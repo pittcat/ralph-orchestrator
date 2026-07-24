@@ -85,6 +85,8 @@ Builtin pipeline preset 的 `fix.done` 规则保护两类不变式：
 - `fix-done-blocked-zero-fixes-applied`：阻止“宣称已执行修复但实际应用数为零”的矛盾 payload。
 - `fix-done-green-with-regressions`：阻止 `post_verification_status=green` 与 `new_business_regressions_count>0` 同时出现。
 
+`work.done` 上的 `work-done-green-with-regressions` 规则保护同一不变式在执行结算侧的镜像：有回归就必须诚实标红，而不是改发 `work.failed`（2026-07-24-002 起回归为 report-only，`work.failed` 只保留给零交付 dead-end）。
+
 这些示例只说明通用规则形状；业务 preset 可以声明自己的 topic 与不变式。
 
 ## See also

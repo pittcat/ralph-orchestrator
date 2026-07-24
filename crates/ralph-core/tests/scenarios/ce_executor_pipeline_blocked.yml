@@ -1,13 +1,17 @@
-# ce_executor_pipeline_blocked: blocked/failure variant for ce-executor-pipeline preset
+# ce_executor_pipeline_blocked: dead-end failure variant for ce-executor-pipeline preset
 #
-# 2026-07-02-003 plan U2: failure variant where executor fails
-# (work.failed) instead of completing cleanly. The 6-dim chain and
-# downstream synthesizers/fixer/alignment must NOT fire — the only
-# terminal event is reporter → report.done → LOOP_COMPLETE with
-# verdict=blocked.
+# 2026-07-02-003 plan U2, narrowed by 2026-07-24-002 plan U3 (B2):
+# `work.failed` is reserved for the dead-end case — the executor
+# produced ZERO deliverable commits (completed_units empty). Any
+# run with commits, even a single Unit, settles via `work.done`
+# with execution_status=partial instead (covered by
+# ce_executor_pipeline_executor_fail_stop.yml). The stabilizer,
+# the 6-dim chain, and downstream synthesizers/fixer/alignment
+# must NOT fire — the only terminal path is
+# reporter → report.done → LOOP_COMPLETE with verdict=blocked.
 
 name: ce_executor_pipeline_blocked
-description: Executor failure variant for ce-executor-pipeline — work.failed short-circuits to reporter (no 6-dim chain)
+description: Executor dead-end variant for ce-executor-pipeline — work.failed (zero deliverable commits) short-circuits to reporter; stabilizer and 6-dim chain stay absent
 
 config:
   prompt_file: PROMPT.md
@@ -25,9 +29,15 @@ config:
       publishes:
         - work.done
         - work.failed
-    "dim:goal-alignment":
+    test-stabilizer:
       subscribes_to:
         - work.done
+      publishes:
+        - stabilization.done
+        - stabilization.blocked
+    "dim:goal-alignment":
+      subscribes_to:
+        - stabilization.done
       publishes:
         - review.goalalign.done
     "dim:correctness":
@@ -75,6 +85,7 @@ config:
         - align.done
         - plan.blocked
         - work.failed
+        - stabilization.blocked
       publishes:
         - report.done
         - LOOP_COMPLETE
@@ -98,7 +109,17 @@ config:
         work.failed:
           required_fields:
             - plan_name
+            - plan_path
+            - planned_units
+            - attempted_units
+            - completed_units
+            - failed_units
+            - blocked_units
+            - skipped_units
+            - baseline_verification_file
+            - decisions_file
             - reason
+            - report_input_file
           payload: json_object
         report.done:
           required_fields:
@@ -118,22 +139,24 @@ mock_responses:
       {"plan_name":"plan-b","plan_path":"docs/plans/b.md","plan_revised":false,"review_summary":"plan ready"}
       </event>
     hat: plan-reviewer
-  # 1. executor fails (e.g. cannot reach test green) — emits work.failed
+  # 1. executor hits a dead end: build unreachable on every attempted
+  # Unit, ZERO deliverable commits (completed_units empty). Only this
+  # case may emit work.failed; partial delivery must use work.done.
   - text: |
       <event topic="work.failed">
-      {"plan_name":"plan-b","reason":"tests_not_green: 2 of 12 tests fail after 3 attempts"}
+      {"plan_name":"plan-b","plan_path":"docs/plans/b.md","planned_units":["U1","U2","U3"],"attempted_units":["U1"],"completed_units":[],"failed_units":["U1"],"blocked_units":["U2","U3"],"skipped_units":[],"baseline_verification_file":".ralph/review/plan-b/baseline-verification.md","decisions_file":".ralph/agent/decisions.md","reason":"no_deliverable_commits: build failed on every attempted Unit; zero commits produced","report_input_file":".ralph/review/plan-b/report-input.work-failed.json"}
       </event>
     hat: executor
   # 2. reporter emits report.done with blocked verdict
   - text: |
       <event topic="report.done">
-      {"plan_name":"plan-b","report_path":".ralph/review/plan-b/report.md","verdict":"blocked"}
+      {"plan_name":"plan-b","report_path":".ralph/review/plan-b/report.md","verdict":"blocked","reason":"executor dead-end: no_deliverable_commits"}
       </event>
     hat: reporter
   # 3. reporter emits LOOP_COMPLETE
   - text: |
       <event topic="LOOP_COMPLETE">
-      {"reason":"executor blocked: tests_not_green"}
+      {"reason":"executor dead-end: no deliverable commits"}
       </event>
     hat: reporter
 
@@ -144,8 +167,10 @@ expected:
     - topic: work.failed
     - topic: report.done
   absent_events:
-    # 6-dim chain MUST NOT fire (executor failed before reaching review)
+    # Stabilizer and 6-dim chain MUST NOT fire (dead-end before any handoff)
     - topic: work.done
+    - topic: stabilization.done
+    - topic: stabilization.blocked
     - topic: review.goalalign.done
     - topic: review.correctness.done
     - topic: review.testing.done
@@ -157,6 +182,9 @@ expected:
     - topic: align.done
     # plan.blocked is not the failure path here (executor emits work.failed)
     - topic: plan.blocked
+    # Linear preset: no review-reentry round machinery
+    - topic: review.round.ready
+    - topic: review.loop.blocked
     # ce-executor-serial terminology must NOT appear
     - topic: review.start
     - topic: review.dimension.ready

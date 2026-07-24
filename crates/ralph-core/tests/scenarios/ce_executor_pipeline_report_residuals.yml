@@ -1,0 +1,178 @@
+# ce_executor_pipeline_report_residuals: regressions alone never force verdict=blocked
+#
+# 2026-07-24-002 plan U3 (B3): regressions are report-only. An
+# executor run where every planned Unit reached a commit
+# (execution_status=complete) but the delta introduced one new
+# business regression settles via `work.done` with an honest
+# post_verification_status=red (the work-done-green-with-regressions
+# consistency rule forbids claiming green). The full linear chain
+# runs to the end and reporter emits verdict=pass_with_residuals —
+# NOT verdict=blocked. Regressions are documented in the
+# verification delta file and surfaced as residuals.
+
+name: ce_executor_pipeline_report_residuals
+description: ce-executor-pipeline — work.done with regressions (honest red) walks the full chain to report.done{verdict:pass_with_residuals}; regressions never force blocked
+
+config:
+  prompt_file: PROMPT.md
+  max_iterations: 20
+  hats:
+    plan-reviewer:
+      subscribes_to: [work.start]
+      publishes: [plan.ready, plan.blocked]
+    executor:
+      subscribes_to: [plan.ready]
+      publishes: [work.done, work.failed]
+    test-stabilizer:
+      subscribes_to: [work.done]
+      publishes: [stabilization.done, stabilization.blocked]
+    "dim:goal-alignment":
+      subscribes_to: [stabilization.done]
+      publishes: [review.goalalign.done]
+    "dim:correctness":
+      subscribes_to: [review.goalalign.done]
+      publishes: [review.correctness.done]
+    "dim:testing":
+      subscribes_to: [review.correctness.done]
+      publishes: [review.testing.done]
+    "dim:maintainability":
+      subscribes_to: [review.testing.done]
+      publishes: [review.maintainability.done]
+    "dim:project-standards":
+      subscribes_to: [review.maintainability.done]
+      publishes: [review.standards.done]
+    "dim:adversarial":
+      subscribes_to: [review.standards.done]
+      publishes: [review.adversarial.done]
+    review-synthesizer:
+      subscribes_to: [review.adversarial.done]
+      publishes: [review.synthesized]
+    fix-planner:
+      subscribes_to: [review.synthesized]
+      publishes: [review.complete]
+    fixer:
+      subscribes_to: [review.complete]
+      publishes: [fix.done]
+    alignment:
+      subscribes_to: [fix.done]
+      publishes: [align.done]
+    reporter:
+      subscribes_to: [align.done, plan.blocked, work.failed, stabilization.blocked]
+      publishes: [report.done, LOOP_COMPLETE]
+  event_loop:
+    execution_mode: isolated
+    starting_event: work.start
+    completion_promise: LOOP_COMPLETE
+    required_events: [report.done]
+    event_policy:
+      enabled: true
+      mode: enforce
+      on_violation: reject_with_resume
+      terminal_topics: [LOOP_COMPLETE]
+      business_topics:
+        - plan.ready
+        - plan.blocked
+        - work.done
+        - work.failed
+        - stabilization.done
+        - stabilization.blocked
+        - review.goalalign.done
+        - review.correctness.done
+        - review.testing.done
+        - review.maintainability.done
+        - review.standards.done
+        - review.adversarial.done
+        - review.synthesized
+        - review.complete
+        - fix.done
+        - align.done
+        - report.done
+
+mock_responses:
+  - hat: plan-reviewer
+    text: |
+      <event topic="plan.ready">{"plan_name":"plan-residuals","plan_path":"docs/plans/residuals.md","plan_revised":false,"review_summary":"ok","flow_audit":"first_run","resolved_baseline_sha":"0000000000000000000000000000000000000001"}</event>
+  # Every Unit delivered, but the delta introduced 1 new business
+  # regression → honest red, documented in the delta file. This is
+  # still work.done (report-only), never work.failed.
+  - hat: executor
+    text: |
+      <event topic="work.done">
+      {"plan_name":"plan-residuals","plan_path":"docs/plans/residuals.md","executor_head_sha":"0000000000000000000000000000000000000002","resolved_baseline_sha":"0000000000000000000000000000000000000001","planned_units":["U1","U2","U3"],"completed_units":["U1","U2","U3"],"attempted_units":["U1","U2","U3"],"failed_units":[],"blocked_units":[],"skipped_units":[],"execution_status":"complete","decisions_file":".ralph/agent/decisions.md","baseline_verification_status":"green","post_verification_status":"red","verification_delta_file":".ralph/review/plan-residuals/verification-delta.md","new_business_regressions_count":1,"test_compatibility_updates_count":0,"flaky_or_environmental_count":0,"tests_run":120,"tests_passed":119,"changed_lines":140,"commit_count":3}
+      </event>
+  - hat: test-stabilizer
+    text: |
+      <event topic="stabilization.done">{"plan_name":"plan-residuals","plan_path":"docs/plans/residuals.md","tested_from_sha":"0000000000000000000000000000000000000002","head_sha":"0000000000000000000000000000000000000002","stabilization_audit_file":".ralph/review/plan-residuals/stabilization/r1-audit.md","correction_ids":[],"classification_counts":{"test_bug":0,"production_bug":1,"pre_existing_failure":0,"flaky_or_env":0,"unattributable":0},"worktree_status":"clean","tests_run":120,"tests_passed":119}</event>
+  - hat: "dim:goal-alignment"
+    text: |
+      <event topic="review.goalalign.done">{"plan_name":"plan-residuals","plan_path":"docs/plans/residuals.md","executor_head_sha":"0000000000000000000000000000000000000002","dimension":"goal-alignment","findings_file":".ralph/review/plan-residuals/goal-alignment.md","findings_count":0}</event>
+  - hat: "dim:correctness"
+    text: |
+      <event topic="review.correctness.done">{"plan_name":"plan-residuals","plan_path":"docs/plans/residuals.md","executor_head_sha":"0000000000000000000000000000000000000002","dimension":"correctness","findings_file":".ralph/review/plan-residuals/correctness.md","findings_count":1}</event>
+  - hat: "dim:testing"
+    text: |
+      <event topic="review.testing.done">{"plan_name":"plan-residuals","plan_path":"docs/plans/residuals.md","executor_head_sha":"0000000000000000000000000000000000000002","dimension":"testing","findings_file":".ralph/review/plan-residuals/testing.md","findings_count":0}</event>
+  - hat: "dim:maintainability"
+    text: |
+      <event topic="review.maintainability.done">{"plan_name":"plan-residuals","plan_path":"docs/plans/residuals.md","executor_head_sha":"0000000000000000000000000000000000000002","dimension":"maintainability","findings_file":".ralph/review/plan-residuals/maintainability.md","findings_count":0}</event>
+  - hat: "dim:project-standards"
+    text: |
+      <event topic="review.standards.done">{"plan_name":"plan-residuals","plan_path":"docs/plans/residuals.md","executor_head_sha":"0000000000000000000000000000000000000002","dimension":"project-standards","findings_file":".ralph/review/plan-residuals/standards.md","findings_count":0}</event>
+  - hat: "dim:adversarial"
+    text: |
+      <event topic="review.adversarial.done">{"plan_name":"plan-residuals","plan_path":"docs/plans/residuals.md","executor_head_sha":"0000000000000000000000000000000000000002","dimension":"adversarial","findings_file":".ralph/review/plan-residuals/adversarial.md","findings_count":0}</event>
+  - hat: review-synthesizer
+    text: |
+      <event topic="review.synthesized">{"plan_name":"plan-residuals","plan_path":"docs/plans/residuals.md","executor_head_sha":"0000000000000000000000000000000000000002","synthesized_review_file":".ralph/review/plan-residuals/synthesized-review.md","findings_count":1,"p0_count":0,"p1_count":1,"must_fix_now_count":0,"findings_summary":"1 regression documented as residual in verification delta","verdict":"pass_with_residuals"}</event>
+  - hat: fix-planner
+    text: |
+      <event topic="review.complete">{"plan_name":"plan-residuals","plan_path":"docs/plans/residuals.md","executor_head_sha":"0000000000000000000000000000000000000002","fix_plan_file":".ralph/review/plan-residuals/fix-plan.md","findings_count":1,"p0_count":0,"p1_count":1,"findings_summary":"regression residual deferred with follow-up","verdict":"pass_with_residuals"}</event>
+  - hat: fixer
+    text: |
+      <event topic="fix.done">{"plan_name":"plan-residuals","plan_path":"docs/plans/residuals.md","executor_head_sha":"0000000000000000000000000000000000000002","head_sha":"0000000000000000000000000000000000000003","fix_attempt_commit_sha":"0000000000000000000000000000000000000003","worktree_status":"clean","fix_plan_file":".ralph/review/plan-residuals/fix-plan.md","review_verdict":"pass_with_residuals","fixes_applied":0,"fixes_skipped":1,"fix_status":"applied"}</event>
+  - hat: alignment
+    text: |
+      <event topic="align.done">{"plan_name":"plan-residuals","plan_path":"docs/plans/residuals.md","executor_head_sha":"0000000000000000000000000000000000000002","head_sha":"0000000000000000000000000000000000000003","worktree_status":"clean","fix_plan_file":".ralph/review/plan-residuals/fix-plan.md","review_verdict":"pass_with_residuals","plan_executed":true,"fix_plan_executed":false,"residuals_count":1,"residuals_summary":"1 new business regression carried as residual (documented in verification delta)","report_input_file":".ralph/review/plan-residuals/report-input.align-done.json"}</event>
+  # The point of B3: regressions>0 does NOT force verdict=blocked.
+  - hat: reporter
+    text: |
+      <event topic="report.done">{"plan_name":"plan-residuals","report_path":".ralph/review/plan-residuals/report.md","verdict":"pass_with_residuals","reason":"all Units delivered; 1 regression documented as residual"}</event>
+  - hat: reporter
+    text: |
+      <event topic="LOOP_COMPLETE">{"reason":"reported with residuals; regressions are report-only"}</event>
+
+expected:
+  iterations: 15
+  events:
+    - topic: plan.ready
+    - topic: work.done
+    - topic: stabilization.done
+    - topic: review.goalalign.done
+    - topic: review.correctness.done
+    - topic: review.testing.done
+    - topic: review.maintainability.done
+    - topic: review.standards.done
+    - topic: review.adversarial.done
+    - topic: review.synthesized
+    - topic: review.complete
+    - topic: fix.done
+    - topic: align.done
+    - topic: report.done
+  absent_events:
+    # Regressions are report-only: no work.failed, no blocked verdict path.
+    - topic: work.failed
+    - topic: plan.blocked
+    - topic: stabilization.blocked
+    - topic: review.round.ready
+    - topic: review.loop.blocked
+  payload_matches:
+    - topic: work.done
+      fields:
+        execution_status: "complete"
+        new_business_regressions_count: 1
+        post_verification_status: "red"
+        tests_passed: 119
+    - topic: report.done
+      fields:
+        verdict: "pass_with_residuals"
+  completion: true

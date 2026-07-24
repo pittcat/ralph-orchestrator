@@ -1504,27 +1504,29 @@ fn test_ce_executor_pipeline_loop_max_round_blocked() {
     run_workflow_guard_scenario(yaml);
 }
 
-/// 2026-07-02-003 plan U2: failure variant. When the executor
-/// emits `work.failed` (e.g. cannot reach test green), the 6-dim
-/// review chain and downstream synthesizers/fixer/alignment MUST
-/// NOT fire — only reporter handles the failure. Asserts the
-/// absent_events list contains every dimension done, fix.done,
-/// align.done, and review.complete (none of which can be reached
-/// when work.failed short-circuits the chain).
+/// 2026-07-02-003 plan U2, narrowed by 2026-07-24-002 plan U3 (B2):
+/// dead-end variant. `work.failed` is reserved for runs with zero
+/// deliverable commits (`completed_units` empty). The stabilizer,
+/// 6-dim review chain, and downstream synthesizers/fixer/alignment
+/// MUST NOT fire — only reporter handles the dead end. Asserts the
+/// absent_events list contains stabilization.*, every dimension
+/// done, fix.done, align.done, and review.complete.
 #[test]
 fn test_ce_executor_pipeline_blocked() {
     let yaml = load_scenario("tests/scenarios/ce_executor_pipeline_blocked.yml");
     run_workflow_guard_scenario(yaml);
 }
 
-/// 2026-07-16-001 plan U2: per-Unit fail-stop. When Executor fails
-/// on a non-final Unit (U2 in this scenario), it MUST emit
-/// `work.failed` with a complete Unit accounting bill
+/// 2026-07-16-001 plan U2 bill contract, inverted by 2026-07-24-002
+/// plan U3 (B1): a non-final Unit failure (U2) with commits on
+/// record (`completed_units` non-empty) MUST settle via `work.done`
+/// with `execution_status=partial` and the full settlement bill
 /// (`planned_units` / `attempted_units` / `completed_units` /
-/// `failed_units` / `skipped_units`) and subsequent Units
-/// (U3..Un) MUST NOT start. Asserts no review/fix/align event
-/// fires after `work.failed`, and the bill fields are mutually
-/// exclusive and exhaustive over the planned Unit set.
+/// `failed_units` / `blocked_units` / `skipped_units`), and the
+/// whole linear chain (stabilizer → 6 dims → synthesizer →
+/// fix-planner → fixer → alignment → reporter) MUST run to
+/// report.done{verdict: pass_with_residuals}. `work.failed` is
+/// dead-end-only and must stay absent here.
 #[test]
 fn test_ce_executor_pipeline_executor_fail_stop() {
     let yaml = load_scenario("tests/scenarios/ce_executor_pipeline_executor_fail_stop.yml");
@@ -1562,6 +1564,45 @@ fn test_ce_executor_pipeline_post_fix_review() {
 #[test]
 fn test_ce_executor_pipeline_loop_fixer_fail_stop() {
     let yaml = load_scenario("tests/scenarios/ce_executor_pipeline_loop_fixer_fail_stop.yml");
+    run_workflow_guard_scenario(yaml);
+}
+
+/// 2026-07-24-002 plan U3 (B5, loop half): a partial `work.done`
+/// (U2 failed, U1/U3 delivered) in the loop preset MUST walk
+/// stabilizer → review-reentry → 6-dim review → gate accept →
+/// alignment → reporter instead of short-circuiting via
+/// `work.failed`. Round 1 has no must-fix-now findings, so the
+/// gate emits `review.accepted` and the loop ends with
+/// verdict=pass_with_residuals; `work.failed`, `fix.requested`,
+/// and `review.loop.blocked` must stay absent.
+#[test]
+fn test_ce_executor_pipeline_loop_executor_partial_done() {
+    let yaml = load_scenario("tests/scenarios/ce_executor_pipeline_loop_executor_partial_done.yml");
+    run_workflow_guard_scenario(yaml);
+}
+
+/// 2026-07-24-002 plan U3 (KTD10): when a non-final Fix Unit fails
+/// (UF2) while independent Fix Units land (UF1, UF3), `fix.done`
+/// MUST report `fix_status=partial` with the full fix-unit bill —
+/// never a premature `blocked`. The partial fix.done re-enters
+/// review round 2, which accepts with the UF2 finding as residual,
+/// and the loop reports verdict=pass_with_residuals.
+/// `review.loop.blocked` must stay absent.
+#[test]
+fn test_ce_executor_pipeline_loop_fixer_partial_continue() {
+    let yaml =
+        load_scenario("tests/scenarios/ce_executor_pipeline_loop_fixer_partial_continue.yml");
+    run_workflow_guard_scenario(yaml);
+}
+
+/// 2026-07-24-002 plan U3 (B3): regressions are report-only. A
+/// `work.done` with `new_business_regressions_count > 0` and an
+/// honest `post_verification_status=red` walks the full linear
+/// chain and ends in report.done{verdict: pass_with_residuals} —
+/// regressions alone never force verdict=blocked or work.failed.
+#[test]
+fn test_ce_executor_pipeline_report_residuals() {
+    let yaml = load_scenario("tests/scenarios/ce_executor_pipeline_report_residuals.yml");
     run_workflow_guard_scenario(yaml);
 }
 
@@ -3144,9 +3185,7 @@ fn test_opac_sb2_supervisor_review_batch_origin_guard() {
 // ownership moves to U5).
 #[test]
 fn test_u2_task_planner_writes_execution_plan_artifact() {
-    let yaml = load_scenario(
-        "tests/scenarios/supervisor/u2_task_planner_artifact_happy_path.yml",
-    );
+    let yaml = load_scenario("tests/scenarios/supervisor/u2_task_planner_artifact_happy_path.yml");
     run_workflow_guard_scenario(yaml);
 }
 
@@ -3220,7 +3259,10 @@ fn test_pipeline_work_done_payload_carries_unit_evidence() {
 
 /// SC1 blocked-scenario half: the `work.failed` payload must carry
 /// at least `{plan_name, reason}` so downstream can attribute the
-/// failure to the originating plan.
+/// failure to the originating plan, plus the 2026-07-24-002 U1
+/// dead-end contract fields (`completed_units`, `decisions_file`)
+/// so the fixture cannot drift back to a deliverable run claiming
+/// `work.failed`.
 #[test]
 fn test_pipeline_work_failed_payload_minimal() {
     let text = fs::read_to_string("tests/scenarios/ce_executor_pipeline_blocked.yml")
@@ -3246,7 +3288,7 @@ fn test_pipeline_work_failed_payload_minimal() {
             }
         })
         .collect();
-    for required in ["plan_name", "reason"] {
+    for required in ["plan_name", "reason", "completed_units", "decisions_file"] {
         assert!(
             keys.contains(required),
             "ce_executor_pipeline_blocked.yml work.failed mock payload is missing \

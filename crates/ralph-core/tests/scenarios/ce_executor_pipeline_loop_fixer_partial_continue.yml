@@ -1,0 +1,235 @@
+# ce_executor_pipeline_loop_fixer_partial_continue: partial fix.done continues instead of premature blocked
+#
+# 2026-07-24-002 plan U3 (KTD10): when one Fix Unit fails (UF2)
+# but independent Fix Units still land (UF1, UF3 applied), the
+# fixer MUST settle fix.done with fix_status=partial and a full
+# fix-unit bill — NOT fix_status=blocked. The partial fix.done
+# re-enters review (round 2 via review-reentry); round 2 finds
+# zero must-fix-now findings (UF2's finding becomes a residual),
+# so the gate emits review.accepted and the loop reports
+# verdict=pass_with_residuals. A single failed Fix Unit must not
+# prematurely block the loop while auditable progress exists.
+
+name: ce_executor_pipeline_loop_fixer_partial_continue
+description: ce-executor-pipeline-loop — fix.done partial (UF2 failed, UF1/UF3 applied) re-enters review round 2 → accepted → report.done; no premature review.loop.blocked
+
+config:
+  prompt_file: PROMPT.md
+  max_iterations: 50
+  hats:
+    plan-reviewer:
+      subscribes_to: [work.start]
+      publishes: [plan.ready, plan.blocked]
+    executor:
+      subscribes_to: [plan.ready]
+      publishes: [work.done, work.failed]
+    test-stabilizer:
+      subscribes_to: [work.done]
+      publishes: [stabilization.done, stabilization.blocked]
+    review-reentry:
+      subscribes_to: [stabilization.done, fix.done]
+      publishes: [review.round.ready]
+    "dim:goal-alignment":
+      subscribes_to: [review.round.ready]
+      publishes: [review.goalalign.done]
+    "dim:correctness":
+      subscribes_to: [review.goalalign.done]
+      publishes: [review.correctness.done]
+    "dim:testing":
+      subscribes_to: [review.correctness.done]
+      publishes: [review.testing.done]
+    "dim:maintainability":
+      subscribes_to: [review.testing.done]
+      publishes: [review.maintainability.done]
+    "dim:project-standards":
+      subscribes_to: [review.maintainability.done]
+      publishes: [review.standards.done]
+    "dim:adversarial":
+      subscribes_to: [review.standards.done]
+      publishes: [review.adversarial.done]
+    review-synthesizer:
+      subscribes_to: [review.adversarial.done]
+      publishes: [review.synthesized]
+    review-gate:
+      subscribes_to: [review.synthesized]
+      publishes: [review.accepted, fix.requested, review.loop.blocked]
+    fix-planner:
+      subscribes_to: [fix.requested]
+      publishes: [review.complete]
+    fixer:
+      subscribes_to: [review.complete]
+      publishes: [fix.done]
+    alignment:
+      subscribes_to: [review.accepted]
+      publishes: [align.done]
+    reporter:
+      subscribes_to: [align.done, plan.blocked, work.failed, stabilization.blocked, review.loop.blocked]
+      publishes: [report.done, LOOP_COMPLETE]
+  event_loop:
+    execution_mode: isolated
+    starting_event: work.start
+    completion_promise: LOOP_COMPLETE
+    required_events: [report.done]
+    event_policy:
+      enabled: true
+      mode: enforce
+      on_violation: reject_with_resume
+      terminal_topics: [LOOP_COMPLETE]
+      business_topics:
+        - plan.ready
+        - plan.blocked
+        - work.done
+        - work.failed
+        - stabilization.done
+        - stabilization.blocked
+        - review.round.ready
+        - review.goalalign.done
+        - review.correctness.done
+        - review.testing.done
+        - review.maintainability.done
+        - review.standards.done
+        - review.adversarial.done
+        - review.synthesized
+        - review.accepted
+        - fix.requested
+        - review.complete
+        - fix.done
+        - review.loop.blocked
+        - align.done
+        - report.done
+
+mock_responses:
+  # Round 1: complete executor delivery, review finds 3 must-fix-now.
+  - hat: plan-reviewer
+    text: |
+      <event topic="plan.ready">{"plan_name":"plan-fixer-partial","plan_path":"docs/plans/fixer-partial.md","plan_revised":false,"review_summary":"ok","flow_audit":"first_run","resolved_baseline_sha":"0000000000000000000000000000000000000001"}</event>
+  - hat: executor
+    text: |
+      <event topic="work.done">{"plan_name":"plan-fixer-partial","plan_path":"docs/plans/fixer-partial.md","executor_head_sha":"0000000000000000000000000000000000000002","resolved_baseline_sha":"0000000000000000000000000000000000000001","planned_units":["U1","U2"],"completed_units":["U1","U2"],"attempted_units":["U1","U2"],"failed_units":[],"blocked_units":[],"skipped_units":[],"execution_status":"complete","decisions_file":".ralph/agent/decisions.md","baseline_verification_status":"green","post_verification_status":"green","verification_delta_file":".ralph/review/plan-fixer-partial/verification-delta.md","new_business_regressions_count":0,"tests_run":80,"tests_passed":80,"changed_lines":120,"commit_count":2}</event>
+  - hat: test-stabilizer
+    text: |
+      <event topic="stabilization.done">{"plan_name":"plan-fixer-partial","plan_path":"docs/plans/fixer-partial.md","tested_from_sha":"0000000000000000000000000000000000000002","head_sha":"0000000000000000000000000000000000000002","stabilization_audit_file":".ralph/review/plan-fixer-partial/stabilization/r1-audit.md","correction_ids":[],"classification_counts":{"test_bug":0,"production_bug":0,"pre_existing_failure":0,"flaky_or_env":0,"unattributable":0},"worktree_status":"clean","tests_run":80,"tests_passed":80}</event>
+  - hat: review-reentry
+    text: |
+      <event topic="review.round.ready">{"plan_name":"plan-fixer-partial","plan_path":"docs/plans/fixer-partial.md","review_round":1,"source_topic":"work.done","executor_head_sha":"0000000000000000000000000000000000000002","resolved_baseline_sha":"0000000000000000000000000000000000000001","round_base_sha":"0000000000000000000000000000000000000002","review_plan":{"focus_areas":["full diff"],"fixed_findings":[],"verification_performed":["cargo nextest"],"residual_risks":[],"diff_ranges":["0000000000000000000000000000000000000001..0000000000000000000000000000000000000002"]}}</event>
+  - hat: "dim:goal-alignment"
+    text: |
+      <event topic="review.goalalign.done">{"plan_name":"plan-fixer-partial","plan_path":"docs/plans/fixer-partial.md","executor_head_sha":"0000000000000000000000000000000000000002","resolved_baseline_sha":"0000000000000000000000000000000000000001","review_round":1,"round_base_sha":"0000000000000000000000000000000000000002","dimension":"goal-alignment","findings_file":".ralph/review/plan-fixer-partial/r1-goal-alignment.md","findings_count":1}</event>
+  - hat: "dim:correctness"
+    text: |
+      <event topic="review.correctness.done">{"plan_name":"plan-fixer-partial","plan_path":"docs/plans/fixer-partial.md","executor_head_sha":"0000000000000000000000000000000000000002","resolved_baseline_sha":"0000000000000000000000000000000000000001","review_round":1,"round_base_sha":"0000000000000000000000000000000000000002","dimension":"correctness","findings_file":".ralph/review/plan-fixer-partial/r1-correctness.md","findings_count":1}</event>
+  - hat: "dim:testing"
+    text: |
+      <event topic="review.testing.done">{"plan_name":"plan-fixer-partial","plan_path":"docs/plans/fixer-partial.md","executor_head_sha":"0000000000000000000000000000000000000002","resolved_baseline_sha":"0000000000000000000000000000000000000001","review_round":1,"round_base_sha":"0000000000000000000000000000000000000002","dimension":"testing","findings_file":".ralph/review/plan-fixer-partial/r1-testing.md","findings_count":1}</event>
+  - hat: "dim:maintainability"
+    text: |
+      <event topic="review.maintainability.done">{"plan_name":"plan-fixer-partial","plan_path":"docs/plans/fixer-partial.md","executor_head_sha":"0000000000000000000000000000000000000002","resolved_baseline_sha":"0000000000000000000000000000000000000001","review_round":1,"round_base_sha":"0000000000000000000000000000000000000002","dimension":"maintainability","findings_file":".ralph/review/plan-fixer-partial/r1-maintainability.md","findings_count":0}</event>
+  - hat: "dim:project-standards"
+    text: |
+      <event topic="review.standards.done">{"plan_name":"plan-fixer-partial","plan_path":"docs/plans/fixer-partial.md","executor_head_sha":"0000000000000000000000000000000000000002","resolved_baseline_sha":"0000000000000000000000000000000000000001","review_round":1,"round_base_sha":"0000000000000000000000000000000000000002","dimension":"project-standards","findings_file":".ralph/review/plan-fixer-partial/r1-standards.md","findings_count":0}</event>
+  - hat: "dim:adversarial"
+    text: |
+      <event topic="review.adversarial.done">{"plan_name":"plan-fixer-partial","plan_path":"docs/plans/fixer-partial.md","executor_head_sha":"0000000000000000000000000000000000000002","resolved_baseline_sha":"0000000000000000000000000000000000000001","review_round":1,"round_base_sha":"0000000000000000000000000000000000000002","dimension":"adversarial","findings_file":".ralph/review/plan-fixer-partial/r1-adversarial.md","findings_count":0}</event>
+  - hat: review-synthesizer
+    text: |
+      <event topic="review.synthesized">{"plan_name":"plan-fixer-partial","plan_path":"docs/plans/fixer-partial.md","executor_head_sha":"0000000000000000000000000000000000000002","resolved_baseline_sha":"0000000000000000000000000000000000000001","review_round":1,"round_base_sha":"0000000000000000000000000000000000000002","diff_patch_file":".ralph/review/plan-fixer-partial/round-01/review.diff.patch","synthesized_review_file":".ralph/review/plan-fixer-partial/r1-synthesized-review.md","findings_count":3,"p0_count":1,"p1_count":2,"must_fix_now_count":3,"main_conflict_count":3,"unfixed_previous_count":0,"new_regression_p0_count":0,"newly_discovered_residual_count":0,"blocking_main_conflict_count":3,"residual_findings_count":0,"findings_summary":"three must-fix findings → UF1,UF2,UF3","loop_decision_basis":"round 1 needs fix","verdict":"blocked"}</event>
+  - hat: review-gate
+    text: |
+      <event topic="fix.requested">{"plan_name":"plan-fixer-partial","plan_path":"docs/plans/fixer-partial.md","review_round":1,"executor_head_sha":"0000000000000000000000000000000000000002","resolved_baseline_sha":"0000000000000000000000000000000000000001","round_base_sha":"0000000000000000000000000000000000000002","diff_patch_file":".ralph/review/plan-fixer-partial/round-01/review.diff.patch","synthesized_review_file":".ralph/review/plan-fixer-partial/r1-synthesized-review.md","p0_count":1,"p1_count":2,"must_fix_now_count":3,"main_conflict_count":3,"unfixed_previous_count":0,"new_regression_p0_count":0,"newly_discovered_residual_count":0,"blocking_main_conflict_count":3,"residual_findings_count":0,"findings_summary":"three must-fix findings → UF1,UF2,UF3","loop_decision_basis":"round 1 needs fix","verdict":"blocked"}</event>
+  - hat: fix-planner
+    text: |
+      <event topic="review.complete">{"plan_name":"plan-fixer-partial","plan_path":"docs/plans/fixer-partial.md","review_round":1,"executor_head_sha":"0000000000000000000000000000000000000002","resolved_baseline_sha":"0000000000000000000000000000000000000001","fix_base_sha":"0000000000000000000000000000000000000002","fix_plan_file":".ralph/review/plan-fixer-partial/fix-plan.md","findings_count":3,"p0_count":1,"p1_count":2,"must_fix_now_count":3,"main_conflict_count":3,"unfixed_previous_count":0,"new_regression_p0_count":0,"newly_discovered_residual_count":0,"blocking_main_conflict_count":3,"residual_findings_count":0,"findings_summary":"fix plan: UF1,UF2,UF3 (UF2/UF3 independent of each other)","loop_decision_basis":"fix plan covers the three findings","verdict":"blocked"}</event>
+  # Fixer: UF2 fails, but independent UF1 and UF3 land. fix_status is
+  # partial (NOT blocked): auditable progress exists.
+  - hat: fixer
+    text: |
+      <event topic="fix.done">{"plan_name":"plan-fixer-partial","plan_path":"docs/plans/fixer-partial.md","review_round":1,"executor_head_sha":"0000000000000000000000000000000000000002","resolved_baseline_sha":"0000000000000000000000000000000000000001","fixed_from_sha":"0000000000000000000000000000000000000002","head_sha":"0000000000000000000000000000000000000003","fix_plan_file":".ralph/review/plan-fixer-partial/fix-plan.md","review_verdict":"blocked","fixes_applied":2,"fixes_skipped":0,"fix_summary":"UF1,UF3 applied; UF2 failed independently","next_review_plan":{"focus_areas":["verify UF1/UF3; reassess UF2 finding"],"fixed_findings":["P0-1","P1-2"],"verification_performed":["cargo nextest"],"residual_risks":["UF2 finding unresolved"],"diff_ranges":["0000000000000000000000000000000000000002..0000000000000000000000000000000000000003"]},"planned_fix_units":["UF1","UF2","UF3"],"attempted_fix_units":["UF1","UF2","UF3"],"completed_fix_units":["UF1","UF3"],"failed_fix_units":["UF2"],"blocked_fix_units":[],"skipped_fix_units":[],"fix_attempt_commit_sha":"0000000000000000000000000000000000000003","worktree_status":"clean","fix_status":"partial","failure_reason":"UF2 tests_not_green after 3 attempts","decisions_file":".ralph/agent/decisions.md","baseline_verification_status":"green","post_verification_status":"red","verification_delta_file":".ralph/review/plan-fixer-partial/fix-verification-delta.md","new_business_regressions_count":0,"fix_base_sha":"0000000000000000000000000000000000000002"}</event>
+  # Round 2: partial fix.done re-enters review; UF1/UF3 findings are
+  # fixed, UF2's finding drops to a residual → must_fix_now_count 0.
+  - hat: review-reentry
+    text: |
+      <event topic="review.round.ready">{"plan_name":"plan-fixer-partial","plan_path":"docs/plans/fixer-partial.md","review_round":2,"source_topic":"fix.done","executor_head_sha":"0000000000000000000000000000000000000002","resolved_baseline_sha":"0000000000000000000000000000000000000001","round_base_sha":"0000000000000000000000000000000000000003","review_plan":{"focus_areas":["verify UF1/UF3 fixes"],"fixed_findings":["P0-1","P1-2"],"verification_performed":["cargo nextest"],"residual_risks":["UF2 finding unresolved"],"diff_ranges":["0000000000000000000000000000000000000002..0000000000000000000000000000000000000003"]}}</event>
+  - hat: "dim:goal-alignment"
+    text: |
+      <event topic="review.goalalign.done">{"plan_name":"plan-fixer-partial","plan_path":"docs/plans/fixer-partial.md","executor_head_sha":"0000000000000000000000000000000000000002","resolved_baseline_sha":"0000000000000000000000000000000000000001","review_round":2,"round_base_sha":"0000000000000000000000000000000000000003","dimension":"goal-alignment","findings_file":".ralph/review/plan-fixer-partial/r2-goal-alignment.md","findings_count":0}</event>
+  - hat: "dim:correctness"
+    text: |
+      <event topic="review.correctness.done">{"plan_name":"plan-fixer-partial","plan_path":"docs/plans/fixer-partial.md","executor_head_sha":"0000000000000000000000000000000000000002","resolved_baseline_sha":"0000000000000000000000000000000000000001","review_round":2,"round_base_sha":"0000000000000000000000000000000000000003","dimension":"correctness","findings_file":".ralph/review/plan-fixer-partial/r2-correctness.md","findings_count":0}</event>
+  - hat: "dim:testing"
+    text: |
+      <event topic="review.testing.done">{"plan_name":"plan-fixer-partial","plan_path":"docs/plans/fixer-partial.md","executor_head_sha":"0000000000000000000000000000000000000002","resolved_baseline_sha":"0000000000000000000000000000000000000001","review_round":2,"round_base_sha":"0000000000000000000000000000000000000003","dimension":"testing","findings_file":".ralph/review/plan-fixer-partial/r2-testing.md","findings_count":0}</event>
+  - hat: "dim:maintainability"
+    text: |
+      <event topic="review.maintainability.done">{"plan_name":"plan-fixer-partial","plan_path":"docs/plans/fixer-partial.md","executor_head_sha":"0000000000000000000000000000000000000002","resolved_baseline_sha":"0000000000000000000000000000000000000001","review_round":2,"round_base_sha":"0000000000000000000000000000000000000003","dimension":"maintainability","findings_file":".ralph/review/plan-fixer-partial/r2-maintainability.md","findings_count":0}</event>
+  - hat: "dim:project-standards"
+    text: |
+      <event topic="review.standards.done">{"plan_name":"plan-fixer-partial","plan_path":"docs/plans/fixer-partial.md","executor_head_sha":"0000000000000000000000000000000000000002","resolved_baseline_sha":"0000000000000000000000000000000000000001","review_round":2,"round_base_sha":"0000000000000000000000000000000000000003","dimension":"project-standards","findings_file":".ralph/review/plan-fixer-partial/r2-standards.md","findings_count":0}</event>
+  - hat: "dim:adversarial"
+    text: |
+      <event topic="review.adversarial.done">{"plan_name":"plan-fixer-partial","plan_path":"docs/plans/fixer-partial.md","executor_head_sha":"0000000000000000000000000000000000000002","resolved_baseline_sha":"0000000000000000000000000000000000000001","review_round":2,"round_base_sha":"0000000000000000000000000000000000000003","dimension":"adversarial","findings_file":".ralph/review/plan-fixer-partial/r2-adversarial.md","findings_count":0}</event>
+  - hat: review-synthesizer
+    text: |
+      <event topic="review.synthesized">{"plan_name":"plan-fixer-partial","plan_path":"docs/plans/fixer-partial.md","executor_head_sha":"0000000000000000000000000000000000000002","resolved_baseline_sha":"0000000000000000000000000000000000000001","review_round":2,"round_base_sha":"0000000000000000000000000000000000000003","diff_patch_file":".ralph/review/plan-fixer-partial/round-02/review.diff.patch","synthesized_review_file":".ralph/review/plan-fixer-partial/r2-synthesized-review.md","findings_count":1,"p0_count":0,"p1_count":0,"must_fix_now_count":0,"main_conflict_count":0,"unfixed_previous_count":0,"new_regression_p0_count":0,"newly_discovered_residual_count":0,"blocking_main_conflict_count":0,"residual_findings_count":1,"findings_summary":"UF2 finding downgraded to residual after UF1/UF3 landed","loop_decision_basis":"must_fix_now_count == 0 at round 2; accept with residual","verdict":"pass_with_residuals"}</event>
+  - hat: review-gate
+    text: |
+      <event topic="review.accepted">{"plan_name":"plan-fixer-partial","plan_path":"docs/plans/fixer-partial.md","review_round":2,"executor_head_sha":"0000000000000000000000000000000000000002","resolved_baseline_sha":"0000000000000000000000000000000000000001","p0_count":0,"p1_count":0,"must_fix_now_count":0,"main_conflict_count":0,"blocking_main_conflict_count":0,"residual_findings_count":1,"loop_decision_basis":"must_fix_now_count == 0; partial fix accepted with UF2 residual","verdict":"pass_with_residuals"}</event>
+  - hat: alignment
+    text: |
+      <event topic="align.done">{"plan_name":"plan-fixer-partial","plan_path":"docs/plans/fixer-partial.md","review_round":2,"executor_head_sha":"0000000000000000000000000000000000000002","resolved_baseline_sha":"0000000000000000000000000000000000000001","fix_plan_file":".ralph/review/plan-fixer-partial/fix-plan.md","review_verdict":"pass_with_residuals","plan_executed":true,"fix_plan_executed":false,"residuals_count":1,"residuals_summary":"UF2 fix failed; finding kept as residual","report_input_file":".ralph/review/plan-fixer-partial/report-input.align-done.json"}</event>
+  - hat: reporter
+    text: |
+      <event topic="report.done">{"plan_name":"plan-fixer-partial","report_path":".ralph/review/plan-fixer-partial/report.md","verdict":"pass_with_residuals","reason":"partial fix: UF1/UF3 applied; UF2 residual"}</event>
+  - hat: reporter
+    text: |
+      <event topic="LOOP_COMPLETE">{"reason":"partial fix accepted with residuals; no premature loop block"}</event>
+
+expected:
+  iterations: 26
+  events:
+    - topic: plan.ready
+    - topic: work.done
+    - topic: stabilization.done
+    - topic: review.round.ready
+    - topic: fix.requested
+    - topic: review.complete
+    - topic: fix.done
+    - topic: review.round.ready
+    - topic: review.accepted
+    - topic: align.done
+    - topic: report.done
+  absent_events:
+    # The contract: one failed Fix Unit with independent progress
+    # must NOT produce fix_status=blocked or a premature loop block.
+    - topic: review.loop.blocked
+    - topic: work.failed
+    - topic: plan.blocked
+    - topic: stabilization.blocked
+  event_topic_counts:
+    - topic: review.round.ready
+      count: 2
+    - topic: fix.requested
+      count: 1
+    - topic: fix.done
+      count: 1
+    - topic: review.accepted
+      count: 1
+  payload_matches:
+    - topic: fix.done
+      fields:
+        review_round: 1
+        fix_status: "partial"
+        planned_fix_units: ["UF1","UF2","UF3"]
+        attempted_fix_units: ["UF1","UF2","UF3"]
+        completed_fix_units: ["UF1","UF3"]
+        failed_fix_units: ["UF2"]
+        skipped_fix_units: []
+        blocked_fix_units: []
+    - topic: review.round.ready
+      occurrence: 2
+      fields:
+        review_round: 2
+        source_topic: "fix.done"
+    - topic: report.done
+      fields:
+        verdict: "pass_with_residuals"
+  completion: true

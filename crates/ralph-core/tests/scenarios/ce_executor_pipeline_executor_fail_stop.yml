@@ -1,24 +1,30 @@
-# ce_executor_pipeline_executor_fail_stop: U2 fail-stop per-Unit contract
+# ce_executor_pipeline_executor_fail_stop: partial-delivery continue contract
 #
-# 2026-07-16-001 plan U2: when Executor fails on Unit U2 (or any
-# non-final Unit), it MUST emit work.failed with a complete
-# Unit accounting bill:
-#   planned_units = [U1, U2, U3, ..., Un]
+# 2026-07-24-002 plan U3 (B1, inverts the old 2026-07-16-001 U2
+# fail-stop contract): when the Executor fails a non-final Unit
+# (U2 here) but has delivered commits (completed_units non-empty),
+# it MUST emit `work.done` — NOT `work.failed` — with an honest
+# settlement bill:
+#   planned_units   = [U1, U2, U3, U4]
 #   attempted_units = [U1, U2]
 #   completed_units = [U1]
-#   failed_units = [U2]
-#   blocked_units = []
-#   skipped_units = [U3, ..., Un]
-# And there MUST NOT be any subsequent Unit-related business event
-# (work.done, fix.done, review.*, align.done) — only reporter handles
-# the failure short-circuit.
+#   failed_units    = [U2]
+#   blocked_units   = [U3, U4]   (dependency chain off failed U2)
+#   skipped_units   = []
+#   execution_status = partial
+# `work.failed` is reserved for dead-end runs with zero deliverable
+# commits. The partial `work.done` MUST walk the full linear chain
+# (test-stabilizer → 6 dim hats → review-synthesizer → fix-planner
+# → fixer → alignment → reporter) and end in
+# report.done{verdict: pass_with_residuals}; the undelivered Units
+# surface as residuals, never as a chain short-circuit.
 
 name: ce_executor_pipeline_executor_fail_stop
-description: ce-executor-pipeline U2 — Unit-level fail-stop with bill accounting (U2 fails, U3..Un never start)
+description: ce-executor-pipeline — partial executor bill (U2 failed, U1 delivered) continues the whole linear chain to report.done; work.failed stays absent
 
 config:
   prompt_file: PROMPT.md
-  max_iterations: 10
+  max_iterations: 20
   hats:
     plan-reviewer:
       subscribes_to: [work.start]
@@ -27,7 +33,7 @@ config:
       subscribes_to: [plan.ready]
       publishes: [work.done, work.failed]
     test-stabilizer:
-      subscribes_to: [work.done, fix.done]
+      subscribes_to: [work.done]
       publishes: [stabilization.done, stabilization.blocked]
     "dim:goal-alignment":
       subscribes_to: [stabilization.done]
@@ -60,7 +66,7 @@ config:
       subscribes_to: [fix.done]
       publishes: [align.done]
     reporter:
-      subscribes_to: [align.done, plan.blocked, work.failed, stabilization.blocked, review.loop.blocked]
+      subscribes_to: [align.done, plan.blocked, work.failed, stabilization.blocked]
       publishes: [report.done, LOOP_COMPLETE]
   event_loop:
     execution_mode: isolated
@@ -79,7 +85,6 @@ config:
         - work.failed
         - stabilization.done
         - stabilization.blocked
-        - review.round.ready
         - review.goalalign.done
         - review.correctness.done
         - review.testing.done
@@ -87,6 +92,7 @@ config:
         - review.standards.done
         - review.adversarial.done
         - review.synthesized
+        - review.complete
         - fix.done
         - align.done
         - report.done
@@ -94,33 +100,61 @@ config:
 mock_responses:
   - hat: plan-reviewer
     text: |
-      <event topic="plan.ready">{"plan_name":"plan-fail-stop","plan_path":"docs/plans/fail-stop.md","plan_revised":false,"review_summary":"ok","flow_audit":"first_run","resolved_baseline_sha":"0000000000000000000000000000000000000001"}</event>
-  # Executor fails on U2; emits work.failed with full Unit bill.
-  # U3..U6 must NOT start.
+      <event topic="plan.ready">{"plan_name":"plan-partial-continue","plan_path":"docs/plans/partial-continue.md","plan_revised":false,"review_summary":"ok","flow_audit":"first_run","resolved_baseline_sha":"0000000000000000000000000000000000000001"}</event>
+  # Executor delivers U1, fails U2 after retries, and marks U3/U4
+  # blocked via their dependency on U2. completed_units is non-empty,
+  # so the settlement MUST be work.done (partial), never work.failed.
   - hat: executor
     text: |
-      <event topic="work.failed">
-      {"plan_name":"plan-fail-stop","plan_path":"docs/plans/fail-stop.md","executor_head_sha":"0000000000000000000000000000000000000002","resolved_baseline_sha":"0000000000000000000000000000000000000001","reason":"unit_failed: U2 tests_not_green after 3 attempts","planned_units":["U1","U2","U3","U4","U5","U6"],"attempted_units":["U1","U2"],"completed_units":["U1"],"failed_units":["U2"],"blocked_units":[],"skipped_units":["U3","U4","U5","U6"],"decisions_file":".ralph/agent/decisions.md","report_input_file":".ralph/review/plan-fail-stop/report-input.work-failed.json"}
+      <event topic="work.done">
+      {"plan_name":"plan-partial-continue","plan_path":"docs/plans/partial-continue.md","executor_head_sha":"0000000000000000000000000000000000000002","resolved_baseline_sha":"0000000000000000000000000000000000000001","planned_units":["U1","U2","U3","U4"],"completed_units":["U1"],"attempted_units":["U1","U2"],"failed_units":["U2"],"blocked_units":["U3","U4"],"skipped_units":[],"execution_status":"partial","decisions_file":".ralph/agent/decisions.md","baseline_verification_status":"green","post_verification_status":"red","verification_delta_file":".ralph/review/plan-partial-continue/verification-delta.md","new_business_regressions_count":1,"tests_run":120,"tests_passed":119,"changed_lines":85,"commit_count":1}
       </event>
+  - hat: test-stabilizer
+    text: |
+      <event topic="stabilization.done">{"plan_name":"plan-partial-continue","plan_path":"docs/plans/partial-continue.md","tested_from_sha":"0000000000000000000000000000000000000002","head_sha":"0000000000000000000000000000000000000002","stabilization_audit_file":".ralph/review/plan-partial-continue/stabilization/r1-audit.md","correction_ids":[],"classification_counts":{"test_bug":0,"production_bug":1,"pre_existing_failure":0,"flaky_or_env":0,"unattributable":0},"worktree_status":"clean","tests_run":120,"tests_passed":119}</event>
+  - hat: "dim:goal-alignment"
+    text: |
+      <event topic="review.goalalign.done">{"plan_name":"plan-partial-continue","plan_path":"docs/plans/partial-continue.md","executor_head_sha":"0000000000000000000000000000000000000002","dimension":"goal-alignment","findings_file":".ralph/review/plan-partial-continue/goal-alignment.md","findings_count":1}</event>
+  - hat: "dim:correctness"
+    text: |
+      <event topic="review.correctness.done">{"plan_name":"plan-partial-continue","plan_path":"docs/plans/partial-continue.md","executor_head_sha":"0000000000000000000000000000000000000002","dimension":"correctness","findings_file":".ralph/review/plan-partial-continue/correctness.md","findings_count":1}</event>
+  - hat: "dim:testing"
+    text: |
+      <event topic="review.testing.done">{"plan_name":"plan-partial-continue","plan_path":"docs/plans/partial-continue.md","executor_head_sha":"0000000000000000000000000000000000000002","dimension":"testing","findings_file":".ralph/review/plan-partial-continue/testing.md","findings_count":0}</event>
+  - hat: "dim:maintainability"
+    text: |
+      <event topic="review.maintainability.done">{"plan_name":"plan-partial-continue","plan_path":"docs/plans/partial-continue.md","executor_head_sha":"0000000000000000000000000000000000000002","dimension":"maintainability","findings_file":".ralph/review/plan-partial-continue/maintainability.md","findings_count":0}</event>
+  - hat: "dim:project-standards"
+    text: |
+      <event topic="review.standards.done">{"plan_name":"plan-partial-continue","plan_path":"docs/plans/partial-continue.md","executor_head_sha":"0000000000000000000000000000000000000002","dimension":"project-standards","findings_file":".ralph/review/plan-partial-continue/standards.md","findings_count":0}</event>
+  - hat: "dim:adversarial"
+    text: |
+      <event topic="review.adversarial.done">{"plan_name":"plan-partial-continue","plan_path":"docs/plans/partial-continue.md","executor_head_sha":"0000000000000000000000000000000000000002","dimension":"adversarial","findings_file":".ralph/review/plan-partial-continue/adversarial.md","findings_count":0}</event>
+  - hat: review-synthesizer
+    text: |
+      <event topic="review.synthesized">{"plan_name":"plan-partial-continue","plan_path":"docs/plans/partial-continue.md","executor_head_sha":"0000000000000000000000000000000000000002","synthesized_review_file":".ralph/review/plan-partial-continue/synthesized-review.md","findings_count":2,"p0_count":0,"p1_count":1,"must_fix_now_count":0,"findings_summary":"1 P1 residual traceable to failed U2; U3-U4 blocked off U2","verdict":"pass_with_residuals"}</event>
+  - hat: fix-planner
+    text: |
+      <event topic="review.complete">{"plan_name":"plan-partial-continue","plan_path":"docs/plans/partial-continue.md","executor_head_sha":"0000000000000000000000000000000000000002","fix_plan_file":".ralph/review/plan-partial-continue/fix-plan.md","findings_count":2,"p0_count":0,"p1_count":1,"findings_summary":"1 P1 residual deferred; no must-fix-now","verdict":"pass_with_residuals"}</event>
+  - hat: fixer
+    text: |
+      <event topic="fix.done">{"plan_name":"plan-partial-continue","plan_path":"docs/plans/partial-continue.md","executor_head_sha":"0000000000000000000000000000000000000002","head_sha":"0000000000000000000000000000000000000003","fix_attempt_commit_sha":"0000000000000000000000000000000000000003","worktree_status":"clean","fix_plan_file":".ralph/review/plan-partial-continue/fix-plan.md","review_verdict":"pass_with_residuals","fixes_applied":1,"fixes_skipped":0,"fix_status":"applied"}</event>
+  - hat: alignment
+    text: |
+      <event topic="align.done">{"plan_name":"plan-partial-continue","plan_path":"docs/plans/partial-continue.md","executor_head_sha":"0000000000000000000000000000000000000002","head_sha":"0000000000000000000000000000000000000003","worktree_status":"clean","fix_plan_file":".ralph/review/plan-partial-continue/fix-plan.md","review_verdict":"pass_with_residuals","plan_executed":false,"fix_plan_executed":true,"residuals_count":3,"residuals_summary":"U2 failed; U3,U4 blocked by dependency on U2","report_input_file":".ralph/review/plan-partial-continue/report-input.align-done.json"}</event>
   - hat: reporter
     text: |
-      <event topic="report.done">{"plan_name":"plan-fail-stop","report_path":".ralph/review/plan-fail-stop/report.md","verdict":"blocked","reason":"executor fail-stop at U2"}</event>
+      <event topic="report.done">{"plan_name":"plan-partial-continue","report_path":".ralph/review/plan-partial-continue/report.md","verdict":"pass_with_residuals","reason":"partial delivery: U1 committed; U2 failed; U3-U4 blocked"}</event>
   - hat: reporter
     text: |
-      <event topic="LOOP_COMPLETE">{"reason":"executor fail-stop at U2"}</event>
+      <event topic="LOOP_COMPLETE">{"reason":"partial delivery reported with residuals; no dead-end short-circuit"}</event>
 
 expected:
-  iterations: 4
+  iterations: 15
   events:
     - topic: plan.ready
-    - topic: work.failed
-    - topic: report.done
-  absent_events:
-    # U2 fail-stop: U3..U6 must NEVER start. No review/fix/align events.
     - topic: work.done
     - topic: stabilization.done
-    - topic: stabilization.blocked
-    - topic: review.round.ready
     - topic: review.goalalign.done
     - topic: review.correctness.done
     - topic: review.testing.done
@@ -128,19 +162,32 @@ expected:
     - topic: review.standards.done
     - topic: review.adversarial.done
     - topic: review.synthesized
-    - topic: fix.requested
     - topic: review.complete
     - topic: fix.done
     - topic: align.done
-    - topic: review.loop.blocked
-    - topic: plan.blocked
-  payload_matches:
+    - topic: report.done
+  absent_events:
+    # The inversion: partial delivery with commits is NOT work.failed.
     - topic: work.failed
+    - topic: plan.blocked
+    - topic: stabilization.blocked
+    # Linear preset: no review-reentry round machinery.
+    - topic: review.round.ready
+    - topic: review.loop.blocked
+  payload_matches:
+    - topic: work.done
       fields:
-        planned_units: ["U1","U2","U3","U4","U5","U6"]
+        planned_units: ["U1","U2","U3","U4"]
         attempted_units: ["U1","U2"]
         completed_units: ["U1"]
         failed_units: ["U2"]
-        skipped_units: ["U3","U4","U5","U6"]
-        reason: "unit_failed: U2 tests_not_green after 3 attempts"
+        blocked_units: ["U3","U4"]
+        skipped_units: []
+        execution_status: "partial"
+        decisions_file: ".ralph/agent/decisions.md"
+        post_verification_status: "red"
+        new_business_regressions_count: 1
+    - topic: report.done
+      fields:
+        verdict: "pass_with_residuals"
   completion: true

@@ -48,6 +48,16 @@ plan-gate / work.start
 - executor 的 unit-level 证据走现有 `work.done` payload 字段（`tests_run` /
   `tests_passed` / `commit_count` / `executor_head_sha` / `changed_lines`），
   **不**新增 runtime unit-loop topic
+- 结算二分契约（2026-07-24-002）：`completed_units` 非空一律走 `work.done`
+  （`execution_status` 取 complete / partial；failed / blocked / skipped Units
+  进对应 bill 字段，下游按 residual 处理）；`work.failed` 只保留给零交付
+  dead-end（`completed_units` 为空，`reason` 以 `unreachable` /
+  `no_deliverable_commits` / `cannot_produce_handoff` 开头）。
+  `new_business_regressions_count` / `flaky_or_environmental_count` 是
+  report-only：诚实写进 `verification_delta_file` 与
+  `post_verification_status`，非零不得强制 `work.failed` 或
+  `fix_status=blocked`（`fix.done` 的 `blocked` 同样只给真 dead-end，
+  与 `review_verdict` 解耦）
 
 **收尾双事件终态（reporter hat）**：preset 把 `event_loop.required_events: ["report.done"]` 与 `event_loop.completion_promise: LOOP_COMPLETE` 配对，作为 reporter 合法双 emit 的入口。其它 hat（plan-reviewer / executor / dimension hats / synthesizer / fix-planner / fixer / alignment）一律**不享受**该例外——它们的 `publishes` 不应同时包含 required_events 列表里的 topic 与 completion_promise。AAF 复核参见 `finding-rubric.md`「required-event-to-completion 窄例外」段。
 
