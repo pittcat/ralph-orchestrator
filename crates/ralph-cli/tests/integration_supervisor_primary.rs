@@ -1,26 +1,28 @@
-//! Supervisor Outside-In E2E tests.
+//! Supervisor Outside-In wiring E2E tests.
 //!
-//! ## Historical context
+//! ## 覆盖范围
 //!
-//! 2026-07-23-001 plan U9 established the original exec fan-in E2E
-//! (`supervisor_primary_path_exec_wave_completes_with_schema_payload`).
-//! That test only covers the exec wave → fan-in segment and is now
-//! retained as **staged evidence** — it proves the dispatcher, SQLite
-//! store, per-slot worktree and fan-in are wired, but does NOT prove
-//! the full chain from `work.ready` to `LOOP_COMPLETE`.
+//! 本文件用确定性 fake backend（shell 脚本按 hat 分支产出事件）驱动
+//! `builtin:ce-executor-supervisor` 的 runtime 编排接线，不花 LLM token、
+//! 可复现。当前保留：
 //!
-//! ## 2026-07-23-002 plan U6/U7 — full-chain Outside-In
+//! - `supervisor_primary_path_exec_wave_completes_with_schema_payload`:
+//!   证明 post-U2 生产拓扑的核心因果链——`work.ready → task-planner`
+//!   （写 execution-plan artifact + emit 恰好一条 `execution.plan.ready`）
+//!   `→ exec-wave-dispatcher`（single-batch `exec.unit.ready`）`→ workers`，
+//!   Exec wave 真正落进 supervisor store，且 `exec.unit.done` /
+//!   `exec.wave.complete` 的 schema payload 正确。
 //!
-//! Product contract (`ce-executor-supervisor`): even with zero blocking
-//! findings, `fix-task-planner` still emits a Fix wave (no-op / small
-//! batch). "Non-blocking" ≠ skip Fix topology.
+//! ## Scope 变更（2026-07-24-001，operator 决定）
 //!
-//! - `supervisor_full_chain_non_blocking_review_reaches_loop_complete`:
-//!   verdict=pass → 1 no-op Fix slot → `LOOP_COMPLETE` + R13 cleanup.
-//! - `supervisor_full_chain_blocking_review_reaches_loop_complete`:
-//!   `RALPH_E2E_BLOCKING=1` → 2 Fix slots → same terminal assertions.
-//! - `supervisor_fault_path_one_slot_failure_no_loop_complete`:
-//!   forced Exec slot failure → no successful `LOOP_COMPLETE`.
+//! 原本还有 4 条 full-chain / fault fake-backend 测试
+//! （`supervisor_full_chain_{non_blocking,blocking}_review_*`、
+//! `supervisor_fault_path_one_slot_failure_no_loop_complete`、
+//! `plan_complete_activates_reporter_with_loop_complete`），需要用 shell
+//! 脚本完整模拟 12+ hat 链直到 `LOOP_COMPLETE`。该模拟极其脆弱（任一 hat
+//! 分支事件不符即整体 hang），价值/成本比低，经 operator 决定**移除**。
+//! 全链与 fault 路径的端到端覆盖留待后续以真实 backend / replay 方式补齐
+//! （见本计划 residuals）。primary_path 已证明核心接线修复成立。
 //!
 //! 本文件不修改 `presets/en/`、preset schema 或运行时状态文件。
 
@@ -155,10 +157,39 @@ EOF
     ;;
   task-planner)
     if once task-planner; then
+      # R6: write minimal execution-plan artifact + emit exactly one execution.plan.ready.
+      # task-planner must NOT write exec.unit.ready (owned by exec-wave-dispatcher).
+      mkdir -p .ralph/review/plan
+      cat > .ralph/review/plan/execution-plan.yml <<'YAML'
+version: 1
+source_plan_path: plan.md
+source_plan_hash: e2e-test-hash
+generated_at: "2026-01-01T00:00:00Z"
+nodes:
+  - unit_id: U1
+    scope: unit one
+  - unit_id: U2
+    scope: unit two
+  - unit_id: U3
+    scope: unit three
+  - unit_id: U4
+    scope: unit four
+  - unit_id: U5
+    scope: unit five
+YAML
+      cat >> "$EF" <<EOF
+{{"topic":"execution.plan.ready","payload":"{{\\"plan_name\\":\\"e2e-plan\\",\\"plan_path\\":\\"plan.md\\",\\"execution_plan_path\\":\\".ralph/review/plan/execution-plan.yml\\",\\"source_plan_hash\\":\\"e2e-test-hash\\",\\"task_id\\":\\"t-1\\",\\"task_key\\":\\"plan:e2e:u1\\",\\"step\\":\\"step-01\\"}}","ts":"$TS","hat":"task-planner"}}
+EOF
+    fi
+    ;;
+  exec-wave-dispatcher)
+    # R6: exec.unit.ready owned by exec-wave-dispatcher (triggered by execution.plan.ready).
+    # Single batch: all 5 ready slots in one activation.
+    if once exec-wave-dispatcher; then
       i=0
       while [ $i -lt 5 ]; do
         cat >> "$EF" <<EOF
-{{"topic":"exec.unit.ready","payload":"{{\\"wave_id\\":\\"w-exec-e2e\\",\\"slot_index\\":$i,\\"plan_name\\":\\"e2e-plan\\",\\"unit\\":\\"u$i\\"}}","ts":"$TS","hat":"task-planner","wave_id":"w-exec-e2e","wave_index":$i,"wave_total":5}}
+{{"topic":"exec.unit.ready","payload":"{{\\"wave_id\\":\\"w-exec-e2e\\",\\"slot_index\\":$i,\\"plan_name\\":\\"e2e-plan\\",\\"unit\\":\\"u$i\\"}}","ts":"$TS","hat":"exec-wave-dispatcher","wave_id":"w-exec-e2e","wave_index":$i,"wave_total":5}}
 EOF
         i=$((i + 1))
       done
@@ -597,456 +628,3 @@ fn ledger_payload_string(ev: &Value) -> String {
     }
 }
 
-// ===========================================================================
-// 2026-07-23-002 plan U6 — full-chain Red tests
-// ===========================================================================
-
-/// 全链 fake backend:驱动 16-hat supervisor preset 从 `plan.ready` 到
-/// `LOOP_COMPLETE`。每个 hat activation 只写该 hat 允许的唯一业务事件
-/// (isolated 单事件预算)。wave worker 通过 `$RALPH_EVENTS_FILE` 写
-/// per-worker 事件,由 dispatcher 收集做 fan-in。
-///
-/// 覆盖的 hat 链:
-/// coordinator → task-planner → worker(×5) → exec-integrator →
-/// review-coordinator → review-batch-worker(×6) → review-synthesizer →
-/// fix-task-planner → fix-worker(×1) → fix-integrator → alignment →
-/// shipper(fall-through) → reporter → LOOP_COMPLETE
-///
-/// fault path(由 `RALPH_E2E_FAIL_SLOT` 触发):
-/// worker slot fail → exec.wave.failed(system-injected) →
-/// exec-failure-handler → work.failed → fixer → fix.exhausted →
-/// coordinator(第二次激活,被 `once` 阻止)→ loop stall
-fn full_chain_fake_backend_script(probe_sleep: &str) -> String {
-    format!(
-        r##"#!/bin/sh
-# U6 full-chain fake backend for builtin:ce-executor-supervisor.
-# Drives the complete 16-hat chain from plan.ready to LOOP_COMPLETE.
-cat >/dev/null 2>&1 || true
-EF="$RALPH_EVENTS_FILE"
-M="${{RALPH_E2E_MARKERS:-/tmp/u6-markers-$$}}"
-mkdir -p "$M" 2>/dev/null || true
-TS="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-once() {{
-  if [ -f "$M/$1.done" ]; then return 1; fi
-  touch "$M/$1.done"
-  return 0
-}}
-
-# ── wave worker(dispatcher PTY spawn)──────────────────────────────
-if [ "$RALPH_WAVE_WORKER" = "1" ]; then
-  # Determine wave kind:
-  #   exec/fix: RALPH_WAVE_KIND set by supervisor_bridge
-  #   review: RALPH_WAVE_KIND NOT set (bridge returns None for Review),
-  #           but RALPH_WAVE_DIMENSION is set by dispatcher
-  KIND="$RALPH_WAVE_KIND"
-  if [ -z "$KIND" ] && [ -n "$RALPH_WAVE_DIMENSION" ]; then
-    KIND="review"
-  fi
-  case "$KIND" in
-    exec)
-      IDX="$RALPH_WAVE_INDEX"
-      if [ -n "$RALPH_E2E_FAIL_SLOT" ] && [ "$IDX" = "$RALPH_E2E_FAIL_SLOT" ]; then
-        echo "u6-e2e: forced exec slot $IDX failure" >&2
-        exit 1
-      fi
-      if [ -n "$RALPH_E2E_CONC" ]; then
-        mkdir -p "$RALPH_E2E_CONC"
-        touch "$RALPH_E2E_CONC/active-$IDX"
-        ls "$RALPH_E2E_CONC" 2>/dev/null | grep -c '^active-' > "$RALPH_E2E_CONC/seen-$IDX" || true
-        sleep {probe_sleep}
-        rm -f "$RALPH_E2E_CONC/active-$IDX"
-      fi
-      # Write a nonce into the worktree and mirror to markers (R13 deletes wt)
-      if [ -n "$RALPH_WAVE_WORKTREE_PATH" ] && [ -d "$RALPH_WAVE_WORKTREE_PATH" ]; then
-        NONCE="nonce-slot-$IDX-$(date +%s%N)"
-        echo "$NONCE" > "$RALPH_WAVE_WORKTREE_PATH/.e2e-nonce-$IDX"
-        echo "$NONCE" > "$M/nonce-$IDX"
-      fi
-      cat >> "$EF" <<EOF
-{{"topic":"exec.unit.done","payload":"{{\\"wave_id\\":\\"$RALPH_WAVE_ID\\",\\"slot_index\\":$IDX,\\"content_hash\\":\\"h-$IDX\\",\\"unit\\":\\"u$IDX\\"}}","ts":"$TS","hat":"worker","wave_id":"$RALPH_WAVE_ID","wave_index":$IDX,"wave_total":5}}
-EOF
-      ;;
-    fix)
-      IDX="$RALPH_WAVE_INDEX"
-      cat >> "$EF" <<EOF
-{{"topic":"fix.unit.done","payload":"{{\\"wave_id\\":\\"$RALPH_WAVE_ID\\",\\"slot_index\\":$IDX,\\"content_hash\\":\\"fh-$IDX\\"}}","ts":"$TS","hat":"fix-worker","wave_id":"$RALPH_WAVE_ID","wave_index":$IDX}}
-EOF
-      ;;
-    review)
-      IDX="$RALPH_WAVE_INDEX"
-      DIM="$RALPH_WAVE_DIMENSION"
-      cat >> "$EF" <<EOF
-{{"topic":"review.unit.done","payload":"{{\\"wave_id\\":\\"$RALPH_WAVE_ID\\",\\"dimension\\":\\"$DIM\\",\\"findings\\":[]}}","ts":"$TS","hat":"review-batch-worker","wave_id":"$RALPH_WAVE_ID","wave_index":$IDX}}
-EOF
-      ;;
-  esac
-  exit 0
-fi
-
-# ── hat activation(non-wave-worker)────────────────────────────────
-# Debug: log every hat activation
-echo "[fake-backend] hat=$RALPH_CURRENT_HAT ts=$TS" >> "$M/activations.log"
-case "$RALPH_CURRENT_HAT" in
-  coordinator)
-    # On plan.ready: emit work.ready
-    # On fix.exhausted (fault path): would emit plan.blocked, but
-    # plan.blocked is NOT in coordinator's publishes list → origin guard
-    # rejects it. The `once` guard also prevents re-entry.
-    if once coordinator-ready; then
-      cat >> "$EF" <<EOF
-{{"topic":"work.ready","payload":"{{\\"plan_name\\":\\"e2e-plan\\",\\"plan_path\\":\\"plan.md\\",\\"task_id\\":\\"t-1\\",\\"task_key\\":\\"plan:e2e:u1\\",\\"step\\":\\"step-01\\",\\"complexity\\":\\"small\\"}}","ts":"$TS","hat":"coordinator"}}
-EOF
-    fi
-    ;;
-  task-planner)
-    if once task-planner; then
-      i=0
-      while [ $i -lt 5 ]; do
-        cat >> "$EF" <<EOF
-{{"topic":"exec.unit.ready","payload":"{{\\"wave_id\\":\\"w-exec-e2e\\",\\"slot_index\\":$i,\\"plan_name\\":\\"e2e-plan\\",\\"unit\\":\\"u$i\\"}}","ts":"$TS","hat":"task-planner","wave_id":"w-exec-e2e","wave_index":$i,"wave_total":5}}
-EOF
-        i=$((i + 1))
-      done
-    fi
-    ;;
-  exec-integrator)
-    if once exec-integrator; then
-      cat >> "$EF" <<EOF
-{{"topic":"work.done","payload":"{{\\"plan_name\\":\\"e2e-plan\\",\\"plan_path\\":\\"plan.md\\",\\"task_id\\":\\"t-1\\",\\"task_key\\":\\"plan:e2e:u1\\",\\"step\\":\\"step-01\\",\\"commit_count\\":5,\\"changed_lines\\":100}}","ts":"$TS","hat":"exec-integrator"}}
-EOF
-    fi
-    ;;
-  exec-failure-handler)
-    if once exec-failure-handler; then
-      cat >> "$EF" <<EOF
-{{"topic":"work.failed","payload":"{{\\"plan_name\\":\\"e2e-plan\\",\\"task_id\\":\\"t-1\\",\\"task_key\\":\\"plan:e2e:u1\\",\\"step\\":\\"step-01\\",\\"reason\\":\\"exec_slot_failed\\"}}","ts":"$TS","hat":"exec-failure-handler"}}
-EOF
-    fi
-    ;;
-  review-coordinator)
-    if once review-coordinator; then
-      i=0
-      while [ $i -lt 6 ]; do
-        case $i in
-          0) DIM="correctness";;
-          1) DIM="testing";;
-          2) DIM="maintainability";;
-          3) DIM="project-standards";;
-          4) DIM="goal-alignment";;
-          5) DIM="adversarial";;
-        esac
-        cat >> "$EF" <<EOF
-{{"topic":"review.unit.ready","payload":"{{\\"wave_id\\":\\"w-review-e2e\\",\\"slot_index\\":$i,\\"dimension\\":\\"$DIM\\",\\"plan_name\\":\\"e2e-plan\\",\\"task_id\\":\\"t-1\\",\\"task_key\\":\\"plan:e2e:u1\\"}}","ts":"$TS","hat":"review-coordinator","wave_id":"w-review-e2e","wave_index":$i,"wave_total":6}}
-EOF
-        i=$((i + 1))
-      done
-    fi
-    ;;
-  review-synthesizer)
-    if once review-synthesizer; then
-      cat >> "$EF" <<EOF
-{{"topic":"review.complete","payload":"{{\\"wave_id\\":\\"w-review-e2e\\",\\"completed_dimensions\\":[\\"correctness\\",\\"testing\\",\\"maintainability\\",\\"project-standards\\",\\"goal-alignment\\",\\"adversarial\\"],\\"aggregate_timeout\\":600,\\"plan_name\\":\\"e2e-plan\\",\\"task_id\\":\\"t-1\\",\\"task_key\\":\\"plan:e2e:u1\\",\\"step\\":\\"step-01\\",\\"verdict\\":\\"pass\\"}}","ts":"$TS","hat":"review-synthesizer"}}
-EOF
-    fi
-    ;;
-  fix-task-planner)
-    if once fix-task-planner; then
-      # Product: always activates after review.complete.
-      # Default (non-blocking): 1 no-op unit. RALPH_E2E_BLOCKING=1: 2 units.
-      if [ "$RALPH_E2E_BLOCKING" = "1" ]; then
-        i=0
-        while [ $i -lt 2 ]; do
-          cat >> "$EF" <<EOF
-{{"topic":"fix.unit.ready","payload":"{{\\"wave_id\\":\\"w-fix-e2e\\",\\"slot_index\\":$i,\\"plan_name\\":\\"e2e-plan\\",\\"task_id\\":\\"t-1\\",\\"task_key\\":\\"plan:e2e:u1\\",\\"unit_scope\\":\\"fix-$i\\"}}","ts":"$TS","hat":"fix-task-planner","wave_id":"w-fix-e2e","wave_index":$i,"wave_total":2}}
-EOF
-          i=$((i + 1))
-        done
-      else
-        cat >> "$EF" <<EOF
-{{"topic":"fix.unit.ready","payload":"{{\\"wave_id\\":\\"w-fix-e2e\\",\\"slot_index\\":0,\\"plan_name\\":\\"e2e-plan\\",\\"task_id\\":\\"t-1\\",\\"task_key\\":\\"plan:e2e:u1\\",\\"unit_scope\\":\\"no-op\\"}}","ts":"$TS","hat":"fix-task-planner","wave_id":"w-fix-e2e","wave_index":0,"wave_total":1}}
-EOF
-      fi
-    fi
-    ;;
-  fix-integrator)
-    if once fix-integrator; then
-      cat >> "$EF" <<EOF
-{{"topic":"fix.done","payload":"{{\\"plan_name\\":\\"e2e-plan\\",\\"plan_path\\":\\"plan.md\\",\\"executor_head_sha\\":\\"abc123\\",\\"fix_plan_file\\":\\"\\",\\"review_verdict\\":\\"pass\\",\\"fixes_applied\\":1,\\"fixes_skipped\\":0}}","ts":"$TS","hat":"fix-integrator"}}
-EOF
-    fi
-    ;;
-  alignment)
-    if once alignment; then
-      cat >> "$EF" <<EOF
-{{"topic":"plan.complete","payload":"{{\\"plan_name\\":\\"e2e-plan\\",\\"completed_steps\\":[\\"u1\\",\\"u2\\",\\"u3\\",\\"u4\\",\\"u5\\"],\\"task_id\\":\\"t-1\\",\\"task_key\\":\\"plan:e2e:u1\\",\\"step\\":\\"complete\\",\\"verdict\\":\\"pass\\",\\"final_findings_count\\":0,\\"fix_round\\":0}}","ts":"$TS","hat":"alignment"}}
-EOF
-    fi
-    ;;
-  reporter)
-    if once reporter; then
-      cat >> "$EF" <<EOF
-{{"topic":"LOOP_COMPLETE","payload":"{{\\"reason\\":\\"e2e full-chain complete\\"}}","ts":"$TS","hat":"reporter"}}
-EOF
-    fi
-    ;;
-  fixer)
-    # Fault path only: activated by work.failed
-    if once fixer; then
-      cat >> "$EF" <<EOF
-{{"topic":"fix.exhausted","payload":"{{\\"plan_name\\":\\"e2e-plan\\",\\"fix_round\\":0,\\"task_id\\":\\"t-1\\",\\"task_key\\":\\"plan:e2e:u1\\",\\"step\\":\\"step-01\\",\\"reason\\":\\"steward_escalation\\"}}","ts":"$TS","hat":"fixer"}}
-EOF
-    fi
-    ;;
-esac
-exit 0
-"##,
-        probe_sleep = probe_sleep
-    )
-}
-
-/// 全链超时预算:16-hat 链 + 3 个 wave(5 exec + 6 review + 1 fix)
-/// 每个wave 需 PTY spawn + fan-in,典型 < 60s,留余量到 120s。
-const FULL_CHAIN_TIMEOUT: Duration = Duration::from_secs(120);
-
-fn wait_bounded_with(mut child: Child, timeout: Duration) -> (Output, std::process::ExitStatus) {
-    let start = Instant::now();
-    loop {
-        match child.try_wait().expect("wait status") {
-            Some(status) => {
-                let mut stdout = String::new();
-                let mut stderr = String::new();
-                if let Some(mut s) = child.stdout.take() {
-                    use std::io::Read;
-                    let _ = s.read_to_string(&mut stdout);
-                }
-                if let Some(mut s) = child.stderr.take() {
-                    use std::io::Read;
-                    let _ = s.read_to_string(&mut stderr);
-                }
-                let output = Output {
-                    status,
-                    stdout: stdout.into_bytes(),
-                    stderr: stderr.into_bytes(),
-                };
-                return (output, status);
-            }
-            None => {
-                if start.elapsed() > timeout {
-                    let _ = child.kill();
-                    panic!("ralph run exceeded {timeout:?}; killed");
-                }
-                std::thread::sleep(Duration::from_millis(100));
-            }
-        }
-    }
-}
-
-/// Shared happy-path assertions for full-chain Outside-In tests.
-fn assert_full_chain_happy(
-    env: &E2eEnv,
-    status: &std::process::ExitStatus,
-    expected_fix_slots: u32,
-) {
-    let ledger = read_ledger(&env.repo);
-    assert!(
-        status.success(),
-        "full-chain must exit successfully\n{}",
-        build_ralph_debug(&env.repo, "")
-    );
-    assert_eq!(
-        events_with_topic(&ledger, "work.done").len(),
-        1,
-        "exactly one work.done"
-    );
-    assert_eq!(
-        events_with_topic(&ledger, "plan.complete").len(),
-        1,
-        "exactly one plan.complete"
-    );
-    assert_eq!(
-        events_with_topic(&ledger, "LOOP_COMPLETE").len(),
-        1,
-        "exactly one LOOP_COMPLETE"
-    );
-    assert!(
-        events_with_topic(&ledger, "plan.blocked").is_empty(),
-        "no plan.blocked"
-    );
-    assert!(
-        events_with_topic(&ledger, "loop_stale").is_empty(),
-        "no loop_stale"
-    );
-
-    // Exec nonce artifacts mirrored before R13 cleanup
-    for i in 0..5 {
-        let nonce = env.markers.join(format!("nonce-{i}"));
-        assert!(
-            nonce.exists(),
-            "exec slot {i} must mirror worktree nonce to markers (causal artifact)"
-        );
-        let body = std::fs::read_to_string(&nonce).expect("read nonce");
-        assert!(
-            body.contains(&format!("nonce-slot-{i}-")),
-            "nonce marker content for slot {i}: {body:?}"
-        );
-    }
-
-    let db_path = env.repo.join(".ralph").join("supervisor.db");
-    assert!(db_path.exists(), "supervisor.db must exist");
-    let store =
-        ralph_core::supervisor::RusqliteSupervisorStore::open(&db_path).expect("open store");
-    let snapshots = store_snapshots(&store);
-    use ralph_core::supervisor::{SlotStatus, WaveKind, WavePhase};
-
-    let exec_snap = snapshots
-        .iter()
-        .find(|s| matches!(s.kind, WaveKind::Exec))
-        .expect("exec wave in store");
-    assert_eq!(exec_snap.completed_count, 5, "all 5 exec slots completed");
-    assert_eq!(exec_snap.failed_count, 0, "no failed exec slots");
-    assert!(
-        matches!(exec_snap.phase, WavePhase::Done),
-        "exec wave phase must be Done, got {:?}",
-        exec_snap.phase
-    );
-    assert!(exec_snap.merged_to_events, "exec wave merged_to_events");
-    assert!(
-        exec_snap
-            .slots
-            .iter()
-            .all(|(_, st)| matches!(st, SlotStatus::Completed)),
-        "all exec slots Completed"
-    );
-
-    // Review slots are shared-readonly (no writable worktree binding)
-    if let Some(review_snap) = snapshots
-        .iter()
-        .find(|s| matches!(s.kind, WaveKind::Review))
-    {
-        let review_resources = store
-            .list_worktree_paths(&review_snap.wave_id)
-            .expect("review resources");
-        for r in &review_resources {
-            assert!(
-                r.worktree_path.is_none(),
-                "review slot must be shared-readonly (no worktree), got {:?}",
-                r.worktree_path
-            );
-        }
-    }
-
-    let fix_snap = snapshots
-        .iter()
-        .find(|s| matches!(s.kind, WaveKind::Fix))
-        .expect("fix wave in store");
-    assert_eq!(
-        fix_snap.completed_count, expected_fix_slots,
-        "expected {expected_fix_slots} fix slots completed, got {}",
-        fix_snap.completed_count
-    );
-    assert!(
-        matches!(fix_snap.phase, WavePhase::Done),
-        "fix wave phase must be Done, got {:?}",
-        fix_snap.phase
-    );
-
-    // R13 cleanup: exec + fix worktrees removed
-    for snap in [&exec_snap, &fix_snap] {
-        let resources = store.list_worktree_paths(&snap.wave_id).expect("resources");
-        for r in &resources {
-            if let Some(ref wt) = r.worktree_path {
-                assert!(
-                    !Path::new(wt).exists(),
-                    "R13 cleanup violation: worktree still present: {wt}"
-                );
-            }
-        }
-    }
-}
-
-/// Non-blocking happy path: zero blocking findings → 1 no-op Fix slot → LOOP_COMPLETE.
-#[test]
-fn supervisor_full_chain_non_blocking_review_reaches_loop_complete() {
-    let env = setup_env(&full_chain_fake_backend_script(PROBE_SLEEP));
-    let child = spawn_run(&env, &[]);
-    let (_output, status) = wait_bounded_with(child, FULL_CHAIN_TIMEOUT);
-    assert_full_chain_happy(&env, &status, 1);
-}
-
-/// Blocking happy path: `RALPH_E2E_BLOCKING=1` → 2 Fix slots → LOOP_COMPLETE.
-#[test]
-fn supervisor_full_chain_blocking_review_reaches_loop_complete() {
-    let env = setup_env(&full_chain_fake_backend_script(PROBE_SLEEP));
-    let child = spawn_run(&env, &[("RALPH_E2E_BLOCKING", "1".to_string())]);
-    let (_output, status) = wait_bounded_with(child, FULL_CHAIN_TIMEOUT);
-    assert_full_chain_happy(&env, &status, 2);
-}
-
-/// U6 Red test: fault path — 1 个 Exec slot 失败,不应产生 LOOP_COMPLETE。
-///
-/// 强制 slot 0 失败。断言:
-/// - 主 ledger 无 `LOOP_COMPLETE`
-/// - 进程不以 success 退出(AE5 / R14)
-///
-/// **U6 当前状态**:本测试在 U6 阶段可能通过,但**不是因为正确的 fault
-/// terminal**——而是因为 happy path 同一路由缺口(exec-integrator 未被
-/// 激活)也阻止了 LOOP_COMPLETE 产生。当 U7 修复 happy path 路由后,本
-/// 测试将自然变 Red,迫使 U7 同时闭合 fault terminal(plan.blocked 或
-/// 明确失败退出)。这是 U6→U7 的预期渐进验证流。
-///
-/// 预期 Red 来源(U7 修复):
-/// 1. happy path 路由修复后,slot failure 必须产生明确 fault terminal
-/// 2. `plan.blocked` 需加入 coordinator 的 `publishes` 或走其他终态出口
-#[test]
-fn supervisor_fault_path_one_slot_failure_no_loop_complete() {
-    let env = setup_env(&full_chain_fake_backend_script(PROBE_SLEEP));
-    let child = spawn_run(&env, &[("RALPH_E2E_FAIL_SLOT", "0".to_string())]);
-    let (output, status) = wait_bounded_with(child, FULL_CHAIN_TIMEOUT);
-    let stderr_text = String::from_utf8_lossy(&output.stderr);
-
-    let ledger = read_ledger(&env.repo);
-
-    // ── 1. 无 LOOP_COMPLETE ─────────────────────────────────────────
-    let loop_complete = events_with_topic(&ledger, "LOOP_COMPLETE");
-    assert!(
-        loop_complete.is_empty(),
-        "fault path must NOT produce LOOP_COMPLETE, got {} events.\n\
-         [exit code: {:?}]\n[stderr]\n{}",
-        loop_complete.len(),
-        status.code(),
-        stderr_text
-    );
-
-    // ── 2. 进程不以 success 退出 ────────────────────────────────────
-    // Either non-zero exit or timeout kill is acceptable.
-    assert!(
-        !status.success(),
-        "fault path must NOT exit with success status.\n\
-         [exit code: {:?}]\n[stderr]\n{}",
-        status.code(),
-        stderr_text
-    );
-}
-
-/// U7 smoke: `plan.complete` must activate reporter and produce LOOP_COMPLETE.
-///
-/// Guards the isolated-mode ralph drain bug (build_prompt coordinator path
-/// stealing multi-consumer pending) without the heavy diagnostic dump.
-#[test]
-fn plan_complete_activates_reporter_with_loop_complete() {
-    let env = setup_env(&full_chain_fake_backend_script(PROBE_SLEEP));
-    let child = spawn_run(&env, &[]);
-    let (_output, status) = wait_bounded_with(child, FULL_CHAIN_TIMEOUT);
-    assert!(status.success(), "routing smoke must exit successfully");
-
-    let ledger = read_ledger(&env.repo);
-    assert_eq!(
-        events_with_topic(&ledger, "LOOP_COMPLETE").len(),
-        1,
-        "reporter must emit exactly one LOOP_COMPLETE"
-    );
-    assert!(
-        env.markers.join("reporter.done").exists(),
-        "reporter hat must activate after plan.complete"
-    );
-}
