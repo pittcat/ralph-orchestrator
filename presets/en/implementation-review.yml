@@ -61,7 +61,7 @@ tasks:
 
 event_loop:
   execution_mode: isolated
-  prompt_file: "PROMPT.md"
+  prompt_file: "PROMPT.implementation-review.md"
   completion_promise: "LOOP_COMPLETE"
   # KTD14: required_events MUST stay empty. Listing mutually exclusive
   # success + blocked handoffs (review.synthesized AND scope.blocked,
