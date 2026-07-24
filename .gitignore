@@ -124,6 +124,13 @@ site/
 !.ralph/agent/memories.md
 !.ralph/agent/tasks.jsonl
 
+# Plan residuals (HARD RULE: 不进 git). review/<plan-id>/ 下的过程产物:
+# reviewer/executor 在 plan 跑完后应把有用内容合并到 docs/solutions/ 或 plan 主文件,
+# 然后删除这些文件;无用则直接删除。pre-commit hook 也会硬拦截,这是兜底。
+.ralph/review/**/residuals*.md
+.ralph/review/**/scratch/
+.ralph/review/**/draft/
+
 # Codex local state
 .codex/
 .agents/

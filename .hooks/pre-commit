@@ -14,4 +14,8 @@ while IFS= read -r git_env_var; do
   unset "$git_env_var"
 done < <(git rev-parse --local-env-vars)
 
+# Plan residuals gate (HARD RULE: 见 CLAUDE.md / AGENTS.md).
+# 必须在重 CI gate 之前 fail-fast,避免误 commit 后还要回滚。
+./scripts/check-plan-residuals.sh
+
 ./scripts/ci-rust-gate.sh --skip-hooks-bdd --skip-mock-e2e
