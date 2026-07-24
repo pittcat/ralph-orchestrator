@@ -425,15 +425,17 @@ impl DriftEngine {
                 Self::emit_plan_blocked_for_recovery_exhaustion(event_loop, &hint);
                 event_loop.state_mut().pending_plan_blocked_for_failure = true;
                 // P0-3 (2026-06-29-006): pin the next hat
-                // activation to `shipper` so the just-published
-                // `plan.blocked` is consumed immediately on the
-                // next iteration, instead of waiting for
-                // round-robin to pick shipper. Mirrors the
-                // `pending_recovery_hat` mechanism used by the
-                // hard-gate / wave-recovery paths
+                // activation to `reporter` (was `shipper`; the
+                // shipper hat is removed from the supervisor
+                // preset — see plan 2026-07-24-005 U1) so the
+                // just-published `plan.blocked` is consumed
+                // immediately on the next iteration, instead
+                // of waiting for round-robin to pick reporter.
+                // Mirrors the `pending_recovery_hat` mechanism
+                // used by the hard-gate / wave-recovery paths
                 // (`event_loop/mod.rs:2464`).
-                event_loop.state_mut().pending_recovery_hat = Some(HatId::from("shipper"));
-                // Phase 1: defer termination so shipper can
+                event_loop.state_mut().pending_recovery_hat = Some(HatId::from("reporter"));
+                // Phase 1: defer termination so reporter can
                 // process `plan.blocked` on the next iteration.
                 return None;
             }
@@ -463,8 +465,8 @@ impl DriftEngine {
 
     /// P0-3 (plan 2026-06-29-006): synthesise and publish a
     /// `plan.blocked` business event with the recovery
-    /// exhaustion context so the coordinator / shipper /
-    /// reporter chain can run the preset's failure path before
+    /// exhaustion context so the coordinator / reporter
+    /// chain can run the preset's failure path before
     /// the loop actually terminates. Routed to the bus
     /// `ralph` source so the EventOriginGuard accepts the
     /// publish. The event is best-effort: a publish failure is
@@ -472,13 +474,18 @@ impl DriftEngine {
     /// `RecoveryExhausted` (the loop must still terminate to
     /// avoid burning more iterations on a known-bad run).
     ///
-    /// 2026-06-29 code-review fix: the target is now `shipper`
-    /// (not `coordinator`). The `ce-executor-serial` preset's
-    /// `shipper` hat subscribes to `plan.blocked` directly
-    /// (see `presets/en/ce-executor-serial.yml` shipper
-    /// `triggers`); `coordinator` does not. Routing to
-    /// `coordinator` left the event in the bus with no
+    /// 2026-06-29 code-review fix: the target was `coordinator`
+    /// (then `shipper`). The `ce-executor-supervisor` preset's
+    /// `reporter` hat subscribes to `plan.blocked` (see
+    /// `presets/en/ce-executor-supervisor.yml` reporter
+    /// `triggers`); `coordinator` / `shipper` do not. Routing
+    /// to either of those left the event in the bus with no
     /// subscriber, so the failure path never ran.
+    ///
+    /// 2026-07-24-005 plan U1: target is now `reporter` (was
+    /// `shipper`). The shipper hat is removed from the
+    /// supervisor preset; reporter is the canonical
+    /// `plan.blocked` terminal owner.
     fn emit_plan_blocked_for_recovery_exhaustion(
         event_loop: &mut EventLoop,
         hint: &TerminationHint,
@@ -495,8 +502,8 @@ impl DriftEngine {
         });
         let event = Event::new("plan.blocked", payload.to_string())
             .with_source(HatId::from("ralph"))
-            .with_target(HatId::from("shipper"));
-        // The bus may not have a shipper subscriber in
+            .with_target(HatId::from("reporter"));
+        // The bus may not have a reporter subscriber in
         // some presets; the bus itself will still record the
         // event in the events file so downstream tooling can
         // observe it.
@@ -986,11 +993,18 @@ mod tests {
     /// P0-3 (plan 2026-06-29-006): when the responder promotes
     /// to `Final`, the engine must publish a `plan.blocked`
     /// business event *before* returning
-    /// `RecoveryExhausted`, so the coordinator / shipper /
-    /// reporter chain can run the preset's failure path. The
+    /// `RecoveryExhausted`, so the coordinator / reporter chain
+    /// can run the preset's failure path. The
     /// 2026-06-28-172725 run missed this and terminated
     /// without emitting any terminal events; the fix pins the
     /// "publish then terminate" ordering.
+    ///
+    /// 2026-07-24-005 plan U1: production target was changed
+    /// from `shipper` to `reporter`. The `shipper` hat is
+    /// deleted from the supervisor preset; the `reporter` hat
+    /// is the canonical owner of `plan.blocked` terminal
+    /// handling. Asserting the target == `reporter` is the
+    /// production-semantic contract this test pins.
     #[test]
     fn p0_3_final_emits_plan_blocked_before_terminating() {
         let diag = diagnosis_config(true, 1, 1);
@@ -1006,8 +1020,8 @@ mod tests {
         event_loop.set_iteration_for_test(1);
 
         // Register a coordinator hat (kept for legacy
-        // compatibility) AND the shipper hat that the
-        // 2026-06-29-006 code-review fix routes to.
+        // compatibility) AND the reporter hat that the
+        // 2026-07-24-005 plan U1 routes to.
         use ralph_proto::Hat;
         let coordinator = Hat {
             id: HatId::from("coordinator"),
@@ -1018,15 +1032,15 @@ mod tests {
             instructions: String::new(),
         };
         event_loop.bus().register(coordinator);
-        let shipper = Hat {
-            id: HatId::from("shipper"),
-            name: "Shipper".to_string(),
+        let reporter = Hat {
+            id: HatId::from("reporter"),
+            name: "Reporter".to_string(),
             description: "P0-3 test stub".to_string(),
             subscriptions: vec![ralph_proto::Topic::from("plan.blocked")],
             publishes: Vec::new(),
             instructions: String::new(),
         };
-        event_loop.bus().register(shipper);
+        event_loop.bus().register(reporter);
 
         // Trigger Final via a single Error observation.
         let env = envelope_for(
@@ -1040,7 +1054,7 @@ mod tests {
         let _ = event_loop.recovery_responder_mut().record_finding(&env, 1);
 
         // Phase 1: the engine emits `plan.blocked` to the
-        // shipper's queue and returns `None` so the loop
+        // reporter's queue and returns `None` so the loop
         // continues for one more iteration.
         let term_phase1 = engine.check_termination_hint(&mut event_loop);
         assert!(
@@ -1051,11 +1065,11 @@ mod tests {
             event_loop.state().pending_plan_blocked_for_failure,
             "P0-3: Phase 1 must set the pending_plan_blocked_for_failure flag"
         );
-        let shipper_events = event_loop.bus().take_pending(&HatId::from("shipper"));
-        let plan_blocked = shipper_events
+        let reporter_events = event_loop.bus().take_pending(&HatId::from("reporter"));
+        let plan_blocked = reporter_events
             .iter()
             .find(|e| e.topic.as_str() == "plan.blocked")
-            .expect("P0-3: plan.blocked must be queued for shipper on Phase 1");
+            .expect("P0-3: plan.blocked must be queued for reporter on Phase 1");
         let payload: serde_json::Value = serde_json::from_str(&plan_blocked.payload)
             .expect("P0-3: plan.blocked payload must be valid JSON");
         let reason = payload
@@ -1065,6 +1079,16 @@ mod tests {
         assert!(
             reason.starts_with("recovery_exhausted:"),
             "P0-3: plan.blocked reason must start with `recovery_exhausted:`, got: {reason}"
+        );
+        // 2026-07-24-005 plan U1 (R1): production target must
+        // be `reporter`, not `shipper`. The shipper hat was
+        // removed from the supervisor preset; routing
+        // `plan.blocked` to it would leave the event in the
+        // bus with no subscriber.
+        assert_eq!(
+            plan_blocked.target.as_ref().map(|t| t.as_str()),
+            Some("reporter"),
+            "P0-3: plan.blocked target must be `reporter` after U1 shipper→reporter retarget"
         );
 
         // Phase 2: the engine now returns

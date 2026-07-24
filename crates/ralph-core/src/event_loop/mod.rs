@@ -3528,8 +3528,8 @@ impl EventLoop {
     ///
     /// The hat provenance is `review-synthesizer` (so the event
     /// passes the isolated-scope publish allowlist check); the
-    /// target is `shipper` per plan §Key Technical Decisions —
-    /// `plan-gate.triggers` does NOT include `plan.blocked`, so
+    /// target is `reporter` (was `shipper` per plan 2026-07-24-005 U1
+    /// — `plan-gate.triggers` does NOT include `plan.blocked`, so
     /// routing through plan-gate would silently drop the event.
     /// The wave is then closed in the tracker (`open_wave_id =
     /// None`) so the gate does not re-fire on the next
@@ -3614,14 +3614,19 @@ impl EventLoop {
         // `review-synthesizer` (which has `plan.blocked` in its
         // `publishes` allowlist per the preset validator). The
         // `Event::with_source(...)` helper stamps the producer
-        // hat; `with_target(...)` routes to `shipper`.
+        // hat; `with_target(...)` routes to `reporter`.
+        //
+        // 2026-07-24-005 plan U1: target was `shipper`; the
+        // shipper hat is removed from the supervisor preset —
+        // `reporter` is the canonical `plan.blocked` terminal
+        // owner.
         let json_payload = match serde_json::to_string(&payload) {
             Ok(s) => s,
             Err(_) => return false,
         };
         let event = Event::new("plan.blocked", json_payload)
             .with_source(HatId::new("review-synthesizer"))
-            .with_target(HatId::new("shipper"));
+            .with_target(HatId::new("reporter"));
         debug!(
             wave_id = %info.wave_id,
             expected = info.expected,
@@ -5901,14 +5906,18 @@ impl EventLoop {
                         "reason": format!("recovery_exhausted:{retry_key}"),
                         "runtime_recovery_reason": reason,
                     });
+                    // 2026-07-24-005 plan U1: target is `reporter`
+                    // (was `shipper`); the shipper hat is removed
+                    // from the supervisor preset — reporter is the
+                    // canonical `plan.blocked` terminal owner.
                     let blocked = Event::new("plan.blocked", payload.to_string())
                         .with_source(HatId::from("ralph"))
-                        .with_target(HatId::from("shipper"));
+                        .with_target(HatId::from("reporter"));
                     // 2026-07-06 U2 (DEV-002): persist the terminal
                     // plan.blocked to events.jsonl. Previously only
                     // bus.publish was called, leaving events.jsonl
                     // silent while the in-memory bus still routed
-                    // shipper downstream — silent-success path.
+                    // downstream — silent-success path.
                     //
                     // ===========================================================================
                     // P0-1 LINT GUARD (2026-07-06 silent-success regression):
@@ -13855,11 +13864,15 @@ fn run_stall_detector_on_state(
                  emitting plan.blocked (fail-close)",
                 max_iter,
             );
+            // 2026-07-24-005 plan U1: target is `reporter` (was
+            // `shipper`); the shipper hat is removed from the
+            // supervisor preset — reporter is the canonical
+            // `plan.blocked` terminal owner.
             let blocked = ralph_proto::Event::new(
                 "plan.blocked",
                 "{\"reason\":\"loop_stalled_max_iterations\"}".to_string(),
             )
-            .with_target(ralph_proto::HatId::new("shipper"));
+            .with_target(ralph_proto::HatId::new("reporter"));
             bus.publish(blocked);
             state.consecutive_no_progress_turns = 0;
             state.consecutive_steward_activations = 0;
@@ -13919,8 +13932,15 @@ fn run_stall_detector_on_state(
         // The steward has been woken `max_iter` times in a row
         // without producing a forwarded business event.
         // Escalate by emitting `plan.blocked` and forcing the
-        // loop to route through shipper → reporter for a
-        // clean termination.
+        // loop to route through `reporter` for a clean
+        // termination.
+        //
+        // 2026-07-24-005 plan U1: target is now `reporter`
+        // (was `shipper`); the shipper hat is removed from the
+        // supervisor preset — reporter is the canonical
+        // `plan.blocked` terminal owner. The previous comment
+        // about the "shipper → reporter termination path" is
+        // replaced with a direct reporter route.
         warn!(
             consecutive_steward_activations = state.consecutive_steward_activations,
             max_iter,
@@ -13932,12 +13952,12 @@ fn run_stall_detector_on_state(
             "{\"reason\":\"loop_stalled_max_iterations\"}".to_string(),
         )
         // 2026-06-16-001 review fix (CORR-P1-2): explicit
-        // `with_target(shipper)` so the route matches the R5
+        // `with_target(...)` so the route matches the R5
         // hard-gate hat-routing convention. Without a
         // target, the bus delivers the event to the
-        // default-routed hats; with the target, the
-        // shipper is the canonical consumer and the
-        // event reaches the shipper → reporter termination
+        // default-routed hats; with the target,
+        // `reporter` is the canonical consumer and the
+        // event reaches the reporter termination
         // path consistently. Loopback to progress-steward
         // is unnecessary: the steward was the one that
         // failed to make progress, so the recovery action
