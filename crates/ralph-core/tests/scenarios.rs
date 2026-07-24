@@ -3451,6 +3451,9 @@ fn test_retained_scenarios_pipeline_or_generic_only() {
         // implementation-review preset（6-hat wave review→fix-plan，
         // 非 pipeline / 非 supervisor）
         "tests/scenarios/implementation_review_",
+        // 2026-07-24-003 plan U8: wave protocol 通用场景
+        // (normal_apply_confirm / recovery_required),跨 preset 共用
+        "tests/scenarios/wave_protocol/",
     ];
     const SUPERVISOR_PATH_PREFIXES: &[&str] =
         &["tests/scenarios/opac/", "tests/scenarios/supervisor/"];
