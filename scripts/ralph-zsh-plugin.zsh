@@ -264,7 +264,10 @@ _RALPH_HOOKS_CMDS=(
 # Main Completion Function
 # =============================================================================
 _ralph_builtin_hats() {
-  compadd \
+  # -Q: values contain ':' (builtin:name); without -Q zsh may treat
+  # the colon as a completion separator and produce zero matches when
+  # the user has already typed `builtin:`.
+  compadd -Q \
     -X 'builtin hat collection' \
     -d _RALPH_BUILTIN_HAT_DESCRIPTIONS \
     -a _RALPH_BUILTIN_HAT_VALUES
@@ -274,7 +277,14 @@ _ralph_hat_source() {
   local ret=1
 
   _ralph_builtin_hats && ret=0
-  _files && ret=0
+
+  # Only offer path completion when the user is clearly typing a path.
+  # Unconditional `_files` floods the menu with hundreds of cwd entries and
+  # triggers zsh's "do you wish to see all N possibilities?" — which looks
+  # like "TAB does nothing" for `ralph run -H <TAB>` / `ralph run -H builtin:`.
+  if [[ $PREFIX == .* || $PREFIX == /* || $PREFIX == ~* || $PREFIX == */* ]]; then
+    _files && ret=0
+  fi
 
   return ret
 }
@@ -298,18 +308,21 @@ _ralph() {
   _ralph_cmds=($_RALPH_COMMANDS)
   curcontext="${curcontext}:ralph-"
 
-  _arguments -C $_ralph_main_opts
+  # Proper subcommand state machine. The old CURRENT/words[1] switch
+  # assumed words[1] was the subcommand, but zsh sets words[1]=ralph —
+  # so `ralph run -H <TAB>` never reached `_ralph_run_args` and returned
+  # 0 matches. With `-C` + `*::arg:->args`, words is rewritten so
+  # words[1] is the subcommand inside the args state.
+  _arguments -C \
+    $_ralph_main_opts \
+    '1:ralph command:->cmds' \
+    '*::arg:->args'
 
-  # Only return early for options when not in a special state
-  if [[ ${words[CURRENT]} == -* ]]; then
-    return
-  fi
-
-  case ${CURRENT} in
-    1)
+  case $state in
+    cmds)
       _describe 'ralph command' _ralph_cmds
       ;;
-    2)
+    args)
       case ${words[1]} in
         run|preflight|hooks|doctor|tutorial|events|clean|emit|plan|code-task|task)
           _ralph_subcmd_args ${words[1]}
@@ -318,22 +331,51 @@ _ralph() {
           _ralph_init_args
           ;;
         tools)
-          _describe 'tools command' _RALPH_TOOLS_COMMANDS
+          # In args state words[1]=tools; CURRENT=2 completes tools subcommand.
+          if (( CURRENT == 2 )); then
+            _describe 'tools command' _RALPH_TOOLS_COMMANDS
+          else
+            _ralph_tools_subcmd ${words[2]} ${words[CURRENT]}
+          fi
           ;;
         wave)
-          _describe 'wave command' _RALPH_WAVE_CMDS
+          if (( CURRENT == 2 )); then
+            _describe 'wave command' _RALPH_WAVE_CMDS
+          else
+            _ralph_wave_subcmd ${words[2]}
+          fi
           ;;
         loops)
-          _describe 'loops command' _RALPH_LOOPS_CMDS
+          if (( CURRENT == 2 )); then
+            _describe 'loops command' _RALPH_LOOPS_CMDS
+          else
+            _ralph_loops_subcmd ${words[2]}
+          fi
           ;;
         hats)
-          _describe 'hats command' _RALPH_HATS_CMDS
+          if (( CURRENT == 2 )); then
+            _describe 'hats command' _RALPH_HATS_CMDS
+          else
+            _ralph_hats_subcmd ${words[2]}
+          fi
           ;;
         preset)
-          _describe 'preset command' _RALPH_PRESET_CMDS
+          if (( CURRENT == 2 )); then
+            _describe 'preset command' _RALPH_PRESET_CMDS
+          else
+            _ralph_preset_subcmd ${words[2]} ${words[CURRENT]}
+          fi
           ;;
         inspect)
-          _ralph_inspect_subcmd
+          if (( CURRENT == 2 )); then
+            _ralph_inspect_subcmd
+          else
+            case ${words[2]} in
+              profiles)
+                _ralph_inspect_profiles_args
+                ;;
+            esac
+          fi
           ;;
         tui)
           _ralph_tui_args
@@ -346,32 +388,6 @@ _ralph() {
           ;;
         completions)
           _ralph_completions_args
-          ;;
-      esac
-      ;;
-    *)
-      case ${words[1]} in
-        tools)
-          _ralph_tools_subcmd ${words[2]} ${words[CURRENT]}
-          ;;
-        wave)
-          _ralph_wave_subcmd ${words[2]}
-          ;;
-        loops)
-          _ralph_loops_subcmd ${words[2]}
-          ;;
-        hats)
-          _ralph_hats_subcmd ${words[2]}
-          ;;
-        preset)
-          _ralph_preset_subcmd ${words[2]} ${words[CURRENT]}
-          ;;
-        inspect)
-          case ${words[2]} in
-            profiles)
-              _ralph_inspect_profiles_args
-              ;;
-          esac
           ;;
       esac
       ;;
