@@ -42,6 +42,22 @@ use std::path::{Path, PathBuf};
 /// Path-relative marker so a denied agent knows where to look.
 pub const TICKET_REL_PATH: &str = ".ralph/agent/.ralph-wave-verify-ticket";
 
+/// 2026-07-24-003 plan U6: sibling file that records an in-flight
+/// claim of the on-disk ticket. The prepare/claim/consume state
+/// machine is:
+///
+/// | state | `.ralph-wave-verify-ticket` | `.ralph-wave-verify-ticket.claim` |
+/// |---|---|---|
+/// | `prepared` | exists | missing |
+/// | `claimed`  | exists | exists |
+/// | `consumed` | missing | missing |
+///
+/// The claim marker carries the unix-second timestamp of the
+/// claim so an operator can `cat` the workspace and see when the
+/// ticket was taken into Apply.
+pub const TICKET_CLAIM_REL_PATH: &str =
+    ".ralph/agent/.ralph-wave-verify-ticket.claim";
+
 /// Stable deny prefix (mirrors `task_verify_gate denied` for
 /// grep-ability).
 pub const DENY_PREFIX: &str = "wave_verify_gate denied";
@@ -99,6 +115,12 @@ pub fn canonical_payload_form(payloads: &[String]) -> String {
 /// Resolve the ticket file path for a workspace.
 pub fn ticket_path(workspace: &Path) -> PathBuf {
     workspace.join(TICKET_REL_PATH)
+}
+
+/// 2026-07-24-003 plan U6: resolve the claim marker path for a
+/// workspace.
+pub fn claim_marker_path(workspace: &Path) -> PathBuf {
+    workspace.join(TICKET_CLAIM_REL_PATH)
 }
 
 /// Write a one-shot ticket so the next `require_ticket` for the
@@ -201,6 +223,12 @@ pub struct TicketRecord {
 /// Consume a ticket by deleting the file. The caller has confirmed
 /// the fingerprint matches the pending emit; the ticket is now
 /// burned so a retry needs a fresh `verify`.
+///
+/// 2026-07-24-003 plan U6: production callers should now use
+/// [`consume_claimed_ticket`] which removes both the ticket and
+/// the claim marker (the proper `prepared → claimed → consumed`
+/// finalisation). `consume_ticket` is retained as a no-claim
+/// delete helper used by tests / one-shot scripts.
 pub fn consume_ticket(path: &Path) -> anyhow::Result<()> {
     if path.exists() {
         std::fs::remove_file(path)
@@ -209,10 +237,72 @@ pub fn consume_ticket(path: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// 2026-07-24-003 plan U6: claim marker is removed (Apply failed
+/// before completion; the ticket must be returned to `prepared`
+/// so the next attempt can claim it again).
+///
+/// This is the roll-back side of `claim_ticket`: the underlying
+/// ticket file is untouched. After this call the workspace is in
+/// the original `prepared` state.
+pub fn restore_ticket(workspace: &Path) -> anyhow::Result<()> {
+    let claim = claim_marker_path(workspace);
+    if claim.exists() {
+        std::fs::remove_file(&claim)
+            .with_context(|| format!("delete claim marker {}", claim.display()))?;
+    }
+    Ok(())
+}
+
+/// 2026-07-24-003 plan U6: finalise a successful Apply by
+/// removing both the ticket and the claim marker. Idempotent —
+/// either file already missing is a no-op.
+///
+/// `cleanup_failed` is set to `true` if either remove_file
+/// returned an I/O error; the caller decides whether to surface
+/// `applied_cleanup_pending` to the agent.
+///
+/// The claim marker is always removed when present so a retry
+/// sees a clean workspace; the underlying ticket is what we
+/// surface as cleanup-pending when the delete I/O errors.
+pub fn consume_claimed_ticket(
+    workspace: &Path,
+) -> anyhow::Result<bool> {
+    let claim = claim_marker_path(workspace);
+    let ticket = ticket_path(workspace);
+    // Always drop the claim marker first so retries are
+    // unblocked even when the ticket delete errors.
+    if claim.exists() {
+        if let Err(err) = std::fs::remove_file(&claim) {
+            eprintln!(
+                "warning: failed to delete claim marker at {}: {}",
+                claim.display(),
+                err
+            );
+        }
+    }
+    let mut cleanup_failed = false;
+    if ticket.exists() {
+        if let Err(err) = std::fs::remove_file(&ticket) {
+            eprintln!(
+                "warning: failed to delete ticket at {}: {}",
+                ticket.display(),
+                err
+            );
+            cleanup_failed = true;
+        }
+    }
+    Ok(cleanup_failed)
+}
+
 /// Combined read + delete: returns the ticket if it exists, and
 /// then removes the file in one call so a successful emit burns
 /// the ticket atomically (modulo the small I/O window between
 /// `read_ticket` and `consume_ticket` — accepted).
+///
+/// 2026-07-24-003 plan U6: deprecated for production paths; kept
+/// as a public API for callers that want the legacy one-shot
+/// consume (unit tests + operator one-liners).
+#[allow(dead_code)]
 pub fn read_and_consume_ticket(path: &Path) -> anyhow::Result<Option<TicketRecord>> {
     let record = read_ticket(path)?;
     if record.is_some() {
@@ -225,15 +315,28 @@ pub fn read_and_consume_ticket(path: &Path) -> anyhow::Result<Option<TicketRecor
 /// proceed; `Err` with a stable, machine-grepable deny prefix
 /// when the gate denies.
 ///
-/// Behavior:
+/// 2026-07-24-003 plan U6 behaviour change: a successful claim
+/// writes the claim marker (not the legacy delete). The Apply
+/// step is responsible for either `consume_claimed_ticket` (on
+/// success) or `restore_ticket` (on failure). This closes the
+/// drift window where Apply failed mid-flight but the ticket was
+/// already gone — the agent no longer needs to re-run
+/// `ralph wave verify` after a recoverable failure.
+///
+/// Behaviour:
 /// - Human CLI (`!ctx.is_agent_context`) → `Ok(())` always.
 /// - Agent + no ticket on disk → `Err(denied: missing ticket)`.
 /// - Agent + ticket with wrong (loop|hat|topic|fingerprint) →
-///   `Err(denied: stale or mismatched ticket)`.
-/// - Agent + ticket matches → consume the ticket and return
+///   `Err(denied: stale or mismatched ticket)`. The ticket file
+///   is NOT touched — a clean retry with the right payloads can
+///   still succeed.
+/// - Agent + ticket already claimed → `Err(denied: ticket
+///   already claimed)`. The marker carries the in-flight
+///   timestamp so an operator can spot stuck claims.
+/// - Agent + ticket matches → write the claim marker and return
 ///   `Ok(())`.
 pub fn require_ticket(
-    path: &Path,
+    workspace: &Path,
     ctx: &OperationContext,
     topic: &str,
     fingerprint: &str,
@@ -245,7 +348,24 @@ pub fn require_ticket(
     }
     let loop_id = ctx.current_loop_id.as_deref().unwrap_or("");
     let hat_id = ctx.current_hat_id.as_deref().unwrap_or("");
-    let record = match read_and_consume_ticket(path)? {
+    let ticket = ticket_path(workspace);
+    let claim = claim_marker_path(workspace);
+
+    if claim.exists() {
+        let claimed_at = std::fs::read_to_string(&claim)
+            .ok()
+            .map(|s| s.trim().to_string())
+            .unwrap_or_default();
+        return Err(anyhow::anyhow!(
+            "{DENY_PREFIX} '{topic}': ticket already claimed at {claimed_at} — \
+             another Apply is in flight or a previous attempt failed to \
+             restore. Remove the claim marker at {} or run a clean retry; \
+             Hat: '{hat_id}' Loop: '{loop_id}'.",
+            claim.display()
+        ));
+    }
+
+    let record = match read_ticket(&ticket)? {
         Some(r) => r,
         None => {
             return Err(anyhow::anyhow!(
@@ -253,7 +373,7 @@ pub fn require_ticket(
                  run `ralph wave verify {topic} --payloads ...` first to record a matching ticket, \
                  then re-invoke `ralph wave emit` with the same payloads. \
                  Hat: '{hat_id}' Loop: '{loop_id}'.",
-                path.display()
+                ticket.display()
             ));
         }
     };
@@ -286,6 +406,21 @@ pub fn require_ticket(
             rec_hat = record.hat_id
         ));
     }
+    // Successful claim — write the marker so a concurrent emit
+    // is rejected and so the cleanup step (consume_claimed_ticket
+    // on success, restore_ticket on failure) can find the right
+    // state to roll forward / back.
+    if let Some(parent) = claim.parent() {
+        std::fs::create_dir_all(parent).with_context(|| {
+            format!("create parent dir for {}", claim.display())
+        })?;
+    }
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    std::fs::write(&claim, format!("{now}\n"))
+        .with_context(|| format!("write claim marker {}", claim.display()))?;
     Ok(())
 }
 
@@ -383,7 +518,7 @@ mod wave_verify_gate_tests {
         let ctx = make_ctx("loop-1", "executor", true);
         let canonical = canonical_payload_form(&[r#"{"dim":"x"}"#.to_string()]);
         let fp = emission_fingerprint("review.wave.ready", &canonical, "loop-1", "executor");
-        let err = require_ticket(&path, &ctx, "review.wave.ready", &fp)
+        let err = require_ticket(ws.path(), &ctx, "review.wave.ready", &fp)
             .expect_err("missing ticket must deny");
         let msg = err.to_string();
         assert!(msg.starts_with(DENY_PREFIX), "must carry stable prefix: {msg}");
@@ -404,13 +539,14 @@ mod wave_verify_gate_tests {
         let canonical = canonical_payload_form(&[r#"{"dim":"x"}"#.to_string()]);
         let fp = emission_fingerprint("review.wave.ready", &canonical, "loop-1", "executor");
         // Human CLI with no ticket on disk → still Ok.
-        require_ticket(&path, &ctx, "review.wave.ready", &fp).expect("human must bypass");
+        require_ticket(ws.path(), &ctx, "review.wave.ready", &fp).expect("human must bypass");
     }
 
     #[test]
-    fn test_require_ticket_match_consumes_and_allows() {
+    fn test_require_ticket_match_claims_and_allows() {
         let ws = temp_workspace();
         let path = ticket_path(ws.path());
+        let claim = claim_marker_path(ws.path());
         let ctx = make_ctx("loop-1", "executor", true);
         let canonical = canonical_payload_form(&[r#"{"dim":"x"}"#.to_string()]);
         let fp = emission_fingerprint("review.wave.ready", &canonical, "loop-1", "executor");
@@ -422,13 +558,17 @@ mod wave_verify_gate_tests {
             "executor",
         )
         .expect("record");
-        require_ticket(&path, &ctx, "review.wave.ready", &fp).expect("matching ticket must allow");
-        // Ticket is consumed.
-        assert!(!path.exists(), "matching emit must consume the ticket");
+        require_ticket(ws.path(), &ctx, "review.wave.ready", &fp).expect("matching ticket must allow");
+        // U6: ticket is NOT consumed yet; the claim marker is
+        // written instead. The Apply step is responsible for
+        // `consume_claimed_ticket` (success) or `restore_ticket`
+        // (failure).
+        assert!(path.exists(), "matching emit must NOT delete the ticket");
+        assert!(claim.exists(), "matching emit must write the claim marker");
     }
 
     #[test]
-    fn test_require_ticket_fingerprint_mismatch_denied() {
+    fn test_require_ticket_fingerprint_mismatch_keeps_ticket() {
         let ws = temp_workspace();
         let path = ticket_path(ws.path());
         let ctx = make_ctx("loop-1", "executor", true);
@@ -444,13 +584,15 @@ mod wave_verify_gate_tests {
             "executor",
         )
         .expect("record");
-        let err = require_ticket(&path, &ctx, "review.wave.ready", &pending_fp)
+        let err = require_ticket(ws.path(), &ctx, "review.wave.ready", &pending_fp)
             .expect_err("mismatch must deny");
         let msg = err.to_string();
         assert!(msg.contains("fingerprint mismatch"), "must explain: {msg}");
-        // The mismatched ticket is consumed (read+consume) so the
-        // next emit starts clean. Same as task_verify_gate.
-        assert!(!path.exists(), "consumed on mismatch too");
+        // U6: mismatch does NOT consume the ticket — the agent
+        // can re-verify with the matching payload and retry
+        // without re-running `ralph wave verify` against a
+        // ticket the gate already deleted.
+        assert!(path.exists(), "U6 mismatch must NOT consume the ticket");
     }
 
     #[test]
@@ -468,7 +610,7 @@ mod wave_verify_gate_tests {
             "executor",
         )
         .expect("record");
-        let err = require_ticket(&path, &ctx, "review.different", &fp)
+        let err = require_ticket(ws.path(), &ctx, "review.different", &fp)
             .expect_err("topic mismatch must deny");
         let msg = err.to_string();
         assert!(
@@ -492,12 +634,69 @@ mod wave_verify_gate_tests {
             "executor",
         )
         .expect("record");
-        let err = require_ticket(&path, &ctx, "review.wave.ready", &fp)
+        let err = require_ticket(ws.path(), &ctx, "review.wave.ready", &fp)
             .expect_err("hat mismatch must deny");
         let msg = err.to_string();
         assert!(
             msg.contains("ticket (loop, hat)"),
             "must explain hat binding: {msg}"
         );
+    }
+
+    #[test]
+    fn test_require_ticket_double_claim_rejected() {
+        // U6: a second agent that tries to claim the same
+        // ticket sees the in-flight claim marker and is denied
+        // with the stable prefix.
+        let ws = temp_workspace();
+        let path = ticket_path(ws.path());
+        let ctx = make_ctx("loop-1", "executor", true);
+        let canonical = canonical_payload_form(&[r#"{"dim":"x"}"#.to_string()]);
+        let fp = emission_fingerprint("review.wave.ready", &canonical, "loop-1", "executor");
+        record_ticket(
+            &path,
+            &fp,
+            "review.wave.ready",
+            "loop-1",
+            "executor",
+        )
+        .expect("record");
+        require_ticket(ws.path(), &ctx, "review.wave.ready", &fp)
+            .expect("first claim must succeed");
+        let err = require_ticket(ws.path(), &ctx, "review.wave.ready", &fp)
+            .expect_err("second claim must deny");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("already claimed"),
+            "must explain the claim collision: {msg}"
+        );
+    }
+
+    #[test]
+    fn test_consume_claimed_ticket_removes_both() {
+        let ws = temp_workspace();
+        let path = ticket_path(ws.path());
+        let claim = claim_marker_path(ws.path());
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, "stub\n").unwrap();
+        std::fs::write(&claim, "stub\n").unwrap();
+        let cleanup_failed =
+            consume_claimed_ticket(ws.path()).expect("consume must succeed");
+        assert!(!cleanup_failed, "no cleanup failure");
+        assert!(!path.exists(), "ticket must be removed");
+        assert!(!claim.exists(), "claim marker must be removed");
+    }
+
+    #[test]
+    fn test_restore_ticket_keeps_underlying_ticket() {
+        let ws = temp_workspace();
+        let path = ticket_path(ws.path());
+        let claim = claim_marker_path(ws.path());
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, "stub\n").unwrap();
+        std::fs::write(&claim, "stub\n").unwrap();
+        restore_ticket(ws.path()).expect("restore must succeed");
+        assert!(path.exists(), "underlying ticket must survive restore");
+        assert!(!claim.exists(), "claim marker must be removed");
     }
 }

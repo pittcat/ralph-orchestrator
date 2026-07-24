@@ -649,7 +649,25 @@ fn execute_emit(args: WaveEmitArgs, use_colors: bool) -> Result<()> {
         op_ctx.current_hat_id.as_deref().unwrap_or(""),
     );
     let ticket = crate::wave_verify_gate::ticket_path(&workspace_root);
-    crate::wave_verify_gate::require_ticket(&ticket, &op_ctx, &args.topic, &fp)?;
+    let _ = ticket; // resolved for parity with the verify path; not consumed here.
+    crate::wave_verify_gate::require_ticket(
+        &workspace_root,
+        &op_ctx,
+        &args.topic,
+        &fp,
+    )?;
+
+    // 2026-07-24-003 plan U6: fault injection seam for the
+    // ticket-recovery tests. Recognised values:
+    //   - `apply_before_write` — bail right before the events
+    //     file write inside the store cutover branch. The
+    //     ticket must be restored so the next retry can
+    //     succeed.
+    //   - `cleanup_ticket` — succeed in the store, but fail
+    //     when removing the on-disk ticket. The response must
+    //     surface `applied_cleanup_pending: true`.
+    //   - anything else (or absent) — no injection, normal path.
+    let fail_at = std::env::var("RALPH_WAVE_EMIT_FAIL_AT").ok();
 
     // U2: Branch — with idempotency key or legacy path
     //
@@ -660,18 +678,38 @@ fn execute_emit(args: WaveEmitArgs, use_colors: bool) -> Result<()> {
     // operator smol-scripts that don't carry idempotency keys
     // still get unique wave_ids and the dual-process happy
     // path keeps FileLock as the only mutex).
-    let (outcome, used_store_cutover) = if let Some(ref key) = args.idempotency_key {
+    //
+    // U6: the keyed branch owns the ticket cleanup. On any
+    // failure it restores the ticket; on success it consumes.
+    let (outcome, used_store_cutover, mut applied_cleanup_pending) = if let Some(ref key) = args.idempotency_key {
         let (loop_id, hat) = build_scope_inputs();
-        let out = write_wave_events_with_idempotency_store(
+        let outcome_res = write_wave_events_with_idempotency_store_with_injection(
             &args.topic,
             &payloads,
             &events_file,
             key,
             &loop_id,
             &hat,
-        )?;
-        (out, true)
+            fail_at.as_deref(),
+        );
+        match outcome_res {
+            Ok(out) => (out, true, false),
+            Err(err) => {
+                // Apply-before-failure path: the ticket is
+                // still claimed; restore so the next retry
+                // can re-claim without re-verifying.
+                if let Err(restore_err) =
+                    crate::wave_verify_gate::restore_ticket(&workspace_root)
+                {
+                    eprintln!(
+                        "warning: failed to restore ticket after emit failure: {restore_err}"
+                    );
+                }
+                return Err(err);
+            }
+        }
     } else {
+        // No-key branch never touches the ticket (human bypass).
         let wave_id = write_wave_events(&args.topic, &payloads, &events_file)?;
         (
             IdempotencyOutcome {
@@ -679,12 +717,60 @@ fn execute_emit(args: WaveEmitArgs, use_colors: bool) -> Result<()> {
                 deduplicated: false,
             },
             false,
+            false,
         )
     };
 
     let wave_id = outcome.wave_id;
     let deduplicated = outcome.deduplicated;
     let total = payloads.len();
+
+    // U6 cleanup step: the CLI consumes both the ticket and the
+    // claim marker whenever the run was ticket-gated (any agent
+    // path — with or without an idempotency key). The call is
+    // **idempotent**: `consume_claimed_ticket` only deletes
+    // files that exist, so a second-pass retry is a no-op. A
+    // cleanup failure is non-fatal — the emission has already
+    // landed and the store (or FileLock) is the source of
+    // truth; the agent gets `applied_cleanup_pending: true`
+    // and a pointer at `ralph wave inspect <wave_id>` so it
+    // knows the ticket is in a stuck state.
+    if op_ctx.is_agent_context {
+        let cleanup_result = if fail_at.as_deref() == Some("cleanup_ticket") {
+            // U6 fault injection: mirror a real I/O failure on
+            // the ticket-delete step. We DO drop the claim
+            // marker (the apply phase is over) but pretend the
+            // ticket delete errored, so the response surfaces
+            // `applied_cleanup_pending: true`.
+            if let Err(err) = std::fs::remove_file(
+                crate::wave_verify_gate::claim_marker_path(&workspace_root),
+            ) {
+                eprintln!(
+                    "warning: claim marker cleanup errored during fault injection: {err}"
+                );
+            }
+            Ok::<_, anyhow::Error>(true)
+        } else {
+            crate::wave_verify_gate::consume_claimed_ticket(&workspace_root)
+        };
+        match cleanup_result {
+            Ok(false) => {}
+            Ok(true) => {
+                // Cleanup partial-failure: the emission is
+                // durable, but the ticket is still on disk.
+                // Do not surface a hard error to the agent —
+                // `applied_cleanup_pending` is the stable
+                // surface for this case.
+                applied_cleanup_pending = true;
+            }
+            Err(err) => {
+                eprintln!(
+                    "warning: ticket cleanup errored unexpectedly: {err}"
+                );
+                applied_cleanup_pending = true;
+            }
+        }
+    }
 
     // U5: optionally emit structured JSON for machine verification.
     match args.output {
@@ -705,19 +791,31 @@ fn execute_emit(args: WaveEmitArgs, use_colors: bool) -> Result<()> {
             // store-routed from no-key emissions when grepping
             // logs); agents that ignore unknown fields still
             // parse cleanly.
+            //
+            // U6: when the on-disk ticket cleanup fails, the
+            // `applied_cleanup_pending: true` flag tells the
+            // agent the emission is durable but the local
+            // state needs operator attention — do NOT retry
+            // (the store's `AlreadyApplied` would just dedup
+            // the same wave_id), but DO run `ralph wave
+            // inspect <wave_id>` to confirm the landing.
             let applied_via = if used_store_cutover {
                 "store"
             } else {
                 "legacy_file_lock"
             };
-            let payload = serde_json::json!({
+            let mut payload = serde_json::json!({
                 "ok": true,
                 "wave_id": wave_id,
                 "topic": args.topic,
                 "count": total,
                 "deduplicated": deduplicated,
                 "applied_via": applied_via,
+                "applied": true,
             });
+            if applied_cleanup_pending {
+                payload["applied_cleanup_pending"] = serde_json::json!(true);
+            }
             println!("{}", serde_json::to_string(&payload)?);
         }
     }
@@ -1632,6 +1730,37 @@ pub fn write_wave_events_with_idempotency_store(
     loop_id: &str,
     hat: &str,
 ) -> Result<IdempotencyOutcome> {
+    write_wave_events_with_idempotency_store_with_injection(
+        topic,
+        payloads,
+        events_file,
+        idempotency_key,
+        loop_id,
+        hat,
+        None,
+    )
+}
+
+/// 2026-07-24-003 plan U6 variant: the same cutover path with an
+/// optional `fail_at` knob for the ticket-recovery integration
+/// tests. Production callers use
+/// [`write_wave_events_with_idempotency_store`], which passes
+/// `None`.
+///
+/// | `fail_at` value             | behaviour |
+/// |---|---|
+/// | `None` / absent              | normal path |
+/// | `"apply_before_write"`       | return `Err` immediately after `mark_emission_applying`, before the events file write — exercises S5 (ticket must be restored on retry). |
+/// | `"cleanup_ticket"`           | succeed end-to-end; force `consume_claimed_ticket` to report a cleanup failure — exercises S7 (`applied_cleanup_pending: true`). |
+pub fn write_wave_events_with_idempotency_store_with_injection(
+    topic: &str,
+    payloads: &[String],
+    events_file: &Path,
+    idempotency_key: &str,
+    loop_id: &str,
+    hat: &str,
+    fail_at: Option<&str>,
+) -> Result<IdempotencyOutcome> {
     if payloads.is_empty() {
         bail!("At least one payload is required");
     }
@@ -1731,6 +1860,24 @@ pub fn write_wave_events_with_idempotency_store(
         });
     }
 
+    // 2026-07-24-003 plan U6 fault-injection seam (S5):
+    // bail after the miss-import branch resolves but before the
+    // store ever sees `reserve_emission`. The ticket stays
+    // claimed; restore_ticket (the caller's responsibility on
+    // Err) puts it back to `prepared` so the next retry can
+    // re-claim and emit a fresh batch — the store has no row
+    // for this scope and there is no partial batch to recover,
+    // so this is the cleanest possible failure surface for
+    // I/O faults that hit before the JSONL append.
+    if fail_at == Some("apply_before_write") {
+        bail!(
+            "wave_emission_apply_before_write: injected failure before \
+             writing events for scope {scope_key}; the ticket has been \
+             restored. Retry with the same fingerprint + idempotency-key \
+             — no partial batch exists for this scope."
+        );
+    }
+
     // Drive the store. The `count_events_on_disk` closure lets the
     // store peek at on-disk rows without owning the events_file.
     let reservation = store.reserve_emission(
@@ -1756,6 +1903,7 @@ pub fn write_wave_events_with_idempotency_store(
             store
                 .mark_emission_applying(&scope_key)
                 .map_err(|e| anyhow!("failed to mark emission applying: {e}"))?;
+
             let write_result = write_wave_events_with_provenance_with_wave_id(
                 topic,
                 payloads,
