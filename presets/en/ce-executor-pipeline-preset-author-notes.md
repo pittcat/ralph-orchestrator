@@ -19,7 +19,7 @@
 - **Q1 使命:** 逐个 dispatch 原始计划的所有独立 U-ID，验收、独立提交并发出完整执行账单。
 - **Q2 输入:** 从 `plan.ready` 读取 `plan_path` 与 baseline SHA；从计划提取 U-ID/Dependencies；从 subagent 返回、git log 与验证报告取得尝试证据。
 - **Q3 执行:** Observe → baseline verifier → 每 U-ID dispatch/验收/affected tests/commit → final full-suite → delegated repair（如需）→ settlement → policy-check → emit/confirm。
-- **Q4 输出:** `work.done` 或结构化 `work.failed`。
+- **Q4 输出:** 有任一可审计交付 commit → `work.done`（`execution_status: complete|partial` + 完整 Unit 账单 + 诚实 red delta；回归计数 report-only，不强制 work.failed）；仅当零交付 commit / 无法产出验证交接 / 外部不可达 blocker → 结构化 `work.failed`（dead-end 前缀 reason：`unreachable` / `no_deliverable_commits` / `cannot_produce_handoff`）。再进入同一 worktree/loop 时先对账 `decisions.md` 的 `executor checkpoint:` 行与 `git log <DIFF_BASE>..HEAD`，只跑 remaining Units（无 runtime resume API）。
 - **Q5 交接:** reporter 从 `work.failed` 的 Unit 分类与 `reason` 生成 blocked 报告。
 
 ### Hat: executor — Payload Contract
