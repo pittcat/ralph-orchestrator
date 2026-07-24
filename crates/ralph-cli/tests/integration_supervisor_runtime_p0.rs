@@ -721,7 +721,6 @@ fn unknown_public_wave_id_lookup_returns_none() {
 /// the public store API and verifies the typed failure.
 #[test]
 fn conflicting_terminal_does_not_overwrite_completed_slot() {
-    use ralph_core::supervisor::SupervisorStore;
     use ralph_core::supervisor::SupervisorStoreError;
     let mut fx = SupervisorP0Fixture::new_in_memory(
         "u5-conflict",
@@ -772,7 +771,6 @@ fn conflicting_terminal_does_not_overwrite_completed_slot() {
 #[test]
 fn release_slot_dispatch_after_completed_is_noop() {
     use ralph_core::supervisor::DispatchOutcome;
-    use ralph_core::supervisor::SupervisorStore;
     let mut fx = SupervisorP0Fixture::new_in_memory(
         "u6-noop",
         "u6-loop",
@@ -820,7 +818,6 @@ fn release_slot_dispatch_after_completed_is_noop() {
 #[test]
 fn release_slot_dispatch_before_record_slot_transitions_to_failed() {
     use ralph_core::supervisor::DispatchOutcome;
-    use ralph_core::supervisor::SupervisorStore;
     let mut fx = SupervisorP0Fixture::new_in_memory(
         "u6-before",
         "u6-loop",
@@ -867,7 +864,6 @@ fn release_slot_dispatch_before_record_slot_transitions_to_failed() {
 #[cfg(feature = "supervisor-db")]
 #[test]
 fn rusqlite_record_slot_failure_rejects_after_completed() {
-    use ralph_core::supervisor::SupervisorStore;
     use ralph_core::supervisor::SupervisorStoreError;
     let mut fx = SupervisorP0Fixture::new_rusqlite(
         "u8-rusqlite-rejects",
@@ -909,7 +905,6 @@ fn rusqlite_record_slot_failure_rejects_after_completed() {
 #[cfg(feature = "supervisor-db")]
 #[test]
 fn rusqlite_record_slot_failure_idempotent_same_reason() {
-    use ralph_core::supervisor::SupervisorStore;
     let mut fx = SupervisorP0Fixture::new_rusqlite(
         "u8-rusqlite-idempotent",
         "u8-loop",
@@ -945,7 +940,6 @@ fn rusqlite_record_slot_failure_idempotent_same_reason() {
 #[cfg(feature = "supervisor-db")]
 #[test]
 fn rusqlite_record_slot_failure_cancel_after_completed_wins() {
-    use ralph_core::supervisor::SupervisorStore;
     let mut fx = SupervisorP0Fixture::new_rusqlite(
         "u8-rusqlite-cancel-wins",
         "u8-loop",
@@ -1008,7 +1002,6 @@ fn dispatcher_fail_close_records_validator_reason() {
     use ralph_core::control_plane::{
         ControlPlaneError, reason_for, validate_control_plane_binding,
     };
-    use ralph_core::supervisor::SupervisorStore;
     let mut fx = SupervisorP0Fixture::new_in_memory(
         "u9-fail-close",
         "u9-loop",
