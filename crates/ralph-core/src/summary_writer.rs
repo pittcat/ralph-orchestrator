@@ -517,6 +517,7 @@ mod tests {
             // `None`; the first accepted `REVIEW_COMPLETE`
             // event populates it.
             terminal_adjacent_seen_payload_hash: None,
+            rejected_completion_payload_hash: None,
             // 2026-06-30-001 P0-3: starts `false`; the U3
             // runtime guard flips it when the fix-unit
             // chain is exhausted.

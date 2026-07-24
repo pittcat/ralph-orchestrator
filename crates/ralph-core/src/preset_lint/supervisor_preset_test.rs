@@ -74,6 +74,33 @@ fn ce_executor_supervisor_preset_contains_all_required_supervisor_keys() {
         Some(&serde_yaml::Value::String("isolated".to_string())),
         "event_loop.execution_mode must be isolated (R-SW-1)"
     );
+    // 2026-07-24-004 U2: pin the config switch off. Hats
+    // `progress-steward` / `shipper` stay deleted; this only
+    // documents the dead U5 path must not be re-armed.
+    assert_eq!(
+        event_loop
+            .get("progress_steward")
+            .and_then(|v| v.get("enabled")),
+        Some(&serde_yaml::Value::Bool(false)),
+        "event_loop.progress_steward.enabled must be explicitly false (2026-07-24-004 U2)"
+    );
+
+    let event_policy = event_loop
+        .get("event_policy")
+        .expect("preset must declare event_loop.event_policy");
+    for list_name in ["terminal_topics", "business_topics"] {
+        let topics: Vec<&str> = event_policy
+            .get(list_name)
+            .and_then(|v| v.as_sequence())
+            .expect("event policy topic list must be a sequence")
+            .iter()
+            .filter_map(serde_yaml::Value::as_str)
+            .collect();
+        assert!(
+            topics.contains(&"plan.blocked"),
+            "event_policy.{list_name} must contain plan.blocked; got {topics:?}"
+        );
+    }
 
     let hats = yaml
         .get("hats")
@@ -118,6 +145,18 @@ fn ce_executor_supervisor_preset_contains_all_required_supervisor_keys() {
         hat_names.iter().any(|h| h.contains("-integrator")),
         "preset must declare at least one `*-integrator` hat; got {:?}",
         hat_names
+    );
+
+    let coordinator_instructions = hats
+        .get("coordinator")
+        .and_then(|v| v.get("instructions"))
+        .and_then(serde_yaml::Value::as_str)
+        .expect("coordinator instructions must be present");
+    assert!(
+        coordinator_instructions.contains(
+            "When activated by `plan.ready`, you MUST NOT emit `LOOP_COMPLETE` or `plan.complete`."
+        ),
+        "coordinator instructions must pin the plan.ready terminal-event prohibition"
     );
 
     // Lint R-SW-2: integrators subscribe to the relevant

@@ -619,6 +619,42 @@ fn test_loop_complete_rejected_before_report_done() {
     );
 }
 
+#[test]
+fn test_duplicate_rejected_loop_complete_is_silently_dropped() {
+    use tempfile::TempDir;
+
+    let temp_dir = TempDir::new().unwrap();
+    let events_path = temp_dir.path().join("events.jsonl");
+    let mut event_loop = setup_loop_with_required_events(vec!["report.done".to_string()]);
+    event_loop.initialize("Test");
+    event_loop.event_reader = crate::event_reader::EventReader::new(&events_path);
+
+    write_event_to_jsonl(&events_path, "LOOP_COMPLETE", r#"{"status":"early"}"#);
+    let first = event_loop.process_events_from_jsonl().unwrap();
+    assert!(first.accepted_events.is_empty());
+    assert_eq!(event_loop.state.prompt_context.correction_blocks.len(), 1);
+
+    event_loop.state.iteration += 1;
+    write_event_to_jsonl(&events_path, "LOOP_COMPLETE", r#"{"status":"early"}"#);
+    let duplicate = event_loop.process_events_from_jsonl().unwrap();
+    assert!(duplicate.accepted_events.is_empty());
+    assert_eq!(
+        event_loop.state.prompt_context.correction_blocks.len(),
+        1,
+        "an identical rejected completion must not inject another correction"
+    );
+
+    event_loop.state.iteration += 1;
+    write_event_to_jsonl(&events_path, "LOOP_COMPLETE", r#"{"status":"changed"}"#);
+    let changed = event_loop.process_events_from_jsonl().unwrap();
+    assert!(changed.accepted_events.is_empty());
+    assert_eq!(
+        event_loop.state.prompt_context.correction_blocks.len(),
+        2,
+        "a changed rejected completion payload must remain observable"
+    );
+}
+
 // 2026-06-30-001 P0-3 (primary-20260630-032648 diagnosis):
 // the dedup is keyed on the *first* hash observed, so
 // re-emitting a byte-identical `REVIEW_COMPLETE` payload

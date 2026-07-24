@@ -11239,6 +11239,20 @@ impl EventLoop {
                     &self.config.event_loop.required_events,
                     &self.config.event_loop.completion_promise,
                 ) {
+                    // Keep `completion_requested` set so
+                    // `check_completion_event()` can run the stale-breaker
+                    // and correction path (same as a post-admit rejection).
+                    self.state.completion_requested = true;
+                    if self
+                        .state
+                        .is_rejected_completion_duplicate(payload.as_str())
+                    {
+                        // Identical rejected payload: do not re-inject
+                        // a correction block (would just spam the prompt),
+                        // but still let `check_completion_event()` advance
+                        // the stale-breaker counter for this iteration.
+                        continue;
+                    }
                     let missing = self
                         .state
                         .missing_required_events(&self.config.event_loop.required_events);
@@ -11262,10 +11276,6 @@ impl EventLoop {
                         "missing_required_events",
                         &free_form,
                     );
-                    // Keep `completion_requested` set so
-                    // `check_completion_event()` can run the stale-breaker
-                    // and correction path (same as a post-admit rejection).
-                    self.state.completion_requested = true;
                     // Drop the event from this batch's
                     // accepted stream; the runtime continues
                     // to wait for required workflow events. The

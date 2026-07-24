@@ -96,6 +96,19 @@ event_loop:
   ephemeral_isolation: true
   enforce_current_unit: true
   enforce_hat_scope: true
+  # 2026-07-24-004 plan U2 (KTD2): pin `progress_steward.enabled`
+  # to `false`. The `progress-steward` and `shipper` hats are
+  # permanently deleted (2026-07-23-005); do NOT restore them.
+  # Opening this switch only re-arms the dead U5 escalation path
+  # that still hardcodes `target=shipper`, which EventBus then
+  # silently drops. Operators MUST keep this `false`. Note: this
+  # key is outside the hats event_loop overlay allowlist, so an
+  # operator `ralph.yml` that sets `enabled: true` still wins —
+  # see plan residuals. Disabled steward may still fail-close
+  # after `max_steward_iterations`; that residual is intentional
+  # and out of scope for this plan.
+  progress_steward:
+    enabled: false
   required_events:
     - work.done
     - LOOP_COMPLETE
@@ -118,11 +131,13 @@ event_loop:
     terminal_topics:
       - "LOOP_COMPLETE"
       - "plan.complete"
+      - "plan.blocked"
     business_topics:
       # Handoff topics — main workflow chain.
       - "work.ready"
       - "work.done"
       - "work.failed"
+      - "plan.blocked"
       - "review.complete"
       - "fix.done"
       # 2026-07-24-001 plan U2 (KTD1): task-planner -> exec-wave-dispatcher
@@ -204,6 +219,11 @@ hats:
 
       ### 1. When you are activated by `plan.ready`
 
+      When activated by `plan.ready`, you MUST NOT emit `LOOP_COMPLETE` or `plan.complete`.
+      The only successful business event is `work.ready`. If the plan cannot be
+      registered, emit exactly one `plan.blocked` after following `ralph-tools` §5
+      and the `ralph-tools-tasks` strict-match rule.
+
       Goal: register the plan's units and hand off to the
       next hat. ONE emit: `work.ready`.
 
@@ -269,6 +289,10 @@ hats:
         six coordination topics named after a wave kind).
         Those belong to other hats and will be rejected
         if you try to emit them.
+      - **When activated by `plan.ready`, do not emit
+        `LOOP_COMPLETE` or `plan.complete`** — use `work.ready`
+        on success or exactly one `plan.blocked` when the plan
+        cannot be registered.
       - **Do not emit more than one business event in a
         turn** — see §0.
       - **Do not try to inspect the runtime's internal

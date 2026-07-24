@@ -257,6 +257,11 @@ pub struct LoopState {
     /// set stays in lockstep with `record_terminal_adjacent`.
     pub terminal_adjacent_seen_payload_hash: Option<u64>,
 
+    /// Hash of the most recently rejected non-empty completion payload.
+    /// Kept separate from admitted terminal-event dedup so a rejected
+    /// completion cannot affect later accepted terminal processing.
+    pub rejected_completion_payload_hash: Option<u64>,
+
     /// 2026-06-30-001 P0-3 (primary-20260630-032648 diagnosis):
     /// sticky flag set to `true` when the runtime admits a
     /// `work.done` whose `task_key` is a fix-unit shape and
@@ -833,6 +838,7 @@ impl Default for LoopState {
             // payload hash; subsequent byte-identical events
             // are deduped.
             terminal_adjacent_seen_payload_hash: None,
+            rejected_completion_payload_hash: None,
             // 2026-06-30-001 P0-3: starts `false`;
             // flipped to `true` by the U3 runtime guard
             // when every fix-NN step in the current plan
@@ -1782,6 +1788,22 @@ impl LoopState {
         // Record the new hash; legitimate payload changes
         // are NOT deduped.
         self.terminal_adjacent_seen_payload_hash = Some(h);
+        false
+    }
+
+    pub fn is_rejected_completion_duplicate(&mut self, payload: &str) -> bool {
+        if payload.is_empty() {
+            return false;
+        }
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+        let mut hasher = DefaultHasher::new();
+        payload.hash(&mut hasher);
+        let hash = hasher.finish();
+        if Some(hash) == self.rejected_completion_payload_hash {
+            return true;
+        }
+        self.rejected_completion_payload_hash = Some(hash);
         false
     }
 
