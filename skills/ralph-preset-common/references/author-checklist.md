@@ -208,7 +208,7 @@
 
 1. **唯一 dispatcher**：本 preset 中**只有 1 个 hat**（典型为 executor / dispatcher）允许调用 `ralph wave emit` / `ralph wave verify`；其它 hat 一律通过 dispatcher 走事件流。✓ / ✗ + 列出 dispatcher hat id + 证据
 2. **worker 禁 `wave emit`**：所有非 dispatcher hat 的 `instructions:` 中不得出现 `ralph wave emit` 字样（哪怕只是示例）。✓ / ✗ + grep 证据
-3. **`wave verify` → emit**：dispatcher 必须先 `ralph wave verify --payloads-stdin` 零写盘预检，通过后再去掉 verify 真正写盘；不在同一调用里合并预检 + 写盘。✓ / ✗ + 引用 `ralph-tools-wave` Policy-Check feedback 章节
+3. **`wave verify` → emit**：dispatcher 必须先 `ralph wave verify --payloads-stdin`（业务事件零写盘；**通过后写一次性 ticket**），再用**未改动的同一批** payload 跑 `ralph wave emit --payloads-stdin`；禁止把 `wave emit --policy-check` 当成 wave Precheck，也不在同一调用里合并预检 + 写盘。✓ / ✗ + 引用 `ralph-tools-wave` Wave OPAC / Policy-Check 反馈章节
 4. **Confirm 用 main ledger**：worker 完成态由 dispatcher 通过 `ralph events --events-source main` 对账，**不**用 hat-channel（hat-channel 是 dispatcher's own 私有落盘点，不是 worker 的 Confirm 入口）。✓ / ✗ + 列命令
 5. **禁 agent 发协调 topic**：worker / dispatcher 一律不得 publish 任何 `wave.*` / `exec.wave.*` 协调 topic；这些由 runtime / supervisor 管。✓ / ✗ + grep `publishes`
 6. **batch 失败可定位**：`ralph wave verify` 拒收时 policy-check JSON 必须含 `payload_index`；dispatcher 必须按 index 定位失败 item 并精准修复（而不是整批重发）。✓ / ✗ + 引用 `ralph-tools-wave`「Policy-Check 反馈」段

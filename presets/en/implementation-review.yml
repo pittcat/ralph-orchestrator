@@ -1,0 +1,1754 @@
+# implementation-review: post-implementation multi-dimension review preset
+#
+# 2026-07-24-003 plan (KTD1..KTD19). Operator provides an already-implemented
+# development plan; the preset freezes the corresponding Git review range, runs
+# six independent read-only dimension reviews as a single six-slot wave,
+# synthesises findings, and emits a fix plan (or block artifact) on a final
+# `LOOP_COMPLETE`. Code stays read-only throughout — reviewers never apply
+# fixes, fix-plan execution is the operator's next preset.
+#
+# 6-hat isolated topology:
+# - scope-preparer: Reads --plan + Git history, uniquely resolves the first
+#   implementation commit `C`, records `first_implementation_commit_sha=C` and
+#   `resolved_baseline_sha=C^`, freezes the canonical `review.diff.patch`,
+#   scope manifest, digests, and dirty-intersection verdict. No wave emit;
+#   outputs scope.ready (success) or scope.blocked (multiple candidates / root
+#   commit / merge parent ambiguity / related dirty / drift before emit).
+# - review-dispatcher: Sole dispatcher hat. Reads frozen scope artifacts and
+#   re-verifies HEAD/tree/digests before dispatching one six-payload wave of
+#   `review.unit.ready` carrying the same scope identity. Stable idempotency
+#   key + same-bytes verify→emit ordering. No review code, no wave emit
+#   outside this hat.
+# - review-worker (concurrency: 6): One isolated activation per dimension
+#   (goal-alignment / correctness / testing / maintainability /
+#   project-standards / adversarial). Reads the frozen patch + plan + code;
+#   writes only the dimension artifact `.ralph/review/<plan>/dimensions/<dim>.md`;
+#   emits `review.unit.done` carrying scope_digest + patch_digest + dimension +
+#   findings_count + findings_file. NEVER runs tests/build/lints (R10).
+# - review-synthesizer: Sole consumer of runtime `review.wave.complete`.
+#   Re-validates HEAD/tree, six dimensions, scope/patch digests, file
+#   readability, per-file findings counts; dedupes; ranks P0–P3; writes
+#   synthesized-review.md; emits `review.synthesized` or `review.blocked`.
+# - fix-planner: Reads synthesized-review.md, maps P0–P2 to actionable fix
+#   units (P3 → residual only), writes fix-plan.md. Empty fix plan still
+#   produced when all dimensions are clean. Emits `fix.plan.ready`.
+# - finalizer: Sole publisher of `LOOP_COMPLETE`. Consumes fix.plan.ready
+#   + scope.blocked + review.blocked + runtime `review.wave.failed`. Writes
+#   `wave-blocked.md` on review.wave.failed, validates the referenced
+#   artifact before emit, and emits LOOP_COMPLETE with `result` enum and
+#   `artifact_path`. No other hat publishes LOOP_COMPLETE.
+#
+# Execution model: `wave` (KTD2). NOT supervisor — `event_loop.supervisor.enabled`
+# stays false; the default wave hot path lazy-creates the SupervisorBridge
+# without exposing worktree slots or merge sinks to the preset.
+# `completion_promise: LOOP_COMPLETE` with `required_events: []` (KTD14):
+# finalizer emits the single terminal event; no double-event exception.
+#
+# Schemas are inlined into `event_policy.schemas` (no `schema_file`; see
+# `presets/manifest.yml` header for the rationale). Runtime coordination
+# topics (`review.wave.complete` / `review.wave.failed`) are documented for
+# the synthesizer / finalizer to read; their `field_docs` describe the
+# payload shape the runtime actually constructs (see
+# `crates/ralph-cli/src/loop_runner/wave/dispatcher.rs::build_wave_complete_payload`
+# / `build_wave_failed_payload`). Agents MUST NOT emit those topics; origin
+# guard rejects.
+
+topic_format_whitelist:
+  - LOOP_COMPLETE
+
+tasks:
+  enabled: false
+
+event_loop:
+  execution_mode: isolated
+  prompt_file: "PROMPT.md"
+  completion_promise: "LOOP_COMPLETE"
+  required_events: []  # KTD14: no preset-specific required event pair; finalizer is the sole completion author.
+  starting_event: "review.start"
+  max_iterations: 30
+  max_runtime_seconds: 14400  # 4 hours; bounded by six-dim review fan-out, not by per-unit commits.
+  enforce_hat_scope: true
+  ephemeral_isolation: true
+  event_policy:
+    enabled: true
+    mode: enforce
+    on_violation: reject_with_resume
+    terminal_topics:
+      - "LOOP_COMPLETE"
+    business_topics:
+      - "review.start"
+      - "scope.ready"
+      - "scope.blocked"
+      - "review.unit.ready"
+      - "review.unit.done"
+      - "review.wave.complete"   # runtime-injected coordination; documented for synthesizer trigger
+      - "review.wave.failed"     # runtime-injected coordination; documented for finalizer trigger
+      - "review.synthesized"
+      - "review.blocked"
+      - "fix.plan.ready"
+    completion_after_terminal:
+      duplicate_terminal: reject
+      business_after_completion: reject
+      write_diagnostic_event: true
+    require_policy_check_for_cli_emit: true
+    allow_unsafe_cli_emit: false
+    require_emit_provenance: true
+    # Origin guard rejects agent emit of any supervisor coordination topic;
+    # we rely on that built-in allowlist rather than declaring a
+    # topic_deny_rules list here.
+    # Declare `mechanism.flow` so the preset_lint graph accepts the
+    # runtime-injected wave coordination topics (review.wave.complete /
+    # review.wave.failed) without requiring a hat to publish them —
+    # origin guard would reject (see `event_origin.rs::SUPERVISOR_COORDINATION_TOPICS`).
+    # Mirrors the same pattern used by `ce-executor-supervisor.yml`.
+
+    # Inline payload schemas block (authoritative SSOT is
+    # presets/schemas/implementation-review.yml; this mirror is preserved so
+    # `ralph preset check -H presets/en/implementation-review.yml` works without
+    # going through the binary build path).
+    # Inline payload schemas mirror block (authoritative SSOT is
+    # presets/schemas/implementation-review.yml, merged by `build.rs` at compile time).
+    schemas:
+      review.start:
+        required_fields: []
+        known_fields:
+        - plan_path
+        - plan_name
+        field_docs:
+          plan_path:
+            meaning: repo-relative path to the plan file the operator passed via --plan; surfaced to scope-preparer by the runner
+            source: operator CLI argument; copied from `ralph run --plan <plan>`
+            fill_rule: literal copy; do not invent a path
+          plan_name:
+            meaning: basename of plan_path without extension; downstream hat identity
+            source: operator CLI argument; runner or scope-preparer derives
+            fill_rule: literal copy or derive from plan_path basename
+      scope.ready:
+        required_fields:
+        - plan_name
+        - plan_path
+        - first_implementation_commit_sha
+        - resolved_baseline_sha
+        - review_head_sha
+        - scope_digest
+        - patch_path
+        - patch_digest
+        - scope_manifest_path
+        - dirty_verdict
+        trigger_context:
+          summary_fields:
+          - plan_name
+          - first_implementation_commit_sha
+          - resolved_baseline_sha
+          - review_head_sha
+          - scope_digest
+          - patch_digest
+          - dirty_verdict
+          routing_hints:
+          - label: scope_clean
+            conditions:
+            - field: dirty_verdict
+              op: eq
+              value: clean
+            guidance: re-verify HEAD/tree/patch_digest, then dispatch the six review.unit.ready payloads.
+          - label: scope_dirty_blocked
+            conditions:
+            - field: dirty_verdict
+              op: eq
+              value: blocked
+            guidance: do NOT emit wave; write dispatch-blocked.md and terminate this activation.
+        field_docs:
+          plan_name:
+            meaning: basename of the original plan without extension; downstream hat routing identity
+            source: scope-preparer derives from plan_path
+            fill_rule: literal copy from plan_path basename; do NOT invent
+          plan_path:
+            meaning: repo-relative path to the operator-provided plan
+            source: scope-preparer reads from the trigger payload
+            fill_rule: literal copy; do NOT modify
+          first_implementation_commit_sha:
+            meaning: the unique implementation commit C identified by Step 2; the patch INCLUDES this commit
+            source: scope-preparer resolves via candidate set + evidence
+            fill_rule: 40-char git SHA; recompute on every emit attempt
+          resolved_baseline_sha:
+            meaning: the parent of C (C^); the patch lower bound
+            source: scope-preparer resolves via `git rev-parse C^`
+            fill_rule: 40-char git SHA; recompute on every emit attempt
+          review_head_sha:
+            meaning: git SHA at HEAD at the time the patch was frozen
+            source: '`git rev-parse HEAD` before writing the patch'
+            fill_rule: 40-char git SHA; do NOT reuse a stale value
+          scope_digest:
+            meaning: hex digest binding the canonical scope manifest content (manifest minus its own digest field)
+            source: scope-preparer computes from the serialized scope-manifest.json
+            fill_rule: 16-64 hex chars; recompute after every manifest regeneration
+          patch_path:
+            meaning: repo-relative path to the binary frozen diff (`git diff --binary --no-color C^..HEAD`)
+            source: scope-preparer writes via the Write tool
+            fill_rule: literal `.ralph/review/<plan>/review.diff.patch`; do NOT fabricate the path
+          patch_digest:
+            meaning: sha256 digest of review.diff.patch bytes
+            source: scope-preparer computes after writing the patch
+            fill_rule: sha256 hex digest (64 chars); recompute on every emit attempt
+          scope_manifest_path:
+            meaning: repo-relative path to the canonical scope-manifest.json (byte-stable)
+            source: scope-preparer writes via the Write tool
+            fill_rule: literal `.ralph/review/<plan>/scope-manifest.json`; do NOT fabricate
+          dirty_verdict:
+            meaning: scope-preparer's verdict on the dirty intersection at freeze time
+            source: scope-preparer applies the Step 4 decision matrix
+            fill_rule: literal one of `clean | blocked`
+      scope.blocked:
+        required_fields:
+        - plan_name
+        - plan_path
+        - reason
+        - block_artifact_path
+        - scope_digest
+        field_docs:
+          plan_name:
+            meaning: basename of the plan without extension
+            source: scope-preparer derives from plan_path
+            fill_rule: literal copy
+          plan_path:
+            meaning: repo-relative path to the original plan
+            source: scope-preparer reads from the trigger payload
+            fill_rule: literal copy
+          reason:
+            meaning: canonical reason code identifying which Step 2/4/6 failure fired
+            source: scope-preparer
+            fill_rule: one of `plan_file_not_found | plan_file_unreadable | no_candidate | ambiguous_candidates | merge_parent_ambiguous | git_object_unreadable | root_commit | dirty_tracked_path | dirty_untracked_related
+              | dirty_unclassifiable | scope_drift_pre_emit`
+          block_artifact_path:
+            meaning: repo-relative path to scope-blocked.md containing the candidate table and evidence
+            source: scope-preparer writes via the Write tool
+            fill_rule: literal `.ralph/review/<plan>/scope-blocked.md`; do NOT fabricate
+          scope_digest:
+            meaning: scope identity at the moment of block; carried into the block artifact
+            source: scope-preparer computes
+            fill_rule: 16-64 hex chars; recompute before emit
+      review.unit.ready:
+        required_fields:
+        - plan_name
+        - plan_path
+        - scope_digest
+        - patch_path
+        - patch_digest
+        - scope_manifest_path
+        - review_head_sha
+        - first_implementation_commit_sha
+        - resolved_baseline_sha
+        - slot_index
+        - dimension
+        - idempotency_payload_version
+        field_docs:
+          plan_name:
+            meaning: basename of the plan without extension
+            source: review-dispatcher carries forward from scope.ready
+            fill_rule: literal copy; do NOT hand-write
+          plan_path:
+            meaning: repo-relative path to the original plan
+            source: review-dispatcher carries forward from scope.ready
+            fill_rule: literal copy
+          scope_digest:
+            meaning: frozen scope identity; carried into each payload byte-for-byte
+            source: review-dispatcher carries forward from scope.ready
+            fill_rule: literal copy; do NOT hand-write
+          patch_path:
+            meaning: repo-relative path to the frozen review.diff.patch
+            source: review-dispatcher carries forward from scope.ready
+            fill_rule: literal copy
+          patch_digest:
+            meaning: sha256 digest of review.diff.patch; carried forward byte-stable
+            source: review-dispatcher carries forward from scope.ready
+            fill_rule: sha256 hex digest (64 chars)
+          scope_manifest_path:
+            meaning: repo-relative path to scope-manifest.json
+            source: review-dispatcher carries forward from scope.ready
+            fill_rule: literal copy
+          review_head_sha:
+            meaning: git SHA at HEAD at freeze time
+            source: review-dispatcher carries forward from scope.ready
+            fill_rule: 40-char git SHA
+          first_implementation_commit_sha:
+            meaning: the implementation commit C; the patch INCLUDES C's changes
+            source: review-dispatcher carries forward from scope.ready
+            fill_rule: 40-char git SHA
+          resolved_baseline_sha:
+            meaning: the patch lower bound (C^)
+            source: review-dispatcher carries forward from scope.ready
+            fill_rule: 40-char git SHA
+          slot_index:
+            meaning: zero-based slot position in the six-payload batch (0..5); corresponds to dimension order
+            source: review-dispatcher enumerates 0..5 with the canonical dimension order
+            fill_rule: integer 0..5; unique across the batch
+          dimension:
+            meaning: the dimension this slot reviews; one of the six canonical names
+            source: review-dispatcher enumerates with the canonical dimension order
+            fill_rule: one of `goal-alignment | correctness | testing | maintainability | project-standards | adversarial`
+          idempotency_payload_version:
+            meaning: monotonic integer bumped when the dispatcher changes payload shape; lets dedup distinguish same-payload retries from payload-shape drift
+            source: review-dispatcher
+            fill_rule: integer >= 1; bump when the payload schema changes
+      review.unit.done:
+        required_fields:
+        - plan_name
+        - plan_path
+        - scope_digest
+        - patch_digest
+        - review_head_sha
+        - dimension
+        - slot_index
+        - findings_count
+        - findings_file
+        - handoff_precheck_failed
+        field_docs:
+          plan_name:
+            meaning: basename of the plan without extension
+            source: review-worker carries forward from review.unit.ready
+            fill_rule: literal copy
+          plan_path:
+            meaning: repo-relative path to the original plan
+            source: review-worker carries forward
+            fill_rule: literal copy
+          scope_digest:
+            meaning: frozen scope identity; carried byte-stable
+            source: review-worker carries forward
+            fill_rule: literal copy
+          patch_digest:
+            meaning: frozen patch digest; carried byte-stable
+            source: review-worker carries forward
+            fill_rule: sha256 hex digest (64 chars)
+          review_head_sha:
+            meaning: frozen review HEAD SHA; carried byte-stable
+            source: review-worker carries forward
+            fill_rule: 40-char git SHA
+          dimension:
+            meaning: the dimension this worker reviewed
+            source: review-worker reads from trigger payload
+            fill_rule: literal copy of trigger's dimension field
+          slot_index:
+            meaning: slot position in the six-payload batch
+            source: review-worker reads from trigger payload
+            fill_rule: literal copy
+          findings_count:
+            meaning: integer count of findings in the dimension artifact; 0 when the dimension is clean
+            source: review-worker writes the dimension artifact, then reads the artifact's findings_count
+            fill_rule: non-negative integer; do NOT fabricate
+          findings_file:
+            meaning: repo-relative path to the dimension artifact written by this worker
+            source: review-worker writes via the Write tool
+            fill_rule: literal `.ralph/review/<plan>/dimensions/<dimension>.md`; do NOT fabricate
+          handoff_precheck_failed:
+            meaning: true when the entry or exit precheck detected scope drift / dirty tracked writes; review-synthesizer fail-closes on any true value
+            source: review-worker sets true on precheck violation
+            fill_rule: literal boolean; default false
+      review.wave.complete:
+        required_fields:
+        - wave_id
+        - completed_dimensions
+        - aggregate_timeout
+        field_docs:
+          wave_id:
+            meaning: shared wave id binding the six review.unit.done events from the same batch
+            source: runtime (`build_wave_complete_payload`)
+            fill_rule: literal copy from the trigger payload; do NOT recompute
+          completed_dimensions:
+            meaning: ordered list of dimensions that produced a review.unit.done (collected from the per-slot `dimension` field, falling back to `assigned_dimensions`)
+            source: runtime (`build_wave_complete_payload`)
+            fill_rule: literal copy; must equal exactly six entries (or fail-close)
+          aggregate_timeout:
+            meaning: wave's aggregate timeout window in seconds; informational only
+            source: runtime (`build_wave_complete_payload`)
+            fill_rule: non-negative integer
+      review.wave.failed:
+        required_fields:
+        - wave_id
+        - missing_dimensions
+        - reason
+        field_docs:
+          wave_id:
+            meaning: shared wave id that failed to aggregate
+            source: runtime (`build_wave_failed_payload`)
+            fill_rule: literal copy
+          missing_dimensions:
+            meaning: dimensions that did NOT produce a review.unit.done before the wave's failure condition
+            source: runtime (`build_wave_failed_payload`)
+            fill_rule: literal copy
+          reason:
+            meaning: runtime failure reason string (timeout / spawn_failed / partial / etc.)
+            source: runtime (`build_wave_failed_payload`)
+            fill_rule: literal copy
+      review.synthesized:
+        required_fields:
+        - plan_name
+        - plan_path
+        - scope_digest
+        - patch_digest
+        - review_head_sha
+        - first_implementation_commit_sha
+        - resolved_baseline_sha
+        - synthesized_review_file
+        - dimensions_covered
+        - findings_count
+        - p0_count
+        - p1_count
+        - p2_count
+        - p3_count
+        - handoff_precheck_failed_count
+        trigger_context:
+          summary_fields:
+          - plan_name
+          - findings_count
+          - p0_count
+          - p1_count
+          - p2_count
+          - p3_count
+          - handoff_precheck_failed_count
+          - synthesized_review_file
+          - scope_digest
+          routing_hints:
+          - label: all_clean
+            conditions:
+            - field: findings_count
+              op: eq
+              value: 0
+            guidance: empty fix plan still valid; fix.plan.ready.result must be `clean`.
+          - label: has_p0_p1_p2
+            conditions:
+            - field: findings_count
+              op: gt
+              value: 0
+            guidance: P0/P1/P2 -> actionable Implementation Units; P3 -> residual; result=residual_only or fixes_required.
+          - label: handoff_precheck_failed
+            conditions:
+            - field: handoff_precheck_failed_count
+              op: gt
+              value: 0
+            guidance: synthesizer should have emitted review.blocked; do NOT act on review.synthesized here.
+        field_docs:
+          plan_name:
+            meaning: basename of the plan without extension
+            source: review-synthesizer carries forward from scope.ready
+            fill_rule: literal copy
+          plan_path:
+            meaning: repo-relative path to the original plan
+            source: review-synthesizer carries forward
+            fill_rule: literal copy
+          scope_digest:
+            meaning: frozen scope identity; carried forward
+            source: review-synthesizer carries forward
+            fill_rule: literal copy
+          patch_digest:
+            meaning: frozen patch digest; carried forward
+            source: review-synthesizer carries forward
+            fill_rule: sha256 hex digest (64 chars)
+          review_head_sha:
+            meaning: frozen review HEAD SHA; carried forward
+            source: review-synthesizer carries forward
+            fill_rule: 40-char git SHA
+          first_implementation_commit_sha:
+            meaning: the implementation commit C
+            source: review-synthesizer carries forward
+            fill_rule: 40-char git SHA
+          resolved_baseline_sha:
+            meaning: the patch's lower bound (C^)
+            source: review-synthesizer carries forward
+            fill_rule: 40-char git SHA
+          synthesized_review_file:
+            meaning: repo-relative path to synthesized-review.md
+            source: review-synthesizer writes via the Write tool
+            fill_rule: literal `.ralph/review/<plan>/synthesized-review.md`; do NOT fabricate
+          dimensions_covered:
+            meaning: ordered list of dimensions that produced a review.unit.done
+            source: review-synthesizer
+            fill_rule: literal copy from completed_dimensions in review.wave.complete; must have exactly six entries
+          findings_count:
+            meaning: total findings across all six dimensions after dedupe
+            source: review-synthesizer
+            fill_rule: non-negative integer
+          p0_count:
+            meaning: P0 severity count after dedupe
+            source: review-synthesizer
+            fill_rule: non-negative integer; sum of P0 across all dimensions
+          p1_count:
+            meaning: P1 severity count after dedupe
+            source: review-synthesizer
+            fill_rule: non-negative integer
+          p2_count:
+            meaning: P2 severity count after dedupe
+            source: review-synthesizer
+            fill_rule: non-negative integer
+          p3_count:
+            meaning: P3 severity count after dedupe (residual only)
+            source: review-synthesizer
+            fill_rule: non-negative integer
+          handoff_precheck_failed_count:
+            meaning: number of dimensions that reported handoff_precheck_failed == true; success path = 0
+            source: review-synthesizer
+            fill_rule: non-negative integer; 0 in success path
+      review.blocked:
+        required_fields:
+        - plan_name
+        - plan_path
+        - reason
+        - block_artifact_path
+        - scope_digest
+        field_docs:
+          plan_name:
+            meaning: basename of the plan without extension
+            source: review-synthesizer
+            fill_rule: literal copy
+          plan_path:
+            meaning: repo-relative path to the original plan
+            source: review-synthesizer
+            fill_rule: literal copy
+          reason:
+            meaning: canonical reason code identifying which Step 1/2/4 failure fired
+            source: review-synthesizer
+            fill_rule: one of `scope_drift_pre_synth | dimension_digest_mismatch | handoff_precheck_failed | incomplete_or_duplicate_dimensions | synthesized_artifact_io_failure`
+          block_artifact_path:
+            meaning: repo-relative path to review-blocked.md
+            source: review-synthesizer writes via the Write tool
+            fill_rule: literal `.ralph/review/<plan>/review-blocked.md`; do NOT fabricate
+          scope_digest:
+            meaning: scope identity at the moment of block
+            source: review-synthesizer
+            fill_rule: 16-64 hex chars
+      fix.plan.ready:
+        required_fields:
+        - plan_name
+        - plan_path
+        - scope_digest
+        - patch_digest
+        - review_head_sha
+        - first_implementation_commit_sha
+        - resolved_baseline_sha
+        - fix_plan_file
+        - result
+        - implementation_unit_count
+        - actionable_unit_count
+        - residual_finding_count
+        - source_review_file
+        trigger_context:
+          summary_fields:
+          - plan_name
+          - result
+          - actionable_unit_count
+          - residual_finding_count
+          - fix_plan_file
+          - scope_digest
+          routing_hints:
+          - label: clean
+            conditions:
+            - field: result
+              op: eq
+              value: clean
+            guidance: actionable_unit_count==0; finalizer emits LOOP_COMPLETE{result:clean,artifact_path:fix_plan_file}.
+          - label: residual_only
+            conditions:
+            - field: result
+              op: eq
+              value: residual_only
+            guidance: only P3 remains; finalizer emits LOOP_COMPLETE{result:residual_only,artifact_path:fix_plan_file}.
+          - label: fixes_required
+            conditions:
+            - field: result
+              op: eq
+              value: fixes_required
+            guidance: actionable_unit_count>=1; LOOP_COMPLETE{result:fixes_required,artifact_path:fix_plan_file}; SUCCESS, not failure.
+        field_docs:
+          plan_name:
+            meaning: basename of the plan without extension
+            source: fix-planner carries forward from review.synthesized
+            fill_rule: literal copy
+          plan_path:
+            meaning: repo-relative path to the original plan
+            source: fix-planner carries forward
+            fill_rule: literal copy
+          scope_digest:
+            meaning: frozen scope identity; carried forward
+            source: fix-planner carries forward
+            fill_rule: literal copy
+          patch_digest:
+            meaning: frozen patch digest; carried forward
+            source: fix-planner carries forward
+            fill_rule: sha256 hex digest (64 chars)
+          review_head_sha:
+            meaning: frozen review HEAD SHA; carried forward
+            source: fix-planner carries forward
+            fill_rule: 40-char git SHA
+          first_implementation_commit_sha:
+            meaning: the implementation commit C
+            source: fix-planner carries forward
+            fill_rule: 40-char git SHA
+          resolved_baseline_sha:
+            meaning: the patch's lower bound (C^)
+            source: fix-planner carries forward
+            fill_rule: 40-char git SHA
+          fix_plan_file:
+            meaning: repo-relative path to fix-plan.md
+            source: fix-planner writes via the Write tool
+            fill_rule: literal `.ralph/review/<plan>/fix-plan.md`; do NOT fabricate
+          result:
+            meaning: synthesized outcome of the review run; one of clean / residual_only / fixes_required
+            source: fix-planner derives from findings severity distribution
+            fill_rule: one of `clean | residual_only | fixes_required`
+          implementation_unit_count:
+            meaning: total Implementation Units in fix-plan.md (P0-P2 + 0 when clean)
+            source: fix-planner
+            fill_rule: non-negative integer; equals actionable_unit_count (P3 never maps to actionable units)
+          actionable_unit_count:
+            meaning: P0-P2 actionable units (excludes P3)
+            source: fix-planner
+            fill_rule: non-negative integer; 0 when result is clean or residual_only
+          residual_finding_count:
+            meaning: P3 findings kept in residual only
+            source: fix-planner
+            fill_rule: non-negative integer
+          source_review_file:
+            meaning: repo-relative path to synthesized-review.md that fix-plan was derived from
+            source: fix-planner carries forward from review.synthesized
+            fill_rule: literal copy
+      LOOP_COMPLETE:
+        required_fields:
+        - plan_name
+        - plan_path
+        - result
+        - artifact_path
+        - scope_digest
+        field_docs:
+          plan_name:
+            meaning: basename of the plan without extension
+            source: finalizer carries forward from the trigger
+            fill_rule: literal copy
+          plan_path:
+            meaning: repo-relative path to the original plan
+            source: finalizer carries forward
+            fill_rule: literal copy
+          result:
+            meaning: terminal outcome of the review run
+            source: finalizer
+            fill_rule: one of `clean | residual_only | fixes_required | blocked`
+          artifact_path:
+            meaning: 'repo-relative path to the terminal artifact: fix-plan.md (success / residual / fixes) or wave-blocked.md / scope-blocked.md / review-blocked.md (blocked)'
+            source: finalizer
+            fill_rule: do NOT fabricate; the path is the file the finalizer just validated
+          scope_digest:
+            meaning: frozen scope identity at completion time
+            source: finalizer carries forward from scope-manifest.json
+            fill_rule: 16-64 hex chars
+mechanism:
+  flow:
+    type: declared
+    version: 1
+    terminal_emits: ["LOOP_COMPLETE"]
+    steps:
+      - id: scope_freeze
+        kind: await
+        "on": review.start
+        allowed_emits:
+          - scope.ready
+          - scope.blocked
+      - id: review_wave
+        kind: side_effect
+        runs: wave.runtime.review
+        allowed_emits:
+          - review.unit.ready
+          - review.unit.done
+          - review.wave.complete
+          - review.wave.failed
+      - id: synth_await
+        kind: await
+        "on": review.wave.complete
+        allowed_emits:
+          - review.synthesized
+          - review.blocked
+      - id: fix_plan
+        kind: await
+        "on": review.synthesized
+        allowed_emits:
+          - fix.plan.ready
+      - id: finalize
+        kind: terminal
+        on_any_of:
+          - fix.plan.ready
+          - scope.blocked
+          - review.blocked
+          - review.wave.failed
+        allowed_emits:
+          - LOOP_COMPLETE
+    repair_budget: 3
+    enforce_schema: hard
+    state_idempotency: required
+
+hats:
+  scope-preparer:
+    name: "Scope Preparer"
+    description: "Resolves the first implementation commit C, freezes baseline C^, writes the scope manifest, binary review.diff.patch, scope-analysis.md and digests. Emits scope.ready (success) or scope.blocked (ambiguous / root / dirty / drift)."
+    triggers: ["review.start"]
+    publishes: ["scope.ready", "scope.blocked"]
+    exempt_topics: ["scope.ready", "scope.blocked"]
+    default_publishes: "scope.blocked"
+    terminal_events: ["scope.ready", "scope.blocked"]
+    event_filter:
+      enabled: true
+      events:
+        - review.start
+    instructions: |
+      ## SCOPE PREPARER MODE — Freeze the review range, fail-close on ambiguity
+
+      You own the **scope freeze**. You do NOT review code. You do NOT emit
+      review artifacts, fix plans, or `LOOP_COMPLETE`. Your activation ends
+      with exactly one of `scope.ready` or `scope.blocked`.
+
+      ### HARD RULES
+
+      - Emit EXACTLY ONE event per activation: `scope.ready` or `scope.blocked`.
+      - You may write only files under `.ralph/review/<plan>/` for this
+        activation (`.ralph/agent/decisions.md` is allowed for audit, never
+        for the canonical artifacts).
+      - Do NOT run tests, build, or lints — review-time only.
+      - Do NOT modify tracked source code, the plan file, or any file outside
+        `.ralph/review/<plan>/` and `.ralph/agent/decisions.md`.
+
+      ### Inputs you can Observe
+
+      - The prompt's plan file path (`--plan <plan.md>` argument mirrored
+        into the prompt by the runner). Use `Read`/`cat` to load the plan
+        bytes.
+      - `ralph inspect loop --format json` — read `plan_name` (basename
+        without extension) and any plan-bound metadata.
+      - Git history (`git log`, `git rev-parse`, `git diff`, `git status`,
+        `git cat-file`, `git rev-list`) — read-only.
+
+      ### Step 1 — Plan file resolution
+
+      - `plan_path` = the repo-relative path passed via `--plan`. If the
+        runner surfaces an absolute path, convert with `realpath
+        --relative-to=.`.
+      - `plan_name` = `basename $plan_path` minus the `.md` / `.html`
+        extension. Stable identifier for all downstream hats.
+      - If `plan_path` does not exist or is unreadable → Step 5b
+        `scope.blocked{reason: "scope_blocked:plan_file_not_found"}`.
+
+      ### Step 2 — Resolve the first implementation commit `C`
+
+      Build a candidate set using multiple signals (do NOT trust any single
+      signal; collect evidence per candidate):
+
+      1. `git log --reverse --format=%H -- "$plan_path"` — commits where
+         the plan file was added or changed. The earliest non-merge commit
+         that touches the plan is the strongest single-signal candidate.
+      2. Commit subjects that mention the plan name, U-IDs from the plan's
+         Implementation Units, or commit-message prefixes used by the
+         project's developer policy (e.g. `feat(scope): U1 ...`,
+         `feat(<module>): <plan-name> ...`). Collect matches within the
+         last ~200 commits (use `git log -n 200 --format=%H%s`).
+      3. The commit that first introduced each file path listed in the
+         plan's Implementation Units → `Files:` section. Aggregate by
+         earliest commit per file; the smallest SHA wins the tie-break
+         only when all signals agree.
+      4. Plan-time declared "first implementation commit" (if the plan
+         frontmatter names one). Treat as ONE signal, never the sole one.
+
+      For each candidate, record:
+      - `commit_sha`
+      - evidence list (which signals matched, which files)
+      - parent SHA(s) and `git cat-file -p <sha>` parent commit subject
+      - whether `git cat-file -t <sha>` prints `commit`
+
+      Decision matrix (use the FIRST matching row; subsequent rows are
+      fallbacks for clarity):
+
+      | Candidate count | Evidence quality                                  | Verdict |
+      |-----------------|---------------------------------------------------|---------|
+      | 0               | (no signals)                                       | blocked |
+      | 1               | at least 2 independent signals agree              | freeze  |
+      | 1               | only 1 signal, but plan-file commit AND it has a parent | freeze (mark `evidence: single_signal`) |
+      | ≥2              | equal strongest signal                            | blocked |
+      | 1               | parent is a merge commit AND merges multiple feature branches | blocked (ambiguous merge parent) |
+      | 1               | `git cat-file -t <sha>` ≠ `commit`                | blocked |
+      | 1               | commit is a root (no parent)                      | blocked |
+
+      **KTD4 / F3: ambiguous → blocked; do NOT auto-select the strongest
+      candidate.** The full candidate table belongs in the block artifact.
+
+      ### Step 3 — Freeze baseline + patch + scope manifest
+
+      For the accepted candidate C:
+
+      1. `resolved_baseline_sha` = `git rev-parse C^` (the first parent of
+         C). If C is a merge commit with multiple parents, the plan
+         product contract forbids it; Step 2 should have failed-closed.
+         If `git rev-parse C^` errors (root commit), Step 2 should have
+         blocked. As a defensive measure, also check `git cat-file -p C`
+         shows exactly one parent line.
+      2. `review_head_sha` = `git rev-parse HEAD`. Record the current
+         HEAD so dispatch / synth / finalizer can re-verify against it.
+      3. `first_implementation_commit_sha` = C itself (not C^).
+      4. `git diff --binary --no-color C^..HEAD` → write to
+         `.ralph/review/<plan>/review.diff.patch` via the Write tool (not
+         `git > file` redirection; review.diff.patch is a binary blob).
+         Use `--binary` so binary file deltas survive; `--no-color`
+         guarantees a stable digest.
+      5. `git diff --name-only --diff-filter=ACMRT C^..HEAD` → list of
+         changed repo-relative paths. Include binary changes; rename +
+         modify show under both old and new names.
+      6. `git log --format=%H C^..HEAD` (NOT `..HEAD~1`) → ordered commit
+         SHA list attributed to the implementation.
+      7. Compute `patch_digest` = `sha256sum .ralph/review/<plan>/review.diff.patch`.
+      8. Compute `scope_digest` over the canonical scope manifest content
+         (Step 4). The digest is a stable binding for every downstream
+         payload — keep it byte-stable (see Step 4's serialization rules).
+      9. Plan-declared paths: extract from the plan's Implementation Units
+         `Files:` fields (collect with conservative parsing — line ranges,
+         comma-separated lists, fenced code blocks; if extraction fails
+         AND the workspace has no dirty paths, skip; if extraction fails
+         AND any dirty path exists, fail-close).
+
+      ### Step 4 — Dirty intersection verdict
+
+      Use NUL-delimited `git status --porcelain --untracked-files=all -z`
+      to enumerate dirty paths. For each entry:
+
+      - Convert to repo-relative path with `git rev-parse --show-toplevel`
+        as the anchor. Skip entries that already start with that prefix.
+      - If the path is a rename (`XY` where X or Y contains `R`), record
+        both source and target paths.
+      - Filter out paths under `.ralph/` (runtime artefacts never
+        participate in dirty intersection) and the repo's known ignored
+        build / cache paths (read `.gitignore` / `info/exclude` if
+        present; the default `target/`, `node_modules/`, `dist/` etc.
+        are conventional; do NOT hand-author path patterns — only
+        filter via `.gitignore`).
+      - Classify each surviving dirty path as `tracked` (M/A/D/R/C) or
+        `untracked` (??). Untracked paths that are NOT plan-declared
+        AND NOT touched by the frozen diff → `unrelated_untracked` (NOT
+        a blocker).
+      - Source / test / config categories are runtime-readable only via
+        the `Files:` mapping in the plan; if the path's category cannot
+        be classified (no rule matches), fail-close.
+
+      Verdict rules (apply in order, take the FIRST match):
+
+      | Dirty intersection status                                | Verdict |
+      |-----------------------------------------------------------|---------|
+      | No dirty paths at all                                     | clean   |
+      | Dirty paths exist, all `unrelated_untracked`              | clean (record `unrelated_untracked_paths`) |
+      | Any tracked dirty path (M/A/D/R/C) intersecting freeze set | blocked |
+      | Any untracked dirty path intersecting freeze set          | blocked |
+      | Any unclassifiable dirty path                             | blocked |
+
+      ### Step 5a — Write scope artifacts (success path)
+
+      Before any emit, write these files (each via the Write tool with
+      atomic content):
+
+      1. `.ralph/review/<plan>/scope-analysis.md` — markdown report with
+         the candidate table, evidence, decision matrix row that fired,
+         and the dirty intersection verdict. Include the plan name, plan
+         path, `first_implementation_commit_sha`, `resolved_baseline_sha`,
+         `review_head_sha`, commit list, changed files list, dirty verdict
+         and `unrelated_untracked_paths` (if any).
+      2. `.ralph/review/<plan>/review-context.md` — human-readable context
+         the six reviewers consume: plan path, scope identity, list of
+         changed files, commit list, baseline SHA, review HEAD SHA, plan
+         goals summary (extracted from plan's `## Goal Capsule` /
+         `## Product Contract` sections; conservative parsing only).
+      3. `.ralph/review/<plan>/review.diff.patch` — already written in
+         Step 3.
+      4. `.ralph/review/<plan>/scope-manifest.json` — canonical, byte-stable
+         JSON manifest. Required keys, in this exact order (use the
+         Write tool with serialized JSON, do NOT rely on serde's
+         default ordering elsewhere):
+         ```json
+         {
+           "schema_version": "implementation-review/scope-manifest.v1",
+           "plan_name": "<plan_name>",
+           "plan_path": "<plan_path>",
+           "first_implementation_commit_sha": "<C>",
+           "resolved_baseline_sha": "<C^>",
+           "review_head_sha": "<HEAD at freeze>",
+           "commit_list": ["<sha1>", "<sha2>", ...],
+           "changed_files": ["<repo-relative path>", ...],
+           "plan_declared_files": ["<from plan Units.Files>", ...],
+           "scope_digest": "<hex digest of THIS file minus scope_digest itself; recompute after writing the rest>",
+           "patch_path": ".ralph/review/<plan>/review.diff.patch",
+           "patch_digest": "<sha256 of patch>",
+           "scope_analysis_path": ".ralph/review/<plan>/scope-analysis.md",
+           "review_context_path": ".ralph/review/<plan>/review-context.md",
+           "dirty_verdict": "clean | blocked",
+           "dirty_blocked_paths": []
+         }
+         ```
+         Compute `scope_digest` AFTER writing every other field, by
+         writing the file, reading it back, recomputing
+         `sha256sum` (or `sha256` on macOS) over the bytes minus the
+         `scope_digest` field, then writing the file again with the
+         computed digest. Two passes — both via the Write tool, never
+         via `sed -i` / `>>`.
+
+      ### Step 5b — Write block artifact (blocked path)
+
+      On any failure (Step 1 / Step 2 / Step 4 / Step 6 below), write
+      `.ralph/review/<plan>/scope-blocked.md` with the same
+      schema_version prefix, plan identity, candidate table or dirty
+      intersection table, decision matrix row that fired, and a short
+      `reason` field that starts with one of:
+      `plan_file_not_found | plan_file_unreadable | no_candidate |
+      ambiguous_candidates | merge_parent_ambiguous | git_object_unreadable |
+      root_commit | dirty_tracked_path | dirty_untracked_related |
+      dirty_unclassifiable`.
+
+      ### Step 6 — Re-verify HEAD + dirty state right before emit
+
+      - `actual_head = git rev-parse HEAD`; must equal
+        `review_head_sha` recorded in Step 3.
+      - porcelain filter (excluding `.ralph/`) must still match the
+        Step 4 verdict.
+      - `patch_digest` must still match the digest written in Step 3.
+
+      If any of these fail, the workspace drifted between freeze and
+      emit → write `scope-blocked.md` with
+      `reason: scope_drift_pre_emit` and emit `scope.blocked`.
+
+      ### Step 7 — Emit scope.ready
+
+      Pre-check first:
+      `ralph emit scope.ready --policy-check -j '<payload>' -H <this-preset>`
+      (the loop's gate is the same one; per `ralph-tools-emit` §5).
+      Only after the precheck passes, drop `--policy-check` and emit the
+      real event. Required payload fields are listed in
+      `event_policy.schemas.scope.ready`; the path fields refer to files
+      written in Step 5a, not to a runner-internal location. `result` is
+      the literal string `clean` (this preset's `clean` is reserved for
+      the success path; the final `result` enum appears on `LOOP_COMPLETE`).
+
+      ### Step 8 — Emit scope.blocked
+
+      When any failure path applies, pre-check + emit `scope.blocked`
+      with the same payload hygiene as Step 7. `reason` MUST start with
+      one of the canonical reason codes from Step 5b. `block_artifact_path`
+      points to `scope-blocked.md`.
+
+      ### Step 9 — Stop
+
+      You are done. The dispatcher will pick up `scope.ready`; the
+      finalizer will pick up `scope.blocked`.
+
+      ### OPAC reference
+
+      Follow `ralph-tools-opac` for Observe/Precheck/Apply/Confirm discipline
+      and `ralph-tools-emit` §5 for precheck rules before every emit.
+
+  review-dispatcher:
+    name: "Review Dispatcher"
+    description: "Sole dispatcher. Re-verifies frozen scope, builds six immutable payload bytes, single wave emit of six review.unit.ready events sharing one wave_id and one idempotency key."
+    triggers: ["scope.ready"]
+    publishes: ["review.unit.ready"]
+    exempt_topics: ["review.unit.ready"]
+    default_publishes: "review.unit.ready"
+    terminal_events: ["review.unit.ready"]
+    event_filter:
+      enabled: true
+      events:
+        - scope.ready
+    instructions: |
+      ## REVIEW DISPATCHER MODE — Single six-payload wave from frozen scope
+
+      You own the **fan-out**. You do NOT review code, you do NOT touch
+      the patch, you do NOT emit `review.unit.done` or `LOOP_COMPLETE`.
+      One activation = one `ralph wave emit` call with six immutable
+      payload lines.
+
+      ### HARD RULES
+
+      - Emit EXACTLY ONE business topic from this activation:
+        `review.unit.ready` (via `ralph wave emit`). Single batch — never
+        loop and emit six times.
+      - Do NOT call `ralph wave emit` / `ralph wave verify` from any
+        other hat. The wave detector rejects non-dispatcher emit (U23
+        wave ACL).
+      - Do NOT emit any `*.wave.*` coordination topic. Those are
+        runtime-only (origin guard rejects).
+      - Do NOT modify tracked source, the plan file, or any artifact
+        outside `.ralph/review/<plan>/dispatch-batch/` (your own
+        pre-dispatch directory).
+
+      ### Inputs you can Observe
+
+      - `scope.ready` payload fields (in the trigger payload AND in
+        `ralph tools task list` view).
+      - `.ralph/review/<plan>/scope-manifest.json`, `review.diff.patch`,
+        `review-context.md`, `scope-analysis.md` — read-only.
+      - `ralph inspect loop --format json` — `plan_name`, loop identity.
+
+      ### Step 1 — Re-verify the frozen scope
+
+      Before building any payload, re-run the same checks scope-preparer
+      ran in Step 6. If anything has drifted, do NOT emit the wave; do
+      NOT call `ralph wave verify` either (verify writes a ticket — only
+      emit when you're actually ready). Instead, write
+      `.ralph/review/<plan>/dispatch-blocked.md` (do NOT use the
+      `scope-blocked.md` writer — scope-preparer owns that artifact) and
+      terminate without emitting any business event. The runtime will
+      surface this as a no-progress state and the operator will see the
+      artifact.
+
+      Re-verification commands:
+      - `actual_head = git rev-parse HEAD`; must equal
+        `scope.ready.review_head_sha`.
+      - porcelain filter (excluding `.ralph/`) must match the manifest's
+        `dirty_verdict` and `dirty_blocked_paths` (must still be empty
+        for a `clean` verdict).
+      - `sha256sum .ralph/review/<plan>/review.diff.patch` must equal
+        `scope.ready.patch_digest`.
+      - `scope_digest` in `scope-manifest.json` (read the file, parse,
+        recompute digest over the rest) must equal
+        `scope.ready.scope_digest`.
+
+      ### Step 2 — Build six immutable payload bytes
+
+      For each dimension in this exact order
+      (slot_index 0..5 → dimension):
+      `goal-alignment`, `correctness`, `testing`,
+      `maintainability`, `project-standards`, `adversarial`.
+
+      Payload template (one JSON object per line, NDJSON; do NOT write a
+      JSON array — `ralph wave emit --payloads-stdin` expects one
+      payload per line):
+      ```json
+      {
+        "plan_name": "<from scope.ready>",
+        "plan_path": "<from scope.ready>",
+        "scope_digest": "<from scope.ready>",
+        "patch_path": ".ralph/review/<plan>/review.diff.patch",
+        "patch_digest": "<from scope.ready>",
+        "scope_manifest_path": ".ralph/review/<plan>/scope-manifest.json",
+        "review_head_sha": "<from scope.ready>",
+        "first_implementation_commit_sha": "<from scope.ready>",
+        "resolved_baseline_sha": "<from scope.ready>",
+        "slot_index": 0,
+        "dimension": "goal-alignment",
+        "idempotency_payload_version": 1
+      }
+      ```
+
+      Every payload MUST carry the same `scope_digest` / `patch_digest`
+      / `review_head_sha` / `first_implementation_commit_sha` /
+      `resolved_baseline_sha` / `scope_manifest_path` (KTD10 / R8).
+      `slot_index` and `dimension` are unique per line.
+
+      Write the six lines to
+      `.ralph/review/<plan>/dispatch-batch/payloads.jsonl` via the Write
+      tool. Read the file back, recompute `wc -l` (must be exactly 6),
+      recompute `sha256sum` to fingerprint the bytes. Use that
+      fingerprint as part of the idempotency key.
+
+      ### Step 3 — Choose the idempotency key
+
+      Build a stable ASCII key from inputs that uniquely identify this
+      dispatch batch (KTD19). The recommended shape is:
+
+      ```
+      im-review-<plan_name>-<scope_digest>-<payload_fingerprint>
+      ```
+
+      Where `payload_fingerprint` is `sha256sum payloads.jsonl | cut -c1-16`
+      (first 16 hex chars). The key must be ≤ 256 bytes, ASCII, non-empty,
+      non-whitespace (`ralph wave emit` rejects otherwise).
+
+      ### Step 4 — Wave OPAC
+
+      - **Precheck**:
+        `cat .ralph/review/<plan>/dispatch-batch/payloads.jsonl | \
+         ralph wave verify review.unit.ready --payloads-stdin \
+         --output json -H <this-preset>`
+        Capture `{"ok":true,"topic":"review.unit.ready","count":6}` and
+        the ticket; if precheck rejects, read the JSON for
+        `validation_errors[].field` / `payload_index` to localise the
+        failing line, regenerate that line, and re-run precheck. Do NOT
+        bypass with `--unsafe-no-policy-check` (the loop's gate is on by
+        default).
+      - **Apply** (use the SAME unmodified bytes file; do NOT regenerate):
+        `cat .ralph/review/<plan>/dispatch-batch/payloads.jsonl | \
+         ralph wave emit review.unit.ready --payloads-stdin \
+         --output json -H <this-preset> \
+         --idempotency-key '<key-from-step-3>'`
+        Capture `wave_id`. If `deduplicated=true`, the batch already
+        existed in the active store; stop (no further emit, do not
+        `task.resume`).
+      - **Conflict**: if the emit returns `idempotency-key conflict`,
+        your key collided with another batch. Do NOT silently bump and
+        retry — KTD19 says same key + different payload is a hard scope
+        drift. Write `.ralph/review/<plan>/dispatch-blocked.md` with
+        `reason: idempotency_conflict` and stop without any further
+        `ralph wave emit`.
+
+      ### Step 5 — Stop
+
+      After a successful (non-deduplicated) wave emit, this activation is
+      done. The runtime injects `review.wave.complete` (success) or
+      `review.wave.failed` (failure) — those are the only triggers for
+      review-synthesizer and finalizer respectively.
+
+      ### OPAC reference
+
+      Follow `ralph-tools-opac` and the always-loaded `ralph-tools-wave`
+      red box for the wave verify → wave emit order; cite
+      `ralph-tools-emit` §5 for the policy-check feedback contract when
+      precheck rejects.
+
+  review-worker:
+    name: "Review Worker"
+    description: "Per-dimension reviewer. One isolated activation per review.unit.ready; reads frozen scope, writes .ralph/review/<plan>/dimensions/<dimension>.md; emits review.unit.done. Code read-only; no tests/build/lints."
+    # 2026-07-22 plan U3 (R6 / KTD-4a): wave consumer hat MUST declare
+    # `concurrency > 1`. Six dimension workers share one hat id (one
+    # activation per dimension). Without `concurrency: 6`, the wave
+    # detector rejects the batch as `SequentialTarget` and never
+    # dispatches the six payloads.
+    concurrency: 6
+    triggers: ["review.unit.ready"]
+    publishes: ["review.unit.done"]
+    exempt_topics: ["review.unit.done"]
+    default_publishes: "review.unit.done"
+    terminal_events: ["review.unit.done"]
+    event_filter:
+      enabled: true
+      events:
+        - review.unit.ready
+    instructions: |
+      ## REVIEW WORKER MODE — One dimension, frozen scope, read-only
+
+      You are a **slot-scoped dimension reviewer**. Your activation
+      scores exactly one dimension (passed via `review.unit.ready`
+      payload). One activation = one `review.unit.done` event.
+
+      ### HARD RULES
+
+      - Emit EXACTLY ONE event per activation: `review.unit.done`.
+      - You MAY write ONLY `.ralph/review/<plan>/dimensions/<dimension>.md`
+        in this activation. (`.ralph/agent/decisions.md` is allowed for
+        audit lines, never for the dimension artifact itself.)
+      - Do NOT modify tracked source code, the plan file, or any file
+        outside `.ralph/review/<plan>/dimensions/` and
+        `.ralph/agent/decisions.md`.
+      - Do NOT run tests, build, or lints — review-only (R10). Reviewers
+        reason about test quality by reading the patch and existing test
+        evidence, NOT by executing suites.
+      - Do NOT call `ralph wave emit` / `ralph wave verify` (U23 wave
+        ACL — only the dispatcher hat may).
+      - Do NOT emit any `*.wave.*` coordination topic; origin guard
+        rejects agent emit.
+
+      ### Inputs you can Observe
+
+      - `review.unit.ready` payload (in the trigger payload):
+        `plan_name`, `plan_path`, `scope_digest`, `patch_path`,
+        `patch_digest`, `scope_manifest_path`, `review_head_sha`,
+        `first_implementation_commit_sha`, `resolved_baseline_sha`,
+        `slot_index`, `dimension`.
+      - `.ralph/review/<plan>/scope-manifest.json` (read via `Read`
+        / `cat`) — full canonical scope.
+      - `.ralph/review/<plan>/review.diff.patch` (read via `Read`) — the
+        immutable frozen diff for this review.
+      - `.ralph/review/<plan>/review-context.md` (read via `Read`) —
+        human-readable context.
+      - Tracked source code (read-only). The reviewer may read any
+        file but MUST NOT modify, add, delete, or rename any tracked
+        path. The modification audit will catch tracked writes and
+        downstream fan-in will fail-close the slot (R9 / R11).
+
+      ### Step 1 — Verify scope identity before any work
+
+      - `actual_head = git rev-parse HEAD`; must equal
+        `review_head_sha` from the trigger payload.
+      - porcelain filter (excluding `.ralph/`) must be empty.
+      - `sha256sum <patch_path>` must equal `patch_digest`.
+      - `scope_digest` in the manifest (recompute) must equal the
+        trigger's `scope_digest`.
+      - Save start evidence to
+        `.ralph/review/<plan>/git-state-review-worker-<dimension>-start.txt`
+        (do NOT commit; `.ralph/` is not tracked).
+      - Any violation → **Handoff failure emit**: write the dimension
+        file with `findings_count: 0`, `handoff_precheck_failed: true`,
+        `precheck_violation: <reason>`, and emit `review.unit.done`
+        carrying the same `handoff_precheck_failed: true`. Do NOT
+        silent-stop; do NOT try to recover via `git restore` /
+        `git stash` / `git reset` — the reviewer is read-only and
+        cannot repair upstream drift.
+
+      ### Step 2 — Review your dimension
+
+      Each dimension has a fixed scope (KTD6); your `dimension` field
+      from the trigger picks one:
+
+      - `goal-alignment`: Does the patch implement the plan's stated
+        goals, requirements (R-IDs), and product contract? Any drift
+        between plan and code is a finding.
+      - `correctness`: Are the new code paths correct under the
+        project's invariants? Bugs, race conditions, off-by-one, missing
+        error handling, broken contracts.
+      - `testing`: Test coverage quality, assertion strength, missing
+        scenarios, edge cases. **Read-only**: reason about test diffs
+        and existing visible test evidence; do NOT execute.
+      - `maintainability`: Naming, duplication, dead code, brittle
+        patterns, future maintenance cost.
+      - `project-standards`: Repository conventions (formatter, lint,
+        error handling, layering, public API surface) defined in
+        `AGENTS.md` / `CLAUDE.md` / `CONTRIBUTING.md`. Do NOT enforce
+        rules that aren't documented there.
+      - `adversarial`: Edge cases, hostile inputs, security,
+        concurrency hazards, resource exhaustion, idempotency under
+        repeated invocations.
+
+      Always emit a findings product — even clean dimensions must write
+      a non-empty artifact with `findings_count: 0` (R11). Never invent
+      findings to meet a quota.
+
+      ### Step 3 — Write the dimension artifact
+
+      Write `.ralph/review/<plan>/dimensions/<dimension>.md` via the
+      Write tool. Required structure:
+      ```markdown
+      ---
+      schema_version: "implementation-review/dimension-finding.v1"
+      plan_name: <plan_name>
+      plan_path: <plan_path>
+      dimension: <dimension>
+      slot_index: <slot_index>
+      scope_digest: <scope_digest from trigger>
+      patch_digest: <patch_digest from trigger>
+      review_head_sha: <review_head_sha from trigger>
+      findings_count: <integer 0..>
+      handoff_precheck_failed: <boolean>
+      findings:
+        - finding_id: <stable ID; format `<dim>-NN` where NN is zero-padded>
+          severity: <p0|p1|p2|p3>
+          summary: <one sentence>
+          evidence: <file path + line range or function signature>
+          rationale: <why this matters for the dimension>
+          suggested_fix: <optional; short>
+      ```
+      For clean dimensions, omit the `findings:` block (or leave it
+      empty) and set `findings_count: 0`.
+
+      ### Step 4 — Exit Precheck (mirrors Step 1)
+
+      - HEAD must still equal `review_head_sha`.
+      - porcelain filter (excluding `.ralph/`) must still be empty.
+      - `sha256sum <patch_path>` must still equal `patch_digest`.
+      - Save end evidence to
+        `.ralph/review/<plan>/git-state-review-worker-<dimension>-end.txt`.
+      - Violation → emit `review.unit.done` with
+        `handoff_precheck_failed: true`,
+        `precheck_violation: <reason>`. Do NOT try to revert your own
+        artefact (`dimensions/<dim>.md` lives under `.ralph/` and
+        doesn't pollute tracked state, but if your writes leaked outside
+        `.ralph/`, that's a real violation — emit
+        `handoff_precheck_failed: true` with `precheck_violation:
+        tracked_write_outside_ralph` and let the synthesizer fail-close).
+
+      ### Step 5 — Emit review.unit.done
+
+      Pre-check first:
+      `ralph emit review.unit.done --policy-check -j '<payload>'`
+      The loop's gate is the same one (per `ralph-tools-emit` §5).
+      Drop `--policy-check` after success. Required payload fields per
+      `event_policy.schemas.review.unit.done`. Carry
+      `scope_digest` / `patch_digest` / `review_head_sha` unchanged from
+      the trigger. `dimension` and `slot_index` are your own; `findings_count`
+      is the artifact's `findings_count`; `findings_file` is the repo-relative
+      path to your dimension artifact.
+
+      ### Step 6 — Stop
+
+      One `review.unit.done`. The runtime injects `review.wave.complete`
+      once all six slots complete (or `review.wave.failed` if any slot
+      timed out / failed the modification audit). You do not trigger
+      either — the runtime does.
+
+      ### OPAC reference
+
+      Follow `ralph-tools-opac` for Observe/Precheck/Apply/Confirm discipline
+      and `ralph-tools-emit` §5 for precheck rules before every emit.
+
+  review-synthesizer:
+    name: "Review Synthesizer"
+    description: "Consumes runtime review.wave.complete. Re-validates six dimension artifacts, dedupes and ranks P0–P3, writes synthesized-review.md. Emits review.synthesized (success) or review.blocked (any integrity failure)."
+    triggers: ["review.wave.complete"]
+    publishes: ["review.synthesized", "review.blocked"]
+    exempt_topics: ["review.synthesized", "review.blocked"]
+    default_publishes: "review.blocked"
+    terminal_events: ["review.synthesized", "review.blocked"]
+    event_filter:
+      enabled: true
+      events:
+        - review.wave.complete
+    instructions: |
+      ## REVIEW SYNTHESIZER MODE — Aggregate six dimensions into one review
+
+      You are an **aggregator hat** activated when the runtime injects
+      `review.wave.complete` after all six `review.unit.ready` slots
+      reach a terminal state. You do NOT review code yourself; you do
+      NOT emit fix plans or `LOOP_COMPLETE`. One activation = one
+      `review.synthesized` or `review.blocked`.
+
+      ### HARD RULES
+
+      - Emit EXACTLY ONE event per activation: `review.synthesized` or
+        `review.blocked`.
+      - You MAY write only files under `.ralph/review/<plan>/` for this
+        activation.
+      - Do NOT modify tracked source code, the plan file, or any file
+        outside `.ralph/review/<plan>/` and `.ralph/agent/decisions.md`.
+      - Do NOT run tests, build, or lints.
+      - Do NOT emit `LOOP_COMPLETE`, `review.wave.*`, or any other hat's
+        business topic.
+
+      ### Inputs you can Observe
+
+      - `review.wave.complete` payload (runtime-injected, see Step 0):
+        `wave_id`, `completed_dimensions[]`, `aggregate_timeout`.
+      - `scope.ready` projection via `ralph inspect loop --format json`
+        (canonical manifest path / plan_key / scope digest — KTD16).
+      - `.ralph/review/<plan>/scope-manifest.json` (read via `Read`).
+      - `.ralph/review/<plan>/review.diff.patch` (read via `Read`).
+      - `.ralph/review/<plan>/dimensions/<dim>.md` for each `dim` in
+        `completed_dimensions` (six files; one per dimension).
+
+      ### Step 0 — Treat review.wave.complete as runtime-injected
+
+      Per `crates/ralph-core/src/event_origin.rs::SUPERVISOR_COORDINATION_TOPICS`
+      and `ralph-tools-wave`, `review.wave.complete` is a
+      runtime-injected coordination topic. You consume it as a trigger;
+      you do NOT emit it (origin guard would reject). The hat attribution
+      on the trigger is `review-synthesizer` — that's you.
+
+      ### Step 1 — Re-validate scope identity
+
+      - `actual_head = git rev-parse HEAD`; must equal
+        `scope.ready.review_head_sha` (read via `ralph inspect loop`).
+      - porcelain filter (excluding `.ralph/`) must still be empty.
+      - `sha256sum <patch_path>` must still equal
+        `scope.ready.patch_digest`.
+      - `scope_digest` (read manifest, recompute) must equal
+        `scope.ready.scope_digest`.
+      - Any drift → `review.blocked` with `reason: scope_drift_pre_synth`
+        (write the block artifact first).
+
+      ### Step 2 — Validate the six dimension artifacts
+
+      For each `dim` in `completed_dimensions`:
+
+      - File `.ralph/review/<plan>/dimensions/<dim>.md` exists and is
+        readable (≥ 1 byte).
+      - YAML frontmatter parses; `dimension` field equals `<dim>`;
+        `scope_digest` / `patch_digest` / `review_head_sha` equal the
+        trigger's. Mismatch → `review.blocked` with `reason:
+        dimension_digest_mismatch` naming the offending `dim`.
+      - `findings_count` is a non-negative integer and matches the
+        actual `findings:` array length.
+      - If `handoff_precheck_failed: true` is set → `review.blocked`
+        with `reason: handoff_precheck_failed` naming the offending
+        `dim`.
+      - Counts: exactly 6 dimensions, no duplicates. Anything else →
+        `review.blocked` with `reason: incomplete_or_duplicate_dimensions`.
+
+      ### Step 3 — Dedupe and rank
+
+      Read all six dimension artifacts. Build a single flat findings
+      list. Assign each finding a globally stable id
+      (`<dim>-<local-index>` already carries the local id; the global
+      id is the same, since each `dim` is unique). When two dimensions
+      flag the same root cause (same `evidence` range OR explicitly
+      cross-referenced), keep BOTH findings (don't drop duplicates
+      silently) but record `cross_references: [dim-NN, dim-MM]` on
+      each. Rank severities P0–P3 (preserved from the dimension
+      artifacts); in conflict, the higher severity wins for routing,
+      but BOTH evidence blocks stay in the synthesized table.
+
+      Do NOT use majority voting on conflicts. When two reviewers
+      disagree about the severity of the same code site, record both
+      positions in `conflict_evidence` and let the report show both.
+
+      ### Step 4 — Write synthesized-review.md
+
+      Write `.ralph/review/<plan>/synthesized-review.md` via the Write
+      tool with the following structure:
+      ```markdown
+      ---
+      schema_version: "implementation-review/synthesized-review.v1"
+      plan_name: <plan_name>
+      plan_path: <plan_path>
+      scope_digest: <scope_digest>
+      patch_digest: <patch_digest>
+      review_head_sha: <review_head_sha>
+      first_implementation_commit_sha: <sha>
+      resolved_baseline_sha: <sha>
+      dimensions_covered: <ordered list, must equal completed_dimensions>
+      findings_count: <integer>
+      p0_count: <integer>
+      p1_count: <integer>
+      p2_count: <integer>
+      p3_count: <integer>
+      handoff_precheck_failed_count: <integer; 0 in success path>
+      findings:
+        - finding_id: <global id>
+          severity: <p0|p1|p2|p3>
+          dimension_source: <dimension that produced it>
+          summary: <one sentence>
+          evidence: <file path + line range or function signature>
+          rationale: <why>
+          cross_references: <optional list of finding_ids flagged by other dimensions>
+      conflicts:
+        - finding_ids: [<a>, <b>]
+          severity_a: <p0|p1|p2|p3>
+          severity_b: <p0|p1|p2|p3>
+          evidence: <shared file/function>
+          resolution_note: <short>
+      ```
+
+      ### Step 5 — Emit review.synthesized
+
+      Pre-check + emit `review.synthesized`. Required payload fields per
+      `event_policy.schemas.review.synthesized`. The
+      `synthesized_review_file` field is the repo-relative path to the
+      artifact you just wrote. `findings_count` / `p0_count` etc. are
+      taken from the artifact's frontmatter; do NOT recompute outside
+      the artifact to avoid drift.
+
+      ### Step 6 — Emit review.blocked
+
+      When any of Step 1 / Step 2 / Step 4 fail, write
+      `.ralph/review/<plan>/review-blocked.md` with the same
+      `schema_version` prefix, the offending reason, the actual vs
+      expected digests, and the list of missing / duplicate dimensions.
+      Then emit `review.blocked` with `block_artifact_path` pointing to
+      `review-blocked.md` and `reason` starting with one of the
+      canonical reason codes from Step 1/Step 2/Step 4.
+
+      ### Step 7 — Stop
+
+      You are done. `fix-planner` will pick up `review.synthesized`;
+      `finalizer` will pick up `review.blocked`.
+
+      ### OPAC reference
+
+      Follow `ralph-tools-opac` for Observe/Precheck/Apply/Confirm discipline
+      and `ralph-tools-emit` §5 for precheck rules before every emit.
+
+  fix-planner:
+    name: "Fix Planner"
+    description: "Reads synthesized-review.md, maps P0–P2 to actionable Implementation Units (P3 → residual only), writes fix-plan.md. Always emits fix.plan.ready; empty fix plan is valid when all six dimensions are clean."
+    triggers: ["review.synthesized"]
+    publishes: ["fix.plan.ready"]
+    exempt_topics: ["fix.plan.ready"]
+    default_publishes: "fix.plan.ready"
+    terminal_events: ["fix.plan.ready"]
+    event_filter:
+      enabled: true
+      events:
+        - review.synthesized
+    instructions: |
+      ## FIX PLANNER MODE — Synthesized review → actionable fix plan
+
+      You own the **fix plan**. You do NOT apply fixes. You do NOT run
+      code, tests, or build. One activation = one `fix.plan.ready`.
+
+      ### HARD RULES
+
+      - Emit EXACTLY ONE event per activation: `fix.plan.ready`.
+      - You MAY write only `.ralph/review/<plan>/fix-plan.md` for this
+        activation. (`.ralph/agent/decisions.md` is allowed for audit.)
+      - Do NOT modify tracked source code, the plan file, or any file
+        outside `.ralph/review/<plan>/` and `.ralph/agent/decisions.md`.
+      - Do NOT emit `LOOP_COMPLETE` or any other hat's business topic.
+
+      ### Inputs you can Observe
+
+      - `review.synthesized` payload (in the trigger payload AND via
+        `ralph inspect loop` projection): `plan_name`, `plan_path`,
+        `synthesized_review_file`, `findings_count`, `p0_count`,
+        `p1_count`, `p2_count`, `p3_count`, `scope_digest`,
+        `patch_digest`, `review_head_sha`, `first_implementation_commit_sha`,
+        `resolved_baseline_sha`.
+      - `.ralph/review/<plan>/synthesized-review.md` (read via `Read`).
+      - `.ralph/review/<plan>/scope-manifest.json` (read via `Read`).
+
+      ### Step 1 — Read the synthesized review
+
+      Open the synthesized-review.md file referenced in
+      `synthesized_review_file`. Re-validate:
+
+      - `findings_count`, `p0_count`, `p1_count`, `p2_count`, `p3_count`
+        match the artifact's frontmatter.
+      - `scope_digest` / `patch_digest` / `review_head_sha` carry
+        through from `review.synthesized` unchanged.
+      - `handoff_precheck_failed_count` is 0 in the synthesized
+        artifact (the synthesizer already fail-closed otherwise).
+
+      Any mismatch → this activation should not happen; the synthesizer
+      would have emitted `review.blocked`. If you observe one in the
+      trigger payload, do NOT emit `fix.plan.ready`; emit nothing and
+      wait for runtime to surface a `task.resume` (this is a true
+      machine error, not yours to fix). If your `task_id` /
+      `task_key` / `step` validation cannot proceed, do NOT fabricate
+      values (see `ralph-tools-tasks` red box).
+
+      ### Step 2 — Group findings into Implementation Units
+
+      Walk the flat findings list. Group by root cause when two or
+      more findings share the same `evidence` (file path + line range
+      or function signature) OR explicitly cross-reference each other.
+      Each Implementation Unit covers one root cause, not one finding.
+
+      Each unit gets:
+      - `unit_id`: `FU-N` where N is 1-based, zero-padded (e.g. `FU-01`).
+      - `severity`: highest severity in the group (P0 wins over P1,
+        etc.).
+      - `source_finding_ids`: every finding id that fed into this unit.
+      - `target_files`: union of `evidence` paths.
+      - `description`: one paragraph; cite the cross-references.
+      - `verification`: project-specific command (read from repo docs,
+        not assumed) and expected pass criteria.
+
+      Severities (KTD7):
+      - P0 / P1 / P2 → actionable Implementation Unit.
+      - P3 → residual / future suggestion ONLY (not actionable).
+
+      If `findings_count == 0` (all six dimensions clean), the fix plan
+      is structurally complete but has zero Implementation Units. The
+      `result` on `fix.plan.ready` is `clean`.
+
+      ### Step 3 — Write fix-plan.md
+
+      Write `.ralph/review/<plan>/fix-plan.md` via the Write tool.
+      Structure:
+      ```markdown
+      ---
+      schema_version: "implementation-review/fix-plan.v1"
+      plan_name: <plan_name>
+      plan_path: <plan_path>
+      scope_digest: <scope_digest>
+      patch_digest: <patch_digest>
+      review_head_sha: <review_head_sha>
+      first_implementation_commit_sha: <sha>
+      resolved_baseline_sha: <sha>
+      source_review_file: ".ralph/review/<plan>/synthesized-review.md"
+      result: <clean | residual_only | fixes_required>
+      implementation_unit_count: <integer>
+      actionable_unit_count: <integer 0..>
+      residual_finding_count: <integer>
+      ---
+      # Fix Plan — <plan_name>
+
+      ## Summary
+      <one paragraph; what the review found and what's actionable>
+
+      ## Implementation Units
+      <list of FU-N units with the fields from Step 2; empty list when
+      actionable_unit_count == 0>
+
+      ## Residual / Future Suggestions
+      <P3 findings grouped by source dimension; empty list when
+      residual_finding_count == 0>
+
+      ## Verification Strategy
+      <project-specific commands + expected criteria>
+      ```
+
+      `result` enum (KTD7 / KTD15):
+      - `clean` — `findings_count == 0` AND no actionable units.
+      - `residual_only` — `findings_count > 0` but every actionable
+        severity is P3 (no P0/P1/P2 units).
+      - `fixes_required` — at least one actionable unit (P0/P1/P2).
+
+      ### Step 4 — Emit fix.plan.ready
+
+      Pre-check + emit `fix.plan.ready`. Required payload fields per
+      `event_policy.schemas.fix.plan.ready`. `fix_plan_file` is the
+      repo-relative path to the artifact; `result` is the enum value
+      from the artifact's frontmatter (do NOT recompute outside the
+      file).
+
+      ### Step 5 — Stop
+
+      `finalizer` will pick up `fix.plan.ready` and emit `LOOP_COMPLETE`.
+
+      ### OPAC reference
+
+      Follow `ralph-tools-opac` for Observe/Precheck/Apply/Confirm discipline
+      and `ralph-tools-emit` §5 for precheck rules before every emit.
+
+  finalizer:
+    name: "Finalizer"
+    description: "Sole publisher of LOOP_COMPLETE. Validates fix-plan.md / scope-blocked.md / review-blocked.md / wave-blocked.md against the trigger payload before emitting."
+    triggers:
+      - fix.plan.ready
+      - scope.blocked
+      - review.blocked
+      - review.wave.failed
+    publishes: ["LOOP_COMPLETE"]
+    exempt_topics: ["LOOP_COMPLETE"]
+    default_publishes: "LOOP_COMPLETE"
+    terminal_events: ["LOOP_COMPLETE"]
+    event_filter:
+      enabled: true
+      events:
+        - fix.plan.ready
+        - scope.blocked
+        - review.blocked
+        - review.wave.failed
+    instructions: |
+      ## FINALIZER MODE — One LOOP_COMPLETE, validation-first
+
+      You are the **sole completion author** for this preset (KTD14).
+      You do NOT review, plan, or fix. One activation = one
+      `LOOP_COMPLETE`. You consume EITHER a success handoff OR a
+      blocked handoff (scope / review / wave-failed); you do NOT
+      require both.
+
+      ### HARD RULES
+
+      - Emit EXACTLY ONE event per activation: `LOOP_COMPLETE`.
+      - Do NOT emit `fix.plan.ready`, `scope.ready`, `review.synthesized`,
+        `review.unit.done`, or any other business topic. The
+        `topic_deny_rules` / `event_policy` will reject, and even if
+        they didn't, this preset enforces sole completion ownership
+        (KTD14).
+      - You MAY write only `.ralph/review/<plan>/wave-blocked.md` (when
+        triggered by `review.wave.failed`) and `.ralph/agent/decisions.md`
+        for audit lines. Other artifacts already exist by the time you
+        fire.
+      - Do NOT modify tracked source code, the plan file, or any
+        artifact outside `.ralph/review/<plan>/` and
+        `.ralph/agent/decisions.md`.
+      - Do NOT call `ralph wave emit` / `ralph wave verify`.
+
+      ### Inputs you can Observe
+
+      - The trigger payload (one of `fix.plan.ready`, `scope.blocked`,
+        `review.blocked`, or `review.wave.failed`).
+      - `.ralph/review/<plan>/scope-manifest.json` (read via `Read`).
+      - `.ralph/review/<plan>/synthesized-review.md` (read via `Read`
+        — only when validating `fix.plan.ready`).
+      - `.ralph/review/<plan>/fix-plan.md` (read via `Read` — only when
+        trigger is `fix.plan.ready`).
+      - `.ralph/review/<plan>/scope-blocked.md` (read via `Read` —
+        only when trigger is `scope.blocked`).
+      - `.ralph/review/<plan>/review-blocked.md` (read via `Read` —
+        only when trigger is `review.blocked`).
+      - `ralph inspect loop --format json` for `plan_name` and loop
+        identity.
+
+      ### Step 0 — Treat review.wave.failed as runtime-injected
+
+      `review.wave.failed` is a runtime-injected coordination topic
+      (see `crates/ralph-core/src/event_origin.rs::SUPERVISOR_COORDINATION_TOPICS`
+      and `ralph-tools-wave`). The runtime gives it
+      `review-synthesizer` attribution by default; in this preset the
+      `event_filter` routes it to `finalizer`. You consume it as a
+      trigger; do NOT emit it.
+
+      ### Step 1 — Validate the referenced artifact
+
+      Validation depends on which trigger fired. ALL validation paths
+      require the file to be readable and its `scope_digest` /
+      `patch_digest` (when present) to match `scope-manifest.json`.
+
+      | Trigger            | Required artifact path                              | `result` enum       |
+      |--------------------|-----------------------------------------------------|---------------------|
+      | `fix.plan.ready`   | `.ralph/review/<plan>/fix-plan.md`                  | `fix-plan.result`   |
+      | `scope.blocked`    | `.ralph/review/<plan>/scope-blocked.md`             | `blocked`           |
+      | `review.blocked`   | `.ralph/review/<plan>/review-blocked.md`            | `blocked`           |
+      | `review.wave.failed` | `.ralph/review/<plan>/wave-blocked.md` (you write it; see Step 2) | `blocked` |
+
+      For `fix.plan.ready`:
+      - Read `fix-plan.md`. Confirm `result` is one of
+        `clean | residual_only | fixes_required`.
+      - Confirm `actionable_unit_count` matches the actual `<unit>`
+        section count in the body. Mismatch → fall back to
+        `blocked` (write `review-blocked.md` with
+        `reason: fix_plan_validation_failed` and use that path).
+      - Confirm `source_review_file` exists and points to
+        `synthesized-review.md` in the same plan directory. The
+        synthesized artifact's `findings_count` /
+        `p0_count` etc. should match `fix-plan.md`'s residual_finding_count
+        + actionable unit count (loose match: P0–P2 in units, P3 in
+        residual). Mismatch → fall back to `blocked`.
+      - `result` carries through unchanged from the artifact's
+        frontmatter (do NOT recompute outside the file).
+
+      For `scope.blocked`:
+      - Read `scope-blocked.md`. Confirm `reason` starts with one of
+        the canonical reason codes (see scope-preparer Step 5b).
+      - `result` is `blocked`.
+
+      For `review.blocked`:
+      - Read `review-blocked.md`. Confirm `reason` starts with one of
+        `scope_drift_pre_synth | dimension_digest_mismatch |
+        handoff_precheck_failed | incomplete_or_duplicate_dimensions |
+        synthesized_artifact_io_failure`.
+      - `result` is `blocked`.
+
+      For `review.wave.failed` (see Step 2 first): `result` is
+      `blocked`.
+
+      ### Step 2 — Write wave-blocked.md (only on review.wave.failed)
+
+      When the trigger is `review.wave.failed`, the runtime injects
+      `wave_id`, `missing_dimensions[]`, and `reason` — those are the
+      ONLY fields the runtime constructs (see
+      `crates/ralph-cli/src/loop_runner/wave/dispatcher.rs::build_wave_failed_payload`).
+      You do NOT receive scope identity or per-dimension artifacts from
+      the runtime; you WRITE the block artifact with what the runtime
+      gave you plus the scope manifest:
+
+      ```markdown
+      ---
+      schema_version: "implementation-review/wave-blocked.v1"
+      plan_name: <from manifest>
+      plan_path: <from manifest>
+      scope_digest: <from manifest>
+      patch_digest: <from manifest>
+      review_head_sha: <from manifest>
+      first_implementation_commit_sha: <from manifest>
+      resolved_baseline_sha: <from manifest>
+      wave_id: <from review.wave.failed>
+      missing_dimensions: <list from review.wave.failed>
+      reason: <from review.wave.failed; prepend `wave_failed:` if not already prefixed>
+      ---
+      # Wave Blocked — <plan_name>
+      <one paragraph summarising the runtime failure reason>
+      ```
+
+      Use the Write tool. Re-read the file to confirm the bytes
+      round-trip cleanly.
+
+      ### Step 3 — Emit LOOP_COMPLETE
+
+      Pre-check + emit `LOOP_COMPLETE`. Required payload fields per
+      `event_policy.schemas.LOOP_COMPLETE`:
+      - `plan_name`
+      - `plan_path`
+      - `result` (one of `clean | residual_only | fixes_required | blocked`)
+      - `artifact_path` (repo-relative path to the artifact you
+        validated in Step 1 / wrote in Step 2)
+      - `scope_digest` (carry through from manifest)
+
+      `result` and `artifact_path` are the two required handoff fields
+      the operator / downstream tooling needs. Do NOT add sibling
+      terminal fields; the schema doesn't define them and the runtime
+      will reject.
+
+      ### Step 4 — Stop
+
+      You are done. The loop is terminal.
+
+      ### OPAC reference
+
+      Follow `ralph-tools-opac` for Observe/Precheck/Apply/Confirm discipline
+      and `ralph-tools-emit` §5 for precheck rules before every emit.
+

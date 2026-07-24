@@ -100,17 +100,18 @@ test -f "$RUN/.ralph/loop.lock" && echo "LOCK_HELD" || echo "lock_released"
 
 在写《产物盘点表》之前，按主 skill「Phase 0 能力推断」段产出 `execution_capabilities`（字符串数组）。检测信号冻结在 [`../../ralph-preset-common/references/agent-native-model.md`](../../ralph-preset-common/references/agent-native-model.md)「执行模型（Execution Model）」段：
 
-| 信号 | → capability |
+| 信号 | → capability / Observe |
 |------|----------------|
 | `event_loop.supervisor.enabled: true` | +supervisor |
 | hat `instructions` 含 `ralph wave emit` / `ralph wave verify`，或 `## WAVE CONTEXT` | +wave |
 | events 含 `wave_id` | +wave（产物侧） |
-| `.ralph/supervisor.db` 存在 | +supervisor（**仅**当 YAML 也声明；产物不推翻配置） |
+| `.ralph/supervisor.db` 存在 | ledger 证据：YAML 已 enabled 时加固 +supervisor；enabled=false 时仍可能让 `ralph inspect loop` JSON 出现 `supervisor` 键（default-wave）——先 `has("supervisor")`，**不要**用 enabled=false 断言无键 |
 
 **硬规则**：
 
 - **禁止**用 `exec.wave.*` / `slot.*` 推断 +wave（协调 topic ≠ wave fan-out）。
 - 能力集合为单链（或不含 supervisor/wave）时：缺 `.ralph/supervisor.db`、events 无 `wave_id` 均为**预期**，**不**标故障。
+- `inspect` 的 `supervisor` 块门控 = **enabled 或盘上已有可打开 wave 账本**（与注入 skill `ralph-tools-opac` 一致）；诊断时以 JSON 是否含键为准，禁止手读 ledger 文件内容。
 - 将 `execution_capabilities` 写入报告 §0（见 [report-template.md](report-template.md)）。
 
 ---

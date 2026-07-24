@@ -74,8 +74,8 @@ instructions 诱导非法 emit → preset + agent
 
 | capability 信号 | 期望产物 / 路径 | Confirm 路径 | 缺失判定 |
 |---|---|---|---|
-| `event_loop.supervisor.enabled: true` | `.ralph/supervisor.db` | `ralph inspect loop --format json` 的 `supervisor` 块 | 缺 db → capability +supervisor 必需时记 P0；否则 N/A |
+| `event_loop.supervisor.enabled: true` **或** `.ralph/supervisor.db` 存在 | wave/supervisor ledger（enabled 时通常有 db；default-wave 可能仅有 db） | `ralph inspect loop --format json`：先 `has("supervisor")`，为 true 再读 `supervisor` 块 | enabled=true 且缺 db → +supervisor 记 P0；enabled=false 且无 db → 无 `supervisor` 键是预期；enabled=false 但有 db → **期望**可能有 `supervisor` 键，勿当故障省略 |
 | events 含 `wave_id` | hat-channel（dispatcher）+ main ledger（worker Confirm） | worker 完成态走 `ralph events --events-source main`（main ledger） | events 无 wave_id → capability +wave 必需时记缺失；否则 N/A |
-| 既无 supervisor.enabled 又无 `ralph wave emit` | 仅 main events + tasks + Tier C | `ralph events --events-source main` + Tier C artifact | 缺 supervisor.db / wave_id 是预期，**不**列为故障 |
+| 既无 supervisor.enabled、又无盘上 ledger、又无 `ralph wave emit` | 仅 main events + tasks + Tier C | `ralph events --events-source main` + Tier C artifact | 缺 supervisor.db / wave_id / inspect `supervisor` 键是预期，**不**列为故障 |
 
 报告 §0 与 §5 引用 capability 推断结果而非 preset 名称；详见 `SKILL.md`「Phase 0 能力推断」段。

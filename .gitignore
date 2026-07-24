@@ -143,3 +143,4 @@ LEAN-CTX.md
 # Trae IDE local config
 .trae/
 .claude/
+.pi-subagents/

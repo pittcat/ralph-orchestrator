@@ -1,0 +1,530 @@
+schemas:
+  review.start:
+    required_fields: []
+    known_fields:
+    - plan_path
+    - plan_name
+    field_docs:
+      plan_path:
+        meaning: repo-relative path to the plan file the operator passed via --plan; surfaced to scope-preparer by the runner
+        source: operator CLI argument; copied from `ralph run --plan <plan>`
+        fill_rule: literal copy; do not invent a path
+      plan_name:
+        meaning: basename of plan_path without extension; downstream hat identity
+        source: operator CLI argument; runner or scope-preparer derives
+        fill_rule: literal copy or derive from plan_path basename
+  scope.ready:
+    required_fields:
+    - plan_name
+    - plan_path
+    - first_implementation_commit_sha
+    - resolved_baseline_sha
+    - review_head_sha
+    - scope_digest
+    - patch_path
+    - patch_digest
+    - scope_manifest_path
+    - dirty_verdict
+    trigger_context:
+      summary_fields:
+      - plan_name
+      - first_implementation_commit_sha
+      - resolved_baseline_sha
+      - review_head_sha
+      - scope_digest
+      - patch_digest
+      - dirty_verdict
+      routing_hints:
+      - label: scope_clean
+        conditions:
+        - field: dirty_verdict
+          op: eq
+          value: clean
+        guidance: re-verify HEAD/tree/patch_digest, then dispatch the six review.unit.ready payloads.
+      - label: scope_dirty_blocked
+        conditions:
+        - field: dirty_verdict
+          op: eq
+          value: blocked
+        guidance: do NOT emit wave; write dispatch-blocked.md and terminate this activation.
+    field_docs:
+      plan_name:
+        meaning: basename of the original plan without extension; downstream hat routing identity
+        source: scope-preparer derives from plan_path
+        fill_rule: literal copy from plan_path basename; do NOT invent
+      plan_path:
+        meaning: repo-relative path to the operator-provided plan
+        source: scope-preparer reads from the trigger payload
+        fill_rule: literal copy; do NOT modify
+      first_implementation_commit_sha:
+        meaning: the unique implementation commit C identified by Step 2; the patch INCLUDES this commit
+        source: scope-preparer resolves via candidate set + evidence
+        fill_rule: 40-char git SHA; recompute on every emit attempt
+      resolved_baseline_sha:
+        meaning: the parent of C (C^); the patch lower bound
+        source: scope-preparer resolves via `git rev-parse C^`
+        fill_rule: 40-char git SHA; recompute on every emit attempt
+      review_head_sha:
+        meaning: git SHA at HEAD at the time the patch was frozen
+        source: '`git rev-parse HEAD` before writing the patch'
+        fill_rule: 40-char git SHA; do NOT reuse a stale value
+      scope_digest:
+        meaning: hex digest binding the canonical scope manifest content (manifest minus its own digest field)
+        source: scope-preparer computes from the serialized scope-manifest.json
+        fill_rule: 16-64 hex chars; recompute after every manifest regeneration
+      patch_path:
+        meaning: repo-relative path to the binary frozen diff (`git diff --binary --no-color C^..HEAD`)
+        source: scope-preparer writes via the Write tool
+        fill_rule: literal `.ralph/review/<plan>/review.diff.patch`; do NOT fabricate the path
+      patch_digest:
+        meaning: sha256 digest of review.diff.patch bytes
+        source: scope-preparer computes after writing the patch
+        fill_rule: sha256 hex digest (64 chars); recompute on every emit attempt
+      scope_manifest_path:
+        meaning: repo-relative path to the canonical scope-manifest.json (byte-stable)
+        source: scope-preparer writes via the Write tool
+        fill_rule: literal `.ralph/review/<plan>/scope-manifest.json`; do NOT fabricate
+      dirty_verdict:
+        meaning: scope-preparer's verdict on the dirty intersection at freeze time
+        source: scope-preparer applies the Step 4 decision matrix
+        fill_rule: literal one of `clean | blocked`
+  scope.blocked:
+    required_fields:
+    - plan_name
+    - plan_path
+    - reason
+    - block_artifact_path
+    - scope_digest
+    field_docs:
+      plan_name:
+        meaning: basename of the plan without extension
+        source: scope-preparer derives from plan_path
+        fill_rule: literal copy
+      plan_path:
+        meaning: repo-relative path to the original plan
+        source: scope-preparer reads from the trigger payload
+        fill_rule: literal copy
+      reason:
+        meaning: canonical reason code identifying which Step 2/4/6 failure fired
+        source: scope-preparer
+        fill_rule: one of `plan_file_not_found | plan_file_unreadable | no_candidate | ambiguous_candidates | merge_parent_ambiguous | git_object_unreadable | root_commit | dirty_tracked_path | dirty_untracked_related
+          | dirty_unclassifiable | scope_drift_pre_emit`
+      block_artifact_path:
+        meaning: repo-relative path to scope-blocked.md containing the candidate table and evidence
+        source: scope-preparer writes via the Write tool
+        fill_rule: literal `.ralph/review/<plan>/scope-blocked.md`; do NOT fabricate
+      scope_digest:
+        meaning: scope identity at the moment of block; carried into the block artifact
+        source: scope-preparer computes
+        fill_rule: 16-64 hex chars; recompute before emit
+  review.unit.ready:
+    required_fields:
+    - plan_name
+    - plan_path
+    - scope_digest
+    - patch_path
+    - patch_digest
+    - scope_manifest_path
+    - review_head_sha
+    - first_implementation_commit_sha
+    - resolved_baseline_sha
+    - slot_index
+    - dimension
+    - idempotency_payload_version
+    field_docs:
+      plan_name:
+        meaning: basename of the plan without extension
+        source: review-dispatcher carries forward from scope.ready
+        fill_rule: literal copy; do NOT hand-write
+      plan_path:
+        meaning: repo-relative path to the original plan
+        source: review-dispatcher carries forward from scope.ready
+        fill_rule: literal copy
+      scope_digest:
+        meaning: frozen scope identity; carried into each payload byte-for-byte
+        source: review-dispatcher carries forward from scope.ready
+        fill_rule: literal copy; do NOT hand-write
+      patch_path:
+        meaning: repo-relative path to the frozen review.diff.patch
+        source: review-dispatcher carries forward from scope.ready
+        fill_rule: literal copy
+      patch_digest:
+        meaning: sha256 digest of review.diff.patch; carried forward byte-stable
+        source: review-dispatcher carries forward from scope.ready
+        fill_rule: sha256 hex digest (64 chars)
+      scope_manifest_path:
+        meaning: repo-relative path to scope-manifest.json
+        source: review-dispatcher carries forward from scope.ready
+        fill_rule: literal copy
+      review_head_sha:
+        meaning: git SHA at HEAD at freeze time
+        source: review-dispatcher carries forward from scope.ready
+        fill_rule: 40-char git SHA
+      first_implementation_commit_sha:
+        meaning: the implementation commit C; the patch INCLUDES C's changes
+        source: review-dispatcher carries forward from scope.ready
+        fill_rule: 40-char git SHA
+      resolved_baseline_sha:
+        meaning: the patch lower bound (C^)
+        source: review-dispatcher carries forward from scope.ready
+        fill_rule: 40-char git SHA
+      slot_index:
+        meaning: zero-based slot position in the six-payload batch (0..5); corresponds to dimension order
+        source: review-dispatcher enumerates 0..5 with the canonical dimension order
+        fill_rule: integer 0..5; unique across the batch
+      dimension:
+        meaning: the dimension this slot reviews; one of the six canonical names
+        source: review-dispatcher enumerates with the canonical dimension order
+        fill_rule: one of `goal-alignment | correctness | testing | maintainability | project-standards | adversarial`
+      idempotency_payload_version:
+        meaning: monotonic integer bumped when the dispatcher changes payload shape; lets dedup distinguish same-payload retries from payload-shape drift
+        source: review-dispatcher
+        fill_rule: integer >= 1; bump when the payload schema changes
+  review.unit.done:
+    required_fields:
+    - plan_name
+    - plan_path
+    - scope_digest
+    - patch_digest
+    - review_head_sha
+    - dimension
+    - slot_index
+    - findings_count
+    - findings_file
+    - handoff_precheck_failed
+    field_docs:
+      plan_name:
+        meaning: basename of the plan without extension
+        source: review-worker carries forward from review.unit.ready
+        fill_rule: literal copy
+      plan_path:
+        meaning: repo-relative path to the original plan
+        source: review-worker carries forward
+        fill_rule: literal copy
+      scope_digest:
+        meaning: frozen scope identity; carried byte-stable
+        source: review-worker carries forward
+        fill_rule: literal copy
+      patch_digest:
+        meaning: frozen patch digest; carried byte-stable
+        source: review-worker carries forward
+        fill_rule: sha256 hex digest (64 chars)
+      review_head_sha:
+        meaning: frozen review HEAD SHA; carried byte-stable
+        source: review-worker carries forward
+        fill_rule: 40-char git SHA
+      dimension:
+        meaning: the dimension this worker reviewed
+        source: review-worker reads from trigger payload
+        fill_rule: literal copy of trigger's dimension field
+      slot_index:
+        meaning: slot position in the six-payload batch
+        source: review-worker reads from trigger payload
+        fill_rule: literal copy
+      findings_count:
+        meaning: integer count of findings in the dimension artifact; 0 when the dimension is clean
+        source: review-worker writes the dimension artifact, then reads the artifact's findings_count
+        fill_rule: non-negative integer; do NOT fabricate
+      findings_file:
+        meaning: repo-relative path to the dimension artifact written by this worker
+        source: review-worker writes via the Write tool
+        fill_rule: literal `.ralph/review/<plan>/dimensions/<dimension>.md`; do NOT fabricate
+      handoff_precheck_failed:
+        meaning: true when the entry or exit precheck detected scope drift / dirty tracked writes; review-synthesizer fail-closes on any true value
+        source: review-worker sets true on precheck violation
+        fill_rule: literal boolean; default false
+  review.wave.complete:
+    required_fields:
+    - wave_id
+    - completed_dimensions
+    - aggregate_timeout
+    field_docs:
+      wave_id:
+        meaning: shared wave id binding the six review.unit.done events from the same batch
+        source: runtime (`build_wave_complete_payload`)
+        fill_rule: literal copy from the trigger payload; do NOT recompute
+      completed_dimensions:
+        meaning: ordered list of dimensions that produced a review.unit.done (collected from the per-slot `dimension` field, falling back to `assigned_dimensions`)
+        source: runtime (`build_wave_complete_payload`)
+        fill_rule: literal copy; must equal exactly six entries (or fail-close)
+      aggregate_timeout:
+        meaning: wave's aggregate timeout window in seconds; informational only
+        source: runtime (`build_wave_complete_payload`)
+        fill_rule: non-negative integer
+  review.wave.failed:
+    required_fields:
+    - wave_id
+    - missing_dimensions
+    - reason
+    field_docs:
+      wave_id:
+        meaning: shared wave id that failed to aggregate
+        source: runtime (`build_wave_failed_payload`)
+        fill_rule: literal copy
+      missing_dimensions:
+        meaning: dimensions that did NOT produce a review.unit.done before the wave's failure condition
+        source: runtime (`build_wave_failed_payload`)
+        fill_rule: literal copy
+      reason:
+        meaning: runtime failure reason string (timeout / spawn_failed / partial / etc.)
+        source: runtime (`build_wave_failed_payload`)
+        fill_rule: literal copy
+  review.synthesized:
+    required_fields:
+    - plan_name
+    - plan_path
+    - scope_digest
+    - patch_digest
+    - review_head_sha
+    - first_implementation_commit_sha
+    - resolved_baseline_sha
+    - synthesized_review_file
+    - dimensions_covered
+    - findings_count
+    - p0_count
+    - p1_count
+    - p2_count
+    - p3_count
+    - handoff_precheck_failed_count
+    trigger_context:
+      summary_fields:
+      - plan_name
+      - findings_count
+      - p0_count
+      - p1_count
+      - p2_count
+      - p3_count
+      - handoff_precheck_failed_count
+      - synthesized_review_file
+      - scope_digest
+      routing_hints:
+      - label: all_clean
+        conditions:
+        - field: findings_count
+          op: eq
+          value: 0
+        guidance: empty fix plan still valid; fix.plan.ready.result must be `clean`.
+      - label: has_p0_p1_p2
+        conditions:
+        - field: findings_count
+          op: gt
+          value: 0
+        guidance: P0/P1/P2 -> actionable Implementation Units; P3 -> residual; result=residual_only or fixes_required.
+      - label: handoff_precheck_failed
+        conditions:
+        - field: handoff_precheck_failed_count
+          op: gt
+          value: 0
+        guidance: synthesizer should have emitted review.blocked; do NOT act on review.synthesized here.
+    field_docs:
+      plan_name:
+        meaning: basename of the plan without extension
+        source: review-synthesizer carries forward from scope.ready
+        fill_rule: literal copy
+      plan_path:
+        meaning: repo-relative path to the original plan
+        source: review-synthesizer carries forward
+        fill_rule: literal copy
+      scope_digest:
+        meaning: frozen scope identity; carried forward
+        source: review-synthesizer carries forward
+        fill_rule: literal copy
+      patch_digest:
+        meaning: frozen patch digest; carried forward
+        source: review-synthesizer carries forward
+        fill_rule: sha256 hex digest (64 chars)
+      review_head_sha:
+        meaning: frozen review HEAD SHA; carried forward
+        source: review-synthesizer carries forward
+        fill_rule: 40-char git SHA
+      first_implementation_commit_sha:
+        meaning: the implementation commit C
+        source: review-synthesizer carries forward
+        fill_rule: 40-char git SHA
+      resolved_baseline_sha:
+        meaning: the patch's lower bound (C^)
+        source: review-synthesizer carries forward
+        fill_rule: 40-char git SHA
+      synthesized_review_file:
+        meaning: repo-relative path to synthesized-review.md
+        source: review-synthesizer writes via the Write tool
+        fill_rule: literal `.ralph/review/<plan>/synthesized-review.md`; do NOT fabricate
+      dimensions_covered:
+        meaning: ordered list of dimensions that produced a review.unit.done
+        source: review-synthesizer
+        fill_rule: literal copy from completed_dimensions in review.wave.complete; must have exactly six entries
+      findings_count:
+        meaning: total findings across all six dimensions after dedupe
+        source: review-synthesizer
+        fill_rule: non-negative integer
+      p0_count:
+        meaning: P0 severity count after dedupe
+        source: review-synthesizer
+        fill_rule: non-negative integer; sum of P0 across all dimensions
+      p1_count:
+        meaning: P1 severity count after dedupe
+        source: review-synthesizer
+        fill_rule: non-negative integer
+      p2_count:
+        meaning: P2 severity count after dedupe
+        source: review-synthesizer
+        fill_rule: non-negative integer
+      p3_count:
+        meaning: P3 severity count after dedupe (residual only)
+        source: review-synthesizer
+        fill_rule: non-negative integer
+      handoff_precheck_failed_count:
+        meaning: number of dimensions that reported handoff_precheck_failed == true; success path = 0
+        source: review-synthesizer
+        fill_rule: non-negative integer; 0 in success path
+  review.blocked:
+    required_fields:
+    - plan_name
+    - plan_path
+    - reason
+    - block_artifact_path
+    - scope_digest
+    field_docs:
+      plan_name:
+        meaning: basename of the plan without extension
+        source: review-synthesizer
+        fill_rule: literal copy
+      plan_path:
+        meaning: repo-relative path to the original plan
+        source: review-synthesizer
+        fill_rule: literal copy
+      reason:
+        meaning: canonical reason code identifying which Step 1/2/4 failure fired
+        source: review-synthesizer
+        fill_rule: one of `scope_drift_pre_synth | dimension_digest_mismatch | handoff_precheck_failed | incomplete_or_duplicate_dimensions | synthesized_artifact_io_failure`
+      block_artifact_path:
+        meaning: repo-relative path to review-blocked.md
+        source: review-synthesizer writes via the Write tool
+        fill_rule: literal `.ralph/review/<plan>/review-blocked.md`; do NOT fabricate
+      scope_digest:
+        meaning: scope identity at the moment of block
+        source: review-synthesizer
+        fill_rule: 16-64 hex chars
+  fix.plan.ready:
+    required_fields:
+    - plan_name
+    - plan_path
+    - scope_digest
+    - patch_digest
+    - review_head_sha
+    - first_implementation_commit_sha
+    - resolved_baseline_sha
+    - fix_plan_file
+    - result
+    - implementation_unit_count
+    - actionable_unit_count
+    - residual_finding_count
+    - source_review_file
+    trigger_context:
+      summary_fields:
+      - plan_name
+      - result
+      - actionable_unit_count
+      - residual_finding_count
+      - fix_plan_file
+      - scope_digest
+      routing_hints:
+      - label: clean
+        conditions:
+        - field: result
+          op: eq
+          value: clean
+        guidance: actionable_unit_count==0; finalizer emits LOOP_COMPLETE{result:clean,artifact_path:fix_plan_file}.
+      - label: residual_only
+        conditions:
+        - field: result
+          op: eq
+          value: residual_only
+        guidance: only P3 remains; finalizer emits LOOP_COMPLETE{result:residual_only,artifact_path:fix_plan_file}.
+      - label: fixes_required
+        conditions:
+        - field: result
+          op: eq
+          value: fixes_required
+        guidance: actionable_unit_count>=1; LOOP_COMPLETE{result:fixes_required,artifact_path:fix_plan_file}; SUCCESS, not failure.
+    field_docs:
+      plan_name:
+        meaning: basename of the plan without extension
+        source: fix-planner carries forward from review.synthesized
+        fill_rule: literal copy
+      plan_path:
+        meaning: repo-relative path to the original plan
+        source: fix-planner carries forward
+        fill_rule: literal copy
+      scope_digest:
+        meaning: frozen scope identity; carried forward
+        source: fix-planner carries forward
+        fill_rule: literal copy
+      patch_digest:
+        meaning: frozen patch digest; carried forward
+        source: fix-planner carries forward
+        fill_rule: sha256 hex digest (64 chars)
+      review_head_sha:
+        meaning: frozen review HEAD SHA; carried forward
+        source: fix-planner carries forward
+        fill_rule: 40-char git SHA
+      first_implementation_commit_sha:
+        meaning: the implementation commit C
+        source: fix-planner carries forward
+        fill_rule: 40-char git SHA
+      resolved_baseline_sha:
+        meaning: the patch's lower bound (C^)
+        source: fix-planner carries forward
+        fill_rule: 40-char git SHA
+      fix_plan_file:
+        meaning: repo-relative path to fix-plan.md
+        source: fix-planner writes via the Write tool
+        fill_rule: literal `.ralph/review/<plan>/fix-plan.md`; do NOT fabricate
+      result:
+        meaning: synthesized outcome of the review run; one of clean / residual_only / fixes_required
+        source: fix-planner derives from findings severity distribution
+        fill_rule: one of `clean | residual_only | fixes_required`
+      implementation_unit_count:
+        meaning: total Implementation Units in fix-plan.md (P0-P2 + 0 when clean)
+        source: fix-planner
+        fill_rule: non-negative integer; equals actionable_unit_count (P3 never maps to actionable units)
+      actionable_unit_count:
+        meaning: P0-P2 actionable units (excludes P3)
+        source: fix-planner
+        fill_rule: non-negative integer; 0 when result is clean or residual_only
+      residual_finding_count:
+        meaning: P3 findings kept in residual only
+        source: fix-planner
+        fill_rule: non-negative integer
+      source_review_file:
+        meaning: repo-relative path to synthesized-review.md that fix-plan was derived from
+        source: fix-planner carries forward from review.synthesized
+        fill_rule: literal copy
+  LOOP_COMPLETE:
+    required_fields:
+    - plan_name
+    - plan_path
+    - result
+    - artifact_path
+    - scope_digest
+    field_docs:
+      plan_name:
+        meaning: basename of the plan without extension
+        source: finalizer carries forward from the trigger
+        fill_rule: literal copy
+      plan_path:
+        meaning: repo-relative path to the original plan
+        source: finalizer carries forward
+        fill_rule: literal copy
+      result:
+        meaning: terminal outcome of the review run
+        source: finalizer
+        fill_rule: one of `clean | residual_only | fixes_required | blocked`
+      artifact_path:
+        meaning: 'repo-relative path to the terminal artifact: fix-plan.md (success / residual / fixes) or wave-blocked.md / scope-blocked.md / review-blocked.md (blocked)'
+        source: finalizer
+        fill_rule: do NOT fabricate; the path is the file the finalizer just validated
+      scope_digest:
+        meaning: frozen scope identity at completion time
+        source: finalizer carries forward from scope-manifest.json
+        fill_rule: 16-64 hex chars

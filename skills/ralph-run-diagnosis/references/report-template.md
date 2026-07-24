@@ -27,7 +27,7 @@ diagnostics_mode: FULL | MINIMAL | LOGS_ONLY | DISABLED
 > **对照 preset**: `<preset_file>` + `presets/schemas/<name>.yml`
 > **执行方式**: 4 sub-agent 并行（流程还原 / 历史 / 对账 / 归因）→ 汇总
 > **Diagnostics 模式**: FULL | MINIMAL | LOGS_ONLY | DISABLED
-> **execution_capabilities**: [single-chain | wave | supervisor | supervisor+wave 的子集]（Phase 0 推断结果; 由 `event_loop.supervisor.enabled` / hat `ralph wave emit` / `.ralph/supervisor.db` 存在 / events 含 `wave_id` 等 capability 信号决定; **禁止**按 builtin preset 名称点名; 详见 `SKILL.md`「Phase 0 能力推断」段）
+> **execution_capabilities**: [single-chain | wave | supervisor | supervisor+wave 的子集]（Phase 0 推断结果; 由 `event_loop.supervisor.enabled` / hat `ralph wave emit` / `.ralph/supervisor.db` 存在 / events 含 `wave_id` 等 capability 信号决定; **`ralph inspect loop` 的 `supervisor` 键**在 enabled **或** 盘上已有可打开 wave 账本时出现，先 `has("supervisor")`；**禁止**按 builtin preset 名称点名; 详见 `SKILL.md`「Phase 0 能力推断」段）
 > **报告仓库**: `ralph-orchestrator` 主仓（非 run_dir）
 > **Tier C 根**: （从 preset+schema 解析）
 > **置信度规则**: §5 仅收录 confidence≥60；P0 须 confidence≥70（见 confidence-rubric）

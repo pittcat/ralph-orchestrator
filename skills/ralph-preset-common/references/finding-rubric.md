@@ -184,7 +184,7 @@ Review skill 将 mechanical lint 与软性 AAF 缺口映射为 P0/P1/P2 + confid
 | 缺口 | Severity | category | aaf_question | finding_id |
 |---|---|---|---|---|
 | 非 dispatcher hat `instructions` 要求 / 暗示调用 `ralph wave emit` 或 `ralph wave verify` | P0 | feasibility | Q3 | `preset.wave_worker_calls_wave_emit` |
-| dispatcher 在 `ralph wave emit --payloads-stdin` 之前未先跑 `ralph wave verify --payloads-stdin` 预检 | P0 | opac | Q3 / Q4 | `preset.wave_missing_verify_before_emit` |
+| dispatcher 在 `ralph wave emit --payloads-stdin` 之前未先跑 `ralph wave verify --payloads-stdin`（拿 ticket）预检 | P0 | opac | Q3 / Q4 | `preset.wave_missing_verify_before_emit` |
 | worker 完成态由 hat-channel 验证（应走 `ralph events --events-source main`） | P0 | visibility | Q2 | `preset.wave_confirm_uses_hat_channel` |
 | 任何 hat `publishes` 含 `wave.*` / `exec.wave.*` 等协调 topic | P0 | topology | Q4 | `preset.wave_agent_emits_coordination_topic` |
 

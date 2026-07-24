@@ -70,14 +70,14 @@ Diagnostics 四档：`FULL` | `MINIMAL` | `LOGS_ONLY` | `DISABLED` — 决定 L2
    - hat `instructions` 含 `ralph wave emit` / `ralph wave verify`，或 hat 依赖 `## WAVE CONTEXT` → capability +wave
    - **禁止**用 `exec.wave.*` / `slot.*` 等协调 topic 推断 +wave（那些是 supervisor 协调面，走 supervisor audit，不是 wave fan-out 信号）
 3. 解析 Intent（如有作者 notes）：`execution_model: wave | supervisor | supervisor+wave` → 与上面 capability 一致则 OK；不一致 → 主表 P0（详见 [`../ralph-preset-common/references/finding-rubric.md`](../ralph-preset-common/references/finding-rubric.md)「Supervisor capability audit」段 `preset.execution_model_intent_mismatch`）。
-4. 扫描产物：
-   - `.ralph/supervisor.db` 存在 → capability +supervisor（**仅**当上一步 YAML 也声明；产物不应推翻配置）
+4. 扫描产物与 Observe 门控：
+   - `.ralph/supervisor.db` 存在 → ledger 证据。若 YAML 已 `supervisor.enabled: true`，加固 +supervisor；若 enabled=false（常见 default-wave），**不要**因此否定 `ralph inspect loop` 可能出现的 `supervisor` 键——键在 **enabled 或盘上已有可打开 wave 账本** 时都会出现；先 `jq 'has("supervisor")'` 再读块
    - events 含 `wave_id` → capability +wave
 5. 输出到报告 §0 的 **`execution_capabilities`** 字段（字符串数组），例如 `["single-chain"]` / `["wave"]` / `["supervisor", "wave"]`。
 
-**缺 db / 缺 wave_id 不算故障（hard rule）**：在 capability 推断结果为单链时，缺 `.ralph/supervisor.db` 是**预期**，**不**是异常；events 无 `wave_id` 也是**预期**，**不**是异常。**仅**当 capability +supervisor 时缺 db 才列为缺失（runtime 异常）；**仅**当 capability +wave 时缺 wave_id 对账才列为缺失。
+**缺 db / 缺 wave_id 不算故障（hard rule）**：在 capability 推断结果为单链时，缺 `.ralph/supervisor.db` 是**预期**，**不**是异常；events 无 `wave_id` 也是**预期**，**不**是异常。**仅**当 capability +supervisor（YAML `supervisor.enabled: true`）时缺 db 才列为缺失（runtime 异常）；**仅**当 capability +wave 时缺 wave_id 对账才列为缺失。`inspect` JSON **无** `supervisor` 键：仅当 enabled=false **且** 盘上无 ledger 时为预期；不要把「enabled=false」单独当成「必无 supervisor 键」。
 
-**wave Confirm 路径**：capability +wave 时，worker / dispatcher 完成态由 `ralph events --events-source main`（main ledger）对账；hat-channel 是 dispatcher 自己 private 落盘点，**不**用作 wave Confirm。L3 / L4 验证按 `references/mechanism-checklist.md`（如有 wave Confirm 源行则引用）。
+**wave Confirm 路径**：capability +wave（产物侧常见 `wave_id`）时，worker / dispatcher 完成态由 `ralph events --events-source main`（main ledger）对账；hat-channel 是 dispatcher 自己 private 落盘点，**不**用作 wave Confirm。L3 / L4 验证按 `references/mechanism-checklist.md`（如有 wave Confirm 源行则引用）。
 
 ## Phase 1–3 Sub-Agent
 
