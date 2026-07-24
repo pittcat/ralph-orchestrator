@@ -594,23 +594,14 @@ fn load_opt_in_flow_declaration(
     config: &crate::config::RalphConfig,
 ) -> Option<crate::event_loop::flow_declaration::FlowDeclaration> {
     use crate::event_loop::flow_declaration::FlowDeclaration;
-    config
-        .mechanism
-        .as_ref()
+    // Typed conversion — do NOT serde_yaml round-trip. Wrapping
+    // `to_string(flow_cfg)` under `mechanism:\n  flow:\n` left the
+    // body unindented, so `mechanism.flow` parsed as null and
+    // `FlowStepScopeStage` rejected every emit with
+    // `flow_step_undeclared` (work.ready never reached task-planner).
+    effective_mechanism_config(config)
         .and_then(|m| m.flow.as_ref())
-        .or_else(|| {
-            config
-                .event_loop
-                .mechanism
-                .as_ref()
-                .and_then(|m| m.flow.as_ref())
-        })
-        .and_then(|flow_cfg| {
-            serde_yaml::to_string(flow_cfg)
-                .ok()
-                .map(|flow| format!("mechanism:\n  flow:\n{flow}"))
-        })
-        .and_then(|yaml| FlowDeclaration::from_yaml(&yaml).ok())
+        .and_then(|flow_cfg| FlowDeclaration::from_config(flow_cfg).ok())
 }
 
 fn effective_mechanism_config(
@@ -14097,10 +14088,9 @@ fn extract_step_id(payload: &str) -> Option<String> {
 /// attempt" (the topology cache stays empty, which is the
 /// pre-existing fail-closed state).
 fn initial_current_plan_step(config: &RalphConfig) -> String {
-    config
-        .event_loop
-        .mechanism
-        .as_ref()
+    // Top-level `mechanism:` is the preset SSOT; fall back to
+    // legacy `event_loop.mechanism` via `effective_mechanism_config`.
+    effective_mechanism_config(config)
         .and_then(|m| m.flow.as_ref())
         .and_then(|f| f.steps.first())
         .map(|s| s.id.clone())
@@ -14138,7 +14128,7 @@ pub(crate) fn advance_plan_step(
     if current.is_empty() {
         return None;
     }
-    let flow = config.event_loop.mechanism.as_ref()?.flow.as_ref()?;
+    let flow = effective_mechanism_config(config)?.flow.as_ref()?;
     let steps = &flow.steps;
     let idx = steps.iter().position(|s| s.id == current)?;
     let step = &steps[idx];
@@ -14197,6 +14187,32 @@ mod u4_current_plan_step_tests {
             ..EventLoopConfig::default()
         };
         cfg
+    }
+
+    #[test]
+    fn initial_returns_first_step_id_from_top_level_mechanism() {
+        // Preset SSOT is top-level `mechanism:`, not
+        // `event_loop.mechanism`. initial_current_plan_step must
+        // read via effective_mechanism_config.
+        let mut cfg = RalphConfig::default();
+        cfg.mechanism = Some(MechanismConfig {
+            flow: Some(FlowDeclarationConfig {
+                flow_type: "declared".to_string(),
+                version: 1,
+                terminal_emits: vec!["LOOP_COMPLETE".to_string()],
+                steps: vec![FlowStepConfig {
+                    id: "unit_loop".to_string(),
+                    kind: None,
+                    allowed_emits: vec!["work.ready".to_string()],
+                    terminal_when: None,
+                    on_partial: std::collections::BTreeMap::new(),
+                    runs: None,
+                }],
+                ..FlowDeclarationConfig::default()
+            }),
+            phase_authority: None,
+        });
+        assert_eq!(initial_current_plan_step(&cfg), "unit_loop");
     }
 
     #[test]

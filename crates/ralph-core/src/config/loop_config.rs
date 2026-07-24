@@ -1191,8 +1191,9 @@ pub struct MechanismConfig {
 /// `event_loop::flow_declaration`. The runtime
 /// converts this into the in-memory
 /// `FlowDeclaration` via
-/// `FlowDeclaration::from_yaml` after wrapping it
-/// in the `mechanism:` key the parser expects.
+/// `FlowDeclaration::from_config` (typed, no YAML
+/// round-trip — the previous `to_string` + indent
+/// wrap path dropped every step).
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct FlowDeclarationConfig {
     // 2026-07-02-001 plan U4 (Fix D): the `type` rename mirrors

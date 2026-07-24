@@ -3422,6 +3422,9 @@ fn test_retained_scenarios_pipeline_or_generic_only() {
         // payload_consistency 门的通用行为(fixture-neutral,抽象 topic/rule,
         // 不绑定任何 builtin preset;plan 2026-07-22-004 U4)
         "tests/scenarios/payload_consistency/",
+        // implementation-review preset（6-hat wave review→fix-plan，
+        // 非 pipeline / 非 supervisor）
+        "tests/scenarios/implementation_review_",
     ];
     const SUPERVISOR_PATH_PREFIXES: &[&str] =
         &["tests/scenarios/opac/", "tests/scenarios/supervisor/"];

@@ -204,6 +204,43 @@ pub fn is_partial_state(terminal_when: &str) -> bool {
 }
 
 impl FlowDeclaration {
+    /// Convert the typed config view (`FlowDeclarationConfig`)
+    /// into the runtime `FlowDeclaration` without a YAML
+    /// round-trip.
+    ///
+    /// The previous `serde_yaml::to_string` +
+    /// `format!("mechanism:\\n  flow:\\n{flow}")` path left the
+    /// serialized body unindented, so `mechanism.flow` parsed
+    /// as null and `FlowStepScopeStage` rejected every business
+    /// emit with `flow_step_undeclared` (supervisor primary-path
+    /// E2E: `work.ready` never reached `task-planner`).
+    pub fn from_config(
+        cfg: &crate::config::FlowDeclarationConfig,
+    ) -> Result<Self, FlowParseError> {
+        let decl = FlowDeclaration {
+            flow_type: cfg.flow_type.clone(),
+            version: cfg.version,
+            terminal_emits: cfg.terminal_emits.clone(),
+            steps: cfg
+                .steps
+                .iter()
+                .map(|s| FlowStepDecl {
+                    id: s.id.clone(),
+                    kind: s.kind.clone(),
+                    allowed_emits: s.allowed_emits.clone(),
+                    terminal_when: s.terminal_when.clone(),
+                    on_partial: s.on_partial.clone(),
+                    total_units: None,
+                    runs: s.runs.clone(),
+                })
+                .collect(),
+            repair_budget: cfg.repair_budget,
+            enforce_schema: cfg.enforce_schema.clone(),
+            state_idempotency: cfg.state_idempotency.clone(),
+        };
+        decl.validate()
+    }
+
     /// Parse a YAML document that contains a `mechanism:` top
     /// level key. Returns the inner flow declaration.
     pub fn from_yaml(yaml: &str) -> Result<Self, FlowParseError> {
@@ -218,18 +255,22 @@ impl FlowDeclaration {
             .and_then(|m| m.get("flow"))
             .ok_or(FlowParseError::MissingMechanismFlow)?;
         let decl: FlowDeclaration = serde_yaml::from_value(flow_value.clone())?;
+        decl.validate()
+    }
 
-        if decl.flow_type != "declared" {
-            return Err(FlowParseError::UnsupportedFlowType(decl.flow_type));
+    /// Shared post-parse / post-config invariants.
+    fn validate(self) -> Result<Self, FlowParseError> {
+        if self.flow_type != "declared" {
+            return Err(FlowParseError::UnsupportedFlowType(self.flow_type));
         }
-        if decl.enforce_schema != "hard" {
+        if self.enforce_schema != "hard" {
             return Err(FlowParseError::UnsupportedEnforceSchema(
-                decl.enforce_schema,
+                self.enforce_schema,
             ));
         }
-        if decl.state_idempotency != "required" {
+        if self.state_idempotency != "required" {
             return Err(FlowParseError::UnsupportedStateIdempotency(
-                decl.state_idempotency,
+                self.state_idempotency,
             ));
         }
 
@@ -237,13 +278,13 @@ impl FlowDeclaration {
         // preset fails fast at load time rather than at
         // runtime stage check.
         let mut seen = std::collections::HashSet::new();
-        for step in &decl.steps {
+        for step in &self.steps {
             if !seen.insert(step.id.clone()) {
                 return Err(FlowParseError::DuplicateStepId(step.id.clone()));
             }
         }
 
-        Ok(decl)
+        Ok(self)
     }
 
     /// Return the step with the given id, if present.

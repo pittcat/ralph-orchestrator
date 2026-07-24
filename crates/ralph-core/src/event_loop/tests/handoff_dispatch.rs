@@ -432,3 +432,63 @@ hats:
         "an ordinary hat consumer whose triggers lack the topic must still report task.resume.misrouted"
     );
 }
+
+
+/// Regression: `ce-executor-supervisor`'s top-level `mechanism.flow`
+/// must load into `FlowStepScopeStage` so `work.ready` is admitted
+/// to the bus and lands in `task-planner`'s pending queue.
+///
+/// Pre-fix: `load_opt_in_flow_declaration` wrapped a bare
+/// `serde_yaml::to_string(flow)` under `mechanism:\n  flow:\n`
+/// without indenting, so `mechanism.flow` parsed as null,
+/// `FlowStepScope` rejected with `flow_step_undeclared`, and the
+/// Outside-In primary_path E2E never activated `task-planner`.
+#[test]
+fn supervisor_work_ready_lands_in_task_planner_pending() {
+    use crate::config::RalphConfig;
+    use crate::event_loop::EventLoop;
+    use ralph_proto::HatId;
+    use std::io::Write;
+    use tempfile::TempDir;
+
+    let yaml = include_str!("../../../../../presets/en/ce-executor-supervisor.yml");
+    let config = RalphConfig::parse_yaml(yaml).expect("parse supervisor preset");
+    assert!(
+        config.mechanism.as_ref().and_then(|m| m.flow.as_ref()).is_some(),
+        "builtin supervisor must declare top-level mechanism.flow"
+    );
+
+    let tmp = TempDir::new().unwrap();
+    let events_path = tmp.path().join("events.jsonl");
+    std::fs::write(&events_path, "").unwrap();
+
+    let mut event_loop = EventLoop::new(config);
+    event_loop.set_event_reader_path(&events_path);
+    event_loop.state_mut().current_isolated_hat = Some(HatId::new("coordinator"));
+    event_loop.state_mut().last_active_hat_ids = vec![HatId::new("coordinator")];
+
+    let line = r#"{"topic":"work.ready","payload":"{\"plan_name\":\"e2e-plan\",\"plan_path\":\"plan.md\",\"task_id\":\"t-1\",\"task_key\":\"plan:e2e:u1\",\"step\":\"step-01\",\"complexity\":\"small\"}","ts":"2020-01-01T00:00:00Z","hat":"coordinator","source":"coordinator","triggered":"task-planner"}"#;
+    {
+        let mut f = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&events_path)
+            .unwrap();
+        writeln!(f, "{line}").unwrap();
+    }
+
+    let processed = event_loop.process_events_from_jsonl().expect("process");
+    assert!(
+        processed.had_events,
+        "work.ready must be accepted by process_events"
+    );
+
+    let pending = event_loop.bus().peek_pending(&HatId::new("task-planner"));
+    let topics: Vec<_> = pending
+        .map(|q| q.iter().map(|e| e.topic.as_str().to_string()).collect())
+        .unwrap_or_default();
+    assert!(
+        topics.iter().any(|t| t == "work.ready"),
+        "work.ready must land in task-planner pending after FlowStepScope admits it; got {topics:?}"
+    );
+}
+
