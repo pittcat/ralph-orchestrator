@@ -37,7 +37,9 @@ fn make_bridge() -> InMemoryCoordinatorBridge {
     // portable across `cargo nextest run --no-default-features`
     // because Plan B does not require `supervisor-db`.
     let store = std::sync::Arc::new(crate::supervisor::InMemorySupervisorStore::new());
-    InMemoryCoordinatorBridge::from_store(store as std::sync::Arc<dyn crate::supervisor::SupervisorStore>)
+    InMemoryCoordinatorBridge::from_store(
+        store as std::sync::Arc<dyn crate::supervisor::SupervisorStore>,
+    )
 }
 
 fn default_phase_inputs() -> crate::supervisor::PhaseInputs {
@@ -63,10 +65,7 @@ fn drive_slot_to_done(bridge: &InMemoryCoordinatorBridge, store_id: &str, slot_i
         .expect("bind worktree");
     // Promote slot to dispatched so record_slot_result accepts
     // the Completed transition.
-    bridge
-        .store()
-        .try_dispatch_next(64)
-        .expect("dispatch");
+    bridge.store().try_dispatch_next(64).expect("dispatch");
     bridge
         .store()
         .record_slot_result(store_id, slot_index, &format!("h-{slot_index}"), 1)
@@ -86,10 +85,7 @@ fn drive_slot_to_failure(bridge: &InMemoryCoordinatorBridge, store_id: &str, slo
             },
         )
         .expect("bind worktree");
-    bridge
-        .store()
-        .try_dispatch_next(64)
-        .expect("dispatch");
+    bridge.store().try_dispatch_next(64).expect("dispatch");
     bridge
         .store()
         .record_slot_failure(store_id, slot_index, "compilation error: missing import")
@@ -237,10 +233,7 @@ fn plan_b_contract_double_slot_resources_round_trip() {
     let r = &resources[0];
     assert_eq!(r.slot_index, 0);
     assert_eq!(r.branch.as_deref(), Some("plan-b/review/0"));
-    assert_eq!(
-        r.worktree_path.as_deref(),
-        Some("/tmp/plan-b/review/0")
-    );
+    assert_eq!(r.worktree_path.as_deref(), Some("/tmp/plan-b/review/0"));
 }
 
 #[test]
@@ -273,9 +266,9 @@ fn plan_b_contract_double_unknown_wave_does_not_emit_terminal() {
             // expected — the bridge stays in Collecting because
             // no slots reported back.
         }
-        Ok(other) => panic!(
-            "Plan B contract double must NOT EmitCoord for an unknown wave; got {other:?}"
-        ),
+        Ok(other) => {
+            panic!("Plan B contract double must NOT EmitCoord for an unknown wave; got {other:?}")
+        }
         Err(_) => {
             // acceptable — typed error from the store layer is
             // also a valid Plan B signal.

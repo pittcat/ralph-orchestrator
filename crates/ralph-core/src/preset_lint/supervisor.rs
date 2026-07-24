@@ -27,10 +27,11 @@
 use crate::event_origin::SUPERVISOR_COORDINATION_TOPICS;
 use crate::preset_lint::LintFinding;
 pub use crate::preset_lint::finding_id::{
-    FINDING_SUPERVISOR_ALIGNMENT_PUBLISHES_WAVE_READY, FINDING_SUPERVISOR_ALIGNMENT_TRIGGERS_WAVE_READY,
-    FINDING_SUPERVISOR_DELETED_HAT_REFERENCED, FINDING_SUPERVISOR_DELETED_HAT_REINSTATED,
-    FINDING_SUPERVISOR_HAT_PUBLISHES_COORD_TOPIC, FINDING_SUPERVISOR_INTEGRATOR_TRIGGERS_SLOT_DONE,
-    FINDING_SUPERVISOR_REQUIRES_ISOLATED, FINDING_SUPERVISOR_TASK_PLANNER_PUBLISHES_EXEC_READY,
+    FINDING_SUPERVISOR_ALIGNMENT_PUBLISHES_WAVE_READY,
+    FINDING_SUPERVISOR_ALIGNMENT_TRIGGERS_WAVE_READY, FINDING_SUPERVISOR_DELETED_HAT_REFERENCED,
+    FINDING_SUPERVISOR_DELETED_HAT_REINSTATED, FINDING_SUPERVISOR_HAT_PUBLISHES_COORD_TOPIC,
+    FINDING_SUPERVISOR_INTEGRATOR_TRIGGERS_SLOT_DONE, FINDING_SUPERVISOR_REQUIRES_ISOLATED,
+    FINDING_SUPERVISOR_TASK_PLANNER_PUBLISHES_EXEC_READY,
     FINDING_SUPERVISOR_TASK_PLANNER_TRIGGERS_EXEC_READY,
     FINDING_SUPERVISOR_WAVE_CONSUMER_LOW_CONCURRENCY,
 };
@@ -450,11 +451,7 @@ fn check_task_planner_triggers_exec_ready(value: &Value) -> Vec<LintFinding> {
 /// claims or consumes any of them, it has silently become a
 /// second fixer or dispatcher and bypasses the formal fix
 /// chain. U7 hard rule: alignment is read-only.
-const WAVE_DISPATCHER_TOPICS: &[&str] = &[
-    "exec.unit.ready",
-    "fix.unit.ready",
-    "review.unit.ready",
-];
+const WAVE_DISPATCHER_TOPICS: &[&str] = &["exec.unit.ready", "fix.unit.ready", "review.unit.ready"];
 
 /// 2026-07-23-005 plan U7: `alignment` must NOT publish
 /// `*.unit.ready`. If it does, it has become a second wave
@@ -466,10 +463,7 @@ fn check_alignment_publishes_wave_ready(value: &Value) -> Vec<LintFinding> {
     let Some(hats) = value.get("hats").and_then(|h| h.as_mapping()) else {
         return findings;
     };
-    let Some((_, hat_value)) = hats
-        .iter()
-        .find(|(id, _)| id.as_str() == Some("alignment"))
-    else {
+    let Some((_, hat_value)) = hats.iter().find(|(id, _)| id.as_str() == Some("alignment")) else {
         return findings;
     };
     let publishes: Vec<String> = hat_value
@@ -522,10 +516,7 @@ fn check_alignment_triggers_wave_ready(value: &Value) -> Vec<LintFinding> {
     let Some(hats) = value.get("hats").and_then(|h| h.as_mapping()) else {
         return findings;
     };
-    let Some((_, hat_value)) = hats
-        .iter()
-        .find(|(id, _)| id.as_str() == Some("alignment"))
-    else {
+    let Some((_, hat_value)) = hats.iter().find(|(id, _)| id.as_str() == Some("alignment")) else {
         return findings;
     };
     let triggers: Vec<String> = hat_value
@@ -1197,7 +1188,9 @@ hats:
 ";
         let findings = run(yaml);
         assert!(
-            findings.iter().any(|f| f.id == FINDING_SUPERVISOR_TASK_PLANNER_PUBLISHES_EXEC_READY),
+            findings
+                .iter()
+                .any(|f| f.id == FINDING_SUPERVISOR_TASK_PLANNER_PUBLISHES_EXEC_READY),
             "expected task_planner_publishes_exec_unit_ready finding, got {findings:?}"
         );
     }
@@ -1219,7 +1212,9 @@ hats:
 ";
         let findings = run(yaml);
         assert!(
-            findings.iter().any(|f| f.id == FINDING_SUPERVISOR_TASK_PLANNER_TRIGGERS_EXEC_READY),
+            findings
+                .iter()
+                .any(|f| f.id == FINDING_SUPERVISOR_TASK_PLANNER_TRIGGERS_EXEC_READY),
             "expected task_planner_triggers_exec_unit_ready finding, got {findings:?}"
         );
     }
@@ -1240,10 +1235,10 @@ hats:
 ";
         let findings = run(yaml);
         assert!(
-            findings
-                .iter()
-                .all(|f| f.id != FINDING_SUPERVISOR_TASK_PLANNER_PUBLISHES_EXEC_READY
-                    && f.id != FINDING_SUPERVISOR_TASK_PLANNER_TRIGGERS_EXEC_READY),
+            findings.iter().all(
+                |f| f.id != FINDING_SUPERVISOR_TASK_PLANNER_PUBLISHES_EXEC_READY
+                    && f.id != FINDING_SUPERVISOR_TASK_PLANNER_TRIGGERS_EXEC_READY
+            ),
             "U2 ownership transfer guards must stay silent for a valid task-planner preset; \
              got {findings:?}"
         );
@@ -1317,9 +1312,10 @@ hats:
 ";
         let findings = run(yaml);
         assert!(
-            findings.iter().all(|f| f.id
-                != FINDING_SUPERVISOR_ALIGNMENT_PUBLISHES_WAVE_READY
-                && f.id != FINDING_SUPERVISOR_ALIGNMENT_TRIGGERS_WAVE_READY),
+            findings.iter().all(
+                |f| f.id != FINDING_SUPERVISOR_ALIGNMENT_PUBLISHES_WAVE_READY
+                    && f.id != FINDING_SUPERVISOR_ALIGNMENT_TRIGGERS_WAVE_READY
+            ),
             "U7 alignment must stay read-only; got {findings:?}"
         );
     }

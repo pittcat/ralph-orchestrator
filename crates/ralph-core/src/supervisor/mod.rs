@@ -461,9 +461,7 @@ pub trait SupervisorStore: fmt::Debug + Send + Sync {
     /// coordinator tick) is responsible for marking them
     /// `executed` via [`Self::complete_compensation`] so the
     /// store can advance the lifecycle.
-    fn take_pending_compensations(
-        &self,
-    ) -> SupervisorStoreResult<Vec<(String, CompensationKind)>>;
+    fn take_pending_compensations(&self) -> SupervisorStoreResult<Vec<(String, CompensationKind)>>;
 
     /// 2026-07-22-001 plan U6: mark a drained compensation job
     /// completed (`ok`) or failed (`!ok`). The store records
@@ -511,9 +509,9 @@ mod memory_protocol_tests;
 mod merge_sink;
 #[cfg(feature = "supervisor-db")]
 mod migrations;
+pub mod phase;
 #[cfg(test)]
 mod plan_b_contract;
-pub mod phase;
 mod recover;
 #[cfg(feature = "supervisor-db")]
 mod rusqlite;

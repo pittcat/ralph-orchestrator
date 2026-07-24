@@ -17,9 +17,9 @@ use std::sync::Mutex;
 use std::time::SystemTime;
 
 use super::{
-    CompensationKind, DispatchOutcome, IdempotencyKey, IsolationMode,
-    SlotResource, SlotStatus, SupervisorStore, SupervisorStoreError, SupervisorStoreResult,
-    WaveKind, WavePhase, WaveSnapshot,
+    CompensationKind, DispatchOutcome, IdempotencyKey, IsolationMode, SlotResource, SlotStatus,
+    SupervisorStore, SupervisorStoreError, SupervisorStoreResult, WaveKind, WavePhase,
+    WaveSnapshot,
 };
 
 /// Per-wave descriptor held in `InMemorySupervisorStore::waves`.
@@ -720,10 +720,9 @@ impl SupervisorStore for InMemorySupervisorStore {
         // dispatcher is shutting down, and we do not want a
         // compensation enqueue failure to abort the shutdown.
         let mut inner = self.lock()?;
-        let exists = inner
-            .compensation
-            .iter()
-            .any(|c| c.wave_id == wave_id && c.kind == kind && c.status == CompensationStatus::Pending);
+        let exists = inner.compensation.iter().any(|c| {
+            c.wave_id == wave_id && c.kind == kind && c.status == CompensationStatus::Pending
+        });
         if !exists {
             inner.compensation.push(CompensationEntry {
                 wave_id: wave_id.to_string(),
@@ -734,9 +733,7 @@ impl SupervisorStore for InMemorySupervisorStore {
         Ok(())
     }
 
-    fn take_pending_compensations(
-        &self,
-    ) -> SupervisorStoreResult<Vec<(String, CompensationKind)>> {
+    fn take_pending_compensations(&self) -> SupervisorStoreResult<Vec<(String, CompensationKind)>> {
         let inner = self.lock()?;
         Ok(inner
             .compensation
@@ -753,11 +750,9 @@ impl SupervisorStore for InMemorySupervisorStore {
         ok: bool,
     ) -> SupervisorStoreResult<()> {
         let mut inner = self.lock()?;
-        if let Some(entry) = inner
-            .compensation
-            .iter_mut()
-            .find(|c| c.wave_id == wave_id && c.kind == kind && c.status == CompensationStatus::Pending)
-        {
+        if let Some(entry) = inner.compensation.iter_mut().find(|c| {
+            c.wave_id == wave_id && c.kind == kind && c.status == CompensationStatus::Pending
+        }) {
             entry.status = if ok {
                 CompensationStatus::Executed
             } else {

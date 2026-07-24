@@ -960,9 +960,7 @@ impl SupervisorStore for RusqliteSupervisorStore {
         })
     }
 
-    fn take_pending_compensations(
-        &self,
-    ) -> SupervisorStoreResult<Vec<(String, CompensationKind)>> {
+    fn take_pending_compensations(&self) -> SupervisorStoreResult<Vec<(String, CompensationKind)>> {
         let pairs = self.with_conn(|conn| -> SupervisorStoreResult<Vec<(String, String)>> {
             let mut stmt = conn.prepare(
                 "SELECT wave_id, kind FROM compensation_jobs WHERE status = 'pending' ORDER BY id ASC",
