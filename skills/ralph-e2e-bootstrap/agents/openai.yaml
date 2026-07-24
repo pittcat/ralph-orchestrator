@@ -1,0 +1,16 @@
+agent: openai
+name: ralph-e2e-bootstrap
+description: >-
+  Bootstrap an E2E sandbox directory into a runnable Ralph preset suite
+  from a development plan + git diff, via combo-box decisions, static
+  gates, and a copy-paste launch command. Distinct from
+  ralph-project-bootstrap (which audits an arbitrary project root) and
+  ralph-preset-author (which authors presets).
+version: 0.1.0
+owner: ralph-orchestrator
+tags:
+  - ralph
+  - bootstrap
+  - e2e
+  - preset
+  - operator-skill
