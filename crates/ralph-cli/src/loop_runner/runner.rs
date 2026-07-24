@@ -540,6 +540,9 @@ pub async fn run_loop_impl(
     hats_source_label: Option<String>,
 ) -> Result<TerminationReason> {
     remove_loop_termination_sentinel(&loop_context);
+    // plan 2026-07-25-001 U4: `config` moves into `run_loop_impl_inner`, so
+    // snapshot the notifications settings before the call.
+    let notifications_config = config.notifications.clone();
     let result = run_loop_impl_inner(
         config,
         color_mode,
@@ -564,6 +567,18 @@ pub async fn run_loop_impl(
         && !reason.is_success()
     {
         write_loop_termination_sentinel(&loop_context, reason);
+    }
+    // plan 2026-07-25-001 U4: single chokepoint for loop-completion webhook
+    // notifications — every `Ok(reason)` return passes through here, so the
+    // shortcut paths inside `run_loop_impl_inner` are covered too. Strictly
+    // best-effort: never mutates `result`.
+    if let Ok(ref reason) = result {
+        crate::loop_runner::notifications::notify_loop_termination(
+            &notifications_config,
+            &loop_context,
+            reason,
+        )
+        .await;
     }
     result
 }

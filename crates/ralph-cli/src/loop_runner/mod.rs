@@ -13,6 +13,7 @@ mod hooks;
 mod late_events;
 mod loop_owner;
 mod merge_queue;
+mod notifications;
 mod output_parsing;
 mod paths;
 mod payload_contract_gate;
