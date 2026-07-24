@@ -247,8 +247,13 @@ notifications:
       body: '{"msg_type":"text","content":{"text":"Ralph FAIL {{loop_id}}: {{termination_reason}}"}}'
 "#;
     let config = RalphConfig::parse_yaml(yaml).unwrap();
-    let warnings = config.validate().expect("feishu YAML must validate cleanly");
-    assert!(warnings.is_empty(), "feishu YAML must produce zero warnings");
+    let warnings = config
+        .validate()
+        .expect("feishu YAML must validate cleanly");
+    assert!(
+        warnings.is_empty(),
+        "feishu YAML must produce zero warnings"
+    );
     assert!(config.notifications.enabled);
     assert_eq!(config.notifications.timeout_seconds, 5);
     assert_eq!(config.notifications.endpoints.len(), 2);
@@ -284,7 +289,9 @@ notifications:
       body: '{"event":"{{status}}"}'
 "#;
     let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
-    let warnings = config.validate().expect("on: [success, failure] must validate");
+    let warnings = config
+        .validate()
+        .expect("on: [success, failure] must validate");
     assert!(warnings.is_empty());
     let ep = &config.notifications.endpoints[0];
     assert_eq!(ep.on.len(), 2);

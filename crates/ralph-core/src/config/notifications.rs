@@ -96,7 +96,13 @@ pub struct NotificationEndpoint {
     pub url: String,
 
     /// Which termination statuses this endpoint receives.
-    #[serde(default)]
+    ///
+    /// Accepts either a single value (`on: success`) or a sequence
+    /// (`on: [success, failure]`). Unknown values deserialize to
+    /// `OnStatus::Unknown` and are rejected by `validate()`, so an invalid
+    /// filter surfaces as a validation error with a field path rather than
+    /// a parse error.
+    #[serde(default, deserialize_with = "deserialize_on_list")]
     pub on: Vec<OnStatus>,
 
     /// Optional HTTP headers to include in the request.
@@ -150,11 +156,18 @@ impl NotificationEndpoint {
 }
 
 /// Status filter for a notification endpoint.
+///
+/// Unknown values (e.g. `on: [bogus]`) deserialize to `Unknown` via
+/// `#[serde(other)]` instead of failing the parse; `validate()` rejects
+/// them with a field-path error.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum OnStatus {
     Success,
     Failure,
+    /// Catch-all for unrecognized status strings.
+    #[serde(other)]
+    Unknown,
 }
 
 impl OnStatus {
@@ -173,6 +186,7 @@ impl OnStatus {
         match self {
             OnStatus::Success => "success",
             OnStatus::Failure => "failure",
+            OnStatus::Unknown => "unknown",
         }
     }
 
@@ -192,6 +206,25 @@ impl Default for OnStatus {
 
 fn default_timeout_seconds() -> u64 {
     5
+}
+
+/// Deserializes `on` from either a single scalar (`on: success`) or a
+/// sequence (`on: [success, failure]`), always producing a `Vec`.
+fn deserialize_on_list<'de, D>(deserializer: D) -> Result<Vec<OnStatus>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum OneOrMany {
+        One(OnStatus),
+        Many(Vec<OnStatus>),
+    }
+
+    Ok(match OneOrMany::deserialize(deserializer)? {
+        OneOrMany::One(s) => vec![s],
+        OneOrMany::Many(v) => v,
+    })
 }
 
 #[cfg(test)]
