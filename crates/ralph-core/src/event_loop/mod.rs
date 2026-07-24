@@ -14152,7 +14152,25 @@ pub(crate) fn advance_plan_step(
     // pattern. A plan that wants different semantics can use
     // the `terminal_when` field to refine; for now the simple
     // rule is enough.
-    const NON_TRANSITION_TOPICS: &[&str] = &["work.done", "work.failed", "work.ready"];
+    //
+    // 2026-07-24-005 plan U2 (KTD3): supervisor exec_wave
+    // declares `exec.unit.done` / `exec.unit.failed` /
+    // `exec.unit.ready` in `allowed_emits` so a unit terminal
+    // does not collide with FlowStepScope. Without these in
+    // the non-transition whitelist, the first unit completion
+    // would collapse the step to `exec_integrate` before the
+    // wave has actually finished. The wave-terminal
+    // `exec.wave.complete` / `exec.wave.failed` are NOT
+    // listed — they remain transition topics so the wave
+    // still advances when it has truly closed.
+    const NON_TRANSITION_TOPICS: &[&str] = &[
+        "work.done",
+        "work.failed",
+        "work.ready",
+        "exec.unit.ready",
+        "exec.unit.done",
+        "exec.unit.failed",
+    ];
     if NON_TRANSITION_TOPICS.contains(&accepted_topic) {
         return None;
     }
@@ -14289,6 +14307,78 @@ mod u4_current_plan_step_tests {
         let cfg = RalphConfig::default();
         let next = advance_plan_step(&cfg, "unit_loop", "review.start");
         assert_eq!(next, None);
+    }
+
+    // 2026-07-24-005 plan U2 (R2 / R3 / S1 / S6): supervisor
+    // exec_wave accepts `exec.unit.done` / `exec.unit.failed`
+    // without advancing the step, while `exec.wave.complete`
+    // still advances to `exec_integrate`. These three topics
+    // are pinned in the `NON_TRANSITION_TOPICS` whitelist of
+    // `advance_plan_step` so the supervisor wave does not
+    // collapse after the first unit completion.
+    //
+    // KTD3: the whitelist is the smaller change vs. the
+    // alternative of an `exec_unit_*` non-transition bucket.
+    fn exec_wave_flow() -> RalphConfig {
+        flow_config(vec![
+            ("unit_loop", vec!["work.ready", "execution.plan.ready"]),
+            ("exec_wave", vec![
+                "exec.wave.complete",
+                "exec.wave.failed",
+                "exec.unit.done",
+                "exec.unit.failed",
+            ]),
+            ("exec_integrate", vec!["plan.complete"]),
+        ])
+    }
+
+    #[test]
+    fn u2_advance_unit_done_on_exec_wave_returns_none() {
+        // S1 + R3: a unit terminal on the exec_wave step
+        // must NOT advance the plan to exec_integrate.
+        let cfg = exec_wave_flow();
+        let next = advance_plan_step(&cfg, "exec_wave", "exec.unit.done");
+        assert_eq!(next, None);
+    }
+
+    #[test]
+    fn u2_advance_unit_failed_on_exec_wave_returns_none() {
+        let cfg = exec_wave_flow();
+        let next = advance_plan_step(&cfg, "exec_wave", "exec.unit.failed");
+        assert_eq!(next, None);
+    }
+
+    #[test]
+    fn u2_advance_wave_complete_on_exec_wave_advances() {
+        // S6: the wave terminal must still advance to the
+        // next step (exec_integrate) — the wave has truly
+        // closed.
+        let cfg = exec_wave_flow();
+        let next = advance_plan_step(&cfg, "exec_wave", "exec.wave.complete");
+        assert_eq!(next, Some("exec_integrate".to_string()));
+    }
+
+    #[test]
+    fn u2_advance_unit_done_on_unit_loop_returns_none() {
+        // S2 boundary: the supervisor preset must NOT
+        // double-mount `exec.unit.done` on `unit_loop`;
+        // the helper still returns None because the topic
+        // is not in `unit_loop.allowed_emits` (and is in
+        // the non-transition list).
+        let cfg = exec_wave_flow();
+        let next = advance_plan_step(&cfg, "unit_loop", "exec.unit.done");
+        assert_eq!(next, None);
+    }
+
+    #[test]
+    fn u2_advance_execution_plan_ready_advances_to_exec_wave() {
+        // S3 / R4: `execution.plan.ready` accepted on
+        // `unit_loop` advances to `exec_wave`. Confirms
+        // the flow declaration wires task-planner →
+        // exec-wave-dispatcher.
+        let cfg = exec_wave_flow();
+        let next = advance_plan_step(&cfg, "unit_loop", "execution.plan.ready");
+        assert_eq!(next, Some("exec_wave".to_string()));
     }
 }
 
