@@ -13962,7 +13962,11 @@ fn run_stall_detector_on_state(
         // is unnecessary: the steward was the one that
         // failed to make progress, so the recovery action
         // is to terminate, not retry.
-        .with_target(ralph_proto::HatId::new("shipper"));
+        //
+        // 2026-07-24-005 plan U1: target is now `reporter`
+        // (was `shipper`); the shipper hat is removed from
+        // the supervisor preset.
+        .with_target(ralph_proto::HatId::new("reporter"));
         bus.publish(blocked);
         // Reset so the next loop (e.g. a follow-up diagnostic
         // or operator restart) starts from a clean state.
