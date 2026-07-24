@@ -107,9 +107,10 @@ metadata:
 | 协议违规 correction / bounded retry | 读 `## CORRECTION CONTEXT` 与 EmitResult | `ralph tools skill load ralph-tools-recovery-directives` + `ralph-tools-emit` |
 | `ralph emit --schema <TOPIC>` | 只读查 topic 协议 + protocol_hash | 同上 |
 | Precheck gate（`event_loop.precheck`） | 非 CLI；loop 内 `.proposed`/gate 行为 | `ralph tools skill load ralph-tools-precheck` |
-| `ralph wave emit` | 并行 wave 调度 | `ralph tools skill load ralph-tools-wave` |
+| `ralph wave emit` | 并行 wave 调度；带 key 路径走 supervisor store（`applied_via: store`）；agent context 默认 enforce `--policy-check` | `ralph tools skill load ralph-tools-wave` |
+| `ralph wave verify --payloads-stdin` | 不写业务事件，只写一次性 ticket 的 wave batch Precheck（dispatcher hat） | `ralph tools skill load ralph-tools-wave` |
+| `ralph wave inspect <wave_id>` | OPAC Confirm 公开只读入口；返回 phase / 计数 / availability / `applied`；不含 `events_file` | `ralph tools skill load ralph-tools-wave` |
 | `ralph tools task verify <verb>` | 零写盘 Precheck（含 `verify-emit-bridge` 三字段同源） | `ralph tools skill load ralph-tools-tasks` |
-| `ralph wave verify --payloads-stdin` | 零写盘 wave batch Precheck（dispatcher hat） | `ralph tools skill load ralph-tools-wave` |
 | `ralph inspect loop` | 机器可读 loop + hat 身份摘要；JSON 可能含 `supervisor` 块（见 `ralph-tools-opac` Observe）（OPAC Observe） | `ralph tools skill load ralph-tools-cmdref` |
 | `ralph run` | 启动编排循环 | `ralph tools skill load ralph-tools-cmdref` |
 | `ralph inspect profiles` | 预览 profile overlay 解析结果（只读，不启动 loop） | `ralph tools skill load ralph-tools-cmdref` |

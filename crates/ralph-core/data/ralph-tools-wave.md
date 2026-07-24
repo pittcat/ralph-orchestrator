@@ -24,35 +24,36 @@ Wave OPAC 与单 emit OPAC 并列——同样四阶段，差别只在 Confirm �
 | 阶段 | 命令 | 关键约束 |
 |------|------|----------|
 | **Observe** | `ralph inspect loop` + `ralph tools task list` | 不要读 ledger 文件（HARD RULE 4） |
-| **Precheck** | `ralph wave verify --payloads-stdin` | 零写盘；通过后写一次性 ticket；与 emit 同源 `policy_check` / origin guard |
+| **Precheck** | `ralph wave verify --payloads-stdin` | 不写业务事件；通过后写一次性 ticket；与 emit 同源 `policy_check` / origin guard |
 | **Apply** | `ralph wave emit --payloads-stdin` | 必须有匹配的 ticket；同源 payload 集合；agent context 默认 enforce `--policy-check` |
-| **Confirm** | 用 emit 返回的 `wave_id` 调公开只读查询 | ticket 消费仅证明 Apply 已写盘，**不证明下游已完成** |
+| **Confirm** | `ralph wave inspect <wave_id>` | 不读内部 ledger；返回 phase、计数、cancel 状态；agent 只用此公开只读查询 |
 
 **Confirm 路径与单 emit 不同**：`ralph wave emit` 写入主 ledger。所以 Confirm 必须从主 ledger 验，不要看单 emit 通道。
 
 **关键约束（agent 视角）**：
 
 - 🔴 Precheck→Apply 之间**不可漂移**：`verify` 通过后改任何 payload（增删、修改、重排）后再 `emit` → 拒。必须重新 `verify`。
-- 🔴 ticket 是**一次性**：emit 成功后 ticket 消费；下次同 topic 必须重新 verify。
+- 🔴 ticket 状态机为 prepared → claimed → consumed：emit 成功（Apply 完成）才走 consumed；Apply 失败时 ticket 回到 prepared，无需重新 `verify` 即可重试。
 - 🔴 `--unsafe-no-policy-check` 仅绕过 schema gate，**不绕过** OPAC ticket gate。
 - 🔴 人类 CLI（不在 agent context）bypass ticket。
-- 🔴 ticket 消费 ≠ Confirm：仅证明 Apply 已写盘，不证明下游 worker / aggregator 已完成。
+- 🔴 Confirm ≠ 下游完成：`wave inspect` 只证明 Apply 已经在运行时记账，**不证明** worker / aggregator 已完成或通过 review。
 
 **反模式**：
 
 - ❌ 跳过 `wave verify` 直接 `wave emit`（agent 默认 enforce 会拒写盘）
 - ❌ 在 worker hat 内调用 `ralph wave emit`（仅 dispatcher hat 可调用）
-- ❌ Confirm 阶段读单 emit 通道（看不到 wave 写入）
+- ❌ Confirm 用 `jq` 读 `.ralph/events.jsonl` 或直接打开 supervisor DB——只读入口是 `ralph wave inspect`
 - ❌ 试图让 agent emit `*.wave.complete` / `*.unit.ready` 等 supervisor 协调 topic（origin guard 拒收）
 - ❌ 改 payload 后再 `emit`（fingerprint mismatch → ticket gate 拒）
+- ❌ Cleanup I/O 失败时反复 `wave emit` 重试同 key——响应中的 `applied_cleanup_pending: true` 已提示这是稳定状态，重试只会拿到 `deduplicated=true`
 
 ### `ralph wave verify`
 
-零写盘批预检；与 `wave emit` 共用同源 schema / origin guard。**通过后写一次性 ticket**，下一次 `wave emit` 必须使用完全相同的 payload 集合。
+不写业务事件，但会写一次性 ticket 到 `.ralph/agent/.ralph-wave-verify-ticket`（与 emit 同源 schema / origin guard）。**通过后写一次性 ticket**，下一次 `wave emit` 必须使用完全相同的 payload 集合。
 
 ```bash
 cat payloads.jsonl | ralph wave verify review.wave.ready --payloads-stdin --output json
-# {"ok":true,"topic":"review.wave.ready","count":7}
+# {"ok":true,"wave_id":"verify:...","topic":"review.wave.ready","count":7}
 ```
 
 捕获返回的 `topic` / `count`，然后同源 path 用同一文件 emit（不要重新生成 payload）：
@@ -60,7 +61,7 @@ cat payloads.jsonl | ralph wave verify review.wave.ready --payloads-stdin --outp
 ```bash
 # 同源 path：cat payloads.jsonl 必须与 verify 时相同字节内容
 cat payloads.jsonl | ralph wave emit review.wave.ready --payloads-stdin --output json
-# {"ok":true,"wave_id":"w-...","topic":"review.wave.ready","count":7,"events_file":"...","deduplicated":false}
+# {"ok":true,"wave_id":"w-...","topic":"review.wave.ready","count":7,"deduplicated":false,"applied_via":"store","applied":true}
 ```
 
 ### `ralph wave emit`
@@ -79,7 +80,7 @@ ralph wave emit [OPTIONS] <TOPIC>
 | `<TOPIC>` | string | 是 | — | 所有 wave 事件的主题（如 `review.file`） |
 | `--payloads <PAYLOADS>...` | string… | 二选一 | — | 每个 wave worker 一个 payload（`num_args = 1..`，至少 1 个） |
 | `--payloads-stdin` | flag | 二选一 | false | 从 stdin 逐行读取 payload，适合 JSON payload 列表 |
-| `--output <FMT>` | enum | 否 | `text` | 输出格式：`text`（stdout 仅 wave_id）或 `json`（stdout `{ok, wave_id, topic, count, events_file, deduplicated}`） |
+| `--output <FMT>` | enum | 否 | `text` | 输出格式：`text`（stdout 仅 wave_id）或 `json`（stdout `{ok, wave_id, topic, count, deduplicated, applied, applied_via, applied_cleanup_pending?}`）。成功响应**不会**包含 `events_file`——agent 不应需要读内部 ledger 路径 |
 | `--idempotency-key <KEY>` | string | 否 | — | 幂等键。同一 `(loop_id, hat, topic, key)` 重复调用只返回首个 `wave_id` 并标 `deduplicated=true`，不写新事件。键最长 256 字节、ASCII、非空非空白 |
 | `--policy-check` | flag | 否 | false | 显式强制 schema 预检 |
 | `--unsafe-no-policy-check` | flag | 否 | false | 尝试绕过 schema 预检。当 config `event_policy.allow_unsafe_cli_emit: false` 时**不生效**。与 `--policy-check` 互斥。**仅绕 schema，不绕 OPAC ticket** |
@@ -109,12 +110,12 @@ ralph wave emit [OPTIONS] <TOPIC>
 
 首次输出（`--output json`）：
 ```json
-{"ok":true,"wave_id":"w-...","topic":"review.wave.ready","count":7,"events_file":"...","deduplicated":false}
+{"ok":true,"wave_id":"w-...","topic":"review.wave.ready","count":7,"deduplicated":false,"applied_via":"store","applied":true}
 ```
 
 重试同 key 同 payload 输出：
 ```json
-{"ok":true,"wave_id":"w-...","topic":"review.wave.ready","count":7,"events_file":"...","deduplicated":true}
+{"ok":true,"wave_id":"w-...","topic":"review.wave.ready","count":7,"deduplicated":true,"applied_via":"store","applied":true}
 ```
 
 **反模式 / 注意事项：**
@@ -187,21 +188,62 @@ ralph wave emit [OPTIONS] <TOPIC>
 
 ### Confirm 阶段
 
-`wave emit` 仅证明 Apply 已写盘，不证明下游 worker / aggregator 已完成。Confirm 必须使用 emit 返回的 `wave_id` 调**公开只读查询**确认 wave 已登记：
+`wave emit` 仅证明 Apply 已在运行时记账（store 行的 `applied` 字段为 `true`），不证明下游 worker / aggregator 已完成。Confirm **必须**通过 `ralph wave inspect <wave_id>` 走公开只读查询，禁止直接 `jq` 读 `.ralph/events.jsonl` 或打开 supervisor 数据库：
 
 ```bash
-# 1. Apply：emit 返回 wave_id
+# 1. Apply：emit 返回 wave_id（不要从此输出推断 Confirm）
 wave_id=$(cat payloads.jsonl | ralph wave emit review.wave.ready --payloads-stdin --output json | jq -r .wave_id)
 
-# 2. Confirm：用 wave_id 验 wave 已登记
-events_file=$(cat .ralph/current-events 2>/dev/null || echo .ralph/events.jsonl)
-expected_count=7
-jq -e --arg id "$wave_id" --argjson expected "$expected_count" '
-  ([. | select(.wave_id == $id)] | length) == $expected
-' "$events_file"
+# 2. Confirm：公开只读入口
+ralph wave inspect "$wave_id" --output json
+# 成功响应：
+# {"ok":true,"wave_id":"<public>","registered":true,"availability":"available",
+#  "phase":"dispatch|collect|integrate|done|failed","expected_total":7,
+#  "completed_count":<n>,"failed_count":<n>,"pending_count":<n>,"in_flight_count":<n>,
+#  "cancel_requested":false}
+#
+# 未登记：registered=false；不可用：availability="unavailable"。
 ```
 
+特殊 JSON 字段：
+
+- `applied: true` —— store 已确认该 `wave_id` 落到 `applied` 状态（Apply 落盘成功）。
+- `applied_cleanup_pending: true` —— Apply 落盘成功，但本端 cleanup（删除一次性 ticket 文件）I/O 失败。**不要**反复重试同 key：重试只会拿到 `deduplicated=true`。建议运行 `ralph wave inspect <wave_id>` 确认登记，并由操作员手动清理本地 ticket。
+
 > Confirm 仅证明本次 wave 已登记，**不证明**下游 worker / aggregator 已完成。后续 hat activation 自会处理 worker 完成事件（`*.unit.done` 等）。
+
+### `ralph wave inspect`
+
+公开只读 Confirm 查询，输入 emit 返回的 `wave_id`，查询其在 supervisor store 的登记与相位状态。绝不修改 store / events JSONL / ticket 文件——适合在 Confirm 阶段使用。
+
+**语法：**
+```bash
+ralph wave inspect <WAVE_ID> [--output json|text]
+```
+
+**参数：**
+
+| 参数 | 类型 | 必需 | 说明 |
+|------|------|------|------|
+| `<WAVE_ID>` | string | 是 | 公开 wave id（`wave emit` 在成功 JSON 中返回的 `wave_id` 字段值） |
+| `--output <FMT>` | enum | 否 | `text`（默认，人类可读）或 `json`（agent-stable 形状） |
+
+**响应字段：**
+
+- `ok`: 始终 `true`（错误以 `availability` / `registered` 表达，非 `ok:false`）
+- `wave_id`: 回显查询的 wave id
+- `registered`: `true` 时 store 有此 wave 的行；`false` 表示未登记（未知 id 或 store 可用但 miss）
+- `availability`: `"available"`（store 健康）或 `"unavailable"`（store 文件存在但打开失败、feature 未编入等不可用状态）
+- `phase`: `"dispatch"` / `"collect"` / `"integrate"` / `"done"` / `"failed"` 之一（仅 `registered=true` 时出现）
+- `expected_total` / `completed_count` / `failed_count` / `pending_count` / `in_flight_count`: 槽位计数（仅 registered）
+- `cancel_requested`: 取消标记（仅 registered）
+- `unavailable_reason`: 仅 `availability="unavailable"` 时出现，已脱敏（不暴露 `.ralph/` 路径或 DB 文件名）
+
+**节流与重试：**
+
+- 这是只读入口，无需 ticket 或 idempotency key。
+- 响应不含 `db_path` / `events_file` / `pid` / `payload` / ticket 字段——agent 不应需要这些内部细节。
+- 重复调用同一 `wave_id` 是幂等的。
 
 ### 写隔离
 

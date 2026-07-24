@@ -27,12 +27,17 @@ pub struct WaveArgs {
 pub enum WaveCommands {
     /// Emit multiple events as a wave for parallel execution
     Emit(WaveEmitArgs),
-    /// U21: Zero-disk precheck — validate payloads against the active
-    /// event policy without writing the JSONL. Mirrors `ralph wave emit`
-    /// schema / origin-guard checks but stops before the write step.
-    /// Returns the same `{ok, wave_id?, error?}` shape so agents can
-    /// treat verify and emit uniformly. Intended for OPAC Precheck stage.
-    Verify(WaveVerifyArgs),
+    /// U21: OPAC Precheck for `ralph wave emit` mutations.
+///
+/// Validate payloads against the active event policy (no
+/// business events written) and record a one-shot
+/// `ralph-wave-verify-ticket` so the next `ralph wave emit`
+/// can prove it targets the same payload set. Mirrors
+/// `ralph wave emit` schema / origin-guard checks but stops
+/// before any business-event write step. Returns the same
+/// `{ok, wave_id?, error?}` shape so agents can treat verify
+/// and emit uniformly. Intended for OPAC Precheck stage.
+Verify(WaveVerifyArgs),
     /// 2026-07-24-003 plan Unit 2: read-only Confirm for a wave.
     ///
     /// Returns the public `wave_id`'s current state from the
