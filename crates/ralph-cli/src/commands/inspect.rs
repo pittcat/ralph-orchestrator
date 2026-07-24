@@ -702,11 +702,17 @@ pub fn loop_anchor_unattached_warning() -> &'static str {
 }
 
 /// U22 + U8 of plan 2026-07-04-002: produce an agent-safe supervisor
-/// summary block for `inspect loop`. Returns `None` (so the JSON key
-/// is omitted) when supervisor is disabled in config; returns
-/// `Some(default)` (active_waves: [], queue_depth: 0,
-/// slot_summary: [], last_coordination_topics: []) when the
-/// supervisor is enabled but the db is missing / cannot be opened.
+/// summary block for `inspect loop`.
+///
+/// Gate (R8 / KTD6 of plan 2026-07-24-001): the block is emitted when
+/// supervisor is enabled in config **or** a supervisor ledger file
+/// exists on disk (`<root>/.ralph/supervisor.db`) — the default-wave /
+/// lazy-opened-store path keeps `supervisor.enabled: false` yet still
+/// leaves a ledger behind. Only when both are absent does the function
+/// return `None` (JSON key omitted), keeping pure pipelines quiet.
+/// Returns `Some(default)` (active_waves: [], queue_depth: 0,
+/// slot_summary: [], last_coordination_topics: []) when the gate is
+/// satisfied via config but the db is missing / cannot be opened.
 ///
 /// When the `supervisor-db` feature is on AND the db is reachable the
 /// function opens the rusqlite store, calls
@@ -725,12 +731,19 @@ fn build_supervisor_summary(
     workspace_root: &std::path::Path,
 ) -> Option<ralph_core::supervisor::SupervisorInspectSummary> {
     let supervisor_enabled = config.event_loop.supervisor.enabled;
-    if !supervisor_enabled {
+    let db_path = workspace_root.join(".ralph/supervisor.db");
+    let ledger_present = db_path.exists();
+
+    // R8 / KTD6: a supervisor ledger on disk (default-wave loop that
+    // lazy-opened the store) is enough evidence to surface the summary
+    // even when the preset keeps `supervisor.enabled: false`. Hide the
+    // block only when neither config nor ledger evidence exists, so
+    // pure pipelines stay quiet.
+    if !supervisor_enabled && !ledger_present {
         return None;
     }
 
-    let db_path = workspace_root.join(".ralph/supervisor.db");
-    if !db_path.exists() {
+    if !ledger_present {
         return Some(ralph_core::supervisor::SupervisorInspectSummary::default());
     }
 
@@ -1764,7 +1777,7 @@ mod tests {
     // U22 — `ralph inspect loop` supervisor summary block.
     // ─────────────────────────────────────────────────────────────────────
 
-    /// Supervisor disabled → no `supervisor` key in JSON.
+    /// Supervisor disabled + no ledger on disk → no `supervisor` key in JSON.
     #[test]
     fn build_supervisor_summary_omitted_when_disabled() {
         let cfg = RalphConfig::default();
@@ -1783,6 +1796,73 @@ mod tests {
         let summary = out.expect("enabled must yield Some");
         assert!(summary.active_waves.is_empty());
         assert_eq!(summary.queue_depth, 0);
+    }
+
+    /// Seed `<tmp>/.ralph/supervisor.db` with one active Exec wave so
+    /// gate tests can exercise the "ledger on disk" branch against a
+    /// real rusqlite store (C4: "exists with at least one wave row").
+    #[cfg(feature = "supervisor-db")]
+    fn seed_ledger_with_one_wave(tmp: &TempDir) {
+        use ralph_core::supervisor::{RusqliteSupervisorStore, SupervisorStore, WaveKind};
+        let ralph_dir = tmp.path().join(".ralph");
+        std::fs::create_dir_all(&ralph_dir).expect("create .ralph dir");
+        let db_path = ralph_dir.join("supervisor.db");
+        // Scope so the seeding connection is released before
+        // `build_supervisor_summary` re-opens the store read-only.
+        let store = RusqliteSupervisorStore::open(&db_path).expect("open store");
+        store
+            .register_wave("u4-ledger", WaveKind::Exec, 1)
+            .expect("register_wave");
+    }
+
+    /// R8 / KTD6 / AE6: supervisor disabled **but** a ledger file with
+    /// at least one wave row exists on disk → the summary block is
+    /// still emitted (default-wave lazy-open path), surfacing the
+    /// active wave — while never leaking db_path / internal ledger
+    /// fields (R11).
+    #[cfg(feature = "supervisor-db")]
+    #[test]
+    fn build_supervisor_summary_disabled_with_ledger_on_disk_yields_summary() {
+        let cfg = RalphConfig::default();
+        assert!(
+            !cfg.event_loop.supervisor.enabled,
+            "precondition: default config has supervisor disabled"
+        );
+        let tmp = TempDir::new().expect("temp dir");
+        seed_ledger_with_one_wave(&tmp);
+
+        let out = build_supervisor_summary(&cfg, tmp.path());
+        let summary = out.expect("disabled + db on disk must yield Some (R8/KTD6)");
+        assert_eq!(
+            summary.active_waves.len(),
+            1,
+            "ledger wave must surface even when enabled=false"
+        );
+
+        // Output safety (R11): the struct must NOT leak any path / db
+        // or internal ledger field — same contract as line-1861 pins.
+        let json = serde_json::to_value(&summary).expect("serialise");
+        assert!(json.get("db_path").is_none(), "must not leak db_path");
+        assert!(json.get("event_log").is_none(), "must not leak event_log");
+    }
+
+    /// enabled=true + db on disk → live summary from the store (the
+    /// enabled path does not regress under the new ledger-aware gate).
+    #[cfg(feature = "supervisor-db")]
+    #[test]
+    fn build_supervisor_summary_enabled_with_ledger_on_disk_yields_summary() {
+        let mut cfg = RalphConfig::default();
+        cfg.event_loop.supervisor.enabled = true;
+        let tmp = TempDir::new().expect("temp dir");
+        seed_ledger_with_one_wave(&tmp);
+
+        let out = build_supervisor_summary(&cfg, tmp.path());
+        let summary = out.expect("enabled + db must yield Some");
+        assert_eq!(summary.active_waves.len(), 1);
+
+        let json = serde_json::to_value(&summary).expect("serialise");
+        assert!(json.get("db_path").is_none(), "must not leak db_path");
+        assert!(json.get("event_log").is_none(), "must not leak event_log");
     }
 
     // ─────────────────────────────────────────────────────────────────────
