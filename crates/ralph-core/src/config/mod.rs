@@ -16,6 +16,7 @@ pub mod hat;
 mod hooks;
 mod loop_config;
 mod memories;
+mod notifications;
 mod precheck;
 mod preflight_ext;
 mod ralph_config;
@@ -74,6 +75,7 @@ pub use state_files::{StateFileEntry, StateFileFormat, StateFilesConfig};
 pub use state_machine::{BusinessAfterTerminalAction, DuplicateTerminalAction, StateMachineConfig};
 pub use state_projection::{StateProjectionAction, StateProjectionConfig};
 pub use tasks::TasksConfig;
+pub use notifications::{NotificationEndpoint, NotificationsConfig, OnStatus};
 pub use telemetry::{
     CoordJoinMode, DriftConfig, MalformedJsonlPolicy, RuntimeDiagnosisConfig, TelemetryConfig,
 };
@@ -238,6 +240,13 @@ pub struct RalphConfig {
     #[serde(default)]
     pub telemetry: TelemetryConfig,
 
+    /// Loop-completion webhook notifications (U1 of the 2026-07-25-001
+    /// Loop Completion Webhook plan). Disabled by default: omitting
+    /// `notifications:` or setting `enabled: false` produces zero
+    /// network activity.
+    #[serde(default)]
+    pub notifications: NotificationsConfig,
+
     /// Agent doc sync configuration for managed agent doc blocks.
     /// When enabled (default), the sync engine injects curated constraint
     /// blocks into `CLAUDE.md` / `AGENTS.md` before backend spawn.
@@ -321,6 +330,8 @@ impl Default for RalphConfig {
             features: FeaturesConfig::default(),
             // Telemetry / runtime diagnosis (U1)
             telemetry: TelemetryConfig::default(),
+            // Notifications (U1 of plan 2026-07-25-001)
+            notifications: NotificationsConfig::default(),
             // Agent doc sync
             agent_doc_sync: AgentDocSyncConfig::default(),
             // Profile overlays (U1 of plan 2026-06-25-002)

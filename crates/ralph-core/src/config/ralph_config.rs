@@ -308,6 +308,10 @@ impl RalphConfig {
         let telemetry_warnings = self.telemetry.validate()?;
         warnings.extend(telemetry_warnings);
 
+        // Validate notifications config (U1 of plan 2026-07-25-001).
+        // Hard errors short-circuit; no warnings emitted in this unit.
+        self.notifications.validate()?;
+
         // Validate hooks config semantics (v1 guardrails)
         self.validate_hooks()?;
 

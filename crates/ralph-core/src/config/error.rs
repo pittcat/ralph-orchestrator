@@ -122,6 +122,11 @@ pub enum ConfigError {
     TelemetryValidation { field: String, message: String },
 
     #[error(
+        "Notifications config validation error at '{field}': {message}\nFix: adjust the value under the 'notifications' section of ralph.yml."
+    )]
+    NotificationsValidation { field: String, message: String },
+
+    #[error(
         "Hat '{hat}' terminal event '{topic}' is not in the hat's 'publishes' list.\nFix: add '{topic}' to the hat's 'publishes' array, or remove it from 'terminal_events'."
     )]
     TerminalTopicNotInPublishes { hat: String, topic: String },

@@ -490,6 +490,7 @@ fn config_error_id(err: &ConfigError) -> &'static str {
         ConfigError::SchemaFileNotMap { .. } => "config.schema_file_not_map",
         ConfigError::SchemaFileInvalidSchema { .. } => "config.schema_file_invalid_schema",
         ConfigError::TelemetryValidation { .. } => "config.telemetry_validation",
+        ConfigError::NotificationsValidation { .. } => "config.notifications_validation",
         ConfigError::TerminalTopicNotInPublishes { .. } => "config.terminal_topic_not_in_publishes",
         ConfigError::Io(_) | ConfigError::Yaml(_) => "config.parse_error",
     }
@@ -631,7 +632,8 @@ fn config_error_finding(err: &ConfigError) -> RuntimeContractFinding {
         | ConfigError::DeprecatedProjectKey
         | ConfigError::InvalidCompletionPromise
         | ConfigError::CustomBackendRequiresCommand
-        | ConfigError::TelemetryValidation { .. } => {}
+        | ConfigError::TelemetryValidation { .. }
+        | ConfigError::NotificationsValidation { .. } => {}
         ConfigError::TerminalTopicNotInPublishes { hat, topic } => {
             finding = finding
                 .with_detail("hat", hat.clone())
