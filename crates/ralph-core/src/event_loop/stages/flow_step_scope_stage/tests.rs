@@ -308,3 +308,104 @@ fn u3_bypass_requires_source_hat_for_non_transition_topics() {
     let err = stage.check(&mut ctx_for("unit_loop"), &e).unwrap_err();
     assert_eq!(err.reason_code, "flow_unknown_emit");
 }
+
+// 2026-07-24-005 plan U3 (S1 Accept / S2): supervisor
+// exec_wave accepts worker `exec.unit.done` after U2 mounts
+// the topic on exec_wave.allowed_emits. Conversely, an
+// `exec.unit.done` from a worker at `unit_loop` (before the
+// task-planner handoff advances the step) must still be
+// rejected — that is the S2 product-decision boundary
+// (`unit_loop` does NOT double-mount the topic).
+//
+// The FlowStepScope is the runtime gate that translates the
+// `allowed_emits` declaration into Accept/Reject. The
+// companion structural pin lives in
+// `ce_executor_supervisor_preset_exec_wave_mounts_unit_terminal_topics`
+// (ralph-core/src/preset_lint/supervisor_preset_test.rs).
+
+fn supervisor_flow() -> FlowDeclaration {
+    // Mirrors `presets/en/ce-executor-supervisor.yml`
+    // `mechanism.flow.steps` after U2.  Kept inline so the
+    // test does not depend on a build-script / include_str
+    // pipeline.
+    const SUPERVISOR_FLOW_YAML: &str = r#"
+mechanism:
+  flow:
+    type: declared
+    version: 1
+    terminal_emits: [LOOP_COMPLETE]
+    steps:
+      - id: unit_loop
+        kind: foreach
+        allowed_emits: [work.ready, work.done, execution.plan.ready]
+      - id: exec_wave
+        kind: side_effect
+        allowed_emits:
+          - exec.wave.complete
+          - exec.wave.failed
+          - exec.unit.ready
+          - exec.unit.done
+          - exec.unit.failed
+      - id: exec_integrate
+        kind: await
+        allowed_emits: [plan.complete]
+"#;
+    FlowDeclaration::from_yaml(SUPERVISOR_FLOW_YAML).unwrap()
+}
+
+#[test]
+fn u3_exec_wave_accepts_worker_exec_unit_done() {
+    // S1 Accept: worker emits `exec.unit.done` while the
+    // plan is on the `exec_wave` step. The
+    // FlowStepScope must return Ok — the topic is in
+    // `exec_wave.allowed_emits` per U2.
+    let stage = FlowStepScopeStage::new(supervisor_flow());
+    let e = ev_with_source("exec.unit.done", "{}", "worker");
+    assert!(
+        stage.check(&mut ctx_for("exec_wave"), &e).is_ok(),
+        "exec_wave must accept `exec.unit.done` after U2 (S1 Accept)"
+    );
+}
+
+#[test]
+fn u3_exec_wave_accepts_worker_exec_unit_failed() {
+    // S2 / S5: same accept path for the unit-failed
+    // terminal companion.
+    let stage = FlowStepScopeStage::new(supervisor_flow());
+    let e = ev_with_source("exec.unit.failed", "{}", "worker");
+    assert!(
+        stage.check(&mut ctx_for("exec_wave"), &e).is_ok(),
+        "exec_wave must accept `exec.unit.failed` after U2 (S2 / S5)"
+    );
+}
+
+#[test]
+fn u3_unit_loop_rejects_worker_exec_unit_done() {
+    // S2 product-decision boundary: `unit_loop` does NOT
+    // mount `exec.unit.done`. A worker that emits before
+    // task-planner → exec-wave-dispatcher handoff must be
+    // rejected with `flow_unknown_emit`, not silently
+    // accepted.
+    let stage = FlowStepScopeStage::new(supervisor_flow());
+    let e = ev_with_source("exec.unit.done", "{}", "worker");
+    let err = stage.check(&mut ctx_for("unit_loop"), &e).unwrap_err();
+    assert_eq!(
+        err.reason_code, "flow_unknown_emit",
+        "unit_loop must reject `exec.unit.done` (S2 boundary); got reason={:?}",
+        err.reason_code
+    );
+}
+
+#[test]
+fn u3_unit_loop_accepts_execution_plan_ready() {
+    // S3 / R4 boundary: `execution.plan.ready` is mounted on
+    // `unit_loop.allowed_emits` so task-planner can hand off
+    // to exec-wave-dispatcher and the step advances to
+    // `exec_wave`.
+    let stage = FlowStepScopeStage::new(supervisor_flow());
+    let e = ev_with_source("execution.plan.ready", "{}", "task-planner");
+    assert!(
+        stage.check(&mut ctx_for("unit_loop"), &e).is_ok(),
+        "unit_loop must accept `execution.plan.ready` (S3 handoff)"
+    );
+}
