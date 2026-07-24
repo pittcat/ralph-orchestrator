@@ -51,3 +51,14 @@ Wave/supervisor 协议层能力集合：反压、分布式取消、状态持久�
 ### Ralph 分阶段 Pi activation
 
 单次 hat activation 内，Pi extension 识别 Ralph 长 prompt，按 `ORIENTATION → EXECUTE → VERIFY → REPORT`（对齐 `build_custom_hat`）自动多轮披露与续跑；缺段跳过，解析失败则不接管。阶段完成须确定性信号；事实源与门禁仍在 Ralph。适用于所有 Ralph→Pi activation，不限某个 hat。
+
+## Operator skills（loop 外）
+
+### ralph-e2e-bootstrap
+
+Loop 外 Skill：输入开发计划路径 + 端到端测试目录，交叉核对计划意图与代码 diff，用 combo-box 交互处理最新 `ralph` 二进制（build/PATH）与沙箱配置/启动参数，跑静态门禁（含 `ralph run --dry-run`）后交出启动命令。实现面仅 skill + 可选 Python scripts，**不改 Rust**。不写 Preset（硬 handoff `ralph-preset-author`）；不代跑 live loop；不做跑后诊断。与 `ralph-project-bootstrap` 入口不同。
+
+### E2E 沙箱目录
+
+Operator 指定的、用本仓编译出的 `ralph` 对真实 plan 手跑 preset 的可写沙箱（典型为独立 sibling 仓）。**不是**本仓 `crates/ralph-e2e` 测试 harness。
+
