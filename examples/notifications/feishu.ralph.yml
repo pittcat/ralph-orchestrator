@@ -1,0 +1,24 @@
+# 示例：loop 完成后向飞书自定义机器人发送 best-effort Webhook 通知。
+# 默认关闭；将 enabled 改为 true 并填入你自己的 webhook 路径（替换 ********）即可启用。
+# 变量：{{loop_id}} {{status}} {{termination_reason}} {{workspace}} {{repo_root}}
+#       {{iteration_current}} {{iteration_max}} {{active_hat}}（替换值会做 JSON 转义）。
+# 发送失败（超时/DNS/非 2xx/渲染错误）只记录日志，不会改变 loop 的退出原因或 exit code。
+# 与 hooks.events.post.loop.complete / post.loop.error 的区别：本通知走 HTTP Webhook、
+# 仅在 loop 终止边界触发一次、基于终止原因过滤 success/failure；hooks 是本地命令。
+agent: claude
+event_loop:
+  completion_promise: DONE
+notifications:
+  enabled: false
+  timeout_seconds: 5
+  endpoints:
+    - name: feishu-success
+      url: "https://open.feishu.cn/open-apis/bot/v2/hook/********"
+      on: [success]
+      headers:
+        Content-Type: application/json
+      body: '{"msg_type":"text","content":{"text":"Ralph OK {{loop_id}} ({{termination_reason}})"}}'
+    - name: feishu-failure
+      url: "https://open.feishu.cn/open-apis/bot/v2/hook/********"
+      on: [failure]
+      body: '{"msg_type":"text","content":{"text":"Ralph FAIL {{loop_id}}: {{termination_reason}}"}}'

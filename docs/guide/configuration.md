@@ -239,6 +239,22 @@ telemetry:
       coord_join_mode: parallel
       emit_cadence_sigma: 2.0
 
+# Loop-completion webhook notifications (best-effort, default off)
+notifications:
+  enabled: false
+  timeout_seconds: 5
+  endpoints:
+    - name: feishu-success
+      url: "https://open.feishu.cn/open-apis/bot/v2/hook/********"
+      on: [success]
+      headers:
+        Content-Type: application/json
+      body: '{"msg_type":"text","content":{"text":"Ralph OK {{loop_id}} ({{termination_reason}})"}}'
+    - name: feishu-failure
+      url: "https://open.feishu.cn/open-apis/bot/v2/hook/********"
+      on: [failure]
+      body: '{"msg_type":"text","content":{"text":"Ralph FAIL {{loop_id}}: {{termination_reason}}"}}'
+
 # Backend adapter defaults
 adapters:
   claude:
@@ -763,6 +779,82 @@ Runtime-diagnosis configuration.
 | `runtime_diagnosis.drift.emit_cadence_sigma` | float | `2.0` | Cadence-drift sigma threshold |
 
 `RALPH_DIAGNOSTICS=1` enables the full diagnostics session regardless of config.
+
+### notifications
+
+Loop 终止 Webhook 通知：loop 以成功或失败终止时，向飞书自定义机器人（或任意支持 HTTP POST 的 Webhook）发送**一次** best-effort 通知。
+
+- 默认关闭：省略整个 `notifications` 段或 `enabled: false` 时零网络、零副作用，校验也永远通过。
+- 仅配置在项目级 YAML（`ralph.yml` / `ralph.pipeline.yml` / `ralph.merge.yml` 或 `-c` / `RALPH_CONFIG` 指向的任意 `RalphConfig` YAML），**不进 preset**。
+- 发送失败（超时 / DNS 失败 / 非 2xx / 模板渲染错误）只记录 warn 日志，**不会**改变 loop 的 `TerminationReason`，也不影响进程 exit code。
+
+顶层字段：
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `enabled` | boolean | `false` | 主开关；仅在 `true` 时发送通知并执行下方校验 |
+| `timeout_seconds` | integer | `5` | 每个 endpoint 的请求超时（秒）；启用时必须 > 0 |
+| `endpoints` | list | `[]` | 通知 endpoint 列表；启用时必须非空 |
+
+`endpoints[]` 子字段：
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `name` | string | `""` | endpoint 显示名（可选，用于日志） |
+| `url` | string | `""` | Webhook POST 目标 URL；启用时必填 |
+| `on` | string 或 list | `[]` | 状态过滤：`success` 和/或 `failure`；支持单值（`on: success`）或序列（`on: [success, failure]`）；启用时必填；未知值在校验时被拒绝 |
+| `headers` | map | `{}` | 附加 HTTP 请求头 |
+| `body` | string | `""` | 请求体模板，支持 `{{var}}` 占位符；启用时必填 |
+
+`body` 模板变量：
+
+| 变量 | 含义 |
+|------|------|
+| `{{loop_id}}` | loop 标识，如 `loop-2026-07-25-001` |
+| `{{status}}` | 终止结果：`success` 或 `failure` |
+| `{{termination_reason}}` | 稳定的终止原因字符串，如 `completed` / `max_iterations` / `recovery_exhausted` |
+| `{{workspace}}` | loop 工作区（worktree）路径 |
+| `{{repo_root}}` | 仓库根目录路径 |
+| `{{iteration_current}}` | 已消耗迭代数（v1 中可能为空字符串） |
+| `{{iteration_max}}` | 配置的迭代上限（v1 中可能为空字符串） |
+| `{{active_hat}}` | 终止时活跃的 hat（v1 中可能为空字符串） |
+
+替换值会做 JSON 字符串转义，可安全嵌入 JSON 字符串字面量。`body` 中出现未知 `{{var}}` 时，该 endpoint 被跳过并记录 warn（进程不崩溃）。
+
+语义要点：
+
+- **默认关闭**：省略或 `enabled: false` 时整段 inert，校验永远通过，无任何网络调用。
+- **状态过滤基于终止原因**：`success`/`failure` 由 loop 终止边界上的 `TerminationReason` 决定——仅 `CompletionPromise`（即 `LOOP_COMPLETE` 路径）算 `success`，其余（限额、恢复耗尽、取消等）均为 `failure`。触发依据**不是**环内业务事件 `plan.blocked`（它可多次出现且不等于终止）。
+- **Best-effort 不阻断**：超时、DNS 失败、非 2xx、渲染错误只记 warn，不改变 `TerminationReason`，不影响 CLI exit code，也不触发 hooks 的 block/suspend。
+- **启用时非法配置硬失败**：`timeout_seconds == 0`、`endpoints` 为空、endpoint 缺少 `url`/`body`/`on`、`on` 含未知值，都会在配置校验阶段报 `notifications.*` 字段路径错误并拒绝启动。
+- **与 hooks 可并存**：与 `hooks.events.post.loop.complete` / `post.loop.error` 互不干扰，但同开两套可能重复通知，请自行取舍。
+- **数组合并为整表替换**：项目 YAML 合并（`-c` + `-H` 或配置覆盖）时，`endpoints` 列表按整表替换（覆盖而非追加）。
+- **日志脱敏**：warn 日志与 diagnostics 中的 URL 会对 query string 做 redact，避免 token 明文落盘。
+
+启用示例（飞书自定义机器人，`********` 为你自己的 webhook 路径占位）：
+
+```yaml
+notifications:
+  enabled: true
+  timeout_seconds: 5
+  endpoints:
+    - name: feishu-success
+      url: "https://open.feishu.cn/open-apis/bot/v2/hook/********"
+      on: [success]
+      headers:
+        Content-Type: application/json
+      body: '{"msg_type":"text","content":{"text":"Ralph OK {{loop_id}} ({{termination_reason}})"}}'
+    - name: feishu-failure
+      url: "https://open.feishu.cn/open-apis/bot/v2/hook/********"
+      on: [failure]
+      headers:
+        Content-Type: application/json
+      body: '{"msg_type":"text","content":{"text":"Ralph FAIL {{loop_id}}: {{termination_reason}}"}}'
+```
+
+飞书自定义机器人的创建与 webhook 路径获取见飞书开放平台文档：<https://open.feishu.cn/document/ukTMukTMukTM/ucTM5YjL3ETO24yNxkjN>
+
+延期项：飞书签名校验（timestamp/sign）、URL 环境变量展开、双向机器人/按钮回调、环内 `plan.blocked` 即时推送、失败自动重试队列均不在 v1 范围内。
 
 ### adapters
 
