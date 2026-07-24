@@ -24,6 +24,14 @@ A hat modified tracked files despite its read-only or tool-restriction contract.
 
 一种跨 hat 或 hat 与 sub-agent 的交接原则：完整结果、可恢复状态、证据和关键决策依据优先写入当前 workspace/worktree 的 `.ralph/` 业务 artifact，消息与事件只传递短状态、摘要、路径、必要身份和路由字段。Ralph 的内部 ledger 不属于可供 hat 自定义读写的业务 artifact。
 
+### follow-on loop
+
+跨两次独立 `ralph run` 的串联：第一环终态成功且交接校验通过后，再启动第二环（另一 preset/config）。与同一 preset 内的 hat 链、以及 `ce-executor-pipeline-loop` 的 review/fix 环不同。近亲行为是 worktree 成功后的 `auto_merge → merge-loop` spawn。
+
+### chain handoff
+
+follow-on 两环之间的强制交接产物：由第一环成功路径写出、启动第二环前校验；缺失或不合格则失败关闭、不启动第二环。正文在业务 artifact；第二环只消费约定路径与必填字段。
+
 ### execution.plan.ready
 
 `ce-executor-supervisor` 中 task-planner 在成功写入 `.ralph/review/<plan-key>/execution-plan.yml` 之后发出的业务 handoff topic。事件只携带路径、hash 与路由身份字段；DAG 正文留在 artifact。消费方是 `exec-wave-dispatcher`（首次 ready-wave fan-out）。失败路径发 `plan.blocked`，二者在同一 activation 互斥（isolated 单业务事件预算）。
@@ -61,4 +69,5 @@ Loop 外 Skill：输入开发计划路径 + 端到端测试目录，交叉核对
 ### E2E 沙箱目录
 
 Operator 指定的、用本仓编译出的 `ralph` 对真实 plan 手跑 preset 的可写沙箱（典型为独立 sibling 仓）。**不是**本仓 `crates/ralph-e2e` 测试 harness。
+
 
