@@ -1175,6 +1175,113 @@ mod tests {
         );
     }
 
+    // plan 2026-07-24-002 U1: the REAL embedded `ce-executor-pipeline`
+    // preset declares a `payload_consistency` gate on `work.done` that
+    // rejects the self-contradictory `post_verification_status=green +
+    // new_business_regressions_count>0` shape (mirroring the existing
+    // fix-done-green-with-regressions rule) while accepting the honest
+    // red path. This test loads the genuine embedded preset and drives
+    // `validate_event` to lock the gate's runtime behaviour.
+    #[test]
+    fn test_ce_executor_pipeline_work_done_payload_consistency_gate() {
+        use ralph_core::{PolicyDecision, PolicyRuntimeState, ViolationType, validate_event};
+
+        let preset = get_preset("ce-executor-pipeline").expect("linear preset should exist");
+        let config = RalphConfig::parse_yaml(preset.content).expect("linear preset should parse");
+        let policy = config
+            .event_loop
+            .event_policy
+            .as_ref()
+            .expect("pipeline preset must declare event_policy");
+
+        assert!(
+            policy.payload_consistency.enabled,
+            "ce-executor-pipeline must enable payload_consistency"
+        );
+
+        // A fully schema-valid `work.done` payload representing an
+        // honest partial execution with red verification.
+        let legal = serde_json::json!({
+            "plan_name": "2026-07-24-001-demo-plan",
+            "plan_path": "docs/plans/2026-07-24-001-demo-plan.md",
+            "plan_contract_version": "ce-unified-plan/v1",
+            "normalized_plan_file": ".ralph/review/2026-07-24-001-demo-plan/normalized-plan.md",
+            "plan_contract_digest": "sha256:deadbeef",
+            "trace_file": ".ralph/review/2026-07-24-001-demo-plan/trace.jsonl",
+            "executor_head_sha": "0123456789abcdef0123456789abcdef01234567",
+            "resolved_baseline_sha": "fedcba9876543210fedcba9876543210fedcba98",
+            "planned_units": ["U1", "U2", "U3"],
+            "completed_units": ["U1", "U3"],
+            "attempted_units": ["U1", "U2", "U3"],
+            "failed_units": ["U2"],
+            "blocked_units": [],
+            "skipped_units": [],
+            "execution_status": "partial",
+            "decisions_file": ".ralph/agent/decisions.md",
+            "baseline_verification_status": "green",
+            "baseline_verification_file": ".ralph/review/2026-07-24-001-demo-plan/baseline-verification.md",
+            "post_verification_status": "red",
+            "post_verification_file": ".ralph/review/2026-07-24-001-demo-plan/final-verification.md",
+            "verification_delta_file": ".ralph/review/2026-07-24-001-demo-plan/verification-delta.md",
+            "baseline_existing_count": 0,
+            "new_business_regressions_count": 1,
+            "test_compatibility_updates_count": 0,
+            "flaky_or_environmental_count": 0,
+            "tests_run": 120,
+            "tests_passed": 119,
+            "changed_lines": 85,
+            "commit_count": 2
+        });
+
+        // 1. Honest red + regressions must be ACCEPTED.
+        let mut state = PolicyRuntimeState::default();
+        let legal_str = legal.to_string();
+        let decision = validate_event("work.done", Some(&legal_str), policy, &mut state);
+        assert_eq!(
+            decision,
+            PolicyDecision::Accept,
+            "honest red work.done with regressions must be accepted"
+        );
+
+        // 2. HITTING: flip post_verification_status to green while
+        //    keeping regressions>0. Must be rejected with the
+        //    `payload_consistency:work-done-green-with-regressions` gate.
+        let mut hitting = legal.clone();
+        hitting["post_verification_status"] = serde_json::json!("green");
+        let hitting_str = hitting.to_string();
+        let mut state = PolicyRuntimeState::default();
+        let decision = validate_event("work.done", Some(&hitting_str), policy, &mut state);
+        let PolicyDecision::RejectWithResume(finding) = decision else {
+            panic!("green-with-regressions work.done must be rejected, got {decision:?}");
+        };
+        let ViolationType::SemanticGateViolation { gate, context, .. } = &finding.violation_type
+        else {
+            panic!(
+                "green-with-regressions work.done must trip a SemanticGateViolation, got {:?}",
+                finding.violation_type
+            );
+        };
+        assert_eq!(gate, "payload_consistency:work-done-green-with-regressions");
+        assert!(
+            context.contains("post_verification_status=green contradicts"),
+            "gate context must carry the actionable rule message, got {context}"
+        );
+
+        // 3. NON-MISFIRE: green with zero regressions must be accepted.
+        let mut clean_green = legal.clone();
+        clean_green["post_verification_status"] = serde_json::json!("green");
+        clean_green["new_business_regressions_count"] = serde_json::json!(0);
+        clean_green["tests_passed"] = serde_json::json!(120);
+        let clean_str = clean_green.to_string();
+        let mut state = PolicyRuntimeState::default();
+        let decision = validate_event("work.done", Some(&clean_str), policy, &mut state);
+        assert_eq!(
+            decision,
+            PolicyDecision::Accept,
+            "green work.done with zero regressions must not trip the gate"
+        );
+    }
+
     // 2026-07-16-002 plan U2: structured guard that the enhanced
     // `test-stabilizer` hat in each CE executor preset still owns
     // *only* the stabilization.* terminal topics and stays the sole
