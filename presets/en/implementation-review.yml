@@ -1187,25 +1187,30 @@ hats:
 
       ### Step 2 — Review your dimension
 
+      All six dimensions are read-only reviews — never run tests, build,
+      or lints (R10). Reviewers reason about test/build/lint quality by
+      reading the patch and existing visible evidence, NOT by executing
+      suites.
+
       Each dimension has a fixed scope (KTD6); your `dimension` field
       from the trigger picks one:
 
-      - `goal-alignment`: Does the patch implement the plan's stated
-        goals, requirements (R-IDs), and product contract? Any drift
-        between plan and code is a finding.
-      - `correctness`: Are the new code paths correct under the
-        project's invariants? Bugs, race conditions, off-by-one, missing
-        error handling, broken contracts.
-      - `testing`: Test coverage quality, assertion strength, missing
-        scenarios, edge cases. **Read-only**: reason about test diffs
-        and existing visible test evidence; do NOT execute.
-      - `maintainability`: Naming, duplication, dead code, brittle
-        patterns, future maintenance cost.
-      - `project-standards`: Repository conventions (formatter, lint,
-        error handling, layering, public API surface) defined in
-        `AGENTS.md` / `CLAUDE.md` / `CONTRIBUTING.md`. Do NOT enforce
-        rules that aren't documented there.
-      - `adversarial`: Edge cases, hostile inputs, security,
+      - `goal-alignment` (Read-only): Does the patch implement the plan's
+        stated goals, requirements (R-IDs), and product contract? Any
+        drift between plan and code is a finding.
+      - `correctness` (Read-only): Are the new code paths correct under
+        the project's invariants? Bugs, race conditions, off-by-one,
+        missing error handling, broken contracts.
+      - `testing` (Read-only): Test coverage quality, assertion strength,
+        missing scenarios, edge cases. Reason about test diffs and
+        existing visible test evidence; do NOT execute.
+      - `maintainability` (Read-only): Naming, duplication, dead code,
+        brittle patterns, future maintenance cost.
+      - `project-standards` (Read-only): Repository conventions
+        (formatter, lint, error handling, layering, public API surface)
+        defined in `AGENTS.md` / `CLAUDE.md` / `CONTRIBUTING.md`. Do NOT
+        enforce rules that aren't documented there.
+      - `adversarial` (Read-only): Edge cases, hostile inputs, security,
         concurrency hazards, resource exhaustion, idempotency under
         repeated invocations.
 
@@ -1427,7 +1432,31 @@ hats:
           resolution_note: <short>
       ```
 
+      ### Step 4.5 — Fail-close on aggregate precheck failure
+
+      After writing `synthesized-review.md`, **recompute**
+      `handoff_precheck_failed_count` by reading each of the six
+      dimension artifacts' `handoff_precheck_failed` field directly
+      from the artifact frontmatter (do NOT trust the trigger payload's
+      count — recompute from bytes to avoid drift). If the recomputed
+      count > 0:
+
+      - Do NOT emit `review.synthesized`.
+      - Write `.ralph/review/<plan>/review-blocked.md` with
+        `reason: handoff_precheck_failed` and a body listing each
+        offending `dim` (the dim whose `handoff_precheck_failed: true`).
+      - Emit `review.blocked` with the canonical 5 required fields per
+        `event_policy.schemas.review.blocked`.
+
+      This is the success-path fail-close gate: a dim that reports
+      `handoff_precheck_failed: true` MUST NOT propagate downstream via
+      `review.synthesized`, even if Step 2's per-dim check was skipped
+      or the synth agent read a stale dimension frontmatter.
+
       ### Step 5 — Emit review.synthesized
+
+      Prerequisite: `handoff_precheck_failed_count == 0` (recomputed
+      from artifact bytes in Step 4.5). If non-zero, jump to Step 6.
 
       Pre-check + emit `review.synthesized`. Required payload fields per
       `event_policy.schemas.review.synthesized`. The
@@ -1528,8 +1557,14 @@ hats:
       - `source_finding_ids`: every finding id that fed into this unit.
       - `target_files`: union of `evidence` paths.
       - `description`: one paragraph; cite the cross-references.
-      - `verification`: project-specific command (read from repo docs,
-        not assumed) and expected pass criteria.
+      - `verification`: project-specific command. Read
+        `<repo-root>/AGENTS.md` and `<repo-root>/CONTRIBUTING.md` for
+        documented verification patterns; cite the source path verbatim
+        in the unit (e.g. `AGENTS.md §3.2`). If neither file documents
+        a verification command for this unit, write
+        `verification: unspecified — see <unit_id> rationale` and
+        explain in the rationale why no documented command applies. Do
+        NOT invent verification commands from memory.
 
       Severities (KTD7):
       - P0 / P1 / P2 → actionable Implementation Unit.
