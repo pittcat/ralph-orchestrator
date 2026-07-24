@@ -110,7 +110,7 @@ metadata:
 | `ralph wave emit` | 并行 wave 调度 | `ralph tools skill load ralph-tools-wave` |
 | `ralph tools task verify <verb>` | 零写盘 Precheck（含 `verify-emit-bridge` 三字段同源） | `ralph tools skill load ralph-tools-tasks` |
 | `ralph wave verify --payloads-stdin` | 零写盘 wave batch Precheck（dispatcher hat） | `ralph tools skill load ralph-tools-wave` |
-| `ralph inspect loop` | 机器可读 loop + hat 身份摘要（OPAC Observe） | `ralph tools skill load ralph-tools-cmdref` |
+| `ralph inspect loop` | 机器可读 loop + hat 身份摘要；JSON 可能含 `supervisor` 块（见 `ralph-tools-opac` Observe）（OPAC Observe） | `ralph tools skill load ralph-tools-cmdref` |
 | `ralph run` | 启动编排循环 | `ralph tools skill load ralph-tools-cmdref` |
 | `ralph inspect profiles` | 预览 profile overlay 解析结果（只读，不启动 loop） | `ralph tools skill load ralph-tools-cmdref` |
 | `ralph hats validate [--strict]` | 拓扑/payload/orphan/lint 校验 | `ralph hats validate --help`（strict 时启用 lint 所有权检查） |

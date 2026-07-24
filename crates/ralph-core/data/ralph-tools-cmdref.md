@@ -141,7 +141,7 @@ ralph run [OPTIONS] [-- <CUSTOM_ARGS>...]
 | `ralph web` | 启动 Web 仪表板（前后端） |
 | `ralph mcp` | MCP 服务器模式 |
 | `ralph completions` | 生成 shell 补全脚本 |
-| `ralph inspect` | 只读诊断命名空间（含 `inspect profiles`；`inspect loop` 输出 loop + hat 身份 + events 路径 + **`loop_anchor` plan 锚点**（优先 `.ralph/agent/.ralph-anchor.json`，否则 `prompt_file`），OPAC Observe 一手数据源） |
+| `ralph inspect` | 只读诊断命名空间（含 `inspect profiles`；`inspect loop` 输出 loop + hat 身份 + events 路径 + **`loop_anchor` plan 锚点**（优先 `.ralph/agent/.ralph-anchor.json`，否则 `prompt_file`）；JSON 可能含 **`supervisor` 块**（配置启用 supervisor，或 runtime 已有可打开的 wave 账本时出现，否则整键省略），OPAC Observe 一手数据源） |
 | `ralph diagnose` | 离线诊断报告（`--format json` 含 `dup_storm_topics`：`work.ready` 同 dedup key 重复 ≥3 次；ranked findings 的 `hint` 区分 `duplicate_work_done_same_step` / `duplicate_work_done_stall_bypass`） |
 
 > `ralph bot` 已随 `ralph-telegram` crate 一起删除;运行时不再提供人工通道。`human.guidance` 已废弃;`task.resume` 恢复通道保留(由 runtime diagnosis engine 产出)。

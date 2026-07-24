@@ -16,9 +16,9 @@ metadata:
 
 | 阶段 | 目的 | 工具 |
 |------|------|------|
-| **O — Observe** | 「我现在是谁？系统是什么状态？」 | `ralph inspect loop` + `ralph tools task list` + 必要时 `ralph events --events-source hat-channel\|main`;**`event_loop.supervisor.enabled: true` 时 inspect loop JSON 含 supervisor 块**（`active_waves` / `slot_summary` / `last_coordination_topics`） |
-| **P — Precheck** | 「这次操作会成功吗？写盘后会留下什么？」 | `ralph tools task verify <verb>` 或 `ralph emit/wave emit --policy-check`（覆盖 schema、required_fields、origin guard、payload_consistency gate） |
-| **A — Apply** | 「实际写盘」 | `ralph tools task <verb>` 或 `ralph emit` / `ralph wave emit`（去掉 `--policy-check`） |
+| **O — Observe** | 「我现在是谁？系统是什么状态？」 | `ralph inspect loop` + `ralph tools task list` + 必要时 `ralph events --events-source hat-channel\|main`；若 JSON 含 `supervisor` 键，可读 `active_waves` / `slot_summary` / `last_coordination_topics`（见下方「supervisor 摘要」门控） |
+| **P — Precheck** | 「这次操作会成功吗？写盘后会留下什么？」 | `ralph tools task verify <verb>`；单事件用 `ralph emit --policy-check`；wave 批用 `ralph wave verify --payloads-stdin`（不是 `wave emit --policy-check`） |
+| **A — Apply** | 「实际写盘」 | `ralph tools task <verb>`；单事件用去掉 `--policy-check` 的 `ralph emit`；wave 用与 verify **相同** payload 的 `ralph wave emit`（先 verify 拿 ticket，再 emit） |
 | **C — Confirm** | 「预期状态真的产生了吗？下一步要做什么？」 | 优先检查本次操作通过公开接口给出的成功反馈；反馈不足时，再按对应 skill 使用只读查询接口确认 |
 
 **每个 A 之前必须有 P，每个 A 之后必须完成 C；Confirm 不可省略**。Apply 后必须按下方路由找到专项 skill，并取得该 skill 规定的有效证据。Confirm 不等于“所有操作固定再跑同一条查询命令”：具体证据和查询方式由专项 skill 定义。未找到 skill、未取得证据或证据不一致时，必须停止，不得继续下一次状态变更。省略 Precheck 会绕过写入前约束；省略 Confirm 会把“命令已执行”误当成“预期状态已产生”。
@@ -29,7 +29,7 @@ metadata:
 2. **loop 处于哪一阶段**：`## ORCHESTRATOR CONTEXT` 段
 3. **任务当前状态**：`ralph tools task list` + `ready` 子命令
 4. **上一操作产生了什么状态**：先检查该操作的公开成功反馈；需要进一步确认时，按对应 skill 使用公开只读接口，不读取内部 ledger
-5. **supervisor 在做什么（仅当 `event_loop.supervisor.enabled: true`）**：`ralph inspect loop --format json` 的 `supervisor` 键
+5. **supervisor / wave 账本在做什么（仅当 inspect JSON 含 `supervisor` 键）**：`ralph inspect loop --format json` 的 `supervisor` 键；**先** `jq 'has("supervisor")'`，为 false 则跳过，不要读内部 ledger 文件
 6. **loop 锚定的 plan 是哪个**：`ralph inspect loop --format json` 的 `loop_anchor` 键
 
 ## loop_anchor 摘要
@@ -54,40 +54,47 @@ metadata:
 
 ## supervisor 摘要
 
-当 `event_loop.supervisor.enabled: true` 时,`ralph inspect loop --format json` 的 `supervisor` 字段会带四段信息:
+**何时出现 `supervisor` 键（Observe 门控）**：`ralph inspect loop --format json` 在下列**任一**成立时包含 `supervisor` 块；**两者都不成立**时整键省略（纯单链 pipeline 保持安静）：
 
-| 字段 | 含义 | 来源 |
+1. 当前配置 `event_loop.supervisor.enabled: true`；或
+2. runtime 已能打开本 loop 的 wave 账本（常见于 default-wave：配置里 supervisor 未开，但先前 wave 已留下可恢复账本）
+
+agent **只**用 `jq 'has("supervisor")'` 判断，**不要**去读或探测内部 ledger 文件路径。键存在但账本暂不可读时，字段多为空默认值（`active_waves: []`、`queue_depth: 0` 等），仍属合法 Observe 结果。
+
+键存在时，`supervisor` 带四段公开摘要：
+
+| 字段 | 含义 | agent 用法 |
 |------|------|------|
-| `active_waves[]` | 当前未到终态的 wave 列表 | `SupervisorStore::recover_active_waves` |
-| `queue_depth` | 所有 active wave 的非终态 slot 总和 | 同上 |
-| `slot_summary[]` | **单一 active wave 时填充**：`{slot_id, hat, status}` 三元组,`hat` 是 wave kind 的稳定字符串标签（`exec-worker` / `fix-worker` / `review-worker`） | 同上 + `WaveSnapshot.slots` |
-| `last_coordination_topics[]` | 每个 active wave 可能产出的 supervisor 协调 topic（`exec.wave.complete` / `exec.wave.failed` 等 6 个白名单项中按 wave kind 派生） | `SUPERVISOR_COORDINATION_TOPICS` ∩ wave kind,纯派生,无 db 读取 |
+| `active_waves[]` | 当前未到终态的 wave 列表 | 判断是否仍有进行中的 batch |
+| `queue_depth` | 所有 active wave 的非终态 slot 总和 | 粗看积压 |
+| `slot_summary[]` | **仅当恰好一个 active wave 时填充**：`{slot_id, hat, status}`；`hat` 为 wave kind 标签（如 `exec-worker` / `fix-worker` / `review-worker`） | 看本 activation 相关 slot 是否仍 `dispatched` |
+| `last_coordination_topics[]` | 当前 active wave 可能产出的协调 topic 派生列表（如 `exec.wave.complete` / `exec.wave.failed`） | 只读预期；不要自行 emit 这些 topic |
 
 **字段填充契约**:
 
-- `slot_summary` 仅当 `active_waves.len() == 1` 时填充——agent-safe 语义是"我的 slot 被什么 block",不是"全量状态 dump"
-- `last_coordination_topics` 在 `active_waves` 为空时返回空数组,不伪造任何潜在 topic
-- 输出**绝不**包含 db 路径、event log 内容或其他内部 ledger 字段
-- 多次调用结果完全确定（同 store 状态 → 同 JSON）,适合机读 + 离线断言
+- `slot_summary` 仅当 `active_waves.len() == 1` 时填充——语义是「我的 slot 被什么挡住」，不是全量 dump
+- `last_coordination_topics` 在 `active_waves` 为空时返回空数组，不伪造潜在 topic
+- 输出**绝不**包含内部 ledger 路径、event log 正文或其他不可见字段
+- 同 store 状态下多次调用结果确定，适合机读
 
 **典型用法**:
 
 ```bash
-# 收到 `ralph emit` 拒收 → supervisor wave 还在路上
-ralph inspect loop --format json | jq '.supervisor.slot_summary[] | select(.status=="dispatched")'
-
-# 想确认这条 wave 落地后会出什么协调 topic
-ralph inspect loop --format json | jq '.supervisor.last_coordination_topics'
-
-# supervisor 没启用 → JSON 没有 `supervisor` 键（不要假设 key 存在）
+# 先看键在不在（门控）；false → 跳过本段
 ralph inspect loop --format json | jq 'has("supervisor")'
+
+# 收到拒收且 supervisor 键存在 → 看 slot 是否仍在路上
+ralph inspect loop --format json | jq '.supervisor.slot_summary[]? | select(.status=="dispatched")'
+
+# 只读：这条 wave 落地后可能出现的协调 topic（不要自行 emit）
+ralph inspect loop --format json | jq '.supervisor.last_coordination_topics // []'
 ```
 
 ## Precheck 阶段关键命令
 
 - **task 变更**：`ralph tools task verify <add\|ensure\|start\|close\|fail\|reopen> [args…]`，三字段一致性：`ralph tools task verify-emit-bridge --task-id ID --task-key KEY --step STEP`
 - **单事件 emit**：`ralph emit <TOPIC> --policy-check -j '<payload>'`，**不带 flag 写盘会被 agent context 默认 enforce 拒收**（参考 `ralph-tools-emit` §5 precheck）
-- **wave emit**：`ralph wave verify --payloads-stdin`（零写盘 batch precheck）。**worker hat 不可 wave emit**（仅 dispatcher hat 可调用）
+- **wave emit**：先 `ralph wave verify --payloads-stdin`（同源 schema 预检 + 一次性 ticket），再用**未改动的同一批** payload 跑 `ralph wave emit --payloads-stdin`。**不要**把 `wave emit --policy-check` 当成 wave 的 Precheck。**worker hat 不可 wave emit**（仅 dispatcher hat 可调用）；细节见 `ralph-tools-wave`
 - **shell 残留 `RALPH_CURRENT_HAT`**：operator 在 agent shell 残留变量是常见误用源；如发现 context 错乱，先 `unset RALPH_CURRENT_HAT`
 
 ## Apply 阶段两步式 task verify gate
