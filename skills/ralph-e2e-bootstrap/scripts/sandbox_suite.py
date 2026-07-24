@@ -35,11 +35,9 @@ from __future__ import annotations
 import hashlib
 import os
 import re
-import shutil
 import tempfile
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Mapping
 
 # ---------------------------------------------------------------------------
 # Stem derivation
@@ -191,11 +189,27 @@ def _read_plan(plan_path: Path) -> bytes:
 
 
 def _check_writable(directory: Path) -> None:
-    """Refuse to write to ``presets/`` subtrees (orchestration SSOT)."""
+    """Refuse to write to orchestration SSOT subtrees (canonical-roots).
+
+    The canonical SSOT root names are ``presets`` / ``crates`` /
+    ``.ralph``. Any directory whose resolved path contains a segment
+    that exactly equals a canonical root OR starts with a canonical
+    root followed by a dash is rejected. This catches both subtrees
+    under the SSOT (e.g. ``<repo>/presets/en/``) and sandbox roots
+    that share a canonical-root prefix (e.g. ``/tmp/presets-foo/``).
+    Directories whose name merely contains a canonical root name as
+    an interior substring (e.g. ``real_presets/``) are NOT blocked
+    by this guard.
+    """
     resolved = directory.resolve()
     parts = resolved.parts
-    if "presets" in parts:
-        raise SandboxError(f"refusing to write inside orchestration SSOT: {resolved}")
+    canonical_roots = ("presets", "crates", ".ralph")
+    for part in parts:
+        for root in canonical_roots:
+            if part == root or (part.startswith(f"{root}-") and len(part) > len(root)):
+                raise SandboxError(
+                    f"refusing to write inside orchestration SSOT ({part}/): {resolved}"
+                )
     if not directory.exists():
         raise SandboxError(f"sandbox directory does not exist: {directory}")
     if not directory.is_dir():
@@ -204,27 +218,273 @@ def _check_writable(directory: Path) -> None:
         raise SandboxError(f"sandbox directory is not writable: {directory}")
 
 
-def _atomic_write(path: Path, payload: bytes) -> None:
-    """Write ``payload`` to ``path`` atomically.
+def _atomic_write_with_provenance(
+    path: Path, payload: bytes, profile_sha256: str, prompt_sha256: str
+) -> None:
+    """Atomic write with provenance header + reuse check.
 
-    The sibling ``.tmp`` is created in the same directory so the
-    rename is on the same filesystem. ``os.replace`` is atomic on
-    POSIX and on Windows (when the destination is on the same
-    filesystem as the temp file).
+    The first 3 lines are a reproducible provenance comment::
+
+        # generated_by: ralph-e2e-bootstrap
+        # profile_sha256: <hex>
+        # prompt_sha256: <hex>
+
+    If ``path`` already exists, parse its first 3 lines; if the
+    embedded ``profile_sha256`` / ``prompt_sha256`` differ from the
+    current call, raise ``SandboxError("write_conflict: provenance
+    mismatch on <path>: existing=<old> current=<new>")``.
+
+    Append the payload (without duplicating the header) so the
+    produced file has exactly one provenance block.
     """
-    tmp_dir = path.parent
-    fd, tmp_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=tmp_dir)
-    try:
-        with os.fdopen(fd, "wb") as handle:
-            handle.write(payload)
-        os.replace(tmp_name, path)
-    except Exception:
-        # Best-effort cleanup of the temp file on the failure path.
+    header = (
+        f"# generated_by: ralph-e2e-bootstrap\n"
+        f"# profile_sha256: {profile_sha256}\n"
+        f"# prompt_sha256: {prompt_sha256}\n"
+    )
+    header_bytes = header.encode("utf-8")
+
+    # Check for write conflict on existing file.
+    if path.exists():
         try:
-            os.unlink(tmp_name)
+            raw = path.read_bytes()
         except OSError:
+            raw = b""
+        lines = raw.splitlines()
+        if len(lines) >= 3:
+            existing = b"\n".join(lines[:3]) + b"\n"
+            if existing != header_bytes:
+                # Extract existing hashes for error message.
+                def _extract_sha(line: bytes) -> str:
+                    return line.decode("utf-8").split(":", 1)[1].strip()
+
+                old_profile = _extract_sha(lines[1])
+                old_prompt = _extract_sha(lines[2])
+                raise SandboxError(
+                    f"write_conflict: provenance mismatch on {path}: "
+                    f"existing=profile:{old_profile} prompt:{old_prompt} "
+                    f"current=profile:{profile_sha256} prompt:{prompt_sha256}"
+                )
+
+    def _write() -> None:
+        tmp_dir = path.parent
+        # A. Orphan cleanup — remove stale .tmp files from prior runs.
+        for stale in tmp_dir.glob(f".{path.name}.*.tmp"):
+            try:
+                stale.unlink()
+            except OSError:
+                pass
+        # B. Stage to .tmp sibling.
+        fd, tmp_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=tmp_dir)
+        try:
+            with os.fdopen(fd, "wb") as handle:
+                handle.write(header_bytes)
+                handle.write(payload)
+            os.replace(tmp_name, path)
+        except Exception:
+            try:
+                os.unlink(tmp_name)
+            except OSError:
+                pass
+            raise
+
+    _write()
+
+
+def _atomic_pair_write(
+    config_path: Path,
+    prompt_path: Path,
+    config_payload: bytes,
+    prompt_payload: bytes,
+    *,
+    profile_sha256: str,
+    prompt_sha256: str,
+    rollback_paths: tuple[Path, ...] = (),
+    updated_pair: tuple[Path, Path] | None = None,
+) -> None:
+    """Write config + prompt payloads atomically across the pair.
+
+    Each half is written via _atomic_write_with_provenance, which
+    stages a .tmp sibling, writes a 3-line provenance header + payload,
+    then os.replace-s it into place.  On any failure all .tmp files are
+    unlinked and any ``rollback_paths`` we created in this call are
+    removed.  If we were updating an existing pair (``updated_pair``
+    is set), we verify both originals are still byte-equivalent to the
+    snapshot taken before the call; if either has been modified the
+    pair is left in a half-written state and we raise
+    ``SandboxError("pair-half-written: …: rerun")``.
+
+    Returns early (no exception) when both halves write successfully.
+    """
+    # Snapshot originals for updated_pair contract check.
+    original_config_bytes: bytes | None = None
+    original_prompt_bytes: bytes | None = None
+    if updated_pair is not None:
+        if config_path.exists():
+            try:
+                original_config_bytes = config_path.read_bytes()
+            except OSError:
+                original_config_bytes = None
+        if prompt_path.exists():
+            try:
+                original_prompt_bytes = prompt_path.read_bytes()
+            except OSError:
+                original_prompt_bytes = None
+
+    errors: dict[Path, Exception] = {}
+
+    # Write each half with provenance header.
+    for path, payload in [
+        (config_path, config_payload),
+        (prompt_path, prompt_payload),
+    ]:
+        try:
+            _atomic_write_with_provenance(path, payload, profile_sha256, prompt_sha256)
+        except Exception as exc:  # noqa: PERF203
+            errors[path] = exc
+
+    if not errors:
+        return  # both halves written successfully
+
+    # At least one half failed.  Clean up .tmp / orphan files first.
+    tmp_dir = config_path.parent
+    for stem in [f".{config_path.name}.", f".{prompt_path.name}."]:
+        for stale in tmp_dir.glob(f"{stem}*.tmp"):
+            try:
+                stale.unlink()
+            except OSError:
+                pass
+    for path_ in [config_path, prompt_path]:
+        try:
+            path_.unlink()
+        except FileNotFoundError:
             pass
-        raise
+
+    if updated_pair is None:
+        raise errors[config_path if config_path in errors else prompt_path]
+
+    # Verify pair invariant: both originals must still be intact so
+    # the caller can retry and the pair is still in its pre-call state.
+    for path, original_bytes, name in [
+        (config_path, original_config_bytes, "config"),
+        (prompt_path, original_prompt_bytes, "prompt"),
+    ]:
+        if original_bytes is None:
+            continue  # did not exist before; nothing to verify
+        if not path.exists() or path.read_bytes() != original_bytes:
+            # New file exists (written before the other half failed) but
+            # original is gone or modified — the pair is half-written.
+            raise SandboxError(f"pair-half-written: {name} ({path}): rerun")
+
+    # Both originals intact; rollback is clean.  Re-raise the first error.
+    raise errors[config_path if config_path in errors else prompt_path]
+
+
+# ---------------------------------------------------------------------------
+# Suite generation
+# ---------------------------------------------------------------------------
+
+
+# ---------------------------------------------------------------------------
+# Helpers for generate_suite
+# ---------------------------------------------------------------------------
+
+
+def _render_payloads(plan_relpath: str, stem: str, preset: str) -> tuple[bytes, bytes]:
+    """Return the (config_payload, prompt_payload) bytes for the suite pair."""
+    config_payload = CONFIG_TEMPLATE.format(
+        stem=stem,
+        preset=preset.removeprefix("builtin:"),
+    ).encode("utf-8")
+    prompt_payload = PROMPT_TEMPLATE.format(
+        stem=stem,
+        preset=preset,
+        plan_relpath=plan_relpath,
+    ).encode("utf-8")
+    return config_payload, prompt_payload
+
+
+def _compute_disposition(
+    path: Path,
+    payload: bytes,
+    config_payload: bytes,
+    prompt_payload: bytes,
+    created: list[str],
+    updated: list[str],
+    noop: list[str],
+) -> str:
+    """Determine file disposition using provenance comparison.
+
+    Reads the existing file's first 3 lines as a provenance header.
+    Raises ``SandboxError("write_conflict: …")`` on provenance mismatch.
+    Otherwise falls back to bytes-equality for noop/updated/created.
+    """
+    if path.exists():
+        try:
+            raw = path.read_bytes()
+        except OSError:
+            raw = b""
+        lines = raw.splitlines()
+        if len(lines) >= 3:
+
+            def _extract_sha(line: bytes) -> str | None:
+                # Header lines look like `# profile_sha256: <hex>` — only
+                # those carry a `:` separator in the form `<key>: <value>`.
+                # Lines without that shape (Markdown comments, bare YAML keys,
+                # etc.) return None so we fall through to bytes-equality.
+                parts = line.decode("utf-8", errors="replace").split(":", 1)
+                if len(parts) != 2:
+                    return None
+                return parts[1].strip()
+
+            existing_profile = _extract_sha(lines[1])
+            existing_prompt = _extract_sha(lines[2])
+            if existing_profile is not None and existing_prompt is not None:
+                current_profile = _sha256_bytes(config_payload)
+                current_prompt = _sha256_bytes(prompt_payload)
+                if existing_profile != current_profile or existing_prompt != current_prompt:
+                    raise SandboxError(
+                        f"write_conflict: provenance mismatch on {path}: "
+                        f"existing=profile:{existing_profile} prompt:{existing_prompt} "
+                        f"current=profile:{current_profile} prompt:{current_prompt}"
+                    )
+            # else: legacy file without header → fall through to
+            # bytes-equality check below.
+        if raw == payload:
+            noop.append(str(path))
+            return "noop"
+        updated.append(str(path))
+        return "updated"
+    created.append(str(path))
+    return "created"
+
+
+def _build_argv(
+    binary: str, config_path: Path, preset: str, plan_path: Path
+) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """Return (base_argv, launch_argv) for the suite."""
+    base = (
+        binary,
+        "-c",
+        str(config_path),
+        "-H",
+        preset,
+        "run",
+        "--dry-run",
+        "--plan",
+        str(plan_path),
+    )
+    launch = (
+        binary,
+        "-c",
+        str(config_path),
+        "-H",
+        preset,
+        "run",
+        "--plan",
+        str(plan_path),
+    )
+    return base, launch
 
 
 # ---------------------------------------------------------------------------
@@ -238,7 +498,6 @@ def generate_suite(
     preset: str,
     plan_path: Path,
     stem: str | None = None,
-    extra_hats: Mapping[str, Any] | None = None,
 ) -> SuiteResult:
     """Generate the preset-bound pair in ``sandbox``.
 
@@ -256,10 +515,6 @@ def generate_suite(
     stem:
         Override for the derived preset stem. When ``None`` the
         function derives it from ``preset`` via :func:`derive_stem`.
-    extra_hats:
-        Optional mapping injected into the generated config under
-        ``event_loop.hats_source`` for tests that need to control
-        the resolved preset. Production callers leave this ``None``.
 
     Raises
     ------
@@ -277,89 +532,50 @@ def generate_suite(
 
     plan_bytes = _read_plan(plan_path)
     plan_sha256 = _sha256_bytes(plan_bytes)
-
-    # Plan file is referenced by absolute path in the argv; only its
-    # repo-relative form is embedded in the prompt body for operator
-    # legibility. We never mutate the plan file itself.
     plan_relpath = str(Path(os.path.relpath(plan_path, sandbox)))
 
-    config_payload = CONFIG_TEMPLATE.format(
-        stem=resolved_stem,
-        preset=preset.removeprefix("builtin:"),
-    ).encode("utf-8")
-    prompt_payload = PROMPT_TEMPLATE.format(
-        stem=resolved_stem,
-        preset=preset,
-        plan_relpath=plan_relpath,
-    ).encode("utf-8")
+    config_payload, prompt_payload = _render_payloads(plan_relpath, resolved_stem, preset)
 
     created: list[str] = []
     updated: list[str] = []
     noop: list[str] = []
 
-    def _dispose(path: Path, payload: bytes) -> str:
-        if path.exists():
-            try:
-                existing = path.read_bytes()
-            except OSError:
-                existing = b""
-            if existing == payload:
-                noop.append(str(path))
-                return "noop"
-            updated.append(str(path))
-            return "updated"
-        created.append(str(path))
-        return "created"
-
-    _dispose(config_path, config_payload)
-    _dispose(prompt_path, prompt_payload)
-
-    try:
-        if not config_path.exists() or config_path.read_bytes() != config_payload:
-            _atomic_write(config_path, config_payload)
-        if not prompt_path.exists() or prompt_path.read_bytes() != prompt_payload:
-            _atomic_write(prompt_path, prompt_payload)
-    except Exception as exc:  # pragma: no cover - re-raised as SandboxError
-        # Best-effort rollback: any file we created in this call is
-        # removed; any file we updated is left untouched (the caller
-        # owns the prior state).
-        for path in created:
-            try:
-                os.unlink(Path(path))
-            except OSError:
-                pass
-        raise SandboxError(f"atomic write failed: {exc.__class__.__name__}: {exc}") from exc
+    _compute_disposition(config_path, config_payload, config_payload, prompt_payload, created, updated, noop)
+    _compute_disposition(prompt_path, prompt_payload, config_payload, prompt_payload, created, updated, noop)
 
     config_sha256 = _sha256_bytes(config_payload)
     prompt_sha256 = _sha256_bytes(prompt_payload)
 
+    # Only set updated_pair when BOTH halves are being updated (not
+    # when one is a noop and the other is updated).  Pair-half-written
+    # verification is only meaningful when both files had pending writes;
+    # when one is a noop the result is always consistent regardless.
+    updated_config = str(config_path) in updated
+    updated_prompt = str(prompt_path) in updated
+
+    try:
+        _atomic_pair_write(
+            config_path,
+            prompt_path,
+            config_payload,
+            prompt_payload,
+            profile_sha256=config_sha256,
+            prompt_sha256=prompt_sha256,
+            rollback_paths=tuple(Path(p) for p in created),
+            updated_pair=(config_path, prompt_path)
+            if (updated_config and updated_prompt)
+            else None,
+        )
+    except Exception as exc:
+        raise SandboxError(f"atomic write failed: {exc.__class__.__name__}: {exc}") from exc
+
     binary_token = "ralph"
-    base_argv = (
-        binary_token,
-        "-c",
-        str(config_path),
-        "-H",
-        preset,
-        "run",
-        "--dry-run",
-        "--plan",
-        str(plan_path),
-    )
-    launch_argv = (
-        binary_token,
-        "-c",
-        str(config_path),
-        "-H",
-        preset,
-        "run",
-        "--plan",
-        str(plan_path),
-    )
+    argv, launch_argv = _build_argv(binary_token, config_path, preset, plan_path)
 
     return SuiteResult(
         config_path=str(config_path),
         prompt_path=str(prompt_path),
-        argv=base_argv,
+        argv=argv,
         launch_argv=launch_argv,
         created=tuple(created),
         updated=tuple(updated),

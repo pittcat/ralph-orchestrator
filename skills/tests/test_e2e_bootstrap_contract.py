@@ -30,8 +30,12 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+import sys
 
 import pytest
+
+# Probe runner factory (shared with ralph-project-bootstrap).
+import _probe_runner_common  # type: ignore[import-not-found]
 
 # Loaded via skills/tests/conftest.py: the sibling
 # ``ralph-project-bootstrap`` helpers are pre-registered in
@@ -145,6 +149,41 @@ def test_e2e_bootstrap_no_plan_rewrite() -> None:
     text = SKILL_DOC.read_text(encoding="utf-8")
     assert "NEVER rewrites the plan file" in text or "read-only" in text.lower()
     assert "--plan" in text
+
+
+# ---------------------------------------------------------------------------
+# T1 — standalone import (no conftest pre-load)
+# ---------------------------------------------------------------------------
+
+
+def test_gate_standalone_import() -> None:
+    """``import gate`` must succeed without conftest pre-load.
+
+    Runs in a subprocess so sys.modules state is clean. The gate.py
+    import shim resolves ``cli_probe`` via ``importlib.spec_from_file_location``
+    without relying on the conftest sys.modules registration.
+    """
+    import subprocess
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            (
+                "import sys; "
+                "sys.modules.pop('cli_probe', None); "
+                "sys.modules.pop('gate', None); "
+                "sys.path.insert(0, 'skills/ralph-e2e-bootstrap/scripts'); "
+                "import gate; "
+                "print('import_ok')"
+            ),
+        ],
+        capture_output=True,
+        text=True,
+        cwd=str(ROOT),
+    )
+    assert result.returncode == 0, f"import gate failed: {result.stderr}"
+    assert "import_ok" in result.stdout
 
 
 # ---------------------------------------------------------------------------
@@ -319,6 +358,144 @@ def test_binary_resolve_uses_fake_path_iter(
 
 
 # ---------------------------------------------------------------------------
+# T6 — binary resolution: strengthened cases
+# ---------------------------------------------------------------------------
+
+
+def test_binary_resolve_explicit_fail_blocked(tmp_path: Path) -> None:
+    """Explicit path to a non-existent binary → ``reason='blocked'``."""
+    resolution = binary_resolve.resolve_binary(
+        explicit_path="/nonexistent/ralph",
+        runner=lambda argv, **kw: (_ for _ in ()).throw(FileNotFoundError("no such binary")),
+    )
+    assert resolution.reason == "blocked"
+    assert resolution.source == "explicit"
+
+
+def test_binary_resolve_path_version_fail_combo_box(tmp_path: Path) -> None:
+    """PATH has a binary that exits non-zero on ``--version`` → combo_box."""
+    fake = tmp_path / "ralph"
+    fake.write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
+    fake.chmod(0o755)
+
+    resolution = binary_resolve.resolve_binary(
+        path_iter=lambda: iter([tmp_path]),
+        runner=lambda argv, **kw: _Completed(stderr="version probe failed", returncode=1),
+    )
+    assert resolution.reason == "combo_box"
+    assert resolution.source == "path"
+
+
+def test_binary_resolve_require_version_false(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """``require_version=False`` — PATH fake with non-zero exit is accepted as ok."""
+    monkeypatch.setenv("PATH", "")
+    monkeypatch.delenv("RALPH_BINARY", raising=False)
+    fake = tmp_path / "ralph"
+    fake.write_text("#!/bin/sh\necho 'ralph'\n", encoding="utf-8")
+    fake.chmod(0o755)
+
+    resolution = binary_resolve.resolve_binary(
+        path_iter=lambda: iter([tmp_path]),
+        runner=lambda argv, **kw: _Completed(stderr="error", returncode=1),
+        require_version=False,
+    )
+    assert resolution.reason == "ok"
+
+
+def test_binary_resolve_exception_file_not_found() -> None:
+    """FileNotFoundError during version probe → ``reason='missing'`` (explicit → blocked)."""
+
+    def fnf_runner(argv, **kw):  # noqa: ANN001, ARG001
+        raise FileNotFoundError("no such file")
+
+    resolution = binary_resolve.resolve_binary(
+        explicit_path="/some/ralph",
+        runner=fnf_runner,
+    )
+    # explicit + missing → blocked per A8 / trusted_path
+    assert resolution.reason == "blocked"
+    assert resolution.source == "explicit"
+
+
+def test_binary_resolve_exception_timeout_expired() -> None:
+    """subprocess.TimeoutExpired during version probe → ``reason='blocked'`` (explicit path)."""
+    import subprocess
+
+    def timeout_runner(argv, **kw):  # noqa: ANN001, ARG001
+        raise subprocess.TimeoutExpired(argv, 5.0)
+
+    resolution = binary_resolve.resolve_binary(
+        explicit_path="/some/ralph",
+        runner=timeout_runner,
+    )
+    assert resolution.reason == "blocked"
+    assert resolution.source == "explicit"
+
+
+def test_binary_resolve_exception_os_error() -> None:
+    """OSError during version probe → ``reason='blocked'`` (explicit path)."""
+
+    def oserror_runner(argv, **kw):  # noqa: ANN001, ARG001
+        raise OSError("permission denied")
+
+    resolution = binary_resolve.resolve_binary(
+        explicit_path="/some/ralph",
+        runner=oserror_runner,
+    )
+    assert resolution.reason == "blocked"
+    assert resolution.source == "explicit"
+
+
+def test_binary_resolve_priority_explicit_none_env_hit_path_hit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Priority: explicit None + env hit + PATH hit → env wins."""
+    env_fake = tmp_path / "ralph-env"
+    env_fake.write_text("#!/bin/sh\necho env-ralph 1.0.0\n", encoding="utf-8")
+    env_fake.chmod(0o755)
+
+    path_fake = tmp_path / "ralph-path"
+    path_fake.write_text("#!/bin/sh\necho path-ralph 1.0.0\n", encoding="utf-8")
+    path_fake.chmod(0o755)
+
+    monkeypatch.setenv("RALPH_BINARY", str(env_fake))
+    monkeypatch.setenv("PATH", str(tmp_path))
+
+    resolution = binary_resolve.resolve_binary(
+        runner=lambda argv, **kw: _ok_completed(argv, "ralph 1.0.0"),
+    )
+    # Env wins over PATH.
+    assert resolution.source == "env"
+    assert resolution.reason == "ok"
+
+
+def test_binary_resolve_trusted_path_explicit_rejects_tmp(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Explicit path under /tmp/ is blocked by trusted_path guard."""
+    monkeypatch.setenv("PATH", "")
+    monkeypatch.delenv("RALPH_BINARY", raising=False)
+
+    fake_tmp = tmp_path / "fake-ralph"
+    fake_tmp.write_text("#!/bin/sh\necho fake\n", encoding="utf-8")
+    fake_tmp.chmod(0o755)
+
+    # We need to use a real /tmp path (not pytest's tmp_path which is /private/var/...).
+    real_tmp = Path("/tmp/ralph-e2e-test-fake-ralph")
+    real_tmp.write_text("#!/bin/sh\necho fake\n", encoding="utf-8")
+    real_tmp.chmod(0o755)
+    try:
+        resolution = binary_resolve.resolve_binary(
+            explicit_path=str(real_tmp),
+            runner=lambda argv, **kw: _ok_completed(argv, "ralph 0.0.0"),
+        )
+        assert resolution.reason == "blocked"
+        assert "untrusted path" in resolution.detail.lower()
+    finally:
+        real_tmp.unlink(missing_ok=True)
+
+
+# ---------------------------------------------------------------------------
 # Unit 4 — sandbox suite
 # ---------------------------------------------------------------------------
 
@@ -398,6 +575,92 @@ def test_derive_stem_for_builtin_and_file() -> None:
 
 
 # ---------------------------------------------------------------------------
+# T3 — sandbox suite: strengthened cases
+# ---------------------------------------------------------------------------
+
+
+def test_launch_argv_excludes_dry_run(tmp_path: Path) -> None:
+    """``launch_argv`` must NOT contain ``--dry-run``; ``argv`` must contain it."""
+    sandbox = tmp_path / "sandbox"
+    sandbox.mkdir()
+    plan = tmp_path / "plan.md"
+    plan.write_text("# Plan\n", encoding="utf-8")
+    result = sandbox_suite.generate_suite(
+        sandbox=sandbox,
+        preset="builtin:ce-executor-pipeline",
+        plan_path=plan,
+    )
+    assert "--dry-run" not in result.launch_argv
+    assert "--dry-run" in result.argv
+
+
+def test_disposition_write_conflict_raises_sandbox_error(tmp_path: Path) -> None:
+    """Pre-write a file with valid 3-line header but WRONG SHA → ``SandboxError(write_conflict)``."""
+    sandbox = tmp_path / "sandbox"
+    sandbox.mkdir()
+    plan = tmp_path / "plan.md"
+    plan.write_text("# Plan\n", encoding="utf-8")
+
+    # Pre-write with valid 3-line header format but WRONG SHA values.
+    config_file = sandbox / "ralph.ce-executor-pipeline.yml"
+    config_file.write_text(
+        "# generated_by: ralph-e2e-bootstrap\n"
+        "# profile_sha256: 0000000000000000000000000000000000000000000000000000000000000000\n"
+        "# prompt_sha256: 1111111111111111111111111111111111111111111111111111111111111111\n"
+        "# body content\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(sandbox_suite.SandboxError) as excinfo:
+        sandbox_suite.generate_suite(
+            sandbox=sandbox,
+            preset="builtin:ce-executor-pipeline",
+            plan_path=plan,
+        )
+    assert "write_conflict" in str(excinfo.value).lower()
+    assert "provenance mismatch" in str(excinfo.value).lower()
+
+
+def test_sandbox_is_file_rejected(tmp_path: Path) -> None:
+    """Pass a regular file as ``sandbox`` → ``SandboxError``."""
+    file_sandbox = tmp_path / "somefile"
+    file_sandbox.write_text("not a directory\n", encoding="utf-8")
+    plan = tmp_path / "plan.md"
+    plan.write_text("# Plan\n", encoding="utf-8")
+
+    with pytest.raises(sandbox_suite.SandboxError) as excinfo:
+        sandbox_suite.generate_suite(
+            sandbox=file_sandbox,
+            preset="builtin:ce-executor-pipeline",
+            plan_path=plan,
+        )
+    assert "not a directory" in str(excinfo.value).lower()
+
+
+def test_mid_write_oserror(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Monkeypatch _atomic_pair_write to raise OSError → ``SandboxError``."""
+    sandbox = tmp_path / "sandbox"
+    sandbox.mkdir()
+    plan = tmp_path / "plan.md"
+    plan.write_text("# Plan\n", encoding="utf-8")
+
+    original = sandbox_suite._atomic_pair_write
+
+    def broken_write(*args, **kwargs):
+        raise OSError("simulated disk error")
+
+    monkeypatch.setattr(sandbox_suite, "_atomic_pair_write", broken_write)
+
+    with pytest.raises(sandbox_suite.SandboxError) as excinfo:
+        sandbox_suite.generate_suite(
+            sandbox=sandbox,
+            preset="builtin:ce-executor-pipeline",
+            plan_path=plan,
+        )
+    assert "atomic write failed" in str(excinfo.value).lower()
+
+
+# ---------------------------------------------------------------------------
 # Unit 5 — static gate + handoff
 # ---------------------------------------------------------------------------
 
@@ -435,6 +698,103 @@ def test_static_gate_runs_four_stages_with_fake_runner() -> None:
     assert report.dry_run.stage == "dry_run"
 
 
+def test_static_gate_per_stage_argv_shape() -> None:
+    """Assert per-stage argv shape: each stage has a distinct argv signature.
+
+    The capability probe calls: --version, --help, --json --help,
+    preset --help, preflight --help (no config).  validate_pipeline then
+    calls preset check --strict and preflight --strict (with config).
+    dry_run calls the full ralph -c cfg -H preset run --dry-run --plan path.
+    """
+    plan_path = "/abs/plan.md"
+    cfg = "ralph.foo.yml"
+    preset = "builtin:ce-executor-pipeline"
+    invocations = [
+        _probe_runner_common.version_probe_invocation("ralph"),
+        _probe_runner_common.capability_probe_invocation("ralph"),
+        # probe_capability also calls --json --help, preset --help, preflight --help:
+        _probe_runner_common.FakeInvocation(
+            argv_expected=("ralph", "--json", "--help"),
+            stdout_chunks=("ralph --help\n  --json\n  --version\n",),
+            stderr_chunks=(),
+            exit_code=0,
+        ),
+        _probe_runner_common.FakeInvocation(
+            argv_expected=("ralph", "preset", "check", "--help"),
+            stdout_chunks=("ralph-preset\n\nUsage: ralph preset ...\n  --strict\n",),
+            stderr_chunks=(),
+            exit_code=0,
+        ),
+        _probe_runner_common.FakeInvocation(
+            argv_expected=("ralph", "preflight", "--help"),
+            stdout_chunks=("ralph-preflight\n\nUsage: ralph preflight ...\n  --strict\n",),
+            stderr_chunks=(),
+            exit_code=0,
+        ),
+        _probe_runner_common.FakeInvocation(
+            argv_expected=("ralph", "run", "--help"),
+            stdout_chunks=(
+                "ralph-run\n\nUsage: ralph run ...\n  --dry-run\n  --plan PLAN\n",
+            ),
+            stderr_chunks=(),
+            exit_code=0,
+        ),
+        _probe_runner_common.preset_check_ok_invocation("ralph", cfg, preset),
+        _probe_runner_common.preflight_ok_invocation("ralph", cfg, preset),
+        _probe_runner_common.dry_run_ok_invocation("ralph", cfg, preset, plan_path),
+    ]
+    runner = _probe_runner_common.e2e_make_runner(invocations)
+
+    report = gate.run_static_gate(
+        binary="ralph",
+        config_path=cfg,
+        preset=preset,
+        plan_path=plan_path,
+        runner=runner,
+    )
+
+    # capability: _build_stage_argv returns (binary, -c, cfg, -H, preset) for capability stage
+    cap = report.capability
+    assert cap.argv[:2] == ("ralph", "-c")
+    assert "-H" in cap.argv
+    assert "preset" not in cap.argv  # capability stage has no subcommand
+
+    # preset_check: ralph -c cfg -H preset preset check --strict
+    pc = report.preset_check
+    assert pc.argv[:2] == ("ralph", "-c")
+    assert "-H" in pc.argv
+    assert "preset" in pc.argv
+
+    # preflight: ralph -c cfg -H preset preflight --strict
+    pf = report.preflight
+    assert pf.argv[:2] == ("ralph", "-c")
+    assert "-H" in pf.argv
+    assert "preflight" in pf.argv
+    assert "preflight" in pf.argv
+
+    # dry_run: ralph -c cfg -H preset run --dry-run --plan <path>
+    dr = report.dry_run
+    assert dr.argv[:2] == ("ralph", "-c")
+    assert "-H" in dr.argv
+    assert "run" in dr.argv
+    assert "--dry-run" in dr.argv
+    assert "--plan" in dr.argv
+    assert plan_path in dr.argv
+    assert dr.outcome == "ok"
+
+
+def test_static_gate_plan_path_none_returns_blocked_input() -> None:
+    """plan_path=None → dry_run.outcome == 'blocked_input' and plan_required == True."""
+    report = gate.run_static_gate(
+        binary="ralph",
+        config_path="ralph.foo.yml",
+        preset="builtin:ce-executor-pipeline",
+        plan_path=None,
+    )
+    assert report.dry_run.outcome == "blocked_input"
+    assert report.plan_required is True
+
+
 def test_handoff_static_only_command_shape(tmp_path: Path) -> None:
     inputs = handoff.HandoffInputs(
         binary="ralph",
@@ -468,6 +828,108 @@ def test_handoff_blocked_requires_summary() -> None:
             sandbox_path="sandbox",
             blocker_summary="",
         )
+
+
+def test_handoff_blocked_command_empty() -> None:
+    """level='blocked' → command == '' and command_argv == ()."""
+    inputs = handoff.HandoffInputs(
+        binary="ralph",
+        config_path="ralph.foo.yml",
+        preset="builtin:ce-executor-pipeline",
+        plan_path="/abs/plan.md",
+        level="blocked",
+        sandbox_path="sandbox",
+        blocker_summary="something went wrong",
+        validation_evidence=(),
+    )
+    artifact = handoff.build_handoff(inputs)
+    assert artifact.command == ""
+    assert artifact.command_argv == ()
+
+
+def test_handoff_abs_sandbox_raises() -> None:
+    """sandbox_path='/abs/path' (absolute on POSIX) raises ValueError.
+
+    Note: on macOS, Path('/abs/path').is_absolute() returns True for paths
+    starting with '/'. On Windows it would be different. We use an absolute
+    path that would fail on all platforms to ensure the guard fires.
+    """
+    with pytest.raises(ValueError) as excinfo:
+        handoff.HandoffInputs(
+            binary="ralph",
+            config_path="ralph.foo.yml",
+            preset="builtin:ce-executor-pipeline",
+            plan_path="/abs/plan.md",
+            level="static_only",
+            sandbox_path="/abs/path",
+        )
+    assert "sandbox_path" in str(excinfo.value)
+
+
+def test_handoff_blocker_markdown_injection_sanitised() -> None:
+    """blocker_summary with ``](https://evil.example)`` → ``\]`` in rendered report."""
+    inputs = handoff.HandoffInputs(
+        binary="ralph",
+        config_path="ralph.foo.yml",
+        preset="builtin:ce-executor-pipeline",
+        plan_path="/abs/plan.md",
+        level="blocked",
+        sandbox_path="sandbox",
+        blocker_summary="see [link](https://evil.example)",
+        validation_evidence=(),
+    )
+    artifact = handoff.build_handoff(inputs)
+    # The link must be escaped to prevent markdown injection.
+    assert r"\]" in artifact.report
+    assert "https://evil.example" in artifact.report
+
+
+def test_handoff_empty_validation_evidence() -> None:
+    """validation_evidence=() → report contains ``(no static gate evidence recorded)``."""
+    inputs = handoff.HandoffInputs(
+        binary="ralph",
+        config_path="ralph.foo.yml",
+        preset="builtin:ce-executor-pipeline",
+        plan_path="/abs/plan.md",
+        level="static_only",
+        sandbox_path="sandbox",
+        validation_evidence=(),
+    )
+    artifact = handoff.build_handoff(inputs)
+    assert "(no static gate evidence recorded)" in artifact.report
+
+
+def test_handoff_notes_per_branch() -> None:
+    """static_only vs blocked produce different ``notes`` tuples."""
+    static_inputs = handoff.HandoffInputs(
+        binary="ralph",
+        config_path="ralph.foo.yml",
+        preset="builtin:ce-executor-pipeline",
+        plan_path="/abs/plan.md",
+        level="static_only",
+        sandbox_path="sandbox",
+        validation_evidence=("capability=ok",),
+    )
+    static_artifact = handoff.build_handoff(static_inputs)
+
+    blocked_inputs = handoff.HandoffInputs(
+        binary="ralph",
+        config_path="ralph.foo.yml",
+        preset="builtin:ce-executor-pipeline",
+        plan_path="/abs/plan.md",
+        level="blocked",
+        sandbox_path="sandbox",
+        blocker_summary="gate failed",
+        validation_evidence=(),
+    )
+    blocked_artifact = handoff.build_handoff(blocked_inputs)
+
+    # Notes differ between the two branches.
+    assert static_artifact.notes != blocked_artifact.notes
+    # static_only notes mention "loop is NOT closed".
+    assert any("NOT closed" in n for n in static_artifact.notes)
+    # blocked notes mention "resolve the blocker".
+    assert any("resolve the blocker" in n for n in blocked_artifact.notes)
 
 
 # ---------------------------------------------------------------------------

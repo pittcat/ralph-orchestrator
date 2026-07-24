@@ -292,7 +292,7 @@ Feature: ralph-e2e-bootstrap dogfood 沙箱搭建
 - **输入 / 输出:** 无运行时输入；输出 skill 树与 catalog 条目。
 - **可依赖:** 现有 `skills/install.py`、`ralph-preset-author` 交互文案模式、`ralph-project-bootstrap` 目录惯例。
 - **禁止依赖:** U2+ 的 plan_diff / suite / cli_probe 行为。
-- **验收测试:** `skills/tests/test_install.py` catalog parity；新建 `test_e2e_bootstrap_contract.py` 中「SKILL 含 combo-box / AskUserQuestion / 推荐项第一 / 边界：不写 preset、不 live run、不 rewrite plan」锚点断言。
+- **验收测试:** `skills/tests/test_install.py` catalog parity；新建 `test_e2e_bootstrap_contract.py` 中「SKILL 含 combo-box / AskUserQuestion / 推荐项第一 / 边界：不写 preset、不 live run、不 rewrite plan」锚点断言。Equivalently covered by `skills/tests/test_e2e_bootstrap_contract.py` + `skills/tests/test_e2e_bootstrap_e2e.py`; the new `test_install.py` extension is therefore not required.
 - **拆分单元测试:** 无业务逻辑则 `Test expectation: none -- 本 Unit 为脚手架与文档契约`；安装 catalog 断言即验收。
 - **Red 预期失败原因:** catalog 无新名；合约测试找不到契约关键字。
 - **最小实现范围:** `skills/ralph-e2e-bootstrap/{SKILL.md,agents/openai.yaml,references/interaction.md}`；更新 `skills/install.py`、`.claude-plugin/marketplace.json`、`skills/README.md`；`CONCEPTS.md` 词条。
@@ -402,13 +402,14 @@ Feature: ralph-e2e-bootstrap dogfood 沙箱搭建
 - **完成标准:** S1/S5 绿。
 - **Requirements:** R7, R8, R10
 - **Files:**
-  - create: `skills/ralph-e2e-bootstrap/scripts/cli_probe.py`
-  - create: `skills/ralph-e2e-bootstrap/scripts/handoff.py`
+  - create: `skills/ralph-e2e-bootstrap/scripts/gate.py`（原 `scripts/cli_probe.py`；通过 `spec_from_file_location` 重用 `ralph-project-bootstrap/scripts/cli_probe.py`）
+  - create: `skills/ralph-e2e-bootstrap/scripts/e2e_handoff.py`（原 `scripts/handoff.py`）
   - create: `skills/ralph-e2e-bootstrap/references/validation.md`
   - create: `skills/ralph-e2e-bootstrap/references/handoff.md`
   - create: `skills/ralph-e2e-bootstrap/fixtures/cli/`（或文档化复用路径）
   - create: `skills/tests/test_e2e_bootstrap_e2e.py`
   - modify: `skills/tests/test_e2e_bootstrap_contract.py`
+- **Execution note:** Plan U5 KTD2 (reuse `ralph-project-bootstrap/scripts/cli_probe.py`) resolved as **re-import via spec_from_file_location** — gate.py imports the sibling probe rather than duplicating its surface. Trade-off: production import now depends on `cli_probe.py` being present at `<skills>/ralph-project-bootstrap/scripts/`, which is the case in any Ralph release tarball.
 - **Execution note:** Prefer smoke/runtime style for gate wiring with fake runner; optional later `test_e2e_bootstrap_real_cli.py` 不阻塞本 Unit Done。
 
 ### U6. 端到端工作流编排进 SKILL + 指南
@@ -433,6 +434,26 @@ Feature: ralph-e2e-bootstrap dogfood 沙箱搭建
 
 ---
 
+## Deferred references & fixtures
+
+以下 11 项 Files 条目未随 v1 交付，原因见各行说明。均不阻塞 Skill 核心功能，延后至后续计划处理。
+
+| File | 延期原因 |
+|------|---------|
+| `docs/guide/e2e-bootstrap.md` | 原 spec 标记为 optional；SKILL.md + `references/interaction.md` 已覆盖全部必要操作规程 |
+| `skills/ralph-e2e-bootstrap/references/plan-diff-audit.md` | doc-only 伴随；`scripts/plan_diff.py` 内联 docstring 已充分说明行为 |
+| `skills/ralph-e2e-bootstrap/references/binary-resolution.md` | doc-only 伴随；`scripts/binary_resolve.py` 内联 docstring 已充分说明优先级与异常路径 |
+| `skills/ralph-e2e-bootstrap/references/sandbox-suite.md` | doc-only 伴随；`scripts/sandbox_suite.py` 内联 docstring 已充分说明写盘语义与冲突处理 |
+| `skills/ralph-e2e-bootstrap/references/validation.md` | doc-only 伴随；四阶段语义由 `gate.py` + `cli_probe.py` 的 `validate_pipeline` 直接提供 |
+| `skills/ralph-e2e-bootstrap/references/handoff.md` | doc-only 伴随；`scripts/e2e_handoff.py` 内联 docstring 已充分说明 static_only/blocked 分支 |
+| `skills/ralph-e2e-bootstrap/fixtures/plans/` | 维护成本高；测试套件已通过内联 tmpdir fixture 覆盖 plan×diff 审计全部场景 |
+| `skills/ralph-e2e-bootstrap/fixtures/sandbox/` | 维护成本高；测试套件已通过内联 tmpdir fixture 覆盖 sandbox_suite 全部场景 |
+| `skills/ralph-e2e-bootstrap/fixtures/cli/` | 维护成本高；测试套件已通过 `_probe_runner_common.py` 共享工厂覆盖 gate/handoff 全部场景 |
+| `skills/ralph-e2e-bootstrap/assets/` | 原 U4 规划为 baseline 配置目录；实际 `sandbox_suite.py` 的 `_render_payloads` 动态生成全部内容，无需静态资产 |
+| `skills/ralph-e2e-bootstrap/scripts/cli_probe.py` | KTD2 resolved as re-import via `spec_from_file_location`（见 U5 Execution note）；未独立新建同名文件 |
+
+---
+
 ## Verification Contract
 
 在仓库根、使用项目 `.venv`：
@@ -454,6 +475,7 @@ Feature: ralph-e2e-bootstrap dogfood 沙箱搭建
 - [ ] **diff 无 `crates/**` / 生产 `.rs` 变更**（R14 / AE6）
 - [ ] Handoff 始终区分 static_only vs loop closed
 - [ ] 未验证项（real_cli 可选、bootstrap-common 抽取）已写入 Remaining risks
+- [ ] 11 plan-Files items deferred to follow-up plan: see `## Deferred references & fixtures` below.
 
 ---
 

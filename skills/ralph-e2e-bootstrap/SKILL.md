@@ -2,13 +2,9 @@
 name: ralph-e2e-bootstrap
 description: >-
   Bootstrap an E2E sandbox directory into a runnable Ralph preset suite
-  from a development plan + git diff, via combo-box decisions, static
-  gates, and a copy-paste launch command. Use when bringing an E2E
-  harness directory (or a smoke sandbox) onto Ralph with a known
-  preset. Distinct from ralph-project-bootstrap (which audits an
-  arbitrary project root) and ralph-preset-author (which authors
-  presets). Not for preset authoring, loop operations, or post-run
-  diagnosis.
+  from a development plan + git diff, via combo-box decisions and static
+  gates; deliver a copy-paste launch command. Use when bringing an E2E
+  harness directory onto Ralph with a known preset.
 ---
 
 # Ralph E2E Bootstrap
@@ -94,13 +90,13 @@ acceptance in `.ralph/agent/decisions.md`.
    from the resolved preset). The plan file is read-only — the
    generated argv references the absolute path via `--plan`. Refuse to
    write inside `presets/`.
-5. **U5 — Static Gate + Handoff.** Run `scripts/cli_probe.py`
-   (`scripts/cli_probe.py` is reused from `ralph-project-bootstrap`)
-   in the four-stage order: capability → preset check --strict →
-   preflight --strict → `ralph run --dry-run`. Render
-   `scripts/handoff.py` output with `static_only: true` and an
-   explicit `not_live_run` clause. The handoff is the final
-   deliverable; nothing else mutates state.
+5. **U5 — Static Gate + Handoff.** Run `scripts/gate.py` in the
+   four-stage order: capability → preset check --strict →
+   preflight --strict → `ralph run --dry-run`. `gate.py` imports the
+   sibling probe via the same `spec_from_file_location` shim used by
+   tests. Render `scripts/e2e_handoff.py` output with `static_only:
+   true` and an explicit `not_live_run` clause. The handoff is the
+   final deliverable; nothing else mutates state.
 6. **U6 — Workflow Orchestration.** Wire U1–U5 into this SKILL.md as
    the canonical procedure; ensure the decision-point table in this
    file matches `references/interaction.md` exactly; ensure both
@@ -150,3 +146,5 @@ argv MUST also include `-c ralph.<stem>.yml -H <preset>` so
 - `skills/ralph-project-bootstrap/` — sibling skill with the same
   static-gate + handoff shape (do not duplicate the underlying
   cli_probe / handoff helpers; reuse them).
+- `skills/ralph-preset-author/` — combo-box shape mirroring; preset_gap
+  handoff target.

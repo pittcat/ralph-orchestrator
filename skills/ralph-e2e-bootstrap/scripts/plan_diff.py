@@ -30,7 +30,7 @@ from __future__ import annotations
 
 import hashlib
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Iterable
 
@@ -40,6 +40,7 @@ CLARIFY_INTENT_UNDECLARED = "intent_undeclared"
 CLARIFY_SCOPE_DRIFT = "scope_drift"
 CLARIFY_UNIT_MISSING = "unit_missing"
 CLARIFY_STALE_PLAN = "plan_stale"
+CLARIFY_DIFF_UNAVAILABLE = "diff_unavailable"
 
 
 @dataclass(frozen=True)
@@ -71,6 +72,7 @@ class AuditDecision:
     issues: tuple[AuditIssue, ...] = ()
     plan_intent_paths: tuple[str, ...] = ()
     diff_paths: tuple[str, ...] = ()
+    diff_unavailable: bool = False
 
     @property
     def is_blocking(self) -> bool:
@@ -138,13 +140,14 @@ def _hash_plan(plan_bytes: bytes) -> str:
 DiffProvider = Callable[[], tuple[str, ...]]
 
 
-def _git_diff_paths(repo_root: Path) -> tuple[str, ...]:
+def _git_diff_paths(repo_root: Path) -> tuple[tuple[str, ...], bool]:
     """Default ``diff_provider`` implementation.
 
-    Returns the repo-relative paths that appear in ``git diff HEAD``.
-    Pure stdlib — uses ``subprocess`` against the system ``git``
-    binary, never the worktree-state machinery. When ``git`` is
-    missing or the directory is not a repo, returns an empty tuple.
+    Returns ``(paths, diff_unavailable)`` where ``paths`` is the
+    repo-relative paths from ``git diff HEAD`` and ``diff_unavailable``
+    is True when git is missing, the timeout fired, the directory is
+    not a repo, or the command otherwise failed. Distinguishes "diff
+    unavailable" (environment fault) from "diff empty" (no changes).
     """
     import subprocess
 
@@ -157,10 +160,10 @@ def _git_diff_paths(repo_root: Path) -> tuple[str, ...]:
             check=False,
         )
     except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
-        return ()
+        return (), True
     if completed.returncode != 0:
-        return ()
-    return tuple(line.strip() for line in completed.stdout.splitlines() if line.strip())
+        return (), True
+    return tuple(line.strip() for line in completed.stdout.splitlines() if line.strip()), False
 
 
 # ---------------------------------------------------------------------------
@@ -173,6 +176,7 @@ def _classify(
     u_ids: tuple[str, ...],
     intent_paths: tuple[str, ...],
     diff_paths: tuple[str, ...],
+    diff_unavailable: bool = False,
 ) -> tuple[tuple[str, ...], tuple[AuditIssue, ...]]:
     """Return ``(clarify_codes, issues)``.
 
@@ -210,9 +214,13 @@ def _classify(
         if drift:
             clarify.append(CLARIFY_SCOPE_DRIFT)
 
-    # Stale plan: plan declares U-IDs but the diff is empty (no work
-    # in progress) — usually a sign the plan is out of date.
-    if u_ids and not diff_paths:
+    # Diff unavailable: git binary missing / timeout / not-a-repo —
+    # distinct from "diff empty" (legitimately no changes in progress).
+    if diff_unavailable:
+        clarify.append(CLARIFY_DIFF_UNAVAILABLE)
+    elif u_ids and not diff_paths:
+        # Stale plan: plan declares U-IDs but the diff is empty (no
+        # work in progress) — usually a sign the plan is out of date.
         clarify.append(CLARIFY_STALE_PLAN)
 
     return tuple(clarify), tuple(issues)
@@ -264,8 +272,23 @@ def run_audit(
     plan_hash = _hash_plan(plan_bytes)
     u_ids = _extract_u_ids(plan_text)
     intent_paths = _extract_intent_paths(plan_text)
-    diff_paths = provider()
-    clarify, issues = _classify(plan_text, u_ids, intent_paths, diff_paths)
+
+    raw_provider_result = provider()
+    # Detect new 2-tuple form: (diff_paths: tuple[str,...], diff_unavailable: bool)
+    # Fall back to plain tuple of paths for back-compat with existing test providers.
+    if (
+        isinstance(raw_provider_result, tuple)
+        and len(raw_provider_result) == 2
+        and isinstance(raw_provider_result[1], bool)
+    ):
+        diff_paths, diff_unavailable = raw_provider_result
+    else:
+        diff_paths = raw_provider_result
+        diff_unavailable = False
+
+    clarify, issues = _classify(
+        plan_text, u_ids, intent_paths, diff_paths, diff_unavailable,
+    )
 
     return AuditDecision(
         plan_path=str(plan_path),
@@ -276,12 +299,14 @@ def run_audit(
         issues=issues,
         plan_intent_paths=intent_paths,
         diff_paths=diff_paths,
+        diff_unavailable=diff_unavailable,
     )
 
 
 __all__ = [
     "AuditDecision",
     "AuditIssue",
+    "CLARIFY_DIFF_UNAVAILABLE",
     "CLARIFY_INTENT_UNDECLARED",
     "CLARIFY_SCOPE_DRIFT",
     "CLARIFY_STALE_PLAN",

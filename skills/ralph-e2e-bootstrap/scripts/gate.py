@@ -30,18 +30,33 @@ Hard rules:
 from __future__ import annotations
 
 from dataclasses import dataclass
-from pathlib import Path
-from typing import Callable, Sequence
+from pathlib import Path as _Path
+from typing import Any, Callable, Sequence, cast
+import importlib.util
+import sys
 
-# Reuse the project-bootstrap probe. The two skills share the same
-# capability surface; only the argv shape and outcome vocabulary
-# differ.
-from cli_probe import (  # type: ignore[import-not-found]
-    CapabilityReport,
-    StageDecision,
-    probe_capability,
-    validate_pipeline,
-)
+# Resolve the sibling probe via importlib so the gate is importable
+# in production (single-skill clone / pip install / docker image)
+# without depending on the test conftest's sys.modules shim.
+_SKILLS_ROOT = _Path(__file__).resolve().parent.parent.parent
+_PROBE_FILE = _SKILLS_ROOT / "ralph-project-bootstrap" / "scripts" / "cli_probe.py"
+_spec = importlib.util.spec_from_file_location("cli_probe", _PROBE_FILE)
+if _spec and _spec.loader:
+    _cli_probe = importlib.util.module_from_spec(_spec)
+    # Register before exec_module so dataclass decorators inside
+    # cli_probe (which resolve types via sys.modules[cls.__module__])
+    # find a valid module entry.
+    sys.modules["cli_probe"] = _cli_probe
+    _spec.loader.exec_module(_cli_probe)
+    CapabilityReport = _cli_probe.CapabilityReport  # type: ignore[attr-defined]
+    StageDecision = _cli_probe.StageDecision
+    probe_capability = _cli_probe.probe_capability
+    validate_pipeline = _cli_probe.validate_pipeline
+else:
+    raise ImportError(
+        f"ralph-e2e-bootstrap.gate requires sibling "
+        f"ralph-project-bootstrap/scripts/cli_probe.py at {_PROBE_FILE}"
+    )
 
 
 @dataclass(frozen=True)
@@ -77,6 +92,54 @@ def _stub_decision(stage: str, outcome: str, reason: str, argv: Sequence[str]) -
     )
 
 
+def _skipped_plan_required_stages(
+    placeholder_argv: Sequence[str], placeholder_argv_with_plan: Sequence[str]
+) -> tuple[StageDecision, StageDecision, StageDecision, StageDecision]:
+    """Return four stub StageDecision for the plan_path=None branch."""
+    return (
+        _stub_decision(
+            "capability", "ok",
+            "skipped: plan_path required by E2E bootstrap gate",
+            placeholder_argv,
+        ),
+        _stub_decision(
+            "preset_check", "blocked_unknown",
+            "skipped: plan_path required by E2E bootstrap gate",
+            placeholder_argv,
+        ),
+        _stub_decision(
+            "preflight", "blocked_unknown",
+            "skipped: plan_path required by E2E bootstrap gate",
+            placeholder_argv,
+        ),
+        _stub_decision(
+            "dry_run", "blocked_input",
+            "plan_path is required by the E2E bootstrap gate (R13)",
+            placeholder_argv_with_plan,
+        ),
+    )
+
+
+def _missing_decisions(
+    by_stage: dict[str, StageDecision],
+    placeholder_argv: Sequence[str],
+    placeholder_argv_with_plan: Sequence[str],
+) -> dict[str, StageDecision]:
+    """Return stage decisions, filling gaps with stub fallbacks."""
+    defaults = (
+        ("capability", "blocked_unknown", "missing capability decision"),
+        ("preset_check", "blocked_unknown", "missing preset_check decision"),
+        ("preflight", "blocked_unknown", "missing preflight decision"),
+        ("dry_run", "blocked_unknown", "missing dry_run decision"),
+    )
+    result = dict(by_stage)
+    for stage, outcome, reason in defaults:
+        if stage not in result:
+            argv = placeholder_argv_with_plan if stage == "dry_run" else placeholder_argv
+            result[stage] = _stub_decision(stage, outcome, reason, argv)
+    return result
+
+
 def run_static_gate(
     *,
     binary: Path | str,
@@ -92,44 +155,16 @@ def run_static_gate(
     decision; the capability / preset / preflight stages are recorded
     as skipped so the handoff evidence block is still informative.
     """
-    binary_path = Path(binary)
-    plan_required = plan_path is None
+    binary_path = _Path(binary)
 
     placeholder_argv = (
-        str(binary_path),
-        "-c",
-        config_path,
-        "-H",
-        preset,
-        "run",
-        "--dry-run",
+        str(binary_path), "-c", config_path, "-H", preset, "run", "--dry-run",
     )
     placeholder_argv_with_plan = placeholder_argv + ("--plan", plan_path or "<abs-plan-path>")
 
-    if plan_required:
-        capability = _stub_decision(
-            "capability",
-            "ok",
-            "skipped: plan_path required by E2E bootstrap gate",
-            placeholder_argv,
-        )
-        preset_check = _stub_decision(
-            "preset_check",
-            "blocked_unknown",
-            "skipped: plan_path required by E2E bootstrap gate",
-            placeholder_argv,
-        )
-        preflight = _stub_decision(
-            "preflight",
-            "blocked_unknown",
-            "skipped: plan_path required by E2E bootstrap gate",
-            placeholder_argv,
-        )
-        dry_run = _stub_decision(
-            "dry_run",
-            "blocked_input",
-            "plan_path is required by the E2E bootstrap gate (R13)",
-            placeholder_argv_with_plan,
+    if plan_path is None:
+        capability, preset_check, preflight, dry_run = _skipped_plan_required_stages(
+            placeholder_argv, placeholder_argv_with_plan,
         )
         return GateReport(
             ok=False,
@@ -147,42 +182,19 @@ def run_static_gate(
         preset=preset,
         prompt_file=None,
         plan_path=plan_path,
-        runner=runner,  # type: ignore[arg-type]
+        runner=cast(Any, runner),
     )
 
     by_stage = {decision.stage: decision for decision in decisions}
-    capability = by_stage.get("capability") or _stub_decision(
-        "capability",
-        "blocked_unknown",
-        "missing capability decision",
-        placeholder_argv,
-    )
-    preset_check = by_stage.get("preset_check") or _stub_decision(
-        "preset_check",
-        "blocked_unknown",
-        "missing preset_check decision",
-        placeholder_argv,
-    )
-    preflight = by_stage.get("preflight") or _stub_decision(
-        "preflight",
-        "blocked_unknown",
-        "missing preflight decision",
-        placeholder_argv,
-    )
-    dry_run = by_stage.get("dry_run") or _stub_decision(
-        "dry_run",
-        "blocked_unknown",
-        "missing dry_run decision",
-        placeholder_argv_with_plan,
-    )
+    filled = _missing_decisions(by_stage, placeholder_argv, placeholder_argv_with_plan)
 
     ok = all(decision.outcome == "ok" for decision in decisions)
     return GateReport(
         ok=ok,
-        capability=capability,
-        preset_check=preset_check,
-        preflight=preflight,
-        dry_run=dry_run,
+        capability=filled["capability"],
+        preset_check=filled["preset_check"],
+        preflight=filled["preflight"],
+        dry_run=filled["dry_run"],
         plan_required=False,
         plan_missing=False,
     )

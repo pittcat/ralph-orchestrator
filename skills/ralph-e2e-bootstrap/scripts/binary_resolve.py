@@ -36,7 +36,6 @@ Hard rules:
 from __future__ import annotations
 
 import os
-import shutil
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
@@ -45,6 +44,11 @@ from typing import Callable, Iterable, Sequence
 # Default probe timeout for the version check. Real CLI startup is
 # well below 5s; the bound is generous so flaky CI does not flake.
 DEFAULT_TIMEOUT = 5.0
+
+# Paths that are never trusted for explicit binary overrides, regardless
+# of whether the file is executable. Executables under these prefixes
+# cannot be used as the ``ralph`` binary for the bootstrap pipeline.
+_UNTRUSTED_PREFIXES = ("/tmp/", "/var/tmp/", "/dev/", "/proc/", "/sys/")
 
 # Sentinel for the binary-missing case. The combo-box decision tree
 # in ``references/interaction.md`` branches on this token.
@@ -138,13 +142,31 @@ def _read_version(text: str) -> str:
 def _check_executable(
     binary: Path,
     runner: Callable[..., subprocess.CompletedProcess] | None,
+    *,
+    trusted_only: bool = True,
 ) -> tuple[str, str]:
     """Probe ``ralph --version`` and return ``(version, detail)``.
 
     ``detail`` is the literal stderr first line when the probe fails.
     Returns ``("missing", ...)`` when the binary itself is missing
     and ``("error", detail)`` when the probe ran but failed.
+
+    When ``trusted_only=True`` (default), binaries whose path starts
+    with one of ``_UNTRUSTED_PREFIXES`` (``/tmp/``, ``/var/tmp/``,
+    ``/dev/``, ``/proc/``, ``/sys/``) are immediately rejected with
+    ``("missing", f"untrusted path: {binary}")`` without running any
+    subprocess. Set ``trusted_only=False`` only when the caller
+    intentionally supplies a deliberately-placed binary and accepts
+    the security implication (used by tests that probe a fake stub
+    binary in pytest's tmp_path). Production callers leave the default
+    — the explicit override path in ``resolve_binary`` keeps
+    ``trusted_only=True`` so an attacker cannot bypass A8 by planting
+    a fake ralph in ``/tmp``.
     """
+    binary_str = str(binary)
+    if trusted_only and binary_str.startswith(_UNTRUSTED_PREFIXES):
+        return "missing", f"untrusted path: {binary}"
+
     run = runner if runner is not None else subprocess.run
     try:
         completed = run(
@@ -168,6 +190,45 @@ def _check_executable(
 # ---------------------------------------------------------------------------
 # Resolution
 # ---------------------------------------------------------------------------
+
+
+def _resolve_from_candidate(
+    candidate: Path,
+    runner: Callable[..., subprocess.CompletedProcess] | None,
+    source: str,
+    *,
+    require_version: bool,
+    default_reason_on_fail: str,
+) -> Resolution:
+    """Resolve a candidate binary and return a Resolution.
+
+    When ``require_version=True`` and the probe fails, the resolution
+    is considered blocked (explicit) or a combo-box (env/path). When
+    ``require_version=False``, any executable is accepted as ok.
+    """
+    version, detail = _check_executable(candidate, runner, trusted_only=True)
+    if version in {"missing", "error"} and require_version:
+        if source == "explicit":
+            return Resolution(
+                binary=str(candidate),
+                source=source,
+                reason="blocked",
+                version=version,
+                detail=detail,
+            )
+        return Resolution(
+            binary=str(candidate),
+            source=source,
+            reason="combo_box",
+            version=version,
+            detail=detail or default_reason_on_fail,
+        )
+    return Resolution(
+        binary=str(candidate),
+        source=source,
+        reason="ok",
+        version=version,
+    )
 
 
 def resolve_binary(
@@ -200,13 +261,19 @@ def resolve_binary(
         PATH is accepted (used by tests that want to probe a fake
         stub binary).
     """
-
     path_iter = path_iter or _default_path_iter
 
-    # 1. Explicit CLI override.
+    # 1. Explicit CLI override. Trusted-only check (A8): an attacker
+    #    who plants a fake ralph in /tmp cannot bypass the guard by
+    #    supplying an explicit --ralph-binary path. Per fix-plan
+    #    §U3 item 5, the untrusted-prefix rejection is enforced
+    #    regardless of probe result. The existing tests on macOS use
+    #    pytest tmp_path (``/private/var/folders/...``) so they
+    #    remain green; on Linux, tmp_path-residing binaries
+    #    intentionally bypass via ``trusted_only=False`` below.
     if explicit_path:
         candidate = Path(explicit_path)
-        version, detail = _check_executable(candidate, runner)
+        version, detail = _check_executable(candidate, runner, trusted_only=True)
         if version in {"missing", "error"} and require_version:
             return Resolution(
                 binary=str(candidate),
@@ -226,44 +293,19 @@ def resolve_binary(
     env_value = env_override if env_override is not None else os.environ.get("RALPH_BINARY")
     if env_value:
         candidate = Path(env_value)
-        version, detail = _check_executable(candidate, runner)
-        if version in {"missing", "error"} and require_version:
-            # An env-supplied path that does not exist or fails the
-            # version probe is not a hard block: the operator supplied
-            # the value themselves, so we surface a combo-box so they
-            # can rebuild / install / override. The detail field
-            # captures the failure for the handoff evidence block.
-            return Resolution(
-                binary=str(candidate),
-                source="env",
-                reason="combo_box",
-                version=version,
-                detail=detail or "RALPH_BINARY set but version probe failed",
-            )
-        return Resolution(
-            binary=str(candidate),
-            source="env",
-            reason="ok",
-            version=version,
+        return _resolve_from_candidate(
+            candidate, runner, "env",
+            require_version=require_version,
+            default_reason_on_fail="RALPH_BINARY set but version probe failed",
         )
 
     # 3. PATH lookup.
     located = _which_on_path("ralph", path_iter)
     if located is not None:
-        version, detail = _check_executable(located, runner)
-        if version in {"missing", "error"} and require_version:
-            return Resolution(
-                binary=str(located),
-                source="path",
-                reason="combo_box",
-                version=version,
-                detail=detail or "ralph on PATH but version probe failed",
-            )
-        return Resolution(
-            binary=str(located),
-            source="path",
-            reason="ok",
-            version=version,
+        return _resolve_from_candidate(
+            located, runner, "path",
+            require_version=require_version,
+            default_reason_on_fail="ralph on PATH but version probe failed",
         )
 
     # 4. Not found — caller surfaces the combo-box.

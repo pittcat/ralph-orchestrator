@@ -27,6 +27,7 @@ import pytest
 
 # Pre-loaded via skills/tests/conftest.py
 import install  # type: ignore[import-not-found]
+import _probe_runner_common  # type: ignore[import-not-found]
 
 ROOT = Path(__file__).resolve().parents[2]
 SKILLS_DIR = ROOT / "skills"
@@ -38,53 +39,6 @@ SCRIPTS_DIR = E2E_DIR / "scripts"
 def _e2e_scripts_on_path() -> None:
     if str(SCRIPTS_DIR) not in sys.path:
         sys.path.insert(0, str(SCRIPTS_DIR))
-
-
-def _ok_completed(argv, stdout: str = "") -> "_Completed":
-    text = stdout
-    if not text:
-        if "--version" in argv:
-            text = "ralph 0.0.0"
-        elif "--help" in argv:
-            sub = ""
-            for token in ("preset", "preflight", "run"):
-                if token in argv:
-                    sub = token
-                    break
-            if sub == "preset":
-                text = "ralph-preset\n\nUsage: ralph preset ...\n  --strict\n"
-            elif sub == "preflight":
-                text = "ralph-preflight\n\nUsage: ralph preflight ...\n  --strict\n"
-            elif sub == "run":
-                text = "ralph-run\n\nUsage: ralph run ...\n  --dry-run\n  --plan PLAN\n"
-            else:
-                text = "ralph --help\n  --json\n  --version\n"
-        elif "preset" in argv and "check" in argv:
-            text = "preset check OK"
-        elif "preflight" in argv:
-            text = "preflight OK"
-        elif "run" in argv and "--dry-run" in argv:
-            text = (
-                "Dry run mode - configuration:\n"
-                "  Backend: fake\n"
-                "  Prompt file: PROMPT.foo.md\n"
-                "  Max iterations: 1\n"
-                "  Max runtime: 60\n"
-            )
-        else:
-            text = "ok"
-    return _Completed(stdout=text)
-
-
-class _Completed:
-    def __init__(self, stdout: str = "", stderr: str = "", returncode: int = 0) -> None:
-        self.stdout = stdout
-        self.stderr = stderr
-        self.returncode = returncode
-
-
-def _fake_runner(argv, **kwargs):  # noqa: ANN001, ARG001
-    return _ok_completed(argv)
 
 
 def _coherent_plan(tmp_path: Path) -> Path:
@@ -137,7 +91,6 @@ def test_e2e_full_pipeline_static_only(tmp_path: Path, monkeypatch: pytest.Monke
     # U3 — binary resolution via the explicit CLI override.
     resolution = binary_resolve.resolve_binary(
         explicit_path=str(fake_binary),
-        runner=_fake_runner,
     )
     assert resolution.ok is True
 
@@ -150,13 +103,70 @@ def test_e2e_full_pipeline_static_only(tmp_path: Path, monkeypatch: pytest.Monke
     assert (sandbox / "ralph.ce-executor-pipeline.yml").is_file()
     assert (sandbox / "PROMPT.ce-executor-pipeline.md").is_file()
 
-    # U5 — static gate.
+    # U5 — static gate — use the shared factory.
+    # probe_capability calls: (binary, --version), (binary, --help),
+    # (binary, --json --help), (binary, preset --help), (binary, preflight --help),
+    # (binary, run --help). validate_pipeline then calls preset check --strict,
+    # preflight --strict, and dry_run.
+    invocations = [
+        _probe_runner_common.version_probe_invocation(resolution.binary),
+        _probe_runner_common.capability_probe_invocation(resolution.binary),
+        _probe_runner_common.FakeInvocation(
+            argv_expected=(resolution.binary, "--json", "--help"),
+            stdout_chunks=(
+                "ralph --help\n"
+                "  --json\n"
+                "  --version\n"
+                "  --config PATH\n"
+                "\n"
+                "Commands:\n"
+                "  preset    Manage presets\n"
+                "  preflight    Check configuration\n"
+                "  run       Run the loop\n",
+            ),
+            stderr_chunks=(),
+            exit_code=0,
+        ),
+        _probe_runner_common.FakeInvocation(
+            argv_expected=(resolution.binary, "preset", "check", "--help"),
+            stdout_chunks=("ralph-preset\n\nUsage: ralph preset ...\n  --strict\n",),
+            stderr_chunks=(),
+            exit_code=0,
+        ),
+        _probe_runner_common.FakeInvocation(
+            argv_expected=(resolution.binary, "preflight", "--help"),
+            stdout_chunks=("ralph-preflight\n\nUsage: ralph preflight ...\n  --strict\n",),
+            stderr_chunks=(),
+            exit_code=0,
+        ),
+        _probe_runner_common.FakeInvocation(
+            argv_expected=(resolution.binary, "run", "--help"),
+            stdout_chunks=(
+                "ralph-run\n\nUsage: ralph run ...\n  --dry-run\n  --plan PLAN\n",
+            ),
+            stderr_chunks=(),
+            exit_code=0,
+        ),
+        _probe_runner_common.preset_check_ok_invocation(
+            resolution.binary, suite.config_path, "builtin:ce-executor-pipeline"
+        ),
+        _probe_runner_common.preflight_ok_invocation(
+            resolution.binary, suite.config_path, "builtin:ce-executor-pipeline"
+        ),
+        _probe_runner_common.dry_run_ok_invocation(
+            resolution.binary,
+            suite.config_path,
+            "builtin:ce-executor-pipeline",
+            str(plan),
+        ),
+    ]
+    gate_runner = _probe_runner_common.e2e_make_runner(invocations)
     gate_report = gate.run_static_gate(
         binary=resolution.binary,
         config_path=suite.config_path,
         preset="builtin:ce-executor-pipeline",
         plan_path=str(plan),
-        runner=_fake_runner,
+        runner=gate_runner,
     )
     assert gate_report.ok is True
 

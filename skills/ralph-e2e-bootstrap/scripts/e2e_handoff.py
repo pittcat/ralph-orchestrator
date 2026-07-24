@@ -31,8 +31,8 @@ Hard rules:
 from __future__ import annotations
 
 from dataclasses import dataclass
-from pathlib import PurePosixPath
-from typing import Iterable, Literal, Sequence
+from pathlib import Path
+from typing import Iterable, Literal, Sequence, cast
 
 HandoffLevel = Literal["static_only", "blocked"]
 
@@ -44,7 +44,7 @@ def _ensure_level(level: str) -> HandoffLevel:
         raise ValueError(
             f"unknown handoff level: {level!r}; must be one of {HANDOFF_LEVELS}"
         )
-    return level  # type: ignore[return-value]
+    return cast(HandoffLevel, level)
 
 
 @dataclass(frozen=True)
@@ -85,7 +85,7 @@ class HandoffInputs:
         # argv in particular carries ``--plan <abs>``. ``sandbox_path``
         # is the only field that must be repo-relative: it is the
         # path persisted to disk for the operator's handoff record.
-        if PurePosixPath(self.sandbox_path).is_absolute():
+        if Path(self.sandbox_path).is_absolute():
             raise ValueError(
                 f"sandbox_path must be sandbox- or repo-relative: {self.sandbox_path!r}"
             )
@@ -118,7 +118,7 @@ def _shell_quote(token: str) -> str:
         return "''"
     safe_chars = set(
         "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
-        "0123456789-_./:+=@"
+        "0123456789_./:+=@"
     )
     if all(ch in safe_chars for ch in token):
         return token
@@ -133,6 +133,55 @@ def _render_validation_block(evidence: Iterable[str]) -> tuple[str, ...]:
     return tuple(line for line in evidence if line.strip())
 
 
+def _render_header(inputs: HandoffInputs) -> list[str]:
+    """Render the report header lines."""
+    return [
+        "# Ralph E2E Bootstrap — Handoff",
+        "",
+        f"- **Level**: `{inputs.level}`",
+        f"- **Sandbox**: `{inputs.sandbox_path}`",
+        f"- **Config**: `{inputs.config_path}`",
+        f"- **Preset**: `{inputs.preset}`",
+        f"- **Plan**: `{inputs.plan_path}`",
+        f"- **Binary**: `{inputs.binary}`",
+        "",
+    ]
+
+
+def _render_blocker_section(blocker_summary: str) -> list[str]:
+    """Render the blocker section, sanitising markdown link injection.
+
+    Escapes ``]`` characters inside ``blocker_summary`` to prevent
+    ``](url)``-style link injection when the summary contains raw
+    markdown link syntax.
+    """
+    sanitised = blocker_summary.replace("]", r"\]")
+    return [
+        "## Blocker",
+        "",
+        sanitised,
+        "",
+    ]
+
+
+def _render_status_section(level: HandoffLevel) -> list[str]:
+    """Render the static-only vs blocked status block."""
+    sections = ["## Status"]
+    if level == "static_only":
+        sections.append(
+            "Static load passed; **the loop is NOT closed**. The launch command "
+            "above is the canonical operator action; running it will start a "
+            "live Ralph loop in the supplied sandbox."
+        )
+    else:
+        sections.append(
+            "Static load did NOT pass; the launch command is empty. The "
+            "blocker above names the missing prerequisite."
+        )
+    sections.append("")
+    return sections
+
+
 def _render_report(
     *,
     inputs: HandoffInputs,
@@ -140,15 +189,7 @@ def _render_report(
     notes: Sequence[str],
 ) -> str:
     sections: list[str] = []
-    sections.append("# Ralph E2E Bootstrap — Handoff")
-    sections.append("")
-    sections.append(f"- **Level**: `{inputs.level}`")
-    sections.append(f"- **Sandbox**: `{inputs.sandbox_path}`")
-    sections.append(f"- **Config**: `{inputs.config_path}`")
-    sections.append(f"- **Preset**: `{inputs.preset}`")
-    sections.append(f"- **Plan**: `{inputs.plan_path}`")
-    sections.append(f"- **Binary**: `{inputs.binary}`")
-    sections.append("")
+    sections.extend(_render_header(inputs))
 
     sections.append("## Launch command")
     sections.append("")
@@ -178,10 +219,7 @@ def _render_report(
         sections.append("")
 
     if inputs.level == "blocked":
-        sections.append("## Blocker")
-        sections.append("")
-        sections.append(inputs.blocker_summary)
-        sections.append("")
+        sections.extend(_render_blocker_section(inputs.blocker_summary))
 
     if notes:
         sections.append("## Notes")
@@ -189,20 +227,7 @@ def _render_report(
             sections.append(f"- {note}")
         sections.append("")
 
-    # Always distinguish static-only from loop-closed (R10).
-    sections.append("## Status")
-    if inputs.level == "static_only":
-        sections.append(
-            "Static load passed; **the loop is NOT closed**. The launch command "
-            "above is the canonical operator action; running it will start a "
-            "live Ralph loop in the supplied sandbox."
-        )
-    else:
-        sections.append(
-            "Static load did NOT pass; the launch command is empty. The "
-            "blocker above names the missing prerequisite."
-        )
-    sections.append("")
+    sections.extend(_render_status_section(inputs.level))
     return "\n".join(sections)
 
 
