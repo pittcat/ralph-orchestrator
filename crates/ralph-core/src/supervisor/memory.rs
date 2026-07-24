@@ -928,6 +928,13 @@ impl SupervisorStore for InMemorySupervisorStore {
             .emissions
             .get_mut(scope_key)
             .ok_or_else(|| SupervisorStoreError::UnknownWave(scope_key.to_string()))?;
+        // Parity with rusqlite: only Reserved/Applying → RecoveryRequired.
+        if !matches!(row.state, EmissionState::Reserved | EmissionState::Applying) {
+            return Err(SupervisorStoreError::InvalidTransition(format!(
+                "emission row for {scope_key} is in state {:?}, expected Reserved or Applying",
+                row.state
+            )));
+        }
         row.state = EmissionState::RecoveryRequired;
         Ok(())
     }
@@ -1556,6 +1563,28 @@ mod tests {
         assert!(
             calls.is_empty(),
             "rebind to same path must NOT call cleanup"
+        );
+    }
+
+    /// Parity with rusqlite: Applied → RecoveryRequired is rejected.
+    #[test]
+    fn mark_emission_recovery_required_rejects_applied() {
+        let s = store();
+        let always_zero = |_id: &str| 0u32;
+        let reserved = s
+            .reserve_emission("scope-r", "digest", 1, &always_zero)
+            .unwrap();
+        let EmissionReservation::Reserved { .. } = reserved else {
+            panic!("expected Reserved");
+        };
+        s.mark_emission_applying("scope-r").unwrap();
+        s.mark_emission_applied("scope-r", 1).unwrap();
+        let err = s
+            .mark_emission_recovery_required("scope-r")
+            .expect_err("Applied must not become RecoveryRequired");
+        assert!(
+            matches!(err, SupervisorStoreError::InvalidTransition(_)),
+            "got {err:?}"
         );
     }
 }

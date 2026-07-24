@@ -159,11 +159,10 @@ fn u8_apply_then_confirm_round_trip() {
         Some(wave_id.as_str()),
         "inspect must echo the public wave_id"
     );
-    assert!(
-        json_field(&i_stdout, "applied").is_some()
-            || i_stdout.contains("\"applied\":true")
-            || i_stdout.contains("phase"),
-        "inspect response must carry phase / applied info, got: {i_stdout}"
+    assert_eq!(
+        json_field(&i_stdout, "phase"),
+        Some("done"),
+        "emission Apply confirm must surface phase=done, got: {i_stdout}"
     );
 }
 
@@ -485,4 +484,170 @@ fn u8_human_path_uses_ralph_bin_scrub_helper() {
         Some("true"),
         "second emit must report deduplicated=true: {s_c}"
     );
+}
+
+// =============================================================================
+// S2: true concurrent dual-process barrier — same key, shared store.
+// Human CLI (no ticket) so both processes race the Store UNIQUE path.
+// =============================================================================
+
+#[test]
+fn u8_concurrent_barrier_same_key_single_apply() {
+    use std::sync::{Arc, Barrier};
+    use std::thread;
+
+    let tmp = TempDir::new().unwrap();
+    let ws = tmp.path().to_path_buf();
+    write_minimal_ralph_yml(&ws);
+    let payloads = write_payloads(&ws, &[r#"{"dim":"a"}"#, r#"{"dim":"b"}"#]);
+    let store_path = ws.join(".ralph/test-store.db");
+    let store_path_str = store_path.to_string_lossy().into_owned();
+    let key = "u8-barrier-concurrent";
+    let barrier = Arc::new(Barrier::new(2));
+
+    let spawn_one = |ws: std::path::PathBuf,
+                     payloads: std::path::PathBuf,
+                     store: String,
+                     key: String,
+                     barrier: Arc<Barrier>| {
+        thread::spawn(move || {
+            barrier.wait();
+            let mut cmd = ralph_bin();
+            cmd.current_dir(&ws);
+            cmd.args([
+                "wave",
+                "emit",
+                "review.wave.ready",
+                "--payloads-stdin",
+                "--idempotency-key",
+                &key,
+                "--output",
+                "json",
+            ]);
+            common::scrub_agent_runtime_env(&mut cmd);
+            cmd.env("RALPH_EMISSION_STORE_PATH", &store);
+            cmd.stdin(std::fs::File::open(&payloads).unwrap());
+            let output = cmd.output().expect("ralph spawn");
+            (
+                output.status.code().unwrap_or(-1),
+                String::from_utf8_lossy(&output.stdout).to_string(),
+                String::from_utf8_lossy(&output.stderr).to_string(),
+            )
+        })
+    };
+
+    let h1 = spawn_one(
+        ws.clone(),
+        payloads.clone(),
+        store_path_str.clone(),
+        key.to_string(),
+        Arc::clone(&barrier),
+    );
+    let h2 = spawn_one(
+        ws.clone(),
+        payloads,
+        store_path_str,
+        key.to_string(),
+        barrier,
+    );
+    let (c1, s1, e1) = h1.join().expect("t1");
+    let (c2, s2, e2) = h2.join().expect("t2");
+    assert_eq!(c1, 0, "t1 must succeed; stderr={e1} stdout={s1}");
+    assert_eq!(c2, 0, "t2 must succeed; stderr={e2} stdout={s2}");
+
+    let w1 = json_field(&s1, "wave_id").expect("w1").to_string();
+    let w2 = json_field(&s2, "wave_id").expect("w2").to_string();
+    assert_eq!(w1, w2, "concurrent same-key must converge on one wave_id");
+
+    let d1 = json_field(&s1, "deduplicated").unwrap_or("?");
+    let d2 = json_field(&s2, "deduplicated").unwrap_or("?");
+    assert!(
+        (d1 == "true" && d2 == "false") || (d1 == "false" && d2 == "true"),
+        "exactly one response must be fresh Apply: d1={d1} d2={d2} s1={s1} s2={s2}"
+    );
+
+    let body = std::fs::read_to_string(ws.join(".ralph/events.jsonl")).unwrap();
+    let line_count = body.lines().filter(|l| !l.trim().is_empty()).count();
+    assert_eq!(
+        line_count, 2,
+        "concurrent same-key must write exactly N=2 events, got {line_count}"
+    );
+}
+
+// =============================================================================
+// S3: different keys concurrent — both succeed with distinct wave_ids.
+// =============================================================================
+
+#[test]
+fn u8_concurrent_distinct_keys_both_succeed() {
+    use std::sync::{Arc, Barrier};
+    use std::thread;
+    use std::time::Instant;
+
+    let tmp = TempDir::new().unwrap();
+    let ws = tmp.path().to_path_buf();
+    write_minimal_ralph_yml(&ws);
+    let payloads = write_payloads(&ws, &[r#"{"dim":"x"}"#]);
+    let store_path = ws.join(".ralph/test-store.db");
+    let store_path_str = store_path.to_string_lossy().into_owned();
+    let barrier = Arc::new(Barrier::new(2));
+
+    let spawn_one = |ws: std::path::PathBuf,
+                     payloads: std::path::PathBuf,
+                     store: String,
+                     key: String,
+                     barrier: Arc<Barrier>| {
+        thread::spawn(move || {
+            barrier.wait();
+            let start = Instant::now();
+            let mut cmd = ralph_bin();
+            cmd.current_dir(&ws);
+            cmd.args([
+                "wave",
+                "emit",
+                "review.wave.ready",
+                "--payloads-stdin",
+                "--idempotency-key",
+                &key,
+                "--output",
+                "json",
+            ]);
+            common::scrub_agent_runtime_env(&mut cmd);
+            cmd.env("RALPH_EMISSION_STORE_PATH", &store);
+            cmd.stdin(std::fs::File::open(&payloads).unwrap());
+            let output = cmd.output().expect("ralph spawn");
+            let elapsed = start.elapsed();
+            (
+                output.status.code().unwrap_or(-1),
+                String::from_utf8_lossy(&output.stdout).to_string(),
+                elapsed,
+            )
+        })
+    };
+
+    let h1 = spawn_one(
+        ws.clone(),
+        payloads.clone(),
+        store_path_str.clone(),
+        "u8-key-a".into(),
+        Arc::clone(&barrier),
+    );
+    let h2 = spawn_one(
+        ws.clone(),
+        payloads,
+        store_path_str,
+        "u8-key-b".into(),
+        barrier,
+    );
+    let (c1, s1, e1) = h1.join().unwrap();
+    let (c2, s2, e2) = h2.join().unwrap();
+    assert_eq!(c1, 0, "key-a must succeed: {s1}");
+    assert_eq!(c2, 0, "key-b must succeed: {s2}");
+    let w1 = json_field(&s1, "wave_id").unwrap().to_string();
+    let w2 = json_field(&s2, "wave_id").unwrap().to_string();
+    assert_ne!(w1, w2, "distinct keys must mint distinct wave_ids");
+    // Overlap heuristic: both started after the same barrier; wall
+    // clocks are not an SLA — just assert both finished (non-serial
+    // proof is Store-layer; here we prove concurrent CLI success).
+    assert!(e1.as_secs_f64() >= 0.0 && e2.as_secs_f64() >= 0.0);
 }

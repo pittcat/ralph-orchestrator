@@ -434,3 +434,88 @@ fn u6_human_cli_bypasses_ticket_state_machine() {
         "human CLI must not require a ticket on disk"
     );
 }
+
+// =============================================================================
+// P1: stale claim after Store applied — retry recovers via dedup.
+// =============================================================================
+
+#[test]
+fn u6_stale_claim_after_applied_recovers_dedup() {
+    let tmp = TempDir::new().unwrap();
+    let ws = tmp.path();
+    write_minimal_ralph_yml(ws);
+    let payloads = write_payloads(ws, &[r#"{"dim":"a"}"#]);
+    let env = [
+        ("RALPH_CURRENT_HAT", "coordinator"),
+        ("RALPH_CURRENT_LOOP_ID", "loop-stale-claim"),
+    ];
+    let key = "u6-stale-claim";
+
+    let (v_code, _, _) = run_ralph(
+        ws,
+        &["wave", "verify", "review.wave.ready", "--payloads-stdin"],
+        &env,
+        Some(&payloads),
+    );
+    assert_eq!(v_code, 0);
+
+    let (e_code, e_stdout, e_err) = run_ralph(
+        ws,
+        &[
+            "wave",
+            "emit",
+            "review.wave.ready",
+            "--payloads-stdin",
+            "--idempotency-key",
+            key,
+            "--output",
+            "json",
+        ],
+        &env,
+        Some(&payloads),
+    );
+    assert_eq!(e_code, 0, "first emit must succeed; stderr={e_err}");
+    let wave_id = json_field(&e_stdout, "wave_id").unwrap().to_string();
+
+    // Simulate crash after Apply: leftover claim + fresh ticket
+    // (re-verify) as if consume never ran.
+    let ticket = ticket_path(ws);
+    let claim = ws.join(".ralph/agent/.ralph-wave-verify-ticket.claim");
+    let (v2, _, _) = run_ralph(
+        ws,
+        &["wave", "verify", "review.wave.ready", "--payloads-stdin"],
+        &env,
+        Some(&payloads),
+    );
+    assert_eq!(v2, 0);
+    std::fs::write(&claim, b"1\n").unwrap();
+    assert!(ticket.exists() && claim.exists());
+
+    let (r_code, r_stdout, r_err) = run_ralph(
+        ws,
+        &[
+            "wave",
+            "emit",
+            "review.wave.ready",
+            "--payloads-stdin",
+            "--idempotency-key",
+            key,
+            "--output",
+            "json",
+        ],
+        &env,
+        Some(&payloads),
+    );
+    assert_eq!(
+        r_code, 0,
+        "stale claim + applied store must recover; stderr={r_err} stdout={r_stdout}"
+    );
+    assert_eq!(json_field(&r_stdout, "wave_id"), Some(wave_id.as_str()));
+    assert_eq!(json_field(&r_stdout, "deduplicated"), Some("true"));
+    let body = std::fs::read_to_string(ws.join(".ralph/events.jsonl")).unwrap();
+    assert_eq!(
+        body.lines().filter(|l| !l.trim().is_empty()).count(),
+        1,
+        "must not double-write"
+    );
+}

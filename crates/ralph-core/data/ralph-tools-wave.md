@@ -28,7 +28,7 @@ Wave OPAC 与单 emit OPAC 并列——同样四阶段，差别只在 Confirm �
 | **Apply** | `ralph wave emit --payloads-stdin` | 必须有匹配的 ticket；同源 payload 集合；agent context 默认 enforce `--policy-check` |
 | **Confirm** | `ralph wave inspect <wave_id>` | 不读内部 ledger；返回 phase、计数、cancel 状态；agent 只用此公开只读查询 |
 
-**Confirm 路径与单 emit 不同**：`ralph wave emit` 写入主 ledger。所以 Confirm 必须从主 ledger 验，不要看单 emit 通道。
+**Confirm 与单 emit 不同**：wave 批次落盘后，Confirm **只**走 `ralph wave inspect <wave_id>`；不要用 `jq` 读 `.ralph/events.jsonl`，也不要打开 supervisor DB。
 
 **关键约束（agent 视角）**：
 

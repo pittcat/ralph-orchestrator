@@ -27,6 +27,7 @@
 //! Agent-context env scrubs are mandatory (HARD RULE 5).
 
 use crate::common::{ralph_bin, scrub_agent_runtime_env};
+use ralph_core::supervisor::SupervisorStore;
 use std::io::Write;
 use std::path::Path;
 use tempfile::TempDir;
@@ -574,12 +575,8 @@ fn u5_legacy_sidecar_digest_mismatch_fails_closed() {
     }
 
     // Cutover call with the real payload — digest disagrees with the
-    // sidecar, so the importer must NOT adopt the legacy row. The
-    // store has no emission for this scope, but the events file
-    // does carry 2 events with a *different* wave_id than any
-    // future write will produce. The cutover must treat this as a
-    // partial/migration conflict and fail closed without writing
-    // a second wave.
+    // sidecar, so the importer must fail-closed (S11) and must NOT
+    // mint a second wave beside the legacy batch.
     let payloads_a = ws.join("payloads-a.jsonl");
     std::fs::write(&payloads_a, "{\"dim\":\"a\"}\n").unwrap();
     let (code, _stdout, err) = run_ralph(
@@ -598,31 +595,170 @@ fn u5_legacy_sidecar_digest_mismatch_fails_closed() {
         Some(&payloads_a),
     );
 
-    // Either a conflict / partial-emission error surfaces, OR the
-    // import succeeds but reports `deduplicated=false` (the cutover
-    // proves the digest is fresh and writes a *new* wave — which is
-    // also the safe outcome since the sidecar wasn't trusted). In
-    // both branches the events file must NOT grow a third wave.
+    assert_ne!(code, 0, "S11 mismatch must fail closed; stderr={err}");
+    assert!(
+        err.contains("sidecar_import_conflict")
+            || err.contains("idempotency_key_conflict")
+            || err.contains("mismatch"),
+        "mismatch sidecar must fail with a stable marker, got: {err}"
+    );
     let body = std::fs::read_to_string(&events_path).unwrap();
     let line_count = body.lines().filter(|l| !l.trim().is_empty()).count();
-    if code != 0 {
-        assert!(
-            err.contains("idempotency_key_conflict")
-                || err.contains("partial")
-                || err.contains("mismatch"),
-            "mismatch sidecar must fail closed with a stable marker, got: {err}"
-        );
-        assert_eq!(
-            line_count, 2,
-            "mismatch must not append events (got {line_count} lines)"
-        );
-    } else {
-        // The accepted path may rewrite — but it must NOT keep the
-        // legacy wave_id. A correct cutover rejects the sidecar
-        // digest and writes a fresh wave carrying the real payload.
-        assert_eq!(
-            line_count, 3,
-            "fresh write after mismatch must append exactly the new batch"
-        );
+    assert_eq!(
+        line_count, 2,
+        "mismatch must not append events (got {line_count} lines)"
+    );
+}
+
+// =============================================================================
+// P0: corrupt supervisor.db must fail-closed on keyed emit (no InMemory).
+// =============================================================================
+
+#[test]
+fn u5_corrupt_store_keyed_emit_fails_closed() {
+    let tmp = TempDir::new().unwrap();
+    let ws = tmp.path();
+    write_minimal_ralph_yml(ws);
+    let payloads = write_payloads(ws, &[r#"{"dim":"a"}"#]);
+
+    let corrupt = ws.join(".ralph/corrupt-store.db");
+    std::fs::write(&corrupt, b"not a sqlite database\n").unwrap();
+    let corrupt_str = corrupt.to_string_lossy().into_owned();
+
+    // Bypass run_ralph's default store injection so we point at the
+    // corrupt file exclusively.
+    let mut cmd = ralph_bin();
+    cmd.current_dir(ws);
+    cmd.args([
+        "wave",
+        "emit",
+        "review.wave.ready",
+        "--payloads-stdin",
+        "--idempotency-key",
+        "corrupt-store-key",
+        "--output",
+        "json",
+    ]);
+    scrub_agent_runtime_env(&mut cmd);
+    cmd.env("RALPH_EMISSION_STORE_PATH", &corrupt_str);
+    cmd.stdin(std::fs::File::open(&payloads).unwrap());
+    let output = cmd.output().unwrap();
+    let code = output.status.code().unwrap_or(-1);
+    let err = String::from_utf8_lossy(&output.stderr).to_string();
+    assert_ne!(code, 0, "corrupt store must fail closed; stderr={err}");
+    assert!(
+        err.contains("supervisor_store_unavailable"),
+        "must surface supervisor_store_unavailable, got: {err}"
+    );
+    let events = ws.join(".ralph/events.jsonl");
+    assert!(
+        !events.exists() || std::fs::read_to_string(&events).unwrap().trim().is_empty(),
+        "corrupt store must not write events"
+    );
+}
+
+// =============================================================================
+// S9: partial emission on disk + reserved store row → fail-closed, no append.
+// =============================================================================
+
+#[test]
+fn u5_partial_emission_fail_closed_and_inspect() {
+    let tmp = TempDir::new().unwrap();
+    let ws = tmp.path();
+    write_minimal_ralph_yml(ws);
+    let store_path = ws.join(".ralph/test-store.db");
+    let events_path = default_events_path(ws);
+    std::fs::create_dir_all(events_path.parent().unwrap()).unwrap();
+
+    let key = "u5-partial-s9";
+    let scope_key = {
+        use sha2::{Digest, Sha256};
+        let mut h = Sha256::new();
+        h.update(b"unknown||review.wave.ready|");
+        h.update(key.as_bytes());
+        let digest = h.finalize();
+        let mut out = String::with_capacity(64);
+        for b in digest {
+            use std::fmt::Write;
+            let _ = write!(&mut out, "{b:02x}");
+        }
+        out
+    };
+    let payload_digest = {
+        use sha2::{Digest, Sha256};
+        let mut h = Sha256::new();
+        h.update(b"{\"dim\":\"a\"}");
+        h.update([0x1F]);
+        h.update(b"{\"dim\":\"b\"}");
+        let digest = h.finalize();
+        let mut out = String::with_capacity(64);
+        for b in digest {
+            use std::fmt::Write;
+            let _ = write!(&mut out, "{b:02x}");
+        }
+        out
+    };
+
+    let store = ralph_core::supervisor::RusqliteSupervisorStore::open(&store_path)
+        .expect("open store");
+    let reserved = store
+        .reserve_emission(&scope_key, &payload_digest, 2, &|_| 0)
+        .expect("reserve");
+    let wave_id = match reserved {
+        ralph_core::supervisor::EmissionReservation::Reserved { public_wave_id } => public_wave_id,
+        other => panic!("expected Reserved, got {other:?}"),
+    };
+    // Partial batch: only 1 of 2 events.
+    {
+        use std::io::Write;
+        let mut f = std::fs::File::create(&events_path).unwrap();
+        writeln!(
+            f,
+            r#"{{"topic":"review.wave.ready","ts":"2026-01-01T00:00:00Z","wave_id":"{wave_id}","wave_index":0,"wave_total":2,"idempotency_key":"{key}"}}"#
+        )
+        .unwrap();
     }
+    store
+        .mark_emission_recovery_required(&scope_key)
+        .expect("mark recovery");
+
+    let payloads = write_payloads(ws, &[r#"{"dim":"a"}"#, r#"{"dim":"b"}"#]);
+    let (code, _stdout, err) = run_ralph(
+        ws,
+        &[
+            "wave",
+            "emit",
+            "review.wave.ready",
+            "--payloads-stdin",
+            "--idempotency-key",
+            key,
+            "--output",
+            "json",
+        ],
+        &[],
+        Some(&payloads),
+    );
+    assert_ne!(code, 0, "S9 partial must fail closed; stderr={err}");
+    assert!(
+        err.contains("recovery") || err.contains("partial") || err.contains("RecoveryRequired"),
+        "partial must mention recovery/partial, got: {err}"
+    );
+    let body = std::fs::read_to_string(&events_path).unwrap();
+    let line_count = body.lines().filter(|l| !l.trim().is_empty()).count();
+    assert_eq!(line_count, 1, "must not append on partial recovery");
+
+    let (i_code, i_stdout, _) = run_ralph(
+        ws,
+        &["wave", "inspect", &wave_id, "--output", "json"],
+        &[],
+        None,
+    );
+    assert_eq!(i_code, 0, "inspect must succeed; {i_stdout}");
+    let parsed: serde_json::Value = serde_json::from_str(&i_stdout).unwrap();
+    assert_eq!(parsed["registered"], serde_json::json!(true));
+    assert_eq!(
+        parsed["phase"],
+        serde_json::json!("failed"),
+        "recovery_required surfaces as failed phase: {parsed}"
+    );
 }

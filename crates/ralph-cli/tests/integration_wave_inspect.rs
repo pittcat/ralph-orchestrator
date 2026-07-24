@@ -26,6 +26,7 @@
 //!   "store said no" from "store unreachable".
 
 use crate::common::ralph_bin;
+use ralph_core::supervisor::SupervisorStore;
 use tempfile::TempDir;
 
 #[path = "common/mod.rs"]
@@ -373,5 +374,108 @@ fn wave_inspect_missing_store_is_known_unknown() {
         parsed["availability"],
         serde_json::json!("available"),
         "missing db is a lookup miss, NOT unavailable"
+    );
+}
+
+// =============================================================================
+// S12: active (runtime register_wave) + terminal (emission applied) inspect.
+// =============================================================================
+
+#[test]
+fn inspect_active_and_terminal_wave_shapes() {
+    let tmp = TempDir::new().unwrap();
+    let ws = tmp.path();
+    write_minimal_ralph_yml(ws);
+    let store_path = ws.join(".ralph/supervisor.db");
+
+    let store = ralph_core::supervisor::RusqliteSupervisorStore::open(&store_path)
+        .expect("open store");
+    let active_id = store
+        .register_wave("inspect-active-key", ralph_core::supervisor::WaveKind::Review, 3)
+        .expect("register");
+
+    let (code, stdout, stderr) =
+        run_ralph(ws, &["wave", "inspect", &active_id, "--output", "json"], &[]);
+    assert_eq!(code, 0, "inspect active must succeed; stderr={stderr}");
+    let parsed: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    assert_eq!(parsed["registered"], serde_json::json!(true));
+    assert_eq!(parsed["availability"], serde_json::json!("available"));
+    assert_eq!(parsed["phase"], serde_json::json!("dispatch"));
+    assert_eq!(parsed["expected_total"], serde_json::json!(3));
+    assert!(
+        parsed.get("db_path").is_none() && !stdout.contains("supervisor.db"),
+        "must not leak db_path: {stdout}"
+    );
+
+    // Terminal emission path: keyed emit then inspect phase=done.
+    let payloads = ws.join("payloads.jsonl");
+    std::fs::write(&payloads, "{\"dim\":\"t\"}\n").unwrap();
+    let mut cmd = ralph_bin();
+    cmd.current_dir(ws);
+    cmd.args([
+        "wave",
+        "emit",
+        "review.wave.ready",
+        "--payloads-stdin",
+        "--idempotency-key",
+        "inspect-terminal-key",
+        "--output",
+        "json",
+    ]);
+    common::scrub_agent_runtime_env(&mut cmd);
+    cmd.env(
+        "RALPH_EMISSION_STORE_PATH",
+        store_path.to_string_lossy().as_ref(),
+    );
+    cmd.stdin(std::fs::File::open(&payloads).unwrap());
+    let out = cmd.output().unwrap();
+    assert_eq!(out.status.code().unwrap_or(-1), 0);
+    let emit_json: serde_json::Value =
+        serde_json::from_str(&String::from_utf8_lossy(&out.stdout)).unwrap();
+    let term_id = emit_json["wave_id"].as_str().unwrap();
+
+    let (t_code, t_stdout, _) =
+        run_ralph(ws, &["wave", "inspect", term_id, "--output", "json"], &[]);
+    assert_eq!(t_code, 0);
+    let term: serde_json::Value = serde_json::from_str(&t_stdout).unwrap();
+    assert_eq!(term["registered"], serde_json::json!(true));
+    assert_eq!(term["phase"], serde_json::json!("done"));
+}
+
+// =============================================================================
+// S14: help + skill surface must not advertise zero-disk / ledger Confirm.
+// =============================================================================
+
+#[test]
+fn wave_help_bans_zero_disk_and_ledger_confirm() {
+    let tmp = TempDir::new().unwrap();
+    let ws = tmp.path();
+    write_minimal_ralph_yml(ws);
+    for args in [
+        ["wave", "--help"].as_slice(),
+        ["wave", "verify", "--help"].as_slice(),
+        ["wave", "emit", "--help"].as_slice(),
+        ["wave", "inspect", "--help"].as_slice(),
+    ] {
+        let (code, stdout, stderr) = run_ralph(ws, args, &[]);
+        assert_eq!(code, 0, "{args:?} help must exit 0; stderr={stderr}");
+        let combined = format!("{stdout}\n{stderr}").to_lowercase();
+        assert!(
+            !combined.contains("zero-disk") && !combined.contains("zero disk"),
+            "{args:?} must not say zero-disk: {combined}"
+        );
+    }
+    let skill = include_str!("../../ralph-core/data/ralph-tools-wave.md");
+    assert!(
+        !skill.to_lowercase().contains("zero-disk"),
+        "skill must not say zero-disk"
+    );
+    assert!(
+        skill.contains("ralph wave inspect"),
+        "skill must document wave inspect Confirm"
+    );
+    assert!(
+        !skill.contains("Confirm 必须从主 ledger"),
+        "skill must not instruct ledger Confirm"
     );
 }

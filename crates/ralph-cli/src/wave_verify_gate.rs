@@ -345,28 +345,29 @@ pub fn require_ticket(
     let claim = claim_marker_path(workspace);
 
     if claim.exists() {
-        let claimed_at = std::fs::read_to_string(&claim)
-            .ok()
-            .map(|s| s.trim().to_string())
-            .unwrap_or_default();
-        return Err(anyhow::anyhow!(
-            "{DENY_PREFIX} '{topic}': ticket already claimed at {claimed_at} — \
-             another Apply is in flight or a previous attempt failed to \
-             restore. Remove the claim marker at {} or run a clean retry; \
-             Hat: '{hat_id}' Loop: '{loop_id}'.",
-            claim.display()
-        ));
+        // Orphan claim (ticket already gone): clear so the agent can
+        // re-verify instead of being permanently locked out.
+        if !ticket.exists() {
+            let _ = std::fs::remove_file(&claim);
+        } else {
+            return Err(anyhow::anyhow!(
+                "{DENY_PREFIX} '{topic}': ticket already claimed — \
+                 another Apply is in flight or a previous attempt left a \
+                 claim marker. If Store already applied this wave, retry \
+                 after `ralph wave inspect` confirms; otherwise wait or \
+                 re-verify. Hat: '{hat_id}' Loop: '{loop_id}'."
+            ));
+        }
     }
 
     let record = match read_ticket(&ticket)? {
         Some(r) => r,
         None => {
             return Err(anyhow::anyhow!(
-                "{DENY_PREFIX} '{topic}': no verify ticket at {} — \
+                "{DENY_PREFIX} '{topic}': no verify ticket — \
                  run `ralph wave verify {topic} --payloads ...` first to record a matching ticket, \
                  then re-invoke `ralph wave emit` with the same payloads. \
-                 Hat: '{hat_id}' Loop: '{loop_id}'.",
-                ticket.display()
+                 Hat: '{hat_id}' Loop: '{loop_id}'."
             ));
         }
     };
@@ -399,20 +400,37 @@ pub fn require_ticket(
             rec_hat = record.hat_id
         ));
     }
-    // Successful claim — write the marker so a concurrent emit
-    // is rejected and so the cleanup step (consume_claimed_ticket
-    // on success, restore_ticket on failure) can find the right
-    // state to roll forward / back.
+    // Successful claim — `create_new` so concurrent emits cannot both
+    // hold the claim (closes TOCTOU vs plain write).
     if let Some(parent) = claim.parent() {
-        std::fs::create_dir_all(parent)
-            .with_context(|| format!("create parent dir for {}", claim.display()))?;
+        std::fs::create_dir_all(parent).with_context(|| {
+            format!("create parent dir for claim marker (hat={hat_id} loop={loop_id})")
+        })?;
     }
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0);
-    std::fs::write(&claim, format!("{now}\n"))
-        .with_context(|| format!("write claim marker {}", claim.display()))?;
+    match std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&claim)
+    {
+        Ok(mut f) => {
+            use std::io::Write;
+            f.write_all(format!("{now}\n").as_bytes())
+                .with_context(|| "write claim marker contents")?;
+        }
+        Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {
+            return Err(anyhow::anyhow!(
+                "{DENY_PREFIX} '{topic}': ticket already claimed — \
+                 another Apply is in flight. Hat: '{hat_id}' Loop: '{loop_id}'."
+            ));
+        }
+        Err(err) => {
+            return Err(anyhow::anyhow!("write claim marker failed: {err}"));
+        }
+    }
     Ok(())
 }
 

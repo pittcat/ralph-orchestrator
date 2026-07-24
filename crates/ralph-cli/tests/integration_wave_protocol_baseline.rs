@@ -1,31 +1,18 @@
-//! 2026-07-24-003 plan Unit 1: Characterization baseline.
+//! 2026-07-24-003 plan Unit 1: Characterization baseline (post-flip).
 //!
-//! This file **freezes the current behavior** of the wave protocol
-//! before any fixes land. Every assertion below must hold against the
-//! unmodified code at plan baseline. Subsequent Units (U3, U5, U6)
-//! are expected to *invert* these assertions as the protocol
-//! changes; the flips are tracked in this file's header comment so
-//! the regressions can be audited line-by-line.
+//! Assertions below pin the **post U3/U5/U6** contracts. Historical
+//! pre-fix shapes lived in earlier revisions of this file.
 //!
-//! ## Inversion map (assertion → owning Unit)
+//! ## Contract map
 //!
-//! - `baseline_emit_json_includes_events_file`
-//!     Flipped by U5 (`wave emit` JSON loses `events_file` once the
-//!     emission authority moves to the supervisor store).
-//! - `baseline_idempotency_writes_sidecar`
-//!     Flipped by U5 (Store-cutover path: no sidecar read or write
-//!     on the happy path; legacy sidecar imported once when
-//!     Store has no emission for that scope).
-//! - `baseline_ticket_removed_before_event_write_on_io_failure`
-//!     Flipped by U6 (`require_ticket` does not delete the ticket
-//!     until the Apply step succeeds; mismatch / IO-failure
-//!     paths leave the ticket on disk for retry).
-//! - `baseline_inspect_loop_swallows_corrupt_store`
-//!     **Flipped by U3** — the assertion now pins the post-flip
-//!     contract (`availability = unavailable` with sanitised reason)
-//!     because the U3 implementation landed in the same commit
-//!     series as this file. Reverting this test would be a U3
-//!     regression.
+//! - `baseline_emit_json_includes_events_file` — U5: success JSON
+//!   omits `events_file`.
+//! - `baseline_idempotency_writes_sidecar` — U5: keyed emit does not
+//!   write the legacy sidecar.
+//! - `baseline_ticket_removed_before_event_write_on_io_failure` — U6:
+//!   Apply-before failure restores the ticket (prepared).
+//! - `baseline_inspect_loop_swallows_corrupt_store` — U3: corrupt
+//!   store surfaces `availability=unavailable`.
 //!
 //! ## Agent-context scrubbing (HARD RULE 5)
 //!
@@ -113,9 +100,8 @@ fn write_payloads(workspace: &std::path::Path, payloads: &[&str]) -> std::path::
 }
 
 // =============================================================================
-// Baseline 1: emit JSON includes `events_file`.
-// Flipped by U5 — once the supervisor store owns emission, the CLI
-// stops echoing the events file path in the success response.
+// Baseline 1 (FLIPPED by U5): emit JSON must NOT include `events_file`.
+// Agents Confirm via `ralph wave inspect`, not ledger paths.
 // =============================================================================
 
 #[test]
@@ -146,22 +132,19 @@ fn baseline_emit_json_includes_events_file() {
     assert_eq!(parsed["topic"], serde_json::json!("review.wave.ready"));
     assert_eq!(parsed["count"], serde_json::json!(2));
     assert_eq!(parsed["deduplicated"], serde_json::json!(false));
-    // Pin the field that U5 plans to remove.
+    // U5 contract: agents must not see internal ledger paths.
     assert!(
-        parsed.get("events_file").is_some(),
-        "baseline must include `events_file` (U5 inverts this): {parsed}"
+        parsed.get("events_file").is_none(),
+        "U5: success JSON must omit `events_file`: {parsed}"
     );
     assert!(
-        parsed["events_file"].is_string(),
-        "events_file must be a string: {parsed}"
+        parsed.get("wave_id").and_then(|v| v.as_str()).is_some(),
+        "success JSON must carry public wave_id: {parsed}"
     );
 }
 
 // =============================================================================
-// Baseline 2: idempotency writes the legacy sidecar.
-// Flipped by U5 — Store-cutover path does not write the sidecar on
-// happy paths; the sidecar remains as a one-shot legacy importer
-// for Store misses.
+// Baseline 2 (FLIPPED by U5): keyed emit must NOT write the legacy sidecar.
 // =============================================================================
 
 #[test]
@@ -189,7 +172,6 @@ fn baseline_idempotency_writes_sidecar() {
     );
     assert_eq!(code, 0, "first emit must succeed; stderr={stderr}");
 
-    // The events file path is `.ralph/events.jsonl` (default).
     let events_file = ws.join(".ralph/events.jsonl");
     let parent = events_file.parent().expect("parent");
     let file_name = events_file.file_name().expect("file_name");
@@ -198,33 +180,14 @@ fn baseline_idempotency_writes_sidecar() {
         file_name.to_string_lossy()
     ));
     assert!(
-        sidecar.exists(),
-        "baseline must write .idempotency.jsonl next to events file (U5 inverts this): {sidecar:?}"
-    );
-    let body = std::fs::read_to_string(&sidecar).unwrap();
-    assert!(
-        body.contains(key),
-        "sidecar must record the key we passed: {body}"
+        !sidecar.exists(),
+        "U5: keyed emit must not write .idempotency.jsonl (got {sidecar:?})"
     );
 }
 
 // =============================================================================
-// Baseline 3: ticket is consumed before the event write is attempted.
-// `read_and_consume_ticket` deletes the file before the caller runs
-// `write_wave_events_with_provenance`. When the events file cannot be
-// opened, the ticket is already gone — the agent has no ticket left
-// to retry with.
-//
-// Flipped by U6: ticket transitions through
-// `prepared → claimed → consumed`. IO failure between claim and
-// apply restores the ticket so the agent can retry without
-// re-running `ralph wave verify`.
-//
-// We simulate IO failure by pointing RALPH_EVENTS_FILE at a path
-// whose parent cannot be created (a *file* path used as a parent
-// directory is rejected by `create_dir_all`). The agent is in
-// agent-context (RALPH_CURRENT_HAT set) and has a verified ticket
-// for a 1-payload batch.
+// Baseline 3 (FLIPPED by U6): Apply-before-write failure restores ticket
+// (prepared → claimed → restore → prepared). Agent retries without re-verify.
 // =============================================================================
 
 #[test]
@@ -237,6 +200,7 @@ fn baseline_ticket_removed_before_event_write_on_io_failure() {
     let env = [
         ("RALPH_CURRENT_HAT", "coordinator"),
         ("RALPH_CURRENT_LOOP_ID", "loop-baseline-3"),
+        ("RALPH_WAVE_EMIT_FAIL_AT", "apply_before_write"),
     ];
 
     // 1. Verify records a fresh ticket.
@@ -249,19 +213,13 @@ fn baseline_ticket_removed_before_event_write_on_io_failure() {
     assert_eq!(v_code, 0, "verify must succeed; stderr={v_stderr}");
 
     let ticket_path = ws.join(".ralph/agent/.ralph-wave-verify-ticket");
+    let claim_path = ws.join(".ralph/agent/.ralph-wave-verify-ticket.claim");
     assert!(
         ticket_path.exists(),
         "verify must have recorded a ticket: {ticket_path:?}"
     );
 
-    // 2. Force IO failure on the events-file write by pointing
-    // RALPH_EVENTS_FILE at a path whose "parent" is a regular file
-    // (create_dir_all on a path that already exists as a file is an
-    // IO error on all unix platforms we support).
-    let blocker = ws.join("blocker");
-    std::fs::write(&blocker, b"not a directory").unwrap();
-    let blocked_events = blocker.join("events.jsonl");
-
+    // 2. Emit with fault injection before events write.
     let (e_code, _stdout, e_stderr) = run_ralph(
         ws,
         &[
@@ -271,34 +229,30 @@ fn baseline_ticket_removed_before_event_write_on_io_failure() {
             "--payloads-stdin",
             "--output",
             "json",
+            "--idempotency-key",
+            "baseline-ticket-restore",
         ],
-        &[
-            ("RALPH_CURRENT_HAT", "coordinator"),
-            ("RALPH_CURRENT_LOOP_ID", "loop-baseline-3"),
-            ("RALPH_EVENTS_FILE", blocked_events.to_str().unwrap()),
-        ],
+        &env,
         Some(&payloads),
     );
     assert_ne!(
         e_code, 0,
-        "emit must fail under IO failure; stderr={e_stderr}"
+        "emit must fail under apply_before_write; stderr={e_stderr}"
     );
 
-    // Baseline invariant: `require_ticket` consumes the ticket *before*
-    // the IO failure is observed, so the agent has no ticket left.
+    // U6: ticket restored to prepared; claim cleared.
     assert!(
-        !ticket_path.exists(),
-        "baseline: ticket must be gone after the failed emit (U6 restores it): {ticket_path:?}"
+        ticket_path.exists(),
+        "U6: ticket must be restored after Apply-before failure: {ticket_path:?}"
+    );
+    assert!(
+        !claim_path.exists(),
+        "U6: claim marker must be cleared after restore: {claim_path:?}"
     );
 }
 
 // =============================================================================
-// Baseline 4: `inspect loop` swallows a corrupt supervisor store and
-// returns a default-shape summary with no `availability` signal.
-//
-// Flipped by U3 — `wave inspect` and `inspect loop` surface
-// `availability` so the agent can distinguish a healthy empty store
-// from a corrupt / unavailable one.
+// Baseline 4: `inspect loop` surfaces corrupt store as unavailable (U3 flip).
 // =============================================================================
 
 #[test]

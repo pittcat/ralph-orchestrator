@@ -533,8 +533,11 @@ pub fn render_wave_inspect_view_text(view: &WaveInspectView) -> String {
     out
 }
 
-/// Execute `ralph wave verify` — zero-disk precheck. Validates payloads
-/// against the active event policy without writing any JSONL.
+/// Execute `ralph wave verify` — validates payloads against the
+/// active event policy without writing business events. On success
+/// in agent context, records a one-shot ticket for the subsequent
+/// `wave emit` (ticket write is intentional side effect; not a
+/// zero-disk operation).
 fn execute_verify(args: WaveVerifyArgs) -> Result<()> {
     enforce_wave_acl("verify")?;
     let payloads = if args.payloads_stdin {
@@ -712,73 +715,80 @@ fn execute_emit(args: WaveEmitArgs, use_colors: bool) -> Result<()> {
         op_ctx.current_loop_id.as_deref().unwrap_or(""),
         op_ctx.current_hat_id.as_deref().unwrap_or(""),
     );
-    let ticket = crate::wave_verify_gate::ticket_path(&workspace_root);
-    let _ = ticket; // resolved for parity with the verify path; not consumed here.
-    crate::wave_verify_gate::require_ticket(&workspace_root, &op_ctx, &args.topic, &fp)?;
 
-    // 2026-07-24-003 plan U6: fault injection seam for the
-    // ticket-recovery tests. Recognised values:
-    //   - `apply_before_write` — bail right before the events
-    //     file write inside the store cutover branch. The
-    //     ticket must be restored so the next retry can
-    //     succeed.
-    //   - `cleanup_ticket` — succeed in the store, but fail
-    //     when removing the on-disk ticket. The response must
-    //     surface `applied_cleanup_pending: true`.
-    //   - anything else (or absent) — no injection, normal path.
-    let fail_at = std::env::var("RALPH_WAVE_EMIT_FAIL_AT").ok();
-
-    // U2: Branch — with idempotency key or legacy path
-    //
-    // 2026-07-24-003 plan U5: the keyed branch now routes through
-    // the supervisor store (single source of truth). The
-    // no-key branch retains the legacy FileLock + sidecar writer
-    // (S15: human CLI without a key keeps the old behaviour, so
-    // operator smol-scripts that don't carry idempotency keys
-    // still get unique wave_ids and the dual-process happy
-    // path keeps FileLock as the only mutex).
-    //
-    // U6: the keyed branch owns the ticket cleanup. On any
-    // failure it restores the ticket; on success it consumes.
-    let (outcome, used_store_cutover, mut applied_cleanup_pending) = if let Some(ref key) =
-        args.idempotency_key
+    // Stale-claim recovery: Apply succeeded in Store but the process
+    // crashed before `consume_claimed_ticket`. A leftover claim would
+    // permanently block `require_ticket`. When the keyed Store row is
+    // already `applied` for this scope+digest, clear markers and
+    // short-circuit to dedup (no second write).
+    let stale_applied = if op_ctx.is_agent_context
+        && crate::wave_verify_gate::claim_marker_path(&workspace_root).exists()
     {
-        let (loop_id, hat) = build_scope_inputs();
-        let outcome_res = write_wave_events_with_idempotency_store_with_injection(
-            &args.topic,
-            &payloads,
-            &events_file,
-            key,
-            &loop_id,
-            &hat,
-            fail_at.as_deref(),
-        );
-        match outcome_res {
-            Ok(out) => (out, true, false),
-            Err(err) => {
-                // Apply-before-failure path: the ticket is
-                // still claimed; restore so the next retry
-                // can re-claim without re-verifying.
-                if let Err(restore_err) = crate::wave_verify_gate::restore_ticket(&workspace_root) {
-                    eprintln!(
-                        "warning: failed to restore ticket after emit failure: {restore_err}"
-                    );
-                }
-                return Err(err);
-            }
+        if let Some(ref key) = args.idempotency_key {
+            try_recover_stale_claim_if_store_applied(
+                &workspace_root,
+                &args.topic,
+                &payloads,
+                &events_file,
+                key,
+            )?
+        } else {
+            None
         }
     } else {
-        // No-key branch never touches the ticket (human bypass).
-        let wave_id = write_wave_events(&args.topic, &payloads, &events_file)?;
-        (
-            IdempotencyOutcome {
-                wave_id,
-                deduplicated: false,
-            },
-            false,
-            false,
-        )
+        None
     };
+
+    let fail_at = std::env::var("RALPH_WAVE_EMIT_FAIL_AT").ok();
+
+    let (outcome, used_store_cutover, mut applied_cleanup_pending) =
+        if let Some(out) = stale_applied {
+            let _ = crate::wave_verify_gate::consume_claimed_ticket(&workspace_root);
+            (out, true, false)
+        } else {
+            crate::wave_verify_gate::require_ticket(
+                &workspace_root,
+                &op_ctx,
+                &args.topic,
+                &fp,
+            )?;
+
+            if let Some(ref key) = args.idempotency_key {
+                let (loop_id, hat) = build_scope_inputs();
+                let outcome_res = write_wave_events_with_idempotency_store_with_injection(
+                    &args.topic,
+                    &payloads,
+                    &events_file,
+                    key,
+                    &loop_id,
+                    &hat,
+                    fail_at.as_deref(),
+                );
+                match outcome_res {
+                    Ok(out) => (out, true, false),
+                    Err(err) => {
+                        if let Err(restore_err) =
+                            crate::wave_verify_gate::restore_ticket(&workspace_root)
+                        {
+                            eprintln!(
+                                "warning: failed to restore ticket after emit failure: {restore_err}"
+                            );
+                        }
+                        return Err(err);
+                    }
+                }
+            } else {
+                let wave_id = write_wave_events(&args.topic, &payloads, &events_file)?;
+                (
+                    IdempotencyOutcome {
+                        wave_id,
+                        deduplicated: false,
+                    },
+                    false,
+                    false,
+                )
+            }
+        };
 
     let wave_id = outcome.wave_id;
     let deduplicated = outcome.deduplicated;
@@ -1765,9 +1775,8 @@ pub fn write_wave_events_with_idempotency_with_scope(
 /// happy-path traffic; the store's `wave_emissions` table is the
 /// dedup authority. A legacy sidecar is imported only when the
 /// store has no record for the scope (the miss-import branch —
-///
-/// (S10) — closes the migration window without making the
-/// sidecar authoritative for new emissions (S1, S15).
+/// S10 closes the migration window without making the sidecar
+/// authoritative for new emissions).
 ///
 /// Behaviour table:
 ///
@@ -1777,6 +1786,7 @@ pub fn write_wave_events_with_idempotency_with_scope(
 /// | `AlreadyApplied { public_wave_id }` | return id with `deduplicated=true`, zero writes. |
 /// | `Conflict` | return `idempotency_key_conflict`, zero writes. |
 /// | `RecoveryRequired { ... }` / `FailedPartial { ... }` | return inspect-guided error, zero writes. |
+#[allow(dead_code)] // thin wrapper kept for callers / future non-injection path
 pub fn write_wave_events_with_idempotency_store(
     topic: &str,
     payloads: &[String],
@@ -1796,6 +1806,92 @@ pub fn write_wave_events_with_idempotency_store(
     )
 }
 
+/// If a claim marker is left behind after Store already applied this
+/// scope+digest (crash between `mark_emission_applied` and ticket
+/// cleanup), return the dedup outcome so the emit path can clear
+/// markers without calling `require_ticket` (which would deny).
+fn try_recover_stale_claim_if_store_applied(
+    workspace: &Path,
+    topic: &str,
+    payloads: &[String],
+    events_file: &Path,
+    idempotency_key: &str,
+) -> Result<Option<IdempotencyOutcome>> {
+    let (loop_id, hat) = build_scope_inputs();
+    let scope_key = compute_scope_key(&loop_id, &hat, topic, idempotency_key);
+    let payload_digest = compute_payload_digest(payloads);
+    let expected_count = payloads.len() as u32;
+
+    #[cfg(feature = "supervisor-db")]
+    {
+        use std::path::PathBuf;
+        let path: PathBuf = std::env::var("RALPH_EMISSION_STORE_PATH")
+            .ok()
+            .filter(|s| !s.is_empty())
+            .map(PathBuf::from)
+            .unwrap_or_else(|| workspace.join(".ralph/supervisor.db"));
+        if !path.exists() {
+            return Ok(None);
+        }
+        let store = match ralph_core::supervisor::RusqliteSupervisorStore::open(&path) {
+            Ok(s) => s,
+            Err(_) => return Ok(None),
+        };
+        let count_for_wave = |wave_id: &str| -> u32 {
+            if !events_file.exists() {
+                return 0;
+            }
+            let Ok(body) = fs::read_to_string(events_file) else {
+                return 0;
+            };
+            let mut n: u32 = 0;
+            for line in body.lines() {
+                let trimmed = line.trim();
+                if trimmed.is_empty() {
+                    continue;
+                }
+                let Ok(v) = serde_json::from_str::<serde_json::Value>(trimmed) else {
+                    continue;
+                };
+                if v.get("wave_id").and_then(|x| x.as_str()) == Some(wave_id)
+                    && v.get("idempotency_key").and_then(|x| x.as_str()) == Some(idempotency_key)
+                {
+                    n += 1;
+                }
+            }
+            n
+        };
+        match store.reserve_emission(
+            &scope_key,
+            &payload_digest,
+            expected_count,
+            &count_for_wave,
+        ) {
+            Ok(ralph_core::supervisor::EmissionReservation::AlreadyApplied { public_wave_id }) => {
+                Ok(Some(IdempotencyOutcome {
+                    wave_id: public_wave_id,
+                    deduplicated: true,
+                }))
+            }
+            _ => Ok(None),
+        }
+    }
+    #[cfg(not(feature = "supervisor-db"))]
+    {
+        let _ = (
+            workspace,
+            topic,
+            payloads,
+            events_file,
+            idempotency_key,
+            scope_key,
+            payload_digest,
+            expected_count,
+        );
+        Ok(None)
+    }
+}
+
 /// 2026-07-24-003 plan U6 variant: the same cutover path with an
 /// optional `fail_at` knob for the ticket-recovery integration
 /// tests. Production callers use
@@ -1805,8 +1901,8 @@ pub fn write_wave_events_with_idempotency_store(
 /// | `fail_at` value             | behaviour |
 /// |---|---|
 /// | `None` / absent              | normal path |
-/// | `"apply_before_write"`       | return `Err` immediately after `mark_emission_applying`, before the events file write — exercises S5 (ticket must be restored on retry). |
-/// | `"cleanup_ticket"`           | succeed end-to-end; force `consume_claimed_ticket` to report a cleanup failure — exercises S7 (`applied_cleanup_pending: true`). |
+/// | `"apply_before_write"`       | return `Err` immediately after miss-import / before reserve write — exercises S5 (ticket must be restored on retry). |
+/// | `"cleanup_ticket"`           | handled at the execute_emit layer — exercises S7 (`applied_cleanup_pending: true`). |
 pub fn write_wave_events_with_idempotency_store_with_injection(
     topic: &str,
     payloads: &[String],
@@ -1827,41 +1923,49 @@ pub fn write_wave_events_with_idempotency_store_with_injection(
     let payload_digest = compute_payload_digest(payloads);
     let expected_count = payloads.len() as u32;
 
-    // Open the supervisor store. The dispatcher path is opt-in:
-    // the production CLI falls back to the in-memory store unless
-    // the operator explicitly opted in by either (a) having
-    // `.ralph/supervisor.db` already on disk (production preset
-    // started the loop and seeded it) or (b) supplying
-    // `RALPH_EMISSION_STORE_PATH` to point at a specific SQLite
-    // file. Tests use (b) to share the store across processes.
+    // Open the supervisor store — SQLite is the sole authority for
+    // keyed emissions (plan 2026-07-24-003). Resolution order:
+    //   1. `RALPH_EMISSION_STORE_PATH` (tests / explicit override)
+    //   2. `.ralph/supervisor.db` (create if missing so a lone
+    //      `wave emit --idempotency-key` still gets durable UNIQUE)
+    // Open failure (corrupt file, permission, migration) is
+    // **fail-closed** — never silently fall back to InMemory, which
+    // would break cross-process dedup while `wave inspect` reports
+    // `unavailable` for the same path.
     #[cfg(feature = "supervisor-db")]
     let store: std::sync::Arc<dyn ralph_core::supervisor::SupervisorStore> = {
         use std::path::PathBuf;
-        let candidate: Option<PathBuf> = std::env::var("RALPH_EMISSION_STORE_PATH")
+        let path: PathBuf = std::env::var("RALPH_EMISSION_STORE_PATH")
             .ok()
             .filter(|s| !s.is_empty())
             .map(PathBuf::from)
-            .or_else(|| {
-                let default = PathBuf::from(".ralph/supervisor.db");
-                if default.exists() {
-                    Some(default)
-                } else {
-                    None
-                }
-            });
-        match candidate {
-            Some(p) => match ralph_core::supervisor::RusqliteSupervisorStore::open(&p) {
-                Ok(s) => std::sync::Arc::new(s),
-                Err(_) => {
-                    std::sync::Arc::new(ralph_core::supervisor::InMemorySupervisorStore::new())
-                }
-            },
-            None => std::sync::Arc::new(ralph_core::supervisor::InMemorySupervisorStore::new()),
+            .unwrap_or_else(|| PathBuf::from(".ralph/supervisor.db"));
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).with_context(|| {
+                format!(
+                    "supervisor_store_unavailable: create parent for {}",
+                    path.display()
+                )
+            })?;
+        }
+        match ralph_core::supervisor::RusqliteSupervisorStore::open(&path) {
+            Ok(s) => std::sync::Arc::new(s),
+            Err(err) => {
+                bail!(
+                    "supervisor_store_unavailable: cannot open emission store at {}: {err}. \
+                     Fix or remove the corrupt store, then retry; do not re-emit blindly.",
+                    path.display()
+                );
+            }
         }
     };
     #[cfg(not(feature = "supervisor-db"))]
-    let store: std::sync::Arc<dyn ralph_core::supervisor::SupervisorStore> =
-        std::sync::Arc::new(ralph_core::supervisor::InMemorySupervisorStore::new());
+    let store: std::sync::Arc<dyn ralph_core::supervisor::SupervisorStore> = {
+        bail!(
+            "supervisor_store_unavailable: this build was compiled without the \
+             `supervisor-db` feature; keyed wave emit requires a durable store"
+        );
+    };
 
     // Count helper: events on disk carrying a specific wave_id.
     let count_for_wave = |wave_id: &str| -> u32 {
@@ -2031,8 +2135,12 @@ pub fn write_wave_events_with_idempotency_store_with_injection(
 /// for `scope_key`, and only adopt it when (a) the
 /// `payload_digest` matches the incoming batch and (b) the events
 /// file carries exactly `expected_count` rows with that wave_id +
-/// idempotency_key. In every other case the legacy row is ignored
-/// (S11 — migration conflict fail-closed).
+/// idempotency_key.
+///
+/// S11 — migration conflict fail-closed: when a sidecar row exists
+/// for this scope+key but digest/count disagrees, return `Err` so
+/// the caller never falls through to a fresh `reserve_emission`
+/// (which would mint a second wave beside the legacy batch).
 ///
 /// When adopted, the sidecar row is removed so subsequent emits
 /// cannot accidentally re-import it.
@@ -2059,13 +2167,20 @@ fn try_legacy_sidecar_import(
         return Ok(None);
     }
     if record.payload_digest != payload_digest {
-        // Digest drift: legacy row does not match the batch.
-        return Ok(None);
+        bail!(
+            "sidecar_import_conflict: legacy idempotency row for key '{idempotency_key}' \
+             has a different payload_digest than this emit. Refusing to create a second \
+             wave. Inspect the events ledger and remove or repair the sidecar before retrying."
+        );
     }
     let on_disk = count_recovered_events(events_file, &record.wave_id, idempotency_key)?;
     if on_disk != record.count || record.count as u32 != expected_count {
-        // Partial or count mismatch — refuse to adopt.
-        return Ok(None);
+        bail!(
+            "sidecar_import_conflict: legacy idempotency row for key '{idempotency_key}' \
+             count/on-disk mismatch (sidecar_count={}, on_disk={on_disk}, expected={expected_count}). \
+             Refusing to create a second wave.",
+            record.count
+        );
     }
 
     // We adopted the row. Remove the sidecar so the next emit does
