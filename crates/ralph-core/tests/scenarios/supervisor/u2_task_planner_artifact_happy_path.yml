@@ -1,23 +1,26 @@
-# 2026-07-23-005 plan U2 (R-B1 BDD): task-planner writes the
-# execution-plan artifact and stops. The happy path emits NO
-# business topic (the artifact is the dependency SSOT; the
-# runtime routes downstream hats through the artifact path
-# rather than through a per-emit handoff). The invalid-plan
-# scenario is split into its own fixture below so each case
-# is asserted in isolation.
+# 2026-07-24-001 plan U2 (KTD1/KTD2, R-B1 BDD): task-planner writes
+# the execution-plan artifact and then emits EXACTLY ONE
+# `execution.plan.ready` handoff (consumed solely by
+# exec-wave-dispatcher). This corrects the 2026-07-23-005 "happy path
+# = zero business emit" design hole: downstream routing is still
+# artifact-first (the emit only carries the artifact path + source
+# hash), but the dispatcher is woken by an explicit handoff topic
+# instead of racing the coordinator on `work.ready`. The invalid-plan
+# scenario is split into its own fixture (u3) so each case is asserted
+# in isolation.
 #
-# Topology pin: only `coordinator` and `task-planner` are
-# declared; `task-planner` does NOT carry `exec.unit.ready` in
-# `publishes:` (U2 ownership transfer). This fixture pins the
-# pre-conditions: the supervisor preset's wave-coordinator
-# behavior moves to U5.
+# Topology pin: only `coordinator` and `task-planner` are declared;
+# `task-planner` does NOT carry `exec.unit.ready` in `publishes:`
+# (wave dispatch belongs to exec-wave-dispatcher). The fixture asserts
+# the happy path emits `execution.plan.ready` and STILL never emits
+# `exec.unit.ready` (the planner does not fan out the wave itself).
 
 name: u2_task_planner_writes_execution_plan_artifact
-description: "U2 - task-planner happy path: write artifact, no business emit; original plan path unchanged."
+description: "U2 - task-planner happy path: write artifact, emit exactly one execution.plan.ready handoff; no wave emit."
 
 config:
   prompt_file: PROMPT.md
-  max_iterations: 2
+  max_iterations: 3
   event_loop:
     execution_mode: isolated
     supervisor:
@@ -32,6 +35,7 @@ config:
       subscribes_to:
         - work.ready
       publishes:
+        - execution.plan.ready
         - plan.blocked
 
 mock_responses:
@@ -46,12 +50,20 @@ mock_responses:
       complexity: "small"
       </event>
     hat: coordinator
-  # Iter 2: task-planner writes the artifact. The fixture asserts
-  # the absence of any business event from task-planner — happy
-  # path = no emit (per U2 spec). We send a plain `waiting.`
-  # response so the loop ends without surprises.
+  # Iter 2: task-planner writes the artifact, then emits exactly one
+  # `execution.plan.ready` handoff (artifact-first: the payload only
+  # carries the artifact path + source hash + three-field task id).
   - text: |
-      waiting.
+      <event topic="execution.plan.ready">
+      plan_name: "u2-demo"
+      plan_path: "docs/plans/u2-demo.md"
+      execution_plan_path: ".ralph/review/u2-demo/execution-plan.yml"
+      source_plan_hash: "deadbeef"
+      task_id: "u2-task-1"
+      task_key: "plan:u2-demo:u1"
+      step: "plan"
+      </event>
+    hat: task-planner
   # Iter 3: idle / loop completion path
   - text: |
       waiting.
@@ -60,10 +72,15 @@ expected:
   iterations: 3
   events:
     - topic: work.ready
-  # U2 happy path: task-planner emits NO business event. The
-  # artifact at `.ralph/review/<plan>/execution-plan.yml` is the
-  # dependency SSOT and the runtime routes downstream through
-  # the artifact path.
+    - topic: execution.plan.ready
+  event_topic_counts:
+    # Exactly one handoff emit (isolated single-business-event budget).
+    - topic: execution.plan.ready
+      count: 1
+  # U2 happy path: the planner hands off via `execution.plan.ready`
+  # but does NOT fan out the wave itself — `exec.unit.ready` and the
+  # downstream wave/integration topics stay absent, as does the
+  # failure-path `plan.blocked` (mutually exclusive with the handoff).
   absent_events:
     - topic: plan.blocked
     - topic: exec.unit.ready

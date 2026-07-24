@@ -306,14 +306,195 @@ fn ce_executor_supervisor_preset_builtin_wave_consumers_match_expected_three() {
     );
 }
 
+// 2026-07-24-001 plan U2 (AE2 / KTD1 / KTD2): the execution-plan
+// handoff topology. `work.ready` must have exactly ONE trigger
+// consumer (`task-planner`) and `execution.plan.ready` must have
+// exactly ONE trigger consumer (`exec-wave-dispatcher`). This pins
+// the causal chain `work.ready → task-planner → execution.plan.ready
+// → exec-wave-dispatcher` so a future edit that re-adds `work.ready`
+// to the dispatcher (the original 005 race) or removes the planner's
+// handoff surfaces as a hard failure rather than a silent stall.
+#[test]
+fn ce_executor_supervisor_preset_handoff_topology_single_consumers() {
+    let yaml: serde_yaml::Value =
+        serde_yaml::from_str(PRESET_YAML).expect("preset YAML must parse");
+    let hats = yaml
+        .get("hats")
+        .and_then(|v| v.as_mapping())
+        .expect("preset must have hats: mapping");
+
+    // Collect, for each topic, the hats that list it in `triggers:`.
+    let mut consumers: std::collections::BTreeMap<String, Vec<String>> =
+        std::collections::BTreeMap::new();
+    for (hat_id_value, hat_value) in hats {
+        let hat_id = hat_id_value.as_str().unwrap_or("").to_string();
+        let triggers: Vec<String> = hat_value
+            .get("triggers")
+            .and_then(|v| v.as_sequence())
+            .map(|s| {
+                s.iter()
+                    .filter_map(|v| v.as_str().map(String::from))
+                    .collect()
+            })
+            .unwrap_or_default();
+        for topic in triggers {
+            consumers.entry(topic).or_default().push(hat_id.clone());
+        }
+    }
+
+    let work_ready = consumers.get("work.ready").cloned().unwrap_or_default();
+    assert_eq!(
+        work_ready,
+        vec!["task-planner".to_string()],
+        "AE2/KTD2: `work.ready` must have exactly one trigger consumer (task-planner); got {:?}",
+        work_ready
+    );
+
+    let handoff = consumers
+        .get("execution.plan.ready")
+        .cloned()
+        .unwrap_or_default();
+    assert_eq!(
+        handoff,
+        vec!["exec-wave-dispatcher".to_string()],
+        "AE2/KTD1: `execution.plan.ready` must have exactly one trigger consumer \
+         (exec-wave-dispatcher); got {:?}",
+        handoff
+    );
+
+    // The dispatcher must NOT trigger on `work.ready` anymore (the
+    // first wake is the handoff, not the coordinator's work.ready).
+    let dispatcher_triggers: Vec<String> = hats
+        .get("exec-wave-dispatcher")
+        .and_then(|v| v.get("triggers"))
+        .and_then(|v| v.as_sequence())
+        .map(|s| {
+            s.iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect()
+        })
+        .unwrap_or_default();
+    assert!(
+        !dispatcher_triggers.contains(&"work.ready".to_string()),
+        "KTD2: exec-wave-dispatcher must NOT trigger on `work.ready`; got {:?}",
+        dispatcher_triggers
+    );
+    assert!(
+        dispatcher_triggers.contains(&"exec.wave.complete".to_string()),
+        "R3: exec-wave-dispatcher must still trigger on `exec.wave.complete`; got {:?}",
+        dispatcher_triggers
+    );
+
+    // task-planner must publish the handoff + the failure emit, and
+    // declare them as terminal so the activation closes (U2 DoD:
+    // planner no longer empty-terminal).
+    let planner = hats
+        .get("task-planner")
+        .expect("preset must declare hat `task-planner`");
+    let publishes: Vec<String> = planner
+        .get("publishes")
+        .and_then(|v| v.as_sequence())
+        .map(|s| {
+            s.iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect()
+        })
+        .unwrap_or_default();
+    for topic in ["execution.plan.ready", "plan.blocked"] {
+        assert!(
+            publishes.contains(&topic.to_string()),
+            "R2: task-planner must publish `{topic}`; got {:?}",
+            publishes
+        );
+    }
+    let terminal: Vec<String> = planner
+        .get("terminal_events")
+        .and_then(|v| v.as_sequence())
+        .map(|s| {
+            s.iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect()
+        })
+        .unwrap_or_default();
+    assert_eq!(
+        terminal,
+        vec![
+            "execution.plan.ready".to_string(),
+            "plan.blocked".to_string()
+        ],
+        "U2 DoD: task-planner must declare terminal_events [execution.plan.ready, plan.blocked]; got {:?}",
+        terminal
+    );
+}
+
+// 2026-07-24-001 plan U2 (R5): deleted-hat topics must NOT appear as
+// emit event schemas, and the execution-plan artifact must NOT be
+// declared as an emit schema (it is a FILE artifact, not an event).
+// Reads the schema SSOT directly (the schemas are merged into the
+// embedded preset by build.rs, so they are not in the raw preset YAML).
+#[test]
+fn ce_executor_supervisor_schema_has_no_deleted_hat_or_artifact_topics() {
+    const SCHEMA_YAML: &str =
+        include_str!("../../../../presets/schemas/ce-executor-supervisor.yml");
+    let yaml: serde_yaml::Value =
+        serde_yaml::from_str(SCHEMA_YAML).expect("schema SSOT YAML must parse");
+    let schemas = yaml
+        .get("schemas")
+        .and_then(|s| s.as_mapping())
+        .expect("schema SSOT must have a top-level `schemas:` mapping");
+
+    let forbidden = [
+        "fix.applied",
+        "fix.exhausted",
+        "review.start",
+        "execution-plan.artifact",
+    ];
+    for topic in forbidden {
+        assert!(
+            !schemas.contains_key(&serde_yaml::Value::String(topic.to_string())),
+            "R5: schema must NOT declare deleted-hat/artifact topic `{topic}`"
+        );
+    }
+
+    // The handoff topic MUST be present with its required fields.
+    let handoff = schemas
+        .get("execution.plan.ready")
+        .expect("schema must declare `execution.plan.ready` (R2 handoff)");
+    let required: Vec<String> = handoff
+        .get("required_fields")
+        .and_then(|v| v.as_sequence())
+        .map(|s| {
+            s.iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect()
+        })
+        .unwrap_or_default();
+    for field in [
+        "plan_name",
+        "plan_path",
+        "execution_plan_path",
+        "source_plan_hash",
+    ] {
+        assert!(
+            required.contains(&field.to_string()),
+            "R2: execution.plan.ready schema must require `{field}`; got {:?}",
+            required
+        );
+    }
+}
+
 #[test]
 fn ce_executor_supervisor_yaml_passes_strict_ambiguous_routing_check() {
-    use crate::config::{RalphConfig, ConfigError};
+    use crate::config::{ConfigError, RalphConfig};
     let config = RalphConfig::parse_yaml(PRESET_YAML).expect("preset must parse as RalphConfig");
     let result = config.validate();
 
     let ambiguous_errors: Vec<String> = match &result {
-        Err(ConfigError::AmbiguousRouting { trigger, hat1, hat2 }) => {
+        Err(ConfigError::AmbiguousRouting {
+            trigger,
+            hat1,
+            hat2,
+        }) => {
             vec![format!("AmbiguousRouting({trigger}, {hat1}, {hat2})")]
         }
         Err(_) => vec![],
@@ -335,7 +516,7 @@ fn ce_executor_supervisor_yaml_passes_strict_ambiguous_routing_check() {
 #[test]
 fn ce_executor_supervisor_yaml_passes_strict_topology_lint() {
     use crate::config::RalphConfig;
-    use crate::preset_lint::{run_preset_lint_with_preset_name, LintStrictness};
+    use crate::preset_lint::{LintStrictness, run_preset_lint_with_preset_name};
     use crate::runtime_contract::FindingSeverity;
 
     let config = RalphConfig::parse_yaml(PRESET_YAML).expect("preset must parse as RalphConfig");

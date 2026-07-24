@@ -101,6 +101,23 @@ schemas:
 
   # Main workflow handoff topics (mirrors ce-executor-serial
   # schema shapes where applicable).
+  #
+  # 2026-07-24-001 plan U2 (KTD1): task-planner -> exec-wave-dispatcher
+  # handoff emitted after the execution-plan artifact is written.
+  # Carries the artifact path + source hash (artifact-first: the event
+  # only points at the file; the file is the dependency SSOT) plus the
+  # three-field task identity used by every other handoff in this preset.
+  execution.plan.ready:
+    required_fields:
+      - plan_name
+      - plan_path
+      - execution_plan_path
+      - source_plan_hash
+      - task_id
+      - task_key
+      - step
+    payload: json_object
+
   work.ready:
     required_fields:
       - plan_name

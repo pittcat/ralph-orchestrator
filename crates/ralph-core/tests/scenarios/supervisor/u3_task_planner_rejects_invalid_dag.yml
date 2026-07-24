@@ -30,6 +30,7 @@ config:
       subscribes_to:
         - work.ready
       publishes:
+        - execution.plan.ready
         - plan.blocked
 
 mock_responses:
@@ -68,8 +69,11 @@ expected:
       count: 1
   # U3 fail-close: the agent must NOT also emit any other
   # business topic in the same activation (single business
-  # event budget per `ralph-tools` §6).
+  # event budget per `ralph-tools` §6). In particular the
+  # happy-path `execution.plan.ready` handoff is mutually
+  # exclusive with `plan.blocked` (2026-07-24-001 plan U2).
   absent_events:
+    - topic: execution.plan.ready
     - topic: exec.unit.ready
     - topic: work.done
     - topic: LOOP_COMPLETE

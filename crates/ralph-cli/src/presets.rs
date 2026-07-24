@@ -1988,21 +1988,21 @@ mod tests {
         // so these exemptions are no longer needed.
         //
         // `ce-executor-supervisor` / `config.empty_terminal_events`:
-        // the 2026-07-23-005 supervisor redesign intentionally leaves
-        // `terminal_events` empty on `task-planner` (happy path writes the
-        // execution-plan artifact and stops WITHOUT any business emit, so a
-        // terminal event would force-quit a successful activation — see the
-        // hat's preset comment) and on `exec-wave-dispatcher` (its output is
-        // a single `ralph wave emit exec.unit.ready` batch; fan-in signaling
-        // is the supervisor-injected `exec.wave.complete`, not a hat emit).
-        // Empty `terminal_events` is an explicitly allowed legacy-hat shape
-        // (ralph_config.rs only warns), so this is a documented design choice,
-        // not a topology defect. Tracked by the ce-executor-supervisor
-        // redesign plan `2026-07-23-005-…`.
+        // since 2026-07-24-001 plan U2 (KTD1), `task-planner` declares
+        // `terminal_events: [execution.plan.ready, plan.blocked]` (its
+        // happy-path handoff + failure emit), so it NO LONGER trips this
+        // finding. The exemption now covers ONLY `exec-wave-dispatcher`,
+        // whose output is a single `ralph wave emit exec.unit.ready`
+        // batch; its fan-in signal is the supervisor-injected
+        // `exec.wave.complete`, not a hat emit, so it intentionally keeps
+        // an empty `terminal_events`. Empty `terminal_events` is an
+        // explicitly allowed legacy-hat shape (ralph_config.rs only
+        // warns), so this is a documented design choice, not a topology
+        // defect. Tracked by plan `2026-07-24-001-…` (U2).
         const EXEMPT_FINDINGS: &[(&str, &str, &str)] = &[(
             "ce-executor-supervisor",
             "config.empty_terminal_events",
-            "2026-07-23-005 supervisor redesign: task-planner + exec-wave-dispatcher intentionally have empty terminal_events",
+            "2026-07-24-001 U2: only exec-wave-dispatcher keeps empty terminal_events (wave emit is its output; task-planner now declares execution.plan.ready/plan.blocked)",
         )];
 
         let mut failures = Vec::new();

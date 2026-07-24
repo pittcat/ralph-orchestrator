@@ -48,6 +48,11 @@ mechanism:
         allowed_emits:
           - work.ready
           - work.done
+          # 2026-07-24-001 plan U2 (KTD1): task-planner hands off to
+          # exec-wave-dispatcher via `execution.plan.ready` after writing
+          # the execution-plan artifact (failure path emits `plan.blocked`).
+          - execution.plan.ready
+          - plan.blocked
       - id: exec_wave
         kind: side_effect
         runs: supervisor.exec.wave
@@ -120,6 +125,9 @@ event_loop:
       - "work.failed"
       - "review.complete"
       - "fix.done"
+      # 2026-07-24-001 plan U2 (KTD1): task-planner -> exec-wave-dispatcher
+      # handoff after the execution-plan artifact is written.
+      - "execution.plan.ready"
       # Sub-loop coordination topics emitted by hats that the
       # supervisor aggregates fan-in / fan-out for.
       - "exec.unit.ready"
@@ -152,7 +160,8 @@ tasks:
   coordinator_hats:
     - coordinator
 
-# 16 functional hats + progress-steward. Per-hat `publishes`
+# Functional hats (post-2026-07-23-005 topology; deleted hats:
+# progress-steward, shipper, fallback fixer). Per-hat `publishes`
 # and `triggers` are deliberately minimal: the supervisor
 # owns the wave.complete/failed topics, integrators subscribe
 # to those (lint R-SW-2 enforced), workers publish per-slot
@@ -360,23 +369,28 @@ hats:
 
       ### 0. This activation is single-shot
 
-      In this activation, **emit at most one** business
-      event. The accepted cases:
+      In this activation, **emit exactly one** business
+      event — the two cases are mutually exclusive (isolated
+      single-business-event budget):
 
-      - **Happy path**: write the artifact, then stop
-        without emitting any business topic. The next hat
-        in the chain is wired through the artifact, not
-        through your emit; downstream routing reads the
-        artifact via `ralph inspect loop` /
-        `ralph tools task list`. Do not chain a handoff
-        emit just to "wake up" the next hat.
-      - **Invalid plan**: emit exactly one `plan.blocked`
-        with `reason: <category>` (see §3). Do not also
-        emit a handoff event in the same activation —
-        that would race the terminal and get dropped.
+      - **Happy path**: write the execution-plan artifact
+        (§2), then emit **exactly one** `execution.plan.ready`
+        to hand off to the exec-wave-dispatcher. Pre-check
+        first with `ralph emit execution.plan.ready
+        --policy-check -j '<json>'` (the loop's gate; per
+        `ralph-tools` §5); only after the precheck passes,
+        drop `--policy-check` and emit for real. The artifact
+        remains the dependency SSOT; the emit only carries the
+        artifact path + source hash so the next hat can find it.
+      - **Invalid plan**: emit **exactly one** `plan.blocked`
+        with `reason: <category>` (see §3). Do NOT also emit
+        `execution.plan.ready` in the same activation — the
+        two are mutually exclusive; a second business event is
+        dropped and the loop stalls.
 
       This rule is the same as the always-injected
-      `ralph-tools` skill's §6. Do not retry inside this
+      `ralph-tools` skill's §6 (and `ralph-tools-emit` §5 for
+      the precheck contract). Do not retry inside this
       activation; let `task.resume` route a later turn.
 
       ### 1. Read the original plan
@@ -562,10 +576,14 @@ hats:
       - **Do not call `ralph wave emit`**. Wave
         dispatching belongs to U5 (executor / iteration
         hat).
-      - **Do not call `ralph emit` for a non-terminal
-        business topic** in this activation. The
-        artifact is your business output; the next hat
-        picks up through the artifact, not your emit.
+      - **Do not emit more than one business event** in
+        this activation (see §0). The happy path emits
+        exactly one `execution.plan.ready`; the failure
+        path emits exactly one `plan.blocked`. Never both
+        in the same turn.
+      - **Do not emit `exec.unit.ready`** — wave dispatch
+        belongs to the exec-wave-dispatcher; your handoff
+        stops at `execution.plan.ready`.
       - **Do not read runtime internal ledgers**
         (events.jsonl, supervisor.db). Use
         `ralph inspect loop --format json` for loop
@@ -583,8 +601,24 @@ hats:
         tasks. If the list is empty, your artifact
         still stands (the runtime can re-materialize
         from it); do not fabricate task entries here.
+        This is also where you read the live `task_id` /
+        `task_key` for the handoff payload (never
+        hand-write `task_id`).
+      - `ralph emit execution.plan.ready --policy-check
+        -j '<json>'` — the happy-path handoff (exactly
+        one). Required fields: `plan_name`, `plan_path`,
+        `execution_plan_path` (the artifact path you wrote
+        in §2), `source_plan_hash` (the sha256 from §1c).
+        If this preset's three-field rule applies, also
+        carry `task_id` / `task_key` / `step` taken from
+        `ralph tools task list` (per `ralph-tools-tasks`
+        red box; `step` must match the `:step-<n>:`
+        segment of `task_key`). Pre-check first, then
+        drop `--policy-check` to emit for real (per
+        `ralph-tools` §5 / `ralph-tools-emit`).
       - `ralph emit plan.blocked --policy-check
-        -j '<json>'` — only on invalid plan; the loop
+        -j '<json>'` — only on invalid plan (mutually
+        exclusive with the handoff); the loop
         gate is the same one (per `ralph-tools` §5).
         For the strict rules on `task_id` /
         `events.jsonl` allowlist, load
@@ -601,19 +635,30 @@ hats:
         for the artifact's loop_id stamping.
       - `RALPH_HATS_SOURCE` — preset label, useful in
         error messages.
-    # 2026-07-23-005 plan U2: task-planner no longer publishes the
-    # per-unit `exec.unit.ready` wave (that ownership moves to the
-    # exec-wave dispatcher in U5). It only emits `plan.blocked` on
-    # invalid-plan detection — the happy path writes the artifact
-    # and stops without any business emit. The `terminal_events`
-    # is left empty so the runtime does not force-quit after the
-    # hat returns successfully.
+    # 2026-07-24-001 plan U2 (KTD1/KTD2): task-planner is the SOLE
+    # trigger consumer of `work.ready`. On the happy path it writes
+    # the execution-plan artifact and emits exactly one
+    # `execution.plan.ready` handoff (consumed only by
+    # exec-wave-dispatcher); the failure path emits exactly one
+    # `plan.blocked`. It does NOT publish the per-unit
+    # `exec.unit.ready` wave (that ownership belongs to the
+    # exec-wave-dispatcher). `terminal_events` now closes the
+    # activation on either the handoff or the blocked emit, so the
+    # legacy empty-terminal exemption no longer applies to this hat.
+    triggers:
+      - work.ready
     publishes:
+      - execution.plan.ready
       - plan.blocked
     event_filter:
       enabled: true
-      events: []
+      events:
+      - work.ready
     exempt_topics:
+      - execution.plan.ready
+      - plan.blocked
+    terminal_events:
+      - execution.plan.ready
       - plan.blocked
 
   # 2026-07-23-005 plan U5: exec-wave-dispatcher takes the
@@ -634,10 +679,12 @@ hats:
       OPAC reference: follow `ralph-tools-opac` for Observe/Precheck/Apply/Confirm discipline and `ralph-tools-wave` red box.
       ## EXEC WAVE DISPATCHER MODE — Iterative ready-wave fan-out (this hat)
 
-      You are a **dispatcher hat** activated by the
-      exec integrator after each wave merges (the
-      supervisor injects `exec.wave.complete` to signal
-      fan-in is done). You do not implement code or run
+      You are a **dispatcher hat**. Your first activation
+      comes from the task-planner's `execution.plan.ready`
+      handoff (the execution-plan artifact is ready); each
+      later activation comes from the supervisor injecting
+      `exec.wave.complete` to signal a wave fan-in is done.
+      You do not implement code or run
       tests. You read the static execution-plan artifact
       and the runtime task API, compute the current ready
       set, and emit **one** `ralph wave emit
@@ -766,22 +813,24 @@ hats:
       allowlist rules, see `ralph-tools-tasks` and
       `ralph-tools-emit` (load on demand).
     triggers:
-      - work.ready
+      - execution.plan.ready
       - exec.wave.complete
     trigger_multi_consumer_topics:
       - exec.wave.complete
-    # 2026-07-23-005 plan U5: dispatcher only emits the
-    # per-unit readiness topic. `exec.wave.complete` is
-    # supervisor-only (origin guard rejects agent emit; see
-    # R14 / R-COORD-4). The dispatcher consumes the supervisor
-    # `exec.wave.complete` event to know when to compute the
-    # next ready wave.
+    # 2026-07-24-001 plan U2 (KTD1/KTD2): the dispatcher's FIRST
+    # activation comes from the task-planner's `execution.plan.ready`
+    # handoff (NOT `work.ready` — that topic is now consumed solely by
+    # task-planner); subsequent iterations re-trigger on the supervisor
+    # `exec.wave.complete` fan-in signal to compute the next ready wave.
+    # The dispatcher only emits the per-unit readiness topic
+    # `exec.unit.ready`; `exec.wave.complete` is supervisor-only
+    # (origin guard rejects agent emit; see R14 / R-COORD-4).
     publishes:
       - exec.unit.ready
     event_filter:
       enabled: true
       events:
-      - work.ready
+      - execution.plan.ready
       - exec.wave.complete
     exempt_topics:
       - exec.unit.ready
