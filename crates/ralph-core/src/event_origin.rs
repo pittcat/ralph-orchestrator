@@ -139,6 +139,20 @@ pub const SUPERVISOR_COORDINATION_TOPICS: &[&str] = &[
     "review.wave.failed",
 ];
 
+/// 2026-07-24-003 plan U1 / capability-gap fix: predicate that
+/// returns `true` for any topic matching the
+/// `<kind>.wave.{complete,failed}` pattern (the six topics
+/// already in `SUPERVISOR_COORDINATION_TOPICS` plus any future
+/// variant the runtime might introduce). Used by the
+/// `preset_lint` and `runtime_contract` capability-aware
+/// exemptions when a preset declares a `wave.runtime.*`
+/// runner binding — the runtime's default wave hot path
+/// injects these topics regardless of whether
+/// `event_loop.supervisor.enabled` is true.
+pub fn is_wave_coordination_topic(topic: &str) -> bool {
+    topic.ends_with(".wave.complete") || topic.ends_with(".wave.failed")
+}
+
 /// 2026-07-03-001 plan U7: `true` when `topic` is one of the six
 /// supervisor coordination topics, regardless of the hat
 /// publishing it. Used by lint rules (U9) and CLI emit guard

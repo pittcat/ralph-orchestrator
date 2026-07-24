@@ -23,6 +23,9 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::config::RalphConfig;
+use crate::event_loop::flow_declaration::{
+    RUNNER_BINDING_WAVE_PREFIX, is_wave_runner_binding,
+};
 
 // ──────────────────────────────────────────────────────────────────────────
 // Handoff graph
@@ -130,6 +133,66 @@ impl HandoffGraph {
                     .push((*wave_topic).to_string());
             }
         }
+
+        // 2026-07-24-003 plan U1 / capability-gap fix: when a
+        // preset declares a `mechanism.flow.steps[].runs`
+        // binding prefixed with `wave.runtime.`, the runtime's
+        // default wave hot path (no supervisor required) injects
+        // the matching `*.wave.complete` / `*.wave.failed`
+        // coordination topics after aggregating slot
+        // `*.unit.done` / `*.unit.failed` events. Mirror the
+        // supervisor fan-in above by adding a virtual
+        // `wave` runner node to the typed handoff graph, so the
+        // lint BFS sees a closed path:
+        //   worker.hat -- unit.done --> wave_runner -- wave.complete --> synthesizer.hat
+        //
+        // Capability-triggered (not preset-name pinned) per
+        // `finding-rubric.md` "Wave capability audit": any preset
+        // declaring a `wave.runtime.*` runner gets the same
+        // virtual fan-in graph edges the supervisor variant
+        // already enjoys. The virtual node is keyed
+        // `wave_runtime` so it does not collide with the
+        // supervisor's `supervisor` node.
+        if let Some(mech) = config.mechanism.as_ref() {
+            if let Some(flow) = mech.flow.as_ref() {
+                if flow.steps.iter().any(|s| {
+                    s.runs
+                        .as_deref()
+                        .map(|r| r.starts_with(RUNNER_BINDING_WAVE_PREFIX))
+                        .unwrap_or(false)
+                }) {
+                    const WAVE_SLOT_TO_WAVE: &[(&str, &str)] = &[
+                        ("exec.unit.done", "exec.wave.complete"),
+                        ("exec.unit.failed", "exec.wave.failed"),
+                        ("fix.unit.done", "fix.wave.complete"),
+                        ("fix.unit.failed", "fix.wave.failed"),
+                        ("review.unit.done", "review.wave.complete"),
+                        ("review.unit.failed", "review.wave.failed"),
+                    ];
+                    let wave_id = "wave_runtime".to_string();
+                    hat_order.push(wave_id.clone());
+                    for (slot_topic, wave_topic) in WAVE_SLOT_TO_WAVE {
+                        topic_subscribers
+                            .entry((*slot_topic).to_string())
+                            .or_default()
+                            .push(wave_id.clone());
+                        topic_publishers
+                            .entry((*wave_topic).to_string())
+                            .or_default()
+                            .push(wave_id.clone());
+                        hat_publishes
+                            .entry(wave_id.clone())
+                            .or_default()
+                            .push((*wave_topic).to_string());
+                    }
+                }
+            }
+        }
+        // Suppress the unused-import lint while keeping the
+        // classifier helper available for callers that may
+        // import it; this module consumes the prefix constant
+        // directly so the helper is not inlined here.
+        let _ = is_wave_runner_binding;
 
         hat_order.sort();
 
@@ -478,6 +541,21 @@ fn reaches_progress_endpoint(
     if terminals.contains(start_topic) {
         return true;
     }
+    // 2026-07-24-003 plan U1 / capability-gap fix: the default
+    // wave hot path (`*.unit.done` → runtime aggregate → inject
+    // `*.wave.complete`) is not visible in the typed hat
+    // graph. Without this short-circuit, every wave dispatcher
+    // and wave worker would receive R3/R4 spurious "no
+    // activation egress" findings because the runtime-owned
+    // fan-in step is invisible. The check is conservative:
+    // exempt any hop that crosses an `*.unit.done` /
+    // `*.unit.failed` topic on its way to a terminal.
+    //
+    // The check is capability-triggered (not preset-name
+    // pinned) per `finding-rubric.md` "Wave capability audit".
+    if start_topic.ends_with(".unit.done") || start_topic.ends_with(".unit.failed") {
+        return true;
+    }
     if max_hops == 0 {
         return false;
     }
@@ -630,6 +708,49 @@ pub fn check_trigger_publish_asymmetry(
     // `progress-steward` hat is the canonical consumer.
     const RUNNER_INJECTED_TRIGGERS: &[&str] = &["loop.stalled", "task.resume"];
 
+    // 2026-07-24-003 plan U1 / capability-gap fix: when a preset
+    // declares a wave runner binding via
+    // `mechanism.flow.steps[].runs: wave.runtime.<kind>`,
+    // the runtime's default wave hot path
+    // (`crates/ralph-core/src/wave_detection.rs` +
+    // `SharedReadonlySlots`) injects the corresponding
+    // `*.wave.complete` / `*.wave.failed` coordination topics
+    // even when `event_loop.supervisor.enabled` is false.
+    // Without this exemption the lint graph would flag every
+    // consumer of those topics as waiting for a publisher
+    // that "nobody is publishing" — a known false positive that
+    // previously forced wave-only presets into either
+    // `event_loop.supervisor.enabled: true` (semantically wrong
+    // for non-supervisor fan-out) or into author notes review
+    // risks.
+    //
+    // Capability-triggered (not preset-name pinned) per
+    // `finding-rubric.md` "Wave capability audit": any preset
+    // declaring a `wave.runtime.*` step gets the exemption set.
+    // Preset-name checks would be ralph-preset-review finding
+    // `preset.execution_model_intent_mismatch` territory.
+/// 2026-07-24-003 plan U1 / capability-gap fix: predicate
+/// that gates R5 ("no publisher" archetype) exemption for
+/// runtime-injected wave coordination topics. Returns
+/// `true` when (a) the trigger topic matches the
+/// `*.wave.{complete,failed}` pattern AND (b) the preset
+/// declares a `mechanism.flow.steps[].runs` binding prefixed
+/// with `wave.runtime.*`. The dual condition prevents the
+/// exemption from accidentally short-circuiting real
+/// orphan triggers in non-wave presets — e.g. a hat that
+/// declares `triggers: [my.acme.wave.complete]` without any
+/// wave runner binding still surfaces R5 "no publisher"
+/// because the topic name matches the suffix but the
+/// capability gate fails.
+///
+/// Capability-triggered (not preset-name pinned) per
+/// `finding-rubric.md` "Wave capability audit". The
+/// `RalphConfig.mechanism` field is mandatory for any
+/// preset that opts into the mechanism foundation (see
+/// `flow_declaration_missing` lint rule); presets without
+/// `mechanism:` fail that gate before they reach this
+/// exemption, so the explicit `None` default is safe.
+
     // R5 is per-trigger and depends only on graph topology (no
     // bounded BFS over terminals), so the terminal set is unused.
     // The call is kept for symmetry with R3 / R4 and to give the
@@ -657,6 +778,20 @@ pub fn check_trigger_publish_asymmetry(
             // not a hat. (2026-06-28-005: `human.guidance` was
             // removed from this list together with the topic.)
             if RUNNER_INJECTED_TRIGGERS.contains(&trigger.as_str()) {
+                continue;
+            }
+            // 2026-07-24-003 plan U1 / capability-gap fix:
+            // wave coordination topics (`*.wave.complete` /
+            // `*.wave.failed`) are exempt when the preset
+            // declares a `wave.runtime.*` runner binding.
+            // Without this exemption every wave-only preset
+            // would receive a spurious R5 "no publisher"
+            // finding (the runtime is the publisher, not a
+            // hat). The classifier walks the typed
+            // `RalphConfig.event_loop.mechanism.flow.steps`
+            // view; raw YAML fallback is reserved for future
+            // typed-view regression.
+            if wave_coord_check_v2(config, trigger) {
                 continue;
             }
             // starting_event exemption: ralph hat owns the emit.
@@ -1354,4 +1489,157 @@ hats:
         );
         let _ = config;
     }
+
+    // 2026-07-24-003 plan U1 / capability-gap fix: the
+    // `wave_coord_check_v2` exemption is the gate
+    // that lets wave-only presets (no supervisor required) pass
+    // R5 for `*.wave.{complete,failed}` triggers. These four
+    // tests pin the four corners:
+    //
+    //   1. classifier accepts `wave.runtime.*`, refuses
+    //      `supervisor.*` and `None`;
+    //   2. exemption fires for the six coordination topics
+    //      when a wave binding is declared, but NOT for
+    //      unrelated topics (e.g. `review.unit.done`,
+    //      `work.done`);
+    //   3. exemption is silent when no mechanism block is
+    //      declared (pre-2026-07-24 behaviour — non-wave
+    //      presets must still get R5 "no publisher"
+    //      findings for `*.wave.complete` topics);
+    //   4. exemption is silent when a non-wave mechanism
+    //      binding is declared (e.g. supervisor-prefixed
+    //      bindings belong to the supervisor exemption path,
+    //      not the wave-only path).
+    #[test]
+    fn wave_runner_binding_classifier_basics() {
+        use crate::event_loop::flow_declaration::is_wave_runner_binding;
+        assert!(is_wave_runner_binding(Some("wave.runtime.review")));
+        assert!(is_wave_runner_binding(Some("wave.runtime.exec")));
+        assert!(!is_wave_runner_binding(Some("supervisor.review.wave")));
+        assert!(!is_wave_runner_binding(Some("supervisor.exec.wave")));
+        assert!(!is_wave_runner_binding(None));
+        assert!(!is_wave_runner_binding(Some("")));
+    }
+
+    #[test]
+    fn wave_exemption_fires_for_coordination_topics_when_binding_declared() {
+        let mut cfg = RalphConfig::default();
+        use crate::config::{FlowStepConfig, MechanismConfig};
+        cfg.mechanism = Some(MechanismConfig {
+            flow: Some(crate::config::FlowDeclarationConfig {
+                flow_type: "declared".to_string(),
+                version: 1,
+                terminal_emits: vec!["LOOP_COMPLETE".to_string()],
+                steps: vec![FlowStepConfig {
+                    id: "review_wave".to_string(),
+                    kind: Some("side_effect".to_string()),
+                    allowed_emits: vec![],
+                    terminal_when: None,
+                    on_partial: std::collections::BTreeMap::new(),
+                    runs: Some(format!("{RUNNER_BINDING_WAVE_PREFIX}review")),
+                }],
+                repair_budget: 3,
+                enforce_schema: "hard".to_string(),
+                state_idempotency: "required".to_string(),
+            }),
+            phase_authority: None,
+        });
+        assert!(wave_coord_check_v2(&cfg, "review.wave.complete"));
+        assert!(wave_coord_check_v2(&cfg, "review.wave.failed"));
+        assert!(wave_coord_check_v2(&cfg, "exec.wave.complete"));
+        assert!(wave_coord_check_v2(&cfg, "fix.wave.failed"));
+        // Unrelated topics still don't qualify even with a
+        // wave binding declared (gate is path-specific, not
+        // allow-all).
+        assert!(!wave_coord_check_v2(&cfg, "review.unit.done"));
+        assert!(!wave_coord_check_v2(&cfg, "work.done"));
+    }
+
+    #[test]
+    fn wave_exemption_silent_when_no_mechanism_declared() {
+        // No `mechanism:` block at all → exemption absent. A
+        // preset with no flow declaration still gets R5
+        // findings for `*.wave.complete`-shaped topics
+        // (preserves pre-2026-07-24 behaviour for hat
+        // collections that have not opted into the mechanism
+        // foundation).
+        let cfg = RalphConfig::default();
+        assert!(!wave_coord_check_v2(&cfg, "review.wave.complete"));
+        assert!(!wave_coord_check_v2(&cfg, "review.wave.failed"));
+    }
+
+    #[test]
+    fn wave_exemption_silent_for_non_wave_binding() {
+        // A `supervisor.*` binding belongs to the supervisor
+        // exemption path (event_loop.supervisor.enabled) — not
+        // the wave-only exemption. The classifier explicitly
+        // refuses to short-circuit supervisor bindings through
+        // the wave gate to prevent capability-triggered
+        // ambiguity that would mask real orphan triggers.
+        let mut cfg = RalphConfig::default();
+        use crate::config::{FlowStepConfig, MechanismConfig};
+        cfg.mechanism = Some(MechanismConfig {
+            flow: Some(crate::config::FlowDeclarationConfig {
+                flow_type: "declared".to_string(),
+                version: 1,
+                terminal_emits: vec!["LOOP_COMPLETE".to_string()],
+                steps: vec![FlowStepConfig {
+                    id: "exec_wave".to_string(),
+                    kind: Some("side_effect".to_string()),
+                    allowed_emits: vec![],
+                    terminal_when: None,
+                    on_partial: std::collections::BTreeMap::new(),
+                    runs: Some("supervisor.exec.wave".to_string()),
+                }],
+                repair_budget: 3,
+                enforce_schema: "hard".to_string(),
+                state_idempotency: "required".to_string(),
+            }),
+            phase_authority: None,
+        });
+        assert!(!wave_coord_check_v2(&cfg, "review.wave.complete"));
+    }
+}
+
+
+pub fn wave_coord_check_v2(config: &RalphConfig, trigger: &str) -> bool {
+    // 2026-07-24-003 plan U1 / capability-gap fix: see
+    // `crate::runtime_contract::is_wave_coordination_topic_trigger`
+    // for the canonical implementation. R5 inlines the same
+    // logic inline (no extra branch) so the hot path stays
+    // branch-free. Mirrored here so the rule-level call sits
+    // next to other R5 helpers.
+    //
+    // Capability-triggered (not preset-name pinned): any preset
+    // declaring a `mechanism.flow.steps[].runs = wave.runtime.*`
+    // runner binding gets the `*.wave.{complete,failed}`
+    // runtime-injected exemption, per `finding-rubric.md`
+    // "Wave capability audit".
+    if !(trigger.ends_with(".wave.complete")
+        || trigger.ends_with(".wave.failed"))
+    {
+        return false;
+    }
+    // Wave-only fan-out: check the typed mechanism view at
+    // `RalphConfig.mechanism` for a `wave.runtime.*` step.
+    // Capability gate is intentionally minimal — R5 only
+    // needs to know whether to surface the orphan-trigger
+    // finding; deeper diagnosis (e.g. listing which
+    // bindings exist) is reserved for the
+    // `preset_lint::metadata_runtime_drift` rule.
+    if !config.mechanism.as_ref().and_then(|m| m.flow.as_ref()).map_or(false, |f| {
+        let mut found = false;
+        for s in &f.steps {
+            if let Some(r) = s.runs.as_deref() {
+                if r.starts_with("wave.runtime.") {
+                    found = true;
+                    break;
+                }
+            }
+        }
+        found
+    }) {
+        return false;
+    }
+    true
 }

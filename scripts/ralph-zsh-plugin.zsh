@@ -70,6 +70,14 @@ _RALPH_BUILTIN_HAT_VALUES=(
   "builtin:debug"
   "builtin:autoresearch"
   "builtin:merge-batch"
+  # 2026-07-24-003 plan: post-implementation six-dimension wave-review
+  # preset. Wave-only fan-out — no supervisor — with one batched
+  # SharedReadonly wave across goal-alignment / correctness /
+  # testing / maintainability / project-standards / adversarial,
+  # followed by synthesis + fix-plan + finalizer. Completes with
+  # the terminal LOOP_COMPLETE event carrying result and
+  # artifact_path.
+  "builtin:implementation-review"
 )
 
 _RALPH_BUILTIN_HAT_DESCRIPTIONS=(
@@ -80,6 +88,12 @@ _RALPH_BUILTIN_HAT_DESCRIPTIONS=(
   "Bug investigation, root-cause analysis, and adversarial fix verification"
   "Autonomous experiment loop: try ideas, measure, keep what works"
   "Git-first batch merge: review design intent, merge multiple worktree branches, stabilize with verify-fix loop, write merge report"
+  # 2026-07-24-003 plan: post-implementation six-dimension wave-review
+  # preset. Wave-only fan-out — no supervisor — with one batched
+  # SharedReadonly wave across goal-alignment / correctness /
+  # testing / maintainability / project-standards / adversarial,
+  # followed by synthesis + fix-plan + finalizer.
+  "Post-implementation six-dimension review: freeze scope, single SharedReadonly wave across 6 dimensions, synthesize findings, emit fix-plan.md or block artifact as terminal LOOP_COMPLETE"
 )
 
 # =============================================================================

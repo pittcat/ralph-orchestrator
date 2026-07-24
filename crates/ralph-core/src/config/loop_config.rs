@@ -1227,6 +1227,16 @@ pub struct FlowDeclarationConfig {
 /// P0-3: typed view of one step in a
 /// `mechanism.flow.steps` list. Mirrors
 /// `event_loop::flow_declaration::FlowStepDecl`.
+///
+/// 2026-07-24-003 plan U1 / capability-gap fix: the `runs`
+/// field declares which runtime runner owns the
+/// `kind: side_effect` step. `wave.runtime.*` bindings exempt
+/// the corresponding `*.wave.{complete,failed}` coordination
+/// topics from the lint graph's "no publisher" archetype
+/// without requiring `event_loop.supervisor.enabled: true`.
+/// Kept in sync with `FlowStepDecl::runs` via the
+/// `event_loop::flow_declaration::is_wave_runner_binding`
+/// classifier helper.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct FlowStepConfig {
     pub id: String,
@@ -1238,6 +1248,39 @@ pub struct FlowStepConfig {
     pub terminal_when: Option<String>,
     #[serde(default)]
     pub on_partial: std::collections::BTreeMap<String, String>,
+    /// Runtime runner binding (e.g. `wave.runtime.review`,
+    /// `supervisor.review.wave`). New runner namespaces must
+    /// extend the classifier helpers in
+    /// `event_loop::flow_declaration` so the lint graph
+    /// remains the authoritative source of truth for
+    /// capability-triggered exemptions.
+    #[serde(default)]
+    pub runs: Option<String>,
+}
+
+impl FlowStepConfig {
+    /// Pass-through to the typed `FlowStepDecl` classifier.
+    /// The typed view keeps the lint rule source-of-truth in
+    /// one place; this small wrapper makes the typed config
+    /// usable from `runtime_contract.rs` without forcing it
+    /// to depend on `FlowDeclaration::from_yaml` round-trips.
+    pub fn uses_wave_runtime(&self) -> bool {
+        self.runs
+            .as_deref()
+            .map(|r| r.starts_with(crate::event_loop::flow_declaration::RUNNER_BINDING_WAVE_PREFIX))
+            .unwrap_or(false)
+    }
+}
+
+impl FlowDeclarationConfig {
+    /// Aggregator: returns `true` when any step declares a
+    /// `wave.runtime.*` runner binding. Used by
+    /// `runtime_contract::detect_required_topic_gaps` to
+    /// exempt `*.wave.{complete,failed}` from the
+    /// "no publisher" archetype on the typed view path.
+    pub fn uses_wave_runtime(&self) -> bool {
+        self.steps.iter().any(|s| s.uses_wave_runtime())
+    }
 }
 
 fn default_flow_type() -> String {

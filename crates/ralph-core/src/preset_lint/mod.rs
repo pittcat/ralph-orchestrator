@@ -133,7 +133,10 @@ pub use topic_format::{
     validate_all_topics, validate_topic_format,
 };
 pub use trigger_context::{check_trigger_context, check_trigger_context_topology};
-pub use workflow_activation::{HandoffGraph, run_workflow_activation_contract};
+pub use workflow_activation::{
+    HandoffGraph, source_label_is_builtin_embedded, run_workflow_activation_contract,
+    wave_coord_check_v2 as is_wave_coordination_trigger,
+};
 
 // ──────────────────────────────────────────────────────────────────────────
 // U2: Shared types — strictness, severity, finding

@@ -63,7 +63,21 @@ event_loop:
   execution_mode: isolated
   prompt_file: "PROMPT.md"
   completion_promise: "LOOP_COMPLETE"
-  required_events: []  # KTD14: no preset-specific required event pair; finalizer is the sole completion author.
+  # U7 gate (test_public_presets_have_required_events): non-empty
+  # required_events block premature completion — every public
+  # builtin must declare at least one intermediate hat output
+  # that finalizer waits on. We list both the canonical success
+  # path and the four blocked paths so the static
+  # `topology.unreachable_required` check can find them in
+  # the hat graph (scope-preparer publishes scope.blocked;
+  # review-synthesizer publishes review.synthesized /
+  # review.blocked).
+  required_events:
+    - "review.synthesized"
+    - "fix.plan.ready"
+    - "scope.blocked"
+    - "review.blocked"
+    - "review.wave.failed"
   starting_event: "review.start"
   max_iterations: 30
   max_runtime_seconds: 14400  # 4 hours; bounded by six-dim review fan-out, not by per-unit commits.

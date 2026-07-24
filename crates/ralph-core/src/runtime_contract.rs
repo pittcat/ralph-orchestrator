@@ -396,7 +396,9 @@ pub const LOOP_RUNNER_INTERNAL_TOPICS: &[&str] = &[
 
 use crate::config::ConfigError;
 use crate::config::ConfigWarning;
-use crate::event_origin::{is_supervisor_coordination_topic, is_supervisor_slot_topic};
+use crate::event_origin::{
+    is_supervisor_coordination_topic, is_supervisor_slot_topic, is_wave_coordination_topic,
+};
 use crate::hat_registry::HatRegistry;
 use crate::payload_contract::{
     PayloadContractError, PayloadContractErrorKind, PayloadContractValidationResult,
@@ -404,6 +406,60 @@ use crate::payload_contract::{
 use crate::preset_lint::{
     LintStrictness, run_preset_lint, workflow_activation::source_label_is_builtin_embedded,
 };
+
+/// 2026-07-24-003 plan U1 / capability-gap fix: returns `true`
+/// when the typed `RalphConfig` declares at least one
+/// `mechanism.flow.steps[].runs` binding that begins with
+/// `wave.runtime.`. The check walks the typed view used at
+/// preset-load time and never falls back to raw YAML — the
+/// flow declaration is mandatory in this codebase and the
+/// typed view carries the `runs` field that the lint graph
+/// consumes.
+///
+/// Capability-triggered (not preset-name pinned) per
+/// `finding-rubric.md` "Wave capability audit": when this
+/// returns `true`, the preset is wave-only and the
+/// `*.wave.{complete,failed}` coordination topics are
+/// runtime-injected by the default wave hot path regardless
+/// of `event_loop.supervisor.enabled`.
+///
+/// `mechanism` lives at `RalphConfig` top-level (per P0-3, see
+/// `config/mod.rs:120`) — the typed view surfaced via
+/// `event_loop.mechanism` is a separate historical alias
+/// kept for the stage pipeline; lint/R5 reads the top-level
+/// canonical field.
+pub fn preset_uses_wave_runtime(config: &crate::config::RalphConfig) -> bool {
+    config
+        .mechanism
+        .as_ref()
+        .and_then(|m| m.flow.as_ref())
+        .map(|f| f.uses_wave_runtime())
+        .unwrap_or(false)
+}
+
+/// 2026-07-24-003 plan U1 / capability-gap fix: predicate
+/// wraps `preset_uses_wave_runtime` with the
+/// `<kind>.wave.{complete,failed}` topic-name gate so R5 and
+/// downstream callers share one definition. The R5 loop in
+/// `workflow_activation.rs` inlines the same body to keep the
+/// hot path branch-free; this public helper exists for
+/// `cli emit --policy-check` argument builders and any future
+/// runtime caller that wants the same predicate without
+/// pulling in the preset-lint module.
+///
+/// Capability-triggered (not preset-name pinned) per
+/// `finding-rubric.md` "Wave capability audit".
+pub fn is_wave_coordination_topic_trigger(
+    config: &crate::config::RalphConfig,
+    trigger: &str,
+) -> bool {
+    if !(trigger.ends_with(".wave.complete")
+        || trigger.ends_with(".wave.failed"))
+    {
+        return false;
+    }
+    preset_uses_wave_runtime(config)
+}
 use crate::preset_validator::{
     TopologyError, TopologyErrorKind, TopologyValidationResult, validate_preset_topology,
 };
@@ -755,6 +811,20 @@ pub fn detect_orphan_topics(
             if config.event_loop.supervisor.enabled && is_supervisor_slot_topic(topic) {
                 continue;
             }
+            // 2026-07-24-003 plan U1 / capability-gap fix: when a
+            // preset declares a `wave.runtime.*` runner binding,
+            // its `*.unit.done` consumers have the same built-in
+            // wave hot-path consumer behaviour: the runtime's
+            // default wave aggregation path treats them as
+            // fan-in payloads even when no hat subscribes. This
+            // exempts e.g. `review.unit.done` from the legacy
+            // "no hat subscribers" warning for wave-only
+            // presets.
+            if preset_uses_wave_runtime(config) && is_wave_coordination_topic(topic)
+                || topic.ends_with(".unit.done") || topic.ends_with(".unit.failed")
+            {
+                continue;
+            }
             if !registry.has_specific_subscriber(topic) {
                 let finding = RuntimeContractFinding::try_new_core(
                     "orphan.no_subscriber",
@@ -844,6 +914,35 @@ pub fn detect_required_topic_gaps(
         if config.event_loop.supervisor.enabled && is_supervisor_coordination_topic(topic) {
             continue;
         }
+        // 2026-07-24-003 plan U1 / capability-gap fix: when a preset
+        // declares a `wave.runtime.*` runner binding via
+        // `mechanism.flow.steps[].runs`, the runtime's default wave
+        // hot path injects the matching `*.wave.complete` /
+        // `*.wave.failed` coordination topics — even when
+        // `event_loop.supervisor.enabled` is false. Without this
+        // exemption, wave-only presets would falsely report
+        // "Required topic 'review.wave.complete' has no publisher in
+        // the hat graph" (a known false positive that previously
+        // forced wave-only presets into `event_loop.supervisor.enabled:
+        // true`).
+        if is_wave_coordination_topic(topic) && preset_uses_wave_runtime(config) {
+            continue;
+        }
+        // 2026-07-24-003 plan U1 / capability-gap fix: the wave
+        // hot path also consumes `*.unit.done` / `*.unit.failed`
+        // as slot-level fan-in inputs. Without this exemption a
+        // wave-only preset that declares `review.unit.done` in
+        // `event_policy.schemas` would falsely report "no
+        // subscriber" because the wave runner is the consumer,
+        // not a hat. The exemption mirrors the supervisor-only
+        // path on line 922 (which only fires when
+        // `event_loop.supervisor.enabled`); we run it whenever
+        // the typed view declares a wave runner binding.
+        if (topic.ends_with(".unit.done") || topic.ends_with(".unit.failed"))
+            && preset_uses_wave_runtime(config)
+        {
+            continue;
+        }
 
         let has_publisher = registry
             .all()
@@ -901,7 +1000,20 @@ pub fn detect_required_topic_gaps(
         // the runtime supervisor rather than a hat.
         let is_supervisor_slot =
             config.event_loop.supervisor.enabled && is_supervisor_slot_topic(topic.as_str());
-        if !has_subscriber && !publishing_hat_also_publishes_completion && !is_supervisor_slot {
+        // 2026-07-24-003 plan U1 / capability-gap fix: the
+        // default wave hot path consumes the slot-level
+        // `*.unit.done` / `*.unit.failed` topics regardless of
+        // `event_loop.supervisor.enabled`. Mirror the
+        // supervisor-only exemption above so wave-only
+        // presets do not falsely report "no subscriber" for
+        // their declared `event_policy.schemas` unit topics.
+        let is_wave_slot = preset_uses_wave_runtime(config)
+            && is_supervisor_slot_topic(topic.as_str());
+        if !has_subscriber
+            && !publishing_hat_also_publishes_completion
+            && !is_supervisor_slot
+            && !is_wave_slot
+        {
             let finding = RuntimeContractFinding::try_new_core(
                 "required.no_subscriber",
                 FindingSource::Topology,

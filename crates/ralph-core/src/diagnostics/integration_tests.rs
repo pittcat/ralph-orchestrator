@@ -922,6 +922,7 @@ mod tests {
             terminal_when: step.terminal_when.clone(),
             on_partial: step.on_partial.clone(),
             total_units: None,
+            runs: None,
         };
         event_loop.stage_pipeline =
             crate::event_loop::stage_pipeline::StagePipeline::with_default_stages(flow);

@@ -81,6 +81,23 @@ const PRESETS: &[EmbeddedPreset] = &[
         content: include_str!(concat!(env!("OUT_DIR"), "/presets/merge-batch.yml")),
         public: true,
     },
+    // 2026-07-24-003 plan / KTD1: implementation-review — six-hat
+    // isolated wave preset. Scope-preparer freezes baseline + patch +
+    // digests; review-dispatcher emits a single six-payload
+    // `review.unit.ready` wave; the runtime default wave hot path
+    // injects `review.wave.complete` / `review.wave.failed` (no
+    // supervisor execution model, no worktree slots); review-synthesizer
+    // + fix-planner + finalizer produce one `LOOP_COMPLETE` with
+    // `result` + `artifact_path`.
+    EmbeddedPreset {
+        name: "implementation-review",
+        description: "Post-implementation six-dimension review: freeze scope, fan out a single SharedReadonly wave across goal-alignment / correctness / testing / maintainability / project-standards / adversarial, synthesize findings, and emit a fix-plan.md or block artifact as the terminal LOOP_COMPLETE",
+        content: include_str!(concat!(
+            env!("OUT_DIR"),
+            "/presets/implementation-review.yml"
+        )),
+        public: true,
+    },
 ];
 
 /// WRC-U5 (2026-06-12-003) / KTD-WRC-5: Tier-0 list of builtin
@@ -658,7 +675,11 @@ mod tests {
     #[test]
     fn test_list_presets_returns_all() {
         let presets = list_presets();
-        assert_eq!(presets.len(), 6, "Expected 6 public presets");
+        // Hard-coded count of 6 was true pre-2026-07-24
+        // (ce-executor-supervisor / ce-executor-pipeline / debug /
+        // merge-batch / merge-loop / autoresearch). 2026-07-24
+        // plan U5 added `implementation-review`; bump to 7.
+        assert_eq!(presets.len(), 7, "Expected 7 public presets (added implementation-review 2026-07-24)");
     }
 
     #[test]
@@ -783,7 +804,9 @@ mod tests {
     #[test]
     fn test_preset_names_returns_all_names() {
         let names = preset_names();
-        assert_eq!(names.len(), 6);
+        // 2026-07-24 plan U5: added `implementation-review`, the
+        // post-implementation six-dimension wave-review preset.
+        assert_eq!(names.len(), 7);
         assert!(names.contains(&"autoresearch"));
         assert!(names.contains(&"ce-executor-pipeline"));
         assert!(names.contains(&"ce-executor-pipeline-loop"));
@@ -1628,6 +1651,10 @@ mod tests {
             "builtin:debug",
             "builtin:autoresearch",
             "builtin:merge-batch",
+            // 2026-07-24-003 plan: post-implementation six-dim
+            // wave-review preset; mirrored in
+            // scripts/ralph-zsh-plugin.zsh _RALPH_BUILTIN_HAT_VALUES.
+            "builtin:implementation-review",
         ]
         .iter()
         .map(|s| s.to_string())
@@ -1912,6 +1939,15 @@ mod tests {
             // the fix wave. The runtime still requires `work.done` on every
             // successful completion.
             "ce-executor-supervisor",
+            // 2026-07-24-003 plan U1: implementation-review declares
+            // 4 blocked paths (scope.blocked / review.blocked /
+            // review.wave.failed) + 1 success path; the static
+            // `required_event_not_on_all_paths` check assumes a
+            // single success path. Adding a topology exemption is
+            // the documented design choice (this preset's
+            // branching completion paths are intentional, per
+            // plan R10/R11).
+            "implementation-review",
         ];
 
         // Per-preset finding-id exemptions for the non-strict authoring
@@ -2066,7 +2102,20 @@ mod tests {
         // This is by design — `work.done` is the success-path handoff, while
         // the failure path is handled by the fix wave. The runtime still
         // requires `work.done` on every successful completion.
-        let topology_exempt: &[&str] = &["autoresearch", "debug", "ce-executor-supervisor"];
+        let topology_exempt: &[&str] = &[
+            "autoresearch",
+            "debug",
+            "ce-executor-supervisor",
+            // 2026-07-24-003 plan U1: implementation-review declares
+            // 4 blocked paths (scope.blocked / review.blocked /
+            // review.wave.failed) + 1 success path; the strict
+            // `required_event_not_on_all_paths` check assumes a
+            // single success path. Adding a topology exemption is
+            // the documented design choice (this preset's
+            // branching completion paths are intentional, per
+            // plan R10/R11).
+            "implementation-review",
+        ];
 
         // Per-preset finding-id exemptions (P2 #16 + #22).
         //

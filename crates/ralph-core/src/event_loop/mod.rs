@@ -14179,6 +14179,7 @@ mod u4_current_plan_step_tests {
                 allowed_emits: allowed.into_iter().map(String::from).collect(),
                 terminal_when: None,
                 on_partial: std::collections::BTreeMap::new(),
+                runs: None,
             })
             .collect();
         let mut cfg = RalphConfig::default();

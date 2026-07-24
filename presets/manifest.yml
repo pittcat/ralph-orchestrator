@@ -45,5 +45,6 @@ embedded:
   # commented-out rather than deleted so a future curator can decide
   # whether to promote it back into the public set or remove the file
   # outright. See `presets/en/hatless-baseline.yml` for contents.
+  - implementation-review
   - merge-loop
   - merge-batch

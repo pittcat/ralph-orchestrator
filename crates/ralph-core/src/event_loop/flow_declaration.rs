@@ -68,20 +68,47 @@ pub struct FlowStepDecl {
     /// (see `is_partial_state`).
     #[serde(default)]
     pub on_partial: std::collections::BTreeMap<String, String>,
-    /// U12 (2026-06-27-002 plan completion) — total
-    /// number of units the step is expected to drive
-    /// (e.g. 8 in the 4/8 partial scenario). When set,
-    /// `StepCloseObligationStage` becomes live: the
-    /// runtime drives
-    /// `update_progress(step_id, done, total)` from
-    /// `work.done` emit counts, and the stage rejects
-    /// emits that don't satisfy
-    /// `on_partial` while `done < total`. Backwards
-    /// compatible: omitted = stage stays fail-open
-    /// (the pre-U12 behaviour).
+    /// U12 (2026-07-24-003 plan U1, was: 2026-06-27-002 plan
+    /// completion) — total number of units the step is expected
+    /// to drive (e.g. 8 in the 4/8 partial scenario). When
+    /// set, `StepCloseObligationStage` becomes live: the
+    /// runtime drives `update_progress(step_id, done, total)`
+    /// from `work.done` emit counts, and the stage rejects
+    /// emits that don't satisfy `on_partial` while `done <
+    /// total`. Backwards compatible: omitted = stage stays
+    /// fail-open (the pre-U12 behaviour).
     #[serde(default)]
     pub total_units: Option<u32>,
+    /// Optional runner binding. For `kind: side_effect` steps
+    /// this names the runtime runner that owns the side-effect
+    /// emit (e.g. `supervisor.review.wave`, `wave.runtime.review`).
+    /// `supervisor.*` bindings imply
+    /// `event_loop.supervisor.enabled: true` is required;
+    /// `wave.runtime.*` bindings work without supervisor — the
+    /// runtime's default wave hot path injects the
+    /// corresponding `*.wave.complete` / `*.wave.failed`
+    /// coordination topics.
+    ///
+    /// The lint graph (`preset_lint::workflow_activation`
+    /// R5 `RUNNER_INJECTED_TRIGGERS` and
+    /// `runtime_contract::detect_required_topic_gaps`) use
+    /// this to exempt `*.wave.{complete,failed}` from the
+    /// "no publisher" archetype when a wave runner binding is
+    /// declared but `event_loop.supervisor.enabled` is
+    /// false (the implementation-review preset path).
+    #[serde(default)]
+    pub runs: Option<String>,
 }
+
+/// Step runner-binding namespaces recognised by the runtime.
+///
+/// New runner bindings must land here AND extend the
+/// `is_wave_runner_binding` / `is_supervisor_runner_binding`
+/// classification helpers so the lint graph remains the
+/// authoritative source of truth for capability-triggered
+/// exemptions.
+pub const RUNNER_BINDING_WAVE_PREFIX: &str = "wave.runtime.";
+pub const RUNNER_BINDING_SUPERVISOR_PREFIX: &str = "supervisor.";
 
 /// Top-level flow declaration.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -127,6 +154,23 @@ fn default_enforce_schema() -> String {
 }
 fn default_state_idempotency() -> String {
     "required".to_string()
+}
+
+/// Classifier helpers used by the preset_lint and
+/// runtime_contract layers to recognise which runner a
+/// `kind: side_effect` step delegates to.
+///
+/// `wave.runtime.*` bindings are exempt from the supervisor
+/// enablement guard because the default wave hot path
+/// (`wave_detection.rs` + `crate::wave::SharedReadonlySlots`)
+/// produces `*.wave.complete` / `*.wave.failed` even when
+/// `event_loop.supervisor.enabled` is false.
+pub fn is_wave_runner_binding(runs: Option<&str>) -> bool {
+    runs.map(|r| r.starts_with(RUNNER_BINDING_WAVE_PREFIX)).unwrap_or(false)
+}
+
+pub fn is_supervisor_runner_binding(runs: Option<&str>) -> bool {
+    runs.map(|r| r.starts_with(RUNNER_BINDING_SUPERVISOR_PREFIX)).unwrap_or(false)
 }
 
 #[derive(Debug, Error)]
@@ -213,6 +257,43 @@ impl FlowDeclaration {
             .map(|s| s.allowed_emits.iter().any(|t| t == topic))
             .unwrap_or(false)
     }
+
+    /// 2026-07-24-003 plan U1 / capability-gap fix: returns
+    /// `true` when at least one step declares a
+    /// `wave.runtime.*` runner binding. Used by the lint
+    /// graph (`preset_lint::workflow_activation` R5
+    /// `RUNNER_INJECTED_TRIGGERS` exemption + the topology
+    /// `detect_required_topic_gaps` exemption in
+    /// `runtime_contract`) to recognise that the
+    /// `*.wave.complete` / `*.wave.failed` coordination
+    /// topics are runtime-injected by the default wave hot
+    /// path even when `event_loop.supervisor.enabled` is
+    /// false.
+    ///
+    /// The check is capability-triggered (not preset-name
+    /// pinned): any preset that declares a `wave.runtime.*`
+    /// runner binding qualifies, mirroring the supervisor
+    /// exemption in `runtime_contract.rs:844`.
+    pub fn uses_wave_runtime(&self) -> bool {
+        self.steps.iter().any(|s| is_wave_runner_binding(s.runs.as_deref()))
+    }
+}
+
+/// 2026-07-24-003 plan U1 / capability-gap fix: top-level
+/// predicate for downstream callers (preset_validator's
+/// `build_topology_graph`, BFS reachability, etc.) that need
+/// the same "does this preset declare a `wave.runtime.*` step?"
+/// answer without depending on the typed view's struct. The
+/// typed view's `uses_wave_runtime` is the authoritative
+/// source of truth; this wrapper exposes it to consumers that
+/// take `&RalphConfig` (not `&FlowDeclaration`).
+pub fn is_wave_runner_binding_preset(config: &crate::config::RalphConfig) -> bool {
+    config
+        .mechanism
+        .as_ref()
+        .and_then(|m| m.flow.as_ref())
+        .map(|f| f.uses_wave_runtime())
+        .unwrap_or(false)
 }
 
 #[cfg(test)]

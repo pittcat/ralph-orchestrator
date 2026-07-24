@@ -25,6 +25,11 @@
     "category": "workflow"
   },
   {
+    "name": "implementation-review",
+    "description": "Post-implementation six-dimension review: freeze scope, fan out a single SharedReadonly wave across goal-alignment / correctness / testing / maintainability / project-standards / adversarial, synthesize findings, and emit a fix-plan.md or block artifact as the terminal LOOP_COMPLETE",
+    "category": "development"
+  },
+  {
     "name": "merge-batch",
     "description": "Git-first batch merge: review design intent, merge multiple worktree branches, stabilize with verify-fix loop, write merge report",
     "category": "workflow"

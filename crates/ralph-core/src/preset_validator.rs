@@ -255,6 +255,37 @@ impl TopologyGraph {
             hat_to_topics.insert(SUPERVISOR_ID.to_string(), supervisor_publishes);
         }
 
+        // 2026-07-24-003 plan U1 / capability-gap fix: when a preset
+        // declares a `mechanism.flow.steps[].runs = wave.runtime.*`
+        // runner binding, the default wave hot path injects the
+        // same `*.wave.{complete,failed}` coordination topics
+        // without `event_loop.supervisor.enabled`. Model that as a
+        // virtual `wave_runtime` node in the topology graph so the
+        // reachability / required-event BFS sees a closed path
+        // through the wave fan-in. Mirrors the supervisor graph
+        // edge above; capability-triggered (not preset-name pinned)
+        // per `finding-rubric.md` "Wave capability audit".
+        if crate::event_loop::flow_declaration::is_wave_runner_binding_preset(config) {
+            const WAVE_RUNTIME_ID: &str = "wave_runtime";
+            const WAVE_SLOT_TO_WAVE: &[(&str, &str)] = &[
+                ("exec.unit.done", "exec.wave.complete"),
+                ("exec.unit.failed", "exec.wave.failed"),
+                ("fix.unit.done", "fix.wave.complete"),
+                ("fix.unit.failed", "fix.wave.failed"),
+                ("review.unit.done", "review.wave.complete"),
+                ("review.unit.failed", "review.wave.failed"),
+            ];
+            let mut wave_publishes = Vec::new();
+            for (slot_topic, wave_topic) in WAVE_SLOT_TO_WAVE {
+                topic_to_hats
+                    .entry((*slot_topic).to_string())
+                    .or_default()
+                    .push(WAVE_RUNTIME_ID.to_string());
+                wave_publishes.push((*wave_topic).to_string());
+            }
+            hat_to_topics.insert(WAVE_RUNTIME_ID.to_string(), wave_publishes);
+        }
+
         Self {
             topic_to_hats,
             hat_to_topics,
