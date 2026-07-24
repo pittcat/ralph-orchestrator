@@ -98,10 +98,12 @@ ralph wave emit [OPTIONS] <TOPIC>
 
 **幂等键：**
 
-- `--idempotency-key` 用于重试同一 `(loop_id, hat, topic, key)` 的 emit：返回原 `wave_id` 与 `deduplicated=true`，不二次 spawn。键最长 256 字节、ASCII、非空非空白。
-- 推荐 review-coordinator 使用 `ce-review:{plan_name}:{task_id}:{step}:round-{fix_round}` 命名空间。
-- 跨 `loop_id` / `hat` / `topic` 不去重——通过 scope 哈希隔离。
-- 同 key 不同 payload 会报错（`idempotency-key conflict`），不静默覆盖。
+- **作用**：`--idempotency-key` 让「同一批 wave 内容重入」安全。同一 `(loop_id, hat, topic, key)` 且 payload 不变时重复调用，runtime 直接返回**第一次**产生的 `wave_id` 并标 `deduplicated=true`，**不重复派发** worker、不再写新事件。键最长 256 字节、ASCII、非空非空白。
+- **权威去重源**：某批内容是否「已派发过」由 runtime 维护的 **wave 账本**（supervisor 的单一事实源）判定。只要该账本里已存在对应 wave，重入就返回既有 `wave_id`。agent 不需要、也不能直接读写这个账本——判断本次是否被去重，只看 `--output json` 返回里的 `deduplicated` 字段。
+- **过渡兼容层（弃用，非权威）**：早期版本会在本地额外写一份幂等记录文件作为兼容层；它**不是权威**，仅为旧工具链过渡保留，带弃用语义，将在后续版本移除。**不要**读取、解析或依赖它来判断是否重入——一切以 `wave emit` 返回的 `wave_id` / `deduplicated` 为准。若在日志中看到关于该文件的弃用提示，属正常现象，无需处理。
+- **如何取 key**：用能唯一标识本次 wave 内容的稳定片段拼 key（如计划名、task id、step、轮次），保证「内容相同的重入」命中同一 key、「内容不同」用不同 key。
+- **作用域**：跨 `loop_id` / `hat` / `topic` 不去重——key 的去重范围由这三者加 key 本身共同限定。
+- **冲突停止条件**：同 key 但 payload 不同会报错（`idempotency-key conflict`），不静默覆盖。遇到冲突说明同一 key 被用于不同内容——**停止**，改用能区分本次内容的 key（如把轮次段递增）后重发，不要用同一 key 反复重试。
 
 **幂等示例：**
 
