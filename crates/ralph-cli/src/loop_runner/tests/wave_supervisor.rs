@@ -3163,6 +3163,118 @@ async fn test_u2_workspace_root_and_channel_injected_into_worker_env() {
     );
 }
 
+/// 2026-07-25-003 plan U4 (R6): the worker process's
+/// `RALPH_WAVE_ID` env var MUST be the **public** wave id (the
+/// `DetectedWave.wave_id` the dispatcher received), NOT the
+/// supervisor store's internal `w-{seq}` id. The dispatcher
+/// injects `RALPH_WAVE_ID = public id` in `dispatch_wave_inner`
+/// (line ~1582), but `bind_slot` later writes the store id into
+/// `binding.env` and the env merge in the dispatcher uses
+/// last-write-wins — so the public id is silently overwritten by
+/// the store id in the spawned worker's environment. This
+/// regression reproduces that bug end-to-end and pins the fix
+/// (the dispatcher's final RALPH_WAVE_ID must be the public id).
+#[tokio::test]
+async fn test_u4_worker_env_wave_id_is_public_id() {
+    use crate::loop_runner::wave::CoordinatorSupervisorBridge;
+
+    let tmp = tempfile::tempdir().expect("temp dir");
+    let workspace_root = std::fs::canonicalize(tmp.path()).expect("canonicalize");
+    let wave_dir = workspace_root.join(".ralph");
+    std::fs::create_dir_all(&wave_dir).expect("create wave dir");
+    let main_events_file = wave_dir.join("events.jsonl");
+
+    #[derive(Debug)]
+    struct StubFactory;
+    impl ralph_core::supervisor::worktree_bind::WorktreeFactory for StubFactory {
+        fn create(
+            &self,
+            repo_root: std::path::PathBuf,
+            branch: String,
+        ) -> Result<
+            ralph_core::worktree::Worktree,
+            ralph_core::supervisor::worktree_bind::WorktreeError,
+        > {
+            let wt = repo_root.join(format!("wt-{branch}"));
+            std::fs::create_dir_all(&wt).ok();
+            Ok(ralph_core::worktree::Worktree {
+                path: wt,
+                branch,
+                is_main: false,
+                head: None,
+            })
+        }
+    }
+
+    let store = std::sync::Arc::new(InMemorySupervisorStore::new());
+    let context = ProductionBridgeContext {
+        loop_id: "u4-public-id".to_string(),
+        repo_root: workspace_root.clone(),
+        events_path: Some(main_events_file.clone()),
+        tasks_path: None,
+    };
+    let bridge = CoordinatorSupervisorBridge::with_context_and_factory(
+        store.clone() as std::sync::Arc<dyn SupervisorStore>,
+        context,
+        std::sync::Arc::new(StubFactory),
+    );
+
+    // Public id contains a dash (mirrors the production
+    // `w-rs-1` / `w-246cb4afef33` shape) so the test fails
+    // loudly if any code path mangles the id format.
+    let public_wave_id = "w-public-rs-1";
+    let wave = make_u3_wave(public_wave_id, 1, 1);
+    let executor = U5RecordingExecutor::new(U5SlotOutcome::Success(1));
+
+    let capture = captured_env();
+    capture.lock().unwrap().clear();
+    let _outcome = run_u2_execute_wave_with_env_capture(
+        bridge,
+        wave,
+        executor,
+        &main_events_file,
+        "u4-public-id",
+    )
+    .await;
+
+    let snap = capture.lock().unwrap().clone();
+    assert_eq!(snap.len(), 1, "U4/003: one slot captured; got {snap:?}");
+    let env_map: std::collections::HashMap<String, String> = snap
+        .get(&0)
+        .expect("slot 0 captured")
+        .iter()
+        .cloned()
+        .collect();
+
+    let observed = env_map
+        .get("RALPH_WAVE_ID")
+        .expect("RALPH_WAVE_ID must be injected")
+        .clone();
+    assert_eq!(
+        observed, public_wave_id,
+        "U4/003: worker RALPH_WAVE_ID must equal the public wave id (the id the agent saw in `DetectedWave.wave_id`); got {observed}"
+    );
+    // Negative guard: the worker must NOT see the supervisor
+    // store's internal `w-{seq}` id. The store allocates a
+    // distinct id on first registration, so we recover it from
+    // the live store and assert it does NOT leak into the
+    // worker's env.
+    let store_wave_id = store
+        .recover_active_waves()
+        .expect("recover")
+        .pop()
+        .expect("one wave")
+        .wave_id;
+    assert_ne!(
+        store_wave_id, public_wave_id,
+        "U4/003: pre-condition: the supervisor store must allocate a distinct id from the public id (otherwise the test cannot distinguish them); got {store_wave_id}"
+    );
+    assert_ne!(
+        observed, store_wave_id,
+        "U4/003: worker RALPH_WAVE_ID must NOT leak the supervisor store's internal id ({store_wave_id}); got {observed}"
+    );
+}
+
 /// 2026-07-23-007 plan U4 (R-W5): when the production bridge
 /// carries a `tasks.jsonl` path, the dispatcher projects each
 /// slot's terminal state onto a stable task row. A successful

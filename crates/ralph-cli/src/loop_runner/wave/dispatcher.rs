@@ -1696,15 +1696,32 @@ pub(crate) async fn execute_wave_via_supervisor_with_executor(
         };
 
         if let Some(ref b) = binding {
-            // Merge binding env (last-write-wins).
-            let binding_env: std::collections::HashMap<String, String> =
-                b.env.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+            // Merge binding env (last-write-wins), BUT the dispatcher
+            // already injected `RALPH_WAVE_ID = public wave id` at
+            // line ~1582 (the value the agent saw in
+            // `DetectedWave.wave_id`). `bind_slot`'s `binding.env`
+            // carries the **store** id (the `w-{seq}` the store
+            // allocated) because `bind_worktree` needs the store id
+            // to find the row. Plan 2026-07-25-003 U4 (R6) requires
+            // the worker's `RALPH_WAVE_ID` to be the public id so
+            // envelope / business record wave_id stays consistent
+            // with what the operator and the agent see. We therefore
+            // exclude `RALPH_WAVE_ID` from the binding-env merge:
+            // the dispatcher's earlier public-id injection is the
+            // last word, and the store id never leaks into the
+            // spawned worker's environment.
+            let binding_env: std::collections::HashMap<String, String> = b
+                .env
+                .iter()
+                .filter(|(k, _)| k.as_str() != "RALPH_WAVE_ID")
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect();
             worker_backend
                 .env_vars
                 .retain(|(k, _)| !binding_env.contains_key(k));
             worker_backend
                 .env_vars
-                .extend(b.env.iter().map(|(k, v)| (k.clone(), v.clone())));
+                .extend(binding_env.iter().map(|(k, v)| (k.clone(), v.clone())));
         }
 
         // 2026-07-23-007 plan U2 (R-W1): inject the
