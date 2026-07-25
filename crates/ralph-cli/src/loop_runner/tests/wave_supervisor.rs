@@ -4399,3 +4399,112 @@ async fn run_u3_dispatch_wave<E: WaveWorkerExecutor + 'static>(
     )
     .await
 }
+
+// =============================================================================
+// 2026-07-25-003 plan U5: legacy `WaveTracker.record_outcome` and the
+// supervisor classifier must agree that an empty-success outcome
+// (`Ok(([], _, true))`) is a failure, not a result. Without this
+// invariant, an empty-success worker is counted in `CompletedWave.results`
+// (the `results=N` line in dispatcher logs) while the supervisor
+// store flags the same slot `empty_worker_result` — a "results=N
+// failures=1" log line that masks an all-failed store. The fix is a
+// single line in `record_outcome`; the test pins the new behaviour
+// directly so a future refactor cannot silently re-introduce the
+// drift.
+// =============================================================================
+
+/// U5 Red/Green: `record_outcome` must treat
+/// `Ok((events=[], duration, success=true))` as a failure (the
+/// canonical `empty_worker_result` reason), NOT a result. The
+/// supervisor path's `classify_slot_result` already does the right
+/// thing; this test pins the legacy `WaveTracker` path so the two
+/// stay aligned.
+#[test]
+fn test_u5_record_outcome_empty_success_is_failure() {
+    use crate::loop_runner::wave::record_outcome;
+
+    let mut tracker = ralph_core::WaveTracker::new();
+    tracker.register_wave_with_source(
+        "u5-empty-success".to_string(),
+        1,
+        Some(ralph_proto::HatId::new("u5-hat")),
+    );
+
+    // Plan 2026-07-25-003 U5 / R3: a worker that exits 0 with no
+    // accepted events is `empty_worker_result`, not a result. The
+    // legacy `record_outcome` previously wrote this as a
+    // result (because `success || events.is_empty()` was
+    // satisfied by the `success` arm), producing the
+    // `results=N failures=0` log line that masked a store row
+    // flagged `empty_worker_result`.
+    let outcome: crate::loop_runner::wave::WaveWorkerOutcome =
+        Ok((Vec::new(), std::time::Duration::from_millis(5), true));
+    record_outcome(&mut tracker, "u5-empty-success", 0, outcome);
+
+    let completed = tracker
+        .take_wave_results("u5-empty-success")
+        .expect("wave must exist after registration");
+    assert_eq!(
+        completed.results.len(),
+        0,
+        "U5/003: empty-success must NOT be counted as a result; got {completed:?}"
+    );
+    assert_eq!(
+        completed.failures.len(),
+        1,
+        "U5/003: empty-success must be recorded as a failure; got {completed:?}"
+    );
+    assert_eq!(
+        completed.failures[0].error, "empty_worker_result",
+        "U5/003: empty-success reason must equal the canonical `empty_worker_result`; got {:?}",
+        completed.failures[0].error
+    );
+}
+
+/// U5 regression guard: the partial-timeout contract (PTY
+/// workers exit non-zero but produce partial events) must keep
+/// its `record_result` path even after the empty-success fix.
+/// A non-zero exit WITH events stays a result — the dispatcher's
+/// merge layer still surfaces the partial events to the
+/// aggregator.
+#[test]
+fn test_u5_record_outcome_partial_timeout_stays_result() {
+    use crate::loop_runner::wave::record_outcome;
+
+    let mut tracker = ralph_core::WaveTracker::new();
+    tracker.register_wave_with_source(
+        "u5-partial-timeout".to_string(),
+        1,
+        Some(ralph_proto::HatId::new("u5-hat")),
+    );
+
+    let event = ralph_core::Event {
+        topic: "exec.unit.done".to_string(),
+        payload: Some("{\"slot\":0}".to_string()),
+        ts: String::new(),
+        hat: None,
+        triggered: None,
+        source: None,
+        wave_id: None,
+        wave_index: None,
+        wave_total: None,
+        system_injected: None,
+    };
+    let outcome: crate::loop_runner::wave::WaveWorkerOutcome =
+        Ok((vec![event], std::time::Duration::from_millis(5), false));
+    record_outcome(&mut tracker, "u5-partial-timeout", 0, outcome);
+
+    let completed = tracker
+        .take_wave_results("u5-partial-timeout")
+        .expect("wave must exist after registration");
+    assert_eq!(
+        completed.results.len(),
+        1,
+        "U5/003: partial-timeout (success=false, events=non-empty) must stay a result for the merge layer; got {completed:?}"
+    );
+    assert_eq!(
+        completed.failures.len(),
+        0,
+        "U5/003: partial-timeout must NOT be a failure; got {completed:?}"
+    );
+}

@@ -37,3 +37,8 @@ pub use worker::{
     WaveWorkerExecutionMode, WaveWorkerOutcome, run_wave_worker, run_wave_worker_pty,
     wave_worker_execution_mode,
 };
+// 2026-07-25-003 plan U5: re-export the legacy `record_outcome`
+// helper so the wave_supervisor test surface can pin the
+// empty-success classification against the supervisor
+// classifier.
+pub(crate) use dispatcher::record_outcome;

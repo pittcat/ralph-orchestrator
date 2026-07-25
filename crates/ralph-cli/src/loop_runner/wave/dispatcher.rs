@@ -3177,7 +3177,7 @@ async fn dispatch_wave_inner_with_release<E: WaveWorkerExecutor + ?Sized>(
     outcome_for_completion(completed)
 }
 
-fn record_outcome(
+pub(crate) fn record_outcome(
     tracker: &mut ralph_core::WaveTracker,
     wave_id: &str,
     index: u32,
@@ -3185,12 +3185,33 @@ fn record_outcome(
 ) {
     match outcome {
         Ok((events, duration, success)) => {
-            // PTY workers return Ok((_, _, false)) for non-zero exit and for
-            // timeout-with-events (`run_wave_worker_pty`). Distinguish:
-            // - events present → keep results visible (partial-timeout contract)
-            // - empty + unsuccessful → hard failure so a forced slot exit
-            //   (exit 1, no events) cannot Integrate → false-green LOOP_COMPLETE
-            if success || !events.is_empty() {
+            // PTY workers return Ok((_, _, false)) for non-zero exit
+            // and for timeout-with-events (`run_wave_worker_pty`).
+            // Distinguish:
+            // - success + events present → result
+            // - success + NO events → empty_worker_result (failure);
+            //   a worker that exits 0 without accepted events is
+            //   not a real success, it just failed silently. Without
+            //   this rule, a false-green LOOP_COMPLETE could fire
+            //   for a wave whose every slot is empty.
+            // - success=false + events present → keep result visible
+            //   (partial-timeout contract).
+            // - success=false + empty → hard failure so a forced
+            //   slot exit (exit 1, no events) cannot Integrate →
+            //   false-green LOOP_COMPLETE.
+            //
+            // 2026-07-25-003 plan U5 (R3): align this branch with
+            // the supervisor `classify_slot_result` truth table —
+            // empty-success is `empty_worker_result` (Failed), not a
+            // result.
+            if success && events.is_empty() {
+                tracker.record_failure(
+                    wave_id,
+                    index,
+                    ralph_core::supervisor::worker_outcome::REASON_EMPTY_WORKER_RESULT.into(),
+                    duration,
+                );
+            } else if success || !events.is_empty() {
                 let proto_events: Vec<ralph_proto::Event> =
                     events.into_iter().map(ralph_proto::Event::from).collect();
                 tracker.record_result(wave_id, index, proto_events);
