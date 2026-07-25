@@ -246,6 +246,16 @@ artifact-first review-only finding **不**出现在 `ralph preset check` JSON；
 
 若后续 `crates/ralph-core/src/preset_lint/` 要把这些 finding 升级为 lint（实现 R8 / R9 / R10 / R11 / R12 的机械拦截），须先把 ID 加入 `crates/ralph-core/src/preset_lint/finding_id.rs` 并同步更新 `ALL_FINDING_IDS` 数组，同时把 `default_severity` / `default_confidence` 与本表保持一致；升级前 review 仍按本表入主表，并在 Remediation Plan 中标注 review-only 来源。本任务不涉及 Rust 代码修改。
 
+### Runtime-contract topology finding（`ralph preset check` JSON 直接产出）
+
+这些 id **不带** `lint.` 前缀，来自 `runtime_contract` / `preset_validator`：
+
+| finding_id | default_severity | 含义 | 怎么改 |
+|---|---|---|---|
+| `topology.required_event_not_on_all_paths` | Error | `required_events` 某 topic 不在所有通往 completion 的路径上 | 换成真收敛 topic，或把成功脊门禁改到 `path_required_events` |
+| `topology.path_required_event_not_on_all_paths` | Error | `path_required_events.require` 可被绕过到达 `anchor` | 去掉绕过边，或调整 `anchor` / `require` |
+| `topology.unreachable_path_required` | Error | `path_required_events` 的 `anchor`/`require` 从起点不可达 | 补齐 publishes/triggers |
+
 ## required-event-to-completion 窄例外（review 复核条件）
 
 上方「同一 hat emit 多条业务事件」「终态 emit 前夹带其它业务事件」两条 P0 不再 blanket 适用。当且仅当以下**全部条件**成立时，review 可在不重新触发 P0 的前提下放过该 hat 的双事件 emit：

@@ -341,7 +341,9 @@ hats:
 | `topology.unreachable_start` | `starting_event` 不在任何 hat 的 `triggers` | 给至少一个 hat 的 `triggers` 加上 `starting_event` |
 | `topology.unreachable_completion` | `completion_promise` 没有 hat publish 它 | 把 `completion_promise` token 加进某个 hat 的 `publishes`（或白名单） |
 | `topology.unreachable_required` | `required_events` 中的 topic 在拓扑里不可达 | 让某个 hat 在路径上 publish 它 |
-| `topology.required_event_not_on_all_paths` | 某条路径上不会 emit required event | 调整 hat 的 `publishes`，确保每条路径都覆盖 |
+| `topology.required_event_not_on_all_paths` | 某条路径上不会 emit required event | 调整 hat 的 `publishes`，确保每条路径都覆盖；成功脊专用门禁改用 `path_required_events` |
+| `topology.unreachable_path_required` | `path_required_events` 的 `anchor` / `require` topic 从起点不可达 | 补齐 publishes / triggers 路径 |
+| `topology.path_required_event_not_on_all_paths` | 存在绕过 `require` 到达 `anchor` 的路径 | 去掉绕过边，或改 `anchor` / `require` |
 
 #### Orphan / Payload
 

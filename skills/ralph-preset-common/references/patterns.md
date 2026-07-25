@@ -61,6 +61,18 @@ plan-gate / work.start
 
 **收尾双事件终态（reporter hat）**：preset 把 `event_loop.required_events: ["report.done"]` 与 `event_loop.completion_promise: LOOP_COMPLETE` 配对，作为 reporter 合法双 emit 的入口。其它 hat（plan-reviewer / executor / dimension hats / synthesizer / fix-planner / fixer / alignment）一律**不享受**该例外——它们的 `publishes` 不应同时包含 required_events 列表里的 topic 与 completion_promise。AAF 复核参见 `finding-rubric.md`「required-event-to-completion 窄例外」段。
 
+**成功脊门禁（`path_required_events`）**：当 preset 同时有成功路径（例如 `work.done` → `plan.complete`）与失败早退（`plan.blocked` / `work.failed` → `LOOP_COMPLETE`）时，不要把成功脊 handoff 写进 `required_events`。改用：
+
+```yaml
+event_loop:
+  required_events: [LOOP_COMPLETE]
+  path_required_events:
+    - anchor: plan.complete
+      require: [work.done]
+```
+
+`ralph preset check` 会对绕过 `require` 到达 `anchor` 的边报 `topology.path_required_event_not_on_all_paths`；runtime 在 admit `anchor` 前也会要求 `require` 已见过。
+
 参考：`presets/en/ce-executor-pipeline.yml`。
 
 ## ce-executor-pipeline-loop（15 hat，isolated；单链环形 review/fix；2026-07-08）

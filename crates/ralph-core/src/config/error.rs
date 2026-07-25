@@ -77,6 +77,11 @@ pub enum ConfigError {
     WorkflowGuardValidation { field: String, message: String },
 
     #[error(
+        "path_required_events validation error at '{field}': {message}\nFix: check your event_loop.path_required_events configuration."
+    )]
+    PathRequiredValidation { field: String, message: String },
+
+    #[error(
         "Event policy validation error at '{field}': {message}\nFix: check your event_loop.event_policy configuration."
     )]
     EventPolicyValidation { field: String, message: String },

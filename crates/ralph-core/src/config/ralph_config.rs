@@ -246,6 +246,31 @@ impl RalphConfig {
             return Err(ConfigError::InvalidCompletionPromise);
         }
 
+        for (idx, gate) in self.event_loop.path_required_events.iter().enumerate() {
+            if gate.anchor.trim().is_empty() {
+                return Err(ConfigError::PathRequiredValidation {
+                    field: format!("event_loop.path_required_events[{idx}].anchor"),
+                    message: "anchor topic cannot be empty".to_string(),
+                });
+            }
+            if gate.require.is_empty() {
+                return Err(ConfigError::PathRequiredValidation {
+                    field: format!("event_loop.path_required_events[{idx}].require"),
+                    message: "require list cannot be empty".to_string(),
+                });
+            }
+            for (req_idx, topic) in gate.require.iter().enumerate() {
+                if topic.trim().is_empty() {
+                    return Err(ConfigError::PathRequiredValidation {
+                        field: format!(
+                            "event_loop.path_required_events[{idx}].require[{req_idx}]"
+                        ),
+                        message: "require topic cannot be empty".to_string(),
+                    });
+                }
+            }
+        }
+
         // Check custom backend has a command
         if self.cli.backend == "custom" && self.cli.command.as_ref().is_none_or(String::is_empty) {
             return Err(ConfigError::CustomBackendRequiresCommand);

@@ -263,6 +263,30 @@ In this example, both the fix path and the test path converge on `report.done`. 
 - Listing too many required events (fragile; prefer one or two convergence topics).
 - Using mutually exclusive branch events (e.g., `review.passed` and `review.complete` together) -- the validator will reject these since no single path emits both.
 
+### `path_required_events` -- Anchor-Scoped Path Gates
+
+When a topic must appear on every path to a **success anchor** (for example `plan.complete`) but must **not** block failure paths that reach `LOOP_COMPLETE` via `plan.blocked` / `work.failed`, put it in `path_required_events` instead of `required_events`.
+
+```yaml
+event_loop:
+  starting_event: plan.ready
+  completion_promise: LOOP_COMPLETE
+  required_events:
+    - LOOP_COMPLETE          # all-path convergence
+  path_required_events:
+    - anchor: plan.complete  # success spine only
+      require:
+        - work.done
+```
+
+**Semantics:**
+
+- **Authoring (`ralph preset check`)**: every `require` topic must lie on **all** paths from `starting_event` to `anchor`. Finding id: `topology.path_required_event_not_on_all_paths`.
+- **Runtime**: admitting an event whose topic equals `anchor` is rejected until every `require` topic has been observed in the loop lifetime.
+- Failure paths that never emit the anchor are unaffected.
+
+**Anti-pattern:** putting a success-spine-only handoff (like `work.done`) into `required_events` when the preset also completes via failure terminals. That fails static topology and can reject legitimate failure `LOOP_COMPLETE` at runtime.
+
 ### Validating Your Preset Topology
 
 Use `ralph hats validate` to check your preset for topology issues before running:
@@ -277,10 +301,11 @@ This checks:
 2. **Completion promise reachability** -- `LOOP_COMPLETE` (or your custom promise) is reachable from at least one hat.
 3. **Required event reachability** -- every topic in `required_events` is reachable from the starting event.
 4. **All-paths coverage** -- every required event lies on **all** completion paths (not just some). If a required event can be bypassed, the validator emits an error.
-5. **Orphan detection** -- events published by no hat subscriber (warnings).
-6. **Dead-end detection** -- hats that emit events nobody listens to (warnings).
+5. **Path-required coverage** -- every `path_required_events.require` topic lies on **all** paths from start to its `anchor`.
+6. **Orphan detection** -- events published by no hat subscriber (warnings).
+7. **Dead-end detection** -- hats that emit events nobody listens to (warnings).
 
-If any required event is not on all completion paths, adjust your hat topology so that the convergence topic is emitted by the last hat in every branch.
+If any required event is not on all completion paths, adjust your hat topology so that the convergence topic is emitted by the last hat in every branch. For success-spine-only gates, use `path_required_events` instead of expanding `required_events`.
 
 ### Preflight Topology Check
 

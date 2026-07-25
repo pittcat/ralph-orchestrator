@@ -483,6 +483,7 @@ fn config_error_id(err: &ConfigError) -> &'static str {
         ConfigError::InvalidConcurrency { .. } => "config.invalid_concurrency",
         ConfigError::AggregateOnConcurrentHat { .. } => "config.aggregate_on_concurrent_hat",
         ConfigError::WorkflowGuardValidation { .. } => "config.workflow_guard_validation",
+        ConfigError::PathRequiredValidation { .. } => "config.path_required_validation",
         ConfigError::EventPolicyValidation { .. } => "config.event_policy_validation",
         ConfigError::StateMachineValidation { .. } => "config.state_machine_validation",
         ConfigError::SchemaFileNotFound { .. } => "config.schema_file_not_found",
@@ -603,6 +604,9 @@ fn config_error_finding(err: &ConfigError) -> RuntimeContractFinding {
         ConfigError::WorkflowGuardValidation { field, message: _ } => {
             finding = finding.with_detail("field", field.clone());
         }
+        ConfigError::PathRequiredValidation { field, message: _ } => {
+            finding = finding.with_detail("field", field.clone());
+        }
         ConfigError::EventPolicyValidation { field, message: _ } => {
             finding = finding.with_detail("field", field.clone());
         }
@@ -652,6 +656,10 @@ fn topology_finding(err: &TopologyError) -> RuntimeContractFinding {
         TopologyErrorKind::UnreachableCompletion => "topology.unreachable_completion",
         TopologyErrorKind::UnreachableRequired => "topology.unreachable_required",
         TopologyErrorKind::RequiredEventNotOnAllPaths => "topology.required_event_not_on_all_paths",
+        TopologyErrorKind::UnreachablePathRequired => "topology.unreachable_path_required",
+        TopologyErrorKind::PathRequiredEventNotOnAllPaths => {
+            "topology.path_required_event_not_on_all_paths"
+        }
     };
     let mut finding = RuntimeContractFinding::try_new_core(
         id,
@@ -876,6 +884,12 @@ pub fn detect_required_topic_gaps(
     let mut topics_to_check: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
     for t in &config.event_loop.required_events {
         topics_to_check.insert(t.clone());
+    }
+    for gate in &config.event_loop.path_required_events {
+        topics_to_check.insert(gate.anchor.clone());
+        for t in &gate.require {
+            topics_to_check.insert(t.clone());
+        }
     }
     if let Some(ec) = &config.event_loop.execution_contracts
         && ec.enabled

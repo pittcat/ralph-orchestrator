@@ -39,6 +39,10 @@ pub enum TopologyErrorKind {
     UnreachableRequired,
     /// Required event is not on all completion paths.
     RequiredEventNotOnAllPaths,
+    /// A `path_required_events` require topic is not reachable from start.
+    UnreachablePathRequired,
+    /// A `path_required_events` require topic is not on all paths to its anchor.
+    PathRequiredEventNotOnAllPaths,
 }
 
 /// A single topology validation error.
@@ -68,6 +72,8 @@ impl TopologyValidationResult {
 /// 2. Completion promise is reachable from the start.
 /// 3. Every required event is reachable.
 /// 4. Every required event appears on ALL completion paths.
+/// 5. Every `path_required_events` require topic is reachable and appears
+///    on ALL paths from start to its anchor.
 ///
 /// Runtime-only fallback hats such as builtin `ralph` are ignored for path
 /// analysis. Their wildcard subscription is useful at runtime, but treating it
@@ -140,6 +146,45 @@ pub fn validate_preset_topology(
                     required, start
                 ),
             });
+        }
+    }
+
+    // 5. Anchor-scoped path gates (`path_required_events`)
+    for gate in &config.event_loop.path_required_events {
+        let anchor = gate.anchor.as_str();
+        if !graph.is_topic_reachable_from(&start, anchor) {
+            result.errors.push(TopologyError {
+                kind: TopologyErrorKind::UnreachablePathRequired,
+                message: format!(
+                    "path_required_events anchor '{}' is not reachable from starting event '{}'",
+                    anchor, start
+                ),
+            });
+            continue;
+        }
+        for required in &gate.require {
+            if !graph.is_topic_reachable_from(&start, required) {
+                result.errors.push(TopologyError {
+                    kind: TopologyErrorKind::UnreachablePathRequired,
+                    message: format!(
+                        "path_required_events require '{}' (anchor '{}') is not reachable \
+                         from starting event '{}'",
+                        required, anchor, start
+                    ),
+                });
+                continue;
+            }
+            if !graph.is_required_on_all_paths(&start, anchor, required) {
+                result.errors.push(TopologyError {
+                    kind: TopologyErrorKind::PathRequiredEventNotOnAllPaths,
+                    message: format!(
+                        "path_required_events require '{}' is not on all paths from '{}' \
+                         to anchor '{}'. Choose a topic every path to the anchor emits, \
+                         or adjust hat topology.",
+                        required, start, anchor
+                    ),
+                });
+            }
         }
     }
 
@@ -230,12 +275,13 @@ impl TopologyGraph {
         }
 
         // 2026-07-03-001 plan U13: when supervisor is enabled, model the
-        // virtual supervisor hat in the topology graph. It consumes slot-level
-        // *.unit.done/*.unit.failed topics and emits wave-level
-        // *.wave.complete/*.wave.failed topics, closing the fan-in paths that
-        // the runtime implements via system_injected events.
+        // virtual supervisor fan-in edges in the topology graph. Each
+        // slot→wave pair is its own virtual node so BFS cannot jump
+        // across phases (e.g. exec.unit.done must NOT reach
+        // fix.wave.complete). A single shared "supervisor" hat that
+        // published every wave topic from every slot trigger created
+        // false bypasses for path_required_events / required_events.
         if config.event_loop.supervisor.enabled {
-            const SUPERVISOR_ID: &str = "supervisor";
             const SUPERVISOR_SLOT_TO_WAVE: &[(&str, &str)] = &[
                 ("exec.unit.done", "exec.wave.complete"),
                 ("exec.unit.failed", "exec.wave.failed"),
@@ -244,29 +290,25 @@ impl TopologyGraph {
                 ("review.unit.done", "review.wave.complete"),
                 ("review.unit.failed", "review.wave.failed"),
             ];
-            let mut supervisor_publishes = Vec::new();
             for (slot_topic, wave_topic) in SUPERVISOR_SLOT_TO_WAVE {
+                let virtual_id = format!("supervisor:{slot_topic}");
                 topic_to_hats
                     .entry((*slot_topic).to_string())
                     .or_default()
-                    .push(SUPERVISOR_ID.to_string());
-                supervisor_publishes.push((*wave_topic).to_string());
+                    .push(virtual_id.clone());
+                hat_to_topics.insert(virtual_id, vec![(*wave_topic).to_string()]);
             }
-            hat_to_topics.insert(SUPERVISOR_ID.to_string(), supervisor_publishes);
         }
 
         // 2026-07-24-003 plan U1 / capability-gap fix: when a preset
         // declares a `mechanism.flow.steps[].runs = wave.runtime.*`
         // runner binding, the default wave hot path injects the
         // same `*.wave.{complete,failed}` coordination topics
-        // without `event_loop.supervisor.enabled`. Model that as a
-        // virtual `wave_runtime` node in the topology graph so the
-        // reachability / required-event BFS sees a closed path
-        // through the wave fan-in. Mirrors the supervisor graph
-        // edge above; capability-triggered (not preset-name pinned)
-        // per `finding-rubric.md` "Wave capability audit".
+        // without `event_loop.supervisor.enabled`. Model that as
+        // per-pair virtual nodes (same pairing discipline as
+        // supervisor above) so reachability / required-event BFS
+        // sees a closed fan-in without cross-phase edges.
         if crate::event_loop::flow_declaration::is_wave_runner_binding_preset(config) {
-            const WAVE_RUNTIME_ID: &str = "wave_runtime";
             const WAVE_SLOT_TO_WAVE: &[(&str, &str)] = &[
                 ("exec.unit.done", "exec.wave.complete"),
                 ("exec.unit.failed", "exec.wave.failed"),
@@ -275,15 +317,14 @@ impl TopologyGraph {
                 ("review.unit.done", "review.wave.complete"),
                 ("review.unit.failed", "review.wave.failed"),
             ];
-            let mut wave_publishes = Vec::new();
             for (slot_topic, wave_topic) in WAVE_SLOT_TO_WAVE {
+                let virtual_id = format!("wave_runtime:{slot_topic}");
                 topic_to_hats
                     .entry((*slot_topic).to_string())
                     .or_default()
-                    .push(WAVE_RUNTIME_ID.to_string());
-                wave_publishes.push((*wave_topic).to_string());
+                    .push(virtual_id.clone());
+                hat_to_topics.insert(virtual_id, vec![(*wave_topic).to_string()]);
             }
-            hat_to_topics.insert(WAVE_RUNTIME_ID.to_string(), wave_publishes);
         }
 
         Self {
@@ -1620,6 +1661,161 @@ event_loop:
         assert!(
             !strict.payload_contracts.errors.is_empty(),
             "strict mode must produce a payload error"
+        );
+    }
+
+    #[test]
+    fn path_required_events_flags_bypass_to_anchor() {
+        // start -> worker -> work.done -> alignment -> plan.complete
+        // start -> blocker -> plan.complete (bypass work.done)
+        // path_required work.done before plan.complete must fail.
+        let yaml = r#"
+hats:
+  worker:
+    name: "Worker"
+    triggers: ["start"]
+    publishes: ["work.done"]
+  alignment:
+    name: "Alignment"
+    triggers: ["work.done"]
+    publishes: ["plan.complete"]
+  blocker:
+    name: "Blocker"
+    triggers: ["start"]
+    publishes: ["plan.complete"]
+  reporter:
+    name: "Reporter"
+    triggers: ["plan.complete"]
+    publishes: ["LOOP_COMPLETE"]
+event_loop:
+  starting_event: "start"
+  completion_promise: "LOOP_COMPLETE"
+  required_events: ["LOOP_COMPLETE"]
+  path_required_events:
+    - anchor: plan.complete
+      require: [work.done]
+"#;
+        let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
+        let registry = runtime_registry(yaml);
+        let result = validate_preset_topology(&config, &registry);
+        assert!(
+            result.errors.iter().any(|e| {
+                e.kind == TopologyErrorKind::PathRequiredEventNotOnAllPaths
+                    && e.message.contains("work.done")
+            }),
+            "bypass to plan.complete without work.done must fail: {:?}",
+            result.errors
+        );
+    }
+
+    #[test]
+    fn path_required_events_allows_failure_path_to_loop_complete() {
+        // Success spine: start -> work.done -> plan.complete -> LOOP_COMPLETE
+        // Failure spine: start -> plan.blocked -> LOOP_COMPLETE (no work.done)
+        // required_events: LOOP_COMPLETE only; path_required on plan.complete.
+        let yaml = r#"
+hats:
+  worker:
+    name: "Worker"
+    triggers: ["start"]
+    publishes: ["work.done", "plan.blocked"]
+  alignment:
+    name: "Alignment"
+    triggers: ["work.done"]
+    publishes: ["plan.complete"]
+  reporter:
+    name: "Reporter"
+    triggers: ["plan.complete", "plan.blocked"]
+    publishes: ["LOOP_COMPLETE"]
+event_loop:
+  starting_event: "start"
+  completion_promise: "LOOP_COMPLETE"
+  required_events: ["LOOP_COMPLETE"]
+  path_required_events:
+    - anchor: plan.complete
+      require: [work.done]
+"#;
+        let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
+        let registry = runtime_registry(yaml);
+        let result = validate_preset_topology(&config, &registry);
+        assert!(
+            result.is_valid(),
+            "failure path to LOOP_COMPLETE without work.done must pass when \
+             work.done is only path_required for plan.complete: {:?}",
+            result.errors
+        );
+    }
+
+    #[test]
+    fn supervisor_slot_wave_pairs_do_not_cross_phase_for_path_required() {
+        // exec.unit.done must fan in to exec.wave.complete only. A
+        // cross-wired supervisor virtual hat would let exec.unit.done
+        // reach fix.wave.complete → plan.complete and falsely fail
+        // path_required(work.done → plan.complete).
+        let yaml = r#"
+hats:
+  coordinator:
+    name: "Coordinator"
+    triggers: ["plan.ready"]
+    publishes: ["work.ready"]
+  dispatcher:
+    name: "Dispatcher"
+    triggers: ["work.ready"]
+    publishes: ["exec.unit.ready"]
+  worker:
+    name: "Worker"
+    triggers: ["exec.unit.ready"]
+    publishes: ["exec.unit.done"]
+  integrator:
+    name: "Integrator"
+    triggers: ["exec.wave.complete"]
+    publishes: ["work.done"]
+  review:
+    name: "Review"
+    triggers: ["work.done"]
+    publishes: ["review.unit.ready"]
+  review_worker:
+    name: "ReviewWorker"
+    triggers: ["review.unit.ready"]
+    publishes: ["review.unit.done"]
+  fix_dispatch:
+    name: "FixDispatch"
+    triggers: ["review.wave.complete"]
+    publishes: ["fix.unit.ready"]
+  fix_worker:
+    name: "FixWorker"
+    triggers: ["fix.unit.ready"]
+    publishes: ["fix.unit.done"]
+  fix_integrator:
+    name: "FixIntegrator"
+    triggers: ["fix.wave.complete"]
+    publishes: ["fix.done"]
+  alignment:
+    name: "Alignment"
+    triggers: ["fix.done"]
+    publishes: ["plan.complete"]
+  reporter:
+    name: "Reporter"
+    triggers: ["plan.complete"]
+    publishes: ["LOOP_COMPLETE"]
+event_loop:
+  starting_event: "plan.ready"
+  completion_promise: "LOOP_COMPLETE"
+  required_events: ["LOOP_COMPLETE"]
+  path_required_events:
+    - anchor: plan.complete
+      require: [work.done]
+  supervisor:
+    enabled: true
+"#;
+        let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
+        let registry = runtime_registry(yaml);
+        let result = validate_preset_topology(&config, &registry);
+        assert!(
+            result.is_valid(),
+            "paired supervisor fan-in must keep work.done on all paths \
+             to plan.complete: {:?}",
+            result.errors
         );
     }
 }

@@ -133,8 +133,14 @@ event_loop:
   progress_steward:
     enabled: false
   required_events:
-    - work.done
     - LOOP_COMPLETE
+  # Success-spine gate: every path from plan.ready to plan.complete must
+  # pass through work.done. Failure paths (plan.blocked / work.failed →
+  # reporter → LOOP_COMPLETE) are intentionally excluded from this gate.
+  path_required_events:
+    - anchor: plan.complete
+      require:
+        - work.done
   starting_event: plan.ready
   event_policy:
     enabled: true
@@ -374,19 +380,17 @@ hats:
       # LOOP_COMPLETE, which does not need the coordinator.
     publishes:
       - work.ready
-      - plan.complete
-      - LOOP_COMPLETE
+      - plan.blocked
     event_filter:
       enabled: true
       events:
       - plan.ready
-      - fix.done
     exempt_topics:
       - work.ready
-      - plan.complete
-      - LOOP_COMPLETE
+      - plan.blocked
     terminal_events:
-      - LOOP_COMPLETE
+      - work.ready
+      - plan.blocked
 
   task-planner:
     name: "Task Planner"
@@ -742,9 +746,9 @@ hats:
 
       In this activation, **emit at most one**
       `ralph wave emit` call. If the ready set is empty,
-      stop without emitting (the loop will route you to
-      `review-coordinator` via the exec.wave.complete
-      contract). Do not chain a follow-up emit. Do not
+      stop without emitting (the loop routes to review
+      only after `exec-integrator` emits `work.done`).
+      Do not chain a follow-up emit. Do not
       call `ralph emit` for a non-terminal business topic
       in this turn — your output is the wave.
 
@@ -786,8 +790,8 @@ hats:
         `plan.blocked`.
       - Otherwise, the plan is fully dispatched; the
         supervisor's `exec.wave.complete` injection
-        will route the loop to the review phase
-        (U6 picks up from there).
+        wakes `exec-integrator` (merge + full suite →
+        `work.done`), and review starts from `work.done`.
 
       ### 3. Build the wave payload
 
@@ -881,6 +885,8 @@ hats:
       - exec.wave.complete
     exempt_topics:
       - exec.unit.ready
+    terminal_events:
+      - exec.unit.ready
 
   worker:
     name: "Worker"
@@ -942,14 +948,17 @@ hats:
       - exec.wave.complete
     publishes:
       - work.done
+      - work.failed
     event_filter:
       enabled: true
       events:
       - exec.wave.complete
     exempt_topics:
       - work.done
+      - work.failed
     terminal_events:
       - work.done
+      - work.failed
     instructions: |
       ## EXEC INTEGRATOR MODE — Merge a completed exec wave
 
@@ -979,7 +988,7 @@ hats:
       OPAC reference: follow `ralph-tools-opac` for Observe/Precheck/Apply/Confirm discipline and `ralph-tools-emit` §5 for precheck rules.
   exec-failure-handler:
     name: "Exec Failure Handler"
-    description: "Converts a failed execution wave into a work.failed event for the fixer."
+    description: "Converts a failed execution wave into a work.failed event for the reporter."
     triggers:
       - exec.wave.failed
     publishes:
@@ -997,7 +1006,7 @@ hats:
 
       You are activated when supervisor reports an exec wave as
       unrecoverable. Your job is to emit a single `work.failed`
-      with a `reason` so the fixer path picks it up.
+      with a `reason` so the reporter can close the loop.
 
       ### OPAC 四阶段 (本 hat 视角)
 
@@ -1269,24 +1278,18 @@ hats:
       - `RALPH_HATS_SOURCE` — preset label.
     triggers:
       - work.done
-      - exec.wave.complete
-    # `exec.wave.complete` is a design-level multi-consumer topic: the
-    # supervisor fan-in signal is consumed by exec-wave-dispatcher (next
-    # ready wave), exec-integrator (merge + full suite), AND this hat
-    # (dispatch the 7-payload review wave on the merged commit — see the
-    # exec-wave-dispatcher comment "route you to review-coordinator via
-    # the exec.wave.complete contract"). All three consumers must opt in
-    # to bypass the strict 1:1 AmbiguousRouting check; this hat was the
-    # missing opt-in.
-    trigger_multi_consumer_topics:
-      - exec.wave.complete
+    # Review starts only after exec-integrator emits `work.done`
+    # (merge + full suite). Do NOT also trigger on
+    # `exec.wave.complete` — that signal is multi-consumed by
+    # exec-wave-dispatcher (next ready wave) and exec-integrator
+    # (merge); waking review there would bypass the work.done
+    # success-spine gate (`path_required_events` on plan.complete).
     publishes:
       - review.unit.ready
     event_filter:
       enabled: true
       events:
       - work.done
-      - exec.wave.complete
     exempt_topics:
       - review.unit.ready
     terminal_events:

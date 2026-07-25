@@ -372,8 +372,23 @@ pub struct EventLoopConfig {
     /// Event topics that must have been seen before LOOP_COMPLETE is accepted.
     /// If any required event has not been seen during the loop's lifetime,
     /// completion is rejected and a task.resume event is injected.
+    ///
+    /// All-paths semantics relative to [`Self::completion_promise`]: every
+    /// listed topic must lie on **every** path from `starting_event` to
+    /// completion. Do not list success-spine-only handoffs here (use
+    /// [`Self::path_required_events`] instead).
     #[serde(default)]
     pub required_events: Vec<String>,
+
+    /// Anchor-scoped path gates: each `require` topic must appear on **every**
+    /// path from `starting_event` to `anchor` (authoring), and must already
+    /// have been observed before the runtime admits an `anchor` event.
+    ///
+    /// Use this for success-spine handoffs (e.g. `work.done` before
+    /// `plan.complete`) that must not block failure paths that reach
+    /// `LOOP_COMPLETE` via `plan.blocked` / `work.failed`.
+    #[serde(default)]
+    pub path_required_events: Vec<PathRequiredEventGate>,
 
     /// Event topic that triggers graceful early termination WITHOUT chain validation.
     /// Use this for human rejection, timeout escalation, or other abort paths.
@@ -692,6 +707,7 @@ impl Default for EventLoopConfig {
             mutation_score_warn_threshold: None,
             persistent: false,
             required_events: Vec::new(),
+            path_required_events: Vec::new(),
             cancellation_promise: default_cancellation_promise(),
             enforce_hat_scope: false,
             workflow_guards: None,
@@ -749,6 +765,18 @@ impl Default for EventLoopConfig {
             handoff_envelope: HandoffEnvelopeConfig::default(),
         }
     }
+}
+
+/// One anchor-scoped path gate for [`EventLoopConfig::path_required_events`].
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PathRequiredEventGate {
+    /// Topic that closes the gated subpath (e.g. `plan.complete`).
+    pub anchor: String,
+    /// Topics that must appear on every path from `starting_event` to
+    /// [`Self::anchor`], and must be observed before the runtime admits
+    /// an event with topic `anchor`.
+    #[serde(default)]
+    pub require: Vec<String>,
 }
 
 /// Verdict gate: when the most recent event matching any of

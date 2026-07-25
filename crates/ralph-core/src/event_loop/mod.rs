@@ -830,6 +830,28 @@ impl EventLoop {
         self.state.mark_required_event_topic_seen(topic, &required);
     }
 
+    /// Returns missing `path_required_events.require` topics when `topic`
+    /// matches a configured anchor; `None` when the topic is not an anchor
+    /// or all requires have already been observed.
+    pub(crate) fn path_required_missing_for_anchor(&self, topic: &str) -> Option<Vec<String>> {
+        let mut missing: Vec<String> = Vec::new();
+        for gate in &self.config.event_loop.path_required_events {
+            if gate.anchor != topic {
+                continue;
+            }
+            for required in &gate.require {
+                if !self.state.seen_topics.contains(required.as_str()) {
+                    missing.push(required.clone());
+                }
+            }
+        }
+        if missing.is_empty() {
+            None
+        } else {
+            Some(missing)
+        }
+    }
+
     /// 2026-06-09: returns the union of `verdict_gate.topic` and
     /// its `additional_topics`, or `None` when no gate is
     /// configured.  Used at every record-verdict call site so the
@@ -9408,7 +9430,7 @@ impl EventLoop {
                     }
                 }
 
-                let should_admit = if admitted_under_wave {
+                let mut should_admit = if admitted_under_wave {
                     true
                 } else if wave_collision {
                     false
@@ -9521,6 +9543,19 @@ impl EventLoop {
                     ) {
                         exempt_topic_carveout_used = true;
                     }
+                }
+
+                if should_admit
+                    && let Some(missing) =
+                        self.path_required_missing_for_anchor(event.topic.as_str())
+                {
+                    tracing::warn!(
+                        topic = %event.topic,
+                        missing = ?missing,
+                        hat = %isolated_hat.as_str(),
+                        "Isolated admit rejected: path_required_events require topics not yet observed"
+                    );
+                    should_admit = false;
                 }
 
                 if should_admit {
@@ -11854,6 +11889,18 @@ impl EventLoop {
                     iteration = self.state.iteration,
                     topic = %event.topic,
                     "phase authority: shipper routing denied REVIEW_COMPLETE"
+                );
+                continue;
+            }
+
+            // path_required_events: reject anchor topics until every
+            // require topic has been observed on this loop lifetime.
+            if let Some(missing) = self.path_required_missing_for_anchor(event.topic.as_str()) {
+                tracing::warn!(
+                    iteration = self.state.iteration,
+                    topic = %event.topic,
+                    missing = ?missing,
+                    "Rejected anchor event: path_required_events require topics not yet observed"
                 );
                 continue;
             }

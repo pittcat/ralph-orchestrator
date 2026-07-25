@@ -1944,16 +1944,6 @@ mod tests {
             // every completion path — this is by design for the debug loop's
             // hypothesis/fix/verify flow.
             "debug",
-            // ce-executor-supervisor: 2026-07-03-001 plan U13. The supervisor
-            // preset has intentional branching completion paths: a failed exec
-            // wave (`exec.wave.failed`) routes through `exec-failure-handler` →
-            // `work.failed` → `fixer` instead of through `work.done`. The
-            // static topology validator therefore flags `work.done` as not on
-            // all paths from `plan.ready`. This is by design — `work.done` is
-            // the success-path handoff, while the failure path is handled by
-            // the fix wave. The runtime still requires `work.done` on every
-            // successful completion.
-            "ce-executor-supervisor",
         ];
 
         // Per-preset finding-id exemptions for the non-strict authoring
@@ -2100,15 +2090,10 @@ mod tests {
         // section "U5: built-in preset migration" (autoresearch, debug explicitly
         // deferred due to multi-branch completion topologies).
         //
-        // ce-executor-supervisor: 2026-07-03-001 plan U13. The supervisor
-        // preset has intentional branching completion paths: a failed exec
-        // wave routes through `exec-failure-handler` → `work.failed` →
-        // `fixer` instead of through `work.done`. The static topology
-        // validator flags `work.done` as not on all paths from `plan.ready`.
-        // This is by design — `work.done` is the success-path handoff, while
-        // the failure path is handled by the fix wave. The runtime still
-        // requires `work.done` on every successful completion.
-        let topology_exempt: &[&str] = &["autoresearch", "debug", "ce-executor-supervisor"];
+        // `ce-executor-supervisor` is NOT exempt: `required_events` holds only
+        // the all-path convergence topic (`LOOP_COMPLETE`), and success-spine
+        // `work.done` is gated via `path_required_events` on `plan.complete`.
+        let topology_exempt: &[&str] = &["autoresearch", "debug"];
 
         // Per-preset finding-id exemptions (P2 #16 + #22).
         //
@@ -2136,23 +2121,10 @@ mod tests {
         // from 10 to 12 let both presets pass strict with zero findings,
         // so these exemptions are no longer needed.
         //
-        // `ce-executor-supervisor` / `config.empty_terminal_events`:
-        // since 2026-07-24-001 plan U2 (KTD1), `task-planner` declares
-        // `terminal_events: [execution.plan.ready, plan.blocked]` (its
-        // happy-path handoff + failure emit), so it NO LONGER trips this
-        // finding. The exemption now covers ONLY `exec-wave-dispatcher`,
-        // whose output is a single `ralph wave emit exec.unit.ready`
-        // batch; its fan-in signal is the supervisor-injected
-        // `exec.wave.complete`, not a hat emit, so it intentionally keeps
-        // an empty `terminal_events`. Empty `terminal_events` is an
-        // explicitly allowed legacy-hat shape (ralph_config.rs only
-        // warns), so this is a documented design choice, not a topology
-        // defect. Tracked by plan `2026-07-24-001-…` (U2).
-        const EXEMPT_FINDINGS: &[(&str, &str, &str)] = &[(
-            "ce-executor-supervisor",
-            "config.empty_terminal_events",
-            "2026-07-24-001 U2: only exec-wave-dispatcher keeps empty terminal_events (wave emit is its output; task-planner now declares execution.plan.ready/plan.blocked)",
-        )];
+        // `ce-executor-supervisor` / `config.empty_terminal_events` was
+        // previously exempt for `exec-wave-dispatcher`; that hat now
+        // declares `terminal_events: [exec.unit.ready]`.
+        const EXEMPT_FINDINGS: &[(&str, &str, &str)] = &[];
 
         let mut failures = Vec::new();
         for preset in PRESETS {
