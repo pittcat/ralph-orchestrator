@@ -22,9 +22,11 @@ arbitrary project bootstrap (`ralph-project-bootstrap` owns that) and
   forced to be `crates/ralph-e2e`; any caller-owned directory the
   operator designates as the E2E harness root works.
 - **Read-only on the plan.** The plan file is read as the canonical
-  intent source. The skill NEVER rewrites the plan file inside the
-  sandbox (R13) — every plan reference becomes an absolute argv
-  argument (`--plan <abs-path>`).
+  intent source. The skill NEVER rewrites the plan file (R13); the
+  bytes are read once, hashed, and staged into the sandbox at
+  `<sandbox>/docs/plans/<basename>`. The launch argv references
+  the staged sandbox-relative path (`--plan docs/plans/<basename>`)
+  so the operator's launch command is portable across machines.
 - **No preset authoring.** Preset topology, AAF tables and builtin
   completions live in `ralph-preset-author` / `ralph-preset-review`.
   When the existing preset does not cover the plan's verification
@@ -86,12 +88,22 @@ acceptance in `.ralph/agent/decisions.md`.
    raises `blocked`.
 4. **U4 — Sandbox Suite.** Run `scripts/sandbox_suite.py` to author
    `ralph.<stem>.yml` + `PROMPT.<stem>.md` inside the caller-supplied
-   sandbox directory. Pass the resolved binary from U3 as
-   `binary=` so `argv` / `launch_argv` match the gate binary (R6).
-   The pair is **preset-bound** (`<stem>` derives
-   from the resolved preset). The plan file is read-only — the
-   generated argv references the absolute path via `--plan`. Refuse to
-   write inside `presets/`.
+   sandbox directory. The script also stages the caller-supplied plan
+   into `<sandbox>/docs/plans/<basename>` (R13: source bytes are
+   untouched; the staged file is a sandbox-scoped artefact). The
+   generated argv uses the sandbox-relative path
+   (`--plan docs/plans/<basename>`) so the launch command is portable
+   and works when the live loop is started from the sandbox cwd.
+   Pass the resolved binary from U3 as `binary=` so `argv` /
+   `launch_argv` match the gate binary (R6). The pair is
+   **preset-bound** (`<stem>` derives from the resolved preset).
+   Refuse to write inside `presets/`. Do not declare preset opt-in
+   subtrees such as `event_loop.supervisor`; omission lets the
+   selected preset supply its own runtime requirements. When
+   `write_conflict` occurs and the operator selects the recommended
+   refresh option, rerun
+   `generate_suite(..., refresh_existing=True)`; this may replace only
+   files carrying the skill's provenance header.
 5. **U5 — Static Gate + Handoff.** Run `scripts/gate.py` in the
    four-stage order: capability → preset check --strict →
    preflight --strict → `ralph run --dry-run`. `gate.py` imports the
@@ -112,10 +124,17 @@ acceptance in `.ralph/agent/decisions.md`.
 | capability | `ralph --version`, `ralph --help`, per-subcommand help | `blocked_cli` |
 | preset check --strict | `ralph -c ralph.<stem>.yml -H <preset> preset check --strict` | `blocked_preset` |
 | preflight --strict | `ralph -c ralph.<stem>.yml -H <preset> preflight --strict` | `blocked_cli` / `blocked_backend` |
-| dry-run | `ralph -c ralph.<stem>.yml -H <preset> run --dry-run --plan <abs>` | `blocked_command` |
+| dry-run | `ralph -c ralph.<stem>.yml -H <preset> run --dry-run --plan docs/plans/<basename>` | `blocked_command` |
 
-The dry-run argv **must** include `--plan <abs-plan-path>` (R13). The
-argv MUST also include `-c ralph.<stem>.yml -H <preset>` so
+For `builtin:ce-executor-supervisor`, `gate.py` requests JSON for the
+first two strict stages and accepts only the exact findings already
+exempted by Ralph's embedded-preset tests. Any unknown finding, message,
+check status, malformed JSON, backend failure, or environment failure
+remains blocking.
+
+The dry-run argv **must** include `--plan docs/plans/<basename>` (the
+staged sandbox-relative path; R13: source bytes are never modified).
+The argv MUST also include `-c ralph.<stem>.yml -H <preset>` so
 `$RALPH_CONFIG` / `ralph.yml` cannot preempt the target suite.
 
 ## Guardrails

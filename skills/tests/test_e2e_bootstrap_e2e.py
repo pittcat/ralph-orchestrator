@@ -162,7 +162,7 @@ def test_e2e_full_pipeline_static_only(tmp_path: Path, monkeypatch: pytest.Monke
             resolution.binary,
             suite.config_path,
             "builtin:ce-executor-pipeline",
-            str(plan),
+            "docs/plans/plan.md",
         ),
     ]
     gate_runner = _probe_runner_common.e2e_make_runner(invocations)
@@ -170,7 +170,7 @@ def test_e2e_full_pipeline_static_only(tmp_path: Path, monkeypatch: pytest.Monke
         binary=resolution.binary,
         config_path=suite.config_path,
         preset="builtin:ce-executor-pipeline",
-        plan_path=str(plan),
+        plan_path="docs/plans/plan.md",
         runner=gate_runner,
     )
     assert gate_report.ok is True
@@ -181,7 +181,7 @@ def test_e2e_full_pipeline_static_only(tmp_path: Path, monkeypatch: pytest.Monke
             binary=resolution.binary,
             config_path=suite.config_path,
             preset="builtin:ce-executor-pipeline",
-            plan_path=str(plan),
+            plan_path="docs/plans/plan.md",
             level="static_only",
             sandbox_path="sandbox",
             validation_evidence=gate_report.summary(),

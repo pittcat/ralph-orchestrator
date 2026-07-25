@@ -29,6 +29,7 @@ These tests are the public, behavioural contract for the skill:
 from __future__ import annotations
 
 import json
+import hashlib
 from pathlib import Path
 import sys
 
@@ -512,11 +513,35 @@ def test_sandbox_suite_generates_preset_bound_pair(tmp_path: Path) -> None:
     )
     assert (sandbox / "ralph.ce-executor-pipeline.yml").is_file()
     assert (sandbox / "PROMPT.ce-executor-pipeline.md").is_file()
+    # The plan is staged into the sandbox so the live loop can find
+    # it when launched from the sandbox cwd.
+    assert (sandbox / "docs" / "plans" / "plan.md").is_file()
+    assert (sandbox / "docs" / "plans" / "plan.md").read_bytes() == plan.read_bytes()
     assert result.config_sha256 and result.prompt_sha256 and result.plan_sha256
     assert "-c" in result.argv and "-H" in result.argv
-    assert "--plan" in result.argv and str(plan) in result.argv
+    # --plan uses a sandbox-relative path (the staged file), not the
+    # caller-supplied absolute path.
+    assert "--plan" in result.argv and "docs/plans/plan.md" in result.argv
+    assert str(plan) not in result.argv
     # No preset mutation.
     assert "presets" not in result.argv
+
+
+def test_sandbox_suite_preserves_supervisor_preset_opt_in(tmp_path: Path) -> None:
+    sandbox = tmp_path / "sandbox"
+    sandbox.mkdir()
+    plan = tmp_path / "plan.md"
+    plan.write_text("# Plan\n", encoding="utf-8")
+
+    result = sandbox_suite.generate_suite(
+        sandbox=sandbox,
+        preset="builtin:ce-executor-supervisor",
+        plan_path=plan,
+    )
+
+    config = Path(result.config_path).read_text(encoding="utf-8")
+    assert "supervisor:" not in config
+    assert "enabled: false" not in config
 
 
 def test_sandbox_suite_refuses_presets_subtree(tmp_path: Path) -> None:
@@ -592,6 +617,36 @@ def test_launch_argv_excludes_dry_run(tmp_path: Path) -> None:
     )
     assert "--dry-run" not in result.launch_argv
     assert "--dry-run" in result.argv
+
+
+def test_disposition_refreshes_owned_pair_after_template_change(tmp_path: Path) -> None:
+    sandbox = tmp_path / "sandbox"
+    sandbox.mkdir()
+    plan = tmp_path / "plan.md"
+    plan.write_text("# Plan\n", encoding="utf-8")
+
+    config_file = sandbox / "ralph.ce-executor-supervisor.yml"
+    prompt_file = sandbox / "PROMPT.ce-executor-supervisor.md"
+    stale_header = (
+        "# generated_by: ralph-e2e-bootstrap\n"
+        f"# profile_sha256: {'0' * 64}\n"
+        f"# prompt_sha256: {'1' * 64}\n"
+    )
+    config_file.write_text(stale_header + "# stale config\n", encoding="utf-8")
+    prompt_file.write_text(stale_header + "# stale prompt\n", encoding="utf-8")
+
+    result = sandbox_suite.generate_suite(
+        sandbox=sandbox,
+        preset="builtin:ce-executor-supervisor",
+        plan_path=plan,
+        refresh_existing=True,
+    )
+
+    assert set(result.updated) == {str(config_file), str(prompt_file)}
+    assert "supervisor:" not in config_file.read_text(encoding="utf-8")
+    assert config_file.read_text(encoding="utf-8").startswith(
+        "# generated_by: ralph-e2e-bootstrap\n"
+    )
 
 
 def test_disposition_write_conflict_raises_sandbox_error(tmp_path: Path) -> None:
@@ -714,6 +769,110 @@ def test_update_pair_restores_originals_on_second_half_failure(
     assert config_path.read_bytes() == original_config
     assert prompt_path.read_bytes() == original_prompt
     assert calls["n"] >= 2
+
+
+def test_sandbox_suite_stages_plan_in_sandbox(tmp_path: Path) -> None:
+    """Plan bytes must be staged into ``<sandbox>/docs/plans/<basename>``."""
+    sandbox = tmp_path / "sandbox"
+    sandbox.mkdir()
+    plan = tmp_path / "plan.md"
+    original = "# Plan\n## U1. unit one\n## U2. unit two\n"
+    plan.write_text(original, encoding="utf-8")
+
+    result = sandbox_suite.generate_suite(
+        sandbox=sandbox,
+        preset="builtin:ce-executor-pipeline",
+        plan_path=plan,
+    )
+
+    staged = sandbox / "docs" / "plans" / "plan.md"
+    assert staged.is_file()
+    assert staged.read_bytes() == original.encode("utf-8")
+    # argv points to the staged sandbox-relative path, not the source.
+    assert "docs/plans/plan.md" in result.argv
+    # Source bytes remain untouched.
+    assert plan.read_bytes() == original.encode("utf-8")
+    # plan_sha256 captures the source bytes (used by tamper evidence).
+    assert result.plan_sha256
+    assert result.plan_sha256 == hashlib.sha256(original.encode("utf-8")).hexdigest()
+
+
+def test_sandbox_suite_idempotent_plan_stage(tmp_path: Path) -> None:
+    """Re-running with the same plan bytes must be a noop for the staged file."""
+    sandbox = tmp_path / "sandbox"
+    sandbox.mkdir()
+    plan = tmp_path / "plan.md"
+    plan.write_text("# Plan\n", encoding="utf-8")
+
+    first = sandbox_suite.generate_suite(
+        sandbox=sandbox,
+        preset="builtin:ce-executor-pipeline",
+        plan_path=plan,
+    )
+    staged = sandbox / "docs" / "plans" / "plan.md"
+    first_mtime = staged.stat().st_mtime_ns
+
+    second = sandbox_suite.generate_suite(
+        sandbox=sandbox,
+        preset="builtin:ce-executor-pipeline",
+        plan_path=plan,
+    )
+    # Staged file is not rewritten (idempotent) when bytes match.
+    assert staged.stat().st_mtime_ns == first_mtime
+    assert second.plan_sha256 == first.plan_sha256
+    assert "docs/plans/plan.md" in second.argv
+
+
+def test_sandbox_suite_blocks_plan_stage_content_conflict(tmp_path: Path) -> None:
+    """Pre-existing staged plan with DIFFERENT bytes must raise ``SandboxError``."""
+    sandbox = tmp_path / "sandbox"
+    sandbox.mkdir()
+    plan = tmp_path / "plan.md"
+    plan.write_text("# new plan\n", encoding="utf-8")
+
+    staged_dir = sandbox / "docs" / "plans"
+    staged_dir.mkdir(parents=True)
+    (staged_dir / "plan.md").write_text("# OLD plan\n", encoding="utf-8")
+
+    with pytest.raises(sandbox_suite.SandboxError) as excinfo:
+        sandbox_suite.generate_suite(
+            sandbox=sandbox,
+            preset="builtin:ce-executor-pipeline",
+            plan_path=plan,
+        )
+    assert "plan_stage" in str(excinfo.value).lower()
+    assert "different bytes" in str(excinfo.value).lower()
+    # The pre-existing staged file is left intact (no overwrite on conflict).
+    assert (staged_dir / "plan.md").read_text(encoding="utf-8") == "# OLD plan\n"
+
+
+def test_sandbox_suite_rollback_staged_plan_on_pair_write_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """When pair-write fails AFTER plan stage, the staged plan must be rolled back."""
+    sandbox = tmp_path / "sandbox"
+    sandbox.mkdir()
+    plan = tmp_path / "plan.md"
+    plan.write_text("# Plan\n", encoding="utf-8")
+
+    def failing_pair_write(*args, **kwargs):  # noqa: ANN001, ARG001
+        raise OSError("simulated pair-write failure")
+
+    monkeypatch.setattr(sandbox_suite, "_atomic_pair_write", failing_pair_write)
+
+    with pytest.raises(sandbox_suite.SandboxError) as excinfo:
+        sandbox_suite.generate_suite(
+            sandbox=sandbox,
+            preset="builtin:ce-executor-pipeline",
+            plan_path=plan,
+        )
+    assert "atomic write failed" in str(excinfo.value).lower()
+    # The staged plan was created by this call, so it must be rolled back.
+    staged = sandbox / "docs" / "plans" / "plan.md"
+    assert not staged.exists()
+    # The sandbox pair files were never created either.
+    assert not (sandbox / "ralph.ce-executor-pipeline.yml").exists()
+    assert not (sandbox / "PROMPT.ce-executor-pipeline.md").exists()
 
 
 def test_generate_suite_uses_resolved_binary(tmp_path: Path) -> None:
@@ -856,6 +1015,161 @@ def test_static_gate_per_stage_argv_shape() -> None:
     assert "--plan" in dr.argv
     assert plan_path in dr.argv
     assert dr.outcome == "ok"
+
+
+def _supervisor_gate_invocations(
+    *,
+    config: str,
+    plan: str,
+    extra_preset_finding: dict[str, object] | None = None,
+) -> list[_probe_runner_common.FakeInvocation]:
+    preset_findings: list[dict[str, object]] = [
+        {
+            "id": "config.empty_terminal_events",
+            "source": "config",
+            "severity": "warn",
+            "message": "Hat 'exec-wave-dispatcher' has no terminal events configured",
+        },
+        {
+            "id": "topology.required_event_not_on_all_paths",
+            "source": "topology",
+            "severity": "error",
+            "message": "Required event 'work.done' is not on all completion paths from 'plan.ready'",
+        },
+    ]
+    if extra_preset_finding is not None:
+        preset_findings.append(extra_preset_finding)
+
+    preset_report = json.dumps(
+        {
+            "passed": False,
+            "warnings": 1,
+            "errors": sum(finding["severity"] == "error" for finding in preset_findings),
+            "findings": preset_findings,
+        }
+    )
+    preflight_report = json.dumps(
+        {
+            "passed": False,
+            "warnings": 1,
+            "failures": 2,
+            "checks": [
+                {
+                    "name": "config",
+                    "status": "warn",
+                    "message": "Warning [terminal_events]: Hat 'exec-wave-dispatcher' has no terminal events configured",
+                },
+                {
+                    "name": "preset-topology",
+                    "status": "fail",
+                    "message": "Required event 'work.done' is not on all completion paths from 'plan.ready'",
+                },
+                {
+                    "name": "preset-contract",
+                    "status": "fail",
+                    "message": "Required event 'work.done' is not on all completion paths from 'plan.ready'",
+                },
+            ],
+        }
+    )
+    preset = "builtin:ce-executor-supervisor"
+    return [
+        _probe_runner_common.version_probe_invocation("ralph"),
+        _probe_runner_common.capability_probe_invocation("ralph"),
+        _probe_runner_common.FakeInvocation(
+            argv_expected=("ralph", "--json", "--help"),
+            stdout_chunks=("ralph --help\n  --json\n",),
+            stderr_chunks=(),
+            exit_code=0,
+        ),
+        _probe_runner_common.FakeInvocation(
+            argv_expected=("ralph", "preset", "check", "--help"),
+            stdout_chunks=("Usage: ralph preset check\n  --strict\n  --format FORMAT\n",),
+            stderr_chunks=(),
+            exit_code=0,
+        ),
+        _probe_runner_common.FakeInvocation(
+            argv_expected=("ralph", "preflight", "--help"),
+            stdout_chunks=("Usage: ralph preflight\n  --strict\n  --format FORMAT\n",),
+            stderr_chunks=(),
+            exit_code=0,
+        ),
+        _probe_runner_common.FakeInvocation(
+            argv_expected=("ralph", "run", "--help"),
+            stdout_chunks=("Usage: ralph run\n  --dry-run\n  --plan PLAN\n",),
+            stderr_chunks=(),
+            exit_code=0,
+        ),
+        _probe_runner_common.FakeInvocation(
+            argv_expected=(
+                "ralph", "-c", config, "-H", preset,
+                "preset", "check", "--strict", "--format", "json",
+            ),
+            stdout_chunks=(preset_report,),
+            stderr_chunks=(),
+            exit_code=1,
+        ),
+        _probe_runner_common.FakeInvocation(
+            argv_expected=(
+                "ralph", "-c", config, "-H", preset,
+                "preflight", "--strict", "--format", "json",
+            ),
+            stdout_chunks=(preflight_report,),
+            stderr_chunks=(),
+            exit_code=1,
+        ),
+        _probe_runner_common.dry_run_ok_invocation("ralph", config, preset, plan),
+    ]
+
+
+def test_static_gate_accepts_supervisor_approved_strict_findings() -> None:
+    config = "ralph.ce-executor-supervisor.yml"
+    plan = "/abs/plan.md"
+    runner = _probe_runner_common.e2e_make_runner(
+        _supervisor_gate_invocations(config=config, plan=plan)
+    )
+
+    report = gate.run_static_gate(
+        binary="ralph",
+        config_path=config,
+        preset="builtin:ce-executor-supervisor",
+        plan_path=plan,
+        runner=runner,
+    )
+
+    assert report.ok is True
+    assert report.preset_check.outcome == "ok"
+    assert report.preflight.outcome == "ok"
+    assert any("approved_findings" in item for item in report.preset_check.evidence)
+
+
+def test_static_gate_rejects_unapproved_supervisor_finding() -> None:
+    config = "ralph.ce-executor-supervisor.yml"
+    plan = "/abs/plan.md"
+    runner = _probe_runner_common.e2e_make_runner(
+        _supervisor_gate_invocations(
+            config=config,
+            plan=plan,
+            extra_preset_finding={
+                "id": "lint.preset.new_failure",
+                "source": "lint",
+                "severity": "error",
+                "message": "new failure must remain blocking",
+            },
+        )
+    )
+
+    report = gate.run_static_gate(
+        binary="ralph",
+        config_path=config,
+        preset="builtin:ce-executor-supervisor",
+        plan_path=plan,
+        runner=runner,
+    )
+
+    assert report.ok is False
+    assert report.preset_check.outcome == "blocked_preset"
+    assert report.preflight.outcome == "blocked_unknown"
 
 
 def test_static_gate_plan_path_none_returns_blocked_input() -> None:

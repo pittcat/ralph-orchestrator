@@ -7,7 +7,6 @@ repo root so the canonical-root guard is testable.
 
 from __future__ import annotations
 
-import os
 from pathlib import Path
 
 import pytest
@@ -66,9 +65,12 @@ def test_unicode_cjk_emoji_in_plan_path(tmp_path: Path) -> None:
 def test_shell_metachar_in_plan_path(tmp_path: Path) -> None:
     """Plan path with shell metachar embedded in prompt — must not execute.
 
-    The PROMPT.<stem>.md must contain the literal path bytes, not interpreted
-    shell syntax. Verify by reading the generated file and checking the path
-    appears verbatim.
+    The PROMPT.<stem>.md must contain the literal staged sandbox-relative
+    path (``docs/plans/<basename>``), not interpreted shell syntax. After
+    the plan-staging refactor, the prompt carries the staged path rather
+    than the caller-supplied absolute path; the no-shell-interpretation
+    invariant still holds because the staged basename is constrained to
+    ``[A-Za-z0-9._-]+`` and the relative path has no shell metachars.
     """
     plan = tmp_path / "plan.md"
     plan.write_text(
@@ -86,9 +88,9 @@ def test_shell_metachar_in_plan_path(tmp_path: Path) -> None:
     prompt_path = Path(result.prompt_path)
     assert prompt_path.is_file()
     prompt_text = prompt_path.read_text(encoding="utf-8")
-    # Plan relpath embedded verbatim — no shell interpretation.
-    relplan = os.path.relpath(str(plan), str(sandbox))
-    assert relplan in prompt_text
+    # Plan path embedded verbatim as the staged sandbox-relative path.
+    staged_relplan = Path("docs") / "plans" / plan.name
+    assert str(staged_relplan) in prompt_text
 
 
 # ---------------------------------------------------------------------------

@@ -73,7 +73,7 @@ source for the dry-run argv.
 
 | # | Option | Consequence |
 |---|--------|-------------|
-| 1 (recommended) | `--plan <abs>` | The plan is the authoritative prompt; the dry-run argv uses `--plan`. The skill does NOT also pass `--prompt-file`. |
+| 1 (recommended) | `--plan <sandbox-relative>` | The caller-supplied plan is staged into `<sandbox>/docs/plans/<basename>`; argv uses the sandbox-relative `docs/plans/<basename>` so the launch command is portable and works when the live loop is started from the sandbox cwd. The source plan bytes are never modified (R13). |
 | 2 | `--prompt-file <abs>` | An external prompt file is authoritative; the plan is read-only context. |
 | Other | Free-text | Recorded verbatim; skill halts unless paired with a concrete argv slot. |
 
