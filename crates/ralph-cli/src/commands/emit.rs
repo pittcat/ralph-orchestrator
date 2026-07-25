@@ -3625,7 +3625,7 @@ hats:
             &workspace.join(".ralph/events.jsonl"), // default cli file (not used — env overrides)
             Some(&wave_channel),
             Some("exec-worker"), // current_hat = wave worker hat
-            true,               // isolated_mode (wave workers run in isolated context)
+            true,                // isolated_mode (wave workers run in isolated context)
         );
 
         // TARGET behavior: Ok with the wave channel path

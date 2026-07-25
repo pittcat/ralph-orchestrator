@@ -5,6 +5,11 @@
 //! only legitimate destinations, with `.ralph/events.jsonl` accepted only
 //! when neither marker exists. Any explicit `RALPH_EVENTS_FILE` / `--file`
 //! target must match an allowlist entry — no silent fallback to markers.
+//! One narrow exception (plan 2026-07-25-003, U2): the dispatcher-signed
+//! per-slot wave channel `…/.ralph/wave-<id>-<idx>.jsonl` is accepted when
+//! the caller runs in isolated mode with a hat context, since the wave
+//! dispatcher creates that file and injects it via `RALPH_EVENTS_FILE`
+//! without listing it in any marker.
 //!
 //! Originally in `main.rs`; U4 lifts it into `cli/emit_path.rs` so the
 //! call sites in `commands/emit.rs` (U4 step-2) can keep the imports tight.
@@ -75,6 +80,13 @@ pub(crate) fn resolve_hat_channel_file(workspace_root: &Path) -> Option<(PathBuf
 ///   non-empty `current-hat-events` marker, the resolver refuses to
 ///   fall back to `workspace_root/.ralph/events.jsonl` (the legacy
 ///   default); the channel marker is the only legitimate fall-through.
+///
+/// U2 (plan 2026-07-25-003): when `isolated_mode` is `true` AND
+/// `current_hat` is `Some(_)`, an explicit target whose shape is
+/// `workspace_root/.ralph/wave-<id>-<idx>.jsonl` (the dispatcher-signed
+/// per-slot wave channel, injected via `RALPH_EVENTS_FILE`) is accepted
+/// even though no marker lists it. All other non-allowlisted explicit
+/// targets are still rejected.
 pub(crate) fn resolve_emit_path(
     workspace_root: &Path,
     cli_file: &Path,
@@ -149,6 +161,72 @@ pub(crate) fn resolve_emit_path(
             ));
         }
         None
+    }
+
+    /// U2 (plan 2026-07-25-003): recognize the dispatcher-signed per-slot
+    /// wave channel `workspace_root/.ralph/wave-<id>-<idx>.jsonl`.
+    ///
+    /// The wave dispatcher creates this file (`wave/dispatcher.rs`) and
+    /// injects it into wave workers via `RALPH_EVENTS_FILE`; it never
+    /// appears in the `current-events` / `current-candidate-events` /
+    /// `current-hat-events` markers, so without this shape check the P6
+    /// allowlist rejects it and workers cannot emit to their own channel.
+    ///
+    /// The check is deliberately narrow:
+    ///
+    /// - the path must sit DIRECTLY under the workspace root `.ralph/`
+    ///   (not under a slot-worktree subtree, not outside the workspace);
+    /// - the file name must be `wave-<id>-<idx>.jsonl` with a non-empty
+    ///   `<id>` (wave ids may contain dashes, e.g. `w-test`) and an
+    ///   all-ASCII-digit `<idx>`.
+    ///
+    /// The call site additionally requires `isolated_mode == true` and
+    /// `current_hat.is_some()`, binding acceptance to the wave-worker
+    /// context (wave workers run in isolated execution with a hat id).
+    /// This does NOT open arbitrary `.ralph/*.jsonl` writes.
+    fn is_wave_channel_path(
+        candidate: &Path,
+        workspace_root: &Path,
+        workspace_canon: &Path,
+    ) -> bool {
+        // Strip the workspace root prefix (lexical), trying both the raw
+        // and canonical roots so macOS `/var` → `/private/var` symlink
+        // forms match regardless of which form the env var carried.
+        let relative = match candidate
+            .strip_prefix(workspace_root)
+            .or_else(|_| candidate.strip_prefix(workspace_canon))
+        {
+            Ok(rel) => rel,
+            Err(_) => return false,
+        };
+        // Exactly two components: `.ralph/<file>`. Anything deeper nests
+        // under a subtree (e.g. a slot worktree's `.ralph/`); anything
+        // shallower is not an events file at all.
+        let mut comps = relative.components();
+        let first_is_ralph_dir = comps.next().is_some_and(|c| c.as_os_str() == ".ralph");
+        let file_comp = comps.next();
+        if !first_is_ralph_dir || file_comp.is_none() || comps.next().is_some() {
+            return false;
+        }
+        let Some(file_name) = file_comp.and_then(|c| c.as_os_str().to_str()) else {
+            return false;
+        };
+        // File-name pattern: wave-<id>-<idx>.jsonl.
+        let Some(stem) = file_name
+            .strip_prefix("wave-")
+            .and_then(|s| s.strip_suffix(".jsonl"))
+        else {
+            return false;
+        };
+        // `<idx>` is the segment after the LAST dash: non-empty, all
+        // ASCII digits. `<id>` is everything before it and must be
+        // non-empty.
+        let Some(last_dash) = stem.rfind('-') else {
+            return false;
+        };
+        let id_part = &stem[..last_dash];
+        let idx_part = &stem[last_dash + 1..];
+        !id_part.is_empty() && !idx_part.is_empty() && idx_part.chars().all(|c| c.is_ascii_digit())
     }
 
     // Two paths are equivalent when their lexical forms match (after
@@ -243,12 +321,31 @@ pub(crate) fn resolve_emit_path(
             }
         });
 
+    // Canonicalize the workspace root once for prefix comparison (used by
+    // the wave-channel shape check below and the outside-workspace guard).
+    let workspace_canon = workspace_root
+        .canonicalize()
+        .unwrap_or_else(|_| workspace_root.to_path_buf());
+
     let candidate = if let Some(explicit_target) = explicit {
         let normalized_explicit = normalize_path(&explicit_target);
         if allowed
             .iter()
             .any(|entry| paths_equivalent(entry, &normalized_explicit))
         {
+            explicit_target
+        } else if isolated_mode
+            && current_hat.is_some()
+            && is_wave_channel_path(&normalized_explicit, workspace_root, &workspace_canon)
+        {
+            // U2 (plan 2026-07-25-003): accept the dispatcher-signed
+            // per-slot wave channel. The dispatcher creates
+            // `…/.ralph/wave-<id>-<idx>.jsonl` and injects it as
+            // `RALPH_EVENTS_FILE`; no marker lists it, so it is not in
+            // `allowed` yet. Register it now so the symlink / orphan
+            // guards in the final allowlist loop below still apply to
+            // the resolved candidate.
+            allowed.push(normalized_explicit.clone());
             explicit_target
         } else {
             bail!(
@@ -326,10 +423,6 @@ pub(crate) fn resolve_emit_path(
 
     // Normalize the candidate: drop `.` and resolve `..` lexically.
     let normalized = normalize_path(&candidate);
-    // Canonicalize the workspace root once for prefix comparison.
-    let workspace_canon = workspace_root
-        .canonicalize()
-        .unwrap_or_else(|_| workspace_root.to_path_buf());
 
     // Verify the candidate is in the allowlist. We compare normalized forms
     // so that `.ralph/foo` and `foo/../.ralph/foo` are recognized as the
