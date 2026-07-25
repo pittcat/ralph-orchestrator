@@ -449,6 +449,22 @@ impl SupervisorBridge for CoordinatorSupervisorBridge {
         Ok(())
     }
 
+    fn record_never_started_failures(&self, wave_id: &str) -> Result<(), BridgeError> {
+        use ralph_core::supervisor::worker_outcome::REASON_SLOT_NEVER_STARTED;
+        let snap = self
+            .store
+            .fan_in_status(wave_id)
+            .map_err(|e| BridgeError::Store(e.to_string()))?;
+        for (slot_index, status) in &snap.slots {
+            if *status == ralph_core::supervisor::SlotStatus::Pending {
+                // Idempotent: same-reason replay is Ok(()) per
+                // `record_slot_failure`'s existing same-content_hash contract.
+                let _ = self.store.record_slot_failure(wave_id, *slot_index, REASON_SLOT_NEVER_STARTED);
+            }
+        }
+        Ok(())
+    }
+
     fn release_slot_dispatch(
         &self,
         wave_id: &str,
@@ -1028,5 +1044,73 @@ mod tests {
             .tick("w-1", PhaseInputs::default())
             .expect("tick must succeed");
         assert_eq!(result, CoordinatorAction::ContinueCollect);
+    }
+
+    // ─────────────────────────────────────────────────────────────────
+    // G3: 2026-07-25-004 plan U4 (R4 / R5 / AE4)
+    // Production bridge: `record_never_started_failures`
+    // ─────────────────────────────────────────────────────────────────
+
+    /// G3 T1: `CoordinatorSupervisorBridge` with in-memory store.
+    /// Register wave (expected_total=3), complete slot 0 via store,
+    /// call `bridge.record_never_started_failures(...)` — slots 1, 2
+    /// become `Failed` with reason `slot_never_started`; slot 0 stays
+    /// `Completed`. Second call is idempotent (no double-count).
+    #[test]
+    fn g3_coordinator_bridge_records_never_started_failures() {
+        use ralph_core::supervisor::SlotStatus;
+        use ralph_core::supervisor::worker_outcome::REASON_SLOT_NEVER_STARTED;
+
+        let bridge = CoordinatorSupervisorBridge::with_in_memory_store();
+        let store = bridge.store();
+
+        let wave_id = bridge
+            .register_wave_if_absent(WaveKind::Exec, "g3-wave", 3)
+            .unwrap();
+
+        // Complete slot 0.
+        store
+            .bind_worktree(
+                &wave_id,
+                0,
+                SlotResource {
+                    slot_index: 0,
+                    worktree_path: Some(".ralph/g3".to_string()),
+                    branch: Some("ralph/g3".to_string()),
+                },
+            )
+            .unwrap();
+        let _ = store.try_dispatch_next(4).unwrap().unwrap();
+        store
+            .record_slot_result(&wave_id, 0, "hash-g3", 1)
+            .unwrap();
+
+        // Slots 1, 2 are still Pending. Record never-started.
+        bridge.record_never_started_failures(&wave_id).unwrap();
+
+        // Slot 0: Completed.
+        let snap = store.fan_in_status(&wave_id).unwrap();
+        let (_, s0) = snap.slots.iter().find(|(i, _)| *i == 0).unwrap();
+        assert_eq!(s0, &SlotStatus::Completed, "slot 0 must stay Completed");
+
+        // Slots 1, 2: Failed with `slot_never_started`.
+        for slot_index in [1u32, 2] {
+            let snap = store.fan_in_status(&wave_id).unwrap();
+            let (_, status) = snap.slots.iter().find(|(i, _)| *i == slot_index).unwrap();
+            assert_eq!(
+                status, &SlotStatus::Failed,
+                "slot {slot_index} must be Failed"
+            );
+        }
+
+        // Idempotency: second call → same failed_count (no double-count).
+        let snap_before = store.fan_in_status(&wave_id).unwrap();
+        let failed_before = snap_before.failed_count;
+        bridge.record_never_started_failures(&wave_id).unwrap();
+        let snap_after = store.fan_in_status(&wave_id).unwrap();
+        assert_eq!(
+            snap_after.failed_count, failed_before,
+            "second call must not double-count; idempotent Ok(())"
+        );
     }
 }

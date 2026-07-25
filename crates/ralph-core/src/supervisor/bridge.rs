@@ -195,6 +195,16 @@ pub trait SupervisorBridge: std::fmt::Debug + Send + Sync {
         reason: &str,
     ) -> Result<(), BridgeError>;
 
+    /// 2026-07-25-004 plan U4 (R4 / R5 / AE4): record
+    /// `slot_never_started` for every slot that is still
+    /// `Pending` (never reached `Dispatched`/`Running`) when a
+    /// wave fails. Idempotent: same-reason replay is a no-op
+    /// because `record_slot_failure` already enforces first-terminal-wins.
+    /// Default: no-op so mocks / bridges without a store stay compiling.
+    fn record_never_started_failures(&self, _wave_id: &str) -> Result<(), BridgeError> {
+        Ok(())
+    }
+
     /// Release the global dispatch permit after a worker reaches a
     /// terminal state. Bridges without a store retain the legacy no-op.
     fn release_slot_dispatch(
@@ -411,6 +421,23 @@ impl SupervisorBridge for InMemoryCoordinatorBridge {
         Ok(())
     }
 
+    fn record_never_started_failures(&self, wave_id: &str) -> Result<(), BridgeError> {
+        use crate::supervisor::SlotStatus;
+        use crate::supervisor::worker_outcome::REASON_SLOT_NEVER_STARTED;
+        let snap = self
+            .store
+            .fan_in_status(wave_id)
+            .map_err(|e| BridgeError::Store(e.to_string()))?;
+        for (slot_index, status) in &snap.slots {
+            if *status == SlotStatus::Pending {
+                // Idempotent: same-reason replay is Ok(()) per
+                // `record_slot_failure`'s existing same-content_hash contract.
+                let _ = self.store.record_slot_failure(wave_id, *slot_index, REASON_SLOT_NEVER_STARTED);
+            }
+        }
+        Ok(())
+    }
+
     fn release_slot_dispatch(
         &self,
         wave_id: &str,
@@ -545,6 +572,76 @@ mod tests {
         assert!(!is_supervisor_path_enabled(true, false));
         assert!(!is_supervisor_path_enabled(false, true));
         assert!(!is_supervisor_path_enabled(false, false));
+    }
+
+    // ─────────────────────────────────────────────────────────────────
+    // G2: 2026-07-25-004 plan U4 (R4 / R5 / AE4)
+    // Store integration: `record_never_started_failures`
+    // ─────────────────────────────────────────────────────────────────
+
+    /// G2 T1: register wave (expected_total=3), complete slot 0,
+    /// never touch slots 1, 2 → call `record_never_started_failures`
+    /// → slots 1, 2 are Failed with reason `slot_never_started`,
+    /// slot 0 stays Completed.
+    #[test]
+    fn g2_record_never_started_marks_pending_slots() {
+        use crate::supervisor::SlotStatus;
+        use crate::supervisor::worker_outcome::REASON_SLOT_NEVER_STARTED;
+
+        let store = std::sync::Arc::new(InMemorySupervisorStore::new());
+        let bridge =
+            InMemoryCoordinatorBridge::from_store(store.clone() as std::sync::Arc<dyn SupervisorStore>);
+
+        let store_id = bridge
+            .register_wave_if_absent(WaveKind::Exec, "g2-wave", 3)
+            .unwrap();
+
+        // Dispatch and complete slot 0.
+        store
+            .bind_worktree(
+                &store_id,
+                0,
+                SlotResource {
+                    slot_index: 0,
+                    worktree_path: Some(".ralph/g2".to_string()),
+                    branch: Some("ralph/g2".to_string()),
+                },
+            )
+            .unwrap();
+        let _ = store.try_dispatch_next(4).unwrap().unwrap();
+        store
+            .record_slot_result(&store_id, 0, "hash-g2", 1)
+            .unwrap();
+
+        // Slots 1 and 2 are still Pending — never dispatched.
+        // Call the helper.
+        bridge.record_never_started_failures(&store_id).unwrap();
+
+        // Verify slot 0 stayed Completed.
+        let snap = store.fan_in_status(&store_id).unwrap();
+        assert_eq!(
+            snap.slots.iter().find(|(i, _)| *i == 0).map(|(_, s)| *s),
+            Some(SlotStatus::Completed),
+            "slot 0 must stay Completed"
+        );
+
+        // Verify slots 1 and 2 are now Failed with reason `slot_never_started`.
+        for slot_index in [1u32, 2] {
+            let snap = store.fan_in_status(&store_id).unwrap();
+            let (_, status) = snap.slots.iter().find(|(i, _)| *i == slot_index).unwrap();
+            assert_eq!(
+                status, &SlotStatus::Failed,
+                "slot {slot_index} must be Failed"
+            );
+        }
+
+        // Idempotency: second call is a no-op (same-reason replay → Ok).
+        bridge.record_never_started_failures(&store_id).unwrap();
+        let snap2 = store.fan_in_status(&store_id).unwrap();
+        assert_eq!(
+            snap2.failed_count, snap.failed_count,
+            "second call must not double-count failures"
+        );
     }
 }
 

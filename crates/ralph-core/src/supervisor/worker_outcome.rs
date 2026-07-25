@@ -33,6 +33,11 @@ pub const REASON_MISSING_WORKER_TERMINAL: &str = "missing_worker_terminal";
 pub const REASON_CONFLICTING_WORKER_TERMINAL: &str = "conflicting_worker_terminal";
 pub const REASON_WORKER_TIMEOUT: &str = "worker_timeout";
 pub const REASON_WORKER_CANCELLED: &str = "worker_cancelled";
+/// 2026-07-25-004 plan U4 (R4 / R5 / AE4): a slot that was
+/// registered but never reached `Dispatched`/`Running` before
+/// the wave was marked `Failed`. Distinct from `worker_timeout`
+/// (for slots that did dispatch but never reported a terminal).
+pub const REASON_SLOT_NEVER_STARTED: &str = "slot_never_started";
 
 /// Terminal kind inferred from the worker event stream.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

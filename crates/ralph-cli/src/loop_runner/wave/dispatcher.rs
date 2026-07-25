@@ -2197,6 +2197,22 @@ pub(crate) fn run_supervisor_fan_in(
             // `review.wave.failed` schema requires `missing_dimensions`,
             // not `blocking_slots`. Exec/fix waves keep the existing
             // `blocking_slots` shape.
+            //
+            // 2026-07-25-004 plan U4 (R4 / R5 / AE4): record
+            // `slot_never_started` for every slot still `Pending`
+            // before writing the coordination event. This fires
+            // AT MOST ONCE per (wave, slot) — `record_slot_failure`
+            // is already idempotent for same-reason replays, so a
+            // second call to this helper is a harmless no-op.
+            if let Err(err) = bridge.record_never_started_failures(&store_wave_id) {
+                warn!(
+                    wave_id = %completed.wave_id,
+                    store_wave_id = %store_wave_id,
+                    error = %err,
+                    "U4: record_never_started_failures failed during fan-in; \
+                     continuing anyway — the wave failure is already recorded"
+                );
+            }
             let payload = build_wave_failed_payload(wave_kind, completed, reason, blocking_slots);
             append_supervisor_coord_event(main_events_file, &topic, &payload);
             SupervisorFanInOutcome::InjectedFailed

@@ -44,7 +44,7 @@ use crate::loop_runner::wave::{
     BridgeError, MockSupervisorBridge, SlotBinding, SupervisorBridge, WaveWorkerExecutor,
     is_supervisor_path_enabled,
 };
-use ralph_core::supervisor::{PhaseInputs, WaveKind};
+use ralph_core::supervisor::{PhaseInputs, SlotResource, WaveKind};
 use std::collections::HashMap;
 use std::sync::Mutex;
 
@@ -4104,5 +4104,81 @@ fn u7_review_default_is_shared_readonly() {
     assert!(
         binding.is_none(),
         "Review waves must default to shared_readonly (no worktree)"
+    );
+}
+
+// ── 2026-07-25-004 plan U4: slot_never_started diagnostics ─────────────────────
+//
+// G3: the `SupervisorBridge::record_never_started_failures` contract.
+// When a wave fails with slots that never left `Pending`, those slots
+// must be recorded as `Failed` with reason `slot_never_started`. This
+// is exercised by the dispatcher in the `InjectedFailed` arm of
+// `run_supervisor_fan_in` before writing the coordination event.
+//
+// The test is scoped to the bridge + store layer (no full dispatcher
+// machinery); JSON diagnostic assertions are deferred to U5.
+
+/// G3 T1: `record_never_started_failures` on a wave with 1 completed
+/// slot and 2 Pending slots — Pending slots become `Failed` with
+/// `slot_never_started`, completed slot stays `Completed`. Second call
+/// is idempotent (same-reason replay → Ok(())).
+#[test]
+fn g3_record_never_started_marks_pending_slots_in_store() {
+    use ralph_core::supervisor::worker_outcome::REASON_SLOT_NEVER_STARTED;
+    use std::sync::Arc;
+
+    let bridge = CoordinatorSupervisorBridge::with_in_memory_store();
+    let store = bridge.store();
+
+    let wave_id = bridge
+        .register_wave_if_absent(WaveKind::Exec, "g3-wave", 3)
+        .unwrap();
+
+    // Slot 0: bind, dispatch, complete.
+    store
+        .bind_worktree(
+            &wave_id,
+            0,
+            SlotResource {
+                slot_index: 0,
+                worktree_path: Some(".ralph/g3".to_string()),
+                branch: Some("ralph/g3".to_string()),
+            },
+        )
+        .unwrap();
+    let _ = store.try_dispatch_next(4).unwrap().unwrap();
+    store.record_slot_result(&wave_id, 0, "hash-g3", 1).unwrap();
+
+    // Slots 1 and 2: still `Pending` — never dispatched.
+    bridge.record_never_started_failures(&wave_id).unwrap();
+
+    // Verify slot 0 stayed Completed.
+    let snap = store.fan_in_status(&wave_id).unwrap();
+    let (_, s0_status) = snap.slots.iter().find(|(i, _)| *i == 0).unwrap();
+    assert_eq!(
+        s0_status,
+        &ralph_core::supervisor::SlotStatus::Completed,
+        "slot 0 must stay Completed"
+    );
+
+    // Verify slots 1 and 2 are Failed with `slot_never_started`.
+    for slot_index in [1u32, 2] {
+        let snap = store.fan_in_status(&wave_id).unwrap();
+        let (_, status) = snap.slots.iter().find(|(i, _)| *i == slot_index).unwrap();
+        assert_eq!(
+            status,
+            &ralph_core::supervisor::SlotStatus::Failed,
+            "slot {slot_index} must be Failed"
+        );
+    }
+
+    // Idempotency: second call → same failed_count.
+    let snap_before = store.fan_in_status(&wave_id).unwrap();
+    let failed_before = snap_before.failed_count;
+    bridge.record_never_started_failures(&wave_id).unwrap();
+    let snap_after = store.fan_in_status(&wave_id).unwrap();
+    assert_eq!(
+        snap_after.failed_count, failed_before,
+        "second record_never_started_failures call must not double-count"
     );
 }
