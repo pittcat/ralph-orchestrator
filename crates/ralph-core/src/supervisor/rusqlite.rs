@@ -1608,7 +1608,9 @@ mod tests {
         let store = store();
         let wave = store.register_wave("u2-val", WaveKind::Exec, 1).unwrap();
         store.bind_worktree(&wave, 0, bind(0)).unwrap();
-        store.record_slot_failure(&wave, 0, REASON_WORKER_TIMEOUT).unwrap();
+        store
+            .record_slot_failure(&wave, 0, REASON_WORKER_TIMEOUT)
+            .unwrap();
         assert_eq!(
             store.slot_failure_reason(&wave, 0).unwrap(),
             Some(REASON_WORKER_TIMEOUT.to_string())
@@ -1622,7 +1624,9 @@ mod tests {
     #[test]
     fn u2_slot_failure_reason_missing_slot_returns_unknown_slot() {
         let store = store();
-        let wave = store.register_wave("u2-missing", WaveKind::Exec, 1).unwrap();
+        let wave = store
+            .register_wave("u2-missing", WaveKind::Exec, 1)
+            .unwrap();
         store.bind_worktree(&wave, 0, bind(0)).unwrap();
         // slot_index 7 was never registered for this wave.
         let err = store.slot_failure_reason(&wave, 7).unwrap_err();

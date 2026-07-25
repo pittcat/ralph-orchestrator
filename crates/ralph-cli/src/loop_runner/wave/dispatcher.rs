@@ -6135,7 +6135,8 @@ hats: {}
         let temp_root = tempfile::TempDir::new().expect("temp dir");
         let main_events_file = temp_root.path().join("events.jsonl");
 
-        let outcome = run_supervisor_fan_in(&bridge_arc, &completed, &detected, &main_events_file, 60);
+        let outcome =
+            run_supervisor_fan_in(&bridge_arc, &completed, &detected, &main_events_file, 60);
         assert!(
             matches!(outcome, SupervisorFanInOutcome::InjectedComplete),
             "success path must reach InjectedComplete, got {outcome:?}"

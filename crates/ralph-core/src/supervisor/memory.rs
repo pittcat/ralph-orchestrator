@@ -610,9 +610,8 @@ impl SupervisorStore for InMemorySupervisorStore {
                 // InjectedFailed reason-collection sees a non-null
                 // reason. The `if Pending` guard guarantees
                 // already-terminal slots keep their own reason.
-                slot.failure_reason = Some(
-                    crate::supervisor::worker_outcome::REASON_SLOT_NEVER_STARTED.to_string(),
-                );
+                slot.failure_reason =
+                    Some(crate::supervisor::worker_outcome::REASON_SLOT_NEVER_STARTED.to_string());
             }
         }
         Ok(())
@@ -1539,7 +1538,8 @@ mod tests {
         // Slot 1: dispatch then fail with worker_timeout → terminal
         // Failed carrying its own reason (must NOT be overwritten).
         s.try_dispatch_next(4).unwrap().unwrap();
-        s.record_slot_failure(&wave, 1, REASON_WORKER_TIMEOUT).unwrap();
+        s.record_slot_failure(&wave, 1, REASON_WORKER_TIMEOUT)
+            .unwrap();
         // Slot 2: stays Pending (never dispatched).
         s.cancel_wave(&wave).unwrap();
 

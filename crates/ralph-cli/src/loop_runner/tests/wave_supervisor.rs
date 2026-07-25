@@ -4230,7 +4230,9 @@ fn g3_cancel_closure_cancelled_slot_has_never_started_reason() {
         )
         .unwrap();
     let _ = store.try_dispatch_next(4).unwrap().unwrap();
-    store.record_slot_result(&wave_id, 0, "hash-g3c", 1).unwrap();
+    store
+        .record_slot_result(&wave_id, 0, "hash-g3c", 1)
+        .unwrap();
 
     // Slots 1 and 2: still Pending — never dispatched. Cancel the wave.
     bridge.cancel_wave(&wave_id).unwrap();
@@ -4239,7 +4241,10 @@ fn g3_cancel_closure_cancelled_slot_has_never_started_reason() {
     // through the exact bridge surface the dispatcher reads.
     for slot_index in [1u32, 2] {
         let reason = bridge.slot_failure_reason(&wave_id, slot_index).unwrap();
-        assert!(reason.is_some(), "cancelled slot {slot_index} reason must be Some");
+        assert!(
+            reason.is_some(),
+            "cancelled slot {slot_index} reason must be Some"
+        );
         assert_eq!(
             reason.as_deref(),
             Some(REASON_SLOT_NEVER_STARTED),
