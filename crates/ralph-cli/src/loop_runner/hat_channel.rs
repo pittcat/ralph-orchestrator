@@ -185,13 +185,17 @@ fn scan_orphan_subtree_events(ctx: &LoopContext) -> anyhow::Result<()> {
 
     let workspace = ctx.workspace();
 
-    // Skip main tree + hat-channel + .git + node_modules/target.
+    // Skip main tree + hat-channel + .git + node_modules/target + crates.
+    // `crates/**/.ralph/events*.jsonl` is almost always residual from
+    // in-crate test / tooling runs (not hat cwd-drift orphans) and was
+    // polluting operator diagnostics for the active loop.
     let skip_paths: HashSet<std::path::PathBuf> = [
         ".ralph".to_string(),
         ".ralph/agent".to_string(),
         ".git".to_string(),
         "node_modules".to_string(),
         "target".to_string(),
+        "crates".to_string(),
     ]
     .into_iter()
     .map(|p| workspace.join(p))
@@ -610,6 +614,42 @@ mod tests {
         assert!(
             diag_content.contains("events.jsonl"),
             "diagnostic should mention the orphan path, got: {diag_content}"
+        );
+    }
+
+    /// `crates/**/.ralph/events*.jsonl` is residual from in-crate tooling,
+    /// not hat cwd-drift — must not emit orphan-emit diagnostics.
+    #[test]
+    fn test_merge_hat_channel_skips_crates_subtree_orphans() {
+        let tmp = TempDir::new().unwrap();
+        let ctx = make_ctx(&tmp);
+
+        let channel = prepare_hat_channel(&ctx, "validator", "primary-008", 1).unwrap();
+        assert!(channel.exists());
+
+        let crate_ralph = tmp.path().join("crates/ralph-core/.ralph");
+        std::fs::create_dir_all(&crate_ralph).unwrap();
+        std::fs::write(
+            crate_ralph.join("events.jsonl"),
+            "{\"topic\":\"LOOP_COMPLETE\"}\n",
+        )
+        .unwrap();
+
+        let target = tmp.path().join(".ralph/events-main.jsonl");
+        std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+        std::fs::write(&target, "existing\n").unwrap();
+
+        merge_hat_channel(&ctx, &target, "validator", None).unwrap();
+
+        let diagnostics_dir = ctx.ralph_dir().join("diagnostics");
+        let has_orphan = diagnostics_dir.is_dir()
+            && fs::read_dir(&diagnostics_dir)
+                .unwrap()
+                .flatten()
+                .any(|e| e.file_name().to_string_lossy().starts_with("orphan-emit-"));
+        assert!(
+            !has_orphan,
+            "crates/**/.ralph orphans must not produce orphan-emit diagnostic"
         );
     }
 

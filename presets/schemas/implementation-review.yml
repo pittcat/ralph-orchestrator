@@ -266,7 +266,11 @@ schemas:
         source: runtime (`build_wave_failed_payload`)
         fill_rule: literal copy
       reason:
-        meaning: runtime failure reason string (timeout / spawn_failed / partial / etc.)
+        meaning: >-
+          runtime failure reason string (timeout / spawn_failed / partial /
+          cancelled / etc.). Per-worker budget is review-worker.timeout (900s);
+          aggregate wave timeout follows runtime formula and surfaces here when
+          slots are missing.
         source: runtime (`build_wave_failed_payload`)
         fill_rule: literal copy
   review.synthesized:

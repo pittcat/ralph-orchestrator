@@ -181,9 +181,17 @@
 | 2 (禁读 / 写 `supervisor.db` 作业务接口) | **N/A** | 同上 |
 | 3 (禁发 coordination topic) | **N/A** | 同上 |
 | 4 (unit 状态经 task API / 业务 artifact) | **N/A** | 同上;本 preset `tasks.enabled: false` |
-| 5 (timeout / partial 有业务可见出口) | **N/A** | timeout / partial 通过 runtime `review.wave.failed` 注入,finalizer 消费发 `LOOP_COMPLETE{result: blocked}`(F7 / KTD17) |
+| 5 (timeout / partial 有业务可见出口) | **N/A** | `review-worker.timeout: 900`(每 slot 15min);timeout / partial 经 runtime `review.wave.failed` 注入,finalizer → `LOOP_COMPLETE{result: blocked}` |
 | 6 (与 Intent 一致) | **N/A** | Intent.execution_model=wave,YAML 无 `event_loop.supervisor.enabled: true`,一致 |
 | 7 (wave consumer `concurrency > 1`) | **N/A** (本问题实际属于 wave fan-out,但与 supervisor 7 同形) | `review-worker.concurrency: 6` ≥ 6 (六槽) ✓,wave detector 不会 `SequentialTarget` 拒 |
+
+> **silent-success 契约 (2026-07-26):** `review-dispatcher` /
+> `review-worker` / `fix-planner` / `finalizer` **不得**配置成功态
+> `default_publishes`。空 emit 必须走 missing-event hard gate。
+> `scope-preparer` / `review-synthesizer` 保留 fail-closed default
+> (`scope.blocked` / `review.blocked`)。`scope-preparer` Step 0 必须
+> 清理同 plan 的 `dimensions/`、`dispatch-batch/` 与综合/阻塞残留,
+> 避免跨 loop 误读。
 
 ---
 

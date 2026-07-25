@@ -39,8 +39,15 @@
 #   `artifact_path`. No other hat publishes LOOP_COMPLETE.
 #
 # Execution model: `wave` (KTD2). NOT supervisor — `event_loop.supervisor.enabled`
-# stays false; the default wave hot path lazy-creates the SupervisorBridge
-# without exposing worktree slots or merge sinks to the preset.
+# stays false; the default wave hot path may lazy-open `supervisor.db` for
+# wave ledger persistence (KTD-2) without exposing worktree slots or merge
+# sinks to the preset.
+# Per-worker budget: `review-worker.timeout: 900` (15 min). With concurrency
+# 6 the aggregate wall clock is ~930s (per-worker × batches + 30s); timed-out
+# slots surface via runtime `review.wave.failed` (`reason=timeout|partial`).
+# Success-shaped `default_publishes` is forbidden on dispatcher / worker /
+# fix-planner / finalizer — missing emit must hard-gate, never synthesize a
+# success handoff (silent-success class).
 # `completion_promise: LOOP_COMPLETE` with `required_events: []` (KTD14):
 # finalizer emits the single terminal event; no double-event exception.
 #
@@ -382,7 +389,11 @@ event_loop:
             source: runtime (`build_wave_failed_payload`)
             fill_rule: literal copy
           reason:
-            meaning: runtime failure reason string (timeout / spawn_failed / partial / etc.)
+            meaning: >-
+              runtime failure reason string (timeout / spawn_failed / partial /
+              cancelled / etc.). Per-worker budget is review-worker.timeout (900s);
+              aggregate wave timeout follows runtime formula and surfaces here when
+              slots are missing.
             source: runtime (`build_wave_failed_payload`)
             fill_rule: literal copy
       review.synthesized:
@@ -718,6 +729,27 @@ hats:
       - Do NOT modify tracked source code, the plan file, or any file outside
         `.ralph/review/<plan>/` and `.ralph/agent/decisions.md`.
 
+      ### Step 0 — Clear prior-loop residuals for this plan
+
+      Before any freeze work, remove prior-loop artifacts under
+      `.ralph/review/<plan>/` so a previous incomplete review cannot be
+      mistaken for this loop's output. Delete these paths if they exist
+      (`rm -rf` is fine; they live under `.ralph/` and are not tracked):
+
+      - `.ralph/review/<plan>/dimensions/`
+      - `.ralph/review/<plan>/dispatch-batch/`
+      - `.ralph/review/<plan>/synthesized-review.md`
+      - `.ralph/review/<plan>/fix-plan.md`
+      - `.ralph/review/<plan>/review-blocked.md`
+      - `.ralph/review/<plan>/wave-blocked.md`
+      - `.ralph/review/<plan>/scope-blocked.md`
+
+      Keep nothing from a previous loop's dimension / dispatch / synthesis
+      / fix / block artifacts. Scope freeze will rewrite the canonical
+      freeze files (`scope-manifest.json`, `review.diff.patch`, etc.) in
+      later steps; do not skip this cleanup even when those freeze files
+      already look fresh.
+
       ### Inputs you can Observe
 
       - The prompt's plan file path (`--plan <plan.md>` argument mirrored
@@ -954,7 +986,8 @@ hats:
     triggers: ["scope.ready"]
     publishes: ["review.unit.ready"]
     exempt_topics: ["review.unit.ready"]
-    default_publishes: "review.unit.ready"
+    # No default_publishes: a synthetic review.unit.ready is silent-success
+    # (fan-out never happened). Missing emit must hard-gate and retry.
     terminal_events: ["review.unit.ready"]
     event_filter:
       enabled: true
@@ -1115,10 +1148,15 @@ hats:
     # detector rejects the batch as `SequentialTarget` and never
     # dispatches the six payloads.
     concurrency: 6
+    # Per-worker wall clock: 15 minutes. Aggregate wave budget follows
+    # runtime formula (~930s with concurrency 6); timed-out slots become
+    # missing_dimensions on runtime `review.wave.failed`.
+    timeout: 900
     triggers: ["review.unit.ready"]
     publishes: ["review.unit.done"]
     exempt_topics: ["review.unit.done"]
-    default_publishes: "review.unit.done"
+    # No default_publishes: synthetic review.unit.done without a dimension
+    # artifact is silent-success. Missing emit must hard-gate / wave-fail.
     terminal_events: ["review.unit.done"]
     event_filter:
       enabled: true
@@ -1275,10 +1313,11 @@ hats:
 
       ### Step 6 — Stop
 
-      One `review.unit.done`. The runtime injects `review.wave.complete`
-      once all six slots complete (or `review.wave.failed` if any slot
-      timed out / failed the modification audit). You do not trigger
-      either — the runtime does.
+      One `review.unit.done`. Runtime budget for this slot is 15 minutes
+      (`timeout: 900`). The runtime injects `review.wave.complete` once
+      all six slots complete, or `review.wave.failed` with
+      `missing_dimensions` when any slot times out / fails the
+      modification audit. You do not trigger either — the runtime does.
 
       ### OPAC reference
 
@@ -1491,7 +1530,8 @@ hats:
     triggers: ["review.synthesized"]
     publishes: ["fix.plan.ready"]
     exempt_topics: ["fix.plan.ready"]
-    default_publishes: "fix.plan.ready"
+    # No default_publishes: synthetic fix.plan.ready without fix-plan.md
+    # is silent-success. Missing emit must hard-gate and retry.
     terminal_events: ["fix.plan.ready"]
     event_filter:
       enabled: true
@@ -1644,7 +1684,8 @@ hats:
       - review.wave.failed
     publishes: ["LOOP_COMPLETE"]
     exempt_topics: ["LOOP_COMPLETE"]
-    default_publishes: "LOOP_COMPLETE"
+    # No default_publishes: synthetic LOOP_COMPLETE is silent-success.
+    # Missing emit must hard-gate and retry.
     terminal_events: ["LOOP_COMPLETE"]
     event_filter:
       enabled: true

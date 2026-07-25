@@ -1006,6 +1006,71 @@ mod tests {
     }
 
     #[test]
+    fn test_implementation_review_no_success_shaped_default_publishes_and_worker_timeout() {
+        // Structured contract (not prompt text): success-shaped
+        // default_publishes on fan-out / worker / planner / finalizer
+        // recreates the silent-success class (synthetic ready/done/
+        // LOOP_COMPLETE without real artifacts). Fail-closed defaults
+        // on scope-preparer / review-synthesizer remain allowed.
+        let preset =
+            get_preset("implementation-review").expect("implementation-review preset should exist");
+        let config = RalphConfig::parse_yaml(preset.content)
+            .expect("implementation-review YAML should parse");
+
+        for hat_id in [
+            "review-dispatcher",
+            "review-worker",
+            "fix-planner",
+            "finalizer",
+        ] {
+            let hat = config
+                .hats
+                .get(hat_id)
+                .unwrap_or_else(|| panic!("implementation-review should define {hat_id}"));
+            assert!(
+                hat.default_publishes.is_none(),
+                "{hat_id} must not set success-shaped default_publishes; got {:?}",
+                hat.default_publishes
+            );
+        }
+
+        assert_eq!(
+            config
+                .hats
+                .get("scope-preparer")
+                .expect("scope-preparer")
+                .default_publishes
+                .as_deref(),
+            Some("scope.blocked"),
+            "scope-preparer must keep fail-closed default_publishes"
+        );
+        assert_eq!(
+            config
+                .hats
+                .get("review-synthesizer")
+                .expect("review-synthesizer")
+                .default_publishes
+                .as_deref(),
+            Some("review.blocked"),
+            "review-synthesizer must keep fail-closed default_publishes"
+        );
+
+        let worker = config
+            .hats
+            .get("review-worker")
+            .expect("review-worker");
+        assert_eq!(
+            worker.timeout,
+            Some(900),
+            "review-worker per-worker timeout must be 15 minutes (900s)"
+        );
+        assert_eq!(
+            worker.concurrency, 6,
+            "review-worker concurrency must stay 6 for six-dimension fan-out"
+        );
+    }
+
+    #[test]
     fn test_ce_executor_reporter_publishes_report_done() {
         // Static-config guard for the completion-gate event. The chain test above
         // proves the event is origin-compatible at runtime, but `required_events`
