@@ -408,9 +408,10 @@ fn parse_env_nul(bytes: &[u8]) -> HashMap<String, String> {
         let key = iter.next().unwrap_or(b"").to_vec();
         let val = iter.next().unwrap_or(b"").to_vec();
         if let Ok(k) = std::str::from_utf8(&key)
-            && let Ok(v) = std::str::from_utf8(&val) {
-                out.insert(k.to_string(), v.to_string());
-            }
+            && let Ok(v) = std::str::from_utf8(&val)
+        {
+            out.insert(k.to_string(), v.to_string());
+        }
     }
     out
 }

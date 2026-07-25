@@ -516,35 +516,38 @@ fn u8_concurrent_barrier_same_key_single_apply() {
     let store_path_str = store_path.to_string_lossy().into_owned();
     let key = "u8-barrier-concurrent";
 
-    let spawn_one = |ws: std::path::PathBuf,
-                     payloads: std::path::PathBuf,
-                     store: String,
-                     key: String| {
-        let mut cmd = ralph_bin();
-        cmd.current_dir(&ws);
-        cmd.args([
-            "wave",
-            "emit",
-            "review.wave.ready",
-            "--payloads-stdin",
-            "--idempotency-key",
-            &key,
-            "--output",
-            "json",
-        ]);
-        common::scrub_agent_runtime_env(&mut cmd);
-        cmd.env("RALPH_EMISSION_STORE_PATH", &store);
-        cmd.stdin(std::fs::File::open(&payloads).unwrap());
-        let output = cmd.output().expect("ralph spawn");
-        (
-            output.status.code().unwrap_or(-1),
-            String::from_utf8_lossy(&output.stdout).to_string(),
-            String::from_utf8_lossy(&output.stderr).to_string(),
-        )
-    };
+    let spawn_one =
+        |ws: std::path::PathBuf, payloads: std::path::PathBuf, store: String, key: String| {
+            let mut cmd = ralph_bin();
+            cmd.current_dir(&ws);
+            cmd.args([
+                "wave",
+                "emit",
+                "review.wave.ready",
+                "--payloads-stdin",
+                "--idempotency-key",
+                &key,
+                "--output",
+                "json",
+            ]);
+            common::scrub_agent_runtime_env(&mut cmd);
+            cmd.env("RALPH_EMISSION_STORE_PATH", &store);
+            cmd.stdin(std::fs::File::open(&payloads).unwrap());
+            let output = cmd.output().expect("ralph spawn");
+            (
+                output.status.code().unwrap_or(-1),
+                String::from_utf8_lossy(&output.stdout).to_string(),
+                String::from_utf8_lossy(&output.stderr).to_string(),
+            )
+        };
 
     // t1: fresh emit — establishes the row and writes N events.
-    let (c1, s1, e1) = spawn_one(ws.clone(), payloads.clone(), store_path_str.clone(), key.to_string());
+    let (c1, s1, e1) = spawn_one(
+        ws.clone(),
+        payloads.clone(),
+        store_path_str.clone(),
+        key.to_string(),
+    );
     assert_eq!(c1, 0, "t1 must succeed; stderr={e1} stdout={s1}");
 
     // t2: same key after t1 reached `applied` → AlreadyApplied,
@@ -554,7 +557,10 @@ fn u8_concurrent_barrier_same_key_single_apply() {
 
     let w1 = json_field(&s1, "wave_id").expect("w1").to_string();
     let w2 = json_field(&s2, "wave_id").expect("w2").to_string();
-    assert_eq!(w1, w2, "same-key sequential emit must converge on one wave_id");
+    assert_eq!(
+        w1, w2,
+        "same-key sequential emit must converge on one wave_id"
+    );
 
     let d1 = json_field(&s1, "deduplicated").unwrap_or("?");
     let d2 = json_field(&s2, "deduplicated").unwrap_or("?");

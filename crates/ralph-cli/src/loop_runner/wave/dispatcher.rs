@@ -1539,7 +1539,9 @@ pub(crate) async fn execute_wave_via_supervisor_with_executor(
 
     // U3 KTD-5: the local effective cap is
     // `min(hat.concurrency, bridge.max_concurrent_workers())`.
-    let effective_cap: u32 = wave.hat_config.concurrency
+    let effective_cap: u32 = wave
+        .hat_config
+        .concurrency
         .min(bridge.max_concurrent_workers())
         .max(1);
 

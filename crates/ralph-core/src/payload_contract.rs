@@ -58,8 +58,7 @@ static FROM_PAYLOAD_REGEX: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(?i)From\s+event\s+payload\s*:\s*").unwrap());
 static MUST_INCLUDE_REGEX: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(?i)payload\s+MUST\s+include\s*:\s*").unwrap());
-static BACKTICK_FIELD_REGEX: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"`([^`]+)`").unwrap());
+static BACKTICK_FIELD_REGEX: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"`([^`]+)`").unwrap());
 static BACKTICK_INTENT_REGEX: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?i)from\s+event\s+payload|event\s+payload\s*:|payload\s+MUST\s+include").unwrap()
 });

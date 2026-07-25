@@ -699,8 +699,8 @@ fn u5_partial_emission_fail_closed_and_inspect() {
         out
     };
 
-    let store = ralph_core::supervisor::RusqliteSupervisorStore::open(&store_path)
-        .expect("open store");
+    let store =
+        ralph_core::supervisor::RusqliteSupervisorStore::open(&store_path).expect("open store");
     let reserved = store
         .reserve_emission(&scope_key, &payload_digest, 2, &|_| 0)
         .expect("reserve");

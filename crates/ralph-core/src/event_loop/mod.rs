@@ -14333,12 +14333,15 @@ mod u4_current_plan_step_tests {
     fn exec_wave_flow() -> RalphConfig {
         flow_config(vec![
             ("unit_loop", vec!["work.ready", "execution.plan.ready"]),
-            ("exec_wave", vec![
-                "exec.wave.complete",
-                "exec.wave.failed",
-                "exec.unit.done",
-                "exec.unit.failed",
-            ]),
+            (
+                "exec_wave",
+                vec![
+                    "exec.wave.complete",
+                    "exec.wave.failed",
+                    "exec.unit.done",
+                    "exec.unit.failed",
+                ],
+            ),
             ("exec_integrate", vec!["plan.complete"]),
         ])
     }
@@ -14420,7 +14423,10 @@ mod u4_current_plan_step_tests {
     #[test]
     fn u2_review_unit_done_on_review_loop_returns_none() {
         let cfg = review_fix_wave_flow();
-        assert_eq!(advance_plan_step(&cfg, "review_loop", "review.unit.done"), None);
+        assert_eq!(
+            advance_plan_step(&cfg, "review_loop", "review.unit.done"),
+            None
+        );
     }
 
     #[test]

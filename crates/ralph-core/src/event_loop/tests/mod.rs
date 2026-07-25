@@ -63,13 +63,13 @@ mod progress_steward;
 /// consumer_stall_repeat gate that U12 adds on top of the
 /// pre-existing U5 stall-detector gate.
 mod progress_steward_disabled;
-/// 2026-07-24-005 U1 review fix: production `plan.blocked`
-/// synthesis paths must target `reporter`.
-mod u1_plan_blocked_reporter_target;
 mod r5_hard_gate_routing;
 mod recovery_envelope_u7_u8;
 mod replay_light_integration;
 mod review_step_gate;
+/// 2026-07-24-005 U1 review fix: production `plan.blocked`
+/// synthesis paths must target `reporter`.
+mod u1_plan_blocked_reporter_target;
 // 2026-06-23 T2: `## RUNTIME CONFIG` block injection for `max_residuals`.
 // See `runtime_config_block.rs`.
 mod event_policy_lint_resume;

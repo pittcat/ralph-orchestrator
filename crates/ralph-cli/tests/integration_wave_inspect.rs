@@ -388,14 +388,21 @@ fn inspect_active_and_terminal_wave_shapes() {
     write_minimal_ralph_yml(ws);
     let store_path = ws.join(".ralph/supervisor.db");
 
-    let store = ralph_core::supervisor::RusqliteSupervisorStore::open(&store_path)
-        .expect("open store");
+    let store =
+        ralph_core::supervisor::RusqliteSupervisorStore::open(&store_path).expect("open store");
     let active_id = store
-        .register_wave("inspect-active-key", ralph_core::supervisor::WaveKind::Review, 3)
+        .register_wave(
+            "inspect-active-key",
+            ralph_core::supervisor::WaveKind::Review,
+            3,
+        )
         .expect("register");
 
-    let (code, stdout, stderr) =
-        run_ralph(ws, &["wave", "inspect", &active_id, "--output", "json"], &[]);
+    let (code, stdout, stderr) = run_ralph(
+        ws,
+        &["wave", "inspect", &active_id, "--output", "json"],
+        &[],
+    );
     assert_eq!(code, 0, "inspect active must succeed; stderr={stderr}");
     let parsed: serde_json::Value = serde_json::from_str(&stdout).unwrap();
     assert_eq!(parsed["registered"], serde_json::json!(true));

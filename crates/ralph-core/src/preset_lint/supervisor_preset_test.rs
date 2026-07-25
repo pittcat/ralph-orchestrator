@@ -703,9 +703,7 @@ fn ce_executor_supervisor_preset_exec_wave_mounts_unit_terminal_topics() {
             .unwrap_or_else(|| panic!("mechanism.flow must contain a `{step_id}` step"))
             .get("allowed_emits")
             .and_then(|v| v.as_sequence())
-            .unwrap_or_else(|| {
-                panic!("`{step_id}` step must declare allowed_emits as a sequence")
-            })
+            .unwrap_or_else(|| panic!("`{step_id}` step must declare allowed_emits as a sequence"))
             .iter()
             .filter_map(serde_yaml::Value::as_str)
             .map(str::to_string)

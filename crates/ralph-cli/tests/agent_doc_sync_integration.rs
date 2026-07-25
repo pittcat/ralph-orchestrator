@@ -64,9 +64,11 @@ fn sync_creates_section_when_file_missing() {
     assert!(!path.exists(), "precondition: file must not exist");
 
     let block = sample_block();
-    let report =
-        ralph_core::agent_doc_sync::sync_all(dir.path(), &sync_config_for(std::slice::from_ref(&block)))
-            .expect("warn mode must not propagate errors");
+    let report = ralph_core::agent_doc_sync::sync_all(
+        dir.path(),
+        &sync_config_for(std::slice::from_ref(&block)),
+    )
+    .expect("warn mode must not propagate errors");
 
     assert_eq!(report.synced, 1);
     assert_eq!(report.skipped, 0);
@@ -107,9 +109,11 @@ fn sync_appends_block_when_marker_absent() {
     fs::write(&path, prefix).unwrap();
 
     let block = sample_block();
-    let report =
-        ralph_core::agent_doc_sync::sync_all(dir.path(), &sync_config_for(std::slice::from_ref(&block)))
-            .expect("warn mode must not propagate errors");
+    let report = ralph_core::agent_doc_sync::sync_all(
+        dir.path(),
+        &sync_config_for(std::slice::from_ref(&block)),
+    )
+    .expect("warn mode must not propagate errors");
 
     assert_eq!(report.synced, 1, "one block must be appended");
     assert_eq!(report.skipped, 0);
@@ -217,9 +221,11 @@ fn sync_replaces_in_place_on_v_mismatch() {
     );
     fs::write(&path, &existing).unwrap();
 
-    let report =
-        ralph_core::agent_doc_sync::sync_all(dir.path(), &sync_config_for(std::slice::from_ref(&block)))
-            .expect("warn mode must not propagate errors");
+    let report = ralph_core::agent_doc_sync::sync_all(
+        dir.path(),
+        &sync_config_for(std::slice::from_ref(&block)),
+    )
+    .expect("warn mode must not propagate errors");
 
     assert_eq!(report.synced, 1, "block must be reported as replaced");
     assert_eq!(report.skipped, 0);
@@ -355,9 +361,11 @@ fn sync_retries_lock_then_succeeds() {
     // Wait until the holder has acquired the lock, then start sync.
     barrier.wait();
     let started = Instant::now();
-    let report =
-        ralph_core::agent_doc_sync::sync_all(dir.path(), &sync_config_for(std::slice::from_ref(&block)))
-            .expect("warn mode must not propagate errors");
+    let report = ralph_core::agent_doc_sync::sync_all(
+        dir.path(),
+        &sync_config_for(std::slice::from_ref(&block)),
+    )
+    .expect("warn mode must not propagate errors");
     let elapsed = started.elapsed();
 
     holder.join().expect("holder thread must not panic");

@@ -741,54 +741,50 @@ fn execute_emit(args: WaveEmitArgs, use_colors: bool) -> Result<()> {
 
     let fail_at = std::env::var("RALPH_WAVE_EMIT_FAIL_AT").ok();
 
-    let (outcome, used_store_cutover, mut applied_cleanup_pending) =
-        if let Some(out) = stale_applied {
-            let _ = crate::wave_verify_gate::consume_claimed_ticket(&workspace_root);
-            (out, true, false)
-        } else {
-            crate::wave_verify_gate::require_ticket(
-                &workspace_root,
-                &op_ctx,
-                &args.topic,
-                &fp,
-            )?;
+    let (outcome, used_store_cutover, mut applied_cleanup_pending) = if let Some(out) =
+        stale_applied
+    {
+        let _ = crate::wave_verify_gate::consume_claimed_ticket(&workspace_root);
+        (out, true, false)
+    } else {
+        crate::wave_verify_gate::require_ticket(&workspace_root, &op_ctx, &args.topic, &fp)?;
 
-            if let Some(ref key) = args.idempotency_key {
-                let (loop_id, hat) = build_scope_inputs();
-                let outcome_res = write_wave_events_with_idempotency_store_with_injection(
-                    &args.topic,
-                    &payloads,
-                    &events_file,
-                    key,
-                    &loop_id,
-                    &hat,
-                    fail_at.as_deref(),
-                );
-                match outcome_res {
-                    Ok(out) => (out, true, false),
-                    Err(err) => {
-                        if let Err(restore_err) =
-                            crate::wave_verify_gate::restore_ticket(&workspace_root)
-                        {
-                            eprintln!(
-                                "warning: failed to restore ticket after emit failure: {restore_err}"
-                            );
-                        }
-                        return Err(err);
+        if let Some(ref key) = args.idempotency_key {
+            let (loop_id, hat) = build_scope_inputs();
+            let outcome_res = write_wave_events_with_idempotency_store_with_injection(
+                &args.topic,
+                &payloads,
+                &events_file,
+                key,
+                &loop_id,
+                &hat,
+                fail_at.as_deref(),
+            );
+            match outcome_res {
+                Ok(out) => (out, true, false),
+                Err(err) => {
+                    if let Err(restore_err) =
+                        crate::wave_verify_gate::restore_ticket(&workspace_root)
+                    {
+                        eprintln!(
+                            "warning: failed to restore ticket after emit failure: {restore_err}"
+                        );
                     }
+                    return Err(err);
                 }
-            } else {
-                let wave_id = write_wave_events(&args.topic, &payloads, &events_file)?;
-                (
-                    IdempotencyOutcome {
-                        wave_id,
-                        deduplicated: false,
-                    },
-                    false,
-                    false,
-                )
             }
-        };
+        } else {
+            let wave_id = write_wave_events(&args.topic, &payloads, &events_file)?;
+            (
+                IdempotencyOutcome {
+                    wave_id,
+                    deduplicated: false,
+                },
+                false,
+                false,
+            )
+        }
+    };
 
     let wave_id = outcome.wave_id;
     let deduplicated = outcome.deduplicated;
@@ -1861,12 +1857,7 @@ fn try_recover_stale_claim_if_store_applied(
             }
             n
         };
-        match store.reserve_emission(
-            &scope_key,
-            &payload_digest,
-            expected_count,
-            &count_for_wave,
-        ) {
+        match store.reserve_emission(&scope_key, &payload_digest, expected_count, &count_for_wave) {
             Ok(ralph_core::supervisor::EmissionReservation::AlreadyApplied { public_wave_id }) => {
                 Ok(Some(IdempotencyOutcome {
                     wave_id: public_wave_id,

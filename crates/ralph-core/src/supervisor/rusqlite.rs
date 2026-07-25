@@ -121,9 +121,7 @@ impl RusqliteSupervisorStore {
                 }
                 Err(err) if is_sqlite_busy(&err) => {
                     last_busy_err = Some(err);
-                    std::thread::sleep(std::time::Duration::from_millis(
-                        50 * (attempt as u64 + 1),
-                    ));
+                    std::thread::sleep(std::time::Duration::from_millis(50 * (attempt as u64 + 1)));
                 }
                 Err(err) => {
                     return Err(SupervisorStoreError::Open(format!(
@@ -1135,9 +1133,8 @@ impl SupervisorStore for RusqliteSupervisorStore {
             // which conflicts with `tx.commit()` later.  Materialise
             // the seq to a local first, then drop the statement.
             let seq: i64 = {
-                let mut stmt = tx.prepare(
-                    "INSERT INTO wave_id_seq (placeholder) VALUES (0) RETURNING seq",
-                )?;
+                let mut stmt =
+                    tx.prepare("INSERT INTO wave_id_seq (placeholder) VALUES (0) RETURNING seq")?;
                 stmt.query_row([], |row| row.get(0))?
             };
             let public_wave_id = format!("w-rs-{seq}");

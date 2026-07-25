@@ -113,12 +113,11 @@ impl ValidationRule for StepHandoffRule {
         //      `ValidationContext::with_tasks_path`.
         // If any of those are missing, the legacy path (in-memory
         // only) runs unchanged.
-        let resolved_task: Option<Task> =
-            match (task_id.as_deref(), ctx.tasks_path()) {
-                (Some(tid), Some(path)) => resolve_task_for_gate(&snapshot.tasks, path, tid).ok(),
-                _ => None,
-            }
-            .unwrap_or_default();
+        let resolved_task: Option<Task> = match (task_id.as_deref(), ctx.tasks_path()) {
+            (Some(tid), Some(path)) => resolve_task_for_gate(&snapshot.tasks, path, tid).ok(),
+            _ => None,
+        }
+        .unwrap_or_default();
 
         let phase_id = ctx.workflow_phase_id();
 

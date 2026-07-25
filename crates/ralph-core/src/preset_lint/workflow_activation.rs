@@ -153,36 +153,36 @@ impl HandoffGraph {
         // supervisor's `supervisor` node.
         if let Some(mech) = config.mechanism.as_ref()
             && let Some(flow) = mech.flow.as_ref()
-                && flow
-                    .steps
-                    .iter()
-                    .any(|s| is_wave_runner_binding(s.runs.as_deref()))
-                {
-                    const WAVE_SLOT_TO_WAVE: &[(&str, &str)] = &[
-                        ("exec.unit.done", "exec.wave.complete"),
-                        ("exec.unit.failed", "exec.wave.failed"),
-                        ("fix.unit.done", "fix.wave.complete"),
-                        ("fix.unit.failed", "fix.wave.failed"),
-                        ("review.unit.done", "review.wave.complete"),
-                        ("review.unit.failed", "review.wave.failed"),
-                    ];
-                    let wave_id = "wave_runtime".to_string();
-                    hat_order.push(wave_id.clone());
-                    for (slot_topic, wave_topic) in WAVE_SLOT_TO_WAVE {
-                        topic_subscribers
-                            .entry((*slot_topic).to_string())
-                            .or_default()
-                            .push(wave_id.clone());
-                        topic_publishers
-                            .entry((*wave_topic).to_string())
-                            .or_default()
-                            .push(wave_id.clone());
-                        hat_publishes
-                            .entry(wave_id.clone())
-                            .or_default()
-                            .push((*wave_topic).to_string());
-                    }
-                }
+            && flow
+                .steps
+                .iter()
+                .any(|s| is_wave_runner_binding(s.runs.as_deref()))
+        {
+            const WAVE_SLOT_TO_WAVE: &[(&str, &str)] = &[
+                ("exec.unit.done", "exec.wave.complete"),
+                ("exec.unit.failed", "exec.wave.failed"),
+                ("fix.unit.done", "fix.wave.complete"),
+                ("fix.unit.failed", "fix.wave.failed"),
+                ("review.unit.done", "review.wave.complete"),
+                ("review.unit.failed", "review.wave.failed"),
+            ];
+            let wave_id = "wave_runtime".to_string();
+            hat_order.push(wave_id.clone());
+            for (slot_topic, wave_topic) in WAVE_SLOT_TO_WAVE {
+                topic_subscribers
+                    .entry((*slot_topic).to_string())
+                    .or_default()
+                    .push(wave_id.clone());
+                topic_publishers
+                    .entry((*wave_topic).to_string())
+                    .or_default()
+                    .push(wave_id.clone());
+                hat_publishes
+                    .entry(wave_id.clone())
+                    .or_default()
+                    .push((*wave_topic).to_string());
+            }
+        }
 
         hat_order.sort();
 
@@ -1596,10 +1596,11 @@ pub fn wave_coord_check_v2(config: &RalphConfig, trigger: &str) -> bool {
             let mut found = false;
             for s in &f.steps {
                 if let Some(r) = s.runs.as_deref()
-                    && r.starts_with("wave.runtime.") {
-                        found = true;
-                        break;
-                    }
+                    && r.starts_with("wave.runtime.")
+                {
+                    found = true;
+                    break;
+                }
             }
             found
         })
