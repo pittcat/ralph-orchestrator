@@ -177,12 +177,13 @@ ralph wave emit [OPTIONS] <TOPIC>
 
 > **wave worker 注意事项**：
 >
-> 1. **结果返回必须用 `ralph emit`**：在 `RALPH_WAVE_WORKER=1` 的子进程中，`ralph emit` 会将事件写入 candidate-events。`ralph wave emit` 本身在 worker 内被阻止（dispatcher hat 才能调用）。
+> 1. **结果返回必须用 `ralph emit`**：在 `RALPH_WAVE_WORKER=1` 的子进程中，dispatcher 已注入 `RALPH_EVENTS_FILE=<workspace_root>/.ralph/wave-<id>-<idx>.jsonl`，即本 slot 专用的 per-slot wave channel。直接 `ralph emit <topic> ...`，事件落到该 channel，dispatcher 之后会读出并对账到 supervisor store。`ralph wave emit` 本身在 worker 内被阻止（dispatcher hat 才能调用）。
 >
 > 2. **落点差异**：
->    - `ralph wave emit` → 写入主 ledger（`current-events` 链）
->    - `ralph emit`（在 wave worker 内）→ 写入 candidate-events
->    - 不要混用：worker 内不要试图设置 `RALPH_EVENTS_FILE` 把结果写到 current-events 绕过 candidate-events——会被 `ralph emit` 的 allowlist 校验拒绝。
+>    - `ralph wave emit`（dispatcher hat 用）→ 写入主 ledger（`current-events` 链）
+>    - `ralph emit`（在 wave worker 内）→ 写入 dispatcher 注入的 per-slot wave channel（`<workspace_root>/.ralph/wave-<id>-<idx>.jsonl`）
+>    - 保留 `RALPH_EVENTS_FILE`（dispatcher 已设置）；**禁止** `unset` 后改走 candidate-events —— 事件会丢失，slot 会被记为 `empty_worker_result`。
+>    - 也不要强行把 `RALPH_EVENTS_FILE` 写到 `current-events` / `current-candidate-events` / 其它 wave slot 的 channel —— 都会被 P6 allowlist 拒收。
 >
 > 3. **wave_id 共享**：同一 `--payloads` 列表产生的 N 个事件共享同一个 `wave_id` 和 `wave_total`，由 `wave_index`（0..N-1）区分。聚合 hat 据此识别同一 wave 的所有结果。
 

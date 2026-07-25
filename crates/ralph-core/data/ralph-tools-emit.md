@@ -238,7 +238,7 @@ tail -n 1 "$events_file" | jq -e '.payload | type == "object"'
 | `Refusing urgent steer marker` | 上轮 urgent steer 未处理 | 先处理 urgent steer 内容（参见 error 信息中的指引），再重试 emit |
 | 任何命令失败 | 通用恢复 | 1. `ralph emit --help` 确认语法 2. 检查退出码 3. 查看错误信息 4. 重试 |
 
-> **wave worker 注意**：在 `RALPH_WAVE_WORKER=1` 的子进程中通过 `ralph emit` 返回结果时，事件会写入 **candidate-events**（不是 current-events），与 wave 调度器一致。不要强行设置 `RALPH_EVENTS_FILE` 指向其他文件——会被 allowlist 拒绝。
+> **wave worker 通道**：在 `RALPH_WAVE_WORKER=1` 的子进程中，dispatcher 已为你注入了 `RALPH_EVENTS_FILE=<workspace_root>/.ralph/wave-<id>-<idx>.jsonl` —— 这是该 slot 专用的 per-slot wave channel。`ralph emit` 接受这个路径（wave-worker 上下文下由 P6 allowlist 显式放行，路径形态必须严格匹配 `wave-<id>-<idx>.jsonl`）。保留 `RALPH_EVENTS_FILE`，直接 `ralph emit <topic> ...`，事件落到该 slot 的 channel，dispatcher 之后会读取并对账到 supervisor store。**禁止** `unset RALPH_EVENTS_FILE` 或改写到 candidate-events —— 事件会丢失，slot 会被记为 `empty_worker_result`。
 
 > **诊断**：emit 拒收后无法在 CLI 层修复时，启 `RALPH_DIAGNOSTICS=1` 重新 loop；envelope 写到 `recovery.jsonl`，`ralph diagnose --session latest` 出报告。详见 `docs/guide/runtime-diagnosis.md` §10 / §12.1。
 
