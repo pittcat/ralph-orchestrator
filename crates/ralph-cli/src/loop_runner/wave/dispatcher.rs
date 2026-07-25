@@ -6053,19 +6053,131 @@ hats: {}
     }
 
     /// T3 (regression): success path (`InjectedComplete`) does NOT write a
-    /// diagnostics file. We verify by calling `write_wave_diagnostics_json`
-    /// against a clean temp dir and confirming the directory stays empty.
+    /// diagnostics file. Unlike the earlier hollow stub, this test actually
+    /// drives `run_supervisor_fan_in` through a fully-completed wave so the
+    /// coordinator returns `CoordinatorAction::Complete`, then asserts the
+    /// success arm wrote NO per-slot diagnostics JSON. The unique wave_id
+    /// guarantees the assertion is meaningful: production writes diagnostics
+    /// to `Path::new(".")` (CWD), and nextest's process-per-test isolation
+    /// keeps CWD stable, so if a future change adds
+    /// `write_wave_diagnostics_json` to the `InjectedComplete` arm this test
+    /// fails.
     #[test]
     fn u5_no_diagnostics_file_on_success_path() {
+        use ralph_core::config::HatConfig;
+        use ralph_core::supervisor::InMemoryCoordinatorBridge;
+        use ralph_core::supervisor::SlotResource;
+        use ralph_core::supervisor::SupervisorBridge;
+        use ralph_core::supervisor::{SupervisorStore, WaveKind};
+
+        // Unique wave_id so the diagnostics-file absence assertion cannot
+        // collide with a file written by any other test.
+        let wave_id = "w-u4-success-no-diag-2026-07-25-004";
+
+        // Build an in-memory store + bridge with 2 slots, both Completed.
+        let store = std::sync::Arc::new(ralph_core::supervisor::InMemorySupervisorStore::new());
+        let bridge = InMemoryCoordinatorBridge::from_store(store.clone());
+        let bridge_arc: Arc<dyn SupervisorBridge> = Arc::new(bridge);
+
+        let store_wave_id = bridge_arc
+            .register_wave_if_absent(WaveKind::Exec, wave_id, 2)
+            .unwrap();
+
+        // Bind + dispatch + complete BOTH slots so `evaluate_phase`
+        // reaches `Integrate` (pending=0, in_flight=0, completed>=total).
+        for slot in 0..2u32 {
+            store
+                .bind_worktree(
+                    &store_wave_id,
+                    slot,
+                    SlotResource {
+                        slot_index: slot,
+                        worktree_path: Some(format!(".ralph/s{slot}")),
+                        branch: Some(format!("ralph/u4-s{slot}")),
+                    },
+                )
+                .unwrap();
+        }
+        let mut dispatched = Vec::new();
+        for _ in 0..2 {
+            let (w, i) = store.try_dispatch_next(8).unwrap().unwrap();
+            dispatched.push((w, i));
+        }
+        for (w, i) in dispatched {
+            store.record_slot_result(&w, i, "hash", 1).unwrap();
+        }
+
+        // Sanity: the wave is fully completed before fan-in.
+        let snap = store.fan_in_status(&store_wave_id).unwrap();
+        assert_eq!(snap.completed_count, 2);
+
+        // Build the CompletedWave + DetectedWave for this wave. The trigger
+        // topic does NOT start with `review.` or `fix.` so the kind is Exec.
+        let completed = ralph_core::CompletedWave {
+            wave_id: wave_id.to_string(),
+            wave_total: 2,
+            ..ralph_core::CompletedWave::default()
+        };
+        let detected = ralph_core::DetectedWave {
+            wave_id: wave_id.to_string(),
+            target_hat: HatId::new("u4-success-hat"),
+            hat_config: HatConfig {
+                name: "u4-success-hat".to_string(),
+                ..HatConfig::default()
+            },
+            events: vec![core_event("work.ready", "payload-0")],
+            total: 1,
+            partial: false,
+            consumer_aggregate_timeout: None,
+        };
+
+        // Fresh temp dir for the main events file the success arm appends to.
+        let temp_root = tempfile::TempDir::new().expect("temp dir");
+        let main_events_file = temp_root.path().join("events.jsonl");
+
+        let outcome = run_supervisor_fan_in(&bridge_arc, &completed, &detected, &main_events_file, 60);
+        assert!(
+            matches!(outcome, SupervisorFanInOutcome::InjectedComplete),
+            "success path must reach InjectedComplete, got {outcome:?}"
+        );
+
+        // The InjectedComplete arm must NOT write any diagnostics file.
+        let diag_path = std::path::Path::new(".")
+            .join(".ralph")
+            .join("diagnostics")
+            .join(format!("wave-{wave_id}-slots.json"));
+        assert!(
+            !diag_path.exists(),
+            "success path must not write a diagnostics file at {}",
+            diag_path.display()
+        );
+    }
+
+    /// T3 negative: `write_wave_diagnostics_json` surfaces an `Err` (and does
+    /// NOT panic) when the diagnostics directory cannot be created — here
+    /// because `.ralph/diagnostics` collides with an existing regular file.
+    #[test]
+    fn u5_write_wave_diagnostics_json_failure_returns_err() {
         let temp_root = tempfile::TempDir::new().expect("temp dir");
         let root_path = temp_root.path();
 
-        // Simulate a success path: no call to write_wave_diagnostics_json.
-        // Verify the diagnostics directory was never created.
-        let diag_path = root_path.join(".ralph").join("diagnostics");
+        // Make `create_dir_all(root/.ralph/diagnostics)` fail by placing a
+        // regular FILE at the `diagnostics` path.
+        std::fs::create_dir_all(root_path.join(".ralph")).expect("create .ralph");
+        std::fs::write(root_path.join(".ralph").join("diagnostics"), b"x")
+            .expect("plant colliding file");
+
+        let payload = serde_json::json!({
+            "wave_id": "w-u4-neg",
+            "generated_at_kind": "injected_failed",
+            "elapsed_secs": 0,
+            "slots": []
+        });
+
+        let result = write_wave_diagnostics_json(root_path, "w-u4-neg", &payload);
         assert!(
-            !diag_path.exists(),
-            "success path must not create the diagnostics directory"
+            result.is_err(),
+            "write must fail when diagnostics path is a file, got {result:?}"
         );
     }
 
@@ -6140,10 +6252,10 @@ hats: {}
         use ralph_core::supervisor::SlotStatus;
         let mut reasons = std::collections::HashMap::new();
         for (idx, status) in &snap.slots {
-            if matches!(status, SlotStatus::Failed | SlotStatus::Cancelled) {
-                if let Ok(Some(r)) = bridge.slot_failure_reason(&wave_id, *idx) {
-                    reasons.insert(*idx, r);
-                }
+            if matches!(status, SlotStatus::Failed | SlotStatus::Cancelled)
+                && let Ok(Some(r)) = bridge.slot_failure_reason(&wave_id, *idx)
+            {
+                reasons.insert(*idx, r);
             }
         }
 
