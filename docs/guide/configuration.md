@@ -829,7 +829,7 @@ Loop 终止 Webhook 通知：loop 以成功或失败终止时，向飞书自定�
 - **启用时非法配置硬失败**：`timeout_seconds == 0`、`endpoints` 为空、endpoint 缺少 `url`/`body`/`on`、`on` 含未知值，都会在配置校验阶段报 `notifications.*` 字段路径错误并拒绝启动。
 - **与 hooks 可并存**：与 `hooks.events.post.loop.complete` / `post.loop.error` 互不干扰，但同开两套可能重复通知，请自行取舍。
 - **数组合并为整表替换**：项目 YAML 合并（`-c` + `-H` 或配置覆盖）时，`endpoints` 列表按整表替换（覆盖而非追加）。
-- **日志脱敏**：warn 日志与 diagnostics 中的 URL 会对 query string 做 redact，避免 token 明文落盘。
+- **日志脱敏**：投递失败的 warn 日志仅保留 URL 的 `scheme://host[:port]`，path、query 与 userinfo 均替换或移除；HTTP 错误只记录稳定类别，不透传可能内嵌完整 URL 的底层错误文本。非法或非 HTTP(S) URL 按 `<redacted>` 处理。
 
 启用示例（飞书自定义机器人，`********` 为你自己的 webhook 路径占位）：
 
