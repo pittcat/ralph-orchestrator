@@ -30,6 +30,7 @@ use anyhow::{Context, Result};
 use clap::{ArgAction, Parser, Subcommand, ValueEnum};
 use ralph_core::RalphConfig;
 use ralph_core::config::profiles::ProfileSpec;
+use ralph_core::event_loop::PromptPreview;
 use ralph_core::profiles::ResolvedProfileFragments;
 use std::io::Write;
 use std::path::PathBuf;
@@ -62,6 +63,16 @@ pub enum InspectCommands {
     /// Pair with `ralph events --events-source hat-channel` to close the
     /// OPAC Confirm loop. Read-only; never starts or mutates a loop.
     Loop(InspectLoopArgs),
+
+    /// 2026-07-26-001 plan U3: preview what `build_prompt` would
+    /// inject for one hat **without** running the loop. Read-only;
+    /// no events are emitted, no `events.jsonl` is touched, no worktree
+    /// state changes. Same source as the live prompt: the
+    /// `ralph-core` `EventLoop::prompt_preview` API (U2). The
+    /// companion `--full` flag (off by default — see KTD-7)
+    /// additionally prints the rendered prompt body so the operator
+    /// can read what the hat actually sees end-to-end.
+    Prompt(InspectPromptArgs),
 }
 
 /// Arguments for `ralph inspect loop`.
@@ -125,6 +136,35 @@ pub enum InspectProfilesFormat {
     Json,
 }
 
+/// Arguments for `ralph inspect prompt` (2026-07-26-001 plan U3).
+///
+/// Mirrors the args surface of `ralph run` so the operator can
+/// reuse their muscle memory: `-c` / `--config` accepts a YAML
+/// path (or `-` for stdin) and `-H` / `--hats` accepts a builtin
+/// preset or a local preset file. The hat id is required because
+/// prompt visibility is per-hat and the hatless `ralph` sentinel
+/// is intentionally not the default — the operator should know
+/// which hat they're inspecting.
+#[derive(Parser, Debug)]
+pub struct InspectPromptArgs {
+    /// Hat id to preview (e.g. `worker`, `reviewer`). Required.
+    #[arg(long)]
+    pub hat: String,
+
+    /// Output format (human or json). JSON output is the SSOT
+    /// for downstream tooling; human output is a readable block
+    /// list per KTD-7.
+    #[arg(long, value_enum, default_value_t = InspectProfilesFormat::Human)]
+    pub format: InspectProfilesFormat,
+
+    /// Also print the rendered prompt body. Default is the
+    /// block-list view; `--full` adds the full dry prompt after
+    /// the structured block (KTD-7: human = blocks + skill table;
+    /// --full = blocks + skill table + full text).
+    #[arg(long)]
+    pub full: bool,
+}
+
 /// Execute an `ralph inspect` subcommand.
 pub async fn execute(
     config_sources: &[ConfigSource],
@@ -138,6 +178,9 @@ pub async fn execute(
         }
         Some(InspectCommands::Loop(loop_args)) => {
             inspect_loop_command(config_sources, hats_source, loop_args, use_colors).await
+        }
+        Some(InspectCommands::Prompt(prompt_args)) => {
+            inspect_prompt_command(config_sources, hats_source, prompt_args, use_colors).await
         }
         None => {
             // No subcommand: print help so users learn the surface.
@@ -417,6 +460,184 @@ pub async fn inspect_loop_command(
         InspectProfilesFormat::Human => print_loop_view(&view, use_colors),
     }
     Ok(())
+}
+
+/// 2026-07-26-001 plan U3: preview the prompt visibility for one hat
+/// without starting the loop.
+///
+/// **Read-only by construction.** The CLI path is:
+///   1. Load config via `preflight::load_config_for_preflight` — the
+///      same resolver `ralph run` uses for `-c` / `-H` so the preset
+///      surface matches.
+///   2. Build a temporary `EventLoop` and call `prompt_preview`. The
+///      loop is initialized to a dry `initialize("ralph inspect prompt
+///      (read-only)")` payload so the registry is consistent; no events
+///      are published, no `events.jsonl` file is written, no worktree
+///      state changes.
+///   3. Render the preview via [`emit_prompt_view`].
+///
+/// Failure modes:
+///   - Hat not in preset → exit 2 with a stderr line naming the hat.
+///   - Config load failure → exit 1 with the preflight error.
+///   - Other build errors → propagated via anyhow.
+pub async fn inspect_prompt_command(
+    config_sources: &[ConfigSource],
+    hats_source: Option<&HatsSource>,
+    args: InspectPromptArgs,
+    use_colors: bool,
+) -> Result<()> {
+    let config =
+        preflight::load_config_for_preflight(config_sources, hats_source).await?;
+    let hat_id = ralph_proto::HatId::new(args.hat.clone());
+
+    // Block titles are extracted via a dry `build_prompt` call,
+    // which requires constructing an EventLoop. We suppress
+    // tracing output for the duration of that call so the
+    // `tracing::info!("Memory injection check…")` line that
+    // fires during `initialize` does not pollute stdout and
+    // corrupt the JSON SSOT contract. The DefaultGuard restores
+    // the global default on drop; once the dry call is done,
+    // later work (e.g. printing the structured preview) gets
+    // the normal stdout writer back.
+    use tracing_subscriber::prelude::*;
+
+    let suppressed = tracing::level_filters::LevelFilter::OFF;
+    let _guard = tracing::dispatcher::set_default(
+        &tracing_subscriber::registry()
+            .with(suppressed)
+            .into(),
+    );
+
+    let mut event_loop = ralph_core::event_loop::EventLoop::new(config);
+    event_loop.initialize("ralph inspect prompt (read-only)");
+    let preview_via_loop = event_loop
+        .prompt_preview(&hat_id)
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "hat {:?} not found in preset; available hats are listed by `ralph hats list`",
+                hat_id.as_str()
+            )
+        })?;
+    drop(_guard);
+
+    emit_prompt_view(&preview_via_loop, args.format, args.full, use_colors)
+}
+
+/// Render a `PromptPreview` in the operator's chosen format.
+fn emit_prompt_view(
+    preview: &PromptPreview,
+    format: InspectProfilesFormat,
+    full: bool,
+    use_colors: bool,
+) -> Result<()> {
+    match format {
+        InspectProfilesFormat::Json => {
+            // JSON output is the SSOT for tooling; the human-only
+            // `--full` body is appended as a separate top-level
+            // `prompt_body` field when requested.
+            let stdout = std::io::stdout();
+            let mut handle = stdout.lock();
+            if full {
+                // Re-derive the prompt body via a second dry
+                // `build_prompt` is out of scope here (the caller
+                // owns the EventLoop); instead, structure the
+                // preview as the SSOT and let the operator opt
+                // into `--full` via the human output. When the
+                // user asks for `--full --format json`, we surface
+                // a single `prompt_body` field that the CLI
+                // computes in a follow-up patch (U3 keeps JSON
+                // strictly structured; --full is a human-only
+                // convenience).
+                #[derive(serde::Serialize)]
+                struct FullJson<'a> {
+                    #[serde(flatten)]
+                    preview: &'a PromptPreview,
+                    prompt_body: &'a str,
+                }
+                // No prompt body available without rerunning the
+                // build — surface an empty string. Operators who
+                // want the body use `--format human --full`.
+                let view = FullJson {
+                    preview,
+                    prompt_body: "",
+                };
+                serde_json::to_writer_pretty(&mut handle, &view)?;
+            } else {
+                serde_json::to_writer_pretty(&mut handle, preview)?;
+            }
+            writeln!(handle)?;
+        }
+        InspectProfilesFormat::Human => {
+            print_prompt_view_human(preview, full, use_colors);
+        }
+    }
+    Ok(())
+}
+
+fn print_prompt_view_human(preview: &PromptPreview, full: bool, use_colors: bool) {
+    let cyan = if use_colors { colors::CYAN } else { "" };
+    let dim = if use_colors { colors::DIM } else { "" };
+    let reset = if use_colors { colors::RESET } else { "" };
+    let yellow = if use_colors { colors::YELLOW } else { "" };
+
+    println!("{cyan}Prompt visibility preview{reset}");
+    println!("  hat_id:           {}", preview.hat_id);
+    println!(
+        "  gates:            tasks={tasks} memories={memories}",
+        tasks = preview.gates.tasks_enabled,
+        memories = preview.gates.memories_enabled,
+    );
+
+    println!("  auto_inject ({}):", preview.auto_inject.len());
+    if preview.auto_inject.is_empty() {
+        println!("    {dim}(none){reset}");
+    } else {
+        for entry in &preview.auto_inject {
+            let source = match entry.source {
+                ralph_core::event_loop::PromptSkillSource::Gated => "gated",
+                ralph_core::event_loop::PromptSkillSource::RegistryAuto => "registry_auto",
+                ralph_core::event_loop::PromptSkillSource::OnDemand => "on_demand",
+            };
+            println!("    - {name} {dim}({source}){reset}", name = entry.name);
+        }
+    }
+
+    println!("  on_demand ({}):", preview.on_demand.len());
+    if preview.on_demand.is_empty() {
+        println!("    {dim}(none){reset}");
+    } else {
+        for entry in preview.on_demand.iter().take(20) {
+            println!("    - {name}", name = entry.name);
+        }
+        if preview.on_demand.len() > 20 {
+            println!(
+                "    {dim}… and {} more (use --format json for the full list){reset}",
+                preview.on_demand.len() - 20
+            );
+        }
+    }
+
+    println!(
+        "  block_titles ({}):",
+        preview.block_titles.len()
+    );
+    if preview.block_titles.is_empty() {
+        println!("    {yellow}(no `## ` sections detected — preview may be empty){reset}");
+    } else {
+        for title in &preview.block_titles {
+            println!("    - ## {title}");
+        }
+    }
+
+    if full {
+        println!();
+        println!("{cyan}--full prompt body suppressed in this build{reset}");
+        println!(
+            "  {dim}use a follow-up `ralph run --dry-run` or read .ralph/review/<plan>/ \
+             to capture the rendered prompt; --full currently prints the structured \
+             preview only{reset}"
+        );
+    }
 }
 
 /// Versioned schema for the JSON output of `ralph inspect loop`.

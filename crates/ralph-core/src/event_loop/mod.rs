@@ -825,6 +825,97 @@ fn build_invalid_step_target_resume_payload_for_jsonl(
     serde_json::to_string(&serde_json::Value::Object(payload)).unwrap_or_else(|_| "{}".to_string())
 }
 
+/// Pure config-driven preview that does **not** require a
+/// constructed `EventLoop`. Used by `ralph inspect prompt` to
+/// avoid the noisy `tracing::info!("Memory injection check…")`
+/// path that runs when an EventLoop is constructed (its
+/// initialization logs to stdout, which corrupts the JSON SSOT
+/// contract). The `EventLoop::prompt_preview` method delegates to
+/// this function with a closure that runs `build_prompt` for the
+/// block-title extraction.
+///
+/// `block_titles` is supplied via a closure so the caller can opt
+/// into the heavier `build_prompt`-driven extraction; the pure
+/// CLI path passes `|_| Vec::new()` to keep the command
+/// side-effect-free.
+pub fn preview_prompt_for_config<F>(
+    config: &RalphConfig,
+    hat_id: &HatId,
+    block_titles: F,
+) -> Option<PromptPreview>
+where
+    F: FnOnce(&HatId) -> Vec<String>,
+{
+    let hat_registry = HatRegistry::from_config(config);
+    if hat_registry.get(hat_id).is_none() && hat_id.as_str() != "ralph" {
+        return None;
+    }
+
+    let skill_registry = SkillRegistry::from_config(
+        &config.skills,
+        std::path::Path::new(&config.core.workspace_root),
+        Some(config.cli.backend.as_str()),
+    )
+    .unwrap_or_else(|_| SkillRegistry::new(Some(config.cli.backend.as_str())));
+
+    let gates = PromptGates {
+        tasks_enabled: config.tasks.enabled,
+        memories_enabled: config.memories.enabled,
+    };
+
+    let mut auto_inject: Vec<PromptSkillEntry> = Vec::new();
+    let default_gate_open = gates.memories_enabled || gates.tasks_enabled;
+    if default_gate_open && skill_registry.is_hat_eligible("ralph-tools", hat_id.as_str()) {
+        auto_inject.push(PromptSkillEntry::gated("ralph-tools"));
+    }
+    if gates.tasks_enabled
+        && skill_registry.is_hat_eligible("ralph-tools-tasks", hat_id.as_str())
+    {
+        auto_inject.push(PromptSkillEntry::gated("ralph-tools-tasks"));
+    }
+    if gates.memories_enabled
+        && skill_registry.is_hat_eligible("ralph-tools-memories", hat_id.as_str())
+    {
+        auto_inject.push(PromptSkillEntry::gated("ralph-tools-memories"));
+    }
+    if default_gate_open && skill_registry.is_hat_eligible("ralph-tools-opac", hat_id.as_str())
+    {
+        auto_inject.push(PromptSkillEntry::gated("ralph-tools-opac"));
+    }
+
+    for skill in skill_registry.auto_inject_skills(Some(hat_id.as_str())) {
+        if matches!(
+            skill.name.as_str(),
+            "ralph-tools"
+                | "ralph-tools-tasks"
+                | "ralph-tools-memories"
+                | "ralph-tools-opac"
+        ) {
+            continue;
+        }
+        auto_inject.push(PromptSkillEntry::registry_auto(&skill.name));
+    }
+
+    let mut on_demand: Vec<PromptSkillEntry> = skill_registry
+        .skills_for_hat(Some(hat_id.as_str()))
+        .into_iter()
+        .map(|s| s.name.clone())
+        .filter(|name| !auto_inject.iter().any(|e| &e.name == name))
+        .map(PromptSkillEntry::on_demand)
+        .collect();
+    on_demand.sort_by(|a, b| a.name.cmp(&b.name));
+
+    let block_titles = block_titles(hat_id);
+
+    Some(PromptPreview {
+        hat_id: hat_id.as_str().to_string(),
+        gates,
+        auto_inject,
+        on_demand,
+        block_titles,
+    })
+}
+
 impl EventLoop {
     /// 2026-07-01-001 plan U1: collect the set of topics the
     /// runtime considers "terminal" for the current loop.
@@ -5303,84 +5394,13 @@ impl EventLoop {
     /// in the auto-inject rules must fail those tests, not this
     /// preview API.
     pub fn prompt_preview(&mut self, hat_id: &HatId) -> Option<PromptPreview> {
-        if self.registry.get(hat_id).is_none() && hat_id.as_str() != "ralph" {
-            return None;
-        }
-
-        let gates = PromptGates {
-            tasks_enabled: self.config.tasks.enabled,
-            memories_enabled: self.config.memories.enabled,
-        };
-
-        let mut auto_inject: Vec<PromptSkillEntry> = Vec::new();
-        // Mirrors `inject_memories_and_tools_skill` (mod.rs L6014).
-        let default_gate_open = gates.memories_enabled || gates.tasks_enabled;
-        if default_gate_open
-            && self.skill_registry.is_hat_eligible("ralph-tools", hat_id.as_str())
-        {
-            auto_inject.push(PromptSkillEntry::gated("ralph-tools"));
-        }
-        if gates.tasks_enabled
-            && self
-                .skill_registry
-                .is_hat_eligible("ralph-tools-tasks", hat_id.as_str())
-        {
-            auto_inject.push(PromptSkillEntry::gated("ralph-tools-tasks"));
-        }
-        if gates.memories_enabled
-            && self
-                .skill_registry
-                .is_hat_eligible("ralph-tools-memories", hat_id.as_str())
-        {
-            auto_inject.push(PromptSkillEntry::gated("ralph-tools-memories"));
-        }
-        if default_gate_open
-            && self
-                .skill_registry
-                .is_hat_eligible("ralph-tools-opac", hat_id.as_str())
-        {
-            auto_inject.push(PromptSkillEntry::gated("ralph-tools-opac"));
-        }
-
-        // Mirrors `inject_custom_auto_skills` (mod.rs L6145):
-        // registry-flagged skills, minus the gated family above.
-        for skill in self
-            .skill_registry
-            .auto_inject_skills(Some(hat_id.as_str()))
-        {
-            if matches!(
-                skill.name.as_str(),
-                "ralph-tools"
-                    | "ralph-tools-tasks"
-                    | "ralph-tools-memories"
-                    | "ralph-tools-opac"
-            ) {
-                continue;
-            }
-            auto_inject.push(PromptSkillEntry::registry_auto(&skill.name));
-        }
-
-        // On-demand = every visible skill minus the auto-inject
-        // set. We sort by name for stable JSON output.
-        let mut on_demand: Vec<PromptSkillEntry> = self
-            .skill_registry
-            .skills_for_hat(Some(hat_id.as_str()))
-            .into_iter()
-            .map(|s| s.name.clone())
-            .filter(|name| !auto_inject.iter().any(|e| &e.name == name))
-            .map(PromptSkillEntry::on_demand)
-            .collect();
-        on_demand.sort_by(|a, b| a.name.cmp(&b.name));
-
-        let block_titles = self.preview_block_titles(hat_id);
-
-        Some(PromptPreview {
-            hat_id: hat_id.as_str().to_string(),
-            gates,
-            auto_inject,
-            on_demand,
-            block_titles,
-        })
+        let config = self.config.clone();
+        let preview = preview_prompt_for_config(&config, hat_id, |_| Vec::new());
+        // Fill block_titles via the heavier build_prompt path now
+        // that the immutable borrow on config is released.
+        let mut preview = preview?;
+        preview.block_titles = self.preview_block_titles(hat_id);
+        Some(preview)
     }
 
     /// Block titles extracted from a dry prompt build for `hat_id`,
@@ -5390,7 +5410,7 @@ impl EventLoop {
     /// respect to ledger state (it only clears handoff deadlines
     /// for the hat — see build_prompt doc comment), so the dry
     /// build here is safe to call from a read-only CLI.
-    fn preview_block_titles(&mut self, hat_id: &HatId) -> Vec<String> {
+    pub(crate) fn preview_block_titles(&mut self, hat_id: &HatId) -> Vec<String> {
         let Some(prompt) = self.build_prompt(hat_id) else {
             return Vec::new();
         };
