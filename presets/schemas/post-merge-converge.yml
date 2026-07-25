@@ -1,0 +1,297 @@
+# Authoring SSOT for `post-merge-converge` `event_policy.schemas`.
+#
+# Post-merge system convergence after all development plans are already
+# merged into the final branch. Flat 8-hat linear chain with two
+# self-loops (reproducer / fixer) for per-Finding work.
+#
+# Topic coverage:
+#   baseline         -> postmerge.baseline.ready
+#   change-mapper    -> postmerge.changemap.ready
+#   system-auditor   -> postmerge.audit.ready
+#   test-gap         -> postmerge.testplan.ready
+#   reproducer       -> postmerge.reproduce.next / postmerge.reproduce.ready
+#   fixer            -> postmerge.fix.next / postmerge.fix.ready
+#   closer           -> postmerge.reviewed
+#   reporter         -> postmerge.complete (completion_promise; requires report_path)
+#
+# `postmerge.fix.ready` is the required workflow event on every
+# completion path. Only `reporter` may emit `postmerge.complete`.
+#
+# Confidence policy (operator choice: redo-first):
+#   low confidence on P0/P1 → deepen or self-loop; if still low, mark
+#   LOW_CONFIDENCE and never VERIFIED/CLOSED; reporter lists 待核实.
+#
+# Topic deny rules live in `presets/en/post-merge-converge.yml`.
+
+schemas:
+  postmerge.baseline.ready:
+    required_fields:
+      - baseline_valid
+      - artifact_path
+      - head_sha
+      - branch
+    payload: json_object
+    field_docs:
+      baseline_valid:
+        meaning: Whether the final merged tree is a usable post-merge baseline.
+        source: Git status checks plus one full existing verification run.
+        fill_rule: true only when branch/HEAD/worktree/verification all match the completion criteria; otherwise false with reasons in the artifact.
+      artifact_path:
+        meaning: Repo-relative path to the baseline artifact written this activation.
+        source: File actually created under .ralph/post-merge/.
+        fill_rule: Must be the real path (typically .ralph/post-merge/01-baseline.md); do not invent.
+      head_sha:
+        meaning: Full git commit SHA recorded as the baseline HEAD.
+        source: git rev-parse HEAD after confirming expected branch.
+        fill_rule: Use the exact SHA observed; never hand-write.
+      branch:
+        meaning: Branch name that owns the baseline HEAD.
+        source: git branch --show-current or equivalent.
+        fill_rule: Must match the operator's final branch expectation from the prompt when given.
+
+  postmerge.changemap.ready:
+    required_fields:
+      - proceed
+      - artifact_path
+      - high_risk_crossings_count
+      - plan_match_confidence
+    payload: json_object
+    allowed_values:
+      plan_match_confidence:
+        - high
+        - medium
+        - low
+    field_docs:
+      proceed:
+        meaning: Whether downstream audit should run full system analysis.
+        source: Upstream baseline_valid plus ability to build a change map.
+        fill_rule: false when baseline_valid was false or the map cannot be built; true only when the four required tables exist in the artifact.
+      artifact_path:
+        meaning: Repo-relative path to the change-map artifact.
+        source: File written this activation (.ralph/post-merge/02-change-map.md).
+        fill_rule: Real path only.
+      high_risk_crossings_count:
+        meaning: Count of high-risk multi-plan crossing points identified.
+        source: High-risk crossing table in the change-map artifact.
+        fill_rule: Non-negative integer matching the table row count.
+      plan_match_confidence:
+        meaning: Confidence that commit↔plan mappings (especially auto-discovered ones) are correct.
+        source: Prompt plan list (high) or git-history matching quality (medium/low).
+        fill_rule: high when prompt listed plans and all matched; medium when most auto-matches are clear; low when many unmatched/ambiguous — deepen matching before emit when low and high-risk crossings depend on those matches.
+
+  postmerge.audit.ready:
+    required_fields:
+      - proceed
+      - findings_created_count
+      - audit_docs_complete
+      - low_confidence_findings_count
+    payload: json_object
+    field_docs:
+      proceed:
+        meaning: Whether test-gap planning should run.
+        source: Upstream proceed flag and completion of all six audit documents.
+        fill_rule: false when upstream proceed was false or any audit doc is missing; true only when docs 03-08 exist under .ralph/post-merge/.
+      findings_created_count:
+        meaning: Number of new PMI Finding files created in this audit activation.
+        source: .ralph/post-merge/findings/PMI-*.md created or updated this run.
+        fill_rule: Count real Finding files touched; 0 is allowed when no issues found.
+      audit_docs_complete:
+        meaning: Whether all six audit artifacts (03-08) were written or explicitly short-circuited.
+        source: Presence of .ralph/post-merge/03-contract-audit.md through 08-concurrency-idempotency.md.
+        fill_rule: true only when every required audit path exists.
+      low_confidence_findings_count:
+        meaning: Count of Findings still at confidence=low after deepen-once policy.
+        source: Finding files' confidence field.
+        fill_rule: Non-negative integer; P0/P1 low-confidence items must have been deepened once before counting as residual LOW_CONFIDENCE.
+
+  postmerge.testplan.ready:
+    required_fields:
+      - proceed
+      - artifact_path
+      - p0_p1_scenario_count
+    payload: json_object
+    field_docs:
+      proceed:
+        meaning: Whether defect reproduction should run.
+        source: Upstream proceed and completeness of the test-gap plan.
+        fill_rule: false when upstream blocked; true when every P0/P1 risk has a scenario or an explicit deferral reason in the artifact.
+      artifact_path:
+        meaning: Repo-relative path to the test-gap plan artifact.
+        source: .ralph/post-merge/09-test-gap-plan.md written this activation.
+        fill_rule: Real path only.
+      p0_p1_scenario_count:
+        meaning: Number of P0/P1 test scenarios listed in the plan.
+        source: Priority sections of the test-gap artifact.
+        fill_rule: Non-negative integer; may be 0 when no P0/P1 risks remain.
+
+  postmerge.reproduce.next:
+    required_fields:
+      - finding_id
+      - remaining_count
+      - repro_confidence
+    payload: json_object
+    allowed_values:
+      repro_confidence:
+        - high
+        - medium
+        - low
+    field_docs:
+      finding_id:
+        meaning: PMI id just processed in the reproduce self-loop.
+        source: Finding filename / header (e.g. PMI-001).
+        fill_rule: Must match an existing .ralph/post-merge/findings/PMI-*.md id.
+      remaining_count:
+        meaning: How many actionable findings still need reproduction after this emit.
+        source: Finding board after updating the current Finding status.
+        fill_rule: Non-negative integer; emit reproduce.ready instead when this would be 0 and no current work remains.
+      repro_confidence:
+        meaning: Confidence that the failing test/script proves the claimed invariant (not flaky / wrong cause).
+        source: Stable re-runs and invariant assertions this activation.
+        fill_rule: high only after stable fail+rerun with invariant assert; low → deepen or mark unreproducible/LOW_CONFIDENCE for P0/P1 — do not treat as solid REPRODUCED.
+
+  postmerge.reproduce.ready:
+    required_fields:
+      - proceed
+      - reproduced_count
+      - unreproducible_count
+      - low_confidence_count
+    payload: json_object
+    field_docs:
+      proceed:
+        meaning: Whether fixer should start root-cause/fix/regression work.
+        source: Upstream proceed and reproduction outcomes.
+        fill_rule: false when upstream blocked; true when every actionable P0/P1 Finding is REPRODUCED (confidence medium/high), NOT_A_BUG, DUPLICATE, documented unreproducible, or residual LOW_CONFIDENCE after deepen.
+      reproduced_count:
+        meaning: Findings moved to REPRODUCED with a stable failing test or script at medium/high confidence.
+        source: Finding status updates this stage.
+        fill_rule: Non-negative integer.
+      unreproducible_count:
+        meaning: Findings that could not be stably reproduced, with missing conditions recorded.
+        source: Finding files marked unreproducible.
+        fill_rule: Non-negative integer.
+      low_confidence_count:
+        meaning: Findings left as LOW_CONFIDENCE after redo-first policy.
+        source: Finding board.
+        fill_rule: Non-negative integer; these must appear in the operator report 待核实 section.
+
+  postmerge.fix.next:
+    required_fields:
+      - finding_id
+      - remaining_count
+      - last_status
+      - root_cause_confidence
+    payload: json_object
+    allowed_values:
+      last_status:
+        - ROOT_CAUSED
+        - FIXED
+        - VERIFIED
+        - ACCEPTED_RISK
+        - BLOCKED
+        - REGRESSION_FAILED
+        - LOW_CONFIDENCE
+      root_cause_confidence:
+        - high
+        - medium
+        - low
+    field_docs:
+      finding_id:
+        meaning: PMI id handled in this fixer activation.
+        source: Current Finding under work.
+        fill_rule: Existing PMI id only.
+      remaining_count:
+        meaning: Actionable findings still needing root-cause/fix/regression after this emit.
+        source: Finding board after this activation.
+        fill_rule: Emit fix.ready when remaining actionable P0/P1 work is done or permanently blocked/LOW_CONFIDENCE residual.
+      last_status:
+        meaning: Status reached for finding_id at end of this activation.
+        source: Finding file status field after root-cause / fix / regression steps.
+        fill_rule: Must match allowed_values; REGRESSION_FAILED or low root_cause on P0/P1 → another fix.next; LOW_CONFIDENCE only after deepen-once still fails.
+      root_cause_confidence:
+        meaning: Confidence in the causal root-cause write-up before/with the fix.
+        source: Causal chain quality vs evidence from the failing test.
+        fill_rule: Do not VERIFIED a P0/P1 Finding when root_cause_confidence is low; deepen or emit LOW_CONFIDENCE.
+
+  postmerge.fix.ready:
+    required_fields:
+      - passed
+      - verified_count
+      - open_p0_p1_count
+      - low_confidence_open_count
+    payload: json_object
+    field_docs:
+      passed:
+        meaning: Whether clean-env + final review may treat the fix stage as green enough to continue.
+        source: Finding board after fixer self-loop exit.
+        fill_rule: true only when open_p0_p1_count is 0 and upstream proceed was true; LOW_CONFIDENCE P0/P1 count as open (not passed).
+      verified_count:
+        meaning: Findings that reached VERIFIED (or CLOSED after verify) this stage.
+        source: Finding board.
+        fill_rule: Non-negative integer; never count LOW_CONFIDENCE as verified.
+      open_p0_p1_count:
+        meaning: Remaining P0/P1 findings not CLOSED/VERIFIED/ACCEPTED_RISK (includes LOW_CONFIDENCE).
+        source: Finding board severity + status.
+        fill_rule: Must be 0 for passed:true.
+      low_confidence_open_count:
+        meaning: Subset of open board that is LOW_CONFIDENCE after redo-first.
+        source: Finding board.
+        fill_rule: Non-negative integer; reporter must list each under 待核实.
+
+  postmerge.reviewed:
+    required_fields:
+      - verdict
+      - verdict_confidence
+      - final_review_path
+      - clean_validation_path
+    payload: json_object
+    allowed_values:
+      verdict:
+        - PASS
+        - PASS_WITH_ACCEPTED_RISKS
+        - FAIL
+      verdict_confidence:
+        - high
+        - medium
+        - low
+    field_docs:
+      verdict:
+        meaning: Independent final-review conclusion (technical gate, not operator report).
+        source: .ralph/post-merge/15-final-review.md.
+        fill_rule: Exactly one allowed value; low verdict_confidence on intended PASS → emit FAIL or require accepted-risk list, do not over-claim PASS.
+      verdict_confidence:
+        meaning: Confidence in the final verdict given residual LOW_CONFIDENCE findings and audit completeness.
+        source: Reviewer judgment after reading artifacts + finding board.
+        fill_rule: high only when P0/P1 board is clean of LOW_CONFIDENCE and audits are complete; otherwise medium/low.
+      final_review_path:
+        meaning: Path to the independent final-review artifact.
+        source: File written this activation.
+        fill_rule: Typically .ralph/post-merge/15-final-review.md; real path only.
+      clean_validation_path:
+        meaning: Path to the clean-environment validation artifact.
+        source: File written this activation.
+        fill_rule: Typically .ralph/post-merge/14-clean-validation.md; real path only.
+
+  postmerge.complete:
+    required_fields:
+      - success
+      - verdict
+      - report_path
+    payload: json_object
+    allowed_values:
+      verdict:
+        - PASS
+        - PASS_WITH_ACCEPTED_RISKS
+        - FAIL
+    field_docs:
+      success:
+        meaning: Operator-facing boolean for loop success.
+        source: Closer verdict carried in postmerge.reviewed (and report body).
+        fill_rule: true for PASS or PASS_WITH_ACCEPTED_RISKS; false for FAIL.
+      verdict:
+        meaning: Final conclusion copied into the operator report.
+        source: Trigger postmerge.reviewed.verdict / 15-final-review.md.
+        fill_rule: Must match the closer verdict; do not invent a greener verdict in the report.
+      report_path:
+        meaning: Repo-relative path to the operator-facing convergence report (must exist before emit).
+        source: File actually written this activation under .ralph/post-merge/ (typically REPORT.md).
+        fill_rule: Real readable path only. NEVER emit postmerge.complete without this file on disk; Confirm must surface this path to the operator.

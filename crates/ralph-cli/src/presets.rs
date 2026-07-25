@@ -81,6 +81,12 @@ const PRESETS: &[EmbeddedPreset] = &[
         content: include_str!(concat!(env!("OUT_DIR"), "/presets/merge-batch.yml")),
         public: true,
     },
+    EmbeddedPreset {
+        name: "post-merge-converge",
+        description: "After all development plans are merged: baseline, change map, six-dimension system audit, test-gap plan, per-finding reproduce/fix/regression, clean-env validation, and independent final review",
+        content: include_str!(concat!(env!("OUT_DIR"), "/presets/post-merge-converge.yml")),
+        public: true,
+    },
     // 2026-07-24-003 plan / KTD1: implementation-review — six-hat
     // isolated wave preset. Scope-preparer freezes baseline + patch +
     // digests; review-dispatcher emits a single six-payload
@@ -699,8 +705,8 @@ mod tests {
         // plan U5 added `implementation-review`; bump to 7.
         assert_eq!(
             presets.len(),
-            7,
-            "Expected 7 public presets (added implementation-review 2026-07-24)"
+            8,
+            "Expected 8 public presets (added post-merge-converge 2026-07-25)"
         );
     }
 
@@ -828,13 +834,15 @@ mod tests {
         let names = preset_names();
         // 2026-07-24 plan U5: added `implementation-review`, the
         // post-implementation six-dimension wave-review preset.
-        assert_eq!(names.len(), 7);
+        assert_eq!(names.len(), 8);
         assert!(names.contains(&"autoresearch"));
         assert!(names.contains(&"ce-executor-pipeline"));
         assert!(names.contains(&"ce-executor-pipeline-loop"));
         assert!(names.contains(&"ce-executor-supervisor"));
         assert!(names.contains(&"debug"));
         assert!(names.contains(&"merge-batch"));
+        assert!(names.contains(&"post-merge-converge"));
+        assert!(names.contains(&"implementation-review"));
     }
 
     #[test]
@@ -1671,6 +1679,7 @@ mod tests {
             "builtin:debug",
             "builtin:autoresearch",
             "builtin:merge-batch",
+            "builtin:post-merge-converge",
             // 2026-07-24-003 plan: post-implementation six-dim
             // wave-review preset; mirrored in
             // scripts/ralph-zsh-plugin.zsh _RALPH_BUILTIN_HAT_VALUES.

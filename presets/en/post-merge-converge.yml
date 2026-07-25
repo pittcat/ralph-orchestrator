@@ -1,0 +1,595 @@
+# Post-Merge Converge Preset
+#
+# After multiple development plans are fully merged into the final branch,
+# treat the tree as one system: baseline → change map → six-dimension
+# system audit → test-gap plan → per-Finding reproduce → per-Finding
+# root-cause/fix/regression → clean-env + final independent review.
+#
+# Source process: 15 serial hats from「多开发计划全部合入后的通用系统收敛流程」
+# collapsed into 8 hats without dropping steps:
+#   baseline (01)
+#   change-mapper (02)
+#   system-auditor (03–08)
+#   test-gap (09)
+#   reproducer (10, self-loop)
+#   fixer (11–13, self-loop)
+#   closer (14–15 technical gates)
+#   reporter (operator-facing REPORT.md + completion)
+#
+# Prompt contract (operator provides via `.ralph/post-merge.prompt.md`,
+# referenced by `ralph.post-merge.yml`):
+#   - Optional: final branch name
+#   - Optional: development plan paths/IDs (if omitted, agent discovers
+#     via git log / merge history matching docs/plans/)
+#   - Optional: verification command overrides
+#
+# Does NOT re-execute individual plans and does NOT re-merge branches.
+#
+# Usage:
+#   ralph run -c ralph.post-merge.yml -H builtin:post-merge-converge
+#
+# Artifacts (under gitignored .ralph/, like merge-batch):
+#   .ralph/post-merge/01-baseline.md … 15-final-review.md
+#   .ralph/post-merge/findings/PMI-*.md
+#   .ralph/post-merge/REPORT.md  (operator-facing; required before complete)
+
+topic_format_whitelist:
+  - postmerge.complete
+
+# No `mechanism.flow`: flat hat-only linear chain with reproducer and
+# fixer self-loops. Routing comes from hat triggers/publishes.
+
+tasks:
+  enabled: false
+
+event_loop:
+  execution_mode: isolated
+  prompt: |
+    Post-merge system convergence on the final merged branch.
+
+    Read the prompt file for:
+    - Optional final branch name (default: current branch)
+    - Optional development plan list (paths or IDs). If omitted, discover
+      plans via git history matching docs/plans/ (and repo plan conventions).
+    - Optional verification command overrides
+
+    Do NOT re-run individual development plans. Do NOT re-merge branches.
+    Analyse the current final tree as one system.
+  completion_promise: "postmerge.complete"
+  required_events:
+    - "postmerge.fix.ready"
+  max_iterations: 80
+  max_runtime_seconds: 28800
+  starting_event: "postmerge.start"
+  # Payload schemas SSOT: `presets/schemas/post-merge-converge.yml`
+  # (build.rs deep-merges into event_policy.schemas).
+  event_policy:
+    enabled: true
+    mode: enforce
+    on_violation: reject_with_resume
+    require_policy_check_for_cli_emit: true
+    allow_unsafe_cli_emit: false
+    require_emit_provenance: true
+    terminal_topics:
+      - "postmerge.complete"
+    business_topics:
+      - "postmerge.baseline.ready"
+      - "postmerge.changemap.ready"
+      - "postmerge.audit.ready"
+      - "postmerge.testplan.ready"
+      - "postmerge.reproduce.next"
+      - "postmerge.reproduce.ready"
+      - "postmerge.fix.next"
+      - "postmerge.fix.ready"
+      - "postmerge.reviewed"
+    completion_after_terminal:
+      duplicate_terminal: reject
+      business_after_completion: reject
+      write_diagnostic_event: true
+    topic_deny_rules:
+      # baseline owns baseline.ready
+      - {hat_id: change-mapper, topic: postmerge.baseline.ready}
+      - {hat_id: system-auditor, topic: postmerge.baseline.ready}
+      - {hat_id: test-gap, topic: postmerge.baseline.ready}
+      - {hat_id: reproducer, topic: postmerge.baseline.ready}
+      - {hat_id: fixer, topic: postmerge.baseline.ready}
+      - {hat_id: closer, topic: postmerge.baseline.ready}
+      - {hat_id: reporter, topic: postmerge.baseline.ready}
+      # change-mapper owns changemap.ready
+      - {hat_id: baseline, topic: postmerge.changemap.ready}
+      - {hat_id: system-auditor, topic: postmerge.changemap.ready}
+      - {hat_id: test-gap, topic: postmerge.changemap.ready}
+      - {hat_id: reproducer, topic: postmerge.changemap.ready}
+      - {hat_id: fixer, topic: postmerge.changemap.ready}
+      - {hat_id: closer, topic: postmerge.changemap.ready}
+      - {hat_id: reporter, topic: postmerge.changemap.ready}
+      # system-auditor owns audit.ready
+      - {hat_id: baseline, topic: postmerge.audit.ready}
+      - {hat_id: change-mapper, topic: postmerge.audit.ready}
+      - {hat_id: test-gap, topic: postmerge.audit.ready}
+      - {hat_id: reproducer, topic: postmerge.audit.ready}
+      - {hat_id: fixer, topic: postmerge.audit.ready}
+      - {hat_id: closer, topic: postmerge.audit.ready}
+      - {hat_id: reporter, topic: postmerge.audit.ready}
+      # test-gap owns testplan.ready
+      - {hat_id: baseline, topic: postmerge.testplan.ready}
+      - {hat_id: change-mapper, topic: postmerge.testplan.ready}
+      - {hat_id: system-auditor, topic: postmerge.testplan.ready}
+      - {hat_id: reproducer, topic: postmerge.testplan.ready}
+      - {hat_id: fixer, topic: postmerge.testplan.ready}
+      - {hat_id: closer, topic: postmerge.testplan.ready}
+      - {hat_id: reporter, topic: postmerge.testplan.ready}
+      # reproducer owns reproduce.*
+      - {hat_id: baseline, topic: postmerge.reproduce.next}
+      - {hat_id: change-mapper, topic: postmerge.reproduce.next}
+      - {hat_id: system-auditor, topic: postmerge.reproduce.next}
+      - {hat_id: test-gap, topic: postmerge.reproduce.next}
+      - {hat_id: fixer, topic: postmerge.reproduce.next}
+      - {hat_id: closer, topic: postmerge.reproduce.next}
+      - {hat_id: reporter, topic: postmerge.reproduce.next}
+      - {hat_id: baseline, topic: postmerge.reproduce.ready}
+      - {hat_id: change-mapper, topic: postmerge.reproduce.ready}
+      - {hat_id: system-auditor, topic: postmerge.reproduce.ready}
+      - {hat_id: test-gap, topic: postmerge.reproduce.ready}
+      - {hat_id: fixer, topic: postmerge.reproduce.ready}
+      - {hat_id: closer, topic: postmerge.reproduce.ready}
+      - {hat_id: reporter, topic: postmerge.reproduce.ready}
+      # fixer owns fix.*
+      - {hat_id: baseline, topic: postmerge.fix.next}
+      - {hat_id: change-mapper, topic: postmerge.fix.next}
+      - {hat_id: system-auditor, topic: postmerge.fix.next}
+      - {hat_id: test-gap, topic: postmerge.fix.next}
+      - {hat_id: reproducer, topic: postmerge.fix.next}
+      - {hat_id: closer, topic: postmerge.fix.next}
+      - {hat_id: reporter, topic: postmerge.fix.next}
+      - {hat_id: baseline, topic: postmerge.fix.ready}
+      - {hat_id: change-mapper, topic: postmerge.fix.ready}
+      - {hat_id: system-auditor, topic: postmerge.fix.ready}
+      - {hat_id: test-gap, topic: postmerge.fix.ready}
+      - {hat_id: reproducer, topic: postmerge.fix.ready}
+      - {hat_id: closer, topic: postmerge.fix.ready}
+      - {hat_id: reporter, topic: postmerge.fix.ready}
+      # closer owns reviewed
+      - {hat_id: baseline, topic: postmerge.reviewed}
+      - {hat_id: change-mapper, topic: postmerge.reviewed}
+      - {hat_id: system-auditor, topic: postmerge.reviewed}
+      - {hat_id: test-gap, topic: postmerge.reviewed}
+      - {hat_id: reproducer, topic: postmerge.reviewed}
+      - {hat_id: fixer, topic: postmerge.reviewed}
+      - {hat_id: reporter, topic: postmerge.reviewed}
+      # reporter owns completion
+      - {hat_id: baseline, topic: postmerge.complete}
+      - {hat_id: change-mapper, topic: postmerge.complete}
+      - {hat_id: system-auditor, topic: postmerge.complete}
+      - {hat_id: test-gap, topic: postmerge.complete}
+      - {hat_id: reproducer, topic: postmerge.complete}
+      - {hat_id: fixer, topic: postmerge.complete}
+      - {hat_id: closer, topic: postmerge.complete}
+      # ralph locked out
+      - {hat_id: ralph, topic: postmerge.baseline.ready}
+      - {hat_id: ralph, topic: postmerge.changemap.ready}
+      - {hat_id: ralph, topic: postmerge.audit.ready}
+      - {hat_id: ralph, topic: postmerge.testplan.ready}
+      - {hat_id: ralph, topic: postmerge.reproduce.next}
+      - {hat_id: ralph, topic: postmerge.reproduce.ready}
+      - {hat_id: ralph, topic: postmerge.fix.next}
+      - {hat_id: ralph, topic: postmerge.fix.ready}
+      - {hat_id: ralph, topic: postmerge.reviewed}
+      - {hat_id: ralph, topic: postmerge.complete}
+
+cli:
+  backend: "auto"
+
+core:
+  specs_dir: "./specs/"
+  guardrails:
+    - "OPAC Observe: `ralph inspect loop`. Do not read runtime-private orchestration ledgers; use inspect/tools APIs only."
+    - "OPAC Precheck: `ralph emit --policy-check` before every real emit. Cite `ralph-tools-emit` Policy-Check feedback; do not copy field tables."
+    - "OPAC Apply: one business event per isolated activation; never put business events before a terminal emit in the same activation."
+    - "OPAC Confirm: `ralph events --events-source hat-channel` after emit."
+    - "Artifact-First: write `.ralph/post-merge/**` (including findings and REPORT.md) first; emit only short status + paths. Never treat runtime ledgers as business artifacts."
+    - "Finding discipline: every risk/defect becomes `.ralph/post-merge/findings/PMI-NNN.md`. Status flow DISCOVERED→TRIAGED→REPRODUCED→ROOT_CAUSED→FIXED→VERIFIED→CLOSED. Never jump DISCOVERED→FIXED. Allowed exits: NOT_A_BUG, DUPLICATE, ACCEPTED_RISK (with reasons), residual LOW_CONFIDENCE after redo-first."
+    - "Confidence discipline (redo-first): confidence ∈ {high,medium,low}. On P0/P1 low confidence: deepen observation or self-loop once; if still low, mark LOW_CONFIDENCE — never VERIFIED/CLOSED; reporter lists 待核实."
+    - "Do not re-execute individual development plans. Do not re-merge branches. Worktrees may already be deleted."
+    - "ABSOLUTE PROHIBITION: NEVER kill or signal any ralph / ralph-orchestrator process."
+    - "Do not force-push or rewrite published history."
+
+hats:
+  baseline:
+    name: "Baseline"
+    description: "Freeze the post-merge final-tree baseline; record only, no architecture analysis or code changes."
+    exempt_topics: ["postmerge.baseline.ready"]
+    triggers: ["postmerge.start"]
+    publishes: ["postmerge.baseline.ready"]
+    default_publishes: "postmerge.baseline.ready"
+    terminal_events: ["postmerge.baseline.ready"]
+    event_filter:
+      enabled: true
+      events: ["work.start"]
+    instructions: |
+      ## BASELINE MODE (process step 01)
+
+      Record-only. Do NOT analyse architecture. Do NOT modify production code.
+
+      OPAC: follow `ralph-tools-opac` and `ralph-tools-emit` §5; always `--policy-check` before real emit.
+
+      ### Inputs
+      - Current final repository / branch / HEAD
+      - Prompt optional final-branch name and verification command overrides
+      - Existing tests and build/run configuration
+
+      ### Work
+      A. Confirm repository state:
+      - Expected final branch (prompt override or current branch)
+      - No in-progress merge / rebase / cherry-pick
+      - No unresolved conflicts
+      - Working tree has no unexpected tracked modifications (`.ralph/` noise excluded if present)
+      B. Record baseline snapshot: repo, branch, HEAD, time, build env, dependency versions, OS/runtime, env vars, feature flags, config files, external service versions, test commands, test results.
+      C. Run the project's existing standard verification once (build + unit + integration + static check as the repo defines; default full gate for this repo is `./scripts/run-tests.sh` unless prompt overrides). Purpose: prove the audit starts from a known state — not to hunt new bugs.
+
+      ### Problems to look for (baseline validity only)
+      Wrong final version; uncommitted expected changes; tests not actually run; cache-dependent green; unreproducible env; undocumented external inputs.
+
+      ### Artifact (required before emit)
+      Write `.ralph/post-merge/01-baseline.md` with at least: final commit, branch, build/test results, env/config snapshot, known limits, baseline timestamp.
+      Optionally create git tag `post-merge-baseline` when baseline_valid is true and tagging is safe.
+
+      ### Completion gate
+      HEAD recorded; worktree state recorded; build/test results recorded; config/env recorded; subsequent diffs have a clear starting point.
+
+      ### Emit
+      Artifact-first: write `01-baseline.md` → `ralph emit --policy-check` → real emit `postmerge.baseline.ready` with `baseline_valid`, `artifact_path`, `head_sha`, `branch`.
+      Set `baseline_valid: false` when any completion gate fails; still write the artifact explaining why.
+
+      ### DON'T
+      - Analyse cross-module architecture here
+      - Modify production code or tests to "make baseline green"
+      - Read runtime-private orchestration ledgers
+
+  change-mapper:
+    name: "Change Mapper"
+    description: "Build the whole-system change map after merge; no quality judgment and no fixes."
+    exempt_topics: ["postmerge.changemap.ready"]
+    triggers: ["postmerge.baseline.ready"]
+    publishes: ["postmerge.changemap.ready"]
+    default_publishes: "postmerge.changemap.ready"
+    terminal_events: ["postmerge.changemap.ready"]
+    event_filter:
+      enabled: true
+      events: ["work.start"]
+    instructions: |
+      ## CHANGE MAPPER MODE (process step 02)
+
+      Map only. Do NOT judge code quality. Do NOT fix issues.
+
+      OPAC: follow `ralph-tools-opac` and `ralph-tools-emit` §5; always `--policy-check` before real emit.
+
+      ### Observe
+      - Read trigger payload `artifact_path` → `.ralph/post-merge/01-baseline.md`
+      - If `baseline_valid` is false: write a short `.ralph/post-merge/02-change-map.md` noting short-circuit, emit `proceed: false`, stop.
+
+      ### Plan discovery + confidence
+      1. If the prompt lists development plan paths/IDs, use that list as authoritative (`plan_match_confidence: high` when all resolve).
+      2. If the prompt omits plans, discover via `git log` / merge commits / branch subjects and match to `docs/plans/` (and repo plan conventions). Record unmatched commits as unmatched.
+      3. Score `plan_match_confidence` high|medium|low. If low and high-risk crossings depend on ambiguous matches: deepen matching once (more log/plan reads) before emit; if still low, keep low and document ambiguities in the artifact for auditor/reporter.
+
+      ### Work
+      A. List added/changed capabilities (features, commands, interfaces, config, state, formats, fields, background jobs, deps, caches, cleanup, logs, permissions).
+      B. Mark co-touched areas (same module / structure / state / config / external service / lifecycle stage across plans).
+      C. Sketch system data flow (input → parse → config → orchestration → domain → storage → state → output → cleanup).
+      D. Record dependencies (A→B contracts and failure impact).
+
+      ### Problems to surface into the map (not Findings yet unless obviously a defect)
+      Orphan capabilities; multi-owner state; new behaviour without tests; new files without cleanup; interfaces without callers; configs without defaults; errors without owners; similar capabilities across plans; hidden cross-plan deps.
+
+      ### Artifact (required)
+      `.ralph/post-merge/02-change-map.md` with four tables:
+      1. Capability change table
+      2. Shared state table
+      3. Dependency table
+      4. High-risk crossing table (crossing, plans, risk reason, later audit focus)
+
+      ### Emit
+      Write artifact → policy-check → emit `postmerge.changemap.ready` with `proceed`, `artifact_path`, `high_risk_crossings_count`, `plan_match_confidence`.
+
+      ### DON'T
+      - Evaluate "good/bad code" beyond mapping risk crossings
+      - Modify production code
+      - Skip plan discovery when the prompt omitted the list
+
+  system-auditor:
+    name: "System Auditor"
+    description: "Read-only six-dimension post-merge audit (contract, state, lifecycle, configuration, failure recovery, concurrency/idempotency)."
+    exempt_topics: ["postmerge.audit.ready"]
+    triggers: ["postmerge.changemap.ready"]
+    publishes: ["postmerge.audit.ready"]
+    default_publishes: "postmerge.audit.ready"
+    terminal_events: ["postmerge.audit.ready"]
+    event_filter:
+      enabled: true
+      events: ["work.start"]
+    instructions: |
+      ## SYSTEM AUDITOR MODE (process steps 03–08, merged)
+
+      Read-only audit. Do NOT modify production code. Do NOT design the full test plan here (that is a later step). Do create Finding files.
+
+      OPAC: follow `ralph-tools-opac` and `ralph-tools-emit` §5; always `--policy-check` before real emit.
+
+      ### Observe
+      - Read `.ralph/post-merge/01-baseline.md` and `02-change-map.md` from upstream paths.
+      - If upstream `proceed` is false: write stub notes under .ralph/post-merge/03–08 explaining short-circuit, emit `proceed: false`, `audit_docs_complete: true`, `findings_created_count: 0`, `low_confidence_findings_count: 0`.
+
+      ### Execute six audits in order (one activation, six artifacts)
+      Keep each audit's deliverable separate even though one hat runs them.
+
+      #### 03 System Contract
+      Check cross-module input/output/error/order contracts. Look for: same field different meanings; enum drift; callers on old semantics; swallowed/new errors; null-as-success; implicit call order; docs drift.
+      Write `.ralph/post-merge/03-contract-audit.md`. Each issue → Finding `PMI-xxx` type Contract.
+
+      #### 04 State Ownership
+      Every important state needs one authority. Answer create/authority/read/update/persist/migrate/delete/crash-recovery for memory/file/db/cache/task/external/lock/temp/progress/completion markers.
+      Write `.ralph/post-merge/04-state-ownership.md` (state table + invariants table). Findings for dual authority, persist/memory skew, non-atomic updates, half-visible state, delete-with-dangling-refs, migration data loss, defaults masking absence.
+
+      #### 05 Lifecycle
+      Audit install/init/run/repeat/pause/resume/shutdown/crash/restart/upgrade/downgrade/uninstall. Resources: files, db, threads, processes, sockets, locks, caches, temp dirs, task records, devices, external sessions.
+      Write `.ralph/post-merge/05-lifecycle-audit.md` lifecycle matrix. Findings for double-init failure, duplicate resources, leak on exit, stuck Running after crash, non-idempotent cleanup, dangling refs, upgrade/downgrade gaps.
+
+      #### 06 Configuration
+      Defaults, legal/illegal combinations, opt-in-off zero side effects, priority between env/file/flags.
+      Write `.ralph/post-merge/06-configuration-matrix.md`. Findings for undefined combos, hidden deps between flags, late failure of illegal combos, silent reinterpretation of old config, side effects when off.
+
+      #### 07 Failure Recovery
+      Walk the data flow injecting failures (IO, perms, missing dirs, disk/db/network/timeouts, child process kill, corrupt data, resource contention). Ask: propagated? partial mutate? original intact? temps left? safe retry? user next step clear?
+      Write `.ralph/post-merge/07-failure-recovery.md` fault matrix. Findings for swallowed failure, success-on-error, completed-after-fail, destructive partial writes, retry side effects, orphan children, permanent locks, missing context, retryability confusion.
+
+      #### 08 Concurrency and Idempotency
+      Even if mostly serial today: double-submit, retry, agent restart, scheduler double-dispatch, two processes. Cover concurrent update/read-write/cleanup races; idempotent create/update/complete/export/cleanup/retry; order swaps.
+      Write `.ralph/post-merge/08-concurrency-idempotency.md` scenario table. Findings for dup records, lost updates, deadlocks, half-reads, duplicate side effects, order-sensitive undeclared deps.
+
+      ### Finding rules
+      - Create `.ralph/post-merge/findings/PMI-NNN.md` using the standard template (title, status DISCOVERED, severity P0–P3, **confidence high|medium|low**, discovering audit, modules, plans, description, trigger, steps, expected, actual, invariant, impact).
+      - Do not leave risks only in chat.
+      - Do not jump status to FIXED.
+      - Redo-first: for each P0/P1 Finding at confidence=low, deepen evidence once in this activation; if still low, leave confidence=low (downstream may mark LOW_CONFIDENCE) — do not inflate to high.
+
+      ### Emit
+      All six docs present → policy-check → emit `postmerge.audit.ready` with `proceed`, `findings_created_count`, `audit_docs_complete`, `low_confidence_findings_count`.
+
+      ### DON'T
+      - Modify production code or weaken tests
+      - Collapse six audit docs into one file
+      - Skip high-risk crossings from the change map
+
+  test-gap:
+    name: "Test Gap Planner"
+    description: "Turn audit risks into an executable test plan; design only, no production fixes."
+    exempt_topics: ["postmerge.testplan.ready"]
+    triggers: ["postmerge.audit.ready"]
+    publishes: ["postmerge.testplan.ready"]
+    default_publishes: "postmerge.testplan.ready"
+    terminal_events: ["postmerge.testplan.ready"]
+    event_filter:
+      enabled: true
+      events: ["work.start"]
+    instructions: |
+      ## TEST GAP MODE (process step 09)
+
+      Design tests only. Do NOT fix production code. Do NOT implement the failing tests yet (next step does reproduction).
+
+      OPAC: follow `ralph-tools-opac` and `ralph-tools-emit` §5; always `--policy-check` before real emit.
+
+      ### Observe
+      Read audit docs 03–08 and all `.ralph/post-merge/findings/PMI-*.md`. If upstream `proceed` is false: write short-circuit plan artifact and emit `proceed: false`.
+
+      ### Work
+      Convert risks into scenarios across: component, interface, integration, system, lifecycle, config matrix, fault injection, concurrency, idempotency, compatibility.
+      Each scenario must include: name, goal, initial state, inputs, steps, expected result, invariants, what failure proves.
+
+      Priorities:
+      - P0: data loss/corruption, false success, unrecoverable
+      - P1: state inconsistency, repeat-exec errors, compatibility
+      - P2: hard diagnostics, perf regressions, duplication risk
+      - P3: pure cleanup/maintainability
+
+      ### Artifact
+      `.ralph/post-merge/09-test-gap-plan.md` with prioritized scenarios and execution order.
+
+      ### Completion gate
+      Every P0/P1 risk has a scenario (or explicit deferred reason); every state invariant has a verification approach; failure-recovery and config-combination conclusions are present.
+
+      ### Emit
+      Write artifact → policy-check → `postmerge.testplan.ready` with `proceed`, `artifact_path`, `p0_p1_scenario_count`.
+
+      ### DON'T
+      - Implement production fixes
+      - Assert only "process exited 0" in scenario designs — require state/side-effect/cleanup/restart checks
+
+  reproducer:
+    name: "Defect Reproducer"
+    description: "Turn Findings into stable failing tests/scripts; no production code fixes; one Finding per activation."
+    exempt_topics: ["postmerge.reproduce.next", "postmerge.reproduce.ready"]
+    triggers: ["postmerge.testplan.ready", "postmerge.reproduce.next"]
+    publishes: ["postmerge.reproduce.next", "postmerge.reproduce.ready"]
+    default_publishes: "postmerge.reproduce.ready"
+    terminal_events: ["postmerge.reproduce.next", "postmerge.reproduce.ready"]
+    event_filter:
+      enabled: true
+      events: ["work.start"]
+    instructions: |
+      ## DEFECT REPRODUCER MODE (process step 10)
+
+      Create stable failing automation for Findings. Do NOT modify production code.
+
+      OPAC: follow `ralph-tools-opac` and `ralph-tools-emit` §5; always `--policy-check` before real emit.
+
+      ### Observe
+      Read `09-test-gap-plan.md` and Finding files. If upstream `proceed` is false: emit `postmerge.reproduce.ready` with proceed false and zero counts.
+
+      ### One Finding per activation
+      Pick the highest-priority actionable Finding not yet REPRODUCED / NOT_A_BUG / DUPLICATE / documented-unreproducible / residual LOW_CONFIDENCE.
+      Flow for that Finding only:
+      select → minimal scenario → run → confirm stable fail → re-run → exclude env flukes → solidify as test/script.
+      Assert a concrete invariant (e.g. original data unchanged after failure; no second record on repeat; no new dir when feature off; Completed stays Completed after restart). Do not assert only "it errored".
+      Score `repro_confidence` high|medium|low. If low on P0/P1: deepen once (narrow scenario / more reruns); if still low → mark Finding LOW_CONFIDENCE (not solid REPRODUCED).
+
+      Update Finding status DISCOVERED/TRIAGED → REPRODUCED only when repro_confidence is medium/high (or document cannot reproduce + missing conditions). Never jump to FIXED.
+
+      ### Emit choice (exactly one)
+      - More actionable Findings remain → `postmerge.reproduce.next` with `finding_id`, `remaining_count`, `repro_confidence`
+      - None remain → `postmerge.reproduce.ready` with `proceed`, `reproduced_count`, `unreproducible_count`, `low_confidence_count`
+
+      ### DON'T
+      - Fix production code
+      - Batch-reproduce many Findings in one activation
+      - Land flaky or multi-cause oversized scenarios
+
+  fixer:
+    name: "Finding Fixer"
+    description: "Per Finding: root cause → minimal fix → layered regression; self-loop until P0/P1 board is closed or blocked."
+    exempt_topics: ["postmerge.fix.next", "postmerge.fix.ready"]
+    triggers: ["postmerge.reproduce.ready", "postmerge.fix.next"]
+    publishes: ["postmerge.fix.next", "postmerge.fix.ready"]
+    default_publishes: "postmerge.fix.ready"
+    terminal_events: ["postmerge.fix.next", "postmerge.fix.ready"]
+    event_filter:
+      enabled: true
+      events: ["work.start"]
+    instructions: |
+      ## FINDING FIXER MODE (process steps 11–13, merged — keep order)
+
+      One Finding per activation. Inside the activation keep the PDF order:
+      Root Cause → Minimal Fix → Regression. Do not skip ahead.
+
+      OPAC: follow `ralph-tools-opac` and `ralph-tools-emit` §5; always `--policy-check` before real emit.
+
+      ### Observe
+      Read reproduce payload / prior `fix.next` and the target Finding file + failing test.
+      If upstream `proceed` is false: emit `postmerge.fix.ready` with `passed: false`, counts reflecting open board / short-circuit.
+
+      ### Step 11 Root Cause (before any production edit)
+      Answer: earliest layer; broken invariant; owning module; why tests missed it; conflicting plan assumptions; why a surface patch is insufficient; minimal correct fix point.
+      Use a causal chain. Reject non-causes like only "bad code" / "missing tests" / "merge" / "concurrency" without mechanism.
+      Update Finding: root cause, invariant, responsible module, suggested fix locus, compatibility, collateral paths, **root_cause_confidence** high|medium|low. Status → ROOT_CAUSED only when you can write a causal chain; if P0/P1 confidence stays low after deepen-once → `last_status: LOW_CONFIDENCE` (no production fix).
+
+      ### Step 12 Fix
+      Only when root_cause_confidence is medium/high. Only this Finding. Restore the invariant. No unrelated features/refactors. Do not weaken assertions. Do not delete the failing test. Do not pass by ignoring errors.
+      Run the new failing test + affected module tests. Independent fix commit preferred. Status → FIXED. Do not CLOSE yet. Never VERIFIED/CLOSED a LOW_CONFIDENCE Finding.
+
+      ### Step 13 Regression (no further production edits in this step)
+      Layered verification:
+      1) current Finding test
+      2) affected component tests
+      3) related integration
+      4) critical system flows
+      5) full suite (default `./scripts/run-tests.sh` unless prompt overrides)
+      6) static/format checks
+      Write/update `.ralph/post-merge/13-regression-report.md` for this Finding (or append section).
+      On success: Finding FIXED → VERIFIED.
+      On failure: do NOT quietly patch more production code in the "regression" mindset; set `last_status: REGRESSION_FAILED` and emit `postmerge.fix.next` for another root-cause/fix cycle on the same Finding (fresh activation).
+
+      ### Emit choice (exactly one)
+      - More actionable P0/P1 work remains, REGRESSION_FAILED, or low root_cause needing another cycle → `postmerge.fix.next` with `finding_id`, `remaining_count`, `last_status`, `root_cause_confidence`
+      - Board settled (every P0/P1 is VERIFIED/CLOSED/ACCEPTED_RISK/LOW_CONFIDENCE residual/BLOCKED) → `postmerge.fix.ready` with `passed`, `verified_count`, `open_p0_p1_count`, `low_confidence_open_count`
+        - `passed: true` only when `open_p0_p1_count == 0` (LOW_CONFIDENCE counts as open) and upstream was proceedable
+        - ACCEPTED_RISK requires written reason/impact/mitigation/owner/follow-up condition in the Finding
+
+      ### DON'T
+      - Fix multiple unrelated Findings in one activation
+      - Hide duplicates only in the output layer / retry-without-state-fix / default-away corruption / catch-and-return-success
+      - Weaken tests to go green
+      - Jump DISCOVERED → FIXED
+
+  closer:
+    name: "Closer"
+    description: "Clean-environment revalidation then independent final review; emits reviewed for reporter."
+    exempt_topics: ["postmerge.reviewed"]
+    triggers: ["postmerge.fix.ready"]
+    publishes: ["postmerge.reviewed"]
+    default_publishes: "postmerge.reviewed"
+    terminal_events: ["postmerge.reviewed"]
+    event_filter:
+      enabled: true
+      events: ["work.start"]
+    instructions: |
+      ## CLOSER MODE (process steps 14–15, merged — keep order)
+
+      First clean-environment validation, then independent final review.
+      Final review does NOT backfill earlier work. Gaps → FAIL.
+      You do NOT write the operator-facing REPORT.md and do NOT emit `postmerge.complete`.
+
+      OPAC: follow `ralph-tools-opac` and `ralph-tools-emit` §5; always `--policy-check` before real emit.
+
+      ### Observe
+      Read `postmerge.fix.ready` payload and all `.ralph/post-merge/**` artifacts + findings. Use trigger payload as the control-plane status; read files for full evidence. Do not rebuild history from runtime-private orchestration ledgers.
+
+      ### Step 14 Clean Environment
+      Without relying on local caches/history:
+      clean build products/temps → refresh deps → rebuild → retest → rerun critical system flows.
+      Prefer also: fresh clone mindset checks (absolute paths, uncommitted files, old worktree deps, undocumented env, agent-context deps).
+      Write `.ralph/post-merge/14-clean-validation.md`.
+
+      ### Step 15 Final Review (independent)
+      Judge whether convergence is complete. Check:
+      contracts unified; unique state authorities; lifecycle safe; failure recovery safe; idempotent repeats; concurrency entrances guarded; config combos explicit; default-off zero side effects; all P0/P1 closed or accepted with reasons; each fix protected by a previously-failing test; clean env reproducible; **no open LOW_CONFIDENCE P0/P1 treated as success**.
+      Inspect final delta from baseline → hardened tip: should be mostly system tests, fault tests, minimal defect fixes, necessary convergence/compat — not large unrelated features.
+      Write `.ralph/post-merge/15-final-review.md` with exactly one conclusion: `PASS` | `PASS WITH ACCEPTED RISKS` | `FAIL`.
+      Score `verdict_confidence` high|medium|low. If you would PASS but confidence is low (or LOW_CONFIDENCE P0/P1 remain): emit FAIL, or PASS_WITH_ACCEPTED_RISKS only when each residual is explicitly accepted with reasons — never silent PASS.
+      For PASS WITH ACCEPTED RISKS, list each risk: content, reason, impact, temporary mitigation, owner, follow-up condition.
+
+      Final gate checklist (must all hold for PASS*):
+      baseline fixed; change map done; contracts/state/lifecycle/config/failure/concurrency audited; test gaps addressed; P0/P1 closed (not LOW_CONFIDENCE); each fix has failing-test protection; full regression passed; clean env passed; independent review passed.
+
+      Optional tag `post-merge-hardened` only on PASS / PASS WITH ACCEPTED RISKS with medium/high verdict_confidence.
+
+      ### Emit
+      Write 14 + 15 artifacts → policy-check → emit `postmerge.reviewed` with `verdict`, `verdict_confidence`, `final_review_path`, `clean_validation_path`.
+
+      ### DON'T
+      - Quietly repair earlier hats' missing work
+      - Emit `postmerge.complete` or write REPORT.md
+      - Treat full-suite green alone as sufficient without system audits
+
+  reporter:
+    name: "Reporter"
+    description: "Write the operator-facing convergence report with all product paths, conclusions, and next steps; sole completion publisher."
+    exempt_topics: ["postmerge.complete"]
+    triggers: ["postmerge.reviewed"]
+    publishes: ["postmerge.complete"]
+    default_publishes: "postmerge.complete"
+    terminal_events: ["postmerge.complete"]
+    event_filter:
+      enabled: true
+      events: ["work.start"]
+    instructions: |
+      ## REPORTER MODE (operator-facing closure)
+
+      Your only job is to present results to the human operator.
+      Do NOT re-run audits, do NOT fix code, do NOT change the closer verdict to a greener one.
+
+      OPAC: follow `ralph-tools-opac` and `ralph-tools-emit` §5; always `--policy-check` before real emit.
+      Artifact-first hard gate: the operator report file MUST exist and its path MUST be stated before `postmerge.complete`.
+
+      ### Observe
+      Read trigger `postmerge.reviewed` (`verdict`, `verdict_confidence`, `final_review_path`, `clean_validation_path`) and gather paths under `.ralph/post-merge/` (01–15, findings, regression). Do not rebuild facts from runtime-private orchestration ledgers.
+
+      ### Write operator report (required)
+      Create `.ralph/post-merge/REPORT.md` (or `.ralph/post-merge/reports/<timestamp>.md` if you need a stamped copy; then use that as `report_path`) containing at least:
+      1. **结论** — PASS / PASS WITH ACCEPTED RISKS / FAIL (must match closer verdict) + verdict_confidence
+      2. **本轮做了什么** — short stage summary (baseline → map → six audits → test-gap → reproduce/fix loops → clean → final review)
+      3. **产物路径清单** — every important file path (01–15, findings dir, REPORT itself)
+      4. **Finding 摘要** — counts by severity/status; list **待核实 (LOW_CONFIDENCE)** explicitly
+      5. **接受的风险** — if any
+      6. **下一步建议** — concrete operator actions (tag, merge, re-run, manual verify residuals, stop)
+
+      ### OPAC Confirm order (mandatory)
+      1. Write the report file to disk and verify it is readable (`wc`/`head`).
+      2. `ralph emit --policy-check` for `postmerge.complete` including `report_path`.
+      3. Real emit `postmerge.complete` with `success`, `verdict`, `report_path`.
+      4. Confirm via hat-channel; print exactly `DELIVERABLE_PATH: <report_path>`
+         so the operator sees the file in TUI (cite `ralph-tools-emit`「终态交付路径」).
+      NEVER emit complete without a real `report_path`.
+
+      ### DON'T
+      - Invent a better verdict than closer
+      - Omit 待核实 LOW_CONFIDENCE items
+      - Complete with only prose and no report file

@@ -33,5 +33,10 @@
     "name": "merge-batch",
     "description": "Git-first batch merge: review design intent, merge multiple worktree branches, stabilize with verify-fix loop, write merge report",
     "category": "workflow"
+  },
+  {
+    "name": "post-merge-converge",
+    "description": "After all development plans are merged: baseline, change map, six-dimension audit, test-gap, per-finding reproduce/fix with confidence redo-first, clean-env + final review, then operator REPORT.md before complete",
+    "category": "workflow"
   }
 ]

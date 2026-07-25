@@ -48,3 +48,4 @@ embedded:
   - implementation-review
   - merge-loop
   - merge-batch
+  - post-merge-converge

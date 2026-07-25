@@ -1,0 +1,7 @@
+cli:
+  backend: claude
+
+event_loop:
+  prompt_file: .ralph/post-merge.prompt.md
+  max_iterations: 80
+  max_runtime_seconds: 28800
