@@ -52,6 +52,18 @@ Supervisor/wave slot 的稳定失败 reason：波次失败/取消闭合时，该
 
 `*.wave.failed` 载荷中的失败槽下标列表。契约上只含 `Failed` / `Cancelled` 槽；`Completed` 不得进入。宽泛全量列表（如 `[0,1,2,3,4]`）是诊断反模式，应配合 per-slot reason / diagnostics 归因。
 
+### salvage merge
+
+Supervisor 在注入 `*.wave.failed` 之前，把本波次已 `Completed` 槽的业务事件写入主 ledger 的动作。仍 fail-closed（不是 silent partial complete）：失败协调事件照发，`blocking_slots` 仍只含 Failed/Cancelled；成功槽结果对诊断与后续 focused run 可见。
+
+### slot_retry_budget
+
+`event_loop.supervisor.slot_retry_budget`：同一 public `wave_id` 内、对可重试 slot 失败的自动 redispatch 次数上限（默认 1 = 初始执行后再试 1 次，硬上限 2）。耗尽后槽永久 Failed，进入 salvage / `*.wave.failed` 路径。与 review dimension mismatch 的 `task.resume` 预算不是同一机制。
+
+### ralph wave redrive
+
+Operator CLI：在 supervisor store 上将 Failed 波次的指定失败槽重置并重新进入 Collect/dispatch，不要求（也不允许）靠手工 `ralph emit exec.unit.done` 绕过 FlowStepScope。已写入 `LOOP_COMPLETE` 的 loop 上应拒绝并提示另开 focused run。
+
 ### OPAC
 
 Observe → Precheck → Apply → Confirm。isolated 模式下 state-changing 操作的纪律框架；Precheck/ACL 可由 CLI 硬闸，Confirm 对 wave/task 逐步硬化为 ticket 或公开查询证据。
