@@ -208,8 +208,30 @@ pub trait SupervisorBridge: std::fmt::Debug + Send + Sync {
     /// `Pending` (never reached `Dispatched`/`Running`) when a
     /// wave fails. Idempotent: same-reason replay is a no-op
     /// because `record_slot_failure` already enforces first-terminal-wins.
-    /// Default: no-op so mocks / bridges without a store stay compiling.
-    fn record_never_started_failures(&self, _wave_id: &str) -> Result<(), BridgeError> {
+    ///
+    /// 2026-07-25-004 plan U3: this shared default IS the single
+    /// authoritative implementation — the store-backed bridges
+    /// (`InMemoryCoordinatorBridge`, `CoordinatorSupervisorBridge`)
+    /// inherit it instead of duplicating the logic. Per-slot
+    /// errors are NOT swallowed: a non-idempotent rejection
+    /// (e.g. `AlreadyTerminal` for a slot that reached a terminal
+    /// state with a different reason between the snapshot read
+    /// and the record) propagates upward so the dispatcher's
+    /// warn branch is reachable for real I/O / lock / state
+    /// errors.
+    fn record_never_started_failures(&self, wave_id: &str) -> Result<(), BridgeError> {
+        use crate::supervisor::SlotStatus;
+        use crate::supervisor::worker_outcome::REASON_SLOT_NEVER_STARTED;
+        let snap = self.fan_in_status(wave_id)?;
+        for (slot_index, status) in &snap.slots {
+            if *status == SlotStatus::Pending {
+                // Fail-fast: same-reason replays already return
+                // Ok(()) via the store's idempotency contract, so
+                // any Err here is a real non-idempotent rejection
+                // that the caller must observe.
+                self.record_slot_failure(wave_id, *slot_index, REASON_SLOT_NEVER_STARTED)?;
+            }
+        }
         Ok(())
     }
 
@@ -448,25 +470,6 @@ impl SupervisorBridge for InMemoryCoordinatorBridge {
         Ok(())
     }
 
-    fn record_never_started_failures(&self, wave_id: &str) -> Result<(), BridgeError> {
-        use crate::supervisor::SlotStatus;
-        use crate::supervisor::worker_outcome::REASON_SLOT_NEVER_STARTED;
-        let snap = self
-            .store
-            .fan_in_status(wave_id)
-            .map_err(|e| BridgeError::Store(e.to_string()))?;
-        for (slot_index, status) in &snap.slots {
-            if *status == SlotStatus::Pending {
-                // Idempotent: same-reason replay is Ok(()) per
-                // `record_slot_failure`'s existing same-content_hash contract.
-                let _ =
-                    self.store
-                        .record_slot_failure(wave_id, *slot_index, REASON_SLOT_NEVER_STARTED);
-            }
-        }
-        Ok(())
-    }
-
     fn slot_failure_reason(
         &self,
         wave_id: &str,
@@ -625,7 +628,6 @@ mod tests {
     #[test]
     fn g2_record_never_started_marks_pending_slots() {
         use crate::supervisor::SlotStatus;
-        use crate::supervisor::worker_outcome::REASON_SLOT_NEVER_STARTED;
 
         let store = std::sync::Arc::new(InMemorySupervisorStore::new());
         let bridge = InMemoryCoordinatorBridge::from_store(
@@ -682,6 +684,138 @@ mod tests {
         assert_eq!(
             snap2.failed_count, snap.failed_count,
             "second call must not double-count failures"
+        );
+    }
+
+    /// Test-only bridge that serves a fixed (stale) snapshot from
+    /// `fan_in_status` while delegating every other call to a real
+    /// `InMemoryCoordinatorBridge`. Simulates the race where the
+    /// snapshot was read before the store learned a slot had
+    /// already reached a terminal state with a different reason —
+    /// the rejection `record_never_started_failures` must
+    /// propagate instead of swallowing. Inherits the trait's
+    /// shared default `record_never_started_failures`.
+    #[derive(Debug)]
+    struct StaleSnapshotBridge {
+        inner: InMemoryCoordinatorBridge,
+        stale: WaveSnapshot,
+    }
+
+    impl SupervisorBridge for StaleSnapshotBridge {
+        fn tick(
+            &self,
+            wave_id: &str,
+            inputs: PhaseInputs,
+        ) -> Result<CoordinatorAction, BridgeError> {
+            self.inner.tick(wave_id, inputs)
+        }
+
+        fn bind_slot(
+            &self,
+            kind: WaveKind,
+            wave_id: &str,
+            slot_index: u32,
+        ) -> Result<Option<SlotBinding>, BridgeError> {
+            self.inner.bind_slot(kind, wave_id, slot_index)
+        }
+
+        fn recover(&self) -> Result<Vec<WaveSnapshot>, BridgeError> {
+            self.inner.recover()
+        }
+
+        fn fan_in_status(&self, _wave_id: &str) -> Result<WaveSnapshot, BridgeError> {
+            Ok(self.stale.clone())
+        }
+
+        fn register_wave_if_absent(
+            &self,
+            kind: WaveKind,
+            wave_id: &str,
+            expected_total: u32,
+        ) -> Result<String, BridgeError> {
+            self.inner
+                .register_wave_if_absent(kind, wave_id, expected_total)
+        }
+
+        fn record_slot_result(
+            &self,
+            wave_id: &str,
+            slot_index: u32,
+            content_hash: &str,
+            event_count: usize,
+        ) -> Result<(), BridgeError> {
+            self.inner
+                .record_slot_result(wave_id, slot_index, content_hash, event_count)
+        }
+
+        fn record_slot_failure(
+            &self,
+            wave_id: &str,
+            slot_index: u32,
+            reason: &str,
+        ) -> Result<(), BridgeError> {
+            self.inner.record_slot_failure(wave_id, slot_index, reason)
+        }
+    }
+
+    /// G2 T2: a slot the (stale) snapshot still shows as `Pending`
+    /// is already terminally `Failed(worker_timeout)` in the store.
+    /// The store's first-terminal-wins contract rejects the
+    /// different-reason replay (`AlreadyTerminal`); the helper MUST
+    /// propagate that rejection as `Err` instead of swallowing it
+    /// with `let _ =`.
+    #[test]
+    fn g2_record_never_started_propagates_non_idempotent_error() {
+        use crate::supervisor::SlotStatus;
+        use crate::supervisor::worker_outcome::REASON_WORKER_TIMEOUT;
+
+        let store = std::sync::Arc::new(InMemorySupervisorStore::new());
+        let inner = InMemoryCoordinatorBridge::from_store(
+            store.clone() as std::sync::Arc<dyn SupervisorStore>
+        );
+
+        let store_id = inner
+            .register_wave_if_absent(WaveKind::Exec, "g2-prop-wave", 2)
+            .unwrap();
+
+        // Slot 1: terminally Failed with a DIFFERENT reason than
+        // the `slot_never_started` the helper is about to write.
+        inner
+            .record_slot_failure(&store_id, 1, REASON_WORKER_TIMEOUT)
+            .unwrap();
+
+        // Stale view: the snapshot still shows slot 1 as Pending
+        // (read before the store learned about the failure), so
+        // the helper attempts `slot_never_started` on it.
+        let mut stale = inner.fan_in_status(&store_id).unwrap();
+        for (idx, status) in stale.slots.iter_mut() {
+            if *idx == 1 {
+                *status = SlotStatus::Pending;
+            }
+        }
+
+        let bridge = StaleSnapshotBridge { inner, stale };
+        let result = bridge.record_never_started_failures(&store_id);
+        assert!(
+            result.is_err(),
+            "non-idempotent per-slot rejection must propagate upward; got {result:?}"
+        );
+    }
+
+    /// G2 T3: `fan_in_status` on an unknown wave returns `Err` —
+    /// the helper must propagate it (existing behavior preserved
+    /// by the shared implementation).
+    #[test]
+    fn g2_record_never_started_unknown_wave_errors() {
+        let store = std::sync::Arc::new(InMemorySupervisorStore::new());
+        let bridge = InMemoryCoordinatorBridge::from_store(
+            store.clone() as std::sync::Arc<dyn SupervisorStore>
+        );
+
+        let result = bridge.record_never_started_failures("no-such-wave");
+        assert!(
+            result.is_err(),
+            "fan_in_status error on an unknown wave must propagate; got {result:?}"
         );
     }
 }

@@ -455,23 +455,11 @@ impl SupervisorBridge for CoordinatorSupervisorBridge {
         Ok(())
     }
 
-    fn record_never_started_failures(&self, wave_id: &str) -> Result<(), BridgeError> {
-        use ralph_core::supervisor::worker_outcome::REASON_SLOT_NEVER_STARTED;
-        let snap = self
-            .store
-            .fan_in_status(wave_id)
-            .map_err(|e| BridgeError::Store(e.to_string()))?;
-        for (slot_index, status) in &snap.slots {
-            if *status == ralph_core::supervisor::SlotStatus::Pending {
-                // Idempotent: same-reason replay is Ok(()) per
-                // `record_slot_failure`'s existing same-content_hash contract.
-                let _ =
-                    self.store
-                        .record_slot_failure(wave_id, *slot_index, REASON_SLOT_NEVER_STARTED);
-            }
-        }
-        Ok(())
-    }
+    // `record_never_started_failures` inherits the shared trait
+    // default (2026-07-25-004 plan U3): the single authoritative
+    // implementation lives in `ralph_core::supervisor::bridge`,
+    // built on `fan_in_status` + `record_slot_failure` with
+    // fail-fast per-slot error propagation.
 
     fn slot_failure_reason(
         &self,
@@ -1136,6 +1124,113 @@ mod tests {
         assert_eq!(
             snap_after.failed_count, failed_before,
             "second call must not double-count; idempotent Ok(())"
+        );
+    }
+
+    /// G3 T2: the production bridge must propagate non-idempotent
+    /// per-slot rejections. A stale snapshot still shows slot 1 as
+    /// `Pending` while the store already holds it terminally
+    /// `Failed(worker_timeout)`; the shared default implementation
+    /// must surface the store's `AlreadyTerminal` rejection as
+    /// `Err` instead of swallowing it.
+    #[test]
+    fn g3_coordinator_bridge_record_never_started_propagates_non_idempotent_error() {
+        use ralph_core::supervisor::SlotStatus;
+        use ralph_core::supervisor::worker_outcome::REASON_WORKER_TIMEOUT;
+
+        /// Serves a fixed (stale) snapshot from `fan_in_status`,
+        /// delegating everything else to the production bridge.
+        /// Inherits the trait's shared default
+        /// `record_never_started_failures`.
+        #[derive(Debug)]
+        struct StaleSnapshotBridge {
+            inner: CoordinatorSupervisorBridge,
+            stale: WaveSnapshot,
+        }
+
+        impl SupervisorBridge for StaleSnapshotBridge {
+            fn tick(
+                &self,
+                wave_id: &str,
+                inputs: PhaseInputs,
+            ) -> Result<CoordinatorAction, BridgeError> {
+                self.inner.tick(wave_id, inputs)
+            }
+
+            fn bind_slot(
+                &self,
+                kind: WaveKind,
+                wave_id: &str,
+                slot_index: u32,
+            ) -> Result<Option<SlotBinding>, BridgeError> {
+                self.inner.bind_slot(kind, wave_id, slot_index)
+            }
+
+            fn recover(&self) -> Result<Vec<WaveSnapshot>, BridgeError> {
+                self.inner.recover()
+            }
+
+            fn fan_in_status(&self, _wave_id: &str) -> Result<WaveSnapshot, BridgeError> {
+                Ok(self.stale.clone())
+            }
+
+            fn register_wave_if_absent(
+                &self,
+                kind: WaveKind,
+                wave_id: &str,
+                expected_total: u32,
+            ) -> Result<String, BridgeError> {
+                self.inner
+                    .register_wave_if_absent(kind, wave_id, expected_total)
+            }
+
+            fn record_slot_result(
+                &self,
+                wave_id: &str,
+                slot_index: u32,
+                content_hash: &str,
+                event_count: usize,
+            ) -> Result<(), BridgeError> {
+                self.inner
+                    .record_slot_result(wave_id, slot_index, content_hash, event_count)
+            }
+
+            fn record_slot_failure(
+                &self,
+                wave_id: &str,
+                slot_index: u32,
+                reason: &str,
+            ) -> Result<(), BridgeError> {
+                self.inner.record_slot_failure(wave_id, slot_index, reason)
+            }
+        }
+
+        let inner = CoordinatorSupervisorBridge::with_in_memory_store();
+
+        let wave_id = inner
+            .register_wave_if_absent(WaveKind::Exec, "g3-prop-wave", 2)
+            .unwrap();
+
+        // Slot 1: terminally Failed with a DIFFERENT reason than
+        // the `slot_never_started` the helper is about to write.
+        inner
+            .record_slot_failure(&wave_id, 1, REASON_WORKER_TIMEOUT)
+            .unwrap();
+
+        // Stale view: slot 1 still Pending → the helper attempts
+        // `slot_never_started` on an already-terminal slot.
+        let mut stale = inner.fan_in_status(&wave_id).unwrap();
+        for (idx, status) in stale.slots.iter_mut() {
+            if *idx == 1 {
+                *status = SlotStatus::Pending;
+            }
+        }
+
+        let bridge = StaleSnapshotBridge { inner, stale };
+        let result = bridge.record_never_started_failures(&wave_id);
+        assert!(
+            result.is_err(),
+            "production bridge must propagate non-idempotent per-slot rejections; got {result:?}"
         );
     }
 }
