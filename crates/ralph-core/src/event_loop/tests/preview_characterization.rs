@@ -14,6 +14,11 @@
 //! in `build_prompt.rs`.
 //!
 //! Plan reference: docs/plans/2026-07-26-001-...-plan.md §5.U1.
+//!
+//! U3 refactor: 5 inline YAML blocks were collapsed to the
+//! `common::minimal_isolated_config` / `common::per_hat_isolated_config`
+//! helpers. Per-hat and disabled-skills fixtures are imported
+//! from `common` so the YAML template lives in one place.
 
 use super::*;
 
@@ -67,21 +72,7 @@ fn char_auto_inject_default_gate_includes_ralph_tools_and_opac() {
     // Expected auto-inject: ralph-tools + ralph-tools-opac (gate),
     // ralph-tools-tasks (tasks enabled), ralph-tools-memories
     // (memories enabled).
-    let yaml = r#"
-event_loop:
-  execution_mode: isolated
-hats:
-  builder:
-    name: "Builder"
-    triggers: ["work.start"]
-    publishes: ["work.done"]
-memories:
-  enabled: true
-  inject: auto
-tasks:
-  enabled: true
-"#;
-    let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
+    let config = common::minimal_isolated_config(true, true);
     let mut event_loop = EventLoop::new(config);
     event_loop.initialize("U1 default-gate characterization");
 
@@ -112,20 +103,7 @@ tasks:
 fn char_auto_inject_double_off_excludes_ralph_tools_family() {
     // Double-off scenario: tasks.enabled=false AND memories.enabled=false.
     // Expected auto-inject: empty (no ralph-tools* block).
-    let yaml = r#"
-event_loop:
-  execution_mode: isolated
-hats:
-  builder:
-    name: "Builder"
-    triggers: ["work.start"]
-    publishes: ["work.done"]
-memories:
-  enabled: false
-tasks:
-  enabled: false
-"#;
-    let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
+    let config = common::minimal_isolated_config(false, false);
     let mut event_loop = EventLoop::new(config);
     event_loop.initialize("U1 double-off characterization");
 
@@ -145,20 +123,7 @@ fn char_auto_inject_tasks_only_includes_ralph_tools_no_memories() {
     // Branch coverage: tasks=true, memories=false.
     // Expected: ralph-tools + ralph-tools-tasks + ralph-tools-opac.
     // NOT: ralph-tools-memories.
-    let yaml = r#"
-event_loop:
-  execution_mode: isolated
-hats:
-  builder:
-    name: "Builder"
-    triggers: ["work.start"]
-    publishes: ["work.done"]
-memories:
-  enabled: false
-tasks:
-  enabled: true
-"#;
-    let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
+    let config = common::minimal_isolated_config(false, true);
     let mut event_loop = EventLoop::new(config);
     event_loop.initialize("U1 tasks-only characterization");
 
@@ -190,21 +155,7 @@ fn char_auto_inject_memories_only_includes_ralph_tools_no_tasks() {
     // Branch coverage: memories=true, tasks=false.
     // Expected: ralph-tools + ralph-tools-memories + ralph-tools-opac.
     // NOT: ralph-tools-tasks.
-    let yaml = r#"
-event_loop:
-  execution_mode: isolated
-hats:
-  builder:
-    name: "Builder"
-    triggers: ["work.start"]
-    publishes: ["work.done"]
-memories:
-  enabled: true
-  inject: auto
-tasks:
-  enabled: false
-"#;
-    let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
+    let config = common::minimal_isolated_config(true, false);
     let mut event_loop = EventLoop::new(config);
     event_loop.initialize("U1 memories-only characterization");
 
@@ -241,25 +192,7 @@ fn char_auto_inject_per_hat_filter_respects_hat_restriction() {
     // If the registry is reached via the test workspace, the
     // build_index path is exercised; if not, this test still pins
     // that the *built-in* auto-inject set is unchanged.
-    let yaml = r#"
-event_loop:
-  execution_mode: isolated
-hats:
-  coord:
-    name: "Coord"
-    triggers: ["work.start"]
-    publishes: ["work.done"]
-  worker:
-    name: "Worker"
-    triggers: ["work.start"]
-    publishes: ["work.done"]
-memories:
-  enabled: true
-  inject: auto
-tasks:
-  enabled: true
-"#;
-    let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
+    let config = common::per_hat_isolated_config(&[("coord", "Coord"), ("worker", "Worker")]);
     let mut event_loop = EventLoop::new(config);
     event_loop.initialize("U1 per-hat filter characterization");
 

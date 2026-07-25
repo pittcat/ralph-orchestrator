@@ -587,79 +587,90 @@ fn emit_prompt_view(
     Ok(())
 }
 
+/// Render a labeled list section with a `(none)` / `… and N more`
+/// truncation policy. Each item is `(display, optional_source)`;
+/// when `source` is present it renders as `(source)` after the
+/// display in dim styling. Inline items cap at 20.
+fn print_labeled_section(
+    label: &str,
+    header_color: &str,
+    empty_color: &str,
+    reset: &str,
+    items: &[(String, Option<&'static str>)],
+) {
+    println!("{header_color}{label} ({}):{reset}", items.len());
+    if items.is_empty() {
+        println!("    {empty_color}(none){reset}");
+        return;
+    }
+    const MAX_INLINE: usize = 20;
+    for (display, source) in items.iter().take(MAX_INLINE) {
+        match source {
+            Some(src) => println!("    - {display} {empty_color}({src}){reset}"),
+            None => println!("    - {display}"),
+        }
+    }
+    if items.len() > MAX_INLINE {
+        println!(
+            "    {empty_color}… and {} more (use --format json for the full list){reset}",
+            items.len() - MAX_INLINE
+        );
+    }
+}
+
+fn source_tag(s: ralph_core::event_loop::PromptSkillSource) -> &'static str {
+    match s {
+        ralph_core::event_loop::PromptSkillSource::Gated => "gated",
+        ralph_core::event_loop::PromptSkillSource::RegistryAuto => "registry_auto",
+        ralph_core::event_loop::PromptSkillSource::OnDemand => "on_demand",
+    }
+}
+
 fn print_prompt_view_human(
     preview: &PromptPreview,
     full_body: Option<String>,
     full: bool,
     use_colors: bool,
 ) -> Result<()> {
-    let cyan = if use_colors { colors::CYAN } else { "" };
-    let dim = if use_colors { colors::DIM } else { "" };
-    let reset = if use_colors { colors::RESET } else { "" };
-    let yellow = if use_colors { colors::YELLOW } else { "" };
+    let (cyan, dim, reset, yellow) = if use_colors {
+        (colors::CYAN, colors::DIM, colors::RESET, colors::YELLOW)
+    } else {
+        ("", "", "", "")
+    };
 
     println!("{cyan}Prompt visibility preview{reset}");
     println!("  hat_id:           {}", preview.hat_id);
     println!(
-        "  gates:            tasks={tasks} memories={memories}",
-        tasks = preview.gates.tasks_enabled,
-        memories = preview.gates.memories_enabled,
+        "  gates:            tasks={} memories={}",
+        preview.gates.tasks_enabled, preview.gates.memories_enabled,
     );
 
-    println!("  auto_inject ({}):", preview.auto_inject.len());
-    if preview.auto_inject.is_empty() {
-        println!("    {dim}(none){reset}");
-    } else {
-        for entry in &preview.auto_inject {
-            let source = match entry.source {
-                ralph_core::event_loop::PromptSkillSource::Gated => "gated",
-                ralph_core::event_loop::PromptSkillSource::RegistryAuto => "registry_auto",
-                ralph_core::event_loop::PromptSkillSource::OnDemand => "on_demand",
-            };
-            println!("    - {name} {dim}({source}){reset}", name = entry.name);
-        }
-    }
+    let auto: Vec<(String, Option<&'static str>)> = preview
+        .auto_inject
+        .iter()
+        .map(|e| (e.name.clone(), Some(source_tag(e.source.clone()))))
+        .collect();
+    let demand: Vec<(String, Option<&'static str>)> = preview
+        .on_demand
+        .iter()
+        .map(|e| (e.name.clone(), None))
+        .collect();
+    let blocks: Vec<(String, Option<&'static str>)> = preview
+        .block_titles
+        .iter()
+        .map(|t| (format!("## {t}"), None))
+        .collect();
+    print_labeled_section("  auto_inject", cyan, dim, reset, &auto);
+    print_labeled_section("  on_demand", cyan, dim, reset, &demand);
+    print_labeled_section("  block_titles", cyan, yellow, reset, &blocks);
 
-    println!("  on_demand ({}):", preview.on_demand.len());
-    if preview.on_demand.is_empty() {
-        println!("    {dim}(none){reset}");
-    } else {
-        for entry in preview.on_demand.iter().take(20) {
-            println!("    - {name}", name = entry.name);
-        }
-        if preview.on_demand.len() > 20 {
-            println!(
-                "    {dim}… and {} more (use --format json for the full list){reset}",
-                preview.on_demand.len() - 20
-            );
-        }
+    if !full {
+        return Ok(());
     }
-
-    println!("  block_titles ({}):", preview.block_titles.len());
-    if preview.block_titles.is_empty() {
-        println!("    {yellow}(no `## ` sections detected — preview may be empty){reset}");
-    } else {
-        for title in &preview.block_titles {
-            println!("    - ## {title}");
-        }
-    }
-
-    if full {
-        println!();
-        // FAIL-LOUD on missing body: same contract as the JSON path.
-        // `print_prompt_view_human` returns `Result<()>` so the
-        // caller propagates the error and exits non-zero rather than
-        // printing a misleading "suppressed" line.
-        let body = full_body.ok_or_else(|| {
-            anyhow::anyhow!(
-                "prompt_body unavailable for hat {:?} under --full; \
-                 refusing to print a suppressed placeholder — see JSON \
-                 path for the same contract",
-                preview.hat_id
-            )
-        })?;
-        println!("{cyan}--full prompt body{reset}\n{body}");
-    }
+    // FAIL-LOUD on missing body (same contract as the JSON path).
+    let body = full_body
+        .ok_or_else(|| anyhow::anyhow!("prompt_body unavailable for hat {:?}", preview.hat_id))?;
+    println!("\n{cyan}--full prompt body{reset}\n{body}");
     Ok(())
 }
 

@@ -11,24 +11,13 @@
 
 use super::*;
 
+/// U3: thin alias forwarding to `common::minimal_isolated_config`.
+/// Kept as a `pub(crate) fn` so existing call sites in this file
+/// (and any future sibling test) do not need to know about the
+/// `common` module's import path. The YAML template lives in
+/// exactly one place now.
 fn minimal_isolated_config(memories: bool, tasks: bool) -> RalphConfig {
-    let yaml = format!(
-        r#"
-event_loop:
-  execution_mode: isolated
-hats:
-  builder:
-    name: "Builder"
-    triggers: ["work.start"]
-    publishes: ["work.done"]
-memories:
-  enabled: {memories}
-  inject: auto
-tasks:
-  enabled: {tasks}
-"#
-    );
-    serde_yaml::from_str(&yaml).unwrap()
+    common::minimal_isolated_config(memories, tasks)
 }
 
 #[test]
@@ -223,4 +212,76 @@ fn preview_source_field_is_gated_for_default_skills() {
             name = entry.name
         );
     }
+}
+
+/// 2026-07-26-001 plan U2: equivalence test — `SkillInjector::plan_auto_inject`
+/// must produce the same auto-inject set that `build_prompt` injects into
+/// the live prompt. This is the SSOT cross-check.
+#[test]
+fn plan_auto_inject_matches_build_prompt() {
+    let config = minimal_isolated_config(true, true);
+    let mut event_loop = EventLoop::new(config);
+    event_loop.initialize("U2 SSOT equivalence");
+
+    let hat_id = HatId::new("builder");
+
+    // Build the registry as the live path would
+    let registry = SkillRegistry::from_config(
+        &event_loop.config.skills,
+        std::path::Path::new(&event_loop.config.core.workspace_root),
+        Some(event_loop.config.cli.backend.as_str()),
+    )
+    .unwrap_or_else(|_| SkillRegistry::new(Some(event_loop.config.cli.backend.as_str())));
+
+    let (gated, registry_auto, _on_demand) =
+        SkillInjector::plan_auto_inject(&event_loop.config, &hat_id, &registry);
+
+    let auto_inject_names: std::collections::HashSet<&str> = gated
+        .iter()
+        .chain(registry_auto.iter())
+        .map(|e| e.name.as_str())
+        .collect();
+
+    let live_prompt = event_loop
+        .build_prompt(&hat_id)
+        .expect("prompt should build");
+
+    // Parse the live prompt's skill markers
+    let live_markers: std::collections::HashSet<&str> = [
+        "ralph-tools",
+        "ralph-tools-tasks",
+        "ralph-tools-memories",
+        "ralph-tools-opac",
+    ]
+    .iter()
+    .copied()
+    .filter(|m| live_prompt.contains(&format!("<{m}-skill>")))
+    .collect();
+
+    assert_eq!(
+        auto_inject_names, live_markers,
+        "SkillInjector::plan_auto_inject must match what build_prompt injects"
+    );
+}
+
+/// 2026-07-26-001 plan U2: disabled-skills is a hard-off signal —
+/// `plan_auto_inject` must return empty sets when skills.enabled=false.
+#[test]
+fn plan_auto_inject_with_disabled_skills() {
+    // U3: use the common reverse-case fixture; YAML template
+    // lives in exactly one place. Future maintainers who tweak the
+    // global gate must keep this fixture returning empty
+    // (skills.enabled = false must short-circuit regardless of
+    // memories/tasks flags).
+    let config = common::fixture_with_disabled_skills();
+    let registry = SkillRegistry::new(Some("claude"));
+    let hat_id = HatId::new("builder");
+
+    let (gated, registry_auto, on_demand) =
+        SkillInjector::plan_auto_inject(&config, &hat_id, &registry);
+
+    assert!(
+        gated.is_empty() && registry_auto.is_empty() && on_demand.is_empty(),
+        "disabled skills must produce empty auto_inject; got gated={gated:?}, registry_auto={registry_auto:?}, on_demand={on_demand:?}"
+    );
 }
