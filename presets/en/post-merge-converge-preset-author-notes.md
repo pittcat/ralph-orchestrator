@@ -1,5 +1,12 @@
 # Preset Author Notes — post-merge-converge
 
+## Revision 2026-07-26 (P1 remediation from review)
+
+- Consumer Observe binds trigger `artifact_path` (reproducer / system-auditor / change-mapper)
+- test-gap lists full `.ralph/post-merge/03…08` paths
+- fixer selects Finding from `.ralph/post-merge/findings/` when `reproduce.ready` has no `finding_id`
+- Artifact lifecycle declared: owner + retention + operator-owned cleanup; agents must not wipe dir
+
 ## Revision 2026-07-25 (operator report + confidence)
 
 - Artifacts root: `.ralph/post-merge/` (not docs/)
@@ -16,13 +23,13 @@
 - **阻塞条件：** 基线无效或 P0/P1 未关闭且未 accepted → `postmerge.fix.ready{passed:false}` → closer `FAIL` / `success:false`（merge-batch 式全路径收敛，不用 plan.blocked 旁路）。
 - **允许的修改范围：** 审计/地图/test-gap/终审只读生产代码；reproducer 只写失败测试；fixer 按 Finding 最小修复。
 - **必须独立执行的评审：** closer 的 Final Review，不补前面工作。
-- **重要 artifact：** `.ralph/post-merge/01…15` + `findings/PMI-*.md`。
+- **重要 artifact：** `.ralph/post-merge/01…15` + `findings/PMI-*.md` + `REPORT.md`。
 - **execution_model：** single-chain  
   **why：** 严格串行，无 wave/supervisor 需求。
 - **非目标：** 不重跑各计划、不重新 merge、不绑语言/CI。
 - **用户确认：** 6.1 已确认（2026-07-25）。
 
-## Fusion notes（15→7，保留步骤）
+## Fusion notes（15→8，保留步骤）
 
 | Hat | PDF steps | 融合注意 |
 |---|---|---|
@@ -32,19 +39,20 @@
 | test-gap | 09 | 只设计不实现失败测试 |
 | reproducer | 10 | 自环；一 Finding/activation；禁改生产代码 |
 | fixer | 11–13 | **同 activation 内强制顺序** 根因→修复→回归；回归失败发 `fix.next` 再进，不在「回归心态」里继续改 |
-| closer | 14–15 | **先 14 后 15**；终审不补活 |
+| closer | 14–15 | **先 14 后 15**；终审不补活；发 `postmerge.reviewed` |
+| reporter | （收口） | 写 `.ralph/post-merge/REPORT.md`；唯一 `postmerge.complete`（必填 `report_path`） |
 
 Hard questions — single-chain-first: ✓（无 supervisor/wave）  
 Hard questions — wave / supervisor: N/A  
-Hard questions — Artifact-First: ✓（docs/post-merge 为业务 artifact；event 只带路径/短状态）
+Hard questions — Artifact-First: ✓（`.ralph/post-merge/` 为业务 artifact；event 只带路径/短状态；lifecycle 已声明）
 
 ## Hat: baseline
 
 - **Q1 使命:** 固定合入后基线，只记录不分析不改码
 - **Q2 输入:** prompt 分支/验证命令；`git` 状态；现有测试
-- **Q3 执行:** Observe 仓库 → Precheck 无 merge 中 → Apply 跑现状验证并写 `01-baseline.md` → Confirm emit
+- **Q3 执行:** Observe 仓库 → Precheck 无 merge 中 → Apply 跑现状验证并写 `.ralph/post-merge/01-baseline.md` → Confirm emit
 - **Q4 输出:** `postmerge.baseline.ready`
-- **Q5 交接:** `artifact_path` → change-mapper 读 `01-baseline.md`
+- **Q5 交接:** `artifact_path` → change-mapper `cat` 该路径
 
 ### Payload Contract
 
@@ -58,10 +66,10 @@ Hard questions — Artifact-First: ✓（docs/post-merge 为业务 artifact；ev
 ## Hat: change-mapper
 
 - **Q1 使命:** 建立整体变更地图
-- **Q2 输入:** 读 `01-baseline.md`；计划列表或 git 发现
+- **Q2 输入:** 读 trigger `artifact_path`（baseline）；计划列表或 git 发现
 - **Q3:** 短路面 → 建四表 → emit
 - **Q4:** `postmerge.changemap.ready`
-- **Q5:** `02-change-map.md` → system-auditor
+- **Q5:** trigger `artifact_path`（地图）→ system-auditor
 
 ### Payload Contract
 
@@ -144,7 +152,7 @@ Hard questions — Artifact-First: ✓（docs/post-merge 为业务 artifact；ev
 ## Hat: closer
 
 - **Q1 使命:** 干净环境验证 + 独立终审；唯一 completion 发布者
-- **Q2:** `fix.ready` + 全部 docs/post-merge
+- **Q2:** `fix.ready` + 全部 `.ralph/post-merge/**`
 - **Q3:** 先 14 后 15 → emit complete
 - **Q4:** `postmerge.complete`
 - **Q5:** 终态；操作者读 `15-final-review.md`
@@ -191,7 +199,7 @@ Hard questions — Artifact-First: ✓（docs/post-merge 为业务 artifact；ev
 ## Pre-review gate
 
 - [x] 每 hat AAF + Payload Contract  
-- [x] hat 数 notes=YAML=7  
+- [x] hat 数 notes=YAML=8  
 - [x] single-chain / Artifact-First hard questions  
 - [x] emitter 引用 OPAC / policy-check  
 - [ ] lint 实测（下一步）
