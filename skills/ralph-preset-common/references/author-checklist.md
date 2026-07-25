@@ -78,6 +78,7 @@
 - [ ] **对每条 hat 跑 `ralph -c <preset>.yml inspect prompt --hat <id> --format json`**（详见 [`prompt-visibility.md`](prompt-visibility.md)），把 `auto_inject` / `on_demand` 作为该 hat 唯一可见性证据：
   - on-demand skill（`auto_inject[]` 不含、`on_demand[]` 含）→ instructions 必须显式让 agent `ralph tools skill load <name>`，**不得**写成「已自动注入」
   - auto-inject skill → instructions 可直接引用其章节名；**禁止**让 agent 再 `ralph tools skill load`
+- [ ] **运行 `ralph inspect prompt --full --format json` 验证 preset instructions 在 prompt_body 中可见**（`prompt_body` 字段含完整 instructions + 注入 skill 拼接文本）
 - [ ] 写 hat X 的 `instructions:` 时 **只扮演 hat X 的 agent**
 - [ ] 逐 hat 填 AAF 五问表（模板见下）
 - [ ] 禁止拓扑句式抄进 instructions

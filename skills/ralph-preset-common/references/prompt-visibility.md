@@ -40,6 +40,7 @@ ralph -c ./local.yml inspect prompt --hat worker --format json
 | `auto_inject[]` | **已自动注入**的 skill + source (`gated` \| `registry_auto`) |
 | `on_demand[]` | 可见但**未自动注入**的 skill，按名字排序 |
 | `block_titles[]` | prompt 里 `## …` 块标题，按出现顺序 |
+| `prompt_body` | `--full` 时返回真实 instructions + 注入 skill 拼接的完整 body；human 模式打印同等文本（不 suppressed） |
 
 ## 3. auto vs on_demand 判定
 

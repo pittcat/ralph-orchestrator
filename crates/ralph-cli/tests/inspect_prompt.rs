@@ -345,3 +345,187 @@ fn inspect_prompt_help_lists_subcommand() {
         "inspect --help must list the new `prompt` subcommand; got: {stdout}"
     );
 }
+
+#[test]
+fn inspect_prompt_full_json_returns_real_body() {
+    // T1: --full --format json returns a non-empty prompt_body with real content
+    let tmp = tempfile::tempdir().unwrap();
+    let preset_path = write_preset(tmp.path(), "local.yml", MINIMAL_PRESET);
+
+    let mut cmd = ralph_bin();
+    cmd.current_dir(&tmp)
+        .args(["-c", preset_path.to_str().unwrap()])
+        .args([
+            "inspect", "prompt", "--hat", "worker", "--format", "json", "--full",
+        ]);
+
+    let output = cmd
+        .output()
+        .expect("spawn ralph inspect prompt --full json");
+    assert!(
+        output.status.success(),
+        "inspect prompt --full json must exit 0; got {:?}\nstderr: {}\nstdout: {}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr),
+        String::from_utf8_lossy(&output.stdout)
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let parsed: serde_json::Value = serde_json::from_str(&stdout).expect("must be valid JSON");
+
+    // prompt_body must be a non-empty string with real content
+    let prompt_body = parsed["prompt_body"]
+        .as_str()
+        .expect("prompt_body must be a string");
+    assert!(
+        prompt_body.len() > 100,
+        "prompt_body must be >100 chars, got {} chars: {prompt_body}",
+        prompt_body.len()
+    );
+
+    // The MINIMAL_PRESET instruction literal must appear in the rendered body
+    assert!(
+        prompt_body.contains("Build a small CLI in Rust that prints hello world."),
+        "prompt_body must contain the hat instruction literal; got: {prompt_body}"
+    );
+}
+
+#[test]
+fn inspect_prompt_full_human_prints_full_body() {
+    // T1: --full --format human prints the full body (not suppressed)
+    let tmp = tempfile::tempdir().unwrap();
+    let preset_path = write_preset(tmp.path(), "local.yml", MINIMAL_PRESET);
+
+    let mut cmd = ralph_bin();
+    cmd.current_dir(&tmp)
+        .args(["-c", preset_path.to_str().unwrap()])
+        .args([
+            "inspect", "prompt", "--hat", "worker", "--format", "human", "--full",
+        ]);
+
+    let output = cmd
+        .output()
+        .expect("spawn ralph inspect prompt --full human");
+    assert!(
+        output.status.success(),
+        "inspect prompt --full human must exit 0; got {:?}\nstderr: {}\nstdout: {}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr),
+        String::from_utf8_lossy(&output.stdout)
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    // Must print the instruction literal from MINIMAL_PRESET
+    assert!(
+        stdout.contains("Build a small CLI in Rust that prints hello world."),
+        "stdout must contain the hat instruction literal; got: {stdout}"
+    );
+
+    // Must NOT print the suppressed message
+    assert!(
+        !stdout.contains("suppressed in this build"),
+        "stdout must NOT contain suppressed message; got: {stdout}"
+    );
+    assert!(
+        !stderr.contains("suppressed in this build"),
+        "stderr must NOT contain suppressed message; got: {stderr}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Fail-loud contracts (U1 error-handling hardening):
+// `--full` promises a real `prompt_body`; emitting `""` or a "suppressed"
+// placeholder would mask a real failure. These tests pin that promise:
+// when build_prompt returns None, the CLI must exit non-zero with stderr
+// naming the failure (not silently emit an empty SSOT field).
+// ---------------------------------------------------------------------------
+
+#[test]
+fn inspect_prompt_full_json_unknown_hat_exits_nonzero() {
+    // A1 fail-loud: --full --format json with an unknown hat must
+    // exit non-zero. The hat-not-found branch fires before
+    // build_prompt runs, so this exercises the early-exit error
+    // path (exit 2 + stderr names the hat).
+    let tmp = tempfile::tempdir().unwrap();
+    let preset_path = write_preset(tmp.path(), "local.yml", MINIMAL_PRESET);
+
+    let mut cmd = ralph_bin();
+    cmd.current_dir(&tmp)
+        .args(["-c", preset_path.to_str().unwrap()])
+        .args([
+            "inspect", "prompt", "--hat", "ghost", "--format", "json", "--full",
+        ]);
+
+    let output = cmd
+        .output()
+        .expect("spawn ralph inspect prompt --full json unknown hat");
+    assert!(
+        !output.status.success(),
+        "--full with unknown hat must exit non-zero; got {:?}\nstderr: {}\nstdout: {}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr),
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("ghost") || String::from_utf8_lossy(&output.stdout).contains("ghost"),
+        "stderr or stdout must name the unknown hat; got stderr: {stderr}\nstdout: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+}
+
+#[test]
+fn inspect_prompt_full_json_does_not_emit_empty_body() {
+    // A2 contract pin: even if `--full` were to fail internally, the
+    // JSON output must NEVER be `{"prompt_body": "", ...}`. Either
+    // the body is real (success) or the command exits non-zero with
+    // a stderr error (failure). Silent `prompt_body: ""` is the bug
+    // we just fixed.
+    let tmp = tempfile::tempdir().unwrap();
+    let preset_path = write_preset(tmp.path(), "local.yml", MINIMAL_PRESET);
+
+    let mut cmd = ralph_bin();
+    cmd.current_dir(&tmp)
+        .args(["-c", preset_path.to_str().unwrap()])
+        .args([
+            "inspect", "prompt", "--hat", "worker", "--format", "json", "--full",
+        ]);
+
+    let output = cmd
+        .output()
+        .expect("spawn ralph inspect prompt --full json");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    if output.status.success() {
+        // Success path: prompt_body must be non-empty.
+        let parsed: serde_json::Value =
+            serde_json::from_str(&stdout).expect("must be valid JSON on success");
+        let body = parsed["prompt_body"]
+            .as_str()
+            .expect("prompt_body must be a string on success");
+        assert!(
+            !body.is_empty(),
+            "successful --full JSON must have non-empty prompt_body; got empty"
+        );
+    } else {
+        // Failure path: stdout must NOT contain a JSON with prompt_body="".
+        // Either stdout is empty, or stdout has no prompt_body key.
+        if !stdout.trim().is_empty()
+            && let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&stdout)
+        {
+            let body = parsed.get("prompt_body").and_then(|v| v.as_str());
+            assert!(
+                body.map(str::is_empty) != Some(true),
+                "failed --full JSON must NOT emit prompt_body=\"\"; \
+                 emit must fail-loud instead; got stdout: {stdout}\nstderr: {stderr}"
+            );
+        }
+        assert!(
+            !stderr.is_empty(),
+            "failed --full must produce stderr; got empty stderr"
+        );
+    }
+}

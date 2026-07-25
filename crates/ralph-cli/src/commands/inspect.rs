@@ -512,14 +512,29 @@ pub async fn inspect_prompt_command(
             hat_id.as_str()
         )
     })?;
+
+    // Build the full prompt body while tracing is still suppressed,
+    // then drop the guard before emitting output so normal logging resumes.
+    let full_body = if args.full {
+        event_loop.build_prompt(&hat_id)
+    } else {
+        None
+    };
     drop(_guard);
 
-    emit_prompt_view(&preview_via_loop, args.format, args.full, use_colors)
+    emit_prompt_view(
+        &preview_via_loop,
+        full_body,
+        args.format,
+        args.full,
+        use_colors,
+    )
 }
 
 /// Render a `PromptPreview` in the operator's chosen format.
 fn emit_prompt_view(
     preview: &PromptPreview,
+    full_body: Option<String>,
     format: InspectProfilesFormat,
     full: bool,
     use_colors: bool,
@@ -532,28 +547,32 @@ fn emit_prompt_view(
             let stdout = std::io::stdout();
             let mut handle = stdout.lock();
             if full {
-                // Re-derive the prompt body via a second dry
-                // `build_prompt` is out of scope here (the caller
-                // owns the EventLoop); instead, structure the
-                // preview as the SSOT and let the operator opt
-                // into `--full` via the human output. When the
-                // user asks for `--full --format json`, we surface
-                // a single `prompt_body` field that the CLI
-                // computes in a follow-up patch (U3 keeps JSON
-                // strictly structured; --full is a human-only
-                // convenience).
+                // Use the pre-computed prompt body (computed while tracing
+                // was suppressed so no log pollution reaches stdout).
+                // FAIL-LOUD on missing body: `prompt_body` is part of
+                // the SSOT contract (`--full` guarantees a real body);
+                // silently emitting `""` would mask a real failure
+                // mode (e.g. build_prompt errored, registry missing,
+                // hat stripped after preview).
+                let body = full_body.ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "prompt_body unavailable for hat {:?} under --full; \
+                         inspect failed to materialize build_prompt output \
+                         (registry empty, hat unknown after preview, or \
+                         build_prompt returned None) — refusing to emit an \
+                         empty SSOT field",
+                        preview.hat_id
+                    )
+                })?;
                 #[derive(serde::Serialize)]
-                struct FullJson<'a> {
+                struct PromptViewJson<'a> {
                     #[serde(flatten)]
                     preview: &'a PromptPreview,
                     prompt_body: &'a str,
                 }
-                // No prompt body available without rerunning the
-                // build — surface an empty string. Operators who
-                // want the body use `--format human --full`.
-                let view = FullJson {
+                let view = PromptViewJson {
                     preview,
-                    prompt_body: "",
+                    prompt_body: body.as_str(),
                 };
                 serde_json::to_writer_pretty(&mut handle, &view)?;
             } else {
@@ -562,13 +581,18 @@ fn emit_prompt_view(
             writeln!(handle)?;
         }
         InspectProfilesFormat::Human => {
-            print_prompt_view_human(preview, full, use_colors);
+            print_prompt_view_human(preview, full_body, full, use_colors)?;
         }
     }
     Ok(())
 }
 
-fn print_prompt_view_human(preview: &PromptPreview, full: bool, use_colors: bool) {
+fn print_prompt_view_human(
+    preview: &PromptPreview,
+    full_body: Option<String>,
+    full: bool,
+    use_colors: bool,
+) -> Result<()> {
     let cyan = if use_colors { colors::CYAN } else { "" };
     let dim = if use_colors { colors::DIM } else { "" };
     let reset = if use_colors { colors::RESET } else { "" };
@@ -622,13 +646,21 @@ fn print_prompt_view_human(preview: &PromptPreview, full: bool, use_colors: bool
 
     if full {
         println!();
-        println!("{cyan}--full prompt body suppressed in this build{reset}");
-        println!(
-            "  {dim}use a follow-up `ralph run --dry-run` or read .ralph/review/<plan>/ \
-             to capture the rendered prompt; --full currently prints the structured \
-             preview only{reset}"
-        );
+        // FAIL-LOUD on missing body: same contract as the JSON path.
+        // `print_prompt_view_human` returns `Result<()>` so the
+        // caller propagates the error and exits non-zero rather than
+        // printing a misleading "suppressed" line.
+        let body = full_body.ok_or_else(|| {
+            anyhow::anyhow!(
+                "prompt_body unavailable for hat {:?} under --full; \
+                 refusing to print a suppressed placeholder — see JSON \
+                 path for the same contract",
+                preview.hat_id
+            )
+        })?;
+        println!("{cyan}--full prompt body{reset}\n{body}");
     }
+    Ok(())
 }
 
 /// Versioned schema for the JSON output of `ralph inspect loop`.
