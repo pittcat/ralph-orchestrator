@@ -5661,7 +5661,6 @@ hats: {}
     // is observable as a red → green transition.
 
     /// CA-2: U1 characterization — U3 will flip this:
-    /// Err arm with a timeout message currently returns
     /// `SlotOutcome::Failed { reason: REASON_WORKER_CANCELLED }` with the
     /// Dynamic string verbatim in the reason field. After U3 lands,
     /// the Err arm is expected to return `SlotOutcome::Failed { reason: REASON_WORKER_TIMEOUT }`
