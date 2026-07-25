@@ -1068,6 +1068,22 @@ mod tests {
             worker.concurrency, 6,
             "review-worker concurrency must stay 6 for six-dimension fan-out"
         );
+        // KTD-2 default-wave path opens supervisor.db and applies
+        // max_concurrent_workers even when supervisor.enabled is
+        // false. Cap < concurrency collapses effective_cap and
+        // leaves trailing TUI eggs blank (observed: 6 eggs / 4 live).
+        assert!(
+            config.event_loop.supervisor.max_concurrent_workers >= worker.concurrency,
+            "supervisor.max_concurrent_workers ({}) must be >= review-worker.concurrency ({}); \
+             otherwise dispatcher effective_cap = min(hat, bridge) drops trailing slots",
+            config.event_loop.supervisor.max_concurrent_workers,
+            worker.concurrency
+        );
+        assert!(
+            !config.event_loop.supervisor.enabled,
+            "implementation-review stays on default wave (supervisor.enabled=false); \
+             full supervisor product mode is ce-executor-supervisor, not this preset"
+        );
     }
 
     #[test]
