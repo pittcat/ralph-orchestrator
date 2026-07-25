@@ -54,7 +54,9 @@ cargo build
 cargo clippy                                 # Lint (pedantic configured in workspace)
 cargo fmt                                    # Format
 cargo doc --no-deps                          # Documentation
-./scripts/setup-hooks.sh                     # Install pre-commit hooks (once)
+./scripts/setup-hooks.sh                     # Install git hooks (once per clone/machine)
+#   pre-push = embedded dead-source sync only (no rustup / no tests)
+#   full CI gate is manual: ./scripts/ci-rust-gate.sh or ./scripts/run-tests.sh
 ```
 
 **IMPORTANT**: Run `cargo nextest run` (or `./scripts/run-tests.sh` if nextest is installed) before declaring any task done.

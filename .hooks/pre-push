@@ -1,7 +1,10 @@
 #!/usr/bin/env bash
-# Pre-push hook: run the shared Rust CI parity gate before pushing.
-# This catches the Rust-side CI failures locally, including the checks that
-# previously drifted from GitHub Actions.
+# Pre-push hook: light hygiene only — no rustup, no fmt/clippy, no tests.
+#
+# Catches "dead source still mirrored" / missing embedded-asset sources
+# (e.g. deleted `.claude/skills/...` still listed in MIRRORED_FILES).
+# Full test / CI parity is manual: `./scripts/run-tests.sh` or
+# `./scripts/ci-rust-gate.sh` when you choose to run them.
 #
 # Skip with: git push --no-verify
 
@@ -11,9 +14,11 @@ REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
 cd "$REPO_ROOT"
 
 # Hooks inherit Git env vars (GIT_DIR/GIT_INDEX_FILE/etc.).
-# Unset them so nested `git` calls in tests run against their own repos.
+# Unset them so nested `git` calls do not see the outer repo.
 while IFS= read -r git_env_var; do
   unset "$git_env_var"
 done < <(git rev-parse --local-env-vars)
 
-./scripts/ci-rust-gate.sh
+echo "🔍 Pre-push: embedded / dead-source sync check only..."
+./scripts/sync-embedded-files.sh check
+echo "✅ Pre-push hygiene passed (tests not run — run manually if needed)"
