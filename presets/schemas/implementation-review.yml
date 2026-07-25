@@ -69,9 +69,9 @@ schemas:
         source: '`git rev-parse HEAD` before writing the patch'
         fill_rule: 40-char git SHA; do NOT reuse a stale value
       scope_digest:
-        meaning: hex digest binding the canonical scope manifest content (manifest minus its own digest field)
+        meaning: hex digest binding the canonical scope manifest content (manifest minus its own digest field line)
         source: scope-preparer computes from the serialized scope-manifest.json
-        fill_rule: 16-64 hex chars; recompute after every manifest regeneration
+        fill_rule: "64 hex chars from `grep -v '\"scope_digest\"' <manifest> | sha256sum | awk '{print $1}'` (strip the JSON line containing the key; do NOT jq/python re-serialize). Recompute after every manifest regeneration."
       patch_path:
         meaning: repo-relative path to the binary frozen diff (`git diff --binary --no-color C^..HEAD`)
         source: scope-preparer writes via the Write tool

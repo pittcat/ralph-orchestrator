@@ -201,9 +201,9 @@ event_loop:
             source: '`git rev-parse HEAD` before writing the patch'
             fill_rule: 40-char git SHA; do NOT reuse a stale value
           scope_digest:
-            meaning: hex digest binding the canonical scope manifest content (manifest minus its own digest field)
+            meaning: hex digest binding the canonical scope manifest content (manifest minus its own digest field line)
             source: scope-preparer computes from the serialized scope-manifest.json
-            fill_rule: 16-64 hex chars; recompute after every manifest regeneration
+            fill_rule: "64 hex chars from `grep -v '\"scope_digest\"' <manifest> | sha256sum | awk '{print $1}'` (strip the JSON line containing the key; do NOT jq/python re-serialize). Recompute after every manifest regeneration."
           patch_path:
             meaning: repo-relative path to the binary frozen diff (`git diff --binary --no-color C^..HEAD`)
             source: scope-preparer writes via the Write tool
@@ -929,12 +929,21 @@ hats:
            "dirty_blocked_paths": []
          }
          ```
-         Compute `scope_digest` AFTER writing every other field, by
-         writing the file, reading it back, recomputing
-         `sha256sum` (or `sha256` on macOS) over the bytes minus the
-         `scope_digest` field, then writing the file again with the
-         computed digest. Two passes — both via the Write tool, never
-         via `sed -i` / `>>`.
+         Compute `scope_digest` AFTER writing every other field
+         (including a placeholder `scope_digest` line). Canonical
+         recipe — every downstream re-verify MUST use this same
+         pipeline (line-strip, not JSON re-serialize):
+         ```
+         grep -v '"scope_digest"' .ralph/review/<plan>/scope-manifest.json \
+           | sha256sum | awk '{print $1}'
+         ```
+         (`grep -v` deletes the single JSON line whose key is
+         `scope_digest`; remaining bytes are hashed as-is. Do NOT use
+         `jq` / `python -m json` / pretty-print — key order and
+         whitespace would diverge.) Then rewrite the file with the
+         computed digest via the Write tool (two Write passes; never
+         `sed -i` / `>>`). On macOS without `sha256sum`, use
+         `shasum -a 256` in place of `sha256sum`.
 
       ### Step 5b — Write block artifact (blocked path)
 
@@ -1052,9 +1061,14 @@ hats:
         for a `clean` verdict).
       - `sha256sum .ralph/review/<plan>/review.diff.patch` must equal
         `scope.ready.patch_digest`.
-      - `scope_digest` in `scope-manifest.json` (read the file, parse,
-        recompute digest over the rest) must equal
-        `scope.ready.scope_digest`.
+      - Recompute `scope_digest` with the canonical line-strip recipe
+        (do NOT jq/python re-serialize — key order/whitespace diverge):
+        ```
+        grep -v '"scope_digest"' .ralph/review/<plan>/scope-manifest.json \
+          | sha256sum | awk '{print $1}'
+        ```
+        Result must equal both the manifest's recorded `scope_digest`
+        and `scope.ready.scope_digest`.
 
       ### Step 2 — Build six immutable payload bytes
 
@@ -1219,8 +1233,14 @@ hats:
         `review_head_sha` from the trigger payload.
       - porcelain filter (excluding `.ralph/`) must be empty.
       - `sha256sum <patch_path>` must equal `patch_digest`.
-      - `scope_digest` in the manifest (recompute) must equal the
-        trigger's `scope_digest`.
+      - Recompute `scope_digest` with the canonical line-strip recipe
+        (do NOT jq/python re-serialize):
+        ```
+        grep -v '"scope_digest"' .ralph/review/<plan>/scope-manifest.json \
+          | sha256sum | awk '{print $1}'
+        ```
+        Result must equal the trigger's `scope_digest` and the
+        manifest's recorded `scope_digest`.
       - Save start evidence to
         `.ralph/review/<plan>/git-state-review-worker-<dimension>-start.txt`
         (do NOT commit; `.ralph/` is not tracked).
@@ -1403,8 +1423,13 @@ hats:
       - porcelain filter (excluding `.ralph/`) must still be empty.
       - `sha256sum` of the patch file must still equal
         `scope-manifest.patch_digest`.
-      - Recomputed `scope_digest` from the manifest bytes must equal
-        the manifest's recorded `scope_digest`.
+      - Recompute `scope_digest` with the canonical line-strip recipe
+        (do NOT jq/python re-serialize):
+        ```
+        grep -v '"scope_digest"' .ralph/review/<plan>/scope-manifest.json \
+          | sha256sum | awk '{print $1}'
+        ```
+        Result must equal the manifest's recorded `scope_digest`.
       - Any drift → `review.blocked` with `reason: scope_drift_pre_synth`
         (write the block artifact first).
 
