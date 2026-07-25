@@ -868,9 +868,7 @@ where
     if default_gate_open && skill_registry.is_hat_eligible("ralph-tools", hat_id.as_str()) {
         auto_inject.push(PromptSkillEntry::gated("ralph-tools"));
     }
-    if gates.tasks_enabled
-        && skill_registry.is_hat_eligible("ralph-tools-tasks", hat_id.as_str())
-    {
+    if gates.tasks_enabled && skill_registry.is_hat_eligible("ralph-tools-tasks", hat_id.as_str()) {
         auto_inject.push(PromptSkillEntry::gated("ralph-tools-tasks"));
     }
     if gates.memories_enabled
@@ -878,18 +876,14 @@ where
     {
         auto_inject.push(PromptSkillEntry::gated("ralph-tools-memories"));
     }
-    if default_gate_open && skill_registry.is_hat_eligible("ralph-tools-opac", hat_id.as_str())
-    {
+    if default_gate_open && skill_registry.is_hat_eligible("ralph-tools-opac", hat_id.as_str()) {
         auto_inject.push(PromptSkillEntry::gated("ralph-tools-opac"));
     }
 
     for skill in skill_registry.auto_inject_skills(Some(hat_id.as_str())) {
         if matches!(
             skill.name.as_str(),
-            "ralph-tools"
-                | "ralph-tools-tasks"
-                | "ralph-tools-memories"
-                | "ralph-tools-opac"
+            "ralph-tools" | "ralph-tools-tasks" | "ralph-tools-memories" | "ralph-tools-opac"
         ) {
             continue;
         }

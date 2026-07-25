@@ -81,19 +81,37 @@ fn inspect_prompt_human_lists_blocks_and_skills() {
     let stdout = String::from_utf8_lossy(&output.stdout);
 
     // Block / structure markers (U3 / S3)
-    assert!(stdout.contains("Prompt visibility preview"), "stdout must contain header");
-    assert!(stdout.contains("hat_id:"), "stdout must include hat_id line");
+    assert!(
+        stdout.contains("Prompt visibility preview"),
+        "stdout must contain header"
+    );
+    assert!(
+        stdout.contains("hat_id:"),
+        "stdout must include hat_id line"
+    );
     assert!(stdout.contains("gates:"), "stdout must include gates line");
-    assert!(stdout.contains("auto_inject"), "stdout must include auto_inject block");
-    assert!(stdout.contains("on_demand"), "stdout must include on_demand block");
-    assert!(stdout.contains("block_titles"), "stdout must include block_titles block");
+    assert!(
+        stdout.contains("auto_inject"),
+        "stdout must include auto_inject block"
+    );
+    assert!(
+        stdout.contains("on_demand"),
+        "stdout must include on_demand block"
+    );
+    assert!(
+        stdout.contains("block_titles"),
+        "stdout must include block_titles block"
+    );
 
     // Skill classification (S1)
     assert!(
         stdout.contains("ralph-tools") && !stdout.contains("ralph-tools (gated) only"),
         "stdout must mention ralph-tools"
     );
-    assert!(stdout.contains("ralph-tools-emit"), "stdout must list emit as on-demand");
+    assert!(
+        stdout.contains("ralph-tools-emit"),
+        "stdout must list emit as on-demand"
+    );
 
     // No side effects on events.jsonl (S3)
     let events = tmp.path().join(".ralph/events.jsonl");
@@ -123,7 +141,13 @@ fn inspect_prompt_json_shape_is_stable() {
     let parsed: serde_json::Value = serde_json::from_str(&stdout).expect("must be valid JSON");
 
     // Stable top-level keys
-    for key in ["hat_id", "gates", "auto_inject", "on_demand", "block_titles"] {
+    for key in [
+        "hat_id",
+        "gates",
+        "auto_inject",
+        "on_demand",
+        "block_titles",
+    ] {
         assert!(
             parsed.get(key).is_some(),
             "JSON must contain top-level key {key}; got {parsed:?}"
@@ -221,8 +245,7 @@ fn inspect_prompt_double_off_gate_excludes_ralph_tools() {
 
     let output = cmd.output().expect("spawn ralph inspect prompt double-off");
     assert!(output.status.success());
-    let parsed: serde_json::Value =
-        serde_json::from_slice(&output.stdout).expect("valid json");
+    let parsed: serde_json::Value = serde_json::from_slice(&output.stdout).expect("valid json");
 
     let auto: Vec<&str> = parsed["auto_inject"]
         .as_array()
@@ -259,8 +282,7 @@ fn inspect_prompt_works_in_tempdir_without_crates_dir() {
         "inspect prompt in tempdir must exit 0; stderr: {}",
         String::from_utf8_lossy(&output.stderr)
     );
-    let parsed: serde_json::Value =
-        serde_json::from_slice(&output.stdout).expect("valid json");
+    let parsed: serde_json::Value = serde_json::from_slice(&output.stdout).expect("valid json");
     assert_eq!(parsed["hat_id"], "worker");
 
     // The `Build a small CLI in Rust that prints hello world.`
@@ -300,8 +322,7 @@ fn inspect_prompt_survives_polluted_agent_env() {
         "inspect prompt must succeed under polluted env; stderr: {}",
         String::from_utf8_lossy(&output.stderr)
     );
-    let parsed: serde_json::Value =
-        serde_json::from_slice(&output.stdout).expect("valid json");
+    let parsed: serde_json::Value = serde_json::from_slice(&output.stdout).expect("valid json");
 
     // The polluted env must NOT have rerouted the request: we
     // asked for `--hat worker`, we must get `worker` back, not

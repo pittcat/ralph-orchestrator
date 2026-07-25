@@ -486,8 +486,7 @@ pub async fn inspect_prompt_command(
     args: InspectPromptArgs,
     use_colors: bool,
 ) -> Result<()> {
-    let config =
-        preflight::load_config_for_preflight(config_sources, hats_source).await?;
+    let config = preflight::load_config_for_preflight(config_sources, hats_source).await?;
     let hat_id = ralph_proto::HatId::new(args.hat.clone());
 
     // Block titles are extracted via a dry `build_prompt` call,
@@ -502,22 +501,17 @@ pub async fn inspect_prompt_command(
     use tracing_subscriber::prelude::*;
 
     let suppressed = tracing::level_filters::LevelFilter::OFF;
-    let _guard = tracing::dispatcher::set_default(
-        &tracing_subscriber::registry()
-            .with(suppressed)
-            .into(),
-    );
+    let _guard =
+        tracing::dispatcher::set_default(&tracing_subscriber::registry().with(suppressed).into());
 
     let mut event_loop = ralph_core::event_loop::EventLoop::new(config);
     event_loop.initialize("ralph inspect prompt (read-only)");
-    let preview_via_loop = event_loop
-        .prompt_preview(&hat_id)
-        .ok_or_else(|| {
-            anyhow::anyhow!(
-                "hat {:?} not found in preset; available hats are listed by `ralph hats list`",
-                hat_id.as_str()
-            )
-        })?;
+    let preview_via_loop = event_loop.prompt_preview(&hat_id).ok_or_else(|| {
+        anyhow::anyhow!(
+            "hat {:?} not found in preset; available hats are listed by `ralph hats list`",
+            hat_id.as_str()
+        )
+    })?;
     drop(_guard);
 
     emit_prompt_view(&preview_via_loop, args.format, args.full, use_colors)
@@ -617,10 +611,7 @@ fn print_prompt_view_human(preview: &PromptPreview, full: bool, use_colors: bool
         }
     }
 
-    println!(
-        "  block_titles ({}):",
-        preview.block_titles.len()
-    );
+    println!("  block_titles ({}):", preview.block_titles.len());
     if preview.block_titles.is_empty() {
         println!("    {yellow}(no `## ` sections detected — preview may be empty){reset}");
     } else {

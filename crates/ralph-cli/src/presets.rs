@@ -1055,10 +1055,7 @@ mod tests {
             "review-synthesizer must keep fail-closed default_publishes"
         );
 
-        let worker = config
-            .hats
-            .get("review-worker")
-            .expect("review-worker");
+        let worker = config.hats.get("review-worker").expect("review-worker");
         assert_eq!(
             worker.timeout,
             Some(900),

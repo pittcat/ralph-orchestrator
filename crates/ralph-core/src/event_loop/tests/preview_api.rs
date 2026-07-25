@@ -38,7 +38,9 @@ fn preview_unknown_hat_returns_none() {
     event_loop.initialize("U2 unknown hat test");
 
     assert!(
-        event_loop.prompt_preview(&HatId::new("does-not-exist")).is_none(),
+        event_loop
+            .prompt_preview(&HatId::new("does-not-exist"))
+            .is_none(),
         "unknown hat must return None"
     );
 }
@@ -56,7 +58,11 @@ fn preview_default_gate_auto_inject_matches_build_prompt_markers() {
         .build_prompt(&HatId::new("builder"))
         .expect("prompt should build");
 
-    let auto_names: Vec<&str> = preview.auto_inject.iter().map(|e| e.name.as_str()).collect();
+    let auto_names: Vec<&str> = preview
+        .auto_inject
+        .iter()
+        .map(|e| e.name.as_str())
+        .collect();
 
     // Build the expected set from the actual prompt markers so this
     // test stays aligned with what the agent sees, not a stale list.
@@ -77,10 +83,12 @@ fn preview_default_gate_auto_inject_matches_build_prompt_markers() {
         "preview.auto_inject must match markers present in live prompt"
     );
     assert!(preview.auto_inject.iter().any(|e| e.name == "ralph-tools"));
-    assert!(preview
-        .auto_inject
-        .iter()
-        .all(|e| e.source == PromptSkillSource::Gated));
+    assert!(
+        preview
+            .auto_inject
+            .iter()
+            .all(|e| e.source == PromptSkillSource::Gated)
+    );
 }
 
 #[test]
@@ -120,8 +128,7 @@ fn preview_on_demand_includes_emit_wave_cmdref_precheck() {
     let preview = event_loop
         .prompt_preview(&HatId::new("builder"))
         .expect("preview");
-    let on_demand_names: Vec<&str> =
-        preview.on_demand.iter().map(|e| e.name.as_str()).collect();
+    let on_demand_names: Vec<&str> = preview.on_demand.iter().map(|e| e.name.as_str()).collect();
 
     for expected in [
         "ralph-tools-emit",
@@ -134,9 +141,11 @@ fn preview_on_demand_includes_emit_wave_cmdref_precheck() {
             on_demand_names.contains(&expected),
             "{expected} must be on-demand; got {on_demand_names:?}"
         );
-        assert!(on_demand_names
-            .iter()
-            .all(|n| !preview.auto_inject.iter().any(|a| a.name == *n)));
+        assert!(
+            on_demand_names
+                .iter()
+                .all(|n| !preview.auto_inject.iter().any(|a| a.name == *n))
+        );
     }
 }
 
