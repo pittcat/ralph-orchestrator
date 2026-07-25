@@ -64,6 +64,14 @@ Supervisor 在注入 `*.wave.failed` 之前，把本波次已 `Completed` 槽的
 
 Operator CLI：在 supervisor store 上将 Failed 波次的指定失败槽重置并重新进入 Collect/dispatch，不要求（也不允许）靠手工 `ralph emit exec.unit.done` 绕过 FlowStepScope。已写入 `LOOP_COMPLETE` 的 loop 上应拒绝并提示另开 focused run。
 
+### StartToClose（wave worker）
+
+Wave worker 硬顶：自 PTY spawn 起的最长存活时间，对应 hat 级 `timeout`。到期必须 kill，不论是否刚有心跳。与主 loop `cli.idle_timeout_secs` 不是同一字段。
+
+### idle heartbeat（wave worker）
+
+Wave worker 静默窗口（HeartbeatTimeout）：自上次合格进度信号起，超过 `hats.<id>.idle_heartbeat_secs` 无强/弱合格信号则 kill。`0` 或省略 = 关闭，仅 StartToClose 墙钟（legacy）。强信号优先（tool stream / events 文件增长）；弱信号（text/thinking）可续租但受 `idle_weak_signal_cap` 连续次数上限。不要求模型主动调 heartbeat API。与 `cli.idle_timeout_secs`（主 loop PtyExecutor）作用域不同。
+
 ### OPAC
 
 Observe → Precheck → Apply → Confirm。isolated 模式下 state-changing 操作的纪律框架；Precheck/ACL 可由 CLI 硬闸，Confirm 对 wave/task 逐步硬化为 ticket 或公开查询证据。
