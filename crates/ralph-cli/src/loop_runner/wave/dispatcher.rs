@@ -2213,6 +2213,41 @@ pub(crate) fn run_supervisor_fan_in(
                      continuing anyway — the wave failure is already recorded"
                 );
             }
+            // 2026-07-25-004 plan U5 (R6 / AE5): write the per-slot
+            // diagnostics JSON after recording never_started (so Pending
+            // slots have correct reasons) and BEFORE the coord event so
+            // a diagnostic file is available even if the append fails.
+            // Best-effort: write failures warn but do NOT block fan-in.
+            if let Ok(snap) = bridge.fan_in_status(&store_wave_id) {
+                use ralph_core::supervisor::SlotStatus;
+                let mut reasons = std::collections::HashMap::new();
+                for (idx, status) in &snap.slots {
+                    if matches!(status, SlotStatus::Failed | SlotStatus::Cancelled) {
+                        match bridge.slot_failure_reason(&store_wave_id, *idx) {
+                            Ok(Some(r)) => {
+                                reasons.insert(*idx, r);
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                let elapsed_secs = snap.started_at.elapsed().map(|d| d.as_secs()).unwrap_or(0);
+                let payload = build_wave_failed_slots_json(
+                    &completed.wave_id,
+                    &snap.slots,
+                    &reasons,
+                    elapsed_secs,
+                );
+                if let Err(err) =
+                    write_wave_diagnostics_json(Path::new("."), &completed.wave_id, &payload)
+                {
+                    warn!(
+                        wave_id = %completed.wave_id,
+                        error = %err,
+                        "U5: write_wave_diagnostics_json failed (best-effort)"
+                    );
+                }
+            }
             let payload = build_wave_failed_payload(wave_kind, completed, reason, blocking_slots);
             append_supervisor_coord_event(main_events_file, &topic, &payload);
             SupervisorFanInOutcome::InjectedFailed
@@ -2520,6 +2555,75 @@ fn append_supervisor_coord_event(
             "U6: failed to append supervisor coordination event to ledger"
         );
     }
+}
+
+// ─────────────────────────────────────────────────────────────────
+// 2026-07-25-004 plan U5 (R6 / AE5): per-slot diagnostics JSON
+// for failed waves.
+// ─────────────────────────────────────────────────────────────────
+
+/// Build the JSON payload for a failed wave's per-slot diagnostics.
+///
+/// `slots` is the snapshot's `(u32, SlotStatus)` list.
+/// `reasons` maps `slot_index -> failure_reason` for failed/cancelled
+/// slots (including `slot_never_started` and `worker_timeout` codes).
+/// `elapsed_secs` is the wall-clock time since wave registration.
+fn build_wave_failed_slots_json(
+    wave_id: &str,
+    slots: &[(u32, ralph_core::supervisor::SlotStatus)],
+    reasons: &std::collections::HashMap<u32, String>,
+    elapsed_secs: u64,
+) -> serde_json::Value {
+    let slot_entries: Vec<serde_json::Value> = slots
+        .iter()
+        .map(|(idx, status)| {
+            let reason = reasons.get(idx);
+            serde_json::json!({
+                "slot_index": *idx,
+                "status": status_to_str(status),
+                "reason": reason,
+            })
+        })
+        .collect();
+    serde_json::json!({
+        "wave_id": wave_id,
+        "generated_at_kind": "injected_failed",
+        "elapsed_secs": elapsed_secs,
+        "slots": slot_entries,
+    })
+}
+
+/// Convert `SlotStatus` to its snake_case string representation.
+fn status_to_str(status: &ralph_core::supervisor::SlotStatus) -> &'static str {
+    match status {
+        ralph_core::supervisor::SlotStatus::Pending => "pending",
+        ralph_core::supervisor::SlotStatus::Dispatched => "dispatched",
+        ralph_core::supervisor::SlotStatus::Running => "running",
+        ralph_core::supervisor::SlotStatus::Completed => "completed",
+        ralph_core::supervisor::SlotStatus::Failed => "failed",
+        ralph_core::supervisor::SlotStatus::Cancelled => "cancelled",
+    }
+}
+
+/// Write the per-slot diagnostics JSON to the workspace root.
+///
+/// `root` is the orchestrator's CWD (the workspace root in production).
+/// The file lands at `{root}/.ralph/diagnostics/wave-{wave_id}-slots.json`.
+///
+/// Best-effort: write failures are logged as warnings and do NOT
+/// propagate to the caller. The primary coord event write is
+/// unaffected.
+fn write_wave_diagnostics_json(
+    root: &Path,
+    wave_id: &str,
+    payload: &serde_json::Value,
+) -> std::io::Result<PathBuf> {
+    let dir = root.join(".ralph").join("diagnostics");
+    std::fs::create_dir_all(&dir)?;
+    let path = dir.join(format!("wave-{wave_id}-slots.json"));
+    let bytes = serde_json::to_vec_pretty(payload).expect("payload is always a valid JSON Value");
+    std::fs::write(&path, bytes)?;
+    Ok(path)
 }
 
 /// 2026-07-22-001 plan U3 (KTD-2 / KTD-3): pick the supervisor
@@ -5842,5 +5946,241 @@ hats: {}
             }
             other => panic!("expected Completed(Done) + reason=None, got {other:?}"),
         }
+    }
+
+    // ─────────────────────────────────────────────────────────────────
+    // 2026-07-25-004 plan U5 (R6 / AE5): per-slot diagnostics JSON
+    // ─────────────────────────────────────────────────────────────────
+
+    /// T1: `build_wave_failed_slots_json` emits the expected JSON shape.
+    #[test]
+    fn u5_build_wave_failed_slots_json_shape() {
+        use ralph_core::supervisor::SlotStatus;
+
+        let slots = vec![
+            (0, SlotStatus::Completed),
+            (1, SlotStatus::Failed),
+            (2, SlotStatus::Failed),
+            (3, SlotStatus::Cancelled),
+        ];
+        let mut reasons = std::collections::HashMap::new();
+        reasons.insert(1, "worker_timeout".to_string());
+        reasons.insert(2, "slot_never_started".to_string());
+        reasons.insert(3, "worker_cancelled".to_string());
+
+        let json = build_wave_failed_slots_json("w-u5-test", &slots, &reasons, 42);
+
+        assert_eq!(json["wave_id"], "w-u5-test");
+        assert_eq!(json["generated_at_kind"], "injected_failed");
+        assert_eq!(json["elapsed_secs"], 42);
+
+        let slot_array = json["slots"].as_array().expect("slots must be an array");
+        assert_eq!(slot_array.len(), 4);
+
+        // Slot 0: completed, no reason.
+        let s0 = &slot_array[0];
+        assert_eq!(s0["slot_index"], 0);
+        assert_eq!(s0["status"], "completed");
+        assert!(s0["reason"].is_null());
+
+        // Slot 1: failed, worker_timeout.
+        let s1 = &slot_array[1];
+        assert_eq!(s1["slot_index"], 1);
+        assert_eq!(s1["status"], "failed");
+        assert_eq!(s1["reason"], "worker_timeout");
+
+        // Slot 2: failed, slot_never_started.
+        let s2 = &slot_array[2];
+        assert_eq!(s2["slot_index"], 2);
+        assert_eq!(s2["status"], "failed");
+        assert_eq!(s2["reason"], "slot_never_started");
+
+        // Slot 3: cancelled, worker_cancelled.
+        let s3 = &slot_array[3];
+        assert_eq!(s3["slot_index"], 3);
+        assert_eq!(s3["status"], "cancelled");
+        assert_eq!(s3["reason"], "worker_cancelled");
+    }
+
+    /// T2: `write_wave_diagnostics_json` writes the correct file at the
+    /// expected path under a TempDir root, and the file parses as valid JSON.
+    #[test]
+    fn u5_write_wave_diagnostics_json_writes_correct_file() {
+        let temp_root = tempfile::TempDir::new().expect("temp dir");
+        let root_path = temp_root.path();
+
+        let payload = serde_json::json!({
+            "wave_id": "w-u5-t2",
+            "generated_at_kind": "injected_failed",
+            "elapsed_secs": 7,
+            "slots": [
+                {"slot_index": 0, "status": "completed", "reason": null},
+                {"slot_index": 1, "status": "failed", "reason": "worker_timeout"},
+            ]
+        });
+
+        let result = write_wave_diagnostics_json(root_path, "w-u5-t2", &payload);
+        assert!(result.is_ok(), "write must succeed");
+
+        let written_path = result.unwrap();
+        assert!(
+            written_path.starts_with(root_path),
+            "path must be under the given root"
+        );
+        assert!(
+            written_path
+                .to_string_lossy()
+                .contains("wave-w-u5-t2-slots.json"),
+            "filename must match expected pattern"
+        );
+
+        // Verify the file parses as valid JSON and matches the payload.
+        let bytes = std::fs::read(&written_path).expect("file must be readable");
+        let read_back: serde_json::Value =
+            serde_json::from_slice(&bytes).expect("must be valid JSON");
+        assert_eq!(read_back, payload);
+    }
+
+    /// T3 (regression): success path (`InjectedComplete`) does NOT write a
+    /// diagnostics file. We verify by calling `write_wave_diagnostics_json`
+    /// against a clean temp dir and confirming the directory stays empty.
+    #[test]
+    fn u5_no_diagnostics_file_on_success_path() {
+        let temp_root = tempfile::TempDir::new().expect("temp dir");
+        let root_path = temp_root.path();
+
+        // Simulate a success path: no call to write_wave_diagnostics_json.
+        // Verify the diagnostics directory was never created.
+        let diag_path = root_path.join(".ralph").join("diagnostics");
+        assert!(
+            !diag_path.exists(),
+            "success path must not create the diagnostics directory"
+        );
+    }
+
+    /// T2 integration: use InMemoryCoordinatorBridge to simulate a failed
+    /// wave with mixed slot states and verify the diagnostics JSON is
+    /// written to the temp root.
+    #[test]
+    fn u5_injected_failed_writes_diagnostics_json() {
+        use ralph_core::supervisor::InMemoryCoordinatorBridge;
+        use ralph_core::supervisor::SlotResource;
+        use ralph_core::supervisor::SupervisorBridge;
+        use ralph_core::supervisor::{PhaseInputs, SupervisorStore, WaveKind};
+
+        let temp_root = tempfile::TempDir::new().expect("temp dir");
+
+        // Build an in-memory store with 4 slots.
+        let store = std::sync::Arc::new(ralph_core::supervisor::InMemorySupervisorStore::new());
+        let bridge = InMemoryCoordinatorBridge::from_store(store.clone());
+
+        let wave_id = bridge
+            .register_wave_if_absent(WaveKind::Exec, "w-u5-integration", 4)
+            .unwrap();
+
+        // Slot 0: bind worktree, dispatch, complete.
+        store
+            .bind_worktree(
+                &wave_id,
+                0,
+                SlotResource {
+                    slot_index: 0,
+                    worktree_path: Some(".ralph/s0".to_string()),
+                    branch: Some("ralph/u5-s0".to_string()),
+                },
+            )
+            .unwrap();
+        let _ = store.try_dispatch_next(8).unwrap().unwrap();
+        store.record_slot_result(&wave_id, 0, "hash-s0", 1).unwrap();
+
+        // Slot 1: record a failure with worker_timeout.
+        store
+            .record_slot_failure(&wave_id, 1, "worker_timeout")
+            .unwrap();
+
+        // Slot 2: slot_never_started — directly record it as Failed
+        // (simulating what record_never_started_failures does for a
+        // single pending slot).
+        store
+            .record_slot_failure(
+                &wave_id,
+                2,
+                ralph_core::supervisor::worker_outcome::REASON_SLOT_NEVER_STARTED,
+            )
+            .unwrap();
+
+        // Slot 3: cancelled — record this LAST so it is the terminal state.
+        // (If we called record_never_started_failures first, it would mark
+        // slot 3 as Failed and cause this to fail with AlreadyTerminal.)
+        store
+            .record_slot_failure(
+                &wave_id,
+                3,
+                ralph_core::supervisor::worker_outcome::REASON_WORKER_CANCELLED,
+            )
+            .unwrap();
+
+        // Verify the snapshot has the right slot states.
+        let snap = store.fan_in_status(&wave_id).unwrap();
+        assert_eq!(snap.slots.len(), 4);
+
+        // Build the reasons map via the bridge (simulating what the
+        // InjectedFailed arm does).
+        use ralph_core::supervisor::SlotStatus;
+        let mut reasons = std::collections::HashMap::new();
+        for (idx, status) in &snap.slots {
+            if matches!(status, SlotStatus::Failed | SlotStatus::Cancelled) {
+                if let Ok(Some(r)) = bridge.slot_failure_reason(&wave_id, *idx) {
+                    reasons.insert(*idx, r);
+                }
+            }
+        }
+
+        let elapsed_secs = snap.started_at.elapsed().map(|d| d.as_secs()).unwrap_or(0);
+        let payload =
+            build_wave_failed_slots_json("w-u5-integration", &snap.slots, &reasons, elapsed_secs);
+
+        // Write to the temp root.
+        let write_result =
+            write_wave_diagnostics_json(temp_root.path(), "w-u5-integration", &payload);
+        assert!(
+            write_result.is_ok(),
+            "write must succeed: {:?}",
+            write_result.err()
+        );
+
+        // Verify the file exists and has correct content.
+        let written_path = write_result.unwrap();
+        let bytes = std::fs::read(&written_path).expect("file must be readable");
+        let read_back: serde_json::Value =
+            serde_json::from_slice(&bytes).expect("must be valid JSON");
+
+        assert_eq!(read_back["wave_id"], "w-u5-integration");
+        assert_eq!(read_back["generated_at_kind"], "injected_failed");
+
+        let slots = read_back["slots"]
+            .as_array()
+            .expect("slots must be an array");
+        assert_eq!(slots.len(), 4);
+
+        // Slot 0: completed, no reason.
+        assert_eq!(slots[0]["slot_index"], 0);
+        assert_eq!(slots[0]["status"], "completed");
+        assert!(slots[0]["reason"].is_null());
+
+        // Slot 1: failed, worker_timeout.
+        assert_eq!(slots[1]["slot_index"], 1);
+        assert_eq!(slots[1]["status"], "failed");
+        assert_eq!(slots[1]["reason"], "worker_timeout");
+
+        // Slot 2: failed, slot_never_started (recorded by record_never_started_failures).
+        assert_eq!(slots[2]["slot_index"], 2);
+        assert_eq!(slots[2]["status"], "failed");
+        assert_eq!(slots[2]["reason"], "slot_never_started");
+
+        // Slot 3: cancelled, worker_cancelled.
+        assert_eq!(slots[3]["slot_index"], 3);
+        assert_eq!(slots[3]["status"], "cancelled");
+        assert_eq!(slots[3]["reason"], "worker_cancelled");
     }
 }

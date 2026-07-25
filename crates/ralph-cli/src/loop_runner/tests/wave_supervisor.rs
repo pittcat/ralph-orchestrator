@@ -44,7 +44,7 @@ use crate::loop_runner::wave::{
     BridgeError, MockSupervisorBridge, SlotBinding, SupervisorBridge, WaveWorkerExecutor,
     is_supervisor_path_enabled,
 };
-use ralph_core::supervisor::{PhaseInputs, SlotResource, WaveKind};
+use ralph_core::supervisor::{PhaseInputs, SlotResource, WaveKind, WaveSnapshot};
 use std::collections::HashMap;
 use std::sync::Mutex;
 
@@ -108,6 +108,12 @@ impl SupervisorBridge for SpyBindingBridge {
 
     fn recover(&self) -> Result<Vec<ralph_core::supervisor::WaveSnapshot>, BridgeError> {
         Ok(Vec::new())
+    }
+
+    fn fan_in_status(&self, _wave_id: &str) -> Result<WaveSnapshot, BridgeError> {
+        Err(BridgeError::Store(
+            "SpyBindingBridge has no store".to_string(),
+        ))
     }
 
     // 2026-07-03-001 supervisor real-wiring: the trait gained
@@ -1898,6 +1904,12 @@ impl SupervisorBridge for U3DispatchBridge {
         Ok(Vec::new())
     }
 
+    fn fan_in_status(&self, _wave_id: &str) -> Result<WaveSnapshot, BridgeError> {
+        Err(BridgeError::Store(
+            "U3DispatchBridge has no store".to_string(),
+        ))
+    }
+
     fn register_wave_if_absent(
         &self,
         kind: WaveKind,
@@ -2620,6 +2632,12 @@ impl SupervisorBridge for U5RecordingBridge {
     fn recover(&self) -> Result<Vec<ralph_core::supervisor::WaveSnapshot>, BridgeError> {
         self.store
             .recover_active_waves()
+            .map_err(|err| BridgeError::Store(err.to_string()))
+    }
+
+    fn fan_in_status(&self, wave_id: &str) -> Result<WaveSnapshot, BridgeError> {
+        self.store
+            .fan_in_status(wave_id)
             .map_err(|err| BridgeError::Store(err.to_string()))
     }
 

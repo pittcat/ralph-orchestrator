@@ -741,6 +741,24 @@ impl SupervisorStore for RusqliteSupervisorStore {
         })
     }
 
+    fn slot_failure_reason(
+        &self,
+        wave_id: &str,
+        slot_index: u32,
+    ) -> SupervisorStoreResult<Option<String>> {
+        self.with_conn(|conn| {
+            let reason: Option<String> = conn
+                .query_row(
+                    "SELECT failure_reason FROM wave_slots
+                     WHERE wave_id = ?1 AND slot_index = ?2",
+                    rusqlite::params![wave_id, i64::from(slot_index)],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            Ok(reason)
+        })
+    }
+
     fn cancel_wave(&self, wave_id: &str) -> SupervisorStoreResult<()> {
         self.with_conn(|conn| {
             conn.execute(

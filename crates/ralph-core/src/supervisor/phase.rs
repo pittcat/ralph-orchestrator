@@ -622,14 +622,15 @@ mod tests {
             cancel_requested: false,
             merged_to_events: false,
             started_at: std::time::SystemTime::UNIX_EPOCH,
-            slots: vec![
-                (0, SlotStatus::Dispatched),
-                (1, SlotStatus::Pending),
-            ],
+            slots: vec![(0, SlotStatus::Dispatched), (1, SlotStatus::Pending)],
         };
         let already_recorded = std::collections::HashMap::new();
         let never_started = never_started_slot_indices(&snap, &already_recorded);
-        assert_eq!(never_started, vec![1], "only slot 1 (Pending) should be returned");
+        assert_eq!(
+            never_started,
+            vec![1],
+            "only slot 1 (Pending) should be returned"
+        );
     }
 
     /// G1 T2: two Pending slots + one Failed slot → returns the two Pending only.
@@ -656,7 +657,8 @@ mod tests {
         let already_recorded = std::collections::HashMap::new();
         let never_started = never_started_slot_indices(&snap, &already_recorded);
         assert_eq!(
-            never_started, vec![0, 2],
+            never_started,
+            vec![0, 2],
             "Pending slots 0 and 2 should be returned; Failed slot 1 excluded"
         );
     }
@@ -686,7 +688,8 @@ mod tests {
         already_recorded.insert(1, "slot_never_started");
         let never_started = never_started_slot_indices(&snap, &already_recorded);
         assert_eq!(
-            never_started, vec![0, 2],
+            never_started,
+            vec![0, 2],
             "slot 1 already recorded → excluded; slots 0 and 2 returned"
         );
     }
@@ -706,10 +709,7 @@ mod tests {
             cancel_requested: false,
             merged_to_events: false,
             started_at: std::time::SystemTime::UNIX_EPOCH,
-            slots: vec![
-                (0, SlotStatus::Completed),
-                (1, SlotStatus::Failed),
-            ],
+            slots: vec![(0, SlotStatus::Completed), (1, SlotStatus::Failed)],
         };
         let already_recorded = std::collections::HashMap::new();
         let never_started = never_started_slot_indices(&snap, &already_recorded);

@@ -568,6 +568,26 @@ impl SupervisorStore for InMemorySupervisorStore {
         Ok(())
     }
 
+    fn slot_failure_reason(
+        &self,
+        wave_id: &str,
+        slot_index: u32,
+    ) -> SupervisorStoreResult<Option<String>> {
+        let inner = self.lock()?;
+        let wave = inner
+            .waves_by_id
+            .get(wave_id)
+            .ok_or_else(|| SupervisorStoreError::UnknownWave(wave_id.to_string()))?;
+        let slot =
+            wave.slots
+                .get(&slot_index)
+                .ok_or_else(|| SupervisorStoreError::UnknownSlot {
+                    wave_id: wave_id.to_string(),
+                    slot_index,
+                })?;
+        Ok(slot.failure_reason.clone())
+    }
+
     fn cancel_wave(&self, wave_id: &str) -> SupervisorStoreResult<()> {
         let mut inner = self.lock()?;
         let wave = inner

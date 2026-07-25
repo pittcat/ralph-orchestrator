@@ -395,6 +395,12 @@ impl SupervisorBridge for CoordinatorSupervisorBridge {
             .map_err(|err| BridgeError::Store(err.to_string()))
     }
 
+    fn fan_in_status(&self, wave_id: &str) -> Result<WaveSnapshot, BridgeError> {
+        self.store
+            .fan_in_status(wave_id)
+            .map_err(|err| BridgeError::Store(err.to_string()))
+    }
+
     fn register_wave_if_absent(
         &self,
         kind: WaveKind,
@@ -459,10 +465,22 @@ impl SupervisorBridge for CoordinatorSupervisorBridge {
             if *status == ralph_core::supervisor::SlotStatus::Pending {
                 // Idempotent: same-reason replay is Ok(()) per
                 // `record_slot_failure`'s existing same-content_hash contract.
-                let _ = self.store.record_slot_failure(wave_id, *slot_index, REASON_SLOT_NEVER_STARTED);
+                let _ =
+                    self.store
+                        .record_slot_failure(wave_id, *slot_index, REASON_SLOT_NEVER_STARTED);
             }
         }
         Ok(())
+    }
+
+    fn slot_failure_reason(
+        &self,
+        wave_id: &str,
+        slot_index: u32,
+    ) -> Result<Option<String>, BridgeError> {
+        self.store
+            .slot_failure_reason(wave_id, slot_index)
+            .map_err(|e| BridgeError::Store(e.to_string()))
     }
 
     fn release_slot_dispatch(
@@ -690,6 +708,14 @@ impl SupervisorBridge for MockSupervisorBridge {
 
     fn recover(&self) -> Result<Vec<WaveSnapshot>, BridgeError> {
         Ok(Vec::new())
+    }
+
+    fn fan_in_status(&self, _wave_id: &str) -> Result<WaveSnapshot, BridgeError> {
+        // Mock has no store — return an error so the diagnostics
+        // path falls back gracefully (no file written).
+        Err(BridgeError::Store(
+            "MockSupervisorBridge has no store".to_string(),
+        ))
     }
 
     fn register_wave_if_absent(
@@ -1081,9 +1107,7 @@ mod tests {
             )
             .unwrap();
         let _ = store.try_dispatch_next(4).unwrap().unwrap();
-        store
-            .record_slot_result(&wave_id, 0, "hash-g3", 1)
-            .unwrap();
+        store.record_slot_result(&wave_id, 0, "hash-g3", 1).unwrap();
 
         // Slots 1, 2 are still Pending. Record never-started.
         bridge.record_never_started_failures(&wave_id).unwrap();
@@ -1098,7 +1122,8 @@ mod tests {
             let snap = store.fan_in_status(&wave_id).unwrap();
             let (_, status) = snap.slots.iter().find(|(i, _)| *i == slot_index).unwrap();
             assert_eq!(
-                status, &SlotStatus::Failed,
+                status,
+                &SlotStatus::Failed,
                 "slot {slot_index} must be Failed"
             );
         }
