@@ -89,6 +89,18 @@ argument-hint: "[run_dir] [preset_file_or_builtin] [optional: plan_file] [--incl
 3. 编排是否合理
 4. 归因：preset / mechanism / agent / compound（附 **根因置信度**）
 
+## 强制对账：prompt visibility（hat 这一轮真看到什么）
+
+> **触发条件**：诊断怀疑「agent 看不到某 skill」或「agent 引用了不该看到的内部实现」时，**必须**在 Phase 0 之后、Phase 1 之前用 `ralph -c <preset> inspect prompt --hat <id> --format json` 跑一次可见性对账。对账源即 [../ralph-preset-common/references/prompt-visibility.md](../ralph-preset-common/references/prompt-visibility.md) 的 `auto_inject` / `on_demand` / `block_titles` 字段。
+>
+> **对账要点**：
+>
+> 1. **auto vs on-demand 矛盾**：hat `instructions:` 把 on-demand skill 当成 auto-inject 用 → `agent_skill.inject_claim_false`（见 [../ralph-preset-common/references/finding-rubric.md](../ralph-preset-common/references/finding-rubric.md)）。
+> 2. **skill 文档泄漏内部实现**：auto_inject 的 skill 内容含内部函数名 / 模块名 / 内部 ledger 路径 / review-only 注释 → `agent_skill.leaks_internals`。
+> 3. **Confirm 路径与 `ralph tools skill load` 期望**：`on_demand[]` 里有 skill 但 hat `instructions:` 没要求 agent 先 `ralph tools skill load` → 行为缺口，按 Q3 入栏。
+>
+> 报告 §1「强制四问」答完后，附一段「**Prompt visibility 对账**」，引用 `inspect prompt` JSON 关键字段（`auto_inject[].name` / `on_demand[].name`），不要复述 prompt 全文。
+
 ## 执行顺序（硬约束）
 
 ```

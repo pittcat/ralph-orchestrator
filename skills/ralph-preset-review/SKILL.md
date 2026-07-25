@@ -32,6 +32,16 @@ Use this skill to **review** Ralph presets with **Agent 视角可行性（AAF）
 
 ## Workflow
 
+0a. **Agent-skill audit gate（强制弹窗，默认跳过）** — 在 Workflow 第 1 步前必须弹出交互选择菜单（`AskUserQuestion` / `Question` 当平台支持；否则在 chat 里给编号选项并等回复），让 reviewer 决定是否同时审「注入给 agent 的 skill 文档」（`crates/ralph-core/data/*.md` / 外仓等价来源）：
+
+   1. **仅审查 preset YAML（推荐，默认）** — 不审注入 skill；运行时间更短；适合 preset 形态稳定、只想确认 hat instructions + topology 的场景。
+   2. **同时审查注入 skill 文档** — 怀疑 data 被改坏 / agent 看不懂 / 可读性下降时再选；跑 `references/agent-skill-audit.md` 规程。
+
+   **默认行为**：未选 / 选推荐 → **不**审 data/*.md；报告「Executive Summary」必须写 `agent_skill_audit: skipped`。
+   **选审后**：报告写 `agent_skill_audit: performed`，并按 `references/agent-skill-audit.md` 输出审计结论（含外仓「二进制内嵌」来源说明）；命中按 `references/finding-rubric.md`「Agent skill audit」段 `agent_skill.*` finding_id 入主表。
+
+0b. **Discovery / 重审区分**：复跑已有 preset-review-report.md 时，先看上一份报告「Workflow 0a」行记录的 `agent_skill_audit` 字段；若上一份是 `performed`，本次默认仍是 `performed`（不要无声地降级回 skipped）。若选择降级，必须在本次报告显式说明「由 performed 降级到 skipped」。
+
 1. Read **topology-only** fields from preset YAML: `event_loop`, `hats.*.triggers`, `hats.*.publishes`, `state_projection`, `event_policy` — **not** other hats' `instructions` yet.
 
 2. Record `execution_mode`, hat count, preset path (`builtin:` vs file).
@@ -77,7 +87,7 @@ Use this skill to **review** Ralph presets with **Agent 视角可行性（AAF）
    - For the current hat, load **only** that hat's `instructions` (or `ralph hats show -H <path> <id>`). Do not use another hat's private instructions as evidence for this hat's visible context.
    - Run the **activation dry-run sequence** in order:
      1. **Trigger received** — what event triggered this hat? payload fields visible?
-     2. **Visible context** — go through isolated prompt 栈 (`## HAT IDENTITY` / `## ORCHESTRATOR CONTEXT` / `instructions` / injected skills). What can the agent actually see?
+     2. **Visible context** — go through isolated prompt 栈 (`## HAT IDENTITY` / `## ORCHESTRATOR CONTEXT` / `instructions` / injected skills). What can the agent actually see? **Visible context MUST be backed by `ralph -c <preset> inspect prompt --hat <id> --format json`**（共享规程 `references/prompt-visibility.md`）的 `auto_inject` / `on_demand` / `block_titles` 输出；禁止凭记忆说「该 skill 一定会注入」。命中 on-demand skill 被 instructions 当成 auto-inject 时入 `agent_skill.inject_claim_false` finding。
      3. **Command plan** — which `ralph` commands in which order? OPAC 四阶段？
      4. **Payload construction** — for each emit topic, can every field be sourced from visible context?
      5. **Emit precheck** — `--policy-check` / `--triggered` ownership / policy-check feedback handling / single event budget / terminal ordering?
@@ -149,7 +159,7 @@ Use this skill to **review** Ralph presets with **Agent 视角可行性（AAF）
 
 ## Report Structure (fixed)
 
-1. **Executive Summary** — mode, hat count, P0/P1/P2 counts (confidence ≥ 60 only), lint pass/fail, **payload audit pass/fail**, policy-check feedback adoption pass/fail, **artifact-first handoff audit pass/fail** (含 review-only finding 计数,例如 `preset.artifact_path_not_in_visible_context` / `preset.artifact_no_lifecycle_owner` / `preset.payload_carries_full_content` 等)
+1. **Executive Summary** — mode, hat count, P0/P1/P2 counts (confidence ≥ 60 only), lint pass/fail, **payload audit pass/fail**, policy-check feedback adoption pass/fail, **artifact-first handoff audit pass/fail** (含 review-only finding 计数,例如 `preset.artifact_path_not_in_visible_context` / `preset.artifact_no_lifecycle_owner` / `preset.payload_carries_full_content` 等), **`agent_skill_audit: skipped|performed`**（Workflow 0a 选定值；若 `performed` 则附「来源: 本仓 crates/.../data/*.md / 外仓二进制内嵌」），**`prompt_visibility_evidence: <hat_id>=inspect-prompt-json`**（Per-Hat AAF Visible context 引用证据）
 2. **Findings Table** — sort P0 → P1 → P2; columns: id, severity, confidence, category, aaf_question, hat, problem one-liner
 3. **Topology** — event flow
 4. **Per-Hat AAF Reviews** — full 五问表 per hat + deltas vs instructions + mandatory Payload Audit Table rows (topic / field / source / visibility / identity / downstream / schema metadata / policy-check repair / **artifact 落盘(必填 / 可选 / 不落盘+理由)** / verdict / fix)
