@@ -64,7 +64,7 @@ Wave/supervisor 协议层能力集合：反压、分布式取消、状态持久�
 
 ### ralph-e2e-bootstrap
 
-Loop 外 Skill：输入 **E2E 沙箱目录**（plan 路径可选），先经 `plan_resolve` 做 sandbox 适配（发现本地 plan / 硬拒 orchestrator 修仓 plan / 必要时写最小 E2E plan），再交叉核对计划意图与 diff，用 combo-box 处理二进制与沙箱配置/启动参数，跑静态门禁（含 `ralph run --dry-run`）后交出启动命令。实现面仅 skill + Python scripts，**不改 Rust**。不写 Preset（硬 handoff `ralph-preset-author`）；不代跑 live loop；不做跑后诊断。与 `ralph-project-bootstrap` 入口不同。
+Loop 外 Skill：对**外仓** E2E 沙箱，验证**当前仓改动 plan**。输入 sandbox + 改动 plan（+ 建议 preset）；自动发现沙箱业务 workload 作为 `ralph run --plan`；改动意图写入 `PROMPT`；检查/构建当前仓最新 `ralph`；静态门后交启动命令。不静默改写沙箱 plan；不动 preset（需则 handoff `ralph-preset-author`）；不代跑 live / 不做诊断（`ralph-run-diagnosis`）。实现面仅 skill + Python，**不改 Rust**。
 
 ### E2E 沙箱目录
 

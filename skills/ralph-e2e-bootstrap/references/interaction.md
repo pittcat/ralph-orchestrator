@@ -11,113 +11,115 @@ skill MUST NOT batch multiple decisions into a single AskUser.
 
 ## Decision points
 
-### `plan_resolve_choice` — which suitable sandbox-local plan
+### `sandbox_plan_write` — create or edit a sandbox workload plan
 
-Triggered by `scripts/plan_resolve.py` only when **multiple** suitable
-sandbox plans score close and the operator asks to pick, or when the
-skill surfaces discovered alternatives after rejecting an unfit
-caller candidate. Recommended option is the highest-scored discovered
-plan. Authoring a minimal plan is offered when discovery is empty.
+Triggered when discovery finds **no** suitable workload under
+`<sandbox>/docs/plans/`, or when the operator explicitly asks to
+create/edit a sandbox plan. **Silent writes are forbidden.**
 
 | # | Option | Consequence |
 |---|--------|-------------|
-| 1 (**recommended**) | Use highest-scored sandbox plan | Bind that `docs/plans/<basename>` for audit + suite. |
-| 2 | Use another listed suitable plan | Operator picks among discovered suitable plans only. |
-| 3 | Author minimal E2E plan | Skill writes `docs/plans/<date>-e2e-bootstrap-minimal-<stem>-plan.md`. |
-| Other | Free-text suitable sandbox-relative plan path | Re-run fitness; unfit paths remain rejected. |
+| 1 (**recommended**) | Author minimal E2E plan | Skill writes `docs/plans/<date>-e2e-bootstrap-minimal-<stem>-plan.md` after this confirm. |
+| 2 | Halt — operator will add a plan manually | Skill emits blocked / incomplete handoff; no write. |
+| 3 | Point to an existing sandbox-relative path | Re-run fitness; unfit paths rejected. |
+| Other | Free-text | Recorded; no write unless paired with a concrete create/edit action. |
 
-**Not a decision point (R15 hard reject).** An unfit caller plan
-(orchestrator `crates/`/`presets/` intent against a product sandbox)
-MUST NOT be rebound via combo-box. The skill records
-`rejected_candidate` + reason, then discovers or authors.
+### `plan_resolve_choice` — which suitable sandbox-local workload
 
-### `plan_diff_clarify` — plan intent ↔ git diff disagree
+Triggered when **multiple** suitable sandbox plans score close.
 
-Triggered by `scripts/plan_diff.py` when the **resolved** development
-plan's intent fields disagree with the current git diff (paths
-changed, U-ID list, scope).
+| # | Option | Consequence |
+|---|--------|-------------|
+| 1 (**recommended**) | Use highest-scored sandbox plan | That path becomes `ralph run --plan`. |
+| 2 | Use another listed suitable plan | Operator picks among suitable discovered plans only. |
+| Other | Free-text suitable sandbox-relative path | Re-run fitness; change plans from other repos rejected as workload. |
+
+**Not a decision point.** The orchestrator **change plan** is never
+offered as workload `--plan`. It is verification context only
+(injected into `PROMPT.<stem>.md`). Binding it as `--plan` is forbidden.
+
+**Not a decision point.** Change plan declares `presets/` intent →
+hard-handoff `ralph-preset-author` (see `preset_gap`), not a soft
+override.
+
+### `plan_diff_clarify` — workload plan ↔ sandbox git diff disagree
+
+Triggered by `scripts/plan_diff.py` when the **workload** plan
+disagrees with the sandbox git diff.
 
 **Cross-repo auto-pass (not a decision point).** When
-`AuditDecision.cross_repo` is `True` (plan git toplevel ≠
-`repo_root` git toplevel), the skill does **not** surface this
-combo-box for `scope_drift` / `plan_stale` — those comparisons are
-not meaningful across repos. The audit sets `ok=True` when no other
-clarify codes apply and records `plan_repo_root` /
-`diff_repo_root` for handoff evidence. Plan-quality codes
-(`unit_missing`, `intent_undeclared`) and `diff_unavailable` still
-trigger this decision point as usual.
+`AuditDecision.cross_repo` is `True`, skip `scope_drift` /
+`plan_stale` combo-box for those codes. Plan-quality codes and
+`diff_unavailable` still trigger this decision point.
 
 | # | Option | Consequence |
 |---|--------|-------------|
-| 1 (**recommended**) | Accept plan intent, re-audit diff | The skill trusts the plan; subsequent stages use plan-derived scope. |
-| 2 | Accept diff, flag plan as stale | The skill captures a `plan_stale` risk in the handoff and continues with diff-derived scope. |
-| 3 | Halt, manual reconcile | The skill emits a `blocked` handoff and stops; the operator edits the plan and re-runs. |
-| Other | Free-text custom intent | The skill records the operator text verbatim and re-runs the audit once. |
+| 1 (**recommended**) | Accept plan intent, re-audit diff | Trust workload plan for downstream scope. |
+| 2 | Accept diff, flag plan as stale | Record `plan_stale` risk; continue with diff-derived scope. |
+| 3 | Halt, manual reconcile | Blocked handoff; operator edits workload plan and re-runs. |
+| Other | Free-text custom intent | Recorded; re-audit once. |
 
-### `binary_resolution` — no usable `ralph` on PATH (or feature miss)
+### `binary_resolution` — missing or stale ralph binary
 
-Triggered by `scripts/binary_resolve.py` when no `ralph` binary
-exists on `PATH`, the located binary fails version detection, or its
-declared features do not match the resolved preset.
-
-| # | Option | Consequence |
-|---|--------|-------------|
-| 1 (recommended) | Rebuild via `cargo build` | The skill runs `cargo build -p ralph-cli`; the freshly-built binary becomes the resolved one. |
-| 2 | Install via PATH (`cargo install`) | The skill runs `cargo install --path crates/ralph-cli --locked`; the install dir is added to `PATH` for this run. |
-| 3 | Provide absolute path | The operator supplies an absolute path; the skill re-runs the probe with the supplied path. |
-| Other | Free-text path or build override | Recorded verbatim; re-probed once. |
-
-### `preset_gap` — no preset covers the plan's verification intent
-
-Triggered by `scripts/sandbox_suite.py` (or its upstream chain) when
-the resolved preset does not cover the plan's required intents
-(testing / lint / build / e2e). The skill MUST NOT silently fall
-through; it MUST stop and hard-handoff to `ralph-preset-author`.
+Triggered when no usable `ralph` is on PATH, version probe fails, **or**
+`check_binary_freshness` reports the binary is not a fresh build of
+the change-plan (orchestrator) repo.
 
 | # | Option | Consequence |
 |---|--------|-------------|
-| 1 (recommended) | Handoff to `ralph-preset-author` | The skill emits a blocked handoff naming the missing intent and pointing to the preset-author workflow. |
-| 2 | Force-resolve with closest builtin | Recorded as `forced_preset_gap` risk; the handoff declares the gap loudly. |
-| 3 | Halt, operator edits preset manually | The skill emits a blocked handoff with the operator action recorded. |
-| Other | Free-text override | Recorded verbatim; skill halts unless the operator also confirms a preset identifier. |
+| 1 (**recommended**) | Rebuild via `cargo build -p ralph-cli` | Build in the change-plan repo; use `target/debug/ralph`. |
+| 2 | Install via PATH (`cargo install`) | `cargo install --path crates/ralph-cli --locked`. |
+| 3 | Provide absolute path to a repo build | Re-probe; must pass freshness when verifying a change plan. |
+| Other | Free-text path or build override | Recorded; re-probed once. |
+
+### `preset_gap` — preset missing or change plan touches presets/
+
+Triggered when no preset covers verification intent, **or**
+`resolve_plans` sets `change_plan_touches_presets` (change plan
+declares `presets/` paths).
+
+| # | Option | Consequence |
+|---|--------|-------------|
+| 1 (**recommended** when preset already landed) | Preset already updated in orchestrator — continue | Record confirmation; proceed with bootstrap. |
+| 2 | Handoff to `ralph-preset-author` | Blocked handoff; resume after preset lands. |
+| 3 | Halt, operator edits preset manually | Blocked handoff with operator action recorded. |
+| Other | Free-text | Recorded; skill halts unless a concrete continue/handoff is clear. |
+
+When the builtin/file preset is **missing**, option 1 is not offered —
+only handoff / halt.
 
 ### `write_conflict` — owned pair exists under different provenance
 
 Triggered by `scripts/sandbox_suite.py` when an existing
 `ralph.<stem>.yml` / `PROMPT.<stem>.md` pair is on disk but the
-embedded `profile_sha256` / `prompt_sha256` do not match the
-resolved preset / inline prompt.
+embedded hashes do not match.
 
 | # | Option | Consequence |
 |---|--------|-------------|
-| 1 (recommended) | Refresh with current preset hash | The skill rewrites both files under the current provenance and records the prior hash in `decisions.md`. |
-| 2 | Preserve existing pair | The skill keeps the pair and emits an `incomplete_static_only` handoff noting the provenance mismatch. |
-| 3 | Back up and overwrite | The skill writes the prior pair to `ralph.<stem>.yml.bak-<sha>` / `PROMPT.<stem>.md.bak-<sha>` and refreshes. |
-| Other | Free-text | Recorded verbatim; skill halts unless paired with a concrete action. |
+| 1 (recommended) | Refresh with current preset hash | Rewrite both files under current provenance. |
+| 2 | Preserve existing pair | Keep pair; incomplete static-only handoff. |
+| 3 | Back up and overwrite | `.bak-<sha>` then refresh. |
+| Other | Free-text | Recorded; halt unless paired with a concrete action. |
 
 ### `argv_shape` — `--plan` vs `--prompt-file`
 
-Triggered when the caller supplied both a plan path and a prompt
-file (or neither). The skill must choose exactly one explicit prompt
-source for the dry-run argv.
-
 | # | Option | Consequence |
 |---|--------|-------------|
-| 1 (recommended) | `--plan <sandbox-relative>` | The caller-supplied plan is staged into `<sandbox>/docs/plans/<basename>`; argv uses the sandbox-relative `docs/plans/<basename>` so the launch command is portable and works when the live loop is started from the sandbox cwd. The source plan bytes are never modified (R13). |
-| 2 | `--prompt-file <abs>` | An external prompt file is authoritative; the plan is read-only context. |
-| Other | Free-text | Recorded verbatim; skill halts unless paired with a concrete argv slot. |
+| 1 (recommended) | `--plan <sandbox-relative workload>` | Workload staged/used as `docs/plans/<basename>`. Change plan stays in PROMPT only. |
+| 2 | `--prompt-file <abs>` | External prompt authoritative; rare for this skill. |
+| Other | Free-text | Recorded; halt unless paired with a concrete argv slot. |
 
 ### `live_run` — operator asks whether to spawn a live loop
 
-Triggered by an explicit operator message after the handoff has
-been rendered. By default the skill stops at the static-only
-handoff (R10).
+Triggered by an explicit operator message after the handoff.
+Default remains static-only. Intermediate artifacts after a live run
+are owned by `ralph-run-diagnosis`, not this skill.
 
 | # | Option | Consequence |
 |---|--------|-------------|
-| 1 (recommended) | Stay static-only | The skill emits nothing further; the operator runs the handoff command in a separate terminal. |
-| 2 | Spawn live `ralph run` (operator-supervised) | The skill emits the resolved argv; loop startup is the operator's terminal action. The skill itself never spawns the loop. |
-| Other | Free-text | Recorded verbatim; default behavior is `Stay static-only` unless the operator supplies an explicit `spawn live` confirmation. |
+| 1 (recommended) | Stay static-only | No further skill action; operator runs launch command separately. |
+| 2 | Spawn live `ralph run` (operator-supervised) | Emit argv; skill itself never spawns the loop. |
+| Other | Free-text | Recorded; default Stay static-only. |
 
 ## Forbidden patterns
 
@@ -127,12 +129,6 @@ handoff (R10).
 - A combo-box where the recommended option's consequence is not
   stated.
 - A combo-box without an `Other` escape hatch.
-- A combo-box whose options are not mutually exclusive (e.g. "yes
-  and continue" + "yes and stop" presented side-by-side).
-
-## Cross-skill alignment
-
-The combo-box shape mirrors `skills/ralph-preset-author`'s
-`Workflow 0` decision points (resolve preset, resolve plan, argv
-shape, write-conflict, binary-missing). The wording is intentionally
-similar so an operator fluent in one skill is fluent in the other.
+- A combo-box whose options are not mutually exclusive.
+- Offering the orchestrator change plan as workload `--plan`.
+- Silently creating or editing `<sandbox>/docs/plans/*`.

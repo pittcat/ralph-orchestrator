@@ -1,40 +1,41 @@
-"""Plan resolution for ``ralph-e2e-bootstrap``.
+"""Plan resolution for ``ralph-e2e-bootstrap`` (R15 / dual-plan model).
 
-Resolves which development plan the skill may bind into an E2E
-sandbox **before** ``plan_diff`` / suite generation.
+Two plan roles:
+
+* **Change plan** (from the orchestrator / current repo) — verification
+  intent: what was modified and what the E2E run should prove. Never
+  used as ``ralph run --plan``.
+* **Workload plan** (sandbox-local) — the business scenario agents
+  execute. Always discovered under ``<sandbox>/docs/plans/``. Creating
+  or editing sandbox plans requires an explicit operator combo-box
+  (this module never silently authors).
 
 Public surface:
 
-* :class:`ResolveResult` — typed outcome.
-* :func:`assess_fitness` — whether a plan is a suitable E2E workload
-  for the given sandbox.
-* :func:`discover_sandbox_plans` — candidate plans under
-  ``<sandbox>/docs/plans/``.
-* :func:`author_minimal_plan` — write a new sandbox-local minimal
-  E2E plan when none are suitable.
-* :func:`resolve_plan` — main entry: optional caller candidate →
-  fitness gate → discover → author.
+* :func:`assess_workload_fitness` — sandbox-local E2E suitability.
+* :func:`discover_sandbox_plans` / :func:`pick_best_discovered`
+* :func:`change_plan_needs_preset_author` — hard-handoff signal.
+* :func:`extract_change_summary` — short text for PROMPT injection.
+* :func:`author_minimal_plan` — write only after operator confirms.
+* :func:`resolve_plans` — main entry.
 
 Hard rules:
 
-* Never rewrite a caller-supplied plan file (R13). Authored plans are
-  **new** files under the sandbox only.
-* Unfit caller candidates are **hard-rejected** (no combo-box override
-  that re-binds an orchestrator crates/preset fix into a product
-  sandbox).
-* Pure stdlib. No writes except :func:`author_minimal_plan`.
+* Never rewrite a caller-supplied change plan (R13).
+* Never bind an orchestrator change plan as the workload ``--plan``.
+* Never silently create/edit files under ``<sandbox>/docs/plans/``.
+* Pure stdlib.
 """
 
 from __future__ import annotations
 
+import hashlib
 import re
 from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
 from typing import Literal
 
-# Reuse the same path-token extractor as plan_diff (duplicated lightly
-# to keep this module importable without circular deps on classify).
 _PATH_TOKEN_RE = re.compile(
     r"`(?P<back>[^`\n]+?\.[A-Za-z0-9]+)`"
     r"|(?P<bare>(?:[A-Za-z0-9_.-]+/)+[A-Za-z0-9_.-]+\.[A-Za-z0-9]+)"
@@ -43,13 +44,11 @@ _PATH_TOKEN_RE = re.compile(
 _ORCH_PREFIXES = ("crates/", "presets/", "scripts/")
 _SAFE_BASENAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,200}\.md$")
 
-ResolveSource = Literal["caller", "discovered", "authored"]
+WorkloadSource = Literal["discovered", "none"]
 
 
 @dataclass(frozen=True)
 class FitnessReport:
-    """Whether ``plan_path`` is a suitable E2E workload for ``sandbox``."""
-
     suitable: bool
     reason: str
     intent_paths: tuple[str, ...]
@@ -59,22 +58,39 @@ class FitnessReport:
 
 @dataclass(frozen=True)
 class ResolveResult:
-    """Outcome of plan resolution.
+    """Dual-plan resolution outcome.
 
-    * ``ok`` True ⇒ caller may pass ``plan_path`` to ``plan_diff`` /
-      ``generate_suite``.
-    * ``blocked`` True ⇒ hard stop (sandbox unusable / write failure).
-    * ``rejected_candidate`` records a caller path that failed fitness.
+    * ``ok`` True ⇒ a workload plan is ready for audit / suite.
+    * ``needs_author_confirmation`` True ⇒ no suitable workload;
+      skill MUST combo-box before calling :func:`author_minimal_plan`.
+    * ``change_plan_touches_presets`` True ⇒ change plan mentions
+      ``presets/``; skill MUST ask whether preset work is done or
+      hard-handoff ``ralph-preset-author`` (do not silently skip).
+    * ``workload_plan_path`` is the only path allowed for ``--plan``.
+    * ``change_plan_path`` is verification context for PROMPT injection.
     """
 
     ok: bool
     blocked: bool
-    plan_path: str
-    source: ResolveSource | str
-    rejected_candidate: str | None = None
-    reject_reason: str | None = None
+    workload_plan_path: str
+    workload_source: WorkloadSource | str
+    change_plan_path: str | None = None
+    change_plan_hash: str = ""
+    change_summary: str = ""
+    change_plan_touches_presets: bool = False
+    needs_author_confirmation: bool = False
     message: str = ""
     fitness: FitnessReport | None = None
+
+    # Back-compat alias used by older call sites / tests.
+    @property
+    def plan_path(self) -> str:
+        return self.workload_plan_path
+
+    @property
+    def needs_preset_author(self) -> bool:
+        """Deprecated alias — prefer ``change_plan_touches_presets`` + combo-box."""
+        return self.change_plan_touches_presets
 
 
 def _extract_intent_paths(plan_text: str) -> tuple[str, ...]:
@@ -113,14 +129,12 @@ def _git_toplevel(path: Path) -> Path | None:
         return None
 
 
-def assess_fitness(plan_path: Path, sandbox: Path) -> FitnessReport:
-    """Return whether ``plan_path`` is a suitable E2E workload for ``sandbox``.
+def _hash_bytes(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()
 
-    A plan is **unfit** when it primarily targets orchestrator trees
-    (``crates/``, ``presets/``, ``scripts/``) that do not exist in the
-    sandbox — the classic failure mode of binding an orchestrator fix
-    plan into a product E2E harness.
-    """
+
+def assess_workload_fitness(plan_path: Path, sandbox: Path) -> FitnessReport:
+    """Return whether ``plan_path`` is a suitable **workload** for ``sandbox``."""
     sandbox = Path(sandbox).resolve()
     plan_path = Path(plan_path)
     try:
@@ -140,7 +154,6 @@ def assess_fitness(plan_path: Path, sandbox: Path) -> FitnessReport:
     sandbox_has_presets = (sandbox / "presets").is_dir()
     local_hits = 0
     for p in intents:
-        # Paths that resolve under the sandbox tree count as local.
         if not p.startswith(_ORCH_PREFIXES) and (sandbox / p).exists():
             local_hits += 1
         elif p.startswith("sorts/") or p.startswith("docs/"):
@@ -154,28 +167,24 @@ def assess_fitness(plan_path: Path, sandbox: Path) -> FitnessReport:
         and plan_top != sand_top
     )
 
-    # Hard unfit: orchestrator-heavy intent and sandbox is not an
-    # orchestrator checkout (no crates/ + no presets/).
     if orch >= 2 and not sandbox_has_crates and not sandbox_has_presets:
         return FitnessReport(
             suitable=False,
             reason=(
-                "plan intent targets orchestrator trees (crates/presets/scripts) "
-                "but sandbox has neither crates/ nor presets/; "
-                "not an E2E workload for this sandbox"
+                "plan intent targets orchestrator trees; not a sandbox "
+                "workload (use as change plan / verification intent only)"
             ),
             intent_paths=intents,
             orch_intent_count=orch,
             sandbox_local_hint_count=local_hits,
         )
 
-    # Cross-repo + any orch intent against a product sandbox → unfit.
     if cross and orch >= 1 and not sandbox_has_crates:
         return FitnessReport(
             suitable=False,
             reason=(
-                "plan lives in a different git repo than the sandbox and "
-                "declares orchestrator intent paths; refuse binding"
+                "plan is outside the sandbox git repo and declares "
+                "orchestrator intent; refuse as workload --plan"
             ),
             intent_paths=intents,
             orch_intent_count=orch,
@@ -184,15 +193,62 @@ def assess_fitness(plan_path: Path, sandbox: Path) -> FitnessReport:
 
     return FitnessReport(
         suitable=True,
-        reason="plan intent is compatible with sandbox layout",
+        reason="plan intent is compatible with sandbox workload",
         intent_paths=intents,
         orch_intent_count=orch,
         sandbox_local_hint_count=local_hits,
     )
 
 
+# Back-compat name for older imports/tests.
+assess_fitness = assess_workload_fitness
+
+
+def change_plan_needs_preset_author(change_plan: Path) -> bool:
+    """True when the change plan declares ``presets/`` intent paths."""
+    try:
+        text = Path(change_plan).read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return False
+    return any(p.startswith("presets/") for p in _extract_intent_paths(text))
+
+
+def extract_change_summary(change_plan: Path, *, max_chars: int = 1200) -> str:
+    """Extract a short verification-context blurb for PROMPT injection."""
+    try:
+        text = Path(change_plan).read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
+        return f"(unreadable change plan: {exc.__class__.__name__})"
+
+    lines = text.splitlines()
+    # Prefer Goal Capsule / Objective bullets when present.
+    blob: list[str] = []
+    in_capsule = False
+    for line in lines:
+        if line.strip().startswith("## Goal Capsule"):
+            in_capsule = True
+            blob.append(line.strip())
+            continue
+        if in_capsule:
+            if line.startswith("## ") and not line.startswith("## Goal"):
+                break
+            if line.strip():
+                blob.append(line.rstrip())
+            if sum(len(x) + 1 for x in blob) >= max_chars:
+                break
+    if not blob:
+        for line in lines[:40]:
+            if line.strip():
+                blob.append(line.rstrip())
+            if sum(len(x) + 1 for x in blob) >= max_chars:
+                break
+    summary = "\n".join(blob).strip()
+    if len(summary) > max_chars:
+        summary = summary[: max_chars - 3] + "..."
+    return summary or "(empty change plan)"
+
+
 def discover_sandbox_plans(sandbox: Path) -> tuple[Path, ...]:
-    """Return ``*.md`` plans under ``<sandbox>/docs/plans/`` (sorted)."""
     plans_dir = Path(sandbox).resolve() / "docs" / "plans"
     if not plans_dir.is_dir():
         return ()
@@ -210,7 +266,6 @@ def _score_candidate(path: Path, preset: str | None) -> int:
         score += 3
     if "minimal" in name or "e2e-bootstrap-minimal" in name:
         score += 1
-    # Prefer newer dated prefixes roughly (YYYY-MM-DD).
     if re.match(r"^\d{4}-\d{2}-\d{2}-", path.name):
         score += 1
     return score
@@ -221,11 +276,10 @@ def pick_best_discovered(
     *,
     preset: str | None = None,
 ) -> Path | None:
-    """Pick the highest-scoring **suitable** plan under the sandbox."""
     best: Path | None = None
     best_score = -10_000
     for candidate in discover_sandbox_plans(sandbox):
-        report = assess_fitness(candidate, sandbox)
+        report = assess_workload_fitness(candidate, sandbox)
         if not report.suitable:
             continue
         score = _score_candidate(candidate, preset) + report.sandbox_local_hint_count
@@ -241,9 +295,9 @@ def author_minimal_plan(
     preset: str | None = None,
     today: date | None = None,
 ) -> Path:
-    """Write a new minimal E2E plan under ``<sandbox>/docs/plans/``.
+    """Write a new minimal workload plan under the sandbox.
 
-    Does not modify any existing plan file. Returns the new path.
+    Call **only** after the operator confirms via combo-box.
     """
     sandbox = Path(sandbox).resolve()
     plans_dir = sandbox / "docs" / "plans"
@@ -264,7 +318,7 @@ def author_minimal_plan(
         f"\n"
         f"> generated_by: ralph-e2e-bootstrap\n"
         f"> preset: {preset or '(unspecified)'}\n"
-        f"> purpose: sandbox-local workload when no suitable plan was found\n"
+        f"> purpose: sandbox-local workload (operator-confirmed)\n"
         f"\n"
         f"## Goal Capsule\n"
         f"\n"
@@ -287,6 +341,87 @@ def author_minimal_plan(
     return dest
 
 
+def resolve_plans(
+    sandbox: Path,
+    *,
+    change_plan: Path | str | None = None,
+    preset: str | None = None,
+) -> ResolveResult:
+    """Resolve change-plan context + sandbox workload for the skill.
+
+    Never treats ``change_plan`` as the workload ``--plan``. Never
+    authors a plan; when discovery fails sets
+    ``needs_author_confirmation=True`` for the skill combo-box.
+    """
+    sandbox = Path(sandbox).resolve()
+    if not sandbox.is_dir():
+        return ResolveResult(
+            ok=False,
+            blocked=True,
+            workload_plan_path="",
+            workload_source="none",
+            message=f"sandbox is not a directory: {sandbox}",
+        )
+
+    change_path: Path | None = Path(change_plan) if change_plan else None
+    change_hash = ""
+    change_summary = ""
+    touches_presets = False
+    if change_path is not None:
+        try:
+            raw = change_path.read_bytes()
+            change_hash = _hash_bytes(raw)
+            change_summary = extract_change_summary(change_path)
+            touches_presets = change_plan_needs_preset_author(change_path)
+        except (OSError, UnicodeDecodeError) as exc:
+            return ResolveResult(
+                ok=False,
+                blocked=True,
+                workload_plan_path="",
+                workload_source="none",
+                change_plan_path=str(change_path),
+                message=f"change plan unreadable: {exc.__class__.__name__}",
+            )
+
+    discovered = pick_best_discovered(sandbox, preset=preset)
+    if discovered is not None:
+        report = assess_workload_fitness(discovered, sandbox)
+        msg = "workload discovered under sandbox docs/plans/"
+        if touches_presets:
+            msg += (
+                "; change plan touches presets/ — ask operator: preset "
+                "already updated, or hard-handoff ralph-preset-author"
+            )
+        return ResolveResult(
+            ok=True,
+            blocked=False,
+            workload_plan_path=str(discovered.resolve()),
+            workload_source="discovered",
+            change_plan_path=str(change_path.resolve()) if change_path else None,
+            change_plan_hash=change_hash,
+            change_summary=change_summary,
+            change_plan_touches_presets=touches_presets,
+            fitness=report,
+            message=msg,
+        )
+
+    return ResolveResult(
+        ok=False,
+        blocked=False,
+        workload_plan_path="",
+        workload_source="none",
+        change_plan_path=str(change_path.resolve()) if change_path else None,
+        change_plan_hash=change_hash,
+        change_summary=change_summary,
+        change_plan_touches_presets=touches_presets,
+        needs_author_confirmation=True,
+        message=(
+            "no suitable sandbox workload plan; ask operator before "
+            "authoring a minimal plan (do not write silently)"
+        ),
+    )
+
+
 def resolve_plan(
     sandbox: Path,
     *,
@@ -294,110 +429,27 @@ def resolve_plan(
     preset: str | None = None,
     allow_author: bool = True,
 ) -> ResolveResult:
-    """Resolve the plan path the rest of the skill may bind.
+    """Backward-compatible wrapper.
 
-    Order:
-
-    1. If ``candidate`` is given and :func:`assess_fitness` passes →
-       use it (``source=caller``).
-    2. If ``candidate`` is unfit → record rejection; fall through
-       (hard reject, no override).
-    3. Discover suitable plans under the sandbox; pick best.
-    4. If none and ``allow_author`` → :func:`author_minimal_plan`.
-    5. Otherwise blocked.
+    * ``candidate`` is treated as the **change plan** (verification
+      intent), never as the workload.
+    * ``allow_author`` is ignored for silent writes; discovery failure
+      always sets ``needs_author_confirmation`` instead of auto-authoring.
     """
-    sandbox = Path(sandbox).resolve()
-    if not sandbox.is_dir():
-        return ResolveResult(
-            ok=False,
-            blocked=True,
-            plan_path="",
-            source="caller",
-            message=f"sandbox is not a directory: {sandbox}",
-        )
-
-    rejected: str | None = None
-    reject_reason: str | None = None
-    fitness: FitnessReport | None = None
-
-    if candidate is not None:
-        cand = Path(candidate)
-        fitness = assess_fitness(cand, sandbox)
-        if fitness.suitable:
-            return ResolveResult(
-                ok=True,
-                blocked=False,
-                plan_path=str(cand.resolve() if cand.exists() else cand),
-                source="caller",
-                fitness=fitness,
-                message="caller plan accepted",
-            )
-        rejected = str(cand)
-        reject_reason = fitness.reason
-
-    discovered = pick_best_discovered(sandbox, preset=preset)
-    if discovered is not None:
-        report = assess_fitness(discovered, sandbox)
-        return ResolveResult(
-            ok=True,
-            blocked=False,
-            plan_path=str(discovered.resolve()),
-            source="discovered",
-            rejected_candidate=rejected,
-            reject_reason=reject_reason,
-            fitness=report,
-            message=(
-                "using sandbox-local plan"
-                + (f"; rejected unfit candidate {rejected}" if rejected else "")
-            ),
-        )
-
-    if allow_author:
-        try:
-            authored = author_minimal_plan(sandbox, preset=preset)
-        except (OSError, ValueError) as exc:
-            return ResolveResult(
-                ok=False,
-                blocked=True,
-                plan_path="",
-                source="authored",
-                rejected_candidate=rejected,
-                reject_reason=reject_reason,
-                message=f"failed to author minimal plan: {exc}",
-            )
-        report = assess_fitness(authored, sandbox)
-        return ResolveResult(
-            ok=True,
-            blocked=False,
-            plan_path=str(authored.resolve()),
-            source="authored",
-            rejected_candidate=rejected,
-            reject_reason=reject_reason,
-            fitness=report,
-            message=(
-                "authored minimal sandbox-local plan"
-                + (f"; rejected unfit candidate {rejected}" if rejected else "")
-            ),
-        )
-
-    return ResolveResult(
-        ok=False,
-        blocked=True,
-        plan_path="",
-        source="discovered",
-        rejected_candidate=rejected,
-        reject_reason=reject_reason,
-        fitness=fitness,
-        message="no suitable sandbox plan and authoring disabled",
-    )
+    del allow_author  # silent author removed by product contract
+    return resolve_plans(sandbox, change_plan=candidate, preset=preset)
 
 
 __all__ = [
     "FitnessReport",
     "ResolveResult",
     "assess_fitness",
+    "assess_workload_fitness",
     "author_minimal_plan",
+    "change_plan_needs_preset_author",
     "discover_sandbox_plans",
+    "extract_change_summary",
     "pick_best_discovered",
     "resolve_plan",
+    "resolve_plans",
 ]

@@ -318,9 +318,113 @@ def resolve_binary(
     )
 
 
+@dataclass(frozen=True)
+class FreshnessReport:
+    """Whether ``binary`` looks like a current build of ``build_repo``."""
+
+    fresh: bool
+    needs_build: bool
+    detail: str
+    suggested_binary: str = ""
+
+
+def check_binary_freshness(
+    binary: str | Path,
+    build_repo: str | Path,
+) -> FreshnessReport:
+    """Return whether ``binary`` is an up-to-date build of ``build_repo``.
+
+    Fresh when the resolved binary is ``{repo}/target/{debug,release}/ralph``
+    and its mtime is at least as new as ``Cargo.toml`` / ``Cargo.lock``
+    (when present). Otherwise the skill should combo-box / run
+    ``cargo build -p ralph-cli`` in ``build_repo``.
+    """
+    repo = Path(build_repo).resolve()
+    try:
+        bin_path = Path(binary).resolve()
+    except OSError:
+        return FreshnessReport(
+            fresh=False,
+            needs_build=True,
+            detail=f"cannot resolve binary path: {binary!r}",
+            suggested_binary=str(repo / "target" / "debug" / "ralph"),
+        )
+
+    suggested = repo / "target" / "debug" / "ralph"
+    repo_bins = (
+        (repo / "target" / "debug" / "ralph").resolve(),
+        (repo / "target" / "release" / "ralph").resolve(),
+    )
+    if bin_path not in repo_bins:
+        return FreshnessReport(
+            fresh=False,
+            needs_build=True,
+            detail=(
+                f"binary {bin_path} is not {repo}/target/{{debug,release}}/ralph; "
+                "rebuild from the change-plan repo to verify this change"
+            ),
+            suggested_binary=str(suggested),
+        )
+
+    if not bin_path.is_file():
+        return FreshnessReport(
+            fresh=False,
+            needs_build=True,
+            detail=f"repo binary missing: {bin_path}",
+            suggested_binary=str(suggested),
+        )
+
+    try:
+        bin_mtime = bin_path.stat().st_mtime
+    except OSError as exc:
+        return FreshnessReport(
+            fresh=False,
+            needs_build=True,
+            detail=f"stat binary failed: {exc}",
+            suggested_binary=str(suggested),
+        )
+
+    newest_src = 0.0
+    for rel in ("Cargo.toml", "Cargo.lock"):
+        p = repo / rel
+        if p.is_file():
+            try:
+                newest_src = max(newest_src, p.stat().st_mtime)
+            except OSError:
+                pass
+    crates = repo / "crates"
+    if crates.is_dir():
+        # Bound walk: only top-level crate Cargo.toml files.
+        for crate_toml in crates.glob("*/Cargo.toml"):
+            try:
+                newest_src = max(newest_src, crate_toml.stat().st_mtime)
+            except OSError:
+                pass
+
+    if newest_src and bin_mtime + 1.0 < newest_src:
+        return FreshnessReport(
+            fresh=False,
+            needs_build=True,
+            detail=(
+                "repo ralph binary is older than Cargo.toml/lock or crate "
+                "manifests; rebuild with `cargo build -p ralph-cli`"
+            ),
+            suggested_binary=str(bin_path),
+        )
+
+    return FreshnessReport(
+        fresh=True,
+        needs_build=False,
+        detail="binary is a current repo target build",
+        suggested_binary=str(bin_path),
+    )
+
+
 __all__ = [
     "DEFAULT_TIMEOUT",
     "MISSING_TOKEN",
+    "FreshnessReport",
     "Resolution",
+    "check_binary_freshness",
     "resolve_binary",
 ]

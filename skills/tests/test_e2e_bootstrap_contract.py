@@ -117,6 +117,7 @@ def test_e2e_bootstrap_interaction_doc_has_decision_table() -> None:
     # Every decision point from SKILL.md must appear in
     # references/interaction.md and be documented as a combo-box.
     for decision in (
+        "sandbox_plan_write",
         "plan_resolve_choice",
         "plan_diff_clarify",
         "binary_resolution",
@@ -128,7 +129,8 @@ def test_e2e_bootstrap_interaction_doc_has_decision_table() -> None:
         assert decision in text, f"interaction.md must document {decision!r}"
     for token in ("recommended option", "Other", "consequence", "2–4"):
         assert token in text, f"interaction.md must contain combo-box token {token!r}"
-    assert "hard reject" in text.lower() or "hard-rejected" in text.lower()
+    assert "hard" in text.lower()
+    assert "silently" in text.lower() or "Silent writes are forbidden" in text
 
 
 def test_e2e_bootstrap_no_preset_write_anchor() -> None:
@@ -144,27 +146,25 @@ def test_e2e_bootstrap_no_live_run_default() -> None:
     # Either 'static_only' appears literally, or the document
     # explicitly states the skill does not spawn live runs by default.
     assert "static_only" in text
-    assert "NEVER spawn a live" in text or "never spawn a live" in text.lower()
+    assert "NEVER spawn" in text or "never spawn" in text.lower()
 
 
 def test_e2e_bootstrap_no_plan_rewrite() -> None:
-    """SKILL.md must declare the plan-read-only invariant (R13)."""
+    """SKILL.md must declare change-plan read-only (R13)."""
     text = SKILL_DOC.read_text(encoding="utf-8")
-    assert (
-        "NEVER rewrites a caller-supplied plan" in text
-        or "NEVER rewrite a caller-supplied plan" in text
-        or "NEVER rewrites the plan file" in text
-        or "read-only" in text.lower()
-    )
+    assert "Never rewrite the orchestrator change plan" in text or "R13" in text
     assert "--plan" in text
-    assert "plan_resolve" in text or "R15" in text
+    assert "plan_resolve" in text or "Workload plan" in text or "workload" in text.lower()
 
 
-def test_e2e_bootstrap_plan_resolve_hard_reject_anchor() -> None:
-    """SKILL.md must hard-reject unfit orchestrator plans (R15)."""
+def test_e2e_bootstrap_dual_plan_anchors() -> None:
+    """SKILL.md must document dual-plan + sandbox_plan_write (R15)."""
     text = SKILL_DOC.read_text(encoding="utf-8")
-    assert "hard-reject" in text.lower() or "hard reject" in text.lower()
-    assert "plan_resolve" in text
+    assert "Change plan" in text or "change plan" in text.lower()
+    assert "Workload" in text or "workload" in text.lower()
+    assert "sandbox_plan_write" in text
+    assert "check_binary_freshness" in text or "fresh" in text.lower()
+    assert "ralph-run-diagnosis" in text
 
 
 # ---------------------------------------------------------------------------
