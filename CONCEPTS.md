@@ -40,6 +40,18 @@ follow-on 两环之间的强制交接产物：由第一环成功路径写出、�
 
 同一 hat 定义下、对 N 份同构 payload 的 orchestrator 级 fan-out/fan-in。共享 `wave_id`，用 `wave_index` / `wave_total` 区分 slot。需要账本级收齐、超时与诊断时用 wave；hat 内部分工优先 subagent。`events.jsonl` / `supervisor.db` 是 runtime ledger，不是 hat 业务 artifact。
 
+### worker_timeout
+
+Supervisor/wave slot 的稳定失败 reason：该槽 **已进入租约/执行**（或等价 Timeout 出口）后，在 deadline 内未形成可接受终态（无 terminal，或 Timeout 分类路径判定为超时失败）。是调度租约语义，不是「已证明 agent 卡死」。有 `*.unit.done` / `*.unit.failed` terminal 的 Timeout 应 Completed，不得记本 reason。
+
+### slot_never_started
+
+Supervisor/wave slot 的稳定失败 reason：波次失败/取消闭合时，该槽 status 仍为 `Pending`（从未 `Dispatched` / `Running`）。用于区分「排队未开跑」与 `worker_timeout`（已开跑后到期）。不得与「已开跑但未 report」混用同一字符串。
+
+### blocking_slots
+
+`*.wave.failed` 载荷中的失败槽下标列表。契约上只含 `Failed` / `Cancelled` 槽；`Completed` 不得进入。宽泛全量列表（如 `[0,1,2,3,4]`）是诊断反模式，应配合 per-slot reason / diagnostics 归因。
+
 ### OPAC
 
 Observe → Precheck → Apply → Confirm。isolated 模式下 state-changing 操作的纪律框架；Precheck/ACL 可由 CLI 硬闸，Confirm 对 wave/task 逐步硬化为 ticket 或公开查询证据。
