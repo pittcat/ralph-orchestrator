@@ -1507,9 +1507,9 @@ event_loop:
             source: "passed-through from align.done / plan.blocked / work.failed / stabilization.blocked / review.loop.blocked / review.artifact.blocked"
             fill_rule: "literal string; do NOT hand-write"
           report_path:
-            meaning: "repo-relative path to the final Markdown report file under `.ralph/report/<plan_name>.md`"
-            source: "reporter (this hat) writes via the Write tool before emit"
-            fill_rule: "non-empty path under `.ralph/report/`; do NOT make up a path — write the file first"
+            meaning: "repo-relative path to the final aggregated report under `.ralph/review/<plan>/report.md`; agent must verify readable before emit (schema checks field presence, not filesystem)"
+            source: "reporter writes the file this activation, then copies the real path"
+            fill_rule: "repo-relative path only after the file is readable; do NOT invent a path; Confirm must print DELIVERABLE_PATH with the same value"
           verdict:
             meaning: "single final outcome token; one of 'pass' / 'pass_with_residuals' / 'blocked'"
             source: "reporter aggregates from upstream triggers + report bundle"
@@ -5247,7 +5247,8 @@ hats:
       ### Report contract (manager body + short technical appendix)
 
       Always write `.ralph/review/{plan_name}/report.md` after creating the
-      directory if needed. Use exactly this run-level structure:
+      directory if needed. **No readable report file ⇒ no `report.done`.**
+      Use exactly this run-level structure:
 
       ```markdown
       ## 一句话结论
@@ -5278,6 +5279,12 @@ hats:
       requested or accepted, key evidence, and final round detail. If no fix
       round happened, state "本轮未进入修复".>
 
+      ## 全部产物路径清单
+      <bullet list of every important repo-relative path for this run:
+      report.md itself, report_input_file, per-round verification/review
+      products, fix-plan, decisions, and residual artifacts. Missing
+      phases → mark 未运行 / 无文件.>
+
       ## 请你决定的事
       <Chinese action request matching the conclusion: continue / continue
       with follow-up / intervene before continuing.>
@@ -5300,6 +5307,20 @@ hats:
       and appendix contain no Mermaid/AACIM block and no line beginning with
       `graph`, `flowchart`, `sequenceDiagram`, `classDiagram`, `stateDiagram`,
       or `gantt`.
+
+      ### OPAC Confirm order (mandatory for report.done)
+      1. Write `.ralph/review/{plan_name}/report.md`; verify readable.
+      2. `ralph emit report.done --policy-check` with real `report_path`.
+      3. Real `report.done` emit.
+      4. Confirm: print `DELIVERABLE_PATH: .ralph/review/{plan_name}/report.md`
+         in this activation's visible reply (operator TUI search).
+         Do this on the `report.done` activation (the one that writes the
+         file). If a later activation only emits `LOOP_COMPLETE`, reprint
+         the same `DELIVERABLE_PATH` line; do not invent a new path and do
+         not put `report_path` on `LOOP_COMPLETE`.
+         Also Confirm emit with `--output json` (`ok`/`recorded`); schema
+         does not check the filesystem — use `test -f` before emit.
+      Then emit `LOOP_COMPLETE` on the same or next activation per HARD RULES.
 
       ### Branch A — Accepted path (trigger = `align.done`)
 
@@ -5423,5 +5444,7 @@ hats:
         shuts the loop on this event.
 
       ### OPAC reference
-      Follow `ralph-tools-opac` for Observe/Precheck/Apply/Confirm discipline
-      and `ralph-tools-emit` §5 for precheck rules before every emit.
+      Follow `ralph-tools-opac`. Before each real emit: `--policy-check` then
+      emit; Confirm with `--output json` (`ok`/`recorded`), not event files.
+      On the `report.done` activation print
+      `DELIVERABLE_PATH: <report_path>` in the visible reply for the operator TUI.

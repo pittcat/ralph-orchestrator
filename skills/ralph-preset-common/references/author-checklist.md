@@ -82,6 +82,7 @@
 - [ ] Emitter hat：若 instructions 提到 payload / required fields / field shape / `ralph emit` / `ralph wave emit`，必须引用 `ralph-tools-emit`「Policy-Check 反馈」；不要复制 `field_docs` 表
 - [ ] Recovery / correction 路径：引用 `ralph-tools-recovery-directives`（通用 bounded retry）；preset 内用**触发状态表**写专用动作，不复述 data skill 全文
 - [ ] 终态报告类 hat：正文面向决策者、技术附录面向核验证据者；正文不得是 payload 字段流水账，失败路径不得写成 silent-success
+- [ ] **操作者交付文件路径可见（硬）**：凡「本轮写操作者可读文件 + schema 要求路径字段」的 hat，payload 必须带真实路径字段；instructions 须自洽写明「先落盘 → `test -f` → `--policy-check` → 真实 emit → Confirm 打印 `DELIVERABLE_PATH:`」（不依赖 emit skill 已注入）；schema 只验字段非空、不验文件系统
 - [ ] `task_id` / `task_key` / `step`：引用 `ralph-tools-tasks` red box
 - [ ] 不复述 `ralph-tools*.md` 参数表
 - [ ] **对每个 emit topic，按 payload audit 五列填行**（见下）—— schema 通过不等于字段可达

@@ -521,9 +521,9 @@ schemas:
         source: finalizer
         fill_rule: one of `clean | residual_only | fixes_required | blocked`
       artifact_path:
-        meaning: 'repo-relative path to the terminal artifact: fix-plan.md (success / residual / fixes) or wave-blocked.md / scope-blocked.md / review-blocked.md (blocked)'
+        meaning: 'repo-relative path to the terminal artifact: fix-plan.md (success / residual / fixes) or wave-blocked.md / scope-blocked.md / review-blocked.md (blocked). Must exist and be readable before emit; Confirm must print DELIVERABLE_PATH with the same value for the operator TUI.'
         source: finalizer
-        fill_rule: do NOT fabricate; the path is the file the finalizer just validated
+        fill_rule: do NOT fabricate; the path is the file the finalizer just validated; never complete without a readable artifact_path
       scope_digest:
         meaning: frozen scope identity at completion time
         source: finalizer carries forward from scope-manifest.json

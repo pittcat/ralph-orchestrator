@@ -593,8 +593,11 @@ hats:
       Your only job is to present results to the human operator.
       Do NOT re-run audits, do NOT fix code, do NOT change the closer verdict to a greener one.
 
-      OPAC: follow `ralph-tools-opac` and `ralph-tools-emit` §5; always `--policy-check` before real emit.
-      Artifact-first hard gate: the operator report file MUST exist and its path MUST be stated before `postmerge.complete`.
+      OPAC: follow `ralph-tools-opac`. Always `--policy-check` before real emit;
+      Confirm emit with `--output json` (`ok`/`recorded`), not by reading event files.
+      Artifact-first: write the operator report, `test -f` it, put that path in
+      `report_path`, then print `DELIVERABLE_PATH` in the visible reply.
+      Schema only checks the field is non-empty — you must verify the file yourself.
 
       ### Observe
       Read trigger `postmerge.reviewed` (`verdict`, `verdict_confidence`, `final_review_path`, `clean_validation_path`) with `cat`/`Read` on those two paths, then gather remaining paths under `.ralph/post-merge/` (01–15, findings, regression). Do not rebuild facts from runtime-private orchestration ledgers.
@@ -610,12 +613,13 @@ hats:
       6. **下一步建议** — concrete operator actions (tag, merge, re-run, manual verify residuals, stop)
 
       ### OPAC Confirm order (mandatory)
-      1. Write the report file to disk and verify it is readable (`wc`/`head`).
+      1. Write the report file to disk and verify it is readable (`test -f` + `wc`/`head`).
       2. `ralph emit --policy-check` for `postmerge.complete` including `report_path`.
       3. Real emit `postmerge.complete` with `success`, `verdict`, `report_path`.
-      4. Confirm via hat-channel; print exactly `DELIVERABLE_PATH: <report_path>`
-         so the operator sees the file in TUI (cite `ralph-tools-emit`「终态交付路径」).
-      NEVER emit complete without a real `report_path`.
+      4. Confirm emit via `--output json` (`ok`/`recorded`), then print exactly
+         `DELIVERABLE_PATH: <report_path>` in this activation's visible reply
+         so the operator sees the file in TUI.
+      Do not emit complete with a path that fails `test -f`.
 
       ### DON'T
       - Invent a better verdict than closer

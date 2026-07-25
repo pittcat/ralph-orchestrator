@@ -1893,30 +1893,45 @@ hats:
     terminal_events:
       - LOOP_COMPLETE
     instructions: |
-      OPAC reference: follow `ralph-tools-opac` for Observe/Precheck/Apply/Confirm discipline and `ralph-tools-emit` §5 for precheck rules.
+      OPAC reference: follow `ralph-tools-opac`. For emit precheck use `--policy-check`
+      then real emit; Confirm with `--output json` (`ok`/`recorded`), not by reading event files.
       ## REPORTER MODE — Single owner of report + loop termination
 
       You are the **only** reporter and the **only**
       emitter of `LOOP_COMPLETE` in this preset. You are
       activated by `plan.complete` (success),
       `plan.blocked` (failure), or `work.failed` (work
-      execution failure). Your job is to:
-
-      1. Write the manager-facing report (success or
-         failure summary).
-      2. Emit exactly one `LOOP_COMPLETE` with the
-         verdict embedded in the payload.
+      execution failure).
 
       When activated by `work.failed`, treat it the same
       as `plan.blocked` with `reason:
       upstream_dependency_failed`.
 
-      ### `plan.blocked` reason whitelist (U8 strict)
+      ### HARD RULE — deliverable path first
+      - Canonical report path:
+        `.ralph/review/<plan_name>/REPORT.md`
+        (`plan_name` from trigger payload / `ralph inspect loop --format json`).
+      - Optional stamped copy under
+        `.ralph/review/<plan_name>/reports/<timestamp>.md`
+        is allowed; then `report_path` must point at the
+        file you actually wrote.
+      - **No readable `report_path` ⇒ no `LOOP_COMPLETE`.**
+      - OPAC order is mandatory: write file → verify readable
+        → `--policy-check` → real emit → Confirm pin.
 
-      When you are activated by `plan.blocked`, you
-      MUST use **strict exact match** on the `reason`
-      field (after `trim()` + `to_lowercase()`) to
-      classify the failure. Whitelisted reasons:
+      ### Report contract (minimum sections)
+      Write the report (Chinese manager body OK; paths/SHAs English) with at least:
+      1. **结论** — pass / pass_with_residuals / failed / blocked
+      2. **本轮做了什么** — short stage summary from trigger evidence
+      3. **产物路径清单** — every important `.ralph/review/<plan>/…` path you can observe, plus this REPORT
+      4. **接受的风险 / 残留** — if any; else write 无
+      5. **下一步建议** — merge / fix residuals / re-run / stop
+
+      ### `plan.blocked` reason whitelist (strict)
+
+      When activated by `plan.blocked`, classify `reason`
+      with strict exact match after `trim()` +
+      `to_lowercase()`. Whitelisted reasons:
 
       - `loop_stalled_max_iterations`
       - `steward_escalation`
@@ -1937,34 +1952,40 @@ hats:
       - `cancel`
       - `alignment_failed`
 
-      Any other `reason` is a hard failure: emit
-      `LOOP_COMPLETE` with `verdict=failed`,
-      `reason="unrecognized_blocked_reason"`, and
-      surface the original `reason` in the report.
+      Any other `reason` → report + `LOOP_COMPLETE` with
+      `verdict=failed`, `reason="unrecognized_blocked_reason"`,
+      and the original reason inside the report body.
 
       ### Report-write failure handling
 
-      If writing the report file fails, do **NOT**
-      retry. Emit exactly one `LOOP_COMPLETE` with
-      `report_written=false`, the target path, the
-      write error, and a minimal failure summary in
-      the payload. This guarantees the loop terminates
-      with `verdict=failed` instead of silently waiting
-      for a consumer that never arrives.
+      If the primary write fails, do **NOT** spin forever.
+      Write a minimal failure report to the same canonical
+      path (or a stamped path under `reports/`) that still
+      records the write error, then emit `LOOP_COMPLETE`
+      with `verdict=failed` and that readable `report_path`.
+      Loop must terminate **and** the operator must still
+      see a file path.
 
       ### OPAC 四阶段 (本 hat 视角)
 
-      - **Observe**: `ralph tools task list -s done`
-        + 读 `plan.complete` / `plan.blocked` payload。
-      - **Precheck**: `ralph emit LOOP_COMPLETE
-        --policy-check`。
-      - **Apply**: 写报告，emit `LOOP_COMPLETE`。
-      - **Confirm**: `ralph events --events-source main`。
+      - **Observe**: trigger payload +
+        `ralph tools task list -s done` +
+        `ralph inspect loop --format json` for plan identity.
+        Do not rebuild business facts from runtime-private ledgers.
+      - **Apply (artifact first)**: write REPORT.md; `wc`/`head` to prove readable.
+      - **Precheck**: `ralph emit LOOP_COMPLETE --policy-check`
+        with `reason`, `report_path`, `verdict`.
+      - **Apply (emit)**: real `LOOP_COMPLETE` (same payload).
+      - **Confirm**: print exactly
+        `DELIVERABLE_PATH: <report_path>`
+        in this activation's visible reply (operator TUI search).
+        Schema only checks the field is non-empty — you must `test -f`
+        the file yourself before emit. Optional deeper reference:
+        `ralph tools skill load ralph-tools-emit`「操作者交付文件路径」.
 
       ### Constraints
 
-      - 一条业务事件即停。
-      - 报告写失败时**绝对不**重试——把失败摘要塞进
-        LOOP_COMPLETE payload，保证 loop 一定终止。
+      - 一条业务事件即停（only `LOOP_COMPLETE`）。
       - 不要消费 `task.resume`——那是 runtime 内部
         recovery 通道，不属于本 hat 的输入。
+      - Do NOT modify tracked source code.

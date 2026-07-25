@@ -292,6 +292,6 @@ schemas:
         source: Trigger postmerge.reviewed.verdict / 15-final-review.md.
         fill_rule: Must match the closer verdict; do not invent a greener verdict in the report.
       report_path:
-        meaning: Repo-relative path to the operator-facing convergence report (must exist before emit).
+        meaning: Repo-relative path to the operator-facing convergence report.
         source: File actually written this activation under .ralph/post-merge/ (typically REPORT.md).
-        fill_rule: Real readable path only. NEVER emit postmerge.complete without this file on disk; Confirm must surface this path to the operator.
+        fill_rule: Real readable path only. Agent must verify the file exists before emit (schema checks the field is present, not the filesystem). Confirm must print DELIVERABLE_PATH with the same path.

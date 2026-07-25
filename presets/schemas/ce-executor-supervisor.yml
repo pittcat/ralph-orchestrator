@@ -190,7 +190,28 @@ schemas:
   LOOP_COMPLETE:
     required_fields:
       - reason
+      - report_path
+      - verdict
     payload: json_object
+    allowed_values:
+      verdict:
+        - pass
+        - pass_with_residuals
+        - failed
+        - blocked
+    field_docs:
+      reason:
+        meaning: Short operator-facing summary of why the loop ended.
+        source: Reporter derives from plan.complete / plan.blocked / work.failed plus the written report.
+        fill_rule: One or two sentences; must match the report conclusion.
+      report_path:
+        meaning: Repo-relative path to the operator-facing report written this activation. Agent must verify the file is readable before emit.
+        source: File actually written under .ralph/review/<plan>/REPORT.md (or a stamped copy under .ralph/review/<plan>/reports/).
+        fill_rule: Real readable path only. Agent must verify the file exists before emit (schema checks the field is present, not the filesystem). Confirm must print DELIVERABLE_PATH with the same path.
+      verdict:
+        meaning: Terminal outcome token for the operator and tooling.
+        source: Reporter aggregates from the trigger (plan.complete success vs blocked/failed paths).
+        fill_rule: One of pass / pass_with_residuals / failed / blocked; must match the report conclusion.
 
   # NOTE (2026-07-23-005 U2/U3): the execution-plan artifact
   # (`.ralph/review/<plan-key>/execution-plan.yml`) is a FILE artifact

@@ -201,23 +201,60 @@ JSON 写法：`ralph emit work.done --policy-check -j '{"plan_path": "...", "tas
 
 > **OPAC Precheck/Apply（agent context 默认 enforce）**: agent 上下文下，`ralph emit` 在无 `--policy-check` 且无 `--unsafe-no-policy-check` 写盘会被拒。`allow_unsafe_cli_emit: true` 可作为 preset opt-out（打印 deprecation warning）。详见 always-injected `ralph-tools-opac` skill Apply 段。
 
-**校验：**
+### Confirm（普通 emit）
+
+优先用公开反馈，不要读事件文件：
+
 ```bash
-# 1. 确定实际写入的事件文件（与 ralph emit 源码一致）
-events_file="${RALPH_EVENTS_FILE:-}"
-if [ -z "$events_file" ] && [ -f .ralph/current-candidate-events ]; then
-  events_file="$(cat .ralph/current-candidate-events)"
-elif [ -z "$events_file" ] && [ -f .ralph/current-events ]; then
-  events_file="$(cat .ralph/current-events)"
-fi
-events_file="${events_file:-.ralph/events.jsonl}"
-
-# 2. 确认事件已追加到文件末尾
-tail -n 1 "$events_file" | jq -e ".topic == \"YOUR_TOPIC\""
-
-# 3. 确认 payload 格式正确（若使用了 -j）
-tail -n 1 "$events_file" | jq -e '.payload | type == "object"'
+ralph emit <TOPIC> --policy-check -j '...' --output json   # 预检：看 ok / errors
+ralph emit <TOPIC> -j '...' --output json                  # 落盘：看 ok=true 且 recorded=true
 ```
+
+`ok` / `recorded` / `errors[]` 字段含义见下文「`ralph emit` 响应：`EmitResult`」。  
+**不要**用 `tail .ralph/events.jsonl` 当作 Confirm（那是内部 ledger，不是公开接口）。
+
+### 操作者交付文件路径（仅当本轮要交文件给操作者时）
+
+**何时适用（必须同时满足）：**
+1. 当前 hat instructions 要求你**写出**一份操作者可读文件（报告、fix-plan、blocked 说明等）；并且
+2. 本 activation 会 emit 一个 **schema 要求带路径字段** 的 topic（先用 `ralph emit --schema <TOPIC>` 看 `required_fields` 里是否有 `report_path` / `artifact_path` 等路径字段）。
+
+**何时不适用：**
+- 只 emit 中间业务事件，且该 topic 的 schema **不要求**路径字段；
+- 本轮不写操作者文件，只转发上游路径；
+- 本 activation 只发收尾的纯完成信号（例如某些 preset 第二次 activation 只发 `LOOP_COMPLETE` 且 schema 只有 `reason`）——此时若上一 activation 已打印过 `DELIVERABLE_PATH`，本轮可再打印同一行提醒操作者，但**不要**伪造新路径，也**不要**往无路径字段的 schema 里塞 `report_path`。
+
+**怎么做：**
+1. **先落盘**：按 hat instructions 写出文件。
+2. **确认文件可读**：
+   ```bash
+   test -f "<repo-relative-path>" && wc -l "<repo-relative-path>"
+   ```
+3. **查字段名**：对**即将 emit、且 schema 要求路径字段**的那个 topic 跑  
+   `ralph emit --schema <TOPIC>`，只用返回的 `required_fields` 里的路径字段名（常见 `report_path` / `artifact_path`）。**不要两个都猜，不要自造字段名，不要把路径字段塞进 schema 未要求它的 topic。**
+4. **Precheck → Apply**：先 `--policy-check`，通过后再真实 emit；路径字段值必须等于第 1 步真实文件路径（仓库相对路径，通常以 `.ralph/` 开头）。
+5. **Confirm（两件事都要做，缺一不可）**：
+   - 普通 emit Confirm：看 `--output json` 的 `ok` / `recorded`（见上一节）；
+   - **额外**在本轮最终可见回复里单独打印一行（方便操作者在 TUI 搜索）：
+     ```text
+     DELIVERABLE_PATH: .ralph/.../实际文件名.md
+     ```
+     这一行必须与 payload 路径字段完全一致。
+
+**重要边界（避免误解）：**
+- Schema / `--policy-check` 通常只检查「路径字段是否存在且非空」，**不会**替你检查磁盘上文件是否可读。文件可读性必须你自己用第 2 步确认。
+- 若 hat instructions 允许「先 `report.done`（带 `report_path`）再 `LOOP_COMPLETE`」：路径字段与 `DELIVERABLE_PATH` 落在 **带路径字段的那次 emit / 那次 activation**；不要把 `report_path` 错绑到只有 `reason` 的 `LOOP_COMPLETE` 上。
+
+**停止条件：**
+- 文件写不出 / 不可读 → **不要** emit 那个要求路径字段的 topic；按 hat instructions 走失败/阻塞路径（通常仍须先落一份可读的失败说明，再带真实路径 emit）。
+- schema 要求路径字段但你填了不存在的路径 → 对操作者是假交付；先写文件再 emit。
+- 只在心里记住路径、或只写在报告正文里却不放进 payload / 不打印 `DELIVERABLE_PATH` → 视为未完成 Confirm。
+
+**禁止：**
+- 伪造路径；
+- 用读事件文件 / 内部 ledger 来「证明」交付文件存在；
+- 把本节套用到每一个中间 emit 上；
+- 把「打印 `DELIVERABLE_PATH`」理解成可以跳过 EmitResult Confirm。
 
 ---
 

@@ -40,6 +40,7 @@ metadata:
 | Loop 崩溃/ledger 损坏需恢复 | `ralph loops clean --ledger` + `ralph diagnose --session latest` | `docs/guide/runtime-diagnosis.md`（JSON 含 `dup_storm_topics` + findings `hint`） |
 | `ralph emit` 报 `triggered_not_in_topology` | `--triggered` 不在 preset `hats[]`；改 hat id 或省略 | `ralph tools skill load ralph-tools-emit` |
 | prompt 顶部出现 `## TRIGGER CONTEXT` 区块 | 先读完它，再按 hat instructions 执行；不要从完整 payload / ledger 重新推断 | 本 skill「核心规则」第 8 条 |
+| 本轮要写操作者可读文件，且即将 emit 的 topic schema 要求路径字段 | 先落盘并 `test -f` → `--schema` 确认字段名 → policy-check → emit → 回复打印 `DELIVERABLE_PATH:`；细则按需 load emit skill | `ralph tools skill load ralph-tools-emit`「操作者交付文件路径」（非每轮自动注入） |
 
 **新增 flag 一句话说明**：
 - `ralph run --no-default-profiles`：跳过 `ralph.yml` 中的 `profiles.default`，仅保留 CLI `--profile`。

@@ -128,6 +128,7 @@ Confirm 验证的是**预期效果**，不是机械重复读取：
 2. **按专项规则检查证据**：只有专项 skill 规定的公开成功反馈或只读查询结果可以完成 Confirm；仅有命令退出成功不算完成。
 3. **区分本地操作成功与流程推进**：操作成功只证明本次修改已生效，不代表下游 hat 已处理或工作流已进入下一阶段。只有当前任务要求确认流程推进时，才查询下游可见状态。
 4. **失败即停止**：未找到专项 skill、没有取得有效证据、查询结果不一致或出现 warning 时，不要继续下一次状态变更；先按专项 skill 的恢复步骤处理。
+5. **操作者交付文件（多数 hat 跳过）**：仅当 hat instructions 要你写出操作者可读文件，且 `ralph emit --schema <TOPIC>` 显示该 topic 的 `required_fields` 含路径字段时——先 `test -f`，再 emit，再在可见回复打印 `DELIVERABLE_PATH: <同路径>`。中间业务 emit 不要打印。细节（含双事件收尾）在按需 skill：`ralph tools skill load ralph-tools-emit` →「操作者交付文件路径」。
 
 | 当前操作 | Confirm 规则来源 | Agent 动作 |
 |---------|------------------|------------|
@@ -162,3 +163,6 @@ Confirm 验证的是**预期效果**，不是机械重复读取：
 4. 命令退出成功后立即走人 — 应先确认预期状态，并处理公开反馈中的 warning 或下一步动作
 5. 跨 activation 共享一个 `task_id` — close 是 terminal，第二次 emit 一定被拒
 6. 在 hat instructions 里写"读 `.ralph/supervisor.db`"或"运行 `ralph diagnose --supervisor`" — supervisor 的内部 ledger 与诊断输出都不在 hat 可观测范围；Observe 阶段用 `ralph inspect loop --format json` 的 `supervisor` 块即可
+7. 本轮要交操作者文件却不打印 `DELIVERABLE_PATH`，或打印了不存在的路径 — 操作者在 TUI 找不到交付物；按需 load `ralph-tools-emit`「操作者交付文件路径」
+8. schema 不要求路径字段的中间业务 emit 也打印 `DELIVERABLE_PATH` — 噪音；只在「写操作者文件 + schema 要求路径字段」时打印
+9. 用 `tail` 读事件文件当作 emit Confirm — 应用 `--output json` 的 EmitResult（`ok` / `recorded`）

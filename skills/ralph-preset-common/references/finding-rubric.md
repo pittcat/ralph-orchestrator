@@ -223,6 +223,7 @@ Reviewer 在做 CE builtin preset review 时按本表入主表（不进 `ralph p
 | mandatory review artifact 缺失 / 不可读但 preset 没有任何阻塞事件路径 | P0 | topology | Q4 | reporter 之外的下游禁止消费阻塞事件 |
 | reporter 用 `ralph events --events-source main` 重建跨 hat 状态（业务字段而不是诊断字段） | P0 | visibility | Q2 | 必须只读 trigger payload 与 `report_input_file` bundle |
 | reporter 的 trigger topic schema 没有 `report_input_file` required field 或 field_docs 三段不完整 | P0（缺字段）/ P1（field_docs 缺段） | payload-content | Q4 / Q5 | CE builtin 结构化契约测试在 `crates/ralph-cli/src/presets.rs` 兜底 |
+| 「写操作者文件 + emit 完成 topic」的 hat，completion schema 缺路径字段 required，或 instructions 未要求 Confirm 打印 `DELIVERABLE_PATH` | P0 | visibility | Q4 / Q5 | 操作者必须能在 TUI 看到可读交付路径；触发条件以 instructions 为准，不以 hat 名为准 |
 | preset 把 `report.done` + `completion_promise` 双事件配对声明，但触发 hat 身份不是 preset 的 sole 收尾 hat（多个 hat 都 publish 这对） | P0 | topology | Q4 | 只允许唯一收尾 hat 享受窄例外 |
 | 同 activation 内 emit 第三个业务事件（即使前两个合法配对） | P0 | feasibility | Q4 | 窄例外只覆盖两个事件；第三仍按单事件预算被丢弃 |
 | 本次新增或修改的 handoff / identity / artifact reference / decision 字段缺 `field_docs` 三段 | P0（缺 `source`）/ P1（缺 `meaning` 或 `fill_rule`） | policy-feedback | Q4 | 结构化契约测试只覆盖本次新增合同，不借机强制迁移无关历史字段 |

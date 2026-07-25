@@ -17,7 +17,8 @@
 # Artifacts (preset-owned paths under .ralph/merge/):
 #   .ralph/merge/stabilize-log.md
 #   .ralph/merge/stabilize-state.json
-#   .ralph/merge/reports/<timestamp>.md
+#   .ralph/merge/REPORT.md  (operator-facing; required before complete)
+#   .ralph/merge/reports/<timestamp>.md  (optional stamped copy)
 
 topic_format_whitelist:
   - merge.batch.complete
@@ -392,20 +393,32 @@ hats:
 
       Write the final report and signal completion.
 
-      OPAC reference: follow `ralph-tools-opac` (Observe → Precheck → Apply → Confirm) and `ralph-tools-emit` §5 precheck; do not reproduce command syntax in this hat.
+      OPAC reference: follow `ralph-tools-opac` (Observe → Precheck → Apply → Confirm).
+      Before each real emit: `--policy-check` first; Confirm with `--output json`
+      (`ok`/`recorded`), not by reading event files. Do not reproduce command
+      syntax tables in this hat.
 
-      ### Report path
+      ### HARD RULE — deliverable path first
+      Canonical path: `.ralph/merge/REPORT.md`
+      Optional stamped copy: `.ralph/merge/reports/<YYYY-MM-DDTHH-MM-SS>.md`
+      (then `report_path` must point at the file you actually wrote).
+      Create parent dirs if missing.
+      **No readable `report_path` ⇒ no `merge.batch.complete`.**
 
-      ```
-      .ralph/merge/reports/<YYYY-MM-DDTHH-MM-SS>.md
-      ```
-
-      Create `.ralph/merge/reports/` if missing.
-
-      ### Report contents
+      ### Report contents (minimum)
 
       ```markdown
       # Merge Batch Report
+
+      ## 结论
+      PASS | PASS WITH ACCEPTED RISKS | FAIL
+
+      ## 本轮做了什么
+      (review → integrate → stabilize stages)
+
+      ## 产物路径清单
+      - this report
+      - any stabilize logs / related `.ralph/merge/**` paths
 
       ## Target and branches
       ## Design understanding (per branch)
@@ -414,7 +427,8 @@ hats:
       ## Merge results (SHAs, order)
       ## Stabilization (attempts, classifications, fixes)
       ## Verification (commands run, outcome)
-      ## Residual concerns
+      ## 接受的风险 / Residual concerns
+      ## 下一步建议
       ## Repository state (remaining worktrees/branches)
       ```
 
@@ -440,12 +454,21 @@ hats:
       - Do NOT remove worktrees or delete branches
       - Document exact state for human follow-up
       - Include stabilize-log summary, `reason`, and `next_hint`
+      - Still write a readable report file (FAIL conclusion) before emit
+
+      ### OPAC Confirm order (mandatory)
+      1. Write the report file; verify readable (`test -f` + `wc`/`head`).
+      2. `ralph emit merge.batch.complete --policy-check` with `success` + `report_path`.
+      3. Real emit `merge.batch.complete`.
+      4. Confirm emit via `--output json` (`ok`/`recorded`), then print
+         `DELIVERABLE_PATH: <report_path>` in this activation's visible reply.
+         Schema does not check the filesystem — you must.
 
       ### Publish
 
       Publish **`merge.batch.complete`** (sole completion token) with payload:
       - `success: true|false` (true ONLY when `merge.stabilized.passed` is true)
-      - `report_path`
+      - `report_path` (required; readable file)
       - `merged_branches`
       - `failed_stage` / `reason` (if any)
 

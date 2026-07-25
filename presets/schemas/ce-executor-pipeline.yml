@@ -1120,9 +1120,9 @@ schemas:
         source: "reporter copies from the last event in the chain"
         fill_rule: "literal copy"
       report_path:
-        meaning: "absolute path to the final aggregated report file the reporter wrote"
-        source: "reporter writes it via the Write tool"
-        fill_rule: "absolute path; do NOT make up a path — write the file first"
+        meaning: "repo-relative path to the final aggregated report under `.ralph/review/<plan>/report.md`; agent must verify readable before emit (schema checks field presence, not filesystem)"
+        source: "reporter writes the file this activation, then copies the real path"
+        fill_rule: "repo-relative path only after the file is readable; do NOT invent a path; Confirm must print DELIVERABLE_PATH with the same value"
       verdict:
         meaning: "single-field terminal verdict driving LOOP_COMPLETE"
         source: "reporter aggregates from the chain"

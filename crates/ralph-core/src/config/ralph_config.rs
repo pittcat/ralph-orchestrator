@@ -262,9 +262,7 @@ impl RalphConfig {
             for (req_idx, topic) in gate.require.iter().enumerate() {
                 if topic.trim().is_empty() {
                     return Err(ConfigError::PathRequiredValidation {
-                        field: format!(
-                            "event_loop.path_required_events[{idx}].require[{req_idx}]"
-                        ),
+                        field: format!("event_loop.path_required_events[{idx}].require[{req_idx}]"),
                         message: "require topic cannot be empty".to_string(),
                     });
                 }

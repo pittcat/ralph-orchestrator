@@ -83,4 +83,14 @@ schemas:
   merge.batch.complete:
     required_fields:
       - success
+      - report_path
     payload: json_object
+    field_docs:
+      success:
+        meaning: Whether the merge batch completed successfully for the operator.
+        source: Reporter copies from merge.stabilized.passed (true only when stabilization passed).
+        fill_rule: true only when merge.stabilized.passed is true; otherwise false.
+      report_path:
+        meaning: Repo-relative path to the operator-facing merge report. Agent must verify the file is readable before emit.
+        source: File actually written this activation under .ralph/merge/ (typically REPORT.md).
+        fill_rule: Real readable path only. Agent must verify the file exists before emit (schema checks the field is present, not the filesystem). Confirm must print DELIVERABLE_PATH with the same path.

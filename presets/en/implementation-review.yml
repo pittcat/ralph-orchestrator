@@ -1796,12 +1796,21 @@ hats:
       terminal fields; the schema doesn't define them and the runtime
       will reject.
 
+      **HARD RULE — deliverable path visible:** `artifact_path` must point
+      at a readable file (`test -f` yourself — schema only checks the field).
+      After a successful emit, Confirm must print exactly one line in this
+      activation's visible reply:
+      `DELIVERABLE_PATH: <artifact_path>`
+      so the operator can open the fix-plan / blocked artifact from TUI.
+      No readable path ⇒ no complete.
+
       ### Step 4 — Stop
 
       You are done. The loop is terminal.
 
       ### OPAC reference
 
-      Follow `ralph-tools-opac` for Observe/Precheck/Apply/Confirm discipline
-      and `ralph-tools-emit` §5 for precheck rules before every emit.
+      Follow `ralph-tools-opac` for Observe/Precheck/Apply/Confirm.
+      Before every emit: `--policy-check` then real emit; Confirm with
+      `--output json` (`ok`/`recorded`), not by reading event files.
 
