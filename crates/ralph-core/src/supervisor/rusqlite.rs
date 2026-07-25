@@ -747,15 +747,27 @@ impl SupervisorStore for RusqliteSupervisorStore {
         slot_index: u32,
     ) -> SupervisorStoreResult<Option<String>> {
         self.with_conn(|conn| {
-            let reason: Option<String> = conn
+            // Read the column as `Option<String>` so a SQL NULL
+            // failure_reason projects to the `Ok(None)` column value
+            // rather than raising `InvalidColumnType`. `.optional()?`
+            // then lifts "no such row" into the outer `None`, which we
+            // map to `UnknownSlot` — symmetric with the in-memory store
+            // (memory.rs:580-588) that errors on an absent slot.
+            let row: Option<Option<String>> = conn
                 .query_row(
                     "SELECT failure_reason FROM wave_slots
                      WHERE wave_id = ?1 AND slot_index = ?2",
                     rusqlite::params![wave_id, i64::from(slot_index)],
-                    |row| row.get(0),
+                    |row| row.get::<_, Option<String>>(0),
                 )
                 .optional()?;
-            Ok(reason)
+            match row {
+                None => Err(SupervisorStoreError::UnknownSlot {
+                    wave_id: wave_id.to_string(),
+                    slot_index,
+                }),
+                Some(reason) => Ok(reason),
+            }
         })
     }
 
@@ -1564,6 +1576,56 @@ mod tests {
         );
         assert_eq!(snap.failed_count, 1);
         assert_eq!(snap.in_flight_count, 1);
+    }
+
+    /// U2 (rusqlite variant): a bound slot with no recorded
+    /// failure has a SQL NULL `failure_reason`, which MUST read
+    /// back as `Ok(None)` — symmetric with the in-memory store.
+    /// Pre-fix the closure inferred `Result<String>`, so NULL
+    /// raised `InvalidColumnType`.
+    #[test]
+    fn u2_slot_failure_reason_null_returns_none() {
+        let store = store();
+        let wave = store.register_wave("u2-null", WaveKind::Exec, 1).unwrap();
+        store.bind_worktree(&wave, 0, bind(0)).unwrap();
+        // No record_slot_failure call → column stays NULL.
+        assert_eq!(store.slot_failure_reason(&wave, 0).unwrap(), None);
+    }
+
+    /// U2 (rusqlite variant): a recorded failure reason reads
+    /// back as `Ok(Some(reason))`.
+    #[test]
+    fn u2_slot_failure_reason_value_returns_some() {
+        use crate::supervisor::worker_outcome::REASON_WORKER_TIMEOUT;
+        let store = store();
+        let wave = store.register_wave("u2-val", WaveKind::Exec, 1).unwrap();
+        store.bind_worktree(&wave, 0, bind(0)).unwrap();
+        store.record_slot_failure(&wave, 0, REASON_WORKER_TIMEOUT).unwrap();
+        assert_eq!(
+            store.slot_failure_reason(&wave, 0).unwrap(),
+            Some(REASON_WORKER_TIMEOUT.to_string())
+        );
+    }
+
+    /// U2 (rusqlite variant): querying a slot that was never
+    /// bound MUST return `UnknownSlot`, symmetric with the
+    /// in-memory store (which has no row to project). Pre-fix the
+    /// missing row mapped to `Ok(None)` via `.optional()`.
+    #[test]
+    fn u2_slot_failure_reason_missing_slot_returns_unknown_slot() {
+        let store = store();
+        let wave = store.register_wave("u2-missing", WaveKind::Exec, 1).unwrap();
+        store.bind_worktree(&wave, 0, bind(0)).unwrap();
+        // slot_index 7 was never registered for this wave.
+        let err = store.slot_failure_reason(&wave, 7).unwrap_err();
+        assert!(
+            matches!(
+                &err,
+                SupervisorStoreError::UnknownSlot { wave_id, slot_index }
+                    if wave_id == &wave && *slot_index == 7
+            ),
+            "expected UnknownSlot, got {err:?}"
+        );
     }
 
     /// R-A2: backpressure returns None when cap is hit.

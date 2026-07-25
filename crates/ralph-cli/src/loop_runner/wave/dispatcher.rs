@@ -2227,7 +2227,18 @@ pub(crate) fn run_supervisor_fan_in(
                             Ok(Some(r)) => {
                                 reasons.insert(*idx, r);
                             }
-                            _ => {}
+                            Ok(None) => {
+                                // no recorded reason; diagnostics JSON keeps reason=null
+                            }
+                            Err(err) => {
+                                warn!(
+                                    wave_id = %store_wave_id,
+                                    slot_index = *idx,
+                                    error = %err,
+                                    "U5: slot_failure_reason lookup failed; \
+                                     diagnostics JSON keeps reason=null for this slot"
+                                );
+                            }
                         }
                     }
                 }
