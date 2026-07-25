@@ -604,6 +604,15 @@ impl SupervisorStore for InMemorySupervisorStore {
         for slot in wave.slots.values_mut() {
             if slot.status == SlotStatus::Pending {
                 slot.status = SlotStatus::Cancelled;
+                // 2026-07-25-004 plan U5: freeze `failure_reason` to
+                // `slot_never_started` for the Pending slots we cancel
+                // here (symmetric with the rusqlite store), so the
+                // InjectedFailed reason-collection sees a non-null
+                // reason. The `if Pending` guard guarantees
+                // already-terminal slots keep their own reason.
+                slot.failure_reason = Some(
+                    crate::supervisor::worker_outcome::REASON_SLOT_NEVER_STARTED.to_string(),
+                );
             }
         }
         Ok(())
@@ -1498,6 +1507,64 @@ mod tests {
             snap.failed_count + snap.completed_count,
             0,
             "no slot should reach a terminal pass/fail just from cancel"
+        );
+    }
+
+    /// 2026-07-25-004 plan U5 (memory variant, symmetric with the
+    /// rusqlite `u5_cancel_freezes_never_started_reason`): when
+    /// `cancel_wave` flips a Pending slot to Cancelled it MUST also
+    /// set `failure_reason` to `slot_never_started`. Already-terminal
+    /// slots (Completed, or Failed with their own reason) MUST NOT be
+    /// overwritten — the `if Pending` guard enforces this.
+    #[test]
+    fn u5_cancel_freezes_never_started_reason() {
+        use crate::supervisor::worker_outcome::{REASON_SLOT_NEVER_STARTED, REASON_WORKER_TIMEOUT};
+        let s = store();
+        let wave = s.register_wave("u5-cancel", WaveKind::Exec, 3).unwrap();
+        for i in 0..3u32 {
+            s.bind_worktree(
+                &wave,
+                i,
+                SlotResource {
+                    slot_index: i,
+                    worktree_path: Some(format!(".ralph/u5/{i}")),
+                    branch: Some(format!("ralph/u5/{i}")),
+                },
+            )
+            .unwrap();
+        }
+        // Slot 0: dispatch + complete → terminal Completed, reason None.
+        s.try_dispatch_next(4).unwrap().unwrap();
+        s.record_slot_result(&wave, 0, "h0", 1).unwrap();
+        // Slot 1: dispatch then fail with worker_timeout → terminal
+        // Failed carrying its own reason (must NOT be overwritten).
+        s.try_dispatch_next(4).unwrap().unwrap();
+        s.record_slot_failure(&wave, 1, REASON_WORKER_TIMEOUT).unwrap();
+        // Slot 2: stays Pending (never dispatched).
+        s.cancel_wave(&wave).unwrap();
+
+        let snap = s.fan_in_status(&wave).unwrap();
+        let status = |idx: u32| {
+            snap.slots
+                .iter()
+                .find(|(i, _)| *i == idx)
+                .map(|(_, s)| *s)
+                .unwrap()
+        };
+        // Slot 2 flipped Pending → Cancelled, reason frozen.
+        assert_eq!(status(2), SlotStatus::Cancelled);
+        assert_eq!(
+            s.slot_failure_reason(&wave, 2).unwrap(),
+            Some(REASON_SLOT_NEVER_STARTED.to_string())
+        );
+        // Slot 0 Completed, untouched, reason None.
+        assert_eq!(status(0), SlotStatus::Completed);
+        assert_eq!(s.slot_failure_reason(&wave, 0).unwrap(), None);
+        // Slot 1 already Failed with worker_timeout → NOT overwritten.
+        assert_eq!(status(1), SlotStatus::Failed);
+        assert_eq!(
+            s.slot_failure_reason(&wave, 1).unwrap(),
+            Some(REASON_WORKER_TIMEOUT.to_string())
         );
     }
 

@@ -4142,9 +4142,6 @@ fn u7_review_default_is_shared_readonly() {
 /// is idempotent (same-reason replay → Ok(())).
 #[test]
 fn g3_record_never_started_marks_pending_slots_in_store() {
-    use ralph_core::supervisor::worker_outcome::REASON_SLOT_NEVER_STARTED;
-    use std::sync::Arc;
-
     let bridge = CoordinatorSupervisorBridge::with_in_memory_store();
     let store = bridge.store();
 
@@ -4199,4 +4196,57 @@ fn g3_record_never_started_marks_pending_slots_in_store() {
         snap_after.failed_count, failed_before,
         "second record_never_started_failures call must not double-count"
     );
+}
+
+/// 2026-07-25-004 plan U5: cancel-closure diagnostic pin. `cancel_wave`
+/// is the only thing that flips never-started Pending slots to Cancelled
+/// on the cancel path. After U5 those Cancelled slots carry
+/// `failure_reason = slot_never_started`, so the InjectedFailed
+/// reason-collection (dispatcher.rs:2221-2233) — which inserts a reason
+/// whenever `slot_failure_reason` returns `Ok(Some(_))` for a
+/// Failed|Cancelled slot — now produces a NON-null reason for them
+/// instead of the pre-fix `status=cancelled, reason=null`.
+#[test]
+fn g3_cancel_closure_cancelled_slot_has_never_started_reason() {
+    use ralph_core::supervisor::worker_outcome::REASON_SLOT_NEVER_STARTED;
+
+    let bridge = CoordinatorSupervisorBridge::with_in_memory_store();
+    let store = bridge.store();
+
+    let wave_id = bridge
+        .register_wave_if_absent(WaveKind::Exec, "g3-cancel-wave", 3)
+        .unwrap();
+
+    // Slot 0: bind, dispatch, complete → Completed, reason None.
+    store
+        .bind_worktree(
+            &wave_id,
+            0,
+            SlotResource {
+                slot_index: 0,
+                worktree_path: Some(".ralph/g3c".to_string()),
+                branch: Some("ralph/g3c".to_string()),
+            },
+        )
+        .unwrap();
+    let _ = store.try_dispatch_next(4).unwrap().unwrap();
+    store.record_slot_result(&wave_id, 0, "hash-g3c", 1).unwrap();
+
+    // Slots 1 and 2: still Pending — never dispatched. Cancel the wave.
+    bridge.cancel_wave(&wave_id).unwrap();
+
+    // Cancelled slots now expose a non-null `slot_never_started` reason
+    // through the exact bridge surface the dispatcher reads.
+    for slot_index in [1u32, 2] {
+        let reason = bridge.slot_failure_reason(&wave_id, slot_index).unwrap();
+        assert!(reason.is_some(), "cancelled slot {slot_index} reason must be Some");
+        assert_eq!(
+            reason.as_deref(),
+            Some(REASON_SLOT_NEVER_STARTED),
+            "cancelled slot {slot_index} must surface slot_never_started"
+        );
+    }
+
+    // The completed slot's reason stays None.
+    assert_eq!(bridge.slot_failure_reason(&wave_id, 0).unwrap(), None);
 }

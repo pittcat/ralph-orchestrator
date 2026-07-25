@@ -772,16 +772,24 @@ impl SupervisorStore for RusqliteSupervisorStore {
     }
 
     fn cancel_wave(&self, wave_id: &str) -> SupervisorStoreResult<()> {
+        use crate::supervisor::worker_outcome::REASON_SLOT_NEVER_STARTED;
         self.with_conn(|conn| {
             conn.execute(
                 "UPDATE waves SET cancel_requested = 1, updated_at = strftime('%s','now')
                  WHERE wave_id = ?1",
                 [&wave_id],
             )?;
+            // 2026-07-25-004 plan U5: also freeze `failure_reason` to
+            // `slot_never_started` for the Pending slots we cancel here,
+            // so the InjectedFailed reason-collection sees a non-null
+            // reason for cancelled never-started slots. The
+            // `status = 'pending'` guard is essential: already-terminal
+            // slots (Completed/Failed with their own reason, or
+            // Dispatched/Running) are NOT overwritten.
             conn.execute(
-                "UPDATE wave_slots SET status = 'cancelled'
+                "UPDATE wave_slots SET status = 'cancelled', failure_reason = ?2
                  WHERE wave_id = ?1 AND status = 'pending'",
-                [&wave_id],
+                rusqlite::params![wave_id, REASON_SLOT_NEVER_STARTED],
             )?;
             Ok(())
         })
@@ -1719,6 +1727,59 @@ mod tests {
         assert!(snap.cancel_requested);
         assert_eq!(snap.pending_count, 2);
         assert_eq!(snap.failed_count, 0);
+    }
+
+    /// 2026-07-25-004 plan U5: when `cancel_wave` flips a Pending
+    /// slot to Cancelled it MUST also freeze `failure_reason` to
+    /// `slot_never_started`, so the InjectedFailed reason-collection
+    /// (which inserts a reason whenever `slot_failure_reason` returns
+    /// `Ok(Some(_))` for a Failed|Cancelled slot) produces a non-null
+    /// reason. Already-terminal slots (Completed, or Failed with their
+    /// own reason) MUST NOT be overwritten — the `status = 'pending'`
+    /// guard in the UPDATE enforces this.
+    #[test]
+    fn u5_cancel_freezes_never_started_reason() {
+        use crate::supervisor::worker_outcome::{REASON_SLOT_NEVER_STARTED, REASON_WORKER_TIMEOUT};
+        let store = store();
+        let wave = store.register_wave("u5-cancel", WaveKind::Exec, 3).unwrap();
+        for i in 0..3 {
+            store.bind_worktree(&wave, i, bind(i)).unwrap();
+        }
+        // Slot 0: dispatch + complete → terminal Completed, reason None.
+        store.try_dispatch_next(4).unwrap().unwrap();
+        store.record_slot_result(&wave, 0, "h0", 1).unwrap();
+        // Slot 1: dispatch then fail with worker_timeout → terminal
+        // Failed carrying its own reason (must NOT be overwritten).
+        store.try_dispatch_next(4).unwrap().unwrap();
+        store
+            .record_slot_failure(&wave, 1, REASON_WORKER_TIMEOUT)
+            .unwrap();
+        // Slot 2: stays Pending (never dispatched).
+        store.cancel_wave(&wave).unwrap();
+
+        let snap = store.fan_in_status(&wave).unwrap();
+        let status = |idx: u32| {
+            snap.slots
+                .iter()
+                .find(|(i, _)| *i == idx)
+                .map(|(_, s)| *s)
+                .unwrap()
+        };
+        // Slot 2 flipped Pending → Cancelled, reason frozen.
+        assert_eq!(status(2), SlotStatus::Cancelled);
+        assert_eq!(
+            store.slot_failure_reason(&wave, 2).unwrap(),
+            Some(REASON_SLOT_NEVER_STARTED.to_string())
+        );
+        // Slot 0 Completed, untouched, reason None.
+        assert_eq!(status(0), SlotStatus::Completed);
+        assert_eq!(store.slot_failure_reason(&wave, 0).unwrap(), None);
+        // Slot 1 already Failed with worker_timeout → NOT overwritten.
+        assert_eq!(status(1), SlotStatus::Failed);
+        assert_eq!(
+            store.slot_failure_reason(&wave, 1).unwrap(),
+            Some(REASON_WORKER_TIMEOUT.to_string())
+        );
     }
 
     /// R-C4: opening a corrupted / unreadable path returns
