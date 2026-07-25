@@ -23,6 +23,7 @@ Use this skill to design and draft Ralph **presets** (builtin or local) with **A
 ## Core Assumptions
 
 - Each hat activation in `execution_mode: isolated` sees **only its own** `instructions` plus runtime injection — not other hats' instructions.
+- **Prompt visibility evidence MUST come from `ralph inspect prompt`**, not from memory: see `references/prompt-visibility.md`. The shared command is the SSOT for `auto_inject` / `on_demand` and is enforced by `skills/tests/test_prompt_visibility_contract.py`.
 - State passes via **emit → state_projection → task/progress → Observe**, not by reading internal ledgers.
 - **Artifact-First Handoff assumption (2026-07-16-003 plan):**
   - **文件是重要信息的事实源**：完整结果、长内容、跨 hat 摘要、关键决策依据、验证证据、高成本重建信息默认必须落盘。
@@ -76,6 +77,11 @@ Use this skill to design and draft Ralph **presets** (builtin or local) with **A
    - **Opt-in same-payload consistency rules**: when a preset needs an inter-field invariant on a single emit payload (e.g. two fields that must agree), declare rules under `event_loop.event_policy.payload_consistency.rules` (lint covers `rule.id` / `rule.topic` / `when` field references); see `references/author-checklist.md`「Payload Consistency 审核项」for the audit items.
 
 3. **Drafting phase (single-hat agent brain):**
+   - **Prompt Visibility 必查（每条 hat）**：起草或修改某 hat 的 `instructions:` 之前，**先跑** `ralph -c <preset>.yml inspect prompt --hat <hat_id> --format json`，把返回的 `auto_inject` / `on_demand` / `block_titles` 作为该 hat 真实可见性证据。详细规程与字段约定见 `references/prompt-visibility.md`。
+     - **禁止**把 on-demand skill（如 `ralph-tools-emit` / `ralph-tools-wave` / `ralph-tools-cmdref`）写成「已自动注入」。
+     - **禁止**引用 auto-inject skill 时让 agent 再 `ralph tools skill load <name>`（已注入就不必再 load）。
+     - **禁止**复制 `ralph-tools*.md` 命令表到 `instructions:`——按 `crates/ralph-core/data/*.md` 注入，**只引用章节名**。
+     - 外仓（无 `crates/ralph-core/data/`）时仍可用 `inspect prompt`：内容来自当前 ralph 二进制内嵌；报告与 review 标注须注明来源。
    - For each hat, **pretend other hats do not exist**.
    - Write only that hat's `instructions:`.
    - Fill one AAF 五问表 per hat (template in `references/author-checklist.md`).
