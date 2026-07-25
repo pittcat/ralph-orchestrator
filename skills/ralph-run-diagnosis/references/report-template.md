@@ -18,6 +18,7 @@ preset: builtin:<name> 或 <preset_file>
 run_dir: <repo-relative run_dir>
 status: <一句话健康度>
 diagnostics_mode: FULL | MINIMAL | LOGS_ONLY | DISABLED
+history_search: disabled | preset-only | full   # 来自主 SKILL §0.1 的 AskUserQuestion；默认 disabled
 ---
 
 # <preset> Loop `<loop_id>` 运行链路诊断报告
@@ -25,8 +26,9 @@ diagnostics_mode: FULL | MINIMAL | LOGS_ONLY | DISABLED
 > **生成时间**: ...
 > **诊断对象**: `<run_dir>/.ralph/`（loop_id=..., 启动 → 终止）
 > **对照 preset**: `<preset_file>` + `presets/schemas/<name>.yml`
-> **执行方式**: 4 sub-agent 并行（流程还原 / 历史 / 对账 / 归因）→ 汇总
+> **执行方式**: 4 sub-agent 并行（流程还原 / 历史 / 对账 / 归因）→ 汇总；**`history_search=disabled` 时仅 3 个 sub-agent**（Agent B 跳过）
 > **Diagnostics 模式**: FULL | MINIMAL | LOGS_ONLY | DISABLED
+> **history_search**: `disabled` | `preset-only` | `full`（默认 `disabled`）— 来自主 SKILL §0.1 AskUserQuestion
 > **execution_capabilities**: [single-chain | wave | supervisor | supervisor+wave 的子集]（Phase 0 推断结果; 由 `event_loop.supervisor.enabled` / hat `ralph wave emit` / `.ralph/supervisor.db` 存在 / events 含 `wave_id` 等 capability 信号决定; **`ralph inspect loop` 的 `supervisor` 键**在 enabled **或** 盘上已有可打开 wave 账本时出现，先 `has("supervisor")`；**禁止**按 builtin preset 名称点名; 详见 `SKILL.md`「Phase 0 能力推断」段）
 > **报告仓库**: `ralph-orchestrator` 主仓（非 run_dir）
 > **Tier C 根**: （从 preset+schema 解析）
@@ -85,6 +87,8 @@ diagnostics_mode: FULL | MINIMAL | LOGS_ONLY | DISABLED
 
 ## 3. 历史问题上下文
 
+> **⚠️ 启用条件**：`history_search=disabled`（默认）下，**不启动 Agent B**，由主 Agent 在合成阶段直接写入 §0.1-占位符（字面见 [SKILL.md § SSOT](SKILL.md#01-历史检索开关hard-rule)）；`preset-only` / `full` 才走下文 schema，且 §3 末尾必须含一行 `本次扫描窗口：<preset-only (30d sliding) | full (full-history)>`（Agent B 自填；disabled 模式不写）。
+
 （粘贴 Agent B：关联度表 + 复发对照）
 
 ---
@@ -107,7 +111,9 @@ diagnostics_mode: FULL | MINIMAL | LOGS_ONLY | DISABLED
 | 优先级 | 问题 | 根因分类 | **置信度** | 证据 DEV | 历史关联 | 加深轮次 |
 |--------|------|----------|------------|----------|----------|----------|
 | P0 | ... | mechanism / preset / agent / compound | **82** | DEV-00x | 高 | 1→82 |
-| P1 | ... | preset | **65** | DEV-00y | 低 | 0 |
+| P1 | ... | preset | **65** | DEV-00y | N/A (history disabled) | 0 |
+
+> **历史关联列规则**：`history_search=disabled`（默认）一律 `N/A (history disabled)`；`preset-only` / `full` 才填高/中/低/新。
 
 **compound 行须附**：成分 A(conf%) + 成分 B(conf%) → 整行置信度 = min 或加权公式。
 
@@ -146,3 +152,4 @@ confidence < 60 且已加深 2 轮仍不足；**不驱动修复**。
 - `compound` 须写贡献比例 + 各成分置信度。
 - 低置信度须走 [confidence-rubric.md](confidence-rubric.md) 加深流程并记录轮次。
 - 路径一律 **repo-relative**。
+- frontmatter 必含 `history_search: <disabled | preset-only | full>`（默认 `disabled`，与执行实际一致）。

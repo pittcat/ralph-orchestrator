@@ -1,10 +1,14 @@
 # Sub-Agent Charters（增强版）
 
-各 agent **只负责本 charter**；输出 Markdown 片段供主 Agent 汇入最终报告。
+各 agent **只负责本 charter**；输出 Markdown 片段供主 Agent 汇入最终报告。**全局约束**（适用于所有 sub-agent，源自主 SKILL）与**字面 SSOT** 见 [SKILL.md](../SKILL.md)「§0.1」末段表。
 
 ---
 
 ## Agent A — 流程还原
+
+> **全局约束（适用于所有 sub-agent，源自主 SKILL）**：
+> - Phase 0 完成前**禁止**启动任何 sub-agent（主 SKILL「执行顺序」段）。
+> - `--include-history=disabled`（默认）下，Agent A / C / D **禁止读** `docs/report/`、`docs/solutions/`、`docs/plans/`、`docs/brainstorms/`（即便不出现在产物中也禁止扫描）。仅 Agent B 与 L5 才会触碰上述目录。
 
 **输入**：《产物盘点表》、`current-events` 指向的 events 文件（禁止 `events*.jsonl` 通配）、preset、schema、BDD。
 
@@ -28,22 +32,40 @@
 
 ## Agent B — 历史上下文
 
-**输入**：[history-sources.md](history-sources.md) 所列目录；本次 preset 名、loop 症状关键词。
+> **⚠️ 启动条件**：仅当主流程 `--include-history ≠ disabled`（默认 disabled）时才启动 Agent B；否则**跳过**，报告 §3 写 §0.1-占位符（字面见 [SKILL.md § SSOT](../SKILL.md#01-历史检索开关hard-rule)）。
+
+**输入**：[history-sources.md](history-sources.md) 所列目录；本次 preset 名、loop 症状关键词；`--include-history` 当前值。
 
 **步骤**：
 
-1. 扫描历史诊断报告（`docs/report/*-diagnosis.md`）中与 preset / 症状相近的条目。
-2. 扫描 `docs/solutions/`、`docs/brainstorms/` 中机制/preset 修复记录。
-3. 按 **问题类型** 分类（如 `task.resume` 死信、silent-success、loop_anchor、duplicate_work_done、OPAC 缺 precheck）。
-4. 每条记录：文档路径、出现次数、是否闭环、与本次关联度（高/中/低）。
+1. **窗口收窄（hard rule）**：
+   - `--include-history=preset-only` → 仅扫与本次 `preset` / `loop_id` 关键词相近的近 30 天条目；
+   - `--include-history=full` → 同 1 但窗口扩全库；
+   - **禁止** `disabled` 下再启 Agent B。
+2. 扫描历史诊断报告（`docs/report/*-diagnosis.md`）中与 preset / 症状相近的条目。
+3. 扫描 `docs/solutions/`、`docs/brainstorms/` 中机制/preset 修复记录。
+4. 按 **问题类型** 分类（如 `task.resume` 死信、silent-success、loop_anchor、duplicate_work_done、OPAC 缺 precheck）。
+5. 每条记录：文档路径、出现次数、是否闭环、与本次关联度（高/中/低）。
 
 **输出**：《历史问题知识库》
 
 - 全景表（类型 × 次数 × 本次关联 × 闭环状态）
 - 根因分类对照（若历史报告有）
 - **即使无关联**也输出「本次为新问题模式」
+- **窗口注脚（hard rule）**：报告 §3 末尾必须含 1 行 `本次扫描窗口：preset-only (30d sliding) | full (full-history)`，便于事后审计；**禁止不写或写 "N/A"**。
 
 **禁止**：对本次 run 做归因（留给 D）。
+
+**目录边界（hard rule）**：Agent B 仅可读以下子目录（其它一律禁止）：
+
+- `docs/report/*-diagnosis.md`
+- `docs/solutions/{integration-issues,logic-errors,state-management}/`
+- `docs/plans/` — `status: active` 子集
+- `docs/brainstorms/*.md`
+
+**禁止读**：`.ralph/`、`docs/achieved/plan/` 旧归档子集（preset-only 模式外）、任何不在上列的子目录；如有遗漏目录需读，必须先记录到 §3 注脚，由主 Agent 评估是否升级到 `full`。
+
+**禁用条件**：与主 SKILL [§0.1 HARD RULE](SKILL.md#01-历史检索开关hard-rule)「禁用默认开启的理由」三点一致——跨仓越权、跨 preset 误归因、扫描无上限；本 charter 不再复述，**以主 SKILL §0.1 为唯一事实源**。
 
 ---
 

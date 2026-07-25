@@ -4,10 +4,12 @@ description: >-
   Post-run deep diagnosis for any Ralph preset loop. Inventories .ralph artifacts
   by tier (S/A/B/C), reconciles events/ledger/recovery/logs against preset schema,
   audits OPAC with mode-aware confidence, traces mechanism bugs to source lines,
-  checks docs/report recurrence, writes docs/report/*-diagnosis.md with per-finding
-  root-cause confidence scores and low-confidence re-investigation. Use after
-  ralph run, ralph-e2e, debug.md, loop diagnosis, or orchestration vs mechanism.
-argument-hint: "[run_dir] [preset_file_or_builtin] [optional: plan_file]"
+  optionally correlates against prior docs/report/ docs/plans/ docs/solutions/
+  docs/brainstorms/ (opt-in via --include-history; off by default), writes
+  docs/report/*-diagnosis.md with per-finding root-cause confidence scores and
+  low-confidence re-investigation. Use after ralph run, ralph-e2e, debug.md,
+  loop diagnosis, or orchestration vs mechanism.
+argument-hint: "[run_dir] [preset_file_or_builtin] [optional: plan_file] [--include-history disabled|preset-only|full]"
 ---
 
 # Ralph Run Diagnosis
@@ -18,7 +20,59 @@ argument-hint: "[run_dir] [preset_file_or_builtin] [optional: plan_file]"
 
 **交付物**：**主仓** `docs/report/YYYY-MM-DD-<preset>-<loop_id>-diagnosis.md`。
 
-## 输入
+> **变更日志**：
+> - 2026-07-25：新增 §0.1 历史检索开关 + SSOT 常量 + §0.x 编号扩展约定。若主项目文档（CLAUDE.md / AGENTS.md / operator docs）需说明此开关，在此 `变更日志` 行追加即可（不触发 CLAUDE.md/AGENTS.md 强制同步——本 skill 不属于 `crates/ralph-core/data/`）。
+
+## 0.1 历史检索开关（HARD RULE）
+
+**默认 `--include-history=disabled`**。Phase 0 完成《产物盘点表》之后，**必须**用 `AskUserQuestion` 询问一次（三选一，默认 disabled）：
+
+> 历史扫描会跨入主仓 `docs/report/` / `docs/solutions/` / `docs/plans/` / `docs/brainstorms/`，**不属于**本次 run 的 `.ralph/` 范围。
+>
+> 1. **不检索（disabled，默认）** — 只看本次 run 产物；§3 / §5 历史关联列一律写 `N/A (history disabled)`；**跳过 Agent B 与 L5**。
+> 2. **本次 preset/loop 历史（preset-only）** — 仅扫描与 `preset` / `loop_id` 关键词相近的 30 天滑动窗口条目。
+> 3. **全库（full）** — 同 2 但窗口扩到全库；用于复发排查 / compound 归因。
+
+**参数与询问互斥说明**：human 在调起 skill 时**可显式传** `--include-history`（见 §1 参数表）；若 human 未传且已授权交互（默认假设），agent 在 Phase 0 后**应用 `AskUserQuestion` 询问一次**。两种入口殊途同归，最终 `--include-history` 值以最近一次确认为准（参数 > 询问）。
+
+**禁用默认开启的理由（hard rule）**：
+
+- 历史检索会跨入主仓，**不属于**本次 run 的 `.ralph/`；未确认授权前不得假设这是用户期望。
+- 复用旧报告的根因分类可能产生跨 preset 误归因（已多次发生；参见 `docs/solutions/integration-issues/ce-executor-isolated-preset-dispatch-gap-plan-gate-executor-2026-06-12.md` 的"静默 no-op"教训——同构问题）。
+- 扫描窗口不设上限会随 preset/symptom 关键词数无限扩张，且需读非本次 run 的 `.ralph/` 之外目录；用户在确认是否启用前不应承担这部分耗时。
+
+**启用后的纪律（仅 `--include-history ≠ disabled` 时生效）**：
+
+- Agent B 才允许启动；L5 才允许跑；`confidence-rubric` 加深顺序第 4 项"历史对照"才有效。**disabled 模式下第 4 项标记为不可用**（不扫描、不写结论），详见 [confidence-rubric.md](references/confidence-rubric.md)。
+- Agent A / C / D 在 disabled 模式下**禁止读** `docs/report/`、`docs/solutions/`、`docs/plans/`、`docs/brainstorms/`（即便不出现在产物中也禁止扫描）。详见 [subagent-charters.md](references/subagent-charters.md)。
+- 报告 §3 / §5"历史关联"列才允许填值；否则一律写 §0.1-占位符。
+- 报告 frontmatter 必须记录 `history_search: disabled | preset-only | full`，与 `execution_capabilities` 同级。
+
+提交前 checklist 多一条：**历史检索开关状态已写入 frontmatter**。
+
+### SSOT 常量
+
+为避免字面散落多处漂移，约定以下占位符/标签为单一事实源：
+
+| 名称 | 字面值 | 用途 | 出现位置（不得复制变体） |
+|------|--------|------|----------------------------|
+| **§0.1-占位符** | `` `N/A (history disabled)` `` | §3 / §5 disabled 模式下历史关联字段 | report-template.md §3 / §5 |
+| **样式标签** | `> **⚠️ 启动条件**：…` | 4 份 references 内的"启动条件"提示块 | history-sources.md / report-template.md §3 / subagent-charters.md Agent B / verification-pipeline.md L5 |
+| **§0.1 链接锚** | `[SKILL.md §0.1 历史检索开关](SKILL.md#01-历史检索开关hard-rule)` | 跨 references 互引主文档 | 任意引用主 SKILL 的 §0.1 处 |
+
+未来若需调整字面，**必须先**在本表登记，再改动引用处（references 间交叉互引但以本表为字面 SSOT）。
+
+### §0.x 编号扩展约定（HARD RULE）
+
+`## 0.x` 仅用于"必须先于 `## 1. 输入`"的全局开关段（Phase 0 类配置 gate）。若未来新增 `§0.y`：
+
+- 必须是另一组**全局门控开关**（如 `--strict-mode`、`--dry-run` 等），不是局部指令。
+- 顺序按门控依赖排列：`§0.1` (history) → `§0.2` (xx) → ... → `## 1. 输入`。
+- 不得与 `## 1.` 之后的章节混排；一律放在「输入」之前。
+
+---
+
+## 1. 输入
 
 | 参数 | 必填 | 说明 |
 |------|------|------|
@@ -26,6 +80,7 @@ argument-hint: "[run_dir] [preset_file_or_builtin] [optional: plan_file]"
 | `preset` | 是 | `presets/en/foo.yml` 或 `builtin:foo` → 解析为 `presets/en/foo.yml` |
 | `plan_file` | 否 | plan frontmatter 对账 |
 | `repo` | 否 | 默认当前 `ralph-orchestrator` 主仓（报告路径） |
+| `--include-history` | 否（默认 disabled） | `disabled` / `preset-only` / `full`；见 §0.1 |
 
 ## 强制四问（§1 逐条，禁止合并）
 
@@ -39,8 +94,9 @@ argument-hint: "[run_dir] [preset_file_or_builtin] [optional: plan_file]"
 ```
 Phase 0 盘点（串行，主 Agent）
     → 产出《产物盘点表》+ diagnostics 四档
+    → AskUserQuestion 决定 --include-history（详见 §0.1）
     → 仅 then ↓
-Phase 1  A∥B（流程 + 历史）
+Phase 1  A∥[B 仅在 --include-history ≠ disabled]（流程 + 历史）
 Phase 2  C（对账，吃 A+B+盘点表）
 Phase 3  D（归因 + 置信度评分，吃 C+B+源码；低分加深）
 Phase 4  主 Agent 汇总落盘
@@ -106,6 +162,7 @@ Diagnostics 四档：`FULL` | `MINIMAL` | `LOGS_ONLY` | `DISABLED` — 决定 L2
 - [ ] confidence<60 的候选已加深或落入 §7，未混入 §5/§6
 - [ ] 未引用 ssot-guardrails 禁止项
 - [ ] 报告在主仓 `docs/report/`
+- [ ] **历史检索开关状态已写入 frontmatter**（`history_search: disabled | preset-only | full`）
 
 ## 参考
 

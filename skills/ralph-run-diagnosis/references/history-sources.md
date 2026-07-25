@@ -1,6 +1,14 @@
 # 历史文档扫描范围（Agent B）
 
-按 preset 名、症状关键词、loop_id 检索。优先近 30 天，全库扫描复发模式。
+> **⚠️ 启动条件（hard rule）**：本目录 + Agent B + L5 **仅**在主流程 `--include-history ≠ disabled` 时被调用；`disabled`（默认）下整段跳过。详见主 SKILL [§0.1 历史检索开关（HARD RULE）](../SKILL.md#01-历史检索开关hard-rule) 与 [verification-pipeline.md](verification-pipeline.md) L5。字面/SMOT 见 SKILL §0.1「SSOT 常量」表。
+
+按 preset 名、症状关键词、loop_id 检索。窗口由 `--include-history` 决定：
+
+| 取值 | 窗口 |
+|------|------|
+| `disabled`（默认） | **不扫** |
+| `preset-only` | 与本 preset/loop_id 关键词相近 + 近 30 天 |
+| `full` | 全库（用于复发排查 / compound 归因） |
 
 ## 目录
 

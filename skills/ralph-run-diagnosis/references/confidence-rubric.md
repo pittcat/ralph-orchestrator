@@ -60,7 +60,7 @@ OPAC 单项置信度见 [opac-audit-by-mode.md](opac-audit-by-mode.md)。本文�
 1. **补读账本**：workspace + session `recovery.jsonl`、ledger 对应 iteration、hat-channel 文件
 2. **源码反查**：[source-trace-guide.md](source-trace-guide.md) — `reason_code` → Rust 函数
 3. **preset 行级**：`sed -n` 读 triggers/publishes/instructions 与违规 event 对照
-4. **历史对照**：[history-sources.md](history-sources.md) — 同 preset 旧报告是否同根因
+4. **历史对照**：[history-sources.md](history-sources.md) — 同 preset 旧报告是否同根因；⚠️ **仅在 `--include-history ≠ disabled` 时允许**，disabled 下此步标记为不可用
 5. **BDD**：`crates/ralph-core/tests/scenarios/<preset>*.yml` 预期 events
 6. **Tier C 产物**：findings、fix-log、progress 与 event payload 交叉验证
 

@@ -114,19 +114,23 @@ L0 盘点 → L1 拓扑 → L2 日志三联 → L3 产物五证 → L4 机制十
 
 ---
 
-## L5 — 历史深挖（Gate: 复发与未闭环 plan 已检索）
+## L5 — 历史深挖（Gate: 仅在 --include-history ≠ disabled 时执行）
 
-**必须执行的检索**（见 [history-sources.md](history-sources.md)）：
+> **⚠️ 启动条件**：与 Agent B 同步；`--include-history=disabled`（默认）下**跳过** L5，报告 §3 与 §5"历史关联"列一律写 §0.1-占位符（字面见 [SKILL.md § SSOT](SKILL.md#01-历史检索开关hard-rule)）。详见主 SKILL §0.1。
 
-1. `docs/report/*<preset>*diagnosis*.md` — 全量或近 30 天
-2. `docs/solutions/integration-issues/` + `logic-errors/` — grep 症状关键词
+**执行的检索**（见 [history-sources.md](history-sources.md)）：
+
+1. `docs/report/*<preset>*diagnosis*.md` — 30 天窗口（preset-only）/ 全库（full）
+2. `docs/solutions/integration-issues/` + `logic-errors/` + `state-management/` — grep 症状关键词
 3. `docs/plans/` — `status: active` 且与 symptom 相关的 plan
-4. `docs/brainstorms/2026-06-27-ralph-orchestrator-mechanism-foundation-requirements.md` — Top 根因对照
+4. `docs/brainstorms/*.md`（最近 N 篇根因讨论） — Top 根因对照
 5. 对每条 P0：在 solutions 搜是否已有 fix；plan 是否 merged
+
+> **文件存在性提醒**：第 2-4 项所列目录中真实存在哪些文档，因时间推移会变动；执行前先 `ls` 确认目标文件存在，**禁止假设路径有效**。
 
 **产出**：Agent B《历史知识库》+ §8 历史 run 对照表 + 「第 N 次复发」判定。
 
-**门禁**：P0 未标注历史关联度（高/中/低/新）→ 报告不合格。
+**门禁**：仅在 `--include-history ≠ disabled` 时才检查；P0 未标注历史关联度（高/中/低/新）→ 报告不合格。`disabled` 模式下不检查此项。
 
 ---
 
@@ -151,10 +155,50 @@ Agent D 输出 P0/P1/P2 + **每条置信度** + 修复依赖序；低分须已�
 
 **最终门禁**（全部满足才可提交）：
 
-- [ ] L0–L6 每层有产出（可合并进报告章节）
+- [ ] L0–L6 每层有产出（可合并进报告章节；`--include-history=disabled` 时 L5 标 `N/A`）
 - [ ] §5 每条 P0/P1 有 **置信度**；P0≥70、入表≥60
 - [ ] confidence<60 项仅在 §7 或已加深达标，未混入 §5/§6
 - [ ] P0 每条有 DEV + 源码或 preset 行号
 - [ ] 日志三联至少 5 行对账
-- [ ] 历史表 ≥3 行或明确「无先例」
+- [ ] 历史表 ≥3 行（仅在 `--include-history ≠ disabled`）/ `disabled` 时显式 `N/A (history disabled)`
 - [ ] 报告路径 `docs/report/...-diagnosis.md` 已写入
+- [ ] frontmatter 含 `history_search: <disabled | preset-only | full>`
+- [ ] 已执行下方"frontmatter 对账"机器校验脚本并通过
+
+### frontmatter 对账（机器校验，hard rule）
+
+下列 jq 命令读报告文件 frontmatter，与本次执行参数 `$RALPH_INCLUDE_HISTORY`（或 `--include-history` 入参）比对。**未通过则报告不合格**（即使其它项已 ✓）。
+
+```bash
+# 历史检索开关必须可在执行环境复现（如未设 RALPH_INCLUDE_HISTORY 则按 disabled 兜底）
+: "${RALPH_INCLUDE_HISTORY:=disabled}"
+
+REPORT="${REPORT:-docs/report/$(date +%Y-%m-%d)-<preset>-<loop_id>-diagnosis.md}"
+
+# 提取 frontmatter 中 history_search 的值（解析 ---…--- 包围的 YAML 块）
+HS=$(awk 'BEGIN{f=0} /^---$/{n++; next} n==1 && /^history_search:/{print $2; exit}' "$REPORT")
+HS="${HS:-missing}"
+
+# 1) 与执行参数一致
+if [ "$HS" != "$RALPH_INCLUDE_HISTORY" ]; then
+  echo "FAIL: --include-history=$RALPH_INCLUDE_HISTORY 与 report frontmatter history_search=$HS 不一致" >&2
+  exit 1
+fi
+
+# 2) disabled 模式下 §5 历史关联列必须含 §0.1-占位符
+if [ "$RALPH_INCLUDE_HISTORY" = "disabled" ]; then
+  NA_COUNT=$(grep -cE '\| N/A \(history disabled\) \|' "$REPORT")
+  if [ "$NA_COUNT" -eq 0 ]; then
+    echo "FAIL: disabled 模式下报告 §5 应含 'N/A (history disabled)' 占位行" >&2
+    exit 1
+  fi
+fi
+
+echo "OK: history_search=$HS, 占位符=$NA_COUNT"
+```
+
+> **何时必须跑**：① L7 最终门禁前；② `git commit` 诊断报告时。**禁止只跑人工走读不跑此命令**（这是 P2-TEST-001 的合规底线）。
+
+### §3 历史关联一致性（P3-TEST-002 落地）
+
+Agent B 在 `[full | preset-only]` 模式下，**报告 §3 末尾必须含一行**：`本次扫描窗口：<preset-only (30d sliding) | full (full-history)>`。这条作为事后 audit trail；缺失则 Agent B 未完成。
