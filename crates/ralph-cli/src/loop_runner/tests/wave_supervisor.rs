@@ -4106,3 +4106,184 @@ fn u7_review_default_is_shared_readonly() {
         "Review waves must default to shared_readonly (no worktree)"
     );
 }
+
+// =============================================================================
+// 2026-07-25-003 plan U3: outside-in integration — `ralph emit` writes
+// `exec.unit.done` into the dispatcher-signed per-slot wave channel,
+// the worker reads it back via `read_worker_events`, the dispatcher's
+// `classify_slot_result` recognises it as terminal `Done`, and the
+// supervisor store records the slot as `completed`. This pins the
+// complete causal chain end-to-end (without mocking
+// `classify_slot_result` / `record_slot_result`).
+// =============================================================================
+
+/// 2026-07-25-003 plan U3: a worker that "wrote its own events" via the
+/// dispatcher-injected per-slot channel ends up in the supervisor
+/// store as `Completed`. The executor writes a single `exec.unit.done`
+/// record into the `request.worker_events_path` (the path the
+/// dispatcher injected as `RALPH_EVENTS_FILE` and the path
+/// `read_worker_events` later reads in `wave/worker.rs`), then reads
+/// the file back to obtain the event batch. This mirrors the
+/// production flow: agent runs `ralph emit exec.unit.done` →
+/// `read_worker_events` returns the record → `classify_slot_result`
+/// maps it to `Completed(Done)` → `record_slot_result` writes the
+/// store row.
+#[tokio::test]
+async fn test_u3_emit_to_wave_channel_records_slot_completed() {
+    use crate::loop_runner::wave::read_worker_events;
+    use crate::loop_runner::wave::{WaveWorkerExecutor, WorkerRequest};
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    /// Executor that emits a terminal `exec.unit.done` into the
+    /// dispatcher-injected per-slot channel file, then reads it back
+    /// via the production `read_worker_events` helper. The returned
+    /// `(events, _, true)` matches what production `run_wave_worker`
+    /// hands to the dispatcher.
+    struct ChannelEmittingExecutor;
+    impl WaveWorkerExecutor for ChannelEmittingExecutor {
+        fn execute(
+            &self,
+            request: WorkerRequest,
+        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = (u32, WaveWorkerOutcome)> + Send>>
+        {
+            Box::pin(async move {
+                let index = request.index;
+                let events_path = request.worker_events_path.clone();
+                // Write the terminal Done record into the
+                // dispatcher-owned per-slot channel. This is what an
+                // agent's `ralph emit exec.unit.done` would do; the
+                // allowlist (U2) accepts this path in isolated mode
+                // with a hat context, so the emit lands here.
+                let line = serde_json::to_string(&ralph_core::Event {
+                    topic: "exec.unit.done".to_string(),
+                    payload: Some(format!("{{\"slot\":{index},\"seq\":0}}")),
+                    ts: String::new(),
+                    hat: None,
+                    triggered: None,
+                    source: None,
+                    wave_id: None,
+                    wave_index: None,
+                    wave_total: None,
+                    system_injected: None,
+                })
+                .expect("serialize event");
+                if let Some(parent) = events_path.parent() {
+                    let _ = std::fs::create_dir_all(parent);
+                }
+                std::fs::write(&events_path, format!("{line}\n")).expect("write channel file");
+                // Production `run_wave_worker` reads the file via
+                // `read_worker_events` (wave/worker.rs); the test
+                // exercises the same helper to assert the channel
+                // path is consumable by the production reader.
+                let events = read_worker_events(&events_path);
+                assert_eq!(
+                    events.len(),
+                    1,
+                    "U3/003: channel must hold exactly one event for the dispatcher to classify; got {events:?}"
+                );
+                assert_eq!(
+                    events[0].topic, "exec.unit.done",
+                    "U3/003: emitted topic must round-trip through the channel reader"
+                );
+                (index, Ok((events, Duration::from_millis(5), true)))
+            })
+        }
+    }
+
+    let store = std::sync::Arc::new(InMemorySupervisorStore::new());
+    let bridge = U5RecordingBridge::new(store.clone() as std::sync::Arc<dyn SupervisorStore>);
+
+    let wave = make_u3_wave("u3-emit-channel", 1, 1);
+    let executor = ChannelEmittingExecutor;
+    let outcome = run_u3_dispatch_wave(bridge.clone(), wave, executor).await;
+    let bridge_for_asserts = bridge;
+
+    assert!(
+        matches!(
+            outcome,
+            WaveDispatchOutcome::Completed(_) | WaveDispatchOutcome::Partial(_)
+        ),
+        "U3/003: emit→channel→Completed must close the wave, got {outcome:?}"
+    );
+
+    // U5RecordingBridge recorded exactly one `record_slot_result`
+    // call (the success path), zero `record_slot_failure` calls.
+    let results = bridge_for_asserts.results_snapshot();
+    let failures = bridge_for_asserts.failures_snapshot();
+    assert_eq!(
+        results.len(),
+        1,
+        "U3/003: dispatcher's classifier must call record_slot_result for the terminal Done; got {results:?}"
+    );
+    assert!(
+        failures.is_empty(),
+        "U3/003: no failure record expected for a slot that emitted terminal Done; got {failures:?}"
+    );
+    assert_eq!(results[0].0, 0, "U3/003: slot 0 must be the one recorded");
+    assert_eq!(
+        results[0].2, 1,
+        "U3/003: event_count must equal the number of events read from the channel"
+    );
+
+    // The supervisor store snapshot reflects the slot as completed
+    // — this is the causal-chain proof the plan U3 requires.
+    let store_wave_id = bridge_for_asserts
+        .store
+        .recover_active_waves()
+        .expect("recover")
+        .pop()
+        .expect("one wave")
+        .wave_id;
+    let snap = bridge_for_asserts
+        .store
+        .fan_in_status(&store_wave_id)
+        .expect("snapshot");
+    assert_eq!(
+        snap.completed_count, 1,
+        "U3/003: emit→channel must produce a store row with completed_count=1; got {snap:?}"
+    );
+    assert_eq!(
+        snap.failed_count, 0,
+        "U3/003: emit→channel must not produce any failure rows; got {snap:?}"
+    );
+    // Suppress unused-import warnings if Arc is dropped during refactors.
+    let _ = Arc::clone(&bridge_for_asserts.store);
+}
+
+/// Run a single-slot wave with a custom `WaveWorkerExecutor`, while
+/// keeping the U5RecordingBridge in the loop so the dispatcher's
+/// `record_slot_result` / `record_slot_failure` calls land in the
+/// spy. This is the dispatcher-level runner that powers U3's
+/// outside-in channel-writing test.
+async fn run_u3_dispatch_wave<E: WaveWorkerExecutor + 'static>(
+    bridge: U5RecordingBridge,
+    wave: ralph_core::DetectedWave,
+    executor: E,
+) -> WaveDispatchOutcome {
+    use crate::loop_runner::wave::execute_wave_via_supervisor_with_executor;
+
+    let wave_dir = std::env::temp_dir().join(format!("u3-disp-{}", wave.wave_id));
+    let _ = std::fs::create_dir_all(&wave_dir);
+    let main_events_file = wave_dir.join("events.jsonl");
+    let _ = std::fs::File::create(&main_events_file);
+
+    let executor_dyn: std::sync::Arc<dyn WaveWorkerExecutor> = std::sync::Arc::new(executor);
+    let bridge_arc: std::sync::Arc<dyn SupervisorBridge> = std::sync::Arc::new(bridge);
+    execute_wave_via_supervisor_with_executor(
+        &wave,
+        &make_test_cli_backend(),
+        &main_events_file,
+        false,
+        false,
+        None,
+        None,
+        "u3-test-loop",
+        WaveDispatchLimits::default(),
+        None,
+        None,
+        &bridge_arc,
+        executor_dyn,
+    )
+    .await
+}
