@@ -42,6 +42,10 @@ mod objective;
 mod origin_guard;
 mod payload_types;
 mod persistent_mode;
+/// 2026-07-26-001 plan U1: characterization tests that pin the
+/// current auto-inject skill set before introducing the
+/// `PromptPreview` API.
+mod preview_characterization;
 mod post_terminal_rejection;
 /// 2026-07-07-002 plan Unit 8: protocol-violation bounded retry +
 /// fail-close invariants. Regression guard for the
