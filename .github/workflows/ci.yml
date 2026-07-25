@@ -52,9 +52,12 @@ jobs:
       # not abort the job; scripts/run-tests.sh and scripts/ci-rust-gate.sh
       # automatically fall back to the legacy single-threaded `cargo test`
       # path when nextest is unavailable, preserving the historical CI gate.
+      # tool-version must match mise.toml `"cargo:cargo-nextest"` pin.
       - name: Install cargo-nextest
         continue-on-error: true
         uses: taiki-e/install-action@nextest
+        with:
+          tool-version: 0.9.140
       - name: Run shared Rust CI gate
         run: ./scripts/ci-rust-gate.sh --skip-embedded-files --skip-format
       - name: Upload test artifacts

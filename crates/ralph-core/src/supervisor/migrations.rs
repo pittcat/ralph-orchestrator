@@ -35,12 +35,16 @@ mod imp {
     /// is a no-op (SQLite `IF NOT EXISTS` clauses guarantee
     /// this for table/index creation).
     pub fn run(connection: &Connection) -> rusqlite::Result<()> {
-        // Pragmas: WAL mode (R-DB-0) and foreign keys ON.
-        // `PRAGMA journal_mode = WAL` returns the new mode;
-        // `WAL` is what we asked for, so the assignment is a
-        // success path even though `execute` ignores the row.
+        // Pragmas: busy_timeout FIRST so the WAL header switch
+        // below tolerates a concurrent process racing the same
+        // fresh database (2026-07-25).  WAL mode (R-DB-0) and
+        // foreign keys ON follow.  `PRAGMA journal_mode = WAL`
+        // returns the new mode; `WAL` is what we asked for, so
+        // the assignment is a success path even though `execute`
+        // ignores the row.
         connection.execute_batch(
-            "PRAGMA journal_mode = WAL;
+            "PRAGMA busy_timeout = 5000;
+             PRAGMA journal_mode = WAL;
              PRAGMA foreign_keys = ON;
              PRAGMA synchronous = NORMAL;",
         )?;

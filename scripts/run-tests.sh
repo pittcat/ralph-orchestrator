@@ -222,7 +222,35 @@ run_cargo() {
 
 if [[ "$SERIAL" -ne 1 ]] && run_cargo nextest --version >/dev/null 2>&1; then
   echo "🚀 使用 cargo-nextest 并行运行测试(ralph-cli 串行组,其它包并行)..."
-  run_cargo nextest run --workspace --exclude ralph-e2e
+
+  # 2026-07-25: two-phase run — fast path + isolated slow path.
+  # Phase 1: full workspace with default num-cpus concurrency,
+  #   EXCLUDING the `partial_timeout_events_visible` trio.  That
+  #   trio hard-codes a 1s worker-timeout assertion; under
+  #   saturated CPU contention it trips the timeout (wall-clock
+  #   observed at ~1.06-1.09s — only ~80ms slack above the 1s
+  #   hard limit).
+  # Phase 2: re-run those three tests with `-j 1` so they get a
+  #   quiescent core and the 1s timeout doesn't fire on a busy
+  #   CI runner.  Three serial tests take ~3-4s vs ~6-8s of
+  #   contention-retry cost, so the slow path is cheaper than
+  #   the global `RALPH_BASELINE_SERIAL=1` fallback (which
+  #   serialises the whole workspace).
+  # See CLAUDE.md "hooks-executor-test-flake" for the
+  #   parallel-failure characterisation that motivates this split.
+  echo "📦 Phase 1: full workspace at default num-cpus concurrency..."
+  run_cargo nextest run \
+    --workspace \
+    --exclude ralph-e2e \
+    -E 'not test(/partial_timeout_events_visible/)'
+
+  echo
+  echo "🐢 Phase 2: race-sensitive trio at -j 1 (3 tests)..."
+  run_cargo nextest run \
+    --workspace \
+    --exclude ralph-e2e \
+    -j 1 \
+    -E 'test(/partial_timeout_events_visible/)'
 
   echo
   # doctest 阶段:rustdoc 对**没有** ```rust 代码块的 crate 仍会跑完整 lint + 编译 + 提取

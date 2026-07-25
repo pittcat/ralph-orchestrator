@@ -912,6 +912,14 @@ impl SupervisorStore for InMemorySupervisorStore {
             .emissions
             .get_mut(scope_key)
             .ok_or_else(|| SupervisorStoreError::UnknownWave(scope_key.to_string()))?;
+        // Only Applying/Reserved → Applied.  applied→applied is
+        // NOT idempotent: a second `mark_emission_applied` on an
+        // already Applied row must fail closed so a double-Apply
+        // cannot silently overwrite `applied_at` (test pin
+        // `mark_emission_applied_rejects_terminal_applied_row`).
+        // Rusqlite mirrors the same strict WHERE clause — peer
+        // dedup is handled by `reserve_emission` returning
+        // AlreadyApplied, not by loosening this transition.
         if !matches!(row.state, EmissionState::Applying | EmissionState::Reserved) {
             return Err(SupervisorStoreError::InvalidTransition(format!(
                 "emission row for {scope_key} is in state {:?}, expected Applying or Reserved",

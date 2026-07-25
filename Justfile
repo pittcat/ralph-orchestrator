@@ -36,9 +36,10 @@ test-parallel:
 test-serial:
     cargo test --workspace --exclude ralph-e2e -- --test-threads=1
 
-# Install cargo-nextest (required for the test-parallel recipe).
+# Install cargo-nextest at the version pinned in mise.toml (SSOT).
+# Prefer `mise install` when mise is available; this recipe is the no-mise fallback.
 nextest-install:
-    cargo install cargo-nextest --locked
+    cargo install cargo-nextest --locked --version 0.9.140
 
 # Sync embedded assets (crate-local mirrors + generated SOPs)
 embedded-sync:

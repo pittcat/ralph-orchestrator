@@ -42,6 +42,25 @@ use super::{
 #[cfg(feature = "supervisor-db")]
 const BUSY_TIMEOUT_MS: u32 = 5_000;
 
+/// Returns `true` when the rusqlite error carries SQLite result
+/// code `SQLITE_BUSY` (code 5).  Used by the migration retry
+/// loop in `RusqliteSupervisorStore::open` to distinguish a
+/// transient lock conflict (retryable) from a permanent schema
+/// or I/O error (not retryable).
+#[cfg(feature = "supervisor-db")]
+fn is_sqlite_busy(err: &rusqlite::Error) -> bool {
+    matches!(
+        err,
+        rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error {
+                code: rusqlite::ErrorCode::DatabaseBusy,
+                ..
+            },
+            _
+        )
+    )
+}
+
 /// Persistent `SupervisorStore` backed by SQLite (WAL mode,
 /// foreign keys ON, see `migrations::run`). The store is
 /// `Send + Sync` because the underlying `Connection` lives
@@ -67,20 +86,18 @@ impl RusqliteSupervisorStore {
     /// try to flip `journal_mode` to `WAL`; without a non-zero
     /// `busy_timeout` the loser hits `SQLITE_BUSY` immediately
     /// and the store fails closed even though either process
-    /// alone would succeed. The timeout makes the loser wait
-    /// for the winner to release the write lock so both stores
-    /// open cleanly (2026-07-25 integration
+    /// alone would succeed.  The `PRAGMA journal_mode = WAL`
+    /// switch on a brand-new file can still hit filesystem-level
+    /// contention (creating the `-wal`/`-shm` sidecars) that
+    /// bypasses SQLite's busy handler, so `migrations::run` is
+    /// wrapped in a short retry loop with linear backoff.
+    /// (2026-07-25 integration
     /// `u8_concurrent_barrier_same_key_single_apply`).
     pub fn open(path: impl AsRef<Path>) -> SupervisorStoreResult<Self> {
         let path = path.as_ref();
         let conn = Connection::open(path)
             .map_err(|err| SupervisorStoreError::Open(format!("{}: {err}", path.display())))?;
         // 2026-07-25: tolerate concurrent open of the same DB.
-        // The value matches the supervisor preset's worst-case
-        // DDL/transactions window (sub-second) plus slack for
-        // cold-disk CI runners; absolute cap is just a bound on
-        // the longest possible wait before SQLITE_BUSY
-        // propagates so we never wedge a loop on a stuck peer.
         conn.pragma_update(None, "busy_timeout", BUSY_TIMEOUT_MS)
             .map_err(|err| {
                 SupervisorStoreError::Open(format!(
@@ -88,9 +105,40 @@ impl RusqliteSupervisorStore {
                     path.display()
                 ))
             })?;
-        migrations::run(&conn).map_err(|err| {
-            SupervisorStoreError::Open(format!("migration failed on {}: {err}", path.display()))
-        })?;
+        // Retry migrations on SQLITE_BUSY: the WAL header switch
+        // on a fresh database creates `-wal`/`-shm` sidecar files;
+        // two processes racing this creation can hit a brief
+        // filesystem-level lock that the busy handler does not
+        // cover.  5 attempts × 50-250 ms backoff covers the
+        // worst-case cold-disk CI window without wedging a loop.
+        const MIGRATION_RETRIES: u32 = 5;
+        let mut last_busy_err: Option<rusqlite::Error> = None;
+        for attempt in 0..MIGRATION_RETRIES {
+            match migrations::run(&conn) {
+                Ok(()) => {
+                    last_busy_err = None;
+                    break;
+                }
+                Err(err) if is_sqlite_busy(&err) => {
+                    last_busy_err = Some(err);
+                    std::thread::sleep(std::time::Duration::from_millis(
+                        50 * (attempt as u64 + 1),
+                    ));
+                }
+                Err(err) => {
+                    return Err(SupervisorStoreError::Open(format!(
+                        "migration failed on {}: {err}",
+                        path.display()
+                    )));
+                }
+            }
+        }
+        if let Some(err) = last_busy_err {
+            return Err(SupervisorStoreError::Open(format!(
+                "migration failed on {} after {MIGRATION_RETRIES} retries: {err}",
+                path.display()
+            )));
+        }
         Ok(Self {
             inner: Arc::new(Mutex::new(conn)),
         })
@@ -1069,22 +1117,36 @@ impl SupervisorStore for RusqliteSupervisorStore {
         expected_count: u32,
         count_events_on_disk: &dyn Fn(&str) -> u32,
     ) -> SupervisorStoreResult<EmissionReservation> {
-        // Atomic fresh reservation: allocate a public_wave_id
-        // inside the same connection so two parallel emits on
-        // distinct (loop, hat, topic, key) tuples never mint the
-        // same id. We derive the seq from `wave_id_seq` so a
-        // future migration off SQLite keeps a single allocator.
+        // Wrap the read-modify-write in BEGIN IMMEDIATE so two
+        // callers racing the same scope serialize at the SQLite
+        // write-lock (busy_timeout=5000 waits for the peer).
+        // This only covers THIS call's RMW — production still
+        // commits `reserved` before FileLock / event write /
+        // mark_applied, so a later peer can observe in-flight
+        // `reserved`/`applying` (live producer or crash residue).
+        // Those rows must be classified by on-disk evidence
+        // (FailedPartial / RecoveryRequired / AlreadyApplied via
+        // recovery) — never coerced into AlreadyApplied, which
+        // would silently drop events.  (2026-07-25)
         self.with_conn(|conn| {
-            let mut stmt =
-                conn.prepare("INSERT INTO wave_id_seq (placeholder) VALUES (0) RETURNING seq")?;
-            let seq: i64 = stmt.query_row([], |row| row.get(0))?;
+            let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+            // `RETURNING` via prepare+query_row holds a borrow on
+            // `tx` for the lifetime of the prepared `Statement`,
+            // which conflicts with `tx.commit()` later.  Materialise
+            // the seq to a local first, then drop the statement.
+            let seq: i64 = {
+                let mut stmt = tx.prepare(
+                    "INSERT INTO wave_id_seq (placeholder) VALUES (0) RETURNING seq",
+                )?;
+                stmt.query_row([], |row| row.get(0))?
+            };
             let public_wave_id = format!("w-rs-{seq}");
 
             // Try to insert a fresh emission row. The UNIQUE
             // constraint on `scope_key` makes a parallel
             // reservation a no-op so we can probe the existing
             // row instead.
-            let inserted = conn.execute(
+            let inserted = tx.execute(
                 "INSERT OR IGNORE INTO wave_emissions
                    (scope_key, public_wave_id, payload_digest, expected_count, state)
                  VALUES (?1, ?2, ?3, ?4, 'reserved')",
@@ -1092,11 +1154,12 @@ impl SupervisorStore for RusqliteSupervisorStore {
             )?;
 
             if inserted == 1 {
+                tx.commit()?;
                 return Ok(EmissionReservation::Reserved { public_wave_id });
             }
 
             // A row already exists; load it and classify.
-            let existing = conn
+            let existing = tx
                 .query_row(
                     "SELECT public_wave_id, payload_digest, expected_count, state
                      FROM wave_emissions WHERE scope_key = ?1",
@@ -1120,14 +1183,19 @@ impl SupervisorStore for RusqliteSupervisorStore {
             let (existing_public_wave_id, existing_payload_digest, existing_expected, state_str) =
                 existing;
             if existing_payload_digest != payload_digest {
+                tx.commit()?;
                 return Ok(EmissionReservation::Conflict);
             }
             let state = parse_emission_state(&state_str)?;
-            match state {
+            let out = match state {
                 EmissionState::Applied => Ok(EmissionReservation::AlreadyApplied {
                     public_wave_id: existing_public_wave_id,
                 }),
                 EmissionState::Failed => Ok(EmissionReservation::Conflict),
+                // Prior reservation still open (live peer mid-emit,
+                // crash residue, or explicit recovery_required).
+                // Classify by on-disk event count — do not coerce
+                // into AlreadyApplied without evidence.
                 EmissionState::Reserved
                 | EmissionState::Applying
                 | EmissionState::RecoveryRequired => {
@@ -1147,7 +1215,7 @@ impl SupervisorStore for RusqliteSupervisorStore {
                     } else {
                         // Recovery path: events present + row never
                         // reached applied → advance to applied.
-                        conn.execute(
+                        tx.execute(
                             "UPDATE wave_emissions
                              SET state = 'applied', applied_at = strftime('%s','now')
                              WHERE scope_key = ?1",
@@ -1158,7 +1226,9 @@ impl SupervisorStore for RusqliteSupervisorStore {
                         })
                     }
                 }
-            }
+            };
+            tx.commit()?;
+            out
         })
     }
 
@@ -1185,6 +1255,13 @@ impl SupervisorStore for RusqliteSupervisorStore {
         applied_at_unix_secs: u64,
     ) -> SupervisorStoreResult<()> {
         self.with_conn(|conn| {
+            // Strict Applying/Reserved → Applied.  'applied' is
+            // NOT a valid source state: overwriting `applied_at`
+            // would corrupt the audit trail.  Peer same-key
+            // retries go through `reserve_emission` →
+            // AlreadyApplied and never call this path; 0 rows
+            // here means a true invalid transition (e.g.
+            // recovery_required or failed terminal).  (2026-07-25)
             let rows = conn.execute(
                 "UPDATE wave_emissions
                  SET state = 'applied', applied_at = ?2

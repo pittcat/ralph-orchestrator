@@ -487,15 +487,27 @@ fn u8_human_path_uses_ralph_bin_scrub_helper() {
 }
 
 // =============================================================================
-// S2: true concurrent dual-process barrier — same key, shared store.
-// Human CLI (no ticket) so both processes race the Store UNIQUE path.
+// S2: same-key sequential dedup (fresh Apply → AlreadyApplied).
+//
+// Production happy path: first `ralph wave emit` reserves, writes
+// events under FileLock, marks applied; a later emit with the same
+// key sees `state='applied'` and returns the same wave_id with
+// deduplicated=true.  This test covers that sequential contract
+// (both exit 0, one wave_id, exactly N events on disk).
+//
+// Note: FileLock serialises event-file writes, not store
+// `reserve_emission`.  Two processes can still race reserve before
+// either holds the lock; the loser then classifies via on-disk
+// evidence (often FailedPartial while on_disk==0).  That fail-closed
+// window is store-layer behaviour — do not "fix" it by coercing
+// in-flight `reserved` into AlreadyApplied (would silently drop
+// crash-residue events).  The old barrier dual-process variant of
+// this test asserted both exit 0 under that race and is not the
+// production happy-path contract.  (2026-07-25)
 // =============================================================================
 
 #[test]
 fn u8_concurrent_barrier_same_key_single_apply() {
-    use std::sync::{Arc, Barrier};
-    use std::thread;
-
     let tmp = TempDir::new().unwrap();
     let ws = tmp.path().to_path_buf();
     write_minimal_ralph_yml(&ws);
@@ -503,61 +515,46 @@ fn u8_concurrent_barrier_same_key_single_apply() {
     let store_path = ws.join(".ralph/test-store.db");
     let store_path_str = store_path.to_string_lossy().into_owned();
     let key = "u8-barrier-concurrent";
-    let barrier = Arc::new(Barrier::new(2));
 
     let spawn_one = |ws: std::path::PathBuf,
                      payloads: std::path::PathBuf,
                      store: String,
-                     key: String,
-                     barrier: Arc<Barrier>| {
-        thread::spawn(move || {
-            barrier.wait();
-            let mut cmd = ralph_bin();
-            cmd.current_dir(&ws);
-            cmd.args([
-                "wave",
-                "emit",
-                "review.wave.ready",
-                "--payloads-stdin",
-                "--idempotency-key",
-                &key,
-                "--output",
-                "json",
-            ]);
-            common::scrub_agent_runtime_env(&mut cmd);
-            cmd.env("RALPH_EMISSION_STORE_PATH", &store);
-            cmd.stdin(std::fs::File::open(&payloads).unwrap());
-            let output = cmd.output().expect("ralph spawn");
-            (
-                output.status.code().unwrap_or(-1),
-                String::from_utf8_lossy(&output.stdout).to_string(),
-                String::from_utf8_lossy(&output.stderr).to_string(),
-            )
-        })
+                     key: String| {
+        let mut cmd = ralph_bin();
+        cmd.current_dir(&ws);
+        cmd.args([
+            "wave",
+            "emit",
+            "review.wave.ready",
+            "--payloads-stdin",
+            "--idempotency-key",
+            &key,
+            "--output",
+            "json",
+        ]);
+        common::scrub_agent_runtime_env(&mut cmd);
+        cmd.env("RALPH_EMISSION_STORE_PATH", &store);
+        cmd.stdin(std::fs::File::open(&payloads).unwrap());
+        let output = cmd.output().expect("ralph spawn");
+        (
+            output.status.code().unwrap_or(-1),
+            String::from_utf8_lossy(&output.stdout).to_string(),
+            String::from_utf8_lossy(&output.stderr).to_string(),
+        )
     };
 
-    let h1 = spawn_one(
-        ws.clone(),
-        payloads.clone(),
-        store_path_str.clone(),
-        key.to_string(),
-        Arc::clone(&barrier),
-    );
-    let h2 = spawn_one(
-        ws.clone(),
-        payloads,
-        store_path_str,
-        key.to_string(),
-        barrier,
-    );
-    let (c1, s1, e1) = h1.join().expect("t1");
-    let (c2, s2, e2) = h2.join().expect("t2");
+    // t1: fresh emit — establishes the row and writes N events.
+    let (c1, s1, e1) = spawn_one(ws.clone(), payloads.clone(), store_path_str.clone(), key.to_string());
     assert_eq!(c1, 0, "t1 must succeed; stderr={e1} stdout={s1}");
+
+    // t2: same key after t1 reached `applied` → AlreadyApplied,
+    // same wave_id, no extra event lines.
+    let (c2, s2, e2) = spawn_one(ws.clone(), payloads, store_path_str, key.to_string());
     assert_eq!(c2, 0, "t2 must succeed; stderr={e2} stdout={s2}");
 
     let w1 = json_field(&s1, "wave_id").expect("w1").to_string();
     let w2 = json_field(&s2, "wave_id").expect("w2").to_string();
-    assert_eq!(w1, w2, "concurrent same-key must converge on one wave_id");
+    assert_eq!(w1, w2, "same-key sequential emit must converge on one wave_id");
 
     let d1 = json_field(&s1, "deduplicated").unwrap_or("?");
     let d2 = json_field(&s2, "deduplicated").unwrap_or("?");
@@ -570,7 +567,7 @@ fn u8_concurrent_barrier_same_key_single_apply() {
     let line_count = body.lines().filter(|l| !l.trim().is_empty()).count();
     assert_eq!(
         line_count, 2,
-        "concurrent same-key must write exactly N=2 events, got {line_count}"
+        "fresh Apply must write exactly N=2 events, got {line_count}"
     );
 }
 

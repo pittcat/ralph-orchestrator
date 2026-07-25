@@ -1,2 +1,17 @@
+# Host-tool pins for this repo (not Rust crate deps — those live in Cargo.lock).
+#
+# Node.js: use nvm + `.nvmrc` (currently 24). Do NOT pin node here.
+#
+# cargo-nextest: single source of truth for the CLI version expected by
+# `./scripts/run-tests.sh` (two-phase partial_timeout isolation) and docs
+# in CLAUDE.md / AGENTS.md HARD RULE 1a.
+#
+# Install (with mise):
+#   mise install
+# Install (without mise):
+#   cargo install cargo-nextest --locked --version 0.9.140
+# Verify:
+#   cargo nextest --version   # expect 0.9.140
+
 [tools]
-node = "22"
+"cargo:cargo-nextest" = "0.9.140"
