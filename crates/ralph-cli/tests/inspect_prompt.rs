@@ -267,7 +267,7 @@ fn inspect_prompt_works_in_tempdir_without_crates_dir() {
     // instructions line is encoded via the block list / on-demand
     // surface; we don't strictly require it on stdout (it may be
     // trimmed) but at minimum the hat must be locatable.
-    assert!(parsed["auto_inject"].as_array().unwrap().len() > 0);
+    assert!(!parsed["auto_inject"].as_array().unwrap().is_empty());
 }
 
 #[test]
