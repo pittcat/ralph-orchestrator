@@ -159,10 +159,10 @@ def test_e2e_full_pipeline_static_only(tmp_path: Path, monkeypatch: pytest.Monke
             exit_code=0,
         ),
         _probe_runner_common.preset_check_ok_invocation(
-            resolution.binary, suite.config_path, "builtin:ce-executor-pipeline"
+            resolution.binary, "ralph.ce-executor-pipeline.yml", "builtin:ce-executor-pipeline"
         ),
         _probe_runner_common.preflight_ok_invocation(
-            resolution.binary, suite.config_path, "builtin:ce-executor-pipeline"
+            resolution.binary, "ralph.ce-executor-pipeline.yml", "builtin:ce-executor-pipeline"
         ),
         _probe_runner_common.dry_run_ok_invocation(
             resolution.binary,
