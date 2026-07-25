@@ -97,7 +97,7 @@ impl WebhookTransport for ReqwestTransport {
             if e.is_timeout() {
                 TransportError::Timeout
             } else {
-                TransportError::Http(e.to_string())
+                TransportError::Http("request failed".to_string())
             }
         })?;
 
@@ -117,6 +117,67 @@ pub struct RecordedCall {
     pub url: String,
     /// The rendered body of the call.
     pub body: String,
+}
+
+/// Returns a redacted representation of a webhook URL for safe logging.
+///
+/// Parses `url` with `reqwest::Url`.  If the parse succeeds, the URL is
+/// http(s), and the host is non-empty, returns `scheme://host[:port]/<redacted>`.
+/// The host is always derived from `host_str()` (no userinfo).  Port is appended
+/// if present.  IPv6 hosts are formatted with square brackets.
+/// In all other cases (invalid URL, non-http scheme, empty authority) returns the
+/// literal string `<redacted>` (fail-closed).
+pub(crate) fn redact_url(url: &str) -> String {
+    let parsed = match reqwest::Url::parse(url) {
+        Ok(u) => u,
+        Err(_) => return "<redacted>".to_string(),
+    };
+
+    match parsed.scheme() {
+        "http" | "https" => {}
+        _ => return "<redacted>".to_string(),
+    }
+
+    // Reject URLs where the host was inferred from a leading '/' in the authority
+    // (e.g. "https:///path" → reqwest infers host="path").  Also reject absent host.
+    let scheme_end = url.find("://").unwrap_or(0) + 3;
+    let after_scheme = &url[scheme_end..];
+    let first_slash = after_scheme.find('/').unwrap_or(after_scheme.len());
+    if first_slash == 0 || after_scheme[..first_slash].is_empty() {
+        return "<redacted>".to_string();
+    }
+
+    // Build authority without userinfo: host_str (IPv6 with brackets) + port.
+    // reqwest's host_str() already returns IPv6 with brackets, so only add them
+    // if host_str does not already start with '['.
+    let host_str = match parsed.host_str() {
+        Some(s) => s,
+        None => return "<redacted>".to_string(),
+    };
+    let bracketed = if host_str.starts_with('[') {
+        host_str.to_string()
+    } else if host_str.contains(':') {
+        // IPv6 with port: need square brackets in URL authority.
+        format!("[{}]", host_str)
+    } else {
+        host_str.to_string()
+    };
+    let authority = match parsed.port() {
+        Some(port) => format!("{}:{}", bracketed, port),
+        None => bracketed,
+    };
+
+    format!("{}://{}/<redacted>", parsed.scheme(), authority)
+}
+
+/// Returns a safe, stable representation of a [`TransportError`] for logging.
+/// The original error content is discarded; only the error category is preserved.
+pub(crate) fn redact_transport_error(err: &TransportError) -> String {
+    match err {
+        TransportError::Http(_) => "http request failed".to_string(),
+        TransportError::Timeout => "request timed out".to_string(),
+        TransportError::Non2xx(status) => format!("non-2xx status code: {status}"),
+    }
 }
 
 /// In-memory transport test double.
@@ -254,6 +315,103 @@ mod tests {
         assert_eq!(TransportError::Timeout.to_string(), "request timed out");
         assert_eq!(
             TransportError::Non2xx(503).to_string(),
+            "non-2xx status code: 503"
+        );
+    }
+
+    // ── RED: redact_url ─────────────────────────────────────────────────────
+
+    #[test]
+    fn redact_url_feishu_path_and_query() {
+        let url = "https://open.feishu.cn/open-apis/bot/v2/hook/xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx?sig=secret";
+        let r = redact_url(url);
+        assert!(!r.contains("xxxxxxxx"));
+        assert!(!r.contains("sig=secret"));
+        assert!(!r.contains("/open-apis"));
+        assert_eq!(r, "https://open.feishu.cn/<redacted>");
+    }
+
+    #[test]
+    fn redact_url_query_only() {
+        let r = redact_url("https://open.feishu.cn?token=abc");
+        assert!(!r.contains("token=abc"));
+        assert_eq!(r, "https://open.feishu.cn/<redacted>");
+    }
+
+    #[test]
+    fn redact_url_path_only() {
+        let r = redact_url("https://open.feishu.cn/open-apis/bot/v2/hook/secret-token");
+        assert!(!r.contains("secret-token"));
+        assert_eq!(r, "https://open.feishu.cn/<redacted>");
+    }
+
+    #[test]
+    fn redact_url_no_path_or_query() {
+        assert_eq!(redact_url("https://h"), "https://h/<redacted>");
+    }
+
+    #[test]
+    fn redact_url_non_http_scheme_fails_closed() {
+        assert_eq!(redact_url("foo://secret/path"), "<redacted>");
+    }
+
+    #[test]
+    fn redact_url_empty_authority_fails_closed() {
+        for url in &["https:///path", "https://"] {
+            let r = redact_url(url);
+            assert_eq!(r, "<redacted>", "url={:?} got={:?}", url, r);
+        }
+    }
+
+    #[test]
+    fn redact_url_userinfo_stripped() {
+        // user:password must not appear in output.
+        let r = redact_url("https://user:password@example.com:8443/hook/TOKEN");
+        assert!(!r.contains("user"));
+        assert!(!r.contains("password"));
+        assert!(!r.contains("TOKEN"));
+        assert_eq!(r, "https://example.com:8443/<redacted>");
+    }
+
+    #[test]
+    fn redact_url_ipv6_with_port() {
+        let r = redact_url("https://[::1]:8080/hook/secret");
+        assert!(!r.contains("secret"));
+        assert_eq!(r, "https://[::1]:8080/<redacted>");
+    }
+
+    #[test]
+    fn redact_url_invalid_url_fails_closed() {
+        assert_eq!(redact_url("not-a-url"), "<redacted>");
+        assert_eq!(redact_url(""), "<redacted>");
+    }
+
+    // ── RED: redact_transport_error ─────────────────────────────────────────
+
+    #[test]
+    fn redact_transport_error_http_sanitized() {
+        let err = TransportError::Http(
+            "error sending request for url (https://open.feishu.cn/open-apis/bot/v2/hook/TOKEN)"
+                .to_string(),
+        );
+        let r = redact_transport_error(&err);
+        assert_eq!(r, "http request failed");
+        assert!(!r.contains("TOKEN"));
+        assert!(!r.contains("open.feishu.cn"));
+    }
+
+    #[test]
+    fn redact_transport_error_timeout_preserved() {
+        assert_eq!(
+            redact_transport_error(&TransportError::Timeout),
+            "request timed out"
+        );
+    }
+
+    #[test]
+    fn redact_transport_error_non2xx_preserved() {
+        assert_eq!(
+            redact_transport_error(&TransportError::Non2xx(503)),
             "non-2xx status code: 503"
         );
     }

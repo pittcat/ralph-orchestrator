@@ -15,7 +15,7 @@ use crate::config::{NotificationsConfig, OnStatus};
 use crate::event_loop::TerminationReason;
 
 use super::template::render;
-use super::transport::WebhookTransport;
+use super::transport::{WebhookTransport, redact_transport_error, redact_url};
 
 /// The eight template variable names exposed to webhook `body` templates
 /// (plan KTD-5).
@@ -111,15 +111,6 @@ pub fn status_for_reason(reason: &TerminationReason) -> OnStatus {
     }
 }
 
-/// Strips everything after (and including) the first `?` so a webhook URL
-/// whose query string embeds a token is never written to logs (plan KTD-7).
-fn redact_url(url: &str) -> String {
-    match url.find('?') {
-        Some(idx) => format!("{}?<redacted>", &url[..idx]),
-        None => url.to_string(),
-    }
-}
-
 /// Dispatches loop-completion webhook notifications, best-effort.
 ///
 /// Semantics:
@@ -177,7 +168,7 @@ pub async fn dispatch<T: WebhookTransport>(
                 tracing::warn!(
                     endpoint = %endpoint.name,
                     url = %redact_url(&endpoint.url),
-                    error = %err,
+                    error = %redact_transport_error(&err),
                     "notification delivery failed; continuing"
                 );
             }
@@ -446,8 +437,9 @@ mod tests {
         let redacted = redact_url("https://h/x?a=secret&token=abc");
         assert!(!redacted.contains("secret"));
         assert!(!redacted.contains("token=abc"));
-        assert!(redacted.starts_with("https://h/x"));
-        // No query string → unchanged.
-        assert_eq!(redact_url("https://h/x"), "https://h/x");
+        // U1: scheme+authority preserved, path+query redacted.
+        assert_eq!(redacted, "https://h/<redacted>");
+        // No query string → path also redacted.
+        assert_eq!(redact_url("https://h/x"), "https://h/<redacted>");
     }
 }
