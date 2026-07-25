@@ -386,8 +386,9 @@ def _build_stage_argv(
     ``-H <preset>``. The ``dry_run`` stage additionally carries
     ``--dry-run`` only — ``ralph run`` does not accept ``--strict``;
     strict gating lives in the dedicated ``preflight --strict`` stage.
-    The dry-run uses exactly one explicit prompt source. ``--plan`` wins
-    when a plan path exists; otherwise ``--prompt-file`` may be appended.
+    The dry-run may carry ``--prompt-file`` and/or ``--plan``. When both
+    are present, Ralph uses ``--prompt-file`` as the agent-visible prompt
+    and ``--plan`` as the workload / worktree key.
 
     The contract is enforced by the test suite: every argv the helper
     builds must contain ``-c <config_path>`` and ``-H <preset>``; the
@@ -409,10 +410,14 @@ def _build_stage_argv(
         return base + ("preflight", "--strict")
     if stage == "dry_run":
         argv = base + ("run", "--dry-run")
+        # Prefer emitting both when supplied: ``--prompt-file`` is the
+        # agent-visible prompt (wins over ``--plan`` inside ``ralph run``),
+        # while ``--plan`` remains the workload identity / worktree key.
+        # Callers that pass only one keep the historical single-source shape.
+        if prompt_file:
+            argv = argv + ("--prompt-file", prompt_file)
         if plan_path:
             argv = argv + ("--plan", plan_path)
-        elif prompt_file:
-            argv = argv + ("--prompt-file", prompt_file)
         return argv
     raise ValueError(f"unknown stage: {stage!r}")
 

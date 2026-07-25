@@ -272,6 +272,7 @@ def run_static_gate(
     config_path: str,
     preset: str,
     plan_path: str | None,
+    prompt_file: str | None = None,
     runner: Callable[..., object] | None = None,
 ) -> GateReport:
     """Run the four-stage gate and bundle the per-stage decisions.
@@ -280,6 +281,10 @@ def run_static_gate(
     absent the gate short-circuits with a single blocked dry-run
     decision; the capability / preset / preflight stages are recorded
     as skipped so the handoff evidence block is still informative.
+
+    ``prompt_file`` should be the generated ``PROMPT.<stem>.md`` so the
+    dry-run argv matches launch (``--prompt-file`` + ``--plan``). When
+    omitted, dry-run falls back to ``--plan`` only (legacy).
     """
     binary_path = _Path(binary)
 
@@ -312,7 +317,7 @@ def run_static_gate(
         binary=binary_path,
         config_path=config_path,
         preset=preset,
-        prompt_file=None,
+        prompt_file=prompt_file,
         plan_path=plan_path,
         runner=effective_runner,
     )

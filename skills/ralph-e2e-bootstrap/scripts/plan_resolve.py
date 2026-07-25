@@ -104,6 +104,11 @@ def _extract_intent_paths(plan_text: str) -> tuple[str, ...]:
     return tuple(seen)
 
 
+def git_toplevel(path: Path) -> Path | None:
+    """Public wrapper around the private git toplevel probe."""
+    return _git_toplevel(path)
+
+
 def _git_toplevel(path: Path) -> Path | None:
     import subprocess
 
@@ -294,11 +299,20 @@ def author_minimal_plan(
     *,
     preset: str | None = None,
     today: date | None = None,
+    confirmed: bool = False,
+    confirmation_token: str = "",
 ) -> Path:
     """Write a new minimal workload plan under the sandbox.
 
-    Call **only** after the operator confirms via combo-box.
+    Call **only** after the operator confirms via ``sandbox_plan_write``
+    combo-box. Requires ``confirmed=True`` and
+    ``confirmation_token="sandbox_plan_write"``.
     """
+    if not confirmed or confirmation_token != "sandbox_plan_write":
+        raise ValueError(
+            "author_minimal_plan refused: require confirmed=True and "
+            "confirmation_token='sandbox_plan_write' after combo-box"
+        )
     sandbox = Path(sandbox).resolve()
     plans_dir = sandbox / "docs" / "plans"
     plans_dir.mkdir(parents=True, exist_ok=True)
@@ -341,6 +355,32 @@ def author_minimal_plan(
     return dest
 
 
+def external_sandbox_error(
+    sandbox: Path,
+    change_plan: Path,
+) -> str | None:
+    """Return an error when sandbox is not an external git repo vs change plan."""
+    sand_top = _git_toplevel(Path(sandbox))
+    change_top = _git_toplevel(Path(change_plan))
+    if sand_top is None or change_top is None:
+        # Soft: cannot prove; pipeline still prefers distinct paths.
+        try:
+            if Path(sandbox).resolve() == Path(change_plan).resolve().parent:
+                return (
+                    "sandbox path collides with change-plan directory; "
+                    "use an external product/E2E harness repo"
+                )
+        except OSError:
+            pass
+        return None
+    if sand_top == change_top:
+        return (
+            f"sandbox must be an external repo (got same git toplevel "
+            f"as change plan: {sand_top})"
+        )
+    return None
+
+
 def resolve_plans(
     sandbox: Path,
     *,
@@ -349,8 +389,8 @@ def resolve_plans(
 ) -> ResolveResult:
     """Resolve change-plan context + sandbox workload for the skill.
 
-    Never treats ``change_plan`` as the workload ``--plan``. Never
-    authors a plan; when discovery fails sets
+    ``change_plan`` is **required**. Never treats it as the workload
+    ``--plan``. Never authors a plan; when discovery fails sets
     ``needs_author_confirmation=True`` for the skill combo-box.
     """
     sandbox = Path(sandbox).resolve()
@@ -363,25 +403,47 @@ def resolve_plans(
             message=f"sandbox is not a directory: {sandbox}",
         )
 
-    change_path: Path | None = Path(change_plan) if change_plan else None
+    if change_plan is None or not str(change_plan).strip():
+        return ResolveResult(
+            ok=False,
+            blocked=True,
+            workload_plan_path="",
+            workload_source="none",
+            message=(
+                "change_plan is required (orchestrator verification intent); "
+                "refusing to bootstrap without it"
+            ),
+        )
+
+    change_path = Path(change_plan)
+    cross_err = external_sandbox_error(sandbox, change_path)
+    if cross_err is not None:
+        return ResolveResult(
+            ok=False,
+            blocked=True,
+            workload_plan_path="",
+            workload_source="none",
+            change_plan_path=str(change_path),
+            message=cross_err,
+        )
+
     change_hash = ""
     change_summary = ""
     touches_presets = False
-    if change_path is not None:
-        try:
-            raw = change_path.read_bytes()
-            change_hash = _hash_bytes(raw)
-            change_summary = extract_change_summary(change_path)
-            touches_presets = change_plan_needs_preset_author(change_path)
-        except (OSError, UnicodeDecodeError) as exc:
-            return ResolveResult(
-                ok=False,
-                blocked=True,
-                workload_plan_path="",
-                workload_source="none",
-                change_plan_path=str(change_path),
-                message=f"change plan unreadable: {exc.__class__.__name__}",
-            )
+    try:
+        raw = change_path.read_bytes()
+        change_hash = _hash_bytes(raw)
+        change_summary = extract_change_summary(change_path)
+        touches_presets = change_plan_needs_preset_author(change_path)
+    except (OSError, UnicodeDecodeError) as exc:
+        return ResolveResult(
+            ok=False,
+            blocked=True,
+            workload_plan_path="",
+            workload_source="none",
+            change_plan_path=str(change_path),
+            message=f"change plan unreadable: {exc.__class__.__name__}",
+        )
 
     discovered = pick_best_discovered(sandbox, preset=preset)
     if discovered is not None:
@@ -397,7 +459,7 @@ def resolve_plans(
             blocked=False,
             workload_plan_path=str(discovered.resolve()),
             workload_source="discovered",
-            change_plan_path=str(change_path.resolve()) if change_path else None,
+            change_plan_path=str(change_path.resolve()),
             change_plan_hash=change_hash,
             change_summary=change_summary,
             change_plan_touches_presets=touches_presets,
@@ -410,7 +472,7 @@ def resolve_plans(
         blocked=False,
         workload_plan_path="",
         workload_source="none",
-        change_plan_path=str(change_path.resolve()) if change_path else None,
+        change_plan_path=str(change_path.resolve()),
         change_plan_hash=change_hash,
         change_summary=change_summary,
         change_plan_touches_presets=touches_presets,
@@ -448,7 +510,9 @@ __all__ = [
     "author_minimal_plan",
     "change_plan_needs_preset_author",
     "discover_sandbox_plans",
+    "external_sandbox_error",
     "extract_change_summary",
+    "git_toplevel",
     "pick_best_discovered",
     "resolve_plan",
     "resolve_plans",

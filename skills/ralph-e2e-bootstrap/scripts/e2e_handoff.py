@@ -53,7 +53,7 @@ class HandoffInputs:
 
     All path fields are sandbox-relative or repo-relative. ``binary``
     is the path to the ``ralph`` binary the operator will run
-    (typically the literal ``"ralph"`` string).
+    (typically a repo ``target/debug/ralph`` path).
     """
 
     binary: str
@@ -62,6 +62,7 @@ class HandoffInputs:
     plan_path: str
     level: HandoffLevel
     sandbox_path: str
+    prompt_path: str = ""
     validation_evidence: tuple[str, ...] = ()
     residual_risks: tuple[str, ...] = ()
     blocker_summary: str = ""
@@ -135,17 +136,26 @@ def _render_validation_block(evidence: Iterable[str]) -> tuple[str, ...]:
 
 def _render_header(inputs: HandoffInputs) -> list[str]:
     """Render the report header lines."""
-    return [
+    lines = [
         "# Ralph E2E Bootstrap — Handoff",
         "",
         f"- **Level**: `{inputs.level}`",
         f"- **Sandbox**: `{inputs.sandbox_path}`",
         f"- **Config**: `{inputs.config_path}`",
         f"- **Preset**: `{inputs.preset}`",
-        f"- **Plan**: `{inputs.plan_path}`",
-        f"- **Binary**: `{inputs.binary}`",
-        "",
+        f"- **Plan** (``--plan`` workload): `{inputs.plan_path}`",
     ]
+    if inputs.prompt_path.strip():
+        lines.append(
+            f"- **Prompt** (``--prompt-file``, agent-visible): `{inputs.prompt_path}`"
+        )
+    lines.extend(
+        [
+            f"- **Binary**: `{inputs.binary}`",
+            "",
+        ]
+    )
+    return lines
 
 
 def _render_blocker_section(blocker_summary: str) -> list[str]:
@@ -171,7 +181,8 @@ def _render_status_section(level: HandoffLevel) -> list[str]:
         sections.append(
             "Static load passed; **the loop is NOT closed**. The launch command "
             "above is the canonical operator action; running it will start a "
-            "live Ralph loop in the supplied sandbox."
+            "live Ralph loop in the supplied sandbox. After the live run, use "
+            "``ralph-run-diagnosis`` for intermediate artifacts — not this skill."
         )
     else:
         sections.append(
@@ -243,6 +254,14 @@ def build_handoff(inputs: HandoffInputs) -> HandoffArtifact:
         command_argv: tuple[str, ...] = ()
         notes = ("Handoff blocked; resolve the blocker above and re-run.",)
     else:
+        prompt_rel = inputs.prompt_path.strip()
+        if not prompt_rel:
+            # Derive from config stem when callers omit prompt_path.
+            cfg = Path(inputs.config_path).name
+            if cfg.startswith("ralph.") and cfg.endswith(".yml"):
+                prompt_rel = f"PROMPT.{cfg[len('ralph.'):-len('.yml')]}.md"
+            else:
+                prompt_rel = "PROMPT.md"
         command_argv = (
             inputs.binary,
             "-c",
@@ -250,13 +269,18 @@ def build_handoff(inputs: HandoffInputs) -> HandoffArtifact:
             "-H",
             inputs.preset,
             "run",
+            "--prompt-file",
+            prompt_rel,
             "--plan",
             inputs.plan_path,
         )
         command = _render_command(command_argv)
         notes = (
             "Static load passed; loop is NOT closed.",
-            "Use the launch command above verbatim in the supplied sandbox.",
+            "``--prompt-file`` is agent-visible (change intent + workload body).",
+            "``--plan`` is the pure sandbox workload identity.",
+            "Use the launch command above verbatim from the sandbox cwd.",
+            "Post-run diagnosis: ``ralph-run-diagnosis``.",
         )
 
     return HandoffArtifact(
