@@ -55,6 +55,7 @@ for _name, _path in (
 _E2E_BOOTSTRAP_SCRIPTS = SKILLS_DIR / "ralph-e2e-bootstrap" / "scripts"
 for _name, _path in (
     ("plan_diff", _E2E_BOOTSTRAP_SCRIPTS / "plan_diff.py"),
+    ("plan_resolve", _E2E_BOOTSTRAP_SCRIPTS / "plan_resolve.py"),
     ("binary_resolve", _E2E_BOOTSTRAP_SCRIPTS / "binary_resolve.py"),
     ("sandbox_suite", _E2E_BOOTSTRAP_SCRIPTS / "sandbox_suite.py"),
     ("gate", _E2E_BOOTSTRAP_SCRIPTS / "gate.py"),

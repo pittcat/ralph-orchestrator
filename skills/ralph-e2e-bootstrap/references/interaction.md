@@ -11,11 +11,31 @@ skill MUST NOT batch multiple decisions into a single AskUser.
 
 ## Decision points
 
+### `plan_resolve_choice` — which suitable sandbox-local plan
+
+Triggered by `scripts/plan_resolve.py` only when **multiple** suitable
+sandbox plans score close and the operator asks to pick, or when the
+skill surfaces discovered alternatives after rejecting an unfit
+caller candidate. Recommended option is the highest-scored discovered
+plan. Authoring a minimal plan is offered when discovery is empty.
+
+| # | Option | Consequence |
+|---|--------|-------------|
+| 1 (**recommended**) | Use highest-scored sandbox plan | Bind that `docs/plans/<basename>` for audit + suite. |
+| 2 | Use another listed suitable plan | Operator picks among discovered suitable plans only. |
+| 3 | Author minimal E2E plan | Skill writes `docs/plans/<date>-e2e-bootstrap-minimal-<stem>-plan.md`. |
+| Other | Free-text suitable sandbox-relative plan path | Re-run fitness; unfit paths remain rejected. |
+
+**Not a decision point (R15 hard reject).** An unfit caller plan
+(orchestrator `crates/`/`presets/` intent against a product sandbox)
+MUST NOT be rebound via combo-box. The skill records
+`rejected_candidate` + reason, then discovers or authors.
+
 ### `plan_diff_clarify` — plan intent ↔ git diff disagree
 
-Triggered by `scripts/plan_diff.py` when the development plan's
-intent fields disagree with the current git diff (paths changed, U-ID
-list, scope).
+Triggered by `scripts/plan_diff.py` when the **resolved** development
+plan's intent fields disagree with the current git diff (paths
+changed, U-ID list, scope).
 
 **Cross-repo auto-pass (not a decision point).** When
 `AuditDecision.cross_repo` is `True` (plan git toplevel ≠

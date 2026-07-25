@@ -117,6 +117,7 @@ def test_e2e_bootstrap_interaction_doc_has_decision_table() -> None:
     # Every decision point from SKILL.md must appear in
     # references/interaction.md and be documented as a combo-box.
     for decision in (
+        "plan_resolve_choice",
         "plan_diff_clarify",
         "binary_resolution",
         "preset_gap",
@@ -127,6 +128,7 @@ def test_e2e_bootstrap_interaction_doc_has_decision_table() -> None:
         assert decision in text, f"interaction.md must document {decision!r}"
     for token in ("recommended option", "Other", "consequence", "2–4"):
         assert token in text, f"interaction.md must contain combo-box token {token!r}"
+    assert "hard reject" in text.lower() or "hard-rejected" in text.lower()
 
 
 def test_e2e_bootstrap_no_preset_write_anchor() -> None:
@@ -148,8 +150,21 @@ def test_e2e_bootstrap_no_live_run_default() -> None:
 def test_e2e_bootstrap_no_plan_rewrite() -> None:
     """SKILL.md must declare the plan-read-only invariant (R13)."""
     text = SKILL_DOC.read_text(encoding="utf-8")
-    assert "NEVER rewrites the plan file" in text or "read-only" in text.lower()
+    assert (
+        "NEVER rewrites a caller-supplied plan" in text
+        or "NEVER rewrite a caller-supplied plan" in text
+        or "NEVER rewrites the plan file" in text
+        or "read-only" in text.lower()
+    )
     assert "--plan" in text
+    assert "plan_resolve" in text or "R15" in text
+
+
+def test_e2e_bootstrap_plan_resolve_hard_reject_anchor() -> None:
+    """SKILL.md must hard-reject unfit orchestrator plans (R15)."""
+    text = SKILL_DOC.read_text(encoding="utf-8")
+    assert "hard-reject" in text.lower() or "hard reject" in text.lower()
+    assert "plan_resolve" in text
 
 
 # ---------------------------------------------------------------------------

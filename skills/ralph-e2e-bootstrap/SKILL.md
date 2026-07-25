@@ -16,17 +16,29 @@ arbitrary project bootstrap (`ralph-project-bootstrap` owns that) and
 
 ## Boundaries
 
-- **Inputs.** Caller supplies (1) a development plan path
-  (`docs/plans/<id>-<slug>.md`) and (2) an E2E sandbox directory the
-  skill owns for the duration of the run. The sandbox is **not**
-  forced to be `crates/ralph-e2e`; any caller-owned directory the
-  operator designates as the E2E harness root works.
-- **Read-only on the plan.** The plan file is read as the canonical
-  intent source. The skill NEVER rewrites the plan file (R13); the
-  bytes are read once, hashed, and staged into the sandbox at
-  `<sandbox>/docs/plans/<basename>`. The launch argv references
-  the staged sandbox-relative path (`--plan docs/plans/<basename>`)
-  so the operator's launch command is portable across machines.
+- **Inputs.** Caller supplies an E2E **sandbox** directory the skill
+  owns for the run, and optionally a development plan path. The
+  sandbox is **not** forced to be `crates/ralph-e2e`; any
+  caller-owned directory the operator designates as the E2E harness
+  root works. Plan path is **optional**: when omitted, or when the
+  supplied plan fails the sandbox fitness gate, the skill resolves a
+  sandbox-local plan via `scripts/plan_resolve.py` (discover under
+  `<sandbox>/docs/plans/`, else author a minimal E2E plan).
+- **Plan resolve before audit (R15).** Before `plan_diff` / suite
+  generation, run `plan_resolve.resolve_plan(sandbox, candidate=…)`.
+  Unfit candidates (e.g. orchestrator `crates/`/`presets/` fix plans
+  aimed at a product sandbox with no such trees) are **hard-rejected**
+  — do **not** offer a combo-box that re-binds them. Prefer a suitable
+  sandbox-local plan; if none exist, author
+  `docs/plans/<date>-e2e-bootstrap-minimal-<stem>-plan.md` inside the
+  sandbox only.
+- **Read-only on caller plans (R13).** The skill NEVER rewrites a
+  caller-supplied plan file. Resolved plan bytes are read once,
+  hashed, and staged into `<sandbox>/docs/plans/<basename>` when the
+  source is outside the sandbox; sandbox-local plans are used in
+  place. Launch argv always uses sandbox-relative
+  `--plan docs/plans/<basename>`. Authoring a **new** minimal plan
+  under the sandbox is allowed (R15) and is not an R13 violation.
 - **No preset authoring.** Preset topology, AAF tables and builtin
   completions live in `ralph-preset-author` / `ralph-preset-review`.
   When the existing preset does not cover the plan's verification
@@ -58,6 +70,7 @@ Every user-decision point in this skill is rendered as a **combo-box**:
 
 | Decision point | Trigger | Default (recommended first) |
 |----------------|---------|------------------------------|
+| `plan_resolve_choice` | multiple suitable sandbox plans / operator asks which local plan (R15) | highest-scored discovered plan |
 | `plan_diff_clarify` | plan intent ↔ git diff disagree (S2) | accept plan intent and re-audit (R4) |
 | `binary_resolution` | PATH has no usable `ralph` OR feature requirement unmet (S4) | rebuild via `cargo build` (R6) |
 | `preset_gap` | no builtin/file preset covers the plan's verification intent (S3) | handoff to `ralph-preset-author` (R5) |
@@ -65,11 +78,13 @@ Every user-decision point in this skill is rendered as a **combo-box**:
 | `argv_shape` | `--plan <abs>` vs `--prompt-file <abs>` (R13) | `--plan` (plan-driven default) |
 | `live_run` | operator asks whether to spawn a live loop after the handoff (R10) | stay static-only |
 
+**Not a decision point:** unfit caller plan → hard reject + discover/author (R15). Do not offer "accept unfit orchestrator plan into product sandbox".
+
 The full table is mirrored in `references/interaction.md`.
 
 ## Workflow
 
-U1 → U2 → U3 → U4 → U5 → U6 strictly serial. Each Unit records
+U1 → U2 → U3 → U4 → U5 → U6 → U7 strictly serial. Each Unit records
 acceptance in `.ralph/agent/decisions.md`.
 
 1. **U1 — Scaffolding & Catalog.** Materialise the skill tree and
@@ -77,45 +92,30 @@ acceptance in `.ralph/agent/decisions.md`.
    Author `references/interaction.md`. Verify `skills/tests/test_install.py`
    + `skills/tests/test_e2e_bootstrap_contract.py` catalogue anchors
    are green.
-2. **U2 — Plan × Diff Audit.** Run `scripts/plan_diff.py` to reconcile
-   the development plan against the working-tree diff. On disagreement,
-   raise `plan_diff_clarify` combo-box. On unreadable plan, raise
-   `blocked`. No writes happen until this stage reports `ok`.
-3. **U3 — Binary Resolution.** Run `scripts/binary_resolve.py` to pick
+2. **U2 — Plan Resolve (R15).** Run `scripts/plan_resolve.py`
+   `resolve_plan(sandbox, candidate=optional_plan, preset=…)`.
+   Record `source` / `rejected_candidate` in decisions.md. Unfit
+   candidate → hard reject (no override combo-box). Prefer discovered
+   sandbox plan; else author minimal plan. Only the resolved path
+   proceeds.
+3. **U3 — Plan × Diff Audit.** Run `scripts/plan_diff.py` on the
+   **resolved** plan (sandbox as `repo_root` for sandbox-local work).
+   On disagreement, raise `plan_diff_clarify`. On unreadable plan,
+   raise `blocked`. No suite writes until `ok`.
+4. **U4 — Binary Resolution.** Run `scripts/binary_resolve.py` to pick
    the `ralph` executable. Priority: explicit `--ralph-binary` >
-   `RALPH_BINARY` env > `PATH` lookup > suggest `cargo build` (which
-   becomes a combo-box choice). A non-existent or non-executable path
-   raises `blocked`.
-4. **U4 — Sandbox Suite.** Run `scripts/sandbox_suite.py` to author
-   `ralph.<stem>.yml` + `PROMPT.<stem>.md` inside the caller-supplied
-   sandbox directory. The script also stages the caller-supplied plan
-   into `<sandbox>/docs/plans/<basename>` (R13: source bytes are
-   untouched; the staged file is a sandbox-scoped artefact). The
-   generated argv uses the sandbox-relative path
-   (`--plan docs/plans/<basename>`) so the launch command is portable
-   and works when the live loop is started from the sandbox cwd.
-   Pass the resolved binary from U3 as `binary=` so `argv` /
-   `launch_argv` match the gate binary (R6). The pair is
-   **preset-bound** (`<stem>` derives from the resolved preset).
-   Refuse to write inside `presets/`. Do not declare preset opt-in
-   subtrees such as `event_loop.supervisor`; omission lets the
-   selected preset supply its own runtime requirements. When
-   `write_conflict` occurs and the operator selects the recommended
-   refresh option, rerun
-   `generate_suite(..., refresh_existing=True)`; this may replace only
-   files carrying the skill's provenance header.
-5. **U5 — Static Gate + Handoff.** Run `scripts/gate.py` in the
-   four-stage order: capability → preset check --strict →
-   preflight --strict → `ralph run --dry-run`. `gate.py` imports the
-   sibling probe via the same `spec_from_file_location` shim used by
-   tests. Render `scripts/e2e_handoff.py` output with `static_only:
-   true` and an explicit `not_live_run` clause. The handoff is the
-   final deliverable; nothing else mutates state.
-6. **U6 — Workflow Orchestration.** Wire U1–U5 into this SKILL.md as
-   the canonical procedure; ensure the decision-point table in this
-   file matches `references/interaction.md` exactly; ensure both
-   `test_e2e_bootstrap_contract.py` and `test_e2e_bootstrap_e2e.py`
-   pass. `test_project_bootstrap_contract.py` MUST remain unchanged.
+   `RALPH_BINARY` env > `PATH` lookup > suggest `cargo build`.
+5. **U5 — Sandbox Suite.** Run `scripts/sandbox_suite.py` with the
+   **resolved** plan. Stage when needed (R13: caller plan bytes
+   untouched). Argv uses sandbox-relative `--plan docs/plans/<basename>`.
+   Pass U4 binary. On `write_conflict` + recommended refresh, rerun
+   `generate_suite(..., refresh_existing=True)`.
+6. **U6 — Static Gate + Handoff.** Run `scripts/gate.py`; render
+   `e2e_handoff.py` with `static_only: true`. Handoff `--plan` MUST
+   be the resolved basename.
+7. **U7 — Workflow Orchestration.** Keep decision tables in sync;
+   `test_plan_resolve.py` + e2e-bootstrap contract/e2e green;
+   `test_project_bootstrap_contract.py` untouched.
 
 ## Static Gates (R7)
 
@@ -140,16 +140,22 @@ The argv MUST also include `-c ralph.<stem>.yml -H <preset>` so
 ## Guardrails
 
 - NEVER mutate `presets/**` or `crates/**` (R14).
-- NEVER rewrite the supplied plan file (R13).
+- NEVER rewrite a caller-supplied plan file (R13). Authoring a **new**
+  minimal plan under the sandbox is allowed (R15).
+- NEVER bind an unfit orchestrator-intent plan into a product sandbox
+  via combo-box override (R15 hard reject).
 - NEVER spawn a live `ralph run` without explicit operator approval
   captured in the handoff (R10).
-- Every user decision is rendered as a combo-box (R12).
+- Every user decision is rendered as a combo-box (R12), except R15
+  hard rejects which are not decision points.
 - Every argv MUST carry `-c ralph.<stem>.yml -H <preset>` explicitly.
 - The handoff MUST declare `static_only: true` and a free-form
   `not_live_run` note; `static_only` and `loop closed` MUST NOT be
   conflated.
 - All paths persisted to disk are repo-relative; absolute argv values
   are kept inside the handoff only.
+- Handoff `--plan` MUST be the **resolved** sandbox-local basename,
+  never an unfit rejected candidate.
 
 ## Catalog Wiring (U1)
 
