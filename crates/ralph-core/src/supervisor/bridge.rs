@@ -151,6 +151,14 @@ pub trait SupervisorBridge: std::fmt::Debug + Send + Sync {
     /// surface.
     fn recover(&self) -> Result<Vec<WaveSnapshot>, BridgeError>;
 
+    /// 2026-07-25-004 plan U5 (R6 / AE5): read the current
+    /// slot/lifecycle snapshot from the underlying store.
+    /// Used by the diagnostics JSON builder in the InjectedFailed
+    /// arm. Default: return an error so bridges without a store
+    /// don't silently return wrong data; implementations that have
+    /// a store override this.
+    fn fan_in_status(&self, wave_id: &str) -> Result<WaveSnapshot, BridgeError>;
+
     /// 2026-07-03-001 supervisor real-wiring: register a wave
     /// in the supervisor store if it is not already present.
     /// Idempotent — re-registering the same `wave_id` is a
@@ -194,6 +202,51 @@ pub trait SupervisorBridge: std::fmt::Debug + Send + Sync {
         slot_index: u32,
         reason: &str,
     ) -> Result<(), BridgeError>;
+
+    /// 2026-07-25-004 plan U4 (R4 / R5 / AE4): record
+    /// `slot_never_started` for every slot that is still
+    /// `Pending` (never reached `Dispatched`/`Running`) when a
+    /// wave fails. Idempotent: same-reason replay is a no-op
+    /// because `record_slot_failure` already enforces first-terminal-wins.
+    ///
+    /// 2026-07-25-004 plan U3: this shared default IS the single
+    /// authoritative implementation — the store-backed bridges
+    /// (`InMemoryCoordinatorBridge`, `CoordinatorSupervisorBridge`)
+    /// inherit it instead of duplicating the logic. Per-slot
+    /// errors are NOT swallowed: a non-idempotent rejection
+    /// (e.g. `AlreadyTerminal` for a slot that reached a terminal
+    /// state with a different reason between the snapshot read
+    /// and the record) propagates upward so the dispatcher's
+    /// warn branch is reachable for real I/O / lock / state
+    /// errors.
+    fn record_never_started_failures(&self, wave_id: &str) -> Result<(), BridgeError> {
+        use crate::supervisor::SlotStatus;
+        use crate::supervisor::worker_outcome::REASON_SLOT_NEVER_STARTED;
+        let snap = self.fan_in_status(wave_id)?;
+        for (slot_index, status) in &snap.slots {
+            if *status == SlotStatus::Pending {
+                // Fail-fast: same-reason replays already return
+                // Ok(()) via the store's idempotency contract, so
+                // any Err here is a real non-idempotent rejection
+                // that the caller must observe.
+                self.record_slot_failure(wave_id, *slot_index, REASON_SLOT_NEVER_STARTED)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// 2026-07-25-004 plan U5 (R6 / AE5): read a slot's
+    /// recorded failure reason. Returns `None` for non-failed
+    /// slots (Completed, Pending, Dispatched, Running) or when
+    /// the reason was never recorded. Default: `Ok(None)` so
+    /// mocks / bridges without a store stay compiling.
+    fn slot_failure_reason(
+        &self,
+        _wave_id: &str,
+        _slot_index: u32,
+    ) -> Result<Option<String>, BridgeError> {
+        Ok(None)
+    }
 
     /// Release the global dispatch permit after a worker reaches a
     /// terminal state. Bridges without a store retain the legacy no-op.
@@ -349,6 +402,12 @@ impl SupervisorBridge for InMemoryCoordinatorBridge {
             .map_err(|err| BridgeError::Store(err.to_string()))
     }
 
+    fn fan_in_status(&self, wave_id: &str) -> Result<WaveSnapshot, BridgeError> {
+        self.store
+            .fan_in_status(wave_id)
+            .map_err(|err| BridgeError::Store(err.to_string()))
+    }
+
     fn register_wave_if_absent(
         &self,
         kind: WaveKind,
@@ -409,6 +468,16 @@ impl SupervisorBridge for InMemoryCoordinatorBridge {
         self.store
             .record_slot_failure(wave_id, slot_index, reason)?;
         Ok(())
+    }
+
+    fn slot_failure_reason(
+        &self,
+        wave_id: &str,
+        slot_index: u32,
+    ) -> Result<Option<String>, BridgeError> {
+        self.store
+            .slot_failure_reason(wave_id, slot_index)
+            .map_err(|e| BridgeError::Store(e.to_string()))
     }
 
     fn release_slot_dispatch(
@@ -545,6 +614,209 @@ mod tests {
         assert!(!is_supervisor_path_enabled(true, false));
         assert!(!is_supervisor_path_enabled(false, true));
         assert!(!is_supervisor_path_enabled(false, false));
+    }
+
+    // ─────────────────────────────────────────────────────────────────
+    // G2: 2026-07-25-004 plan U4 (R4 / R5 / AE4)
+    // Store integration: `record_never_started_failures`
+    // ─────────────────────────────────────────────────────────────────
+
+    /// G2 T1: register wave (expected_total=3), complete slot 0,
+    /// never touch slots 1, 2 → call `record_never_started_failures`
+    /// → slots 1, 2 are Failed with reason `slot_never_started`,
+    /// slot 0 stays Completed.
+    #[test]
+    fn g2_record_never_started_marks_pending_slots() {
+        use crate::supervisor::SlotStatus;
+
+        let store = std::sync::Arc::new(InMemorySupervisorStore::new());
+        let bridge = InMemoryCoordinatorBridge::from_store(
+            store.clone() as std::sync::Arc<dyn SupervisorStore>
+        );
+
+        let store_id = bridge
+            .register_wave_if_absent(WaveKind::Exec, "g2-wave", 3)
+            .unwrap();
+
+        // Dispatch and complete slot 0.
+        store
+            .bind_worktree(
+                &store_id,
+                0,
+                SlotResource {
+                    slot_index: 0,
+                    worktree_path: Some(".ralph/g2".to_string()),
+                    branch: Some("ralph/g2".to_string()),
+                },
+            )
+            .unwrap();
+        let _ = store.try_dispatch_next(4).unwrap().unwrap();
+        store
+            .record_slot_result(&store_id, 0, "hash-g2", 1)
+            .unwrap();
+
+        // Slots 1 and 2 are still Pending — never dispatched.
+        // Call the helper.
+        bridge.record_never_started_failures(&store_id).unwrap();
+
+        // Verify slot 0 stayed Completed.
+        let snap = store.fan_in_status(&store_id).unwrap();
+        assert_eq!(
+            snap.slots.iter().find(|(i, _)| *i == 0).map(|(_, s)| *s),
+            Some(SlotStatus::Completed),
+            "slot 0 must stay Completed"
+        );
+
+        // Verify slots 1 and 2 are now Failed with reason `slot_never_started`.
+        for slot_index in [1u32, 2] {
+            let snap = store.fan_in_status(&store_id).unwrap();
+            let (_, status) = snap.slots.iter().find(|(i, _)| *i == slot_index).unwrap();
+            assert_eq!(
+                status,
+                &SlotStatus::Failed,
+                "slot {slot_index} must be Failed"
+            );
+        }
+
+        // Idempotency: second call is a no-op (same-reason replay → Ok).
+        bridge.record_never_started_failures(&store_id).unwrap();
+        let snap2 = store.fan_in_status(&store_id).unwrap();
+        assert_eq!(
+            snap2.failed_count, snap.failed_count,
+            "second call must not double-count failures"
+        );
+    }
+
+    /// Test-only bridge that serves a fixed (stale) snapshot from
+    /// `fan_in_status` while delegating every other call to a real
+    /// `InMemoryCoordinatorBridge`. Simulates the race where the
+    /// snapshot was read before the store learned a slot had
+    /// already reached a terminal state with a different reason —
+    /// the rejection `record_never_started_failures` must
+    /// propagate instead of swallowing. Inherits the trait's
+    /// shared default `record_never_started_failures`.
+    #[derive(Debug)]
+    struct StaleSnapshotBridge {
+        inner: InMemoryCoordinatorBridge,
+        stale: WaveSnapshot,
+    }
+
+    impl SupervisorBridge for StaleSnapshotBridge {
+        fn tick(
+            &self,
+            wave_id: &str,
+            inputs: PhaseInputs,
+        ) -> Result<CoordinatorAction, BridgeError> {
+            self.inner.tick(wave_id, inputs)
+        }
+
+        fn bind_slot(
+            &self,
+            kind: WaveKind,
+            wave_id: &str,
+            slot_index: u32,
+        ) -> Result<Option<SlotBinding>, BridgeError> {
+            self.inner.bind_slot(kind, wave_id, slot_index)
+        }
+
+        fn recover(&self) -> Result<Vec<WaveSnapshot>, BridgeError> {
+            self.inner.recover()
+        }
+
+        fn fan_in_status(&self, _wave_id: &str) -> Result<WaveSnapshot, BridgeError> {
+            Ok(self.stale.clone())
+        }
+
+        fn register_wave_if_absent(
+            &self,
+            kind: WaveKind,
+            wave_id: &str,
+            expected_total: u32,
+        ) -> Result<String, BridgeError> {
+            self.inner
+                .register_wave_if_absent(kind, wave_id, expected_total)
+        }
+
+        fn record_slot_result(
+            &self,
+            wave_id: &str,
+            slot_index: u32,
+            content_hash: &str,
+            event_count: usize,
+        ) -> Result<(), BridgeError> {
+            self.inner
+                .record_slot_result(wave_id, slot_index, content_hash, event_count)
+        }
+
+        fn record_slot_failure(
+            &self,
+            wave_id: &str,
+            slot_index: u32,
+            reason: &str,
+        ) -> Result<(), BridgeError> {
+            self.inner.record_slot_failure(wave_id, slot_index, reason)
+        }
+    }
+
+    /// G2 T2: a slot the (stale) snapshot still shows as `Pending`
+    /// is already terminally `Failed(worker_timeout)` in the store.
+    /// The store's first-terminal-wins contract rejects the
+    /// different-reason replay (`AlreadyTerminal`); the helper MUST
+    /// propagate that rejection as `Err` instead of swallowing it
+    /// with `let _ =`.
+    #[test]
+    fn g2_record_never_started_propagates_non_idempotent_error() {
+        use crate::supervisor::SlotStatus;
+        use crate::supervisor::worker_outcome::REASON_WORKER_TIMEOUT;
+
+        let store = std::sync::Arc::new(InMemorySupervisorStore::new());
+        let inner = InMemoryCoordinatorBridge::from_store(
+            store.clone() as std::sync::Arc<dyn SupervisorStore>
+        );
+
+        let store_id = inner
+            .register_wave_if_absent(WaveKind::Exec, "g2-prop-wave", 2)
+            .unwrap();
+
+        // Slot 1: terminally Failed with a DIFFERENT reason than
+        // the `slot_never_started` the helper is about to write.
+        inner
+            .record_slot_failure(&store_id, 1, REASON_WORKER_TIMEOUT)
+            .unwrap();
+
+        // Stale view: the snapshot still shows slot 1 as Pending
+        // (read before the store learned about the failure), so
+        // the helper attempts `slot_never_started` on it.
+        let mut stale = inner.fan_in_status(&store_id).unwrap();
+        for (idx, status) in stale.slots.iter_mut() {
+            if *idx == 1 {
+                *status = SlotStatus::Pending;
+            }
+        }
+
+        let bridge = StaleSnapshotBridge { inner, stale };
+        let result = bridge.record_never_started_failures(&store_id);
+        assert!(
+            result.is_err(),
+            "non-idempotent per-slot rejection must propagate upward; got {result:?}"
+        );
+    }
+
+    /// G2 T3: `fan_in_status` on an unknown wave returns `Err` —
+    /// the helper must propagate it (existing behavior preserved
+    /// by the shared implementation).
+    #[test]
+    fn g2_record_never_started_unknown_wave_errors() {
+        let store = std::sync::Arc::new(InMemorySupervisorStore::new());
+        let bridge = InMemoryCoordinatorBridge::from_store(
+            store.clone() as std::sync::Arc<dyn SupervisorStore>
+        );
+
+        let result = bridge.record_never_started_failures("no-such-wave");
+        assert!(
+            result.is_err(),
+            "fan_in_status error on an unknown wave must propagate; got {result:?}"
+        );
     }
 }
 

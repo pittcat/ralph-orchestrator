@@ -14,9 +14,9 @@
 //! | !=0  | >0          | none          | no        | missing_worker_terminal |
 //! | !=0  | >0          | done          | yes       | — |
 //! | !=0  | >0          | failed        | yes       | — |
-//! | timeout | 0         | (worker died)| no        | empty_worker_result |
-//! | timeout | >0        | none          | no (partial evidence kept) | missing_worker_terminal |
-//! | timeout | >0        | done          | yes (terminal commits within deadline) |
+//! | timeout | 0           | none          | no        | worker_timeout |
+//! | timeout | >0          | none          | no (partial evidence kept) | missing_worker_terminal |
+//! | timeout | >0          | done/failed   | yes       | (terminal wins: Completed) |
 //! | cancel | any        | none          | no        | worker_cancelled |
 //!
 //! Distinct error reasons are kept stable so the dispatcher
@@ -33,6 +33,11 @@ pub const REASON_MISSING_WORKER_TERMINAL: &str = "missing_worker_terminal";
 pub const REASON_CONFLICTING_WORKER_TERMINAL: &str = "conflicting_worker_terminal";
 pub const REASON_WORKER_TIMEOUT: &str = "worker_timeout";
 pub const REASON_WORKER_CANCELLED: &str = "worker_cancelled";
+/// 2026-07-25-004 plan U4 (R4 / R5 / AE4): a slot that was
+/// registered but never reached `Dispatched`/`Running` before
+/// the wave was marked `Failed`. Distinct from `worker_timeout`
+/// (for slots that did dispatch but never reported a terminal).
+pub const REASON_SLOT_NEVER_STARTED: &str = "slot_never_started";
 
 /// Terminal kind inferred from the worker event stream.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -146,17 +151,30 @@ pub fn classify_worker_outcome(
         };
     }
     if exit.is_timeout() {
+        // KTD9: three-way split on terminals + accepted_event_count
         if terminals.is_empty() {
+            // Empty terminals: distinguish by whether we have events.
+            if accepted_event_count == 0 {
+                return SlotOutcome::Failed {
+                    reason: REASON_WORKER_TIMEOUT,
+                };
+            }
+            // Events seen but no terminal marker emitted → KTD9 row 3
             return SlotOutcome::Failed {
-                reason: REASON_WORKER_TIMEOUT,
+                reason: REASON_MISSING_WORKER_TERMINAL,
             };
         }
-        // Timeout with a terminal still in flight: the worker's
-        // output counts, but the slot final state is timeout —
-        // a worker that ran past its lease cannot lift the
-        // failure even if it managed to print success text.
-        return SlotOutcome::Failed {
-            reason: REASON_WORKER_TIMEOUT,
+        // Non-empty terminals: the worker's own terminal markers
+        // take precedence — the timeout only means the dispatcher's
+        // lease expired, not that the worker's output is invalid.
+        return match WorkerTerminalKind::from_events(terminals) {
+            WorkerTerminalKind::Missing => SlotOutcome::Failed {
+                // events > 0 but no terminal marker → KTD9
+                reason: REASON_MISSING_WORKER_TERMINAL,
+            },
+            WorkerTerminalKind::Done | WorkerTerminalKind::Failed => {
+                SlotOutcome::Completed(WorkerTerminalKind::from_events(terminals))
+            }
         };
     }
 
@@ -227,17 +245,19 @@ mod tests {
         assert_eq!(out, SlotOutcome::Completed(WorkerTerminalKind::Done));
     }
 
+    /// U2 (KTD9): Timeout + non-empty terminals → Completed
+    /// (terminal wins over the dispatcher's lease expiry).
     #[test]
-    fn table_a3_4_timeout_partial_evidence_still_fails_timeout() {
+    fn table_a3_4_timeout_with_done_marker_completes() {
         let out = classify_worker_outcome(WorkerExit::Timeout, 5, &[TerminalMarker::Done]);
-        assert_eq!(
-            out,
-            SlotOutcome::Failed {
-                reason: REASON_WORKER_TIMEOUT
-            }
-        );
+        assert_eq!(out, SlotOutcome::Completed(WorkerTerminalKind::Done));
     }
 
+    /// U1 characterization — U2 will flip this assertion: after U2 lands,
+    /// Timeout + zero accepted events MUST resolve to
+    /// `SlotOutcome::Completed(WorkerTerminalKind::Missing)` (exit=0, no terminal,
+    /// partial evidence kept), not `SlotOutcome::Failed { reason: REASON_WORKER_TIMEOUT }`.
+    /// Do NOT change the assertion; change the comment to match the flip.
     #[test]
     fn timeout_zero_events_is_timeout_not_empty() {
         let out = classify_worker_outcome(WorkerExit::Timeout, 0, &[]);
@@ -286,6 +306,58 @@ mod tests {
             5,
             &[TerminalMarker::Done, TerminalMarker::Done],
         );
+        assert_eq!(
+            out,
+            SlotOutcome::Failed {
+                reason: REASON_WORKER_CANCELLED
+            }
+        );
+    }
+
+    // --- U2 acceptance tests (KTD9 / R1 / R2 / R-W4) ---
+
+    /// AE1: Timeout + Done marker → Completed(Done).
+    #[test]
+    fn u2_timeout_with_done_marker_completes() {
+        let out = classify_worker_outcome(WorkerExit::Timeout, 5, &[TerminalMarker::Done]);
+        assert_eq!(out, SlotOutcome::Completed(WorkerTerminalKind::Done));
+    }
+
+    /// AE2: Timeout + Failed marker → Completed(Failed).
+    #[test]
+    fn u2_timeout_with_failed_marker_completes_as_failed_terminal() {
+        let out = classify_worker_outcome(WorkerExit::Timeout, 7, &[TerminalMarker::Failed]);
+        assert_eq!(out, SlotOutcome::Completed(WorkerTerminalKind::Failed));
+    }
+
+    /// KTD9 row 1: Timeout + zero events + empty terminals → worker_timeout.
+    #[test]
+    fn u2_timeout_zero_events_is_worker_timeout() {
+        let out = classify_worker_outcome(WorkerExit::Timeout, 0, &[]);
+        assert_eq!(
+            out,
+            SlotOutcome::Failed {
+                reason: REASON_WORKER_TIMEOUT
+            }
+        );
+    }
+
+    /// KTD9 row 3: Timeout + events but no terminal marker → missing_worker_terminal.
+    #[test]
+    fn u2_timeout_events_but_no_terminal_marker_is_missing_worker_terminal() {
+        let out = classify_worker_outcome(WorkerExit::Timeout, 4, &[]);
+        assert_eq!(
+            out,
+            SlotOutcome::Failed {
+                reason: REASON_MISSING_WORKER_TERMINAL
+            }
+        );
+    }
+
+    /// KTD1 regression: cancel still wins even with a Done marker present.
+    #[test]
+    fn u2_cancel_still_wins_over_timeout_with_terminal() {
+        let out = classify_worker_outcome(WorkerExit::Cancelled, 3, &[TerminalMarker::Done]);
         assert_eq!(
             out,
             SlotOutcome::Failed {

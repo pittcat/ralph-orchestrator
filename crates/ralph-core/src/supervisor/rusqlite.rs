@@ -741,17 +741,55 @@ impl SupervisorStore for RusqliteSupervisorStore {
         })
     }
 
+    fn slot_failure_reason(
+        &self,
+        wave_id: &str,
+        slot_index: u32,
+    ) -> SupervisorStoreResult<Option<String>> {
+        self.with_conn(|conn| {
+            // Read the column as `Option<String>` so a SQL NULL
+            // failure_reason projects to the `Ok(None)` column value
+            // rather than raising `InvalidColumnType`. `.optional()?`
+            // then lifts "no such row" into the outer `None`, which we
+            // map to `UnknownSlot` — symmetric with the in-memory store
+            // (memory.rs:580-588) that errors on an absent slot.
+            let row: Option<Option<String>> = conn
+                .query_row(
+                    "SELECT failure_reason FROM wave_slots
+                     WHERE wave_id = ?1 AND slot_index = ?2",
+                    rusqlite::params![wave_id, i64::from(slot_index)],
+                    |row| row.get::<_, Option<String>>(0),
+                )
+                .optional()?;
+            match row {
+                None => Err(SupervisorStoreError::UnknownSlot {
+                    wave_id: wave_id.to_string(),
+                    slot_index,
+                }),
+                Some(reason) => Ok(reason),
+            }
+        })
+    }
+
     fn cancel_wave(&self, wave_id: &str) -> SupervisorStoreResult<()> {
+        use crate::supervisor::worker_outcome::REASON_SLOT_NEVER_STARTED;
         self.with_conn(|conn| {
             conn.execute(
                 "UPDATE waves SET cancel_requested = 1, updated_at = strftime('%s','now')
                  WHERE wave_id = ?1",
                 [&wave_id],
             )?;
+            // 2026-07-25-004 plan U5: also freeze `failure_reason` to
+            // `slot_never_started` for the Pending slots we cancel here,
+            // so the InjectedFailed reason-collection sees a non-null
+            // reason for cancelled never-started slots. The
+            // `status = 'pending'` guard is essential: already-terminal
+            // slots (Completed/Failed with their own reason, or
+            // Dispatched/Running) are NOT overwritten.
             conn.execute(
-                "UPDATE wave_slots SET status = 'cancelled'
+                "UPDATE wave_slots SET status = 'cancelled', failure_reason = ?2
                  WHERE wave_id = ?1 AND status = 'pending'",
-                [&wave_id],
+                rusqlite::params![wave_id, REASON_SLOT_NEVER_STARTED],
             )?;
             Ok(())
         })
@@ -1548,6 +1586,60 @@ mod tests {
         assert_eq!(snap.in_flight_count, 1);
     }
 
+    /// U2 (rusqlite variant): a bound slot with no recorded
+    /// failure has a SQL NULL `failure_reason`, which MUST read
+    /// back as `Ok(None)` — symmetric with the in-memory store.
+    /// Pre-fix the closure inferred `Result<String>`, so NULL
+    /// raised `InvalidColumnType`.
+    #[test]
+    fn u2_slot_failure_reason_null_returns_none() {
+        let store = store();
+        let wave = store.register_wave("u2-null", WaveKind::Exec, 1).unwrap();
+        store.bind_worktree(&wave, 0, bind(0)).unwrap();
+        // No record_slot_failure call → column stays NULL.
+        assert_eq!(store.slot_failure_reason(&wave, 0).unwrap(), None);
+    }
+
+    /// U2 (rusqlite variant): a recorded failure reason reads
+    /// back as `Ok(Some(reason))`.
+    #[test]
+    fn u2_slot_failure_reason_value_returns_some() {
+        use crate::supervisor::worker_outcome::REASON_WORKER_TIMEOUT;
+        let store = store();
+        let wave = store.register_wave("u2-val", WaveKind::Exec, 1).unwrap();
+        store.bind_worktree(&wave, 0, bind(0)).unwrap();
+        store
+            .record_slot_failure(&wave, 0, REASON_WORKER_TIMEOUT)
+            .unwrap();
+        assert_eq!(
+            store.slot_failure_reason(&wave, 0).unwrap(),
+            Some(REASON_WORKER_TIMEOUT.to_string())
+        );
+    }
+
+    /// U2 (rusqlite variant): querying a slot that was never
+    /// bound MUST return `UnknownSlot`, symmetric with the
+    /// in-memory store (which has no row to project). Pre-fix the
+    /// missing row mapped to `Ok(None)` via `.optional()`.
+    #[test]
+    fn u2_slot_failure_reason_missing_slot_returns_unknown_slot() {
+        let store = store();
+        let wave = store
+            .register_wave("u2-missing", WaveKind::Exec, 1)
+            .unwrap();
+        store.bind_worktree(&wave, 0, bind(0)).unwrap();
+        // slot_index 7 was never registered for this wave.
+        let err = store.slot_failure_reason(&wave, 7).unwrap_err();
+        assert!(
+            matches!(
+                &err,
+                SupervisorStoreError::UnknownSlot { wave_id, slot_index }
+                    if wave_id == &wave && *slot_index == 7
+            ),
+            "expected UnknownSlot, got {err:?}"
+        );
+    }
+
     /// R-A2: backpressure returns None when cap is hit.
     #[test]
     fn backpressure_blocks_when_cap_is_hit() {
@@ -1639,6 +1731,59 @@ mod tests {
         assert!(snap.cancel_requested);
         assert_eq!(snap.pending_count, 2);
         assert_eq!(snap.failed_count, 0);
+    }
+
+    /// 2026-07-25-004 plan U5: when `cancel_wave` flips a Pending
+    /// slot to Cancelled it MUST also freeze `failure_reason` to
+    /// `slot_never_started`, so the InjectedFailed reason-collection
+    /// (which inserts a reason whenever `slot_failure_reason` returns
+    /// `Ok(Some(_))` for a Failed|Cancelled slot) produces a non-null
+    /// reason. Already-terminal slots (Completed, or Failed with their
+    /// own reason) MUST NOT be overwritten — the `status = 'pending'`
+    /// guard in the UPDATE enforces this.
+    #[test]
+    fn u5_cancel_freezes_never_started_reason() {
+        use crate::supervisor::worker_outcome::{REASON_SLOT_NEVER_STARTED, REASON_WORKER_TIMEOUT};
+        let store = store();
+        let wave = store.register_wave("u5-cancel", WaveKind::Exec, 3).unwrap();
+        for i in 0..3 {
+            store.bind_worktree(&wave, i, bind(i)).unwrap();
+        }
+        // Slot 0: dispatch + complete → terminal Completed, reason None.
+        store.try_dispatch_next(4).unwrap().unwrap();
+        store.record_slot_result(&wave, 0, "h0", 1).unwrap();
+        // Slot 1: dispatch then fail with worker_timeout → terminal
+        // Failed carrying its own reason (must NOT be overwritten).
+        store.try_dispatch_next(4).unwrap().unwrap();
+        store
+            .record_slot_failure(&wave, 1, REASON_WORKER_TIMEOUT)
+            .unwrap();
+        // Slot 2: stays Pending (never dispatched).
+        store.cancel_wave(&wave).unwrap();
+
+        let snap = store.fan_in_status(&wave).unwrap();
+        let status = |idx: u32| {
+            snap.slots
+                .iter()
+                .find(|(i, _)| *i == idx)
+                .map(|(_, s)| *s)
+                .unwrap()
+        };
+        // Slot 2 flipped Pending → Cancelled, reason frozen.
+        assert_eq!(status(2), SlotStatus::Cancelled);
+        assert_eq!(
+            store.slot_failure_reason(&wave, 2).unwrap(),
+            Some(REASON_SLOT_NEVER_STARTED.to_string())
+        );
+        // Slot 0 Completed, untouched, reason None.
+        assert_eq!(status(0), SlotStatus::Completed);
+        assert_eq!(store.slot_failure_reason(&wave, 0).unwrap(), None);
+        // Slot 1 already Failed with worker_timeout → NOT overwritten.
+        assert_eq!(status(1), SlotStatus::Failed);
+        assert_eq!(
+            store.slot_failure_reason(&wave, 1).unwrap(),
+            Some(REASON_WORKER_TIMEOUT.to_string())
+        );
     }
 
     /// R-C4: opening a corrupted / unreadable path returns

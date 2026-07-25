@@ -44,7 +44,7 @@ use crate::loop_runner::wave::{
     BridgeError, MockSupervisorBridge, SlotBinding, SupervisorBridge, WaveWorkerExecutor,
     is_supervisor_path_enabled,
 };
-use ralph_core::supervisor::{PhaseInputs, WaveKind};
+use ralph_core::supervisor::{PhaseInputs, SlotResource, WaveKind, WaveSnapshot};
 use std::collections::HashMap;
 use std::sync::Mutex;
 
@@ -108,6 +108,12 @@ impl SupervisorBridge for SpyBindingBridge {
 
     fn recover(&self) -> Result<Vec<ralph_core::supervisor::WaveSnapshot>, BridgeError> {
         Ok(Vec::new())
+    }
+
+    fn fan_in_status(&self, _wave_id: &str) -> Result<WaveSnapshot, BridgeError> {
+        Err(BridgeError::Store(
+            "SpyBindingBridge has no store".to_string(),
+        ))
     }
 
     // 2026-07-03-001 supervisor real-wiring: the trait gained
@@ -1898,6 +1904,12 @@ impl SupervisorBridge for U3DispatchBridge {
         Ok(Vec::new())
     }
 
+    fn fan_in_status(&self, _wave_id: &str) -> Result<WaveSnapshot, BridgeError> {
+        Err(BridgeError::Store(
+            "U3DispatchBridge has no store".to_string(),
+        ))
+    }
+
     fn register_wave_if_absent(
         &self,
         kind: WaveKind,
@@ -2620,6 +2632,12 @@ impl SupervisorBridge for U5RecordingBridge {
     fn recover(&self) -> Result<Vec<ralph_core::supervisor::WaveSnapshot>, BridgeError> {
         self.store
             .recover_active_waves()
+            .map_err(|err| BridgeError::Store(err.to_string()))
+    }
+
+    fn fan_in_status(&self, wave_id: &str) -> Result<WaveSnapshot, BridgeError> {
+        self.store
+            .fan_in_status(wave_id)
             .map_err(|err| BridgeError::Store(err.to_string()))
     }
 
@@ -4105,4 +4123,135 @@ fn u7_review_default_is_shared_readonly() {
         binding.is_none(),
         "Review waves must default to shared_readonly (no worktree)"
     );
+}
+
+// ── 2026-07-25-004 plan U4: slot_never_started diagnostics ─────────────────────
+//
+// G3: the `SupervisorBridge::record_never_started_failures` contract.
+// When a wave fails with slots that never left `Pending`, those slots
+// must be recorded as `Failed` with reason `slot_never_started`. This
+// is exercised by the dispatcher in the `InjectedFailed` arm of
+// `run_supervisor_fan_in` before writing the coordination event.
+//
+// The test is scoped to the bridge + store layer (no full dispatcher
+// machinery); JSON diagnostic assertions are deferred to U5.
+
+/// G3 T1: `record_never_started_failures` on a wave with 1 completed
+/// slot and 2 Pending slots — Pending slots become `Failed` with
+/// `slot_never_started`, completed slot stays `Completed`. Second call
+/// is idempotent (same-reason replay → Ok(())).
+#[test]
+fn g3_record_never_started_marks_pending_slots_in_store() {
+    let bridge = CoordinatorSupervisorBridge::with_in_memory_store();
+    let store = bridge.store();
+
+    let wave_id = bridge
+        .register_wave_if_absent(WaveKind::Exec, "g3-wave", 3)
+        .unwrap();
+
+    // Slot 0: bind, dispatch, complete.
+    store
+        .bind_worktree(
+            &wave_id,
+            0,
+            SlotResource {
+                slot_index: 0,
+                worktree_path: Some(".ralph/g3".to_string()),
+                branch: Some("ralph/g3".to_string()),
+            },
+        )
+        .unwrap();
+    let _ = store.try_dispatch_next(4).unwrap().unwrap();
+    store.record_slot_result(&wave_id, 0, "hash-g3", 1).unwrap();
+
+    // Slots 1 and 2: still `Pending` — never dispatched.
+    bridge.record_never_started_failures(&wave_id).unwrap();
+
+    // Verify slot 0 stayed Completed.
+    let snap = store.fan_in_status(&wave_id).unwrap();
+    let (_, s0_status) = snap.slots.iter().find(|(i, _)| *i == 0).unwrap();
+    assert_eq!(
+        s0_status,
+        &ralph_core::supervisor::SlotStatus::Completed,
+        "slot 0 must stay Completed"
+    );
+
+    // Verify slots 1 and 2 are Failed with `slot_never_started`.
+    for slot_index in [1u32, 2] {
+        let snap = store.fan_in_status(&wave_id).unwrap();
+        let (_, status) = snap.slots.iter().find(|(i, _)| *i == slot_index).unwrap();
+        assert_eq!(
+            status,
+            &ralph_core::supervisor::SlotStatus::Failed,
+            "slot {slot_index} must be Failed"
+        );
+    }
+
+    // Idempotency: second call → same failed_count.
+    let snap_before = store.fan_in_status(&wave_id).unwrap();
+    let failed_before = snap_before.failed_count;
+    bridge.record_never_started_failures(&wave_id).unwrap();
+    let snap_after = store.fan_in_status(&wave_id).unwrap();
+    assert_eq!(
+        snap_after.failed_count, failed_before,
+        "second record_never_started_failures call must not double-count"
+    );
+}
+
+/// 2026-07-25-004 plan U5: cancel-closure diagnostic pin. `cancel_wave`
+/// is the only thing that flips never-started Pending slots to Cancelled
+/// on the cancel path. After U5 those Cancelled slots carry
+/// `failure_reason = slot_never_started`, so the InjectedFailed
+/// reason-collection (dispatcher.rs:2221-2233) — which inserts a reason
+/// whenever `slot_failure_reason` returns `Ok(Some(_))` for a
+/// Failed|Cancelled slot — now produces a NON-null reason for them
+/// instead of the pre-fix `status=cancelled, reason=null`.
+#[test]
+fn g3_cancel_closure_cancelled_slot_has_never_started_reason() {
+    use ralph_core::supervisor::worker_outcome::REASON_SLOT_NEVER_STARTED;
+
+    let bridge = CoordinatorSupervisorBridge::with_in_memory_store();
+    let store = bridge.store();
+
+    let wave_id = bridge
+        .register_wave_if_absent(WaveKind::Exec, "g3-cancel-wave", 3)
+        .unwrap();
+
+    // Slot 0: bind, dispatch, complete → Completed, reason None.
+    store
+        .bind_worktree(
+            &wave_id,
+            0,
+            SlotResource {
+                slot_index: 0,
+                worktree_path: Some(".ralph/g3c".to_string()),
+                branch: Some("ralph/g3c".to_string()),
+            },
+        )
+        .unwrap();
+    let _ = store.try_dispatch_next(4).unwrap().unwrap();
+    store
+        .record_slot_result(&wave_id, 0, "hash-g3c", 1)
+        .unwrap();
+
+    // Slots 1 and 2: still Pending — never dispatched. Cancel the wave.
+    bridge.cancel_wave(&wave_id).unwrap();
+
+    // Cancelled slots now expose a non-null `slot_never_started` reason
+    // through the exact bridge surface the dispatcher reads.
+    for slot_index in [1u32, 2] {
+        let reason = bridge.slot_failure_reason(&wave_id, slot_index).unwrap();
+        assert!(
+            reason.is_some(),
+            "cancelled slot {slot_index} reason must be Some"
+        );
+        assert_eq!(
+            reason.as_deref(),
+            Some(REASON_SLOT_NEVER_STARTED),
+            "cancelled slot {slot_index} must surface slot_never_started"
+        );
+    }
+
+    // The completed slot's reason stays None.
+    assert_eq!(bridge.slot_failure_reason(&wave_id, 0).unwrap(), None);
 }

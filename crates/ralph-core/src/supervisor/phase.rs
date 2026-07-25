@@ -188,7 +188,35 @@ impl WaveSnapshotExt for WaveSnapshot {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::supervisor::{SlotStatus, WavePhase};
+    use crate::supervisor::{SlotStatus, WaveKind, WavePhase};
+
+    /// 2026-07-25-004 plan U4 (R4 / R5 / AE4): pure helper
+    /// that extracts the indices of slots which are still `Pending`
+    /// in a `WaveSnapshot`. Used by the tests to verify the
+    /// `slot_never_started` classification logic.
+    ///
+    /// The `already_recorded` map carries slot indices that have
+    /// already received a `record_slot_failure` call (keyed by
+    /// slot index with their recorded reason). Slots that already
+    /// have a failure reason are excluded — this keeps the helper
+    /// idempotent-safe: calling it twice for the same wave returns
+    /// the same set on the second call.
+    fn never_started_slot_indices(
+        snapshot: &WaveSnapshot,
+        already_recorded: &std::collections::HashMap<u32, &'static str>,
+    ) -> Vec<u32> {
+        snapshot
+            .slots
+            .iter()
+            .filter_map(|(idx, status)| {
+                if *status == SlotStatus::Pending && !already_recorded.contains_key(idx) {
+                    Some(*idx)
+                } else {
+                    None
+                }
+            })
+            .collect()
+    }
 
     fn snap(
         expected_total: u32,
@@ -572,5 +600,119 @@ mod tests {
         finalize.completed_count = 5;
         assert_eq!(evaluate_phase(&finalize, &inputs), PhaseDecision::Integrate);
         let _ = SlotStatus::Pending; // ensures the import is used in tests.
+    }
+
+    // ─────────────────────────────────────────────────────────────────
+    // G1: 2026-07-25-004 plan U4 (R4 / R5 / AE4)
+    // Pure helper: `never_started_slot_indices`
+    // ─────────────────────────────────────────────────────────────────
+
+    /// G1 T1: slot 0 = Dispatched, slot 1 = Pending → returns [1].
+    #[test]
+    fn g1_never_started_one_pending_slot() {
+        let snap = WaveSnapshot {
+            wave_id: "w-g1-1".into(),
+            kind: WaveKind::Exec,
+            phase: WavePhase::Collect,
+            expected_total: 2,
+            completed_count: 0,
+            failed_count: 0,
+            pending_count: 1,
+            in_flight_count: 1,
+            cancel_requested: false,
+            merged_to_events: false,
+            started_at: std::time::SystemTime::UNIX_EPOCH,
+            slots: vec![(0, SlotStatus::Dispatched), (1, SlotStatus::Pending)],
+        };
+        let already_recorded = std::collections::HashMap::new();
+        let never_started = never_started_slot_indices(&snap, &already_recorded);
+        assert_eq!(
+            never_started,
+            vec![1],
+            "only slot 1 (Pending) should be returned"
+        );
+    }
+
+    /// G1 T2: two Pending slots + one Failed slot → returns the two Pending only.
+    #[test]
+    fn g1_never_started_two_pending_one_failed() {
+        let snap = WaveSnapshot {
+            wave_id: "w-g1-2".into(),
+            kind: WaveKind::Exec,
+            phase: WavePhase::Collect,
+            expected_total: 3,
+            completed_count: 0,
+            failed_count: 1,
+            pending_count: 2,
+            in_flight_count: 0,
+            cancel_requested: false,
+            merged_to_events: false,
+            started_at: std::time::SystemTime::UNIX_EPOCH,
+            slots: vec![
+                (0, SlotStatus::Pending),
+                (1, SlotStatus::Failed),
+                (2, SlotStatus::Pending),
+            ],
+        };
+        let already_recorded = std::collections::HashMap::new();
+        let never_started = never_started_slot_indices(&snap, &already_recorded);
+        assert_eq!(
+            never_started,
+            vec![0, 2],
+            "Pending slots 0 and 2 should be returned; Failed slot 1 excluded"
+        );
+    }
+
+    /// G1 T3: idempotency — slots already recorded are excluded.
+    #[test]
+    fn g1_never_started_excludes_already_recorded() {
+        let snap = WaveSnapshot {
+            wave_id: "w-g1-3".into(),
+            kind: WaveKind::Exec,
+            phase: WavePhase::Collect,
+            expected_total: 3,
+            completed_count: 0,
+            failed_count: 0,
+            pending_count: 3,
+            in_flight_count: 0,
+            cancel_requested: false,
+            merged_to_events: false,
+            started_at: std::time::SystemTime::UNIX_EPOCH,
+            slots: vec![
+                (0, SlotStatus::Pending),
+                (1, SlotStatus::Pending),
+                (2, SlotStatus::Pending),
+            ],
+        };
+        let mut already_recorded = std::collections::HashMap::new();
+        already_recorded.insert(1, "slot_never_started");
+        let never_started = never_started_slot_indices(&snap, &already_recorded);
+        assert_eq!(
+            never_started,
+            vec![0, 2],
+            "slot 1 already recorded → excluded; slots 0 and 2 returned"
+        );
+    }
+
+    /// G1 T4: no pending slots → empty vec.
+    #[test]
+    fn g1_never_started_all_slots_resolved() {
+        let snap = WaveSnapshot {
+            wave_id: "w-g1-4".into(),
+            kind: WaveKind::Exec,
+            phase: WavePhase::Collect,
+            expected_total: 2,
+            completed_count: 1,
+            failed_count: 1,
+            pending_count: 0,
+            in_flight_count: 0,
+            cancel_requested: false,
+            merged_to_events: false,
+            started_at: std::time::SystemTime::UNIX_EPOCH,
+            slots: vec![(0, SlotStatus::Completed), (1, SlotStatus::Failed)],
+        };
+        let already_recorded = std::collections::HashMap::new();
+        let never_started = never_started_slot_indices(&snap, &already_recorded);
+        assert!(never_started.is_empty(), "no Pending slots → empty result");
     }
 }

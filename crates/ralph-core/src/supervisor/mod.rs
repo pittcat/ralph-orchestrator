@@ -443,6 +443,17 @@ pub trait SupervisorStore: fmt::Debug + Send + Sync {
         reason: &str,
     ) -> SupervisorStoreResult<()>;
 
+    /// 2026-07-25-004 plan U5 (R6 / AE5): read a slot's
+    /// recorded failure reason. Used by the diagnostics JSON
+    /// builder to populate the per-slot `reason` field.
+    /// Returns `None` when the slot has no recorded failure
+    /// (it may be Completed, Pending, Dispatched, or Running).
+    fn slot_failure_reason(
+        &self,
+        wave_id: &str,
+        slot_index: u32,
+    ) -> SupervisorStoreResult<Option<String>>;
+
     /// Set the wave's cancel-requested flag. Pending slots become
     /// `Cancelled`; running slots are killed by the runtime via
     /// PID (out of scope for the store layer, R-B4).
