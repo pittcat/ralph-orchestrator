@@ -2,17 +2,66 @@
 
 These tests cover the five cases the contract suite skips:
 intent_undeclared, unit_missing, prefix-depth boundary, mixed clarify codes,
-and unicode paths in plan body.
+and unicode paths in plan body — plus cross-repo auto-pass cases.
 """
 
 from __future__ import annotations
 
+import subprocess
 from pathlib import Path
 
 import pytest
 
 # Loaded via skills/tests/conftest.py.
 import plan_diff  # type: ignore[import-not-found]
+
+
+def _git_init(repo: Path) -> Path:
+    """Create a minimal git repo at ``repo`` and return its resolved toplevel."""
+    repo.mkdir(parents=True, exist_ok=True)
+    subprocess.run(
+        ["git", "init"],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    # Identity required for commit on fresh clones in CI/sandbox.
+    subprocess.run(
+        ["git", "config", "user.email", "test@example.com"],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "config", "user.name", "test"],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+    )
+    # Need a HEAD so rev-parse --show-toplevel is stable on all git versions.
+    marker = repo / ".keep"
+    marker.write_text("", encoding="utf-8")
+    subprocess.run(
+        ["git", "add", ".keep"],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "commit", "-m", "init"],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+    )
+    completed = subprocess.run(
+        ["git", "rev-parse", "--show-toplevel"],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return Path(completed.stdout.strip()).resolve()
 
 
 # ---------------------------------------------------------------------------
@@ -167,3 +216,162 @@ def test_unicode_path_in_plan(tmp_path: Path) -> None:
     # No crash means ok is still False (plan stale + no units), but
     # at minimum the path appears in plan_intent_paths.
     assert decision.plan_hash != ""
+
+
+# ---------------------------------------------------------------------------
+# T2.6 — cross-repo + non-empty sandbox diff → no scope_drift
+# ---------------------------------------------------------------------------
+
+
+def test_cross_repo_nonempty_diff_ok_no_scope_drift(tmp_path: Path) -> None:
+    """Plan in repo A, sandbox (repo_root) in repo B with unrelated diff paths.
+
+    Cross-repo is a legitimate dogfood pattern: ok=True, cross_repo=True,
+    and scope_drift must not fire even when sandbox paths diverge from
+    plan intent prefixes.
+    """
+    plan_repo = _git_init(tmp_path / "plan_repo")
+    sandbox_repo = _git_init(tmp_path / "sandbox_repo")
+    plans_dir = plan_repo / "docs" / "plans"
+    plans_dir.mkdir(parents=True)
+    plan = plans_dir / "cross.md"
+    plan.write_text(
+        "# Plan\n"
+        "\n"
+        "### U1. Touch orchestrator\n"
+        "\n"
+        "Touch `crates/foo.rs`.\n",
+        encoding="utf-8",
+    )
+    decision = plan_diff.run_audit(
+        plan,
+        repo_root=sandbox_repo,
+        diff_provider=lambda: ("PROMPT.ce.yml", "ralph.ce.yml"),
+    )
+    assert decision.cross_repo is True
+    assert decision.plan_repo_root == str(plan_repo)
+    assert decision.diff_repo_root == str(sandbox_repo)
+    assert plan_diff.CLARIFY_SCOPE_DRIFT not in decision.clarify_codes
+    assert plan_diff.CLARIFY_STALE_PLAN not in decision.clarify_codes
+    assert decision.ok is True
+    assert decision.blocked is False
+
+
+# ---------------------------------------------------------------------------
+# T2.7 — cross-repo + empty sandbox diff → no plan_stale
+# ---------------------------------------------------------------------------
+
+
+def test_cross_repo_empty_diff_ok_no_plan_stale(tmp_path: Path) -> None:
+    """Empty sandbox diff must not emit plan_stale when repos differ."""
+    plan_repo = _git_init(tmp_path / "plan_repo")
+    sandbox_repo = _git_init(tmp_path / "sandbox_repo")
+    plan = plan_repo / "plan.md"
+    plan.write_text(
+        "# Plan\n"
+        "\n"
+        "### U1. Touch orchestrator\n"
+        "\n"
+        "Touch `crates/foo.rs`.\n",
+        encoding="utf-8",
+    )
+    decision = plan_diff.run_audit(
+        plan,
+        repo_root=sandbox_repo,
+        diff_provider=lambda: (),
+    )
+    assert decision.cross_repo is True
+    assert plan_diff.CLARIFY_STALE_PLAN not in decision.clarify_codes
+    assert plan_diff.CLARIFY_SCOPE_DRIFT not in decision.clarify_codes
+    assert decision.ok is True
+
+
+# ---------------------------------------------------------------------------
+# T2.8 — cross-repo still emits plan-quality / diff_unavailable codes
+# ---------------------------------------------------------------------------
+
+
+def test_cross_repo_still_emits_intent_undeclared(tmp_path: Path) -> None:
+    plan_repo = _git_init(tmp_path / "plan_repo")
+    sandbox_repo = _git_init(tmp_path / "sandbox_repo")
+    plan = plan_repo / "plan.md"
+    plan.write_text(
+        "# Plan\n"
+        "\n"
+        "### U1. Fix bugs\n"
+        "\n"
+        "Just fix things.\n",
+        encoding="utf-8",
+    )
+    decision = plan_diff.run_audit(
+        plan,
+        repo_root=sandbox_repo,
+        diff_provider=lambda: ("PROMPT.x.md",),
+    )
+    assert decision.cross_repo is True
+    assert plan_diff.CLARIFY_INTENT_UNDECLARED in decision.clarify_codes
+    assert decision.ok is False
+
+
+def test_cross_repo_still_emits_diff_unavailable(tmp_path: Path) -> None:
+    plan_repo = _git_init(tmp_path / "plan_repo")
+    sandbox_repo = _git_init(tmp_path / "sandbox_repo")
+    plan = plan_repo / "plan.md"
+    plan.write_text(
+        "# Plan\n"
+        "\n"
+        "### U1. Touch orchestrator\n"
+        "\n"
+        "Touch `crates/foo.rs`.\n",
+        encoding="utf-8",
+    )
+    decision = plan_diff.run_audit(
+        plan,
+        repo_root=sandbox_repo,
+        diff_provider=lambda: ((), True),
+    )
+    assert decision.cross_repo is True
+    assert plan_diff.CLARIFY_DIFF_UNAVAILABLE in decision.clarify_codes
+    assert decision.ok is False
+
+
+def test_same_repo_cross_repo_false(tmp_path: Path) -> None:
+    """Plan and repo_root in the same git toplevel → cross_repo=False."""
+    repo = _git_init(tmp_path / "one_repo")
+    plan = repo / "plan.md"
+    plan.write_text(
+        "# Plan\n"
+        "\n"
+        "### U1. Touch\n"
+        "\n"
+        "Touch `crates/foo.rs`.\n",
+        encoding="utf-8",
+    )
+    decision = plan_diff.run_audit(
+        plan,
+        repo_root=repo,
+        diff_provider=lambda: ("crates/foo.rs",),
+    )
+    assert decision.cross_repo is False
+    assert decision.ok is True
+
+
+def test_non_git_repo_root_does_not_claim_cross_repo(tmp_path: Path) -> None:
+    """Unresolvable git toplevels must not set cross_repo=True."""
+    plan = tmp_path / "plan.md"
+    plan.write_text(
+        "# Plan\n"
+        "\n"
+        "### U1. Touch\n"
+        "\n"
+        "Touch `crates/foo.rs`.\n",
+        encoding="utf-8",
+    )
+    decision = plan_diff.run_audit(
+        plan,
+        repo_root=tmp_path,
+        diff_provider=lambda: ("crates/foo.rs",),
+    )
+    assert decision.cross_repo is False
+    assert decision.plan_repo_root is None
+    assert decision.diff_repo_root is None

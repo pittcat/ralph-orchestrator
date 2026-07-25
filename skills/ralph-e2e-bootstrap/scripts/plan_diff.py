@@ -32,7 +32,7 @@ import hashlib
 import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Iterable
+from typing import Callable
 
 # Stable codes that ``clarify_codes`` may emit. Downstream UI maps
 # each code to a combo-box option in ``references/interaction.md``.
@@ -62,6 +62,9 @@ class AuditDecision:
       (U2 completion gate "plan 文件不可读 → blocked").
     * ``plan_hash`` is the SHA-256 of the plan bytes as read; the
       handoff reuses this for tamper-evidence.
+    * ``plan_repo_root`` / ``diff_repo_root`` are resolved git
+      toplevels when available; ``cross_repo`` is True when both
+      resolve and differ (legitimate dogfood pattern — no combo-box).
     """
 
     plan_path: str
@@ -73,6 +76,9 @@ class AuditDecision:
     plan_intent_paths: tuple[str, ...] = ()
     diff_paths: tuple[str, ...] = ()
     diff_unavailable: bool = False
+    plan_repo_root: str | None = None
+    diff_repo_root: str | None = None
+    cross_repo: bool = False
 
     @property
     def is_blocking(self) -> bool:
@@ -140,6 +146,36 @@ def _hash_plan(plan_bytes: bytes) -> str:
 DiffProvider = Callable[[], tuple[str, ...]]
 
 
+def _git_toplevel(path: Path) -> Path | None:
+    """Return the git toplevel for ``path``, or ``None`` if unavailable.
+
+    Uses ``git rev-parse --show-toplevel`` with the same timeout /
+    failure posture as :func:`_git_diff_paths`. Never raises.
+    """
+    import subprocess
+
+    probe = path if path.is_dir() else path.parent
+    try:
+        completed = subprocess.run(
+            ["git", "-C", str(probe), "rev-parse", "--show-toplevel"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+        return None
+    if completed.returncode != 0:
+        return None
+    raw = completed.stdout.strip()
+    if not raw:
+        return None
+    try:
+        return Path(raw).resolve()
+    except OSError:
+        return None
+
+
 def _git_diff_paths(repo_root: Path) -> tuple[tuple[str, ...], bool]:
     """Default ``diff_provider`` implementation.
 
@@ -177,6 +213,8 @@ def _classify(
     intent_paths: tuple[str, ...],
     diff_paths: tuple[str, ...],
     diff_unavailable: bool = False,
+    *,
+    cross_repo: bool = False,
 ) -> tuple[tuple[str, ...], tuple[AuditIssue, ...]]:
     """Return ``(clarify_codes, issues)``.
 
@@ -184,6 +222,10 @@ def _classify(
       but the plan↔diff comparison fails.
     * ``issues`` is non-empty only when the plan is unreadable /
       missing (the caller surfaces these as a hard blocked handoff).
+    * When ``cross_repo`` is True, ``scope_drift`` and ``plan_stale``
+      are suppressed — the diff repo is not the plan's repo, so those
+      comparisons are not meaningful. Plan-quality codes and
+      ``diff_unavailable`` still apply.
     """
     issues: list[AuditIssue] = []
     clarify: list[str] = []
@@ -200,11 +242,13 @@ def _classify(
     # false positive while still catching cross-area drift (e.g.
     # ``crates/auth.rs`` against a plan that only mentions
     # ``crates/renderer.rs``).
+    # Cross-repo: sandbox diff paths (e.g. PROMPT.*.md) will never
+    # match orchestrator intent prefixes — skip this check.
     def _prefixes(path: str, depth: int = 2) -> tuple[str, ...]:
         parts = path.split("/")
         return tuple(parts[:depth])
 
-    if intent_paths:
+    if intent_paths and not cross_repo:
         declared_prefixes = {_prefixes(path) for path in intent_paths}
         drift = sorted(
             path
@@ -218,9 +262,10 @@ def _classify(
     # distinct from "diff empty" (legitimately no changes in progress).
     if diff_unavailable:
         clarify.append(CLARIFY_DIFF_UNAVAILABLE)
-    elif u_ids and not diff_paths:
+    elif u_ids and not diff_paths and not cross_repo:
         # Stale plan: plan declares U-IDs but the diff is empty (no
         # work in progress) — usually a sign the plan is out of date.
+        # Cross-repo: empty sandbox diff does not mean the plan is stale.
         clarify.append(CLARIFY_STALE_PLAN)
 
     return tuple(clarify), tuple(issues)
@@ -242,12 +287,25 @@ def run_audit(
       tuple of changed repo-relative paths. Defaults to
       :func:`_git_diff_paths` which shells out to ``git diff
       --name-only HEAD``.
+    * When plan and ``repo_root`` resolve to different git toplevels,
+      the decision sets ``cross_repo=True`` and skips ``scope_drift`` /
+      ``plan_stale`` (legitimate dogfood; no combo-box).
     """
     plan_path = Path(plan_path)
     repo_root_path = Path(repo_root) if repo_root is not None else (
         plan_path.parent if plan_path.parent != Path("") else Path.cwd()
     )
     provider = diff_provider or (lambda: _git_diff_paths(repo_root_path))
+
+    plan_toplevel = _git_toplevel(plan_path)
+    diff_toplevel = _git_toplevel(repo_root_path)
+    cross_repo = (
+        plan_toplevel is not None
+        and diff_toplevel is not None
+        and plan_toplevel != diff_toplevel
+    )
+    plan_repo_root = str(plan_toplevel) if plan_toplevel is not None else None
+    diff_repo_root = str(diff_toplevel) if diff_toplevel is not None else None
 
     # Read the plan. ``OSError`` and ``UnicodeDecodeError`` both
     # surface as a hard blocked decision (U2 completion gate).
@@ -267,6 +325,9 @@ def run_audit(
                     paths=(str(plan_path),),
                 ),
             ),
+            plan_repo_root=plan_repo_root,
+            diff_repo_root=diff_repo_root,
+            cross_repo=cross_repo,
         )
 
     plan_hash = _hash_plan(plan_bytes)
@@ -287,7 +348,12 @@ def run_audit(
         diff_unavailable = False
 
     clarify, issues = _classify(
-        plan_text, u_ids, intent_paths, diff_paths, diff_unavailable,
+        plan_text,
+        u_ids,
+        intent_paths,
+        diff_paths,
+        diff_unavailable,
+        cross_repo=cross_repo,
     )
 
     return AuditDecision(
@@ -300,6 +366,9 @@ def run_audit(
         plan_intent_paths=intent_paths,
         diff_paths=diff_paths,
         diff_unavailable=diff_unavailable,
+        plan_repo_root=plan_repo_root,
+        diff_repo_root=diff_repo_root,
+        cross_repo=cross_repo,
     )
 
 

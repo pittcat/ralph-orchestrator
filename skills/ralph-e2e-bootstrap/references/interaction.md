@@ -17,6 +17,16 @@ Triggered by `scripts/plan_diff.py` when the development plan's
 intent fields disagree with the current git diff (paths changed, U-ID
 list, scope).
 
+**Cross-repo auto-pass (not a decision point).** When
+`AuditDecision.cross_repo` is `True` (plan git toplevel ≠
+`repo_root` git toplevel), the skill does **not** surface this
+combo-box for `scope_drift` / `plan_stale` — those comparisons are
+not meaningful across repos. The audit sets `ok=True` when no other
+clarify codes apply and records `plan_repo_root` /
+`diff_repo_root` for handoff evidence. Plan-quality codes
+(`unit_missing`, `intent_undeclared`) and `diff_unavailable` still
+trigger this decision point as usual.
+
 | # | Option | Consequence |
 |---|--------|-------------|
 | 1 (**recommended**) | Accept plan intent, re-audit diff | The skill trusts the plan; subsequent stages use plan-derived scope. |
