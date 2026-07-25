@@ -5653,4 +5653,90 @@ hats: {}
             request.backend.env_vars
         );
     }
+
+    // ── 2026-07-25-004 plan U1: characterize classify_slot_result ───────────
+    //
+    // U2/U3 will flip the Err arm and the Ok(success=false) arm.
+    // These tests pin the CURRENT (pre-U3) behaviour so the flip
+    // is observable as a red → green transition.
+
+    /// CA-2: U1 characterization — U3 will flip this:
+    /// Err arm with a timeout message currently returns
+    /// `SlotOutcome::Failed { reason: REASON_WORKER_CANCELLED }` with the
+    /// Dynamic string verbatim in the reason field. After U3 lands,
+    /// the Err arm is expected to return `SlotOutcome::Failed { reason: REASON_WORKER_TIMEOUT }`
+    /// and the Dynamic string is dropped.
+    #[test]
+    fn classify_slot_result_err_arm_char_u1_pre_u3_returns_worker_cancelled_dynamic() {
+        use ralph_core::supervisor::worker_outcome::REASON_WORKER_CANCELLED;
+
+        let result: WaveWorkerOutcome = Err((
+            "Worker timed out after 5s without emitting events".to_string(),
+            Duration::from_secs(5),
+        ));
+        let classified = classify_slot_result(&result);
+
+        // U1 contract: Err always wins, reason is Dynamic (verbatim worker message).
+        match classified {
+            ClassifiedSlot {
+                outcome: ralph_core::supervisor::worker_outcome::SlotOutcome::Failed { reason },
+                reason: Some(ClassifiedReason::Dynamic(msg)),
+            } => {
+                assert_eq!(
+                    reason, REASON_WORKER_CANCELLED,
+                    "U1: Err arm must use REASON_WORKER_CANCELLED; U3 flips to REASON_WORKER_TIMEOUT"
+                );
+                assert_eq!(
+                    msg, "Worker timed out after 5s without emitting events",
+                    "U1: Dynamic reason must carry the verbatim worker error message"
+                );
+            }
+            other => panic!(
+                "U1: expected Failed{{reason=REASON_WORKER_CANCELLED}} + Dynamic(_), got {other:?}"
+            ),
+        }
+    }
+
+    /// CA-3: U1 characterization — U3 will flip this:
+    /// Ok arm with success=false and a Done terminal currently returns
+    /// `SlotOutcome::Completed(WorkerTerminalKind::Done)`. After U3 lands,
+    /// the Ok arm with success=false returns
+    /// `SlotOutcome::Failed {{ reason: REASON_WORKER_TIMEOUT }}` (exit=non-zero,
+    /// done terminal present → U3 reclassification).
+    #[test]
+    fn classify_slot_result_ok_success_false_with_done_char_u1_pre_u3_completes_via_exit_nonzero() {
+        let done_event = ralph_core::Event {
+            topic: "review.unit.done".to_string(),
+            payload: Some("ok".to_string()),
+            ts: String::new(),
+            hat: None,
+            triggered: None,
+            source: None,
+            wave_id: None,
+            wave_index: None,
+            wave_total: None,
+            system_injected: None,
+        };
+        // success=false → WorkerExit::ExitNonZero in classify_slot_result
+        let result: WaveWorkerOutcome = Ok((vec![done_event], Duration::from_secs(3), false));
+        let classified = classify_slot_result(&result);
+
+        // U1 contract: ExitNonZero + Done terminal → Completed(Done).
+        // U3 flips: ExitNonZero + Done terminal → Failed(reason=worker_timeout).
+        match classified {
+            ClassifiedSlot {
+                outcome:
+                    ralph_core::supervisor::worker_outcome::SlotOutcome::Completed(
+                        ralph_core::supervisor::worker_outcome::WorkerTerminalKind::Done,
+                    ),
+                reason: None,
+            } => {
+                // U1 passes here; U3 will change this match arm to a Failed variant.
+            }
+            other => panic!(
+                "U1: expected Completed(Done) + reason=None, got {other:?}; \
+                 U3 will change this to Failed{{reason=REASON_WORKER_TIMEOUT}}"
+            ),
+        }
+    }
 }

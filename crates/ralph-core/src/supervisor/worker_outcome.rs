@@ -238,6 +238,11 @@ mod tests {
         );
     }
 
+    /// U1 characterization — U2 will flip this assertion: after U2 lands,
+    /// Timeout + zero accepted events MUST resolve to
+    /// `SlotOutcome::Completed(WorkerTerminalKind::Missing)` (exit=0, no terminal,
+    /// partial evidence kept), not `SlotOutcome::Failed { reason: REASON_WORKER_TIMEOUT }`.
+    /// Do NOT change the assertion; change the comment to match the flip.
     #[test]
     fn timeout_zero_events_is_timeout_not_empty() {
         let out = classify_worker_outcome(WorkerExit::Timeout, 0, &[]);
