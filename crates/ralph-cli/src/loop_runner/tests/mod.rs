@@ -21,5 +21,6 @@ mod hard_gate;
 mod hard_gate_payload_contract;
 mod hooks;
 mod legacy;
+mod notifications;
 mod wave;
 mod wave_supervisor;

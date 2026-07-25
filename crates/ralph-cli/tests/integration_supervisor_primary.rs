@@ -201,6 +201,17 @@ EOF
       done
     fi
     ;;
+  reporter)
+    # After exec.wave.complete + exec-integrator silent pass, the no-progress
+    # watchdog activates reporter. Emit exactly one LOOP_COMPLETE (isolated
+    # single-event budget) so the loop exits cleanly.  The payload satisfies
+    # completion schema: reason is required.
+    if once reporter; then
+      cat >> "$EF" <<EOF
+{{"topic":"LOOP_COMPLETE","payload":"{{\\"reason\\":\\"exec_wave_complete\\",\\"verdict\\":\\"success\\"}}","ts":"$TS","hat":"reporter"}}
+EOF
+    fi
+    ;;
 esac
 exit 0
 "#,

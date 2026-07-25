@@ -88,6 +88,7 @@ mod memory;
 pub mod memory_parser;
 mod memory_store;
 pub mod merge_queue;
+pub mod notifications;
 pub mod payload_contract;
 pub mod plan_baseline;
 pub mod planning_session;

@@ -16,6 +16,7 @@ pub mod hat;
 mod hooks;
 mod loop_config;
 mod memories;
+mod notifications;
 mod precheck;
 mod preflight_ext;
 mod ralph_config;
@@ -66,6 +67,7 @@ pub use memories::{InjectMode, MemoriesConfig, MemoriesFilter};
 pub use multi_hat_policy::{
     MULTI_HAT_ISOLATION_LIMIT, MultiHatPolicyViolation, evaluate_multi_hat_isolation,
 };
+pub use notifications::{NotificationEndpoint, NotificationsConfig, OnStatus};
 pub use precheck::{PrecheckConfig, PrecheckOnFail, PrecheckRule, precheck_runtime_enabled};
 pub use preflight_ext::{HookStage, PreflightExtensionsConfig, PreflightHook};
 pub use profiles::{ProfileScope, ProfileSpec, ProfilesConfig};
@@ -238,6 +240,13 @@ pub struct RalphConfig {
     #[serde(default)]
     pub telemetry: TelemetryConfig,
 
+    /// Loop-completion webhook notifications (U1 of the 2026-07-25-001
+    /// Loop Completion Webhook plan). Disabled by default: omitting
+    /// `notifications:` or setting `enabled: false` produces zero
+    /// network activity.
+    #[serde(default)]
+    pub notifications: NotificationsConfig,
+
     /// Agent doc sync configuration for managed agent doc blocks.
     /// When enabled (default), the sync engine injects curated constraint
     /// blocks into `CLAUDE.md` / `AGENTS.md` before backend spawn.
@@ -321,6 +330,8 @@ impl Default for RalphConfig {
             features: FeaturesConfig::default(),
             // Telemetry / runtime diagnosis (U1)
             telemetry: TelemetryConfig::default(),
+            // Notifications (U1 of plan 2026-07-25-001)
+            notifications: NotificationsConfig::default(),
             // Agent doc sync
             agent_doc_sync: AgentDocSyncConfig::default(),
             // Profile overlays (U1 of plan 2026-06-25-002)
