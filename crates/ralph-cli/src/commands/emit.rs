@@ -3578,6 +3578,113 @@ hats:
         );
     }
 
+    // -------------------------------------------------------------------------
+    // U1: wave-worker channel allowlist characterization
+    // P0 root cause: dispatcher injects RALPH_EVENTS_FILE=.ralph/wave-<id>-<idx>.jsonl
+    // into wave workers, but the P6 emit allowlist (current-events / current-candidate-events
+    // / current-hat-events marker targets + default events.jsonl) does not include the
+    // wave channel path. Agents fall back to writing the main events file, breaking
+    // the supervisor's causal chain.
+    //
+    // API note: resolve_emit_path does NOT take RALPH_WAVE_WORKER as a parameter.
+    // The wave-worker signal must be inferred from the path shape (.ralph/wave-<id>-<idx>.jsonl)
+    // combined with isolated_mode=true. U2 must extend the allowlist to recognize this
+    // pattern, either via a new parameter or via path-shape detection in production code.
+    // -------------------------------------------------------------------------
+
+    /// U1: wave-worker channel must be accepted when isolated_mode=true and the
+    /// channel path matches the wave pattern (.ralph/wave-<id>-<idx>.jsonl).
+    ///
+    /// Current behavior (BUG): allowlist rejects because .ralph/wave-w-test-0.jsonl
+    /// does not match any marker target (current-events / current-candidate-events /
+    /// current-hat-events).
+    ///
+    /// Target behavior (after U2): resolve_emit_path returns Ok(wave_channel_path).
+    #[test]
+    fn test_emit_wave_worker_channel_accepted() {
+        let tmp = TempDir::new().unwrap();
+        let workspace = make_workspace(&tmp);
+        // Main loop's current-events marker (the dispatcher sets this, not the wave channel)
+        std::fs::write(
+            workspace.join(".ralph/current-events"),
+            ".ralph/events-main.jsonl",
+        )
+        .unwrap();
+
+        // Wave dispatcher injects RALPH_EVENTS_FILE=.ralph/wave-w-test-0.jsonl
+        // into the worker process. The wave channel path must be accepted in
+        // wave-worker context (isolated_mode=true, current_hat present, path shape
+        // matches .ralph/wave-<id>-<idx>.jsonl).
+        let wave_channel = workspace
+            .join(".ralph/wave-w-test-0.jsonl")
+            .display()
+            .to_string();
+
+        let result = resolve_emit_path(
+            &workspace,
+            &workspace.join(".ralph/events.jsonl"), // default cli file (not used — env overrides)
+            Some(&wave_channel),
+            Some("exec-worker"), // current_hat = wave worker hat
+            true,               // isolated_mode (wave workers run in isolated context)
+        );
+
+        // TARGET behavior: Ok with the wave channel path
+        assert!(
+            result.is_ok(),
+            "wave-worker channel must be accepted in isolated mode, got error: {:?}",
+            result.as_ref().err()
+        );
+        let resolved = result.unwrap();
+        assert!(
+            resolved.ends_with(".ralph/wave-w-test-0.jsonl"),
+            "resolved path must point to wave channel, got: {}",
+            resolved.display()
+        );
+    }
+
+    /// U1: wave-worker channel must be rejected when isolated_mode=false
+    /// (no wave-worker context). This confirms the allowlist still protects
+    /// against non-wave paths even after the U2 fix.
+    ///
+    /// Current behavior: rejected (path not in allowlist).
+    /// Target behavior (after U2): still rejected (wave pattern only accepted
+    /// when isolated_mode=true signals wave-worker context).
+    #[test]
+    fn test_emit_wave_worker_channel_rejected_without_isolated_mode() {
+        let tmp = TempDir::new().unwrap();
+        let workspace = make_workspace(&tmp);
+        std::fs::write(
+            workspace.join(".ralph/current-events"),
+            ".ralph/events-main.jsonl",
+        )
+        .unwrap();
+
+        let wave_channel = workspace
+            .join(".ralph/wave-w-test-0.jsonl")
+            .display()
+            .to_string();
+
+        // isolated_mode=false → no wave-worker context signal
+        let result = resolve_emit_path(
+            &workspace,
+            &workspace.join(".ralph/events.jsonl"),
+            Some(&wave_channel),
+            Some("exec-worker"),
+            false, // NOT isolated → no wave-worker context
+        );
+
+        assert!(
+            result.is_err(),
+            "wave channel must be rejected without isolated_mode, got: {:?}",
+            result
+        );
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("allowlist") || msg.contains("not in"),
+            "error must mention allowlist, got: {msg}"
+        );
+    }
+
     #[test]
     fn test_emit_auto_detects_json_payload_without_json_flag() {
         // Bug #4 regression: work.done and other structured events must be
