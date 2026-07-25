@@ -28,9 +28,11 @@ PDD_DEST="crates/ralph-cli/sops/pdd.md"
 # them via `include_str!(concat!(env!("OUT_DIR"), "/..."))`. The
 # mirror directory under `crates/ralph-cli/presets/` has been removed
 # in favour of a single source of truth.
+#
+# `crates/ralph-cli/sops/code-task-generator.md` is crate-local SSOT
+# (consumed via include_str!). The old `.claude/skills/code-task-generator/`
+# source was removed; do not re-add a mirror entry pointing at it.
 MIRRORED_FILES=(
-    # SOPs for ralph plan/task commands
-    ".claude/skills/code-task-generator/SKILL.md:crates/ralph-cli/sops/code-task-generator.md"
 )
 
 # Colors for output
