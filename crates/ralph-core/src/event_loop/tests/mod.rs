@@ -46,6 +46,9 @@ mod persistent_mode;
 /// current auto-inject skill set before introducing the
 /// `PromptPreview` API.
 mod preview_characterization;
+/// 2026-07-26-001 plan U2: unit tests for the new
+/// `EventLoop::prompt_preview` structured API.
+mod preview_api;
 mod post_terminal_rejection;
 /// 2026-07-07-002 plan Unit 8: protocol-violation bounded retry +
 /// fail-close invariants. Regression guard for the
