@@ -41,4 +41,5 @@ pub use worker::{
 // helper so the wave_supervisor test surface can pin the
 // empty-success classification against the supervisor
 // classifier.
+pub(crate) use dispatcher::build_wave_failed_payload;
 pub(crate) use dispatcher::record_outcome;

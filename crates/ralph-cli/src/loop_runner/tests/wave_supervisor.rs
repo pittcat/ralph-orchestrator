@@ -4508,3 +4508,147 @@ fn test_u5_record_outcome_partial_timeout_stays_result() {
         "U5/003: partial-timeout must NOT be a failure; got {completed:?}"
     );
 }
+
+// =============================================================================
+// 2026-07-25-003 plan U6: `exec.wave.failed` / `fix.wave.failed`
+// payload must expose per-slot `failure_reason` so an operator can
+// tell a `worker_timeout` apart from an `empty_worker_result` without
+// re-running diagnostics. The legacy payload shape carries
+// `wave_id` + `reason` + `blocking_slots` only; a 5-slot failure
+// looks identical whether slot 0 timed out or hit
+// `empty_worker_result`. The fix adds an OPTIONAL `slot_failures`
+// field (schema `required_fields` is unchanged so the engine gate
+// still passes) listing `{slot_index, reason, duration_ms}` for every
+// failed slot. The new test pins the field shape so a future schema
+// refactor cannot silently drop the diagnostic data.
+// =============================================================================
+
+/// U6: `build_wave_failed_payload` for an Exec wave with two
+/// failures (one `worker_timeout`, one `empty_worker_result`) must
+/// surface each per-slot reason in `slot_failures`, AND the
+/// `blocking_slots` set must equal the indices that actually
+/// failed (no false-positive blocking of completed slots).
+#[test]
+fn test_u6_failed_payload_exposes_per_slot_reasons() {
+    use crate::loop_runner::wave::build_wave_failed_payload;
+    use ralph_core::supervisor::WaveKind;
+    use ralph_core::{CompletedWave, WaveFailure, WaveResult};
+    use std::time::Duration;
+
+    let mut completed = CompletedWave {
+        wave_id: "u6-exec".to_string(),
+        wave_total: 5,
+        results: vec![WaveResult {
+            index: 1,
+            events: vec![],
+        }],
+        failures: vec![
+            WaveFailure {
+                index: 0,
+                error: "worker_timeout".to_string(),
+                duration: Duration::from_secs(300),
+                expected_dimension: None,
+                actual_dimension: None,
+            },
+            WaveFailure {
+                index: 2,
+                error: "empty_worker_result".to_string(),
+                duration: Duration::from_millis(50),
+                expected_dimension: None,
+                actual_dimension: None,
+            },
+            WaveFailure {
+                index: 4,
+                error: "worker_cancelled".to_string(),
+                duration: Duration::from_secs(2),
+                expected_dimension: None,
+                actual_dimension: None,
+            },
+        ],
+        duration: Duration::from_secs(300),
+        partial: true,
+        expected_source_hat: None,
+        assigned_dimensions: std::collections::HashMap::new(),
+        dimension_retry_counts: std::collections::HashMap::new(),
+        worker_events: vec![],
+    };
+    // 5-slot failure set: {0,2,4} (1+3 are completed/otherwise)
+    let payload = build_wave_failed_payload(
+        WaveKind::Exec,
+        &completed,
+        "required_slot_failure",
+        vec![0, 2, 4],
+    );
+    let obj = payload.as_object().expect("payload must be a JSON object");
+
+    // Required fields still present (schema contract intact).
+    assert_eq!(
+        obj.get("wave_id").and_then(|v| v.as_str()),
+        Some("u6-exec"),
+        "U6/003: required field `wave_id` must be present"
+    );
+    assert_eq!(
+        obj.get("reason").and_then(|v| v.as_str()),
+        Some("required_slot_failure"),
+        "U6/003: required field `reason` must be present"
+    );
+    let blocking: Vec<u32> = obj
+        .get("blocking_slots")
+        .and_then(|v| v.as_array())
+        .expect("U6/003: `blocking_slots` must be a JSON array")
+        .iter()
+        .filter_map(|v| v.as_u64().map(|n| n as u32))
+        .collect();
+    assert_eq!(
+        blocking,
+        vec![0, 2, 4],
+        "U6/003: `blocking_slots` must equal the actual failed slot indices; got {blocking:?}"
+    );
+
+    // New diagnostic field: per-slot reasons in stable slot order.
+    let slot_failures = obj.get("slot_failures").and_then(|v| v.as_array()).expect(
+        "U6/003: `slot_failures` must be a JSON array of {slot_index, reason, duration_ms}",
+    );
+    assert_eq!(
+        slot_failures.len(),
+        3,
+        "U6/003: one entry per failed slot; got {slot_failures:?}"
+    );
+    let by_index: std::collections::HashMap<u32, String> = slot_failures
+        .iter()
+        .filter_map(|v| {
+            let obj = v.as_object()?;
+            let slot = obj.get("slot_index")?.as_u64()? as u32;
+            let reason = obj.get("reason")?.as_str()?.to_string();
+            Some((slot, reason))
+        })
+        .collect();
+    assert_eq!(
+        by_index.get(&0).map(String::as_str),
+        Some("worker_timeout"),
+        "U6/003: slot 0 must carry `worker_timeout`; got {by_index:?}"
+    );
+    assert_eq!(
+        by_index.get(&2).map(String::as_str),
+        Some("empty_worker_result"),
+        "U6/003: slot 2 must carry `empty_worker_result`; got {by_index:?}"
+    );
+    assert_eq!(
+        by_index.get(&4).map(String::as_str),
+        Some("worker_cancelled"),
+        "U6/003: slot 4 must carry `worker_cancelled`; got {by_index:?}"
+    );
+
+    // Negative guard: a completed slot MUST NOT appear in
+    // `blocking_slots` (R5) or in `slot_failures`.
+    assert!(
+        !blocking.contains(&1) && !blocking.contains(&3),
+        "U6/003: completed slots must NOT be in blocking_slots; got {blocking:?}"
+    );
+    assert!(
+        !by_index.contains_key(&1) && !by_index.contains_key(&3),
+        "U6/003: completed slots must NOT appear in slot_failures; got {by_index:?}"
+    );
+    // Suppress unused mut warnings if completed gains new fields.
+    let _ = &mut completed;
+}

@@ -2381,7 +2381,7 @@ fn build_wave_complete_payload(
 /// matches the **target topic's** schema. Exec/fix waves carry
 /// `blocking_slots`; review waves carry `missing_dimensions`
 /// (the dimensions that never produced a `review.unit.done`).
-fn build_wave_failed_payload(
+pub(crate) fn build_wave_failed_payload(
     wave_kind: ralph_core::supervisor::WaveKind,
     completed: &ralph_core::CompletedWave,
     reason: &str,
@@ -2404,11 +2404,36 @@ fn build_wave_failed_payload(
                 "reason": reason,
             })
         }
-        WaveKind::Exec | WaveKind::Fix => serde_json::json!({
-            "wave_id": completed.wave_id,
-            "reason": reason,
-            "blocking_slots": blocking_slots,
-        }),
+        WaveKind::Exec | WaveKind::Fix => {
+            // 2026-07-25-003 plan U6 (R5 / R4): expose per-slot
+            // failure reasons alongside `blocking_slots` so the
+            // operator can tell a `worker_timeout` apart from an
+            // `empty_worker_result` without re-running diagnostics.
+            // The field is OPTIONAL — `presets/schemas/...yml`
+            // `required_fields` does not list it, so the engine
+            // gate still passes — and the integrator hat (e.g.
+            // `exec-failure-handler`) treats unknown fields as
+            // advisory. Downstream consumers that DO care about
+            // the per-slot reasons get a stable
+            // `[{slot_index, reason, duration_ms}, ...]` shape.
+            let slot_failures: Vec<serde_json::Value> = completed
+                .failures
+                .iter()
+                .map(|f| {
+                    serde_json::json!({
+                        "slot_index": f.index,
+                        "reason": f.error,
+                        "duration_ms": f.duration.as_millis(),
+                    })
+                })
+                .collect();
+            serde_json::json!({
+                "wave_id": completed.wave_id,
+                "reason": reason,
+                "blocking_slots": blocking_slots,
+                "slot_failures": slot_failures,
+            })
+        }
     }
 }
 
