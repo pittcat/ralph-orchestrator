@@ -163,6 +163,8 @@ timeout_watcher() {
 
 # ---- 主流程 ----
 
+START_TS=$SECONDS
+
 echo "🧹 清场:杀掉上一轮残留的 cargo/rustc/nextest 进程..."
 kill_stale_test_processes
 kill_zombie_loops
@@ -220,6 +222,89 @@ run_cargo() {
   fi
 }
 
+# ---------------------------------------------------------------------------
+# 结果汇总:把 nextest / doctest 的 summary 行解析成结构化数字,
+# 最后渲染成一张对齐的表格。纯展示,不影响退出码。
+# 表格列内容全部用 ASCII/数字,避免 CJK 双宽字符破坏对齐;
+# 中文只放在无边框的标题行 / 状态行。
+# ---------------------------------------------------------------------------
+
+# 解析 nextest 输出的最后一条 Summary 行 → "time|run|passed|failed|skipped"
+parse_nextest_summary() {
+  local log="$1" line
+  line=$(grep -E 'tests? run:' "$log" 2>/dev/null | tail -n1)
+  if [[ -z "$line" ]]; then
+    echo "-|-|-|-|-"
+    return
+  fi
+  local t run passed failed skipped
+  t=$(echo "$line" | grep -oE '\[[[:space:]]*[0-9.]+s\]' | grep -oE '[0-9.]+' | head -n1)
+  run=$(echo "$line" | grep -oE '[0-9]+ tests? run' | grep -oE '[0-9]+' | head -n1)
+  passed=$(echo "$line" | grep -oE '[0-9]+ passed' | grep -oE '[0-9]+' | head -n1)
+  failed=$(echo "$line" | grep -oE '[0-9]+ failed' | grep -oE '[0-9]+' | head -n1)
+  skipped=$(echo "$line" | grep -oE '[0-9]+ skipped' | grep -oE '[0-9]+' | head -n1)
+  echo "${t:-?}s|${run:-?}|${passed:-0}|${failed:-0}|${skipped:-0}"
+}
+
+# 解析 doctest 输出(可能多 crate)→ "time|run|passed|failed|ignored"
+parse_doctest_summary() {
+  local log="$1"
+  local passed=0 failed=0 ignored=0 p f i
+  while read -r p f i; do
+    passed=$((passed + p)); failed=$((failed + f)); ignored=$((ignored + i))
+  done < <(grep -E '^test result:' "$log" 2>/dev/null \
+    | sed -E 's/^test result: [A-Za-z]+\. ([0-9]+) passed; ([0-9]+) failed; ([0-9]+) ignored.*/\1 \2 \3/')
+  local t
+  t=$(grep -oE 'all doctests ran in [0-9.]+s' "$log" 2>/dev/null | grep -oE '[0-9.]+' | tail -n1)
+  echo "${t:-?}s|$((passed + failed + ignored))|${passed}|${failed}|${ignored}"
+}
+
+# 表格列宽(内容宽度):Stage Run Pass Fail Skip Time
+_SUMMARY_WIDTHS=(16 6 7 6 8 9)
+
+_summary_hline() { # $1=left $2=mid $3=right
+  local out="$1" i n=${#_SUMMARY_WIDTHS[@]} seg
+  for i in "${!_SUMMARY_WIDTHS[@]}"; do
+    printf -v seg '─%.0s' $(seq 1 $((_SUMMARY_WIDTHS[i] + 2)))
+    out+="$seg"
+    if [[ $i -lt $((n - 1)) ]]; then out+="$2"; else out+="$3"; fi
+  done
+  printf '%s\n' "$out"
+}
+
+_summary_row() { # stage run pass fail skip time
+  printf '│ %-16s │ %6s │ %7s │ %6s │ %8s │ %9s │\n' "$@"
+}
+
+# 把 "time|run|passed|failed|skipped" 拆成表格行(顺序 run pass fail skip time)
+_summary_row_from() { # $1=stage $2=packed
+  local a
+  IFS='|' read -ra a <<< "$2"
+  _summary_row "$1" "${a[1]}" "${a[2]}" "${a[3]}" "${a[4]}" "${a[0]}"
+}
+
+render_summary_table() { # $1=overall_rc
+  local rc="$1"
+  echo
+  echo "  📊 测试结果汇总"
+  _summary_hline "┌" "┬" "┐"
+  _summary_row "Stage" "Run" "Pass" "Fail" "Skip" "Time"
+  _summary_hline "├" "┼" "┤"
+  _summary_row_from "Phase 1 (par)" "$P1_SUM"
+  _summary_row_from "Phase 2 (ser)" "$P2_SUM"
+  if [[ -n "${DOC_SUM:-}" ]]; then
+    _summary_row_from "Doctest" "$DOC_SUM"
+  else
+    _summary_row "Doctest" "-" "-" "-" "skip" "-"
+  fi
+  _summary_hline "└" "┴" "┘"
+  if [[ "$rc" -eq 0 ]]; then
+    printf '  \033[32m✅ 全部通过\033[0m · 总耗时 %ss\n' "$((SECONDS - START_TS))"
+  else
+    printf '  \033[31m❌ 存在失败\033[0m · 总耗时 %ss(详见上方 FAIL 行)\n' "$((SECONDS - START_TS))"
+  fi
+}
+
 if [[ "$SERIAL" -ne 1 ]] && run_cargo nextest --version >/dev/null 2>&1; then
   echo "🚀 使用 cargo-nextest 并行运行测试(ralph-cli 串行组,其它包并行)..."
 
@@ -239,18 +324,28 @@ if [[ "$SERIAL" -ne 1 ]] && run_cargo nextest --version >/dev/null 2>&1; then
   # See CLAUDE.md "hooks-executor-test-flake" for the
   #   parallel-failure characterisation that motivates this split.
   echo "📦 Phase 1: full workspace at default num-cpus concurrency..."
+  # 关闭 errexit/pipefail 触发的即时退出:我们要跑完所有阶段并汇总,
+  # 失败与否由 OVERALL_RC 记录,最后统一 exit。
+  set +e
+  P1_LOG=$(mktemp)
+  OVERALL_RC=0
   run_cargo nextest run \
     --workspace \
     --exclude ralph-e2e \
-    -E 'not test(/partial_timeout_events_visible/)'
+    -E 'not test(/partial_timeout_events_visible/)' 2>&1 | tee "$P1_LOG"
+  [[ ${PIPESTATUS[0]} -ne 0 ]] && OVERALL_RC=1
+  P1_SUM=$(parse_nextest_summary "$P1_LOG")
 
   echo
   echo "🐢 Phase 2: race-sensitive trio at -j 1 (3 tests)..."
+  P2_LOG=$(mktemp)
   run_cargo nextest run \
     --workspace \
     --exclude ralph-e2e \
     -j 1 \
-    -E 'test(/partial_timeout_events_visible/)'
+    -E 'test(/partial_timeout_events_visible/)' 2>&1 | tee "$P2_LOG"
+  [[ ${PIPESTATUS[0]} -ne 0 ]] && OVERALL_RC=1
+  P2_SUM=$(parse_nextest_summary "$P2_LOG")
 
   echo
   # doctest 阶段:rustdoc 对**没有** ```rust 代码块的 crate 仍会跑完整 lint + 编译 + 提取
@@ -277,20 +372,26 @@ if [[ "$SERIAL" -ne 1 ]] && run_cargo nextest --version >/dev/null 2>&1; then
 
   if [[ ${#crates_with_doc[@]} -eq 0 ]]; then
     echo "📚 跳过 doctest:workspace 中 8 个非 e2e crate 均无 \`\`\`rust 代码块"
+    DOC_SUM=""
   elif [[ ${#crates_skipped[@]} -gt 0 ]]; then
     echo "📚 doctest:跳过 ${#crates_skipped[@]} 个无 doctest 的 crate($(IFS=,; echo "${crates_skipped[*]}")),只跑:$(IFS=,; echo "${crates_with_doc[*]}")"
+    DOC_LOG=$(mktemp)
     for crate_name in "${crates_with_doc[@]}"; do
-      run_cargo test -p "$crate_name" --doc
+      run_cargo test -p "$crate_name" --doc 2>&1 | tee -a "$DOC_LOG"
+      [[ ${PIPESTATUS[0]} -ne 0 ]] && OVERALL_RC=1
     done
+    DOC_SUM=$(parse_doctest_summary "$DOC_LOG")
   else
     echo "📚 运行 doctest 覆盖(cargo test --workspace --doc)..."
-    run_cargo test --workspace --exclude ralph-e2e --doc
+    DOC_LOG=$(mktemp)
+    run_cargo test --workspace --exclude ralph-e2e --doc 2>&1 | tee "$DOC_LOG"
+    [[ ${PIPESTATUS[0]} -ne 0 ]] && OVERALL_RC=1
+    DOC_SUM=$(parse_doctest_summary "$DOC_LOG")
   fi
 
-  echo
-  echo "✅ 测试通过(nextest + doctest)"
+  render_summary_table "$OVERALL_RC"
   kill $TIMEOUT_PID 2>/dev/null || true
-  exit 0
+  exit "$OVERALL_RC"
 fi
 
 if [[ "$SERIAL" -eq 1 ]]; then
