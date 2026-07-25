@@ -164,6 +164,8 @@ def test_e2e_bootstrap_dual_plan_anchors() -> None:
     assert "Workload" in text or "workload" in text.lower()
     assert "sandbox_plan_write" in text
     assert "check_binary_freshness" in text or "fresh" in text.lower()
+    assert "bootstrap_pipeline" in text or "run_pipeline" in text
+    assert "--prompt-file" in text
     assert "ralph-run-diagnosis" in text
 
 
@@ -315,6 +317,7 @@ def test_binary_resolve_prefers_explicit_over_env_and_path(
     resolution = binary_resolve.resolve_binary(
         explicit_path=str(fake),
         runner=lambda argv, **kwargs: _ok_completed(argv, "fake-ralph 0.0.0"),
+        trusted_only=False,
     )
     assert resolution.ok is True
     assert resolution.source == "explicit"
@@ -367,6 +370,7 @@ def test_binary_resolve_uses_fake_path_iter(
         path_iter=lambda: iter([tmp_path]),
         runner=lambda argv, **kwargs: _ok_completed(argv, "fake-ralph 0.0.0"),
         require_version=True,
+        trusted_only=False,
     )
     # The fake binary is on the fake PATH and answers --version.
     assert resolution.ok is True
@@ -479,6 +483,7 @@ def test_binary_resolve_priority_explicit_none_env_hit_path_hit(
 
     resolution = binary_resolve.resolve_binary(
         runner=lambda argv, **kw: _ok_completed(argv, "ralph 1.0.0"),
+        trusted_only=False,
     )
     # Env wins over PATH.
     assert resolution.source == "env"
@@ -525,6 +530,9 @@ def test_sandbox_suite_generates_preset_bound_pair(tmp_path: Path) -> None:
         sandbox=sandbox,
         preset="builtin:ce-executor-pipeline",
         plan_path=plan,
+        change_plan_path="docs/plans/change.md",
+        change_plan_hash="0000000000000000000000000000000000000000000000000000000000000000",
+        change_summary="## Goal Capsule\n- Objective: verify",
     )
     assert (sandbox / "ralph.ce-executor-pipeline.yml").is_file()
     assert (sandbox / "PROMPT.ce-executor-pipeline.md").is_file()
@@ -537,7 +545,13 @@ def test_sandbox_suite_generates_preset_bound_pair(tmp_path: Path) -> None:
     # --plan uses a sandbox-relative path (the staged file), not the
     # caller-supplied absolute path.
     assert "--plan" in result.argv and "docs/plans/plan.md" in result.argv
+    assert "--prompt-file" in result.argv
+    assert "PROMPT.ce-executor-pipeline.md" in result.argv
     assert str(plan) not in result.argv
+    prompt = (sandbox / "PROMPT.ce-executor-pipeline.md").read_text(encoding="utf-8")
+    assert "Change intent" in prompt or "change plan" in prompt.lower()
+    assert "BEGIN WORKLOAD PLAN" in prompt
+    assert "# Plan" in prompt
     # No preset mutation.
     assert "presets" not in result.argv
 
@@ -552,6 +566,9 @@ def test_sandbox_suite_preserves_supervisor_preset_opt_in(tmp_path: Path) -> Non
         sandbox=sandbox,
         preset="builtin:ce-executor-supervisor",
         plan_path=plan,
+        change_plan_path="docs/plans/change.md",
+        change_plan_hash="0000000000000000000000000000000000000000000000000000000000000000",
+        change_summary="## Goal Capsule\n- Objective: verify",
     )
 
     config = Path(result.config_path).read_text(encoding="utf-8")
@@ -569,7 +586,10 @@ def test_sandbox_suite_refuses_presets_subtree(tmp_path: Path) -> None:
             sandbox=bad,
             preset="builtin:ce-executor-pipeline",
             plan_path=plan,
-        )
+        change_plan_path="docs/plans/change.md",
+        change_plan_hash="0000000000000000000000000000000000000000000000000000000000000000",
+        change_summary="## Goal Capsule\n- Objective: verify",
+    )
     assert "presets" in str(excinfo.value).lower()
 
 
@@ -584,6 +604,9 @@ def test_sandbox_suite_plan_file_hash_unchanged(tmp_path: Path) -> None:
         sandbox=sandbox,
         preset="builtin:ce-executor-pipeline",
         plan_path=plan,
+        change_plan_path="docs/plans/change.md",
+        change_plan_hash="0000000000000000000000000000000000000000000000000000000000000000",
+        change_summary="## Goal Capsule\n- Objective: verify",
     )
     after = plan.read_bytes()
     assert before == after
@@ -599,7 +622,10 @@ def test_sandbox_suite_blocks_unwritable_sandbox(tmp_path: Path) -> None:
             sandbox=missing,
             preset="builtin:ce-executor-pipeline",
             plan_path=plan,
-        )
+        change_plan_path="docs/plans/change.md",
+        change_plan_hash="0000000000000000000000000000000000000000000000000000000000000000",
+        change_summary="## Goal Capsule\n- Objective: verify",
+    )
 
 
 def test_derive_stem_for_builtin_and_file() -> None:
@@ -629,6 +655,9 @@ def test_launch_argv_excludes_dry_run(tmp_path: Path) -> None:
         sandbox=sandbox,
         preset="builtin:ce-executor-pipeline",
         plan_path=plan,
+        change_plan_path="docs/plans/change.md",
+        change_plan_hash="0000000000000000000000000000000000000000000000000000000000000000",
+        change_summary="## Goal Capsule\n- Objective: verify",
     )
     assert "--dry-run" not in result.launch_argv
     assert "--dry-run" in result.argv
@@ -655,6 +684,9 @@ def test_disposition_refreshes_owned_pair_after_template_change(tmp_path: Path) 
         preset="builtin:ce-executor-supervisor",
         plan_path=plan,
         refresh_existing=True,
+        change_plan_path="docs/plans/change.md",
+        change_plan_hash="0000000000000000000000000000000000000000000000000000000000000000",
+        change_summary="## Goal Capsule\n- Objective: verify",
     )
 
     assert set(result.updated) == {str(config_file), str(prompt_file)}
@@ -686,7 +718,10 @@ def test_disposition_write_conflict_raises_sandbox_error(tmp_path: Path) -> None
             sandbox=sandbox,
             preset="builtin:ce-executor-pipeline",
             plan_path=plan,
-        )
+        change_plan_path="docs/plans/change.md",
+        change_plan_hash="0000000000000000000000000000000000000000000000000000000000000000",
+        change_summary="## Goal Capsule\n- Objective: verify",
+    )
     assert "write_conflict" in str(excinfo.value).lower()
     assert "provenance mismatch" in str(excinfo.value).lower()
 
@@ -703,7 +738,10 @@ def test_sandbox_is_file_rejected(tmp_path: Path) -> None:
             sandbox=file_sandbox,
             preset="builtin:ce-executor-pipeline",
             plan_path=plan,
-        )
+        change_plan_path="docs/plans/change.md",
+        change_plan_hash="0000000000000000000000000000000000000000000000000000000000000000",
+        change_summary="## Goal Capsule\n- Objective: verify",
+    )
     assert "not a directory" in str(excinfo.value).lower()
 
 
@@ -726,7 +764,10 @@ def test_mid_write_oserror(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> N
             sandbox=sandbox,
             preset="builtin:ce-executor-pipeline",
             plan_path=plan,
-        )
+        change_plan_path="docs/plans/change.md",
+        change_plan_hash="0000000000000000000000000000000000000000000000000000000000000000",
+        change_summary="## Goal Capsule\n- Objective: verify",
+    )
     assert "atomic write failed" in str(excinfo.value).lower()
 
 
@@ -744,6 +785,9 @@ def test_update_pair_restores_originals_on_second_half_failure(
         sandbox=sandbox,
         preset="builtin:ce-executor-pipeline",
         plan_path=plan,
+        change_plan_path="docs/plans/change.md",
+        change_plan_hash="0000000000000000000000000000000000000000000000000000000000000000",
+        change_summary="## Goal Capsule\n- Objective: verify",
     )
     config_path = Path(first.config_path)
     prompt_path = Path(first.prompt_path)
@@ -798,6 +842,9 @@ def test_sandbox_suite_stages_plan_in_sandbox(tmp_path: Path) -> None:
         sandbox=sandbox,
         preset="builtin:ce-executor-pipeline",
         plan_path=plan,
+        change_plan_path="docs/plans/change.md",
+        change_plan_hash="0000000000000000000000000000000000000000000000000000000000000000",
+        change_summary="## Goal Capsule\n- Objective: verify",
     )
 
     staged = sandbox / "docs" / "plans" / "plan.md"
@@ -823,6 +870,9 @@ def test_sandbox_suite_idempotent_plan_stage(tmp_path: Path) -> None:
         sandbox=sandbox,
         preset="builtin:ce-executor-pipeline",
         plan_path=plan,
+        change_plan_path="docs/plans/change.md",
+        change_plan_hash="0000000000000000000000000000000000000000000000000000000000000000",
+        change_summary="## Goal Capsule\n- Objective: verify",
     )
     staged = sandbox / "docs" / "plans" / "plan.md"
     first_mtime = staged.stat().st_mtime_ns
@@ -831,6 +881,9 @@ def test_sandbox_suite_idempotent_plan_stage(tmp_path: Path) -> None:
         sandbox=sandbox,
         preset="builtin:ce-executor-pipeline",
         plan_path=plan,
+        change_plan_path="docs/plans/change.md",
+        change_plan_hash="0000000000000000000000000000000000000000000000000000000000000000",
+        change_summary="## Goal Capsule\n- Objective: verify",
     )
     # Staged file is not rewritten (idempotent) when bytes match.
     assert staged.stat().st_mtime_ns == first_mtime
@@ -854,7 +907,10 @@ def test_sandbox_suite_blocks_plan_stage_content_conflict(tmp_path: Path) -> Non
             sandbox=sandbox,
             preset="builtin:ce-executor-pipeline",
             plan_path=plan,
-        )
+        change_plan_path="docs/plans/change.md",
+        change_plan_hash="0000000000000000000000000000000000000000000000000000000000000000",
+        change_summary="## Goal Capsule\n- Objective: verify",
+    )
     assert "plan_stage" in str(excinfo.value).lower()
     assert "different bytes" in str(excinfo.value).lower()
     # The pre-existing staged file is left intact (no overwrite on conflict).
@@ -880,7 +936,10 @@ def test_sandbox_suite_rollback_staged_plan_on_pair_write_failure(
             sandbox=sandbox,
             preset="builtin:ce-executor-pipeline",
             plan_path=plan,
-        )
+        change_plan_path="docs/plans/change.md",
+        change_plan_hash="0000000000000000000000000000000000000000000000000000000000000000",
+        change_summary="## Goal Capsule\n- Objective: verify",
+    )
     assert "atomic write failed" in str(excinfo.value).lower()
     # The staged plan was created by this call, so it must be rolled back.
     staged = sandbox / "docs" / "plans" / "plan.md"
@@ -903,6 +962,9 @@ def test_generate_suite_uses_resolved_binary(tmp_path: Path) -> None:
         preset="builtin:ce-executor-pipeline",
         plan_path=plan,
         binary=resolved,
+        change_plan_path="docs/plans/change.md",
+        change_plan_hash="0000000000000000000000000000000000000000000000000000000000000000",
+        change_summary="## Goal Capsule\n- Objective: verify",
     )
     assert result.argv[0] == resolved
     assert result.launch_argv[0] == resolved
@@ -1021,7 +1083,7 @@ def test_static_gate_per_stage_argv_shape() -> None:
     assert "preflight" in pf.argv
     assert "preflight" in pf.argv
 
-    # dry_run: ralph -c cfg -H preset run --dry-run --plan <path>
+    # dry_run: ralph -c cfg -H preset run --dry-run --prompt-file --plan
     dr = report.dry_run
     assert dr.argv[:2] == ("ralph", "-c")
     assert "-H" in dr.argv
@@ -1217,6 +1279,7 @@ def test_handoff_static_only_command_shape(tmp_path: Path) -> None:
     assert "-c" in artifact.command
     assert "builtin:ce-executor-pipeline" in artifact.command
     assert "--plan" in artifact.command
+    assert "--prompt-file" in artifact.command
     assert "Static load passed" in artifact.report
     assert "NOT closed" in artifact.report
 

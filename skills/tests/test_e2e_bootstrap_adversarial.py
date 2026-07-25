@@ -84,6 +84,9 @@ def test_shell_metachar_in_plan_path(tmp_path: Path) -> None:
         sandbox=sandbox,
         preset="builtin:ce-executor-pipeline",
         plan_path=plan,
+        change_plan_path="docs/plans/change.md",
+        change_plan_hash="0000000000000000000000000000000000000000000000000000000000000000",
+        change_summary="## Goal Capsule\n- Objective: verify",
     )
     prompt_path = Path(result.prompt_path)
     assert prompt_path.is_file()
@@ -115,6 +118,9 @@ def test_real_presets_subtree_now_blocked(tmp_path: Path) -> None:
         sandbox=bad,
         preset="builtin:ce-executor-pipeline",
         plan_path=plan,
+        change_plan_path="docs/plans/change.md",
+        change_plan_hash="0000000000000000000000000000000000000000000000000000000000000000",
+        change_summary="## Goal Capsule\n- Objective: verify",
     )
     assert result.config_path and result.prompt_path
 
@@ -141,7 +147,10 @@ def test_presets_foo_subtree_blocked(tmp_path: Path) -> None:
             sandbox=bad,
             preset="builtin:ce-executor-pipeline",
             plan_path=plan,
-        )
+        change_plan_path="docs/plans/change.md",
+        change_plan_hash="0000000000000000000000000000000000000000000000000000000000000000",
+        change_summary="## Goal Capsule\n- Objective: verify",
+    )
     assert "presets" in str(excinfo.value).lower()
 
 
@@ -167,6 +176,9 @@ def test_my_presets_clone_subtree_allowed(tmp_path: Path) -> None:
         sandbox=good,
         preset="builtin:ce-executor-pipeline",
         plan_path=plan,
+        change_plan_path="docs/plans/change.md",
+        change_plan_hash="0000000000000000000000000000000000000000000000000000000000000000",
+        change_summary="## Goal Capsule\n- Objective: verify",
     )
     assert result.config_path and result.prompt_path
 
@@ -190,6 +202,9 @@ def test_concurrent_atomic_write(tmp_path: Path) -> None:
         sandbox=sandbox,
         preset="builtin:ce-executor-pipeline",
         plan_path=plan,
+        change_plan_path="docs/plans/change.md",
+        change_plan_hash="0000000000000000000000000000000000000000000000000000000000000000",
+        change_summary="## Goal Capsule\n- Objective: verify",
     )
     config_bytes_1 = Path(result1.config_path).read_bytes()
     prompt_bytes_1 = Path(result1.prompt_path).read_bytes()
@@ -199,6 +214,9 @@ def test_concurrent_atomic_write(tmp_path: Path) -> None:
         sandbox=sandbox,
         preset="builtin:ce-executor-pipeline",
         plan_path=plan,
+        change_plan_path="docs/plans/change.md",
+        change_plan_hash="0000000000000000000000000000000000000000000000000000000000000000",
+        change_summary="## Goal Capsule\n- Objective: verify",
     )
     config_bytes_2 = Path(result2.config_path).read_bytes()
     prompt_bytes_2 = Path(result2.prompt_path).read_bytes()
@@ -238,7 +256,10 @@ def test_toctou_sandbox_inside_real_presets(tmp_path: Path) -> None:
             sandbox=sandbox,
             preset="builtin:ce-executor-pipeline",
             plan_path=plan,
-        )
+        change_plan_path="docs/plans/change.md",
+        change_plan_hash="0000000000000000000000000000000000000000000000000000000000000000",
+        change_summary="## Goal Capsule\n- Objective: verify",
+    )
     assert "presets" in str(excinfo.value).lower()
 
 

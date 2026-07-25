@@ -36,11 +36,25 @@ Triggered when **multiple** suitable sandbox plans score close.
 
 **Not a decision point.** The orchestrator **change plan** is never
 offered as workload `--plan`. It is verification context only
-(injected into `PROMPT.<stem>.md`). Binding it as `--plan` is forbidden.
+(injected into `PROMPT.<stem>.md` and shown to agents via
+`--prompt-file`). Binding it as `--plan` is forbidden.
 
-**Not a decision point.** Change plan declares `presets/` intent →
-hard-handoff `ralph-preset-author` (see `preset_gap`), not a soft
-override.
+### `preset_gap` — preset missing or change plan touches presets/
+
+Triggered when no preset covers verification intent, **or**
+`resolve_plans` / `run_pipeline` sets `change_plan_touches_presets`
+(change plan declares `presets/` paths). Pipeline pauses with
+`needs=preset_gap` until the operator chooses.
+
+| # | Option | Consequence |
+|---|--------|-------------|
+| 1 (**recommended** when preset already landed) | Preset already updated in orchestrator — continue | Re-run pipeline with `--preset-continue-confirmed`. |
+| 2 | Handoff to `ralph-preset-author` | Blocked handoff (hard-handoff); resume after preset lands. |
+| 3 | Halt, operator edits preset manually | Blocked handoff with operator action recorded. |
+| Other | Free-text | Recorded; skill halts unless a concrete continue/handoff is clear. |
+
+When the builtin/file preset is **missing**, option 1 is not offered —
+only handoff / halt.
 
 ### `plan_diff_clarify` — workload plan ↔ sandbox git diff disagree
 
@@ -62,8 +76,9 @@ disagrees with the sandbox git diff.
 ### `binary_resolution` — missing or stale ralph binary
 
 Triggered when no usable `ralph` is on PATH, version probe fails, **or**
-`check_binary_freshness` reports the binary is not a fresh build of
-the change-plan (orchestrator) repo.
+`check_binary_freshness` / `run_pipeline` reports the binary is not a
+fresh build of the change-plan (orchestrator) repo. Pipeline will not
+emit handoff until freshness passes.
 
 | # | Option | Consequence |
 |---|--------|-------------|
@@ -71,22 +86,6 @@ the change-plan (orchestrator) repo.
 | 2 | Install via PATH (`cargo install`) | `cargo install --path crates/ralph-cli --locked`. |
 | 3 | Provide absolute path to a repo build | Re-probe; must pass freshness when verifying a change plan. |
 | Other | Free-text path or build override | Recorded; re-probed once. |
-
-### `preset_gap` — preset missing or change plan touches presets/
-
-Triggered when no preset covers verification intent, **or**
-`resolve_plans` sets `change_plan_touches_presets` (change plan
-declares `presets/` paths).
-
-| # | Option | Consequence |
-|---|--------|-------------|
-| 1 (**recommended** when preset already landed) | Preset already updated in orchestrator — continue | Record confirmation; proceed with bootstrap. |
-| 2 | Handoff to `ralph-preset-author` | Blocked handoff; resume after preset lands. |
-| 3 | Halt, operator edits preset manually | Blocked handoff with operator action recorded. |
-| Other | Free-text | Recorded; skill halts unless a concrete continue/handoff is clear. |
-
-When the builtin/file preset is **missing**, option 1 is not offered —
-only handoff / halt.
 
 ### `write_conflict` — owned pair exists under different provenance
 
@@ -101,12 +100,12 @@ embedded hashes do not match.
 | 3 | Back up and overwrite | `.bak-<sha>` then refresh. |
 | Other | Free-text | Recorded; halt unless paired with a concrete action. |
 
-### `argv_shape` — `--plan` vs `--prompt-file`
+### `argv_shape` — `--prompt-file` + `--plan`
 
 | # | Option | Consequence |
 |---|--------|-------------|
-| 1 (recommended) | `--plan <sandbox-relative workload>` | Workload staged/used as `docs/plans/<basename>`. Change plan stays in PROMPT only. |
-| 2 | `--prompt-file <abs>` | External prompt authoritative; rare for this skill. |
+| 1 (**recommended**) | `--prompt-file PROMPT.<stem>.md --plan docs/plans/<workload>` | Agents see change intent + workload body; `--plan` is workload identity. |
+| 2 | `--plan` only (legacy / blocked for this skill) | Change intent would not reach agents — do not use. |
 | Other | Free-text | Recorded; halt unless paired with a concrete argv slot. |
 
 ### `live_run` — operator asks whether to spawn a live loop
@@ -132,3 +131,5 @@ are owned by `ralph-run-diagnosis`, not this skill.
 - A combo-box whose options are not mutually exclusive.
 - Offering the orchestrator change plan as workload `--plan`.
 - Silently creating or editing `<sandbox>/docs/plans/*`.
+- Emitting handoff without `bootstrap_pipeline` / freshness gate.
+- Launch argv with `--plan` alone when a change plan was supplied.

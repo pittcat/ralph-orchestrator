@@ -60,17 +60,35 @@ def dry_run_ok_invocation(
     config: str,
     preset: str,
     plan: str,
+    prompt_file: str | None = None,
 ) -> FakeInvocation:
     """Return a FakeInvocation for a successful ``ralph run --dry-run``.
 
     The stdout is the canonical dry-run configuration block Ralph emits.
+    When ``prompt_file`` is set, argv carries both ``--prompt-file`` and
+    ``--plan`` (e2e-bootstrap P0 shape).
     """
+    argv: tuple[str, ...] = (
+        binary,
+        "-c",
+        config,
+        "-H",
+        preset,
+        "run",
+        "--dry-run",
+    )
+    shown = "PROMPT.foo.md"
+    if prompt_file:
+        argv = argv + ("--prompt-file", prompt_file)
+        shown = prompt_file
+    if plan:
+        argv = argv + ("--plan", plan)
     return FakeInvocation(
-        argv_expected=(binary, "-c", config, "-H", preset, "run", "--dry-run", "--plan", plan),
+        argv_expected=argv,
         stdout_chunks=(
             "Dry run mode - configuration:\n"
             "  Backend: fake\n"
-            "  Prompt file: PROMPT.foo.md\n"
+            f"  Prompt file: {shown}\n"
             "  Max iterations: 1\n"
             "  Max runtime: 60\n",
         ),

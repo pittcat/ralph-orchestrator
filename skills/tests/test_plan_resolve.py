@@ -127,28 +127,53 @@ def test_no_workload_asks_confirmation_no_silent_author(tmp_path: Path) -> None:
     bad = sand / "docs" / "plans" / "accidental-orch.md"
     _write_change_plan(bad)
     before = list((sand / "docs" / "plans").glob("*.md"))
-    result = plan_resolve.resolve_plans(sand, change_plan=None)
+    change = _git_init(tmp_path / "orch") / "docs" / "plans" / "005.md"
+    _write_change_plan(change)
+    result = plan_resolve.resolve_plans(sand, change_plan=change)
     assert result.ok is False
     assert result.needs_author_confirmation is True
     after = list((sand / "docs" / "plans").glob("*.md"))
     assert after == before  # no silent write
 
 
-def test_author_minimal_only_when_called(tmp_path: Path) -> None:
+def test_author_minimal_requires_confirmation(tmp_path: Path) -> None:
     sand = tmp_path / "sand"
     sand.mkdir()
+    try:
+        plan_resolve.author_minimal_plan(
+            sand, preset="builtin:ce-executor-supervisor", today=date(2026, 7, 25)
+        )
+        raise AssertionError("expected ValueError without confirmation")
+    except ValueError as exc:
+        assert "sandbox_plan_write" in str(exc)
     path = plan_resolve.author_minimal_plan(
-        sand, preset="builtin:ce-executor-supervisor", today=date(2026, 7, 25)
+        sand,
+        preset="builtin:ce-executor-supervisor",
+        today=date(2026, 7, 25),
+        confirmed=True,
+        confirmation_token="sandbox_plan_write",
     )
     assert path.is_file()
     assert "e2e_smoke_marker.txt" in path.read_text(encoding="utf-8")
 
 
-def test_resolve_without_change_plan_still_discovers(tmp_path: Path) -> None:
+def test_resolve_without_change_plan_blocked(tmp_path: Path) -> None:
     sand = _git_init(tmp_path / "sand")
     good = sand / "docs" / "plans" / "2026-07-22-001-feat-multi-sort-supervisor-e2e-plan.md"
     _write_e2e_plan(good)
     result = plan_resolve.resolve_plans(sand, change_plan=None)
-    assert result.ok is True
-    assert result.change_plan_path is None
-    assert Path(result.workload_plan_path).resolve() == good.resolve()
+    assert result.ok is False
+    assert result.blocked is True
+    assert "change_plan is required" in result.message
+
+
+def test_same_repo_sandbox_blocked(tmp_path: Path) -> None:
+    repo = _git_init(tmp_path / "same")
+    change = repo / "docs" / "plans" / "005.md"
+    _write_change_plan(change)
+    good = repo / "docs" / "plans" / "2026-07-22-001-feat-multi-sort-supervisor-e2e-plan.md"
+    _write_e2e_plan(good)
+    result = plan_resolve.resolve_plans(repo, change_plan=change)
+    assert result.ok is False
+    assert result.blocked is True
+    assert "external" in result.message.lower() or "same git" in result.message.lower()

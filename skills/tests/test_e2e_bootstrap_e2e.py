@@ -91,6 +91,7 @@ def test_e2e_full_pipeline_static_only(tmp_path: Path, monkeypatch: pytest.Monke
     # U3 — binary resolution via the explicit CLI override.
     resolution = binary_resolve.resolve_binary(
         explicit_path=str(fake_binary),
+        trusted_only=False,
     )
     assert resolution.ok is True
 
@@ -100,6 +101,9 @@ def test_e2e_full_pipeline_static_only(tmp_path: Path, monkeypatch: pytest.Monke
         preset="builtin:ce-executor-pipeline",
         plan_path=plan,
         binary=resolution.binary,
+        change_plan_path="docs/plans/change.md",
+        change_plan_hash="0000000000000000000000000000000000000000000000000000000000000000",
+        change_summary="## Goal Capsule\n- Objective: verify",
     )
     assert (sandbox / "ralph.ce-executor-pipeline.yml").is_file()
     assert (sandbox / "PROMPT.ce-executor-pipeline.md").is_file()
@@ -107,6 +111,8 @@ def test_e2e_full_pipeline_static_only(tmp_path: Path, monkeypatch: pytest.Monke
     assert suite.launch_argv[0] == resolution.binary
     assert "--dry-run" in suite.argv
     assert "--dry-run" not in suite.launch_argv
+    assert "--prompt-file" in suite.launch_argv
+    assert "PROMPT.ce-executor-pipeline.md" in suite.launch_argv
 
     # U5 — static gate — use the shared factory.
     # probe_capability calls: (binary, --version), (binary, --help),
@@ -160,17 +166,19 @@ def test_e2e_full_pipeline_static_only(tmp_path: Path, monkeypatch: pytest.Monke
         ),
         _probe_runner_common.dry_run_ok_invocation(
             resolution.binary,
-            suite.config_path,
+            "ralph.ce-executor-pipeline.yml",
             "builtin:ce-executor-pipeline",
             "docs/plans/plan.md",
+            prompt_file="PROMPT.ce-executor-pipeline.md",
         ),
     ]
     gate_runner = _probe_runner_common.e2e_make_runner(invocations)
     gate_report = gate.run_static_gate(
         binary=resolution.binary,
-        config_path=suite.config_path,
+        config_path="ralph.ce-executor-pipeline.yml",
         preset="builtin:ce-executor-pipeline",
         plan_path="docs/plans/plan.md",
+        prompt_file="PROMPT.ce-executor-pipeline.md",
         runner=gate_runner,
     )
     assert gate_report.ok is True
@@ -179,9 +187,10 @@ def test_e2e_full_pipeline_static_only(tmp_path: Path, monkeypatch: pytest.Monke
     artifact = handoff.build_handoff(
         handoff.HandoffInputs(
             binary=resolution.binary,
-            config_path=suite.config_path,
+            config_path="ralph.ce-executor-pipeline.yml",
             preset="builtin:ce-executor-pipeline",
             plan_path="docs/plans/plan.md",
+            prompt_path="PROMPT.ce-executor-pipeline.md",
             level="static_only",
             sandbox_path="sandbox",
             validation_evidence=gate_report.summary(),
@@ -193,6 +202,8 @@ def test_e2e_full_pipeline_static_only(tmp_path: Path, monkeypatch: pytest.Monke
     assert "-c" in artifact.command
     assert "builtin:ce-executor-pipeline" in artifact.command
     assert "--plan" in artifact.command
+    assert "--prompt-file" in artifact.command
+    assert "PROMPT.ce-executor-pipeline.md" in artifact.command
     assert "NOT closed" in artifact.report
 
 
@@ -235,7 +246,10 @@ def test_e2e_sandbox_refuses_presets_write(tmp_path: Path) -> None:
             sandbox=presets_root,
             preset="builtin:ce-executor-pipeline",
             plan_path=plan,
-        )
+        change_plan_path="docs/plans/change.md",
+        change_plan_hash="0000000000000000000000000000000000000000000000000000000000000000",
+        change_summary="## Goal Capsule\n- Objective: verify",
+    )
 
 
 # ---------------------------------------------------------------------------
