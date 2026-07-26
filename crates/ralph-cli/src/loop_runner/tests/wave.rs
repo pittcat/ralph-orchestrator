@@ -1957,6 +1957,175 @@ async fn test_run_wave_worker_pty_surfaces_spawn_failure() {
     emit_wave_validation_marker("pty:spawn-failure", &["error"]);
 }
 
+// ─────────────────────────────────────────────────────────────────────────
+// 2026-07-25-006 plan U3: wave worker idle-heartbeat kill scenarios.
+// Fake-backend integration tests exercising the dual-clock lease:
+// S1 (silent idle-kill), S4 (weak-signal cap idle-kill), S3 (strong-signal
+// keeps worker alive past legacy wall-clock).
+// ─────────────────────────────────────────────────────────────────────────
+
+/// S1: fake backend writes one line then goes silent for 10 s.
+/// idle_heartbeat=2 s, idle_weak_signal_cap=4, wave_timeout=60 s.
+/// Expected: IdleKill, error starts with "Worker timed out after",
+/// duration ≤ 8 s (well before the 10 s silence ends).
+#[cfg(unix)]
+#[tokio::test]
+async fn test_run_wave_worker_pty_idle_kill_on_silence() {
+    let temp_dir = tempfile::tempdir().expect("temp dir");
+    // echo once then sleep 10 s — no further output to refresh the lease.
+    let body = "echo first && sleep 10\nexit 0\n";
+    write_fake_executable(temp_dir.path(), "wave-worker", body);
+    let worker_events_path = temp_dir.path().join("wave-events.jsonl");
+    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    let backend = CliBackend {
+        command: temp_dir.path().join("wave-worker").display().to_string(),
+        args: vec![],
+        prompt_mode: ralph_adapters::PromptMode::Arg,
+        prompt_flag: None,
+        output_format: BackendOutputFormat::Text,
+        env_vars: vec![],
+    };
+
+    let (_index, outcome) = run_wave_worker_pty(
+        0,
+        &backend,
+        "prompt",
+        &worker_events_path,
+        Duration::from_secs(60),
+        Some(Duration::from_secs(2)),
+        4,
+        tx,
+        None,
+        None,
+        None,
+    )
+    .await;
+
+    let (error, duration) = outcome.expect_err("silent worker should be idle-killed");
+    assert!(
+        error.starts_with("Worker timed out after"),
+        "expected idle-kill error, got: {error}"
+    );
+    assert!(
+        duration <= Duration::from_secs(8),
+        "should be killed well before the 10 s silence ends, got {duration:?}"
+    );
+    emit_wave_validation_marker("idle-kill:silence", &["idle", "kill"]);
+}
+
+/// S4: fake backend emits 3 weak Pi TextDelta lines at 1 s intervals,
+/// then sleeps 6 s. idle_heartbeat=10 s, idle_weak_signal_cap=2,
+/// wave_timeout=60 s. After 2 consecutive weak lines the cap is
+/// exhausted; the 3 rd weak line (arriving after the 6 s sleep) triggers
+/// IdleKill with weak_count=2.
+#[cfg(unix)]
+#[tokio::test]
+async fn test_run_wave_worker_pty_idle_kill_at_weak_signal_cap() {
+    let temp_dir = tempfile::tempdir().expect("temp dir");
+    // 3 weak deltas 1 s apart, then sleep 6 s (total 9 s to last line,
+    // idle window fires at t=10 s from first line).
+    let body = r#"printf '{"type":"message_update","assistantMessageEvent":{"type":"text_delta","delta":"thinking..."}}\n'
+sleep 1
+printf '{"type":"message_update","assistantMessageEvent":{"type":"text_delta","delta":"still thinking..."}}\n'
+sleep 1
+printf '{"type":"message_update","assistantMessageEvent":{"type":"text_delta","delta":"more..."}}\n'
+sleep 6
+exit 0
+"#;
+    write_fake_executable(temp_dir.path(), "wave-worker", body);
+    let worker_events_path = temp_dir.path().join("wave-events.jsonl");
+    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    let backend = CliBackend {
+        command: temp_dir.path().join("wave-worker").display().to_string(),
+        args: vec![],
+        prompt_mode: ralph_adapters::PromptMode::Arg,
+        prompt_flag: None,
+        output_format: BackendOutputFormat::PiStreamJson,
+        env_vars: vec![],
+    };
+
+    let (_index, outcome) = run_wave_worker_pty(
+        0,
+        &backend,
+        "prompt",
+        &worker_events_path,
+        Duration::from_secs(60),
+        Some(Duration::from_secs(10)),
+        2,
+        tx,
+        None,
+        None,
+        None,
+    )
+    .await;
+
+    let (error, _duration) = outcome.expect_err("worker should be idle-killed at weak cap");
+    assert!(
+        error.starts_with("Worker timed out after"),
+        "expected idle-kill error, got: {error}"
+    );
+    assert!(
+        error.contains("weak_count="),
+        "error should mention weak_count, got: {error}"
+    );
+    emit_wave_validation_marker("idle-kill:weak-cap", &["idle", "weak", "kill"]);
+}
+
+/// S3: fake backend emits Pi tool_execution_start strong signals every
+/// 500 ms for 4 s. idle_heartbeat=60 s, idle_weak_signal_cap=4,
+/// wave_timeout=10 s. Strong signals keep the lease refreshed so the
+/// worker survives past the legacy wall-clock. Expected: Ok with
+/// success=true, duration ≥ 3.5 s (the 4 s execution must fully run).
+#[cfg(unix)]
+#[tokio::test]
+async fn test_run_wave_worker_pty_strong_signal_keeps_alive_past_legacy_timeout() {
+    let temp_dir = tempfile::tempdir().expect("temp dir");
+    // Emit 8 tool_execution_start strong-signal lines at 500 ms intervals
+    // (total 4 s), then exit cleanly.
+    let body = r#"i=0
+while [ $i -lt 8 ]; do
+  printf '{"type":"tool_execution_start","toolCallId":"x%d","toolName":"x","args":{}}\n'
+  sleep 0.5
+  i=$((i + 1))
+done
+exit 0
+"#;
+    write_fake_executable(temp_dir.path(), "wave-worker", body);
+    let worker_events_path = temp_dir.path().join("wave-events.jsonl");
+    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    let backend = CliBackend {
+        command: temp_dir.path().join("wave-worker").display().to_string(),
+        args: vec![],
+        prompt_mode: ralph_adapters::PromptMode::Arg,
+        prompt_flag: None,
+        output_format: BackendOutputFormat::PiStreamJson,
+        env_vars: vec![],
+    };
+
+    let (_index, outcome) = run_wave_worker_pty(
+        0,
+        &backend,
+        "prompt",
+        &worker_events_path,
+        Duration::from_secs(10),
+        Some(Duration::from_secs(60)),
+        4,
+        tx,
+        None,
+        None,
+        None,
+    )
+    .await;
+
+    let (events, duration, success) = outcome.expect("strong-signal worker should succeed");
+    assert!(success, "worker should report success, got events={events:?}");
+    assert!(
+        duration >= Duration::from_secs_f64(3.5),
+        "worker should run at least 3.5 s (4 s script), got {duration:?}"
+    );
+    emit_wave_validation_marker("strong-signal:keeps-alive", &["strong", "lease"]);
+}
+
 #[cfg(unix)]
 #[test]
 fn test_merge_wave_results_to_events_file_synthesizes_failure_events() {
