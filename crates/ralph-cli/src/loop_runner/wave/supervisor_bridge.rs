@@ -449,6 +449,25 @@ impl SupervisorBridge for CoordinatorSupervisorBridge {
         Ok(())
     }
 
+    fn record_slot_terminal_evidence(
+        &self,
+        wave_id: &str,
+        slot_index: u32,
+        evidence: &ralph_core::supervisor::TerminalEvidence,
+    ) -> Result<(), BridgeError> {
+        self.store
+            .record_slot_terminal_evidence(wave_id, slot_index, evidence)?;
+        Ok(())
+    }
+
+    fn slot_terminal_evidence(
+        &self,
+        wave_id: &str,
+        slot_index: u32,
+    ) -> Result<Option<ralph_core::supervisor::TerminalEvidence>, BridgeError> {
+        Ok(self.store.slot_terminal_evidence(wave_id, slot_index)?)
+    }
+
     fn record_slot_failure(
         &self,
         wave_id: &str,

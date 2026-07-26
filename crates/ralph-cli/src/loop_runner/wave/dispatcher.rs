@@ -2352,13 +2352,22 @@ pub(crate) fn run_supervisor_fan_in(
             // main-backscan + store-Completed rows (used by Review
             // to subtract from `missing_dimensions`). Each
             // WaveKind ignores the argument it does not consume.
+            // 2026-07-26-004 plan U3 (R1 / R2): build the real
+            // cross-source reconciliation hints (main-ledger backscan +
+            // store Completed-with-evidence) instead of passing `None`.
+            // This is the production wiring the 003 plan left half-done:
+            // `missing_dimensions` now subtracts every dimension that is
+            // provably done in ANY source, so it reports only the
+            // genuinely-missing (failed) dimensions.
+            let review_done_hints =
+                build_review_done_hints(bridge, &store_wave_id, completed, main_events_file);
             let payload = build_wave_failed_payload(
                 wave_kind,
                 completed,
                 reason,
                 blocking_slots,
                 &reasons,
-                None,
+                Some(&review_done_hints),
             );
             append_supervisor_coord_event(main_events_file, &topic, &payload);
             SupervisorFanInOutcome::InjectedFailed
@@ -2691,6 +2700,86 @@ fn collect_review_dimensions(completed: &ralph_core::CompletedWave) -> Vec<Strin
     by_index.into_values().collect()
 }
 
+
+/// 2026-07-26-004 plan U3 (R1 / R2): build the cross-source
+/// [`ReviewDoneHints`] the failed-payload builder subtracts from
+/// `missing_dimensions`. Two sources beyond `completed.results`:
+///
+/// - `main_backscan`: dimensions whose `review.unit.done` already
+///   lives in the main ledger for THIS wave. The scan is bounded by
+///   the envelope `wave_id` — malformed rows, rows without a wave id,
+///   and other waves' rows are ignored (R2: an event already in main
+///   must not be re-counted as missing; U3 risk: never eat another
+///   wave's terminal event).
+/// - `store_completed`: dimensions whose slot is `Completed` in the
+///   supervisor store WITH valid terminal evidence (KTD3 fail-closed:
+///   a bare `Completed` status bit with no evidence does NOT count).
+fn build_review_done_hints(
+    bridge: &Arc<dyn ralph_core::supervisor::SupervisorBridge>,
+    store_wave_id: &str,
+    completed: &ralph_core::CompletedWave,
+    main_events_file: &Path,
+) -> ReviewDoneHints {
+    use ralph_core::supervisor::SlotStatus;
+    use std::io::BufRead;
+
+    // --- main_backscan: same-wave `review.unit.done` already in main ---
+    let mut main_backscan = std::collections::HashSet::new();
+    if let Ok(file) = std::fs::File::open(main_events_file) {
+        for line in std::io::BufReader::new(file).lines() {
+            let Ok(line) = line else { continue };
+            let Ok(record) = serde_json::from_str::<serde_json::Value>(&line) else {
+                continue;
+            };
+            if record.get("topic").and_then(|t| t.as_str()) != Some("review.unit.done") {
+                continue;
+            }
+            // Bounded wave match: the envelope wave_id must equal this
+            // wave. Rows without a wave_id (legacy / malformed) are NOT
+            // counted — fail-closed.
+            if record.get("wave_id").and_then(|w| w.as_str())
+                != Some(completed.wave_id.as_str())
+            {
+                continue;
+            }
+            let payload = record.get("payload").and_then(|p| p.as_str()).unwrap_or("");
+            if let Ok(serde_json::Value::Object(map)) =
+                serde_json::from_str::<serde_json::Value>(payload)
+                && let Some(serde_json::Value::String(dim)) = map.get("dimension")
+            {
+                main_backscan.insert(dim.clone());
+            }
+        }
+    }
+
+    // --- store_completed: Completed slots WITH valid terminal evidence ---
+    let mut store_completed = std::collections::HashSet::new();
+    if let Ok(snap) = bridge.fan_in_status(store_wave_id) {
+        for (slot_index, status) in &snap.slots {
+            if !matches!(status, SlotStatus::Completed) {
+                continue;
+            }
+            let Ok(Some(evidence)) = bridge.slot_terminal_evidence(store_wave_id, *slot_index)
+            else {
+                // KTD3 fail-closed: no evidence → not provably done.
+                continue;
+            };
+            if let Some(dim) = evidence.dimension {
+                store_completed.insert(dim);
+            } else if let Some(dim) = completed.assigned_dimensions.get(slot_index) {
+                // Evidence existed but carried no dimension field; fall
+                // back to the slot's assigned dimension.
+                store_completed.insert(dim.clone());
+            }
+        }
+    }
+
+    ReviewDoneHints {
+        main_backscan,
+        store_completed,
+    }
+}
+
 /// U6: append a `system_injected: true` coordination event
 /// (`*.wave.complete` / `*.wave.failed`) to the loop's main ledger
 /// WITHOUT advancing the reader cursor. The caller's post-wave
@@ -2834,12 +2923,21 @@ fn merge_completed_review_slots_to_main(
             // Pre-render the JSONL row with the `review-worker`
             // attribution so `compute_missing_dimensions` (U4)
             // sees the dimension in main as already done.
+            //
+            // 2026-07-26-004 plan U3 (R1 / bounded backscan): preserve
+            // the event's envelope `wave_id` / `wave_index` so the
+            // fan-in main-ledger backscan can filter to THIS wave and
+            // never eat another wave's `review.unit.done`. Dropping the
+            // wave id here was what made cross-source reconciliation
+            // unsafe before U3.
             let record = serde_json::json!({
                 "topic": event.topic.as_str(),
                 "payload": event.payload.as_str(),
                 "ts": chrono::Utc::now().to_rfc3339(),
                 "hat": "review-worker",
                 "source": "review-worker",
+                "wave_id": event.wave_id,
+                "wave_index": event.wave_index,
             });
             if let Ok(line) = serde_json::to_string(&record) {
                 lines.push(line);
@@ -3291,6 +3389,38 @@ async fn dispatch_wave_inner_with_release<E: WaveWorkerExecutor + ?Sized>(
                                     %error,
                                     "U5: supervisor record_slot_result failed"
                                 );
+                            }
+                            // 2026-07-26-004 plan U2/U3 (KTD3): persist
+                            // bounded terminal evidence for the Completed
+                            // slot so fan-in reconciliation can prove the
+                            // slot produced a real terminal event. Prefer
+                            // the `review.unit.done` record; fall back to
+                            // the first accepted event for non-review
+                            // wave kinds. Failures only warn — the slot is
+                            // already Completed and reconciliation treats
+                            // missing evidence as fail-closed.
+                            if let Some(terminal) = events
+                                .iter()
+                                .find(|e| e.topic == "review.unit.done")
+                                .or_else(|| events.first())
+                            {
+                                let evidence =
+                                    ralph_core::supervisor::TerminalEvidence::from_event(
+                                        &terminal.topic,
+                                        terminal.payload.as_deref().unwrap_or(""),
+                                    );
+                                if let Err(error) = guard.bridge.record_slot_terminal_evidence(
+                                    &guard.wave_id,
+                                    guard.slot_index,
+                                    &evidence,
+                                ) {
+                                    warn!(
+                                        wave_id = %guard.wave_id,
+                                        slot_index = guard.slot_index,
+                                        %error,
+                                        "U2: supervisor record_slot_terminal_evidence failed"
+                                    );
+                                }
                             }
                         }
                     }
@@ -7275,6 +7405,236 @@ hats: {}
             .expect("slot 1 must exist");
         assert_eq!(s1["status"], "failed");
         assert_eq!(s1["reason"], "worker_timeout");
+    }
+
+
+    /// U1 Red #1 (plan 2026-07-26-004, S2 / R2): production
+    /// `run_supervisor_fan_in` must NOT report a dimension as
+    /// missing when that dimension's `review.unit.done` already
+    /// lives in the main ledger for this wave (e.g. merged by a
+    /// previous fan-in tick). Today the InjectedFailed arm passes
+    /// `None` for `review_done_hints`, so a main-only done
+    /// dimension is double-counted as missing (the
+    /// primary-20260726 inflation). This test drives the REAL
+    /// production call point and asserts the reconciled truth; it
+    /// goes RED until U3 wires the main-backscan hints into the
+    /// payload builder.
+    #[test]
+    fn u1_red1_fan_in_failed_missing_excludes_main_backscanned_dimension() {
+        use ralph_core::config::HatConfig;
+        use ralph_core::supervisor::InMemoryCoordinatorBridge;
+        use ralph_core::supervisor::SupervisorBridge;
+        use ralph_core::supervisor::{SupervisorStore, WaveKind};
+        use std::io::{BufRead, Write};
+
+        let workspace = tempfile::TempDir::new().expect("temp workspace");
+        let ralph_dir = workspace.path().join(".ralph");
+        std::fs::create_dir_all(&ralph_dir).expect("mkdir .ralph");
+        let main_events_file = ralph_dir.join("events.jsonl");
+
+        // Pre-seed the main ledger with a `review.unit.done` for the
+        // `testing` dimension under THIS wave id — simulating a prior
+        // partial fan-in tick that already merged it. Per R2 this
+        // dimension is already proven done and must not be re-counted
+        // as missing.
+        {
+            let mut f = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&main_events_file)
+                .expect("open main");
+            let line = serde_json::json!({
+                "topic": "review.unit.done",
+                "payload": "{\"dimension\":\"testing\"}",
+                "ts": "2026-07-26T00:00:00Z",
+                "hat": "review-worker",
+                "source": "review-worker",
+                "wave_id": "w-u1-red1",
+            });
+            writeln!(f, "{}", line).expect("write main line");
+        }
+
+        let store = std::sync::Arc::new(ralph_core::supervisor::InMemorySupervisorStore::new());
+        let bridge = InMemoryCoordinatorBridge::from_store(store.clone());
+        let store_wave_id = bridge
+            .register_wave_if_absent(WaveKind::Review, "w-u1-red1", 2)
+            .unwrap();
+
+        // Slot 0: Completed with a real review.unit.done for `correctness`.
+        store.record_slot_result(&store_wave_id, 0, "hash-s0", 1).unwrap();
+        // Slot 1: terminally Failed. Its assigned dimension `testing`
+        // is already done in main from the prior tick.
+        store
+            .record_slot_failure(
+                &store_wave_id,
+                1,
+                ralph_core::supervisor::worker_outcome::REASON_WORKER_TIMEOUT,
+            )
+            .unwrap();
+
+        // completed.results carries ONLY slot 0's event (correctness);
+        // `testing` is done via main, not via this fan-in's results.
+        let mut assigned = std::collections::HashMap::new();
+        assigned.insert(0u32, "correctness".to_string());
+        assigned.insert(1u32, "testing".to_string());
+        let completed = ralph_core::CompletedWave {
+            wave_id: "w-u1-red1".to_string(),
+            wave_total: 2,
+            results: vec![ralph_core::WaveResult {
+                index: 0,
+                events: vec![
+                    ralph_proto::Event::new(
+                        "review.unit.done",
+                        serde_json::json!({"dimension":"correctness"}).to_string(),
+                    )
+                    .with_source("review-worker")
+                    .with_wave("w-u1-red1".to_string(), 0, 2),
+                ],
+            }],
+            failures: vec![ralph_core::WaveFailure {
+                index: 1,
+                error: "worker_timeout".to_string(),
+                duration: std::time::Duration::from_millis(1),
+                ..ralph_core::WaveFailure::default()
+            }],
+            duration: std::time::Duration::from_millis(1),
+            partial: false,
+            expected_source_hat: None,
+            assigned_dimensions: assigned,
+            dimension_retry_counts: std::collections::HashMap::new(),
+            worker_events: Vec::new(),
+        };
+        let detected = ralph_core::DetectedWave {
+            wave_id: "w-u1-red1".to_string(),
+            target_hat: HatId::new("review-dispatcher"),
+            hat_config: HatConfig {
+                name: "review-dispatcher".to_string(),
+                ..HatConfig::default()
+            },
+            events: vec![core_event("review.unit.ready", "payload-0")],
+            total: 2,
+            partial: false,
+            consumer_aggregate_timeout: None,
+        };
+
+        let bridge_arc: Arc<dyn ralph_core::supervisor::SupervisorBridge> = Arc::new(bridge);
+        let outcome =
+            run_supervisor_fan_in(&bridge_arc, &completed, &detected, &main_events_file, 60);
+        assert!(
+            matches!(outcome, SupervisorFanInOutcome::InjectedFailed),
+            "failed wave must reach InjectedFailed; got {outcome:?}"
+        );
+
+        // Read the injected review.wave.failed coord event and assert
+        // missing_dimensions does NOT include `testing` (already done
+        // in main) — the reconciled truth per R2.
+        let failed = std::io::BufReader::new(std::fs::File::open(&main_events_file).expect("main"))
+            .lines()
+            .filter_map(|l| l.ok())
+            .filter_map(|l| serde_json::from_str::<serde_json::Value>(&l).ok())
+            .find(|r| r["topic"] == "review.wave.failed")
+            .expect("a review.wave.failed coord event must be injected");
+        let missing: std::collections::HashSet<String> = failed["payload"]["missing_dimensions"]
+            .as_array()
+            .expect("missing_dimensions array")
+            .iter()
+            .map(|v| v.as_str().expect("str").to_string())
+            .collect();
+        assert!(
+            !missing.contains("testing"),
+            "RED: `testing` already has a review.unit.done in main for this wave; \
+             it must NOT be reported missing (production passes None hints today). got {missing:?}"
+        );
+    }
+
+
+    /// 2026-07-26-004 plan U3 (R1 / R2 / KTD3): `build_review_done_hints`
+    /// reconciles the two cross-source views correctly and stays bounded:
+    /// - `main_backscan` keeps ONLY same-wave `review.unit.done` rows and
+    ///   ignores other-wave / wave-less / malformed rows;
+    /// - `store_completed` keeps ONLY Completed slots WITH valid terminal
+    ///   evidence (a legacy Completed status bit with no evidence is
+    ///   fail-closed and does NOT count).
+    #[test]
+    fn u3_build_review_done_hints_is_bounded_and_evidence_gated() {
+        use ralph_core::supervisor::{
+            InMemoryCoordinatorBridge, SupervisorBridge, SupervisorStore, TerminalEvidence, WaveKind,
+        };
+        use std::io::Write;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let main = dir.path().join("events.jsonl");
+        {
+            let mut f = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&main)
+                .expect("open main");
+            let row = |dim: &str, wave: Option<&str>| -> String {
+                let mut rec = serde_json::json!({
+                    "topic": "review.unit.done",
+                    "payload": serde_json::json!({"dimension": dim}).to_string(),
+                    "hat": "review-worker",
+                    "source": "review-worker",
+                });
+                if let Some(w) = wave {
+                    rec["wave_id"] = serde_json::Value::String(w.to_string());
+                }
+                rec.to_string()
+            };
+            // same wave → counted
+            writeln!(f, "{}", row("correctness", Some("W-main"))).unwrap();
+            // different wave → ignored
+            writeln!(f, "{}", row("security", Some("W-other"))).unwrap();
+            // no wave_id → ignored (fail-closed)
+            writeln!(f, "{}", row("testing", None)).unwrap();
+            // malformed → ignored
+            writeln!(f, "not-json").unwrap();
+        }
+
+        let store = std::sync::Arc::new(ralph_core::supervisor::InMemorySupervisorStore::new());
+        let bridge = InMemoryCoordinatorBridge::from_store(store.clone());
+        let store_wave_id = bridge
+            .register_wave_if_absent(WaveKind::Review, "W-main", 2)
+            .unwrap();
+        // Slot 0: Completed WITH evidence (dimension `performance`).
+        store.record_slot_result(&store_wave_id, 0, "h0", 1).unwrap();
+        store
+            .record_slot_terminal_evidence(
+                &store_wave_id,
+                0,
+                &TerminalEvidence::from_event(
+                    "review.unit.done",
+                    "{\"dimension\":\"performance\"}",
+                ),
+            )
+            .unwrap();
+        // Slot 1: Completed but NO evidence (legacy) → must NOT count.
+        store.record_slot_result(&store_wave_id, 1, "h1", 1).unwrap();
+
+        let mut assigned = std::collections::HashMap::new();
+        assigned.insert(0u32, "performance".to_string());
+        assigned.insert(1, "maintainability".to_string());
+        let completed = ralph_core::CompletedWave {
+            wave_id: "W-main".to_string(),
+            wave_total: 2,
+            assigned_dimensions: assigned,
+            ..ralph_core::CompletedWave::default()
+        };
+
+        let bridge_arc: Arc<dyn ralph_core::supervisor::SupervisorBridge> = Arc::new(bridge);
+        let hints = build_review_done_hints(&bridge_arc, &store_wave_id, &completed, &main);
+
+        assert_eq!(
+            hints.main_backscan,
+            ["correctness".to_string()].into_iter().collect(),
+            "main_backscan must keep only same-wave rows"
+        );
+        assert_eq!(
+            hints.store_completed,
+            ["performance".to_string()].into_iter().collect(),
+            "store_completed must keep only Completed-with-evidence slots"
+        );
     }
 
     /// 2026-07-26-002 plan U5 (R5 / KTD6): `slot_failures` MUST be
