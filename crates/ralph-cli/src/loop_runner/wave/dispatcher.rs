@@ -2731,6 +2731,28 @@ fn collect_review_dimensions(completed: &ralph_core::CompletedWave) -> Vec<Strin
     by_index.into_values().collect()
 }
 
+/// Plan 004 P1-7: read the payload field of a main-ledger
+/// record, accepting BOTH legacy string-encoded JSON
+/// (`"payload": "{\"dimension\":...}"`) AND the inline object
+/// shape (`"payload": {"dimension":...}`) the supervisor merge
+/// sink writes directly. Returns `None` when the payload is
+/// absent, malformed, or neither string-nor-object.
+fn payload_object(
+    payload: Option<&serde_json::Value>,
+) -> Option<serde_json::Map<String, serde_json::Value>> {
+    let p = payload?;
+    match p {
+        serde_json::Value::Object(map) => Some(map.clone()),
+        serde_json::Value::String(s) => serde_json::from_str::<serde_json::Value>(s)
+            .ok()
+            .and_then(|v| match v {
+                serde_json::Value::Object(map) => Some(map),
+                _ => None,
+            }),
+        _ => None,
+    }
+}
+
 /// 2026-07-26-004 plan U3 (R1 / R2): build the cross-source
 /// [`ReviewDoneHints`] the failed-payload builder subtracts from
 /// `missing_dimensions`. Two sources beyond `completed.results`:
@@ -2770,12 +2792,21 @@ fn build_review_done_hints(
             if record.get("wave_id").and_then(|w| w.as_str()) != Some(completed.wave_id.as_str()) {
                 continue;
             }
-            let payload = record.get("payload").and_then(|p| p.as_str()).unwrap_or("");
-            if let Ok(serde_json::Value::Object(map)) =
-                serde_json::from_str::<serde_json::Value>(payload)
-                && let Some(serde_json::Value::String(dim)) = map.get("dimension")
-            {
-                main_backscan.insert(dim.clone());
+            // Plan 004 P1-7: the main-ledger payload may arrive in two
+            // shapes — string-encoded JSON (the legacy / agent
+            // emit path) OR an inline JSON object (the
+            // supervisor merge sink path, which writes object
+            // payloads directly). The pre-fix code only
+            // accepted the string form, so an object payload
+            // was silently ignored and the dimension was
+            // re-counted as missing. The fix: read whichever
+            // shape is present via a unified accessor that
+            // returns the inner payload object, then index
+            // `dimension` directly.
+            if let Some(map) = payload_object(record.get("payload")) {
+                if let Some(serde_json::Value::String(dim)) = map.get("dimension") {
+                    main_backscan.insert(dim.clone());
+                }
             }
         }
     }
@@ -8355,5 +8386,54 @@ hats: {}
             "matching evidence + assigned must be accepted; got {:?}",
             hints.store_completed,
         );
+    }
+
+    // ─────────────────────────────────────────────────────────────────
+    // Plan 004 P1-7: main-ledger reconciliation accepts both
+    // object and JSON-encoded-string payload shapes. The
+    // pre-fix code only consumed the string form, so object
+    // payloads (the supervisor merge sink writes them
+    // directly) were silently ignored and the dimension was
+    // re-counted as missing.
+    // ─────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn p1_7_payload_object_from_string_json() {
+        // String-encoded JSON (legacy agent-emit path).
+        let payload = serde_json::Value::String(
+            serde_json::to_string(&serde_json::json!({"dimension":"correctness"})).unwrap(),
+        );
+        let map = payload_object(Some(&payload));
+        assert!(map.is_some());
+        assert_eq!(
+            map.unwrap().get("dimension").and_then(|v| v.as_str()),
+            Some("correctness"),
+        );
+    }
+
+    #[test]
+    fn p1_7_payload_object_from_inline_object() {
+        // Inline object (supervisor merge sink path).
+        let payload = serde_json::json!({"dimension": "correctness"});
+        let map = payload_object(Some(&payload));
+        assert!(map.is_some());
+        assert_eq!(
+            map.unwrap().get("dimension").and_then(|v| v.as_str()),
+            Some("correctness"),
+        );
+    }
+
+    #[test]
+    fn p1_7_payload_object_missing_returns_none() {
+        let map = payload_object(None);
+        assert!(map.is_none());
+    }
+
+    #[test]
+    fn p1_7_payload_object_malformed_string_returns_none() {
+        // String that is not valid JSON.
+        let payload = serde_json::Value::String("not json".to_string());
+        let map = payload_object(Some(&payload));
+        assert!(map.is_none());
     }
 }
