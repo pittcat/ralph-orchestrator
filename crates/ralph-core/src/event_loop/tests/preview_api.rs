@@ -35,6 +35,37 @@ fn preview_unknown_hat_returns_none() {
 }
 
 #[test]
+fn preview_default_gate_each_gated_builtin_appears_once() {
+    // 2026-07-26-002 U1 follow-up: after the dedup fix, every
+    // gated builtin must appear EXACTLY once in `build_prompt`,
+    // not just "at least once". A future maintainer who widens
+    // the `inject_custom_auto_skills` skip-list OR re-chains
+    // registry_auto into `inject_memories_and_tools_skill` would
+    // flip a count from 1 to 2 (or 0). Pin the count.
+    let config = minimal_isolated_config(true, true);
+    let mut event_loop = EventLoop::new(config);
+    event_loop.initialize("U1 count==1 lock");
+
+    let hat_id = HatId::new("builder");
+    let prompt = event_loop
+        .build_prompt(&hat_id)
+        .expect("prompt should build");
+
+    for name in [
+        "ralph-tools",
+        "ralph-tools-tasks",
+        "ralph-tools-memories",
+        "ralph-tools-opac",
+    ] {
+        let count = prompt.matches(&format!("<{name}-skill>")).count();
+        assert_eq!(
+            count, 1,
+            "<{name}-skill> must appear exactly once in build_prompt; got {count}"
+        );
+    }
+}
+
+#[test]
 fn preview_default_gate_auto_inject_matches_build_prompt_markers() {
     let config = minimal_isolated_config(true, true);
     let mut event_loop = EventLoop::new(config);
