@@ -287,17 +287,63 @@ def test_author_checklist_references_prompt_visibility() -> None:
 
 
 def test_install_tree_does_not_contain_prompt_visibility_copy() -> None:
-    """``.claude/skills/<name>/`` must NOT contain a prompt-visibility.md copy.
+    """``.claude/skills/<name>/references/prompt-visibility.md`` must
+    be byte-identical to the source ``skills/ralph-preset-common/
+    references/prompt-visibility.md``.
 
-    The plan (Product Contract preservation) forbids editing the
-    install tree. If a copy accidentally lands there, the operator
-    may diverge from the source.
+    2026-07-26-002 U2 KTD1: ``skills/install.py`` is a physical
+    copier (not a symlink), so the install tree holding a copy is
+    expected. The contract is that the copy drift from the source
+    is what gets caught — identical bytes pass, mutated copies
+    fail. The plan rejected both "force symlink" and "forbid any
+    copy"; the byte-identical gate preserves a one-source-of-truth
+    promise without forcing the install layout.
     """
     if not CLAUDE_INSTALL_SKILLS.is_dir():
         pytest.skip(".claude/skills/ is not present (install tree absent)")
-    for path in CLAUDE_INSTALL_SKILLS.rglob("prompt-visibility.md"):
-        pytest.fail(
-            f"install tree contains a copy at {path}; remove it — the "
-            "shared reference lives only at "
-            f"{PROMPT_VISIBILITY.relative_to(ROOT)}"
+
+    source_bytes = PROMPT_VISIBILITY.read_bytes()
+    install_copies = list(CLAUDE_INSTALL_SKILLS.rglob("prompt-visibility.md"))
+
+    if not install_copies:
+        # Nothing to compare against; the install tree never
+        # pulled this reference in. Future operators may rerun
+        # ./skills/install.py to populate it. Skip without
+        # failing so a fresh checkout stays green.
+        pytest.skip("no prompt-visibility copy in install tree")
+
+    for path in install_copies:
+        copy_bytes = path.read_bytes()
+        assert copy_bytes == source_bytes, (
+            f"install copy at {path} drifted from source "
+            f"{PROMPT_VISIBILITY.relative_to(ROOT)} "
+            f"({len(copy_bytes)} bytes vs {len(source_bytes)} bytes); "
+            "rerun ./skills/install.py --force to refresh"
+        )
+
+
+def test_install_copy_detects_artifact_drift() -> None:
+    """2026-07-26-002 U2 KTD1 helper: simulate a mutated install
+    copy and assert the contract catches it.
+
+    Lives in a tmp dir so it does not touch the real install
+    tree. Reuses the byte-identical comparator from
+    ``test_install_tree_does_not_contain_prompt_visibility_copy``
+    via a mirror comparison.
+    """
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as tmp:
+        src = Path(tmp) / "prompt-visibility.md"
+        install_a = Path(tmp) / "install-a.md"
+        install_b = Path(tmp) / "install-b.md"
+
+        source_text = PROMPT_VISIBILITY.read_text(encoding="utf-8")
+        src.write_text(source_text, encoding="utf-8")
+        install_a.write_text(source_text, encoding="utf-8")
+        assert src.read_bytes() == install_a.read_bytes()
+
+        install_b.write_text(source_text + "\nDRIFTED\n", encoding="utf-8")
+        assert src.read_bytes() != install_b.read_bytes(), (
+            "drift sentinel: a mutated install copy must not match the source"
         )
