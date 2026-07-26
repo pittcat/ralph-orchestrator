@@ -1055,19 +1055,29 @@ fn check_cli_flow_step_scope(
     payload: Option<&str>,
 ) -> Option<String> {
     use ralph_core::event_loop::load_opt_in_flow_declaration;
-    use ralph_core::event_loop::recover_current_plan_step;
+    use ralph_core::event_loop::load_flow_authority_current_step;
     use ralph_core::event_loop::stage_pipeline::{EmitStage, FlowStep, StageContext};
     use ralph_core::event_loop::stages::flow_step_scope_stage::FlowStepScopeStage;
 
     // No declared flow → flow-step gating is skipped (hat-only presets).
     let flow = load_opt_in_flow_declaration(config)?;
 
-    // Recover the current step by folding the single authority over the
-    // replayed ledger topics — identical to what the resident EventLoop
-    // holds after ingesting the same events.
-    let topics = read_main_ledger_topics(workspace_root);
-    let topic_refs: Vec<&str> = topics.iter().map(|s| s.as_str()).collect();
-    let current = recover_current_plan_step(config, &topic_refs);
+    // Plan 004 R7 (P0-4): the resident EventLoop writes accepted
+    // step transitions to `.ralph/flow-authority.jsonl`; we read
+    // the same ledger so CLI policy-check never disagrees with
+    // the resident loop on rejected events. When the file is
+    // missing (loop never accepted any event) we fall back to
+    // initial_current_plan_step via the topic-replay fold, which
+    // is correct because no event has been accepted yet.
+    let current = if let Some(step) = load_flow_authority_current_step(workspace_root) {
+        if step.is_empty() {
+            recover_from_topics(config, workspace_root)
+        } else {
+            step
+        }
+    } else {
+        recover_from_topics(config, workspace_root)
+    };
     if current.is_empty() {
         return None;
     }
@@ -1088,6 +1098,20 @@ fn check_cli_flow_step_scope(
         Ok(()) => None,
         Err(reject) => Some(reject.reason_code),
     }
+}
+
+/// Topic-replay fallback for `check_cli_flow_step_scope`: only used
+/// when no accepted transition has been written yet, so the
+/// "reject/accept mix" P0-4 concern does not apply (every prior
+/// topic is implicitly accepted because no accept ledger exists).
+fn recover_from_topics(
+    config: &ralph_core::config::RalphConfig,
+    workspace_root: &Path,
+) -> String {
+    use ralph_core::event_loop::recover_current_plan_step;
+    let topics = read_main_ledger_topics(workspace_root);
+    let topic_refs: Vec<&str> = topics.iter().map(|s| s.as_str()).collect();
+    recover_current_plan_step(config, &topic_refs)
 }
 
 /// Read the `topic` field of every JSONL line in the loop's main ledger

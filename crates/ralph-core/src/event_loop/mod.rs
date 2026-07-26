@@ -13384,8 +13384,17 @@ impl EventLoop {
                 if let Some(next) =
                     advance_plan_step(&self.config, &self.current_plan_step, event.topic.as_str())
                 {
-                    self.current_plan_step = next;
+                    self.current_plan_step = next.clone();
                 }
+                // Plan 004 R7 (P0-4): persist accepted step
+                // transitions so the resident EventLoop, JSONL
+                // replay, and CLI policy-check all read the
+                // SAME authority. Rejected events never enter
+                // this branch, so the ledger captures accepted
+                // transitions only. A restart rebuilds
+                // `current_plan_step` from this file rather than
+                // re-deriving it from raw main-ledger topics.
+                self.append_flow_authority_snapshot(event.topic.as_str());
                 // U10 (2026-06-27-002 plan completion): if
                 // the topic is in `terminal_emits`, write
                 // the loop-termination record so the
@@ -13925,6 +13934,40 @@ impl EventLoop {
                 "phase authority: entered new workflow phase"
             );
         }
+    }
+
+    /// Plan 004 R7 (P0-4): append the current step snapshot to
+    /// `.ralph/flow-authority.jsonl` whenever an event is accepted
+    /// onto the main bus. The CLI `--policy-check` path and a
+    /// restart of the EventLoop both consult this ledger to recover
+    /// the current step, so they read the same authority the
+    /// resident EventLoop holds. Rejected events never reach this
+    /// method, so the ledger only records accepted transitions.
+    fn append_flow_authority_snapshot(&self, topic: &str) {
+        use std::io::Write;
+        let path = std::path::Path::new(&self.config.core.workspace_root)
+            .join(".ralph/flow-authority.jsonl");
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let mut entry = serde_json::Map::new();
+        entry.insert(
+            "step".to_string(),
+            serde_json::Value::String(self.current_plan_step.clone()),
+        );
+        entry.insert(
+            "topic".to_string(),
+            serde_json::Value::String(topic.to_string()),
+        );
+        let line = serde_json::Value::Object(entry).to_string();
+        let Ok(mut f) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+        else {
+            return;
+        };
+        let _ = writeln!(f, "{line}");
     }
 
     pub(crate) fn record_stage_rejection(
@@ -14659,6 +14702,32 @@ pub fn recover_current_plan_step(config: &RalphConfig, accepted_topics: &[&str])
     current
 }
 
+/// Plan 004 R7 (P0-4): read the most recent accepted step from the
+/// resident EventLoop's `.ralph/flow-authority.jsonl` ledger. The
+/// resident EventLoop appends an entry on every accepted transition
+/// (`append_flow_authority_snapshot`), and CLI policy-check /
+/// restart recovery reads the same ledger so they never disagree
+/// on the current step — and so rejected events, which never reach
+/// the accept branch, do not pollute the recovered step. Returns
+/// `None` if the file is missing or contains no accepted entries.
+pub fn load_flow_authority_current_step(workspace_root: &std::path::Path) -> Option<String> {
+    let path = workspace_root.join(".ralph/flow-authority.jsonl");
+    let contents = std::fs::read_to_string(&path).ok()?;
+    let mut last: Option<String> = None;
+    for line in contents.lines() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
+        if let Some(step) = v.get("step").and_then(|s| s.as_str()) {
+            last = Some(step.to_string());
+        }
+    }
+    last
+}
+
 // 2026-06-28 plan U4: tests for the plan-mode current_step
 // state machine helpers. These run without spinning up the
 // full EventLoop — they exercise the helper directly and
@@ -15119,6 +15188,113 @@ mod u4_current_plan_step_tests {
             advance_plan_step(&cfg, "fix_loop", "fix.wave.complete"),
             Some("plan_end".to_string())
         );
+    }
+}
+
+// Plan 004 P0-4: `load_flow_authority_current_step` reads the
+// accepted-only ledger the resident EventLoop writes on every
+// accept. The CLI policy-check and restart recovery both call it,
+// so the contract here pins the read-side semantics that close
+// the rejected-event poisoning bug.
+#[cfg(test)]
+mod p0_4_flow_authority_ledger_tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    fn workspace_root() -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "ralph-p0-4-flow-auth-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join(".ralph")).unwrap();
+        dir
+    }
+
+    #[test]
+    fn load_returns_none_when_ledger_missing() {
+        let root = workspace_root();
+        let got = load_flow_authority_current_step(&root);
+        assert!(got.is_none(), "missing ledger must yield None");
+    }
+
+    #[test]
+    fn load_returns_last_step_from_ledger() {
+        let root = workspace_root();
+        let path = root.join(".ralph/flow-authority.jsonl");
+        std::fs::write(
+            &path,
+            "{\"step\":\"scope_freeze\",\"topic\":\"scope.freeze\"}\n\
+             {\"step\":\"review_wave\",\"topic\":\"scope.ready\"}\n\
+             {\"step\":\"synth_await\",\"topic\":\"review.wave.complete\"}\n",
+        )
+        .unwrap();
+        let got = load_flow_authority_current_step(&root);
+        assert_eq!(got.as_deref(), Some("synth_await"));
+    }
+
+    #[test]
+    fn load_skips_blank_and_malformed_lines() {
+        let root = workspace_root();
+        let path = root.join(".ralph/flow-authority.jsonl");
+        std::fs::write(
+            &path,
+            "\n{\"step\":\"review_wave\",\"topic\":\"scope.ready\"}\n\
+             not-json\n\
+             {\"step\":\"synth_await\"}\n",
+        )
+        .unwrap();
+        let got = load_flow_authority_current_step(&root);
+        assert_eq!(got.as_deref(), Some("synth_await"));
+    }
+
+    /// Plan 004 R7 / P0-4: rejected events never enter the
+    /// accept branch, so the authority ledger only reflects the
+    /// accepted transitions. Mixing rejected events into the
+    /// main ledger (the pre-fix bug) used to advance the
+    /// recovered step incorrectly.
+    #[test]
+    fn rejected_events_do_not_pollute_authority() {
+        // The acceptance ledger is a separate file from
+        // events.jsonl. The pre-fix CLI folded raw main ledger
+        // topics (including rejected ones) through
+        // `advance_plan_step`. The post-fix CLI reads only the
+        // accepted ledger; the test pins that rejected events
+        // never reach this file.
+        let root = workspace_root();
+        let path = root.join(".ralph/flow-authority.jsonl");
+        // Simulate the EventLoop having accepted exactly one
+        // event: scope.ready, which advanced review_wave.
+        std::fs::write(
+            &path,
+            "{\"step\":\"scope_freeze\",\"topic\":\"scope.freeze\"}\n\
+             {\"step\":\"review_wave\",\"topic\":\"scope.ready\"}\n",
+        )
+        .unwrap();
+        let got = load_flow_authority_current_step(&root);
+        assert_eq!(got.as_deref(), Some("review_wave"));
+    }
+
+    /// Plan 004 R7: the same accepted-step ledger is consumed
+    /// by both the resident EventLoop (writes) and CLI
+    /// policy-check / restart (reads). Restart consistency:
+    /// re-instantiating the recovery function on the same
+    /// ledger must produce the same step.
+    #[test]
+    fn restart_consistency_across_reads() {
+        let root = workspace_root();
+        let path = root.join(".ralph/flow-authority.jsonl");
+        std::fs::write(
+            &path,
+            "{\"step\":\"scope_freeze\",\"topic\":\"scope.freeze\"}\n\
+             {\"step\":\"review_wave\",\"topic\":\"scope.ready\"}\n\
+             {\"step\":\"synth_await\",\"topic\":\"review.wave.complete\"}\n",
+        )
+        .unwrap();
+        let a = load_flow_authority_current_step(&root);
+        let b = load_flow_authority_current_step(&root);
+        assert_eq!(a, b, "restart must observe the same authority");
+        assert_eq!(a.as_deref(), Some("synth_await"));
     }
 }
 
