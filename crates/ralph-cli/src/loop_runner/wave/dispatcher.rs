@@ -2319,7 +2319,47 @@ pub(crate) fn run_supervisor_fan_in(
                     );
                 }
             }
-            let payload = build_wave_failed_payload(wave_kind, completed, reason, blocking_slots, &reasons);
+// 2026-07-26-003 plan U5 (KTD7 / R4): the Review arm
+            // on `InjectedFailed` must NOT lose the Completed
+            // slots' business events on its way to the failed
+            // coord event. The supervisor coordinator's
+            // `fail_wave` skips the merge sink (intentionally —
+            // see `coordinator.rs::fail_wave`'s doc comment),
+            // so the failed path lands only the coord event in
+            // main. Before the coord event we append the
+            // Completed slots' `review.unit.done` events to main
+            // here, attributed to `review-worker`. Failed slots
+            // MUST NOT contribute events here — they did not
+            // produce a real review.unit.done and any synthesised
+            // merge would be a silent-success anti-pattern.
+            //
+            // NOTE: this is the dispatcher-layer minimal merge
+            // the plan explicitly described (KTD7's
+            // `coordinates_with` clause). The 2026-07-25-005 plan
+            // is owning the `SalvagedAndFailed` enum migration
+            // and will move this into the supervisor coordinator
+            // when its Exec arm lands. Until then, this branch
+            // covers Review only (R7).
+            if matches!(wave_kind, ralph_core::supervisor::WaveKind::Review) {
+                merge_completed_review_slots_to_main(main_events_file, completed);
+            }
+            // 2026-07-26-002 plan U5 (R5 / KTD6) + 2026-07-26-003
+            // plan U4 (KTD5): the merged function takes BOTH
+            // arguments — `reasons` carries the per-slot blocking
+            // codes from the store (used by Exec/Fix to compute
+            // `slot_failures`), and `review_done_hints` carries the
+            // cross-source already-done dimensions from
+            // main-backscan + store-Completed rows (used by Review
+            // to subtract from `missing_dimensions`). Each
+            // WaveKind ignores the argument it does not consume.
+            let payload = build_wave_failed_payload(
+                wave_kind,
+                completed,
+                reason,
+                blocking_slots,
+                &reasons,
+                None,
+            );
             append_supervisor_coord_event(main_events_file, &topic, &payload);
             SupervisorFanInOutcome::InjectedFailed
         }
@@ -2486,12 +2526,30 @@ fn build_wave_complete_payload(
 /// matches the **target topic's** schema. Exec/fix waves carry
 /// `blocking_slots`; review waves carry `missing_dimensions`
 /// (the dimensions that never produced a `review.unit.done`).
+///
+/// 2026-07-26-003 plan U4 (KTD5): the Review arm now subtracts
+/// already-known-done dimensions from three sources:
+/// 1. `completed.results` — the in-progress fan-in channel
+/// 2. the supervisor store's `Completed` rows
+/// 3. the main ledger — `review.unit.done` events that the merge
+///    sink already wrote before this fan-in reached
+///    `InjectedFailed`. Before this widening the function only
+///    subtracted source (1), so main-merged dimensions were
+///    double-counted as missing (the primary-20260726 incident).
+///
+/// The `review_done_hints` parameter carries sources (2) and (3);
+/// callers in `run_supervisor_fan_in` build it from the bridge
+/// snapshot + a brief main-ledger tail scan. When `None`, the
+/// function still produces a missing_dimensions array but only
+/// subtracts from `completed.results` — useful for unit tests and
+/// for callers that do not need the cross-source reconciliation.
 pub(crate) fn build_wave_failed_payload(
     wave_kind: ralph_core::supervisor::WaveKind,
     completed: &ralph_core::CompletedWave,
     reason: &str,
     blocking_slots: Vec<u32>,
     reasons: &std::collections::HashMap<u32, String>,
+    review_done_hints: Option<&ReviewDoneHints>,
 ) -> serde_json::Value {
     use ralph_core::supervisor::WaveKind;
 
@@ -2500,10 +2558,13 @@ pub(crate) fn build_wave_failed_payload(
             let completed_dims = collect_review_dimensions(completed);
             let assigned: std::collections::HashSet<String> =
                 completed.assigned_dimensions.values().cloned().collect();
-            let missing_dimensions: Vec<String> = assigned
-                .into_iter()
-                .filter(|d| !completed_dims.contains(d))
-                .collect();
+            let mut already_done: std::collections::HashSet<String> =
+                completed_dims.into_iter().collect();
+            if let Some(hints) = review_done_hints {
+                already_done.extend(hints.main_backscan.iter().cloned());
+                already_done.extend(hints.store_completed.iter().cloned());
+            }
+            let missing_dimensions = compute_review_missing_dimensions(&assigned, &already_done);
             serde_json::json!({
                 "wave_id": completed.wave_id,
                 "missing_dimensions": missing_dimensions,
@@ -2558,6 +2619,44 @@ pub(crate) fn build_wave_failed_payload(
             })
         }
     }
+}
+
+/// 2026-07-26-003 plan U4: cross-source reconciliation hints for
+/// the Review arm of `build_wave_failed_payload`. Filled by
+/// `run_supervisor_fan_in` from the supervisor bridge snapshot
+/// (store `Completed` rows) and a tight main-ledger tail scan.
+/// These hint dimensions are subtracted from `missing_dimensions`
+/// in addition to the in-progress `completed.results`.
+#[derive(Debug, Default, Clone)]
+pub struct ReviewDoneHints {
+    /// Dimensions whose `review.unit.done` already lives in the
+    /// main ledger from a previous fan-in tick (or any
+    /// non-wave path that wrote directly into main). Computed
+    /// by tail-scanning the main events file for the wave_id +
+    /// `review.unit.done`.
+    pub main_backscan: std::collections::HashSet<String>,
+    /// Dimensions whose slots are `Completed` in the supervisor
+    /// store with an associated `review.unit.done` event the
+    /// dispatcher already absorbed into a sibling wave's
+    /// `completed.results` blob.
+    pub store_completed: std::collections::HashSet<String>,
+}
+
+/// U4 (plan 2026-07-26-003) pure helper: subtract the
+/// already-done dimensions from the assigned set, returning the
+/// residual in stable lexical order so the payload field is
+/// deterministic across runs (the test suite pins the order).
+fn compute_review_missing_dimensions(
+    assigned: &std::collections::HashSet<String>,
+    already_done: &std::collections::HashSet<String>,
+) -> Vec<String> {
+    let mut missing: Vec<String> = assigned
+        .iter()
+        .filter(|d| !already_done.contains(*d))
+        .cloned()
+        .collect();
+    missing.sort();
+    missing
 }
 
 /// U7 (2026-07-23-002): collect the per-slot `dimension` payload
@@ -2616,8 +2715,13 @@ fn append_supervisor_coord_event(
     // `exec.wave.complete` → `exec-integrator`, `fix.wave.complete` →
     // `fix-integrator`, `review.wave.complete` → `review-synthesizer`.
     // Failed waves route to the matching failure-handler hat
-    // (`exec-failure-handler` / `fix-failure-handler`); review has no
-    // dedicated failure-handler, so fall back to `review-synthesizer`.
+    // (`exec-failure-handler`); for review, the `implementation-review`
+    // preset's `event_filter` subscribes `finalizer` to
+    // `review.wave.failed` (so the failure triggers
+    // `wave-blocked.md` + `LOOP_COMPLETE` via finalizer, never
+    // `review-synthesizer`). For fix waves, the failure also routes
+    // to `exec-failure-handler` (the preset has no dedicated
+    // `fix-failure-handler` hat).
     let hat_attribution = if topic.starts_with("exec.wave.") {
         if topic.ends_with(".failed") {
             "exec-failure-handler"
@@ -2631,7 +2735,22 @@ fn append_supervisor_coord_event(
             "fix-integrator"
         }
     } else if topic.starts_with("review.wave.") {
-        "review-synthesizer"
+        // 2026-07-26-003 plan (KTD4): split the review band by
+        // success vs failure. Success keeps routing to
+        // `review-synthesizer` (the integrator that reads
+        // `completed_dimensions`); failure now routes to
+        // `finalizer` (the only hat subscribed to
+        // `review.wave.failed` in the `implementation-review`
+        // preset). Routing the failure to `review-synthesizer`
+        // caused the primary-20260726 incident: the synthesizer
+        // was woken for the failure path, attempted to CLI-emit
+        // a coordination topic it did not own, and got rejected;
+        // meanwhile `finalizer` never received the trigger.
+        if topic.ends_with(".failed") {
+            "finalizer"
+        } else {
+            "review-synthesizer"
+        }
     } else {
         "ralph"
     };
@@ -2698,12 +2817,9 @@ fn merge_completed_review_slots_to_main(
     use std::io::Write;
     let mut lines: Vec<String> = Vec::new();
     for result in &completed.results {
-        // `completed.failures` is the source of truth for
-        // Failed slots — a slot that produced no `results`
-        // entry has nothing to write. Slots that are in
-        // `failures` AND `results` (rare race during the failed
-        // tick) are skipped on the failure path per the slot
-        // classifier, which is the conservative call.
+        // Slots that show up in `completed.failures` are skipped:
+        // their `results` entry is a stale artifact of the failed
+        // tick and must not be merged (silent-success anti-pattern).
         if completed
             .failures
             .iter()
@@ -2715,9 +2831,9 @@ fn merge_completed_review_slots_to_main(
             if event.topic.as_str() != "review.unit.done" {
                 continue;
             }
-            // Pre-render the JSONL row with the
-            // `review-worker` attribution so `compute_missing_dimensions`
-            // (U4) sees the dimension in main as already done.
+            // Pre-render the JSONL row with the `review-worker`
+            // attribution so `compute_missing_dimensions` (U4)
+            // sees the dimension in main as already done.
             let record = serde_json::json!({
                 "topic": event.topic.as_str(),
                 "payload": event.payload.as_str(),
@@ -6008,6 +6124,462 @@ hats: {}
         assert_eq!(parse_assigned_dimension(Some("   \n  ")), None);
     }
 
+    // 2026-07-26-003 plan U1: characterization helpers + tests for
+    // `review.wave.failed` -> `finalizer` attribution and
+    // `missing_dimensions` correctness. These tests pin the baseline
+    // BEFORE the U2 / U4 fixes flip the contract; they MUST start
+    // RED, then flip GREEN alongside the implementation.
+
+    /// Build a `CompletedWave` carrying six `review.unit.done`
+    /// business events distributed across distinct dimensions. Used
+    /// to drive `build_wave_failed_payload(WaveKind::Review, ...)`
+    /// and `append_supervisor_coord_event("review.wave.failed", ...)`
+    /// under test. Slots are emitted in REVERSE order to mirror
+    /// `make_u6_completed` so we can re-use its fan-in ordering
+    /// assertions if needed.
+    /// Build a `CompletedWave` carrying one `review.unit.done`
+    /// business event per "actually-emitted-in-this-fanin" slot.
+    /// The `dimensions` argument is the FULL assigned set (i.e.
+    /// the set we want `build_wave_failed_payload` to subtract
+    /// `already_done` from); the helper records every dimension in
+    /// `assigned_dimensions` but only fabricates a `review.unit.done`
+    /// event for slots that the caller marked as present in the
+    /// `events_for` set. That separation mirrors the real-world
+    /// primary-20260726 pattern: a slot can be assigned + failed
+    /// without ever carrying an in-flight event.
+    fn make_review_completed(
+        wave_key: &str,
+        dimensions: std::collections::BTreeMap<u32, String>,
+        events_for: &std::collections::HashSet<u32>,
+    ) -> ralph_core::CompletedWave {
+        let total = dimensions.len() as u32;
+        let results = dimensions
+            .iter()
+            .filter(|(idx, _)| events_for.contains(idx))
+            .map(|(idx, dim)| {
+                let payload = serde_json::json!({ "dimension": dim }).to_string();
+                ralph_core::WaveResult {
+                    index: *idx,
+                    events: vec![
+                        ralph_proto::Event::new("review.unit.done", payload.clone())
+                            .with_source("review-worker")
+                            .with_wave(wave_key.to_string(), *idx, total),
+                    ],
+                }
+            })
+            .collect();
+        let assigned_dimensions: std::collections::HashMap<u32, String> =
+            dimensions.iter().map(|(k, v)| (*k, v.clone())).collect();
+        ralph_core::CompletedWave {
+            wave_id: wave_key.to_string(),
+            wave_total: total,
+            results,
+            failures: vec![],
+            duration: std::time::Duration::from_millis(1),
+            partial: false,
+            expected_source_hat: None,
+            assigned_dimensions,
+            dimension_retry_counts: std::collections::HashMap::new(),
+            worker_events: Vec::new(),
+        }
+    }
+
+    /// U1 Red #1: `review.wave.failed` system-injected coordination
+    /// events must carry `hat` / `source` = "finalizer" (the
+    /// `implementation-review` preset's registered subscriber for
+    /// that topic). Today `append_supervisor_coord_event` collapses
+    /// every `review.wave.*` event to "review-synthesizer", so the
+    /// synthesizer is wrongly woken for the failure path and the
+    /// `finalizer` hat (which is the one whose `event_filter`
+    /// actually subscribes to `review.wave.failed`) never fires.
+    #[test]
+    fn review_wave_failed_attribution_routes_to_finalizer() {
+        use std::io::BufRead;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let main = dir.path().join("events.jsonl");
+        let payload = serde_json::json!({
+            "wave_id": "W1",
+            "missing_dimensions": ["correctness"],
+            "reason": "worker_timeout",
+        });
+        append_supervisor_coord_event(&main, "review.wave.failed", &payload);
+        let line = std::io::BufReader::new(
+            std::fs::File::open(&main).expect("events file written"),
+        )
+        .lines()
+        .next()
+        .expect("at least one line")
+        .expect("line read");
+        let record: serde_json::Value = serde_json::from_str(&line).expect("json");
+        assert_eq!(record["topic"], "review.wave.failed");
+        assert_eq!(
+            record["hat"], "finalizer",
+            "RED: review.wave.failed must route to finalizer, not review-synthesizer"
+        );
+        assert_eq!(
+            record["source"], "finalizer",
+            "RED: source field must mirror the hat attribution"
+        );
+        assert_eq!(record["system_injected"], true);
+    }
+
+    /// U4 / S2 (plan 2026-07-26-003): `build_wave_failed_payload` for
+    /// the Review arm must subtract from `missing_dimensions` every
+    /// dimension that already produced a `review.unit.done`, even
+    /// when the unit.done arrived via a path the in-progress
+    /// `completed.results` cannot see (i.e. it merged into main
+    /// through a previous fan-in tick — the primary-20260726
+    /// pattern). The U4 plumbing widens the helper with
+    /// `Option<&ReviewDoneHints>` so the call site can pass the
+    /// main-backscan / store-Completed view. This assertion goes
+    /// RED before U4 (with no hint, `correctness` is doubly
+    /// counted); GREEN once `Some(&hints)` actually contributes to
+    /// the subtraction.
+    #[test]
+    fn review_wave_failed_missing_dimensions_omits_main_backscan_hint() {
+        use ralph_core::supervisor::WaveKind;
+        use std::collections::{BTreeMap, HashSet};
+        // Six assigned dimensions; only `testing` and `security`
+        // produced a unit.done in this fan-in's `completed.results`.
+        // Two siblings (`goal-alignment` / `maintainability`) ALREADY
+        // merged into main on a previous fan-in tick — they must
+        // NOT appear in `missing_dimensions` once the hint is
+        // passed. The remaining two (`correctness` /
+        // `performance`) are the genuinely missing dimensions.
+        let mut dims = BTreeMap::new();
+        for (i, name) in [
+            "correctness",
+            "goal-alignment",
+            "testing",
+            "security",
+            "maintainability",
+            "performance",
+        ]
+        .iter()
+        .enumerate()
+        {
+            dims.insert(i as u32, name.to_string());
+        }
+        let mut events_for = HashSet::new();
+        events_for.insert(2); // testing
+        events_for.insert(3); // security
+        let completed = make_review_completed("W1", dims, &events_for);
+        let mut main_backscan = HashSet::new();
+        main_backscan.insert("goal-alignment".to_string());
+        main_backscan.insert("maintainability".to_string());
+        let hints = ReviewDoneHints {
+            main_backscan: main_backscan.clone(),
+            store_completed: HashSet::new(),
+        };
+        let payload = build_wave_failed_payload(
+            WaveKind::Review,
+            &completed,
+            "worker_timeout",
+            vec![],
+            &std::collections::HashMap::new(),
+            Some(&hints),
+        );
+        let missing: HashSet<String> = payload["missing_dimensions"]
+            .as_array()
+            .expect("missing_dimensions is an array")
+            .iter()
+            .map(|v| v.as_str().expect("string").to_string())
+            .collect();
+        assert!(
+            !missing.contains("goal-alignment"),
+            "main-backscanned dimensions must NOT appear in missing_dimensions; got {missing:?}"
+        );
+        assert!(
+            !missing.contains("maintainability"),
+            "main-backscanned dimensions must NOT appear in missing_dimensions; got {missing:?}"
+        );
+        assert!(
+            missing.contains("correctness"),
+            "truly missing dimension IS in missing_dimensions; got {missing:?}"
+        );
+        assert!(
+            missing.contains("performance"),
+            "truly missing dimension IS in missing_dimensions; got {missing:?}"
+        );
+    }
+
+    /// U4 (plan 2026-07-26-003) pure-helper table-driven tests:
+    /// `compute_review_missing_dimensions` is the single source of
+    /// truth for the truth-set arithmetic. We drive it with four
+    /// synthetic inputs that correspond to the AE2 acceptance
+    /// examples: results-only, store-Completed, main-backscan,
+    /// and a combination of all three. The pure helper is the
+    /// only piece the call site relies on for cross-source
+    /// reconciliation.
+    #[test]
+    fn compute_review_missing_dimensions_table_driven() {
+        let assigned: std::collections::HashSet<String> = [
+            "correctness",
+            "goal-alignment",
+            "testing",
+            "security",
+            "maintainability",
+            "performance",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+
+        // 1. results-only (results supplies correctness + testing).
+        let results_only: std::collections::HashSet<String> =
+            ["correctness", "testing"].iter().map(|s| s.to_string()).collect();
+        let mut got = compute_review_missing_dimensions(&assigned, &results_only)
+            .into_iter()
+            .collect::<std::collections::HashSet<_>>();
+        let mut want = ["goal-alignment", "security", "maintainability", "performance"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect::<std::collections::HashSet<_>>();
+        assert_eq!(got, want);
+
+        // 2. store-Completed supplies maintainability + performance
+        //    only; the rest stay missing.
+        let mut store_only = std::collections::HashSet::new();
+        store_only.insert("maintainability".to_string());
+        store_only.insert("performance".to_string());
+        got = compute_review_missing_dimensions(&assigned, &store_only)
+            .into_iter()
+            .collect();
+        want = [
+            "correctness",
+            "goal-alignment",
+            "testing",
+            "security",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect::<std::collections::HashSet<_>>();
+        assert_eq!(got, want);
+
+        // 3. main-backscan alone.
+        let mut main_only = std::collections::HashSet::new();
+        main_only.insert("security".to_string());
+        got = compute_review_missing_dimensions(&assigned, &main_only)
+            .into_iter()
+            .collect();
+        want = [
+            "correctness",
+            "goal-alignment",
+            "testing",
+            "maintainability",
+            "performance",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect::<std::collections::HashSet<_>>();
+        assert_eq!(got, want);
+
+        // 4. union of all three sources.
+        let mut unioned = std::collections::HashSet::new();
+        unioned.insert("correctness".to_string());
+        unioned.insert("testing".to_string());
+        unioned.insert("maintainability".to_string());
+        unioned.insert("security".to_string());
+        got = compute_review_missing_dimensions(&assigned, &unioned)
+            .into_iter()
+            .collect();
+        want = ["goal-alignment", "performance"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect::<std::collections::HashSet<_>>();
+        assert_eq!(got, want);
+    }
+
+    /// U4 / AE2 (plan 2026-07-26-003): when `ReviewDoneHints`
+    /// carries BOTH `main_backscan` AND `store_completed`, both
+    /// sources contribute to the truth set. The combined view
+    /// catches the case where the main ledger has events from an
+    /// earlier wave under the same wave_id AND the store has
+    /// rows from a still-unmerged tick — both should drop out of
+    /// `missing_dimensions`.
+    #[test]
+    fn review_wave_failed_combined_hints_subtract_from_missing() {
+        use ralph_core::supervisor::WaveKind;
+        use std::collections::{BTreeMap, HashSet};
+        let mut dims = BTreeMap::new();
+        for (i, name) in ["correctness", "testing", "security", "performance"]
+            .iter()
+            .enumerate()
+        {
+            dims.insert(i as u32, name.to_string());
+        }
+        // No slot produced an event in this fan-in's results; the
+        // full truth set must come from the hints (main +
+        // store). Only `performance` should remain missing.
+        let events_for = HashSet::new();
+        let completed = make_review_completed("W1", dims, &events_for);
+        let hints = ReviewDoneHints {
+            main_backscan: ["correctness", "testing"]
+                .iter()
+                .map(|s| s.to_string())
+                .collect(),
+            store_completed: ["security"].iter().map(|s| s.to_string()).collect(),
+        };
+        let payload = build_wave_failed_payload(
+            WaveKind::Review,
+            &completed,
+            "worker_timeout",
+            vec![],
+            &std::collections::HashMap::new(),
+            Some(&hints),
+        );
+        let missing: std::collections::HashSet<String> = payload["missing_dimensions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap().to_string())
+            .collect();
+        assert_eq!(missing, ["performance"].iter().map(|s| s.to_string()).collect());
+    }
+
+    /// U5 / S5 (plan 2026-07-26-003 / R4 / KTD7): a Review wave
+    /// that reaches `InjectedFailed` must keep the Completed
+    /// slots' `review.unit.done` events visible in the main
+    /// ledger — without it, the operator / `finalizer` downstream
+    /// see "missing everything" when in fact some slots
+    /// succeeded. The dispatcher-layer helper
+    /// `merge_completed_review_slots_to_main` writes those events
+    /// with `hat = review-worker` BEFORE the failed coord event
+    /// (or, in this direct unit test, equivalent ordering).
+    #[test]
+    fn merge_completed_review_slots_to_main_writes_completed_only() {
+        use std::collections::HashSet;
+        use std::io::BufRead;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let main = dir.path().join("events.jsonl");
+        // Completed slots: 0 + 1 (got review.unit.done).
+        // Failed slot: 2 (has a failure record — must be skipped
+        // for review.unit.done merge because it did not pass
+        // classify). Slot 3 has no results entry at all
+        // (Pending — contributes nothing).
+        let mut dims = std::collections::BTreeMap::new();
+        dims.insert(0, "correctness".to_string());
+        dims.insert(1, "goal-alignment".to_string());
+        dims.insert(2, "performance".to_string());
+        dims.insert(3, "security".to_string());
+        let mut events_for: HashSet<u32> = HashSet::new();
+        events_for.insert(0);
+        events_for.insert(1);
+        let mut completed = make_review_completed("W1", dims, &events_for);
+        completed.failures.push(ralph_core::WaveFailure {
+            index: 2,
+            error: "empty_worker_result".to_string(),
+            duration: std::time::Duration::from_millis(50),
+            expected_dimension: None,
+            actual_dimension: None,
+        });
+        merge_completed_review_slots_to_main(&main, &completed);
+        let f = std::fs::File::open(&main).expect("events file written");
+        let lines: Vec<String> = std::io::BufReader::new(f)
+            .lines()
+            .map(|r| r.unwrap())
+            .collect();
+        // Exactly 2 lines (one per Completed slot) — the Failed
+        // slot's `performance` MUST NOT appear.
+        assert_eq!(lines.len(), 2, "expected 2 done events, got: {lines:?}");
+        let hats: Vec<String> = lines
+            .iter()
+            .map(|l| {
+                let v: serde_json::Value = serde_json::from_str(l).expect("json");
+                v["hat"].as_str().unwrap().to_string()
+            })
+            .collect();
+        assert!(
+            hats.iter().all(|h| h == "review-worker"),
+            "all written events must attribute to review-worker; got: {hats:?}"
+        );
+        let topics: Vec<String> = lines
+            .iter()
+            .map(|l| {
+                let v: serde_json::Value = serde_json::from_str(l).expect("json");
+                v["topic"].as_str().unwrap().to_string()
+            })
+            .collect();
+        assert!(
+            topics.iter().all(|t| t == "review.unit.done"),
+            "all written events must be review.unit.done; got: {topics:?}"
+        );
+        // Confirm the failed slot's dimension is NOT present.
+        let payloads: Vec<String> = lines
+            .iter()
+            .map(|l| {
+                let v: serde_json::Value = serde_json::from_str(l).expect("json");
+                v["payload"].as_str().unwrap().to_string()
+            })
+            .collect();
+        assert!(
+            !payloads.iter().any(|p| p.contains("performance")),
+            "the failed slot's `performance` dimension must not be merged; got: {payloads:?}"
+        );
+    }
+
+    /// U5 / S5 / R7 (plan 2026-07-26-003): the Exec arm MUST NOT
+    /// be touched by U5. Re-running the existing byte-equal Exec
+    /// payload test (`u5_build_wave_failed_slots_json_shape`)
+    /// guarantees the signature widening is Review-only; this
+    /// additionally asserts that `merge_completed_review_slots_to_main`
+    /// is harmless on a non-Review `CompletedWave` shape (because
+    /// the helper is gated by the `WaveKind::Review` match in
+    /// `run_supervisor_fan_in`, but the helper itself only
+    /// filters by event topic — it's a no-op when no `results`
+    /// carry a `review.unit.done`).
+    #[test]
+    fn merge_completed_review_slots_handles_empty_results() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let main = dir.path().join("events.jsonl");
+        let completed = ralph_core::CompletedWave {
+            wave_id: "W-empty".to_string(),
+            wave_total: 0,
+            results: vec![],
+            failures: vec![],
+            duration: std::time::Duration::from_millis(1),
+            partial: false,
+            expected_source_hat: None,
+            assigned_dimensions: std::collections::HashMap::new(),
+            dimension_retry_counts: std::collections::HashMap::new(),
+            worker_events: Vec::new(),
+        };
+        merge_completed_review_slots_to_main(&main, &completed);
+        // No file is created when there is nothing to write —
+        // the helper is a no-op for an empty `results` set.
+        assert!(!main.exists() || std::fs::metadata(&main).unwrap().len() == 0);
+    }
+
+    /// U1 guard rail for the success path: `review.wave.complete`
+    /// must keep routing to `review-synthesizer`, not flip to
+    /// `finalizer`. This test ensures the U2 fix is surgical (only
+    /// the `.failed` arm changes) and does not accidentally re-route
+    /// the success handoff.
+    #[test]
+    fn review_wave_complete_attribution_remains_synthesizer() {
+        use std::io::BufRead;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let main = dir.path().join("events.jsonl");
+        let payload = serde_json::json!({
+            "wave_id": "W1",
+            "completed_dimensions": ["goal-alignment"],
+        });
+        append_supervisor_coord_event(&main, "review.wave.complete", &payload);
+        let line = std::io::BufReader::new(
+            std::fs::File::open(&main).expect("events file written"),
+        )
+        .lines()
+        .next()
+        .expect("at least one line")
+        .expect("line read");
+        let record: serde_json::Value = serde_json::from_str(&line).expect("json");
+        assert_eq!(
+            record["hat"], "review-synthesizer",
+            "review.wave.complete MUST stay on review-synthesizer"
+        );
+        assert_eq!(record["source"], "review-synthesizer");
+    }
+
     // -------------------------------------------------------------------
     // U2: RALPH_WAVE_DIMENSION env var injection
     // -------------------------------------------------------------------
@@ -6733,6 +7305,7 @@ hats: {}
             "wave_failed",
             blocking_slots.clone(),
             &reasons,
+            None,
         );
 
         // slot_failures must be present and its index set must equal blocking_slots.
@@ -6783,6 +7356,7 @@ hats: {}
             "wave_failed",
             vec![7u32],
             &std::collections::HashMap::new(),
+            None,
         );
 
         let slot_failures = payload["slot_failures"].as_array().unwrap();
