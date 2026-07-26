@@ -44,7 +44,9 @@ use crate::loop_runner::wave::{
     BridgeError, MockSupervisorBridge, SlotBinding, SupervisorBridge, WaveWorkerExecutor,
     is_supervisor_path_enabled,
 };
-use ralph_core::supervisor::{PhaseInputs, SlotResource, WaveKind, WaveSnapshot};
+use ralph_core::supervisor::{
+    PhaseInputs, SlotResource, TerminalEvidence, WaveKind, WaveSnapshot,
+};
 use std::collections::HashMap;
 use std::sync::Mutex;
 
@@ -3622,6 +3624,22 @@ fn setup_u6_production_bridge(
         bridge
             .record_slot_result(&store_wave_id, i, &format!("hash-{i}"), 1)
             .expect("record slot result must succeed");
+        // Plan 004 R2 / P0-2: the production success path requires
+        // terminal evidence per slot (KTD3 fail-closed). Without
+        // this the coordinator falls into
+        // `Failed(IncompleteEvidence)` and the wave never reaches
+        // `InjectedComplete`.
+        bridge
+            .store()
+            .record_slot_terminal_evidence(
+                &store_wave_id,
+                i,
+                &ralph_core::supervisor::TerminalEvidence::from_event(
+                    "exec.unit.done",
+                    &format!("{{\"unit\":\"u6-{i}\"}}"),
+                ),
+            )
+            .expect("record terminal evidence must succeed");
     }
     (std::sync::Arc::new(bridge), store_wave_id)
 }
@@ -3822,12 +3840,34 @@ fn test_production_fan_in_partial_failure_injects_failed() {
     bridge
         .record_slot_result(&store_wave_id, 0, "h0", 1)
         .expect("s0");
+    // Plan 004 R2 / P0-2: success path requires terminal evidence.
+    bridge
+        .store()
+        .record_slot_terminal_evidence(
+            &store_wave_id,
+            0,
+            &TerminalEvidence::from_event("exec.unit.done", "{\"unit\":\"u6-0\"}"),
+        )
+        .expect("evidence 0");
     bridge
         .record_slot_result(&store_wave_id, 1, "h1", 1)
         .expect("s1");
     bridge
+        .store()
+        .record_slot_terminal_evidence(
+            &store_wave_id,
+            1,
+            &TerminalEvidence::from_event("exec.unit.done", "{\"unit\":\"u6-1\"}"),
+        )
+        .expect("evidence 1");
+    bridge
         .record_slot_failure(&store_wave_id, 2, "boom")
         .expect("f2");
+    // Plan 004 R3 / P0-1: dispatcher must commit salvage BEFORE
+    // `fail_wave` latches the coord-event injection.
+    bridge
+        .mark_salvage_merged(&store_wave_id)
+        .expect("mark salvage");
 
     let bridge: std::sync::Arc<dyn SupervisorBridge> = std::sync::Arc::new(bridge);
     let completed = make_u6_completed("u6-wave-fail", 2); // only 2 results (slot 2 failed)
@@ -3900,6 +3940,14 @@ fn test_production_fan_in_sink_failure_defers_complete() {
         .expect("bind");
     let _ = store.try_dispatch_next(1).expect("dispatch").expect("slot");
     store.record_slot_result(&wave, 0, "h0", 1).expect("record");
+    // Plan 004 R2 / P0-2: success path requires terminal evidence.
+    store
+        .record_slot_terminal_evidence(
+            &wave,
+            0,
+            &TerminalEvidence::from_event("exec.unit.done", "{\"unit\":\"u6-retry-0\"}"),
+        )
+        .expect("evidence");
 
     let sink = std::sync::Arc::new(InMemoryMergeSink::new());
     sink.fail_with("ledger locked");

@@ -7234,6 +7234,17 @@ hats: {}
         }
         for (w, i) in dispatched {
             store.record_slot_result(&w, i, "hash", 1).unwrap();
+            // Plan 004 R2 / P0-2: success path requires terminal evidence.
+            store
+                .record_slot_terminal_evidence(
+                    &w,
+                    i,
+                    &ralph_core::supervisor::TerminalEvidence::from_event(
+                        "exec.unit.done",
+                        &format!("{{\"unit\":\"u5-ok-{i}\"}}"),
+                    ),
+                )
+                .unwrap();
         }
 
         // Sanity: the wave is fully completed before fan-in.
@@ -7492,6 +7503,17 @@ hats: {}
         store
             .record_slot_result(&store_wave_id, 0, "hash-s0", 1)
             .unwrap();
+        // Plan 004 R2 / P0-2: success path requires terminal evidence.
+        store
+            .record_slot_terminal_evidence(
+                &store_wave_id,
+                0,
+                &ralph_core::supervisor::TerminalEvidence::from_event(
+                    "exec.unit.done",
+                    "{\"unit\":\"u4-fan-in-0\"}",
+                ),
+            )
+            .unwrap();
 
         // Slot 1: failure → will become blocking, triggering
         // InjectedFailed.
@@ -7501,6 +7523,12 @@ hats: {}
                 1,
                 ralph_core::supervisor::worker_outcome::REASON_WORKER_TIMEOUT,
             )
+            .unwrap();
+
+        // Plan 004 R3 / P0-1: dispatcher must commit salvage BEFORE
+        // `fail_wave` latches the coord-event injection.
+        bridge
+            .mark_salvage_merged(&store_wave_id)
             .unwrap();
 
         let completed = ralph_core::CompletedWave {
@@ -7614,6 +7642,17 @@ hats: {}
         store
             .record_slot_result(&store_wave_id, 0, "hash-s0", 1)
             .unwrap();
+        // Plan 004 R2 / P0-2: success path requires terminal evidence.
+        store
+            .record_slot_terminal_evidence(
+                &store_wave_id,
+                0,
+                &ralph_core::supervisor::TerminalEvidence::from_event(
+                    "review.unit.done",
+                    &serde_json::json!({"dimension":"correctness"}).to_string(),
+                ),
+            )
+            .unwrap();
         // Slot 1: terminally Failed. Its assigned dimension `testing`
         // is already done in main from the prior tick.
         store
@@ -7622,6 +7661,11 @@ hats: {}
                 1,
                 ralph_core::supervisor::worker_outcome::REASON_WORKER_TIMEOUT,
             )
+            .unwrap();
+        // Plan 004 R3 / P0-1: dispatcher must commit salvage BEFORE
+        // `fail_wave` latches the coord-event injection.
+        bridge
+            .mark_salvage_merged(&store_wave_id)
             .unwrap();
 
         // completed.results carries ONLY slot 0's event (correctness);
@@ -7823,6 +7867,17 @@ hats: {}
         store
             .record_slot_result(&store_wave_id, 0, "hash-s0", 1)
             .unwrap();
+        // Plan 004 R2 / P0-2: success path requires terminal evidence.
+        store
+            .record_slot_terminal_evidence(
+                &store_wave_id,
+                0,
+                &ralph_core::supervisor::TerminalEvidence::from_event(
+                    "review.unit.done",
+                    &serde_json::json!({"dimension":"correctness"}).to_string(),
+                ),
+            )
+            .unwrap();
         // Slot 1: terminally Failed → InjectedFailed.
         store
             .record_slot_failure(
@@ -7830,6 +7885,11 @@ hats: {}
                 1,
                 ralph_core::supervisor::worker_outcome::REASON_WORKER_TIMEOUT,
             )
+            .unwrap();
+        // Plan 004 R3 / P0-1: dispatcher must commit salvage BEFORE
+        // `fail_wave` latches the coord-event injection.
+        bridge
+            .mark_salvage_merged(&store_wave_id)
             .unwrap();
 
         let mut assigned = std::collections::HashMap::new();
@@ -7937,12 +7997,28 @@ hats: {}
         store
             .record_slot_result(&store_wave_id, 0, "hash-s0", 1)
             .unwrap();
+        // Plan 004 R2 / P0-2: success path requires terminal evidence.
+        store
+            .record_slot_terminal_evidence(
+                &store_wave_id,
+                0,
+                &ralph_core::supervisor::TerminalEvidence::from_event(
+                    "review.unit.done",
+                    &serde_json::json!({"dimension":"correctness"}).to_string(),
+                ),
+            )
+            .unwrap();
         store
             .record_slot_failure(
                 &store_wave_id,
                 1,
                 ralph_core::supervisor::worker_outcome::REASON_WORKER_TIMEOUT,
             )
+            .unwrap();
+        // Plan 004 R3 / P0-1: dispatcher must commit salvage BEFORE
+        // `fail_wave` latches the coord-event injection.
+        bridge
+            .mark_salvage_merged(&store_wave_id)
             .unwrap();
 
         let mut assigned = std::collections::HashMap::new();

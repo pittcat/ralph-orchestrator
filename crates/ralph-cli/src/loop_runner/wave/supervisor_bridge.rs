@@ -856,6 +856,17 @@ mod tests {
             .unwrap();
         let _ = store.try_dispatch_next(2).unwrap().unwrap();
         store.record_slot_result(&wave, 0, "h", 1).unwrap();
+        // Plan 004 R2 / P0-2: success path requires terminal evidence.
+        store
+            .record_slot_terminal_evidence(
+                &wave,
+                0,
+                &ralph_core::supervisor::TerminalEvidence::from_event(
+                    "exec.unit.done",
+                    "{\"unit\":\"rt-0\"}",
+                ),
+            )
+            .unwrap();
         let bridge =
             CoordinatorSupervisorBridge::from_store(store.clone() as Arc<dyn SupervisorStore>);
         let action = bridge
