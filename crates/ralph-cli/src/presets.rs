@@ -1083,6 +1083,63 @@ mod tests {
         );
     }
 
+
+    /// 2026-07-26-004 plan U9 (R9 / R10 / S5 / S10): implementation-review
+    /// adopts the generic mechanism contract — the finalizer is the SOLE
+    /// `LOOP_COMPLETE` publisher (`review.wave.failed` is a runtime
+    /// coordination topic delivered via trigger, NOT a finalizer publish),
+    /// `review-worker` publishes only `review.unit.done`, and the declared
+    /// flow branches `review.wave.failed` straight to `finalize` via
+    /// `on_any_of` (the transition the U6 flow authority now honors).
+    #[test]
+    fn test_implementation_review_adopts_generic_mechanism_contract() {
+        let preset = get_preset("implementation-review").expect("implementation-review preset");
+        let config = RalphConfig::parse_yaml(preset.content).expect("YAML parses");
+
+        // R9 / KTD7: finalizer publishes ONLY LOOP_COMPLETE.
+        let finalizer = config.hats.get("finalizer").expect("finalizer");
+        assert_eq!(
+            finalizer.publishes,
+            vec!["LOOP_COMPLETE".to_string()],
+            "finalizer must be the sole LOOP_COMPLETE publisher"
+        );
+        assert!(
+            !finalizer.publishes.iter().any(|t| t == "review.wave.failed"),
+            "finalizer must NOT publish the runtime coordination topic review.wave.failed"
+        );
+
+        // review-worker publishes only review.unit.done (producer contract).
+        let worker = config.hats.get("review-worker").expect("review-worker");
+        assert_eq!(worker.publishes, vec!["review.unit.done".to_string()]);
+
+        // R10 / S10: the declared flow branches review.wave.failed → finalize.
+        let flow = config
+            .mechanism
+            .as_ref()
+            .and_then(|m| m.flow.as_ref())
+            .expect("implementation-review declares mechanism.flow");
+        let finalize = flow.steps.iter().find(|s| s.id == "finalize").expect("finalize step");
+        assert!(
+            finalize.on_any_of.iter().any(|t| t == "review.wave.failed"),
+            "finalize must branch on review.wave.failed (U6 declared transition); got {:?}",
+            finalize.on_any_of
+        );
+        // The preset adopts the U6/U7 flow authority end-to-end: scope.ready
+        // advances scope_freeze → review_wave (positional), and a failed wave
+        // branches straight to finalize via the declared on_any_of above.
+        use ralph_core::event_loop::recover_current_plan_step;
+        assert_eq!(
+            recover_current_plan_step(&config, &["scope.ready"]),
+            "review_wave",
+            "scope.ready must advance scope_freeze → review_wave"
+        );
+        assert_eq!(
+            recover_current_plan_step(&config, &["scope.ready", "review.wave.failed"]),
+            "finalize",
+            "a failed review wave must branch to finalize"
+        );
+    }
+
     #[test]
     fn test_ce_executor_reporter_publishes_report_done() {
         // Static-config guard for the completion-gate event. The chain test above
