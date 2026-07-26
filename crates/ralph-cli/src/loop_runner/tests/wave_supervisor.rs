@@ -3181,6 +3181,118 @@ async fn test_u2_workspace_root_and_channel_injected_into_worker_env() {
     );
 }
 
+/// 2026-07-25-003 plan U4 (R6): the worker process's
+/// `RALPH_WAVE_ID` env var MUST be the **public** wave id (the
+/// `DetectedWave.wave_id` the dispatcher received), NOT the
+/// supervisor store's internal `w-{seq}` id. The dispatcher
+/// injects `RALPH_WAVE_ID = public id` in `dispatch_wave_inner`
+/// (line ~1582), but `bind_slot` later writes the store id into
+/// `binding.env` and the env merge in the dispatcher uses
+/// last-write-wins — so the public id is silently overwritten by
+/// the store id in the spawned worker's environment. This
+/// regression reproduces that bug end-to-end and pins the fix
+/// (the dispatcher's final RALPH_WAVE_ID must be the public id).
+#[tokio::test]
+async fn test_u4_worker_env_wave_id_is_public_id() {
+    use crate::loop_runner::wave::CoordinatorSupervisorBridge;
+
+    let tmp = tempfile::tempdir().expect("temp dir");
+    let workspace_root = std::fs::canonicalize(tmp.path()).expect("canonicalize");
+    let wave_dir = workspace_root.join(".ralph");
+    std::fs::create_dir_all(&wave_dir).expect("create wave dir");
+    let main_events_file = wave_dir.join("events.jsonl");
+
+    #[derive(Debug)]
+    struct StubFactory;
+    impl ralph_core::supervisor::worktree_bind::WorktreeFactory for StubFactory {
+        fn create(
+            &self,
+            repo_root: std::path::PathBuf,
+            branch: String,
+        ) -> Result<
+            ralph_core::worktree::Worktree,
+            ralph_core::supervisor::worktree_bind::WorktreeError,
+        > {
+            let wt = repo_root.join(format!("wt-{branch}"));
+            std::fs::create_dir_all(&wt).ok();
+            Ok(ralph_core::worktree::Worktree {
+                path: wt,
+                branch,
+                is_main: false,
+                head: None,
+            })
+        }
+    }
+
+    let store = std::sync::Arc::new(InMemorySupervisorStore::new());
+    let context = ProductionBridgeContext {
+        loop_id: "u4-public-id".to_string(),
+        repo_root: workspace_root.clone(),
+        events_path: Some(main_events_file.clone()),
+        tasks_path: None,
+    };
+    let bridge = CoordinatorSupervisorBridge::with_context_and_factory(
+        store.clone() as std::sync::Arc<dyn SupervisorStore>,
+        context,
+        std::sync::Arc::new(StubFactory),
+    );
+
+    // Public id contains a dash (mirrors the production
+    // `w-rs-1` / `w-246cb4afef33` shape) so the test fails
+    // loudly if any code path mangles the id format.
+    let public_wave_id = "w-public-rs-1";
+    let wave = make_u3_wave(public_wave_id, 1, 1);
+    let executor = U5RecordingExecutor::new(U5SlotOutcome::Success(1));
+
+    let capture = captured_env();
+    capture.lock().unwrap().clear();
+    let _outcome = run_u2_execute_wave_with_env_capture(
+        bridge,
+        wave,
+        executor,
+        &main_events_file,
+        "u4-public-id",
+    )
+    .await;
+
+    let snap = capture.lock().unwrap().clone();
+    assert_eq!(snap.len(), 1, "U4/003: one slot captured; got {snap:?}");
+    let env_map: std::collections::HashMap<String, String> = snap
+        .get(&0)
+        .expect("slot 0 captured")
+        .iter()
+        .cloned()
+        .collect();
+
+    let observed = env_map
+        .get("RALPH_WAVE_ID")
+        .expect("RALPH_WAVE_ID must be injected")
+        .clone();
+    assert_eq!(
+        observed, public_wave_id,
+        "U4/003: worker RALPH_WAVE_ID must equal the public wave id (the id the agent saw in `DetectedWave.wave_id`); got {observed}"
+    );
+    // Negative guard: the worker must NOT see the supervisor
+    // store's internal `w-{seq}` id. The store allocates a
+    // distinct id on first registration, so we recover it from
+    // the live store and assert it does NOT leak into the
+    // worker's env.
+    let store_wave_id = store
+        .recover_active_waves()
+        .expect("recover")
+        .pop()
+        .expect("one wave")
+        .wave_id;
+    assert_ne!(
+        store_wave_id, public_wave_id,
+        "U4/003: pre-condition: the supervisor store must allocate a distinct id from the public id (otherwise the test cannot distinguish them); got {store_wave_id}"
+    );
+    assert_ne!(
+        observed, store_wave_id,
+        "U4/003: worker RALPH_WAVE_ID must NOT leak the supervisor store's internal id ({store_wave_id}); got {observed}"
+    );
+}
+
 /// 2026-07-23-007 plan U4 (R-W5): when the production bridge
 /// carries a `tasks.jsonl` path, the dispatcher projects each
 /// slot's terminal state onto a stable task row. A successful
@@ -4254,4 +4366,520 @@ fn g3_cancel_closure_cancelled_slot_has_never_started_reason() {
 
     // The completed slot's reason stays None.
     assert_eq!(bridge.slot_failure_reason(&wave_id, 0).unwrap(), None);
+}
+// =============================================================================
+// 2026-07-25-003 plan U3: outside-in integration — `ralph emit` writes
+// `exec.unit.done` into the dispatcher-signed per-slot wave channel,
+// the worker reads it back via `read_worker_events`, the dispatcher's
+// `classify_slot_result` recognises it as terminal `Done`, and the
+// supervisor store records the slot as `completed`. This pins the
+// complete causal chain end-to-end (without mocking
+// `classify_slot_result` / `record_slot_result`).
+// =============================================================================
+
+/// 2026-07-25-003 plan U3 / adversarial-01 outside-in (allowlist side):
+/// the production `resolve_emit_path` P6-allowlist carve-out accepts
+/// a dispatcher-signed per-slot channel **only** when the worker's
+/// `RALPH_WAVE_ID` / `RALPH_WAVE_INDEX` match the file's `<id>` /
+/// `<idx>` segments. A regression that drops the handshake
+/// alignment is caught here. The dispatcher's read/classify/record
+/// chain is pinned by the existing `test_u3_emit_to_wave_channel_records_slot_completed`
+/// below; this test focuses on the allowlist half of the contract.
+#[test]
+fn test_u3_resolve_emit_path_dispatcher_signed_carve_out() {
+    use crate::cli::resolve_emit_path;
+
+    // Use a process-unique temp directory so this test does not
+    // collide with other concurrent nextest tests sharing
+    // `std::env::temp_dir()`.
+    let workspace = std::env::temp_dir().join(format!(
+        "u3-carve-out-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0)
+    ));
+    std::fs::create_dir_all(&workspace).unwrap();
+    std::fs::create_dir_all(workspace.join(".ralph")).unwrap();
+    std::fs::write(
+        workspace.join(".ralph/current-events"),
+        ".ralph/events-main.jsonl",
+    )
+    .unwrap();
+
+    let wave_id = "w-rs-1";
+    let slot_idx: u32 = 0;
+    let channel = workspace.join(format!(".ralph/wave-{wave_id}-{slot_idx}.jsonl"));
+
+    // Happy path: handshake aligns → accepted.
+    let resolved = resolve_emit_path(
+        &workspace,
+        &workspace.join(".ralph/events.jsonl"),
+        Some(channel.to_string_lossy().as_ref()),
+        Some("exec-worker"),
+        true,
+        Some(wave_id),
+        Some(slot_idx),
+    )
+    .expect("U3/003: dispatcher-signed channel must be accepted");
+    assert_eq!(
+        resolved, channel,
+        "U3/003: resolved path must point at the dispatcher channel"
+    );
+
+    // Adversarial-01: same path shape, mismatched wave id.
+    let cross = workspace.join(".ralph/wave-w-other-0.jsonl");
+    let bad = resolve_emit_path(
+        &workspace,
+        &workspace.join(".ralph/events.jsonl"),
+        Some(cross.to_string_lossy().as_ref()),
+        Some("exec-worker"),
+        true,
+        Some(wave_id),
+        Some(slot_idx),
+    );
+    assert!(
+        bad.is_err(),
+        "U3/003: channel with mismatched wave id must be rejected, got: {bad:?}"
+    );
+
+    // Adversarial-01: same path shape, mismatched slot idx.
+    let cross_idx = workspace.join(".ralph/wave-w-rs-1-7.jsonl");
+    let bad_idx = resolve_emit_path(
+        &workspace,
+        &workspace.join(".ralph/events.jsonl"),
+        Some(cross_idx.to_string_lossy().as_ref()),
+        Some("exec-worker"),
+        true,
+        Some(wave_id),
+        Some(slot_idx),
+    );
+    assert!(
+        bad_idx.is_err(),
+        "U3/003: channel with mismatched slot idx must be rejected, got: {bad_idx:?}"
+    );
+}
+
+// =============================================================================
+
+/// 2026-07-25-003 plan U3: a worker that "wrote its own events" via the
+/// dispatcher-injected per-slot channel ends up in the supervisor
+/// store as `Completed`. The executor writes a single `exec.unit.done`
+/// record into the `request.worker_events_path` (the path the
+/// dispatcher injected as `RALPH_EVENTS_FILE` and the path
+/// `read_worker_events` later reads in `wave/worker.rs`), then reads
+/// the file back to obtain the event batch. This mirrors the
+/// production flow: agent runs `ralph emit exec.unit.done` →
+/// `read_worker_events` returns the record → `classify_slot_result`
+/// maps it to `Completed(Done)` → `record_slot_result` writes the
+/// store row.
+#[tokio::test]
+async fn test_u3_emit_to_wave_channel_records_slot_completed() {
+    use crate::loop_runner::wave::read_worker_events;
+    use crate::loop_runner::wave::{WaveWorkerExecutor, WorkerRequest};
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    /// Executor that emits a terminal `exec.unit.done` into the
+    /// dispatcher-injected per-slot channel file, then reads it back
+    /// via the production `read_worker_events` helper. The returned
+    /// `(events, _, true)` matches what production `run_wave_worker`
+    /// hands to the dispatcher. The carve-out regression is pinned
+    /// separately by `test_u3_resolve_emit_path_dispatcher_signed_carve_out`
+    /// (this test focuses on the dispatcher's causal-chain side).
+    struct ChannelEmittingExecutor;
+    impl WaveWorkerExecutor for ChannelEmittingExecutor {
+        fn execute(
+            &self,
+            request: WorkerRequest,
+        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = (u32, WaveWorkerOutcome)> + Send>>
+        {
+            Box::pin(async move {
+                let index = request.index;
+                let events_path = request.worker_events_path.clone();
+                let line = serde_json::to_string(&ralph_core::Event {
+                    topic: "exec.unit.done".to_string(),
+                    payload: Some(format!("{{\"slot\":{index},\"seq\":0}}")),
+                    ts: String::new(),
+                    hat: None,
+                    triggered: None,
+                    source: None,
+                    wave_id: None,
+                    wave_index: None,
+                    wave_total: None,
+                    system_injected: None,
+                })
+                .expect("serialize event");
+                if let Some(parent) = events_path.parent() {
+                    let _ = std::fs::create_dir_all(parent);
+                }
+                std::fs::write(&events_path, format!("{line}\n")).expect("write channel file");
+                // Production `run_wave_worker` reads the file via
+                // `read_worker_events` (wave/worker.rs); the test
+                // exercises the same helper to assert the channel
+                // path is consumable by the production reader.
+                let events = read_worker_events(&events_path);
+                assert_eq!(
+                    events.len(),
+                    1,
+                    "U3/003: channel must hold exactly one event for the dispatcher to classify; got {events:?}"
+                );
+                assert_eq!(
+                    events[0].topic, "exec.unit.done",
+                    "U3/003: emitted topic must round-trip through the channel reader"
+                );
+                (index, Ok((events, Duration::from_millis(5), true)))
+            })
+        }
+    }
+
+    let store = std::sync::Arc::new(InMemorySupervisorStore::new());
+    let bridge = U5RecordingBridge::new(store.clone() as std::sync::Arc<dyn SupervisorStore>);
+
+    let wave = make_u3_wave("u3-emit-channel", 1, 1);
+    let executor = ChannelEmittingExecutor;
+    let outcome = run_u3_dispatch_wave(bridge.clone(), wave, executor).await;
+    let bridge_for_asserts = bridge;
+
+    assert!(
+        matches!(
+            outcome,
+            WaveDispatchOutcome::Completed(_) | WaveDispatchOutcome::Partial(_)
+        ),
+        "U3/003: emit→channel→Completed must close the wave, got {outcome:?}"
+    );
+
+    // U5RecordingBridge recorded exactly one `record_slot_result`
+    // call (the success path), zero `record_slot_failure` calls.
+    let results = bridge_for_asserts.results_snapshot();
+    let failures = bridge_for_asserts.failures_snapshot();
+    assert_eq!(
+        results.len(),
+        1,
+        "U3/003: dispatcher's classifier must call record_slot_result for the terminal Done; got {results:?}"
+    );
+    assert!(
+        failures.is_empty(),
+        "U3/003: no failure record expected for a slot that emitted terminal Done; got {failures:?}"
+    );
+    assert_eq!(results[0].0, 0, "U3/003: slot 0 must be the one recorded");
+    assert_eq!(
+        results[0].2, 1,
+        "U3/003: event_count must equal the number of events read from the channel"
+    );
+
+    // The supervisor store snapshot reflects the slot as completed
+    // — this is the causal-chain proof the plan U3 requires.
+    let store_wave_id = bridge_for_asserts
+        .store
+        .recover_active_waves()
+        .expect("recover")
+        .pop()
+        .expect("one wave")
+        .wave_id;
+    let snap = bridge_for_asserts
+        .store
+        .fan_in_status(&store_wave_id)
+        .expect("snapshot");
+    assert_eq!(
+        snap.completed_count, 1,
+        "U3/003: emit→channel must produce a store row with completed_count=1; got {snap:?}"
+    );
+    assert_eq!(
+        snap.failed_count, 0,
+        "U3/003: emit→channel must not produce any failure rows; got {snap:?}"
+    );
+    // Suppress unused-import warnings if Arc is dropped during refactors.
+    let _ = Arc::clone(&bridge_for_asserts.store);
+}
+
+/// Run a single-slot wave with a custom `WaveWorkerExecutor`, while
+/// keeping the U5RecordingBridge in the loop so the dispatcher's
+/// `record_slot_result` / `record_slot_failure` calls land in the
+/// spy. This is the dispatcher-level runner that powers U3's
+/// outside-in channel-writing test.
+async fn run_u3_dispatch_wave<E: WaveWorkerExecutor + 'static>(
+    bridge: U5RecordingBridge,
+    wave: ralph_core::DetectedWave,
+    executor: E,
+) -> WaveDispatchOutcome {
+    use crate::loop_runner::wave::execute_wave_via_supervisor_with_executor;
+
+    let wave_dir = std::env::temp_dir().join(format!("u3-disp-{}", wave.wave_id));
+    let _ = std::fs::create_dir_all(&wave_dir);
+    let main_events_file = wave_dir.join("events.jsonl");
+    let _ = std::fs::File::create(&main_events_file);
+
+    let executor_dyn: std::sync::Arc<dyn WaveWorkerExecutor> = std::sync::Arc::new(executor);
+    let bridge_arc: std::sync::Arc<dyn SupervisorBridge> = std::sync::Arc::new(bridge);
+    execute_wave_via_supervisor_with_executor(
+        &wave,
+        &make_test_cli_backend(),
+        &main_events_file,
+        false,
+        false,
+        None,
+        None,
+        "u3-test-loop",
+        WaveDispatchLimits::default(),
+        None,
+        None,
+        &bridge_arc,
+        executor_dyn,
+    )
+    .await
+}
+
+// =============================================================================
+// 2026-07-25-003 plan U5: legacy `WaveTracker.record_outcome` and the
+// supervisor classifier must agree that an empty-success outcome
+// (`Ok(([], _, true))`) is a failure, not a result. Without this
+// invariant, an empty-success worker is counted in `CompletedWave.results`
+// (the `results=N` line in dispatcher logs) while the supervisor
+// store flags the same slot `empty_worker_result` — a "results=N
+// failures=1" log line that masks an all-failed store. The fix is a
+// single line in `record_outcome`; the test pins the new behaviour
+// directly so a future refactor cannot silently re-introduce the
+// drift.
+// =============================================================================
+
+/// U5 Red/Green: `record_outcome` must treat
+/// `Ok((events=[], duration, success=true))` as a failure (the
+/// canonical `empty_worker_result` reason), NOT a result. The
+/// supervisor path's `classify_slot_result` already does the right
+/// thing; this test pins the legacy `WaveTracker` path so the two
+/// stay aligned.
+#[test]
+fn test_u5_record_outcome_empty_success_is_failure() {
+    use crate::loop_runner::wave::record_outcome;
+
+    let mut tracker = ralph_core::WaveTracker::new();
+    tracker.register_wave_with_source(
+        "u5-empty-success".to_string(),
+        1,
+        Some(ralph_proto::HatId::new("u5-hat")),
+    );
+
+    // Plan 2026-07-25-003 U5 / R3: a worker that exits 0 with no
+    // accepted events is `empty_worker_result`, not a result. The
+    // legacy `record_outcome` previously wrote this as a
+    // result (because `success || events.is_empty()` was
+    // satisfied by the `success` arm), producing the
+    // `results=N failures=0` log line that masked a store row
+    // flagged `empty_worker_result`.
+    let outcome: crate::loop_runner::wave::WaveWorkerOutcome =
+        Ok((Vec::new(), std::time::Duration::from_millis(5), true));
+    record_outcome(&mut tracker, "u5-empty-success", 0, outcome);
+
+    let completed = tracker
+        .take_wave_results("u5-empty-success")
+        .expect("wave must exist after registration");
+    assert_eq!(
+        completed.results.len(),
+        0,
+        "U5/003: empty-success must NOT be counted as a result; got {completed:?}"
+    );
+    assert_eq!(
+        completed.failures.len(),
+        1,
+        "U5/003: empty-success must be recorded as a failure; got {completed:?}"
+    );
+    assert_eq!(
+        completed.failures[0].error, "empty_worker_result",
+        "U5/003: empty-success reason must equal the canonical `empty_worker_result`; got {:?}",
+        completed.failures[0].error
+    );
+}
+
+/// U5 regression guard: the partial-timeout contract (PTY
+/// workers exit non-zero but produce partial events) must keep
+/// its `record_result` path even after the empty-success fix.
+/// A non-zero exit WITH events stays a result — the dispatcher's
+/// merge layer still surfaces the partial events to the
+/// aggregator.
+#[test]
+fn test_u5_record_outcome_partial_timeout_stays_result() {
+    use crate::loop_runner::wave::record_outcome;
+
+    let mut tracker = ralph_core::WaveTracker::new();
+    tracker.register_wave_with_source(
+        "u5-partial-timeout".to_string(),
+        1,
+        Some(ralph_proto::HatId::new("u5-hat")),
+    );
+
+    let event = ralph_core::Event {
+        topic: "exec.unit.done".to_string(),
+        payload: Some("{\"slot\":0}".to_string()),
+        ts: String::new(),
+        hat: None,
+        triggered: None,
+        source: None,
+        wave_id: None,
+        wave_index: None,
+        wave_total: None,
+        system_injected: None,
+    };
+    let outcome: crate::loop_runner::wave::WaveWorkerOutcome =
+        Ok((vec![event], std::time::Duration::from_millis(5), false));
+    record_outcome(&mut tracker, "u5-partial-timeout", 0, outcome);
+
+    let completed = tracker
+        .take_wave_results("u5-partial-timeout")
+        .expect("wave must exist after registration");
+    assert_eq!(
+        completed.results.len(),
+        1,
+        "U5/003: partial-timeout (success=false, events=non-empty) must stay a result for the merge layer; got {completed:?}"
+    );
+    assert_eq!(
+        completed.failures.len(),
+        0,
+        "U5/003: partial-timeout must NOT be a failure; got {completed:?}"
+    );
+}
+
+// =============================================================================
+// 2026-07-25-003 plan U6: `exec.wave.failed` / `fix.wave.failed`
+// payload must expose per-slot `failure_reason` so an operator can
+// tell a `worker_timeout` apart from an `empty_worker_result` without
+// re-running diagnostics. The legacy payload shape carries
+// `wave_id` + `reason` + `blocking_slots` only; a 5-slot failure
+// looks identical whether slot 0 timed out or hit
+// `empty_worker_result`. The fix adds an OPTIONAL `slot_failures`
+// field (schema `required_fields` is unchanged so the engine gate
+// still passes) listing `{slot_index, reason, duration_ms}` for every
+// failed slot. The new test pins the field shape so a future schema
+// refactor cannot silently drop the diagnostic data.
+// =============================================================================
+
+/// U6: `build_wave_failed_payload` for an Exec wave with two
+/// failures (one `worker_timeout`, one `empty_worker_result`) must
+/// surface each per-slot reason in `slot_failures`, AND the
+/// `blocking_slots` set must equal the indices that actually
+/// failed (no false-positive blocking of completed slots).
+#[test]
+fn test_u6_failed_payload_exposes_per_slot_reasons() {
+    use crate::loop_runner::wave::build_wave_failed_payload;
+    use ralph_core::supervisor::WaveKind;
+    use ralph_core::{CompletedWave, WaveFailure, WaveResult};
+    use std::time::Duration;
+
+    let mut completed = CompletedWave {
+        wave_id: "u6-exec".to_string(),
+        wave_total: 5,
+        results: vec![WaveResult {
+            index: 1,
+            events: vec![],
+        }],
+        failures: vec![
+            WaveFailure {
+                index: 0,
+                error: "worker_timeout".to_string(),
+                duration: Duration::from_secs(300),
+                expected_dimension: None,
+                actual_dimension: None,
+            },
+            WaveFailure {
+                index: 2,
+                error: "empty_worker_result".to_string(),
+                duration: Duration::from_millis(50),
+                expected_dimension: None,
+                actual_dimension: None,
+            },
+            WaveFailure {
+                index: 4,
+                error: "worker_cancelled".to_string(),
+                duration: Duration::from_secs(2),
+                expected_dimension: None,
+                actual_dimension: None,
+            },
+        ],
+        duration: Duration::from_secs(300),
+        partial: true,
+        expected_source_hat: None,
+        assigned_dimensions: std::collections::HashMap::new(),
+        dimension_retry_counts: std::collections::HashMap::new(),
+        worker_events: vec![],
+    };
+    // 5-slot failure set: {0,2,4} (1+3 are completed/otherwise)
+    let payload = build_wave_failed_payload(
+        WaveKind::Exec,
+        &completed,
+        "required_slot_failure",
+        vec![0, 2, 4],
+    );
+    let obj = payload.as_object().expect("payload must be a JSON object");
+
+    // Required fields still present (schema contract intact).
+    assert_eq!(
+        obj.get("wave_id").and_then(|v| v.as_str()),
+        Some("u6-exec"),
+        "U6/003: required field `wave_id` must be present"
+    );
+    assert_eq!(
+        obj.get("reason").and_then(|v| v.as_str()),
+        Some("required_slot_failure"),
+        "U6/003: required field `reason` must be present"
+    );
+    let blocking: Vec<u32> = obj
+        .get("blocking_slots")
+        .and_then(|v| v.as_array())
+        .expect("U6/003: `blocking_slots` must be a JSON array")
+        .iter()
+        .filter_map(|v| v.as_u64().map(|n| n as u32))
+        .collect();
+    assert_eq!(
+        blocking,
+        vec![0, 2, 4],
+        "U6/003: `blocking_slots` must equal the actual failed slot indices; got {blocking:?}"
+    );
+
+    // New diagnostic field: per-slot reasons in stable slot order.
+    let slot_failures = obj.get("slot_failures").and_then(|v| v.as_array()).expect(
+        "U6/003: `slot_failures` must be a JSON array of {slot_index, reason, duration_ms}",
+    );
+    assert_eq!(
+        slot_failures.len(),
+        3,
+        "U6/003: one entry per failed slot; got {slot_failures:?}"
+    );
+    let by_index: std::collections::HashMap<u32, String> = slot_failures
+        .iter()
+        .filter_map(|v| {
+            let obj = v.as_object()?;
+            let slot = obj.get("slot_index")?.as_u64()? as u32;
+            let reason = obj.get("reason")?.as_str()?.to_string();
+            Some((slot, reason))
+        })
+        .collect();
+    assert_eq!(
+        by_index.get(&0).map(String::as_str),
+        Some("worker_timeout"),
+        "U6/003: slot 0 must carry `worker_timeout`; got {by_index:?}"
+    );
+    assert_eq!(
+        by_index.get(&2).map(String::as_str),
+        Some("empty_worker_result"),
+        "U6/003: slot 2 must carry `empty_worker_result`; got {by_index:?}"
+    );
+    assert_eq!(
+        by_index.get(&4).map(String::as_str),
+        Some("worker_cancelled"),
+        "U6/003: slot 4 must carry `worker_cancelled`; got {by_index:?}"
+    );
+
+    // Negative guard: a completed slot MUST NOT appear in
+    // `blocking_slots` (R5) or in `slot_failures`.
+    assert!(
+        !blocking.contains(&1) && !blocking.contains(&3),
+        "U6/003: completed slots must NOT be in blocking_slots; got {blocking:?}"
+    );
+    assert!(
+        !by_index.contains_key(&1) && !by_index.contains_key(&3),
+        "U6/003: completed slots must NOT appear in slot_failures; got {by_index:?}"
+    );
+    // Suppress unused mut warnings if completed gains new fields.
+    let _ = &mut completed;
 }

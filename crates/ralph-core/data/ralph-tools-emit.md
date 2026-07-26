@@ -275,7 +275,17 @@ ralph emit <TOPIC> -j '...' --output json                  # 落盘：看 ok=tru
 | `Refusing urgent steer marker` | 上轮 urgent steer 未处理 | 先处理 urgent steer 内容（参见 error 信息中的指引），再重试 emit |
 | 任何命令失败 | 通用恢复 | 1. `ralph emit --help` 确认语法 2. 检查退出码 3. 查看错误信息 4. 重试 |
 
-> **wave worker 注意**：在 `RALPH_WAVE_WORKER=1` 的子进程中通过 `ralph emit` 返回结果时，事件会写入 **candidate-events**（不是 current-events），与 wave 调度器一致。不要强行设置 `RALPH_EVENTS_FILE` 指向其他文件——会被 allowlist 拒绝。
+> **在 wave worker 子进程内调用 `ralph emit`**：当本进程的 `RALPH_WAVE_WORKER=1` 时，runtime 已为你准备好本次 slot 的事件落点（由 `RALPH_EVENTS_FILE` 指向）。**强制先 `--policy-check` 预检**：
+>
+> ```bash
+> ralph emit --policy-check --hat "$RALPH_CURRENT_HAT" -j '<payload>' "$TOPIC"   # 预检
+> ralph emit --hat "$RALPH_CURRENT_HAT" -j '<payload>' "$TOPIC"                  # 真正写盘
+> ```
+>
+> **禁止**：
+>
+> - `unset RALPH_EVENTS_FILE` 或改写到其它目录 —— 事件不会落到本次 slot，runtime 会判定本 slot 无结果产出。
+> - 改写 `RALPH_WAVE_WORKER` / `RALPH_WAVE_ID` / `RALPH_WAVE_INDEX` —— 这三个值由 runtime 在你启动时注入，是本次 slot 的身份凭据。
 
 > **诊断**：emit 拒收后无法在 CLI 层修复时，启 `RALPH_DIAGNOSTICS=1` 重新 loop；envelope 写到 `recovery.jsonl`，`ralph diagnose --session latest` 出报告。详见 `docs/guide/runtime-diagnosis.md` §10 / §12.1。
 

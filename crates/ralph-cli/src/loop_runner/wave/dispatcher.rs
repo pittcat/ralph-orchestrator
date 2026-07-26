@@ -1696,15 +1696,32 @@ pub(crate) async fn execute_wave_via_supervisor_with_executor(
         };
 
         if let Some(ref b) = binding {
-            // Merge binding env (last-write-wins).
-            let binding_env: std::collections::HashMap<String, String> =
-                b.env.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+            // Merge binding env (last-write-wins), BUT the dispatcher
+            // already injected `RALPH_WAVE_ID = public wave id` at
+            // line ~1582 (the value the agent saw in
+            // `DetectedWave.wave_id`). `bind_slot`'s `binding.env`
+            // carries the **store** id (the `w-{seq}` the store
+            // allocated) because `bind_worktree` needs the store id
+            // to find the row. Plan 2026-07-25-003 U4 (R6) requires
+            // the worker's `RALPH_WAVE_ID` to be the public id so
+            // envelope / business record wave_id stays consistent
+            // with what the operator and the agent see. We therefore
+            // exclude `RALPH_WAVE_ID` from the binding-env merge:
+            // the dispatcher's earlier public-id injection is the
+            // last word, and the store id never leaks into the
+            // spawned worker's environment.
+            let binding_env: std::collections::HashMap<String, String> = b
+                .env
+                .iter()
+                .filter(|(k, _)| k.as_str() != "RALPH_WAVE_ID")
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect();
             worker_backend
                 .env_vars
                 .retain(|(k, _)| !binding_env.contains_key(k));
             worker_backend
                 .env_vars
-                .extend(b.env.iter().map(|(k, v)| (k.clone(), v.clone())));
+                .extend(binding_env.iter().map(|(k, v)| (k.clone(), v.clone())));
         }
 
         // 2026-07-23-007 plan U2 (R-W1): inject the
@@ -2426,7 +2443,7 @@ fn build_wave_complete_payload(
 /// matches the **target topic's** schema. Exec/fix waves carry
 /// `blocking_slots`; review waves carry `missing_dimensions`
 /// (the dimensions that never produced a `review.unit.done`).
-fn build_wave_failed_payload(
+pub(crate) fn build_wave_failed_payload(
     wave_kind: ralph_core::supervisor::WaveKind,
     completed: &ralph_core::CompletedWave,
     reason: &str,
@@ -2449,11 +2466,36 @@ fn build_wave_failed_payload(
                 "reason": reason,
             })
         }
-        WaveKind::Exec | WaveKind::Fix => serde_json::json!({
-            "wave_id": completed.wave_id,
-            "reason": reason,
-            "blocking_slots": blocking_slots,
-        }),
+        WaveKind::Exec | WaveKind::Fix => {
+            // 2026-07-25-003 plan U6 (R5 / R4): expose per-slot
+            // failure reasons alongside `blocking_slots` so the
+            // operator can tell a `worker_timeout` apart from an
+            // `empty_worker_result` without re-running diagnostics.
+            // The field is OPTIONAL — `presets/schemas/...yml`
+            // `required_fields` does not list it, so the engine
+            // gate still passes — and the integrator hat (e.g.
+            // `exec-failure-handler`) treats unknown fields as
+            // advisory. Downstream consumers that DO care about
+            // the per-slot reasons get a stable
+            // `[{slot_index, reason, duration_ms}, ...]` shape.
+            let slot_failures: Vec<serde_json::Value> = completed
+                .failures
+                .iter()
+                .map(|f| {
+                    serde_json::json!({
+                        "slot_index": f.index,
+                        "reason": f.error,
+                        "duration_ms": f.duration.as_millis(),
+                    })
+                })
+                .collect();
+            serde_json::json!({
+                "wave_id": completed.wave_id,
+                "reason": reason,
+                "blocking_slots": blocking_slots,
+                "slot_failures": slot_failures,
+            })
+        }
     }
 }
 
@@ -3291,7 +3333,7 @@ async fn dispatch_wave_inner_with_release<E: WaveWorkerExecutor + ?Sized>(
     outcome_for_completion(completed)
 }
 
-fn record_outcome(
+pub(crate) fn record_outcome(
     tracker: &mut ralph_core::WaveTracker,
     wave_id: &str,
     index: u32,
@@ -3299,12 +3341,33 @@ fn record_outcome(
 ) {
     match outcome {
         Ok((events, duration, success)) => {
-            // PTY workers return Ok((_, _, false)) for non-zero exit and for
-            // timeout-with-events (`run_wave_worker_pty`). Distinguish:
-            // - events present → keep results visible (partial-timeout contract)
-            // - empty + unsuccessful → hard failure so a forced slot exit
-            //   (exit 1, no events) cannot Integrate → false-green LOOP_COMPLETE
-            if success || !events.is_empty() {
+            // PTY workers return Ok((_, _, false)) for non-zero exit
+            // and for timeout-with-events (`run_wave_worker_pty`).
+            // Distinguish:
+            // - success + events present → result
+            // - success + NO events → empty_worker_result (failure);
+            //   a worker that exits 0 without accepted events is
+            //   not a real success, it just failed silently. Without
+            //   this rule, a false-green LOOP_COMPLETE could fire
+            //   for a wave whose every slot is empty.
+            // - success=false + events present → keep result visible
+            //   (partial-timeout contract).
+            // - success=false + empty → hard failure so a forced
+            //   slot exit (exit 1, no events) cannot Integrate →
+            //   false-green LOOP_COMPLETE.
+            //
+            // 2026-07-25-003 plan U5 (R3): align this branch with
+            // the supervisor `classify_slot_result` truth table —
+            // empty-success is `empty_worker_result` (Failed), not a
+            // result.
+            if success && events.is_empty() {
+                tracker.record_failure(
+                    wave_id,
+                    index,
+                    ralph_core::supervisor::worker_outcome::REASON_EMPTY_WORKER_RESULT.into(),
+                    duration,
+                );
+            } else if success || !events.is_empty() {
                 let proto_events: Vec<ralph_proto::Event> =
                     events.into_iter().map(ralph_proto::Event::from).collect();
                 tracker.record_result(wave_id, index, proto_events);
