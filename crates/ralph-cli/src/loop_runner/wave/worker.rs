@@ -280,59 +280,8 @@ pub async fn run_wave_worker_pty(
     // U6/U7/U8: choose the execution path.
     // Legacy path (idle disabled): single-layer tokio::time::timeout.
     // Dual-clock path (idle enabled): tokio::select! deadline-driven loop.
-    let timed_out = if lease_cfg.is_none() {
-        // ── Legacy single-clock path ──────────────────────────────────
-        // This must be bit-for-bit identical to the pre-U6 behaviour so
-        // that `partial_timeout_events_visible` and the S2 regression pin
-        // stay green.
-        let mut line_count: u64 = 0;
-        let stream_result = async {
-            while let Some(line) = line_rx.recv().await {
-                line_count += 1;
-                if line_count == 1 {
-                    info!(
-                        worker = index,
-                        line_len = line.len(),
-                        ?output_format,
-                        "Wave worker: first stdout line received"
-                    );
-                }
-                if let Some(delta) = extract_readable_delta(&line, output_format) {
-                    if let Some(ref rpc_tx) = worker_rpc_tx {
-                        let _ = rpc_tx.try_send(RpcEvent::WaveWorkerTextDelta {
-                            worker_index: index,
-                            delta: delta.clone(),
-                        });
-                    }
-                    if let Some(ref state) = worker_tui_state {
-                        let tui_lines = ralph_tui::text_to_lines(&delta);
-                        push_to_wave_worker_buffer(state, index as usize, &tui_lines);
-                    }
-                }
-            }
-            Ok::<_, std::io::Error>(())
-        };
-
-        match tokio::time::timeout(wave_timeout, stream_result).await {
-            Ok(result) => {
-                if let Err(e) = result {
-                    warn!(error = %e, worker = index, "Wave worker I/O error");
-                }
-                false
-            }
-            Err(_) => {
-                warn!(
-                    timeout_secs = wave_timeout.as_secs(),
-                    worker = index,
-                    "Wave worker timeout, killing process"
-                );
-                let _ = child.kill();
-                true
-            }
-        }
-    } else {
+    let timed_out = if let Some(cfg) = lease_cfg {
         // ── Dual-clock path (U6/U7/U8) ────────────────────────────────
-        let cfg = lease_cfg.unwrap();
         let mut lease_state = super::heartbeat::LeaseState::fresh(0);
         let hard_deadline = start + wave_timeout;
 
@@ -517,6 +466,56 @@ pub async fn run_wave_worker_pty(
         final_weak_count = lease_state.weak_count;
 
         timed_out
+    } else {
+        // ── Legacy single-clock path ──────────────────────────────────
+        // This must be bit-for-bit identical to the pre-U6 behaviour so
+        // that `partial_timeout_events_visible` and the S2 regression pin
+        // stay green.
+        let mut line_count: u64 = 0;
+        let stream_result = async {
+            while let Some(line) = line_rx.recv().await {
+                line_count += 1;
+                if line_count == 1 {
+                    info!(
+                        worker = index,
+                        line_len = line.len(),
+                        ?output_format,
+                        "Wave worker: first stdout line received"
+                    );
+                }
+                if let Some(delta) = extract_readable_delta(&line, output_format) {
+                    if let Some(ref rpc_tx) = worker_rpc_tx {
+                        let _ = rpc_tx.try_send(RpcEvent::WaveWorkerTextDelta {
+                            worker_index: index,
+                            delta: delta.clone(),
+                        });
+                    }
+                    if let Some(ref state) = worker_tui_state {
+                        let tui_lines = ralph_tui::text_to_lines(&delta);
+                        push_to_wave_worker_buffer(state, index as usize, &tui_lines);
+                    }
+                }
+            }
+            Ok::<_, std::io::Error>(())
+        };
+
+        match tokio::time::timeout(wave_timeout, stream_result).await {
+            Ok(result) => {
+                if let Err(e) = result {
+                    warn!(error = %e, worker = index, "Wave worker I/O error");
+                }
+                false
+            }
+            Err(_) => {
+                warn!(
+                    timeout_secs = wave_timeout.as_secs(),
+                    worker = index,
+                    "Wave worker timeout, killing process"
+                );
+                let _ = child.kill();
+                true
+            }
+        }
     };
 
     let (status, _) = tokio::task::spawn_blocking(move || {
