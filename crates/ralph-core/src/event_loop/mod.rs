@@ -755,7 +755,7 @@ fn minimal_flow_declaration_yaml() -> &'static str {
 /// Presets without `mechanism.flow` (hat-only linear chains such as
 /// `ce-executor-pipeline`) skip flow-step gating; routing is driven by
 /// hat triggers/publishes plus `event_policy`.
-fn load_opt_in_flow_declaration(
+pub fn load_opt_in_flow_declaration(
     config: &crate::config::RalphConfig,
 ) -> Option<crate::event_loop::flow_declaration::FlowDeclaration> {
     use crate::event_loop::flow_declaration::FlowDeclaration;
@@ -14640,6 +14640,29 @@ pub(crate) fn advance_plan_step(
     steps.get(idx + 1).map(|s| s.id.clone())
 }
 
+
+/// 2026-07-26-004 plan U7 (R7 / R8): recover the current flow step by
+/// folding the SAME [`advance_plan_step`] authority over a sequence of
+/// accepted topics, starting from [`initial_current_plan_step`].
+///
+/// This is the single recoverable source of truth the EventLoop restart
+/// path, JSONL replay, and CLI `--policy-check` MUST share so none of
+/// them silently re-derives the current step from the flow's first step
+/// (the primary-20260726 `flow_unknown_emit` after `scope.ready`). The
+/// resident EventLoop advances `current_plan_step` incrementally as it
+/// ingests events; a separate process (CLI policy-check) or a restart
+/// rebuilds the identical value by replaying the accepted topic sequence
+/// through this fold.
+pub fn recover_current_plan_step(config: &RalphConfig, accepted_topics: &[&str]) -> String {
+    let mut current = initial_current_plan_step(config);
+    for topic in accepted_topics {
+        if let Some(next) = advance_plan_step(config, &current, topic) {
+            current = next;
+        }
+    }
+    current
+}
+
 // 2026-06-28 plan U4: tests for the plan-mode current_step
 // state machine helpers. These run without spinning up the
 // full EventLoop — they exercise the helper directly and
@@ -14863,6 +14886,81 @@ mod u4_current_plan_step_tests {
             advance_plan_step(&cfg, &initial, "scope.ready"),
             Some("review_wave".to_string())
         );
+    }
+
+
+    /// 2026-07-26-004 plan U7 (R7 / R8): `recover_current_plan_step`
+    /// rebuilds the SAME current step a resident EventLoop reaches
+    /// incrementally, by folding the single `advance_plan_step`
+    /// authority over the accepted topic sequence. A restart / replay /
+    /// CLI policy-check that calls this never re-derives from the flow's
+    /// first step independently (the primary-20260726 flow drift).
+    #[test]
+    fn u7_recover_current_plan_step_matches_incremental_advance() {
+        let mk = |id: &str,
+                  allowed: Vec<&str>,
+                  on: Option<&str>,
+                  on_any_of: Vec<&str>|
+         -> FlowStepConfig {
+            FlowStepConfig {
+                id: id.to_string(),
+                kind: None,
+                allowed_emits: allowed.into_iter().map(String::from).collect(),
+                terminal_when: None,
+                on_partial: std::collections::BTreeMap::new(),
+                runs: None,
+                on: on.map(String::from),
+                on_any_of: on_any_of.into_iter().map(String::from).collect(),
+            }
+        };
+        let mut cfg = RalphConfig::default();
+        cfg.event_loop = EventLoopConfig {
+            mechanism: Some(MechanismConfig {
+                flow: Some(FlowDeclarationConfig {
+                    flow_type: "declared".to_string(),
+                    version: 1,
+                    terminal_emits: vec!["LOOP_COMPLETE".to_string()],
+                    steps: vec![
+                        mk("scope_freeze", vec!["scope.ready", "scope.blocked"], None, vec![]),
+                        mk(
+                            "review_wave",
+                            vec!["review.unit.done", "review.wave.failed"],
+                            Some("scope.ready"),
+                            vec![],
+                        ),
+                        mk(
+                            "finalize",
+                            vec!["LOOP_COMPLETE"],
+                            None,
+                            vec!["scope.blocked", "review.wave.failed"],
+                        ),
+                    ],
+                    ..FlowDeclarationConfig::default()
+                }),
+                phase_authority: None,
+            }),
+            ..EventLoopConfig::default()
+        };
+
+        // No events → first step.
+        assert_eq!(recover_current_plan_step(&cfg, &[]), "scope_freeze");
+        // After scope.ready → review_wave (matches incremental advance).
+        assert_eq!(recover_current_plan_step(&cfg, &["scope.ready"]), "review_wave");
+        // review.unit.done is a non-transition → stays review_wave.
+        assert_eq!(
+            recover_current_plan_step(&cfg, &["scope.ready", "review.unit.done"]),
+            "review_wave"
+        );
+        // Branch: review.wave.failed → finalize.
+        assert_eq!(
+            recover_current_plan_step(&cfg, &["scope.ready", "review.wave.failed"]),
+            "finalize"
+        );
+        // Recovery is deterministic: replaying the same sequence twice
+        // yields the same step the resident loop holds.
+        let seq = ["scope.ready", "review.unit.done", "review.unit.done"];
+        assert_eq!(recover_current_plan_step(&cfg, &seq), "review_wave");
+        assert_eq!(recover_current_plan_step(&cfg, &seq), "review_wave");
     }
 
     // 2026-07-24-005 plan U2 (R2 / R3 / S1 / S6): supervisor

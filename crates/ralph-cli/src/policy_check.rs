@@ -1021,7 +1021,84 @@ pub fn run_policy_check_unified(
         return Ok(rej);
     }
 
+    // 2026-07-26-004 plan U7 (R7 / S7): enforce the SAME flow-step
+    // scope the resident EventLoop applies, using the single recovered
+    // current-step authority (`recover_current_plan_step` folded over
+    // the replayed ledger). Before this, `--policy-check` evaluated the
+    // topic against the flow's first step while the loop had advanced —
+    // the primary-20260726 `flow_unknown_emit` after `scope.ready`.
+    if let Some(cfg) = config.as_ref()
+        && let Some(reason_code) =
+            check_cli_flow_step_scope(cfg, &workspace_root, topic, hat, payload)
+    {
+        let mut rej = final_report;
+        rej.accepted = false;
+        rej.reason_codes.push(reason_code);
+        return Ok(rej);
+    }
+
     Ok(final_report)
+}
+
+
+/// 2026-07-26-004 plan U7 (R7 / S7): run the resident EventLoop's
+/// `FlowStepScopeStage` against a CLI emit / `--policy-check` candidate,
+/// using the current flow step recovered from the replayed main ledger
+/// via the single [`recover_current_plan_step`] authority. Returns
+/// `Some(reason_code)` when the topic is not allowed at the recovered
+/// step (mirroring the loop's `flow_unknown_emit` / `flow_step_undeclared`),
+/// `None` when there is no flow declaration or the topic is admitted.
+fn check_cli_flow_step_scope(
+    config: &ralph_core::config::RalphConfig,
+    workspace_root: &Path,
+    topic: &str,
+    hat: Option<&str>,
+    payload: Option<&str>,
+) -> Option<String> {
+    use ralph_core::event_loop::load_opt_in_flow_declaration;
+    use ralph_core::event_loop::recover_current_plan_step;
+    use ralph_core::event_loop::stage_pipeline::{EmitStage, FlowStep, StageContext};
+    use ralph_core::event_loop::stages::flow_step_scope_stage::FlowStepScopeStage;
+
+    // No declared flow → flow-step gating is skipped (hat-only presets).
+    let flow = load_opt_in_flow_declaration(config)?;
+
+    // Recover the current step by folding the single authority over the
+    // replayed ledger topics — identical to what the resident EventLoop
+    // holds after ingesting the same events.
+    let topics = read_main_ledger_topics(workspace_root);
+    let topic_refs: Vec<&str> = topics.iter().map(|s| s.as_str()).collect();
+    let current = recover_current_plan_step(config, &topic_refs);
+    if current.is_empty() {
+        return None;
+    }
+
+    let stage = FlowStepScopeStage::new(flow);
+    let mut repair_states = std::collections::HashMap::new();
+    let mut ctx = StageContext::new(FlowStep::new(current), "cli-policy-check", 0, &mut repair_states);
+    let mut event = ralph_proto::Event::new(topic, payload.unwrap_or(""));
+    if let Some(h) = hat {
+        event = event.with_source(h);
+    }
+    match stage.check(&mut ctx, &event) {
+        Ok(()) => None,
+        Err(reject) => Some(reject.reason_code),
+    }
+}
+
+/// Read the `topic` field of every JSONL line in the loop's main ledger
+/// (`.ralph/events.jsonl`), in order. Malformed lines are skipped. Used
+/// by [`check_cli_flow_step_scope`] to recover the current flow step.
+fn read_main_ledger_topics(workspace_root: &Path) -> Vec<String> {
+    let path = workspace_root.join(".ralph/events.jsonl");
+    let Ok(contents) = std::fs::read_to_string(&path) else {
+        return Vec::new();
+    };
+    contents
+        .lines()
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .filter_map(|v| v.get("topic").and_then(|t| t.as_str()).map(|s| s.to_string()))
+        .collect()
 }
 
 /// 2026-06-28-002 U7: append a `repair_dispatch` envelope to
@@ -3018,6 +3095,90 @@ event_loop:
         );
         let cfg: RalphConfig = serde_yaml::from_str(&yaml).unwrap();
         cfg.event_loop.event_policy.unwrap()
+    }
+
+
+    /// 2026-07-26-004 plan U7 (R7 / S7 / S8): the CLI `--policy-check`
+    /// flow-step decision MUST agree with the resident EventLoop. With no
+    /// ledger the recovered step is the first step (`scope_freeze`), so
+    /// `review.unit.done` is rejected as `flow_unknown_emit`; once
+    /// `scope.ready` lands in the ledger the recovered step is
+    /// `review_wave` and the same emit is admitted — no silent fall-back
+    /// to the first step (the primary-20260726 flow drift).
+    #[test]
+    fn u7_cli_flow_step_scope_agrees_with_recovered_step() {
+        use ralph_core::config::{
+            EventLoopConfig, FlowDeclarationConfig, FlowStepConfig, MechanismConfig, RalphConfig,
+        };
+        let mk = |id: &str,
+                  allowed: Vec<&str>,
+                  on: Option<&str>,
+                  on_any_of: Vec<&str>|
+         -> FlowStepConfig {
+            FlowStepConfig {
+                id: id.to_string(),
+                kind: None,
+                allowed_emits: allowed.into_iter().map(String::from).collect(),
+                terminal_when: None,
+                on_partial: std::collections::BTreeMap::new(),
+                runs: None,
+                on: on.map(String::from),
+                on_any_of: on_any_of.into_iter().map(String::from).collect(),
+            }
+        };
+        let mut cfg = RalphConfig::default();
+        cfg.event_loop = EventLoopConfig {
+            mechanism: Some(MechanismConfig {
+                flow: Some(FlowDeclarationConfig {
+                    flow_type: "declared".to_string(),
+                    version: 1,
+                    terminal_emits: vec!["LOOP_COMPLETE".to_string()],
+                    steps: vec![
+                        mk("scope_freeze", vec!["scope.ready"], None, vec![]),
+                        mk("review_wave", vec!["review.unit.done"], Some("scope.ready"), vec![]),
+                    ],
+                    repair_budget: 3,
+                    enforce_schema: "hard".to_string(),
+                    state_idempotency: "required".to_string(),
+                }),
+                phase_authority: None,
+            }),
+            ..EventLoopConfig::default()
+        };
+
+        let ws = tempfile::tempdir().expect("tempdir");
+        // Before scope.ready: review.unit.done at scope_freeze → rejected.
+        let reject = check_cli_flow_step_scope(
+            &cfg,
+            ws.path(),
+            "review.unit.done",
+            Some("review-worker"),
+            Some("{}"),
+        );
+        assert_eq!(
+            reject.as_deref(),
+            Some("flow_unknown_emit"),
+            "review.unit.done at the first step must be flow_unknown_emit"
+        );
+
+        // Land scope.ready in the ledger → recovered step = review_wave.
+        std::fs::create_dir_all(ws.path().join(".ralph")).expect("mkdir .ralph");
+        std::fs::write(ws.path().join(".ralph/events.jsonl"), "{\"topic\":\"scope.ready\"}\n")
+            .expect("write ledger");
+
+        // After scope.ready: the SAME emit is admitted (CLI agrees with
+        // the recovered review_wave step the EventLoop would hold).
+        let admit = check_cli_flow_step_scope(
+            &cfg,
+            ws.path(),
+            "review.unit.done",
+            Some("review-worker"),
+            Some("{}"),
+        );
+        assert_eq!(
+            admit, None,
+            "CLI policy-check must agree with the recovered review_wave step"
+        );
     }
 
     #[test]
