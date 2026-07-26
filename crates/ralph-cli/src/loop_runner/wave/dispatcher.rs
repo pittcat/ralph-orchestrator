@@ -2780,6 +2780,14 @@ fn build_review_done_hints(
     }
 }
 
+/// 2026-07-26-004 plan U5 (S5 / AE3 / KTD4): the producer identity
+/// stamped on runtime coordination events (`*.wave.complete` /
+/// `*.wave.failed`). The orchestrator — not the consumer hat — produces
+/// these; `ralph` is the builtin runtime pseudo-hat the origin guard
+/// already recognises as a control producer. The consumer hat is carried
+/// separately in the event's `hat` field (routing / topic subscription).
+const COORD_SYSTEM_PRODUCER: &str = "ralph";
+
 /// U6: append a `system_injected: true` coordination event
 /// (`*.wave.complete` / `*.wave.failed`) to the loop's main ledger
 /// WITHOUT advancing the reader cursor. The caller's post-wave
@@ -2843,12 +2851,20 @@ fn append_supervisor_coord_event(
     } else {
         "ralph"
     };
+    // 2026-07-26-004 plan U5 (S5 / AE3 / KTD4): separate the PRODUCER
+    // from the CONSUMER. A runtime coordination event is produced by
+    // the orchestrator (system producer `ralph`), NOT by the consumer
+    // hat. The consumer (finalizer / integrator / synthesizer) is
+    // expressed by `hat` (which the 2026-07-26-003 routing fix and the
+    // preset's topic subscription rely on) — keeping `hat` unchanged
+    // preserves that routing while `source` now truthfully names the
+    // runtime as producer. The two answers no longer reuse one field.
     let record = serde_json::json!({
         "topic": topic,
         "payload": payload,
         "ts": chrono::Utc::now().to_rfc3339(),
         "hat": hat_attribution,
-        "source": hat_attribution,
+        "source": COORD_SYSTEM_PRODUCER,
         "system_injected": true,
     });
     let result = (|| -> std::io::Result<()> {
@@ -6346,9 +6362,16 @@ hats: {}
             record["hat"], "finalizer",
             "RED: review.wave.failed must route to finalizer, not review-synthesizer"
         );
+        // 2026-07-26-004 plan U5 (S5 / AE3): producer (source) is the
+        // runtime system identity, NOT the consumer hat. The consumer
+        // (finalizer) is carried in `hat` for routing/subscription.
         assert_eq!(
-            record["source"], "finalizer",
-            "RED: source field must mirror the hat attribution"
+            record["source"], "ralph",
+            "U5: producer must be the runtime system identity, not the consumer hat"
+        );
+        assert_ne!(
+            record["source"], record["hat"],
+            "U5: producer and consumer must not reuse the same field"
         );
         assert_eq!(record["system_injected"], true);
     }
@@ -6705,9 +6728,11 @@ hats: {}
         let record: serde_json::Value = serde_json::from_str(&line).expect("json");
         assert_eq!(
             record["hat"], "review-synthesizer",
-            "review.wave.complete MUST stay on review-synthesizer"
+            "review.wave.complete MUST stay on review-synthesizer (consumer/routing)"
         );
-        assert_eq!(record["source"], "review-synthesizer");
+        // 2026-07-26-004 plan U5 (S5 / AE3): producer is the runtime
+        // system identity, separate from the consumer hat.
+        assert_eq!(record["source"], "ralph");
     }
 
     // -------------------------------------------------------------------
@@ -7748,6 +7773,108 @@ hats: {}
             count("review.unit.done"),
             1,
             "salvaged review.unit.done must not be double-written on replay"
+        );
+    }
+
+
+    /// U5 (plan 2026-07-26-004, S4 / AE2): a worker's terminal event
+    /// must keep its WORKER producer across the fan-in merge — never
+    /// inherit the current `review-dispatcher` activation. The trusted
+    /// merge seam normalises the salvaged `review.unit.done` to
+    /// `review-worker` even when the in-flight event carried a missing
+    /// or spoofed source, so a later replay during the dispatcher
+    /// activation cannot mis-attribute it (no `isolated_scope_violation`
+    /// against `review-dispatcher`).
+    #[test]
+    fn u5_salvaged_worker_event_keeps_worker_provenance() {
+        use ralph_core::config::HatConfig;
+        use ralph_core::supervisor::InMemoryCoordinatorBridge;
+        use ralph_core::supervisor::SupervisorBridge;
+        use ralph_core::supervisor::{SupervisorStore, WaveKind};
+        use std::io::BufRead;
+
+        let workspace = tempfile::TempDir::new().expect("temp workspace");
+        let ralph_dir = workspace.path().join(".ralph");
+        std::fs::create_dir_all(&ralph_dir).expect("mkdir .ralph");
+        let main_events_file = ralph_dir.join("events.jsonl");
+
+        let store = std::sync::Arc::new(ralph_core::supervisor::InMemorySupervisorStore::new());
+        let bridge = InMemoryCoordinatorBridge::from_store(store.clone());
+        let store_wave_id = bridge
+            .register_wave_if_absent(WaveKind::Review, "w-u5-prov", 2)
+            .unwrap();
+        store.record_slot_result(&store_wave_id, 0, "hash-s0", 1).unwrap();
+        store
+            .record_slot_failure(
+                &store_wave_id,
+                1,
+                ralph_core::supervisor::worker_outcome::REASON_WORKER_TIMEOUT,
+            )
+            .unwrap();
+
+        let mut assigned = std::collections::HashMap::new();
+        assigned.insert(0u32, "correctness".to_string());
+        assigned.insert(1u32, "testing".to_string());
+        // Slot 0's event carries a SPOOFED source (review-dispatcher) to
+        // prove the merge seam normalises provenance to the real worker.
+        let completed = ralph_core::CompletedWave {
+            wave_id: "w-u5-prov".to_string(),
+            wave_total: 2,
+            results: vec![ralph_core::WaveResult {
+                index: 0,
+                events: vec![
+                    ralph_proto::Event::new(
+                        "review.unit.done",
+                        serde_json::json!({"dimension":"correctness"}).to_string(),
+                    )
+                    .with_source("review-dispatcher")
+                    .with_wave("w-u5-prov".to_string(), 0, 2),
+                ],
+            }],
+            failures: vec![ralph_core::WaveFailure {
+                index: 1,
+                error: "worker_timeout".to_string(),
+                duration: std::time::Duration::from_millis(1),
+                ..ralph_core::WaveFailure::default()
+            }],
+            duration: std::time::Duration::from_millis(1),
+            partial: false,
+            expected_source_hat: None,
+            assigned_dimensions: assigned,
+            dimension_retry_counts: std::collections::HashMap::new(),
+            worker_events: Vec::new(),
+        };
+        let detected = ralph_core::DetectedWave {
+            wave_id: "w-u5-prov".to_string(),
+            target_hat: HatId::new("review-dispatcher"),
+            hat_config: HatConfig {
+                name: "review-dispatcher".to_string(),
+                ..HatConfig::default()
+            },
+            events: vec![core_event("review.unit.ready", "payload-0")],
+            total: 2,
+            partial: false,
+            consumer_aggregate_timeout: None,
+        };
+
+        let bridge_arc: Arc<dyn ralph_core::supervisor::SupervisorBridge> = Arc::new(bridge);
+        let outcome =
+            run_supervisor_fan_in(&bridge_arc, &completed, &detected, &main_events_file, 60);
+        assert!(matches!(outcome, SupervisorFanInOutcome::InjectedFailed));
+
+        let done = std::io::BufReader::new(std::fs::File::open(&main_events_file).expect("main"))
+            .lines()
+            .filter_map(|l| l.ok())
+            .filter_map(|l| serde_json::from_str::<serde_json::Value>(&l).ok())
+            .find(|r| r["topic"] == "review.unit.done")
+            .expect("the salvaged review.unit.done must be in main");
+        assert_eq!(
+            done["hat"], "review-worker",
+            "salvaged worker event must keep worker producer (hat)"
+        );
+        assert_eq!(
+            done["source"], "review-worker",
+            "salvaged worker event must keep worker producer (source), not the dispatcher"
         );
     }
 
