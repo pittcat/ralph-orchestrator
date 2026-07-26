@@ -1,0 +1,14 @@
+-- 2026-07-26-004 plan U4 follow-up (R3 / P0-1): salvage-merge
+-- completion flag on the `waves` row. Distinct from the
+-- `merged_to_events` column (which tracks coord-event
+-- injection). The failed fan-in path requires the dispatcher
+-- to first append Completed slots' business events to main,
+-- then mark `salvage_merged=1` here, and only then call
+-- `fail_wave`. Without this column the coord-injection latch
+-- (`merged_to_events`) flips BEFORE the salvage write lands
+-- and a crash between them orphans the merge.
+--
+-- Nullable INTEGER (0 default / NULL pre-v5): legacy v4 rows
+-- carry NULL and MUST be treated as "salvage not yet merged"
+-- (fail-closed).
+ALTER TABLE waves ADD COLUMN salvage_merged INTEGER NOT NULL DEFAULT 0;

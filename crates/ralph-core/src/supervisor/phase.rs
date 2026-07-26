@@ -270,6 +270,7 @@ mod tests {
             in_flight_count: in_flight,
             cancel_requested: cancel,
             merged_to_events: false,
+            salvage_merged: false,
             started_at: std::time::SystemTime::UNIX_EPOCH,
             slots,
         };
@@ -459,6 +460,7 @@ mod tests {
             in_flight_count: 0,
             cancel_requested: false,
             merged_to_events: false,
+            salvage_merged: false,
             // U3: pop the slot list. The failed slot is
             // index 1; the completed + pending ones do NOT
             // appear in `blocking_slot_indices`.
@@ -494,6 +496,7 @@ mod tests {
             in_flight_count: 0,
             cancel_requested: false,
             merged_to_events: false,
+            salvage_merged: false,
             started_at: std::time::SystemTime::UNIX_EPOCH,
             slots: vec![
                 (0, SlotStatus::Failed),
@@ -520,6 +523,7 @@ mod tests {
             in_flight_count: 0,
             cancel_requested: false,
             merged_to_events: false,
+            salvage_merged: false,
             started_at: std::time::SystemTime::UNIX_EPOCH,
             slots: vec![(0, SlotStatus::Completed), (1, SlotStatus::Completed)],
         };
@@ -581,6 +585,7 @@ mod tests {
             in_flight_count: 2,
             cancel_requested: false,
             merged_to_events: false,
+            salvage_merged: false,
             started_at: std::time::SystemTime::UNIX_EPOCH,
             slots: Vec::new(),
         };
@@ -621,6 +626,7 @@ mod tests {
             in_flight_count: 1,
             cancel_requested: false,
             merged_to_events: false,
+            salvage_merged: false,
             started_at: std::time::SystemTime::UNIX_EPOCH,
             slots: vec![(0, SlotStatus::Dispatched), (1, SlotStatus::Pending)],
         };
@@ -647,6 +653,7 @@ mod tests {
             in_flight_count: 0,
             cancel_requested: false,
             merged_to_events: false,
+            salvage_merged: false,
             started_at: std::time::SystemTime::UNIX_EPOCH,
             slots: vec![
                 (0, SlotStatus::Pending),
@@ -677,6 +684,7 @@ mod tests {
             in_flight_count: 0,
             cancel_requested: false,
             merged_to_events: false,
+            salvage_merged: false,
             started_at: std::time::SystemTime::UNIX_EPOCH,
             slots: vec![
                 (0, SlotStatus::Pending),
@@ -708,6 +716,7 @@ mod tests {
             in_flight_count: 0,
             cancel_requested: false,
             merged_to_events: false,
+            salvage_merged: false,
             started_at: std::time::SystemTime::UNIX_EPOCH,
             slots: vec![(0, SlotStatus::Completed), (1, SlotStatus::Failed)],
         };

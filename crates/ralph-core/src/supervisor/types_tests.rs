@@ -135,6 +135,7 @@ mod tests {
             in_flight_count: 0,
             cancel_requested: false,
             merged_to_events: false,
+            salvage_merged: false,
             started_at: SystemTime::UNIX_EPOCH,
             slots: vec![(0, SlotStatus::Completed), (1, SlotStatus::Failed)],
         };

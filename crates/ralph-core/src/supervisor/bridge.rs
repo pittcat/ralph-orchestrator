@@ -159,6 +159,22 @@ pub trait SupervisorBridge: std::fmt::Debug + Send + Sync {
     /// a store override this.
     fn fan_in_status(&self, wave_id: &str) -> Result<WaveSnapshot, BridgeError>;
 
+    /// Plan 004 R3 / P0-1: bridge-level convenience for the
+    /// dispatcher's failed-fan-in salvage commit. Bridges that
+    /// own a `SupervisorStore` delegate to it; the default impl
+    /// returns `Unsupported` so mock bridges in tests stay
+    /// compilable. The dispatcher's failed-path arms call this
+    /// AFTER `merge_completed_review_slots_to_main` lands the
+    /// Completed-slots business events on main; the coordinator's
+    /// `fail_wave` then refuses to inject `*.wave.failed` until
+    /// the salvage mark is observed.
+    fn mark_salvage_merged(&self, wave_id: &str) -> Result<(), BridgeError> {
+        let _ = wave_id;
+        Err(BridgeError::Store(
+            "mark_salvage_merged: bridge does not own a store".to_string(),
+        ))
+    }
+
     /// 2026-07-03-001 supervisor real-wiring: register a wave
     /// in the supervisor store if it is not already present.
     /// Idempotent — re-registering the same `wave_id` is a
@@ -429,6 +445,12 @@ impl SupervisorBridge for InMemoryCoordinatorBridge {
     fn fan_in_status(&self, wave_id: &str) -> Result<WaveSnapshot, BridgeError> {
         self.store
             .fan_in_status(wave_id)
+            .map_err(|err| BridgeError::Store(err.to_string()))
+    }
+
+    fn mark_salvage_merged(&self, wave_id: &str) -> Result<(), BridgeError> {
+        self.store
+            .mark_salvage_merged(wave_id)
             .map_err(|err| BridgeError::Store(err.to_string()))
     }
 

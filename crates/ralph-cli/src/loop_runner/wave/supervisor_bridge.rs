@@ -406,6 +406,12 @@ impl SupervisorBridge for CoordinatorSupervisorBridge {
             .map_err(|err| BridgeError::Store(err.to_string()))
     }
 
+    fn mark_salvage_merged(&self, wave_id: &str) -> Result<(), BridgeError> {
+        self.store
+            .mark_salvage_merged(wave_id)
+            .map_err(|err| BridgeError::Store(err.to_string()))
+    }
+
     fn register_wave_if_absent(
         &self,
         kind: WaveKind,

@@ -206,6 +206,18 @@ pub struct WaveSnapshot {
     pub in_flight_count: u32,
     pub cancel_requested: bool,
     pub merged_to_events: bool,
+    /// Plan 004 R3 / P0-1: salvage-merge phase flag, distinct
+    /// from `merged_to_events` (which records the coord-event
+    /// injection). On the failed fan-in path the dispatcher
+    /// must first append the Completed slots' business events
+    /// to main, then call `mark_salvage_merged` on the store,
+    /// and only then call `fail_wave`. Without this guard, a
+    /// crash between `fail_wave` returning `InjectedFailed` and
+    /// the dispatcher-layer merge would orphan the salvage
+    /// write — the latch would say "already done" and the
+    /// merge would never retry.
+    #[serde(default)]
+    pub salvage_merged: bool,
     /// 2026-07-03-001 plan U6: wall-clock instant the wave
     /// was registered. Recovery (U11) uses this to decide
     /// the `Failed` timeout verdict; both stores populate
@@ -585,6 +597,18 @@ pub trait SupervisorStore: fmt::Debug + Send + Sync {
     /// not double-inject `*.wave.complete`. Idempotent: repeated
     /// calls return `Ok(())`.
     fn mark_merge_to_events(&self, wave_id: &str) -> SupervisorStoreResult<()>;
+
+    /// Plan 004 R3 / P0-1: mark the failed-fan-in salvage merge
+    /// as committed. Distinct from `mark_merge_to_events` —
+    /// that flag tracks the coord-event injection, this one
+    /// tracks the dispatcher-layer Completed-slots business
+    /// event append that precedes it. Implementations MUST be
+    /// idempotent and MUST survive restart (Memory + rusqlite).
+    /// Default no-op for stores that do not persist a salvage
+    /// row; production stores (memory + rusqlite) override.
+    fn mark_salvage_merged(&self, _wave_id: &str) -> SupervisorStoreResult<()> {
+        Ok(())
+    }
 
     /// List every wave id known to the store, including Done/Failed.
     /// Used by the terminal cleanup finalizer (KTD8 / R13) so

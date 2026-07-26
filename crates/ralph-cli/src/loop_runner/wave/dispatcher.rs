@@ -2341,6 +2341,25 @@ pub(crate) fn run_supervisor_fan_in(
             // covers Review only (R7).
             if matches!(wave_kind, ralph_core::supervisor::WaveKind::Review) {
                 merge_completed_review_slots_to_main(main_events_file, completed);
+                // Plan 004 R3 / P0-1: commit the salvage merge
+                // BEFORE `fail_wave` latches the coord-event
+                // injection. Without this `mark_salvage_merged`
+                // the coordinator's new pre-check refuses to
+                // inject `*.wave.failed` because the salvage
+                // write has not yet been persisted; the dispatcher
+                // re-ticks after marking and the coord-event lands
+                // exactly once. The mark is idempotent across
+                // replays and restarts (Memory + rusqlite stores
+                // both honour it).
+                if let Err(err) = bridge
+                    .mark_salvage_merged(&store_wave_id)
+                {
+                    warn!(
+                        wave_id = %store_wave_id,
+                        error = %err,
+                        "P0-1: mark_salvage_merged failed; next tick will retry",
+                    );
+                }
             }
             // 2026-07-26-002 plan U5 (R5 / KTD6) + 2026-07-26-003
             // plan U4 (KTD5): the merged function takes BOTH
@@ -2373,6 +2392,19 @@ pub(crate) fn run_supervisor_fan_in(
         }
         ralph_core::supervisor::CoordinatorAction::AlreadyDone => {
             SupervisorFanInOutcome::AlreadyDone
+        }
+        ralph_core::supervisor::CoordinatorAction::SalvageNotMerged => {
+            // Plan 004 R3 / P0-1: the coordinator refused to
+            // latch the coord-event injection because the
+            // dispatcher has not yet committed the salvage
+            // merge. Surface as ContinueCollect so the next
+            // tick re-runs the merge seam, marks
+            // `mark_salvage_merged`, and re-invokes the
+            // coordinator. The recovery tick observes the new
+            // `salvage_merged=true` and either latches
+            // (AlreadyDone on subsequent ticks) or injects the
+            // coord event exactly once.
+            SupervisorFanInOutcome::ContinueCollect
         }
         ralph_core::supervisor::CoordinatorAction::ContinueCollect => {
             SupervisorFanInOutcome::ContinueCollect

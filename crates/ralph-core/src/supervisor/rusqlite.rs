@@ -903,7 +903,7 @@ impl SupervisorStore for RusqliteSupervisorStore {
         self.with_conn(|conn| {
             let wave = conn
                 .query_row(
-                    "SELECT wave_id, phase, expected_total, cancel_requested, merged_to_events, created_at
+                    "SELECT wave_id, phase, expected_total, cancel_requested, merged_to_events, salvage_merged, created_at
                      FROM waves WHERE wave_id = ?1",
                     [&wave_id],
                     |row| {
@@ -913,13 +913,14 @@ impl SupervisorStore for RusqliteSupervisorStore {
                             row.get::<_, i64>(2)? as u32,
                             row.get::<_, i64>(3)? != 0,
                             row.get::<_, i64>(4)? != 0,
-                            row.get::<_, i64>(5)?,
+                            row.get::<_, i64>(5)? != 0,
+                            row.get::<_, i64>(6)?,
                         ))
                     },
                 )
                 .optional()?
                 .ok_or_else(|| SupervisorStoreError::UnknownWave(wave_id.to_string()))?;
-            let (wave_id_row, phase_str, expected_total, cancel, merged, created_at_unix) = wave;
+            let (wave_id_row, phase_str, expected_total, cancel, merged, salvage_merged, created_at_unix) = wave;
             let phase = parse_phase(&phase_str)?;
             let kind = {
                 let kind_str: String = conn
@@ -1015,6 +1016,7 @@ impl SupervisorStore for RusqliteSupervisorStore {
                 in_flight_count: in_flight,
                 cancel_requested: cancel,
                 merged_to_events: merged,
+                salvage_merged,
                 started_at,
                 slots,
             })
@@ -1026,6 +1028,17 @@ impl SupervisorStore for RusqliteSupervisorStore {
             conn.execute(
                 "UPDATE waves SET merged_to_events = 1, updated_at = strftime('%s','now')
                  WHERE wave_id = ?1 AND merged_to_events = 0",
+                [&wave_id],
+            )?;
+            Ok(())
+        })
+    }
+
+    fn mark_salvage_merged(&self, wave_id: &str) -> SupervisorStoreResult<()> {
+        self.with_conn(|conn| {
+            conn.execute(
+                "UPDATE waves SET salvage_merged = 1, updated_at = strftime('%s','now')
+                 WHERE wave_id = ?1 AND salvage_merged = 0",
                 [&wave_id],
             )?;
             Ok(())

@@ -61,6 +61,15 @@ pub enum CoordinatorAction {
     },
     /// Merge failed; the wave stayed in `Collect` for recovery.
     MergeFailed { topic: String, error: String },
+    /// Plan 004 R3 / P0-1: the failed-fan-in path was reached
+    /// BEFORE the dispatcher committed the salvage merge. The
+    /// caller must run the merge seam, call `mark_salvage_merged`
+    /// on the store, and re-tick. This variant exists to refuse
+    /// the unsafe pre-merge injection that the pre-fix code
+    /// performed, and to give `ralph diagnose` a structured
+    /// signal that the loop needs another tick after the
+    /// salvage merge.
+    SalvageNotMerged,
 }
 
 /// Coordinator holds only trait objects; the in-memory and
@@ -211,30 +220,51 @@ impl SupervisorCoordinator {
     /// produce integrable events; their coord event still
     /// carries the `blocking_slots` payload.
     ///
-    /// U2 / F-002 / KTD-8: the coordinator owns the phase
-    /// verdict transition. We call `set_wave_phase(Failed)`
-    /// here so the wave's terminal state is recorded in the
-    /// store exactly once and AFTER all sibling slot rows
-    /// have settled. The store's `record_slot_failure` no
-    /// longer flips the phase — `evaluate_phase` decides
-    /// when `Failed` is correct (KTD-8 forbids partial =
-    /// fail until all slots are terminal).
+    /// Plan 004 R3 / P0-1: salvage-merge / coord-injection are
+    /// split into two persisted phases. `fail_wave` rejects
+    /// any caller that has not yet committed the dispatcher
+    /// salvage merge (`salvage_merged=false`) — closing the
+    /// crash window where the coord-injection latch
+    /// (`merged_to_events`) flipped before the salvage write
+    /// landed and orphaned the merge. On restart the recovery
+    /// path must observe `salvage_merged=true` to inject
+    /// `*.wave.failed`; otherwise the supervisor re-runs the
+    /// merge seam before completing the failed fan-in.
+    ///
+    /// The combined latch check is split as follows:
+    /// - `salvage_merged == false` → caller is unsafe; refuse
+    ///   with `SalvageNotMerged`. The dispatcher is responsible
+    ///   for committing the salvage before invoking us.
+    /// - `merged_to_events == true && salvage_merged == true`
+    ///   → fully latched, return `AlreadyDone`. A restart that
+    ///   observes both flags must NOT re-inject `*.wave.failed`.
+    /// - `merged_to_events == true && salvage_merged == false`
+    ///   is an invariant violation (the coord-event injection
+    ///   cannot precede the salvage merge); we treat it as a
+    ///   fail-closed refusal.
     fn fail_wave(
         &self,
         snapshot: &WaveSnapshot,
         reason: &FailedReason,
         blocking_slots: Vec<u32>,
     ) -> SupervisorStoreResult<CoordinatorAction> {
-        // 2026-07-26-004 plan U4 (S9 / R3 / KTD-6): idempotency latch,
-        // mirroring `merge_and_complete`. `evaluate_phase` is a pure
-        // function of the slot snapshot — it keeps returning `Failed`
-        // on every tick after the wave settles, so without this guard a
-        // replay / restart / repeated tick would re-inject `*.wave.failed`
-        // and re-run the dispatcher-layer salvage merge (double-write).
-        // Once latched, re-tick returns `AlreadyDone`. The wave PHASE
-        // (Failed here vs Done on the success path) still distinguishes
-        // the two outcomes — `merged_to_events` is the "terminal fan-in
-        // action already performed once" latch, not the outcome bit.
+        // Plan 004 R3 / P0-1: refuse when salvage has not
+        // been committed yet. Without this guard, the pre-fix
+        // `merged_to_events` latch flipped BEFORE the salvage
+        // write and a crash between them orphaned the merge.
+        if !snapshot.salvage_merged {
+            return Ok(CoordinatorAction::SalvageNotMerged);
+        }
+        // Plan 004 R3 / P0-1 (continued): coord-injection latch.
+        // Mirrors `merge_and_complete`. `evaluate_phase` is a
+        // pure function of the slot snapshot — it keeps returning
+        // `Failed` on every tick after the wave settles, so
+        // without this guard a replay / restart / repeated tick
+        // would re-inject `*.wave.failed`. Once latched,
+        // re-tick returns `AlreadyDone`. The wave PHASE (Failed
+        // here vs Done on the success path) still distinguishes
+        // the two outcomes — `merged_to_events` is the "coord
+        // event already injected" latch, not the outcome bit.
         if snapshot.merged_to_events {
             return Ok(CoordinatorAction::AlreadyDone);
         }
@@ -383,6 +413,8 @@ mod tests {
             let coord = SupervisorCoordinator::with_in_memory_sink(
                 store.clone() as Arc<dyn SupervisorStore>
             );
+            // Plan 004 R3 / P0-1: pre-commit salvage before tick.
+            store.mark_salvage_merged(&wave).unwrap();
             let inputs = PhaseInputs {
                 aggregate_timeout_secs: 60,
                 elapsed_secs: 0,
@@ -491,6 +523,12 @@ mod tests {
         // Slot 0 succeeds; slot 1 fails.
         store.record_slot_result(&wave, 0, "h0", 1).unwrap();
         store.record_slot_failure(&wave, 1, "boom").unwrap();
+        // Plan 004 R3 / P0-1: the dispatcher is responsible
+        // for committing the salvage merge before the
+        // coordinator's `fail_wave` latches the coord-event
+        // injection. U8 tests run the coordinator directly so
+        // they mark salvage here.
+        store.mark_salvage_merged(&wave).unwrap();
         let coord =
             SupervisorCoordinator::with_in_memory_sink(store.clone() as Arc<dyn SupervisorStore>);
         let action = coord
@@ -705,6 +743,8 @@ mod tests {
         // Now fail slot 1 (the pending sibling) and complete
         // the fan-in: phase must transition to Failed.
         store.record_slot_failure(&wave, 1, "boom").unwrap();
+        // Plan 004 R3 / P0-1: pre-commit salvage before tick.
+        store.mark_salvage_merged(&wave).unwrap();
         let coord =
             SupervisorCoordinator::with_in_memory_sink(store.clone() as Arc<dyn SupervisorStore>);
         let action = coord
@@ -756,6 +796,8 @@ mod tests {
             )
             .unwrap();
         store.cancel_wave(&wave).unwrap();
+        // Plan 004 R3 / P0-1: pre-commit salvage before tick.
+        store.mark_salvage_merged(&wave).unwrap();
         let coord =
             SupervisorCoordinator::with_in_memory_sink(store.clone() as Arc<dyn SupervisorStore>);
         let action = coord
@@ -796,6 +838,8 @@ mod tests {
         }
         let coord =
             SupervisorCoordinator::with_in_memory_sink(store.clone() as Arc<dyn SupervisorStore>);
+        // Plan 004 R3 / P0-1: pre-commit salvage before tick.
+        store.mark_salvage_merged(&wave).unwrap();
         let action = coord
             .tick(
                 &wave,
@@ -810,6 +854,153 @@ mod tests {
             CoordinatorAction::InjectedFailed { reason, .. } => assert_eq!(reason, "timeout"),
             other => panic!("expected InjectedFailed(timeout), got {other:?}"),
         }
+    }
+
+    /// Plan 004 R3 / P0-1 — fault injection: a failed fan-in
+    /// reached WITHOUT a prior `mark_salvage_merged` MUST be
+    /// refused (`SalvageNotMerged`) so the coord-injection
+    /// latch cannot flip before the salvage merge lands. This
+    /// pins the post-fix invariant that closes the crash
+    /// window where the salvage write could be lost between
+    /// `fail_wave` returning and the dispatcher-layer merge.
+    #[test]
+    fn p0_1_failed_fan_in_without_salvage_is_refused() {
+        let store = Arc::new(InMemorySupervisorStore::new());
+        let wave = store.register_wave("p01", WaveKind::Review, 2).unwrap();
+        // Slot 0 Completed with evidence; slot 1 Failed.
+        store.record_slot_result(&wave, 0, "h0", 1).unwrap();
+        store
+            .record_slot_terminal_evidence(
+                &wave,
+                0,
+                &crate::supervisor::TerminalEvidence::from_event(
+                    "review.unit.done",
+                    "{\"dimension\":\"correctness\"}",
+                ),
+            )
+            .unwrap();
+        store
+            .record_slot_failure(
+                &wave,
+                1,
+                crate::supervisor::worker_outcome::REASON_WORKER_TIMEOUT,
+            )
+            .unwrap();
+
+        let coord = SupervisorCoordinator::with_in_memory_sink(
+            store.clone() as Arc<dyn SupervisorStore>,
+        );
+        // No mark_salvage_merged — coordinator must refuse.
+        let action = coord
+            .tick(
+                &wave,
+                PhaseInputs {
+                    aggregate_timeout_secs: 60,
+                    elapsed_secs: 0,
+                    cancel_requested: false,
+                },
+            )
+            .unwrap();
+        assert!(
+            matches!(action, CoordinatorAction::SalvageNotMerged),
+            "expected SalvageNotMerged, got {action:?}",
+        );
+        // After refusal, merged_to_events stays false so the
+        // recovery path can mark salvage and re-tick.
+        let snap = store.fan_in_status(&wave).unwrap();
+        assert!(
+            !snap.merged_to_events,
+            "merged_to_events must NOT be latched after refusal",
+        );
+        assert!(
+            !snap.salvage_merged,
+            "salvage_merged must NOT be latched after refusal",
+        );
+
+        // Mark salvage and re-tick — coordinator now injects
+        // the failed coord event exactly once.
+        store.mark_salvage_merged(&wave).unwrap();
+        let action2 = coord
+            .tick(
+                &wave,
+                PhaseInputs {
+                    aggregate_timeout_secs: 60,
+                    elapsed_secs: 0,
+                    cancel_requested: false,
+                },
+            )
+            .unwrap();
+        assert!(
+            matches!(action2, CoordinatorAction::InjectedFailed { .. }),
+            "after mark_salvage_merged the second tick must InjectedFailed, got {action2:?}",
+        );
+        // Replay is AlreadyDone — restart-safe.
+        let replay = coord
+            .tick(
+                &wave,
+                PhaseInputs {
+                    aggregate_timeout_secs: 60,
+                    elapsed_secs: 0,
+                    cancel_requested: false,
+                },
+            )
+            .unwrap();
+        assert!(
+            matches!(replay, CoordinatorAction::AlreadyDone),
+            "replay must AlreadyDone, got {replay:?}",
+        );
+    }
+
+    /// Plan 004 R3 / P0-1 — restart simulation: drop the
+    /// coordinator mid-tick, rebuild from snapshot, and
+    /// confirm the new coordinator refuses to re-run the
+    /// salvage path (no business-event double-write) AND
+    /// does not re-inject the coord event after restart.
+    #[test]
+    fn p0_1_restart_after_coord_injection_is_no_op() {
+        let store = Arc::new(InMemorySupervisorStore::new());
+        let wave = store.register_wave("restart", WaveKind::Review, 1).unwrap();
+        store.record_slot_failure(&wave, 0, "boom").unwrap();
+        // Tick 1: mark salvage, inject failed.
+        store.mark_salvage_merged(&wave).unwrap();
+        let coord1 =
+            SupervisorCoordinator::with_in_memory_sink(store.clone() as Arc<dyn SupervisorStore>);
+        let action1 = coord1
+            .tick(
+                &wave,
+                PhaseInputs {
+                    aggregate_timeout_secs: 60,
+                    elapsed_secs: 0,
+                    cancel_requested: false,
+                },
+            )
+            .unwrap();
+        assert!(matches!(action1, CoordinatorAction::InjectedFailed { .. }));
+
+        // Simulate restart — drop the coordinator, observe
+        // the persisted store, build a fresh one.
+        drop(coord1);
+        let snap = store.fan_in_status(&wave).unwrap();
+        assert!(snap.merged_to_events);
+        assert!(snap.salvage_merged);
+        assert_eq!(snap.phase, WavePhase::Failed);
+
+        let coord2 =
+            SupervisorCoordinator::with_in_memory_sink(store.clone() as Arc<dyn SupervisorStore>);
+        let action2 = coord2
+            .tick(
+                &wave,
+                PhaseInputs {
+                    aggregate_timeout_secs: 60,
+                    elapsed_secs: 0,
+                    cancel_requested: false,
+                },
+            )
+            .unwrap();
+        assert!(
+            matches!(action2, CoordinatorAction::AlreadyDone),
+            "post-restart tick must AlreadyDone, got {action2:?}",
+        );
     }
 
     /// U8 sanity: the in-memory merge sink records batches so

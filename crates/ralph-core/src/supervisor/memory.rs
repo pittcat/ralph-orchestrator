@@ -31,6 +31,14 @@ struct WaveRow {
     phase: WavePhase,
     cancel_requested: bool,
     merged_to_events: bool,
+    /// Plan 004 R3 / P0-1: salvage-merge flag. Distinct from
+    /// `merged_to_events` (which tracks coord-event injection).
+    /// `fail_wave` requires this to be `true` before it will
+    /// latch the coord-event injection — closing the crash
+    /// window where the salvage merge could be lost between
+    /// `fail_wave` returning and the dispatcher writing the
+    /// merge.
+    salvage_merged: bool,
     /// 2026-07-03-001 plan U6: wall-clock instant the wave
     /// was registered. Recovery (U11) uses this to decide
     /// the `Failed` timeout verdict; the in-memory store
@@ -272,6 +280,7 @@ impl SupervisorStore for InMemorySupervisorStore {
             phase: WavePhase::Dispatch,
             cancel_requested: false,
             merged_to_events: false,
+            salvage_merged: false,
             created_at: SystemTime::now(),
             slots,
         };
@@ -711,6 +720,7 @@ impl SupervisorStore for InMemorySupervisorStore {
             in_flight_count: in_flight,
             cancel_requested: wave.cancel_requested,
             merged_to_events: wave.merged_to_events,
+            salvage_merged: wave.salvage_merged,
             started_at: wave.created_at,
             slots,
         })
@@ -724,6 +734,18 @@ impl SupervisorStore for InMemorySupervisorStore {
             .ok_or_else(|| SupervisorStoreError::UnknownWave(wave_id.to_string()))?;
         if !wave.merged_to_events {
             wave.merged_to_events = true;
+        }
+        Ok(())
+    }
+
+    fn mark_salvage_merged(&self, wave_id: &str) -> SupervisorStoreResult<()> {
+        let mut inner = self.lock()?;
+        let wave = inner
+            .waves_by_id
+            .get_mut(wave_id)
+            .ok_or_else(|| SupervisorStoreError::UnknownWave(wave_id.to_string()))?;
+        if !wave.salvage_merged {
+            wave.salvage_merged = true;
         }
         Ok(())
     }
@@ -776,6 +798,7 @@ impl SupervisorStore for InMemorySupervisorStore {
                 in_flight_count: in_flight,
                 cancel_requested: wave.cancel_requested,
                 merged_to_events: wave.merged_to_events,
+                salvage_merged: wave.salvage_merged,
                 started_at: wave.created_at,
                 slots,
             });
