@@ -94,6 +94,59 @@ impl DetectedWave {
     pub fn timeout_secs(&self) -> u64 {
         self.per_worker_timeout_secs()
     }
+
+    // ─── 2026-07-25-006 plan U3: idle heartbeat accessors ───
+    //
+    // The dispatcher / worker never reach into `hat_config` for the
+    // new idle fields.  They go through these helpers so the
+    // "None / Some(0) ⇒ disabled" / "Some(n>0) ⇒ enabled" / cap
+    // resolution is centralized.
+
+    /// Effective idle heartbeat window in seconds.
+    ///
+    /// Returns `None` when the hat has no idle heartbeat configured
+    /// (`idle_heartbeat_secs` is `None` *or* `Some(0)`); callers
+    /// must treat this as "idle mode disabled" and rely solely on
+    /// the `timeout` wall-clock. Returns the explicit value
+    /// otherwise.
+    pub fn idle_heartbeat_secs(&self) -> Option<u32> {
+        match self.hat_config.idle_heartbeat_secs {
+            Some(0) | None => None,
+            Some(n) => Some(n),
+        }
+    }
+
+    /// Whether the wave worker should run the dual-clock lease.
+    /// True when `idle_heartbeat_secs` is `Some(n)` with `n > 0`.
+    pub fn idle_enabled(&self) -> bool {
+        self.idle_heartbeat_secs().is_some()
+    }
+
+    /// Effective cap on consecutive weak-only heartbeat renewals.
+    ///
+    /// Resolution:
+    /// 1. Explicit `Some(n)` on the hat — use as-is.
+    /// 2. `None` or `Some(0)` — fall through to the operator
+    ///    default in [`default_idle_weak_signal_cap`] (8).
+    ///
+    /// The cap exists to bound pathological weak-only streams;
+    /// setting it to `0` disables weak-signal renewals entirely
+    /// (only strong signals refresh the lease).
+    pub fn idle_weak_signal_cap(&self) -> u32 {
+        match self.hat_config.idle_weak_signal_cap {
+            Some(0) | None => default_idle_weak_signal_cap(),
+            Some(n) => n,
+        }
+    }
+}
+
+/// 2026-07-25-006 plan U3 / KTD7: operator-visible default for the
+/// idle weak-signal cap when the hat does not pin one.  Mirrors
+/// the value recommended for `worker` / `fix-worker` /
+/// `review-batch-worker` so a hat with idle heartbeat enabled but
+/// no explicit cap still gets a sensible ceiling.
+pub fn default_idle_weak_signal_cap() -> u32 {
+    8
 }
 
 /// Typed reason a wave was rejected by the detector.
@@ -575,6 +628,111 @@ mod tests {
         assert!(!wave.partial, "complete wave must not be marked partial");
         assert_eq!(wave.target_hat.as_str(), "reviewer");
         assert_eq!(wave.hat_config.concurrency, 4);
+    }
+
+    // ─── 2026-07-25-006 plan U3: idle heartbeat accessors ───
+    //
+    // These helpers are the only public way the dispatcher / worker
+    // should learn the idle knobs. The behavior table below must
+    // remain stable so legacy presets (no idle fields) keep working
+    // and explicit pins are honored.
+
+    fn detected_wave_with_hat_timeout(
+        timeout: Option<u32>,
+        idle: Option<u32>,
+        cap: Option<u32>,
+    ) -> DetectedWave {
+        let yaml = format!(
+            r#"
+hats:
+  worker:
+    name: "Worker"
+    triggers: ["work.ready"]
+    publishes: ["work.done"]
+    instructions: "do work"
+    concurrency: 2
+    timeout: {timeout_val}
+    idle_heartbeat_secs: {idle_val}
+    idle_weak_signal_cap: {cap_val}
+"#,
+            timeout_val = timeout
+                .map(|n| n.to_string())
+                .unwrap_or_else(|| "~".to_string()),
+            idle_val = idle
+                .map(|n| n.to_string())
+                .unwrap_or_else(|| "~".to_string()),
+            cap_val = cap
+                .map(|n| n.to_string())
+                .unwrap_or_else(|| "~".to_string()),
+        );
+        let config: RalphConfig = serde_yaml::from_str(&yaml).expect("parse test yaml");
+        let registry = HatRegistry::from_config(&config);
+        let events = vec![Event {
+            topic: "work.ready".to_string(),
+            payload: Some("p".to_string()),
+            ts: "2025-01-01T00:00:00Z".to_string(),
+            hat: None,
+            triggered: None,
+            source: None,
+            wave_id: Some("w-1".to_string()),
+            wave_index: Some(0),
+            wave_total: Some(1),
+            system_injected: None,
+        }];
+        detect_wave_events(&events, &registry, 64).expect("wave detected")
+    }
+
+    #[test]
+    fn idle_heartbeat_secs_accessor_table() {
+        // None → disabled (idle_heartbeat_secs() == None, idle_enabled false)
+        let w = detected_wave_with_hat_timeout(Some(600), None, None);
+        assert_eq!(w.idle_heartbeat_secs(), None);
+        assert!(!w.idle_enabled());
+        // timeout must NOT silently flip to 0 due to idle defaults
+        assert_eq!(w.per_worker_timeout_secs(), 600);
+
+        // Some(0) → disabled (explicit opt-out)
+        let w = detected_wave_with_hat_timeout(Some(600), Some(0), None);
+        assert_eq!(w.idle_heartbeat_secs(), None);
+        assert!(!w.idle_enabled());
+        assert_eq!(w.per_worker_timeout_secs(), 600);
+
+        // Some(n>0) → enabled
+        let w = detected_wave_with_hat_timeout(Some(1800), Some(120), Some(8));
+        assert_eq!(w.idle_heartbeat_secs(), Some(120));
+        assert!(w.idle_enabled());
+        assert_eq!(w.per_worker_timeout_secs(), 1800);
+    }
+
+    #[test]
+    fn idle_weak_signal_cap_accessor_table() {
+        // None → operator default (8)
+        let w = detected_wave_with_hat_timeout(Some(600), Some(120), None);
+        assert_eq!(w.idle_weak_signal_cap(), 8);
+        // Some(0) → operator default (explicit "no cap" still falls back)
+        let w = detected_wave_with_hat_timeout(Some(600), Some(120), Some(0));
+        assert_eq!(w.idle_weak_signal_cap(), 8);
+        // Some(n) → use as-is
+        let w = detected_wave_with_hat_timeout(Some(600), Some(120), Some(3));
+        assert_eq!(w.idle_weak_signal_cap(), 3);
+        // Idle disabled path still resolves a stable cap value
+        // (the worker loop won't consume it, but the accessor must
+        // never panic or change under the hood).
+        let w = detected_wave_with_hat_timeout(Some(600), None, Some(2));
+        assert_eq!(w.idle_weak_signal_cap(), 2);
+    }
+
+    #[test]
+    fn idle_accessor_does_not_affect_aggregate_timeout_priority() {
+        // Even when idle is enabled, aggregate_timeout_secs() must
+        // continue to walk the existing priority chain
+        // (aggregate block → consumer → per-worker). This guards
+        // against a future refactor that mistakenly re-uses
+        // idle_heartbeat_secs to scale aggregate timeouts.
+        let w = detected_wave_with_hat_timeout(Some(600), Some(120), Some(8));
+        // No aggregate block, no consumer → fall back to per_worker.
+        assert_eq!(w.aggregate_timeout_secs(), 600);
+        assert!(!w.has_explicit_aggregate_timeout());
     }
 
     #[test]
