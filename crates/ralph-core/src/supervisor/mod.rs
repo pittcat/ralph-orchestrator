@@ -412,17 +412,30 @@ impl TerminalEvidence {
     }
 }
 
-/// Stable, bounded fingerprint for terminal-evidence conflict
-/// detection. Uses the crate's existing hashing helper when
-/// available; falls back to a length+simple hash so the contract is
-/// deterministic across memory and rusqlite stores without pulling a
-/// new dependency.
+/// Stable, versioned fingerprint for terminal-evidence conflict
+/// detection. Uses SHA-256 so the hash is reproducible across
+/// toolchain upgrades (Rust's `DefaultHasher` is explicitly
+/// unstable across versions — see P1-9 fix). The hex digest is
+/// the canonical 64-character form so a database reopen after a
+/// future Rust upgrade produces the same fingerprint and
+/// conflict detection keeps working.
+///
+/// Plan 004 P1-9: SHA-256 (via `sha2`) is the SSOT hash
+/// algorithm for terminal evidence fingerprints. Any change of
+/// algorithm must come with a SupervisorStore migration so the
+/// pre-existing fingerprint rows either stay comparable (same
+/// algo) or are re-derived (migrated).
 fn fingerprint_payload(payload: &str) -> String {
-    use std::collections::hash_map::DefaultHasher;
-    use std::hash::{Hash, Hasher};
-    let mut hasher = DefaultHasher::new();
-    payload.hash(&mut hasher);
-    format!("{:016x}", hasher.finish())
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(payload.as_bytes());
+    let digest = hasher.finalize();
+    let mut out = String::with_capacity(64);
+    for byte in digest {
+        use std::fmt::Write;
+        let _ = write!(&mut out, "{byte:02x}");
+    }
+    out
 }
 
 /// The supervisor persistence + dispatch-decision trait. Both the

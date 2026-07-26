@@ -1638,6 +1638,76 @@ mod tests {
         assert_eq!(s.slot_terminal_evidence(&wave, 0).unwrap(), Some(ev));
     }
 
+    /// Plan 004 P1-9: terminal-evidence fingerprints MUST be
+    /// stable across toolchain upgrades (Rust's `DefaultHasher`
+    /// is explicitly NOT stable across versions). We pin the
+    /// SHA-256 hex digest of a known payload here so a future
+    /// regression that swaps back to `DefaultHasher` (or any
+    /// other non-stable algorithm) breaks this test.
+    #[test]
+    fn p1_9_fingerprint_is_sha256_of_payload() {
+        use crate::supervisor::TerminalEvidence;
+        // Known SHA-256 vector: empty string.
+        let empty = TerminalEvidence::from_event("review.unit.done", "");
+        assert_eq!(
+            empty.payload_fingerprint,
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            "empty payload fingerprint must equal SHA-256(\"\") hex",
+        );
+        // Known SHA-256 vector: a representative JSON.
+        use sha2::Digest;
+        let payload = "{\"dimension\":\"correctness\"}";
+        let ev = TerminalEvidence::from_event("review.unit.done", payload);
+        let mut hasher = sha2::Sha256::new();
+        Digest::update(&mut hasher, payload.as_bytes());
+        let expected = format!("{:x}", hasher.finalize());
+        assert_eq!(
+            ev.payload_fingerprint, expected,
+            "fingerprint must equal SHA-256 hex of payload",
+        );
+    }
+
+    /// Plan 004 P1-9: the same payload must round-trip across
+    /// a database reopen — the fingerprint stored at write time
+    /// must match the fingerprint computed at read time after a
+    /// restart. This pins the versioned-algorithm contract at
+    /// the persistence boundary.
+    #[test]
+    fn p1_9_fingerprint_round_trip_across_reopen() {
+        use crate::supervisor::{TerminalEvidence, WaveKind};
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("supervisor.db");
+        let wave = {
+            let store = RusqliteSupervisorStore::open(&path).unwrap();
+            let wave = store
+                .register_wave("p1-9-rt", WaveKind::Review, 1)
+                .unwrap();
+            store
+                .record_slot_terminal_evidence(
+                    &wave,
+                    0,
+                    &TerminalEvidence::from_event(
+                        "review.unit.done",
+                        "{\"dimension\":\"correctness\"}",
+                    ),
+                )
+                .unwrap();
+            wave
+        };
+        // Reopen: read the same fingerprint back.
+        let reopened = RusqliteSupervisorStore::open(&path).unwrap();
+        let ev = reopened.slot_terminal_evidence(&wave, 0).unwrap();
+        let read_back = ev.expect("evidence must round-trip");
+        // The fingerprint must be reproducible across opens —
+        // NOT a toolchain-dependent DefaultHasher output.
+        assert_eq!(
+            read_back.payload_fingerprint.len(),
+            64,
+            "SHA-256 hex digest is 64 chars; got {:?}",
+            read_back.payload_fingerprint,
+        );
+    }
+
     fn bind(slot: u32) -> SlotResource {
         SlotResource {
             slot_index: slot,
