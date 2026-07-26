@@ -547,13 +547,13 @@ pub async fn run_wave_worker_pty(
         let reason = if idle_enabled && final_weak_count > 0 {
             // Idle kill path (not a hard timeout).
             format!(
-                "idle heartbeat exceeded: {}s since last activity, weak_count={}",
+                "{WORKER_TIMEOUT_ERR_PREFIX} {}s of idle heartbeat (worker_timeout/idle_kill, weak_count={})",
                 idle_heartbeat.unwrap().as_secs(),
                 final_weak_count
             )
         } else if idle_enabled {
             format!(
-                "idle heartbeat exceeded: {}s since last activity",
+                "{WORKER_TIMEOUT_ERR_PREFIX} {}s of idle heartbeat (worker_timeout/idle_kill)",
                 idle_heartbeat.unwrap().as_secs()
             )
         } else {
