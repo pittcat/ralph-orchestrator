@@ -2537,3 +2537,44 @@ fn compute_agent_wrote_any_valid_or_rejected(
 ) -> bool {
     runner::agent_wrote_any_valid_or_rejected(processed.as_ref(), wave_policy_rejections)
 }
+
+// ─────────────────────────────────────────────────────────────────────────
+// 2026-07-25-006 plan U7: pin the KTD7 idle-lease values of the three wave
+// worker hats (`worker` / `fix-worker` / `review-batch-worker`) in the
+// `ce-executor-supervisor` preset. Structural assertion through the real
+// `RalphConfig` parse path (no YAML grep): any future preset edit that
+// silently regresses the timeout / idle heartbeat / weak-signal cap trips
+// this test.
+// ─────────────────────────────────────────────────────────────────────────
+#[test]
+fn test_ce_executor_supervisor_idle_lease_values_match_ktd7() {
+    let yaml_path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../presets/en/ce-executor-supervisor.yml"
+    );
+    let yaml = std::fs::read_to_string(yaml_path)
+        .unwrap_or_else(|err| panic!("read preset yaml at {yaml_path}: {err}"));
+    let config: RalphConfig =
+        serde_yaml::from_str(&yaml).expect("parse ce-executor-supervisor preset");
+
+    // KTD7: worker / fix-worker = 1800 s hard cap + 120 s idle window +
+    // weak-signal cap 8; review-batch-worker = 900 s hard cap + 90 s idle
+    // window + weak-signal cap 8.
+    let worker = config.hats.get("worker").expect("worker hat present");
+    assert_eq!(worker.timeout, Some(1800));
+    assert_eq!(worker.idle_heartbeat_secs, Some(120));
+    assert_eq!(worker.idle_weak_signal_cap, Some(8));
+
+    let fix_worker = config.hats.get("fix-worker").expect("fix-worker hat present");
+    assert_eq!(fix_worker.timeout, Some(1800));
+    assert_eq!(fix_worker.idle_heartbeat_secs, Some(120));
+    assert_eq!(fix_worker.idle_weak_signal_cap, Some(8));
+
+    let review_batch_worker = config
+        .hats
+        .get("review-batch-worker")
+        .expect("review-batch-worker hat present");
+    assert_eq!(review_batch_worker.timeout, Some(900));
+    assert_eq!(review_batch_worker.idle_heartbeat_secs, Some(90));
+    assert_eq!(review_batch_worker.idle_weak_signal_cap, Some(8));
+}
