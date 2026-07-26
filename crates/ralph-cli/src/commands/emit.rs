@@ -3642,6 +3642,9 @@ hats:
     /// current-hat-events).
     ///
     /// Target behavior (after U2): resolve_emit_path returns Ok(wave_channel_path).
+    /// After U6 (2026-07-26-002): the candidate must additionally appear in
+    /// `.ralph/current-wave-channels` (the dispatcher-signed allowlist); env-only
+    /// self-claim is no longer enough.
     #[test]
     fn test_emit_wave_worker_channel_accepted() {
         let tmp = TempDir::new().unwrap();
@@ -3657,10 +3660,18 @@ hats:
         // into the worker process. The wave channel path must be accepted in
         // wave-worker context (isolated_mode=true, current_hat present, path shape
         // matches .ralph/wave-<id>-<idx>.jsonl).
-        let wave_channel = workspace
-            .join(".ralph/wave-w-test-0.jsonl")
-            .display()
-            .to_string();
+        let wave_channel_path = workspace.join(".ralph/wave-w-test-0.jsonl");
+        let wave_channel = wave_channel_path.display().to_string();
+
+        // 2026-07-26-002 plan U6 (R6 / KTD2): the dispatcher appends
+        // the absolute channel path to .ralph/current-wave-channels
+        // BEFORE spawning. Without the marker, env-only self-claim
+        // is rejected (proven by the prior Red test).
+        std::fs::write(
+            workspace.join(".ralph/current-wave-channels"),
+            format!("{}\n", wave_channel_path.display()),
+        )
+        .unwrap();
 
         let result = resolve_emit_path(
             &workspace,
@@ -3728,6 +3739,55 @@ hats:
         assert!(
             msg.contains("allowlist") || msg.contains("not in"),
             "error must mention allowlist, got: {msg}"
+        );
+    }
+
+    /// 2026-07-26-002 plan U6 (R6 / AE6): even with isolated + hat +
+    /// matching wave_id/index, a wave channel whose absolute path
+    /// does NOT appear in `.ralph/current-wave-channels` (the
+    /// dispatcher-signed marker) MUST be rejected. This is the
+    /// U6 forgery guard: an attacker who can set env vars cannot
+    /// grant themselves write access to an arbitrary
+    /// `.ralph/wave-<id>-<idx>.jsonl` file — only the dispatcher
+    /// that wrote the marker can grant access.
+    #[test]
+    fn test_emit_wave_worker_channel_rejected_without_marker_signature() {
+        let tmp = TempDir::new().unwrap();
+        let workspace = make_workspace(&tmp);
+        std::fs::write(
+            workspace.join(".ralph/current-events"),
+            ".ralph/events-main.jsonl",
+        )
+        .unwrap();
+        // No `.ralph/current-wave-channels` marker written —
+        // simulates the attacker scenario where the worker self-
+        // claims the channel via env vars without dispatcher sign.
+
+        let wave_channel = workspace
+            .join(".ralph/wave-w-test-0.jsonl")
+            .display()
+            .to_string();
+
+        let result = resolve_emit_path(
+            &workspace,
+            &workspace.join(".ralph/events.jsonl"),
+            Some(&wave_channel),
+            Some("exec-worker"),
+            true,             // isolated_mode = true
+            Some("w-test"),   // matching wave_id
+            Some(0),          // matching slot_index
+        );
+
+        assert!(
+            result.is_err(),
+            "forged env without marker signature must be rejected; got Ok({result:?})",
+        );
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("current-wave-channels")
+                || msg.contains("marker")
+                || msg.contains("dispatcher must sign"),
+            "error must reference the missing marker; got: {msg}"
         );
     }
 

@@ -4412,6 +4412,17 @@ fn test_u3_resolve_emit_path_dispatcher_signed_carve_out() {
     let slot_idx: u32 = 0;
     let channel = workspace.join(format!(".ralph/wave-{wave_id}-{slot_idx}.jsonl"));
 
+    // 2026-07-26-002 plan U6 (R6 / KTD2): the dispatcher signs the
+    // wave channel by appending the absolute path to
+    // `.ralph/current-wave-channels` BEFORE spawning. Without that
+    // marker, env-only self-claim is rejected (proven by
+    // test_emit_wave_worker_channel_rejected_without_marker_signature).
+    std::fs::write(
+        workspace.join(".ralph/current-wave-channels"),
+        format!("{}\n", channel.display()),
+    )
+    .unwrap();
+
     // Happy path: handshake aligns → accepted.
     let resolved = resolve_emit_path(
         &workspace,

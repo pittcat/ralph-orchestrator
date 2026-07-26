@@ -1210,6 +1210,26 @@ pub async fn execute_wave_structured(
         // Create per-worker events file
         let worker_events_file = wave_dir.join(format!("wave-{}-{}.jsonl", wave_id, index_u32));
 
+        // 2026-07-26-002 plan U6 (R6 / KTD7): the dispatcher is the
+        // sole authority for which per-slot channels the wave
+        // workers may write to. Append the absolute path to
+        // `<workspace>/.ralph/current-wave-channels` BEFORE spawning
+        // so the worker's `ralph emit` finds the marker. Best-effort:
+        // marker write failure is a warn-and-continue, NOT a
+        // spawn blocker, because the worker process can still
+        // surface its own diagnostic. The marker is rewritten by
+        // every dispatcher invocation (one line per slot, exact
+        // match — no prefix wildcards).
+        if let Err(err) = append_wave_channel_to_marker(main_events_file, &worker_events_file) {
+            warn!(
+                wave_id = %wave.wave_id,
+                slot_index = index_u32,
+                error = %err,
+                "U6: failed to append wave channel to .ralph/current-wave-channels; \
+                 worker emit will fall back to shape-only allowlist check"
+            );
+        }
+
         // Build worker prompt
         let ctx = WaveWorkerContext {
             wave_id: wave_id.clone(),
@@ -2641,6 +2661,95 @@ fn append_supervisor_coord_event(
     }
 }
 
+/// 2026-07-26-003 plan U5 (KTD7): on `InjectedFailed` for the
+/// Review kind, append the **Completed** slots' business events
+/// to the main events ledger BEFORE the failed coord event so
+/// downstream `finalizer` + `ralph diagnose` consumers can see
+/// what got done. This is the dispatcher-layer minimal merge the
+/// plan describes; the 2026-07-25-005 supervisor plan owns the
+/// migration to `SupervisorAction::SalvagedAndFailed` and will
+/// absorb this logic once that lands. Until then, this helper is
+/// the only place a Review-failed wave's Completed events get
+/// written to main — without it, all six slots' results are
+/// invisible to anything that doesn't read `.ralph/supervisor.db`
+/// directly.
+///
+/// `Failed` slots are deliberately skipped: their events did NOT
+/// pass `classify_slot_result` and writing them would be a
+/// silent-success anti-pattern that masks real failures. We also
+/// only write events with `review.unit.done` shape; any other
+/// topic a Completed slot may carry (`review.dimension.done`,
+/// etc.) is dropped here because the `review-synthesizer`'s
+/// consumed payload is the topic it expects to see in main.
+fn merge_completed_review_slots_to_main(
+    main_events_file: &Path,
+    completed: &ralph_core::CompletedWave,
+) {
+    use std::io::Write;
+    let mut lines: Vec<String> = Vec::new();
+    for result in &completed.results {
+        // `completed.failures` is the source of truth for
+        // Failed slots — a slot that produced no `results`
+        // entry has nothing to write. Slots that are in
+        // `failures` AND `results` (rare race during the failed
+        // tick) are skipped on the failure path per the slot
+        // classifier, which is the conservative call.
+        if completed
+            .failures
+            .iter()
+            .any(|f| f.index == result.index)
+        {
+            continue;
+        }
+        for event in &result.events {
+            if event.topic.as_str() != "review.unit.done" {
+                continue;
+            }
+            // Pre-render the JSONL row with the
+            // `review-worker` attribution so `compute_missing_dimensions`
+            // (U4) sees the dimension in main as already done.
+            let record = serde_json::json!({
+                "topic": event.topic.as_str(),
+                "payload": event.payload.as_str(),
+                "ts": chrono::Utc::now().to_rfc3339(),
+                "hat": "review-worker",
+                "source": "review-worker",
+            });
+            if let Ok(line) = serde_json::to_string(&record) {
+                lines.push(line);
+            }
+        }
+    }
+    if lines.is_empty() {
+        return;
+    }
+    let open = || -> std::io::Result<()> {
+        if let Some(parent) = main_events_file.parent()
+            && !parent.as_os_str().is_empty()
+        {
+            std::fs::create_dir_all(parent)?;
+        }
+        let mut file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(main_events_file)?;
+        for line in &lines {
+            writeln!(file, "{}", line)?;
+        }
+        file.flush()?;
+        Ok(())
+    };
+    if let Err(err) = open() {
+        warn!(
+            wave_id = %completed.wave_id,
+            path = %main_events_file.display(),
+            error = %err,
+            "U5: failed to merge Completed review slots to main ledger; \
+             continuing with coord event injection anyway (best-effort salvage)"
+        );
+    }
+}
+
 // ─────────────────────────────────────────────────────────────────
 // 2026-07-25-004 plan U5 (R6 / AE5): per-slot diagnostics JSON
 // for failed waves.
@@ -2708,6 +2817,43 @@ fn write_wave_diagnostics_json(
     let bytes = serde_json::to_vec_pretty(payload).expect("payload is always a valid JSON Value");
     std::fs::write(&path, bytes)?;
     Ok(path)
+}
+
+/// 2026-07-26-002 plan U6 (R6 / KTD2 / KTD7): append the
+/// dispatcher's signed absolute channel path to
+/// `<workspace>/.ralph/current-wave-channels`. The marker is one
+/// line per path, exact-matched at the consumer (no prefix
+/// wildcards). Concurrent waves can append freely because each
+/// line is independently accepted or rejected by the canonicalize
+/// equality check in `paths_equivalent`.
+///
+/// Failure modes:
+/// - `.ralph/` not writable: caller logs warn and the worker
+///   falls back to the legacy shape-only allowlist.
+/// - `events_file` does not have a `.ralph/` ancestor: caller
+///   surfaces an error and the worker is spawned without a marker.
+pub(crate) fn append_wave_channel_to_marker(
+    main_events_file: &Path,
+    worker_events_file: &Path,
+) -> std::io::Result<()> {
+    let workspace_root = workspace_root_from_events(main_events_file);
+    let ralph_dir = workspace_root.join(".ralph");
+    let marker = ralph_dir.join("current-wave-channels");
+    std::fs::create_dir_all(&ralph_dir)?;
+    let absolute = if worker_events_file.is_absolute() {
+        worker_events_file.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .map(|c| c.join(worker_events_file))
+            .unwrap_or_else(|_| worker_events_file.to_path_buf())
+    };
+    use std::io::Write;
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&marker)?;
+    writeln!(file, "{}", absolute.display())?;
+    Ok(())
 }
 
 /// 2026-07-26-002 plan U3 (R3 / KTD3): derive an absolute workspace

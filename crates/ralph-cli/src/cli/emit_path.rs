@@ -308,6 +308,16 @@ pub(crate) fn resolve_emit_path(
     let candidate_marker = ralph_dir.join("current-candidate-events");
     let current_marker = ralph_dir.join("current-events");
     let current_hat_marker = ralph_dir.join("current-hat-events");
+    // 2026-07-26-002 plan U6 (R6 / KTD2 / KTD7): dispatcher-signed
+    // wave-channel allowlist. The dispatcher appends one absolute
+    // path per worker to `.ralph/current-wave-channels` BEFORE the
+    // worker process starts (see `write_wave_channels_marker`).
+    // env-only `RALPH_EVENTS_FILE` self-claim is no longer enough
+    // for `wave-<id>-<idx>.jsonl` targets: the candidate path MUST
+    // appear in this marker exactly. Markers from a previous wave
+    // remain on disk until best-effort cleanup at wave end (or
+    // crash recovery on next dispatcher startup).
+    let wave_channels_marker = ralph_dir.join("current-wave-channels");
     let default_path = ralph_dir.join("events.jsonl");
 
     // Build the allowlist of legitimate targets.
@@ -330,6 +340,19 @@ pub(crate) fn resolve_emit_path(
     if let Ok(value) = fs::read_to_string(&current_hat_marker) {
         let trimmed = value.trim();
         if !trimmed.is_empty() {
+            allowed.push(resolve_marker_target(workspace_root, trimmed));
+        }
+    }
+    // 2026-07-26-002 plan U6: dispatcher-signed wave channels. One
+    // absolute path per line. Each line is exact-matched (no prefix
+    // wildcard) so concurrent waves cannot grant write access to
+    // each other's slots.
+    if let Ok(value) = fs::read_to_string(&wave_channels_marker) {
+        for line in value.lines() {
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
             allowed.push(resolve_marker_target(workspace_root, trimmed));
         }
     }
@@ -383,13 +406,28 @@ pub(crate) fn resolve_emit_path(
                 slot_index,
             )
         {
-            // U2 (plan 2026-07-25-003): accept the dispatcher-signed
-            // per-slot wave channel. The dispatcher creates
+            // 2026-07-25-003 plan U2: legacy per-slot wave channel
+            // shape check. The dispatcher creates
             // `…/.ralph/wave-<id>-<idx>.jsonl` and injects it as
-            // `RALPH_EVENTS_FILE`; no marker lists it, so it is not in
-            // `allowed` yet. Register it now so the symlink / orphan
-            // guards in the final allowlist loop below still apply to
-            // the resolved candidate.
+            // `RALPH_EVENTS_FILE`. 2026-07-26-002 plan U6 (R6 /
+            // KTD7): even when the path shape is correct and
+            // `RALPH_WAVE_ID` / `RALPH_WAVE_INDEX` match, the
+            // candidate MUST also appear in the
+            // dispatcher-signed `.ralph/current-wave-channels`
+            // marker — env-only self-claim is no longer enough.
+            if !allowed
+                .iter()
+                .any(|entry| paths_equivalent(entry, &normalized_explicit))
+            {
+                bail!(
+                    "refusing wave-channel emit to {}: not in .ralph/current-wave-channels marker. \
+                     The dispatcher must sign the channel before the worker starts.",
+                    normalized_explicit.display()
+                );
+            }
+            // Register it so the symlink / orphan guards in the
+            // final allowlist loop below still apply to the
+            // resolved candidate.
             allowed.push(normalized_explicit.clone());
             explicit_target
         } else {
