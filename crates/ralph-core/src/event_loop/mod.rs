@@ -6387,11 +6387,18 @@ impl EventLoop {
         // Inject ralph-tools skills via the SSOT plan_auto_inject.
         // plan_auto_inject already honours per-hat eligibility
         // (is_hat_eligible) and the gated/registry-auto split, so
-        // the live path and the preview path produce identical results.
-        let (gated, registry_auto, _on_demand) =
+        // the live path and the preview path produce identical
+        // results.
+        //
+        // 2026-07-26-002 U1: chain only `gated` here. Custom
+        // registry-auto skills are owned by
+        // `inject_custom_auto_skills` below — chaining both sets
+        // here produced double injection of any
+        // `skills.overrides.<name>.auto_inject: true` skill.
+        let (gated, _registry_auto, _on_demand) =
             SkillInjector::plan_auto_inject(&self.config, hat_id, &self.skill_registry);
 
-        for entry in gated.into_iter().chain(registry_auto) {
+        for entry in gated {
             let Some(skill) = self.skill_registry.get(entry.name.as_str()) else {
                 continue;
             };

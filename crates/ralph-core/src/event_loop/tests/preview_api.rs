@@ -264,6 +264,80 @@ fn plan_auto_inject_matches_build_prompt() {
     );
 }
 
+/// 2026-07-26-002 plan U1 SSOT extension: with a custom
+/// registry_auto skill, the live prompt must include it exactly
+/// once and `plan_auto_inject` must agree. Cross-check for the
+/// single-injection fix — `inject_custom_auto_skills` is the sole
+/// owner of registry_auto in the live path.
+#[test]
+fn plan_auto_inject_matches_build_prompt_with_custom_skill() {
+    const UNIQUE_DUP_MARKER: &str = "UNIQUE_DUP_MARKER_2026_07_26_002_SSOT";
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let skill_dir = tmp.path().join("skills");
+    std::fs::create_dir_all(&skill_dir).expect("mkdir");
+    let body = format!("ssot body {UNIQUE_DUP_MARKER}");
+    std::fs::write(
+        skill_dir.join("custom-ssot.md"),
+        format!("---\nname: custom-ssot\ndescription: U1 SSOT\n---\n\n{body}\n"),
+    )
+    .expect("write");
+
+    let mut config = minimal_isolated_config(true, true);
+    config.skills.dirs = vec![skill_dir.clone()];
+    config.skills.overrides.insert(
+        "custom-ssot".to_string(),
+        crate::config::SkillOverride {
+            enabled: Some(true),
+            auto_inject: Some(true),
+            ..Default::default()
+        },
+    );
+
+    let mut event_loop = EventLoop::new(config);
+    event_loop.initialize("U1 SSOT cross-check");
+
+    let hat_id = HatId::new("builder");
+    let registry = SkillRegistry::from_config(
+        &event_loop.config.skills,
+        std::path::Path::new("."),
+        Some(event_loop.config.cli.backend.as_str()),
+    )
+    .unwrap_or_else(|_| SkillRegistry::new(Some(event_loop.config.cli.backend.as_str())));
+
+    let (gated, registry_auto, _on_demand) =
+        SkillInjector::plan_auto_inject(&event_loop.config, &hat_id, &registry);
+
+    let auto_inject_names: std::collections::HashSet<&str> = gated
+        .iter()
+        .chain(registry_auto.iter())
+        .map(|e| e.name.as_str())
+        .collect();
+
+    let live_prompt = event_loop
+        .build_prompt(&hat_id)
+        .expect("prompt should build");
+
+    assert!(
+        auto_inject_names.contains("custom-ssot"),
+        "plan_auto_inject must list custom-ssot"
+    );
+    assert!(
+        live_prompt.contains("<custom-ssot-skill>"),
+        "live prompt must include custom-ssot"
+    );
+    assert_eq!(
+        live_prompt.matches("<custom-ssot-skill>").count(),
+        1,
+        "live prompt must include custom-ssot exactly once"
+    );
+    assert_eq!(
+        live_prompt.matches(UNIQUE_DUP_MARKER).count(),
+        1,
+        "live prompt must include custom-ssot body marker exactly once"
+    );
+}
+
 /// 2026-07-26-001 plan U2: disabled-skills is a hard-off signal —
 /// `plan_auto_inject` must return empty sets when skills.enabled=false.
 #[test]
@@ -283,5 +357,69 @@ fn plan_auto_inject_with_disabled_skills() {
     assert!(
         gated.is_empty() && registry_auto.is_empty() && on_demand.is_empty(),
         "disabled skills must produce empty auto_inject; got gated={gated:?}, registry_auto={registry_auto:?}, on_demand={on_demand:?}"
+    );
+}
+
+/// 2026-07-26-002 plan U1: a custom registry auto_inject skill must
+/// appear **exactly once** in `build_prompt` output — never twice.
+/// Today the live path chain-injects `registry_auto` inside
+/// `inject_memories_and_tools_skill` AND re-injects via
+/// `inject_custom_auto_skills`, producing duplicate markers.
+///
+/// Markers we assert on:
+/// - `<custom-dup-skill>` open tag (one per injection)
+/// - `UNIQUE_DUP_MARKER` substring inside the body (one per injection)
+///
+/// When the bug is live both counts == 2; after fix both == 1.
+#[test]
+fn custom_auto_inject_skill_appears_once() {
+    const UNIQUE_DUP_MARKER: &str = "UNIQUE_DUP_MARKER_2026_07_26_002";
+
+    // temp workspace + skills.dirs so the registry sees a real
+    // custom skill file; `auto_inject: true` in frontmatter forces
+    // the registry auto-inject path so the bug can fire.
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let skill_dir = tmp.path().join("skills");
+    std::fs::create_dir_all(&skill_dir).expect("mkdir");
+    let body = format!("custom-dup body {UNIQUE_DUP_MARKER} payload");
+    let raw = format!(
+        "---\nname: custom-dup\ndescription: U1 dup regression\n---\n\n{body}\n"
+    );
+    std::fs::write(skill_dir.join("custom-dup.md"), raw).expect("write skill");
+
+    let mut config = minimal_isolated_config(true, true);
+    config.core.workspace_root = tmp.path().to_path_buf();
+    // EventLoop::with_context_and_diagnostics uses `Path::new(".")`
+    // as the skill registry scan root regardless of workspace_root,
+    // so the skills dir must be absolute to land inside the
+    // tempdir we just created.
+    config.skills.dirs = vec![skill_dir.clone()];
+    config.skills.overrides.insert(
+        "custom-dup".to_string(),
+        crate::config::SkillOverride {
+            enabled: Some(true),
+            auto_inject: Some(true),
+            ..Default::default()
+        },
+    );
+
+    let mut event_loop = EventLoop::new(config);
+    event_loop.initialize("U1 dup injection regression");
+
+    let hat_id = HatId::new("builder");
+    let prompt = event_loop
+        .build_prompt(&hat_id)
+        .expect("prompt should build");
+
+    let tag_count = prompt.matches("<custom-dup-skill>").count();
+    let marker_count = prompt.matches(UNIQUE_DUP_MARKER).count();
+
+    assert_eq!(
+        tag_count, 1,
+        "<custom-dup-skill> open tag must appear exactly once; got {tag_count}"
+    );
+    assert_eq!(
+        marker_count, 1,
+        "custom auto_inject marker must appear exactly once; got {marker_count}"
     );
 }
