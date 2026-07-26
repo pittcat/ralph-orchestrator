@@ -30,6 +30,7 @@ use anyhow::{Context, Result};
 use clap::{ArgAction, Parser, Subcommand, ValueEnum};
 use ralph_core::RalphConfig;
 use ralph_core::config::profiles::ProfileSpec;
+use ralph_core::event_loop::PromptPreview;
 use ralph_core::profiles::ResolvedProfileFragments;
 use std::io::Write;
 use std::path::PathBuf;
@@ -62,6 +63,16 @@ pub enum InspectCommands {
     /// Pair with `ralph events --events-source hat-channel` to close the
     /// OPAC Confirm loop. Read-only; never starts or mutates a loop.
     Loop(InspectLoopArgs),
+
+    /// 2026-07-26-001 plan U3: preview what `build_prompt` would
+    /// inject for one hat **without** running the loop. Read-only;
+    /// no events are emitted, no `events.jsonl` is touched, no worktree
+    /// state changes. Same source as the live prompt: the
+    /// `ralph-core` `EventLoop::prompt_preview` API (U2). The
+    /// companion `--full` flag (off by default — see KTD-7)
+    /// additionally prints the rendered prompt body so the operator
+    /// can read what the hat actually sees end-to-end.
+    Prompt(InspectPromptArgs),
 }
 
 /// Arguments for `ralph inspect loop`.
@@ -125,6 +136,35 @@ pub enum InspectProfilesFormat {
     Json,
 }
 
+/// Arguments for `ralph inspect prompt` (2026-07-26-001 plan U3).
+///
+/// Mirrors the args surface of `ralph run` so the operator can
+/// reuse their muscle memory: `-c` / `--config` accepts a YAML
+/// path (or `-` for stdin) and `-H` / `--hats` accepts a builtin
+/// preset or a local preset file. The hat id is required because
+/// prompt visibility is per-hat and the hatless `ralph` sentinel
+/// is intentionally not the default — the operator should know
+/// which hat they're inspecting.
+#[derive(Parser, Debug)]
+pub struct InspectPromptArgs {
+    /// Hat id to preview (e.g. `worker`, `reviewer`). Required.
+    #[arg(long)]
+    pub hat: String,
+
+    /// Output format (human or json). JSON output is the SSOT
+    /// for downstream tooling; human output is a readable block
+    /// list per KTD-7.
+    #[arg(long, value_enum, default_value_t = InspectProfilesFormat::Human)]
+    pub format: InspectProfilesFormat,
+
+    /// Also print the rendered prompt body. Default is the
+    /// block-list view; `--full` adds the full dry prompt after
+    /// the structured block (KTD-7: human = blocks + skill table;
+    /// --full = blocks + skill table + full text).
+    #[arg(long)]
+    pub full: bool,
+}
+
 /// Execute an `ralph inspect` subcommand.
 pub async fn execute(
     config_sources: &[ConfigSource],
@@ -138,6 +178,9 @@ pub async fn execute(
         }
         Some(InspectCommands::Loop(loop_args)) => {
             inspect_loop_command(config_sources, hats_source, loop_args, use_colors).await
+        }
+        Some(InspectCommands::Prompt(prompt_args)) => {
+            inspect_prompt_command(config_sources, hats_source, prompt_args, use_colors).await
         }
         None => {
             // No subcommand: print help so users learn the surface.
@@ -416,6 +459,218 @@ pub async fn inspect_loop_command(
         }
         InspectProfilesFormat::Human => print_loop_view(&view, use_colors),
     }
+    Ok(())
+}
+
+/// 2026-07-26-001 plan U3: preview the prompt visibility for one hat
+/// without starting the loop.
+///
+/// **Read-only by construction.** The CLI path is:
+///   1. Load config via `preflight::load_config_for_preflight` — the
+///      same resolver `ralph run` uses for `-c` / `-H` so the preset
+///      surface matches.
+///   2. Build a temporary `EventLoop` and call `prompt_preview`. The
+///      loop is initialized to a dry `initialize("ralph inspect prompt
+///      (read-only)")` payload so the registry is consistent; no events
+///      are published, no `events.jsonl` file is written, no worktree
+///      state changes.
+///   3. Render the preview via [`emit_prompt_view`].
+///
+/// Failure modes:
+///   - Hat not in preset → exit 2 with a stderr line naming the hat.
+///   - Config load failure → exit 1 with the preflight error.
+///   - Other build errors → propagated via anyhow.
+pub async fn inspect_prompt_command(
+    config_sources: &[ConfigSource],
+    hats_source: Option<&HatsSource>,
+    args: InspectPromptArgs,
+    use_colors: bool,
+) -> Result<()> {
+    let config = preflight::load_config_for_preflight(config_sources, hats_source).await?;
+    let hat_id = ralph_proto::HatId::new(args.hat.clone());
+
+    // Block titles are extracted via a dry `build_prompt` call,
+    // which requires constructing an EventLoop. We suppress
+    // tracing output for the duration of that call so the
+    // `tracing::info!("Memory injection check…")` line that
+    // fires during `initialize` does not pollute stdout and
+    // corrupt the JSON SSOT contract. The DefaultGuard restores
+    // the global default on drop; once the dry call is done,
+    // later work (e.g. printing the structured preview) gets
+    // the normal stdout writer back.
+    use tracing_subscriber::prelude::*;
+
+    let suppressed = tracing::level_filters::LevelFilter::OFF;
+    let _guard =
+        tracing::dispatcher::set_default(&tracing_subscriber::registry().with(suppressed).into());
+
+    let mut event_loop = ralph_core::event_loop::EventLoop::new(config);
+    event_loop.initialize("ralph inspect prompt (read-only)");
+    let preview_via_loop = event_loop.prompt_preview(&hat_id).ok_or_else(|| {
+        anyhow::anyhow!(
+            "hat {:?} not found in preset; available hats are listed by `ralph hats list`",
+            hat_id.as_str()
+        )
+    })?;
+
+    // Build the full prompt body while tracing is still suppressed,
+    // then drop the guard before emitting output so normal logging resumes.
+    let full_body = if args.full {
+        event_loop.build_prompt(&hat_id)
+    } else {
+        None
+    };
+    drop(_guard);
+
+    emit_prompt_view(
+        &preview_via_loop,
+        full_body,
+        args.format,
+        args.full,
+        use_colors,
+    )
+}
+
+/// Render a `PromptPreview` in the operator's chosen format.
+fn emit_prompt_view(
+    preview: &PromptPreview,
+    full_body: Option<String>,
+    format: InspectProfilesFormat,
+    full: bool,
+    use_colors: bool,
+) -> Result<()> {
+    match format {
+        InspectProfilesFormat::Json => {
+            // JSON output is the SSOT for tooling; the human-only
+            // `--full` body is appended as a separate top-level
+            // `prompt_body` field when requested.
+            let stdout = std::io::stdout();
+            let mut handle = stdout.lock();
+            if full {
+                // Use the pre-computed prompt body (computed while tracing
+                // was suppressed so no log pollution reaches stdout).
+                // FAIL-LOUD on missing body: `prompt_body` is part of
+                // the SSOT contract (`--full` guarantees a real body);
+                // silently emitting `""` would mask a real failure
+                // mode (e.g. build_prompt errored, registry missing,
+                // hat stripped after preview).
+                let body = full_body.ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "prompt_body unavailable for hat {:?} under --full; \
+                         inspect failed to materialize build_prompt output \
+                         (registry empty, hat unknown after preview, or \
+                         build_prompt returned None) — refusing to emit an \
+                         empty SSOT field",
+                        preview.hat_id
+                    )
+                })?;
+                #[derive(serde::Serialize)]
+                struct PromptViewJson<'a> {
+                    #[serde(flatten)]
+                    preview: &'a PromptPreview,
+                    prompt_body: &'a str,
+                }
+                let view = PromptViewJson {
+                    preview,
+                    prompt_body: body.as_str(),
+                };
+                serde_json::to_writer_pretty(&mut handle, &view)?;
+            } else {
+                serde_json::to_writer_pretty(&mut handle, preview)?;
+            }
+            writeln!(handle)?;
+        }
+        InspectProfilesFormat::Human => {
+            print_prompt_view_human(preview, full_body, full, use_colors)?;
+        }
+    }
+    Ok(())
+}
+
+/// Render a labeled list section with a `(none)` / `… and N more`
+/// truncation policy. Each item is `(display, optional_source)`;
+/// when `source` is present it renders as `(source)` after the
+/// display in dim styling. Inline items cap at 20.
+fn print_labeled_section(
+    label: &str,
+    header_color: &str,
+    empty_color: &str,
+    reset: &str,
+    items: &[(String, Option<&'static str>)],
+) {
+    println!("{header_color}{label} ({}):{reset}", items.len());
+    if items.is_empty() {
+        println!("    {empty_color}(none){reset}");
+        return;
+    }
+    const MAX_INLINE: usize = 20;
+    for (display, source) in items.iter().take(MAX_INLINE) {
+        match source {
+            Some(src) => println!("    - {display} {empty_color}({src}){reset}"),
+            None => println!("    - {display}"),
+        }
+    }
+    if items.len() > MAX_INLINE {
+        println!(
+            "    {empty_color}… and {} more (use --format json for the full list){reset}",
+            items.len() - MAX_INLINE
+        );
+    }
+}
+
+fn source_tag(s: ralph_core::event_loop::PromptSkillSource) -> &'static str {
+    match s {
+        ralph_core::event_loop::PromptSkillSource::Gated => "gated",
+        ralph_core::event_loop::PromptSkillSource::RegistryAuto => "registry_auto",
+        ralph_core::event_loop::PromptSkillSource::OnDemand => "on_demand",
+    }
+}
+
+fn print_prompt_view_human(
+    preview: &PromptPreview,
+    full_body: Option<String>,
+    full: bool,
+    use_colors: bool,
+) -> Result<()> {
+    let (cyan, dim, reset, yellow) = if use_colors {
+        (colors::CYAN, colors::DIM, colors::RESET, colors::YELLOW)
+    } else {
+        ("", "", "", "")
+    };
+
+    println!("{cyan}Prompt visibility preview{reset}");
+    println!("  hat_id:           {}", preview.hat_id);
+    println!(
+        "  gates:            tasks={} memories={}",
+        preview.gates.tasks_enabled, preview.gates.memories_enabled,
+    );
+
+    let auto: Vec<(String, Option<&'static str>)> = preview
+        .auto_inject
+        .iter()
+        .map(|e| (e.name.clone(), Some(source_tag(e.source.clone()))))
+        .collect();
+    let demand: Vec<(String, Option<&'static str>)> = preview
+        .on_demand
+        .iter()
+        .map(|e| (e.name.clone(), None))
+        .collect();
+    let blocks: Vec<(String, Option<&'static str>)> = preview
+        .block_titles
+        .iter()
+        .map(|t| (format!("## {t}"), None))
+        .collect();
+    print_labeled_section("  auto_inject", cyan, dim, reset, &auto);
+    print_labeled_section("  on_demand", cyan, dim, reset, &demand);
+    print_labeled_section("  block_titles", cyan, yellow, reset, &blocks);
+
+    if !full {
+        return Ok(());
+    }
+    // FAIL-LOUD on missing body (same contract as the JSON path).
+    let body = full_body
+        .ok_or_else(|| anyhow::anyhow!("prompt_body unavailable for hat {:?}", preview.hat_id))?;
+    println!("\n{cyan}--full prompt body{reset}\n{body}");
     Ok(())
 }
 

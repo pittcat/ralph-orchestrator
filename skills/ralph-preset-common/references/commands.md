@@ -59,6 +59,22 @@ ralph hats graph -c ralph.yml -H <hats.yml> --format mermaid
 
 `ralph hats show` 可看单 hat 有效配置；**不是**完整 isolated prompt dump。
 
+## Prompt 可见性（author / review / diagnose 三规程必用）
+
+```bash
+# 默认 human 输出：块清单 + skill 表
+ralph -c <preset>.yml inspect prompt --hat <id>
+
+# JSON（合同 / fixture / lint 自动化 SSOT）
+ralph -c <preset>.yml inspect prompt --hat <id> --format json
+
+# --full：JSON 返回真实 prompt_body，human 打印完整 body（不 suppressed）
+ralph -c <preset>.yml inspect prompt --hat <id> --format json --full
+ralph -c <preset>.yml inspect prompt --hat <id> --format human --full
+```
+
+外仓（无 `crates/ralph-core/data/`）同样可用——内容来自当前 ralph 二进制内嵌（`SkillRegistry::include_str!`）；报告须注明来源。详细规程见 [`prompt-visibility.md`](prompt-visibility.md)；audit 规程见 [`agent-skill-audit.md`](agent-skill-audit.md)。
+
 ## Preset 脚手架（author 拓扑阶段）
 
 ```bash

@@ -4,6 +4,96 @@ use super::*;
 
 use std::path::Path;
 
+/// U3 helper: build a `RalphConfig` for the minimal isolated
+/// preset used by `preview_api` and `preview_characterization`
+/// tests. Single source of truth — replaces 5+ inline YAML blocks
+/// that previously drifted between test files.
+///
+/// `memories` / `tasks` toggle the `memories.enabled` /
+/// `tasks.enabled` flags; `inject: auto` is preserved when
+/// memories is enabled so the auto-inject path is exercised.
+pub(super) fn minimal_isolated_config(memories: bool, tasks: bool) -> RalphConfig {
+    let yaml = format!(
+        r#"
+event_loop:
+  execution_mode: isolated
+hats:
+  builder:
+    name: "Builder"
+    triggers: ["work.start"]
+    publishes: ["work.done"]
+memories:
+  enabled: {memories}
+  inject: auto
+tasks:
+  enabled: {tasks}
+"#
+    );
+    serde_yaml::from_str(&yaml).expect("minimal_isolated_config YAML must parse")
+}
+
+/// U3 helper: build a `RalphConfig` with multiple hats sharing
+/// the same builder topology. Used by per-hat filter
+/// characterization tests where a single builder YAML is too
+/// narrow to exercise the registry's `is_hat_eligible` path.
+///
+/// `hats` is a slice of `(hat_id, display_name)` tuples that get
+/// rendered into the YAML `hats:` block. The default gate is
+/// opened (memories=true, tasks=true) so the test focuses on the
+/// per-hat filter, not on gating branches.
+pub(super) fn per_hat_isolated_config(hats: &[(&str, &str)]) -> RalphConfig {
+    let hats_yaml: String = hats
+        .iter()
+        .map(|(id, name)| {
+            format!(
+                "  {id}:\n    name: \"{name}\"\n    triggers: [\"work.start\"]\n    publishes: [\"work.done\"]\n"
+            )
+        })
+        .collect();
+    let yaml = format!(
+        r#"
+event_loop:
+  execution_mode: isolated
+hats:
+{hats_yaml}memories:
+  enabled: true
+  inject: auto
+tasks:
+  enabled: true
+"#
+    );
+    serde_yaml::from_str(&yaml).expect("per_hat_isolated_config YAML must parse")
+}
+
+/// U3 helper: a reverse-case fixture used to verify that
+/// `SkillInjector::plan_auto_inject` returns empty when
+/// `skills.enabled = false` even though memories and tasks are
+/// enabled. The `plan_auto_inject_with_disabled_skills` test in
+/// `preview_api.rs` consumes this.
+///
+/// Future maintainers who tweak the global gate must keep this
+/// fixture returning empty (skills.enabled = false must short-
+/// circuit regardless of memories/tasks flags).
+pub(super) fn fixture_with_disabled_skills() -> RalphConfig {
+    let yaml = r#"
+event_loop:
+  execution_mode: isolated
+skills:
+  enabled: false
+hats:
+  builder:
+    name: "Builder"
+    triggers: ["work.start"]
+    publishes: ["work.done"]
+memories:
+  enabled: true
+  inject: auto
+tasks:
+  enabled: true
+"#;
+    serde_yaml::from_str(yaml).expect("fixture_with_disabled_skills YAML must parse")
+}
+
 /// P2 finding #8: shared `init_git_workspace` helper. Both
 /// `isolated_complex_regression.rs` and the ralph-cli `loop_runner`
 /// tests had near-identical copies of this routine; consolidating

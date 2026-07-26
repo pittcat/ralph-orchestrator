@@ -395,6 +395,175 @@ pub(crate) fn append_runtime_config_block(base_prompt: String, max_residuals: u3
     )
 }
 
+/// 2026-07-26-001 plan U2: structured preview of what
+/// `EventLoop::build_prompt` would inject for one hat, **without**
+/// running the loop, consuming the event bus, or writing to any
+/// ledger. Powers the `ralph inspect prompt` CLI (U3-U5) and the
+/// operator skills' visible-context checks (U7-U11).
+///
+/// **Same source as the live prompt.** The `auto_inject` set is
+/// derived from the same registry + gate state that
+/// `prepend_auto_inject_skills` consults; the
+/// `preview_characterization` test module (event_loop/tests/
+/// preview_characterization.rs) pins the equivalence between
+/// this preview and the actual prompt — any future drift fails
+/// the tests, not this API.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct PromptPreview {
+    /// Hat id whose prompt is being previewed.
+    pub hat_id: String,
+    /// Snapshot of the auto-inject gates that drive the
+    /// `ralph-tools` / `ralph-tools-tasks` / `ralph-tools-memories`
+    /// / `ralph-tools-opac` decision.
+    pub gates: PromptGates,
+    /// Skills injected into the prompt without the agent asking.
+    /// Stable order: gated family first (in registration order),
+    /// then registry-flagged skills in registry iteration order.
+    pub auto_inject: Vec<PromptSkillEntry>,
+    /// Skills visible to the hat but not injected — the agent
+    /// loads them via `ralph tools skill load <name>`. Sorted by
+    /// name for stable JSON.
+    pub on_demand: Vec<PromptSkillEntry>,
+    /// `## …` block titles extracted from a dry `build_prompt`
+    /// call, in the order they appear in the prompt.
+    pub block_titles: Vec<String>,
+}
+
+/// Snapshot of the auto-inject gates that drive
+/// `prepend_auto_inject_skills`. Mirrors the `memories.enabled`
+/// and `tasks.enabled` config fields.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct PromptGates {
+    pub tasks_enabled: bool,
+    pub memories_enabled: bool,
+}
+
+/// One entry in either the auto-inject or on-demand list.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct PromptSkillEntry {
+    pub name: String,
+    /// How this skill is sourced for the auto-inject set:
+    ///   * `Gated` — controlled by the hard-coded
+    ///     `inject_memories_and_tools_skill` block.
+    ///   * `RegistryAuto` — `auto_inject: true` in the skill
+    ///     registry frontmatter.
+    /// For on-demand entries, this is always `OnDemand`.
+    pub source: PromptSkillSource,
+}
+
+/// Discriminator for [`PromptSkillEntry`].
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PromptSkillSource {
+    Gated,
+    RegistryAuto,
+    OnDemand,
+}
+
+impl PromptSkillEntry {
+    pub(crate) fn gated(name: &str) -> Self {
+        Self {
+            name: name.to_string(),
+            source: PromptSkillSource::Gated,
+        }
+    }
+    pub(crate) fn registry_auto(name: &str) -> Self {
+        Self {
+            name: name.to_string(),
+            source: PromptSkillSource::RegistryAuto,
+        }
+    }
+    fn on_demand(name: String) -> Self {
+        Self {
+            name,
+            source: PromptSkillSource::OnDemand,
+        }
+    }
+}
+
+/// Single source of truth for which skills should be auto-injected
+/// into a hat's prompt, derived from the same `SkillRegistry` that
+/// the live `inject_memories_and_tools_skill` path uses. Both the
+/// `ralph inspect prompt` preview path AND the live `build_prompt`
+/// path MUST go through `plan_auto_inject` so the operator-visible
+/// preview matches what agents actually receive.
+///
+/// Gated skills (always ralph-tools / -tasks / -memories / -opac
+/// when their gate is open) live in the first Vec. Registry-auto
+/// (third-party skills with `auto_inject: true` frontmatter)
+/// live in the second. On-demand (visible-but-not-injected)
+/// live in the third and are NOT pushed into the prompt — they
+/// are exposed via `ralph tools skill load <name>`.
+pub struct SkillInjector;
+
+impl SkillInjector {
+    /// Compute the (gated, registry_auto, on_demand) skill sets for
+    /// `hat_id` from `config` using the provided `registry`.
+    ///
+    /// Returns owned Vecs so the caller can assemble a
+    /// `PromptPreview` without further registry access.
+    pub fn plan_auto_inject(
+        config: &RalphConfig,
+        hat_id: &HatId,
+        registry: &SkillRegistry,
+    ) -> (
+        Vec<PromptSkillEntry>,
+        Vec<PromptSkillEntry>,
+        Vec<PromptSkillEntry>,
+    ) {
+        let gates = PromptGates {
+            tasks_enabled: config.tasks.enabled,
+            memories_enabled: config.memories.enabled,
+        };
+
+        // Short-circuit when skills are globally disabled
+        if !config.skills.enabled {
+            return (Vec::new(), Vec::new(), Vec::new());
+        }
+
+        let mut gated: Vec<PromptSkillEntry> = Vec::new();
+        let default_gate_open = gates.memories_enabled || gates.tasks_enabled;
+
+        if default_gate_open && registry.is_hat_eligible("ralph-tools", hat_id.as_str()) {
+            gated.push(PromptSkillEntry::gated("ralph-tools"));
+        }
+        if gates.tasks_enabled && registry.is_hat_eligible("ralph-tools-tasks", hat_id.as_str()) {
+            gated.push(PromptSkillEntry::gated("ralph-tools-tasks"));
+        }
+        if gates.memories_enabled
+            && registry.is_hat_eligible("ralph-tools-memories", hat_id.as_str())
+        {
+            gated.push(PromptSkillEntry::gated("ralph-tools-memories"));
+        }
+        if default_gate_open && registry.is_hat_eligible("ralph-tools-opac", hat_id.as_str()) {
+            gated.push(PromptSkillEntry::gated("ralph-tools-opac"));
+        }
+
+        let mut registry_auto: Vec<PromptSkillEntry> = Vec::new();
+        for skill in registry.auto_inject_skills(Some(hat_id.as_str())) {
+            if matches!(
+                skill.name.as_str(),
+                "ralph-tools" | "ralph-tools-tasks" | "ralph-tools-memories" | "ralph-tools-opac"
+            ) {
+                continue;
+            }
+            registry_auto.push(PromptSkillEntry::registry_auto(&skill.name));
+        }
+
+        let mut on_demand: Vec<PromptSkillEntry> = registry
+            .skills_for_hat(Some(hat_id.as_str()))
+            .into_iter()
+            .map(|s| s.name.clone())
+            .filter(|name| !gated.iter().any(|e| &e.name == name))
+            .filter(|name| !registry_auto.iter().any(|e| &e.name == name))
+            .map(PromptSkillEntry::on_demand)
+            .collect();
+        on_demand.sort_by(|a, b| a.name.cmp(&b.name));
+
+        (gated, registry_auto, on_demand)
+    }
+}
+
 /// Strip the `### HUMAN GUIDANCE` block from a historical
 /// scratchpad. Kept as a private file-level helper because
 /// `filter_human_guidance_blocks` (which used to handle every
@@ -737,6 +906,59 @@ fn build_invalid_step_target_resume_payload_for_jsonl(
         serde_json::Value::String(finding.message.clone()),
     );
     serde_json::to_string(&serde_json::Value::Object(payload)).unwrap_or_else(|_| "{}".to_string())
+}
+
+/// Pure config-driven preview that does **not** require a
+/// constructed `EventLoop`. Used by `ralph inspect prompt` to
+/// avoid the noisy `tracing::info!("Memory injection check…")`
+/// path that runs when an EventLoop is constructed (its
+/// initialization logs to stdout, which corrupts the JSON SSOT
+/// contract). The `EventLoop::prompt_preview` method delegates to
+/// this function with a closure that runs `build_prompt` for the
+/// block-title extraction.
+///
+/// `block_titles` is supplied via a closure so the caller can opt
+/// into the heavier `build_prompt`-driven extraction; the pure
+/// CLI path passes `|_| Vec::new()` to keep the command
+/// side-effect-free.
+pub fn preview_prompt_for_config<F>(
+    config: &RalphConfig,
+    hat_id: &HatId,
+    block_titles: F,
+) -> Option<PromptPreview>
+where
+    F: FnOnce(&HatId) -> Vec<String>,
+{
+    let hat_registry = HatRegistry::from_config(config);
+    if hat_registry.get(hat_id).is_none() && hat_id.as_str() != "ralph" {
+        return None;
+    }
+
+    let skill_registry = SkillRegistry::from_config(
+        &config.skills,
+        std::path::Path::new(&config.core.workspace_root),
+        Some(config.cli.backend.as_str()),
+    )
+    .unwrap_or_else(|_| SkillRegistry::new(Some(config.cli.backend.as_str())));
+
+    let gates = PromptGates {
+        tasks_enabled: config.tasks.enabled,
+        memories_enabled: config.memories.enabled,
+    };
+
+    let (gated, registry_auto, on_demand) =
+        SkillInjector::plan_auto_inject(config, hat_id, &skill_registry);
+
+    let auto_inject = [gated, registry_auto].concat();
+    let block_titles = block_titles(hat_id);
+
+    Some(PromptPreview {
+        hat_id: hat_id.as_str().to_string(),
+        gates,
+        auto_inject,
+        on_demand,
+        block_titles,
+    })
 }
 
 impl EventLoop {
@@ -5202,6 +5424,96 @@ impl EventLoop {
         Some(with_diagnosis)
     }
 
+    /// 2026-07-26-001 plan U2: structured preview of what
+    /// `build_prompt` would inject for the given hat, *without*
+    /// running the loop. Powers the `ralph inspect prompt` CLI
+    /// (U3-U5).
+    ///
+    /// **Side effects — single-CLI-invocation safe, do NOT reuse
+    /// across hot loops or shared state.** Although the preview
+    /// itself does not publish events, calling it ultimately
+    /// invokes `build_prompt` (via `preview_block_titles`), which:
+    ///
+    /// 1. Calls `handoff_tracker.on_hat_activated(hat_id)`,
+    ///    clearing any pending handoff deadlines for that hat.
+    /// 2. Calls `event_bus.take_pending(hat_id)`, consuming
+    ///    any pending events addressed to the new hat.
+    ///
+    /// Within a single CLI invocation (`ralph inspect prompt`)
+    /// the `EventLoop` instance owns its state and no externally
+    /// visible mutation escapes — the CLI process exits
+    /// immediately after, so cleared deadlines and consumed
+    /// pending events are simply discarded. **Across invocations,
+    /// or in any long-lived hot loop / shared `EventLoop`
+    /// instance, these calls would silently bypass WRC-U4's 30s
+    /// escalation gate and consume pending escalations**, so
+    /// `prompt_preview` MUST NOT be called more than once per
+    /// `EventLoop` instance. This contract is the same one
+    /// `build_prompt` honours; any caller that survives multiple
+    /// activations should drive the same code path through the
+    /// orchestrator's hat-activation lifecycle, not through this
+    /// inspector.
+    ///
+    /// Returns `None` when the hat is not registered.
+    ///
+    /// The `auto_inject` set is derived from the same
+    /// `prepend_auto_inject_skills` pipeline that `build_prompt`
+    /// uses, **without** invoking it. The
+    /// `preview_characterization` test module pins the equivalence
+    /// between this preview and the live prompt — any future drift
+    /// in the auto-inject rules must fail those tests, not this
+    /// preview API.
+    pub fn prompt_preview(&mut self, hat_id: &HatId) -> Option<PromptPreview> {
+        let config = self.config.clone();
+        let preview = preview_prompt_for_config(&config, hat_id, |_| Vec::new());
+        // Fill block_titles via the heavier build_prompt path now
+        // that the immutable borrow on config is released.
+        let mut preview = preview?;
+        preview.block_titles = self.preview_block_titles(hat_id);
+        Some(preview)
+    }
+
+    /// 2026-07-26-001 plan U2 R3: thin alias for `build_prompt`
+    /// so callers (especially the U1 `inspect --full` JSON / human
+    /// paths) can build only the prompt body without materializing
+    /// a full `PromptPreview` struct.
+    ///
+    /// **Side effects — same contract as `prompt_preview`:** this
+    /// is a direct wrapper around `build_prompt`, so it inherits
+    /// the `handoff_tracker.on_hat_activated` clear and
+    /// `event_bus.take_pending` consumption. Single CLI invocation
+    /// is safe; do not call more than once per `EventLoop`
+    /// instance. See `prompt_preview`'s doc for the full rationale
+    /// (WRC-U4 30s escalation gate).
+    pub fn build_prompt_body(&mut self, hat_id: &HatId) -> Option<String> {
+        self.build_prompt(hat_id)
+    }
+
+    /// Block titles extracted from a dry prompt build for `hat_id`,
+    /// in the order they appear. Implementation: call
+    /// `build_prompt` and parse out `## …` headers from the
+    /// resulting string. Build prompt is side-effect-free with
+    /// respect to ledger state (it only clears handoff deadlines
+    /// for the hat — see build_prompt doc comment), so the dry
+    /// build here is safe to call from a read-only CLI.
+    pub(crate) fn preview_block_titles(&mut self, hat_id: &HatId) -> Vec<String> {
+        let Some(prompt) = self.build_prompt(hat_id) else {
+            return Vec::new();
+        };
+        let mut titles: Vec<String> = Vec::new();
+        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for line in prompt.lines() {
+            let Some(rest) = line.strip_prefix("## ") else {
+                continue;
+            };
+            let trimmed = rest.trim().to_string();
+            if seen.insert(trimmed.clone()) {
+                titles.push(trimmed);
+            }
+        }
+        titles
+    }
+
     /// Inspect a batch of policy-accepted events and flip the
     /// `bootstrap_complete` / `bootstrap_failed` flags when the
     /// coordinator produces a terminal bootstrap handoff.
@@ -6072,72 +6384,26 @@ impl EventLoop {
             }
         }
 
-        // Inject ralph-tools skills conditionally based on config
-        let tasks_enabled = self.config.tasks.enabled;
+        // Inject ralph-tools skills via the SSOT plan_auto_inject.
+        // plan_auto_inject already honours per-hat eligibility
+        // (is_hat_eligible) and the gated/registry-auto split, so
+        // the live path and the preview path produce identical results.
+        let (gated, registry_auto, _on_demand) =
+            SkillInjector::plan_auto_inject(&self.config, hat_id, &self.skill_registry);
 
-        // Base skill (shared commands) when either memories or tasks are enabled
-        if (memories_config.enabled || tasks_enabled)
-            && let Some(skill) = self.skill_registry.get("ralph-tools")
-        {
+        for entry in gated.into_iter().chain(registry_auto) {
+            let Some(skill) = self.skill_registry.get(entry.name.as_str()) else {
+                continue;
+            };
             if !prefix.is_empty() {
                 prefix.push_str("\n\n");
             }
             prefix.push_str(&format!(
-                "<ralph-tools-skill>\n{}\n</ralph-tools-skill>",
-                skill.content.trim()
+                "<{name}-skill>\n{content}\n</{name}-skill>",
+                name = entry.name,
+                content = skill.content.trim()
             ));
-            debug!("Injected ralph-tools skill from registry");
-        }
-
-        // Tasks skill — only when tasks are enabled
-        if tasks_enabled && let Some(skill) = self.skill_registry.get("ralph-tools-tasks") {
-            if !prefix.is_empty() {
-                prefix.push_str("\n\n");
-            }
-            prefix.push_str(&format!(
-                "<ralph-tools-tasks-skill>\n{}\n</ralph-tools-tasks-skill>",
-                skill.content.trim()
-            ));
-            debug!("Injected ralph-tools-tasks skill from registry");
-        }
-
-        // Memories skill — only when memories are enabled
-        if memories_config.enabled
-            && let Some(skill) = self.skill_registry.get("ralph-tools-memories")
-        {
-            if !prefix.is_empty() {
-                prefix.push_str("\n\n");
-            }
-            prefix.push_str(&format!(
-                "<ralph-tools-memories-skill>\n{}\n</ralph-tools-memories-skill>",
-                skill.content.trim()
-            ));
-            debug!("Injected ralph-tools-memories skill from registry");
-        }
-
-        // U8: ralph-tools-opac — four-stage discipline (Observe →
-        // Precheck → Apply → Confirm). Always-injected under the same
-        // gate as ralph-tools (any of tasks / memories enabled).
-        if (memories_config.enabled || tasks_enabled)
-            && let Some(skill) = self.skill_registry.get("ralph-tools-opac")
-        {
-            // Honour per-hat restriction so a hat-restricted OPAC
-            // variant would only land in its target hat; the
-            // always-on variant has no hat restriction in its
-            // frontmatter so this gate degenerates to "everyone".
-            if self
-                .skill_registry
-                .is_hat_eligible("ralph-tools-opac", hat_id.as_str())
-            {
-                if !prefix.is_empty() {
-                    prefix.push_str("\n\n");
-                }
-                prefix.push_str(&format!(
-                    "<ralph-tools-opac-skill>\n{}\n</ralph-tools-opac-skill>",
-                    skill.content.trim()
-                ));
-                debug!("Injected ralph-tools-opac skill from registry");
-            }
+            debug!("Injected {} skill from registry", entry.name);
         }
     }
 

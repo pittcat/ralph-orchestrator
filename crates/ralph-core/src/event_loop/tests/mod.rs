@@ -43,6 +43,13 @@ mod origin_guard;
 mod payload_types;
 mod persistent_mode;
 mod post_terminal_rejection;
+/// 2026-07-26-001 plan U2: unit tests for the new
+/// `EventLoop::prompt_preview` structured API.
+mod preview_api;
+/// 2026-07-26-001 plan U1: characterization tests that pin the
+/// current auto-inject skill set before introducing the
+/// `PromptPreview` API.
+mod preview_characterization;
 /// 2026-07-07-002 plan Unit 8: protocol-violation bounded retry +
 /// fail-close invariants. Regression guard for the
 /// `clear_rejection_keys_for_hat` carve-out (DEV-006) that lets

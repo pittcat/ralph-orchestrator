@@ -213,6 +213,16 @@ review 命中时按上表 `finding_id` + `default_severity` + 默认 confidence 
 
 命中按上表入主表；`preset.execution_model_intent_mismatch` 是 U4 新增 review-only 软性 finding，与既有 lint id `preset.supervisor_requires_isolated` / `preset.supervisor_hat_publishes_coord_topic` / `preset.artifact_uses_internal_ledger` 复用底层问题，但触发条件是 **capability + Intent 一致性**而非 preset 名。`presets/en/ce-executor-supervisor.yml` 等既有 builtin 仍受既有 lint 约束，不在本表新触发条件内。
 
+### Agent skill audit（review-only，由 review SKILL Workflow 0a 弹窗默认跳过、选审触发）
+
+按 `references/agent-skill-audit.md` 的规程，对注入给 agent 的 skill 文档（`crates/ralph-core/data/*.md` / 外仓二进制内嵌）做内容级审计。**默认不审**，review SKILL 第 0a 步必须弹出交互选择菜单，默认选项是「仅审查 preset YAML（推荐）」。命中按上表 `default_severity` + `default_confidence` 入主表（与 `ralph preset check --strict` 输出的 lint ID 分开——本表 ID 不带 `lint.` 前缀，也**不**出现在 `ralph preset check` JSON）。
+
+| finding_id（裸 ID） | default_severity | default_confidence | aaf_question | category | 含义 |
+|---|---|---|---|---|---|
+| `agent_skill.leaks_internals` | P0 | 95 | Q3 | lint | skill 文档泄漏了 agent 不可见的内部实现细节（内部函数名 / 模块名 / 内部 ledger 路径 / review-only 注释 / 一次性事故报告路径 / 过窄 preset 案例） |
+| `agent_skill.unreadable` | P1 | 85 | Q3 | style | skill 文档可读性差（术语未解释 / 触发条件缺失 / 失败停止条件缺失 / 未按「agent 下一步能执行什么」写） |
+| `agent_skill.inject_claim_false` | P0 | 95 | Q3 / Q4 | lint | skill 文档 / hat `instructions:` 错误声称某 skill 已自动注入，或把 on-demand skill 写成 auto-inject；对账源：`ralph inspect prompt --hat <id> --format json` |
+
 ### CE pipeline review/fix artifacts（review-only 软性缺口）
 
 Reviewer 在做 CE builtin preset review 时按本表入主表（不进 `ralph preset check` JSON，机制同 Artifact-First finding）。
