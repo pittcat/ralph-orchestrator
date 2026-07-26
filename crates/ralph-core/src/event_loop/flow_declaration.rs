@@ -98,6 +98,16 @@ pub struct FlowStepDecl {
     /// false (the implementation-review preset path).
     #[serde(default)]
     pub runs: Option<String>,
+    /// 2026-07-26-004 plan U6 (R7 / R8): single accepted topic that
+    /// transitions INTO this step (`None` for the initial step / legacy
+    /// linear flows). YAML key is the quoted `"on"`.
+    #[serde(default, rename = "on")]
+    pub on: Option<String>,
+    /// 2026-07-26-004 plan U6 (R8): branching entry — any of these
+    /// accepted topics transitions into this step (takes precedence over
+    /// positional advance).
+    #[serde(default)]
+    pub on_any_of: Vec<String>,
 }
 
 /// Step runner-binding namespaces recognised by the runtime.
@@ -232,6 +242,8 @@ impl FlowDeclaration {
                     on_partial: s.on_partial.clone(),
                     total_units: None,
                     runs: s.runs.clone(),
+                    on: s.on.clone(),
+                    on_any_of: s.on_any_of.clone(),
                 })
                 .collect(),
             repair_budget: cfg.repair_budget,

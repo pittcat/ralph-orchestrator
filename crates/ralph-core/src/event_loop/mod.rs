@@ -14614,6 +14614,29 @@ pub(crate) fn advance_plan_step(
     if !step.allowed_emits.iter().any(|t| t == accepted_topic) {
         return None;
     }
+
+    // 2026-07-26-004 plan U6 (R7 / R8): declared-transition authority.
+    // A FORWARD step (`j > idx`) whose `on` / `on_any_of` names the
+    // accepted topic is the transition target. Forward-only makes the
+    // transition idempotent (re-accepting the same event once advanced
+    // finds no forward target → no-op) and rejects retrograde / illegal
+    // jumps. Branching via `on_any_of` lets a failed review wave jump
+    // straight to `finalize` instead of walking `synth_await`/`fix_plan`
+    // positionally (the primary-20260726 flow-drift root cause).
+    for (j, candidate) in steps.iter().enumerate() {
+        if j <= idx {
+            continue;
+        }
+        let enters = candidate.on.as_deref() == Some(accepted_topic)
+            || candidate.on_any_of.iter().any(|t| t == accepted_topic);
+        if enters {
+            return Some(candidate.id.clone());
+        }
+    }
+
+    // Legacy linear fallback: flows without declared `on` / `on_any_of`
+    // transitions advance positionally (the existing ce-executor-serial
+    // and supervisor exec_wave behaviour — unchanged).
     steps.get(idx + 1).map(|s| s.id.clone())
 }
 
@@ -14639,6 +14662,8 @@ mod u4_current_plan_step_tests {
                 terminal_when: None,
                 on_partial: std::collections::BTreeMap::new(),
                 runs: None,
+                on: None,
+                on_any_of: Vec::new(),
             })
             .collect();
         let mut cfg = RalphConfig::default();
@@ -14676,6 +14701,8 @@ mod u4_current_plan_step_tests {
                     terminal_when: None,
                     on_partial: std::collections::BTreeMap::new(),
                     runs: None,
+                    on: None,
+                    on_any_of: Vec::new(),
                 }],
                 ..FlowDeclarationConfig::default()
             }),
@@ -14744,6 +14771,98 @@ mod u4_current_plan_step_tests {
         let cfg = RalphConfig::default();
         let next = advance_plan_step(&cfg, "unit_loop", "review.start");
         assert_eq!(next, None);
+    }
+
+
+    /// 2026-07-26-004 plan U6 (R7 / R8): the flow authority advances by
+    /// DECLARED transition (`on` / `on_any_of`), is idempotent on repeat,
+    /// and branches a failed review wave straight to `finalize` (not
+    /// positionally through `synth_await` / `fix_plan`) — the
+    /// primary-20260726 flow-drift root cause. Mirrors the
+    /// implementation-review flow shape.
+    #[test]
+    fn u6_declared_transition_authority_is_idempotent_and_branching() {
+        let mk = |id: &str,
+                  allowed: Vec<&str>,
+                  on: Option<&str>,
+                  on_any_of: Vec<&str>|
+         -> FlowStepConfig {
+            FlowStepConfig {
+                id: id.to_string(),
+                kind: None,
+                allowed_emits: allowed.into_iter().map(String::from).collect(),
+                terminal_when: None,
+                on_partial: std::collections::BTreeMap::new(),
+                runs: None,
+                on: on.map(String::from),
+                on_any_of: on_any_of.into_iter().map(String::from).collect(),
+            }
+        };
+        let mut cfg = RalphConfig::default();
+        cfg.event_loop = EventLoopConfig {
+            mechanism: Some(MechanismConfig {
+                flow: Some(FlowDeclarationConfig {
+                    flow_type: "declared".to_string(),
+                    version: 1,
+                    terminal_emits: vec!["LOOP_COMPLETE".to_string()],
+                    steps: vec![
+                        mk("scope_freeze", vec!["scope.ready", "scope.blocked"], None, vec![]),
+                        mk(
+                            "review_wave",
+                            vec!["review.unit.done", "review.wave.complete", "review.wave.failed"],
+                            Some("scope.ready"),
+                            vec![],
+                        ),
+                        mk("synth_await", vec!["review.synthesized"], Some("review.wave.complete"), vec![]),
+                        mk("fix_plan", vec!["fix.plan.ready"], Some("review.synthesized"), vec![]),
+                        mk(
+                            "finalize",
+                            vec!["LOOP_COMPLETE"],
+                            None,
+                            vec!["fix.plan.ready", "scope.blocked", "review.wave.failed"],
+                        ),
+                    ],
+                    ..FlowDeclarationConfig::default()
+                }),
+                phase_authority: None,
+            }),
+            ..EventLoopConfig::default()
+        };
+
+        // Declared `on`: scope.ready transitions scope_freeze → review_wave.
+        assert_eq!(
+            advance_plan_step(&cfg, "scope_freeze", "scope.ready"),
+            Some("review_wave".to_string())
+        );
+        // Idempotent: scope.ready is not allowed at review_wave, so a
+        // replayed transition is a no-op (the step does not re-advance).
+        assert_eq!(advance_plan_step(&cfg, "review_wave", "scope.ready"), None);
+        // Non-transition unit terminal stays on review_wave.
+        assert_eq!(advance_plan_step(&cfg, "review_wave", "review.unit.done"), None);
+        // Declared `on`: review.wave.complete → synth_await.
+        assert_eq!(
+            advance_plan_step(&cfg, "review_wave", "review.wave.complete"),
+            Some("synth_await".to_string())
+        );
+        // BRANCH (on_any_of): review.wave.failed jumps straight to
+        // finalize, NOT positionally to synth_await.
+        assert_eq!(
+            advance_plan_step(&cfg, "review_wave", "review.wave.failed"),
+            Some("finalize".to_string())
+        );
+        // BRANCH from the first step: scope.blocked → finalize.
+        assert_eq!(
+            advance_plan_step(&cfg, "scope_freeze", "scope.blocked"),
+            Some("finalize".to_string())
+        );
+        // Recovery: rebuilding from the initial step + the accepted
+        // transition lands on the same step the live loop reached.
+        let initial = initial_current_plan_step(&cfg);
+        assert_eq!(initial, "scope_freeze");
+        assert_eq!(
+            advance_plan_step(&cfg, &initial, "scope.ready"),
+            Some("review_wave".to_string())
+        );
     }
 
     // 2026-07-24-005 plan U2 (R2 / R3 / S1 / S6): supervisor

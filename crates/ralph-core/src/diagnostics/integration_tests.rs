@@ -923,6 +923,8 @@ mod tests {
             on_partial: step.on_partial.clone(),
             total_units: None,
             runs: None,
+            on: None,
+            on_any_of: Vec::new(),
         };
         event_loop.stage_pipeline =
             crate::event_loop::stage_pipeline::StagePipeline::with_default_stages(flow);

@@ -1285,6 +1285,22 @@ pub struct FlowStepConfig {
     /// capability-triggered exemptions.
     #[serde(default)]
     pub runs: Option<String>,
+    /// 2026-07-26-004 plan U6 (R7 / R8): the single accepted topic
+    /// that transitions INTO this step (e.g. `review.start` enters
+    /// `review_wave`). `None` for the initial step (flow entry) and
+    /// for legacy linear flows that rely on positional advance.
+    /// Serialised as the quoted YAML key `"on"` (a YAML boolean word).
+    #[serde(default, rename = "on")]
+    pub on: Option<String>,
+    /// 2026-07-26-004 plan U6 (R8): branching entry — ANY of these
+    /// accepted topics transitions into this step (e.g. `finalize`
+    /// enters on_any_of `[fix.plan.ready, scope.blocked,
+    /// review.blocked, review.wave.failed]`). Empty for non-branching
+    /// steps. Takes precedence over positional advance so a failed
+    /// review wave jumps straight to `finalize` instead of walking
+    /// `synth_await` / `fix_plan`.
+    #[serde(default)]
+    pub on_any_of: Vec<String>,
 }
 
 impl FlowStepConfig {
