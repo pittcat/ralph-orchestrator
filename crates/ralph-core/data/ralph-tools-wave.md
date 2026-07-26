@@ -162,8 +162,8 @@ ralph wave emit [OPTIONS] <TOPIC>
 | `At least one payload is required` | `--payloads` 为空或 `--payloads-stdin` 未读到非空行 | 至少提供 1 个 payload |
 | ``--payloads` argument <i> contains multiple JSON payload lines` | 把多行 JSON 列表作为一个 shell 参数传给了 `--payloads` | 改用 `--payloads-stdin` |
 | `payload[<i>] is not a JSON object: ...` | 输入不是合法 JSON object | 确保每个 payload 都是 `{"key": ...}` object |
-| `Failed to create directory: <path>` | 父目录无写权限或路径非法 | 检查 `.ralph/` 父目录权限；或设置 `RALPH_EVENTS_FILE` 指向可写路径 |
-| `Failed to open events file: <path>` | 事件文件路径不可写或不存在 | 确认 `RALPH_EVENTS_FILE` / marker 指向的路径可写；或 `mkdir -p .ralph` |
+| `Failed to create directory: <path>` | 父目录无写权限或路径非法 | 检查 `.ralph/` 父目录权限；或调整 marker 指向的路径为可写位置 |
+| `Failed to open events file: <path>` | 事件文件路径不可写或不存在 | 确认 marker 指向的路径可写；或 `mkdir -p .ralph`。**wave worker 子进程内禁止改写 `RALPH_EVENTS_FILE`**（runtime 已注入合法落点，改写即拒收） |
 | `--idempotency-key must not be empty` | key 为空串 | 传非空字符串 |
 | `--idempotency-key must not be whitespace-only` | key 全是空白 | 同上 |
 | `--idempotency-key exceeds 256 bytes` | key 过长（>256B） | 缩短 |

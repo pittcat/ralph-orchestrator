@@ -592,6 +592,11 @@ _RALPH_INSPECT_CMDS=(
   # Returns loop_id, iteration, current_hat, HatIdentitySnapshot, events
   # path resolution, and hat-channel size — OPAC Observe source of truth.
   "loop:Read-only loop + hat identity diagnostic (OPAC Observe; U22 adds supervisor summary)"
+  # 2026-07-26-002 plan U9 (R9): add `inspect prompt` so the OPAC
+  # Observe cross-check (auto-inject + on-demand + block_titles)
+  # is discoverable from the shell alongside `inspect loop` /
+  # `inspect profiles`. Mirrors ralph-tools-cmdref.md.
+  "prompt:Preview hat prompt rendering (auto-inject + on-demand + block titles; OPAC Observe)"
 )
 
 _ralph_profile_spec() {
