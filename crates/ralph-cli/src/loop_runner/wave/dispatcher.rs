@@ -1187,8 +1187,9 @@ pub async fn execute_wave_structured(
     // `idle_heartbeat_secs()` returns `Option<u32>`; widen to `u64` for
     // `Duration::from_secs` (which takes `u64`). `None` / `Some(0)` is
     // already collapsed to `None` by `DetectedWave::idle_heartbeat_secs`.
-    let idle_heartbeat: Option<Duration> =
-        wave.idle_heartbeat_secs().map(|secs| Duration::from_secs(secs as u64));
+    let idle_heartbeat: Option<Duration> = wave
+        .idle_heartbeat_secs()
+        .map(|secs| Duration::from_secs(secs as u64));
     let idle_weak_signal_cap = wave.idle_weak_signal_cap();
     // Use an explicitly-configured aggregate timeout (worker or consumer)
     // directly.  Only fall back to the per-worker-timeout × batches formula
@@ -1504,8 +1505,9 @@ pub(crate) async fn execute_wave_via_supervisor_with_executor(
     // so the worker signature stays in `Duration` (compatible with the legacy
     // `wave_timeout: Duration` path). `None` / `Some(0)` is already collapsed to
     // `None` by `DetectedWave::idle_heartbeat_secs`.
-    let idle_heartbeat: Option<Duration> =
-        wave.idle_heartbeat_secs().map(|secs| Duration::from_secs(secs as u64));
+    let idle_heartbeat: Option<Duration> = wave
+        .idle_heartbeat_secs()
+        .map(|secs| Duration::from_secs(secs as u64));
     let idle_weak_signal_cap = wave.idle_weak_signal_cap();
     let aggregate_timeout =
         if wave.has_explicit_aggregate_timeout() || wave.consumer_aggregate_timeout.is_some() {
@@ -2770,12 +2772,14 @@ fn payload_object(
     let p = payload?;
     match p {
         serde_json::Value::Object(map) => Some(map.clone()),
-        serde_json::Value::String(s) => serde_json::from_str::<serde_json::Value>(s)
-            .ok()
-            .and_then(|v| match v {
-                serde_json::Value::Object(map) => Some(map),
-                _ => None,
-            }),
+        serde_json::Value::String(s) => {
+            serde_json::from_str::<serde_json::Value>(s)
+                .ok()
+                .and_then(|v| match v {
+                    serde_json::Value::Object(map) => Some(map),
+                    _ => None,
+                })
+        }
         _ => None,
     }
 }
@@ -6844,9 +6848,7 @@ hats: {}
             .register_wave("W1", ralph_core::supervisor::WaveKind::Review, 2)
             .expect("register");
         let bridge: Arc<dyn ralph_core::supervisor::SupervisorBridge> =
-            Arc::new(ralph_core::supervisor::InMemoryCoordinatorBridge::from_store(
-                store.clone(),
-            ));
+            Arc::new(ralph_core::supervisor::InMemoryCoordinatorBridge::from_store(store.clone()));
         merge_completed_review_slots_to_main(&main, &completed, &bridge, &wave_id);
         // P0-1: the helper must also commit `salvage_merged` so
         // the dispatcher's failure path can inject `*.wave.failed`.
@@ -6931,9 +6933,7 @@ hats: {}
             .register_wave("W-empty", ralph_core::supervisor::WaveKind::Review, 1)
             .expect("register");
         let bridge: Arc<dyn ralph_core::supervisor::SupervisorBridge> =
-            Arc::new(ralph_core::supervisor::InMemoryCoordinatorBridge::from_store(
-                store.clone(),
-            ));
+            Arc::new(ralph_core::supervisor::InMemoryCoordinatorBridge::from_store(store.clone()));
         merge_completed_review_slots_to_main(&main, &completed, &bridge, &wave_id);
         // No file is created when there is nothing to write —
         // the helper is a no-op for an empty `results` set.
@@ -7646,9 +7646,7 @@ hats: {}
 
         // Plan 004 R3 / P0-1: dispatcher must commit salvage BEFORE
         // `fail_wave` latches the coord-event injection.
-        bridge
-            .mark_salvage_merged(&store_wave_id)
-            .unwrap();
+        bridge.mark_salvage_merged(&store_wave_id).unwrap();
 
         let completed = ralph_core::CompletedWave {
             wave_id: "w-u4-fan-in".to_string(),
@@ -7783,9 +7781,7 @@ hats: {}
             .unwrap();
         // Plan 004 R3 / P0-1: dispatcher must commit salvage BEFORE
         // `fail_wave` latches the coord-event injection.
-        bridge
-            .mark_salvage_merged(&store_wave_id)
-            .unwrap();
+        bridge.mark_salvage_merged(&store_wave_id).unwrap();
 
         // completed.results carries ONLY slot 0's event (correctness);
         // `testing` is done via main, not via this fan-in's results.
@@ -8007,9 +8003,7 @@ hats: {}
             .unwrap();
         // Plan 004 R3 / P0-1: dispatcher must commit salvage BEFORE
         // `fail_wave` latches the coord-event injection.
-        bridge
-            .mark_salvage_merged(&store_wave_id)
-            .unwrap();
+        bridge.mark_salvage_merged(&store_wave_id).unwrap();
 
         let mut assigned = std::collections::HashMap::new();
         assigned.insert(0u32, "correctness".to_string());
@@ -8136,9 +8130,7 @@ hats: {}
             .unwrap();
         // Plan 004 R3 / P0-1: dispatcher must commit salvage BEFORE
         // `fail_wave` latches the coord-event injection.
-        bridge
-            .mark_salvage_merged(&store_wave_id)
-            .unwrap();
+        bridge.mark_salvage_merged(&store_wave_id).unwrap();
 
         let mut assigned = std::collections::HashMap::new();
         assigned.insert(0u32, "correctness".to_string());
@@ -8400,9 +8392,7 @@ hats: {}
         use ralph_core::supervisor::SupervisorBridge as _;
         use ralph_core::wave_tracker::CompletedWave;
         let bridge: Arc<dyn ralph_core::supervisor::SupervisorBridge> =
-            Arc::new(ralph_core::supervisor::InMemoryCoordinatorBridge::from_store(
-                store.clone(),
-            ));
+            Arc::new(ralph_core::supervisor::InMemoryCoordinatorBridge::from_store(store.clone()));
         let completed = CompletedWave {
             wave_id: wave_id.to_string(),
             wave_total: assigned_dimensions.len() as u32,
@@ -8422,14 +8412,12 @@ hats: {}
     /// P1-6 #1: evidence topic != "review.unit.done" is rejected.
     #[test]
     fn p1_6_wrong_evidence_topic_is_rejected() {
-        use ralph_core::supervisor::{
-            SlotResource, SupervisorStore, TerminalEvidence, WaveKind,
-        };
+        use ralph_core::supervisor::{SlotResource, SupervisorStore, TerminalEvidence, WaveKind};
         let store = std::sync::Arc::new(ralph_core::supervisor::InMemorySupervisorStore::new());
         let wave = store
             .register_wave("p1-6-topic", WaveKind::Review, 1)
             .unwrap();
-                let _ = store.try_dispatch_next(2).unwrap().unwrap();
+        let _ = store.try_dispatch_next(2).unwrap().unwrap();
         store.record_slot_result(&wave, 0, "h", 1).unwrap();
         store
             .record_slot_terminal_evidence(
@@ -8454,14 +8442,12 @@ hats: {}
     /// P1-6 #2: evidence with no dimension is rejected.
     #[test]
     fn p1_6_missing_dimension_is_rejected() {
-        use ralph_core::supervisor::{
-            SlotResource, SupervisorStore, TerminalEvidence, WaveKind,
-        };
+        use ralph_core::supervisor::{SlotResource, SupervisorStore, TerminalEvidence, WaveKind};
         let store = std::sync::Arc::new(ralph_core::supervisor::InMemorySupervisorStore::new());
         let wave = store
             .register_wave("p1-6-dim", WaveKind::Review, 1)
             .unwrap();
-                let _ = store.try_dispatch_next(2).unwrap().unwrap();
+        let _ = store.try_dispatch_next(2).unwrap().unwrap();
         store.record_slot_result(&wave, 0, "h", 1).unwrap();
         // Note: TerminalEvidence::from_event without a dimension
         // field yields dimension=None (matches the legacy
@@ -8487,14 +8473,12 @@ hats: {}
     /// P1-6 #3: evidence dimension != assigned is rejected.
     #[test]
     fn p1_6_dimension_mismatch_is_rejected() {
-        use ralph_core::supervisor::{
-            SlotResource, SupervisorStore, TerminalEvidence, WaveKind,
-        };
+        use ralph_core::supervisor::{SlotResource, SupervisorStore, TerminalEvidence, WaveKind};
         let store = std::sync::Arc::new(ralph_core::supervisor::InMemorySupervisorStore::new());
         let wave = store
             .register_wave("p1-6-mis", WaveKind::Review, 1)
             .unwrap();
-                let _ = store.try_dispatch_next(2).unwrap().unwrap();
+        let _ = store.try_dispatch_next(2).unwrap().unwrap();
         store.record_slot_result(&wave, 0, "h", 1).unwrap();
         store
             .record_slot_terminal_evidence(
@@ -8522,14 +8506,10 @@ hats: {}
     /// P1-6 #4: slot has no assigned dimension at all → refuse.
     #[test]
     fn p1_6_no_assigned_dimension_is_rejected() {
-        use ralph_core::supervisor::{
-            SlotResource, SupervisorStore, TerminalEvidence, WaveKind,
-        };
+        use ralph_core::supervisor::{SlotResource, SupervisorStore, TerminalEvidence, WaveKind};
         let store = std::sync::Arc::new(ralph_core::supervisor::InMemorySupervisorStore::new());
-        let wave = store
-            .register_wave("p1-6-na", WaveKind::Review, 1)
-            .unwrap();
-                let _ = store.try_dispatch_next(2).unwrap().unwrap();
+        let wave = store.register_wave("p1-6-na", WaveKind::Review, 1).unwrap();
+        let _ = store.try_dispatch_next(2).unwrap().unwrap();
         store.record_slot_result(&wave, 0, "h", 1).unwrap();
         store
             .record_slot_terminal_evidence(
@@ -8554,14 +8534,10 @@ hats: {}
     /// accepted.
     #[test]
     fn p1_6_matching_evidence_dimension_accepted() {
-        use ralph_core::supervisor::{
-            SlotResource, SupervisorStore, TerminalEvidence, WaveKind,
-        };
+        use ralph_core::supervisor::{SlotResource, SupervisorStore, TerminalEvidence, WaveKind};
         let store = std::sync::Arc::new(ralph_core::supervisor::InMemorySupervisorStore::new());
-        let wave = store
-            .register_wave("p1-6-ok", WaveKind::Review, 1)
-            .unwrap();
-                let _ = store.try_dispatch_next(2).unwrap().unwrap();
+        let wave = store.register_wave("p1-6-ok", WaveKind::Review, 1).unwrap();
+        let _ = store.try_dispatch_next(2).unwrap().unwrap();
         store.record_slot_result(&wave, 0, "h", 1).unwrap();
         store
             .record_slot_terminal_evidence(

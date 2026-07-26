@@ -342,10 +342,7 @@ pub async fn run_wave_worker_pty(
             Option<(u64, Option<std::time::SystemTime>)>,
         )> = events_file_path.map(|p| {
             let prev_meta = fs::metadata(&p).ok();
-            (
-                p,
-                prev_meta.map(|m| (m.len(), m.modified().ok())),
-            )
+            (p, prev_meta.map(|m| (m.len(), m.modified().ok())))
         });
         let mut events_tick_interval = tokio::time::interval(Duration::from_millis(250));
         // Don't fire immediately on the first tick.

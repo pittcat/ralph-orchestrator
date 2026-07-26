@@ -288,11 +288,10 @@ impl LeaseState {
             // counter — only the clock moves.
             (_, HeartbeatKind::None) => {
                 self.now_ms = now_ms;
-            }
-            // (LeaseDecision::Continue, HeartbeatKind::Strong)
-            // already covered above by the Strong arm.
-            // (LeaseDecision::Continue, HeartbeatKind::None)
-            // already covered above by the None arm.
+            } // (LeaseDecision::Continue, HeartbeatKind::Strong)
+              // already covered above by the Strong arm.
+              // (LeaseDecision::Continue, HeartbeatKind::None)
+              // already covered above by the None arm.
         }
         decision
     }
@@ -368,7 +367,9 @@ fn classify_claude_assistant_fallback(_line: &str) -> HeartbeatKind {
 
 fn classify_pi(line: &str) -> HeartbeatKind {
     match PiStreamParser::parse_line(line) {
-        Some(PiStreamEvent::MessageUpdate { assistant_message_event }) => match assistant_message_event {
+        Some(PiStreamEvent::MessageUpdate {
+            assistant_message_event,
+        }) => match assistant_message_event {
             // Text + extended-thinking deltas count as Weak (per R5).
             // The model is still streaming progress; the lease just
             // only refreshes up to `idle_weak_signal_cap` in a row.
@@ -556,17 +557,11 @@ mod tests {
         // Non-assistant / non-user events (e.g. `message_start`,
         // `message_delta`, `message_stop`, or future-only `type` tags).
         assert_eq!(
-            classify_heartbeat_line(
-                r#"{"type":"message_stop"}"#,
-                OutputFormat::StreamJson
-            ),
+            classify_heartbeat_line(r#"{"type":"message_stop"}"#, OutputFormat::StreamJson),
             HeartbeatKind::None
         );
         assert_eq!(
-            classify_heartbeat_line(
-                r#"{"type":"ping","ts":1}"#,
-                OutputFormat::StreamJson
-            ),
+            classify_heartbeat_line(r#"{"type":"ping","ts":1}"#, OutputFormat::StreamJson),
             HeartbeatKind::None
         );
     }
@@ -611,7 +606,8 @@ mod tests {
 
     #[test]
     fn pi_error_is_none() {
-        let line = r#"{"type":"message_update","assistantMessageEvent":{"type":"error","reason":"boom"}}"#;
+        let line =
+            r#"{"type":"message_update","assistantMessageEvent":{"type":"error","reason":"boom"}}"#;
         assert_eq!(
             classify_heartbeat_line(line, OutputFormat::PiStreamJson),
             HeartbeatKind::None
@@ -666,10 +662,7 @@ mod tests {
     #[test]
     fn cursor_malformed_is_none() {
         assert_eq!(
-            classify_heartbeat_line(
-                "{garbage",
-                OutputFormat::AgentStreamJson
-            ),
+            classify_heartbeat_line("{garbage", OutputFormat::AgentStreamJson),
             HeartbeatKind::None
         );
     }
