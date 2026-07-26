@@ -83,7 +83,7 @@ const PRESETS: &[EmbeddedPreset] = &[
     },
     EmbeddedPreset {
         name: "post-merge-converge",
-        description: "After all development plans are merged: baseline, change map, six-dimension system audit, test-gap plan, per-finding reproduce/fix/regression, clean-env validation, and independent final review",
+        description: "After one or more development plans have landed in the current branch: baseline, change map, six-dimension system audit, test-gap plan, per-finding reproduce/fix/regression, clean-env validation, and independent final review",
         content: include_str!(concat!(env!("OUT_DIR"), "/presets/post-merge-converge.yml")),
         public: true,
     },

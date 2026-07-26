@@ -36,7 +36,7 @@
   },
   {
     "name": "post-merge-converge",
-    "description": "After all development plans are merged: baseline, change map, six-dimension audit, test-gap, per-finding reproduce/fix with confidence redo-first, clean-env + final review, then operator REPORT.md before complete",
+    "description": "After one or more development plans have landed in the current branch: baseline, change map, six-dimension audit, test-gap, per-finding reproduce/fix with confidence redo-first, clean-env + final review, then operator REPORT.md before complete",
     "category": "workflow"
   }
 ]

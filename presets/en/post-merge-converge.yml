@@ -1,7 +1,9 @@
 # Post-Merge Converge Preset
 #
-# After multiple development plans are fully merged into the final branch,
-# treat the tree as one system: baseline → change map → six-dimension
+# After one or more development plans have landed in the current final
+# branch / final code tree, whether via merge commits or sequential commits
+# on the same branch, treat the tree as one system: baseline → change map →
+# six-dimension
 # system audit → test-gap plan → per-Finding reproduce → per-Finding
 # root-cause/fix/regression → clean-env + final independent review.
 #
@@ -20,10 +22,12 @@
 # referenced by `ralph.post-merge.yml`):
 #   - Optional: final branch name
 #   - Optional: development plan paths/IDs (if omitted, agent discovers
-#     via git log / merge history matching docs/plans/)
+#     via git log / commit chronology / branch history matching docs/plans/)
 #   - Optional: verification command overrides
 #
 # Does NOT re-execute individual plans and does NOT re-merge branches.
+# A single branch may already contain multiple completed plans; treat them
+# as input, not as separate merge work.
 #
 # Usage:
 #   ralph run -c ralph.post-merge.yml -H builtin:post-merge-converge
@@ -51,12 +55,15 @@ tasks:
 event_loop:
   execution_mode: isolated
   prompt: |
-    Post-merge system convergence on the final merged branch.
+    Post-merge system convergence on the current final code tree after one
+    or more development plans have landed.
 
     Read the prompt file for:
     - Optional final branch name (default: current branch)
     - Optional development plan list (paths or IDs). If omitted, discover
-      plans via git history matching docs/plans/ (and repo plan conventions).
+      plans via git history, commit chronology, and branch subjects matching
+      docs/plans/ (and repo plan conventions). Same-branch sequential plans
+      are in scope.
     - Optional verification command overrides
 
     Do NOT re-run individual development plans. Do NOT re-merge branches.
@@ -278,7 +285,7 @@ hats:
 
       ### Plan discovery + confidence
       1. If the prompt lists development plan paths/IDs, use that list as authoritative (`plan_match_confidence: high` when all resolve).
-      2. If the prompt omits plans, discover via `git log` / merge commits / branch subjects and match to `docs/plans/` (and repo plan conventions). Record unmatched commits as unmatched.
+      2. If the prompt omits plans, discover via `git log` / commit chronology / branch subjects and match to `docs/plans/` (and repo plan conventions). Record unmatched commits as unmatched. For same-branch sequential plans, prefer commit order and completion evidence over merge ancestry.
       3. Score `plan_match_confidence` high|medium|low. If low and high-risk crossings depend on ambiguous matches: deepen matching once (more log/plan reads) before emit; if still low, keep low and document ambiguities in the artifact for auditor/reporter.
 
       ### Work

@@ -1,7 +1,8 @@
 # Authoring SSOT for `post-merge-converge` `event_policy.schemas`.
 #
-# Post-merge system convergence after all development plans are already
-# merged into the final branch. Flat 8-hat linear chain with two
+# Post-merge system convergence after one or more development plans are
+# already landed in the current final branch / final code tree. Flat 8-hat
+# linear chain with two
 # self-loops (reproducer / fixer) for per-Finding work.
 #
 # Topic coverage:
@@ -76,8 +77,8 @@ schemas:
         fill_rule: Non-negative integer matching the table row count.
       plan_match_confidence:
         meaning: Confidence that commit↔plan mappings (especially auto-discovered ones) are correct.
-        source: Prompt plan list (high) or git-history matching quality (medium/low).
-        fill_rule: high when prompt listed plans and all matched; medium when most auto-matches are clear; low when many unmatched/ambiguous — deepen matching before emit when low and high-risk crossings depend on those matches.
+        source: Prompt plan list (high) or git-history / commit chronology / branch-history matching quality (medium/low).
+        fill_rule: high when prompt listed plans and all matched; medium when most auto-matches are clear, including same-branch sequential plans resolved by commit order; low when many unmatched/ambiguous — deepen matching before emit when low and high-risk crossings depend on those matches.
 
   postmerge.audit.ready:
     required_fields:

@@ -1,9 +1,10 @@
 # Preset Author Notes — post-merge-converge
 
-## Revision 2026-07-26 (P1 remediation from review)
+## Revision 2026-07-26 (sequential same-branch plan coverage)
 
 - Consumer Observe binds trigger `artifact_path` (reproducer / system-auditor / change-mapper)
 - test-gap lists full `.ralph/post-merge/03…08` paths
+- change-mapper treats prompt plans as authoritative and otherwise discovers ordered plans from git chronology / branch subjects, not just merge ancestry
 - fixer selects Finding from `.ralph/post-merge/findings/` when `reproduce.ready` has no `finding_id`
 - Artifact lifecycle declared: owner + retention + operator-owned cleanup; agents must not wipe dir
 
@@ -16,9 +17,9 @@
 
 ## Preset Intent Confirmation
 
-- **目标：** 多开发计划已全部合入最终分支后，将当前最终代码视为完整系统，串行完成跨计划组合审计、系统级测试补充、按 Finding 最小修复、回归与干净环境验证、独立终审。
+- **目标：** 一个或多个开发计划已在当前最终分支/最终代码树中完成后，将当前最终代码视为完整系统，串行完成跨计划组合审计、系统级测试补充、按 Finding 最小修复、回归与干净环境验证、独立终审。
 - **操作者与启动路径：** `ralph run -c ralph.post-merge.yml -H builtin:post-merge-converge`；`ralph.post-merge.yml` 指向 `.ralph/post-merge.prompt.md`（gitignore）；仓库内 `post-merge.prompt.md` 为可复制模板。
-- **输入与事实源：** 最少输入=已在最终分支且基线可验证；prompt 可给计划列表，未给则 git log 匹配 `docs/plans/`。
+- **输入与事实源：** 最少输入=当前最终分支/最终代码树且基线可验证；prompt 可给计划列表，未给则 git log / commit chronology / branch subjects 匹配 `docs/plans/`，同分支顺序完成的计划也在范围内。
 - **成功条件：** Final Review `PASS` 或 `PASS WITH ACCEPTED RISKS`；P0/P1 关闭或 accepted；干净环境通过。
 - **阻塞条件：** 基线无效或 P0/P1 未关闭且未 accepted → `postmerge.fix.ready{passed:false}` → closer `FAIL` / `success:false`（merge-batch 式全路径收敛，不用 plan.blocked 旁路）。
 - **允许的修改范围：** 审计/地图/test-gap/终审只读生产代码；reproducer 只写失败测试；fixer 按 Finding 最小修复。
@@ -34,7 +35,7 @@
 | Hat | PDF steps | 融合注意 |
 |---|---|---|
 | baseline | 01 | 未合并 |
-| change-mapper | 02 | 未合并；计划发现=prompt 优先否则 git |
+| change-mapper | 02 | 未合并；计划发现=prompt 优先否则 git  chronology / branch subjects |
 | system-auditor | 03–08 | **六份独立文档仍分写**；只读；Finding 在此创建 |
 | test-gap | 09 | 只设计不实现失败测试 |
 | reproducer | 10 | 自环；一 Finding/activation；禁改生产代码 |
@@ -66,7 +67,7 @@ Hard questions — Artifact-First: ✓（`.ralph/post-merge/` 为业务 artifact
 ## Hat: change-mapper
 
 - **Q1 使命:** 建立整体变更地图
-- **Q2 输入:** 读 trigger `artifact_path`（baseline）；计划列表或 git 发现
+- **Q2 输入:** 读 trigger `artifact_path`（baseline）；计划列表或 git 发现（按 commit chronology / branch subjects 排序，同分支顺序完成也在范围内）
 - **Q3:** 短路面 → 建四表 → emit
 - **Q4:** `postmerge.changemap.ready`
 - **Q5:** trigger `artifact_path`（地图）→ system-auditor
@@ -75,7 +76,7 @@ Hard questions — Artifact-First: ✓（`.ralph/post-merge/` 为业务 artifact
 
 | topic | 字段 | 类型 | 值源 | 可见性 | 身份检查 | 下游消费 | schema metadata | artifact 落盘 |
 |---|---|---|---|---|---|---|---|---|
-| postmerge.changemap.ready | proceed | bool | baseline_valid+地图完成 | trigger+本 hat | 不涉及 | auditor 短路 | field_docs | 不落盘 + 短控制 |
+| postmerge.changemap.ready | proceed | bool | baseline_valid+地图完成（按 prompt / git chronology） | trigger+本 hat | 不涉及 | auditor 短路 | field_docs | 不落盘 + 短控制 |
 | postmerge.changemap.ready | artifact_path | path | 本 hat 写入 | 本 hat | 不涉及 | 读四表 | field_docs | 必填 · `02-change-map.md` |
 | postmerge.changemap.ready | high_risk_crossings_count | int | 高风险表行数 | artifact | 不涉及 | 审计优先级 | field_docs | 不落盘 + 可从 artifact 重算 |
 
