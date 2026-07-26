@@ -4809,6 +4809,7 @@ fn test_u6_failed_payload_exposes_per_slot_reasons() {
         &completed,
         "required_slot_failure",
         vec![0, 2, 4],
+        &std::collections::HashMap::new(),
     );
     let obj = payload.as_object().expect("payload must be a JSON object");
 

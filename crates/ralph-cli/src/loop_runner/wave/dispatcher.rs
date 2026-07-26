@@ -2230,14 +2230,17 @@ pub(crate) fn run_supervisor_fan_in(
                      continuing anyway — the wave failure is already recorded"
                 );
             }
-            // 2026-07-25-004 plan U5 (R6 / AE5): write the per-slot
-            // diagnostics JSON after recording never_started (so Pending
-            // slots have correct reasons) and BEFORE the coord event so
-            // a diagnostic file is available even if the append fails.
-            // Best-effort: write failures warn but do NOT block fan-in.
-            if let Ok(snap) = bridge.fan_in_status(&store_wave_id) {
+            // 2026-07-26-002 plan U5 (R5 / KTD6): derive `reasons` from the
+            // store (NOT from `completed.failures` free-form text) so
+            // `slot_failures` and `blocking_slots` index sets agree
+            // and the per-slot reason is a stable code from
+            // `slot_failure_reason` rather than whatever the
+            // worker wrote into the failure envelope.
+            let snap_for_reasons = bridge.fan_in_status(&store_wave_id);
+            let mut reasons: std::collections::HashMap<u32, String> =
+                std::collections::HashMap::new();
+            if let Ok(snap) = snap_for_reasons.as_ref() {
                 use ralph_core::supervisor::SlotStatus;
-                let mut reasons = std::collections::HashMap::new();
                 for (idx, status) in &snap.slots {
                     if matches!(status, SlotStatus::Failed | SlotStatus::Cancelled) {
                         match bridge.slot_failure_reason(&store_wave_id, *idx) {
@@ -2245,7 +2248,7 @@ pub(crate) fn run_supervisor_fan_in(
                                 reasons.insert(*idx, r);
                             }
                             Ok(None) => {
-                                // no recorded reason; diagnostics JSON keeps reason=null
+                                // no recorded reason; payload keeps reason=null
                             }
                             Err(err) => {
                                 warn!(
@@ -2253,12 +2256,19 @@ pub(crate) fn run_supervisor_fan_in(
                                     slot_index = *idx,
                                     error = %err,
                                     "U5: slot_failure_reason lookup failed; \
-                                     diagnostics JSON keeps reason=null for this slot"
+                                     payload keeps reason=null for this slot"
                                 );
                             }
                         }
                     }
                 }
+            }
+            // 2026-07-25-004 plan U5 (R6 / AE5): write the per-slot
+            // diagnostics JSON after recording never_started (so Pending
+            // slots have correct reasons) and BEFORE the coord event so
+            // a diagnostic file is available even if the append fails.
+            // Best-effort: write failures warn but do NOT block fan-in.
+            if let Ok(snap) = snap_for_reasons.as_ref() {
                 let elapsed_secs = snap.started_at.elapsed().map(|d| d.as_secs()).unwrap_or(0);
                 let payload = build_wave_failed_slots_json(
                     &completed.wave_id,
@@ -2279,7 +2289,7 @@ pub(crate) fn run_supervisor_fan_in(
                     );
                 }
             }
-            let payload = build_wave_failed_payload(wave_kind, completed, reason, blocking_slots);
+            let payload = build_wave_failed_payload(wave_kind, completed, reason, blocking_slots, &reasons);
             append_supervisor_coord_event(main_events_file, &topic, &payload);
             SupervisorFanInOutcome::InjectedFailed
         }
@@ -2451,6 +2461,7 @@ pub(crate) fn build_wave_failed_payload(
     completed: &ralph_core::CompletedWave,
     reason: &str,
     blocking_slots: Vec<u32>,
+    reasons: &std::collections::HashMap<u32, String>,
 ) -> serde_json::Value {
     use ralph_core::supervisor::WaveKind;
 
@@ -2470,28 +2481,45 @@ pub(crate) fn build_wave_failed_payload(
             })
         }
         WaveKind::Exec | WaveKind::Fix => {
-            // 2026-07-25-003 plan U6 (R5 / R4): expose per-slot
-            // failure reasons alongside `blocking_slots` so the
-            // operator can tell a `worker_timeout` apart from an
-            // `empty_worker_result` without re-running diagnostics.
-            // The field is OPTIONAL — `presets/schemas/...yml`
-            // `required_fields` does not list it, so the engine
-            // gate still passes — and the integrator hat (e.g.
-            // `exec-failure-handler`) treats unknown fields as
-            // advisory. Downstream consumers that DO care about
-            // the per-slot reasons get a stable
-            // `[{slot_index, reason, duration_ms}, ...]` shape.
-            let slot_failures: Vec<serde_json::Value> = completed
-                .failures
-                .iter()
-                .map(|f| {
-                    serde_json::json!({
-                        "slot_index": f.index,
-                        "reason": f.error,
-                        "duration_ms": f.duration.as_millis(),
-                    })
-                })
-                .collect();
+            // 2026-07-25-003 plan U6 (R5 / R4) + 2026-07-26-002
+            // plan U5 (R5 / KTD6): per-slot `slot_failures` is
+            // derived from the supervisor store's frozen
+            // `failure_reason` codes (NOT from `completed.failures`
+            // free-form text), restricted to `blocking_slots` so
+            // the index set agrees exactly. This is the SSOT for
+            // downstream consumers (integrator / alignment /
+            // reporter) — they no longer parse worker-written
+            // `error` strings to tell a `worker_timeout` apart from
+            // an `empty_worker_result`.
+            let mut slot_failures: Vec<serde_json::Value> = Vec::new();
+            for idx in &blocking_slots {
+                let stored_reason = reasons.get(idx).cloned();
+                let fallback_reason = completed
+                    .failures
+                    .iter()
+                    .find(|f| f.index == *idx)
+                    .map(|f| f.error.clone());
+                let duration_ms = completed
+                    .failures
+                    .iter()
+                    .find(|f| f.index == *idx)
+                    .map(|f| f.duration.as_millis())
+                    .unwrap_or(0);
+                let reason = stored_reason.or(fallback_reason);
+                let entry = match reason {
+                    Some(r) => serde_json::json!({
+                        "slot_index": idx,
+                        "reason": r,
+                        "duration_ms": duration_ms,
+                    }),
+                    None => serde_json::json!({
+                        "slot_index": idx,
+                        "reason": serde_json::Value::Null,
+                        "duration_ms": duration_ms,
+                    }),
+                };
+                slot_failures.push(entry);
+            }
             serde_json::json!({
                 "wave_id": completed.wave_id,
                 "reason": reason,
@@ -6517,6 +6545,95 @@ hats: {}
             .expect("slot 1 must exist");
         assert_eq!(s1["status"], "failed");
         assert_eq!(s1["reason"], "worker_timeout");
+    }
+
+    /// 2026-07-26-002 plan U5 (R5 / KTD6): `slot_failures` MUST be
+    /// derived from the store's frozen reason codes filtered by
+    /// `blocking_slots` — the index set of `slot_failures` must
+    /// equal `blocking_slots` exactly, and the reason strings
+    /// must come from the `reasons` map (NOT from
+    /// `completed.failures` free-form text).
+    #[test]
+    fn u5_slot_failures_matches_blocking_slots_from_store() {
+        use ralph_core::supervisor::WaveKind;
+
+        // 3 slots: 0 success, 1 worker_timeout, 2 empty_worker_result
+        let completed = ralph_core::CompletedWave {
+            wave_id: "w-u5-ssot".to_string(),
+            wave_total: 3,
+            ..ralph_core::CompletedWave::default()
+        };
+        let blocking_slots = vec![1u32, 2];
+        // Store-derived reasons (frozen codes).
+        let mut reasons = std::collections::HashMap::new();
+        reasons.insert(1u32, "worker_timeout".to_string());
+        reasons.insert(2u32, "empty_worker_result".to_string());
+
+        let payload = build_wave_failed_payload(
+            WaveKind::Exec,
+            &completed,
+            "wave_failed",
+            blocking_slots.clone(),
+            &reasons,
+        );
+
+        // slot_failures must be present and its index set must equal blocking_slots.
+        let slot_failures = payload["slot_failures"]
+            .as_array()
+            .expect("slot_failures must be an array");
+        let sf_indices: std::collections::BTreeSet<u32> = slot_failures
+            .iter()
+            .map(|s| s["slot_index"].as_u64().unwrap() as u32)
+            .collect();
+        let bs_indices: std::collections::BTreeSet<u32> =
+            blocking_slots.iter().copied().collect();
+        assert_eq!(
+            sf_indices, bs_indices,
+            "slot_failures index set must equal blocking_slots; got slot_failures={sf_indices:?}, blocking_slots={bs_indices:?}"
+        );
+
+        // Reasons are taken from the store, not from free-form text.
+        let s1 = slot_failures
+            .iter()
+            .find(|s| s["slot_index"] == 1)
+            .expect("slot 1 must be present");
+        let s2 = slot_failures
+            .iter()
+            .find(|s| s["slot_index"] == 2)
+            .expect("slot 2 must be present");
+        assert_eq!(s1["reason"], "worker_timeout");
+        assert_eq!(s2["reason"], "empty_worker_result");
+    }
+
+    /// 2026-07-26-002 plan U5 (R5): when the store has NO reason for
+    /// a blocking slot (e.g., legacy store without `record_slot_failure`),
+    /// the payload must still include that slot in `slot_failures`
+    /// — keeping the index-set invariant — but with `reason: null`,
+    /// NOT a free-form fallback string from `completed.failures`.
+    #[test]
+    fn u5_slot_failures_no_store_reason_yields_null() {
+        use ralph_core::supervisor::WaveKind;
+
+        let completed = ralph_core::CompletedWave {
+            wave_id: "w-u5-null".to_string(),
+            wave_total: 1,
+            ..ralph_core::CompletedWave::default()
+        };
+        let payload = build_wave_failed_payload(
+            WaveKind::Exec,
+            &completed,
+            "wave_failed",
+            vec![7u32],
+            &std::collections::HashMap::new(),
+        );
+
+        let slot_failures = payload["slot_failures"].as_array().unwrap();
+        assert_eq!(slot_failures.len(), 1);
+        assert_eq!(slot_failures[0]["slot_index"], 7);
+        assert!(
+            slot_failures[0]["reason"].is_null(),
+            "no-store-reason slot must report null, not free-form text"
+        );
     }
 
     // -------------------------------------------------------------------
