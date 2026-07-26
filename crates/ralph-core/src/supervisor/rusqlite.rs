@@ -771,6 +771,111 @@ impl SupervisorStore for RusqliteSupervisorStore {
         })
     }
 
+
+    fn record_slot_terminal_evidence(
+        &self,
+        wave_id: &str,
+        slot_index: u32,
+        evidence: &super::TerminalEvidence,
+    ) -> SupervisorStoreResult<()> {
+        self.with_conn(|conn| {
+            // Read the existing evidence triple (NULL topic == no
+            // evidence yet). `.optional()?` lifts "no such slot row"
+            // into `UnknownSlot`, symmetric with the in-memory store.
+            let existing: Option<(Option<String>, Option<String>, Option<String>)> = conn
+                .query_row(
+                    "SELECT evidence_topic, evidence_dimension, evidence_fingerprint
+                     FROM wave_slots WHERE wave_id = ?1 AND slot_index = ?2",
+                    rusqlite::params![wave_id, i64::from(slot_index)],
+                    |row| {
+                        Ok((
+                            row.get::<_, Option<String>>(0)?,
+                            row.get::<_, Option<String>>(1)?,
+                            row.get::<_, Option<String>>(2)?,
+                        ))
+                    },
+                )
+                .optional()?;
+            let Some((topic, dimension, fingerprint)) = existing else {
+                return Err(SupervisorStoreError::UnknownSlot {
+                    wave_id: wave_id.to_string(),
+                    slot_index,
+                });
+            };
+            match topic {
+                // 2026-07-26-004 plan U2 (R3): idempotent same-evidence
+                // replay is a no-op; conflicting evidence fails closed.
+                Some(existing_topic) => {
+                    let existing_ev = super::TerminalEvidence {
+                        topic: existing_topic,
+                        dimension,
+                        payload_fingerprint: fingerprint.unwrap_or_default(),
+                    };
+                    if &existing_ev == evidence {
+                        Ok(())
+                    } else {
+                        Err(SupervisorStoreError::AlreadyTerminal(format!(
+                            "wave={wave_id} slot={slot_index} terminal evidence conflict: \
+                             existing={existing_ev:?} incoming={evidence:?}"
+                        )))
+                    }
+                }
+                None => {
+                    conn.execute(
+                        "UPDATE wave_slots
+                         SET evidence_topic = ?3, evidence_dimension = ?4, evidence_fingerprint = ?5
+                         WHERE wave_id = ?1 AND slot_index = ?2",
+                        rusqlite::params![
+                            wave_id,
+                            i64::from(slot_index),
+                            evidence.topic,
+                            evidence.dimension,
+                            evidence.payload_fingerprint,
+                        ],
+                    )?;
+                    Ok(())
+                }
+            }
+        })
+    }
+
+    fn slot_terminal_evidence(
+        &self,
+        wave_id: &str,
+        slot_index: u32,
+    ) -> SupervisorStoreResult<Option<super::TerminalEvidence>> {
+        self.with_conn(|conn| {
+            let row: Option<(Option<String>, Option<String>, Option<String>)> = conn
+                .query_row(
+                    "SELECT evidence_topic, evidence_dimension, evidence_fingerprint
+                     FROM wave_slots WHERE wave_id = ?1 AND slot_index = ?2",
+                    rusqlite::params![wave_id, i64::from(slot_index)],
+                    |row| {
+                        Ok((
+                            row.get::<_, Option<String>>(0)?,
+                            row.get::<_, Option<String>>(1)?,
+                            row.get::<_, Option<String>>(2)?,
+                        ))
+                    },
+                )
+                .optional()?;
+            match row {
+                None => Err(SupervisorStoreError::UnknownSlot {
+                    wave_id: wave_id.to_string(),
+                    slot_index,
+                }),
+                // NULL topic == legacy / no evidence → `None`
+                // (reconciliation treats this as not-provably-done).
+                Some((None, _, _)) => Ok(None),
+                Some((Some(topic), dimension, fingerprint)) => Ok(Some(super::TerminalEvidence {
+                    topic,
+                    dimension,
+                    payload_fingerprint: fingerprint.unwrap_or_default(),
+                })),
+            }
+        })
+    }
+
     fn cancel_wave(&self, wave_id: &str) -> SupervisorStoreResult<()> {
         use crate::supervisor::worker_outcome::REASON_SLOT_NEVER_STARTED;
         self.with_conn(|conn| {
@@ -1454,6 +1559,44 @@ mod tests {
     fn store() -> RusqliteSupervisorStore {
         let conn = Connection::open_in_memory().unwrap();
         RusqliteSupervisorStore::from_connection(conn).unwrap()
+    }
+
+
+    /// 2026-07-26-004 plan U2 (KTD3 / R2 / R3): rusqlite parity with
+    /// the in-memory store — terminal evidence round-trips through the
+    /// v4 `evidence_*` columns, same-evidence replay is a no-op,
+    /// conflicting evidence fails closed, and a legacy slot recorded
+    /// before evidence existed reads back as `None`.
+    #[test]
+    fn u2_terminal_evidence_round_trip_and_conflict() {
+        use crate::supervisor::TerminalEvidence;
+        let s = store();
+        let wave = s.register_wave("k-ev", WaveKind::Review, 2).unwrap();
+        // Legacy: a slot that reached Completed via record_slot_result
+        // WITHOUT evidence reads back as None (not provably done).
+        s.record_slot_result(&wave, 1, "hash-legacy", 1).unwrap();
+        assert_eq!(s.slot_terminal_evidence(&wave, 1).unwrap(), None);
+        // Never-completed slot also None.
+        assert_eq!(s.slot_terminal_evidence(&wave, 0).unwrap(), None);
+
+        let ev =
+            TerminalEvidence::from_event("review.unit.done", "{\"dimension\":\"correctness\"}");
+        assert_eq!(ev.dimension.as_deref(), Some("correctness"));
+        s.record_slot_terminal_evidence(&wave, 0, &ev).unwrap();
+        assert_eq!(s.slot_terminal_evidence(&wave, 0).unwrap(), Some(ev.clone()));
+
+        // Idempotent same-evidence replay → Ok no-op.
+        s.record_slot_terminal_evidence(&wave, 0, &ev).unwrap();
+        assert_eq!(s.slot_terminal_evidence(&wave, 0).unwrap(), Some(ev.clone()));
+
+        // Conflicting evidence → AlreadyTerminal, original preserved.
+        let other = TerminalEvidence::from_event("review.unit.done", "{\"dimension\":\"testing\"}");
+        let conflict = s.record_slot_terminal_evidence(&wave, 0, &other);
+        assert!(
+            matches!(conflict, Err(SupervisorStoreError::AlreadyTerminal(_))),
+            "conflicting evidence must fail closed; got {conflict:?}"
+        );
+        assert_eq!(s.slot_terminal_evidence(&wave, 0).unwrap(), Some(ev));
     }
 
     fn bind(slot: u32) -> SlotResource {

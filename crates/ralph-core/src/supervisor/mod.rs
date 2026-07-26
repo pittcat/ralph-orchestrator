@@ -352,6 +352,63 @@ pub enum EmissionState {
     Failed,
 }
 
+/// 2026-07-26-004 plan U2 (KTD3 / R2 / R3): bounded terminal-event
+/// evidence attached to a `Completed` slot.
+///
+/// A `Completed` status bit alone is not proof a slot produced a
+/// real business terminal event (the primary-20260726 silent-success
+/// hazard). Fan-in reconciliation must distinguish "Completed WITH
+/// valid terminal evidence" from "legacy / evidence-missing". The
+/// store persists ONLY the bounded identity needed to validate and
+/// dimension-map the terminal event — never the full agent output —
+/// so SQLite writes stay small and migrations stay additive.
+///
+/// `payload_fingerprint` is a stable content hash of the terminal
+/// event payload; it lets the differential contract tell an
+/// idempotent same-evidence replay (no-op) apart from a conflicting
+/// re-record (fail-closed) without storing the payload bytes.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TerminalEvidence {
+    /// The terminal event topic (e.g. `review.unit.done`).
+    pub topic: String,
+    /// The dimension the terminal event claims, when the payload
+    /// carries one (review waves). `None` for wave kinds whose
+    /// terminal events are not dimension-scoped.
+    pub dimension: Option<String>,
+    /// Stable fingerprint of the terminal event payload, used for
+    /// idempotent-replay vs conflict detection (R3).
+    pub payload_fingerprint: String,
+}
+
+impl TerminalEvidence {
+    /// Build evidence from a terminal event, deriving the dimension
+    /// from a top-level `dimension` string field when present and
+    /// fingerprinting the payload bytes.
+    pub fn from_event(topic: &str, payload: &str) -> Self {
+        let dimension = serde_json::from_str::<serde_json::Value>(payload)
+            .ok()
+            .and_then(|v| v.get("dimension").and_then(|d| d.as_str()).map(|s| s.to_string()));
+        Self {
+            topic: topic.to_string(),
+            dimension,
+            payload_fingerprint: fingerprint_payload(payload),
+        }
+    }
+}
+
+/// Stable, bounded fingerprint for terminal-evidence conflict
+/// detection. Uses the crate's existing hashing helper when
+/// available; falls back to a length+simple hash so the contract is
+/// deterministic across memory and rusqlite stores without pulling a
+/// new dependency.
+fn fingerprint_payload(payload: &str) -> String {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+    let mut hasher = DefaultHasher::new();
+    payload.hash(&mut hasher);
+    format!("{:016x}", hasher.finish())
+}
+
 /// The supervisor persistence + dispatch-decision trait. Both the
 /// in-memory (U3/U4) and rusqlite (U5) implementations satisfy this
 /// contract; the coordinator (U8) depends only on the trait so
@@ -433,6 +490,42 @@ pub trait SupervisorStore: fmt::Debug + Send + Sync {
         content_hash: &str,
         event_count: usize,
     ) -> SupervisorStoreResult<()>;
+
+
+    /// 2026-07-26-004 plan U2 (KTD3 / R2): attach bounded terminal
+    /// evidence to a `Completed` slot so fan-in reconciliation can
+    /// tell a real terminal event apart from a bare status bit.
+    ///
+    /// Idempotency contract (R3):
+    /// - recording the SAME evidence again is a no-op `Ok(())`;
+    /// - recording DIFFERENT evidence for a slot that already has
+    ///   evidence returns `AlreadyTerminal` (fail-closed conflict);
+    /// - implementations persist only the bounded [`TerminalEvidence`],
+    ///   never the full event payload.
+    ///
+    /// Default: no-op so stores / mocks without evidence support keep
+    /// compiling. The memory and rusqlite stores override this.
+    fn record_slot_terminal_evidence(
+        &self,
+        _wave_id: &str,
+        _slot_index: u32,
+        _evidence: &TerminalEvidence,
+    ) -> SupervisorStoreResult<()> {
+        Ok(())
+    }
+
+    /// 2026-07-26-004 plan U2 (KTD3): read a slot's terminal evidence.
+    /// Returns `None` for legacy rows recorded before evidence existed
+    /// and for slots that never reached `Completed` with evidence —
+    /// reconciliation MUST treat `None` as "not provably done"
+    /// (fail-closed), never as success. Default: `Ok(None)`.
+    fn slot_terminal_evidence(
+        &self,
+        _wave_id: &str,
+        _slot_index: u32,
+    ) -> SupervisorStoreResult<Option<TerminalEvidence>> {
+        Ok(None)
+    }
 
     /// Mark a slot permanently failed. The phase-decision pure
     /// function (U6) consumes this alongside the snapshot.

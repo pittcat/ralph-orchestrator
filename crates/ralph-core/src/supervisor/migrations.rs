@@ -26,7 +26,7 @@ mod imp {
     /// U4 (2026-07-24-003) bump: `wave_emissions` reservation
     /// table backs the CLI emission state machine.
     #[allow(dead_code)] // pinned by `migrations_idempotent_across_reopen`; production writes via pragma_update
-    pub const CURRENT_VERSION: i64 = 3;
+    pub const CURRENT_VERSION: i64 = 4;
 
     /// Apply migrations sequentially. Each migration is a
     /// closure that performs the SQL DDL and bumps the
@@ -96,6 +96,10 @@ mod imp {
             Migration {
                 version: 3,
                 ddl: include_str!("migrations/v3.sql"),
+            },
+            Migration {
+                version: 4,
+                ddl: include_str!("migrations/v4.sql"),
             },
         ]
     }

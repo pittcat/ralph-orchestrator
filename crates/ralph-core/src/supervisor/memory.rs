@@ -51,6 +51,9 @@ struct SlotRow {
     content_hash: Option<String>,
     event_count: Option<usize>,
     failure_reason: Option<String>,
+    /// 2026-07-26-004 plan U2 (KTD3): bounded terminal evidence for
+    /// a `Completed` slot. `None` for legacy / not-provably-done.
+    terminal_evidence: Option<super::TerminalEvidence>,
 }
 
 /// In-memory implementation of `SupervisorStore`. The store
@@ -258,6 +261,7 @@ impl SupervisorStore for InMemorySupervisorStore {
                     content_hash: None,
                     event_count: None,
                     failure_reason: None,
+                    terminal_evidence: None,
                 },
             );
         }
@@ -586,6 +590,61 @@ impl SupervisorStore for InMemorySupervisorStore {
                     slot_index,
                 })?;
         Ok(slot.failure_reason.clone())
+    }
+
+    fn record_slot_terminal_evidence(
+        &self,
+        wave_id: &str,
+        slot_index: u32,
+        evidence: &super::TerminalEvidence,
+    ) -> SupervisorStoreResult<()> {
+        let mut inner = self.lock()?;
+        let wave = inner
+            .waves_by_id
+            .get_mut(wave_id)
+            .ok_or_else(|| SupervisorStoreError::UnknownWave(wave_id.to_string()))?;
+        let slot =
+            wave.slots
+                .get_mut(&slot_index)
+                .ok_or_else(|| SupervisorStoreError::UnknownSlot {
+                    wave_id: wave_id.to_string(),
+                    slot_index,
+                })?;
+        // 2026-07-26-004 plan U2 (R3): idempotent same-evidence replay
+        // is a no-op; conflicting evidence for the same slot fails
+        // closed so a double-recorded slot cannot silently swap its
+        // proven terminal event.
+        match slot.terminal_evidence.as_ref() {
+            Some(existing) if existing == evidence => Ok(()),
+            Some(existing) => Err(SupervisorStoreError::AlreadyTerminal(format!(
+                "wave={wave_id} slot={slot_index} terminal evidence conflict: \
+                 existing={existing:?} incoming={evidence:?}"
+            ))),
+            None => {
+                slot.terminal_evidence = Some(evidence.clone());
+                Ok(())
+            }
+        }
+    }
+
+    fn slot_terminal_evidence(
+        &self,
+        wave_id: &str,
+        slot_index: u32,
+    ) -> SupervisorStoreResult<Option<super::TerminalEvidence>> {
+        let inner = self.lock()?;
+        let wave = inner
+            .waves_by_id
+            .get(wave_id)
+            .ok_or_else(|| SupervisorStoreError::UnknownWave(wave_id.to_string()))?;
+        let slot =
+            wave.slots
+                .get(&slot_index)
+                .ok_or_else(|| SupervisorStoreError::UnknownSlot {
+                    wave_id: wave_id.to_string(),
+                    slot_index,
+                })?;
+        Ok(slot.terminal_evidence.clone())
     }
 
     fn cancel_wave(&self, wave_id: &str) -> SupervisorStoreResult<()> {
@@ -1114,6 +1173,43 @@ mod tests {
 
     fn store() -> InMemorySupervisorStore {
         InMemorySupervisorStore::new()
+    }
+
+
+    /// 2026-07-26-004 plan U2 (KTD3 / R2 / R3): terminal evidence
+    /// round-trips, idempotent same-evidence replay is a no-op,
+    /// conflicting evidence fails closed, and a legacy slot with no
+    /// evidence reads back as `None` (not provably done).
+    #[test]
+    fn u2_terminal_evidence_round_trip_and_conflict() {
+        use crate::supervisor::TerminalEvidence;
+        let s = store();
+        let wave = s.register_wave("k-ev", WaveKind::Review, 2).unwrap();
+        // Legacy: no evidence recorded yet → None.
+        assert_eq!(s.slot_terminal_evidence(&wave, 0).unwrap(), None);
+
+        let ev =
+            TerminalEvidence::from_event("review.unit.done", "{\"dimension\":\"correctness\"}");
+        assert_eq!(ev.dimension.as_deref(), Some("correctness"));
+        s.record_slot_terminal_evidence(&wave, 0, &ev).unwrap();
+        assert_eq!(s.slot_terminal_evidence(&wave, 0).unwrap(), Some(ev.clone()));
+
+        // Idempotent same-evidence replay → Ok no-op.
+        s.record_slot_terminal_evidence(&wave, 0, &ev).unwrap();
+        assert_eq!(s.slot_terminal_evidence(&wave, 0).unwrap(), Some(ev.clone()));
+
+        // Conflicting evidence for the same slot → AlreadyTerminal.
+        let other = TerminalEvidence::from_event("review.unit.done", "{\"dimension\":\"testing\"}");
+        let conflict = s.record_slot_terminal_evidence(&wave, 0, &other);
+        assert!(
+            matches!(conflict, Err(SupervisorStoreError::AlreadyTerminal(_))),
+            "conflicting evidence must fail closed; got {conflict:?}"
+        );
+        // Original evidence preserved.
+        assert_eq!(s.slot_terminal_evidence(&wave, 0).unwrap(), Some(ev));
+
+        // Slot 1 untouched → None.
+        assert_eq!(s.slot_terminal_evidence(&wave, 1).unwrap(), None);
     }
 
     #[test]

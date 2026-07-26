@@ -192,6 +192,31 @@ pub trait SupervisorBridge: std::fmt::Debug + Send + Sync {
         event_count: usize,
     ) -> Result<(), BridgeError>;
 
+
+    /// 2026-07-26-004 plan U2 (KTD3): attach bounded terminal evidence
+    /// to a `Completed` slot via the underlying store. Default: no-op
+    /// for mocks / bridges without a store. Store-backed bridges
+    /// override this to delegate to [`SupervisorStore::record_slot_terminal_evidence`].
+    fn record_slot_terminal_evidence(
+        &self,
+        _wave_id: &str,
+        _slot_index: u32,
+        _evidence: &crate::supervisor::TerminalEvidence,
+    ) -> Result<(), BridgeError> {
+        Ok(())
+    }
+
+    /// 2026-07-26-004 plan U2 (KTD3): read a slot's terminal evidence
+    /// from the underlying store. Default: `Ok(None)` (not provably
+    /// done) for mocks / bridges without a store.
+    fn slot_terminal_evidence(
+        &self,
+        _wave_id: &str,
+        _slot_index: u32,
+    ) -> Result<Option<crate::supervisor::TerminalEvidence>, BridgeError> {
+        Ok(None)
+    }
+
     /// 2026-07-03-001 supervisor real-wiring: record a slot's
     /// permanent failure. Called by the dispatcher's
     /// `run_supervisor_fan_in` for every entry in
@@ -457,6 +482,25 @@ impl SupervisorBridge for InMemoryCoordinatorBridge {
         self.store
             .record_slot_result(wave_id, slot_index, content_hash, event_count)?;
         Ok(())
+    }
+
+    fn record_slot_terminal_evidence(
+        &self,
+        wave_id: &str,
+        slot_index: u32,
+        evidence: &crate::supervisor::TerminalEvidence,
+    ) -> Result<(), BridgeError> {
+        self.store
+            .record_slot_terminal_evidence(wave_id, slot_index, evidence)?;
+        Ok(())
+    }
+
+    fn slot_terminal_evidence(
+        &self,
+        wave_id: &str,
+        slot_index: u32,
+    ) -> Result<Option<crate::supervisor::TerminalEvidence>, BridgeError> {
+        Ok(self.store.slot_terminal_evidence(wave_id, slot_index)?)
     }
 
     fn record_slot_failure(
