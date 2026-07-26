@@ -1184,8 +1184,11 @@ pub async fn execute_wave_structured(
     // 2026-07-25-006 plan U6: resolve idle heartbeat config from DetectedWave.
     // `idle_heartbeat_secs() == None` disables the dual-clock lease.
     // `Some(0s)` is also disabled per DetectedWave semantics.
+    // `idle_heartbeat_secs()` returns `Option<u32>`; widen to `u64` for
+    // `Duration::from_secs` (which takes `u64`). `None` / `Some(0)` is
+    // already collapsed to `None` by `DetectedWave::idle_heartbeat_secs`.
     let idle_heartbeat: Option<Duration> =
-        wave.idle_heartbeat_secs().map(Duration::from_secs);
+        wave.idle_heartbeat_secs().map(|secs| Duration::from_secs(secs as u64));
     let idle_weak_signal_cap = wave.idle_weak_signal_cap();
     // Use an explicitly-configured aggregate timeout (worker or consumer)
     // directly.  Only fall back to the per-worker-timeout × batches formula
@@ -1497,8 +1500,12 @@ pub(crate) async fn execute_wave_via_supervisor_with_executor(
     let concurrency = wave.hat_config.concurrency as usize;
     let wave_timeout = Duration::from_secs(wave.per_worker_timeout_secs());
     // 2026-07-25-006 plan U6: resolve idle heartbeat config from DetectedWave.
+    // `idle_heartbeat_secs()` returns `Option<u32>`; convert to `Duration` here
+    // so the worker signature stays in `Duration` (compatible with the legacy
+    // `wave_timeout: Duration` path). `None` / `Some(0)` is already collapsed to
+    // `None` by `DetectedWave::idle_heartbeat_secs`.
     let idle_heartbeat: Option<Duration> =
-        wave.idle_heartbeat_secs().map(Duration::from_secs);
+        wave.idle_heartbeat_secs().map(|secs| Duration::from_secs(secs as u64));
     let idle_weak_signal_cap = wave.idle_weak_signal_cap();
     let aggregate_timeout =
         if wave.has_explicit_aggregate_timeout() || wave.consumer_aggregate_timeout.is_some() {

@@ -269,6 +269,14 @@ pub async fn run_wave_worker_pty(
             }
         });
 
+    // U9: counter is read by the post-kill reason string; we need it
+    // outside the dual-clock branch so Err reporting can attribute
+    // `idle heartbeat exceeded` vs `worker_timeout` correctly even
+    // when the legacy single-clock path is taken. In the legacy path
+    // the counter is always 0 (no heartbeat loop), so the discriminator
+    // reduces to `idle_enabled`.
+    let mut final_weak_count: u32 = 0;
+
     // U6/U7/U8: choose the execution path.
     // Legacy path (idle disabled): single-layer tokio::time::timeout.
     // Dual-clock path (idle enabled): tokio::select! deadline-driven loop.
@@ -329,7 +337,10 @@ pub async fn run_wave_worker_pty(
         let hard_deadline = start + wave_timeout;
 
         // U8: events-file strong-signal ticker state.
-        let mut events_file_ticker = events_file_path.map(|p| {
+        let mut events_file_ticker: Option<(
+            PathBuf,
+            Option<(u64, Option<std::time::SystemTime>)>,
+        )> = events_file_path.map(|p| {
             let prev_meta = fs::metadata(&p).ok();
             (
                 p,
@@ -344,27 +355,33 @@ pub async fn run_wave_worker_pty(
         let mut killed = false;
 
         // Helper to compute the next deadline (hard, idle, or events-file).
-        let next_deadline = || {
+        //
+        // 2026-07-25-006 U6 fix: this used to be a closure that captured
+        // `&mut lease_state`, which made the closure `!Unpin` and made
+        // `tokio::select!` reject `&mut hard_sleep` (PhantomPinned).
+        // Extract the relevant scalars up front so the helper is a plain
+        // `fn` (`Unpin`) that takes borrowed snapshots.
+        let idle_window_ms = idle_heartbeat.unwrap().as_millis() as u64;
+        let compute_next_deadline = |lease_state: &super::heartbeat::LeaseState| -> Duration {
             let now = start.elapsed();
             let hard_remaining = hard_deadline.saturating_duration_since(start);
-            if !idle_enabled {
-                return hard_remaining;
-            }
-            let idle_remaining = if lease_state.last_hb_ms >= now.as_millis() as u64 {
+            let now_ms = now.as_millis() as u64;
+            let idle_remaining = if lease_state.last_hb_ms >= now_ms {
                 Duration::ZERO
             } else {
-                let idle_window =
-                    Duration::from_millis(idle_heartbeat.unwrap().as_millis() as u64);
-                let elapsed_since_hb =
-                    Duration::from_millis(now.as_millis() as u64 - lease_state.last_hb_ms);
-                idle_window.saturating_sub(elapsed_since_hb)
+                let elapsed_since_hb = Duration::from_millis(now_ms - lease_state.last_hb_ms);
+                Duration::from_millis(idle_window_ms).saturating_sub(elapsed_since_hb)
             };
             hard_remaining.min(idle_remaining)
         };
 
         loop {
-            let sleep_until = next_deadline();
-            let mut hard_sleep = tokio::time::sleep(sleep_until);
+            let sleep_until = compute_next_deadline(&lease_state);
+            // `tokio::time::Sleep` is `!Unpin`; `Pin<Box<Sleep>>` is
+            // `Unpin`, which is what `tokio::select!` requires for the
+            // `&mut future` shape.
+            let mut hard_sleep: std::pin::Pin<Box<tokio::time::Sleep>> =
+                Box::pin(tokio::time::sleep(sleep_until));
 
             tokio::select! {
                 biased;
@@ -449,14 +466,36 @@ pub async fn run_wave_worker_pty(
 
                 // U8: events-file growth as strong signal.
                 _ = events_tick_interval.tick(), if events_file_ticker.is_some() => {
-                    let (ref path, ref mut prev) = events_file_ticker.as_mut().unwrap();
+                    let (path, prev_key) = events_file_ticker.as_ref().unwrap();
                     let current_meta = fs::metadata(path).ok();
                     let current_key = current_meta.as_ref().map(|m| (m.len(), m.modified().ok()));
-                    if current_key != prev.as_ref().map(|m| (m.len(), m.modified().ok())) {
+                    // Borrow-checker: snapshot the prev key into locals to
+                    // allow the partial compare without the previous
+                    // double-borrow of `prev`. `prev_mtime` is `Option<SystemTime>`
+                    // matching the inner type of `current_key` so the equality
+                    // check on `Option<Option<SystemTime>>` reduces to a direct
+                    // 3-state comparison.
+                    let (prev_len, prev_mtime) = match prev_key {
+                        Some((len, mtime)) => (Some(*len), Some(*mtime)),
+                        None => (None, None),
+                    };
+                    let grew = match (&current_key, prev_len) {
+                        (Some((cur_len, _)), Some(pl)) => cur_len != &pl,
+                        (Some(_), None) => true,
+                        _ => false,
+                    };
+                    let mtime_changed = match (&current_key, &prev_mtime) {
+                        (Some((_, cur_mtime)), Some(pm)) => cur_mtime != pm,
+                        (Some(_), None) => true,
+                        _ => false,
+                    };
+                    if grew || mtime_changed {
                         // File grew or mtime changed — strong signal.
                         let now_ms = start.elapsed().as_millis() as u64;
                         let decision = lease_state.tick(super::heartbeat::HeartbeatKind::Strong, now_ms, &cfg);
-                        *prev = current_key;
+                        if let Some(slot) = events_file_ticker.as_mut() {
+                            slot.1 = current_key;
+                        }
                         match decision {
                             super::heartbeat::LeaseDecision::HardKill => {
                                 let _ = child.kill();
@@ -475,6 +514,10 @@ pub async fn run_wave_worker_pty(
                 }
             }
         }
+
+        // Carry the last observed weak_count out to the post-kill
+        // reason builder so the U9 attribution keeps working.
+        final_weak_count = lease_state.weak_count;
 
         timed_out
     };
@@ -496,17 +539,17 @@ pub async fn run_wave_worker_pty(
     };
     let _ = fs::remove_file(worker_events_path);
 
-    // U6 kill reason strings — distinguished for U9歸因.
+    // U6/U9 kill reason strings — distinguished for U9归因.
     // Hard kill uses WORKER_TIMEOUT_ERR_PREFIX so the dispatcher
     // `reason.starts_with(WORKER_TIMEOUT_ERR_PREFIX)` still matches.
     // Idle kill uses a different prefix so U9 can extend归因.
     if timed_out && events.is_empty() {
-        let reason = if idle_enabled && lease_state.weak_count > 0 {
+        let reason = if idle_enabled && final_weak_count > 0 {
             // Idle kill path (not a hard timeout).
             format!(
                 "idle heartbeat exceeded: {}s since last activity, weak_count={}",
                 idle_heartbeat.unwrap().as_secs(),
-                lease_state.weak_count
+                final_weak_count
             )
         } else if idle_enabled {
             format!(

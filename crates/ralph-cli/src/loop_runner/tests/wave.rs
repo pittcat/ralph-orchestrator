@@ -1936,6 +1936,12 @@ async fn test_run_wave_worker_pty_surfaces_spawn_failure() {
         "prompt",
         &worker_events_path,
         Duration::from_secs(1),
+        // 2026-07-25-006 plan U6: idle heartbeat knobs are
+        // `None` / `0` here because the legacy spawn-failure
+        // path must not change (the worker never reaches the
+        // dual-clock path).
+        None,
+        0,
         tx,
         None,
         None,
