@@ -899,6 +899,18 @@ hats:
     # builtin value; effective per-wave parallelism is
     # `min(hat.concurrency, supervisor.max_concurrent_workers)`.
     concurrency: 4
+    # 2026-07-25-006 plan U10 (KTD7): dual-clock lease so a tool-using
+    # worker can run past the old wall clock while still being killed
+    # fast when it stalls. `timeout` is the StartToClose hard cap
+    # (30 minutes covers the upper bound of a single TDD cycle);
+    # `idle_heartbeat_secs` is the HeartbeatTimeout window refreshed
+    # by ToolUse / ToolResult / events-file growth; `idle_weak_signal_cap`
+    # caps the number of consecutive text-only renewals before the
+    # lease is forced to expire. `idle_heartbeat_secs == 0` would
+    # disable idle mode entirely — do NOT use that here.
+    timeout: 1800
+    idle_heartbeat_secs: 120
+    idle_weak_signal_cap: 8
     triggers:
       - exec.unit.ready
     publishes:
@@ -939,6 +951,8 @@ hats:
       - 不能读 supervisor 内部状态存储 / runtime event ledger（HARD RULE 4）。
       - 一条业务事件即停（isolated 单事件预算）；不要在同一 activation
         重试 dropped emit，等 `task.resume`。
+      - 你不需要主动发送 heartbeat；orchestrator 观察你的 stream 与
+        events file 来续租 idle 窗口，正常写代码即可。
   exec-integrator:
     name: "Exec Integrator"
     description: "Merges completed execution waves and runs the full test suite."
@@ -1305,6 +1319,16 @@ hats:
     # payloads; without `concurrency: 4` (here matching the
     # effective cap) the wave detector rejects the batch.
     concurrency: 4
+    # 2026-07-25-006 plan U10 (KTD7): dual-clock lease for review
+    # workers. Review work is shorter than implementation; the
+    # 15-minute hard ceiling is enough for a single dimension
+    # read against the full test diff. Idle window at 90s is
+    # tight enough that a stalled review still gets killed
+    # fast while still tolerating a quick `Read` / `Grep` /
+    # `git diff` chain.
+    timeout: 900
+    idle_heartbeat_secs: 90
+    idle_weak_signal_cap: 8
     triggers:
       - review.unit.ready
     publishes:
@@ -1342,6 +1366,8 @@ hats:
       - 不能 emit `review.complete` / `review.wave.complete`——
         那是 review-synthesizer 与 supervisor 的活。
       - 一条业务事件即停（isolated 单事件预算）。
+      - 不需要主动发 heartbeat；orchestrator 观察你的 stream 与
+        events file 续租 idle 窗口。
   review-synthesizer:
     name: "Review Synthesizer"
     description: "Aggregates dimension review results into a fix plan and review wave completion."
@@ -1742,6 +1768,14 @@ hats:
     # `fix.unit.ready` and the wave detector rejects
     # `concurrency <= 1` consumers.
     concurrency: 4
+    # 2026-07-25-006 plan U10 (KTD7): same dual-clock lease as
+    # `worker`. Fix rounds are usually shorter than the initial
+    # implementation, but the idle window still matters when a
+    # fixer pauses to read a long diff before editing; the wall
+    # clock stays the backstop.
+    timeout: 1800
+    idle_heartbeat_secs: 120
+    idle_weak_signal_cap: 8
     triggers:
       - fix.unit.ready
     publishes:
@@ -1777,6 +1811,8 @@ hats:
 
       - 不能调 wave emit（U23）。
       - 一条业务事件即停。
+      - 不需要主动发 heartbeat；orchestrator 观察你的 stream 与
+        events file 续租 idle 窗口。
   fix-integrator:
     name: "Fix Integrator"
     description: "Merges completed fix waves and verifies the full test suite is green."
