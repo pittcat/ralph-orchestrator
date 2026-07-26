@@ -3641,6 +3641,7 @@ event_loop:
             in_flight_count: 1,
             cancel_requested: false,
             merged_to_events: false,
+            salvage_merged: false,
             started_at: std::time::SystemTime::now(),
             slots: vec![(0, ralph_core::supervisor::SlotStatus::Completed)],
         };

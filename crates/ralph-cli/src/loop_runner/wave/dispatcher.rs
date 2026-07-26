@@ -2781,23 +2781,91 @@ fn build_review_done_hints(
     }
 
     // --- store_completed: Completed slots WITH valid terminal evidence ---
+    //
+    // Plan 004 P1-6 / KTD3 fail-closed: terminal evidence is
+    // bound to (topic, dimension, slot_index) — it MUST match
+    // the wave kind's terminal topic AND carry a dimension AND
+    // that dimension must equal the slot's assigned dimension.
+    // Any mismatch (wrong topic, missing dimension, dimension
+    // mismatch) drops the slot from `done` so the dispatcher
+    // cannot under-report `missing_dimensions` by smuggling in
+    // unrelated events as terminal evidence.
     let mut store_completed = std::collections::HashSet::new();
     if let Ok(snap) = bridge.fan_in_status(store_wave_id) {
         for (slot_index, status) in &snap.slots {
             if !matches!(status, SlotStatus::Completed) {
                 continue;
             }
-            let Ok(Some(evidence)) = bridge.slot_terminal_evidence(store_wave_id, *slot_index)
-            else {
-                // KTD3 fail-closed: no evidence → not provably done.
-                continue;
+            let evidence = match bridge.slot_terminal_evidence(store_wave_id, *slot_index) {
+                Ok(Some(ev)) => ev,
+                Ok(None) => continue,
+                Err(err) => {
+                    tracing::warn!(
+                        wave_id = %store_wave_id,
+                        slot_index = slot_index,
+                        error = %err,
+                        "store_completed: evidence lookup failed; failing closed",
+                    );
+                    continue;
+                }
             };
-            if let Some(dim) = evidence.dimension {
-                store_completed.insert(dim);
-            } else if let Some(dim) = completed.assigned_dimensions.get(slot_index) {
-                // Evidence existed but carried no dimension field; fall
-                // back to the slot's assigned dimension.
-                store_completed.insert(dim.clone());
+            // P1-6: topic must be the wave-kind terminal
+            // topic. We pin Review for now; Exec/Fix
+            // reconciliation is a separate fan-in path and does
+            // not enter this helper.
+            if evidence.topic != "review.unit.done" {
+                tracing::warn!(
+                    wave_id = %store_wave_id,
+                    slot_index = slot_index,
+                    evidence_topic = %evidence.topic,
+                    "store_completed: evidence topic is not the review terminal topic; failing closed",
+                );
+                continue;
+            }
+            // P1-6: dimension must be present AND equal the
+            // slot's assigned dimension. We refuse the
+            // pre-fix `evidence.dimension.or(assigned)` fallback
+            // because it would let an evidence row with a
+            // missing dimension silently mark the assigned
+            // dimension done — exactly the wrong-topic /
+            // missing-dimension inflation the review demanded
+            // close.
+            let evidence_dim = match &evidence.dimension {
+                Some(d) => d,
+                None => {
+                    tracing::warn!(
+                        wave_id = %store_wave_id,
+                        slot_index = slot_index,
+                        "store_completed: evidence missing dimension; failing closed",
+                    );
+                    continue;
+                }
+            };
+            let assigned = completed.assigned_dimensions.get(slot_index);
+            match assigned {
+                Some(a) if a == evidence_dim => {
+                    store_completed.insert(a.clone());
+                }
+                Some(a) => {
+                    tracing::warn!(
+                        wave_id = %store_wave_id,
+                        slot_index = slot_index,
+                        assigned = %a,
+                        evidence_dimension = %evidence_dim,
+                        "store_completed: dimension mismatch; failing closed",
+                    );
+                    continue;
+                }
+                None => {
+                    // No assigned dimension at all — refuse to
+                    // invent one.
+                    tracing::warn!(
+                        wave_id = %store_wave_id,
+                        slot_index = slot_index,
+                        "store_completed: slot has no assigned dimension; failing closed",
+                    );
+                    continue;
+                }
             }
         }
     }
@@ -8083,5 +8151,209 @@ hats: {}
             .repo_root()
             .expect("bridge must surface repo_root; lazy paths used to return None");
         assert_eq!(reported, tmp.path());
+    }
+
+    // ─────────────────────────────────────────────────────────────────
+    // Plan 004 P1-6: terminal evidence topic/dimension strict checks
+    //
+    // The post-fix `build_review_done_hints` rejects four classes of
+    // mismatch (KTD3 fail-closed):
+    //   1. evidence topic != "review.unit.done"
+    //   2. evidence dimension missing
+    //   3. evidence dimension != slot's assigned dimension
+    //   4. slot has no assigned dimension
+    // Each test below pins one failure mode so a future regression
+    // that re-introduces the silent-fallback surfaces here.
+    // ─────────────────────────────────────────────────────────────────
+
+    fn build_p1_6_hints(
+        store: &std::sync::Arc<ralph_core::supervisor::InMemorySupervisorStore>,
+        wave_id: &str,
+        assigned_dimensions: std::collections::HashMap<u32, String>,
+    ) -> ReviewDoneHints {
+        use ralph_core::supervisor::SupervisorBridge as _;
+        use ralph_core::wave_tracker::CompletedWave;
+        let bridge: Arc<dyn ralph_core::supervisor::SupervisorBridge> =
+            Arc::new(ralph_core::supervisor::InMemoryCoordinatorBridge::from_store(
+                store.clone(),
+            ));
+        let completed = CompletedWave {
+            wave_id: wave_id.to_string(),
+            wave_total: assigned_dimensions.len() as u32,
+            results: Vec::new(),
+            failures: Vec::new(),
+            duration: std::time::Duration::from_secs(0),
+            partial: false,
+            expected_source_hat: None,
+            assigned_dimensions,
+            dimension_retry_counts: std::collections::HashMap::new(),
+            worker_events: Vec::new(),
+        };
+        let main_events = std::env::temp_dir().join("p1-6-does-not-exist.jsonl");
+        build_review_done_hints(&bridge, wave_id, &completed, &main_events)
+    }
+
+    /// P1-6 #1: evidence topic != "review.unit.done" is rejected.
+    #[test]
+    fn p1_6_wrong_evidence_topic_is_rejected() {
+        use ralph_core::supervisor::{
+            SlotResource, SupervisorStore, TerminalEvidence, WaveKind,
+        };
+        let store = std::sync::Arc::new(ralph_core::supervisor::InMemorySupervisorStore::new());
+        let wave = store
+            .register_wave("p1-6-topic", WaveKind::Review, 1)
+            .unwrap();
+                let _ = store.try_dispatch_next(2).unwrap().unwrap();
+        store.record_slot_result(&wave, 0, "h", 1).unwrap();
+        store
+            .record_slot_terminal_evidence(
+                &wave,
+                0,
+                &TerminalEvidence::from_event(
+                    "work.start", // wrong topic
+                    "{\"dimension\":\"correctness\"}",
+                ),
+            )
+            .unwrap();
+        let mut assigned = std::collections::HashMap::new();
+        assigned.insert(0, "correctness".to_string());
+        let hints = build_p1_6_hints(&store, &wave, assigned);
+        assert!(
+            !hints.store_completed.contains("correctness"),
+            "wrong-topic evidence must not be accepted as done (got {:?})",
+            hints.store_completed,
+        );
+    }
+
+    /// P1-6 #2: evidence with no dimension is rejected.
+    #[test]
+    fn p1_6_missing_dimension_is_rejected() {
+        use ralph_core::supervisor::{
+            SlotResource, SupervisorStore, TerminalEvidence, WaveKind,
+        };
+        let store = std::sync::Arc::new(ralph_core::supervisor::InMemorySupervisorStore::new());
+        let wave = store
+            .register_wave("p1-6-dim", WaveKind::Review, 1)
+            .unwrap();
+                let _ = store.try_dispatch_next(2).unwrap().unwrap();
+        store.record_slot_result(&wave, 0, "h", 1).unwrap();
+        // Note: TerminalEvidence::from_event without a dimension
+        // field yields dimension=None (matches the legacy
+        // happy-path that the post-fix code refuses).
+        let evidence = TerminalEvidence {
+            topic: "review.unit.done".to_string(),
+            dimension: None,
+            payload_fingerprint: "abc".to_string(),
+        };
+        store
+            .record_slot_terminal_evidence(&wave, 0, &evidence)
+            .unwrap();
+        let mut assigned = std::collections::HashMap::new();
+        assigned.insert(0, "correctness".to_string());
+        let hints = build_p1_6_hints(&store, &wave, assigned);
+        assert!(
+            hints.store_completed.is_empty(),
+            "missing-dimension evidence must not be accepted (got {:?})",
+            hints.store_completed,
+        );
+    }
+
+    /// P1-6 #3: evidence dimension != assigned is rejected.
+    #[test]
+    fn p1_6_dimension_mismatch_is_rejected() {
+        use ralph_core::supervisor::{
+            SlotResource, SupervisorStore, TerminalEvidence, WaveKind,
+        };
+        let store = std::sync::Arc::new(ralph_core::supervisor::InMemorySupervisorStore::new());
+        let wave = store
+            .register_wave("p1-6-mis", WaveKind::Review, 1)
+            .unwrap();
+                let _ = store.try_dispatch_next(2).unwrap().unwrap();
+        store.record_slot_result(&wave, 0, "h", 1).unwrap();
+        store
+            .record_slot_terminal_evidence(
+                &wave,
+                0,
+                &TerminalEvidence::from_event(
+                    "review.unit.done",
+                    "{\"dimension\":\"security\"}", // mismatched
+                ),
+            )
+            .unwrap();
+        let mut assigned = std::collections::HashMap::new();
+        assigned.insert(0, "correctness".to_string());
+        let hints = build_p1_6_hints(&store, &wave, assigned);
+        assert!(
+            !hints.store_completed.contains("correctness"),
+            "dimension-mismatched evidence must not be accepted as done",
+        );
+        assert!(
+            !hints.store_completed.contains("security"),
+            "wrong dimension must not be counted under any name",
+        );
+    }
+
+    /// P1-6 #4: slot has no assigned dimension at all → refuse.
+    #[test]
+    fn p1_6_no_assigned_dimension_is_rejected() {
+        use ralph_core::supervisor::{
+            SlotResource, SupervisorStore, TerminalEvidence, WaveKind,
+        };
+        let store = std::sync::Arc::new(ralph_core::supervisor::InMemorySupervisorStore::new());
+        let wave = store
+            .register_wave("p1-6-na", WaveKind::Review, 1)
+            .unwrap();
+                let _ = store.try_dispatch_next(2).unwrap().unwrap();
+        store.record_slot_result(&wave, 0, "h", 1).unwrap();
+        store
+            .record_slot_terminal_evidence(
+                &wave,
+                0,
+                &TerminalEvidence::from_event(
+                    "review.unit.done",
+                    "{\"dimension\":\"correctness\"}",
+                ),
+            )
+            .unwrap();
+        let assigned = std::collections::HashMap::new();
+        let hints = build_p1_6_hints(&store, &wave, assigned);
+        assert!(
+            hints.store_completed.is_empty(),
+            "no-assigned-dimension must fail closed",
+        );
+    }
+
+    /// P1-6 positive control: a slot whose evidence topic,
+    /// dimension, and assigned dimension ALL agree IS
+    /// accepted.
+    #[test]
+    fn p1_6_matching_evidence_dimension_accepted() {
+        use ralph_core::supervisor::{
+            SlotResource, SupervisorStore, TerminalEvidence, WaveKind,
+        };
+        let store = std::sync::Arc::new(ralph_core::supervisor::InMemorySupervisorStore::new());
+        let wave = store
+            .register_wave("p1-6-ok", WaveKind::Review, 1)
+            .unwrap();
+                let _ = store.try_dispatch_next(2).unwrap().unwrap();
+        store.record_slot_result(&wave, 0, "h", 1).unwrap();
+        store
+            .record_slot_terminal_evidence(
+                &wave,
+                0,
+                &TerminalEvidence::from_event(
+                    "review.unit.done",
+                    "{\"dimension\":\"correctness\"}",
+                ),
+            )
+            .unwrap();
+        let mut assigned = std::collections::HashMap::new();
+        assigned.insert(0, "correctness".to_string());
+        let hints = build_p1_6_hints(&store, &wave, assigned);
+        assert!(
+            hints.store_completed.contains("correctness"),
+            "matching evidence + assigned must be accepted; got {:?}",
+            hints.store_completed,
+        );
     }
 }
