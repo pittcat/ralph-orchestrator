@@ -144,6 +144,14 @@ pub(crate) struct WorkerRequest {
     /// legacy `std::env::current_dir()` behaviour (the non-supervisor
     /// dispatcher path always sets `None` here).
     pub(crate) cwd: Option<PathBuf>,
+    /// 2026-07-25-006 plan U6: idle heartbeat duration.
+    /// `None` disables the dual-clock lease (legacy wall-clock only).
+    /// `Some(0s)` is also treated as disabled by `DetectedWave`.
+    pub(crate) idle_heartbeat: Option<Duration>,
+    /// 2026-07-25-006 plan U6: weak-signal renewal cap.
+    /// Only meaningful when `idle_heartbeat` is `Some`; the default
+    /// (8) is set by `DetectedWave::idle_weak_signal_cap()`.
+    pub(crate) idle_weak_signal_cap: u32,
 }
 
 /// Dispatcher-internal seam that abstracts "run one wave worker".
@@ -221,6 +229,8 @@ impl WaveWorkerExecutor for ProductionExecutor {
                 &request.prompt,
                 &request.worker_events_path,
                 request.worker_timeout,
+                request.idle_heartbeat,
+                request.idle_weak_signal_cap,
                 request.progress_tx,
                 request.worker_rpc_tx.take(),
                 request.worker_tui_state.take(),
@@ -1171,6 +1181,12 @@ pub async fn execute_wave_structured(
 
     let concurrency = wave.hat_config.concurrency as usize;
     let wave_timeout = Duration::from_secs(wave.per_worker_timeout_secs());
+    // 2026-07-25-006 plan U6: resolve idle heartbeat config from DetectedWave.
+    // `idle_heartbeat_secs() == None` disables the dual-clock lease.
+    // `Some(0s)` is also disabled per DetectedWave semantics.
+    let idle_heartbeat: Option<Duration> =
+        wave.idle_heartbeat_secs().map(Duration::from_secs);
+    let idle_weak_signal_cap = wave.idle_weak_signal_cap();
     // Use an explicitly-configured aggregate timeout (worker or consumer)
     // directly.  Only fall back to the per-worker-timeout × batches formula
     // when no aggregate timeout is available.
@@ -1346,6 +1362,8 @@ pub async fn execute_wave_structured(
             // `std::env::current_dir()` behaviour. The supervisor
             // path overrides this via `execute_wave_via_supervisor`.
             cwd: None,
+            idle_heartbeat,
+            idle_weak_signal_cap,
         });
     }
 
@@ -1478,6 +1496,10 @@ pub(crate) async fn execute_wave_via_supervisor_with_executor(
 
     let concurrency = wave.hat_config.concurrency as usize;
     let wave_timeout = Duration::from_secs(wave.per_worker_timeout_secs());
+    // 2026-07-25-006 plan U6: resolve idle heartbeat config from DetectedWave.
+    let idle_heartbeat: Option<Duration> =
+        wave.idle_heartbeat_secs().map(Duration::from_secs);
+    let idle_weak_signal_cap = wave.idle_weak_signal_cap();
     let aggregate_timeout =
         if wave.has_explicit_aggregate_timeout() || wave.consumer_aggregate_timeout.is_some() {
             Duration::from_secs(wave.aggregate_timeout_secs())
@@ -1803,6 +1825,8 @@ pub(crate) async fn execute_wave_via_supervisor_with_executor(
                 worker_tui_state,
                 assigned_dimension: assigned_dimension.clone(),
                 cwd: slot_cwd,
+                idle_heartbeat,
+                idle_weak_signal_cap,
             }),
             preview,
             dimension: assigned_dimension,
@@ -4978,6 +5002,8 @@ hats: {}
             worker_tui_state: None,
             assigned_dimension,
             cwd: None,
+            idle_heartbeat: None,
+            idle_weak_signal_cap: 8,
         }
     }
 
