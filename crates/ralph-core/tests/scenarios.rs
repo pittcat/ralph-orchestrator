@@ -1556,7 +1556,7 @@ fn test_implementation_review_wave() {
 /// `implementation_review_wave` after the workflow-guard runner
 /// accepts the inactive-handoff semantics.
 #[test]
-#[ignore = "U6 BDD pending one-step workflow-guard mock timing fix; see docs/plans/2026-07-26-003 §U6 residuals"]
+#[ignore = "workflow-guard mock-iteration cadence still needs tuning (finalizer LOOP_COMPLETE handoff). 2026-07-26-004 proved the S10 contract at the production run_supervisor_fan_in + preset level (u1_red1 / u4_replayed / u5_salvaged / test_implementation_review_adopts_generic_mechanism_contract); the scenario routing is correct (review.wave.failed seen, no success-side detour) — only the harness cadence for the terminal LOOP_COMPLETE remains."]
 fn test_implementation_review_wave_failed() {
     let yaml = load_scenario("tests/scenarios/implementation_review_wave_failed.yml");
     run_workflow_guard_scenario(yaml);
