@@ -101,6 +101,8 @@ ralph emit --schema work.done | jq -r .protocol_hash   # 改后
 
 **新增 emitter hat 时的一致性约束**：任何会通过 `ralph emit` 或 `ralph wave emit` 发事件的 hat，`instructions` 需要引用本段；相关 lint 会检查这一点。
 
+**Trust 边界（agent 不可伪造的字段）**：JSONL 事件里的 `system_injected` 字段**不是 agent 可声明的信任凭据**。`--policy-check` 与正式 emit 路径都会拒绝 `system_injected=true` 的业务 topic（如 `work.start` / `review.unit.done`）——只有 `<kind>.wave.{complete,failed}` 这六个 supervisor 协调 topic 可以走 system_injected runtime seam。**agent 永远不要**在事件 payload 里写 `system_injected: true` 试图绕过发布/作用域校验；这会被原 guard 拒为 `system_injected_on_business_topic`，并写进诊断。如果 hat 想发 coord topic，请走 `ralph wave` 的 merge seam（dispatcher 自动 commit `system_injected=true`），而不是手工拼字段。
+
 ### Envelope 校验（`triggered` 拓扑）
 
 `ralph emit --triggered <hat_id>` 在 apply 路径与 `--policy-check` 路径都会被 envelope 层校验：`triggered` 字段的值必须是当前 preset 声明的 hat 之一（即出现在 `hats[]` map 里），否则返回 `triggered_not_in_topology`。

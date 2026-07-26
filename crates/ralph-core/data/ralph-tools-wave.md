@@ -253,3 +253,12 @@ ralph wave inspect <WAVE_ID> [--output json|text]
 ### 取消 / 补偿
 
 `ralph wave emit` 不直接暴露取消 / 补偿命令。Wave 在 aggregate timeout / 显式 cancel / spawn failure 时由 runtime 自动标记状态；inspect / diagnose 公开返回 wave 的当前阶段（Collect / Cancelled / Failed / Done），agent 据此决定后续动作。补偿 job 由 runtime 在终态阶段执行诊断记录，**不阻塞** wave 的最终态。
+
+### Fan-in 失败语义（agent 可见）
+
+失败 fan-in 路径有两段持久化状态机：
+
+1. **salvage merge**：dispatcher 把已 Completed 槽的业务事件（`review.unit.done` 等）写入 main ledger 后，立即 `mark_salvage_merged`。
+2. **coord injection**：coordinator 之后注入 `*.wave.failed`，写 `merged_to_events`。
+
+如果协调事件还没注入就崩溃，重启后 supervisor 看到 `salvage_merged=true && merged_to_events=false` → 安全地注入一次；如果两者都已 latch → AlreadyDone。Agent 看到 `missing_dimensions` 字段时应当相信它：它**已经**扣除 store 里带证据的 Completed 槽与 main ledger 里已落盘的同 wave 业务事件。**没有** terminal evidence 的 Completed 槽不进 done set，会被报为 missing（这是 `KTD3` fail-closed 的硬规则，不是配置）。
