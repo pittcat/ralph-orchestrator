@@ -225,15 +225,25 @@ impl SupervisorCoordinator {
         reason: &FailedReason,
         blocking_slots: Vec<u32>,
     ) -> SupervisorStoreResult<CoordinatorAction> {
+        // 2026-07-26-004 plan U4 (S9 / R3 / KTD-6): idempotency latch,
+        // mirroring `merge_and_complete`. `evaluate_phase` is a pure
+        // function of the slot snapshot — it keeps returning `Failed`
+        // on every tick after the wave settles, so without this guard a
+        // replay / restart / repeated tick would re-inject `*.wave.failed`
+        // and re-run the dispatcher-layer salvage merge (double-write).
+        // Once latched, re-tick returns `AlreadyDone`. The wave PHASE
+        // (Failed here vs Done on the success path) still distinguishes
+        // the two outcomes — `merged_to_events` is the "terminal fan-in
+        // action already performed once" latch, not the outcome bit.
+        if snapshot.merged_to_events {
+            return Ok(CoordinatorAction::AlreadyDone);
+        }
         let topic = coordinator_topic(snapshot.kind, false);
-        // U2: apply the verdict to the store. Idempotent —
-        // `set_wave_phase` writes the same Failed phase on
-        // repeat calls, but we only reach this branch when
-        // `evaluate_phase` returned `Failed`, so re-entry on
-        // a subsequent tick is expected (the verdict stays
-        // stable across ticks).
+        // U2: apply the verdict to the store.
         self.store
             .set_wave_phase(&snapshot.wave_id, WavePhase::Failed)?;
+        // U4: latch the failed fan-in so a subsequent tick is a no-op.
+        self.store.mark_merge_to_events(&snapshot.wave_id)?;
         Ok(CoordinatorAction::InjectedFailed {
             topic,
             reason: reason.as_str(),

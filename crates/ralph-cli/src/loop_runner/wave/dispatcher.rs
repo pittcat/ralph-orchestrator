@@ -7637,6 +7637,120 @@ hats: {}
         );
     }
 
+
+    /// U4 Red (plan 2026-07-26-004, S9 / R3): replaying a failed
+    /// fan-in MUST NOT double-write. Calling `run_supervisor_fan_in`
+    /// twice for the same mixed Review wave must leave exactly ONE
+    /// `review.wave.failed` coord event and ONE salvaged
+    /// `review.unit.done` in the main ledger. Before U4, `fail_wave`
+    /// had no idempotency latch (`evaluate_phase` is pure and keeps
+    /// returning `Failed`), so the second tick re-injected the coord
+    /// event and re-ran the dispatcher-layer salvage merge.
+    #[test]
+    fn u4_replayed_failed_fan_in_does_not_double_write() {
+        use ralph_core::config::HatConfig;
+        use ralph_core::supervisor::InMemoryCoordinatorBridge;
+        use ralph_core::supervisor::SupervisorBridge;
+        use ralph_core::supervisor::{SupervisorStore, WaveKind};
+        use std::io::BufRead;
+
+        let workspace = tempfile::TempDir::new().expect("temp workspace");
+        let ralph_dir = workspace.path().join(".ralph");
+        std::fs::create_dir_all(&ralph_dir).expect("mkdir .ralph");
+        let main_events_file = ralph_dir.join("events.jsonl");
+
+        let store = std::sync::Arc::new(ralph_core::supervisor::InMemorySupervisorStore::new());
+        let bridge = InMemoryCoordinatorBridge::from_store(store.clone());
+        let store_wave_id = bridge
+            .register_wave_if_absent(WaveKind::Review, "w-u4-replay", 2)
+            .unwrap();
+        // Slot 0: Completed with a real review.unit.done (correctness).
+        store.record_slot_result(&store_wave_id, 0, "hash-s0", 1).unwrap();
+        // Slot 1: terminally Failed → InjectedFailed.
+        store
+            .record_slot_failure(
+                &store_wave_id,
+                1,
+                ralph_core::supervisor::worker_outcome::REASON_WORKER_TIMEOUT,
+            )
+            .unwrap();
+
+        let mut assigned = std::collections::HashMap::new();
+        assigned.insert(0u32, "correctness".to_string());
+        assigned.insert(1u32, "testing".to_string());
+        let completed = ralph_core::CompletedWave {
+            wave_id: "w-u4-replay".to_string(),
+            wave_total: 2,
+            results: vec![ralph_core::WaveResult {
+                index: 0,
+                events: vec![
+                    ralph_proto::Event::new(
+                        "review.unit.done",
+                        serde_json::json!({"dimension":"correctness"}).to_string(),
+                    )
+                    .with_source("review-worker")
+                    .with_wave("w-u4-replay".to_string(), 0, 2),
+                ],
+            }],
+            failures: vec![ralph_core::WaveFailure {
+                index: 1,
+                error: "worker_timeout".to_string(),
+                duration: std::time::Duration::from_millis(1),
+                ..ralph_core::WaveFailure::default()
+            }],
+            duration: std::time::Duration::from_millis(1),
+            partial: false,
+            expected_source_hat: None,
+            assigned_dimensions: assigned,
+            dimension_retry_counts: std::collections::HashMap::new(),
+            worker_events: Vec::new(),
+        };
+        let detected = ralph_core::DetectedWave {
+            wave_id: "w-u4-replay".to_string(),
+            target_hat: HatId::new("review-dispatcher"),
+            hat_config: HatConfig {
+                name: "review-dispatcher".to_string(),
+                ..HatConfig::default()
+            },
+            events: vec![core_event("review.unit.ready", "payload-0")],
+            total: 2,
+            partial: false,
+            consumer_aggregate_timeout: None,
+        };
+
+        let bridge_arc: Arc<dyn ralph_core::supervisor::SupervisorBridge> = Arc::new(bridge);
+        // First fan-in: reaches InjectedFailed.
+        let first =
+            run_supervisor_fan_in(&bridge_arc, &completed, &detected, &main_events_file, 60);
+        assert!(matches!(first, SupervisorFanInOutcome::InjectedFailed));
+        // Replay: must be a no-op (AlreadyDone), NOT a second InjectedFailed.
+        let second =
+            run_supervisor_fan_in(&bridge_arc, &completed, &detected, &main_events_file, 60);
+        assert!(
+            matches!(second, SupervisorFanInOutcome::AlreadyDone),
+            "replayed failed fan-in must be AlreadyDone; got {second:?}"
+        );
+
+        let count = |topic: &str| {
+            std::io::BufReader::new(std::fs::File::open(&main_events_file).expect("main"))
+                .lines()
+                .filter_map(|l| l.ok())
+                .filter_map(|l| serde_json::from_str::<serde_json::Value>(&l).ok())
+                .filter(|r| r["topic"] == topic)
+                .count()
+        };
+        assert_eq!(
+            count("review.wave.failed"),
+            1,
+            "exactly one review.wave.failed after replay"
+        );
+        assert_eq!(
+            count("review.unit.done"),
+            1,
+            "salvaged review.unit.done must not be double-written on replay"
+        );
+    }
+
     /// 2026-07-26-002 plan U5 (R5 / KTD6): `slot_failures` MUST be
     /// derived from the store's frozen reason codes filtered by
     /// `blocking_slots` — the index set of `slot_failures` must
