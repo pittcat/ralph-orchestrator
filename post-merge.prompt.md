@@ -16,7 +16,7 @@ ralph run -c ralph.post-merge.yml -H builtin:post-merge-converge
 
 ## 开发计划列表（可选）
 
-若提供，以本列表为准。若整段省略，agent 通过 `git log` / merge 历史匹配 `docs/plans/` 自行发现。
+若提供，以本列表为准。若整段省略，agent 通过 `git log` / commit chronology / branch subjects 匹配 `docs/plans/` 自行发现；同一分支上顺序完成的多个计划也在范围内，不要求一定出现 merge commit。
 
 ```text
 开发计划:
@@ -44,6 +44,6 @@ ralph run -c ralph.post-merge.yml -H builtin:post-merge-converge
 
 ## 约束提醒
 
-- 各开发计划已完成并已合入；不要重新执行各计划，不要重新 merge。
+- 各开发计划已完成并已落在当前最终代码树里；这些计划可以是 merge 进来的，也可以是同一分支顺序提交完成的。不要重新执行各计划，不要重新 merge。
 - 分析基于当前最终树；原 worktree / 开发分支可以已删除。
 - 置信度 redo-first：P0/P1 低置信先加深/自环；仍低则 LOW_CONFIDENCE，不得当 VERIFIED，报告「待核实」。
