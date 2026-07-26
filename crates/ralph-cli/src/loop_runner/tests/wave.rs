@@ -2126,6 +2126,84 @@ exit 0
     emit_wave_validation_marker("strong-signal:keeps-alive", &["strong", "lease"]);
 }
 
+/// U6: the worker stays completely silent on stdout (one line then sleep),
+/// so the ONLY thing refreshing the lease is events-file growth. The
+/// dispatcher-injected `RALPH_EVENTS_FILE` points at a separate file that
+/// a background task appends to every 500 ms. idle_heartbeat=2 s would
+/// kill a silent worker in ~2 s (see S1); continuous events-file growth
+/// must tick `HeartbeatKind::Strong` and keep the worker alive until the
+/// script exits cleanly at ~6 s. Expected: Ok, success=true, duration ≥ 5 s.
+#[cfg(unix)]
+#[tokio::test]
+async fn test_run_wave_worker_pty_events_file_growth_keeps_lease_alive() {
+    let temp_dir = tempfile::tempdir().expect("temp dir");
+    // echo once then sleep 6 s — stdout goes silent immediately.
+    let body = "echo first && sleep 6\nexit 0\n";
+    write_fake_executable(temp_dir.path(), "wave-worker", body);
+    let worker_events_path = temp_dir.path().join("wave-events.jsonl");
+    // Independent events file injected as RALPH_EVENTS_FILE; stands in for
+    // the runtime events.jsonl that grows while the worker runs.
+    let events_path = temp_dir.path().join("runtime-events.jsonl");
+    std::fs::write(&events_path, "").expect("seed empty events file");
+
+    // Background appender: grow the events file every 500 ms for ~7 s, i.e.
+    // well past the 6 s script lifetime, so the lease is refreshed on every
+    // 250 ms events-tick for the entire run.
+    let appender_path = events_path.clone();
+    let appender = tokio::spawn(async move {
+        use std::io::Write;
+        for _ in 0..14 {
+            if let Ok(mut file) = std::fs::OpenOptions::new()
+                .append(true)
+                .create(true)
+                .open(&appender_path)
+            {
+                let _ = writeln!(file, "{{\"topic\":\"x\"}}");
+            }
+            tokio::time::sleep(Duration::from_millis(500)).await;
+        }
+    });
+
+    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    let backend = CliBackend {
+        command: temp_dir.path().join("wave-worker").display().to_string(),
+        args: vec![],
+        prompt_mode: ralph_adapters::PromptMode::Arg,
+        prompt_flag: None,
+        output_format: BackendOutputFormat::Text,
+        env_vars: vec![(
+            "RALPH_EVENTS_FILE".to_string(),
+            events_path.display().to_string(),
+        )],
+    };
+
+    let (_index, outcome) = run_wave_worker_pty(
+        0,
+        &backend,
+        "prompt",
+        &worker_events_path,
+        Duration::from_secs(60),
+        Some(Duration::from_secs(2)),
+        4,
+        tx,
+        None,
+        None,
+        None,
+    )
+    .await;
+
+    let (_events, duration, success) =
+        outcome.expect("events-file growth should keep the silent worker alive");
+    assert!(success, "worker should exit cleanly, not be idle-killed");
+    assert!(
+        duration >= Duration::from_secs(5),
+        "events-file growth must refresh the lease past the 2 s idle window; \
+         worker ran only {duration:?}"
+    );
+    let _ = appender.await;
+    emit_wave_validation_marker("events-file-growth:keeps-alive", &["strong", "lease", "events"]);
+}
+
 #[cfg(unix)]
 #[test]
 fn test_merge_wave_results_to_events_file_synthesizes_failure_events() {
