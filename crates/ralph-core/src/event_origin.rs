@@ -337,9 +337,28 @@ pub fn validate_event_origin(
     cancellation_topic: &str,
     _completion_promise: &str,
 ) -> OriginCheck {
-    // P0-1: system-injected events bypass the origin guard entirely.
+    // R6 (Plan 004 P0-3): system_injected is only a runtime-injection
+    // marker, never a self-asserted permission grant. Trust binds to
+    // the topic family, not the JSON field. Business topics
+    // (`work.start`, `review.unit.done`, ...) tagged with
+    // `system_injected=true` are forged by a non-runtime caller and
+    // MUST be rejected with `system_injected_on_business_topic`.
+    // Only the six supervisor coordination topics (and future
+    // `<kind>.wave.{complete,failed}` variants via
+    // `is_wave_coordination_topic`) may use the system injection
+    // path. This preserves the runtime's coord injection seam
+    // (KTD4/R5) while denying agent-emitted forged
+    // `system_injected=true` business events.
     if event.system_injected == Some(true) {
-        return OriginCheck::Accepted;
+        let topic_str = event.topic.as_str();
+        if is_supervisor_coordination_topic(topic_str) || is_wave_coordination_topic(topic_str) {
+            return OriginCheck::Accepted;
+        }
+        return OriginCheck::Rejected {
+            topic: topic_str.to_string(),
+            hat: event.hat.clone(),
+            reason: "system_injected_on_business_topic",
+        };
     }
 
     let topic_str = event.topic.as_str();
@@ -1423,10 +1442,14 @@ hats:
         assert_eq!(sorted.len(), original.len());
     }
 
-    /// P0-1: system-injected events bypass the origin guard entirely, including
-    /// ralph_control_only and unknown-hat checks.
+    /// Plan 004 R6 / P0-3: `system_injected` is a runtime-seam marker,
+    /// not a self-asserted permission grant. Business topics tagged
+    /// `system_injected=true` are forged by a non-runtime caller and
+    /// MUST be rejected. Only `<kind>.wave.{complete,failed}` (the
+    /// supervisor coordination topic family) may use the injection
+    /// path.
     #[test]
-    fn test_system_injected_event_bypasses_origin_guard() {
+    fn test_system_injected_on_business_topic_is_rejected() {
         let registry = runtime_registry_with_hats(
             r#"
 hats:
@@ -1434,24 +1457,82 @@ hats:
     name: "Executor"
     triggers: ["work.start"]
     publishes: ["work.done"]
+  review-worker:
+    name: "Reviewer"
+    triggers: ["scope.ready"]
+    publishes: ["review.unit.done"]
 "#,
         );
 
-        // Even with hat=ralph and a business topic, system_injected=true bypasses
-        let event = make_system_injected_event("work.start", Some("ralph"));
-        assert_eq!(
-            validate_event_origin(&event, &registry, "", ""),
-            OriginCheck::Accepted,
-            "system_injected event must bypass ralph_control_only"
+        // work.start is a business topic — forged system_injected must
+        // be rejected even if the caller claims `hat=ralph` or any
+        // unregistered hat name. The hat value is irrelevant: the
+        // forgery check is on the topic family.
+        for hat in ["ralph", "executor", "review-worker", "unknown"] {
+            let event = make_system_injected_event("work.start", Some(hat));
+            assert!(
+                matches!(
+                    validate_event_origin(&event, &registry, "", ""),
+                    OriginCheck::Rejected {
+                        reason: "system_injected_on_business_topic",
+                        ..
+                    }
+                ),
+                "system_injected=true on work.start (hat={hat}) must be rejected",
+            );
+        }
+
+        // review.unit.done is the agent-owned business terminal —
+        // the supervisor must not be able to back-fill it via
+        // system_injected.
+        let event = make_system_injected_event("review.unit.done", Some("review-worker"));
+        assert!(
+            matches!(
+                validate_event_origin(&event, &registry, "", ""),
+                OriginCheck::Rejected {
+                    reason: "system_injected_on_business_topic",
+                    ..
+                }
+            ),
+            "system_injected=true on review.unit.done must be rejected",
+        );
+    }
+
+    /// Plan 004 R6: the runtime coord injection seam is preserved.
+    /// All six `SUPERVISOR_COORDINATION_TOPICS` and any
+    /// `<kind>.wave.{complete,failed}` future variant are still
+    /// accepted when system_injected=true.
+    #[test]
+    fn test_system_injected_coordination_topics_still_accepted() {
+        let registry = runtime_registry_with_hats(
+            r#"
+hats:
+  integrator:
+    name: "Integrator"
+    triggers: ["exec.wave.complete"]
+    publishes: ["work.done"]
+  finalizer:
+    name: "Finalizer"
+    triggers: ["review.wave.failed"]
+    publishes: ["LOOP_COMPLETE"]
+"#,
         );
 
-        // Also bypasses unknown-hat check
-        let event = make_system_injected_event("work.start", Some("unknown"));
-        assert_eq!(
-            validate_event_origin(&event, &registry, "", ""),
-            OriginCheck::Accepted,
-            "system_injected event must bypass unknown-hat rejection"
-        );
+        for topic in [
+            "exec.wave.complete",
+            "exec.wave.failed",
+            "fix.wave.complete",
+            "fix.wave.failed",
+            "review.wave.complete",
+            "review.wave.failed",
+        ] {
+            let event = make_system_injected_event(topic, Some("integrator"));
+            assert_eq!(
+                validate_event_origin(&event, &registry, "", ""),
+                OriginCheck::Accepted,
+                "system_injected {topic} must be accepted as runtime coord",
+            );
+        }
     }
 
     /// P1-12: `is_ralph_control_topic` accepts existing control topics
