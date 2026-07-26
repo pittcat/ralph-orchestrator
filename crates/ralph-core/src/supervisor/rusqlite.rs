@@ -24,8 +24,8 @@ use rusqlite::{Connection, OptionalExtension};
 use super::migrations;
 use super::{
     CompensationKind, DispatchOutcome, EmissionReservation, EmissionState, IsolationMode,
-    SlotResource, SlotStatus, SupervisorStore, SupervisorStoreError, SupervisorStoreResult,
-    WaveKind, WavePhase, WaveSnapshot,
+    RedriveResult, SlotResource, SlotStatus, SupervisorStore, SupervisorStoreError,
+    SupervisorStoreResult, WaveKind, WavePhase, WaveSnapshot,
 };
 
 /// `PRAGMA busy_timeout` value installed on every supervisor
@@ -1258,6 +1258,214 @@ impl SupervisorStore for RusqliteSupervisorStore {
                 ],
             )?;
             Ok(())
+        })
+    }
+
+    // ─────────────────────────────────────────────────────────────────
+    // 2026-07-25-005 plan U11: redrive API.
+    // ─────────────────────────────────────────────────────────────────
+
+    fn create_redrive_wave(
+        &self,
+        parent_wave_id: &str,
+        slots: Option<&[u32]>,
+    ) -> SupervisorStoreResult<RedriveResult> {
+        self.with_conn(|conn| {
+            // 1. Load parent wave (phase, kind, attempt_epoch, slot_retry_budget)
+            let parent: (String, String, i64, i64) = conn
+                .query_row(
+                    "SELECT wave_id, kind, attempt_epoch, slot_retry_budget
+                     FROM waves WHERE wave_id = ?1",
+                    [parent_wave_id],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+                )
+                .optional()?
+                .ok_or_else(|| SupervisorStoreError::UnknownWave(parent_wave_id.to_string()))?;
+
+            let phase_str = conn
+                .query_row(
+                    "SELECT phase FROM waves WHERE wave_id = ?1",
+                    [parent_wave_id],
+                    |row| row.get::<_, String>(0),
+                )
+                .map_err(|_| SupervisorStoreError::UnknownWave(parent_wave_id.to_string()))?;
+
+            let phase = parse_phase(&phase_str)
+                .map_err(|e| SupervisorStoreError::InvalidTransition(e.to_string()))?;
+
+            // 2. Reject Done or Integrate parent
+            if matches!(phase, WavePhase::Done | WavePhase::Integrate) {
+                return Err(SupervisorStoreError::InvalidTransition(
+                    "cannot redrive a wave in done or integrate phase".to_string(),
+                ));
+            }
+
+            // 3. Collect failed slot indices for this parent
+            let mut stmt_failed = conn.prepare(
+                "SELECT slot_index FROM wave_slots
+                 WHERE wave_id = ?1 AND status = 'failed'",
+            )?;
+            let failed_slot_indices: Vec<u32> = stmt_failed
+                .query_map([parent_wave_id], |row| {
+                    let idx: i64 = row.get(0)?;
+                    Ok(idx as u32)
+                })?
+                .filter_map(|r| r.ok())
+                .collect();
+            drop(stmt_failed);
+
+            if failed_slot_indices.is_empty() {
+                return Err(SupervisorStoreError::InvalidTransition(
+                    "no failed slots to redrive".to_string(),
+                ));
+            }
+
+            // 4. Apply explicit slots filter or default to all failed
+            let target_slots: Vec<u32> = match slots {
+                Some(requested) => {
+                    let requested_set: std::collections::HashSet<u32> =
+                        requested.iter().cloned().collect();
+                    failed_slot_indices
+                        .into_iter()
+                        .filter(|i| requested_set.contains(i))
+                        .collect()
+                }
+                None => failed_slot_indices.clone(),
+            };
+
+            if target_slots.is_empty() {
+                return Err(SupervisorStoreError::InvalidTransition(
+                    "none of the requested slots are failed".to_string(),
+                ));
+            }
+
+            let parent_attempt_epoch = parent.2 as u32;
+            let attempt_epoch = parent_attempt_epoch + 1;
+            let kind_str = &parent.1;
+            let kind = parse_kind(kind_str)
+                .map_err(|e| SupervisorStoreError::InvalidTransition(e.to_string()))?;
+            let isolation = default_isolation_for(kind);
+            let slot_retry_budget = parent.3 as u32;
+            let now_secs: i64 = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs() as i64)
+                .unwrap_or(0);
+
+            // 5. For each target slot: INSERT OR IGNORE into redrive_requests
+            //    UNIQUE(parent_wave_id, slot_index, attempt_epoch) provides idempotency.
+            //    If row already exists, we get a constraint violation and must not fail.
+            let mut redrive_request_id: Option<i64> = None;
+
+            for &slot_index in &target_slots {
+                let conflict_occurred: bool = conn
+                    .query_row(
+                        "SELECT 1 FROM redrive_requests
+                         WHERE parent_wave_id = ?1 AND slot_index = ?2 AND attempt_epoch = ?3",
+                        rusqlite::params![parent_wave_id, i64::from(slot_index), i64::from(attempt_epoch)],
+                        |_| Ok(true),
+                    )
+                    .optional()?
+                    .unwrap_or(false);
+
+                if conflict_occurred {
+                    // Idempotent hit: fetch the existing id
+                    let existing_id: i64 = conn
+                        .query_row(
+                            "SELECT id FROM redrive_requests
+                             WHERE parent_wave_id = ?1 AND slot_index = ?2 AND attempt_epoch = ?3",
+                            rusqlite::params![parent_wave_id, i64::from(slot_index), i64::from(attempt_epoch)],
+                            |row| row.get(0),
+                        )
+                        .map_err(|e| SupervisorStoreError::Storage(e.to_string()))?;
+                    redrive_request_id.get_or_insert(existing_id);
+                } else {
+                    // Insert new row with status 'applied'
+                    conn.execute(
+                        "INSERT INTO redrive_requests (parent_wave_id, slot_index, attempt_epoch, created_at_ms, status)
+                         VALUES (?1, ?2, ?3, ?4, 'applied')",
+                        rusqlite::params![
+                            parent_wave_id,
+                            i64::from(slot_index),
+                            i64::from(attempt_epoch),
+                            now_secs * 1000,
+                        ],
+                    )?;
+                    let id = conn
+                        .query_row("SELECT last_insert_rowid()", [], |row| row.get(0))
+                        .map_err(|e| SupervisorStoreError::Storage(e.to_string()))?;
+                    redrive_request_id.get_or_insert(id);
+                }
+            }
+
+            let redrive_request_id = redrive_request_id.unwrap();
+
+            // 6. Check if a child wave already exists for this (parent, attempt_epoch).
+            //    This covers the idempotency case: the second redrive call finds
+            //    the child already created by the first call.
+            if let Some(existing_child) = conn
+                .query_row(
+                    "SELECT wave_id FROM waves
+                     WHERE parent_wave_id = ?1 AND attempt_epoch = ?2",
+                    rusqlite::params![parent_wave_id, i64::from(attempt_epoch)],
+                    |row| row.get::<_, String>(0),
+                )
+                .optional()?
+            {
+                return Ok(RedriveResult {
+                    redrive_request_id,
+                    child_wave_id: existing_child,
+                    attempt_epoch,
+                    parent_wave_id: parent_wave_id.to_string(),
+                    slots: target_slots,
+                });
+            }
+
+            // 7. Create child wave row with new wave_id via wave_id_seq
+            let next_seq: i64 = conn
+                .query_row(
+                    "INSERT INTO wave_id_seq DEFAULT VALUES RETURNING seq",
+                    [],
+                    |row| row.get(0),
+                )
+                .map_err(|e| SupervisorStoreError::Storage(e.to_string()))?;
+            let child_wave_id = format!("w-{next_seq}");
+
+            conn.execute(
+                "INSERT INTO waves (wave_id, idempotency_key, kind, expected_total, phase, slot_retry_budget, attempt_epoch, parent_wave_id, published_failure_payload)
+                 VALUES (?1, ?2, ?3, ?4, 'dispatch', ?5, ?6, ?7, 0)",
+                rusqlite::params![
+                    &child_wave_id,
+                    "", // empty idempotency_key for redrive waves
+                    kind_str,
+                    i64::from(target_slots.len() as u32),
+                    i64::from(slot_retry_budget),
+                    i64::from(attempt_epoch),
+                    parent_wave_id,
+                ],
+            )
+            .map_err(|e| SupervisorStoreError::Storage(e.to_string()))?;
+
+            // 8. Create child slot rows
+            for (i, &_slot_index) in target_slots.iter().enumerate() {
+                conn.execute(
+                    "INSERT INTO wave_slots (wave_id, slot_index, status, isolation, attempt_count, max_attempts)
+                     VALUES (?1, ?2, 'pending', ?3, 0, NULL)",
+                    rusqlite::params![
+                        &child_wave_id,
+                        i64::from(i as u32),
+                        isolation_to_str(isolation),
+                    ],
+                )
+                .map_err(|e| SupervisorStoreError::Storage(e.to_string()))?;
+            }
+
+            Ok(RedriveResult {
+                redrive_request_id,
+                child_wave_id,
+                attempt_epoch,
+                parent_wave_id: parent_wave_id.to_string(),
+                slots: target_slots,
+            })
         })
     }
 

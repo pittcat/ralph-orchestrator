@@ -18,7 +18,7 @@ use std::time::SystemTime;
 
 use super::{
     CompensationKind, DispatchOutcome, EmissionReservation, EmissionState, IdempotencyKey,
-    IsolationMode, SlotResource, SlotStatus, SupervisorStore, SupervisorStoreError,
+    IsolationMode, RedriveResult, SlotResource, SlotStatus, SupervisorStore, SupervisorStoreError,
     SupervisorStoreResult, WaveKind, WavePhase, WaveSnapshot,
 };
 
@@ -49,6 +49,11 @@ struct WaveRow {
     /// 2026-07-25-005 plan U2: default retry budget for all slots
     /// in this wave. Range 0..=2; 0 disables auto-retry.
     slot_retry_budget: u32,
+    /// 2026-07-25-005 plan U2: child attempt wave's epoch marker
+    /// (incremented each time a redrive wave is created from this wave).
+    attempt_epoch: u32,
+    /// 2026-07-25-005 plan U2: redrive parent reference (NULL for original waves).
+    parent_wave_id: Option<String>,
     slots: BTreeMap<u32, SlotRow>,
 }
 
@@ -129,6 +134,11 @@ struct Inner {
     /// `public_wave_id` on `reserve_emission`; `scope_key` is
     /// the dedup primary key.
     emissions: HashMap<String, EmissionRow>,
+    /// 2026-07-25-005 plan U11: redrive request ledger.
+    /// Key = `(parent_wave_id, slot_index, attempt_epoch)` for UNIQUE lookup.
+    redrive_requests: HashMap<(String, u32, u32), RedriveRequestRow>,
+    /// Autoincrement id for redrive_requests.
+    next_redrive_id: i64,
 }
 
 /// 2026-07-24-003 plan U4: in-memory emission reservation row.
@@ -144,6 +154,29 @@ struct EmissionRow {
     expected_count: u32,
     state: EmissionState,
     applied_at: Option<u64>,
+}
+
+/// 2026-07-25-005 plan U11: in-memory redrive request row.
+/// Mirrors the `redrive_requests` SQLite table so unit tests
+/// exercise the same idempotency semantics as the rusqlite store.
+#[derive(Debug, Clone)]
+#[allow(dead_code)] // fields mirror the SQLite schema but are not all read in tests
+struct RedriveRequestRow {
+    id: i64,
+    parent_wave_id: String,
+    slot_index: u32,
+    attempt_epoch: u32,
+    created_at_ms: u64,
+    status: RedriveRequestStatus,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(dead_code)] // Pending/RejectedDuplicate/RejectedTerminal are part of the schema contract
+enum RedriveRequestStatus {
+    Pending,
+    Applied,
+    RejectedDuplicate,
+    RejectedTerminal,
 }
 
 #[derive(Debug, Clone)]
@@ -292,6 +325,8 @@ impl SupervisorStore for InMemorySupervisorStore {
             salvage_merged: false,
             created_at: SystemTime::now(),
             slot_retry_budget,
+            attempt_epoch: 0,
+            parent_wave_id: None,
             slots,
         };
         inner.waves_by_id.insert(wave_id.clone(), row);
@@ -907,6 +942,192 @@ impl SupervisorStore for InMemorySupervisorStore {
             };
         }
         Ok(())
+    }
+
+    // ─────────────────────────────────────────────────────────────────
+    // 2026-07-25-005 plan U11: redrive API.
+    // ─────────────────────────────────────────────────────────────────
+
+    fn create_redrive_wave(
+        &self,
+        parent_wave_id: &str,
+        slots: Option<&[u32]>,
+    ) -> SupervisorStoreResult<RedriveResult> {
+        use std::time::UNIX_EPOCH;
+
+        // 1. Load parent wave — clone data we need so we can drop the borrow
+        let (parent_kind, attempt_epoch_base, parent_slot_retry_budget, target_slots) = {
+            let inner = self.lock()?;
+            let parent = inner
+                .waves_by_id
+                .get(parent_wave_id)
+                .ok_or_else(|| SupervisorStoreError::UnknownWave(parent_wave_id.to_string()))?;
+
+            // 2. Reject Done or Integrate parent
+            if matches!(parent.phase, WavePhase::Done | WavePhase::Integrate) {
+                return Err(SupervisorStoreError::InvalidTransition(
+                    "cannot redrive a wave in done or integrate phase".to_string(),
+                ));
+            }
+
+            // 3. Collect failed slots
+            let failed_slot_indices: Vec<u32> = parent
+                .slots
+                .iter()
+                .filter(|(_, s)| s.status == SlotStatus::Failed)
+                .map(|(idx, _)| *idx)
+                .collect();
+
+            if failed_slot_indices.is_empty() {
+                return Err(SupervisorStoreError::InvalidTransition(
+                    "no failed slots to redrive".to_string(),
+                ));
+            }
+
+            // 4. Apply explicit slots filter or default to all failed
+            let target: Vec<u32> = match slots {
+                Some(s) => {
+                    let requested: std::collections::HashSet<u32> = s.iter().cloned().collect();
+                    failed_slot_indices
+                        .into_iter()
+                        .filter(|i| requested.contains(i))
+                        .collect()
+                }
+                None => failed_slot_indices,
+            };
+
+            if target.is_empty() {
+                return Err(SupervisorStoreError::InvalidTransition(
+                    "none of the requested slots are failed".to_string(),
+                ));
+            }
+
+            (
+                parent.kind,
+                parent.attempt_epoch,
+                parent.slot_retry_budget,
+                target,
+            )
+        };
+
+        let attempt_epoch = attempt_epoch_base + 1;
+
+        // Re-acquire lock for state mutations
+        let mut inner = self.lock()?;
+
+        // 5. Check if a child wave already exists for this (parent, attempt_epoch).
+        //    This covers the idempotency case: the second redrive call should
+        //    find the child already created by the first call.
+        let existing_child_wave_id: Option<String> = inner
+            .waves_by_id
+            .values()
+            .find(|w| {
+                w.parent_wave_id.as_deref() == Some(parent_wave_id)
+                    && w.attempt_epoch == attempt_epoch
+            })
+            .map(|w| w.wave_id.clone());
+
+        if let Some(existing_id) = existing_child_wave_id {
+            // Idempotent hit: find the first redrive_request for this (parent, epoch)
+            // to get its id; return the existing child wave.
+            let req_id = inner
+                .redrive_requests
+                .values()
+                .find(|r| r.parent_wave_id == parent_wave_id && r.attempt_epoch == attempt_epoch)
+                .map(|r| r.id);
+            return Ok(RedriveResult {
+                redrive_request_id: req_id.unwrap_or(0),
+                child_wave_id: existing_id,
+                attempt_epoch,
+                parent_wave_id: parent_wave_id.to_string(),
+                slots: target_slots,
+            });
+        }
+
+        // 6. For each target slot: idempotency check / record in redrive_requests
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+
+        let mut redrive_request_id: Option<i64> = None;
+
+        for &slot_index in &target_slots {
+            let key = (parent_wave_id.to_string(), slot_index, attempt_epoch);
+            if let Some(existing) = inner.redrive_requests.get(&key) {
+                // Duplicate: use the existing request id
+                redrive_request_id.get_or_insert(existing.id);
+            } else {
+                // Insert new redrive request with status Applied
+                let id = inner.next_redrive_id;
+                inner.next_redrive_id += 1;
+                redrive_request_id.get_or_insert(id);
+                inner.redrive_requests.insert(
+                    key,
+                    RedriveRequestRow {
+                        id,
+                        parent_wave_id: parent_wave_id.to_string(),
+                        slot_index,
+                        attempt_epoch,
+                        created_at_ms: now_ms,
+                        status: RedriveRequestStatus::Applied,
+                    },
+                );
+            }
+        }
+
+        let redrive_request_id = redrive_request_id.unwrap();
+
+        // 7. Create child wave (register_wave equivalent)
+        let child_wave_id = format!("w-{}", inner.next_wave_seq + 1);
+        inner.next_wave_seq += 1;
+
+        let default_isolation = match parent_kind {
+            WaveKind::Exec | WaveKind::Fix => IsolationMode::Worktree,
+            WaveKind::Review => IsolationMode::SharedReadonly,
+        };
+
+        let mut child_slots = BTreeMap::new();
+        for (i, &_slot_index) in target_slots.iter().enumerate() {
+            child_slots.insert(
+                i as u32,
+                SlotRow {
+                    slot_index: i as u32,
+                    status: SlotStatus::Pending,
+                    isolation: default_isolation,
+                    resource: None,
+                    content_hash: None,
+                    event_count: None,
+                    failure_reason: None,
+                    terminal_evidence: None,
+                },
+            );
+        }
+
+        let row = WaveRow {
+            wave_id: child_wave_id.clone(),
+            kind: parent_kind,
+            expected_total: target_slots.len() as u32,
+            phase: WavePhase::Dispatch,
+            cancel_requested: false,
+            merged_to_events: false,
+            salvage_merged: false,
+            created_at: SystemTime::now(),
+            slot_retry_budget: parent_slot_retry_budget,
+            attempt_epoch,
+            parent_wave_id: Some(parent_wave_id.to_string()),
+            slots: child_slots,
+        };
+
+        inner.waves_by_id.insert(child_wave_id.clone(), row);
+
+        Ok(RedriveResult {
+            redrive_request_id,
+            child_wave_id,
+            attempt_epoch,
+            parent_wave_id: parent_wave_id.to_string(),
+            slots: target_slots,
+        })
     }
 
     // ─────────────────────────────────────────────────────────────────

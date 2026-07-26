@@ -291,6 +291,25 @@ pub enum SupervisorStoreError {
 /// Result alias for the trait surface.
 pub type SupervisorStoreResult<T> = Result<T, SupervisorStoreError>;
 
+// ─────────────────────────────────────────────────────────────────
+// 2026-07-25-005 plan U11: redrive API.
+// ─────────────────────────────────────────────────────────────────
+
+/// 2026-07-25-005 plan U11: outcome of `SupervisorStore::create_redrive_wave`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RedriveResult {
+    /// Stable redrive request record id (用于幂等去重).
+    pub redrive_request_id: i64,
+    /// The newly created child wave id.
+    pub child_wave_id: String,
+    /// Attempt epoch of the child wave (= parent.attempt_epoch + 1).
+    pub attempt_epoch: u32,
+    /// Parent wave id that was redriven.
+    pub parent_wave_id: String,
+    /// Slot indices that were included in the redrive.
+    pub slots: Vec<u32>,
+}
+
 // 2026-07-24-003 plan U4: emission reservation state machine.
 //
 // Public API for the CLI's `ralph wave emit` happy path. The store
@@ -708,6 +727,32 @@ pub trait SupervisorStore: fmt::Debug + Send + Sync {
     ) -> SupervisorStoreResult<()>;
 
     // ─────────────────────────────────────────────────────────────────
+    // 2026-07-25-005 plan U11: redrive API.
+    // ─────────────────────────────────────────────────────────────────
+
+    /// Create a redrive child wave for a parent wave with failed slots.
+    ///
+    /// The child wave is created with:
+    /// - `kind` inherited from the parent
+    /// - `slot_retry_budget` inherited from the parent
+    /// - `expected_total = failed_slot_indices.len()`
+    /// - `attempt_epoch = parent.attempt_epoch + 1`
+    /// - `parent_wave_id = parent.wave_id`
+    ///
+    /// Validation rules:
+    /// - Parent phase must NOT be `Done` or `Integrate` → `InvalidTransition`
+    /// - Parent must have at least one Failed slot → `InvalidTransition("no failed slots")`
+    /// - Duplicate (parent_wave_id, slot_index, attempt_epoch) triple → idempotent return of existing child
+    ///
+    /// The `slots` parameter allows selecting a subset of failed slots.
+    /// `None` means "all failed slots".
+    fn create_redrive_wave(
+        &self,
+        parent_wave_id: &str,
+        slots: Option<&[u32]>,
+    ) -> SupervisorStoreResult<RedriveResult>;
+
+    // ─────────────────────────────────────────────────────────────────
     // 2026-07-24-003 plan U4: emission reservation API.
     //
     // The CLI's `ralph wave emit` calls these instead of writing
@@ -848,6 +893,8 @@ pub mod phase;
 #[cfg(test)]
 mod plan_b_contract;
 mod recover;
+#[cfg(test)]
+mod redrive_tests;
 #[cfg(test)]
 mod retry_classifier_tests;
 #[cfg(feature = "supervisor-db")]
