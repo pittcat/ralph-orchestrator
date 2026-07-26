@@ -116,7 +116,7 @@ fn plan_b_contract_double_tick_emits_complete_with_success_resources() {
 
     // Register two slots for the same exec wave.
     let store_id = bridge
-        .register_wave_if_absent(WaveKind::Exec, "w-b-1", 2)
+        .register_wave_if_absent(WaveKind::Exec, "w-b-1", 2, 1)
         .expect("register wave");
     drive_slot_to_done(&bridge, &store_id, 0);
     drive_slot_to_done(&bridge, &store_id, 1);
@@ -157,7 +157,7 @@ fn plan_b_contract_double_tick_emits_failed_with_blocking_slot() {
     // reason, blocking_slots }`.
     let bridge = make_bridge();
     let store_id = bridge
-        .register_wave_if_absent(WaveKind::Exec, "w-b-2", 1)
+        .register_wave_if_absent(WaveKind::Exec, "w-b-2", 1, 1)
         .expect("register wave");
     drive_slot_to_failure(&bridge, &store_id, 0);
     // Plan 004 R3 / P0-1: pre-commit salvage before tick.
@@ -194,7 +194,7 @@ fn plan_b_contract_double_duplicate_terminal_is_rejected() {
     // bridge surfaces this as `AlreadyDone` (KTD-7 / F-001).
     let bridge = make_bridge();
     let store_id = bridge
-        .register_wave_if_absent(WaveKind::Exec, "w-b-3", 1)
+        .register_wave_if_absent(WaveKind::Exec, "w-b-3", 1, 1)
         .expect("register wave");
     drive_slot_to_done(&bridge, &store_id, 0);
 
@@ -229,7 +229,7 @@ fn plan_b_contract_double_slot_resources_round_trip() {
     // accidentally swaps the two modes fails loudly here.
     let bridge = make_bridge();
     let store_id = bridge
-        .register_wave_if_absent(WaveKind::Exec, "w-b-4", 1)
+        .register_wave_if_absent(WaveKind::Exec, "w-b-4", 1, 1)
         .expect("register exec wave");
     bridge
         .store()
@@ -304,7 +304,7 @@ fn plan_b_contract_double_review_wave_uses_review_wave_complete_topic() {
     // binding) — the bridge records the slot result directly.
     let bridge = make_bridge();
     let store_id = bridge
-        .register_wave_if_absent(WaveKind::Review, "w-b-r", 1)
+        .register_wave_if_absent(WaveKind::Review, "w-b-r", 1, 1)
         .expect("register review wave");
     bridge
         .store()
@@ -343,7 +343,7 @@ fn plan_b_contract_double_fix_wave_uses_fix_wave_complete_topic() {
     // Mirrors the review wave assertion above.
     let bridge = make_bridge();
     let store_id = bridge
-        .register_wave_if_absent(WaveKind::Fix, "w-b-f", 1)
+        .register_wave_if_absent(WaveKind::Fix, "w-b-f", 1, 1)
         .expect("register fix wave");
     bridge
         .store()

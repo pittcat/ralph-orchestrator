@@ -15202,10 +15202,7 @@ mod p0_4_flow_authority_ledger_tests {
     use std::path::PathBuf;
 
     fn workspace_root() -> PathBuf {
-        let dir = std::env::temp_dir().join(format!(
-            "ralph-p0-4-flow-auth-{}",
-            std::process::id()
-        ));
+        let dir = std::env::temp_dir().join(format!("ralph-p0-4-flow-auth-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(dir.join(".ralph")).unwrap();
         dir

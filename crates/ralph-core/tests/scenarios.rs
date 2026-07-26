@@ -677,8 +677,7 @@ fn run_bdd_supervisor_fan_in(
             // We use the worker topic + payload as the
             // evidence body so the stored fingerprint matches
             // what the worker actually emitted.
-            let wave_kind_for_evidence =
-                wave_kind.get(&wave_id).copied().unwrap_or(WaveKind::Exec);
+            let wave_kind_for_evidence = wave_kind.get(&wave_id).copied().unwrap_or(WaveKind::Exec);
             let evidence_topic = match wave_kind_for_evidence {
                 ralph_core::supervisor::WaveKind::Review => "review.unit.done",
                 ralph_core::supervisor::WaveKind::Fix => "fix.unit.done",

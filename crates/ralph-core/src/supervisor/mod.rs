@@ -457,11 +457,14 @@ pub trait SupervisorStore: fmt::Debug + Send + Sync {
     /// - in absence of an `IsolationMode` override, default each
     ///   slot's isolation per `WaveKind` (exec/fix=Worktree,
     ///   review=SharedReadonly)
+    /// - store `slot_retry_budget` (range 0..=2; >2 returns
+    ///   `InvalidTransition`)
     fn register_wave(
         &self,
         idempotency_key: &str,
         kind: WaveKind,
         expected_total: u32,
+        slot_retry_budget: u32,
     ) -> SupervisorStoreResult<String>;
 
     /// Enqueue a wave that exceeded the backpressure ceiling. The
@@ -473,6 +476,7 @@ pub trait SupervisorStore: fmt::Debug + Send + Sync {
         idempotency_key: &str,
         kind: WaveKind,
         expected_total: u32,
+        slot_retry_budget: u32,
     ) -> SupervisorStoreResult<String>;
 
     /// Try to take the next pending slot for dispatch. Returns
@@ -844,6 +848,8 @@ pub mod phase;
 #[cfg(test)]
 mod plan_b_contract;
 mod recover;
+#[cfg(test)]
+mod retry_classifier_tests;
 #[cfg(feature = "supervisor-db")]
 mod rusqlite;
 #[cfg(test)]

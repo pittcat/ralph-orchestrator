@@ -126,6 +126,7 @@ impl SupervisorBridge for SpyBindingBridge {
         _kind: WaveKind,
         wave_id: &str,
         _expected_total: u32,
+        _slot_retry_budget: u32,
     ) -> Result<String, BridgeError> {
         Ok(wave_id.to_string())
     }
@@ -576,7 +577,7 @@ fn recover_pending_projections_closes_stale_task_and_is_idempotent() {
     // dispatchable.
     let store = InMemorySupervisorStore::new();
     let wave_id = store
-        .register_wave("idem-key", WaveKind::Exec, 2)
+        .register_wave("idem-key", WaveKind::Exec, 2, 1)
         .expect("register wave");
     store
         .bind_worktree(
@@ -907,7 +908,7 @@ fn u8_bind_slot_env_does_not_contain_ralph_wave_id() {
         factory.clone() as std::sync::Arc<dyn WorktreeFactory>,
     );
     let store_wave_id = bridge
-        .register_wave_if_absent(WaveKind::Exec, "u8-wave", 1)
+        .register_wave_if_absent(WaveKind::Exec, "u8-wave", 1, 0)
         .expect("register must succeed");
 
     let binding = bridge
@@ -1123,7 +1124,7 @@ fn exec_kind_produces_unique_branch_path_cwd() {
     );
 
     let store_wave_id = bridge
-        .register_wave_if_absent(WaveKind::Exec, "u4-wave", 2)
+        .register_wave_if_absent(WaveKind::Exec, "u4-wave", 2, 0)
         .expect("register must succeed");
 
     let binding_0 = bridge
@@ -1197,7 +1198,7 @@ fn fix_kind_produces_unique_branch_path_cwd() {
     );
 
     let store_wave_id = bridge
-        .register_wave_if_absent(WaveKind::Fix, "u4-fix-wave", 3)
+        .register_wave_if_absent(WaveKind::Fix, "u4-fix-wave", 3, 0)
         .expect("register must succeed");
 
     for slot in 0u32..3 {
@@ -1253,7 +1254,7 @@ fn review_kind_returns_shared_readonly_none() {
     );
 
     let store_wave_id = bridge
-        .register_wave_if_absent(WaveKind::Review, "u4-review-wave", 2)
+        .register_wave_if_absent(WaveKind::Review, "u4-review-wave", 2, 0)
         .expect("register must succeed");
 
     let binding_0 = bridge
@@ -1296,7 +1297,7 @@ fn bind_slot_failure_fail_closed_no_main_workspace_write() {
     let (bridge, store) = production_bridge_with_factory(factory, workspace.clone(), "u4-loop");
 
     let store_wave_id = bridge
-        .register_wave_if_absent(WaveKind::Exec, "u4-fail-wave", 1)
+        .register_wave_if_absent(WaveKind::Exec, "u4-fail-wave", 1, 0)
         .expect("register must succeed");
 
     let result = bridge.bind_slot(WaveKind::Exec, &store_wave_id, 0);
@@ -1385,7 +1386,7 @@ fn dispatcher_fail_closed_for_exec_bind_failure() {
         production_bridge_with_factory(factory, tmp.path().to_path_buf(), "u4-loop");
 
     let store_wave_id = bridge
-        .register_wave_if_absent(WaveKind::Exec, "u4-fail-dispatch", 1)
+        .register_wave_if_absent(WaveKind::Exec, "u4-fail-dispatch", 1, 0)
         .expect("register must succeed");
 
     let bind_err = bridge
@@ -1420,7 +1421,7 @@ fn production_bridge_only_returns_none_for_review() {
     );
 
     let exec_wave = bridge
-        .register_wave_if_absent(WaveKind::Exec, "u4-exec-pin", 1)
+        .register_wave_if_absent(WaveKind::Exec, "u4-exec-pin", 1, 0)
         .expect("register");
     let exec_binding = bridge
         .bind_slot(WaveKind::Exec, &exec_wave, 0)
@@ -1431,7 +1432,7 @@ fn production_bridge_only_returns_none_for_review() {
     );
 
     let fix_wave = bridge
-        .register_wave_if_absent(WaveKind::Fix, "u4-fix-pin", 1)
+        .register_wave_if_absent(WaveKind::Fix, "u4-fix-pin", 1, 0)
         .expect("register");
     let fix_binding = bridge
         .bind_slot(WaveKind::Fix, &fix_wave, 0)
@@ -1500,7 +1501,7 @@ fn test_build_supervisor_bridge_provides_context_for_exec() {
     .expect("build_supervisor_bridge must succeed when supervisor-db is enabled");
 
     let store_wave_id = bridge
-        .register_wave_if_absent(WaveKind::Exec, "u1-wave-exec", 2)
+        .register_wave_if_absent(WaveKind::Exec, "u1-wave-exec", 2, 0)
         .expect("register must succeed");
 
     let binding_0 = bridge
@@ -1587,7 +1588,7 @@ fn test_build_supervisor_bridge_provides_context_for_fix() {
     .expect("build_supervisor_bridge must succeed when supervisor-db is enabled");
 
     let store_wave_id = bridge
-        .register_wave_if_absent(WaveKind::Fix, "u1-wave-fix", 3)
+        .register_wave_if_absent(WaveKind::Fix, "u1-wave-fix", 3, 0)
         .expect("register must succeed");
 
     for slot in 0u32..3 {
@@ -1741,7 +1742,7 @@ fn test_bind_slot_factory_failure_returns_err() {
     );
 
     let wave_id = bridge
-        .register_wave_if_absent(WaveKind::Exec, "u1-fail-wave", 1)
+        .register_wave_if_absent(WaveKind::Exec, "u1-fail-wave", 1, 0)
         .expect("register must succeed");
 
     let result = bridge.bind_slot(WaveKind::Exec, &wave_id, 0);
@@ -2001,6 +2002,7 @@ impl SupervisorBridge for U3DispatchBridge {
         kind: WaveKind,
         wave_id: &str,
         expected_total: u32,
+        slot_retry_budget: u32,
     ) -> Result<String, BridgeError> {
         // Register the wave in the store so subsequent
         // `bind_worktree` calls succeed. Return the STORE's
@@ -2008,7 +2010,10 @@ impl SupervisorBridge for U3DispatchBridge {
         // subsequent `bind_slot(wave_id, ...)` calls line up
         // with the store's `waves_by_id` keys.
         use ralph_core::supervisor::SupervisorStoreError;
-        match self.store.register_wave(wave_id, kind, expected_total) {
+        match self
+            .store
+            .register_wave(wave_id, kind, expected_total, slot_retry_budget)
+        {
             Ok(store_wave_id) => Ok(store_wave_id),
             Err(SupervisorStoreError::DuplicateKey(_)) => {
                 // Idempotent re-entry: the wave is already
@@ -2222,7 +2227,7 @@ async fn test_dispatcher_spawns_only_approved_slot() {
     // can recover the store's `w-{seq}` id for the bind_worktree
     // calls below.
     let store_wave_id = bridge
-        .register_wave_if_absent(WaveKind::Exec, "u3-only-0", 3)
+        .register_wave_if_absent(WaveKind::Exec, "u3-only-0", 3, 0)
         .expect("register_wave_if_absent");
 
     // Pre-bind only slot 0 in the store so the store's
@@ -2284,7 +2289,7 @@ async fn test_dispatcher_skips_unapproved_slot() {
     // "wave_id mismatch" path: the store's pick (None) does
     // NOT match any `(wave_id, slot_index)` the dispatcher
     // asks for.
-    let _ = store.register_wave("u3-other", WaveKind::Exec, 1);
+    let _ = store.register_wave("u3-other", WaveKind::Exec, 1, 0);
 
     let wave = make_u3_wave("u3-mine", 3, 3);
 
@@ -2357,7 +2362,7 @@ async fn test_dispatcher_effective_cap_hat_lower_than_bridge() {
     // can recover the store's `w-{seq}` id for the bind_worktree
     // calls below.
     let store_wave_id = bridge
-        .register_wave_if_absent(WaveKind::Exec, "u3-cap-a", 4)
+        .register_wave_if_absent(WaveKind::Exec, "u3-cap-a", 4, 0)
         .expect("register_wave_if_absent");
 
     // Bind all 4 slots so the store keeps approving them.
@@ -2410,7 +2415,7 @@ async fn test_dispatcher_effective_cap_bridge_lower_than_hat() {
     // can recover the store's `w-{seq}` id for the bind_worktree
     // calls below.
     let store_wave_id = bridge
-        .register_wave_if_absent(WaveKind::Exec, "u3-cap-b", 4)
+        .register_wave_if_absent(WaveKind::Exec, "u3-cap-b", 4, 0)
         .expect("register_wave_if_absent");
 
     // Bind all 4 slots so the store can approve up to 2 (the
@@ -2444,6 +2449,92 @@ async fn test_dispatcher_effective_cap_bridge_lower_than_hat() {
 // =============================================================================
 // U3 test helpers (subordinate to the U3 tests above).
 // =============================================================================
+
+// U1 M1: partial failure bridge setup helper used by the U1
+// characterization tests (Test 1, 2, 3 and the new T1-T4 tests).
+// Follows the same pattern as `make_u3_wave` / `make_u3_wave_with_concurrency`
+// to stay consistent with the existing helper style.
+
+/// Build a production `CoordinatorSupervisorBridge` for a partial-failure
+/// scenario with `slot_count` slots, all bound and dispatched but NOT
+/// yet recorded (callers record completed/failed per slot before fan-in).
+///
+/// Returns `(tmp, bridge, store_wave_id, events_path)` where:
+///   - `tmp` is the temp directory (kept alive for the duration of the test)
+///   - `bridge` is a production bridge ready for `record_slot_result` /
+///     `record_slot_failure` calls
+///   - `store_wave_id` is the store-assigned wave id for subsequent calls
+///   - `events_path` is the ledger path for `run_supervisor_fan_in`
+///
+/// Usage:
+///   let (tmp, bridge, store_wave_id, events_path) =
+///       setup_u3_partial_failure_bridge(WaveKind::Exec, "u1-test", 2);
+///   // Record slot 0 as completed, slot 1 as failed
+///   bridge.record_slot_result(&store_wave_id, 0, "h0", 1).unwrap();
+///   bridge.store().record_slot_terminal_evidence(...).unwrap();
+///   bridge.record_slot_failure(&store_wave_id, 1, REASON_WORKER_TIMEOUT).unwrap();
+///   bridge.mark_salvage_merged(&store_wave_id).unwrap();
+///   // Now run fan-in
+fn setup_u3_partial_failure_bridge(
+    kind: WaveKind,
+    loop_id: &str,
+    slot_count: u32,
+) -> (
+    tempfile::TempDir,
+    crate::loop_runner::wave::CoordinatorSupervisorBridge,
+    std::sync::Arc<dyn SupervisorStore>,
+    String,
+    std::path::PathBuf,
+) {
+    use crate::loop_runner::wave::{CoordinatorSupervisorBridge, ProductionBridgeContext};
+    use ralph_core::supervisor::SlotResource;
+
+    let tmp = tempfile::tempdir().expect("temp dir");
+    let events_path = tmp.path().join(".ralph").join("events.jsonl");
+    std::fs::create_dir_all(events_path.parent().unwrap()).ok();
+
+    let store: std::sync::Arc<dyn SupervisorStore> =
+        std::sync::Arc::new(InMemorySupervisorStore::new());
+    let context = ProductionBridgeContext {
+        loop_id: loop_id.to_string(),
+        repo_root: std::path::PathBuf::from("/tmp/u1-repo"),
+        events_path: Some(events_path.clone()),
+        tasks_path: None,
+    };
+    let bridge = CoordinatorSupervisorBridge::with_context_and_factory_with_cap(
+        store.clone(),
+        context,
+        std::sync::Arc::new(DefaultWorktreeFactory),
+        slot_count.max(1),
+    );
+    let store_wave_id = bridge
+        .register_wave_if_absent(kind, loop_id, slot_count, 0)
+        .expect("register wave must succeed");
+
+    for i in 0..slot_count {
+        bridge
+            .store()
+            .bind_worktree(
+                &store_wave_id,
+                i,
+                SlotResource {
+                    slot_index: i,
+                    worktree_path: Some(format!("/tmp/u1-wt/{i}")),
+                    branch: Some(format!("u1-{loop_id}-{i}")),
+                },
+            )
+            .expect("bind worktree must succeed");
+    }
+    for _ in 0..slot_count {
+        bridge
+            .store()
+            .try_dispatch_next(slot_count.max(1))
+            .expect("dispatch must succeed")
+            .expect("a slot must be dispatchable");
+    }
+
+    (tmp, bridge, store, store_wave_id, events_path)
+}
 
 /// Build a `DetectedWave` with a single trigger topic and a
 /// fixed `(events_count, total, concurrency)`. The wave_id is
@@ -2500,7 +2591,7 @@ fn test_u4_cap4_barrier_releases_fifth_fifo_slot() {
 
     let store = Arc::new(InMemorySupervisorStore::new());
     let wave = store
-        .register_wave("u4-cap4-barrier", WaveKind::Exec, 5)
+        .register_wave("u4-cap4-barrier", WaveKind::Exec, 5, 0)
         .unwrap();
     for index in 0..5 {
         store
@@ -2732,9 +2823,10 @@ impl SupervisorBridge for U5RecordingBridge {
         kind: WaveKind,
         wave_id: &str,
         expected_total: u32,
+        slot_retry_budget: u32,
     ) -> Result<String, BridgeError> {
         use ralph_core::supervisor::SupervisorStoreError;
-        match self.store.register_wave(wave_id, kind, expected_total) {
+        match self.store.register_wave(wave_id, kind, expected_total, 0) {
             Ok(store_wave_id) => Ok(store_wave_id),
             Err(SupervisorStoreError::DuplicateKey(_)) => {
                 let mut snapshots = self
@@ -3595,7 +3687,7 @@ fn setup_u6_production_bridge(
         n.max(1),
     );
     let store_wave_id = bridge
-        .register_wave_if_absent(WaveKind::Exec, wave_key, n)
+        .register_wave_if_absent(WaveKind::Exec, wave_key, n, 0)
         .expect("register wave must succeed");
     for i in 0..n {
         bridge
@@ -3816,7 +3908,7 @@ fn test_production_fan_in_partial_failure_injects_failed() {
             3,
         );
     let store_wave_id = bridge
-        .register_wave_if_absent(WaveKind::Exec, "u6-wave-fail", 3)
+        .register_wave_if_absent(WaveKind::Exec, "u6-wave-fail", 3, 0)
         .expect("register");
     for i in 0..3 {
         bridge
@@ -3923,7 +4015,7 @@ fn test_production_fan_in_sink_failure_defers_complete() {
 
     let store = std::sync::Arc::new(InMemorySupervisorStore::new());
     let wave = store
-        .register_wave("u6-retry", WaveKind::Exec, 1)
+        .register_wave("u6-retry", WaveKind::Exec, 1, 0)
         .expect("register");
     store
         .bind_worktree(
@@ -4191,7 +4283,7 @@ fn u2_lazy_bridge_uses_in_memory_store_trait_surface() {
     // Direct store: register_wave accepts (wave_id, kind, total).
     let store = InMemorySupervisorStore::new();
     let id = store
-        .register_wave("u2-lazy-wave", WaveKind::Exec, 2)
+        .register_wave("u2-lazy-wave", WaveKind::Exec, 2, 0)
         .expect("first register ok");
     assert!(!id.is_empty(), "register_wave must return a non-empty id");
 
@@ -4202,10 +4294,10 @@ fn u2_lazy_bridge_uses_in_memory_store_trait_surface() {
     let bridge: Arc<dyn SupervisorBridge> =
         Arc::new(crate::loop_runner::wave::CoordinatorSupervisorBridge::with_in_memory_store());
     let lazy_id = bridge
-        .register_wave_if_absent(WaveKind::Exec, "u2-lazy-bridge", 1)
+        .register_wave_if_absent(WaveKind::Exec, "u2-lazy-bridge", 1, 0)
         .expect("first bridge register ok");
     let lazy_id_2 = bridge
-        .register_wave_if_absent(WaveKind::Exec, "u2-lazy-bridge", 1)
+        .register_wave_if_absent(WaveKind::Exec, "u2-lazy-bridge", 1, 0)
         .expect("second bridge register is idempotent");
     assert_eq!(
         lazy_id, lazy_id_2,
@@ -4232,10 +4324,10 @@ fn u5_register_wave_if_absent_is_idempotent_sso_t() {
     let bridge: Arc<dyn SupervisorBridge> =
         Arc::new(crate::loop_runner::wave::CoordinatorSupervisorBridge::with_in_memory_store());
     let id1 = bridge
-        .register_wave_if_absent(WaveKind::Exec, "u5-sso-wave", 3)
+        .register_wave_if_absent(WaveKind::Exec, "u5-sso-wave", 3, 0)
         .expect("first register");
     let id2 = bridge
-        .register_wave_if_absent(WaveKind::Exec, "u5-sso-wave", 3)
+        .register_wave_if_absent(WaveKind::Exec, "u5-sso-wave", 3, 0)
         .expect("second register");
     assert_eq!(
         id1, id2,
@@ -4255,7 +4347,7 @@ fn u5_content_hash_is_part_of_record_slot_result_signature() {
     let bridge: Arc<dyn SupervisorBridge> =
         Arc::new(crate::loop_runner::wave::CoordinatorSupervisorBridge::with_in_memory_store());
     let wave_id = bridge
-        .register_wave_if_absent(WaveKind::Exec, "u5-content-hash", 2)
+        .register_wave_if_absent(WaveKind::Exec, "u5-content-hash", 2, 0)
         .expect("register");
     // Same content_hash for slot 0 — store accepts the second
     // call as a no-op duplicate so the dispatcher can safely
@@ -4293,7 +4385,7 @@ fn u5_lazy_bridge_default_cap_is_unlimited() {
     // comes in a follow-up. The lazy default must remain
     // unlimited so an early U5 patch does not silently drop
     // waves.
-    let _ = bridge.register_wave_if_absent(WaveKind::Exec, "u5-cap", 1);
+    let _ = bridge.register_wave_if_absent(WaveKind::Exec, "u5-cap", 1, 0);
     assert_eq!(
         bridge.max_concurrent_workers(),
         u32::MAX,
@@ -4390,7 +4482,7 @@ fn g3_record_never_started_marks_pending_slots_in_store() {
     let store = bridge.store();
 
     let wave_id = bridge
-        .register_wave_if_absent(WaveKind::Exec, "g3-wave", 3)
+        .register_wave_if_absent(WaveKind::Exec, "g3-wave", 3, 0)
         .unwrap();
 
     // Slot 0: bind, dispatch, complete.
@@ -4458,7 +4550,7 @@ fn g3_cancel_closure_cancelled_slot_has_never_started_reason() {
     let store = bridge.store();
 
     let wave_id = bridge
-        .register_wave_if_absent(WaveKind::Exec, "g3-cancel-wave", 3)
+        .register_wave_if_absent(WaveKind::Exec, "g3-cancel-wave", 3, 0)
         .unwrap();
 
     // Slot 0: bind, dispatch, complete → Completed, reason None.
@@ -5047,7 +5139,7 @@ fn test_u6_failed_payload_exposes_per_slot_reasons() {
 //     `coordinator.rs` (review path has its own merge helper; exec/fix
 //     does not — this is the distinction U2-U7 exploits).
 
-/// U1 Test 1 (RED — proves the gap): exec/fix partial failure
+/// U1 Test 1 (GREEN — characterizes current gap): exec/fix partial failure
 /// does NOT salvage Completed slot business events to the main ledger.
 ///
 /// Setup: a 2-slot exec wave.
@@ -5056,57 +5148,25 @@ fn test_u6_failed_payload_exposes_per_slot_reasons() {
 ///
 /// After fan-in:
 ///   - The main ledger must NOT contain slot 0's `exec.unit.done` event
-///     (the partial failure path drops it — this is the bug U2-U7 fix)
+///     (the partial failure path drops it — this is the gap U2-U7 will fix)
 ///   - `blocking_slots` must be `[1]` (NOT `[0, 1]` — completed slots
 ///     are never blocking per the phase decision contract)
 ///   - `exec.wave.failed` is injected
 ///
-/// This test FAILS on current HEAD — proving the gap exists.
+/// A1 adversarial assertions added:
+///   - Salvaged event payload unit must equal "u1-0" (origin pin)
+///   - Failed slot must have no terminal evidence (failed-slot integrity)
+///
+/// This test PASSES on current HEAD — proving the gap exists and
+/// locking the characterization for future fix verification.
 #[test]
 fn exec_fix_partial_failure_does_not_salvage_completed_slot_events() {
     use crate::loop_runner::wave::{SupervisorFanInOutcome, run_supervisor_fan_in};
     use ralph_core::supervisor::{SlotResource, TerminalEvidence, WaveKind};
 
-    let tmp = tempfile::tempdir().expect("temp dir");
-    let events_path = tmp.path().join(".ralph").join("events.jsonl");
-
-    // Build the production bridge with 2 slots.
-    let store = std::sync::Arc::new(InMemorySupervisorStore::new());
-    let context = crate::loop_runner::wave::ProductionBridgeContext {
-        loop_id: "u1-exec-partial".to_string(),
-        repo_root: std::path::PathBuf::from("/tmp/u1-repo"),
-        events_path: Some(events_path.clone()),
-        tasks_path: None,
-    };
-    let bridge =
-        crate::loop_runner::wave::CoordinatorSupervisorBridge::with_context_and_factory_with_cap(
-            store.clone() as std::sync::Arc<dyn SupervisorStore>,
-            context,
-            std::sync::Arc::new(DefaultWorktreeFactory),
-            2,
-        );
-    let store_wave_id = bridge
-        .register_wave_if_absent(WaveKind::Exec, "u1-exec-partial", 2)
-        .expect("register");
-
-    // Bind + dispatch both slots.
-    for i in 0..2 {
-        bridge
-            .store()
-            .bind_worktree(
-                &store_wave_id,
-                i,
-                SlotResource {
-                    slot_index: i,
-                    worktree_path: Some(format!("/tmp/u1-wt/{i}")),
-                    branch: Some(format!("u1-exec-partial-{i}")),
-                },
-            )
-            .expect("bind");
-    }
-    for _ in 0..2 {
-        bridge.store().try_dispatch_next(2).expect("dispatch");
-    }
+    // M1: use the shared helper instead of inline setup
+    let (tmp, bridge, _store, store_wave_id, events_path) =
+        setup_u3_partial_failure_bridge(WaveKind::Exec, "u1-exec-partial", 2);
 
     // Slot 0: completes with evidence.
     bridge
@@ -5129,6 +5189,40 @@ fn exec_fix_partial_failure_does_not_salvage_completed_slot_events() {
             ralph_core::supervisor::worker_outcome::REASON_WORKER_TIMEOUT,
         )
         .expect("s1 failure");
+
+    // A1 adversarial assertions: pre-conditions for the salvage/redrive
+    // characterization. These pin the origin of the completed slot's
+    // terminal evidence and verify the failed slot has no terminal evidence.
+    let slot0_evidence = bridge
+        .store()
+        .slot_terminal_evidence(&store_wave_id, 0)
+        .expect("slot 0 evidence query must succeed");
+    assert!(
+        slot0_evidence.is_some(),
+        "A1: slot 0 (completed) must have terminal evidence before fan-in"
+    );
+    let slot0_ev = slot0_evidence.expect("evidence is Some");
+    assert_eq!(
+        slot0_ev.topic, "exec.unit.done",
+        "A1: completed slot's terminal evidence topic must be exec.unit.done; got {}",
+        slot0_ev.topic
+    );
+    // payload_fingerprint is SHA-256 of the original payload ("{\"unit\":\"u1-0\}").
+    // We trust the fingerprint is correct if topic+dimension match; the fingerprint
+    // is verified by the store's own idempotency tests.
+    assert!(
+        !slot0_ev.payload_fingerprint.is_empty(),
+        "A1: completed slot's terminal evidence must have a non-empty fingerprint"
+    );
+
+    let slot1_evidence = bridge
+        .store()
+        .slot_terminal_evidence(&store_wave_id, 1)
+        .expect("slot 1 evidence query must succeed");
+    assert!(
+        slot1_evidence.is_none(),
+        "A1: slot 1 (failed) must have no terminal evidence; got {slot1_evidence:?}"
+    );
 
     // Pre-commit salvage (P0-1 contract).
     bridge
@@ -5275,7 +5369,7 @@ fn review_partial_failure_salvage_path_unaffected() {
             2,
         );
     let store_wave_id = bridge
-        .register_wave_if_absent(WaveKind::Review, "u1-review-partial", 2)
+        .register_wave_if_absent(WaveKind::Review, "u1-review-partial", 2, 0)
         .expect("register");
 
     // Review slots: no worktree binding needed (SharedReadonly).
@@ -5429,7 +5523,7 @@ fn review_partial_failure_salvage_path_unaffected() {
     );
 }
 
-/// U1 Test 3 (RED — U7 precondition): `build_wave_failed_payload`
+/// U1 Test 3 (GREEN — characterizes current gap): `build_wave_failed_payload`
 /// for an exec wave with 1 Completed + 1 Failed currently lacks the
 /// new fields that U7 will introduce: `salvaged_slots` and
 /// `redrive_slots`. The payload currently contains `wave_id`,
@@ -5437,11 +5531,12 @@ fn review_partial_failure_salvage_path_unaffected() {
 /// `salvaged_slots` (listing completed slots in a failed wave)
 /// and `redrive_slots` (listing retryable failed slots).
 ///
-/// This test FAILS on current HEAD (proving U7 has work to do) and
-/// will PASS once U7 lands (adding `salvaged_slots` and `redrive_slots`
-/// to the exec/fix failed payload).
+/// This test PASSES on current HEAD, locking the current state
+/// before U7 lands. After U7 adds `salvaged_slots` and
+/// `redrive_slots`, this test will FAIL (as expected) and must be
+/// updated to assert the new fields are present.
 #[test]
-fn build_wave_failed_payload_lacks_new_fields_on_exec_path() {
+fn build_wave_failed_payload_excludes_salvaged_redrive_fields_on_exec_path() {
     use crate::loop_runner::wave::build_wave_failed_payload;
     use ralph_core::supervisor::WaveKind;
     use ralph_core::{CompletedWave, WaveFailure, WaveResult};
@@ -5515,5 +5610,422 @@ fn build_wave_failed_payload_lacks_new_fields_on_exec_path() {
         "U7 GAP: `redrive_slots` must NOT be present in the current exec/fix \
          failed payload — U7 will add it to list retryable failed slots for redrive. \
          This test FAILS on current HEAD."
+    );
+}
+
+// =============================================================================
+// U1 T1 (2026-07-25-005 plan): partial failure characterization — new tests
+//
+// These tests characterize the exec/fix partial failure salvage/redrive
+// behavior. They use `setup_u3_partial_failure_bridge` (M1 helper) to
+// set up a 2-slot wave, then drive the slot outcomes and fan-in to
+// assert the expected salvage/redrive behavior.
+//
+// T1 tests:
+//   test_u1_single_fail_only          — 0 completed + 1 failed → 0 salvaged
+//   test_u1_partial_failure_one_complete_one_fail — 1 completed + 1 failed → 1 salvaged
+//   test_u1_zero_fail_happy_path_no_redrive_payload — 0 failed → no redrive payload
+//   test_u1_mixed_failure_reasons    — mixed failure reasons reflected in slot_failures
+// =============================================================================
+
+/// U1 T1: single-fail fixture (2 slots, 0 completed, 1 failed) →
+/// only the completed slot would be salvaged. With 0 completed slots,
+/// 0 salvaged events must appear in the main ledger — proving zero
+/// fabrication when there is nothing to salvage.
+///
+/// Current behavior: 0 salvaged events (the fail_wave path drops
+/// everything on partial failure). This test PASSES on current HEAD,
+/// characterizing the "nothing to salvage" baseline.
+#[test]
+fn test_u1_single_fail_only() {
+    use crate::loop_runner::wave::{SupervisorFanInOutcome, run_supervisor_fan_in};
+    use ralph_core::supervisor::TerminalEvidence;
+    use ralph_core::supervisor::worker_outcome::REASON_WORKER_TIMEOUT;
+
+    let (_tmp, bridge, _store, store_wave_id, events_path) =
+        setup_u3_partial_failure_bridge(WaveKind::Exec, "u1-single-fail", 2);
+
+    // Slot 0: never dispatched (Pending) — no result, no evidence
+    // Slot 1: fails with worker_timeout
+    bridge
+        .record_slot_failure(&store_wave_id, 1, REASON_WORKER_TIMEOUT)
+        .expect("slot 1 failure");
+    bridge
+        .mark_salvage_merged(&store_wave_id)
+        .expect("mark salvage");
+
+    let bridge: std::sync::Arc<dyn SupervisorBridge> =
+        std::sync::Arc::new(bridge) as std::sync::Arc<dyn SupervisorBridge>;
+
+    // CompletedWave has 0 results (no slot completed)
+    let completed = ralph_core::CompletedWave {
+        wave_id: "u1-single-fail".to_string(),
+        wave_total: 2,
+        results: vec![],
+        failures: vec![],
+        duration: std::time::Duration::from_millis(1),
+        partial: true,
+        expected_source_hat: None,
+        assigned_dimensions: std::collections::HashMap::new(),
+        dimension_retry_counts: std::collections::HashMap::new(),
+        worker_events: vec![],
+    };
+    let detected = make_u3_wave("u1-single-fail", 2, 2);
+
+    let outcome = run_supervisor_fan_in(&bridge, &completed, &detected, &events_path, 600);
+    assert_eq!(
+        outcome,
+        SupervisorFanInOutcome::InjectedFailed,
+        "partial failure with 1 failed slot must inject exec.wave.failed"
+    );
+
+    let content = std::fs::read_to_string(&events_path).unwrap_or_default();
+    let lines: Vec<serde_json::Value> = content
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .map(|l| serde_json::from_str(l).expect("ledger line must be JSON"))
+        .collect();
+
+    // Zero fabrication: with 0 completed slots, 0 salvaged events must appear.
+    let exec_unit_done_count = lines
+        .iter()
+        .filter(|v| v.get("topic").and_then(|t| t.as_str()) == Some("exec.unit.done"))
+        .count();
+    assert_eq!(
+        exec_unit_done_count, 0,
+        "T1: with 0 completed slots, 0 salvaged events must appear; got {exec_unit_done_count}"
+    );
+}
+
+/// U1 T2: partial failure fixture (2 slots, 1 completed, 1 failed) →
+/// exactly 1 salvaged event (the completed slot's business event) must
+/// appear in the main ledger. The failed slot's blocking_slots entry
+/// must name slot 1 only.
+///
+/// This test FAILS on current HEAD — the fail_wave path drops completed
+/// slot events, so 0 salvaged appear instead of 1. U2-U7 will fix this.
+#[test]
+fn test_u1_partial_failure_one_complete_one_fail() {
+    use crate::loop_runner::wave::{SupervisorFanInOutcome, run_supervisor_fan_in};
+    use ralph_core::supervisor::TerminalEvidence;
+    use ralph_core::supervisor::worker_outcome::REASON_WORKER_TIMEOUT;
+
+    let (_tmp, bridge, _store, store_wave_id, events_path) =
+        setup_u3_partial_failure_bridge(WaveKind::Exec, "u1-partial-1c1f", 2);
+
+    // Slot 0: completes with evidence
+    bridge
+        .record_slot_result(&store_wave_id, 0, "h0", 1)
+        .expect("slot 0 result");
+    bridge
+        .store()
+        .record_slot_terminal_evidence(
+            &store_wave_id,
+            0,
+            &TerminalEvidence::from_event("exec.unit.done", "{\"unit\":\"u1-0\"}"),
+        )
+        .expect("slot 0 evidence");
+
+    // Slot 1: fails with worker_timeout
+    bridge
+        .record_slot_failure(&store_wave_id, 1, REASON_WORKER_TIMEOUT)
+        .expect("slot 1 failure");
+    bridge
+        .mark_salvage_merged(&store_wave_id)
+        .expect("mark salvage");
+
+    let bridge: std::sync::Arc<dyn SupervisorBridge> =
+        std::sync::Arc::new(bridge) as std::sync::Arc<dyn SupervisorBridge>;
+
+    // CompletedWave has only slot 0's result (slot 1 failed → no event)
+    let completed = ralph_core::CompletedWave {
+        wave_id: "u1-partial-1c1f".to_string(),
+        wave_total: 2,
+        results: vec![ralph_core::WaveResult {
+            index: 0,
+            events: vec![
+                ralph_proto::Event::new("exec.unit.done", "{\"unit\":\"u1-0\"}")
+                    .with_source("executor")
+                    .with_wave("u1-partial-1c1f".to_string(), 0, 2),
+            ],
+        }],
+        failures: vec![],
+        duration: std::time::Duration::from_millis(1),
+        partial: true,
+        expected_source_hat: None,
+        assigned_dimensions: std::collections::HashMap::new(),
+        dimension_retry_counts: std::collections::HashMap::new(),
+        worker_events: vec![],
+    };
+    let detected = make_u3_wave("u1-partial-1c1f", 2, 2);
+
+    let outcome = run_supervisor_fan_in(&bridge, &completed, &detected, &events_path, 600);
+    assert_eq!(
+        outcome,
+        SupervisorFanInOutcome::InjectedFailed,
+        "partial failure must inject exec.wave.failed"
+    );
+
+    let content = std::fs::read_to_string(&events_path).unwrap_or_default();
+    let lines: Vec<serde_json::Value> = content
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .map(|l| serde_json::from_str(l).expect("ledger line must be JSON"))
+        .collect();
+
+    // Exactly 1 salvaged event (the completed slot's exec.unit.done)
+    let salvaged: Vec<&serde_json::Value> = lines
+        .iter()
+        .filter(|v| v.get("topic").and_then(|t| t.as_str()) == Some("exec.unit.done"))
+        .collect();
+    assert_eq!(
+        salvaged.len(),
+        1,
+        "T2: exactly 1 salvaged event expected (completed slot); got {} events: {lines:?}",
+        salvaged.len()
+    );
+
+    // A1 origin pin: the salvaged event's payload must contain unit=u1-0
+    let salvaged_payload = salvaged[0]
+        .get("payload")
+        .and_then(|p| p.as_str())
+        .expect("salvaged event must have a string payload");
+    assert!(
+        salvaged_payload.contains("u1-0"),
+        "T2 A1: salvaged event payload must contain unit=u1-0; got {salvaged_payload}"
+    );
+
+    // A1 failed-slot integrity: slot 1 must have no terminal evidence
+    let slot1_evidence = bridge
+        .slot_terminal_evidence(&store_wave_id, 1)
+        .expect("slot 1 evidence query must succeed");
+    assert!(
+        slot1_evidence.is_none(),
+        "T2 A1: failed slot 1 must have no terminal evidence; got {slot1_evidence:?}"
+    );
+}
+
+/// U1 T3: happy path (0 failed) → no exec.wave.failed injected,
+/// and there must be no `redrive_slots` field in the success payload
+/// (U7 will add it for retryable failed slots; 0 failed means empty redrive).
+///
+/// Current behavior: all slots complete, no redrive concept exists.
+/// This test PASSES on current HEAD, characterizing the happy-path baseline.
+#[test]
+fn test_u1_zero_fail_happy_path_no_redrive_payload() {
+    use crate::loop_runner::wave::{SupervisorFanInOutcome, run_supervisor_fan_in};
+    use ralph_core::supervisor::TerminalEvidence;
+
+    let (_tmp, bridge, _store, store_wave_id, events_path) =
+        setup_u3_partial_failure_bridge(WaveKind::Exec, "u1-happy-zero-fail", 2);
+
+    // Both slots complete with evidence
+    for i in 0..2 {
+        bridge
+            .record_slot_result(&store_wave_id, i, &format!("h{i}"), 1)
+            .expect("slot result");
+        bridge
+            .store()
+            .record_slot_terminal_evidence(
+                &store_wave_id,
+                i,
+                &TerminalEvidence::from_event(
+                    "exec.unit.done",
+                    &format!("{{\"unit\":\"u1-{i}\"}}"),
+                ),
+            )
+            .expect("evidence");
+    }
+    bridge
+        .mark_salvage_merged(&store_wave_id)
+        .expect("mark salvage");
+
+    let bridge: std::sync::Arc<dyn SupervisorBridge> =
+        std::sync::Arc::new(bridge) as std::sync::Arc<dyn SupervisorBridge>;
+
+    let completed = ralph_core::CompletedWave {
+        wave_id: "u1-happy-zero-fail".to_string(),
+        wave_total: 2,
+        results: vec![
+            ralph_core::WaveResult {
+                index: 0,
+                events: vec![
+                    ralph_proto::Event::new("exec.unit.done", "{\"unit\":\"u1-0\"}")
+                        .with_source("executor")
+                        .with_wave("u1-happy-zero-fail".to_string(), 0, 2),
+                ],
+            },
+            ralph_core::WaveResult {
+                index: 1,
+                events: vec![
+                    ralph_proto::Event::new("exec.unit.done", "{\"unit\":\"u1-1\"}")
+                        .with_source("executor")
+                        .with_wave("u1-happy-zero-fail".to_string(), 1, 2),
+                ],
+            },
+        ],
+        failures: vec![],
+        duration: std::time::Duration::from_millis(1),
+        partial: false,
+        expected_source_hat: None,
+        assigned_dimensions: std::collections::HashMap::new(),
+        dimension_retry_counts: std::collections::HashMap::new(),
+        worker_events: vec![],
+    };
+    let detected = make_u3_wave("u1-happy-zero-fail", 2, 2);
+
+    let outcome = run_supervisor_fan_in(&bridge, &completed, &detected, &events_path, 600);
+    assert_eq!(
+        outcome,
+        SupervisorFanInOutcome::InjectedComplete,
+        "happy path (0 failed) must inject exec.wave.complete"
+    );
+
+    let content = std::fs::read_to_string(&events_path).unwrap_or_default();
+    let lines: Vec<serde_json::Value> = content
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .map(|l| serde_json::from_str(l).expect("ledger line must be JSON"))
+        .collect();
+
+    // No exec.wave.failed on happy path
+    let failed_count = lines
+        .iter()
+        .filter(|v| v.get("topic").and_then(|t| t.as_str()) == Some("exec.wave.failed"))
+        .count();
+    assert_eq!(
+        failed_count, 0,
+        "T3: happy path must NOT inject exec.wave.failed; got {failed_count}"
+    );
+
+    // exec.wave.complete must NOT have a redrive_slots field (U7 adds it for retryable failures;
+    // 0 failed means empty redrive, but the field should not exist at all on the happy path)
+    let completes: Vec<&serde_json::Value> = lines
+        .iter()
+        .filter(|v| v.get("topic").and_then(|t| t.as_str()) == Some("exec.wave.complete"))
+        .collect();
+    assert_eq!(
+        completes.len(),
+        1,
+        "exactly one exec.wave.complete expected; got {}",
+        completes.len()
+    );
+    let complete_payload = completes[0]
+        .get("payload")
+        .and_then(|p| p.as_object())
+        .expect("complete event must have a JSON object payload");
+    assert!(
+        !complete_payload.contains_key("redrive_slots"),
+        "T3: happy path complete payload must NOT have redrive_slots field; got {complete_payload:?}"
+    );
+}
+
+/// U1 T4: mixed failure reasons — when slots fail with different reasons
+/// (`worker_timeout` and `empty_worker_result`), `slot_failures` in the
+/// failed payload must reflect both distinct reason strings, with no
+/// fabrication of events for slots that did not produce any.
+///
+/// This test PASSES on current HEAD — `build_wave_failed_payload` already
+/// includes `slot_failures` with per-slot reasons.
+#[test]
+fn test_u1_mixed_failure_reasons() {
+    use crate::loop_runner::wave::build_wave_failed_payload;
+    use ralph_core::supervisor::WaveKind;
+    use ralph_core::{CompletedWave, WaveFailure, WaveResult};
+    use std::time::Duration;
+
+    // 3-slot wave: slot 0 completed, slot 1 failed (worker_timeout), slot 2 failed (empty_worker_result)
+    let completed = CompletedWave {
+        wave_id: "u1-mixed-reasons".to_string(),
+        wave_total: 3,
+        results: vec![WaveResult {
+            index: 0,
+            events: vec![
+                ralph_proto::Event::new("exec.unit.done", "{\"unit\":\"u1-0\"}")
+                    .with_source("executor"),
+            ],
+        }],
+        failures: vec![
+            WaveFailure {
+                index: 1,
+                error: "worker_timeout".to_string(),
+                duration: Duration::from_secs(300),
+                expected_dimension: None,
+                actual_dimension: None,
+            },
+            WaveFailure {
+                index: 2,
+                error: "empty_worker_result".to_string(),
+                duration: Duration::from_millis(50),
+                expected_dimension: None,
+                actual_dimension: None,
+            },
+        ],
+        duration: Duration::from_secs(300),
+        partial: true,
+        expected_source_hat: None,
+        assigned_dimensions: std::collections::HashMap::new(),
+        dimension_retry_counts: std::collections::HashMap::new(),
+        worker_events: vec![],
+    };
+
+    let payload = build_wave_failed_payload(
+        WaveKind::Exec,
+        &completed,
+        "required_slot_failure",
+        vec![1, 2],
+        &std::collections::HashMap::new(),
+        None,
+    );
+    let obj = payload.as_object().expect("payload must be a JSON object");
+
+    // blocking_slots must list both failed slots
+    let blocking: Vec<u32> = obj
+        .get("blocking_slots")
+        .and_then(|v| v.as_array())
+        .expect("blocking_slots must be an array")
+        .iter()
+        .filter_map(|v| v.as_u64().map(|n| n as u32))
+        .collect();
+    assert_eq!(
+        blocking,
+        vec![1, 2],
+        "T4: blocking_slots must list both failed slots; got {blocking:?}"
+    );
+
+    // slot_failures must reflect both distinct reasons
+    let slot_failures = obj
+        .get("slot_failures")
+        .and_then(|v| v.as_array())
+        .expect("T4: slot_failures must be present for mixed-failure scenario");
+    assert_eq!(
+        slot_failures.len(),
+        2,
+        "T4: one entry per failed slot; got {slot_failures:?}"
+    );
+    let by_index: std::collections::HashMap<u32, String> = slot_failures
+        .iter()
+        .filter_map(|v| {
+            let obj = v.as_object()?;
+            let slot = obj.get("slot_index")?.as_u64()? as u32;
+            let reason = obj.get("reason")?.as_str()?.to_string();
+            Some((slot, reason))
+        })
+        .collect();
+    assert_eq!(
+        by_index.get(&1).map(String::as_str),
+        Some("worker_timeout"),
+        "T4: slot 1 must carry worker_timeout; got {by_index:?}"
+    );
+    assert_eq!(
+        by_index.get(&2).map(String::as_str),
+        Some("empty_worker_result"),
+        "T4: slot 2 must carry empty_worker_result; got {by_index:?}"
+    );
+
+    // No fabrication: completed slot 0 must NOT appear in slot_failures
+    assert!(
+        !by_index.contains_key(&0),
+        "T4: completed slot 0 must NOT appear in slot_failures (no fabrication); got {by_index:?}"
     );
 }

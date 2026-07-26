@@ -403,7 +403,7 @@ mod tests {
 
     fn store_with(kind: WaveKind, n: u32) -> (Arc<InMemorySupervisorStore>, String) {
         let store = InMemorySupervisorStore::new();
-        let wave = store.register_wave("k", kind, n).unwrap();
+        let wave = store.register_wave("k", kind, n, 1).unwrap();
         for i in 0..n {
             store
                 .bind_worktree(
@@ -484,7 +484,7 @@ mod tests {
             (WaveKind::Review, "review.wave.failed"),
         ] {
             let store = Arc::new(InMemorySupervisorStore::new());
-            let wave = store.register_wave("k-contract", kind, 2).unwrap();
+            let wave = store.register_wave("k-contract", kind, 2, 1).unwrap();
             // Slot 0: Completed WITH terminal evidence. Slot 1: Failed.
             store.record_slot_result(&wave, 0, "h0", 1).unwrap();
             store
@@ -551,7 +551,7 @@ mod tests {
     #[test]
     fn merge_failure_skips_coord_injection() {
         let store = Arc::new(InMemorySupervisorStore::new());
-        let wave = store.register_wave("m", WaveKind::Exec, 1).unwrap();
+        let wave = store.register_wave("m", WaveKind::Exec, 1, 1).unwrap();
         store
             .bind_worktree(
                 &wave,
@@ -616,7 +616,7 @@ mod tests {
     #[test]
     fn fan_in_failed_emits_failed_topic_with_blocking_slots() {
         let store = Arc::new(InMemorySupervisorStore::new());
-        let wave = store.register_wave("ff", WaveKind::Exec, 2).unwrap();
+        let wave = store.register_wave("ff", WaveKind::Exec, 2, 1).unwrap();
         for i in 0..2 {
             store
                 .bind_worktree(
@@ -674,7 +674,9 @@ mod tests {
     #[test]
     fn tick_after_merge_to_events_emits_exactly_once() {
         let store = Arc::new(InMemorySupervisorStore::new());
-        let wave = store.register_wave("idem-once", WaveKind::Exec, 1).unwrap();
+        let wave = store
+            .register_wave("idem-once", WaveKind::Exec, 1, 1)
+            .unwrap();
         store
             .bind_worktree(
                 &wave,
@@ -771,7 +773,7 @@ mod tests {
     #[test]
     fn tick_after_merge_to_events_is_idempotent() {
         let store = Arc::new(InMemorySupervisorStore::new());
-        let wave = store.register_wave("idem", WaveKind::Exec, 1).unwrap();
+        let wave = store.register_wave("idem", WaveKind::Exec, 1, 1).unwrap();
         store
             .bind_worktree(
                 &wave,
@@ -845,7 +847,7 @@ mod tests {
     fn coordinator_moves_wave_to_failed_only_after_siblings_settle() {
         let store = Arc::new(InMemorySupervisorStore::new());
         let wave = store
-            .register_wave("mixed-fail", WaveKind::Exec, 2)
+            .register_wave("mixed-fail", WaveKind::Exec, 2, 1)
             .unwrap();
         store
             .bind_worktree(
@@ -920,7 +922,7 @@ mod tests {
     #[test]
     fn cancel_propagates_through_coordinator() {
         let store = Arc::new(InMemorySupervisorStore::new());
-        let wave = store.register_wave("cx", WaveKind::Exec, 1).unwrap();
+        let wave = store.register_wave("cx", WaveKind::Exec, 1, 1).unwrap();
         store
             .bind_worktree(
                 &wave,
@@ -959,7 +961,7 @@ mod tests {
     #[test]
     fn timeout_propagates_through_coordinator() {
         let store = Arc::new(InMemorySupervisorStore::new());
-        let wave = store.register_wave("to", WaveKind::Exec, 2).unwrap();
+        let wave = store.register_wave("to", WaveKind::Exec, 2, 1).unwrap();
         for i in 0..2 {
             store
                 .bind_worktree(
@@ -1003,7 +1005,7 @@ mod tests {
     #[test]
     fn p0_1_failed_fan_in_without_salvage_is_refused() {
         let store = Arc::new(InMemorySupervisorStore::new());
-        let wave = store.register_wave("p01", WaveKind::Review, 2).unwrap();
+        let wave = store.register_wave("p01", WaveKind::Review, 2, 1).unwrap();
         // Slot 0 Completed with evidence; slot 1 Failed.
         store.record_slot_result(&wave, 0, "h0", 1).unwrap();
         store
@@ -1024,9 +1026,8 @@ mod tests {
             )
             .unwrap();
 
-        let coord = SupervisorCoordinator::with_in_memory_sink(
-            store.clone() as Arc<dyn SupervisorStore>,
-        );
+        let coord =
+            SupervisorCoordinator::with_in_memory_sink(store.clone() as Arc<dyn SupervisorStore>);
         // No mark_salvage_merged — coordinator must refuse.
         let action = coord
             .tick(
@@ -1096,7 +1097,9 @@ mod tests {
     #[test]
     fn p0_1_restart_after_coord_injection_is_no_op() {
         let store = Arc::new(InMemorySupervisorStore::new());
-        let wave = store.register_wave("restart", WaveKind::Review, 1).unwrap();
+        let wave = store
+            .register_wave("restart", WaveKind::Review, 1, 1)
+            .unwrap();
         store.record_slot_failure(&wave, 0, "boom").unwrap();
         // Tick 1: mark salvage, inject failed.
         store.mark_salvage_merged(&wave).unwrap();
@@ -1151,7 +1154,7 @@ mod tests {
     #[test]
     fn p0_2_completed_without_evidence_fails_closed() {
         let store = Arc::new(InMemorySupervisorStore::new());
-        let wave = store.register_wave("p02", WaveKind::Exec, 1).unwrap();
+        let wave = store.register_wave("p02", WaveKind::Exec, 1, 1).unwrap();
         store
             .bind_worktree(
                 &wave,
@@ -1212,7 +1215,7 @@ mod tests {
     #[test]
     fn p0_2_with_evidence_engages_success_path() {
         let store = Arc::new(InMemorySupervisorStore::new());
-        let wave = store.register_wave("p02-ok", WaveKind::Exec, 1).unwrap();
+        let wave = store.register_wave("p02-ok", WaveKind::Exec, 1, 1).unwrap();
         store
             .bind_worktree(
                 &wave,

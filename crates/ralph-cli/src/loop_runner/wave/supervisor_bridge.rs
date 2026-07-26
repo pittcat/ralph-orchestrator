@@ -417,6 +417,7 @@ impl SupervisorBridge for CoordinatorSupervisorBridge {
         kind: WaveKind,
         wave_id: &str,
         expected_total: u32,
+        slot_retry_budget: u32,
     ) -> Result<String, BridgeError> {
         use ralph_core::supervisor::SupervisorStoreError;
         // U6: return the stable store-assigned id on idempotent
@@ -430,7 +431,10 @@ impl SupervisorBridge for CoordinatorSupervisorBridge {
         if let Some(existing) = self.registered.lock().unwrap().get(wave_id) {
             return Ok(existing.clone());
         }
-        match self.store.register_wave(wave_id, kind, expected_total) {
+        match self
+            .store
+            .register_wave(wave_id, kind, expected_total, slot_retry_budget)
+        {
             Ok(id) => {
                 self.registered
                     .lock()
@@ -741,6 +745,7 @@ impl SupervisorBridge for MockSupervisorBridge {
         _kind: WaveKind,
         wave_id: &str,
         _expected_total: u32,
+        _slot_retry_budget: u32,
     ) -> Result<String, BridgeError> {
         Ok(wave_id.to_string())
     }
@@ -842,7 +847,7 @@ mod tests {
     #[test]
     fn production_bridge_thread_tick_round_trip() {
         let store = Arc::new(InMemorySupervisorStore::new());
-        let wave = store.register_wave("rt", WaveKind::Exec, 1).unwrap();
+        let wave = store.register_wave("rt", WaveKind::Exec, 1, 1).unwrap();
         store
             .bind_worktree(
                 &wave,
@@ -938,7 +943,7 @@ mod tests {
         // Sanity: confirm the store keeps the slot's
         // status as `Completed` after `record_slot_result`.
         let store = InMemorySupervisorStore::new();
-        let wave = store.register_wave("rs", WaveKind::Exec, 1).unwrap();
+        let wave = store.register_wave("rs", WaveKind::Exec, 1, 1).unwrap();
         store
             .bind_worktree(
                 &wave,
@@ -1058,7 +1063,7 @@ mod tests {
     fn production_bridge_exposes_cap_and_forwards_dispatch_approval() {
         let store = Arc::new(InMemorySupervisorStore::new());
         let wave = store
-            .register_wave("dispatch-surface", WaveKind::Exec, 1)
+            .register_wave("dispatch-surface", WaveKind::Exec, 1, 1)
             .unwrap();
         store
             .bind_worktree(
@@ -1120,7 +1125,7 @@ mod tests {
         let store = bridge.store();
 
         let wave_id = bridge
-            .register_wave_if_absent(WaveKind::Exec, "g3-wave", 3)
+            .register_wave_if_absent(WaveKind::Exec, "g3-wave", 3, 0)
             .unwrap();
 
         // Complete slot 0.
@@ -1220,9 +1225,10 @@ mod tests {
                 kind: WaveKind,
                 wave_id: &str,
                 expected_total: u32,
+                slot_retry_budget: u32,
             ) -> Result<String, BridgeError> {
                 self.inner
-                    .register_wave_if_absent(kind, wave_id, expected_total)
+                    .register_wave_if_absent(kind, wave_id, expected_total, slot_retry_budget)
             }
 
             fn record_slot_result(
@@ -1249,7 +1255,7 @@ mod tests {
         let inner = CoordinatorSupervisorBridge::with_in_memory_store();
 
         let wave_id = inner
-            .register_wave_if_absent(WaveKind::Exec, "g3-prop-wave", 2)
+            .register_wave_if_absent(WaveKind::Exec, "g3-prop-wave", 2, 0)
             .unwrap();
 
         // Slot 1: terminally Failed with a DIFFERENT reason than

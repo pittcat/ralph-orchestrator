@@ -2095,7 +2095,7 @@ mod tests {
         // `build_supervisor_summary` re-opens the store read-only.
         let store = RusqliteSupervisorStore::open(&db_path).expect("open store");
         store
-            .register_wave("u4-ledger", WaveKind::Exec, 1)
+            .register_wave("u4-ledger", WaveKind::Exec, 1, 1)
             .expect("register_wave");
     }
 
@@ -2171,7 +2171,7 @@ mod tests {
         };
         let store = InMemorySupervisorStore::new();
         let wave = store
-            .register_wave("u8-summarize", WaveKind::Exec, 2)
+            .register_wave("u8-summarize", WaveKind::Exec, 2, 1)
             .expect("register_wave");
         // Bind both slots so dispatch is allowed; then mark slot 0
         // Completed and slot 1 still Pending so we have a mix.
@@ -2251,7 +2251,7 @@ mod tests {
         };
         let store = InMemorySupervisorStore::new();
         store
-            .register_wave("u8-fix", WaveKind::Fix, 1)
+            .register_wave("u8-fix", WaveKind::Fix, 1, 1)
             .expect("register_wave");
         let summary = summarize(&store);
         assert_eq!(

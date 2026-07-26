@@ -38,6 +38,72 @@ pub const REASON_WORKER_CANCELLED: &str = "worker_cancelled";
 /// the wave was marked `Failed`. Distinct from `worker_timeout`
 /// (for slots that did dispatch but never reported a terminal).
 pub const REASON_SLOT_NEVER_STARTED: &str = "slot_never_started";
+/// 2026-07-25-005 plan U3: dispatcher could not construct a
+/// valid control-plane path for the slot (bad wave kind /
+/// missing slot resources). The slot will never succeed;
+/// retrying would produce the same failure.
+pub const REASON_INVALID_CONTROL_PLANE_PATH: &str = "invalid_control_plane_path";
+
+// ── Retry classifier ─────────────────────────────────────────────────────────
+
+/// Reasons that may be retried by the dispatcher.
+const RETRYABLE_REASONS: &[&str] = &[
+    REASON_WORKER_TIMEOUT,
+    REASON_EMPTY_WORKER_RESULT,
+    REASON_MISSING_WORKER_TERMINAL,
+    REASON_SLOT_NEVER_STARTED,
+];
+
+/// Reasons that are permanent failures — retrying is futile.
+const NON_RETRYABLE_REASONS: &[&str] = &[
+    REASON_CONFLICTING_WORKER_TERMINAL,
+    REASON_INVALID_CONTROL_PLANE_PATH,
+    REASON_WORKER_CANCELLED,
+    // cancel/aggregate wave-level failures
+    "aggregate_timeout",
+    "aggregate_deadline_exceeded",
+    "cancelled",
+    "wave_cancelled",
+];
+
+/// Classification of a slot failure reason for dispatch decisions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FailureClassification {
+    /// The dispatcher may retry this slot immediately.
+    Retryable,
+    /// The slot has reached a permanent terminal failure; no
+    /// retry or redrive will change the outcome.
+    Permanent,
+    /// The reason string is not recognised.  We fail-closed
+    /// (Permanent) rather than risk an infinite retry loop on an
+    /// unknown failure mode.
+    UnknownFailClosed,
+}
+
+/// Returns `true` for known retryable slot reasons.
+/// Unknown or non-retryable reasons return `false`.
+pub fn is_retryable_slot_reason(reason: &str) -> bool {
+    let trimmed = reason.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+    RETRYABLE_REASONS.contains(&trimmed)
+}
+
+/// Classify a slot failure reason for dispatch decisions.
+pub fn classify_failure_reason(reason: &str) -> FailureClassification {
+    let trimmed = reason.trim();
+    if trimmed.is_empty() {
+        return FailureClassification::UnknownFailClosed;
+    }
+    if RETRYABLE_REASONS.contains(&trimmed) {
+        return FailureClassification::Retryable;
+    }
+    if NON_RETRYABLE_REASONS.contains(&trimmed) {
+        return FailureClassification::Permanent;
+    }
+    FailureClassification::UnknownFailClosed
+}
 
 /// Terminal kind inferred from the worker event stream.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

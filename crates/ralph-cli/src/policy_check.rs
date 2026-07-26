@@ -1028,8 +1028,14 @@ pub fn run_policy_check_unified(
     // topic against the flow's first step while the loop had advanced —
     // the primary-20260726 `flow_unknown_emit` after `scope.ready`.
     if let Some(cfg) = config.as_ref()
-        && let Some(reason_code) =
-            check_cli_flow_step_scope(cfg, &workspace_root, Some(events_path.as_path()), topic, hat, payload)
+        && let Some(reason_code) = check_cli_flow_step_scope(
+            cfg,
+            &workspace_root,
+            Some(events_path.as_path()),
+            topic,
+            hat,
+            payload,
+        )
     {
         let mut rej = final_report;
         rej.accepted = false;
@@ -1055,8 +1061,8 @@ fn check_cli_flow_step_scope(
     hat: Option<&str>,
     payload: Option<&str>,
 ) -> Option<String> {
-    use ralph_core::event_loop::load_opt_in_flow_declaration;
     use ralph_core::event_loop::load_flow_authority_current_step;
+    use ralph_core::event_loop::load_opt_in_flow_declaration;
     use ralph_core::event_loop::stage_pipeline::{EmitStage, FlowStep, StageContext};
     use ralph_core::event_loop::stages::flow_step_scope_stage::FlowStepScopeStage;
 

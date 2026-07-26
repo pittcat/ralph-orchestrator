@@ -308,10 +308,16 @@ impl SupervisorStore for RusqliteSupervisorStore {
         idempotency_key: &str,
         kind: WaveKind,
         expected_total: u32,
+        slot_retry_budget: u32,
     ) -> SupervisorStoreResult<String> {
         if expected_total == 0 {
             return Err(SupervisorStoreError::InvalidTransition(
                 "expected_total must be > 0".to_string(),
+            ));
+        }
+        if slot_retry_budget > 2 {
+            return Err(SupervisorStoreError::InvalidTransition(
+                "slot_retry_budget must be 0..=2".to_string(),
             ));
         }
         self.with_conn(|conn| {
@@ -349,14 +355,15 @@ impl SupervisorStore for RusqliteSupervisorStore {
             let isolation = default_isolation_for(kind);
 
             tx.execute(
-                "INSERT INTO waves (wave_id, idempotency_key, kind, expected_total, phase)
-                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                "INSERT INTO waves (wave_id, idempotency_key, kind, expected_total, phase, slot_retry_budget)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
                 rusqlite::params![
                     &wave_id,
                     idempotency_key,
                     kind_to_str(kind),
                     i64::from(expected_total),
                     phase_to_str(WavePhase::Dispatch),
+                    i64::from(slot_retry_budget),
                 ],
             )?;
             for idx in 0..expected_total {
@@ -384,8 +391,10 @@ impl SupervisorStore for RusqliteSupervisorStore {
         idempotency_key: &str,
         kind: WaveKind,
         expected_total: u32,
+        slot_retry_budget: u32,
     ) -> SupervisorStoreResult<String> {
-        let wave_id = self.register_wave(idempotency_key, kind, expected_total)?;
+        let wave_id =
+            self.register_wave(idempotency_key, kind, expected_total, slot_retry_budget)?;
         self.with_conn(|conn| {
             conn.execute(
                 "INSERT OR IGNORE INTO wave_queue (wave_id) VALUES (?1)",
@@ -1582,7 +1591,7 @@ mod tests {
     fn u2_terminal_evidence_round_trip_and_conflict() {
         use crate::supervisor::TerminalEvidence;
         let s = store();
-        let wave = s.register_wave("k-ev", WaveKind::Review, 2).unwrap();
+        let wave = s.register_wave("k-ev", WaveKind::Review, 2, 1).unwrap();
         // Legacy: a slot that reached Completed via record_slot_result
         // WITHOUT evidence reads back as None (not provably done).
         s.record_slot_result(&wave, 1, "hash-legacy", 1).unwrap();
@@ -1625,15 +1634,13 @@ mod tests {
     #[test]
     fn p0_2_completed_without_evidence_reads_none_rusqlite() {
         let s = store();
-        let wave = s.register_wave("k-p02", WaveKind::Review, 1).unwrap();
+        let wave = s.register_wave("k-p02", WaveKind::Review, 1, 1).unwrap();
         s.record_slot_result(&wave, 0, "hash", 1).unwrap();
         assert_eq!(s.slot_terminal_evidence(&wave, 0).unwrap(), None);
         // Once evidence is recorded, the gate opens.
         use crate::supervisor::TerminalEvidence;
-        let ev = TerminalEvidence::from_event(
-            "review.unit.done",
-            "{\"dimension\":\"correctness\"}",
-        );
+        let ev =
+            TerminalEvidence::from_event("review.unit.done", "{\"dimension\":\"correctness\"}");
         s.record_slot_terminal_evidence(&wave, 0, &ev).unwrap();
         assert_eq!(s.slot_terminal_evidence(&wave, 0).unwrap(), Some(ev));
     }
@@ -1680,7 +1687,7 @@ mod tests {
         let wave = {
             let store = RusqliteSupervisorStore::open(&path).unwrap();
             let wave = store
-                .register_wave("p1-9-rt", WaveKind::Review, 1)
+                .register_wave("p1-9-rt", WaveKind::Review, 1, 1)
                 .unwrap();
             store
                 .record_slot_terminal_evidence(
@@ -1745,7 +1752,7 @@ mod tests {
                     for c in 0..calls_per_thread {
                         let key = format!("k-{t}-{c}");
                         let id = store
-                            .register_wave(&key, WaveKind::Exec, 1)
+                            .register_wave(&key, WaveKind::Exec, 1, 1)
                             .expect("register_wave must succeed");
                         ids.push(id);
                     }
@@ -1796,7 +1803,7 @@ mod tests {
         // Pin that the second store is wired: a `register_wave`
         // call returns the next `w-N` (default wave counter
         // is one after the first open).
-        let wave = store.register_wave("after", WaveKind::Exec, 1).unwrap();
+        let wave = store.register_wave("after", WaveKind::Exec, 1, 1).unwrap();
         assert!(wave.starts_with("w-"));
     }
 
@@ -1804,8 +1811,8 @@ mod tests {
     #[test]
     fn duplicate_key_is_rejected() {
         let store = store();
-        store.register_wave("dup", WaveKind::Exec, 1).unwrap();
-        let err = store.register_wave("dup", WaveKind::Fix, 1).unwrap_err();
+        store.register_wave("dup", WaveKind::Exec, 1, 1).unwrap();
+        let err = store.register_wave("dup", WaveKind::Fix, 1, 1).unwrap_err();
         assert!(matches!(err, SupervisorStoreError::DuplicateKey(_)));
     }
 
@@ -1817,7 +1824,7 @@ mod tests {
     fn record_slot_failure_with_in_flight_siblings_keeps_phase_collect() {
         let store = store();
         let wave = store
-            .register_wave("partial-fail-rs", WaveKind::Exec, 2)
+            .register_wave("partial-fail-rs", WaveKind::Exec, 2, 1)
             .unwrap();
         for i in 0..2 {
             store.bind_worktree(&wave, i, bind(i)).unwrap();
@@ -1846,7 +1853,9 @@ mod tests {
     #[test]
     fn u2_slot_failure_reason_null_returns_none() {
         let store = store();
-        let wave = store.register_wave("u2-null", WaveKind::Exec, 1).unwrap();
+        let wave = store
+            .register_wave("u2-null", WaveKind::Exec, 1, 1)
+            .unwrap();
         store.bind_worktree(&wave, 0, bind(0)).unwrap();
         // No record_slot_failure call → column stays NULL.
         assert_eq!(store.slot_failure_reason(&wave, 0).unwrap(), None);
@@ -1858,7 +1867,7 @@ mod tests {
     fn u2_slot_failure_reason_value_returns_some() {
         use crate::supervisor::worker_outcome::REASON_WORKER_TIMEOUT;
         let store = store();
-        let wave = store.register_wave("u2-val", WaveKind::Exec, 1).unwrap();
+        let wave = store.register_wave("u2-val", WaveKind::Exec, 1, 1).unwrap();
         store.bind_worktree(&wave, 0, bind(0)).unwrap();
         store
             .record_slot_failure(&wave, 0, REASON_WORKER_TIMEOUT)
@@ -1877,7 +1886,7 @@ mod tests {
     fn u2_slot_failure_reason_missing_slot_returns_unknown_slot() {
         let store = store();
         let wave = store
-            .register_wave("u2-missing", WaveKind::Exec, 1)
+            .register_wave("u2-missing", WaveKind::Exec, 1, 1)
             .unwrap();
         store.bind_worktree(&wave, 0, bind(0)).unwrap();
         // slot_index 7 was never registered for this wave.
@@ -1896,8 +1905,8 @@ mod tests {
     #[test]
     fn backpressure_blocks_when_cap_is_hit() {
         let store = store();
-        let _ = store.register_wave("bp-1", WaveKind::Exec, 2).unwrap();
-        let _ = store.register_wave("bp-2", WaveKind::Exec, 2).unwrap();
+        let _ = store.register_wave("bp-1", WaveKind::Exec, 2, 1).unwrap();
+        let _ = store.register_wave("bp-2", WaveKind::Exec, 2, 1).unwrap();
         // bind every slot so dispatch is enabled.
         for w in ["w-1", "w-2"] {
             for i in 0..2 {
@@ -1913,7 +1922,7 @@ mod tests {
     #[test]
     fn backpressure_releases_after_completion() {
         let store = store();
-        let wave = store.register_wave("bp-r", WaveKind::Exec, 1).unwrap();
+        let wave = store.register_wave("bp-r", WaveKind::Exec, 1, 1).unwrap();
         store.bind_worktree(&wave, 0, bind(0)).unwrap();
         let _ = store.try_dispatch_next(1).unwrap().unwrap();
         assert!(store.try_dispatch_next(1).unwrap().is_none());
@@ -1929,7 +1938,7 @@ mod tests {
     fn release_dispatch_permit_is_idempotent() {
         let store = store();
         let wave = store
-            .register_wave("release-sql", WaveKind::Exec, 2)
+            .register_wave("release-sql", WaveKind::Exec, 2, 1)
             .unwrap();
         for i in 0..2 {
             store.bind_worktree(&wave, i, bind(i)).unwrap();
@@ -1955,7 +1964,7 @@ mod tests {
     #[test]
     fn worker_results_replace_on_conflict() {
         let store = store();
-        let wave = store.register_wave("wh", WaveKind::Exec, 1).unwrap();
+        let wave = store.register_wave("wh", WaveKind::Exec, 1, 1).unwrap();
         store.bind_worktree(&wave, 0, bind(0)).unwrap();
         store.try_dispatch_next(4).unwrap().unwrap();
         store.record_slot_result(&wave, 0, "h-a", 1).unwrap();
@@ -1977,7 +1986,7 @@ mod tests {
     #[test]
     fn cancel_marks_pending_slots_as_cancelled() {
         let store = store();
-        let wave = store.register_wave("cx", WaveKind::Exec, 2).unwrap();
+        let wave = store.register_wave("cx", WaveKind::Exec, 2, 1).unwrap();
         store.cancel_wave(&wave).unwrap();
         let snap = store.fan_in_status(&wave).unwrap();
         assert!(snap.cancel_requested);
@@ -1997,7 +2006,9 @@ mod tests {
     fn u5_cancel_freezes_never_started_reason() {
         use crate::supervisor::worker_outcome::{REASON_SLOT_NEVER_STARTED, REASON_WORKER_TIMEOUT};
         let store = store();
-        let wave = store.register_wave("u5-cancel", WaveKind::Exec, 3).unwrap();
+        let wave = store
+            .register_wave("u5-cancel", WaveKind::Exec, 3, 1)
+            .unwrap();
         for i in 0..3 {
             store.bind_worktree(&wave, i, bind(i)).unwrap();
         }
@@ -2065,11 +2076,11 @@ mod tests {
         let path = dir.path().join("supervisor.db");
         {
             let s = RusqliteSupervisorStore::open(&path).unwrap();
-            s.register_wave("idem", WaveKind::Exec, 1).unwrap();
+            s.register_wave("idem", WaveKind::Exec, 1, 1).unwrap();
         }
         let s = RusqliteSupervisorStore::open(&path).unwrap();
         // No panic + still functional.
-        let _ = s.register_wave("idem2", WaveKind::Exec, 1).unwrap();
+        let _ = s.register_wave("idem2", WaveKind::Exec, 1, 1).unwrap();
     }
 
     /// Sanity: in_flight_count + pending_count + completed +
@@ -2077,7 +2088,7 @@ mod tests {
     #[test]
     fn slot_count_partition_is_consistent() {
         let store = store();
-        let wave = store.register_wave("part", WaveKind::Exec, 3).unwrap();
+        let wave = store.register_wave("part", WaveKind::Exec, 3, 1).unwrap();
         for i in 0..3 {
             store.bind_worktree(&wave, i, bind(i)).unwrap();
         }
@@ -2094,7 +2105,7 @@ mod tests {
     #[test]
     fn dispatch_moves_slot_to_in_flight() {
         let store = store();
-        let wave = store.register_wave("dsp", WaveKind::Exec, 2).unwrap();
+        let wave = store.register_wave("dsp", WaveKind::Exec, 2, 1).unwrap();
         for i in 0..2 {
             store.bind_worktree(&wave, i, bind(i)).unwrap();
         }
@@ -2171,7 +2182,7 @@ mod tests {
         cleanup_calls_reset();
         let store = store();
         let wave = store
-            .register_wave("rebind-sql", WaveKind::Exec, 1)
+            .register_wave("rebind-sql", WaveKind::Exec, 1, 1)
             .unwrap();
         store
             .bind_worktree(
@@ -2206,7 +2217,9 @@ mod tests {
     fn bind_worktree_fresh_does_not_call_cleanup() {
         cleanup_calls_reset();
         let store = store();
-        let wave = store.register_wave("fresh-sql", WaveKind::Exec, 1).unwrap();
+        let wave = store
+            .register_wave("fresh-sql", WaveKind::Exec, 1, 1)
+            .unwrap();
         store
             .bind_worktree(
                 &wave,
@@ -2283,7 +2296,7 @@ mod recovery_reopen_tests {
     /// `wave_id`.
     fn seed_mixed_wave(store: &RusqliteSupervisorStore) -> String {
         let wave = store
-            .register_wave("u8-recover", WaveKind::Exec, 5)
+            .register_wave("u8-recover", WaveKind::Exec, 5, 1)
             .unwrap();
         for idx in 0..5 {
             bind(store, &wave, idx);
@@ -2418,7 +2431,9 @@ mod recovery_reopen_tests {
         // ---- Phase 1: fully merge the wave, then crash. ----
         let wave = {
             let store = file_store(&path);
-            let wave = store.register_wave("u8-merged", WaveKind::Exec, 2).unwrap();
+            let wave = store
+                .register_wave("u8-merged", WaveKind::Exec, 2, 1)
+                .unwrap();
             bind(&store, &wave, 0);
             bind(&store, &wave, 1);
             assert_eq!(
@@ -2520,7 +2535,7 @@ mod recovery_reopen_tests {
         // ---- Phase 1: 2 in-flight + 2 pending, then crash. ----
         let wave = {
             let store = file_store(&path);
-            let wave = store.register_wave("u8-cap", WaveKind::Exec, 4).unwrap();
+            let wave = store.register_wave("u8-cap", WaveKind::Exec, 4, 1).unwrap();
             for idx in 0..4 {
                 bind(&store, &wave, idx);
             }

@@ -327,7 +327,7 @@ impl SupervisorP0Fixture {
     pub fn register_and_bind(&mut self) -> &mut Self {
         let bridge = InMemoryCoordinatorBridge::from_store(self.store.clone());
         let store_id = bridge
-            .register_wave_if_absent(self.wave_kind, &self.public_wave_id, self.wave_total)
+            .register_wave_if_absent(self.wave_kind, &self.public_wave_id, self.wave_total, 0)
             .expect("register_wave_if_absent");
         self.bound_wave_id = Some(store_id.clone());
 
@@ -503,11 +503,11 @@ fn public_wave_id_resolves_to_store_id_after_restart() {
     // bridge cannot rely on its own cache across restart.
     let store: Arc<dyn SupervisorStore> = Arc::new(InMemorySupervisorStore::new());
     store
-        .register_wave("public-A", WaveKind::Exec, 1)
+        .register_wave("public-A", WaveKind::Exec, 1, 1)
         .expect("first register");
     let fresh_bridge = InMemoryCoordinatorBridge::from_store(store.clone());
     let resolved = fresh_bridge
-        .register_wave_if_absent(WaveKind::Exec, "public-A", 1)
+        .register_wave_if_absent(WaveKind::Exec, "public-A", 1, 1)
         .expect("idempotent re-register");
     // 2026-07-23-004 U2: the resolved id MUST be the original
     // store id (`w-1`), not the caller-supplied `public-A`.
@@ -528,7 +528,7 @@ fn public_wave_id_resolves_to_store_id_after_restart() {
     // DuplicateKey implies the row exists. Validate the
     // successful path remains idempotent for repeated calls.
     let resolved_again = fresh_bridge
-        .register_wave_if_absent(WaveKind::Exec, "public-A", 1)
+        .register_wave_if_absent(WaveKind::Exec, "public-A", 1, 1)
         .expect("second idempotent call");
     assert_eq!(resolved_again, resolved);
 }
@@ -554,7 +554,7 @@ fn public_wave_id_out_of_range_slot_is_rejected() {
     let store: std::sync::Arc<dyn SupervisorStore> =
         std::sync::Arc::new(InMemorySupervisorStore::new());
     let wave_id = store
-        .register_wave("public-OOR", WaveKind::Exec, 1)
+        .register_wave("public-OOR", WaveKind::Exec, 1, 1)
         .expect("register");
     let slot_resource = SlotResource {
         slot_index: 5,
@@ -706,7 +706,7 @@ fn unknown_public_wave_id_lookup_returns_none() {
     // And the in-memory store keeps the public→store map after
     // registration so subsequent lookups succeed.
     let assigned = store
-        .register_wave("now-registered", WaveKind::Exec, 1)
+        .register_wave("now-registered", WaveKind::Exec, 1, 1)
         .expect("register");
     let looked_after = store
         .wave_id_for_idempotency_key("now-registered")
