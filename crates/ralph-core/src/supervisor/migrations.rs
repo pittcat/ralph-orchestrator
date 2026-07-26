@@ -25,8 +25,14 @@ mod imp {
     /// pre-fix `SELECT COUNT(*) + 1 FROM waves` allocator.
     /// U4 (2026-07-24-003) bump: `wave_emissions` reservation
     /// table backs the CLI emission state machine.
+    /// v6 (2026-07-25-005 plan U2) adds `attempt_count` /
+    /// `max_attempts` on `wave_slots` and `attempt_epoch` /
+    /// `parent_wave_id` / `slot_retry_budget` /
+    /// `published_failure_payload` on `waves`.
+    /// v7 (2026-07-25-005 plan U4) adds `redrive_requests`
+    /// idempotency ledger.
     #[allow(dead_code)] // pinned by `migrations_idempotent_across_reopen`; production writes via pragma_update
-    pub const CURRENT_VERSION: i64 = 5;
+    pub const CURRENT_VERSION: i64 = 7;
 
     /// Apply migrations sequentially. Each migration is a
     /// closure that performs the SQL DDL and bumps the

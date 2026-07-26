@@ -624,7 +624,7 @@ fn run_bdd_supervisor_fan_in(
         let kind = wave_kind.remove(&wave_id).unwrap_or(WaveKind::Exec);
         // Register the wave (idempotent). The bridge returns the
         // store-assigned id; we reuse it for subsequent calls.
-        let store_id = match bridge.register_wave_if_absent(kind, &wave_id, slots.len() as u32) {
+        let store_id = match bridge.register_wave_if_absent(kind, &wave_id, slots.len() as u32, 1) {
             Ok(id) => id,
             Err(err) => {
                 eprintln!("[bdd-supervisor] register_wave_if_absent failed for {wave_id}: {err}");

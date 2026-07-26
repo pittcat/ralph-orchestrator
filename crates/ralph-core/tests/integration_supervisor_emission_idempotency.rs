@@ -435,7 +435,9 @@ fn migration_v2_to_v3_preserves_existing_waves() {
     // Bring the DB up to v2 by registering a wave.
     {
         let store = RusqliteSupervisorStore::open(&path).expect("open v2");
-        let wave = store.register_wave("k1", WaveKind::Exec, 1).expect("reg");
+        let wave = store
+            .register_wave("k1", WaveKind::Exec, 1, 1)
+            .expect("reg");
         assert!(wave.starts_with("w-"));
     }
 
