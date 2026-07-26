@@ -450,7 +450,7 @@ Feature: Wave worker idle heartbeat lease
 - **输入与输出**：`presets/en/ce-executor-supervisor.yml`。
 - **可依赖**：U2。
 - **禁止依赖**：改 triggers / publishes 拓扑。
-- **Files**：`presets/en/ce-executor-supervisor.yml`；必要时 `crates/ralph-cli/src/presets.rs` / `presets/manifest.yml` / `presets/index.json` 同步。
+- **Files**：`presets/en/ce-executor-supervisor.yml`；同步刷新 `presets/schemas/ce-executor-supervisor.yml`（SSOT；event schema 字段、`required_fields`、`execution_contracts` 一致性约束）；`crates/ralph-cli/src/presets.rs` 的 `PRESETS` 数组；`presets/manifest.yml` 的 `embedded:` 列表；`presets/index.json`；`scripts/ralph-zsh-plugin.zsh` 的 `ralph run -H builtin:` 补全；CLAUDE.md「Presets & Hats System」段 builtin preset 列表（HARD RULE「preset/schema 改动后的下游同步清单」）。
 - **验收测试**：`preset_lint` + `presets` parity；对三 hat 字段做结构化断言。
 - **需要拆分的单元测试**：解析三值。
 - **Red 预期**：字段缺失断言红。
