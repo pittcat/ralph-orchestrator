@@ -1835,6 +1835,15 @@ EOF"#,
     emit_wave_validation_marker("hat-backend:invalid-fallback", &["error"]);
 }
 
+// U1 characterization pin (2026-07-25-006 plan):
+// The three `test_execute_wave_keeps_*_partial_timeout_events_visible` tests below
+// are the wall-clock baseline that the upcoming idle-heartbeat lease must preserve
+// when `idle_heartbeat_secs` is None/0. They run a worker with `timeout=1s`, have
+// it write one accepted event to RALPH_EVENTS_FILE *before* sleeping past the
+// deadline, and assert the event still lands in the merged ledger — proving the
+// wave does NOT synthesize worker failures when the wall-clock deadline fires
+// after an accepted event has already been recorded. Any idle-heartbeat refactor
+// must keep these tests green while idle mode is disabled.
 #[cfg(unix)]
 #[tokio::test]
 async fn test_execute_wave_keeps_text_partial_timeout_events_visible() {
