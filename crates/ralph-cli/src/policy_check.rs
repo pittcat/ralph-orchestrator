@@ -1040,7 +1040,6 @@ pub fn run_policy_check_unified(
     Ok(final_report)
 }
 
-
 /// 2026-07-26-004 plan U7 (R7 / S7): run the resident EventLoop's
 /// `FlowStepScopeStage` against a CLI emit / `--policy-check` candidate,
 /// using the current flow step recovered from the replayed main ledger
@@ -1075,7 +1074,12 @@ fn check_cli_flow_step_scope(
 
     let stage = FlowStepScopeStage::new(flow);
     let mut repair_states = std::collections::HashMap::new();
-    let mut ctx = StageContext::new(FlowStep::new(current), "cli-policy-check", 0, &mut repair_states);
+    let mut ctx = StageContext::new(
+        FlowStep::new(current),
+        "cli-policy-check",
+        0,
+        &mut repair_states,
+    );
     let mut event = ralph_proto::Event::new(topic, payload.unwrap_or(""));
     if let Some(h) = hat {
         event = event.with_source(h);
@@ -1097,7 +1101,11 @@ fn read_main_ledger_topics(workspace_root: &Path) -> Vec<String> {
     contents
         .lines()
         .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
-        .filter_map(|v| v.get("topic").and_then(|t| t.as_str()).map(|s| s.to_string()))
+        .filter_map(|v| {
+            v.get("topic")
+                .and_then(|t| t.as_str())
+                .map(|s| s.to_string())
+        })
         .collect()
 }
 
@@ -3097,7 +3105,6 @@ event_loop:
         cfg.event_loop.event_policy.unwrap()
     }
 
-
     /// 2026-07-26-004 plan U7 (R7 / S7 / S8): the CLI `--policy-check`
     /// flow-step decision MUST agree with the resident EventLoop. With no
     /// ledger the recovered step is the first step (`scope_freeze`), so
@@ -3135,7 +3142,12 @@ event_loop:
                     terminal_emits: vec!["LOOP_COMPLETE".to_string()],
                     steps: vec![
                         mk("scope_freeze", vec!["scope.ready"], None, vec![]),
-                        mk("review_wave", vec!["review.unit.done"], Some("scope.ready"), vec![]),
+                        mk(
+                            "review_wave",
+                            vec!["review.unit.done"],
+                            Some("scope.ready"),
+                            vec![],
+                        ),
                     ],
                     repair_budget: 3,
                     enforce_schema: "hard".to_string(),
@@ -3163,8 +3175,11 @@ event_loop:
 
         // Land scope.ready in the ledger → recovered step = review_wave.
         std::fs::create_dir_all(ws.path().join(".ralph")).expect("mkdir .ralph");
-        std::fs::write(ws.path().join(".ralph/events.jsonl"), "{\"topic\":\"scope.ready\"}\n")
-            .expect("write ledger");
+        std::fs::write(
+            ws.path().join(".ralph/events.jsonl"),
+            "{\"topic\":\"scope.ready\"}\n",
+        )
+        .expect("write ledger");
 
         // After scope.ready: the SAME emit is admitted (CLI agrees with
         // the recovered review_wave step the EventLoop would hold).

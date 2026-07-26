@@ -562,9 +562,7 @@ impl SkillInjector {
             // plan_auto_inject must mirror that removal here so
             // the on-demand list does not surface a skill the
             // agent can never actually load.
-            .filter(|name| {
-                !(name == "ralph-tools-memories" && !gates.memories_enabled)
-            })
+            .filter(|name| !(name == "ralph-tools-memories" && !gates.memories_enabled))
             .filter(|name| !gated.iter().any(|e| &e.name == name))
             .filter(|name| !registry_auto.iter().any(|e| &e.name == name))
             .map(PromptSkillEntry::on_demand)
@@ -14443,8 +14441,7 @@ mod u7_rejection_stale_characterization {
     fn past_older_than_ttl_is_stale() {
         // An event older than the 300s default is stale. We
         // build a ts 1000s in the past relative to `now`.
-        let past = chrono::Utc::now()
-            - chrono::Duration::seconds(1000);
+        let past = chrono::Utc::now() - chrono::Duration::seconds(1000);
         let rejection = rejection_with_ts(&past.to_rfc3339());
         assert!(
             is_rejection_stale(&rejection, 300),
@@ -14640,7 +14637,6 @@ pub(crate) fn advance_plan_step(
     steps.get(idx + 1).map(|s| s.id.clone())
 }
 
-
 /// 2026-07-26-004 plan U7 (R7 / R8): recover the current flow step by
 /// folding the SAME [`advance_plan_step`] authority over a sequence of
 /// accepted topics, starting from [`initial_current_plan_step`].
@@ -14796,7 +14792,6 @@ mod u4_current_plan_step_tests {
         assert_eq!(next, None);
     }
 
-
     /// 2026-07-26-004 plan U6 (R7 / R8): the flow authority advances by
     /// DECLARED transition (`on` / `on_any_of`), is idempotent on repeat,
     /// and branches a failed review wave straight to `finalize` (not
@@ -14829,15 +14824,34 @@ mod u4_current_plan_step_tests {
                     version: 1,
                     terminal_emits: vec!["LOOP_COMPLETE".to_string()],
                     steps: vec![
-                        mk("scope_freeze", vec!["scope.ready", "scope.blocked"], None, vec![]),
+                        mk(
+                            "scope_freeze",
+                            vec!["scope.ready", "scope.blocked"],
+                            None,
+                            vec![],
+                        ),
                         mk(
                             "review_wave",
-                            vec!["review.unit.done", "review.wave.complete", "review.wave.failed"],
+                            vec![
+                                "review.unit.done",
+                                "review.wave.complete",
+                                "review.wave.failed",
+                            ],
                             Some("scope.ready"),
                             vec![],
                         ),
-                        mk("synth_await", vec!["review.synthesized"], Some("review.wave.complete"), vec![]),
-                        mk("fix_plan", vec!["fix.plan.ready"], Some("review.synthesized"), vec![]),
+                        mk(
+                            "synth_await",
+                            vec!["review.synthesized"],
+                            Some("review.wave.complete"),
+                            vec![],
+                        ),
+                        mk(
+                            "fix_plan",
+                            vec!["fix.plan.ready"],
+                            Some("review.synthesized"),
+                            vec![],
+                        ),
                         mk(
                             "finalize",
                             vec!["LOOP_COMPLETE"],
@@ -14861,7 +14875,10 @@ mod u4_current_plan_step_tests {
         // replayed transition is a no-op (the step does not re-advance).
         assert_eq!(advance_plan_step(&cfg, "review_wave", "scope.ready"), None);
         // Non-transition unit terminal stays on review_wave.
-        assert_eq!(advance_plan_step(&cfg, "review_wave", "review.unit.done"), None);
+        assert_eq!(
+            advance_plan_step(&cfg, "review_wave", "review.unit.done"),
+            None
+        );
         // Declared `on`: review.wave.complete → synth_await.
         assert_eq!(
             advance_plan_step(&cfg, "review_wave", "review.wave.complete"),
@@ -14887,7 +14904,6 @@ mod u4_current_plan_step_tests {
             Some("review_wave".to_string())
         );
     }
-
 
     /// 2026-07-26-004 plan U7 (R7 / R8): `recover_current_plan_step`
     /// rebuilds the SAME current step a resident EventLoop reaches
@@ -14921,7 +14937,12 @@ mod u4_current_plan_step_tests {
                     version: 1,
                     terminal_emits: vec!["LOOP_COMPLETE".to_string()],
                     steps: vec![
-                        mk("scope_freeze", vec!["scope.ready", "scope.blocked"], None, vec![]),
+                        mk(
+                            "scope_freeze",
+                            vec!["scope.ready", "scope.blocked"],
+                            None,
+                            vec![],
+                        ),
                         mk(
                             "review_wave",
                             vec!["review.unit.done", "review.wave.failed"],
@@ -14945,7 +14966,10 @@ mod u4_current_plan_step_tests {
         // No events → first step.
         assert_eq!(recover_current_plan_step(&cfg, &[]), "scope_freeze");
         // After scope.ready → review_wave (matches incremental advance).
-        assert_eq!(recover_current_plan_step(&cfg, &["scope.ready"]), "review_wave");
+        assert_eq!(
+            recover_current_plan_step(&cfg, &["scope.ready"]),
+            "review_wave"
+        );
         // review.unit.done is a non-transition → stays review_wave.
         assert_eq!(
             recover_current_plan_step(&cfg, &["scope.ready", "review.unit.done"]),

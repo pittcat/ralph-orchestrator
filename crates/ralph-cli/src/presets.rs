@@ -1083,7 +1083,6 @@ mod tests {
         );
     }
 
-
     /// 2026-07-26-004 plan U9 (R9 / R10 / S5 / S10): implementation-review
     /// adopts the generic mechanism contract — the finalizer is the SOLE
     /// `LOOP_COMPLETE` publisher (`review.wave.failed` is a runtime
@@ -1104,7 +1103,10 @@ mod tests {
             "finalizer must be the sole LOOP_COMPLETE publisher"
         );
         assert!(
-            !finalizer.publishes.iter().any(|t| t == "review.wave.failed"),
+            !finalizer
+                .publishes
+                .iter()
+                .any(|t| t == "review.wave.failed"),
             "finalizer must NOT publish the runtime coordination topic review.wave.failed"
         );
 
@@ -1118,7 +1120,11 @@ mod tests {
             .as_ref()
             .and_then(|m| m.flow.as_ref())
             .expect("implementation-review declares mechanism.flow");
-        let finalize = flow.steps.iter().find(|s| s.id == "finalize").expect("finalize step");
+        let finalize = flow
+            .steps
+            .iter()
+            .find(|s| s.id == "finalize")
+            .expect("finalize step");
         assert!(
             finalize.on_any_of.iter().any(|t| t == "review.wave.failed"),
             "finalize must branch on review.wave.failed (U6 declared transition); got {:?}",

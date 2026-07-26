@@ -387,7 +387,11 @@ impl TerminalEvidence {
     pub fn from_event(topic: &str, payload: &str) -> Self {
         let dimension = serde_json::from_str::<serde_json::Value>(payload)
             .ok()
-            .and_then(|v| v.get("dimension").and_then(|d| d.as_str()).map(|s| s.to_string()));
+            .and_then(|v| {
+                v.get("dimension")
+                    .and_then(|d| d.as_str())
+                    .map(|s| s.to_string())
+            });
         Self {
             topic: topic.to_string(),
             dimension,
@@ -490,7 +494,6 @@ pub trait SupervisorStore: fmt::Debug + Send + Sync {
         content_hash: &str,
         event_count: usize,
     ) -> SupervisorStoreResult<()>;
-
 
     /// 2026-07-26-004 plan U2 (KTD3 / R2): attach bounded terminal
     /// evidence to a `Completed` slot so fan-in reconciliation can

@@ -3773,9 +3773,9 @@ hats:
             &workspace.join(".ralph/events.jsonl"),
             Some(&wave_channel),
             Some("exec-worker"),
-            true,             // isolated_mode = true
-            Some("w-test"),   // matching wave_id
-            Some(0),          // matching slot_index
+            true,           // isolated_mode = true
+            Some("w-test"), // matching wave_id
+            Some(0),        // matching slot_index
         );
 
         assert!(

@@ -342,7 +342,6 @@ mod tests {
         ));
     }
 
-
     /// 2026-07-26-004 plan U8 (R1–R5): ONE shared mechanism contract for
     /// all three WaveKind. A mixed wave (1 Completed-with-evidence + 1
     /// Failed) reaches `InjectedFailed` with the kind-specific topic,

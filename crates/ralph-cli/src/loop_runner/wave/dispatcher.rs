@@ -2310,8 +2310,7 @@ pub(crate) fn run_supervisor_fan_in(
                     &workspace_root_from_events(main_events_file),
                     &completed.wave_id,
                     &payload,
-                )
-                {
+                ) {
                     warn!(
                         wave_id = %completed.wave_id,
                         error = %err,
@@ -2319,7 +2318,7 @@ pub(crate) fn run_supervisor_fan_in(
                     );
                 }
             }
-// 2026-07-26-003 plan U5 (KTD7 / R4): the Review arm
+            // 2026-07-26-003 plan U5 (KTD7 / R4): the Review arm
             // on `InjectedFailed` must NOT lose the Completed
             // slots' business events on its way to the failed
             // coord event. The supervisor coordinator's
@@ -2700,7 +2699,6 @@ fn collect_review_dimensions(completed: &ralph_core::CompletedWave) -> Vec<Strin
     by_index.into_values().collect()
 }
 
-
 /// 2026-07-26-004 plan U3 (R1 / R2): build the cross-source
 /// [`ReviewDoneHints`] the failed-payload builder subtracts from
 /// `missing_dimensions`. Two sources beyond `completed.results`:
@@ -2737,9 +2735,7 @@ fn build_review_done_hints(
             // Bounded wave match: the envelope wave_id must equal this
             // wave. Rows without a wave_id (legacy / malformed) are NOT
             // counted — fail-closed.
-            if record.get("wave_id").and_then(|w| w.as_str())
-                != Some(completed.wave_id.as_str())
-            {
+            if record.get("wave_id").and_then(|w| w.as_str()) != Some(completed.wave_id.as_str()) {
                 continue;
             }
             let payload = record.get("payload").and_then(|p| p.as_str()).unwrap_or("");
@@ -2925,11 +2921,7 @@ fn merge_completed_review_slots_to_main(
         // Slots that show up in `completed.failures` are skipped:
         // their `results` entry is a stale artifact of the failed
         // tick and must not be merged (silent-success anti-pattern).
-        if completed
-            .failures
-            .iter()
-            .any(|f| f.index == result.index)
-        {
+        if completed.failures.iter().any(|f| f.index == result.index) {
             continue;
         }
         for event in &result.events {
@@ -6349,13 +6341,12 @@ hats: {}
             "reason": "worker_timeout",
         });
         append_supervisor_coord_event(&main, "review.wave.failed", &payload);
-        let line = std::io::BufReader::new(
-            std::fs::File::open(&main).expect("events file written"),
-        )
-        .lines()
-        .next()
-        .expect("at least one line")
-        .expect("line read");
+        let line =
+            std::io::BufReader::new(std::fs::File::open(&main).expect("events file written"))
+                .lines()
+                .next()
+                .expect("at least one line")
+                .expect("line read");
         let record: serde_json::Value = serde_json::from_str(&line).expect("json");
         assert_eq!(record["topic"], "review.wave.failed");
         assert_eq!(
@@ -6479,15 +6470,22 @@ hats: {}
         .collect();
 
         // 1. results-only (results supplies correctness + testing).
-        let results_only: std::collections::HashSet<String> =
-            ["correctness", "testing"].iter().map(|s| s.to_string()).collect();
+        let results_only: std::collections::HashSet<String> = ["correctness", "testing"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
         let mut got = compute_review_missing_dimensions(&assigned, &results_only)
             .into_iter()
             .collect::<std::collections::HashSet<_>>();
-        let mut want = ["goal-alignment", "security", "maintainability", "performance"]
-            .iter()
-            .map(|s| s.to_string())
-            .collect::<std::collections::HashSet<_>>();
+        let mut want = [
+            "goal-alignment",
+            "security",
+            "maintainability",
+            "performance",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect::<std::collections::HashSet<_>>();
         assert_eq!(got, want);
 
         // 2. store-Completed supplies maintainability + performance
@@ -6498,15 +6496,10 @@ hats: {}
         got = compute_review_missing_dimensions(&assigned, &store_only)
             .into_iter()
             .collect();
-        want = [
-            "correctness",
-            "goal-alignment",
-            "testing",
-            "security",
-        ]
-        .iter()
-        .map(|s| s.to_string())
-        .collect::<std::collections::HashSet<_>>();
+        want = ["correctness", "goal-alignment", "testing", "security"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect::<std::collections::HashSet<_>>();
         assert_eq!(got, want);
 
         // 3. main-backscan alone.
@@ -6587,7 +6580,10 @@ hats: {}
             .iter()
             .map(|v| v.as_str().unwrap().to_string())
             .collect();
-        assert_eq!(missing, ["performance"].iter().map(|s| s.to_string()).collect());
+        assert_eq!(
+            missing,
+            ["performance"].iter().map(|s| s.to_string()).collect()
+        );
     }
 
     /// U5 / S5 (plan 2026-07-26-003 / R4 / KTD7): a Review wave
@@ -6718,13 +6714,12 @@ hats: {}
             "completed_dimensions": ["goal-alignment"],
         });
         append_supervisor_coord_event(&main, "review.wave.complete", &payload);
-        let line = std::io::BufReader::new(
-            std::fs::File::open(&main).expect("events file written"),
-        )
-        .lines()
-        .next()
-        .expect("at least one line")
-        .expect("line read");
+        let line =
+            std::io::BufReader::new(std::fs::File::open(&main).expect("events file written"))
+                .lines()
+                .next()
+                .expect("at least one line")
+                .expect("line read");
         let record: serde_json::Value = serde_json::from_str(&line).expect("json");
         assert_eq!(
             record["hat"], "review-synthesizer",
@@ -7432,7 +7427,6 @@ hats: {}
         assert_eq!(s1["reason"], "worker_timeout");
     }
 
-
     /// U1 Red #1 (plan 2026-07-26-004, S2 / R2): production
     /// `run_supervisor_fan_in` must NOT report a dimension as
     /// missing when that dimension's `review.unit.done` already
@@ -7486,7 +7480,9 @@ hats: {}
             .unwrap();
 
         // Slot 0: Completed with a real review.unit.done for `correctness`.
-        store.record_slot_result(&store_wave_id, 0, "hash-s0", 1).unwrap();
+        store
+            .record_slot_result(&store_wave_id, 0, "hash-s0", 1)
+            .unwrap();
         // Slot 1: terminally Failed. Its assigned dimension `testing`
         // is already done in main from the prior tick.
         store
@@ -7572,7 +7568,6 @@ hats: {}
         );
     }
 
-
     /// 2026-07-26-004 plan U3 (R1 / R2 / KTD3): `build_review_done_hints`
     /// reconciles the two cross-source views correctly and stays bounded:
     /// - `main_backscan` keeps ONLY same-wave `review.unit.done` rows and
@@ -7583,7 +7578,8 @@ hats: {}
     #[test]
     fn u3_build_review_done_hints_is_bounded_and_evidence_gated() {
         use ralph_core::supervisor::{
-            InMemoryCoordinatorBridge, SupervisorBridge, SupervisorStore, TerminalEvidence, WaveKind,
+            InMemoryCoordinatorBridge, SupervisorBridge, SupervisorStore, TerminalEvidence,
+            WaveKind,
         };
         use std::io::Write;
 
@@ -7623,7 +7619,9 @@ hats: {}
             .register_wave_if_absent(WaveKind::Review, "W-main", 2)
             .unwrap();
         // Slot 0: Completed WITH evidence (dimension `performance`).
-        store.record_slot_result(&store_wave_id, 0, "h0", 1).unwrap();
+        store
+            .record_slot_result(&store_wave_id, 0, "h0", 1)
+            .unwrap();
         store
             .record_slot_terminal_evidence(
                 &store_wave_id,
@@ -7635,7 +7633,9 @@ hats: {}
             )
             .unwrap();
         // Slot 1: Completed but NO evidence (legacy) → must NOT count.
-        store.record_slot_result(&store_wave_id, 1, "h1", 1).unwrap();
+        store
+            .record_slot_result(&store_wave_id, 1, "h1", 1)
+            .unwrap();
 
         let mut assigned = std::collections::HashMap::new();
         assigned.insert(0u32, "performance".to_string());
@@ -7661,7 +7661,6 @@ hats: {}
             "store_completed must keep only Completed-with-evidence slots"
         );
     }
-
 
     /// U4 Red (plan 2026-07-26-004, S9 / R3): replaying a failed
     /// fan-in MUST NOT double-write. Calling `run_supervisor_fan_in`
@@ -7690,7 +7689,9 @@ hats: {}
             .register_wave_if_absent(WaveKind::Review, "w-u4-replay", 2)
             .unwrap();
         // Slot 0: Completed with a real review.unit.done (correctness).
-        store.record_slot_result(&store_wave_id, 0, "hash-s0", 1).unwrap();
+        store
+            .record_slot_result(&store_wave_id, 0, "hash-s0", 1)
+            .unwrap();
         // Slot 1: terminally Failed → InjectedFailed.
         store
             .record_slot_failure(
@@ -7776,7 +7777,6 @@ hats: {}
         );
     }
 
-
     /// U5 (plan 2026-07-26-004, S4 / AE2): a worker's terminal event
     /// must keep its WORKER producer across the fan-in merge — never
     /// inherit the current `review-dispatcher` activation. The trusted
@@ -7803,7 +7803,9 @@ hats: {}
         let store_wave_id = bridge
             .register_wave_if_absent(WaveKind::Review, "w-u5-prov", 2)
             .unwrap();
-        store.record_slot_result(&store_wave_id, 0, "hash-s0", 1).unwrap();
+        store
+            .record_slot_result(&store_wave_id, 0, "hash-s0", 1)
+            .unwrap();
         store
             .record_slot_failure(
                 &store_wave_id,
@@ -7917,8 +7919,7 @@ hats: {}
             .iter()
             .map(|s| s["slot_index"].as_u64().unwrap() as u32)
             .collect();
-        let bs_indices: std::collections::BTreeSet<u32> =
-            blocking_slots.iter().copied().collect();
+        let bs_indices: std::collections::BTreeSet<u32> = blocking_slots.iter().copied().collect();
         assert_eq!(
             sf_indices, bs_indices,
             "slot_failures index set must equal blocking_slots; got slot_failures={sf_indices:?}, blocking_slots={bs_indices:?}"
@@ -7989,7 +7990,8 @@ hats: {}
             "workspace_root_from_events must be absolute; got {root:?}"
         );
         assert_eq!(
-            root, tmp.path(),
+            root,
+            tmp.path(),
             "two `.parent()` calls from <ws>/.ralph/events.jsonl must yield <ws>"
         );
     }

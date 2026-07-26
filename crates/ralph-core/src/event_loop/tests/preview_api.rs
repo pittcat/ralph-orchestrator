@@ -165,11 +165,7 @@ fn preview_memories_off_drops_ralph_tools_memories_in_both_paths() {
         !auto_names.contains(&"ralph-tools-memories"),
         "preview.auto_inject must omit ralph-tools-memories when memories.enabled=false; got {auto_names:?}"
     );
-    let on_demand_names: Vec<&str> = preview
-        .on_demand
-        .iter()
-        .map(|e| e.name.as_str())
-        .collect();
+    let on_demand_names: Vec<&str> = preview.on_demand.iter().map(|e| e.name.as_str()).collect();
     assert!(
         !on_demand_names.contains(&"ralph-tools-memories"),
         "preview.on_demand must also omit ralph-tools-memories; got {on_demand_names:?}"
@@ -470,9 +466,7 @@ fn custom_auto_inject_skill_appears_once() {
     let skill_dir = tmp.path().join("skills");
     std::fs::create_dir_all(&skill_dir).expect("mkdir");
     let body = format!("custom-dup body {UNIQUE_DUP_MARKER} payload");
-    let raw = format!(
-        "---\nname: custom-dup\ndescription: U1 dup regression\n---\n\n{body}\n"
-    );
+    let raw = format!("---\nname: custom-dup\ndescription: U1 dup regression\n---\n\n{body}\n");
     std::fs::write(skill_dir.join("custom-dup.md"), raw).expect("write skill");
 
     let mut config = minimal_isolated_config(true, true);

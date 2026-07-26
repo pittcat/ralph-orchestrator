@@ -771,7 +771,6 @@ impl SupervisorStore for RusqliteSupervisorStore {
         })
     }
 
-
     fn record_slot_terminal_evidence(
         &self,
         wave_id: &str,
@@ -1561,7 +1560,6 @@ mod tests {
         RusqliteSupervisorStore::from_connection(conn).unwrap()
     }
 
-
     /// 2026-07-26-004 plan U2 (KTD3 / R2 / R3): rusqlite parity with
     /// the in-memory store — terminal evidence round-trips through the
     /// v4 `evidence_*` columns, same-evidence replay is a no-op,
@@ -1583,11 +1581,17 @@ mod tests {
             TerminalEvidence::from_event("review.unit.done", "{\"dimension\":\"correctness\"}");
         assert_eq!(ev.dimension.as_deref(), Some("correctness"));
         s.record_slot_terminal_evidence(&wave, 0, &ev).unwrap();
-        assert_eq!(s.slot_terminal_evidence(&wave, 0).unwrap(), Some(ev.clone()));
+        assert_eq!(
+            s.slot_terminal_evidence(&wave, 0).unwrap(),
+            Some(ev.clone())
+        );
 
         // Idempotent same-evidence replay → Ok no-op.
         s.record_slot_terminal_evidence(&wave, 0, &ev).unwrap();
-        assert_eq!(s.slot_terminal_evidence(&wave, 0).unwrap(), Some(ev.clone()));
+        assert_eq!(
+            s.slot_terminal_evidence(&wave, 0).unwrap(),
+            Some(ev.clone())
+        );
 
         // Conflicting evidence → AlreadyTerminal, original preserved.
         let other = TerminalEvidence::from_event("review.unit.done", "{\"dimension\":\"testing\"}");

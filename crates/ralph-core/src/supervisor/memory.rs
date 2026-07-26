@@ -1175,7 +1175,6 @@ mod tests {
         InMemorySupervisorStore::new()
     }
 
-
     /// 2026-07-26-004 plan U2 (KTD3 / R2 / R3): terminal evidence
     /// round-trips, idempotent same-evidence replay is a no-op,
     /// conflicting evidence fails closed, and a legacy slot with no
@@ -1192,11 +1191,17 @@ mod tests {
             TerminalEvidence::from_event("review.unit.done", "{\"dimension\":\"correctness\"}");
         assert_eq!(ev.dimension.as_deref(), Some("correctness"));
         s.record_slot_terminal_evidence(&wave, 0, &ev).unwrap();
-        assert_eq!(s.slot_terminal_evidence(&wave, 0).unwrap(), Some(ev.clone()));
+        assert_eq!(
+            s.slot_terminal_evidence(&wave, 0).unwrap(),
+            Some(ev.clone())
+        );
 
         // Idempotent same-evidence replay → Ok no-op.
         s.record_slot_terminal_evidence(&wave, 0, &ev).unwrap();
-        assert_eq!(s.slot_terminal_evidence(&wave, 0).unwrap(), Some(ev.clone()));
+        assert_eq!(
+            s.slot_terminal_evidence(&wave, 0).unwrap(),
+            Some(ev.clone())
+        );
 
         // Conflicting evidence for the same slot → AlreadyTerminal.
         let other = TerminalEvidence::from_event("review.unit.done", "{\"dimension\":\"testing\"}");

@@ -192,7 +192,6 @@ pub trait SupervisorBridge: std::fmt::Debug + Send + Sync {
         event_count: usize,
     ) -> Result<(), BridgeError>;
 
-
     /// 2026-07-26-004 plan U2 (KTD3): attach bounded terminal evidence
     /// to a `Completed` slot via the underlying store. Default: no-op
     /// for mocks / bridges without a store. Store-backed bridges
