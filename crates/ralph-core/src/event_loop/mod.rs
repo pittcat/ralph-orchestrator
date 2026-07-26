@@ -554,6 +554,17 @@ impl SkillInjector {
             .skills_for_hat(Some(hat_id.as_str()))
             .into_iter()
             .map(|s| s.name.clone())
+            // 2026-07-26-002 plan U10 (R12): preview and the live
+            // `build_prompt` path must agree on which skills are
+            // visible. The live path calls
+            // `skill_registry.remove("ralph-tools-memories")` when
+            // `memories.enabled == false` (see EventLoop::new);
+            // plan_auto_inject must mirror that removal here so
+            // the on-demand list does not surface a skill the
+            // agent can never actually load.
+            .filter(|name| {
+                !(name == "ralph-tools-memories" && !gates.memories_enabled)
+            })
             .filter(|name| !gated.iter().any(|e| &e.name == name))
             .filter(|name| !registry_auto.iter().any(|e| &e.name == name))
             .map(PromptSkillEntry::on_demand)

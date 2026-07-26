@@ -127,6 +127,63 @@ fn preview_double_off_auto_inject_is_empty() {
     );
 }
 
+/// 2026-07-26-002 plan U10 (R12): when `memories.enabled = false`,
+/// `prompt_preview` must drop `ralph-tools-memories` from
+/// `auto_inject` AND the live `build_prompt` must omit its
+/// marker — they MUST agree (R12 cross-check), and the gated
+/// set must drop it just like the registry removes it in the
+/// live path (line 1304 of event_loop/mod.rs).
+#[test]
+fn preview_memories_off_drops_ralph_tools_memories_in_both_paths() {
+    let config = minimal_isolated_config(false, true);
+    let mut event_loop = EventLoop::new(config);
+    event_loop.initialize("U10 memories-off cross-check");
+
+    let hat_id = HatId::new("builder");
+
+    // Live path: build_prompt must NOT include the memories skill
+    // marker when memories are disabled.
+    let prompt = event_loop
+        .build_prompt(&hat_id)
+        .expect("prompt should build");
+    assert!(
+        !prompt.contains("<ralph-tools-memories-skill>"),
+        "live prompt must not include ralph-tools-memories when memories.enabled=false; got prompt with marker"
+    );
+
+    // Preview path: auto_inject must NOT list ralph-tools-memories
+    // and on_demand must NOT either (same registry state).
+    let preview = event_loop
+        .prompt_preview(&hat_id)
+        .expect("preview should exist");
+    let auto_names: Vec<&str> = preview
+        .auto_inject
+        .iter()
+        .map(|e| e.name.as_str())
+        .collect();
+    assert!(
+        !auto_names.contains(&"ralph-tools-memories"),
+        "preview.auto_inject must omit ralph-tools-memories when memories.enabled=false; got {auto_names:?}"
+    );
+    let on_demand_names: Vec<&str> = preview
+        .on_demand
+        .iter()
+        .map(|e| e.name.as_str())
+        .collect();
+    assert!(
+        !on_demand_names.contains(&"ralph-tools-memories"),
+        "preview.on_demand must also omit ralph-tools-memories; got {on_demand_names:?}"
+    );
+
+    // Cross-check: preview and live must agree on what IS injected.
+    for name in auto_names {
+        assert!(
+            prompt.contains(&format!("<{name}-skill>")),
+            "preview auto-inject lists {name} but live prompt is missing its marker"
+        );
+    }
+}
+
 #[test]
 fn preview_gates_snapshot_reflects_config() {
     let config = minimal_isolated_config(true, false);
