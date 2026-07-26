@@ -285,7 +285,7 @@ mod tests {
 
     use super::*;
     use crate::supervisor::{
-        InMemorySupervisorStore, MergeSinkError, SlotResource, SlotStatus, WaveKind,
+        InMemorySupervisorStore, MergeSinkError, SlotResource, SlotStatus, WaveKind, WavePhase,
     };
     use std::sync::Arc;
 
@@ -340,6 +340,85 @@ mod tests {
             action,
             CoordinatorAction::InjectedComplete { ref topic, .. } if topic == "exec.wave.complete"
         ));
+    }
+
+
+    /// 2026-07-26-004 plan U8 (R1–R5): ONE shared mechanism contract for
+    /// all three WaveKind. A mixed wave (1 Completed-with-evidence + 1
+    /// Failed) reaches `InjectedFailed` with the kind-specific topic,
+    /// latches `merged_to_events` so a replay is `AlreadyDone` (no
+    /// double-inject), keeps the wave phase `Failed`, and a Completed
+    /// slot stays distinguishable from a Failed slot via terminal
+    /// evidence. The wave KIND only changes the coordination topic — the
+    /// lifecycle / evidence / idempotency rules are identical, so Review,
+    /// Exec and Fix cannot drift into separate branches.
+    #[test]
+    fn u8_shared_fan_in_contract_across_wave_kinds() {
+        for (kind, failed_topic) in [
+            (WaveKind::Exec, "exec.wave.failed"),
+            (WaveKind::Fix, "fix.wave.failed"),
+            (WaveKind::Review, "review.wave.failed"),
+        ] {
+            let store = Arc::new(InMemorySupervisorStore::new());
+            let wave = store.register_wave("k-contract", kind, 2).unwrap();
+            // Slot 0: Completed WITH terminal evidence. Slot 1: Failed.
+            store.record_slot_result(&wave, 0, "h0", 1).unwrap();
+            store
+                .record_slot_terminal_evidence(
+                    &wave,
+                    0,
+                    &crate::supervisor::TerminalEvidence::from_event(
+                        "review.unit.done",
+                        "{\"dimension\":\"correctness\"}",
+                    ),
+                )
+                .unwrap();
+            store
+                .record_slot_failure(
+                    &wave,
+                    1,
+                    crate::supervisor::worker_outcome::REASON_WORKER_TIMEOUT,
+                )
+                .unwrap();
+
+            let coord = SupervisorCoordinator::with_in_memory_sink(
+                store.clone() as Arc<dyn SupervisorStore>
+            );
+            let inputs = PhaseInputs {
+                aggregate_timeout_secs: 60,
+                elapsed_secs: 0,
+                cancel_requested: false,
+            };
+            // First tick → InjectedFailed with the kind-specific topic.
+            let action = coord.tick(&wave, inputs.clone()).unwrap();
+            match &action {
+                CoordinatorAction::InjectedFailed { topic, .. } => {
+                    assert_eq!(topic, failed_topic, "{kind} failed topic mismatch");
+                }
+                other => panic!("{kind}: expected InjectedFailed, got {other:?}"),
+            }
+            // merged_to_events latched → replay is AlreadyDone (idempotent).
+            let replay = coord.tick(&wave, inputs.clone()).unwrap();
+            assert!(
+                matches!(replay, CoordinatorAction::AlreadyDone),
+                "{kind}: replayed failed fan-in must be AlreadyDone, got {replay:?}"
+            );
+            // Terminal evidence: Completed slot has it, Failed slot does not.
+            assert!(
+                store.slot_terminal_evidence(&wave, 0).unwrap().is_some(),
+                "{kind}: Completed slot must carry terminal evidence"
+            );
+            assert!(
+                store.slot_terminal_evidence(&wave, 1).unwrap().is_none(),
+                "{kind}: Failed slot must carry no terminal evidence"
+            );
+            // Phase is Failed, not Done.
+            assert_eq!(
+                store.fan_in_status(&wave).unwrap().phase,
+                WavePhase::Failed,
+                "{kind}: mixed wave must settle to Failed phase"
+            );
+        }
     }
 
     /// U8 KTD-7 path: merge fails → no coord event injection.
