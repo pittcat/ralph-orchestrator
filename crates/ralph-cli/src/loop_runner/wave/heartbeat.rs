@@ -65,6 +65,247 @@ impl std::fmt::Display for HeartbeatKind {
     }
 }
 
+// =====================================================================
+// 2026-07-25-006 U5: pure lease decision function.
+// =====================================================================
+
+/// Configuration snapshot fed into the lease decision. All timing values
+/// use whole milliseconds relative to the same epoch (the worker's spawn
+/// instant) so the decision is deterministic and trivially testable
+/// without a real clock.
+///
+/// `idle_enabled` is a pre-resolved flag (i.e. `idle_window_secs > 0`);
+/// the worker feeds `false` here when the YAML field is absent or `0`
+/// so the decision treats idle as "not in this loop" and only enforces
+/// the hard ceiling. This mirrors `DetectedWave::idle_enabled()`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct LeaseConfig {
+    /// Hard ceiling (StartToClose). The worker MUST NOT survive past
+    /// `now_ms - start_ms >= hard_cap_ms`. Required.
+    pub hard_cap_ms: u64,
+    /// Idle window (`Some(ms)` when idle mode is enabled; `None` /
+    /// disabled disables the idle branch entirely).
+    pub idle_window_ms: Option<u64>,
+    /// Maximum number of consecutive Weak-only signals that may
+    /// refresh the lease before further Weak signals stop refreshing
+    /// it. Per KTD3 — cap exhaustion forces `IdleKill` even though
+    /// `< idle_window`.
+    pub weak_cap: u32,
+}
+
+impl LeaseConfig {
+    /// `idle_enabled` predicate used by `decide_lease` so callers can
+    /// short-circuit the idle branch without re-deriving the flag.
+    pub fn idle_enabled(&self) -> bool {
+        self.idle_window_ms.is_some()
+    }
+}
+
+/// Input snapshot for one `decide_lease` call. All values are relative
+/// to the same spawn-relative epoch as `LeaseConfig`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct LeaseSnapshot {
+    /// `now_ms`: monotonic time elapsed since spawn, in milliseconds.
+    pub now_ms: u64,
+    /// `last_hb_ms`: monotonic time elapsed since spawn at which the
+    /// most recent qualifying signal (Strong or Weak under cap) was
+    /// observed. May equal `now_ms` if a signal arrived this tick.
+    pub last_hb_ms: u64,
+    /// Consecutive Weak-only renewals observed since the last Strong
+    /// signal. Reset to 0 by Strong. Carried over across the
+    /// idle-window boundary so the cap is honored even after a long
+    /// stream of Weak-only deltas.
+    pub weak_count: u32,
+    /// What kind of signal was just observed on this tick. The
+    /// caller feeds `HeartbeatKind::None` when the tick is just a
+    /// timer tick (e.g. while waiting for stdout before any line has
+    /// arrived).
+    pub kind: HeartbeatKind,
+}
+
+/// Outcome of consulting the lease on one tick.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
+pub enum LeaseDecision {
+    /// Worker may continue. The caller MUST update its `last_hb_ms` /
+    /// `weak_count` state to reflect the snapshot the decision saw
+    /// (use `apply_lease_decision` below).
+    Continue,
+    /// Worker exceeded the idle heartbeat window. The caller MUST
+    /// tear the worker down with reason `idle heartbeat exceeded`.
+    IdleKill,
+    /// Worker exceeded the StartToClose hard ceiling. The caller MUST
+    /// tear the worker down with reason `start-to-close exceeded`.
+    HardKill,
+}
+
+impl std::fmt::Display for LeaseDecision {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            LeaseDecision::Continue => f.write_str("continue"),
+            LeaseDecision::IdleKill => f.write_str("idle_kill"),
+            LeaseDecision::HardKill => f.write_str("hard_kill"),
+        }
+    }
+}
+
+/// Pure lease-decision function. Encodes the plan contract:
+///
+/// - **Hard ceiling wins** (R1 / R6 / KTD8): when
+///   `now_ms >= hard_cap_ms`, the only legal answer is `HardKill`,
+///   regardless of idle settings.
+/// - **Idle disabled**: when `idle_window_ms` is `None`, the function
+///   collapses to the legacy StartToClose behavior — `Continue` until
+///   the hard ceiling (R7 / KTD2).
+/// - **Weak-signal cap** (R3 / KTD3): when idle is enabled and the
+///   current signal is `Weak`, increment `weak_count`. If the new
+///   count strictly exceeds `weak_cap`, return `IdleKill` even though
+///   `now - last_hb < idle_window`. A `Weak` signal at exactly the
+///   cap boundary (i.e. `weak_count == weak_cap` after increment)
+///   still refreshes — the next Weak tick would trip the kill.
+///   Setting `weak_cap == 0` therefore disables weak-renewals outright.
+/// - **Strong resets weak_count** implicitly: the caller's
+///   `apply_lease_decision` zeros it on `Strong`; this function only
+///   reads it.
+///
+/// The function NEVER mutates state; the caller is responsible for
+/// updating `last_hb_ms` and `weak_count` via `apply_lease_decision`
+/// after consulting this function on each signal / timer tick.
+pub fn decide_lease(cfg: &LeaseConfig, snap: LeaseSnapshot) -> LeaseDecision {
+    // (R1) Hard ceiling always wins.
+    if snap.now_ms >= cfg.hard_cap_ms {
+        return LeaseDecision::HardKill;
+    }
+
+    // (R7 / KTD2) Idle disabled → just HardKill (already checked)
+    // or Continue. No idle branch at all.
+    let Some(idle_window_ms) = cfg.idle_window_ms else {
+        return LeaseDecision::Continue;
+    };
+
+    // (R3 / KTD3) Weak-cap kicker fires BEFORE the idle-window check
+    // so a slow trickle of Weak-only deltas can never extend the
+    // lease indefinitely. Count the current signal first to handle
+    // the "this tick is Weak" case correctly.
+    let next_weak = match snap.kind {
+        HeartbeatKind::Weak => snap.weak_count.saturating_add(1),
+        // Strong / None do not bump the counter; the caller is
+        // expected to reset the counter on Strong via
+        // `apply_lease_decision`.
+        HeartbeatKind::Strong | HeartbeatKind::None => snap.weak_count,
+    };
+
+    // (R3) Hard cap = 0 means "Weak can never refresh the lease".
+    // The counter still tracks signal arrival so the worker's
+    // diagnostic logs reflect what was observed, but every tick
+    // with `Weak` trips IdleKill — even on the very first one.
+    if cfg.weak_cap == 0 && snap.kind == HeartbeatKind::Weak {
+        return LeaseDecision::IdleKill;
+    }
+
+    // (R3) Stricter-than cap: when next_weak is strictly greater
+    // than weak_cap, this Weak tick is the one that crosses the
+    // boundary — refuse to renew the lease on this tick.
+    if cfg.weak_cap > 0 && snap.kind == HeartbeatKind::Weak && next_weak > cfg.weak_cap {
+        return LeaseDecision::IdleKill;
+    }
+
+    // (R2) Idle window expiration.
+    // `last_hb_ms` may be in the future relative to `now_ms` if the
+    // caller fast-forwarded a tick; saturate to 0 to avoid panicking
+    // on `sub`.
+    let since_last_hb = snap.now_ms.saturating_sub(snap.last_hb_ms);
+    if since_last_hb >= idle_window_ms {
+        return LeaseDecision::IdleKill;
+    }
+
+    LeaseDecision::Continue
+}
+
+/// State the worker tracks between `decide_lease` calls. Pure data,
+/// `Copy`-able, no I/O. The worker mutates a local copy of this on
+/// every line / timer tick and feeds the next `LeaseSnapshot` from the
+/// updated state. Kept tiny on purpose so the unit suite can pin
+/// every transition.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct LeaseState {
+    pub now_ms: u64,
+    pub last_hb_ms: u64,
+    pub weak_count: u32,
+}
+
+impl LeaseState {
+    /// Fresh state for a brand-new worker: clock has not started,
+    /// `last_hb_ms == now_ms` (i.e. the spawn IS the first signal —
+    /// its weak_count is zero and the lease window starts ticking
+    /// from this instant).
+    pub const fn fresh(now_ms: u64) -> Self {
+        Self {
+            now_ms,
+            last_hb_ms: now_ms,
+            weak_count: 0,
+        }
+    }
+
+    /// Apply the results of one tick. `kind` is the classification of
+    /// the line just observed (or `None` for a pure timer tick).
+    /// `now_ms` is the time elapsed since spawn at which this tick
+    /// happened. Returns the new state and the lease decision so the
+    /// caller can act on it (e.g. forward to kill channel on
+    /// `IdleKill`/`HardKill`). Caller MUST stop on `HardKill` and
+    /// SHOULD stop on `IdleKill`.
+    pub fn tick(&mut self, kind: HeartbeatKind, now_ms: u64, cfg: &LeaseConfig) -> LeaseDecision {
+        let snap = LeaseSnapshot {
+            now_ms,
+            last_hb_ms: self.last_hb_ms,
+            weak_count: self.weak_count,
+            kind,
+        };
+        let decision = decide_lease(cfg, snap);
+        match (decision, kind) {
+            // On HardKill the caller is tearing the worker down.
+            // The clock is FROZEN — repeated HardKill ticks at
+            // later `now_ms` values MUST NOT advance the visible
+            // state, otherwise log timestamps for the kill would
+            // drift after the fact. Must be matched BEFORE the
+            // kind-specific refresh arms so Strong / Weak arrivals
+            // at the cap do not bump last_hb or weak_count.
+            (LeaseDecision::HardKill, _) => {}
+            // Strong refreshes and resets weak_count regardless of
+            // decision (we may be inside an idle window that
+            // successfully refreshed).
+            (_, HeartbeatKind::Strong) => {
+                self.now_ms = now_ms;
+                self.last_hb_ms = now_ms;
+                self.weak_count = 0;
+            }
+            // Weak refreshes only if we decided to continue. When
+            // the cap ticks over, we refuse to refresh.
+            (LeaseDecision::Continue, HeartbeatKind::Weak) => {
+                self.now_ms = now_ms;
+                self.last_hb_ms = now_ms;
+                self.weak_count = self.weak_count.saturating_add(1);
+            }
+            // Weak on IdleKill: do not advance last_hb or weak_count;
+            // the rejection must not reset the idle window, and the
+            // counter snapshot used by the caller already reflects
+            // the value fed to the decision.
+            (LeaseDecision::IdleKill, HeartbeatKind::Weak) => {
+                self.now_ms = now_ms;
+            }
+            // None does not refresh and does not move the weak
+            // counter — only the clock moves.
+            (_, HeartbeatKind::None) => {
+                self.now_ms = now_ms;
+            }
+            // (LeaseDecision::Continue, HeartbeatKind::Strong)
+            // already covered above by the Strong arm.
+            // (LeaseDecision::Continue, HeartbeatKind::None)
+            // already covered above by the None arm.
+        }
+        decision
+    }
+}
+
 /// Pure-function classifier. See module docs for the Strong/Weak
 /// mapping. Returns `HeartbeatKind::None` for blank, malformed, or
 /// unrecognised lines (so the caller never has to reason about the
@@ -502,5 +743,337 @@ mod tests {
         assert_eq!(HeartbeatKind::Strong.to_string(), "strong");
         assert_eq!(HeartbeatKind::Weak.to_string(), "weak");
         assert_eq!(HeartbeatKind::None.to_string(), "none");
+    }
+
+    // =====================================================================
+    // U5 table-driven suite — pure lease decision.
+    // =====================================================================
+
+    fn cfg_idle(hard_cap_ms: u64, idle_window_ms: u64, weak_cap: u32) -> LeaseConfig {
+        LeaseConfig {
+            hard_cap_ms,
+            idle_window_ms: Some(idle_window_ms),
+            weak_cap,
+        }
+    }
+
+    fn cfg_legacy(hard_cap_ms: u64) -> LeaseConfig {
+        LeaseConfig {
+            hard_cap_ms,
+            idle_window_ms: None,
+            weak_cap: 0,
+        }
+    }
+
+    fn snap(now_ms: u64, last_hb_ms: u64, weak_count: u32, kind: HeartbeatKind) -> LeaseSnapshot {
+        LeaseSnapshot {
+            now_ms,
+            last_hb_ms,
+            weak_count,
+            kind,
+        }
+    }
+
+    // ---- R7 / KTD2: idle disabled collapses to StartToClose only. ----
+    #[test]
+    fn lease_idle_disabled_is_legacy_start_to_close() {
+        let cfg = cfg_legacy(5_000);
+        // Within wall clock → Continue.
+        assert_eq!(
+            decide_lease(&cfg, snap(1_000, 1_000, 0, HeartbeatKind::None)),
+            LeaseDecision::Continue
+        );
+        // Past wall clock → HardKill regardless of any other state.
+        assert_eq!(
+            decide_lease(&cfg, snap(5_000, 5_000, 0, HeartbeatKind::None)),
+            LeaseDecision::HardKill
+        );
+        assert_eq!(
+            decide_lease(&cfg, snap(99_999, 0, 99, HeartbeatKind::Strong)),
+            LeaseDecision::HardKill
+        );
+    }
+
+    #[test]
+    fn lease_idle_disabled_continues_through_long_idle_window() {
+        // Idle disabled → a 60-second gap that would otherwise have
+        // been an IdleKill under idle mode is fine; only the hard
+        // ceiling matters. The hard ceiling itself is large enough
+        // (10 minutes) to keep this purely about the idle-disabled
+        // behavior.
+        let cfg = cfg_legacy(600_000);
+        assert_eq!(
+            decide_lease(&cfg, snap(60_000, 0, 0, HeartbeatKind::None)),
+            LeaseDecision::Continue
+        );
+    }
+
+    // ---- R1 / R6 / KTD8: hard ceiling always wins. ----
+    #[test]
+    fn lease_hard_cap_wins_over_idle_continue() {
+        // Even with idle enabled and `Weak` refreshing under cap,
+        // hitting the hard ceiling kills the worker first.
+        let cfg = cfg_idle(1_000, 5_000, 4);
+        assert_eq!(
+            decide_lease(&cfg, snap(1_000, 1_000, 0, HeartbeatKind::Strong)),
+            LeaseDecision::HardKill
+        );
+        // Strict `==` is in-band per the spec.
+        assert_eq!(
+            decide_lease(&cfg, snap(999, 999, 0, HeartbeatKind::Strong)),
+            LeaseDecision::Continue
+        );
+    }
+
+    // ---- R2: silent idle expiration when no signal arrives. ----
+    #[test]
+    fn lease_idle_kill_on_silence() {
+        let cfg = cfg_idle(60_000, 2_000, 4);
+        // 2s+ since last signal → IdleKill, even on a None tick.
+        assert_eq!(
+            decide_lease(&cfg, snap(2_500, 500, 0, HeartbeatKind::None)),
+            LeaseDecision::IdleKill
+        );
+        // At the boundary (== idle_window) → in-band IdleKill.
+        assert_eq!(
+            decide_lease(&cfg, snap(2_000, 0, 0, HeartbeatKind::None)),
+            LeaseDecision::IdleKill
+        );
+        // Just before the boundary → Continue.
+        assert_eq!(
+            decide_lease(&cfg, snap(1_999, 0, 0, HeartbeatKind::None)),
+            LeaseDecision::Continue
+        );
+    }
+
+    // ---- R3 / KTD3: weak-signal cap exhaustion. ----
+    #[test]
+    fn lease_weak_cap_exhausted_kicks_idle() {
+        // cap = 2 → first two Weak renewals refresh (→ weak_count 1
+        // then 2), third Weak crosses the boundary → IdleKill.
+        let cfg = cfg_idle(60_000, 5_000, 2);
+
+        // Tick 1: Weak on a fresh state. weak_count becomes 1.
+        assert_eq!(
+            decide_lease(&cfg, snap(1_000, 0, 0, HeartbeatKind::Weak)),
+            LeaseDecision::Continue
+        );
+        // Tick 2: Weak again, weak_count becomes 2 (= cap).
+        assert_eq!(
+            decide_lease(&cfg, snap(2_000, 1_000, 1, HeartbeatKind::Weak)),
+            LeaseDecision::Continue
+        );
+        // Tick 3: Weak again, weak_count would become 3 (> cap) → kick.
+        assert_eq!(
+            decide_lease(&cfg, snap(3_000, 2_000, 2, HeartbeatKind::Weak)),
+            LeaseDecision::IdleKill
+        );
+    }
+
+    #[test]
+    fn lease_strong_resets_weak_counter() {
+        // Counter at cap, Strong arrives → should NOT kick. After
+        // applying the result the state will reset weak_count = 0
+        // and last_hb = now (handled by `LeaseState::tick`, exercised
+        // by `lease_state_tick_strong_resets` below). The decision
+        // function itself just sees the Strong signal and does
+        // not increment.
+        let cfg = cfg_idle(60_000, 5_000, 2);
+        assert_eq!(
+            decide_lease(&cfg, snap(2_000, 2_000, 2, HeartbeatKind::Strong)),
+            LeaseDecision::Continue
+        );
+    }
+
+    #[test]
+    fn lease_weak_cap_zero_disables_weak_renewal() {
+        // weak_cap = 0: even the first Weak does not refresh the
+        // lease. The first Strong still refreshes because Strong
+        // bumps the counter only via Weak match.
+        let cfg = cfg_idle(60_000, 5_000, 0);
+        assert_eq!(
+            decide_lease(&cfg, snap(1_000, 0, 0, HeartbeatKind::Weak)),
+            LeaseDecision::IdleKill
+        );
+        // Subsequent Strong after a long silence should still be
+        // considered via the idle-window branch (it refreshed last_hb
+        // before this tick so the decision logic sees a fresh signal).
+        assert_eq!(
+            decide_lease(&cfg, snap(2_000, 2_000, 0, HeartbeatKind::Strong)),
+            LeaseDecision::Continue
+        );
+    }
+
+    #[test]
+    fn lease_none_signal_does_not_increment_weak_count() {
+        // None is not Weak; even with the cap primed to the
+        // boundary, blank lines / unknown events must not push the
+        // counter over. Idle window is exercised independently.
+        let cfg = cfg_idle(60_000, 5_000, 2);
+        assert_eq!(
+            decide_lease(&cfg, snap(1_000, 0, 2, HeartbeatKind::None)),
+            LeaseDecision::Continue
+        );
+    }
+
+    // ---- S5: hard cap still wins over healthy heartbeat. ----
+    #[test]
+    fn lease_continuous_strong_does_not_pass_hard_cap() {
+        // Idle disabled when explicit leg; here we mix idle on with
+        // a very small hard cap to prove hard wins. The idle window
+        // is set wider than the hard cap so it can't preempt on
+        // its own.
+        let cfg = cfg_idle(5_000, 60_000, 4);
+        // Every 1s Strong signal, but the hard cap is 5s; the 5th
+        // tick crosses.
+        for elapsed in [1_000u64, 2_000, 3_000, 4_000] {
+            assert_eq!(
+                decide_lease(&cfg, snap(elapsed, elapsed, 0, HeartbeatKind::Strong)),
+                LeaseDecision::Continue
+            );
+        }
+        assert_eq!(
+            decide_lease(&cfg, snap(5_000, 5_000, 0, HeartbeatKind::Strong)),
+            LeaseDecision::HardKill
+        );
+    }
+
+    // ---- Defense: now_ms saturating_sub last_hb_ms. ----
+    #[test]
+    fn lease_last_hb_in_future_saturates_to_zero() {
+        // Caller bug: last_hb_ms accidentally ahead of now_ms. We
+        // must not panic; saturating_sub keeps us safe and the
+        // branch returns Continue (since 0 < idle_window).
+        let cfg = cfg_idle(60_000, 1_000, 4);
+        assert_eq!(
+            decide_lease(&cfg, snap(500, 2_000, 0, HeartbeatKind::None)),
+            LeaseDecision::Continue
+        );
+    }
+
+    // ---- Apply-loop: `LeaseState::tick` runs end-to-end. ----
+    #[test]
+    fn lease_state_tick_strong_resets() {
+        let cfg = cfg_idle(60_000, 5_000, 2);
+        let mut state = LeaseState::fresh(0);
+        // Drive two Weak ticks to bring weak_count to 2.
+        assert_eq!(
+            state.tick(HeartbeatKind::Weak, 1_000, &cfg),
+            LeaseDecision::Continue
+        );
+        assert_eq!(
+            state.tick(HeartbeatKind::Weak, 2_000, &cfg),
+            LeaseDecision::Continue
+        );
+        assert_eq!(state.weak_count, 2);
+        // A Strong signal continues and resets the counter.
+        assert_eq!(
+            state.tick(HeartbeatKind::Strong, 3_000, &cfg),
+            LeaseDecision::Continue
+        );
+        assert_eq!(state.last_hb_ms, 3_000);
+        assert_eq!(state.weak_count, 0);
+    }
+
+    #[test]
+    fn lease_state_tick_weak_kick_at_cap() {
+        let cfg = cfg_idle(60_000, 5_000, 2);
+        let mut state = LeaseState::fresh(0);
+        assert_eq!(
+            state.tick(HeartbeatKind::Weak, 1_000, &cfg),
+            LeaseDecision::Continue
+        );
+        assert_eq!(
+            state.tick(HeartbeatKind::Weak, 2_000, &cfg),
+            LeaseDecision::Continue
+        );
+        // Third Weak → IdleKill; weak_count does NOT advance on a
+        // rejection, mirroring the decision logic.
+        assert_eq!(
+            state.tick(HeartbeatKind::Weak, 3_000, &cfg),
+            LeaseDecision::IdleKill
+        );
+        assert_eq!(state.weak_count, 2, "IdleKill must not advance the counter");
+        // `last_hb_ms` stays put — a rejected Weak must not reset
+        // the idle window.
+        assert_eq!(state.last_hb_ms, 2_000);
+    }
+
+    #[test]
+    fn lease_state_tick_continues_through_silence_then_idle_kills() {
+        let cfg = cfg_idle(60_000, 1_000, 4);
+        let mut state = LeaseState::fresh(0);
+        // Strong at t=0 — refreshes. weak_count = 0, last_hb = 0.
+        state.tick(HeartbeatKind::Strong, 0, &cfg);
+        // Now sit silent for 999ms — still Continue.
+        assert_eq!(
+            state.tick(HeartbeatKind::None, 999, &cfg),
+            LeaseDecision::Continue
+        );
+        // At t=1000ms (boundary), it kills.
+        assert_eq!(
+            state.tick(HeartbeatKind::None, 1_000, &cfg),
+            LeaseDecision::IdleKill
+        );
+    }
+
+    #[test]
+    fn lease_state_tick_strong_inside_idle_window_after_silence() {
+        let cfg = cfg_idle(60_000, 5_000, 4);
+        let mut state = LeaseState::fresh(0);
+        state.tick(HeartbeatKind::Strong, 0, &cfg);
+        // Sit silent 3s — still within the 5s window.
+        assert_eq!(
+            state.tick(HeartbeatKind::None, 3_000, &cfg),
+            LeaseDecision::Continue
+        );
+        // A Strong signal at 3.5s refreshes; weak counter untouched
+        // because Strong does not bump it.
+        assert_eq!(
+            state.tick(HeartbeatKind::Strong, 3_500, &cfg),
+            LeaseDecision::Continue
+        );
+        assert_eq!(state.last_hb_ms, 3_500);
+    }
+
+    #[test]
+    fn lease_state_tick_hard_kill_stops_clock() {
+        let cfg = cfg_idle(60_000, 5_000, 4);
+        let mut state = LeaseState::fresh(0);
+        // Drive to just under the cap so we have non-trivial
+        // last_hb / weak_count state.
+        assert_eq!(
+            state.tick(HeartbeatKind::Strong, 0, &cfg),
+            LeaseDecision::Continue
+        );
+        assert_eq!(
+            state.tick(HeartbeatKind::Strong, 1_000, &cfg),
+            LeaseDecision::Continue
+        );
+        // Cross the hard ceiling → HardKill.
+        assert_eq!(
+            state.tick(HeartbeatKind::Strong, 60_000, &cfg),
+            LeaseDecision::HardKill
+        );
+        // The clock is frozen: HardKill ticks at later `now_ms`
+        // must not advance the visible state.
+        let snap_now = state.now_ms;
+        let snap_last_hb = state.last_hb_ms;
+        let snap_weak = state.weak_count;
+        assert_eq!(
+            state.tick(HeartbeatKind::Strong, 99_999, &cfg),
+            LeaseDecision::HardKill
+        );
+        assert_eq!(state.now_ms, snap_now);
+        assert_eq!(state.last_hb_ms, snap_last_hb);
+        assert_eq!(state.weak_count, snap_weak);
+    }
+
+    // ---- Display for greppable worker logs (used in U9 wiring). ----
+    #[test]
+    fn lease_decision_display_is_stable() {
+        assert_eq!(LeaseDecision::Continue.to_string(), "continue");
+        assert_eq!(LeaseDecision::IdleKill.to_string(), "idle_kill");
+        assert_eq!(LeaseDecision::HardKill.to_string(), "hard_kill");
     }
 }
