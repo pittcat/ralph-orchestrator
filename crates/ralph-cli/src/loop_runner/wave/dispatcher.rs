@@ -9,6 +9,16 @@ use ralph_adapters::CliBackend;
 use ralph_core::CompletedWave;
 use ralph_core::diagnostics::DiagnosticsCollector;
 
+/// 2026-07-26-002 plan U8 (R10): the worker-side timeout error
+/// message and the dispatcher's empty-batch classifier share this
+/// prefix constant. The previous design used two independent
+/// literals ("Worker timed out after ..." in `worker.rs` and a
+/// `const TIMEOUT_PREFIX` inside `classify_slot_result`) which
+/// silently kept the legacy `worker_cancelled` shell when the
+/// worker text drifted. Sharing the constant makes the contract
+/// compile-checked.
+pub(crate) const WORKER_TIMEOUT_ERR_PREFIX: &str = "Worker timed out after";
+
 use ralph_proto::RpcEvent;
 use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
@@ -3686,8 +3696,10 @@ fn classify_slot_result<'a>(result: &'a WaveWorkerOutcome) -> ClassifiedSlot<'a>
             // the legacy `worker_cancelled` shell — fixing that broader
             // mis-classification is out of scope for this plan (plan KTD8
             // explicitly says "非超时 Err 仍保留 Dynamic 原文字案").
-            const TIMEOUT_PREFIX: &str = "Worker timed out after";
-            if reason.starts_with(TIMEOUT_PREFIX) {
+            // 2026-07-26-002 plan U8 (R10): use the shared
+            // constant so worker.rs and this classifier stay
+            // compile-linked.
+            if reason.starts_with(WORKER_TIMEOUT_ERR_PREFIX) {
                 // Empty event batch + empty terminal markers — classify as Timeout.
                 let outcome = classify_worker_outcome(WorkerExit::Timeout, 0, &[]);
                 let reason = match &outcome {

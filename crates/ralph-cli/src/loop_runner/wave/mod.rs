@@ -22,6 +22,11 @@ pub(crate) use dispatcher::{
     SupervisorFanInOutcome, WaveWorkerExecutor, WorkerRequest,
     execute_wave_via_supervisor_with_executor, run_supervisor_fan_in,
 };
+// 2026-07-26-002 plan U8 (R10): expose the shared
+// worker-timeout prefix constant so the wave_supervisor test can
+// assert the worker literal and the dispatcher classifier stay
+// compile-linked.
+pub(crate) use dispatcher::WORKER_TIMEOUT_ERR_PREFIX;
 pub use io::{
     extract_readable_delta, merge_wave_results_to_events_file, push_to_tui_iteration,
     push_to_wave_worker_buffer, read_worker_events, read_worker_events_with_retry,

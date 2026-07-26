@@ -358,10 +358,15 @@ impl SupervisorBridge for CoordinatorSupervisorBridge {
             ralph_core::supervisor::worktree_env_keys::RALPH_WAVE_WORKTREE_BRANCH.to_string(),
             branch.clone(),
         );
-        env.insert(
-            ralph_core::supervisor::worktree_env_keys::RALPH_WAVE_ID.to_string(),
-            wave_id.to_string(),
-        );
+        // 2026-07-26-002 plan U8 (R8): do NOT write RALPH_WAVE_ID
+        // here. The dispatcher already injects the public wave id
+        // (the operator- and agent-visible string) into the
+        // worker's environment earlier in the spawn path; the
+        // store-assigned `w-{seq}` id (which is what bind_slot
+        // historically received as `wave_id`) is internal ledger
+        // state and MUST NOT leak into the spawned worker. The
+        // dispatcher's exclude-list for binding-env merges is
+        // preserved as a defense-in-depth assertion.
         env.insert(
             ralph_core::supervisor::worktree_env_keys::RALPH_WAVE_INDEX.to_string(),
             slot_index.to_string(),

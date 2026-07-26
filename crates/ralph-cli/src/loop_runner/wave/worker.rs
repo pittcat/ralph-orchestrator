@@ -11,6 +11,7 @@ use super::io::{
     extract_readable_delta, push_to_wave_worker_buffer, read_worker_events,
     read_worker_events_with_retry, truncate_wave_worker_preview,
 };
+use super::dispatcher::WORKER_TIMEOUT_ERR_PREFIX;
 
 pub type WaveWorkerOutcome =
     std::result::Result<(Vec<ralph_core::Event>, Duration, bool), (String, Duration)>;
@@ -301,7 +302,7 @@ pub async fn run_wave_worker_pty(
             index,
             Err((
                 format!(
-                    "Worker timed out after {}s without emitting events",
+                    "{WORKER_TIMEOUT_ERR_PREFIX} {}s without emitting events",
                     wave_timeout.as_secs()
                 ),
                 duration,

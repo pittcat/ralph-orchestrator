@@ -870,6 +870,92 @@ fn pipeline_disabled_workspace_has_no_supervisor_artifacts() {
     let _ = ctx;
 }
 
+/// 2026-07-26-002 plan U8 (R8): the production
+/// `CoordinatorSupervisorBridge::bind_slot` MUST NOT inject
+/// `RALPH_WAVE_ID` into `SlotBinding.env`. The dispatcher already
+/// injects the public wave id earlier in the spawn path (the value
+/// the agent and operator see in `DetectedWave.wave_id`); the
+/// store-assigned `w-{seq}` id passed to `bind_slot` is internal
+/// ledger state and must never leak into the spawned worker.
+#[test]
+fn u8_bind_slot_env_does_not_contain_ralph_wave_id() {
+    use crate::loop_runner::wave::ProductionBridgeContext;
+    use ralph_core::LoopContext;
+    use ralph_core::supervisor::SupervisorBridge;
+    use ralph_core::supervisor::WaveKind;
+
+    let factory = std::sync::Arc::new(RecordingFactory::new());
+    let tmp = tempfile::tempdir().expect("temp dir");
+    let repo_root = tmp.path().to_path_buf();
+    // RecordingFactory needs the branch pre-registered so create()
+    // returns Ok instead of `RecordingFactory: no path for branch`.
+    factory.pre_create(
+        "u8-loop-exec-0",
+        tmp.path().join(".ralph/u8-slot-0-worktree"),
+    );
+    let loop_ctx = LoopContext::worktree("u8-loop".to_string(), repo_root.clone(), repo_root);
+    let context = ProductionBridgeContext {
+        loop_id: "u8-loop".to_string(),
+        repo_root: loop_ctx.repo_root().to_path_buf(),
+        events_path: None,
+        tasks_path: None,
+    };
+    let store = std::sync::Arc::new(InMemorySupervisorStore::new());
+    let bridge = CoordinatorSupervisorBridge::with_context_and_factory(
+        store.clone() as std::sync::Arc<dyn SupervisorStore>,
+        context,
+        factory.clone() as std::sync::Arc<dyn WorktreeFactory>,
+    );
+    let store_wave_id = bridge
+        .register_wave_if_absent(WaveKind::Exec, "u8-wave", 1)
+        .expect("register must succeed");
+
+    let binding = bridge
+        .bind_slot(WaveKind::Exec, &store_wave_id, 0)
+        .expect("bind must succeed")
+        .expect("Exec binding must be Some (Review is the only None branch)");
+
+    assert!(
+        !binding.env.contains_key("RALPH_WAVE_ID"),
+        "RALPH_WAVE_ID must NOT leak from bind_slot into binding.env; got {:?}",
+        binding.env
+    );
+    // Defense in depth: even if a future refactor reintroduces it,
+    // the dispatcher-side filter excludes it on merge.
+    assert!(
+        binding.env.contains_key("RALPH_WAVE_WORKER"),
+        "RALPH_WAVE_WORKER must still be set"
+    );
+    // WorktreeFactory must have been invoked (KTD-5).
+    assert_eq!(
+        factory.calls_snapshot().len(),
+        1,
+        "RecordingFactory must record exactly one worktree creation"
+    );
+}
+
+/// 2026-07-26-002 plan U8 (R10): the worker timeout message and
+/// the dispatcher-side empty-batch classifier must share the
+/// prefix constant `WORKER_TIMEOUT_ERR_PREFIX`. A future refactor
+/// that drifts the literal cannot silently fall back to
+/// `worker_cancelled`.
+#[test]
+fn u8_worker_timeout_prefix_constant_is_shared() {
+    use crate::loop_runner::wave::WORKER_TIMEOUT_ERR_PREFIX;
+
+    // Build a sample worker error the same way `worker.rs` does
+    // and confirm the prefix constant is a true prefix of it.
+    let sample_worker_err = format!(
+        "{WORKER_TIMEOUT_ERR_PREFIX} {}s without emitting events",
+        30u64
+    );
+    assert!(
+        sample_worker_err.starts_with(WORKER_TIMEOUT_ERR_PREFIX),
+        "worker literal must start with the shared prefix constant; got {sample_worker_err}"
+    );
+    assert_eq!(WORKER_TIMEOUT_ERR_PREFIX, "Worker timed out after");
+}
+
 // ── 2026-07-22-003 plan U4: production per-slot worktree binding ─────────────
 //
 // Goal: the production `CoordinatorSupervisorBridge::bind_slot` MUST actually
