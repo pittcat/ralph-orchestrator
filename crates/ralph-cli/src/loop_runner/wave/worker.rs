@@ -444,11 +444,15 @@ pub async fn run_wave_worker_pty(
                         }
                         match decision {
                             super::heartbeat::LeaseDecision::HardKill => {
+                                warn!(worker = index, "Wave worker hard deadline exceeded");
                                 let _ = child.kill();
                                 killed = true;
                                 timed_out = true;
                             }
                             super::heartbeat::LeaseDecision::IdleKill => {
+                                warn!(worker = index, idle_window_secs = idle_heartbeat.unwrap().as_secs(),
+                                      weak_count = lease_state.weak_count,
+                                      "Wave worker idle heartbeat exceeded, killing process");
                                 let _ = child.kill();
                                 killed = true;
                                 timed_out = true;
@@ -549,7 +553,7 @@ pub async fn run_wave_worker_pty(
             )
         } else if idle_enabled {
             format!(
-                "{WORKER_TIMEOUT_ERR_PREFIX} {}s of idle heartbeat (worker_timeout/idle_kill)",
+                "{WORKER_TIMEOUT_ERR_PREFIX} {}s of idle heartbeat (worker_timeout/idle_kill, weak_count=0 (no signals))",
                 idle_heartbeat.unwrap().as_secs()
             )
         } else {
