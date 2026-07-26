@@ -4,6 +4,7 @@
 // supervisor_bridge routes supervisor-backed waves when enabled.
 
 mod dispatcher;
+mod heartbeat;
 mod io;
 mod supervisor_bridge;
 pub(crate) mod task_projection;

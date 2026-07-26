@@ -196,6 +196,11 @@ fn make_test_wave_with_timeout_and_payload(
             max_activations: None,
             disallowed_tools: vec![],
             timeout: Some(timeout_secs),
+            // 2026-07-25-006 U4 (R2/R3): idle heartbeat fields
+            // stay `None` in the legacy timeout fixture so the
+            // wall-clock behaviour is pinned untouched.
+            idle_heartbeat_secs: None,
+            idle_weak_signal_cap: None,
             // 2026-06-17-004 U2 (R3): explicit `None` for new
             // field keeps the test helper aligned with
             // `HatConfig::default()`.

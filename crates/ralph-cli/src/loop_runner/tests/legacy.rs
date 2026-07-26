@@ -3634,6 +3634,11 @@ fn make_wave_with_count(
             max_activations: None,
             disallowed_tools: vec![],
             timeout: Some(30),
+            // 2026-07-25-006 U4 (R2/R3): idle heartbeat fields
+            // stay `None` here so the legacy timeout shape is
+            // not accidentally reinterpreted as lease-enabled.
+            idle_heartbeat_secs: None,
+            idle_weak_signal_cap: None,
             // 2026-06-17-004 U2 (R3): explicit `None` for new
             // field keeps the test helper aligned with
             // `HatConfig::default()`.
