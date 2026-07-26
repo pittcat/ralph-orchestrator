@@ -250,6 +250,16 @@ ralph wave inspect <WAVE_ID> [--output json|text]
 
 `isolation_mode=worktree` 时 runtime 为每个 slot 提供隔离 cwd；agent 不应自行创建 / 删除 worktree。默认（未声明 `isolation_mode`）所有 worker 共享当前 workspace，与原 wave 行为一致。
 
+### Worker 终止语义（wave worker 视角）
+
+Wave worker 走双时钟（仅限 wave worker PTY 路径，不影响主 loop）：
+
+- `hats.<id>.timeout` 是 StartToClose 硬顶，从 worker spawn 起算。
+- `hats.<id>.idle_heartbeat_secs` 是 HeartbeatTimeout 静默窗口，自上次合格进度信号起计时。`0` 或省略 = 关闭 idle 模式，仅 StartToClose 墙钟。
+- `hats.<id>.idle_weak_signal_cap` 是连续仅靠弱信号（assistant text / thinking / `TextDelta`）续租的次数上限；用尽后必须等到强信号（tool 事件 / events file 增长）或硬顶到达。
+
+agent 不需要主动刷 heartbeat：orchestrator 观察 stream JSON 与 `RALPH_EVENTS_FILE` 增长来续租 idle 窗口。worker 看到 `timed_out=true` 且 supervised 路径分类为 `worker_timeout` 时，**同时**可能是硬顶到达（reason 文案 `Worker timed out after Ns without emitting events`）或 idle 静默（reason 文案 `idle heartbeat exceeded: Ns since last activity, weak_count=K`）。两者下游 family 都对齐 `worker_timeout`，区别仅在 reason 字符串（U9）。
+
 ### 取消 / 补偿
 
 `ralph wave emit` 不直接暴露取消 / 补偿命令。Wave 在 aggregate timeout / 显式 cancel / spawn failure 时由 runtime 自动标记状态；inspect / diagnose 公开返回 wave 的当前阶段（Collect / Cancelled / Failed / Done），agent 据此决定后续动作。补偿 job 由 runtime 在终态阶段执行诊断记录，**不阻塞** wave 的最终态。
