@@ -93,14 +93,6 @@ pub struct LeaseConfig {
     pub weak_cap: u32,
 }
 
-impl LeaseConfig {
-    /// `idle_enabled` predicate used by `decide_lease` so callers can
-    /// short-circuit the idle branch without re-deriving the flag.
-    pub fn idle_enabled(&self) -> bool {
-        self.idle_window_ms.is_some()
-    }
-}
-
 /// Input snapshot for one `decide_lease` call. All values are relative
 /// to the same spawn-relative epoch as `LeaseConfig`.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
