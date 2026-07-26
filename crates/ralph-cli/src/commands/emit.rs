@@ -1402,6 +1402,26 @@ fn emit_command_with_root_and_hats(
         .as_ref()
         .is_some_and(|c| c.event_loop.execution_mode == HatExecutionMode::Isolated);
 
+    // U2 (plan 2026-07-25-003): capture the wave-worker handshake
+    // (`RALPH_WAVE_ID` / `RALPH_WAVE_INDEX`) from the worker env when
+    // the dispatcher marked this process as a wave worker. The path
+    // shape alone is no longer enough to accept a wave channel; the
+    // file's `<id>` / `<idx>` segments must match these values verbatim
+    // (adversarial-01 / goal-alignment-01). We DO NOT read them when
+    // `RALPH_WAVE_WORKER != "1"` so a non-wave isolated hat cannot
+    // self-claim a wave context just by exporting those vars.
+    let wave_worker = std::env::var("RALPH_WAVE_WORKER").ok().as_deref() == Some("1");
+    let wave_id_env = wave_worker
+        .then(|| std::env::var("RALPH_WAVE_ID").ok())
+        .flatten();
+    let slot_index_env = wave_worker
+        .then(|| {
+            std::env::var("RALPH_WAVE_INDEX")
+                .ok()
+                .and_then(|v| v.parse::<u32>().ok())
+        })
+        .flatten();
+
     // U3 (2026-07-06-002 plan, R3): cwd 漂移硬约束。当 hat 在
     // isolated 模式下运行、`RALPH_CURRENT_HAT` 已设置、未注入
     // `RALPH_EVENTS_FILE`,且 `--file` 仍是默认值(用户没显式指定
@@ -1462,6 +1482,8 @@ fn emit_command_with_root_and_hats(
         env_events_file.as_deref(),
         hat.as_deref(),
         isolated_mode,
+        wave_id_env.as_deref(),
+        slot_index_env,
     ) {
         Ok(path) => path,
         Err(err) => {
@@ -3128,6 +3150,8 @@ hats:
             None,
             None,
             false,
+            None,
+            None,
         )
         .unwrap();
         assert!(resolved.ends_with(".ralph/events-20260101-000000.jsonl"));
@@ -3148,6 +3172,8 @@ hats:
             None,
             None,
             false,
+            None,
+            None,
         )
         .unwrap();
         assert!(resolved.ends_with(".ralph/events-20260101-000000.jsonl"));
@@ -3158,7 +3184,8 @@ hats:
         let tmp = TempDir::new().unwrap();
         let workspace = make_workspace(&tmp);
         let cli_file = workspace.join(".ralph/events.jsonl");
-        let resolved = resolve_emit_path(&workspace, &cli_file, None, None, false).unwrap();
+        let resolved =
+            resolve_emit_path(&workspace, &cli_file, None, None, false, None, None).unwrap();
         assert_eq!(resolved, cli_file);
     }
 
@@ -3174,7 +3201,8 @@ hats:
         // The explicit --file target equals the marker target, so it is
         // accepted (matches the allowlist entry).
         let cli_file = workspace.join(".ralph/events-20260101-000000.jsonl");
-        let resolved = resolve_emit_path(&workspace, &cli_file, None, None, false).unwrap();
+        let resolved =
+            resolve_emit_path(&workspace, &cli_file, None, None, false, None, None).unwrap();
         assert_eq!(resolved, cli_file);
     }
 
@@ -3192,7 +3220,7 @@ hats:
         // that would let an agent redirect events to a different
         // worktree's file.
         let cli_file = workspace.join(".ralph/events-other.jsonl");
-        let result = resolve_emit_path(&workspace, &cli_file, None, None, false);
+        let result = resolve_emit_path(&workspace, &cli_file, None, None, false, None, None);
         assert!(
             result.is_err(),
             "non-allowlisted --file must be rejected, got: {:?}",
@@ -3225,6 +3253,8 @@ hats:
             Some(&env_value),
             None,
             false,
+            None,
+            None,
         );
         assert!(
             result.is_err(),
@@ -3246,7 +3276,7 @@ hats:
         // as a request to escape the workspace and refuses outright
         // (no silent rewrite to the marker).
         let cli_file = workspace.join("../escape.jsonl");
-        let result = resolve_emit_path(&workspace, &cli_file, None, None, false);
+        let result = resolve_emit_path(&workspace, &cli_file, None, None, false, None, None);
         assert!(
             result.is_err(),
             "path traversal with explicit --file must be rejected"
@@ -3261,7 +3291,7 @@ hats:
         // is also rejected (the default events.jsonl is not in scope of
         // the traversal).
         std::fs::remove_file(workspace.join(".ralph/current-events")).unwrap();
-        let result = resolve_emit_path(&workspace, &cli_file, None, None, false);
+        let result = resolve_emit_path(&workspace, &cli_file, None, None, false, None, None);
         assert!(
             result.is_err(),
             "path traversal with no marker must be rejected"
@@ -3287,6 +3317,8 @@ hats:
             None,
             None,
             false,
+            None,
+            None,
         );
         assert!(result.is_err(), "symlink to outside loop must be rejected");
     }
@@ -3521,7 +3553,15 @@ hats:
         // malicious_subtree。然后 orphan guard 必须在 `Some(hat)` 时
         // 拦截。
         let cli_file = workspace.join(".ralph/events.jsonl");
-        let result = resolve_emit_path(&workspace, &cli_file, None, Some("validator"), true);
+        let result = resolve_emit_path(
+            &workspace,
+            &cli_file,
+            None,
+            Some("validator"),
+            true,
+            None,
+            None,
+        );
         match result {
             Ok(path) => panic!(
                 "orphan subtree path must not be accepted, got: {}",
@@ -3569,6 +3609,8 @@ hats:
             None,
             Some("validator"), // hat context 存在
             true,              // isolated_mode
+            None,
+            None,
         )
         .expect("isolated + hat-marker must resolve to channel");
         assert!(
@@ -3626,6 +3668,8 @@ hats:
             Some(&wave_channel),
             Some("exec-worker"), // current_hat = wave worker hat
             true,                // isolated_mode (wave workers run in isolated context)
+            Some("w-test"),
+            Some(0),
         );
 
         // TARGET behavior: Ok with the wave channel path
@@ -3671,6 +3715,8 @@ hats:
             Some(&wave_channel),
             Some("exec-worker"),
             false, // NOT isolated → no wave-worker context
+            None,
+            None,
         );
 
         assert!(
@@ -3682,6 +3728,80 @@ hats:
         assert!(
             msg.contains("allowlist") || msg.contains("not in"),
             "error must mention allowlist, got: {msg}"
+        );
+    }
+
+    /// U2 / adversarial-01: even with isolated + hat, a wave channel
+    /// whose `<id>` doesn't match the worker's `RALPH_WAVE_ID` must be
+    /// rejected. The carve-out is dispatcher-signed: only the slot the
+    /// dispatcher named is allowed to write its own channel.
+    #[test]
+    fn test_emit_wave_worker_channel_rejected_with_mismatched_wave_id() {
+        let tmp = TempDir::new().unwrap();
+        let workspace = make_workspace(&tmp);
+        std::fs::write(
+            workspace.join(".ralph/current-events"),
+            ".ralph/events-main.jsonl",
+        )
+        .unwrap();
+
+        // Worker's RALPH_WAVE_ID says "w-rs-1" but the path is for
+        // "w-other" — forged cross-slot attempt.
+        let wave_channel = workspace
+            .join(".ralph/wave-w-other-0.jsonl")
+            .display()
+            .to_string();
+
+        let result = resolve_emit_path(
+            &workspace,
+            &workspace.join(".ralph/events.jsonl"),
+            Some(&wave_channel),
+            Some("exec-worker"),
+            true,
+            Some("w-rs-1"), // worker-bound wave id
+            Some(0),
+        );
+        assert!(
+            result.is_err(),
+            "wave channel with mismatched <id> must be rejected, got: {result:?}"
+        );
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("allowlist") || msg.contains("not in"),
+            "error must mention allowlist, got: {msg}"
+        );
+    }
+
+    /// U2 / adversarial-01: same shape but the `<idx>` segment must
+    /// match `RALPH_WAVE_INDEX` too. A worker for slot 0 cannot write
+    /// slot 1's channel.
+    #[test]
+    fn test_emit_wave_worker_channel_rejected_with_mismatched_slot_index() {
+        let tmp = TempDir::new().unwrap();
+        let workspace = make_workspace(&tmp);
+        std::fs::write(
+            workspace.join(".ralph/current-events"),
+            ".ralph/events-main.jsonl",
+        )
+        .unwrap();
+
+        let wave_channel = workspace
+            .join(".ralph/wave-w-test-1.jsonl")
+            .display()
+            .to_string();
+
+        let result = resolve_emit_path(
+            &workspace,
+            &workspace.join(".ralph/events.jsonl"),
+            Some(&wave_channel),
+            Some("exec-worker"),
+            true,
+            Some("w-test"),
+            Some(0), // worker-bound slot index
+        );
+        assert!(
+            result.is_err(),
+            "wave channel with mismatched <idx> must be rejected, got: {result:?}"
         );
     }
 

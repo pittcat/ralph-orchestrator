@@ -85,14 +85,21 @@ pub(crate) fn resolve_hat_channel_file(workspace_root: &Path) -> Option<(PathBuf
 /// `current_hat` is `Some(_)`, an explicit target whose shape is
 /// `workspace_root/.ralph/wave-<id>-<idx>.jsonl` (the dispatcher-signed
 /// per-slot wave channel, injected via `RALPH_EVENTS_FILE`) is accepted
-/// even though no marker lists it. All other non-allowlisted explicit
-/// targets are still rejected.
+/// even though no marker lists it. Acceptance additionally requires the
+/// file's `<id>` / `<idx>` segments to match `wave_id` / `slot_index`
+/// verbatim — the dispatcher is the only signer that knows both values,
+/// so this binds the allowlist carve-out to a real wave-worker process
+/// and blocks any isolated hat from forging a path to a sibling slot's
+/// channel (adversarial-01 / goal-alignment-01). All other non-allowlisted
+/// explicit targets are still rejected.
 pub(crate) fn resolve_emit_path(
     workspace_root: &Path,
     cli_file: &Path,
     env_events_file: Option<&str>,
     current_hat: Option<&str>,
     isolated_mode: bool,
+    wave_id: Option<&str>,
+    slot_index: Option<u32>,
 ) -> Result<PathBuf> {
     fn normalize_path(p: &Path) -> PathBuf {
         let mut out = PathBuf::new();
@@ -172,13 +179,19 @@ pub(crate) fn resolve_emit_path(
     /// `current-hat-events` markers, so without this shape check the P6
     /// allowlist rejects it and workers cannot emit to their own channel.
     ///
-    /// The check is deliberately narrow:
+    /// Acceptance requires THREE signals to align — the path shape is
+    /// necessary but no longer sufficient. This blocks any isolated hat
+    /// from writing another slot's channel just by naming the file
+    /// `wave-<other-id>-<other-idx>.jsonl`:
     ///
-    /// - the path must sit DIRECTLY under the workspace root `.ralph/`
-    ///   (not under a slot-worktree subtree, not outside the workspace);
-    /// - the file name must be `wave-<id>-<idx>.jsonl` with a non-empty
-    ///   `<id>` (wave ids may contain dashes, e.g. `w-test`) and an
-    ///   all-ASCII-digit `<idx>`.
+    /// 1. Path sits DIRECTLY under the workspace root `.ralph/<file>`
+    ///    (not under a slot-worktree subtree, not outside the workspace).
+    /// 2. File name is `wave-<id>-<idx>.jsonl` with non-empty `<id>`
+    ///    and an all-ASCII-digit `<idx>`.
+    /// 3. `<id>` matches the dispatcher's `RALPH_WAVE_ID` for this
+    ///    worker AND `<idx>` matches `RALPH_WAVE_INDEX` for this slot.
+    ///    A mismatch means the candidate belongs to a different slot
+    ///    or a different wave; reject as cross-slot tampering.
     ///
     /// The call site additionally requires `isolated_mode == true` and
     /// `current_hat.is_some()`, binding acceptance to the wave-worker
@@ -188,6 +201,8 @@ pub(crate) fn resolve_emit_path(
         candidate: &Path,
         workspace_root: &Path,
         workspace_canon: &Path,
+        expected_wave_id: Option<&str>,
+        expected_slot_index: Option<u32>,
     ) -> bool {
         // Strip the workspace root prefix (lexical), trying both the raw
         // and canonical roots so macOS `/var` → `/private/var` symlink
@@ -226,7 +241,31 @@ pub(crate) fn resolve_emit_path(
         };
         let id_part = &stem[..last_dash];
         let idx_part = &stem[last_dash + 1..];
-        !id_part.is_empty() && !idx_part.is_empty() && idx_part.chars().all(|c| c.is_ascii_digit())
+        if id_part.is_empty()
+            || idx_part.is_empty()
+            || !idx_part.chars().all(|c| c.is_ascii_digit())
+        {
+            return false;
+        }
+        // Bind acceptance to the dispatcher-signed per-slot contract
+        // (adversarial-01 / goal-alignment-01). The path shape alone is
+        // not enough: the worker's `RALPH_WAVE_ID` / `RALPH_WAVE_INDEX`
+        // must match the file's `<id>` / `<idx>` exactly. Mismatched or
+        // missing values mean the candidate is some other slot's
+        // channel (or someone forged the path) — reject.
+        let Some(expected_wave_id) = expected_wave_id else {
+            return false;
+        };
+        let Some(expected_slot_index) = expected_slot_index else {
+            return false;
+        };
+        if id_part != expected_wave_id {
+            return false;
+        }
+        match idx_part.parse::<u32>() {
+            Ok(parsed_idx) => parsed_idx == expected_slot_index,
+            Err(_) => false,
+        }
     }
 
     // Two paths are equivalent when their lexical forms match (after
@@ -336,7 +375,13 @@ pub(crate) fn resolve_emit_path(
             explicit_target
         } else if isolated_mode
             && current_hat.is_some()
-            && is_wave_channel_path(&normalized_explicit, workspace_root, &workspace_canon)
+            && is_wave_channel_path(
+                &normalized_explicit,
+                workspace_root,
+                &workspace_canon,
+                wave_id,
+                slot_index,
+            )
         {
             // U2 (plan 2026-07-25-003): accept the dispatcher-signed
             // per-slot wave channel. The dispatcher creates

@@ -4229,6 +4229,92 @@ fn u7_review_default_is_shared_readonly() {
 // `classify_slot_result` / `record_slot_result`).
 // =============================================================================
 
+/// 2026-07-25-003 plan U3 / adversarial-01 outside-in (allowlist side):
+/// the production `resolve_emit_path` P6-allowlist carve-out accepts
+/// a dispatcher-signed per-slot channel **only** when the worker's
+/// `RALPH_WAVE_ID` / `RALPH_WAVE_INDEX` match the file's `<id>` /
+/// `<idx>` segments. A regression that drops the handshake
+/// alignment is caught here. The dispatcher's read/classify/record
+/// chain is pinned by the existing `test_u3_emit_to_wave_channel_records_slot_completed`
+/// below; this test focuses on the allowlist half of the contract.
+#[test]
+fn test_u3_resolve_emit_path_dispatcher_signed_carve_out() {
+    use crate::cli::resolve_emit_path;
+
+    // Use a process-unique temp directory so this test does not
+    // collide with other concurrent nextest tests sharing
+    // `std::env::temp_dir()`.
+    let workspace = std::env::temp_dir().join(format!(
+        "u3-carve-out-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0)
+    ));
+    std::fs::create_dir_all(&workspace).unwrap();
+    std::fs::create_dir_all(workspace.join(".ralph")).unwrap();
+    std::fs::write(
+        workspace.join(".ralph/current-events"),
+        ".ralph/events-main.jsonl",
+    )
+    .unwrap();
+
+    let wave_id = "w-rs-1";
+    let slot_idx: u32 = 0;
+    let channel = workspace.join(format!(".ralph/wave-{wave_id}-{slot_idx}.jsonl"));
+
+    // Happy path: handshake aligns → accepted.
+    let resolved = resolve_emit_path(
+        &workspace,
+        &workspace.join(".ralph/events.jsonl"),
+        Some(channel.to_string_lossy().as_ref()),
+        Some("exec-worker"),
+        true,
+        Some(wave_id),
+        Some(slot_idx),
+    )
+    .expect("U3/003: dispatcher-signed channel must be accepted");
+    assert_eq!(
+        resolved, channel,
+        "U3/003: resolved path must point at the dispatcher channel"
+    );
+
+    // Adversarial-01: same path shape, mismatched wave id.
+    let cross = workspace.join(".ralph/wave-w-other-0.jsonl");
+    let bad = resolve_emit_path(
+        &workspace,
+        &workspace.join(".ralph/events.jsonl"),
+        Some(cross.to_string_lossy().as_ref()),
+        Some("exec-worker"),
+        true,
+        Some(wave_id),
+        Some(slot_idx),
+    );
+    assert!(
+        bad.is_err(),
+        "U3/003: channel with mismatched wave id must be rejected, got: {bad:?}"
+    );
+
+    // Adversarial-01: same path shape, mismatched slot idx.
+    let cross_idx = workspace.join(".ralph/wave-w-rs-1-7.jsonl");
+    let bad_idx = resolve_emit_path(
+        &workspace,
+        &workspace.join(".ralph/events.jsonl"),
+        Some(cross_idx.to_string_lossy().as_ref()),
+        Some("exec-worker"),
+        true,
+        Some(wave_id),
+        Some(slot_idx),
+    );
+    assert!(
+        bad_idx.is_err(),
+        "U3/003: channel with mismatched slot idx must be rejected, got: {bad_idx:?}"
+    );
+}
+
+// =============================================================================
+
 /// 2026-07-25-003 plan U3: a worker that "wrote its own events" via the
 /// dispatcher-injected per-slot channel ends up in the supervisor
 /// store as `Completed`. The executor writes a single `exec.unit.done`
@@ -4251,7 +4337,9 @@ async fn test_u3_emit_to_wave_channel_records_slot_completed() {
     /// dispatcher-injected per-slot channel file, then reads it back
     /// via the production `read_worker_events` helper. The returned
     /// `(events, _, true)` matches what production `run_wave_worker`
-    /// hands to the dispatcher.
+    /// hands to the dispatcher. The carve-out regression is pinned
+    /// separately by `test_u3_resolve_emit_path_dispatcher_signed_carve_out`
+    /// (this test focuses on the dispatcher's causal-chain side).
     struct ChannelEmittingExecutor;
     impl WaveWorkerExecutor for ChannelEmittingExecutor {
         fn execute(
@@ -4262,11 +4350,6 @@ async fn test_u3_emit_to_wave_channel_records_slot_completed() {
             Box::pin(async move {
                 let index = request.index;
                 let events_path = request.worker_events_path.clone();
-                // Write the terminal Done record into the
-                // dispatcher-owned per-slot channel. This is what an
-                // agent's `ralph emit exec.unit.done` would do; the
-                // allowlist (U2) accepts this path in isolated mode
-                // with a hat context, so the emit lands here.
                 let line = serde_json::to_string(&ralph_core::Event {
                     topic: "exec.unit.done".to_string(),
                     payload: Some(format!("{{\"slot\":{index},\"seq\":0}}")),
