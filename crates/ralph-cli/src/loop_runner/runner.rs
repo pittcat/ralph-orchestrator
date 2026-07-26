@@ -2178,6 +2178,7 @@ async fn run_loop_impl_inner(
                     TerminationReason::ScopeViolationHardRejected { .. } => {
                         "scope_violation_hard_rejected"
                     }
+                    TerminationReason::FanInFailed => "fan_in_failed",
                 };
 
                 if matches!(reason, TerminationReason::Interrupted) {
@@ -2289,6 +2290,10 @@ async fn run_loop_impl_inner(
                             // the variant fields.
                             let _ = (hat, diff_stat);
                             "dimension-reviewer scope_violation (hard-rejected)"
+                        }
+                        // U1 (plan 2026-07-27-001): production fan-in failure.
+                        TerminationReason::FanInFailed => {
+                            "wave fan-in could not reach terminal state"
                         }
                     };
                     if let Err(e) = queue.mark_needs_review(loop_id, reason_str) {
@@ -4592,6 +4597,13 @@ async fn run_loop_impl_inner(
         // iteration.
         if wave_outcome.is_some_and(|o| o.global_deadline_exceeded) {
             late_termination_reason = Some(TerminationReason::MaxRuntime);
+        }
+        // U1 (Green 7): fan-in reached a terminal failure (persistent
+        // store/merge error or unresolvable ContinueCollect). Distinct
+        // from MaxRuntime — the wave dispatched but the supervisor
+        // could not converge to a terminal state.
+        if wave_outcome.is_some_and(|o| o.fan_in_failure) {
+            late_termination_reason = Some(TerminationReason::FanInFailed);
         }
 
         // Inject default_publishes for active hats only when agent wrote no events.

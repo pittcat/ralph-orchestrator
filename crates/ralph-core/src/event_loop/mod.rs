@@ -290,6 +290,9 @@ impl TerminationReason {
             // the silent-success guard fire as an error rather
             // than a limit.
             TerminationReason::ScopeViolationHardRejected { .. } => 1,
+            // U1 (plan 2026-07-27-001): fan-in failure is a failure
+            // (exit 1), not a clean completion or a limit.
+            TerminationReason::FanInFailed => 1,
             TerminationReason::MaxIterations
             | TerminationReason::MaxRuntime
             | TerminationReason::MaxCost => 2,
@@ -340,6 +343,8 @@ impl TerminationReason {
             // (matches the variant name; downstream consumers pin
             // against this literal).
             TerminationReason::ScopeViolationHardRejected { .. } => "scope_violation_hard_rejected",
+            // U1 (plan 2026-07-27-001): production fan-in failure.
+            TerminationReason::FanInFailed => "fan_in_failed",
         }
     }
 

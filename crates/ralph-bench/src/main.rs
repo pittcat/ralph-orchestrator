@@ -560,6 +560,8 @@ fn format_termination_reason(reason: &TerminationReason) -> String {
         TerminationReason::ScopeViolationHardRejected { .. } => {
             "ScopeViolationHardRejected".to_string()
         }
+        // U1 (plan 2026-07-27-001): production fan-in failure.
+        TerminationReason::FanInFailed => "FanInFailed".to_string(),
     }
 }
 

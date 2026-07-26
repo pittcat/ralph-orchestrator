@@ -79,5 +79,12 @@ pub fn termination_status_text(reason: &TerminationReason) -> &'static str {
         TerminationReason::ScopeViolationHardRejected { .. } => {
             "dimension-reviewer scope_violation - hard-rejected, loop terminated."
         }
+        // U1 (plan 2026-07-27-001): production fan-in reached a
+        // terminal failure (persistent store/merge error or
+        // unresolvable ContinueCollect). Distinct from MaxRuntime —
+        // the wave dispatched but the supervisor could not converge.
+        TerminationReason::FanInFailed => {
+            "Wave fan-in failed - supervisor could not reach terminal state."
+        }
     }
 }

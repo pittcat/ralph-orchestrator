@@ -404,6 +404,10 @@ impl SummaryWriter {
             TerminationReason::ScopeViolationHardRejected { .. } => {
                 "Failed: dimension-reviewer scope_violation (hard-rejected)"
             }
+            // U1 (plan 2026-07-27-001): production fan-in failure.
+            TerminationReason::FanInFailed => {
+                "Failed: wave fan-in could not reach terminal state"
+            }
         }
     }
 

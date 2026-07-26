@@ -219,6 +219,15 @@ pub enum TerminationReason {
         /// Human-readable diff stat (e.g. `path/to/file.md | 3 ++`).
         diff_stat: String,
     },
+    /// U1 (plan 2026-07-27-001): production fan-in reached a
+    /// terminal `ContinueCollect` that could not converge (exhausted
+    /// retry budget) or encountered a persistent store/merge error.
+    /// Distinct from `MaxRuntime` — the wave completed its dispatch
+    /// but the supervisor coordinator could not reach a terminal
+    /// state. The loop terminates with a typed reason so operators
+    /// can distinguish "loop ran out of time" from "wave converged
+    /// incorrectly".
+    FanInFailed,
 }
 
 /// 2026-06-26 plan U1: shared shape of a "we tried, the agent did

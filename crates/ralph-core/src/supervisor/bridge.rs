@@ -320,6 +320,21 @@ pub trait SupervisorBridge: std::fmt::Debug + Send + Sync {
         Ok(())
     }
 
+    /// U1: set the wave phase directly. Used by the terminal
+    /// fan-in convergence driver to force the Failed phase when the
+    /// coordinator's fail_wave would otherwise be refused or would
+    /// leave the wave in ContinueCollect. Default: no-op for mocks.
+    fn set_wave_phase(&self, _wave_id: &str, _phase: crate::supervisor::WavePhase) -> Result<(), BridgeError> {
+        Ok(())
+    }
+
+    /// U1: mark the wave as merged to events. Used by the terminal
+    /// fan-in convergence driver to force the merged_to_events latch.
+    /// Default: no-op for mocks.
+    fn mark_merge_to_events(&self, _wave_id: &str) -> Result<(), BridgeError> {
+        Ok(())
+    }
+
     /// 2026-07-22-001 plan U6 (KTD-7): enqueue a compensation
     /// job for `wave_id`. Default: no-op (mocks / BDD bridges
     /// without a store).

@@ -3698,7 +3698,7 @@ fn test_production_fan_in_writes_ledger_and_injects_complete_once() {
     let completed = make_u6_completed("u6-wave-5", 5);
     let detected = make_u3_wave("u6-wave-5", 5, 5);
 
-    let outcome = run_supervisor_fan_in(&bridge, &completed, &detected, &events_path, 600);
+    let outcome = run_supervisor_fan_in(&bridge, &completed, &detected, &events_path, 600, None);
     assert_eq!(
         outcome,
         SupervisorFanInOutcome::InjectedComplete,
@@ -3770,7 +3770,7 @@ fn test_production_fan_in_writes_ledger_and_injects_complete_once() {
     }
 
     // Idempotency: a second tick must NOT re-inject the coord event.
-    let outcome2 = run_supervisor_fan_in(&bridge, &completed, &detected, &events_path, 600);
+    let outcome2 = run_supervisor_fan_in(&bridge, &completed, &detected, &events_path, 600, None);
     assert_eq!(
         outcome2,
         SupervisorFanInOutcome::AlreadyDone,
@@ -3873,7 +3873,7 @@ fn test_production_fan_in_partial_failure_injects_failed() {
     let completed = make_u6_completed("u6-wave-fail", 2); // only 2 results (slot 2 failed)
     let detected = make_u3_wave("u6-wave-fail", 3, 3);
 
-    let outcome = run_supervisor_fan_in(&bridge, &completed, &detected, &events_path, 600);
+    let outcome = run_supervisor_fan_in(&bridge, &completed, &detected, &events_path, 600, None);
     assert_eq!(
         outcome,
         SupervisorFanInOutcome::InjectedFailed,
@@ -4022,7 +4022,7 @@ fn test_production_bridge_writes_real_ledger_not_in_memory() {
     let completed = make_u6_completed("u6-wave-real", 2);
     let detected = make_u3_wave("u6-wave-real", 2, 2);
 
-    let outcome = run_supervisor_fan_in(&bridge, &completed, &detected, &events_path, 600);
+    let outcome = run_supervisor_fan_in(&bridge, &completed, &detected, &events_path, 600, None);
     assert_eq!(outcome, SupervisorFanInOutcome::InjectedComplete);
 
     assert!(
@@ -4076,7 +4076,7 @@ fn test_production_fan_in_dedups_identical_business_events() {
     };
     let detected = make_u3_wave("u6-wave-dedup", 3, 3);
 
-    let outcome = run_supervisor_fan_in(&bridge, &completed, &detected, &events_path, 600);
+    let outcome = run_supervisor_fan_in(&bridge, &completed, &detected, &events_path, 600, None);
     assert_eq!(outcome, SupervisorFanInOutcome::InjectedComplete);
 
     let lines = read_u6_ledger(&events_path);

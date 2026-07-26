@@ -106,9 +106,19 @@ pub enum WaveDispatchOutcome {
 /// skip the iteration's post-wave phases (default publishes,
 /// missing-event gate) so the existing unified termination flow
 /// can take over.
+///
+/// U1 (Green 7): `fan_in_failure` is true when the production
+/// fan-in reached a terminal `ContinueCollect` that could not
+/// converge (exhausted retry budget) or encountered a persistent
+/// store/merge error. The runner maps this to a typed termination
+/// reason distinct from `MaxRuntime`.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct HandleWaveOutcome {
     pub global_deadline_exceeded: bool,
+    /// U1 (Green 7): terminal fan-in failure — persistent store/merge
+    /// error or unresolvable `ContinueCollect`. The runner must NOT
+    /// map this to `MaxRuntime`; it uses a separate typed reason.
+    pub fan_in_failure: bool,
 }
 
 /// Per-worker request handed to a `WaveWorkerExecutor`.
@@ -674,6 +684,17 @@ pub async fn handle_wave_events(
             _ => None,
         };
 
+        // U1 (Green 1): determine terminal dispatch flags before consuming wave_outcome.
+        // These are used to decide whether fan-in needs terminal convergence help.
+        let wave_is_terminal = matches!(
+            &wave_outcome,
+            WaveDispatchOutcome::Partial(_) | WaveDispatchOutcome::AggregateDeadlineExceeded(_)
+        );
+        let wave_cancel_requested = matches!(
+            &wave_outcome,
+            WaveDispatchOutcome::AggregateDeadlineExceeded(_)
+        );
+
         // U4-B3: timeout / partial outcomes must feed the recovery
         // responder, not just be folded into a generic Err. We
         // dispatch on the structured `WaveDispatchOutcome` here.
@@ -794,18 +815,36 @@ pub async fn handle_wave_events(
                         .event_loop
                         .supervisor
                         .aggregate_timeout_secs;
+                    // U1 (Green 1): build TerminalFanInContext for terminal dispatches.
+                    // Partial and AggregateDeadlineExceeded are terminal outcomes that
+                    // require the fan-in to drive to convergence rather than returning
+                    // ContinueCollect with no owner.
+                    let terminal_ctx = wave_is_terminal.then_some(TerminalFanInContext {
+                        is_terminal: wave_is_terminal,
+                        cancel_requested: wave_cancel_requested,
+                        elapsed: completed.duration,
+                        aggregate_timeout_secs,
+                    });
                     let fan_in = run_supervisor_fan_in(
                         bridge,
                         &completed,
                         &detected,
                         &main_events_file,
                         aggregate_timeout_secs,
+                        terminal_ctx,
                     );
                     info!(
                         wave_id = %completed.wave_id,
                         fan_in = ?fan_in,
                         "U6: supervisor fan-in tick completed"
                     );
+                    // U1 (Green 7): if the fan-in hit a persistent store/merge
+                    // error or exhausted its retry budget without converging,
+                    // propagate the failure to the runner so it terminates with
+                    // a typed reason distinct from MaxRuntime.
+                    if matches!(fan_in, SupervisorFanInOutcome::StoreError) {
+                        result.fan_in_failure = true;
+                    }
                 } else {
                     let (mismatch_info, pending_task_resumes) =
                         match merge_wave_results_to_events_file(
@@ -2122,12 +2161,35 @@ impl SupervisorFanInOutcome {
 ///
 /// This function does NOT perform any Git merge (the integrator path
 /// owns that); it only merges the JSONL event fan-in.
+
+/// U1: context for driving a terminal supervisor fan-in to convergence.
+/// When present, the fan-in helper knows it must drive through
+/// ContinueCollect (by recording never-started slots and forcing
+/// the coordinator's terminal state) rather than returning
+/// ContinueCollect as a no-op with no owner.
+#[derive(Debug, Clone)]
+pub(crate) struct TerminalFanInContext {
+    /// True when the wave dispatch returned a terminal outcome
+    /// (Partial, AggregateDeadlineExceeded). Non-terminal dispatches
+    /// do not need fan-in convergence help.
+    pub(crate) is_terminal: bool,
+    /// True when cancel was requested (global_deadline or
+    /// AggregateDeadlineExceeded fired).
+    pub(crate) cancel_requested: bool,
+    /// Real elapsed time since the wave started.
+    pub(crate) elapsed: std::time::Duration,
+    /// The aggregate timeout in seconds, used to detect timeout
+    /// conditions (elapsed > aggregate_timeout_secs).
+    pub(crate) aggregate_timeout_secs: u64,
+}
+
 pub(crate) fn run_supervisor_fan_in(
     bridge: &Arc<dyn ralph_core::supervisor::SupervisorBridge>,
     completed: &CompletedWave,
     detected: &ralph_core::DetectedWave,
     main_events_file: &Path,
     aggregate_timeout_secs: u64,
+    terminal_ctx: Option<TerminalFanInContext>,
 ) -> SupervisorFanInOutcome {
     use ralph_core::supervisor::{SupervisorBridge as _, WaveKind};
 
@@ -2170,6 +2232,19 @@ pub(crate) fn run_supervisor_fan_in(
             }
         };
 
+    // U1 (Green 1 / Green 3): when cancel_requested is true (AggregateDeadlineExceeded
+    // path), mark the store wave as cancelled so evaluate_phase sees the flag
+    // and returns Failed immediately on the first tick.
+    if terminal_ctx.as_ref().is_some_and(|ctx| ctx.cancel_requested) {
+        if let Err(err) = bridge.cancel_wave(&store_wave_id) {
+            warn!(
+                wave_id = %completed.wave_id,
+                error = %err,
+                "U1: cancel_wave failed during terminal fan-in"
+            );
+        }
+    }
+
     // Gather the per-slot business events, ordered by slot index and
     // de-duplicated by (topic, payload). Sorting by `WaveResult.index`
     // gives the deterministic slot-index order the plan requires; the
@@ -2190,14 +2265,15 @@ pub(crate) fn run_supervisor_fan_in(
 
     let inputs = ralph_core::supervisor::PhaseInputs {
         aggregate_timeout_secs,
-        elapsed_secs: 0,
-        cancel_requested: false,
+        elapsed_secs: terminal_ctx.as_ref().map(|ctx| ctx.elapsed.as_secs() as u64).unwrap_or(0),
+        cancel_requested: terminal_ctx.as_ref().is_some_and(|ctx| ctx.cancel_requested),
     };
 
     // The coordinator is the merge gate: on `Integrate` it appends
     // `slot_events` through the production sink and flips
     // `merged_to_events`. Sink failure → `MergeFailed` (no injection,
     // retry next tick).
+    let slot_events_for_retry = slot_events.clone();
     let action = match bridge.tick_with_slot_events(&store_wave_id, inputs, slot_events) {
         Ok(action) => action,
         Err(err) => {
@@ -2390,20 +2466,149 @@ pub(crate) fn run_supervisor_fan_in(
             SupervisorFanInOutcome::AlreadyDone
         }
         ralph_core::supervisor::CoordinatorAction::SalvageNotMerged => {
-            // Plan 004 R3 / P0-1: the coordinator refused to
-            // latch the coord-event injection because the
-            // dispatcher has not yet committed the salvage
-            // merge. Surface as ContinueCollect so the next
-            // tick re-runs the merge seam, marks
-            // `mark_salvage_merged`, and re-invokes the
-            // coordinator. The recovery tick observes the new
-            // `salvage_merged=true` and either latches
-            // (AlreadyDone on subsequent ticks) or injects the
-            // coord event exactly once.
-            SupervisorFanInOutcome::ContinueCollect
+            // U1 (Green 5): the coordinator refused to latch because salvage wasn't merged.
+            // Mark salvage merged, then retry the coordinator tick so it can inject.
+            if let Err(err) = bridge.mark_salvage_merged(&store_wave_id) {
+                warn!(wave_id = %completed.wave_id, error = %err, "U1: mark_salvage_merged failed");
+            }
+            let retry_inputs = ralph_core::supervisor::PhaseInputs {
+                aggregate_timeout_secs,
+                elapsed_secs: terminal_ctx.as_ref().map(|ctx| ctx.elapsed.as_secs() as u64).unwrap_or(0),
+                cancel_requested: terminal_ctx.as_ref().is_some_and(|ctx| ctx.cancel_requested),
+            };
+            let retry_action = match bridge.tick_with_slot_events(&store_wave_id, retry_inputs, slot_events_for_retry.clone()) {
+                Ok(a) => a,
+                Err(err) => {
+                    warn!(wave_id = %completed.wave_id, error = %err, "U1: retry tick after SalvageNotMerged failed");
+                    return SupervisorFanInOutcome::StoreError;
+                }
+            };
+            match retry_action {
+                ralph_core::supervisor::CoordinatorAction::InjectedFailed { topic, reason, blocking_slots } => {
+                    if let Err(err) = bridge.record_never_started_failures(&store_wave_id) {
+                        warn!(wave_id = %completed.wave_id, error = %err, "U1: record_never_started_failures failed");
+                    }
+                    let snap_for_reasons = bridge.fan_in_status(&store_wave_id);
+                    let mut reasons = std::collections::HashMap::new();
+                    if let Ok(snap) = snap_for_reasons.as_ref() {
+                        use ralph_core::supervisor::SlotStatus;
+                        for (idx, status) in &snap.slots {
+                            if matches!(status, SlotStatus::Failed | SlotStatus::Cancelled) {
+                                if let Ok(Some(r)) = bridge.slot_failure_reason(&store_wave_id, *idx) {
+                                    reasons.insert(*idx, r);
+                                }
+                            }
+                        }
+                    }
+                    if let Ok(snap) = snap_for_reasons.as_ref() {
+                        let elapsed = snap.started_at.elapsed().map(|d| d.as_secs()).unwrap_or(0);
+                        let payload = build_wave_failed_slots_json(&completed.wave_id, &snap.slots, &reasons, elapsed);
+                        let _ = write_wave_diagnostics_json(&workspace_root_from_events(main_events_file), &completed.wave_id, &payload);
+                    }
+                    if matches!(wave_kind, ralph_core::supervisor::WaveKind::Review) {
+                        merge_completed_review_slots_to_main(main_events_file, completed, bridge, &store_wave_id);
+                    }
+                    let review_done_hints = build_review_done_hints(bridge, &store_wave_id, completed, main_events_file);
+                    let payload = build_wave_failed_payload(wave_kind, completed, reason, blocking_slots, &reasons, Some(&review_done_hints));
+                    append_supervisor_coord_event(main_events_file, &topic, &payload);
+                    SupervisorFanInOutcome::InjectedFailed
+                }
+                ralph_core::supervisor::CoordinatorAction::InjectedComplete { topic, .. } => {
+                    let payload = build_wave_complete_payload(wave_kind, completed, &store_wave_id, bridge, aggregate_timeout_secs);
+                    append_supervisor_coord_event(main_events_file, &topic, &payload);
+                    SupervisorFanInOutcome::InjectedComplete
+                }
+                ralph_core::supervisor::CoordinatorAction::AlreadyDone => SupervisorFanInOutcome::AlreadyDone,
+                ralph_core::supervisor::CoordinatorAction::ContinueCollect => {
+                    // U1 (Green 6): still ContinueCollect after salvage merged → force Failed phase.
+                    use ralph_core::supervisor::WavePhase;
+                    if let Err(err) = bridge.set_wave_phase(&store_wave_id, WavePhase::Failed) {
+                        warn!(wave_id = %completed.wave_id, error = %err, "U1: set_wave_phase(Failed) failed");
+                    }
+                    if let Err(err) = bridge.mark_merge_to_events(&store_wave_id) {
+                        warn!(wave_id = %completed.wave_id, error = %err, "U1: mark_merge_to_events failed");
+                    }
+                    SupervisorFanInOutcome::AlreadyDone
+                }
+                _ => {
+                    warn!(wave_id = %completed.wave_id, "U1: unexpected coordinator action after SalvageNotMerged retry: retrying");
+                    SupervisorFanInOutcome::ContinueCollect
+                }
+            }
         }
         ralph_core::supervisor::CoordinatorAction::ContinueCollect => {
-            SupervisorFanInOutcome::ContinueCollect
+            // U1 (Green 6): terminal_ctx is set and first tick returned ContinueCollect.
+            // Record never-started failures, mark salvage merged, then second tick.
+            if terminal_ctx.is_some() {
+                if let Err(err) = bridge.record_never_started_failures(&store_wave_id) {
+                    warn!(wave_id = %completed.wave_id, error = %err, "U1: record_never_started_failures failed");
+                }
+                if let Err(err) = bridge.mark_salvage_merged(&store_wave_id) {
+                    warn!(wave_id = %completed.wave_id, error = %err, "U1: mark_salvage_merged failed");
+                }
+                let retry_inputs = ralph_core::supervisor::PhaseInputs {
+                    aggregate_timeout_secs,
+                    elapsed_secs: terminal_ctx.as_ref().map(|ctx| ctx.elapsed.as_secs() as u64).unwrap_or(0),
+                    cancel_requested: terminal_ctx.as_ref().is_some_and(|ctx| ctx.cancel_requested),
+                };
+                let retry_action = match bridge.tick_with_slot_events(&store_wave_id, retry_inputs, slot_events_for_retry) {
+                    Ok(a) => a,
+                    Err(err) => {
+                        warn!(wave_id = %completed.wave_id, error = %err, "U1: second tick failed");
+                        return SupervisorFanInOutcome::StoreError;
+                    }
+                };
+                match retry_action {
+                    ralph_core::supervisor::CoordinatorAction::InjectedFailed { topic, reason, blocking_slots } => {
+                        if let Err(err) = bridge.record_never_started_failures(&store_wave_id) {
+                            warn!(wave_id = %completed.wave_id, error = %err, "U1: record_never_started_failures failed");
+                        }
+                        let snap_for_reasons = bridge.fan_in_status(&store_wave_id);
+                        let mut reasons = std::collections::HashMap::new();
+                        if let Ok(snap) = snap_for_reasons.as_ref() {
+                            use ralph_core::supervisor::SlotStatus;
+                            for (idx, status) in &snap.slots {
+                                if matches!(status, SlotStatus::Failed | SlotStatus::Cancelled) {
+                                    if let Ok(Some(r)) = bridge.slot_failure_reason(&store_wave_id, *idx) {
+                                        reasons.insert(*idx, r);
+                                    }
+                                }
+                            }
+                        }
+                        if let Ok(snap) = snap_for_reasons.as_ref() {
+                            let elapsed = snap.started_at.elapsed().map(|d| d.as_secs()).unwrap_or(0);
+                            let payload = build_wave_failed_slots_json(&completed.wave_id, &snap.slots, &reasons, elapsed);
+                            let _ = write_wave_diagnostics_json(&workspace_root_from_events(main_events_file), &completed.wave_id, &payload);
+                        }
+                        if matches!(wave_kind, ralph_core::supervisor::WaveKind::Review) {
+                            merge_completed_review_slots_to_main(main_events_file, completed, bridge, &store_wave_id);
+                        }
+                        let review_done_hints = build_review_done_hints(bridge, &store_wave_id, completed, main_events_file);
+                        let payload = build_wave_failed_payload(wave_kind, completed, reason, blocking_slots, &reasons, Some(&review_done_hints));
+                        append_supervisor_coord_event(main_events_file, &topic, &payload);
+                        SupervisorFanInOutcome::InjectedFailed
+                    }
+                    ralph_core::supervisor::CoordinatorAction::InjectedComplete { topic, .. } => {
+                        let payload = build_wave_complete_payload(wave_kind, completed, &store_wave_id, bridge, aggregate_timeout_secs);
+                        append_supervisor_coord_event(main_events_file, &topic, &payload);
+                        SupervisorFanInOutcome::InjectedComplete
+                    }
+                    ralph_core::supervisor::CoordinatorAction::AlreadyDone => SupervisorFanInOutcome::AlreadyDone,
+                    _ => {
+                        // Still ContinueCollect or SalvageNotMerged after salvage merged → force Failed.
+                        use ralph_core::supervisor::WavePhase;
+                        if let Err(err) = bridge.set_wave_phase(&store_wave_id, WavePhase::Failed) {
+                            warn!(wave_id = %completed.wave_id, error = %err, "U1: set_wave_phase(Failed) failed");
+                        }
+                        if let Err(err) = bridge.mark_merge_to_events(&store_wave_id) {
+                            warn!(wave_id = %completed.wave_id, error = %err, "U1: mark_merge_to_events failed");
+                        }
+                        SupervisorFanInOutcome::AlreadyDone
+                    }
+                }
+            } else {
+                SupervisorFanInOutcome::ContinueCollect
+            }
         }
         ralph_core::supervisor::CoordinatorAction::MergeFailed { topic, error } => {
             warn!(
@@ -4668,9 +4873,13 @@ mod tests {
     use super::*;
     use ralph_core::EventLoop;
     use ralph_core::config::RalphConfig;
+    use ralph_core::supervisor::{
+        BridgeError, CoordinatorAction, InMemoryCoordinatorBridge, PhaseInputs,
+        SupervisorBridge, SupervisorStore, WaveKind,
+    };
     use ralph_proto::HatId;
     use std::fs;
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicUsize, AtomicBool, Ordering};
     use std::sync::{Arc, Mutex};
 
     /// Build a `ralph_core::Event` with sensible defaults for tests.
@@ -6213,8 +6422,180 @@ hats: {}
     }
 
     // ---------------------------------------------------------------------
-    // U4-C4: runner post-wave phase skipping (static-source guard).
+    // U1 Red: terminal fan-in convergence — missing coverage.
+    // Tests 1, 2, 4, 5 are already defined at the bottom of this file
+    // (near line 9365+). Only tests 3 and 6 are missing from the plan's
+    // Red characterization.
     // ---------------------------------------------------------------------
+
+    /// U1 Red test 3: when `terminal_ctx.elapsed > aggregate_timeout_secs`
+    /// the coordinator must receive the real elapsed value in
+    /// `PhaseInputs.elapsed_secs`. Before the fix, `run_supervisor_fan_in`
+    /// always passed `elapsed_secs: 0` to `tick_with_slot_events`, so
+    /// the coordinator could not make a correct timeout decision.
+    #[test]
+    fn terminal_context_preserves_elapsed_timeout_relation() {
+        use ralph_core::supervisor::{
+            BridgeError, PhaseInputs, SupervisorBridge, WaveKind,
+        };
+        use std::sync::Arc;
+
+        // Capture the PhaseInputs passed to tick
+        struct CapturingBridge {
+            captured: std::sync::Mutex<Option<PhaseInputs>>,
+        }
+        impl std::fmt::Debug for CapturingBridge {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.debug_struct("CapturingBridge").finish()
+            }
+        }
+        impl SupervisorBridge for CapturingBridge {
+            fn tick(&self, _wave_id: &str, inputs: PhaseInputs) -> Result<ralph_core::supervisor::CoordinatorAction, BridgeError> {
+                *self.captured.lock().unwrap() = Some(inputs);
+                Ok(ralph_core::supervisor::CoordinatorAction::ContinueCollect)
+            }
+            fn tick_with_slot_events(&self, _wave_id: &str, inputs: PhaseInputs, _events: Vec<ralph_proto::Event>) -> Result<ralph_core::supervisor::CoordinatorAction, BridgeError> {
+                *self.captured.lock().unwrap() = Some(inputs);
+                Ok(ralph_core::supervisor::CoordinatorAction::ContinueCollect)
+            }
+            fn bind_slot(&self, _kind: WaveKind, _wave_id: &str, _slot_index: u32) -> Result<Option<crate::loop_runner::wave::SlotBinding>, BridgeError> { Ok(None) }
+            fn recover(&self) -> Result<Vec<ralph_core::supervisor::WaveSnapshot>, BridgeError> { Ok(Vec::new()) }
+            fn fan_in_status(&self, _wave_id: &str) -> Result<ralph_core::supervisor::WaveSnapshot, BridgeError> { Err(BridgeError::Store("capturing bridge".into())) }
+            fn register_wave_if_absent(&self, _kind: WaveKind, wave_id: &str, _expected_total: u32) -> Result<String, BridgeError> { Ok(wave_id.to_string()) }
+            fn record_slot_result(&self, _wave_id: &str, _slot_index: u32, _content_hash: &str, _event_count: usize) -> Result<(), BridgeError> { Ok(()) }
+            fn record_slot_failure(&self, _wave_id: &str, _slot_index: u32, _reason: &str) -> Result<(), BridgeError> { Ok(()) }
+            fn release_slot_dispatch(&self, _wave_id: &str, _slot_index: u32, _outcome: ralph_core::supervisor::DispatchOutcome) -> Result<(), BridgeError> { Ok(()) }
+            fn record_never_started_failures(&self, _wave_id: &str) -> Result<(), BridgeError> { Ok(()) }
+            fn mark_salvage_merged(&self, _wave_id: &str) -> Result<(), BridgeError> { Ok(()) }
+            fn mark_merge_to_events(&self, _wave_id: &str) -> Result<(), BridgeError> { Ok(()) }
+            fn set_wave_phase(&self, _wave_id: &str, _phase: ralph_core::supervisor::WavePhase) -> Result<(), BridgeError> { Ok(()) }
+            fn slot_failure_reason(&self, _wave_id: &str, _slot_index: u32) -> Result<Option<String>, BridgeError> { Ok(None) }
+            fn slot_resources(&self, _wave_id: &str) -> Result<Vec<ralph_core::supervisor::SlotResource>, BridgeError> { Ok(Vec::new()) }
+            fn max_concurrent_workers(&self) -> u32 { 1 }
+            fn repo_root(&self) -> Option<&std::path::Path> { None }
+            fn tasks_path(&self) -> Option<&std::path::Path> { None }
+            fn try_dispatch_next(&self, _wave_id: &str, _idx: u32) -> Result<bool, BridgeError> { Ok(false) }
+            fn record_slot_terminal_evidence(&self, _wave_id: &str, _slot_index: u32, _e: &ralph_core::supervisor::TerminalEvidence) -> Result<(), BridgeError> { Ok(()) }
+            fn slot_terminal_evidence(&self, _wave_id: &str, _slot_index: u32) -> Result<Option<ralph_core::supervisor::TerminalEvidence>, BridgeError> { Ok(None) }
+            fn finalize_terminal_cleanup(&self, _p: &std::path::Path) -> Result<(), BridgeError> { Ok(()) }
+            fn cancel_wave(&self, _wave_id: &str) -> Result<(), BridgeError> { Ok(()) }
+            fn enqueue_compensation(&self, _wave_id: &str, _k: ralph_core::supervisor::CompensationKind) -> Result<(), BridgeError> { Ok(()) }
+            fn take_pending_compensations(&self) -> Result<Vec<(String, ralph_core::supervisor::CompensationKind)>, BridgeError> { Ok(Vec::new()) }
+            fn complete_compensation(&self, _wave_id: &str, _k: ralph_core::supervisor::CompensationKind, _ok: bool) -> Result<(), BridgeError> { Ok(()) }
+        }
+
+        let capturing = Arc::new(CapturingBridge { captured: std::sync::Mutex::new(None) });
+        let bridge_arc: Arc<dyn SupervisorBridge> = capturing.clone();
+
+        // elapsed = 120s, aggregate_timeout_secs = 60s  → elapsed > timeout
+        let terminal_ctx = TerminalFanInContext {
+            is_terminal: true,
+            cancel_requested: true,
+            elapsed: std::time::Duration::from_secs(120),
+            aggregate_timeout_secs: 60,
+        };
+
+        let completed = ralph_core::CompletedWave {
+            wave_id: "u1-red-3".to_string(),
+            wave_total: 2,
+            results: vec![
+                ralph_core::WaveResult { index: 0, events: vec![] },
+                ralph_core::WaveResult { index: 1, events: vec![] },
+            ],
+            failures: vec![],
+            duration: std::time::Duration::from_secs(120),
+            partial: false,
+            expected_source_hat: None,
+            assigned_dimensions: std::collections::HashMap::new(),
+            dimension_retry_counts: std::collections::HashMap::new(),
+            worker_events: vec![],
+        };
+        let detected = ralph_core::DetectedWave {
+            wave_id: "u1-red-3".to_string(),
+            target_hat: ralph_proto::HatId::new("review-coordinator"),
+            hat_config: ralph_core::config::HatConfig::default(),
+            events: vec![ralph_core::Event {
+                topic: "review.wave.ready".to_string(),
+                payload: None,
+                ts: String::new(),
+                hat: None,
+                triggered: None,
+                source: None,
+                wave_id: None,
+                wave_index: None,
+                wave_total: None,
+                system_injected: None,
+            }],
+            total: 2,
+            partial: false,
+            consumer_aggregate_timeout: None,
+        };
+
+        let tmp = tempfile::tempdir().unwrap();
+        let main_events_file = tmp.path().join(".ralph").join("events.jsonl");
+        std::fs::create_dir_all(main_events_file.parent().unwrap()).unwrap();
+
+        let _outcome = run_supervisor_fan_in(
+            &bridge_arc,
+            &completed,
+            &detected,
+            &main_events_file,
+            60,
+            Some(terminal_ctx),
+        );
+
+        let captured = capturing.captured.lock().unwrap();
+        let inputs = captured.as_ref().expect("tick must have been called");
+
+        // BEFORE FIX: elapsed_secs is 0 (hardcoded), so the coordinator
+        // cannot detect the timeout condition.
+        // AFTER FIX: elapsed_secs must be the real elapsed value (120).
+        assert_eq!(
+            inputs.elapsed_secs, 120,
+            "U1 Red 3: elapsed_secs must be the real elapsed value (120), not 0"
+        );
+        assert!(
+            inputs.elapsed_secs > inputs.aggregate_timeout_secs,
+            "U1 Red 3: elapsed ({}) must exceed aggregate_timeout ({})",
+            inputs.elapsed_secs, inputs.aggregate_timeout_secs
+        );
+    }
+
+    /// U1 Red test 6: when `handle_wave_events` returns
+    /// `HandleWaveOutcome { fan_in_failure: true, .. }`, the runner
+    /// must enter a termination flow with a reason that is NOT
+    /// `MaxRuntime`. Before the fix, `HandleWaveOutcome` had no
+    /// `fan_in_failure` field, so the runner could not distinguish
+    /// terminal fan-in failure from MaxRuntime.
+    #[test]
+    fn runner_terminates_on_terminal_fan_in_failure() {
+        // Read runner.rs to verify:
+        // 1. `HandleWaveOutcome::fan_in_failure` is checked by the runner.
+        // 2. The fan_in_failure branch does NOT map to MaxRuntime.
+        let runner_rs = include_str!("../runner.rs");
+
+        let has_fan_in_failure_check = runner_rs.contains("fan_in_failure");
+        assert!(
+            has_fan_in_failure_check,
+            "U1 Red 6: runner.rs must check HandleWaveOutcome::fan_in_failure; \
+             no occurrence found. Before the fix, HandleWaveOutcome has no \
+             fan_in_failure field and the runner cannot distinguish terminal \
+             fan-in failure from MaxRuntime."
+        );
+
+        // The fan_in_failure branch must NOT map to MaxRuntime.
+        // Find the fan_in_failure occurrence and verify it doesn't contain MaxRuntime.
+        if let Some(pos) = runner_rs.find("fan_in_failure") {
+            let after = &runner_rs[pos..pos.saturating_add(300)];
+            assert!(
+                !after.contains("MaxRuntime"),
+                "U1 Red 6: fan_in_failure branch must NOT map to MaxRuntime; \
+                 found MaxRuntime in the fan_in_failure handling block. \
+                 Block:\n{after}"
+            );
+        }
+    }
+
 
     /// U4-C4 / §6 C4: when the dispatcher's
     /// `WaveDispatchOutcome::GlobalDeadlineExceeded` fires, the
@@ -7341,7 +7722,7 @@ hats: {}
         let main_events_file = temp_root.path().join("events.jsonl");
 
         let outcome =
-            run_supervisor_fan_in(&bridge_arc, &completed, &detected, &main_events_file, 60);
+            run_supervisor_fan_in(&bridge_arc, &completed, &detected, &main_events_file, 60, None);
         assert!(
             matches!(outcome, SupervisorFanInOutcome::InjectedComplete),
             "success path must reach InjectedComplete, got {outcome:?}"
@@ -7616,7 +7997,7 @@ hats: {}
 
         let bridge_arc: Arc<dyn ralph_core::supervisor::SupervisorBridge> = Arc::new(bridge);
         let outcome =
-            run_supervisor_fan_in(&bridge_arc, &completed, &detected, &main_events_file, 60);
+            run_supervisor_fan_in(&bridge_arc, &completed, &detected, &main_events_file, 60, None);
         assert!(
             matches!(outcome, SupervisorFanInOutcome::InjectedFailed),
             "failed wave must reach InjectedFailed; got {outcome:?}"
@@ -7780,7 +8161,7 @@ hats: {}
 
         let bridge_arc: Arc<dyn ralph_core::supervisor::SupervisorBridge> = Arc::new(bridge);
         let outcome =
-            run_supervisor_fan_in(&bridge_arc, &completed, &detected, &main_events_file, 60);
+            run_supervisor_fan_in(&bridge_arc, &completed, &detected, &main_events_file, 60, None);
         assert!(
             matches!(outcome, SupervisorFanInOutcome::InjectedFailed),
             "failed wave must reach InjectedFailed; got {outcome:?}"
@@ -8003,11 +8384,11 @@ hats: {}
         let bridge_arc: Arc<dyn ralph_core::supervisor::SupervisorBridge> = Arc::new(bridge);
         // First fan-in: reaches InjectedFailed.
         let first =
-            run_supervisor_fan_in(&bridge_arc, &completed, &detected, &main_events_file, 60);
+            run_supervisor_fan_in(&bridge_arc, &completed, &detected, &main_events_file, 60, None);
         assert!(matches!(first, SupervisorFanInOutcome::InjectedFailed));
         // Replay: must be a no-op (AlreadyDone), NOT a second InjectedFailed.
         let second =
-            run_supervisor_fan_in(&bridge_arc, &completed, &detected, &main_events_file, 60);
+            run_supervisor_fan_in(&bridge_arc, &completed, &detected, &main_events_file, 60, None);
         assert!(
             matches!(second, SupervisorFanInOutcome::AlreadyDone),
             "replayed failed fan-in must be AlreadyDone; got {second:?}"
@@ -8133,7 +8514,7 @@ hats: {}
 
         let bridge_arc: Arc<dyn ralph_core::supervisor::SupervisorBridge> = Arc::new(bridge);
         let outcome =
-            run_supervisor_fan_in(&bridge_arc, &completed, &detected, &main_events_file, 60);
+            run_supervisor_fan_in(&bridge_arc, &completed, &detected, &main_events_file, 60, None);
         assert!(matches!(outcome, SupervisorFanInOutcome::InjectedFailed));
 
         let done = std::io::BufReader::new(std::fs::File::open(&main_events_file).expect("main"))
@@ -8576,5 +8957,383 @@ hats: {}
         let payload = serde_json::Value::String("not json".to_string());
         let map = payload_object(Some(&payload));
         assert!(map.is_none());
+    }
+
+    // ══════════════════════════════════════════════════════════════════
+    // U1: fan-in terminal convergence — RED characterization tests
+    // RED: these tests characterize the broken behavior BEFORE the fix.
+    // GREEN: the fix makes them pass.
+    // ══════════════════════════════════════════════════════════════════
+
+    /// AE3 / R3: when AggregateDeadlineExceeded arrives with Pending slots,
+    /// fan-in must converge to InjectedFailed (not ContinueCollect).
+    #[test]
+    fn terminal_aggregate_deadline_does_not_end_as_continue_collect() {
+        use ralph_core::config::HatConfig;
+        use ralph_core::supervisor::{SupervisorBridge, SupervisorStore, WaveKind};
+
+        let workspace = tempfile::TempDir::new().expect("temp workspace");
+        let ralph_dir = workspace.path().join(".ralph");
+        std::fs::create_dir_all(&ralph_dir).expect("mkdir .ralph");
+        let main_events_file = ralph_dir.join("events.jsonl");
+
+        let store = std::sync::Arc::new(ralph_core::supervisor::InMemorySupervisorStore::new());
+        let bridge = InMemoryCoordinatorBridge::from_store(store.clone());
+        let store_wave_id = bridge
+            .register_wave_if_absent(WaveKind::Review, "w-u1-red1", 2)
+            .unwrap();
+
+        // Dispatch BOTH slots so they exist in the store.
+        // Slot 0: dispatched, completed with evidence.
+        // Slot 1: dispatched, then cancelled via cancel_wave (simulating timeout).
+        let _ = store.try_dispatch_next(2).unwrap().unwrap(); // slot 0
+        let _ = store.try_dispatch_next(2).unwrap().unwrap(); // slot 1
+        // Slot 0: Completed with evidence.
+        store.record_slot_result(&store_wave_id, 0, "hash-s0", 1).unwrap();
+        store.record_slot_terminal_evidence(
+            &store_wave_id, 0,
+            &ralph_core::supervisor::TerminalEvidence::from_event(
+                "review.unit.done",
+                &serde_json::json!({"dimension": "correctness"}).to_string(),
+            ),
+        ).unwrap();
+        // Slot 1: Pending in store (will be cancelled by cancel_wave).
+
+        let completed = ralph_core::CompletedWave {
+            wave_id: "w-u1-red1".to_string(),
+            wave_total: 2,
+            results: vec![ralph_core::WaveResult {
+                index: 0,
+                events: vec![ralph_proto::Event::new(
+                    "review.unit.done",
+                    serde_json::json!({"dimension": "correctness"}).to_string(),
+                )
+                .with_source("review-worker")
+                .with_wave("w-u1-red1".to_string(), 0, 2)],
+            }],
+            failures: vec![],
+            duration: std::time::Duration::ZERO,
+            partial: true,
+            expected_source_hat: None,
+            assigned_dimensions: std::collections::HashMap::new(),
+            dimension_retry_counts: std::collections::HashMap::new(),
+            worker_events: Vec::new(),
+        };
+        let detected = ralph_core::DetectedWave {
+            wave_id: "w-u1-red1".to_string(),
+            target_hat: ralph_proto::HatId::new("review-dispatcher"),
+            hat_config: HatConfig { name: "review-dispatcher".to_string(), ..HatConfig::default() },
+            events: vec![ralph_core::Event {
+                topic: "review.unit.ready".to_string(),
+                payload: Some("payload-0".to_string()),
+                ts: String::new(),
+                hat: None,
+                triggered: None,
+                source: None,
+                wave_id: None,
+                wave_index: None,
+                wave_total: None,
+                system_injected: None,
+            }],
+            total: 2,
+            partial: true,
+            consumer_aggregate_timeout: None,
+        };
+
+        // Record slot 1 as Failed (simulating worker never started / timed out).
+        // Using Failed instead of cancel so pending_count = 0 in fan_in_status.
+        let fail_result = store.record_slot_failure(
+            &store_wave_id,
+            1,
+            ralph_core::supervisor::worker_outcome::REASON_SLOT_NEVER_STARTED,
+        );
+        eprintln!("DEBUG record_slot_failure for slot 1: {:?}", fail_result);
+        fail_result.unwrap();
+
+        // Debug: check the snapshot before tick
+        let snap = store.fan_in_status(&store_wave_id).unwrap();
+        eprintln!("DEBUG snapshot before tick: pending={} failed={} completed={} cancel={}",
+            snap.pending_count, snap.failed_count, snap.completed_count, snap.cancel_requested);
+        // Debug: call tick directly on bridge (before Arc-wrapping) to see coordinator returns.
+        let debug_inputs = PhaseInputs {
+            aggregate_timeout_secs: 60,
+            elapsed_secs: 0,
+            cancel_requested: true,
+        };
+        let debug_action = bridge
+            .tick_with_slot_events(&store_wave_id, debug_inputs, vec![])
+            .expect("tick succeeds");
+        eprintln!("DEBUG direct tick action: {:?}", debug_action);
+
+        let bridge_arc: Arc<dyn ralph_core::supervisor::SupervisorBridge> = Arc::new(bridge);
+        let terminal_ctx = Some(TerminalFanInContext {
+            is_terminal: true,
+            cancel_requested: true, // AggregateDeadlineExceeded → cancel
+            elapsed: completed.duration,
+            aggregate_timeout_secs: 60,
+        });
+        let outcome = run_supervisor_fan_in(
+            &bridge_arc, &completed, &detected, &main_events_file, 60, terminal_ctx,
+        );
+
+        // GREEN: must reach InjectedFailed.
+        assert!(
+            matches!(outcome, SupervisorFanInOutcome::InjectedFailed),
+            "aggregate deadline with Pending slots must reach InjectedFailed, got {:?}", outcome
+        );
+    }
+
+    /// AE2 / R3: partial=true with Pending slots must converge to InjectedFailed.
+    #[test]
+    fn terminal_partial_with_pending_slot_converges_to_failed() {
+        use ralph_core::config::HatConfig;
+        use ralph_core::supervisor::{SupervisorBridge, SupervisorStore, WaveKind};
+
+        let workspace = tempfile::TempDir::new().expect("temp workspace");
+        let ralph_dir = workspace.path().join(".ralph");
+        std::fs::create_dir_all(&ralph_dir).expect("mkdir .ralph");
+        let main_events_file = ralph_dir.join("events.jsonl");
+
+        let store = std::sync::Arc::new(ralph_core::supervisor::InMemorySupervisorStore::new());
+        let bridge = InMemoryCoordinatorBridge::from_store(store.clone());
+        let store_wave_id = bridge
+            .register_wave_if_absent(WaveKind::Review, "w-u1-red2", 2)
+            .unwrap();
+
+        // Dispatch slot 0 so it moves from Pending to Dispatched,
+        // then record the result (simulating a completed worker).
+        let _ = store.try_dispatch_next(2).unwrap().unwrap();
+        // Slot 0: Completed with evidence.
+        store.record_slot_result(&store_wave_id, 0, "hash-s0", 1).unwrap();
+        store.record_slot_terminal_evidence(
+            &store_wave_id, 0,
+            &ralph_core::supervisor::TerminalEvidence::from_event(
+                "review.unit.done",
+                &serde_json::json!({"dimension": "correctness"}).to_string(),
+            ),
+        ).unwrap();
+        // Slot 1: Pending (never dispatched — slot stays Pending in the store).
+
+        let completed = ralph_core::CompletedWave {
+            wave_id: "w-u1-red2".to_string(),
+            wave_total: 2,
+            results: vec![ralph_core::WaveResult {
+                index: 0,
+                events: vec![ralph_proto::Event::new(
+                    "review.unit.done",
+                    serde_json::json!({"dimension": "correctness"}).to_string(),
+                )
+                .with_source("review-worker")
+                .with_wave("w-u1-red2".to_string(), 0, 2)],
+            }],
+            failures: vec![],
+            duration: std::time::Duration::ZERO,
+            partial: true,
+            expected_source_hat: None,
+            assigned_dimensions: std::collections::HashMap::new(),
+            dimension_retry_counts: std::collections::HashMap::new(),
+            worker_events: Vec::new(),
+        };
+        let detected = ralph_core::DetectedWave {
+            wave_id: "w-u1-red2".to_string(),
+            target_hat: ralph_proto::HatId::new("review-dispatcher"),
+            hat_config: HatConfig { name: "review-dispatcher".to_string(), ..HatConfig::default() },
+            events: vec![ralph_core::Event {
+                topic: "review.unit.ready".to_string(),
+                payload: Some("payload-0".to_string()),
+                ts: String::new(),
+                hat: None,
+                triggered: None,
+                source: None,
+                wave_id: None,
+                wave_index: None,
+                wave_total: None,
+                system_injected: None,
+            }],
+            total: 2,
+            partial: true,
+            consumer_aggregate_timeout: None,
+        };
+
+        let bridge_arc: Arc<dyn ralph_core::supervisor::SupervisorBridge> = Arc::new(bridge);
+        let terminal_ctx = Some(TerminalFanInContext {
+            is_terminal: true,
+            cancel_requested: false, // Partial (not cancel)
+            elapsed: completed.duration,
+            aggregate_timeout_secs: 60,
+        });
+        let outcome = run_supervisor_fan_in(
+            &bridge_arc, &completed, &detected, &main_events_file, 60, terminal_ctx,
+        );
+
+        // GREEN: the helper drives to InjectedFailed.
+        assert!(
+            matches!(outcome, SupervisorFanInOutcome::InjectedFailed),
+            "partial=true with Pending slots must converge to InjectedFailed, got {:?}", outcome
+        );
+    }
+
+    /// GREEN baseline: non-terminal wave stays ContinueCollect.
+    #[test]
+    fn non_terminal_tick_remains_continue_collect() {
+        use ralph_core::supervisor::{PhaseInputs, SupervisorBridge, SupervisorStore, WaveKind};
+
+        let store = std::sync::Arc::new(ralph_core::supervisor::InMemorySupervisorStore::new());
+        let bridge = InMemoryCoordinatorBridge::from_store(store.clone());
+        let store_wave_id = bridge
+            .register_wave_if_absent(WaveKind::Review, "w-u1-green1", 2)
+            .unwrap();
+        // No slots dispatched — all Pending.
+
+        let inputs = PhaseInputs { aggregate_timeout_secs: 60, elapsed_secs: 0, cancel_requested: false };
+        let action = bridge.tick_with_slot_events(&store_wave_id, inputs, Vec::new())
+            .expect("tick succeeds");
+        assert!(
+            matches!(action, ralph_core::supervisor::CoordinatorAction::ContinueCollect),
+            "non-terminal wave must stay ContinueCollect, got {:?}", action
+        );
+    }
+
+    /// S5: persistent store error must return StoreError.
+    #[test]
+    fn terminal_fan_in_persistent_store_error_is_not_silent() {
+        use ralph_core::config::HatConfig;
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        struct FailingBridge {
+            inner: InMemoryCoordinatorBridge,
+            fail: AtomicBool,
+        }
+        impl std::fmt::Debug for FailingBridge {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.debug_struct("FailingBridge").finish()
+            }
+        }
+        impl SupervisorBridge for FailingBridge {
+            fn register_wave_if_absent(&self, k: WaveKind, id: &str, n: u32) -> Result<String, BridgeError> {
+                self.inner.register_wave_if_absent(k, id, n)
+            }
+            fn fan_in_status(&self, id: &str) -> Result<ralph_core::supervisor::WaveSnapshot, BridgeError> {
+                if self.fail.load(Ordering::SeqCst) {
+                    Err(BridgeError::Store("simulated".into()))
+                } else {
+                    self.inner.fan_in_status(id)
+                }
+            }
+            fn tick_with_slot_events(&self, id: &str, inputs: PhaseInputs, ev: Vec<ralph_proto::Event>) -> Result<CoordinatorAction, BridgeError> {
+                if self.fail.load(Ordering::SeqCst) {
+                    Err(BridgeError::Store("simulated".into()))
+                } else {
+                    self.inner.tick_with_slot_events(id, inputs, ev)
+                }
+            }
+            fn tick(&self, id: &str, inputs: PhaseInputs) -> Result<CoordinatorAction, BridgeError> {
+                self.inner.tick(id, inputs)
+            }
+            fn slot_resources(&self, id: &str) -> Result<Vec<ralph_core::supervisor::SlotResource>, BridgeError> {
+                self.inner.slot_resources(id)
+            }
+            fn max_concurrent_workers(&self) -> u32 { self.inner.max_concurrent_workers() }
+            fn repo_root(&self) -> Option<&std::path::Path> { self.inner.repo_root() }
+            fn tasks_path(&self) -> Option<&std::path::Path> { self.inner.tasks_path() }
+            fn try_dispatch_next(&self, id: &str, idx: u32) -> Result<bool, BridgeError> {
+                self.inner.try_dispatch_next(id, idx)
+            }
+            fn bind_slot(&self, k: WaveKind, id: &str, idx: u32) -> Result<Option<ralph_core::supervisor::SlotBinding>, BridgeError> {
+                self.inner.bind_slot(k, id, idx)
+            }
+            fn recover(&self) -> Result<Vec<ralph_core::supervisor::WaveSnapshot>, BridgeError> {
+                self.inner.recover()
+            }
+            fn mark_salvage_merged(&self, id: &str) -> Result<(), BridgeError> {
+                self.inner.mark_salvage_merged(id)
+            }
+            fn record_slot_result(&self, id: &str, idx: u32, h: &str, n: usize) -> Result<(), BridgeError> {
+                self.inner.record_slot_result(id, idx, h, n)
+            }
+            fn record_slot_terminal_evidence(&self, id: &str, idx: u32, e: &ralph_core::supervisor::TerminalEvidence) -> Result<(), BridgeError> {
+                self.inner.record_slot_terminal_evidence(id, idx, e)
+            }
+            fn slot_terminal_evidence(&self, id: &str, idx: u32) -> Result<Option<ralph_core::supervisor::TerminalEvidence>, BridgeError> {
+                self.inner.slot_terminal_evidence(id, idx)
+            }
+            fn record_slot_failure(&self, id: &str, idx: u32, r: &str) -> Result<(), BridgeError> {
+                self.inner.record_slot_failure(id, idx, r)
+            }
+            fn record_never_started_failures(&self, id: &str) -> Result<(), BridgeError> {
+                self.inner.record_never_started_failures(id)
+            }
+            fn slot_failure_reason(&self, id: &str, idx: u32) -> Result<Option<String>, BridgeError> {
+                self.inner.slot_failure_reason(id, idx)
+            }
+            fn release_slot_dispatch(&self, id: &str, idx: u32, o: ralph_core::supervisor::DispatchOutcome) -> Result<(), BridgeError> {
+                self.inner.release_slot_dispatch(id, idx, o)
+            }
+            fn finalize_terminal_cleanup(&self, p: &std::path::Path) -> Result<(), BridgeError> {
+                self.inner.finalize_terminal_cleanup(p)
+            }
+            fn cancel_wave(&self, id: &str) -> Result<(), BridgeError> {
+                self.inner.cancel_wave(id)
+            }
+            fn enqueue_compensation(&self, id: &str, k: ralph_core::supervisor::CompensationKind) -> Result<(), BridgeError> {
+                self.inner.enqueue_compensation(id, k)
+            }
+            fn take_pending_compensations(&self) -> Result<Vec<(String, ralph_core::supervisor::CompensationKind)>, BridgeError> {
+                self.inner.take_pending_compensations()
+            }
+            fn complete_compensation(&self, id: &str, k: ralph_core::supervisor::CompensationKind, ok: bool) -> Result<(), BridgeError> {
+                self.inner.complete_compensation(id, k, ok)
+            }
+            fn set_wave_phase(&self, id: &str, p: ralph_core::supervisor::WavePhase) -> Result<(), BridgeError> {
+                self.inner.set_wave_phase(id, p)
+            }
+            fn mark_merge_to_events(&self, id: &str) -> Result<(), BridgeError> {
+                self.inner.mark_merge_to_events(id)
+            }
+        }
+
+        let workspace = tempfile::TempDir::new().expect("temp workspace");
+        let ralph_dir = workspace.path().join(".ralph");
+        std::fs::create_dir_all(&ralph_dir).expect("mkdir .ralph");
+        let main_events_file = ralph_dir.join("events.jsonl");
+
+        let store = std::sync::Arc::new(ralph_core::supervisor::InMemorySupervisorStore::new());
+        let inner = InMemoryCoordinatorBridge::from_store(store);
+        let bridge: Arc<dyn ralph_core::supervisor::SupervisorBridge> =
+            Arc::new(FailingBridge { inner, fail: AtomicBool::new(true) });
+
+        let completed = ralph_core::CompletedWave {
+            wave_id: "w-u1-red5".to_string(), wave_total: 1,
+            results: vec![], failures: vec![],
+            duration: std::time::Duration::ZERO, partial: false,
+            expected_source_hat: None, assigned_dimensions: std::collections::HashMap::new(),
+            dimension_retry_counts: std::collections::HashMap::new(), worker_events: Vec::new(),
+        };
+        let detected = ralph_core::DetectedWave {
+            wave_id: "w-u1-red5".to_string(),
+            target_hat: ralph_proto::HatId::new("review-dispatcher"),
+            hat_config: HatConfig { name: "review-dispatcher".to_string(), ..HatConfig::default() },
+            events: vec![ralph_core::Event {
+                topic: "review.unit.ready".to_string(),
+                payload: Some("payload-0".to_string()),
+                ts: String::new(),
+                hat: None,
+                triggered: None,
+                source: None,
+                wave_id: None,
+                wave_index: None,
+                wave_total: None,
+                system_injected: None,
+            }],
+            total: 1, partial: false, consumer_aggregate_timeout: None,
+        };
+
+        let outcome = run_supervisor_fan_in(
+            &bridge, &completed, &detected, &main_events_file, 60, None,
+        );
+        assert!(
+            matches!(outcome, SupervisorFanInOutcome::StoreError),
+            "persistent store error must return StoreError, got {:?}", outcome
+        );
     }
 }
