@@ -1774,11 +1774,14 @@ hats:
       ### Step 0 — Treat review.wave.failed as runtime-injected
 
       `review.wave.failed` is a runtime-injected coordination topic
-      (see `crates/ralph-core/src/event_origin.rs::SUPERVISOR_COORDINATION_TOPICS`
-      and `ralph-tools-wave`). The runtime gives it
-      `review-synthesizer` attribution by default; in this preset the
-      `event_filter` routes it to `finalizer`. You consume it as a
-      trigger; do NOT emit it.
+      (the runtime side handles attribution and injection; see
+      `ralph-tools-wave` § red box on coordination events). When it
+      arrives, this preset's `event_filter` routes it to `finalizer`
+      (your hat), so YOU receive the trigger — you consume it as a
+      trigger; do NOT emit it. The runtime never asks the
+      `review-synthesizer` hat to handle the failure path: that
+      would route away from the writer of `wave-blocked.md` (you)
+      and land the synthesizer in a scope-violation rejection.
 
       ### Step 1 — Validate the referenced artifact
 
