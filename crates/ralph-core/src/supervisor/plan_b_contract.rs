@@ -70,6 +70,20 @@ fn drive_slot_to_done(bridge: &InMemoryCoordinatorBridge, store_id: &str, slot_i
         .store()
         .record_slot_result(store_id, slot_index, &format!("h-{slot_index}"), 1)
         .expect("record slot result");
+    // Plan 004 R2 / P0-2: success path requires terminal
+    // evidence; without it the coordinator falls into
+    // `Failed(IncompleteEvidence)` instead of `InjectedComplete`.
+    bridge
+        .store()
+        .record_slot_terminal_evidence(
+            store_id,
+            slot_index,
+            &crate::supervisor::TerminalEvidence::from_event(
+                "exec.unit.done",
+                &format!("{{\"dimension\":\"d-{slot_index}\"}}"),
+            ),
+        )
+        .expect("record terminal evidence");
 }
 
 fn drive_slot_to_failure(bridge: &InMemoryCoordinatorBridge, store_id: &str, slot_index: u32) {
@@ -296,6 +310,18 @@ fn plan_b_contract_double_review_wave_uses_review_wave_complete_topic() {
         .store()
         .record_slot_result(&store_id, 0, "h-r", 1)
         .expect("record review slot result");
+    // Plan 004 R2 / P0-2: success path requires terminal evidence.
+    bridge
+        .store()
+        .record_slot_terminal_evidence(
+            &store_id,
+            0,
+            &crate::supervisor::TerminalEvidence::from_event(
+                "review.unit.done",
+                "{\"dimension\":\"correctness\"}",
+            ),
+        )
+        .expect("record review evidence");
 
     let action = bridge
         .tick(&store_id, default_phase_inputs())
@@ -336,6 +362,18 @@ fn plan_b_contract_double_fix_wave_uses_fix_wave_complete_topic() {
         .store()
         .record_slot_result(&store_id, 0, "h-f", 1)
         .expect("record");
+    // Plan 004 R2 / P0-2: success path requires terminal evidence.
+    bridge
+        .store()
+        .record_slot_terminal_evidence(
+            &store_id,
+            0,
+            &crate::supervisor::TerminalEvidence::from_event(
+                "fix.unit.done",
+                "{\"dimension\":\"default\"}",
+            ),
+        )
+        .expect("record fix evidence");
 
     let action = bridge
         .tick(&store_id, default_phase_inputs())

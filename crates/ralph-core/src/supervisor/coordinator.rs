@@ -23,7 +23,10 @@ use ralph_proto::Event;
 use crate::event_origin::is_supervisor_coordination_topic;
 
 use super::merge_sink::{EventMergeSink, InMemoryMergeSink};
-use super::phase::{FailedReason, PhaseDecision, PhaseInputs, evaluate_phase};
+use super::{
+    SlotStatus,
+    phase::{FailedReason, PhaseDecision, PhaseInputs, WaveSnapshotExt, evaluate_phase},
+};
 use super::{SupervisorStore, SupervisorStoreResult, WavePhase, WaveSnapshot};
 use crate::supervisor::WaveKind;
 
@@ -143,10 +146,33 @@ impl SupervisorCoordinator {
         slot_events: Vec<Event>,
     ) -> SupervisorStoreResult<CoordinatorAction> {
         let snapshot = self.store.fan_in_status(wave_id)?;
-        // KTD-7 + KTD-6: the merge gate is the only place we
-        // mutate the ledger. Evaluate first, then merge, then
-        // inject.
-        let decision = evaluate_phase(&snapshot, &inputs);
+        // Plan 004 R2 / P0-2: a `Completed` slot WITHOUT terminal
+        // evidence MUST NOT enter the success fan-in path. The
+        // pre-fix code read only `slot.status` and proceeded to
+        // `merge_and_complete`, which is a silent-success
+        // anti-pattern (R2). We consult the evidence row for
+        // every Completed slot before allowing Integrate. A slot
+        // lacking evidence here forces the phase to `Failed`
+        // with reason `incomplete_evidence` — closing the
+        // missing-dimensions inflation at the coordinator level.
+        let decision = if matches!(evaluate_phase(&snapshot, &inputs), PhaseDecision::Integrate) {
+            if self.all_completed_slots_have_evidence(&snapshot)? {
+                PhaseDecision::Integrate
+            } else {
+                // Plan 004 R2 / P0-2: the slots whose status
+                // is `Completed` but whose evidence row is
+                // missing are the "blocking" set on this path
+                // (the failed/cancelled index helper doesn't
+                // cover them because they're nominally done).
+                let blocking = self.evidence_missing_slot_indices(&snapshot)?;
+                PhaseDecision::Failed {
+                    reason: FailedReason::IncompleteEvidence,
+                    blocking_slots: blocking,
+                }
+            }
+        } else {
+            evaluate_phase(&snapshot, &inputs)
+        };
         match decision {
             PhaseDecision::ContinueCollect => Ok(CoordinatorAction::ContinueCollect),
             PhaseDecision::Integrate => self.merge_and_complete(&snapshot, slot_events),
@@ -155,6 +181,62 @@ impl SupervisorCoordinator {
                 blocking_slots,
             } => self.fail_wave(&snapshot, &reason, blocking_slots),
         }
+    }
+
+    /// Plan 004 R2 / P0-2 helper: return the slot indices whose
+    /// `Completed` status is NOT backed by terminal evidence.
+    /// Used to populate `blocking_slots` on the
+    /// `Failed(IncompleteEvidence)` path — the
+    /// `blocking_slot_indices` helper intentionally ignores
+    /// `Completed` slots because they are normally "not
+    /// blocking"; the evidence gate is a separate, narrower
+    /// signal.
+    fn evidence_missing_slot_indices(
+        &self,
+        snapshot: &WaveSnapshot,
+    ) -> SupervisorStoreResult<Vec<u32>> {
+        let mut out = Vec::new();
+        for (slot_index, status) in &snapshot.slots {
+            if !matches!(status, SlotStatus::Completed) {
+                continue;
+            }
+            if self
+                .store
+                .slot_terminal_evidence(&snapshot.wave_id, *slot_index)?
+                .is_none()
+            {
+                out.push(*slot_index);
+            }
+        }
+        out.sort_unstable();
+        Ok(out)
+    }
+
+    /// Plan 004 R2 / P0-2 helper: every `Completed` slot in
+    /// the snapshot must have terminal evidence recorded on
+    /// the store. Slots still `Dispatched` / `Running` /
+    /// `Pending` are out of scope (evaluate_phase already
+    /// excludes them). `Failed` slots are out of scope
+    /// (Failed → already on the Failed branch). The returned
+    /// boolean is true ONLY when every Completed slot has a
+    /// non-`None` evidence row.
+    fn all_completed_slots_have_evidence(
+        &self,
+        snapshot: &WaveSnapshot,
+    ) -> SupervisorStoreResult<bool> {
+        for (slot_index, status) in &snapshot.slots {
+            if !matches!(status, SlotStatus::Completed) {
+                continue;
+            }
+            if self
+                .store
+                .slot_terminal_evidence(&snapshot.wave_id, *slot_index)?
+                .is_none()
+            {
+                return Ok(false);
+            }
+        }
+        Ok(true)
     }
 
     /// Mutate the wave to `Done` after a successful merge.
@@ -343,6 +425,19 @@ mod tests {
         }
         for (w, i) in dispatched {
             store.record_slot_result(&w, i, "h", 1).unwrap();
+            // Plan 004 R2 / P0-2: Completed slots MUST carry
+            // terminal evidence for the success fan-in path
+            // to engage (KTD3 fail-closed).
+            store
+                .record_slot_terminal_evidence(
+                    &w,
+                    i,
+                    &crate::supervisor::TerminalEvidence::from_event(
+                        "exec.unit.done",
+                        "{\"dimension\":\"default\"}",
+                    ),
+                )
+                .unwrap();
         }
         // Sanity: wave is in Collect / completed_count == expected.
         let snap = store.fan_in_status(&wave).unwrap();
@@ -470,6 +565,22 @@ mod tests {
             .unwrap();
         let _ = store.try_dispatch_next(4).unwrap().unwrap();
         store.record_slot_result(&wave, 0, "h", 1).unwrap();
+        // Plan 004 R2 / P0-2: Completed slots MUST carry
+        // terminal evidence for the success fan-in path to
+        // engage. Without this the coordinator falls into
+        // `Failed(IncompleteEvidence)` before reaching the
+        // merge sink — which would mask the merge-failure
+        // contract this test pins.
+        store
+            .record_slot_terminal_evidence(
+                &wave,
+                0,
+                &crate::supervisor::TerminalEvidence::from_event(
+                    "exec.unit.done",
+                    "{\"dimension\":\"default\"}",
+                ),
+            )
+            .unwrap();
         // Force the sink to fail.
         let inner_sink = Arc::new(InMemoryMergeSink::new());
         inner_sink.fail_with("disk full");
@@ -577,6 +688,19 @@ mod tests {
             .unwrap();
         let _ = store.try_dispatch_next(2).unwrap().unwrap();
         store.record_slot_result(&wave, 0, "h", 1).unwrap();
+        // Plan 004 R2 / P0-2: success path requires terminal
+        // evidence; record it so the test reaches
+        // `InjectedComplete` and pins the idempotency contract.
+        store
+            .record_slot_terminal_evidence(
+                &wave,
+                0,
+                &crate::supervisor::TerminalEvidence::from_event(
+                    "exec.unit.done",
+                    "{\"dimension\":\"default\"}",
+                ),
+            )
+            .unwrap();
         let coord =
             SupervisorCoordinator::with_in_memory_sink(store.clone() as Arc<dyn SupervisorStore>);
         let inputs = PhaseInputs {
@@ -661,6 +785,19 @@ mod tests {
             .unwrap();
         let _ = store.try_dispatch_next(2).unwrap().unwrap();
         store.record_slot_result(&wave, 0, "h", 1).unwrap();
+        // Plan 004 R2 / P0-2: success path requires terminal
+        // evidence; record it so the test reaches
+        // `InjectedComplete` and pins the idempotency contract.
+        store
+            .record_slot_terminal_evidence(
+                &wave,
+                0,
+                &crate::supervisor::TerminalEvidence::from_event(
+                    "exec.unit.done",
+                    "{\"dimension\":\"default\"}",
+                ),
+            )
+            .unwrap();
         let coord =
             SupervisorCoordinator::with_in_memory_sink(store.clone() as Arc<dyn SupervisorStore>);
         let action = coord
@@ -1000,6 +1137,120 @@ mod tests {
         assert!(
             matches!(action2, CoordinatorAction::AlreadyDone),
             "post-restart tick must AlreadyDone, got {action2:?}",
+        );
+    }
+
+    /// Plan 004 R2 / P0-2 — fail-closed: a Completed slot
+    /// without terminal evidence MUST NOT enter the success
+    /// fan-in path. The coordinator must surface
+    /// `Failed(IncompleteEvidence)` so the dispatcher injects
+    /// `*.wave.failed` instead of silently completing the wave
+    /// (R2 / KTD3). Cross-store parity: the same invariant must
+    /// hold against the in-memory store; the rusqlite parity
+    /// test lives in `rusqlite.rs::p0_2_completed_without_evidence_fails_closed`.
+    #[test]
+    fn p0_2_completed_without_evidence_fails_closed() {
+        let store = Arc::new(InMemorySupervisorStore::new());
+        let wave = store.register_wave("p02", WaveKind::Exec, 1).unwrap();
+        store
+            .bind_worktree(
+                &wave,
+                0,
+                SlotResource {
+                    slot_index: 0,
+                    worktree_path: Some(".ralph/p02".to_string()),
+                    branch: Some("ralph/p02".to_string()),
+                },
+            )
+            .unwrap();
+        let _ = store.try_dispatch_next(2).unwrap().unwrap();
+        // Mark Completed but DO NOT record terminal evidence.
+        store.record_slot_result(&wave, 0, "h", 1).unwrap();
+        // Pre-commit salvage so fail_wave is not blocked on the
+        // unrelated P0-1 latch.
+        store.mark_salvage_merged(&wave).unwrap();
+        let coord =
+            SupervisorCoordinator::with_in_memory_sink(store.clone() as Arc<dyn SupervisorStore>);
+        let action = coord
+            .tick(
+                &wave,
+                PhaseInputs {
+                    aggregate_timeout_secs: 60,
+                    elapsed_secs: 0,
+                    cancel_requested: false,
+                },
+            )
+            .unwrap();
+        match action {
+            CoordinatorAction::InjectedFailed {
+                topic,
+                reason,
+                blocking_slots,
+            } => {
+                assert_eq!(topic, "exec.wave.failed");
+                assert_eq!(
+                    reason, "incomplete_evidence",
+                    "missing evidence must surface as Failed(IncompleteEvidence)"
+                );
+                assert!(!blocking_slots.is_empty());
+            }
+            other => panic!(
+                "expected InjectedFailed(incomplete_evidence), got {other:?} — \
+                 R2 / KTD3 fail-closed invariant violated"
+            ),
+        }
+        // Phase is Failed, not Done. Snap must NOT record a
+        // coord-event injection.
+        let snap = store.fan_in_status(&wave).unwrap();
+        assert_eq!(snap.phase, WavePhase::Failed);
+        assert!(snap.merged_to_events);
+    }
+
+    /// Plan 004 R2 / P0-2 — happy path: once evidence is
+    /// recorded, the success path engages normally. Pins that
+    /// the evidence gate does not break legitimate flows.
+    #[test]
+    fn p0_2_with_evidence_engages_success_path() {
+        let store = Arc::new(InMemorySupervisorStore::new());
+        let wave = store.register_wave("p02-ok", WaveKind::Exec, 1).unwrap();
+        store
+            .bind_worktree(
+                &wave,
+                0,
+                SlotResource {
+                    slot_index: 0,
+                    worktree_path: Some(".ralph/p02-ok".to_string()),
+                    branch: Some("ralph/p02-ok".to_string()),
+                },
+            )
+            .unwrap();
+        let _ = store.try_dispatch_next(2).unwrap().unwrap();
+        store.record_slot_result(&wave, 0, "h", 1).unwrap();
+        store
+            .record_slot_terminal_evidence(
+                &wave,
+                0,
+                &crate::supervisor::TerminalEvidence::from_event(
+                    "exec.unit.done",
+                    "{\"dimension\":\"default\"}",
+                ),
+            )
+            .unwrap();
+        let coord =
+            SupervisorCoordinator::with_in_memory_sink(store.clone() as Arc<dyn SupervisorStore>);
+        let action = coord
+            .tick(
+                &wave,
+                PhaseInputs {
+                    aggregate_timeout_secs: 60,
+                    elapsed_secs: 0,
+                    cancel_requested: false,
+                },
+            )
+            .unwrap();
+        assert!(
+            matches!(action, CoordinatorAction::InjectedComplete { .. }),
+            "with evidence, success path must engage, got {action:?}"
         );
     }
 

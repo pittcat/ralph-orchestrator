@@ -1616,6 +1616,28 @@ mod tests {
         assert_eq!(s.slot_terminal_evidence(&wave, 0).unwrap(), Some(ev));
     }
 
+    /// Plan 004 R2 / P0-2 — rusqlite parity with the
+    /// in-memory store: a `Completed` slot without terminal
+    /// evidence MUST read back as `None` so the coordinator's
+    /// evidence gate can fail the wave closed. The v4 evidence
+    /// columns stay nullable; the gate is enforced at read
+    /// time, not at write time.
+    #[test]
+    fn p0_2_completed_without_evidence_reads_none_rusqlite() {
+        let s = store();
+        let wave = s.register_wave("k-p02", WaveKind::Review, 1).unwrap();
+        s.record_slot_result(&wave, 0, "hash", 1).unwrap();
+        assert_eq!(s.slot_terminal_evidence(&wave, 0).unwrap(), None);
+        // Once evidence is recorded, the gate opens.
+        use crate::supervisor::TerminalEvidence;
+        let ev = TerminalEvidence::from_event(
+            "review.unit.done",
+            "{\"dimension\":\"correctness\"}",
+        );
+        s.record_slot_terminal_evidence(&wave, 0, &ev).unwrap();
+        assert_eq!(s.slot_terminal_evidence(&wave, 0).unwrap(), Some(ev));
+    }
+
     fn bind(slot: u32) -> SlotResource {
         SlotResource {
             slot_index: slot,
@@ -2339,6 +2361,30 @@ mod recovery_reopen_tests {
             );
             store.record_slot_result(&wave, 0, "m-0", 1).unwrap();
             store.record_slot_result(&wave, 1, "m-1", 1).unwrap();
+            // Plan 004 R2 / P0-2: success path requires
+            // terminal evidence; record it so the test reaches
+            // `InjectedComplete` (the phase-1 coord event was
+            // injected, we just simulate that here).
+            store
+                .record_slot_terminal_evidence(
+                    &wave,
+                    0,
+                    &crate::supervisor::TerminalEvidence::from_event(
+                        "exec.unit.done",
+                        "{\"dimension\":\"m-0\"}",
+                    ),
+                )
+                .unwrap();
+            store
+                .record_slot_terminal_evidence(
+                    &wave,
+                    1,
+                    &crate::supervisor::TerminalEvidence::from_event(
+                        "exec.unit.done",
+                        "{\"dimension\":\"m-1\"}",
+                    ),
+                )
+                .unwrap();
             // The coordinator already injected the coord event and
             // stamped the idempotent-inject marker before the crash.
             store.mark_merge_to_events(&wave).unwrap();

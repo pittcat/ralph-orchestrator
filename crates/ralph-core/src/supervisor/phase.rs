@@ -82,6 +82,14 @@ pub enum FailedReason {
     /// never trigger because `register_wave` rejects zero
     /// sizes, but the function stays defensive.
     ExpectedTotalZero,
+    /// Plan 004 R2 / P0-2: every slot reported `Completed`
+    /// but at least one of them lacks verifiable terminal
+    /// evidence (KTD3 fail-closed). The wave must NOT enter
+    /// the success fan-in path; we surface it as `Failed`
+    /// with reason `incomplete_evidence` so the dispatcher
+    /// records a `*.wave.failed` instead of silently merging
+    /// a phantom done.
+    IncompleteEvidence,
 }
 
 impl FailedReason {
@@ -92,6 +100,7 @@ impl FailedReason {
             FailedReason::Timeout => "timeout",
             FailedReason::RequiredSlotFailure => "required_slot_failure",
             FailedReason::ExpectedTotalZero => "expected_total_zero",
+            FailedReason::IncompleteEvidence => "incomplete_evidence",
         }
     }
 }

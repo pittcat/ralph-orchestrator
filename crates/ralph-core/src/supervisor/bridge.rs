@@ -657,6 +657,21 @@ mod tests {
         bridge
             .record_slot_result(&store_id, 0, "bdd-hash", 1)
             .unwrap();
+        // Plan 004 R2 / P0-2: Completed slot must carry
+        // terminal evidence for the success fan-in path to
+        // engage. Without this the coordinator falls into
+        // `Failed(IncompleteEvidence)` and the BDD assertion
+        // flips.
+        store
+            .record_slot_terminal_evidence(
+                &store_id,
+                0,
+                &crate::supervisor::TerminalEvidence::from_event(
+                    "exec.unit.done",
+                    "{\"dimension\":\"default\"}",
+                ),
+            )
+            .unwrap();
         let action = bridge
             .tick(
                 &store_id,
