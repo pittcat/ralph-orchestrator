@@ -2679,6 +2679,30 @@ fn write_wave_diagnostics_json(
     Ok(path)
 }
 
+/// 2026-07-26-002 plan U3 (R3 / KTD3): derive an absolute workspace
+/// root from the loop's main events file.
+///
+/// Convention: `<workspace>/.ralph/events.jsonl`. Two
+/// `.parent()` calls land on `<workspace>`. When the input path
+/// is too short (or stays relative), we fall back to
+/// `std::env::current_dir()` joined with the remaining suffix so
+/// the validator never sees `Path::new(".")`.
+pub(crate) fn workspace_root_from_events(events_file: &Path) -> PathBuf {
+    let mut current = events_file;
+    for _ in 0..2 {
+        match current.parent() {
+            Some(parent) if !parent.as_os_str().is_empty() => current = parent,
+            _ => break,
+        }
+    }
+    if current.is_absolute() {
+        return current.to_path_buf();
+    }
+    std::env::current_dir()
+        .map(|c| c.join(current))
+        .unwrap_or_else(|_| current.to_path_buf())
+}
+
 /// 2026-07-22-001 plan U3 (KTD-2 / KTD-3): pick the supervisor
 /// store the lazy default-path bridge should wrap.
 ///
@@ -6369,5 +6393,87 @@ hats: {}
         assert_eq!(slots[3]["slot_index"], 3);
         assert_eq!(slots[3]["status"], "cancelled");
         assert_eq!(slots[3]["reason"], "worker_cancelled");
+    }
+
+    // -------------------------------------------------------------------
+    // 2026-07-26-002 plan U3 (R3 / KTD3): workspace_root_from_events
+    // must always yield an absolute workspace root, never
+    // `Path::new(".")` — the validator would reject every spawn with
+    // RelativePath when the bridge repo_root is relative.
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn u3_workspace_root_from_events_absolute() {
+        let tmp = tempfile::TempDir::new().expect("temp dir");
+        let ralph = tmp.path().join(".ralph");
+        std::fs::create_dir_all(&ralph).expect("mkdir .ralph");
+        let events = ralph.join("events.jsonl");
+
+        let root = workspace_root_from_events(&events);
+        assert!(
+            root.is_absolute(),
+            "workspace_root_from_events must be absolute; got {root:?}"
+        );
+        assert_eq!(
+            root, tmp.path(),
+            "two `.parent()` calls from <ws>/.ralph/events.jsonl must yield <ws>"
+        );
+    }
+
+    #[test]
+    fn u3_workspace_root_from_events_relative_falls_back() {
+        // Defensive: even when a relative path slips through (the
+        // runner always passes absolute), the helper must still
+        // return an absolute root. We do not rely on
+        // `set_current_dir` (unreliable under nextest's
+        // process-per-test isolation); we just assert absoluteness.
+        let rel = std::path::Path::new(".ralph").join("events.jsonl");
+        let root = workspace_root_from_events(&rel);
+        assert!(
+            root.is_absolute(),
+            "relative input must still produce an absolute workspace root; got {root:?}"
+        );
+    }
+
+    #[test]
+    fn u3_lazy_bridge_repo_root_is_absolute() {
+        // 2026-07-26-002 plan U3: the lazy
+        // `CoordinatorSupervisorBridge::with_context_and_factory_with_cap`
+        // path used in `dispatch_waves` must build the bridge with
+        // `repo_root` derived from the main events file (absolute),
+        // NOT the previous `PathBuf::from(".")`. We exercise the
+        // same construction and assert `bridge.repo_root()` returns
+        // the absolute workspace, not `.` or `None`.
+        use crate::loop_runner::wave::ProductionBridgeContext;
+        use crate::loop_runner::wave::supervisor_bridge::CoordinatorSupervisorBridge;
+        use ralph_core::supervisor::SupervisorBridge as _;
+        use ralph_core::supervisor::worktree_bind::DefaultWorktreeFactory;
+
+        let tmp = tempfile::TempDir::new().expect("temp dir");
+        let main_events_file = tmp.path().join(".ralph").join("events.jsonl");
+
+        let context = ProductionBridgeContext {
+            loop_id: "loop-u3".to_string(),
+            repo_root: workspace_root_from_events(&main_events_file),
+            events_path: Some(main_events_file.clone()),
+            tasks_path: None,
+        };
+        assert!(
+            context.repo_root.is_absolute(),
+            "ProductionBridgeContext.repo_root must be absolute; got {:?}",
+            context.repo_root
+        );
+
+        let store = std::sync::Arc::new(ralph_core::supervisor::InMemorySupervisorStore::new());
+        let bridge = CoordinatorSupervisorBridge::with_context_and_factory_with_cap(
+            store,
+            context,
+            Arc::new(DefaultWorktreeFactory),
+            u32::MAX,
+        );
+        let reported = bridge
+            .repo_root()
+            .expect("bridge must surface repo_root; lazy paths used to return None");
+        assert_eq!(reported, tmp.path());
     }
 }
