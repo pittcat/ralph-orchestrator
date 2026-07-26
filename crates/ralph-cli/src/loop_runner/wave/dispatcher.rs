@@ -4135,6 +4135,14 @@ fn classify_slot_result<'a>(result: &'a WaveWorkerOutcome) -> ClassifiedSlot<'a>
             // to the frozen reason code so the operator sees the stable
             // `worker_timeout` string instead of a raw Dynamic message.
             //
+            // 2026-07-25-006 plan U9: idle heartbeat kill is the second
+            // member of the `worker_timeout` family. The worker emits
+            // messages beginning with `"idle heartbeat exceeded"`; we
+            // route them through `WorkerExit::IdleTimeout` so the
+            // classifier resolves to `worker_timeout` (the operator
+            // sees the original idle string verbatim, the family
+            // collapses into the same `worker_timeout` reason).
+            //
             // Non-timeout Err (any other message) is preserved verbatim with
             // the legacy `worker_cancelled` shell — fixing that broader
             // mis-classification is out of scope for this plan (plan KTD8
@@ -4150,6 +4158,19 @@ fn classify_slot_result<'a>(result: &'a WaveWorkerOutcome) -> ClassifiedSlot<'a>
                     SlotOutcome::Completed(_) => None,
                 };
                 ClassifiedSlot { outcome, reason }
+            } else if reason.starts_with("idle heartbeat exceeded") {
+                // 2026-07-25-006 U9: idle kill still maps to the
+                // `worker_timeout` family; the reason string carries
+                // the operator-visible detail (`"idle heartbeat
+                // exceeded: 120s since last activity, weak_count=8"`).
+                // The outcome is `Failed { reason: "worker_timeout" }`
+                // but the dynamic reason surfaced to the operator is
+                // the original idle string verbatim.
+                let outcome = classify_worker_outcome(WorkerExit::IdleTimeout, 0, &[]);
+                ClassifiedSlot {
+                    outcome,
+                    reason: Some(ClassifiedReason::Dynamic(reason)),
+                }
             } else {
                 ClassifiedSlot {
                     outcome: SlotOutcome::Failed {
