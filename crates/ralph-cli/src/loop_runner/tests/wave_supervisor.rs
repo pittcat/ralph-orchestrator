@@ -44,9 +44,7 @@ use crate::loop_runner::wave::{
     BridgeError, MockSupervisorBridge, SlotBinding, SupervisorBridge, WaveWorkerExecutor,
     is_supervisor_path_enabled,
 };
-use ralph_core::supervisor::{
-    PhaseInputs, SlotResource, TerminalEvidence, WaveKind, WaveSnapshot,
-};
+use ralph_core::supervisor::{PhaseInputs, SlotResource, TerminalEvidence, WaveKind, WaveSnapshot};
 use std::collections::HashMap;
 use std::sync::Mutex;
 
@@ -5029,4 +5027,493 @@ fn test_u6_failed_payload_exposes_per_slot_reasons() {
     );
     // Suppress unused mut warnings if completed gains new fields.
     let _ = &mut completed;
+}
+
+// ===== U1 characterization =====
+//
+// These tests PROVE the current `run_supervisor_fan_in` /
+// `build_wave_failed_payload` partial-failure path does NOT salvage
+// Completed slot business events back to the main ledger for
+// exec/fix waves (the gap U2-U7 will fix). Test 2 additionally
+// characterizes that the review path already has its own salvage
+// helper and is NOT affected by the exec/fix changes.
+//
+// Refs:
+//   - plan `2026-07-25-005-fix-supervisor-slot-activity-salvage-redrive-plan` U1
+//   - `run_supervisor_fan_in` in `dispatcher.rs` — the partial failure path
+//     routes to `fail_wave` which does NOT call `merge_sink.append_events`,
+//     so completed slot events are silently dropped on the floor.
+//   - Review salvage helper: `review_salvage_collect_done_results` in
+//     `coordinator.rs` (review path has its own merge helper; exec/fix
+//     does not — this is the distinction U2-U7 exploits).
+
+/// U1 Test 1 (RED — proves the gap): exec/fix partial failure
+/// does NOT salvage Completed slot business events to the main ledger.
+///
+/// Setup: a 2-slot exec wave.
+///   - slot 0: emits `exec.unit.done`, reaches Completed
+///   - slot 1: worker_timeout, reaches Failed
+///
+/// After fan-in:
+///   - The main ledger must NOT contain slot 0's `exec.unit.done` event
+///     (the partial failure path drops it — this is the bug U2-U7 fix)
+///   - `blocking_slots` must be `[1]` (NOT `[0, 1]` — completed slots
+///     are never blocking per the phase decision contract)
+///   - `exec.wave.failed` is injected
+///
+/// This test FAILS on current HEAD — proving the gap exists.
+#[test]
+fn exec_fix_partial_failure_does_not_salvage_completed_slot_events() {
+    use crate::loop_runner::wave::{SupervisorFanInOutcome, run_supervisor_fan_in};
+    use ralph_core::supervisor::{SlotResource, TerminalEvidence, WaveKind};
+
+    let tmp = tempfile::tempdir().expect("temp dir");
+    let events_path = tmp.path().join(".ralph").join("events.jsonl");
+
+    // Build the production bridge with 2 slots.
+    let store = std::sync::Arc::new(InMemorySupervisorStore::new());
+    let context = crate::loop_runner::wave::ProductionBridgeContext {
+        loop_id: "u1-exec-partial".to_string(),
+        repo_root: std::path::PathBuf::from("/tmp/u1-repo"),
+        events_path: Some(events_path.clone()),
+        tasks_path: None,
+    };
+    let bridge =
+        crate::loop_runner::wave::CoordinatorSupervisorBridge::with_context_and_factory_with_cap(
+            store.clone() as std::sync::Arc<dyn SupervisorStore>,
+            context,
+            std::sync::Arc::new(DefaultWorktreeFactory),
+            2,
+        );
+    let store_wave_id = bridge
+        .register_wave_if_absent(WaveKind::Exec, "u1-exec-partial", 2)
+        .expect("register");
+
+    // Bind + dispatch both slots.
+    for i in 0..2 {
+        bridge
+            .store()
+            .bind_worktree(
+                &store_wave_id,
+                i,
+                SlotResource {
+                    slot_index: i,
+                    worktree_path: Some(format!("/tmp/u1-wt/{i}")),
+                    branch: Some(format!("u1-exec-partial-{i}")),
+                },
+            )
+            .expect("bind");
+    }
+    for _ in 0..2 {
+        bridge.store().try_dispatch_next(2).expect("dispatch");
+    }
+
+    // Slot 0: completes with evidence.
+    bridge
+        .record_slot_result(&store_wave_id, 0, "h0", 1)
+        .expect("s0 result");
+    bridge
+        .store()
+        .record_slot_terminal_evidence(
+            &store_wave_id,
+            0,
+            &TerminalEvidence::from_event("exec.unit.done", "{\"unit\":\"u1-0\"}"),
+        )
+        .expect("evidence 0");
+
+    // Slot 1: fails with worker_timeout (retryable).
+    bridge
+        .record_slot_failure(
+            &store_wave_id,
+            1,
+            ralph_core::supervisor::worker_outcome::REASON_WORKER_TIMEOUT,
+        )
+        .expect("s1 failure");
+
+    // Pre-commit salvage (P0-1 contract).
+    bridge
+        .mark_salvage_merged(&store_wave_id)
+        .expect("mark salvage");
+
+    let bridge: std::sync::Arc<dyn SupervisorBridge> = std::sync::Arc::new(bridge);
+
+    // Build a CompletedWave with only slot 0's result (slot 1 failed → no event).
+    let completed = ralph_core::CompletedWave {
+        wave_id: "u1-exec-partial".to_string(),
+        wave_total: 2,
+        results: vec![ralph_core::WaveResult {
+            index: 0,
+            events: vec![
+                ralph_proto::Event::new("exec.unit.done", "{\"unit\":\"u1-0\"}\n")
+                    .with_source("executor")
+                    .with_wave("u1-exec-partial".to_string(), 0, 2),
+            ],
+        }],
+        failures: vec![],
+        duration: std::time::Duration::from_millis(1),
+        partial: true,
+        expected_source_hat: None,
+        assigned_dimensions: std::collections::HashMap::new(),
+        dimension_retry_counts: std::collections::HashMap::new(),
+        worker_events: vec![],
+    };
+    let detected = make_u3_wave("u1-exec-partial", 2, 2);
+
+    let outcome = run_supervisor_fan_in(&bridge, &completed, &detected, &events_path, 600);
+    assert_eq!(
+        outcome,
+        SupervisorFanInOutcome::InjectedFailed,
+        "partial failure must inject exec.wave.failed"
+    );
+
+    // Read the main ledger.
+    let content = std::fs::read_to_string(&events_path).unwrap_or_default();
+    let lines: Vec<serde_json::Value> = content
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .map(|l| serde_json::from_str(l).expect("ledger line must be JSON"))
+        .collect();
+
+    // The main ledger must contain exactly one coord event (`exec.wave.failed`),
+    // and slot 0's `exec.unit.done` must NOT appear.
+    let exec_unit_done_count = lines
+        .iter()
+        .filter(|v| v.get("topic").and_then(|t| t.as_str()) == Some("exec.unit.done"))
+        .count();
+    assert_eq!(
+        exec_unit_done_count, 0,
+        "U1 GAP: slot 0's exec.unit.done must NOT appear in the main ledger \
+         during partial failure — the current fail_wave path drops completed slot events. \
+         This test FAILS on current HEAD; U2-U7 will fix this.",
+    );
+
+    let failed_events: Vec<&serde_json::Value> = lines
+        .iter()
+        .filter(|v| v.get("topic").and_then(|t| t.as_str()) == Some("exec.wave.failed"))
+        .collect();
+    assert_eq!(
+        failed_events.len(),
+        1,
+        "exactly one exec.wave.failed coord event expected; got {}",
+        failed_events.len()
+    );
+
+    // blocking_slots must be [1], NOT [0, 1] — completed slots are never blocking.
+    let blocking = failed_events[0]
+        .get("payload")
+        .and_then(|p| p.get("blocking_slots"))
+        .and_then(|b| b.as_array())
+        .expect("payload.blocking_slots");
+    let blocking_indices: Vec<u32> = blocking
+        .iter()
+        .filter_map(|v| v.as_u64().map(|n| n as u32))
+        .collect();
+    assert_eq!(
+        blocking_indices,
+        vec![1],
+        "blocking_slots must be [1] (the failed slot only); completed slot 0 must NOT be listed. \
+         Got {blocking_indices:?}"
+    );
+
+    // No spurious exec.wave.complete on the failure path.
+    let complete_count = lines
+        .iter()
+        .filter(|v| v.get("topic").and_then(|t| t.as_str()) == Some("exec.wave.complete"))
+        .count();
+    assert_eq!(
+        complete_count, 0,
+        "partial failure must NOT inject exec.wave.complete; got {complete_count}"
+    );
+}
+
+/// U1 Test 2 (GREEN — characterization of review path stability):
+/// the review wave kind has its own salvage helper
+/// (`review_salvage_collect_done_results` in `coordinator.rs`)
+/// that is NOT being changed by the exec/fix salvage work (U2-U7).
+/// A review wave with the same partial-failure shape (1 completed
+/// + 1 failed) reaches `InjectedFailed` but the review salvage
+/// path is structurally distinct from the exec/fix path and must
+/// remain unaffected.
+///
+/// This test PASSES on current HEAD — it documents the existing
+/// review salvage behavior and ensures the exec/fix changes don't
+/// accidentally break the review path.
+#[test]
+fn review_partial_failure_salvage_path_unaffected() {
+    use crate::loop_runner::wave::{SupervisorFanInOutcome, run_supervisor_fan_in};
+    use ralph_core::supervisor::{TerminalEvidence, WaveKind};
+
+    // Review salvage helper: `review_salvage_collect_done_results` in
+    // `coordinator.rs` — this is the review wave's own salvage path.
+    // It is structurally separate from the exec/fix `fail_wave` path
+    // and is NOT being modified by plan 2026-07-25-005 (U2-U7).
+    //
+    // The review path differs from exec/fix:
+    //   - Review slots use SharedReadonly (no per-slot worktree)
+    //   - Review wave partial failure still calls the coordinator's
+    //     `tick` which routes through the same `evaluate_phase` +
+    //     `fail_wave` decision, but the review salvage helper is
+    //     invoked separately by the dispatcher BEFORE calling fan-in.
+    //
+    // This test characterizes the current review behavior is stable.
+
+    let tmp = tempfile::tempdir().expect("temp dir");
+    let events_path = tmp.path().join(".ralph").join("events.jsonl");
+
+    let store = std::sync::Arc::new(InMemorySupervisorStore::new());
+    let context = crate::loop_runner::wave::ProductionBridgeContext {
+        loop_id: "u1-review-partial".to_string(),
+        repo_root: std::path::PathBuf::from("/tmp/u1-repo"),
+        events_path: Some(events_path.clone()),
+        tasks_path: None,
+    };
+    let bridge =
+        crate::loop_runner::wave::CoordinatorSupervisorBridge::with_context_and_factory_with_cap(
+            store.clone() as std::sync::Arc<dyn SupervisorStore>,
+            context,
+            std::sync::Arc::new(DefaultWorktreeFactory),
+            2,
+        );
+    let store_wave_id = bridge
+        .register_wave_if_absent(WaveKind::Review, "u1-review-partial", 2)
+        .expect("register");
+
+    // Review slots: no worktree binding needed (SharedReadonly).
+    for _ in 0..2 {
+        bridge.store().try_dispatch_next(2).expect("dispatch");
+    }
+
+    // Slot 0: completes with review evidence.
+    bridge
+        .record_slot_result(&store_wave_id, 0, "h0", 1)
+        .expect("s0 result");
+    bridge
+        .store()
+        .record_slot_terminal_evidence(
+            &store_wave_id,
+            0,
+            &TerminalEvidence::from_event("review.unit.done", "{\"dimension\":\"correctness\"}"),
+        )
+        .expect("evidence 0");
+
+    // Slot 1: fails with worker_timeout.
+    bridge
+        .record_slot_failure(
+            &store_wave_id,
+            1,
+            ralph_core::supervisor::worker_outcome::REASON_WORKER_TIMEOUT,
+        )
+        .expect("s1 failure");
+
+    // Pre-commit salvage (P0-1 contract).
+    bridge
+        .mark_salvage_merged(&store_wave_id)
+        .expect("mark salvage");
+
+    let bridge: std::sync::Arc<dyn SupervisorBridge> = std::sync::Arc::new(bridge);
+
+    // Review wave: 1 completed, 1 failed.
+    let completed = ralph_core::CompletedWave {
+        wave_id: "u1-review-partial".to_string(),
+        wave_total: 2,
+        results: vec![ralph_core::WaveResult {
+            index: 0,
+            events: vec![
+                ralph_proto::Event::new("review.unit.done", "{\"dimension\":\"correctness\"}")
+                    .with_source("reviewer")
+                    .with_wave("u1-review-partial".to_string(), 0, 2),
+            ],
+        }],
+        failures: vec![],
+        duration: std::time::Duration::from_millis(1),
+        partial: true,
+        expected_source_hat: None,
+        assigned_dimensions: std::collections::HashMap::new(),
+        dimension_retry_counts: std::collections::HashMap::new(),
+        worker_events: vec![],
+    };
+    // Detected wave for review kind — trigger topic starts with "review."
+    let detected = {
+        use ralph_core::DetectedWave;
+        use ralph_core::config::HatConfig;
+        let events = vec![ralph_core::Event {
+            topic: "review.unit.ready".to_string(),
+            payload: Some("{}".to_string()),
+            ts: String::new(),
+            hat: None,
+            triggered: None,
+            source: None,
+            wave_id: None,
+            wave_index: None,
+            wave_total: None,
+            system_injected: None,
+        }];
+        let hat_config = HatConfig {
+            name: "reviewer".to_string(),
+            concurrency: 2,
+            ..HatConfig::default()
+        };
+        DetectedWave {
+            wave_id: "u1-review-partial".to_string(),
+            target_hat: ralph_proto::HatId::new("reviewer"),
+            hat_config,
+            events,
+            total: 2,
+            partial: true,
+            consumer_aggregate_timeout: None,
+        }
+    };
+
+    let outcome = run_supervisor_fan_in(&bridge, &completed, &detected, &events_path, 600);
+    assert_eq!(
+        outcome,
+        SupervisorFanInOutcome::InjectedFailed,
+        "review partial failure must inject review.wave.failed"
+    );
+
+    // Review path: the `review_salvage_collect_done_results` helper
+    // (coordinator.rs) is responsible for collecting done results in
+    // the review path. This test PASSES on current HEAD to document
+    // that the review path is NOT being changed by the exec/fix
+    // salvage work (U2-U7). The review salvage helper operates
+    // separately from `run_supervisor_fan_in` and is out of scope
+    // for the exec/fix partial-failure salvage work.
+    //
+    // NOTE: the review wave failed payload uses `missing_dimensions`
+    // (not `blocking_slots`) — the payload structure differs from
+    // exec/fix waves. We assert the coord event topic and the
+    // fan-in outcome without checking payload fields that don't apply
+    // to review waves.
+
+    let content = std::fs::read_to_string(&events_path).unwrap_or_default();
+    let lines: Vec<serde_json::Value> = content
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .map(|l| serde_json::from_str(l).expect("ledger line must be JSON"))
+        .collect();
+
+    let failed_events: Vec<&serde_json::Value> = lines
+        .iter()
+        .filter(|v| v.get("topic").and_then(|t| t.as_str()) == Some("review.wave.failed"))
+        .collect();
+    assert_eq!(
+        failed_events.len(),
+        1,
+        "exactly one review.wave.failed coord event expected; got {}",
+        failed_events.len()
+    );
+
+    // Review wave failed payload uses `missing_dimensions`, not `blocking_slots`.
+    // Verify the payload has the expected review-wave structure.
+    let payload_obj = failed_events[0]
+        .get("payload")
+        .and_then(|p| p.as_object())
+        .expect("review.wave.failed must have a JSON object payload");
+    assert!(
+        payload_obj.contains_key("wave_id"),
+        "review failed payload must have wave_id"
+    );
+    assert!(
+        payload_obj.contains_key("missing_dimensions"),
+        "review failed payload must have missing_dimensions (not blocking_slots)"
+    );
+    assert!(
+        payload_obj.contains_key("reason"),
+        "review failed payload must have reason"
+    );
+    // Verify the wave_id matches.
+    assert_eq!(
+        payload_obj.get("wave_id").and_then(|v| v.as_str()),
+        Some("u1-review-partial"),
+        "wave_id must match"
+    );
+}
+
+/// U1 Test 3 (RED — U7 precondition): `build_wave_failed_payload`
+/// for an exec wave with 1 Completed + 1 Failed currently lacks the
+/// new fields that U7 will introduce: `salvaged_slots` and
+/// `redrive_slots`. The payload currently contains `wave_id`,
+/// `reason`, `blocking_slots`, and `slot_failures` — U7 will add
+/// `salvaged_slots` (listing completed slots in a failed wave)
+/// and `redrive_slots` (listing retryable failed slots).
+///
+/// This test FAILS on current HEAD (proving U7 has work to do) and
+/// will PASS once U7 lands (adding `salvaged_slots` and `redrive_slots`
+/// to the exec/fix failed payload).
+#[test]
+fn build_wave_failed_payload_lacks_new_fields_on_exec_path() {
+    use crate::loop_runner::wave::build_wave_failed_payload;
+    use ralph_core::supervisor::WaveKind;
+    use ralph_core::{CompletedWave, WaveFailure, WaveResult};
+    use std::time::Duration;
+
+    // 2-slot exec wave: slot 0 completed, slot 1 failed.
+    let completed = CompletedWave {
+        wave_id: "u1-exec-failed".to_string(),
+        wave_total: 2,
+        results: vec![WaveResult {
+            index: 0,
+            events: vec![
+                ralph_proto::Event::new("exec.unit.done", "{\"unit\":\"u1-0\"}")
+                    .with_source("executor"),
+            ],
+        }],
+        failures: vec![WaveFailure {
+            index: 1,
+            error: "worker_timeout".to_string(),
+            duration: Duration::from_secs(300),
+            expected_dimension: None,
+            actual_dimension: None,
+        }],
+        duration: Duration::from_secs(300),
+        partial: true,
+        expected_source_hat: None,
+        assigned_dimensions: std::collections::HashMap::new(),
+        dimension_retry_counts: std::collections::HashMap::new(),
+        worker_events: vec![],
+    };
+
+    let payload = build_wave_failed_payload(
+        WaveKind::Exec,
+        &completed,
+        "required_slot_failure",
+        vec![1], // blocking_slots = [1]
+        &std::collections::HashMap::new(),
+        None,
+    );
+    let obj = payload.as_object().expect("payload must be a JSON object");
+
+    // Legacy fields must be present (U7 does not remove these).
+    assert!(
+        obj.contains_key("wave_id"),
+        "wave_id must be present (legacy field)"
+    );
+    assert!(
+        obj.contains_key("blocking_slots"),
+        "blocking_slots must be present (legacy field)"
+    );
+    assert!(
+        obj.contains_key("slot_failures"),
+        "slot_failures must be present (already added by prior work)"
+    );
+
+    // U7 new fields must NOT be present yet:
+    //   - `salvaged_slots`: U7 will list completed slots in the failed payload
+    //   - `redrive_slots`: U7 will list retryable failed slots for redrive
+    //
+    // This assertion FAILS on current HEAD, proving the U7 gap exists.
+    // After U7 lands, `salvaged_slots` and `redrive_slots` will be added
+    // and this test will PASS.
+    assert!(
+        !obj.contains_key("salvaged_slots"),
+        "U7 GAP: `salvaged_slots` must NOT be present in the current exec/fix \
+         failed payload — U7 will add it to list completed slots in a failed wave. \
+         This test FAILS on current HEAD."
+    );
+    assert!(
+        !obj.contains_key("redrive_slots"),
+        "U7 GAP: `redrive_slots` must NOT be present in the current exec/fix \
+         failed payload — U7 will add it to list retryable failed slots for redrive. \
+         This test FAILS on current HEAD."
+    );
 }
