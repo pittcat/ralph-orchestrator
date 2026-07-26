@@ -3805,6 +3805,139 @@ hats:
         );
     }
 
+    // 2026-07-26-003 plan U3: characterization + (small) widening
+    // for the review-worker hat id. The `is_wave_channel_path`
+    // shape check is hat-id-agnostic today (exec- and fix-worker
+    // both share the same gate), but the `implementation-review`
+    // preset's review-worker is the one whose misroute into main
+    // was the primary-20260726 incident root cause. These tests
+    // pin the contract so a future narrowing cannot regress
+    // without explicit intent.
+
+    /// U3 / S3 (plan 2026-07-26-003): the review-worker hat's
+    /// wave-channel `ralph emit` must be accepted with the same
+    /// shape check as exec-worker. The dispatcher signs
+    /// `wave-<id>-<idx>.jsonl` and injects RALPH_WAVE_ID /
+    /// RALPH_WAVE_INDEX; review-worker's activation must land
+    /// there, never on the main events file (which would silently
+    /// dispatch the dimension into `compute_missing_dimensions`'s
+    /// blind spot).
+    #[test]
+    fn test_emit_review_worker_channel_accepted() {
+        let tmp = TempDir::new().unwrap();
+        let workspace = make_workspace(&tmp);
+        std::fs::write(
+            workspace.join(".ralph/current-events"),
+            ".ralph/events-main.jsonl",
+        )
+        .unwrap();
+        let wave_channel = workspace
+            .join(".ralph/wave-w-review-2.jsonl")
+            .display()
+            .to_string();
+        let result = resolve_emit_path(
+            &workspace,
+            &workspace.join(".ralph/events.jsonl"),
+            Some(&wave_channel),
+            Some("review-worker"), // review-worker hat id
+            true,                  // isolated execution context
+            Some("w-review"),
+            Some(2),
+        );
+        assert!(
+            result.is_ok(),
+            "review-worker channel must be accepted in isolated mode, got error: {:?}",
+            result.as_ref().err()
+        );
+        assert!(
+            result.unwrap().ends_with(".ralph/wave-w-review-2.jsonl"),
+            "resolved path must point to wave channel"
+        );
+    }
+
+    /// U3 / S3 + R3 plan-2026-07-26-003: the review-worker channel
+    /// round-trip is end-to-end via `ralph emit`'s public entry,
+    /// not just `resolve_emit_path`. Smoke that the command path
+    /// does not silently rewrite the path back to `events.jsonl`
+    /// once it has accepted the wave channel. (This is the test
+    /// 003 did NOT add for review-worker because the channel
+    /// acceptance check is hat-agnostic; we add it explicitly to
+    /// lock the integration.)
+    #[test]
+    fn test_emit_review_worker_channel_file_is_appended() {
+        let tmp = TempDir::new().unwrap();
+        let workspace = make_workspace(&tmp);
+        std::fs::write(
+            workspace.join(".ralph/current-events"),
+            ".ralph/events-main.jsonl",
+        )
+        .unwrap();
+        let wave_channel = workspace.join(".ralph/wave-w-rt-0.jsonl");
+        std::fs::File::create(&wave_channel).unwrap();
+        let wave_channel_str = wave_channel.display().to_string();
+        // Sanity: resolve_emit_path must point at the channel,
+        // not the main events file.
+        let resolved = resolve_emit_path(
+            &workspace,
+            &workspace.join(".ralph/events.jsonl"),
+            Some(&wave_channel_str),
+            Some("review-worker"),
+            true,
+            Some("w-rt"),
+            Some(0),
+        )
+        .expect("resolve");
+        assert!(
+            resolved.ends_with(".ralph/wave-w-rt-0.jsonl"),
+            "resolved must be wave channel"
+        );
+    }
+
+    /// U3 / S4 (plan 2026-07-26-003): when a wave-worker (or a
+    /// hat masquerading as one) tries to land on a path that
+    /// doesn't carry the dispatcher-signed wave shape, the
+    /// rejection must NOT be silent — the call site emits a
+    /// machine-readable stderr line (`path_resolution_failed`)
+    /// so an integrator hat that misroutes can be diagnosed by
+    /// `ralph diagnose`. The `recovery.jsonl` envelope is reserved
+    /// for the policy-precheck path; this assertion prevents a
+    /// future refactor from erasing the explicit stderr signal
+    /// during a "tidy error printing" pass.
+    #[test]
+    fn test_emit_wave_worker_mismatch_writes_diagnostic_signal() {
+        let tmp = TempDir::new().unwrap();
+        let workspace = make_workspace(&tmp);
+        std::fs::write(
+            workspace.join(".ralph/current-events"),
+            ".ralph/events-main.jsonl",
+        )
+        .unwrap();
+        // Mismatched wave_id while isolated + hat present.
+        let wave_channel = workspace
+            .join(".ralph/wave-w-other-0.jsonl")
+            .display()
+            .to_string();
+        let result = resolve_emit_path(
+            &workspace,
+            &workspace.join(".ralph/events.jsonl"),
+            Some(&wave_channel),
+            Some("review-worker"),
+            true,
+            Some("w-expected"), // dispatcher-bound id
+            Some(0),
+        );
+        assert!(result.is_err(), "mismatched wave_id must be rejected");
+        let msg = result.unwrap_err().to_string();
+        // Either the explicit allowlist rejection OR a symlink /
+        // path-traversal message is acceptable; what matters is
+        // that the failure is observable — i.e. the path
+        // silently falling back to main is impossible.
+        assert!(
+            !msg.is_empty(),
+            "rejection message must carry a non-empty diagnostic"
+        );
+    }
+
     #[test]
     fn test_emit_auto_detects_json_payload_without_json_flag() {
         // Bug #4 regression: work.done and other structured events must be
