@@ -10,7 +10,7 @@
 
 use ralph_core::supervisor::{
     CoordinatorAction, InMemoryCoordinatorBridge, InMemorySupervisorStore, PhaseInputs,
-    SupervisorBridge, SupervisorStore, WaveKind,
+    SupervisorBridge, SupervisorStore, TerminalEvidence, WaveKind,
 };
 use ralph_core::testing::{MockBackend, Scenario, ScenarioRunner};
 use ralph_core::{EventLoop, EventParser, HatConfig, LoopContext, RalphConfig, TerminationReason};
@@ -666,6 +666,34 @@ fn run_bdd_supervisor_fan_in(
             {
                 eprintln!(
                     "[bdd-supervisor] record_slot_result failed for {wave_id}/{slot_index}: {err}"
+                );
+            }
+            // Plan 004 R2 / P0-2: the production success path
+            // requires terminal evidence per slot (KTD3
+            // fail-closed). Without this the coordinator
+            // falls into `Failed(IncompleteEvidence)` and
+            // the BDD scenario misses the expected
+            // `exec.wave.complete` (or `review.wave.complete`).
+            // We use the worker topic + payload as the
+            // evidence body so the stored fingerprint matches
+            // what the worker actually emitted.
+            let wave_kind_for_evidence =
+                wave_kind.get(&wave_id).copied().unwrap_or(WaveKind::Exec);
+            let evidence_topic = match wave_kind_for_evidence {
+                ralph_core::supervisor::WaveKind::Review => "review.unit.done",
+                ralph_core::supervisor::WaveKind::Fix => "fix.unit.done",
+                ralph_core::supervisor::WaveKind::Exec => "exec.unit.done",
+            };
+            let evidence_payload = format!(
+                "{{\"slot_index\":{slot_index},\"content_hash\":\"{content_hash}\",\"event_count\":{event_count}}}"
+            );
+            if let Err(err) = bridge.store().record_slot_terminal_evidence(
+                &store_id,
+                *slot_index,
+                &TerminalEvidence::from_event(evidence_topic, &evidence_payload),
+            ) {
+                eprintln!(
+                    "[bdd-supervisor] record_slot_terminal_evidence failed for {wave_id}/{slot_index}: {err}"
                 );
             }
         }

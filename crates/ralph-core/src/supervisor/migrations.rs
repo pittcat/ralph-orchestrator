@@ -52,10 +52,45 @@ mod imp {
         let current = user_version(connection)?;
         for migration in migrations() {
             if current < migration.version {
-                connection.execute_batch(migration.ddl)?;
+                if let Some(per_column) = migration.column_probe {
+                    apply_with_column_probe(connection, per_column)?;
+                } else {
+                    connection.execute_batch(migration.ddl)?;
+                }
                 connection.pragma_update(None, "user_version", migration.version)?;
             }
         }
+        Ok(())
+    }
+
+    /// Plan 004 (post-P0-2 hotfix): when two ralph CLI processes
+    /// race to migrate a fresh supervisor DB, the second
+    /// process can hit `duplicate column name` on the
+    /// `ALTER TABLE ... ADD COLUMN` statements inside a
+    /// migration. SQLite has no `ADD COLUMN IF NOT EXISTS`,
+    /// so we probe via `pragma_table_info` first and skip the
+    /// ALTER for columns that already exist. We wrap the
+    /// probe + ALTER in a transaction so a concurrent opener
+    /// that already saw the new columns does not see a
+    /// half-migrated schema.
+    fn apply_with_column_probe(
+        connection: &Connection,
+        columns: &[(/* table */ &str, /* column */ &str, /* ddl */ &str)],
+    ) -> rusqlite::Result<()> {
+        connection.execute_batch("BEGIN IMMEDIATE")?;
+        for (table, column, ddl) in columns {
+            let present: i64 = connection
+                .query_row(
+                    "SELECT COUNT(*) FROM pragma_table_info(?1) WHERE name = ?2",
+                    rusqlite::params![table, column],
+                    |row| row.get(0),
+                )
+                .unwrap_or(0);
+            if present == 0 {
+                connection.execute_batch(ddl)?;
+            }
+        }
+        connection.execute_batch("COMMIT")?;
         Ok(())
     }
 
@@ -71,6 +106,16 @@ mod imp {
     struct Migration {
         version: i64,
         ddl: &'static str,
+        /// Optional column-probe list: `(table, column, ALTER)`.
+        /// When present, the migration runner probes each
+        /// column via `pragma_table_info` and only emits the
+        /// ALTER for missing columns. Use this for any migration
+        /// that contains `ALTER TABLE ... ADD COLUMN`
+        /// statements — the second concurrent opener would
+        /// otherwise fail with `duplicate column name`.
+        /// `None` (default) falls back to a plain
+        /// `execute_batch(ddl)`.
+        column_probe: Option<&'static [(&'static str, &'static str, &'static str)]>,
     }
 
     fn migrations() -> &'static [Migration] {
@@ -84,26 +129,61 @@ mod imp {
         // `CREATE TABLE IF NOT EXISTS`; existing v1/v2
         // databases auto-upgrade without touching existing
         // rows.
+        /// Plan 004 (post-P0-2 hotfix): v4 + v5 use the
+        /// column-probe path because their DDL contains
+        /// `ALTER TABLE ... ADD COLUMN` statements. SQLite
+        /// has no `ADD COLUMN IF NOT EXISTS`, so two ralph
+        /// CLI processes racing to migrate a fresh DB would
+        /// otherwise fail the second opener with
+        /// `duplicate column name: evidence_topic` (or
+        /// `salvage_merged`).
+        const V4_PROBE: &[(/* table */ &str, /* column */ &str, /* ddl */ &str)] = &[
+            (
+                "wave_slots",
+                "evidence_topic",
+                "ALTER TABLE wave_slots ADD COLUMN evidence_topic TEXT",
+            ),
+            (
+                "wave_slots",
+                "evidence_dimension",
+                "ALTER TABLE wave_slots ADD COLUMN evidence_dimension TEXT",
+            ),
+            (
+                "wave_slots",
+                "evidence_fingerprint",
+                "ALTER TABLE wave_slots ADD COLUMN evidence_fingerprint TEXT",
+            ),
+        ];
+        const V5_PROBE: &[(/* table */ &str, /* column */ &str, /* ddl */ &str)] = &[(
+            "waves",
+            "salvage_merged",
+            "ALTER TABLE waves ADD COLUMN salvage_merged INTEGER NOT NULL DEFAULT 0",
+        )];
         &[
             Migration {
                 version: 1,
                 ddl: include_str!("migrations/v1.sql"),
+                column_probe: None,
             },
             Migration {
                 version: 2,
                 ddl: include_str!("migrations/v2.sql"),
+                column_probe: None,
             },
             Migration {
                 version: 3,
                 ddl: include_str!("migrations/v3.sql"),
+                column_probe: None,
             },
             Migration {
                 version: 4,
                 ddl: include_str!("migrations/v4.sql"),
+                column_probe: Some(V4_PROBE),
             },
             Migration {
                 version: 5,
                 ddl: include_str!("migrations/v5.sql"),
+                column_probe: Some(V5_PROBE),
             },
         ]
     }
@@ -182,5 +262,85 @@ mod tests {
                 "table `{table}` must exist after run() (got {count})"
             );
         }
+    }
+
+    /// Plan 004 (post-P0-2 hotfix): two threads racing to
+    /// migrate the same fresh DB must BOTH succeed. The
+    /// pre-fix `ALTER TABLE ... ADD COLUMN` raised
+    /// `duplicate column name` on the second opener; the
+    /// column-probe path lets the second opener see the
+    /// columns already exist and skip the ALTER. We mirror
+    /// `RusqliteSupervisorStore::open`'s `SQLITE_BUSY` retry
+    /// so the test does not flake on filesystem-level WAL
+    /// sidecar races that bypass SQLite's busy handler.
+    #[test]
+    fn concurrent_openers_do_not_collide_on_v4_v5_columns() {
+        use std::sync::{Arc, Barrier};
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("supervisor.db");
+        let path = Arc::new(path);
+        let barrier = Arc::new(Barrier::new(2));
+        let mut handles = Vec::new();
+        for _ in 0..2 {
+            let path = Arc::clone(&path);
+            let barrier = Arc::clone(&barrier);
+            handles.push(std::thread::spawn(move || {
+                let conn = Connection::open(path.as_ref()).unwrap();
+                conn.pragma_update(None, "busy_timeout", 5000).unwrap();
+                barrier.wait();
+                // Mirror RusqliteSupervisorStore::open's
+                // SQLITE_BUSY retry on WAL sidecar races.
+                const MIGRATION_RETRIES: u32 = 5;
+                let mut attempt = 0u32;
+                loop {
+                    match run(&conn) {
+                        Ok(()) => return,
+                        Err(err) if attempt < MIGRATION_RETRIES => {
+                            let busy = matches!(
+                                &err,
+                                rusqlite::Error::SqliteFailure(
+                                    rusqlite::ffi::Error { code: rusqlite::ErrorCode::DatabaseBusy, .. },
+                                    _,
+                                )
+                            );
+                            if !busy {
+                                panic!("non-busy migration error: {err}");
+                            }
+                            std::thread::sleep(std::time::Duration::from_millis(
+                                50 * (attempt as u64 + 1),
+                            ));
+                            attempt += 1;
+                        }
+                        Err(err) => panic!("migration failed after retries: {err}"),
+                    }
+                }
+            }));
+        }
+        for h in handles {
+            h.join().unwrap();
+        }
+        // Open a third connection and verify the columns
+        // are present and the schema is the expected
+        // post-v5 shape.
+        let conn = Connection::open(path.as_ref()).unwrap();
+        for col in ["evidence_topic", "evidence_dimension", "evidence_fingerprint"] {
+            let present: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM pragma_table_info('wave_slots') WHERE name = ?1",
+                    [col],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(present, 1, "wave_slots.{col} must exist after concurrent migration");
+        }
+        // waves must carry salvage_merged (v5).
+        let present: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('waves') WHERE name = 'salvage_merged'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(present, 1, "waves.salvage_merged must exist after concurrent migration");
     }
 }

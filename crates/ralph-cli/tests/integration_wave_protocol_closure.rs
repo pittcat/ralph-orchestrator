@@ -14,6 +14,7 @@
 use crate::common::{ralph_bin, scrub_agent_runtime_env};
 use std::io::Write;
 use std::path::Path;
+use std::process::Stdio;
 use tempfile::TempDir;
 
 #[path = "common/mod.rs"]
@@ -595,11 +596,14 @@ fn u8_concurrent_distinct_keys_both_succeed() {
     let store_path_str = store_path.to_string_lossy().into_owned();
     let barrier = Arc::new(Barrier::new(2));
 
-    let spawn_one = |ws: std::path::PathBuf,
-                     payloads: std::path::PathBuf,
-                     store: String,
-                     key: String,
-                     barrier: Arc<Barrier>| {
+    // Concurrent spawn: capture stdout AND stderr so a non-zero
+    // exit surfaces a usable diagnostic (the previous helper only
+    // piped stdout; silent failures looked like "code=1, stdout=''"
+    // and we couldn't tell why key-b flaked under saturated runners).
+    let spawn_one = |key: String, barrier: Arc<Barrier>| {
+        let ws = ws.clone();
+        let payloads = payloads.clone();
+        let store = store_path_str.clone();
         thread::spawn(move || {
             barrier.wait();
             let start = Instant::now();
@@ -618,39 +622,38 @@ fn u8_concurrent_distinct_keys_both_succeed() {
             common::scrub_agent_runtime_env(&mut cmd);
             cmd.env("RALPH_EMISSION_STORE_PATH", &store);
             cmd.stdin(std::fs::File::open(&payloads).unwrap());
+            cmd.stderr(Stdio::piped());
+            cmd.stdout(Stdio::piped());
             let output = cmd.output().expect("ralph spawn");
             let elapsed = start.elapsed();
             (
                 output.status.code().unwrap_or(-1),
                 String::from_utf8_lossy(&output.stdout).to_string(),
+                String::from_utf8_lossy(&output.stderr).to_string(),
                 elapsed,
             )
         })
     };
 
-    let h1 = spawn_one(
-        ws.clone(),
-        payloads.clone(),
-        store_path_str.clone(),
-        "u8-key-a".into(),
-        Arc::clone(&barrier),
+    let h1 = spawn_one("u8-key-a".into(), Arc::clone(&barrier));
+    let h2 = spawn_one("u8-key-b".into(), barrier);
+    let (c1, s1, err1, elapsed1) = h1.join().unwrap();
+    let (c2, s2, err2, elapsed2) = h2.join().unwrap();
+    assert_eq!(
+        c1,
+        0,
+        "key-a must succeed: stdout={s1} stderr={err1}",
     );
-    let h2 = spawn_one(
-        ws.clone(),
-        payloads,
-        store_path_str,
-        "u8-key-b".into(),
-        barrier,
+    assert_eq!(
+        c2,
+        0,
+        "key-b must succeed: stdout={s2} stderr={err2}",
     );
-    let (c1, s1, e1) = h1.join().unwrap();
-    let (c2, s2, e2) = h2.join().unwrap();
-    assert_eq!(c1, 0, "key-a must succeed: {s1}");
-    assert_eq!(c2, 0, "key-b must succeed: {s2}");
     let w1 = json_field(&s1, "wave_id").unwrap().to_string();
     let w2 = json_field(&s2, "wave_id").unwrap().to_string();
     assert_ne!(w1, w2, "distinct keys must mint distinct wave_ids");
     // Overlap heuristic: both started after the same barrier; wall
     // clocks are not an SLA — just assert both finished (non-serial
     // proof is Store-layer; here we prove concurrent CLI success).
-    assert!(e1.as_secs_f64() >= 0.0 && e2.as_secs_f64() >= 0.0);
+    assert!(elapsed1.as_secs_f64() >= 0.0 && elapsed2.as_secs_f64() >= 0.0);
 }

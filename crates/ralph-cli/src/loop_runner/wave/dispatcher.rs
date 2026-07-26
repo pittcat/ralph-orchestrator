@@ -2340,26 +2340,22 @@ pub(crate) fn run_supervisor_fan_in(
             // when its Exec arm lands. Until then, this branch
             // covers Review only (R7).
             if matches!(wave_kind, ralph_core::supervisor::WaveKind::Review) {
-                merge_completed_review_slots_to_main(main_events_file, completed);
-                // Plan 004 R3 / P0-1: commit the salvage merge
-                // BEFORE `fail_wave` latches the coord-event
-                // injection. Without this `mark_salvage_merged`
-                // the coordinator's new pre-check refuses to
-                // inject `*.wave.failed` because the salvage
-                // write has not yet been persisted; the dispatcher
-                // re-ticks after marking and the coord-event lands
-                // exactly once. The mark is idempotent across
+                // Plan 004 R3 / P0-1: the salvage mark now lives
+                // inside `merge_completed_review_slots_to_main`
+                // (post-write). The dispatcher cannot forget it
+                // after the write; the helper itself fails closed
+                // (returns silently without marking) if the
+                // main-ledger append fails, so the next tick
+                // re-runs the merge seam and the mark will be
+                // retried then. The mark is idempotent across
                 // replays and restarts (Memory + rusqlite stores
                 // both honour it).
-                if let Err(err) = bridge
-                    .mark_salvage_merged(&store_wave_id)
-                {
-                    warn!(
-                        wave_id = %store_wave_id,
-                        error = %err,
-                        "P0-1: mark_salvage_merged failed; next tick will retry",
-                    );
-                }
+                merge_completed_review_slots_to_main(
+                    main_events_file,
+                    completed,
+                    bridge,
+                    &store_wave_id,
+                );
             }
             // 2026-07-26-002 plan U5 (R5 / KTD6) + 2026-07-26-003
             // plan U4 (KTD5): the merged function takes BOTH
@@ -3045,6 +3041,8 @@ fn append_supervisor_coord_event(
 fn merge_completed_review_slots_to_main(
     main_events_file: &Path,
     completed: &ralph_core::CompletedWave,
+    bridge: &Arc<dyn ralph_core::supervisor::SupervisorBridge>,
+    store_wave_id: &str,
 ) {
     use std::io::Write;
     let mut lines: Vec<String> = Vec::new();
@@ -3086,6 +3084,15 @@ fn merge_completed_review_slots_to_main(
     if lines.is_empty() {
         return;
     }
+    // Append-then-commit: write the rows first, then commit the
+    // salvage mark. Plan 004 R3 / P0-1 makes the mark live inside
+    // this helper (instead of after the dispatcher call) so the
+    // dispatcher cannot forget the mark after the write — the
+    // pre-fix code's missing-mark window was the original
+    // silent-success regression that the split-phase latch was
+    // introduced to close. The mark is idempotent across replays
+    // and restarts; a write failure leaves the mark unset so the
+    // coordinator's next tick re-runs the merge seam.
     let open = || -> std::io::Result<()> {
         if let Some(parent) = main_events_file.parent()
             && !parent.as_os_str().is_empty()
@@ -3108,7 +3115,27 @@ fn merge_completed_review_slots_to_main(
             path = %main_events_file.display(),
             error = %err,
             "U5: failed to merge Completed review slots to main ledger; \
-             continuing with coord event injection anyway (best-effort salvage)"
+             salvage mark will not be set so the coordinator will refuse \
+             the coord-event injection until the next tick retries"
+        );
+        return;
+    }
+    // Commit the salvage mark AFTER the rows landed. The mark
+    // gates `fail_wave`'s coord-event injection (P0-1) so the
+    // crash window between append and latch can only re-merge
+    // (idempotent on slot status), never re-inject. We use the
+    // store-assigned `store_wave_id` (not `completed.wave_id`)
+    // because the bridge's `mark_salvage_merged` keys off the
+    // row id the store actually wrote; the two normally agree
+    // but the helper must work even when callers pass a
+    // supervisor-idempotency key that does not match the
+    // store-assigned id.
+    if let Err(err) = bridge.mark_salvage_merged(store_wave_id) {
+        warn!(
+            wave_id = %store_wave_id,
+            error = %err,
+            "merge_completed_review_slots_to_main: mark_salvage_merged failed; \
+             next tick will retry"
         );
     }
 }
@@ -6753,7 +6780,27 @@ hats: {}
             expected_dimension: None,
             actual_dimension: None,
         });
-        merge_completed_review_slots_to_main(&main, &completed);
+        let store = std::sync::Arc::new(ralph_core::supervisor::InMemorySupervisorStore::new());
+        use ralph_core::supervisor::SupervisorStore as _;
+        // Register the wave so `fan_in_status` succeeds after
+        // the helper commits salvage_merged (P0-1 invariant).
+        // `register_wave` returns the store-assigned `w-N` id,
+        // NOT the idempotency key, so we must capture it.
+        let wave_id = store
+            .register_wave("W1", ralph_core::supervisor::WaveKind::Review, 2)
+            .expect("register");
+        let bridge: Arc<dyn ralph_core::supervisor::SupervisorBridge> =
+            Arc::new(ralph_core::supervisor::InMemoryCoordinatorBridge::from_store(
+                store.clone(),
+            ));
+        merge_completed_review_slots_to_main(&main, &completed, &bridge, &wave_id);
+        // P0-1: the helper must also commit `salvage_merged` so
+        // the dispatcher's failure path can inject `*.wave.failed`.
+        let snap = store.fan_in_status(&wave_id).expect("snap");
+        assert!(
+            snap.salvage_merged,
+            "merge_completed_review_slots_to_main must commit salvage_merged (P0-1)"
+        );
         let f = std::fs::File::open(&main).expect("events file written");
         let lines: Vec<String> = std::io::BufReader::new(f)
             .lines()
@@ -6824,10 +6871,28 @@ hats: {}
             dimension_retry_counts: std::collections::HashMap::new(),
             worker_events: Vec::new(),
         };
-        merge_completed_review_slots_to_main(&main, &completed);
+        let store = std::sync::Arc::new(ralph_core::supervisor::InMemorySupervisorStore::new());
+        use ralph_core::supervisor::SupervisorStore as _;
+        let wave_id = store
+            .register_wave("W-empty", ralph_core::supervisor::WaveKind::Review, 1)
+            .expect("register");
+        let bridge: Arc<dyn ralph_core::supervisor::SupervisorBridge> =
+            Arc::new(ralph_core::supervisor::InMemoryCoordinatorBridge::from_store(
+                store.clone(),
+            ));
+        merge_completed_review_slots_to_main(&main, &completed, &bridge, &wave_id);
         // No file is created when there is nothing to write —
         // the helper is a no-op for an empty `results` set.
         assert!(!main.exists() || std::fs::metadata(&main).unwrap().len() == 0);
+        // Empty path must NOT commit salvage_merged either; the
+        // helper bails out before the mark is set so the
+        // coordinator's next tick (if any) still treats the wave
+        // as un-salvaged.
+        let snap = store.fan_in_status(&wave_id).expect("snap");
+        assert!(
+            !snap.salvage_merged,
+            "empty results must not commit salvage_merged (P0-1)"
+        );
     }
 
     /// U1 guard rail for the success path: `review.wave.complete`
