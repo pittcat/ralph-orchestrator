@@ -2266,8 +2266,11 @@ pub(crate) fn run_supervisor_fan_in(
                     &reasons,
                     elapsed_secs,
                 );
-                if let Err(err) =
-                    write_wave_diagnostics_json(Path::new("."), &completed.wave_id, &payload)
+                if let Err(err) = write_wave_diagnostics_json(
+                    &workspace_root_from_events(main_events_file),
+                    &completed.wave_id,
+                    &payload,
+                )
                 {
                     warn!(
                         wave_id = %completed.wave_id,
@@ -6393,6 +6396,127 @@ hats: {}
         assert_eq!(slots[3]["slot_index"], 3);
         assert_eq!(slots[3]["status"], "cancelled");
         assert_eq!(slots[3]["reason"], "worker_cancelled");
+    }
+
+    /// 2026-07-26-002 plan U4 (R4): the InjectedFailed arm in
+    /// `run_supervisor_fan_in` MUST write the diagnostics JSON
+    /// under the workspace root derived from the main events
+    /// file (NOT process CWD). This test exercises the production
+    /// path end-to-end:
+    ///
+    /// 1. Construct a real `run_supervisor_fan_in` invocation
+    ///    with a Failed/Cancelled slot mix.
+    /// 2. Pass a main events file inside a fresh temp dir.
+    /// 3. Assert the diagnostics JSON lands at
+    ///    `<temp>/.ralph/diagnostics/wave-<id>-slots.json`.
+    ///
+    /// The previous `u5_injected_failed_writes_diagnostics_json`
+    /// test called `write_wave_diagnostics_json` directly, which
+    /// masked the CWD bug — that test is preserved as a unit
+    /// helper-level guard but this test is the authoritative
+    /// production integration check.
+    #[test]
+    fn u4_run_supervisor_fan_in_injected_failed_writes_workspace_diagnostics() {
+        use ralph_core::config::HatConfig;
+        use ralph_core::supervisor::InMemoryCoordinatorBridge;
+        use ralph_core::supervisor::SlotResource;
+        use ralph_core::supervisor::SupervisorBridge;
+        use ralph_core::supervisor::{PhaseInputs, SupervisorStore, WaveKind};
+
+        // Workspace = fresh temp dir; main events file lives at
+        // <workspace>/.ralph/events.jsonl, exactly as the runner
+        // would emit.
+        let workspace = tempfile::TempDir::new().expect("temp workspace");
+        let ralph_dir = workspace.path().join(".ralph");
+        std::fs::create_dir_all(&ralph_dir).expect("mkdir .ralph");
+        let main_events_file = ralph_dir.join("events.jsonl");
+
+        let store = std::sync::Arc::new(ralph_core::supervisor::InMemorySupervisorStore::new());
+        let bridge = InMemoryCoordinatorBridge::from_store(store.clone());
+        let store_wave_id = bridge
+            .register_wave_if_absent(WaveKind::Exec, "w-u4-fan-in", 2)
+            .unwrap();
+
+        // Slot 0: success.
+        store
+            .bind_worktree(
+                &store_wave_id,
+                0,
+                SlotResource {
+                    slot_index: 0,
+                    worktree_path: Some(".ralph/s0".to_string()),
+                    branch: Some("ralph/u4-s0".to_string()),
+                },
+            )
+            .unwrap();
+        let _ = store.try_dispatch_next(8).unwrap().unwrap();
+        store
+            .record_slot_result(&store_wave_id, 0, "hash-s0", 1)
+            .unwrap();
+
+        // Slot 1: failure → will become blocking, triggering
+        // InjectedFailed.
+        store
+            .record_slot_failure(
+                &store_wave_id,
+                1,
+                ralph_core::supervisor::worker_outcome::REASON_WORKER_TIMEOUT,
+            )
+            .unwrap();
+
+        let completed = ralph_core::CompletedWave {
+            wave_id: "w-u4-fan-in".to_string(),
+            wave_total: 2,
+            ..ralph_core::CompletedWave::default()
+        };
+        let detected = ralph_core::DetectedWave {
+            wave_id: "w-u4-fan-in".to_string(),
+            target_hat: HatId::new("u4-hat"),
+            hat_config: HatConfig {
+                name: "u4-hat".to_string(),
+                ..HatConfig::default()
+            },
+            events: vec![core_event("work.ready", "payload-0")],
+            total: 1,
+            partial: false,
+            consumer_aggregate_timeout: None,
+        };
+
+        let bridge_arc: Arc<dyn ralph_core::supervisor::SupervisorBridge> = Arc::new(bridge);
+        let outcome =
+            run_supervisor_fan_in(&bridge_arc, &completed, &detected, &main_events_file, 60);
+        assert!(
+            matches!(outcome, SupervisorFanInOutcome::InjectedFailed),
+            "failed wave must reach InjectedFailed; got {outcome:?}"
+        );
+
+        // Authoritative assertion: diagnostics JSON exists under
+        // the workspace root, not under process CWD.
+        let diag_path = workspace
+            .path()
+            .join(".ralph")
+            .join("diagnostics")
+            .join("wave-w-u4-fan-in-slots.json");
+        assert!(
+            diag_path.exists(),
+            "InjectedFailed arm must write diagnostics at {diag_path:?}"
+        );
+        let bytes = std::fs::read(&diag_path).expect("read diagnostics");
+        let payload: serde_json::Value =
+            serde_json::from_slice(&bytes).expect("diagnostics must be valid JSON");
+        assert_eq!(payload["wave_id"], "w-u4-fan-in");
+        assert_eq!(payload["generated_at_kind"], "injected_failed");
+        let slots = payload["slots"].as_array().expect("slots must be an array");
+        assert_eq!(slots.len(), 2);
+        // Slot 1 is the Failed slot and must carry the worker_timeout
+        // reason from the store (the field the dispatcher used to
+        // leave blank by reading `completed.failures` free-form).
+        let s1 = slots
+            .iter()
+            .find(|s| s["slot_index"] == 1)
+            .expect("slot 1 must exist");
+        assert_eq!(s1["status"], "failed");
+        assert_eq!(s1["reason"], "worker_timeout");
     }
 
     // -------------------------------------------------------------------
