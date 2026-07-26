@@ -134,7 +134,8 @@ impl DetectedWave {
     /// (only strong signals refresh the lease).
     pub fn idle_weak_signal_cap(&self) -> u32 {
         match self.hat_config.idle_weak_signal_cap {
-            Some(0) | None => default_idle_weak_signal_cap(),
+            Some(0) => 0,
+            None => default_idle_weak_signal_cap(),
             Some(n) => n,
         }
     }
@@ -709,9 +710,9 @@ hats:
         // None → operator default (8)
         let w = detected_wave_with_hat_timeout(Some(600), Some(120), None);
         assert_eq!(w.idle_weak_signal_cap(), 8);
-        // Some(0) → operator default (explicit "no cap" still falls back)
+        // Some(0) → explicit zero (no cap)
         let w = detected_wave_with_hat_timeout(Some(600), Some(120), Some(0));
-        assert_eq!(w.idle_weak_signal_cap(), 8);
+        assert_eq!(w.idle_weak_signal_cap(), 0);
         // Some(n) → use as-is
         let w = detected_wave_with_hat_timeout(Some(600), Some(120), Some(3));
         assert_eq!(w.idle_weak_signal_cap(), 3);
