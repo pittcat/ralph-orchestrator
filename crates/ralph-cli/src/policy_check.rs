@@ -1066,25 +1066,23 @@ fn check_cli_flow_step_scope(
     // Plan 004 R7 (P0-4): the resident EventLoop writes accepted
     // step transitions to `.ralph/flow-authority.jsonl`; we read
     // the same ledger so CLI policy-check never disagrees with
-    // the resident loop on rejected events. When the file is
-    // missing (loop never accepted any event) we fall back to
-    // initial_current_plan_step via the topic-replay fold, which
-    // is correct because no event has been accepted yet.
+    // the resident loop on rejected events.
     //
-    // Plan 004 P1-8: the topic-replay fallback consults the
-    // caller-provided `events_file` (when supplied) instead of
-    // blindly reading `<workspace_root>/.ralph/events.jsonl`. The
-    // caller is the unified policy-check pipeline, which already
-    // resolved the path via the loop identity / RALPH_EVENTS_FILE
-    // override; passing it through here ensures multi-loop /
-    // worktree scenarios cannot accidentally read another loop's
-    // ledger.
+    // If the accepted-step ledger is missing, the default workspace
+    // path falls back to the accepted-state projection
+    // (`StateLedger::workflow_phase`) instead of guessing from raw
+    // topics. Only an explicit caller-provided `events_file` keeps
+    // the legacy topic-replay path, because external replay inputs
+    // are expected to already represent the accepted sequence the
+    // caller wants to validate.
     let current = if let Some(step) = load_flow_authority_current_step(workspace_root) {
         if step.is_empty() {
-            recover_from_topics(config, workspace_root, events_file)
+            recover_from_workspace_state(config, workspace_root)
         } else {
             step
         }
+    } else if events_file.is_none_or(|p| p == workspace_root.join(".ralph/events.jsonl")) {
+        recover_from_workspace_state(config, workspace_root)
     } else {
         recover_from_topics(config, workspace_root, events_file)
     };
@@ -1123,6 +1121,24 @@ fn recover_from_topics(
     let topics = read_main_ledger_topics(workspace_root, events_file);
     let topic_refs: Vec<&str> = topics.iter().map(|s| s.as_str()).collect();
     recover_current_plan_step(config, &topic_refs)
+}
+
+/// Recover the current step from accepted workspace state rather
+/// than from raw topic logs. This is the default-path fallback when
+/// the accepted-step ledger is absent.
+fn recover_from_workspace_state(
+    config: &ralph_core::config::RalphConfig,
+    workspace_root: &Path,
+) -> String {
+    use ralph_core::event_loop::recover_current_plan_step;
+    use ralph_core::state::StateLedger;
+
+    StateLedger::replay_from_disk(workspace_root)
+        .ok()
+        .and_then(|snap| snap.workflow_phase)
+        .map(|phase| phase.phase_id)
+        .filter(|phase_id| !phase_id.is_empty())
+        .unwrap_or_else(|| recover_current_plan_step(config, &[]))
 }
 
 /// Read the `topic` field of every JSONL line in the loop's main
@@ -3154,11 +3170,12 @@ event_loop:
 
     /// 2026-07-26-004 plan U7 (R7 / S7 / S8): the CLI `--policy-check`
     /// flow-step decision MUST agree with the resident EventLoop. With no
-    /// ledger the recovered step is the first step (`scope_freeze`), so
-    /// `review.unit.done` is rejected as `flow_unknown_emit`; once
-    /// `scope.ready` lands in the ledger the recovered step is
-    /// `review_wave` and the same emit is admitted — no silent fall-back
-    /// to the first step (the primary-20260726 flow drift).
+    /// accepted-state ledger the recovered step is the first step
+    /// (`scope_freeze`), so `review.unit.done` is rejected as
+    /// `flow_unknown_emit`; once the accepted-step ledger records
+    /// `scope.ready`, the recovered step is `review_wave` and the same
+    /// emit is admitted — no silent fall-back to raw topics (the
+    /// primary-20260726 flow drift).
     #[test]
     fn u7_cli_flow_step_scope_agrees_with_recovered_step() {
         use ralph_core::config::{
@@ -3181,6 +3198,7 @@ event_loop:
             }
         };
         let mut cfg = RalphConfig::default();
+        cfg.mechanism = None;
         cfg.event_loop = EventLoopConfig {
             mechanism: Some(MechanismConfig {
                 flow: Some(FlowDeclarationConfig {
@@ -3221,13 +3239,14 @@ event_loop:
             "review.unit.done at the first step must be flow_unknown_emit"
         );
 
-        // Land scope.ready in the ledger → recovered step = review_wave.
+        // Land scope.ready in the accepted-step ledger → recovered
+        // step = review_wave.
         std::fs::create_dir_all(ws.path().join(".ralph")).expect("mkdir .ralph");
         std::fs::write(
-            ws.path().join(".ralph/events.jsonl"),
-            "{\"topic\":\"scope.ready\"}\n",
+            ws.path().join(".ralph/flow-authority.jsonl"),
+            "{\"step\":\"review_wave\",\"topic\":\"scope.ready\"}\n",
         )
-        .expect("write ledger");
+        .expect("write accepted-step ledger");
 
         // After scope.ready: the SAME emit is admitted (CLI agrees with
         // the recovered review_wave step the EventLoop would hold).
@@ -3245,6 +3264,87 @@ event_loop:
         );
     }
 
+    /// P1 regression: when the accepted-step ledger is missing, the
+    /// default workspace path must not infer the current step from raw
+    /// topic logs. A forged `review.wave.failed` in `events.jsonl`
+    /// must not advance the recovered step to `finalize` and allow
+    /// `review.blocked`.
+    #[test]
+    fn p1_8_policy_check_default_path_ignores_raw_topic_replay_without_acceptance_ledger() {
+        use ralph_core::config::{
+            EventLoopConfig, FlowDeclarationConfig, FlowStepConfig, MechanismConfig, RalphConfig,
+        };
+        let mk = |id: &str,
+                  allowed: Vec<&str>,
+                  on: Option<&str>,
+                  on_any_of: Vec<&str>|
+         -> FlowStepConfig {
+            FlowStepConfig {
+                id: id.to_string(),
+                kind: None,
+                allowed_emits: allowed.into_iter().map(String::from).collect(),
+                terminal_when: None,
+                on_partial: std::collections::BTreeMap::new(),
+                runs: None,
+                on: on.map(String::from),
+                on_any_of: on_any_of.into_iter().map(String::from).collect(),
+            }
+        };
+
+        let mut cfg = RalphConfig::default();
+        cfg.event_loop = EventLoopConfig {
+            mechanism: Some(MechanismConfig {
+                flow: Some(FlowDeclarationConfig {
+                    flow_type: "declared".to_string(),
+                    version: 1,
+                    terminal_emits: vec!["LOOP_COMPLETE".to_string()],
+                    steps: vec![
+                        mk("scope_freeze", vec!["scope.ready"], None, vec![]),
+                        mk(
+                            "review_wave",
+                            vec!["review.unit.done", "review.wave.failed"],
+                            Some("scope.ready"),
+                            vec!["finalize"],
+                        ),
+                        mk(
+                            "finalize",
+                            vec!["review.blocked"],
+                            Some("review.wave.failed"),
+                            vec![],
+                        ),
+                    ],
+                    enforce_schema: "hard".to_string(),
+                    state_idempotency: "required".to_string(),
+                    repair_budget: Default::default(),
+                }),
+                phase_authority: None,
+            }),
+            ..EventLoopConfig::default()
+        };
+
+        let ws = tempfile::tempdir().expect("tempdir");
+        std::fs::create_dir_all(ws.path().join(".ralph")).expect("mkdir .ralph");
+        std::fs::write(
+            ws.path().join(".ralph/events.jsonl"),
+            "{\"topic\":\"scope.ready\"}\n{\"topic\":\"review.wave.failed\"}\n",
+        )
+        .expect("write raw ledger");
+
+        let reject = check_cli_flow_step_scope(
+            &cfg,
+            ws.path(),
+            None,
+            "review.blocked",
+            Some("finalizer"),
+            Some("{}"),
+        );
+        assert_eq!(
+            reject.as_deref(),
+            Some("flow_unknown_emit"),
+            "default-path policy-check must ignore raw topic replay when the accepted-step ledger is missing",
+        );
+    }
+
     /// Plan 004 P1-8: CLI policy-check honours a caller-provided
     /// `events_file`. Two loops A and B in the same workspace
     /// write different ledgers; policy-check on loop A must NOT
@@ -3258,6 +3358,7 @@ event_loop:
             EventLoopConfig, FlowDeclarationConfig, FlowStepConfig, MechanismConfig,
         };
         let cfg = RalphConfig {
+            mechanism: None,
             event_loop: EventLoopConfig {
                 mechanism: Some(MechanismConfig {
                     flow: Some(FlowDeclarationConfig {
