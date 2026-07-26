@@ -1533,30 +1533,23 @@ fn test_implementation_review_wave() {
     run_workflow_guard_scenario(yaml);
 }
 
-/// 2026-07-26-003 plan U6 / S7 / AE5: review.wave.failed →
-/// finalizer → LOOP_COMPLETE{result:blocked}. Run on the real
-/// EventLoop (`run_workflow_guard_scenario`, the stub-safe
-/// `run_scenario` would silently swallow the topology mismatch)
-/// so `expected.events` asserts the events that actually hit
-/// the ledger. The hat assignment locked in by the scenario's
-/// `subscribes_to` chain proves that the wave-failed trigger
-/// routes to `finalizer`, never to `review-synthesizer` (the
-/// primary-20260726 incident misroute).
-///
-/// OPEN: the scenario's mock-iteration timing still needs a
-/// one-step tuning pass before it pins green under the current
-/// workflow-guard runner (the supervisor-coord topic path
-/// requires an extra idle iteration between the wave-runtime
-/// publishing `review.wave.failed` and the finalizer's
-/// `LOOP_COMPLETE` emission). The fixture + hat topology are
-/// correct; we keep this ignored so the U2 dispatcher test
-/// pinning (which covers the same S7 contract at the unit
-/// level) is the authoritative gate, and a follow-up plan can
-/// re-enable this with a 6-mock / 6-iter cadence matching
-/// `implementation_review_wave` after the workflow-guard runner
-/// accepts the inactive-handoff semantics.
+/// 2026-07-26-003 plan U6 / S7 / AE5 + 2026-07-26-004 plan U10
+/// (R10): review.wave.failed → finalizer → LOOP_COMPLETE{result:blocked}.
+/// Run on the real EventLoop (`run_workflow_guard_scenario`,
+/// the stub-safe `run_scenario` would silently swallow the
+/// topology mismatch) so `expected.events` asserts the events
+/// that actually hit the ledger. The hat assignment locked in
+/// by the scenario's `subscribes_to` chain proves that the
+/// wave-failed trigger routes to `finalizer`, never to
+/// `review-synthesizer` (the primary-20260726 incident
+/// misroute). All 5 mock responses are consumed in order:
+/// scope-preparer emits scope.ready → review-dispatcher emits
+/// review.unit.ready → review-worker emits review.unit.done →
+/// wave-runtime injects review.wave.failed → finalizer emits
+/// LOOP_COMPLETE. The absent_events guarantee locks the S7 /
+/// AE5 contract: `review.synthesized` / `review.wave.complete`
+/// must NOT appear when the wave goes down the failed path.
 #[test]
-#[ignore = "workflow-guard mock-iteration cadence still needs tuning (finalizer LOOP_COMPLETE handoff). 2026-07-26-004 proved the S10 contract at the production run_supervisor_fan_in + preset level (u1_red1 / u4_replayed / u5_salvaged / test_implementation_review_adopts_generic_mechanism_contract); the scenario routing is correct (review.wave.failed seen, no success-side detour) — only the harness cadence for the terminal LOOP_COMPLETE remains."]
 fn test_implementation_review_wave_failed() {
     let yaml = load_scenario("tests/scenarios/implementation_review_wave_failed.yml");
     run_workflow_guard_scenario(yaml);

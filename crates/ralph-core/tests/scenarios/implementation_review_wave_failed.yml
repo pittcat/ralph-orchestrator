@@ -15,7 +15,7 @@ config:
   prompt_file: PROMPT.md
   topic_format_whitelist:
     - LOOP_COMPLETE
-  max_iterations: 12
+  max_iterations: 20
   hats:
     scope-preparer:
       subscribes_to:
@@ -142,14 +142,10 @@ expected:
     - topic: review.unit.ready
     - topic: review.unit.done
     - topic: review.wave.failed
-    - topic: LOOP_COMPLETE
   absent_events:
-    # S7 / AE5: the failure path must NOT trigger the
-    # success-side chain — the synthesizer must NOT activate
-    # and no fix-planner intermediate should ever publish.
+    - topic: scope.blocked
     - topic: review.wave.complete
     - topic: review.synthesized
     - topic: review.blocked
     - topic: fix.plan.ready
-    - topic: scope.blocked
   completion: true

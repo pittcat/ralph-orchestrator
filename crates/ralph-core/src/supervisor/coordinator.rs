@@ -25,7 +25,7 @@ use crate::event_origin::is_supervisor_coordination_topic;
 use super::merge_sink::{EventMergeSink, InMemoryMergeSink};
 use super::{
     SlotStatus,
-    phase::{FailedReason, PhaseDecision, PhaseInputs, WaveSnapshotExt, evaluate_phase},
+    phase::{FailedReason, PhaseDecision, PhaseInputs, evaluate_phase},
 };
 use super::{SupervisorStore, SupervisorStoreResult, WavePhase, WaveSnapshot};
 use crate::supervisor::WaveKind;
