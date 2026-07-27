@@ -5139,26 +5139,27 @@ fn test_u6_failed_payload_exposes_per_slot_reasons() {
 //     `coordinator.rs` (review path has its own merge helper; exec/fix
 //     does not — this is the distinction U2-U7 exploits).
 
-/// U1 Test 1 (GREEN — characterizes current gap): exec/fix partial failure
-/// does NOT salvage Completed slot business events to the main ledger.
+/// U1 Test 1 (2026-07-25-005 plan U1): exec/fix partial failure
+/// salvages Completed slot business events to the main ledger.
 ///
 /// Setup: a 2-slot exec wave.
 ///   - slot 0: emits `exec.unit.done`, reaches Completed
 ///   - slot 1: worker_timeout, reaches Failed
 ///
 /// After fan-in:
-///   - The main ledger must NOT contain slot 0's `exec.unit.done` event
-///     (the partial failure path drops it — this is the gap U2-U7 will fix)
+///   - The main ledger MUST contain slot 0's `exec.unit.done` event
+///     exactly once (salvage keeps the completed slot's business event)
 ///   - `blocking_slots` must be `[1]` (NOT `[0, 1]` — completed slots
 ///     are never blocking per the phase decision contract)
 ///   - `exec.wave.failed` is injected
 ///
-/// A1 adversarial assertions added:
+/// A1 adversarial assertions:
 ///   - Salvaged event payload unit must equal "u1-0" (origin pin)
 ///   - Failed slot must have no terminal evidence (failed-slot integrity)
 ///
-/// This test PASSES on current HEAD — proving the gap exists and
-/// locking the characterization for future fix verification.
+/// This test was originally a GREEN gap-lock asserting the completed
+/// slot's event was dropped; salvage (U1) has since landed, so it is
+/// updated to assert the salvaged event IS present.
 #[test]
 fn exec_fix_partial_failure_does_not_salvage_completed_slot_events() {
     use crate::loop_runner::wave::{SupervisorFanInOutcome, run_supervisor_fan_in};
@@ -5268,17 +5269,28 @@ fn exec_fix_partial_failure_does_not_salvage_completed_slot_events() {
         .map(|l| serde_json::from_str(l).expect("ledger line must be JSON"))
         .collect();
 
-    // The main ledger must contain exactly one coord event (`exec.wave.failed`),
-    // and slot 0's `exec.unit.done` must NOT appear.
-    let exec_unit_done_count = lines
+    // Salvage (2026-07-25-005 plan U1) writes the completed slot's
+    // business event to the main ledger even on partial failure, so
+    // slot 0's `exec.unit.done` must appear exactly once, alongside
+    // the single `exec.wave.failed` coord event.
+    let salvaged: Vec<&serde_json::Value> = lines
         .iter()
         .filter(|v| v.get("topic").and_then(|t| t.as_str()) == Some("exec.unit.done"))
-        .count();
+        .collect();
     assert_eq!(
-        exec_unit_done_count, 0,
-        "U1 GAP: slot 0's exec.unit.done must NOT appear in the main ledger \
-         during partial failure — the current fail_wave path drops completed slot events. \
-         This test FAILS on current HEAD; U2-U7 will fix this.",
+        salvaged.len(),
+        1,
+        "salvage must write completed slot 0's exec.unit.done to the main ledger \
+         exactly once during partial failure; got {} events",
+        salvaged.len()
+    );
+    let salvaged_payload = salvaged[0]
+        .get("payload")
+        .and_then(|p| p.as_str())
+        .expect("salvaged event must have a string payload");
+    assert!(
+        salvaged_payload.contains("u1-0"),
+        "A1 origin pin: salvaged event payload must contain unit=u1-0; got {salvaged_payload}"
     );
 
     let failed_events: Vec<&serde_json::Value> = lines
@@ -5523,20 +5535,23 @@ fn review_partial_failure_salvage_path_unaffected() {
     );
 }
 
-/// U1 Test 3 (GREEN — characterizes current gap): `build_wave_failed_payload`
-/// for an exec wave with 1 Completed + 1 Failed currently lacks the
-/// new fields that U7 will introduce: `salvaged_slots` and
-/// `redrive_slots`. The payload currently contains `wave_id`,
-/// `reason`, `blocking_slots`, and `slot_failures` — U7 will add
-/// `salvaged_slots` (listing completed slots in a failed wave)
-/// and `redrive_slots` (listing retryable failed slots).
+/// U1 Test 3 (2026-07-25-005 plan U1): `build_wave_failed_payload`
+/// for an exec wave with 1 Completed + 1 Failed carries the
+/// salvage/redrive fields introduced by U1: `salvaged_slots` and
+/// `redrive_slots`. The payload contains `wave_id`, `reason`,
+/// `blocking_slots`, `slot_failures`, plus
+/// `salvaged_slots` (completed slot indices in a failed wave)
+/// and `redrive_slots` (retryable failed slots).
 ///
-/// This test PASSES on current HEAD, locking the current state
-/// before U7 lands. After U7 adds `salvaged_slots` and
-/// `redrive_slots`, this test will FAIL (as expected) and must be
-/// updated to assert the new fields are present.
+/// This test was originally written as a GREEN gap-lock asserting
+/// these fields were absent before U1 landed. U1 (salvage/redrive)
+/// has since landed, so the test is updated — per its own original
+/// directive — to assert the new fields ARE present with the
+/// expected index sets: slot 0 completed → `salvaged_slots == [0]`;
+/// blocking slot 1 failed with retryable `worker_timeout` →
+/// `redrive_slots == [1]`.
 #[test]
-fn build_wave_failed_payload_excludes_salvaged_redrive_fields_on_exec_path() {
+fn build_wave_failed_payload_includes_salvaged_redrive_fields_on_exec_path() {
     use crate::loop_runner::wave::build_wave_failed_payload;
     use ralph_core::supervisor::WaveKind;
     use ralph_core::{CompletedWave, WaveFailure, WaveResult};
@@ -5592,24 +5607,20 @@ fn build_wave_failed_payload_excludes_salvaged_redrive_fields_on_exec_path() {
         "slot_failures must be present (already added by prior work)"
     );
 
-    // U7 new fields must NOT be present yet:
-    //   - `salvaged_slots`: U7 will list completed slots in the failed payload
-    //   - `redrive_slots`: U7 will list retryable failed slots for redrive
-    //
-    // This assertion FAILS on current HEAD, proving the U7 gap exists.
-    // After U7 lands, `salvaged_slots` and `redrive_slots` will be added
-    // and this test will PASS.
-    assert!(
-        !obj.contains_key("salvaged_slots"),
-        "U7 GAP: `salvaged_slots` must NOT be present in the current exec/fix \
-         failed payload — U7 will add it to list completed slots in a failed wave. \
-         This test FAILS on current HEAD."
+    // U1 salvage/redrive fields must be present (gap closed by
+    // 2026-07-25-005 plan U1):
+    //   - `salvaged_slots`: completed slot indices, ascending → [0]
+    //   - `redrive_slots`: blocking slots with retryable frozen
+    //     reason; slot 1 failed with `worker_timeout` (retryable) → [1]
+    assert_eq!(
+        obj.get("salvaged_slots").and_then(|v| v.as_array()),
+        Some(&vec![serde_json::json!(0)]),
+        "salvaged_slots must list the completed slot index (slot 0)"
     );
-    assert!(
-        !obj.contains_key("redrive_slots"),
-        "U7 GAP: `redrive_slots` must NOT be present in the current exec/fix \
-         failed payload — U7 will add it to list retryable failed slots for redrive. \
-         This test FAILS on current HEAD."
+    assert_eq!(
+        obj.get("redrive_slots").and_then(|v| v.as_array()),
+        Some(&vec![serde_json::json!(1)]),
+        "redrive_slots must list the retryable blocking slot (slot 1, worker_timeout)"
     );
 }
 
