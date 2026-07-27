@@ -2207,7 +2207,7 @@ pub(crate) fn run_supervisor_fan_in(
     // `slot_events` through the production sink and flips
     // `merged_to_events`. Sink failure → `MergeFailed` (no injection,
     // retry next tick).
-    let action = match bridge.tick_with_slot_events(&store_wave_id, inputs, slot_events) {
+    let action = match bridge.tick_with_slot_events(&store_wave_id, inputs.clone(), slot_events) {
         Ok(action) => action,
         Err(err) => {
             warn!(
@@ -2218,6 +2218,103 @@ pub(crate) fn run_supervisor_fan_in(
             );
             return SupervisorFanInOutcome::StoreError;
         }
+    };
+
+    // ── 2026-07-25-005 plan U1 (R3 / R4 / KTD2 / KTD6) ────────────────
+    // Exec/Fix partial-failure settlement. The coordinator's pure
+    // phase function only reaches `Failed` once EVERY slot is
+    // terminal; a wave whose worker batch has finished but which
+    // still carries (a) a permanently Failed slot plus (b) slots
+    // that never reported anything would otherwise sit in
+    // `ContinueCollect` forever (the coordinator keeps waiting for
+    // workers that will never report). Fan-in runs after the wave's
+    // worker batch completes, so those silent slots can be settled
+    // forward-only as `slot_never_started` (KTD5: no visible
+    // rollback) and the coordinator then owns the Failed verdict,
+    // the wave-phase flip and the coord-injection latch as usual.
+    //
+    // The `SalvageNotMerged` half: production exec/fix waves never
+    // pre-mark the salvage, so `fail_wave` refuses the first tick.
+    // We perform the completed-only salvage merge here (KTD6 order:
+    // append completed events, THEN fail), commit the mark, and
+    // re-tick exactly once so the coordinator latches the failure.
+    //
+    // Review waves keep their existing flow untouched.
+    let mut exec_fix_salvage_written = false;
+    let action = if matches!(wave_kind, WaveKind::Exec | WaveKind::Fix)
+        && matches!(
+            action,
+            ralph_core::supervisor::CoordinatorAction::ContinueCollect
+                | ralph_core::supervisor::CoordinatorAction::SalvageNotMerged
+        ) {
+        use ralph_core::supervisor::SlotStatus;
+        let settle_snapshot = bridge.fan_in_status(&store_wave_id).ok();
+        let has_blocking = settle_snapshot
+            .as_ref()
+            .is_some_and(|snap| {
+                snap.slots
+                    .iter()
+                    .any(|(_, status)| matches!(status, SlotStatus::Failed | SlotStatus::Cancelled))
+            });
+        if has_blocking {
+            // (a) Salvage completed-only business events into the
+            // main ledger and commit the salvage mark (also covers
+            // the zero-completed case: nothing to append, mark
+            // still commits so fail_wave's gate can open).
+            merge_completed_exec_fix_slots_to_main(
+                main_events_file,
+                completed,
+                bridge,
+                &store_wave_id,
+            );
+            exec_fix_salvage_written = true;
+            // (b) Settle slots the finished batch left non-terminal:
+            // they will never report. First-terminal-wins makes this
+            // idempotent for slots that raced into a terminal state
+            // between the snapshot read and this record.
+            if let Some(snap) = settle_snapshot.as_ref() {
+                for (slot_index, status) in &snap.slots {
+                    if matches!(
+                        status,
+                        SlotStatus::Completed | SlotStatus::Failed | SlotStatus::Cancelled
+                    ) {
+                        continue;
+                    }
+                    if let Err(err) = bridge.record_slot_failure(
+                        &store_wave_id,
+                        *slot_index,
+                        ralph_core::supervisor::worker_outcome::REASON_SLOT_NEVER_STARTED,
+                    ) {
+                        warn!(
+                            wave_id = %completed.wave_id,
+                            slot_index = *slot_index,
+                            error = %err,
+                            "U1: record_slot_failure(slot_never_started) failed during \
+                             exec/fix partial-failure settlement"
+                        );
+                    }
+                }
+            }
+            // (c) Re-tick: the coordinator now sees every slot
+            // terminal with at least one failure and returns
+            // `InjectedFailed` (or `AlreadyDone` on a racing latch).
+            match bridge.tick_with_slot_events(&store_wave_id, inputs, Vec::new()) {
+                Ok(retried) => retried,
+                Err(err) => {
+                    warn!(
+                        wave_id = %completed.wave_id,
+                        store_wave_id = %store_wave_id,
+                        error = %err,
+                        "U1: re-tick after exec/fix partial-failure settlement failed"
+                    );
+                    return SupervisorFanInOutcome::StoreError;
+                }
+            }
+        } else {
+            action
+        }
+    } else {
+        action
     };
 
     let action_outcome = match action {
@@ -2360,6 +2457,20 @@ pub(crate) fn run_supervisor_fan_in(
                 // replays and restarts (Memory + rusqlite stores
                 // both honour it).
                 merge_completed_review_slots_to_main(
+                    main_events_file,
+                    completed,
+                    bridge,
+                    &store_wave_id,
+                );
+            } else if !exec_fix_salvage_written {
+                // 2026-07-25-005 plan U1 (R3 / KTD6): exec/fix waves
+                // salvage their Completed slots' business events
+                // before the coord event, same ordering contract as
+                // the review arm. Skipped when the settlement block
+                // above already wrote the salvage on this tick (it
+                // re-ticked the coordinator to reach this arm), so
+                // completed events are never double-appended.
+                merge_completed_exec_fix_slots_to_main(
                     main_events_file,
                     completed,
                     bridge,
@@ -2627,7 +2738,23 @@ pub(crate) fn build_wave_failed_payload(
             // reporter) — they no longer parse worker-written
             // `error` strings to tell a `worker_timeout` apart from
             // an `empty_worker_result`.
+            //
+            // 2026-07-25-005 plan U1 (R4 / R7 / KTD7): each entry
+            // additionally carries a stable consumer-facing
+            // `failure_class` label from `map_failure_class`, and
+            // the payload gains two top-level index sets:
+            //   - `salvaged_slots`: the wave's Completed slot
+            //     indices (from `completed.results`, ascending) —
+            //     business events already kept for the main ledger;
+            //   - `redrive_slots`: `blocking_slots` restricted to
+            //     retryable frozen reasons (ascending) — the only
+            //     slots an operator redrive may reopen.
+            use ralph_core::supervisor::worker_outcome::{
+                is_retryable_slot_reason, map_failure_class,
+            };
+
             let mut slot_failures: Vec<serde_json::Value> = Vec::new();
+            let mut redrive_slots: Vec<u32> = Vec::new();
             for idx in &blocking_slots {
                 let stored_reason = reasons.get(idx).cloned();
                 let fallback_reason = completed
@@ -2642,25 +2769,41 @@ pub(crate) fn build_wave_failed_payload(
                     .map(|f| f.duration.as_millis())
                     .unwrap_or(0);
                 let reason = stored_reason.or(fallback_reason);
-                let entry = match reason {
-                    Some(r) => serde_json::json!({
-                        "slot_index": idx,
-                        "reason": r,
-                        "duration_ms": duration_ms,
-                    }),
-                    None => serde_json::json!({
-                        "slot_index": idx,
-                        "reason": serde_json::Value::Null,
-                        "duration_ms": duration_ms,
-                    }),
+                // `failure_class` is computed from the same reason
+                // string recorded in the entry (store code or
+                // fallback), so per-slot fields never disagree.
+                // A missing reason fail-closes to `unknown` and is
+                // never retryable, so it stays out of redrive_slots.
+                let (reason_value, failure_class) = match &reason {
+                    Some(r) => (serde_json::json!(r), map_failure_class(r)),
+                    None => (serde_json::Value::Null, map_failure_class("")),
                 };
-                slot_failures.push(entry);
+                if reason
+                    .as_deref()
+                    .is_some_and(is_retryable_slot_reason)
+                {
+                    redrive_slots.push(*idx);
+                }
+                slot_failures.push(serde_json::json!({
+                    "slot_index": idx,
+                    "reason": reason_value,
+                    "duration_ms": duration_ms,
+                    "failure_class": failure_class,
+                }));
             }
+            redrive_slots.sort_unstable();
+            // Completed slot indices, ascending. `Completed` never
+            // enters `blocking_slots` (R5), so this set is disjoint
+            // from the failure sets above.
+            let mut salvaged_slots: Vec<u32> = completed.results.iter().map(|r| r.index).collect();
+            salvaged_slots.sort_unstable();
             serde_json::json!({
                 "wave_id": completed.wave_id,
                 "reason": reason,
                 "blocking_slots": blocking_slots,
                 "slot_failures": slot_failures,
+                "salvaged_slots": salvaged_slots,
+                "redrive_slots": redrive_slots,
             })
         }
     }
@@ -3146,6 +3289,96 @@ fn merge_completed_review_slots_to_main(
             wave_id = %store_wave_id,
             error = %err,
             "merge_completed_review_slots_to_main: mark_salvage_merged failed; \
+             next tick will retry"
+        );
+    }
+}
+
+/// 2026-07-25-005 plan U1 (R3 / R4 / KTD2 / KTD6): the exec/fix
+/// counterpart of [`merge_completed_review_slots_to_main`]. When an
+/// exec/fix wave must fail, the Completed slots' business events are
+/// appended to the main ledger FIRST (salvage) and only then does the
+/// dispatcher inject `*.wave.failed` — KTD2 forbids a silent partial
+/// complete, but the completed work must not be dropped on the floor
+/// either.
+///
+/// Slots that also show up in `completed.failures` are skipped: their
+/// `results` entry is a stale artifact of the failed tick and merging
+/// it would be a silent-success anti-pattern. Each salvaged row keeps
+/// the worker's own `source` attribution and the wave envelope
+/// (`wave_id` / `wave_index`) so the post-wave re-read publishes the
+/// event exactly as the worker produced it.
+///
+/// Unlike the review helper, this one commits the salvage mark even
+/// when ZERO rows were appended: an all-failed wave has nothing to
+/// salvage, but the coordinator's `fail_wave` gate still requires
+/// `salvage_merged=true` before it latches the coord-event injection.
+/// An append failure leaves the mark unset so the next tick re-runs
+/// this seam (idempotent on slot status).
+fn merge_completed_exec_fix_slots_to_main(
+    main_events_file: &Path,
+    completed: &ralph_core::CompletedWave,
+    bridge: &Arc<dyn ralph_core::supervisor::SupervisorBridge>,
+    store_wave_id: &str,
+) {
+    use std::io::Write;
+    let mut lines: Vec<String> = Vec::new();
+    for result in &completed.results {
+        if completed.failures.iter().any(|f| f.index == result.index) {
+            continue;
+        }
+        for event in &result.events {
+            let attribution = event
+                .source
+                .as_ref()
+                .map(|h| h.as_str())
+                .unwrap_or("worker");
+            let record = serde_json::json!({
+                "topic": event.topic.as_str(),
+                "payload": event.payload.as_str(),
+                "ts": chrono::Utc::now().to_rfc3339(),
+                "hat": attribution,
+                "source": attribution,
+                "wave_id": event.wave_id,
+                "wave_index": event.wave_index,
+            });
+            if let Ok(line) = serde_json::to_string(&record) {
+                lines.push(line);
+            }
+        }
+    }
+    let open = || -> std::io::Result<()> {
+        if let Some(parent) = main_events_file.parent()
+            && !parent.as_os_str().is_empty()
+        {
+            std::fs::create_dir_all(parent)?;
+        }
+        let mut file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(main_events_file)?;
+        for line in &lines {
+            writeln!(file, "{}", line)?;
+        }
+        file.flush()?;
+        Ok(())
+    };
+    if let Err(err) = open() {
+        warn!(
+            wave_id = %completed.wave_id,
+            path = %main_events_file.display(),
+            error = %err,
+            "U1: failed to merge Completed exec/fix slots to main ledger; \
+             salvage mark will not be set so the coordinator will refuse \
+             the coord-event injection until the next tick retries"
+        );
+        return;
+    }
+    if let Err(err) = bridge.mark_salvage_merged(store_wave_id) {
+        warn!(
+            wave_id = %store_wave_id,
+            error = %err,
+            "merge_completed_exec_fix_slots_to_main: mark_salvage_merged failed; \
              next tick will retry"
         );
     }
