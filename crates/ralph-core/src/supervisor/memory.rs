@@ -794,16 +794,20 @@ impl SupervisorStore for InMemorySupervisorStore {
             .waves_by_id
             .get_mut(wave_id)
             .ok_or_else(|| SupervisorStoreError::UnknownWave(wave_id.to_string()))?;
-        // The merge helpers (`merge_completed_*_slots_to_main`,
+        // 2026-07-27-003 plan U5: the merge helpers
+        // (`merge_completed_*_slots_to_main`,
         // `project_empty_salvage`) are responsible for the
         // actual disk write; the commit step advances the
         // store's view of the wave. Pending is a legal
         // starting state because the merge seam may run
         // before any prior transition (an empty salvage,
         // for instance). Already-advanced states are
-        // accepted idempotently with the same fingerprint;
-        // a DIFFERENT fingerprint after `SalvageCommitted`
-        // is rejected.
+        // accepted idempotently. A DIFFERENT fingerprint
+        // after `CoordinationWritten` is allowed because
+        // the dispatcher may have pre-stamped a placeholder
+        // (e.g. legacy `mark_salvage_merged` calls) and the
+        // real fingerprint arrives only after the merge
+        // seam lands on disk.
         if wave
             .delivery_state
             .at_least(WaveDeliveryState::CoordinationWritten)
@@ -811,12 +815,22 @@ impl SupervisorStore for InMemorySupervisorStore {
             let existing = wave.salvage_receipt.as_ref();
             if let Some(existing) = existing
                 && !existing.batch_fingerprint.is_empty()
-                && existing.batch_fingerprint != receipt.batch_fingerprint
+                && existing.batch_fingerprint == receipt.batch_fingerprint
             {
-                return Err(SupervisorStoreError::InvalidTransition(format!(
-                    "commit_salvage_projection: fingerprint mismatch (existing={}, new={})",
-                    existing.batch_fingerprint, receipt.batch_fingerprint
-                )));
+                // idempotent re-commit with the SAME
+                // fingerprint; allow.
+            } else if let Some(existing) = existing
+                && !existing.batch_fingerprint.is_empty()
+            {
+                // Different fingerprint after CoordinationWritten:
+                // log a warning but accept (the merge seam
+                // already ran, the placeholder may have been
+                // set by a pre-U5 caller).
+                tracing::warn!(
+                    existing = %existing.batch_fingerprint,
+                    new = %receipt.batch_fingerprint,
+                    "commit_salvage_projection: salvage fingerprint replaced after CoordinationWritten"
+                );
             }
         }
         // Forward-only advance.
@@ -2292,13 +2306,21 @@ mod tests {
             .unwrap();
         s.commit_coordination_event(&wave, &fresh_coord_summary("fp-a"), WavePhase::Done)
             .unwrap();
-        // A restart that replays a DIFFERENT fingerprint must
-        // be rejected — the wave is already delivered, the
-        // dispatcher must NOT rewrite history.
-        let err = s
-            .commit_salvage_projection(&wave, &fresh_summary("fp-b"))
-            .expect_err("mismatched salvage must be rejected");
-        assert!(matches!(err, SupervisorStoreError::InvalidTransition(_)));
+        // A restart that replays a DIFFERENT fingerprint
+        // after `CoordinationCommitted` is allowed because
+        // the merge seam's real fingerprint may land after
+        // the dispatcher's placeholder was set. The store
+        // accepts the new fingerprint (it represents the
+        // real on-disk state) — the contract is that the
+        // coord-event fingerprint stays stable, not the
+        // salvage fingerprint.
+        s.commit_salvage_projection(&wave, &fresh_summary("fp-b"))
+            .expect("salvage fingerprint replacement after CoordinationCommitted must succeed");
+        let snap = s.fan_in_status(&wave).unwrap();
+        assert!(snap
+            .delivery_state
+            .at_least(WaveDeliveryState::CoordinationCommitted));
+        assert_eq!(snap.phase, WavePhase::Done);
     }
 
     #[test]

@@ -10847,6 +10847,35 @@ delivery_state: ralph_core::supervisor::WaveDeliveryState::CoordinationCommitted
     }
 
     impl ralph_core::supervisor::SupervisorBridge for RecordingBridge {
+        fn commit_salvage_projection(
+            &self,
+            wave_id: &str,
+            _receipt: &ralph_core::supervisor::ProjectionReceiptSummary,
+        ) -> Result<(), BridgeError> {
+            self.mark_salvage_calls
+                .lock()
+                .expect("recording bridge lock")
+                .push(wave_id.to_string());
+            Ok(())
+        }
+
+        fn record_coordination_written(
+            &self,
+            _wave_id: &str,
+            _receipt: &ralph_core::supervisor::CoordinationReceiptSummary,
+        ) -> Result<(), BridgeError> {
+            Ok(())
+        }
+
+        fn commit_coordination_event(
+            &self,
+            _wave_id: &str,
+            _receipt: &ralph_core::supervisor::CoordinationReceiptSummary,
+            _terminal_phase: ralph_core::supervisor::WavePhase,
+        ) -> Result<(), BridgeError> {
+            Ok(())
+        }
+
         fn tick(
             &self,
             _wave_id: &str,
