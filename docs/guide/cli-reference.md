@@ -258,6 +258,7 @@ ralph preset [OPTIONS] <COMMAND>
 - `check [--format <human|json>] [--strict]` — Check preset/workflow contract.
 - `diff --file <FILE> [--format <human|json>]` — Show differences from the template baseline.
 - `upgrade --file <FILE> [--format <human|json>] [--dry-run] [--force]` — Preview upgrade information (dry-run only).
+- `materialize-artifacts <PRESET> --plan-key <KEY> [--dest <DIR>]` — Write **embedded artifact templates** (development-plan / unit / manager-report, …) to disk. Required for binary-only installs of presets such as `parallel-forge` (no source checkout of `presets/templates/`).
 
 **Examples:**
 
@@ -279,12 +280,17 @@ ralph preset diff --file .ralph/hats/my-flow.yml
 
 # Preview upgrade (dry-run)
 ralph preset upgrade --file .ralph/hats/my-flow.yml --dry-run
+
+# Materialize parallel-forge fill-in templates (binary-safe)
+ralph preset materialize-artifacts parallel-forge --plan-key my-feature-plan
+# → .ralph/forge/my-feature-plan/templates/*.template.md
 ```
 
 Notes:
 
 - Templates are authoring scaffolds; they do not become built-in presets.
 - `x_preset` metadata in generated files does not affect runtime behavior.
+- `materialize-artifacts` is **not** the same as `preset new`: `new` scaffolds a preset YAML; `materialize-artifacts` extracts runtime fill-in docs that hats copy into `.ralph/forge/<plan-key>/`.
 - See [Preset Authoring Guide](./preset-authoring.md) for the full authoring workflow.
 
 ### ralph plan

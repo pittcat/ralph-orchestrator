@@ -144,10 +144,51 @@ ralph run [OPTIONS] [-- <CUSTOM_ARGS>...]
 | `ralph inspect` | 只读诊断命名空间（含 `inspect profiles`；`inspect loop` 输出 loop + hat 身份 + events 路径 + **`loop_anchor` plan 锚点**（优先 `.ralph/agent/.ralph-anchor.json`，否则 `prompt_file`）；JSON 可能含 **`supervisor` 块**（配置启用 supervisor，或 runtime 已有可打开的 wave 账本时出现，否则整键省略），OPAC Observe 一手数据源） |
 | `ralph inspect prompt` | 预览 hat 的 prompt 渲染结果（auto-inject + on-demand + 块标题），OPAC Observe 一手数据；常用 `--hat <hat_id> --format json --full` 形式 |
 | `ralph diagnose` | 离线诊断报告（`--format json` 含 `dup_storm_topics`：`work.ready` 同 dedup key 重复 ≥3 次；ranked findings 的 `hint` 区分 `duplicate_work_done_same_step` / `duplicate_work_done_stall_bypass`） |
+| `ralph preset materialize-artifacts` | 将内嵌 artifact 模板写到磁盘（binary-only 安装；见下方专节） |
 
 > `ralph bot` 已随 `ralph-telegram` crate 一起删除;运行时不再提供人工通道。`human.guidance` 已废弃;`task.resume` 恢复通道保留(由 runtime diagnosis engine 产出)。
 
 > 低频命令的独有参数可通过 `ralph <cmd> --help` 查看。全量参考见 `docs/guide/`。
+
+---
+
+## `ralph preset materialize-artifacts`
+
+把编译进 `ralph` 二进制的 **artifact 填写模板**落到当前工作区。用于 `parallel-forge` 等 preset：部署机通常只有二进制、没有 `presets/templates/` 源码目录。
+
+**触发条件：** hat instructions 要求先复制模板再填写（planner / executor / reporter），且 `.ralph/forge/<plan-key>/templates/` 尚不存在或需要刷新。
+
+**语法：**
+```bash
+ralph preset materialize-artifacts <PRESET> --plan-key <KEY> [--dest <DIR>]
+```
+
+**参数：**
+
+| 参数 | 类型 | 必需 | 默认值 | 说明 |
+|------|------|------|--------|------|
+| `<PRESET>` | string | 是 | — | 内嵌模板所属 preset，如 `parallel-forge` 或 `builtin:parallel-forge` |
+| `--plan-key <KEY>` | string | 是 | — | 单段路径名（禁止 `/`、`\`、`..`）；默认输出目录用它 |
+| `--dest <DIR>` | path | 否 | `.ralph/forge/<KEY>/templates/` | 覆盖输出目录 |
+
+**agent 下一步：**
+1. 运行本命令（或确认 templates 目录已存在）。
+2. `cp` 对应 `*.template.*` 到业务 artifact 路径（见 hat instructions）。
+3. 按模板内 BDD / TDD / Scenario 章节逐节填写；禁止跳过模板写自由格式。
+
+**失败停止条件：**
+- preset 无内嵌模板 → 停止，核对 preset 名。
+- `--plan-key` 为空或含路径分隔符 → 停止，改用 plan 文件 basename。
+
+**校验：**
+```bash
+ralph preset materialize-artifacts parallel-forge --plan-key demo
+test -f .ralph/forge/demo/templates/development-plan.template.md
+```
+
+**反模式：**
+- 🔴 不要假设仓库里存在 `presets/templates/parallel-forge/`（binary 安装没有）。
+- 🔴 不要把本命令当成 `ralph preset new`（那是生成 preset YAML，不是 fill-in 模板）。
 
 ---
 
