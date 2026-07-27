@@ -335,9 +335,15 @@ agent 不需要主动刷 heartbeat：orchestrator 观察 stream JSON 与 `RALPH_
 
 ### Fan-in 失败语义（agent 可见）
 
-失败 fan-in 路径有两段持久化状态机：
+当 wave 未能收齐全部 slot 时，runtime 会注入协调失败事件（例如 `*.wave.failed`）。触发 payload 通常带：
 
-1. **salvage merge**：dispatcher 把已 Completed 槽的业务事件（`review.unit.done` 等）写入 main ledger 后，立即 `mark_salvage_merged`。
-2. **coord injection**：coordinator 之后注入 `*.wave.failed`，写 `merged_to_events`。
+- `wave_id`
+- `missing_dimensions`（或同类缺失列表）
+- `reason`（如 timeout / partial / cancelled / spawn_failed）
 
-如果协调事件还没注入就崩溃，重启后 supervisor 看到 `salvage_merged=true && merged_to_events=false` → 安全地注入一次；如果两者都已 latch → AlreadyDone。Agent 看到 `missing_dimensions` 字段时应当相信它：它**已经**扣除 store 里带证据的 Completed 槽与 main ledger 里已落盘的同 wave 业务事件。**没有** terminal evidence 的 Completed 槽不进 done set，会被报为 missing（这是 `KTD3` fail-closed 的硬规则，不是配置）。
+**Agent 下一步（按顺序）：**
+
+1. 用 `ralph wave inspect <wave_id>` 确认 phase / 计数；**不要**读内部 ledger 文件来猜 fan-in 状态。
+2. **相信** trigger 上的 `missing_dimensions`：列表中的维度/slot **没有**可用的完成证据，不要自行补发缺失 slot 的业务事件来“凑齐” fan-in。
+3. 按本 hat `instructions` 写 block / 终态 artifact（若要求），再 `--policy-check` 后 emit 本 hat 允许的 blocked / 完成 topic。
+4. 若重启后再次收到同一失败协调事件：以**当前** trigger + `ralph wave inspect` 为准做幂等处理；不要假设上次已经成功收齐。

@@ -979,7 +979,7 @@ hats:
 
       ### Step 7 — Emit scope.ready
 
-      Pre-check first:
+      Pre-check first (after loading emit skill — see OPAC reference):
       `ralph emit scope.ready --policy-check -j '<payload>' -H <this-preset>`
       (the loop's gate is the same one; per `ralph-tools-emit` §5).
       Only after the precheck passes, drop `--policy-check` and emit the
@@ -1003,8 +1003,11 @@ hats:
 
       ### OPAC reference
 
-      Follow `ralph-tools-opac` for Observe/Precheck/Apply/Confirm discipline
-      and `ralph-tools-emit` §5 for precheck rules before every emit.
+      `ralph-tools-opac` is auto-injected. Before any emit, load the
+      on-demand emit skill (it is NOT auto-injected):
+      `ralph tools skill load ralph-tools-emit`
+      Then follow Observe/Precheck/Apply/Confirm and `ralph-tools-emit`
+      §5 for `--policy-check` feedback.
 
   review-dispatcher:
     name: "Review Dispatcher"
@@ -1165,9 +1168,13 @@ hats:
 
       ### OPAC reference
 
-      Follow `ralph-tools-opac` and the always-loaded `ralph-tools-wave`
-      red box for the wave verify → wave emit order; cite
-      `ralph-tools-emit` §5 for the policy-check feedback contract when
+      `ralph-tools-opac` is auto-injected. Before wave work, load the
+      on-demand skills (they are NOT auto-injected — do NOT assume
+      "always-loaded"):
+      `ralph tools skill load ralph-tools-wave`
+      `ralph tools skill load ralph-tools-emit`
+      Follow the `ralph-tools-wave` red box for verify → emit order;
+      cite `ralph-tools-emit` §5 for policy-check feedback when
       precheck rejects.
 
   review-worker:
@@ -1338,7 +1345,7 @@ hats:
 
       ### Step 5 — Emit review.unit.done
 
-      Pre-check first:
+      Pre-check first (after loading emit skill — see OPAC reference):
       `ralph emit review.unit.done --policy-check -j '<payload>'`
       The loop's gate is the same one (per `ralph-tools-emit` §5).
       Drop `--policy-check` after success. Required payload fields per
@@ -1358,8 +1365,11 @@ hats:
 
       ### OPAC reference
 
-      Follow `ralph-tools-opac` for Observe/Precheck/Apply/Confirm discipline
-      and `ralph-tools-emit` §5 for precheck rules before every emit.
+      `ralph-tools-opac` is auto-injected. Before any emit, load the
+      on-demand emit skill (it is NOT auto-injected):
+      `ralph tools skill load ralph-tools-emit`
+      Then follow Observe/Precheck/Apply/Confirm and `ralph-tools-emit`
+      §5 for `--policy-check` feedback.
 
   review-synthesizer:
     name: "Review Synthesizer"
@@ -1449,7 +1459,9 @@ hats:
         readable (≥ 1 byte).
       - YAML frontmatter parses; `dimension` field equals `<dim>`;
         `scope_digest` / `patch_digest` / `review_head_sha` equal the
-        trigger's. Mismatch → `review.blocked` with `reason:
+        same fields in `scope-manifest.json` (Step 1 frozen identity —
+        NOT the `review.wave.complete` trigger, which has no digests).
+        Mismatch → `review.blocked` with `reason:
         dimension_digest_mismatch` naming the offending `dim`.
       - `findings_count` is a non-negative integer and matches the
         actual `findings:` array length.
@@ -1563,8 +1575,14 @@ hats:
 
       ### OPAC reference
 
-      Follow `ralph-tools-opac` for Observe/Precheck/Apply/Confirm discipline
-      and `ralph-tools-emit` §5 for precheck rules before every emit.
+      `ralph-tools-opac` is auto-injected. Before any emit, load the
+      on-demand skills (they are NOT auto-injected):
+      `ralph tools skill load ralph-tools-emit`
+      `ralph tools skill load ralph-tools-wave`
+      (wave skill: coordination-topic rules only — you consume
+      `review.wave.complete`, you do NOT emit wave topics.)
+      Then follow Observe/Precheck/Apply/Confirm and `ralph-tools-emit`
+      §5 for `--policy-check` feedback.
 
   fix-planner:
     name: "Fix Planner"
@@ -1713,8 +1731,11 @@ hats:
 
       ### OPAC reference
 
-      Follow `ralph-tools-opac` for Observe/Precheck/Apply/Confirm discipline
-      and `ralph-tools-emit` §5 for precheck rules before every emit.
+      `ralph-tools-opac` is auto-injected. Before any emit, load the
+      on-demand emit skill (it is NOT auto-injected):
+      `ralph tools skill load ralph-tools-emit`
+      Then follow Observe/Precheck/Apply/Confirm and `ralph-tools-emit`
+      §5 for `--policy-check` feedback.
 
   finalizer:
     name: "Finalizer"
@@ -1895,7 +1916,14 @@ hats:
 
       ### OPAC reference
 
-      Follow `ralph-tools-opac` for Observe/Precheck/Apply/Confirm.
-      Before every emit: `--policy-check` then real emit; Confirm with
-      `--output json` (`ok`/`recorded`), not by reading event files.
+      `ralph-tools-opac` is auto-injected. Before any emit, load the
+      on-demand skills (they are NOT auto-injected):
+      `ralph tools skill load ralph-tools-emit`
+      `ralph tools skill load ralph-tools-wave`
+      (wave skill: coordination-topic rules for `review.wave.failed`
+      only — you do NOT call `ralph wave emit` / `verify`.)
+      Then follow Observe/Precheck/Apply/Confirm; before every emit:
+      `--policy-check` then real emit; Confirm with `--output json`
+      (`ok`/`recorded`), not by reading event files. Cite
+      `ralph-tools-emit` §5 for policy-check feedback.
 
