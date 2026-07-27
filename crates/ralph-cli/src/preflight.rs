@@ -266,7 +266,26 @@ pub(crate) fn load_config_for_preflight_sync(
     hats_source: Option<&HatsSource>,
     workspace_root: &std::path::Path,
 ) -> Result<RalphConfig> {
-    let (mut core_value, overrides, core_label) = load_core_value_sync(config_sources)?;
+    load_config_for_preflight_sync_with_missing_default_warning(
+        config_sources,
+        hats_source,
+        workspace_root,
+        true,
+    )
+}
+
+/// Emit can run from a builtin hat collection without a project
+/// `ralph.yml`. In that case the default core config is intentional,
+/// so callers may suppress only the missing-default warning. Explicit
+/// config paths continue to use [`load_config_for_preflight_sync`].
+pub(crate) fn load_config_for_preflight_sync_with_missing_default_warning(
+    config_sources: &[ConfigSource],
+    hats_source: Option<&HatsSource>,
+    workspace_root: &std::path::Path,
+    warn_on_missing_default: bool,
+) -> Result<RalphConfig> {
+    let (mut core_value, overrides, core_label) =
+        load_core_value_sync(config_sources, warn_on_missing_default)?;
 
     validate_core_config_shape(&core_value, &core_label)?;
 
@@ -497,6 +516,7 @@ async fn load_hats_value(source: &HatsSource) -> Result<Value> {
 /// supported; callers that need remote core configs must use the async path.
 fn load_core_value_sync(
     config_sources: &[ConfigSource],
+    warn_on_missing_default: bool,
 ) -> Result<(Value, Vec<ConfigSource>, String)> {
     let (primary_sources, overrides) = config_resolution::split_config_sources(config_sources);
 
@@ -518,7 +538,9 @@ fn load_core_value_sync(
                     let value = config_resolution::parse_yaml_value(&content, &label)?;
                     (Some(value), label, false)
                 } else {
-                    warn!("Config file {:?} not found, using defaults", path);
+                    if warn_on_missing_default {
+                        warn!("Config file {:?} not found, using defaults", path);
+                    }
                     (None, path.display().to_string(), false)
                 }
             }
@@ -544,10 +566,12 @@ fn load_core_value_sync(
             let value = config_resolution::parse_yaml_value(&content, &label)?;
             (Some(value), label, false)
         } else {
-            warn!(
-                "Config file {} not found, using defaults",
-                default_path.display()
-            );
+            if warn_on_missing_default {
+                warn!(
+                    "Config file {} not found, using defaults",
+                    default_path.display()
+                );
+            }
             (None, default_path.display().to_string(), true)
         }
     };

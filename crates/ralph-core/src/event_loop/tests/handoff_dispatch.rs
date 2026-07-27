@@ -303,7 +303,7 @@ fn u16_check_hat_triggers_glob_pattern_matches_single_segment() {
 // `triggers` from the registry — would treat the missing entry as
 // "triggers do not declare the topic" and emit a spurious
 // `task.resume.misrouted`. The U7 narrow exemption recognizes the
-// virtual consumer centrally (`event_origin::is_virtual_supervisor_consumer`)
+// virtual consumer centrally (`event_origin::is_virtual_runtime_consumer`)
 // and skips the U16 check for it, while leaving normal-hat U16 intact.
 // ----------------------------------------------------------------
 
@@ -334,15 +334,40 @@ hats:
     serde_yaml::from_str(yaml).expect("valid supervisor config")
 }
 
+fn wave_runtime_config() -> crate::config::RalphConfig {
+    let yaml = r#"
+event_loop:
+  execution_mode: isolated
+mechanism:
+  flow:
+    type: declared
+    version: 1
+    terminal_emits: ["LOOP_COMPLETE"]
+    steps:
+      - id: review_wave
+        kind: side_effect
+        runs: wave.runtime.review
+        allowed_emits: ["review.unit.done"]
+hats:
+  review-worker:
+    name: "Review Worker"
+    triggers: ["review.unit.ready"]
+    publishes: ["review.unit.done"]
+"#;
+    serde_yaml::from_str(yaml).expect("valid wave runtime config")
+}
+
 /// U7 consumer-predicate 正例: the canonical virtual supervisor id is
 /// recognized as the virtual runtime consumer.
 #[test]
 fn u7_virtual_supervisor_consumer_predicate_positive() {
-    use crate::event_origin::is_virtual_supervisor_consumer;
-    assert!(
-        is_virtual_supervisor_consumer("supervisor"),
-        "the canonical virtual supervisor id must be recognized as the virtual consumer"
-    );
+    use crate::event_origin::is_virtual_runtime_consumer;
+    for consumer in ["supervisor", "wave_runtime"] {
+        assert!(
+            is_virtual_runtime_consumer(consumer),
+            "`{consumer}` must be recognized as a virtual runtime consumer"
+        );
+    }
 }
 
 /// U7 consumer-predicate 反例: ordinary hats are NOT the virtual
@@ -350,11 +375,11 @@ fn u7_virtual_supervisor_consumer_predicate_positive() {
 /// exemption must not widen to normal hats).
 #[test]
 fn u7_virtual_supervisor_consumer_predicate_negative() {
-    use crate::event_origin::is_virtual_supervisor_consumer;
+    use crate::event_origin::is_virtual_runtime_consumer;
     for hat in ["executor", "integrator", "reviewer", "plan-reviewer", ""] {
         assert!(
-            !is_virtual_supervisor_consumer(hat),
-            "ordinary hat `{hat}` must NOT be treated as the virtual supervisor consumer"
+            !is_virtual_runtime_consumer(hat),
+            "ordinary hat `{hat}` must NOT be treated as a virtual runtime consumer"
         );
     }
 }
@@ -385,6 +410,35 @@ fn test_virtual_supervisor_unit_done_no_misrouted() {
             .seen_topics
             .contains("task.resume.misrouted"),
         "virtual supervisor consuming exec.unit.done must NOT produce task.resume.misrouted"
+    );
+}
+
+#[test]
+fn virtual_wave_runtime_unit_done_no_misrouted() {
+    let config = wave_runtime_config();
+    {
+        let index = crate::workflow_contract::HandoffIndex::from_config(&config);
+        assert_eq!(
+            index.consumer_of("review.unit.done"),
+            Some("wave_runtime"),
+            "wave runtime must be the unique consumer of review.unit.done"
+        );
+    }
+
+    let mut event_loop = crate::EventLoop::new(config);
+    event_loop.apply_contract_committed_side_effects(&[u7_jsonl_event("review.unit.done")]);
+
+    assert!(
+        !event_loop
+            .state
+            .seen_topics
+            .contains("task.resume.misrouted"),
+        "virtual wave runtime must not produce task.resume.misrouted"
+    );
+    assert_eq!(
+        event_loop.state.handoff_tracker.pending_count(),
+        0,
+        "virtual wave runtime must not register an agent handoff"
     );
 }
 

@@ -1750,18 +1750,18 @@ impl EventLoop {
         self.update_bootstrap_flags_from_accepted(events);
         for accepted in events {
             if let Some(consumer) = self.handoff_index.consumer_of(&accepted.topic) {
-                // U7 (2026-07-23-001, R10 / KTD-7): the virtual `supervisor`
-                // is a runtime consumer, not a `HatRegistry` agent hat. It
-                // legitimately consumes the slot-level `*.unit.done` /
-                // `*.unit.failed` topics at fan-in but has no registry entry
-                // and therefore no `triggers` list, so the U16 check below
-                // would misread the missing entry as "triggers do not declare
-                // the topic" and emit a spurious `task.resume.misrouted`.
+                // Virtual fan-in consumers (`supervisor` and `wave_runtime`)
+                // are runtime components, not `HatRegistry` agent hats. They
+                // legitimately consume slot-level `*.unit.done` /
+                // `*.unit.failed` topics but have no registry entry and
+                // therefore no `triggers` list, so the U16 check below would
+                // misread the missing entry as "triggers do not declare the
+                // topic" and emit a spurious `task.resume.misrouted`.
                 // Skip both the misrouted check and the 600s pending-handoff
-                // registration for the virtual consumer; it is dispatched by
-                // the supervisor runtime, never via handoff/`task.resume`.
+                // registration for virtual consumers; they are dispatched by
+                // their runtime, never via handoff/`task.resume`.
                 // Ordinary hats fall through to the unchanged U16 logic.
-                if !crate::event_origin::is_virtual_supervisor_consumer(consumer) {
+                if !crate::event_origin::is_virtual_runtime_consumer(consumer) {
                     let consumer_triggers_ok = self
                         .registry
                         .get_config(&HatId::from(consumer))

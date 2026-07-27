@@ -322,8 +322,16 @@ pub fn emit_command(
     args: EmitArgs,
     hats_source: Option<&HatsSource>,
     config_sources: &[ConfigSource],
+    config_was_explicit: bool,
 ) -> Result<()> {
-    emit_command_with_root_and_hats(color_mode, args, None, hats_source, config_sources)
+    emit_command_with_root_and_hats(
+        color_mode,
+        args,
+        None,
+        hats_source,
+        config_sources,
+        config_was_explicit,
+    )
 }
 
 /// U3 (2026-07-06-002 plan, R3): `--file` 仍是 clap 注入的默认
@@ -451,7 +459,7 @@ pub fn emit_command_with_root(
     args: EmitArgs,
     root: Option<&PathBuf>,
 ) -> Result<()> {
-    emit_command_with_root_and_hats(color_mode, args, root, None, &[])
+    emit_command_with_root_and_hats(color_mode, args, root, None, &[], false)
 }
 
 /// Isolated-mode helper: derive `triggered` from the handoff index when
@@ -488,10 +496,17 @@ fn maybe_derive_triggered_for_isolated(
     }
 
     let index = ralph_core::workflow_contract::HandoffIndex::from_config(cfg);
-    index
-        .consumer_of(topic)
-        .map(|id| id.to_string())
-        .or(triggered)
+    index.consumer_of(topic).and_then(|consumer| {
+        (!ralph_core::event_origin::is_virtual_runtime_consumer(consumer))
+            .then(|| consumer.to_string())
+    })
+}
+
+fn should_warn_on_missing_default_config(
+    config_was_explicit: bool,
+    hats_source: Option<&HatsSource>,
+) -> bool {
+    config_was_explicit || hats_source.is_none()
 }
 
 fn emit_command_with_root_and_hats(
@@ -500,6 +515,7 @@ fn emit_command_with_root_and_hats(
     root: Option<&PathBuf>,
     hats_source: Option<&HatsSource>,
     config_sources: &[ConfigSource],
+    config_was_explicit: bool,
 ) -> Result<()> {
     // Plan 001 §4.3 C1: when no `-H` is passed but the parent loop set
     // `RALPH_HATS_SOURCE` (so a backend agent can emit without the explicit
@@ -688,10 +704,13 @@ fn emit_command_with_root_and_hats(
                 }
             })
             .unwrap_or_else(|| workspace_root.join("ralph.yml"));
-        match crate::preflight::load_config_for_preflight_sync(
+        let warn_on_missing_default =
+            should_warn_on_missing_default_config(config_was_explicit, hats_source);
+        match crate::preflight::load_config_for_preflight_sync_with_missing_default_warning(
             effective_config_sources,
             hats_source,
             &workspace_root,
+            warn_on_missing_default,
         ) {
             Ok(cfg) => Some(cfg),
             Err(_e) => {
@@ -867,12 +886,13 @@ fn emit_command_with_root_and_hats(
             .and_then(|c| c.event_loop.event_policy.as_ref())
             .is_some_and(|p| p.enabled);
     if unified_active {
-        let mut report = crate::policy_check::run_policy_check_unified(
+        let mut report = crate::policy_check::run_policy_check_unified_with_config(
             topic,
             Some(&args.payload),
             hat.as_deref(),
             triggered.as_deref(),
             &workspace_root,
+            config.as_ref(),
         )?;
         // 2026-07-09-001 plan (U4): enrich the unified
         // report's per-item `validation_errors` with
@@ -4772,6 +4792,66 @@ hats:
                 Some(&config)
             ),
             None
+        );
+    }
+
+    #[test]
+    fn isolated_emit_does_not_derive_virtual_wave_runtime_as_triggered() {
+        let config = parse_config(
+            r#"
+event_loop:
+  execution_mode: isolated
+mechanism:
+  flow:
+    type: declared
+    version: 1
+    terminal_emits: ["LOOP_COMPLETE"]
+    steps:
+      - id: review_wave
+        kind: side_effect
+        runs: wave.runtime.review
+        allowed_emits: ["review.unit.done"]
+hats:
+  review-worker:
+    name: "Review Worker"
+    triggers: ["review.unit.ready"]
+    publishes: ["review.unit.done"]
+"#,
+        );
+
+        let index = ralph_core::workflow_contract::HandoffIndex::from_config(&config);
+        assert_eq!(
+            index.consumer_of("review.unit.done"),
+            Some("wave_runtime"),
+            "test precondition: wave fan-in must expose its virtual consumer"
+        );
+        assert_eq!(
+            maybe_derive_triggered_for_isolated(
+                "review.unit.done",
+                Some("review-worker"),
+                None,
+                Some(&config),
+            ),
+            None,
+            "virtual runtime consumers must not be written into the event envelope"
+        );
+    }
+
+    #[test]
+    fn missing_default_config_warns_only_without_builtin_context_or_when_explicit() {
+        let builtin = HatsSource::parse("builtin:implementation-review");
+
+        assert!(
+            !should_warn_on_missing_default_config(false, Some(&builtin)),
+            "implicit default core config is expected when a hats source supplies the workflow"
+        );
+        assert!(
+            should_warn_on_missing_default_config(true, Some(&builtin)),
+            "an explicitly requested missing config must remain visible"
+        );
+        assert!(
+            should_warn_on_missing_default_config(false, None),
+            "without a hats source, missing project config keeps the existing warning"
         );
     }
 

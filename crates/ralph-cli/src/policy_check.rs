@@ -840,6 +840,7 @@ fn report_from_validation(
 /// (the post-commit rules need a `LedgerSnapshot`; we use the
 /// cold-start snapshot here because CLI emit runs ahead of the
 /// loop, not against its in-memory state).
+#[cfg(test)]
 pub fn run_policy_check_unified(
     topic: &str,
     payload: Option<&str>,
@@ -847,11 +848,6 @@ pub fn run_policy_check_unified(
     triggered: Option<&str>,
     workspace: &Path,
 ) -> Result<PolicyCheckReport> {
-    use ralph_core::Event;
-    use ralph_core::preset::engine::protocol::ProtocolView;
-    use ralph_core::state::{LedgerSnapshot, StateLedger};
-    use ralph_core::validation::{ValidationContext, ValidationPipeline};
-
     // Load the config to build the protocol view. Reuse the
     // existing preflight loader so RALPH_HATS_SOURCE, schema
     // discovery, and the legacy fail-closed rules (C1/C4) all
@@ -861,10 +857,35 @@ pub fn run_policy_check_unified(
     let workspace_root = resolve_workspace_root(Some(&workspace.to_path_buf()));
     let config =
         load_policy_config_for_cli_emit(Some(&workspace_root), OnConfigError::Tolerate, &[])?;
-    let event_loop_config = config
-        .as_ref()
-        .map(|c| c.event_loop.clone())
-        .unwrap_or_default();
+    run_policy_check_unified_with_config(
+        topic,
+        payload,
+        hat,
+        triggered,
+        &workspace_root,
+        config.as_ref(),
+    )
+}
+
+/// Unified policy check using the configuration already resolved by
+/// the emit boundary. This avoids a second config discovery pass whose
+/// defaults or environment could diverge from the config used for
+/// provenance and routing checks.
+pub fn run_policy_check_unified_with_config(
+    topic: &str,
+    payload: Option<&str>,
+    hat: Option<&str>,
+    triggered: Option<&str>,
+    workspace: &Path,
+    config: Option<&RalphConfig>,
+) -> Result<PolicyCheckReport> {
+    use ralph_core::Event;
+    use ralph_core::preset::engine::protocol::ProtocolView;
+    use ralph_core::state::{LedgerSnapshot, StateLedger};
+    use ralph_core::validation::{ValidationContext, ValidationPipeline};
+
+    let workspace_root = resolve_workspace_root(Some(&workspace.to_path_buf()));
+    let event_loop_config = config.map(|c| c.event_loop.clone()).unwrap_or_default();
 
     // P2-#6 (002-adversarial-review): production-only env
     // read; tests must use `ProtocolView::from_event_loop`
@@ -876,7 +897,7 @@ pub fn run_policy_check_unified(
     // `EventPolicyRule` consults it to reject
     // `success_signal` / `failure_signal` outside the
     // declared topology.
-    let hats = config.as_ref().map(|c| c.hats.clone()).unwrap_or_default();
+    let hats = config.map(|c| c.hats.clone()).unwrap_or_default();
     let view =
         ProtocolView::from_event_loop_with_feature_for_env_and_hats(&event_loop_config, &hats);
     // 2026-07-07-001 plan U1: derive the runtime hat registry
@@ -889,7 +910,7 @@ pub fn run_policy_check_unified(
     // path. The no-config dry-run path still gets `None` so it
     // does not panic and only enforces schema / topology that
     // is derivable from the cold-start view.
-    let pipeline = if let Some(cfg) = config.as_ref() {
+    let pipeline = if let Some(cfg) = config {
         ValidationPipeline::from_ralph_config(&view, cfg)
     } else {
         ValidationPipeline::from_config(&view, &event_loop_config)
@@ -1012,7 +1033,7 @@ pub fn run_policy_check_unified(
     // so the gate order is "payload schema → envelope
     // topology". Mirrors the apply-path gate so `--policy-check`
     // and the real write share the same rejection surface.
-    if let Some(cfg) = config.as_ref()
+    if let Some(cfg) = config
         && let Err(err) = check_envelope_triggered(topic, triggered, cfg)
     {
         let mut rej = final_report;
@@ -1029,7 +1050,7 @@ pub fn run_policy_check_unified(
     // points at an active main ledger, replay that ledger's accepted
     // topic sequence. Falling all the way back to the static workspace
     // snapshot is only correct when no active main ledger exists.
-    if let Some(cfg) = config.as_ref()
+    if let Some(cfg) = config
         && let Some(reason_code) = check_cli_flow_step_scope(
             cfg,
             &workspace_root,
@@ -1357,6 +1378,44 @@ mod u6_unified_path_tests {
         assert!(report.accepted, "report: {report:?}");
         assert!(report.reason_codes.is_empty());
         assert_eq!(report.topic, "debug.step");
+    }
+
+    #[test]
+    fn unified_policy_check_uses_caller_resolved_config() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let config: RalphConfig = serde_yaml::from_str(
+            r#"
+event_loop:
+  execution_mode: isolated
+  event_policy:
+    enabled: true
+    mode: enforce
+hats:
+  review-worker:
+    name: "Review Worker"
+    triggers: ["review.unit.ready"]
+    publishes: ["review.unit.done"]
+"#,
+        )
+        .expect("valid config");
+
+        let report = run_policy_check_unified_with_config(
+            "review.unit.done",
+            Some("{}"),
+            Some("review-worker"),
+            None,
+            temp.path(),
+            Some(&config),
+        )
+        .expect("policy check");
+
+        assert!(
+            !report
+                .reason_codes
+                .iter()
+                .any(|code| code == "origin:unknown_hat"),
+            "the caller-resolved hat registry must be reused: {report:?}"
+        );
     }
 
     #[test]

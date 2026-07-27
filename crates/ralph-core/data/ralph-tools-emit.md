@@ -63,7 +63,7 @@ ralph emit --schema work.done | jq -r .protocol_hash   # 改后
 | `RALPH_TRIGGERED_HAT` | 回退到 `--triggered`。在 `execution_mode: isolated` 下，loop runner 不再注入该变量；`ralph emit` 会根据当前 topic 在 preset 中的唯一下游消费者自动推导 `triggered`；推导不出时保持为空。你不需要关心当前是什么模式，按需显式传 `--triggered` 即可，显式值始终优先。 |
 | `RALPH_EVENT_SOURCE` | 回退到 `--source` |
 
-> **`triggered` 自动推导规则**：`ralph emit` 会读取当前 workspace 配置。如果当前是 isolated 模式、你已处于某个 hat 上下文中（`RALPH_CURRENT_HAT` 已设置）、且没有显式传 `--triggered` / `RALPH_TRIGGERED_HAT`，`ralph emit` 会尝试把 `triggered` 填为当前 topic 的唯一下游目标。只有当拓扑能唯一确定下游 hat 时才填充；多消费者、无明确下游、控制/诊断 topic 都会保持 `triggered` 为空。Coordinator 模式或没有配置时保持原有注入行为不变。
+> **`triggered` 自动推导规则**：`ralph emit` 会读取当前 workspace 配置。如果当前是 isolated 模式、你已处于某个 hat 上下文中（`RALPH_CURRENT_HAT` 已设置）、且没有显式传 `--triggered` / `RALPH_TRIGGERED_HAT`，`ralph emit` 会尝试把 `triggered` 填为当前 topic 的唯一下游 hat。只有当拓扑能唯一确定真实 hat 时才填充；多消费者、无明确下游、下游由内部 runtime 汇聚、控制/诊断 topic 都会保持 `triggered` 为空。看到为空时直接执行原 emit 命令，不要猜测或显式填写内部 runtime 名称；若 policy-check 仍拒收，按反馈修正 payload 或 hat，无法确认真实目标时停止并报告。Coordinator 模式或没有配置时保持原有注入行为不变。
 >
 > **对 agent 来说**：不需要检测当前模式。只要记住两条规则：1) 若 prompt 明确要求你触发某个 hat， emit 时带上 `--triggered <hat>`；2) 没要求时直接 emit，runner / CLI 会自动处理。
 

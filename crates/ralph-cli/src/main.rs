@@ -366,6 +366,9 @@ async fn main() -> Result<()> {
         tracing_subscriber::fmt().with_env_filter(filter).init();
     }
 
+    let config_was_explicit = !cli.config.is_empty()
+        || std::env::var("RALPH_CONFIG")
+            .is_ok_and(|value| !value.trim().is_empty());
     let config_values: Vec<String> = if cli.config.is_empty() {
         vec![default_config_path().to_string_lossy().to_string()]
     } else {
@@ -434,9 +437,13 @@ async fn main() -> Result<()> {
         Some(Commands::Clean(args)) => {
             commands::clean::clean_command(&config_sources, cli.color, args)
         }
-        Some(Commands::Emit(args)) => {
-            commands::emit::emit_command(cli.color, args, hats_source.as_ref(), &config_sources)
-        }
+        Some(Commands::Emit(args)) => commands::emit::emit_command(
+            cli.color,
+            args,
+            hats_source.as_ref(),
+            &config_sources,
+            config_was_explicit,
+        ),
         Some(Commands::Plan(args)) => {
             commands::plan::plan_command(&config_sources, hats_source.as_ref(), cli.color, args)
                 .await
