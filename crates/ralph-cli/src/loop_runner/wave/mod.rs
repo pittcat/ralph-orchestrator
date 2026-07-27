@@ -3,6 +3,17 @@
 // merging into the main events file, worker spawns isolated wave worker backends,
 // supervisor_bridge routes supervisor-backed waves when enabled.
 
+// 2026-07-27-003 plan U2 (KTD-1): per-wave channel registry
+// replaces `.ralph/current-wave-channels`. The dispatcher must
+// commit a registry entry BEFORE spawning any worker so the
+// emit path can refuse channels whose (loop, wave, slot, path)
+// tuple does not match.
+pub(crate) mod channel_registry;
+pub use channel_registry::{
+    BindingInput, ChannelBinding, ChannelRegistryError, CleanupOutcome, REGISTRY_SCHEMA_VERSION,
+    RegistryFile, ResolveOutcome, WaveChannelRegistry, WaveChannelRegistryGuard, encode_identity,
+};
+
 mod dispatcher;
 mod heartbeat;
 mod io;

@@ -4635,17 +4635,24 @@ fn test_u3_resolve_emit_path_dispatcher_signed_carve_out() {
     let wave_id = "w-rs-1";
     let slot_idx: u32 = 0;
     let channel = workspace.join(format!(".ralph/wave-{wave_id}-{slot_idx}.jsonl"));
+    let loop_id = "loop-u3-test";
 
-    // 2026-07-26-002 plan U6 (R6 / KTD2): the dispatcher signs the
-    // wave channel by appending the absolute path to
-    // `.ralph/current-wave-channels` BEFORE spawning. Without that
-    // marker, env-only self-claim is rejected (proven by
-    // test_emit_wave_worker_channel_rejected_without_marker_signature).
-    std::fs::write(
-        workspace.join(".ralph/current-wave-channels"),
-        format!("{}\n", channel.display()),
+    // 2026-07-27-003 plan U2 (KTD-1): the dispatcher signs the
+    // wave channel by committing a per-wave JSON registry entry
+    // via `WaveChannelRegistry::prepare` BEFORE spawning. The
+    // legacy `.ralph/current-wave-channels` marker has been
+    // removed; the resolver now consults the on-disk registry
+    // only. (See `wave/channel_registry.rs`.)
+    let _guard = crate::loop_runner::wave::WaveChannelRegistry::prepare(
+        &workspace,
+        loop_id,
+        wave_id,
+        &[crate::loop_runner::wave::BindingInput::new(
+            slot_idx,
+            channel.clone(),
+        )],
     )
-    .unwrap();
+    .expect("registry prepare must succeed");
 
     // Happy path: handshake aligns → accepted.
     let resolved = resolve_emit_path(
@@ -4656,6 +4663,7 @@ fn test_u3_resolve_emit_path_dispatcher_signed_carve_out() {
         true,
         Some(wave_id),
         Some(slot_idx),
+        Some("loop-u3-test"),
     )
     .expect("U3/003: dispatcher-signed channel must be accepted");
     assert_eq!(
@@ -4673,6 +4681,7 @@ fn test_u3_resolve_emit_path_dispatcher_signed_carve_out() {
         true,
         Some(wave_id),
         Some(slot_idx),
+        Some("loop-u3-test"),
     );
     assert!(
         bad.is_err(),
@@ -4689,6 +4698,7 @@ fn test_u3_resolve_emit_path_dispatcher_signed_carve_out() {
         true,
         Some(wave_id),
         Some(slot_idx),
+        Some("loop-u3-test"),
     );
     assert!(
         bad_idx.is_err(),

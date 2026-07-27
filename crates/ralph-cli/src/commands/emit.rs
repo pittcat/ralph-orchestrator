@@ -1413,6 +1413,17 @@ fn emit_command_with_root_and_hats(
                 .and_then(|v| v.parse::<u32>().ok())
         })
         .flatten();
+    // Plan 2026-07-27-003 U2 (R4): wave workers MUST also have
+    // their loop identity in env (set by the dispatcher at spawn
+    // time) so the registry resolver can authenticate the
+    // (loop, wave, slot, path) tuple against
+    // `.ralph/wave-channels/<loop-id>/<wave-id>.json`. Env-only
+    // self-claim (`unset RALPH_CURRENT_LOOP_ID`) refuses the
+    // emit; this is the dispatcher's binding contract.
+    let loop_id_env = wave_worker
+        .then(|| std::env::var("RALPH_CURRENT_LOOP_ID").ok())
+        .flatten()
+        .filter(|s| !s.is_empty());
 
     // U3 (2026-07-06-002 plan, R3): cwd 漂移硬约束。当 hat 在
     // isolated 模式下运行、`RALPH_CURRENT_HAT` 已设置、未注入
@@ -1476,6 +1487,7 @@ fn emit_command_with_root_and_hats(
         isolated_mode,
         wave_id_env.as_deref(),
         slot_index_env,
+        loop_id_env.as_deref(),
     ) {
         Ok(path) => path,
         Err(err) => {
@@ -3209,6 +3221,7 @@ hats:
             false,
             None,
             None,
+            None,
         )
         .unwrap();
         assert!(resolved.ends_with(".ralph/events-20260101-000000.jsonl"));
@@ -3231,6 +3244,7 @@ hats:
             false,
             None,
             None,
+            None,
         )
         .unwrap();
         assert!(resolved.ends_with(".ralph/events-20260101-000000.jsonl"));
@@ -3242,7 +3256,7 @@ hats:
         let workspace = make_workspace(&tmp);
         let cli_file = workspace.join(".ralph/events.jsonl");
         let resolved =
-            resolve_emit_path(&workspace, &cli_file, None, None, false, None, None).unwrap();
+            resolve_emit_path(&workspace, &cli_file, None, None, false, None, None, None).unwrap();
         assert_eq!(resolved, cli_file);
     }
 
@@ -3259,7 +3273,7 @@ hats:
         // accepted (matches the allowlist entry).
         let cli_file = workspace.join(".ralph/events-20260101-000000.jsonl");
         let resolved =
-            resolve_emit_path(&workspace, &cli_file, None, None, false, None, None).unwrap();
+            resolve_emit_path(&workspace, &cli_file, None, None, false, None, None, None).unwrap();
         assert_eq!(resolved, cli_file);
     }
 
@@ -3277,7 +3291,7 @@ hats:
         // that would let an agent redirect events to a different
         // worktree's file.
         let cli_file = workspace.join(".ralph/events-other.jsonl");
-        let result = resolve_emit_path(&workspace, &cli_file, None, None, false, None, None);
+        let result = resolve_emit_path(&workspace, &cli_file, None, None, false, None, None, None);
         assert!(
             result.is_err(),
             "non-allowlisted --file must be rejected, got: {:?}",
@@ -3312,6 +3326,7 @@ hats:
             false,
             None,
             None,
+            None,
         );
         assert!(
             result.is_err(),
@@ -3333,7 +3348,7 @@ hats:
         // as a request to escape the workspace and refuses outright
         // (no silent rewrite to the marker).
         let cli_file = workspace.join("../escape.jsonl");
-        let result = resolve_emit_path(&workspace, &cli_file, None, None, false, None, None);
+        let result = resolve_emit_path(&workspace, &cli_file, None, None, false, None, None, None);
         assert!(
             result.is_err(),
             "path traversal with explicit --file must be rejected"
@@ -3348,7 +3363,7 @@ hats:
         // is also rejected (the default events.jsonl is not in scope of
         // the traversal).
         std::fs::remove_file(workspace.join(".ralph/current-events")).unwrap();
-        let result = resolve_emit_path(&workspace, &cli_file, None, None, false, None, None);
+        let result = resolve_emit_path(&workspace, &cli_file, None, None, false, None, None, None);
         assert!(
             result.is_err(),
             "path traversal with no marker must be rejected"
@@ -3376,7 +3391,8 @@ hats:
             false,
             None,
             None,
-        );
+            None
+            );
         assert!(result.is_err(), "symlink to outside loop must be rejected");
     }
 
@@ -3618,7 +3634,8 @@ hats:
             true,
             None,
             None,
-        );
+            None
+            );
         match result {
             Ok(path) => panic!(
                 "orphan subtree path must not be accepted, got: {}",
@@ -3668,6 +3685,7 @@ hats:
             true,              // isolated_mode
             None,
             None,
+            None
         )
         .expect("isolated + hat-marker must resolve to channel");
         assert!(
@@ -3720,15 +3738,20 @@ hats:
         let wave_channel_path = workspace.join(".ralph/wave-w-test-0.jsonl");
         let wave_channel = wave_channel_path.display().to_string();
 
-        // 2026-07-26-002 plan U6 (R6 / KTD2): the dispatcher appends
-        // the absolute channel path to .ralph/current-wave-channels
-        // BEFORE spawning. Without the marker, env-only self-claim
-        // is rejected (proven by the prior Red test).
-        std::fs::write(
-            workspace.join(".ralph/current-wave-channels"),
-            format!("{}\n", wave_channel_path.display()),
+        // 2026-07-27-003 plan U2 (KTD-1): the dispatcher commits
+        // the per-wave JSON registry entry BEFORE spawning,
+        // replacing the legacy `.ralph/current-wave-channels`
+        // append-only marker.
+        let _guard = crate::loop_runner::wave::WaveChannelRegistry::prepare(
+            &workspace,
+            "loop-u3-wtest",
+            "w-test",
+            &[crate::loop_runner::wave::BindingInput::new(
+                0,
+                wave_channel_path.clone(),
+            )],
         )
-        .unwrap();
+        .expect("registry prepare must succeed");
 
         let result = resolve_emit_path(
             &workspace,
@@ -3738,6 +3761,7 @@ hats:
             true,                // isolated_mode (wave workers run in isolated context)
             Some("w-test"),
             Some(0),
+            Some("loop-u3-wtest"),
         );
 
         // TARGET behavior: Ok with the wave channel path
@@ -3785,7 +3809,8 @@ hats:
             false, // NOT isolated → no wave-worker context
             None,
             None,
-        );
+            None
+            );
 
         assert!(
             result.is_err(),
@@ -3816,9 +3841,13 @@ hats:
             ".ralph/events-main.jsonl",
         )
         .unwrap();
-        // No `.ralph/current-wave-channels` marker written —
-        // simulates the attacker scenario where the worker self-
-        // claims the channel via env vars without dispatcher sign.
+        // 2026-07-27-003 plan U2 (KTD-1): no per-wave registry
+        // entry written — simulates the attacker scenario where
+        // the worker self-claims the channel via env vars without
+        // dispatcher sign. The legacy
+        // `.ralph/current-wave-channels` marker has been replaced
+        // by the JSON registry; the rejection error now names the
+        // registry instead.
 
         let wave_channel = workspace
             .join(".ralph/wave-w-test-0.jsonl")
@@ -3832,19 +3861,20 @@ hats:
             Some("exec-worker"),
             true,           // isolated_mode = true
             Some("w-test"), // matching wave_id
-            Some(0),        // matching slot_index
+            Some(0),        // matching slot_index,
+            Some("loop-u3-wtest"),
         );
 
         assert!(
             result.is_err(),
-            "forged env without marker signature must be rejected; got Ok({result:?})",
+            "forged env without registry signature must be rejected; got Ok({result:?})",
         );
         let msg = result.unwrap_err().to_string();
         assert!(
-            msg.contains("current-wave-channels")
-                || msg.contains("marker")
-                || msg.contains("dispatcher must sign"),
-            "error must reference the missing marker; got: {msg}"
+            msg.contains("wave_channel_registry_reject")
+                || msg.contains("registry")
+                || msg.contains("dispatcher"),
+            "error must reference the missing registry; got: {msg}"
         );
     }
 
@@ -3877,7 +3907,8 @@ hats:
             true,
             Some("w-rs-1"), // worker-bound wave id
             Some(0),
-        );
+            None
+            );
         assert!(
             result.is_err(),
             "wave channel with mismatched <id> must be rejected, got: {result:?}"
@@ -3914,8 +3945,9 @@ hats:
             Some("exec-worker"),
             true,
             Some("w-test"),
-            Some(0), // worker-bound slot index
-        );
+            Some(0), // worker-bound slot index,
+            None
+            );
         assert!(
             result.is_err(),
             "wave channel with mismatched <idx> must be rejected, got: {result:?}"
@@ -3957,13 +3989,19 @@ hats:
         .unwrap();
         let wave_channel_path = workspace.join(".ralph/wave-w-review-2.jsonl");
         let wave_channel = wave_channel_path.display().to_string();
-        // Dispatcher-signed marker (U6 R6 / KTD2 — merged from
-        // 2026-07-26-002 plan).
-        std::fs::write(
-            workspace.join(".ralph/current-wave-channels"),
-            format!("{}\n", wave_channel_path.display()),
+        // Dispatcher-signed via the per-wave registry JSON
+        // (2026-07-27-003 plan U2 replaces
+        // `.ralph/current-wave-channels`).
+        let _guard = crate::loop_runner::wave::WaveChannelRegistry::prepare(
+            &workspace,
+            "loop-u3-review",
+            "w-review",
+            &[crate::loop_runner::wave::BindingInput::new(
+                2,
+                wave_channel_path.clone(),
+            )],
         )
-        .unwrap();
+        .expect("registry prepare must succeed");
         let result = resolve_emit_path(
             &workspace,
             &workspace.join(".ralph/events.jsonl"),
@@ -3972,6 +4010,7 @@ hats:
             true,                  // isolated execution context
             Some("w-review"),
             Some(2),
+            Some("loop-u3-review"),
         );
         assert!(
             result.is_ok(),
@@ -4002,15 +4041,20 @@ hats:
         )
         .unwrap();
         let wave_channel = workspace.join(".ralph/wave-w-rt-0.jsonl");
-        std::fs::File::create(&wave_channel).unwrap();
         let wave_channel_str = wave_channel.display().to_string();
-        // 2026-07-26-002 plan U6 (R6 / KTD2) — dispatcher-signed
-        // marker must precede the resolve call.
-        std::fs::write(
-            workspace.join(".ralph/current-wave-channels"),
-            format!("{}\n", wave_channel_str),
+        // 2026-07-27-003 plan U2 (KTD-1) — dispatcher signs the
+        // channel via the per-wave JSON registry, replacing the
+        // legacy `.ralph/current-wave-channels` marker.
+        let _guard = crate::loop_runner::wave::WaveChannelRegistry::prepare(
+            &workspace,
+            "loop-u3-rt",
+            "w-rt",
+            &[crate::loop_runner::wave::BindingInput::new(
+                0,
+                wave_channel.clone(),
+            )],
         )
-        .unwrap();
+        .expect("registry prepare must succeed");
         // Sanity: resolve_emit_path must point at the channel,
         // not the main events file.
         let resolved = resolve_emit_path(
@@ -4021,6 +4065,7 @@ hats:
             true,
             Some("w-rt"),
             Some(0),
+            Some("loop-u3-rt"),
         )
         .expect("resolve");
         assert!(
@@ -4061,7 +4106,8 @@ hats:
             true,
             Some("w-expected"), // dispatcher-bound id
             Some(0),
-        );
+            None
+            );
         assert!(result.is_err(), "mismatched wave_id must be rejected");
         let msg = result.unwrap_err().to_string();
         // Either the explicit allowlist rejection OR a symlink /
@@ -4074,17 +4120,20 @@ hats:
         );
     }
 
-    /// U3 / S4 (plan 2026-07-26-003, R3): when the wave-worker
-    /// handshake (`wave_id` + `slot_index`) is present but
-    /// `RALPH_EVENTS_FILE` is unset, marker fallthrough would
-    /// previously resolve to `current-events` (main) and silently
-    /// append there. Fan-in then saw an empty per-slot channel →
-    /// `empty_worker_result` while main already held `unit.done`
-    /// (primary-20260727-051801). The gate must reject that
-    /// fallthrough with an observable `wave_worker_main_fallthrough`
-    /// error — never Ok(main).
+    /// U3 / S4 (plan 2026-07-26-003, R3) + 2026-07-27-003 U2: when
+    /// the wave-worker handshake (`wave_id` + `slot_index`) is
+    /// present but `RALPH_EVENTS_FILE` is unset, marker
+    /// fallthrough would previously resolve to `current-events`
+    /// (main) and silently append there (the implementation-review
+    /// primary-20260727-051801 double-ledger root cause). After
+    /// plan 2026-07-27-003 U2 the registry resolver refuses any
+    /// wave-worker call whose `(loop_id, wave_id, slot_index,
+    /// path)` tuple is not in the dispatcher-committed registry
+    /// JSON — no main fallback path.
     #[test]
     fn test_emit_wave_worker_unset_events_file_rejects_main_fallthrough() {
+        use crate::loop_runner::wave::WaveChannelRegistry;
+
         let tmp = TempDir::new().unwrap();
         let workspace = make_workspace(&tmp);
         std::fs::write(
@@ -4092,25 +4141,34 @@ hats:
             ".ralph/events-main.jsonl",
         )
         .unwrap();
-        // Dispatcher signed a real channel, but the worker dropped
-        // RALPH_EVENTS_FILE (skill historically suggested "remove
-        // explicit params and let marker resolve").
+        // Dispatcher signs the channel via the per-wave registry
+        // JSON (U2 replaces `.ralph/current-wave-channels`).
+        let loop_id = "loop-u3-fallthrough";
+        let wave_id = "w-rs-1";
         let signed = workspace.join(".ralph/wave-w-rs-1-2.jsonl");
-        std::fs::File::create(&signed).unwrap();
-        std::fs::write(
-            workspace.join(".ralph/current-wave-channels"),
-            format!("{}\n", signed.display()),
-        )
-        .unwrap();
+        // prepare creates the channel file via create_new — no
+        // pre-creation needed.
+        let bindings = vec![crate::loop_runner::wave::BindingInput::new(
+            2,
+            signed.clone(),
+        )];
+        let _guard = WaveChannelRegistry::prepare(&workspace, loop_id, wave_id, &bindings)
+            .expect("registry prepare must succeed");
 
+        // (1) No env, no --file → must NOT silently resolve to
+        // main. Marker fallthrough is gone; the resolver falls
+        // through to `events.jsonl` (the non-wave-worker default),
+        // which is outside the dispatcher's binding and is
+        // rejected as a registry miss.
         let result = resolve_emit_path(
             &workspace,
-            &workspace.join(".ralph/events.jsonl"), // default --file
-            None,                                   // unset RALPH_EVENTS_FILE
+            &workspace.join(".ralph/events.jsonl"),
+            None,
             Some("review-worker"),
             true,
-            Some("w-rs-1"),
+            Some(wave_id),
             Some(2),
+            Some(loop_id),
         );
         assert!(
             result.is_err(),
@@ -4118,25 +4176,28 @@ hats:
         );
         let msg = result.unwrap_err().to_string();
         assert!(
-            msg.contains("wave_worker_main_fallthrough")
+            msg.contains("wave_channel_registry_reject")
                 || msg.contains("RALPH_EVENTS_FILE")
-                || msg.contains("empty_worker_result"),
+                || msg.contains("empty_worker_result")
+                || msg.contains("not in this loop's events allowlist"),
             "error must name the fallthrough failure mode; got: {msg}"
         );
-        // Positive control: keeping the signed channel still works.
+
+        // (2) Positive control: dispatcher's signed channel
+        // still works (this is what the worker should have
+        // invoked).
         let ok = resolve_emit_path(
             &workspace,
             &workspace.join(".ralph/events.jsonl"),
             Some(&signed.display().to_string()),
             Some("review-worker"),
             true,
-            Some("w-rs-1"),
+            Some(wave_id),
             Some(2),
-        );
-        assert!(
-            ok.is_ok(),
-            "signed per-slot channel must still be accepted; got {ok:?}"
-        );
+            Some(loop_id),
+        )
+        .expect("signed channel must resolve");
+        assert_eq!(ok, signed);
     }
 
     #[test]

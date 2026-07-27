@@ -26,6 +26,12 @@ use tracing::{info, warn};
 
 use super::io::{merge_wave_results_to_events_file, push_to_tui_iteration};
 use super::worker::{WaveWorkerOutcome, run_wave_worker};
+// 2026-07-27-003 plan U2 (KTD-1): dispatcher commits a per-wave
+// JSON registry entry before spawning each worker. The legacy
+// `append_wave_channel_to_marker` helper stays in this file as
+// deprecated for U1 test coverage until U3 closes the spawn-time
+// gate end-to-end.
+use super::{BindingInput, WaveChannelRegistry};
 use crate::display::{print_wave_header, print_wave_summary, print_wave_worker_done};
 use crate::loop_runner::execution::inject_hat_execution_env;
 use crate::loop_runner::paths::{config_state_machine_enabled, resolve_emit_events_path};
@@ -1284,24 +1290,47 @@ pub async fn execute_wave_structured(
         // Create per-worker events file
         let worker_events_file = wave_dir.join(format!("wave-{}-{}.jsonl", wave_id, index_u32));
 
-        // 2026-07-26-002 plan U6 (R6 / KTD7): the dispatcher is the
-        // sole authority for which per-slot channels the wave
-        // workers may write to. Append the absolute path to
-        // `<workspace>/.ralph/current-wave-channels` BEFORE spawning
-        // so the worker's `ralph emit` finds the marker. Best-effort:
-        // marker write failure is a warn-and-continue, NOT a
-        // spawn blocker, because the worker process can still
-        // surface its own diagnostic. The marker is rewritten by
-        // every dispatcher invocation (one line per slot, exact
-        // match — no prefix wildcards).
-        if let Err(err) = append_wave_channel_to_marker(main_events_file, &worker_events_file) {
-            warn!(
-                wave_id = %wave.wave_id,
-                slot_index = index_u32,
-                error = %err,
-                "U6: failed to append wave channel to .ralph/current-wave-channels; \
-                 worker emit will fall back to shape-only allowlist check"
-            );
+        // 2026-07-27-003 plan U2 (KTD-1): the dispatcher MUST commit
+        // a per-wave JSON registry entry at `.ralph/wave-channels/<encoded-loop-id>/<encoded-wave-id>.json`
+        // BEFORE spawning any worker. This replaces the legacy
+        // append-only `.ralph/current-wave-channels` marker
+        // (which accepted env-only self-claim — the
+        // implementation-review primary-20260727 incident root
+        // cause). The full spawn-time fail-close lands in U3;
+        // for U2 we record the new call so the registry is on disk
+        // and the caller's signature can change without losing
+        // coverage of the legacy helper (U1 tests still pin
+        // `append_wave_channel_to_marker` shape until U3).
+        let wave_workspace_root = main_events_file
+            .parent()
+            .and_then(|p| p.parent())
+            .unwrap_or(Path::new("."));
+        let loop_id_for_registry = std::env::var("RALPH_CURRENT_LOOP_ID")
+            .unwrap_or_else(|_| "loop-unknown".to_string());
+        let registry_binding_input = BindingInput::new(
+            index_u32,
+            worker_events_file.clone(),
+        );
+        match WaveChannelRegistry::prepare(
+            wave_workspace_root,
+            &loop_id_for_registry,
+            &wave.wave_id,
+            std::slice::from_ref(&registry_binding_input),
+        ) {
+            Ok(_guard) => {
+                // Guard is dropped at end of `execute_wave` scope; explicit
+                // cleanup happens via the U3 hook. For U2 we just keep
+                // the registry on disk so `resolve_emit_path` can find it.
+            }
+            Err(err) => {
+                warn!(
+                    wave_id = %wave.wave_id,
+                    slot_index = index_u32,
+                    error = %err,
+                    "U2: failed to commit per-wave channel registry entry; \
+                     worker emit may be rejected by resolve_emit_path"
+                );
+            }
         }
 
         // Build worker prompt
@@ -2365,13 +2394,11 @@ pub(crate) fn run_supervisor_fan_in(
         ) {
         use ralph_core::supervisor::SlotStatus;
         let settle_snapshot = bridge.fan_in_status(&store_wave_id).ok();
-        let has_blocking = settle_snapshot
-            .as_ref()
-            .is_some_and(|snap| {
-                snap.slots
-                    .iter()
-                    .any(|(_, status)| matches!(status, SlotStatus::Failed | SlotStatus::Cancelled))
-            });
+        let has_blocking = settle_snapshot.as_ref().is_some_and(|snap| {
+            snap.slots
+                .iter()
+                .any(|(_, status)| matches!(status, SlotStatus::Failed | SlotStatus::Cancelled))
+        });
         if has_blocking {
             // (a) Salvage completed-only business events into the
             // main ledger and commit the salvage mark (also covers
@@ -3030,10 +3057,7 @@ pub(crate) fn build_wave_failed_payload(
                     Some(r) => (serde_json::json!(r), map_failure_class(r)),
                     None => (serde_json::Value::Null, map_failure_class("")),
                 };
-                if reason
-                    .as_deref()
-                    .is_some_and(is_retryable_slot_reason)
-                {
+                if reason.as_deref().is_some_and(is_retryable_slot_reason) {
                     redrive_slots.push(*idx);
                 }
                 slot_failures.push(serde_json::json!({
@@ -9710,7 +9734,8 @@ hats: {}
                 n: u32,
                 slot_retry_budget: u32,
             ) -> Result<String, BridgeError> {
-                self.inner.register_wave_if_absent(k, id, n, slot_retry_budget)
+                self.inner
+                    .register_wave_if_absent(k, id, n, slot_retry_budget)
             }
             fn fan_in_status(
                 &self,
@@ -9975,7 +10000,10 @@ hats: {}
             "current behavior: marker self-creates and accepts the append; \
              RED baseline for U2 replacement. Got error: {result:?}"
         );
-        let marker = workspace.path().join(".ralph").join("current-wave-channels");
+        let marker = workspace
+            .path()
+            .join(".ralph")
+            .join("current-wave-channels");
         let contents = std::fs::read_to_string(&marker).expect("marker must be readable");
         assert!(
             contents.contains("wave-w-rs-1-0.jsonl"),
@@ -10012,10 +10040,7 @@ hats: {}
         std::fs::set_permissions(&locked_parent, perms).expect("chmod 0o000");
 
         let main_events_file = workspace.path().join(".ralph").join("events.jsonl");
-        let worker_events_file = workspace
-            .path()
-            .join(".ralph")
-            .join("wave-w-rs-1-0.jsonl");
+        let worker_events_file = workspace.path().join(".ralph").join("wave-w-rs-1-0.jsonl");
         let result = append_wave_channel_to_marker(&main_events_file, &worker_events_file);
 
         // Restore perms so the tempdir teardown succeeds.
@@ -10139,7 +10164,8 @@ hats: {}
             ..ralph_core::CompletedWave::default()
         };
 
-        let hints = build_review_done_hints(&bridge_arc, store_wave_id, &completed, &main_events_file);
+        let hints =
+            build_review_done_hints(&bridge_arc, store_wave_id, &completed, &main_events_file);
 
         // CURRENT (RED) behavior: main_backscan contains all 5
         // orphan dimensions. U4 reconciliation must drop these
@@ -10321,12 +10347,14 @@ hats: {}
         for i in 0u32..3 {
             results.push(ralph_core::WaveResult {
                 index: i,
-                events: vec![ralph_proto::Event::new(
-                    "review.unit.done",
-                    serde_json::json!({"dimension": "correctness"}).to_string(),
-                )
-                .with_source("review-worker")
-                .with_wave(store_wave_id.to_string(), i, 3)],
+                events: vec![
+                    ralph_proto::Event::new(
+                        "review.unit.done",
+                        serde_json::json!({"dimension": "correctness"}).to_string(),
+                    )
+                    .with_source("review-worker")
+                    .with_wave(store_wave_id.to_string(), i, 3),
+                ],
             });
         }
         let completed = ralph_core::CompletedWave {
@@ -10407,11 +10435,8 @@ hats: {}
         // success window plan U5 must close. The call MUST
         // NOT panic, but with the current `()` return there
         // is no other observable signal of failure.
-        let _: () = append_supervisor_coord_event(
-            &main_events_file,
-            "review.wave.failed",
-            &payload,
-        );
+        let _: () =
+            append_supervisor_coord_event(&main_events_file, "review.wave.failed", &payload);
 
         // Restore perms so the tempdir teardown succeeds.
         let mut restore = std::fs::metadata(&locked_parent).unwrap().permissions();
