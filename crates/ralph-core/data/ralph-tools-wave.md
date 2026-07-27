@@ -186,6 +186,8 @@ ralph wave emit [OPTIONS] <TOPIC>
 >    - 不要把 `RALPH_EVENTS_FILE` 写到 `current-events` / `current-candidate-events` 之类的位置 —— 这些都不是本次 slot 的通道，会被拒收。
 >
 > 3. **wave_id 共享**：同一 `--payloads` 列表产生的 N 个事件共享同一个 `wave_id` 和 `wave_total`，由 `wave_index`（0..N-1）区分。聚合 hat 据此识别同一 wave 的所有结果。
+>
+> 4. **wave 通道准备阶段（dispatcher 视角 → worker 视角）**：dispatcher 在 spawn worker 前必须完成本 wave 的私有通道准备：把每个 slot 的 `(loop id, wave id, slot index, canonical path)` 绑定写入 dispatcher-managed 的 per-wave 通道记录。如果 dispatcher 报告「本 wave 通道准备失败」，worker 子进程已被 runtime 保护性阻止启动；如果 worker 进程已起来但 `ralph emit` 收到 `wave_channel_registry_reject`（参见 `ralph-tools-emit.md` 同名段），按那边规定的「停 / 看 dispatcher 输出 / 不重试 / 报告」四步动作处理，不要尝试改路径、绕 marker、或者补发同一 topic。
 
 ### Confirm 阶段
 

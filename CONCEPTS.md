@@ -40,6 +40,18 @@ follow-on 两环之间的强制交接产物：由第一环成功路径写出、�
 
 同一 hat 定义下、对 N 份同构 payload 的 orchestrator 级 fan-out/fan-in。共享 `wave_id`，用 `wave_index` / `wave_total` 区分 slot。需要账本级收齐、超时与诊断时用 wave；hat 内部分工优先 subagent。`events.jsonl` / `supervisor.db` 是 runtime ledger，不是 hat 业务 artifact。
 
+### wave channel registry
+
+Dispatcher 在 spawn worker 之前为本 wave 一次性提交的、按 `(loop id, wave id, slot index, canonical path)` 四元组绑定的私有事件通道授权记录；该记录按 wave 隔离、可幂等清理，runtime 据此回答「本次 slot 是否有权把事件写到指定路径」。每 wave 一份、不是全局 append-only —— 旧式跨 wave / 跨 loop 全局 marker 已被替代。任何 worker 子进程若不在该 registry 中命中绑定，`ralph emit` 收到稳定错误码 `wave_channel_registry_reject` 并拒绝回退到 main。
+
+### authoritative terminal evidence
+
+Supervisor 在 fan-in 阶段判断「某 review / fix 维度是否完成」时**唯一**采纳的依据：slot 终态证据，且终态证据必须通过 topic / dimension / slot assignment / payload fingerprint 四项校验后才算有效。Main ledger 中的孤儿事件即便 topic 看起来匹配，也不能用来证明完成 —— 它们只进入「main 与 store 不一致」的诊断分类，不参与完成性计算。
+
+### projection observation
+
+Fan-in 阶段对 main ledger 的只读扫描结果分类：把 main 中匹配本 wave 终态事件形状的条目，按「与权威完成证据一致 / 缺失 / 孤儿 / fingerprint 冲突」分组。**只是观察**，不作为完成性证据；目的是让 operator 从 main JSONL 看到「store 与投影之间的差异」，例如「store 标记 6 个 slot 失败、main 中只有 5 条 done」时区分出「5 个 orphan」而非「5 个 missing」。缺 / 冲突 / 孤儿都写进结构化诊断，不影响 `missing_dimensions` 的权威结果。
+
 ### worker_timeout
 
 Supervisor/wave slot 的稳定失败 reason：该槽 **已进入租约/执行**（或等价 Timeout 出口）后，在 deadline 内未形成可接受终态（无 terminal，或 Timeout 分类路径判定为超时失败）。是调度租约语义，不是「已证明 agent 卡死」。有 `*.unit.done` / `*.unit.failed` terminal 的 Timeout 应 Completed，不得记本 reason。
