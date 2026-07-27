@@ -12,6 +12,90 @@ use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::time::SystemTime;
 
+// ─────────────────────────────────────────────────────────────────
+// 2026-07-27-004 plan U1 (R1-R4 / D1): typed wave identity.
+// `WaveId` is the public identifier callers see at every layer
+// (emit envelope, worker activation, inspect JSON, coord
+// delivery, redrive parent/child). `StoreWaveKey` is the internal
+// store-only key — never serialised, never carried across the
+// trait boundary. The wrapper prevents accidental propagation of
+// store-allocated PKs (`w-{seq}`) into the public surface.
+// ─────────────────────────────────────────────────────────────────
+
+/// 2026-07-27-004 plan U1 (R1): the public wave ID. The store
+/// echoes this value unchanged from every call site, so emit /
+/// dispatch / inspect / fan-in / redrive share a single identifier.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct WaveId(String);
+
+impl WaveId {
+    /// Construct a `WaveId` from a string. No format enforcement
+    /// — the existing CLI emits shapes like `w-rs-1` and
+    /// `w-{emit-seq}`; both remain valid because the store's PK
+    /// constraint is the UNIQUE INDEX on the `waves.wave_id`
+    /// column, not a particular prefix.
+    pub fn from(value: impl Into<String>) -> Self {
+        Self(value.into())
+    }
+
+    /// Access the inner string. Use sparingly — callers should
+    /// compare `WaveId` values directly, not stringify them.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Display for WaveId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl From<&str> for WaveId {
+    fn from(s: &str) -> Self {
+        Self(s.to_string())
+    }
+}
+
+impl From<String> for WaveId {
+    fn from(s: String) -> Self {
+        Self(s)
+    }
+}
+
+impl AsRef<str> for WaveId {
+    fn as_ref(&self) -> &str {
+        &self.0
+    }
+}
+
+/// 2026-07-27-004 plan U1 (R2 / D1): opaque internal store key.
+/// The store implementation may allocate a numeric internal key
+/// (the existing `wave_id_seq` autoincrement column is one such
+/// shape) for FK efficiency; this wrapper prevents that internal
+/// key from leaking into the public trait DTOs. The struct has
+/// no `Display` / `Serialize` impls on purpose.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct StoreWaveKey(String);
+
+impl StoreWaveKey {
+    /// Convert a public `WaveId` into an internal `StoreWaveKey`
+    /// when the store's contract is to keep them 1:1 (the current
+    /// rusqlite `register_wave_with_public_id` shape). Stored as
+    /// a method on the wrapper to discourage callers from doing
+    /// the conversion in ad-hoc places.
+    pub fn from_public(id: &WaveId) -> Self {
+        Self(id.as_str().to_string())
+    }
+
+    /// Internal-only accessor. Should not appear in any user-facing
+    /// log line, JSON, or env variable.
+    #[cfg(test)]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
 /// Which wave category a registered wave belongs to.
 ///
 /// The U13 preset uses `Exec` and `Fix` for parallel implementation and
@@ -529,6 +613,14 @@ pub enum SupervisorStoreError {
     /// `ralph wave inspect` for guidance.
     #[error("partial prior wave emission: {on_disk} events on disk, expected {expected}")]
     EmissionPartial { on_disk: u32, expected: u32 },
+    /// 2026-07-27-004 plan U1 (D2): a `register_wave_with_public_id`
+    /// call hit the same public id with a DIFFERENT activation
+    /// contract (different `kind` / `expected_total` /
+    /// `slot_retry_budget`). Fail closed: callers MUST pick a fresh
+    /// public id rather than coerce the store to overwrite the
+    /// prior row.
+    #[error("wave identity contract conflict: {0}")]
+    IdentityContractConflict(String),
 }
 
 /// Result alias for the trait surface.
@@ -733,6 +825,50 @@ pub trait SupervisorStore: fmt::Debug + Send + Sync {
         expected_total: u32,
         slot_retry_budget: u32,
     ) -> SupervisorStoreResult<String>;
+
+    /// 2026-07-27-004 plan U1 (R1-R4 / D1): register or look up a
+    /// wave using the public `WaveId` AS THE PRIMARY KEY. The
+    /// store's primary key is the public id — there is no
+    /// separate internal allocation. Re-registering with the same
+    /// `WaveId` and matching contract (kind / expected_total /
+    /// slot_retry_budget) returns the existing public id without
+    /// creating a duplicate row. A re-register with the same
+    /// `WaveId` but a DIFFERENT contract returns
+    /// [`SupervisorStoreError::IdentityContractConflict`].
+    ///
+    /// Implementations MUST keep this contract parity across
+    /// in-memory and rusqlite stores. The `InMemoryCoordinatorBridge`
+    /// authoritative `registered: HashMap` (U3 / 2026-07-03-001)
+    /// becomes a redundant cache once this method is in place —
+    /// the persistent `waves_by_id` map is the single source of
+    /// truth.
+    fn register_wave_with_public_id(
+        &self,
+        public_id: &WaveId,
+        kind: WaveKind,
+        expected_total: u32,
+        slot_retry_budget: u32,
+    ) -> SupervisorStoreResult<WaveId> {
+        // 2026-07-27-004 plan U1 (D1 / fallback): the in-memory
+        // and rusqlite production stores override this. The
+        // default mirrors the legacy behaviour: drive the call
+        // through `register_wave(idempotency_key, ...)` and trust
+        // the caller that the returned wave_id equals the
+        // supplied public id. This keeps the existing test mock
+        // stores (`MockSupervisorStore` in the BDD scenarios,
+        // `FailingStore` in `reconciliation_tests`, etc.) compiling
+        // without forcing each one to re-implement the new
+        // contract.
+        let returned =
+            self.register_wave(public_id.as_str(), kind, expected_total, slot_retry_budget)?;
+        if returned != public_id.as_str() {
+            return Err(SupervisorStoreError::IdentityContractConflict(format!(
+                "store returned '{returned}' for public_id '{}' but legacy fallback is only correct when the store echoes the public id verbatim",
+                public_id
+            )));
+        }
+        Ok(public_id.clone())
+    }
 
     /// Enqueue a wave that exceeded the backpressure ceiling. The
     /// store records the wave in `wave_queue` and the dispatcher
@@ -1207,6 +1343,13 @@ mod retry_classifier_tests;
 mod rusqlite;
 #[cfg(test)]
 mod types_tests;
+/// 2026-07-27-004 plan U1 (R1-R4): persistent `WaveId` is the
+/// SINGLE public wave identity at every layer. Tests below drive
+/// `register_wave_with_public_id`, idempotent re-register under
+/// matching contract, conflict under contract drift, and reopen
+/// survival without an in-memory authoritative map.
+#[cfg(test)]
+mod u1_public_id_tests;
 pub mod worker_outcome;
 pub mod worktree_bind;
 

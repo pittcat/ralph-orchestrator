@@ -26,7 +26,7 @@ use super::{
     CompensationKind, CoordinationReceiptSummary, DispatchOutcome, EmissionReservation,
     EmissionState, IsolationMode, ProjectionReceiptSummary, RedriveResult, SlotResource,
     SlotStatus, SupervisorStore, SupervisorStoreError, SupervisorStoreResult, WaveDeliveryState,
-    WaveKind, WavePhase, WaveSnapshot,
+    WaveId, WaveKind, WavePhase, WaveSnapshot,
 };
 
 /// `PRAGMA busy_timeout` value installed on every supervisor
@@ -404,6 +404,103 @@ impl SupervisorStore for RusqliteSupervisorStore {
             // duplicate-key branches anchor on `existing`.
             let _ = existing.as_ref();
             Ok(wave_id)
+        })
+    }
+
+    fn register_wave_with_public_id(
+        &self,
+        public_id: &WaveId,
+        kind: WaveKind,
+        expected_total: u32,
+        slot_retry_budget: u32,
+    ) -> SupervisorStoreResult<WaveId> {
+        // 2026-07-27-004 plan U1 (R1-R4 / D1 / D2): the public
+        // id IS the store primary key. Re-registering with the
+        // same id and matching contract is idempotent; a contract
+        // drift returns IdentityContractConflict. The
+        // `idempotency_key` column aliases the public id so the
+        // legacy `wave_id_for_idempotency_key` lookup still finds
+        // the row (U1 does NOT retire the legacy alias — it adds
+        // a public-id-driven path that supersedes the
+        // store-allocated `w-{seq}` identity).
+        if expected_total == 0 {
+            return Err(SupervisorStoreError::InvalidTransition(
+                "expected_total must be > 0".to_string(),
+            ));
+        }
+        if slot_retry_budget > 2 {
+            return Err(SupervisorStoreError::InvalidTransition(
+                "slot_retry_budget must be 0..=2".to_string(),
+            ));
+        }
+        let public_id_str = public_id.as_str().to_string();
+        self.with_conn(|conn| {
+            let tx = conn.transaction()?;
+            // 1. Idempotent re-register check — same id +
+            //    matching contract is a no-op that echoes the
+            //    public id back to the caller.
+            let existing: Option<(String, i64, String, i64)> = tx
+                .query_row(
+                    "SELECT kind, expected_total, phase, slot_retry_budget
+                       FROM waves
+                      WHERE wave_id = ?1",
+                    [&public_id_str],
+                    |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, i64>(1)?,
+                            row.get::<_, String>(2)?,
+                            row.get::<_, i64>(3)?,
+                        ))
+                    },
+                )
+                .optional()?;
+            if let Some((kind_str, total, _phase, retry_budget)) = existing {
+                let incoming_kind_str = kind_to_str(kind);
+                if kind_str != incoming_kind_str
+                    || total != i64::from(expected_total)
+                    || retry_budget != i64::from(slot_retry_budget)
+                {
+                    return Err(SupervisorStoreError::IdentityContractConflict(format!(
+                        "wave_id '{public_id_str}' already registered with a different \
+                         contract (existing: kind={kind_str} total={total} \
+                         retry_budget={retry_budget}; incoming: kind={incoming_kind_str} total={expected_total} \
+                         retry_budget={slot_retry_budget})"
+                    )));
+                }
+                tx.commit()?;
+                return Ok(public_id.clone());
+            }
+            // 2. Fresh register — insert row keyed by public id
+            //    with `idempotency_key` aliased to the same value
+            //    so the legacy lookup path keeps finding it.
+            let isolation = default_isolation_for(kind);
+            tx.execute(
+                "INSERT INTO waves (wave_id, idempotency_key, kind, expected_total, phase, slot_retry_budget)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                rusqlite::params![
+                    &public_id_str,
+                    &public_id_str,
+                    kind_to_str(kind),
+                    i64::from(expected_total),
+                    phase_to_str(WavePhase::Dispatch),
+                    i64::from(slot_retry_budget),
+                ],
+            )?;
+            for idx in 0..expected_total {
+                tx.execute(
+                    "INSERT INTO wave_slots (wave_id, slot_index, status, isolation)
+                     VALUES (?1, ?2, ?3, ?4)",
+                    rusqlite::params![
+                        &public_id_str,
+                        i64::from(idx),
+                        status_to_str(SlotStatus::Pending),
+                        isolation_to_str(isolation),
+                    ],
+                )?;
+            }
+            tx.commit()?;
+            Ok(public_id.clone())
         })
     }
 

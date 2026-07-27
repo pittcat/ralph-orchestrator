@@ -1,0 +1,30 @@
+-- 2026-07-27-004 plan U1 (R1-R4 / D1): public wave identity =
+-- store primary key.
+--
+-- The schema bump reflects the contract change where caller-supplied
+-- `wave_id` IS the store primary key (the pre-U1 store allocated
+-- `w-{seq}` and kept a separate `idempotency_key` alias). The v1
+-- schema already carries `waves.wave_id TEXT PRIMARY KEY` and
+-- `waves.idempotency_key TEXT`, so the v1-v8 row shape is
+-- unchanged — the migration exists to (a) bump `user_version` and
+-- (b) document that the public-id-only contract is now in force
+-- for new rows.
+--
+-- Existing rows: the pre-U1 store inserted rows with a
+-- store-allocated `wave_id` (`w-{seq}`) and the caller's
+-- idempotency_key in a separate column. Those rows are
+-- 1:1-addressable through `wave_id_for_idempotency_key` because
+-- the legacy dispatcher passes caller wave ID as the idempotency
+-- key, but the rows do NOT have a public-id alias. New rows
+-- registered via `register_wave_with_public_id` use the public
+-- id AS BOTH columns so the legacy lookup path keeps finding
+-- them.
+--
+-- No DDL changes are required because v1-v8 already accept
+-- caller-controlled `waves.wave_id` once the application stops
+-- generating `w-{seq}` on its own. The migration is intentionally
+-- DDL-free; the v9 step exists only as a contract marker so a
+-- reopen knows the public-id contract is in force. The column
+-- bump is performed by the migration runner via
+-- `pragma_update(None, "user_version", 9)`.
+

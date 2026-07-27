@@ -22,7 +22,7 @@ use super::{
     CompensationKind, CoordinationReceiptSummary, DispatchOutcome, EmissionReservation,
     EmissionState, IdempotencyKey, IsolationMode, ProjectionReceiptSummary, RedriveResult,
     SlotResource, SlotStatus, SupervisorStore, SupervisorStoreError, SupervisorStoreResult,
-    WaveDeliveryState, WaveKind, WavePhase, WaveSnapshot,
+    WaveDeliveryState, WaveId, WaveKind, WavePhase, WaveSnapshot,
 };
 
 /// Per-wave descriptor held in `InMemorySupervisorStore::waves`.
@@ -348,6 +348,97 @@ impl SupervisorStore for InMemorySupervisorStore {
             .waves_by_key
             .insert(idempotency_key.to_string(), wave_id.clone());
         Ok(wave_id)
+    }
+
+    fn register_wave_with_public_id(
+        &self,
+        public_id: &WaveId,
+        kind: WaveKind,
+        expected_total: u32,
+        slot_retry_budget: u32,
+    ) -> SupervisorStoreResult<WaveId> {
+        // 2026-07-27-004 plan U1 (R1-R4 / D1 / D2): the public
+        // id IS the store primary key. Re-registering with the
+        // same id and matching contract is idempotent; a contract
+        // drift returns IdentityContractConflict.
+        let mut inner = self.lock()?;
+        if expected_total == 0 {
+            return Err(SupervisorStoreError::InvalidTransition(
+                "expected_total must be > 0".to_string(),
+            ));
+        }
+        if slot_retry_budget > 2 {
+            return Err(SupervisorStoreError::InvalidTransition(
+                "slot_retry_budget must be 0..=2".to_string(),
+            ));
+        }
+        if let Some(existing) = inner.waves_by_id.get(public_id.as_str()) {
+            // R3 / D2: same id + matching contract → idempotent.
+            if existing.kind != kind
+                || existing.expected_total != expected_total
+                || existing.slot_retry_budget != slot_retry_budget
+            {
+                return Err(SupervisorStoreError::IdentityContractConflict(format!(
+                    "wave_id '{}' already registered with a different contract \
+                     (existing: kind={:?} total={} retry_budget={}; \
+                      incoming: kind={:?} total={} retry_budget={})",
+                    public_id,
+                    existing.kind,
+                    existing.expected_total,
+                    existing.slot_retry_budget,
+                    kind,
+                    expected_total,
+                    slot_retry_budget,
+                )));
+            }
+            return Ok(public_id.clone());
+        }
+        let default_isolation = match kind {
+            WaveKind::Exec | WaveKind::Fix => IsolationMode::Worktree,
+            WaveKind::Review => IsolationMode::SharedReadonly,
+        };
+        let mut slots = BTreeMap::new();
+        for idx in 0..expected_total {
+            slots.insert(
+                idx,
+                SlotRow {
+                    slot_index: idx,
+                    status: SlotStatus::Pending,
+                    isolation: default_isolation,
+                    resource: None,
+                    content_hash: None,
+                    event_count: None,
+                    failure_reason: None,
+                    terminal_evidence: None,
+                },
+            );
+        }
+        let wave_id_str = public_id.as_str().to_string();
+        let row = WaveRow {
+            wave_id: wave_id_str.clone(),
+            kind,
+            expected_total,
+            phase: WavePhase::Dispatch,
+            cancel_requested: false,
+            delivery_state: WaveDeliveryState::Pending,
+            salvage_receipt: None,
+            coordination_receipt: None,
+            created_at: SystemTime::now(),
+            slot_retry_budget,
+            attempt_epoch: 0,
+            parent_wave_id: None,
+            slots,
+        };
+        inner.waves_by_id.insert(wave_id_str.clone(), row);
+        // Keep `waves_by_key` in sync so the legacy lookup path
+        // (`wave_id_for_idempotency_key(public_id)`) keeps finding
+        // the row. U1 does not retire the legacy idempotency_key
+        // contract — it makes the public id alias for it.
+        inner
+            .waves_by_key
+            .entry(wave_id_str.clone())
+            .or_insert(wave_id_str.clone());
+        Ok(public_id.clone())
     }
 
     fn enqueue_wave(

@@ -38,7 +38,7 @@ mod imp {
     /// CoordinationCommitted) and persists the salvage /
     /// coordination receipt summaries.
     #[allow(dead_code)] // pinned by `migrations_idempotent_across_reopen`; production writes via pragma_update
-    pub const CURRENT_VERSION: i64 = 8;
+    pub const CURRENT_VERSION: i64 = 9;
 
     /// Apply migrations sequentially. Each migration is a
     /// closure that performs the SQL DDL and bumps the
@@ -329,6 +329,18 @@ mod imp {
                 version: 8,
                 ddl: include_str!("migrations/v8.sql"),
                 column_probe: Some(V8_PROBE),
+            },
+            // 2026-07-27-004 plan U1 (R1-R4 / D1): no-DDL
+            // marker that the public-id-only contract is in
+            // force. The wave row shape is unchanged from v1
+            // (caller supplies the primary key); the migration
+            // bumps `user_version` so a reopen can detect the
+            // contract switch and refuse to silently re-enable
+            // the legacy `w-{seq}` allocator.
+            Migration {
+                version: 9,
+                ddl: include_str!("migrations/v9.sql"),
+                column_probe: None,
             },
         ]
     }
