@@ -9,6 +9,11 @@
 # system-injected; agents must NOT emit them. Custom `forge.*` topics
 # carry control-plane handoffs; long content lives in `.ralph/forge/`
 # business artifacts.
+#
+# Lint: always `ralph preset check -H builtin:parallel-forge --strict`
+# (build.rs merges this SSOT into the embedded preset). Checking the
+# raw `presets/en/parallel-forge.yml` file path alone will fail
+# publishes_missing_schema because schemas are not inlined there.
 
 schemas:
   forge.plan.inspected:
@@ -16,6 +21,7 @@ schemas:
       - plan_path
       - inspection_report_path
       - plan_usable
+      - plan_key
     payload: json_object
     field_docs:
       plan_path:
@@ -30,6 +36,10 @@ schemas:
         meaning: Whether the input is sufficient for Planner to proceed.
         source: Inspector judgment after reading plan and repository.
         fill_rule: '"true" only when Planner can proceed; "false" routes to blocked path.'
+      plan_key:
+        meaning: Forge plan key basename for artifact roots.
+        source: Basename of plan_path without .md/.html.
+        fill_rule: Must match .ralph/forge/<plan-key>/ directory name.
 
   forge.plan.ready:
     required_fields:
@@ -37,6 +47,7 @@ schemas:
       - development_plan_path
       - execution_plan_path
       - unit_count
+      - plan_key
     payload: json_object
     field_docs:
       plan_path:
@@ -55,6 +66,10 @@ schemas:
         meaning: Number of Units in the execution plan.
         source: Parsed execution-plan.yml unit list length.
         fill_rule: Non-negative integer matching execution plan.
+      plan_key:
+        meaning: Forge plan key basename.
+        source: Same key used for .ralph/forge/<plan-key>/ and materialize --plan-key.
+        fill_rule: Must match directory name.
 
   forge.concurrency.approved:
     required_fields:
@@ -81,6 +96,7 @@ schemas:
       - execution_plan_path
       - completed_unit_count
       - failed_unit_count
+      - plan_key
     payload: json_object
     field_docs:
       execution_plan_path:
@@ -95,6 +111,10 @@ schemas:
         meaning: Units that reached exec.unit.failed.
         source: ralph tools task list failed count.
         fill_rule: Zero when proceeding to review.
+      plan_key:
+        meaning: Forge plan key basename (artifact root segment under .ralph/forge/).
+        source: Basename of operator plan without .md, or path parent of execution_plan_path.
+        fill_rule: Must match .ralph/forge/<plan-key>/ directory name.
 
   exec.unit.ready:
     required_fields:
@@ -103,7 +123,43 @@ schemas:
       - task_id
       - task_key
       - unit_id
+      - plan_key
+      - execution_plan_path
+      - worktree_map_path
     payload: json_object
+    field_docs:
+      wave_id:
+        meaning: Supervisor wave identifier for this fan-out batch.
+        source: Dispatcher-generated stable id for the current ready set.
+        fill_rule: Non-empty string; same wave_id for every payload in one wave emit.
+      slot_index:
+        meaning: Zero-based slot index within the wave.
+        source: Dispatcher assignment order (sorted by unit_id).
+        fill_rule: Non-negative integer unique within the wave.
+      task_id:
+        meaning: Live runtime task id for this unit.
+        source: ralph tools task list for the matching task_key.
+        fill_rule: Never hand-write; copy the live id from task list.
+      task_key:
+        meaning: Stable task key registered by planner.
+        source: ralph tools task list / execution-plan unit id mapping.
+        fill_rule: Must match forge:<plan-key>:<unit-id> key form used at registration.
+      unit_id:
+        meaning: Unit id from execution-plan.yml.
+        source: Ready-set unit entry.
+        fill_rule: Exact id string from execution plan.
+      plan_key:
+        meaning: Forge plan key basename for artifact roots.
+        source: Same plan_key used under .ralph/forge/<plan-key>/.
+        fill_rule: Must match directory name; do not invent.
+      execution_plan_path:
+        meaning: Repo-relative path to execution-plan.yml SSOT.
+        source: Projection forge.execution_plan_path or trigger from worktrees.ready.
+        fill_rule: File must exist; same path since planner.
+      worktree_map_path:
+        meaning: Repo-relative path to Unit→branch→worktree map YAML.
+        source: Projection forge.worktree_map_path from forge.worktrees.ready.
+        fill_rule: File must exist; executor uses it to locate the unit worktree.
 
   forge.worktrees.ready:
     required_fields:
@@ -111,6 +167,7 @@ schemas:
       - worktree_map_path
       - integration_branch
       - base_commit
+      - plan_key
     payload: json_object
     field_docs:
       execution_plan_path:
@@ -129,18 +186,22 @@ schemas:
         meaning: Commit SHA frozen as concurrent baseline after Foundation units.
         source: git rev-parse HEAD on integration branch after Foundation merge.
         fill_rule: Full 40-char SHA when available.
-
+      plan_key:
+        meaning: Forge plan key basename for artifact roots.
+        source: Same key as .ralph/forge/<plan-key>/.
+        fill_rule: Must match directory name.
 
   forge.units.reviewed:
     required_fields:
       - execution_plan_path
       - summary_path
       - all_approved
+      - plan_key
     payload: json_object
     field_docs:
       execution_plan_path:
         meaning: Execution plan SSOT.
-        source: Trigger from exec.wave.complete context / loop anchor.
+        source: Trigger forge.exec.development.done.execution_plan_path.
         fill_rule: Same path used throughout forge run.
       summary_path:
         meaning: Aggregate review summary across all Units.
@@ -150,6 +211,10 @@ schemas:
         meaning: Whether every Unit received APPROVED.
         source: Count APPROVED vs total units in summary.
         fill_rule: '"true" only when every unit verdict is APPROVED.'
+      plan_key:
+        meaning: Forge plan key basename.
+        source: Trigger plan_key or parent of execution_plan_path.
+        fill_rule: Must match .ralph/forge/<plan-key>/.
 
   forge.integration.done:
     required_fields:
@@ -159,8 +224,17 @@ schemas:
       - integration_complete
       - commit_map_path
       - linear_history
+      - plan_key
     payload: json_object
     field_docs:
+      integration_branch:
+        meaning: Branch that received sequential Unit merges.
+        source: worktree-map / prior forge.worktrees.ready.integration_branch.
+        fill_rule: Real branch name; do not invent.
+      units_integrated:
+        meaning: Count of Units successfully integrated in order.
+        source: Integrator after processing integration_order.
+        fill_rule: Non-negative integer ≤ unit_count.
       integration_log_path:
         meaning: Sequential integration log (rebase, merge, conflicts).
         source: File at .ralph/forge/plan-key/integration-log.md.
@@ -169,35 +243,69 @@ schemas:
         meaning: Whether all Units were integrated in topology order.
         source: Integrator after processing integration_order from execution plan.
         fill_rule: '"false" when stopped on conflict or test failure.'
-
+      commit_map_path:
+        meaning: Artifact mapping unit_id → final commit SHA on integration branch.
+        source: File at .ralph/forge/plan-key/commit-map.yml written this activation.
+        fill_rule: Must exist; one commit SHA per integrated Unit.
+      linear_history:
+        meaning: Whether integration branch history is linear (no merge commits / WIP tails).
+        source: Integrator Curator check (git log --merges / message scan).
+        fill_rule: '"true" only when one atomic commit per Unit and no merge commits.'
+      plan_key:
+        meaning: Forge plan key basename.
+        source: Trigger / execution_plan_path parent.
+        fill_rule: Must match .ralph/forge/<plan-key>/.
 
   forge.incremental.verified:
     required_fields:
       - last_integrated_unit
       - verification_log_path
       - passed
+      - plan_key
     payload: json_object
     field_docs:
+      last_integrated_unit:
+        meaning: Unit id of the last integrated Unit covered by this incremental run.
+        source: integration_log_path / commit-map last entry.
+        fill_rule: Exact unit_id string.
       verification_log_path:
         meaning: Incremental regression evidence after last integration step.
         source: File at .ralph/forge/plan-key/incremental-verification.md.
         fill_rule: Records commands run and pass/fail per integrated Unit.
+      passed:
+        meaning: Whether incremental regression passed.
+        source: Command outcomes in verification_log_path.
+        fill_rule: '"false" must pair with work.failed instead of this success topic when blocking.'
+      plan_key:
+        meaning: Forge plan key basename.
+        source: Trigger / forge artifact root.
+        fill_rule: Must match directory name.
 
   forge.full.verified:
     required_fields:
       - verification_report_path
       - all_required_passed
+      - plan_key
     payload: json_object
     field_docs:
       verification_report_path:
         meaning: Full regression and CI-equivalent test report.
         source: File at .ralph/forge/plan-key/full-verification.md.
         fill_rule: Must list every command executed and outcome.
+      all_required_passed:
+        meaning: Whether every required gate command passed.
+        source: Parsed full-verification.md outcomes.
+        fill_rule: '"false" routes to work.failed.'
+      plan_key:
+        meaning: Forge plan key basename.
+        source: Trigger / forge artifact root.
+        fill_rule: Must match directory name.
 
   forge.audit.done:
     required_fields:
       - verdict
       - audit_report_path
+      - plan_key
     payload: json_object
     field_docs:
       verdict:
@@ -208,32 +316,65 @@ schemas:
         meaning: Final audit artifact path.
         source: File at .ralph/forge/plan-key/final-audit.md.
         fill_rule: File must exist before emit.
+      plan_key:
+        meaning: Forge plan key basename.
+        source: Trigger / forge artifact root.
+        fill_rule: Must match directory name.
 
   forge.report.done:
     required_fields:
       - report_path
       - status
       - final_audit
+      - plan_key
     payload: json_object
     field_docs:
       report_path:
         meaning: Manager-readable Markdown report path.
         source: File written at docs/reports/date-task-manager-report.md per naming rules.
-        fill_rule: Verify file exists; follow parallel-dev-preset naming rules.
+        fill_rule: Verify file exists; follow parallel-forge naming rules.
       status:
-        meaning: Manager report status derived from Auditor verdict.
-        source: Map ACCEPTED→COMPLETED, REJECTED→FAILED/PARTIAL, BLOCKED→BLOCKED.
-        fill_rule: Must align with forge.audit.done.verdict mapping table in instructions.
+        meaning: Manager report status derived from Auditor verdict or blocked/failed mapping.
+        source: Map ACCEPTED→COMPLETED, REJECTED→FAILED/PARTIAL, BLOCKED→BLOCKED; work.failed→FAILED.
+        fill_rule: Must align with trigger verdict / reason mapping in instructions.
       final_audit:
-        meaning: Copy of Auditor verdict for report frontmatter.
-        source: Trigger payload forge.audit.done.verdict.
-        fill_rule: Same enum as Auditor.
+        meaning: Auditor verdict or BLOCKED/FAILED stand-in for non-audit terminals.
+        source: Trigger forge.audit.done.verdict, or BLOCKED/FAILED for blocked/failed triggers.
+        fill_rule: Do not invent ACCEPTED when audit did not run.
+      plan_key:
+        meaning: Forge plan key basename.
+        source: Trigger forge_artifact_root / plan_key fields.
+        fill_rule: Must match directory name.
 
   forge.plan.blocked:
     required_fields:
       - reason
       - plan_path
+      - context_artifact_path
+      - forge_artifact_root
+      - plan_key
     payload: json_object
+    field_docs:
+      reason:
+        meaning: Human-readable block reason for the manager report.
+        source: Current hat judgment after reading visible artifacts.
+        fill_rule: Non-empty; do not invent upstream facts.
+      plan_path:
+        meaning: Operator plan path being blocked.
+        source: Trigger / loop anchor.
+        fill_rule: Live path only.
+      context_artifact_path:
+        meaning: Repo-relative path to a block note written this activation (what failed and evidence).
+        source: File under .ralph/forge/<plan-key>/blocks/<hat-id>-blocked.md.
+        fill_rule: Write file before emit; test -f; path must be repo-relative.
+      forge_artifact_root:
+        meaning: Directory holding forge artifacts for this plan (.ralph/forge/<plan-key>/).
+        source: Known plan_key from this run.
+        fill_rule: Must exist or be creatable; trailing slash optional.
+      plan_key:
+        meaning: Forge plan key basename.
+        source: Basename of plan_path without .md.
+        fill_rule: Must match forge_artifact_root segment.
 
   LOOP_COMPLETE:
     required_fields:
@@ -253,12 +394,33 @@ schemas:
       - content_hash
       - unit_id
       - unit_report_path
+      - plan_key
     payload: json_object
     field_docs:
+      wave_id:
+        meaning: Wave id from the triggering exec.unit.ready.
+        source: Trigger payload.
+        fill_rule: Copy unchanged.
+      slot_index:
+        meaning: Slot index from the triggering exec.unit.ready.
+        source: Trigger payload.
+        fill_rule: Copy unchanged.
+      content_hash:
+        meaning: Hash of the unit worktree diff or commit content for idempotency.
+        source: Computed this activation from unit commit / tree.
+        fill_rule: Non-empty hex or stable digest string.
+      unit_id:
+        meaning: Unit id completed.
+        source: Trigger payload.
+        fill_rule: Exact match.
       unit_report_path:
         meaning: Unit Completion Report artifact for this slot.
-        source: File at .ralph/forge/plan-key/units/unit-id-completion.md in slot worktree.
+        source: File at .ralph/forge/plan-key/units/unit-id-completion.md.
         fill_rule: Written before emit; path repo-relative from main repo root when possible.
+      plan_key:
+        meaning: Forge plan key basename.
+        source: Trigger exec.unit.ready.plan_key.
+        fill_rule: Copy unchanged.
 
   exec.unit.failed:
     required_fields:
@@ -266,7 +428,29 @@ schemas:
       - slot_index
       - reason
       - unit_id
+      - plan_key
     payload: json_object
+    field_docs:
+      wave_id:
+        meaning: Wave id from the triggering exec.unit.ready.
+        source: Trigger payload.
+        fill_rule: Copy unchanged.
+      slot_index:
+        meaning: Slot index from the triggering exec.unit.ready.
+        source: Trigger payload.
+        fill_rule: Copy unchanged.
+      reason:
+        meaning: Why this unit failed (RED evidence / test / scope).
+        source: This activation failure evidence.
+        fill_rule: Non-empty; no fabricated upstream blame.
+      unit_id:
+        meaning: Unit id that failed.
+        source: Trigger payload.
+        fill_rule: Exact match.
+      plan_key:
+        meaning: Forge plan key basename.
+        source: Trigger exec.unit.ready.plan_key.
+        fill_rule: Copy unchanged.
 
   exec.wave.complete:
     required_fields:
@@ -284,4 +468,28 @@ schemas:
     required_fields:
       - reason
       - plan_path
+      - context_artifact_path
+      - forge_artifact_root
+      - plan_key
     payload: json_object
+    field_docs:
+      reason:
+        meaning: Human-readable failure reason for the manager report.
+        source: Current hat or supervisor-injected wave failure summary.
+        fill_rule: Non-empty; copy upstream reason when translating exec.wave.failed.
+      plan_path:
+        meaning: Operator plan path for this forge run.
+        source: Loop anchor / prior projection / trigger.
+        fill_rule: Live path only.
+      context_artifact_path:
+        meaning: Repo-relative path to a failure note written this activation.
+        source: File under .ralph/forge/<plan-key>/failures/<hat-id>-failed.md.
+        fill_rule: Write before emit; test -f.
+      forge_artifact_root:
+        meaning: Directory holding forge artifacts (.ralph/forge/<plan-key>/).
+        source: Known plan_key.
+        fill_rule: Must point at the plan forge root.
+      plan_key:
+        meaning: Forge plan key basename.
+        source: Basename of plan_path or prior trigger plan_key.
+        fill_rule: Must match forge_artifact_root segment.

@@ -15,7 +15,16 @@
 # Usage:
 #   ralph run -H builtin:parallel-forge -p <plan-or-requirements.md>
 #
+# Lint / check (HARD): always use the embedded builtin so schema SSOT is merged:
+#   ralph preset check -H builtin:parallel-forge --strict
+# Checking `presets/en/parallel-forge.yml` by file path alone fails
+# `publishes_missing_schema` because schemas live in `presets/schemas/parallel-forge.yml`
+# and are merged only at build embed time.
+#
 # Artifacts root: `.ralph/forge/<plan-key>/`
+# Lifecycle: owner=`reporter` (cleanup of unit worktrees after report);
+#   writers=each producer hat; readers=downstream hats via trigger paths;
+#   retention=keep until operator deletes; do not treat as runtime ledger.
 #
 # Artifact templates (SSOT, parallel-dev-preset.md §4 / §10.14 / §13.4 / §21):
 #   Embedded in the `ralph` binary. Materialize at runtime:
@@ -161,7 +170,7 @@ event_loop:
       - {hat_id: worktree, topic: forge.plan.ready}
       - {hat_id: forge-dispatcher, topic: forge.worktrees.ready}
       - {hat_id: reviewer, topic: forge.exec.development.done}
-      - {hat_id: integrator, topic: forge.unit.reviewed}
+      - {hat_id: integrator, topic: forge.units.reviewed}
       - {hat_id: reporter, topic: forge.audit.done}
       - {hat_id: inspector, topic: forge.report.done}
       - {hat_id: executor, topic: LOOP_COMPLETE}
@@ -173,12 +182,16 @@ cli:
 core:
   guardrails:
     - "OPAC Observe: `ralph inspect loop` + `ralph tools task list`. Do not read `.ralph/events.jsonl` or `.ralph/supervisor.db`."
-    - "OPAC Precheck: `ralph emit --policy-check` before every real emit (per `ralph-tools` §5)."
+    - "OPAC Precheck: `ralph tools skill load ralph-tools-emit` then `ralph emit --policy-check` before every real emit (per `ralph-tools` §5)."
+    - "Wave Precheck: dispatcher must `ralph wave verify --payloads-stdin` then same payloads `ralph wave emit` (per `ralph-tools-wave`)."
     - "Artifact templates: run `ralph preset materialize-artifacts parallel-forge --plan-key <plan-key>` then copy from `.ralph/forge/<plan-key>/templates/` — do not write free-form artifacts."
+    - "Artifact lifecycle: `.ralph/forge/<plan-key>/` owner=reporter (cleanup unit worktrees after manager report); producers write; consumers read only via trigger/projection paths."
+    - "Blocked/failed: write context artifact under blocks/ or failures/ before emit; include context_artifact_path + forge_artifact_root + plan_key."
     - "One business event per isolated activation unless reporter terminal pair (forge.report.done then LOOP_COMPLETE)."
     - "Development may be parallel; integration must be serial per execution-plan integration_order."
     - "One worktree per Unit; one atomic commit per Unit in final linear history."
     - "Never weaken tests, skip assertions, or use `.only` to pass gates."
+    - "Preset check: use `-H builtin:parallel-forge` (schema SSOT merged at embed); do not rely on raw presets/en file-path check."
 
 hats:
   inspector:
@@ -196,17 +209,19 @@ hats:
 
       Read-only. Do not edit production code or tests.
 
-      OPAC: `ralph-tools-opac`; emit precheck per `ralph-tools-emit` §5.
+      OPAC: `ralph-tools-opac` (auto-injected). Before emit:
+      `ralph tools skill load ralph-tools-emit` then `--policy-check` per emit skill §5.
 
       ### Mission
       Review the operator plan/requirements and repository. Produce a Plan Inspection Report artifact, then emit exactly one business event.
 
       ### Steps
-      1. Observe: read plan path from task/loop anchor; inspect README, test entry, CI config, existing modules.
-      2. Write `.ralph/forge/<plan-key>/inspection-report.md` with gaps, concurrency risks, test holes, and what Planner must add (Spec/BDD/ATDD/Outside-In).
-      3. Precheck then emit `forge.plan.inspected` when `plan_usable: true`, else `forge.plan.blocked` with `reason`.
+      1. Observe: read plan path from task/loop anchor (`ralph inspect loop`); inspect README, test entry, CI config, existing modules.
+      2. Derive `plan_key` = plan basename without `.md`. Write `.ralph/forge/<plan-key>/inspection-report.md`.
+      3. Success: precheck then emit `forge.plan.inspected` (`plan_usable: true`, `plan_path`, `inspection_report_path`, `plan_key`).
+      4. Block: write `.ralph/forge/<plan-key>/blocks/inspector-blocked.md`, then emit `forge.plan.blocked` with `reason`, `plan_path`, `context_artifact_path`, `forge_artifact_root` (`.ralph/forge/<plan-key>/`), `plan_key`.
 
-      Load `ralph-tools-emit` on demand for emit syntax. Single business event only.
+      Single business event only.
 
   planner:
     name: "Planner"
@@ -223,62 +238,48 @@ hats:
 
       只写计划，不改生产代码、不 commit、不建 worktree。
 
-      OPAC：`ralph-tools-opac`；emit 前 `ralph-tools-emit` §5 `--policy-check`。
+      OPAC：`ralph-tools-opac`（已注入）。emit 前：`ralph tools skill load ralph-tools-emit`，再 `--policy-check`（emit skill §5）。
+      materialize 细节：`ralph tools skill load ralph-tools-cmdref`「materialize-artifacts」。
 
       ### 模板（必须先 materialize 再复制填写）
-
-      二进制安装无需仓库源码。先落盘内置模板（命令细节见 `ralph tools skill load ralph-tools-cmdref`「materialize-artifacts」）：
 
       ```bash
       ralph preset materialize-artifacts parallel-forge --plan-key <plan-key>
       ```
 
-      模板目录：`.ralph/forge/<plan-key>/templates/`
-
-      | 模板 | 产出 artifact |
-      |---|---|
-      | `development-plan.template.md` | `.ralph/forge/<plan-key>/development-plan.md` |
-      | `execution-plan.template.yml` + `unit.template.yml` | `.ralph/forge/<plan-key>/execution-plan.yml` |
+      从 `.ralph/forge/<plan-key>/templates/` 复制：
+      - `development-plan.template.md` → `development-plan.md`
+      - `execution-plan.template.yml` + `unit.template.yml` → `execution-plan.yml`
 
       `<plan-key>` = 操作者 plan 文件 basename（去掉 `.md`）。
 
       ### 步骤 1 — Observe
 
-      1. 读 trigger 的 `inspection_report_path`（完整读 artifact，不只看摘要）。
-      2. 读操作者 plan / `ralph inspect loop` 锚定的 `plan_path`。
-      3. 做仓库发现（README、CI、测试入口、AGENTS.md/CLAUDE.md、构建文件）；未确认项标 `executor_must_confirm`。
+      1. 读 trigger 的 `inspection_report_path`（完整读 artifact）。
+      2. 读操作者 plan / `ralph inspect loop` 的 `plan_path`。
+      3. 仓库发现（README、CI、测试入口、AGENTS.md/CLAUDE.md）；未确认项标 `executor_must_confirm`。
 
-      ### 步骤 2 — Apply：development-plan.md（§10.14）
+      ### 步骤 2 — Apply：development-plan.md
 
       1. `mkdir -p .ralph/forge/<plan-key>`
-      2. 复制 `.ralph/forge/<plan-key>/templates/development-plan.template.md` → `.ralph/forge/<plan-key>/development-plan.md`
-      3. **保留全部 13 个一级章节标题**；逐节填满：
-         - §1 功能目标（含范围/非目标/约束/事实/假设/待确认）
-         - §3 BDD（Gherkin Feature/Scenario）
-         - §4–§6 验收策略、Outside-In、需求—测试矩阵
-         - §7–§8 Unit DAG 与并发边界表
-         - §9 每个 Unit 人类可读摘要
-         - §10–§13 Waves、集成顺序、质量门禁、交付物
-      4. 自检：每个 Scenario 有验收测试层级；每个需求可追踪；无「功能正常」类模糊验收。
+      2. 复制模板 → `development-plan.md`；**保留模板全部一级章节**；填 BDD Scenario、Outside-In、Unit DAG、TDD 拆分、门禁。
+      3. 自检：每个 Scenario 有验收层级；无模糊验收。
 
-      ### 步骤 3 — Apply：execution-plan.yml（§4 Unit 格式）
+      ### 步骤 3 — Apply：execution-plan.yml
 
-      1. 复制 `.ralph/forge/<plan-key>/templates/execution-plan.template.yml` → `.ralph/forge/<plan-key>/execution-plan.yml`
-      2. 对 **每个 Unit**：按 `.ralph/forge/<plan-key>/templates/unit.template.yml` 字段追加到 `units[]`（id/title/type/goal/depends_on/wave/integration_order/allowed_paths/tdd/acceptance_test/...）
-      3. 校验 DAG 无环；parallel Unit 满足 §5 并发安全；共享资源有唯一 Owner。
-      4. 设置 `plan_key`、`source_plan_path`、`development_plan_path`。
+      1. 按 templates 写 `execution-plan.yml`（含 `units[]` DAG 字段）。
+      2. 校验无环；并行 Unit 无共享写冲突；设 `plan_key` / `source_plan_path` / `development_plan_path`。
 
-      ### 步骤 4 — 注册 runtime tasks
+      ### 步骤 4 — 注册 tasks
 
       对每个 unit：`ralph tools task add "<title>" --key forge:<plan-key>:<unit-id>`（记录 live `task_id`）。
 
-      ### 步骤 5 — Precheck & emit
+      ### 步骤 5 — Emit
 
-      1. `test -f` 两个 artifact 均存在且非空。
-      2. `ralph emit forge.plan.ready --policy-check` 通过后真实 emit（含 `development_plan_path`、`execution_plan_path`、`unit_count`）。
-      3. 本 activation **仅一条**业务事件。
-
-      无法完成时：`forge.plan.blocked` + `reason`。
+      1. `test -f` 两个 artifact。
+      2. `ralph emit forge.plan.ready --policy-check` 通过后真实 emit（含 `plan_key`、`development_plan_path`、`execution_plan_path`、`unit_count`）。
+      3. 阻塞：写 `blocks/planner-blocked.md`，emit `forge.plan.blocked`（含 `context_artifact_path` / `forge_artifact_root` / `plan_key`）。
+      4. 本 activation 仅一条业务事件。
 
   guardian:
     name: "Guardian"
@@ -295,17 +296,25 @@ hats:
 
       Read-only on code. Audit the execution plan for safe parallelism.
 
-      OPAC: `ralph-tools-opac`; emit precheck per `ralph-tools-emit` §5.
+      OPAC: `ralph-tools-opac`. Before emit: `ralph tools skill load ralph-tools-emit` then `--policy-check`.
 
       ### Mission
-      Verify DAG, shared resource ownership, path boundaries, and concurrency rules from parallel-dev-preset.md §5–§6.
+      Verify DAG acyclicity, shared-resource single owner, path boundaries
+      (`allowed_paths` / `forbidden_paths`), and that parallel Units do not
+      write the same files. Checklist (write into approval artifact):
+      1. Every `depends_on` target exists; no cycles.
+      2. Parallel Units (same wave / no edge) have disjoint write paths.
+      3. Shared modules have exactly one Owner Unit.
+      4. Foundation-before-parallel ordering is explicit in integration_order.
 
       ### Steps
       1. Read `development_plan_path` and `execution_plan_path` from trigger.
-      2. Write `.ralph/forge/<plan-key>/concurrency-approval.md` (Concurrency Safety Approval).
-      3. If safe: precheck then emit `forge.concurrency.approved` with `approved: true`. Else `forge.plan.blocked`.
+      2. Write `.ralph/forge/<plan-key>/concurrency-approval.md` using the checklist above.
+      3. If safe: emit `forge.concurrency.approved` with `approved: true`.
+      4. Else: write `blocks/guardian-blocked.md`, emit `forge.plan.blocked`
+         (`context_artifact_path`, `forge_artifact_root`, `plan_key`, `reason`, `plan_path`).
 
-      Single business event only.
+      Single business event only. Do not require any repo file outside trigger paths / forge artifacts.
 
   worktree:
     name: "Worktree"
@@ -322,19 +331,21 @@ hats:
 
       Git/worktree operations only for this activation.
 
-      OPAC: `ralph-tools-opac`; emit precheck per `ralph-tools-emit` §5.
+      OPAC: `ralph-tools-opac`. Before emit: `ralph tools skill load ralph-tools-emit` then `--policy-check`.
 
       ### Mission
       Create integration branch, run Foundation units serially on main worktree if needed, then create one branch+worktree per parallel Unit.
+      Unit worktrees are cleaned by **reporter** after the manager report (lifecycle owner).
 
       ### Steps
-      1. Read `execution_plan_path` from trigger; run from main repo root (`git worktree list` first entry).
+      1. Read `execution_plan_path` from trigger; derive `plan_key`; run from main repo root (`git worktree list` first entry).
       2. Create integration branch; record `base_commit` after Foundation units land.
       3. For each parallel Unit: `git worktree add` + dedicated branch (one worktree per Unit).
       4. Write `.ralph/forge/<plan-key>/worktree-map.yml` (unit → branch → path).
-      5. Precheck then emit `forge.worktrees.ready`.
+      5. Precheck then emit `forge.worktrees.ready` including `plan_key`, `worktree_map_path`, `execution_plan_path`, `integration_branch`, `base_commit`.
+      6. On failure: write `blocks/worktree-blocked.md`, emit `forge.plan.blocked` with context paths.
 
-      Do not delete worktrees before final cleanup phase. Single business event only.
+      Do not delete worktrees in this hat. Single business event only.
 
   forge-dispatcher:
     name: "Forge Dispatcher"
@@ -364,34 +375,52 @@ hats:
       Dispatcher hat for `event_loop.supervisor.enabled: true`. You do not
       implement code. You read the static execution-plan artifact and
       `ralph tools task list`, compute the ready set, and either fan out
-      one `ralph wave emit exec.unit.ready` batch OR signal development complete.
+      one `exec.unit.ready` wave OR signal development complete.
 
-      Load `ralph-tools-wave` on demand (red box) and `ralph-tools-emit` §5.
+      OPAC: follow `ralph-tools-opac` for Observe/Precheck/Apply/Confirm.
+      Load on demand: `ralph tools skill load ralph-tools-wave` (red box) and
+      `ralph tools skill load ralph-tools-emit` (§5 precheck for non-wave emits).
 
       ### Single-shot budget
 
-      Per activation emit **at most one** of:
-      - `ralph wave emit exec.unit.ready --payloads-stdin [--policy-check]` (ready set non-empty), OR
-      - `ralph emit forge.exec.development.done` (ready set empty, all unit tasks done/failed, no blocking failures).
+      Per activation publish **at most one** of:
+      - one `ralph wave emit exec.unit.ready --payloads-stdin` batch, OR
+      - `ralph emit forge.exec.development.done`
 
-      Never emit `exec.wave.complete` / `exec.wave.failed` — supervisor injects those.
+      Do **not** publish supervisor fan-in topics (`exec.wave.*`); the runtime
+      injects those after slot fan-in. Your triggers may *receive* fan-in
+      signals; you never write them.
 
       ### Ready set
 
       A unit is ready when its task is `open` and all `depends_on` units are `done`
       (per execution-plan.yml). Sort by `unit_id` ascending.
 
-      ### Wave payload (per ready unit)
+      ### Wave payload (per ready unit) — required fields
 
-      Include: `wave_id`, `slot_index`, `unit_id`, live `task_id` / `task_key` from
-      `ralph tools task list` (never hand-write `task_id`), `worktree_map_path` from projection.
+      Include every required field: `wave_id`, `slot_index`, `unit_id`, live
+      `task_id` / `task_key` from `ralph tools task list` (never hand-write
+      `task_id`), `plan_key`, `execution_plan_path`, `worktree_map_path`
+      (from trigger/projection).
 
-      ### On `forge.worktrees.ready` or `exec.wave.complete`
+      ### Wave OPAC (HARD)
 
-      1. Read `execution_plan_path` from trigger/projection.
-      2. If ready set non-empty: precheck wave, then real `ralph wave emit exec.unit.ready`.
-      3. If ready set empty and all units terminal: precheck then `forge.exec.development.done`.
-      4. If failures block progress: stop; `forge-failure-handler` handles `exec.wave.failed`.
+      1. Build payloads.jsonl (one JSON object per ready unit).
+      2. `cat payloads.jsonl | ralph wave verify exec.unit.ready --payloads-stdin`
+         — must succeed (ticket). **Do not skip verify.**
+      3. Same unmodified payloads:
+         `cat payloads.jsonl | ralph wave emit exec.unit.ready --payloads-stdin`
+      4. Confirm with `ralph wave inspect <wave_id>` (not events.jsonl).
+
+      Schema `--policy-check` alone is **not** a substitute for `wave verify`.
+
+      ### On worktrees-ready or supervisor fan-in re-entry
+
+      1. Read `execution_plan_path`, `worktree_map_path`, `plan_key` from trigger/projection.
+      2. If ready set non-empty: verify → wave emit (above).
+      3. If ready set empty and all units terminal with zero blocking failures:
+         emit `forge.exec.development.done` (`execution_plan_path`, counts, `plan_key`).
+      4. If failures block progress: stop; failure-handler owns the failed-wave path.
 
   forge-failure-handler:
     name: "Forge Failure Handler"
@@ -406,9 +435,17 @@ hats:
     instructions: |
       ## FORGE FAILURE HANDLER MODE
 
-      Activated on supervisor-injected `exec.wave.failed`. Emit exactly one
-      `work.failed` with `reason` from payload. OPAC + `ralph-tools-emit` §5 precheck.
-      Do not re-dispatch workers.
+      Activated on supervisor-injected `exec.wave.failed`.
+
+      OPAC: `ralph-tools-opac`. Before emit: `ralph tools skill load ralph-tools-emit` then `--policy-check`.
+
+      ### Steps
+      1. Read wave `reason` / `blocking_slots` from trigger.
+      2. Derive `plan_key` / `plan_path` from `ralph inspect loop` / projection / task keys.
+      3. Write `.ralph/forge/<plan-key>/failures/forge-failure-handler-failed.md`.
+      4. Emit exactly one `work.failed` with `reason`, `plan_path`,
+         `context_artifact_path`, `forge_artifact_root`, `plan_key`.
+      5. Do not re-dispatch workers.
 
   executor:
     name: "Executor"
@@ -427,52 +464,36 @@ hats:
     instructions: |
       ## EXECUTOR MODE — 单 Unit / 单 activation（supervisor 槽位）
 
-      在隔离 worktree 内只完成 **一个** Unit。OPAC + `ralph-tools-emit` §5。
+      在隔离 worktree 内只完成 **一个** Unit。
 
-      ### 步骤 1 — 理解 Unit（读 execution-plan SSOT）
+      OPAC：`ralph-tools-opac`。emit 前：`ralph tools skill load ralph-tools-emit`，再 `--policy-check`。
+      **禁止** `ralph wave emit` / `ralph wave verify`。
 
-      1. `ralph tools task list` 取得本 slot 的 `task_id` / `task_key` / unit id。
-      2. 读 `.ralph/forge/<plan-key>/execution-plan.yml` 中 **本 unit id** 的完整条目（字段定义见 `.ralph/forge/<plan-key>/templates/unit.template.yml` §4）。
-      3. 读 `development-plan.md` 中对应 Scenario / 验收说明。
-      4. 确认 `allowed_paths` / `forbidden_paths`；只改授权范围。
+      ### 步骤 1 — Observe（只从 trigger 取路径）
 
-      ### 步骤 2 — RED
+      从 `exec.unit.ready` trigger 读取（均为 required）：
+      `unit_id`、`task_id`、`task_key`、`wave_id`、`slot_index`、
+      `plan_key`、`execution_plan_path`、`worktree_map_path`。
 
-      按 unit.`acceptance_test` 编写或启用验收测试；运行并记录：
+      1. `ralph tools task list` 复核 live `task_id` / `task_key`。
+      2. 读 `execution_plan_path` 中本 `unit_id` 条目。
+      3. 读 `worktree_map_path` 定位本 unit 的 worktree 路径；在该 worktree 内工作。
+      4. 读 `.ralph/forge/<plan_key>/development-plan.md` 对应 Scenario（`plan_key` 来自 trigger）。
+      5. 若 templates 缺失：`ralph preset materialize-artifacts parallel-forge --plan-key <plan_key>`。
 
-      ```text
-      RED command / RED result / Expected failure / Actual failure
-      ```
+      ### 步骤 2–6 — RED → GREEN → REFACTOR → REGRESSION → 自审
 
-      必须证明：失败原因 = 缺少当前行为（非语法/环境/测试错误）。
+      按 unit.`acceptance_test` / `tdd` 执行；只改 `allowed_paths`；记录 RED 证据。
 
-      ### 步骤 3 — GREEN
+      ### 步骤 7 — Unit Completion Report
 
-      最小实现使验收 + 单元测试通过；不实现其他 Unit 功能。
-
-      ### 步骤 4 — REFACTOR
-
-      测试保护下整理；不扩大 Unit 范围。
-
-      ### 步骤 5 — REGRESSION
-
-      运行 unit.`tdd.regression.commands` 与相关静态检查/构建。
-
-      ### 步骤 6 — 自审（§13.2 第七步）
-
-      检查：未越界路径、无调试残留、无未授权公共接口变更、无隐藏依赖。
-
-      ### 步骤 7 — Unit Completion Report（§13.4）
-
-      1. 复制 `.ralph/forge/<plan-key>/templates/unit-completion.template.md`
-         → `.ralph/forge/<plan-key>/units/<unit-id>-completion.md`
-      2. 填满：修改摘要、文件列表、RED/GREEN/REFACTOR 证据、回归结果、验收映射、commit、风险、共享接口影响。
-      3. Unit 分支最终形态：集成基线 + **一个** Unit commit（禁止 WIP/fix/temp 类 message 残留）。
+      复制 `.ralph/forge/<plan_key>/templates/unit-completion.template.md`
+      → `.ralph/forge/<plan_key>/units/<unit-id>-completion.md` 并填满。
 
       ### 步骤 8 — Emit
 
-      1. `ralph emit exec.unit.done --policy-check`（含 `unit_id`、`unit_report_path` 等 required 字段）。
-      2. 失败路径：`exec.unit.failed`。本 activation 仅一条业务事件。禁止 `ralph wave emit`。
+      成功：`exec.unit.done`（含 `unit_report_path`、`content_hash`、`plan_key`、wave/slot/unit 字段）。
+      失败：`exec.unit.failed`（含 `reason`、`plan_key`）。本 activation 仅一条业务事件。
 
   reviewer:
     name: "Reviewer"
@@ -489,18 +510,15 @@ hats:
 
       Read-only on code. Review each completed Unit after supervisor development phase.
 
-      OPAC: `ralph-tools-opac`; emit precheck per `ralph-tools-emit` §5.
-
-      ### Mission
-      Read each unit completion report and git diff; write per-unit review artifacts;
-      emit aggregate `forge.units.reviewed` when all units reviewed.
+      OPAC: `ralph-tools-opac`. Before emit: `ralph tools skill load ralph-tools-emit` then `--policy-check`.
 
       ### Steps
-      1. Observe: `forge.exec.development.done` trigger; list units from execution-plan + tasks.
-      2. Per unit: read `.ralph/forge/<plan-key>/units/<unit-id>-completion.md`; inspect diff in unit worktree.
-      3. Write `.ralph/forge/<plan-key>/reviews/<unit-id>-review.md` (verdict: APPROVED | CHANGES_REQUIRED | PLAN_INVALID | DEPENDENCY_CHANGED).
-      4. Write `reviews/summary.md`; precheck then emit `forge.units.reviewed` with `all_approved`.
-      5. If blocking issues: `forge.plan.blocked` instead.
+      1. From trigger `forge.exec.development.done` read `execution_plan_path` and `plan_key`.
+      2. List units from execution-plan + `ralph tools task list`.
+      3. Per unit: read `.ralph/forge/<plan_key>/units/<unit-id>-completion.md`; inspect diff in unit worktree (via worktree-map if needed).
+      4. Write `.ralph/forge/<plan_key>/reviews/<unit-id>-review.md` and `reviews/summary.md`.
+      5. If all APPROVED: emit `forge.units.reviewed` (`summary_path`, `all_approved`, `execution_plan_path`, `plan_key`).
+      6. Else: write `blocks/reviewer-blocked.md`, emit `forge.plan.blocked` with context paths.
 
       Single business event per activation.
 
@@ -519,19 +537,17 @@ hats:
 
       Serial integration only — development was parallel; integration is strictly ordered.
 
-      OPAC: `ralph-tools-opac`; emit precheck per `ralph-tools-emit` §5.
-
-      ### Mission
-      Merge approved Units in `integration_order` from execution-plan; one atomic commit per Unit; linear history.
+      OPAC: `ralph-tools-opac`. Before emit: `ralph tools skill load ralph-tools-emit` then `--policy-check`.
 
       ### Steps
-      1. Abort if `all_approved` is false.
-      2. For each Unit in integration_order: rebase onto integration branch, resolve conflicts in unit worktree, squash to one commit, fast-forward merge, log in integration-log.md.
-      3. Write `.ralph/forge/<plan-key>/integration-log.md` and `commit-map.yml`.
-      4. Verify linear history (Curator duties): one commit per Unit, no merge commits/WIP/fixup tails.
-      5. Precheck then emit `forge.integration.done` with `commit_map_path` and `linear_history` included.
+      1. From trigger read `all_approved`, `execution_plan_path`, `plan_key`, `summary_path`. Abort if not all approved → write failure note, emit `work.failed` with context paths.
+      2. For each Unit in integration_order: rebase onto integration branch, squash to one commit, fast-forward merge; append `integration-log.md`.
+      3. Write `.ralph/forge/<plan_key>/integration-log.md` and `commit-map.yml`.
+      4. Verify linear history (one commit per Unit; no merge/WIP tails).
+      5. Emit `forge.integration.done` with all required fields including `commit_map_path`, `linear_history`, `plan_key`.
+      6. On failure: write `failures/integrator-failed.md`, emit `work.failed` with context paths.
 
-      On failure emit `work.failed`. Single business event only.
+      Single business event only.
 
   verifier:
     name: "Verifier"
@@ -548,13 +564,14 @@ hats:
 
       Run incremental regression per integrated Unit chain.
 
-      OPAC: `ralph-tools-opac`; emit precheck per `ralph-tools-emit` §5.
+      OPAC: `ralph-tools-opac`. Before emit: `ralph tools skill load ralph-tools-emit` then `--policy-check`.
 
       ### Steps
-      1. Read `integration_log_path` from trigger.
-      2. Run incremental test commands from development-plan per last integrated unit.
-      3. Write `.ralph/forge/<plan-key>/incremental-verification.md`.
-      4. Precheck then emit `forge.incremental.verified` with `passed: true/false`; on failure `work.failed`.
+      1. Read `integration_log_path` and `plan_key` from trigger.
+      2. Run incremental test commands from development-plan / execution-plan.
+      3. Write `.ralph/forge/<plan_key>/incremental-verification.md`.
+      4. Success: emit `forge.incremental.verified` (`verification_log_path`, `passed`, `last_integrated_unit`, `plan_key`).
+      5. Failure: write `failures/verifier-failed.md`, emit `work.failed` with context paths.
 
       Single business event.
 
@@ -573,13 +590,14 @@ hats:
 
       Full project verification — not only unit tests.
 
-      OPAC: `ralph-tools-opac`; emit precheck per `ralph-tools-emit` §5.
+      OPAC: `ralph-tools-opac`. Before emit: `ralph tools skill load ralph-tools-emit` then `--policy-check`.
 
       ### Steps
-      1. Discover test/lint/build/CI commands from repo (README, CI, Makefile, etc.).
-      2. Run full regression suite; record every command and outcome.
-      3. Write `.ralph/forge/<plan-key>/full-verification.md`.
-      4. Precheck then emit `forge.full.verified` with `all_required_passed`; on failure `work.failed`.
+      1. Read `verification_log_path` / `plan_key` from trigger (or projection).
+      2. Discover test/lint/build/CI commands from repo (README, CI, Makefile).
+      3. Run full regression; write `.ralph/forge/<plan_key>/full-verification.md`.
+      4. Success: emit `forge.full.verified` (`verification_report_path`, `all_required_passed`, `plan_key`).
+      5. Failure: write `failures/tester-failed.md`, emit `work.failed` with context paths.
 
       Single business event.
 
@@ -598,13 +616,14 @@ hats:
 
       Read-only audit. Verdict: ACCEPTED | REJECTED | BLOCKED.
 
-      OPAC: `ralph-tools-opac`; emit precheck per `ralph-tools-emit` §5.
+      OPAC: `ralph-tools-opac`. Before emit: `ralph tools skill load ralph-tools-emit` then `--policy-check`.
 
       ### Steps
-      1. Cross-check requirements→scenarios→tests→commits using artifacts under `.ralph/forge/<plan-key>/`.
-      2. Verify linear git history, clean worktree, no skipped tests.
-      3. Write `.ralph/forge/<plan-key>/final-audit.md`.
-      4. Precheck then emit `forge.audit.done` with `verdict`.
+      1. From trigger read `verification_report_path` and `plan_key`.
+      2. Cross-check requirements→scenarios→tests→commits using artifacts under `.ralph/forge/<plan_key>/` (paths from trigger/projection only).
+      3. Verify linear git history, clean worktree, no skipped tests.
+      4. Write `.ralph/forge/<plan_key>/final-audit.md`.
+      5. Emit `forge.audit.done` (`verdict`, `audit_report_path`, `plan_key`) or write `blocks/auditor-blocked.md` and emit `forge.plan.blocked` with context paths.
 
       Single business event.
 
@@ -621,53 +640,60 @@ hats:
     instructions: |
       ## REPORTER MODE — 终态 hat
 
-      只读聚合 + 写报告；不改代码/git。OPAC + `ralph-tools-emit` §5。
+      只读聚合 + 写报告；不改生产代码。OPAC：`ralph-tools-opac`。
+      emit 前：`ralph tools skill load ralph-tools-emit`，再 `--policy-check`。
+      materialize：`ralph tools skill load ralph-tools-cmdref`「materialize-artifacts」。
 
-      ### 模板（§21）
+      ### Lifecycle（本 hat 是 forge artifact / worktree 清理 owner）
 
-      若 `.ralph/forge/<plan-key>/templates/` 不存在，先运行：
+      写完 manager report 并确认后：若存在 `worktree_map_path`（projection 或
+      `.ralph/forge/<plan_key>/worktree-map.yml`），对 map 中每个 unit worktree
+      执行 `git worktree remove`（失败记入报告附录，不阻断 LOOP_COMPLETE）。
+      不删 `.ralph/forge/<plan_key>/` 业务文件（留给操作者）。
 
-      `ralph preset materialize-artifacts parallel-forge --plan-key <plan-key>`
+      ### 模板
 
-      复制 `.ralph/forge/<plan-key>/templates/manager-report.template.md` 到：
-
+      若 templates 目录不存在：
+      `ralph preset materialize-artifacts parallel-forge --plan-key <plan_key>`
+      复制 `manager-report.template.md` →
       `docs/reports/<YYYY-MM-DD>-<task-name>-manager-report.md`
 
-      （小写、连字符、含日期；禁止 `final.md` / `report.md`）
+      ### 步骤 1 — Observe（artifact-first，禁止扫 event history）
 
-      ### 步骤 1 — Observe（artifact-first）
+      **从当前 trigger 取路径**（不要猜）：
+      - `forge.audit.done`：`audit_report_path`、`verdict`、`plan_key`
+      - `forge.plan.blocked` / `work.failed`：`context_artifact_path`、
+        `forge_artifact_root`、`plan_key`、`reason`、`plan_path`
 
-      从 trigger 与 projection 路径 **读完整 artifact**，至少包括：
+      再读 trigger/projection 指向的完整 artifact：
+      - `<forge_artifact_root>/development-plan.md`、`execution-plan.yml`
+      - `units/*-completion.md`、`reviews/summary.md`（若存在）
+      - `integration-log.md`、`full-verification.md`、`final-audit.md`（若存在）
+      - 以及 `context_artifact_path` 全文
 
-      - `.ralph/forge/<plan-key>/development-plan.md`
-      - `.ralph/forge/<plan-key>/execution-plan.yml`
-      - `.ralph/forge/<plan-key>/units/*-completion.md`
-      - `.ralph/forge/<plan-key>/reviews/summary.md`
-      - `.ralph/forge/<plan-key>/integration-log.md`、`full-verification.md`、`final-audit.md`
-
-      禁止扫 event history 重建事实。缺失写「信息缺失，无法确认」。
+      缺失写「信息缺失，无法确认」。
 
       ### 步骤 2 — Apply：按模板逐节填写
 
-      保留模板全部 §1–§17 与技术附录；为每个 Unit 复制 §7 小节；填 §23 自检清单。
+      保留模板章节；为每个 Unit 复制 Unit 小节；填自检清单。
 
-      ### 步骤 3 — status 映射（§22，不得篡改 Auditor）
+      ### 步骤 3 — status 映射
 
-      | Auditor verdict | report `status` |
+      | 来源 | report `status` / `final_audit` |
       |---|---|
-      | ACCEPTED | COMPLETED |
-      | REJECTED（整体不可交付） | FAILED |
-      | REJECTED（部分完成） | PARTIAL |
-      | BLOCKED | BLOCKED |
-
-      `final_audit` = Auditor 的 `verdict` 原值。
+      | Auditor ACCEPTED | COMPLETED / ACCEPTED |
+      | Auditor REJECTED（整体不可交付） | FAILED / REJECTED |
+      | Auditor REJECTED（部分） | PARTIAL / REJECTED |
+      | Auditor BLOCKED 或 `forge.plan.blocked` | BLOCKED / BLOCKED |
+      | `work.failed` | FAILED / FAILED |
 
       ### 步骤 4 — Confirm & emit
 
       1. `test -f` 报告路径。
-      2. emit `forge.report.done`（`report_path`、`status`、`final_audit`）— 先 policy-check。
+      2. emit `forge.report.done`（`report_path`、`status`、`final_audit`、`plan_key`）。
       3. 再 emit `LOOP_COMPLETE`（reporter 窄例外双终态）。
       4. 打印 `DELIVERABLE_PATH: <report_path>`。
+      5. 执行 worktree cleanup（见上）。
 
 state_projection:
   actions:
@@ -675,11 +701,13 @@ state_projection:
       set:
         forge.inspection_report_path: "$.inspection_report_path"
         forge.plan_path: "$.plan_path"
+        forge.plan_key: "$.plan_key"
     - on: forge.plan.ready
       set:
         forge.development_plan_path: "$.development_plan_path"
         forge.execution_plan_path: "$.execution_plan_path"
         forge.unit_count: "$.unit_count"
+        forge.plan_key: "$.plan_key"
     - on: forge.concurrency.approved
       set:
         forge.approval_report_path: "$.approval_report_path"
@@ -688,17 +716,45 @@ state_projection:
         forge.worktree_map_path: "$.worktree_map_path"
         forge.integration_branch: "$.integration_branch"
         forge.base_commit: "$.base_commit"
+        forge.plan_key: "$.plan_key"
+    - on: forge.exec.development.done
+      set:
+        forge.execution_plan_path: "$.execution_plan_path"
+        forge.plan_key: "$.plan_key"
+        forge.completed_unit_count: "$.completed_unit_count"
+        forge.failed_unit_count: "$.failed_unit_count"
     - on: forge.units.reviewed
       set:
         forge.review_summary_path: "$.summary_path"
         forge.all_units_approved: "$.all_approved"
+        forge.plan_key: "$.plan_key"
     - on: forge.integration.done
       set:
         forge.integration_log_path: "$.integration_log_path"
+        forge.commit_map_path: "$.commit_map_path"
+        forge.plan_key: "$.plan_key"
+    - on: forge.incremental.verified
+      set:
+        forge.incremental_verification_path: "$.verification_log_path"
+        forge.plan_key: "$.plan_key"
     - on: forge.full.verified
       set:
         forge.full_verification_path: "$.verification_report_path"
+        forge.plan_key: "$.plan_key"
     - on: forge.audit.done
       set:
         forge.audit_verdict: "$.verdict"
         forge.audit_report_path: "$.audit_report_path"
+        forge.plan_key: "$.plan_key"
+    - on: forge.plan.blocked
+      set:
+        forge.block_context_path: "$.context_artifact_path"
+        forge.artifact_root: "$.forge_artifact_root"
+        forge.plan_key: "$.plan_key"
+        forge.plan_path: "$.plan_path"
+    - on: work.failed
+      set:
+        forge.failure_context_path: "$.context_artifact_path"
+        forge.artifact_root: "$.forge_artifact_root"
+        forge.plan_key: "$.plan_key"
+        forge.plan_path: "$.plan_path"
