@@ -153,6 +153,10 @@ fn inspect_prompt_json_shape_is_stable() {
             "JSON must contain top-level key {key}; got {parsed:?}"
         );
     }
+    assert!(
+        parsed.get("evidence_level").is_none(),
+        "default preview must omit evidence_level; got {parsed:?}"
+    );
     assert_eq!(parsed["hat_id"], "worker");
 
     let gates = &parsed["gates"];
@@ -207,6 +211,49 @@ fn inspect_prompt_json_shape_is_stable() {
     assert!(
         !titles.is_empty(),
         "block_titles must be non-empty for the CLI path; got {titles:?}"
+    );
+}
+
+#[test]
+fn inspect_prompt_candidate_emit_marks_runtime_evidence() {
+    let tmp = tempfile::tempdir().unwrap();
+    let preset_path = write_preset(tmp.path(), "local.yml", MINIMAL_PRESET);
+
+    let mut cmd = ralph_bin();
+    cmd.current_dir(&tmp)
+        .args(["-c", preset_path.to_str().unwrap()])
+        .args([
+            "inspect",
+            "prompt",
+            "--hat",
+            "worker",
+            "--format",
+            "json",
+            "--topic",
+            "work.done",
+            "--payload",
+            r#"{"task_key":"task-123"}"#,
+        ]);
+
+    let output = cmd.output().expect("spawn ralph inspect prompt candidate emit");
+    assert!(
+        output.status.success(),
+        "candidate emit preview must exit 0; stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let parsed: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("candidate emit JSON");
+
+    assert_eq!(parsed["evidence_level"], "runtime");
+    let candidate = &parsed["candidate_emit"];
+    assert_eq!(candidate["policy_decision"], "accept");
+    assert_eq!(candidate["next_hat_candidates"]["kind"], "verified");
+    assert!(
+        candidate["next_hat_candidates"]["hats"]
+            .as_array()
+            .expect("hats array")
+            .is_empty(),
+        "no downstream subscribers in the minimal preset should produce an empty verified routing set"
     );
 }
 

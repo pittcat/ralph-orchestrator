@@ -544,11 +544,21 @@ pub async fn inspect_prompt_command(
     use_colors: bool,
 ) -> Result<()> {
     let config = preflight::load_config_for_preflight(config_sources, hats_source).await?;
+    let mut preview_config = config.clone();
+    if let Some(enabled) = args.tasks_enabled {
+        preview_config.tasks.enabled = enabled;
+    }
+    if let Some(enabled) = args.memories_enabled {
+        preview_config.memories.enabled = enabled;
+    }
+    if let Some(enabled) = args.scratchpad {
+        preview_config.core.scratchpad.enabled = enabled;
+    }
     let hat_id = ralph_proto::HatId::new(args.hat.clone());
 
     // Save a cloned config for the read-only candidate emit evaluation
     // (EventLoop takes ownership of config, so we clone before the move).
-    let config_for_candidate = config.clone();
+    let config_for_candidate = preview_config.clone();
 
     // Block titles are extracted via a dry `build_prompt` call,
     // which requires constructing an EventLoop. We suppress
@@ -565,8 +575,11 @@ pub async fn inspect_prompt_command(
     let _guard =
         tracing::dispatcher::set_default(&tracing_subscriber::registry().with(suppressed).into());
 
-    let mut event_loop = ralph_core::event_loop::EventLoop::new(config);
+    let mut event_loop = ralph_core::event_loop::EventLoop::new(preview_config);
     event_loop.initialize("ralph inspect prompt (read-only)");
+    if let Some(iteration) = args.iteration {
+        event_loop.set_iteration_for_test(iteration);
+    }
     let preview_base = event_loop.prompt_preview(&hat_id).ok_or_else(|| {
         anyhow::anyhow!(
             "hat {:?} not found in preset; available hats are listed by `ralph hats list`",
@@ -585,7 +598,9 @@ pub async fn inspect_prompt_command(
         || args.correction.is_some()
         || args.scratchpad.is_some()
         || args.tasks_enabled.is_some()
-        || args.memories_enabled.is_some();
+        || args.memories_enabled.is_some()
+        || args.topic.is_some()
+        || args.triggered.is_some();
 
     let preview = if has_scenario {
         // Parse JSON scenario args.
@@ -700,9 +715,8 @@ pub async fn inspect_prompt_command(
             .transpose()?;
 
         // Build skill_gates from overrides.
-        // U7 (2026-07-27-002 plan): all three gates are overridable;
-        // any that is not explicitly supplied falls back to the effective
-        // config's prompt_gates (tasks/memories) or scratchpad default (false).
+        // Any gate not explicitly supplied falls back to the effective
+        // config's prompt gates after the preview overrides above.
         let skill_gates = if args.scratchpad.is_some()
             || args.tasks_enabled.is_some()
             || args.memories_enabled.is_some()
@@ -735,7 +749,7 @@ pub async fn inspect_prompt_command(
         preview_base
     };
 
-    // ── Unit 2: candidate emit evaluation (2026-07-27-002 plan) ─────
+    // ── Unit 2: candidate emit evaluation ─────
     // When --topic is provided without --payload, fail fast with an
     // error so the caller knows the emission preview cannot run.
     let preview = match (&args.topic, &args.payload) {

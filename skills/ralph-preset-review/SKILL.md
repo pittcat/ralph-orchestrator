@@ -19,7 +19,7 @@ Use this skill to **review** Ralph presets with **Agent 视角可行性（AAF）
 - **Auditing `trigger_context` declarations** in `event_policy.schemas.<topic>`: hint conditions, label uniqueness, topology consumers, and the `instructions` ↔ `## TRIGGER CONTEXT` boundary (no duplicated hint conditions in prose)
 - Running `ralph preset check --strict` and preset_lint nextest subsets
 - Producing actionable remediation from AAF gaps + payload audit gaps
-- **Artifact-First Handoff audit (R8–R12, per `docs/plans/2026-07-16-003-feat-preset-artifact-first-handoffs-plan.md`)**: 逐项验证重要信息是否落盘、路径对消费 hat 可见、消费动作闭环、生命周期责任完整、`field_docs` 与 `examples` 不诱导伪造;命中即按 `references/finding-rubric.md` 「Artifact-First Handoff finding_id」 表入主表(review-only,不进 `ralph preset check` JSON)
+- **Artifact-First Handoff audit (R8–R12)**: 逐项验证重要信息是否落盘、路径对消费 hat 可见、消费动作闭环、生命周期责任完整、`field_docs` 与 `examples` 不诱导伪造;命中即按 `references/finding-rubric.md` 「Artifact-First Handoff finding_id」 表入主表(review-only,不进 `ralph preset check` JSON)
 
 ## Core Assumptions
 
@@ -48,7 +48,7 @@ Use this skill to **review** Ralph presets with **Agent 视角可行性（AAF）
 
 3. **Topology sketch** — event flow diagram (not prompt flow).
 
-3a. **Single-chain-first audit (2026-07-07-006 Unit 6)** — mandatory:
+3a. **Single-chain-first audit** — mandatory:
    - Read `references/finding-rubric.md` 「Single-chain-first audit」段；按 `fallback_reaches_success_terminal` / `runtime_unit_loop_multiple_fact_sources` / `blocked_failed_promoted_to_pass` / `topic_multi_consumer` / `hidden_phase_decision` / `prompt_wall_serial_style` 六项逐项判定。
    - 任一命中 → 报告 P0（`fallback_reaches_success_terminal` / `runtime_unit_loop_multiple_fact_sources` / `blocked_failed_promoted_to_pass`）或 P1（其余）；confidence 起点 60。
    - 此审计**独立**于 mechanical lint 与 AAF 五问；可在 Per-Hat AAF Reviews 之前作为「Topology sketch 续」插入。
@@ -74,13 +74,13 @@ Use this skill to **review** Ralph presets with **Agent 视角可行性（AAF）
    - `fixtures/aaf-wave-capability-negative-fixture.yml`（负）— 期望：Wave capability audit 系列 P0 出现。
    - `fixtures/aaf-supervisor-capability-negative-fixture.yml`（负）— 期望：Supervisor capability audit 系列 P0 出现。
 
-3d. **Wave capability audit (2026-07-22-002 plan U5)** — **capability-triggered**, **不**按 preset 名称点名门控：
+3d. **Wave capability audit** — **capability-triggered**, **不**按 preset 名称点名门控：
    1. **检测顺序**：先读 `references/author-checklist.md` Intent Confirmation 的 `execution_model` 字段 → 再扫 YAML `event_loop.supervisor.enabled` 与 hat `instructions` / `publishes` 中是否出现 `ralph wave emit` / `ralph wave verify` / `## WAVE CONTEXT` 字样。
    2. **触发条件**：`execution_model ∈ {wave, supervisor+wave}` **或** 上述命令字样出现在非 builtin-cli 位置。**未触发**：review 把本步记为 `N/A`（不假装已审）。
    3. **判定**：按 `references/finding-rubric.md`「Wave capability audit」段逐项查 `preset.wave_worker_calls_wave_emit` / `preset.wave_missing_verify_before_emit` / `preset.wave_confirm_uses_hat_channel` / `preset.wave_agent_emits_coordination_topic`；命中 → 主表，默认 P0。
    4. **触发条件不得按 preset 名称**：检测顺序中**禁止**写「`name starts with ...`」之类的名缀门控；详见 `references/agent-native-model.md`「执行模型」段的硬约束。
 
-3e. **Supervisor capability audit (2026-07-22-002 plan U5)** — **capability-triggered**, **不**按 preset 名称点名门控：
+3e. **Supervisor capability audit** — **capability-triggered**, **不**按 preset 名称点名门控：
    1. **检测顺序**：先读 Intent.execution_model → 再扫 YAML `event_loop.supervisor.enabled` 与 hat `instructions` 是否引用 `.ralph/supervisor.db` / 协调 topic。
    2. **触发条件**：`execution_model ∈ {supervisor, supervisor+wave}` **或** `event_loop.supervisor.enabled: true` **或** 上述命令 / 路径字样出现。**未触发**：N/A。
    3. **判定**：按 `references/finding-rubric.md`「Supervisor capability audit」段逐项查 `preset.supervisor_requires_isolated` / `preset.supervisor_hat_publishes_coord_topic` / `preset.supervisor_unit_state_not_via_task_api` / `preset.artifact_uses_internal_ledger` / `preset.execution_model_intent_mismatch`；命中 → 主表，默认 P0。
@@ -122,7 +122,7 @@ Use this skill to **review** Ralph presets with **Agent 视角可行性（AAF）
      - 任一项缺失或不一致 → `preset.artifact_first_field_docs_missing`(P1);若诱导伪造 → 升 P0。
    - Inspect `examples[]`: examples may show shape, but must not encode fake business conclusions that an agent could copy as facts.
 
-5a. **Artifact-First 跨 hat 独立审核(独立于第 4 / 5 步 AAF,2026-07-16-003 必做)**:
+5a. **Artifact-First 跨 hat 独立审核(独立于第 4 / 5 步 AAF,必做)**:
    - **路径可见性闭环**：每条 emit topic 携带的 path 字段,沿「emit → projection → 下游 hat 可见输入」逐跳检查;任一节点路径不可见 → `preset.artifact_path_not_in_visible_context`(P0)。
    - **消费动作闭环**：下游 consumer hat 的 instructions 必须**显式要求**读路径,且读盘后做验收 / 确认(文件存在、可解析、足以支撑本 hat Q1)。判定规程:
      1. instructions 未要求读路径 → `preset.artifact_no_consumer_declared`(P1)。

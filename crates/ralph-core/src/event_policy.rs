@@ -2605,6 +2605,10 @@ pub struct CandidateHatEntry {
     pub verified: bool,
 }
 
+fn empty_next_hat_candidates() -> NextHatCandidates {
+    NextHatCandidates::Verified { hats: Vec::new() }
+}
+
 /// Evaluate a candidate event for the inspect prompt path (read-only).
 ///
 /// Returns a structured preview of whether the event would be accepted
@@ -2645,7 +2649,7 @@ pub fn evaluate_candidate_emit(
                 reason_code: "hat_does_not_publish_topic".to_string(),
             }],
             projection: None,
-            next_hat_candidates: NextHatCandidates::Unverified,
+            next_hat_candidates: empty_next_hat_candidates(),
         });
     }
 
@@ -2667,7 +2671,7 @@ pub fn evaluate_candidate_emit(
                 reason_code: "invalid_topic_format".to_string(),
             }],
             projection: None,
-            next_hat_candidates: NextHatCandidates::Unverified,
+            next_hat_candidates: empty_next_hat_candidates(),
         });
     }
 
@@ -2683,7 +2687,7 @@ pub fn evaluate_candidate_emit(
                 reason_code: "triggered_hat_not_in_config".to_string(),
             }],
             projection: None,
-            next_hat_candidates: NextHatCandidates::Unverified,
+            next_hat_candidates: empty_next_hat_candidates(),
         });
     }
 
@@ -2740,14 +2744,23 @@ pub fn evaluate_candidate_emit(
         }
     };
 
-    // Build projection preview from state changes (minimal for now).
-    let projection = build_projection_preview(&state);
+    let projection = if policy_decision == "accept" {
+        build_projection_preview(&state)
+    } else {
+        None
+    };
+
+    let next_hat_candidates = if policy_decision == "accept" {
+        compute_next_hat_candidates(config, topic)
+    } else {
+        empty_next_hat_candidates()
+    };
 
     Ok(CandidateEmitPreview {
         policy_decision,
         reasons,
         projection,
-        next_hat_candidates: compute_next_hat_candidates(config, topic),
+        next_hat_candidates,
     })
 }
 
@@ -2981,7 +2994,7 @@ pub(crate) fn compute_next_hat_candidates(config: &RalphConfig, topic: &str) -> 
     let subscribers = registry.subscribers(&topic_ref);
 
     if subscribers.is_empty() {
-        return NextHatCandidates::Unverified;
+        return NextHatCandidates::Verified { hats: Vec::new() };
     }
 
     // Separate subscribers into those that are in config.hats (verified) vs unknown.
@@ -7940,6 +7953,11 @@ hats:
             "accepted emit should have no reasons, got {:?}",
             result.reasons
         );
+        assert_eq!(
+            result.next_hat_candidates,
+            NextHatCandidates::Verified { hats: Vec::new() },
+            "no subscribers should yield a verified empty routing set"
+        );
     }
 
     #[test]
@@ -7963,6 +7981,15 @@ hats:
             result.reasons[0].reason_code, "missing_required_field",
             "expected missing_required_field reason, got {:?}",
             result.reasons[0]
+        );
+        assert_eq!(
+            result.next_hat_candidates,
+            NextHatCandidates::Verified { hats: Vec::new() },
+            "rejected emit should not surface downstream routing candidates"
+        );
+        assert!(
+            result.projection.is_none(),
+            "rejected emit should not surface a projection preview"
         );
     }
 
@@ -7994,6 +8021,10 @@ hats:
             "evaluate_candidate_emit must accept when validate_event_with_hat is {:?}",
             decision
         );
+        assert_eq!(
+            candidate.next_hat_candidates,
+            NextHatCandidates::Verified { hats: Vec::new() }
+        );
 
         // Same invalid payload (missing field): both paths should reject.
         let invalid_payload = r#"{}"#;
@@ -8001,6 +8032,11 @@ hats:
             evaluate_candidate_emit(&config, &hat_id, "work.ready", invalid_payload, None)
                 .expect("evaluation");
         assert_eq!(candidate2.policy_decision, "reject");
+        assert_eq!(
+            candidate2.next_hat_candidates,
+            NextHatCandidates::Verified { hats: Vec::new() }
+        );
+        assert!(candidate2.projection.is_none());
     }
 
     // ─────────────────────────────────────────────────────────────────────
@@ -8063,6 +8099,10 @@ hats:
             result.projection.is_some(),
             "accepted event MUST include projection with state_changes, got None"
         );
+        assert_eq!(
+            result.next_hat_candidates,
+            NextHatCandidates::Verified { hats: Vec::new() }
+        );
         let preview = result.projection.unwrap();
         assert!(
             !preview.state_changes.is_empty(),
@@ -8090,6 +8130,10 @@ hats:
             result.projection.is_none(),
             "rejected event must NOT include projection, got {:?}",
             result.projection
+        );
+        assert_eq!(
+            result.next_hat_candidates,
+            NextHatCandidates::Verified { hats: Vec::new() }
         );
     }
 }

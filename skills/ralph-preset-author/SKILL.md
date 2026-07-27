@@ -18,14 +18,14 @@ Use this skill to design and draft Ralph **presets** (builtin or local) with **A
 - **Declaring schema-backed `trigger_context`** (`summary_fields` + `routing_hints` + `known_fields`) for trigger-consuming hats — collapses duplicated payload if/else in `instructions` into a single injected `## TRIGGER CONTEXT` block
 - Writing per-hat `instructions:` in isolated mode (one agent per activation)
 - Producing `preset-author-notes.md` (AAF 五问表 per hat) before review
-- **Artifact-First Handoff authoring** (R1–R7, per `docs/plans/2026-07-16-003-feat-preset-artifact-first-handoffs-plan.md`): declaring artifact 落盘点、消费方、生命周期责任，并在 Payload Contract 与 AAF 五问表中固化每一份重要信息的落盘判定
+- **Artifact-First Handoff authoring** (R1–R7): declaring artifact 落盘点、消费方、生命周期责任，并在 Payload Contract 与 AAF 五问表中固化每一份重要信息的落盘判定
 
 ## Core Assumptions
 
 - Each hat activation in `execution_mode: isolated` sees **only its own** `instructions` plus runtime injection — not other hats' instructions.
 - **Prompt visibility evidence MUST come from `ralph inspect prompt`**, not from memory: see `references/prompt-visibility.md`. The shared command is the SSOT for `auto_inject` / `on_demand` and is enforced by `skills/tests/test_prompt_visibility_contract.py`.
 - State passes via **emit → state_projection → task/progress → Observe**, not by reading internal ledgers.
-- **Artifact-First Handoff assumption (2026-07-16-003 plan):**
+- **Artifact-First Handoff assumption:**
   - **文件是重要信息的事实源**：完整结果、长内容、跨 hat 摘要、关键决策依据、验证证据、高成本重建信息默认必须落盘。
   - **事件承担控制面，文件承担数据面**：event payload 只携带短状态、摘要、路径、必要身份与路由字段。
   - **默认强制但允许有理由的例外**：只有短暂 + 短小 + 无需恢复的信息可以不落盘；例外必须在 Payload Contract 同行标注理由（恢复 / 审计 / 下游依赖），不能仅按字符数判断。
@@ -82,7 +82,7 @@ Use this skill to design and draft Ralph **presets** (builtin or local) with **A
      - **禁止**引用 auto-inject skill 时让 agent 再 `ralph tools skill load <name>`（已注入就不必再 load）。
      - **禁止**复制 `ralph-tools*.md` 命令表到 `instructions:`——按 `crates/ralph-core/data/*.md` 注入，**只引用章节名**。
      - 外仓（无 `crates/ralph-core/data/`）时仍可用 `inspect prompt`：内容来自当前 ralph 二进制内嵌；报告与 review 标注须注明来源。
-     - **场景化激活预览（Unit 1 of plan 2026-07-27-002）**：
+     - **场景化激活预览**：
        ```bash
        # 静态预览（无场景参数）
        ralph -c <preset>.yml inspect prompt --hat <hat_id> --format json
@@ -91,7 +91,7 @@ Use this skill to design and draft Ralph **presets** (builtin or local) with **A
        ralph -c <preset>.yml inspect prompt --hat <hat_id> --format json \
            --trigger build.task --source-hat planner --payload '{"task":"refactor-x"}'
        ```
-       输出含 `trigger_context_injected`、`wave_context_injected`、`orchestrator_context_injected`、`correction_injected`、`skill_gates`、`evidence_level` 字段；`evidence_level` 标识证据等级（`simulated` / `static` / `runtime` / `unverified`）。
+       输出含 `trigger_context_injected`、`wave_context_injected`、`orchestrator_context_injected`、`correction_injected`、`skill_gates`、`evidence_level` 字段；`evidence_level` 标识证据等级（`static` / `runtime` / `unverified`，默认静态预览可省略该字段）。
 
 2.5. **Capability discovery (mandatory for new presets / material changes)**：
    - Run `ralph capability inventory --format json` and walk each capability's `applies_when` field.

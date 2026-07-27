@@ -511,7 +511,8 @@ fn custom_auto_inject_skill_appears_once() {
 // ─────────────────────────────────────────────────────────────────────
 
 /// Default PromptPreview (no scenario args) must have `evidence_level == "static"`
-/// and all optional fields as None.
+/// in memory, but omit the field from JSON so the legacy no-scenario shape
+/// stays stable. All optional fields must remain `None`.
 #[test]
 fn preview_default_evidence_level_is_static() {
     let config = minimal_isolated_config(true, true);
@@ -527,6 +528,12 @@ fn preview_default_evidence_level_is_static() {
     assert!(preview.orchestrator_context_injected.is_none());
     assert!(preview.correction_injected.is_none());
     assert!(preview.skill_gates.is_none());
+
+    let json = serde_json::to_value(&preview).expect("serialize");
+    assert!(
+        json.get("evidence_level").is_none(),
+        "default evidence_level must be omitted from JSON; got {json:?}"
+    );
 }
 
 /// JSON round-trip of PromptPreview must succeed with new optional fields.
@@ -680,11 +687,10 @@ hats:
     );
 }
 
-/// `NextHatCandidates::Unverified` must serialize as `{"kind":"unverified"}`,
-/// NOT as JSON `null` (which is what the unit-variant `#[serde(untagged)]`
-/// produced before the tag was added).
+/// No subscriber should serialize as a verified empty routing set, not a bare
+/// null or an unverified placeholder.
 #[test]
-fn next_hat_candidates_unverified_serializes_with_kind_unverified_not_null() {
+fn next_hat_candidates_empty_serializes_as_verified_empty_set() {
     use crate::event_policy::compute_next_hat_candidates;
 
     let yaml = r#"
@@ -698,17 +704,21 @@ hats:
 "#;
     let config: RalphConfig = serde_yaml::from_str(yaml).expect("parse");
 
-    // No hat subscribes to "work.start" → empty subscriber list → Unverified.
+    // No hat subscribes to "work.start" → empty subscriber list → verified empty set.
     let result = compute_next_hat_candidates(&config, "work.start");
     let json = serde_json::to_string(&result).expect("serialize");
 
     assert!(
-        json.contains(r#""kind":"unverified""#),
-        "unverified must serialize with kind=unverified tag; got: {json}"
+        json.contains(r#""kind":"verified""#),
+        "empty routing must serialize with kind=verified tag; got: {json}"
+    );
+    assert!(
+        json.contains(r#""hats":[]"#),
+        "empty routing must serialize with an empty hats array; got: {json}"
     );
     assert_ne!(
         json, "null",
-        "unverified must NOT serialize as bare null; got: {json}"
+        "empty routing must NOT serialize as bare null; got: {json}"
     );
 }
 

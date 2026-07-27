@@ -451,7 +451,7 @@ pub struct PromptPreview {
     pub skill_gates: Option<SkillGateFlags>,
     /// Evidence level: "static" (default), "runtime" (scenario args supplied),
     /// or "unverified".
-    #[serde(default = "default_evidence_level")]
+    #[serde(default = "default_evidence_level", skip_serializing_if = "is_static_evidence_level")]
     pub evidence_level: String,
 
     /// 2026-07-27-002 plan Unit 2: candidate emit evaluation (when --topic
@@ -487,6 +487,10 @@ pub struct SkillGateFlags {
 /// without runtime scenario parameters.
 pub fn default_evidence_level() -> String {
     "static".to_string()
+}
+
+pub fn is_static_evidence_level(level: &String) -> bool {
+    level == "static"
 }
 
 /// One entry in either the auto-inject or on-demand list.

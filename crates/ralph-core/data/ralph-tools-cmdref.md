@@ -142,7 +142,7 @@ ralph run [OPTIONS] [-- <CUSTOM_ARGS>...]
 | `ralph mcp` | MCP 服务器模式 |
 | `ralph completions` | 生成 shell 补全脚本 |
 | `ralph inspect` | 只读诊断命名空间（含 `inspect profiles`；`inspect loop` 输出 loop + hat 身份 + events 路径 + **`loop_anchor` plan 锚点**（优先 `.ralph/agent/.ralph-anchor.json`，否则 `prompt_file`）；JSON 可能含 **`supervisor` 块**（配置启用 supervisor，或 runtime 已有可打开的 wave 账本时出现，否则整键省略），OPAC Observe 一手数据源） |
-| `ralph inspect prompt` | 预览 hat 的 prompt 渲染结果（auto-inject + on-demand + 块标题）；Unit 1 支持 `--trigger` / `--source-hat` / `--payload` / `--iteration` / `--wave-context` / `--orchestrator-context` / `--correction` / `--scratchpad` / `--tasks-enabled` / `--memories-enabled` 场景化参数；**U8 新增 `trigger_context_injected.source_hat_known`**：`true` = `--source-hat` 值在 config `hats` 映射中；`false` = 值不在 config 中；字段不出现当未提供 `--source-hat`（adversarial:A3 防御：区分已知 topology 成员与任意 Unicode ID）；Unit 2 支持 `--topic` / `--triggered` 候选 emit 干跑评估（`--topic` 必须是当前 hat `publishes` 或 `default_publishes` 中的 topic，否则 `topic_publishes` gate 拒绝；`--triggered` 必须是 config 中已注册的 hat id，否则 `triggered_not_in_topology` gate 拒绝；省略 `--triggered` 为合法路径）。`evidence_level` 标识证据等级（`simulated` / `static` / `runtime` / `unverified`） |
+| `ralph inspect prompt` | 预览 hat 的 prompt 渲染结果（auto-inject + on-demand + 块标题）；支持 `--trigger` / `--source-hat` / `--payload` / `--iteration` / `--wave-context` / `--orchestrator-context` / `--correction` / `--scratchpad` / `--tasks-enabled` / `--memories-enabled` 场景化参数；`trigger_context_injected.source_hat_known`：`true` = `--source-hat` 值在 config `hats` 映射中；`false` = 值不在 config 中；字段不出现当未提供 `--source-hat`（区分已知 topology 成员与任意 Unicode ID）；支持 `--topic` / `--triggered` 候选 emit 干跑评估（`--topic` 必须是当前 hat `publishes` 或 `default_publishes` 中的 topic，否则 `topic_publishes` gate 拒绝；`--triggered` 必须是 config 中已注册的 hat id，否则 `triggered_not_in_topology` gate 拒绝；省略 `--triggered` 为合法路径）。默认静态预览省略 `evidence_level` 键；当有场景参数或 candidate emit 评估时，JSON 可包含 `evidence_level`（`runtime` / `unverified`） |
 | `ralph diagnose` | 离线诊断报告（`--format json` 含 `dup_storm_topics`：`work.ready` 同 dedup key 重复 ≥3 次；ranked findings 的 `hint` 区分 `duplicate_work_done_same_step` / `duplicate_work_done_stall_bypass`） |
 | `ralph preset materialize-artifacts` | 将内嵌 artifact 模板写到磁盘（binary-only 安装；见下方专节） |
 | `ralph capability inventory` | 列出 preset 作者/reviewer 必须理解的运行时 capability 清单（含 id、trigger_signal、applies_when、evidence_sources、recommended_evidence_level、source）；用于 AAF 评审前对齐 capability 覆盖状态 |
@@ -193,17 +193,17 @@ test -f .ralph/forge/demo/templates/development-plan.template.md
 
 ---
 
-## `next_hat_candidates` 三态（`ralph emit --policy-check` JSON 输出）
+## `candidate_emit.next_hat_candidates` 三态（`ralph inspect prompt --topic ...` JSON 输出）
 
-`ralph emit --policy-check --output json` 的 JSON 输出中 `next_hat_candidates` 字段有三种形状，由 `kind` 标签区分：
+`ralph inspect prompt --hat <id> --format json --topic ... --payload ...` 的 JSON 输出中 `candidate_emit.next_hat_candidates` 字段有三种形状，由 `kind` 标签区分：
 
 | kind | 触发条件 | JSON 示例 |
 |------|----------|-----------|
-| `verified` | 所有订阅者都是 config 中已注册的 hat | `{"kind":"verified","hats":["worker"]}` |
-| `unverified` | hatless mode / 空 registry，无 topology 证据 | `{"kind":"unverified"}` |
+| `verified` | 所有订阅者都是 config 中已注册的 hat，或当前 topic 没有订阅者（空路由被视为可验证的空集合） | `{"kind":"verified","hats":[]}` |
+| `unverified` | topology 证据不可得 / 无法从 config 验证路由 | `{"kind":"unverified"}` |
 | `mixed` | 混合态，部分订阅者不在 config 中 | `{"kind":"mixed","entries":[{"hat_id":"worker","verified":true},{"hat_id":"ghost","verified":false}]}` |
 
-**review 关注点**：`mixed` 中 `verified: false` 的 hat 在运行时无法路由，review 需确认它们不是业务拓扑的一部分。
+**review 关注点**：`mixed` 中 `verified: false` 的 hat 在运行时无法路由，review 需确认它们不是业务拓扑的一部分；`verified` 的空数组表示可验证的空路由，不是错误。
 
 ---
 
