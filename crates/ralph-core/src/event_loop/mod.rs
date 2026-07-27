@@ -15716,3 +15716,9 @@ mod flow_authority_pf_recovery_tests {
         );
     }
 }
+
+// 2026-07-28-001 plan U2: typed exec_wave branch tests.
+// Separate file keeps wave transition / non-transition coverage
+// isolated from the longer flow_authority_pf_recovery_tests block.
+#[cfg(test)]
+pub mod wave_branch_tests;

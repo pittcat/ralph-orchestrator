@@ -2138,6 +2138,21 @@ fn test_u13_supervisor_minimal() {
     run_workflow_guard_scenario(yaml);
 }
 
+// 2026-07-28-001 plan U2 (R3/S3, R4/S4): BDD fixture for parallel-forge
+// exec_wave branch topology. Uses run_workflow_guard_scenario (real
+// EventLoop) with supervisor fan-in enabled (expected_slots: 2).
+// R3/S3: exec.unit.done / exec.unit.failed do NOT advance exec_wave step.
+// R4/S4: exec.wave.complete injected by supervisor fan-in DOES advance
+//   exec_wave → unit_review.
+// Coverage: 2-unit fan-out → supervisor injects exec.wave.complete after
+// both slots complete. Verifies event_topic_counts for unit.done (2x) and
+// exec.wave.complete (1x), and absent exec.wave.failed on happy path.
+#[test]
+fn test_parallel_forge_exec_wave_branch() {
+    let yaml = load_scenario("tests/scenarios/parallel_forge_exec_wave_branch.yml");
+    run_workflow_guard_scenario(yaml);
+}
+
 // 2026-06-20-001 plan U6: serial-lint BDD scenarios were
 // considered but deferred. The first iteration (commit
 // 0083f5b) shipped 3 YAML scenarios + 3 #[test] functions, but
