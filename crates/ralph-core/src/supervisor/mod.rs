@@ -1266,6 +1266,41 @@ pub trait SupervisorStore: fmt::Debug + Send + Sync {
     /// decision pure function (U6).
     fn fan_in_status(&self, wave_id: &str) -> SupervisorStoreResult<WaveSnapshot>;
 
+    /// 2026-07-27-004 plan U5 (R17 / P0): stamp the FIRST phase
+    /// of the four-phase delivery protocol — `Pending` →
+    /// `BusinessProjected` — after the merge seam has physically
+    /// appended the Completed slots' business events to the main
+    /// ledger. `commit_salvage_projection` refuses a `Pending`
+    /// wave (see below), so every merge seam MUST stamp this
+    /// marker once its write lands: the coordinator's
+    /// `merge_and_complete` (success fan-in via the merge sink),
+    /// the dispatcher's `merge_completed_*_slots_to_main`
+    /// salvage helpers (failed fan-in), and the restart
+    /// recovery replay. Without the stamp the rusqlite store
+    /// rejects the salvage commit with `InvalidTransition` and
+    /// the loop terminates `fan_in_failed` with the wave stuck
+    /// at `Pending` — the primary-20260727 E2E regression.
+    ///
+    /// Idempotency:
+    /// - Re-stamping the SAME batch fingerprint is a no-op
+    ///   `Ok(())` (restart replay is safe).
+    /// - Stamping a DIFFERENT fingerprint once the wave has
+    ///   advanced past `Pending` returns
+    ///   `SupervisorStoreError::InvalidTransition` so a stale
+    ///   replay cannot rewrite history.
+    ///
+    /// Default: no-op so store-less mocks keep compiling. The
+    /// in-memory and rusqlite stores override with the gated
+    /// mutation.
+    fn record_business_projection(
+        &self,
+        wave_id: &str,
+        receipt: &ProjectionReceiptSummary,
+    ) -> SupervisorStoreResult<()> {
+        let _ = (wave_id, receipt);
+        Ok(())
+    }
+
     /// 2026-07-27-003 plan U5: commit a salvage projection
     /// receipt to the wave row. The receipt is the SOLE proof
     /// that the dispatcher wrote the per-slot business events

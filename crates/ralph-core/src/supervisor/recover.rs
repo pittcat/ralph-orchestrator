@@ -188,16 +188,19 @@ pub fn restore_unmerged_completed_slot(
             .duration_since(SystemTime::UNIX_EPOCH)
             .map(|d| d.as_secs())
             .unwrap_or(0);
-        store.commit_salvage_projection(
-            wave_id,
-            &ProjectionReceiptSummary {
-                kind: ProjectionKind::Business,
-                batch_fingerprint: format!("restore-{wave_id}"),
-                write_count: 0,
-                already_present_count: 0,
-                committed_at_unix_secs: now_secs,
-            },
-        )?;
+        let receipt = ProjectionReceiptSummary {
+            kind: ProjectionKind::Business,
+            batch_fingerprint: format!("restore-{wave_id}"),
+            write_count: 0,
+            already_present_count: 0,
+            committed_at_unix_secs: now_secs,
+        };
+        // 2026-07-27-004 plan U5 (R17 / P0): stamp the first
+        // delivery phase before the salvage commit — the strict
+        // rusqlite gate refuses `commit_salvage_projection` on a
+        // `Pending` wave.
+        store.record_business_projection(wave_id, &receipt)?;
+        store.commit_salvage_projection(wave_id, &receipt)?;
         return Ok(true);
     }
     Ok(false)

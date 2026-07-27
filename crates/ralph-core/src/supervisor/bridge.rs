@@ -159,6 +159,24 @@ pub trait SupervisorBridge: std::fmt::Debug + Send + Sync {
     /// a store override this.
     fn fan_in_status(&self, wave_id: &str) -> Result<WaveSnapshot, BridgeError>;
 
+    /// 2026-07-27-004 plan U5 (R17 / P0): stamp the first
+    /// delivery phase (`Pending` → `BusinessProjected`) on the
+    /// store after the dispatcher's salvage merge seam lands
+    /// the Completed slots' business events on main. The
+    /// strict rusqlite `commit_salvage_projection` gate
+    /// refuses a `Pending` wave, so every salvage seam must
+    /// stamp this BEFORE calling `commit_salvage_projection`.
+    /// Default: `Ok(())` so store-less mock bridges keep
+    /// compiling; production bridges delegate to the store.
+    fn record_business_projection(
+        &self,
+        wave_id: &str,
+        receipt: &crate::supervisor::ProjectionReceiptSummary,
+    ) -> Result<(), BridgeError> {
+        let _ = (wave_id, receipt);
+        Ok(())
+    }
+
     /// 2026-07-27-003 plan U5: bridge-level convenience for the
     /// dispatcher's failed-fan-in salvage commit. Bridges that
     /// own a `SupervisorStore` delegate to it; the default impl

@@ -416,6 +416,16 @@ impl SupervisorBridge for CoordinatorSupervisorBridge {
             .map_err(|err| BridgeError::Store(err.to_string()))
     }
 
+    fn record_business_projection(
+        &self,
+        wave_id: &str,
+        receipt: &ralph_core::supervisor::ProjectionReceiptSummary,
+    ) -> Result<(), BridgeError> {
+        self.store
+            .record_business_projection(wave_id, receipt)
+            .map_err(|err| BridgeError::Store(err.to_string()))
+    }
+
     fn record_coordination_written(
         &self,
         wave_id: &str,

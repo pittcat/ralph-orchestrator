@@ -369,6 +369,34 @@ fn build_ralph_debug(repo: &Path, stderr_text: &str) -> String {
             out.push_str(&format!("  - {}\n", e.file_name().to_string_lossy()));
         }
     }
+    // 2026-07-27-004 plan U5 diagnosis: surface the loop's
+    // termination reason and the supervisor store's final wave
+    // rows so a failed strict gate shows WHY the delivery
+    // commit chain did not advance (fan-in error vs coord
+    // commit error vs salvage skip).
+    let reason_path = ralph_dir.join("loop-termination-reason.json");
+    if let Ok(raw) = std::fs::read_to_string(&reason_path) {
+        out.push_str(&format!(
+            "\n[E2E debug] loop-termination-reason.json:\n{raw}\n"
+        ));
+    }
+    let db_path = ralph_dir.join("supervisor.db");
+    if db_path.exists()
+        && let Ok(store) = ralph_core::supervisor::RusqliteSupervisorStore::open(&db_path)
+        && let Ok(ids) = store.list_wave_ids()
+    {
+        for id in ids {
+            match store.fan_in_status(&id) {
+                Ok(snap) => out.push_str(&format!(
+                    "\n[E2E debug] wave {id}: kind={:?} phase={:?} delivery={:?} slots={:?}\n",
+                    snap.kind, snap.phase, snap.delivery_state, snap.slots
+                )),
+                Err(err) => out.push_str(&format!(
+                    "\n[E2E debug] wave {id}: fan_in_status error: {err}\n"
+                )),
+            }
+        }
+    }
     out
 }
 
@@ -480,8 +508,9 @@ fn supervisor_primary_path_exec_wave_completes_with_schema_payload() {
         "[E2E] exec wave did NOT reach CoordinationCommitted: \
          delivery_state={:?} (U5 strict gate; commit_coordination_event \
          must advance the wave to the terminal phase before \
-         loop.terminate).",
-        exec_snap.delivery_state
+         loop.terminate).\n[stderr]\n{}",
+        exec_snap.delivery_state,
+        build_ralph_debug(&env.repo, &stderr_text)
     );
     let completes = events_with_topic(&ledger, "exec.wave.complete");
     assert!(

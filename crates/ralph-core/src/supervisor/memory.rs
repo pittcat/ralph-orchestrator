@@ -886,6 +886,45 @@ impl SupervisorStore for InMemorySupervisorStore {
         })
     }
 
+    fn record_business_projection(
+        &self,
+        wave_id: &str,
+        receipt: &ProjectionReceiptSummary,
+    ) -> SupervisorStoreResult<()> {
+        // 2026-07-27-004 plan U5 (R17 / P0): first phase of the
+        // delivery protocol. The merge seam stamps this AFTER
+        // its write to main lands; the strict rusqlite
+        // `commit_salvage_projection` gate requires it.
+        let mut inner = self.lock()?;
+        let wave = inner
+            .waves_by_id
+            .get_mut(wave_id)
+            .ok_or_else(|| SupervisorStoreError::UnknownWave(wave_id.to_string()))?;
+        // Once the wave latched `SalvageCommitted` there is
+        // nothing for the first-phase stamp to do — the
+        // fingerprint conflict gate lives in
+        // `commit_salvage_projection`, not here. Replays are a
+        // plain no-op so the dispatcher's salvage seam can run
+        // unconditionally on retried ticks.
+        if wave
+            .delivery_state
+            .at_least(WaveDeliveryState::SalvageCommitted)
+        {
+            return Ok(());
+        }
+        // Forward-only advance.
+        if !wave
+            .delivery_state
+            .at_least(WaveDeliveryState::BusinessProjected)
+        {
+            wave.delivery_state = WaveDeliveryState::BusinessProjected;
+        }
+        if !receipt.batch_fingerprint.is_empty() || wave.salvage_receipt.is_none() {
+            wave.salvage_receipt = Some(receipt.clone());
+        }
+        Ok(())
+    }
+
     fn commit_salvage_projection(
         &self,
         wave_id: &str,

@@ -4116,6 +4116,31 @@ pub(crate) fn merge_completed_review_slots_to_main(
         batch_fingerprint: batch_fingerprint.clone(),
         committed_at_unix_secs: unix_now_secs(),
     };
+    // 2026-07-27-004 plan U5 (R17 / P0): stamp the first
+    // delivery phase (`Pending` → `BusinessProjected`) now
+    // that the business rows have physically landed on main.
+    // The strict rusqlite `commit_salvage_projection` gate
+    // refuses a `Pending` wave, so skipping this stamp
+    // strands the wave at `Pending` and the loop terminates
+    // `fan_in_failed`.
+    if let Err(err) = bridge.record_business_projection(
+        store_wave_id,
+        &ralph_core::supervisor::ProjectionReceiptSummary {
+            kind: ProjectionKind::Business,
+            batch_fingerprint: batch_fingerprint.clone(),
+            write_count,
+            already_present_count: 0,
+            committed_at_unix_secs: receipt.committed_at_unix_secs,
+        },
+    ) {
+        warn!(
+            wave_id = %store_wave_id,
+            error = %err,
+            "merge_completed_review_slots_to_main: record_business_projection failed; \
+             next tick will retry"
+        );
+        return Err(ralph_core::supervisor::ProjectionError::from(err));
+    }
     // Commit the salvage mark AFTER the rows landed.
     if let Err(err) = bridge.commit_salvage_projection(
         store_wave_id,
@@ -4244,6 +4269,29 @@ fn merge_completed_exec_fix_slots_to_main(
         batch_fingerprint: batch_fingerprint.clone(),
         committed_at_unix_secs: unix_now_secs(),
     };
+    // 2026-07-27-004 plan U5 (R17 / P0): stamp the first
+    // delivery phase (`Pending` → `BusinessProjected`) now
+    // that the business rows have physically landed on main —
+    // the strict rusqlite `commit_salvage_projection` gate
+    // refuses a `Pending` wave.
+    if let Err(err) = bridge.record_business_projection(
+        store_wave_id,
+        &ralph_core::supervisor::ProjectionReceiptSummary {
+            kind: ProjectionKind::Business,
+            batch_fingerprint: batch_fingerprint.clone(),
+            write_count,
+            already_present_count: 0,
+            committed_at_unix_secs: receipt.committed_at_unix_secs,
+        },
+    ) {
+        warn!(
+            wave_id = %store_wave_id,
+            error = %err,
+            "merge_completed_exec_fix_slots_to_main: record_business_projection failed; \
+             next tick will retry"
+        );
+        return Err(ralph_core::supervisor::ProjectionError::from(err));
+    }
     if let Err(err) = bridge.commit_salvage_projection(
         store_wave_id,
         &ralph_core::supervisor::ProjectionReceiptSummary {

@@ -1149,6 +1149,47 @@ impl SupervisorStore for RusqliteSupervisorStore {
         })
     }
 
+    fn record_business_projection(
+        &self,
+        wave_id: &str,
+        receipt: &ProjectionReceiptSummary,
+    ) -> SupervisorStoreResult<()> {
+        // 2026-07-27-004 plan U5 (R17 / P0): first phase of the
+        // delivery protocol. The merge seam stamps this AFTER
+        // its write to main lands; the strict
+        // `commit_salvage_projection` gate below requires it.
+        self.with_conn(|conn| {
+            let current: Option<(String, Option<String>)> = conn
+                .query_row(
+                    "SELECT delivery_state, salvage_fingerprint FROM waves WHERE wave_id = ?1",
+                    [&wave_id],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .optional()?;
+            let (state_str, _existing_fp) = current
+                .ok_or_else(|| SupervisorStoreError::UnknownWave(wave_id.to_string()))?;
+            let state = parse_delivery_state(&state_str)?;
+            // Once the wave latched `SalvageCommitted` there is
+            // nothing for the first-phase stamp to do — the
+            // fingerprint conflict gate lives in
+            // `commit_salvage_projection`, not here. Replays are
+            // a plain no-op so the dispatcher's salvage seam can
+            // run unconditionally on retried ticks.
+            if state.at_least(WaveDeliveryState::SalvageCommitted) {
+                return Ok(());
+            }
+            conn.execute(
+                "UPDATE waves
+                    SET delivery_state = CASE WHEN CAST(delivery_state AS TEXT) = 'pending' THEN 'business_projected' ELSE delivery_state END,
+                        salvage_fingerprint = CASE WHEN ?2 <> '' THEN ?2 ELSE salvage_fingerprint END,
+                        updated_at = strftime('%s','now')
+                  WHERE wave_id = ?1",
+                rusqlite::params![wave_id, receipt.batch_fingerprint],
+            )?;
+            Ok(())
+        })
+    }
+
     fn commit_salvage_projection(
         &self,
         wave_id: &str,
