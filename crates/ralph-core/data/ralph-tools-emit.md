@@ -294,6 +294,36 @@ ralph emit <TOPIC> -j '...' --output json                  # 落盘：看 ok=tru
 >
 > - `unset RALPH_EVENTS_FILE` 或改写到其它目录 —— 事件不会落到本次 slot，runtime 会判定本 slot 无结果产出。
 > - 改写 `RALPH_WAVE_WORKER` / `RALPH_WAVE_ID` / `RALPH_WAVE_INDEX` —— 这三个值由 runtime 在你启动时注入，是本次 slot 的身份凭据。
+>
+> **Wave worker 预检顺序**（同一进程内一次 `ralph emit` 走的检查链）：
+>
+> 1. **policy check** —— 按当前 `event_policy` schema 与 origin guard 校验 payload 与 topic；拒收则 bail，不进入下一步
+> 2. **resolve emit path** —— 把 `RALPH_EVENTS_FILE` / `--file` / marker / 默认 `events.jsonl` 解析为具体落点；wave worker 路径上进一步走 wave 通道 registry 校验，身份必须四元组匹配（loop id + wave id + slot index + canonical path）
+> 3. **write** —— 落到校验通过的路径
+>
+> 任一阶段失败 bail 后不会进入下一阶段；wave worker 在阶段 2 被拒时，本 slot 表现为「无结果产出」，runtime 会把它归类为 fan-in missing（不要靠补发或重试绕过）。
+>
+> **`wave_channel_registry_reject` 错误码**（wave worker 在阶段 2 收到的稳定错误码）：
+>
+> **触发条件**：wave worker 的 emit 路径中，registry 校验环节发现当前 `(loop id, wave id, slot index, canonical path)` 与 dispatcher 在准备阶段写入的 wave channel registry 不匹配。可能的原因（按概率从高到低）：
+>
+> - dispatcher 还没来得及写入本 wave 的 registry（spawn 比准备快）—— 这种情况下即便 `--policy-check` 已通过，仍会在阶段 2 拒收
+> - worker 进程被外层注入的 `RALPH_CURRENT_LOOP_ID` / `RALPH_EVENTS_FILE` 污染（human CLI hat env leakage）
+> - dispatcher 准备阶段失败（registry 文件创建 / 写盘 / 回读校验失败），整波准备失败，worker 不应被启动但已启动
+>
+> **Agent 动作**（按顺序，不可跳过）：
+>
+> 1. **停** —— 不要重试同 payload 的 `ralph emit`。本次 emit 已被 runtime 拒收，本 activation 内再次发同一事件只会得到同样的错误码，浪费 isolated 单业务事件预算
+> 2. **看 dispatcher 输出** —— 本 wave 启动时 dispatcher 的 stderr / stdout 包含 registry 准备阶段的状态码（`registry_prepared` / `registry_preparation_failed`）。若 dispatcher 报告 `registry_preparation_failed`，本 wave 已被 runtime 标记为 fan-in 失败
+> 3. **不重试** —— 不再发 `ralph emit`，不要尝试改 `--file` / `RALPH_EVENTS_FILE` 让它落到其它路径。emit 阶段 2 失败是 dispatcher 端故障，不是 worker 端问题
+> 4. **报告** —— 在本 activation 的最终回复里，向操作者或上游 hat 报告「dispatcher 没准备好本 slot 的私有通道」，由 dispatcher 端决定是否整波重试或标记 wave 失败
+>
+> **停止条件**：收到 `wave_channel_registry_reject` 后**禁止**做以下动作：
+>
+> - 重试 `ralph emit` 同 payload / 同 topic（只会同样被拒）
+> - `unset RALPH_EVENTS_FILE` 改走默认 events.jsonl（wave worker 的 marker fallthrough 已删除，会被 `wave_worker_main_fallthrough` 拒收）
+> - 改写 `RALPH_WAVE_ID` / `RALPH_WAVE_INDEX` / `RALPH_CURRENT_LOOP_ID`（这三个是 dispatcher 注入的身份凭据；改写等同于伪造 slot 身份）
+> - 把本 hat 的「发业务事件」动作改成手工 cat / echo 到 `.ralph/events.jsonl`（loop 读盘时仍会被策略校验拒为 `payload_contract_violation`，并终止 loop）
 
 > **诊断**：emit 拒收后无法在 CLI 层修复时，启 `RALPH_DIAGNOSTICS=1` 重新 loop；envelope 写到 `recovery.jsonl`，`ralph diagnose --session latest` 出报告。详见 `docs/guide/runtime-diagnosis.md` §10 / §12.1。
 
