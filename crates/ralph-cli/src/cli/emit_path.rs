@@ -211,6 +211,7 @@ pub(crate) fn resolve_emit_path(
     /// `current_hat.is_some()`, binding acceptance to the wave-worker
     /// context (wave workers run in isolated execution with a hat id).
     /// This does NOT open arbitrary `.ralph/*.jsonl` writes.
+    #[allow(dead_code)]
     fn is_wave_channel_path(
         candidate: &Path,
         workspace_root: &Path,
@@ -637,7 +638,6 @@ pub(crate) fn resolve_emit_path(
                         slot_index.unwrap_or(0)
                     );
                 }
-                (Some(wid), Some(idx), _) => unreachable!(),
                 (None, None, _) => {
                     // Non-wave caller: emit path rules already
                     // applied via the allowlist loop above.

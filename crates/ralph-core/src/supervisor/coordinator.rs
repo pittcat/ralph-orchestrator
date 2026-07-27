@@ -468,9 +468,8 @@ mod tests {
     // U8 closed-circuit tests: they bypass the JSONL ledger
     // by using `InMemoryMergeSink` + `InMemorySupervisorStore`.
     // The U12 bridge covers the real EventLoop wiring.
-    use super::super::{CoordinationReceipt, CoordinationReceiptSummary, ProjectionError, ProjectionKind, ProjectionReceipt, ProjectionReceiptSummary, WaveDeliveryState};
-
     use super::*;
+
     use crate::supervisor::{
         InMemorySupervisorStore, MergeSinkError, SlotResource, SlotStatus, WaveKind, WavePhase,
     };

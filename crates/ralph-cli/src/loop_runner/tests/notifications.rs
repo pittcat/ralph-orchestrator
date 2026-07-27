@@ -93,14 +93,9 @@ async fn spawn_loopback(response: &'static str) -> (u16, Recorded) {
     let recorded: Recorded = Arc::new(Mutex::new(Vec::new()));
     let accept_recorded = recorded.clone();
     tokio::spawn(async move {
-        loop {
-            match listener.accept().await {
-                Ok((stream, _)) => {
-                    let rec = accept_recorded.clone();
-                    tokio::spawn(handle_connection(stream, rec, response.to_string()));
-                }
-                Err(_) => break,
-            }
+        while let Ok((stream, _)) = listener.accept().await {
+            let rec = accept_recorded.clone();
+            tokio::spawn(handle_connection(stream, rec, response.to_string()));
         }
     });
     (port, recorded)

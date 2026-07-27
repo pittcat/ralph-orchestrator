@@ -58,7 +58,7 @@
 //!
 //! - Every test asserts return value + at least two of:
 //!   {store snapshot, private channel file, main ledger JSONL,
-//!    diagnostics JSON, executor/spawn count}.
+//!   diagnostics JSON, executor/spawn count}.
 //! - Stable reason strings asserted by `assert_eq!` on exact match,
 //!   not `contains("error")`.
 //! - No `sleep`. All waits are event-polled (`wait_for_file` /
@@ -72,11 +72,6 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 use tempfile::TempDir;
-
-/// Default bounded deadline for every event/file wait in this file.
-/// 5 s is empirically well above a single process spawn + JSONL write
-/// round-trip on CI while still failing fast enough to surface flakes.
-const DEFAULT_DEADLINE: Duration = Duration::from_secs(5);
 
 /// RAII temp-dir; cleaned up on drop.
 fn workspace() -> TempDir {
@@ -97,40 +92,6 @@ fn run_ralph(cwd: &Path, home: &Path, args: &[&str]) -> std::process::Output {
         .env_remove("RALPH_LOOP_ID")
         .env_remove("RALPH_CONFIG");
     cmd.output().expect("execute ralph")
-}
-
-/// Poll a file until it contains a line whose trimmed JSON value
-/// satisfies `predicate`. Returns the matched line. Panics on
-/// deadline (no `sleep`, no `unbounded wait`).
-fn wait_for_jsonl_line<P>(path: &Path, deadline: Duration, predicate: P) -> serde_json::Value
-where
-    P: Fn(&serde_json::Value) -> bool,
-{
-    let start = Instant::now();
-    loop {
-        if let Ok(content) = std::fs::read_to_string(path) {
-            for line in content.lines() {
-                if line.trim().is_empty() {
-                    continue;
-                }
-                let Ok(val) = serde_json::from_str::<serde_json::Value>(line) else {
-                    continue;
-                };
-                if predicate(&val) {
-                    return val;
-                }
-            }
-        }
-        if start.elapsed() >= deadline {
-            panic!(
-                "wait_for_jsonl_line deadline ({:?}) exceeded for {}; last content:\n{}",
-                deadline,
-                path.display(),
-                std::fs::read_to_string(path).unwrap_or_default()
-            );
-        }
-        std::thread::sleep(Duration::from_millis(25));
-    }
 }
 
 /// Count JSONL lines whose `topic` field matches `topic`.

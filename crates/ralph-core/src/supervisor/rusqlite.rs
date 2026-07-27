@@ -1995,7 +1995,6 @@ mod tests {
     // U5 mirror of U3 + U4 contract tests against the
     // rusqlite store. Tests use `from_connection` with an
     // in-memory DB; CLI integration lives in U12.
-    use super::super::{CoordinationReceipt, CoordinationReceiptSummary, ProjectionError, ProjectionKind, ProjectionReceipt, ProjectionReceiptSummary, WaveDeliveryState};
 
     use super::*;
     use crate::supervisor::WaveKind;

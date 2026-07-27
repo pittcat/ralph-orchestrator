@@ -1425,6 +1425,38 @@ fn emit_command_with_root_and_hats(
         .flatten()
         .filter(|s| !s.is_empty());
 
+    // Plan 2026-07-27-003 U7 (R4): when a process declares itself a
+    // wave worker via `RALPH_WAVE_WORKER=1` but the dispatcher
+    // handshake (`RALPH_WAVE_ID` / `RALPH_WAVE_INDEX` / loop id) is
+    // incomplete, the resolver MUST refuse the emit with a stable
+    // agent-executable reason. Falling through to the legacy
+    // `events.jsonl` default in this state is exactly the
+    // implementation-review primary-20260727 double-ledger root
+    // cause (orphan in main, no registry binding), so we fail-close
+    // here rather than rely on `resolve_emit_path`'s downstream
+    // match-arm guard alone — which only triggers AFTER the legacy
+    // fall-through already committed to a candidate path.
+    //
+    // This is the test-side mirror of `scenario_02_worker_unset_events_file_emits_rejected`:
+    // the worker POV has `RALPH_WAVE_WORKER=1` set but neither
+    // `RALPH_WAVE_ID` nor `RALPH_WAVE_INDEX` injected.
+    if wave_worker && (wave_id_env.is_none() || slot_index_env.is_none()) {
+        let missing = match (wave_id_env.is_none(), slot_index_env.is_none()) {
+            (true, true) => "RALPH_WAVE_ID and RALPH_WAVE_INDEX",
+            (true, false) => "RALPH_WAVE_ID",
+            (false, true) => "RALPH_WAVE_INDEX",
+            _ => unreachable!(),
+        };
+        anyhow::bail!(
+            "incomplete wave-worker binding: {missing} must be set when \
+             RALPH_WAVE_WORKER=1. The dispatcher injects all three handshake \
+             variables atomically; a partial binding means the spawn-time \
+             contract was broken and the emit cannot be routed to a registry- \
+             bound channel. Refusing rather than falling back to the legacy \
+             events.jsonl default."
+        );
+    }
+
     // U3 (2026-07-06-002 plan, R3): cwd 漂移硬约束。当 hat 在
     // isolated 模式下运行、`RALPH_CURRENT_HAT` 已设置、未注入
     // `RALPH_EVENTS_FILE`,且 `--file` 仍是默认值(用户没显式指定

@@ -2293,7 +2293,6 @@ impl SupervisorFanInOutcome {
 ///
 /// This function does NOT perform any Git merge (the integrator path
 /// owns that); it only merges the JSONL event fan-in.
-
 /// U1: context for driving a terminal supervisor fan-in to convergence.
 /// When present, the fan-in helper knows it must drive through
 /// ContinueCollect (by recording never-started slots and re-ticking)
@@ -2365,17 +2364,15 @@ pub(crate) fn run_supervisor_fan_in(
     // U1 (Green 1 / Green 3): when cancel_requested is true (AggregateDeadlineExceeded
     // path), mark the store wave as cancelled so evaluate_phase sees the flag
     // and returns Failed immediately on the first tick.
-    if terminal_ctx
-        .as_ref()
-        .is_some_and(|ctx| ctx.cancel_requested)
+    if let Some(ctx) = terminal_ctx.as_ref()
+        && ctx.cancel_requested
+        && let Err(err) = bridge.cancel_wave(&store_wave_id)
     {
-        if let Err(err) = bridge.cancel_wave(&store_wave_id) {
-            warn!(
-                wave_id = %completed.wave_id,
-                error = %err,
-                "U1: cancel_wave failed during terminal fan-in"
-            );
-        }
+        warn!(
+            wave_id = %completed.wave_id,
+            error = %err,
+            "U1: cancel_wave failed during terminal fan-in"
+        );
     }
 
     // Gather the per-slot business events, ordered by slot index and
@@ -2400,7 +2397,7 @@ pub(crate) fn run_supervisor_fan_in(
         aggregate_timeout_secs,
         elapsed_secs: terminal_ctx
             .as_ref()
-            .map(|ctx| ctx.elapsed.as_secs() as u64)
+            .map(|ctx| ctx.elapsed.as_secs())
             .unwrap_or(0),
         cancel_requested: terminal_ctx
             .as_ref()
@@ -2618,7 +2615,7 @@ pub(crate) fn run_supervisor_fan_in(
                 aggregate_timeout_secs,
                 elapsed_secs: terminal_ctx
                     .as_ref()
-                    .map(|ctx| ctx.elapsed.as_secs() as u64)
+                    .map(|ctx| ctx.elapsed.as_secs())
                     .unwrap_or(0),
                 cancel_requested: terminal_ctx
                     .as_ref()
@@ -2730,7 +2727,7 @@ pub(crate) fn run_supervisor_fan_in(
                     aggregate_timeout_secs,
                     elapsed_secs: terminal_ctx
                         .as_ref()
-                        .map(|ctx| ctx.elapsed.as_secs() as u64)
+                        .map(|ctx| ctx.elapsed.as_secs())
                         .unwrap_or(0),
                     cancel_requested: terminal_ctx
                         .as_ref()
@@ -2818,7 +2815,7 @@ pub(crate) fn run_supervisor_fan_in(
                     aggregate_timeout_secs,
                     elapsed_secs: terminal_ctx
                         .as_ref()
-                        .map(|ctx| ctx.elapsed.as_secs() as u64)
+                        .map(|ctx| ctx.elapsed.as_secs())
                         .unwrap_or(0),
                     cancel_requested: terminal_ctx
                         .as_ref()
@@ -4436,6 +4433,7 @@ fn write_wave_diagnostics_json(
 ///   falls back to the legacy shape-only allowlist.
 /// - `events_file` does not have a `.ralph/` ancestor: caller
 ///   surfaces an error and the worker is spawned without a marker.
+#[allow(dead_code)]
 pub(crate) fn append_wave_channel_to_marker(
     main_events_file: &Path,
     worker_events_file: &Path,
@@ -8031,7 +8029,7 @@ hats: {}
             "missing_dimensions": ["correctness"],
             "reason": "worker_timeout",
         });
-        append_supervisor_coord_event(&main, "review.wave.failed", &payload);
+        let _ = append_supervisor_coord_event(&main, "review.wave.failed", &payload);
         let line =
             std::io::BufReader::new(std::fs::File::open(&main).expect("events file written"))
                 .lines()
@@ -8326,7 +8324,7 @@ hats: {}
             .expect("register");
         let bridge: Arc<dyn ralph_core::supervisor::SupervisorBridge> =
             Arc::new(ralph_core::supervisor::InMemoryCoordinatorBridge::from_store(store.clone()));
-        merge_completed_review_slots_to_main(&main, &completed, &bridge, &wave_id);
+        let _ = merge_completed_review_slots_to_main(&main, &completed, &bridge, &wave_id);
         // P0-1: the helper must also commit `salvage_merged` so
         // the dispatcher's failure path can inject `*.wave.failed`.
         let snap = store.fan_in_status(&wave_id).expect("snap");
@@ -8411,7 +8409,7 @@ hats: {}
             .expect("register");
         let bridge: Arc<dyn ralph_core::supervisor::SupervisorBridge> =
             Arc::new(ralph_core::supervisor::InMemoryCoordinatorBridge::from_store(store.clone()));
-        merge_completed_review_slots_to_main(&main, &completed, &bridge, &wave_id);
+        let _ = merge_completed_review_slots_to_main(&main, &completed, &bridge, &wave_id);
         // No file is created when there is nothing to write —
         // the helper is a no-op for an empty `results` set.
         assert!(!main.exists() || std::fs::metadata(&main).unwrap().len() == 0);
@@ -8440,7 +8438,7 @@ hats: {}
             "wave_id": "W1",
             "completed_dimensions": ["goal-alignment"],
         });
-        append_supervisor_coord_event(&main, "review.wave.complete", &payload);
+        let _ = append_supervisor_coord_event(&main, "review.wave.complete", &payload);
         let line =
             std::io::BufReader::new(std::fs::File::open(&main).expect("events file written"))
                 .lines()
@@ -9343,7 +9341,7 @@ hats: {}
         // primary-20260727 incident.
         let failed = std::io::BufReader::new(std::fs::File::open(&main_events_file).expect("main"))
             .lines()
-            .filter_map(|l| l.ok())
+            .map_while(Result::ok)
             .filter_map(|l| serde_json::from_str::<serde_json::Value>(&l).ok())
             .find(|r| r["topic"] == "review.wave.failed")
             .expect("a review.wave.failed coord event must be injected");
@@ -9601,7 +9599,7 @@ hats: {}
         let count = |topic: &str| {
             std::io::BufReader::new(std::fs::File::open(&main_events_file).expect("main"))
                 .lines()
-                .filter_map(|l| l.ok())
+                .map_while(Result::ok)
                 .filter_map(|l| serde_json::from_str::<serde_json::Value>(&l).ok())
                 .filter(|r| r["topic"] == topic)
                 .count()
@@ -9727,7 +9725,7 @@ hats: {}
 
         let done = std::io::BufReader::new(std::fs::File::open(&main_events_file).expect("main"))
             .lines()
-            .filter_map(|l| l.ok())
+            .map_while(Result::ok)
             .filter_map(|l| serde_json::from_str::<serde_json::Value>(&l).ok())
             .find(|r| r["topic"] == "review.unit.done")
             .expect("the salvaged review.unit.done must be in main");
@@ -11190,6 +11188,7 @@ delivery_state: ralph_core::supervisor::WaveDeliveryState::CoordinationCommitted
         status: ralph_core::supervisor::WaveSnapshot,
         evidence: std::collections::HashMap<u32, ralph_core::supervisor::TerminalEvidence>,
         mark_salvage_calls: std::sync::Mutex<Vec<String>>,
+        #[allow(dead_code)]
         coord_event_appends: std::sync::Mutex<Vec<String>>,
     }
 

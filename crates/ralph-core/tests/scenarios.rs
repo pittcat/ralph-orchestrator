@@ -532,7 +532,6 @@ fn load_scenario(path: &str) -> ScenarioYaml {
 /// injected line (correct for production to avoid double-
 /// processing, but wrong for the BDD stub runner which needs
 /// the re-read to surface the event in `seen_topics`).
-
 fn bdd_append_supervisor_event(
     event_loop: &EventLoop,
     topic: &str,

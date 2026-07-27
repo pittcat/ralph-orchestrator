@@ -18,10 +18,12 @@ use std::time::SystemTime;
 
 use super::{
     CompensationKind, CoordinationReceiptSummary, DispatchOutcome, EmissionReservation,
-    EmissionState, IdempotencyKey, IsolationMode, ProjectionKind, ProjectionReceiptSummary,
-    RedriveResult, SlotResource, SlotStatus, SupervisorStore, SupervisorStoreError,
-    SupervisorStoreResult, WaveDeliveryState, WaveKind, WavePhase, WaveSnapshot,
+    EmissionState, IdempotencyKey, IsolationMode, ProjectionReceiptSummary, RedriveResult,
+    SlotResource, SlotStatus, SupervisorStore, SupervisorStoreError, SupervisorStoreResult,
+    WaveDeliveryState, WaveKind, WavePhase, WaveSnapshot,
 };
+#[cfg(test)]
+use super::ProjectionKind;
 
 /// Per-wave descriptor held in `InMemorySupervisorStore::waves`.
 #[derive(Debug, Clone)]

@@ -4655,7 +4655,7 @@ fn test_u3_resolve_emit_path_dispatcher_signed_carve_out() {
     let wave_id = "w-rs-1";
     let slot_idx: u32 = 0;
     let channel = workspace.join(format!(".ralph/wave-{wave_id}-{slot_idx}.jsonl"));
-    let loop_id = "loop-u3-test";
+    let _loop_id = "loop-u3-test";
 
 // 2026-07-27-003 plan U2 (KTD-1): the dispatcher signs the
     // wave channel by committing a per-wave JSON registry entry

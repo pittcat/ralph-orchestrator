@@ -128,6 +128,7 @@ pub enum ChannelRegistryError {
     /// path). Refuse to commit a registry that says "you may
     /// write X" but X is not the file the worker will actually
     /// touch.
+    #[allow(dead_code)]
     ChannelNotCanonical { path: PathBuf, canonical: PathBuf },
     /// Channel file's parent directory could not be created or
     /// the create-new file open itself failed.
@@ -270,8 +271,11 @@ pub enum ResolveOutcome {
 #[derive(Debug)]
 pub struct WaveChannelRegistryGuard {
     pub(crate) registry_path: PathBuf,
+    #[allow(dead_code)]
     pub(crate) workspace_root: PathBuf,
+    #[allow(dead_code)]
     pub(crate) loop_id: String,
+    #[allow(dead_code)]
     pub(crate) wave_id: String,
     /// Per-slot channel paths (sorted). Kept so cleanup can
     /// remove the create-new'd channel files even when no
@@ -655,18 +659,22 @@ fn read_registry(path: &Path) -> Result<RegistryFile, ChannelRegistryError> {
 /// I/O primitives exposed for the dispatcher / U3 paths. The
 /// public entry-points are below.
 impl WaveChannelRegistryGuard {
+    #[allow(dead_code)]
     pub fn registry_path(&self) -> &Path {
         &self.registry_path
     }
 
+    #[allow(dead_code)]
     pub fn loop_id(&self) -> &str {
         &self.loop_id
     }
 
+    #[allow(dead_code)]
     pub fn wave_id(&self) -> &str {
         &self.wave_id
     }
 
+    #[allow(dead_code)]
     pub fn bound_paths(&self) -> &[PathBuf] {
         &self.bound_paths
     }

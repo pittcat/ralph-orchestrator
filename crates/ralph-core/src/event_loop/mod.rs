@@ -567,7 +567,7 @@ impl SkillInjector {
             // plan_auto_inject must mirror that removal here so
             // the on-demand list does not surface a skill the
             // agent can never actually load.
-            .filter(|name| !(name == "ralph-tools-memories" && !gates.memories_enabled))
+            .filter(|name| name != "ralph-tools-memories" || gates.memories_enabled)
             .filter(|name| !gated.iter().any(|e| &e.name == name))
             .filter(|name| !registry_auto.iter().any(|e| &e.name == name))
             .map(PromptSkillEntry::on_demand)
@@ -13952,16 +13952,16 @@ impl EventLoop {
         use std::io::Write;
         let path = std::path::Path::new(&self.config.core.workspace_root)
             .join(".ralph/flow-authority.jsonl");
-        if let Some(parent) = path.parent() {
-            if let Err(err) = std::fs::create_dir_all(parent) {
-                tracing::warn!(
-                    workspace = %self.config.core.workspace_root.display(),
-                    path = %path.display(),
-                    error = %err,
-                    "failed to create flow-authority parent directory"
-                );
-                return;
-            }
+        if let Some(parent) = path.parent()
+            && let Err(err) = std::fs::create_dir_all(parent)
+        {
+            tracing::warn!(
+                workspace = %self.config.core.workspace_root.display(),
+                path = %path.display(),
+                error = %err,
+                "failed to create flow-authority parent directory"
+            );
+            return;
         }
         let mut entry = serde_json::Map::new();
         entry.insert(
