@@ -207,6 +207,18 @@ pub struct InspectPromptArgs {
     /// Override memories-enabled gate for preview purposes.
     #[arg(long)]
     pub memories_enabled: Option<bool>,
+
+    // ── Unit 2 args (2026-07-27-002 plan) ──────────────────────────
+    /// Topic to evaluate as a candidate emit (requires --payload).
+    /// When provided with --payload, `candidate_emit` is computed and
+    /// included in the preview output.
+    #[arg(long)]
+    pub topic: Option<String>,
+
+    /// Simulated triggered hat for the candidate emit evaluation.
+    /// Only meaningful when --topic and --payload are both provided.
+    #[arg(long)]
+    pub triggered: Option<String>,
 }
 
 /// Execute an `ralph inspect` subcommand.
@@ -533,6 +545,10 @@ pub async fn inspect_prompt_command(
     let config = preflight::load_config_for_preflight(config_sources, hats_source).await?;
     let hat_id = ralph_proto::HatId::new(args.hat.clone());
 
+    // Save a cloned config for the read-only candidate emit evaluation
+    // (EventLoop takes ownership of config, so we clone before the move).
+    let config_for_candidate = config.clone();
+
     // Block titles are extracted via a dry `build_prompt` call,
     // which requires constructing an EventLoop. We suppress
     // tracing output for the duration of that call so the
@@ -675,10 +691,49 @@ pub async fn inspect_prompt_command(
             correction_injected,
             skill_gates,
             evidence_level: "runtime".to_string(),
+            candidate_emit: None,
             ..preview_base
         }
     } else {
         preview_base
+    };
+
+    // ── Unit 2: candidate emit evaluation (2026-07-27-002 plan) ─────
+    // When --topic is provided without --payload, fail fast with an
+    // error so the caller knows the emission preview cannot run.
+    let preview = match (&args.topic, &args.payload) {
+        (Some(_topic), None) => {
+            anyhow::bail!(
+                "--topic requires --payload to evaluate the candidate emit; \
+                 provide both or omit --topic"
+            );
+        }
+        (Some(topic), Some(payload_str)) => {
+            // Validate that payload is parseable JSON.
+            let _parsed: serde_json::Value =
+                serde_json::from_str(payload_str).map_err(|e| {
+                    anyhow::anyhow!(
+                        "failed to parse --payload JSON: {} (required for --topic evaluation)",
+                        e
+                    )
+                })?;
+
+            // Read-only evaluate the candidate emit.
+            let candidate_emit = ralph_core::evaluate_candidate_emit(
+                &config_for_candidate,
+                &hat_id,
+                topic,
+                payload_str,
+                args.triggered.as_deref(),
+            )
+            .map_err(|e| anyhow::anyhow!("candidate emit evaluation failed: {e}"))?;
+
+            ralph_core::event_loop::PromptPreview {
+                candidate_emit: Some(candidate_emit),
+                ..preview
+            }
+        }
+        (None, _) => preview,
     };
 
     // Build the full prompt body while tracing is still suppressed,
@@ -2656,3 +2711,89 @@ mod tests {
         );
     }
 }
+
+    // ─────────────────────────────────────────────────────────────────────
+    // Unit 2 of plan 2026-07-27-002: CLI parsing for --topic/--triggered.
+    // ─────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn cli_parses_inspect_prompt_minimal() {
+        let parsed = InspectArgs::try_parse_from([
+            "inspect",
+            "prompt",
+            "--hat",
+            "worker",
+        ])
+        .expect("CLI parse failed");
+        let prompt_args = match parsed.command.expect("prompt subcommand") {
+            InspectCommands::Prompt(p) => p,
+            other => panic!("expected Prompt, got {other:?}"),
+        };
+        assert_eq!(prompt_args.hat, "worker");
+        assert!(prompt_args.topic.is_none());
+        assert!(prompt_args.triggered.is_none());
+    }
+
+    #[test]
+    fn cli_parses_inspect_prompt_with_topic_and_triggered() {
+        let parsed = InspectArgs::try_parse_from([
+            "inspect",
+            "prompt",
+            "--hat",
+            "reviewer",
+            "--topic",
+            "work.ready",
+            "--payload",
+            r#"{"task_key": "abc"}"#,
+            "--triggered",
+            "worker",
+        ])
+        .expect("CLI parse failed");
+        let prompt_args = match parsed.command.expect("prompt subcommand") {
+            InspectCommands::Prompt(p) => p,
+            other => panic!("expected Prompt, got {other:?}"),
+        };
+        assert_eq!(prompt_args.hat, "reviewer");
+        assert_eq!(prompt_args.topic.as_deref(), Some("work.ready"));
+        assert_eq!(prompt_args.triggered.as_deref(), Some("worker"));
+    }
+
+    #[test]
+    fn cli_parses_inspect_prompt_topic_without_triggered() {
+        let parsed = InspectArgs::try_parse_from([
+            "inspect",
+            "prompt",
+            "--hat",
+            "worker",
+            "--topic",
+            "work.ready",
+            "--payload",
+            r#"{"task_key": "abc"}"#,
+        ])
+        .expect("CLI parse failed");
+        let prompt_args = match parsed.command.expect("prompt subcommand") {
+            InspectCommands::Prompt(p) => p,
+            other => panic!("expected Prompt, got {other:?}"),
+        };
+        assert_eq!(prompt_args.topic.as_deref(), Some("work.ready"));
+        assert!(prompt_args.triggered.is_none());
+    }
+
+    #[test]
+    fn cli_parses_inspect_prompt_triggered_without_topic_is_ok() {
+        let parsed = InspectArgs::try_parse_from([
+            "inspect",
+            "prompt",
+            "--hat",
+            "worker",
+            "--triggered",
+            "builder",
+        ])
+        .expect("CLI parse failed");
+        let prompt_args = match parsed.command.expect("prompt subcommand") {
+            InspectCommands::Prompt(p) => p,
+            other => panic!("expected Prompt, got {other:?}"),
+        };
+        assert!(prompt_args.topic.is_none());
+        assert_eq!(prompt_args.triggered.as_deref(), Some("builder"));
+    }

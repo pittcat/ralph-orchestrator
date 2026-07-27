@@ -454,6 +454,12 @@ pub struct PromptPreview {
     /// or "unverified".
     #[serde(default = "default_evidence_level")]
     pub evidence_level: String,
+
+    /// 2026-07-27-002 plan Unit 2: candidate emit evaluation (when --topic
+    /// and --payload are provided). Contains the read-only policy decision
+    /// preview for the simulated emit.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub candidate_emit: Option<crate::event_policy::CandidateEmitPreview>,
 }
 
 /// Snapshot of the auto-inject gates that drive
@@ -1019,6 +1025,8 @@ where
         correction_injected: None,
         skill_gates: None,
         evidence_level: default_evidence_level(),
+        // 2026-07-27-002 plan Unit 2: candidate emit preview.
+        candidate_emit: None,
     })
 }
 

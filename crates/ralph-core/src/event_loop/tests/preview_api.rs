@@ -588,3 +588,51 @@ fn preview_json_roundtrip_with_all_fields() {
     let back: PromptPreview = serde_json::from_str(&json).expect("deserialize");
     assert_eq!(preview, back);
 }
+
+// ─────────────────────────────────────────────────────────────────────
+// Unit 2 of plan 2026-07-27-002: candidate_emit field.
+// ─────────────────────────────────────────────────────────────────────
+
+/// When `candidate_emit` is provided, it serializes in the JSON output.
+#[test]
+fn prompt_preview_candidate_emit_field_appears_when_provided() {
+    let config = minimal_isolated_config(true, true);
+    let mut event_loop = EventLoop::new(config);
+    event_loop.initialize("U2 candidate_emit test");
+    let base = event_loop
+        .prompt_preview(&HatId::new("builder"))
+        .expect("preview");
+
+    // Verify default: candidate_emit is None.
+    assert!(base.candidate_emit.is_none());
+
+    // Construct a preview with candidate_emit set.
+    let preview = PromptPreview {
+        candidate_emit: Some(crate::event_policy::CandidateEmitPreview {
+            policy_decision: "accept".to_string(),
+            reasons: Vec::new(),
+            projection: None,
+            next_hat_candidates: crate::event_policy::NextHatCandidates::Unverified,
+        }),
+        ..base.clone()
+    };
+
+    // JSON output must include the candidate_emit field.
+    let json = serde_json::to_value(&preview).expect("serialize");
+    assert!(
+        json.get("candidate_emit").is_some(),
+        "JSON must contain candidate_emit when set"
+    );
+    assert_eq!(
+        json["candidate_emit"]["policy_decision"],
+        serde_json::json!("accept")
+    );
+
+    // Serialize the default preview without candidate_emit and verify
+    // the key is absent (skip_serializing_if).
+    let json_default = serde_json::to_value(&base).expect("serialize");
+    assert!(
+        json_default.get("candidate_emit").is_none(),
+        "JSON must omit candidate_emit when None"
+    );
+}

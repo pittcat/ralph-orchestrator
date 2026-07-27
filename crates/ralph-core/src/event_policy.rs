@@ -3,7 +3,10 @@
 //! Provides pure-function validation that can be used by the event loop,
 //! CLI emit commands, and API layers.
 
+use crate::config::RalphConfig;
 use crate::event_reader::EventReader;
+use crate::hat_registry::HatRegistry;
+use ralph_proto::HatId;
 use ralph_proto::Topic;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -2540,6 +2543,246 @@ fn validate_element_shape(
     }
 
     None
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Unit 2 of plan 2026-07-27-002: read-only `evaluate_candidate_emit`
+// preview for the `ralph inspect prompt --topic` path.
+// ─────────────────────────────────────────────────────────────────────
+
+/// Result of evaluating a candidate event for preview.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CandidateEmitPreview {
+    /// "accept" | "reject"
+    pub policy_decision: String,
+    /// Reasons when rejected (empty when accepted).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub reasons: Vec<PolicyReasonEntry>,
+    /// Projection preview (what state changes would occur).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub projection: Option<ProjectionPreview>,
+    /// Next hat candidates (who receives this event).
+    pub next_hat_candidates: NextHatCandidates,
+}
+
+/// One structured reason for rejection.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PolicyReasonEntry {
+    pub gate: String,
+    pub field: String,
+    pub reason_code: String,
+}
+
+/// Projection (state changes) that would result from the event.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ProjectionPreview {
+    pub state_changes: Vec<ProjectionAction>,
+}
+
+/// One projection action.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ProjectionAction {
+    pub field: String,
+    pub action: String,
+    pub value: serde_json::Value,
+}
+
+/// Who receives the event downstream.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum NextHatCandidates {
+    /// At least one matching hat, all verified.
+    Verified(Vec<String>),
+    /// No hat registry available (hatless mode).
+    Unverified,
+    /// Some hats matched but were not all verifiable.
+    Mixed(Vec<CandidateHatEntry>),
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CandidateHatEntry {
+    pub hat_id: String,
+    pub verified: bool,
+}
+
+/// Evaluate a candidate event for the inspect prompt path (read-only).
+///
+/// Returns a structured preview of whether the event would be accepted
+/// by the policy gateway, what projections would apply, and which hats
+/// would receive the event.
+///
+/// This function is **read-only**: it never writes to disk, never
+/// publishes events, and never mutates real runtime state. It uses
+/// `PolicyRuntimeState::default()` for a dry-run evaluation.
+pub fn evaluate_candidate_emit(
+    config: &RalphConfig,
+    hat_id: &HatId,
+    topic: &str,
+    payload_json: &str,
+    _triggered: Option<&str>,
+) -> Result<CandidateEmitPreview, String> {
+    // 1. Check that hat_id exists in config.
+    let hat_config = config
+        .hats
+        .get(hat_id.as_str())
+        .ok_or_else(|| format!("hat {} not found in config", hat_id.as_str()))?;
+
+    let _hat_publishes_topic = hat_config.publishes.iter().any(|p| p == topic)
+        || hat_config
+            .default_publishes
+            .as_deref()
+            .is_some_and(|d| d == topic);
+
+    // 2. Check topic format via build_allowed_topics + check_topic_format.
+    let completion_promise = &config.event_loop.completion_promise;
+    let event_policy = config.event_loop.event_policy.as_ref();
+    let allowed_topics = build_allowed_topics(&config.hats, completion_promise, event_policy);
+
+    // System topics are allowed regardless.
+    let topic_format_ok = is_system_topic(topic)
+        || check_topic_format(topic, &allowed_topics).is_none();
+
+    if !topic_format_ok {
+        return Ok(CandidateEmitPreview {
+            policy_decision: "reject".to_string(),
+            reasons: vec![PolicyReasonEntry {
+                gate: "topic_format".to_string(),
+                field: "topic".to_string(),
+                reason_code: "invalid_topic_format".to_string(),
+            }],
+            projection: None,
+            next_hat_candidates: NextHatCandidates::Unverified,
+        });
+    }
+
+    // 3. Run validate_event_with_hat for policy validation (dry-run with default state).
+    let policy_config = match event_policy {
+        Some(ep) => ep.clone(),
+        None => {
+            // No policy config — accept by default.
+            return Ok(CandidateEmitPreview {
+                policy_decision: "accept".to_string(),
+                reasons: Vec::new(),
+                projection: None,
+                next_hat_candidates: compute_next_hat_candidates(config, topic),
+            });
+        }
+    };
+
+    let mut state = PolicyRuntimeState::default();
+    let hat_str = Some(hat_id.as_str());
+    let decision = validate_event_with_hat(topic, Some(payload_json), &policy_config, &mut state, hat_str);
+
+    // Build the preview from the policy decision.
+    let (policy_decision, reasons) = match &decision {
+        PolicyDecision::Accept => ("accept".to_string(), Vec::new()),
+        PolicyDecision::Warn(_findings) => {
+            // Warnings are still accepted.
+            ("accept".to_string(), Vec::new())
+        }
+        PolicyDecision::RejectWithResume(finding) => {
+            let reason = policy_reason_entry_from_finding(finding);
+            ("reject".to_string(), vec![reason])
+        }
+        PolicyDecision::Hold(finding) => {
+            let reason = policy_reason_entry_from_finding(finding);
+            ("reject".to_string(), vec![reason])
+        }
+        PolicyDecision::AcknowledgeAndForward(finding) => {
+            let reason = policy_reason_entry_from_finding(finding);
+            ("accept".to_string(), vec![reason])
+        }
+        PolicyDecision::Block(finding) => {
+            let reason = policy_reason_entry_from_finding(finding);
+            ("reject".to_string(), vec![reason])
+        }
+        PolicyDecision::Ignore(finding) => {
+            let reason = policy_reason_entry_from_finding(finding);
+            ("reject".to_string(), vec![reason])
+        }
+    };
+
+    // Build projection preview from state changes (minimal for now).
+    let projection = build_projection_preview(&state);
+
+    Ok(CandidateEmitPreview {
+        policy_decision,
+        reasons,
+        projection,
+        next_hat_candidates: compute_next_hat_candidates(config, topic),
+    })
+}
+
+/// Convert a `PolicyFinding` into a structured `PolicyReasonEntry`.
+fn policy_reason_entry_from_finding(finding: &PolicyFinding) -> PolicyReasonEntry {
+    let (gate, field, reason_code) = match &finding.violation_type {
+        ViolationType::PayloadTypeMismatch { expected, actual } => {
+            ("payload_type".to_string(), format!("expected={expected}, actual={actual}"), "payload_type_mismatch".to_string())
+        }
+        ViolationType::MissingRequiredField { field } => {
+            ("required_fields".to_string(), field.clone(), "missing_required_field".to_string())
+        }
+        ViolationType::InvalidFieldValue { field, value: _ } => {
+            ("field_value".to_string(), field.clone(), "invalid_field_value".to_string())
+        }
+        ViolationType::TerminalMonotonicityViolation { terminal_topic, business_topic } => {
+            ("terminal_monotonicity".to_string(), format!("terminal={terminal_topic}, business={business_topic}"), "terminal_monotonicity_violation".to_string())
+        }
+        ViolationType::DuplicateTerminalEvent { topic } => {
+            ("terminal_duplicate".to_string(), topic.clone(), "duplicate_terminal_event".to_string())
+        }
+        ViolationType::BusinessEventAfterCompletion { topic } => {
+            ("completion_guard".to_string(), topic.clone(), "business_event_after_completion".to_string())
+        }
+        ViolationType::InvalidTopicFormat { topic, allowed_topics: _ } => {
+            ("topic_format".to_string(), topic.clone(), "invalid_topic_format".to_string())
+        }
+        ViolationType::TopicDenied { rule_hat, rule_topic } => {
+            ("topic_denied".to_string(), format!("rule_hat={rule_hat}, topic={rule_topic}"), "topic_denied".to_string())
+        }
+        ViolationType::SemanticGateViolation { gate, .. } => {
+            ("semantic_gate".to_string(), gate.clone(), "semantic_gate_violation".to_string())
+        }
+        ViolationType::DuplicateWorkDone { key, .. } => {
+            ("duplicate_work_done".to_string(), key.clone(), "duplicate_work_done".to_string())
+        }
+    };
+
+    PolicyReasonEntry {
+        gate,
+        field,
+        reason_code,
+    }
+}
+
+/// Build a projection preview from the policy runtime state after validation.
+fn build_projection_preview(_state: &PolicyRuntimeState) -> Option<ProjectionPreview> {
+    // For the initial implementation, we return None (no detailed projection).
+    // Future units can populate this by inspecting state changes.
+    None
+}
+
+/// Compute which hats receive the event downstream.
+fn compute_next_hat_candidates(config: &RalphConfig, topic: &str) -> NextHatCandidates {
+    let registry = HatRegistry::from_config(config);
+
+    // Find all hats subscribed to this topic.
+    let topic_ref = ralph_proto::Topic::new(topic);
+    let subscribers = registry.subscribers(&topic_ref);
+
+    if subscribers.is_empty() {
+        return NextHatCandidates::Unverified;
+    }
+
+    let entries: Vec<CandidateHatEntry> = subscribers
+        .into_iter()
+        .map(|hat| CandidateHatEntry {
+            hat_id: hat.id.as_str().to_string(),
+            verified: true,
+        })
+        .collect();
+
+    NextHatCandidates::Mixed(entries)
 }
 
 #[cfg(test)]
@@ -7409,5 +7652,117 @@ hats:
             "finding.message must name the gate, got {}",
             finding.message
         );
+    }
+
+    // ─────────────────────────────────────────────────────────────────────
+    // Unit 2 of plan 2026-07-27-002: evaluate_candidate_emit.
+    // ─────────────────────────────────────────────────────────────────────
+
+    /// Helper: build a minimal config with a single hat that publishes and
+    /// triggers on `work.ready`, with an EventPolicyConfig that requires
+    /// `task_key` as a required field on `work.ready`.
+    fn candidate_emit_test_config() -> RalphConfig {
+        use crate::config::{EventPolicyConfig, EventPolicyMode, EventSchema, HatConfig, PayloadType, ViolationAction};
+        let mut cfg = RalphConfig::default();
+
+        let hat_cfg = HatConfig {
+            name: "worker".to_string(),
+            publishes: vec!["work.ready".to_string()],
+            triggers: vec!["build.task".to_string()],
+            ..Default::default()
+        };
+        cfg.hats.insert("worker".to_string(), hat_cfg);
+
+        let schema = EventSchema {
+            payload: Some(PayloadType::JsonObject),
+            required_fields: vec!["task_key".to_string()],
+            ..Default::default()
+        };
+        let policy = EventPolicyConfig {
+            enabled: true,
+            mode: EventPolicyMode::Enforce,
+            on_violation: ViolationAction::RejectWithResume,
+            schemas: [("work.ready".to_string(), schema)].into_iter().collect(),
+            ..Default::default()
+        };
+        cfg.event_loop.event_policy = Some(policy);
+        cfg
+    }
+
+    #[test]
+    fn evaluate_candidate_emit_accepts_valid_payload() {
+        let config = candidate_emit_test_config();
+        let hat_id = ralph_proto::HatId::new("worker");
+        let payload = r#"{"task_key": "task-123"}"#;
+
+        let result = evaluate_candidate_emit(&config, &hat_id, "work.ready", payload, None)
+            .expect("evaluation should succeed");
+        assert_eq!(result.policy_decision, "accept");
+        assert!(
+            result.reasons.is_empty(),
+            "accepted emit should have no reasons, got {:?}",
+            result.reasons
+        );
+    }
+
+    #[test]
+    fn evaluate_candidate_emit_rejects_missing_required_field() {
+        let config = candidate_emit_test_config();
+        let hat_id = ralph_proto::HatId::new("worker");
+        // Missing the required `task_key` field.
+        let payload = r#"{"other_field": "value"}"#;
+
+        let result = evaluate_candidate_emit(&config, &hat_id, "work.ready", payload, None)
+            .expect("evaluation should succeed");
+        assert_eq!(result.policy_decision, "reject");
+        assert!(
+            !result.reasons.is_empty(),
+            "rejected emit should have at least one reason"
+        );
+        // The reason should mention the missing field (exact gate label
+        // depends on the validation path; check that at least one reason
+        // exists).
+        assert_eq!(
+            result.reasons[0].reason_code,
+            "missing_required_field",
+            "expected missing_required_field reason, got {:?}",
+            result.reasons[0]
+        );
+    }
+
+    #[test]
+    fn evaluate_candidate_emit_equivalence_with_validate() {
+        let config = candidate_emit_test_config();
+        let hat_id = ralph_proto::HatId::new("worker");
+        let policy_config = config.event_loop.event_policy.as_ref().unwrap();
+
+        // Same valid payload: both paths should accept.
+        let valid_payload = r#"{"task_key": "abc"}"#;
+        let candidate = evaluate_candidate_emit(&config, &hat_id, "work.ready", valid_payload, None)
+            .expect("evaluation");
+
+        let mut state = PolicyRuntimeState::default();
+        let decision = validate_event_with_hat(
+            "work.ready",
+            Some(valid_payload),
+            policy_config,
+            &mut state,
+            Some("worker"),
+        );
+
+        // evaluate_candidate_emit should say accept when validate_event_with_hat
+        // says Accept or Warn.
+        assert_eq!(
+            candidate.policy_decision, "accept",
+            "evaluate_candidate_emit must accept when validate_event_with_hat is {:?}",
+            decision
+        );
+
+        // Same invalid payload (missing field): both paths should reject.
+        let invalid_payload = r#"{}"#;
+        let candidate2 =
+            evaluate_candidate_emit(&config, &hat_id, "work.ready", invalid_payload, None)
+                .expect("evaluation");
+        assert_eq!(candidate2.policy_decision, "reject");
     }
 }

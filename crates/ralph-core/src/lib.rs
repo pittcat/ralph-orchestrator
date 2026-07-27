@@ -184,9 +184,10 @@ pub use event_origin::{
 };
 pub use event_parser::EventParser;
 pub use event_policy::{
-    DefaultHandoffConfig, EventLoopHandoffConfig, HandoffEnvelopeConfigAccess, PolicyDecision,
-    PolicyFinding, PolicyRejection, PolicyRuntimeState, ViolationType, check_handoff_envelope,
-    check_topic_deny_rules, validate_event, validate_event_with_hat, validate_event_with_options,
+    CandidateEmitPreview, DefaultHandoffConfig, EventLoopHandoffConfig,
+    HandoffEnvelopeConfigAccess, NextHatCandidates, PolicyDecision, PolicyFinding, PolicyRejection,
+    PolicyRuntimeState, ViolationType, check_handoff_envelope, check_topic_deny_rules,
+    evaluate_candidate_emit, validate_event, validate_event_with_hat, validate_event_with_options,
 };
 pub use event_projection::apply_projection;
 pub use event_reader::{Event, EventReader, MalformedLine, ParseResult};
