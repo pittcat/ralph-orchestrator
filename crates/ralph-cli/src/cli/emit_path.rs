@@ -92,6 +92,15 @@ pub(crate) fn resolve_hat_channel_file(workspace_root: &Path) -> Option<(PathBuf
 /// and blocks any isolated hat from forging a path to a sibling slot's
 /// channel (adversarial-01 / goal-alignment-01). All other non-allowlisted
 /// explicit targets are still rejected.
+///
+/// U3 / S4 (plan 2026-07-26-003, R3): when `wave_id` AND `slot_index` are
+/// both `Some` (the `RALPH_WAVE_WORKER=1` handshake from `ralph emit`),
+/// the resolved target **must** be that dispatcher-signed per-slot
+/// channel. Falling through to `current-events` / main after
+/// `unset RALPH_EVENTS_FILE` is the primary-20260726 /
+/// primary-20260727 double-ledger root cause (`empty_worker_result`
+/// while `review.unit.done` already lives on main) and is rejected
+/// with an observable error — never silent.
 pub(crate) fn resolve_emit_path(
     workspace_root: &Path,
     cli_file: &Path,
@@ -555,6 +564,41 @@ pub(crate) fn resolve_emit_path(
                     normalized.display(),
                     orphan_reason
                 );
+            }
+
+            // Plan 2026-07-26-003 U3 / S4 (R3): wave-worker handshake
+            // present → destination MUST be the signed per-slot channel.
+            // Marker fallthrough to main after unset RALPH_EVENTS_FILE is
+            // the empty_worker_result / double-ledger failure mode.
+            match (wave_id, slot_index) {
+                (Some(wid), Some(idx)) => {
+                    if !is_wave_channel_path(
+                        &normalized,
+                        workspace_root,
+                        &workspace_canon,
+                        Some(wid),
+                        Some(idx),
+                    ) {
+                        bail!(
+                            "wave_worker_main_fallthrough: refusing to emit to {} while \
+                             bound to wave {} slot {}. Keep RALPH_EVENTS_FILE pointing at \
+                             the dispatcher-signed .ralph/wave-<id>-<idx>.jsonl channel; \
+                             do not unset it or rewrite it to current-events / main. \
+                             Writing to main leaves the per-slot channel empty and the \
+                             runtime records empty_worker_result.",
+                            normalized.display(),
+                            wid,
+                            idx
+                        );
+                    }
+                }
+                (None, None) => {}
+                _ => {
+                    bail!(
+                        "incomplete wave-worker binding: both RALPH_WAVE_ID and \
+                         RALPH_WAVE_INDEX are required when emitting from a wave worker"
+                    );
+                }
             }
 
             return Ok(normalized);

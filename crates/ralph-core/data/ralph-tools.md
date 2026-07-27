@@ -127,7 +127,7 @@ metadata:
 
 | 错误场景 | 可能原因 | 修复方式 |
 |----------|---------|---------|
-| `events file not in allowlist` | `RALPH_EVENTS_FILE`/`--file` 指向了非 allowlist 路径 | 查看错误信息中列出的 allowlist 条目；优先移除显式参数让 `ralph emit` 走 marker 解析 |
+| `events file not in allowlist` | `RALPH_EVENTS_FILE`/`--file` 指向了非 allowlist 路径 | 查看错误信息中列出的 allowlist 条目。**非 wave worker**：可去掉显式 `--file` 让 `ralph emit` 走 marker。**wave worker（`RALPH_WAVE_WORKER=1`）**：必须保留 runtime 注入的 `RALPH_EVENTS_FILE`（指向 `wave-<id>-<idx>.jsonl`），禁止 `unset` 改走 main / marker（否则会 `wave_worker_main_fallthrough` / `empty_worker_result`） |
 | `topic is required` | 缺少必需的位置参数 | 补上 topic 参数 |
 | `policy check failed` | 事件不符合策略 | 读 stderr / `--output json` 取 `validation_errors[].field`；修正后用 `ralph emit <topic> --policy-check -j '...'` 预检通过再正式发出 |
 | `payload_consistency:*`（gate 前缀） | payload 字段之间不自洽（runtime gate） | 与 `policy check failed` 同源：`validation_errors[].field` / `expected` / `message` / `gate` 是修复入口；详见 `ralph-tools-emit` 「Payload 字段自洽检查」段 |

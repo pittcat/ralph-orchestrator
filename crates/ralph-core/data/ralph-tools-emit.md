@@ -269,7 +269,8 @@ ralph emit <TOPIC> -j '...' --output json                  # 落盘：看 ok=tru
 
 | 错误 | 原因 | 修复 |
 |------|------|------|
-| `events file not in allowlist` | `RALPH_EVENTS_FILE` / `--file` 命中非 allowlist 路径 | 查看错误信息中列出的 allowlist 条目；优先移除显式参数让 ralph emit 走 marker 解析 |
+| `events file not in allowlist` | `RALPH_EVENTS_FILE` / `--file` 命中非 allowlist 路径 | 查看错误信息中列出的 allowlist 条目。**非 wave worker**：可去掉显式 `--file` 让 ralph emit 走 marker。**wave worker（`RALPH_WAVE_WORKER=1`）**：必须保留 runtime 注入的 `RALPH_EVENTS_FILE`，禁止 `unset` 改走 main（会触发 `wave_worker_main_fallthrough`） |
+| `wave_worker_main_fallthrough` | wave worker 在仍绑定 `RALPH_WAVE_ID`/`INDEX` 时把落点解析到了 main / `current-events` | 恢复 `RALPH_EVENTS_FILE` 为 dispatcher 注入的 `.ralph/wave-<id>-<idx>.jsonl`；不要 `unset` 或改写到 main |
 | `topic is required` | 缺少位置参数 | 补上 topic |
 | `policy check failed` | payload 不符合策略 | 读 stderr / 用 `--output json` 取 `validation_errors[].field` 一次拿全部缺失字段；修正后用 `ralph emit <topic> --policy-check -j '...'` 预检通过再发。**不要**首选 `--unsafe-no-policy-check`（当配置未显式允许时该参数会被拒） |
 | `triggered_not_in_topology` | `--triggered <hat>` 不在当前 preset `hats[]` 里 | 用 `ralph hats list` 或 preset YAML 查合法 hat id；改 `--triggered` 为拓扑内 hat，或省略 `--triggered`（缺省允许）。ralph-control / orchestrator diagnostic topic 跳过此检查 |

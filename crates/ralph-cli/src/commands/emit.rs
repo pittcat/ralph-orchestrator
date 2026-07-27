@@ -4074,6 +4074,71 @@ hats:
         );
     }
 
+    /// U3 / S4 (plan 2026-07-26-003, R3): when the wave-worker
+    /// handshake (`wave_id` + `slot_index`) is present but
+    /// `RALPH_EVENTS_FILE` is unset, marker fallthrough would
+    /// previously resolve to `current-events` (main) and silently
+    /// append there. Fan-in then saw an empty per-slot channel →
+    /// `empty_worker_result` while main already held `unit.done`
+    /// (primary-20260727-051801). The gate must reject that
+    /// fallthrough with an observable `wave_worker_main_fallthrough`
+    /// error — never Ok(main).
+    #[test]
+    fn test_emit_wave_worker_unset_events_file_rejects_main_fallthrough() {
+        let tmp = TempDir::new().unwrap();
+        let workspace = make_workspace(&tmp);
+        std::fs::write(
+            workspace.join(".ralph/current-events"),
+            ".ralph/events-main.jsonl",
+        )
+        .unwrap();
+        // Dispatcher signed a real channel, but the worker dropped
+        // RALPH_EVENTS_FILE (skill historically suggested "remove
+        // explicit params and let marker resolve").
+        let signed = workspace.join(".ralph/wave-w-rs-1-2.jsonl");
+        std::fs::File::create(&signed).unwrap();
+        std::fs::write(
+            workspace.join(".ralph/current-wave-channels"),
+            format!("{}\n", signed.display()),
+        )
+        .unwrap();
+
+        let result = resolve_emit_path(
+            &workspace,
+            &workspace.join(".ralph/events.jsonl"), // default --file
+            None,                                   // unset RALPH_EVENTS_FILE
+            Some("review-worker"),
+            true,
+            Some("w-rs-1"),
+            Some(2),
+        );
+        assert!(
+            result.is_err(),
+            "wave worker must not silently fall through to main; got Ok({result:?})"
+        );
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("wave_worker_main_fallthrough")
+                || msg.contains("RALPH_EVENTS_FILE")
+                || msg.contains("empty_worker_result"),
+            "error must name the fallthrough failure mode; got: {msg}"
+        );
+        // Positive control: keeping the signed channel still works.
+        let ok = resolve_emit_path(
+            &workspace,
+            &workspace.join(".ralph/events.jsonl"),
+            Some(&signed.display().to_string()),
+            Some("review-worker"),
+            true,
+            Some("w-rs-1"),
+            Some(2),
+        );
+        assert!(
+            ok.is_ok(),
+            "signed per-slot channel must still be accepted; got {ok:?}"
+        );
+    }
+
     #[test]
     fn test_emit_auto_detects_json_payload_without_json_flag() {
         // Bug #4 regression: work.done and other structured events must be
