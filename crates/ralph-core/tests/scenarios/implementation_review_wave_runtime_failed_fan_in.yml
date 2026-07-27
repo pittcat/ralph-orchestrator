@@ -1,0 +1,187 @@
+# 2026-07-27-003 plan U7: production-style failure path through the
+# real Supervisor fan-in seam. Six-slot review wave where the
+# fan-in force-terminals with `cancel` + elapsed>aggregate_timeout
+# AFTER slot 0 only has arrived — the `SupervisorCoordinator.tick`
+# must inject `review.wave.failed` from authoritative terminal
+# evidence (Store Only — NO main-ledger backscan), with the
+# `reason: wave_aggregate_timeout` classification that the U7
+# plan calls for in §KTD-5 "stable failure-reason vocabulary".
+#
+# Differences from `implementation_review_wave_failed_runtime_fan_in.yml`
+# (U2 Green 2b, two-of-six partial):
+# - only one slot completes (smallest meaningful salvage baseline);
+# - the synthesized fail payload must include `wave_id` +
+#   `missing_dimensions` (REQUIRED per `event_policy.schemas.review.wave.failed`)
+#   + stable `reason: wave_aggregate_timeout` (NOT a free-form string);
+# - absent_events locks the route:
+#     * review.synthesized (no synth on failed path);
+#     * fix.plan.ready (no fix on failed path);
+#     * review.wave.complete (NEVER coexists with failed);
+#     * review.blocked (finalizer routes the failed wave, not the synth).
+#   These are the §R7 / §R8 "no partial success" + "minimal failed payload"
+#   negative invariants the plan §Acceptance pins.
+#
+# Notes:
+# - `supervisor_fan_in.force_terminal: timeout` +
+#   `min_slots_before_force: 1` matches U2's mechanism but is reused
+#   here purely as a means to drive the production seam; U7 does NOT
+#   change the BDD harness, only asserts the resulting ledger.
+
+name: implementation_review_wave_runtime_failed_fan_in
+description: 1-of-6 partial review wave → real Supervisor fan-in → review.wave.failed → finalizer blocked (U7 production seam proof)
+
+supervisor_fan_in:
+  expected_slots: 6
+  force_terminal: timeout
+  min_slots_before_force: 1
+
+config:
+  prompt_file: PROMPT.md
+  topic_format_whitelist:
+    - LOOP_COMPLETE
+  max_iterations: 20
+  hats:
+    scope-preparer:
+      subscribes_to:
+        - review.start
+      publishes:
+        - scope.ready
+        - scope.blocked
+    review-dispatcher:
+      subscribes_to:
+        - scope.ready
+      publishes:
+        - review.unit.ready
+    review-worker:
+      subscribes_to:
+        - review.unit.ready
+      publishes:
+        - review.unit.done
+      concurrency: 6
+    review-synthesizer:
+      subscribes_to:
+        - review.wave.complete
+      publishes:
+        - review.synthesized
+        - review.blocked
+    fix-planner:
+      subscribes_to:
+        - review.synthesized
+      publishes:
+        - fix.plan.ready
+    finalizer:
+      subscribes_to:
+        - fix.plan.ready
+        - scope.blocked
+        - review.blocked
+        - review.wave.failed
+      publishes:
+        - LOOP_COMPLETE
+  event_loop:
+    execution_mode: isolated
+    starting_event: "review.start"
+    completion_promise: "LOOP_COMPLETE"
+    required_events: []
+    supervisor:
+      enabled: true
+      max_concurrent_workers: 6
+      aggregate_timeout_secs: 60
+    event_policy:
+      enabled: true
+      mode: enforce
+      on_violation: reject_with_resume
+      schemas:
+        scope.ready:
+          required_fields:
+            - plan_name
+            - plan_path
+            - scope_digest
+            - patch_path
+            - patch_digest
+            - scope_manifest_path
+            - review_head_sha
+          payload: json_object
+        review.unit.ready:
+          required_fields:
+            - plan_name
+            - scope_digest
+            - dimension
+            - slot_index
+          payload: json_object
+        review.unit.done:
+          required_fields:
+            - plan_name
+            - scope_digest
+            - dimension
+            - findings_count
+            - findings_file
+          payload: json_object
+        review.wave.complete:
+          required_fields:
+            - wave_id
+            - completed_dimensions
+          payload: json_object
+        review.wave.failed:
+          required_fields:
+            - wave_id
+            - missing_dimensions
+            - reason
+          payload: json_object
+        LOOP_COMPLETE:
+          required_fields:
+            - reason
+          payload: json_object
+
+mock_responses:
+  # 1: scope-preparer publishes scope.ready.
+  - text: |
+      <event topic="scope.ready">
+      {"plan_name":"demo-plan","plan_path":"docs/plans/demo-plan.md","scope_digest":"abcd1234ef567890","patch_path":".ralph/review/demo-plan/review.diff.patch","patch_digest":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef","scope_manifest_path":".ralph/review/demo-plan/scope-manifest.json","review_head_sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","first_implementation_commit_sha":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","resolved_baseline_sha":"cccccccccccccccccccccccccccccccccccccccc","dirty_verdict":"clean"}
+      </event>
+    hat: scope-preparer
+  # 2: review-dispatcher publishes review.unit.ready (wave is dispatched).
+  - text: |
+      <event topic="review.unit.ready">
+      {"plan_name":"demo-plan","plan_path":"docs/plans/demo-plan.md","scope_digest":"abcd1234ef567890","patch_path":".ralph/review/demo-plan/review.diff.patch","patch_digest":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef","scope_manifest_path":".ralph/review/demo-plan/scope-manifest.json","review_head_sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","first_implementation_commit_sha":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","resolved_baseline_sha":"cccccccccccccccccccccccccccccccccccccccc","slot_index":0,"dimension":"goal-alignment","idempotency_payload_version":1}
+      </event>
+    hat: review-dispatcher
+  # 3: only ONE review-worker slot completes (slot 0 / goal-alignment).
+  # Slots 1..5 never emit review.unit.done → BDD harness force-terminals
+  # with cancel + elapsed>aggregate_timeout → Coordinator tick injects
+  # review.wave.failed{reason:wave_aggregate_timeout} from authoritative
+  # supervisor store (NO main-backscan salvage of orphan done events).
+  - text: |
+      <event topic="review.unit.done">
+      {"plan_name":"demo-plan","plan_path":"docs/plans/demo-plan.md","scope_digest":"abcd1234ef567890","patch_digest":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef","review_head_sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","wave_id":"review-wave-1","slot_index":0,"dimension":"goal-alignment","findings_count":0,"findings_file":".ralph/review/demo-plan/dimensions/goal-alignment.md","handoff_precheck_failed":false}
+      </event>
+    hat: review-worker
+  # 4: finalizer activated by runtime-injected review.wave.failed →
+  # LOOP_COMPLETE{result:blocked}.
+  - text: |
+      <event topic="LOOP_COMPLETE">
+      {"reason":"implementation-review wave quality gate blocked","result":"blocked"}
+      </event>
+    hat: finalizer
+
+expected:
+  iterations: 4
+  events:
+    - topic: scope.ready
+    - topic: review.unit.ready
+    - topic: review.unit.done
+    - topic: review.wave.failed
+    - topic: LOOP_COMPLETE
+  absent_events:
+    - topic: scope.blocked
+    - topic: review.wave.complete
+    - topic: review.synthesized
+    - topic: review.blocked
+    - topic: fix.plan.ready
+  completion: true
+  event_topic_counts:
+    - topic: review.unit.done
+      count: 1
+    - topic: review.wave.failed
+      count: 1
+    - topic: review.wave.complete
+      count: 0
