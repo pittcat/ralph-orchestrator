@@ -96,6 +96,12 @@ pub enum WaveDispatchOutcome {
         /// Number of wave events (expected workers).
         expected_count: u32,
     },
+    /// Atomic channel-registry preparation failed before any executor call.
+    PreparationFailed {
+        reason: &'static str,
+        wave_id: String,
+        source: super::channel_registry::ChannelRegistryError,
+    },
 }
 
 /// U4-C3: outcome of `handle_wave_events` returned to the runner.
@@ -1014,6 +1020,19 @@ pub async fn handle_wave_events(
                 result.global_deadline_exceeded = true;
                 return result;
             }
+            WaveDispatchOutcome::PreparationFailed {
+                reason,
+                wave_id,
+                source,
+            } => {
+                warn!(%wave_id, reason, error = %source, "Wave channel preparation failed before spawn");
+                if let Some(state) = out.tui
+                    && let Ok(mut s) = state.lock()
+                {
+                    s.wave_active_iteration_idx.take();
+                    s.wave_active.take();
+                }
+            }
             WaveDispatchOutcome::SpawnFailed {
                 spawned_count,
                 expected_count,
@@ -1074,6 +1093,31 @@ pub async fn handle_wave_events(
         event_loop.reset_stale_topic_counter();
     }
     result
+}
+
+/// Atomically authorize every slot channel before any worker executor can run.
+pub(crate) fn prepare_wave_worker_channels(
+    main_events_file: &Path,
+    loop_id: &str,
+    wave_id: &str,
+    slots: impl IntoIterator<Item = (u32, PathBuf)>,
+) -> std::result::Result<
+    super::channel_registry::WaveChannelRegistryGuard,
+    super::channel_registry::ChannelRegistryError,
+> {
+    let workspace_root = workspace_root_from_events(main_events_file);
+    let bindings = slots
+        .into_iter()
+        .map(|(slot_index, channel_path)| {
+            super::channel_registry::BindingInput::new(slot_index, channel_path)
+        })
+        .collect::<Vec<_>>();
+    super::channel_registry::WaveChannelRegistry::prepare(
+        &workspace_root,
+        loop_id,
+        wave_id,
+        &bindings,
+    )
 }
 
 /// Execute a detected wave by spawning parallel backend instances.
@@ -1148,6 +1192,13 @@ pub async fn execute_wave(
             wave.wave_id,
             spawned_count,
             expected_count
+        )),
+        WaveDispatchOutcome::PreparationFailed {
+            reason,
+            wave_id,
+            source,
+        } => Err(anyhow::anyhow!(
+            "Wave {wave_id} preparation failed ({reason}): {source}"
         )),
     }
 }
@@ -1281,28 +1332,9 @@ pub async fn execute_wave_structured(
         // become `None` so legacy / malformed waves still dispatch.
         let assigned_dimension = parse_assigned_dimension(event.payload.as_deref());
 
-        // Create per-worker events file
+        // Create per-worker events file. Channel authorization is committed
+        // once for the complete request set after this loop.
         let worker_events_file = wave_dir.join(format!("wave-{}-{}.jsonl", wave_id, index_u32));
-
-        // 2026-07-26-002 plan U6 (R6 / KTD7): the dispatcher is the
-        // sole authority for which per-slot channels the wave
-        // workers may write to. Append the absolute path to
-        // `<workspace>/.ralph/current-wave-channels` BEFORE spawning
-        // so the worker's `ralph emit` finds the marker. Best-effort:
-        // marker write failure is a warn-and-continue, NOT a
-        // spawn blocker, because the worker process can still
-        // surface its own diagnostic. The marker is rewritten by
-        // every dispatcher invocation (one line per slot, exact
-        // match — no prefix wildcards).
-        if let Err(err) = append_wave_channel_to_marker(main_events_file, &worker_events_file) {
-            warn!(
-                wave_id = %wave.wave_id,
-                slot_index = index_u32,
-                error = %err,
-                "U6: failed to append wave channel to .ralph/current-wave-channels; \
-                 worker emit will fall back to shape-only allowlist check"
-            );
-        }
 
         // Build worker prompt
         let ctx = WaveWorkerContext {
@@ -1438,7 +1470,26 @@ pub async fn execute_wave_structured(
         }
     }
 
-    dispatch_wave_inner(
+    let mut registry_guard = match prepare_wave_worker_channels(
+        main_events_file,
+        loop_id,
+        &wave.wave_id,
+        worker_requests
+            .iter()
+            .map(|request| (request.index, request.worker_events_path.clone())),
+    ) {
+        Ok(guard) => guard,
+        Err(source) => {
+            return WaveDispatchOutcome::PreparationFailed {
+                reason:
+                    ralph_core::supervisor::worker_outcome::REASON_WAVE_CHANNEL_REGISTRATION_FAILED,
+                wave_id: wave.wave_id.clone(),
+                source,
+            };
+        }
+    };
+
+    let outcome = dispatch_wave_inner(
         tracker,
         worker_requests,
         DispatchContext::build(
@@ -1457,7 +1508,9 @@ pub async fn execute_wave_structured(
             tui_state,
         },
     )
-    .await
+    .await;
+    let _ = registry_guard.cleanup();
+    outcome
 }
 
 /// 2026-07-03-001 supervisor real-wiring: dispatch a wave
@@ -1891,6 +1944,32 @@ pub(crate) async fn execute_wave_via_supervisor_with_executor(
         });
     }
 
+    let _registry_guard = match prepare_wave_worker_channels(
+        main_events_file,
+        loop_id,
+        &wave.wave_id,
+        wave.events.iter().enumerate().map(|(index, _)| {
+            (
+                index as u32,
+                wave_dir.join(format!("wave-{}-{}.jsonl", wave.wave_id, index)),
+            )
+        }),
+    ) {
+        Ok(guard) => guard,
+        Err(source) => {
+            let reason =
+                ralph_core::supervisor::worker_outcome::REASON_WAVE_CHANNEL_REGISTRATION_FAILED;
+            for index in 0..wave.total {
+                let _ = bridge.record_slot_failure(&store_wave_id, index, reason);
+            }
+            return WaveDispatchOutcome::PreparationFailed {
+                reason,
+                wave_id: wave.wave_id.clone(),
+                source,
+            };
+        }
+    };
+
     // Approval rounds: each round lets up to `effective_cap`
     // pending slots dispatch in parallel; permits released by
     // earlier rounds (via inner's per-worker SlotGuard) make the
@@ -2057,6 +2136,10 @@ pub(crate) async fn execute_wave_via_supervisor_with_executor(
                     );
                 }
                 terminal_outcome = Some(WaveDispatchOutcome::GlobalDeadlineExceeded);
+                break;
+            }
+            preparation_failed @ WaveDispatchOutcome::PreparationFailed { .. } => {
+                terminal_outcome = Some(preparation_failed);
                 break;
             }
             spawn_failed @ WaveDispatchOutcome::SpawnFailed { .. } => {
@@ -2365,13 +2448,11 @@ pub(crate) fn run_supervisor_fan_in(
         ) {
         use ralph_core::supervisor::SlotStatus;
         let settle_snapshot = bridge.fan_in_status(&store_wave_id).ok();
-        let has_blocking = settle_snapshot
-            .as_ref()
-            .is_some_and(|snap| {
-                snap.slots
-                    .iter()
-                    .any(|(_, status)| matches!(status, SlotStatus::Failed | SlotStatus::Cancelled))
-            });
+        let has_blocking = settle_snapshot.as_ref().is_some_and(|snap| {
+            snap.slots
+                .iter()
+                .any(|(_, status)| matches!(status, SlotStatus::Failed | SlotStatus::Cancelled))
+        });
         if has_blocking {
             // (a) Salvage completed-only business events into the
             // main ledger and commit the salvage mark (also covers
@@ -3030,10 +3111,7 @@ pub(crate) fn build_wave_failed_payload(
                     Some(r) => (serde_json::json!(r), map_failure_class(r)),
                     None => (serde_json::Value::Null, map_failure_class("")),
                 };
-                if reason
-                    .as_deref()
-                    .is_some_and(is_retryable_slot_reason)
-                {
+                if reason.as_deref().is_some_and(is_retryable_slot_reason) {
                     redrive_slots.push(*idx);
                 }
                 slot_failures.push(serde_json::json!({
@@ -5934,6 +6012,9 @@ hats: {}
             }
             WaveDispatchOutcome::GlobalDeadlineExceeded => {
                 // Also acceptable — deadline could fire first.
+            }
+            WaveDispatchOutcome::PreparationFailed { .. } => {
+                panic!("inner dispatcher does not perform channel preparation")
             }
         }
     }
@@ -9710,7 +9791,8 @@ hats: {}
                 n: u32,
                 slot_retry_budget: u32,
             ) -> Result<String, BridgeError> {
-                self.inner.register_wave_if_absent(k, id, n, slot_retry_budget)
+                self.inner
+                    .register_wave_if_absent(k, id, n, slot_retry_budget)
             }
             fn fan_in_status(
                 &self,
@@ -9975,7 +10057,10 @@ hats: {}
             "current behavior: marker self-creates and accepts the append; \
              RED baseline for U2 replacement. Got error: {result:?}"
         );
-        let marker = workspace.path().join(".ralph").join("current-wave-channels");
+        let marker = workspace
+            .path()
+            .join(".ralph")
+            .join("current-wave-channels");
         let contents = std::fs::read_to_string(&marker).expect("marker must be readable");
         assert!(
             contents.contains("wave-w-rs-1-0.jsonl"),
@@ -10012,10 +10097,7 @@ hats: {}
         std::fs::set_permissions(&locked_parent, perms).expect("chmod 0o000");
 
         let main_events_file = workspace.path().join(".ralph").join("events.jsonl");
-        let worker_events_file = workspace
-            .path()
-            .join(".ralph")
-            .join("wave-w-rs-1-0.jsonl");
+        let worker_events_file = workspace.path().join(".ralph").join("wave-w-rs-1-0.jsonl");
         let result = append_wave_channel_to_marker(&main_events_file, &worker_events_file);
 
         // Restore perms so the tempdir teardown succeeds.
@@ -10139,7 +10221,8 @@ hats: {}
             ..ralph_core::CompletedWave::default()
         };
 
-        let hints = build_review_done_hints(&bridge_arc, store_wave_id, &completed, &main_events_file);
+        let hints =
+            build_review_done_hints(&bridge_arc, store_wave_id, &completed, &main_events_file);
 
         // CURRENT (RED) behavior: main_backscan contains all 5
         // orphan dimensions. U4 reconciliation must drop these
@@ -10321,12 +10404,14 @@ hats: {}
         for i in 0u32..3 {
             results.push(ralph_core::WaveResult {
                 index: i,
-                events: vec![ralph_proto::Event::new(
-                    "review.unit.done",
-                    serde_json::json!({"dimension": "correctness"}).to_string(),
-                )
-                .with_source("review-worker")
-                .with_wave(store_wave_id.to_string(), i, 3)],
+                events: vec![
+                    ralph_proto::Event::new(
+                        "review.unit.done",
+                        serde_json::json!({"dimension": "correctness"}).to_string(),
+                    )
+                    .with_source("review-worker")
+                    .with_wave(store_wave_id.to_string(), i, 3),
+                ],
             });
         }
         let completed = ralph_core::CompletedWave {
@@ -10407,11 +10492,8 @@ hats: {}
         // success window plan U5 must close. The call MUST
         // NOT panic, but with the current `()` return there
         // is no other observable signal of failure.
-        let _: () = append_supervisor_coord_event(
-            &main_events_file,
-            "review.wave.failed",
-            &payload,
-        );
+        let _: () =
+            append_supervisor_coord_event(&main_events_file, "review.wave.failed", &payload);
 
         // Restore perms so the tempdir teardown succeeds.
         let mut restore = std::fs::metadata(&locked_parent).unwrap().permissions();

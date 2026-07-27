@@ -18,6 +18,8 @@ use anyhow::{Result, bail};
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 
+use crate::loop_runner::wave::{ChannelRegistryError, ResolveOutcome, WaveChannelRegistry};
+
 pub(crate) fn resolve_marker_target(workspace_root: &Path, marker_value: &str) -> PathBuf {
     let path = PathBuf::from(marker_value.trim());
     if path.is_absolute() {
@@ -109,6 +111,7 @@ pub(crate) fn resolve_emit_path(
     isolated_mode: bool,
     wave_id: Option<&str>,
     slot_index: Option<u32>,
+    loop_id: Option<&str>,
 ) -> Result<PathBuf> {
     fn normalize_path(p: &Path) -> PathBuf {
         let mut out = PathBuf::new();
@@ -317,16 +320,17 @@ pub(crate) fn resolve_emit_path(
     let candidate_marker = ralph_dir.join("current-candidate-events");
     let current_marker = ralph_dir.join("current-events");
     let current_hat_marker = ralph_dir.join("current-hat-events");
-    // 2026-07-26-002 plan U6 (R6 / KTD2 / KTD7): dispatcher-signed
-    // wave-channel allowlist. The dispatcher appends one absolute
-    // path per worker to `.ralph/current-wave-channels` BEFORE the
-    // worker process starts (see `write_wave_channels_marker`).
-    // env-only `RALPH_EVENTS_FILE` self-claim is no longer enough
-    // for `wave-<id>-<idx>.jsonl` targets: the candidate path MUST
-    // appear in this marker exactly. Markers from a previous wave
-    // remain on disk until best-effort cleanup at wave end (or
-    // crash recovery on next dispatcher startup).
-    let wave_channels_marker = ralph_dir.join("current-wave-channels");
+    // 2026-07-27-003 plan U2 (KTD-1, R4): the dispatcher signs
+    // per-slot wave channels via the per-wave JSON registry at
+    // `.ralph/wave-channels/<encoded-loop-id>/<encoded-wave-id>.json`
+    // instead of the legacy `.ralph/current-wave-channels`
+    // append-only marker. The previous marker accepted env-only
+    // self-claim from any isolated hat, which was the
+    // implementation-review primary-20260727 incident root
+    // cause. The new resolver calls
+    // `WaveChannelRegistry::resolve` and refuses any channel
+    // path whose (loop_id, wave_id, slot_index, canonical_path)
+    // tuple is not in the persisted registry.
     let default_path = ralph_dir.join("events.jsonl");
 
     // Build the allowlist of legitimate targets.
@@ -352,19 +356,14 @@ pub(crate) fn resolve_emit_path(
             allowed.push(resolve_marker_target(workspace_root, trimmed));
         }
     }
-    // 2026-07-26-002 plan U6: dispatcher-signed wave channels. One
-    // absolute path per line. Each line is exact-matched (no prefix
-    // wildcard) so concurrent waves cannot grant write access to
-    // each other's slots.
-    if let Ok(value) = fs::read_to_string(&wave_channels_marker) {
-        for line in value.lines() {
-            let trimmed = line.trim();
-            if trimmed.is_empty() {
-                continue;
-            }
-            allowed.push(resolve_marker_target(workspace_root, trimmed));
-        }
-    }
+    // 2026-07-27-003 plan U2 (R4): the legacy
+    // `.ralph/current-wave-channels` marker is gone. When a
+    // wave worker injects a channel-shaped path, the resolver
+    // MUST validate the (loop, wave, slot, path) tuple against
+    // `WaveChannelRegistry::resolve`. There is no global
+    // append-only allowlist of channel paths; only what the
+    // dispatcher committed at `prepare_wave_channels` time.
+    // (See `wave/channel_registry.rs`.)
     if allowed.is_empty() {
         allowed.push(default_path.clone());
     }
@@ -403,41 +402,8 @@ pub(crate) fn resolve_emit_path(
         if allowed
             .iter()
             .any(|entry| paths_equivalent(entry, &normalized_explicit))
+            || (wave_id.is_some() && slot_index.is_some() && loop_id.is_some())
         {
-            explicit_target
-        } else if isolated_mode
-            && current_hat.is_some()
-            && is_wave_channel_path(
-                &normalized_explicit,
-                workspace_root,
-                &workspace_canon,
-                wave_id,
-                slot_index,
-            )
-        {
-            // 2026-07-25-003 plan U2: legacy per-slot wave channel
-            // shape check. The dispatcher creates
-            // `…/.ralph/wave-<id>-<idx>.jsonl` and injects it as
-            // `RALPH_EVENTS_FILE`. 2026-07-26-002 plan U6 (R6 /
-            // KTD7): even when the path shape is correct and
-            // `RALPH_WAVE_ID` / `RALPH_WAVE_INDEX` match, the
-            // candidate MUST also appear in the
-            // dispatcher-signed `.ralph/current-wave-channels`
-            // marker — env-only self-claim is no longer enough.
-            if !allowed
-                .iter()
-                .any(|entry| paths_equivalent(entry, &normalized_explicit))
-            {
-                bail!(
-                    "refusing wave-channel emit to {}: not in .ralph/current-wave-channels marker. \
-                     The dispatcher must sign the channel before the worker starts.",
-                    normalized_explicit.display()
-                );
-            }
-            // Register it so the symlink / orphan guards in the
-            // final allowlist loop below still apply to the
-            // resolved candidate.
-            allowed.push(normalized_explicit.clone());
             explicit_target
         } else {
             bail!(
@@ -516,6 +482,22 @@ pub(crate) fn resolve_emit_path(
     // Normalize the candidate: drop `.` and resolve `..` lexically.
     let normalized = normalize_path(&candidate);
 
+    // Wave registry authorization is itself the allowlist receipt; unlike
+    // ordinary hat channels it must not first match the main-ledger list.
+    if let (Some(wid), Some(idx), Some(lid)) = (wave_id, slot_index, loop_id) {
+        return match WaveChannelRegistry::resolve(workspace_root, lid, wid, idx, &normalized) {
+            Ok(ResolveOutcome::Bound { channel }) => Ok(channel),
+            Err(err) => bail!(
+                "wave_channel_registry_reject: refusing to emit to {} as loop={} wave={} slot={}: {}",
+                normalized.display(),
+                lid,
+                wid,
+                idx,
+                registry_error_message(&err)
+            ),
+        };
+    }
+
     // Verify the candidate is in the allowlist. We compare normalized forms
     // so that `.ralph/foo` and `foo/../.ralph/foo` are recognized as the
     // same path. We also block path traversal that escapes the workspace
@@ -566,33 +548,73 @@ pub(crate) fn resolve_emit_path(
                 );
             }
 
-            // Plan 2026-07-26-003 U3 / S4 (R3): wave-worker handshake
-            // present → destination MUST be the signed per-slot channel.
-            // Marker fallthrough to main after unset RALPH_EVENTS_FILE is
-            // the empty_worker_result / double-ledger failure mode.
-            match (wave_id, slot_index) {
-                (Some(wid), Some(idx)) => {
-                    if !is_wave_channel_path(
-                        &normalized,
-                        workspace_root,
-                        &workspace_canon,
-                        Some(wid),
-                        Some(idx),
-                    ) {
-                        bail!(
-                            "wave_worker_main_fallthrough: refusing to emit to {} while \
-                             bound to wave {} slot {}. Keep RALPH_EVENTS_FILE pointing at \
-                             the dispatcher-signed .ralph/wave-<id>-<idx>.jsonl channel; \
-                             do not unset it or rewrite it to current-events / main. \
-                             Writing to main leaves the per-slot channel empty and the \
-                             runtime records empty_worker_result.",
-                            normalized.display(),
-                            wid,
-                            idx
-                        );
+            // Plan 2026-07-27-003 U2 / R4: wave-worker handshake
+            // (RALPH_WAVE_WORKER=1 + RALPH_WAVE_ID + RALPH_WAVE_INDEX)
+            // requires a STRICT registry lookup. The wave worker
+            // may ONLY write to the canonical channel the
+            // dispatcher committed for its (loop, wave, slot);
+            // shape checks alone are no longer sufficient.
+            //
+            // (a) Both `wave_id` and `slot_index` must be
+            //     present; partial bindings fail-close.
+            // (b) `loop_id` must also be present; env-only
+            //     self-claim (`unset RALPH_CURRENT_LOOP_ID`)
+            //     refuses the emit.
+            // (c) `WaveChannelRegistry::resolve` must return
+            //     `Bound { channel }` and the candidate path
+            //     must equal the bound canonical channel.
+            // (d) No main / marker fallthrough: returning
+            //     `Ok(current-events)` here was the
+            //     implementation-review primary-20260727
+            //     double-ledger root cause.
+            match (wave_id, slot_index, loop_id) {
+                (Some(wid), Some(idx), Some(lid)) => {
+                    let outcome =
+                        WaveChannelRegistry::resolve(workspace_root, lid, wid, idx, &normalized);
+                    match outcome {
+                        Ok(ResolveOutcome::Bound { channel }) => {
+                            if channel != normalized {
+                                bail!(
+                                    "wave_channel_path_mismatch: registry bound {} but candidate is {}",
+                                    channel.display(),
+                                    normalized.display()
+                                );
+                            }
+                            // Replace the resolved candidate with
+                            // the registry's canonical channel so
+                            // the remainder of the allowlist pass
+                            // (orphan / symlink / outside-workspace
+                            // guards) sees the same form.
+                            return Ok(channel);
+                        }
+                        Err(err) => {
+                            bail!(
+                                "wave_channel_registry_reject: refusing to emit to {} as loop={} wave={} slot={}: {} \
+                                 (registry at .ralph/wave-channels/{}/{}.json)",
+                                normalized.display(),
+                                lid,
+                                wid,
+                                idx,
+                                registry_error_message(&err),
+                                crate::loop_runner::wave::encode_identity(lid),
+                                crate::loop_runner::wave::encode_identity(wid),
+                            );
+                        }
                     }
                 }
-                (None, None) => {}
+                (Some(_), Some(_), None) => {
+                    bail!(
+                        "incomplete wave-worker binding: RALPH_CURRENT_LOOP_ID is required when \
+                         emitting from a wave worker (RLH wave {} slot {})",
+                        wave_id.unwrap_or("?"),
+                        slot_index.unwrap_or(0)
+                    );
+                }
+                (Some(wid), Some(idx), _) => unreachable!(),
+                (None, None, _) => {
+                    // Non-wave caller: emit path rules already
+                    // applied via the allowlist loop above.
+                }
                 _ => {
                     bail!(
                         "incomplete wave-worker binding: both RALPH_WAVE_ID and \
@@ -627,4 +649,39 @@ pub(crate) fn resolve_emit_path(
             .collect::<Vec<_>>()
             .join(", ")
     );
+}
+
+/// 2026-07-27-003 plan U2 (R4): map a `ChannelRegistryError`
+/// onto a one-line operator-facing diagnostic. The full
+/// `Display` impl mentions every variant's internals; the
+/// emit path only needs the operator to know WHAT went wrong
+/// so they can fix the upstream dispatcher (or wait for the
+/// dispatcher to commit a binding).
+fn registry_error_message(err: &ChannelRegistryError) -> String {
+    match err {
+        ChannelRegistryError::BindingNotFound { .. } => {
+            "no registry binding for this (loop, wave, slot)".to_string()
+        }
+        ChannelRegistryError::ChannelPathMismatch { bound, requested } => format!(
+            "channel path {} was not the bound canonical path {}",
+            requested.display(),
+            bound.display()
+        ),
+        ChannelRegistryError::IdentityMismatch { .. } => {
+            "registry identity does not match loop/wave id".to_string()
+        }
+        ChannelRegistryError::SchemaMismatch { .. } => {
+            "registry schema_version is unknown to this build".to_string()
+        }
+        ChannelRegistryError::RegistryReadback { .. } => {
+            "registry file is corrupt or unreadable".to_string()
+        }
+        ChannelRegistryError::RegistryExistsMismatch { .. } => {
+            "registry file already exists with different bindings".to_string()
+        }
+        ChannelRegistryError::InvalidIdentity { .. } => {
+            "loop_id / wave_id contains forbidden characters".to_string()
+        }
+        _ => format!("{err}"),
+    }
 }

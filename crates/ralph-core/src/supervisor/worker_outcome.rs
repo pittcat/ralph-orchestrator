@@ -43,6 +43,9 @@ pub const REASON_SLOT_NEVER_STARTED: &str = "slot_never_started";
 /// missing slot resources). The slot will never succeed;
 /// retrying would produce the same failure.
 pub const REASON_INVALID_CONTROL_PLANE_PATH: &str = "invalid_control_plane_path";
+/// Pre-spawn infrastructure failure: the dispatcher could not atomically
+/// register every worker channel, so no slot was started.
+pub const REASON_WAVE_CHANNEL_REGISTRATION_FAILED: &str = "wave_channel_registration_failed";
 
 // ── Retry classifier ─────────────────────────────────────────────────────────
 
@@ -530,7 +533,10 @@ mod tests {
     /// Retryable frozen reasons map to concrete consumer classes.
     #[test]
     fn u1_map_failure_class_retryable_reasons_get_concrete_classes() {
-        assert_eq!(map_failure_class(REASON_WORKER_TIMEOUT), FAILURE_CLASS_TIMEOUT);
+        assert_eq!(
+            map_failure_class(REASON_WORKER_TIMEOUT),
+            FAILURE_CLASS_TIMEOUT
+        );
         assert_eq!(
             map_failure_class(REASON_EMPTY_WORKER_RESULT),
             FAILURE_CLASS_ORPHAN_OR_EMPTY_RESULT
@@ -552,10 +558,16 @@ mod tests {
             map_failure_class(REASON_CONFLICTING_WORKER_TERMINAL),
             FAILURE_CLASS_IDENTITY_MISMATCH
         );
-        assert_eq!(map_failure_class(REASON_WORKER_CANCELLED), FAILURE_CLASS_CANCEL);
+        assert_eq!(
+            map_failure_class(REASON_WORKER_CANCELLED),
+            FAILURE_CLASS_CANCEL
+        );
         assert_eq!(map_failure_class("cancelled"), FAILURE_CLASS_CANCEL);
         assert_eq!(map_failure_class("wave_cancelled"), FAILURE_CLASS_CANCEL);
-        assert_eq!(map_failure_class("aggregate_timeout"), FAILURE_CLASS_TIMEOUT);
+        assert_eq!(
+            map_failure_class("aggregate_timeout"),
+            FAILURE_CLASS_TIMEOUT
+        );
         assert_eq!(
             map_failure_class("aggregate_deadline_exceeded"),
             FAILURE_CLASS_TIMEOUT
@@ -578,7 +590,10 @@ mod tests {
     fn u1_map_failure_class_unknown_reasons_fail_closed() {
         assert_eq!(map_failure_class(""), FAILURE_CLASS_UNKNOWN);
         assert_eq!(map_failure_class("   "), FAILURE_CLASS_UNKNOWN);
-        assert_eq!(map_failure_class("some_future_reason"), FAILURE_CLASS_UNKNOWN);
+        assert_eq!(
+            map_failure_class("some_future_reason"),
+            FAILURE_CLASS_UNKNOWN
+        );
         assert_eq!(
             map_failure_class(REASON_INVALID_CONTROL_PLANE_PATH),
             FAILURE_CLASS_UNKNOWN
