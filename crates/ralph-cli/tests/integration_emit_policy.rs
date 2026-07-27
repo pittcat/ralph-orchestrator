@@ -145,3 +145,64 @@ fn test_emit_rejection_hint_excludes_unauthorised_topics() {
         stderr
     );
 }
+
+/// 2026-07-27: when an outer hat leaks `RALPH_EVENTS_FILE` into a
+/// human-CLI invocation, `ralph emit` rejects with
+/// `path_resolution_failed` (allowlist mismatch). The error message
+/// on its own does not explain that hat env leakage is the likely
+/// cause — the user / agent has to guess. We emit an extra stderr
+/// hint naming the leak and listing the unset command.
+///
+/// This test pins both behaviours:
+/// - non-allowlisted `RALPH_EVENTS_FILE` is still rejected (R5
+///   stdout summary stays stable).
+/// - the stderr hint names `unset RALPH_*` and the
+///   `scrub_agent_runtime_env()` helper.
+#[test]
+fn test_emit_rejected_env_events_file_prints_outer_hat_leak_hint() {
+    let temp_dir = TempDir::new().expect("temp dir");
+    let temp_path = temp_dir.path();
+    std::fs::create_dir_all(temp_path.join(".ralph")).unwrap();
+    // `current-events` pins the allowlist to a single canonical target
+    // — anything else, including the leaked env value, will be rejected.
+    std::fs::write(
+        temp_path.join(".ralph/current-events"),
+        ".ralph/events-20260101-000000.jsonl",
+    )
+    .unwrap();
+
+    let output = common::ralph_bin()
+        .args(["emit", "review.unit.done", "{}", "--hat", "executor"])
+        .env(
+            "RALPH_EVENTS_FILE",
+            temp_path.join(".ralph/events-other.jsonl"),
+        )
+        .current_dir(temp_path)
+        .output()
+        .expect("failed to execute ralph emit");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !output.status.success(),
+        "non-allowlisted RALPH_EVENTS_FILE must be rejected: stdout={stdout} stderr={stderr}"
+    );
+    // R5 contract: stdout summary stays stable.
+    assert!(
+        stdout.contains("emit rejected [path_resolution_failed]"),
+        "stdout must carry the stable reject summary: {stdout}"
+    );
+    // New behaviour: stderr hint names the cause and the fix.
+    assert!(
+        stderr.contains("hint:"),
+        "stderr must carry a hint when env_events_file is the source: {stderr}"
+    );
+    assert!(
+        stderr.contains("unset RALPH_CURRENT_HAT"),
+        "hint must list the unset command: {stderr}"
+    );
+    assert!(
+        stderr.contains("scrub_agent_runtime_env"),
+        "hint must point at the helper: {stderr}"
+    );
+}

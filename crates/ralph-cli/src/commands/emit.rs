@@ -1496,6 +1496,26 @@ fn emit_command_with_root_and_hats(
                 "path_resolution_failed",
                 &format!("{err:#}"),
             );
+            // Agent-context hint: when the caller injected a target via
+            // `RALPH_EVENTS_FILE` but the path is not in this loop's
+            // events allowlist, the most common cause is an outer hat
+            // leaking RALPH_* into a human-CLI invocation (HARD RULE 5).
+            // Print an extra stderr line with an actionable fix so the
+            // agent / user immediately knows `unset RALPH_*` is the fix
+            // rather than guessing against the allowlist. The stdout
+            // reject summary stays stable (R5 contract) so jq / CI
+            // assertions are unaffected.
+            if env_events_file.is_some() {
+                eprintln!(
+                    "hint: RALPH_EVENTS_FILE came from an outer hat context but is not \
+                     in this loop's events allowlist. Most likely cause is hat env \
+                     leakage. Fix:\n  \
+                     unset RALPH_CURRENT_HAT RALPH_CURRENT_LOOP_ID RALPH_EVENTS_FILE \\\n    \
+                     RALPH_WAVE_WORKER RALPH_TRIGGERED_HAT RALPH_HATS_SOURCE RALPH_CONFIG\n  \
+                     Then re-run `ralph emit`. Subprocess spawns should call\n  \
+                     `scrub_agent_runtime_env()` from crates/ralph-cli/tests/common/mod.rs."
+                );
+            }
             return Err(err);
         }
     };
