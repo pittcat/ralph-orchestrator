@@ -49,3 +49,4 @@ embedded:
   - merge-loop
   - merge-batch
   - post-merge-converge
+  - parallel-forge

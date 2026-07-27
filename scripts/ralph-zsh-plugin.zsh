@@ -70,6 +70,7 @@ _RALPH_BUILTIN_HAT_VALUES=(
   "builtin:debug"
   "builtin:autoresearch"
   "builtin:merge-batch"
+  "builtin:parallel-forge"
   "builtin:post-merge-converge"
   # 2026-07-24-003 plan: post-implementation six-dimension wave-review
   # preset. Wave-only fan-out — no supervisor — with one batched
@@ -89,6 +90,7 @@ _RALPH_BUILTIN_HAT_DESCRIPTIONS=(
   "Bug investigation, root-cause analysis, and adversarial fix verification"
   "Autonomous experiment loop: try ideas, measure, keep what works"
   "Git-first batch merge: review design intent, merge multiple worktree branches, stabilize with verify-fix loop, write merge report"
+  "Parallel Forge: spec-first planning, supervisor-parallel Unit TDD in worktrees, serial integration, full regression, audit, and manager report"
   "After all development plans are merged: baseline, change map, six-dimension system audit, test-gap, per-finding reproduce/fix/regression, clean-env + independent final review"
   # 2026-07-24-003 plan: post-implementation six-dimension wave-review
   # preset. Wave-only fan-out — no supervisor — with one batched

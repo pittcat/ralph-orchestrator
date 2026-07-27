@@ -35,6 +35,11 @@
     "category": "workflow"
   },
   {
+    "name": "parallel-forge",
+    "description": "Parallel Forge: Spec-First → BDD → ATDD → Outside-In planning, supervisor parallel Unit TDD in worktrees, serial integration, linear Unit commits, full regression, audit, and manager Markdown report",
+    "category": "development"
+  },
+  {
     "name": "post-merge-converge",
     "description": "After one or more development plans have landed in the current branch: baseline, change map, six-dimension audit, test-gap, per-finding reproduce/fix with confidence redo-first, clean-env + final review, then operator REPORT.md before complete",
     "category": "workflow"

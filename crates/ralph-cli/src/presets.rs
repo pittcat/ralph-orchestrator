@@ -87,6 +87,12 @@ const PRESETS: &[EmbeddedPreset] = &[
         content: include_str!(concat!(env!("OUT_DIR"), "/presets/post-merge-converge.yml")),
         public: true,
     },
+    EmbeddedPreset {
+        name: "parallel-forge",
+        description: "Parallel Forge: Spec-First planning, supervisor-driven parallel Unit TDD in worktrees, serial integration with linear commits, full regression, audit, and manager report",
+        content: include_str!(concat!(env!("OUT_DIR"), "/presets/parallel-forge.yml")),
+        public: true,
+    },
     // 2026-07-24-003 plan / KTD1: implementation-review — six-hat
     // isolated wave preset. Scope-preparer freezes baseline + patch +
     // digests; review-dispatcher emits a single six-payload
@@ -705,8 +711,8 @@ mod tests {
         // plan U5 added `implementation-review`; bump to 7.
         assert_eq!(
             presets.len(),
-            8,
-            "Expected 8 public presets (added post-merge-converge 2026-07-25)"
+            9,
+            "Expected 9 public presets (added parallel-forge 2026-07-27)"
         );
     }
 
@@ -834,13 +840,14 @@ mod tests {
         let names = preset_names();
         // 2026-07-24 plan U5: added `implementation-review`, the
         // post-implementation six-dimension wave-review preset.
-        assert_eq!(names.len(), 8);
+        assert_eq!(names.len(), 9);
         assert!(names.contains(&"autoresearch"));
         assert!(names.contains(&"ce-executor-pipeline"));
         assert!(names.contains(&"ce-executor-pipeline-loop"));
         assert!(names.contains(&"ce-executor-supervisor"));
         assert!(names.contains(&"debug"));
         assert!(names.contains(&"merge-batch"));
+        assert!(names.contains(&"parallel-forge"));
         assert!(names.contains(&"post-merge-converge"));
         assert!(names.contains(&"implementation-review"));
     }
@@ -1820,6 +1827,7 @@ mod tests {
             "builtin:debug",
             "builtin:autoresearch",
             "builtin:merge-batch",
+            "builtin:parallel-forge",
             "builtin:post-merge-converge",
             // 2026-07-24-003 plan: post-implementation six-dim
             // wave-review preset; mirrored in

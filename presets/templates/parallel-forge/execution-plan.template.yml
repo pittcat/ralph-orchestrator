@@ -1,0 +1,17 @@
+# Parallel Forge execution-plan SSOT — supervisor / forge-dispatcher 读取本文件。
+# 复制到：.ralph/forge/<plan-key>/execution-plan.yml
+# 每个 units[] 条目必须符合 unit.template.yml（§4）。
+
+version: 1
+plan_key: "<PLAN_KEY>"
+source_plan_path: "<REPO_RELATIVE_OPERATOR_PLAN_PATH>"
+development_plan_path: ".ralph/forge/<PLAN_KEY>/development-plan.md"
+
+# 可选：Guardian / Worktree 填写
+integration_branch: "<INTEGRATION_BRANCH_OR_TBD>"
+base_commit: "<SHA_AFTER_FOUNDATION_OR_TBD>"
+
+units: []
+  # - 将 unit.template.yml 的字段作为 YAML 对象逐项追加到 units[]
+  # - depends_on / execution_wave / integration_order 必须形成无环 DAG
+  # - parallel Unit 必须满足 parallel-dev-preset.md §5 并发安全规则

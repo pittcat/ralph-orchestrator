@@ -1,0 +1,287 @@
+# Authoring SSOT for `parallel-forge` `event_policy.schemas`.
+#
+# Parallel Forge: Spec-First → BDD → ATDD → Outside-In planning,
+# supervisor-driven parallel Unit TDD in worktrees, per-Unit review,
+# sequential integration with linear Unit commits, full regression,
+# final audit, and manager Markdown report.
+#
+# Supervisor coordination topics (`exec.wave.*`, `exec.unit.*`) are
+# system-injected; agents must NOT emit them. Custom `forge.*` topics
+# carry control-plane handoffs; long content lives in `.ralph/forge/`
+# business artifacts.
+
+schemas:
+  forge.plan.inspected:
+    required_fields:
+      - plan_path
+      - inspection_report_path
+      - plan_usable
+    payload: json_object
+    field_docs:
+      plan_path:
+        meaning: Repo-relative path to the operator-supplied plan or requirements input.
+        source: Trigger payload or ralph inspect loop plan anchor.
+        fill_rule: Use the live plan path; do not invent filenames.
+      inspection_report_path:
+        meaning: Artifact path for the Plan Inspection Report (full findings).
+        source: File written this activation under .ralph/forge/plan-key/inspection-report.md.
+        fill_rule: Verify file exists before emit; path must be repo-relative.
+      plan_usable:
+        meaning: Whether the input is sufficient for Planner to proceed.
+        source: Inspector judgment after reading plan and repository.
+        fill_rule: '"true" only when Planner can proceed; "false" routes to blocked path.'
+
+  forge.plan.ready:
+    required_fields:
+      - plan_path
+      - development_plan_path
+      - execution_plan_path
+      - unit_count
+    payload: json_object
+    field_docs:
+      plan_path:
+        meaning: Original operator input path.
+        source: Upstream trigger or loop anchor.
+        fill_rule: Same path Planner read; no fabrication.
+      development_plan_path:
+        meaning: Artifact path for the full Spec-First Development Plan (BDD, ATDD, DAG).
+        source: File written this activation at .ralph/forge/plan-key/development-plan.md.
+        fill_rule: Must exist before emit.
+      execution_plan_path:
+        meaning: Machine-readable Unit DAG SSOT for supervisor dispatch.
+        source: File written this activation at .ralph/forge/plan-key/execution-plan.yml.
+        fill_rule: Must exist and list units with depends_on / integration_order.
+      unit_count:
+        meaning: Number of Units in the execution plan.
+        source: Parsed execution-plan.yml unit list length.
+        fill_rule: Non-negative integer matching execution plan.
+
+  forge.concurrency.approved:
+    required_fields:
+      - execution_plan_path
+      - approval_report_path
+      - approved
+    payload: json_object
+    field_docs:
+      execution_plan_path:
+        meaning: Path to the execution-plan SSOT Guardian audited.
+        source: Trigger payload from Planner handoff.
+        fill_rule: Must match Planner artifact path.
+      approval_report_path:
+        meaning: Concurrency Safety Approval artifact path.
+        source: File written this activation at .ralph/forge/plan-key/concurrency-approval.md.
+        fill_rule: File must exist before emit.
+      approved:
+        meaning: Whether parallel execution may proceed.
+        source: Guardian audit of DAG, shared resources, and path boundaries.
+        fill_rule: '"false" blocks worktree creation; emit forge.plan.blocked instead.'
+
+  forge.exec.development.done:
+    required_fields:
+      - execution_plan_path
+      - completed_unit_count
+      - failed_unit_count
+    payload: json_object
+    field_docs:
+      execution_plan_path:
+        meaning: Execution plan SSOT; all development waves finished.
+        source: forge-dispatcher after last exec wave fan-in.
+        fill_rule: Same path used since Planner handoff.
+      completed_unit_count:
+        meaning: Units that reached exec.unit.done.
+        source: ralph tools task list done count for plan units.
+        fill_rule: Non-negative integer.
+      failed_unit_count:
+        meaning: Units that reached exec.unit.failed.
+        source: ralph tools task list failed count.
+        fill_rule: Zero when proceeding to review.
+
+  exec.unit.ready:
+    required_fields:
+      - wave_id
+      - slot_index
+      - task_id
+      - task_key
+      - unit_id
+    payload: json_object
+
+  forge.worktrees.ready:
+    required_fields:
+      - execution_plan_path
+      - worktree_map_path
+      - integration_branch
+      - base_commit
+    payload: json_object
+    field_docs:
+      execution_plan_path:
+        meaning: Execution plan SSOT for dispatcher.
+        source: Trigger payload.
+        fill_rule: Unchanged from upstream.
+      worktree_map_path:
+        meaning: Artifact listing Unit → branch → worktree path mappings.
+        source: File written this activation at .ralph/forge/plan-key/worktree-map.yml.
+        fill_rule: Verify file exists; one worktree per parallel Unit.
+      integration_branch:
+        meaning: Target branch for sequential Unit integration.
+        source: Git branch created or confirmed this activation.
+        fill_rule: Real branch name on the main repo.
+      base_commit:
+        meaning: Commit SHA frozen as concurrent baseline after Foundation units.
+        source: git rev-parse HEAD on integration branch after Foundation merge.
+        fill_rule: Full 40-char SHA when available.
+
+
+  forge.units.reviewed:
+    required_fields:
+      - execution_plan_path
+      - summary_path
+      - all_approved
+    payload: json_object
+    field_docs:
+      execution_plan_path:
+        meaning: Execution plan SSOT.
+        source: Trigger from exec.wave.complete context / loop anchor.
+        fill_rule: Same path used throughout forge run.
+      summary_path:
+        meaning: Aggregate review summary across all Units.
+        source: File at .ralph/forge/plan-key/reviews/summary.md.
+        fill_rule: Lists each unit_id and verdict.
+      all_approved:
+        meaning: Whether every Unit received APPROVED.
+        source: Count APPROVED vs total units in summary.
+        fill_rule: '"true" only when every unit verdict is APPROVED.'
+
+  forge.integration.done:
+    required_fields:
+      - integration_branch
+      - units_integrated
+      - integration_log_path
+      - integration_complete
+      - commit_map_path
+      - linear_history
+    payload: json_object
+    field_docs:
+      integration_log_path:
+        meaning: Sequential integration log (rebase, merge, conflicts).
+        source: File at .ralph/forge/plan-key/integration-log.md.
+        fill_rule: Must exist before emit.
+      integration_complete:
+        meaning: Whether all Units were integrated in topology order.
+        source: Integrator after processing integration_order from execution plan.
+        fill_rule: '"false" when stopped on conflict or test failure.'
+
+
+  forge.incremental.verified:
+    required_fields:
+      - last_integrated_unit
+      - verification_log_path
+      - passed
+    payload: json_object
+    field_docs:
+      verification_log_path:
+        meaning: Incremental regression evidence after last integration step.
+        source: File at .ralph/forge/plan-key/incremental-verification.md.
+        fill_rule: Records commands run and pass/fail per integrated Unit.
+
+  forge.full.verified:
+    required_fields:
+      - verification_report_path
+      - all_required_passed
+    payload: json_object
+    field_docs:
+      verification_report_path:
+        meaning: Full regression and CI-equivalent test report.
+        source: File at .ralph/forge/plan-key/full-verification.md.
+        fill_rule: Must list every command executed and outcome.
+
+  forge.audit.done:
+    required_fields:
+      - verdict
+      - audit_report_path
+    payload: json_object
+    field_docs:
+      verdict:
+        meaning: Final delivery audit outcome.
+        source: Auditor cross-check of plan, tests, git history, and artifacts.
+        fill_rule: One of ACCEPTED, REJECTED, BLOCKED.
+      audit_report_path:
+        meaning: Final audit artifact path.
+        source: File at .ralph/forge/plan-key/final-audit.md.
+        fill_rule: File must exist before emit.
+
+  forge.report.done:
+    required_fields:
+      - report_path
+      - status
+      - final_audit
+    payload: json_object
+    field_docs:
+      report_path:
+        meaning: Manager-readable Markdown report path.
+        source: File written at docs/reports/date-task-manager-report.md per naming rules.
+        fill_rule: Verify file exists; follow parallel-dev-preset naming rules.
+      status:
+        meaning: Manager report status derived from Auditor verdict.
+        source: Map ACCEPTED→COMPLETED, REJECTED→FAILED/PARTIAL, BLOCKED→BLOCKED.
+        fill_rule: Must align with forge.audit.done.verdict mapping table in instructions.
+      final_audit:
+        meaning: Copy of Auditor verdict for report frontmatter.
+        source: Trigger payload forge.audit.done.verdict.
+        fill_rule: Same enum as Auditor.
+
+  forge.plan.blocked:
+    required_fields:
+      - reason
+      - plan_path
+    payload: json_object
+
+  LOOP_COMPLETE:
+    required_fields:
+      - report_path
+    payload: json_object
+    field_docs:
+      report_path:
+        meaning: Repo-relative path to the manager report (same as forge.report.done.report_path).
+        source: forge.report.done trigger payload or file written this activation.
+        fill_rule: Must match an existing report file path.
+
+  # Supervisor slot topics (worker publishes; schema parity with ce-executor-supervisor)
+  exec.unit.done:
+    required_fields:
+      - wave_id
+      - slot_index
+      - content_hash
+      - unit_id
+      - unit_report_path
+    payload: json_object
+    field_docs:
+      unit_report_path:
+        meaning: Unit Completion Report artifact for this slot.
+        source: File at .ralph/forge/plan-key/units/unit-id-completion.md in slot worktree.
+        fill_rule: Written before emit; path repo-relative from main repo root when possible.
+
+  exec.unit.failed:
+    required_fields:
+      - wave_id
+      - slot_index
+      - reason
+      - unit_id
+    payload: json_object
+
+  exec.wave.complete:
+    required_fields:
+      - wave_id
+      - completed_slots
+      - merge_root_event_id
+
+  exec.wave.failed:
+    required_fields:
+      - wave_id
+      - blocking_slots
+      - reason
+
+  work.failed:
+    required_fields:
+      - reason
+      - plan_path
+    payload: json_object

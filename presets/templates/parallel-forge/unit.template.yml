@@ -1,0 +1,119 @@
+# Unit 标准格式 — parallel-dev-preset.md §4
+# Planner：为每个 Unit 复制本结构到 execution-plan.yml 的 units[] 条目。
+# Executor：只实现与本条目 id 匹配的一个 Unit；不得越 allowed_paths / forbidden_paths。
+# 无法确认的路径/命令使用 executor_must_confirm，不得伪造。
+
+id: U01
+title: "简短明确的 Unit 名称"
+type: foundation  # foundation | vertical_slice | integration | migration | verification
+goal: "这个 Unit 唯一负责实现的最小可观察行为"
+
+scenarios:
+  - S01
+
+depends_on: []
+  # - U00
+
+execution_wave: 1
+integration_order: 1
+execution_mode: serial  # serial | parallel
+
+parallel_with: []
+  # - U02
+parallel_reason: "为什么可以安全并发（parallel 时必填）"
+serial_reason: "如果必须串行，说明真实原因（serial 时必填）"
+
+allowed_paths:
+  - src/example/**
+  - tests/example/**
+
+forbidden_paths:
+  - src/unrelated/**
+  - build/global-config.*
+
+shared_contracts:
+  - ExampleInterface
+
+owned_resources: []
+  # - Cargo.lock  # 若本 Unit 是 Owner，列在此处
+
+outside_in:
+  external_entry: "外部入口"
+  application_capability: "应用层协调能力"
+  domain_rules:
+    - "需要独立验证的领域规则"
+  stable_ports:
+    - "稳定接口或端口"
+  infrastructure:
+    - "基础设施适配能力"
+  substitutes:
+    - "可使用的 Fake、Stub 或 Fixture"
+
+observable_behavior:
+  input: "输入"
+  output: "输出"
+  state_changes:
+    - "可观察状态变化"
+  errors:
+    - "错误表现"
+  side_effects:
+    - "必要副作用"
+
+acceptance_criteria:
+  - "可观察、可执行、可判定的验收条件"
+
+acceptance_test:
+  level: unit  # unit | component | integration | contract | cli | e2e
+  entry: "测试入口"
+  given: "前置状态"
+  when: "动作"
+  then:
+    - "可观察结果"
+  dependency_mode: fake  # fake | stub | real
+  command: "实际命令或 executor_must_confirm"
+  expected_red: "第一次运行时正确失败的原因"
+
+tdd:
+  unit_behaviors:
+    - behavior: "最小业务行为"
+      red: "测试如何以正确原因失败"
+      green: "最小实现范围"
+      refactor: "允许的重构范围"
+  regression:
+    commands:
+      - "受影响模块的回归测试命令或 executor_must_confirm"
+    affected_areas:
+      - "受影响范围"
+
+risk_driven_tests: []
+  # - type: characterization | contract | property_based | ...
+  #   reason: "为什么需要"
+  #   scope: "覆盖的风险"
+
+explicitly_out_of_scope:
+  - "明确不在本 Unit 实现的能力"
+
+completion_criteria:
+  - "验收测试通过"
+  - "单元测试通过"
+  - "必要集成测试通过"
+  - "受影响回归通过"
+  - "没有越界修改"
+  - "可整理为一个原子 Commit"
+
+deliverables:
+  - production_code
+  - automated_tests
+  - required_fakes_or_fixtures
+  - required_documentation
+  - unit_completion_report
+
+commit:
+  message: "feat(unit-u01): implement observable behavior"
+  final_commit_count: 1
+
+risks:
+  - "已知风险"
+
+rollback:
+  - "Unit 失败时如何回退"
