@@ -44,42 +44,101 @@ mechanism:
     type: declared
     version: 1
     terminal_emits: [LOOP_COMPLETE]
+    # 2026-07-28-001 plan §3.1: explicit 14-step flow authority. Each
+    # cross-hat handoff uses the next step's `on`; multi-source block
+    # branches use `on_any_of` on `report`. exec_wave unit topics and
+    # `work.failed` are non-transition (NON_TRANSITION_TOPICS). The
+    # generic positional fallback is preserved for any preset that does
+    # not opt into the declared contract.
     steps:
       - id: planning
         kind: linear
         allowed_emits:
           - forge.plan.inspected
+          - forge.plan.blocked
+      - id: plan_authoring
+        kind: linear
+        "on": forge.plan.inspected
+        allowed_emits:
           - forge.plan.ready
+          - forge.plan.blocked
+      - id: concurrency_review
+        kind: linear
+        "on": forge.plan.ready
+        allowed_emits:
           - forge.concurrency.approved
+          - forge.plan.blocked
+      - id: worktree_setup
+        kind: linear
+        "on": forge.concurrency.approved
+        allowed_emits:
           - forge.worktrees.ready
           - forge.plan.blocked
       - id: exec_wave
         kind: side_effect
         runs: supervisor.exec.wave
+        "on": forge.worktrees.ready
         allowed_emits:
-          - exec.wave.complete
-          - exec.wave.failed
           - exec.unit.ready
           - exec.unit.done
           - exec.unit.failed
+          - exec.wave.complete
+          - exec.wave.failed
+      - id: exec_finalize
+        kind: await
+        "on": exec.wave.complete
+        allowed_emits:
           - forge.exec.development.done
+      - id: exec_failure
+        kind: await
+        "on": exec.wave.failed
+        allowed_emits:
+          - work.failed
+          - forge.report.done
       - id: unit_review
         kind: linear
+        "on": forge.exec.development.done
         allowed_emits:
           - forge.units.reviewed
+          - forge.plan.blocked
       - id: integration
         kind: linear
+        "on": forge.units.reviewed
         allowed_emits:
           - forge.integration.done
-          - forge.incremental.verified
-          - forge.full.verified
-          - forge.audit.done
-          - forge.report.done
           - work.failed
-      - id: plan_end
-        kind: terminal
+          - forge.report.done
+      - id: incremental_verify
+        kind: linear
+        "on": forge.integration.done
+        allowed_emits:
+          - forge.incremental.verified
+          - work.failed
+          - forge.report.done
+      - id: full_verify
+        kind: linear
+        "on": forge.incremental.verified
+        allowed_emits:
+          - forge.full.verified
+          - work.failed
+          - forge.report.done
+      - id: audit
+        kind: linear
+        "on": forge.full.verified
+        allowed_emits:
+          - forge.audit.done
+          - forge.plan.blocked
+      - id: report
+        kind: await
+        on_any_of:
+          - forge.audit.done
+          - forge.plan.blocked
         allowed_emits:
           - forge.report.done
+      - id: plan_end
+        kind: terminal
+        "on": forge.report.done
+        allowed_emits:
           - LOOP_COMPLETE
     repair_budget: 3
     enforce_schema: hard

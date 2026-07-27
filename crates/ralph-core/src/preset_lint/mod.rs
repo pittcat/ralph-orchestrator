@@ -128,6 +128,12 @@ pub use supervisor::{
     FINDING_SUPERVISOR_REQUIRES_ISOLATED, FINDING_SUPERVISOR_WAVE_CONSUMER_LOW_CONCURRENCY,
     check_supervisor_rules,
 };
+// 2026-07-28-001 plan U4: re-export the new positional-ambiguity
+// finding ID (from finding_id) and the lint entry point (from
+// flow_declaration) so callers (CI, BDD scenarios, operator docs)
+// can refer to both via the public surface.
+pub use finding_id::FINDING_FLOW_LINEAR_POSITIONAL_AMBIGUITY;
+pub use flow_declaration::check_flow_linear_positional_ambiguity;
 pub use topic_format::{
     TopicFormatResult, TopicOccurrence, TopicSurface, enumerate_topics, suggest_topic_fix,
     validate_all_topics, validate_topic_format,

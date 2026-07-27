@@ -79,12 +79,12 @@ pub(crate) fn registry_paths_equivalent(a: &Path, b: &Path) -> bool {
     // stitching the file name back on, so macOS /var → /private/var
     // symlinks resolve to the same real path regardless of form.
     fn canon_with_existing_parent(p: &Path) -> std::io::Result<PathBuf> {
-        let file_name = p.file_name().ok_or_else(|| {
-            std::io::Error::new(std::io::ErrorKind::InvalidInput, "no file name")
-        })?;
-        let parent = p.parent().ok_or_else(|| {
-            std::io::Error::new(std::io::ErrorKind::InvalidInput, "no parent")
-        })?;
+        let file_name = p
+            .file_name()
+            .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidInput, "no file name"))?;
+        let parent = p
+            .parent()
+            .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidInput, "no parent"))?;
         let canon_parent = parent.canonicalize()?;
         Ok(canon_parent.join(file_name))
     }

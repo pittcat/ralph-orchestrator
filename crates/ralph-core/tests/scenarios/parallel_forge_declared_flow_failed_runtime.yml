@@ -1,0 +1,292 @@
+# 2026-07-28-001 plan U3 (R6/S6, R9/S9): BDD fixture for parallel-forge
+# failed convergence through the explicit 14-step flow.
+#
+# Covers S2 + S6:
+#   - R6/S6: post-exec `work.failed` keeps current step (does NOT
+#     advance); reporter's `forge.report.done` then advances the
+#     failure-capable step → plan_end.
+#   - R9/S9: subsequent success topics after work.failed must NOT
+#     appear; LOOP_COMPLETE accepted via reporter re-trigger.
+#
+# Topology is identical to the success fixture except the failure
+# arm is taken at integration: forge.incremental.verified is
+# skipped, the verifier emits work.failed mid-flow, the reporter
+# is re-triggered, and the loop closes via LOOP_COMPLETE.
+#
+# Workflow:
+#   1. planning handoffs 1-4 (passes through `forge.worktrees.ready`)
+#   2. supervisor fan-in dispatches exec.wave.complete
+#   3. forge.exec.development.done → forge.units.reviewed →
+#      forge.integration.done (post-exec step 9 advances OK)
+#   4. forge.incremental.verified FAILS → verifier emits
+#      `work.failed` instead (failure-capable step stays in
+#      incremental_verify; success handoff `forge.full.verified`
+#      must stay absent)
+#   5. reporter emits forge.report.done → plan_end
+#   6. reporter emits LOOP_COMPLETE
+#
+# U3 acceptance Red: in the broken preset (where integration step
+# `forge.report.done` was missing from allowed_emits), reporter's
+# report.done was rejected by FlowStepScope. After U3, every
+# failure-capable step (`integration`, `incremental_verify`,
+# `full_verify`) declares `forge.report.done` in `allowed_emits`,
+# so the reporter can close the loop.
+#
+# Uses run_workflow_guard_scenario (real EventLoop runner; never the
+# stub `run_scenario`).
+
+name: pf_declared_flow_failed_runtime
+description: U3 - parallel-forge declared 14-step flow with failed post-exec convergence (R6/S6 + R9/S9)
+
+config:
+  prompt_file: PROMPT.md
+  max_iterations: 14
+  event_loop:
+    execution_mode: isolated
+    completion_promise: LOOP_COMPLETE
+    supervisor:
+      enabled: true
+      aggregate_timeout_secs: 60
+    required_events:
+      - forge.report.done
+    starting_event: forge.start
+  hats:
+    pf-inspector:
+      subscribes_to:
+        - forge.start
+      publishes:
+        - forge.plan.inspected
+    pf-planner:
+      subscribes_to:
+        - forge.plan.inspected
+      publishes:
+        - forge.plan.ready
+    pf-guardian:
+      subscribes_to:
+        - forge.plan.ready
+      publishes:
+        - forge.concurrency.approved
+    pf-worktree:
+      subscribes_to:
+        - forge.concurrency.approved
+      publishes:
+        - forge.worktrees.ready
+    pf-dispatcher:
+      subscribes_to:
+        - forge.worktrees.ready
+        - exec.wave.complete
+      publishes:
+        - exec.unit.ready
+    pf-executor:
+      subscribes_to:
+        - exec.unit.ready
+      publishes:
+        - exec.unit.done
+    pf-dev-done:
+      subscribes_to:
+        - exec.wave.complete
+      publishes:
+        - forge.exec.development.done
+    pf-reviewer:
+      subscribes_to:
+        - forge.exec.development.done
+      publishes:
+        - forge.units.reviewed
+    pf-integrator:
+      subscribes_to:
+        - forge.units.reviewed
+      publishes:
+        - forge.integration.done
+    pf-verifier:
+      subscribes_to:
+        - forge.integration.done
+      publishes:
+        - work.failed
+    pf-reporter:
+      subscribes_to:
+        - work.failed
+      publishes:
+        - forge.report.done
+        - LOOP_COMPLETE
+
+mock_responses:
+  # Iter 1-4: planning handoffs (steps 1-4) — identical to success path.
+  - text: |
+      <event topic="forge.plan.inspected">
+      plan_key: "pf-u3-failed"
+      plan_usable: true
+      </event>
+    hat: pf-inspector
+  - text: |
+      <event topic="forge.plan.ready">
+      plan_key: "pf-u3-failed"
+      unit_count: 2
+      </event>
+    hat: pf-planner
+  - text: |
+      <event topic="forge.concurrency.approved">
+      approved: true
+      plan_key: "pf-u3-failed"
+      </event>
+    hat: pf-guardian
+  - text: |
+      <event topic="forge.worktrees.ready">
+      plan_key: "pf-u3-failed"
+      integration_branch: "pf/u3-failed"
+      </event>
+    hat: pf-worktree
+  # Iter 5: dispatcher dispatches slot 0.
+  - text: |
+      <event topic="exec.unit.ready">
+      wave_id: "pf-u3-failed-wave"
+      slot_index: 0
+      unit_id: "u1"
+      plan_key: "pf-u3-failed"
+      </event>
+    hat: pf-dispatcher
+  # Iter 6: executor completes slot 0.
+  - text: |
+      <event topic="exec.unit.done">
+      wave_id: "pf-u3-failed-wave"
+      slot_index: 0
+      content_hash: "pf-u3-failed-h0"
+      plan_key: "pf-u3-failed"
+      </event>
+    hat: pf-executor
+  # Iter 7: dispatcher dispatches slot 1.
+  - text: |
+      <event topic="exec.unit.ready">
+      wave_id: "pf-u3-failed-wave"
+      slot_index: 1
+      unit_id: "u2"
+      plan_key: "pf-u3-failed"
+      </event>
+    hat: pf-dispatcher
+  # Iter 8: executor completes slot 1 → supervisor fan-in fires
+  #         exec.wave.complete (injected; not in mock_responses).
+  - text: |
+      <event topic="exec.unit.done">
+      wave_id: "pf-u3-failed-wave"
+      slot_index: 1
+      content_hash: "pf-u3-failed-h1"
+      plan_key: "pf-u3-failed"
+      </event>
+    hat: pf-executor
+  # Iter 9: dev-done hat emits forge.exec.development.done.
+  - text: |
+      <event topic="forge.exec.development.done">
+      completed_unit_count: 2
+      plan_key: "pf-u3-failed"
+      </event>
+    hat: pf-dev-done
+  # Iter 10: unit_review passes.
+  - text: |
+      <event topic="forge.units.reviewed">
+      all_approved: true
+      summary_path: ".ralph/forge/pf-u3-failed/reviews/summary.md"
+      plan_key: "pf-u3-failed"
+      </event>
+    hat: pf-reviewer
+  # Iter 11: integration succeeds.
+  - text: |
+      <event topic="forge.integration.done">
+      commit_map_path: ".ralph/forge/pf-u3-failed/commit-map.yml"
+      linear_history: true
+      plan_key: "pf-u3-failed"
+      </event>
+    hat: pf-integrator
+  # Iter 12: incremental_verify FAILS — verifier emits work.failed.
+  # This keeps the step in incremental_verify (work.failed is a
+  # non-transition); subsequent success topics must stay absent.
+  - text: |
+      <event topic="work.failed">
+      reason: "incremental verification hit a regression"
+      plan_key: "pf-u3-failed"
+      context_artifact_path: ".ralph/forge/pf-u3-failed/failures/verifier-failed.md"
+      </event>
+    hat: pf-verifier
+  # Iter 13: reporter's forge.report.done — accepted by FlowStepScope
+  # because incremental_verify's allowed_emits includes
+  # forge.report.done. Advances to plan_end.
+  - text: |
+      <event topic="forge.report.done">
+      status: "FAILED"
+      report_path: "docs/reports/2026-07-28-pf-u3-failed-manager-report.md"
+      plan_key: "pf-u3-failed"
+      </event>
+    hat: pf-reporter
+  # Iter 14: reporter emits LOOP_COMPLETE (terminal pair).
+  - text: |
+      <event topic="LOOP_COMPLETE">
+      </event>
+    hat: pf-reporter
+
+# supervisor_fan_in drives the real SupervisorCoordinator after
+# 2 slots complete; without this, exec.wave.complete never gets
+# injected and the loop cannot advance past exec_wave.
+supervisor_fan_in:
+  expected_slots: 2
+
+expected:
+  iterations: 14
+  events:
+    # Planning chain (steps 1-4)
+    - topic: forge.plan.inspected
+    - topic: forge.plan.ready
+    - topic: forge.concurrency.approved
+    - topic: forge.worktrees.ready
+    # Supervisor-coordinated exec wave
+    - topic: exec.unit.ready
+    - topic: exec.unit.done
+    - topic: exec.unit.ready
+    - topic: exec.unit.done
+    - topic: exec.wave.complete
+    - topic: forge.exec.development.done
+    # Success path up to integration (step 9)
+    - topic: forge.units.reviewed
+    - topic: forge.integration.done
+    # Failure arm at incremental_verify
+    - topic: work.failed
+    # Reporter closes loop (step 14)
+    - topic: forge.report.done
+    - topic: LOOP_COMPLETE
+  # R6/S6 + R9/S9: post-failure success handoffs must stay absent.
+  # U3 critical assertion: forge.incremental.verified,
+  # forge.full.verified, forge.audit.done must NOT fire after
+  # work.failed. Without this, a regression that allows success
+  # topics to slip in would silently expand the failure path.
+  absent_events:
+    - topic: forge.incremental.verified
+    - topic: forge.full.verified
+    - topic: forge.audit.done
+    - topic: forge.plan.blocked
+    - topic: exec.wave.failed
+  event_topic_counts:
+    # Exactly one occurrence per topic on the failure path.
+    - topic: forge.plan.inspected
+      count: 1
+    - topic: forge.plan.ready
+      count: 1
+    - topic: forge.concurrency.approved
+      count: 1
+    - topic: forge.worktrees.ready
+      count: 1
+    - topic: exec.unit.ready
+      count: 2
+    - topic: exec.unit.done
+      count: 2
+    - topic: exec.wave.complete
+      count: 1
+    - topic: forge.exec.development.done
+      count: 1
+    - topic: forge.units.reviewed
+      count: 1
+    - topic: forge.integration.done
+      count: 1
+    - topic: work.failed
+      count: 1
+    - topic: forge.report.done
+      count: 1
+    - topic: LOOP_COMPLETE
+      count: 1
+  completion: true

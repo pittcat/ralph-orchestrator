@@ -1153,6 +1153,157 @@ mod tests {
         );
     }
 
+    /// 2026-07-28-001 plan U3 (R5/S5, R6/S6, R7/S7, R9/S9): the real
+    /// embedded `parallel-forge` preset adopts the §3.1 14-step
+    /// flow authority end-to-end. Each cross-hat handoff uses the
+    /// next step's `on`; multi-source block branches use
+    /// `on_any_of` on `report`; exec_wave unit topics and
+    /// `work.failed` are non-transitions; `exec.wave.complete` and
+    /// `exec.wave.failed` route to distinct branches
+    /// (`exec_finalize` vs `exec_failure`).
+    #[test]
+    fn test_parallel_forge_adopts_declared_14step_flow_authority() {
+        use ralph_core::event_loop::recover_current_plan_step;
+
+        let preset = get_preset("parallel-forge").expect("parallel-forge preset");
+        let config = RalphConfig::parse_yaml(preset.content).expect("YAML parses");
+
+        // R1: planning handoff steps advance explicitly (not via
+        // positional fallback).
+        assert_eq!(
+            recover_current_plan_step(
+                &config,
+                &[
+                    "forge.plan.inspected",
+                    "forge.plan.ready",
+                    "forge.concurrency.approved",
+                    "forge.worktrees.ready",
+                ],
+            ),
+            "exec_wave",
+            "R1: full planning handoff chain must reach exec_wave"
+        );
+
+        // R2: forge.plan.blocked branches to report (not exec_wave).
+        let flow = config
+            .mechanism
+            .as_ref()
+            .and_then(|m| m.flow.as_ref())
+            .expect("parallel-forge declares mechanism.flow");
+        let report = flow
+            .steps
+            .iter()
+            .find(|s| s.id == "report")
+            .expect("report step");
+        assert!(
+            report.on_any_of.iter().any(|t| t == "forge.plan.blocked"),
+            "report.on_any_of must include forge.plan.blocked (R2); got {:?}",
+            report.on_any_of
+        );
+        assert_eq!(
+            recover_current_plan_step(&config, &["forge.plan.inspected", "forge.plan.blocked"],),
+            "report",
+            "R2: forge.plan.blocked must advance to report"
+        );
+
+        // R4: exec.wave.complete and exec.wave.failed route to
+        // distinct branches.
+        let exec_finalize = flow
+            .steps
+            .iter()
+            .find(|s| s.id == "exec_finalize")
+            .expect("exec_finalize step");
+        assert_eq!(
+            exec_finalize.on.as_deref(),
+            Some("exec.wave.complete"),
+            "exec_finalize.on must be exec.wave.complete (R4)"
+        );
+        let exec_failure = flow
+            .steps
+            .iter()
+            .find(|s| s.id == "exec_failure")
+            .expect("exec_failure step");
+        assert_eq!(
+            exec_failure.on.as_deref(),
+            Some("exec.wave.failed"),
+            "exec_failure.on must be exec.wave.failed (R4)"
+        );
+        assert_eq!(
+            recover_current_plan_step(
+                &config,
+                &[
+                    "forge.plan.inspected",
+                    "forge.plan.ready",
+                    "forge.concurrency.approved",
+                    "forge.worktrees.ready",
+                    "exec.wave.complete",
+                    "forge.exec.development.done",
+                    "forge.units.reviewed",
+                    "forge.integration.done",
+                    "forge.incremental.verified",
+                    "forge.full.verified",
+                    "forge.audit.done",
+                    "forge.report.done",
+                ],
+            ),
+            "plan_end",
+            "R5: full success path must reach plan_end"
+        );
+        assert_eq!(
+            recover_current_plan_step(
+                &config,
+                &[
+                    "forge.plan.inspected",
+                    "forge.plan.ready",
+                    "forge.concurrency.approved",
+                    "forge.worktrees.ready",
+                    "exec.wave.failed",
+                    "forge.report.done",
+                ],
+            ),
+            "plan_end",
+            "R6: exec_wave.failed → exec_failure → report.done must reach plan_end"
+        );
+
+        // R7: plan_end rejects LOOP_COMPLETE as a transition (it's
+        // the terminal step; LOOP_COMPLETE is accepted by the gate
+        // but does not advance the step).
+        let plan_end = flow
+            .steps
+            .iter()
+            .find(|s| s.id == "plan_end")
+            .expect("plan_end step");
+        assert_eq!(
+            plan_end.kind.as_deref(),
+            Some("terminal"),
+            "plan_end must be kind: terminal"
+        );
+
+        // S3: exec_wave must NOT allow forge.exec.development.done
+        // (only exec_finalize does).
+        let exec_wave = flow
+            .steps
+            .iter()
+            .find(|s| s.id == "exec_wave")
+            .expect("exec_wave step");
+        assert!(
+            !exec_wave
+                .allowed_emits
+                .iter()
+                .any(|t| t == "forge.exec.development.done"),
+            "exec_wave must NOT allow forge.exec.development.done (S3): got {:?}",
+            exec_wave.allowed_emits
+        );
+        assert!(
+            !plan_end
+                .allowed_emits
+                .iter()
+                .any(|t| t == "forge.report.done"),
+            "plan_end must NOT re-allow forge.report.done (transition is in report.on): got {:?}",
+            plan_end.allowed_emits
+        );
+    }
+
     #[test]
     fn test_ce_executor_reporter_publishes_report_done() {
         // Static-config guard for the completion-gate event. The chain test above

@@ -1,0 +1,319 @@
+# 2026-07-28-001 plan U3 (R5/S5, R9/S9): BDD fixture for parallel-forge
+# full success path through all 14 declared flow steps.
+#
+# Covers S5 + S9:
+#   - R5/S5: full success path (planning → exec_wave → unit_review →
+#     integration → incremental_verify → full_verify → audit → report →
+#     plan_end → LOOP_COMPLETE) with each handoff advancing the
+#     `recover_current_plan_step` authority exactly once.
+#   - R9/S9: no work.failed, no forge.plan.blocked, no exec.wave.failed
+#     must appear; LOOP_COMPLETE is exactly one accepted event.
+#
+# Topology mirrors U2 BDD fixture (parallel_forge_exec_wave_branch):
+# minimal dummy hats whose only role is to emit the right topic at
+# the right iteration. Supervisor fan-in is enabled with
+# expected_slots: 2 so the real SupervisorCoordinator injects
+# exec.wave.complete (not a mock faked system event).
+#
+# event_topic_counts proves single-shot acceptance: every required
+# handoff fires exactly once; forbidden topics are absent.
+#
+# Uses run_workflow_guard_scenario (real EventLoop runner; never the
+# stub `run_scenario`).
+
+name: pf_declared_flow_runtime
+description: U3 - parallel-forge full 14-step declared flow success path (R5/S5 + R9/S9)
+
+config:
+  prompt_file: PROMPT.md
+  max_iterations: 18
+  event_loop:
+    execution_mode: isolated
+    completion_promise: LOOP_COMPLETE
+    supervisor:
+      enabled: true
+      aggregate_timeout_secs: 60
+    required_events:
+      - forge.report.done
+    starting_event: forge.start
+  hats:
+    # 12 parallel-forge hats collapsed to dummy publishers — we only
+    # need each hat to emit its own business topic in iteration order.
+    # Subscriptions are minimal so the EventBus carries the topic; the
+    # scope gate accepts based on hat equality vs the YAML's hat id.
+    pf-inspector:
+      subscribes_to:
+        - forge.start
+      publishes:
+        - forge.plan.inspected
+    pf-planner:
+      subscribes_to:
+        - forge.plan.inspected
+      publishes:
+        - forge.plan.ready
+    pf-guardian:
+      subscribes_to:
+        - forge.plan.ready
+      publishes:
+        - forge.concurrency.approved
+    pf-worktree:
+      subscribes_to:
+        - forge.concurrency.approved
+      publishes:
+        - forge.worktrees.ready
+    pf-dispatcher:
+      subscribes_to:
+        - forge.worktrees.ready
+        - exec.wave.complete
+      publishes:
+        - exec.unit.ready
+    pf-executor:
+      subscribes_to:
+        - exec.unit.ready
+      publishes:
+        - exec.unit.done
+    # pf-dev-done: dedicated hat that converts supervisor fan-in
+    # `exec.wave.complete` into `forge.exec.development.done`. In
+    # production parallel-forge this is the dispatcher's terminal
+    # emit; we keep the topology faithful by isolating the emit so
+    # the fake dispatcher (subscribed to forge.worktrees.ready +
+    # exec.wave.complete) does not have to dispatch and emit
+    # forge.exec.development.done from the same activation.
+    pf-dev-done:
+      subscribes_to:
+        - exec.wave.complete
+      publishes:
+        - forge.exec.development.done
+    pf-reviewer:
+      subscribes_to:
+        - forge.exec.development.done
+      publishes:
+        - forge.units.reviewed
+    pf-integrator:
+      subscribes_to:
+        - forge.units.reviewed
+      publishes:
+        - forge.integration.done
+    pf-verifier:
+      subscribes_to:
+        - forge.integration.done
+      publishes:
+        - forge.incremental.verified
+    pf-tester:
+      subscribes_to:
+        - forge.incremental.verified
+      publishes:
+        - forge.full.verified
+    pf-auditor:
+      subscribes_to:
+        - forge.full.verified
+      publishes:
+        - forge.audit.done
+    pf-reporter:
+      subscribes_to:
+        - forge.audit.done
+      publishes:
+        - forge.report.done
+        - LOOP_COMPLETE
+
+# mock_responses drive the isolated-mode single-business-event-per-activation
+# budget. Each iteration emits exactly one business event to mirror the
+# production "single emit per activation" OPAC.
+mock_responses:
+  # Iter 1: planning — inspector
+  - text: |
+      <event topic="forge.plan.inspected">
+      plan_key: "pf-u3-success"
+      plan_usable: true
+      </event>
+    hat: pf-inspector
+  # Iter 2: plan_authoring — planner
+  - text: |
+      <event topic="forge.plan.ready">
+      plan_key: "pf-u3-success"
+      unit_count: 2
+      </event>
+    hat: pf-planner
+  # Iter 3: concurrency_review — guardian
+  - text: |
+      <event topic="forge.concurrency.approved">
+      approved: true
+      plan_key: "pf-u3-success"
+      </event>
+    hat: pf-guardian
+  # Iter 4: worktree_setup — worktree
+  - text: |
+      <event topic="forge.worktrees.ready">
+      plan_key: "pf-u3-success"
+      integration_branch: "pf/u3"
+      </event>
+    hat: pf-worktree
+  # Iter 5: dispatcher fan-out slot 0
+  - text: |
+      <event topic="exec.unit.ready">
+      wave_id: "pf-u3-wave"
+      slot_index: 0
+      unit_id: "u1"
+      plan_key: "pf-u3-success"
+      </event>
+    hat: pf-dispatcher
+  # Iter 6: executor slot 0 done
+  - text: |
+      <event topic="exec.unit.done">
+      wave_id: "pf-u3-wave"
+      slot_index: 0
+      content_hash: "pf-u3-h0"
+      plan_key: "pf-u3-success"
+      </event>
+    hat: pf-executor
+  # Iter 7: dispatcher fan-out slot 1
+  - text: |
+      <event topic="exec.unit.ready">
+      wave_id: "pf-u3-wave"
+      slot_index: 1
+      unit_id: "u2"
+      plan_key: "pf-u3-success"
+      </event>
+    hat: pf-dispatcher
+  # Iter 8: executor slot 1 done → supervisor fan-in fires
+  #         exec.wave.complete (not in mock_responses)
+  - text: |
+      <event topic="exec.unit.done">
+      wave_id: "pf-u3-wave"
+      slot_index: 1
+      content_hash: "pf-u3-h1"
+      plan_key: "pf-u3-success"
+      </event>
+    hat: pf-executor
+  # Iter 9: dev-done hat emits forge.exec.development.done after the
+  # supervisor fan-in injects exec.wave.complete at iter 8.
+  - text: |
+      <event topic="forge.exec.development.done">
+      completed_unit_count: 2
+      plan_key: "pf-u3-success"
+      </event>
+    hat: pf-dev-done
+  # Iter 10: unit_review — reviewer
+  - text: |
+      <event topic="forge.units.reviewed">
+      all_approved: true
+      summary_path: ".ralph/forge/pf-u3-success/reviews/summary.md"
+      plan_key: "pf-u3-success"
+      </event>
+    hat: pf-reviewer
+  # Iter 11: integration — integrator
+  - text: |
+      <event topic="forge.integration.done">
+      commit_map_path: ".ralph/forge/pf-u3-success/commit-map.yml"
+      linear_history: true
+      plan_key: "pf-u3-success"
+      </event>
+    hat: pf-integrator
+  # Iter 12: incremental_verify — verifier
+  - text: |
+      <event topic="forge.incremental.verified">
+      passed: true
+      verification_log_path: ".ralph/forge/pf-u3-success/incremental-verification.md"
+      plan_key: "pf-u3-success"
+      </event>
+    hat: pf-verifier
+  # Iter 13: full_verify — tester
+  - text: |
+      <event topic="forge.full.verified">
+      all_required_passed: true
+      verification_report_path: ".ralph/forge/pf-u3-success/full-verification.md"
+      plan_key: "pf-u3-success"
+      </event>
+    hat: pf-tester
+  # Iter 14: audit — auditor
+  - text: |
+      <event topic="forge.audit.done">
+      verdict: "ACCEPTED"
+      audit_report_path: ".ralph/forge/pf-u3-success/final-audit.md"
+      plan_key: "pf-u3-success"
+      </event>
+    hat: pf-auditor
+  # Iter 15: report — reporter (forge.report.done)
+  - text: |
+      <event topic="forge.report.done">
+      status: "COMPLETED"
+      report_path: "docs/reports/2026-07-28-pf-u3-success-manager-report.md"
+      plan_key: "pf-u3-success"
+      </event>
+    hat: pf-reporter
+  # Iter 16: reporter LOOP_COMPLETE (terminal pair)
+  - text: |
+      <event topic="LOOP_COMPLETE">
+      </event>
+    hat: pf-reporter
+
+# supervisor_fan_in: drives run_bdd_supervisor_fan_in to inject
+# exec.wave.complete via the real SupervisorCoordinator after both
+# slots complete (expected_slots: 2). This is the production
+# supervisor fan-in seam — NOT a faked system injection.
+supervisor_fan_in:
+  expected_slots: 2
+
+expected:
+  iterations: 16
+  events:
+    # Planning handoff chain (steps 1-4) advances planning →
+    # exec_wave via the four explicit `on` transitions.
+    - topic: forge.plan.inspected
+    - topic: forge.plan.ready
+    - topic: forge.concurrency.approved
+    - topic: forge.worktrees.ready
+    # Exec wave dispatch + fan-in (step 5)
+    - topic: exec.unit.ready
+    - topic: exec.unit.done
+    - topic: exec.unit.ready
+    - topic: exec.unit.done
+    # Supervisor fan-in injected (not in mock_responses)
+    - topic: exec.wave.complete
+    - topic: forge.exec.development.done
+    # Post-exec success chain (steps 8-14)
+    - topic: forge.units.reviewed
+    - topic: forge.integration.done
+    - topic: forge.incremental.verified
+    - topic: forge.full.verified
+    - topic: forge.audit.done
+    - topic: forge.report.done
+    - topic: LOOP_COMPLETE
+  # R9/S9: failure topics must stay absent on the success path.
+  absent_events:
+    - topic: exec.wave.failed
+    - topic: work.failed
+    - topic: forge.plan.blocked
+  event_topic_counts:
+    # R5/S5: each handoff fires exactly once on the success path.
+    - topic: forge.plan.inspected
+      count: 1
+    - topic: forge.plan.ready
+      count: 1
+    - topic: forge.concurrency.approved
+      count: 1
+    - topic: forge.worktrees.ready
+      count: 1
+    - topic: exec.unit.ready
+      count: 2
+    - topic: exec.unit.done
+      count: 2
+    - topic: exec.wave.complete
+      count: 1
+    - topic: forge.exec.development.done
+      count: 1
+    - topic: forge.units.reviewed
+      count: 1
+    - topic: forge.integration.done
+      count: 1
+    - topic: forge.incremental.verified
+      count: 1
+    - topic: forge.full.verified
+      count: 1
+    - topic: forge.audit.done
+      count: 1
+    - topic: forge.report.done
+      count: 1
+    - topic: LOOP_COMPLETE
+      count: 1
+  completion: true
