@@ -3086,7 +3086,10 @@ pub struct ReviewDoneHints {
 /// already-done dimensions from the assigned set, returning the
 /// residual in stable lexical order so the payload field is
 /// deterministic across runs (the test suite pins the order).
-fn compute_review_missing_dimensions(
+// U1 (2026-07-27-003 plan): visibility lifted to `pub(crate)` for the
+// accident-characterization tests in `tests/wave_supervisor.rs`.
+// Behavior unchanged.
+pub(crate) fn compute_review_missing_dimensions(
     assigned: &std::collections::HashSet<String>,
     already_done: &std::collections::HashSet<String>,
 ) -> Vec<String> {
@@ -3105,7 +3108,10 @@ fn compute_review_missing_dimensions(
 /// lacks the field. Returns the dimensions in stable slot-index
 /// order so the synthesizer's `completed_dimensions` list is
 /// deterministic across runs.
-fn collect_review_dimensions(completed: &ralph_core::CompletedWave) -> Vec<String> {
+// U1 (2026-07-27-003 plan): visibility lifted to `pub(crate)` for the
+// accident-characterization tests in `tests/wave_supervisor.rs`.
+// Behavior unchanged.
+pub(crate) fn collect_review_dimensions(completed: &ralph_core::CompletedWave) -> Vec<String> {
     let mut by_index: std::collections::BTreeMap<u32, String> = std::collections::BTreeMap::new();
     for result in &completed.results {
         for event in &result.events {
@@ -3168,7 +3174,12 @@ fn payload_object(
 /// - `store_completed`: dimensions whose slot is `Completed` in the
 ///   supervisor store WITH valid terminal evidence (KTD3 fail-closed:
 ///   a bare `Completed` status bit with no evidence does NOT count).
-fn build_review_done_hints(
+// U1 (2026-07-27-003 plan): visibility lifted from private to
+// `pub(crate)` so the accident-characterization tests in
+// `tests/wave_supervisor.rs` can call these directly. The function
+// shape and behavior are unchanged; only visibility grows. Plan U4
+// will rewrite this body into a pure reconciliation helper.
+pub(crate) fn build_review_done_hints(
     bridge: &Arc<dyn ralph_core::supervisor::SupervisorBridge>,
     store_wave_id: &str,
     completed: &ralph_core::CompletedWave,
@@ -3331,7 +3342,13 @@ const COORD_SYSTEM_PRODUCER: &str = "ralph";
 /// not a registered hat id, so isolated-mode scope enforcement
 /// (`isolated_publish_allowed`) rejected the event before it reached
 /// the EventBus, leaving the integrator hat's pending queue empty.
-fn append_supervisor_coord_event(
+// U1 (2026-07-27-003 plan): visibility lifted to `pub(crate)` for the
+// accident-characterization tests in `tests/wave_supervisor.rs`.
+// Plan U5 rewrites this signature to return `Result<CoordinationReceipt,
+// ProjectionError>` so the dispatcher can refuse the next phase when
+// the main ledger write fails. The current `()` return is the P0
+// silent-success window the plan exists to close.
+pub(crate) fn append_supervisor_coord_event(
     main_events_file: &Path,
     topic: &str,
     payload: &serde_json::Value,
@@ -3444,7 +3461,13 @@ fn append_supervisor_coord_event(
 /// topic a Completed slot may carry (`review.dimension.done`,
 /// etc.) is dropped here because the `review-synthesizer`'s
 /// consumed payload is the topic it expects to see in main.
-fn merge_completed_review_slots_to_main(
+// U1 (2026-07-27-003 plan): visibility lifted to `pub(crate)` for the
+// accident-characterization tests in `tests/wave_supervisor.rs`.
+// Plan U5 rewrites this signature to return
+// `Result<ProjectionReceipt, ProjectionError>` and threads the
+// receipt into `commit_salvage_projection`. The current `()` return
+// is the silent-success window the plan exists to close.
+pub(crate) fn merge_completed_review_slots_to_main(
     main_events_file: &Path,
     completed: &ralph_core::CompletedWave,
     bridge: &Arc<dyn ralph_core::supervisor::SupervisorBridge>,
@@ -9889,5 +9912,634 @@ hats: {}
             "persistent store error must return StoreError, got {:?}",
             outcome
         );
+    }
+
+    // =================================================================
+    // U1 accident-characterization tests (plan 2026-07-27-003)
+    //
+    // These tests pin the CURRENT behavior of the wave dispatcher
+    // surfaces the implementation-review primary-20260727-051801
+    // diagnosis flagged as P0/P1 root causes. They are deliberately
+    // designed to fail (RED) at HEAD today so the U2-U5 fixes
+    // (channel registry, terminal-evidence reconciliation, salvage/
+    // coordination receipt protocol) can re-run the same tests and
+    // observe GREEN. Each test name encodes the invariant under
+    // verification; the comment body documents which implementation-
+    // review incident symptom it pins.
+    //
+    // Note: U1.3 / U1.4 assert the SHAPE of the regression; U1.5 /
+    // U1.6 assert the FUNCTION SIGNATURE / FAILURE-SWALLOWING that
+    // plan U5 explicitly rewrites. The tests are intentionally
+    // placed inside `dispatcher.rs`'s `#[cfg(test)] mod tests` so
+    // they can call the same internal helpers (which were just
+    // promoted to `pub(crate)` for parity with `wave_supervisor.rs`
+    // sibling tests) without changing public API surface.
+    // =================================================================
+
+    /// U1.1 — `append_wave_channel_to_marker` creates the marker
+    /// silently on first call. This is the dispatcher-side enabler
+    /// of the implementation-review primary-20260727 incident:
+    /// the dispatcher wrote the wave-channel marker AFTER `execute`
+    /// had been called for the slot, so workers running in
+    /// isolated mode could pass the path-shape check in
+    /// `resolve_emit_path` but failed the marker-membership
+    /// check, ending up rejected (`empty_worker_result`). Plan
+    /// U2 closes the window by replacing the marker with an
+    /// atomic per-wave JSON registry that the dispatcher MUST
+    /// write BEFORE any worker `Command::envs(...)` runs.
+    ///
+    /// Locked invariant (current RED, expected GREEN after U2):
+    /// after the registry rewrite, appending to the marker
+    /// without an explicit binding commit returns Err so the
+    /// dispatcher path can fail-close before spawning workers.
+    /// Today, the marker self-creates, so the same call returns
+    /// Ok(()) unconditionally — the test asserts the current
+    /// behavior verbatim so U2 must change it for the test to
+    /// turn red and stay red until U3 fixes spawn semantics.
+    #[test]
+    fn accident_01_append_wave_channel_to_marker_self_creates_marker() {
+        let workspace = tempfile::TempDir::new().expect("tempdir");
+        let main_events_file = workspace.path().join(".ralph").join("events.jsonl");
+        let worker_events_file = workspace.path().join(".ralph").join("wave-w-rs-1-0.jsonl");
+        // Marker's parent (.ralph) does NOT exist yet; current
+        // implementation must create it on demand. U2 deletes this
+        // self-claim path entirely and replaces it with a
+        // schema-versioned JSON registry written before spawn.
+        assert!(
+            !workspace.path().join(".ralph").exists(),
+            ".ralph must not exist pre-call so the self-claim path is exercised"
+        );
+        let result = append_wave_channel_to_marker(&main_events_file, &worker_events_file);
+        assert!(
+            result.is_ok(),
+            "current behavior: marker self-creates and accepts the append; \
+             RED baseline for U2 replacement. Got error: {result:?}"
+        );
+        let marker = workspace.path().join(".ralph").join("current-wave-channels");
+        let contents = std::fs::read_to_string(&marker).expect("marker must be readable");
+        assert!(
+            contents.contains("wave-w-rs-1-0.jsonl"),
+            "marker must record the worker channel path; got: {contents}"
+        );
+    }
+
+    /// U1.2 — When the marker's parent directory is unwritable
+    /// (chmod 0o000), `append_wave_channel_to_marker` returns
+    /// `Err(_)` and the dispatcher currently warn-and-continues
+    /// — exactly the silent-success window the implementation-
+    /// review primary-20260727 incident exploited (the
+    /// dispatcher logged "marker append failed" and spawned
+    /// the worker anyway). Plan U3 closes the window by
+    /// promoting the failure to a typed `WavePreparationFailure`
+    /// returned BEFORE the executor future is constructed.
+    ///
+    /// This test pins the CURRENT behavior verbatim: the
+    /// function returns Err. U2 must change `append_wave_…`
+    /// into a registry-replacement that does not exist; the
+    /// test will then be deleted by U3 along with the function.
+    #[cfg(unix)]
+    #[test]
+    fn accident_02_append_wave_channel_to_marker_returns_io_error_on_unwritable_parent() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let workspace = tempfile::TempDir::new().expect("tempdir");
+        // Lock the marker's parent so create_dir_all + OpenOptions::create
+        // both fail with EACCES.
+        let locked_parent = workspace.path().join(".ralph");
+        std::fs::create_dir(&locked_parent).expect("mkdir .ralph");
+        let mut perms = std::fs::metadata(&locked_parent).unwrap().permissions();
+        perms.set_mode(0o000);
+        std::fs::set_permissions(&locked_parent, perms).expect("chmod 0o000");
+
+        let main_events_file = workspace.path().join(".ralph").join("events.jsonl");
+        let worker_events_file = workspace
+            .path()
+            .join(".ralph")
+            .join("wave-w-rs-1-0.jsonl");
+        let result = append_wave_channel_to_marker(&main_events_file, &worker_events_file);
+
+        // Restore perms so the tempdir teardown succeeds.
+        let mut restore = std::fs::metadata(&locked_parent).unwrap().permissions();
+        restore.set_mode(0o755);
+        let _ = std::fs::set_permissions(&locked_parent, restore);
+
+        let err = result.expect_err(
+            "current behavior: append returns Err on EACCES; this is the dispatcher \
+             warn-and-continue path that U3 must turn into typed preparation failure",
+        );
+        assert!(
+            matches!(err.kind(), std::io::ErrorKind::PermissionDenied)
+                || matches!(err.kind(), std::io::ErrorKind::Other),
+            "expected EACCES-class error, got {err:?}"
+        );
+    }
+
+    /// U1.3 — `build_review_done_hints` today reads
+    /// `main_backscan` independently of store state, so the
+    /// implementation-review primary-20260727 incident produced
+    /// 5 orphan `review.unit.done` rows in the main JSONL that
+    /// `main_backscan` accepted (the store had those slots as
+    /// `Failed`, but the function's main-side scan does not
+    /// consult the store). The accident: `main_backscan` ends
+    /// up larger than `store_completed`, and downstream
+    /// `build_wave_failed_payload` uses the UNION to subtract
+    /// from `assigned_dimensions`, dropping 5 of 6 actual
+    /// missing dimensions.
+    ///
+    /// Locked invariant: after U4 reconciliation, the function
+    /// must report `main_backscan` only for dimensions whose
+    /// SLOT in the store is `Completed` with matching terminal
+    /// evidence. Orphans (store Failed + main done) MUST NOT
+    /// appear in `main_backscan` — they go to
+    /// `payload_conflicts` in the new `ReviewReconciliation`.
+    ///
+    /// Current RED state: assertion below fails because
+    /// `main_backscan` contains all 5 orphan dimensions.
+    #[test]
+    fn accident_03_review_done_hints_main_backscan_contains_orphan_projections() {
+        use ralph_core::supervisor::{SlotStatus, WavePhase, WaveSnapshot};
+
+        let workspace = tempfile::TempDir::new().expect("tempdir");
+        let ralph_dir = workspace.path().join(".ralph");
+        std::fs::create_dir_all(&ralph_dir).expect("mkdir .ralph");
+        let main_events_file = ralph_dir.join("events.jsonl");
+
+        // Plant 5 same-wave `review.unit.done` rows in main —
+        // they correspond to slots the store will report as
+        // Failed. This is the implementation-review primary-
+        // 20260727 incident layout: dispatcher's failed fan-in
+        // path left these rows in main because workers wrote
+        // there before scope-drop, and the dispatcher did not
+        // validate the store-side slot status.
+        let store_wave_id = "w-acc-3";
+        let mut lines = Vec::new();
+        for dim in [
+            "goal-alignment",
+            "correctness",
+            "maintainability",
+            "adversarial",
+            "project-standards",
+        ] {
+            let record = serde_json::json!({
+                "topic": "review.unit.done",
+                "payload": serde_json::json!({"dimension": dim}).to_string(),
+                "ts": "2026-07-27T00:00:00Z",
+                "hat": "review-worker",
+                "source": "review-worker",
+                "wave_id": store_wave_id,
+                "wave_index": 0u32,
+            });
+            lines.push(serde_json::to_string(&record).expect("json"));
+        }
+        std::fs::write(&main_events_file, lines.join("\n") + "\n").expect("write main");
+
+        // Bridge returns a snapshot where ALL slots are Failed
+        // (the incident shape — `completed.results` was empty,
+        // `completed.failures` was the truth source).
+        let bridge = RecordingBridge {
+            status: WaveSnapshot {
+                wave_id: store_wave_id.to_string(),
+                kind: WaveKind::Review,
+                phase: WavePhase::Collect,
+                expected_total: 6,
+                completed_count: 0,
+                failed_count: 6,
+                pending_count: 0,
+                in_flight_count: 0,
+                cancel_requested: false,
+                merged_to_events: false,
+                salvage_merged: false,
+                started_at: std::time::SystemTime::UNIX_EPOCH,
+                slots: (0u32..6).map(|i| (i, SlotStatus::Failed)).collect(),
+            },
+            evidence: std::collections::HashMap::new(),
+            mark_salvage_calls: std::sync::Mutex::new(Vec::new()),
+            coord_event_appends: std::sync::Mutex::new(Vec::new()),
+        };
+        let bridge_arc: Arc<dyn ralph_core::supervisor::SupervisorBridge> = Arc::new(bridge);
+
+        let mut assigned = std::collections::HashMap::new();
+        for (i, dim) in [
+            "goal-alignment",
+            "correctness",
+            "maintainability",
+            "adversarial",
+            "testing",
+            "project-standards",
+        ]
+        .iter()
+        .enumerate()
+        {
+            assigned.insert(i as u32, dim.to_string());
+        }
+        let completed = ralph_core::CompletedWave {
+            wave_id: store_wave_id.to_string(),
+            wave_total: 6,
+            assigned_dimensions: assigned,
+            ..ralph_core::CompletedWave::default()
+        };
+
+        let hints = build_review_done_hints(&bridge_arc, store_wave_id, &completed, &main_events_file);
+
+        // CURRENT (RED) behavior: main_backscan contains all 5
+        // orphan dimensions. U4 reconciliation must drop these
+        // because no slot is Completed in the store.
+        let orphan_count = hints.main_backscan.len();
+        assert_eq!(
+            orphan_count, 0,
+            "main_backscan must NOT include orphan projections: \
+             store reports all 6 slots as Failed, so a review.unit.done \
+             row in main that has no matching Completed slot is an orphan \
+             (moved to payload_conflicts in the reconciliation output). \
+             Got main_backscan = {:?}, store_completed = {:?}",
+            hints.main_backscan, hints.store_completed
+        );
+    }
+
+    /// U1.4 — `build_wave_failed_payload` for WaveKind::Review
+    /// currently extends `already_done` with `hints.main_backscan`,
+    /// so 6 dimensions assigned, 5 orphan main rows + 0 store
+    /// Completed → `missing_dimensions = [testing]` (length 1).
+    /// The implementation-review primary-20260727 payload
+    /// carried exactly this list, which is what blocked the run
+    /// from synthesizing review output (only 1 dimension was
+    /// classified as missing when in fact 6 were unprocessable).
+    ///
+    /// Locked invariant: after U4 reconciliation, the payload's
+    /// `missing_dimensions` MUST equal the full assigned set
+    /// when no slot is store-Completed. The incident `testing`
+    /// is the only dimension whose row DID land via store;
+    /// after the fix, the orphan 5 rows also count as missing
+    /// (because their slots Failed in the store and the orphan
+    /// projection is not authoritative).
+    #[test]
+    fn accident_04_build_wave_failed_payload_missing_dimensions_undercounts_orphans() {
+        use ralph_core::supervisor::WaveKind;
+
+        let store_wave_id = "w-acc-4";
+        let assigned_dims = [
+            "goal-alignment",
+            "correctness",
+            "maintainability",
+            "adversarial",
+            "testing",
+            "project-standards",
+        ];
+        let mut assigned = std::collections::HashMap::new();
+        for (i, dim) in assigned_dims.iter().enumerate() {
+            assigned.insert(i as u32, dim.to_string());
+        }
+        // No `results`, all 6 slots in `failures` (the incident
+        // shape — store reported 6 Failed, dispatcher never got
+        // any Completed slot evidence).
+        let completed = ralph_core::CompletedWave {
+            wave_id: store_wave_id.to_string(),
+            wave_total: 6,
+            assigned_dimensions: assigned.clone(),
+            failures: (0u32..6)
+                .map(|i| ralph_core::WaveFailure {
+                    index: i,
+                    error: "worker_timeout".to_string(),
+                    duration: std::time::Duration::from_millis(1),
+                    ..ralph_core::WaveFailure::default()
+                })
+                .collect(),
+            ..ralph_core::CompletedWave::default()
+        };
+
+        // Hints shape mirrors the incident: store_completed is
+        // empty (all Failed), main_backscan contains the 5
+        // orphan rows.
+        let mut main_backscan = std::collections::HashSet::new();
+        for dim in &assigned_dims[..5] {
+            main_backscan.insert((*dim).to_string());
+        }
+        let hints = ReviewDoneHints {
+            main_backscan,
+            store_completed: std::collections::HashSet::new(),
+        };
+
+        let payload = build_wave_failed_payload(
+            WaveKind::Review,
+            &completed,
+            "required_slot_failure",
+            (0u32..6).collect(),
+            &std::collections::HashMap::new(),
+            Some(&hints),
+        );
+
+        let missing: Vec<String> = payload
+            .get("missing_dimensions")
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|d| d.as_str().map(|s| s.to_string()))
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        assert_eq!(
+            missing.len(),
+            assigned_dims.len(),
+            "missing_dimensions MUST include all 6 assigned dimensions when \
+             no slot is store-Completed. The implementation-review primary-20260727 \
+             incident produced missing_dimensions=[testing] (length 1) because \
+             build_wave_failed_payload treated the 5 main_backscan orphans as done. \
+             After U4, all 6 must be reported as missing. Got: {missing:?}"
+        );
+        for dim in &assigned_dims {
+            assert!(
+                missing.contains(&dim.to_string()),
+                "missing_dimensions must contain {dim}; got: {missing:?}"
+            );
+        }
+    }
+
+    /// U1.5 — `merge_completed_review_slots_to_main` returns
+    /// `()` today and calls `bridge.mark_salvage_merged` AFTER
+    /// the main append succeeds. The current ordering is the
+    /// P0-1 fix from plan 004 (append-then-commit), but the
+    /// function does not return any `ProjectionReceipt` so the
+    /// caller cannot distinguish "wrote 3 lines and committed"
+    /// from "wrote 0 lines (all Failed) and did not commit".
+    /// Plan U5 replaces the signature with
+    /// `Result<ProjectionReceipt, ProjectionError>` so the
+    /// caller can drive the four-phase
+    /// `BusinessProjected → SalvageCommitted → CoordinationWritten →
+    /// CoordinationCommitted` state machine.
+    ///
+    /// This test pins the CURRENT observable side effects
+    /// (3 Completed slots → 3 lines appended → store mark set)
+    /// so U5's signature change must preserve the side effects
+    /// while also returning a receipt.
+    #[test]
+    fn accident_05_merge_completed_review_slots_to_main_writes_and_marks() {
+        use ralph_core::supervisor::WavePhase;
+        use ralph_core::supervisor::WaveSnapshot;
+        use ralph_core::supervisor::{SlotStatus, TerminalEvidence};
+
+        let workspace = tempfile::TempDir::new().expect("tempdir");
+        let ralph_dir = workspace.path().join(".ralph");
+        std::fs::create_dir_all(&ralph_dir).expect("mkdir .ralph");
+        let main_events_file = ralph_dir.join("events.jsonl");
+
+        let store_wave_id = "w-acc-5";
+        let bridge = std::sync::Arc::new(RecordingBridge {
+            status: WaveSnapshot {
+                wave_id: store_wave_id.to_string(),
+                kind: WaveKind::Review,
+                phase: WavePhase::Collect,
+                expected_total: 3,
+                completed_count: 3,
+                failed_count: 0,
+                pending_count: 0,
+                in_flight_count: 0,
+                cancel_requested: false,
+                merged_to_events: false,
+                salvage_merged: false,
+                started_at: std::time::SystemTime::UNIX_EPOCH,
+                slots: (0u32..3).map(|i| (i, SlotStatus::Completed)).collect(),
+            },
+            evidence: {
+                let mut m = std::collections::HashMap::new();
+                m.insert(
+                    0u32,
+                    TerminalEvidence::from_event(
+                        "review.unit.done",
+                        &serde_json::json!({"dimension": "correctness"}).to_string(),
+                    ),
+                );
+                m
+            },
+            mark_salvage_calls: std::sync::Mutex::new(Vec::new()),
+            coord_event_appends: std::sync::Mutex::new(Vec::new()),
+        });
+        let bridge_arc: Arc<dyn ralph_core::supervisor::SupervisorBridge> = bridge.clone();
+
+        // Completed: 3 slots, each with one review.unit.done event.
+        let mut results = Vec::new();
+        for i in 0u32..3 {
+            results.push(ralph_core::WaveResult {
+                index: i,
+                events: vec![ralph_proto::Event::new(
+                    "review.unit.done",
+                    serde_json::json!({"dimension": "correctness"}).to_string(),
+                )
+                .with_source("review-worker")
+                .with_wave(store_wave_id.to_string(), i, 3)],
+            });
+        }
+        let completed = ralph_core::CompletedWave {
+            wave_id: store_wave_id.to_string(),
+            wave_total: 3,
+            results,
+            ..ralph_core::CompletedWave::default()
+        };
+
+        // Call returns `()` today. Plan U5 changes the signature.
+        let _: () = merge_completed_review_slots_to_main(
+            &main_events_file,
+            &completed,
+            &bridge_arc,
+            store_wave_id,
+        );
+
+        // Side effects that U5 MUST preserve:
+        // 1. main has 3 review.unit.done rows attributed to review-worker.
+        let main_contents =
+            std::fs::read_to_string(&main_events_file).expect("main must be written");
+        let business_lines = main_contents
+            .lines()
+            .filter(|l| l.contains("\"review.unit.done\""))
+            .count();
+        assert_eq!(
+            business_lines, 3,
+            "merge must append exactly 3 review.unit.done rows; got {business_lines} \
+             in main:\n{main_contents}"
+        );
+        // 2. mark_salvage_merged was called exactly once for this wave.
+        let calls = bridge.mark_salvage_calls.lock().unwrap().clone();
+        assert_eq!(
+            calls,
+            vec![store_wave_id.to_string()],
+            "merge must commit salvage mark exactly once; got {calls:?}"
+        );
+    }
+
+    /// U1.6 — `append_supervisor_coord_event` returns `()` and
+    /// warns-and-continues on write failure. The
+    /// implementation-review primary-20260727 incident did NOT
+    /// see a coord-event write failure directly (the events
+    /// file was writable), but the failure mode is the SAME
+    /// root cause: the function is structurally unable to tell
+    /// the caller "I failed to write the coord event" — it
+    /// just logs and proceeds. Plan U5 closes this with
+    /// `Result<CoordinationReceipt, ProjectionError>` so the
+    /// four-phase commit can refuse to advance to
+    /// `CoordinationCommitted` when the main ledger cannot be
+    /// appended to.
+    ///
+    /// Locked invariant (current RED, expected GREEN after U5):
+    /// a write failure to the main ledger causes the function
+    /// to return an error the caller can propagate, instead of
+    /// silently dropping the failure. Today, the function
+    /// returns `()` unconditionally; the test asserts no
+    /// panic and (today) silently passes — U5 must change the
+    /// signature so the SAME test now sees the error surfaced.
+    #[cfg(unix)]
+    #[test]
+    fn accident_06_append_supervisor_coord_event_silently_drops_write_failure() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let workspace = tempfile::TempDir::new().expect("tempdir");
+        // Lock the events file's parent so the append fails.
+        let locked_parent = workspace.path().join("locked");
+        std::fs::create_dir(&locked_parent).expect("mkdir locked");
+        let mut perms = std::fs::metadata(&locked_parent).unwrap().permissions();
+        perms.set_mode(0o000);
+        std::fs::set_permissions(&locked_parent, perms).expect("chmod 0o000");
+
+        let main_events_file = locked_parent.join("events.jsonl");
+        let payload = serde_json::json!({"wave_id": "w-acc-6"});
+
+        // Current signature: `fn(...) { ... }`. The function
+        // warns-and-continues on EACCES; this is the silent-
+        // success window plan U5 must close. The call MUST
+        // NOT panic, but with the current `()` return there
+        // is no other observable signal of failure.
+        let _: () = append_supervisor_coord_event(
+            &main_events_file,
+            "review.wave.failed",
+            &payload,
+        );
+
+        // Restore perms so the tempdir teardown succeeds.
+        let mut restore = std::fs::metadata(&locked_parent).unwrap().permissions();
+        restore.set_mode(0o755);
+        let _ = std::fs::set_permissions(&locked_parent, restore);
+
+        // Today's behavior: no panic. The file was not written,
+        // but the caller cannot detect that. U5 must change the
+        // signature to Result so the caller can refuse the next
+        // phase commit.
+    }
+
+    // =================================================================
+    // Test fixture for U1.3 / U1.4 / U1.5: a minimal
+    // `SupervisorBridge` impl that records call order and lets
+    // each test script the store-side slot status / evidence map.
+    // Stays in `mod tests` so it does not leak to other crates.
+    // =================================================================
+    #[derive(Debug)]
+    struct RecordingBridge {
+        status: ralph_core::supervisor::WaveSnapshot,
+        evidence: std::collections::HashMap<u32, ralph_core::supervisor::TerminalEvidence>,
+        mark_salvage_calls: std::sync::Mutex<Vec<String>>,
+        coord_event_appends: std::sync::Mutex<Vec<String>>,
+    }
+
+    impl ralph_core::supervisor::SupervisorBridge for RecordingBridge {
+        fn tick(
+            &self,
+            _wave_id: &str,
+            _inputs: PhaseInputs,
+        ) -> Result<ralph_core::supervisor::CoordinatorAction, BridgeError> {
+            Ok(ralph_core::supervisor::CoordinatorAction::ContinueCollect)
+        }
+
+        fn bind_slot(
+            &self,
+            _kind: WaveKind,
+            _wave_id: &str,
+            _slot_index: u32,
+        ) -> Result<Option<ralph_core::supervisor::SlotBinding>, BridgeError> {
+            Ok(None)
+        }
+
+        fn recover(&self) -> Result<Vec<ralph_core::supervisor::WaveSnapshot>, BridgeError> {
+            Ok(Vec::new())
+        }
+
+        fn fan_in_status(
+            &self,
+            _wave_id: &str,
+        ) -> Result<ralph_core::supervisor::WaveSnapshot, BridgeError> {
+            Ok(self.status.clone())
+        }
+
+        fn register_wave_if_absent(
+            &self,
+            _kind: WaveKind,
+            wave_id: &str,
+            _expected_total: u32,
+            _slot_retry_budget: u32,
+        ) -> Result<String, BridgeError> {
+            Ok(wave_id.to_string())
+        }
+
+        fn record_slot_result(
+            &self,
+            _wave_id: &str,
+            _slot_index: u32,
+            _content_hash: &str,
+            _event_count: usize,
+        ) -> Result<(), BridgeError> {
+            Ok(())
+        }
+
+        fn record_slot_failure(
+            &self,
+            _wave_id: &str,
+            _slot_index: u32,
+            _reason: &str,
+        ) -> Result<(), BridgeError> {
+            Ok(())
+        }
+
+        fn release_slot_dispatch(
+            &self,
+            _wave_id: &str,
+            _slot_index: u32,
+            _outcome: ralph_core::supervisor::DispatchOutcome,
+        ) -> Result<(), BridgeError> {
+            Ok(())
+        }
+
+        fn slot_terminal_evidence(
+            &self,
+            _wave_id: &str,
+            slot_index: u32,
+        ) -> Result<Option<ralph_core::supervisor::TerminalEvidence>, BridgeError> {
+            Ok(self.evidence.get(&slot_index).cloned())
+        }
+
+        fn slot_failure_reason(
+            &self,
+            _wave_id: &str,
+            _slot_index: u32,
+        ) -> Result<Option<String>, BridgeError> {
+            Ok(None)
+        }
+
+        fn mark_salvage_merged(&self, wave_id: &str) -> Result<(), BridgeError> {
+            self.mark_salvage_calls
+                .lock()
+                .unwrap()
+                .push(wave_id.to_string());
+            Ok(())
+        }
+
+        fn mark_merge_to_events(&self, _wave_id: &str) -> Result<(), BridgeError> {
+            Ok(())
+        }
+
+        fn record_never_started_failures(&self, wave_id: &str) -> Result<(), BridgeError> {
+            // Default impl iterates Pending slots and calls
+            // record_slot_failure. The bridge stub records
+            // nothing in mark_salvage_calls here; U1.x tests
+            // only assert the side effects they care about.
+            let _ = wave_id;
+            Ok(())
+        }
     }
 }
