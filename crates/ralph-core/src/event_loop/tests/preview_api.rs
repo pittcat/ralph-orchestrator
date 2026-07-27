@@ -505,3 +505,86 @@ fn custom_auto_inject_skill_appears_once() {
         "custom auto_inject marker must appear exactly once; got {marker_count}"
     );
 }
+
+// ─────────────────────────────────────────────────────────────────────
+// Unit 1 of plan 2026-07-27-002: scenario injection fields.
+// ─────────────────────────────────────────────────────────────────────
+
+/// Default PromptPreview (no scenario args) must have `evidence_level == "static"`
+/// and all optional fields as None.
+#[test]
+fn preview_default_evidence_level_is_static() {
+    let config = minimal_isolated_config(true, true);
+    let mut event_loop = EventLoop::new(config);
+    event_loop.initialize("U1 evidence-level test");
+    let preview = event_loop
+        .prompt_preview(&HatId::new("builder"))
+        .expect("preview");
+
+    assert_eq!(preview.evidence_level, "static");
+    assert!(preview.trigger_context_injected.is_none());
+    assert!(preview.wave_context_injected.is_none());
+    assert!(preview.orchestrator_context_injected.is_none());
+    assert!(preview.correction_injected.is_none());
+    assert!(preview.skill_gates.is_none());
+}
+
+/// JSON round-trip of PromptPreview must succeed with new optional fields.
+/// The existing `preview_json_roundtrip` already covers the default case;
+/// this test constructs a PromptPreview with all optional fields set to
+/// verify serde skip/deserialize works correctly.
+#[test]
+fn preview_json_roundtrip_with_all_fields() {
+    let config = minimal_isolated_config(true, true);
+    let mut event_loop = EventLoop::new(config);
+    event_loop.initialize("U1 json roundtrip all fields");
+    let base = event_loop
+        .prompt_preview(&HatId::new("builder"))
+        .expect("preview");
+
+    let preview = PromptPreview {
+        evidence_level: "runtime".to_string(),
+        trigger_context_injected: Some(crate::trigger_context::TriggerContextView {
+            source_topic: "build.task".to_string(),
+            source_hat: Some("worker".to_string()),
+            current_hat: "builder".to_string(),
+            summary: Vec::new(),
+            matched_hints: Vec::new(),
+        }),
+        wave_context_injected: Some(crate::wave_context::WaveContext {
+            wave_id: "wave-1".to_string(),
+            wave_total: 3,
+            received_count: 2,
+            expected_dimensions: vec!["lint".to_string(), "test".to_string()],
+            missing_dimensions: vec!["audit".to_string()],
+            all_dimensions_received: false,
+            aggregate_timeout: false,
+        }),
+        orchestrator_context_injected: Some(serde_json::json!({
+            "task_count": 5,
+            "phase": "review"
+        })),
+        correction_injected: Some(crate::correction::CorrectionContext {
+            reason_code: "origin:ralph_control_only".to_string(),
+            stage: "origin".to_string(),
+            topic: "work.ready".to_string(),
+            source_hat: Some("worker".to_string()),
+            retry_key: "origin:worker:work.ready:ralph_control_only".to_string(),
+            retry_count: 1,
+            escalation_threshold: 3,
+            needs_escalation: false,
+            last_message: "test correction".to_string(),
+            expected_payload_template: "{}".to_string(),
+            allowed_topics: vec!["work.ready".to_string()],
+            required_fields: vec!["task_key".to_string()],
+        }),
+        skill_gates: Some(SkillGateFlags {
+            scratchpad_enabled: true,
+        }),
+        ..base
+    };
+
+    let json = serde_json::to_string(&preview).expect("serialize");
+    let back: PromptPreview = serde_json::from_str(&json).expect("deserialize");
+    assert_eq!(preview, back);
+}

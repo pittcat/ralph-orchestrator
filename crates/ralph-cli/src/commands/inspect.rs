@@ -163,6 +163,50 @@ pub struct InspectPromptArgs {
     /// --full = blocks + skill table + full text).
     #[arg(long)]
     pub full: bool,
+
+    // ── Unit 1 scenario args (2026-07-27-002 plan) ──────────────
+    /// Simulated trigger topic (e.g. `build.task`). When provided,
+    /// `trigger_context_injected` is computed and included in the
+    /// preview output.
+    #[arg(long)]
+    pub trigger: Option<String>,
+
+    /// Simulated source hat for the trigger event.
+    #[arg(long)]
+    pub source_hat: Option<String>,
+
+    /// Simulated trigger payload as JSON. Must be valid JSON when
+    /// provided.
+    #[arg(long)]
+    pub payload: Option<String>,
+
+    /// Simulated iteration number for the hat activation.
+    #[arg(long)]
+    pub iteration: Option<u32>,
+
+    /// Simulated wave context as JSON.
+    #[arg(long)]
+    pub wave_context: Option<String>,
+
+    /// Simulated orchestrator context as JSON.
+    #[arg(long)]
+    pub orchestrator_context: Option<String>,
+
+    /// Simulated correction context as JSON.
+    #[arg(long)]
+    pub correction: Option<String>,
+
+    /// Override scratchpad gate for preview purposes.
+    #[arg(long)]
+    pub scratchpad: Option<bool>,
+
+    /// Override tasks-enabled gate for preview purposes.
+    #[arg(long)]
+    pub tasks_enabled: Option<bool>,
+
+    /// Override memories-enabled gate for preview purposes.
+    #[arg(long)]
+    pub memories_enabled: Option<bool>,
 }
 
 /// Execute an `ralph inspect` subcommand.
@@ -506,12 +550,136 @@ pub async fn inspect_prompt_command(
 
     let mut event_loop = ralph_core::event_loop::EventLoop::new(config);
     event_loop.initialize("ralph inspect prompt (read-only)");
-    let preview_via_loop = event_loop.prompt_preview(&hat_id).ok_or_else(|| {
+    let preview_base = event_loop.prompt_preview(&hat_id).ok_or_else(|| {
         anyhow::anyhow!(
             "hat {:?} not found in preset; available hats are listed by `ralph hats list`",
             hat_id.as_str()
         )
     })?;
+
+    // Build scenario context from args (Unit 1 of plan 2026-07-27-002).
+    // When any scenario parameter is provided, we enrich the preview
+    // with simulated trigger/wave/correction/orchestrator context fields.
+    let has_scenario = args.trigger.is_some()
+        || args.payload.is_some()
+        || args.source_hat.is_some()
+        || args.wave_context.is_some()
+        || args.orchestrator_context.is_some()
+        || args.correction.is_some()
+        || args.scratchpad.is_some()
+        || args.tasks_enabled.is_some()
+        || args.memories_enabled.is_some();
+
+    let preview = if has_scenario {
+        // Parse JSON scenario args.
+        let payload_json = match &args.payload {
+            Some(p) => {
+                match serde_json::from_str::<serde_json::Value>(p) {
+                    Ok(v) => Some(v),
+                    Err(e) => anyhow::bail!(
+                        "failed to parse --payload JSON: {} (field: --payload)",
+                        e
+                    ),
+                }
+            }
+            None => None,
+        };
+        let wave_json = match &args.wave_context {
+            Some(w) => Some(serde_json::from_str::<serde_json::Value>(w).map_err(|e| {
+                anyhow::anyhow!(
+                    "failed to parse --wave-context JSON: {} (field: --wave-context)",
+                    e
+                )
+            })?),
+            None => None,
+        };
+        let orchestrator_json = match &args.orchestrator_context {
+            Some(o) => Some(serde_json::from_str::<serde_json::Value>(o).map_err(|e| {
+                anyhow::anyhow!(
+                    "failed to parse --orchestrator-context JSON: {} (field: --orchestrator-context)",
+                    e
+                )
+            })?),
+            None => None,
+        };
+        let correction_json = match &args.correction {
+            Some(c) => Some(serde_json::from_str::<serde_json::Value>(c).map_err(|e| {
+                anyhow::anyhow!(
+                    "failed to parse --correction JSON: {} (field: --correction)",
+                    e
+                )
+            })?),
+            None => None,
+        };
+
+        // Build Option<TriggerContextView> from --trigger / --source-hat / --payload.
+        let trigger_context_injected = args.trigger.as_ref().map(|topic| {
+            // Build a minimal trigger context view from the scenario args.
+            // This mirrors ralph_core::trigger_context::build but without
+            // requiring a full schema lookup — the preview context is
+            // informational, not authoritative.
+            use ralph_core::trigger_context::{
+                FieldSummary, FieldValue, TriggerContextView,
+            };
+            TriggerContextView {
+                source_topic: topic.clone(),
+                source_hat: args.source_hat.clone(),
+                current_hat: hat_id.as_str().to_string(),
+                summary: payload_json
+                    .as_ref()
+                    .map(|pj| {
+                        if let serde_json::Value::Object(map) = pj {
+                            map.iter()
+                                .map(|(k, v)| FieldSummary {
+                                    field: k.clone(),
+                                    value: FieldValue::Present(v.clone()),
+                                })
+                                .collect()
+                        } else {
+                            Vec::new()
+                        }
+                    })
+                    .unwrap_or_default(),
+                matched_hints: Vec::new(),
+            }
+        });
+
+        // Build Option<WaveContext> from --wave-context.
+        let wave_context_injected = wave_json.as_ref().and_then(|wv| {
+            serde_json::from_value::<ralph_core::wave_context::WaveContext>(wv.clone()).ok()
+        });
+
+        // Build Option<CorrectionContext> from --correction.
+        let correction_injected = correction_json.as_ref().and_then(|cv| {
+            serde_json::from_value::<ralph_core::correction::CorrectionContext>(cv.clone()).ok()
+        });
+
+        // Build skill_gates from overrides.
+        let skill_gates = if args.scratchpad.is_some()
+            || args.tasks_enabled.is_some()
+            || args.memories_enabled.is_some()
+        {
+            // If no explicit override, use preview_base gates as fallback.
+            Some(ralph_core::event_loop::SkillGateFlags {
+                scratchpad_enabled: args.scratchpad.unwrap_or(false),
+            })
+        } else {
+            None
+        };
+
+        // Merge scenario fields onto the base preview.
+        ralph_core::event_loop::PromptPreview {
+            trigger_context_injected,
+            wave_context_injected,
+            orchestrator_context_injected: orchestrator_json,
+            correction_injected,
+            skill_gates,
+            evidence_level: "runtime".to_string(),
+            ..preview_base
+        }
+    } else {
+        preview_base
+    };
 
     // Build the full prompt body while tracing is still suppressed,
     // then drop the guard before emitting output so normal logging resumes.
@@ -523,7 +691,7 @@ pub async fn inspect_prompt_command(
     drop(_guard);
 
     emit_prompt_view(
-        &preview_via_loop,
+        &preview,
         full_body,
         args.format,
         args.full,

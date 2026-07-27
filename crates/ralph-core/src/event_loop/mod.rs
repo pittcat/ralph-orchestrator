@@ -413,7 +413,7 @@ pub(crate) fn append_runtime_config_block(base_prompt: String, max_residuals: u3
 /// preview_characterization.rs) pins the equivalence between
 /// this preview and the actual prompt — any future drift fails
 /// the tests, not this API.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct PromptPreview {
     /// Hat id whose prompt is being previewed.
     pub hat_id: String,
@@ -432,6 +432,28 @@ pub struct PromptPreview {
     /// `## …` block titles extracted from a dry `build_prompt`
     /// call, in the order they appear in the prompt.
     pub block_titles: Vec<String>,
+
+    // ── 2026-07-27-002 plan Unit 1: scenario injection fields ──
+
+    /// Structured trigger context view, derived from the simulated trigger.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub trigger_context_injected: Option<crate::trigger_context::TriggerContextView>,
+    /// Wave context snapshot for the hat.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub wave_context_injected: Option<crate::wave_context::WaveContext>,
+    /// Orchestrator context as generic JSON (composite of task/progress views).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub orchestrator_context_injected: Option<serde_json::Value>,
+    /// Correction context (single rejection entry).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub correction_injected: Option<crate::correction::CorrectionContext>,
+    /// Extended gate flags beyond the basic gates (e.g. scratchpad).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub skill_gates: Option<SkillGateFlags>,
+    /// Evidence level: "static" (default), "runtime" (scenario args supplied),
+    /// or "unverified".
+    #[serde(default = "default_evidence_level")]
+    pub evidence_level: String,
 }
 
 /// Snapshot of the auto-inject gates that drive
@@ -441,6 +463,21 @@ pub struct PromptPreview {
 pub struct PromptGates {
     pub tasks_enabled: bool,
     pub memories_enabled: bool,
+}
+
+/// Extended gate flags beyond the basic `PromptGates` (e.g. scratchpad).
+/// 2026-07-27-002 plan Unit 1: visible in `PromptPreview.skill_gates`
+/// when scenario args are supplied.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct SkillGateFlags {
+    pub scratchpad_enabled: bool,
+}
+
+/// Default evidence level for `PromptPreview.evidence_level`.
+/// Returns `"static"` — the preview was derived from config alone
+/// without runtime scenario parameters.
+pub fn default_evidence_level() -> String {
+    "static".to_string()
 }
 
 /// One entry in either the auto-inject or on-demand list.
@@ -972,6 +1009,16 @@ where
         auto_inject,
         on_demand,
         block_titles,
+        // 2026-07-27-002 plan Unit 1: scenario injection defaults.
+        // These are populated by `inspect_prompt_command` when
+        // scenario args are supplied; the pure config path leaves
+        // them at their default (None / "static").
+        trigger_context_injected: None,
+        wave_context_injected: None,
+        orchestrator_context_injected: None,
+        correction_injected: None,
+        skill_gates: None,
+        evidence_level: default_evidence_level(),
     })
 }
 
