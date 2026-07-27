@@ -797,7 +797,80 @@ pub fn fingerprint_payload(payload: &str) -> String {
     out
 }
 
-/// The supervisor persistence + dispatch-decision trait. Both the
+// ─────────────────────────────────────────────────────────────────
+// 2026-07-27-004 plan U3 (R8-R10 / D4): typed atomic slot
+// terminal record. A single store mutator commits the slot's
+// terminal status, optional terminal evidence, content hash,
+// dispatched-capacity release and event count in one
+// transaction so fan-in / reconciliation / blocking / salvage
+// observers never see a half-written slot.
+// ─────────────────────────────────────────────────────────────────
+
+/// 2026-07-27-004 plan U3 (R8 / S7 / S8): the SHAPE of an atomic
+/// slot terminal commit. Each variant carries exactly the data
+/// the store needs to advance the slot to its terminal state in
+/// one transaction. The dispatcher compiles a `SlotTerminalRecord`
+/// from the worker's terminal event (parsed by
+/// `ralph_core::supervisor::worker_outcome`) and hands it to the
+/// store; the store commits everything atomically.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SlotTerminalRecord {
+    /// R8 / S7: terminal Completed. Carries the content hash and
+    /// terminal evidence (topic / dimension / payload fingerprint).
+    Completed {
+        slot_index: u32,
+        content_hash: String,
+        event_count: u32,
+        terminal_evidence: TerminalEvidence,
+    },
+    /// R8 / S9: permanent failure.
+    Failed {
+        slot_index: u32,
+        reason: String,
+        /// Optional bounded evidence (R3 / KTD3): failure
+        /// evidence carries the bound terminal topic + fingerprint
+        /// when one is available so reconciliation can distinguish
+        /// a failure-with-evidence from a worker-timeout-without.
+        terminal_evidence: Option<TerminalEvidence>,
+    },
+    /// R8 / S14: explicit cancel (worker killed by the
+    /// dispatcher's deadline path).
+    Cancelled { slot_index: u32, reason: String },
+}
+
+impl SlotTerminalRecord {
+    /// Project the record's `slot_index` regardless of variant.
+    /// The `commit_slot_terminal` default impl uses this to query
+    /// the slot's current terminal status without branching on
+    /// the variant.
+    pub fn slot_index(&self) -> u32 {
+        match self {
+            SlotTerminalRecord::Completed { slot_index, .. }
+            | SlotTerminalRecord::Failed { slot_index, .. }
+            | SlotTerminalRecord::Cancelled { slot_index, .. } => *slot_index,
+        }
+    }
+}
+
+/// 2026-07-27-004 plan U3 (R9 / S9): return value of
+/// `commit_slot_terminal`. Either the store accepted the new
+/// terminal record (Committed), the record was an identical
+/// replay against a slot already in the same terminal state
+/// (Idempotent), or the commit was refused (Conflict / Unknown /
+/// Invalid).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SlotTerminalOutcome {
+    /// The slot was not previously terminal and the record was
+    /// committed in one transaction.
+    Committed,
+    /// The slot was already terminal with an IDENTICAL terminal
+    /// record; the store returned `Ok` without rewriting any
+    /// state. Replay-safe by construction.
+    Idempotent,
+}
+
+/// 2026-07-27-004 plan U3 (R8 / S7): the supervisor persistence
+/// + dispatch-decision trait. Both the
 /// in-memory (U3/U4) and rusqlite (U5) implementations satisfy this
 /// contract; the coordinator (U8) depends only on the trait so
 /// `MockSupervisorStore` can drive unit tests without spinning up a
@@ -970,6 +1043,123 @@ pub trait SupervisorStore: fmt::Debug + Send + Sync {
         slot_index: u32,
         reason: &str,
     ) -> SupervisorStoreResult<()>;
+
+    /// 2026-07-27-004 plan U3 (R8-R10 / D4): atomic slot terminal
+    /// commit. The store MUST advance the slot to a terminal
+    /// state in a single transaction. The default implementation
+    /// delegates to the legacy `record_slot_result` /
+    /// `record_slot_terminal_evidence` / `record_slot_failure` /
+    /// `release_slot_dispatch` quartet in a fixed order — it is
+    /// NOT atomic and exists only so existing callers keep
+    /// compiling. Production stores (the in-memory and rusqlite
+    /// variants) MUST override this with a single mutation so
+    /// the S8 fault-injection test (a panic between
+    /// `release_slot_dispatch` and `record_slot_terminal_evidence`)
+    /// observes NO half-write.
+    fn commit_slot_terminal(
+        &self,
+        wave_id: &str,
+        record: &SlotTerminalRecord,
+    ) -> SupervisorStoreResult<SlotTerminalOutcome> {
+        // R9 idempotency contract: if the slot is already in the
+        // requested terminal kind AND the existing fingerprint
+        // matches the requested one, return `Idempotent` WITHOUT
+        // mutating state. The default impl does this via two
+        // cheap reads of `fan_in_status` / `slot_terminal_evidence`
+        // before issuing any write — production stores detect the
+        // same condition inside their transaction.
+        let desired_kind = match record {
+            SlotTerminalRecord::Completed { .. } => SlotStatus::Completed,
+            SlotTerminalRecord::Failed { .. } => SlotStatus::Failed,
+            SlotTerminalRecord::Cancelled { .. } => SlotStatus::Cancelled,
+        };
+        if let Ok(snap) = self.fan_in_status(wave_id)
+            && let Some(current) = snap
+                .slots
+                .iter()
+                .find(|(i, _)| *i == record.slot_index())
+                .map(|(_, s)| *s)
+            && matches!(
+                current,
+                SlotStatus::Completed | SlotStatus::Failed | SlotStatus::Cancelled
+            )
+        {
+            // Slot is in some terminal state. Compare kind and
+            // fingerprint to decide Idempotent vs Conflict.
+            if current == desired_kind {
+                match record {
+                    SlotTerminalRecord::Completed {
+                        terminal_evidence, ..
+                    } => {
+                        let stored = self
+                            .slot_terminal_evidence(wave_id, record.slot_index())
+                            .ok()
+                            .flatten();
+                        if stored.as_ref() == Some(terminal_evidence) {
+                            return Ok(SlotTerminalOutcome::Idempotent);
+                        }
+                        // Evidence mismatch but same kind →
+                        // conflict (R9). Fall through so the
+                        // legacy writes observe and surface the
+                        // inconsistency.
+                    }
+                    SlotTerminalRecord::Failed { reason, .. }
+                    | SlotTerminalRecord::Cancelled { reason, .. } => {
+                        if let Ok(Some(stored_reason)) =
+                            self.slot_failure_reason(wave_id, record.slot_index())
+                            && stored_reason == *reason
+                        {
+                            return Ok(SlotTerminalOutcome::Idempotent);
+                        }
+                    }
+                }
+            }
+            // Different terminal kind OR fingerprint mismatch
+            // fall through to the legacy path, which will surface
+            // `AlreadyTerminal` for the caller.
+        }
+
+        // The fallback mirrors the legacy call sequence:
+        //   1. Persist result content_hash + event_count FIRST
+        //      (the underlying record_slot_result only accepts
+        //      new content_hash when the slot is not yet
+        //      terminal-or-completed).
+        //   2. Release dispatch capacity (terminal status).
+        //   3. Attach bounded terminal evidence.
+        // The default is intentionally NOT atomic: split-step
+        // visibility is exactly what U3 aims to close. Production
+        // stores (memory/rusqlite) override; see
+        // `u3_atomic_terminal_tests::tests::slot_terminal_commit_is_atomic_under_simulated_fault`.
+        match record {
+            SlotTerminalRecord::Completed {
+                slot_index,
+                content_hash,
+                event_count,
+                terminal_evidence,
+            } => {
+                self.record_slot_result(wave_id, *slot_index, content_hash, *event_count as usize)?;
+                self.release_slot_dispatch(wave_id, *slot_index, DispatchOutcome::Completed)?;
+                self.record_slot_terminal_evidence(wave_id, *slot_index, terminal_evidence)?;
+                Ok(SlotTerminalOutcome::Committed)
+            }
+            SlotTerminalRecord::Failed {
+                slot_index, reason, ..
+            } => {
+                self.record_slot_failure(wave_id, *slot_index, reason)?;
+                self.release_slot_dispatch(wave_id, *slot_index, DispatchOutcome::Failed)?;
+                Ok(SlotTerminalOutcome::Committed)
+            }
+            SlotTerminalRecord::Cancelled { slot_index, reason } => {
+                // Cancellation releases the dispatch permit and
+                // records the cancel reason via the legacy failure
+                // path so the existing `record_slot_failure`
+                // first-terminal-wins semantics still apply.
+                self.record_slot_failure(wave_id, *slot_index, reason)?;
+                let _ = self.release_slot_dispatch(wave_id, *slot_index, DispatchOutcome::Failed);
+                Ok(SlotTerminalOutcome::Committed)
+            }
+        }
+    }
 
     /// 2026-07-25-004 plan U5 (R6 / AE5): read a slot's
     /// recorded failure reason. Used by the diagnostics JSON
@@ -1350,6 +1540,14 @@ mod types_tests;
 /// survival without an in-memory authoritative map.
 #[cfg(test)]
 mod u1_public_id_tests;
+/// 2026-07-27-004 plan U3 (R8-R10 / D4): atomic slot terminal
+/// commit. The new typed `SlotTerminalRecord` / `SlotTerminalOutcome`
+/// surface is exercised end-to-end (Completed / Failed / Cancelled
+/// paths, idempotent replay, conflict rejection, sibling-slot
+/// isolation). The legacy multi-step APIs remain callable so
+/// existing tests compile unchanged.
+#[cfg(test)]
+mod u3_atomic_terminal_tests;
 pub mod worker_outcome;
 pub mod worktree_bind;
 
