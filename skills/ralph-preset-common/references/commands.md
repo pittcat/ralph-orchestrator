@@ -88,6 +88,11 @@ ralph -c <preset>.yml inspect prompt --hat <hat_id> --format json \
 ralph -c <preset>.yml inspect prompt --hat <hat_id> --format json \
     --topic <TOPIC> --payload '<JSON>' [--triggered <hat_id>]
 
+**失败停机条件：**
+- `--topic` 必须是当前 hat 的 `publishes` 列表成员或 `default_publishes` 回退值，否则返回 `policy_decision: reject` + gate=`topic_publishes`（reason_code=`hat_does_not_publish_topic`）。
+- `--triggered` 如果提供，必须是 config 中已注册的 hat id，否则返回 `policy_decision: reject` + gate=`triggered_not_in_topology`（reason_code=`triggered_hat_not_in_config`）。
+- 省略 `--triggered` 为合法路径（降级到普通 emit 评估，不校验 triggered 拓扑）。
+
 # Capability inventory（Unit 3）
 ralph capability inventory --format {human|json}
 ```

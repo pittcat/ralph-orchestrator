@@ -216,6 +216,7 @@ pub struct InspectPromptArgs {
     pub topic: Option<String>,
 
     /// Simulated triggered hat for the candidate emit evaluation.
+    /// Must be a registered hat id if provided; unknown hats cause rejection.
     /// Only meaningful when --topic and --payload are both provided.
     #[arg(long)]
     pub triggered: Option<String>,

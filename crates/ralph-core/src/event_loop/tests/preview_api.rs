@@ -790,3 +790,149 @@ hats:
     let m_back: NextHatCandidates = serde_json::from_str(&m_json).expect("roundtrip mixed");
     assert_eq!(mixed, m_back);
 }
+
+// ─────────────────────────────────────────────────────────────────────
+// Unit 6 of plan 2026-07-27-002: topology validation for candidate emit.
+// ─────────────────────────────────────────────────────────────────────
+
+/// RED phase: `evaluate_candidate_emit` must reject when `triggered`
+/// hat is not present in the config topology.
+#[test]
+fn evaluate_candidate_emit_rejects_unknown_triggered() {
+    use crate::event_policy::evaluate_candidate_emit;
+
+    let yaml = r#"
+event_loop:
+  execution_mode: isolated
+hats:
+  worker:
+    name: "Worker"
+    publishes: ["work.ready"]
+    triggers: ["build.task"]
+"#;
+    let config: RalphConfig = serde_yaml::from_str(yaml).expect("parse");
+    let hat_id = ralph_proto::HatId::new("worker");
+    let payload = r#"{"task_key": "task-123"}"#;
+
+    // triggered hat "nonexistent" is not in config → must reject.
+    let result =
+        evaluate_candidate_emit(&config, &hat_id, "work.ready", payload, Some("nonexistent"))
+            .expect("evaluation should succeed");
+
+    assert_eq!(
+        result.policy_decision, "reject",
+        "unknown triggered hat must be rejected; got decision: {}",
+        result.policy_decision
+    );
+    assert!(
+        result
+            .reasons
+            .iter()
+            .any(|r| r.gate == "triggered_not_in_topology"),
+        "expected gate=triggered_not_in_topology, got reasons: {:?}",
+        result.reasons
+    );
+}
+
+/// RED phase: `evaluate_candidate_emit` must reject when the current hat
+/// does NOT publish the target topic (and it is not in default_publishes).
+#[test]
+fn evaluate_candidate_emit_rejects_topic_not_in_hat_publishes() {
+    use crate::event_policy::evaluate_candidate_emit;
+
+    let yaml = r#"
+event_loop:
+  execution_mode: isolated
+hats:
+  builder:
+    name: "Builder"
+    publishes: ["build.task"]
+    triggers: []
+"#;
+    let config: RalphConfig = serde_yaml::from_str(yaml).expect("parse");
+    let hat_id = ralph_proto::HatId::new("builder");
+    let payload = r#"{"task_key": "task-123"}"#;
+
+    // builder does NOT publish "work.done" → must reject.
+    let result = evaluate_candidate_emit(&config, &hat_id, "work.done", payload, None)
+        .expect("evaluation should succeed");
+
+    assert_eq!(
+        result.policy_decision, "reject",
+        "topic not in hat publishes must be rejected; got decision: {}",
+        result.policy_decision
+    );
+    assert!(
+        result.reasons.iter().any(|r| r.gate == "topic_publishes"),
+        "expected gate=topic_publishes, got reasons: {:?}",
+        result.reasons
+    );
+}
+
+/// GREEN phase: passing a known triggered hat and a topic that the hat
+/// publishes must NOT reject on topology grounds (policy decision depends
+/// on payload validity, not topology).
+#[test]
+fn evaluate_candidate_emit_accepts_trusted_path() {
+    use crate::event_policy::evaluate_candidate_emit;
+
+    let yaml = r#"
+event_loop:
+  execution_mode: isolated
+hats:
+  worker:
+    name: "Worker"
+    publishes: ["work.ready"]
+    triggers: ["build.task"]
+"#;
+    let config: RalphConfig = serde_yaml::from_str(yaml).expect("parse");
+    let hat_id = ralph_proto::HatId::new("worker");
+    let payload = r#"{"task_key": "task-123"}"#;
+
+    // Known hat + published topic + valid triggered → accept (payload-valid case).
+    let result = evaluate_candidate_emit(&config, &hat_id, "work.ready", payload, Some("worker"))
+        .expect("evaluation should succeed");
+
+    assert_eq!(
+        result.policy_decision, "accept",
+        "trusted path (known hat + published topic) must not be rejected on topology; got: {:?}",
+        result
+    );
+    assert!(
+        !result
+            .reasons
+            .iter()
+            .any(|r| r.gate == "topic_publishes" || r.gate == "triggered_not_in_topology"),
+        "trusted path must not have topology rejection reasons; got: {:?}",
+        result.reasons
+    );
+}
+
+/// Omitting triggered (None) remains a valid fall-through path when
+/// the hat publishes the topic.
+#[test]
+fn evaluate_candidate_emit_accepts_omitted_triggered() {
+    use crate::event_policy::evaluate_candidate_emit;
+
+    let yaml = r#"
+event_loop:
+  execution_mode: isolated
+hats:
+  worker:
+    name: "Worker"
+    publishes: ["work.ready"]
+    triggers: ["build.task"]
+"#;
+    let config: RalphConfig = serde_yaml::from_str(yaml).expect("parse");
+    let hat_id = ralph_proto::HatId::new("worker");
+    let payload = r#"{"task_key": "task-123"}"#;
+
+    let result = evaluate_candidate_emit(&config, &hat_id, "work.ready", payload, None)
+        .expect("evaluation should succeed");
+
+    assert_eq!(
+        result.policy_decision, "accept",
+        "omitted triggered must be valid when hat publishes topic; got: {:?}",
+        result
+    );
+}

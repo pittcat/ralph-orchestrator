@@ -2619,7 +2619,7 @@ pub fn evaluate_candidate_emit(
     hat_id: &HatId,
     topic: &str,
     payload_json: &str,
-    _triggered: Option<&str>,
+    triggered: Option<&str>,
 ) -> Result<CandidateEmitPreview, String> {
     // 1. Check that hat_id exists in config.
     let hat_config = config
@@ -2627,11 +2627,27 @@ pub fn evaluate_candidate_emit(
         .get(hat_id.as_str())
         .ok_or_else(|| format!("hat {} not found in config", hat_id.as_str()))?;
 
-    let _hat_publishes_topic = hat_config.publishes.iter().any(|p| p == topic)
+    // U6: reject if the hat does not publish this topic (and it is not the
+    // default_publishes fallback).  Checked before topic_format so the
+    // topology gate takes priority over format validation.
+    let hat_publishes_topic = hat_config.publishes.iter().any(|p| p == topic)
         || hat_config
             .default_publishes
             .as_deref()
             .is_some_and(|d| d == topic);
+
+    if !hat_publishes_topic {
+        return Ok(CandidateEmitPreview {
+            policy_decision: "reject".to_string(),
+            reasons: vec![PolicyReasonEntry {
+                gate: "topic_publishes".to_string(),
+                field: "topic".to_string(),
+                reason_code: "hat_does_not_publish_topic".to_string(),
+            }],
+            projection: None,
+            next_hat_candidates: NextHatCandidates::Unverified,
+        });
+    }
 
     // 2. Check topic format via build_allowed_topics + check_topic_format.
     let completion_promise = &config.event_loop.completion_promise;
@@ -2649,6 +2665,22 @@ pub fn evaluate_candidate_emit(
                 gate: "topic_format".to_string(),
                 field: "topic".to_string(),
                 reason_code: "invalid_topic_format".to_string(),
+            }],
+            projection: None,
+            next_hat_candidates: NextHatCandidates::Unverified,
+        });
+    }
+
+    // U6: reject if `triggered` is specified but is not a registered hat.
+    if let Some(triggered_hat) = triggered
+        && !config.hats.contains_key(triggered_hat)
+    {
+        return Ok(CandidateEmitPreview {
+            policy_decision: "reject".to_string(),
+            reasons: vec![PolicyReasonEntry {
+                gate: "triggered_not_in_topology".to_string(),
+                field: "triggered".to_string(),
+                reason_code: "triggered_hat_not_in_config".to_string(),
             }],
             projection: None,
             next_hat_candidates: NextHatCandidates::Unverified,
