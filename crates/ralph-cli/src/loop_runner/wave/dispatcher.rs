@@ -2377,12 +2377,20 @@ pub(crate) fn run_supervisor_fan_in(
             // main ledger and commit the salvage mark (also covers
             // the zero-completed case: nothing to append, mark
             // still commits so fail_wave's gate can open).
-            merge_completed_exec_fix_slots_to_main(
+            if let Err(err) = merge_completed_exec_fix_slots_to_main(
                 main_events_file,
                 completed,
                 bridge,
                 &store_wave_id,
-            );
+            ) {
+                warn!(
+                    wave_id = %completed.wave_id,
+                    store_wave_id = %store_wave_id,
+                    error = %err,
+                    "U5: exec/fix salvage merge failed; refusing to advance delivery state"
+                );
+                return SupervisorFanInOutcome::StoreError;
+            }
             exec_fix_salvage_written = true;
             // (b) Settle slots the finished batch left non-terminal:
             // they will never report. First-terminal-wins makes this
@@ -2454,8 +2462,16 @@ pub(crate) fn run_supervisor_fan_in(
                 bridge,
                 aggregate_timeout_secs,
             );
-            append_supervisor_coord_event(main_events_file, &topic, &payload);
-            SupervisorFanInOutcome::InjectedComplete
+            match commit_complete_coord_event(
+                bridge,
+                main_events_file,
+                &store_wave_id,
+                &topic,
+                &payload,
+            ) {
+                CoordCommitOutcome::Committed => SupervisorFanInOutcome::InjectedComplete,
+                CoordCommitOutcome::StoreError => SupervisorFanInOutcome::StoreError,
+            }
         }
         ralph_core::supervisor::CoordinatorAction::InjectedFailed {
             topic,
@@ -2476,10 +2492,40 @@ pub(crate) fn run_supervisor_fan_in(
             SupervisorFanInOutcome::AlreadyDone
         }
         ralph_core::supervisor::CoordinatorAction::SalvageNotMerged => {
-            // U1 (Green 5): the coordinator refused to latch because salvage wasn't merged.
-            // Mark salvage merged, then retry the coordinator tick so it can inject.
-            if let Err(err) = bridge.mark_salvage_merged(&store_wave_id) {
-                warn!(wave_id = %completed.wave_id, error = %err, "U1: mark_salvage_merged failed");
+            // 2026-07-27-003 plan U5: when the coordinator refuses
+            // because salvage isn't committed, we still need to
+            // surface a salvage receipt. The runtime cannot
+            // fabricate one without a real write — delegate to
+            // `project_empty_salvage` for the all-failed case,
+            // otherwise call `merge_completed_*_slots_to_main` so
+            // the merge seam produces a real receipt.
+            let snap = bridge.fan_in_status(&store_wave_id).ok();
+            let salvage_outcome = if matches!(wave_kind, ralph_core::supervisor::WaveKind::Review)
+            {
+                merge_completed_review_slots_to_main(
+                    main_events_file,
+                    completed,
+                    bridge,
+                    &store_wave_id,
+                )
+            } else {
+                merge_completed_exec_fix_slots_to_main(
+                    main_events_file,
+                    completed,
+                    bridge,
+                    &store_wave_id,
+                )
+            };
+            if let Err(err) = salvage_outcome {
+                warn!(
+                    wave_id = %completed.wave_id,
+                    error = %err,
+                    "U5: salvage projection failed during SalvageNotMerged recovery"
+                );
+                if let Some(snap) = snap.as_ref() {
+                    let _ = project_empty_salvage(snap, &store_wave_id);
+                }
+                return SupervisorFanInOutcome::StoreError;
             }
             let retry_inputs = ralph_core::supervisor::PhaseInputs {
                 aggregate_timeout_secs,
@@ -2526,8 +2572,18 @@ pub(crate) fn run_supervisor_fan_in(
                         bridge,
                         aggregate_timeout_secs,
                     );
-                    append_supervisor_coord_event(main_events_file, &topic, &payload);
-                    SupervisorFanInOutcome::InjectedComplete
+                    match commit_complete_coord_event(
+                        bridge,
+                        main_events_file,
+                        &store_wave_id,
+                        &topic,
+                        &payload,
+                    ) {
+                        CoordCommitOutcome::Committed => {
+                            SupervisorFanInOutcome::InjectedComplete
+                        }
+                        CoordCommitOutcome::StoreError => SupervisorFanInOutcome::StoreError,
+                    }
                 }
                 ralph_core::supervisor::CoordinatorAction::AlreadyDone => {
                     SupervisorFanInOutcome::AlreadyDone
@@ -2549,13 +2605,39 @@ pub(crate) fn run_supervisor_fan_in(
         }
         ralph_core::supervisor::CoordinatorAction::ContinueCollect => {
             // U1 (Green 6): terminal_ctx is set and first tick returned ContinueCollect.
-            // Record never-started failures, mark salvage merged, then second tick.
+            // Record never-started failures, then drive the four-phase
+            // commit (salvage → coord → commit) by calling the merge
+            // seam directly so the next tick observes the receipt.
             if terminal_ctx.is_some() {
                 if let Err(err) = bridge.record_never_started_failures(&store_wave_id) {
                     warn!(wave_id = %completed.wave_id, error = %err, "U1: record_never_started_failures failed");
                 }
-                if let Err(err) = bridge.mark_salvage_merged(&store_wave_id) {
-                    warn!(wave_id = %completed.wave_id, error = %err, "U1: mark_salvage_merged failed");
+                // 2026-07-27-003 plan U5: invoke the merge seam
+                // (which commits the salvage receipt as a
+                // side-effect) before the retry tick so the
+                // coordinator's gate opens.
+                let salvage = if matches!(wave_kind, ralph_core::supervisor::WaveKind::Review) {
+                    merge_completed_review_slots_to_main(
+                        main_events_file,
+                        completed,
+                        bridge,
+                        &store_wave_id,
+                    )
+                } else {
+                    merge_completed_exec_fix_slots_to_main(
+                        main_events_file,
+                        completed,
+                        bridge,
+                        &store_wave_id,
+                    )
+                };
+                if let Err(err) = salvage {
+                    warn!(
+                        wave_id = %completed.wave_id,
+                        error = %err,
+                        "U5: salvage projection failed during terminal ContinueCollect recovery"
+                    );
+                    return SupervisorFanInOutcome::StoreError;
                 }
                 let retry_inputs = ralph_core::supervisor::PhaseInputs {
                     aggregate_timeout_secs,
@@ -2604,8 +2686,20 @@ pub(crate) fn run_supervisor_fan_in(
                             bridge,
                             aggregate_timeout_secs,
                         );
-                        append_supervisor_coord_event(main_events_file, &topic, &payload);
-                        SupervisorFanInOutcome::InjectedComplete
+                        match commit_complete_coord_event(
+                            bridge,
+                            main_events_file,
+                            &store_wave_id,
+                            &topic,
+                            &payload,
+                        ) {
+                            CoordCommitOutcome::Committed => {
+                                SupervisorFanInOutcome::InjectedComplete
+                            }
+                            CoordCommitOutcome::StoreError => {
+                                SupervisorFanInOutcome::StoreError
+                            }
+                        }
                     }
                     ralph_core::supervisor::CoordinatorAction::AlreadyDone => {
                         SupervisorFanInOutcome::AlreadyDone
@@ -2659,8 +2753,20 @@ pub(crate) fn run_supervisor_fan_in(
                             bridge,
                             aggregate_timeout_secs,
                         );
-                        append_supervisor_coord_event(main_events_file, &topic, &payload);
-                        SupervisorFanInOutcome::InjectedComplete
+                        match commit_complete_coord_event(
+                            bridge,
+                            main_events_file,
+                            &store_wave_id,
+                            &topic,
+                            &payload,
+                        ) {
+                            CoordCommitOutcome::Committed => {
+                                SupervisorFanInOutcome::InjectedComplete
+                            }
+                            CoordCommitOutcome::StoreError => {
+                                SupervisorFanInOutcome::StoreError
+                            }
+                        }
                     }
                     Ok(ralph_core::supervisor::CoordinatorAction::InjectedFailed {
                         topic,
@@ -2777,7 +2883,20 @@ fn emit_injected_failed_coord(
         }
     }
     if matches!(wave_kind, ralph_core::supervisor::WaveKind::Review) {
-        merge_completed_review_slots_to_main(main_events_file, completed, bridge, store_wave_id);
+        if let Err(err) = merge_completed_review_slots_to_main(
+            main_events_file,
+            completed,
+            bridge,
+            store_wave_id,
+        ) {
+            warn!(
+                wave_id = %completed.wave_id,
+                store_wave_id = %store_wave_id,
+                error = %err,
+                "U5: review salvage merge failed during InjectedFailed path; refusing to append coord event"
+            );
+            return SupervisorFanInOutcome::StoreError;
+        }
     } else if !exec_fix_salvage_written {
         // 2026-07-25-005 plan U1 (R3 / KTD6): exec/fix waves salvage
         // their Completed slots' business events before the coord
@@ -2785,7 +2904,20 @@ fn emit_injected_failed_coord(
         // when the settlement block above already wrote the salvage on
         // this tick (it re-ticked the coordinator to reach this arm),
         // so completed events are never double-appended.
-        merge_completed_exec_fix_slots_to_main(main_events_file, completed, bridge, store_wave_id);
+        if let Err(err) = merge_completed_exec_fix_slots_to_main(
+            main_events_file,
+            completed,
+            bridge,
+            store_wave_id,
+        ) {
+            warn!(
+                wave_id = %completed.wave_id,
+                store_wave_id = %store_wave_id,
+                error = %err,
+                "U5: exec/fix salvage merge failed during InjectedFailed path; refusing to append coord event"
+            );
+            return SupervisorFanInOutcome::StoreError;
+        }
     }
     let review_done_hints =
         build_review_done_hints(bridge, store_wave_id, completed, main_events_file);
@@ -2797,8 +2929,126 @@ fn emit_injected_failed_coord(
         &reasons,
         Some(&review_done_hints),
     );
-    append_supervisor_coord_event(main_events_file, topic, &payload);
-    SupervisorFanInOutcome::InjectedFailed
+    match commit_failed_coord_event(bridge, main_events_file, store_wave_id, topic, &payload) {
+        CoordCommitOutcome::Committed => SupervisorFanInOutcome::InjectedFailed,
+        CoordCommitOutcome::StoreError => SupervisorFanInOutcome::StoreError,
+    }
+}
+
+/// 2026-07-27-003 plan U5: convergence of the
+/// `append_supervisor_coord_event` → `record_coordination_written`
+/// → `commit_coordination_event(Done)` chain on the success
+/// path. Each step is idempotent on a restart; a failure on
+/// any step returns `StoreError` so the runtime retries from
+/// the first uncommitted phase on the next tick.
+fn commit_complete_coord_event(
+    bridge: &Arc<dyn ralph_core::supervisor::SupervisorBridge>,
+    main_events_file: &Path,
+    store_wave_id: &str,
+    topic: &str,
+    payload: &serde_json::Value,
+) -> CoordCommitOutcome {
+    let receipt = match append_supervisor_coord_event(main_events_file, topic, payload) {
+        Ok(receipt) => receipt,
+        Err(err) => {
+            warn!(
+                wave_id = %store_wave_id,
+                topic = %topic,
+                error = %err,
+                "U5: append_supervisor_coord_event failed; refusing to commit"
+            );
+            return CoordCommitOutcome::StoreError;
+        }
+    };
+    let summary = coordination_summary_from_receipt(&receipt);
+    if let Err(err) = bridge.record_coordination_written(store_wave_id, &summary) {
+        warn!(
+            wave_id = %store_wave_id,
+            error = %err,
+            "U5: record_coordination_written failed; refusing to commit"
+        );
+        return CoordCommitOutcome::StoreError;
+    }
+    if let Err(err) = bridge.commit_coordination_event(
+        store_wave_id,
+        &summary,
+        ralph_core::supervisor::WavePhase::Done,
+    ) {
+        warn!(
+            wave_id = %store_wave_id,
+            error = %err,
+            "U5: commit_coordination_event(Done) failed; refusing to mark InjectedComplete"
+        );
+        return CoordCommitOutcome::StoreError;
+    }
+    CoordCommitOutcome::Committed
+}
+
+/// Failure-path counterpart of `commit_complete_coord_event`.
+/// Records the coord event as `Failed` so the recovery path
+/// treats a restart as a no-op.
+fn commit_failed_coord_event(
+    bridge: &Arc<dyn ralph_core::supervisor::SupervisorBridge>,
+    main_events_file: &Path,
+    store_wave_id: &str,
+    topic: &str,
+    payload: &serde_json::Value,
+) -> CoordCommitOutcome {
+    let receipt = match append_supervisor_coord_event(main_events_file, topic, payload) {
+        Ok(receipt) => receipt,
+        Err(err) => {
+            warn!(
+                wave_id = %store_wave_id,
+                topic = %topic,
+                error = %err,
+                "U5: append_supervisor_coord_event failed on failed path; refusing to commit"
+            );
+            return CoordCommitOutcome::StoreError;
+        }
+    };
+    let summary = coordination_summary_from_receipt(&receipt);
+    if let Err(err) = bridge.record_coordination_written(store_wave_id, &summary) {
+        warn!(
+            wave_id = %store_wave_id,
+            error = %err,
+            "U5: record_coordination_written failed on failed path; refusing to commit"
+        );
+        return CoordCommitOutcome::StoreError;
+    }
+    if let Err(err) = bridge.commit_coordination_event(
+        store_wave_id,
+        &summary,
+        ralph_core::supervisor::WavePhase::Failed,
+    ) {
+        warn!(
+            wave_id = %store_wave_id,
+            error = %err,
+            "U5: commit_coordination_event(Failed) failed; refusing to mark InjectedFailed"
+        );
+        return CoordCommitOutcome::StoreError;
+    }
+    CoordCommitOutcome::Committed
+}
+
+fn coordination_summary_from_receipt(
+    receipt: &ralph_core::supervisor::CoordinationReceipt,
+) -> ralph_core::supervisor::CoordinationReceiptSummary {
+    ralph_core::supervisor::CoordinationReceiptSummary {
+        topic: receipt.topic.clone(),
+        idempotency_key: receipt.idempotency_key.clone(),
+        payload_fingerprint: receipt.payload_fingerprint.clone(),
+        write_count: receipt.write_count,
+        already_present_count: receipt.already_present_count,
+        committed_at_unix_secs: receipt.committed_at_unix_secs,
+    }
+}
+
+/// Internal status of the four-phase coord commit. `Committed`
+/// means the runtime can report success; `StoreError` means the
+/// next tick must retry from the first uncommitted phase.
+enum CoordCommitOutcome {
+    Committed,
+    StoreError,
 }
 
 /// 2026-07-22-001 plan U6 (KTD-7): drain any pending
@@ -3352,7 +3602,7 @@ pub(crate) fn append_supervisor_coord_event(
     main_events_file: &Path,
     topic: &str,
     payload: &serde_json::Value,
-) {
+) -> Result<ralph_core::supervisor::CoordinationReceipt, ralph_core::supervisor::ProjectionError> {
     use std::io::Write;
     // Derive the hat attribution from the coordination topic.
     // `exec.wave.complete` → `exec-integrator`, `fix.wave.complete` →
@@ -3413,7 +3663,9 @@ pub(crate) fn append_supervisor_coord_event(
         "source": COORD_SYSTEM_PRODUCER,
         "system_injected": true,
     });
-    let result = (|| -> std::io::Result<()> {
+    let serialised = serde_json::to_string(&record)
+        .map_err(|err| ralph_core::supervisor::ProjectionError::Io(err.to_string()))?;
+    let write_result = (|| -> std::io::Result<()> {
         if let Some(parent) = main_events_file.parent()
             && !parent.as_os_str().is_empty()
         {
@@ -3423,22 +3675,57 @@ pub(crate) fn append_supervisor_coord_event(
             .create(true)
             .append(true)
             .open(main_events_file)?;
-        writeln!(
-            file,
-            "{}",
-            serde_json::to_string(&record).unwrap_or_default()
-        )?;
+        writeln!(file, "{}", serialised)?;
         file.flush()?;
         Ok(())
     })();
-    if let Err(err) = result {
+    if let Err(err) = write_result {
         warn!(
             topic = %topic,
             path = %main_events_file.display(),
             error = %err,
-            "U6: failed to append supervisor coordination event to ledger"
+            "U5: failed to append supervisor coordination event to ledger"
         );
+        return Err(ralph_core::supervisor::ProjectionError::Io(err.to_string()));
     }
+    let payload_fingerprint = fingerprint_coord_payload(topic, payload);
+    let idempotency_key = format!("coord:{}:{}", topic, payload_fingerprint);
+    Ok(ralph_core::supervisor::CoordinationReceipt {
+        wave_id: String::new(),
+        topic: topic.to_string(),
+        idempotency_key,
+        payload_fingerprint,
+        write_count: 1,
+        already_present_count: 0,
+        committed_at_unix_secs: unix_now_secs(),
+    })
+}
+
+/// 2026-07-27-003 plan U5: stable SHA-256 fingerprint over
+/// `(topic, payload)` so the coordination receipt stays
+/// idempotent across replays. The runtime treats a different
+/// fingerprint on the same `wave_id` as a fail-closed
+/// `ReceiptMismatch`.
+fn fingerprint_coord_payload(topic: &str, payload: &serde_json::Value) -> String {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(topic.as_bytes());
+    hasher.update(b"\0");
+    hasher.update(payload.to_string().as_bytes());
+    let digest = hasher.finalize();
+    let mut out = String::with_capacity(64);
+    for byte in digest {
+        use std::fmt::Write;
+        let _ = write!(&mut out, "{byte:02x}");
+    }
+    out
+}
+
+fn unix_now_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
 }
 
 /// 2026-07-26-003 plan U5 (KTD7): on `InjectedFailed` for the
@@ -3465,16 +3752,23 @@ pub(crate) fn append_supervisor_coord_event(
 // accident-characterization tests in `tests/wave_supervisor.rs`.
 // Plan U5 rewrites this signature to return
 // `Result<ProjectionReceipt, ProjectionError>` and threads the
-// receipt into `commit_salvage_projection`. The current `()` return
-// is the silent-success window the plan exists to close.
+// receipt into `commit_salvage_projection`. The current
+// `Result<ProjectionReceipt, ProjectionError>` return
+// is the silent-success window the plan exists to close —
+// writes that error out no longer collapse to `Ok(())`.
 pub(crate) fn merge_completed_review_slots_to_main(
     main_events_file: &Path,
     completed: &ralph_core::CompletedWave,
     bridge: &Arc<dyn ralph_core::supervisor::SupervisorBridge>,
     store_wave_id: &str,
-) {
+) -> Result<
+    ralph_core::supervisor::ProjectionReceipt,
+    ralph_core::supervisor::ProjectionError,
+> {
     use std::io::Write;
+    use ralph_core::supervisor::{ProjectionKey, ProjectionKind, ProjectionReceipt};
     let mut lines: Vec<String> = Vec::new();
+    let mut keys: Vec<ProjectionKey> = Vec::new();
     for result in &completed.results {
         // Slots that show up in `completed.failures` are skipped:
         // their `results` entry is a stale artifact of the failed
@@ -3505,24 +3799,28 @@ pub(crate) fn merge_completed_review_slots_to_main(
                 "wave_id": event.wave_id,
                 "wave_index": event.wave_index,
             });
-            if let Ok(line) = serde_json::to_string(&record) {
-                lines.push(line);
-            }
+            let line = serde_json::to_string(&record)
+                .map_err(|err| ralph_core::supervisor::ProjectionError::Io(err.to_string()))?;
+            keys.push(ProjectionKey {
+                slot_index: result.index,
+                payload_fingerprint: ralph_core::supervisor::fingerprint_payload(&event.payload),
+            });
+            lines.push(line);
         }
     }
     if lines.is_empty() {
-        return;
+        // No Completed review slots: still produce an explicit empty
+        // receipt so the dispatcher can commit salvage_projection
+        // and unlock the coord-injection phase. The bridge-level
+        // gate (`salvage_merged` under the old protocol) used to
+        // require this; U5 keeps the contract under
+        // `commit_salvage_projection`.
+        return Ok(build_empty_projection_receipt(
+            store_wave_id,
+            ProjectionKind::Business,
+        ));
     }
-    // Append-then-commit: write the rows first, then commit the
-    // salvage mark. Plan 004 R3 / P0-1 makes the mark live inside
-    // this helper (instead of after the dispatcher call) so the
-    // dispatcher cannot forget the mark after the write — the
-    // pre-fix code's missing-mark window was the original
-    // silent-success regression that the split-phase latch was
-    // introduced to close. The mark is idempotent across replays
-    // and restarts; a write failure leaves the mark unset so the
-    // coordinator's next tick re-runs the merge seam.
-    let open = || -> std::io::Result<()> {
+    let write_result = (|| -> std::io::Result<()> {
         if let Some(parent) = main_events_file.parent()
             && !parent.as_os_str().is_empty()
         {
@@ -3537,8 +3835,8 @@ pub(crate) fn merge_completed_review_slots_to_main(
         }
         file.flush()?;
         Ok(())
-    };
-    if let Err(err) = open() {
+    })();
+    if let Err(err) = write_result {
         warn!(
             wave_id = %completed.wave_id,
             path = %main_events_file.display(),
@@ -3547,26 +3845,41 @@ pub(crate) fn merge_completed_review_slots_to_main(
              salvage mark will not be set so the coordinator will refuse \
              the coord-event injection until the next tick retries"
         );
-        return;
+        return Err(ralph_core::supervisor::ProjectionError::Io(
+            err.to_string(),
+        ));
     }
-    // Commit the salvage mark AFTER the rows landed. The mark
-    // gates `fail_wave`'s coord-event injection (P0-1) so the
-    // crash window between append and latch can only re-merge
-    // (idempotent on slot status), never re-inject. We use the
-    // store-assigned `store_wave_id` (not `completed.wave_id`)
-    // because the bridge's `mark_salvage_merged` keys off the
-    // row id the store actually wrote; the two normally agree
-    // but the helper must work even when callers pass a
-    // supervisor-idempotency key that does not match the
-    // store-assigned id.
-    if let Err(err) = bridge.mark_salvage_merged(store_wave_id) {
+    let batch_fingerprint = fingerprint_lines(&lines);
+    let write_count = lines.len() as u32;
+    let receipt = ProjectionReceipt {
+        wave_id: store_wave_id.to_string(),
+        kind: ProjectionKind::Business,
+        idempotency_keys: keys,
+        write_count,
+        already_present_count: 0,
+        batch_fingerprint: batch_fingerprint.clone(),
+        committed_at_unix_secs: unix_now_secs(),
+    };
+    // Commit the salvage mark AFTER the rows landed.
+    if let Err(err) = bridge.commit_salvage_projection(
+        store_wave_id,
+        &ralph_core::supervisor::ProjectionReceiptSummary {
+            kind: ProjectionKind::Business,
+            batch_fingerprint,
+            write_count,
+            already_present_count: 0,
+            committed_at_unix_secs: receipt.committed_at_unix_secs,
+        },
+    ) {
         warn!(
             wave_id = %store_wave_id,
             error = %err,
-            "merge_completed_review_slots_to_main: mark_salvage_merged failed; \
+            "merge_completed_review_slots_to_main: commit_salvage_projection failed; \
              next tick will retry"
         );
+        return Err(ralph_core::supervisor::ProjectionError::from(err));
     }
+    Ok(receipt)
 }
 
 /// 2026-07-25-005 plan U1 (R3 / R4 / KTD2 / KTD6): the exec/fix
@@ -3595,9 +3908,14 @@ fn merge_completed_exec_fix_slots_to_main(
     completed: &ralph_core::CompletedWave,
     bridge: &Arc<dyn ralph_core::supervisor::SupervisorBridge>,
     store_wave_id: &str,
-) {
+) -> Result<
+    ralph_core::supervisor::ProjectionReceipt,
+    ralph_core::supervisor::ProjectionError,
+> {
     use std::io::Write;
+    use ralph_core::supervisor::{ProjectionKey, ProjectionKind, ProjectionReceipt};
     let mut lines: Vec<String> = Vec::new();
+    let mut keys: Vec<ProjectionKey> = Vec::new();
     for result in &completed.results {
         if completed.failures.iter().any(|f| f.index == result.index) {
             continue;
@@ -3617,12 +3935,25 @@ fn merge_completed_exec_fix_slots_to_main(
                 "wave_id": event.wave_id,
                 "wave_index": event.wave_index,
             });
-            if let Ok(line) = serde_json::to_string(&record) {
-                lines.push(line);
-            }
+            let line = serde_json::to_string(&record)
+                .map_err(|err| ralph_core::supervisor::ProjectionError::Io(err.to_string()))?;
+            keys.push(ProjectionKey {
+                slot_index: result.index,
+                payload_fingerprint: ralph_core::supervisor::fingerprint_payload(&event.payload),
+            });
+            lines.push(line);
         }
     }
-    let open = || -> std::io::Result<()> {
+    if lines.is_empty() {
+        // Even an all-failed wave must produce an explicit empty
+        // salvage receipt so the coordinator's
+        // `commit_coordination_event` gate can advance.
+        return Ok(build_empty_projection_receipt(
+            store_wave_id,
+            ProjectionKind::Business,
+        ));
+    }
+    let write_result = (|| -> std::io::Result<()> {
         if let Some(parent) = main_events_file.parent()
             && !parent.as_os_str().is_empty()
         {
@@ -3637,26 +3968,116 @@ fn merge_completed_exec_fix_slots_to_main(
         }
         file.flush()?;
         Ok(())
-    };
-    if let Err(err) = open() {
+    })();
+    if let Err(err) = write_result {
         warn!(
             wave_id = %completed.wave_id,
             path = %main_events_file.display(),
             error = %err,
-            "U1: failed to merge Completed exec/fix slots to main ledger; \
-             salvage mark will not be set so the coordinator will refuse \
+            "U5: failed to merge Completed exec/fix slots to main ledger; \
+             salvage commit will not be set so the coordinator will refuse \
              the coord-event injection until the next tick retries"
         );
-        return;
+        return Err(ralph_core::supervisor::ProjectionError::Io(
+            err.to_string(),
+        ));
     }
-    if let Err(err) = bridge.mark_salvage_merged(store_wave_id) {
+    let batch_fingerprint = fingerprint_lines(&lines);
+    let write_count = lines.len() as u32;
+    let receipt = ProjectionReceipt {
+        wave_id: store_wave_id.to_string(),
+        kind: ProjectionKind::Business,
+        idempotency_keys: keys,
+        write_count,
+        already_present_count: 0,
+        batch_fingerprint: batch_fingerprint.clone(),
+        committed_at_unix_secs: unix_now_secs(),
+    };
+    if let Err(err) = bridge.commit_salvage_projection(
+        store_wave_id,
+        &ralph_core::supervisor::ProjectionReceiptSummary {
+            kind: ProjectionKind::Business,
+            batch_fingerprint,
+            write_count,
+            already_present_count: 0,
+            committed_at_unix_secs: receipt.committed_at_unix_secs,
+        },
+    ) {
         warn!(
             wave_id = %store_wave_id,
             error = %err,
-            "merge_completed_exec_fix_slots_to_main: mark_salvage_merged failed; \
+            "merge_completed_exec_fix_slots_to_main: commit_salvage_projection failed; \
              next tick will retry"
         );
+        return Err(ralph_core::supervisor::ProjectionError::from(err));
     }
+    Ok(receipt)
+}
+
+/// 2026-07-27-003 plan U5 (R11): explicit empty salvage receipt.
+///
+/// Used when a wave's snapshot has zero Completed slots. The
+/// helper verifies the snapshot contains no Completed slot
+/// before producing the empty receipt — calling it on a wave
+/// with Completed slots would mask a silent-success regression,
+/// so the verification is loud.
+pub(crate) fn project_empty_salvage(
+    snapshot: &ralph_core::supervisor::WaveSnapshot,
+    store_wave_id: &str,
+) -> Result<
+    ralph_core::supervisor::ProjectionReceipt,
+    ralph_core::supervisor::ProjectionError,
+> {
+    use ralph_core::supervisor::{ProjectionKind, SlotStatus};
+    for (slot_index, status) in &snapshot.slots {
+        if matches!(status, SlotStatus::Completed) {
+            return Err(ralph_core::supervisor::ProjectionError::InvalidTransition(
+                format!(
+                    "project_empty_salvage: wave {store_wave_id} has Completed slot {slot_index}; \
+                     refusing to mark empty salvage"
+                ),
+            ));
+        }
+    }
+    Ok(build_empty_projection_receipt(
+        store_wave_id,
+        ProjectionKind::Business,
+    ))
+}
+
+fn build_empty_projection_receipt(
+    wave_id: &str,
+    kind: ralph_core::supervisor::ProjectionKind,
+) -> ralph_core::supervisor::ProjectionReceipt {
+    ralph_core::supervisor::ProjectionReceipt {
+        wave_id: wave_id.to_string(),
+        kind,
+        idempotency_keys: Vec::new(),
+        write_count: 0,
+        already_present_count: 0,
+        batch_fingerprint: format!("empty-{wave_id}"),
+        committed_at_unix_secs: unix_now_secs(),
+    }
+}
+
+/// 2026-07-27-003 plan U5: stable SHA-256 over a batch of
+/// already-serialised JSONL lines. Used to fingerprint a
+/// projection receipt so a replay with the same lines produces
+/// the same fingerprint.
+fn fingerprint_lines(lines: &[String]) -> String {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    for line in lines {
+        hasher.update(line.as_bytes());
+        hasher.update(b"\n");
+    }
+    let digest = hasher.finalize();
+    let mut out = String::with_capacity(64);
+    for byte in digest {
+        use std::fmt::Write;
+        let _ = write!(&mut out, "{byte:02x}");
+    }
+    out
 }
 
 // ─────────────────────────────────────────────────────────────────
@@ -6856,12 +7277,6 @@ hats: {}
             fn record_never_started_failures(&self, _wave_id: &str) -> Result<(), BridgeError> {
                 Ok(())
             }
-            fn mark_salvage_merged(&self, _wave_id: &str) -> Result<(), BridgeError> {
-                Ok(())
-            }
-            fn mark_merge_to_events(&self, _wave_id: &str) -> Result<(), BridgeError> {
-                Ok(())
-            }
             fn set_wave_phase(
                 &self,
                 _wave_id: &str,
@@ -7637,7 +8052,7 @@ hats: {}
         // the dispatcher's failure path can inject `*.wave.failed`.
         let snap = store.fan_in_status(&wave_id).expect("snap");
         assert!(
-            snap.salvage_merged,
+            snap.delivery_state.at_least(ralph_core::supervisor::WaveDeliveryState::SalvageCommitted),
             "merge_completed_review_slots_to_main must commit salvage_merged (P0-1)"
         );
         let f = std::fs::File::open(&main).expect("events file written");
@@ -7727,7 +8142,7 @@ hats: {}
         // as un-salvaged.
         let snap = store.fan_in_status(&wave_id).expect("snap");
         assert!(
-            !snap.salvage_merged,
+            !snap.delivery_state.at_least(ralph_core::supervisor::WaveDeliveryState::SalvageCommitted),
             "empty results must not commit salvage_merged (P0-1)"
         );
     }
@@ -8435,7 +8850,7 @@ hats: {}
 
         // Plan 004 R3 / P0-1: dispatcher must commit salvage BEFORE
         // `fail_wave` latches the coord-event injection.
-        bridge.mark_salvage_merged(&store_wave_id).unwrap();
+        bridge.commit_salvage_projection(&store_wave_id, &ralph_core::supervisor::ProjectionReceiptSummary { kind: ralph_core::supervisor::ProjectionKind::Business, batch_fingerprint: String::new(), write_count: 0, already_present_count: 0, committed_at_unix_secs: 0 }).unwrap();
 
         let completed = ralph_core::CompletedWave {
             wave_id: "w-u4-fan-in".to_string(),
@@ -8576,7 +8991,7 @@ hats: {}
             .unwrap();
         // Plan 004 R3 / P0-1: dispatcher must commit salvage BEFORE
         // `fail_wave` latches the coord-event injection.
-        bridge.mark_salvage_merged(&store_wave_id).unwrap();
+        bridge.commit_salvage_projection(&store_wave_id, &ralph_core::supervisor::ProjectionReceiptSummary { kind: ralph_core::supervisor::ProjectionKind::Business, batch_fingerprint: String::new(), write_count: 0, already_present_count: 0, committed_at_unix_secs: 0 }).unwrap();
 
         // completed.results carries ONLY slot 0's event (correctness);
         // `testing` is done via main, not via this fan-in's results.
@@ -8804,7 +9219,7 @@ hats: {}
             .unwrap();
         // Plan 004 R3 / P0-1: dispatcher must commit salvage BEFORE
         // `fail_wave` latches the coord-event injection.
-        bridge.mark_salvage_merged(&store_wave_id).unwrap();
+        bridge.commit_salvage_projection(&store_wave_id, &ralph_core::supervisor::ProjectionReceiptSummary { kind: ralph_core::supervisor::ProjectionKind::Business, batch_fingerprint: String::new(), write_count: 0, already_present_count: 0, committed_at_unix_secs: 0 }).unwrap();
 
         let mut assigned = std::collections::HashMap::new();
         assigned.insert(0u32, "correctness".to_string());
@@ -8943,7 +9358,7 @@ hats: {}
             .unwrap();
         // Plan 004 R3 / P0-1: dispatcher must commit salvage BEFORE
         // `fail_wave` latches the coord-event injection.
-        bridge.mark_salvage_merged(&store_wave_id).unwrap();
+        bridge.commit_salvage_projection(&store_wave_id, &ralph_core::supervisor::ProjectionReceiptSummary { kind: ralph_core::supervisor::ProjectionKind::Business, batch_fingerprint: String::new(), write_count: 0, already_present_count: 0, committed_at_unix_secs: 0 }).unwrap();
 
         let mut assigned = std::collections::HashMap::new();
         assigned.insert(0u32, "correctness".to_string());
@@ -9770,9 +10185,6 @@ hats: {}
             fn recover(&self) -> Result<Vec<ralph_core::supervisor::WaveSnapshot>, BridgeError> {
                 self.inner.recover()
             }
-            fn mark_salvage_merged(&self, id: &str) -> Result<(), BridgeError> {
-                self.inner.mark_salvage_merged(id)
-            }
             fn record_slot_result(
                 &self,
                 id: &str,
@@ -9851,9 +10263,6 @@ hats: {}
                 p: ralph_core::supervisor::WavePhase,
             ) -> Result<(), BridgeError> {
                 self.inner.set_wave_phase(id, p)
-            }
-            fn mark_merge_to_events(&self, id: &str) -> Result<(), BridgeError> {
-                self.inner.mark_merge_to_events(id)
             }
         }
 
@@ -10107,8 +10516,7 @@ hats: {}
                 pending_count: 0,
                 in_flight_count: 0,
                 cancel_requested: false,
-                merged_to_events: false,
-                salvage_merged: false,
+delivery_state: ralph_core::supervisor::WaveDeliveryState::CoordinationCommitted,
                 started_at: std::time::SystemTime::UNIX_EPOCH,
                 slots: (0u32..6).map(|i| (i, SlotStatus::Failed)).collect(),
             },
@@ -10295,8 +10703,7 @@ hats: {}
                 pending_count: 0,
                 in_flight_count: 0,
                 cancel_requested: false,
-                merged_to_events: false,
-                salvage_merged: false,
+delivery_state: ralph_core::supervisor::WaveDeliveryState::CoordinationCommitted,
                 started_at: std::time::SystemTime::UNIX_EPOCH,
                 slots: (0u32..3).map(|i| (i, SlotStatus::Completed)).collect(),
             },
@@ -10336,13 +10743,16 @@ hats: {}
             ..ralph_core::CompletedWave::default()
         };
 
-        // Call returns `()` today. Plan U5 changes the signature.
-        let _: () = merge_completed_review_slots_to_main(
+        // Call returns `Result<ProjectionReceipt, ProjectionError>`
+        // since U5. The dispatcher must surface the error
+        // instead of collapsing to `()`.
+        let _ = merge_completed_review_slots_to_main(
             &main_events_file,
             &completed,
             &bridge_arc,
             store_wave_id,
-        );
+        )
+        .expect("merge_completed_review_slots_to_main");
 
         // Side effects that U5 MUST preserve:
         // 1. main has 3 review.unit.done rows attributed to review-worker.
@@ -10402,12 +10812,10 @@ hats: {}
         let main_events_file = locked_parent.join("events.jsonl");
         let payload = serde_json::json!({"wave_id": "w-acc-6"});
 
-        // Current signature: `fn(...) { ... }`. The function
-        // warns-and-continues on EACCES; this is the silent-
-        // success window plan U5 must close. The call MUST
-        // NOT panic, but with the current `()` return there
-        // is no other observable signal of failure.
-        let _: () = append_supervisor_coord_event(
+        // Current signature returns `Result<CoordinationReceipt,
+        // ProjectionError>` since U5. The dispatcher surfaces
+        // the error instead of collapsing to `()`.
+        let _ = append_supervisor_coord_event(
             &main_events_file,
             "review.wave.failed",
             &payload,
@@ -10519,18 +10927,6 @@ hats: {}
             _slot_index: u32,
         ) -> Result<Option<String>, BridgeError> {
             Ok(None)
-        }
-
-        fn mark_salvage_merged(&self, wave_id: &str) -> Result<(), BridgeError> {
-            self.mark_salvage_calls
-                .lock()
-                .unwrap()
-                .push(wave_id.to_string());
-            Ok(())
-        }
-
-        fn mark_merge_to_events(&self, _wave_id: &str) -> Result<(), BridgeError> {
-            Ok(())
         }
 
         fn record_never_started_failures(&self, wave_id: &str) -> Result<(), BridgeError> {

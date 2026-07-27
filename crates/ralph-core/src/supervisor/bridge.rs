@@ -159,19 +159,54 @@ pub trait SupervisorBridge: std::fmt::Debug + Send + Sync {
     /// a store override this.
     fn fan_in_status(&self, wave_id: &str) -> Result<WaveSnapshot, BridgeError>;
 
-    /// Plan 004 R3 / P0-1: bridge-level convenience for the
+    /// 2026-07-27-003 plan U5: bridge-level convenience for the
     /// dispatcher's failed-fan-in salvage commit. Bridges that
     /// own a `SupervisorStore` delegate to it; the default impl
     /// returns `Unsupported` so mock bridges in tests stay
     /// compilable. The dispatcher's failed-path arms call this
-    /// AFTER `merge_completed_review_slots_to_main` lands the
-    /// Completed-slots business events on main; the coordinator's
-    /// `fail_wave` then refuses to inject `*.wave.failed` until
-    /// the salvage mark is observed.
-    fn mark_salvage_merged(&self, wave_id: &str) -> Result<(), BridgeError> {
-        let _ = wave_id;
+    /// AFTER `merge_completed_*_slots_to_main` lands the
+    /// Completed-slots business events on main. The receipt is
+    /// the SOLE proof the write succeeded; the coordinator's
+    /// `commit_coordination_event` refuses to advance
+    /// `WaveDeliveryState` without a matching salvage receipt.
+    fn commit_salvage_projection(
+        &self,
+        wave_id: &str,
+        receipt: &crate::supervisor::ProjectionReceiptSummary,
+    ) -> Result<(), BridgeError> {
+        let _ = (wave_id, receipt);
         Err(BridgeError::Store(
-            "mark_salvage_merged: bridge does not own a store".to_string(),
+            "commit_salvage_projection: bridge does not own a store".to_string(),
+        ))
+    }
+
+    /// 2026-07-27-003 plan U5: persist a coordination write
+    /// receipt on the store side. Bridges delegate to the
+    /// underlying store when they own one.
+    fn record_coordination_written(
+        &self,
+        wave_id: &str,
+        receipt: &crate::supervisor::CoordinationReceiptSummary,
+    ) -> Result<(), BridgeError> {
+        let _ = (wave_id, receipt);
+        Err(BridgeError::Store(
+            "record_coordination_written: bridge does not own a store".to_string(),
+        ))
+    }
+
+    /// 2026-07-27-003 plan U5: finalise the delivery — set the
+    /// wave to its terminal phase and the delivery state to
+    /// `CoordinationCommitted`. Bridges delegate to the
+    /// underlying store.
+    fn commit_coordination_event(
+        &self,
+        wave_id: &str,
+        receipt: &crate::supervisor::CoordinationReceiptSummary,
+        terminal_phase: crate::supervisor::WavePhase,
+    ) -> Result<(), BridgeError> {
+        let _ = (wave_id, receipt, terminal_phase);
+        Err(BridgeError::Store(
+            "commit_coordination_event: bridge does not own a store".to_string(),
         ))
     }
 
@@ -333,13 +368,6 @@ pub trait SupervisorBridge: std::fmt::Debug + Send + Sync {
         Ok(())
     }
 
-    /// U1: mark the wave as merged to events. Used by the terminal
-    /// fan-in convergence driver to force the merged_to_events latch.
-    /// Default: no-op for mocks.
-    fn mark_merge_to_events(&self, _wave_id: &str) -> Result<(), BridgeError> {
-        Ok(())
-    }
-
     /// 2026-07-22-001 plan U6 (KTD-7): enqueue a compensation
     /// job for `wave_id`. Default: no-op (mocks / BDD bridges
     /// without a store).
@@ -468,9 +496,34 @@ impl SupervisorBridge for InMemoryCoordinatorBridge {
             .map_err(|err| BridgeError::Store(err.to_string()))
     }
 
-    fn mark_salvage_merged(&self, wave_id: &str) -> Result<(), BridgeError> {
+    fn commit_salvage_projection(
+        &self,
+        wave_id: &str,
+        receipt: &crate::supervisor::ProjectionReceiptSummary,
+    ) -> Result<(), BridgeError> {
         self.store
-            .mark_salvage_merged(wave_id)
+            .commit_salvage_projection(wave_id, receipt)
+            .map_err(|err| BridgeError::Store(err.to_string()))
+    }
+
+    fn record_coordination_written(
+        &self,
+        wave_id: &str,
+        receipt: &crate::supervisor::CoordinationReceiptSummary,
+    ) -> Result<(), BridgeError> {
+        self.store
+            .record_coordination_written(wave_id, receipt)
+            .map_err(|err| BridgeError::Store(err.to_string()))
+    }
+
+    fn commit_coordination_event(
+        &self,
+        wave_id: &str,
+        receipt: &crate::supervisor::CoordinationReceiptSummary,
+        terminal_phase: crate::supervisor::WavePhase,
+    ) -> Result<(), BridgeError> {
+        self.store
+            .commit_coordination_event(wave_id, receipt, terminal_phase)
             .map_err(|err| BridgeError::Store(err.to_string()))
     }
 

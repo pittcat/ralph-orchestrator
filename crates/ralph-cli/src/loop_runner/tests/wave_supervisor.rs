@@ -2473,7 +2473,16 @@ async fn test_dispatcher_effective_cap_bridge_lower_than_hat() {
 ///   bridge.record_slot_result(&store_wave_id, 0, "h0", 1).unwrap();
 ///   bridge.store().record_slot_terminal_evidence(...).unwrap();
 ///   bridge.record_slot_failure(&store_wave_id, 1, REASON_WORKER_TIMEOUT).unwrap();
-///   bridge.mark_salvage_merged(&store_wave_id).unwrap();
+///   bridge.commit_salvage_projection(
+///       &store_wave_id,
+///       &ralph_core::supervisor::ProjectionReceiptSummary {
+///           kind: ralph_core::supervisor::ProjectionKind::Business,
+///           batch_fingerprint: "test-fp".into(),
+///           write_count: 0,
+///           already_present_count: 0,
+///           committed_at_unix_secs: 0,
+///       },
+///   ).unwrap();
 ///   // Now run fan-in
 fn setup_u3_partial_failure_bridge(
     kind: WaveKind,
@@ -3956,8 +3965,17 @@ fn test_production_fan_in_partial_failure_injects_failed() {
     // Plan 004 R3 / P0-1: dispatcher must commit salvage BEFORE
     // `fail_wave` latches the coord-event injection.
     bridge
-        .mark_salvage_merged(&store_wave_id)
-        .expect("mark salvage");
+        .commit_salvage_projection(
+        &store_wave_id,
+        &ralph_core::supervisor::ProjectionReceiptSummary {
+            kind: ralph_core::supervisor::ProjectionKind::Business,
+            batch_fingerprint: "test-fp".into(),
+            write_count: 0,
+            already_present_count: 0,
+            committed_at_unix_secs: 0,
+        },
+    )
+    .expect("mark salvage");
 
     let bridge: std::sync::Arc<dyn SupervisorBridge> = std::sync::Arc::new(bridge);
     let completed = make_u6_completed("u6-wave-fail", 2); // only 2 results (slot 2 failed)
@@ -4063,7 +4081,7 @@ fn test_production_fan_in_sink_failure_defers_complete() {
         "sink failure must surface MergeFailed; got {action1:?}"
     );
     assert!(
-        !store.fan_in_status(&wave).expect("snap").merged_to_events,
+        !store.fan_in_status(&wave).expect("snap").delivery_state.at_least(ralph_core::supervisor::WaveDeliveryState::CoordinationCommitted),
         "merged_to_events must stay false after a sink failure"
     );
 
@@ -5227,8 +5245,17 @@ fn exec_fix_partial_failure_does_not_salvage_completed_slot_events() {
 
     // Pre-commit salvage (P0-1 contract).
     bridge
-        .mark_salvage_merged(&store_wave_id)
-        .expect("mark salvage");
+        .commit_salvage_projection(
+        &store_wave_id,
+        &ralph_core::supervisor::ProjectionReceiptSummary {
+            kind: ralph_core::supervisor::ProjectionKind::Business,
+            batch_fingerprint: "test-fp".into(),
+            write_count: 0,
+            already_present_count: 0,
+            committed_at_unix_secs: 0,
+        },
+    )
+    .expect("mark salvage");
 
     let bridge: std::sync::Arc<dyn SupervisorBridge> = std::sync::Arc::new(bridge);
 
@@ -5413,8 +5440,17 @@ fn review_partial_failure_salvage_path_unaffected() {
 
     // Pre-commit salvage (P0-1 contract).
     bridge
-        .mark_salvage_merged(&store_wave_id)
-        .expect("mark salvage");
+        .commit_salvage_projection(
+        &store_wave_id,
+        &ralph_core::supervisor::ProjectionReceiptSummary {
+            kind: ralph_core::supervisor::ProjectionKind::Business,
+            batch_fingerprint: "test-fp".into(),
+            write_count: 0,
+            already_present_count: 0,
+            committed_at_unix_secs: 0,
+        },
+    )
+    .expect("mark salvage");
 
     let bridge: std::sync::Arc<dyn SupervisorBridge> = std::sync::Arc::new(bridge);
 
@@ -5661,8 +5697,17 @@ fn test_u1_single_fail_only() {
         .record_slot_failure(&store_wave_id, 1, REASON_WORKER_TIMEOUT)
         .expect("slot 1 failure");
     bridge
-        .mark_salvage_merged(&store_wave_id)
-        .expect("mark salvage");
+        .commit_salvage_projection(
+        &store_wave_id,
+        &ralph_core::supervisor::ProjectionReceiptSummary {
+            kind: ralph_core::supervisor::ProjectionKind::Business,
+            batch_fingerprint: "test-fp".into(),
+            write_count: 0,
+            already_present_count: 0,
+            committed_at_unix_secs: 0,
+        },
+    )
+    .expect("mark salvage");
 
     let bridge: std::sync::Arc<dyn SupervisorBridge> =
         std::sync::Arc::new(bridge) as std::sync::Arc<dyn SupervisorBridge>;
@@ -5741,8 +5786,17 @@ fn test_u1_partial_failure_one_complete_one_fail() {
         .record_slot_failure(&store_wave_id, 1, REASON_WORKER_TIMEOUT)
         .expect("slot 1 failure");
     bridge
-        .mark_salvage_merged(&store_wave_id)
-        .expect("mark salvage");
+        .commit_salvage_projection(
+        &store_wave_id,
+        &ralph_core::supervisor::ProjectionReceiptSummary {
+            kind: ralph_core::supervisor::ProjectionKind::Business,
+            batch_fingerprint: "test-fp".into(),
+            write_count: 0,
+            already_present_count: 0,
+            committed_at_unix_secs: 0,
+        },
+    )
+    .expect("mark salvage");
 
     let bridge: std::sync::Arc<dyn SupervisorBridge> =
         std::sync::Arc::new(bridge) as std::sync::Arc<dyn SupervisorBridge>;
@@ -5847,8 +5901,17 @@ fn test_u1_zero_fail_happy_path_no_redrive_payload() {
             .expect("evidence");
     }
     bridge
-        .mark_salvage_merged(&store_wave_id)
-        .expect("mark salvage");
+        .commit_salvage_projection(
+        &store_wave_id,
+        &ralph_core::supervisor::ProjectionReceiptSummary {
+            kind: ralph_core::supervisor::ProjectionKind::Business,
+            batch_fingerprint: "test-fp".into(),
+            write_count: 0,
+            already_present_count: 0,
+            committed_at_unix_secs: 0,
+        },
+    )
+    .expect("mark salvage");
 
     let bridge: std::sync::Arc<dyn SupervisorBridge> =
         std::sync::Arc::new(bridge) as std::sync::Arc<dyn SupervisorBridge>;

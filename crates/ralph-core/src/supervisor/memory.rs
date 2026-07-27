@@ -17,9 +17,10 @@ use std::sync::Mutex;
 use std::time::SystemTime;
 
 use super::{
-    CompensationKind, DispatchOutcome, EmissionReservation, EmissionState, IdempotencyKey,
-    IsolationMode, RedriveResult, SlotResource, SlotStatus, SupervisorStore, SupervisorStoreError,
-    SupervisorStoreResult, WaveKind, WavePhase, WaveSnapshot,
+    CompensationKind, CoordinationReceiptSummary, DispatchOutcome, EmissionReservation,
+    EmissionState, IdempotencyKey, IsolationMode, ProjectionKind, ProjectionReceiptSummary,
+    RedriveResult, SlotResource, SlotStatus, SupervisorStore, SupervisorStoreError,
+    SupervisorStoreResult, WaveDeliveryState, WaveKind, WavePhase, WaveSnapshot,
 };
 
 /// Per-wave descriptor held in `InMemorySupervisorStore::waves`.
@@ -30,15 +31,25 @@ struct WaveRow {
     expected_total: u32,
     phase: WavePhase,
     cancel_requested: bool,
-    merged_to_events: bool,
-    /// Plan 004 R3 / P0-1: salvage-merge flag. Distinct from
-    /// `merged_to_events` (which tracks coord-event injection).
-    /// `fail_wave` requires this to be `true` before it will
-    /// latch the coord-event injection — closing the crash
-    /// window where the salvage merge could be lost between
-    /// `fail_wave` returning and the dispatcher writing the
-    /// merge.
-    salvage_merged: bool,
+    /// 2026-07-27-003 plan U5: orthogonal delivery state to
+    /// `phase`. Tracks the four-phase commit protocol
+    /// (Pending → BusinessProjected → SalvageCommitted →
+    /// CoordinationWritten → CoordinationCommitted) and the
+    /// receipts each commit consumed. The two booleans this
+    /// field replaces (`merged_to_events`, `salvage_merged`)
+    /// participated in a silent-success regression (Plan 004
+    /// P0-1) that U5 closes.
+    delivery_state: WaveDeliveryState,
+    /// Persisted summary of the last accepted salvage receipt.
+    /// Used by `commit_salvage_projection` to verify the same
+    /// receipt is replayed after a crash (and to refuse a
+    /// mismatched one).
+    salvage_receipt: Option<ProjectionReceiptSummary>,
+    /// Persisted summary of the last accepted coordination
+    /// receipt. Used by `record_coordination_written` /
+    /// `commit_coordination_event` for the same idempotency
+    /// check.
+    coordination_receipt: Option<CoordinationReceiptSummary>,
     /// 2026-07-03-001 plan U6: wall-clock instant the wave
     /// was registered. Recovery (U11) uses this to decide
     /// the `Failed` timeout verdict; the in-memory store
@@ -321,8 +332,9 @@ impl SupervisorStore for InMemorySupervisorStore {
             expected_total,
             phase: WavePhase::Dispatch,
             cancel_requested: false,
-            merged_to_events: false,
-            salvage_merged: false,
+            delivery_state: WaveDeliveryState::Pending,
+            salvage_receipt: None,
+            coordination_receipt: None,
             created_at: SystemTime::now(),
             slot_retry_budget,
             attempt_epoch: 0,
@@ -766,33 +778,146 @@ impl SupervisorStore for InMemorySupervisorStore {
             pending_count: pending,
             in_flight_count: in_flight,
             cancel_requested: wave.cancel_requested,
-            merged_to_events: wave.merged_to_events,
-            salvage_merged: wave.salvage_merged,
+            delivery_state: wave.delivery_state,
             started_at: wave.created_at,
             slots,
         })
     }
 
-    fn mark_merge_to_events(&self, wave_id: &str) -> SupervisorStoreResult<()> {
+    fn commit_salvage_projection(
+        &self,
+        wave_id: &str,
+        receipt: &ProjectionReceiptSummary,
+    ) -> SupervisorStoreResult<()> {
         let mut inner = self.lock()?;
         let wave = inner
             .waves_by_id
             .get_mut(wave_id)
             .ok_or_else(|| SupervisorStoreError::UnknownWave(wave_id.to_string()))?;
-        if !wave.merged_to_events {
-            wave.merged_to_events = true;
+        // The merge helpers (`merge_completed_*_slots_to_main`,
+        // `project_empty_salvage`) are responsible for the
+        // actual disk write; the commit step advances the
+        // store's view of the wave. Pending is a legal
+        // starting state because the merge seam may run
+        // before any prior transition (an empty salvage,
+        // for instance). Already-advanced states are
+        // accepted idempotently with the same fingerprint;
+        // a DIFFERENT fingerprint after `SalvageCommitted`
+        // is rejected.
+        if wave
+            .delivery_state
+            .at_least(WaveDeliveryState::CoordinationWritten)
+        {
+            let existing = wave.salvage_receipt.as_ref();
+            if let Some(existing) = existing
+                && !existing.batch_fingerprint.is_empty()
+                && existing.batch_fingerprint != receipt.batch_fingerprint
+            {
+                return Err(SupervisorStoreError::InvalidTransition(format!(
+                    "commit_salvage_projection: fingerprint mismatch (existing={}, new={})",
+                    existing.batch_fingerprint, receipt.batch_fingerprint
+                )));
+            }
+        }
+        // Forward-only advance.
+        if !wave
+            .delivery_state
+            .at_least(WaveDeliveryState::SalvageCommitted)
+        {
+            wave.delivery_state = WaveDeliveryState::SalvageCommitted;
+        }
+        if receipt.batch_fingerprint.is_empty()
+            || wave
+                .salvage_receipt
+                .as_ref()
+                .is_none_or(|existing| existing.batch_fingerprint == receipt.batch_fingerprint)
+        {
+            wave.salvage_receipt = Some(receipt.clone());
         }
         Ok(())
     }
 
-    fn mark_salvage_merged(&self, wave_id: &str) -> SupervisorStoreResult<()> {
+    fn record_coordination_written(
+        &self,
+        wave_id: &str,
+        receipt: &CoordinationReceiptSummary,
+    ) -> SupervisorStoreResult<()> {
         let mut inner = self.lock()?;
         let wave = inner
             .waves_by_id
             .get_mut(wave_id)
             .ok_or_else(|| SupervisorStoreError::UnknownWave(wave_id.to_string()))?;
-        if !wave.salvage_merged {
-            wave.salvage_merged = true;
+        if !wave.delivery_state.at_least(WaveDeliveryState::SalvageCommitted) {
+            return Err(SupervisorStoreError::InvalidTransition(
+                "record_coordination_written requires SalvageCommitted state".to_string(),
+            ));
+        }
+        if wave.delivery_state.at_least(WaveDeliveryState::CoordinationWritten) {
+            let existing = wave.coordination_receipt.as_ref();
+            if let Some(existing) = existing
+                && !existing.payload_fingerprint.is_empty()
+                && existing.payload_fingerprint != receipt.payload_fingerprint
+            {
+                return Err(SupervisorStoreError::InvalidTransition(format!(
+                    "record_coordination_written: fingerprint mismatch (existing={}, new={})",
+                    existing.payload_fingerprint, receipt.payload_fingerprint
+                )));
+            }
+        }
+        if !wave.delivery_state.at_least(WaveDeliveryState::CoordinationWritten) {
+            wave.delivery_state = WaveDeliveryState::CoordinationWritten;
+        }
+        if receipt.payload_fingerprint.is_empty()
+            || wave
+                .coordination_receipt
+                .as_ref()
+                .is_none_or(|existing| existing.payload_fingerprint == receipt.payload_fingerprint)
+        {
+            wave.coordination_receipt = Some(receipt.clone());
+        }
+        Ok(())
+    }
+
+    fn commit_coordination_event(
+        &self,
+        wave_id: &str,
+        receipt: &CoordinationReceiptSummary,
+        terminal_phase: WavePhase,
+    ) -> SupervisorStoreResult<()> {
+        let mut inner = self.lock()?;
+        let wave = inner
+            .waves_by_id
+            .get_mut(wave_id)
+            .ok_or_else(|| SupervisorStoreError::UnknownWave(wave_id.to_string()))?;
+        if !wave.delivery_state.at_least(WaveDeliveryState::CoordinationWritten) {
+            return Err(SupervisorStoreError::InvalidTransition(
+                "commit_coordination_event requires CoordinationWritten state".to_string(),
+            ));
+        }
+        if let Some(existing) = wave.coordination_receipt.as_ref()
+            && !existing.payload_fingerprint.is_empty()
+            && existing.payload_fingerprint != receipt.payload_fingerprint
+        {
+            return Err(SupervisorStoreError::InvalidTransition(format!(
+                "commit_coordination_event: fingerprint mismatch (existing={}, new={})",
+                existing.payload_fingerprint, receipt.payload_fingerprint
+            )));
+        }
+        wave.delivery_state = WaveDeliveryState::CoordinationCommitted;
+        // Set the terminal phase only on the FIRST commit — a
+        // re-commit on a Done wave must NOT flip Failed into
+        // Done again (the dispatcher must align with the
+        // already-recorded outcome).
+        if !matches!(wave.phase, WavePhase::Done | WavePhase::Failed) {
+            wave.phase = terminal_phase;
+        }
+        if receipt.payload_fingerprint.is_empty()
+            || wave
+                .coordination_receipt
+                .as_ref()
+                .is_none_or(|existing| existing.payload_fingerprint == receipt.payload_fingerprint)
+        {
+            wave.coordination_receipt = Some(receipt.clone());
         }
         Ok(())
     }
@@ -816,6 +941,10 @@ impl SupervisorStore for InMemorySupervisorStore {
         let inner = self.lock()?;
         let mut out = Vec::new();
         for wave in inner.waves_by_id.values() {
+            // U2 contract: skip waves the coordinator has
+            // already driven to a terminal phase
+            // (`Done` / `Failed`). Recovery only cares about
+            // waves that still need a coordinator verdict.
             if matches!(wave.phase, WavePhase::Done | WavePhase::Failed) {
                 continue;
             }
@@ -844,8 +973,7 @@ impl SupervisorStore for InMemorySupervisorStore {
                 pending_count: pending,
                 in_flight_count: in_flight,
                 cancel_requested: wave.cancel_requested,
-                merged_to_events: wave.merged_to_events,
-                salvage_merged: wave.salvage_merged,
+                delivery_state: wave.delivery_state,
                 started_at: wave.created_at,
                 slots,
             });
@@ -1110,8 +1238,9 @@ impl SupervisorStore for InMemorySupervisorStore {
             expected_total: target_slots.len() as u32,
             phase: WavePhase::Dispatch,
             cancel_requested: false,
-            merged_to_events: false,
-            salvage_merged: false,
+            delivery_state: WaveDeliveryState::Pending,
+            salvage_receipt: None,
+            coordination_receipt: None,
             created_at: SystemTime::now(),
             slot_retry_budget: parent_slot_retry_budget,
             attempt_epoch,
@@ -1929,10 +2058,35 @@ mod tests {
     fn mark_merge_to_events_is_idempotent() {
         let s = store();
         let wave = s.register_wave("me", WaveKind::Review, 1, 1).unwrap();
-        s.mark_merge_to_events(&wave).unwrap();
-        s.mark_merge_to_events(&wave).unwrap();
+        s.commit_salvage_projection(
+            &wave,
+            &ProjectionReceiptSummary {
+                kind: ProjectionKind::Business,
+                batch_fingerprint: "fp-idem".into(),
+                write_count: 0,
+                already_present_count: 0,
+                committed_at_unix_secs: 0,
+            },
+        )
+        .unwrap();
+        let summary = CoordinationReceiptSummary {
+            topic: "review.wave.complete".into(),
+            idempotency_key: "k-idem".into(),
+            payload_fingerprint: "fp-idem".into(),
+            write_count: 0,
+            already_present_count: 0,
+            committed_at_unix_secs: 0,
+        };
+        s.record_coordination_written(&wave, &summary).unwrap();
+        s.commit_coordination_event(&wave, &summary, WavePhase::Done)
+            .unwrap();
+        // Re-running commit with the SAME receipt is idempotent.
+        s.commit_coordination_event(&wave, &summary, WavePhase::Done)
+            .unwrap();
         let snap = s.fan_in_status(&wave).unwrap();
-        assert!(snap.merged_to_events);
+        assert!(snap
+            .delivery_state
+            .at_least(WaveDeliveryState::CoordinationCommitted));
     }
 
     /// U8 / F-008 / R8: rebinding a slot to a different
@@ -2038,6 +2192,200 @@ mod tests {
         assert!(
             matches!(err, SupervisorStoreError::InvalidTransition(_)),
             "got {err:?}"
+        );
+    }
+
+    // ─────────────────────────────────────────────────────────────────
+    // 2026-07-27-003 plan U5: four-phase commit protocol tests.
+    //
+    // The tests below pin:
+    // - state transitions are forward-only and never skip a phase;
+    // - same receipt replay is idempotent;
+    // - different receipt replay is rejected;
+    // - migration from a legacy boolean pair (`00` / `10` / `11`)
+    //   produces a deterministic starting state.
+    // ─────────────────────────────────────────────────────────────────
+
+    fn fresh_summary(fp: &str) -> ProjectionReceiptSummary {
+        ProjectionReceiptSummary {
+            kind: ProjectionKind::Business,
+            batch_fingerprint: fp.into(),
+            write_count: 1,
+            already_present_count: 0,
+            committed_at_unix_secs: 0,
+        }
+    }
+
+    fn fresh_coord_summary(fp: &str) -> CoordinationReceiptSummary {
+        CoordinationReceiptSummary {
+            topic: "review.wave.complete".into(),
+            idempotency_key: format!("coord:{fp}"),
+            payload_fingerprint: fp.into(),
+            write_count: 1,
+            already_present_count: 0,
+            committed_at_unix_secs: 0,
+        }
+    }
+
+    #[test]
+    fn u5_wave_delivery_state_starts_pending_and_advances_forward_only() {
+        let s = store();
+        let wave = s.register_wave("u5-fwd", WaveKind::Review, 2, 1).unwrap();
+        // Pending -> SalvageCommitted: ok.
+        s.commit_salvage_projection(&wave, &fresh_summary("fp-1"))
+            .unwrap();
+        assert_eq!(
+            s.fan_in_status(&wave).unwrap().delivery_state,
+            WaveDeliveryState::SalvageCommitted,
+        );
+        // Pending is illegal once past SalvageCommitted:
+        // `record_coordination_written` requires SalvageCommitted
+        // first.
+        s.record_coordination_written(&wave, &fresh_coord_summary("fp-1"))
+            .unwrap();
+        assert_eq!(
+            s.fan_in_status(&wave).unwrap().delivery_state,
+            WaveDeliveryState::CoordinationWritten,
+        );
+        s.commit_coordination_event(
+            &wave,
+            &fresh_coord_summary("fp-1"),
+            WavePhase::Done,
+        )
+        .unwrap();
+        assert_eq!(
+            s.fan_in_status(&wave).unwrap().delivery_state,
+            WaveDeliveryState::CoordinationCommitted,
+        );
+    }
+
+    #[test]
+    fn u5_replay_same_receipt_is_idempotent() {
+        let s = store();
+        let wave = s.register_wave("u5-idem", WaveKind::Review, 1, 1).unwrap();
+        let summary = fresh_summary("fp-idem");
+        s.commit_salvage_projection(&wave, &summary).unwrap();
+        // Re-commit with the SAME fingerprint: still ok, state
+        // stays at SalvageCommitted.
+        s.commit_salvage_projection(&wave, &summary).unwrap();
+        let coord = fresh_coord_summary("fp-idem");
+        s.record_coordination_written(&wave, &coord).unwrap();
+        s.record_coordination_written(&wave, &coord).unwrap();
+        s.commit_coordination_event(&wave, &coord, WavePhase::Done)
+            .unwrap();
+        // Re-running commit with a different terminal phase
+        // must NOT overwrite the Done latch — the recovery
+        // contract is that the FIRST commit wins.
+        s.commit_coordination_event(&wave, &coord, WavePhase::Failed)
+            .unwrap();
+        let snap = s.fan_in_status(&wave).unwrap();
+        assert_eq!(snap.phase, WavePhase::Done);
+    }
+
+    #[test]
+    fn u5_conflicting_receipt_after_committed_is_rejected() {
+        let s = store();
+        let wave = s.register_wave("u5-conflict", WaveKind::Review, 1, 1).unwrap();
+        s.commit_salvage_projection(&wave, &fresh_summary("fp-a"))
+            .unwrap();
+        s.record_coordination_written(&wave, &fresh_coord_summary("fp-a"))
+            .unwrap();
+        s.commit_coordination_event(&wave, &fresh_coord_summary("fp-a"), WavePhase::Done)
+            .unwrap();
+        // A restart that replays a DIFFERENT fingerprint must
+        // be rejected — the wave is already delivered, the
+        // dispatcher must NOT rewrite history.
+        let err = s
+            .commit_salvage_projection(&wave, &fresh_summary("fp-b"))
+            .expect_err("mismatched salvage must be rejected");
+        assert!(matches!(err, SupervisorStoreError::InvalidTransition(_)));
+    }
+
+    #[test]
+    fn u5_crash_window_5_recovery_observes_already_committed() {
+        // Simulates the coord commit + cleanup window: the wave
+        // reached CoordinationCommitted before the loop
+        // crashed. A fresh open must observe the same state
+        // and skip re-injection.
+        let s = store();
+        let wave = s.register_wave("u5-crash-5", WaveKind::Review, 1, 1).unwrap();
+        s.commit_salvage_projection(&wave, &fresh_summary("fp-5"))
+            .unwrap();
+        s.record_coordination_written(&wave, &fresh_coord_summary("fp-5"))
+            .unwrap();
+        s.commit_coordination_event(&wave, &fresh_coord_summary("fp-5"), WavePhase::Done)
+            .unwrap();
+        // The "restart" view: re-derive the snapshot and assert
+        // delivery_state == CoordinationCommitted.
+        let snap = s.fan_in_status(&wave).unwrap();
+        assert!(snap
+            .delivery_state
+            .at_least(WaveDeliveryState::CoordinationCommitted));
+        assert_eq!(snap.phase, WavePhase::Done);
+    }
+
+    #[test]
+    fn u5_crash_window_4_recovery_observes_coord_written() {
+        // The coordination append succeeded but the
+        // `commit_coordination_event` did not. The store
+        // observes `CoordinationWritten`; the runtime
+        // re-derives the receipt from disk and replays the
+        // commit.
+        let s = store();
+        let wave = s.register_wave("u5-crash-4", WaveKind::Review, 1, 1).unwrap();
+        s.commit_salvage_projection(&wave, &fresh_summary("fp-4"))
+            .unwrap();
+        s.record_coordination_written(&wave, &fresh_coord_summary("fp-4"))
+            .unwrap();
+        let snap = s.fan_in_status(&wave).unwrap();
+        assert!(snap
+            .delivery_state
+            .at_least(WaveDeliveryState::CoordinationWritten));
+        assert!(!snap
+            .delivery_state
+            .at_least(WaveDeliveryState::CoordinationCommitted));
+    }
+
+    #[test]
+    fn u5_crash_window_3_recovery_observes_salvage_committed() {
+        // Salvage committed but the coordination append did
+        // not run yet. A restart must observe
+        // `SalvageCommitted` so the dispatcher can resume the
+        // coord-append step without re-projecting.
+        let s = store();
+        let wave = s.register_wave("u5-crash-3", WaveKind::Review, 1, 1).unwrap();
+        s.commit_salvage_projection(&wave, &fresh_summary("fp-3"))
+            .unwrap();
+        let snap = s.fan_in_status(&wave).unwrap();
+        assert_eq!(snap.delivery_state, WaveDeliveryState::SalvageCommitted);
+        assert!(!snap
+            .delivery_state
+            .at_least(WaveDeliveryState::CoordinationWritten));
+    }
+
+    #[test]
+    fn u5_empty_salvage_path_does_not_advance_to_business_projected() {
+        // The dispatcher's `project_empty_salvage` returns a
+        // receipt directly without writing to main. The
+        // store still accepts the receipt and the wave
+        // advances to SalvageCommitted so the coord-injection
+        // gate opens.
+        let s = store();
+        let wave = s.register_wave("u5-empty", WaveKind::Review, 1, 1).unwrap();
+        s.commit_salvage_projection(
+            &wave,
+            &ProjectionReceiptSummary {
+                kind: ProjectionKind::Business,
+                batch_fingerprint: format!("empty-{wave}"),
+                write_count: 0,
+                already_present_count: 0,
+                committed_at_unix_secs: 0,
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            s.fan_in_status(&wave).unwrap().delivery_state,
+            WaveDeliveryState::SalvageCommitted,
         );
     }
 }

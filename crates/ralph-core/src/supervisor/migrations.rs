@@ -31,8 +31,14 @@ mod imp {
     /// `published_failure_payload` on `waves`.
     /// v7 (2026-07-25-005 plan U4) adds `redrive_requests`
     /// idempotency ledger.
+    /// v8 (2026-07-27-003 plan U5) replaces the legacy
+    /// `merged_to_events` / `salvage_merged` boolean pair with
+    /// `delivery_state` (Pending / BusinessProjected /
+    /// SalvageCommitted / CoordinationWritten /
+    /// CoordinationCommitted) and persists the salvage /
+    /// coordination receipt summaries.
     #[allow(dead_code)] // pinned by `migrations_idempotent_across_reopen`; production writes via pragma_update
-    pub const CURRENT_VERSION: i64 = 7;
+    pub const CURRENT_VERSION: i64 = 8;
 
     /// Apply migrations sequentially. Each migration is a
     /// closure that performs the SQL DDL and bumps the
@@ -219,6 +225,70 @@ mod imp {
                 "ALTER TABLE waves ADD COLUMN published_failure_payload INTEGER NOT NULL DEFAULT 0",
             ),
         ];
+        /// 2026-07-27-003 plan U5 (R12 / R10): each new column gets
+        /// its own ALTER inside the column-probe path so the
+        /// concurrent-opener race mirrors the v4/v5 fix.
+        const V8_PROBE: &[(
+            /* table */ &str,
+            /* column */ &str,
+            /* ddl */ &str,
+        )] = &[
+            (
+                "waves",
+                "delivery_state",
+                "ALTER TABLE waves ADD COLUMN delivery_state TEXT NOT NULL DEFAULT 'pending'",
+            ),
+            (
+                "waves",
+                "salvage_fingerprint",
+                "ALTER TABLE waves ADD COLUMN salvage_fingerprint TEXT NOT NULL DEFAULT ''",
+            ),
+            (
+                "waves",
+                "salvage_write_count",
+                "ALTER TABLE waves ADD COLUMN salvage_write_count INTEGER NOT NULL DEFAULT 0",
+            ),
+            (
+                "waves",
+                "salvage_already_present",
+                "ALTER TABLE waves ADD COLUMN salvage_already_present INTEGER NOT NULL DEFAULT 0",
+            ),
+            (
+                "waves",
+                "salvage_committed_at",
+                "ALTER TABLE waves ADD COLUMN salvage_committed_at INTEGER NOT NULL DEFAULT 0",
+            ),
+            (
+                "waves",
+                "coordination_topic",
+                "ALTER TABLE waves ADD COLUMN coordination_topic TEXT NOT NULL DEFAULT ''",
+            ),
+            (
+                "waves",
+                "coordination_idempotency_key",
+                "ALTER TABLE waves ADD COLUMN coordination_idempotency_key TEXT NOT NULL DEFAULT ''",
+            ),
+            (
+                "waves",
+                "coordination_fingerprint",
+                "ALTER TABLE waves ADD COLUMN coordination_fingerprint TEXT NOT NULL DEFAULT ''",
+            ),
+            (
+                "waves",
+                "coordination_write_count",
+                "ALTER TABLE waves ADD COLUMN coordination_write_count INTEGER NOT NULL DEFAULT 0",
+            ),
+            (
+                "waves",
+                "coordination_already_present",
+                "ALTER TABLE waves ADD COLUMN coordination_already_present INTEGER NOT NULL DEFAULT 0",
+            ),
+            (
+                "waves",
+                "coordination_committed_at",
+                "ALTER TABLE waves ADD COLUMN coordination_committed_at INTEGER NOT NULL DEFAULT 0",
+            ),
+        ];
         &[
             Migration {
                 version: 1,
@@ -254,6 +324,11 @@ mod imp {
                 version: 7,
                 ddl: include_str!("migrations/v7.sql"),
                 column_probe: None,
+            },
+            Migration {
+                version: 8,
+                ddl: include_str!("migrations/v8.sql"),
+                column_probe: Some(V8_PROBE),
             },
         ]
     }
@@ -426,7 +501,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             present, 1,
-            "waves.salvage_merged must exist after concurrent migration"
+            "waves.delivery_state.at_least(super::WaveDeliveryState::SalvageCommitted) must exist after concurrent migration"
         );
     }
 }

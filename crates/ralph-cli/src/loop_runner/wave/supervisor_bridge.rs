@@ -406,9 +406,34 @@ impl SupervisorBridge for CoordinatorSupervisorBridge {
             .map_err(|err| BridgeError::Store(err.to_string()))
     }
 
-    fn mark_salvage_merged(&self, wave_id: &str) -> Result<(), BridgeError> {
+    fn commit_salvage_projection(
+        &self,
+        wave_id: &str,
+        receipt: &ralph_core::supervisor::ProjectionReceiptSummary,
+    ) -> Result<(), BridgeError> {
         self.store
-            .mark_salvage_merged(wave_id)
+            .commit_salvage_projection(wave_id, receipt)
+            .map_err(|err| BridgeError::Store(err.to_string()))
+    }
+
+    fn record_coordination_written(
+        &self,
+        wave_id: &str,
+        receipt: &ralph_core::supervisor::CoordinationReceiptSummary,
+    ) -> Result<(), BridgeError> {
+        self.store
+            .record_coordination_written(wave_id, receipt)
+            .map_err(|err| BridgeError::Store(err.to_string()))
+    }
+
+    fn commit_coordination_event(
+        &self,
+        wave_id: &str,
+        receipt: &ralph_core::supervisor::CoordinationReceiptSummary,
+        terminal_phase: ralph_core::supervisor::WavePhase,
+    ) -> Result<(), BridgeError> {
+        self.store
+            .commit_coordination_event(wave_id, receipt, terminal_phase)
             .map_err(|err| BridgeError::Store(err.to_string()))
     }
 
@@ -896,7 +921,7 @@ mod tests {
                 snap.phase,
                 ralph_core::supervisor::WavePhase::Done
                     | ralph_core::supervisor::WavePhase::Integrate
-            ) || snap.merged_to_events
+            ) || snap.delivery_state.at_least(ralph_core::supervisor::WaveDeliveryState::CoordinationCommitted)
                 || snap.completed_count == 1
         );
     }

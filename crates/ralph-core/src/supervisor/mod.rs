@@ -71,8 +71,8 @@ impl fmt::Display for IsolationMode {
 /// requirements doc (R-C-state / KTD-5). The coordinator does NOT
 /// promote a wave to `Done` until `work.done` (exec/fix paths) lands;
 /// staying in `Integrate` after fan-in lets a crash double-inject
-/// `*.wave.complete` be detected by `merged_to_events` on recovery
-/// (U11).
+/// `*.wave.complete` be detected by the merged-to-events latch on
+/// recovery.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum WavePhase {
@@ -104,6 +104,252 @@ impl fmt::Display for WavePhase {
             WavePhase::Done => write!(f, "done"),
             WavePhase::Failed => write!(f, "failed"),
         }
+    }
+}
+
+/// 2026-07-27-003 plan U5: orthogonal delivery state to `WavePhase`.
+///
+/// Tracks the four-phase commit protocol (business projection →
+/// salvage commit → coordination write → coordination commit) so
+/// the runtime can resume from any crash window without skipping
+/// ahead or double-projecting. State transitions are forward-only:
+///
+/// ```text
+/// Pending
+///   → BusinessProjected      (salvage rows landed, receipt kept)
+///   → SalvageCommitted       (store persisted the receipt)
+///   → CoordinationWritten    (coord event appended, receipt kept)
+///   → CoordinationCommitted  (store persisted the receipt)
+/// ```
+///
+/// The store MUST refuse a transition that skips a phase. Repeated
+/// commit of the SAME receipt is idempotent and returns the same
+/// receipt; commit of a DIFFERENT receipt after the phase advanced
+/// is an `InvalidTransition` so a process restart cannot accidentally
+/// rewrite history with stale evidence.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum WaveDeliveryState {
+    /// Initial state — the wave has not yet been projected to main.
+    #[default]
+    Pending,
+    /// The Completed slots' business events were appended to main.
+    BusinessProjected,
+    /// The store committed the salvage projection receipt.
+    SalvageCommitted,
+    /// The `*.wave.complete` / `*.wave.failed` coordination event
+    /// was appended to main.
+    CoordinationWritten,
+    /// The store committed the coordination receipt; wave is fully
+    /// closed for delivery purposes.
+    CoordinationCommitted,
+}
+
+impl fmt::Display for WaveDeliveryState {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let s = match self {
+            WaveDeliveryState::Pending => "pending",
+            WaveDeliveryState::BusinessProjected => "business_projected",
+            WaveDeliveryState::SalvageCommitted => "salvage_committed",
+            WaveDeliveryState::CoordinationWritten => "coordination_written",
+            WaveDeliveryState::CoordinationCommitted => "coordination_committed",
+        };
+        f.write_str(s)
+    }
+}
+
+impl WaveDeliveryState {
+    /// Returns the next state in the protocol. The terminal
+    /// `CoordinationCommitted` state returns itself so a repeated
+    /// check stays bounded.
+    pub fn next(self) -> Self {
+        match self {
+            WaveDeliveryState::Pending => WaveDeliveryState::BusinessProjected,
+            WaveDeliveryState::BusinessProjected => WaveDeliveryState::SalvageCommitted,
+            WaveDeliveryState::SalvageCommitted => WaveDeliveryState::CoordinationWritten,
+            WaveDeliveryState::CoordinationWritten | WaveDeliveryState::CoordinationCommitted => {
+                WaveDeliveryState::CoordinationCommitted
+            }
+        }
+    }
+
+    /// True if `target` is the same phase or a later one — i.e.
+    /// the transition is forward-only and may be safely committed
+    /// idempotently.
+    pub fn at_least(self, target: WaveDeliveryState) -> bool {
+        let rank = |s: WaveDeliveryState| -> u8 {
+            match s {
+                WaveDeliveryState::Pending => 0,
+                WaveDeliveryState::BusinessProjected => 1,
+                WaveDeliveryState::SalvageCommitted => 2,
+                WaveDeliveryState::CoordinationWritten => 3,
+                WaveDeliveryState::CoordinationCommitted => 4,
+            }
+        };
+        rank(self) >= rank(target)
+    }
+}
+
+/// 2026-07-27-003 plan U5 (R9): kind of projection the dispatcher's
+/// failed-fan-in seam produced. The kind is part of the idempotency
+/// key so `business` and `coordination` writes never share a key
+/// namespace.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ProjectionKind {
+    /// Per-slot business events appended to main during the salvage
+    /// merge (the `merge_completed_*_slots_to_main` seam).
+    #[default]
+    Business,
+    /// Supervisor coordination event appended to main on the failed
+    /// fan-in path (`append_supervisor_coord_event`).
+    Coordination,
+}
+
+impl fmt::Display for ProjectionKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ProjectionKind::Business => f.write_str("business"),
+            ProjectionKind::Coordination => f.write_str("coordination"),
+        }
+    }
+}
+
+/// 2026-07-27-003 plan U5 (R9 / R10): receipt produced by the
+/// dispatcher after a successful projection step. The runtime
+/// hands the receipt to the store as the SOLE proof that the
+/// write landed; the store advances `WaveDeliveryState` only on
+/// receipt.
+///
+/// Idempotency contract:
+/// - `idempotency_keys` carry `wave_id + slot_index +
+///   payload_fingerprint + projection_kind`. The runtime scans
+///   for an existing record with the same key before appending;
+///   - same key + same fingerprint → counted in
+///     `already_present_count`, NO re-write;
+///   - same key + different fingerprint → `ProjectionError::Conflict`
+///     (fail-closed);
+///   - new key → write proceeds, counted in `write_count`.
+/// - Re-running the projection after a crash produces the SAME
+///   receipt (same fingerprint, same keys) so the store commit
+///   is idempotent; a different receipt for the same phase is
+///   rejected as `ProjectionError::ReceiptMismatch`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProjectionReceipt {
+    pub wave_id: String,
+    pub kind: ProjectionKind,
+    pub idempotency_keys: Vec<ProjectionKey>,
+    /// Total records appended by this projection call.
+    pub write_count: u32,
+    /// Records that already existed on disk with the same key +
+    /// fingerprint (the replay-no-op count).
+    pub already_present_count: u32,
+    /// SHA-256 fingerprint over the canonicalised write batch —
+    /// stable across replays so the store can detect a replay with
+    /// a different payload as a conflict.
+    pub batch_fingerprint: String,
+    /// Wall-clock instant the projection landed.
+    pub committed_at_unix_secs: u64,
+}
+
+/// Single idempotency record carried by `ProjectionReceipt`. The
+/// tuple `(wave_id, slot_index, payload_fingerprint, kind)` is the
+/// unique key in the projection table; a duplicate insert with the
+/// SAME fingerprint is a no-op, with a DIFFERENT fingerprint is a
+/// conflict (the agent cannot silently overwrite a prior write).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProjectionKey {
+    pub slot_index: u32,
+    pub payload_fingerprint: String,
+}
+
+/// 2026-07-27-003 plan U5: receipt for the coordination event
+/// append. Distinct from `ProjectionReceipt` because the
+/// coordination event has no per-slot breakdown — its idempotency
+/// key is `(wave_id, topic, payload_fingerprint)`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CoordinationReceipt {
+    pub wave_id: String,
+    pub topic: String,
+    pub idempotency_key: String,
+    pub payload_fingerprint: String,
+    pub write_count: u32,
+    pub already_present_count: u32,
+    pub committed_at_unix_secs: u64,
+}
+
+/// 2026-07-27-003 plan U5: persisted summary of the last receipt
+/// the store accepted for each phase. The runtime can recover from
+/// a crash by reading these summaries and resuming from the first
+/// uncommitted phase — no guessing from `WavePhase` alone.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct ProjectionReceiptSummary {
+    pub kind: ProjectionKind,
+    pub batch_fingerprint: String,
+    pub write_count: u32,
+    pub already_present_count: u32,
+    pub committed_at_unix_secs: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct CoordinationReceiptSummary {
+    pub topic: String,
+    pub idempotency_key: String,
+    pub payload_fingerprint: String,
+    pub write_count: u32,
+    pub already_present_count: u32,
+    pub committed_at_unix_secs: u64,
+}
+
+/// 2026-07-27-003 plan U5: failure modes the dispatcher can
+/// encounter on the projection seams. Each variant names the
+/// recovery action the runtime must take so the failure mode is
+/// machine-actionable rather than a silent `Ok(())`.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProjectionError {
+    /// An I/O error occurred opening / appending / syncing the
+    /// ledger. The store flag MUST NOT advance.
+    #[error("projection I/O error: {0}")]
+    Io(String),
+    /// The same idempotency key was previously recorded with a
+    /// different payload fingerprint. Fail-closed: an agent must
+    /// pick a new idempotency key to retry.
+    #[error("projection idempotency conflict for key {0}")]
+    Conflict(String),
+    /// The store rejected the receipt because it was for a wave
+    /// in the wrong `WaveDeliveryState` (e.g. attempting
+    /// `commit_salvage_projection` on a wave already at
+    /// `CoordinationCommitted`). Mirrors
+    /// `SupervisorStoreError::InvalidTransition`.
+    #[error("projection state transition rejected: {0}")]
+    InvalidTransition(String),
+    /// The supplied receipt's fingerprint disagrees with the
+    /// persisted one — a restart tried to commit a different
+    /// batch than the one that landed on disk.
+    #[error("projection receipt fingerprint mismatch: {0}")]
+    ReceiptMismatch(String),
+    /// The store reported an unknown wave id (row evicted /
+    /// crashed mid-migration).
+    #[error("projection wave not found: {0}")]
+    UnknownWave(String),
+}
+
+impl From<SupervisorStoreError> for ProjectionError {
+    fn from(err: SupervisorStoreError) -> Self {
+        match err {
+            SupervisorStoreError::UnknownWave(id) => ProjectionError::UnknownWave(id),
+            SupervisorStoreError::InvalidTransition(msg) => {
+                ProjectionError::InvalidTransition(msg)
+            }
+            other => ProjectionError::InvalidTransition(other.to_string()),
+        }
+    }
+}
+
+impl From<crate::supervisor::bridge::BridgeError> for ProjectionError {
+    fn from(err: crate::supervisor::bridge::BridgeError) -> Self {
+        ProjectionError::InvalidTransition(err.to_string())
     }
 }
 
@@ -205,19 +451,18 @@ pub struct WaveSnapshot {
     #[serde(default)]
     pub in_flight_count: u32,
     pub cancel_requested: bool,
-    pub merged_to_events: bool,
-    /// Plan 004 R3 / P0-1: salvage-merge phase flag, distinct
-    /// from `merged_to_events` (which records the coord-event
-    /// injection). On the failed fan-in path the dispatcher
-    /// must first append the Completed slots' business events
-    /// to main, then call `mark_salvage_merged` on the store,
-    /// and only then call `fail_wave`. Without this guard, a
-    /// crash between `fail_wave` returning `InjectedFailed` and
-    /// the dispatcher-layer merge would orphan the salvage
-    /// write — the latch would say "already done" and the
-    /// merge would never retry.
+    /// 2026-07-27-003 plan U5: orthogonal `WaveDeliveryState` to
+    /// `WavePhase`. The two booleans this field replaces
+    /// (`merged_to_events`, `salvage_merged`) participated in a
+    /// silent-success regression (Plan 004 P0-1) where a crash
+    /// between the salvage write and the coord-event latch left
+    /// the dispatcher unable to detect the half-finished delivery.
+    /// The new field drives the four-phase commit protocol
+    /// (Pending → BusinessProjected → SalvageCommitted →
+    /// CoordinationWritten → CoordinationCommitted); see
+    /// [`WaveDeliveryState`].
     #[serde(default)]
-    pub salvage_merged: bool,
+    pub delivery_state: WaveDeliveryState,
     /// 2026-07-03-001 plan U6: wall-clock instant the wave
     /// was registered. Recovery (U11) uses this to decide
     /// the `Failed` timeout verdict; both stores populate
@@ -444,7 +689,12 @@ impl TerminalEvidence {
 /// algorithm must come with a SupervisorStore migration so the
 /// pre-existing fingerprint rows either stay comparable (same
 /// algo) or are re-derived (migrated).
-fn fingerprint_payload(payload: &str) -> String {
+///
+/// 2026-07-27-003 plan U5: `pub` so the dispatcher's
+/// projection helper can build a `(wave_id, slot_index,
+/// payload_fingerprint, kind)` idempotency tuple without
+/// reaching into a private helper.
+pub fn fingerprint_payload(payload: &str) -> String {
     use sha2::{Digest, Sha256};
     let mut hasher = Sha256::new();
     hasher.update(payload.as_bytes());
@@ -629,22 +879,59 @@ pub trait SupervisorStore: fmt::Debug + Send + Sync {
     /// decision pure function (U6).
     fn fan_in_status(&self, wave_id: &str) -> SupervisorStoreResult<WaveSnapshot>;
 
-    /// Mark the wave's merged-to-events row so recovery (U11) does
-    /// not double-inject `*.wave.complete`. Idempotent: repeated
-    /// calls return `Ok(())`.
-    fn mark_merge_to_events(&self, wave_id: &str) -> SupervisorStoreResult<()>;
+    /// 2026-07-27-003 plan U5: commit a salvage projection
+    /// receipt to the wave row. The receipt is the SOLE proof
+    /// that the dispatcher wrote the per-slot business events
+    /// to main; the store MUST advance `WaveDeliveryState` from
+    /// `BusinessProjected` (or later) to `SalvageCommitted` only
+    /// when the receipt matches the wave's persisted batch
+    /// fingerprint.
+    ///
+    /// Idempotency:
+    /// - Re-committing the SAME receipt is a no-op `Ok(())`; the
+    ///   store returns the receipt's fingerprint back so the
+    ///   caller can confirm.
+    /// - Committing a DIFFERENT receipt for a wave that already
+    ///   passed `SalvageCommitted` returns
+    ///   `SupervisorStoreError::InvalidTransition` so a
+    ///   mis-coordinated restart cannot silently rewrite history.
+    /// - Committing on a wave still at `Pending` returns
+    ///   `InvalidTransition` (the dispatcher must finish writing
+    ///   first); the runtime should re-run the merge seam.
+    fn commit_salvage_projection(
+        &self,
+        wave_id: &str,
+        receipt: &ProjectionReceiptSummary,
+    ) -> SupervisorStoreResult<()>;
 
-    /// Plan 004 R3 / P0-1: mark the failed-fan-in salvage merge
-    /// as committed. Distinct from `mark_merge_to_events` —
-    /// that flag tracks the coord-event injection, this one
-    /// tracks the dispatcher-layer Completed-slots business
-    /// event append that precedes it. Implementations MUST be
-    /// idempotent and MUST survive restart (Memory + rusqlite).
-    /// Default no-op for stores that do not persist a salvage
-    /// row; production stores (memory + rusqlite) override.
-    fn mark_salvage_merged(&self, _wave_id: &str) -> SupervisorStoreResult<()> {
-        Ok(())
-    }
+    /// 2026-07-27-003 plan U5: persist a coordination event
+    /// receipt without flipping the final phase yet. The
+    /// dispatcher calls this immediately after
+    /// `append_supervisor_coord_event` returns
+    /// `Result<CoordinationReceipt, _>` so the store advances
+    /// `WaveDeliveryState` from `SalvageCommitted` (or later) to
+    /// `CoordinationWritten`. Idempotent under the same rules as
+    /// `commit_salvage_projection`.
+    fn record_coordination_written(
+        &self,
+        wave_id: &str,
+        receipt: &CoordinationReceiptSummary,
+    ) -> SupervisorStoreResult<()>;
+
+    /// 2026-07-27-003 plan U5: commit the coordination event to
+    /// the wave's terminal state. Sets
+    /// `WaveDeliveryState::CoordinationCommitted` AND advances
+    /// `WavePhase` to `Done` (success path) or `Failed`
+    /// (failure path) in a single atomic update. Idempotent
+    /// under the same rules as the other commit methods; the
+    /// final wave phase is set only on the FIRST successful
+    /// commit.
+    fn commit_coordination_event(
+        &self,
+        wave_id: &str,
+        receipt: &CoordinationReceiptSummary,
+        terminal_phase: WavePhase,
+    ) -> SupervisorStoreResult<()>;
 
     /// List every wave id known to the store, including Done/Failed.
     /// Used by the terminal cleanup finalizer (KTD8 / R13) so

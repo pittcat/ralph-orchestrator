@@ -548,8 +548,8 @@ fn supervisor_primary_path_exec_wave_completes_with_schema_payload() {
         exec_snap.phase
     );
     assert!(
-        exec_snap.merged_to_events,
-        "merged_to_events must be set (idempotent fan-in contract)"
+        exec_snap.delivery_state.at_least(ralph_core::supervisor::WaveDeliveryState::CoordinationCommitted),
+        "delivery_state must reach CoordinationCommitted (idempotent fan-in contract)"
     );
     use ralph_core::supervisor::SlotStatus;
     assert!(
