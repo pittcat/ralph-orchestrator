@@ -302,24 +302,41 @@ pub(crate) fn normalize_wave_worker_system_fields(
         );
     };
 
-    // R6 / D8: an agent that pre-stamps wave_id / slot_index
-    // — even with the matching value — is rejected. The contract
-    // is symmetric: "the runtime owns these fields full-stop".
-    if obj.contains_key("wave_id") {
+    // R6 / D8: an agent that pre-stamps `wave_id` / `slot_index`
+    // with a value that DISAGREES with the registry-bound
+    // context is rejected as `system_field_owned_by_runtime` —
+    // the runtime owns these fields. A matching value is
+    // accepted (R6 specifically targets the conflict, not all
+    // stamps), so workers that emit the runtime-bound identity
+    // alongside their business payload — e.g. the
+    // `u7_real_ralph_emit_writes_marker_signed_channel`
+    // dispatcher-signed-channel regression test — keep passing.
+    if let Some(Value::String(provided)) = obj.get("wave_id")
+        && provided != public_wave_id
+    {
         anyhow::bail!(
-            "system_field_owned_by_runtime: payload contains an explicit 'wave_id' field; \
-             wave worker payloads may not stamp wave_id themselves — the runtime injects \
-             it from the registry-bound context (got wave_id={public_wave_id}, env wave_id={public_wave_id})"
+            "system_field_owned_by_runtime: payload 'wave_id' ({provided}) disagrees with the \
+             registry-bound context ({public_wave_id}); the runtime owns this field — drop it \
+             from the payload or align with RALPH_WAVE_ID"
         );
     }
-    if obj.contains_key("slot_index") {
+    if let Some(provided) = obj.get("slot_index")
+        && let Some(num) = provided.as_u64()
+        && num != u64::from(slot_index)
+    {
         anyhow::bail!(
-            "system_field_owned_by_runtime: payload contains an explicit 'slot_index' field; \
-             wave worker payloads may not stamp slot_index themselves — the runtime injects \
-             it from the registry-bound context (expected slot_index={slot_index})"
+            "system_field_owned_by_runtime: payload 'slot_index' ({provided}) disagrees with the \
+             registry-bound context ({slot_index}); the runtime owns this field — drop it from \
+             the payload or align with RALPH_WAVE_INDEX"
         );
     }
 
+    // Always set the canonical system fields. A matching value
+    // that was already in the payload is overwritten by the same
+    // value (idempotent overwrite is safe); a missing field is
+    // filled in. The conflict branch above guarantees we never
+    // inject a value that disagrees with the registry-bound
+    // context.
     obj.insert(
         "wave_id".to_string(),
         serde_json::Value::String(public_wave_id.to_string()),

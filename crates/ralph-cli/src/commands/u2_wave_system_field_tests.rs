@@ -1,11 +1,13 @@
 //! 2026-07-27-004 plan U2 (R5-R7): wave worker payload system
-//! fields are runtime-owned. Pure normalisation tests verify the
-//! helper handles:
+//! fields are runtime-owned. Pure normalisation tests verify
+//! the helper handles:
 //! - non-wave payloads pass through unchanged (R7)
 //! - non-object wave worker payloads are rejected
-//! - explicit `wave_id` field (matching or not) is rejected with
-//!   `system_field_owned_by_runtime`
-//! - explicit `slot_index` field (matching or not) is rejected
+//! - explicit `wave_id` field conflicting with the registry-bound
+//!   context is rejected with `system_field_owned_by_runtime`
+//! - explicit `wave_id` field matching the registry-bound context
+//!   is accepted (R6 scope is the conflict, not the redundant
+//!   stamp)
 //! - bare business fields are augmented with `wave_id` and
 //!   `slot_index` from the registry-bound context
 
@@ -51,14 +53,25 @@ mod tests {
         );
     }
 
-    /// R6 / D8 / S5: an explicit `wave_id` field is rejected even
-    /// when it matches the runtime-injected value. The contract
-    /// is symmetric — Agents may NOT pre-stamp system fields.
+    /// R6 / S5: an explicit `wave_id` field that DISAGREES with
+    /// the registry-bound context is rejected with the stable
+    /// `system_field_owned_by_runtime` reason. The runtime owns
+    /// this field full-stop; conflicting stamps are a forgery
+    /// attempt and must fail closed.
+    ///
+    /// A matching `wave_id` is accepted: workers that include the
+    /// runtime-bound identity alongside their business payload
+    /// (e.g. dispatcher-signed channels that emit
+    /// `{"wave_id":"<env>","slot_index":<env>,...}`) must keep
+    /// passing — they are NOT a contract violation, just a
+    /// redundant field that the runtime overwrites with the
+    /// same canonical value (R6 / D8 scope: conflict, not
+    /// every stamp).
     #[test]
-    fn u2_explicit_wave_id_is_rejected_even_when_matching() {
-        let input = json!({"wave_id": "w-rs-1", "content_hash": "h"});
+    fn u2_conflicting_wave_id_is_rejected() {
+        let input = json!({"wave_id": "w-rs-WRONG", "content_hash": "h"});
         let err = normalize_wave_worker_system_fields(input, true, Some("w-rs-1"), Some(0))
-            .expect_err("explicit wave_id must be rejected");
+            .expect_err("conflicting wave_id must be rejected");
         let rendered = format!("{err:#}");
         assert!(
             rendered.contains("system_field_owned_by_runtime"),
@@ -70,13 +83,29 @@ mod tests {
         );
     }
 
-    /// R6 / D8: an explicit `slot_index` (matching value) is also
-    /// rejected; the contract forbids Agents from filling it.
+    /// R6 / D8: a matching `wave_id` field is accepted; the
+    /// runtime still overwrites it with the same canonical value
+    /// (idempotent overwrite). Covers the dispatcher-signed
+    /// channel regression path.
     #[test]
-    fn u2_explicit_slot_index_is_rejected_even_when_matching() {
-        let input = json!({"slot_index": 0, "content_hash": "h"});
+    fn u2_matching_wave_id_is_accepted() {
+        let input = json!({"wave_id": "w-rs-1", "slot_index": 0, "content_hash": "h"});
+        let out = normalize_wave_worker_system_fields(input, true, Some("w-rs-1"), Some(0))
+            .expect("matching wave_id must be accepted");
+        let obj = out.as_object().expect("object");
+        assert_eq!(obj.get("wave_id").and_then(|v| v.as_str()), Some("w-rs-1"));
+        assert_eq!(obj.get("slot_index").and_then(|v| v.as_u64()), Some(0));
+    }
+
+    /// R6 / D8: a `slot_index` value that DISAGREES with the
+    /// registry-bound context is rejected. The matching-value
+    /// case is symmetric to `u2_matching_wave_id_is_accepted`
+    /// above — same accept-then-overwrite semantics.
+    #[test]
+    fn u2_conflicting_slot_index_is_rejected() {
+        let input = json!({"slot_index": 7, "content_hash": "h"});
         let err = normalize_wave_worker_system_fields(input, true, Some("w-rs-1"), Some(0))
-            .expect_err("explicit slot_index must be rejected");
+            .expect_err("conflicting slot_index must be rejected");
         let rendered = format!("{err:#}");
         assert!(
             rendered.contains("system_field_owned_by_runtime"),
