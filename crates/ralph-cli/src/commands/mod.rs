@@ -1,3 +1,4 @@
+pub mod capability;
 pub mod clean;
 pub mod code_task;
 pub mod completions;

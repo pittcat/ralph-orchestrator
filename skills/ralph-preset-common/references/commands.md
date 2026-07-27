@@ -108,6 +108,33 @@ scripts/check-cli-doc-drift.sh --strict
 
 机械 lint 失败时 **仍继续** AAF 评审；Executive Summary 须标注 lint 通过/失败及 Error 计数。
 
+## Capability inventory
+
+```bash
+# 列出 preset-facing capability 清单（read-only；AAF 评审前必读）
+ralph capability inventory --format json
+ralph capability inventory --format human
+```
+
+JSON 输出结构：
+```json
+{
+  "version": "capability_inventory/v1",
+  "capabilities": [
+    {
+      "id": "wave-emit",
+      "trigger_signal": "execution_model == wave | supervisor+wave",
+      "applies_when": "preset uses ralph wave emit / ralph wave verify",
+      "evidence_sources": ["skills/.../finding-rubric.md", "crates/.../ralph-tools-wave.md"],
+      "recommended_evidence_level": "runtime",
+      "source": "binary_embedded"
+    }
+  ]
+}
+```
+
+**用途**：AAF 评审前，对照此清单确认 preset 作者已理解所有依赖的 runtime capability，并检查 `covered_in_author_review`（静态审文档 vs 运行时验证）。
+
 ## Wave 子命令
 
 | 命令 | 说明 |

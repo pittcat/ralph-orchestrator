@@ -11,6 +11,7 @@
 //! - Benchmark task definitions and workspace isolation
 
 pub mod agent_doc_sync;
+pub mod capability_inventory;
 #[cfg(feature = "recording")]
 mod cli_capture;
 pub mod completion_emit;

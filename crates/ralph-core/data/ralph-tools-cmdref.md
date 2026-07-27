@@ -145,6 +145,7 @@ ralph run [OPTIONS] [-- <CUSTOM_ARGS>...]
 | `ralph inspect prompt` | 预览 hat 的 prompt 渲染结果（auto-inject + on-demand + 块标题），OPAC Observe 一手数据；常用 `--hat <hat_id> --format json --full` 形式 |
 | `ralph diagnose` | 离线诊断报告（`--format json` 含 `dup_storm_topics`：`work.ready` 同 dedup key 重复 ≥3 次；ranked findings 的 `hint` 区分 `duplicate_work_done_same_step` / `duplicate_work_done_stall_bypass`） |
 | `ralph preset materialize-artifacts` | 将内嵌 artifact 模板写到磁盘（binary-only 安装；见下方专节） |
+| `ralph capability inventory` | 列出 preset 作者/reviewer 必须理解的运行时 capability 清单（含 id、trigger_signal、applies_when、evidence_sources、recommended_evidence_level、source）；用于 AAF 评审前对齐 capability 覆盖状态 |
 
 > `ralph bot` 已随 `ralph-telegram` crate 一起删除;运行时不再提供人工通道。`human.guidance` 已废弃;`task.resume` 恢复通道保留(由 runtime diagnosis engine 产出)。
 
