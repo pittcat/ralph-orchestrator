@@ -1070,15 +1070,21 @@ fn emit_command_with_root_and_hats(
             )
             .map(|block| format!("\n\n{block}"))
             .unwrap_or_default();
-            // Always append the schema-discovery hint so agents know to
-            // query `--schema` for the authoritative field list instead
-            // of guessing from error messages.
+            // Always append the schema-discovery hint so agents query the
+            // active runner context instead of guessing another preset.
+            // A loop already injects RALPH_HATS_SOURCE / RALPH_CONFIG;
+            // suggesting `-H builtin:<preset>` here can override that
+            // authority and turn a payload error into flow_unknown_emit or
+            // origin:unknown_hat.
             let schema_hint = format!(
-                "\n\nTip: run `ralph emit --schema {} -H builtin:<preset>` \
-                 to list the required fields, or `ralph emit --schema {} \
-                 --config <ralph.yml> -H builtin:<preset>` if the workspace \
-                 has no preset-bearing ralph.yml.",
-                report.topic, report.topic
+                "\n\nTip: run `ralph emit --schema {}` to list the required \
+                 fields from the active runner context. During a hat \
+                 activation, do not guess or override the preset with `-H` \
+                 / `--config`; the runner-injected RALPH_HATS_SOURCE and \
+                 RALPH_CONFIG are authoritative. If schema lookup reports \
+                 flow_unknown_emit or origin:unknown_hat, stop and report a \
+                 runner-context mismatch.",
+                report.topic
             );
             let suggestions_block = format!("{suggestions_block}{repair_block}{schema_hint}");
             let envelope = serde_json::to_string(&report).unwrap_or_else(|_| "{}".to_string());

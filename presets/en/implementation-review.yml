@@ -979,9 +979,27 @@ hats:
 
       ### Step 7 — Emit scope.ready
 
-      Pre-check first (after loading emit skill — see OPAC reference):
-      `ralph emit scope.ready --policy-check -j '<payload>' -H <this-preset>`
-      (the loop's gate is the same one; per `ralph-tools-emit` §5).
+      Pre-check first (after loading emit skill — see OPAC reference).
+      This activation already has the authoritative `RALPH_HATS_SOURCE`,
+      `RALPH_CONFIG`, `RALPH_CURRENT_HAT`, and `RALPH_EVENTS_FILE` injected
+      by the runner. Do NOT search for another preset, infer one from nearby
+      YAML files, or add `-H builtin:<preset>` / `--config` overrides.
+
+      1. Inspect the active schema with
+         `ralph emit --schema scope.ready`.
+      2. Pre-check with
+         `ralph emit scope.ready --policy-check -j '<payload>' --output json`.
+      3. Only when `ok=true`, drop `--policy-check` and emit the real event
+         with `--output json`; Confirm requires `ok=true` and
+         `recorded=true`.
+
+      If schema lookup or precheck reports `flow_unknown_emit`,
+      `origin:unknown_hat`, or names a hat other than `scope-preparer`,
+      stop. That means the active runner context is inconsistent; do not
+      repair it by guessing a preset and do not consume the activation's
+      single business-event slot.
+
+      The loop's gate is the same one (per `ralph-tools-emit` §5).
       Only after the precheck passes, drop `--policy-check` and emit the
       real event. Required payload fields are listed in
       `event_policy.schemas.scope.ready`; the path fields refer to files
@@ -992,9 +1010,11 @@ hats:
       ### Step 8 — Emit scope.blocked
 
       When any failure path applies, pre-check + emit `scope.blocked`
-      with the same payload hygiene as Step 7. `reason` MUST start with
-      one of the canonical reason codes from Step 5b. `block_artifact_path`
-      points to `scope-blocked.md`.
+      with the same active-context and Confirm rules as Step 7:
+      `ralph emit --schema scope.blocked`, then policy-check, then one real
+      emit without any `-H` / `--config` override. `reason` MUST start with
+      one of the canonical reason codes from Step 5b.
+      `block_artifact_path` points to `scope-blocked.md`.
 
       ### Step 9 — Stop
 
@@ -1926,4 +1946,3 @@ hats:
       `--policy-check` then real emit; Confirm with `--output json`
       (`ok`/`recorded`), not by reading event files. Cite
       `ralph-tools-emit` §5 for policy-check feedback.
-

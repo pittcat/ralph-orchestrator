@@ -144,6 +144,18 @@ fn test_emit_rejection_hint_excludes_unauthorised_topics() {
         "fix hint must not surface an unauthorised-topic payload example: {}",
         stderr
     );
+    assert!(
+        stderr.contains("ralph emit --schema work.ready")
+            && stderr.contains("RALPH_HATS_SOURCE")
+            && stderr.contains("do not guess or override the preset"),
+        "schema repair hint must preserve the active runner context: {}",
+        stderr
+    );
+    assert!(
+        !stderr.contains("builtin:<preset>"),
+        "schema repair hint must not teach agents to guess a preset: {}",
+        stderr
+    );
 }
 
 /// 2026-07-27: when an outer hat leaks `RALPH_EVENTS_FILE` into a

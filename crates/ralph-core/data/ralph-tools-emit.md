@@ -52,7 +52,16 @@ cargo build
 ralph emit --schema work.done | jq -r .protocol_hash   # 改后
 ```
 
-**Agent 用法（HARD RULE）：** 在构造任何业务事件 payload 之前，**先**跑 `ralph emit --schema <topic> -H builtin:<preset>`（或在无 preset-bearing `ralph.yml` 的 workspace 跑 `ralph emit --schema <topic> --config <ralph.yml> -H builtin:<preset>`），从返回的 `required_fields` 数组取得字段清单。**不要**靠错误消息逐字段猜。`--schema` 是只读的，不写 events.jsonl、不消耗 iteration。错误消息（如 `receiver_contract.to_hat must be a non-empty string`）用来定位字段层级，`--schema` 用来确认完整字段集——两者配合使用。
+**Agent 用法（HARD RULE）：** 在构造任何业务事件 payload 之前，**先**跑 `ralph emit --schema <topic>`，从返回的 `required_fields` 数组取得字段清单。`--schema` 的 topic 是 flag 的值；不要写成 `ralph emit <topic> --schema`。
+
+当你正由 `ralph run` 激活为某个 **hat**（本轮角色）时，runner 已注入当前 loop 的 `RALPH_HATS_SOURCE`（hat 集合来源）和 `RALPH_CONFIG`（项目配置来源）。这两个值是当前运行上下文的权威来源：
+
+- **不要**扫描 workspace 中的 YAML 来猜 preset。
+- **不要**因为默认 `ralph.yml` 不存在就自行加 `-H builtin:<preset>`。
+- **不要**用另一个 preset 的 `-H` / `--config` 覆盖 runner 注入值；这会让当前 hat、允许发布的 topic 和 schema 来自不同拓扑。
+- 只有 loop 外的操作者明确指定要检查哪个 preset 时，才传 `-H <明确来源>` 或 `--config <明确文件>`。
+
+若 `--schema` / `--policy-check` 返回 `flow_unknown_emit`、`origin:unknown_hat`，或错误中出现的 hat 与 prompt 的 `## HAT IDENTITY` 不一致，**停止 emit**并报告运行上下文不一致；不要继续试不同的 builtin preset。**不要**靠错误消息逐字段猜。`--schema` 是只读的，不写事件、不消耗 iteration。错误消息用来定位字段层级，`--schema` 用来确认完整字段集——两者配合使用。
 
 **环境变量：**
 
