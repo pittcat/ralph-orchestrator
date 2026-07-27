@@ -20,6 +20,7 @@
 //!    present in the isolated loop body).
 
 use super::*;
+use super::common::write_event_with_hat_to_jsonl;
 
 /// Build a minimal preset that exposes a single planner
 /// hat publishing `plan.blocked`, `work.done`,
@@ -224,4 +225,73 @@ fn u3_jsonl_repair_topic_routed_to_placeholder_not_accepted() {
     );
 
     let _ = event_loop.repair_stream_pending; // U7 retired the placeholder counter
+}
+
+#[test]
+fn u3_jsonl_scope_ready_advances_and_persists_flow_authority() {
+    let temp = tempfile::tempdir().unwrap();
+    let events_path = temp.path().join("events.jsonl");
+    let diagnostics_root = temp.path().to_path_buf();
+
+    let yaml = r#"
+event_loop:
+  completion_promise: "LOOP_COMPLETE"
+mechanism:
+  flow:
+    type: declared
+    version: 1
+    terminal_emits: [LOOP_COMPLETE]
+    steps:
+      - id: scope_freeze
+        kind: sequential
+        allowed_emits: ["scope.ready"]
+      - id: review_wave
+        kind: sequential
+        allowed_emits: ["review.unit.done"]
+        on: scope.ready
+hats:
+  scope-preparer:
+    name: "Scope Preparer"
+    triggers: ["work.start"]
+    publishes: ["scope.ready"]
+"#;
+    let mut config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
+    config.core.workspace_root = diagnostics_root.clone();
+    let diagnostics =
+        crate::diagnostics::DiagnosticsCollector::with_enabled(&diagnostics_root, true)
+            .expect("create diagnostics collector");
+    let mut event_loop = EventLoop::with_diagnostics(config, diagnostics);
+    event_loop.initialize("U3 jsonl flow-authority persistence");
+    event_loop.event_reader = crate::event_reader::EventReader::new(&events_path);
+
+    write_event_with_hat_to_jsonl(&events_path, "scope.ready", "{}", "scope-preparer");
+
+    let result = event_loop
+        .process_events_from_jsonl()
+        .expect("process events");
+    let topics: Vec<String> = result
+        .accepted_events
+        .iter()
+        .map(|e| e.topic.to_string())
+        .collect();
+    assert!(
+        topics.iter().any(|t| t == "scope.ready"),
+        "expected scope.ready to be accepted, got {topics:?}"
+    );
+
+    let flow_authority_path = diagnostics_root.join(".ralph/flow-authority.jsonl");
+    let content = std::fs::read_to_string(&flow_authority_path).unwrap_or_else(|err| {
+        panic!(
+            "read flow-authority.jsonl: {err}: {}",
+            flow_authority_path.display()
+        )
+    });
+    assert!(
+        content.contains(r#""step":"review_wave""#),
+        "expected flow authority to advance to review_wave, got: {content}"
+    );
+    assert!(
+        content.contains(r#""topic":"scope.ready""#),
+        "expected scope.ready snapshot in flow authority, got: {content}"
+    );
 }

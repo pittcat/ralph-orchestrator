@@ -13385,25 +13385,6 @@ impl EventLoop {
         let outcome = crate::event_loop::emit_gate::evaluate_emit_gate(&mut stage_ctx, &event);
         match outcome {
             crate::event_loop::emit_gate::EmitGateOutcome::AcceptMainBus => {
-                // 2026-06-28 plan U4: a successful accept may
-                // carry the runner into the next plan step.
-                // We advance AFTER publish so the stage_ctx
-                // that just succeeded does not see its own
-                // topic through the new step's scope.
-                if let Some(next) =
-                    advance_plan_step(&self.config, &self.current_plan_step, event.topic.as_str())
-                {
-                    self.current_plan_step = next.clone();
-                }
-                // Plan 004 R7 (P0-4): persist accepted step
-                // transitions so the resident EventLoop, JSONL
-                // replay, and CLI policy-check all read the
-                // SAME authority. Rejected events never enter
-                // this branch, so the ledger captures accepted
-                // transitions only. A restart rebuilds
-                // `current_plan_step` from this file rather than
-                // re-deriving it from raw main-ledger topics.
-                self.append_flow_authority_snapshot(event.topic.as_str());
                 // U10 (2026-06-27-002 plan completion): if
                 // the topic is in `terminal_emits`, write
                 // the loop-termination record so the
@@ -13898,6 +13879,21 @@ impl EventLoop {
     /// 2026-07-02-006 plan U23: advance workflow phase after a
     /// business event lands on the main bus.
     fn apply_phase_authority_on_accepted(&mut self, event: &Event) {
+        // 2026-06-28 plan U4: a successful accept may carry the
+        // runner into the next plan step. Advance here so both
+        // ingress paths (`publish_event` and `process_parse_result`)
+        // share the same step transition and snapshot write.
+        if let Some(next) =
+            advance_plan_step(&self.config, &self.current_plan_step, event.topic.as_str())
+        {
+            self.current_plan_step = next.clone();
+        }
+        // Plan 004 R7 (P0-4): persist accepted step transitions
+        // at the shared main-bus acceptance point. This method is
+        // called from both `publish_event` and `process_parse_result`,
+        // so the resident EventLoop and CLI policy-check both read the
+        // same authority ledger regardless of ingress path.
+        self.append_flow_authority_snapshot(event.topic.as_str());
         if !self.phase_authority.is_enabled() {
             return;
         }
