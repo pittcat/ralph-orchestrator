@@ -2589,14 +2589,14 @@ pub struct ProjectionAction {
 
 /// Who receives the event downstream.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(untagged)]
+#[serde(tag = "kind", rename_all = "snake_case")]
 pub enum NextHatCandidates {
-    /// At least one matching hat, all verified.
-    Verified(Vec<String>),
-    /// No hat registry available (hatless mode).
+    /// At least one matching hat, all verified against config.hats.
+    Verified { hats: Vec<String> },
+    /// No hat registry available (hatless mode / empty registry).
     Unverified,
     /// Some hats matched but were not all verifiable.
-    Mixed(Vec<CandidateHatEntry>),
+    Mixed { entries: Vec<CandidateHatEntry> },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -2941,7 +2941,7 @@ fn build_projection_preview(state: &PolicyRuntimeState) -> Option<ProjectionPrev
 }
 
 /// Compute which hats receive the event downstream.
-fn compute_next_hat_candidates(config: &RalphConfig, topic: &str) -> NextHatCandidates {
+pub(crate) fn compute_next_hat_candidates(config: &RalphConfig, topic: &str) -> NextHatCandidates {
     let registry = HatRegistry::from_config(config);
 
     // Find all hats subscribed to this topic.
@@ -2952,15 +2952,39 @@ fn compute_next_hat_candidates(config: &RalphConfig, topic: &str) -> NextHatCand
         return NextHatCandidates::Unverified;
     }
 
-    let entries: Vec<CandidateHatEntry> = subscribers
-        .into_iter()
-        .map(|hat| CandidateHatEntry {
-            hat_id: hat.id.as_str().to_string(),
-            verified: true,
-        })
-        .collect();
+    // Separate subscribers into those that are in config.hats (verified) vs unknown.
+    let mut verified_ids = Vec::new();
+    let mut entries = Vec::new();
 
-    NextHatCandidates::Mixed(entries)
+    for hat in subscribers {
+        let hat_id_str = hat.id.as_str();
+        if config.hats.contains_key(hat_id_str) {
+            verified_ids.push(hat_id_str.to_string());
+        } else {
+            entries.push(CandidateHatEntry {
+                hat_id: hat_id_str.to_string(),
+                verified: false,
+            });
+        }
+    }
+
+    if entries.is_empty() {
+        // All subscribers are known hats → Verified.
+        NextHatCandidates::Verified { hats: verified_ids }
+    } else {
+        // Mixed: some verified, some not.
+        // Prepend verified entries to entries list.
+        for id in verified_ids.into_iter().rev() {
+            entries.insert(
+                0,
+                CandidateHatEntry {
+                    hat_id: id,
+                    verified: true,
+                },
+            );
+        }
+        NextHatCandidates::Mixed { entries }
+    }
 }
 
 #[cfg(test)]

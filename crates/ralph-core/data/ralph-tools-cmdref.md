@@ -193,6 +193,20 @@ test -f .ralph/forge/demo/templates/development-plan.template.md
 
 ---
 
+## `next_hat_candidates` 三态（`ralph emit --policy-check` JSON 输出）
+
+`ralph emit --policy-check --output json` 的 JSON 输出中 `next_hat_candidates` 字段有三种形状，由 `kind` 标签区分：
+
+| kind | 触发条件 | JSON 示例 |
+|------|----------|-----------|
+| `verified` | 所有订阅者都是 config 中已注册的 hat | `{"kind":"verified","hats":["worker"]}` |
+| `unverified` | hatless mode / 空 registry，无 topology 证据 | `{"kind":"unverified"}` |
+| `mixed` | 混合态，部分订阅者不在 config 中 | `{"kind":"mixed","entries":[{"hat_id":"worker","verified":true},{"hat_id":"ghost","verified":false}]}` |
+
+**review 关注点**：`mixed` 中 `verified: false` 的 hat 在运行时无法路由，review 需确认它们不是业务拓扑的一部分。
+
+---
+
 ## 错误恢复
 
 | 错误 | 原因 | 修复 |

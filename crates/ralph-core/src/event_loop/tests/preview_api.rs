@@ -636,3 +636,157 @@ fn prompt_preview_candidate_emit_field_appears_when_provided() {
         "JSON must omit candidate_emit when None"
     );
 }
+
+// ─────────────────────────────────────────────────────────────────────
+// Unit 5 of plan 2026-07-27-002: tagged NextHatCandidates enum.
+// ─────────────────────────────────────────────────────────────────────
+
+/// `NextHatCandidates::Verified` must serialize with a `kind` discriminator,
+/// not as a bare array (which is what `#[serde(untagged)]` produces).
+#[test]
+fn next_hat_candidates_verified_serializes_with_kind_discriminator() {
+    use crate::event_policy::compute_next_hat_candidates;
+
+    let yaml = r#"
+event_loop:
+  execution_mode: isolated
+hats:
+  worker:
+    name: "Worker"
+    triggers: ["work.start"]
+    publishes: ["work.done"]
+"#;
+    let config: RalphConfig = serde_yaml::from_str(yaml).expect("parse");
+
+    let result = compute_next_hat_candidates(&config, "work.start");
+    let json = serde_json::to_string(&result).expect("serialize");
+
+    // Must have the kind tag.
+    assert!(
+        json.contains(r#""kind":"verified""#),
+        "verified must serialize with kind=verified tag; got: {json}"
+    );
+    assert!(
+        json.contains(r#""hats":["worker"]"#),
+        "verified hats must appear as hats field; got: {json}"
+    );
+    // Must NOT be a bare array.
+    assert!(
+        !json.starts_with('['),
+        "verified must NOT serialize as bare array; got: {json}"
+    );
+}
+
+/// `NextHatCandidates::Unverified` must serialize as `{"kind":"unverified"}`,
+/// NOT as JSON `null` (which is what the unit-variant `#[serde(untagged)]`
+/// produced before the tag was added).
+#[test]
+fn next_hat_candidates_unverified_serializes_with_kind_unverified_not_null() {
+    use crate::event_policy::compute_next_hat_candidates;
+
+    let yaml = r#"
+event_loop:
+  execution_mode: isolated
+hats:
+  worker:
+    name: "Worker"
+    triggers: []
+    publishes: ["work.done"]
+"#;
+    let config: RalphConfig = serde_yaml::from_str(yaml).expect("parse");
+
+    // No hat subscribes to "work.start" → empty subscriber list → Unverified.
+    let result = compute_next_hat_candidates(&config, "work.start");
+    let json = serde_json::to_string(&result).expect("serialize");
+
+    assert!(
+        json.contains(r#""kind":"unverified""#),
+        "unverified must serialize with kind=unverified tag; got: {json}"
+    );
+    assert_ne!(
+        json, "null",
+        "unverified must NOT serialize as bare null; got: {json}"
+    );
+}
+
+/// `NextHatCandidates::Mixed` must serialize with a `kind` discriminator
+/// and a structured `entries` array.
+#[test]
+fn next_hat_candidates_mixed_serializes_with_kind_mixed() {
+    use crate::event_policy::{CandidateHatEntry, NextHatCandidates};
+
+    // Manually construct Mixed to exercise the serialization path.
+    let mixed = NextHatCandidates::Mixed {
+        entries: vec![
+            CandidateHatEntry {
+                hat_id: "worker".to_string(),
+                verified: true,
+            },
+            CandidateHatEntry {
+                hat_id: "ghost".to_string(),
+                verified: false,
+            },
+        ],
+    };
+    let json = serde_json::to_string(&mixed).expect("serialize");
+
+    assert!(
+        json.contains(r#""kind":"mixed""#),
+        "mixed must serialize with kind=mixed tag; got: {json}"
+    );
+    assert!(
+        json.contains(r#""entries""#),
+        "mixed must have entries field; got: {json}"
+    );
+    // Must NOT be a bare array.
+    assert!(
+        !json.starts_with('['),
+        "mixed must NOT serialize as bare array; got: {json}"
+    );
+}
+
+/// All three `NextHatCandidates` variants must round-trip through serde.
+#[test]
+fn next_hat_candidates_all_variants_roundtrip() {
+    use crate::event_policy::{CandidateHatEntry, NextHatCandidates, compute_next_hat_candidates};
+
+    let yaml = r#"
+event_loop:
+  execution_mode: isolated
+hats:
+  worker:
+    name: "Worker"
+    triggers: ["work.start"]
+    publishes: ["work.done"]
+"#;
+    let config: RalphConfig = serde_yaml::from_str(yaml).expect("parse");
+
+    // Verified.
+    let verified = compute_next_hat_candidates(&config, "work.start");
+    let v_json = serde_json::to_string(&verified).expect("serialize");
+    let v_back: NextHatCandidates = serde_json::from_str(&v_json).expect("roundtrip verified");
+    assert_eq!(verified, v_back);
+
+    // Unverified (no subscriber).
+    let unverified = compute_next_hat_candidates(&config, "nonexistent.topic");
+    let u_json = serde_json::to_string(&unverified).expect("serialize");
+    let u_back: NextHatCandidates = serde_json::from_str(&u_json).expect("roundtrip unverified");
+    assert_eq!(unverified, u_back);
+
+    // Mixed (manually constructed).
+    let mixed = NextHatCandidates::Mixed {
+        entries: vec![
+            CandidateHatEntry {
+                hat_id: "a".to_string(),
+                verified: true,
+            },
+            CandidateHatEntry {
+                hat_id: "b".to_string(),
+                verified: false,
+            },
+        ],
+    };
+    let m_json = serde_json::to_string(&mixed).expect("serialize");
+    let m_back: NextHatCandidates = serde_json::from_str(&m_json).expect("roundtrip mixed");
+    assert_eq!(mixed, m_back);
+}
