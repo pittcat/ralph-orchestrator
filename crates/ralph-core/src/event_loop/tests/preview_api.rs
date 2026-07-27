@@ -579,6 +579,8 @@ fn preview_json_roundtrip_with_all_fields() {
             required_fields: vec!["task_key".to_string()],
         }),
         skill_gates: Some(SkillGateFlags {
+            tasks_enabled: true,
+            memories_enabled: true,
             scratchpad_enabled: true,
         }),
         ..base
@@ -934,5 +936,106 @@ hats:
         result.policy_decision, "accept",
         "omitted triggered must be valid when hat publishes topic; got: {:?}",
         result
+    );
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Unit 7 of plan 2026-07-27-002: full SkillGateFlags (tasks + memories + scratchpad).
+// ─────────────────────────────────────────────────────────────────────
+
+/// SkillGateFlags must carry all three gates and serialize correctly.
+#[test]
+fn skill_gate_flags_serializes_all_three_fields() {
+    let flags = SkillGateFlags {
+        tasks_enabled: true,
+        memories_enabled: false,
+        scratchpad_enabled: true,
+    };
+    let json = serde_json::to_string(&flags).expect("serialize");
+    let back: SkillGateFlags = serde_json::from_str(&json).expect("deserialize");
+    assert_eq!(back, flags);
+}
+
+/// When SkillGateFlags is set inside PromptPreview, all three fields
+/// must appear in the JSON output.
+#[test]
+fn skill_gate_flags_appears_in_json_when_set() {
+    let config = minimal_isolated_config(true, false);
+    let mut event_loop = EventLoop::new(config);
+    event_loop.initialize("U7 skill_gates all fields");
+    let base = event_loop
+        .prompt_preview(&HatId::new("builder"))
+        .expect("preview");
+
+    let preview = PromptPreview {
+        skill_gates: Some(SkillGateFlags {
+            tasks_enabled: true,
+            memories_enabled: true,
+            scratchpad_enabled: false,
+        }),
+        ..base
+    };
+
+    let json: serde_json::Value = serde_json::to_value(&preview).expect("serialize");
+    let gates = json
+        .get("skill_gates")
+        .expect("skill_gates must be present");
+    assert_eq!(
+        gates.get("tasks_enabled").and_then(|v| v.as_bool()),
+        Some(true)
+    );
+    assert_eq!(
+        gates.get("memories_enabled").and_then(|v| v.as_bool()),
+        Some(true)
+    );
+    assert_eq!(
+        gates.get("scratchpad_enabled").and_then(|v| v.as_bool()),
+        Some(false)
+    );
+}
+
+/// SkillGateFlags round-trips through PromptPreview serde.
+#[test]
+fn skill_gate_flags_roundtrips_in_preview() {
+    let config = minimal_isolated_config(true, true);
+    let mut event_loop = EventLoop::new(config);
+    event_loop.initialize("U7 roundtrip");
+    let base = event_loop
+        .prompt_preview(&HatId::new("builder"))
+        .expect("preview");
+
+    let preview = PromptPreview {
+        skill_gates: Some(SkillGateFlags {
+            tasks_enabled: false,
+            memories_enabled: true,
+            scratchpad_enabled: true,
+        }),
+        ..base
+    };
+
+    let json = serde_json::to_string(&preview).expect("serialize");
+    let back: PromptPreview = serde_json::from_str(&json).expect("deserialize");
+    assert_eq!(back.skill_gates, preview.skill_gates);
+}
+
+/// With no skill_gates override, skill_gates must be absent from JSON
+/// (preserves the default behavior of returning None).
+#[test]
+fn preview_no_skill_gates_override_is_none() {
+    let config = minimal_isolated_config(true, true);
+    let mut event_loop = EventLoop::new(config);
+    event_loop.initialize("U7 no override");
+    let preview = event_loop
+        .prompt_preview(&HatId::new("builder"))
+        .expect("preview");
+    assert!(
+        preview.skill_gates.is_none(),
+        "no override → skill_gates must be None"
+    );
+
+    let json: serde_json::Value = serde_json::to_value(&preview).expect("serialize");
+    assert!(
+        json.get("skill_gates").is_none(),
+        "no override → skill_gates must be absent from JSON"
     );
 }

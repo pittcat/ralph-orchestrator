@@ -689,12 +689,20 @@ pub async fn inspect_prompt_command(
             .transpose()?;
 
         // Build skill_gates from overrides.
+        // U7 (2026-07-27-002 plan): all three gates are overridable;
+        // any that is not explicitly supplied falls back to the effective
+        // config's prompt_gates (tasks/memories) or scratchpad default (false).
         let skill_gates = if args.scratchpad.is_some()
             || args.tasks_enabled.is_some()
             || args.memories_enabled.is_some()
         {
-            // If no explicit override, use preview_base gates as fallback.
             Some(ralph_core::event_loop::SkillGateFlags {
+                tasks_enabled: args
+                    .tasks_enabled
+                    .unwrap_or(preview_base.gates.tasks_enabled),
+                memories_enabled: args
+                    .memories_enabled
+                    .unwrap_or(preview_base.gates.memories_enabled),
                 scratchpad_enabled: args.scratchpad.unwrap_or(false),
             })
         } else {

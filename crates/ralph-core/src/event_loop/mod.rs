@@ -473,8 +473,12 @@ pub struct PromptGates {
 /// Extended gate flags beyond the basic `PromptGates` (e.g. scratchpad).
 /// 2026-07-27-002 plan Unit 1: visible in `PromptPreview.skill_gates`
 /// when scenario args are supplied.
+/// U7: expanded to carry all three gates so the inspect command can
+/// override any subset while falling back to effective config for the rest.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct SkillGateFlags {
+    pub tasks_enabled: bool,
+    pub memories_enabled: bool,
     pub scratchpad_enabled: bool,
 }
 
