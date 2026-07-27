@@ -312,6 +312,24 @@ impl SupervisorCoordinator {
         // same receipt.
         let now_secs = unix_now_secs();
         let fp = format!("integrate-{}", snapshot.wave_id);
+        // 2026-07-27-004 plan U5 (R17 / P0): stamp the first
+        // delivery phase (`Pending` → `BusinessProjected`) now
+        // that the merge sink has physically appended the
+        // business events. The strict rusqlite
+        // `commit_salvage_projection` gate refuses a `Pending`
+        // wave; without this stamp the whole tick errors out
+        // and the loop terminates `fan_in_failed` with the
+        // wave stuck at `Pending`.
+        self.store.record_business_projection(
+            &snapshot.wave_id,
+            &super::ProjectionReceiptSummary {
+                kind: super::ProjectionKind::Business,
+                batch_fingerprint: fp.clone(),
+                write_count: 0,
+                already_present_count: 0,
+                committed_at_unix_secs: now_secs,
+            },
+        )?;
         self.store.commit_salvage_projection(
             &snapshot.wave_id,
             &super::ProjectionReceiptSummary {
