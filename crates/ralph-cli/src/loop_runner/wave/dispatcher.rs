@@ -2876,6 +2876,15 @@ fn emit_injected_failed_coord(
     }
     let review_done_hints =
         build_review_done_hints(bridge, store_wave_id, completed, main_events_file);
+    // 2026-07-27-003 plan U4 (KTD3 / R5 / R7): the only
+    // authoritative source of completion is the supervisor store's
+    // terminal evidence. Main ledger is treated as a projection
+    // observation (orphan / conflict) and never as completion.
+    // `build_review_done_hints` is preserved for the U3 bounded
+    // backscan assertions; the failed-payload builder now uses the
+    // reconciliation's `authoritative_completed` directly.
+    let reconciliation =
+        build_review_reconciliation(bridge, store_wave_id, completed, main_events_file);
     let payload = build_wave_failed_payload(
         wave_kind,
         completed,
@@ -2883,6 +2892,7 @@ fn emit_injected_failed_coord(
         blocking_slots,
         &reasons,
         Some(&review_done_hints),
+        reconciliation.as_ref(),
     );
     append_supervisor_coord_event(main_events_file, topic, &payload);
     SupervisorFanInOutcome::InjectedFailed
@@ -3045,21 +3055,63 @@ pub(crate) fn build_wave_failed_payload(
     blocking_slots: Vec<u32>,
     reasons: &std::collections::HashMap<u32, String>,
     review_done_hints: Option<&ReviewDoneHints>,
+    reconciliation: Option<&ralph_core::supervisor::reconciliation::ReviewReconciliation>,
 ) -> serde_json::Value {
     use ralph_core::supervisor::WaveKind;
 
     match wave_kind {
         WaveKind::Review => {
-            let completed_dims = collect_review_dimensions(completed);
             let assigned: std::collections::HashSet<String> =
                 completed.assigned_dimensions.values().cloned().collect();
-            let mut already_done: std::collections::HashSet<String> =
-                completed_dims.into_iter().collect();
-            if let Some(hints) = review_done_hints {
-                already_done.extend(hints.main_backscan.iter().cloned());
-                already_done.extend(hints.store_completed.iter().cloned());
-            }
-            let missing_dimensions = compute_review_missing_dimensions(&assigned, &already_done);
+            // 2026-07-27-003 plan U4 (KTD3 / R5 / R7): the
+            // union-of-hints path is kept for the U3 bounded
+            // backscan test and the diagnostics writer, but the
+            // public `missing_dimensions` field is now driven
+            // exclusively by the store-backed reconciliation.
+            // Main-ledger backscan is now an orphan/conflict
+            // signal; it can no longer reduce `missing_dimensions`
+            // (the implementation-review primary-20260727 accident).
+            let missing_dimensions = match reconciliation {
+                Some(recon) => {
+                    let authoritative_dims: std::collections::HashSet<String> = recon
+                        .authoritative_completed
+                        .iter()
+                        .filter_map(|idx| completed.assigned_dimensions.get(idx).cloned())
+                        .collect();
+                    ralph_core::supervisor::reconciliation::compute_review_missing_dimensions(
+                        &assigned,
+                        &authoritative_dims,
+                    )
+                }
+                None => {
+                    let completed_dims = collect_review_dimensions(completed);
+                    let mut already_done: std::collections::HashSet<String> =
+                        completed_dims.into_iter().collect();
+                    if let Some(hints) = review_done_hints {
+                        already_done.extend(hints.main_backscan.iter().cloned());
+                        already_done.extend(hints.store_completed.iter().cloned());
+                    }
+                    compute_review_missing_dimensions(&assigned, &already_done)
+                }
+            };
+            // 2026-07-27-003 plan U4 (KTD5 / R8): when the
+            // reconciliation surfaces a store/main disagreement
+            // (orphan or payload conflict), prefer the stable
+            // `wave_evidence_conflict` reason so operators can
+            // pin root cause without parsing per-slot fields. The
+            // public payload keeps the existing 3-field contract
+            // (`wave_id` / `missing_dimensions` / `reason`); the
+            // detailed evidence-validation report is written to
+            // the structured diagnostics writer, not the event
+            // payload.
+            let reason = if reconciliation
+                .map(|r| !r.orphan_projections.is_empty() || !r.payload_conflicts.is_empty())
+                .unwrap_or(false)
+            {
+                ralph_core::supervisor::reconciliation::REASON_WAVE_EVIDENCE_CONFLICT
+            } else {
+                reason
+            };
             serde_json::json!({
                 "wave_id": completed.wave_id,
                 "missing_dimensions": missing_dimensions,
@@ -3273,7 +3325,31 @@ pub(crate) fn build_review_done_hints(
     use std::io::BufRead;
 
     // --- main_backscan: same-wave `review.unit.done` already in main ---
-    let mut main_backscan = std::collections::HashSet::new();
+    //
+    // 2026-07-27-003 plan U4 (KTD3 / R5 / R7): pre-U4, this set
+    // was a *raw* tail scan — every same-wave `review.unit.done`
+    // row in main counted. The implementation-review
+    // primary-20260727 incident turned that into the orphan trap:
+    // store had 6 Failed slots, but main still carried 5
+    // `review.unit.done` rows the dispatcher had previously
+    // merged before scope-drop. `main_backscan` then claimed 5
+    // dimensions were done, and `build_wave_failed_payload` only
+    // reported 1 missing dimension.
+    //
+    // Post-U4: this helper still computes the raw scan (it is
+    // the surface the U3 bounded-backscan test pins), but the
+    // `main_backscan` set is *post-filtered* against the
+    // store's authoritative set — a main row only counts when
+    // the slot it references is `Completed` in the store with
+    // valid terminal evidence. Rows whose slot is Failed /
+    // Pending / unknown fall out and become orphan / conflict
+    // observations in the new `ReviewReconciliation` instead.
+    let mut main_backscan_raw = std::collections::HashSet::new();
+    // Slot-indexed bookkeeping for the post-filter below.
+    let mut main_backscan_dim_by_slot: std::collections::HashMap<u32, String> =
+        std::collections::HashMap::new();
+    let mut main_backscan_no_slot: std::collections::HashSet<String> =
+        std::collections::HashSet::new();
     if let Ok(file) = std::fs::File::open(main_events_file) {
         for line in std::io::BufReader::new(file).lines() {
             let Ok(line) = line else { continue };
@@ -3300,9 +3376,25 @@ pub(crate) fn build_review_done_hints(
             // shape is present via a unified accessor that
             // returns the inner payload object, then index
             // `dimension` directly.
-            if let Some(map) = payload_object(record.get("payload")) {
-                if let Some(serde_json::Value::String(dim)) = map.get("dimension") {
-                    main_backscan.insert(dim.clone());
+            let map = match payload_object(record.get("payload")) {
+                Some(m) => m,
+                None => continue,
+            };
+            let dim = match map.get("dimension") {
+                Some(serde_json::Value::String(d)) => d.clone(),
+                _ => continue,
+            };
+            main_backscan_raw.insert(dim.clone());
+            let slot_index = record
+                .get("slot_index")
+                .and_then(|v| v.as_u64())
+                .map(|n| n as u32);
+            match slot_index {
+                Some(idx) => {
+                    main_backscan_dim_by_slot.insert(idx, dim);
+                }
+                None => {
+                    main_backscan_no_slot.insert(dim);
                 }
             }
         }
@@ -3319,6 +3411,8 @@ pub(crate) fn build_review_done_hints(
     // cannot under-report `missing_dimensions` by smuggling in
     // unrelated events as terminal evidence.
     let mut store_completed = std::collections::HashSet::new();
+    let mut authoritative_slot_indices: std::collections::HashSet<u32> =
+        std::collections::HashSet::new();
     if let Ok(snap) = bridge.fan_in_status(store_wave_id) {
         for (slot_index, status) in &snap.slots {
             if !matches!(status, SlotStatus::Completed) {
@@ -3373,6 +3467,7 @@ pub(crate) fn build_review_done_hints(
             match assigned {
                 Some(a) if a == evidence_dim => {
                     store_completed.insert(a.clone());
+                    authoritative_slot_indices.insert(*slot_index);
                 }
                 Some(a) => {
                     tracing::warn!(
@@ -3398,10 +3493,105 @@ pub(crate) fn build_review_done_hints(
         }
     }
 
+    // Post-filter `main_backscan` against the store's authoritative
+    // slot set (2026-07-27-003 plan U4 / R7). A main row only
+    // counts when the slot it references is in
+    // `authoritative_slot_indices`. Rows with no slot index and
+    // rows whose slot is not authoritative drop out of
+    // `main_backscan` entirely; they are visible to the
+    // diagnostics writer through `ReviewReconciliation` instead.
+    let mut main_backscan = std::collections::HashSet::new();
+    for (slot_index, dim) in &main_backscan_dim_by_slot {
+        if authoritative_slot_indices.contains(slot_index) {
+            main_backscan.insert(dim.clone());
+        }
+    }
+    for dim in &main_backscan_no_slot {
+        // No-slot main rows cannot be tied to a specific
+        // authoritative completion. U4 fail-closes them: they
+        // are NOT counted as completion. The pre-fix code kept
+        // them in `main_backscan`, which is exactly the orphan
+        // trap the incident exposed.
+        tracing::warn!(
+            wave_id = %store_wave_id,
+            dimension = %dim,
+            "main_backscan: same-wave row with no slot_index; \
+             dropped from completion set (treated as orphan)"
+        );
+    }
+    let _ = main_backscan_raw; // raw set is reserved for the
+    // structured diagnostics writer
+    // (U6 follow-up); the U3 test only
+    // pins the post-filtered result.
+
     ReviewDoneHints {
         main_backscan,
         store_completed,
     }
+}
+
+/// 2026-07-27-003 plan U4 (KTD3 / R5 / R7): build the authoritative
+/// `ReviewReconciliation` for the review band. The reconciliation
+/// is the only input that can change `missing_dimensions` on the
+/// `*.wave.failed` payload. Main-ledger backscan flows in as
+/// `ProjectionObservation`s and is treated as orphan / conflict
+/// when it disagrees with the store's `Completed` rows; it can no
+/// longer inflate the `authoritative_completed` set (the
+/// implementation-review primary-20260727 accident).
+///
+/// The function is fail-closed: any store read error downgrades
+/// the slot to "missing evidence", which propagates through
+/// `validate_terminal_evidence` and keeps the slot out of
+/// `authoritative_completed`. The structured diagnostics writer
+/// (U6 follow-up) is the canonical surface for the per-slot
+/// `EvidenceValidation` records.
+pub(crate) fn build_review_reconciliation(
+    bridge: &Arc<dyn ralph_core::supervisor::SupervisorBridge>,
+    store_wave_id: &str,
+    completed: &ralph_core::CompletedWave,
+    main_events_file: &Path,
+) -> Option<ralph_core::supervisor::reconciliation::ReviewReconciliation> {
+    let snap = match bridge.fan_in_status(store_wave_id) {
+        Ok(s) => s,
+        Err(err) => {
+            warn!(
+                wave_id = %store_wave_id,
+                error = %err,
+                "U4: fan_in_status failed; reconciliation skipped, \
+                 caller falls back to legacy union-of-hints path"
+            );
+            return None;
+        }
+    };
+    let main_contents = match std::fs::read_to_string(main_events_file) {
+        Ok(c) => c,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(err) => {
+            warn!(
+                wave_id = %store_wave_id,
+                error = %err,
+                "U4: main ledger read failed; reconciliation continues \
+                 with empty observations"
+            );
+            String::new()
+        }
+    };
+    let observations = ralph_core::supervisor::reconciliation::scan_review_projection_observations(
+        &main_contents,
+        store_wave_id,
+    );
+    let evidence_by_slot =
+        ralph_core::supervisor::reconciliation::collect_evidence(bridge.as_ref(), &snap);
+    Some(
+        ralph_core::supervisor::reconciliation::reconcile_review_wave(
+            &snap,
+            &completed.assigned_dimensions,
+            &observations,
+            "review.unit.done",
+            &evidence_by_slot,
+            None,
+        ),
+    )
 }
 
 /// 2026-07-26-004 plan U5 (S5 / AE3 / KTD4): the producer identity
@@ -7508,6 +7698,7 @@ hats: {}
             vec![],
             &std::collections::HashMap::new(),
             Some(&hints),
+            None,
         );
         let missing: HashSet<String> = payload["missing_dimensions"]
             .as_array()
@@ -7659,6 +7850,7 @@ hats: {}
             vec![],
             &std::collections::HashMap::new(),
             Some(&hints),
+            None,
         );
         let missing: std::collections::HashSet<String> = payload["missing_dimensions"]
             .as_array()
@@ -8725,8 +8917,15 @@ hats: {}
         );
 
         // Read the injected review.wave.failed coord event and assert
-        // missing_dimensions does NOT include `testing` (already done
-        // in main) — the reconciled truth per R2.
+        // missing_dimensions DOES include `testing` — slot 1 is
+        // Failed in the store, so the main `review.unit.done` row
+        // for `testing` is an orphan projection. The U4
+        // reconciliation (R5 / R7) drops the orphan from
+        // `authoritative_completed`; the failure handler must see
+        // the full missing set so it can re-dispatch the dimension.
+        // The pre-U4 union-based path would have excluded
+        // `testing` here, which is the implementation-review
+        // primary-20260727 incident.
         let failed = std::io::BufReader::new(std::fs::File::open(&main_events_file).expect("main"))
             .lines()
             .filter_map(|l| l.ok())
@@ -8740,19 +8939,29 @@ hats: {}
             .map(|v| v.as_str().expect("str").to_string())
             .collect();
         assert!(
-            !missing.contains("testing"),
-            "RED: `testing` already has a review.unit.done in main for this wave; \
-             it must NOT be reported missing (production passes None hints today). got {missing:?}"
+            missing.contains("testing"),
+            "U4 (R5 / R7): slot 1 is Failed in the store, so the main \
+             review.unit.done row for `testing` is an orphan projection. \
+             The authoritative reconciliation must report `testing` as \
+             missing so the failure handler can re-dispatch it. The pre-U4 \
+             union-based path would have dropped `testing` from \
+             missing_dimensions (the primary-20260727 incident). \
+             got {missing:?}"
         );
     }
 
-    /// 2026-07-26-004 plan U3 (R1 / R2 / KTD3): `build_review_done_hints`
-    /// reconciles the two cross-source views correctly and stays bounded:
-    /// - `main_backscan` keeps ONLY same-wave `review.unit.done` rows and
-    ///   ignores other-wave / wave-less / malformed rows;
-    /// - `store_completed` keeps ONLY Completed slots WITH valid terminal
-    ///   evidence (a legacy Completed status bit with no evidence is
-    ///   fail-closed and does NOT count).
+    /// 2026-07-26-004 plan U3 (R1 / R2 / KTD3) + 2026-07-27-003
+    /// plan U4 (KTD3 / R5 / R7): `build_review_done_hints`
+    /// reconciles the two cross-source views correctly and stays
+    /// bounded:
+    /// - `main_backscan` keeps ONLY same-wave `review.unit.done` rows
+    ///   AND only those whose slot is in the store's authoritative
+    ///   set (a main row with no slot_index, or whose slot is Failed
+    ///   / Pending, drops out and is reported via the new
+    ///   `ReviewReconciliation` orphan / conflict lists);
+    /// - `store_completed` keeps ONLY Completed slots WITH valid
+    ///   terminal evidence (a legacy Completed status bit with no
+    ///   evidence is fail-closed and does NOT count).
     #[test]
     fn u3_build_review_done_hints_is_bounded_and_evidence_gated() {
         use ralph_core::supervisor::{
@@ -8769,7 +8978,7 @@ hats: {}
                 .append(true)
                 .open(&main)
                 .expect("open main");
-            let row = |dim: &str, wave: Option<&str>| -> String {
+            let row = |dim: &str, wave: Option<&str>, slot_index: Option<u32>| -> String {
                 let mut rec = serde_json::json!({
                     "topic": "review.unit.done",
                     "payload": serde_json::json!({"dimension": dim}).to_string(),
@@ -8779,14 +8988,17 @@ hats: {}
                 if let Some(w) = wave {
                     rec["wave_id"] = serde_json::Value::String(w.to_string());
                 }
+                if let Some(idx) = slot_index {
+                    rec["slot_index"] = serde_json::Value::Number(idx.into());
+                }
                 rec.to_string()
             };
-            // same wave → counted
-            writeln!(f, "{}", row("correctness", Some("W-main"))).unwrap();
+            // same wave + slot 0 authoritative → counted
+            writeln!(f, "{}", row("correctness", Some("W-main"), Some(0))).unwrap();
             // different wave → ignored
-            writeln!(f, "{}", row("security", Some("W-other"))).unwrap();
+            writeln!(f, "{}", row("security", Some("W-other"), Some(0))).unwrap();
             // no wave_id → ignored (fail-closed)
-            writeln!(f, "{}", row("testing", None)).unwrap();
+            writeln!(f, "{}", row("testing", None, Some(1))).unwrap();
             // malformed → ignored
             writeln!(f, "not-json").unwrap();
         }
@@ -8828,10 +9040,20 @@ hats: {}
         let bridge_arc: Arc<dyn ralph_core::supervisor::SupervisorBridge> = Arc::new(bridge);
         let hints = build_review_done_hints(&bridge_arc, &store_wave_id, &completed, &main);
 
+        // U4 (KTD3 / R5 / R7): `main_backscan` only keeps rows
+        // whose slot is in the store's authoritative set. Slot 0
+        // IS authoritative (Completed with `performance` evidence);
+        // the main row's `dimension` (`correctness`) is the value
+        // that lands in the set (the row is an authoritative
+        // projection even though its `dimension` string disagrees
+        // with the slot's assignment — the post-filter for the
+        // failed-payload builder is on slot index, not on
+        // dimension string match).
         assert_eq!(
             hints.main_backscan,
             ["correctness".to_string()].into_iter().collect(),
-            "main_backscan must keep only same-wave rows"
+            "main_backscan must keep same-wave rows whose slot is in the \
+             store's authoritative set"
         );
         assert_eq!(
             hints.store_completed,
@@ -9133,6 +9355,7 @@ hats: {}
             blocking_slots.clone(),
             &reasons,
             None,
+            None,
         );
 
         // slot_failures must be present and its index set must equal blocking_slots.
@@ -9182,6 +9405,7 @@ hats: {}
             "wave_failed",
             vec![7u32],
             &std::collections::HashMap::new(),
+            None,
             None,
         );
 
@@ -10296,15 +10520,42 @@ hats: {}
             ..ralph_core::CompletedWave::default()
         };
 
-        // Hints shape mirrors the incident: store_completed is
-        // empty (all Failed), main_backscan contains the 5
-        // orphan rows.
-        let mut main_backscan = std::collections::HashSet::new();
-        for dim in &assigned_dims[..5] {
-            main_backscan.insert((*dim).to_string());
+        // U4 (KTD3 / R5 / R7): the failed-payload builder now
+        // takes the reconciliation directly. The incident scenario
+        // — store reports 6 Failed, no Completed evidence,
+        // 5 same-wave orphan main rows — produces a reconciliation
+        // with `authoritative_completed = []` and 5 orphan
+        // projections. The builder's missing_dimensions is driven
+        // by the authoritative completed set, not the main
+        // backscan union, so all 6 assigned dimensions are
+        // reported missing (the pre-U4 path only reported 1).
+        use ralph_core::supervisor::reconciliation::{OrphanProjection, ReviewReconciliation};
+        let mut orphan_projections = Vec::new();
+        for (i, dim) in assigned_dims[..5].iter().enumerate() {
+            orphan_projections.push(OrphanProjection {
+                slot_index: Some(i as u32),
+                dimension: Some((*dim).to_string()),
+                payload_fingerprint: format!("orphan-fp-{i}"),
+                line_no: i,
+                store_status: Some(ralph_core::supervisor::SlotStatus::Failed),
+            });
         }
+        let reconciliation = ReviewReconciliation {
+            authoritative_completed: Vec::new(),
+            missing_dimensions: Vec::new(), // rebuilt by build_wave_failed_payload
+            blocking_slots: Vec::new(),
+            orphan_projections,
+            missing_projections: Vec::new(),
+            payload_conflicts: Vec::new(),
+            evidence_validations: Vec::new(),
+        };
+
+        // The hints are passed for diagnostic / backward-compat
+        // reasons (the U3 test still pins its shape) but the
+        // reconciliation is the source of truth for
+        // `missing_dimensions`.
         let hints = ReviewDoneHints {
-            main_backscan,
+            main_backscan: std::collections::HashSet::new(),
             store_completed: std::collections::HashSet::new(),
         };
 
@@ -10315,6 +10566,7 @@ hats: {}
             (0u32..6).collect(),
             &std::collections::HashMap::new(),
             Some(&hints),
+            Some(&reconciliation),
         );
 
         let missing: Vec<String> = payload

@@ -892,6 +892,15 @@ mod migrations;
 pub mod phase;
 #[cfg(test)]
 mod plan_b_contract;
+/// 2026-07-27-003 plan U4: pure reconciliation between the
+/// supervisor store's terminal evidence and the main ledger's
+/// projection observations. The only authority for `*.wave.complete`
+/// in the review band: a slot is "done" only when the store records
+/// it as `Completed` AND the recorded `TerminalEvidence` passes
+/// `validate_terminal_evidence` (topic / dimension / fingerprint).
+/// Main-ledger rows that disagree become `orphan_projections` or
+/// `payload_conflicts`, never completion.
+pub mod reconciliation;
 mod recover;
 #[cfg(test)]
 mod redrive_tests;

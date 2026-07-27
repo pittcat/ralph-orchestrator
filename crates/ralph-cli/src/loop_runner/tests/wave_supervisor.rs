@@ -5060,6 +5060,7 @@ fn test_u6_failed_payload_exposes_per_slot_reasons() {
         vec![0, 2, 4],
         &std::collections::HashMap::new(),
         None,
+        None,
     );
     let obj = payload.as_object().expect("payload must be a JSON object");
 
@@ -5604,6 +5605,7 @@ fn build_wave_failed_payload_includes_salvaged_redrive_fields_on_exec_path() {
         vec![1], // blocking_slots = [1]
         &std::collections::HashMap::new(),
         None,
+        None,
     );
     let obj = payload.as_object().expect("payload must be a JSON object");
 
@@ -5999,6 +6001,7 @@ fn test_u1_mixed_failure_reasons() {
         "required_slot_failure",
         vec![1, 2],
         &std::collections::HashMap::new(),
+        None,
         None,
     );
     let obj = payload.as_object().expect("payload must be a JSON object");
