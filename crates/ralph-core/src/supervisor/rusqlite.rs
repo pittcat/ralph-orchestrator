@@ -1154,8 +1154,20 @@ impl SupervisorStore for RusqliteSupervisorStore {
         wave_id: &str,
         receipt: &ProjectionReceiptSummary,
     ) -> SupervisorStoreResult<()> {
-        // Forward-only: refuse when the wave is still Pending —
-        // the dispatcher must finish the merge seam first.
+        // Forward-only advance to SalvageCommitted. The merge
+        // helpers (`merge_completed_*_slots_to_main`,
+        // `project_empty_salvage`) own the actual disk write;
+        // this commit step only flips the store's view of the
+        // wave. Pending is a legal starting state — the merge
+        // seam may run before any prior transition (an empty
+        // salvage, for instance) — matching the
+        // `InMemorySupervisorStore` contract (see `memory.rs`
+        // `commit_salvage_projection`). A DIFFERENT fingerprint
+        // after `CoordinationWritten` is allowed because the
+        // dispatcher may have pre-stamped a placeholder (e.g.
+        // legacy `mark_salvage_merged` calls) and the real
+        // fingerprint arrives only after the merge seam lands
+        // on disk.
         self.with_conn(|conn| {
             let current_state: Option<String> = conn
                 .query_row(
@@ -1168,14 +1180,13 @@ impl SupervisorStore for RusqliteSupervisorStore {
                 None => return Err(SupervisorStoreError::UnknownWave(wave_id.to_string())),
                 Some(s) => parse_delivery_state(&s)?,
             };
-            if matches!(current_state, WaveDeliveryState::Pending) {
-                return Err(SupervisorStoreError::InvalidTransition(
-                    "commit_salvage_projection requires BusinessProjected state".to_string(),
-                ));
-            }
             // If we already advanced past SalvageCommitted,
             // verify the receipt fingerprint still matches the
-            // one stored previously.
+            // one stored previously. The transition itself is
+            // forward-only: Pending → SalvageCommitted is
+            // allowed (matches InMemory and the
+            // `merge_completed_*_slots_to_main` merge-seam
+            // contract).
             if current_state.at_least(WaveDeliveryState::CoordinationWritten) {
                 let existing_fp: Option<String> = conn
                     .query_row(

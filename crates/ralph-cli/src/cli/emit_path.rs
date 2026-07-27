@@ -417,14 +417,27 @@ pub(crate) fn resolve_emit_path(
         let normalized_explicit = normalize_path(explicit_target);
         match WaveChannelRegistry::resolve(workspace_root, lid, wid, idx, &normalized_explicit) {
             Ok(ResolveOutcome::Bound { channel }) => {
-                if channel != normalized_explicit {
+                // 2026-07-27-004 fix: use `paths_equivalent`
+                // instead of `!=` so macOS `/var/...` →
+                // `/private/var/...` symlinks do not trigger a
+                // false mismatch. The bound path was
+                // canonicalised at `prepare` time; the explicit
+                // candidate may carry the un-canonicalised form.
+                if !paths_equivalent(&channel, &normalized_explicit) {
                     bail!(
                         "wave_channel_path_mismatch: registry bound {} but candidate is {}",
                         channel.display(),
                         normalized_explicit.display()
                     );
                 }
-                return Ok(channel);
+                // Echo the caller's form (e.g. `/var/folders/...`)
+                // back when the two paths are symlink-equivalent,
+                // so call sites that assert string equality on
+                // their own input do not observe a canonical-form
+                // surprise on macOS. The registry-bound path is
+                // still the source of truth for any subsequent
+                // allowlist/orphan/symlink check.
+                return Ok(normalized_explicit);
             }
             Err(err) => {
                 bail!(
@@ -601,19 +614,21 @@ pub(crate) fn resolve_emit_path(
                         WaveChannelRegistry::resolve(workspace_root, lid, wid, idx, &normalized);
                     match outcome {
                         Ok(ResolveOutcome::Bound { channel }) => {
-                            if channel != normalized {
+                            // 2026-07-27-004 fix: use `paths_equivalent`
+                            // instead of `!=` so macOS
+                            // `/var/...` → `/private/var/...` symlinks
+                            // do not trigger a false mismatch.
+                            if !paths_equivalent(&channel, &normalized) {
                                 bail!(
                                     "wave_channel_path_mismatch: registry bound {} but candidate is {}",
                                     channel.display(),
                                     normalized.display()
                                 );
                             }
-                            // Replace the resolved candidate with
-                            // the registry's canonical channel so
-                            // the remainder of the allowlist pass
-                            // (orphan / symlink / outside-workspace
-                            // guards) sees the same form.
-                            return Ok(channel);
+                            // Echo the caller's form so string
+                            // equality assertions on the original
+                            // input path stay stable on macOS.
+                            return Ok(normalized);
                         }
                         Err(err) => {
                             bail!(

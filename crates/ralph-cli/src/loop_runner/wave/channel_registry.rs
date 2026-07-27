@@ -62,6 +62,38 @@ use sha2::{Digest, Sha256};
 /// schema. The parser refuses unknown schema versions.
 pub const REGISTRY_SCHEMA_VERSION: u32 = 1;
 
+/// Two paths are equivalent when their lexical forms match (after
+/// dropping `.` / resolving `..`) OR when both canonicalize to the
+/// same real path. The canonicalize branch exists for macOS, where
+/// `/var` is a symlink to `/private/var`: a caller that passes an
+/// un-canonicalized path to `resolve` (e.g. `/var/folders/...`)
+/// must still match the canonical `channel_path` stored by
+/// `prepare` (`/private/var/folders/...`).
+#[allow(dead_code)]
+pub(crate) fn registry_paths_equivalent(a: &Path, b: &Path) -> bool {
+    if a == b {
+        return true;
+    }
+    // Canonicalize may fail when the target file does not exist yet.
+    // Fall back to canonicalizing each path's existing parent dir and
+    // stitching the file name back on, so macOS /var → /private/var
+    // symlinks resolve to the same real path regardless of form.
+    fn canon_with_existing_parent(p: &Path) -> std::io::Result<PathBuf> {
+        let file_name = p.file_name().ok_or_else(|| {
+            std::io::Error::new(std::io::ErrorKind::InvalidInput, "no file name")
+        })?;
+        let parent = p.parent().ok_or_else(|| {
+            std::io::Error::new(std::io::ErrorKind::InvalidInput, "no parent")
+        })?;
+        let canon_parent = parent.canonicalize()?;
+        Ok(canon_parent.join(file_name))
+    }
+    match (canon_with_existing_parent(a), canon_with_existing_parent(b)) {
+        (Ok(ca), Ok(cb)) => ca == cb,
+        _ => false,
+    }
+}
+
 /// Channel binding row inside a registry: which slot is allowed
 /// to write which canonical channel file. The fingerprint is a
 /// stable hash of the relative channel path so the read-side
@@ -873,7 +905,13 @@ impl WaveChannelRegistry {
             if binding.slot_index != slot_index {
                 continue;
             }
-            if binding.channel_path != requested_path {
+            // 2026-07-27-004 fix: use `registry_paths_equivalent`
+            // instead of `!=` so macOS `/var/...` → `/private/var/...`
+            // symlinks do not falsely reject the resolve. The
+            // bound path was canonicalised at `prepare` time while
+            // the `requested_path` may carry the un-canonicalised
+            // form (e.g. a tempdir path under `/var/folders/`).
+            if !registry_paths_equivalent(&binding.channel_path, requested_path) {
                 return Err(ChannelRegistryError::ChannelPathMismatch {
                     bound: binding.channel_path.clone(),
                     requested: requested_path.to_path_buf(),
