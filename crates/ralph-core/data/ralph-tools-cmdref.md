@@ -142,7 +142,7 @@ ralph run [OPTIONS] [-- <CUSTOM_ARGS>...]
 | `ralph mcp` | MCP 服务器模式 |
 | `ralph completions` | 生成 shell 补全脚本 |
 | `ralph inspect` | 只读诊断命名空间（含 `inspect profiles`；`inspect loop` 输出 loop + hat 身份 + events 路径 + **`loop_anchor` plan 锚点**（优先 `.ralph/agent/.ralph-anchor.json`，否则 `prompt_file`）；JSON 可能含 **`supervisor` 块**（配置启用 supervisor，或 runtime 已有可打开的 wave 账本时出现，否则整键省略），OPAC Observe 一手数据源） |
-| `ralph inspect prompt` | 预览 hat 的 prompt 渲染结果（auto-inject + on-demand + 块标题），OPAC Observe 一手数据；常用 `--hat <hat_id> --format json --full` 形式 |
+| `ralph inspect prompt` | 预览 hat 的 prompt 渲染结果（auto-inject + on-demand + 块标题）；Unit 1 支持 `--trigger` / `--source-hat` / `--payload` / `--iteration` / `--wave-context` / `--orchestrator-context` / `--correction` / `--scratchpad` / `--tasks-enabled` / `--memories-enabled` 场景化参数；Unit 2 支持 `--topic` / `--triggered` 候选 emit 干跑评估。`evidence_level` 标识证据等级（`simulated` / `static` / `runtime` / `unverified`） |
 | `ralph diagnose` | 离线诊断报告（`--format json` 含 `dup_storm_topics`：`work.ready` 同 dedup key 重复 ≥3 次；ranked findings 的 `hint` 区分 `duplicate_work_done_same_step` / `duplicate_work_done_stall_bypass`） |
 | `ralph preset materialize-artifacts` | 将内嵌 artifact 模板写到磁盘（binary-only 安装；见下方专节） |
 | `ralph capability inventory` | 列出 preset 作者/reviewer 必须理解的运行时 capability 清单（含 id、trigger_signal、applies_when、evidence_sources、recommended_evidence_level、source）；用于 AAF 评审前对齐 capability 覆盖状态 |

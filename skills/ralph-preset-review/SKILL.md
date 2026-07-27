@@ -53,6 +53,10 @@ Use this skill to **review** Ralph presets with **Agent 视角可行性（AAF）
    - 任一命中 → 报告 P0（`fallback_reaches_success_terminal` / `runtime_unit_loop_multiple_fact_sources` / `blocked_failed_promoted_to_pass`）或 P1（其余）；confidence 起点 60。
    - 此审计**独立**于 mechanical lint 与 AAF 五问；可在 Per-Hat AAF Reviews 之前作为「Topology sketch 续」插入。
 
+3a.5. **Capability-triggered audit (mandatory for capability-triggering presets)**：
+   - Independently run `ralph capability inventory --format json`. For each capability whose `applies_when` matches this preset, verify the corresponding rule in `references/finding-rubric.md` / `agent-native-model.md` applies.
+   - This audit is **capability-triggered**, not preset-name gated.
+
 3b. **CE pipeline 评审附加检查** — 当且仅当被审 preset 名称以 `ce-executor-pipeline` 开头时执行（其它 preset 不强制）：
    1. **mandatory review artifact fail-close** — reviewer-synthesizer hat 的 instructions 必须定义 6 个 mandatory dimension finding products 的完整性校验（存在 / 可读 / 格式合法 / dimension 字段匹配 / count 一致），任一失败时禁止 synthesized verdict、必须发 `review.artifact.blocked` 并写阻塞 audit block；topic ownership / deny rules / required fields 由 preset 显式声明。缺任一项 → P0。
    2. **reporter 是否从 trigger / bundle 获取跨 hat 状态** — reporter hat 的 instructions 必须禁止 `ralph events --events-source main` 用作业务输入；6 个 reporter trigger topic 的 schema 必须包含 `report_input_file` required field + field_docs 三段。违反 → P0。

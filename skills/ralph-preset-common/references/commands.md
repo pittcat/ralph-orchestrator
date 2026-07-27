@@ -71,6 +71,20 @@ ralph -c <preset>.yml inspect prompt --hat <id> --format json
 # --full：JSON 返回真实 prompt_body，human 打印完整 body（不 suppressed）
 ralph -c <preset>.yml inspect prompt --hat <id> --format json --full
 ralph -c <preset>.yml inspect prompt --hat <id> --format human --full
+
+# 场景化激活预览（Unit 1 of plan 2026-07-27-002）
+ralph -c <preset>.yml inspect prompt --hat <hat_id> --format json \
+    --trigger <TOPIC> --source-hat <hat_id> --payload '<JSON>' \
+    [--iteration N] [--wave-context <JSON>] [--orchestrator-context <JSON>] \
+    [--correction <JSON>] [--scratchpad <true|false>] [--tasks-enabled <true|false>] \
+    [--memories-enabled <true|false>]
+
+# 候选 emit 干跑评估（Unit 2）
+ralph -c <preset>.yml inspect prompt --hat <hat_id> --format json \
+    --topic <TOPIC> --payload '<JSON>' [--triggered <hat_id>]
+
+# Capability inventory（Unit 3）
+ralph capability inventory --format {human|json}
 ```
 
 外仓（无 `crates/ralph-core/data/`）同样可用——内容来自当前 ralph 二进制内嵌（`SkillRegistry::include_str!`）；报告须注明来源。详细规程见 [`prompt-visibility.md`](prompt-visibility.md)；audit 规程见 [`agent-skill-audit.md`](agent-skill-audit.md)。

@@ -82,6 +82,20 @@ Use this skill to design and draft Ralph **presets** (builtin or local) with **A
      - **禁止**引用 auto-inject skill 时让 agent 再 `ralph tools skill load <name>`（已注入就不必再 load）。
      - **禁止**复制 `ralph-tools*.md` 命令表到 `instructions:`——按 `crates/ralph-core/data/*.md` 注入，**只引用章节名**。
      - 外仓（无 `crates/ralph-core/data/`）时仍可用 `inspect prompt`：内容来自当前 ralph 二进制内嵌；报告与 review 标注须注明来源。
+     - **场景化激活预览（Unit 1 of plan 2026-07-27-002）**：
+       ```bash
+       # 静态预览（无场景参数）
+       ralph -c <preset>.yml inspect prompt --hat <hat_id> --format json
+
+       # 场景化预览（指定 trigger / payload / source-hat / iteration / wave-context 等）
+       ralph -c <preset>.yml inspect prompt --hat <hat_id> --format json \
+           --trigger build.task --source-hat planner --payload '{"task":"refactor-x"}'
+       ```
+       输出含 `trigger_context_injected`、`wave_context_injected`、`orchestrator_context_injected`、`correction_injected`、`skill_gates`、`evidence_level` 字段；`evidence_level` 标识证据等级（`simulated` / `static` / `runtime` / `unverified`）。
+
+2.5. **Capability discovery (mandatory for new presets / material changes)**：
+   - Run `ralph capability inventory --format json` and walk each capability's `applies_when` field.
+   - For each capability the preset legitimately uses, ensure the corresponding review evidence path in `references/finding-rubric.md` / `agent-native-model.md` is cited in `preset-author-notes.md`.
    - For each hat, **pretend other hats do not exist**.
    - Write only that hat's `instructions:`.
    - Fill one AAF 五问表 per hat (template in `references/author-checklist.md`).

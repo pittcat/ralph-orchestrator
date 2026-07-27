@@ -285,3 +285,10 @@ review 在放过此类双事件时，应在 Remediation Plan / 报告「AAF Deci
 - 标注当前 hat 是该 preset 的收尾 hat，其它 hat 不享受本例外。
 
 不满足上述任一条件时，仍按 P0 入主表并要求 author 修复。
+
+## Capability coverage finding_id (Unit 4 / plan 2026-07-27-002)
+
+| finding_id | description | severity | confidence起点 |
+|---|---|---|---|
+| `preset.capability_discovery_missing` | preset exercises a capability not covered in `preset-author-notes.md` | P1 | 60 |
+| `preset.review_evidence_coverage_gap` | review lacks evidence path to capability audit | P1 | 60 |

@@ -236,3 +236,7 @@ Skill doc 不复述 `ralph-tools*.md` 的命令参数表；需要时**引用章�
 - 本节列出的检查项属于「模型 / 边界」层，不是机械 lint 规则；review 报告以引用本 reference 的相应段（如「Artifact-First Handoff 模型」 / 「Artifact-First 边界」 / 「Artifact-First 状态传递」）作为 finding 的根因证据。
 - 后续如需把这些检查固化为 lint finding（带 `finding_id`），应在 `finding-rubric.md` 维护；本文件不引入新 finding_id。
 - author 与 reviewer 通过引用本 reference 段保持术语一致；review 不另造「Artifact-First」定义。
+
+## Runtime Audit Model (Unit 4 / plan 2026-07-27-002)
+
+Preset author/review audits now use `ralph inspect prompt --trigger/--payload/--topic` to simulate hat activation without running the loop, and `ralph capability inventory --format json` to discover which runtime capabilities a preset exercises. The four evidence levels (`simulated` / `static` / `runtime` / `unverified`) classify findings by where the proof came from.
