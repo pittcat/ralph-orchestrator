@@ -1056,6 +1056,12 @@ mod tests {
             scratchpad: None,
             disallowed_tools: vec![],
             timeout: None,
+            // 2026-07-25-006 U4 (R2/R3): idle heartbeat fields
+            // are explicit `None` in tests so the lease stays
+            // disabled and the existing `timeout` keeps its
+            // legacy wall-clock-only behaviour.
+            idle_heartbeat_secs: None,
+            idle_weak_signal_cap: None,
             // 2026-06-17-004 U2 (R3): test helper aligned with
             // `HatConfig::default()`.
             missing_event_grace_secs: None,

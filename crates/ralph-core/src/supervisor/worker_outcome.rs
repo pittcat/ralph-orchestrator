@@ -219,12 +219,21 @@ pub enum WorkerExit {
     Exit0,
     ExitNonZero,
     Timeout,
+    /// 2026-07-25-006 plan U9: idle heartbeat kill (no qualifying
+    /// signal for `idle_heartbeat_secs`, weak-cap exhausted, or
+    /// events-file flat). Same downstream family as `Timeout`
+    /// (`worker_timeout`) but distinct exit so the operator can
+    /// grep the reason string for `idle heartbeat exceeded`.
+    IdleTimeout,
     Cancelled,
 }
 
 impl WorkerExit {
     pub fn is_timeout(self) -> bool {
         matches!(self, WorkerExit::Timeout)
+    }
+    pub fn is_idle_timeout(self) -> bool {
+        matches!(self, WorkerExit::IdleTimeout)
     }
     pub fn is_cancelled(self) -> bool {
         matches!(self, WorkerExit::Cancelled)
@@ -289,6 +298,37 @@ pub fn classify_worker_outcome(
         return match WorkerTerminalKind::from_events(terminals) {
             WorkerTerminalKind::Missing => SlotOutcome::Failed {
                 // events > 0 but no terminal marker → KTD9
+                reason: REASON_MISSING_WORKER_TERMINAL,
+            },
+            WorkerTerminalKind::Done | WorkerTerminalKind::Failed => {
+                SlotOutcome::Completed(WorkerTerminalKind::from_events(terminals))
+            }
+        };
+    }
+
+    // 2026-07-25-006 plan U9: idle heartbeat kill shares the
+    // `worker_timeout` family with the hard ceiling. The two paths
+    // only differ in the operator-visible reason string (the wave
+    // worker emits `"idle heartbeat exceeded: ..."`; the dispatcher
+    // preserves that verbatim), so we mirror the timeout branch to
+    // keep downstream consumers blind to the leased-vs-wall-clock
+    // distinction. We do NOT collapse IdleTimeout into
+    // `is_timeout()` because the dispatcher classifier needs to
+    // reason about the two arms separately when wiring the
+    // adapter (e.g. for retry-budget tracking).
+    if exit.is_idle_timeout() {
+        if terminals.is_empty() {
+            if accepted_event_count == 0 {
+                return SlotOutcome::Failed {
+                    reason: REASON_WORKER_TIMEOUT,
+                };
+            }
+            return SlotOutcome::Failed {
+                reason: REASON_MISSING_WORKER_TERMINAL,
+            };
+        }
+        return match WorkerTerminalKind::from_events(terminals) {
+            WorkerTerminalKind::Missing => SlotOutcome::Failed {
                 reason: REASON_MISSING_WORKER_TERMINAL,
             },
             WorkerTerminalKind::Done | WorkerTerminalKind::Failed => {
@@ -584,5 +624,57 @@ mod tests {
             assert_eq!(map_failure_class(reason), FAILURE_CLASS_UNKNOWN);
             assert!(!is_retryable_slot_reason(reason));
         }
+    }
+
+    // --- 2026-07-25-006 plan U9: idle heartbeat kill mirrors Timeout ---
+
+    /// IdleTimeout + zero events + empty terminals → worker_timeout
+    /// (same family as the hard ceiling; the operator-visible reason
+    /// string `"idle heartbeat exceeded: ..."` is preserved verbatim
+    /// upstream of classify_worker_outcome).
+    #[test]
+    fn u9_idle_timeout_zero_events_is_worker_timeout() {
+        let out = classify_worker_outcome(WorkerExit::IdleTimeout, 0, &[]);
+        assert_eq!(
+            out,
+            SlotOutcome::Failed {
+                reason: REASON_WORKER_TIMEOUT
+            }
+        );
+    }
+
+    /// IdleTimeout + Done marker → Completed(Done). The worker's own
+    /// terminal marker wins over the idle-kill disposition, mirroring
+    /// the hard-timeout branch.
+    #[test]
+    fn u9_idle_timeout_with_done_marker_completes() {
+        let out = classify_worker_outcome(WorkerExit::IdleTimeout, 5, &[TerminalMarker::Done]);
+        assert_eq!(out, SlotOutcome::Completed(WorkerTerminalKind::Done));
+    }
+
+    /// IdleTimeout + events but no terminal marker → missing_worker_terminal
+    /// (same downstream classification as Timeout; U9 does not change the
+    /// terminal-missing rule).
+    #[test]
+    fn u9_idle_timeout_events_but_no_terminal_is_missing_worker_terminal() {
+        let out = classify_worker_outcome(WorkerExit::IdleTimeout, 4, &[]);
+        assert_eq!(
+            out,
+            SlotOutcome::Failed {
+                reason: REASON_MISSING_WORKER_TERMINAL
+            }
+        );
+    }
+
+    /// `is_idle_timeout` predicate gate — used by the dispatcher
+    /// classifier to wire the IdleTimeout branch without code
+    /// duplication.
+    #[test]
+    fn u9_is_idle_timeout_predicate() {
+        assert!(WorkerExit::IdleTimeout.is_idle_timeout());
+        assert!(!WorkerExit::Timeout.is_idle_timeout());
+        assert!(!WorkerExit::Cancelled.is_idle_timeout());
+        assert!(!WorkerExit::Exit0.is_idle_timeout());
+        assert!(!WorkerExit::ExitNonZero.is_idle_timeout());
     }
 }

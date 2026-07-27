@@ -438,10 +438,46 @@ pub struct HatConfig {
 
     /// Execution timeout in seconds for this hat.
     ///
-    /// For wave workers, this controls how long each parallel worker can run.
-    /// Defaults to the adapter-level timeout (typically 300s) if not set.
+    /// **Semantics (2026-07-25-006 plan KTD1):** this is the wave worker
+    /// `StartToClose` hard cap — the maximum wall-clock duration since the
+    /// worker spawned, regardless of activity. When the cap is reached,
+    /// the worker is killed and `timed_out=true` is reported to the
+    /// downstream classifier (cf. 2026-07-25-004 plan).
+    ///
+    /// This is **not** an idle / heartbeat window. For an optional
+    /// idle-silence kill, see [`Self::idle_heartbeat_secs`].
     #[serde(default)]
     pub timeout: Option<u32>,
+
+    /// 2026-07-25-006 plan U2: wave worker idle heartbeat window
+    /// (`HeartbeatTimeout`). When set to `Some(n)` with `n > 0`, the wave
+    /// worker is killed if **no strong or allowed-weak heartbeat signal**
+    /// arrives for `n` consecutive seconds. The hard cap in [`Self::timeout`]
+    /// still applies — whichever fires first wins.
+    ///
+    /// Semantics:
+    /// - `None` or `Some(0)`: idle mode **disabled**. The worker only dies
+    ///   on the `timeout` wall clock or on process exit. Mirrors the
+    ///   pre-006 behavior exactly.
+    /// - `Some(n)` with `n > 0`: idle mode **enabled**. The wave worker
+    ///   lease is refreshed whenever a *strong* signal (Claude ToolUse /
+    ///   ToolResult, Pi ToolExecutionStart / ToolExecutionEnd, agent
+    ///   equivalent tool events, or `RALPH_EVENTS_FILE` growth) is
+    ///   observed; weak signals (assistant Text / Thinking, Pi TextDelta)
+    ///   refresh the lease too, but are subject to the cap below.
+    #[serde(default)]
+    pub idle_heartbeat_secs: Option<u32>,
+
+    /// 2026-07-25-006 plan U2: cap on the number of consecutive
+    /// *weak-only* signals that may refresh the lease. Once this many
+    /// weak renewals are spent without a single strong signal arriving,
+    /// the worker is killed (the lease stops honoring further weak
+    /// signals and the idle window takes over). Default value
+    /// (`None`) means "no cap" — only the strong/idle boundary matters.
+    /// Set to `Some(0)` to disable weak-signal renewals entirely
+    /// (only strong signals refresh the lease).
+    #[serde(default)]
+    pub idle_weak_signal_cap: Option<u32>,
 
     /// 2026-06-17-004 U2 (R3): per-hat missing-event gate grace
     /// window in seconds.  When the gate evaluates the obligation
@@ -629,6 +665,14 @@ impl Default for HatConfig {
             scratchpad: None,
             disallowed_tools: Vec::new(),
             timeout: None,
+            // 2026-07-25-006 plan U2: idle heartbeat disabled by
+            // default; downstream code reads `idle_enabled()` off
+            // `DetectedWave` to keep the legacy wall-clock-only path.
+            idle_heartbeat_secs: None,
+            // 2026-07-25-006 plan U2: weak-signal cap defaults to
+            // None (= no cap); `DetectedWave::idle_weak_signal_cap()`
+            // resolves it via `default_idle_weak_signal_cap()`.
+            idle_weak_signal_cap: None,
             // 2026-06-17-004 U2 (R3): default `None` so the
             // `resolve_missing_event_grace_secs` helper falls
             // through to the operator-controlled default chain.
@@ -841,6 +885,89 @@ pub fn resolve_missing_event_grace_secs(
 mod tests {
     use super::*;
 
+    // ─── 2026-07-25-006 plan U2: idle heartbeat lease fields ───
+    //
+    // `idle_heartbeat_secs` and `idle_weak_signal_cap` are *optional*
+    // wave-worker lease knobs. They are absent from legacy presets
+    // (must default to `None`) and may be explicitly zeroed to disable
+    // idle mode for a specific hat while keeping `timeout` enforced.
+
+    /// Legacy preset (no idle fields) parses with both new fields at
+    /// `None`, and the surrounding `timeout` continues to round-trip.
+    /// Guards against any future refactor that would mistakenly make
+    /// the fields required.
+    #[test]
+    fn hat_config_parses_legacy_without_idle_fields() {
+        let yaml = r#"
+name: "Legacy worker"
+triggers: ["work.ready"]
+publishes: ["work.done"]
+timeout: 600
+"#;
+        let hat: HatConfig = serde_yaml::from_str(yaml).expect("parse yaml");
+        assert_eq!(hat.timeout, Some(600));
+        assert_eq!(
+            hat.idle_heartbeat_secs, None,
+            "legacy preset must default idle_heartbeat_secs to None"
+        );
+        assert_eq!(
+            hat.idle_weak_signal_cap, None,
+            "legacy preset must default idle_weak_signal_cap to None"
+        );
+    }
+
+    /// New preset declares both idle fields and they survive the
+    /// YAML → struct round-trip. The zero value of `idle_heartbeat_secs`
+    /// is preserved literally (`Some(0)`) — disabling idle mode is a
+    /// legitimate explicit choice, distinct from omitting the key.
+    #[test]
+    fn hat_config_parses_idle_heartbeat_fields_roundtrip() {
+        let yaml = r#"
+name: "Worker"
+triggers: ["work.ready"]
+publishes: ["work.done"]
+timeout: 1800
+idle_heartbeat_secs: 120
+idle_weak_signal_cap: 8
+"#;
+        let hat: HatConfig = serde_yaml::from_str(yaml).expect("parse yaml");
+        assert_eq!(hat.timeout, Some(1800));
+        assert_eq!(hat.idle_heartbeat_secs, Some(120));
+        assert_eq!(hat.idle_weak_signal_cap, Some(8));
+
+        // Round-trip back to YAML: all three fields reappear.
+        let yaml_out = serde_yaml::to_string(&hat).expect("serialize");
+        let hat2: HatConfig = serde_yaml::from_str(&yaml_out).expect("re-parse");
+        assert_eq!(hat2.timeout, Some(1800));
+        assert_eq!(hat2.idle_heartbeat_secs, Some(120));
+        assert_eq!(hat2.idle_weak_signal_cap, Some(8));
+
+        // Explicit zero is preserved (distinct from omitted).
+        let yaml_zero = r#"
+name: "Worker"
+triggers: ["work.ready"]
+publishes: ["work.done"]
+timeout: 60
+idle_heartbeat_secs: 0
+"#;
+        let hat_zero: HatConfig = serde_yaml::from_str(yaml_zero).expect("parse zero");
+        assert_eq!(
+            hat_zero.idle_heartbeat_secs,
+            Some(0),
+            "explicit zero must survive parse as Some(0)"
+        );
+    }
+
+    /// `HatConfig::default()` leaves both new fields at `None`, which
+    /// `DetectedWave::idle_enabled()` resolves as "disabled".  This
+    /// pins the safe legacy fallback.
+    #[test]
+    fn hat_config_default_has_no_idle_fields() {
+        let hat = HatConfig::default();
+        assert!(hat.idle_heartbeat_secs.is_none());
+        assert!(hat.idle_weak_signal_cap.is_none());
+    }
+
     #[test]
     fn test_hat_backend_kiro_agent_variant_removed() {
         // U4: HatBackend::KiroAgent variant and its `agent` field are deleted.
@@ -874,6 +1001,11 @@ mod tests {
             scratchpad: None,
             disallowed_tools: Vec::new(),
             timeout: None,
+            // 2026-07-25-006 plan U2: test helper stays at
+            // idle-disabled defaults so obligation-related tests
+            // do not exercise the new idle knobs unintentionally.
+            idle_heartbeat_secs: None,
+            idle_weak_signal_cap: None,
             // 2026-06-17-004 U2 (R3): test helper does not need
             // the new field; explicit `None` keeps the helper
             // aligned with `HatConfig::default()`.

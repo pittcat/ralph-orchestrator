@@ -286,6 +286,7 @@ Feature: Wave worker idle heartbeat lease
 - **Files**：`crates/ralph-cli/src/loop_runner/tests/wave.rs`。
 - **验收测试**：保留一条 legacy timeout 测并补一条说明性 characterization。
 - **需要拆分的单元测试**：无。
+- **Execution note**：characterization-first；先运行并确认既有墙钟超时表征，再只补足行为证据。
 - **Red 预期**：本 Unit 不要求 Red，characterization 保绿即可。
 - **最小实现范围**：文档化基线，尽量不动生产代码。
 - **集成验证**：`cargo nextest run -p ralph-cli -- partial_timeout_events_visible`（phase2 隔离入口注意串行）。
@@ -304,6 +305,7 @@ Feature: Wave worker idle heartbeat lease
 - **Files**：`crates/ralph-core/src/config/hat.rs`。
 - **验收测试**：`timeout`、`idle_heartbeat_secs`、`idle_weak_signal_cap` 同 hat 解析；`idle_heartbeat_secs: 0` 保留为关闭态。
 - **需要拆分的单元测试**：缺省为 `None`；cap 缺省走 `default_idle_weak_signal_cap()`；旧配置不因新增字段报错。
+- **Execution note**：test-first；先新增字段缺失、缺省和 `0` 关闭态测试，再实现最小 serde 字段与默认值。
 - **Red 预期**：字段不存在。
 - **最小实现范围**：struct 字段 + serde + 注释，明确 StartToClose / HeartbeatTimeout 语义。
 - **同步**：更新 `HatConfig::timeout` 注释，避免继续把它读成 idle。
@@ -323,6 +325,7 @@ Feature: Wave worker idle heartbeat lease
 - **Files**：`crates/ralph-core/src/wave_detection.rs`。
 - **验收测试**：表驱动访问器单测。
 - **需要拆分的单元测试**：默认 300 timeout 不变；idle 独立；cap 默认值不影响 timeout 解析。
+- **Execution note**：test-first；先新增访问器的 `None/0/>0` 表驱动测试，再实现有效值解析。
 - **Red 预期**：方法不存在。
 - **最小实现范围**：accessor only。
 - **集成验证**：core 单测。
@@ -447,7 +450,7 @@ Feature: Wave worker idle heartbeat lease
 - **输入与输出**：`presets/en/ce-executor-supervisor.yml`。
 - **可依赖**：U2。
 - **禁止依赖**：改 triggers / publishes 拓扑。
-- **Files**：`presets/en/ce-executor-supervisor.yml`；必要时 `crates/ralph-cli/src/presets.rs` / `presets/manifest.yml` / `presets/index.json` 同步。
+- **Files**：`presets/en/ce-executor-supervisor.yml`；同步刷新 `presets/schemas/ce-executor-supervisor.yml`（SSOT；event schema 字段、`required_fields`、`execution_contracts` 一致性约束）；`crates/ralph-cli/src/presets.rs` 的 `PRESETS` 数组；`presets/manifest.yml` 的 `embedded:` 列表；`presets/index.json`；`scripts/ralph-zsh-plugin.zsh` 的 `ralph run -H builtin:` 补全；CLAUDE.md「Presets & Hats System」段 builtin preset 列表（HARD RULE「preset/schema 改动后的下游同步清单」）。
 - **验收测试**：`preset_lint` + `presets` parity；对三 hat 字段做结构化断言。
 - **需要拆分的单元测试**：解析三值。
 - **Red 预期**：字段缺失断言红。
