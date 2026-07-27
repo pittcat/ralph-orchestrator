@@ -1630,10 +1630,8 @@ mod tests {
         assert_eq!(s.slot_terminal_evidence(&wave, 0).unwrap(), None);
         // Once evidence is recorded, the gate opens.
         use crate::supervisor::TerminalEvidence;
-        let ev = TerminalEvidence::from_event(
-            "review.unit.done",
-            "{\"dimension\":\"correctness\"}",
-        );
+        let ev =
+            TerminalEvidence::from_event("review.unit.done", "{\"dimension\":\"correctness\"}");
         s.record_slot_terminal_evidence(&wave, 0, &ev).unwrap();
         assert_eq!(s.slot_terminal_evidence(&wave, 0).unwrap(), Some(ev));
     }
@@ -1679,9 +1677,7 @@ mod tests {
         let path = dir.path().join("supervisor.db");
         let wave = {
             let store = RusqliteSupervisorStore::open(&path).unwrap();
-            let wave = store
-                .register_wave("p1-9-rt", WaveKind::Review, 1)
-                .unwrap();
+            let wave = store.register_wave("p1-9-rt", WaveKind::Review, 1).unwrap();
             store
                 .record_slot_terminal_evidence(
                     &wave,

@@ -1,16 +1,22 @@
-# U2 (Green 1 / Routing Contract): success topic/schema chain through wave fan-in.
-# This scenario tests the DOWNSTREAM ROUTING contract: that a `review.wave.complete`
-# event (injected via the `wave-runtime` stand-in hat) routes correctly through
-# review-synthesizer → fix-planner → finalizer → LOOP_COMPLETE{result:clean}.
+# U2 Green 2 / Production Fan-In Proof: success path via real Supervisor fan-in.
+# This scenario exercises the REAL production fan-in seam: six `review.unit.done`
+# events are fed to `run_bdd_supervisor_fan_in` (via `run_workflow_guard_scenario`'s
+# supervisor bridge), which drives `SupervisorCoordinator.tick` to emit
+# `review.wave.complete` — exactly as the production dispatcher module does.
 #
-# The `wave-runtime` hat is a test-only stand-in that directly emits the
-# coordination event. It does NOT exercise the production Supervisor fan-in
-# seam (run_supervisor_fan_in in the dispatcher module). The routing
-# coverage it provides is still valuable — it proves the hat-subscription
-# chain, payload schema, and absent_events contract are all correct.
+# Unlike `implementation_review_wave.yml` (routing contract via wave-runtime
+# stand-in), this scenario proves the complete/failed topics originate from
+# the U1 runtime seam, not from a mock agent hat.
+#
+# Key mechanism:
+# - `event_loop.supervisor.enabled: true` + `execution_mode: isolated`
+#   activates `run_bdd_supervisor_fan_in` in the BDD runner.
+# - No `wave-runtime` hat in the config (supervisor bridge injects the event).
+# - Six `review.unit.done` events in mock_responses drive 6 slot completions
+#   in the supervisor store → coordinator ticks → injects review.wave.complete.
 
-name: implementation_review_wave
-description: Six-slot wave success chain to LOOP_COMPLETE with fix.plan.ready
+name: implementation_review_wave_runtime_fan_in
+description: Six-slot wave success via real Supervisor fan-in (production seam proof)
 
 config:
   prompt_file: PROMPT.md
@@ -35,14 +41,6 @@ config:
       publishes:
         - review.unit.done
       concurrency: 6
-    wave-runtime:
-      # Stand-in for runtime default wave hot path (not present in the
-      # real builtin — agents must not emit review.wave.complete).
-      subscribes_to:
-        - review.unit.done
-      publishes:
-        - review.wave.complete
-        - review.wave.failed
     review-synthesizer:
       subscribes_to:
         - review.wave.complete
@@ -67,6 +65,10 @@ config:
     starting_event: "review.start"
     completion_promise: "LOOP_COMPLETE"
     required_events: []
+    supervisor:
+      enabled: true
+      max_concurrent_workers: 6
+      aggregate_timeout_secs: 60
     event_policy:
       enabled: true
       mode: enforce
@@ -122,46 +124,77 @@ config:
           payload: json_object
 
 mock_responses:
+  # Response 0: scope-preparer activation → scope.ready
   - text: |
       <event topic="scope.ready">
       {"plan_name":"demo-plan","plan_path":"docs/plans/demo-plan.md","scope_digest":"abcd1234ef567890","patch_path":".ralph/review/demo-plan/review.diff.patch","patch_digest":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef","scope_manifest_path":".ralph/review/demo-plan/scope-manifest.json","review_head_sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","first_implementation_commit_sha":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","resolved_baseline_sha":"cccccccccccccccccccccccccccccccccccccccc","dirty_verdict":"clean"}
       </event>
     hat: scope-preparer
-  # Dispatcher emits one review.unit.ready; scenario runner wakes one
-  # worker activation. Wave stand-in then fans in to wave.complete.
+  # Response 1: review-dispatcher activation → review.unit.ready (wave dispatched)
   - text: |
       <event topic="review.unit.ready">
       {"plan_name":"demo-plan","plan_path":"docs/plans/demo-plan.md","scope_digest":"abcd1234ef567890","patch_path":".ralph/review/demo-plan/review.diff.patch","patch_digest":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef","scope_manifest_path":".ralph/review/demo-plan/scope-manifest.json","review_head_sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","first_implementation_commit_sha":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","resolved_baseline_sha":"cccccccccccccccccccccccccccccccccccccccc","slot_index":0,"dimension":"goal-alignment","idempotency_payload_version":1}
       </event>
     hat: review-dispatcher
+  # Responses 2-7: six review-worker activations (one per dimension slot).
+  # The supervisor bridge records each review.unit.done → coordinator
+  # fan-in injects review.wave.complete after all 6 slots arrive.
   - text: |
       <event topic="review.unit.done">
-      {"plan_name":"demo-plan","plan_path":"docs/plans/demo-plan.md","scope_digest":"abcd1234ef567890","patch_digest":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef","review_head_sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","dimension":"goal-alignment","slot_index":0,"findings_count":0,"findings_file":".ralph/review/demo-plan/dimensions/goal-alignment.md","handoff_precheck_failed":false}
+      {"plan_name":"demo-plan","plan_path":"docs/plans/demo-plan.md","scope_digest":"abcd1234ef567890","patch_digest":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef","review_head_sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","wave_id":"review-wave-1","slot_index":0,"dimension":"goal-alignment","findings_count":0,"findings_file":".ralph/review/demo-plan/dimensions/goal-alignment.md","handoff_precheck_failed":false}
       </event>
     hat: review-worker
   - text: |
-      <event topic="review.wave.complete">
-      {"wave_id":"wave-demo-1","completed_dimensions":["goal-alignment","correctness","testing","maintainability","project-standards","adversarial"],"aggregate_timeout":false}
+      <event topic="review.unit.done">
+      {"plan_name":"demo-plan","plan_path":"docs/plans/demo-plan.md","scope_digest":"abcd1234ef567890","patch_digest":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef","review_head_sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","wave_id":"review-wave-1","slot_index":1,"dimension":"correctness","findings_count":0,"findings_file":".ralph/review/demo-plan/dimensions/correctness.md","handoff_precheck_failed":false}
       </event>
-    hat: wave-runtime
+    hat: review-worker
+  - text: |
+      <event topic="review.unit.done">
+      {"plan_name":"demo-plan","plan_path":"docs/plans/demo-plan.md","scope_digest":"abcd1234ef567890","patch_digest":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef","review_head_sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","wave_id":"review-wave-1","slot_index":2,"dimension":"testing","findings_count":0,"findings_file":".ralph/review/demo-plan/dimensions/testing.md","handoff_precheck_failed":false}
+      </event>
+    hat: review-worker
+  - text: |
+      <event topic="review.unit.done">
+      {"plan_name":"demo-plan","plan_path":"docs/plans/demo-plan.md","scope_digest":"abcd1234ef567890","patch_digest":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef","review_head_sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","wave_id":"review-wave-1","slot_index":3,"dimension":"maintainability","findings_count":0,"findings_file":".ralph/review/demo-plan/dimensions/maintainability.md","handoff_precheck_failed":false}
+      </event>
+    hat: review-worker
+  - text: |
+      <event topic="review.unit.done">
+      {"plan_name":"demo-plan","plan_path":"docs/plans/demo-plan.md","scope_digest":"abcd1234ef567890","patch_digest":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef","review_head_sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","wave_id":"review-wave-1","slot_index":4,"dimension":"project-standards","findings_count":0,"findings_file":".ralph/review/demo-plan/dimensions/project-standards.md","handoff_precheck_failed":false}
+      </event>
+    hat: review-worker
+  - text: |
+      <event topic="review.unit.done">
+      {"plan_name":"demo-plan","plan_path":"docs/plans/demo-plan.md","scope_digest":"abcd1234ef567890","patch_digest":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef","review_head_sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","wave_id":"review-wave-1","slot_index":5,"dimension":"adversarial","findings_count":0,"findings_file":".ralph/review/demo-plan/dimensions/adversarial.md","handoff_precheck_failed":false}
+      </event>
+    hat: review-worker
+  # Response 8: review-synthesizer activation (consumed after fan-in injects review.wave.complete)
   - text: |
       <event topic="review.synthesized">
       {"plan_name":"demo-plan","plan_path":"docs/plans/demo-plan.md","synthesized_review_file":".ralph/review/demo-plan/synthesized-review.md","findings_count":0,"p0_count":0,"p1_count":0,"p2_count":0,"p3_count":0,"scope_digest":"abcd1234ef567890","patch_digest":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef","review_head_sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","first_implementation_commit_sha":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","resolved_baseline_sha":"cccccccccccccccccccccccccccccccccccccccc"}
       </event>
     hat: review-synthesizer
+  # Response 9: fix-planner activation
   - text: |
       <event topic="fix.plan.ready">
       {"plan_name":"demo-plan","plan_path":"docs/plans/demo-plan.md","fix_plan_path":".ralph/review/demo-plan/fix-plan.md","result":"clean","findings_count":0,"p0_count":0,"p1_count":0,"p2_count":0,"p3_count":0,"scope_digest":"abcd1234ef567890","source_review_file":".ralph/review/demo-plan/synthesized-review.md"}
       </event>
     hat: fix-planner
+  # Response 10: finalizer activation → LOOP_COMPLETE{result:clean}
   - text: |
       <event topic="LOOP_COMPLETE">
       {"reason":"implementation-review scenario complete"}
       </event>
     hat: finalizer
+  # Response 11: waiting. — ensures the loop completes all 11 response-processing
+  # iterations before honoring completion and exiting. Without this, the loop exits
+  # after response 10 (iteration 11) because completion_honored is set and
+  # next_hat() returns None early.
+  - text: waiting.
 
 expected:
-  iterations: 7
+  iterations: 12
   events:
     - topic: scope.ready
     - topic: review.unit.ready
@@ -169,8 +202,12 @@ expected:
     - topic: review.wave.complete
     - topic: review.synthesized
     - topic: fix.plan.ready
+    - topic: LOOP_COMPLETE
   absent_events:
     - topic: scope.blocked
     - topic: review.blocked
     - topic: review.wave.failed
   completion: true
+  event_topic_counts:
+    - topic: review.unit.done
+      count: 6

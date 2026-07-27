@@ -22,7 +22,7 @@
 
 mod common;
 
-use common::{scrub_agent_runtime_env, ralph_bin};
+use common::{ralph_bin, scrub_agent_runtime_env};
 use std::process::Command;
 
 fn dispatch() -> Command {
@@ -64,7 +64,11 @@ fn mock_e2e_supervisor_fan_in_no_forged_system_injected() {
     // policy check path is event-loop independent. We assert
     // that `ralph emit --help` exposes `--policy-check` so the
     // gate is reachable.
-    let output = dispatch().arg("emit").arg("--help").output().expect("run ralph");
+    let output = dispatch()
+        .arg("emit")
+        .arg("--help")
+        .output()
+        .expect("run ralph");
     assert!(output.status.success(), "ralph emit --help must exit 0");
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(

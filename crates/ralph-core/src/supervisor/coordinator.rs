@@ -1024,9 +1024,8 @@ mod tests {
             )
             .unwrap();
 
-        let coord = SupervisorCoordinator::with_in_memory_sink(
-            store.clone() as Arc<dyn SupervisorStore>,
-        );
+        let coord =
+            SupervisorCoordinator::with_in_memory_sink(store.clone() as Arc<dyn SupervisorStore>);
         // No mark_salvage_merged — coordinator must refuse.
         let action = coord
             .tick(

@@ -310,11 +310,7 @@ pub fn print_termination(
         ),
         // U1 (plan 2026-07-27-001): production fan-in failure.
         // Same red `✗` glyph as other terminal failures.
-        TerminationReason::FanInFailed => (
-            RED,
-            "✗",
-            "Wave fan-in could not reach terminal state",
-        ),
+        TerminationReason::FanInFailed => (RED, "✗", "Wave fan-in could not reach terminal state"),
     };
 
     let separator = "-".repeat(58);

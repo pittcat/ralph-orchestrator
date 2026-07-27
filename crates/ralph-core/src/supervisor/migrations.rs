@@ -75,7 +75,11 @@ mod imp {
     /// half-migrated schema.
     fn apply_with_column_probe(
         connection: &Connection,
-        columns: &[(/* table */ &str, /* column */ &str, /* ddl */ &str)],
+        columns: &[(
+            /* table */ &str,
+            /* column */ &str,
+            /* ddl */ &str,
+        )],
     ) -> rusqlite::Result<()> {
         connection.execute_batch("BEGIN IMMEDIATE")?;
         for (table, column, ddl) in columns {
@@ -137,7 +141,11 @@ mod imp {
         /// otherwise fail the second opener with
         /// `duplicate column name: evidence_topic` (or
         /// `salvage_merged`).
-        const V4_PROBE: &[(/* table */ &str, /* column */ &str, /* ddl */ &str)] = &[
+        const V4_PROBE: &[(
+            /* table */ &str,
+            /* column */ &str,
+            /* ddl */ &str,
+        )] = &[
             (
                 "wave_slots",
                 "evidence_topic",
@@ -154,7 +162,11 @@ mod imp {
                 "ALTER TABLE wave_slots ADD COLUMN evidence_fingerprint TEXT",
             ),
         ];
-        const V5_PROBE: &[(/* table */ &str, /* column */ &str, /* ddl */ &str)] = &[(
+        const V5_PROBE: &[(
+            /* table */ &str,
+            /* column */ &str,
+            /* ddl */ &str,
+        )] = &[(
             "waves",
             "salvage_merged",
             "ALTER TABLE waves ADD COLUMN salvage_merged INTEGER NOT NULL DEFAULT 0",
@@ -299,7 +311,10 @@ mod tests {
                             let busy = matches!(
                                 &err,
                                 rusqlite::Error::SqliteFailure(
-                                    rusqlite::ffi::Error { code: rusqlite::ErrorCode::DatabaseBusy, .. },
+                                    rusqlite::ffi::Error {
+                                        code: rusqlite::ErrorCode::DatabaseBusy,
+                                        ..
+                                    },
                                     _,
                                 )
                             );
@@ -323,7 +338,11 @@ mod tests {
         // are present and the schema is the expected
         // post-v5 shape.
         let conn = Connection::open(path.as_ref()).unwrap();
-        for col in ["evidence_topic", "evidence_dimension", "evidence_fingerprint"] {
+        for col in [
+            "evidence_topic",
+            "evidence_dimension",
+            "evidence_fingerprint",
+        ] {
             let present: i64 = conn
                 .query_row(
                     "SELECT COUNT(*) FROM pragma_table_info('wave_slots') WHERE name = ?1",
@@ -331,7 +350,10 @@ mod tests {
                     |row| row.get(0),
                 )
                 .unwrap();
-            assert_eq!(present, 1, "wave_slots.{col} must exist after concurrent migration");
+            assert_eq!(
+                present, 1,
+                "wave_slots.{col} must exist after concurrent migration"
+            );
         }
         // waves must carry salvage_merged (v5).
         let present: i64 = conn
@@ -341,6 +363,9 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(present, 1, "waves.salvage_merged must exist after concurrent migration");
+        assert_eq!(
+            present, 1,
+            "waves.salvage_merged must exist after concurrent migration"
+        );
     }
 }

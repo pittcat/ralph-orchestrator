@@ -40,12 +40,23 @@
 #
 # Execution model: `wave` (KTD2). NOT full supervisor product mode —
 # `event_loop.supervisor.enabled` stays false (no worktree slots / merge
-# sinks / compensation queue). The default wave hot path may still open
-# `supervisor.db` for wave ledger persistence (KTD-2). When that path
-# wires the bridge it still applies `max_concurrent_workers`, so the
-# cap MUST be >= `review-worker.concurrency` (6); the SupervisorConfig
-# default of 4 would collapse effective_cap to 4 and leave two TUI
-# eggs blank.
+# sinks / compensation queue). The default wave hot path uses the
+# Supervisor ledger for wave tracking and fan-in convergence.
+#
+# Dispatcher stop condition: after a successful `ralph wave emit`
+# (non-deduplicated), the dispatcher activation ends. The dispatcher
+# does NOT wait for slot completions, does NOT poll the store, and
+# does NOT use `task.resume` to redrive the wave. The Supervisor
+# fan-in path (via `run_supervisor_fan_in` in the dispatcher module)
+# converges to exactly one `review.wave.complete` (all 6 slots
+# completed) or one `review.wave.failed` (timeout / partial / cancel).
+# Those runtime coordination topics are injected by the dispatcher
+# at the fan-in seam; they are NOT emitted by any agent hat.
+#
+# When `supervisor.enabled` is true the bridge still applies
+# `max_concurrent_workers`, so the cap MUST be >= `review-worker.concurrency`
+# (6); the SupervisorConfig default of 4 would collapse effective_cap
+# to 4 and leave two TUI eggs blank.
 # Per-worker budget: `review-worker.timeout: 900` (15 min). With concurrency
 # 6 the aggregate wall clock is ~930s (per-worker × batches + 30s); timed-out
 # slots surface via runtime `review.wave.failed` (`reason=timeout|partial`).

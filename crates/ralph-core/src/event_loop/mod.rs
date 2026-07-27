@@ -11554,9 +11554,11 @@ impl EventLoop {
                     &self.config.event_loop.required_events,
                     &self.config.event_loop.completion_promise,
                 ) {
-                    // Keep `completion_requested` set so
-                    // `check_completion_event()` can run the stale-breaker
-                    // and correction path (same as a post-admit rejection).
+                    tracing::warn!(
+                        reason = %reason,
+                        iteration = self.state.iteration,
+                        "LOOP_COMPLETE REJECTED by mark_completion_requested"
+                    );
                     self.state.completion_requested = true;
                     if self
                         .state
@@ -11607,7 +11609,9 @@ impl EventLoop {
                     crate::state::CommitDelta::CompletionRequested,
                 );
                 completion_seen_in_batch = true;
-                accepted_log_events.push(Event::new(event.topic.as_str(), &payload));
+                let accepted = Event::new(event.topic.as_str(), &payload);
+                accepted_log_events.push(accepted.clone());
+                self.state.record_event(&accepted);
                 self.diagnostics.log_orchestration(
                     self.state.iteration,
                     "jsonl",
@@ -15207,10 +15211,7 @@ mod p0_4_flow_authority_ledger_tests {
     use std::path::PathBuf;
 
     fn workspace_root() -> PathBuf {
-        let dir = std::env::temp_dir().join(format!(
-            "ralph-p0-4-flow-auth-{}",
-            std::process::id()
-        ));
+        let dir = std::env::temp_dir().join(format!("ralph-p0-4-flow-auth-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(dir.join(".ralph")).unwrap();
         dir

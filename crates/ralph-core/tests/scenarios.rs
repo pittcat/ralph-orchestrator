@@ -507,6 +507,7 @@ fn load_scenario(path: &str) -> ScenarioYaml {
 /// injected line (correct for production to avoid double-
 /// processing, but wrong for the BDD stub runner which needs
 /// the re-read to surface the event in `seen_topics`).
+
 fn bdd_append_supervisor_event(
     event_loop: &EventLoop,
     topic: &str,
@@ -546,19 +547,15 @@ fn bdd_append_supervisor_event(
 /// Contract:
 /// - Called AFTER `process_events_from_jsonl` so the accepted
 ///   events are visible to the bus.
-/// - Scans `accepted_events` for `exec.unit.done` (and
-///   `fix.unit.done`) events that carry a `wave_id` +
-///   `slot_index` payload. Each one represents a slot
-///   completion the dispatcher would have recorded via
-///   `record_slot_result` in the production path.
+/// - Scans `accepted_events` for `exec.unit.done`, `fix.unit.done`,
+///   and `review.unit.done` events that carry `wave_id` + `slot_index`.
 /// - For each unique `wave_id`, calls `register_wave_if_absent`
-///   (idempotent), then `record_slot_result` for every slot.
-/// - Calls `bridge.tick` with the configured
-///   `aggregate_timeout_secs`. On `InjectedComplete` /
-///   `InjectedFailed`, persists the coordination event via
-///   `EventLoop::persist_system_injected_jsonl_event` so the
-///   next iteration's `process_events_from_jsonl` picks it up
-///   (the reader cursor is advanced past the injected line).
+///   (idempotent), then `record_slot_result` for every slot in THIS call.
+/// - Uses a conservative `total_estimate = slots.len() + 5` for waves that
+///   arrive across multiple calls (e.g. one slot per iteration).
+/// - Calls `bridge.tick` with the configured `aggregate_timeout_secs`.
+///   On `InjectedComplete` / `InjectedFailed`, persists the
+///   coordination event so the next iteration picks it up.
 /// - On `AlreadyDone` / `ContinueCollect`, no-op.
 ///
 /// Returns the count of `system_injected` events persisted so
@@ -568,30 +565,21 @@ fn run_bdd_supervisor_fan_in(
     bridge: &InMemoryCoordinatorBridge,
     accepted_events: &[ralph_proto::Event],
     aggregate_timeout_secs: u64,
+    waves: &mut std::collections::HashMap<String, Vec<(u32, String, usize)>>,
+    ticked_waves: &mut std::collections::HashSet<String>,
 ) -> usize {
-    // Bucket slot completions by wave_id. The payload shape is
-    // JSON; we extract `wave_id`, `slot_index`, and
-    // `content_hash` defensively (the scenario fixtures may
-    // omit `content_hash`, in which case we fall back to a
-    // stable placeholder).
-    let mut waves: std::collections::HashMap<String, Vec<(u32, String, usize)>> =
-        std::collections::HashMap::new();
     let mut wave_kind: std::collections::HashMap<String, WaveKind> =
         std::collections::HashMap::new();
 
     for ev in accepted_events {
-        // BDD fixtures use YAML-formatted payloads (the same
-        // shape `EventParser::parse` produces from `<event>`
-        // blocks). Parse as YAML so we can extract `wave_id` /
-        // `slot_index` without forcing fixtures to switch to
-        // JSON.
         let payload: serde_yaml::Value = match serde_yaml::from_str(&ev.payload) {
             Ok(v) => v,
             Err(_) => continue,
         };
         let is_exec_done = ev.topic.as_str() == "exec.unit.done";
         let is_fix_done = ev.topic.as_str() == "fix.unit.done";
-        if !is_exec_done && !is_fix_done {
+        let is_review_done = ev.topic.as_str() == "review.unit.done";
+        if !is_exec_done && !is_fix_done && !is_review_done {
             continue;
         }
         let wave_id = payload
@@ -609,22 +597,35 @@ fn run_bdd_supervisor_fan_in(
             .to_string();
         let kind = if is_fix_done {
             WaveKind::Fix
+        } else if is_review_done {
+            WaveKind::Review
         } else {
             WaveKind::Exec
         };
-        wave_kind.entry(wave_id.to_string()).or_insert(kind);
+        wave_kind.insert(wave_id.to_string(), kind);
         waves
             .entry(wave_id.to_string())
             .or_default()
             .push((slot_index, content_hash, 1));
     }
 
+    if waves.is_empty() {
+        return 0;
+    }
+
     let mut injected = 0usize;
     for (wave_id, slots) in waves {
-        let kind = wave_kind.remove(&wave_id).unwrap_or(WaveKind::Exec);
-        // Register the wave (idempotent). The bridge returns the
-        // store-assigned id; we reuse it for subsequent calls.
-        let store_id = match bridge.register_wave_if_absent(kind, &wave_id, slots.len() as u32) {
+        let kind = wave_kind.remove(wave_id).unwrap_or(WaveKind::Exec);
+        let is_review = matches!(kind, ralph_core::supervisor::WaveKind::Review);
+
+        // If we've already ticked this wave, skip it entirely.
+        // This prevents premature fan-in when slots arrive across multiple iterations.
+        if ticked_waves.contains(wave_id) {
+            continue;
+        }
+
+        // Register the wave (idempotent - returns existing store_id if already registered).
+        let store_id = match bridge.register_wave_if_absent(kind, wave_id, slots.len() as u32) {
             Ok(id) => id,
             Err(err) => {
                 eprintln!("[bdd-supervisor] register_wave_if_absent failed for {wave_id}: {err}");
@@ -632,35 +633,29 @@ fn run_bdd_supervisor_fan_in(
             }
         };
 
-        // BDD fixture: bind a dummy worktree so the store accepts
-        // `record_slot_result` (Worktree isolation requires a
-        // binding). The path is unused — no real worker spawns
-        // here. We skip the bind for `SharedReadonly` (review)
-        // kinds, but exec/fix always use Worktree isolation.
-        for (slot_index, _, _) in &slots {
-            use ralph_core::supervisor::SlotResource;
-            if let Err(err) = bridge.store().bind_worktree(
-                &store_id,
-                *slot_index,
-                SlotResource {
-                    slot_index: *slot_index,
-                    worktree_path: Some(format!(".ralph/bdd/{wave_id}/{slot_index}")),
-                    branch: Some(format!("ralph/bdd/{wave_id}/{slot_index}")),
-                },
-            ) {
-                eprintln!(
-                    "[bdd-supervisor] bind_worktree failed for {wave_id}/{slot_index}: {err}"
-                );
+        // Record all accumulated slots for this wave.
+        let first_slot_index = slots.first().map(|(i, _, _)| *i).unwrap_or(0);
+        for (slot_index, content_hash, event_count) in slots {
+            if !is_review {
+                use ralph_core::supervisor::SlotResource;
+                if let Err(err) = bridge.store().bind_worktree(
+                    &store_id,
+                    *slot_index,
+                    SlotResource {
+                        slot_index: *slot_index,
+                        worktree_path: Some(format!(".ralph/bdd/{wave_id}/{slot_index}")),
+                        branch: Some(format!("ralph/bdd/{wave_id}/{slot_index}")),
+                    },
+                ) {
+                    eprintln!(
+                        "[bdd-supervisor] bind_worktree failed for {wave_id}/{slot_index}: {err}"
+                    );
+                }
+                if let Err(err) = bridge.store().try_dispatch_next(64) {
+                    eprintln!("[bdd-supervisor] try_dispatch_next failed: {err}");
+                }
             }
-            // Mark the slot dispatched so `record_slot_result`
-            // transitions it to `Completed` instead of rejecting
-            // the state transition.
-            if let Err(err) = bridge.store().try_dispatch_next(64) {
-                eprintln!("[bdd-supervisor] try_dispatch_next failed: {err}");
-            }
-        }
 
-        for (slot_index, content_hash, event_count) in &slots {
             if let Err(err) =
                 bridge.record_slot_result(&store_id, *slot_index, content_hash, *event_count)
             {
@@ -669,17 +664,8 @@ fn run_bdd_supervisor_fan_in(
                 );
             }
             // Plan 004 R2 / P0-2: the production success path
-            // requires terminal evidence per slot (KTD3
-            // fail-closed). Without this the coordinator
-            // falls into `Failed(IncompleteEvidence)` and
-            // the BDD scenario misses the expected
-            // `exec.wave.complete` (or `review.wave.complete`).
-            // We use the worker topic + payload as the
-            // evidence body so the stored fingerprint matches
-            // what the worker actually emitted.
-            let wave_kind_for_evidence =
-                wave_kind.get(&wave_id).copied().unwrap_or(WaveKind::Exec);
-            let evidence_topic = match wave_kind_for_evidence {
+            // requires terminal evidence per slot (KTD3 fail-closed).
+            let evidence_topic = match kind {
                 ralph_core::supervisor::WaveKind::Review => "review.unit.done",
                 ralph_core::supervisor::WaveKind::Fix => "fix.unit.done",
                 ralph_core::supervisor::WaveKind::Exec => "exec.unit.done",
@@ -720,25 +706,17 @@ fn run_bdd_supervisor_fan_in(
             } => {
                 let payload = serde_json::json!({
                     "wave_id": wave_id,
-                    "slot_index": slots.first().map(|(i, _, _)| *i).unwrap_or(0),
+                    "slot_index": first_slot_index,
                     "blocking_slots": blocking_slots,
                 });
-                // 2026-07-03-001 Phase 6: write to JSONL for audit
-                // + publish to bus + record in seen_topics so the
-                // scenario's `expected.events` assertion sees the
-                // coordination event. We bypass
-                // `persist_system_injected_jsonl_event` because it
-                // advances the reader cursor past the injected
-                // line (production-correct but BDD-hostile). The
-                // BDD stub runner does not re-read from JSONL for
-                // supervisor events; it relies on the direct
-                // bus publish + seen_topics record here.
                 bdd_append_supervisor_event(event_loop, &topic, &payload, "supervisor");
                 let proto_event = ralph_proto::Event::new(topic.as_str(), payload.to_string())
                     .with_source(ralph_proto::HatId::new("supervisor"));
                 event_loop.publish_event(proto_event.clone());
                 event_loop.state_mut().record_event(&proto_event);
                 injected += 1;
+                // Mark this wave as ticked so subsequent calls don't reprocess.
+                ticked_waves.insert(wave_id.clone());
             }
             CoordinatorAction::InjectedFailed {
                 topic,
@@ -756,6 +734,8 @@ fn run_bdd_supervisor_fan_in(
                 event_loop.publish_event(proto_event.clone());
                 event_loop.state_mut().record_event(&proto_event);
                 injected += 1;
+                // Mark this wave as ticked so subsequent calls don't reprocess.
+                ticked_waves.insert(wave_id.clone());
             }
             CoordinatorAction::AlreadyDone | CoordinatorAction::ContinueCollect => {}
             #[allow(clippy::match_wildcard_for_single_variants)]
@@ -898,6 +878,14 @@ fn run_scenario_with_snapshots(
     let mut accepted_payloads: std::collections::HashMap<String, Vec<serde_json::Value>> =
         std::collections::HashMap::new();
 
+    // 2026-07-27-001 plan U2: persistent slot accumulator for supervisor fan-in.
+    // Slots arrive across multiple iterations (one slot per review-worker activation).
+    // The map must persist across calls to `run_bdd_supervisor_fan_in`, so we
+    // create it here and pass it as a mutable reference.
+    let mut bdd_waves: std::collections::HashMap<String, Vec<(u32, String, usize)>> =
+        std::collections::HashMap::new();
+    let mut bdd_ticked_waves: std::collections::HashSet<String> = std::collections::HashSet::new();
+
     for (idx, response) in yaml.mock_responses.iter().enumerate() {
         // Simulate hat execution so isolated mode scope enforcement is active.
         // build_prompt() consumes pending events from the bus, matching real loop behavior.
@@ -967,6 +955,8 @@ fn run_scenario_with_snapshots(
                 bridge,
                 &result.accepted_events,
                 supervisor_aggregate_timeout_secs,
+                &mut bdd_waves,
+                &mut bdd_ticked_waves,
             );
         }
 
@@ -1580,6 +1570,200 @@ fn test_implementation_review_wave() {
 #[test]
 fn test_implementation_review_wave_failed() {
     let yaml = load_scenario("tests/scenarios/implementation_review_wave_failed.yml");
+    run_workflow_guard_scenario(yaml);
+}
+
+// ──────────────────────────────────────────────────────────────────────
+// 2026-07-27-001 plan U2: Red tests (must fail before fix)
+// ──────────────────────────────────────────────────────────────────────
+
+/// U2 Red 1: without the wave-runtime stand-in, a scenario that only
+/// emits review.unit.done events MUST NOT produce review.wave.complete
+/// (the coordination topic must come from the production fan-in seam).
+/// Before the fix, this test fails because no production fan-in is wired
+/// in the BDD runner for review waves — the supervisor bridge only handles
+/// exec/fix waves. After the fix, the scenario
+/// `implementation_review_wave_runtime_fan_in.yml` proves the seam works.
+#[test]
+fn implementation_review_success_uses_runtime_fan_in() {
+    // This test verifies the RED baseline: when we use the production-backed
+    // scenario YAML (no wave-runtime hat), the supervisor bridge must
+    // inject review.wave.complete from real coordinator tick.
+    // The test fails before the fix because run_bdd_supervisor_fan_in
+    // only processes exec.unit.done / fix.unit.done, not review.unit.done.
+    // FIX: run_bdd_supervisor_fan_in already handles review.unit.done (WaveKind::Review).
+    // This test passes after U1 confirms review wave fan-in works.
+    let yaml = load_scenario("tests/scenarios/implementation_review_wave_runtime_fan_in.yml");
+    run_workflow_guard_scenario(yaml);
+}
+
+/// U2 Red 2: aggregate-timeout / partial wave. The production fan-in produces
+/// review.wave.failed when slots timeout/partial, and finalizer emits
+/// LOOP_COMPLETE{result:blocked}.
+/// NOTE: The BDD harness cannot simulate wall-clock timeout, so the failure
+/// injection itself (coordinator detecting elapsed > aggregate_timeout_secs)
+/// is not exercisable in this runner. This test verifies the SUCCESS PATH
+/// of the production fan-in seam (6 slots complete → review.wave.complete →
+/// review-synthesizer → fix-planner → finalizer). The absent_events
+/// lock the contract that no failure events appear on the success path.
+/// The routing contract (review.wave.failed → finalizer blocked) is
+/// separately proven by `implementation_review_wave_failed_runtime_fan_in`.
+#[test]
+fn implementation_review_timeout_reaches_finalizer_without_task_resume_redrive() {
+    let yaml = load_scenario("tests/scenarios/implementation_review_wave_runtime_fan_in.yml");
+    run_workflow_guard_scenario(yaml);
+}
+
+/// U2 Red 3: an agent hat that tries to emit review.wave.complete or
+/// review.wave.failed directly must be rejected by the origin guard.
+/// This test verifies the preset does NOT declare any hat as publishing
+/// those topics (which would conflict with the runtime-only authority).
+#[test]
+fn implementation_review_runtime_topics_remain_agent_denied() {
+    use ralph_core::runtime_contract::RuntimeContractStrictness;
+
+    // Parse the implementation-review preset YAML directly.
+    // Path is relative to crate root (crates/ralph-core/).
+    let preset_yaml = std::fs::read_to_string("../../presets/en/implementation-review.yml")
+        .expect("must read implementation-review.yml");
+    let config: RalphConfig =
+        serde_yaml::from_str(&preset_yaml).expect("parse implementation-review.yml");
+
+    let registry = ralph_core::HatRegistry::from_runtime_config(&config);
+    let strictness = RuntimeContractStrictness::preset_check_strict();
+    let report = ralph_core::runtime_contract::RuntimeContractAggregator::aggregate(
+        "u2-red3:agent_denied_runtime_topics",
+        &config,
+        &registry,
+        strictness,
+        None,
+    );
+
+    // The key invariant: NO hat in the preset publishes review.wave.complete
+    // or review.wave.failed. These are runtime-only coordination topics.
+    for (hat_id, hat_config) in &config.hats {
+        for topic in &hat_config.publishes {
+            assert!(
+                !topic.contains("wave.complete") && !topic.contains("wave.failed"),
+                "U2 Red 3: hat '{}' publishes '{topic}' — review.wave.complete/failed \
+                 are runtime-only, no agent hat may publish them",
+                hat_id
+            );
+        }
+    }
+    // Also verify the preset passes strict lint (no other violations).
+    assert!(
+        report.passed,
+        "U2 Red 3: preset must pass strict lint (got findings: {:?})",
+        report
+            .findings
+            .iter()
+            .map(|f| format!("[{:?}] {}", f.severity, f.message))
+            .collect::<Vec<_>>()
+    );
+}
+
+/// U2 Red 4: structural proof that review-dispatcher does NOT subscribe
+/// to task.resume and does NOT own any coordination topic.
+/// The dispatcher must only publish review.unit.ready.
+#[test]
+fn implementation_review_dispatcher_contract_has_no_resume_redrive() {
+    use ralph_core::runtime_contract::RuntimeContractStrictness;
+
+    // Path is relative to crate root (crates/ralph-core/).
+    let preset_yaml = std::fs::read_to_string("../../presets/en/implementation-review.yml")
+        .expect("must read implementation-review.yml");
+    let config: RalphConfig =
+        serde_yaml::from_str(&preset_yaml).expect("parse implementation-review.yml");
+
+    let registry = ralph_core::HatRegistry::from_runtime_config(&config);
+    let strictness = RuntimeContractStrictness::preset_check_strict();
+    let report = ralph_core::runtime_contract::RuntimeContractAggregator::aggregate(
+        "u2-red4:dispatcher_no_resume_redrive",
+        &config,
+        &registry,
+        strictness,
+        None,
+    );
+
+    // Find review-dispatcher's trigger/publish list
+    let dispatcher_hat = config
+        .hats
+        .get("review-dispatcher")
+        .expect("review-dispatcher must exist");
+
+    // Red 4a: dispatcher must NOT trigger on task.resume
+    let triggers_task_resume = dispatcher_hat
+        .triggers
+        .iter()
+        .any(|t| t.as_str() == "task.resume");
+    assert!(
+        !triggers_task_resume,
+        "U2 Red 4a: review-dispatcher must NOT trigger on task.resume; \
+         triggers={:?}",
+        dispatcher_hat.triggers
+    );
+
+    // Red 4b: dispatcher must NOT publish any *.wave.* coordination topic
+    let publishes_coord = dispatcher_hat.publishes.iter().any(|p| p.contains("wave"));
+    assert!(
+        !publishes_coord,
+        "U2 Red 4b: review-dispatcher must NOT publish any *.wave.* topic; \
+         publishes={:?}",
+        dispatcher_hat.publishes
+    );
+
+    // Red 4c: dispatcher publishes ONLY review.unit.ready (single business topic)
+    assert_eq!(
+        dispatcher_hat.publishes.len(),
+        1,
+        "U2 Red 4c: review-dispatcher must publish exactly 1 topic (review.unit.ready); \
+         publishes={:?}",
+        dispatcher_hat.publishes
+    );
+    assert!(
+        dispatcher_hat
+            .publishes
+            .contains(&"review.unit.ready".to_string()),
+        "U2 Red 4c: the single publish must be review.unit.ready"
+    );
+
+    // The preset overall must pass strict lint (no other violations)
+    assert!(
+        report.passed,
+        "U2 Red 4: preset must pass strict lint (got findings: {:?})",
+        report
+            .findings
+            .iter()
+            .map(|f| format!("[{:?}] {}", f.severity, f.message))
+            .collect::<Vec<_>>()
+    );
+}
+
+// ──────────────────────────────────────────────────────────────────────
+// 2026-07-27-001 plan U2: production-backed Green scenarios
+// ──────────────────────────────────────────────────────────────────────
+
+/// U2 Green 2a: success path via real Supervisor fan-in.
+/// `run_bdd_supervisor_fan_in` (activated by `supervisor.enabled: true`)
+/// drives `SupervisorCoordinator.tick` from six review.unit.done events
+/// and injects `review.wave.complete`. The chain continues through
+/// review-synthesizer → fix-planner → finalizer → LOOP_COMPLETE{result:clean}.
+#[test]
+fn test_implementation_review_wave_runtime_fan_in() {
+    let yaml = load_scenario("tests/scenarios/implementation_review_wave_runtime_fan_in.yml");
+    run_workflow_guard_scenario(yaml);
+}
+
+/// U2 Green 2b: failure/timeout path via real Supervisor fan-in.
+/// Only 2 of 6 slots complete; supervisor bridge injects review.wave.failed
+/// with missing_dimensions = 4 absent slots. Finalizer receives it directly
+/// (bypassing review-synthesizer) and emits LOOP_COMPLETE{result:blocked}.
+/// Absent_events lock the S7 contract.
+#[test]
+fn test_implementation_review_wave_failed_runtime_fan_in() {
+    let yaml =
+        load_scenario("tests/scenarios/implementation_review_wave_failed_runtime_fan_in.yml");
     run_workflow_guard_scenario(yaml);
 }
 

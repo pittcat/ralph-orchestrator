@@ -639,16 +639,8 @@ fn u8_concurrent_distinct_keys_both_succeed() {
     let h2 = spawn_one("u8-key-b".into(), barrier);
     let (c1, s1, err1, elapsed1) = h1.join().unwrap();
     let (c2, s2, err2, elapsed2) = h2.join().unwrap();
-    assert_eq!(
-        c1,
-        0,
-        "key-a must succeed: stdout={s1} stderr={err1}",
-    );
-    assert_eq!(
-        c2,
-        0,
-        "key-b must succeed: stdout={s2} stderr={err2}",
-    );
+    assert_eq!(c1, 0, "key-a must succeed: stdout={s1} stderr={err1}",);
+    assert_eq!(c2, 0, "key-b must succeed: stdout={s2} stderr={err2}",);
     let w1 = json_field(&s1, "wave_id").unwrap().to_string();
     let w2 = json_field(&s2, "wave_id").unwrap().to_string();
     assert_ne!(w1, w2, "distinct keys must mint distinct wave_ids");

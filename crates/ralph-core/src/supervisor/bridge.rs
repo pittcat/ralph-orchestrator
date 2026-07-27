@@ -324,7 +324,11 @@ pub trait SupervisorBridge: std::fmt::Debug + Send + Sync {
     /// fan-in convergence driver to force the Failed phase when the
     /// coordinator's fail_wave would otherwise be refused or would
     /// leave the wave in ContinueCollect. Default: no-op for mocks.
-    fn set_wave_phase(&self, _wave_id: &str, _phase: crate::supervisor::WavePhase) -> Result<(), BridgeError> {
+    fn set_wave_phase(
+        &self,
+        _wave_id: &str,
+        _phase: crate::supervisor::WavePhase,
+    ) -> Result<(), BridgeError> {
         Ok(())
     }
 

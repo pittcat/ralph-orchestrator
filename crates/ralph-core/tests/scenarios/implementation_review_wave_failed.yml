@@ -1,12 +1,14 @@
-# 2026-07-26-003 plan U6: review.wave.failed → finalizer → LOOP_COMPLETE blocked.
+# U2 (Green 3 / Routing Contract): review.wave.failed → finalizer → LOOP_COMPLETE blocked.
 #
-# Outside-In BDD: confirm the failure path lands `review.wave.failed`
-# on `finalizer` (NOT `review-synthesizer` — the primary-20260726
-# incident root cause), and that `finalizer` emits exactly one
-# `LOOP_COMPLETE` with no synthesizer / fix-planner in between. The
-# `absent_events` guarantee locks the S7 / AE5 acceptance contract:
-# `review.synthesized` / `review.wave.complete` must NOT appear when
-# the wave goes down the failed path.
+# This scenario tests the DOWNSTREAM ROUTING contract: that a `review.wave.failed`
+# event (injected via the `wave-runtime` stand-in) routes to `finalizer` (NOT to
+# `review-synthesizer` — the primary-20260726 incident root cause), and that
+# finalizer emits exactly one `LOOP_COMPLETE{result:blocked}` with no
+# synthesizer/fix-planner in between.
+#
+# The `wave-runtime` stand-in does NOT exercise the production Supervisor fan-in
+# seam. The routing coverage it provides proves the failure-path hat subscription
+# chain and absent_events contract (S7 / AE5).
 
 name: implementation_review_wave_failed
 description: review.wave.failed → finalizer → LOOP_COMPLETE blocked (no synthesizer detour)

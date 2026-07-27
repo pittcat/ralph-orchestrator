@@ -44,9 +44,7 @@ use crate::loop_runner::wave::{
     BridgeError, MockSupervisorBridge, SlotBinding, SupervisorBridge, WaveWorkerExecutor,
     is_supervisor_path_enabled,
 };
-use ralph_core::supervisor::{
-    PhaseInputs, SlotResource, TerminalEvidence, WaveKind, WaveSnapshot,
-};
+use ralph_core::supervisor::{PhaseInputs, SlotResource, TerminalEvidence, WaveKind, WaveSnapshot};
 use std::collections::HashMap;
 use std::sync::Mutex;
 
