@@ -69,6 +69,13 @@ pub fn recover_active_waves_at_startup(
     let mut report = RecoveryReport::default();
     let snapshots = store.recover_active_waves()?;
     report.inspected = snapshots.len();
+    // 2026-07-27-003 plan U5: surface waves whose coord event
+    // was already injected before the crash. They live in
+    // `CoordinationCommitted` but are filtered out of
+    // `recover_active_waves` (terminal phase). The runtime /
+    // operator use this list to confirm the restart skipped
+    // re-injection and the dispatcher knows not to retry.
+    report.already_merged = store.list_committed_coord_wave_ids()?;
     let now = SystemTime::now();
     for snapshot in snapshots {
         // The store's `recover_active_waves` skips waves

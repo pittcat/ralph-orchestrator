@@ -863,13 +863,41 @@ impl SupervisorStore for InMemorySupervisorStore {
             .waves_by_id
             .get_mut(wave_id)
             .ok_or_else(|| SupervisorStoreError::UnknownWave(wave_id.to_string()))?;
-        if !wave
+        // 2026-07-27-003 plan U5 / recovery: relax the gate from
+        // `≥ CoordinationWritten` to `≥ SalvageCommitted` (with
+        // explicit refusal only at terminal `CoordinationCommitted`).
+        // The original guard skipped `pending` / `business_projected`
+        // rows, which the rusqlite SQL CASE handles but the
+        // restart-replay path could not exercise through the rust
+        // gate. We now mirror the SQL CASE and let the
+        // fingerprint-mismatch check below catch true replays with
+        // a different receipt.
+        // rusqlite SQL CASE so a restart that re-derives the
+        // receipt from disk and replays through
+        // `record_coordination_written` may observe a `pending`
+        // row (the merge sink wrote main + coord-event but never
+        // stamped the wave).
+        //
+        // Idempotency: a re-record on a wave already at
+        // `CoordinationCommitted` is a no-op. The fingerprint
+        // check below catches a true conflict (different
+        // payload). This mirrors the rusqlite SQL CASE which
+        // leaves `coordination_committed` rows unchanged.
+        if wave
             .delivery_state
-            .at_least(WaveDeliveryState::SalvageCommitted)
+            .at_least(WaveDeliveryState::CoordinationCommitted)
         {
-            return Err(SupervisorStoreError::InvalidTransition(
-                "record_coordination_written requires SalvageCommitted state".to_string(),
-            ));
+            if let Some(existing) = wave.coordination_receipt.as_ref()
+                && !existing.payload_fingerprint.is_empty()
+                && !receipt.payload_fingerprint.is_empty()
+                && existing.payload_fingerprint != receipt.payload_fingerprint
+            {
+                return Err(SupervisorStoreError::InvalidTransition(format!(
+                    "record_coordination_written: fingerprint mismatch (existing={}, new={})",
+                    existing.payload_fingerprint, receipt.payload_fingerprint
+                )));
+            }
+            return Ok(());
         }
         if wave
             .delivery_state
@@ -914,12 +942,19 @@ impl SupervisorStore for InMemorySupervisorStore {
             .waves_by_id
             .get_mut(wave_id)
             .ok_or_else(|| SupervisorStoreError::UnknownWave(wave_id.to_string()))?;
+        // 2026-07-27-003 plan U5 / recovery: the merge sink may
+        // have written the coord event to main and crashed
+        // before `record_coordination_written` ran. Accept any
+        // state ≥ SalvageCommitted so a restart that already
+        // has the main-append + coord-event in place can
+        // advance the wave to CoordinationCommitted without
+        // replaying a stale receipt.
         if !wave
             .delivery_state
-            .at_least(WaveDeliveryState::CoordinationWritten)
+            .at_least(WaveDeliveryState::SalvageCommitted)
         {
             return Err(SupervisorStoreError::InvalidTransition(
-                "commit_coordination_event requires CoordinationWritten state".to_string(),
+                "commit_coordination_event requires SalvageCommitted state".to_string(),
             ));
         }
         if let Some(existing) = wave.coordination_receipt.as_ref()

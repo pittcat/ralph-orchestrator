@@ -1135,10 +1135,39 @@ impl SupervisorStore for RusqliteSupervisorStore {
                 None => return Err(SupervisorStoreError::UnknownWave(wave_id.to_string())),
                 Some(s) => parse_delivery_state(&s)?,
             };
-            if !current_state.at_least(WaveDeliveryState::SalvageCommitted) {
-                return Err(SupervisorStoreError::InvalidTransition(
-                    "record_coordination_written requires SalvageCommitted state".to_string(),
-                ));
+            // 2026-07-27-003 plan U5 / recovery: align the rust
+            // gate with the SQL CASE below, which accepts
+            // `pending` / `business_projected` / `salvage_committed`
+            // → `coordination_written`. The dispatcher always
+            // reaches this in `SalvageCommitted` or later, but a
+            // restart that re-derives the receipt from disk and
+            // replays through `record_coordination_written` may
+            // observe a `pending` row (the merge sink wrote main
+            // + coord-event but never stamped the wave).
+            //
+            // Idempotency: a re-record on a wave already at
+            // `CoordinationCommitted` is a no-op. The fingerprint
+            // check below catches a true conflict (different
+            // payload).
+            if current_state.at_least(WaveDeliveryState::CoordinationCommitted) {
+                let existing_fp: Option<String> = conn
+                    .query_row(
+                        "SELECT coordination_fingerprint FROM waves WHERE wave_id = ?1",
+                        [&wave_id],
+                        |row| row.get(0),
+                    )
+                    .optional()?;
+                if let Some(existing_fp) = existing_fp
+                    && !existing_fp.is_empty()
+                    && !receipt.payload_fingerprint.is_empty()
+                    && existing_fp != receipt.payload_fingerprint
+                {
+                    return Err(SupervisorStoreError::InvalidTransition(format!(
+                        "record_coordination_written: fingerprint mismatch (existing={existing_fp}, new={})",
+                        receipt.payload_fingerprint
+                    )));
+                }
+                return Ok(());
             }
             if current_state.at_least(WaveDeliveryState::CoordinationWritten) {
                 let existing_fp: Option<String> = conn
@@ -1202,9 +1231,16 @@ impl SupervisorStore for RusqliteSupervisorStore {
                 Some(t) => t,
             };
             let current_state = parse_delivery_state(&current_state_str)?;
-            if !current_state.at_least(WaveDeliveryState::CoordinationWritten) {
+            // 2026-07-27-003 plan U5 / recovery: the merge sink may
+            // have written the coord event to main and crashed
+            // before `record_coordination_written` ran. Accept any
+            // state ≥ SalvageCommitted so a restart that already
+            // has the main-append + coord-event in place can
+            // advance the wave to CoordinationCommitted without
+            // replaying a stale receipt.
+            if !current_state.at_least(WaveDeliveryState::SalvageCommitted) {
                 return Err(SupervisorStoreError::InvalidTransition(
-                    "commit_coordination_event requires CoordinationWritten state".to_string(),
+                    "commit_coordination_event requires SalvageCommitted state".to_string(),
                 ));
             }
             if !existing_fp.is_empty() && existing_fp != receipt.payload_fingerprint {
@@ -1322,6 +1358,26 @@ impl SupervisorStore for RusqliteSupervisorStore {
             out.push(self.fan_in_status(&id)?);
         }
         Ok(out)
+    }
+
+    fn list_committed_coord_wave_ids(&self) -> SupervisorStoreResult<Vec<String>> {
+        // 2026-07-27-003 plan U5: a wave whose coord event was
+        // injected before a crash lands in `CoordinationCommitted`
+        // and is excluded from `recover_active_waves` (terminal
+        // phase). The recovery report still surfaces them in
+        // `already_merged` so the operator / dispatcher can
+        // confirm the restart skipped re-injection.
+        self.with_conn(|conn| {
+            let mut stmt = conn.prepare(
+                "SELECT wave_id FROM waves
+                 WHERE delivery_state = 'coordination_committed'
+                 ORDER BY wave_id ASC",
+            )?;
+            let ids = stmt
+                .query_map([], |row| row.get(0))?
+                .collect::<Result<_, _>>()?;
+            Ok(ids)
+        })
     }
 
     fn list_worktree_paths(&self, wave_id: &str) -> SupervisorStoreResult<Vec<SlotResource>> {
@@ -2898,6 +2954,25 @@ mod recovery_reopen_tests {
                 .unwrap();
             // The coordinator already injected the coord event and
             // stamped the idempotent-inject marker before the crash.
+            // Recovery seam: a restart that re-derives the receipt
+            // from disk replays the four-phase commit by first
+            // re-stamping `record_coordination_written` (which
+            // accepts `pending`/`business_projected`/`salvage_committed`
+            // per the rusqlite SQL CASE) and then sealing the wave
+            // with `commit_coordination_event`.
+            store
+                .record_coordination_written(
+                    &wave,
+                    &super::CoordinationReceiptSummary {
+                        topic: String::new(),
+                        idempotency_key: String::new(),
+                        payload_fingerprint: String::new(),
+                        write_count: 0,
+                        already_present_count: 0,
+                        committed_at_unix_secs: 0,
+                    },
+                )
+                .unwrap();
             store
                 .commit_coordination_event(
                     &wave,

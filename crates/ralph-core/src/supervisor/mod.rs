@@ -954,6 +954,18 @@ pub trait SupervisorStore: fmt::Debug + Send + Sync {
     /// touch DB state.
     fn recover_active_waves(&self) -> SupervisorStoreResult<Vec<WaveSnapshot>>;
 
+    /// 2026-07-27-003 plan U5: list wave ids whose
+    /// `delivery_state` is already at `CoordinationCommitted`.
+    /// `recover_active_waves` skips terminal-phase waves, so
+    /// this is the only way the recovery report can populate
+    /// `already_merged` after a restart that already injected
+    /// the coord event before crashing. The default returns an
+    /// empty list so the in-memory fixture (which has no
+    /// persistent rows to scan) keeps working.
+    fn list_committed_coord_wave_ids(&self) -> SupervisorStoreResult<Vec<String>> {
+        Ok(Vec::new())
+    }
+
     /// List the resource bindings a wave allocated (used by the
     /// integrator and the worktree cleanup at loop end).
     fn list_worktree_paths(&self, wave_id: &str) -> SupervisorStoreResult<Vec<SlotResource>>;

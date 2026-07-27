@@ -310,17 +310,28 @@ if [[ "$SERIAL" -ne 1 ]] && run_cargo nextest --version >/dev/null 2>&1; then
 
   # 2026-07-25: two-phase run — fast path + isolated slow path.
   # Phase 1: full workspace with default num-cpus concurrency,
-  #   EXCLUDING the `partial_timeout_events_visible` trio.  That
-  #   trio hard-codes a 1s worker-timeout assertion; under
-  #   saturated CPU contention it trips the timeout (wall-clock
-  #   observed at ~1.06-1.09s — only ~80ms slack above the 1s
-  #   hard limit).
-  # Phase 2: re-run those three tests with `-j 1` so they get a
+  #   EXCLUDING the `partial_timeout_events_visible` trio + two
+  #   race-sensitive backend-invocation tests. Those tests
+  #   hard-code a 1s worker-timeout assertion; under saturated
+  #   CPU contention they trip the timeout (wall-clock observed
+  #   at ~1.06-1.09s — only ~80ms slack above the 1s hard limit).
+  # Phase 2: re-run those tests with `-j 1` so they get a
   #   quiescent core and the 1s timeout doesn't fire on a busy
-  #   CI runner.  Three serial tests take ~3-4s vs ~6-8s of
+  #   CI runner. Three serial tests take ~3-4s vs ~6-8s of
   #   contention-retry cost, so the slow path is cheaper than
   #   the global `RALPH_BASELINE_SERIAL=1` fallback (which
   #   serialises the whole workspace).
+  #
+  # 2026-07-27-003 plan U2/U3 added two more race-sensitive
+  # tests in the same family:
+  #   * `test_execute_wave_hat_backend_invocation_contracts`
+  #   * `test_execute_wave_falls_back_to_global_backend_when_hat_backend_is_invalid`
+  # Both rely on the dispatcher preparing a per-wave channel
+  # registry before spawn and then driving backend subprocesses
+  # through the `WaveWorkerExecutor` mock; under nextest default
+  # concurrency they flake on the same 80ms-slack class of
+  # wall-clock assertions. They are routed to Phase 2 alongside
+  # the original trio for the same reason.
   # See CLAUDE.md "hooks-executor-test-flake" for the
   #   parallel-failure characterisation that motivates this split.
   echo "📦 Phase 1: full workspace at default num-cpus concurrency..."
@@ -332,18 +343,18 @@ if [[ "$SERIAL" -ne 1 ]] && run_cargo nextest --version >/dev/null 2>&1; then
   run_cargo nextest run \
     --workspace \
     --exclude ralph-e2e \
-    -E 'not test(/partial_timeout_events_visible/)' 2>&1 | tee "$P1_LOG"
+    -E 'not test(/partial_timeout_events_visible/) and not test(/test_execute_wave_/)' 2>&1 | tee "$P1_LOG"
   [[ ${PIPESTATUS[0]} -ne 0 ]] && OVERALL_RC=1
   P1_SUM=$(parse_nextest_summary "$P1_LOG")
 
   echo
-  echo "🐢 Phase 2: race-sensitive trio at -j 1 (3 tests)..."
+  echo "🐢 Phase 2: race-sensitive tests at -j 1..."
   P2_LOG=$(mktemp)
   run_cargo nextest run \
     --workspace \
     --exclude ralph-e2e \
     -j 1 \
-    -E 'test(/partial_timeout_events_visible/)' 2>&1 | tee "$P2_LOG"
+    -E 'test(/partial_timeout_events_visible/) or test(/test_execute_wave_/)' 2>&1 | tee "$P2_LOG"
   [[ ${PIPESTATUS[0]} -ne 0 ]] && OVERALL_RC=1
   P2_SUM=$(parse_nextest_summary "$P2_LOG")
 
