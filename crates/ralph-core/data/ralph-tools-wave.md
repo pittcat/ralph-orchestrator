@@ -187,7 +187,9 @@ ralph wave emit [OPTIONS] <TOPIC>
 >
 > 3. **wave_id 共享**：同一 `--payloads` 列表产生的 N 个事件共享同一个 `wave_id` 和 `wave_total`，由 `wave_index`（0..N-1）区分。聚合 hat 据此识别同一 wave 的所有结果。
 >
-> 4. **wave 通道准备阶段（dispatcher 视角 → worker 视角）**：dispatcher 在 spawn worker 前必须完成本 wave 的私有通道准备：把每个 slot 的 `(loop id, wave id, slot index, canonical path)` 绑定写入 dispatcher-managed 的 per-wave 通道记录。如果 dispatcher 报告「本 wave 通道准备失败」，worker 子进程已被 runtime 保护性阻止启动；如果 worker 进程已起来但 `ralph emit` 收到 `wave_channel_registry_reject`（参见 `ralph-tools-emit.md` 同名段），按那边规定的「停 / 看 dispatcher 输出 / 不重试 / 报告」四步动作处理，不要尝试改路径、绕 marker、或者补发同一 topic。
+> 4. **wave_id / slot_index 是 runtime-owned 字段**：当 `RALPH_WAVE_WORKER=1` 且 dispatcher 已注入 `RALPH_WAVE_ID` / `RALPH_WAVE_INDEX` 时，**worker 不应在 `--json` payload 中手填 `wave_id` 或 `slot_index`**。`ralph emit` 在 schema / policy 校验前会自动注入这两个系统字段；如果 payload 已包含，系统以 `system_field_owned_by_runtime` 错误拒收，事件不写盘。Agent 的稳定 payload shape 是「业务字段 + 由 runtime 注入的 `wave_id` / `slot_index`」，不要尝试手动同步这两项。
+>
+> 5. **wave 通道准备阶段（dispatcher 视角 → worker 视角）**：dispatcher 在 spawn worker 前必须完成本 wave 的私有通道准备：把每个 slot 的 `(loop id, wave id, slot index, canonical path)` 绑定写入 dispatcher-managed 的 per-wave 通道记录。如果 dispatcher 报告「本 wave 通道准备失败」，worker 子进程已被 runtime 保护性阻止启动；如果 worker 进程已起来但 `ralph emit` 收到 `wave_channel_registry_reject`（参见 `ralph-tools-emit.md` 同名段），按那边规定的「停 / 看 dispatcher 输出 / 不重试 / 报告」四步动作处理，不要尝试改路径、绕 marker、或者补发同一 topic。
 
 ### Confirm 阶段
 
@@ -309,7 +311,7 @@ slots: [<indices>]
 
 - Operator 手动介入恢复：某个 wave 的部分 slot 在上游执行器崩溃后处于 `failed` 状态，但 wave 已进入终态。
 - Operator 用 `ralph wave inspect <wave_id>` 确认 phase 为 `done`/`failed` 且 `failed_count > 0` 后，针对具体失败 slot 调用 redrive。
-- Redrive 创建的子 wave 由 dispatcher 自动调度，与普通 wave 一样走 `wave dispatch` → `wave collect` → `wave integrate` 流程。
+- Redrive 只在 store 内创建子 wave + 复制 slot 元数据，**不会**自动 dispatch worker；operator 必须接着执行 `ralph run --resume`，由 loop 启动 seam 消费 child descriptor 并走现有 dispatcher / worker executor 重新派发。如不 resume，子 wave 永远停在 `Pending`，协调事件不会注入。
 
 **不适用场景：**
 

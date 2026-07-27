@@ -1,6 +1,10 @@
 # `ralph wave redrive` — Operator CLI Reference
 
 > 2026-07-25-005 plan U11 引入的 supervisor wave redrive 操作员命令。
+> 2026-07-27-004 plan U4: 文档修正执行模型 — redrive 只创建
+> 子 attempt wave + 复制 slot 元数据,**不会**自动派发 worker。
+> Operator 必须接着执行 `ralph run --resume` 让 loop 启动 seam
+> 消费 child descriptor 并复用现有 dispatcher 重新派发。
 > 仅限 operator 在 loop 外手动干预使用；agent 无权调用。
 
 ## 什么是 redrive
@@ -10,7 +14,7 @@
 - 子 wave 继承父 wave 的 `kind` 与 `slot_retry_budget`
 - `attempt_epoch = parent.attempt_epoch + 1`
 - 父 wave ledger 不被重写——父 wave 的 `done`/`failed` 记录保持不变
-- 子 wave 是 supervisor store 中独立的新行，由 dispatcher 自动调度
+- 子 wave 是 supervisor store 中独立的新行；**仅**写 store 元数据 + 复制 bounded activation descriptor（topic、payload、slot index、kind、digest）。子 wave 注册后处于 `Pending`，**不会**自动 spawn worker
 
 ## 何时使用
 
@@ -18,8 +22,8 @@
 
 1. **部分 slot 执行器崩溃**：wave 的某些 slot 在执行过程中节点宕机或进程被 kill，slot 状态为 `failed`，但 wave 已进入终态（`done`/`failed`）。
 2. **确认根因**：operator 用 `ralph wave inspect <wave_id>` 确认 wave 确实处于终态且 `failed_count > 0`，排除"还在进行中"的可能。
-3. **手动 redrive**：operator 针对具体失败 slot 调用 `ralph wave redrive`，创建子 wave 重新调度这些 slot。
-4. **观察恢复**：子 wave 由 dispatcher 自动调度，operator 用 `ralph wave inspect <child_wave_id>` 确认恢复进度。
+3. **手动 redrive**：operator 针对具体失败 slot 调用 `ralph wave redrive`，创建子 wave 复制 slot 元数据。
+4. **必须 resume 才执行**：operator 接着执行 `ralph run --resume`。loop 启动 seam 消费 child descriptor，复用现有 supervisor dispatcher / worker executor 重新派发；agent 不应自己启动新进程。inspect 子 wave 确认恢复进度。
 
 ## 何时不用
 
