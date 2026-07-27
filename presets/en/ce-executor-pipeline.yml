@@ -6,9 +6,10 @@
 # internally; downstream hats only see a single `work.done` / `work.failed`.
 #
 # 13-hat topology with linear single-consumer chain:
-# - plan-reviewer: Reviews the plan file in-place; no per-unit breakdown, no
-#   code edits. Output: plan.ready (with review_summary + plan_revised flag)
-#   or plan.blocked (plan unusable).
+# - plan-reviewer: Reviews the plan's semantic readiness and preserves an
+#   already-compliant source plan; no per-unit breakdown, no code edits.
+#   Output: plan.ready (with review_summary + plan_revised flag) or
+#   plan.blocked (plan unusable).
 # - executor: Whole-plan execution with TDD. Hard DoD = baseline-aware
 #   verification that always runs and is classified; introduced regressions
 #   are report-only (honest red delta). Any auditable deliverable commit →
@@ -1659,7 +1660,7 @@ core:
 hats:
   plan-reviewer:
     name: "Plan Reviewer"
-    description: "Reads the plan file, reviews it for completeness and quality, in-place edits if needed. Emits plan.ready (with review_summary) or plan.blocked (plan unusable). No code edits, no per-unit breakdown."
+    description: "Reads the plan file and reviews its semantic execution readiness. Preserves an already-compliant source plan; normalizes layout in the review artifact. Emits plan.ready (with review_summary) or plan.blocked (plan unusable). No code edits, no per-unit breakdown."
     triggers: ["work.start"]
     publishes: ["plan.ready", "plan.blocked"]
     exempt_topics: ["plan.ready", "plan.blocked"]
@@ -1670,7 +1671,7 @@ hats:
       events:
         - work.start
     instructions: |
-      ## PLAN REVIEWER MODE — Review the plan file, in-place fix if needed, then hand off to executor
+      ## PLAN REVIEWER MODE — Review semantic readiness, preserve compliant source plans, then hand off to executor
 
       You own the **plan review** phase. You do NOT implement code. You do NOT split the plan into units or create task ledger entries (`tasks.enabled: false` for this preset — executor handles the whole plan as one execution). You ONLY review the plan document itself.
 
@@ -1846,14 +1847,24 @@ hats:
 
       ### Step 3 — Plan Review (when file is OK)
       Read the plan file end-to-end and check it against these quality gates.
-      You may IN-PLACE edit the plan file (preserving U-IDs, R-IDs, and frontmatter
-      structure) to fix any deficiency you find. Set `plan_revised: true` if you
-      edited anything; `false` otherwise.
+      Judge semantic coverage across the whole document, not whether every Unit
+      repeats a fixed template. Global BDD sections, traceability tables,
+      dependency graphs, verification matrices, and final quality gates satisfy
+      a Unit gate when the mapping to that Unit is explicit. Layout, heading
+      wording, field order, and equivalent cross-references are NOT deficiencies;
+      express any structural normalization only in `normalized-plan.md`.
+      Preserve the source plan when it is semantically executable. You may
+      IN-PLACE edit it only for a real execution-blocking semantic gap whose
+      correction is unambiguous (preserving U-IDs, R-IDs, and frontmatter
+      structure). Set `plan_revised: true` if you edited anything; `false`
+      otherwise.
       If you edit the plan file, commit that plan-file change before emitting
       `plan.ready`. Do not leave the revised plan as an uncommitted working-tree
       change for downstream hats.
 
-      **Semantic quality gates (titles and numbering may vary; missing or weak → in-place fix):**
+      **Semantic quality gates (titles and numbering may vary; accept equivalent
+      evidence anywhere in the plan; an actual blocking gap may be fixed only
+      under the rule above):**
 
       1. **Ordered Units are semantically present and actionable.** Each Unit has a goal, observable result, dependency boundary, implementation scope, verification, and completion gate. A numbered list or the word "Unit" alone is insufficient.
       2. **Scope Boundaries explicit.** Non-goals are listed; ambiguity is resolved.
@@ -1957,6 +1968,17 @@ hats:
         and do not let a subagent emit Ralph events. Subagents write code
         and tests only; the main executor performs review, commits, metrics,
         policy precheck, emit, and confirm.
+      - **Unit brief isolation (HARD RULE)**: the main executor reads
+        `normalized_plan_file` and constructs an inline brief for the current
+        U-ID. For every initial or retry dispatch, pass only that Unit's goal,
+        observable result, dependency status, allowed files, approach, test
+        scenarios, verification, and directly mapped R/S-IDs, plus relevant
+        repository rules. Do NOT pass `plan_path`, `normalized_plan_file`, or
+        the full plan contents to a Unit subagent. A Unit subagent MUST NOT
+        read either full plan file. If the brief lacks a fact required to
+        proceed, it returns the specific missing fact to the main executor;
+        the main executor supplies a targeted clarification instead of
+        authorizing a whole-plan read.
       - **Anti-abdication gate (HARD RULE)**: plan length, Unit count, file count,
         predicted context pressure, and predicted duration are estimates,
         not observed failures, and NEVER justify `work.failed` or an
@@ -2251,8 +2273,9 @@ hats:
       ### Execution Loop
 
       Walk the Implementation Units (U-IDs) in order. For each U, launch
-      exactly one subagent with only that Unit's Goal / Files / Approach /
-      Test scenarios / Verification plus the relevant repository rules.
+      exactly one subagent using the inline Unit brief defined by **Unit brief
+      isolation** above. Do not give the subagent a plan-file path as a
+      shortcut.
       The subagent must return changed files, tests run, and residual risks;
       it must not emit Ralph events or create commits.
 
