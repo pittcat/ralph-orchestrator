@@ -671,13 +671,13 @@ fn run_bdd_supervisor_fan_in(
         if !ready && !force_now {
             // Still collecting — register early so total is correct, but
             // do not tick until all slots arrive (or force_terminal).
-            let _ = bridge.register_wave_if_absent(kind, wave_id, expected_slots);
+            let _ = bridge.register_wave_if_absent(kind, wave_id, expected_slots, 1);
             for (slot_index, content_hash, event_count, dimension) in slots.iter() {
                 if !is_review {
                     use ralph_core::supervisor::SlotResource;
                     let _ = bridge.store().bind_worktree(
                         &bridge
-                            .register_wave_if_absent(kind, wave_id, expected_slots)
+                            .register_wave_if_absent(kind, wave_id, expected_slots, 1)
                             .unwrap_or_else(|_| wave_id.clone()),
                         *slot_index,
                         SlotResource {
@@ -688,7 +688,8 @@ fn run_bdd_supervisor_fan_in(
                     );
                     let _ = bridge.store().try_dispatch_next(64);
                 }
-                let store_id = match bridge.register_wave_if_absent(kind, wave_id, expected_slots) {
+                let store_id = match bridge.register_wave_if_absent(kind, wave_id, expected_slots, 1)
+                {
                     Ok(id) => id,
                     Err(_) => continue,
                 };
@@ -716,7 +717,7 @@ fn run_bdd_supervisor_fan_in(
             continue;
         }
 
-        let store_id = match bridge.register_wave_if_absent(kind, wave_id, expected_slots) {
+        let store_id = match bridge.register_wave_if_absent(kind, wave_id, expected_slots, 1) {
             Ok(id) => id,
             Err(err) => {
                 eprintln!("[bdd-supervisor] register_wave_if_absent failed for {wave_id}: {err}");

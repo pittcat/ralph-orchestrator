@@ -193,6 +193,7 @@ pub trait SupervisorBridge: std::fmt::Debug + Send + Sync {
         kind: WaveKind,
         wave_id: &str,
         expected_total: u32,
+        slot_retry_budget: u32,
     ) -> Result<String, BridgeError>;
 
     /// 2026-07-03-001 supervisor real-wiring: record a slot's
@@ -478,6 +479,7 @@ impl SupervisorBridge for InMemoryCoordinatorBridge {
         kind: WaveKind,
         wave_id: &str,
         expected_total: u32,
+        slot_retry_budget: u32,
     ) -> Result<String, BridgeError> {
         let mut guard = self.registered.lock().unwrap();
         if let Some(existing) = guard.get(wave_id) {
@@ -493,21 +495,25 @@ impl SupervisorBridge for InMemoryCoordinatorBridge {
         // a `BridgeError::Store` (the wave is gone from disk —
         // cannot resolve the caller's caller-key back to a store
         // row, so refuse to fabricate a fake id).
-        let store_id = match self.store.register_wave(wave_id, kind, expected_total) {
-            Ok(id) => id,
-            Err(SupervisorStoreError::DuplicateKey(_)) => {
-                match self.store.wave_id_for_idempotency_key(wave_id) {
-                    Ok(Some(resolved)) => resolved,
-                    Ok(None) => {
-                        return Err(BridgeError::Store(format!(
-                            "duplicate idempotency_key={wave_id} but store has no row"
-                        )));
+        let store_id =
+            match self
+                .store
+                .register_wave(wave_id, kind, expected_total, slot_retry_budget)
+            {
+                Ok(id) => id,
+                Err(SupervisorStoreError::DuplicateKey(_)) => {
+                    match self.store.wave_id_for_idempotency_key(wave_id) {
+                        Ok(Some(resolved)) => resolved,
+                        Ok(None) => {
+                            return Err(BridgeError::Store(format!(
+                                "duplicate idempotency_key={wave_id} but store has no row"
+                            )));
+                        }
+                        Err(err) => return Err(BridgeError::Store(err.to_string())),
                     }
-                    Err(err) => return Err(BridgeError::Store(err.to_string())),
                 }
-            }
-            Err(err) => return Err(BridgeError::Store(err.to_string())),
-        };
+                Err(err) => return Err(BridgeError::Store(err.to_string())),
+            };
         guard.insert(wave_id.to_string(), store_id.clone());
         Ok(store_id)
     }
@@ -641,11 +647,11 @@ mod tests {
             store.clone() as std::sync::Arc<dyn SupervisorStore>
         );
         let store_id = bridge
-            .register_wave_if_absent(WaveKind::Exec, "bdd-wave", 1)
+            .register_wave_if_absent(WaveKind::Exec, "bdd-wave", 1, 1)
             .unwrap();
         // Second call must be a no-op (returns the same store id).
         let store_id_again = bridge
-            .register_wave_if_absent(WaveKind::Exec, "bdd-wave", 1)
+            .register_wave_if_absent(WaveKind::Exec, "bdd-wave", 1, 1)
             .unwrap();
         assert_eq!(store_id, store_id_again);
         let snap = store.fan_in_status(&store_id).unwrap();
@@ -659,7 +665,7 @@ mod tests {
             store.clone() as std::sync::Arc<dyn SupervisorStore>
         );
         let store_id = bridge
-            .register_wave_if_absent(WaveKind::Exec, "bdd-wave", 1)
+            .register_wave_if_absent(WaveKind::Exec, "bdd-wave", 1, 1)
             .unwrap();
         store
             .bind_worktree(
@@ -734,7 +740,7 @@ mod tests {
         );
 
         let store_id = bridge
-            .register_wave_if_absent(WaveKind::Exec, "g2-wave", 3)
+            .register_wave_if_absent(WaveKind::Exec, "g2-wave", 3, 1)
             .unwrap();
 
         // Dispatch and complete slot 0.
@@ -831,9 +837,10 @@ mod tests {
             kind: WaveKind,
             wave_id: &str,
             expected_total: u32,
+            slot_retry_budget: u32,
         ) -> Result<String, BridgeError> {
             self.inner
-                .register_wave_if_absent(kind, wave_id, expected_total)
+                .register_wave_if_absent(kind, wave_id, expected_total, slot_retry_budget)
         }
 
         fn record_slot_result(
@@ -874,7 +881,7 @@ mod tests {
         );
 
         let store_id = inner
-            .register_wave_if_absent(WaveKind::Exec, "g2-prop-wave", 2)
+            .register_wave_if_absent(WaveKind::Exec, "g2-prop-wave", 2, 1)
             .unwrap();
 
         // Slot 1: terminally Failed with a DIFFERENT reason than

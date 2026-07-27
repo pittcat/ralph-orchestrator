@@ -29,7 +29,7 @@ fn wave_into(
     kind: WaveKind,
     n: u32,
 ) -> SupervisorStoreResult<String> {
-    let wave = s.register_wave(key, kind, n)?;
+    let wave = s.register_wave(key, kind, n, 1)?;
     for i in 0..n {
         s.bind_worktree(&wave, i, bind(i))?;
     }
@@ -42,8 +42,8 @@ fn wave_into(
 #[test]
 fn duplicate_idempotency_key_returns_duplicate_key() {
     let s = store();
-    s.register_wave("dup", WaveKind::Exec, 1).unwrap();
-    let err = s.register_wave("dup", WaveKind::Fix, 1).unwrap_err();
+    s.register_wave("dup", WaveKind::Exec, 1, 1).unwrap();
+    let err = s.register_wave("dup", WaveKind::Fix, 1, 1).unwrap_err();
     assert!(
         matches!(err, SupervisorStoreError::DuplicateKey(ref k) if k == "dup"),
         "expected DuplicateKey, got {err:?}"
@@ -146,9 +146,9 @@ fn backpressure_releases_after_slot_completes() {
 #[test]
 fn enqueue_wave_drains_fifo_across_waves() {
     let s = store();
-    let w1 = s.enqueue_wave("fifo-1", WaveKind::Exec, 1).unwrap();
+    let w1 = s.enqueue_wave("fifo-1", WaveKind::Exec, 1, 1).unwrap();
     s.bind_worktree(&w1, 0, bind(0)).unwrap();
-    let w2 = s.enqueue_wave("fifo-2", WaveKind::Exec, 1).unwrap();
+    let w2 = s.enqueue_wave("fifo-2", WaveKind::Exec, 1, 1).unwrap();
     s.bind_worktree(&w2, 0, bind(0)).unwrap();
     // Cap = 1: only w1's slot can dispatch.
     let first = s.try_dispatch_next(1).unwrap().unwrap();

@@ -209,7 +209,7 @@ mod tests {
     #[test]
     fn merged_to_events_wave_is_skipped() {
         let store = InMemorySupervisorStore::new();
-        let wave = store.register_wave("merge", WaveKind::Exec, 1).unwrap();
+        let wave = store.register_wave("merge", WaveKind::Exec, 1, 1).unwrap();
         slot_bound(&store, &wave, 0);
         store.mark_merge_to_events(&wave).unwrap();
         let report = recover_active_waves_at_startup(Arc::new(store.clone()), 60).unwrap();
@@ -221,7 +221,7 @@ mod tests {
     #[test]
     fn running_wave_with_zero_in_flight_does_not_timeout() {
         let store = InMemorySupervisorStore::new();
-        let wave = store.register_wave("zero", WaveKind::Exec, 1).unwrap();
+        let wave = store.register_wave("zero", WaveKind::Exec, 1, 1).unwrap();
         slot_bound(&store, &wave, 0);
         // No dispatch; in_flight = 0.
         let report = recover_active_waves_at_startup(Arc::new(store.clone()), 60).unwrap();
@@ -232,7 +232,7 @@ mod tests {
     #[test]
     fn cancel_wave_with_in_flight_workers_stays_in_flight() {
         let store = InMemorySupervisorStore::new();
-        let wave = store.register_wave("cancel", WaveKind::Exec, 1).unwrap();
+        let wave = store.register_wave("cancel", WaveKind::Exec, 1, 1).unwrap();
         slot_bound(&store, &wave, 0);
         let _ = store.try_dispatch_next(4).unwrap().unwrap();
         store.cancel_wave(&wave).unwrap();
@@ -247,7 +247,7 @@ mod tests {
     #[test]
     fn merged_waves_skip_recovery_helper_returns_true() {
         let store = InMemorySupervisorStore::new();
-        let wave = store.register_wave("helper", WaveKind::Exec, 1).unwrap();
+        let wave = store.register_wave("helper", WaveKind::Exec, 1, 1).unwrap();
         store.mark_merge_to_events(&wave).unwrap();
         let flag = merged_waves_skip_recovery(Arc::new(store.clone()), &wave).unwrap();
         assert!(flag);
@@ -256,7 +256,7 @@ mod tests {
     #[test]
     fn restore_unmerged_completed_is_noop_for_unmerged_state() {
         let store = InMemorySupervisorStore::new();
-        let wave = store.register_wave("replay", WaveKind::Exec, 1).unwrap();
+        let wave = store.register_wave("replay", WaveKind::Exec, 1, 1).unwrap();
         // snapshot.merged_to_events == false (default) — the
         // marker restore is a no-op.
         let did = restore_unmerged_completed_slot(Arc::new(store.clone()), &wave).unwrap();
@@ -281,7 +281,7 @@ mod tests {
     #[test]
     fn in_flight_wave_past_timeout_marked_failed() {
         let store = InMemorySupervisorStore::new();
-        let wave = store.register_wave("stuck", WaveKind::Exec, 1).unwrap();
+        let wave = store.register_wave("stuck", WaveKind::Exec, 1, 1).unwrap();
         slot_bound(&store, &wave, 0);
         // Dispatch so the slot moves to `Dispatched` and
         // `in_flight_count > 0` for the recovery check.
@@ -308,7 +308,7 @@ mod tests {
     #[test]
     fn in_flight_wave_within_timeout_not_marked_failed() {
         let store = InMemorySupervisorStore::new();
-        let wave = store.register_wave("fresh", WaveKind::Exec, 1).unwrap();
+        let wave = store.register_wave("fresh", WaveKind::Exec, 1, 1).unwrap();
         slot_bound(&store, &wave, 0);
         let _ = store.try_dispatch_next(2).unwrap().unwrap();
         // `aggregate_timeout_secs = 3600` and the wave is
@@ -331,7 +331,9 @@ mod tests {
     #[test]
     fn restore_unmerged_completed_stamps_merge_intent() {
         let store = InMemorySupervisorStore::new();
-        let wave = store.register_wave("unmerged", WaveKind::Exec, 2).unwrap();
+        let wave = store
+            .register_wave("unmerged", WaveKind::Exec, 2, 1)
+            .unwrap();
         slot_bound(&store, &wave, 0);
         slot_bound(&store, &wave, 1);
         let _ = store.try_dispatch_next(4).unwrap().unwrap();

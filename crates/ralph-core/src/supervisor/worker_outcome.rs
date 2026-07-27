@@ -38,6 +38,125 @@ pub const REASON_WORKER_CANCELLED: &str = "worker_cancelled";
 /// the wave was marked `Failed`. Distinct from `worker_timeout`
 /// (for slots that did dispatch but never reported a terminal).
 pub const REASON_SLOT_NEVER_STARTED: &str = "slot_never_started";
+/// 2026-07-25-005 plan U3: dispatcher could not construct a
+/// valid control-plane path for the slot (bad wave kind /
+/// missing slot resources). The slot will never succeed;
+/// retrying would produce the same failure.
+pub const REASON_INVALID_CONTROL_PLANE_PATH: &str = "invalid_control_plane_path";
+
+// ── Retry classifier ─────────────────────────────────────────────────────────
+
+/// Reasons that may be retried by the dispatcher.
+const RETRYABLE_REASONS: &[&str] = &[
+    REASON_WORKER_TIMEOUT,
+    REASON_EMPTY_WORKER_RESULT,
+    REASON_MISSING_WORKER_TERMINAL,
+    REASON_SLOT_NEVER_STARTED,
+];
+
+/// Reasons that are permanent failures — retrying is futile.
+const NON_RETRYABLE_REASONS: &[&str] = &[
+    REASON_CONFLICTING_WORKER_TERMINAL,
+    REASON_INVALID_CONTROL_PLANE_PATH,
+    REASON_WORKER_CANCELLED,
+    // cancel/aggregate wave-level failures
+    "aggregate_timeout",
+    "aggregate_deadline_exceeded",
+    "cancelled",
+    "wave_cancelled",
+];
+
+/// Classification of a slot failure reason for dispatch decisions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FailureClassification {
+    /// The dispatcher may retry this slot immediately.
+    Retryable,
+    /// The slot has reached a permanent terminal failure; no
+    /// retry or redrive will change the outcome.
+    Permanent,
+    /// The reason string is not recognised.  We fail-closed
+    /// (Permanent) rather than risk an infinite retry loop on an
+    /// unknown failure mode.
+    UnknownFailClosed,
+}
+
+/// Returns `true` for known retryable slot reasons.
+/// Unknown or non-retryable reasons return `false`.
+pub fn is_retryable_slot_reason(reason: &str) -> bool {
+    let trimmed = reason.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+    RETRYABLE_REASONS.contains(&trimmed)
+}
+
+/// Classify a slot failure reason for dispatch decisions.
+pub fn classify_failure_reason(reason: &str) -> FailureClassification {
+    let trimmed = reason.trim();
+    if trimmed.is_empty() {
+        return FailureClassification::UnknownFailClosed;
+    }
+    if RETRYABLE_REASONS.contains(&trimmed) {
+        return FailureClassification::Retryable;
+    }
+    if NON_RETRYABLE_REASONS.contains(&trimmed) {
+        return FailureClassification::Permanent;
+    }
+    FailureClassification::UnknownFailClosed
+}
+
+// ── Failure class labels ─────────────────────────────────────────────────────
+
+/// Consumer-facing `failure_class` labels written into the
+/// `*.wave.failed` payload's `slot_failures` entries (plan
+/// 2026-07-25-005 R7 / KTD7). These are stable strings meant for
+/// external consumption by the failure handler and reporter; they
+/// are deliberately NOT the same namespace as the frozen internal
+/// `REASON_*` codes above.
+pub const FAILURE_CLASS_TIMEOUT: &str = "timeout";
+pub const FAILURE_CLASS_ORPHAN_OR_EMPTY_RESULT: &str = "orphan_or_empty_result";
+pub const FAILURE_CLASS_IDENTITY_MISMATCH: &str = "identity_mismatch";
+pub const FAILURE_CLASS_REQUIRED_SLOT_FAILURE: &str = "required_slot_failure";
+pub const FAILURE_CLASS_CANCEL: &str = "cancel";
+/// Fail-closed bucket: the reason is unrecognised, empty, or a
+/// known permanent reason with no consumer-facing class (e.g.
+/// `invalid_control_plane_path`). Downstream must treat `unknown`
+/// as non-recoverable — it never enters `redrive_slots`.
+pub const FAILURE_CLASS_UNKNOWN: &str = "unknown";
+
+/// Map a frozen slot/wave failure reason to a stable external
+/// `failure_class` label (plan 2026-07-25-005 KTD7).
+///
+/// The mapping is aligned with [`classify_failure_reason`]:
+/// retryable reasons (see [`RETRYABLE_REASONS`]) always resolve to
+/// a concrete class, and anything the classifier would not retry
+/// either gets its permanent class (`identity_mismatch`, `cancel`)
+/// or fails-closed to [`FAILURE_CLASS_UNKNOWN`]. Unrecognised or
+/// empty reasons never produce a concrete class, so an unknown
+/// failure mode can neither be mistaken for a recoverable one nor
+/// leak free-form text into the consumer contract.
+pub fn map_failure_class(reason: &str) -> &'static str {
+    match reason.trim() {
+        // timeout family (slot-level + wave-level aggregate codes)
+        REASON_WORKER_TIMEOUT | "aggregate_timeout" | "aggregate_deadline_exceeded" => {
+            FAILURE_CLASS_TIMEOUT
+        }
+        // empty / orphan output family
+        REASON_EMPTY_WORKER_RESULT | REASON_MISSING_WORKER_TERMINAL | REASON_SLOT_NEVER_STARTED => {
+            FAILURE_CLASS_ORPHAN_OR_EMPTY_RESULT
+        }
+        // conflicting terminal identities on the worker channel
+        REASON_CONFLICTING_WORKER_TERMINAL => FAILURE_CLASS_IDENTITY_MISMATCH,
+        // cancel family (slot-level + wave-level aggregate codes)
+        REASON_WORKER_CANCELLED | "cancelled" | "wave_cancelled" => FAILURE_CLASS_CANCEL,
+        // wave-level aggregate reason used by the failed payload
+        "required_slot_failure" => FAILURE_CLASS_REQUIRED_SLOT_FAILURE,
+        // Fail-closed: unrecognised reasons, and known permanent
+        // reasons without a consumer class (e.g.
+        // REASON_INVALID_CONTROL_PLANE_PATH), collapse to `unknown`.
+        _ => FAILURE_CLASS_UNKNOWN,
+    }
+}
 
 /// Terminal kind inferred from the worker event stream.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -364,5 +483,106 @@ mod tests {
                 reason: REASON_WORKER_CANCELLED
             }
         );
+    }
+
+    // --- U1 (2026-07-25-005 plan, R7 / KTD7): map_failure_class table ---
+
+    /// Retryable frozen reasons map to concrete consumer classes.
+    #[test]
+    fn u1_map_failure_class_retryable_reasons_get_concrete_classes() {
+        assert_eq!(map_failure_class(REASON_WORKER_TIMEOUT), FAILURE_CLASS_TIMEOUT);
+        assert_eq!(
+            map_failure_class(REASON_EMPTY_WORKER_RESULT),
+            FAILURE_CLASS_ORPHAN_OR_EMPTY_RESULT
+        );
+        assert_eq!(
+            map_failure_class(REASON_MISSING_WORKER_TERMINAL),
+            FAILURE_CLASS_ORPHAN_OR_EMPTY_RESULT
+        );
+        assert_eq!(
+            map_failure_class(REASON_SLOT_NEVER_STARTED),
+            FAILURE_CLASS_ORPHAN_OR_EMPTY_RESULT
+        );
+    }
+
+    /// Permanent (non-retryable) frozen reasons map per KTD7.
+    #[test]
+    fn u1_map_failure_class_permanent_reasons_get_concrete_classes() {
+        assert_eq!(
+            map_failure_class(REASON_CONFLICTING_WORKER_TERMINAL),
+            FAILURE_CLASS_IDENTITY_MISMATCH
+        );
+        assert_eq!(map_failure_class(REASON_WORKER_CANCELLED), FAILURE_CLASS_CANCEL);
+        assert_eq!(map_failure_class("cancelled"), FAILURE_CLASS_CANCEL);
+        assert_eq!(map_failure_class("wave_cancelled"), FAILURE_CLASS_CANCEL);
+        assert_eq!(map_failure_class("aggregate_timeout"), FAILURE_CLASS_TIMEOUT);
+        assert_eq!(
+            map_failure_class("aggregate_deadline_exceeded"),
+            FAILURE_CLASS_TIMEOUT
+        );
+    }
+
+    /// Wave-level required-slot-failure reason maps to its own class.
+    #[test]
+    fn u1_map_failure_class_required_slot_failure_identity() {
+        assert_eq!(
+            map_failure_class("required_slot_failure"),
+            FAILURE_CLASS_REQUIRED_SLOT_FAILURE
+        );
+    }
+
+    /// Unknown / unrecognised reasons fail-closed to the stable
+    /// `unknown` class — including the empty string and known
+    /// permanent reasons that have no consumer-facing class.
+    #[test]
+    fn u1_map_failure_class_unknown_reasons_fail_closed() {
+        assert_eq!(map_failure_class(""), FAILURE_CLASS_UNKNOWN);
+        assert_eq!(map_failure_class("   "), FAILURE_CLASS_UNKNOWN);
+        assert_eq!(map_failure_class("some_future_reason"), FAILURE_CLASS_UNKNOWN);
+        assert_eq!(
+            map_failure_class(REASON_INVALID_CONTROL_PLANE_PATH),
+            FAILURE_CLASS_UNKNOWN
+        );
+    }
+
+    /// Whitespace around a known reason is tolerated (same trim
+    /// semantics as `classify_failure_reason`).
+    #[test]
+    fn u1_map_failure_class_trims_surrounding_whitespace() {
+        assert_eq!(
+            map_failure_class("  worker_timeout  "),
+            FAILURE_CLASS_TIMEOUT
+        );
+    }
+
+    /// Alignment with the retry classifier: every retryable reason
+    /// resolves to a concrete class, and nothing that resolves to a
+    /// concrete class is retryable-unaccounted. Guards against the
+    /// two tables drifting apart.
+    #[test]
+    fn u1_map_failure_class_stays_aligned_with_retry_classifier() {
+        let retryable = [
+            REASON_WORKER_TIMEOUT,
+            REASON_EMPTY_WORKER_RESULT,
+            REASON_MISSING_WORKER_TERMINAL,
+            REASON_SLOT_NEVER_STARTED,
+        ];
+        for reason in retryable {
+            assert!(
+                is_retryable_slot_reason(reason),
+                "fixture sanity: {reason} must stay retryable"
+            );
+            assert_ne!(
+                map_failure_class(reason),
+                FAILURE_CLASS_UNKNOWN,
+                "retryable reason {reason} must never fail-closed to unknown"
+            );
+        }
+        // Unknown class inputs must never be retryable: an unknown
+        // failure class must not sneak into `redrive_slots`.
+        for reason in ["", "nonsense", REASON_INVALID_CONTROL_PLANE_PATH] {
+            assert_eq!(map_failure_class(reason), FAILURE_CLASS_UNKNOWN);
+            assert!(!is_retryable_slot_reason(reason));
+        }
     }
 }

@@ -18,7 +18,7 @@ use std::time::SystemTime;
 
 use super::{
     CompensationKind, DispatchOutcome, EmissionReservation, EmissionState, IdempotencyKey,
-    IsolationMode, SlotResource, SlotStatus, SupervisorStore, SupervisorStoreError,
+    IsolationMode, RedriveResult, SlotResource, SlotStatus, SupervisorStore, SupervisorStoreError,
     SupervisorStoreResult, WaveKind, WavePhase, WaveSnapshot,
 };
 
@@ -46,6 +46,14 @@ struct WaveRow {
     /// Mirrors the `waves.created_at` column on the rusqlite
     /// store.
     created_at: SystemTime,
+    /// 2026-07-25-005 plan U2: default retry budget for all slots
+    /// in this wave. Range 0..=2; 0 disables auto-retry.
+    slot_retry_budget: u32,
+    /// 2026-07-25-005 plan U2: child attempt wave's epoch marker
+    /// (incremented each time a redrive wave is created from this wave).
+    attempt_epoch: u32,
+    /// 2026-07-25-005 plan U2: redrive parent reference (NULL for original waves).
+    parent_wave_id: Option<String>,
     slots: BTreeMap<u32, SlotRow>,
 }
 
@@ -126,6 +134,11 @@ struct Inner {
     /// `public_wave_id` on `reserve_emission`; `scope_key` is
     /// the dedup primary key.
     emissions: HashMap<String, EmissionRow>,
+    /// 2026-07-25-005 plan U11: redrive request ledger.
+    /// Key = `(parent_wave_id, slot_index, attempt_epoch)` for UNIQUE lookup.
+    redrive_requests: HashMap<(String, u32, u32), RedriveRequestRow>,
+    /// Autoincrement id for redrive_requests.
+    next_redrive_id: i64,
 }
 
 /// 2026-07-24-003 plan U4: in-memory emission reservation row.
@@ -141,6 +154,29 @@ struct EmissionRow {
     expected_count: u32,
     state: EmissionState,
     applied_at: Option<u64>,
+}
+
+/// 2026-07-25-005 plan U11: in-memory redrive request row.
+/// Mirrors the `redrive_requests` SQLite table so unit tests
+/// exercise the same idempotency semantics as the rusqlite store.
+#[derive(Debug, Clone)]
+#[allow(dead_code)] // fields mirror the SQLite schema but are not all read in tests
+struct RedriveRequestRow {
+    id: i64,
+    parent_wave_id: String,
+    slot_index: u32,
+    attempt_epoch: u32,
+    created_at_ms: u64,
+    status: RedriveRequestStatus,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(dead_code)] // Pending/RejectedDuplicate/RejectedTerminal are part of the schema contract
+enum RedriveRequestStatus {
+    Pending,
+    Applied,
+    RejectedDuplicate,
+    RejectedTerminal,
 }
 
 #[derive(Debug, Clone)]
@@ -239,6 +275,7 @@ impl SupervisorStore for InMemorySupervisorStore {
         idempotency_key: &str,
         kind: WaveKind,
         expected_total: u32,
+        slot_retry_budget: u32,
     ) -> SupervisorStoreResult<String> {
         let mut inner = self.lock()?;
         if inner.waves_by_key.contains_key(idempotency_key) {
@@ -249,6 +286,11 @@ impl SupervisorStore for InMemorySupervisorStore {
         if expected_total == 0 {
             return Err(SupervisorStoreError::InvalidTransition(
                 "expected_total must be > 0".to_string(),
+            ));
+        }
+        if slot_retry_budget > 2 {
+            return Err(SupervisorStoreError::InvalidTransition(
+                "slot_retry_budget must be 0..=2".to_string(),
             ));
         }
         let wave_id = format!("w-{}", inner.next_wave_seq + 1);
@@ -282,6 +324,9 @@ impl SupervisorStore for InMemorySupervisorStore {
             merged_to_events: false,
             salvage_merged: false,
             created_at: SystemTime::now(),
+            slot_retry_budget,
+            attempt_epoch: 0,
+            parent_wave_id: None,
             slots,
         };
         inner.waves_by_id.insert(wave_id.clone(), row);
@@ -296,11 +341,13 @@ impl SupervisorStore for InMemorySupervisorStore {
         idempotency_key: &str,
         kind: WaveKind,
         expected_total: u32,
+        slot_retry_budget: u32,
     ) -> SupervisorStoreResult<String> {
         // U3: enqueue is a placeholder until U4 wires
         // backpressure dispatch. The store still tracks the wave
         // so U4 can advance without re-introducing it.
-        let wave_id = self.register_wave(idempotency_key, kind, expected_total)?;
+        let wave_id =
+            self.register_wave(idempotency_key, kind, expected_total, slot_retry_budget)?;
         let mut inner = self.lock()?;
         inner.queue.push(wave_id.clone());
         Ok(wave_id)
@@ -898,6 +945,192 @@ impl SupervisorStore for InMemorySupervisorStore {
     }
 
     // ─────────────────────────────────────────────────────────────────
+    // 2026-07-25-005 plan U11: redrive API.
+    // ─────────────────────────────────────────────────────────────────
+
+    fn create_redrive_wave(
+        &self,
+        parent_wave_id: &str,
+        slots: Option<&[u32]>,
+    ) -> SupervisorStoreResult<RedriveResult> {
+        use std::time::UNIX_EPOCH;
+
+        // 1. Load parent wave — clone data we need so we can drop the borrow
+        let (parent_kind, attempt_epoch_base, parent_slot_retry_budget, target_slots) = {
+            let inner = self.lock()?;
+            let parent = inner
+                .waves_by_id
+                .get(parent_wave_id)
+                .ok_or_else(|| SupervisorStoreError::UnknownWave(parent_wave_id.to_string()))?;
+
+            // 2. Reject Done or Integrate parent
+            if matches!(parent.phase, WavePhase::Done | WavePhase::Integrate) {
+                return Err(SupervisorStoreError::InvalidTransition(
+                    "cannot redrive a wave in done or integrate phase".to_string(),
+                ));
+            }
+
+            // 3. Collect failed slots
+            let failed_slot_indices: Vec<u32> = parent
+                .slots
+                .iter()
+                .filter(|(_, s)| s.status == SlotStatus::Failed)
+                .map(|(idx, _)| *idx)
+                .collect();
+
+            if failed_slot_indices.is_empty() {
+                return Err(SupervisorStoreError::InvalidTransition(
+                    "no failed slots to redrive".to_string(),
+                ));
+            }
+
+            // 4. Apply explicit slots filter or default to all failed
+            let target: Vec<u32> = match slots {
+                Some(s) => {
+                    let requested: std::collections::HashSet<u32> = s.iter().cloned().collect();
+                    failed_slot_indices
+                        .into_iter()
+                        .filter(|i| requested.contains(i))
+                        .collect()
+                }
+                None => failed_slot_indices,
+            };
+
+            if target.is_empty() {
+                return Err(SupervisorStoreError::InvalidTransition(
+                    "none of the requested slots are failed".to_string(),
+                ));
+            }
+
+            (
+                parent.kind,
+                parent.attempt_epoch,
+                parent.slot_retry_budget,
+                target,
+            )
+        };
+
+        let attempt_epoch = attempt_epoch_base + 1;
+
+        // Re-acquire lock for state mutations
+        let mut inner = self.lock()?;
+
+        // 5. Check if a child wave already exists for this (parent, attempt_epoch).
+        //    This covers the idempotency case: the second redrive call should
+        //    find the child already created by the first call.
+        let existing_child_wave_id: Option<String> = inner
+            .waves_by_id
+            .values()
+            .find(|w| {
+                w.parent_wave_id.as_deref() == Some(parent_wave_id)
+                    && w.attempt_epoch == attempt_epoch
+            })
+            .map(|w| w.wave_id.clone());
+
+        if let Some(existing_id) = existing_child_wave_id {
+            // Idempotent hit: find the first redrive_request for this (parent, epoch)
+            // to get its id; return the existing child wave.
+            let req_id = inner
+                .redrive_requests
+                .values()
+                .find(|r| r.parent_wave_id == parent_wave_id && r.attempt_epoch == attempt_epoch)
+                .map(|r| r.id);
+            return Ok(RedriveResult {
+                redrive_request_id: req_id.unwrap_or(0),
+                child_wave_id: existing_id,
+                attempt_epoch,
+                parent_wave_id: parent_wave_id.to_string(),
+                slots: target_slots,
+            });
+        }
+
+        // 6. For each target slot: idempotency check / record in redrive_requests
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+
+        let mut redrive_request_id: Option<i64> = None;
+
+        for &slot_index in &target_slots {
+            let key = (parent_wave_id.to_string(), slot_index, attempt_epoch);
+            if let Some(existing) = inner.redrive_requests.get(&key) {
+                // Duplicate: use the existing request id
+                redrive_request_id.get_or_insert(existing.id);
+            } else {
+                // Insert new redrive request with status Applied
+                let id = inner.next_redrive_id;
+                inner.next_redrive_id += 1;
+                redrive_request_id.get_or_insert(id);
+                inner.redrive_requests.insert(
+                    key,
+                    RedriveRequestRow {
+                        id,
+                        parent_wave_id: parent_wave_id.to_string(),
+                        slot_index,
+                        attempt_epoch,
+                        created_at_ms: now_ms,
+                        status: RedriveRequestStatus::Applied,
+                    },
+                );
+            }
+        }
+
+        let redrive_request_id = redrive_request_id.unwrap();
+
+        // 7. Create child wave (register_wave equivalent)
+        let child_wave_id = format!("w-{}", inner.next_wave_seq + 1);
+        inner.next_wave_seq += 1;
+
+        let default_isolation = match parent_kind {
+            WaveKind::Exec | WaveKind::Fix => IsolationMode::Worktree,
+            WaveKind::Review => IsolationMode::SharedReadonly,
+        };
+
+        let mut child_slots = BTreeMap::new();
+        for (i, &_slot_index) in target_slots.iter().enumerate() {
+            child_slots.insert(
+                i as u32,
+                SlotRow {
+                    slot_index: i as u32,
+                    status: SlotStatus::Pending,
+                    isolation: default_isolation,
+                    resource: None,
+                    content_hash: None,
+                    event_count: None,
+                    failure_reason: None,
+                    terminal_evidence: None,
+                },
+            );
+        }
+
+        let row = WaveRow {
+            wave_id: child_wave_id.clone(),
+            kind: parent_kind,
+            expected_total: target_slots.len() as u32,
+            phase: WavePhase::Dispatch,
+            cancel_requested: false,
+            merged_to_events: false,
+            salvage_merged: false,
+            created_at: SystemTime::now(),
+            slot_retry_budget: parent_slot_retry_budget,
+            attempt_epoch,
+            parent_wave_id: Some(parent_wave_id.to_string()),
+            slots: child_slots,
+        };
+
+        inner.waves_by_id.insert(child_wave_id.clone(), row);
+
+        Ok(RedriveResult {
+            redrive_request_id,
+            child_wave_id,
+            attempt_epoch,
+            parent_wave_id: parent_wave_id.to_string(),
+            slots: target_slots,
+        })
+    }
+
+    // ─────────────────────────────────────────────────────────────────
     // 2026-07-24-003 plan U4: emission reservation state machine.
     //
     // The InMemory implementation serialises under the same
@@ -1206,7 +1439,7 @@ mod tests {
     fn u2_terminal_evidence_round_trip_and_conflict() {
         use crate::supervisor::TerminalEvidence;
         let s = store();
-        let wave = s.register_wave("k-ev", WaveKind::Review, 2).unwrap();
+        let wave = s.register_wave("k-ev", WaveKind::Review, 2, 1).unwrap();
         // Legacy: no evidence recorded yet → None.
         assert_eq!(s.slot_terminal_evidence(&wave, 0).unwrap(), None);
 
@@ -1244,7 +1477,7 @@ mod tests {
     fn register_wave_creates_expected_total_pending_slots() {
         let s = store();
         let wave = s
-            .register_wave("key-1", WaveKind::Exec, 4)
+            .register_wave("key-1", WaveKind::Exec, 4, 1)
             .expect("register_wave must succeed");
         let snapshot = s.fan_in_status(&wave).unwrap();
         assert_eq!(snapshot.expected_total, 4);
@@ -1256,15 +1489,15 @@ mod tests {
     #[test]
     fn duplicate_idempotency_key_is_rejected() {
         let s = store();
-        s.register_wave("dup", WaveKind::Exec, 2).unwrap();
-        let err = s.register_wave("dup", WaveKind::Fix, 1).unwrap_err();
+        s.register_wave("dup", WaveKind::Exec, 2, 1).unwrap();
+        let err = s.register_wave("dup", WaveKind::Fix, 1, 1).unwrap_err();
         assert!(matches!(err, SupervisorStoreError::DuplicateKey(_)));
     }
 
     #[test]
     fn worktree_isolation_blocks_dispatch_until_bound() {
         let s = store();
-        let wave = s.register_wave("k", WaveKind::Exec, 2).unwrap();
+        let wave = s.register_wave("k", WaveKind::Exec, 2, 1).unwrap();
         // No bindings yet: dispatch must yield None.
         let dispatched = s.try_dispatch_next(4).unwrap();
         assert!(
@@ -1290,7 +1523,7 @@ mod tests {
     #[test]
     fn shared_readonly_slots_dispatch_without_binding() {
         let s = store();
-        s.register_wave("rv", WaveKind::Review, 3).unwrap();
+        s.register_wave("rv", WaveKind::Review, 3, 1).unwrap();
         let (wave, idx) = s.try_dispatch_next(2).unwrap().unwrap();
         assert_eq!(idx, 0);
         let snap = s.fan_in_status(&wave).unwrap();
@@ -1306,7 +1539,7 @@ mod tests {
     #[test]
     fn slot_pending_dispatched_completed_lifecycle() {
         let s = store();
-        let wave = s.register_wave("kf", WaveKind::Exec, 2).unwrap();
+        let wave = s.register_wave("kf", WaveKind::Exec, 2, 1).unwrap();
         s.bind_worktree(
             &wave,
             0,
@@ -1347,7 +1580,7 @@ mod tests {
     fn record_slot_failure_with_in_flight_siblings_keeps_phase_collect() {
         let s = store();
         let wave = s
-            .register_wave("partial-fail-mem", WaveKind::Exec, 2)
+            .register_wave("partial-fail-mem", WaveKind::Exec, 2, 1)
             .unwrap();
         // Bind both slots so dispatch is allowed.
         s.bind_worktree(
@@ -1405,7 +1638,7 @@ mod tests {
     fn record_slot_failure_after_completed_is_rejected() {
         let s = store();
         let wave = s
-            .register_wave("u3-after-completed", WaveKind::Exec, 1)
+            .register_wave("u3-after-completed", WaveKind::Exec, 1, 1)
             .unwrap();
         s.bind_worktree(
             &wave,
@@ -1439,7 +1672,7 @@ mod tests {
     fn record_slot_failure_same_reason_after_failed_is_idempotent() {
         let s = store();
         let wave = s
-            .register_wave("u3-same-reason", WaveKind::Exec, 1)
+            .register_wave("u3-same-reason", WaveKind::Exec, 1, 1)
             .unwrap();
         s.bind_worktree(
             &wave,
@@ -1463,7 +1696,7 @@ mod tests {
     fn record_slot_failure_cancel_reason_lifts_to_cancelled_status() {
         let s = store();
         let wave = s
-            .register_wave("u3-cancel-wins", WaveKind::Exec, 1)
+            .register_wave("u3-cancel-wins", WaveKind::Exec, 1, 1)
             .unwrap();
         s.bind_worktree(
             &wave,
@@ -1508,7 +1741,7 @@ mod tests {
     fn record_slot_failure_cancel_after_completed_wins() {
         let s = store();
         let wave = s
-            .register_wave("u3-cancel-after-completed", WaveKind::Exec, 1)
+            .register_wave("u3-cancel-after-completed", WaveKind::Exec, 1, 1)
             .unwrap();
         s.bind_worktree(
             &wave,
@@ -1547,7 +1780,7 @@ mod tests {
     fn record_slot_failure_non_cancel_after_completed_still_rejected() {
         let s = store();
         let wave = s
-            .register_wave("u3-non-cancel-after-completed", WaveKind::Exec, 1)
+            .register_wave("u3-non-cancel-after-completed", WaveKind::Exec, 1, 1)
             .unwrap();
         s.bind_worktree(
             &wave,
@@ -1576,7 +1809,7 @@ mod tests {
     #[test]
     fn fan_in_complete_reaches_expected_total() {
         let s = store();
-        let wave = s.register_wave("fa", WaveKind::Exec, 2).unwrap();
+        let wave = s.register_wave("fa", WaveKind::Exec, 2, 1).unwrap();
         for idx in 0..2 {
             s.bind_worktree(
                 &wave,
@@ -1600,7 +1833,7 @@ mod tests {
     #[test]
     fn review_wave_shared_readonly_no_resource_emitted() {
         let s = store();
-        let wave = s.register_wave("rw", WaveKind::Review, 2).unwrap();
+        let wave = s.register_wave("rw", WaveKind::Review, 2, 1).unwrap();
         let resources = s.list_worktree_paths(&wave).unwrap();
         assert!(
             resources.is_empty(),
@@ -1611,7 +1844,7 @@ mod tests {
     #[test]
     fn cancel_marks_pending_and_running_as_cancelled() {
         let s = store();
-        let wave = s.register_wave("cx", WaveKind::Exec, 2).unwrap();
+        let wave = s.register_wave("cx", WaveKind::Exec, 2, 1).unwrap();
         s.bind_worktree(
             &wave,
             0,
@@ -1643,7 +1876,7 @@ mod tests {
     fn u5_cancel_freezes_never_started_reason() {
         use crate::supervisor::worker_outcome::{REASON_SLOT_NEVER_STARTED, REASON_WORKER_TIMEOUT};
         let s = store();
-        let wave = s.register_wave("u5-cancel", WaveKind::Exec, 3).unwrap();
+        let wave = s.register_wave("u5-cancel", WaveKind::Exec, 3, 1).unwrap();
         for i in 0..3u32 {
             s.bind_worktree(
                 &wave,
@@ -1695,7 +1928,7 @@ mod tests {
     #[test]
     fn mark_merge_to_events_is_idempotent() {
         let s = store();
-        let wave = s.register_wave("me", WaveKind::Review, 1).unwrap();
+        let wave = s.register_wave("me", WaveKind::Review, 1, 1).unwrap();
         s.mark_merge_to_events(&wave).unwrap();
         s.mark_merge_to_events(&wave).unwrap();
         let snap = s.fan_in_status(&wave).unwrap();
@@ -1712,7 +1945,7 @@ mod tests {
     fn bind_worktree_rebind_cleans_up_prior_path() {
         super::cleanup_calls_reset();
         let s = store();
-        let wave = s.register_wave("rebind", WaveKind::Exec, 1).unwrap();
+        let wave = s.register_wave("rebind", WaveKind::Exec, 1, 1).unwrap();
         s.bind_worktree(
             &wave,
             0,
@@ -1749,7 +1982,7 @@ mod tests {
     fn bind_worktree_fresh_does_not_call_cleanup() {
         super::cleanup_calls_reset();
         let s = store();
-        let wave = s.register_wave("fresh", WaveKind::Exec, 1).unwrap();
+        let wave = s.register_wave("fresh", WaveKind::Exec, 1, 1).unwrap();
         s.bind_worktree(
             &wave,
             0,
@@ -1771,7 +2004,7 @@ mod tests {
     fn bind_worktree_rebind_to_same_path_is_idempotent() {
         super::cleanup_calls_reset();
         let s = store();
-        let wave = s.register_wave("idem", WaveKind::Exec, 1).unwrap();
+        let wave = s.register_wave("idem", WaveKind::Exec, 1, 1).unwrap();
         let binding = SlotResource {
             slot_index: 0,
             worktree_path: Some(".ralph/same/0".to_string()),

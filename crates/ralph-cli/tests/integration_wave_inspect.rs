@@ -395,6 +395,7 @@ fn inspect_active_and_terminal_wave_shapes() {
             "inspect-active-key",
             ralph_core::supervisor::WaveKind::Review,
             3,
+            1,
         )
         .expect("register");
 

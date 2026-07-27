@@ -246,6 +246,75 @@ ralph wave inspect <WAVE_ID> [--output json|text]
 - 响应不含 `db_path` / `events_file` / `pid` / `payload` / ticket 字段——agent 不应需要这些内部细节。
 - 重复调用同一 `wave_id` 是幂等的。
 
+### `ralph wave redrive`
+
+操作员恢复命令：为已关闭 wave 中失败的具体 slot 创建子 attempt wave（继承父 wave 的 `kind` 和 `slot_retry_budget`，`attempt_epoch` 加 1）。仅限 operator 在 loop 外使用；agent 无权调用。
+
+**语法：**
+```bash
+ralph wave redrive --wave-id <PARENT_WAVE_ID> [--slots <INDEX,INDEX,...>] [--output text|json]
+```
+
+**参数：**
+
+| 参数 | 类型 | 必需 | 默认值 | 说明 |
+|------|------|------|--------|------|
+| `--wave-id` | string | 是 | — | 要 redrive 的父 wave 的公开 wave id |
+| `--slots` | string | 否 | 所有 failed 槽 | 逗号分隔的 slot 索引列表（如 `0,2,5`）；省略时自动 redrive 所有 failed 槽 |
+| `--output` | enum | 否 | `text` | `text`（人类可读）或 `json`（agent-stable 结构） |
+| `-c` | path | 否 | — | 显式指定 `ralph.yml` 配置文件路径 |
+
+**输出（text 模式）：**
+```
+ok
+parent_wave_id: <id>
+child_wave_id: <id>
+attempt_epoch: <N>
+slots: [<indices>]
+```
+
+**输出（JSON 模式）：**
+```json
+{
+  "ok": true,
+  "parent_wave_id": "<id>",
+  "child_wave_id": "<id>",
+  "attempt_epoch": <N>,
+  "slots": [<indices>],
+  "redrive_request_id": "<opaque>"
+}
+```
+
+**语义：**
+
+- 创建的子 wave 继承父 wave 的 `kind` 与 `slot_retry_budget`，`attempt_epoch = parent.attempt_epoch + 1`。
+- 幂等：同一 `(parent wave_id, slot index, epoch)` 三元组重复调用返回已有子 wave，不创建重复。
+- **不重写旧 wave ledger**：父 wave 的 `done` / `failed` 记录保持不变，子 wave 是独立新增的 store 行。
+- **不触发新业务事件**：redrive 本身只写 store 元数据，不 emit `*.unit.ready` / `work.ready` 等业务事件。
+- **FlowStepScope 仍生效**：redrive 是纯 operator 维护命令，不绕过任何 scope 检查；后续 agent 进程中 hand-patched `exec.unit.done` 事件仍被 FlowStepScope 拒绝。
+
+**拒绝情形：**
+
+| 情形 | 响应 |
+|------|------|
+| 父 wave phase 为 `done` | `error: cannot redrive a wave in phase 'done'` |
+| 父 wave phase 为 `integrate` | `error: cannot redrive a wave in phase 'integrate'` |
+| 所有 slot 均非 failed 状态 | `error: no failed slots to redrive` |
+| `wave_id` 不存在于 store | `error: unknown wave '<id>'` |
+| supervisor store 不可用 | `error: supervisor store not found` 或 `error: failed to open supervisor store` |
+
+**适用场景：**
+
+- Operator 手动介入恢复：某个 wave 的部分 slot 在上游执行器崩溃后处于 `failed` 状态，但 wave 已进入终态。
+- Operator 用 `ralph wave inspect <wave_id>` 确认 phase 为 `done`/`failed` 且 `failed_count > 0` 后，针对具体失败 slot 调用 redrive。
+- Redrive 创建的子 wave 由 dispatcher 自动调度，与普通 wave 一样走 `wave dispatch` → `wave collect` → `wave integrate` 流程。
+
+**不适用场景：**
+
+- ❌ 不要对仍在 `dispatch` / `collect` / `integrate` 阶段的 live wave 调用 redrive（phase 校验会拒绝）。
+- ❌ 不要用 redrive 绕过 FlowStepScope——hand-patched `exec.unit.done` 等业务事件仍被 scope 拒绝，redrive 只解决"slot 需要重新调度"的问题，不解决"事件语义校验"问题。
+- ❌ Agent 不应调用此命令——它是 operator 手动干预工具，不是常规工作流的一部分。
+
 ### 写隔离
 
 `isolation_mode=worktree` 时 runtime 为每个 slot 提供隔离 cwd；agent 不应自行创建 / 删除 worktree。默认（未声明 `isolation_mode`）所有 worker 共享当前 workspace，与原 wave 行为一致。

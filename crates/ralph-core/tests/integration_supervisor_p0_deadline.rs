@@ -96,8 +96,8 @@ fn memory_and_rusqlite_record_consistent_wave_shape() {
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
     let sql = RusqliteSupervisorStore::open(&path).unwrap();
 
-    let mem_id = mem.register_wave("parity", WaveKind::Exec, 3).unwrap();
-    let sql_id = sql.register_wave("parity", WaveKind::Exec, 3).unwrap();
+    let mem_id = mem.register_wave("parity", WaveKind::Exec, 3, 1).unwrap();
+    let sql_id = sql.register_wave("parity", WaveKind::Exec, 3, 1).unwrap();
 
     // 2026-07-23-004 U6: both stores allocate distinct
     // `w-{seq}` ids; we do NOT require identical values (the

@@ -25,8 +25,14 @@ mod imp {
     /// pre-fix `SELECT COUNT(*) + 1 FROM waves` allocator.
     /// U4 (2026-07-24-003) bump: `wave_emissions` reservation
     /// table backs the CLI emission state machine.
+    /// v6 (2026-07-25-005 plan U2) adds `attempt_count` /
+    /// `max_attempts` on `wave_slots` and `attempt_epoch` /
+    /// `parent_wave_id` / `slot_retry_budget` /
+    /// `published_failure_payload` on `waves`.
+    /// v7 (2026-07-25-005 plan U4) adds `redrive_requests`
+    /// idempotency ledger.
     #[allow(dead_code)] // pinned by `migrations_idempotent_across_reopen`; production writes via pragma_update
-    pub const CURRENT_VERSION: i64 = 5;
+    pub const CURRENT_VERSION: i64 = 7;
 
     /// Apply migrations sequentially. Each migration is a
     /// closure that performs the SQL DDL and bumps the
@@ -171,6 +177,48 @@ mod imp {
             "salvage_merged",
             "ALTER TABLE waves ADD COLUMN salvage_merged INTEGER NOT NULL DEFAULT 0",
         )];
+        /// 2026-07-25-005 plan U2: slot attempt/retry model.
+        /// Adds `attempt_count` / `max_attempts` to `wave_slots` and
+        /// `attempt_epoch` / `parent_wave_id` / `slot_retry_budget` /
+        /// `published_failure_payload` to `waves`. Each column gets its
+        /// own ALTER so the column-probe skips only columns already
+        /// present from a prior migration run on a concurrent opener.
+        const V6_PROBE: &[(
+            /* table */ &str,
+            /* column */ &str,
+            /* ddl */ &str,
+        )] = &[
+            (
+                "wave_slots",
+                "attempt_count",
+                "ALTER TABLE wave_slots ADD COLUMN attempt_count INTEGER NOT NULL DEFAULT 0",
+            ),
+            (
+                "wave_slots",
+                "max_attempts",
+                "ALTER TABLE wave_slots ADD COLUMN max_attempts INTEGER",
+            ),
+            (
+                "waves",
+                "attempt_epoch",
+                "ALTER TABLE waves ADD COLUMN attempt_epoch INTEGER NOT NULL DEFAULT 0",
+            ),
+            (
+                "waves",
+                "parent_wave_id",
+                "ALTER TABLE waves ADD COLUMN parent_wave_id TEXT",
+            ),
+            (
+                "waves",
+                "slot_retry_budget",
+                "ALTER TABLE waves ADD COLUMN slot_retry_budget INTEGER NOT NULL DEFAULT 1",
+            ),
+            (
+                "waves",
+                "published_failure_payload",
+                "ALTER TABLE waves ADD COLUMN published_failure_payload INTEGER NOT NULL DEFAULT 0",
+            ),
+        ];
         &[
             Migration {
                 version: 1,
@@ -196,6 +244,16 @@ mod imp {
                 version: 5,
                 ddl: include_str!("migrations/v5.sql"),
                 column_probe: Some(V5_PROBE),
+            },
+            Migration {
+                version: 6,
+                ddl: include_str!("migrations/v6.sql"),
+                column_probe: Some(V6_PROBE),
+            },
+            Migration {
+                version: 7,
+                ddl: include_str!("migrations/v7.sql"),
+                column_probe: None,
             },
         ]
     }
@@ -260,6 +318,9 @@ mod tests {
             // existence so a future DDL drop would surface
             // before runtime.
             "wave_id_seq",
+            // U7 (2026-07-25-005 plan U4): idempotent redrive
+            // request ledger.
+            "redrive_requests",
         ];
         for table in tables {
             let count: i64 = conn

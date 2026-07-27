@@ -47,6 +47,13 @@ pub enum WaveCommands {
     /// Pair with `ralph wave emit` for the OPAC Apply/Confirm loop.
     /// Read-only — never mutates the store, events JSONL, or tickets.
     Inspect(WaveInspectArgs),
+    /// 2026-07-25-005 plan U11: create a redrive child wave for a
+    /// parent wave with failed slots. The child inherits the parent's
+    /// `kind` and `slot_retry_budget` and carries `attempt_epoch + 1`.
+    /// Idempotent: calling with the same (parent, slot, epoch) triple
+    /// returns the existing child wave without creating duplicates.
+    /// Bypasses `FlowStepScope` because it emits no business events.
+    Redrive(WaveRedriveArgs),
 }
 
 /// Arguments for `ralph wave inspect`.
@@ -59,6 +66,34 @@ pub struct WaveInspectArgs {
     /// Output format: `text` (default) or `json` (agent-stable shape).
     #[arg(long, value_enum, default_value_t = WaveOutputFormat::Text)]
     pub output: WaveOutputFormat,
+}
+
+/// Arguments for `ralph wave redrive`.
+#[derive(Parser, Debug)]
+pub struct WaveRedriveArgs {
+    /// Public wave id of the parent wave to redrive.
+    #[arg(long = "wave-id", short = 'w', value_name = "ID")]
+    pub wave_id: String,
+
+    /// Optional comma-separated list of slot indices to redrive.
+    /// If absent, all failed slots are redriven.
+    #[arg(long = "slots", value_delimiter = ',')]
+    pub slots: Option<Vec<u32>>,
+
+    /// Output format: `text` (default) or `json`.
+    #[arg(long = "output", value_enum, default_value_t = WaveRedriveOutputFormat::Text)]
+    pub output: WaveRedriveOutputFormat,
+
+    /// Explicit path to a `ralph.yml` config file.
+    #[arg(long = "config", short = 'c', value_name = "CONFIG", global = true)]
+    pub config: Vec<String>,
+}
+
+/// Output format for `ralph wave redrive`.
+#[derive(clap::ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WaveRedriveOutputFormat {
+    Text,
+    Json,
 }
 
 /// Arguments for `ralph wave verify`.
@@ -186,6 +221,7 @@ pub fn execute(args: WaveArgs, use_colors: bool) -> Result<()> {
         WaveCommands::Emit(emit_args) => execute_emit(emit_args, use_colors),
         WaveCommands::Verify(verify_args) => execute_verify(verify_args),
         WaveCommands::Inspect(inspect_args) => execute_inspect(inspect_args),
+        WaveCommands::Redrive(redrive_args) => execute_redrive(redrive_args),
     }
 }
 
@@ -327,6 +363,123 @@ fn emit_view(view: WaveInspectView, output: WaveOutputFormat) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// Execute `ralph wave redrive` — create a child attempt wave for a
+/// parent wave with failed slots.
+///
+/// The function opens the supervisor store, calls `create_redrive_wave`,
+/// and emits the result in the requested output format.
+///
+/// No FlowStepScope check is performed: redrive is an operator-only
+/// maintenance command that emits no business events.
+fn execute_redrive(args: WaveRedriveArgs) -> Result<()> {
+    let wave_id = args.wave_id.trim().to_string();
+    if wave_id.is_empty() {
+        bail!("ralph wave redrive: --wave-id must not be empty");
+    }
+
+    let store_path = std::env::var("RALPH_EMISSION_STORE_PATH")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| std::path::PathBuf::from(".ralph/supervisor.db"));
+
+    #[cfg(feature = "supervisor-db")]
+    {
+        // No store on disk → cannot redrive.
+        if !store_path.exists() {
+            if matches!(args.output, WaveRedriveOutputFormat::Json) {
+                let payload = serde_json::json!({
+                    "ok": false,
+                    "error": "supervisor store not found",
+                    "hint": "RALPH_EMISSION_STORE_PATH is not set and .ralph/supervisor.db does not exist",
+                });
+                println!("{}", serde_json::to_string(&payload)?);
+            } else {
+                println!("error: supervisor store not found");
+                println!(
+                    "hint: set RALPH_EMISSION_STORE_PATH or ensure .ralph/supervisor.db exists"
+                );
+            }
+            anyhow::bail!("supervisor store not available");
+        }
+
+        let store = match ralph_core::supervisor::RusqliteSupervisorStore::open(&store_path) {
+            Ok(s) => s,
+            Err(err) => {
+                if matches!(args.output, WaveRedriveOutputFormat::Json) {
+                    let payload = serde_json::json!({
+                        "ok": false,
+                        "error": "failed to open supervisor store",
+                        "detail": ralph_core::supervisor::sanitize_unavailable_reason(&err.to_string()),
+                    });
+                    println!("{}", serde_json::to_string(&payload)?);
+                } else {
+                    println!("error: failed to open supervisor store: {}", err);
+                }
+                anyhow::bail!("store open failed");
+            }
+        };
+
+        let slots_ref: Option<&[u32]> = args.slots.as_deref();
+        let result = store.create_redrive_wave(&wave_id, slots_ref);
+
+        match result {
+            Ok(redrive) => {
+                match args.output {
+                    WaveRedriveOutputFormat::Text => {
+                        println!("ok");
+                        println!("parent_wave_id: {}", redrive.parent_wave_id);
+                        println!("child_wave_id: {}", redrive.child_wave_id);
+                        println!("attempt_epoch: {}", redrive.attempt_epoch);
+                        println!("slots: {:?}", redrive.slots);
+                    }
+                    WaveRedriveOutputFormat::Json => {
+                        let payload = serde_json::json!({
+                            "ok": true,
+                            "parent_wave_id": redrive.parent_wave_id,
+                            "child_wave_id": redrive.child_wave_id,
+                            "attempt_epoch": redrive.attempt_epoch,
+                            "slots": redrive.slots,
+                            "redrive_request_id": redrive.redrive_request_id,
+                        });
+                        println!("{}", serde_json::to_string(&payload)?);
+                    }
+                }
+                Ok(())
+            }
+            Err(err) => {
+                if matches!(args.output, WaveRedriveOutputFormat::Json) {
+                    let payload = serde_json::json!({
+                        "ok": false,
+                        "error": err.to_string(),
+                    });
+                    println!("{}", serde_json::to_string(&payload)?);
+                } else {
+                    println!("error: {}", err);
+                }
+                Err(err.into())
+            }
+        }
+    }
+
+    #[cfg(not(feature = "supervisor-db"))]
+    {
+        let _ = (wave_id, args.slots, args.output, store_path);
+        if matches!(args.output, WaveRedriveOutputFormat::Json) {
+            println!(
+                "{}",
+                serde_json::json!({
+                    "ok": false,
+                    "error": "supervisor-db feature not compiled in this build",
+                })
+            );
+        } else {
+            println!("error: supervisor-db feature not compiled in this build");
+        }
+        anyhow::bail!("supervisor-db feature not available")
+    }
 }
 
 /// Serializable view of the inspection result. Both human and JSON

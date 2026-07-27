@@ -95,3 +95,12 @@ scripts/check-cli-doc-drift.sh --strict
 ## Lint 失败时 review 行为
 
 机械 lint 失败时 **仍继续** AAF 评审；Executive Summary 须标注 lint 通过/失败及 Error 计数。
+
+## Wave 子命令
+
+| 命令 | 说明 |
+|------|------|
+| `ralph wave emit <TOPIC> --payloads-stdin` | 将多个 payload 作为 wave 事件发射；必须先 `wave verify` 再 `emit` |
+| `ralph wave verify <TOPIC> --payloads-stdin` | OPAC Precheck：校验 payload 符合 event policy，写入一次性 ticket |
+| `ralph wave inspect <WAVE_ID>` | 公开只读 Confirm：查询 wave 在 supervisor store 的登记状态（phase / counts） |
+| `ralph wave redrive --wave-id <ID> [--slots <LIST>]` | 为已关闭 wave 的失败 slot 创建子 attempt wave；仅限 operator 在 loop 外手动干预 |
