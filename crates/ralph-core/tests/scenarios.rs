@@ -572,10 +572,11 @@ fn bdd_append_supervisor_event(
 /// Contract:
 /// - Called AFTER `process_events_from_jsonl` so accepted events are visible.
 /// - Accumulates `*.unit.done` slots across iterations under `waves`.
-/// - Registers with `expected_slots` (not `slots.len()`) so partial
-///   waves stay Collect until complete or `force_terminal`.
-/// - Ticks only when `slots.len() >= expected_slots`, or when
-///   `force_terminal` is set and at least one slot arrived.
+/// - Registers with `expected_slots` when provided so partial waves
+///   stay Collect until complete or `force_terminal`.
+/// - When `expected_slots` is `None` (legacy scenarios without
+///   `supervisor_fan_in`), ticks with the accumulated slot count —
+///   matching pre-2026-07-27 auto behavior for 1-slot pins like U13.
 /// - On `force_terminal=timeout`: cancel + never-started + salvage +
 ///   elapsed > aggregate_timeout, then tick → InjectedFailed.
 /// - Review payloads carry `completed_dimensions` / `missing_dimensions`.
@@ -584,7 +585,7 @@ fn run_bdd_supervisor_fan_in(
     bridge: &InMemoryCoordinatorBridge,
     accepted_events: &[ralph_proto::Event],
     aggregate_timeout_secs: u64,
-    expected_slots: u32,
+    expected_slots: Option<u32>,
     force_terminal: bool,
     min_slots_before_force: u32,
     waves: &mut std::collections::HashMap<String, Vec<(u32, String, usize, Option<String>)>>,
@@ -639,7 +640,13 @@ fn run_bdd_supervisor_fan_in(
         return 0;
     }
 
-    let expected_slots = expected_slots.max(1);
+    // `None` → auto: tick with the largest accumulated slot count this
+    // call (legacy 1-slot pins). `Some(n)` → wait until n slots arrive
+    // (or force_terminal). Never default to max_concurrent_workers —
+    // that silently stalls fixtures whose slot count < worker cap.
+    let expected_slots = expected_slots
+        .unwrap_or_else(|| (waves.values().map(|s| s.len()).max().unwrap_or(1) as u32).max(1))
+        .max(1);
     let mut injected = 0usize;
     for (wave_id, slots) in waves.iter_mut() {
         let kind = wave_kind.remove(wave_id).unwrap_or_else(|| {
@@ -966,7 +973,6 @@ fn run_scenario_with_snapshots(
         )
     };
     let supervisor_aggregate_timeout_secs = config.event_loop.supervisor.aggregate_timeout_secs;
-    let supervisor_max_workers = config.event_loop.supervisor.max_concurrent_workers.max(1);
     let supervisor_bridge: Option<InMemoryCoordinatorBridge> = if supervisor_path_enabled {
         let store: Arc<dyn SupervisorStore> = Arc::new(InMemorySupervisorStore::new());
         Some(InMemoryCoordinatorBridge::from_store(store))
@@ -1024,8 +1030,7 @@ fn run_scenario_with_snapshots(
     let bdd_expected_slots = yaml
         .supervisor_fan_in
         .as_ref()
-        .and_then(|s| s.expected_slots)
-        .unwrap_or(supervisor_max_workers);
+        .and_then(|s| s.expected_slots);
     let bdd_force_terminal = yaml
         .supervisor_fan_in
         .as_ref()
