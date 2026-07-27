@@ -869,6 +869,69 @@ pub enum SlotTerminalOutcome {
     Idempotent,
 }
 
+// ─────────────────────────────────────────────────────────────────
+// 2026-07-27-004 plan U4 (R11-R16 / D5-D6): bounded redrive
+// activation descriptor. The dispatcher registers a snapshot
+// of the worker's ready event (topic, payload, slot index, kind,
+// payload digest) at spawn time so a `ralph run --resume` cycle
+// can re-execute the slot WITHOUT reading the main event log
+// (which may already be rotated / salvaged) and WITHOUT forcing
+// the operator to re-enter the payload.
+// ─────────────────────────────────────────────────────────────────
+
+/// 2026-07-27-004 plan U4 (R11): bounded activation descriptor
+/// for one slot of a redrive child wave. The persisted shape is
+/// the minimum needed for a worker to resume; it does NOT
+/// include the agent stdout, the prompt, or any credentials.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SlotDescriptor {
+    /// The slot index this descriptor is bound to.
+    pub slot_index: u32,
+    /// The ready event topic the dispatcher emitted
+    /// (e.g. `exec.unit.ready`).
+    pub topic: String,
+    /// The original ready event payload as JSON. Capped at
+    /// the canonical `events.jsonl` line size (mirrors the
+    /// existing payload size limit).
+    pub payload_json: String,
+    /// The wave kind the original wave was registered with.
+    /// `Fix` and `Review` waves must redrive into the same kind.
+    pub wave_kind: WaveKind,
+    /// SHA-256 fingerprint of `payload_json` so consumers can
+    /// detect drift between the persisted descriptor and the
+    /// runtime's re-derived ready event. Mismatch is
+    /// `descriptor_conflict` (S13).
+    pub payload_digest: String,
+}
+
+impl SlotDescriptor {
+    /// Compute the canonical payload digest from a payload string.
+    pub fn digest_of(payload: &str) -> String {
+        fingerprint_payload(payload)
+    }
+}
+
+/// 2026-07-27-004 plan U4 (R16 / S13): reasons a redrive can
+/// be refused. The CLI surfaces this verbatim so the operator
+/// sees an actionable stop reason.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RedriveTakeOutcome {
+    /// A dispatchable child descriptor was returned; the
+    /// supervisor will dispatch a worker when `ralph run
+    /// --resume` runs.
+    Dispatchable { descriptor: SlotDescriptor },
+    /// The parent wave is registered but the activation
+    /// descriptor for this slot was never persisted (legacy
+    /// pre-U4 row) or its digest does not match the runtime
+    /// payload. Fail-closed: the worker MUST NOT be spawned.
+    DescriptorUnavailable,
+    /// The slot's persisted descriptor has a different
+    /// payload digest than the runtime's re-derived ready
+    /// event — a strict fail-close to prevent silently
+    /// re-executing a stale activation.
+    DescriptorConflict,
+}
+
 /// 2026-07-27-004 plan U3 (R8 / S7): the supervisor persistence
 /// + dispatch-decision trait. Both the
 /// in-memory (U3/U4) and rusqlite (U5) implementations satisfy this
@@ -1375,6 +1438,52 @@ pub trait SupervisorStore: fmt::Debug + Send + Sync {
         slots: Option<&[u32]>,
     ) -> SupervisorStoreResult<RedriveResult>;
 
+    /// 2026-07-27-004 plan U4 (R11 / R12 / R14): persist the
+    /// bounded activation descriptor for a slot AT
+    /// `register_wave` / `bind_slot` time. The descriptor is
+    /// the SOLE input `ralph run --resume` consumes to
+    /// dispatch a redrive child worker; agents do not get to
+    /// re-enter the ready payload. The default impl is a
+    /// `Ok(())` so existing callers compile; production
+    /// stores MUST override it so a redrive can be executed
+    /// after a process restart (R14 / S11).
+    fn persist_slot_descriptor(
+        &self,
+        _wave_id: &str,
+        _descriptor: &SlotDescriptor,
+    ) -> SupervisorStoreResult<()> {
+        Ok(())
+    }
+
+    /// 2026-07-27-004 plan U4 (R14 / S11 / S13): for a redrive
+    /// CHILD wave, return the dispatchable descriptor for the
+    /// given `slot_index`. The `ralph run --resume` startup
+    /// seam iterates over pending child slots and calls this
+    /// to decide whether a worker can be spawned.
+    ///
+    /// - `RedriveTakeOutcome::Dispatchable` — the descriptor
+    ///   is bound and matches the runtime's digest; a worker
+    ///   may be dispatched.
+    /// - `RedriveTakeOutcome::DescriptorUnavailable` — no
+    ///   persisted descriptor exists for this slot
+    ///   (legacy pre-U4 row). Fail-closed.
+    /// - `RedriveTakeOutcome::DescriptorConflict` — the
+    ///   descriptor's `payload_digest` disagrees with the
+    ///   runtime payload. Fail-closed to prevent silent
+    ///   drift.
+    ///
+    /// Default impl returns `DescriptorUnavailable` so a
+    /// production store without U4 support signals an
+    /// unexecutable redrive; production stores MUST override.
+    fn take_dispatchable_redrive_descriptor(
+        &self,
+        _child_wave_id: &str,
+        _slot_index: u32,
+        _expected_digest: &str,
+    ) -> SupervisorStoreResult<RedriveTakeOutcome> {
+        Ok(RedriveTakeOutcome::DescriptorUnavailable)
+    }
+
     // ─────────────────────────────────────────────────────────────────
     // 2026-07-24-003 plan U4: emission reservation API.
     //
@@ -1548,6 +1657,11 @@ mod u1_public_id_tests;
 /// existing tests compile unchanged.
 #[cfg(test)]
 mod u3_atomic_terminal_tests;
+/// 2026-07-27-004 plan U4 (R11-R16 / D5 / D6): bounded redrive
+/// activation descriptor. Tests exercise persistence + take +
+/// fail-closed digest mismatch + unknown-wave rejection.
+#[cfg(test)]
+mod u4_descriptor_tests;
 pub mod worker_outcome;
 pub mod worktree_bind;
 

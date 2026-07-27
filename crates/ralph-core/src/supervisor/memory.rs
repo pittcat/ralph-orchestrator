@@ -21,8 +21,9 @@ use super::ProjectionKind;
 use super::{
     CompensationKind, CoordinationReceiptSummary, DispatchOutcome, EmissionReservation,
     EmissionState, IdempotencyKey, IsolationMode, ProjectionReceiptSummary, RedriveResult,
-    SlotResource, SlotStatus, SupervisorStore, SupervisorStoreError, SupervisorStoreResult,
-    WaveDeliveryState, WaveId, WaveKind, WavePhase, WaveSnapshot,
+    RedriveTakeOutcome, SlotDescriptor, SlotResource, SlotStatus, SupervisorStore,
+    SupervisorStoreError, SupervisorStoreResult, WaveDeliveryState, WaveId, WaveKind, WavePhase,
+    WaveSnapshot,
 };
 
 /// Per-wave descriptor held in `InMemorySupervisorStore::waves`.
@@ -152,6 +153,14 @@ struct Inner {
     redrive_requests: HashMap<(String, u32, u32), RedriveRequestRow>,
     /// Autoincrement id for redrive_requests.
     next_redrive_id: i64,
+    /// 2026-07-27-004 plan U4 (R11 / R14): bounded activation
+    /// descriptors by `(wave_id, slot_index)`. The dispatcher
+    /// writes a snapshot of the ready event topic + payload +
+    /// digest at registration time; `ralph run --resume`
+    /// consumes the same descriptor to spawn a worker through
+    /// the existing dispatcher seam (no parallel hot path,
+    /// no fabricated events).
+    slot_descriptors: HashMap<(String, u32), SlotDescriptor>,
 }
 
 /// 2026-07-24-003 plan U4: in-memory emission reservation row.
@@ -1410,6 +1419,58 @@ impl SupervisorStore for InMemorySupervisorStore {
             attempt_epoch,
             parent_wave_id: parent_wave_id.to_string(),
             slots: target_slots,
+        })
+    }
+
+    /// 2026-07-27-004 plan U4 (R11 / R14 / S11): persist the
+    /// bounded activation descriptor for a slot. The in-memory
+    /// store holds descriptors in `slot_descriptors`, keyed by
+    /// `(wave_id, slot_index)`. The mutation is idempotent at
+    /// the API level so a re-registration does not flip state.
+    fn persist_slot_descriptor(
+        &self,
+        wave_id: &str,
+        descriptor: &SlotDescriptor,
+    ) -> SupervisorStoreResult<()> {
+        let mut inner = self.lock()?;
+        // R16 / S11: the wave must exist. A descriptor for a
+        // never-registered wave is a programming error — fail
+        // closed so the operator can spot the misrouted register
+        // before any redrive is attempted.
+        if !inner.waves_by_id.contains_key(wave_id) {
+            return Err(SupervisorStoreError::UnknownWave(wave_id.to_string()));
+        }
+        inner.slot_descriptors.insert(
+            (wave_id.to_string(), descriptor.slot_index),
+            descriptor.clone(),
+        );
+        Ok(())
+    }
+
+    fn take_dispatchable_redrive_descriptor(
+        &self,
+        child_wave_id: &str,
+        slot_index: u32,
+        expected_digest: &str,
+    ) -> SupervisorStoreResult<RedriveTakeOutcome> {
+        let inner = self.lock()?;
+        let key = (child_wave_id.to_string(), slot_index);
+        let Some(descriptor) = inner.slot_descriptors.get(&key) else {
+            // R16 / S13: no persisted descriptor (legacy pre-U4
+            // row). Fail-closed.
+            return Ok(RedriveTakeOutcome::DescriptorUnavailable);
+        };
+        // R16 / S13: digest mismatch is a strict fail-close. The
+        // runtime has re-derived a payload whose fingerprint
+        // does not match the stored descriptor — that means
+        // somebody (an agent? a tooling script?) tampered with
+        // the activation contract. Refuse rather than silently
+        // re-execute a stale activation.
+        if descriptor.payload_digest != expected_digest {
+            return Ok(RedriveTakeOutcome::DescriptorConflict);
+        }
+        Ok(RedriveTakeOutcome::Dispatchable {
+            descriptor: descriptor.clone(),
         })
     }
 
