@@ -46,11 +46,10 @@
 # Dispatcher stop condition: after a successful `ralph wave emit`
 # (non-deduplicated), the dispatcher activation ends. The dispatcher
 # does NOT wait for slot completions, does NOT poll the store, and
-# does NOT use `task.resume` to redrive the wave. The Supervisor
-# fan-in path (via `run_supervisor_fan_in` in the dispatcher module)
+# does NOT use `task.resume` to redrive the wave. Runtime fan-in
 # converges to exactly one `review.wave.complete` (all 6 slots
 # completed) or one `review.wave.failed` (timeout / partial / cancel).
-# Those runtime coordination topics are injected by the dispatcher
+# Those runtime coordination topics are injected by the orchestrator
 # at the fan-in seam; they are NOT emitted by any agent hat.
 #
 # When `supervisor.enabled` is true the bridge still applies
@@ -70,10 +69,8 @@
 # `presets/manifest.yml` header for the rationale). Runtime coordination
 # topics (`review.wave.complete` / `review.wave.failed`) are documented for
 # the synthesizer / finalizer to read; their `field_docs` describe the
-# payload shape the runtime actually constructs (see
-# `crates/ralph-cli/src/loop_runner/wave/dispatcher.rs::build_wave_complete_payload`
-# / `build_wave_failed_payload`). Agents MUST NOT emit those topics; origin
-# guard rejects.
+# payload shape the runtime actually constructs. Agents MUST NOT emit
+# those topics; origin guard rejects.
 
 topic_format_whitelist:
   - LOOP_COMPLETE
@@ -402,11 +399,11 @@ event_loop:
         field_docs:
           wave_id:
             meaning: shared wave id that failed to aggregate
-            source: runtime (`build_wave_failed_payload`)
+            source: runtime (wave-failed coordination payload)
             fill_rule: literal copy
           missing_dimensions:
             meaning: dimensions that did NOT produce a review.unit.done before the wave's failure condition
-            source: runtime (`build_wave_failed_payload`)
+            source: runtime (wave-failed coordination payload)
             fill_rule: literal copy
           reason:
             meaning: >-
@@ -414,7 +411,7 @@ event_loop:
               cancelled / etc.). Per-worker budget is review-worker.timeout (900s);
               aggregate wave timeout follows runtime formula and surfaces here when
               slots are missing.
-            source: runtime (`build_wave_failed_payload`)
+            source: runtime (wave-failed coordination payload)
             fill_rule: literal copy
       review.synthesized:
         required_fields:
@@ -1842,11 +1839,10 @@ hats:
 
       When the trigger is `review.wave.failed`, the runtime injects
       `wave_id`, `missing_dimensions[]`, and `reason` — those are the
-      ONLY fields the runtime constructs (see
-      `crates/ralph-cli/src/loop_runner/wave/dispatcher.rs::build_wave_failed_payload`).
-      You do NOT receive scope identity or per-dimension artifacts from
-      the runtime; you WRITE the block artifact with what the runtime
-      gave you plus the scope manifest:
+      ONLY fields the runtime constructs (see this topic's schema
+      `field_docs`). You do NOT receive scope identity or per-dimension
+      artifacts from the runtime; you WRITE the block artifact with what
+      the runtime gave you plus the scope manifest:
 
       ```markdown
       ---

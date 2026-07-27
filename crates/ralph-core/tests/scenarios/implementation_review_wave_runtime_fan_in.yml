@@ -18,6 +18,9 @@
 name: implementation_review_wave_runtime_fan_in
 description: Six-slot wave success via real Supervisor fan-in (production seam proof)
 
+supervisor_fan_in:
+  expected_slots: 6
+
 config:
   prompt_file: PROMPT.md
   topic_format_whitelist:

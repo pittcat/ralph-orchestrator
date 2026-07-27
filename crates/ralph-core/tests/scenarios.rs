@@ -54,6 +54,31 @@ struct ScenarioYaml {
     /// `.ralph/agent/step-handoff/*.md` for step_handoff scenarios).
     #[serde(default)]
     fixture_files: Vec<FixtureFileYaml>,
+    /// 2026-07-27-001: optional supervisor fan-in controls for BDD
+    /// scenarios that exercise production `SupervisorCoordinator`
+    /// tick (expected slot total + optional forced terminal).
+    #[serde(default)]
+    supervisor_fan_in: Option<SupervisorFanInYaml>,
+}
+
+/// Controls how `run_bdd_supervisor_fan_in` registers and ticks waves.
+#[derive(Debug, Deserialize, Default, Clone)]
+struct SupervisorFanInYaml {
+    /// Slot count passed to `register_wave_if_absent`. When omitted,
+    /// defaults to `event_loop.supervisor.max_concurrent_workers`.
+    #[serde(default)]
+    expected_slots: Option<u32>,
+    /// When `"timeout"`, force a terminal coordinator tick even if
+    /// fewer than `expected_slots` have completed (cancel + elapsed
+    /// > aggregate_timeout). Used for partial/timeout production
+    /// fan-in proofs without wall-clock waits.
+    #[serde(default)]
+    force_terminal: Option<String>,
+    /// Minimum completed slots required before `force_terminal` fires.
+    /// Defaults to 1. Set to 2+ when the fixture intentionally
+    /// completes a subset before timeout.
+    #[serde(default)]
+    min_slots_before_force: Option<u32>,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -538,34 +563,31 @@ fn bdd_append_supervisor_event(
 }
 
 /// 2026-07-03-001 plan U10 / fix-plan U10 + Phase 6 BDD
-/// realization: drive the supervisor coordinator `tick` from the
-/// BDD scenario runner so the `*.wave.complete` coordination
-/// event is produced by the real `SupervisorCoordinator` (via
-/// `InMemoryCoordinatorBridge`) instead of being faked via a
-/// mock `system_injected` response in the YAML fixture.
+/// realization + 2026-07-27-001 terminal fan-in:
+/// drive the supervisor coordinator `tick` from the BDD scenario
+/// runner so `*.wave.complete` / `*.wave.failed` are produced by
+/// the real `SupervisorCoordinator` (via `InMemoryCoordinatorBridge`)
+/// instead of being faked via a mock `system_injected` response.
 ///
 /// Contract:
-/// - Called AFTER `process_events_from_jsonl` so the accepted
-///   events are visible to the bus.
-/// - Scans `accepted_events` for `exec.unit.done`, `fix.unit.done`,
-///   and `review.unit.done` events that carry `wave_id` + `slot_index`.
-/// - For each unique `wave_id`, calls `register_wave_if_absent`
-///   (idempotent), then `record_slot_result` for every slot in THIS call.
-/// - Uses a conservative `total_estimate = slots.len() + 5` for waves that
-///   arrive across multiple calls (e.g. one slot per iteration).
-/// - Calls `bridge.tick` with the configured `aggregate_timeout_secs`.
-///   On `InjectedComplete` / `InjectedFailed`, persists the
-///   coordination event so the next iteration picks it up.
-/// - On `AlreadyDone` / `ContinueCollect`, no-op.
-///
-/// Returns the count of `system_injected` events persisted so
-/// the caller can assert the supervisor path actually fired.
+/// - Called AFTER `process_events_from_jsonl` so accepted events are visible.
+/// - Accumulates `*.unit.done` slots across iterations under `waves`.
+/// - Registers with `expected_slots` (not `slots.len()`) so partial
+///   waves stay Collect until complete or `force_terminal`.
+/// - Ticks only when `slots.len() >= expected_slots`, or when
+///   `force_terminal` is set and at least one slot arrived.
+/// - On `force_terminal=timeout`: cancel + never-started + salvage +
+///   elapsed > aggregate_timeout, then tick → InjectedFailed.
+/// - Review payloads carry `completed_dimensions` / `missing_dimensions`.
 fn run_bdd_supervisor_fan_in(
     event_loop: &mut EventLoop,
     bridge: &InMemoryCoordinatorBridge,
     accepted_events: &[ralph_proto::Event],
     aggregate_timeout_secs: u64,
-    waves: &mut std::collections::HashMap<String, Vec<(u32, String, usize)>>,
+    expected_slots: u32,
+    force_terminal: bool,
+    min_slots_before_force: u32,
+    waves: &mut std::collections::HashMap<String, Vec<(u32, String, usize, Option<String>)>>,
     ticked_waves: &mut std::collections::HashSet<String>,
 ) -> usize {
     let mut wave_kind: std::collections::HashMap<String, WaveKind> =
@@ -595,6 +617,10 @@ fn run_bdd_supervisor_fan_in(
             .and_then(|v| v.as_str())
             .unwrap_or("bdd-hash")
             .to_string();
+        let dimension = payload
+            .get("dimension")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
         let kind = if is_fix_done {
             WaveKind::Fix
         } else if is_review_done {
@@ -603,29 +629,87 @@ fn run_bdd_supervisor_fan_in(
             WaveKind::Exec
         };
         wave_kind.insert(wave_id.to_string(), kind);
-        waves
-            .entry(wave_id.to_string())
-            .or_default()
-            .push((slot_index, content_hash, 1));
+        let entry = waves.entry(wave_id.to_string()).or_default();
+        if !entry.iter().any(|(idx, _, _, _)| *idx == slot_index) {
+            entry.push((slot_index, content_hash, 1, dimension));
+        }
     }
 
     if waves.is_empty() {
         return 0;
     }
 
+    let expected_slots = expected_slots.max(1);
     let mut injected = 0usize;
-    for (wave_id, slots) in waves {
-        let kind = wave_kind.remove(wave_id).unwrap_or(WaveKind::Exec);
-        let is_review = matches!(kind, ralph_core::supervisor::WaveKind::Review);
+    for (wave_id, slots) in waves.iter_mut() {
+        let kind = wave_kind.remove(wave_id).unwrap_or_else(|| {
+            // Kind may be missing on a force-terminal-only call with
+            // no new accepted events this iteration — infer Review
+            // when any slot carries a dimension.
+            if slots.iter().any(|(_, _, _, d)| d.is_some()) {
+                WaveKind::Review
+            } else {
+                WaveKind::Exec
+            }
+        });
+        let is_review = matches!(kind, WaveKind::Review);
 
-        // If we've already ticked this wave, skip it entirely.
-        // This prevents premature fan-in when slots arrive across multiple iterations.
         if ticked_waves.contains(wave_id) {
             continue;
         }
 
-        // Register the wave (idempotent - returns existing store_id if already registered).
-        let store_id = match bridge.register_wave_if_absent(kind, wave_id, slots.len() as u32) {
+        let ready = slots.len() as u32 >= expected_slots;
+        let force_now =
+            force_terminal && !ready && (slots.len() as u32) >= min_slots_before_force.max(1);
+        if !ready && !force_now {
+            // Still collecting — register early so total is correct, but
+            // do not tick until all slots arrive (or force_terminal).
+            let _ = bridge.register_wave_if_absent(kind, wave_id, expected_slots);
+            for (slot_index, content_hash, event_count, dimension) in slots.iter() {
+                if !is_review {
+                    use ralph_core::supervisor::SlotResource;
+                    let _ = bridge.store().bind_worktree(
+                        &bridge
+                            .register_wave_if_absent(kind, wave_id, expected_slots)
+                            .unwrap_or_else(|_| wave_id.clone()),
+                        *slot_index,
+                        SlotResource {
+                            slot_index: *slot_index,
+                            worktree_path: Some(format!(".ralph/bdd/{wave_id}/{slot_index}")),
+                            branch: Some(format!("ralph/bdd/{wave_id}/{slot_index}")),
+                        },
+                    );
+                    let _ = bridge.store().try_dispatch_next(64);
+                }
+                let store_id = match bridge.register_wave_if_absent(kind, wave_id, expected_slots) {
+                    Ok(id) => id,
+                    Err(_) => continue,
+                };
+                let _ =
+                    bridge.record_slot_result(&store_id, *slot_index, content_hash, *event_count);
+                let evidence_topic = match kind {
+                    WaveKind::Review => "review.unit.done",
+                    WaveKind::Fix => "fix.unit.done",
+                    WaveKind::Exec => "exec.unit.done",
+                };
+                let evidence_payload = match dimension {
+                    Some(dim) => format!(
+                        "{{\"slot_index\":{slot_index},\"dimension\":\"{dim}\",\"content_hash\":\"{content_hash}\"}}"
+                    ),
+                    None => format!(
+                        "{{\"slot_index\":{slot_index},\"content_hash\":\"{content_hash}\",\"event_count\":{event_count}}}"
+                    ),
+                };
+                let _ = bridge.store().record_slot_terminal_evidence(
+                    &store_id,
+                    *slot_index,
+                    &TerminalEvidence::from_event(evidence_topic, &evidence_payload),
+                );
+            }
+            continue;
+        }
+
+        let store_id = match bridge.register_wave_if_absent(kind, wave_id, expected_slots) {
             Ok(id) => id,
             Err(err) => {
                 eprintln!("[bdd-supervisor] register_wave_if_absent failed for {wave_id}: {err}");
@@ -633,9 +717,10 @@ fn run_bdd_supervisor_fan_in(
             }
         };
 
-        // Record all accumulated slots for this wave.
-        let first_slot_index = slots.first().map(|(i, _, _)| *i).unwrap_or(0);
-        for (slot_index, content_hash, event_count) in slots {
+        let completed_dimensions: Vec<String> =
+            slots.iter().filter_map(|(_, _, _, d)| d.clone()).collect();
+
+        for (slot_index, content_hash, event_count, dimension) in slots.iter() {
             if !is_review {
                 use ralph_core::supervisor::SlotResource;
                 if let Err(err) = bridge.store().bind_worktree(
@@ -663,16 +748,19 @@ fn run_bdd_supervisor_fan_in(
                     "[bdd-supervisor] record_slot_result failed for {wave_id}/{slot_index}: {err}"
                 );
             }
-            // Plan 004 R2 / P0-2: the production success path
-            // requires terminal evidence per slot (KTD3 fail-closed).
             let evidence_topic = match kind {
-                ralph_core::supervisor::WaveKind::Review => "review.unit.done",
-                ralph_core::supervisor::WaveKind::Fix => "fix.unit.done",
-                ralph_core::supervisor::WaveKind::Exec => "exec.unit.done",
+                WaveKind::Review => "review.unit.done",
+                WaveKind::Fix => "fix.unit.done",
+                WaveKind::Exec => "exec.unit.done",
             };
-            let evidence_payload = format!(
-                "{{\"slot_index\":{slot_index},\"content_hash\":\"{content_hash}\",\"event_count\":{event_count}}}"
-            );
+            let evidence_payload = match dimension {
+                Some(dim) => format!(
+                    "{{\"slot_index\":{slot_index},\"dimension\":\"{dim}\",\"content_hash\":\"{content_hash}\"}}"
+                ),
+                None => format!(
+                    "{{\"slot_index\":{slot_index},\"content_hash\":\"{content_hash}\",\"event_count\":{event_count}}}"
+                ),
+            };
             if let Err(err) = bridge.store().record_slot_terminal_evidence(
                 &store_id,
                 *slot_index,
@@ -684,14 +772,31 @@ fn run_bdd_supervisor_fan_in(
             }
         }
 
-        // Tick the coordinator. The aggregate_timeout is the
-        // scenario's configured value; `elapsed_secs=0` because
-        // the BDD runner does not model wall-clock progression.
-        let inputs = PhaseInputs {
-            aggregate_timeout_secs,
-            elapsed_secs: 0,
-            cancel_requested: false,
+        let inputs = if force_now {
+            if let Err(err) = bridge.cancel_wave(&store_id) {
+                eprintln!("[bdd-supervisor] cancel_wave failed for {wave_id}: {err}");
+            }
+            if let Err(err) = bridge.record_never_started_failures(&store_id) {
+                eprintln!(
+                    "[bdd-supervisor] record_never_started_failures failed for {wave_id}: {err}"
+                );
+            }
+            if let Err(err) = bridge.mark_salvage_merged(&store_id) {
+                eprintln!("[bdd-supervisor] mark_salvage_merged failed for {wave_id}: {err}");
+            }
+            PhaseInputs {
+                aggregate_timeout_secs,
+                elapsed_secs: aggregate_timeout_secs.saturating_add(1),
+                cancel_requested: true,
+            }
+        } else {
+            PhaseInputs {
+                aggregate_timeout_secs,
+                elapsed_secs: 0,
+                cancel_requested: false,
+            }
         };
+
         let action = match bridge.tick(&store_id, inputs) {
             Ok(a) => a,
             Err(err) => {
@@ -700,22 +805,27 @@ fn run_bdd_supervisor_fan_in(
             }
         };
         match action {
-            CoordinatorAction::InjectedComplete {
-                topic,
-                blocking_slots,
-            } => {
-                let payload = serde_json::json!({
-                    "wave_id": wave_id,
-                    "slot_index": first_slot_index,
-                    "blocking_slots": blocking_slots,
-                });
+            CoordinatorAction::InjectedComplete { topic, .. } => {
+                let payload = if is_review {
+                    serde_json::json!({
+                        "wave_id": wave_id,
+                        "completed_dimensions": completed_dimensions,
+                        "aggregate_timeout": aggregate_timeout_secs,
+                    })
+                } else {
+                    serde_json::json!({
+                        "wave_id": wave_id,
+                        "completed_slots": slots.len(),
+                        "success_slots": [],
+                        "merge_root_event_id": format!("fan-in:{topic}:{wave_id}"),
+                    })
+                };
                 bdd_append_supervisor_event(event_loop, &topic, &payload, "supervisor");
                 let proto_event = ralph_proto::Event::new(topic.as_str(), payload.to_string())
                     .with_source(ralph_proto::HatId::new("supervisor"));
                 event_loop.publish_event(proto_event.clone());
                 event_loop.state_mut().record_event(&proto_event);
                 injected += 1;
-                // Mark this wave as ticked so subsequent calls don't reprocess.
                 ticked_waves.insert(wave_id.clone());
             }
             CoordinatorAction::InjectedFailed {
@@ -723,18 +833,41 @@ fn run_bdd_supervisor_fan_in(
                 reason,
                 blocking_slots,
             } => {
-                let payload = serde_json::json!({
-                    "wave_id": wave_id,
-                    "reason": reason,
-                    "blocking_slots": blocking_slots,
-                });
+                let payload = if is_review {
+                    // Prefer schema-required missing_dimensions for Review.
+                    let known: std::collections::HashSet<&str> =
+                        completed_dimensions.iter().map(|s| s.as_str()).collect();
+                    let canonical = [
+                        "goal-alignment",
+                        "correctness",
+                        "testing",
+                        "maintainability",
+                        "project-standards",
+                        "adversarial",
+                    ];
+                    let missing: Vec<&str> = canonical
+                        .iter()
+                        .copied()
+                        .filter(|d| !known.contains(d))
+                        .collect();
+                    serde_json::json!({
+                        "wave_id": wave_id,
+                        "missing_dimensions": missing,
+                        "reason": reason,
+                    })
+                } else {
+                    serde_json::json!({
+                        "wave_id": wave_id,
+                        "reason": reason,
+                        "blocking_slots": blocking_slots,
+                    })
+                };
                 bdd_append_supervisor_event(event_loop, &topic, &payload, "supervisor");
                 let proto_event = ralph_proto::Event::new(topic.as_str(), payload.to_string())
                     .with_source(ralph_proto::HatId::new("supervisor"));
                 event_loop.publish_event(proto_event.clone());
                 event_loop.state_mut().record_event(&proto_event);
                 injected += 1;
-                // Mark this wave as ticked so subsequent calls don't reprocess.
                 ticked_waves.insert(wave_id.clone());
             }
             CoordinatorAction::AlreadyDone | CoordinatorAction::ContinueCollect => {}
@@ -833,6 +966,7 @@ fn run_scenario_with_snapshots(
         )
     };
     let supervisor_aggregate_timeout_secs = config.event_loop.supervisor.aggregate_timeout_secs;
+    let supervisor_max_workers = config.event_loop.supervisor.max_concurrent_workers.max(1);
     let supervisor_bridge: Option<InMemoryCoordinatorBridge> = if supervisor_path_enabled {
         let store: Arc<dyn SupervisorStore> = Arc::new(InMemorySupervisorStore::new());
         Some(InMemoryCoordinatorBridge::from_store(store))
@@ -882,9 +1016,26 @@ fn run_scenario_with_snapshots(
     // Slots arrive across multiple iterations (one slot per review-worker activation).
     // The map must persist across calls to `run_bdd_supervisor_fan_in`, so we
     // create it here and pass it as a mutable reference.
-    let mut bdd_waves: std::collections::HashMap<String, Vec<(u32, String, usize)>> =
-        std::collections::HashMap::new();
+    let mut bdd_waves: std::collections::HashMap<
+        String,
+        Vec<(u32, String, usize, Option<String>)>,
+    > = std::collections::HashMap::new();
     let mut bdd_ticked_waves: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let bdd_expected_slots = yaml
+        .supervisor_fan_in
+        .as_ref()
+        .and_then(|s| s.expected_slots)
+        .unwrap_or(supervisor_max_workers);
+    let bdd_force_terminal = yaml
+        .supervisor_fan_in
+        .as_ref()
+        .and_then(|s| s.force_terminal.as_deref())
+        .is_some_and(|v| v == "timeout" || v == "partial");
+    let bdd_min_slots_before_force = yaml
+        .supervisor_fan_in
+        .as_ref()
+        .and_then(|s| s.min_slots_before_force)
+        .unwrap_or(1);
 
     for (idx, response) in yaml.mock_responses.iter().enumerate() {
         // Simulate hat execution so isolated mode scope enforcement is active.
@@ -955,6 +1106,9 @@ fn run_scenario_with_snapshots(
                 bridge,
                 &result.accepted_events,
                 supervisor_aggregate_timeout_secs,
+                bdd_expected_slots,
+                bdd_force_terminal,
+                bdd_min_slots_before_force,
                 &mut bdd_waves,
                 &mut bdd_ticked_waves,
             );
@@ -1597,20 +1751,13 @@ fn implementation_review_success_uses_runtime_fan_in() {
     run_workflow_guard_scenario(yaml);
 }
 
-/// U2 Red 2: aggregate-timeout / partial wave. The production fan-in produces
-/// review.wave.failed when slots timeout/partial, and finalizer emits
-/// LOOP_COMPLETE{result:blocked}.
-/// NOTE: The BDD harness cannot simulate wall-clock timeout, so the failure
-/// injection itself (coordinator detecting elapsed > aggregate_timeout_secs)
-/// is not exercisable in this runner. This test verifies the SUCCESS PATH
-/// of the production fan-in seam (6 slots complete → review.wave.complete →
-/// review-synthesizer → fix-planner → finalizer). The absent_events
-/// lock the contract that no failure events appear on the success path.
-/// The routing contract (review.wave.failed → finalizer blocked) is
-/// separately proven by `implementation_review_wave_failed_runtime_fan_in`.
+/// U2 Red 2 / S7: aggregate-timeout / partial wave via production fan-in.
+/// Two of six slots complete; harness force-terminals → review.wave.failed
+/// → finalizer emits LOOP_COMPLETE{result:blocked}. No task.resume redrive.
 #[test]
 fn implementation_review_timeout_reaches_finalizer_without_task_resume_redrive() {
-    let yaml = load_scenario("tests/scenarios/implementation_review_wave_runtime_fan_in.yml");
+    let yaml =
+        load_scenario("tests/scenarios/implementation_review_wave_failed_runtime_fan_in.yml");
     run_workflow_guard_scenario(yaml);
 }
 
@@ -1756,10 +1903,9 @@ fn test_implementation_review_wave_runtime_fan_in() {
 }
 
 /// U2 Green 2b: failure/timeout path via real Supervisor fan-in.
-/// Only 2 of 6 slots complete; supervisor bridge injects review.wave.failed
-/// with missing_dimensions = 4 absent slots. Finalizer receives it directly
-/// (bypassing review-synthesizer) and emits LOOP_COMPLETE{result:blocked}.
-/// Absent_events lock the S7 contract.
+/// Two of six slots complete; BDD force-terminal drives InjectedFailed.
+/// Finalizer receives review.wave.failed (no synthesizer) and emits
+/// LOOP_COMPLETE{result:blocked}. Absent_events lock the S7 contract.
 #[test]
 fn test_implementation_review_wave_failed_runtime_fan_in() {
     let yaml =

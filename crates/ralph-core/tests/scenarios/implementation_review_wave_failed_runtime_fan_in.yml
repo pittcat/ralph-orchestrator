@@ -1,23 +1,18 @@
-# U2 Green 2b / Production Fan-In Proof: failed/timeout path via real Supervisor fan-in.
-# This scenario exercises the production Supervisor fan-in seam for the failure path:
-# all 6 slots register via review.unit.done → supervisor bridge injects
-# review.wave.complete (fan-in success) → wave-runtime stand-in then injects
-# review.wave.failed → finalizer receives it and emits LOOP_COMPLETE{result:blocked}.
+# U2 Green 2b / Production Fan-In Proof: timeout/partial path via real Supervisor fan-in.
+# Two of six review.unit.done slots complete; BDD harness force-terminals with
+# cancel + elapsed > aggregate_timeout so SupervisorCoordinator injects
+# review.wave.failed (NOT a wave-runtime stand-in). Finalizer receives it
+# directly and emits LOOP_COMPLETE{result:blocked}.
 #
-# NOTE on review.wave.failed from coordinator: the BDD harness calls
-# coordinator.tick() with elapsed_secs=0. The coordinator returns InjectedFailed
-# only when elapsed_secs > aggregate_timeout_secs (wall-clock timeout simulation).
-# Since the BDD harness cannot simulate wall-clock progression, we use a
-# wave-runtime stand-in to inject review.wave.failed directly (per the pattern
-# in implementation_review_wave_failed.yml). The supervisor bridge still handles
-# the production fan-in for review.wave.complete from the 6 review.unit.done events.
-#
-# This scenario proves:
-# 1. Supervisor fan-in injects review.wave.complete from 6 review.unit.done (production seam)
-# 2. review.wave.failed routes to finalizer (not review-synthesizer) via runtime contract
+# Contrasts with implementation_review_wave_failed.yml (routing-only stand-in).
 
 name: implementation_review_wave_failed_runtime_fan_in
-description: review.wave.failed via wave-runtime + real Supervisor fan-in → finalizer blocked
+description: partial slots + production timeout fan-in → review.wave.failed → finalizer blocked
+
+supervisor_fan_in:
+  expected_slots: 6
+  force_terminal: timeout
+  min_slots_before_force: 2
 
 config:
   prompt_file: PROMPT.md
@@ -42,16 +37,6 @@ config:
       publishes:
         - review.unit.done
       concurrency: 6
-    wave-runtime:
-      # Stand-in for runtime injection of review.wave.failed.
-      # In production, this event comes from the dispatcher module's
-      # run_supervisor_fan_in after coordinator tick detects timeout.
-      # The BDD harness cannot simulate wall-clock elapsed_secs, so
-      # we use this stand-in to prove the routing contract (failed → finalizer).
-      subscribes_to:
-        - review.unit.done
-      publishes:
-        - review.wave.failed
     review-synthesizer:
       subscribes_to:
         - review.wave.complete
@@ -127,20 +112,17 @@ config:
           payload: json_object
 
 mock_responses:
-  # Response 0: scope-preparer → scope.ready
   - text: |
       <event topic="scope.ready">
       {"plan_name":"demo-plan","plan_path":"docs/plans/demo-plan.md","scope_digest":"abcd1234ef567890","patch_path":".ralph/review/demo-plan/review.diff.patch","patch_digest":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef","scope_manifest_path":".ralph/review/demo-plan/scope-manifest.json","review_head_sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","first_implementation_commit_sha":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","resolved_baseline_sha":"cccccccccccccccccccccccccccccccccccccccc","dirty_verdict":"clean"}
       </event>
     hat: scope-preparer
-  # Response 1: review-dispatcher → review.unit.ready
   - text: |
       <event topic="review.unit.ready">
       {"plan_name":"demo-plan","plan_path":"docs/plans/demo-plan.md","scope_digest":"abcd1234ef567890","patch_path":".ralph/review/demo-plan/review.diff.patch","patch_digest":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef","scope_manifest_path":".ralph/review/demo-plan/scope-manifest.json","review_head_sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","first_implementation_commit_sha":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","resolved_baseline_sha":"cccccccccccccccccccccccccccccccccccccccc","slot_index":0,"dimension":"goal-alignment","idempotency_payload_version":1}
       </event>
     hat: review-dispatcher
-  # Responses 2-7: six review-worker activations → supervisor fan-in injects
-  # review.wave.complete after all 6 slots register and complete.
+  # Only 2 of 6 slots complete — production fan-in force-terminals to failed.
   - text: |
       <event topic="review.unit.done">
       {"plan_name":"demo-plan","plan_path":"docs/plans/demo-plan.md","scope_digest":"abcd1234ef567890","patch_digest":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef","review_head_sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","wave_id":"review-wave-1","slot_index":0,"dimension":"goal-alignment","findings_count":0,"findings_file":".ralph/review/demo-plan/dimensions/goal-alignment.md","handoff_precheck_failed":false}
@@ -151,56 +133,32 @@ mock_responses:
       {"plan_name":"demo-plan","plan_path":"docs/plans/demo-plan.md","scope_digest":"abcd1234ef567890","patch_digest":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef","review_head_sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","wave_id":"review-wave-1","slot_index":1,"dimension":"correctness","findings_count":0,"findings_file":".ralph/review/demo-plan/dimensions/correctness.md","handoff_precheck_failed":false}
       </event>
     hat: review-worker
-  - text: |
-      <event topic="review.unit.done">
-      {"plan_name":"demo-plan","plan_path":"docs/plans/demo-plan.md","scope_digest":"abcd1234ef567890","patch_digest":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef","review_head_sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","wave_id":"review-wave-1","slot_index":2,"dimension":"testing","findings_count":0,"findings_file":".ralph/review/demo-plan/dimensions/testing.md","handoff_precheck_failed":false}
-      </event>
-    hat: review-worker
-  - text: |
-      <event topic="review.unit.done">
-      {"plan_name":"demo-plan","plan_path":"docs/plans/demo-plan.md","scope_digest":"abcd1234ef567890","patch_digest":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef","review_head_sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","wave_id":"review-wave-1","slot_index":3,"dimension":"maintainability","findings_count":0,"findings_file":".ralph/review/demo-plan/dimensions/maintainability.md","handoff_precheck_failed":false}
-      </event>
-    hat: review-worker
-  - text: |
-      <event topic="review.unit.done">
-      {"plan_name":"demo-plan","plan_path":"docs/plans/demo-plan.md","scope_digest":"abcd1234ef567890","patch_digest":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef","review_head_sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","wave_id":"review-wave-1","slot_index":4,"dimension":"project-standards","findings_count":0,"findings_file":".ralph/review/demo-plan/dimensions/project-standards.md","handoff_precheck_failed":false}
-      </event>
-    hat: review-worker
-  - text: |
-      <event topic="review.unit.done">
-      {"plan_name":"demo-plan","plan_path":"docs/plans/demo-plan.md","scope_digest":"abcd1234ef567890","patch_digest":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef","review_head_sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","wave_id":"review-wave-1","slot_index":5,"dimension":"adversarial","findings_count":0,"findings_file":".ralph/review/demo-plan/dimensions/adversarial.md","handoff_precheck_failed":false}
-      </event>
-    hat: review-worker
-  # Response 8: supervisor fan-in produces review.wave.complete (injected by run_bdd_supervisor_fan_in).
-  # No wave-runtime hat here for the success path — the coordinator bridge handles it.
-  # Response 9: wave-runtime stand-in injects review.wave.failed (mimics coordinator timeout path).
-  - text: |
-      <event topic="review.wave.failed">
-      {"wave_id":"review-wave-1","missing_dimensions":["testing","maintainability","project-standards","adversarial"],"reason":"worker_timeout"}
-      </event>
-    hat: wave-runtime
-  # Response 10: finalizer → LOOP_COMPLETE{result:blocked}
+  # finalizer activated by runtime-injected review.wave.failed
   - text: |
       <event topic="LOOP_COMPLETE">
-      {"reason":"implementation-review wave quality gate blocked"}
+      {"reason":"implementation-review wave quality gate blocked","result":"blocked"}
       </event>
     hat: finalizer
 
 expected:
-  iterations: 10
+  iterations: 5
   events:
     - topic: scope.ready
     - topic: review.unit.ready
     - topic: review.unit.done
-    - topic: review.wave.complete
     - topic: review.wave.failed
     - topic: LOOP_COMPLETE
   absent_events:
     - topic: scope.blocked
+    - topic: review.wave.complete
     - topic: review.synthesized
     - topic: review.blocked
     - topic: fix.plan.ready
   completion: true
   event_topic_counts:
     - topic: review.unit.done
-      count: 6
+      count: 2
+    - topic: review.wave.failed
+      count: 1
+    - topic: review.wave.complete
+      count: 0
