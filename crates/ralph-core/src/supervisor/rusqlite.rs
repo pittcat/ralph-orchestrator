@@ -23,9 +23,10 @@ use rusqlite::{Connection, OptionalExtension};
 #[cfg(feature = "supervisor-db")]
 use super::migrations;
 use super::{
-    CompensationKind, DispatchOutcome, EmissionReservation, EmissionState, IsolationMode,
-    RedriveResult, SlotResource, SlotStatus, SupervisorStore, SupervisorStoreError,
-    SupervisorStoreResult, WaveKind, WavePhase, WaveSnapshot,
+    CompensationKind, CoordinationReceiptSummary, DispatchOutcome, EmissionReservation,
+    EmissionState, IsolationMode, ProjectionReceiptSummary, RedriveResult, SlotResource,
+    SlotStatus, SupervisorStore, SupervisorStoreError, SupervisorStoreResult,
+    WaveDeliveryState, WaveKind, WavePhase, WaveSnapshot,
 };
 
 /// `PRAGMA busy_timeout` value installed on every supervisor
@@ -222,6 +223,26 @@ fn phase_to_str(phase: WavePhase) -> &'static str {
         WavePhase::Integrate => "integrate",
         WavePhase::Done => "done",
         WavePhase::Failed => "failed",
+    }
+}
+
+/// 2026-07-27-003 plan U5: parse the `delivery_state` text column.
+/// Invalid combinations of the legacy `merged_to_events` /
+/// `salvage_merged` booleans migrate to `pending` (refuse to
+/// guess a higher phase from a partial legacy row).
+#[cfg(feature = "supervisor-db")]
+fn parse_delivery_state(s: &str) -> SupervisorStoreResult<WaveDeliveryState> {
+    match s {
+        "pending" => Ok(WaveDeliveryState::Pending),
+        "business_projected" => Ok(WaveDeliveryState::BusinessProjected),
+        "salvage_committed" => Ok(WaveDeliveryState::SalvageCommitted),
+        "coordination_written" => Ok(WaveDeliveryState::CoordinationWritten),
+        "coordination_committed" => Ok(WaveDeliveryState::CoordinationCommitted),
+        // Legacy values that survived a v8 migration: refuse to
+        // read a row that the migration did not normalise.
+        other => Err(SupervisorStoreError::Storage(format!(
+            "unknown delivery_state: {other}"
+        ))),
     }
 }
 
@@ -912,7 +933,7 @@ impl SupervisorStore for RusqliteSupervisorStore {
         self.with_conn(|conn| {
             let wave = conn
                 .query_row(
-                    "SELECT wave_id, phase, expected_total, cancel_requested, merged_to_events, salvage_merged, created_at
+                    "SELECT wave_id, phase, expected_total, cancel_requested, delivery_state, created_at
                      FROM waves WHERE wave_id = ?1",
                     [&wave_id],
                     |row| {
@@ -921,16 +942,16 @@ impl SupervisorStore for RusqliteSupervisorStore {
                             row.get::<_, String>(1)?,
                             row.get::<_, i64>(2)? as u32,
                             row.get::<_, i64>(3)? != 0,
-                            row.get::<_, i64>(4)? != 0,
-                            row.get::<_, i64>(5)? != 0,
-                            row.get::<_, i64>(6)?,
+                            row.get::<_, String>(4)?,
+                            row.get::<_, i64>(5)?,
                         ))
                     },
                 )
                 .optional()?
                 .ok_or_else(|| SupervisorStoreError::UnknownWave(wave_id.to_string()))?;
-            let (wave_id_row, phase_str, expected_total, cancel, merged, salvage_merged, created_at_unix) = wave;
+            let (wave_id_row, phase_str, expected_total, cancel, delivery_state_str, created_at_unix) = wave;
             let phase = parse_phase(&phase_str)?;
+            let delivery_state = parse_delivery_state(&delivery_state_str)?;
             let kind = {
                 let kind_str: String = conn
                     .query_row(
@@ -1024,32 +1045,225 @@ impl SupervisorStore for RusqliteSupervisorStore {
                 pending_count: pending,
                 in_flight_count: in_flight,
                 cancel_requested: cancel,
-                merged_to_events: merged,
-                salvage_merged,
+                delivery_state,
                 started_at,
                 slots,
             })
         })
     }
 
-    fn mark_merge_to_events(&self, wave_id: &str) -> SupervisorStoreResult<()> {
+    fn commit_salvage_projection(
+        &self,
+        wave_id: &str,
+        receipt: &ProjectionReceiptSummary,
+    ) -> SupervisorStoreResult<()> {
+        // Forward-only: refuse when the wave is still Pending —
+        // the dispatcher must finish the merge seam first.
         self.with_conn(|conn| {
+            let current_state: Option<String> = conn
+                .query_row(
+                    "SELECT delivery_state FROM waves WHERE wave_id = ?1",
+                    [&wave_id],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            let current_state = match current_state {
+                None => return Err(SupervisorStoreError::UnknownWave(wave_id.to_string())),
+                Some(s) => parse_delivery_state(&s)?,
+            };
+            if matches!(current_state, WaveDeliveryState::Pending) {
+                return Err(SupervisorStoreError::InvalidTransition(
+                    "commit_salvage_projection requires BusinessProjected state".to_string(),
+                ));
+            }
+            // If we already advanced past SalvageCommitted,
+            // verify the receipt fingerprint still matches the
+            // one stored previously.
+            if current_state.at_least(WaveDeliveryState::CoordinationWritten) {
+                let existing_fp: Option<String> = conn
+                    .query_row(
+                        "SELECT salvage_fingerprint FROM waves WHERE wave_id = ?1",
+                        [&wave_id],
+                        |row| row.get(0),
+                    )
+                    .optional()?;
+                if let Some(existing_fp) = existing_fp
+                    && !existing_fp.is_empty()
+                    && existing_fp != receipt.batch_fingerprint
+                {
+                    return Err(SupervisorStoreError::InvalidTransition(format!(
+                        "commit_salvage_projection: fingerprint mismatch (existing={existing_fp}, new={})",
+                        receipt.batch_fingerprint
+                    )));
+                }
+            }
             conn.execute(
-                "UPDATE waves SET merged_to_events = 1, updated_at = strftime('%s','now')
-                 WHERE wave_id = ?1 AND merged_to_events = 0",
-                [&wave_id],
+                "UPDATE waves
+                    SET delivery_state = CASE WHEN CAST(delivery_state AS TEXT) = 'pending' OR CAST(delivery_state AS TEXT) = 'business_projected' THEN 'salvage_committed' ELSE delivery_state END,
+                        salvage_fingerprint = ?2,
+                        salvage_write_count = ?3,
+                        salvage_already_present = ?4,
+                        salvage_committed_at = ?5,
+                        updated_at = strftime('%s','now')
+                  WHERE wave_id = ?1",
+                rusqlite::params![
+                    wave_id,
+                    receipt.batch_fingerprint,
+                    receipt.write_count as i64,
+                    receipt.already_present_count as i64,
+                    receipt.committed_at_unix_secs as i64,
+                ],
             )?;
             Ok(())
         })
     }
 
-    fn mark_salvage_merged(&self, wave_id: &str) -> SupervisorStoreResult<()> {
+    fn record_coordination_written(
+        &self,
+        wave_id: &str,
+        receipt: &CoordinationReceiptSummary,
+    ) -> SupervisorStoreResult<()> {
         self.with_conn(|conn| {
+            let current_state: Option<String> = conn
+                .query_row(
+                    "SELECT delivery_state FROM waves WHERE wave_id = ?1",
+                    [&wave_id],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            let current_state = match current_state {
+                None => return Err(SupervisorStoreError::UnknownWave(wave_id.to_string())),
+                Some(s) => parse_delivery_state(&s)?,
+            };
+            if !current_state.at_least(WaveDeliveryState::SalvageCommitted) {
+                return Err(SupervisorStoreError::InvalidTransition(
+                    "record_coordination_written requires SalvageCommitted state".to_string(),
+                ));
+            }
+            if current_state.at_least(WaveDeliveryState::CoordinationWritten) {
+                let existing_fp: Option<String> = conn
+                    .query_row(
+                        "SELECT coordination_fingerprint FROM waves WHERE wave_id = ?1",
+                        [&wave_id],
+                        |row| row.get(0),
+                    )
+                    .optional()?;
+                if let Some(existing_fp) = existing_fp
+                    && !existing_fp.is_empty()
+                    && existing_fp != receipt.payload_fingerprint
+                {
+                    return Err(SupervisorStoreError::InvalidTransition(format!(
+                        "record_coordination_written: fingerprint mismatch (existing={existing_fp}, new={})",
+                        receipt.payload_fingerprint
+                    )));
+                }
+            }
             conn.execute(
-                "UPDATE waves SET salvage_merged = 1, updated_at = strftime('%s','now')
-                 WHERE wave_id = ?1 AND salvage_merged = 0",
-                [&wave_id],
+                "UPDATE waves
+                    SET delivery_state = CASE WHEN CAST(delivery_state AS TEXT) IN ('pending','business_projected','salvage_committed') THEN 'coordination_written' ELSE delivery_state END,
+                        coordination_topic = ?2,
+                        coordination_idempotency_key = ?3,
+                        coordination_fingerprint = ?4,
+                        coordination_write_count = ?5,
+                        coordination_already_present = ?6,
+                        coordination_committed_at = ?7,
+                        updated_at = strftime('%s','now')
+                  WHERE wave_id = ?1",
+                rusqlite::params![
+                    wave_id,
+                    receipt.topic,
+                    receipt.idempotency_key,
+                    receipt.payload_fingerprint,
+                    receipt.write_count as i64,
+                    receipt.already_present_count as i64,
+                    receipt.committed_at_unix_secs as i64,
+                ],
             )?;
+            Ok(())
+        })
+    }
+
+    fn commit_coordination_event(
+        &self,
+        wave_id: &str,
+        receipt: &CoordinationReceiptSummary,
+        terminal_phase: WavePhase,
+    ) -> SupervisorStoreResult<()> {
+        self.with_conn(|conn| {
+            let row: Option<(String, String, String)> = conn
+                .query_row(
+                    "SELECT delivery_state, coordination_fingerprint, phase FROM waves WHERE wave_id = ?1",
+                    [&wave_id],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                )
+                .optional()?;
+            let (current_state_str, existing_fp, current_phase_str) = match row {
+                None => return Err(SupervisorStoreError::UnknownWave(wave_id.to_string())),
+                Some(t) => t,
+            };
+            let current_state = parse_delivery_state(&current_state_str)?;
+            if !current_state.at_least(WaveDeliveryState::CoordinationWritten) {
+                return Err(SupervisorStoreError::InvalidTransition(
+                    "commit_coordination_event requires CoordinationWritten state".to_string(),
+                ));
+            }
+            if !existing_fp.is_empty() && existing_fp != receipt.payload_fingerprint {
+                return Err(SupervisorStoreError::InvalidTransition(format!(
+                    "commit_coordination_event: fingerprint mismatch (existing={existing_fp}, new={})",
+                    receipt.payload_fingerprint
+                )));
+            }
+            let current_phase = parse_phase(&current_phase_str)?;
+            let next_phase_str = phase_to_str(terminal_phase).to_string();
+            // Set the terminal phase only on the FIRST commit;
+            // a re-commit must NOT flip an already-terminal wave.
+            let update_phase_sql = if matches!(current_phase, WavePhase::Done | WavePhase::Failed)
+            {
+                "phase = phase"
+            } else {
+                "phase = ?8"
+            };
+            let sql = format!(
+                "UPDATE waves
+                    SET delivery_state = 'coordination_committed',
+                        coordination_topic = ?2,
+                        coordination_idempotency_key = ?3,
+                        coordination_fingerprint = ?4,
+                        coordination_write_count = ?5,
+                        coordination_already_present = ?6,
+                        coordination_committed_at = ?7,
+                        {update_phase_sql},
+                        updated_at = strftime('%s','now')
+                  WHERE wave_id = ?1"
+            );
+            if matches!(current_phase, WavePhase::Done | WavePhase::Failed) {
+                conn.execute(
+                    &sql,
+                    rusqlite::params![
+                        wave_id,
+                        receipt.topic,
+                        receipt.idempotency_key,
+                        receipt.payload_fingerprint,
+                        receipt.write_count as i64,
+                        receipt.already_present_count as i64,
+                        receipt.committed_at_unix_secs as i64,
+                    ],
+                )?;
+            } else {
+                conn.execute(
+                    &sql,
+                    rusqlite::params![
+                        wave_id,
+                        receipt.topic,
+                        receipt.idempotency_key,
+                        receipt.payload_fingerprint,
+                        receipt.write_count as i64,
+                        receipt.already_present_count as i64,
+                        receipt.committed_at_unix_secs as i64,
+                        next_phase_str,
+                    ],
+                )?;
+            }
             Ok(())
         })
     }
@@ -1778,9 +1992,10 @@ fn kind_to_str(kind: WaveKind) -> &'static str {
 #[cfg(feature = "supervisor-db")]
 #[cfg(test)]
 mod tests {
-    //! U5 mirror of U3 + U4 contract tests against the
-    //! rusqlite store. Tests use `from_connection` with an
-    //! in-memory DB; CLI integration lives in U12.
+    // U5 mirror of U3 + U4 contract tests against the
+    // rusqlite store. Tests use `from_connection` with an
+    // in-memory DB; CLI integration lives in U12.
+    use super::super::{CoordinationReceipt, CoordinationReceiptSummary, ProjectionError, ProjectionKind, ProjectionReceipt, ProjectionReceiptSummary, WaveDeliveryState};
 
     use super::*;
     use crate::supervisor::WaveKind;
@@ -2576,7 +2791,7 @@ mod recovery_reopen_tests {
         assert_eq!(snap.completed_count, 2, "completed must survive reopen");
         assert_eq!(snap.in_flight_count, 2, "in-flight must survive reopen");
         assert_eq!(snap.pending_count, 1, "pending must survive reopen");
-        assert!(!snap.merged_to_events);
+        assert!(!snap.delivery_state.at_least(super::WaveDeliveryState::CoordinationCommitted));
         assert_eq!(snap.phase, WavePhase::Collect);
         assert_eq!(
             snap.slots,
@@ -2680,8 +2895,8 @@ mod recovery_reopen_tests {
                 .unwrap();
             // The coordinator already injected the coord event and
             // stamped the idempotent-inject marker before the crash.
-            store.mark_merge_to_events(&wave).unwrap();
-            assert!(store.fan_in_status(&wave).unwrap().merged_to_events);
+            store.commit_coordination_event(&wave, &super::CoordinationReceiptSummary { topic: String::new(), idempotency_key: String::new(), payload_fingerprint: String::new(), write_count: 0, already_present_count: 0, committed_at_unix_secs: 0 }, super::WavePhase::Done).unwrap();
+            assert!(store.fan_in_status(&wave).unwrap().delivery_state.at_least(super::WaveDeliveryState::CoordinationCommitted));
             wave
         };
 
@@ -2691,7 +2906,7 @@ mod recovery_reopen_tests {
         // (a) The inject key survived the round-trip to disk.
         let snap = store.fan_in_status(&wave).unwrap();
         assert!(
-            snap.merged_to_events,
+            snap.delivery_state.at_least(super::WaveDeliveryState::CoordinationCommitted),
             "merged_to_events inject key must persist across reopen"
         );
 

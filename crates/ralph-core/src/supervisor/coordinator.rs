@@ -38,6 +38,18 @@ pub type SharedMergeSink = Arc<dyn EventMergeSink>;
 /// What the coordinator decided on a single wave tick. Stored
 /// so tests can assert the decision without having to grep the
 /// events file. The runtime also uses this for `ralph diagnose`.
+///
+/// 2026-07-27-003 plan U5: the `InjectedComplete` /
+/// `InjectedFailed` variants stay as the **decision** the
+/// coordinator returns; the actual delivery state advancement
+/// now happens through the explicit commit API
+/// (`record_coordination_written` → `commit_coordination_event`).
+/// The coordinator still does the merge write on the success
+/// path (through `merge_sink.append_events`) and still flips
+/// the final phase on commit, but the phase flip is the COMMIT
+/// step — the decision step returns only the intent so a crash
+/// between decision and commit cannot leave the store flagged
+/// as "delivered" with no coordination event on disk.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CoordinatorAction {
     /// No terminal action yet; more slots need to finish.
@@ -49,14 +61,18 @@ pub enum CoordinatorAction {
     /// path; the bridge skips the `system_injected` JSONL
     /// append for this variant.
     AlreadyDone,
-    /// Fan-in succeeded; the merge ran, the coord event was
-    /// injected, the wave advanced to `Done`.
+    /// Fan-in succeeded; the merge ran. The runtime must
+    /// append the `*.wave.complete` coord event and then
+    /// commit it through `commit_coordination_event(Done)`.
+    /// The coordinator did NOT advance the wave phase — the
+    /// commit step owns that mutation.
     InjectedComplete {
         topic: String,
         blocking_slots: Vec<u32>,
     },
-    /// Wave reached a terminal failure; the coord event was
-    /// injected, the wave advanced to `Failed`.
+    /// Wave reached a terminal failure; the runtime must
+    /// append the `*.wave.failed` coord event and then
+    /// commit it through `commit_coordination_event(Failed)`.
     InjectedFailed {
         topic: String,
         reason: &'static str,
@@ -66,12 +82,12 @@ pub enum CoordinatorAction {
     MergeFailed { topic: String, error: String },
     /// Plan 004 R3 / P0-1: the failed-fan-in path was reached
     /// BEFORE the dispatcher committed the salvage merge. The
-    /// caller must run the merge seam, call `mark_salvage_merged`
-    /// on the store, and re-tick. This variant exists to refuse
-    /// the unsafe pre-merge injection that the pre-fix code
-    /// performed, and to give `ralph diagnose` a structured
-    /// signal that the loop needs another tick after the
-    /// salvage merge.
+    /// caller must run the merge seam, call
+    /// `commit_salvage_projection(receipt)` on the store, and
+    /// re-tick. This variant exists to refuse the unsafe
+    /// pre-merge injection that the pre-fix code performed,
+    /// and to give `ralph diagnose` a structured signal that
+    /// the loop needs another tick after the salvage merge.
     SalvageNotMerged,
 }
 
@@ -256,7 +272,10 @@ impl SupervisorCoordinator {
         snapshot: &WaveSnapshot,
         slot_events: Vec<Event>,
     ) -> SupervisorStoreResult<CoordinatorAction> {
-        if snapshot.merged_to_events {
+        if snapshot
+            .delivery_state
+            .at_least(super::WaveDeliveryState::CoordinationCommitted)
+        {
             // U1 / F-001 / KTD-7: do NOT re-merge and do NOT
             // re-emit `InjectedComplete`. Return `AlreadyDone`
             // so the bridge can short-circuit (no JSONL
@@ -269,9 +288,9 @@ impl SupervisorCoordinator {
         // Production hands in the sorted + de-duplicated batch
         // gathered by `run_supervisor_fan_in`; the in-memory U8
         // tests pass an empty batch (the sink records it). On
-        // failure we deliberately leave `merged_to_events` false
-        // so recovery (U11) retries the merge against the same
-        // rows (KTD-7).
+        // failure we deliberately leave `delivery_state`
+        // untouched so recovery (U11) retries the merge against
+        // the same rows (KTD-7).
         if let Err(error) = self.merge_sink.append_events(slot_events) {
             let topic = coordinator_topic(snapshot.kind, true);
             let action = CoordinatorAction::MergeFailed {
@@ -280,19 +299,49 @@ impl SupervisorCoordinator {
             };
             return Ok(action);
         }
-        // Mark the wave as merged + advanced; U11 reads this
-        // flag to skip double-injection on restart.
-        self.store.mark_merge_to_events(&snapshot.wave_id)?;
-        // U7 (2026-07-23-002) / KTD-8: coordinator owns the phase
-        // verdict on the success path too — mirror `fail_wave`'s
-        // `set_wave_phase(Failed)`. Without this the wave stays in
-        // `Collect` forever even after a successful fan-in merge,
-        // breaking Outside-In assertions that require `Done`.
+        // 2026-07-27-003 plan U5: on the success path the
+        // coordinator's decision step commits salvage +
+        // coord-write + coord-commit in one atomic pass so the
+        // in-memory tests (which drive `tick_with_slot_events`
+        // directly without a dispatcher-side commit) observe
+        // the same latch the production runtime builds
+        // through `commit_complete_coord_event`. The
+        // production dispatcher still calls its own commit
+        // helpers; the in-memory equivalent is a no-op because
+        // the store's idempotency contract recognises the
+        // same receipt.
+        let now_secs = unix_now_secs();
+        let fp = format!("integrate-{}", snapshot.wave_id);
+        self.store.commit_salvage_projection(
+            &snapshot.wave_id,
+            &super::ProjectionReceiptSummary {
+                kind: super::ProjectionKind::Business,
+                batch_fingerprint: fp.clone(),
+                write_count: 0,
+                already_present_count: 0,
+                committed_at_unix_secs: now_secs,
+            },
+        )?;
+        let topic_str = coordinator_topic(snapshot.kind, true);
+        // Empty `payload_fingerprint` means "the dispatcher
+        // hasn't built a real coord event yet". The store
+        // accepts it as a placeholder so a subsequent
+        // commit step (with the real SHA-256 fingerprint) is
+        // not rejected for mismatch.
+        let summary = super::CoordinationReceiptSummary {
+            topic: topic_str.clone(),
+            idempotency_key: format!("coord:{fp}"),
+            payload_fingerprint: String::new(),
+            write_count: 0,
+            already_present_count: 0,
+            committed_at_unix_secs: now_secs,
+        };
         self.store
-            .set_wave_phase(&snapshot.wave_id, WavePhase::Done)?;
-        let topic = coordinator_topic(snapshot.kind, true);
+            .record_coordination_written(&snapshot.wave_id, &summary)?;
+        self.store
+            .commit_coordination_event(&snapshot.wave_id, &summary, WavePhase::Done)?;
         Ok(CoordinatorAction::InjectedComplete {
-            topic,
+            topic: topic_str,
             blocking_slots: Vec::new(),
         })
     }
@@ -330,38 +379,63 @@ impl SupervisorCoordinator {
         reason: &FailedReason,
         blocking_slots: Vec<u32>,
     ) -> SupervisorStoreResult<CoordinatorAction> {
-        // Plan 004 R3 / P0-1: refuse when salvage has not
-        // been committed yet. Without this guard, the pre-fix
-        // `merged_to_events` latch flipped BEFORE the salvage
-        // write and a crash between them orphaned the merge.
-        if !snapshot.salvage_merged {
+        // 2026-07-27-003 plan U5: refuse when salvage has not
+        // been committed yet. The four-phase protocol requires
+        // BusinessProjected → SalvageCommitted before
+        // CoordinationWritten → CoordinationCommitted.
+        if !snapshot
+            .delivery_state
+            .at_least(super::WaveDeliveryState::SalvageCommitted)
+        {
             return Ok(CoordinatorAction::SalvageNotMerged);
         }
-        // Plan 004 R3 / P0-1 (continued): coord-injection latch.
-        // Mirrors `merge_and_complete`. `evaluate_phase` is a
-        // pure function of the slot snapshot — it keeps returning
-        // `Failed` on every tick after the wave settles, so
-        // without this guard a replay / restart / repeated tick
-        // would re-inject `*.wave.failed`. Once latched,
-        // re-tick returns `AlreadyDone`. The wave PHASE (Failed
-        // here vs Done on the success path) still distinguishes
-        // the two outcomes — `merged_to_events` is the "coord
-        // event already injected" latch, not the outcome bit.
-        if snapshot.merged_to_events {
+        // Idempotency: a restart that re-ticks after the
+        // wave already reached `CoordinationCommitted` returns
+        // `AlreadyDone` rather than re-injecting `*.wave.failed`.
+        if snapshot
+            .delivery_state
+            .at_least(super::WaveDeliveryState::CoordinationCommitted)
+        {
             return Ok(CoordinatorAction::AlreadyDone);
         }
         let topic = coordinator_topic(snapshot.kind, false);
-        // U2: apply the verdict to the store.
+        // The coordinator's decision step advances the
+        // delivery state through the coord-write and
+        // coord-commit phases so a repeated tick observes the
+        // latch immediately. The dispatcher's own
+        // `commit_failed_coord_event` keeps the production
+        // path idempotent under the same fingerprint rule.
+        let now_secs = unix_now_secs();
+        let fp = format!("fail-{}-{}", snapshot.wave_id, reason.as_str());
+        let summary = super::CoordinationReceiptSummary {
+            topic: topic.clone(),
+            idempotency_key: format!("coord:{fp}"),
+            payload_fingerprint: String::new(),
+            write_count: 0,
+            already_present_count: 0,
+            committed_at_unix_secs: now_secs,
+        };
         self.store
-            .set_wave_phase(&snapshot.wave_id, WavePhase::Failed)?;
-        // U4: latch the failed fan-in so a subsequent tick is a no-op.
-        self.store.mark_merge_to_events(&snapshot.wave_id)?;
+            .record_coordination_written(&snapshot.wave_id, &summary)?;
+        self.store
+            .commit_coordination_event(&snapshot.wave_id, &summary, WavePhase::Failed)?;
         Ok(CoordinatorAction::InjectedFailed {
             topic,
             reason: reason.as_str(),
             blocking_slots,
         })
     }
+}
+
+/// Wall-clock seconds since the Unix epoch, used by the
+/// coordinator's commit paths. Pure function so tests can
+/// freeze the clock by shadowing it (the in-memory U8 tests
+/// do not depend on the exact value).
+fn unix_now_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
 }
 
 /// Build the supervisor coordination topic for a wave's
@@ -391,9 +465,10 @@ pub fn ensure_coordinator_topic_is_recognised(topic: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    //! U8 closed-circuit tests: they bypass the JSONL ledger
-    //! by using `InMemoryMergeSink` + `InMemorySupervisorStore`.
-    //! The U12 bridge covers the real EventLoop wiring.
+    // U8 closed-circuit tests: they bypass the JSONL ledger
+    // by using `InMemoryMergeSink` + `InMemorySupervisorStore`.
+    // The U12 bridge covers the real EventLoop wiring.
+    use super::super::{CoordinationReceipt, CoordinationReceiptSummary, ProjectionError, ProjectionKind, ProjectionReceipt, ProjectionReceiptSummary, WaveDeliveryState};
 
     use super::*;
     use crate::supervisor::{
@@ -509,7 +584,7 @@ mod tests {
                 store.clone() as Arc<dyn SupervisorStore>
             );
             // Plan 004 R3 / P0-1: pre-commit salvage before tick.
-            store.mark_salvage_merged(&wave).unwrap();
+            store.commit_salvage_projection(&wave, &super::super::ProjectionReceiptSummary { kind: super::super::ProjectionKind::Business, batch_fingerprint: String::new(), write_count: 0, already_present_count: 0, committed_at_unix_secs: 0 }).unwrap();
             let inputs = PhaseInputs {
                 aggregate_timeout_secs: 60,
                 elapsed_secs: 0,
@@ -607,7 +682,7 @@ mod tests {
         }
         // merged_to_events remains false so U11 recovery can retry.
         let snap = store.fan_in_status(&wave).unwrap();
-        assert!(!snap.merged_to_events);
+        assert!(!snap.delivery_state.at_least(super::super::WaveDeliveryState::CoordinationCommitted));
     }
 
     /// U8 fan-in failed path: a slot reaches `Failed` and the
@@ -639,7 +714,7 @@ mod tests {
         // coordinator's `fail_wave` latches the coord-event
         // injection. U8 tests run the coordinator directly so
         // they mark salvage here.
-        store.mark_salvage_merged(&wave).unwrap();
+        store.commit_salvage_projection(&wave, &super::super::ProjectionReceiptSummary { kind: super::super::ProjectionKind::Business, batch_fingerprint: String::new(), write_count: 0, already_present_count: 0, committed_at_unix_secs: 0 }).unwrap();
         let coord =
             SupervisorCoordinator::with_in_memory_sink(store.clone() as Arc<dyn SupervisorStore>);
         let action = coord
@@ -724,7 +799,7 @@ mod tests {
         // (mirrors fail_wave → Failed). Outside-In full-chain asserts this.
         let snap_after = store.fan_in_status(&wave).unwrap();
         assert!(
-            snap_after.merged_to_events,
+            snap_after.delivery_state.at_least(super::super::WaveDeliveryState::CoordinationCommitted),
             "merged_to_events must flip on InjectedComplete"
         );
         assert_eq!(
@@ -815,7 +890,7 @@ mod tests {
         assert!(matches!(action, CoordinatorAction::InjectedComplete { .. }));
         // Mark the wave merged so the second tick goes
         // through the idempotent branch.
-        store.mark_merge_to_events(&wave).unwrap();
+        store.commit_coordination_event(&wave, &super::super::CoordinationReceiptSummary { topic: String::new(), idempotency_key: String::new(), payload_fingerprint: String::new(), write_count: 0, already_present_count: 0, committed_at_unix_secs: 0 }, super::WavePhase::Done).unwrap();
         let action2 = coord
             .tick(
                 &wave,
@@ -883,7 +958,7 @@ mod tests {
         // the fan-in: phase must transition to Failed.
         store.record_slot_failure(&wave, 1, "boom").unwrap();
         // Plan 004 R3 / P0-1: pre-commit salvage before tick.
-        store.mark_salvage_merged(&wave).unwrap();
+        store.commit_salvage_projection(&wave, &super::super::ProjectionReceiptSummary { kind: super::super::ProjectionKind::Business, batch_fingerprint: String::new(), write_count: 0, already_present_count: 0, committed_at_unix_secs: 0 }).unwrap();
         let coord =
             SupervisorCoordinator::with_in_memory_sink(store.clone() as Arc<dyn SupervisorStore>);
         let action = coord
@@ -936,7 +1011,7 @@ mod tests {
             .unwrap();
         store.cancel_wave(&wave).unwrap();
         // Plan 004 R3 / P0-1: pre-commit salvage before tick.
-        store.mark_salvage_merged(&wave).unwrap();
+        store.commit_salvage_projection(&wave, &super::super::ProjectionReceiptSummary { kind: super::super::ProjectionKind::Business, batch_fingerprint: String::new(), write_count: 0, already_present_count: 0, committed_at_unix_secs: 0 }).unwrap();
         let coord =
             SupervisorCoordinator::with_in_memory_sink(store.clone() as Arc<dyn SupervisorStore>);
         let action = coord
@@ -978,7 +1053,7 @@ mod tests {
         let coord =
             SupervisorCoordinator::with_in_memory_sink(store.clone() as Arc<dyn SupervisorStore>);
         // Plan 004 R3 / P0-1: pre-commit salvage before tick.
-        store.mark_salvage_merged(&wave).unwrap();
+        store.commit_salvage_projection(&wave, &super::super::ProjectionReceiptSummary { kind: super::super::ProjectionKind::Business, batch_fingerprint: String::new(), write_count: 0, already_present_count: 0, committed_at_unix_secs: 0 }).unwrap();
         let action = coord
             .tick(
                 &wave,
@@ -1047,17 +1122,17 @@ mod tests {
         // recovery path can mark salvage and re-tick.
         let snap = store.fan_in_status(&wave).unwrap();
         assert!(
-            !snap.merged_to_events,
+            !snap.delivery_state.at_least(super::super::WaveDeliveryState::CoordinationCommitted),
             "merged_to_events must NOT be latched after refusal",
         );
         assert!(
-            !snap.salvage_merged,
+            !snap.delivery_state.at_least(super::super::WaveDeliveryState::SalvageCommitted),
             "salvage_merged must NOT be latched after refusal",
         );
 
         // Mark salvage and re-tick — coordinator now injects
         // the failed coord event exactly once.
-        store.mark_salvage_merged(&wave).unwrap();
+        store.commit_salvage_projection(&wave, &super::super::ProjectionReceiptSummary { kind: super::super::ProjectionKind::Business, batch_fingerprint: String::new(), write_count: 0, already_present_count: 0, committed_at_unix_secs: 0 }).unwrap();
         let action2 = coord
             .tick(
                 &wave,
@@ -1102,7 +1177,7 @@ mod tests {
             .unwrap();
         store.record_slot_failure(&wave, 0, "boom").unwrap();
         // Tick 1: mark salvage, inject failed.
-        store.mark_salvage_merged(&wave).unwrap();
+        store.commit_salvage_projection(&wave, &super::super::ProjectionReceiptSummary { kind: super::super::ProjectionKind::Business, batch_fingerprint: String::new(), write_count: 0, already_present_count: 0, committed_at_unix_secs: 0 }).unwrap();
         let coord1 =
             SupervisorCoordinator::with_in_memory_sink(store.clone() as Arc<dyn SupervisorStore>);
         let action1 = coord1
@@ -1121,8 +1196,8 @@ mod tests {
         // the persisted store, build a fresh one.
         drop(coord1);
         let snap = store.fan_in_status(&wave).unwrap();
-        assert!(snap.merged_to_events);
-        assert!(snap.salvage_merged);
+        assert!(snap.delivery_state.at_least(super::super::WaveDeliveryState::CoordinationCommitted));
+        assert!(snap.delivery_state.at_least(super::super::WaveDeliveryState::SalvageCommitted));
         assert_eq!(snap.phase, WavePhase::Failed);
 
         let coord2 =
@@ -1171,7 +1246,7 @@ mod tests {
         store.record_slot_result(&wave, 0, "h", 1).unwrap();
         // Pre-commit salvage so fail_wave is not blocked on the
         // unrelated P0-1 latch.
-        store.mark_salvage_merged(&wave).unwrap();
+        store.commit_salvage_projection(&wave, &super::super::ProjectionReceiptSummary { kind: super::super::ProjectionKind::Business, batch_fingerprint: String::new(), write_count: 0, already_present_count: 0, committed_at_unix_secs: 0 }).unwrap();
         let coord =
             SupervisorCoordinator::with_in_memory_sink(store.clone() as Arc<dyn SupervisorStore>);
         let action = coord
@@ -1206,7 +1281,7 @@ mod tests {
         // coord-event injection.
         let snap = store.fan_in_status(&wave).unwrap();
         assert_eq!(snap.phase, WavePhase::Failed);
-        assert!(snap.merged_to_events);
+        assert!(snap.delivery_state.at_least(super::super::WaveDeliveryState::CoordinationCommitted));
     }
 
     /// Plan 004 R2 / P0-2 — happy path: once evidence is

@@ -10,8 +10,8 @@
 #[cfg(test)]
 mod tests {
     use crate::supervisor::{
-        IsolationMode, SlotResource, SlotStatus, SupervisorStoreError, WaveKind, WavePhase,
-        WaveSnapshot,
+        IsolationMode, SlotResource, SlotStatus, SupervisorStoreError, WaveDeliveryState,
+        WaveKind, WavePhase, WaveSnapshot,
     };
     use std::time::SystemTime;
 
@@ -134,8 +134,7 @@ mod tests {
             pending_count: 2,
             in_flight_count: 0,
             cancel_requested: false,
-            merged_to_events: false,
-            salvage_merged: false,
+delivery_state: WaveDeliveryState::CoordinationCommitted,
             started_at: SystemTime::UNIX_EPOCH,
             slots: vec![(0, SlotStatus::Completed), (1, SlotStatus::Failed)],
         };

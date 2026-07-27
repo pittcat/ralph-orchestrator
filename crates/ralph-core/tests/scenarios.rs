@@ -789,7 +789,7 @@ fn run_bdd_supervisor_fan_in(
                     "[bdd-supervisor] record_never_started_failures failed for {wave_id}: {err}"
                 );
             }
-            if let Err(err) = bridge.mark_salvage_merged(&store_id) {
+            if let Err(err) = bridge.commit_salvage_projection(&store_id, &ralph_core::supervisor::ProjectionReceiptSummary { kind: ralph_core::supervisor::ProjectionKind::Business, batch_fingerprint: String::new(), write_count: 0, already_present_count: 0, committed_at_unix_secs: 0 }) {
                 eprintln!("[bdd-supervisor] mark_salvage_merged failed for {wave_id}: {err}");
             }
             PhaseInputs {

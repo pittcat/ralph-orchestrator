@@ -3793,8 +3793,7 @@ event_loop:
             pending_count: 2,
             in_flight_count: 1,
             cancel_requested: false,
-            merged_to_events: false,
-            salvage_merged: false,
+            delivery_state: ralph_core::supervisor::WaveDeliveryState::Pending,
             started_at: std::time::SystemTime::now(),
             slots: vec![(0, ralph_core::supervisor::SlotStatus::Completed)],
         };

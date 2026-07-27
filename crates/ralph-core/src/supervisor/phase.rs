@@ -196,6 +196,7 @@ impl WaveSnapshotExt for WaveSnapshot {
 
 #[cfg(test)]
 mod tests {
+    use super::super::WaveDeliveryState;
     use super::*;
     use crate::supervisor::{SlotStatus, WaveKind, WavePhase};
 
@@ -278,8 +279,7 @@ mod tests {
             pending_count: pending,
             in_flight_count: in_flight,
             cancel_requested: cancel,
-            merged_to_events: false,
-            salvage_merged: false,
+delivery_state: WaveDeliveryState::CoordinationCommitted,
             started_at: std::time::SystemTime::UNIX_EPOCH,
             slots,
         };
@@ -468,8 +468,7 @@ mod tests {
             pending_count: 1,
             in_flight_count: 0,
             cancel_requested: false,
-            merged_to_events: false,
-            salvage_merged: false,
+delivery_state: WaveDeliveryState::CoordinationCommitted,
             // U3: pop the slot list. The failed slot is
             // index 1; the completed + pending ones do NOT
             // appear in `blocking_slot_indices`.
@@ -504,8 +503,7 @@ mod tests {
             pending_count: 0,
             in_flight_count: 0,
             cancel_requested: false,
-            merged_to_events: false,
-            salvage_merged: false,
+delivery_state: WaveDeliveryState::CoordinationCommitted,
             started_at: std::time::SystemTime::UNIX_EPOCH,
             slots: vec![
                 (0, SlotStatus::Failed),
@@ -531,8 +529,7 @@ mod tests {
             pending_count: 0,
             in_flight_count: 0,
             cancel_requested: false,
-            merged_to_events: false,
-            salvage_merged: false,
+delivery_state: WaveDeliveryState::CoordinationCommitted,
             started_at: std::time::SystemTime::UNIX_EPOCH,
             slots: vec![(0, SlotStatus::Completed), (1, SlotStatus::Completed)],
         };
@@ -593,8 +590,7 @@ mod tests {
             pending_count: 2,
             in_flight_count: 2,
             cancel_requested: false,
-            merged_to_events: false,
-            salvage_merged: false,
+delivery_state: WaveDeliveryState::CoordinationCommitted,
             started_at: std::time::SystemTime::UNIX_EPOCH,
             slots: Vec::new(),
         };
@@ -634,8 +630,7 @@ mod tests {
             pending_count: 1,
             in_flight_count: 1,
             cancel_requested: false,
-            merged_to_events: false,
-            salvage_merged: false,
+delivery_state: WaveDeliveryState::CoordinationCommitted,
             started_at: std::time::SystemTime::UNIX_EPOCH,
             slots: vec![(0, SlotStatus::Dispatched), (1, SlotStatus::Pending)],
         };
@@ -661,8 +656,7 @@ mod tests {
             pending_count: 2,
             in_flight_count: 0,
             cancel_requested: false,
-            merged_to_events: false,
-            salvage_merged: false,
+delivery_state: WaveDeliveryState::CoordinationCommitted,
             started_at: std::time::SystemTime::UNIX_EPOCH,
             slots: vec![
                 (0, SlotStatus::Pending),
@@ -692,8 +686,7 @@ mod tests {
             pending_count: 3,
             in_flight_count: 0,
             cancel_requested: false,
-            merged_to_events: false,
-            salvage_merged: false,
+delivery_state: WaveDeliveryState::CoordinationCommitted,
             started_at: std::time::SystemTime::UNIX_EPOCH,
             slots: vec![
                 (0, SlotStatus::Pending),
@@ -724,8 +717,7 @@ mod tests {
             pending_count: 0,
             in_flight_count: 0,
             cancel_requested: false,
-            merged_to_events: false,
-            salvage_merged: false,
+delivery_state: WaveDeliveryState::CoordinationCommitted,
             started_at: std::time::SystemTime::UNIX_EPOCH,
             slots: vec![(0, SlotStatus::Completed), (1, SlotStatus::Failed)],
         };
