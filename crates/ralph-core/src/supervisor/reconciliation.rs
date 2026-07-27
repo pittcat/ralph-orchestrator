@@ -49,7 +49,7 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 
 use serde::{Deserialize, Serialize};
 
-use crate::supervisor::{SlotStatus, TerminalEvidence, WaveSnapshot};
+use crate::supervisor::{SlotStatus, TerminalEvidence, WaveDeliveryState, WaveSnapshot};
 
 /// Stable, machine-readable conflict category for the `reason` field of
 /// `*.wave.failed`. Surfaced as the public reason in dispatcher
@@ -652,8 +652,11 @@ mod tests {
             pending_count: 0,
             in_flight_count: 0,
             cancel_requested: false,
-            merged_to_events: false,
-            salvage_merged: false,
+            // U5: `salvage_merged` / `merged_to_events` booleans
+            // removed; superseded by `WaveDeliveryState` +
+            // receipt summaries on the persistence side.
+            // Reconciliation observes slot status only.
+            delivery_state: WaveDeliveryState::Pending,
             started_at: std::time::SystemTime::UNIX_EPOCH,
             slots,
         }
