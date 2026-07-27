@@ -1,6 +1,7 @@
 //! CLI commands for the `ralph preset` namespace.
 //!
-//! Preset template authoring and preset contract validation.
+//! Preset template authoring, preset contract validation, and builtin
+//! **artifact** template materialization (binary-only installs).
 //!
 //! Subcommands:
 //! - `list`: List available workflow templates
@@ -9,6 +10,10 @@
 //! - `check`: Run preset/workflow contract validation (config, topology, payload, orphan)
 //! - `diff`: Show differences between a local preset and its template baseline
 //! - `upgrade`: Preview upgrade information for a local preset
+//! - `materialize-artifacts`: Write embedded artifact templates to disk
+//!   (e.g. parallel-forge development-plan / unit / manager-report templates).
+//!   Distinct from `new`: `new` scaffolds a **preset YAML**; this command
+//!   extracts **runtime fill-in templates** that hats copy into `.ralph/forge/`.
 
 use crate::display::colors;
 use crate::preflight;
@@ -89,6 +94,19 @@ pub enum PresetCommands {
         /// Force: apply upgrade even if there are user changes (not implemented in MVP)
         #[arg(long)]
         force: bool,
+    },
+    /// Materialize embedded artifact templates for a builtin preset (works on binary-only installs)
+    MaterializeArtifacts {
+        /// Builtin preset name (e.g. parallel-forge or builtin:parallel-forge)
+        preset: String,
+
+        /// Plan key basename; default output is .ralph/forge/<plan-key>/templates/
+        #[arg(long)]
+        plan_key: String,
+
+        /// Override output directory
+        #[arg(long)]
+        dest: Option<PathBuf>,
     },
 }
 
@@ -193,6 +211,11 @@ pub async fn execute(
             }
             upgrade_preset(&file, format, use_colors)
         }
+        Some(PresetCommands::MaterializeArtifacts {
+            preset,
+            plan_key,
+            dest,
+        }) => materialize_artifacts(&preset, &plan_key, dest.as_deref(), use_colors),
         None => {
             // Default to list with current config
             list_templates(PresetListFormat::Human, use_colors)
@@ -203,6 +226,59 @@ pub async fn execute(
 // ─────────────────────────────────────────────────────────────────────────────
 // Template authoring commands (U3: list/show/new)
 // ─────────────────────────────────────────────────────────────────────────────
+
+/// Materialize embedded artifact templates for a builtin preset.
+///
+/// # Agent / operator contract
+///
+/// - Works on **binary-only** installs (no `presets/templates/` checkout).
+/// - Default dest: `.ralph/forge/<plan-key>/templates/` (cwd-relative).
+/// - Hats (`planner` / `executor` / `reporter` on parallel-forge) must run
+///   this (or find an existing templates dir) **before** copying templates
+///   into business artifact paths.
+/// - Idempotent overwrite; safe to re-run in later activations.
+fn materialize_artifacts(
+    preset: &str,
+    plan_key: &str,
+    dest: Option<&std::path::Path>,
+    use_colors: bool,
+) -> Result<()> {
+    use crate::builtin_artifact_templates::{default_forge_templates_dir, materialize};
+
+    if plan_key.is_empty() {
+        anyhow::bail!("--plan-key must not be empty");
+    }
+    if plan_key.contains('/') || plan_key.contains('\\') || plan_key.contains("..") {
+        anyhow::bail!(
+            "--plan-key must be a single path segment (no slashes or '..'); got {plan_key:?}"
+        );
+    }
+
+    let dest_dir = dest
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| default_forge_templates_dir(plan_key));
+
+    let written = materialize(preset, &dest_dir)?;
+    if use_colors {
+        println!(
+            "{}✓{} Wrote {} artifact template(s) to {}",
+            colors::GREEN,
+            colors::RESET,
+            written.len(),
+            dest_dir.display()
+        );
+    } else {
+        println!(
+            "Wrote {} artifact template(s) to {}",
+            written.len(),
+            dest_dir.display()
+        );
+    }
+    for path in written {
+        println!("  {}", path.display());
+    }
+    Ok(())
+}
 
 fn list_templates(format: PresetListFormat, use_colors: bool) -> Result<()> {
     let templates = TemplateCatalog::template_names();
@@ -2634,5 +2710,52 @@ event_loop:
         assert_eq!(report1.passed, report2.passed);
         assert_eq!(report1.errors, report2.errors);
         assert_eq!(report1.warnings, report2.warnings);
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// materialize-artifacts CLI helper tests
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod materialize_artifacts_tests {
+    use super::materialize_artifacts;
+    use std::fs;
+
+    #[test]
+    fn rejects_empty_plan_key() {
+        let err = materialize_artifacts("parallel-forge", "", None, false).unwrap_err();
+        assert!(err.to_string().contains("plan-key"));
+    }
+
+    #[test]
+    fn rejects_plan_key_with_path_separators() {
+        let err =
+            materialize_artifacts("parallel-forge", "a/b", None, false).unwrap_err();
+        assert!(err.to_string().contains("path segment"));
+        let err =
+            materialize_artifacts("parallel-forge", "..", None, false).unwrap_err();
+        assert!(err.to_string().contains("path segment"));
+    }
+
+    #[test]
+    fn writes_to_explicit_dest() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dest = tmp.path().join("out");
+        materialize_artifacts("parallel-forge", "any-key", Some(&dest), false)
+            .expect("materialize");
+        assert!(dest.join("development-plan.template.md").is_file());
+        assert!(dest.join("unit.template.yml").is_file());
+        let body = fs::read_to_string(dest.join("development-plan.template.md")).unwrap();
+        assert!(body.contains("## 3. BDD 行为规格"));
+    }
+
+    #[test]
+    fn unknown_preset_fails() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dest = tmp.path().join("out");
+        let err =
+            materialize_artifacts("not-a-preset", "k", Some(&dest), false).unwrap_err();
+        assert!(err.to_string().contains("no embedded artifact templates"));
     }
 }

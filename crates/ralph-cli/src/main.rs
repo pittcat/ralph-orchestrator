@@ -33,6 +33,7 @@ mod policy_check;
 mod preflight;
 mod preset_merge_table;
 mod preset_templates;
+mod builtin_artifact_templates;
 mod presets;
 mod rpc_stdin;
 mod skill_cli;

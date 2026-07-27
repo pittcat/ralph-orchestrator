@@ -195,6 +195,110 @@ fn main() {
         copied,
         names.len()
     );
+
+    copy_artifact_templates(&manifest_dir, &out_dir);
+}
+
+/// Copy `presets/templates/<preset>/` trees into `$OUT_DIR` for `include_str!`.
+///
+/// These are **runtime artifact templates** (development-plan / unit YAML /
+/// manager report), not `ralph preset new` workflow scaffolds. They ship
+/// inside the binary so binary-only installs can run:
+/// `ralph preset materialize-artifacts <preset> --plan-key <key>`.
+///
+/// Fail-closed: if the source directory is missing or empty, panic so the
+/// release binary cannot silently omit templates that hats depend on.
+fn copy_artifact_templates(manifest_dir: &str, out_dir: &str) {
+    let templates_root = PathBuf::from(manifest_dir)
+        .join("..")
+        .join("..")
+        .join("presets")
+        .join("templates");
+    let parallel_forge_src = templates_root.join("parallel-forge");
+    let dest_root = PathBuf::from(out_dir).join("artifact-templates");
+
+    // Required set must stay in sync with
+    // `builtin_artifact_templates::PARALLEL_FORGE_TEMPLATE_NAMES`.
+    const REQUIRED: &[&str] = &[
+        "development-plan.template.md",
+        "unit.template.yml",
+        "execution-plan.template.yml",
+        "unit-completion.template.md",
+        "manager-report.template.md",
+        "README.md",
+    ];
+
+    if !parallel_forge_src.is_dir() {
+        panic!(
+            "build.rs: required artifact templates dir missing: {} \
+             (needed for ralph preset materialize-artifacts)",
+            parallel_forge_src.display()
+        );
+    }
+
+    println!(
+        "cargo:rerun-if-changed={}",
+        parallel_forge_src.display()
+    );
+
+    let dest = dest_root.join("parallel-forge");
+    if let Err(e) = fs::create_dir_all(&dest) {
+        panic!(
+            "build.rs: failed to create {}: {}",
+            dest.display(),
+            e
+        );
+    }
+
+    let mut copied = 0usize;
+    for entry in fs::read_dir(&parallel_forge_src).unwrap_or_else(|e| {
+        panic!(
+            "build.rs: failed to read {}: {}",
+            parallel_forge_src.display(),
+            e
+        )
+    }) {
+        let entry = entry.unwrap_or_else(|e| panic!("build.rs: read_dir entry: {}", e));
+        if !entry.file_type().unwrap().is_file() {
+            continue;
+        }
+        let file_name = entry.file_name();
+        let dest_file = dest.join(&file_name);
+        println!("cargo:rerun-if-changed={}", entry.path().display());
+        fs::copy(entry.path(), &dest_file).unwrap_or_else(|e| {
+            panic!(
+                "build.rs: failed to copy {} -> {}: {}",
+                entry.path().display(),
+                dest_file.display(),
+                e
+            )
+        });
+        copied += 1;
+    }
+
+    for required in REQUIRED {
+        let path = dest.join(required);
+        if !path.is_file() {
+            panic!(
+                "build.rs: required parallel-forge artifact template missing after copy: {}",
+                path.display()
+            );
+        }
+    }
+
+    if copied < REQUIRED.len() {
+        panic!(
+            "build.rs: expected at least {} parallel-forge templates, copied {}",
+            REQUIRED.len(),
+            copied
+        );
+    }
+
+    eprintln!(
+        "build.rs: copied {} parallel-forge artifact template(s) to {}",
+        copied,
+        dest.display()
+    );
 }
 
 /// Minimal `presets/manifest.yml` parser.
