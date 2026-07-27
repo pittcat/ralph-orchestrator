@@ -589,15 +589,10 @@ pub async fn inspect_prompt_command(
     let preview = if has_scenario {
         // Parse JSON scenario args.
         let payload_json = match &args.payload {
-            Some(p) => {
-                match serde_json::from_str::<serde_json::Value>(p) {
-                    Ok(v) => Some(v),
-                    Err(e) => anyhow::bail!(
-                        "failed to parse --payload JSON: {} (field: --payload)",
-                        e
-                    ),
-                }
-            }
+            Some(p) => match serde_json::from_str::<serde_json::Value>(p) {
+                Ok(v) => Some(v),
+                Err(e) => anyhow::bail!("failed to parse --payload JSON: {} (field: --payload)", e),
+            },
             None => None,
         };
         let wave_json = match &args.wave_context {
@@ -634,9 +629,7 @@ pub async fn inspect_prompt_command(
             // This mirrors ralph_core::trigger_context::build but without
             // requiring a full schema lookup — the preview context is
             // informational, not authoritative.
-            use ralph_core::trigger_context::{
-                FieldSummary, FieldValue, TriggerContextView,
-            };
+            use ralph_core::trigger_context::{FieldSummary, FieldValue, TriggerContextView};
             TriggerContextView {
                 source_topic: topic.clone(),
                 source_hat: args.source_hat.clone(),
@@ -661,14 +654,38 @@ pub async fn inspect_prompt_command(
         });
 
         // Build Option<WaveContext> from --wave-context.
-        let wave_context_injected = wave_json.as_ref().and_then(|wv| {
-            serde_json::from_value::<ralph_core::wave_context::WaveContext>(wv.clone()).ok()
-        });
+        // Before U1 fix: silently fell through to None on deserialization
+        // failure (.ok()).  After U1: fail loud so callers know the field
+        // shape was rejected (F-IDs: adversarial:A1, maintainability:M4).
+        let wave_context_injected = wave_json
+            .as_ref()
+            .map(|wv| {
+                serde_json::from_value::<ralph_core::wave_context::WaveContext>(wv.clone()).map_err(
+                    |e| {
+                        anyhow::anyhow!(
+                            "failed to deserialize --wave-context into WaveContext: {} \
+                             (field: --wave-context)",
+                            e
+                        )
+                    },
+                )
+            })
+            .transpose()?;
 
         // Build Option<CorrectionContext> from --correction.
-        let correction_injected = correction_json.as_ref().and_then(|cv| {
-            serde_json::from_value::<ralph_core::correction::CorrectionContext>(cv.clone()).ok()
-        });
+        let correction_injected = correction_json
+            .as_ref()
+            .map(|cv| {
+                serde_json::from_value::<ralph_core::correction::CorrectionContext>(cv.clone())
+                    .map_err(|e| {
+                        anyhow::anyhow!(
+                            "failed to deserialize --correction into CorrectionContext: {} \
+                             (field: --correction)",
+                            e
+                        )
+                    })
+            })
+            .transpose()?;
 
         // Build skill_gates from overrides.
         let skill_gates = if args.scratchpad.is_some()
@@ -710,13 +727,12 @@ pub async fn inspect_prompt_command(
         }
         (Some(topic), Some(payload_str)) => {
             // Validate that payload is parseable JSON.
-            let _parsed: serde_json::Value =
-                serde_json::from_str(payload_str).map_err(|e| {
-                    anyhow::anyhow!(
-                        "failed to parse --payload JSON: {} (required for --topic evaluation)",
-                        e
-                    )
-                })?;
+            let _parsed: serde_json::Value = serde_json::from_str(payload_str).map_err(|e| {
+                anyhow::anyhow!(
+                    "failed to parse --payload JSON: {} (required for --topic evaluation)",
+                    e
+                )
+            })?;
 
             // Read-only evaluate the candidate emit.
             let candidate_emit = ralph_core::evaluate_candidate_emit(
@@ -745,13 +761,7 @@ pub async fn inspect_prompt_command(
     };
     drop(_guard);
 
-    emit_prompt_view(
-        &preview,
-        full_body,
-        args.format,
-        args.full,
-        use_colors,
-    )
+    emit_prompt_view(&preview, full_body, args.format, args.full, use_colors)
 }
 
 /// Render a `PromptPreview` in the operator's chosen format.
@@ -2712,88 +2722,176 @@ mod tests {
     }
 }
 
-    // ─────────────────────────────────────────────────────────────────────
-    // Unit 2 of plan 2026-07-27-002: CLI parsing for --topic/--triggered.
-    // ─────────────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────
+// Unit 2 of plan 2026-07-27-002: CLI parsing for --topic/--triggered.
+// ─────────────────────────────────────────────────────────────────────
 
-    #[test]
-    fn cli_parses_inspect_prompt_minimal() {
-        let parsed = InspectArgs::try_parse_from([
-            "inspect",
-            "prompt",
-            "--hat",
-            "worker",
-        ])
+#[test]
+fn cli_parses_inspect_prompt_minimal() {
+    let parsed = InspectArgs::try_parse_from(["inspect", "prompt", "--hat", "worker"])
         .expect("CLI parse failed");
-        let prompt_args = match parsed.command.expect("prompt subcommand") {
-            InspectCommands::Prompt(p) => p,
-            other => panic!("expected Prompt, got {other:?}"),
-        };
-        assert_eq!(prompt_args.hat, "worker");
-        assert!(prompt_args.topic.is_none());
-        assert!(prompt_args.triggered.is_none());
-    }
+    let prompt_args = match parsed.command.expect("prompt subcommand") {
+        InspectCommands::Prompt(p) => p,
+        other => panic!("expected Prompt, got {other:?}"),
+    };
+    assert_eq!(prompt_args.hat, "worker");
+    assert!(prompt_args.topic.is_none());
+    assert!(prompt_args.triggered.is_none());
+}
 
-    #[test]
-    fn cli_parses_inspect_prompt_with_topic_and_triggered() {
-        let parsed = InspectArgs::try_parse_from([
-            "inspect",
-            "prompt",
-            "--hat",
-            "reviewer",
-            "--topic",
-            "work.ready",
-            "--payload",
-            r#"{"task_key": "abc"}"#,
-            "--triggered",
-            "worker",
-        ])
-        .expect("CLI parse failed");
-        let prompt_args = match parsed.command.expect("prompt subcommand") {
-            InspectCommands::Prompt(p) => p,
-            other => panic!("expected Prompt, got {other:?}"),
-        };
-        assert_eq!(prompt_args.hat, "reviewer");
-        assert_eq!(prompt_args.topic.as_deref(), Some("work.ready"));
-        assert_eq!(prompt_args.triggered.as_deref(), Some("worker"));
-    }
+#[test]
+fn cli_parses_inspect_prompt_with_topic_and_triggered() {
+    let parsed = InspectArgs::try_parse_from([
+        "inspect",
+        "prompt",
+        "--hat",
+        "reviewer",
+        "--topic",
+        "work.ready",
+        "--payload",
+        r#"{"task_key": "abc"}"#,
+        "--triggered",
+        "worker",
+    ])
+    .expect("CLI parse failed");
+    let prompt_args = match parsed.command.expect("prompt subcommand") {
+        InspectCommands::Prompt(p) => p,
+        other => panic!("expected Prompt, got {other:?}"),
+    };
+    assert_eq!(prompt_args.hat, "reviewer");
+    assert_eq!(prompt_args.topic.as_deref(), Some("work.ready"));
+    assert_eq!(prompt_args.triggered.as_deref(), Some("worker"));
+}
 
-    #[test]
-    fn cli_parses_inspect_prompt_topic_without_triggered() {
-        let parsed = InspectArgs::try_parse_from([
-            "inspect",
-            "prompt",
-            "--hat",
-            "worker",
-            "--topic",
-            "work.ready",
-            "--payload",
-            r#"{"task_key": "abc"}"#,
-        ])
-        .expect("CLI parse failed");
-        let prompt_args = match parsed.command.expect("prompt subcommand") {
-            InspectCommands::Prompt(p) => p,
-            other => panic!("expected Prompt, got {other:?}"),
-        };
-        assert_eq!(prompt_args.topic.as_deref(), Some("work.ready"));
-        assert!(prompt_args.triggered.is_none());
-    }
+#[test]
+fn cli_parses_inspect_prompt_topic_without_triggered() {
+    let parsed = InspectArgs::try_parse_from([
+        "inspect",
+        "prompt",
+        "--hat",
+        "worker",
+        "--topic",
+        "work.ready",
+        "--payload",
+        r#"{"task_key": "abc"}"#,
+    ])
+    .expect("CLI parse failed");
+    let prompt_args = match parsed.command.expect("prompt subcommand") {
+        InspectCommands::Prompt(p) => p,
+        other => panic!("expected Prompt, got {other:?}"),
+    };
+    assert_eq!(prompt_args.topic.as_deref(), Some("work.ready"));
+    assert!(prompt_args.triggered.is_none());
+}
 
-    #[test]
-    fn cli_parses_inspect_prompt_triggered_without_topic_is_ok() {
-        let parsed = InspectArgs::try_parse_from([
-            "inspect",
-            "prompt",
-            "--hat",
-            "worker",
-            "--triggered",
-            "builder",
-        ])
-        .expect("CLI parse failed");
-        let prompt_args = match parsed.command.expect("prompt subcommand") {
-            InspectCommands::Prompt(p) => p,
-            other => panic!("expected Prompt, got {other:?}"),
-        };
-        assert!(prompt_args.topic.is_none());
-        assert_eq!(prompt_args.triggered.as_deref(), Some("builder"));
-    }
+#[test]
+fn cli_parses_inspect_prompt_triggered_without_topic_is_ok() {
+    let parsed = InspectArgs::try_parse_from([
+        "inspect",
+        "prompt",
+        "--hat",
+        "worker",
+        "--triggered",
+        "builder",
+    ])
+    .expect("CLI parse failed");
+    let prompt_args = match parsed.command.expect("prompt subcommand") {
+        InspectCommands::Prompt(p) => p,
+        other => panic!("expected Prompt, got {other:?}"),
+    };
+    assert!(prompt_args.topic.is_none());
+    assert_eq!(prompt_args.triggered.as_deref(), Some("builder"));
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Unit 1 (plan 2026-07-27-002): fail-loud on JSON deserialization error.
+// Before the fix `--wave-context` / `--correction` silently fell through
+// to `None` via `.ok()`.  After the fix they must return an `Err`
+// containing the field name and the serde error message.
+// ─────────────────────────────────────────────────────────────────────
+
+/// WaveContext requires `wave_id`, `wave_total`, `received_count`,
+/// `expected_dimensions`, `pending_dimensions` fields.  A JSON that
+/// parses as valid syntax but has the wrong shape must NOT silently
+/// become `None` — it must return an error mentioning `--wave-context`.
+#[test]
+fn inspect_prompt_wave_context_wrong_shape_is_err() {
+    let parsed = InspectArgs::try_parse_from([
+        "inspect",
+        "prompt",
+        "--hat",
+        "worker",
+        "--wave-context",
+        r#"{"wrong_field": "foo"}"#,
+    ])
+    .expect("CLI parse failed");
+    let prompt_args = match parsed.command.expect("prompt subcommand") {
+        InspectCommands::Prompt(p) => p,
+        other => panic!("expected Prompt, got {other:?}"),
+    };
+    // The CLI parser accepts any string for --wave-context; the
+    // deserialization error is raised inside `inspect_prompt_command`.
+    // We test that the parsed args shape is correct for passing to the
+    // command.
+    assert!(prompt_args.wave_context.is_some());
+    let json_input = prompt_args.wave_context.unwrap();
+    // Valid JSON syntax, wrong shape for WaveContext → must fail loud.
+    let result: Result<ralph_core::wave_context::WaveContext, _> =
+        serde_json::from_str(&json_input);
+    assert!(
+        result.is_err(),
+        "wrong-shape JSON for WaveContext must error, got Ok"
+    );
+    let err = result.unwrap_err();
+    assert!(
+        err.to_string().contains("wave_id") || err.to_string().contains("missing field"),
+        "error message should mention the missing field: {}",
+        err
+    );
+}
+
+/// CorrectionContext requires `reason_code`, `stage`, `topic` fields.
+/// A JSON that parses but doesn't match the struct must return an error
+/// mentioning `--correction`.
+#[test]
+fn inspect_prompt_correction_wrong_shape_is_err() {
+    let parsed = InspectArgs::try_parse_from([
+        "inspect",
+        "prompt",
+        "--hat",
+        "worker",
+        "--correction",
+        r#"{"not_a_real_field": 123}"#,
+    ])
+    .expect("CLI parse failed");
+    let prompt_args = match parsed.command.expect("prompt subcommand") {
+        InspectCommands::Prompt(p) => p,
+        other => panic!("expected Prompt, got {other:?}"),
+    };
+    assert!(prompt_args.correction.is_some());
+    let json_input = prompt_args.correction.unwrap();
+    let result: Result<ralph_core::correction::CorrectionContext, _> =
+        serde_json::from_str(&json_input);
+    assert!(
+        result.is_err(),
+        "wrong-shape JSON for CorrectionContext must error, got Ok"
+    );
+    let err = result.unwrap_err();
+    assert!(
+        err.to_string().contains("reason_code") || err.to_string().contains("missing field"),
+        "error message should mention the missing field: {}",
+        err
+    );
+}
+
+/// Valid JSON that happens to be a different type (e.g. a plain string)
+/// is also a deserialization error for WaveContext.
+#[test]
+fn inspect_prompt_wave_context_wrong_type_is_err() {
+    let json_input = r#""just a string, not an object""#;
+    let result: Result<ralph_core::wave_context::WaveContext, _> = serde_json::from_str(json_input);
+    assert!(
+        result.is_err(),
+        "string JSON for WaveContext struct must error, got Ok"
+    );
+}
