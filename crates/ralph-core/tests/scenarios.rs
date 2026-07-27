@@ -1919,6 +1919,24 @@ fn test_implementation_review_wave_failed_runtime_fan_in() {
     run_workflow_guard_scenario(yaml);
 }
 
+/// 2026-07-27-003 plan U7: production seam proof for the failed path
+/// in the same shape as `test_implementation_review_wave_failed_runtime_fan_in`
+/// (U2 Green 2b), but specialized to the U7 smallest-meaningful salvage
+/// baseline (1 of 6 slots) so the absent_events coverage and
+/// event_topic_counts pins survive a future regression that silently
+/// reduces the missing-dimension floor or adds a fallback synth route.
+///
+/// Complement to `test_implementation_review_wave_runtime_fan_in` (U2
+/// Green 2a, success). Together they form the U7 path-2 BDD proof that
+/// `finalizer` is the ONLY hat activated after `review.wave.failed` —
+/// `review-synthesizer`/`fix-planner` never fire on the failed path.
+#[test]
+fn test_implementation_review_wave_runtime_failed_fan_in() {
+    let yaml =
+        load_scenario("tests/scenarios/implementation_review_wave_runtime_failed_fan_in.yml");
+    run_workflow_guard_scenario(yaml);
+}
+
 /// 2026-07-24-003 plan U8 / S1: Apply → Confirm happy path through
 /// the real EventLoop runner. The wave event flows from
 /// `work.done` through the dispatcher to `review.wave.ready`
