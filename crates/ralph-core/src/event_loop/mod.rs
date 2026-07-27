@@ -13957,7 +13957,15 @@ impl EventLoop {
         let path = std::path::Path::new(&self.config.core.workspace_root)
             .join(".ralph/flow-authority.jsonl");
         if let Some(parent) = path.parent() {
-            let _ = std::fs::create_dir_all(parent);
+            if let Err(err) = std::fs::create_dir_all(parent) {
+                tracing::warn!(
+                    workspace = %self.config.core.workspace_root.display(),
+                    path = %path.display(),
+                    error = %err,
+                    "failed to create flow-authority parent directory"
+                );
+                return;
+            }
         }
         let mut entry = serde_json::Map::new();
         entry.insert(
@@ -13974,9 +13982,21 @@ impl EventLoop {
             .append(true)
             .open(&path)
         else {
+            tracing::warn!(
+                workspace = %self.config.core.workspace_root.display(),
+                path = %path.display(),
+                "failed to open flow-authority ledger for append"
+            );
             return;
         };
-        let _ = writeln!(f, "{line}");
+        if let Err(err) = writeln!(f, "{line}") {
+            tracing::warn!(
+                workspace = %self.config.core.workspace_root.display(),
+                path = %path.display(),
+                error = %err,
+                "failed to append flow-authority snapshot"
+            );
+        }
     }
 
     pub(crate) fn record_stage_rejection(

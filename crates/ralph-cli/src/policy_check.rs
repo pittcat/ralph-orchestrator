@@ -24,6 +24,7 @@ use std::path::{Path, PathBuf};
 
 use crate::cli::{ConfigSource, load_config_with_overrides, resolve_workspace_root};
 use crate::config_resolution;
+use crate::operation_guard::OperationContext;
 use ralph_core::config::HatExecutionMode;
 use ralph_core::config::{EventFieldDoc, EventSchema, PayloadType};
 use ralph_core::emit_schema_hint;
@@ -1023,10 +1024,11 @@ pub fn run_policy_check_unified(
 
     // 2026-07-26-004 plan U7 (R7 / S7): enforce the SAME flow-step
     // scope the resident EventLoop applies, using the single recovered
-    // current-step authority (`recover_current_plan_step` folded over
-    // the replayed ledger). Before this, `--policy-check` evaluated the
-    // topic against the flow's first step while the loop had advanced —
-    // the primary-20260726 `flow_unknown_emit` after `scope.ready`.
+    // current-step authority. When the accepted-step ledger exists, that
+    // is the source of truth; otherwise, if `.ralph/current-events`
+    // points at an active main ledger, replay that ledger's accepted
+    // topic sequence. Falling all the way back to the static workspace
+    // snapshot is only correct when no active main ledger exists.
     if let Some(cfg) = config.as_ref()
         && let Some(reason_code) = check_cli_flow_step_scope(
             cfg,
@@ -1081,16 +1083,22 @@ fn check_cli_flow_step_scope(
     // the legacy topic-replay path, because external replay inputs
     // are expected to already represent the accepted sequence the
     // caller wants to validate.
+    let default_events_path = workspace_root.join(".ralph/events.jsonl");
+    let active_main_ledger = OperationContext::detect(workspace_root.to_path_buf())
+        .resolve_accepted_events_path()
+        .unwrap_or_else(|| default_events_path.clone());
     let current = if let Some(step) = load_flow_authority_current_step(workspace_root) {
         if step.is_empty() {
             recover_from_workspace_state(config, workspace_root)
         } else {
             step
         }
-    } else if events_file.is_none_or(|p| p == workspace_root.join(".ralph/events.jsonl")) {
-        recover_from_workspace_state(config, workspace_root)
+    } else if let Some(events_path) = events_file {
+        recover_from_topics(config, workspace_root, Some(events_path))
+    } else if active_main_ledger != default_events_path {
+        recover_from_topics(config, workspace_root, Some(active_main_ledger.as_path()))
     } else {
-        recover_from_topics(config, workspace_root, events_file)
+        recover_from_workspace_state(config, workspace_root)
     };
     if current.is_empty() {
         return None;
@@ -3267,6 +3275,81 @@ event_loop:
         assert_eq!(
             admit, None,
             "CLI policy-check must agree with the recovered review_wave step"
+        );
+    }
+
+    /// Regression for the active-main-ledger case: when `.ralph/current-events`
+    /// points at a timestamped main ledger, policy-check must recover the
+    /// current step from that accepted ledger instead of falling back to the
+    /// static `.ralph/events.jsonl` file.
+    #[test]
+    fn u7_policy_check_uses_current_events_marker_for_active_main_ledger() {
+        use ralph_core::config::{
+            EventLoopConfig, FlowDeclarationConfig, FlowStepConfig, MechanismConfig, RalphConfig,
+        };
+        let mk = |id: &str,
+                  allowed: Vec<&str>,
+                  on: Option<&str>,
+                  on_any_of: Vec<&str>|
+         -> FlowStepConfig {
+            FlowStepConfig {
+                id: id.to_string(),
+                kind: None,
+                allowed_emits: allowed.into_iter().map(String::from).collect(),
+                terminal_when: None,
+                on_partial: std::collections::BTreeMap::new(),
+                runs: None,
+                on: on.map(String::from),
+                on_any_of: on_any_of.into_iter().map(String::from).collect(),
+            }
+        };
+        let mut cfg = RalphConfig::default();
+        cfg.event_loop = EventLoopConfig {
+            mechanism: Some(MechanismConfig {
+                flow: Some(FlowDeclarationConfig {
+                    flow_type: "declared".to_string(),
+                    version: 1,
+                    terminal_emits: vec!["LOOP_COMPLETE".to_string()],
+                    steps: vec![
+                        mk("scope_freeze", vec!["scope.ready"], None, vec![]),
+                        mk(
+                            "review_wave",
+                            vec!["review.unit.done"],
+                            Some("scope.ready"),
+                            vec![],
+                        ),
+                    ],
+                    repair_budget: 3,
+                    enforce_schema: "hard".to_string(),
+                    state_idempotency: "required".to_string(),
+                }),
+                phase_authority: None,
+            }),
+            ..EventLoopConfig::default()
+        };
+
+        let ws = tempfile::tempdir().expect("tempdir");
+        std::fs::create_dir_all(ws.path().join(".ralph")).expect("mkdir .ralph");
+        let active_events = ws.path().join(".ralph/events-20260727-023002.jsonl");
+        std::fs::write(&active_events, "{\"topic\":\"scope.ready\"}\n")
+            .expect("write active main ledger");
+        std::fs::write(
+            ws.path().join(".ralph/current-events"),
+            " .ralph/events-20260727-023002.jsonl\n",
+        )
+        .expect("write current-events marker");
+
+        let admit = check_cli_flow_step_scope(
+            &cfg,
+            ws.path(),
+            None,
+            "review.unit.done",
+            Some("review-worker"),
+            Some("{}"),
+        );
+        assert_eq!(
+            admit, None,
+            "policy-check must recover review_wave from the current-events marker"
         );
     }
 

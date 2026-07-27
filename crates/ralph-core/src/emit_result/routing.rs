@@ -73,10 +73,9 @@ pub fn resolve_emit_routing_from_config(
 }
 
 fn load_ledger_workflow_phase(workspace: &Path) -> Option<PhaseSnapshot> {
-    let events_path = workspace.join(".ralph/events.jsonl");
-    if !events_path.exists() {
-        return None;
-    }
+    // Replay the ledger unconditionally. The commit log itself decides
+    // whether there is any workflow phase to recover; the default
+    // `.ralph/events.jsonl` file is not a validity gate here.
     StateLedger::replay_from_disk(workspace)
         .ok()
         .and_then(|snap| snap.workflow_phase)
