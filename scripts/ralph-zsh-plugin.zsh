@@ -20,6 +20,7 @@ for _ralph_fn in \
   _ralph_init_args \
   _ralph_events_args \
   _ralph_clean_args \
+  _ralph_capability_args \
   _ralph_emit_args \
   _ralph_plan_args \
   _ralph_code_task_args \
@@ -127,6 +128,7 @@ _RALPH_COMMANDS=(
   "events:View event history for debugging"
   "init:Initialize new ralph.yml configuration file"
   "clean:Clean up Ralph artifacts from .ralph/agent"
+  "capability:List preset-facing capabilities (read-only inventory)"
   "emit:Emit an event to the current run's events file with proper JSON formatting"
   "plan:Start a Prompt-Driven Development planning session"
   "code-task:Generate code task files from descriptions or plans"
@@ -381,6 +383,13 @@ _ralph() {
             esac
           fi
           ;;
+        capability)
+          if (( CURRENT == 2 )); then
+            _describe 'capability command' _RALPH_CAPABILITY_CMDS
+          else
+            _ralph_capability_args
+          fi
+          ;;
         tui)
           _ralph_tui_args
           ;;
@@ -601,6 +610,13 @@ _RALPH_INSPECT_CMDS=(
   "prompt:Preview hat prompt rendering (auto-inject + on-demand + block titles; OPAC Observe)"
 )
 
+# =============================================================================
+# Capability Subcommands
+# =============================================================================
+_RALPH_CAPABILITY_CMDS=(
+  "inventory:List preset-facing capabilities and their audit status"
+)
+
 _ralph_profile_spec() {
   # `--profile` value is a literal `<scope>:<name>` where scope is `repo`
   # or `user`. We use compadd (not _describe) because values contain a colon
@@ -644,6 +660,18 @@ _ralph_inspect_profiles_args() {
     '-v[Verbose output]'
   )
   _arguments $inspect_profiles_opts
+}
+
+# =============================================================================
+# Capability Command Arguments
+# =============================================================================
+(( $+functions[_ralph_capability_args] )) ||
+_ralph_capability_args() {
+  local -a capability_opts
+  capability_opts=(
+    '--format+[Output format]:format:(human json)'
+  )
+  _arguments $capability_opts
 }
 
 # =============================================================================

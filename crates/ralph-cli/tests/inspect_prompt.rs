@@ -529,3 +529,150 @@ fn inspect_prompt_full_json_does_not_emit_empty_body() {
         );
     }
 }
+
+// ─────────────────────────────────────────────────────────────────────
+// Unit 7 of plan 2026-07-27-002: full SkillGateFlags override in CLI.
+// ─────────────────────────────────────────────────────────────────────
+
+/// With all three skill gate overrides provided, the JSON output must
+/// contain `skill_gates` with all three fields set to the exact values.
+#[test]
+fn inspect_prompt_skill_gate_all_three_overrides() {
+    let tmp = tempfile::tempdir().unwrap();
+    let preset_path = write_preset(tmp.path(), "local.yml", MINIMAL_PRESET);
+
+    let mut cmd = ralph_bin();
+    cmd.current_dir(&tmp)
+        .args(["-c", preset_path.to_str().unwrap()])
+        .args([
+            "inspect",
+            "prompt",
+            "--hat",
+            "worker",
+            "--format",
+            "json",
+            "--scratchpad",
+            "true",
+            "--tasks-enabled",
+            "false",
+            "--memories-enabled",
+            "true",
+        ]);
+
+    let output = cmd
+        .output()
+        .expect("spawn ralph inspect prompt with all three gates");
+    assert!(
+        output.status.success(),
+        "inspect prompt with skill gate overrides must exit 0; stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let parsed: serde_json::Value = serde_json::from_str(&stdout).expect("must be valid JSON");
+
+    let gates = parsed
+        .get("skill_gates")
+        .expect("skill_gates must be present");
+    assert_eq!(
+        gates.get("tasks_enabled").and_then(|v| v.as_bool()),
+        Some(false),
+        "tasks_enabled must be false as override"
+    );
+    assert_eq!(
+        gates.get("memories_enabled").and_then(|v| v.as_bool()),
+        Some(true),
+        "memories_enabled must be true as override"
+    );
+    assert_eq!(
+        gates.get("scratchpad_enabled").and_then(|v| v.as_bool()),
+        Some(true),
+        "scratchpad_enabled must be true as override"
+    );
+}
+
+/// When only `--scratchpad false` is provided, `tasks_enabled` and
+/// `memories_enabled` must fall back to the effective config values
+/// (not hardcoded false). The preset has tasks=true, memories=true.
+#[test]
+fn inspect_prompt_skill_gate_partial_override_falls_back() {
+    let tmp = tempfile::tempdir().unwrap();
+    let preset_path = write_preset(tmp.path(), "local.yml", MINIMAL_PRESET);
+
+    let mut cmd = ralph_bin();
+    cmd.current_dir(&tmp)
+        .args(["-c", preset_path.to_str().unwrap()])
+        .args([
+            "inspect",
+            "prompt",
+            "--hat",
+            "worker",
+            "--format",
+            "json",
+            "--scratchpad",
+            "false",
+        ]);
+
+    let output = cmd
+        .output()
+        .expect("spawn ralph inspect prompt with scratchpad=false");
+    assert!(
+        output.status.success(),
+        "inspect prompt with partial override must exit 0; stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let parsed: serde_json::Value = serde_json::from_str(&stdout).expect("must be valid JSON");
+
+    let gates = parsed
+        .get("skill_gates")
+        .expect("skill_gates must be present");
+    // MINIMAL_PRESET has tasks=true, memories=true — must fall back to those.
+    assert_eq!(
+        gates.get("tasks_enabled").and_then(|v| v.as_bool()),
+        Some(true),
+        "tasks_enabled must fall back to effective config (true)"
+    );
+    assert_eq!(
+        gates.get("memories_enabled").and_then(|v| v.as_bool()),
+        Some(true),
+        "memories_enabled must fall back to effective config (true)"
+    );
+    assert_eq!(
+        gates.get("scratchpad_enabled").and_then(|v| v.as_bool()),
+        Some(false),
+        "scratchpad_enabled must be false as explicit override"
+    );
+}
+
+/// When no skill gate override flags are provided, `skill_gates` must be
+/// absent from JSON (preserves the pre-U7 default behavior).
+#[test]
+fn inspect_prompt_skill_gate_no_override_returns_none() {
+    let tmp = tempfile::tempdir().unwrap();
+    let preset_path = write_preset(tmp.path(), "local.yml", MINIMAL_PRESET);
+
+    let mut cmd = ralph_bin();
+    cmd.current_dir(&tmp)
+        .args(["-c", preset_path.to_str().unwrap()])
+        .args(["inspect", "prompt", "--hat", "worker", "--format", "json"]);
+
+    let output = cmd
+        .output()
+        .expect("spawn ralph inspect prompt without overrides");
+    assert!(
+        output.status.success(),
+        "inspect prompt without overrides must exit 0; stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let parsed: serde_json::Value = serde_json::from_str(&stdout).expect("must be valid JSON");
+
+    // skill_gates must be absent when no override is supplied.
+    assert!(
+        parsed.get("skill_gates").is_none(),
+        "no override → skill_gates must be absent from JSON; got: {parsed}"
+    );
+}

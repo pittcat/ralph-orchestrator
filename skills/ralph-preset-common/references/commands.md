@@ -47,6 +47,11 @@ ralph tools task verify-emit-bridge ...
 
 **review 含义**：上面四条命令只能排除 shape / 拓扑 ownership 类问题，并观察 policy-check 的 agent-facing 修复面。**字段可见性 / 值源 / 身份 / 语义 / 下游消费 必须由 review 从 activated-hat 视角独立审**。详见 `references/agent-native-model.md`「Payload 审计模型」段。
 
+**`next_hat_candidates` 三态**：`ralph emit --policy-check --output json` 的 JSON 输出中 `next_hat_candidates` 字段有三种形状（由 `kind` 标签区分）：
+- `{"kind":"verified","hats":["<hat_id>",...]}` — 所有订阅者都是 config 中已注册的 hat，可直接路由。
+- `{"kind":"unverified"}` — hatless mode / 空 registry，无 topology 证据。
+- `{"kind":"mixed","entries":[{"hat_id":"...","verified":true|false},...]}` — 混合态，部分订阅者不在 config 中。review 需注意 `entries` 中 `verified: false` 的 hat 在运行时无法路由，应确认它们不是业务拓扑的一部分。
+
 **Trigger Context（preset `event_policy.schemas.<topic>.trigger_context`）命令边界**：`ralph preset check --strict` 与 `ralph emit --schema <topic>` 只能验证 `trigger_context.summary_fields` 字段引用、`routing_hints[*].conditions[*].{op, value}` 形状、`label` 唯一性、以及 `trigger_context` 与下游 hat `triggers` / `subscribes_to` 的拓扑消费方关系（lint ID 见 `references/finding-rubric.md`）。**它们不能证明 hint `guidance` 与下游 hat 实际决策分支语义一致，也不能验证 hat `instructions` 是否仍在复制 hint 条件值**——这两项是 review 必须独立审的软性 AAF / payload-content 缺口。
 
 ## Hat 检查（local / 路径 preset）
@@ -71,6 +76,28 @@ ralph -c <preset>.yml inspect prompt --hat <id> --format json
 # --full：JSON 返回真实 prompt_body，human 打印完整 body（不 suppressed）
 ralph -c <preset>.yml inspect prompt --hat <id> --format json --full
 ralph -c <preset>.yml inspect prompt --hat <id> --format human --full
+
+# 场景化激活预览（Unit 1 of plan 2026-07-27-002）
+ralph -c <preset>.yml inspect prompt --hat <hat_id> --format json \
+    --trigger <TOPIC> --source-hat <hat_id> --payload '<JSON>' \
+    [--iteration N] [--wave-context <JSON>] [--orchestrator-context <JSON>] \
+    [--correction <JSON>] [--scratchpad <true|false>] [--tasks-enabled <true|false>] \
+    [--memories-enabled <true|false>]
+
+**`source_hat_known` 语义（U8 / adversarial:A3）：**
+当 `--source-hat` 提供的 hat id 在 config `hats` 映射中存在时，`trigger_context_injected.source_hat_known` 为 `true`；存在但不在 config 中时为 `false`；未提供 `--source-hat` 时该字段不序列化（`skip_serializing_if`）。这使得 reviewer 可以区分"已知 topology 成员"和"任意 Unicode ID"（adversarial:A3 防御：不允许凭外观拒绝，也不混淆 matched_hints）。
+
+# 候选 emit 干跑评估（Unit 2）
+ralph -c <preset>.yml inspect prompt --hat <hat_id> --format json \
+    --topic <TOPIC> --payload '<JSON>' [--triggered <hat_id>]
+
+**失败停机条件：**
+- `--topic` 必须是当前 hat 的 `publishes` 列表成员或 `default_publishes` 回退值，否则返回 `policy_decision: reject` + gate=`topic_publishes`（reason_code=`hat_does_not_publish_topic`）。
+- `--triggered` 如果提供，必须是 config 中已注册的 hat id，否则返回 `policy_decision: reject` + gate=`triggered_not_in_topology`（reason_code=`triggered_hat_not_in_config`）。
+- 省略 `--triggered` 为合法路径（降级到普通 emit 评估，不校验 triggered 拓扑）。
+
+# Capability inventory（Unit 3）
+ralph capability inventory --format {human|json}
 ```
 
 外仓（无 `crates/ralph-core/data/`）同样可用——内容来自当前 ralph 二进制内嵌（`SkillRegistry::include_str!`）；报告须注明来源。详细规程见 [`prompt-visibility.md`](prompt-visibility.md)；audit 规程见 [`agent-skill-audit.md`](agent-skill-audit.md)。
@@ -107,6 +134,42 @@ scripts/check-cli-doc-drift.sh --strict
 ## Lint 失败时 review 行为
 
 机械 lint 失败时 **仍继续** AAF 评审；Executive Summary 须标注 lint 通过/失败及 Error 计数。
+
+## Capability inventory
+
+```bash
+# 列出 preset-facing capability 清单（read-only；AAF 评审前必读）
+ralph capability inventory --format json
+ralph capability inventory --format human
+```
+
+JSON 输出结构：
+```json
+{
+  "version": "capability_inventory/v1",
+  "capabilities": [
+    {
+      "id": "wave-emit",
+      "trigger_signal": "execution_model == wave | supervisor+wave",
+      "applies_when": "preset uses ralph wave emit / ralph wave verify",
+      "evidence_sources": ["skills/.../finding-rubric.md", "crates/.../ralph-tools-wave.md"],
+      "recommended_evidence_level": "runtime",
+      "source": "binary_embedded"
+    }
+  ]
+}
+```
+
+**用途**：AAF 评审前，对照此清单确认 preset 作者已理解所有依赖的 runtime capability，并检查 `covered_in_author_review`（静态审文档 vs 运行时验证）。
+
+## Capability coverage
+
+<!-- anchor: wave-emit -->
+<!-- anchor: supervisor-emit -->
+<!-- anchor: task-id-live -->
+<!-- anchor: artifact-first -->
+<!-- anchor: payload-consistency -->
+<!-- anchor: trigger-context -->
 
 ## Wave 子命令
 

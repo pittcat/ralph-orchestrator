@@ -125,6 +125,9 @@ enum Commands {
     /// Clean up Ralph artifacts from `.ralph/agent`.
     Clean(commands::clean::CleanArgs),
 
+    /// List preset-facing capabilities (read-only inventory)
+    Capability(commands::capability::CapabilityArgs),
+
     /// Emit an event to the current run's events file with proper JSON formatting
     Emit(commands::emit::EmitArgs),
 
@@ -440,6 +443,9 @@ async fn main() -> Result<()> {
         Some(Commands::Init(args)) => commands::init::init_command(cli.color, args),
         Some(Commands::Clean(args)) => {
             commands::clean::clean_command(&config_sources, cli.color, args)
+        }
+        Some(Commands::Capability(args)) => {
+            commands::capability::execute(args, cli.color.should_use_colors())
         }
         Some(Commands::Emit(args)) => commands::emit::emit_command(
             cli.color,

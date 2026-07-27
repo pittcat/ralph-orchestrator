@@ -505,3 +505,644 @@ fn custom_auto_inject_skill_appears_once() {
         "custom auto_inject marker must appear exactly once; got {marker_count}"
     );
 }
+
+// ─────────────────────────────────────────────────────────────────────
+// Unit 1 of plan 2026-07-27-002: scenario injection fields.
+// ─────────────────────────────────────────────────────────────────────
+
+/// Default PromptPreview (no scenario args) must have `evidence_level == "static"`
+/// and all optional fields as None.
+#[test]
+fn preview_default_evidence_level_is_static() {
+    let config = minimal_isolated_config(true, true);
+    let mut event_loop = EventLoop::new(config);
+    event_loop.initialize("U1 evidence-level test");
+    let preview = event_loop
+        .prompt_preview(&HatId::new("builder"))
+        .expect("preview");
+
+    assert_eq!(preview.evidence_level, "static");
+    assert!(preview.trigger_context_injected.is_none());
+    assert!(preview.wave_context_injected.is_none());
+    assert!(preview.orchestrator_context_injected.is_none());
+    assert!(preview.correction_injected.is_none());
+    assert!(preview.skill_gates.is_none());
+}
+
+/// JSON round-trip of PromptPreview must succeed with new optional fields.
+/// The existing `preview_json_roundtrip` already covers the default case;
+/// this test constructs a PromptPreview with all optional fields set to
+/// verify serde skip/deserialize works correctly.
+#[test]
+fn preview_json_roundtrip_with_all_fields() {
+    let config = minimal_isolated_config(true, true);
+    let mut event_loop = EventLoop::new(config);
+    event_loop.initialize("U1 json roundtrip all fields");
+    let base = event_loop
+        .prompt_preview(&HatId::new("builder"))
+        .expect("preview");
+
+    let preview = PromptPreview {
+        evidence_level: "runtime".to_string(),
+        trigger_context_injected: Some(crate::trigger_context::TriggerContextView {
+            source_topic: "build.task".to_string(),
+            source_hat: Some("worker".to_string()),
+            source_hat_known: Some(true),
+            current_hat: "builder".to_string(),
+            summary: Vec::new(),
+            matched_hints: Vec::new(),
+        }),
+        wave_context_injected: Some(crate::wave_context::WaveContext {
+            wave_id: "wave-1".to_string(),
+            wave_total: 3,
+            received_count: 2,
+            expected_dimensions: vec!["lint".to_string(), "test".to_string()],
+            missing_dimensions: vec!["audit".to_string()],
+            all_dimensions_received: false,
+            aggregate_timeout: false,
+        }),
+        orchestrator_context_injected: Some(serde_json::json!({
+            "task_count": 5,
+            "phase": "review"
+        })),
+        correction_injected: Some(crate::correction::CorrectionContext {
+            reason_code: "origin:ralph_control_only".to_string(),
+            stage: "origin".to_string(),
+            topic: "work.ready".to_string(),
+            source_hat: Some("worker".to_string()),
+            retry_key: "origin:worker:work.ready:ralph_control_only".to_string(),
+            retry_count: 1,
+            escalation_threshold: 3,
+            needs_escalation: false,
+            last_message: "test correction".to_string(),
+            expected_payload_template: "{}".to_string(),
+            allowed_topics: vec!["work.ready".to_string()],
+            required_fields: vec!["task_key".to_string()],
+        }),
+        skill_gates: Some(SkillGateFlags {
+            tasks_enabled: true,
+            memories_enabled: true,
+            scratchpad_enabled: true,
+        }),
+        ..base
+    };
+
+    let json = serde_json::to_string(&preview).expect("serialize");
+    let back: PromptPreview = serde_json::from_str(&json).expect("deserialize");
+    assert_eq!(preview, back);
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Unit 2 of plan 2026-07-27-002: candidate_emit field.
+// ─────────────────────────────────────────────────────────────────────
+
+/// When `candidate_emit` is provided, it serializes in the JSON output.
+#[test]
+fn prompt_preview_candidate_emit_field_appears_when_provided() {
+    let config = minimal_isolated_config(true, true);
+    let mut event_loop = EventLoop::new(config);
+    event_loop.initialize("U2 candidate_emit test");
+    let base = event_loop
+        .prompt_preview(&HatId::new("builder"))
+        .expect("preview");
+
+    // Verify default: candidate_emit is None.
+    assert!(base.candidate_emit.is_none());
+
+    // Construct a preview with candidate_emit set.
+    let preview = PromptPreview {
+        candidate_emit: Some(crate::event_policy::CandidateEmitPreview {
+            policy_decision: "accept".to_string(),
+            reasons: Vec::new(),
+            projection: None,
+            next_hat_candidates: crate::event_policy::NextHatCandidates::Unverified,
+        }),
+        ..base.clone()
+    };
+
+    // JSON output must include the candidate_emit field.
+    let json = serde_json::to_value(&preview).expect("serialize");
+    assert!(
+        json.get("candidate_emit").is_some(),
+        "JSON must contain candidate_emit when set"
+    );
+    assert_eq!(
+        json["candidate_emit"]["policy_decision"],
+        serde_json::json!("accept")
+    );
+
+    // Serialize the default preview without candidate_emit and verify
+    // the key is absent (skip_serializing_if).
+    let json_default = serde_json::to_value(&base).expect("serialize");
+    assert!(
+        json_default.get("candidate_emit").is_none(),
+        "JSON must omit candidate_emit when None"
+    );
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Unit 5 of plan 2026-07-27-002: tagged NextHatCandidates enum.
+// ─────────────────────────────────────────────────────────────────────
+
+/// `NextHatCandidates::Verified` must serialize with a `kind` discriminator,
+/// not as a bare array (which is what `#[serde(untagged)]` produces).
+#[test]
+fn next_hat_candidates_verified_serializes_with_kind_discriminator() {
+    use crate::event_policy::compute_next_hat_candidates;
+
+    let yaml = r#"
+event_loop:
+  execution_mode: isolated
+hats:
+  worker:
+    name: "Worker"
+    triggers: ["work.start"]
+    publishes: ["work.done"]
+"#;
+    let config: RalphConfig = serde_yaml::from_str(yaml).expect("parse");
+
+    let result = compute_next_hat_candidates(&config, "work.start");
+    let json = serde_json::to_string(&result).expect("serialize");
+
+    // Must have the kind tag.
+    assert!(
+        json.contains(r#""kind":"verified""#),
+        "verified must serialize with kind=verified tag; got: {json}"
+    );
+    assert!(
+        json.contains(r#""hats":["worker"]"#),
+        "verified hats must appear as hats field; got: {json}"
+    );
+    // Must NOT be a bare array.
+    assert!(
+        !json.starts_with('['),
+        "verified must NOT serialize as bare array; got: {json}"
+    );
+}
+
+/// `NextHatCandidates::Unverified` must serialize as `{"kind":"unverified"}`,
+/// NOT as JSON `null` (which is what the unit-variant `#[serde(untagged)]`
+/// produced before the tag was added).
+#[test]
+fn next_hat_candidates_unverified_serializes_with_kind_unverified_not_null() {
+    use crate::event_policy::compute_next_hat_candidates;
+
+    let yaml = r#"
+event_loop:
+  execution_mode: isolated
+hats:
+  worker:
+    name: "Worker"
+    triggers: []
+    publishes: ["work.done"]
+"#;
+    let config: RalphConfig = serde_yaml::from_str(yaml).expect("parse");
+
+    // No hat subscribes to "work.start" → empty subscriber list → Unverified.
+    let result = compute_next_hat_candidates(&config, "work.start");
+    let json = serde_json::to_string(&result).expect("serialize");
+
+    assert!(
+        json.contains(r#""kind":"unverified""#),
+        "unverified must serialize with kind=unverified tag; got: {json}"
+    );
+    assert_ne!(
+        json, "null",
+        "unverified must NOT serialize as bare null; got: {json}"
+    );
+}
+
+/// `NextHatCandidates::Mixed` must serialize with a `kind` discriminator
+/// and a structured `entries` array.
+#[test]
+fn next_hat_candidates_mixed_serializes_with_kind_mixed() {
+    use crate::event_policy::{CandidateHatEntry, NextHatCandidates};
+
+    // Manually construct Mixed to exercise the serialization path.
+    let mixed = NextHatCandidates::Mixed {
+        entries: vec![
+            CandidateHatEntry {
+                hat_id: "worker".to_string(),
+                verified: true,
+            },
+            CandidateHatEntry {
+                hat_id: "ghost".to_string(),
+                verified: false,
+            },
+        ],
+    };
+    let json = serde_json::to_string(&mixed).expect("serialize");
+
+    assert!(
+        json.contains(r#""kind":"mixed""#),
+        "mixed must serialize with kind=mixed tag; got: {json}"
+    );
+    assert!(
+        json.contains(r#""entries""#),
+        "mixed must have entries field; got: {json}"
+    );
+    // Must NOT be a bare array.
+    assert!(
+        !json.starts_with('['),
+        "mixed must NOT serialize as bare array; got: {json}"
+    );
+}
+
+/// All three `NextHatCandidates` variants must round-trip through serde.
+#[test]
+fn next_hat_candidates_all_variants_roundtrip() {
+    use crate::event_policy::{CandidateHatEntry, NextHatCandidates, compute_next_hat_candidates};
+
+    let yaml = r#"
+event_loop:
+  execution_mode: isolated
+hats:
+  worker:
+    name: "Worker"
+    triggers: ["work.start"]
+    publishes: ["work.done"]
+"#;
+    let config: RalphConfig = serde_yaml::from_str(yaml).expect("parse");
+
+    // Verified.
+    let verified = compute_next_hat_candidates(&config, "work.start");
+    let v_json = serde_json::to_string(&verified).expect("serialize");
+    let v_back: NextHatCandidates = serde_json::from_str(&v_json).expect("roundtrip verified");
+    assert_eq!(verified, v_back);
+
+    // Unverified (no subscriber).
+    let unverified = compute_next_hat_candidates(&config, "nonexistent.topic");
+    let u_json = serde_json::to_string(&unverified).expect("serialize");
+    let u_back: NextHatCandidates = serde_json::from_str(&u_json).expect("roundtrip unverified");
+    assert_eq!(unverified, u_back);
+
+    // Mixed (manually constructed).
+    let mixed = NextHatCandidates::Mixed {
+        entries: vec![
+            CandidateHatEntry {
+                hat_id: "a".to_string(),
+                verified: true,
+            },
+            CandidateHatEntry {
+                hat_id: "b".to_string(),
+                verified: false,
+            },
+        ],
+    };
+    let m_json = serde_json::to_string(&mixed).expect("serialize");
+    let m_back: NextHatCandidates = serde_json::from_str(&m_json).expect("roundtrip mixed");
+    assert_eq!(mixed, m_back);
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Unit 6 of plan 2026-07-27-002: topology validation for candidate emit.
+// ─────────────────────────────────────────────────────────────────────
+
+/// RED phase: `evaluate_candidate_emit` must reject when `triggered`
+/// hat is not present in the config topology.
+#[test]
+fn evaluate_candidate_emit_rejects_unknown_triggered() {
+    use crate::event_policy::evaluate_candidate_emit;
+
+    let yaml = r#"
+event_loop:
+  execution_mode: isolated
+hats:
+  worker:
+    name: "Worker"
+    publishes: ["work.ready"]
+    triggers: ["build.task"]
+"#;
+    let config: RalphConfig = serde_yaml::from_str(yaml).expect("parse");
+    let hat_id = ralph_proto::HatId::new("worker");
+    let payload = r#"{"task_key": "task-123"}"#;
+
+    // triggered hat "nonexistent" is not in config → must reject.
+    let result =
+        evaluate_candidate_emit(&config, &hat_id, "work.ready", payload, Some("nonexistent"))
+            .expect("evaluation should succeed");
+
+    assert_eq!(
+        result.policy_decision, "reject",
+        "unknown triggered hat must be rejected; got decision: {}",
+        result.policy_decision
+    );
+    assert!(
+        result
+            .reasons
+            .iter()
+            .any(|r| r.gate == "triggered_not_in_topology"),
+        "expected gate=triggered_not_in_topology, got reasons: {:?}",
+        result.reasons
+    );
+}
+
+/// RED phase: `evaluate_candidate_emit` must reject when the current hat
+/// does NOT publish the target topic (and it is not in default_publishes).
+#[test]
+fn evaluate_candidate_emit_rejects_topic_not_in_hat_publishes() {
+    use crate::event_policy::evaluate_candidate_emit;
+
+    let yaml = r#"
+event_loop:
+  execution_mode: isolated
+hats:
+  builder:
+    name: "Builder"
+    publishes: ["build.task"]
+    triggers: []
+"#;
+    let config: RalphConfig = serde_yaml::from_str(yaml).expect("parse");
+    let hat_id = ralph_proto::HatId::new("builder");
+    let payload = r#"{"task_key": "task-123"}"#;
+
+    // builder does NOT publish "work.done" → must reject.
+    let result = evaluate_candidate_emit(&config, &hat_id, "work.done", payload, None)
+        .expect("evaluation should succeed");
+
+    assert_eq!(
+        result.policy_decision, "reject",
+        "topic not in hat publishes must be rejected; got decision: {}",
+        result.policy_decision
+    );
+    assert!(
+        result.reasons.iter().any(|r| r.gate == "topic_publishes"),
+        "expected gate=topic_publishes, got reasons: {:?}",
+        result.reasons
+    );
+}
+
+/// GREEN phase: passing a known triggered hat and a topic that the hat
+/// publishes must NOT reject on topology grounds (policy decision depends
+/// on payload validity, not topology).
+#[test]
+fn evaluate_candidate_emit_accepts_trusted_path() {
+    use crate::event_policy::evaluate_candidate_emit;
+
+    let yaml = r#"
+event_loop:
+  execution_mode: isolated
+hats:
+  worker:
+    name: "Worker"
+    publishes: ["work.ready"]
+    triggers: ["build.task"]
+"#;
+    let config: RalphConfig = serde_yaml::from_str(yaml).expect("parse");
+    let hat_id = ralph_proto::HatId::new("worker");
+    let payload = r#"{"task_key": "task-123"}"#;
+
+    // Known hat + published topic + valid triggered → accept (payload-valid case).
+    let result = evaluate_candidate_emit(&config, &hat_id, "work.ready", payload, Some("worker"))
+        .expect("evaluation should succeed");
+
+    assert_eq!(
+        result.policy_decision, "accept",
+        "trusted path (known hat + published topic) must not be rejected on topology; got: {:?}",
+        result
+    );
+    assert!(
+        !result
+            .reasons
+            .iter()
+            .any(|r| r.gate == "topic_publishes" || r.gate == "triggered_not_in_topology"),
+        "trusted path must not have topology rejection reasons; got: {:?}",
+        result.reasons
+    );
+}
+
+/// Omitting triggered (None) remains a valid fall-through path when
+/// the hat publishes the topic.
+#[test]
+fn evaluate_candidate_emit_accepts_omitted_triggered() {
+    use crate::event_policy::evaluate_candidate_emit;
+
+    let yaml = r#"
+event_loop:
+  execution_mode: isolated
+hats:
+  worker:
+    name: "Worker"
+    publishes: ["work.ready"]
+    triggers: ["build.task"]
+"#;
+    let config: RalphConfig = serde_yaml::from_str(yaml).expect("parse");
+    let hat_id = ralph_proto::HatId::new("worker");
+    let payload = r#"{"task_key": "task-123"}"#;
+
+    let result = evaluate_candidate_emit(&config, &hat_id, "work.ready", payload, None)
+        .expect("evaluation should succeed");
+
+    assert_eq!(
+        result.policy_decision, "accept",
+        "omitted triggered must be valid when hat publishes topic; got: {:?}",
+        result
+    );
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Unit 7 of plan 2026-07-27-002: full SkillGateFlags (tasks + memories + scratchpad).
+// ─────────────────────────────────────────────────────────────────────
+
+/// SkillGateFlags must carry all three gates and serialize correctly.
+#[test]
+fn skill_gate_flags_serializes_all_three_fields() {
+    let flags = SkillGateFlags {
+        tasks_enabled: true,
+        memories_enabled: false,
+        scratchpad_enabled: true,
+    };
+    let json = serde_json::to_string(&flags).expect("serialize");
+    let back: SkillGateFlags = serde_json::from_str(&json).expect("deserialize");
+    assert_eq!(back, flags);
+}
+
+/// When SkillGateFlags is set inside PromptPreview, all three fields
+/// must appear in the JSON output.
+#[test]
+fn skill_gate_flags_appears_in_json_when_set() {
+    let config = minimal_isolated_config(true, false);
+    let mut event_loop = EventLoop::new(config);
+    event_loop.initialize("U7 skill_gates all fields");
+    let base = event_loop
+        .prompt_preview(&HatId::new("builder"))
+        .expect("preview");
+
+    let preview = PromptPreview {
+        skill_gates: Some(SkillGateFlags {
+            tasks_enabled: true,
+            memories_enabled: true,
+            scratchpad_enabled: false,
+        }),
+        ..base
+    };
+
+    let json: serde_json::Value = serde_json::to_value(&preview).expect("serialize");
+    let gates = json
+        .get("skill_gates")
+        .expect("skill_gates must be present");
+    assert_eq!(
+        gates.get("tasks_enabled").and_then(|v| v.as_bool()),
+        Some(true)
+    );
+    assert_eq!(
+        gates.get("memories_enabled").and_then(|v| v.as_bool()),
+        Some(true)
+    );
+    assert_eq!(
+        gates.get("scratchpad_enabled").and_then(|v| v.as_bool()),
+        Some(false)
+    );
+}
+
+/// SkillGateFlags round-trips through PromptPreview serde.
+#[test]
+fn skill_gate_flags_roundtrips_in_preview() {
+    let config = minimal_isolated_config(true, true);
+    let mut event_loop = EventLoop::new(config);
+    event_loop.initialize("U7 roundtrip");
+    let base = event_loop
+        .prompt_preview(&HatId::new("builder"))
+        .expect("preview");
+
+    let preview = PromptPreview {
+        skill_gates: Some(SkillGateFlags {
+            tasks_enabled: false,
+            memories_enabled: true,
+            scratchpad_enabled: true,
+        }),
+        ..base
+    };
+
+    let json = serde_json::to_string(&preview).expect("serialize");
+    let back: PromptPreview = serde_json::from_str(&json).expect("deserialize");
+    assert_eq!(back.skill_gates, preview.skill_gates);
+}
+
+/// With no skill_gates override, skill_gates must be absent from JSON
+/// (preserves the default behavior of returning None).
+#[test]
+fn preview_no_skill_gates_override_is_none() {
+    let config = minimal_isolated_config(true, true);
+    let mut event_loop = EventLoop::new(config);
+    event_loop.initialize("U7 no override");
+    let preview = event_loop
+        .prompt_preview(&HatId::new("builder"))
+        .expect("preview");
+    assert!(
+        preview.skill_gates.is_none(),
+        "no override → skill_gates must be None"
+    );
+}
+
+/// U8 (2026-07-27-002 plan): `source_hat_known` is computed from config.hats
+/// membership and is only serialized when `source_hat` is present.
+/// When `source_hat` is provided and the hat is in config.hats → true.
+/// When `source_hat` is provided but NOT in config.hats → false.
+/// When `source_hat` is absent → `source_hat_known` is absent from JSON.
+#[test]
+fn trigger_context_source_hat_known_true_when_in_config() {
+    // Manually build a TriggerContextView with source_hat = "builder"
+    // (which IS in minimal_isolated_config's hats).
+    let trigger_ctx = crate::trigger_context::TriggerContextView {
+        source_topic: "work.done".to_string(),
+        source_hat: Some("builder".to_string()),
+        source_hat_known: Some(true),
+        current_hat: "builder".to_string(),
+        summary: Vec::new(),
+        matched_hints: Vec::new(),
+    };
+
+    let json: serde_json::Value = serde_json::to_value(&trigger_ctx).expect("serialize");
+    assert_eq!(
+        json.get("source_hat_known").and_then(|v| v.as_bool()),
+        Some(true),
+        "source_hat_known must be true when source_hat is in config.hats"
+    );
+    assert_eq!(
+        json.get("source_hat").and_then(|v| v.as_str()),
+        Some("builder"),
+        "source_hat must be preserved"
+    );
+}
+
+/// When source_hat is provided but the hat is NOT in config.hats,
+/// `source_hat_known` must be `false` in the JSON output.
+#[test]
+fn trigger_context_source_hat_known_false_when_unknown() {
+    let trigger_ctx = crate::trigger_context::TriggerContextView {
+        source_topic: "work.done".to_string(),
+        source_hat: Some("nonexistent_hat".to_string()),
+        source_hat_known: Some(false),
+        current_hat: "builder".to_string(),
+        summary: Vec::new(),
+        matched_hints: Vec::new(),
+    };
+
+    let json: serde_json::Value = serde_json::to_value(&trigger_ctx).expect("serialize");
+    assert_eq!(
+        json.get("source_hat_known").and_then(|v| v.as_bool()),
+        Some(false),
+        "source_hat_known must be false when source_hat is not in config.hats"
+    );
+    assert_eq!(
+        json.get("source_hat").and_then(|v| v.as_str()),
+        Some("nonexistent_hat"),
+        "source_hat must be preserved even when unknown"
+    );
+}
+
+/// When source_hat is absent (None), `source_hat_known` must be
+/// entirely absent from the JSON output (skip_serializing_if).
+#[test]
+fn trigger_context_source_hat_known_omitted_when_source_hat_absent() {
+    let trigger_ctx = crate::trigger_context::TriggerContextView {
+        source_topic: "work.done".to_string(),
+        source_hat: None,
+        source_hat_known: None,
+        current_hat: "builder".to_string(),
+        summary: Vec::new(),
+        matched_hints: Vec::new(),
+    };
+
+    let json: serde_json::Value = serde_json::to_value(&trigger_ctx).expect("serialize");
+    assert!(
+        json.get("source_hat_known").is_none(),
+        "source_hat_known must be absent when source_hat is None"
+    );
+    // Note: source_hat serializes as null (not absent) when None;
+    // only source_hat_known has skip_serializing_if.
+}
+
+/// PromptPreview round-trip must preserve source_hat_known in trigger_context_injected.
+#[test]
+fn preview_trigger_context_source_hat_known_roundtrip() {
+    let config = minimal_isolated_config(true, true);
+    let mut event_loop = EventLoop::new(config);
+    event_loop.initialize("U8 roundtrip");
+    let base = event_loop
+        .prompt_preview(&HatId::new("builder"))
+        .expect("preview");
+
+    let preview = PromptPreview {
+        trigger_context_injected: Some(crate::trigger_context::TriggerContextView {
+            source_topic: "work.done".to_string(),
+            source_hat: Some("worker".to_string()),
+            source_hat_known: Some(true),
+            current_hat: "builder".to_string(),
+            summary: Vec::new(),
+            matched_hints: Vec::new(),
+        }),
+        ..base
+    };
+
+    let json = serde_json::to_string(&preview).expect("serialize");
+    let back: PromptPreview = serde_json::from_str(&json).expect("deserialize");
+    assert_eq!(
+        back.trigger_context_injected
+            .as_ref()
+            .and_then(|v| v.source_hat_known),
+        Some(true),
+        "source_hat_known must round-trip correctly"
+    );
+}

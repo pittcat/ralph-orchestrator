@@ -121,6 +121,15 @@ pub struct TriggerContextView {
     /// `(unknown source hat)`.
     pub source_hat: Option<String>,
 
+    /// Whether `source_hat` is a known hat in the effective
+    /// config topology. `None` when `source_hat` is `None`
+    /// (not serialized — see `skip_serializing_if`).
+    /// `Some(true)` when `source_hat` is in `config.hats`.
+    /// `Some(false)` when `source_hat` is provided but not
+    /// in `config.hats`. U8 / adversarial:A3.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_hat_known: Option<bool>,
+
     /// Current hat being activated. Recorded for downstream
     /// observability (U5 topology-aware lint) but never rendered
     /// into the prompt block.
@@ -146,6 +155,7 @@ impl TriggerContextView {
         Self {
             source_topic: String::new(),
             source_hat: None,
+            source_hat_known: None,
             current_hat: current_hat.into(),
             summary: Vec::new(),
             matched_hints: Vec::new(),
@@ -256,6 +266,7 @@ pub fn build(input: &TriggerContextInput<'_>) -> TriggerContextView {
     TriggerContextView {
         source_topic: input.source_topic.to_string(),
         source_hat: input.source_hat.map(str::to_string),
+        source_hat_known: None,
         current_hat: input.current_hat.to_string(),
         summary,
         matched_hints,

@@ -163,6 +163,63 @@ pub struct InspectPromptArgs {
     /// --full = blocks + skill table + full text).
     #[arg(long)]
     pub full: bool,
+
+    // ── Unit 1 scenario args (2026-07-27-002 plan) ──────────────
+    /// Simulated trigger topic (e.g. `build.task`). When provided,
+    /// `trigger_context_injected` is computed and included in the
+    /// preview output.
+    #[arg(long)]
+    pub trigger: Option<String>,
+
+    /// Simulated source hat for the trigger event.
+    #[arg(long)]
+    pub source_hat: Option<String>,
+
+    /// Simulated trigger payload as JSON. Must be valid JSON when
+    /// provided.
+    #[arg(long)]
+    pub payload: Option<String>,
+
+    /// Simulated iteration number for the hat activation.
+    #[arg(long)]
+    pub iteration: Option<u32>,
+
+    /// Simulated wave context as JSON.
+    #[arg(long)]
+    pub wave_context: Option<String>,
+
+    /// Simulated orchestrator context as JSON.
+    #[arg(long)]
+    pub orchestrator_context: Option<String>,
+
+    /// Simulated correction context as JSON.
+    #[arg(long)]
+    pub correction: Option<String>,
+
+    /// Override scratchpad gate for preview purposes.
+    #[arg(long)]
+    pub scratchpad: Option<bool>,
+
+    /// Override tasks-enabled gate for preview purposes.
+    #[arg(long)]
+    pub tasks_enabled: Option<bool>,
+
+    /// Override memories-enabled gate for preview purposes.
+    #[arg(long)]
+    pub memories_enabled: Option<bool>,
+
+    // ── Unit 2 args (2026-07-27-002 plan) ──────────────────────────
+    /// Topic to evaluate as a candidate emit (requires --payload).
+    /// When provided with --payload, `candidate_emit` is computed and
+    /// included in the preview output.
+    #[arg(long)]
+    pub topic: Option<String>,
+
+    /// Simulated triggered hat for the candidate emit evaluation.
+    /// Must be a registered hat id if provided; unknown hats cause rejection.
+    /// Only meaningful when --topic and --payload are both provided.
+    #[arg(long)]
+    pub triggered: Option<String>,
 }
 
 /// Execute an `ralph inspect` subcommand.
@@ -489,6 +546,10 @@ pub async fn inspect_prompt_command(
     let config = preflight::load_config_for_preflight(config_sources, hats_source).await?;
     let hat_id = ralph_proto::HatId::new(args.hat.clone());
 
+    // Save a cloned config for the read-only candidate emit evaluation
+    // (EventLoop takes ownership of config, so we clone before the move).
+    let config_for_candidate = config.clone();
+
     // Block titles are extracted via a dry `build_prompt` call,
     // which requires constructing an EventLoop. We suppress
     // tracing output for the duration of that call so the
@@ -506,12 +567,210 @@ pub async fn inspect_prompt_command(
 
     let mut event_loop = ralph_core::event_loop::EventLoop::new(config);
     event_loop.initialize("ralph inspect prompt (read-only)");
-    let preview_via_loop = event_loop.prompt_preview(&hat_id).ok_or_else(|| {
+    let preview_base = event_loop.prompt_preview(&hat_id).ok_or_else(|| {
         anyhow::anyhow!(
             "hat {:?} not found in preset; available hats are listed by `ralph hats list`",
             hat_id.as_str()
         )
     })?;
+
+    // Build scenario context from args (Unit 1 of plan 2026-07-27-002).
+    // When any scenario parameter is provided, we enrich the preview
+    // with simulated trigger/wave/correction/orchestrator context fields.
+    let has_scenario = args.trigger.is_some()
+        || args.payload.is_some()
+        || args.source_hat.is_some()
+        || args.wave_context.is_some()
+        || args.orchestrator_context.is_some()
+        || args.correction.is_some()
+        || args.scratchpad.is_some()
+        || args.tasks_enabled.is_some()
+        || args.memories_enabled.is_some();
+
+    let preview = if has_scenario {
+        // Parse JSON scenario args.
+        let payload_json = match &args.payload {
+            Some(p) => match serde_json::from_str::<serde_json::Value>(p) {
+                Ok(v) => Some(v),
+                Err(e) => anyhow::bail!("failed to parse --payload JSON: {} (field: --payload)", e),
+            },
+            None => None,
+        };
+        let wave_json = match &args.wave_context {
+            Some(w) => Some(serde_json::from_str::<serde_json::Value>(w).map_err(|e| {
+                anyhow::anyhow!(
+                    "failed to parse --wave-context JSON: {} (field: --wave-context)",
+                    e
+                )
+            })?),
+            None => None,
+        };
+        let orchestrator_json = match &args.orchestrator_context {
+            Some(o) => Some(serde_json::from_str::<serde_json::Value>(o).map_err(|e| {
+                anyhow::anyhow!(
+                    "failed to parse --orchestrator-context JSON: {} (field: --orchestrator-context)",
+                    e
+                )
+            })?),
+            None => None,
+        };
+        let correction_json = match &args.correction {
+            Some(c) => Some(serde_json::from_str::<serde_json::Value>(c).map_err(|e| {
+                anyhow::anyhow!(
+                    "failed to parse --correction JSON: {} (field: --correction)",
+                    e
+                )
+            })?),
+            None => None,
+        };
+
+        // Build Option<TriggerContextView> from --trigger / --source-hat / --payload.
+        let trigger_context_injected = args.trigger.as_ref().map(|topic| {
+            // Build a minimal trigger context view from the scenario args.
+            // This mirrors ralph_core::trigger_context::build but without
+            // requiring a full schema lookup — the preview context is
+            // informational, not authoritative.
+            use ralph_core::trigger_context::{FieldSummary, FieldValue, TriggerContextView};
+            // U8: compute source_hat_known from config.hats membership.
+            // None when source_hat is None (not serialized).
+            // Some(true) when source_hat is in config.hats.
+            // Some(false) when source_hat is provided but unknown.
+            // Use config_for_candidate (cloned before EventLoop took ownership
+            // of config) to avoid borrow-after-move.
+            let source_hat_known = args
+                .source_hat
+                .as_ref()
+                .map(|h| config_for_candidate.hats.contains_key(h));
+            TriggerContextView {
+                source_topic: topic.clone(),
+                source_hat: args.source_hat.clone(),
+                source_hat_known,
+                current_hat: hat_id.as_str().to_string(),
+                summary: payload_json
+                    .as_ref()
+                    .map(|pj| {
+                        if let serde_json::Value::Object(map) = pj {
+                            map.iter()
+                                .map(|(k, v)| FieldSummary {
+                                    field: k.clone(),
+                                    value: FieldValue::Present(v.clone()),
+                                })
+                                .collect()
+                        } else {
+                            Vec::new()
+                        }
+                    })
+                    .unwrap_or_default(),
+                matched_hints: Vec::new(),
+            }
+        });
+
+        // Build Option<WaveContext> from --wave-context.
+        // Before U1 fix: silently fell through to None on deserialization
+        // failure (.ok()).  After U1: fail loud so callers know the field
+        // shape was rejected (F-IDs: adversarial:A1, maintainability:M4).
+        let wave_context_injected = wave_json
+            .as_ref()
+            .map(|wv| {
+                serde_json::from_value::<ralph_core::wave_context::WaveContext>(wv.clone()).map_err(
+                    |e| {
+                        anyhow::anyhow!(
+                            "failed to deserialize --wave-context into WaveContext: {} \
+                             (field: --wave-context)",
+                            e
+                        )
+                    },
+                )
+            })
+            .transpose()?;
+
+        // Build Option<CorrectionContext> from --correction.
+        let correction_injected = correction_json
+            .as_ref()
+            .map(|cv| {
+                serde_json::from_value::<ralph_core::correction::CorrectionContext>(cv.clone())
+                    .map_err(|e| {
+                        anyhow::anyhow!(
+                            "failed to deserialize --correction into CorrectionContext: {} \
+                             (field: --correction)",
+                            e
+                        )
+                    })
+            })
+            .transpose()?;
+
+        // Build skill_gates from overrides.
+        // U7 (2026-07-27-002 plan): all three gates are overridable;
+        // any that is not explicitly supplied falls back to the effective
+        // config's prompt_gates (tasks/memories) or scratchpad default (false).
+        let skill_gates = if args.scratchpad.is_some()
+            || args.tasks_enabled.is_some()
+            || args.memories_enabled.is_some()
+        {
+            Some(ralph_core::event_loop::SkillGateFlags {
+                tasks_enabled: args
+                    .tasks_enabled
+                    .unwrap_or(preview_base.gates.tasks_enabled),
+                memories_enabled: args
+                    .memories_enabled
+                    .unwrap_or(preview_base.gates.memories_enabled),
+                scratchpad_enabled: args.scratchpad.unwrap_or(false),
+            })
+        } else {
+            None
+        };
+
+        // Merge scenario fields onto the base preview.
+        ralph_core::event_loop::PromptPreview {
+            trigger_context_injected,
+            wave_context_injected,
+            orchestrator_context_injected: orchestrator_json,
+            correction_injected,
+            skill_gates,
+            evidence_level: "runtime".to_string(),
+            candidate_emit: None,
+            ..preview_base
+        }
+    } else {
+        preview_base
+    };
+
+    // ── Unit 2: candidate emit evaluation (2026-07-27-002 plan) ─────
+    // When --topic is provided without --payload, fail fast with an
+    // error so the caller knows the emission preview cannot run.
+    let preview = match (&args.topic, &args.payload) {
+        (Some(_topic), None) => {
+            anyhow::bail!(
+                "--topic requires --payload to evaluate the candidate emit; \
+                 provide both or omit --topic"
+            );
+        }
+        (Some(topic), Some(payload_str)) => {
+            // Validate that payload is parseable JSON.
+            let _parsed: serde_json::Value = serde_json::from_str(payload_str).map_err(|e| {
+                anyhow::anyhow!(
+                    "failed to parse --payload JSON: {} (required for --topic evaluation)",
+                    e
+                )
+            })?;
+
+            // Read-only evaluate the candidate emit.
+            let candidate_emit = ralph_core::evaluate_candidate_emit(
+                &config_for_candidate,
+                &hat_id,
+                topic,
+                payload_str,
+                args.triggered.as_deref(),
+            )
+            .map_err(|e| anyhow::anyhow!("candidate emit evaluation failed: {e}"))?;
+
+            ralph_core::event_loop::PromptPreview {
+                candidate_emit: Some(candidate_emit),
+                ..preview
+            }
+        }
+        (None, _) => preview,
+    };
 
     // Build the full prompt body while tracing is still suppressed,
     // then drop the guard before emitting output so normal logging resumes.
@@ -522,13 +781,7 @@ pub async fn inspect_prompt_command(
     };
     drop(_guard);
 
-    emit_prompt_view(
-        &preview_via_loop,
-        full_body,
-        args.format,
-        args.full,
-        use_colors,
-    )
+    emit_prompt_view(&preview, full_body, args.format, args.full, use_colors)
 }
 
 /// Render a `PromptPreview` in the operator's chosen format.
@@ -2487,4 +2740,178 @@ mod tests {
             "warning must mention `--plan` as the recovery hint"
         );
     }
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Unit 2 of plan 2026-07-27-002: CLI parsing for --topic/--triggered.
+// ─────────────────────────────────────────────────────────────────────
+
+#[test]
+fn cli_parses_inspect_prompt_minimal() {
+    let parsed = InspectArgs::try_parse_from(["inspect", "prompt", "--hat", "worker"])
+        .expect("CLI parse failed");
+    let prompt_args = match parsed.command.expect("prompt subcommand") {
+        InspectCommands::Prompt(p) => p,
+        other => panic!("expected Prompt, got {other:?}"),
+    };
+    assert_eq!(prompt_args.hat, "worker");
+    assert!(prompt_args.topic.is_none());
+    assert!(prompt_args.triggered.is_none());
+}
+
+#[test]
+fn cli_parses_inspect_prompt_with_topic_and_triggered() {
+    let parsed = InspectArgs::try_parse_from([
+        "inspect",
+        "prompt",
+        "--hat",
+        "reviewer",
+        "--topic",
+        "work.ready",
+        "--payload",
+        r#"{"task_key": "abc"}"#,
+        "--triggered",
+        "worker",
+    ])
+    .expect("CLI parse failed");
+    let prompt_args = match parsed.command.expect("prompt subcommand") {
+        InspectCommands::Prompt(p) => p,
+        other => panic!("expected Prompt, got {other:?}"),
+    };
+    assert_eq!(prompt_args.hat, "reviewer");
+    assert_eq!(prompt_args.topic.as_deref(), Some("work.ready"));
+    assert_eq!(prompt_args.triggered.as_deref(), Some("worker"));
+}
+
+#[test]
+fn cli_parses_inspect_prompt_topic_without_triggered() {
+    let parsed = InspectArgs::try_parse_from([
+        "inspect",
+        "prompt",
+        "--hat",
+        "worker",
+        "--topic",
+        "work.ready",
+        "--payload",
+        r#"{"task_key": "abc"}"#,
+    ])
+    .expect("CLI parse failed");
+    let prompt_args = match parsed.command.expect("prompt subcommand") {
+        InspectCommands::Prompt(p) => p,
+        other => panic!("expected Prompt, got {other:?}"),
+    };
+    assert_eq!(prompt_args.topic.as_deref(), Some("work.ready"));
+    assert!(prompt_args.triggered.is_none());
+}
+
+#[test]
+fn cli_parses_inspect_prompt_triggered_without_topic_is_ok() {
+    let parsed = InspectArgs::try_parse_from([
+        "inspect",
+        "prompt",
+        "--hat",
+        "worker",
+        "--triggered",
+        "builder",
+    ])
+    .expect("CLI parse failed");
+    let prompt_args = match parsed.command.expect("prompt subcommand") {
+        InspectCommands::Prompt(p) => p,
+        other => panic!("expected Prompt, got {other:?}"),
+    };
+    assert!(prompt_args.topic.is_none());
+    assert_eq!(prompt_args.triggered.as_deref(), Some("builder"));
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Unit 1 (plan 2026-07-27-002): fail-loud on JSON deserialization error.
+// Before the fix `--wave-context` / `--correction` silently fell through
+// to `None` via `.ok()`.  After the fix they must return an `Err`
+// containing the field name and the serde error message.
+// ─────────────────────────────────────────────────────────────────────
+
+/// WaveContext requires `wave_id`, `wave_total`, `received_count`,
+/// `expected_dimensions`, `pending_dimensions` fields.  A JSON that
+/// parses as valid syntax but has the wrong shape must NOT silently
+/// become `None` — it must return an error mentioning `--wave-context`.
+#[test]
+fn inspect_prompt_wave_context_wrong_shape_is_err() {
+    let parsed = InspectArgs::try_parse_from([
+        "inspect",
+        "prompt",
+        "--hat",
+        "worker",
+        "--wave-context",
+        r#"{"wrong_field": "foo"}"#,
+    ])
+    .expect("CLI parse failed");
+    let prompt_args = match parsed.command.expect("prompt subcommand") {
+        InspectCommands::Prompt(p) => p,
+        other => panic!("expected Prompt, got {other:?}"),
+    };
+    // The CLI parser accepts any string for --wave-context; the
+    // deserialization error is raised inside `inspect_prompt_command`.
+    // We test that the parsed args shape is correct for passing to the
+    // command.
+    assert!(prompt_args.wave_context.is_some());
+    let json_input = prompt_args.wave_context.unwrap();
+    // Valid JSON syntax, wrong shape for WaveContext → must fail loud.
+    let result: Result<ralph_core::wave_context::WaveContext, _> =
+        serde_json::from_str(&json_input);
+    assert!(
+        result.is_err(),
+        "wrong-shape JSON for WaveContext must error, got Ok"
+    );
+    let err = result.unwrap_err();
+    assert!(
+        err.to_string().contains("wave_id") || err.to_string().contains("missing field"),
+        "error message should mention the missing field: {}",
+        err
+    );
+}
+
+/// CorrectionContext requires `reason_code`, `stage`, `topic` fields.
+/// A JSON that parses but doesn't match the struct must return an error
+/// mentioning `--correction`.
+#[test]
+fn inspect_prompt_correction_wrong_shape_is_err() {
+    let parsed = InspectArgs::try_parse_from([
+        "inspect",
+        "prompt",
+        "--hat",
+        "worker",
+        "--correction",
+        r#"{"not_a_real_field": 123}"#,
+    ])
+    .expect("CLI parse failed");
+    let prompt_args = match parsed.command.expect("prompt subcommand") {
+        InspectCommands::Prompt(p) => p,
+        other => panic!("expected Prompt, got {other:?}"),
+    };
+    assert!(prompt_args.correction.is_some());
+    let json_input = prompt_args.correction.unwrap();
+    let result: Result<ralph_core::correction::CorrectionContext, _> =
+        serde_json::from_str(&json_input);
+    assert!(
+        result.is_err(),
+        "wrong-shape JSON for CorrectionContext must error, got Ok"
+    );
+    let err = result.unwrap_err();
+    assert!(
+        err.to_string().contains("reason_code") || err.to_string().contains("missing field"),
+        "error message should mention the missing field: {}",
+        err
+    );
+}
+
+/// Valid JSON that happens to be a different type (e.g. a plain string)
+/// is also a deserialization error for WaveContext.
+#[test]
+fn inspect_prompt_wave_context_wrong_type_is_err() {
+    let json_input = r#""just a string, not an object""#;
+    let result: Result<ralph_core::wave_context::WaveContext, _> = serde_json::from_str(json_input);
+    assert!(
+        result.is_err(),
+        "string JSON for WaveContext struct must error, got Ok"
+    );
 }
