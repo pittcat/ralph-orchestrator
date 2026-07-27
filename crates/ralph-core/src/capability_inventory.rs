@@ -3,10 +3,65 @@
 //! Each `Capability` represents a runtime capability that preset authors
 //! and reviewers MUST understand to assess whether their preset can
 //! legitimately use it. The `covered_in_author_review` field is computed
-//! at runtime by checking whether the corresponding reference document
-//! contains a stable anchor.
+//! at compile time by checking whether the corresponding reference documents
+//! contain stable anchors (`<!-- anchor: <id> -->` comments).
 
 use serde::{Deserialize, Serialize};
+
+// Relative to crates/ralph-core/src/ (source file location).
+const AGENT_NATIVE_MODEL: &str =
+    include_str!("../../../skills/ralph-preset-common/references/agent-native-model.md");
+const COMMANDS_DOC: &str =
+    include_str!("../../../skills/ralph-preset-common/references/commands.md");
+const FINDING_RUBRIC: &str =
+    include_str!("../../../skills/ralph-preset-common/references/finding-rubric.md");
+
+/// Returns "yes" if both anchors are present, "partial" if at least one
+/// is present, "no" if none are present.
+const fn compute_coverage(author_anchor: bool, review_anchor: bool) -> &'static str {
+    if author_anchor && review_anchor {
+        "yes"
+    } else if author_anchor || review_anchor {
+        "partial"
+    } else {
+        "no"
+    }
+}
+
+/// Compile-time anchor presence check using simple byte scan.
+/// All args are Copy types, so usable in const fn.
+const fn doc_has_anchor(haystack: &str, needle: &str) -> bool {
+    let h = haystack.as_bytes();
+    let n = needle.as_bytes();
+    let hl = h.len();
+    let nl = n.len();
+    if nl > hl {
+        return false;
+    }
+    let mut i = 0;
+    while i <= hl - nl {
+        let mut j = 0;
+        while j < nl {
+            if h[i + j] != n[j] {
+                break;
+            }
+            j += 1;
+        }
+        if j == nl {
+            return true;
+        }
+        i += 1;
+    }
+    false
+}
+
+// Pre-computed anchor strings per capability id.
+const ANCHOR_WAVE_EMIT: &str = "<!-- anchor: wave-emit -->";
+const ANCHOR_SUPERVISOR_EMIT: &str = "<!-- anchor: supervisor-emit -->";
+const ANCHOR_TASK_ID_LIVE: &str = "<!-- anchor: task-id-live -->";
+const ANCHOR_ARTIFACT_FIRST: &str = "<!-- anchor: artifact-first -->";
+const ANCHOR_PAYLOAD_CONSISTENCY: &str = "<!-- anchor: payload-consistency -->";
+const ANCHOR_TRIGGER_CONTEXT: &str = "<!-- anchor: trigger-context -->";
 
 /// One entry in the capability inventory.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -23,6 +78,9 @@ pub struct Capability {
     pub recommended_evidence_level: &'static str,
     /// Source of this inventory entry: "binary_embedded" | "repo_local".
     pub source: &'static str,
+    /// Whether this capability is covered in the author/review reference docs.
+    /// Computed at compile time from stable `<!-- anchor: <id> -->` comments.
+    pub covered_in_author_review: &'static str,
 }
 
 /// Manual Deserialize impl: the capability inventory is a static compile-time
@@ -53,6 +111,11 @@ pub fn capability_inventory() -> Vec<Capability> {
             ],
             recommended_evidence_level: "runtime",
             source: "binary_embedded",
+            covered_in_author_review: compute_coverage(
+                doc_has_anchor(AGENT_NATIVE_MODEL, ANCHOR_WAVE_EMIT)
+                    || doc_has_anchor(COMMANDS_DOC, ANCHOR_WAVE_EMIT),
+                doc_has_anchor(FINDING_RUBRIC, ANCHOR_WAVE_EMIT),
+            ),
         },
         Capability {
             id: "supervisor-emit",
@@ -64,6 +127,11 @@ pub fn capability_inventory() -> Vec<Capability> {
             ],
             recommended_evidence_level: "runtime",
             source: "binary_embedded",
+            covered_in_author_review: compute_coverage(
+                doc_has_anchor(AGENT_NATIVE_MODEL, ANCHOR_SUPERVISOR_EMIT)
+                    || doc_has_anchor(COMMANDS_DOC, ANCHOR_SUPERVISOR_EMIT),
+                doc_has_anchor(FINDING_RUBRIC, ANCHOR_SUPERVISOR_EMIT),
+            ),
         },
         Capability {
             id: "task-id-live",
@@ -75,6 +143,11 @@ pub fn capability_inventory() -> Vec<Capability> {
             ],
             recommended_evidence_level: "runtime",
             source: "binary_embedded",
+            covered_in_author_review: compute_coverage(
+                doc_has_anchor(AGENT_NATIVE_MODEL, ANCHOR_TASK_ID_LIVE)
+                    || doc_has_anchor(COMMANDS_DOC, ANCHOR_TASK_ID_LIVE),
+                doc_has_anchor(FINDING_RUBRIC, ANCHOR_TASK_ID_LIVE),
+            ),
         },
         Capability {
             id: "artifact-first",
@@ -86,6 +159,11 @@ pub fn capability_inventory() -> Vec<Capability> {
             ],
             recommended_evidence_level: "runtime",
             source: "binary_embedded",
+            covered_in_author_review: compute_coverage(
+                doc_has_anchor(AGENT_NATIVE_MODEL, ANCHOR_ARTIFACT_FIRST)
+                    || doc_has_anchor(COMMANDS_DOC, ANCHOR_ARTIFACT_FIRST),
+                doc_has_anchor(FINDING_RUBRIC, ANCHOR_ARTIFACT_FIRST),
+            ),
         },
         Capability {
             id: "payload-consistency",
@@ -97,6 +175,11 @@ pub fn capability_inventory() -> Vec<Capability> {
             ],
             recommended_evidence_level: "runtime",
             source: "binary_embedded",
+            covered_in_author_review: compute_coverage(
+                doc_has_anchor(AGENT_NATIVE_MODEL, ANCHOR_PAYLOAD_CONSISTENCY)
+                    || doc_has_anchor(COMMANDS_DOC, ANCHOR_PAYLOAD_CONSISTENCY),
+                doc_has_anchor(FINDING_RUBRIC, ANCHOR_PAYLOAD_CONSISTENCY),
+            ),
         },
         Capability {
             id: "trigger-context",
@@ -108,6 +191,11 @@ pub fn capability_inventory() -> Vec<Capability> {
             ],
             recommended_evidence_level: "runtime",
             source: "binary_embedded",
+            covered_in_author_review: compute_coverage(
+                doc_has_anchor(AGENT_NATIVE_MODEL, ANCHOR_TRIGGER_CONTEXT)
+                    || doc_has_anchor(COMMANDS_DOC, ANCHOR_TRIGGER_CONTEXT),
+                doc_has_anchor(FINDING_RUBRIC, ANCHOR_TRIGGER_CONTEXT),
+            ),
         },
     ]
 }
@@ -148,6 +236,39 @@ mod tests {
                 "invalid evidence level for {}: {}",
                 c.id,
                 c.recommended_evidence_level
+            );
+        }
+    }
+
+    #[test]
+    fn capability_inventory_covered_in_author_review_valid() {
+        for c in capability_inventory() {
+            assert!(
+                matches!(c.covered_in_author_review, "yes" | "partial" | "no"),
+                "invalid covered_in_author_review for {}: {}",
+                c.id,
+                c.covered_in_author_review
+            );
+        }
+    }
+
+    #[test]
+    fn compute_coverage_all_three_states() {
+        // All three states are reachable via the compute_coverage logic
+        assert_eq!(compute_coverage(true, true), "yes");
+        assert_eq!(compute_coverage(true, false), "partial");
+        assert_eq!(compute_coverage(false, true), "partial");
+        assert_eq!(compute_coverage(false, false), "no");
+    }
+
+    #[test]
+    fn capability_inventory_covered_in_author_review_yes() {
+        // All current capabilities have anchors in all three docs -> "yes"
+        for c in capability_inventory() {
+            assert_eq!(
+                c.covered_in_author_review, "yes",
+                "capability {} should have 'yes' coverage (anchors exist in all three docs)",
+                c.id
             );
         }
     }

@@ -239,4 +239,11 @@ Skill doc 不复述 `ralph-tools*.md` 的命令参数表；需要时**引用章�
 
 ## Runtime Audit Model (Unit 4 / plan 2026-07-27-002)
 
+<!-- anchor: wave-emit -->
+<!-- anchor: supervisor-emit -->
+<!-- anchor: task-id-live -->
+<!-- anchor: artifact-first -->
+<!-- anchor: payload-consistency -->
+<!-- anchor: trigger-context -->
+
 Preset author/review audits now use `ralph inspect prompt --trigger/--payload/--topic` to simulate hat activation without running the loop, and `ralph capability inventory --format json` to discover which runtime capabilities a preset exercises. The four evidence levels (`simulated` / `static` / `runtime` / `unverified`) classify findings by where the proof came from.

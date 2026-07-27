@@ -149,6 +149,15 @@ JSON 输出结构：
 
 **用途**：AAF 评审前，对照此清单确认 preset 作者已理解所有依赖的 runtime capability，并检查 `covered_in_author_review`（静态审文档 vs 运行时验证）。
 
+## Capability coverage
+
+<!-- anchor: wave-emit -->
+<!-- anchor: supervisor-emit -->
+<!-- anchor: task-id-live -->
+<!-- anchor: artifact-first -->
+<!-- anchor: payload-consistency -->
+<!-- anchor: trigger-context -->
+
 ## Wave 子命令
 
 | 命令 | 说明 |

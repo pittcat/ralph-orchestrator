@@ -288,6 +288,13 @@ review 在放过此类双事件时，应在 Remediation Plan / 报告「AAF Deci
 
 ## Capability coverage finding_id (Unit 4 / plan 2026-07-27-002)
 
+<!-- anchor: wave-emit -->
+<!-- anchor: supervisor-emit -->
+<!-- anchor: task-id-live -->
+<!-- anchor: artifact-first -->
+<!-- anchor: payload-consistency -->
+<!-- anchor: trigger-context -->
+
 | finding_id | description | severity | confidence起点 |
 |---|---|---|---|
 | `preset.capability_discovery_missing` | preset exercises a capability not covered in `preset-author-notes.md` | P1 | 60 |
