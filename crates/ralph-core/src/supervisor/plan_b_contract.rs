@@ -161,7 +161,18 @@ fn plan_b_contract_double_tick_emits_failed_with_blocking_slot() {
         .expect("register wave");
     drive_slot_to_failure(&bridge, &store_id, 0);
     // Plan 004 R3 / P0-1: pre-commit salvage before tick.
-    bridge.commit_salvage_projection(&store_id, &super::ProjectionReceiptSummary { kind: super::ProjectionKind::Business, batch_fingerprint: String::new(), write_count: 0, already_present_count: 0, committed_at_unix_secs: 0 }).expect("mark salvage");
+    bridge
+        .commit_salvage_projection(
+            &store_id,
+            &super::ProjectionReceiptSummary {
+                kind: super::ProjectionKind::Business,
+                batch_fingerprint: String::new(),
+                write_count: 0,
+                already_present_count: 0,
+                committed_at_unix_secs: 0,
+            },
+        )
+        .expect("mark salvage");
 
     let action = bridge
         .tick(&store_id, default_phase_inputs())

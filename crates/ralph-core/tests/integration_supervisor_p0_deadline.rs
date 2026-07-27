@@ -39,7 +39,7 @@ fn evaluate_phase_now_equals_deadline_still_allows_integrate() {
         failed_count: 0,
         slots: vec![(0, SlotStatus::Completed)].into_iter().collect(),
         cancel_requested: false,
-delivery_state: ralph_core::supervisor::WaveDeliveryState::CoordinationCommitted,
+        delivery_state: ralph_core::supervisor::WaveDeliveryState::CoordinationCommitted,
         started_at: std::time::SystemTime::now(),
     };
 
@@ -139,7 +139,7 @@ fn cancel_before_timeout_fires_cancelled_not_timeout() {
             .into_iter()
             .collect(),
         cancel_requested: true,
-delivery_state: ralph_core::supervisor::WaveDeliveryState::CoordinationCommitted,
+        delivery_state: ralph_core::supervisor::WaveDeliveryState::CoordinationCommitted,
         started_at: std::time::SystemTime::now(),
     };
 

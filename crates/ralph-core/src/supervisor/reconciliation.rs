@@ -49,9 +49,9 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 
 use serde::{Deserialize, Serialize};
 
-use crate::supervisor::{SlotStatus, TerminalEvidence, WaveSnapshot};
 #[cfg(test)]
 use crate::supervisor::WaveDeliveryState;
+use crate::supervisor::{SlotStatus, TerminalEvidence, WaveSnapshot};
 
 /// Stable, machine-readable conflict category for the `reason` field of
 /// `*.wave.failed`. Surfaced as the public reason in dispatcher

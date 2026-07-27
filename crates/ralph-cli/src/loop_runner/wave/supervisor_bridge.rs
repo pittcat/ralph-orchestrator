@@ -921,7 +921,9 @@ mod tests {
                 snap.phase,
                 ralph_core::supervisor::WavePhase::Done
                     | ralph_core::supervisor::WavePhase::Integrate
-            ) || snap.delivery_state.at_least(ralph_core::supervisor::WaveDeliveryState::CoordinationCommitted)
+            ) || snap
+                .delivery_state
+                .at_least(ralph_core::supervisor::WaveDeliveryState::CoordinationCommitted)
                 || snap.completed_count == 1
         );
     }

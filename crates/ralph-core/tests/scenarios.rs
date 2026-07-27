@@ -687,11 +687,11 @@ fn run_bdd_supervisor_fan_in(
                     );
                     let _ = bridge.store().try_dispatch_next(64);
                 }
-                let store_id = match bridge.register_wave_if_absent(kind, wave_id, expected_slots, 1)
-                {
-                    Ok(id) => id,
-                    Err(_) => continue,
-                };
+                let store_id =
+                    match bridge.register_wave_if_absent(kind, wave_id, expected_slots, 1) {
+                        Ok(id) => id,
+                        Err(_) => continue,
+                    };
                 let _ =
                     bridge.record_slot_result(&store_id, *slot_index, content_hash, *event_count);
                 let evidence_topic = match kind {
@@ -788,7 +788,16 @@ fn run_bdd_supervisor_fan_in(
                     "[bdd-supervisor] record_never_started_failures failed for {wave_id}: {err}"
                 );
             }
-            if let Err(err) = bridge.commit_salvage_projection(&store_id, &ralph_core::supervisor::ProjectionReceiptSummary { kind: ralph_core::supervisor::ProjectionKind::Business, batch_fingerprint: String::new(), write_count: 0, already_present_count: 0, committed_at_unix_secs: 0 }) {
+            if let Err(err) = bridge.commit_salvage_projection(
+                &store_id,
+                &ralph_core::supervisor::ProjectionReceiptSummary {
+                    kind: ralph_core::supervisor::ProjectionKind::Business,
+                    batch_fingerprint: String::new(),
+                    write_count: 0,
+                    already_present_count: 0,
+                    committed_at_unix_secs: 0,
+                },
+            ) {
                 eprintln!("[bdd-supervisor] mark_salvage_merged failed for {wave_id}: {err}");
             }
             PhaseInputs {

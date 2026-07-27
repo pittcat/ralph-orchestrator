@@ -195,7 +195,7 @@ mod tests {
             pending_count: 1,
             in_flight_count: 0,
             cancel_requested: false,
-delivery_state: ralph_core::supervisor::WaveDeliveryState::CoordinationCommitted,
+            delivery_state: ralph_core::supervisor::WaveDeliveryState::CoordinationCommitted,
             slots: vec![(0, SlotStatus::Failed), (1, SlotStatus::Pending)],
             started_at: std::time::SystemTime::UNIX_EPOCH,
         };

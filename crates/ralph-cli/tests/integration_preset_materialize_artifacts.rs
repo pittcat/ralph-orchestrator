@@ -73,9 +73,7 @@ fn happy_path_writes_default_forge_templates_dir() {
     let out = run_materialize(tmp.path(), &["parallel-forge", "--plan-key", "demo-plan"]);
     assert_success(&out);
 
-    let templates = tmp
-        .path()
-        .join(".ralph/forge/demo-plan/templates");
+    let templates = tmp.path().join(".ralph/forge/demo-plan/templates");
     for name in REQUIRED_FILES {
         assert!(
             templates.join(name).is_file(),
@@ -127,15 +125,13 @@ fn dest_override_writes_only_to_dest() {
 #[test]
 fn accepts_builtin_prefix() {
     let tmp = TempDir::new().unwrap();
-    let out = run_materialize(
-        tmp.path(),
-        &["builtin:parallel-forge", "--plan-key", "pfx"],
-    );
+    let out = run_materialize(tmp.path(), &["builtin:parallel-forge", "--plan-key", "pfx"]);
     assert_success(&out);
-    assert!(tmp
-        .path()
-        .join(".ralph/forge/pfx/templates/README.md")
-        .is_file());
+    assert!(
+        tmp.path()
+            .join(".ralph/forge/pfx/templates/README.md")
+            .is_file()
+    );
 }
 
 /// Given an unknown preset,
@@ -148,8 +144,7 @@ fn unknown_preset_fails_closed() {
     assert_failure(&out);
     let combined = format!("{}{}", stdout(&out), stderr(&out));
     assert!(
-        combined.contains("no embedded artifact templates")
-            || combined.contains("nope-preset"),
+        combined.contains("no embedded artifact templates") || combined.contains("nope-preset"),
         "unexpected error text: {combined}"
     );
     assert!(!tmp.path().join(".ralph").exists());
@@ -227,10 +222,11 @@ fn succeeds_under_polluted_agent_env_when_scrubbed() {
         .output()
         .unwrap();
     assert_success(&out);
-    assert!(tmp
-        .path()
-        .join(".ralph/forge/polluted/templates/unit.template.yml")
-        .is_file());
+    assert!(
+        tmp.path()
+            .join(".ralph/forge/polluted/templates/unit.template.yml")
+            .is_file()
+    );
 }
 
 #[test]

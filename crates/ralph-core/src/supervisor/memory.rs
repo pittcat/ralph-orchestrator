@@ -16,14 +16,14 @@ use std::collections::{BTreeMap, HashMap};
 use std::sync::Mutex;
 use std::time::SystemTime;
 
+#[cfg(test)]
+use super::ProjectionKind;
 use super::{
     CompensationKind, CoordinationReceiptSummary, DispatchOutcome, EmissionReservation,
     EmissionState, IdempotencyKey, IsolationMode, ProjectionReceiptSummary, RedriveResult,
     SlotResource, SlotStatus, SupervisorStore, SupervisorStoreError, SupervisorStoreResult,
     WaveDeliveryState, WaveKind, WavePhase, WaveSnapshot,
 };
-#[cfg(test)]
-use super::ProjectionKind;
 
 /// Per-wave descriptor held in `InMemorySupervisorStore::waves`.
 #[derive(Debug, Clone)]
@@ -863,12 +863,18 @@ impl SupervisorStore for InMemorySupervisorStore {
             .waves_by_id
             .get_mut(wave_id)
             .ok_or_else(|| SupervisorStoreError::UnknownWave(wave_id.to_string()))?;
-        if !wave.delivery_state.at_least(WaveDeliveryState::SalvageCommitted) {
+        if !wave
+            .delivery_state
+            .at_least(WaveDeliveryState::SalvageCommitted)
+        {
             return Err(SupervisorStoreError::InvalidTransition(
                 "record_coordination_written requires SalvageCommitted state".to_string(),
             ));
         }
-        if wave.delivery_state.at_least(WaveDeliveryState::CoordinationWritten) {
+        if wave
+            .delivery_state
+            .at_least(WaveDeliveryState::CoordinationWritten)
+        {
             let existing = wave.coordination_receipt.as_ref();
             if let Some(existing) = existing
                 && !existing.payload_fingerprint.is_empty()
@@ -880,7 +886,10 @@ impl SupervisorStore for InMemorySupervisorStore {
                 )));
             }
         }
-        if !wave.delivery_state.at_least(WaveDeliveryState::CoordinationWritten) {
+        if !wave
+            .delivery_state
+            .at_least(WaveDeliveryState::CoordinationWritten)
+        {
             wave.delivery_state = WaveDeliveryState::CoordinationWritten;
         }
         if receipt.payload_fingerprint.is_empty()
@@ -905,7 +914,10 @@ impl SupervisorStore for InMemorySupervisorStore {
             .waves_by_id
             .get_mut(wave_id)
             .ok_or_else(|| SupervisorStoreError::UnknownWave(wave_id.to_string()))?;
-        if !wave.delivery_state.at_least(WaveDeliveryState::CoordinationWritten) {
+        if !wave
+            .delivery_state
+            .at_least(WaveDeliveryState::CoordinationWritten)
+        {
             return Err(SupervisorStoreError::InvalidTransition(
                 "commit_coordination_event requires CoordinationWritten state".to_string(),
             ));
@@ -2100,9 +2112,10 @@ mod tests {
         s.commit_coordination_event(&wave, &summary, WavePhase::Done)
             .unwrap();
         let snap = s.fan_in_status(&wave).unwrap();
-        assert!(snap
-            .delivery_state
-            .at_least(WaveDeliveryState::CoordinationCommitted));
+        assert!(
+            snap.delivery_state
+                .at_least(WaveDeliveryState::CoordinationCommitted)
+        );
     }
 
     /// U8 / F-008 / R8: rebinding a slot to a different
@@ -2263,12 +2276,8 @@ mod tests {
             s.fan_in_status(&wave).unwrap().delivery_state,
             WaveDeliveryState::CoordinationWritten,
         );
-        s.commit_coordination_event(
-            &wave,
-            &fresh_coord_summary("fp-1"),
-            WavePhase::Done,
-        )
-        .unwrap();
+        s.commit_coordination_event(&wave, &fresh_coord_summary("fp-1"), WavePhase::Done)
+            .unwrap();
         assert_eq!(
             s.fan_in_status(&wave).unwrap().delivery_state,
             WaveDeliveryState::CoordinationCommitted,
@@ -2301,7 +2310,9 @@ mod tests {
     #[test]
     fn u5_conflicting_receipt_after_committed_is_rejected() {
         let s = store();
-        let wave = s.register_wave("u5-conflict", WaveKind::Review, 1, 1).unwrap();
+        let wave = s
+            .register_wave("u5-conflict", WaveKind::Review, 1, 1)
+            .unwrap();
         s.commit_salvage_projection(&wave, &fresh_summary("fp-a"))
             .unwrap();
         s.record_coordination_written(&wave, &fresh_coord_summary("fp-a"))
@@ -2319,9 +2330,10 @@ mod tests {
         s.commit_salvage_projection(&wave, &fresh_summary("fp-b"))
             .expect("salvage fingerprint replacement after CoordinationCommitted must succeed");
         let snap = s.fan_in_status(&wave).unwrap();
-        assert!(snap
-            .delivery_state
-            .at_least(WaveDeliveryState::CoordinationCommitted));
+        assert!(
+            snap.delivery_state
+                .at_least(WaveDeliveryState::CoordinationCommitted)
+        );
         assert_eq!(snap.phase, WavePhase::Done);
     }
 
@@ -2332,7 +2344,9 @@ mod tests {
         // crashed. A fresh open must observe the same state
         // and skip re-injection.
         let s = store();
-        let wave = s.register_wave("u5-crash-5", WaveKind::Review, 1, 1).unwrap();
+        let wave = s
+            .register_wave("u5-crash-5", WaveKind::Review, 1, 1)
+            .unwrap();
         s.commit_salvage_projection(&wave, &fresh_summary("fp-5"))
             .unwrap();
         s.record_coordination_written(&wave, &fresh_coord_summary("fp-5"))
@@ -2342,9 +2356,10 @@ mod tests {
         // The "restart" view: re-derive the snapshot and assert
         // delivery_state == CoordinationCommitted.
         let snap = s.fan_in_status(&wave).unwrap();
-        assert!(snap
-            .delivery_state
-            .at_least(WaveDeliveryState::CoordinationCommitted));
+        assert!(
+            snap.delivery_state
+                .at_least(WaveDeliveryState::CoordinationCommitted)
+        );
         assert_eq!(snap.phase, WavePhase::Done);
     }
 
@@ -2356,18 +2371,23 @@ mod tests {
         // re-derives the receipt from disk and replays the
         // commit.
         let s = store();
-        let wave = s.register_wave("u5-crash-4", WaveKind::Review, 1, 1).unwrap();
+        let wave = s
+            .register_wave("u5-crash-4", WaveKind::Review, 1, 1)
+            .unwrap();
         s.commit_salvage_projection(&wave, &fresh_summary("fp-4"))
             .unwrap();
         s.record_coordination_written(&wave, &fresh_coord_summary("fp-4"))
             .unwrap();
         let snap = s.fan_in_status(&wave).unwrap();
-        assert!(snap
-            .delivery_state
-            .at_least(WaveDeliveryState::CoordinationWritten));
-        assert!(!snap
-            .delivery_state
-            .at_least(WaveDeliveryState::CoordinationCommitted));
+        assert!(
+            snap.delivery_state
+                .at_least(WaveDeliveryState::CoordinationWritten)
+        );
+        assert!(
+            !snap
+                .delivery_state
+                .at_least(WaveDeliveryState::CoordinationCommitted)
+        );
     }
 
     #[test]
@@ -2377,14 +2397,18 @@ mod tests {
         // `SalvageCommitted` so the dispatcher can resume the
         // coord-append step without re-projecting.
         let s = store();
-        let wave = s.register_wave("u5-crash-3", WaveKind::Review, 1, 1).unwrap();
+        let wave = s
+            .register_wave("u5-crash-3", WaveKind::Review, 1, 1)
+            .unwrap();
         s.commit_salvage_projection(&wave, &fresh_summary("fp-3"))
             .unwrap();
         let snap = s.fan_in_status(&wave).unwrap();
         assert_eq!(snap.delivery_state, WaveDeliveryState::SalvageCommitted);
-        assert!(!snap
-            .delivery_state
-            .at_least(WaveDeliveryState::CoordinationWritten));
+        assert!(
+            !snap
+                .delivery_state
+                .at_least(WaveDeliveryState::CoordinationWritten)
+        );
     }
 
     #[test]

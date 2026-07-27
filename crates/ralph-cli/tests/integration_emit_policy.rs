@@ -232,10 +232,7 @@ fn test_emit_hats_source_with_ralph_config_suppresses_missing_yml_warn() {
         .env("RALPH_HATS_SOURCE", "builtin:ce-executor-pipeline")
         .env("RALPH_CONFIG", "ralph.yml")
         .env("RALPH_CURRENT_HAT", "executor")
-        .env(
-            "RALPH_EVENTS_FILE",
-            temp_path.join(".ralph/events.jsonl"),
-        )
+        .env("RALPH_EVENTS_FILE", temp_path.join(".ralph/events.jsonl"))
         .output()
         .expect("failed to execute ralph emit");
 

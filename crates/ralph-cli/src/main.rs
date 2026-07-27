@@ -15,6 +15,7 @@
 //! - Work item tracking via `ralph task`
 
 mod backend_support;
+mod builtin_artifact_templates;
 mod cli;
 mod commands;
 mod config_resolution;
@@ -33,7 +34,6 @@ mod policy_check;
 mod preflight;
 mod preset_merge_table;
 mod preset_templates;
-mod builtin_artifact_templates;
 mod presets;
 mod rpc_stdin;
 mod skill_cli;

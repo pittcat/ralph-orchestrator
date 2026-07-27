@@ -495,9 +495,9 @@ fn supervisor_primary_path_exec_wave_completes_with_schema_payload() {
     // succeeded. The follow-up task that restores the strict
     // `CoordinationCommitted` check lives in the 2026-07-27-003
     // plan residuals.
-    let fan_in_completed = exec_snap.delivery_state.at_least(
-        ralph_core::supervisor::WaveDeliveryState::CoordinationCommitted,
-    );
+    let fan_in_completed = exec_snap
+        .delivery_state
+        .at_least(ralph_core::supervisor::WaveDeliveryState::CoordinationCommitted);
     let completes = events_with_topic(&ledger, "exec.wave.complete");
     if fan_in_completed {
         // Strict U5 path: the typed commit landed AND the JSONL
@@ -516,8 +516,8 @@ fn supervisor_primary_path_exec_wave_completes_with_schema_payload() {
                 Some(true),
                 "exec.wave.complete must be system_injected (KTD-6)"
             );
-            let coord_payload: Value = serde_json::from_str(&ledger_payload_string(coord))
-                .expect("coord payload parse");
+            let coord_payload: Value =
+                serde_json::from_str(&ledger_payload_string(coord)).expect("coord payload parse");
             assert_eq!(
                 coord_payload
                     .get("completed_slots")
@@ -538,7 +538,11 @@ fn supervisor_primary_path_exec_wave_completes_with_schema_payload() {
                 .get("success_slots")
                 .and_then(|s| s.as_array())
                 .expect("payload.success_slots must be an array");
-            assert_eq!(success_slots.len(), 5, "success_slots must list all 5 slots");
+            assert_eq!(
+                success_slots.len(),
+                5,
+                "success_slots must list all 5 slots"
+            );
         }
     } else {
         // 2026-07-27-003 plan U5: `commit_complete_coord_event` is

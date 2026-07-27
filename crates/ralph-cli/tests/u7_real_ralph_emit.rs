@@ -154,13 +154,7 @@ fn canonical_channel(channel: &Path, workspace_root: &Path) -> PathBuf {
 /// Write the per-wave JSON registry the dispatcher would have
 /// written via `WaveChannelRegistry::prepare`. The schema mirrors
 /// `loop_runner::wave::channel_registry::RegistryFile`.
-fn write_registry(
-    workspace: &Path,
-    loop_id: &str,
-    wave_id: &str,
-    slot_index: u32,
-    channel: &Path,
-) {
+fn write_registry(workspace: &Path, loop_id: &str, wave_id: &str, slot_index: u32, channel: &Path) {
     let path = registry_path(workspace, loop_id, wave_id);
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).expect("mkdir registry dir");
@@ -180,8 +174,11 @@ fn write_registry(
             }
         ]
     });
-    fs::write(&path, serde_json::to_string_pretty(&body).expect("serialize registry"))
-        .expect("write registry");
+    fs::write(
+        &path,
+        serde_json::to_string_pretty(&body).expect("serialize registry"),
+    )
+    .expect("write registry");
 }
 
 /// Smoke test for the U7 outside-in slice: dispatcher writes the

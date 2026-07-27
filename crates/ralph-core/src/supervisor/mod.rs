@@ -339,9 +339,7 @@ impl From<SupervisorStoreError> for ProjectionError {
     fn from(err: SupervisorStoreError) -> Self {
         match err {
             SupervisorStoreError::UnknownWave(id) => ProjectionError::UnknownWave(id),
-            SupervisorStoreError::InvalidTransition(msg) => {
-                ProjectionError::InvalidTransition(msg)
-            }
+            SupervisorStoreError::InvalidTransition(msg) => ProjectionError::InvalidTransition(msg),
             other => ProjectionError::InvalidTransition(other.to_string()),
         }
     }

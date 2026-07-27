@@ -2730,11 +2730,9 @@ mod materialize_artifacts_tests {
 
     #[test]
     fn rejects_plan_key_with_path_separators() {
-        let err =
-            materialize_artifacts("parallel-forge", "a/b", None, false).unwrap_err();
+        let err = materialize_artifacts("parallel-forge", "a/b", None, false).unwrap_err();
         assert!(err.to_string().contains("path segment"));
-        let err =
-            materialize_artifacts("parallel-forge", "..", None, false).unwrap_err();
+        let err = materialize_artifacts("parallel-forge", "..", None, false).unwrap_err();
         assert!(err.to_string().contains("path segment"));
     }
 
@@ -2754,8 +2752,7 @@ mod materialize_artifacts_tests {
     fn unknown_preset_fails() {
         let tmp = tempfile::tempdir().unwrap();
         let dest = tmp.path().join("out");
-        let err =
-            materialize_artifacts("not-a-preset", "k", Some(&dest), false).unwrap_err();
+        let err = materialize_artifacts("not-a-preset", "k", Some(&dest), false).unwrap_err();
         assert!(err.to_string().contains("no embedded artifact templates"));
     }
 }

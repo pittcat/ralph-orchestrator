@@ -19,7 +19,7 @@ use std::fs;
 use std::path::{Component, Path, PathBuf};
 
 use crate::loop_runner::wave::{
-    encode_identity, ChannelRegistryError, ResolveOutcome, WaveChannelRegistry,
+    ChannelRegistryError, ResolveOutcome, WaveChannelRegistry, encode_identity,
 };
 
 pub(crate) fn resolve_marker_target(workspace_root: &Path, marker_value: &str) -> PathBuf {

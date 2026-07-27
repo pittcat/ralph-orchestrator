@@ -25,8 +25,8 @@ use super::migrations;
 use super::{
     CompensationKind, CoordinationReceiptSummary, DispatchOutcome, EmissionReservation,
     EmissionState, IsolationMode, ProjectionReceiptSummary, RedriveResult, SlotResource,
-    SlotStatus, SupervisorStore, SupervisorStoreError, SupervisorStoreResult,
-    WaveDeliveryState, WaveKind, WavePhase, WaveSnapshot,
+    SlotStatus, SupervisorStore, SupervisorStoreError, SupervisorStoreResult, WaveDeliveryState,
+    WaveKind, WavePhase, WaveSnapshot,
 };
 
 /// `PRAGMA busy_timeout` value installed on every supervisor
@@ -2790,7 +2790,11 @@ mod recovery_reopen_tests {
         assert_eq!(snap.completed_count, 2, "completed must survive reopen");
         assert_eq!(snap.in_flight_count, 2, "in-flight must survive reopen");
         assert_eq!(snap.pending_count, 1, "pending must survive reopen");
-        assert!(!snap.delivery_state.at_least(super::WaveDeliveryState::CoordinationCommitted));
+        assert!(
+            !snap
+                .delivery_state
+                .at_least(super::WaveDeliveryState::CoordinationCommitted)
+        );
         assert_eq!(snap.phase, WavePhase::Collect);
         assert_eq!(
             snap.slots,
@@ -2894,8 +2898,27 @@ mod recovery_reopen_tests {
                 .unwrap();
             // The coordinator already injected the coord event and
             // stamped the idempotent-inject marker before the crash.
-            store.commit_coordination_event(&wave, &super::CoordinationReceiptSummary { topic: String::new(), idempotency_key: String::new(), payload_fingerprint: String::new(), write_count: 0, already_present_count: 0, committed_at_unix_secs: 0 }, super::WavePhase::Done).unwrap();
-            assert!(store.fan_in_status(&wave).unwrap().delivery_state.at_least(super::WaveDeliveryState::CoordinationCommitted));
+            store
+                .commit_coordination_event(
+                    &wave,
+                    &super::CoordinationReceiptSummary {
+                        topic: String::new(),
+                        idempotency_key: String::new(),
+                        payload_fingerprint: String::new(),
+                        write_count: 0,
+                        already_present_count: 0,
+                        committed_at_unix_secs: 0,
+                    },
+                    super::WavePhase::Done,
+                )
+                .unwrap();
+            assert!(
+                store
+                    .fan_in_status(&wave)
+                    .unwrap()
+                    .delivery_state
+                    .at_least(super::WaveDeliveryState::CoordinationCommitted)
+            );
             wave
         };
 
@@ -2905,7 +2928,8 @@ mod recovery_reopen_tests {
         // (a) The inject key survived the round-trip to disk.
         let snap = store.fan_in_status(&wave).unwrap();
         assert!(
-            snap.delivery_state.at_least(super::WaveDeliveryState::CoordinationCommitted),
+            snap.delivery_state
+                .at_least(super::WaveDeliveryState::CoordinationCommitted),
             "merged_to_events inject key must persist across reopen"
         );
 

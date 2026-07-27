@@ -2118,7 +2118,10 @@ exit 0
     .await;
 
     let (events, duration, success) = outcome.expect("strong-signal worker should succeed");
-    assert!(success, "worker should report success, got events={events:?}");
+    assert!(
+        success,
+        "worker should report success, got events={events:?}"
+    );
     assert!(
         duration >= Duration::from_secs_f64(3.5),
         "worker should run at least 3.5 s (4 s script), got {duration:?}"
@@ -2201,7 +2204,10 @@ async fn test_run_wave_worker_pty_events_file_growth_keeps_lease_alive() {
          worker ran only {duration:?}"
     );
     let _ = appender.await;
-    emit_wave_validation_marker("events-file-growth:keeps-alive", &["strong", "lease", "events"]);
+    emit_wave_validation_marker(
+        "events-file-growth:keeps-alive",
+        &["strong", "lease", "events"],
+    );
 }
 
 #[cfg(unix)]
@@ -2565,7 +2571,10 @@ fn test_ce_executor_supervisor_idle_lease_values_match_ktd7() {
     assert_eq!(worker.idle_heartbeat_secs, Some(120));
     assert_eq!(worker.idle_weak_signal_cap, Some(8));
 
-    let fix_worker = config.hats.get("fix-worker").expect("fix-worker hat present");
+    let fix_worker = config
+        .hats
+        .get("fix-worker")
+        .expect("fix-worker hat present");
     assert_eq!(fix_worker.timeout, Some(1800));
     assert_eq!(fix_worker.idle_heartbeat_secs, Some(120));
     assert_eq!(fix_worker.idle_weak_signal_cap, Some(8));

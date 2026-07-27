@@ -19,8 +19,8 @@
 //!    the `is_orchestrator_internal` carve-out already
 //!    present in the isolated loop body).
 
-use super::*;
 use super::common::write_event_with_hat_to_jsonl;
+use super::*;
 
 /// Build a minimal preset that exposes a single planner
 /// hat publishing `plan.blocked`, `work.done`,

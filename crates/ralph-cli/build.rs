@@ -236,18 +236,11 @@ fn copy_artifact_templates(manifest_dir: &str, out_dir: &str) {
         );
     }
 
-    println!(
-        "cargo:rerun-if-changed={}",
-        parallel_forge_src.display()
-    );
+    println!("cargo:rerun-if-changed={}", parallel_forge_src.display());
 
     let dest = dest_root.join("parallel-forge");
     if let Err(e) = fs::create_dir_all(&dest) {
-        panic!(
-            "build.rs: failed to create {}: {}",
-            dest.display(),
-            e
-        );
+        panic!("build.rs: failed to create {}: {}", dest.display(), e);
     }
 
     let mut copied = 0usize;

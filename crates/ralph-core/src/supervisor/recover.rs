@@ -204,8 +204,8 @@ mod tests {
 
     use super::*;
     use crate::supervisor::{
-        CoordinationReceiptSummary, InMemorySupervisorStore, ProjectionReceiptSummary, SlotResource,
-        WaveKind,
+        CoordinationReceiptSummary, InMemorySupervisorStore, ProjectionReceiptSummary,
+        SlotResource, WaveKind,
     };
     use std::sync::Arc;
 
@@ -408,16 +408,19 @@ mod tests {
         let _ = store.try_dispatch_next(4).unwrap().unwrap();
         store.record_slot_result(&wave, 0, "h", 1).unwrap();
         let snap = store.fan_in_status(&wave).unwrap();
-        assert!(!snap
-            .delivery_state
-            .at_least(WaveDeliveryState::CoordinationCommitted));
+        assert!(
+            !snap
+                .delivery_state
+                .at_least(WaveDeliveryState::CoordinationCommitted)
+        );
         assert_eq!(snap.completed_count, 1);
         let store_arc = Arc::new(store);
         let did = restore_unmerged_completed_slot(store_arc.clone(), &wave).unwrap();
         assert!(did, "completed > 0 must stamp the salvage commit");
         let snap = store_arc.fan_in_status(&wave).unwrap();
-        assert!(snap
-            .delivery_state
-            .at_least(WaveDeliveryState::SalvageCommitted));
+        assert!(
+            snap.delivery_state
+                .at_least(WaveDeliveryState::SalvageCommitted)
+        );
     }
 }

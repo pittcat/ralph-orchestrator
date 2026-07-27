@@ -139,9 +139,7 @@ fn templates_for_preset(preset: &str) -> Result<&'static [ArtifactTemplate]> {
 pub fn materialize(preset: &str, dest_dir: &Path) -> Result<Vec<PathBuf>> {
     let preset_key = normalize_preset_name(preset);
     let templates = templates_for_preset(preset_key)?;
-    if preset_key == "parallel-forge"
-        && templates.len() != PARALLEL_FORGE_TEMPLATE_NAMES.len()
-    {
+    if preset_key == "parallel-forge" && templates.len() != PARALLEL_FORGE_TEMPLATE_NAMES.len() {
         bail!(
             "internal catalog drift for parallel-forge: embedded {} files, \
              expected {}",
@@ -160,12 +158,8 @@ pub fn materialize(preset: &str, dest_dir: &Path) -> Result<Vec<PathBuf>> {
     let mut written = Vec::with_capacity(templates.len());
     for template in templates {
         let path = dest_dir.join(template.file_name);
-        fs::write(&path, template.content).with_context(|| {
-            format!(
-                "failed to write artifact template {}",
-                path.display()
-            )
-        })?;
+        fs::write(&path, template.content)
+            .with_context(|| format!("failed to write artifact template {}", path.display()))?;
         written.push(path);
     }
 
@@ -230,10 +224,7 @@ mod tests {
     #[test]
     fn default_dir_uses_plan_key() {
         let p = default_forge_templates_dir("my-plan");
-        assert_eq!(
-            p,
-            PathBuf::from(".ralph/forge/my-plan/templates")
-        );
+        assert_eq!(p, PathBuf::from(".ralph/forge/my-plan/templates"));
     }
 
     #[test]
@@ -268,9 +259,11 @@ mod tests {
         let second = materialize("parallel-forge", dir.path()).unwrap();
         assert_eq!(first.len(), second.len());
         let marker = dir.path().join("development-plan.template.md");
-        assert!(fs::read_to_string(&marker)
-            .unwrap()
-            .contains("## 3. BDD 行为规格"));
+        assert!(
+            fs::read_to_string(&marker)
+                .unwrap()
+                .contains("## 3. BDD 行为规格")
+        );
     }
 
     #[test]

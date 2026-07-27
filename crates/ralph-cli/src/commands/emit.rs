@@ -3423,8 +3423,8 @@ hats:
             false,
             None,
             None,
-            None
-            );
+            None,
+        );
         assert!(result.is_err(), "symlink to outside loop must be rejected");
     }
 
@@ -3666,8 +3666,8 @@ hats:
             true,
             None,
             None,
-            None
-            );
+            None,
+        );
         match result {
             Ok(path) => panic!(
                 "orphan subtree path must not be accepted, got: {}",
@@ -3717,7 +3717,7 @@ hats:
             true,              // isolated_mode
             None,
             None,
-            None
+            None,
         )
         .expect("isolated + hat-marker must resolve to channel");
         assert!(
@@ -3841,8 +3841,8 @@ hats:
             false, // NOT isolated → no wave-worker context
             None,
             None,
-            None
-            );
+            None,
+        );
 
         assert!(
             result.is_err(),
@@ -3939,8 +3939,8 @@ hats:
             true,
             Some("w-rs-1"), // worker-bound wave id
             Some(0),
-            None
-            );
+            None,
+        );
         assert!(
             result.is_err(),
             "wave channel with mismatched <id> must be rejected, got: {result:?}"
@@ -3978,8 +3978,8 @@ hats:
             true,
             Some("w-test"),
             Some(0), // worker-bound slot index,
-            None
-            );
+            None,
+        );
         assert!(
             result.is_err(),
             "wave channel with mismatched <idx> must be rejected, got: {result:?}"
@@ -4138,8 +4138,8 @@ hats:
             true,
             Some("w-expected"), // dispatcher-bound id
             Some(0),
-            None
-            );
+            None,
+        );
         assert!(result.is_err(), "mismatched wave_id must be rejected");
         let msg = result.unwrap_err().to_string();
         // Either the explicit allowlist rejection OR a symlink /

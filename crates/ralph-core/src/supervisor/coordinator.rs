@@ -583,7 +583,18 @@ mod tests {
                 store.clone() as Arc<dyn SupervisorStore>
             );
             // Plan 004 R3 / P0-1: pre-commit salvage before tick.
-            store.commit_salvage_projection(&wave, &super::super::ProjectionReceiptSummary { kind: super::super::ProjectionKind::Business, batch_fingerprint: String::new(), write_count: 0, already_present_count: 0, committed_at_unix_secs: 0 }).unwrap();
+            store
+                .commit_salvage_projection(
+                    &wave,
+                    &super::super::ProjectionReceiptSummary {
+                        kind: super::super::ProjectionKind::Business,
+                        batch_fingerprint: String::new(),
+                        write_count: 0,
+                        already_present_count: 0,
+                        committed_at_unix_secs: 0,
+                    },
+                )
+                .unwrap();
             let inputs = PhaseInputs {
                 aggregate_timeout_secs: 60,
                 elapsed_secs: 0,
@@ -681,7 +692,11 @@ mod tests {
         }
         // merged_to_events remains false so U11 recovery can retry.
         let snap = store.fan_in_status(&wave).unwrap();
-        assert!(!snap.delivery_state.at_least(super::super::WaveDeliveryState::CoordinationCommitted));
+        assert!(
+            !snap
+                .delivery_state
+                .at_least(super::super::WaveDeliveryState::CoordinationCommitted)
+        );
     }
 
     /// U8 fan-in failed path: a slot reaches `Failed` and the
@@ -713,7 +728,18 @@ mod tests {
         // coordinator's `fail_wave` latches the coord-event
         // injection. U8 tests run the coordinator directly so
         // they mark salvage here.
-        store.commit_salvage_projection(&wave, &super::super::ProjectionReceiptSummary { kind: super::super::ProjectionKind::Business, batch_fingerprint: String::new(), write_count: 0, already_present_count: 0, committed_at_unix_secs: 0 }).unwrap();
+        store
+            .commit_salvage_projection(
+                &wave,
+                &super::super::ProjectionReceiptSummary {
+                    kind: super::super::ProjectionKind::Business,
+                    batch_fingerprint: String::new(),
+                    write_count: 0,
+                    already_present_count: 0,
+                    committed_at_unix_secs: 0,
+                },
+            )
+            .unwrap();
         let coord =
             SupervisorCoordinator::with_in_memory_sink(store.clone() as Arc<dyn SupervisorStore>);
         let action = coord
@@ -798,7 +824,9 @@ mod tests {
         // (mirrors fail_wave → Failed). Outside-In full-chain asserts this.
         let snap_after = store.fan_in_status(&wave).unwrap();
         assert!(
-            snap_after.delivery_state.at_least(super::super::WaveDeliveryState::CoordinationCommitted),
+            snap_after
+                .delivery_state
+                .at_least(super::super::WaveDeliveryState::CoordinationCommitted),
             "merged_to_events must flip on InjectedComplete"
         );
         assert_eq!(
@@ -889,7 +917,20 @@ mod tests {
         assert!(matches!(action, CoordinatorAction::InjectedComplete { .. }));
         // Mark the wave merged so the second tick goes
         // through the idempotent branch.
-        store.commit_coordination_event(&wave, &super::super::CoordinationReceiptSummary { topic: String::new(), idempotency_key: String::new(), payload_fingerprint: String::new(), write_count: 0, already_present_count: 0, committed_at_unix_secs: 0 }, super::WavePhase::Done).unwrap();
+        store
+            .commit_coordination_event(
+                &wave,
+                &super::super::CoordinationReceiptSummary {
+                    topic: String::new(),
+                    idempotency_key: String::new(),
+                    payload_fingerprint: String::new(),
+                    write_count: 0,
+                    already_present_count: 0,
+                    committed_at_unix_secs: 0,
+                },
+                super::WavePhase::Done,
+            )
+            .unwrap();
         let action2 = coord
             .tick(
                 &wave,
@@ -957,7 +998,18 @@ mod tests {
         // the fan-in: phase must transition to Failed.
         store.record_slot_failure(&wave, 1, "boom").unwrap();
         // Plan 004 R3 / P0-1: pre-commit salvage before tick.
-        store.commit_salvage_projection(&wave, &super::super::ProjectionReceiptSummary { kind: super::super::ProjectionKind::Business, batch_fingerprint: String::new(), write_count: 0, already_present_count: 0, committed_at_unix_secs: 0 }).unwrap();
+        store
+            .commit_salvage_projection(
+                &wave,
+                &super::super::ProjectionReceiptSummary {
+                    kind: super::super::ProjectionKind::Business,
+                    batch_fingerprint: String::new(),
+                    write_count: 0,
+                    already_present_count: 0,
+                    committed_at_unix_secs: 0,
+                },
+            )
+            .unwrap();
         let coord =
             SupervisorCoordinator::with_in_memory_sink(store.clone() as Arc<dyn SupervisorStore>);
         let action = coord
@@ -1010,7 +1062,18 @@ mod tests {
             .unwrap();
         store.cancel_wave(&wave).unwrap();
         // Plan 004 R3 / P0-1: pre-commit salvage before tick.
-        store.commit_salvage_projection(&wave, &super::super::ProjectionReceiptSummary { kind: super::super::ProjectionKind::Business, batch_fingerprint: String::new(), write_count: 0, already_present_count: 0, committed_at_unix_secs: 0 }).unwrap();
+        store
+            .commit_salvage_projection(
+                &wave,
+                &super::super::ProjectionReceiptSummary {
+                    kind: super::super::ProjectionKind::Business,
+                    batch_fingerprint: String::new(),
+                    write_count: 0,
+                    already_present_count: 0,
+                    committed_at_unix_secs: 0,
+                },
+            )
+            .unwrap();
         let coord =
             SupervisorCoordinator::with_in_memory_sink(store.clone() as Arc<dyn SupervisorStore>);
         let action = coord
@@ -1052,7 +1115,18 @@ mod tests {
         let coord =
             SupervisorCoordinator::with_in_memory_sink(store.clone() as Arc<dyn SupervisorStore>);
         // Plan 004 R3 / P0-1: pre-commit salvage before tick.
-        store.commit_salvage_projection(&wave, &super::super::ProjectionReceiptSummary { kind: super::super::ProjectionKind::Business, batch_fingerprint: String::new(), write_count: 0, already_present_count: 0, committed_at_unix_secs: 0 }).unwrap();
+        store
+            .commit_salvage_projection(
+                &wave,
+                &super::super::ProjectionReceiptSummary {
+                    kind: super::super::ProjectionKind::Business,
+                    batch_fingerprint: String::new(),
+                    write_count: 0,
+                    already_present_count: 0,
+                    committed_at_unix_secs: 0,
+                },
+            )
+            .unwrap();
         let action = coord
             .tick(
                 &wave,
@@ -1121,17 +1195,32 @@ mod tests {
         // recovery path can mark salvage and re-tick.
         let snap = store.fan_in_status(&wave).unwrap();
         assert!(
-            !snap.delivery_state.at_least(super::super::WaveDeliveryState::CoordinationCommitted),
+            !snap
+                .delivery_state
+                .at_least(super::super::WaveDeliveryState::CoordinationCommitted),
             "merged_to_events must NOT be latched after refusal",
         );
         assert!(
-            !snap.delivery_state.at_least(super::super::WaveDeliveryState::SalvageCommitted),
+            !snap
+                .delivery_state
+                .at_least(super::super::WaveDeliveryState::SalvageCommitted),
             "salvage_merged must NOT be latched after refusal",
         );
 
         // Mark salvage and re-tick — coordinator now injects
         // the failed coord event exactly once.
-        store.commit_salvage_projection(&wave, &super::super::ProjectionReceiptSummary { kind: super::super::ProjectionKind::Business, batch_fingerprint: String::new(), write_count: 0, already_present_count: 0, committed_at_unix_secs: 0 }).unwrap();
+        store
+            .commit_salvage_projection(
+                &wave,
+                &super::super::ProjectionReceiptSummary {
+                    kind: super::super::ProjectionKind::Business,
+                    batch_fingerprint: String::new(),
+                    write_count: 0,
+                    already_present_count: 0,
+                    committed_at_unix_secs: 0,
+                },
+            )
+            .unwrap();
         let action2 = coord
             .tick(
                 &wave,
@@ -1176,7 +1265,18 @@ mod tests {
             .unwrap();
         store.record_slot_failure(&wave, 0, "boom").unwrap();
         // Tick 1: mark salvage, inject failed.
-        store.commit_salvage_projection(&wave, &super::super::ProjectionReceiptSummary { kind: super::super::ProjectionKind::Business, batch_fingerprint: String::new(), write_count: 0, already_present_count: 0, committed_at_unix_secs: 0 }).unwrap();
+        store
+            .commit_salvage_projection(
+                &wave,
+                &super::super::ProjectionReceiptSummary {
+                    kind: super::super::ProjectionKind::Business,
+                    batch_fingerprint: String::new(),
+                    write_count: 0,
+                    already_present_count: 0,
+                    committed_at_unix_secs: 0,
+                },
+            )
+            .unwrap();
         let coord1 =
             SupervisorCoordinator::with_in_memory_sink(store.clone() as Arc<dyn SupervisorStore>);
         let action1 = coord1
@@ -1195,8 +1295,14 @@ mod tests {
         // the persisted store, build a fresh one.
         drop(coord1);
         let snap = store.fan_in_status(&wave).unwrap();
-        assert!(snap.delivery_state.at_least(super::super::WaveDeliveryState::CoordinationCommitted));
-        assert!(snap.delivery_state.at_least(super::super::WaveDeliveryState::SalvageCommitted));
+        assert!(
+            snap.delivery_state
+                .at_least(super::super::WaveDeliveryState::CoordinationCommitted)
+        );
+        assert!(
+            snap.delivery_state
+                .at_least(super::super::WaveDeliveryState::SalvageCommitted)
+        );
         assert_eq!(snap.phase, WavePhase::Failed);
 
         let coord2 =
@@ -1245,7 +1351,18 @@ mod tests {
         store.record_slot_result(&wave, 0, "h", 1).unwrap();
         // Pre-commit salvage so fail_wave is not blocked on the
         // unrelated P0-1 latch.
-        store.commit_salvage_projection(&wave, &super::super::ProjectionReceiptSummary { kind: super::super::ProjectionKind::Business, batch_fingerprint: String::new(), write_count: 0, already_present_count: 0, committed_at_unix_secs: 0 }).unwrap();
+        store
+            .commit_salvage_projection(
+                &wave,
+                &super::super::ProjectionReceiptSummary {
+                    kind: super::super::ProjectionKind::Business,
+                    batch_fingerprint: String::new(),
+                    write_count: 0,
+                    already_present_count: 0,
+                    committed_at_unix_secs: 0,
+                },
+            )
+            .unwrap();
         let coord =
             SupervisorCoordinator::with_in_memory_sink(store.clone() as Arc<dyn SupervisorStore>);
         let action = coord
@@ -1280,7 +1397,10 @@ mod tests {
         // coord-event injection.
         let snap = store.fan_in_status(&wave).unwrap();
         assert_eq!(snap.phase, WavePhase::Failed);
-        assert!(snap.delivery_state.at_least(super::super::WaveDeliveryState::CoordinationCommitted));
+        assert!(
+            snap.delivery_state
+                .at_least(super::super::WaveDeliveryState::CoordinationCommitted)
+        );
     }
 
     /// Plan 004 R2 / P0-2 — happy path: once evidence is

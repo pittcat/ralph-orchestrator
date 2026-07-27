@@ -113,9 +113,8 @@ fn count_topic(lines: &str, topic: &str) -> usize {
 fn write_fake_worker(bin_dir: &Path, name: &str, topic: &str, payload: &str) -> PathBuf {
     std::fs::create_dir_all(bin_dir).expect("bin dir");
     let path = bin_dir.join(name);
-    let body = format!(
-        "#!/usr/bin/env bash\necho '<event topic=\"{topic}\">{payload}</event>'\nexit 0\n"
-    );
+    let body =
+        format!("#!/usr/bin/env bash\necho '<event topic=\"{topic}\">{payload}</event>'\nexit 0\n");
     std::fs::write(&path, body).expect("write fake worker");
     let mut perms = std::fs::metadata(&path).expect("stat").permissions();
     perms.set_mode(0o755);
@@ -155,8 +154,17 @@ fn scenario_01_six_workers_full_success() {
     let bin_dir = cwd.path().join("bin");
 
     // Six fake workers, each emits its own review.unit.done.
-    for (i, topic) in ["goal-alignment", "correctness", "testing", "maintainability",
-        "project-standards", "adversarial"].iter().enumerate() {
+    for (i, topic) in [
+        "goal-alignment",
+        "correctness",
+        "testing",
+        "maintainability",
+        "project-standards",
+        "adversarial",
+    ]
+    .iter()
+    .enumerate()
+    {
         let payload = format!(
             "{{\"plan_name\":\"demo\",\"scope_digest\":\"abcd1234ef567890\",\
              \"patch_digest\":\"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\",\
@@ -165,18 +173,16 @@ fn scenario_01_six_workers_full_success() {
              \"findings_count\":0,\"findings_file\":\".ralph/d/{topic}.md\",\
              \"handoff_precheck_failed\":false}}"
         );
-        write_fake_worker(&bin_dir, &format!("worker-{i}"), "review.unit.done", &payload);
+        write_fake_worker(
+            &bin_dir,
+            &format!("worker-{i}"),
+            "review.unit.done",
+            &payload,
+        );
     }
     scaffold_minimal_preset_yaml(cwd.path());
 
-    let out = run_ralph(
-        cwd.path(),
-        home.path(),
-        &[
-            "emit",
-            "--help",
-        ],
-    );
+    let out = run_ralph(cwd.path(), home.path(), &["emit", "--help"]);
     assert!(
         out.status.success(),
         "emit --help should not error in clean workspace: stderr={}",
@@ -237,13 +243,16 @@ fn scenario_02_worker_unset_events_file_emits_rejected() {
         .env("RALPH_CURRENT_HAT", "review-worker")
         .env("RALPH_CURRENT_LOOP_ID", "u7-loop")
         .env("RALPH_WAVE_WORKER", "1")
-        .env("PATH", format!("{}:{}", bin_dir.display(), std::env::var("PATH").unwrap_or_default()))
+        .env(
+            "PATH",
+            format!(
+                "{}:{}",
+                bin_dir.display(),
+                std::env::var("PATH").unwrap_or_default()
+            ),
+        )
         .current_dir(cwd.path())
-        .args([
-            "emit",
-            "review.unit.done",
-            "{}",
-        ]);
+        .args(["emit", "review.unit.done", "{}"]);
 
     let out = cmd.output().expect("spawn worker");
     assert!(
@@ -313,18 +322,13 @@ fn scenario_03_registry_preparation_failure_no_spawn() {
     let out = run_ralph(
         cwd.path(),
         home.path(),
-        &[
-            "wave",
-            "emit",
-            "review.unit.ready",
-            "--payloads-stdin",
-        ],
+        &["wave", "emit", "review.unit.ready", "--payloads-stdin"],
     );
     // We don't assert exit code == 0 or != 0 — the CLI may simply
     // log and no-op without a starting_event. We DO assert the
     // negative-space invariants the plan calls out.
-    let stderr = String::from_utf8_lossy(&out.stderr).to_string()
-        + &String::from_utf8_lossy(&out.stdout);
+    let stderr =
+        String::from_utf8_lossy(&out.stderr).to_string() + &String::from_utf8_lossy(&out.stdout);
 
     // No half-written registry directory.
     let registry = cwd.path().join(".ralph/wave-channels");
@@ -411,7 +415,10 @@ fn scenario_04_six_failed_with_five_orphan_main_done() {
     let store_content = std::fs::read_to_string(&store).unwrap();
     let main_content = std::fs::read_to_string(&main).unwrap();
     assert_eq!(
-        store_content.lines().filter(|l| l.contains("\"failed\"")).count(),
+        store_content
+            .lines()
+            .filter(|l| l.contains("\"failed\""))
+            .count(),
         6,
         "store must record 6 failed terminals"
     );
@@ -420,10 +427,9 @@ fn scenario_04_six_failed_with_five_orphan_main_done() {
         5,
         "main must contain 5 orphan done entries"
     );
-    let diag_val: serde_json::Value = serde_json::from_str(
-        &std::fs::read_to_string(&diagnostics).expect("read diag"),
-    )
-    .expect("diag parse");
+    let diag_val: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&diagnostics).expect("read diag"))
+            .expect("diag parse");
     assert_eq!(
         diag_val["missing_dimensions"].as_array().map(|a| a.len()),
         Some(6),
@@ -541,8 +547,16 @@ fn scenario_06_concurrent_waves_same_name_isolated_per_loop() {
     let reg_b_dir = loop_b.join(".ralph/wave-channels/loop_B/wave_x.json");
     std::fs::create_dir_all(reg_a_dir.parent().unwrap()).expect("reg A parent");
     std::fs::create_dir_all(reg_b_dir.parent().unwrap()).expect("reg B parent");
-    std::fs::write(&reg_a_dir, "{\"loop_id\":\"loop_A\",\"wave_id\":\"wave_x\",\"slots\":[]}").expect("write A");
-    std::fs::write(&reg_b_dir, "{\"loop_id\":\"loop_B\",\"wave_id\":\"wave_x\",\"slots\":[]}").expect("write B");
+    std::fs::write(
+        &reg_a_dir,
+        "{\"loop_id\":\"loop_A\",\"wave_id\":\"wave_x\",\"slots\":[]}",
+    )
+    .expect("write A");
+    std::fs::write(
+        &reg_b_dir,
+        "{\"loop_id\":\"loop_B\",\"wave_id\":\"wave_x\",\"slots\":[]}",
+    )
+    .expect("write B");
 
     // Both files exist independently.
     assert!(reg_a_dir.exists() && reg_b_dir.exists());
@@ -582,8 +596,11 @@ fn scenario_07_timeout_cleanup_yields_explicit_terminal() {
         .path()
         .join(".ralph/wave-channels/u7-loop/wave-cleanup.json");
     std::fs::create_dir_all(reg_path.parent().unwrap()).expect("parent");
-    std::fs::write(&reg_path, "{\"loop_id\":\"u7-loop\",\"wave_id\":\"wave-cleanup\"}")
-        .expect("write registry");
+    std::fs::write(
+        &reg_path,
+        "{\"loop_id\":\"u7-loop\",\"wave_id\":\"wave-cleanup\"}",
+    )
+    .expect("write registry");
     assert!(reg_path.exists(), "registry must exist before cleanup");
     // Verify cleanup physically: the registry file is the file we
     // would remove; the parent dir is the cleanup scope.
@@ -654,7 +671,10 @@ fn scenario_09_dirty_hat_env_scrubbed_matches_clean() {
     let cwd = workspace();
     let mut dirty = common::ralph_bin();
     // Polluting context BEFORE scrub.
-    dirty.env("HOME", home.path()).env("USERPROFILE", home.path()).current_dir(cwd.path());
+    dirty
+        .env("HOME", home.path())
+        .env("USERPROFILE", home.path())
+        .current_dir(cwd.path());
     dirty
         .env("RALPH_CURRENT_HAT", "executor")
         .env("RALPH_CURRENT_LOOP_ID", "outer-loop")
@@ -668,7 +688,10 @@ fn scenario_09_dirty_hat_env_scrubbed_matches_clean() {
         .args(["emit", "--help"]);
 
     let mut clean = common::ralph_bin();
-    clean.env("HOME", home.path()).env("USERPROFILE", home.path()).current_dir(cwd.path());
+    clean
+        .env("HOME", home.path())
+        .env("USERPROFILE", home.path())
+        .current_dir(cwd.path());
     clean.args(["emit", "--help"]);
     // common::ralph_bin already scrubs, this is the explicit guard.
 
@@ -708,10 +731,7 @@ fn scenario_10_diagnostics_write_failure_does_not_lose_root_cause() {
 
     // Attempt to write: must fail (read-only filesystem).
     let write_res = std::fs::write(&target, b"{\"reason\":\"boom\"}");
-    assert!(
-        write_res.is_err(),
-        "read-only directory must reject writes"
-    );
+    assert!(write_res.is_err(), "read-only directory must reject writes");
 
     // Root-cause survives in the ORIGINAL diagnostics sink (caller's
     // in-memory return value), not on disk.
