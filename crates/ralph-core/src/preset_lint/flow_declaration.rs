@@ -28,9 +28,10 @@ use crate::config::RalphConfig;
 use crate::event_loop::flow_declaration::{FlowDeclaration, FlowParseError, is_partial_state};
 use crate::preset_lint::LintFinding;
 use crate::preset_lint::finding_id::{
-    FINDING_FLOW_DECLARATION_MISSING, FINDING_FLOW_PARTIAL_BRANCH_EMPTY,
-    FINDING_FLOW_PARTIAL_STATE_UNDECLARED, FINDING_FLOW_REVIEW_COMPLETE_IN_UNIT_LOOP_BODY,
-    FINDING_FLOW_TERMINAL_EMIT_MISSING, FINDING_FLOW_UNKNOWN_EMIT_REJECTED,
+    FINDING_FLOW_DECLARATION_MISSING, FINDING_FLOW_LINEAR_POSITIONAL_AMBIGUITY,
+    FINDING_FLOW_PARTIAL_BRANCH_EMPTY, FINDING_FLOW_PARTIAL_STATE_UNDECLARED,
+    FINDING_FLOW_REVIEW_COMPLETE_IN_UNIT_LOOP_BODY, FINDING_FLOW_TERMINAL_EMIT_MISSING,
+    FINDING_FLOW_UNKNOWN_EMIT_REJECTED,
 };
 use serde_yaml::Value;
 
@@ -159,7 +160,166 @@ pub fn check_flow_declaration(raw_yaml: &str) -> Result<Vec<LintFinding>, FlowPa
     //    strictness because the rule is purely structural.
     findings.extend(check_review_complete_not_in_unit_loop_body(raw_yaml));
 
+    // 5. U4 (plan 2026-07-28-001): `kind: linear` step has
+    //    multiple allowed emits but no forward target names
+    //    any of them. The runtime falls back to positional
+    //    advance, which silently produces the
+    //    `flow_drift_positional_fallback` class of bug
+    //    (e.g. the 2026-07-27 parallel-forge primary run
+    //    where `forge.plan.inspected` landed in `exec_wave`
+    //    instead of `plan_authoring`). Surfacing this guard
+    //    at preset-load time prevents authoring a flow that
+    //    relies on positional fallback to wire up handoffs.
+    findings.extend(check_flow_linear_positional_ambiguity(raw_yaml));
+
     Ok(findings)
+}
+
+/// 2026-07-28-001 plan U4 (R8 / S8): a non-final `kind: linear` step
+/// declares at least two allowed emits but NO forward step has an
+/// `on` / `on_any_of` that names any of those topics.
+///
+/// Trigger conditions (all must hold):
+///   1. The step is NOT the last step in the flow.
+///   2. The step has `kind: linear` (other kinds — `side_effect`,
+///      `await`, `foreach`, `sequence`, `terminal` — are exempt
+///      because their transition model is different).
+///   3. `allowed_emits.len() >= 2` (single-topic steps have no
+///      ambiguity since the runtime either has a forward target
+///      or has to fall through linearly, which is the legacy
+///      position-based contract).
+///   4. The intersection of `{topics in this step's allowed_emits}`
+///      and `{topics in any forward step's on ∪ on_any_of}` is
+///      EMPTY **after removing non-transition topics**
+///      (`work.failed` / `work.done` / `work.ready` / `exec.unit.*`
+///      / `review.unit.*` / `fix.unit.*`).
+///
+/// Action hint: declare the next step's `on` (or the multi-source
+/// branch's `on_any_of`) to name the transition explicitly.
+///
+/// Severity: `Error` in strict mode (so the lint surface stays quiet
+/// for legacy presets; only `--strict` surfaces this). The default
+/// mode is permissive by design — see plan §3.1 D5 for the
+/// rationale.
+pub fn check_flow_linear_positional_ambiguity(raw_yaml: &str) -> Vec<LintFinding> {
+    let mut findings = Vec::new();
+    let Ok(value) = serde_yaml::from_str::<Value>(raw_yaml) else {
+        return findings;
+    };
+
+    let Some(steps) = value
+        .get("mechanism")
+        .and_then(|m| m.get("flow"))
+        .and_then(|f| f.get("steps"))
+        .and_then(|s| s.as_sequence())
+    else {
+        return findings;
+    };
+
+    // Mirror `event_loop::advance_plan_step::NON_TRANSITION_TOPICS`
+    // so the lint does not flag topics that the runtime will never
+    // use as a transition signal. Keeping this list local avoids a
+    // cross-crate dep on the runtime's `pub(crate)` constant.
+    const NON_TRANSITION_TOPICS: &[&str] = &[
+        "work.done",
+        "work.failed",
+        "work.ready",
+        "exec.unit.ready",
+        "exec.unit.done",
+        "exec.unit.failed",
+        "review.unit.ready",
+        "review.unit.done",
+        "fix.unit.ready",
+        "fix.unit.done",
+        "fix.unit.failed",
+    ];
+
+    let step_count = steps.len();
+    for (idx, step) in steps.iter().enumerate() {
+        let id = step.get("id").and_then(|v| v.as_str()).unwrap_or("");
+        let is_last = idx + 1 == step_count;
+
+        // Exemption 1: not the last step.
+        if is_last {
+            continue;
+        }
+        // Exemption 2: must be kind == "linear".
+        let kind = step.get("kind").and_then(|v| v.as_str()).unwrap_or("");
+        if kind != "linear" {
+            continue;
+        }
+        // Exemption 3: must have at least 2 allowed emits.
+        let Some(allowed) = step.get("allowed_emits").and_then(|a| a.as_sequence()) else {
+            continue;
+        };
+        if allowed.len() < 2 {
+            continue;
+        }
+        let allowed_topics: Vec<String> = allowed
+            .iter()
+            .filter_map(|v| v.as_str().map(String::from))
+            .collect();
+
+        // Compute the forward target topic set: any topic named by
+        // a forward step's `on` or `on_any_of`.
+        let mut forward_targets: std::collections::HashSet<String> =
+            std::collections::HashSet::new();
+        for later in steps.iter().skip(idx + 1) {
+            if let Some(on) = later.get("on").and_then(|v| v.as_str()).map(String::from) {
+                forward_targets.insert(on);
+            }
+            if let Some(seq) = later.get("on_any_of").and_then(|a| a.as_sequence()) {
+                for t in seq {
+                    if let Some(s) = t.as_str() {
+                        forward_targets.insert(s.to_string());
+                    }
+                }
+            }
+        }
+
+        // Filter non-transition topics from the trigger: a topic
+        // that the runtime never treats as a transition signal
+        // (e.g. `work.failed`) does NOT need a forward target, and
+        // surfacing it would be a false positive. Per plan §3.1 the
+        // failure-capable step explicitly keeps `work.failed` in
+        // its `allowed_emits` to satisfy the FlowStepScope gate
+        // even though it never advances the step.
+        let ambiguous: Vec<&String> = allowed_topics
+            .iter()
+            .filter(|t| {
+                !NON_TRANSITION_TOPICS.contains(&t.as_str()) && !forward_targets.contains(*t)
+            })
+            .collect();
+        if ambiguous.is_empty() {
+            continue;
+        }
+        // The finding fires only when the step has at least one
+        // topic that the runtime would fall back to advance
+        // positionally for. We surface all such topics in the
+        // message so the operator can wire each one.
+        let topics_list: Vec<String> = allowed_topics.iter().map(|s| format!("`{s}`")).collect();
+        let topics_str = topics_list.join(", ");
+        let ambiguous_list: Vec<String> = ambiguous.iter().map(|s| format!("`{s}`")).collect();
+        let ambiguous_str = ambiguous_list.join(", ");
+        let mut f = LintFinding::new(
+            FINDING_FLOW_LINEAR_POSITIONAL_AMBIGUITY,
+            format!(
+                "step '{id}' (kind=linear, non-final) has multiple allowed emits ({topics_str}) \
+                 but no forward step names any of them via `on` or `on_any_of`. The runtime will \
+                 fall back to positional advance for {ambiguous_str}, which silently produces the \
+                 `flow_drift_positional_fallback` class of bug. \
+                 Declare a forward `on` (single target) or `on_any_of` (multi-source branch) for each."
+            ),
+        );
+        f.hat = Some(id.to_string());
+        f.action_hint = Some(format!(
+            "add `on: <topic>` (single target) or `on_any_of: [<topics>]` (branch) to the next step, \
+             and ensure every transition-capable topic in step '{id}'.allowed_emits appears in some \
+             forward step's on/on_any_of. Topics needing forward targets: {ambiguous_str}"
+        ));
+        findings.push(f);
+    }
+    findings
 }
 
 /// U8 (plan 2026-07-04-004) helper: scan the raw YAML's

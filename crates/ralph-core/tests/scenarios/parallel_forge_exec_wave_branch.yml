@@ -1,0 +1,138 @@
+# 2026-07-28-001 plan U2 (R3/S3, R4/S4): BDD fixture for parallel-forge
+# exec_wave branch topology.
+#
+# R3/S3 coverage: exec.unit.{ready,done,failed} do NOT advance exec_wave.
+#   Multiple exec.unit.done events accumulate inside the wave; the
+#   supervisor fan-in is responsible for deciding when all slots are
+#   done and injecting exec.wave.complete.
+#
+# R4/S4 coverage: exec.wave.complete / exec.wave.failed DO advance
+#   exec_wave → unit_review. The happy path uses exec.wave.complete
+#   (supervisor fan-in); the failure path uses exec.wave.failed.
+#
+# Supervisor fan-in is enabled (supervisor.enabled: true) so the
+# real SupervisorCoordinator drives the wave terminal injection after
+# all slots complete. This exercises the full production code path
+# (run_bdd_supervisor_fan_in in scenarios.rs).
+#
+# Topology: 2-unit fan-out so the fan-in fires after 2 exec.unit.done
+# events arrive. supervisor_fan_in.expected_slots: 2 means the
+# coordinator fires exec.wave.complete as soon as both slots complete.
+#
+# Uses run_workflow_guard_scenario (real EventLoop runner; not stub).
+
+name: pf_exec_wave_branch
+description: U2 - parallel-forge exec_wave branch (R3/S3 non-transition, R4/S4 transition)
+
+config:
+  prompt_file: PROMPT.md
+  max_iterations: 5
+  event_loop:
+    execution_mode: isolated
+    supervisor:
+      enabled: true
+      aggregate_timeout_secs: 60
+  hats:
+    exec-coordinator:
+      subscribes_to:
+        - work.start
+      publishes:
+        - exec.unit.ready
+    unit-executor:
+      subscribes_to:
+        - exec.unit.ready
+      publishes:
+        - exec.unit.done
+    exec-integrator:
+      subscribes_to:
+        - exec.wave.complete
+      publishes:
+        - work.done
+
+# mock_responses drive the isolated-mode single-business-event-per-activation
+# budget. Each iteration emits exactly one business event.
+#
+# Iter 1: exec-coordinator dispatches slot-0 (first unit starts).
+# Iter 2: unit-executor completes slot-0.
+# Iter 3: exec-coordinator dispatches slot-1 (second unit starts).
+# Iter 4: unit-executor completes slot-1 → supervisor fan-in fires
+#         exec.wave.complete → exec-integrator sees it → work.done.
+# Iter 5: exec-integrator emits work.done.
+mock_responses:
+  # Iter 1: exec-coordinator emits exec.unit.ready for slot-0
+  - text: |
+      <event topic="exec.unit.ready">
+      wave_id: "pf-wave"
+      slot_index: 0
+      complexity: "small"
+      next_hint: "implement slot 0"
+      </event>
+    hat: exec-coordinator
+  # Iter 2: unit-executor emits exec.unit.done for slot-0
+  - text: |
+      <event topic="exec.unit.done">
+      wave_id: "pf-wave"
+      slot_index: 0
+      content_hash: "pf-hash-0"
+      </event>
+    hat: unit-executor
+  # Iter 3: exec-coordinator emits exec.unit.ready for slot-1
+  - text: |
+      <event topic="exec.unit.ready">
+      wave_id: "pf-wave"
+      slot_index: 1
+      complexity: "small"
+      next_hint: "implement slot 1"
+      </event>
+    hat: exec-coordinator
+  # Iter 4: unit-executor emits exec.unit.done for slot-1.
+  # Supervisor fan-in (expected_slots: 2) sees both slots done and
+  # injects exec.wave.complete into the EventLoop. This event is
+  # NOT in mock_responses — it is produced by run_bdd_supervisor_fan_in.
+  - text: |
+      <event topic="exec.unit.done">
+      wave_id: "pf-wave"
+      slot_index: 1
+      content_hash: "pf-hash-1"
+      </event>
+    hat: unit-executor
+  # Iter 5: exec-integrator publishes work.done (wave closed, step advanced).
+  - text: |
+      <event topic="work.done">
+      status: "complete"
+      wave_id: "pf-wave"
+      </event>
+    hat: exec-integrator
+
+# supervisor_fan_in: tells run_bdd_supervisor_fan_in to drive the
+# InMemoryCoordinatorBridge and inject exec.wave.complete after
+# expected_slots have reported exec.unit.done.
+supervisor_fan_in:
+  expected_slots: 2
+
+expected:
+  iterations: 5
+  events:
+    # R3/S3: exec.unit.done events are accepted and accumulated
+    # (supervisor tracks them for fan-in), but do not advance step.
+    - topic: exec.unit.ready
+    - topic: exec.unit.done
+    - topic: exec.unit.ready
+    - topic: exec.unit.done
+    # R4/S4: exec.wave.complete is injected by supervisor fan-in
+    # after both slots complete — this is the step transition.
+    - topic: exec.wave.complete
+    - topic: work.done
+  # R3/S3: multiple exec.unit.done events accumulate; no step advance.
+  # R4/S4: exec.wave.failed must not appear on the happy path.
+  absent_events:
+    - topic: exec.wave.failed
+    - topic: plan.blocked
+  event_topic_counts:
+    # R3/S3: two exec.unit.done events (one per unit), both accepted.
+    - topic: exec.unit.done
+      count: 2
+    # R4/S4: exactly one exec.wave.complete injected after fan-in.
+    - topic: exec.wave.complete
+      count: 1
+  completion: false

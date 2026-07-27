@@ -2138,6 +2138,56 @@ fn test_u13_supervisor_minimal() {
     run_workflow_guard_scenario(yaml);
 }
 
+// 2026-07-28-001 plan U2 (R3/S3, R4/S4): BDD fixture for parallel-forge
+// exec_wave branch topology. Uses run_workflow_guard_scenario (real
+// EventLoop) with supervisor fan-in enabled (expected_slots: 2).
+// R3/S3: exec.unit.done / exec.unit.failed do NOT advance exec_wave step.
+// R4/S4: exec.wave.complete injected by supervisor fan-in DOES advance
+//   exec_wave → unit_review.
+// Coverage: 2-unit fan-out → supervisor injects exec.wave.complete after
+// both slots complete. Verifies event_topic_counts for unit.done (2x) and
+// exec.wave.complete (1x), and absent exec.wave.failed on happy path.
+#[test]
+fn test_parallel_forge_exec_wave_branch() {
+    let yaml = load_scenario("tests/scenarios/parallel_forge_exec_wave_branch.yml");
+    run_workflow_guard_scenario(yaml);
+}
+
+// 2026-07-28-001 plan U3 (R5/S5 + R9/S9): parallel-forge full
+// 14-step declared flow success path. Every cross-hat handoff advances
+// the authority exactly once through planning → exec_wave → unit_review
+// → integration → incremental_verify → full_verify → audit → report
+// → plan_end → LOOP_COMPLETE. Uses run_workflow_guard_scenario (real
+// EventLoop) with supervisor fan-in enabled so the real
+// SupervisorCoordinator injects exec.wave.complete (not a faked mock).
+// U3 critical assertion: failure-side topics (`exec.wave.failed`,
+// `work.failed`, `forge.plan.blocked`) must stay absent, and
+// `LOOP_COMPLETE` / `forge.report.done` each fire exactly once.
+#[test]
+fn test_parallel_forge_declared_flow_runtime() {
+    let yaml = load_scenario("tests/scenarios/parallel_forge_declared_flow_runtime.yml");
+    run_workflow_guard_scenario(yaml);
+}
+
+// 2026-07-28-001 plan U3 (R6/S6 + R9/S9): parallel-forge declared
+// flow with failed post-exec convergence. After
+// `forge.integration.done`, the verifier emits `work.failed` instead
+// of `forge.incremental.verified`. The failure-capable step stays in
+// `incremental_verify` (work.failed is non-transition), the reporter
+// is re-triggered, and `forge.report.done` + `LOOP_COMPLETE` close
+// the loop. Uses run_workflow_guard_scenario (real EventLoop) with
+// supervisor fan-in enabled. U3 critical assertion: subsequent
+// success topics (`forge.incremental.verified`, `forge.full.verified`,
+// `forge.audit.done`) must stay absent after the `work.failed` is
+// accepted — without this, a regression that allows success handoffs
+// to slip past the failure gate would silently expand the failure
+// path.
+#[test]
+fn test_parallel_forge_declared_flow_failed_runtime() {
+    let yaml = load_scenario("tests/scenarios/parallel_forge_declared_flow_failed_runtime.yml");
+    run_workflow_guard_scenario(yaml);
+}
+
 // 2026-06-20-001 plan U6: serial-lint BDD scenarios were
 // considered but deferred. The first iteration (commit
 // 0083f5b) shipped 3 YAML scenarios + 3 #[test] functions, but
@@ -3853,6 +3903,11 @@ fn test_retained_scenarios_pipeline_or_generic_only() {
         "tests/scenarios/mechanism/",
         "tests/scenarios/u6_coordinator_",
         "tests/scenarios/2026-07-02-",
+        // 2026-07-28-001 plan U2/U3: parallel-forge exec_wave branch
+        // and success/failed chain BDD fixtures are fixture-neutral
+        // (custom hat topology in the yaml) so they qualify as
+        // generic (not pipeline, not supervisor).
+        "tests/scenarios/parallel_forge_",
         "tests/scenarios/isolated_with_event_projection",
         // correction/diagnose 模块的通用行为(fixture-neutral,U8 已恢复
         // 三个 pipeline-named 测试条目,见 d294be76 的 commit message)

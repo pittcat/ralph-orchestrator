@@ -116,6 +116,7 @@ Review skill 将 mechanical lint 与软性 AAF 缺口映射为 P0/P1/P2 + confid
 | `preset.hat_scope_coordinator_review_leak` | P0 | 95 | Q2 | visibility |
 | `preset.flow_declaration_missing` | P1 | 85 | Q4 | topology |
 | `preset.flow_unknown_emit_rejected` | P0 | 95 | Q4 | topology |
+| `preset.flow_linear_positional_ambiguity` | P0 | 90 | Q4 | topology |
 | `preset.supervisor_requires_isolated` | P0 | 95 | Q3 | lint |
 | `preset.supervisor_hat_publishes_coord_topic` | P0 | 95 | Q4 | lint |
 | `preset.supervisor_wave_consumer_low_concurrency` | P0 | 95 | Q3 | lint |
@@ -256,6 +257,25 @@ artifact-first review-only finding **不**出现在 `ralph preset check` JSON；
 - 业务 artifact 目录结构由 preset / hat 设计自定，lint 不强制统一约定（plan Product Contract §Scope Boundaries 明示），所以路径是否合理也是 review 的判断。
 
 若后续 `crates/ralph-core/src/preset_lint/` 要把这些 finding 升级为 lint（实现 R8 / R9 / R10 / R11 / R12 的机械拦截），须先把 ID 加入 `crates/ralph-core/src/preset_lint/finding_id.rs` 并同步更新 `ALL_FINDING_IDS` 数组，同时把 `default_severity` / `default_confidence` 与本表保持一致；升级前 review 仍按本表入主表，并在 Remediation Plan 中标注 review-only 来源。本任务不涉及 Rust 代码修改。
+
+### Flow declaration topology finding（`ralph preset check` JSON 直接产出）
+
+`mechanism.flow.steps[]` 是公开 stable contract。这些 finding 在 `ralph preset check --strict` JSON 中按 `lint.preset.<id>` 输出。
+
+| finding_id | default_severity | 含义 | 怎么改 |
+|---|---|---|---|
+| `preset.flow_declaration_missing` | P1 / 85 | preset 声明了多 hat handoff 但 `mechanism.flow` 整段缺失，`advance_plan_step` 退化到 positional fallback，多 topic 路径不可审计 | 增加 `mechanism.flow.steps`，把每个跨 hat handoff 拆成单 step |
+| `preset.flow_unknown_emit_rejected` | P0 / 95 | 当前 step `allowed_emits` 不含该 topic，FlowStepScope 拒收 | 把该 topic 加到对应 step 的 `allowed_emits`；或拆出独立 step 显式声明 `on` |
+| `preset.flow_linear_positional_ambiguity` | P0 / 90 | 非末尾 `kind: linear` step 声明了 ≥2 个 allowed emits，且后续 step 全无 `on` / `on_any_of` 引用其中任一 topic——运行时仍会按位置回退推进，隐藏真实拓扑 | 把多个顺序 handoff 拆成各自 step，使用下一 step 的 `on` 声明进入条件；多源 block 走 `on_any_of` |
+
+`flow_linear_positional_ambiguity` 的精确触发条件（plan Unit 4 §13）：
+
+1. 当前 step 不是 steps 数组末尾；
+2. `kind == "linear"`；
+3. `allowed_emits.len() >= 2`；
+4. 所有后续 step 的 `on` ∪ `on_any_of` 与当前 allowed topics 交集为空。
+
+不在上述形状内的 multi-topic linear step（如已有显式 `on` / `on_any_of` 引用其中一个 topic）不会被该 finding 命中，**也不**读取 hat prompt 或修改 severity 随 strictness 的通用机制。
 
 ### Runtime-contract topology finding（`ralph preset check` JSON 直接产出）
 

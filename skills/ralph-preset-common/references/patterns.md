@@ -171,6 +171,45 @@ work.done / fix.done
 - 报告 prose 不应用 byte-equality 测试锁死；用 schema、lint、事件场景和人工
   checklist 验证结构化合同。
 
+## Declarative flow authority pattern（通用：跨 hat handoff 必须显式声明）
+
+适用范围：任何 preset 通过 `mechanism.flow` 表达多 hat handoff 时。
+
+- 通用语义：`advance_plan_step` 显式 forward target 优先，positional fallback 兜底。
+  现行通用 runtime（`recover_current_plan_step` / `FlowStepScope` / 各类协
+  调 fan-in）已支持显式 `on` / `on_any_of`，起草 preset 时**不应再依赖**
+  「任一允许 topic 都推进到下一个 step」的 positional 行为。
+- 多 topic 顺序 handoff 必须各占一个 step：每个跨 hat handoff 用下一
+  step 的 `"on": <topic>`；同一 step 的 `allowed_emits` 只承载进入当前
+  step 那一刻可能浮现的 topic，不要把多个顺序成功 handoff 塞在同一
+  `kind: linear` step 里。
+- 多源 block 走 `on_any_of`：当 N 个不同 step 都可能因业务失败 / plan
+  阻塞汇聚到同一个收敛 step 时，在收敛 step 上声明 `on_any_of: [t1, t2, ...]`
+  而不是把每个源的「block topic」分别塞回原 step 的 `allowed_emits`。
+- `exec_wave` 等 side-effect step 的 unit topic 保持 non-transition：
+  `exec.unit.ready` / `exec.unit.done` / `exec.unit.failed` 不应被任何下一
+  step 的 `on` 引用——它们的 step 推进由 supervisor 注入的
+  `exec.wave.complete` / `exec.wave.failed` 决定。`kind: side_effect` /
+  `kind: await` 不强制声明 `runs`，但要让 `allowed_emits` 与下一 step
+  的 `on` 自洽。
+- `work.failed` 始终 non-transition：它由 runtime 的 `NON_TRANSITION_TOPICS`
+  在显式 target 搜索前 no-op；preset 不应用 `on: work.failed` 制造假分支，
+  也不把 work.failed 当作进入 terminal 的 transition。reporter 由
+  `forge.plan.blocked` / `exec.wave.failed` / `work.failed` 等 trigger
+  唤醒后，在自己的 `forge.report.done` 单步里把当前 step 推到 `plan_end`。
+- 非末尾、kind=linear、allowed_emits≥2、无后续 forward target 的组合
+  会被严格 lint 拒收（finding_id：`preset.flow_linear_positional_ambiguity`）。
+  拆 step、加 `on` / `on_any_of` 是唯一合规修复，不要改 severity 也不要
+  按 preset 名走 exemption。
+- 起草完后用结构性契约测试验证：
+  - `recover_current_plan_step` 对每个 cross-hat success handoff 顺序
+    推进到下一 step，且不会从单 topic 跨过早一节；
+  - 任意 `forge.plan.blocked` 收敛到 reporter 的 step（通常是 `report`
+    或对等的收敛点）；
+  - failure-capable step 的 `allowed_emits` 同时含 `work.failed` 和
+    收敛 topic（如 `forge.report.done`），使 reporter 在 work.failed 后
+    不会再次被 FlowStepScope 拒。
+
 ## 起草反模式（禁止抄进 instructions）
 
 | 反模式 | 应改为 |

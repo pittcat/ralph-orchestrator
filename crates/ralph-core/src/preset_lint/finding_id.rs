@@ -615,6 +615,22 @@ pub const FINDING_PAYLOAD_CONSISTENCY_NON_OBJECT_WHEN: &str =
 pub const FINDING_PAYLOAD_CONSISTENCY_UNSAFE_MESSAGE: &str =
     "preset.payload_consistency_unsafe_message";
 
+/// 2026-07-28-001 plan U4 (R8): a non-final `kind: linear` step
+/// declares at least two allowed emits but NO forward step has an
+/// `on` / `on_any_of` that names any of those topics. The runtime
+/// falls back to positional advance, which silently produces the
+/// `flow_drift_positional_fallback` class of bug (e.g. the
+/// 2026-07-27 parallel-forge primary run where `forge.plan.inspected`
+/// landed in `exec_wave` instead of `plan_authoring`).
+///
+/// `Error` in strict mode (the only mode that surfaces this — the
+/// default mode is permissive for legacy presets). The rule is
+/// local to a single non-final `kind: linear` step; non-linear
+/// (`side_effect` / `await` / `foreach` / `sequence` / `terminal`)
+/// steps are exempt because their transition model is different.
+pub const FINDING_FLOW_LINEAR_POSITIONAL_AMBIGUITY: &str =
+    "preset.flow_linear_positional_ambiguity";
+
 /// Inventory of every finding id in this module. Use this in tests
 /// that assert the lint surface does not silently re-introduce a
 /// serial-only or coordinator-loop finding. Plan 2026-07-07-006
@@ -681,4 +697,5 @@ pub const ALL_FINDING_IDS: &[&str] = &[
     FINDING_PAYLOAD_CONSISTENCY_UNKNOWN_OP,
     FINDING_PAYLOAD_CONSISTENCY_NON_OBJECT_WHEN,
     FINDING_PAYLOAD_CONSISTENCY_UNSAFE_MESSAGE,
+    FINDING_FLOW_LINEAR_POSITIONAL_AMBIGUITY,
 ];
