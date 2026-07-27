@@ -129,7 +129,8 @@ mod tests {
         for c in capability_inventory() {
             assert!(!c.id.is_empty(), "id must be non-empty");
             assert!(
-                c.id.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-'),
+                c.id.chars()
+                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-'),
                 "id must be kebab-case: {}",
                 c.id
             );

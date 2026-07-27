@@ -2639,8 +2639,8 @@ pub fn evaluate_candidate_emit(
     let allowed_topics = build_allowed_topics(&config.hats, completion_promise, event_policy);
 
     // System topics are allowed regardless.
-    let topic_format_ok = is_system_topic(topic)
-        || check_topic_format(topic, &allowed_topics).is_none();
+    let topic_format_ok =
+        is_system_topic(topic) || check_topic_format(topic, &allowed_topics).is_none();
 
     if !topic_format_ok {
         return Ok(CandidateEmitPreview {
@@ -2671,7 +2671,13 @@ pub fn evaluate_candidate_emit(
 
     let mut state = PolicyRuntimeState::default();
     let hat_str = Some(hat_id.as_str());
-    let decision = validate_event_with_hat(topic, Some(payload_json), &policy_config, &mut state, hat_str);
+    let decision = validate_event_with_hat(
+        topic,
+        Some(payload_json),
+        &policy_config,
+        &mut state,
+        hat_str,
+    );
 
     // Build the preview from the policy decision.
     let (policy_decision, reasons) = match &decision {
@@ -2716,36 +2722,65 @@ pub fn evaluate_candidate_emit(
 /// Convert a `PolicyFinding` into a structured `PolicyReasonEntry`.
 fn policy_reason_entry_from_finding(finding: &PolicyFinding) -> PolicyReasonEntry {
     let (gate, field, reason_code) = match &finding.violation_type {
-        ViolationType::PayloadTypeMismatch { expected, actual } => {
-            ("payload_type".to_string(), format!("expected={expected}, actual={actual}"), "payload_type_mismatch".to_string())
-        }
-        ViolationType::MissingRequiredField { field } => {
-            ("required_fields".to_string(), field.clone(), "missing_required_field".to_string())
-        }
-        ViolationType::InvalidFieldValue { field, value: _ } => {
-            ("field_value".to_string(), field.clone(), "invalid_field_value".to_string())
-        }
-        ViolationType::TerminalMonotonicityViolation { terminal_topic, business_topic } => {
-            ("terminal_monotonicity".to_string(), format!("terminal={terminal_topic}, business={business_topic}"), "terminal_monotonicity_violation".to_string())
-        }
-        ViolationType::DuplicateTerminalEvent { topic } => {
-            ("terminal_duplicate".to_string(), topic.clone(), "duplicate_terminal_event".to_string())
-        }
-        ViolationType::BusinessEventAfterCompletion { topic } => {
-            ("completion_guard".to_string(), topic.clone(), "business_event_after_completion".to_string())
-        }
-        ViolationType::InvalidTopicFormat { topic, allowed_topics: _ } => {
-            ("topic_format".to_string(), topic.clone(), "invalid_topic_format".to_string())
-        }
-        ViolationType::TopicDenied { rule_hat, rule_topic } => {
-            ("topic_denied".to_string(), format!("rule_hat={rule_hat}, topic={rule_topic}"), "topic_denied".to_string())
-        }
-        ViolationType::SemanticGateViolation { gate, .. } => {
-            ("semantic_gate".to_string(), gate.clone(), "semantic_gate_violation".to_string())
-        }
-        ViolationType::DuplicateWorkDone { key, .. } => {
-            ("duplicate_work_done".to_string(), key.clone(), "duplicate_work_done".to_string())
-        }
+        ViolationType::PayloadTypeMismatch { expected, actual } => (
+            "payload_type".to_string(),
+            format!("expected={expected}, actual={actual}"),
+            "payload_type_mismatch".to_string(),
+        ),
+        ViolationType::MissingRequiredField { field } => (
+            "required_fields".to_string(),
+            field.clone(),
+            "missing_required_field".to_string(),
+        ),
+        ViolationType::InvalidFieldValue { field, value: _ } => (
+            "field_value".to_string(),
+            field.clone(),
+            "invalid_field_value".to_string(),
+        ),
+        ViolationType::TerminalMonotonicityViolation {
+            terminal_topic,
+            business_topic,
+        } => (
+            "terminal_monotonicity".to_string(),
+            format!("terminal={terminal_topic}, business={business_topic}"),
+            "terminal_monotonicity_violation".to_string(),
+        ),
+        ViolationType::DuplicateTerminalEvent { topic } => (
+            "terminal_duplicate".to_string(),
+            topic.clone(),
+            "duplicate_terminal_event".to_string(),
+        ),
+        ViolationType::BusinessEventAfterCompletion { topic } => (
+            "completion_guard".to_string(),
+            topic.clone(),
+            "business_event_after_completion".to_string(),
+        ),
+        ViolationType::InvalidTopicFormat {
+            topic,
+            allowed_topics: _,
+        } => (
+            "topic_format".to_string(),
+            topic.clone(),
+            "invalid_topic_format".to_string(),
+        ),
+        ViolationType::TopicDenied {
+            rule_hat,
+            rule_topic,
+        } => (
+            "topic_denied".to_string(),
+            format!("rule_hat={rule_hat}, topic={rule_topic}"),
+            "topic_denied".to_string(),
+        ),
+        ViolationType::SemanticGateViolation { gate, .. } => (
+            "semantic_gate".to_string(),
+            gate.clone(),
+            "semantic_gate_violation".to_string(),
+        ),
+        ViolationType::DuplicateWorkDone { key, .. } => (
+            "duplicate_work_done".to_string(),
+            key.clone(),
+            "duplicate_work_done".to_string(),
+        ),
     };
 
     PolicyReasonEntry {
@@ -2756,10 +2791,153 @@ fn policy_reason_entry_from_finding(finding: &PolicyFinding) -> PolicyReasonEntr
 }
 
 /// Build a projection preview from the policy runtime state after validation.
-fn build_projection_preview(_state: &PolicyRuntimeState) -> Option<ProjectionPreview> {
-    // For the initial implementation, we return None (no detailed projection).
-    // Future units can populate this by inspecting state changes.
-    None
+fn build_projection_preview(state: &PolicyRuntimeState) -> Option<ProjectionPreview> {
+    let default = PolicyRuntimeState::default();
+    let mut actions = Vec::new();
+
+    if state.terminal_observed != default.terminal_observed {
+        actions.push(ProjectionAction {
+            field: "terminal_observed".to_string(),
+            action: "set".to_string(),
+            value: serde_json::json!(state.terminal_observed),
+        });
+    }
+
+    if state.completion_honored != default.completion_honored {
+        actions.push(ProjectionAction {
+            field: "completion_honored".to_string(),
+            action: "set".to_string(),
+            value: serde_json::json!(state.completion_honored),
+        });
+    }
+
+    if state.completion_topic != default.completion_topic {
+        actions.push(ProjectionAction {
+            field: "completion_topic".to_string(),
+            action: "set".to_string(),
+            value: serde_json::json!(state.completion_topic),
+        });
+    }
+
+    if state.completion_event_index != default.completion_event_index {
+        actions.push(ProjectionAction {
+            field: "completion_event_index".to_string(),
+            action: "set".to_string(),
+            value: serde_json::json!(state.completion_event_index),
+        });
+    }
+
+    if state.completion_iteration != default.completion_iteration {
+        actions.push(ProjectionAction {
+            field: "completion_iteration".to_string(),
+            action: "set".to_string(),
+            value: serde_json::json!(state.completion_iteration),
+        });
+    }
+
+    if state.current_plan_name != default.current_plan_name {
+        actions.push(ProjectionAction {
+            field: "current_plan_name".to_string(),
+            action: "set".to_string(),
+            value: serde_json::json!(state.current_plan_name),
+        });
+    }
+
+    if !state.work_done_seen_keys.is_empty() {
+        actions.push(ProjectionAction {
+            field: "work_done_seen_keys".to_string(),
+            action: "set".to_string(),
+            value: serde_json::json!(state.work_done_seen_keys),
+        });
+    }
+
+    if !state.work_done_task_id_to_key.is_empty() {
+        actions.push(ProjectionAction {
+            field: "work_done_task_id_to_key".to_string(),
+            action: "set".to_string(),
+            value: serde_json::json!(state.work_done_task_id_to_key),
+        });
+    }
+
+    if !state.review_dimension_ready_seen_keys.is_empty() {
+        actions.push(ProjectionAction {
+            field: "review_dimension_ready_seen_keys".to_string(),
+            action: "set".to_string(),
+            value: serde_json::json!(state.review_dimension_ready_seen_keys),
+        });
+    }
+
+    if !state.review_dimensions_complete_seen_keys.is_empty() {
+        actions.push(ProjectionAction {
+            field: "review_dimensions_complete_seen_keys".to_string(),
+            action: "set".to_string(),
+            value: serde_json::json!(state.review_dimensions_complete_seen_keys),
+        });
+    }
+
+    if !state.work_ready_seen_keys.is_empty() {
+        actions.push(ProjectionAction {
+            field: "work_ready_seen_keys".to_string(),
+            action: "set".to_string(),
+            value: serde_json::json!(state.work_ready_seen_keys),
+        });
+    }
+
+    if !state.pruned_work_ready_buckets.is_empty() {
+        actions.push(ProjectionAction {
+            field: "pruned_work_ready_buckets".to_string(),
+            action: "set".to_string(),
+            value: serde_json::json!(state.pruned_work_ready_buckets),
+        });
+    }
+
+    if !state.test_passed_seen_keys.is_empty() {
+        actions.push(ProjectionAction {
+            field: "test_passed_seen_keys".to_string(),
+            action: "set".to_string(),
+            value: serde_json::json!(state.test_passed_seen_keys),
+        });
+    }
+
+    if !state.test_failed_seen_keys.is_empty() {
+        actions.push(ProjectionAction {
+            field: "test_failed_seen_keys".to_string(),
+            action: "set".to_string(),
+            value: serde_json::json!(state.test_failed_seen_keys),
+        });
+    }
+
+    if !state.review_start_seen_keys.is_empty() {
+        actions.push(ProjectionAction {
+            field: "review_start_seen_keys".to_string(),
+            action: "set".to_string(),
+            value: serde_json::json!(state.review_start_seen_keys),
+        });
+    }
+
+    if !state.precheck_proposed_pending_keys.is_empty() {
+        actions.push(ProjectionAction {
+            field: "precheck_proposed_pending_keys".to_string(),
+            action: "set".to_string(),
+            value: serde_json::json!(state.precheck_proposed_pending_keys),
+        });
+    }
+
+    if state.last_plan_blocked_reason != default.last_plan_blocked_reason {
+        actions.push(ProjectionAction {
+            field: "last_plan_blocked_reason".to_string(),
+            action: "set".to_string(),
+            value: serde_json::json!(state.last_plan_blocked_reason),
+        });
+    }
+
+    if actions.is_empty() {
+        None
+    } else {
+        Some(ProjectionPreview {
+            state_changes: actions,
+        })
+    }
 }
 
 /// Compute which hats receive the event downstream.
@@ -7662,7 +7840,10 @@ hats:
     /// triggers on `work.ready`, with an EventPolicyConfig that requires
     /// `task_key` as a required field on `work.ready`.
     fn candidate_emit_test_config() -> RalphConfig {
-        use crate::config::{EventPolicyConfig, EventPolicyMode, EventSchema, HatConfig, PayloadType, ViolationAction};
+        use crate::config::{
+            EventPolicyConfig, EventPolicyMode, EventSchema, HatConfig, PayloadType,
+            ViolationAction,
+        };
         let mut cfg = RalphConfig::default();
 
         let hat_cfg = HatConfig {
@@ -7723,8 +7904,7 @@ hats:
         // depends on the validation path; check that at least one reason
         // exists).
         assert_eq!(
-            result.reasons[0].reason_code,
-            "missing_required_field",
+            result.reasons[0].reason_code, "missing_required_field",
             "expected missing_required_field reason, got {:?}",
             result.reasons[0]
         );
@@ -7738,8 +7918,9 @@ hats:
 
         // Same valid payload: both paths should accept.
         let valid_payload = r#"{"task_key": "abc"}"#;
-        let candidate = evaluate_candidate_emit(&config, &hat_id, "work.ready", valid_payload, None)
-            .expect("evaluation");
+        let candidate =
+            evaluate_candidate_emit(&config, &hat_id, "work.ready", valid_payload, None)
+                .expect("evaluation");
 
         let mut state = PolicyRuntimeState::default();
         let decision = validate_event_with_hat(
@@ -7764,5 +7945,95 @@ hats:
             evaluate_candidate_emit(&config, &hat_id, "work.ready", invalid_payload, None)
                 .expect("evaluation");
         assert_eq!(candidate2.policy_decision, "reject");
+    }
+
+    // ─────────────────────────────────────────────────────────────────────
+    // Unit 3 of plan 2026-07-27-002: build_projection_preview must return
+    // real state_changes when (and only when) the candidate was accepted.
+    // ─────────────────────────────────────────────────────────────────────
+
+    /// Helper: config for testing projection on accepted/rejected review.start.
+    fn projection_test_config() -> RalphConfig {
+        use crate::config::{
+            EventPolicyConfig, EventPolicyMode, EventSchema, HatConfig, PayloadType,
+            ViolationAction,
+        };
+        let mut cfg = RalphConfig::default();
+
+        let hat_cfg = HatConfig {
+            name: "reviewer".to_string(),
+            publishes: vec!["review.start".to_string()],
+            triggers: vec!["build.task".to_string()],
+            ..Default::default()
+        };
+        cfg.hats.insert("reviewer".to_string(), hat_cfg);
+
+        let schema = EventSchema {
+            payload: Some(PayloadType::JsonObject),
+            required_fields: vec!["plan_name".to_string(), "task_id".to_string()],
+            ..Default::default()
+        };
+        let policy = EventPolicyConfig {
+            enabled: true,
+            mode: EventPolicyMode::Enforce,
+            on_violation: ViolationAction::RejectWithResume,
+            schemas: [("review.start".to_string(), schema)].into_iter().collect(),
+            ..Default::default()
+        };
+        cfg.event_loop.event_policy = Some(policy);
+        cfg
+    }
+
+    #[test]
+    fn evaluate_candidate_emit_accepted_includes_projection() {
+        // RED phase: build_projection_preview currently returns None unconditionally.
+        // After U3 GREEN, accepted events must include a projection with state_changes.
+        let config = projection_test_config();
+        let hat_id = ralph_proto::HatId::new("reviewer");
+        let payload = serde_json::json!({
+            "plan_name": "myplan",
+            "task_id": "task-1"
+        });
+
+        let result =
+            evaluate_candidate_emit(&config, &hat_id, "review.start", &payload.to_string(), None)
+                .expect("evaluation should succeed");
+
+        assert_eq!(
+            result.policy_decision, "accept",
+            "review.start with plan_name and task_id must be accepted"
+        );
+        assert!(
+            result.projection.is_some(),
+            "accepted event MUST include projection with state_changes, got None"
+        );
+        let preview = result.projection.unwrap();
+        assert!(
+            !preview.state_changes.is_empty(),
+            "accepted event projection state_changes must not be empty"
+        );
+    }
+
+    #[test]
+    fn evaluate_candidate_emit_rejected_has_no_projection() {
+        // Rejected events must NOT include a projection.
+        let config = projection_test_config();
+        let hat_id = ralph_proto::HatId::new("reviewer");
+        // Missing required plan_name and task_id.
+        let payload = serde_json::json!({});
+
+        let result =
+            evaluate_candidate_emit(&config, &hat_id, "review.start", &payload.to_string(), None)
+                .expect("evaluation should succeed");
+
+        assert_eq!(
+            result.policy_decision, "reject",
+            "review.start without required fields must be rejected"
+        );
+        assert!(
+            result.projection.is_none(),
+            "rejected event must NOT include projection, got {:?}",
+            result.projection
+        );
     }
 }

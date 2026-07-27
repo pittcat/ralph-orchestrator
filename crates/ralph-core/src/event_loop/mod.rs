@@ -434,7 +434,6 @@ pub struct PromptPreview {
     pub block_titles: Vec<String>,
 
     // ── 2026-07-27-002 plan Unit 1: scenario injection fields ──
-
     /// Structured trigger context view, derived from the simulated trigger.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub trigger_context_injected: Option<crate::trigger_context::TriggerContextView>,
