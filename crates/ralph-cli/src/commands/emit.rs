@@ -237,6 +237,100 @@ pub fn looks_like_json(payload: &str) -> bool {
     trimmed.starts_with('{') || trimmed.starts_with('[')
 }
 
+/// 2026-07-27-004 plan U2 (R5-R7 / D3 / D8): apply runtime-owned
+/// system-field normalization to a wave worker's payload.
+///
+/// Contract:
+/// - When the process is bound to a registry-validated wave worker
+///   context (`wave_worker == true`) AND both `wave_id_env` and
+///   `slot_index_env` are present (the dispatcher injects them as a
+///   single handshake — see
+///   `loop_runner/wave/dispatcher.rs::spawn_worker_env`), inject the
+///   `wave_id` and `slot_index` system fields into the payload.
+/// - When the worker payload already contains `wave_id` or
+///   `slot_index` (even with matching values), reject with
+///   `system_field_owned_by_runtime` so the contract stays
+///   symmetric and auditable — Agent-fillable system fields create
+///   drift between the dispatcher's authoritative context and the
+///   payload's stamp.
+/// - When `wave_worker == false` (regular hat), pass through
+///   unchanged; the system fields are not relevant to non-wave
+///   payloads.
+///
+/// The helper is `pub(crate)` so the wave worker tests under
+/// `ralph-cli/src/cli::emit_path` and `commands::emit::tests` can
+/// pin the contract directly. It returns the (possibly mutated)
+/// payload and never panics; rejections are surfaced via
+/// `anyhow::Error` so the calling emit path can route them through
+/// the existing policy-check recovery envelope.
+pub(crate) fn normalize_wave_worker_system_fields(
+    mut payload: serde_json::Value,
+    wave_worker: bool,
+    wave_id_env: Option<&str>,
+    slot_index_env: Option<u32>,
+) -> Result<serde_json::Value> {
+    if !wave_worker {
+        // R7: non-wave hat payloads are unchanged; the existing
+        // payload contract still applies.
+        return Ok(payload);
+    }
+    let Some(public_wave_id) = wave_id_env else {
+        // Handshake already gated at the call site
+        // (`:390`); a missing `RALPH_WAVE_ID` here means the
+        // upstream guard let through a malformed process. We
+        // keep this conservative and pass through unchanged so
+        // the previously enforced error still surfaces.
+        return Ok(payload);
+    };
+    let Some(slot_index) = slot_index_env else {
+        return Ok(payload);
+    };
+
+    let Some(obj) = payload.as_object_mut() else {
+        anyhow::bail!(
+            "system_field_owned_by_runtime: wave worker payload must be a JSON object, \
+             but received {payload_kind}. Refusing to inject wave_id/slot_index \
+             into a non-object payload — the agent must emit a structured object.",
+            payload_kind = match payload {
+                serde_json::Value::Null => "null",
+                serde_json::Value::Bool(_) => "bool",
+                serde_json::Value::Number(_) => "number",
+                serde_json::Value::String(_) => "string",
+                serde_json::Value::Array(_) => "array",
+                serde_json::Value::Object(_) => "object",
+            }
+        );
+    };
+
+    // R6 / D8: an agent that pre-stamps wave_id / slot_index
+    // — even with the matching value — is rejected. The contract
+    // is symmetric: "the runtime owns these fields full-stop".
+    if obj.contains_key("wave_id") {
+        anyhow::bail!(
+            "system_field_owned_by_runtime: payload contains an explicit 'wave_id' field; \
+             wave worker payloads may not stamp wave_id themselves — the runtime injects \
+             it from the registry-bound context (got wave_id={public_wave_id}, env wave_id={public_wave_id})"
+        );
+    }
+    if obj.contains_key("slot_index") {
+        anyhow::bail!(
+            "system_field_owned_by_runtime: payload contains an explicit 'slot_index' field; \
+             wave worker payloads may not stamp slot_index themselves — the runtime injects \
+             it from the registry-bound context (expected slot_index={slot_index})"
+        );
+    }
+
+    obj.insert(
+        "wave_id".to_string(),
+        serde_json::Value::String(public_wave_id.to_string()),
+    );
+    obj.insert(
+        "slot_index".to_string(),
+        serde_json::Value::Number(serde_json::Number::from(slot_index)),
+    );
+    Ok(payload)
+}
+
 /// Write a recovery envelope to `.ralph/recovery.jsonl` when the CLI
 /// emit precheck rejects an event. The envelope captures the rejected
 /// topic, the offending hat (if known), and the policy finding so
@@ -1262,6 +1356,23 @@ fn emit_command_with_root_and_hats(
     // Generate timestamp internally — agents cannot forge timestamps
     let ts = chrono::Utc::now().to_rfc3339();
 
+    // 2026-07-27-004 plan U2 (R5-R7 / D3 / D8): capture the wave-worker
+    // handshake EARLY so the payload normalisation step below runs
+    // before the policy-check path inspects the payload. The values
+    // mirror the late `wave_worker` block further down — we hoist
+    // the read so the normalisation happens in the correct order.
+    let wave_worker = std::env::var("RALPH_WAVE_WORKER").ok().as_deref() == Some("1");
+    let wave_id_env = wave_worker
+        .then(|| std::env::var("RALPH_WAVE_ID").ok())
+        .flatten();
+    let slot_index_env = wave_worker
+        .then(|| {
+            std::env::var("RALPH_WAVE_INDEX")
+                .ok()
+                .and_then(|v| v.parse::<u32>().ok())
+        })
+        .flatten();
+
     // Validate JSON payload if --json flag is set
     let payload = if args.json && !args.payload.is_empty() {
         // Validate it's valid JSON
@@ -1289,6 +1400,19 @@ fn emit_command_with_root_and_hats(
     } else {
         serde_json::Value::String(payload.clone())
     };
+
+    // 2026-07-27-004 plan U2 (R5-R7 / D3 / D8): wave worker
+    // payload system fields are runtime-owned. Apply the
+    // normalisation BEFORE the policy_check block below (which
+    // inspects `payload_value`); the helper either injects
+    // `wave_id`/`slot_index` or rejects an Agent hand-fill with
+    // the stable `system_field_owned_by_runtime` reason.
+    let payload_value = normalize_wave_worker_system_fields(
+        payload_value,
+        wave_worker,
+        wave_id_env.as_deref(),
+        slot_index_env,
+    )?;
 
     // U2: stash the original payload string before any
     // downstream borrow consumes it; the JSON `--output`
@@ -1402,6 +1526,14 @@ fn emit_command_with_root_and_hats(
     // (adversarial-01 / goal-alignment-01). We DO NOT read them when
     // `RALPH_WAVE_WORKER != "1"` so a non-wave isolated hat cannot
     // self-claim a wave context just by exporting those vars.
+    //
+    // 2026-07-27-004 plan U2: the values are captured earlier in
+    // this function (above the payload normalisation step) and
+    // kept in scope so this block can use the same names. The
+    // reads match the dispatcher's `RALPH_WAVE_*` handshake
+    // contract; we deliberately do not call `std::env::var`
+    // again because the contract requires the worker PID to be
+    // bound exactly once at spawn time.
     let wave_worker = std::env::var("RALPH_WAVE_WORKER").ok().as_deref() == Some("1");
     let wave_id_env = wave_worker
         .then(|| std::env::var("RALPH_WAVE_ID").ok())

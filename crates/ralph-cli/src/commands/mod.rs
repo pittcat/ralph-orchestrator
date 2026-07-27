@@ -13,3 +13,5 @@ pub mod resume;
 pub mod run;
 pub mod tui;
 pub mod tutorial;
+#[cfg(test)]
+mod u2_wave_system_field_tests;
