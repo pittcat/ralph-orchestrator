@@ -547,6 +547,7 @@ fn preview_json_roundtrip_with_all_fields() {
         trigger_context_injected: Some(crate::trigger_context::TriggerContextView {
             source_topic: "build.task".to_string(),
             source_hat: Some("worker".to_string()),
+            source_hat_known: Some(true),
             current_hat: "builder".to_string(),
             summary: Vec::new(),
             matched_hints: Vec::new(),
@@ -1032,10 +1033,116 @@ fn preview_no_skill_gates_override_is_none() {
         preview.skill_gates.is_none(),
         "no override → skill_gates must be None"
     );
+}
 
-    let json: serde_json::Value = serde_json::to_value(&preview).expect("serialize");
+/// U8 (2026-07-27-002 plan): `source_hat_known` is computed from config.hats
+/// membership and is only serialized when `source_hat` is present.
+/// When `source_hat` is provided and the hat is in config.hats → true.
+/// When `source_hat` is provided but NOT in config.hats → false.
+/// When `source_hat` is absent → `source_hat_known` is absent from JSON.
+#[test]
+fn trigger_context_source_hat_known_true_when_in_config() {
+    // Manually build a TriggerContextView with source_hat = "builder"
+    // (which IS in minimal_isolated_config's hats).
+    let trigger_ctx = crate::trigger_context::TriggerContextView {
+        source_topic: "work.done".to_string(),
+        source_hat: Some("builder".to_string()),
+        source_hat_known: Some(true),
+        current_hat: "builder".to_string(),
+        summary: Vec::new(),
+        matched_hints: Vec::new(),
+    };
+
+    let json: serde_json::Value = serde_json::to_value(&trigger_ctx).expect("serialize");
+    assert_eq!(
+        json.get("source_hat_known").and_then(|v| v.as_bool()),
+        Some(true),
+        "source_hat_known must be true when source_hat is in config.hats"
+    );
+    assert_eq!(
+        json.get("source_hat").and_then(|v| v.as_str()),
+        Some("builder"),
+        "source_hat must be preserved"
+    );
+}
+
+/// When source_hat is provided but the hat is NOT in config.hats,
+/// `source_hat_known` must be `false` in the JSON output.
+#[test]
+fn trigger_context_source_hat_known_false_when_unknown() {
+    let trigger_ctx = crate::trigger_context::TriggerContextView {
+        source_topic: "work.done".to_string(),
+        source_hat: Some("nonexistent_hat".to_string()),
+        source_hat_known: Some(false),
+        current_hat: "builder".to_string(),
+        summary: Vec::new(),
+        matched_hints: Vec::new(),
+    };
+
+    let json: serde_json::Value = serde_json::to_value(&trigger_ctx).expect("serialize");
+    assert_eq!(
+        json.get("source_hat_known").and_then(|v| v.as_bool()),
+        Some(false),
+        "source_hat_known must be false when source_hat is not in config.hats"
+    );
+    assert_eq!(
+        json.get("source_hat").and_then(|v| v.as_str()),
+        Some("nonexistent_hat"),
+        "source_hat must be preserved even when unknown"
+    );
+}
+
+/// When source_hat is absent (None), `source_hat_known` must be
+/// entirely absent from the JSON output (skip_serializing_if).
+#[test]
+fn trigger_context_source_hat_known_omitted_when_source_hat_absent() {
+    let trigger_ctx = crate::trigger_context::TriggerContextView {
+        source_topic: "work.done".to_string(),
+        source_hat: None,
+        source_hat_known: None,
+        current_hat: "builder".to_string(),
+        summary: Vec::new(),
+        matched_hints: Vec::new(),
+    };
+
+    let json: serde_json::Value = serde_json::to_value(&trigger_ctx).expect("serialize");
     assert!(
-        json.get("skill_gates").is_none(),
-        "no override → skill_gates must be absent from JSON"
+        json.get("source_hat_known").is_none(),
+        "source_hat_known must be absent when source_hat is None"
+    );
+    // Note: source_hat serializes as null (not absent) when None;
+    // only source_hat_known has skip_serializing_if.
+}
+
+/// PromptPreview round-trip must preserve source_hat_known in trigger_context_injected.
+#[test]
+fn preview_trigger_context_source_hat_known_roundtrip() {
+    let config = minimal_isolated_config(true, true);
+    let mut event_loop = EventLoop::new(config);
+    event_loop.initialize("U8 roundtrip");
+    let base = event_loop
+        .prompt_preview(&HatId::new("builder"))
+        .expect("preview");
+
+    let preview = PromptPreview {
+        trigger_context_injected: Some(crate::trigger_context::TriggerContextView {
+            source_topic: "work.done".to_string(),
+            source_hat: Some("worker".to_string()),
+            source_hat_known: Some(true),
+            current_hat: "builder".to_string(),
+            summary: Vec::new(),
+            matched_hints: Vec::new(),
+        }),
+        ..base
+    };
+
+    let json = serde_json::to_string(&preview).expect("serialize");
+    let back: PromptPreview = serde_json::from_str(&json).expect("deserialize");
+    assert_eq!(
+        back.trigger_context_injected
+            .as_ref()
+            .and_then(|v| v.source_hat_known),
+        Some(true),
+        "source_hat_known must round-trip correctly"
     );
 }

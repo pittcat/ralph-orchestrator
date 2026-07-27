@@ -84,6 +84,9 @@ ralph -c <preset>.yml inspect prompt --hat <hat_id> --format json \
     [--correction <JSON>] [--scratchpad <true|false>] [--tasks-enabled <true|false>] \
     [--memories-enabled <true|false>]
 
+**`source_hat_known` 语义（U8 / adversarial:A3）：**
+当 `--source-hat` 提供的 hat id 在 config `hats` 映射中存在时，`trigger_context_injected.source_hat_known` 为 `true`；存在但不在 config 中时为 `false`；未提供 `--source-hat` 时该字段不序列化（`skip_serializing_if`）。这使得 reviewer 可以区分"已知 topology 成员"和"任意 Unicode ID"（adversarial:A3 防御：不允许凭外观拒绝，也不混淆 matched_hints）。
+
 # 候选 emit 干跑评估（Unit 2）
 ralph -c <preset>.yml inspect prompt --hat <hat_id> --format json \
     --topic <TOPIC> --payload '<JSON>' [--triggered <hat_id>]

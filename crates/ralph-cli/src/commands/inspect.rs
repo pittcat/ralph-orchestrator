@@ -631,9 +631,20 @@ pub async fn inspect_prompt_command(
             // requiring a full schema lookup — the preview context is
             // informational, not authoritative.
             use ralph_core::trigger_context::{FieldSummary, FieldValue, TriggerContextView};
+            // U8: compute source_hat_known from config.hats membership.
+            // None when source_hat is None (not serialized).
+            // Some(true) when source_hat is in config.hats.
+            // Some(false) when source_hat is provided but unknown.
+            // Use config_for_candidate (cloned before EventLoop took ownership
+            // of config) to avoid borrow-after-move.
+            let source_hat_known = args
+                .source_hat
+                .as_ref()
+                .map(|h| config_for_candidate.hats.contains_key(h));
             TriggerContextView {
                 source_topic: topic.clone(),
                 source_hat: args.source_hat.clone(),
+                source_hat_known,
                 current_hat: hat_id.as_str().to_string(),
                 summary: payload_json
                     .as_ref()
