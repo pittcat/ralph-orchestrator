@@ -502,11 +502,20 @@ fn maybe_derive_triggered_for_isolated(
     })
 }
 
+/// Whether to WARN when the resolved core config file is missing.
+///
+/// `cli_config_explicit` is true only when the operator passed CLI
+/// `-c` / `--config`. Ambient / runner-injected `RALPH_CONFIG` is
+/// intentionally excluded — see `main.rs` call site comment.
+///
+/// When a hats source (`-H` or `RALPH_HATS_SOURCE`) supplies the
+/// workflow, a missing project `ralph.yml` is the expected default
+/// core layer and must stay silent.
 fn should_warn_on_missing_default_config(
-    config_was_explicit: bool,
+    cli_config_explicit: bool,
     hats_source: Option<&HatsSource>,
 ) -> bool {
-    config_was_explicit || hats_source.is_none()
+    cli_config_explicit || hats_source.is_none()
 }
 
 fn emit_command_with_root_and_hats(
@@ -1365,52 +1374,15 @@ fn emit_command_with_root_and_hats(
         record["wave_index"] = serde_json::Value::Number(wave_index.into());
     }
 
-    // P0-2 (2026-07-02-005 BP1-3): explicit `--policy-check` is a dry-run
-    // probe — validation already ran above; do not append to JSONL.
-    // Enforce mode (config-mandated check before write) still writes.
-    if check_mode == PolicyCheckMode::ExplicitCheck {
-        // U8 (2026-07-06-001 plan): `--output json` 路径下打印
-        // EmitResult JSON（ok=true, recorded=false）作为
-        // policy-check 通过的机器可读信号。text 模式保持原有 stdout
-        // "Policy check passed" 行不变（向后兼容）。
-        if args.output == "json" {
-            let parts = crate::policy_check::build_emit_result_parts(
-                topic.to_string(),
-                true,
-                false,
-                Vec::new(),
-                config.as_ref(),
-                &workspace_root,
-                hat.as_deref(),
-                None, // policy-check not yet written → no target_path
-                // U2: thread the payload so the
-                // `handoff_envelope` summary can be extracted
-                // when the typed `emit_result_summary` flag
-                // is on.
-                Some(payload_for_summary.as_str()),
-            );
-            let result = ralph_core::emit_result::EmitResult::assemble(parts);
-            println!(
-                "{}",
-                serde_json::to_string(&result).context("Failed to serialise EmitResult JSON")?
-            );
-        } else if use_colors {
-            println!(
-                "{}✓{} Policy check passed: {} (not written to disk)",
-                colors::GREEN,
-                colors::RESET,
-                topic
-            );
-        } else {
-            println!("Policy check passed: {} (not written to disk)", topic);
-        }
-        return Ok(());
-    }
-
-    // Resolve events file via the P6 allowlist guard. The guard verifies
-    // the candidate path is either the active `current-candidate-events`
-    // target, the `current-events` target, or the default `events.jsonl`
-    // when no marker exists.
+    // Resolve events file via the P6 allowlist guard BEFORE the
+    // `--policy-check` early return. Dry-run must fail the same way as
+    // apply when `RALPH_EVENTS_FILE` / `--file` is outside the allowlist
+    // (otherwise agents get a false green on --policy-check then exit 1
+    // on the real emit — see 2026-07-26-002 Open Questions).
+    //
+    // The guard verifies the candidate path is either the active
+    // `current-candidate-events` target, the `current-events` target, or
+    // the default `events.jsonl` when no marker exists.
     //
     // U2 (2026-07-06-002 plan, R2/R4): pass the resolved hat context
     // and the isolated-mode flag to `resolve_emit_path` so the
@@ -1539,6 +1511,51 @@ fn emit_command_with_root_and_hats(
             return Err(err);
         }
     };
+
+    // P0-2 (2026-07-02-005 BP1-3): explicit `--policy-check` is a dry-run
+    // probe — validation already ran above; do not append to JSONL.
+    // Enforce mode (config-mandated check before write) still writes.
+    // Path allowlist already ran so dry-run and apply agree on destination.
+    if check_mode == PolicyCheckMode::ExplicitCheck {
+        // U8 (2026-07-06-001 plan): `--output json` 路径下打印
+        // EmitResult JSON（ok=true, recorded=false）作为
+        // policy-check 通过的机器可读信号。text 模式保持原有 stdout
+        // "Policy check passed" 行不变（向后兼容）。
+        if args.output == "json" {
+            let parts = crate::policy_check::build_emit_result_parts(
+                topic.to_string(),
+                true,
+                false,
+                Vec::new(),
+                config.as_ref(),
+                &workspace_root,
+                hat.as_deref(),
+                // recorded=false：契约仍省略 target_path（见 ralph-tools-emit.md）；
+                // 落点已在上方 resolve_emit_path 校验，失败则不会走到这里。
+                None,
+                // U2: thread the payload so the
+                // `handoff_envelope` summary can be extracted
+                // when the typed `emit_result_summary` flag
+                // is on.
+                Some(payload_for_summary.as_str()),
+            );
+            let result = ralph_core::emit_result::EmitResult::assemble(parts);
+            println!(
+                "{}",
+                serde_json::to_string(&result).context("Failed to serialise EmitResult JSON")?
+            );
+        } else if use_colors {
+            println!(
+                "{}✓{} Policy check passed: {} (not written to disk)",
+                colors::GREEN,
+                colors::RESET,
+                topic
+            );
+        } else {
+            println!("Policy check passed: {} (not written to disk)", topic);
+        }
+        return Ok(());
+    }
 
     // Ensure parent directory exists
     if let Some(parent) = events_file.parent()
@@ -4847,11 +4864,19 @@ hats:
         );
         assert!(
             should_warn_on_missing_default_config(true, Some(&builtin)),
-            "an explicitly requested missing config must remain visible"
+            "CLI -c / --config pointing at a missing file must remain visible even with hats"
         );
         assert!(
             should_warn_on_missing_default_config(false, None),
             "without a hats source, missing project config keeps the existing warning"
+        );
+        // Closure for ec636dc4: ambient RALPH_CONFIG is represented as
+        // cli_config_explicit=false at the call site. With hats present
+        // that must suppress the warn — otherwise every in-loop emit
+        // re-fires `Config file "ralph.yml" not found`.
+        assert!(
+            !should_warn_on_missing_default_config(false, Some(&builtin)),
+            "runner-injected RALPH_CONFIG must not count as CLI-explicit when hats_source is set"
         );
     }
 

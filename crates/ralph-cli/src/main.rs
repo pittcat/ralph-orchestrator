@@ -366,9 +366,13 @@ async fn main() -> Result<()> {
         tracing_subscriber::fmt().with_env_filter(filter).init();
     }
 
-    let config_was_explicit = !cli.config.is_empty()
-        || std::env::var("RALPH_CONFIG")
-            .is_ok_and(|value| !value.trim().is_empty());
+    // Only CLI `-c` / `--config` counts as "explicit" for missing-default
+    // warnings. Runner-injected / ambient `RALPH_CONFIG` must NOT — hat
+    // subprocesses always inherit `RALPH_CONFIG` (plan 2026-07-13 U2) while
+    // the workflow comes from `RALPH_HATS_SOURCE`; treating that env as
+    // explicit re-fired `Config file "ralph.yml" not found` on every
+    // in-loop `ralph emit` (ec636dc4 incomplete closure).
+    let config_was_explicit = !cli.config.is_empty();
     let config_values: Vec<String> = if cli.config.is_empty() {
         vec![default_config_path().to_string_lossy().to_string()]
     } else {

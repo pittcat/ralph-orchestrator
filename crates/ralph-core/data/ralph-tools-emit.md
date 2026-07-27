@@ -183,8 +183,13 @@ ralph emit --schema work.done | jq -r .protocol_hash   # 改后
 
 **状态驱动的 emit 规则（通用）**
 
-- 在发射任何“已经由你或上游 hat 发射过”的事件之前，先检查事件文件：loop 可能已被重启、你的上一轮可能已经成功落盘，或者另一个 hat 已经代你发出了等价事件。盲目重发会被运行时的去重层拒绝，并在 isolated mode 下浪费唯一的业务事件槽位。
-- 检查方法：`events_file="$(cat .ralph/current-events 2>/dev/null || echo .ralph/events.jsonl)"`，然后 `grep '"topic":"<TOPIC>"' "$events_file"` 并匹配关键字段（如 `plan_name`、`task_id`、`step`、`dimension` 等）。如果已存在匹配事件，**停止 emit**，等待对应的下游事件或 `task.resume`。
+- 在发射任何“已经由你或上游 hat 发射过”的事件之前，先用**公开只读接口**确认当前状态：loop 可能已被重启、你的上一轮可能已经成功落盘，或者另一个 hat 已经代你发出了等价事件。盲目重发会被运行时的去重层拒绝，并在 isolated mode 下浪费唯一的业务事件槽位。
+- **允许的检查方法（任选，优先从上到下）：**
+  1. `ralph inspect loop --format json` — 看当前 loop / hat / 投影状态
+  2. `ralph tools task list` — 看 runtime task 是否已 done/failed
+  3. 上一次 `ralph emit … --output json` 的 `ok` / `recorded` / `errors[]`
+- **禁止**把 `.ralph/events.jsonl` / `.ralph/supervisor.db` / `.ralph/loops.json` 当业务输入：不要 `cat` / `grep` / `jq` / `tail` 这些内部 ledger 来决定是否 emit。
+- 若公开接口已表明等价事件已落盘：**停止 emit**，等待下游事件或 `task.resume`。
 - **一个 turn 只发射一个业务事件**是默认纪律；去重层再强也只是兜底，不要在同一回合内通过“多发一次”来尝试修复。
 - 如果某条事件被去重层拒绝并收到 `task.resume`，下一回合只发一次修正后的事件，不要在同一回合继续补发。
 
@@ -199,7 +204,7 @@ ralph emit --schema work.done | jq -r .protocol_hash   # 改后
 
 JSON 写法：`ralph emit work.done --policy-check -j '{"plan_path": "...", "task_id": "..."}'`（dry-run 预检，不写盘；通过后去掉 `--policy-check` 再正式 emit）。
 
-**`--policy-check` 边界**：显式 `--policy-check` 是 **dry-run 预检**——校验通过与 loop gate 同源，但**不会**把事件写入 `events.jsonl`；通过后再跑一次不带 `--policy-check` 的正式 `ralph emit` 才会落盘。配置强制 `require_policy_check_for_cli_emit: true` 时，校验通过后仍会写盘（Enforce 模式，不是 dry-run）。CLI 校验覆盖：统一的事件策略校验、isolated hat 作用域，以及 `progress_task_gate`（`plan.complete` / `queue.advance` 的 `progress.md` ↔ `tasks.jsonl` 一致性）。
+**`--policy-check` 边界**：显式 `--policy-check` 是 **dry-run 预检**——校验通过与 loop gate 同源，但**不会**把事件写入 `events.jsonl`；通过后再跑一次不带 `--policy-check` 的正式 `ralph emit` 才会落盘。配置强制 `require_policy_check_for_cli_emit: true` 时，校验通过后仍会写盘（Enforce 模式，不是 dry-run）。CLI 校验覆盖：统一的事件策略校验、isolated hat 作用域、`progress_task_gate`（`plan.complete` / `queue.advance` 的 `progress.md` ↔ `tasks.jsonl` 一致性），以及 **P6 emit 落点 allowlist**（`RALPH_EVENTS_FILE` / `--file` 必须命中 `current-events` / `current-candidate-events` / `current-hat-events` / 默认 `events.jsonl` / dispatcher 签名的 wave channel）。`--policy-check` 与正式 emit 对落点拒绝的条件一致——预检绿了再 emit，不会因 allowlist 再挂一次。
 
 > **OPAC Precheck/Apply（agent context 默认 enforce）**: agent 上下文下，`ralph emit` 在无 `--policy-check` 且无 `--unsafe-no-policy-check` 写盘会被拒。`allow_unsafe_cli_emit: true` 可作为 preset opt-out（打印 deprecation warning）。详见 always-injected `ralph-tools-opac` skill Apply 段。
 

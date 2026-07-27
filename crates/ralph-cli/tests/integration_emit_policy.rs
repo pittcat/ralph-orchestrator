@@ -206,3 +206,88 @@ fn test_emit_rejected_env_events_file_prints_outer_hat_leak_hint() {
         "hint must point at the helper: {stderr}"
     );
 }
+
+/// Closure for ec636dc4: runner-injected `RALPH_CONFIG=ralph.yml` plus
+/// `RALPH_HATS_SOURCE` must NOT re-fire
+/// `Config file "ralph.yml" not found, using defaults` on every in-loop
+/// emit. The workflow comes from the hats source; missing project
+/// ralph.yml is the expected default core layer.
+#[test]
+fn test_emit_hats_source_with_ralph_config_suppresses_missing_yml_warn() {
+    let temp_dir = TempDir::new().expect("temp dir");
+    let temp_path = temp_dir.path();
+    std::fs::create_dir_all(temp_path.join(".ralph")).unwrap();
+    // Deliberately NO ralph.yml — mirrors hat cwd / thin worktree.
+
+    let output = common::ralph_bin()
+        .args([
+            "emit",
+            "debug.step",
+            "task_id=demo",
+            "--policy-check",
+            "--hat",
+            "executor",
+        ])
+        .current_dir(temp_path)
+        .env("RALPH_HATS_SOURCE", "builtin:ce-executor-pipeline")
+        .env("RALPH_CONFIG", "ralph.yml")
+        .env("RALPH_CURRENT_HAT", "executor")
+        .env(
+            "RALPH_EVENTS_FILE",
+            temp_path.join(".ralph/events.jsonl"),
+        )
+        .output()
+        .expect("failed to execute ralph emit");
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stderr.contains("not found, using defaults"),
+        "runner-injected RALPH_CONFIG + hats source must suppress missing-default warn; stderr={stderr}"
+    );
+}
+
+/// `--policy-check` must reject non-allowlisted `RALPH_EVENTS_FILE`
+/// the same way as formal emit (no false green then exit 1 on apply).
+#[test]
+fn test_emit_policy_check_rejects_non_allowlisted_events_file() {
+    let temp_dir = TempDir::new().expect("temp dir");
+    let temp_path = temp_dir.path();
+    std::fs::create_dir_all(temp_path.join(".ralph")).unwrap();
+    std::fs::write(
+        temp_path.join(".ralph/current-events"),
+        ".ralph/events-20260101-000000.jsonl",
+    )
+    .unwrap();
+
+    let output = common::ralph_bin()
+        .args([
+            "emit",
+            "review.unit.done",
+            "{}",
+            "--policy-check",
+            "--hat",
+            "executor",
+        ])
+        .env(
+            "RALPH_EVENTS_FILE",
+            temp_path.join(".ralph/events-other.jsonl"),
+        )
+        .current_dir(temp_path)
+        .output()
+        .expect("failed to execute ralph emit --policy-check");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !output.status.success(),
+        "--policy-check must reject non-allowlisted RALPH_EVENTS_FILE: stdout={stdout} stderr={stderr}"
+    );
+    assert!(
+        stdout.contains("emit rejected [path_resolution_failed]"),
+        "stdout must carry the stable reject summary: {stdout}"
+    );
+    assert!(
+        stderr.contains("hint:"),
+        "stderr must carry the outer-hat leak hint: {stderr}"
+    );
+}
