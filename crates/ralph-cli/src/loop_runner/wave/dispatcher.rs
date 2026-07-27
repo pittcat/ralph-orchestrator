@@ -102,6 +102,12 @@ pub enum WaveDispatchOutcome {
         /// Number of wave events (expected workers).
         expected_count: u32,
     },
+    /// Atomic channel-registry preparation failed before any executor call.
+    PreparationFailed {
+        reason: &'static str,
+        wave_id: String,
+        source: super::channel_registry::ChannelRegistryError,
+    },
 }
 
 /// U4-C3: outcome of `handle_wave_events` returned to the runner.
@@ -1020,6 +1026,19 @@ pub async fn handle_wave_events(
                 result.global_deadline_exceeded = true;
                 return result;
             }
+            WaveDispatchOutcome::PreparationFailed {
+                reason,
+                wave_id,
+                source,
+            } => {
+                warn!(%wave_id, reason, error = %source, "Wave channel preparation failed before spawn");
+                if let Some(state) = out.tui
+                    && let Ok(mut s) = state.lock()
+                {
+                    s.wave_active_iteration_idx.take();
+                    s.wave_active.take();
+                }
+            }
             WaveDispatchOutcome::SpawnFailed {
                 spawned_count,
                 expected_count,
@@ -1080,6 +1099,31 @@ pub async fn handle_wave_events(
         event_loop.reset_stale_topic_counter();
     }
     result
+}
+
+/// Atomically authorize every slot channel before any worker executor can run.
+pub(crate) fn prepare_wave_worker_channels(
+    main_events_file: &Path,
+    loop_id: &str,
+    wave_id: &str,
+    slots: impl IntoIterator<Item = (u32, PathBuf)>,
+) -> std::result::Result<
+    super::channel_registry::WaveChannelRegistryGuard,
+    super::channel_registry::ChannelRegistryError,
+> {
+    let workspace_root = workspace_root_from_events(main_events_file);
+    let bindings = slots
+        .into_iter()
+        .map(|(slot_index, channel_path)| {
+            super::channel_registry::BindingInput::new(slot_index, channel_path)
+        })
+        .collect::<Vec<_>>();
+    super::channel_registry::WaveChannelRegistry::prepare(
+        &workspace_root,
+        loop_id,
+        wave_id,
+        &bindings,
+    )
 }
 
 /// Execute a detected wave by spawning parallel backend instances.
@@ -1154,6 +1198,13 @@ pub async fn execute_wave(
             wave.wave_id,
             spawned_count,
             expected_count
+        )),
+        WaveDispatchOutcome::PreparationFailed {
+            reason,
+            wave_id,
+            source,
+        } => Err(anyhow::anyhow!(
+            "Wave {wave_id} preparation failed ({reason}): {source}"
         )),
     }
 }
@@ -1287,51 +1338,9 @@ pub async fn execute_wave_structured(
         // become `None` so legacy / malformed waves still dispatch.
         let assigned_dimension = parse_assigned_dimension(event.payload.as_deref());
 
-        // Create per-worker events file
+        // Create per-worker events file. Channel authorization is committed
+        // once for the complete request set after this loop.
         let worker_events_file = wave_dir.join(format!("wave-{}-{}.jsonl", wave_id, index_u32));
-
-        // 2026-07-27-003 plan U2 (KTD-1): the dispatcher MUST commit
-        // a per-wave JSON registry entry at `.ralph/wave-channels/<encoded-loop-id>/<encoded-wave-id>.json`
-        // BEFORE spawning any worker. This replaces the legacy
-        // append-only `.ralph/current-wave-channels` marker
-        // (which accepted env-only self-claim — the
-        // implementation-review primary-20260727 incident root
-        // cause). The full spawn-time fail-close lands in U3;
-        // for U2 we record the new call so the registry is on disk
-        // and the caller's signature can change without losing
-        // coverage of the legacy helper (U1 tests still pin
-        // `append_wave_channel_to_marker` shape until U3).
-        let wave_workspace_root = main_events_file
-            .parent()
-            .and_then(|p| p.parent())
-            .unwrap_or(Path::new("."));
-        let loop_id_for_registry = std::env::var("RALPH_CURRENT_LOOP_ID")
-            .unwrap_or_else(|_| "loop-unknown".to_string());
-        let registry_binding_input = BindingInput::new(
-            index_u32,
-            worker_events_file.clone(),
-        );
-        match WaveChannelRegistry::prepare(
-            wave_workspace_root,
-            &loop_id_for_registry,
-            &wave.wave_id,
-            std::slice::from_ref(&registry_binding_input),
-        ) {
-            Ok(_guard) => {
-                // Guard is dropped at end of `execute_wave` scope; explicit
-                // cleanup happens via the U3 hook. For U2 we just keep
-                // the registry on disk so `resolve_emit_path` can find it.
-            }
-            Err(err) => {
-                warn!(
-                    wave_id = %wave.wave_id,
-                    slot_index = index_u32,
-                    error = %err,
-                    "U2: failed to commit per-wave channel registry entry; \
-                     worker emit may be rejected by resolve_emit_path"
-                );
-            }
-        }
 
         // Build worker prompt
         let ctx = WaveWorkerContext {
@@ -1467,7 +1476,26 @@ pub async fn execute_wave_structured(
         }
     }
 
-    dispatch_wave_inner(
+    let mut registry_guard = match prepare_wave_worker_channels(
+        main_events_file,
+        loop_id,
+        &wave.wave_id,
+        worker_requests
+            .iter()
+            .map(|request| (request.index, request.worker_events_path.clone())),
+    ) {
+        Ok(guard) => guard,
+        Err(source) => {
+            return WaveDispatchOutcome::PreparationFailed {
+                reason:
+                    ralph_core::supervisor::worker_outcome::REASON_WAVE_CHANNEL_REGISTRATION_FAILED,
+                wave_id: wave.wave_id.clone(),
+                source,
+            };
+        }
+    };
+
+    let outcome = dispatch_wave_inner(
         tracker,
         worker_requests,
         DispatchContext::build(
@@ -1486,7 +1514,9 @@ pub async fn execute_wave_structured(
             tui_state,
         },
     )
-    .await
+    .await;
+    let _ = registry_guard.cleanup();
+    outcome
 }
 
 /// 2026-07-03-001 supervisor real-wiring: dispatch a wave
@@ -1920,6 +1950,32 @@ pub(crate) async fn execute_wave_via_supervisor_with_executor(
         });
     }
 
+    let _registry_guard = match prepare_wave_worker_channels(
+        main_events_file,
+        loop_id,
+        &wave.wave_id,
+        wave.events.iter().enumerate().map(|(index, _)| {
+            (
+                index as u32,
+                wave_dir.join(format!("wave-{}-{}.jsonl", wave.wave_id, index)),
+            )
+        }),
+    ) {
+        Ok(guard) => guard,
+        Err(source) => {
+            let reason =
+                ralph_core::supervisor::worker_outcome::REASON_WAVE_CHANNEL_REGISTRATION_FAILED;
+            for index in 0..wave.total {
+                let _ = bridge.record_slot_failure(&store_wave_id, index, reason);
+            }
+            return WaveDispatchOutcome::PreparationFailed {
+                reason,
+                wave_id: wave.wave_id.clone(),
+                source,
+            };
+        }
+    };
+
     // Approval rounds: each round lets up to `effective_cap`
     // pending slots dispatch in parallel; permits released by
     // earlier rounds (via inner's per-worker SlotGuard) make the
@@ -2086,6 +2142,10 @@ pub(crate) async fn execute_wave_via_supervisor_with_executor(
                     );
                 }
                 terminal_outcome = Some(WaveDispatchOutcome::GlobalDeadlineExceeded);
+                break;
+            }
+            preparation_failed @ WaveDispatchOutcome::PreparationFailed { .. } => {
+                terminal_outcome = Some(preparation_failed);
                 break;
             }
             spawn_failed @ WaveDispatchOutcome::SpawnFailed { .. } => {
@@ -5958,6 +6018,9 @@ hats: {}
             }
             WaveDispatchOutcome::GlobalDeadlineExceeded => {
                 // Also acceptable — deadline could fire first.
+            }
+            WaveDispatchOutcome::PreparationFailed { .. } => {
+                panic!("inner dispatcher does not perform channel preparation")
             }
         }
     }

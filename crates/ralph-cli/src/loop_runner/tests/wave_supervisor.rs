@@ -2088,7 +2088,9 @@ async fn run_u3_execute_wave(
 ) {
     use crate::loop_runner::wave::execute_wave_via_supervisor_with_executor;
 
-    let wave_dir = std::env::temp_dir().join(format!("u3-disp-{}", wave.wave_id));
+    let wave_dir =
+        std::env::temp_dir().join(format!("u3-disp-{}-{}", wave.wave_id, std::process::id()));
+    let _ = std::fs::remove_dir_all(&wave_dir);
     let _ = std::fs::create_dir_all(&wave_dir);
     let main_events_file = wave_dir.join("events.jsonl");
     let _ = std::fs::File::create(&main_events_file);
@@ -4637,7 +4639,7 @@ fn test_u3_resolve_emit_path_dispatcher_signed_carve_out() {
     let channel = workspace.join(format!(".ralph/wave-{wave_id}-{slot_idx}.jsonl"));
     let loop_id = "loop-u3-test";
 
-    // 2026-07-27-003 plan U2 (KTD-1): the dispatcher signs the
+// 2026-07-27-003 plan U2 (KTD-1): the dispatcher signs the
     // wave channel by committing a per-wave JSON registry entry
     // via `WaveChannelRegistry::prepare` BEFORE spawning. The
     // legacy `.ralph/current-wave-channels` marker has been
@@ -4645,14 +4647,14 @@ fn test_u3_resolve_emit_path_dispatcher_signed_carve_out() {
     // only. (See `wave/channel_registry.rs`.)
     let _guard = crate::loop_runner::wave::WaveChannelRegistry::prepare(
         &workspace,
-        loop_id,
+        "loop-u3-test",
         wave_id,
         &[crate::loop_runner::wave::BindingInput::new(
             slot_idx,
             channel.clone(),
         )],
     )
-    .expect("registry prepare must succeed");
+    .expect("prepare dispatcher channel registry");
 
     // Happy path: handshake aligns → accepted.
     let resolved = resolve_emit_path(
@@ -4851,7 +4853,9 @@ async fn run_u3_dispatch_wave<E: WaveWorkerExecutor + 'static>(
 ) -> WaveDispatchOutcome {
     use crate::loop_runner::wave::execute_wave_via_supervisor_with_executor;
 
-    let wave_dir = std::env::temp_dir().join(format!("u3-disp-{}", wave.wave_id));
+    let wave_dir =
+        std::env::temp_dir().join(format!("u3-disp-{}-{}", wave.wave_id, std::process::id()));
+    let _ = std::fs::remove_dir_all(&wave_dir);
     let _ = std::fs::create_dir_all(&wave_dir);
     let main_events_file = wave_dir.join("events.jsonl");
     let _ = std::fs::File::create(&main_events_file);
