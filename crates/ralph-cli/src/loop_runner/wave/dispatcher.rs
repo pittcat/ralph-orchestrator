@@ -215,6 +215,25 @@ impl Clone for WorkerRequest {
     }
 }
 
+/// 2026-07-28-003 plan U5 (A1 / A3): for **intermediate** retry
+/// attempts the worker must NOT push progress / RPC / TUI
+/// side-effects to the live dispatcher / TUI / RPC subscribers —
+/// only the final attempt's outcome escapes. We swap each
+/// shared sender for a fresh one whose receiver we drop on the
+/// floor: `try_send` / `send` / `blocking_send` on those senders
+/// remain infallible no-ops (the underlying `mpsc` buffer
+/// accepts up to capacity, then no-ops the rest).
+fn silent_request(orig: &WorkerRequest) -> WorkerRequest {
+    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel::<(u32, bool, Duration)>();
+    let (rpc_tx, _rpc_rx) = tokio::sync::mpsc::channel::<RpcEvent>(8);
+    let tui_state = Arc::new(std::sync::Mutex::new(ralph_tui::TuiState::default()));
+    let mut r = orig.clone();
+    r.progress_tx = tx;
+    r.worker_rpc_tx = Some(rpc_tx);
+    r.worker_tui_state = Some(tui_state);
+    r
+}
+
 /// Dispatcher-internal seam that abstracts "run one wave worker".
 ///
 /// The production executor delegates to `run_wave_worker`; tests
@@ -4768,6 +4787,13 @@ async fn dispatch_wave_inner_with_release<E: WaveWorkerExecutor + ?Sized>(
         // Replace the placeholder progress_tx with the real sender.
         let mut request = request;
         request.progress_tx = progress_tx.clone();
+        // 2026-07-28-003 plan U5 (A2): bring the wave-level
+        // partial / aggregate deadlines into the worker task so
+        // the in-task retry loop can stop retrying once the
+        // dispatcher-level budget expires (instead of letting a
+        // single retryable slot burn the entire wave_timeout).
+        let retry_partial_deadline = ctx.partial_deadline;
+        let retry_aggregate_deadline = ctx.aggregate_deadline;
 
         join_set.spawn(async move {
             // The Drop guard is installed before waiting on the local
@@ -4829,12 +4855,25 @@ async fn dispatch_wave_inner_with_release<E: WaveWorkerExecutor + ?Sized>(
             // attempt's outcome (KTD9). `WorkerRequest: Clone`
             // (U5 E15) lets us re-enter `execute()` after a retry
             // decision without consuming the request.
+            //
+            // Mid-attempt contract (A1 / A3): each non-final
+            // attempt's WorkerRequest has its `progress_tx`,
+            // `worker_rpc_tx` and `worker_tui_state` swapped for
+            // a no-op channel so the dispatcher / TUI / RPC
+            // subscribers only see the FINAL attempt's outcome.
+            //
+            // Deadline contract (A2): before each retry the loop
+            // checks the wave-level partial / aggregate deadlines;
+            // once either fires we break out of the loop and let
+            // the final attempt's outcome take the natural record
+            // path — we never extend a single slot beyond the
+            // wave's budget.
             let result = {
                 let mut attempt: u32 = 1;
                 // 2026-07-28-003 plan U5: use the budget we captured
                 // before moving `terminal_bridge` into the guard.
                 let budget = retry_budget;
-                let current_request = request;
+                let mut current_request = request;
                 let last_outcome: (u32, WaveWorkerOutcome) = loop {
                     let outcome = executor.execute(current_request.clone()).await;
                     let (_idx, res) = &outcome;
@@ -4862,9 +4901,22 @@ async fn dispatch_wave_inner_with_release<E: WaveWorkerExecutor + ?Sized>(
                                 _ => None,
                             };
                         if let Some(code) = frozen_code {
-                            if is_retryable_slot_reason(code)
+                            // C1: drop the `attempt < u32::MAX` dead
+                            // guard — `attempt.saturating_add(1)` plus
+                            // the `attempt <= budget` check already
+                            // bound the loop; the u32::MAX check is
+                            // unreachable once `budget <= 2`.
+                            // A2: bail out of the retry loop the
+                            // moment the wave-level partial /
+                            // aggregate deadline has passed, so a
+                            // single retryable slot cannot burn
+                            // `budget * wave_timeout` of wall time.
+                            let now = tokio::time::Instant::now();
+                            let deadline_passed = now >= retry_partial_deadline
+                                || now >= retry_aggregate_deadline;
+                            if !deadline_passed
+                                && is_retryable_slot_reason(code)
                                 && attempt <= budget
-                                && attempt < u32::MAX
                             {
                                 tracing::warn!(
                                     slot_index = request_index,
@@ -4874,20 +4926,32 @@ async fn dispatch_wave_inner_with_release<E: WaveWorkerExecutor + ?Sized>(
                                     "U5: retrying slot after frozen-code failure"
                                 );
                                 should_retry = true;
+                            } else if deadline_passed {
+                                tracing::warn!(
+                                    slot_index = request_index,
+                                    attempt,
+                                    code = %code,
+                                    "U5: skipping retry because wave-level partial/aggregate deadline has passed"
+                                );
                             }
                         }
                     }
                     if !should_retry {
                         break outcome;
                     }
+                    // A1 / A3: hand intermediate attempts a request
+                    // whose `progress_tx` / `worker_rpc_tx` /
+                    // `worker_tui_state` are no-op channels. The
+                    // FINAL attempt below keeps the real senders
+                    // so the dispatcher / TUI / RPC subscribers
+                    // observe exactly one Done / Failed notification
+                    // per (wave, slot).
                     attempt = attempt.saturating_add(1);
+                    current_request = silent_request(&current_request);
                     // Loop continues; **only** the final attempt's
                     // outcome escapes (KTD9: do not salvage
                     // intermediate batches).
                 };
-                // Pin the final attempt so warnings / logs about
-                // success relate to the attempt the caller observes.
-                let _ = last_outcome.0;
                 last_outcome
             };
 
