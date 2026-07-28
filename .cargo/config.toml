@@ -23,3 +23,4 @@
 # non-cargo processes; this only affects `cargo` children.
 [env]
 NO_PROXY = { value = "127.0.0.1,localhost,::1", force = true }
+TMPDIR = { value = "/private/tmp", force = true }

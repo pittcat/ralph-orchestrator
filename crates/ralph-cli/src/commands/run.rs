@@ -11,7 +11,7 @@ use ralph_core::{
     TerminationReason, ensure_plan_baseline_from_head, truncate_with_ellipsis,
     worktree::{
         WorktreeConfig, clean_worktree_runtime_artifacts, create_worktree, ensure_gitignore,
-        find_reusable_worktree, find_reusable_worktree_by_name, remove_worktree,
+        find_reusable_worktree_by_name, remove_worktree,
     },
 };
 use std::io::IsTerminal;
@@ -142,18 +142,18 @@ pub struct RunArgs {
     /// Reuse an existing, completed worktree for this run instead of
     /// creating a new one. Only valid with `--worktree`.
     ///
-    /// When the prompt-derived loop name prefix matches a previously
-    /// completed worktree listed in `.ralph/loops.json`, that
-    /// worktree's directory is reused (preserving its branch and code
-    /// state) and only its runtime artifacts (events, scratchpad,
-    /// tasks, summary, handoff, diagnostics) are cleaned up before
-    /// the new loop starts.
+    /// When `--plan` is provided, Ralph looks up a previously
+    /// completed worktree whose name is exactly the plan file's
+    /// basename (without `.md`/`.html`). When `--worktree-name` is
+    /// provided, Ralph looks up that exact worktree name instead.
+    /// A matching completed worktree listed in `.ralph/loops.json`
+    /// is reused after runtime-only artifacts (events, scratchpad,
+    /// tasks, summary, handoff, diagnostics) are cleaned up.
     ///
-    /// If no matching worktree is found, the run falls back to the
-    /// default behavior of creating a new worktree and prints a
-    /// notice explaining why. A worktree whose loop is still running
-    /// is never reused; the runner always spawns a fresh worktree
-    /// for it.
+    /// If no matching worktree is found, the run fails closed. It does
+    /// not create a new worktree under `--reuse-worktree`.
+    /// A worktree whose loop is still running is never reused; the
+    /// runner always refuses to attach to it.
     ///
     /// Cannot be used with `--exclusive` (the two flags address
     /// different concurrency regimes).
@@ -666,6 +666,7 @@ fn handle_active_lock(
     workspace_root: &Path,
     prompt_summary: &str,
     file_name_prefix: Option<&str>,
+    exact_worktree_name: Option<&str>,
     exclusive: bool,
     parallel: bool,
     loop_naming: &ralph_core::LoopNamingConfig,
@@ -702,7 +703,7 @@ fn handle_active_lock(
             workspace_root,
             prompt_summary,
             file_name_prefix,
-            None,
+            exact_worktree_name,
             loop_naming,
             pending_worktree_registration,
         )
@@ -714,10 +715,10 @@ fn worktree_file_name_prefix(
     _prompt_summary: &str,
     plan_file: Option<&Path>,
 ) -> Option<String> {
-    // Explicit --plan takes precedence: derive prefix from the plan's
-    // basename. This is the recommended way to name worktrees because
-    // it is deterministic and does not depend on fragile prompt-text
-    // parsing.
+    // Explicit --plan takes precedence: derive the plan basename.
+    // That basename is later used as the exact worktree name when
+    // reuse is requested, so it must stay deterministic and not depend
+    // on fragile prompt-text parsing.
     if let Some(plan) = plan_file
         && let Some(stem) = plan
             .file_stem()
@@ -742,6 +743,20 @@ fn worktree_file_name_prefix(
         .filter(|stem| !stem.trim().is_empty())
         .filter(|stem| !stem.eq_ignore_ascii_case("prompt"))?;
     Some(stem.to_string())
+}
+
+fn resolve_exact_worktree_name(
+    worktree_name: Option<&str>,
+    plan_file: Option<&Path>,
+    derived_plan_name: Option<&str>,
+) -> Option<String> {
+    worktree_name.map(str::to_owned).or_else(|| {
+        plan_file.and_then(|_| {
+            derived_plan_name
+                .map(str::to_owned)
+                .filter(|name| !name.is_empty())
+        })
+    })
 }
 
 /// Resolve a `--plan` argument to an existing plan file path.
@@ -1018,6 +1033,11 @@ pub async fn run_command(
         &prompt_summary,
         args.plan.as_deref(),
     );
+    let exact_worktree_name = resolve_exact_worktree_name(
+        args.worktree_name.as_deref(),
+        args.plan.as_deref(),
+        worktree_file_name_prefix.as_deref(),
+    );
 
     let mut pending_worktree_registration: Option<LoopEntry> = None;
 
@@ -1042,113 +1062,91 @@ pub async fn run_command(
         // Explicit --worktree flag: create worktree directly without acquiring lock
         // Worktree mode does not hold .ralph/loop.lock - it's fully isolated
         //
-        // 2026-06-14-001: when `--reuse-worktree` is also set, look up an
-        // existing completed worktree for this prompt prefix. If we
-        // find one, clean its runtime artifacts and reuse its
-        // directory. Otherwise fall through to the existing
-        // "create new worktree" path so the user is not blocked.
+        // When `--reuse-worktree` is also set, look up an existing
+        // completed worktree by exact name and reuse it. If no match
+        // exists, fail closed instead of silently creating a new one.
         if args.reuse_worktree {
             debug!("Reusing worktree for explicit --worktree --reuse-worktree mode");
-            let reuse_result = if let Some(name) = &args.worktree_name {
-                find_reusable_worktree_by_name(workspace_root, name)
-            } else {
-                find_reusable_worktree(
-                    workspace_root,
-                    worktree_file_name_prefix.as_deref().unwrap_or(""),
-                )
-            };
-            match reuse_result {
-                Ok(Some(reusable)) => {
-                    info!(
-                        "Reusing worktree at {} (loop_id={})",
-                        reusable.path.display(),
-                        reusable.loop_id
-                    );
-                    clean_worktree_runtime_artifacts(&reusable.path)
-                        .context("Failed to clean runtime artifacts in reused worktree")?;
-                    info!("Cleaned runtime artifacts in reused worktree");
-
-                    // Re-create the worktree's symlinks (in case the
-                    // previous loop removed them) and refresh the
-                    // context file metadata. setup_worktree_symlinks
-                    // is idempotent — it skips existing symlinks.
-                    let reused_ctx = LoopContext::worktree(
-                        reusable.loop_id.clone(),
-                        reusable.path.clone(),
-                        workspace_root.clone(),
-                    );
-                    reused_ctx
-                        .setup_worktree_symlinks()
-                        .context("Failed to refresh symlinks in reused worktree")?;
-                    reused_ctx
-                        .generate_context_file(&reusable.branch, &prompt_summary)
-                        .context("Failed to refresh context file in reused worktree")?;
-                    // The plan baseline was recorded when the worktree was first
-                    // created. Do NOT recreate it here: if it was lost we want the
-                    // runner to warn and fall back to current HEAD rather than
-                    // silently re-anchor the review diff base.
-                    // PROMPT.md sync (mirrors the create path) so
-                    // the agent reads its prompt from the worktree.
-                    sync_prompt_to_worktree(workspace_root, &reusable.path);
-
-                    // Register a new loop entry pointing at the same
-                    // worktree. The previous (dead-PID) entry is
-                    // replaced by register's same-PID guard or
-                    // simply ages out via the registry's own cleanup.
-                    let entry = LoopEntry::with_id(
-                        &reusable.loop_id,
-                        &prompt_summary,
-                        Some(reusable.path.to_string_lossy().to_string()),
-                        reusable.path.to_string_lossy().to_string(),
-                    );
-                    pending_worktree_registration = Some(entry);
-
-                    // Hand the reused context to the rest of the
-                    // pipeline exactly like a freshly-created one.
-                    subprocess_tui_args.worktree = false;
-                    subprocess_tui_args.worktree_path = Some(reused_ctx.workspace().to_path_buf());
-                    (reused_ctx, None)
-                }
-                Ok(None) => {
-                    // The deprecated "scan prompt text for plan path"
-                    // fallback has been removed. Reuse now requires an
-                    // explicit --plan or --worktree-name so the match is
-                    // deterministic.
-                    if args.worktree_name.is_none() && worktree_file_name_prefix.is_none() {
-                        anyhow::bail!(
-                            "--reuse-worktree requires an explicit --plan or --worktree-name. \
-                             Prompt-text plan detection has been removed because it was fragile."
+            match exact_worktree_name.as_deref() {
+                Some(name) => match find_reusable_worktree_by_name(workspace_root, name) {
+                    Ok(Some(reusable)) => {
+                        info!(
+                            "Reusing worktree at {} (loop_id={})",
+                            reusable.path.display(),
+                            reusable.loop_id
                         );
+                        clean_worktree_runtime_artifacts(&reusable.path)
+                            .context("Failed to clean runtime artifacts in reused worktree")?;
+                        info!("Cleaned runtime artifacts in reused worktree");
+
+                        // Re-create the worktree's symlinks (in case the
+                        // previous loop removed them) and refresh the
+                        // context file metadata. setup_worktree_symlinks
+                        // is idempotent — it skips existing symlinks.
+                        let reused_ctx = LoopContext::worktree(
+                            reusable.loop_id.clone(),
+                            reusable.path.clone(),
+                            workspace_root.clone(),
+                        );
+                        reused_ctx
+                            .setup_worktree_symlinks()
+                            .context("Failed to refresh symlinks in reused worktree")?;
+                        reused_ctx
+                            .generate_context_file(&reusable.branch, &prompt_summary)
+                            .context("Failed to refresh context file in reused worktree")?;
+                        // The plan baseline was recorded when the worktree was first
+                        // created. Do NOT recreate it here: if it was lost we want the
+                        // runner to warn and fall back to current HEAD rather than
+                        // silently re-anchor the review diff base.
+                        // PROMPT.md sync (mirrors the create path) so
+                        // the agent reads its prompt from the worktree.
+                        sync_prompt_to_worktree(workspace_root, &reusable.path);
+
+                        // Register a new loop entry pointing at the same
+                        // worktree. The previous (dead-PID) entry is
+                        // replaced by register's same-PID guard or
+                        // simply ages out via the registry's own cleanup.
+                        let entry = LoopEntry::with_id(
+                            &reusable.loop_id,
+                            &prompt_summary,
+                            Some(reusable.path.to_string_lossy().to_string()),
+                            reusable.path.to_string_lossy().to_string(),
+                        );
+                        pending_worktree_registration = Some(entry);
+
+                        // Hand the reused context to the rest of the
+                        // pipeline exactly like a freshly-created one.
+                        subprocess_tui_args.worktree = false;
+                        subprocess_tui_args.worktree_path =
+                            Some(reused_ctx.workspace().to_path_buf());
+                        (reused_ctx, None)
                     }
-                    info!(
-                        "No reusable worktree found for prefix '{}', creating new worktree",
-                        worktree_file_name_prefix.as_deref().unwrap_or("")
-                    );
-                    let (wt_ctx, _wt_guard) = spawn_worktree_loop(
-                        workspace_root,
-                        &prompt_summary,
-                        worktree_file_name_prefix.as_deref(),
-                        args.worktree_name.as_deref(),
-                        &config.features.loop_naming,
-                        &mut pending_worktree_registration,
-                    )?;
-                    subprocess_tui_args.worktree = false;
-                    subprocess_tui_args.worktree_path = Some(wt_ctx.workspace().to_path_buf());
-                    (wt_ctx, None)
-                }
-                Err(e) => {
-                    return Err(anyhow::Error::new(e).context(
-                        "Failed to look up reusable worktree; aborting to avoid stale state",
-                    ));
-                }
+                    Ok(None) => anyhow::bail!(
+                        "--reuse-worktree requires an existing worktree named '{}'; \
+                         refusing to create a new one",
+                        name
+                    ),
+                    Err(e) => {
+                        return Err(anyhow::Error::new(e).context(
+                            "Failed to look up reusable worktree; aborting to avoid stale state",
+                        ));
+                    }
+                },
+                None => anyhow::bail!(
+                    "--reuse-worktree requires `--plan <plan.md>` or `--worktree-name <name>`"
+                ),
             }
         } else {
             debug!("Creating worktree for explicit --worktree mode");
             let (wt_ctx, _wt_guard) = spawn_worktree_loop(
                 workspace_root,
                 &prompt_summary,
-                worktree_file_name_prefix.as_deref(),
-                args.worktree_name.as_deref(),
+                if exact_worktree_name.is_some() {
+                    None
+                } else {
+                    worktree_file_name_prefix.as_deref()
+                },
+                exact_worktree_name.as_deref(),
                 &config.features.loop_naming,
                 &mut pending_worktree_registration,
             )?;
@@ -1220,6 +1218,7 @@ pub async fn run_command(
                             workspace_root,
                             &prompt_summary,
                             worktree_file_name_prefix.as_deref(),
+                            exact_worktree_name.as_deref(),
                             args.exclusive,
                             config.features.parallel,
                             &config.features.loop_naming,
@@ -1257,6 +1256,7 @@ pub async fn run_command(
                             workspace_root,
                             &prompt_summary,
                             worktree_file_name_prefix.as_deref(),
+                            exact_worktree_name.as_deref(),
                             args.exclusive,
                             config.features.parallel,
                             &config.features.loop_naming,
@@ -1281,6 +1281,7 @@ pub async fn run_command(
                     workspace_root,
                     &prompt_summary,
                     worktree_file_name_prefix.as_deref(),
+                    exact_worktree_name.as_deref(),
                     args.exclusive,
                     config.features.parallel,
                     &config.features.loop_naming,
@@ -1303,6 +1304,7 @@ pub async fn run_command(
                         workspace_root,
                         &prompt_summary,
                         worktree_file_name_prefix.as_deref(),
+                        exact_worktree_name.as_deref(),
                         args.exclusive,
                         config.features.parallel,
                         &config.features.loop_naming,
@@ -2965,6 +2967,43 @@ mod tests {
         let source = worktree_file_name_prefix("custom-prompt.md", "[no prompt]", Some(&plan_path));
 
         assert_eq!(source.as_deref(), Some("explicit-plan"));
+    }
+
+    #[test]
+    fn resolve_exact_worktree_name_prefers_explicit_name_over_plan() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let plan_path = temp_dir.path().join("plan.md");
+
+        let resolved = resolve_exact_worktree_name(
+            Some("exact-name"),
+            Some(&plan_path),
+            Some("plan-basename"),
+        );
+
+        assert_eq!(resolved.as_deref(), Some("exact-name"));
+    }
+
+    #[test]
+    fn resolve_exact_worktree_name_uses_plan_basename_when_present() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let plan_path = temp_dir
+            .path()
+            .join("docs")
+            .join("plans")
+            .join("exact-plan.md");
+        std::fs::create_dir_all(plan_path.parent().unwrap()).unwrap();
+        std::fs::write(&plan_path, "Implement something").unwrap();
+
+        let resolved = resolve_exact_worktree_name(None, Some(&plan_path), Some("exact-plan"));
+
+        assert_eq!(resolved.as_deref(), Some("exact-plan"));
+    }
+
+    #[test]
+    fn resolve_exact_worktree_name_returns_none_without_exact_binding() {
+        let resolved = resolve_exact_worktree_name(None, None, None);
+
+        assert_eq!(resolved, None);
     }
 
     #[test]
