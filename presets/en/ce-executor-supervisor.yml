@@ -203,6 +203,11 @@ tasks:
   enabled: true
   coordinator_hats:
     - coordinator
+    # `task-planner` is the single writer for the execution-plan →
+    # runtime-task materialization path. It must be allowed to mint the
+    # plan nodes it owns, but it does not gain any additional task routing
+    # responsibilities.
+    - task-planner
 
 # Functional hats (post-2026-07-23-005 topology; deleted hats:
 # progress-steward, shipper, fallback fixer). Per-hat `publishes`
