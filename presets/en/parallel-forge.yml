@@ -336,8 +336,8 @@ hats:
       ### 步骤 5 — Emit
 
       1. `test -f` 两个 artifact。
-      2. `ralph emit forge.plan.ready --policy-check` 通过后真实 emit（含 `plan_key`、`development_plan_path`、`execution_plan_path`、`unit_count`）。
-      3. 阻塞：写 `blocks/planner-blocked.md`，emit `forge.plan.blocked`（含 `context_artifact_path` / `forge_artifact_root` / `plan_key`）。
+      2. `ralph emit forge.plan.ready --policy-check` 通过后真实 emit（含 `plan_path`、`plan_key`、`development_plan_path`、`execution_plan_path`、`unit_count`）。`plan_path` 取自步骤 1 Observe（`ralph inspect loop` / 操作者 plan），禁止手写。
+      3. 阻塞：写 `blocks/planner-blocked.md`，emit `forge.plan.blocked`（含 `reason`、`plan_path`、`context_artifact_path`、`forge_artifact_root`、`plan_key`）。
       4. 本 activation 仅一条业务事件。
 
   guardian:
@@ -367,9 +367,11 @@ hats:
       4. Foundation-before-parallel ordering is explicit in integration_order.
 
       ### Steps
-      1. Read `development_plan_path` and `execution_plan_path` from trigger.
-      2. Write `.ralph/forge/<plan-key>/concurrency-approval.md` using the checklist above.
-      3. If safe: emit `forge.concurrency.approved` with `approved: true`.
+      1. Read `development_plan_path` and `execution_plan_path` from trigger; derive `plan_key` from those paths.
+      2. Write `.ralph/forge/<plan-key>/concurrency-approval.md` using the checklist above; record
+         `approval_report_path` = that file (repo-relative).
+      3. If safe: precheck then emit `forge.concurrency.approved` with all required fields:
+         `approved: true`, `approval_report_path`, `execution_plan_path` (copy from trigger).
       4. Else: write `blocks/guardian-blocked.md`, emit `forge.plan.blocked`
          (`context_artifact_path`, `forge_artifact_root`, `plan_key`, `reason`, `plan_path`).
 
@@ -600,11 +602,17 @@ hats:
 
       ### Steps
       1. From trigger read `all_approved`, `execution_plan_path`, `plan_key`, `summary_path`. Abort if not all approved → write failure note, emit `work.failed` with context paths.
-      2. For each Unit in integration_order: rebase onto integration branch, squash to one commit, fast-forward merge; append `integration-log.md`.
-      3. Write `.ralph/forge/<plan_key>/integration-log.md` and `commit-map.yml`.
-      4. Verify linear history (one commit per Unit; no merge/WIP tails).
-      5. Emit `forge.integration.done` with all required fields including `commit_map_path`, `linear_history`, `plan_key`.
-      6. On failure: write `failures/integrator-failed.md`, emit `work.failed` with context paths.
+      2. Observe `integration_branch`: read `.ralph/forge/<plan_key>/worktree-map.yml` (or projection
+         `forge.worktree_map_path` / `forge.integration_branch` if present). Use the real branch name
+         from that map — do not invent. Confirm with `git branch --list` on the main repo.
+      3. For each Unit in integration_order: rebase onto `integration_branch`, squash to one commit,
+         fast-forward merge; append `integration-log.md`.
+      4. Write `.ralph/forge/<plan_key>/integration-log.md` and `commit-map.yml`.
+      5. Verify linear history (one commit per Unit; no merge/WIP tails).
+      6. Precheck then emit `forge.integration.done` with all required fields:
+         `integration_branch`, `units_integrated`, `integration_log_path`, `integration_complete`,
+         `commit_map_path`, `linear_history`, `plan_key`.
+      7. On failure: write `failures/integrator-failed.md`, emit `work.failed` with context paths.
 
       Single business event only.
 
@@ -748,9 +756,10 @@ hats:
 
       ### 步骤 4 — Confirm & emit
 
-      1. `test -f` 报告路径。
+      1. `test -f` 报告路径；记下同一 `report_path`。
       2. emit `forge.report.done`（`report_path`、`status`、`final_audit`、`plan_key`）。
-      3. 再 emit `LOOP_COMPLETE`（reporter 窄例外双终态）。
+      3. 再 emit `LOOP_COMPLETE`（reporter 窄例外双终态），payload 必须含同一 `report_path`
+        （与 schema required_fields 一致；禁止省略）。
       4. 打印 `DELIVERABLE_PATH: <report_path>`。
       5. 执行 worktree cleanup（见上）。
 

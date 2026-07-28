@@ -36,7 +36,7 @@ metadata:
 | 要管理 runtime task | `ralph tools task add/ensure/start/close` | `ralph-tools-tasks`（已注入，若 tasks.enabled） |
 | 要记录/查找记忆或 decision journal | `ralph tools memory add/search/prime` | `ralph-tools-memories`（已注入，若 memories.enabled） |
 | 要启动 loop / 复用 worktree / 预览 profiles | `ralph run ...` / `ralph inspect profiles` | `ralph tools skill load ralph-tools-cmdref` |
-| 要落盘 builtin artifact 模板（如 parallel-forge，binary-only） | `ralph preset materialize-artifacts <preset> --plan-key <key>` | `ralph tools skill load ralph-tools-cmdref`「materialize-artifacts」 |
+| 要落盘 builtin artifact 填写模板（binary-only；部署机无源码 templates 目录时） | `ralph preset materialize-artifacts <preset> --plan-key <key>` | `ralph tools skill load ralph-tools-cmdref`「materialize-artifacts」 |
 | 要校验 hat 拓扑 | `ralph hats validate [--strict]` | `ralph hats --help`（strict 时启用 lint 所有权检查） |
 | Loop 崩溃/ledger 损坏需恢复 | `ralph loops clean --ledger` + `ralph diagnose --session latest` | `docs/guide/runtime-diagnosis.md`（JSON 含 `dup_storm_topics` + findings `hint`） |
 | `ralph emit` 报 `triggered_not_in_topology` | `--triggered` 不在 preset `hats[]`；改 hat id 或省略 | `ralph tools skill load ralph-tools-emit` |

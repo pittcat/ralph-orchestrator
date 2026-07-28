@@ -155,9 +155,9 @@ ralph run [OPTIONS] [-- <CUSTOM_ARGS>...]
 
 ## `ralph preset materialize-artifacts`
 
-把编译进 `ralph` 二进制的 **artifact 填写模板**落到当前工作区。用于 `parallel-forge` 等 preset：部署机通常只有二进制、没有 `presets/templates/` 源码目录。
+把编译进 `ralph` 二进制的 **artifact 填写模板**落到当前工作区。用于内嵌了 fill-in 模板的 builtin preset：部署机通常只有二进制、没有 `presets/templates/` 源码目录。
 
-**触发条件：** hat instructions 要求先复制模板再填写（planner / executor / reporter），且 `.ralph/forge/<plan-key>/templates/` 尚不存在或需要刷新。
+**触发条件：** 当前 hat instructions 要求先复制模板再填写，且 instructions 给出的 templates 目录尚不存在或需要刷新。
 
 **语法：**
 ```bash
@@ -168,27 +168,27 @@ ralph preset materialize-artifacts <PRESET> --plan-key <KEY> [--dest <DIR>]
 
 | 参数 | 类型 | 必需 | 默认值 | 说明 |
 |------|------|------|--------|------|
-| `<PRESET>` | string | 是 | — | 内嵌模板所属 preset，如 `parallel-forge` 或 `builtin:parallel-forge` |
+| `<PRESET>` | string | 是 | — | 内嵌模板所属 preset 名（或 `builtin:<name>`）；以 hat instructions / `ralph preset --help` 为准 |
 | `--plan-key <KEY>` | string | 是 | — | 单段路径名（禁止 `/`、`\`、`..`）；默认输出目录用它 |
-| `--dest <DIR>` | path | 否 | `.ralph/forge/<KEY>/templates/` | 覆盖输出目录 |
+| `--dest <DIR>` | path | 否 | `.ralph/forge/<KEY>/templates/` | 覆盖输出目录（若 hat instructions 另有根路径，以 instructions 为准） |
 
 **agent 下一步：**
 1. 运行本命令（或确认 templates 目录已存在）。
 2. `cp` 对应 `*.template.*` 到业务 artifact 路径（见 hat instructions）。
-3. 按模板内 BDD / TDD / Scenario 章节逐节填写；禁止跳过模板写自由格式。
+3. 按模板内章节逐节填写；禁止跳过模板写自由格式。
 
 **失败停止条件：**
-- preset 无内嵌模板 → 停止，核对 preset 名。
+- preset 无内嵌模板 → 停止，核对 preset 名（以 hat instructions 给出的名为准）。
 - `--plan-key` 为空或含路径分隔符 → 停止，改用 plan 文件 basename。
 
 **校验：**
 ```bash
-ralph preset materialize-artifacts parallel-forge --plan-key demo
-test -f .ralph/forge/demo/templates/development-plan.template.md
+ralph preset materialize-artifacts <PRESET> --plan-key <KEY>
+test -d .ralph/forge/<KEY>/templates/
 ```
 
 **反模式：**
-- 🔴 不要假设仓库里存在 `presets/templates/parallel-forge/`（binary 安装没有）。
+- 🔴 不要假设仓库里存在 `presets/templates/<preset>/`（binary 安装没有）。
 - 🔴 不要把本命令当成 `ralph preset new`（那是生成 preset YAML，不是 fill-in 模板）。
 
 ---
