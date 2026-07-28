@@ -388,12 +388,17 @@ hats:
       - Config attack: defaults, feature off, invalid combinations, env/config/CLI priority, old config compatibility, missing config
       - Concurrency & idempotency attack: double-click, double-submit, concurrent processes, retry, timeout retry, scheduler duplicate dispatch, cleanup vs execution race
       - External system attack: network down, 4xx/5xx, timeout, corrupted response, duplicate response, browser refresh/back, session expiry, cookie/localStorage/server state mismatch
+      - Backward compatibility attack: baseline vs after-patch behavior drift, feature combination scenarios, default-off backward compatibility, cross-module state pollution, performance regression on critical paths
 
       ### Experiment Design Rules
       - Every experiment MUST have: control group, attack group, machine-checkable invariant, state inspection, repeat policy, cleanup policy
       - No vague descriptions like "test concurrency" or "check restart"
       - Use the experiment template; fill every section
       - Control group proves environment is normal; attack group proves the vulnerability exists
+      - For each plan, MUST design at least one "combination scenario" experiment:
+          control group runs the old feature test suite with the new feature disabled;
+          attack group runs the same old feature test suite with the new feature enabled;
+          the invariant is that old feature test results are identical in both groups.
 
       ### Steps (on plan.resolved)
       1. Read `redteam.plan.resolved` payload. Read plan-resolution and patch-reconstruction artifacts.
@@ -460,6 +465,10 @@ hats:
 
       ### Allowed Operations
       - Build project, run existing tests, lint, format-check, static check, benchmark, fuzz
+      - Run full existing test suite with the new feature toggled on and off, then diff the results
+      - Run integration tests that combine the new feature with each major old feature
+      - Run cross-module state propagation checks (e.g., module A writes, module B reads)
+      - Benchmark critical paths before and after the patch to detect performance regression
       - Start programs, execute commands, pass invalid/boundary args, concurrent execution,
         terminate self-started processes, timeout retry, compare before/after state
       - File/persistence experiments ONLY in isolated dirs / temp data / copies
@@ -597,6 +606,10 @@ hats:
          - Concurrent entry verification
          - Web refresh/re-login verification
          - API caller compatibility verification
+         - Run full existing test suite with new feature enabled vs disabled, then diff results
+         - Run integration tests combining the new feature with each major old feature
+         - Run cross-module state propagation checks (module A writes, module B reads)
+         - Benchmark critical paths before and after patch to detect performance regression
       4. Determine:
          - Earliest failure layer
          - Which invariant broken
@@ -610,6 +623,9 @@ hats:
          - Compatibility impact
          - Confirmed unaffected modules
          - Minimal safe fix boundary
+         - Whether any old feature behavior drifts when the new feature is enabled
+         - Whether any cross-module state coupling is introduced
+         - Whether any critical path performance regresses beyond acceptable threshold
       5. Recompute impact_certainty from boundary experiment results (not from evidence-gate).
       6. If impact_certainty < threshold:
          - Emit `redteam.impact.rejected` with reason `REJECTED_AFTER_RETRY_UNCERTAIN_IMPACT`
