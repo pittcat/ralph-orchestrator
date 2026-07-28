@@ -1,7 +1,7 @@
 //! Task ledger projection.
 //!
 //! Plan ref: U2 of
-//! `docs/plans/2026-06-17-003-feat-hat-orchestrator-state-projection-phase1-plan.md`.
+//! `docs/plans/2026-06-17-003-hat-orchestrator-state-projection-phase1-plan.md`.
 //!
 //! These two helpers write `.ralph/agent/tasks.jsonl` from the
 //! projector. The projector is the **sole** writer in Phase 1
@@ -12,6 +12,19 @@
 //! into a [`super::Rejection`] and the bus emits
 //! `event.state_projection.rejected`.
 
+/// Canonical owner hat id assigned to projector-materialised rows.
+///
+/// Every row written by `project_ensure_task` /
+/// `project_ensure_task_batch` carries this `owner_hat_id` so the
+/// close-before-done ACL succeeds when the executor's `exec.unit.done`
+/// hits `TaskStore::close`. Fix-units keep coordinator ownership (minted
+/// via `ralph tools task ensure --for-fix-unit`) and exempt this
+/// default. Centralising the constant keeps the two projection paths
+/// (`project_ensure_task` + `project_ensure_task_batch`) in lock-step
+/// — if a future hat acquires executor-equivalent ownership, change
+/// this constant rather than the per-call site.
+pub(crate) const PLAN_UNIT_OWNER_HAT: &str = "executor";
+
 // This module **owns** the deprecated `tasks_cache` mirror:
 // `persist` updates it as a write-through of the on-disk ledger.
 // The mirror is kept in sync with the canonical
@@ -20,7 +33,7 @@
 // observe the same view, while the U2 path reads from the
 // snapshot directly. Touching the field here is therefore
 // intentional and unavoidable.
-#![allow(deprecated)]
+#[allow(deprecated)]
 
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
@@ -265,10 +278,10 @@ pub(crate) fn project_ensure_task(
         task = task.with_description(Some(format!("plan: {plan_name}")));
     }
     // 2026-07-07-002: plan-unit rows created by the projector are owned
-    // by `executor` so close-before-done ACL succeeds. Fix-units keep
-    // coordinator ownership (minted via `task ensure --for-fix-unit`).
+    // by the canonical executor hat so close-before-done ACL succeeds.
+    // Fix-units keep coordinator ownership (minted via `task ensure --for-fix-unit`).
     if !task_key_is_fix_unit(&key) {
-        task = task.with_owner_hat(Some("executor".to_string()));
+        task = task.with_owner_hat(Some(PLAN_UNIT_OWNER_HAT.to_string()));
     }
     // Reject duplicate task_id bound to a different key (coordinator
     // `task add` racing `work.ready` → projector).
@@ -481,7 +494,7 @@ pub(crate) fn project_ensure_task_batch(
             let mut task = Task::new(spec.title.clone(), 1)
                 .with_key(Some(spec.key.clone()))
                 .with_loop_id(loop_id.clone())
-                .with_owner_hat(Some("executor".to_string()));
+                .with_owner_hat(Some(PLAN_UNIT_OWNER_HAT.to_string()));
             task.id = live_ids[&spec.key].clone();
             task.blocked_by = blocked_by;
             store.add(task);
