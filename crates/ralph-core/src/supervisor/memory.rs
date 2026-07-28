@@ -1523,10 +1523,10 @@ impl SupervisorStore for InMemorySupervisorStore {
         }
         let key = (wave_id.to_string(), descriptor.slot_index);
         let mut merged = descriptor.clone();
-        if merged.slot_index_in_parent.is_none() {
-            if let Some(existing) = inner.slot_descriptors.get(&key) {
-                merged.slot_index_in_parent = existing.slot_index_in_parent;
-            }
+        if merged.slot_index_in_parent.is_none()
+            && let Some(existing) = inner.slot_descriptors.get(&key)
+        {
+            merged.slot_index_in_parent = existing.slot_index_in_parent;
         }
         inner.slot_descriptors.insert(key, merged);
         Ok(())

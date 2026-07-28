@@ -1908,7 +1908,7 @@ impl SupervisorStore for RusqliteSupervisorStore {
                     .optional()
                     .map_err(|e| SupervisorStoreError::Storage(e.to_string()))?;
 
-                if let Some((slot_idx, topic, payload_json, kind_str, digest)) = parent_descriptor {
+                if let Some((_slot_idx, topic, payload_json, kind_str, digest)) = parent_descriptor {
                     let kind = parse_kind(&kind_str)
                         .map_err(|e| SupervisorStoreError::InvalidTransition(e.to_string()))?;
                     conn.execute(

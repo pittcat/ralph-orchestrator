@@ -1698,31 +1698,31 @@ async fn run_loop_impl_inner(
     // leftover redrive state (plan U4 fresh-boot exclusion). Failures
     // inside the scan are warn+continue (see the helper) so a corrupt
     // child wave can never abort loop startup.
-    if resume {
-        if let (Some(bridge), Some(store)) = (&supervisor_bridge, &supervisor_store) {
-            // Re-derive the supervisor events path (same derivation as
-            // the bridge construction above).
-            let supervisor_events_path = resolve_emit_events_path(
-                &ctx,
-                crate::loop_runner::paths::config_state_machine_enabled(&config),
+    if resume
+        && let (Some(bridge), Some(store)) = (&supervisor_bridge, &supervisor_store)
+    {
+        // Re-derive the supervisor events path (same derivation as
+        // the bridge construction above).
+        let supervisor_events_path = resolve_emit_events_path(
+            &ctx,
+            crate::loop_runner::paths::config_state_machine_enabled(&config),
+        );
+        let hat_registry = ralph_core::HatRegistry::from_config(&config);
+        let dispatched = crate::loop_runner::wave::dispatch_pending_redrive_waves(
+            store,
+            &loop_id,
+            &hat_registry,
+            &backend,
+            bridge,
+            &supervisor_events_path,
+            std::sync::Arc::new(crate::loop_runner::wave::ProductionExecutor),
+        )
+        .await;
+        if dispatched > 0 {
+            info!(
+                dispatched,
+                "U4: redrive boot scan dispatched {dispatched} pending child wave slot(s)"
             );
-            let hat_registry = ralph_core::HatRegistry::from_config(&config);
-            let dispatched = crate::loop_runner::wave::dispatch_pending_redrive_waves(
-                store,
-                &loop_id,
-                &hat_registry,
-                &backend,
-                bridge,
-                &supervisor_events_path,
-                std::sync::Arc::new(crate::loop_runner::wave::ProductionExecutor),
-            )
-            .await;
-            if dispatched > 0 {
-                info!(
-                    dispatched,
-                    "U4: redrive boot scan dispatched {dispatched} pending child wave slot(s)"
-                );
-            }
         }
     }
 

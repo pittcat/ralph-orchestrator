@@ -6011,6 +6011,218 @@ async fn handle_wave_rejection(
     Ok(())
 }
 
+// 2026-07-28-002 plan U4 (R9 / S3 / S6): synthesise a one-slot
+// `DetectedWave` from a `SlotDescriptor` previously persisted by
+// the dispatcher at spawn time, and dispatch it via the supervisor
+// path using the pre-registered child wave id (skipping the
+// `register_wave_if_absent` step inside
+// `execute_wave_via_supervisor_with_executor`).
+//
+// `consumer_aggregate_timeout` is left `None`: the dispatcher
+// already falls back to the per-worker-timeout formula in that
+// case (see `aggregate_timeout_for` above).
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn dispatch_redrive_child_wave(
+    bridge: Arc<dyn ralph_core::supervisor::SupervisorBridge>,
+    executor: Arc<dyn WaveWorkerExecutor>,
+    cli_backend: &CliBackend,
+    loop_id: &str,
+    hat_registry: &ralph_core::HatRegistry,
+    child_wave_id: String,
+    descriptor: ralph_core::supervisor::SlotDescriptor,
+    child_slot_index: u32,
+    expected_total: u32,
+    main_events_file: &std::path::Path,
+) -> WaveDispatchOutcome {
+    use ralph_core::Event;
+
+    let target_hat = match hat_registry.find_by_trigger(&descriptor.topic) {
+        Some(hat_id) => hat_id.clone(),
+        None => {
+            tracing::warn!(
+                wave_id = %child_wave_id,
+                topic = %descriptor.topic,
+                "U4 dispatch_redrive_child_wave: no hat registered for descriptor topic; \
+                 failing closed (no spawn)"
+            );
+            return WaveDispatchOutcome::SpawnFailed {
+                spawned_count: 0,
+                expected_count: expected_total,
+            };
+        }
+    };
+    let hat_config = hat_registry
+        .get_config(&target_hat)
+        .cloned()
+        .unwrap_or_default();
+
+    let synthesized = ralph_core::DetectedWave {
+        wave_id: child_wave_id.clone(),
+        target_hat,
+        hat_config,
+        events: vec![Event {
+            topic: descriptor.topic.clone(),
+            payload: Some(descriptor.payload_json.clone()),
+            ts: String::new(),
+            hat: None,
+            triggered: None,
+            source: None,
+            wave_id: Some(child_wave_id.clone()),
+            wave_index: None,
+            wave_total: None,
+            system_injected: None,
+        }],
+        total: expected_total,
+        partial: false,
+        consumer_aggregate_timeout: None,
+    };
+
+    execute_wave_via_supervisor_with_executor(
+        &synthesized,
+        cli_backend,
+        main_events_file,
+        false,
+        false,
+        None,
+        None,
+        loop_id,
+        WaveDispatchLimits::default(),
+        None,
+        None,
+        &bridge,
+        executor,
+        Some(&child_wave_id),
+        // 2026-07-28-002 plan U3/U4 (C3): the synthesized wave carries
+        // exactly one event, but its store slot is the child slot index
+        // (which differs from the events-array position 0 for multi-slot
+        // child waves).
+        Some(child_slot_index),
+    )
+    .await
+}
+
+// 2026-07-28-002 plan U4 (R7 / S3 / S4 / S5 / S6): at boot, scan
+// the supervisor store for pending redrive child waves, take each
+// slot's descriptor (fail-closed on `DescriptorUnavailable` /
+// `DescriptorConflict`), and dispatch each dispatchable slot as a
+// one-shot wave. The dispatcher code that handles regular waves
+// already covers the per-slot binding, slot result, and worker
+// spawn; this routine just orchestrates the scan + take + per-slot
+// dispatch using `dispatch_redrive_child_wave` above.
+//
+// Returns the number of slots dispatched. Used by
+// `runner.rs::run_loop_impl_inner` after `recover_active_waves_at_startup`
+// so an operator-driven `ralph run --resume` catches redrive
+// children that the previous loop did not finish spawning.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn dispatch_pending_redrive_waves(
+    store: &std::sync::Arc<dyn ralph_core::supervisor::SupervisorStore>,
+    loop_id: &str,
+    hat_registry: &ralph_core::HatRegistry,
+    cli_backend: &CliBackend,
+    bridge: &Arc<dyn ralph_core::supervisor::SupervisorBridge>,
+    main_events_file: &std::path::Path,
+    worker_executor: std::sync::Arc<dyn WaveWorkerExecutor>,
+) -> usize {
+    use ralph_core::supervisor::RedriveTakeOutcome;
+
+    let pending = match store.list_redrive_pending_child_waves() {
+        Ok(p) => p,
+        Err(err) => {
+            tracing::warn!(
+                error = %err,
+                "U4 dispatch_pending_redrive_waves: list_redrive_pending_child_waves failed; \
+                 skipping (no spawn)"
+            );
+            return 0;
+        }
+    };
+
+    let mut dispatched = 0usize;
+    for child in pending {
+        for slot in &child.slots {
+            // S4: expected_digest = None means the parent slot never
+            // started (no persisted descriptor — pre-U4 legacy row).
+            // Fail-closed: skip without calling take.
+            let expected_digest = match slot.expected_digest.as_deref() {
+                Some(d) => d.to_string(),
+                None => {
+                    tracing::warn!(
+                        child_wave_id = %child.child_wave_id,
+                        child_slot_index = slot.child_slot_index,
+                        parent_wave_id = %child.parent_wave_id,
+                        parent_slot_index = slot.parent_slot_index,
+                        "U4 dispatch_pending_redrive_waves: slot has no persisted descriptor; \
+                         skipping (slot_never_started fail-close)"
+                    );
+                    continue;
+                }
+            };
+
+            let outcome = match store.take_dispatchable_redrive_descriptor(
+                &child.child_wave_id,
+                slot.child_slot_index,
+                &expected_digest,
+            ) {
+                Ok(o) => o,
+                Err(err) => {
+                    tracing::warn!(
+                        child_wave_id = %child.child_wave_id,
+                        child_slot_index = slot.child_slot_index,
+                        error = %err,
+                        "U4 dispatch_pending_redrive_waves: take failed; skipping (fail-close)"
+                    );
+                    continue;
+                }
+            };
+
+            match outcome {
+                RedriveTakeOutcome::Dispatchable { descriptor } => {
+                    // 2026-07-28-002 plan U4 (S6): each boot dispatch is a
+                    // single-slot wave (`dispatch_redrive_child_wave`
+                    // synthesizes exactly one event), so the wave total is
+                    // 1 regardless of how many slots the child wave has.
+                    // The other slots are dispatched by their own loop
+                    // iterations.
+                    let expected_total = 1u32;
+                    dispatch_redrive_child_wave(
+                        bridge.clone(),
+                        worker_executor.clone(),
+                        cli_backend,
+                        loop_id,
+                        hat_registry,
+                        child.child_wave_id.clone(),
+                        descriptor,
+                        slot.child_slot_index,
+                        expected_total,
+                        main_events_file,
+                    )
+                    .await;
+                    dispatched += 1;
+                }
+                RedriveTakeOutcome::DescriptorUnavailable => {
+                    tracing::warn!(
+                        child_wave_id = %child.child_wave_id,
+                        child_slot_index = slot.child_slot_index,
+                        "U4 dispatch_pending_redrive_waves: descriptor unavailable; \
+                         skipping (fail-close)"
+                    );
+                }
+                RedriveTakeOutcome::DescriptorConflict => {
+                    tracing::warn!(
+                        child_wave_id = %child.child_wave_id,
+                        child_slot_index = slot.child_slot_index,
+                        "U4 dispatch_pending_redrive_waves: descriptor digest conflict; \
+                         skipping (fail-close)"
+                    );
+                }
+            }
+        }
+    }
+    dispatched
+}
+
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -11471,215 +11683,4 @@ hats: {}
             Ok(())
         }
     }
-}
-
-// 2026-07-28-002 plan U4 (R9 / S3 / S6): synthesise a one-slot
-// `DetectedWave` from a `SlotDescriptor` previously persisted by
-// the dispatcher at spawn time, and dispatch it via the supervisor
-// path using the pre-registered child wave id (skipping the
-// `register_wave_if_absent` step inside
-// `execute_wave_via_supervisor_with_executor`).
-//
-// `consumer_aggregate_timeout` is left `None`: the dispatcher
-// already falls back to the per-worker-timeout formula in that
-// case (see `aggregate_timeout_for` above).
-#[allow(clippy::too_many_arguments)]
-pub(crate) async fn dispatch_redrive_child_wave(
-    bridge: Arc<dyn ralph_core::supervisor::SupervisorBridge>,
-    executor: Arc<dyn WaveWorkerExecutor>,
-    cli_backend: &CliBackend,
-    loop_id: &str,
-    hat_registry: &ralph_core::HatRegistry,
-    child_wave_id: String,
-    descriptor: ralph_core::supervisor::SlotDescriptor,
-    child_slot_index: u32,
-    expected_total: u32,
-    main_events_file: &std::path::Path,
-) -> WaveDispatchOutcome {
-    use ralph_core::Event;
-
-    let target_hat = match hat_registry.find_by_trigger(&descriptor.topic) {
-        Some(hat_id) => hat_id.clone(),
-        None => {
-            tracing::warn!(
-                wave_id = %child_wave_id,
-                topic = %descriptor.topic,
-                "U4 dispatch_redrive_child_wave: no hat registered for descriptor topic; \
-                 failing closed (no spawn)"
-            );
-            return WaveDispatchOutcome::SpawnFailed {
-                spawned_count: 0,
-                expected_count: expected_total,
-            };
-        }
-    };
-    let hat_config = hat_registry
-        .get_config(&target_hat)
-        .cloned()
-        .unwrap_or_default();
-
-    let synthesized = ralph_core::DetectedWave {
-        wave_id: child_wave_id.clone(),
-        target_hat,
-        hat_config,
-        events: vec![Event {
-            topic: descriptor.topic.clone(),
-            payload: Some(descriptor.payload_json.clone()),
-            ts: String::new(),
-            hat: None,
-            triggered: None,
-            source: None,
-            wave_id: Some(child_wave_id.clone()),
-            wave_index: None,
-            wave_total: None,
-            system_injected: None,
-        }],
-        total: expected_total,
-        partial: false,
-        consumer_aggregate_timeout: None,
-    };
-
-    execute_wave_via_supervisor_with_executor(
-        &synthesized,
-        cli_backend,
-        main_events_file,
-        false,
-        false,
-        None,
-        None,
-        loop_id,
-        WaveDispatchLimits::default(),
-        None,
-        None,
-        &bridge,
-        executor,
-        Some(&child_wave_id),
-        // 2026-07-28-002 plan U3/U4 (C3): the synthesized wave carries
-        // exactly one event, but its store slot is the child slot index
-        // (which differs from the events-array position 0 for multi-slot
-        // child waves).
-        Some(child_slot_index),
-    )
-    .await
-}
-
-// 2026-07-28-002 plan U4 (R7 / S3 / S4 / S5 / S6): at boot, scan
-// the supervisor store for pending redrive child waves, take each
-// slot's descriptor (fail-closed on `DescriptorUnavailable` /
-// `DescriptorConflict`), and dispatch each dispatchable slot as a
-// one-shot wave. The dispatcher code that handles regular waves
-// already covers the per-slot binding, slot result, and worker
-// spawn; this routine just orchestrates the scan + take + per-slot
-// dispatch using `dispatch_redrive_child_wave` above.
-//
-// Returns the number of slots dispatched. Used by
-// `runner.rs::run_loop_impl_inner` after `recover_active_waves_at_startup`
-// so an operator-driven `ralph run --resume` catches redrive
-// children that the previous loop did not finish spawning.
-#[allow(clippy::too_many_arguments)]
-pub(crate) async fn dispatch_pending_redrive_waves(
-    store: &std::sync::Arc<dyn ralph_core::supervisor::SupervisorStore>,
-    loop_id: &str,
-    hat_registry: &ralph_core::HatRegistry,
-    cli_backend: &CliBackend,
-    bridge: &Arc<dyn ralph_core::supervisor::SupervisorBridge>,
-    main_events_file: &std::path::Path,
-    worker_executor: std::sync::Arc<dyn WaveWorkerExecutor>,
-) -> usize {
-    use ralph_core::supervisor::RedriveTakeOutcome;
-
-    let pending = match store.list_redrive_pending_child_waves() {
-        Ok(p) => p,
-        Err(err) => {
-            tracing::warn!(
-                error = %err,
-                "U4 dispatch_pending_redrive_waves: list_redrive_pending_child_waves failed; \
-                 skipping (no spawn)"
-            );
-            return 0;
-        }
-    };
-
-    let mut dispatched = 0usize;
-    for child in pending {
-        for slot in &child.slots {
-            // S4: expected_digest = None means the parent slot never
-            // started (no persisted descriptor — pre-U4 legacy row).
-            // Fail-closed: skip without calling take.
-            let expected_digest = match slot.expected_digest.as_deref() {
-                Some(d) => d.to_string(),
-                None => {
-                    tracing::warn!(
-                        child_wave_id = %child.child_wave_id,
-                        child_slot_index = slot.child_slot_index,
-                        parent_wave_id = %child.parent_wave_id,
-                        parent_slot_index = slot.parent_slot_index,
-                        "U4 dispatch_pending_redrive_waves: slot has no persisted descriptor; \
-                         skipping (slot_never_started fail-close)"
-                    );
-                    continue;
-                }
-            };
-
-            let outcome = match store.take_dispatchable_redrive_descriptor(
-                &child.child_wave_id,
-                slot.child_slot_index,
-                &expected_digest,
-            ) {
-                Ok(o) => o,
-                Err(err) => {
-                    tracing::warn!(
-                        child_wave_id = %child.child_wave_id,
-                        child_slot_index = slot.child_slot_index,
-                        error = %err,
-                        "U4 dispatch_pending_redrive_waves: take failed; skipping (fail-close)"
-                    );
-                    continue;
-                }
-            };
-
-            match outcome {
-                RedriveTakeOutcome::Dispatchable { descriptor } => {
-                    // 2026-07-28-002 plan U4 (S6): each boot dispatch is a
-                    // single-slot wave (`dispatch_redrive_child_wave`
-                    // synthesizes exactly one event), so the wave total is
-                    // 1 regardless of how many slots the child wave has.
-                    // The other slots are dispatched by their own loop
-                    // iterations.
-                    let expected_total = 1u32;
-                    dispatch_redrive_child_wave(
-                        bridge.clone(),
-                        worker_executor.clone(),
-                        cli_backend,
-                        loop_id,
-                        hat_registry,
-                        child.child_wave_id.clone(),
-                        descriptor,
-                        slot.child_slot_index,
-                        expected_total,
-                        main_events_file,
-                    )
-                    .await;
-                    dispatched += 1;
-                }
-                RedriveTakeOutcome::DescriptorUnavailable => {
-                    tracing::warn!(
-                        child_wave_id = %child.child_wave_id,
-                        child_slot_index = slot.child_slot_index,
-                        "U4 dispatch_pending_redrive_waves: descriptor unavailable; \
-                         skipping (fail-close)"
-                    );
-                }
-                RedriveTakeOutcome::DescriptorConflict => {
-                    tracing::warn!(
-                        child_wave_id = %child.child_wave_id,
-                        child_slot_index = slot.child_slot_index,
-                        "U4 dispatch_pending_redrive_waves: descriptor digest conflict; \
-                         skipping (fail-close)"
-                    );
-                }
-            }
-        }
-    }
-    dispatched
 }
