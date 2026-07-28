@@ -1969,25 +1969,59 @@ impl SupervisorStore for RusqliteSupervisorStore {
             if !exists {
                 return Err(SupervisorStoreError::UnknownWave(wave_id.to_string()));
             }
-            conn.execute(
-                "UPDATE slot_descriptors
+            // 2026-07-28-002 plan U2 fix A1 (R-F4): UPDATE-first so a
+            // dispatcher-side persist can never clobber the
+            // `slot_index_in_parent` anchor seeded by
+            // `create_redrive_wave` (COALESCE preserves the seeded
+            // value when the caller passes `None`).
+            //
+            // U3/U4 follow-up (S3 seal): the original A1 fix ONLY
+            // updated — when no descriptor row existed yet (the
+            // normal first-persist-at-spawn case) the UPDATE matched
+            // zero rows and returned `Ok(())`, silently dropping the
+            // descriptor. A slot whose descriptor never lands can
+            // never be redriven. Fall back to INSERT when the UPDATE
+            // matched nothing. The store serializes access through
+            // `with_conn`, and a cross-process race still fails
+            // closed via the `(wave_id, slot_index)` primary key
+            // surfacing as `Storage(_)`.
+            let updated = conn
+                .execute(
+                    "UPDATE slot_descriptors
                  SET topic = ?1,
                      payload_json = ?2,
                      wave_kind = ?3,
                      payload_digest = ?4,
                      slot_index_in_parent = COALESCE(?5, slot_index_in_parent)
                  WHERE wave_id = ?6 AND slot_index = ?7",
-                rusqlite::params![
-                    &descriptor.topic,
-                    &descriptor.payload_json,
-                    &descriptor.wave_kind.to_string(),
-                    &descriptor.payload_digest,
-                    descriptor.slot_index_in_parent.map(i64::from),
-                    wave_id,
-                    i64::from(descriptor.slot_index),
-                ],
-            )
-            .map_err(|e| SupervisorStoreError::Storage(e.to_string()))?;
+                    rusqlite::params![
+                        &descriptor.topic,
+                        &descriptor.payload_json,
+                        &descriptor.wave_kind.to_string(),
+                        &descriptor.payload_digest,
+                        descriptor.slot_index_in_parent.map(i64::from),
+                        wave_id,
+                        i64::from(descriptor.slot_index),
+                    ],
+                )
+                .map_err(|e| SupervisorStoreError::Storage(e.to_string()))?;
+            if updated == 0 {
+                conn.execute(
+                    "INSERT INTO slot_descriptors
+                     (wave_id, slot_index, slot_index_in_parent, topic, payload_json, wave_kind, payload_digest)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                    rusqlite::params![
+                        wave_id,
+                        i64::from(descriptor.slot_index),
+                        descriptor.slot_index_in_parent.map(i64::from),
+                        &descriptor.topic,
+                        &descriptor.payload_json,
+                        &descriptor.wave_kind.to_string(),
+                        &descriptor.payload_digest,
+                    ],
+                )
+                .map_err(|e| SupervisorStoreError::Storage(e.to_string()))?;
+            }
             Ok(())
         })
     }
