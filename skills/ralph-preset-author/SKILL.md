@@ -19,6 +19,7 @@ Use this skill to design and draft Ralph **presets** (builtin or local) with **A
 - Writing per-hat `instructions:` in isolated mode (one agent per activation)
 - Producing `preset-author-notes.md` (AAF 五问表 per hat) before review
 - **Artifact-First Handoff authoring** (R1–R7): declaring artifact 落盘点、消费方、生命周期责任，并在 Payload Contract 与 AAF 五问表中固化每一份重要信息的落盘判定
+- **模板文件压缩 instructions（软性推荐）**: 当 hat `instructions:` 需要承载大段固定格式文档（报告模板、计划模板、验收清单、SOP 步骤等）时，推荐采用 `presets/templates/` + `ralph preset materialize-artifacts` 机制（参考 `parallel-forge`），把模板内容移出 prompt、改为运行时复制填写，从而压缩上下文。此推荐不强制，但 author 应在 Drafting phase 前通过菜单询问用户是否采用。
 
 ## Core Assumptions
 
@@ -111,6 +112,22 @@ Use this skill to design and draft Ralph **presets** (builtin or local) with **A
    - In `instructions:`, cite `ralph-tools-emit` Policy-Check feedback instead of copying field tables. The prompt builder supplies the per-topic schema-aware publish section.
    - **Artifact-First handoff closure (单 hat 视角)**：每条 hat 的 instructions 必须明确产出顺序——「实际执行的 hat 或其 sub-agent 先写 artifact → hat 验收文件 → `ralph emit --policy-check` → 真实 emit」。消费型 hat 的 instructions 必须明确「从路径读完整内容后再决策」。
    - **Trigger Context 收敛**：trigger-consuming hats 的分支判定（accept / fix-now / blocked、residual 处理边界）若用 payload if/else 表达，必须先收敛到 `event_policy.schemas.<topic>.trigger_context.routing_hints`，再用 `summary_fields` 暴露关键计数；`instructions` 只引用 `## TRIGGER CONTEXT` 区块，不复制 hint 条件值。详情见 `references/author-checklist.md`「Trigger Context 审核项」。
+
+3. **模板文件机制询问（软性推荐，不强制）**：
+   - **触发条件**：当某 hat 的 `instructions:` 需要承载大段固定格式文档（报告模板、计划模板、验收清单、SOP 步骤、审计表等），或单 hat `instructions:` 长度预计超过 ~80 行时，author 应通过交互菜单询问用户是否采用模板文件机制。
+   - **菜单示例**：
+     ```text
+     该 hat 的 instructions 需要包含固定格式文档（如报告模板 / 计划模板 / 验收清单）。
+     推荐做法：把模板内容抽到 presets/templates/<preset>/ 并在编译期内嵌，
+     hat 运行时通过 `ralph preset materialize-artifacts` 复制填写，从而压缩上下文。
+     是否采用模板文件机制？
+       1) 采用（推荐）— instructions 只写「materialize → 复制 → 填模板」三步
+       2) 不采用 — 模板内容直接写在 instructions 里
+       3) 部分采用 — 仅对最长的 1–2 个模板使用文件
+     ```
+   - **若用户选择采用**：在 preset 同级目录创建 `presets/templates/<preset>/`，把固定格式文档写成模板文件；在 `instructions:` 中只保留「先 materialize 再复制填写」的简短指引（参考 `presets/en/parallel-forge.yml` 的 planner / executor / reporter 写法）。**注意**：当前 runtime 仅内嵌 `parallel-forge` 的模板目录；若为新 preset 采用模板机制，需同步扩展 `crates/ralph-cli/src/builtin_artifact_templates.rs` 的 `templates_for_preset` 匹配分支（或改用本地文件路径方案），并更新 `crates/ralph-cli/build.rs` 的模板拷贝逻辑。
+   - **若用户选择不采用**：继续把模板内容写在 `instructions:` 内，author 需在 `preset-author-notes.md` 中记录「未采用模板文件机制」及理由，供 review 参考。
+   - **记录**：无论是否采用，都应在 `preset-author-notes.md` 的 Intent Confirmation 或对应 hat AAF 表旁注明该决定。
 
 4. **Assemble `preset-author-notes.md`** next to the preset YAML (all AAF tables + Payload Contract tables).
    - Put the confirmed `Preset Intent Confirmation` at the beginning so authoring and review share the same business baseline.

@@ -105,6 +105,7 @@ Use this skill to **review** Ralph presets with **Agent 视角可行性（AAF）
      - 不落盘例外无理由 / 仅有「字符很少」 → `preset.artifact_first_exemption_unjustified` finding。
      - producer / consumer 缺顺序约束 → 严重度按 `references/finding-rubric.md`「Artifact-First Handoff → Severity」表入栏。
    - Compare to `instructions:` → candidate findings.
+   - **模板文件机制轻量检查（review-only，不新增 finding_id）**：若某 hat 的 `instructions:` 内联了大段固定格式文档（报告模板、计划模板、验收清单、SOP 步骤等，通常 >80 行或占 instructions 一半以上），review 应在 Per-Hat AAF Reviews 的「deltas vs instructions」或 Executive Summary 中备注「该 hat 可考虑模板文件机制（`presets/templates/` + `ralph preset materialize-artifacts`）压缩上下文」。验证方式：用 `ralph -c <preset>.yml inspect prompt --hat <hat_id> --format json --full` 查看 `prompt_body` 中 `### 1. EXECUTE` 到 `### 2. VERIFY` 之间的 instructions 实际长度；若 instructions 引用了 `materialize-artifacts` 且长度 <80 行，说明模板机制已生效。此检查不阻塞 review，仅作为优化建议记录；若 author notes 中已说明「未采用模板文件机制」及理由，则跳过。
    - Optional: read `preset-author-notes.md` for that hat only after your table is drafted.
 
 5. **Payload Audit table** (mandatory — aggregate it under the Per-Hat AAF Reviews section, one row per material emit field):

@@ -111,9 +111,9 @@ ralph preset new <template> --output .ralph/hats/my.yml
 ralph preset diff --file <path>   # 与 template 基线对比
 ```
 
-## Builtin artifact 模板落盘（binary-only / parallel-forge）
+## Builtin artifact 模板落盘（binary-only）
 
-`parallel-forge` 等 preset 的 **fill-in artifact 模板**（development-plan / unit / manager-report）在编译期嵌入 `ralph` 二进制。部署机没有源码树时，hat 必须先 materialize，再 `cp` 到业务路径填写：
+某些 preset（如 `parallel-forge`）的 **fill-in artifact 模板**（development-plan / unit / manager-report 等）在编译期嵌入 `ralph` 二进制。部署机没有源码树时，hat 必须先 materialize，再 `cp` 到业务路径填写：
 
 ```bash
 ralph preset materialize-artifacts parallel-forge --plan-key <plan-key>
@@ -123,6 +123,8 @@ ralph preset materialize-artifacts builtin:parallel-forge --plan-key <plan-key> 
 ```
 
 与 `ralph preset new` 不同：`new` 生成 **preset YAML 脚手架**；`materialize-artifacts` 抽出 **运行时填写模板**。幂等可重复执行。
+
+> **机制通用性**：当前 runtime 仅内嵌 `parallel-forge` 的模板目录（`presets/templates/parallel-forge/`）。若新 preset 需要采用同样的模板文件机制压缩 hat instructions，需同步扩展 `crates/ralph-cli/src/builtin_artifact_templates.rs` 与 `build.rs` 的模板内嵌列表，或改用本地文件路径方案。
 ## 合入前升级（非默认）
 
 ```bash
