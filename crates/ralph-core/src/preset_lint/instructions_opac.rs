@@ -70,6 +70,19 @@ pub fn check_instructions_opac_with_preset(raw_yaml: &str, preset_name: &str) ->
         return findings;
     };
 
+    // `tasks.enabled: true` is the precondition for the task authority lint:
+    // the lint is about WHO within an active task system is allowed to mint
+    // rows. If the preset has explicitly disabled the task system at the
+    // event_loop level, every `ralph tools task ensure` call is the
+    // agent's own way to enforce runtime workflow — not a violation of
+    // the projector / coordinator invariant (the invariant only exists
+    // when `tasks.enabled: true`).
+    let tasks_enabled = parsed
+        .get("tasks")
+        .and_then(|value| value.get("enabled"))
+        .and_then(Value::as_bool)
+        .unwrap_or(true);
+
     let projection_owned = parsed
         .get("event_loop")
         .and_then(|value| value.get("state_projection"))
@@ -132,13 +145,15 @@ pub fn check_instructions_opac_with_preset(raw_yaml: &str, preset_name: &str) ->
         let publishes = hat_publishes(hat_value);
 
         check_task_create_literal(hat_id_str, &instructions, &mut findings);
-        check_task_mutation_authority(
-            hat_id_str,
-            &instructions,
-            projection_owned,
-            coordinator_hats.contains(hat_id_str),
-            &mut findings,
-        );
+        if tasks_enabled {
+            check_task_mutation_authority(
+                hat_id_str,
+                &instructions,
+                projection_owned,
+                coordinator_hats.contains(hat_id_str),
+                &mut findings,
+            );
+        }
         check_internal_ledger_read(hat_id_str, &instructions, &mut findings);
         check_supervisor_coordination_emit(hat_id_str, &instructions, &mut findings);
 
@@ -742,6 +757,34 @@ hats:
                 }
             }
         }
+    }
+
+    /// When `tasks.enabled: false` the preset has explicitly opted out
+    /// of the task system at the event_loop level — the
+    /// coordinator-vs-projector invariant only exists when the task
+    /// system is enabled, so any `ralph tools task ensure` /
+    /// `ralph tools task add` call is treated as the hat's own runtime
+    /// workflow contract, not a violation of an authority boundary
+    /// (autoresearch uses this pattern: `tasks.enabled: false` +
+    /// strategist calls `ralph tools task ensure`).
+    #[test]
+    fn task_mutation_authority_silent_when_tasks_disabled() {
+        let yaml = r#"
+tasks:
+  enabled: false
+hats:
+  strategist:
+    instructions: |
+      Run `ralph tools task ensure "Run baseline" --key autoresearch:baseline` to mint the runtime task before emitting.
+"#;
+        let findings = check_instructions_opac_with_preset(yaml, "autoresearch");
+        assert!(
+            !findings
+                .iter()
+                .any(|finding| finding.id
+                    == FINDING_INSTRUCTIONS_TASK_MUTATION_AUTHORITY_CONFLICT),
+            "tasks.enabled:false opts the preset out of the authority lint; got: {findings:?}"
+        );
     }
 
     #[test]

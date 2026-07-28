@@ -59,14 +59,6 @@ struct ScenarioYaml {
     /// tick (expected slot total + optional forced terminal).
     #[serde(default)]
     supervisor_fan_in: Option<SupervisorFanInYaml>,
-    /// Plan 2026-07-28-001 U1/U2 (R1/S1, R4/S8): optional harness
-    /// hook that flips `event_loop.state_projection.enabled` on
-    /// AFTER the YAML `event_loop:` block has been parsed, so
-    /// fixtures can opt into the task projector without having to
-    /// re-author the entire state-projection block in YAML. Empty
-    /// `actions:` entries still force the projector to be inert.
-    #[serde(default)]
-    state_projection: Option<StateProjectionFixtureYaml>,
 }
 
 /// Controls how `run_bdd_supervisor_fan_in` registers and ticks waves.
@@ -87,19 +79,6 @@ struct SupervisorFanInYaml {
     /// completes a subset before timeout.
     #[serde(default)]
     min_slots_before_force: Option<u32>,
-}
-
-/// Plan 2026-07-28-001 U1/U2: harness-level projection opt-in.
-/// When `enabled = true`, the helper enables
-/// `config.event_loop.state_projection` after parsing the fixture's
-/// `event_loop:` block, so scenarios can exercise the projector
-/// without inlining the full typed-action map. Real fixtures
-/// should drive projector behaviour through the YAML schema and
-/// the embedded preset; this hook is for BDD-only side doors.
-#[derive(Debug, Deserialize, Default, Clone)]
-struct StateProjectionFixtureYaml {
-    #[serde(default)]
-    enabled: bool,
 }
 
 /// Plan 2026-07-28-001 U2/U3 (`task_ledger` assertion).
