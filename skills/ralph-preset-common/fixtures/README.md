@@ -11,6 +11,8 @@
 | `trigger-context-negative-fixture.yml` | Trigger Context anti-pattern index (2026-07-09-003 plan U8 step 11): unknown summary field, duplicate hint label, unsupported predicate, value-shape mismatch, no consumer, and instructions duplicating hint conditions |
 | `aaf-wave-capability-negative-fixture.yml` | Wave capability audit axes (2026-07-22-002 plan U6): worker `ralph wave emit`, missing `wave verify`, hat-channel Confirm, hat publishes coordination topic |
 | `aaf-supervisor-capability-negative-fixture.yml` | Supervisor capability audit axes (2026-07-22-002 plan U6): supervisor with non-isolated mode, hat publishes `exec.wave.*`, dispatcher reads `supervisor.db`, execution_model Intent mismatch |
+| `reentry-dirty-worktree-positive-fixture.yml` | Step 1.25 re-entry dirty-worktree reconciliation (2026-07-28-002 plan R-F13): writable executor hat with full attributable/unattributable protocol — zero reentry findings expected |
+| `reentry-dirty-worktree-negative-fixture.yml` | Step 1.25 anti-patterns: missing reconciliation (P1), unconditional `git checkout . && git clean -fd` on unattributable dirt (P0), no fail-closed terminal (P0) |
 
 ## Acceptance Checklist
 

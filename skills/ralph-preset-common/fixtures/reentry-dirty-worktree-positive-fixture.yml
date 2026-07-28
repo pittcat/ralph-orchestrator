@@ -1,0 +1,45 @@
+# Re-entry dirty-worktree reconciliation — POSITIVE fixture.
+# NOT a builtin preset; not registered in presets/manifest.yml.
+# For ralph-preset-review / ralph-preset-author acceptance only
+# (2026-07-28-002 plan R-F13 / S5).
+#
+# Shows a writable executor hat whose instructions carry the full
+# Step 1.25 contract. A reviewer should find ZERO reentry findings
+# on this hat.
+
+name: reentry-dirty-worktree-positive
+execution_mode: isolated
+
+hats:
+  executor:
+    description: "executes plan units; re-entry safe"
+    triggers: ["work.ready"]
+    publishes: ["work.done", "work.failed"]
+    instructions: |
+      你是写入型 executor。启动执行循环前，先做 Step 1.25
+      Re-entry Dirty-Worktree Reconciliation（HARD RULE）：
+
+      1. 只读盘点：`git status --porcelain --untracked-files=all`
+         （排除 `.ralph/` 运行时产物）+ `git diff` + `git diff --cached`
+         + `.ralph/agent/decisions.md` 的 `executor checkpoint:` 行
+         + `git log --oneline <DIFF_BASE>..HEAD`。
+      2. 盘点为空 → 正常继续。
+      3. 非空 → 把每个脏路径归属到 plan 剩余 U-ID（按 Unit 白名单
+         文件 + approach + checkpoint 记录）：
+         - 恰好一个归属 U-ID 且无矛盾编辑：向 `.ralph/agent/decisions.md`
+           追加一行 `executor re-entry: <U-ID> paths=<...>`，把现有
+           diff 当作该 U-ID 的进行中起点，检查、补完、跑该 Unit 的
+           验证后合并为该 U-ID 的单次提交。不重放已存在的编辑。
+         - 多 U-ID 但每个路径归属唯一：记录归属映射，按依赖顺序续做。
+         - 归属歧义 / 跨 U 部分改动 / 无关 operator 改动 / 冲突标记 /
+           不可读 untracked：追加 `executor re-entry blocked: <paths>`，
+           原样保留 worktree——禁止 reset / restore / checkout / clean /
+           stash / overwrite / delete / stage / commit 这些改动；
+           仅当已有匹配 U-ID commit 时发 `work.done` partial，否则
+           `ralph emit work.failed`，payload `reason:
+           "unattributable_dirty_worktree: <paths>"`。不启动任何
+           Unit 子代理。
+      4. 可归属接管后：baseline 描述续做后的 worktree 状态，在
+         `baseline-verification.md` 记录
+         `baseline_context: resumed_attributable_dirty_worktree`
+         与归属映射。

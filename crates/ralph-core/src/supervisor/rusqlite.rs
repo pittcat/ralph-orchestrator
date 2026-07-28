@@ -1949,8 +1949,12 @@ impl SupervisorStore for RusqliteSupervisorStore {
     /// explicit `UPDATE ... COALESCE(slot_index_in_parent, ?)`:
     /// when the new descriptor passes `None`, the previously
     /// seeded value is preserved; when it passes `Some(_)`, that
-    /// override wins. The mutation is idempotent at the API level
-    /// — repeated persists only update mutable payload fields.
+    /// override wins. When the UPDATE matches no row (the normal
+    /// first-persist-at-spawn case) an INSERT creates the row —
+    /// the earlier UPDATE-only version returned `Ok(())` after a
+    /// zero-row update and silently dropped the descriptor. The
+    /// mutation is idempotent at the API level — repeated persists
+    /// only update mutable payload fields.
     fn persist_slot_descriptor(
         &self,
         wave_id: &str,
@@ -2057,8 +2061,12 @@ impl SupervisorStore for RusqliteSupervisorStore {
                 Some((slot_idx, topic, payload_json, kind_str, digest, slot_in_parent)) => {
                     let kind = parse_kind(&kind_str)
                         .map_err(|e| SupervisorStoreError::InvalidTransition(e.to_string()))?;
+                    // C1 / R-F6 parity: child rows report the parent
+                    // slot index in `slot_index` (same as the
+                    // in-memory store); parent rows have no anchor and
+                    // report their own index.
                     Ok(Some(SlotDescriptor {
-                        slot_index: slot_idx as u32,
+                        slot_index: slot_in_parent.map(|v| v as u32).unwrap_or(slot_idx as u32),
                         topic,
                         payload_json,
                         wave_kind: kind,
@@ -2118,8 +2126,15 @@ impl SupervisorStore for RusqliteSupervisorStore {
             let kind = parse_kind(&kind_str)
                 .map_err(|e| SupervisorStoreError::InvalidTransition(e.to_string()))?;
 
+            // 2026-07-28-002 plan C1 / R-F6: parity with the in-memory
+            // store — `descriptor.slot_index` carries the PARENT slot
+            // index (the audit anchor `create_redrive_wave` copied in),
+            // not the child row's own slot. Callers that need the child
+            // slot use the list-enriched `child_slot_index`.
             let descriptor = SlotDescriptor {
-                slot_index,
+                slot_index: slot_in_parent
+                    .map(|v| v as u32)
+                    .unwrap_or(slot_index),
                 topic,
                 payload_json,
                 wave_kind: kind,
@@ -2205,8 +2220,17 @@ impl SupervisorStore for RusqliteSupervisorStore {
                             (idx, dig)
                         }
                         None => {
-                            // No descriptor row — skip this slot.
-                            continue;
+                            // 2026-07-28-002 plan C7 / R-F6: pre-U4
+                            // legacy slot without a descriptor row.
+                            // Keep the slot with `expected_digest =
+                            // None` (mirrors the in-memory store) so
+                            // the boot scan fails closed on it instead
+                            // of silently dropping it from the list.
+                            // The parent index has no persisted source
+                            // here; fall back to the child index
+                            // (field is diagnostic-only for the boot
+                            // scan).
+                            (child_slot_index, None)
                         }
                     };
 

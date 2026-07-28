@@ -6068,8 +6068,12 @@ pub(crate) async fn dispatch_redrive_child_wave(
             triggered: None,
             source: None,
             wave_id: Some(child_wave_id.clone()),
-            wave_index: None,
-            wave_total: None,
+            // 2026-07-28-002 plan G5 / R-F7: the synthesized event
+            // carries the child slot position and wave total so the
+            // worker prompt / context see the true redrive coordinates
+            // instead of empty fields.
+            wave_index: Some(child_slot_index),
+            wave_total: Some(expected_total),
             system_injected: None,
         }],
         total: expected_total,
@@ -6110,10 +6114,12 @@ pub(crate) async fn dispatch_redrive_child_wave(
 // spawn; this routine just orchestrates the scan + take + per-slot
 // dispatch using `dispatch_redrive_child_wave` above.
 //
-// Returns the number of slots dispatched. Used by
-// `runner.rs::run_loop_impl_inner` after `recover_active_waves_at_startup`
-// so an operator-driven `ralph run --resume` catches redrive
-// children that the previous loop did not finish spawning.
+// Returns the number of slots dispatched. Wired in
+// `runner.rs::run_loop_impl_inner` (both supervisor boot seams),
+// gated on `--resume`, after `recover_active_waves_at_startup`
+// and backend construction — so an operator-driven `ralph run
+// --resume` catches redrive children that the previous loop did
+// not finish spawning. A fresh boot never calls this.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn dispatch_pending_redrive_waves(
     store: &std::sync::Arc<dyn ralph_core::supervisor::SupervisorStore>,
@@ -6154,6 +6160,14 @@ pub(crate) async fn dispatch_pending_redrive_waves(
                         parent_slot_index = slot.parent_slot_index,
                         "U4 dispatch_pending_redrive_waves: slot has no persisted descriptor; \
                          skipping (slot_never_started fail-close)"
+                    );
+                    // A3 / R-F1: mark the slot failed on the bridge so
+                    // the store carries a structured `slot_never_started`
+                    // reason instead of leaving a silent Pending row.
+                    let _ = bridge.record_slot_failure(
+                        &child.child_wave_id,
+                        slot.child_slot_index,
+                        "redrive_slot_never_started: parent slot had no persisted descriptor",
                     );
                     continue;
                 }
@@ -6207,6 +6221,11 @@ pub(crate) async fn dispatch_pending_redrive_waves(
                         "U4 dispatch_pending_redrive_waves: descriptor unavailable; \
                          skipping (fail-close)"
                     );
+                    let _ = bridge.record_slot_failure(
+                        &child.child_wave_id,
+                        slot.child_slot_index,
+                        "redrive_slot_never_started: descriptor unavailable at boot",
+                    );
                 }
                 RedriveTakeOutcome::DescriptorConflict => {
                     tracing::warn!(
@@ -6214,6 +6233,11 @@ pub(crate) async fn dispatch_pending_redrive_waves(
                         child_slot_index = slot.child_slot_index,
                         "U4 dispatch_pending_redrive_waves: descriptor digest conflict; \
                          skipping (fail-close)"
+                    );
+                    let _ = bridge.record_slot_failure(
+                        &child.child_wave_id,
+                        slot.child_slot_index,
+                        "redrive_descriptor_conflict: expected digest mismatch (fail-closed)",
                     );
                 }
             }

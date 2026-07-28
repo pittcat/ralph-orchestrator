@@ -311,7 +311,7 @@ slots: [<indices>]
 
 - Operator 手动介入恢复：某个 wave 的部分 slot 在上游执行器崩溃后处于 `failed` 状态，但 wave 已进入终态。
 - Operator 用 `ralph wave inspect <wave_id>` 确认 phase 为 `done`/`failed` 且 `failed_count > 0` 后，针对具体失败 slot 调用 redrive。
-- Redrive 只在 store 内创建子 wave + 复制 slot 元数据，**不会**自动 dispatch worker；operator 必须接着执行 `ralph run --resume`，由 loop 启动 seam 消费 child descriptor 并走现有 dispatcher / worker executor 重新派发。如不 resume，子 wave 永远停在 `Pending`，协调事件不会注入。
+- Redrive 只在 store 内创建子 wave + 复制 slot 元数据，**不会**自动 dispatch worker；operator 必须接着执行 `ralph run --continue` 继续该 loop。continue 启动时 boot seam 会扫描 store 中的 pending 子 wave：对每个有已持久化 descriptor 且 digest 校验通过的 slot，经现有 dispatcher / worker executor 重新派发（每个 slot 只派一次，重复 continue 不会重复派发）。无 descriptor 或 digest 冲突的 slot 走 fail-close：不派发，并在 store 中标记失败原因。如果不 continue，子 wave 永远停在 `Pending`，协调事件不会注入。
 
 **不适用场景：**
 

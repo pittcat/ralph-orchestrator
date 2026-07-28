@@ -1562,16 +1562,12 @@ impl SupervisorStore for InMemorySupervisorStore {
     /// 2026-07-28-002 plan U2 (R4 / R6): read a persisted
     /// descriptor for `(wave_id, slot_index)`.
     ///
-    /// For a CHILD wave slot, the descriptor was stored at
-    /// `(child_wave_id, parent_slot_index)` (because the
-    /// dispatcher calls `persist_slot_descriptor(child_wave_id,
-    /// child_slot, descriptor)` where `descriptor.slot_index`
-    /// is the parent's slot). We redirect the lookup to
-    /// `(parent_wave_id, parent_slot_index)` via
-    /// `child_parent_slots`.
-    ///
-    /// For a PARENT wave, no redirect exists; we do a direct
-    /// lookup in `slot_descriptors`.
+    /// Direct lookup in `slot_descriptors` — there is no redirect.
+    /// Child slots carry the descriptor copied in by
+    /// `create_redrive_wave` under their OWN `(child_wave_id,
+    /// child_slot_index)` key; that copied descriptor's `slot_index`
+    /// field holds the parent slot index (audit anchor) and
+    /// `slot_index_in_parent` is `Some(parent_slot)`.
     fn slot_descriptor(
         &self,
         wave_id: &str,
@@ -1579,12 +1575,6 @@ impl SupervisorStore for InMemorySupervisorStore {
     ) -> SupervisorStoreResult<Option<SlotDescriptor>> {
         let inner = self.lock()?;
         let key = (wave_id.to_string(), slot_index);
-        // R4 / R6: direct lookup in `slot_descriptors`. Both
-        // parent and child slots store their descriptors under
-        // their own `(wave_id, slot_index)` key — child slots
-        // carry the descriptor copied by `create_redrive_wave`
-        // (with `slot_index` / `slot_index_in_parent` set to
-        // the parent slot for audit).
         Ok(inner.slot_descriptors.get(&key).cloned())
     }
 
