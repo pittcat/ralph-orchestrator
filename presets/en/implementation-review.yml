@@ -33,10 +33,11 @@
 #   units (P3 → residual only), writes fix-plan.md. Empty fix plan still
 #   produced when all dimensions are clean. Emits `fix.plan.ready`.
 # - finalizer: Sole publisher of `LOOP_COMPLETE`. Consumes fix.plan.ready
-#   + scope.blocked + review.blocked + runtime `review.wave.failed`. Writes
-#   `wave-blocked.md` on review.wave.failed, validates the referenced
-#   artifact before emit, and emits LOOP_COMPLETE with `result` enum and
-#   `artifact_path`. No other hat publishes LOOP_COMPLETE.
+#   + scope.blocked + dispatch.blocked + review.blocked + runtime
+#   `review.wave.failed`. Writes `wave-blocked.md` on review.wave.failed,
+#   validates the referenced artifact before emit, and emits LOOP_COMPLETE
+#   with `result` enum and `artifact_path`. No other hat publishes
+#   LOOP_COMPLETE.
 #
 # Execution model: `wave` (KTD2). NOT full supervisor product mode —
 # `event_loop.supervisor.enabled` stays false (no worktree slots / merge
@@ -109,6 +110,7 @@ event_loop:
       - "review.start"
       - "scope.ready"
       - "scope.blocked"
+      - "dispatch.blocked"
       - "review.unit.ready"
       - "review.unit.done"
       - "review.wave.complete"   # runtime-injected coordination; documented for synthesizer trigger
@@ -129,7 +131,7 @@ event_loop:
     # Declare `mechanism.flow` so the preset_lint graph accepts the
     # runtime-injected wave coordination topics (review.wave.complete /
     # review.wave.failed) without requiring a hat to publish them —
-    # origin guard would reject (see `event_origin.rs::SUPERVISOR_COORDINATION_TOPICS`).
+    # origin guard rejects agent emit of those coordination topics.
     # Mirrors the same pattern used by `ce-executor-supervisor.yml`.
 
     # Inline payload schemas block (authoritative SSOT is
@@ -186,7 +188,7 @@ event_loop:
             - field: dirty_verdict
               op: eq
               value: blocked
-            guidance: do NOT emit wave; write dispatch-blocked.md and terminate this activation.
+            guidance: do NOT emit wave; write dispatch-blocked.md then emit dispatch.blocked so finalizer can close with LOOP_COMPLETE{result:blocked}.
         field_docs:
           plan_name:
             meaning: basename of the original plan without extension; downstream hat routing identity
@@ -257,6 +259,34 @@ event_loop:
             meaning: scope identity at the moment of block; carried into the block artifact
             source: scope-preparer computes
             fill_rule: 16-64 hex chars; recompute before emit
+      dispatch.blocked:
+        required_fields:
+        - plan_name
+        - plan_path
+        - reason
+        - block_artifact_path
+        - scope_digest
+        field_docs:
+          plan_name:
+            meaning: basename of the plan without extension
+            source: review-dispatcher copies from scope.ready trigger or scope-manifest.json
+            fill_rule: literal copy; do NOT invent
+          plan_path:
+            meaning: repo-relative path to the original plan
+            source: review-dispatcher copies from scope.ready trigger or scope-manifest.json
+            fill_rule: literal copy
+          reason:
+            meaning: canonical reason code identifying which dispatch re-verify / wave precheck failure fired
+            source: review-dispatcher
+            fill_rule: one of `scope_drift_pre_dispatch | digest_mismatch | dirty_drift | idempotency_conflict | payloads_invalid`
+          block_artifact_path:
+            meaning: artifact land path (repo-relative under `.ralph/`) for dispatch-blocked.md with re-verify evidence
+            source: review-dispatcher writes via the Write tool
+            fill_rule: literal `.ralph/review/<plan>/dispatch-blocked.md`; do NOT fabricate
+          scope_digest:
+            meaning: scope identity at the moment of block (from trigger or last known manifest digest)
+            source: review-dispatcher copies from scope.ready / scope-manifest.json when still readable
+            fill_rule: 16-64 hex chars; do NOT invent a digest
       review.unit.ready:
         required_fields:
         - plan_name
@@ -463,34 +493,34 @@ event_loop:
         field_docs:
           plan_name:
             meaning: basename of the plan without extension
-            source: review-synthesizer carries forward from scope.ready
+            source: review-synthesizer reads from scope-manifest.json and/or ralph inspect loop loop_anchor
             fill_rule: literal copy
           plan_path:
             meaning: repo-relative path to the original plan
-            source: review-synthesizer carries forward
+            source: review-synthesizer reads from scope-manifest.json and/or ralph inspect loop loop_anchor
             fill_rule: literal copy
           scope_digest:
             meaning: frozen scope identity; carried forward
-            source: review-synthesizer carries forward
+            source: review-synthesizer reads from scope-manifest.json (recomputed line-strip digest must match)
             fill_rule: literal copy
           patch_digest:
             meaning: frozen patch digest; carried forward
-            source: review-synthesizer carries forward
+            source: review-synthesizer reads from scope-manifest.json
             fill_rule: sha256 hex digest (64 chars)
           review_head_sha:
             meaning: frozen review HEAD SHA; carried forward
-            source: review-synthesizer carries forward
+            source: review-synthesizer reads from scope-manifest.json
             fill_rule: 40-char git SHA
           first_implementation_commit_sha:
             meaning: the implementation commit C
-            source: review-synthesizer carries forward
+            source: review-synthesizer reads from scope-manifest.json
             fill_rule: 40-char git SHA
           resolved_baseline_sha:
             meaning: the patch's lower bound (C^)
-            source: review-synthesizer carries forward
+            source: review-synthesizer reads from scope-manifest.json
             fill_rule: 40-char git SHA
           synthesized_review_file:
-            meaning: repo-relative path to synthesized-review.md
+            meaning: artifact land path (repo-relative under `.ralph/`) to synthesized-review.md
             source: review-synthesizer writes via the Write tool
             fill_rule: literal `.ralph/review/<plan>/synthesized-review.md`; do NOT fabricate
           dimensions_covered:
@@ -665,7 +695,7 @@ event_loop:
             source: finalizer
             fill_rule: one of `clean | residual_only | fixes_required | blocked`
           artifact_path:
-            meaning: 'repo-relative path to the terminal artifact: fix-plan.md (success / residual / fixes) or wave-blocked.md / scope-blocked.md / review-blocked.md (blocked)'
+            meaning: 'artifact land path (repo-relative under `.ralph/`): fix-plan.md (success / residual / fixes) or wave-blocked.md / scope-blocked.md / dispatch-blocked.md / review-blocked.md (blocked)'
             source: finalizer
             fill_rule: do NOT fabricate; the path is the file the finalizer just validated
           scope_digest:
@@ -692,6 +722,7 @@ mechanism:
           - review.unit.done
           - review.wave.complete
           - review.wave.failed
+          - dispatch.blocked
       - id: synth_await
         kind: await
         "on": review.wave.complete
@@ -708,6 +739,7 @@ mechanism:
         on_any_of:
           - fix.plan.ready
           - scope.blocked
+          - dispatch.blocked
           - review.blocked
           - review.wave.failed
         allowed_emits:
@@ -760,6 +792,7 @@ hats:
       - `.ralph/review/<plan>/review-blocked.md`
       - `.ralph/review/<plan>/wave-blocked.md`
       - `.ralph/review/<plan>/scope-blocked.md`
+      - `.ralph/review/<plan>/dispatch-blocked.md`
 
       Keep nothing from a previous loop's dimension / dispatch / synthesis
       / fix / block artifacts. Scope freeze will rewrite the canonical
@@ -1031,13 +1064,14 @@ hats:
 
   review-dispatcher:
     name: "Review Dispatcher"
-    description: "Sole dispatcher. Re-verifies frozen scope, builds six immutable payload bytes, single wave emit of six review.unit.ready events sharing one wave_id and one idempotency key."
+    description: "Sole dispatcher. Re-verifies frozen scope, builds six immutable payload bytes, single wave emit of six review.unit.ready events sharing one wave_id and one idempotency key. On re-verify / idempotency failure emits dispatch.blocked."
     triggers: ["scope.ready"]
-    publishes: ["review.unit.ready"]
-    exempt_topics: ["review.unit.ready"]
+    publishes: ["review.unit.ready", "dispatch.blocked"]
+    exempt_topics: ["review.unit.ready", "dispatch.blocked"]
     # No default_publishes: a synthetic review.unit.ready is silent-success
     # (fan-out never happened). Missing emit must hard-gate and retry.
-    terminal_events: ["review.unit.ready"]
+    # Fail path is an explicit `dispatch.blocked` emit (not a default).
+    terminal_events: ["review.unit.ready", "dispatch.blocked"]
     event_filter:
       enabled: true
       events:
@@ -1047,29 +1081,35 @@ hats:
 
       You own the **fan-out**. You do NOT review code, you do NOT touch
       the patch, you do NOT emit `review.unit.done` or `LOOP_COMPLETE`.
-      One activation = one `ralph wave emit` call with six immutable
-      payload lines.
+      One activation = exactly one business outcome: either one
+      `ralph wave emit` of six immutable `review.unit.ready` lines, or
+      one `dispatch.blocked` after writing `dispatch-blocked.md`.
 
       ### HARD RULES
 
       - Emit EXACTLY ONE business topic from this activation:
-        `review.unit.ready` (via `ralph wave emit`). Single batch — never
-        loop and emit six times.
+        `review.unit.ready` (via `ralph wave emit`) **or**
+        `dispatch.blocked` (via `ralph emit`). Never both. Single wave
+        batch — never loop and emit six times with `ralph emit`.
       - Do NOT call `ralph wave emit` / `ralph wave verify` from any
         other hat. The wave detector rejects non-dispatcher emit (U23
         wave ACL).
       - Do NOT emit any `*.wave.*` coordination topic. Those are
         runtime-only (origin guard rejects).
-      - Do NOT modify tracked source, the plan file, or any artifact
-        outside `.ralph/review/<plan>/dispatch-batch/` (your own
-        pre-dispatch directory).
+      - You MAY write only under `.ralph/review/<plan>/dispatch-batch/`
+        and `.ralph/review/<plan>/dispatch-blocked.md` (plus
+        `.ralph/agent/decisions.md` for audit). Do NOT modify tracked
+        source, the plan file, or any other path.
 
       ### Inputs you can Observe
 
-      - `scope.ready` payload fields (in the trigger payload AND in
-        `ralph tools task list` view).
+      - `scope.ready` payload fields from the **trigger payload** (this
+        activation's injected trigger). Do NOT use `ralph tools task
+        list` — this preset has `tasks.enabled: false`, so the task
+        ledger is not a source for scope identity.
       - `.ralph/review/<plan>/scope-manifest.json`, `review.diff.patch`,
-        `review-context.md`, `scope-analysis.md` — read-only.
+        `review-context.md`, `scope-analysis.md` — read-only via
+        `Read`/`cat`.
       - `ralph inspect loop --format json` — `plan_name`, loop identity.
 
       ### Step 1 — Re-verify the frozen scope
@@ -1077,12 +1117,8 @@ hats:
       Before building any payload, re-run the same checks scope-preparer
       ran in Step 6. If anything has drifted, do NOT emit the wave; do
       NOT call `ralph wave verify` either (verify writes a ticket — only
-      emit when you're actually ready). Instead, write
-      `.ralph/review/<plan>/dispatch-blocked.md` (do NOT use the
-      `scope-blocked.md` writer — scope-preparer owns that artifact) and
-      terminate without emitting any business event. The runtime will
-      surface this as a no-progress state and the operator will see the
-      artifact.
+      emit when you're actually ready). Instead go to Step 1b
+      (`dispatch.blocked`).
 
       Re-verification commands:
       - `actual_head = git rev-parse HEAD`; must equal
@@ -1100,6 +1136,30 @@ hats:
         ```
         Result must equal both the manifest's recorded `scope_digest`
         and `scope.ready.scope_digest`.
+
+      ### Step 1b — Emit dispatch.blocked (fail path)
+
+      When Step 1 re-verify fails, or Step 4 returns an idempotency
+      conflict / unrecoverable wave precheck failure:
+
+      1. Write `.ralph/review/<plan>/dispatch-blocked.md` via the Write
+         tool (do NOT use the `scope-blocked.md` writer — scope-preparer
+         owns that artifact). Include plan identity, expected vs actual
+         digests/HEAD, and a `reason` that starts with one of:
+         `scope_drift_pre_dispatch | digest_mismatch | dirty_drift |
+         idempotency_conflict | payloads_invalid`.
+      2. Load emit skill if needed:
+         `ralph tools skill load ralph-tools-emit`
+      3. Pre-check then emit (active runner context — do NOT add
+         `-H` / `--config` overrides):
+         `ralph emit --schema dispatch.blocked`
+         then
+         `ralph emit dispatch.blocked --policy-check -j '<payload>' --output json`
+         and only when `ok=true`, drop `--policy-check` and emit for real.
+      4. Required payload fields per `event_policy.schemas.dispatch.blocked`.
+         `block_artifact_path` must be the file you just wrote.
+         Cite `ralph-tools-emit` §5 for `--policy-check` feedback.
+      5. Stop. Finalizer consumes `dispatch.blocked`.
 
       ### Step 2 — Build six immutable payload bytes
 
@@ -1154,20 +1214,27 @@ hats:
 
       ### Step 4 — Wave OPAC
 
+      This activation already has `RALPH_HATS_SOURCE` / `RALPH_CONFIG` /
+      `RALPH_CURRENT_HAT` injected by the runner. Do NOT add
+      `-H builtin:<preset>` / `-H <path>` / `--config` overrides for
+      wave verify/emit (same rule as `ralph emit` in this loop). Loop-out
+      manual debugging may use `-H`; in-loop activations must not.
+
       - **Precheck**:
         `cat .ralph/review/<plan>/dispatch-batch/payloads.jsonl | \
          ralph wave verify review.unit.ready --payloads-stdin \
-         --output json -H <this-preset>`
+         --output json`
         Capture `{"ok":true,"topic":"review.unit.ready","count":6}` and
         the ticket; if precheck rejects, read the JSON for
         `validation_errors[].field` / `payload_index` to localise the
         failing line, regenerate that line, and re-run precheck. Do NOT
         bypass with `--unsafe-no-policy-check` (the loop's gate is on by
-        default).
+        default). If the batch cannot be repaired, go to Step 1b with
+        `reason: payloads_invalid`.
       - **Apply** (use the SAME unmodified bytes file; do NOT regenerate):
         `cat .ralph/review/<plan>/dispatch-batch/payloads.jsonl | \
          ralph wave emit review.unit.ready --payloads-stdin \
-         --output json -H <this-preset> \
+         --output json \
          --idempotency-key '<key-from-step-3>'`
         Capture `wave_id`. If `deduplicated=true`, the batch already
         existed in the active store; stop (no further emit, do not
@@ -1175,16 +1242,18 @@ hats:
       - **Conflict**: if the emit returns `idempotency-key conflict`,
         your key collided with another batch. Do NOT silently bump and
         retry — KTD19 says same key + different payload is a hard scope
-        drift. Write `.ralph/review/<plan>/dispatch-blocked.md` with
-        `reason: idempotency_conflict` and stop without any further
-        `ralph wave emit`.
+        drift. Go to Step 1b with `reason: idempotency_conflict` (write
+        `dispatch-blocked.md`, then emit `dispatch.blocked`). Do NOT
+        call `ralph wave emit` again.
 
       ### Step 5 — Stop
 
       After a successful (non-deduplicated) wave emit, this activation is
       done. The runtime injects `review.wave.complete` (success) or
       `review.wave.failed` (failure) — those are the only triggers for
-      review-synthesizer and finalizer respectively.
+      review-synthesizer and finalizer respectively on the wave path.
+      The fail path without a wave is Step 1b → `dispatch.blocked` →
+      finalizer.
 
       ### OPAC reference
 
@@ -1194,7 +1263,7 @@ hats:
       `ralph tools skill load ralph-tools-wave`
       `ralph tools skill load ralph-tools-emit`
       Follow the `ralph-tools-wave` red box for verify → emit order;
-      cite `ralph-tools-emit` §5 for policy-check feedback when
+      cite `ralph-tools-emit` §5 for `--policy-check` feedback when
       precheck rejects.
 
   review-worker:
@@ -1440,9 +1509,8 @@ hats:
 
       ### Step 0 — Treat review.wave.complete as runtime-injected
 
-      Per `crates/ralph-core/src/event_origin.rs::SUPERVISOR_COORDINATION_TOPICS`
-      and `ralph-tools-wave`, `review.wave.complete` is a
-      runtime-injected coordination topic. You consume it as a trigger;
+      Per `ralph-tools-wave` (load on-demand if needed), `review.wave.complete`
+      is a runtime-injected coordination topic. You consume it as a trigger;
       you do NOT emit it (origin guard would reject). The hat attribution
       on the trigger is `review-synthesizer` — that's you.
 
@@ -1759,10 +1827,11 @@ hats:
 
   finalizer:
     name: "Finalizer"
-    description: "Sole publisher of LOOP_COMPLETE. Validates fix-plan.md / scope-blocked.md / review-blocked.md / wave-blocked.md against the trigger payload before emitting."
+    description: "Sole publisher of LOOP_COMPLETE. Validates fix-plan.md / scope-blocked.md / dispatch-blocked.md / review-blocked.md / wave-blocked.md against the trigger payload before emitting."
     triggers:
       - fix.plan.ready
       - scope.blocked
+      - dispatch.blocked
       - review.blocked
       - review.wave.failed
     publishes: ["LOOP_COMPLETE"]
@@ -1775,6 +1844,7 @@ hats:
       events:
         - fix.plan.ready
         - scope.blocked
+        - dispatch.blocked
         - review.blocked
         - review.wave.failed
     instructions: |
@@ -1806,7 +1876,7 @@ hats:
       ### Inputs you can Observe
 
       - The trigger payload (one of `fix.plan.ready`, `scope.blocked`,
-        `review.blocked`, or `review.wave.failed`).
+        `dispatch.blocked`, `review.blocked`, or `review.wave.failed`).
       - `.ralph/review/<plan>/scope-manifest.json` (read via `Read`).
       - `.ralph/review/<plan>/synthesized-review.md` (read via `Read`
         — only when validating `fix.plan.ready`).
@@ -1814,6 +1884,8 @@ hats:
         trigger is `fix.plan.ready`).
       - `.ralph/review/<plan>/scope-blocked.md` (read via `Read` —
         only when trigger is `scope.blocked`).
+      - `.ralph/review/<plan>/dispatch-blocked.md` (read via `Read` —
+        only when trigger is `dispatch.blocked`).
       - `.ralph/review/<plan>/review-blocked.md` (read via `Read` —
         only when trigger is `review.blocked`).
       - `ralph inspect loop --format json` for `loop_anchor.plan_name`
@@ -1842,6 +1914,7 @@ hats:
       |--------------------|-----------------------------------------------------|---------------------|
       | `fix.plan.ready`   | `.ralph/review/<plan>/fix-plan.md`                  | `fix-plan.result`   |
       | `scope.blocked`    | `.ralph/review/<plan>/scope-blocked.md`             | `blocked`           |
+      | `dispatch.blocked` | `.ralph/review/<plan>/dispatch-blocked.md`          | `blocked`           |
       | `review.blocked`   | `.ralph/review/<plan>/review-blocked.md`            | `blocked`           |
       | `review.wave.failed` | `.ralph/review/<plan>/wave-blocked.md` (you write it; see Step 2) | `blocked` |
 
@@ -1864,6 +1937,12 @@ hats:
       For `scope.blocked`:
       - Read `scope-blocked.md`. Confirm `reason` starts with one of
         the canonical reason codes (see scope-preparer Step 5b).
+      - `result` is `blocked`.
+
+      For `dispatch.blocked`:
+      - Read `dispatch-blocked.md`. Confirm `reason` starts with one of
+        `scope_drift_pre_dispatch | digest_mismatch | dirty_drift |
+        idempotency_conflict | payloads_invalid`.
       - `result` is `blocked`.
 
       For `review.blocked`:

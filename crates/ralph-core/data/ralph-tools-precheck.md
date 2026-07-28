@@ -7,13 +7,15 @@ metadata:
 
 # Precheck Gates（事件发射 LLM 关卡）
 
-> **这不是 CLI 命令。** 没有 `ralph precheck`。本机制由 preset 里的 `event_loop.precheck` 配置驱动，在 `RalphConfig::normalize()` 时脱糖，runtime 合成 `precheck-<X>` gate hat。
+> **仅当 preset 声明了 `event_loop.precheck` 时才需要本 skill。** 出厂 builtin preset 默认不带 precheck；若你的 prompt / 指令从未提到 `.proposed` / `.rejected` / `precheck-<X>`，不要加载本文件。
+>
+> **这不是 CLI 命令。** 没有 `ralph precheck`。本机制由 preset 里的 `event_loop.precheck` 配置驱动；**脱糖** = runtime 在加载配置时把原 topic `<X>` 改写成 `<X>.proposed`，并合成名为 `precheck-<X>` 的 gate hat。
 >
 > **与 `ralph emit --policy-check` 无关** — 后者是 CLI dry-run 确定性 schema/ownership 预检（**不写盘**）；本特性是 loop 里多一轮 LLM-as-judge hat。
 >
-> **opt-in**：未声明 `event_loop.precheck` 时一切行为与未启用时等价；出厂 builtin preset 默认不带 precheck。
+> **opt-in**：未声明 `event_loop.precheck` 时一切行为与未启用时等价。
 >
-> Preset 作者配置 walkthrough：`docs/guide/precheck-gates.md`
+> Preset 作者配置 walkthrough：`docs/guide/precheck-gates.md`（人类文档，不是 agent 必读输入）。
 
 ---
 
@@ -25,6 +27,18 @@ metadata:
 | 你是 producer，preset 已对某 topic 启用 precheck | 读下方「producer 行为」 |
 | 你是下游 consumer，订阅的是 bare `<X>` | **无变化** — 脱糖后你仍只处理真 `<X>` |
 | 要配置/启用 precheck | 读 `docs/guide/precheck-gates.md`（人类文档），不要猜 YAML |
+| preset **没有** `event_loop.precheck` | **不要加载**本 skill |
+
+---
+
+## 关键术语（首次出现）
+
+| 术语 | 含义 |
+|------|------|
+| **脱糖** | runtime 按 `event_loop.precheck.rules` 改写 publishes/triggers，并插入 gate hat 的配置变换 |
+| **`retry_budget`** | producer 被 `<X>.rejected` 打回后，runtime 允许再试的次数上限（默认 `3`） |
+| **`on_exhausted`** | `retry_budget` 用尽后 runtime 发出的终态动作（默认 `plan.blocked(reason=precheck_failed)`） |
+| **`on_fail.target`** | `<X>.rejected` 后 `task.resume` 打回的目标 hat / 步骤 |
 
 ---
 
@@ -35,7 +49,7 @@ metadata:
 1. 原 producer 的 `publishes`/`terminal_events` 里的 `<X>` 被改写为 `<X>.proposed`
 2. 合成 hat `precheck-<X>`：`triggers=[<X>.proposed]`，`publishes=[<X>, <X>.rejected]`
 3. producer 发 `<X>.proposed` → gate hat 激活一轮 → 过则发 `<X>`，不过则发 `<X>.rejected`
-4. `<X>.rejected` → runtime 自动 `task.resume(target=on_fail.target)`；`retry_budget` 耗尽 → `on_exhausted`（默认 `plan.blocked(reason=precheck_failed)`）
+4. `<X>.rejected` → runtime 自动 `task.resume(target=on_fail.target)`；`retry_budget`（再试上限）耗尽 → 执行 `on_exhausted`（默认 `plan.blocked(reason=precheck_failed)`）
 
 ---
 
@@ -54,7 +68,7 @@ metadata:
 
 - 仍按原 topic 名 emit（例如 `ralph emit review.complete ...`）。脱糖后实际写入的是 `review.complete.proposed`。
 - 收到 `task.resume`（precheck 打回）后：读 payload 里的 `failed_checks` / `reason`，针对检查点修改产物，**再 emit 同一业务 topic**；不要手 emit `*.proposed`。
-- `retry_budget` 默认 3：连续被拒会打回 producer；耗尽后 loop 发 `plan.blocked(reason=precheck_failed)`，**不要**自己重开 loop 或绕过 gate。
+- `retry_budget`（再试上限）默认 3：连续被拒会打回 producer；耗尽后 loop 发 `plan.blocked(reason=precheck_failed)`，**不要**自己重开 loop 或绕过 gate。
 
 ---
 

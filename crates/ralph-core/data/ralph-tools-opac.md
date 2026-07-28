@@ -46,7 +46,7 @@ metadata:
 | `plan_name` | `plan_path.file_stem()` 派生的稳定 key | `plan_path` 派生 |
 | `plan_baseline_sha` | plan 启动时的 git HEAD SHA | `.ralph/agent/plan-baseline.sha` |
 | `loop_start_sha` | loop runner 启动时的 git HEAD SHA | 未来 ledger 字段；当前为 `None` |
-| `attached_at` | attach 时间 | marker 的 `attached_at`（resume）或 `.ralph/loops.json` 的 `started`（run fallback） |
+| `attached_at` | attach 时间 | `ralph inspect loop --format json` 的 `loop_anchor.attached_at`（runtime 已解析；agent 只读该公开字段，不要打开内部 ledger 文件） |
 
 **未 attach 时**：`loop_anchor` 键整体省略，同时 `warnings` 数组会含 `"loop_anchor not attached; preset hats requiring loop_anchor will receive null. Pass --plan <path> to attach a plan, or run inside an active loop"`。
 

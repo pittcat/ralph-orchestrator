@@ -1137,6 +1137,16 @@ mod tests {
             "finalize must branch on review.wave.failed (U6 declared transition); got {:?}",
             finalize.on_any_of
         );
+        assert!(
+            finalize.on_any_of.iter().any(|t| t == "dispatch.blocked"),
+            "finalize must branch on dispatch.blocked (dispatcher re-verify fail-close); got {:?}",
+            finalize.on_any_of
+        );
+        let dispatcher = config.hats.get("review-dispatcher").expect("review-dispatcher");
+        assert!(
+            dispatcher.publishes.iter().any(|t| t == "dispatch.blocked"),
+            "review-dispatcher must publish dispatch.blocked for re-verify fail-close"
+        );
         // The preset adopts the U6/U7 flow authority end-to-end: scope.ready
         // advances scope_freeze → review_wave (positional), and a failed wave
         // branches straight to finalize via the declared on_any_of above.
@@ -1150,6 +1160,11 @@ mod tests {
             recover_current_plan_step(&config, &["scope.ready", "review.wave.failed"]),
             "finalize",
             "a failed review wave must branch to finalize"
+        );
+        assert_eq!(
+            recover_current_plan_step(&config, &["scope.ready", "dispatch.blocked"]),
+            "finalize",
+            "dispatch.blocked must branch to finalize"
         );
     }
 

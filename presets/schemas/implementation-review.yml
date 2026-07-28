@@ -46,7 +46,7 @@ schemas:
         - field: dirty_verdict
           op: eq
           value: blocked
-        guidance: do NOT emit wave; write dispatch-blocked.md and terminate this activation.
+        guidance: do NOT emit wave; write dispatch-blocked.md then emit dispatch.blocked so finalizer can close with LOOP_COMPLETE{result:blocked}.
     field_docs:
       plan_name:
         meaning: basename of the original plan without extension; downstream hat routing identity
@@ -117,6 +117,34 @@ schemas:
         meaning: scope identity at the moment of block; carried into the block artifact
         source: scope-preparer computes
         fill_rule: 16-64 hex chars; recompute before emit
+  dispatch.blocked:
+    required_fields:
+    - plan_name
+    - plan_path
+    - reason
+    - block_artifact_path
+    - scope_digest
+    field_docs:
+      plan_name:
+        meaning: basename of the plan without extension
+        source: review-dispatcher copies from scope.ready trigger or scope-manifest.json
+        fill_rule: literal copy; do NOT invent
+      plan_path:
+        meaning: repo-relative path to the original plan
+        source: review-dispatcher copies from scope.ready trigger or scope-manifest.json
+        fill_rule: literal copy
+      reason:
+        meaning: canonical reason code identifying which dispatch re-verify / wave precheck failure fired
+        source: review-dispatcher
+        fill_rule: one of `scope_drift_pre_dispatch | digest_mismatch | dirty_drift | idempotency_conflict | payloads_invalid`
+      block_artifact_path:
+        meaning: artifact land path (repo-relative under `.ralph/`) for dispatch-blocked.md with re-verify evidence
+        source: review-dispatcher writes via the Write tool
+        fill_rule: literal `.ralph/review/<plan>/dispatch-blocked.md`; do NOT fabricate
+      scope_digest:
+        meaning: scope identity at the moment of block (from trigger or last known manifest digest)
+        source: review-dispatcher copies from scope.ready / scope-manifest.json when still readable
+        fill_rule: 16-64 hex chars; do NOT invent a digest
   review.unit.ready:
     required_fields:
     - plan_name
@@ -323,34 +351,34 @@ schemas:
     field_docs:
       plan_name:
         meaning: basename of the plan without extension
-        source: review-synthesizer carries forward from scope.ready
+        source: review-synthesizer reads from scope-manifest.json and/or ralph inspect loop loop_anchor
         fill_rule: literal copy
       plan_path:
         meaning: repo-relative path to the original plan
-        source: review-synthesizer carries forward
+        source: review-synthesizer reads from scope-manifest.json and/or ralph inspect loop loop_anchor
         fill_rule: literal copy
       scope_digest:
         meaning: frozen scope identity; carried forward
-        source: review-synthesizer carries forward
+        source: review-synthesizer reads from scope-manifest.json (recomputed line-strip digest must match)
         fill_rule: literal copy
       patch_digest:
         meaning: frozen patch digest; carried forward
-        source: review-synthesizer carries forward
+        source: review-synthesizer reads from scope-manifest.json
         fill_rule: sha256 hex digest (64 chars)
       review_head_sha:
         meaning: frozen review HEAD SHA; carried forward
-        source: review-synthesizer carries forward
+        source: review-synthesizer reads from scope-manifest.json
         fill_rule: 40-char git SHA
       first_implementation_commit_sha:
         meaning: the implementation commit C
-        source: review-synthesizer carries forward
+        source: review-synthesizer reads from scope-manifest.json
         fill_rule: 40-char git SHA
       resolved_baseline_sha:
         meaning: the patch's lower bound (C^)
-        source: review-synthesizer carries forward
+        source: review-synthesizer reads from scope-manifest.json
         fill_rule: 40-char git SHA
       synthesized_review_file:
-        meaning: repo-relative path to synthesized-review.md
+        meaning: artifact land path (repo-relative under `.ralph/`) to synthesized-review.md
         source: review-synthesizer writes via the Write tool
         fill_rule: literal `.ralph/review/<plan>/synthesized-review.md`; do NOT fabricate
       dimensions_covered:
