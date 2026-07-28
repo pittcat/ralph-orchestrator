@@ -113,7 +113,7 @@ impl TestScenario for ParallelForgeDispatchContractScenario {
     async fn run(
         &self,
         _executor: &RalphExecutor,
-        config: &ScenarioConfig,
+        _config: &ScenarioConfig,
     ) -> Result<TestResult, ScenarioError> {
         // Plan 2026-07-28-001 §4.6 #21 + follow-up plan: this body
         // is a placeholder until the marker-cassette harness lands.
