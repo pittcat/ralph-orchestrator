@@ -318,6 +318,19 @@ pub async fn run_wave_worker_pty(
     // Legacy path (idle disabled): single-layer tokio::time::timeout.
     // Dual-clock path (idle enabled): tokio::select! deadline-driven loop.
     let mut kill_reason: Option<KillReason> = None;
+    // C4 helper: collapse the 9-place duplication of
+    //   `let _ = child.kill(); kill_reason = ...; killed = true; timed_out = true;`
+    // into a single closure bound at the top of the dual-clock
+    // block. The closure captures `&mut kill_reason`, `&mut killed`,
+    // `&mut timed_out`, `child` (reborrowed), and `index` so the
+    // three select! arms can call it without copy-pasting the
+    // same 4-line kill sequence per kill kind.
+    let mut apply_kill = |reason: KillReason, killed: &mut bool, timed_out: &mut bool| {
+        let _ = child.kill();
+        kill_reason = Some(reason);
+        *killed = true;
+        *timed_out = true;
+    };
     let timed_out = if let Some(cfg) = lease_cfg {
         // ── Dual-clock path (U6/U7/U8) ────────────────────────────────
         let mut lease_state = super::heartbeat::LeaseState::fresh(0);
@@ -393,28 +406,19 @@ pub async fn run_wave_worker_pty(
                     match decision {
                         super::heartbeat::LeaseDecision::HardKill => {
                             warn!(worker = index, "Wave worker hard deadline exceeded");
-                            let _ = child.kill();
-                            kill_reason = Some(KillReason::Hard);
-                            killed = true;
-                            timed_out = true;
+                            apply_kill(KillReason::Hard, &mut killed, &mut timed_out);
                         }
                         super::heartbeat::LeaseDecision::IdleKill => {
                             warn!(worker = index, idle_window_secs = idle_heartbeat.unwrap().as_secs(),
                                   weak_count = lease_state.weak_count,
                                   "Wave worker idle heartbeat exceeded, killing process");
-                            let _ = child.kill();
-                            kill_reason = Some(KillReason::Idle);
-                            killed = true;
-                            timed_out = true;
+                            apply_kill(KillReason::Idle, &mut killed, &mut timed_out);
                         }
                         super::heartbeat::LeaseDecision::StartupKill => {
                             warn!(worker = index,
                                   startup_grace_secs = startup_grace.map(|d| d.as_secs()).unwrap_or(0),
                                   "Wave worker startup grace exceeded, killing process");
-                            let _ = child.kill();
-                            kill_reason = Some(KillReason::Startup);
-                            killed = true;
-                            timed_out = true;
+                            apply_kill(KillReason::Startup, &mut killed, &mut timed_out);
                         }
                         super::heartbeat::LeaseDecision::Continue => {
                             // The hard sleep fired but neither kill condition was met.
@@ -449,28 +453,19 @@ pub async fn run_wave_worker_pty(
                             match decision {
                                 super::heartbeat::LeaseDecision::HardKill => {
                                     warn!(worker = index, "Wave worker hard deadline exceeded");
-                                    let _ = child.kill();
-                                    kill_reason = Some(KillReason::Hard);
-                                    killed = true;
-                                    timed_out = true;
+                                    apply_kill(KillReason::Hard, &mut killed, &mut timed_out);
                                 }
                                 super::heartbeat::LeaseDecision::IdleKill => {
                                     warn!(worker = index, idle_window_secs = idle_heartbeat.unwrap().as_secs(),
                                           weak_count = lease_state.weak_count,
                                           "Wave worker idle heartbeat exceeded, killing process");
-                                    let _ = child.kill();
-                                    kill_reason = Some(KillReason::Idle);
-                                    killed = true;
-                                    timed_out = true;
+                                    apply_kill(KillReason::Idle, &mut killed, &mut timed_out);
                                 }
                                 super::heartbeat::LeaseDecision::StartupKill => {
                                     warn!(worker = index,
                                           startup_grace_secs = startup_grace.map(|d| d.as_secs()).unwrap_or(0),
                                           "Wave worker startup grace exceeded, killing process");
-                                    let _ = child.kill();
-                                    kill_reason = Some(KillReason::Startup);
-                                    killed = true;
-                                    timed_out = true;
+                                    apply_kill(KillReason::Startup, &mut killed, &mut timed_out);
                                 }
                                 super::heartbeat::LeaseDecision::Continue => {
                                     // Lease refreshed; loop continues.
@@ -520,28 +515,19 @@ pub async fn run_wave_worker_pty(
                         match decision {
                             super::heartbeat::LeaseDecision::HardKill => {
                                 warn!(worker = index, "Wave worker hard deadline exceeded");
-                                let _ = child.kill();
-                                kill_reason = Some(KillReason::Hard);
-                                killed = true;
-                                timed_out = true;
+                                apply_kill(KillReason::Hard, &mut killed, &mut timed_out);
                             }
                             super::heartbeat::LeaseDecision::IdleKill => {
                                 warn!(worker = index, idle_window_secs = idle_heartbeat.unwrap().as_secs(),
                                       weak_count = lease_state.weak_count,
                                       "Wave worker idle heartbeat exceeded, killing process");
-                                let _ = child.kill();
-                                kill_reason = Some(KillReason::Idle);
-                                killed = true;
-                                timed_out = true;
+                                apply_kill(KillReason::Idle, &mut killed, &mut timed_out);
                             }
                             super::heartbeat::LeaseDecision::StartupKill => {
                                 warn!(worker = index,
                                       startup_grace_secs = startup_grace.map(|d| d.as_secs()).unwrap_or(0),
                                       "Wave worker startup grace exceeded, killing process");
-                                let _ = child.kill();
-                                kill_reason = Some(KillReason::Startup);
-                                killed = true;
-                                timed_out = true;
+                                apply_kill(KillReason::Startup, &mut killed, &mut timed_out);
                             }
                             super::heartbeat::LeaseDecision::Continue => {}
                         }
