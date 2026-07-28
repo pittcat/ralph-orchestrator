@@ -152,25 +152,20 @@ Hard questions — Artifact-First: ✓（`.ralph/post-merge/` 为业务 artifact
 
 ## Hat: closer
 
-- **Q1 使命:** 干净环境验证 + 独立终审；唯一 completion 发布者
+- **Q1 使命:** 干净环境验证 + 独立终审；不写 REPORT、不 emit complete
 - **Q2:** `fix.ready` + 全部 `.ralph/post-merge/**`
-- **Q3:** 先 14 后 15 → emit complete
-- **Q4:** `postmerge.complete`
-- **Q5:** 终态；操作者读 `15-final-review.md`
+- **Q3:** 先 14 后 15 → emit reviewed
+- **Q4:** `postmerge.reviewed`（`verdict` / `verdict_confidence` / `final_review_path` / `clean_validation_path`）
+- **Q5:** → reporter；操作者读 `15-final-review.md`
 
 ### Payload Contract
 
 | topic | 字段 | 类型 | 值源 | 可见性 | 身份检查 | 下游消费 | schema metadata | artifact 落盘 |
 |---|---|---|---|---|---|---|---|---|
-| postmerge.complete | success | bool | verdict | 本 hat | 不涉及 | runtime 完成 | field_docs | 不落盘 + 短控制 |
-| postmerge.complete | verdict | enum | 15 结论 | 本 hat | 不涉及 | 操作者 | allowed_values | 必填正文 · `15-final-review.md` |
-| postmerge.complete | artifact_path | path | 本 hat 写入 | 本 hat | 不涉及 | 操作者 | field_docs | 必填 · `15-final-review.md`；另写 `14-clean-validation.md` |
-
-## Hat: closer (revised)
-
-- **Q1:** 14 clean-env + 15 independent review only
-- **Q4:** `postmerge.reviewed` (`verdict`, `verdict_confidence`, paths)
-- **Q5:** → reporter；不写 REPORT、不 complete
+| postmerge.reviewed | verdict | enum | `.ralph/post-merge/15-final-review.md` 结论 | 本 hat | 不涉及 | reporter | allowed_values + field_docs | 必填正文 · `15-final-review.md` |
+| postmerge.reviewed | verdict_confidence | enum | 审稿人判定 | 本 hat | 不涉及 | reporter 透传 | allowed_values + field_docs | 不落盘 + 短控制 |
+| postmerge.reviewed | final_review_path | path | 本 hat 写入 | 本 hat | 不涉及 | reporter `cat` | field_docs | 必填 · `15-final-review.md` |
+| postmerge.reviewed | clean_validation_path | path | 本 hat 写入 | 本 hat | 不涉及 | reporter `cat` | field_docs | 必填 · `14-clean-validation.md` |
 
 ## Hat: reporter
 
@@ -190,7 +185,7 @@ Hard questions — Artifact-First: ✓（`.ralph/post-merge/` 为业务 artifact
 ## 7-point sync checklist（builtin）
 
 1. runtime step-close：无旧终态依赖，新 topic 自洽 ✓  
-2. preset_lint：待跑校验  
+2. preset_lint：✓ 已跑（2026-07-28 评审 `builtin:post-merge-converge` 0 Error / 0 Warn；`cargo nextest -p ralph-core -- preset_lint` 267/267 PASS；`cargo nextest -p ralph-cli --bin ralph -- preset_lint` 11/11 PASS；`cargo nextest -p ralph-cli --bin ralph -- presets` 57/57 PASS）  
 3. BDD：本轮未加 scenario（merge-batch 式 workflow preset）— 可后续补  
 4. config 字段：无新 event_loop 全局字段 ✓  
 5. CLI presets.rs + 计数测试 ✓  
@@ -203,4 +198,4 @@ Hard questions — Artifact-First: ✓（`.ralph/post-merge/` 为业务 artifact
 - [x] hat 数 notes=YAML=8  
 - [x] single-chain / Artifact-First hard questions  
 - [x] emitter 引用 OPAC / policy-check  
-- [ ] lint 实测（下一步）
+- [x] lint 实测（2026-07-28 评审通过；见 `.ralph/reviews/post-merge-converge-2026-07-28.md`）
