@@ -661,34 +661,86 @@ hats:
 
     #[test]
     fn task_mutation_authority_matrix() {
+        // Cover the four orthogonal combinations of
+        // `projection_owned` × `is_coordinator` so each branch of
+        // the lint's reason field gets pinned. (Plan §4.4 U2 / R8
+        // — `non_coordinator_task_mutation` vs
+        // `projector_single_writer_conflict`.)
+        struct Case {
+            name: &'static str,
+            command: &'static str,
+            projection_owned: bool,
+            is_coordinator: bool,
+            /// expected `reason:` body substring (None = lint MUST NOT fire).
+            expect_reason: Option<&'static str>,
+        }
         let cases = [
-            (
-                "non-coordinator",
-                "ralph tools task add \"Unit\" --key k",
-                false,
-                true,
-            ),
-            (
-                "projection-owner",
-                "ralph tools task ensure --key k",
-                true,
-                true,
-            ),
+            Case {
+                name: "non-coordinator",
+                command: "ralph tools task add \"Unit\" --key k",
+                projection_owned: false,
+                is_coordinator: false,
+                expect_reason: Some("non_coordinator_task_mutation"),
+            },
+            Case {
+                name: "coordinator-without-projector",
+                command: "ralph tools task add \"Unit\" --key k",
+                projection_owned: false,
+                is_coordinator: true,
+                expect_reason: None,
+            },
+            Case {
+                name: "projection-owner-without-coordinator",
+                command: "ralph tools task ensure --key k",
+                projection_owned: true,
+                is_coordinator: false,
+                expect_reason: Some("projector_single_writer_conflict"),
+            },
+            Case {
+                name: "projection-owner-with-coordinator",
+                command: "ralph tools task ensure --key k",
+                projection_owned: true,
+                is_coordinator: true,
+                expect_reason: Some("projector_single_writer_conflict"),
+            },
         ];
-        for (name, command, projection_owned, is_coordinator) in cases {
+        for case in &cases {
+            let projection_block = if case.projection_owned {
+                "event_loop:\n  state_projection:\n    actions:\n      custom.ready:\n        kind: ensure_task\n        key: task_key\n"
+            } else {
+                ""
+            };
             let yaml = format!(
-                "event_loop:\n  state_projection:\n    actions:\n      custom.ready:\n        kind: ensure_task\n        key: task_key\ntasks:\n  coordinator_hats: [{}]\nhats:\n  worker:\n    instructions: |\n      {command}\n",
-                if is_coordinator { "worker" } else { "other" }
+                "{projection}tasks:\n  coordinator_hats: [{coord}]\nhats:\n  worker:\n    instructions: |\n      {cmd}\n",
+                projection = projection_block,
+                coord = if case.is_coordinator { "worker" } else { "other" },
+                cmd = case.command,
             );
             let findings = check_instructions_opac_with_preset(&yaml, "");
-            assert!(
-                findings.iter().any(|finding| {
-                    finding.id == FINDING_INSTRUCTIONS_TASK_MUTATION_AUTHORITY_CONFLICT
-                        && finding.hat.as_deref() == Some("worker")
-                }),
-                "{name} must be rejected: {findings:?}"
-            );
-            let _ = projection_owned;
+            match case.expect_reason {
+                Some(reason) => {
+                    let expected_id = FINDING_INSTRUCTIONS_TASK_MUTATION_AUTHORITY_CONFLICT;
+                    let matched = findings.iter().find(|finding| {
+                        finding.id == expected_id
+                            && finding.hat.as_deref() == Some("worker")
+                            && finding.message.contains(reason)
+                    });
+                    assert!(
+                        matched.is_some(),
+                        "{} must fire with reason `{reason}` (projection_owned={}, is_coordinator={}); got: {findings:?}",
+                        case.name, case.projection_owned, case.is_coordinator
+                    );
+                }
+                None => {
+                    assert!(
+                        !findings.iter().any(|finding| finding.id
+                            == FINDING_INSTRUCTIONS_TASK_MUTATION_AUTHORITY_CONFLICT),
+                        "{} must NOT fire when the hat is in tasks.coordinator_hats \
+                         and no projector owns the action; got: {findings:?}",
+                        case.name
+                    );
+                }
+            }
         }
     }
 
