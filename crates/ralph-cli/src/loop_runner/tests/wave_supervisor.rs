@@ -2302,6 +2302,7 @@ async fn run_u3_execute_wave_with_prebound_slots(
         None,
         &bridge_arc,
         executor_dyn,
+        None, // pre_registered_id: not pre-registered in test path
     )
     .await;
     (outcome, started)
@@ -2351,6 +2352,7 @@ async fn run_u3_execute_wave(
         None,
         &bridge_arc,
         executor_dyn,
+        None, // pre_registered_id: not pre-registered in test path
     )
     .await;
     (outcome, started)
@@ -3173,6 +3175,7 @@ async fn run_u5_execute_wave(
         None,
         &bridge_arc,
         executor_dyn,
+        None, // pre_registered_id: not pre-registered in test path
     )
     .await;
     (outcome, bridge)
@@ -3486,6 +3489,7 @@ async fn run_u2_execute_wave_with_env_capture(
         None,
         &bridge_arc,
         executor_dyn,
+        None, // pre_registered_id: not pre-registered in test path
     )
     .await
 }
@@ -5137,6 +5141,7 @@ async fn run_u3_dispatch_wave<E: WaveWorkerExecutor + 'static>(
         None,
         &bridge_arc,
         executor_dyn,
+        None, // pre_registered_id: not pre-registered in test path
     )
     .await
 }

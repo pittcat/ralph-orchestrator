@@ -1276,6 +1276,7 @@ pub async fn execute_wave_structured(
             config_path,
             bridge,
             executor as Arc<dyn WaveWorkerExecutor>,
+            None, // pre_registered_id: not pre-registered in normal dispatch path
         )
         .await;
     }
@@ -1572,6 +1573,7 @@ async fn execute_wave_via_supervisor(
         config_path,
         bridge,
         executor as Arc<dyn WaveWorkerExecutor>,
+        None, // pre_registered_id: not pre-registered in normal dispatch path
     )
     .await
 }
@@ -1583,6 +1585,13 @@ async fn execute_wave_via_supervisor(
 /// `Arc::new(ProductionExecutor)`; tests substitute their own
 /// executor (e.g. `U3CountingExecutor`) to drive the gate under
 /// test.
+///
+/// 2026-07-28-002 plan U4 (S6): when `pre_registered_id` is `Some`,
+/// the caller has already registered the wave in the store (e.g. a
+/// redrive child created by `create_redrive_wave` at boot). The
+/// dispatcher skips `register_wave_if_absent` and uses the provided
+/// `store_wave_id` directly, verifying the wave exists to fail-closed
+/// on a missing row.
 pub(crate) async fn execute_wave_via_supervisor_with_executor(
     wave: &ralph_core::DetectedWave,
     global_backend: &CliBackend,
@@ -1597,6 +1606,7 @@ pub(crate) async fn execute_wave_via_supervisor_with_executor(
     config_path: Option<&std::path::Path>,
     bridge: &Arc<dyn ralph_core::supervisor::SupervisorBridge>,
     executor: Arc<dyn WaveWorkerExecutor>,
+    pre_registered_id: Option<&str>,
 ) -> WaveDispatchOutcome {
     use ralph_core::supervisor::{SupervisorBridge as _, WaveKind};
     use ralph_core::{WaveTracker, WaveWorkerContext, build_wave_worker_prompt};
@@ -1653,32 +1663,53 @@ pub(crate) async fn execute_wave_via_supervisor_with_executor(
     // fail closed so callers see the root cause (DB open failure,
     // constraint conflict, etc.) instead of a silently different
     // dispatch shape.
-    let store_wave_id = match bridge.register_wave_if_absent(
-        wave_kind,
-        &wave.wave_id,
-        wave.total,
-        1,
-    ) {
-        Ok(id) => id,
-        Err(err) => {
-            // 2026-07-22-001 plan U2: register errors fail closed.
-            // Map to `SpawnFailed { expected = total, spawned = 0 }`
-            // so the runner can write a `wave_spawn_failed`
-            // RecoveryDiagnosisEnvelope and the outer dispatcher can
-            // convert the error uniformly. The previous code's
-            // fallback to legacy `WaveTracker` dispatch re-opened
-            // the OPAC register-double-spawn gap; surfacing the
-            // error keeps the supervisor as the single source of
-            // truth.
-            tracing::warn!(
-                wave_id = %wave.wave_id,
-                error = %err,
-                "supervisor register_wave_if_absent failed; aborting wave (fail-closed per 2026-07-22-001 plan U2)"
-            );
-            return WaveDispatchOutcome::SpawnFailed {
-                spawned_count: 0,
-                expected_count: wave.total,
-            };
+    //
+    // 2026-07-28-002 plan U4 (S6): when `pre_registered_id` is `Some`,
+    // the wave was already registered by the boot redrive scan. Skip
+    // `register_wave_if_absent` and verify the wave exists to fail-closed
+    // on a missing row.
+    let store_wave_id = if let Some(pre_id) = pre_registered_id {
+        // Verify the pre-registered wave exists in the store.
+        // `fan_in_status` returns the wave snapshot; an error means
+        // the row is absent or corrupted → fail-closed.
+        match bridge.fan_in_status(pre_id) {
+            Ok(_) => pre_id.to_string(),
+            Err(err) => {
+                tracing::warn!(
+                    wave_id = %wave.wave_id,
+                    pre_registered_id = %pre_id,
+                    error = %err,
+                    "pre-registered wave not found in store; aborting redrive (fail-closed per 2026-07-28-002 plan U4 S6)"
+                );
+                return WaveDispatchOutcome::SpawnFailed {
+                    spawned_count: 0,
+                    expected_count: wave.total,
+                };
+            }
+        }
+    } else {
+        match bridge.register_wave_if_absent(wave_kind, &wave.wave_id, wave.total, 1) {
+            Ok(id) => id,
+            Err(err) => {
+                // 2026-07-22-001 plan U2: register errors fail closed.
+                // Map to `SpawnFailed { expected = total, spawned = 0 }`
+                // so the runner can write a `wave_spawn_failed`
+                // RecoveryDiagnosisEnvelope and the outer dispatcher can
+                // convert the error uniformly. The previous code's
+                // fallback to legacy `WaveTracker` dispatch re-opened
+                // the OPAC register-double-spawn gap; surfacing the
+                // error keeps the supervisor as the single source of
+                // truth.
+                tracing::warn!(
+                    wave_id = %wave.wave_id,
+                    error = %err,
+                    "supervisor register_wave_if_absent failed; aborting wave (fail-closed per 2026-07-22-001 plan U2)"
+                );
+                return WaveDispatchOutcome::SpawnFailed {
+                    spawned_count: 0,
+                    expected_count: wave.total,
+                };
+            }
         }
     };
 
