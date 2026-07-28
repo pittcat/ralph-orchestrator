@@ -95,9 +95,9 @@ history_search: disabled | preset-only | full   # 来自主 SKILL §0.1 的 AskU
 
 ## 4. 证据清单
 
-| ID | 描述 | 证据锚点 | 严重度初判 | 置信度初估 | 证据缺口 |
-|----|------|----------|------------|------------|----------|
-| DEV-001 | ... | file:line / event#L | P0 | 45 | 缺 recovery 对照 |
+| ID | 描述 | 证据锚点 | 严重度初判 | 置信度初估 | 已计分证据项 | 证据缺口 |
+|----|------|----------|------------|------------|--------------|----------|
+| DEV-001 | ... | file:line / event#L | P0 | 40 | （无） | 缺 file:line、缺双账本 |
 
 ### 4.1 OPAC 逐 hat 审计表
 
@@ -108,10 +108,10 @@ history_search: disabled | preset-only | full   # 来自主 SKILL §0.1 的 AskU
 
 ## 5. 问题归因表（confidence ≥ 60；P0 ≥ 70）
 
-| 优先级 | 问题 | 根因分类 | **置信度** | 证据 DEV | 历史关联 | 加深轮次 |
-|--------|------|----------|------------|----------|----------|----------|
-| P0 | ... | mechanism / preset / agent / compound | **82** | DEV-00x | 高 | 1→82 |
-| P1 | ... | preset | **65** | DEV-00y | N/A (history disabled) | 0 |
+| 优先级 | 问题 | 根因分类 | **置信度** | 证据 DEV | 已计分证据项 | 历史关联 | 加深轮次 |
+|--------|------|----------|------------|----------|--------------|----------|----------|
+| P0 | ... | mechanism / preset / agent / compound | **82** | DEV-00x | file:line(+25) + 双账本(+20) + preset行号(+15) + BDD(+10) | 高 | 1→82 |
+| P1 | ... | preset | **65** | DEV-00y | preset行号(+15) + 单账本 | N/A (history disabled) | 0 |
 
 > **历史关联列规则**：`history_search=disabled`（默认）一律 `N/A (history disabled)`；`preset-only` / `full` 才填高/中/低/新。
 

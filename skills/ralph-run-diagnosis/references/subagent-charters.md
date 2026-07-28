@@ -90,7 +90,7 @@
 **输出**：《偏离证据清单》
 
 - 编号 DEV-001…
-- 每条：描述、严重度初判、**置信度初估**、证据锚点（file:行号或 event#）、**证据缺口**、关联 A 链路步骤
+- 每条：描述、严重度初判、**置信度初估**（按 [confidence-rubric.md](confidence-rubric.md) 计分卡，列出已计分证据项）、证据锚点（file:行号或 event#）、**证据缺口**（缺哪些计分项）、关联 A 链路步骤
 
 见 [confidence-rubric.md](confidence-rubric.md) §Agent C。
 
@@ -100,26 +100,31 @@
 
 ## Agent D — 归因、置信度与修复
 
-**输入**：Agent C 偏离清单、Agent B 知识库、主仓源码（按需）、[confidence-rubric.md](confidence-rubric.md)。
+**输入**：Agent C 偏离清单（含计分卡初估）、Agent B 知识库、主仓源码（按需）、[confidence-rubric.md](confidence-rubric.md)。
 
 **步骤**：
 
 1. 逐条 DEV 判定根因：`preset` / `mechanism` / `agent` / `compound`。
-2. 为每条 P0/P1 打 **confidence 0–100**；附评分依据（双账本、file:line、preset 行号等）。
-3. **confidence < 60**（P0 候选 **< 70**）→ **禁止入 §5**；执行 rubric 加深顺序，记录轮次与分数变化（最多 2 轮）。
-4. 2 轮后仍不足 → 写入 §7「未核实疑点」+ `blocked_by`。
-5. 对 `mechanism` 必须 `file:line` 才能 confidence ≥ 70。
-6. 对 `preset` 必须 preset/schema **具体行号** 才能 confidence ≥ 65。
-7. 对照 B：历史复发、第几次、未落地 plan。
-8. 仅对 §5 入表项写 P0/P1/P2 与三段式修复建议。
+2. **按根因分类走加深决策树**（见 [confidence-rubric.md](confidence-rubric.md)「加深决策树」）：
+   - `mechanism`：第 1 轮源码反查（file:line）→ 第 2 轮补双账本或 BDD
+   - `preset`：第 1 轮 preset/schema 行级 → 第 2 轮补双账本或 prompt visibility
+   - `agent`：第 1 轮 agent-output（FULL）→ 第 2 轮补 logs 或 prompt visibility
+   - `compound`：各成分并行第 1 轮 → 第 2 轮补最低分成分
+3. 为每条 P0/P1 打 **confidence 0–100**：终评 = C 初估 + 加深新增证据项加分（≤ 模式硬顶）；附计分卡证据项列表。
+4. **confidence < 60**（P0 候选 **< 70**）→ **禁止入 §5**；每轮加深必须新增至少一个可计分证据项（信息增量阈值），记录轮次与分数变化（最多 2 轮）。
+5. 2 轮后仍不足 → 写入 §7「未核实疑点」+ `blocked_by: <缺哪个计分证据项>`。
+6. 对 `mechanism` 必须 `file:line` 才能 confidence ≥ 70。
+7. 对 `preset` 必须 preset/schema **具体行号** 才能 confidence ≥ 65。
+8. 对照 B：历史复发、第几次、未落地 plan（历史同根因 +10，仅 `--include-history ≠ disabled`）。
+9. 仅对 §5 入表项写 P0/P1/P2 与三段式修复建议。
 
 **输出**：
 
-- 《问题归因表》（含 **置信度**、加深轮次）
+- 《问题归因表》（含 **置信度**、已计分证据项、加深轮次）
 - 《未核实疑点表》（若有）
 - 《修复建议》（每条关联置信度）
 
-**禁止**：低置信度当定论；重新扫描原始 events（只用 C 的证据）；直接改代码。
+**禁止**：低置信度当定论；重新扫描原始 events（只用 C 的证据）；直接改代码；凭直觉给分不列计分证据项。
 
 ---
 
