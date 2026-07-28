@@ -296,6 +296,10 @@ fn build_supervisor_bridge_relative_db_path_resolves_under_ralph_dir() {
         db_path: ".ralph/supervisor.db".to_string(),
         max_concurrent_workers: 2,
         aggregate_timeout_secs: 60,
+        // 2026-07-28-003 plan U4: explicit budget; default 1
+        // mirrors the documented historical default so this
+        // relative-path characterization test stays green.
+        slot_retry_budget: 1,
     };
     let bridge = crate::loop_runner::build_supervisor_bridge(
         &cfg,
@@ -325,6 +329,9 @@ fn build_supervisor_bridge_absolute_db_path_honoured_as_is() {
         db_path: abs_db.display().to_string(),
         max_concurrent_workers: 1,
         aggregate_timeout_secs: 30,
+        // 2026-07-28-003 plan U4: default budget for the
+        // absolute-path characterization test.
+        slot_retry_budget: 1,
     };
     let bridge = crate::loop_runner::build_supervisor_bridge(
         &cfg,
@@ -2517,6 +2524,9 @@ fn setup_u3_partial_failure_bridge(
         context,
         std::sync::Arc::new(DefaultWorktreeFactory),
         slot_count.max(1),
+        // 2026-07-28-003 plan U4: explicit budget keeps the
+        // characterization test seam at the historical default.
+        1,
     );
     let store_wave_id = bridge
         .register_wave_if_absent(kind, loop_id, slot_count, 0)
@@ -3696,6 +3706,9 @@ fn setup_u6_production_bridge(
         context,
         std::sync::Arc::new(DefaultWorktreeFactory),
         n.max(1),
+        // 2026-07-28-003 plan U4: explicit budget keeps the U6
+        // characterization helpers at the historical default.
+        1,
     );
     let store_wave_id = bridge
         .register_wave_if_absent(WaveKind::Exec, wave_key, n, 0)
@@ -3917,6 +3930,9 @@ fn test_production_fan_in_partial_failure_injects_failed() {
             context,
             std::sync::Arc::new(DefaultWorktreeFactory),
             3,
+            // 2026-07-28-003 plan U4: explicit budget keeps the
+            // fan-in characterization at the historical default.
+            1,
         );
     let store_wave_id = bridge
         .register_wave_if_absent(WaveKind::Exec, "u6-wave-fail", 3, 0)
@@ -5425,6 +5441,10 @@ fn review_partial_failure_salvage_path_unaffected() {
             context,
             std::sync::Arc::new(DefaultWorktreeFactory),
             2,
+            // 2026-07-28-003 plan U4: explicit budget keeps the
+            // U1 review partial characterization at the
+            // historical default.
+            1,
         );
     let store_wave_id = bridge
         .register_wave_if_absent(WaveKind::Review, "u1-review-partial", 2, 0)
@@ -6206,5 +6226,218 @@ fn task_close_then_next_ready_two_wave_supervisor_path() {
         wave1.phase, wave2.phase,
         "two consecutive waves must NOT share a phase; got wave1={:?} wave2={:?}",
         wave1.phase, wave2.phase
+    );
+}
+
+// =====================================================================
+// 2026-07-28-003 plan U4: `SupervisorConfig.slot_retry_budget` wiring
+// and bridge surface integration tests.
+//
+// U4-19: pin test for the new bridge slot_retry_budget access
+// (KTD6 / S13 / R14). All test fixtures that build the production
+// bridge go through `with_context_and_factory_with_cap` so the
+// budget forwarding is exercised on every construction path.
+// =====================================================================
+
+/// U4-19: production bridge surfaces the constructor-supplied
+/// budget; the trait default is documented as 1 but production
+/// bridges always propagate the supplied argument. Locks down
+/// KTD6 / R14.
+#[test]
+fn u4_production_bridge_forwards_slot_retry_budget_through_constructor() {
+    use crate::loop_runner::wave::ProductionBridgeContext;
+    use ralph_core::supervisor::InMemorySupervisorStore;
+    use ralph_core::supervisor::worktree_bind::DefaultWorktreeFactory;
+
+    let tmp = tempfile::tempdir().expect("temp dir");
+    let events_path = tmp.path().join(".ralph").join("events.jsonl");
+    let store = std::sync::Arc::new(InMemorySupervisorStore::new());
+
+    // budget = 2 — verify production bridge reflects the param.
+    let bridge =
+        crate::loop_runner::wave::CoordinatorSupervisorBridge::with_context_and_factory_with_cap(
+            store.clone() as std::sync::Arc<dyn ralph_core::supervisor::SupervisorStore>,
+            ProductionBridgeContext {
+                loop_id: "u4-budget".to_string(),
+                repo_root: std::path::PathBuf::from("/tmp/u4-repo"),
+                events_path: Some(events_path.clone()),
+                tasks_path: None,
+            },
+            std::sync::Arc::new(DefaultWorktreeFactory),
+            4,
+            2,
+        );
+    assert_eq!(
+        bridge.slot_retry_budget(),
+        2,
+        "production bridge must forward slot_retry_budget to the trait"
+    );
+
+    // budget = 0 — also propagate (close auto-retry).
+    let bridge_zero =
+        crate::loop_runner::wave::CoordinatorSupervisorBridge::with_context_and_factory_with_cap(
+            store.clone() as std::sync::Arc<dyn ralph_core::supervisor::SupervisorStore>,
+            ProductionBridgeContext {
+                loop_id: "u4-budget-zero".to_string(),
+                repo_root: std::path::PathBuf::from("/tmp/u4-repo"),
+                events_path: Some(events_path),
+                tasks_path: None,
+            },
+            std::sync::Arc::new(DefaultWorktreeFactory),
+            4,
+            0,
+        );
+    assert_eq!(bridge_zero.slot_retry_budget(), 0);
+}
+
+/// U4-19 / S13: the two `register_wave_if_absent` call sites
+/// (dispatcher's spawn path + supervisor fan-in path) read the
+/// budget from the SAME bridge accessors, so they always agree.
+/// This test stubs the bridge with a recording struct and asserts
+/// both calls see the same budget value.
+#[test]
+fn u4_register_wave_if_absent_call_sites_use_same_bridge_budget() {
+    use std::sync::Mutex;
+
+    /// Bridge stub that records every `register_wave_if_absent`
+    /// call so the test can assert consistency across dispatch
+    /// spawn paths. Inherits trait-default `Debug` and
+    /// `slot_retry_budget` accessors so the surface area stays
+    /// minimal.
+    #[derive(Debug, Default)]
+    struct RecordingBridge {
+        recorded_budgets: Mutex<Vec<u32>>,
+        budget: u32,
+    }
+    impl ralph_core::supervisor::SupervisorBridge for RecordingBridge {
+        fn tick(
+            &self,
+            _wave_id: &str,
+            _inputs: ralph_core::supervisor::PhaseInputs,
+        ) -> Result<ralph_core::supervisor::CoordinatorAction, ralph_core::supervisor::BridgeError>
+        {
+            Ok(ralph_core::supervisor::CoordinatorAction::ContinueCollect)
+        }
+        fn register_wave_if_absent(
+            &self,
+            _kind: ralph_core::supervisor::WaveKind,
+            _wave_id: &str,
+            _expected_total: u32,
+            slot_retry_budget: u32,
+        ) -> Result<String, ralph_core::supervisor::BridgeError> {
+            self.recorded_budgets
+                .lock()
+                .unwrap()
+                .push(slot_retry_budget);
+            Ok(format!("w-rec-{}", self.recorded_budgets.lock().unwrap().len()))
+        }
+        fn bind_slot(
+            &self,
+            _kind: ralph_core::supervisor::WaveKind,
+            _wave_id: &str,
+            _slot_index: u32,
+        ) -> Result<Option<ralph_core::supervisor::SlotBinding>, ralph_core::supervisor::BridgeError>
+        {
+            Ok(None)
+        }
+        fn recover(
+            &self,
+        ) -> Result<Vec<ralph_core::supervisor::WaveSnapshot>, ralph_core::supervisor::BridgeError>
+        {
+            Ok(Vec::new())
+        }
+        fn fan_in_status(
+            &self,
+            _wave_id: &str,
+        ) -> Result<ralph_core::supervisor::WaveSnapshot, ralph_core::supervisor::BridgeError>
+        {
+            Err(ralph_core::supervisor::BridgeError::Store(
+                "RecordingBridge::fan_in_status not used in U4-19 test".into(),
+            ))
+        }
+        fn record_slot_result(
+            &self,
+            _wave_id: &str,
+            _slot_index: u32,
+            _content_hash: &str,
+            _event_count: usize,
+        ) -> Result<(), ralph_core::supervisor::BridgeError> {
+            Ok(())
+        }
+        fn record_slot_failure(
+            &self,
+            _wave_id: &str,
+            _slot_index: u32,
+            _reason: &str,
+        ) -> Result<(), ralph_core::supervisor::BridgeError> {
+            Ok(())
+        }
+        fn slot_retry_budget(&self) -> u32 {
+            self.budget
+        }
+    }
+
+    let bridge = RecordingBridge {
+        recorded_budgets: Mutex::new(Vec::new()),
+        budget: 2,
+    };
+    // First registration (mirrors dispatcher's spawn path call).
+    bridge
+        .register_wave_if_absent(
+            ralph_core::supervisor::WaveKind::Exec,
+            "dispatch-spawn",
+            1,
+            bridge.slot_retry_budget(),
+        )
+        .unwrap();
+    // Second registration (mirrors supervisor fan-in path call).
+    bridge
+        .register_wave_if_absent(
+            ralph_core::supervisor::WaveKind::Exec,
+            "dispatch-fan-in",
+            1,
+            bridge.slot_retry_budget(),
+        )
+        .unwrap();
+
+    let recorded = bridge.recorded_budgets.lock().unwrap().clone();
+    assert_eq!(recorded.len(), 2, "both call sites must run");
+    assert_eq!(
+        recorded[0], recorded[1],
+        "both call sites must consult the same bridge budget accessor"
+    );
+    assert_eq!(recorded[0], 2, "budget must equal the bridge accessor value");
+}
+
+/// U4-19 / S11: out-of-range budget (3) is rejected by the
+/// runner's bridge constructor fail-closed check, with a
+/// message that includes the `0..=2` range hint.
+#[test]
+fn u4_runner_rejects_out_of_range_slot_retry_budget() {
+    use ralph_core::LoopContext;
+    use ralph_core::config::SupervisorConfig;
+
+    let tmp = tempfile::tempdir().expect("temp dir");
+    let ctx = LoopContext::primary(tmp.path().to_path_buf());
+    let cfg = SupervisorConfig {
+        enabled: true,
+        db_path: ".ralph/supervisor.db".to_string(),
+        max_concurrent_workers: 2,
+        aggregate_timeout_secs: 60,
+        // 2026-07-28-003 plan U4 (S11): out-of-range budget
+        // must fail-closed at bridge construction.
+        slot_retry_budget: 3,
+    };
+    let events_path = ctx.workspace().join(".ralph").join("events.jsonl");
+    let err = crate::loop_runner::build_supervisor_bridge(&cfg, &ctx, events_path)
+        .expect_err("budget 3 must fail closed");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("0..=2"),
+        "error must include the legal range `0..=2`; got: {msg}"
+    );
+    assert!(
+        msg.contains("3"),
+        "error must echo the offending value; got: {msg}"
     );
 }

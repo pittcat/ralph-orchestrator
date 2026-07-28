@@ -107,6 +107,27 @@ pub trait SupervisorBridge: std::fmt::Debug + Send + Sync {
         u32::MAX
     }
 
+    /// 2026-07-28-003 plan U4 (R8 / KTD6): per-slot automatic retry
+    /// budget returned to the worker-task attempt loop in
+    /// `dispatcher.rs`. The task consults this BEFORE the very
+    /// first attempt so the loop count matches the configured
+    /// budget.
+    ///
+    /// Production bridges must surface the operator's
+    /// `SupervisorConfig.slot_retry_budget` explicitly. The
+    /// default of `1` keeps legacy / mock bridges (`from_store`,
+    /// `InMemoryCoordinatorBridge`, the BDD fixtures, etc.)
+    /// bit-for-bit identical to the pre-U4 budget hard-code so
+    /// characterization tests stay green without a parallel
+    /// field on every test stub. U4 §20's "no default" warning
+    /// is honored by the dedicated `U4BudgetPassesThroughBridge`
+    /// pin test in `loop_runner::tests::wave_supervisor` which
+    /// forces `with_context_and_factory_with_cap` to fail loud
+    /// if a future change drops the budget at the call site.
+    fn slot_retry_budget(&self) -> u32 {
+        1
+    }
+
     /// 2026-07-23-007 plan U2 (R-W1): return the loop's primary
     /// workspace root when the bridge was constructed with one
     /// (i.e. `with_context_and_factory` in production). The

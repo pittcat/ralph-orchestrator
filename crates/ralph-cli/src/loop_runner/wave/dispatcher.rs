@@ -603,6 +603,11 @@ pub async fn handle_wave_events(
                 },
                 Arc::new(DefaultWorktreeFactory),
                 cap,
+                // 2026-07-28-003 plan U4 (KTD6): default wave path
+                // is a feature-flag / BDD seam, not operator-facing;
+                // pin at the historical default (1) so legacy tests
+                // stay bit-for-bit identical.
+                1,
             );
             Some(Arc::new(bridge) as Arc<dyn ralph_core::supervisor::SupervisorBridge>)
         } else {
@@ -1683,11 +1688,17 @@ pub(crate) async fn execute_wave_via_supervisor_with_executor(
     // fail closed so callers see the root cause (DB open failure,
     // constraint conflict, etc.) instead of a silently different
     // dispatch shape.
+    //
+    // 2026-07-28-003 plan U4 (R8 / R14 / S13): read the budget
+    // from the bridge (which surfaces `SupervisorConfig::slot_retry_budget`)
+    // so this call and the mirror call in `run_supervisor_fan_in`
+    // (fan-in path) always agree on the exact same value
+    // (memory.rs:388-400 reports an inconsistency as a store error).
     let store_wave_id = match bridge.register_wave_if_absent(
         wave_kind,
         &wave.wave_id,
         wave.total,
-        1,
+        bridge.slot_retry_budget(),
     ) {
         Ok(id) => id,
         Err(err) => {
@@ -2378,11 +2389,16 @@ pub(crate) fn run_supervisor_fan_in(
     // under `completed.wave_id`; `register_wave_if_absent` returns
     // the existing store id on re-entry so the coordinator reads the
     // same row the slot results were recorded against.
+    //
+    // 2026-07-28-003 plan U4 (R14 / S13): mirror of the spawn
+    // path's registration call; reads the budget from the bridge
+    // so the two `register_wave_if_absent` calls always agree
+    // on the same value.
     let store_wave_id = match bridge.register_wave_if_absent(
         wave_kind,
         &completed.wave_id,
         completed.wave_total,
-        1,
+        bridge.slot_retry_budget(),
     ) {
         Ok(id) => id,
         Err(err) => {
@@ -10018,6 +10034,10 @@ hats: {}
             context,
             Arc::new(DefaultWorktreeFactory),
             u32::MAX,
+            // 2026-07-28-003 plan U4: surface `slot_retry_budget`
+            // arg so this characterization test does not regress
+            // budget pass-through.
+            1,
         );
         let reported = bridge
             .repo_root()
