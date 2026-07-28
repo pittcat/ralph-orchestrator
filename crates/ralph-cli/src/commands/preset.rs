@@ -243,7 +243,9 @@ fn materialize_artifacts(
     dest: Option<&std::path::Path>,
     use_colors: bool,
 ) -> Result<()> {
-    use crate::builtin_artifact_templates::{default_forge_templates_dir, materialize};
+    use crate::builtin_artifact_templates::{
+        default_forge_templates_dir, default_red_team_templates_dir, materialize,
+    };
 
     if plan_key.is_empty() {
         anyhow::bail!("--plan-key must not be empty");
@@ -254,9 +256,14 @@ fn materialize_artifacts(
         );
     }
 
-    let dest_dir = dest
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|| default_forge_templates_dir(plan_key));
+    let dest_dir = dest.map(std::path::PathBuf::from).unwrap_or_else(|| {
+        match preset {
+            "red-team-attack" | "builtin:red-team-attack" => {
+                default_red_team_templates_dir(plan_key)
+            }
+            _ => default_forge_templates_dir(plan_key),
+        }
+    });
 
     let written = materialize(preset, &dest_dir)?;
     if use_colors {
@@ -2746,6 +2753,45 @@ mod materialize_artifacts_tests {
         assert!(dest.join("unit.template.yml").is_file());
         let body = fs::read_to_string(dest.join("development-plan.template.md")).unwrap();
         assert!(body.contains("## 3. BDD 行为规格"));
+    }
+
+    #[test]
+    fn red_team_attack_picks_red_team_default_dest() {
+        // Without an explicit `--dest`, the red-team-attack preset must
+        // land under `.ralph/red-team/<plan_key>/templates/`, NOT under
+        // `.ralph/forge/...` — the two presets now share a materialize
+        // binary but their artifact trees are disjoint.
+        let tmp = tempfile::tempdir().unwrap();
+        // We override the cwd to the temp dir so the relative defaults
+        // can resolve without polluting the repo's `.ralph/`.
+        let cwd_backup = std::env::current_dir().ok();
+        std::env::set_current_dir(tmp.path()).unwrap();
+
+        let result = materialize_artifacts("red-team-attack", "rt-key", None, false);
+
+        if let Some(prev) = cwd_backup {
+            let _ = std::env::set_current_dir(prev);
+        }
+        result.expect("red-team materialize under red-team dir");
+
+        let expected = tmp
+            .path()
+            .join(".ralph")
+            .join("red-team")
+            .join("rt-key")
+            .join("templates");
+        assert!(
+            expected.join("experiment.template.yml").is_file(),
+            "expected red-team templates under {}",
+            expected.display()
+        );
+        // The parallel-forge templates must NOT have leaked into the
+        // red-team default directory.
+        let forge_default = tmp.path().join(".ralph").join("forge");
+        assert!(
+            !forge_default.exists(),
+            "red-team preset must not write into the parallel-forge default tree"
+        );
     }
 
     #[test]
