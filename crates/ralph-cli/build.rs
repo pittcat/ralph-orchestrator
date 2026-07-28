@@ -275,13 +275,9 @@ fn copy_preset_templates(
     }
 
     let mut copied = 0usize;
-    for entry in fs::read_dir(&src_dir).unwrap_or_else(|e| {
-        panic!(
-            "build.rs: failed to read {}: {}",
-            src_dir.display(),
-            e
-        )
-    }) {
+    for entry in fs::read_dir(&src_dir)
+        .unwrap_or_else(|e| panic!("build.rs: failed to read {}: {}", src_dir.display(), e))
+    {
         let entry = entry.unwrap_or_else(|e| panic!("build.rs: read_dir entry: {}", e));
         if !entry.file_type().unwrap().is_file() {
             continue;

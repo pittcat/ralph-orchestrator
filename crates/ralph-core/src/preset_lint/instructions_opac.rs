@@ -86,8 +86,18 @@ pub fn check_instructions_opac_with_preset(raw_yaml: &str, preset_name: &str) ->
     let projection_owned = parsed
         .get("event_loop")
         .and_then(|value| value.get("state_projection"))
-        .and_then(|value| value.get("actions"))
-        .is_some_and(|actions| actions.as_mapping().is_some_and(|map| !map.is_empty()));
+        .is_some_and(|projection| {
+            projection
+                .get("actions")
+                .is_some_and(|actions| actions.as_mapping().is_some_and(|map| !map.is_empty()))
+                || projection
+                    .get("actions_chain")
+                    .is_some_and(|actions_chain| {
+                        actions_chain
+                            .as_mapping()
+                            .is_some_and(|map| !map.is_empty())
+                    })
+        });
     let coordinator_hats = parsed
         .get("tasks")
         .and_then(|value| value.get("coordinator_hats"))
@@ -235,52 +245,43 @@ fn check_task_mutation_authority(
     is_coordinator: bool,
     findings: &mut Vec<LintFinding>,
 ) {
-    let lower = instructions.to_ascii_lowercase();
-    let command = [
-        "ralph tools task add",
-        "ralph task add",
-        "ralph tools task ensure",
-        "ralph task ensure",
-    ]
-    .iter()
-    .find(|needle| lower.contains(**needle));
-    let Some(command) = command else {
-        return;
-    };
-    // Read-only task subcommands and the fix-unit mint template never
-    // mutate the ledger through this code path — exempt them by command
-    // shape (not by negation heuristic). A hat that pairs the mutation
-    // command with a separate "do not"-style disclaimer still fires the
-    // lint; the agent runtime's authority model does not care what the
-    // instructions author intended to say.
-    let read_only_call = ["ralph tools task list", "ralph tools task show", "ralph tools task verify"]
+    for line in instructions.lines() {
+        let lower = line.to_ascii_lowercase();
+        let command = [
+            "ralph tools task add",
+            "ralph task add",
+            "ralph tools task ensure",
+            "ralph task ensure",
+        ]
         .iter()
-        .any(|needle| lower.contains(needle));
-    if read_only_call {
+        .find(|needle| lower.contains(**needle));
+        let Some(command) = command else {
+            continue;
+        };
+        let legal_fix_unit_template =
+            lower.contains("--for-fix-unit") && lower.contains("ralph tools task ensure");
+        if legal_fix_unit_template {
+            continue;
+        }
+        let reason = if projection_owned {
+            "projector_single_writer_conflict"
+        } else if !is_coordinator {
+            "non_coordinator_task_mutation"
+        } else {
+            continue;
+        };
+        findings.push(
+            LintFinding::new(
+                FINDING_INSTRUCTIONS_TASK_MUTATION_AUTHORITY_CONFLICT,
+                format!(
+                    "hat `{hat_id}` requires `{command}` ({reason}); task creation must use the configured projector or an authorized coordinator"
+                ),
+            )
+            .with_hat(hat_id)
+            .with_action_hint("Remove agent-side task mutation and emit the declarative task handoff; read live task IDs through the task API."),
+        );
         return;
     }
-    let legal_fix_unit_template =
-        lower.contains("--for-fix-unit") && lower.contains("ralph tools task ensure");
-    if legal_fix_unit_template {
-        return;
-    }
-    let reason = if projection_owned {
-        "projector_single_writer_conflict"
-    } else if !is_coordinator {
-        "non_coordinator_task_mutation"
-    } else {
-        return;
-    };
-    findings.push(
-        LintFinding::new(
-            FINDING_INSTRUCTIONS_TASK_MUTATION_AUTHORITY_CONFLICT,
-            format!(
-                "hat `{hat_id}` requires `{command}` ({reason}); task creation must use the configured projector or an authorized coordinator"
-            ),
-        )
-        .with_hat(hat_id)
-        .with_action_hint("Remove agent-side task mutation and emit the declarative task handoff; read live task IDs through the task API."),
-    );
 }
 
 fn check_internal_ledger_read(hat_id: &str, instructions: &str, findings: &mut Vec<LintFinding>) {
@@ -728,7 +729,11 @@ hats:
             let yaml = format!(
                 "{projection}tasks:\n  coordinator_hats: [{coord}]\nhats:\n  worker:\n    instructions: |\n      {cmd}\n",
                 projection = projection_block,
-                coord = if case.is_coordinator { "worker" } else { "other" },
+                coord = if case.is_coordinator {
+                    "worker"
+                } else {
+                    "other"
+                },
                 cmd = case.command,
             );
             let findings = check_instructions_opac_with_preset(&yaml, "");
@@ -743,7 +748,9 @@ hats:
                     assert!(
                         matched.is_some(),
                         "{} must fire with reason `{reason}` (projection_owned={}, is_coordinator={}); got: {findings:?}",
-                        case.name, case.projection_owned, case.is_coordinator
+                        case.name,
+                        case.projection_owned,
+                        case.is_coordinator
                     );
                 }
                 None => {
@@ -757,6 +764,33 @@ hats:
                 }
             }
         }
+    }
+
+    #[test]
+    fn task_mutation_authority_matrix_actions_chain_counts_as_projection_owned() {
+        let yaml = r#"
+event_loop:
+  state_projection:
+    actions_chain:
+      custom.ready:
+        - kind: ensure_task
+          key: task_key
+tasks:
+  coordinator_hats: [worker]
+hats:
+  worker:
+    instructions: |
+      Call `ralph tools task ensure --key k`.
+"#;
+        let findings = check_instructions_opac_with_preset(yaml, "");
+        assert!(
+            findings.iter().any(|finding| {
+                finding.id == FINDING_INSTRUCTIONS_TASK_MUTATION_AUTHORITY_CONFLICT
+                    && finding.hat.as_deref() == Some("worker")
+                    && finding.message.contains("projector_single_writer_conflict")
+            }),
+            "actions_chain must count as projector ownership: {findings:?}"
+        );
     }
 
     /// When `tasks.enabled: false` the preset has explicitly opted out
@@ -781,8 +815,7 @@ hats:
         assert!(
             !findings
                 .iter()
-                .any(|finding| finding.id
-                    == FINDING_INSTRUCTIONS_TASK_MUTATION_AUTHORITY_CONFLICT),
+                .any(|finding| finding.id == FINDING_INSTRUCTIONS_TASK_MUTATION_AUTHORITY_CONFLICT),
             "tasks.enabled:false opts the preset out of the authority lint; got: {findings:?}"
         );
     }
@@ -839,9 +872,10 @@ hats:
 "#;
         let findings = check_instructions_opac_with_preset(yaml, "");
         assert!(
-            findings.iter().any(|f| f.id
-                == FINDING_INSTRUCTIONS_TASK_MUTATION_AUTHORITY_CONFLICT
-                && f.hat.as_deref() == Some("worker")),
+            findings.iter().any(
+                |f| f.id == FINDING_INSTRUCTIONS_TASK_MUTATION_AUTHORITY_CONFLICT
+                    && f.hat.as_deref() == Some("worker")
+            ),
             "disclaimer must not exempt real mutation mention elsewhere: {findings:?}"
         );
     }

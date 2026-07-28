@@ -61,8 +61,7 @@ hats:
     triggers: ["generic.handoff"]
     publishes: ["generic.handoff", "generic.extra", "LOOP_COMPLETE"]
 "#;
-    let mut config =
-        RalphConfig::parse_yaml(yaml).expect("parse minimal isolated preset");
+    let mut config = RalphConfig::parse_yaml(yaml).expect("parse minimal isolated preset");
     // Mirror the complex-regression fixture: do NOT carry
     // `workspace_root` in the YAML body (an empty string
     // deserializes into a zero-length PathBuf that fails the
@@ -225,7 +224,12 @@ fn generic_isolated_terminal_and_default_publish_unchanged() {
     let reporter_id = HatId::new("reporter");
 
     event_loop.state.current_isolated_hat = Some(reporter_id.clone());
-    append_event(&events_path, "generic.extra", Some("reporter"), "first-extra");
+    append_event(
+        &events_path,
+        "generic.extra",
+        Some("reporter"),
+        "first-extra",
+    );
     append_event(&events_path, "LOOP_COMPLETE", Some("reporter"), "terminal");
     let _ = event_loop
         .process_events_from_jsonl()

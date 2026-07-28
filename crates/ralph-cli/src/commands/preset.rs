@@ -256,14 +256,14 @@ fn materialize_artifacts(
         );
     }
 
-    let dest_dir = dest.map(std::path::PathBuf::from).unwrap_or_else(|| {
-        match preset {
+    let dest_dir = dest
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| match preset {
             "red-team-attack" | "builtin:red-team-attack" => {
                 default_red_team_templates_dir(plan_key)
             }
             _ => default_forge_templates_dir(plan_key),
-        }
-    });
+        });
 
     let written = materialize(preset, &dest_dir)?;
     if use_colors {

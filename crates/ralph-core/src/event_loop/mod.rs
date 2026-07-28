@@ -684,10 +684,7 @@ impl SkillInjector {
 /// topics added to the recovery carrier surface should be added
 /// here rather than inlining the predicate.
 pub(crate) fn is_commit_first_business_topic(topic: &str) -> bool {
-    if topic == "task.resume"
-        || topic == "LOOP_COMPLETE"
-        || topic == "plan.blocked"
-    {
+    if topic == "task.resume" || topic == "LOOP_COMPLETE" || topic == "plan.blocked" {
         return false;
     }
     if topic.starts_with("event.isolation.") {

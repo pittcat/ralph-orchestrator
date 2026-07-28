@@ -1524,6 +1524,7 @@ fn run_scenario_with_snapshots(
             &yaml.expected.payload_task_refs,
             &yaml.expected.supervisor_waves,
             &yaml.expected.ready_task_keys,
+            supervisor_bridge.as_ref(),
             temp_dir.path(),
             &accepted_payloads,
         );
@@ -1547,6 +1548,7 @@ fn assert_task_ledger_and_waves(
     payload_refs: &[PayloadTaskRefYaml],
     waves: &[SupervisorWaveYaml],
     ready_keys: &[String],
+    bridge: Option<&InMemoryCoordinatorBridge>,
     workspace: &std::path::Path,
     accepted_payloads: &std::collections::HashMap<String, Vec<serde_json::Value>>,
 ) {
@@ -1555,7 +1557,10 @@ fn assert_task_ledger_and_waves(
     let tasks_path = workspace.join(".ralph/agent/tasks.jsonl");
     if !ledger.is_empty() || !ready_keys.is_empty() || !payload_refs.is_empty() {
         let store = TaskStore::load(&tasks_path).unwrap_or_else(|err| {
-            panic!("{name}: failed to reload task ledger at {}: {err}", tasks_path.display())
+            panic!(
+                "{name}: failed to reload task ledger at {}: {err}",
+                tasks_path.display()
+            )
         });
         let all = store.all();
         let mut key_to_id: std::collections::HashMap<String, String> =
@@ -1610,8 +1615,7 @@ fn assert_task_ledger_and_waves(
                 })
                 .filter_map(|t| t.key.clone())
                 .collect();
-            let expected: std::collections::BTreeSet<String> =
-                ready_keys.iter().cloned().collect();
+            let expected: std::collections::BTreeSet<String> = ready_keys.iter().cloned().collect();
             assert_eq!(
                 actual, expected,
                 "{name}: ready_task_keys mismatch (actual vs expected)"
@@ -1658,11 +1662,23 @@ fn assert_task_ledger_and_waves(
         }
     }
     if !waves.is_empty() {
-        use ralph_core::supervisor::{
-            InMemoryCoordinatorBridge, InMemorySupervisorStore, SupervisorStore, WaveKind,
+        let Some(bridge) = bridge else {
+            panic!(
+                "{name}: supervisor_waves were declared but the scenario did not opt into the live supervisor bridge"
+            );
         };
-        let store = std::sync::Arc::new(InMemorySupervisorStore::new());
-        let bridge = InMemoryCoordinatorBridge::from_store(store.clone());
+        let store = bridge.store();
+        let actual_wave_ids = store
+            .list_wave_ids()
+            .unwrap_or_else(|err| panic!("{name}: failed to list live supervisor waves: {err}"));
+        let expected_wave_ids: std::collections::BTreeSet<String> =
+            waves.iter().map(|wave| wave.wave_id.clone()).collect();
+        let actual_wave_ids_set: std::collections::BTreeSet<String> =
+            actual_wave_ids.iter().cloned().collect();
+        assert_eq!(
+            actual_wave_ids_set, expected_wave_ids,
+            "{name}: live supervisor wave ids mismatch"
+        );
         for wave in waves {
             let kind = match wave.kind.as_str() {
                 "exec" | "execution" => WaveKind::Exec,
@@ -1673,22 +1689,13 @@ fn assert_task_ledger_and_waves(
                     wave.wave_id, other
                 ),
             };
-            bridge
-                .register_wave_if_absent(kind, &wave.wave_id, wave.expected_total, 1)
-                .expect("register_wave_if_absent");
-        }
-        // The supervisor BDD bridge that the running scenario actually
-        // uses is local to `run_scenario_with_snapshots`; the supervisor
-        // harness here only checks the wave registration round-trip
-        // against the same `InMemorySupervisorStore` API the production
-        // coordinator uses. The wave ids we list here must match the ids
-        // the scenario emits so the production `register_wave_if_absent`
-        // sees no new wave created in the BDD-only store. Comparing
-        // wave-id sets catches accidental drift between the YAML and the
-        // supervisor store.
-        for wave in waves {
             match store.fan_in_status(&wave.wave_id) {
                 Ok(snap) => {
+                    assert_eq!(
+                        snap.kind, kind,
+                        "{name}: supervisor_waves `{}` kind mismatch",
+                        wave.wave_id
+                    );
                     assert_eq!(
                         snap.expected_total, wave.expected_total,
                         "{name}: supervisor_waves `{}` expected_total mismatch",
@@ -1702,6 +1709,12 @@ fn assert_task_ledger_and_waves(
                     assert_eq!(
                         snap.failed_count, wave.failed_count,
                         "{name}: supervisor_waves `{}` failed_count mismatch",
+                        wave.wave_id
+                    );
+                    assert_eq!(
+                        snap.phase.to_string(),
+                        wave.phase,
+                        "{name}: supervisor_waves `{}` phase mismatch",
                         wave.wave_id
                     );
                 }

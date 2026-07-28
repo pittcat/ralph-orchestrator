@@ -407,9 +407,9 @@ hats:
     event_loop
         .bus
         .publish(Event::new("exec.unit.ready", "committed-handoff"));
-    event_loop.bus.publish(
-        Event::new("task.resume", "stranded").with_target("executor"),
-    );
+    event_loop
+        .bus
+        .publish(Event::new("task.resume", "stranded").with_target("executor"));
 
     // Walk the bus manually so we only assert routing state — the
     // U3 fixture does NOT drive a full isolated-mode turn; it
@@ -423,9 +423,7 @@ hats:
     let committed = pending
         .iter()
         .find(|e| e.topic.as_str() == "exec.unit.ready");
-    let stranded = pending
-        .iter()
-        .find(|e| e.topic.as_str() == "task.resume");
+    let stranded = pending.iter().find(|e| e.topic.as_str() == "task.resume");
     assert!(committed.is_some(), "the committed handoff is parked");
     assert!(stranded.is_some(), "the stranded resume is parked");
     // The committed handoff and the stranded resume sit in the

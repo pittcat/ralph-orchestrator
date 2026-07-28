@@ -34,7 +34,6 @@ pub(crate) const PLAN_UNIT_OWNER_HAT: &str = "executor";
 // snapshot directly. Touching the field here is therefore
 // intentional and unavoidable.
 #[allow(deprecated)]
-
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 

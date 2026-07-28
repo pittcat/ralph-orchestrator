@@ -235,7 +235,9 @@ fn inspect_prompt_candidate_emit_marks_runtime_evidence() {
             r#"{"task_key":"task-123"}"#,
         ]);
 
-    let output = cmd.output().expect("spawn ralph inspect prompt candidate emit");
+    let output = cmd
+        .output()
+        .expect("spawn ralph inspect prompt candidate emit");
     assert!(
         output.status.success(),
         "candidate emit preview must exit 0; stderr: {}",

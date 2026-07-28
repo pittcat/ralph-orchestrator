@@ -113,10 +113,7 @@ const PRESETS: &[EmbeddedPreset] = &[
     EmbeddedPreset {
         name: "red-team-attack",
         description: "Experiment-driven Red Team analysis: reverse-locate plan commits from Git history, reconstruct patches, execute real attack experiments with control groups, apply hard-threshold evidence gating, and produce a zero-regression repair plan awaiting human confirmation",
-        content: include_str!(concat!(
-            env!("OUT_DIR"),
-            "/presets/red-team-attack.yml"
-        )),
+        content: include_str!(concat!(env!("OUT_DIR"), "/presets/red-team-attack.yml")),
         public: true,
     },
 ];
@@ -1155,7 +1152,10 @@ mod tests {
             "finalize must branch on dispatch.blocked (dispatcher re-verify fail-close); got {:?}",
             finalize.on_any_of
         );
-        let dispatcher = config.hats.get("review-dispatcher").expect("review-dispatcher");
+        let dispatcher = config
+            .hats
+            .get("review-dispatcher")
+            .expect("review-dispatcher");
         assert!(
             dispatcher.publishes.iter().any(|t| t == "dispatch.blocked"),
             "review-dispatcher must publish dispatch.blocked for re-verify fail-close"
@@ -2548,10 +2548,8 @@ mod tests {
         .iter()
         .map(|s| s.to_string())
         .collect();
-        let expected_new_keys: BTreeSet<String> = ["forge.plan.ready"]
-            .iter()
-            .map(|s| s.to_string())
-            .collect();
+        let expected_new_keys: BTreeSet<String> =
+            ["forge.plan.ready"].iter().map(|s| s.to_string()).collect();
 
         let mut full_legacy: BTreeSet<String> = legacy_keys.clone();
         let mut full_new: BTreeSet<String> = BTreeSet::new();

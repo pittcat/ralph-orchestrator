@@ -496,7 +496,6 @@ fn unconfigured_topic_is_inert_per_action_key_authority() {
     );
 }
 
-
 #[test]
 fn json_pointer_reads_nested_keys() {
     let v = json!({"a": {"b": "hi"}});

@@ -80,11 +80,7 @@ impl TestScenario for ParallelForgeDispatchContractScenario {
         "Tier 3: Parallel Forge"
     }
 
-    fn setup(
-        &self,
-        workspace: &Path,
-        backend: Backend,
-    ) -> Result<ScenarioConfig, ScenarioError> {
+    fn setup(&self, workspace: &Path, backend: Backend) -> Result<ScenarioConfig, ScenarioError> {
         // Pre-create the directory the future mock-cli will own.
         // The shell itself does not advance the cursor; it only
         // makes the path discoverable so the follow-up cassette +
@@ -175,9 +171,11 @@ mod tests {
         let scenario = ParallelForgeDispatchContractScenario::new();
         scenario.setup(temp.path(), Backend::Claude).expect("setup");
         scenario.cleanup(temp.path()).expect("cleanup");
-        assert!(!workspace_cursor(temp.path(), Backend::Claude)
-            .parent()
-            .unwrap()
-            .exists());
+        assert!(
+            !workspace_cursor(temp.path(), Backend::Claude)
+                .parent()
+                .unwrap()
+                .exists()
+        );
     }
 }
