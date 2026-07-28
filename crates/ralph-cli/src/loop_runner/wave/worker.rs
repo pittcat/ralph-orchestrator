@@ -8,6 +8,19 @@ use ralph_proto::RpcEvent;
 use tracing::{info, warn};
 
 use super::dispatcher::WORKER_TIMEOUT_ERR_PREFIX;
+
+/// Three-way kill attribution discriminator. The post-kill
+/// reason builder reads this directly instead of inferring
+/// `startup_kill` from `startup_grace.is_some() &&
+/// final_weak_count == 0` (which used to mis-attribute HardKill
+/// and the first-Signal-then-idle IdleKill).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum KillReason {
+    Hard,
+    Idle,
+    Startup,
+}
+
 use super::io::{
     extract_readable_delta, push_to_wave_worker_buffer, read_worker_events,
     read_worker_events_with_retry, truncate_wave_worker_preview,
@@ -43,6 +56,10 @@ pub async fn run_wave_worker(
     // sourced from `SlotBinding.worktree_path`. `None` keeps
     // the legacy `std::env::current_dir()` behaviour.
     worker_cwd: Option<&Path>,
+    // 2026-07-28-003 plan U3 (R1): optional startup grace window.
+    // Mirrors the `run_wave_worker_pty` semantics — see the
+    // matching parameter docs on that function.
+    startup_grace: Option<Duration>,
 ) -> (u32, WaveWorkerOutcome) {
     match wave_worker_execution_mode(worker_backend.output_format) {
         WaveWorkerExecutionMode::Pty => {
@@ -58,6 +75,7 @@ pub async fn run_wave_worker(
                 worker_rpc_tx,
                 worker_tui_state,
                 worker_cwd,
+                startup_grace,
             )
             .await
         }
@@ -84,6 +102,14 @@ pub async fn run_wave_worker_pty(
     worker_rpc_tx: Option<tokio::sync::mpsc::Sender<RpcEvent>>,
     worker_tui_state: Option<Arc<std::sync::Mutex<ralph_tui::TuiState>>>,
     worker_cwd: Option<&Path>,
+    // 2026-07-28-003 plan U2/U3: per-worker startup grace window.
+    // When `Some(n)` and the idle dual-clock lease is enabled
+    // (`idle_heartbeat` is also `Some` and non-zero), the lease
+    // uses `startup_grace_ms` instead of `idle_window_ms` while the
+    // worker has not yet observed its first qualifying signal.
+    // Cross-references: heartbeat::LeaseConfig::startup_grace_ms,
+    // `Decide_lease` R2 / S1 / S2 arms.
+    startup_grace: Option<Duration>,
 ) -> (u32, WaveWorkerOutcome) {
     let start = std::time::Instant::now();
 
@@ -248,6 +274,17 @@ pub async fn run_wave_worker_pty(
             hard_cap_ms: wave_timeout.as_millis() as u64,
             idle_window_ms: Some(idle_heartbeat.unwrap().as_millis() as u64),
             weak_cap: idle_weak_signal_cap,
+            // 2026-07-28-003 plan U2: plug the optional startup
+            // grace window into the lease. Idle-enabled is a
+            // precondition for grace to take effect (KTD1: when
+            // idle mode is off, the field is ignored). `None`
+            // here = no grace (current behaviour); `Some(0)` is
+            // also `None` because `DetectedWave` already collapses
+            // `Some(0)` upstream. U3 will source the value from
+            // `WorkerRequest.startup_grace` (hat config).
+            startup_grace_ms: startup_grace
+                .filter(|d| d.as_secs() > 0)
+                .map(|d| d.as_millis() as u64),
         })
     } else {
         None
@@ -274,12 +311,26 @@ pub async fn run_wave_worker_pty(
     // `idle heartbeat exceeded` vs `worker_timeout` correctly even
     // when the legacy single-clock path is taken. In the legacy path
     // the counter is always 0 (no heartbeat loop), so the discriminator
-    // reduces to `idle_enabled`.
+    // reduces to `kill_reason`.
     let mut final_weak_count: u32 = 0;
 
     // U6/U7/U8: choose the execution path.
     // Legacy path (idle disabled): single-layer tokio::time::timeout.
     // Dual-clock path (idle enabled): tokio::select! deadline-driven loop.
+    let mut kill_reason: Option<KillReason> = None;
+    // C4 helper: collapse the 9-place duplication of
+    //   `let _ = child.kill(); kill_reason = ...; killed = true; timed_out = true;`
+    // into a single closure bound at the top of the dual-clock
+    // block. The closure captures `&mut kill_reason`, `&mut killed`,
+    // `&mut timed_out`, `child` (reborrowed), and `index` so the
+    // three select! arms can call it without copy-pasting the
+    // same 4-line kill sequence per kill kind.
+    let mut apply_kill = |reason: KillReason, killed: &mut bool, timed_out: &mut bool| {
+        let _ = child.kill();
+        kill_reason = Some(reason);
+        *killed = true;
+        *timed_out = true;
+    };
     let timed_out = if let Some(cfg) = lease_cfg {
         // ── Dual-clock path (U6/U7/U8) ────────────────────────────────
         let mut lease_state = super::heartbeat::LeaseState::fresh(0);
@@ -307,18 +358,33 @@ pub async fn run_wave_worker_pty(
         // `tokio::select!` reject `&mut hard_sleep` (PhantomPinned).
         // Extract the relevant scalars up front so the helper is a plain
         // `fn` (`Unpin`) that takes borrowed snapshots.
+        //
+        // 2026-07-28-003 U2 (R2 / S1 / S2): while the worker has not
+        // yet observed its first qualifying signal AND startup grace
+        // is configured, `hard_remaining` is paired against
+        // `startup_grace_remaining` so the timer tick can fire before
+        // either idle or hard cap. After `seen_first_signal` flips
+        // the grace window collapses to zero and the helper naturally
+        // falls back to idle-window arithmetic.
         let idle_window_ms = idle_heartbeat.unwrap().as_millis() as u64;
+        let startup_grace_ms: Option<u64> = lease_cfg.as_ref().and_then(|c| c.startup_grace_ms);
         let compute_next_deadline = |lease_state: &super::heartbeat::LeaseState| -> Duration {
             let now = start.elapsed();
             let hard_remaining = hard_deadline.saturating_duration_since(start);
             let now_ms = now.as_millis() as u64;
+            let grace_remaining = match (startup_grace_ms, lease_state.seen_first_signal) {
+                (Some(grace_ms), false) => {
+                    Duration::from_millis(grace_ms).saturating_sub(Duration::from_millis(now_ms))
+                }
+                _ => Duration::MAX,
+            };
             let idle_remaining = if lease_state.last_hb_ms >= now_ms {
                 Duration::ZERO
             } else {
                 let elapsed_since_hb = Duration::from_millis(now_ms - lease_state.last_hb_ms);
                 Duration::from_millis(idle_window_ms).saturating_sub(elapsed_since_hb)
             };
-            hard_remaining.min(idle_remaining)
+            hard_remaining.min(grace_remaining).min(idle_remaining)
         };
 
         loop {
@@ -340,17 +406,19 @@ pub async fn run_wave_worker_pty(
                     match decision {
                         super::heartbeat::LeaseDecision::HardKill => {
                             warn!(worker = index, "Wave worker hard deadline exceeded");
-                            let _ = child.kill();
-                            killed = true;
-                            timed_out = true;
+                            apply_kill(KillReason::Hard, &mut killed, &mut timed_out);
                         }
                         super::heartbeat::LeaseDecision::IdleKill => {
                             warn!(worker = index, idle_window_secs = idle_heartbeat.unwrap().as_secs(),
                                   weak_count = lease_state.weak_count,
                                   "Wave worker idle heartbeat exceeded, killing process");
-                            let _ = child.kill();
-                            killed = true;
-                            timed_out = true;
+                            apply_kill(KillReason::Idle, &mut killed, &mut timed_out);
+                        }
+                        super::heartbeat::LeaseDecision::StartupKill => {
+                            warn!(worker = index,
+                                  startup_grace_secs = startup_grace.map(|d| d.as_secs()).unwrap_or(0),
+                                  "Wave worker startup grace exceeded, killing process");
+                            apply_kill(KillReason::Startup, &mut killed, &mut timed_out);
                         }
                         super::heartbeat::LeaseDecision::Continue => {
                             // The hard sleep fired but neither kill condition was met.
@@ -385,17 +453,19 @@ pub async fn run_wave_worker_pty(
                             match decision {
                                 super::heartbeat::LeaseDecision::HardKill => {
                                     warn!(worker = index, "Wave worker hard deadline exceeded");
-                                    let _ = child.kill();
-                                    killed = true;
-                                    timed_out = true;
+                                    apply_kill(KillReason::Hard, &mut killed, &mut timed_out);
                                 }
                                 super::heartbeat::LeaseDecision::IdleKill => {
                                     warn!(worker = index, idle_window_secs = idle_heartbeat.unwrap().as_secs(),
                                           weak_count = lease_state.weak_count,
                                           "Wave worker idle heartbeat exceeded, killing process");
-                                    let _ = child.kill();
-                                    killed = true;
-                                    timed_out = true;
+                                    apply_kill(KillReason::Idle, &mut killed, &mut timed_out);
+                                }
+                                super::heartbeat::LeaseDecision::StartupKill => {
+                                    warn!(worker = index,
+                                          startup_grace_secs = startup_grace.map(|d| d.as_secs()).unwrap_or(0),
+                                          "Wave worker startup grace exceeded, killing process");
+                                    apply_kill(KillReason::Startup, &mut killed, &mut timed_out);
                                 }
                                 super::heartbeat::LeaseDecision::Continue => {
                                     // Lease refreshed; loop continues.
@@ -445,17 +515,19 @@ pub async fn run_wave_worker_pty(
                         match decision {
                             super::heartbeat::LeaseDecision::HardKill => {
                                 warn!(worker = index, "Wave worker hard deadline exceeded");
-                                let _ = child.kill();
-                                killed = true;
-                                timed_out = true;
+                                apply_kill(KillReason::Hard, &mut killed, &mut timed_out);
                             }
                             super::heartbeat::LeaseDecision::IdleKill => {
                                 warn!(worker = index, idle_window_secs = idle_heartbeat.unwrap().as_secs(),
                                       weak_count = lease_state.weak_count,
                                       "Wave worker idle heartbeat exceeded, killing process");
-                                let _ = child.kill();
-                                killed = true;
-                                timed_out = true;
+                                apply_kill(KillReason::Idle, &mut killed, &mut timed_out);
+                            }
+                            super::heartbeat::LeaseDecision::StartupKill => {
+                                warn!(worker = index,
+                                      startup_grace_secs = startup_grace.map(|d| d.as_secs()).unwrap_or(0),
+                                      "Wave worker startup grace exceeded, killing process");
+                                apply_kill(KillReason::Startup, &mut killed, &mut timed_out);
                             }
                             super::heartbeat::LeaseDecision::Continue => {}
                         }
@@ -517,6 +589,7 @@ pub async fn run_wave_worker_pty(
                     "Wave worker timeout, killing process"
                 );
                 let _ = child.kill();
+                kill_reason = Some(KillReason::Hard);
                 true
             }
         }
@@ -543,24 +616,39 @@ pub async fn run_wave_worker_pty(
     // Hard kill uses WORKER_TIMEOUT_ERR_PREFIX so the dispatcher
     // `reason.starts_with(WORKER_TIMEOUT_ERR_PREFIX)` still matches.
     // Idle kill uses a different prefix so U9 can extend归因.
+    //
+    // 2026-07-28-003 U2 (KTD3): startup-kill uses the same
+    // WORKER_TIMEOUT_ERR_PREFIX as idle-kill so the dispatcher
+    // classifier (which only checks the prefix) routes it into
+    // the `worker_timeout` family for free. The body carries the
+    // distinct `startup_kill` tag so operators can tell apart
+    // cold-start misses from runtime idle hangs (S2 / R6).
     if timed_out && events.is_empty() {
-        let reason = if idle_enabled && final_weak_count > 0 {
-            // Idle kill path (not a hard timeout).
-            format!(
+        // Read the actual kill reason recorded by the dual-clock
+        // / legacy path. We MUST NOT infer `startup_kill` from
+        // post-hoc state — the dual-clock arm could have fired
+        // HardKill or a post-first-signal IdleKill with the same
+        // `startup_grace.is_some() && final_weak_count == 0`
+        // surface. The dual-clock path already sets `kill_reason`
+        // to the right variant.
+        let reason = match kill_reason {
+            Some(KillReason::Startup) => format!(
+                "{WORKER_TIMEOUT_ERR_PREFIX} {}s of startup grace (worker_timeout/startup_kill, no first signal)",
+                startup_grace.unwrap_or_default().as_secs()
+            ),
+            Some(KillReason::Idle) if final_weak_count > 0 => format!(
                 "{WORKER_TIMEOUT_ERR_PREFIX} {}s of idle heartbeat (worker_timeout/idle_kill, weak_count={})",
                 idle_heartbeat.unwrap().as_secs(),
                 final_weak_count
-            )
-        } else if idle_enabled {
-            format!(
+            ),
+            Some(KillReason::Idle) => format!(
                 "{WORKER_TIMEOUT_ERR_PREFIX} {}s of idle heartbeat (worker_timeout/idle_kill, weak_count=0 (no signals))",
                 idle_heartbeat.unwrap().as_secs()
-            )
-        } else {
-            format!(
+            ),
+            Some(KillReason::Hard) | None => format!(
                 "{WORKER_TIMEOUT_ERR_PREFIX} {}s without emitting events",
                 wave_timeout.as_secs()
-            )
+            ),
         };
         let _ = tx.send((index, false, duration));
         (index, Err((reason, duration)))

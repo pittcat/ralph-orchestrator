@@ -330,8 +330,40 @@ Wave worker 走双时钟（仅限 wave worker PTY 路径，不影响主 loop）�
 - `hats.<id>.timeout` 是 StartToClose 硬顶，从 worker spawn 起算。
 - `hats.<id>.idle_heartbeat_secs` 是 HeartbeatTimeout 静默窗口，自上次合格进度信号起计时。`0` 或省略 = 关闭 idle 模式，仅 StartToClose 墙钟。
 - `hats.<id>.idle_weak_signal_cap` 是连续仅靠弱信号（assistant text / thinking / `TextDelta`）续租的次数上限；用尽后必须等到强信号（tool 事件 / events file 增长）或硬顶到达。
+- `hats.<id>.startup_grace_secs` 是首信号到达之前的冷启动容忍窗口（**仅当 idle 模式启用时才生效**）。在首个合格进度信号到达之前,idle 心跳窗口被 `startup_grace_secs` 取代以保护慢热的 backend（如 Claude headless 冷启动）；首个合格信号到达后即恢复 idle 语义。`0` 或省略 = 关闭 startup grace,worker 行为与配置之前一致。超时的归因 reason 文案包含 `startup_kill` 标签,下游 `worker_timeout` 分类不受影响。
 
-agent 不需要主动刷 heartbeat：orchestrator 观察 stream JSON 与 `RALPH_EVENTS_FILE` 增长来续租 idle 窗口。worker 看到 `timed_out=true` 且 supervised 路径分类为 `worker_timeout` 时，**同时**可能是硬顶到达（reason 文案 `Worker timed out after Ns without emitting events`）或 idle 静默（reason 文案 `idle heartbeat exceeded: Ns since last activity, weak_count=K`）。两者下游 family 都对齐 `worker_timeout`，区别仅在 reason 字符串（U9）。
+  **最小配置**（YAML）：
+
+  ```yaml
+  hats:
+    worker:
+      timeout: 1800              # StartToClose 硬顶
+      idle_heartbeat_secs: 120   # 启用 idle（前置条件）
+      startup_grace_secs: 300    # 冷启动 5 分钟保护窗
+  ```
+
+  **何时启用**：当 `idle_heartbeat_secs` < backend 冷启动实测 P50 时启用；典型场景是 Claude / Gemini / Codex headless backend 在 spawn 后到第一行输出之间超过 idle 窗口。与 `idle_heartbeat_secs` 同处配置。
+
+  **停止条件**：该字段为 `0` 或省略时,`startup_grace` 关闭,worker 行为退回到仅 StartToClose + idle 语义(无 grace 保护)；预算是「首信号到达之前」,首信号到达后即恢复 idle 语义。预算耗尽后会触发 `startup_kill` 归因(归入 `worker_timeout` family,可在 `ralph wave inspect <wave_id>` 中通过 `worker_timeout/startup_kill` 标签识别),不再自动重派,由 operator 决定 redrive。
+
+agent 不需要主动刷 heartbeat：orchestrator 观察 stream JSON 与 `RALPH_EVENTS_FILE` 增长来续租 idle 窗口。worker 看到 `timed_out=true` 且 supervised 路径分类为 `worker_timeout` 时,**同时**可能是硬顶到达(reason 文案 `Worker timed out after Ns without emitting events`)、idle 静默(reason 文案 `idle heartbeat exceeded: Ns since last activity, weak_count=K`)或 startup grace 超时(reason 文案 `Worker timed out after Ns of startup grace (worker_timeout/startup_kill, no first signal)`)。三者下游 family 都对齐 `worker_timeout`,区别仅在 reason 字符串。
+
+### Slot 自动重试
+
+`event_loop.supervisor.slot_retry_budget`(默认 `1`,允许 `0..=2`,`>2` 启动期拒绝)控制同一 wave 内 supervisor 对单个 slot 的自动重派次数。判定条件:`worker_timeout` / `empty_worker_result` / `missing_worker_terminal` / `slot_never_started` 这四个冻结 reason 之一(详见 `ralph-core::supervisor::worker_outcome::RETRYABLE_REASONS`),且 attempt 计数未超出预算。重试在同一 task 内执行,slot 永远不进入 `Failed` 中间态——只最终 attempt 的 outcome 暴露给 record / projection / harvest,失败时仍走原始失败路径(进入 `redrive_slots`)。agent 工作副作用应保证幂等可重入,因为重试可能在原 slot 上重新执行一次。
+
+  **最小配置**（YAML）：
+
+  ```yaml
+  event_loop:
+    supervisor:
+      enabled: true
+      slot_retry_budget: 1   # 默认 1,允许 0..=2,>2 启动期拒绝
+  ```
+
+  **何时启用**：当 backend 偶发 worker_timeout 误杀但 agent 副作用可幂等时,把 budget 调高（最大 2）以吸收瞬时错误；副作用非幂等或 backend 已知不稳时设为 0,直接进入 redrive 路径。
+
+  **停止条件**：预算耗尽后该 slot 立即 Failed（不再无限重试），由 operator 决定 redrive；预算 >2 启动期 fail-closed（`runner.rs:712`）。retry 在同一 task 内执行,中间 attempt 的 progress / RPC / TUI side-effect 被截断（只有最终 attempt 的 outcome 暴露给 reporter）,不会让 TUI `wave.completed` 计数漂移。
 
 ### 取消 / 补偿
 

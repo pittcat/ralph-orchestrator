@@ -1062,6 +1062,10 @@ mod tests {
             // legacy wall-clock-only behaviour.
             idle_heartbeat_secs: None,
             idle_weak_signal_cap: None,
+            // 2026-07-28-003 plan U3 (R1): same default for the
+            // newly-added startup grace field; doctor tests do
+            // not exercise the new knob.
+            startup_grace_secs: None,
             // 2026-06-17-004 U2 (R3): test helper aligned with
             // `HatConfig::default()`.
             missing_event_grace_secs: None,

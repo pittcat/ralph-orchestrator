@@ -107,6 +107,21 @@ pub trait SupervisorBridge: std::fmt::Debug + Send + Sync {
         u32::MAX
     }
 
+    /// 2026-07-28-003 plan U4 (R8 / KTD6): per-slot automatic retry
+    /// budget returned to the worker-task attempt loop in
+    /// `dispatcher.rs`. The task consults this BEFORE the very
+    /// first attempt so the loop count matches the configured
+    /// budget.
+    ///
+    /// **No default implementation** — every `SupervisorBridge`
+    /// impl MUST provide a value. Production bridges surface the
+    /// operator's `SupervisorConfig.slot_retry_budget` explicitly;
+    /// mock / BDD / stub bridges must declare their own
+    /// `slot_retry_budget()` (typically `0` to disable auto-retry
+    /// for characterization tests). This makes "missing override"
+    /// a compile error instead of a silent default of `1`.
+    fn slot_retry_budget(&self) -> u32;
+
     /// 2026-07-23-007 plan U2 (R-W1): return the loop's primary
     /// workspace root when the bridge was constructed with one
     /// (i.e. `with_context_and_factory` in production). The
@@ -484,6 +499,13 @@ impl SupervisorBridge for InMemoryCoordinatorBridge {
         self.store
             .list_worktree_paths(wave_id)
             .map_err(|err| BridgeError::Store(err.to_string()))
+    }
+
+    /// BDD / in-memory bridge: return 0 so the BDD scenarios
+    /// don't auto-retry — they assert specific failure shapes
+    /// and intermediate-attempt counts.
+    fn slot_retry_budget(&self) -> u32 {
+        0
     }
 
     fn bind_slot(
@@ -884,6 +906,10 @@ mod tests {
             inputs: PhaseInputs,
         ) -> Result<CoordinatorAction, BridgeError> {
             self.inner.tick(wave_id, inputs)
+        }
+
+        fn slot_retry_budget(&self) -> u32 {
+            self.inner.slot_retry_budget()
         }
 
         fn bind_slot(

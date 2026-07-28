@@ -158,6 +158,12 @@ impl SupervisorBridge for SpyBindingBridge {
     ) -> Result<(), BridgeError> {
         Ok(())
     }
+
+    /// Spy: 0 so the spy doesn't auto-retry; tests that
+    /// exercise the retry path use other bridges.
+    fn slot_retry_budget(&self) -> u32 {
+        0
+    }
 }
 
 /// U9 happy path: supervisor `enabled == false` → the
@@ -296,6 +302,10 @@ fn build_supervisor_bridge_relative_db_path_resolves_under_ralph_dir() {
         db_path: ".ralph/supervisor.db".to_string(),
         max_concurrent_workers: 2,
         aggregate_timeout_secs: 60,
+        // 2026-07-28-003 plan U4: explicit budget; default 1
+        // mirrors the documented historical default so this
+        // relative-path characterization test stays green.
+        slot_retry_budget: 1,
     };
     let bridge = crate::loop_runner::build_supervisor_bridge(
         &cfg,
@@ -325,6 +335,9 @@ fn build_supervisor_bridge_absolute_db_path_honoured_as_is() {
         db_path: abs_db.display().to_string(),
         max_concurrent_workers: 1,
         aggregate_timeout_secs: 30,
+        // 2026-07-28-003 plan U4: default budget for the
+        // absolute-path characterization test.
+        slot_retry_budget: 1,
     };
     let bridge = crate::loop_runner::build_supervisor_bridge(
         &cfg,
@@ -1930,6 +1943,15 @@ impl SupervisorBridge for U3DispatchBridge {
         self.max_concurrent_workers
     }
 
+    // 2026-07-28-003 plan U5 (R11): the U3 characterization
+    // helpers preserve the pre-U5 "no retry" semantics by
+    // overriding the trait default budget (`1`) to `0`. This
+    // keeps `test_dispatcher_effective_cap_*` green without
+    // having to special-case the spawn counter.
+    fn slot_retry_budget(&self) -> u32 {
+        0
+    }
+
     fn try_dispatch_next(&self, wave_id: &str, slot_index: u32) -> Result<bool, BridgeError> {
         self.dispatch_calls
             .lock()
@@ -2146,11 +2168,29 @@ fn make_test_cli_backend() -> CliBackend {
 /// `started` count is stable.
 struct U3CountingExecutor {
     started: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    /// Topic of the single event this executor emits. Defaults to
+    /// `review.done` (NO `.unit.done` / `.wave.done` terminal marker)
+    /// to preserve the historical U3 fixture shape. Tests that need
+    /// the slot to classify as `Completed` — e.g. the S3 redrive
+    /// boot-scan test, whose "exactly one worker" assertion must not
+    /// be inflated by the 2026-07-28-003 plan U5 slot auto-retry loop
+    /// (a missing terminal classifies as the retryable
+    /// `missing_worker_terminal` frozen code) — override this with a
+    /// `*.unit.done` topic via `with_topic`.
+    topic: String,
 }
 
 impl U3CountingExecutor {
     fn new(started: std::sync::Arc<std::sync::atomic::AtomicUsize>) -> Self {
-        Self { started }
+        Self {
+            started,
+            topic: "review.done".to_string(),
+        }
+    }
+
+    fn with_topic(mut self, topic: impl Into<String>) -> Self {
+        self.topic = topic.into();
+        self
     }
 }
 
@@ -2160,12 +2200,13 @@ impl WaveWorkerExecutor for U3CountingExecutor {
         mut request: crate::loop_runner::wave::WorkerRequest,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = (u32, WaveWorkerOutcome)> + Send>> {
         let started = std::sync::Arc::clone(&self.started);
+        let topic = self.topic.clone();
         Box::pin(async move {
             started.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             let _ = request.worker_rpc_tx.take();
             let _ = request.worker_tui_state.take();
             let event = ralph_core::Event {
-                topic: "review.done".to_string(),
+                topic,
                 payload: Some("ok".to_string()),
                 ts: String::new(),
                 hat: None,
@@ -2524,6 +2565,9 @@ fn setup_u3_partial_failure_bridge(
         context,
         std::sync::Arc::new(DefaultWorktreeFactory),
         slot_count.max(1),
+        // 2026-07-28-003 plan U4: explicit budget keeps the
+        // characterization test seam at the historical default.
+        1,
     );
     let store_wave_id = bridge
         .register_wave_if_absent(kind, loop_id, slot_count, 0)
@@ -2684,6 +2728,12 @@ enum U5SlotOutcome {
     Success(usize),
     /// Worker fails with the given reason.
     Fail(String),
+    /// 2026-07-28-003 plan U5 (S7 / S12): first attempt follows
+    /// `initial`; any subsequent attempt follows `follow_up`.
+    ScriptedThen {
+        initial: Box<U5SlotOutcome>,
+        follow_up: Box<U5SlotOutcome>,
+    },
 }
 
 /// Executor whose per-slot outcome is scripted by the test. Slots
@@ -2691,6 +2741,8 @@ enum U5SlotOutcome {
 struct U5RecordingExecutor {
     plan: std::sync::Arc<std::collections::HashMap<u32, U5SlotOutcome>>,
     default: U5SlotOutcome,
+    /// Number of times each slot has been executed.
+    calls: std::sync::Arc<Mutex<std::collections::HashMap<u32, u32>>>,
 }
 
 impl U5RecordingExecutor {
@@ -2698,6 +2750,7 @@ impl U5RecordingExecutor {
         Self {
             plan: std::sync::Arc::new(std::collections::HashMap::new()),
             default,
+            calls: std::sync::Arc::new(Mutex::new(std::collections::HashMap::new())),
         }
     }
 
@@ -2706,8 +2759,39 @@ impl U5RecordingExecutor {
         map.insert(index, outcome);
         self
     }
-}
 
+    /// 2026-07-28-003 plan U5 (S7 / S12): the *first* attempt's
+    /// outcome for `index`, followed by `follow_up` for any subsequent
+    /// attempt. Tests describe "fail once, then succeed" by setting
+    /// initial=Fail(retryable), follow_up=Success(N).
+    fn with_first_attempt_then(
+        mut self,
+        index: u32,
+        initial: U5SlotOutcome,
+        follow_up: U5SlotOutcome,
+    ) -> Self {
+        let map = std::sync::Arc::make_mut(&mut self.plan);
+        // Use entry list semantics by encoding both in a tuple; the
+        // execute() path below picks the right one based on call count.
+        map.insert(
+            index,
+            U5SlotOutcome::ScriptedThen {
+                initial: Box::new(initial),
+                follow_up: Box::new(follow_up),
+            },
+        );
+        self
+    }
+
+    fn call_count(&self, slot_index: u32) -> u32 {
+        self.calls
+            .lock()
+            .unwrap()
+            .get(&slot_index)
+            .copied()
+            .unwrap_or(0)
+    }
+}
 /// Build a deterministic `ralph_core::Event` for a (slot, seq) pair so
 /// the content hash is stable across runs.
 ///
@@ -2737,6 +2821,7 @@ impl WaveWorkerExecutor for U5RecordingExecutor {
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = (u32, WaveWorkerOutcome)> + Send>> {
         let plan = std::sync::Arc::clone(&self.plan);
         let default = self.default.clone();
+        let calls = std::sync::Arc::clone(&self.calls);
         Box::pin(async move {
             // U2/007: capture the per-slot env map so the test
             // surface can assert on RALPH_WORKSPACE_ROOT and
@@ -2749,7 +2834,25 @@ impl WaveWorkerExecutor for U5RecordingExecutor {
             let _ = request.worker_rpc_tx.take();
             let _ = request.worker_tui_state.take();
             let index = request.index;
-            let outcome = plan.get(&index).cloned().unwrap_or(default);
+            // 2026-07-28-003 plan U5 (S7 / S8 / S12): count attempts
+            // per slot so the test surface can assert the budget loop.
+            let attempt_number = {
+                let mut guard = calls.lock().unwrap();
+                let n = guard.entry(index).or_insert(0);
+                *n += 1;
+                *n
+            };
+            let mapped = match plan.get(&index).cloned().unwrap_or(default.clone()) {
+                U5SlotOutcome::ScriptedThen { initial, follow_up } => {
+                    if attempt_number == 1 {
+                        (*initial).clone()
+                    } else {
+                        (*follow_up).clone()
+                    }
+                }
+                other => other,
+            };
+            let outcome = mapped;
             match outcome {
                 U5SlotOutcome::Success(count) => {
                     let events: Vec<ralph_core::Event> =
@@ -2757,6 +2860,7 @@ impl WaveWorkerExecutor for U5RecordingExecutor {
                     (index, Ok((events, Duration::from_millis(5), true)))
                 }
                 U5SlotOutcome::Fail(reason) => (index, Err((reason, Duration::from_millis(5)))),
+                U5SlotOutcome::ScriptedThen { .. } => unreachable!("mapped above"),
             }
         })
     }
@@ -2773,6 +2877,10 @@ struct U5RecordingBridge {
     slot_results: std::sync::Arc<Mutex<Vec<(u32, String, usize)>>>,
     /// `(slot_index, reason)` per failure record.
     slot_failures: std::sync::Arc<Mutex<Vec<(u32, String)>>>,
+    /// 2026-07-28-003 plan U5: per-test override for the retry budget.
+    /// Defaults to 0 so the existing characterization tests stay
+    /// bit-identical to pre-U5; new S7/S8/S10/S12 tests override it.
+    retry_budget_override: std::sync::Arc<Mutex<Option<u32>>>,
 }
 
 impl std::fmt::Debug for U5RecordingBridge {
@@ -2787,7 +2895,13 @@ impl U5RecordingBridge {
             store,
             slot_results: std::sync::Arc::new(Mutex::new(Vec::new())),
             slot_failures: std::sync::Arc::new(Mutex::new(Vec::new())),
+            retry_budget_override: std::sync::Arc::new(Mutex::new(None)),
         }
+    }
+
+    fn with_retry_budget(self, budget: u32) -> Self {
+        *self.retry_budget_override.lock().unwrap() = Some(budget);
+        self
     }
 
     fn results_snapshot(&self) -> Vec<(u32, String, usize)> {
@@ -2822,6 +2936,10 @@ impl SupervisorBridge for U5RecordingBridge {
             env: HashMap::new(),
             worktree_path: Some(format!("/tmp/u5/{wave_id}-{slot_index}").into()),
         }))
+    }
+
+    fn slot_retry_budget(&self) -> u32 {
+        self.retry_budget_override.lock().unwrap().unwrap_or(0)
     }
 
     fn recover(&self) -> Result<Vec<ralph_core::supervisor::WaveSnapshot>, BridgeError> {
@@ -2917,14 +3035,19 @@ async fn run_u5_execute_wave(
     bridge: U5RecordingBridge,
     wave: ralph_core::DetectedWave,
     executor: U5RecordingExecutor,
-) -> (WaveDispatchOutcome, U5RecordingBridge) {
+) -> (WaveDispatchOutcome, U5RecordingBridge, U5RecordingExecutor) {
     use crate::loop_runner::wave::execute_wave_via_supervisor_with_executor;
 
-    let wave_dir = std::env::temp_dir().join(format!("u5-disp-{}", wave.wave_id));
-    let _ = std::fs::create_dir_all(&wave_dir);
-    let main_events_file = wave_dir.join("events.jsonl");
-    let _ = std::fs::File::create(&main_events_file);
+    let workspace_root = std::env::temp_dir().join(format!("u5-disp-{}", wave.wave_id));
+    let ralph_dir = workspace_root.join(".ralph");
+    std::fs::create_dir_all(&ralph_dir).expect("create test .ralph directory");
+    let main_events_file = ralph_dir.join("events.jsonl");
+    std::fs::File::create(&main_events_file).expect("create test events file");
 
+    // 2026-07-28-003 plan U5 (S7 / S8 / S12): share the executor's
+    // call counter between the dispatcher-side Arc<dyn..> and the
+    // returned probe so the test surface can assert attempt counts.
+    let calls = std::sync::Arc::clone(&executor.calls);
     let executor_dyn: std::sync::Arc<dyn WaveWorkerExecutor> = std::sync::Arc::new(executor) as _;
     let bridge_arc: std::sync::Arc<dyn SupervisorBridge> = std::sync::Arc::new(bridge.clone());
     let outcome = execute_wave_via_supervisor_with_executor(
@@ -2944,7 +3067,12 @@ async fn run_u5_execute_wave(
         None, // pre_registered_id: normal test path
     )
     .await;
-    (outcome, bridge)
+    let probe = U5RecordingExecutor {
+        plan: std::sync::Arc::new(std::collections::HashMap::new()),
+        default: U5SlotOutcome::Success(0),
+        calls,
+    };
+    (outcome, bridge, probe)
 }
 
 /// U5 验收 #1: N successful workers → the supervisor store records
@@ -2957,7 +3085,7 @@ async fn test_dispatcher_records_slot_outcomes() {
     let wave = make_u3_wave("u5-all-ok", 3, 3);
     let executor = U5RecordingExecutor::new(U5SlotOutcome::Success(1));
 
-    let (outcome, bridge) = run_u5_execute_wave(bridge, wave, executor).await;
+    let (outcome, bridge, _exec) = run_u5_execute_wave(bridge, wave, executor).await;
 
     // The wave must complete (all workers succeed well within budget).
     assert!(
@@ -3010,7 +3138,7 @@ async fn test_dispatcher_records_failure_with_reason() {
     let executor = U5RecordingExecutor::new(U5SlotOutcome::Success(1))
         .with_slot(1, U5SlotOutcome::Fail("boom: worker crashed".to_string()));
 
-    let (_outcome, bridge) = run_u5_execute_wave(bridge, wave, executor).await;
+    let (_outcome, bridge, _exec) = run_u5_execute_wave(bridge, wave, executor).await;
 
     let results = bridge.results_snapshot();
     let failures = bridge.failures_snapshot();
@@ -3054,7 +3182,8 @@ async fn test_dispatcher_record_idempotent_across_reruns() {
 
     // First dispatch: both slots succeed and are recorded.
     let executor = U5RecordingExecutor::new(U5SlotOutcome::Success(1));
-    let (_outcome, bridge) = run_u5_execute_wave(bridge.clone(), wave, executor).await;
+    let (_outcome, _returned_bridge, _exec) =
+        run_u5_execute_wave(bridge.clone(), wave, executor).await;
 
     let store_wave_id = bridge
         .store
@@ -3120,7 +3249,7 @@ async fn test_dispatcher_records_event_batch_count() {
     let executor =
         U5RecordingExecutor::new(U5SlotOutcome::Success(1)).with_slot(0, U5SlotOutcome::Success(4));
 
-    let (_outcome, bridge) = run_u5_execute_wave(bridge, wave, executor).await;
+    let (_outcome, bridge, _exec) = run_u5_execute_wave(bridge, wave, executor).await;
 
     let results = bridge.results_snapshot();
     assert_eq!(results.len(), 2, "U5: two slots recorded; got {results:?}");
@@ -3155,7 +3284,7 @@ async fn test_dispatcher_records_empty_batch_stable_hash() {
     let wave = make_u3_wave("u5-empty", 1, 1);
     let executor = U5RecordingExecutor::new(U5SlotOutcome::Success(0));
 
-    let (_outcome, bridge) = run_u5_execute_wave(bridge, wave, executor).await;
+    let (_outcome, bridge, _exec) = run_u5_execute_wave(bridge, wave, executor).await;
 
     // The flipped semantic: success + zero events → record_slot_failure.
     let results = bridge.results_snapshot();
@@ -3197,6 +3326,205 @@ async fn test_dispatcher_records_empty_batch_stable_hash() {
     assert_eq!(
         snap.failed_count, 1,
         "U1/007: empty batch must lift failed_count"
+    );
+}
+
+// =============================================================================
+// 2026-07-28-003 plan U5 (R9 / R10 / R11 / R12 / R13): dispatcher task 内
+// 自动重试闭环 — S7 / S8 / S10 / S12 真实集成覆盖（注入 retryable 失败）
+//
+// Existing characterization tests only exercise the bridgeAccessor /
+// worker_timeout classifier surface. These four tests drive the real
+// `execute_wave_via_supervisor_with_executor` with a `U5RecordingExecutor`
+// that returns `Err((reason, duration))` on attempt 1 and `Ok(...)` on
+// attempt 2, then assert on attempt count, `record_slot_result` /
+// `record_slot_failure` invocations, and the fingerprint contract.
+// =============================================================================
+
+/// Sanitized retryable reason (matches `dispatcher.rs:5359-5366` first
+/// arm classification when the worker's `Err` reason starts with the
+/// `WORKER_TIMEOUT_ERR_PREFIX`).
+const U5_RETRYABLE_REASON: &str =
+    "Worker timed out after 1s of startup grace (worker_timeout/startup_kill, no first signal)";
+
+/// U5 / S7: a worker that fails with a retryable reason on attempt 1
+/// and succeeds on attempt 2 must trigger an in-task retry, no
+/// `record_slot_failure`, and end with `record_slot_result` once.
+#[tokio::test]
+async fn u5_s7_retry_then_success_records_only_result() {
+    let store = std::sync::Arc::new(InMemorySupervisorStore::new());
+    let bridge = U5RecordingBridge::new(store.clone() as std::sync::Arc<dyn SupervisorStore>)
+        .with_retry_budget(1);
+
+    let wave = make_u3_wave("u5-s7-retry", 1, 1);
+    // Attempt 1 = retryable failure; attempt 2 = success with 1 event.
+    let executor = U5RecordingExecutor::new(U5SlotOutcome::Success(0)).with_first_attempt_then(
+        0,
+        U5SlotOutcome::Fail(U5_RETRYABLE_REASON.to_string()),
+        U5SlotOutcome::Success(1),
+    );
+
+    let (_outcome, bridge, exec) = run_u5_execute_wave(bridge, wave, executor).await;
+
+    // Two attempts on slot 0.
+    assert_eq!(
+        exec.call_count(0),
+        2,
+        "U5/S7: retryable failure must trigger a second attempt, got {}",
+        exec.call_count(0)
+    );
+
+    // No record_slot_failure; exactly one record_slot_result.
+    let failures = bridge.failures_snapshot();
+    assert!(
+        failures.is_empty(),
+        "U5/S7: retryable failure must NOT record_slot_failure, got {failures:?}"
+    );
+    let results = bridge.results_snapshot();
+    assert_eq!(
+        results.len(),
+        1,
+        "U5/S7: second attempt success must record_slot_result once, got {results:?}"
+    );
+    let (slot, _hash, count) = &results[0];
+    assert_eq!(*slot, 0);
+    assert_eq!(
+        *count, 1,
+        "U5/S7: fingerprint must reflect attempt 2's batch only"
+    );
+}
+
+/// U5 / S8: two consecutive retryable failures (budget=1) must exhaust
+/// the budget and route to `record_slot_failure("worker_timeout")`. The
+/// resulting failure path keeps the `redrive_slots` field present (the
+/// store still records a failed slot so the next fan-in can offer a
+/// redrive slot).
+#[tokio::test]
+async fn u5_s8_budget_exhausted_records_failure_with_redrive_eligibility() {
+    use ralph_core::supervisor::SupervisorStore;
+
+    let store = std::sync::Arc::new(InMemorySupervisorStore::new());
+    let bridge = U5RecordingBridge::new(store.clone() as std::sync::Arc<dyn SupervisorStore>)
+        .with_retry_budget(1);
+
+    let wave = make_u3_wave("u5-s8-budget", 1, 1);
+    let executor = U5RecordingExecutor::new(U5SlotOutcome::Fail(U5_RETRYABLE_REASON.to_string()));
+
+    let (_outcome, bridge, exec) = run_u5_execute_wave(bridge, wave, executor).await;
+
+    // Two attempts (initial + 1 retry, budget=1).
+    assert_eq!(
+        exec.call_count(0),
+        2,
+        "U5/S8: budget=1 must allow exactly 2 attempts, got {}",
+        exec.call_count(0)
+    );
+
+    // Exactly one record_slot_failure with the FROZEN reason code.
+    let results = bridge.results_snapshot();
+    assert!(
+        results.is_empty(),
+        "U5/S8: budget exhausted must NOT record_slot_result, got {results:?}"
+    );
+    let failures = bridge.failures_snapshot();
+    assert_eq!(
+        failures.len(),
+        1,
+        "U5/S8: budget exhausted must record_slot_failure once, got {failures:?}"
+    );
+    let (slot, reason) = &failures[0];
+    assert_eq!(*slot, 0);
+    assert_eq!(
+        reason, "worker_timeout",
+        "U5/S8: stored reason must be the FROZEN worker_timeout static code"
+    );
+
+    // Store state: 0 completed + 1 failed (so the next fan-in/recovery
+    // path can offer this slot for redrive).
+    let store_wave_id = bridge
+        .store
+        .recover_active_waves()
+        .expect("recover")
+        .pop()
+        .expect("one wave")
+        .wave_id;
+    let snap = bridge
+        .store
+        .fan_in_status(&store_wave_id)
+        .expect("snapshot");
+    assert_eq!(
+        snap.completed_count, 0,
+        "U5/S8: failed slot must not lift completed_count"
+    );
+    assert_eq!(
+        snap.failed_count, 1,
+        "U5/S8: failed slot must lift failed_count"
+    );
+}
+
+/// U5 / S10: a non-retryable failure (e.g. `worker_cancelled` or unknown
+/// dynamic reason) must NOT trigger a retry, even when budget > 0.
+#[tokio::test]
+async fn u5_s10_non_retryable_failure_does_not_retry() {
+    let store = std::sync::Arc::new(InMemorySupervisorStore::new());
+    let bridge = U5RecordingBridge::new(store.clone() as std::sync::Arc<dyn SupervisorStore>)
+        .with_retry_budget(2);
+
+    let wave = make_u3_wave("u5-s10-cancelled", 1, 1);
+    let executor = U5RecordingExecutor::new(U5SlotOutcome::Fail("worker_cancelled".to_string()));
+
+    let (_outcome, bridge, exec) = run_u5_execute_wave(bridge, wave, executor).await;
+
+    assert_eq!(
+        exec.call_count(0),
+        1,
+        "U5/S10: non-retryable reason must attempt exactly once, got {}",
+        exec.call_count(0)
+    );
+
+    let failures = bridge.failures_snapshot();
+    assert_eq!(
+        failures.len(),
+        1,
+        "U5/S10: cancelled must record one failure"
+    );
+    let (_, reason) = &failures[0];
+    assert_eq!(
+        reason, "worker_cancelled",
+        "U5/S10: store must keep the verbatim reason"
+    );
+}
+
+/// U5 / S12: an intermediate partial-batch attempt that fails with a
+/// retryable reason must NOT leak its events into the
+/// `record_slot_result` fingerprint. Only the *final* attempt's batch
+/// (whether success or failure) must end up in the store.
+#[tokio::test]
+async fn u5_s12_final_attempt_fingerprint_only() {
+    let store = std::sync::Arc::new(InMemorySupervisorStore::new());
+    let bridge = U5RecordingBridge::new(store.clone() as std::sync::Arc<dyn SupervisorStore>)
+        .with_retry_budget(1);
+
+    let wave = make_u3_wave("u5-s12-fingerprint", 1, 1);
+    let executor = U5RecordingExecutor::new(U5SlotOutcome::Success(0)).with_first_attempt_then(
+        0,
+        U5SlotOutcome::Fail(U5_RETRYABLE_REASON.to_string()),
+        U5SlotOutcome::Success(3),
+    );
+
+    let (_outcome, bridge, _exec) = run_u5_execute_wave(bridge, wave, executor).await;
+
+    let results = bridge.results_snapshot();
+    assert_eq!(
+        results.len(),
+        1,
+        "U5/S12: only the final attempt's result may be recorded, got {results:?}"
+    );
+    let (slot, _hash, count) = &results[0];
+    assert_eq!(*slot, 0);
+    assert_eq!(
+        *count, 3,
+        "U5/S12: event_count must reflect the final attempt's batch (3 events), not the failed attempt"
     );
 }
 
@@ -3705,6 +4033,9 @@ fn setup_u6_production_bridge(
         context,
         std::sync::Arc::new(DefaultWorktreeFactory),
         n.max(1),
+        // 2026-07-28-003 plan U4: explicit budget keeps the U6
+        // characterization helpers at the historical default.
+        1,
     );
     let store_wave_id = bridge
         .register_wave_if_absent(WaveKind::Exec, wave_key, n, 0)
@@ -3926,6 +4257,9 @@ fn test_production_fan_in_partial_failure_injects_failed() {
             context,
             std::sync::Arc::new(DefaultWorktreeFactory),
             3,
+            // 2026-07-28-003 plan U4: explicit budget keeps the
+            // fan-in characterization at the historical default.
+            1,
         );
     let store_wave_id = bridge
         .register_wave_if_absent(WaveKind::Exec, "u6-wave-fail", 3, 0)
@@ -5435,6 +5769,10 @@ fn review_partial_failure_salvage_path_unaffected() {
             context,
             std::sync::Arc::new(DefaultWorktreeFactory),
             2,
+            // 2026-07-28-003 plan U4: explicit budget keeps the
+            // U1 review partial characterization at the
+            // historical default.
+            1,
         );
     let store_wave_id = bridge
         .register_wave_if_absent(WaveKind::Review, "u1-review-partial", 2, 0)
@@ -6375,9 +6713,18 @@ async fn test_s3_dispatch_pending_redrive_wave_in_memory() {
     //    intent of this scenario. The counting executor returns a
     //    successful terminal event, which drives the slot to
     //    `Completed` so it drops out of the pending list.
+    //
+    //    Merge note (002 ∩ 003): the topic MUST be a terminal marker
+    //    (`exec.unit.done`, matching this test's hat registry). The
+    //    2026-07-28-003 plan U5 slot auto-retry loop retries frozen
+    //    retryable codes — a marker-less event classifies as
+    //    `missing_worker_terminal` (retryable) and, with the default
+    //    `slot_retry_budget = 1`, would spawn a second attempt,
+    //    inflating the "exactly one worker" count this scenario
+    //    guards (the boot-scan double-spawn gap).
     let started = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let executor: Arc<dyn crate::loop_runner::wave::WaveWorkerExecutor> =
-        Arc::new(U3CountingExecutor::new(started.clone()));
+        Arc::new(U3CountingExecutor::new(started.clone()).with_topic("exec.unit.done"));
     dispatch_pending_redrive_waves(
         &store,
         "s3-loop",
@@ -6697,5 +7044,301 @@ async fn test_s6_no_pending_children_is_noop() {
     assert!(
         pending_after.is_empty(),
         "S6: still no pending children; got {pending_after:?}"
+    );
+}
+
+// =====================================================================
+// 2026-07-28-003 plan U4: `SupervisorConfig.slot_retry_budget` wiring
+// and bridge surface integration tests.
+//
+// U4-19: pin test for the new bridge slot_retry_budget access
+// (KTD6 / S13 / R14). All test fixtures that build the production
+// bridge go through `with_context_and_factory_with_cap` so the
+// budget forwarding is exercised on every construction path.
+// =====================================================================
+
+/// U4-19: production bridge surfaces the constructor-supplied
+/// budget; the trait default is documented as 1 but production
+/// bridges always propagate the supplied argument. Locks down
+/// KTD6 / R14.
+#[test]
+fn u4_production_bridge_forwards_slot_retry_budget_through_constructor() {
+    use crate::loop_runner::wave::ProductionBridgeContext;
+    use ralph_core::supervisor::InMemorySupervisorStore;
+    use ralph_core::supervisor::worktree_bind::DefaultWorktreeFactory;
+
+    let tmp = tempfile::tempdir().expect("temp dir");
+    let events_path = tmp.path().join(".ralph").join("events.jsonl");
+    let store = std::sync::Arc::new(InMemorySupervisorStore::new());
+
+    // budget = 2 — verify production bridge reflects the param.
+    let bridge =
+        crate::loop_runner::wave::CoordinatorSupervisorBridge::with_context_and_factory_with_cap(
+            store.clone() as std::sync::Arc<dyn ralph_core::supervisor::SupervisorStore>,
+            ProductionBridgeContext {
+                loop_id: "u4-budget".to_string(),
+                repo_root: std::path::PathBuf::from("/tmp/u4-repo"),
+                events_path: Some(events_path.clone()),
+                tasks_path: None,
+            },
+            std::sync::Arc::new(DefaultWorktreeFactory),
+            4,
+            2,
+        );
+    assert_eq!(
+        bridge.slot_retry_budget(),
+        2,
+        "production bridge must forward slot_retry_budget to the trait"
+    );
+
+    // budget = 0 — also propagate (close auto-retry).
+    let bridge_zero =
+        crate::loop_runner::wave::CoordinatorSupervisorBridge::with_context_and_factory_with_cap(
+            store.clone() as std::sync::Arc<dyn ralph_core::supervisor::SupervisorStore>,
+            ProductionBridgeContext {
+                loop_id: "u4-budget-zero".to_string(),
+                repo_root: std::path::PathBuf::from("/tmp/u4-repo"),
+                events_path: Some(events_path),
+                tasks_path: None,
+            },
+            std::sync::Arc::new(DefaultWorktreeFactory),
+            4,
+            0,
+        );
+    assert_eq!(bridge_zero.slot_retry_budget(), 0);
+}
+
+/// U4-19 / S13: the two `register_wave_if_absent` call sites
+/// (dispatcher's spawn path + supervisor fan-in path) read the
+/// budget from the SAME bridge accessors, so they always agree.
+/// This test stubs the bridge with a recording struct and asserts
+/// both calls see the same budget value.
+#[test]
+fn u4_register_wave_if_absent_call_sites_use_same_bridge_budget() {
+    use std::sync::Mutex;
+
+    /// Bridge stub that records every `register_wave_if_absent`
+    /// call so the test can assert consistency across dispatch
+    /// spawn paths. Inherits trait-default `Debug` and
+    /// `slot_retry_budget` accessors so the surface area stays
+    /// minimal.
+    #[derive(Debug, Default)]
+    struct RecordingBridge {
+        recorded_budgets: Mutex<Vec<u32>>,
+        budget: u32,
+    }
+    impl ralph_core::supervisor::SupervisorBridge for RecordingBridge {
+        fn tick(
+            &self,
+            _wave_id: &str,
+            _inputs: ralph_core::supervisor::PhaseInputs,
+        ) -> Result<ralph_core::supervisor::CoordinatorAction, ralph_core::supervisor::BridgeError>
+        {
+            Ok(ralph_core::supervisor::CoordinatorAction::ContinueCollect)
+        }
+        fn register_wave_if_absent(
+            &self,
+            _kind: ralph_core::supervisor::WaveKind,
+            _wave_id: &str,
+            _expected_total: u32,
+            slot_retry_budget: u32,
+        ) -> Result<String, ralph_core::supervisor::BridgeError> {
+            self.recorded_budgets
+                .lock()
+                .unwrap()
+                .push(slot_retry_budget);
+            Ok(format!(
+                "w-rec-{}",
+                self.recorded_budgets.lock().unwrap().len()
+            ))
+        }
+        fn bind_slot(
+            &self,
+            _kind: ralph_core::supervisor::WaveKind,
+            _wave_id: &str,
+            _slot_index: u32,
+        ) -> Result<Option<ralph_core::supervisor::SlotBinding>, ralph_core::supervisor::BridgeError>
+        {
+            Ok(None)
+        }
+        fn recover(
+            &self,
+        ) -> Result<Vec<ralph_core::supervisor::WaveSnapshot>, ralph_core::supervisor::BridgeError>
+        {
+            Ok(Vec::new())
+        }
+        fn fan_in_status(
+            &self,
+            _wave_id: &str,
+        ) -> Result<ralph_core::supervisor::WaveSnapshot, ralph_core::supervisor::BridgeError>
+        {
+            Err(ralph_core::supervisor::BridgeError::Store(
+                "RecordingBridge::fan_in_status not used in U4-19 test".into(),
+            ))
+        }
+        fn record_slot_result(
+            &self,
+            _wave_id: &str,
+            _slot_index: u32,
+            _content_hash: &str,
+            _event_count: usize,
+        ) -> Result<(), ralph_core::supervisor::BridgeError> {
+            Ok(())
+        }
+        fn record_slot_failure(
+            &self,
+            _wave_id: &str,
+            _slot_index: u32,
+            _reason: &str,
+        ) -> Result<(), ralph_core::supervisor::BridgeError> {
+            Ok(())
+        }
+        fn slot_retry_budget(&self) -> u32 {
+            self.budget
+        }
+    }
+
+    let bridge = RecordingBridge {
+        recorded_budgets: Mutex::new(Vec::new()),
+        budget: 2,
+    };
+    // First registration (mirrors dispatcher's spawn path call).
+    bridge
+        .register_wave_if_absent(
+            ralph_core::supervisor::WaveKind::Exec,
+            "dispatch-spawn",
+            1,
+            bridge.slot_retry_budget(),
+        )
+        .unwrap();
+    // Second registration (mirrors supervisor fan-in path call).
+    bridge
+        .register_wave_if_absent(
+            ralph_core::supervisor::WaveKind::Exec,
+            "dispatch-fan-in",
+            1,
+            bridge.slot_retry_budget(),
+        )
+        .unwrap();
+
+    let recorded = bridge.recorded_budgets.lock().unwrap().clone();
+    assert_eq!(recorded.len(), 2, "both call sites must run");
+    assert_eq!(
+        recorded[0], recorded[1],
+        "both call sites must consult the same bridge budget accessor"
+    );
+    assert_eq!(
+        recorded[0], 2,
+        "budget must equal the bridge accessor value"
+    );
+}
+
+/// U4-19 / S11: out-of-range budget (3) is rejected by the
+/// runner's bridge constructor fail-closed check, with a
+/// message that includes the `0..=2` range hint.
+#[test]
+fn u4_runner_rejects_out_of_range_slot_retry_budget() {
+    use ralph_core::LoopContext;
+    use ralph_core::config::SupervisorConfig;
+
+    let tmp = tempfile::tempdir().expect("temp dir");
+    let ctx = LoopContext::primary(tmp.path().to_path_buf());
+    let cfg = SupervisorConfig {
+        enabled: true,
+        db_path: ".ralph/supervisor.db".to_string(),
+        max_concurrent_workers: 2,
+        aggregate_timeout_secs: 60,
+        // 2026-07-28-003 plan U4 (S11): out-of-range budget
+        // must fail-closed at bridge construction.
+        slot_retry_budget: 3,
+    };
+    let events_path = ctx.workspace().join(".ralph").join("events.jsonl");
+    let err = crate::loop_runner::build_supervisor_bridge(&cfg, &ctx, events_path)
+        .expect_err("budget 3 must fail closed");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("0..=2"),
+        "error must include the legal range `0..=2`; got: {msg}"
+    );
+    assert!(
+        msg.contains("3"),
+        "error must echo the offending value; got: {msg}"
+    );
+}
+
+// =====================================================================
+// 2026-07-28-003 plan U5: dispatcher task attempt-loop integration
+// tests. KTD9 (do not salvage intermediate batches) and KTD10
+// (fail-closed on `None`/`Permanent` reasons) are pinned by the
+// retry-decision table in `ralph-core/src/supervisor/worker_outcome.rs::retry_classifier_tests`;
+// this file pins the dispatcher-side wiring: `WorkerRequest: Clone`
+// (E15) and `slot_retry_budget = 0` closes retry (R11).
+// =====================================================================
+
+/// U5 §13 / E15: `WorkerRequest: Clone` is the load-bearing
+/// invariant that lets the supervisor task attempt-loop re-enter
+/// `executor.execute` after a retryable failure (KTD7). A
+/// regression here (e.g. forgetting to keep the manual impl when
+/// refactoring fields) breaks U5 silently; this pin turns that
+/// regression into a compile-time failure.
+#[test]
+fn u5_worker_request_implements_clone() {
+    fn assert_clone<T: Clone>() {}
+    assert_clone::<crate::loop_runner::wave::WorkerRequest>();
+}
+
+/// U5 §15 / S9: when the bridge reports `slot_retry_budget = 0`,
+/// the dispatcher attempt loop must NOT retry on a frozen-code
+/// failure — the task exits the loop on the first attempt.
+#[test]
+fn u5_slot_retry_budget_zero_closes_auto_retry_at_bridge_accessor() {
+    use ralph_core::supervisor::InMemorySupervisorStore;
+    let store = std::sync::Arc::new(InMemorySupervisorStore::new());
+    let bridge =
+        crate::loop_runner::wave::CoordinatorSupervisorBridge::with_context_and_factory_with_cap(
+            store as std::sync::Arc<dyn ralph_core::supervisor::SupervisorStore>,
+            crate::loop_runner::wave::ProductionBridgeContext {
+                loop_id: "u5-s9".to_string(),
+                repo_root: std::path::PathBuf::from("/tmp/u5-s9"),
+                events_path: None,
+                tasks_path: None,
+            },
+            std::sync::Arc::new(ralph_core::supervisor::worktree_bind::DefaultWorktreeFactory),
+            4,
+            // S9: budget = 0 — explicit close.
+            0,
+        );
+    assert_eq!(
+        bridge.slot_retry_budget(),
+        0,
+        "bridge accessor must expose budget = 0 so the dispatcher closes retry"
+    );
+}
+
+/// U5 §15 / R8: when the operator configures `slot_retry_budget = 2`,
+/// the bridge accessor reflects it; the dispatcher task therefore
+/// can run up to 3 attempts (initial + 2 retries) on a retryable
+/// frozen-code failure.
+#[test]
+fn u5_slot_retry_budget_two_propagates_to_accessor() {
+    use ralph_core::supervisor::InMemorySupervisorStore;
+    let store = std::sync::Arc::new(InMemorySupervisorStore::new());
+    let bridge =
+        crate::loop_runner::wave::CoordinatorSupervisorBridge::with_context_and_factory_with_cap(
+            store as std::sync::Arc<dyn ralph_core::supervisor::SupervisorStore>,
+            crate::loop_runner::wave::ProductionBridgeContext {
+                loop_id: "u5-s7-budget-2".to_string(),
+                repo_root: std::path::PathBuf::from("/tmp/u5-budget-2"),
+                events_path: None,
+                tasks_path: None,
+            },
+            std::sync::Arc::new(ralph_core::supervisor::worktree_bind::DefaultWorktreeFactory),
+            4,
+            2,
+        );
+    assert_eq!(
+        bridge.slot_retry_budget(),
+        2,
+        "bridge accessor must surface the operator-configured budget"
     );
 }

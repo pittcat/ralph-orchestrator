@@ -1148,6 +1148,25 @@ pub struct SupervisorConfig {
     /// than running compensation silently (R-C3 / KTD-8).
     #[serde(default = "default_supervisor_aggregate_timeout_secs")]
     pub aggregate_timeout_secs: u64,
+
+    /// 2026-07-28-003 plan U4 (R8): per-slot automatic retry budget
+    /// for the worker task. When a slot terminates in a retryable
+    /// failure (`worker_timeout` / `empty_worker_result` /
+    /// `missing_worker_terminal` / `slot_never_started`, see
+    /// `supervisor::worker_outcome::RETRYABLE_REASONS`) and the
+    /// spent attempts are still below this budget, the dispatcher
+    /// re-runs `execute(request)` in the same task **without**
+    /// driving the slot through the store's Failed state — the
+    /// supervisor consumes only the final outcome.
+    ///
+    /// Bounds: `0..=2`. Values outside this range are
+    /// **fail-closed**: `runner.rs` refuses to construct the
+    /// supervisor bridge when the operator explicitly chose an
+    /// out-of-range budget. The default (`1`) matches the DB
+    /// column default (`migrations.rs:220`) and the historical
+    /// `CONCEPTS.md` claim.
+    #[serde(default = "default_supervisor_slot_retry_budget")]
+    pub slot_retry_budget: u32,
 }
 
 fn default_supervisor_enabled() -> bool {
@@ -1166,6 +1185,10 @@ fn default_supervisor_aggregate_timeout_secs() -> u64 {
     600
 }
 
+fn default_supervisor_slot_retry_budget() -> u32 {
+    1
+}
+
 impl Default for SupervisorConfig {
     fn default() -> Self {
         Self {
@@ -1173,6 +1196,7 @@ impl Default for SupervisorConfig {
             db_path: default_supervisor_db_path(),
             max_concurrent_workers: default_supervisor_max_concurrent_workers(),
             aggregate_timeout_secs: default_supervisor_aggregate_timeout_secs(),
+            slot_retry_budget: default_supervisor_slot_retry_budget(),
         }
     }
 }

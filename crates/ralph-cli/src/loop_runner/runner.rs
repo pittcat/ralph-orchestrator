@@ -701,6 +701,22 @@ pub(crate) fn build_supervisor_bridge(
         use crate::loop_runner::wave::{CoordinatorSupervisorBridge, ProductionBridgeContext};
         use ralph_core::supervisor::worktree_bind::DefaultWorktreeFactory;
 
+        // 2026-07-28-003 plan U4 (KTD10 / S11): the slot retry
+        // budget MUST be in `0..=2`. Out-of-range values fail
+        // closed here, before the bridge exists, so an operator
+        // who typed `3` (or `99`) gets a startup error pointing
+        // at the field rather than a silent runtime invariant
+        // violation. The store layer's `register_wave` check
+        // (`memory.rs:313-315`) remains as a defensive second
+        // gate.
+        if cfg.slot_retry_budget > 2 {
+            anyhow::bail!(
+                "supervisor.slot_retry_budget must be in 0..=2; got {}. Update preset {}",
+                cfg.slot_retry_budget,
+                "<event_loop.supervisor.slot_retry_budget>",
+            );
+        }
+
         if let Some(parent) = resolved_db_path.parent() {
             let _ = std::fs::create_dir_all(parent);
         }
@@ -767,6 +783,12 @@ pub(crate) fn build_supervisor_bridge(
                 context,
                 factory,
                 cfg.max_concurrent_workers,
+                // 2026-07-28-003 plan U4 (KTD6): forward the
+                // operator-configured slot retry budget to the
+                // bridge so the dispatcher attempt loop and the
+                // two `register_wave_if_absent` calls see the
+                // exact same value.
+                cfg.slot_retry_budget,
             ),
         )
     }

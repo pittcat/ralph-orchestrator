@@ -916,6 +916,14 @@ hats:
     timeout: 1800
     idle_heartbeat_secs: 120
     idle_weak_signal_cap: 8
+    # parallel-forge was covered by the `0eb29e01` plan-broadening;
+    # this preset's idle window (120 s) is the bare-knuckle miss
+    # zone — `startup_grace_secs` extends the cold-start window so
+    # slow-warming backends (Claude / Gemini / Codex headless) survive
+    # past their first-signal latency. The `claude` headless backend
+    # (and any other slow-warm-up backend) cannot be idle-killed before
+    # producing its first qualifying signal.
+    startup_grace_secs: 300
     triggers:
       - exec.unit.ready
     publishes:
@@ -1781,6 +1789,11 @@ hats:
     timeout: 1800
     idle_heartbeat_secs: 120
     idle_weak_signal_cap: 8
+    # Same grace as `worker`. Fix rounds boot a fresh process from
+    # the worktree branch and may take just as long to emit the first
+    # signal; the 300 s grace prevents the bare-knuckle idle window
+    # from killing the worker's re-attach before the model responds.
+    startup_grace_secs: 300
     triggers:
       - fix.unit.ready
     publishes:

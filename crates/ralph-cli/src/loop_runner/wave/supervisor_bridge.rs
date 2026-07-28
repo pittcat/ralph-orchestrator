@@ -113,6 +113,11 @@ pub struct CoordinatorSupervisorBridge {
     factory: Arc<dyn WorktreeFactory>,
     /// Global supervisor worker cap supplied by the loop config.
     max_concurrent_workers: u32,
+    /// 2026-07-28-003 plan U4 (R8): per-slot automatic retry
+    /// budget supplied by the loop config. The worker task's
+    /// attempt loop reads this BEFORE the very first attempt
+    /// so the loop count matches the configured budget.
+    slot_retry_budget: u32,
     /// U6: map from the caller-supplied idempotency key (the
     /// dispatcher's wave_id) to the store-assigned wave id
     /// (`w-{seq}`). `register_wave_if_absent` populates this on
@@ -141,6 +146,11 @@ impl CoordinatorSupervisorBridge {
             context: None,
             factory,
             max_concurrent_workers: u32::MAX,
+            // 2026-07-28-003 plan U4: in-memory legacy fixtures
+            // do not configure retry; the conservative default
+            // (`1`) keeps them at the documented history so
+            // characterization tests stay bit-for-bit unchanged.
+            slot_retry_budget: 1,
             registered: Default::default(),
         }
     }
@@ -156,10 +166,11 @@ impl CoordinatorSupervisorBridge {
         context: ProductionBridgeContext,
         factory: Arc<dyn WorktreeFactory>,
     ) -> Self {
-        Self::with_context_and_factory_with_cap(store, context, factory, u32::MAX)
+        Self::with_context_and_factory_with_cap(store, context, factory, u32::MAX, 1)
     }
 
-    /// Build a production bridge with the configured global worker cap.
+    /// Build a production bridge with the configured global worker cap
+    /// **and** slot retry budget.
     ///
     /// U6: when `context.events_path` is `Some`, the coordinator is
     /// constructed with a production [`FileEventMergeSink`] pointed
@@ -167,11 +178,17 @@ impl CoordinatorSupervisorBridge {
     /// the real per-slot business events to `events.jsonl` (KTD-6 /
     /// KTD-7). `None` keeps the in-memory sink for the legacy /
     /// dry-run entry points.
+    ///
+    /// 2026-07-28-003 plan U4 (KTD6 / KTD10): `slot_retry_budget`
+    /// surfaces the configured budget (caller-validated to `0..=2`)
+    /// so the worker-task attempt loop and the dispatcher-side
+    /// `register_wave_if_absent` calls share the exact same value.
     pub fn with_context_and_factory_with_cap(
         store: Arc<dyn SupervisorStore>,
         context: ProductionBridgeContext,
         factory: Arc<dyn WorktreeFactory>,
         max_concurrent_workers: u32,
+        slot_retry_budget: u32,
     ) -> Self {
         let coordinator = Arc::new(match context.events_path.as_ref() {
             Some(path) => SupervisorCoordinator::new(
@@ -186,6 +203,7 @@ impl CoordinatorSupervisorBridge {
             context: Some(context),
             factory,
             max_concurrent_workers,
+            slot_retry_budget,
             registered: Default::default(),
         }
     }
@@ -231,6 +249,10 @@ impl CoordinatorSupervisorBridge {
             context: None,
             factory,
             max_concurrent_workers: u32::MAX,
+            // 2026-07-28-003 plan U4: legacy characterization
+            // entry point stays at the documented default (1)
+            // so the pin tests do not drift.
+            slot_retry_budget: 1,
             registered: Default::default(),
         }
     }
@@ -272,6 +294,15 @@ impl SupervisorBridge for CoordinatorSupervisorBridge {
 
     fn max_concurrent_workers(&self) -> u32 {
         self.max_concurrent_workers
+    }
+
+    fn slot_retry_budget(&self) -> u32 {
+        // 2026-07-28-003 plan U4 (R8): the operator-visible
+        // budget is the single source of truth for the
+        // dispatcher task attempt loop and for the two
+        // `register_wave_if_absent` calls. The runner has
+        // already validated it lies in `0..=2` (KTD10).
+        self.slot_retry_budget
     }
 
     fn repo_root(&self) -> Option<&std::path::Path> {
@@ -803,6 +834,14 @@ impl SupervisorBridge for MockSupervisorBridge {
     ) -> Result<(), BridgeError> {
         Ok(())
     }
+
+    /// Mock bridge: return 0 so the legacy characterization
+    /// tests don't accidentally trigger auto-retry. Tests that
+    /// exercise the retry path use the explicit budget fields
+    /// on `CoordinatorSupervisorBridge` instead.
+    fn slot_retry_budget(&self) -> u32 {
+        0
+    }
 }
 
 #[cfg(test)]
@@ -1123,9 +1162,14 @@ mod tests {
             },
             Arc::new(DefaultWorktreeFactory),
             1,
+            // 2026-07-28-003 plan U4: explicit budget; pin at 1
+            // (test seam default) so this characterization keeps
+            // its historical semantics.
+            1,
         );
 
         assert_eq!(bridge.max_concurrent_workers(), 1);
+        assert_eq!(bridge.slot_retry_budget(), 1);
         assert!(bridge.try_dispatch_next(&wave, 0).unwrap());
         assert!(!bridge.try_dispatch_next(&wave, 0).unwrap());
     }
@@ -1286,6 +1330,10 @@ mod tests {
                 reason: &str,
             ) -> Result<(), BridgeError> {
                 self.inner.record_slot_failure(wave_id, slot_index, reason)
+            }
+
+            fn slot_retry_budget(&self) -> u32 {
+                self.inner.slot_retry_budget()
             }
         }
 

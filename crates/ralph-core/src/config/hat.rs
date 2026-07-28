@@ -479,6 +479,30 @@ pub struct HatConfig {
     #[serde(default)]
     pub idle_weak_signal_cap: Option<u32>,
 
+    /// 2026-07-28-003 plan U3 (R1): wave-worker startup grace window
+    /// in seconds. While the worker has not yet observed its first
+    /// qualifying signal (Strong stdout / events-file growth /
+    /// cap-allowed Weak), the silence window is bounded by
+    /// `startup_grace_secs` instead of `idle_heartbeat_secs`. The
+    /// moment any qualifying signal arrives the lease reverts to
+    /// the normal idle semantic.
+    ///
+    /// Semantics:
+    /// - `None` (default) or `Some(0)`: startup grace **disabled**.
+    ///   The worker uses `idle_heartbeat_secs` from spawn (which is
+    ///   itself the pre-U3 behaviour).
+    /// - `Some(n)` with `n > 0`: startup grace **enabled**. The
+    ///   worker is given an `n`-second cold-start window before the
+    ///   idle leash fires.
+    ///
+    /// Effective only when idle mode is also enabled
+    /// (`idle_heartbeat_secs` is `Some(n>0)`); see KTD1 — if idle
+    /// mode is disabled the field is silently ignored. The two
+    /// fields are intentionally independent so operators may
+    /// opt in to startup grace on a hat-by-hat basis.
+    #[serde(default)]
+    pub startup_grace_secs: Option<u32>,
+
     /// 2026-06-17-004 U2 (R3): per-hat missing-event gate grace
     /// window in seconds.  When the gate evaluates the obligation
     /// for this hat and the elapsed time since the hat's last
@@ -673,6 +697,9 @@ impl Default for HatConfig {
             // None (= no cap); `DetectedWave::idle_weak_signal_cap()`
             // resolves it via `default_idle_weak_signal_cap()`.
             idle_weak_signal_cap: None,
+            // 2026-07-28-003 plan U3 (R1): startup grace is opt-in;
+            // `None` keeps the pre-U3 behaviour (idle window from spawn).
+            startup_grace_secs: None,
             // 2026-06-17-004 U2 (R3): default `None` so the
             // `resolve_missing_event_grace_secs` helper falls
             // through to the operator-controlled default chain.
@@ -968,6 +995,50 @@ idle_heartbeat_secs: 0
         assert!(hat.idle_weak_signal_cap.is_none());
     }
 
+    // =====================================================================
+    // 2026-07-28-003 plan U3: `startup_grace_secs` parsing round-trip.
+    // Mirrors the idle-heartbeat pattern so the YAML field flows
+    // through `HatConfig::deserialize` without surprises.
+    // =====================================================================
+
+    #[test]
+    fn hat_startup_grace_secs_yaml_round_trip() {
+        let yaml = r#"
+name: worker
+triggers: ["work.done"]
+publishes: ["work.done"]
+idle_heartbeat_secs: 120
+startup_grace_secs: 300
+"#;
+        let hat: HatConfig = serde_yaml::from_str(yaml).expect("parse");
+        assert_eq!(hat.startup_grace_secs, Some(300));
+    }
+
+    #[test]
+    fn hat_startup_grace_secs_omitted_defaults_to_none() {
+        let yaml = r#"
+name: worker
+triggers: ["work.done"]
+publishes: ["work.done"]
+"#;
+        let hat: HatConfig = serde_yaml::from_str(yaml).expect("parse");
+        assert!(hat.startup_grace_secs.is_none());
+    }
+
+    #[test]
+    fn hat_startup_grace_secs_zero_is_preserved() {
+        // Zero is preserved as Some(0) so `DetectedWave::startup_grace_secs`
+        // can collapse it to None (mirroring `idle_heartbeat_secs`).
+        let yaml = r#"
+name: worker
+triggers: ["work.done"]
+publishes: ["work.done"]
+startup_grace_secs: 0
+"#;
+        let hat: HatConfig = serde_yaml::from_str(yaml).expect("parse");
+        assert_eq!(hat.startup_grace_secs, Some(0));
+    }
+
     #[test]
     fn test_hat_backend_kiro_agent_variant_removed() {
         // U4: HatBackend::KiroAgent variant and its `agent` field are deleted.
@@ -1006,6 +1077,10 @@ idle_heartbeat_secs: 0
             // do not exercise the new idle knobs unintentionally.
             idle_heartbeat_secs: None,
             idle_weak_signal_cap: None,
+            // 2026-07-28-003 plan U3 (R1): same default, so
+            // existing tests don't accidentally exercise the
+            // startup-grace branch.
+            startup_grace_secs: None,
             // 2026-06-17-004 U2 (R3): test helper does not need
             // the new field; explicit `None` keeps the helper
             // aligned with `HatConfig::default()`.

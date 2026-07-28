@@ -139,6 +139,11 @@ pub struct HandleWaveOutcome {
 /// resolved, prompt built, env vars injected, events file path
 /// resolved). The executor only runs the future.
 pub(crate) struct WorkerRequest {
+    // 2026-07-28-003 plan U5 (E15 / KTD7): `#[derive(Clone)]`
+    // so the supervisor task body can re-execute the request
+    // in-place after a retryable failure. `CliBackend` derives
+    // Clone; sender / Arc / PathBuf / Duration / String / Option
+    // are all Clone; `tokio::sync::mpsc::Sender` is Clone.
     pub(crate) index: u32,
     pub(crate) backend: CliBackend,
     pub(crate) prompt: String,
@@ -174,6 +179,59 @@ pub(crate) struct WorkerRequest {
     /// Only meaningful when `idle_heartbeat` is `Some`; the default
     /// (8) is set by `DetectedWave::idle_weak_signal_cap()`.
     pub(crate) idle_weak_signal_cap: u32,
+    /// 2026-07-28-003 plan U3 (R1): wave worker startup grace window.
+    /// Resolution mirrors `idle_heartbeat`: `None` disables the
+    /// grace half of the dual-clock lease (`seen_first_signal`
+    /// stays `false` forever in practice because no grace deadline
+    /// is computed). `Some(0)` is collapsed upstream by
+    /// `DetectedWave::startup_grace_secs()`. Effective only when
+    /// `idle_heartbeat` is also `Some` (KTD1).
+    pub(crate) startup_grace: Option<Duration>,
+}
+
+// 2026-07-28-003 plan U5 (E15 / KTD7): manual `Clone` impl
+// instead of `#[derive(Clone)]` because `WorkerRequest` carries
+// `progress_tx: tokio::sync::mpsc::UnboundedSender<…>` (cheap
+// clone) and the rest is plain data. Keeping the manual impl
+// explicit lets the type's SSoT for the dispatcher stay on a
+// single readable block without `#[derive(...)]` macro clutter.
+impl Clone for WorkerRequest {
+    fn clone(&self) -> Self {
+        Self {
+            index: self.index,
+            backend: self.backend.clone(),
+            prompt: self.prompt.clone(),
+            worker_events_path: self.worker_events_path.clone(),
+            worker_timeout: self.worker_timeout,
+            progress_tx: self.progress_tx.clone(),
+            worker_rpc_tx: self.worker_rpc_tx.clone(),
+            worker_tui_state: self.worker_tui_state.clone(),
+            assigned_dimension: self.assigned_dimension.clone(),
+            cwd: self.cwd.clone(),
+            idle_heartbeat: self.idle_heartbeat,
+            idle_weak_signal_cap: self.idle_weak_signal_cap,
+            startup_grace: self.startup_grace,
+        }
+    }
+}
+
+/// 2026-07-28-003 plan U5 (A1 / A3): for **intermediate** retry
+/// attempts the worker must NOT push progress / RPC / TUI
+/// side-effects to the live dispatcher / TUI / RPC subscribers —
+/// only the final attempt's outcome escapes. We swap each
+/// shared sender for a fresh one whose receiver we drop on the
+/// floor: `try_send` / `send` / `blocking_send` on those senders
+/// remain infallible no-ops (the underlying `mpsc` buffer
+/// accepts up to capacity, then no-ops the rest).
+fn silent_request(orig: &WorkerRequest) -> WorkerRequest {
+    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel::<(u32, bool, Duration)>();
+    let (rpc_tx, _rpc_rx) = tokio::sync::mpsc::channel::<RpcEvent>(8);
+    let tui_state = Arc::new(std::sync::Mutex::new(ralph_tui::TuiState::default()));
+    let mut r = orig.clone();
+    r.progress_tx = tx;
+    r.worker_rpc_tx = Some(rpc_tx);
+    r.worker_tui_state = Some(tui_state);
+    r
 }
 
 /// Dispatcher-internal seam that abstracts "run one wave worker".
@@ -245,6 +303,12 @@ impl WaveWorkerExecutor for ProductionExecutor {
         mut request: WorkerRequest,
     ) -> Pin<Box<dyn Future<Output = (u32, WaveWorkerOutcome)> + Send>> {
         Box::pin(async move {
+            // 2026-07-28-003 plan U3 (R1): forward `startup_grace`
+            // out of the request so the worker can plug it into
+            // `LeaseConfig.startup_grace_ms`. `take()` is fine
+            // because the request is moved into `run_wave_worker`
+            // and never reused (the executor owns the dispatch).
+            let startup_grace = request.startup_grace.take();
             run_wave_worker(
                 request.index,
                 &request.backend,
@@ -261,6 +325,7 @@ impl WaveWorkerExecutor for ProductionExecutor {
                 // to the spawned worker process. `None` keeps the
                 // legacy `std::env::current_dir()` behaviour.
                 request.cwd.as_deref(),
+                startup_grace,
             )
             .await
         })
@@ -588,6 +653,11 @@ pub async fn handle_wave_events(
                 },
                 Arc::new(DefaultWorktreeFactory),
                 cap,
+                // 2026-07-28-003 plan U4 (KTD6): default wave path
+                // is a feature-flag / BDD seam, not operator-facing;
+                // pin at the historical default (1) so legacy tests
+                // stay bit-for-bit identical.
+                1,
             );
             Some(Arc::new(bridge) as Arc<dyn ralph_core::supervisor::SupervisorBridge>)
         } else {
@@ -1293,6 +1363,12 @@ pub async fn execute_wave_structured(
         .idle_heartbeat_secs()
         .map(|secs| Duration::from_secs(secs as u64));
     let idle_weak_signal_cap = wave.idle_weak_signal_cap();
+    // 2026-07-28-003 plan U3 (R1): startup_grace resolved through
+    // `DetectedWave::startup_grace_secs` — `None` / `Some(0)`
+    // already collapsed to `None` upstream.
+    let startup_grace: Option<Duration> = wave
+        .startup_grace_secs()
+        .map(|secs| Duration::from_secs(secs as u64));
     // Use an explicitly-configured aggregate timeout (worker or consumer)
     // directly.  Only fall back to the per-worker-timeout × batches formula
     // when no aggregate timeout is available.
@@ -1451,6 +1527,10 @@ pub async fn execute_wave_structured(
             cwd: None,
             idle_heartbeat,
             idle_weak_signal_cap,
+            // 2026-07-28-003 plan U3 (R1): forward the hat-configured
+            // startup grace to the worker. Both `None` and `Some(0)`
+            // were collapsed to `None` by `DetectedWave::startup_grace_secs`.
+            startup_grace,
         });
     }
 
@@ -1897,6 +1977,11 @@ pub(crate) async fn execute_wave_via_supervisor_with_executor(
         .idle_heartbeat_secs()
         .map(|secs| Duration::from_secs(secs as u64));
     let idle_weak_signal_cap = wave.idle_weak_signal_cap();
+    // 2026-07-28-003 plan U3 (R1): symmetric to the legacy path.
+    // Mirrors `idle_heartbeat` resolution above.
+    let startup_grace: Option<Duration> = wave
+        .startup_grace_secs()
+        .map(|secs| Duration::from_secs(secs as u64));
     let aggregate_timeout =
         if wave.has_explicit_aggregate_timeout() || wave.consumer_aggregate_timeout.is_some() {
             Duration::from_secs(wave.aggregate_timeout_secs())
@@ -1943,6 +2028,13 @@ pub(crate) async fn execute_wave_via_supervisor_with_executor(
     // the wave was already registered by the boot redrive scan. Skip
     // `register_wave_if_absent` and verify the wave exists to fail-closed
     // on a missing row.
+    //
+    // 2026-07-28-003 plan U4 (R8 / R14 / S13): in the register branch,
+    // read the budget from the bridge (which surfaces
+    // `SupervisorConfig::slot_retry_budget`) so this call and the mirror
+    // call in `run_supervisor_fan_in` (fan-in path) always agree on the
+    // exact same value (memory.rs:388-400 reports an inconsistency as a
+    // store error).
     let store_wave_id = if let Some(pre_id) = pre_registered_id {
         // Verify the pre-registered wave exists in the store.
         // `fan_in_status` returns the wave snapshot; an error means
@@ -1963,7 +2055,12 @@ pub(crate) async fn execute_wave_via_supervisor_with_executor(
             }
         }
     } else {
-        match bridge.register_wave_if_absent(wave_kind, &wave.wave_id, wave.total, 1) {
+        match bridge.register_wave_if_absent(
+            wave_kind,
+            &wave.wave_id,
+            wave.total,
+            bridge.slot_retry_budget(),
+        ) {
             Ok(id) => id,
             Err(err) => {
                 // 2026-07-22-001 plan U2: register errors fail closed.
@@ -2250,6 +2347,10 @@ pub(crate) async fn execute_wave_via_supervisor_with_executor(
                 cwd: slot_cwd,
                 idle_heartbeat,
                 idle_weak_signal_cap,
+                // 2026-07-28-003 plan U3 (R1): forward startup grace
+                // through the supervisor dispatch path. Same accessors
+                // as the legacy path.
+                startup_grace,
             }),
             preview,
             dimension: assigned_dimension,
@@ -2650,11 +2751,16 @@ pub(crate) fn run_supervisor_fan_in(
     // under `completed.wave_id`; `register_wave_if_absent` returns
     // the existing store id on re-entry so the coordinator reads the
     // same row the slot results were recorded against.
+    //
+    // 2026-07-28-003 plan U4 (R14 / S13): mirror of the spawn
+    // path's registration call; reads the budget from the bridge
+    // so the two `register_wave_if_absent` calls always agree
+    // on the same value.
     let store_wave_id = match bridge.register_wave_if_absent(
         wave_kind,
         &completed.wave_id,
         completed.wave_total,
-        1,
+        bridge.slot_retry_budget(),
     ) {
         Ok(id) => id,
         Err(err) => {
@@ -4993,11 +5099,28 @@ async fn dispatch_wave_inner_with_release<E: WaveWorkerExecutor + ?Sized>(
         // Replace the placeholder progress_tx with the real sender.
         let mut request = request;
         request.progress_tx = progress_tx.clone();
+        // 2026-07-28-003 plan U5 (A2): bring the wave-level
+        // partial / aggregate deadlines into the worker task so
+        // the in-task retry loop can stop retrying once the
+        // dispatcher-level budget expires (instead of letting a
+        // single retryable slot burn the entire wave_timeout).
+        let retry_partial_deadline = ctx.partial_deadline;
+        let retry_aggregate_deadline = ctx.aggregate_deadline;
 
         join_set.spawn(async move {
             // The Drop guard is installed before waiting on the local
             // semaphore, so JoinSet abort/cancellation also releases
             // the store-side permit for an approved slot.
+            //
+            // 2026-07-28-003 plan U5: capture the retry budget
+            // BEFORE moving `terminal_bridge` into the guard so
+            // the attempt loop can read it. `None` legacy path
+            // collapses to a budget of `0` (no retries), keeping
+            // the pre-U5 bit-for-bit semantics.
+            let retry_budget: u32 = terminal_bridge
+                .as_ref()
+                .map(|b| b.slot_retry_budget())
+                .unwrap_or(0);
             let mut release_guard =
                 terminal_bridge
                     .zip(terminal_wave_id)
@@ -5033,7 +5156,116 @@ async fn dispatch_wave_inner_with_release<E: WaveWorkerExecutor + ?Sized>(
             // the permit to the executor; the executor does not
             // need it.
             let _permit = permit;
-            let result = executor.execute(request).await;
+
+            // 2026-07-28-003 plan U5 (R9 / R10 / R11 / R12 / R13):
+            // wrapper around `executor.execute(request).await` that
+            // retries on a retryable, frozen-code failure as long
+            // as the bridge's `slot_retry_budget()` has not been
+            // exhausted. The loop runs IN this task (KTD7) so
+            // harvest / store / tracker never see the intermediate
+            // attempt — the dispatcher only consumes the final
+            // attempt's outcome (KTD9). `WorkerRequest: Clone`
+            // (U5 E15) lets us re-enter `execute()` after a retry
+            // decision without consuming the request.
+            //
+            // Mid-attempt contract (A1 / A3): each non-final
+            // attempt's WorkerRequest has its `progress_tx`,
+            // `worker_rpc_tx` and `worker_tui_state` swapped for
+            // a no-op channel so the dispatcher / TUI / RPC
+            // subscribers only see the FINAL attempt's outcome.
+            //
+            // Deadline contract (A2): before each retry the loop
+            // checks the wave-level partial / aggregate deadlines;
+            // once either fires we break out of the loop and let
+            // the final attempt's outcome take the natural record
+            // path — we never extend a single slot beyond the
+            // wave's budget.
+            let result = {
+                let mut attempt: u32 = 1;
+                // 2026-07-28-003 plan U5: use the budget we captured
+                // before moving `terminal_bridge` into the guard.
+                let budget = retry_budget;
+                let mut current_request = request;
+                let last_outcome: (u32, WaveWorkerOutcome) = loop {
+                    let outcome = executor.execute(current_request.clone()).await;
+                    let (_idx, res) = &outcome;
+                    let classified = classify_slot_result(res);
+                    let mut should_retry = false;
+                    if let Some(_guard) = release_guard.as_ref() {
+                        use ralph_core::supervisor::worker_outcome::{
+                            SlotOutcome, is_retryable_slot_reason,
+                        };
+                        // KTD8: retry decision uses the FROZEN static
+                        // code (the typed reason from
+                        // `classify_slot_result`), not the worker's
+                        // dynamic Err message. `ClassifiedReason` is
+                        // the dispatcher-local helper enum declared
+                        // near `classify_slot_result` below; we match
+                        // on its `Static` arm to read the frozen code.
+                        // `ClassifiedReason::Static(_)` carries a
+                        // `&'a str` we dereference into a `&str`.
+                        let frozen_code: Option<&str> =
+                            match (&classified.outcome, &classified.reason) {
+                                (
+                                    SlotOutcome::Failed { .. },
+                                    Some(ClassifiedReason::Static(code)),
+                                ) => Some(*code),
+                                _ => None,
+                            };
+                        if let Some(code) = frozen_code {
+                            // C1: drop the `attempt < u32::MAX` dead
+                            // guard — `attempt.saturating_add(1)` plus
+                            // the `attempt <= budget` check already
+                            // bound the loop; the u32::MAX check is
+                            // unreachable once `budget <= 2`.
+                            // A2: bail out of the retry loop the
+                            // moment the wave-level partial /
+                            // aggregate deadline has passed, so a
+                            // single retryable slot cannot burn
+                            // `budget * wave_timeout` of wall time.
+                            let now = tokio::time::Instant::now();
+                            let deadline_passed = now >= retry_partial_deadline
+                                || now >= retry_aggregate_deadline;
+                            if !deadline_passed
+                                && is_retryable_slot_reason(code)
+                                && attempt <= budget
+                            {
+                                tracing::warn!(
+                                    slot_index = request_index,
+                                    attempt,
+                                    budget,
+                                    code = %code,
+                                    "U5: retrying slot after frozen-code failure"
+                                );
+                                should_retry = true;
+                            } else if deadline_passed {
+                                tracing::warn!(
+                                    slot_index = request_index,
+                                    attempt,
+                                    code = %code,
+                                    "U5: skipping retry because wave-level partial/aggregate deadline has passed"
+                                );
+                            }
+                        }
+                    }
+                    if !should_retry {
+                        break outcome;
+                    }
+                    // A1 / A3: hand intermediate attempts a request
+                    // whose `progress_tx` / `worker_rpc_tx` /
+                    // `worker_tui_state` are no-op channels. The
+                    // FINAL attempt below keeps the real senders
+                    // so the dispatcher / TUI / RPC subscribers
+                    // observe exactly one Done / Failed notification
+                    // per (wave, slot).
+                    attempt = attempt.saturating_add(1);
+                    current_request = silent_request(&current_request);
+                    // Loop continues; **only** the final attempt's
+                    // outcome escapes (KTD9: do not salvage
+                    // intermediate batches).
+                };
+                last_outcome
+            };
 
             // 2026-07-23-001 plan U5 (R8): record the terminal slot
             // outcome into the supervisor store at the structured
@@ -6548,6 +6780,11 @@ hats: {}
             cwd: None,
             idle_heartbeat: None,
             idle_weak_signal_cap: 8,
+            // 2026-07-28-003 plan U3 (R1): the dispatcher test
+            // fixtures pass `None` here so the worker runs the
+            // legacy / no-grace path even when idle is enabled
+            // via the helper's own idle config.
+            startup_grace: None,
         }
     }
 
@@ -7956,6 +8193,9 @@ hats: {}
                 _ok: bool,
             ) -> Result<(), BridgeError> {
                 Ok(())
+            }
+            fn slot_retry_budget(&self) -> u32 {
+                0
             }
         }
 
@@ -10285,6 +10525,10 @@ hats: {}
             context,
             Arc::new(DefaultWorktreeFactory),
             u32::MAX,
+            // 2026-07-28-003 plan U4: surface `slot_retry_budget`
+            // arg so this characterization test does not regress
+            // budget pass-through.
+            1,
         );
         let reported = bridge
             .repo_root()
@@ -10951,6 +11195,9 @@ hats: {}
                 p: ralph_core::supervisor::WavePhase,
             ) -> Result<(), BridgeError> {
                 self.inner.set_wave_phase(id, p)
+            }
+            fn slot_retry_budget(&self) -> u32 {
+                self.inner.slot_retry_budget()
             }
         }
 
@@ -11685,6 +11932,9 @@ hats: {}
             // only assert the side effects they care about.
             let _ = wave_id;
             Ok(())
+        }
+        fn slot_retry_budget(&self) -> u32 {
+            0
         }
     }
 }

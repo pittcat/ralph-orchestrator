@@ -122,6 +122,21 @@ impl DetectedWave {
         self.idle_heartbeat_secs().is_some()
     }
 
+    /// 2026-07-28-003 plan U3 (R1): effective startup-grace
+    /// window in seconds. Resolution:
+    /// 1. `Some(n)` with `n > 0` — return `Some(n)`.
+    /// 2. `None` or `Some(0)` — return `None` (grace disabled).
+    ///
+    /// Mirrors [`Self::idle_heartbeat_secs`] semantics so the
+    /// dispatcher collapses both `None` and `Some(0)` to the
+    /// worker as `None`.
+    pub fn startup_grace_secs(&self) -> Option<u32> {
+        match self.hat_config.startup_grace_secs {
+            Some(0) | None => None,
+            Some(n) => Some(n),
+        }
+    }
+
     /// Effective cap on consecutive weak-only heartbeat renewals.
     ///
     /// Resolution:
@@ -643,6 +658,18 @@ mod tests {
         idle: Option<u32>,
         cap: Option<u32>,
     ) -> DetectedWave {
+        detected_wave_with_hat_grace(timeout, idle, cap, None)
+    }
+
+    fn detected_wave_with_hat_grace(
+        timeout: Option<u32>,
+        idle: Option<u32>,
+        cap: Option<u32>,
+        startup_grace: Option<u32>,
+    ) -> DetectedWave {
+        let grace_line = startup_grace
+            .map(|n| format!("    startup_grace_secs: {n}\n"))
+            .unwrap_or_default();
         let yaml = format!(
             r#"
 hats:
@@ -655,6 +682,7 @@ hats:
     timeout: {timeout_val}
     idle_heartbeat_secs: {idle_val}
     idle_weak_signal_cap: {cap_val}
+{grace_line}
 "#,
             timeout_val = timeout
                 .map(|n| n.to_string())
@@ -703,6 +731,26 @@ hats:
         assert_eq!(w.idle_heartbeat_secs(), Some(120));
         assert!(w.idle_enabled());
         assert_eq!(w.per_worker_timeout_secs(), 1800);
+    }
+
+    // 2026-07-28-003 plan U3 (R1): startup_grace_secs accessor table.
+    // Mirrors the idle_heartbeat_secs accessor collapse rules so the
+    // dispatcher is responsible for None / Some(0) → None translation.
+    #[test]
+    fn startup_grace_secs_accessor_table() {
+        // None → disabled
+        let w = detected_wave_with_hat_grace(Some(600), Some(120), Some(8), None);
+        assert_eq!(w.startup_grace_secs(), None);
+        // Some(0) → disabled (explicit opt-out)
+        let w = detected_wave_with_hat_grace(Some(600), Some(120), Some(8), Some(0));
+        assert_eq!(
+            w.startup_grace_secs(),
+            None,
+            "Some(0) should collapse to None (mirror idle_heartbeat_secs)"
+        );
+        // Some(n>0) → use as-is
+        let w = detected_wave_with_hat_grace(Some(600), Some(120), Some(8), Some(300));
+        assert_eq!(w.startup_grace_secs(), Some(300));
     }
 
     #[test]
