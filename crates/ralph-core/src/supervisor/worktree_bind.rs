@@ -163,7 +163,7 @@ fn exec_binding<F: WorktreeFactory>(
     wave_id: &str,
     slot_index: u32,
 ) -> SupervisorStoreResult<WorktreeBinding> {
-    let branch = format!("{loop_id}-{kind}-{slot_index}");
+    let branch = format!("{loop_id}-{kind}-{wave_id}-{slot_index}");
     let wt = factory
         .create(repo_root.clone(), branch.clone())
         .map_err(|err| SupervisorStoreError::Storage(err.to_string()))?;
@@ -270,10 +270,10 @@ mod tests {
                 binding.env.keys().collect::<Vec<_>>()
             );
         }
-        // Branch naming follows `{loop_id}-{kind}-{slot_index}`.
+        // Branch naming follows `{loop_id}-{kind}-{wave_id}-{slot_index}`.
         let calls = f.calls.lock().unwrap();
         assert_eq!(calls.len(), 1);
-        assert_eq!(calls[0].1, "loop-1-exec-0");
+        assert_eq!(calls[0].1, "loop-1-exec-w-1-0");
     }
 
     #[test]
@@ -315,7 +315,7 @@ mod tests {
         .unwrap();
         let calls = f.calls.lock().unwrap();
         assert_eq!(calls.len(), 1);
-        assert_eq!(calls[0].1, "loop-z-fix-3");
+        assert_eq!(calls[0].1, "loop-z-fix-w-99-3");
         let _ = binding;
     }
 
@@ -383,6 +383,9 @@ mod tests {
         )
         .unwrap();
         assert!(binding.resource.worktree_path.is_some());
-        assert_eq!(binding.resource.branch.as_deref(), Some("loop-2-exec-0"));
+        assert_eq!(
+            binding.resource.branch.as_deref(),
+            Some("loop-2-exec-w-2-0")
+        );
     }
 }

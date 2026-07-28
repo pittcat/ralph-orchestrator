@@ -339,7 +339,7 @@ impl SupervisorBridge for CoordinatorSupervisorBridge {
         // storage. The factory contract is the same: success
         // yields a `Worktree { path, branch }`, failure yields
         // `BridgeError::Store`.
-        let branch = format!("{}-{}-{}", ctx.loop_id, kind, slot_index);
+        let branch = format!("{}-{}-{}-{}", ctx.loop_id, kind, wave_id, slot_index);
         let wt = self
             .factory
             .create(ctx.repo_root.clone(), branch.clone())

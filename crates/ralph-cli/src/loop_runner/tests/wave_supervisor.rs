@@ -888,12 +888,6 @@ fn u8_bind_slot_env_does_not_contain_ralph_wave_id() {
     let factory = std::sync::Arc::new(RecordingFactory::new());
     let tmp = tempfile::tempdir().expect("temp dir");
     let repo_root = tmp.path().to_path_buf();
-    // RecordingFactory needs the branch pre-registered so create()
-    // returns Ok instead of `RecordingFactory: no path for branch`.
-    factory.pre_create(
-        "u8-loop-exec-0",
-        tmp.path().join(".ralph/u8-slot-0-worktree"),
-    );
     let loop_ctx = LoopContext::worktree("u8-loop".to_string(), repo_root.clone(), repo_root);
     let context = ProductionBridgeContext {
         loop_id: "u8-loop".to_string(),
@@ -910,6 +904,13 @@ fn u8_bind_slot_env_does_not_contain_ralph_wave_id() {
     let store_wave_id = bridge
         .register_wave_if_absent(WaveKind::Exec, "u8-wave", 1, 0)
         .expect("register must succeed");
+
+    // 2026-07-28-002 plan U1: branch naming now follows
+    // `{loop_id}-{kind}-{wave_id}-{slot_index}`.
+    factory.pre_create(
+        format!("u8-loop-exec-{store_wave_id}-0").as_str(),
+        tmp.path().join(format!(".ralph/u8-slot-{store_wave_id}-0-worktree")),
+    );
 
     let binding = bridge
         .bind_slot(WaveKind::Exec, &store_wave_id, 0)
@@ -933,6 +934,111 @@ fn u8_bind_slot_env_does_not_contain_ralph_wave_id() {
         1,
         "RecordingFactory must record exactly one worktree creation"
     );
+}
+
+/// S1 (2026-07-28-002 plan U1): same loop, two consecutive exec waves,
+/// same slot index (0) — the branch names must be different so the
+/// second wave does not conflict with the first wave's worktree.
+///
+/// Branch naming follows `{loop_id}-{kind}-{wave_id}-{slot_index}`.
+///
+/// This is the core regression test for the wave-slot namespace fix:
+/// without `wave_id` in the branch name, both waves would produce
+/// `loop-S1-exec-0` and the second `bind_slot` would either reuse
+/// the first wave's worktree or fail if the branch already exists.
+#[test]
+fn s1_same_loop_different_waves_get_distinct_branches() {
+    let factory = std::sync::Arc::new(RecordingFactory::new());
+    let tmp = tempfile::tempdir().expect("temp dir");
+
+    // Pre-register branch names following the new convention:
+    // {loop_id}-{kind}-{wave_id}-{slot_index}
+    let loop_id = "S1";
+    let wave_id_1 = "w-1";
+    let wave_id_2 = "w-2";
+    let slot_index = 0u32;
+
+    factory.pre_create(
+        &format!("{loop_id}-exec-{wave_id_1}-{slot_index}"),
+        tmp.path().join("wt-wave-1"),
+    );
+    factory.pre_create(
+        &format!("{loop_id}-exec-{wave_id_2}-{slot_index}"),
+        tmp.path().join("wt-wave-2"),
+    );
+
+    let (bridge, _store) = production_bridge_with_factory(
+        factory.clone() as std::sync::Arc<dyn WorktreeFactory>,
+        tmp.path().to_path_buf(),
+        loop_id,
+    );
+
+    // Register two distinct waves.
+    let store_wave_id_1 = bridge
+        .register_wave_if_absent(WaveKind::Exec, wave_id_1, 1, 0)
+        .expect("register wave 1 must succeed");
+    let store_wave_id_2 = bridge
+        .register_wave_if_absent(WaveKind::Exec, wave_id_2, 1, 0)
+        .expect("register wave 2 must succeed");
+
+    // Bind slot 0 for wave 1.
+    let binding_1 = bridge
+        .bind_slot(WaveKind::Exec, &store_wave_id_1, slot_index)
+        .expect("bind_slot wave 1 must succeed")
+        .expect("Exec binding must be Some");
+
+    // Bind slot 0 for wave 2.
+    let binding_2 = bridge
+        .bind_slot(WaveKind::Exec, &store_wave_id_2, slot_index)
+        .expect("bind_slot wave 2 must succeed")
+        .expect("Exec binding must be Some");
+
+    // Both bindings succeeded.
+    assert!(
+        binding_1.worktree_path.is_some(),
+        "wave 1 binding must have worktree_path"
+    );
+    assert!(
+        binding_2.worktree_path.is_some(),
+        "wave 2 binding must have worktree_path"
+    );
+
+    // Distinct worktree paths.
+    assert_ne!(
+        binding_1.worktree_path, binding_2.worktree_path,
+        "two waves with the same slot_index must receive distinct worktree paths"
+    );
+
+    // Branch names follow the new convention and are distinct.
+    let branch_1 = binding_1
+        .env
+        .get("RALPH_WAVE_WORKTREE_BRANCH")
+        .map(String::as_str);
+    let branch_2 = binding_2
+        .env
+        .get("RALPH_WAVE_WORKTREE_BRANCH")
+        .map(String::as_str);
+
+    assert_eq!(
+        branch_1,
+        Some("S1-exec-w-1-0"),
+        "wave 1 branch must follow {{loop_id}}-{{kind}}-{{wave_id}}-{{slot_index}}"
+    );
+    assert_eq!(
+        branch_2,
+        Some("S1-exec-w-2-0"),
+        "wave 2 branch must follow {{loop_id}}-{{kind}}-{{wave_id}}-{{slot_index}}"
+    );
+    assert_ne!(
+        branch_1, branch_2,
+        "two waves must produce distinct branch names even for the same slot_index"
+    );
+
+    // Factory was called exactly twice with different branch names.
+    let calls = factory.calls_snapshot();
+    assert_eq!(calls.len(), 2, "two waves must call the factory twice");
+    assert_eq!(calls[0].1, "S1-exec-w-1-0");
+    assert_eq!(calls[1].1, "S1-exec-w-2-0");
 }
 
 /// 2026-07-26-002 plan U8 (R10): the worker timeout message and
@@ -1114,8 +1220,6 @@ fn production_bridge_with_factory(
 fn exec_kind_produces_unique_branch_path_cwd() {
     let factory = std::sync::Arc::new(RecordingFactory::new());
     let tmp = tempfile::tempdir().expect("temp dir");
-    factory.pre_create("u4-loop-exec-0", tmp.path().join("wt-0"));
-    factory.pre_create("u4-loop-exec-1", tmp.path().join("wt-1"));
 
     let (bridge, store) = production_bridge_with_factory(
         factory.clone() as std::sync::Arc<dyn WorktreeFactory>,
@@ -1126,6 +1230,20 @@ fn exec_kind_produces_unique_branch_path_cwd() {
     let store_wave_id = bridge
         .register_wave_if_absent(WaveKind::Exec, "u4-wave", 2, 0)
         .expect("register must succeed");
+
+    // 2026-07-28-002 plan U1: branch naming now follows
+    // `{loop_id}-{kind}-{wave_id}-{slot_index}`. The store assigns
+    // `store_wave_id` (= `w-{seq}`) on register, so pre-register the
+    // factory paths using the live id rather than a hard-coded
+    // branch string.
+    factory.pre_create(
+        format!("u4-loop-exec-{store_wave_id}-0").as_str(),
+        tmp.path().join("wt-0"),
+    );
+    factory.pre_create(
+        format!("u4-loop-exec-{store_wave_id}-1").as_str(),
+        tmp.path().join("wt-1"),
+    );
 
     let binding_0 = bridge
         .bind_slot(WaveKind::Exec, &store_wave_id, 0)
@@ -1146,23 +1264,23 @@ fn exec_kind_produces_unique_branch_path_cwd() {
             .env
             .get("RALPH_WAVE_WORKTREE_BRANCH")
             .map(String::as_str),
-        Some("u4-loop-exec-0"),
-        "slot 0 branch must follow the {{loop_id}}-{{kind}}-{{slot_index}} convention"
+        Some(format!("u4-loop-exec-{store_wave_id}-0").as_str()),
+        "slot 0 branch must follow the {{loop_id}}-{{kind}}-{{wave_id}}-{{slot_index}} convention"
     );
     assert_eq!(
         binding_1
             .env
             .get("RALPH_WAVE_WORKTREE_BRANCH")
             .map(String::as_str),
-        Some("u4-loop-exec-1"),
-        "slot 1 branch must follow the {{loop_id}}-{{kind}}-{{slot_index}} convention"
+        Some(format!("u4-loop-exec-{store_wave_id}-1").as_str()),
+        "slot 1 branch must follow the {{loop_id}}-{{kind}}-{{wave_id}}-{{slot_index}} convention"
     );
 
     // Factory observed both calls.
     let calls = factory.calls_snapshot();
     assert_eq!(calls.len(), 2, "two exec slots must call the factory twice");
-    assert_eq!(calls[0].1, "u4-loop-exec-0");
-    assert_eq!(calls[1].1, "u4-loop-exec-1");
+    assert_eq!(calls[0].1, format!("u4-loop-exec-{store_wave_id}-0"));
+    assert_eq!(calls[1].1, format!("u4-loop-exec-{store_wave_id}-1"));
 
     // Store has the per-slot `SlotResource` recorded so fan-in can
     // resolve them later (R7 / R10).
@@ -1176,20 +1294,23 @@ fn exec_kind_produces_unique_branch_path_cwd() {
         .iter()
         .find(|r| r.slot_index == 1)
         .expect("slot 1 resource");
-    assert_eq!(branch_0.branch.as_deref(), Some("u4-loop-exec-0"));
-    assert_eq!(branch_1.branch.as_deref(), Some("u4-loop-exec-1"));
+    assert_eq!(
+        branch_0.branch.as_deref(),
+        Some(format!("u4-loop-exec-{store_wave_id}-0").as_str())
+    );
+    assert_eq!(
+        branch_1.branch.as_deref(),
+        Some(format!("u4-loop-exec-{store_wave_id}-1").as_str())
+    );
 }
 
 /// U4 R7: production `bind_slot` for `Fix` MUST use the same
-/// `{loop_id}-{kind}-{slot_index}` branch convention and hand
+/// `{loop_id}-{kind}-{wave_id}-{slot_index}` branch convention and hand
 /// back distinct worktree paths.
 #[test]
 fn fix_kind_produces_unique_branch_path_cwd() {
     let factory = std::sync::Arc::new(RecordingFactory::new());
     let tmp = tempfile::tempdir().expect("temp dir");
-    factory.pre_create("u4-loop-fix-0", tmp.path().join("fix-wt-0"));
-    factory.pre_create("u4-loop-fix-1", tmp.path().join("fix-wt-1"));
-    factory.pre_create("u4-loop-fix-2", tmp.path().join("fix-wt-2"));
 
     let (bridge, store) = production_bridge_with_factory(
         factory.clone() as std::sync::Arc<dyn WorktreeFactory>,
@@ -1201,6 +1322,15 @@ fn fix_kind_produces_unique_branch_path_cwd() {
         .register_wave_if_absent(WaveKind::Fix, "u4-fix-wave", 3, 0)
         .expect("register must succeed");
 
+    // 2026-07-28-002 plan U1: branch naming now follows
+    // `{loop_id}-{kind}-{wave_id}-{slot_index}`.
+    for slot in 0u32..3 {
+        factory.pre_create(
+            format!("u4-loop-fix-{store_wave_id}-{slot}").as_str(),
+            tmp.path().join(format!("fix-wt-{slot}")),
+        );
+    }
+
     for slot in 0u32..3 {
         let binding = bridge
             .bind_slot(WaveKind::Fix, &store_wave_id, slot)
@@ -1211,7 +1341,7 @@ fn fix_kind_produces_unique_branch_path_cwd() {
                 .env
                 .get("RALPH_WAVE_WORKTREE_BRANCH")
                 .map(String::as_str),
-            Some(format!("u4-loop-fix-{slot}").as_str()),
+            Some(format!("u4-loop-fix-{store_wave_id}-{slot}").as_str()),
             "fix slot {slot} branch must follow the convention"
         );
         assert!(
@@ -1229,11 +1359,11 @@ fn fix_kind_produces_unique_branch_path_cwd() {
     assert_eq!(
         branches,
         vec![
-            "u4-loop-fix-0".to_string(),
-            "u4-loop-fix-1".to_string(),
-            "u4-loop-fix-2".to_string()
+            format!("u4-loop-fix-{store_wave_id}-0"),
+            format!("u4-loop-fix-{store_wave_id}-1"),
+            format!("u4-loop-fix-{store_wave_id}-2"),
         ],
-        "fix branch names must follow the loop-kind-index convention"
+        "fix branch names must follow the loop-kind-wave_id-index convention"
     );
 }
 
@@ -1332,7 +1462,7 @@ fn bind_slot_failure_fail_closed_no_main_workspace_write() {
         "bind_slot failure MUST NOT materialise .ralph/ under the workspace"
     );
     assert!(
-        !workspace.join("u4-loop-exec-0").exists(),
+        !workspace.join(format!("u4-loop-exec-{store_wave_id}-0")).exists(),
         "bind_slot failure MUST NOT create the slot branch dir under the workspace"
     );
 }
@@ -1411,8 +1541,6 @@ fn dispatcher_fail_closed_for_exec_bind_failure() {
 fn production_bridge_only_returns_none_for_review() {
     let factory = std::sync::Arc::new(RecordingFactory::new());
     let tmp = tempfile::tempdir().expect("temp dir");
-    factory.pre_create("u4-loop-exec-0", tmp.path().join("exec-wt"));
-    factory.pre_create("u4-loop-fix-0", tmp.path().join("fix-wt"));
 
     let (bridge, _store) = production_bridge_with_factory(
         factory.clone() as std::sync::Arc<dyn WorktreeFactory>,
@@ -1420,9 +1548,24 @@ fn production_bridge_only_returns_none_for_review() {
         "u4-loop",
     );
 
+    // 2026-07-28-002 plan U1: branch naming now follows
+    // `{loop_id}-{kind}-{wave_id}-{slot_index}`. Pre-create using
+    // the actual store wave ids.
     let exec_wave = bridge
         .register_wave_if_absent(WaveKind::Exec, "u4-exec-pin", 1, 0)
         .expect("register");
+    factory.pre_create(
+        format!("u4-loop-exec-{exec_wave}-0").as_str(),
+        tmp.path().join("exec-wt"),
+    );
+    let fix_wave = bridge
+        .register_wave_if_absent(WaveKind::Fix, "u4-fix-pin", 1, 0)
+        .expect("register");
+    factory.pre_create(
+        format!("u4-loop-fix-{fix_wave}-0").as_str(),
+        tmp.path().join("fix-wt"),
+    );
+
     let exec_binding = bridge
         .bind_slot(WaveKind::Exec, &exec_wave, 0)
         .expect("exec bind must succeed");
@@ -1431,9 +1574,6 @@ fn production_bridge_only_returns_none_for_review() {
         "production Exec bind MUST NOT return None; got None (old behaviour)"
     );
 
-    let fix_wave = bridge
-        .register_wave_if_absent(WaveKind::Fix, "u4-fix-pin", 1, 0)
-        .expect("register");
     let fix_binding = bridge
         .bind_slot(WaveKind::Fix, &fix_wave, 0)
         .expect("fix bind must succeed");
@@ -1476,8 +1616,6 @@ fn test_build_supervisor_bridge_provides_context_for_exec() {
 
     let factory = std::sync::Arc::new(RecordingFactory::new());
     let tmp = tempfile::tempdir().expect("temp dir");
-    factory.pre_create("u1-loop-exec-0", tmp.path().join("exec-wt-0"));
-    factory.pre_create("u1-loop-exec-1", tmp.path().join("exec-wt-1"));
 
     crate::loop_runner::install_factory_override_for_test(
         factory.clone() as std::sync::Arc<dyn WorktreeFactory>
@@ -1504,6 +1642,17 @@ fn test_build_supervisor_bridge_provides_context_for_exec() {
         .register_wave_if_absent(WaveKind::Exec, "u1-wave-exec", 2, 0)
         .expect("register must succeed");
 
+    // 2026-07-28-002 plan U1: branch naming now follows
+    // `{loop_id}-{kind}-{wave_id}-{slot_index}`.
+    factory.pre_create(
+        format!("u1-loop-exec-{store_wave_id}-0").as_str(),
+        tmp.path().join("exec-wt-0"),
+    );
+    factory.pre_create(
+        format!("u1-loop-exec-{store_wave_id}-1").as_str(),
+        tmp.path().join("exec-wt-1"),
+    );
+
     let binding_0 = bridge
         .bind_slot(WaveKind::Exec, &store_wave_id, 0)
         .expect("exec slot 0 must succeed");
@@ -1528,16 +1677,16 @@ fn test_build_supervisor_bridge_provides_context_for_exec() {
             .env
             .get("RALPH_WAVE_WORKTREE_BRANCH")
             .map(String::as_str),
-        Some("u1-loop-exec-0"),
-        "slot 0 branch must follow the {{loop_id}}-{{kind}}-{{slot_index}} convention"
+        Some(format!("u1-loop-exec-{store_wave_id}-0").as_str()),
+        "slot 0 branch must follow the {{loop_id}}-{{kind}}-{{wave_id}}-{{slot_index}} convention"
     );
     assert_eq!(
         binding_1
             .env
             .get("RALPH_WAVE_WORKTREE_BRANCH")
             .map(String::as_str),
-        Some("u1-loop-exec-1"),
-        "slot 1 branch must follow the {{loop_id}}-{{kind}}-{{slot_index}} convention"
+        Some(format!("u1-loop-exec-{store_wave_id}-1").as_str()),
+        "slot 1 branch must follow the {{loop_id}}-{{kind}}-{{wave_id}}-{{slot_index}} convention"
     );
 
     let calls = factory.calls_snapshot();
@@ -1562,9 +1711,6 @@ fn test_build_supervisor_bridge_provides_context_for_fix() {
 
     let factory = std::sync::Arc::new(RecordingFactory::new());
     let tmp = tempfile::tempdir().expect("temp dir");
-    factory.pre_create("u1-loop-fix-0", tmp.path().join("fix-wt-0"));
-    factory.pre_create("u1-loop-fix-1", tmp.path().join("fix-wt-1"));
-    factory.pre_create("u1-loop-fix-2", tmp.path().join("fix-wt-2"));
 
     crate::loop_runner::install_factory_override_for_test(
         factory.clone() as std::sync::Arc<dyn WorktreeFactory>
@@ -1591,6 +1737,15 @@ fn test_build_supervisor_bridge_provides_context_for_fix() {
         .register_wave_if_absent(WaveKind::Fix, "u1-wave-fix", 3, 0)
         .expect("register must succeed");
 
+    // 2026-07-28-002 plan U1: branch naming now follows
+    // `{loop_id}-{kind}-{wave_id}-{slot_index}`.
+    for slot in 0u32..3 {
+        factory.pre_create(
+            format!("u1-loop-fix-{store_wave_id}-{slot}").as_str(),
+            tmp.path().join(format!("fix-wt-{slot}")),
+        );
+    }
+
     for slot in 0u32..3 {
         let binding = bridge
             .bind_slot(WaveKind::Fix, &store_wave_id, slot)
@@ -1606,7 +1761,7 @@ fn test_build_supervisor_bridge_provides_context_for_fix() {
                 .env
                 .get("RALPH_WAVE_WORKTREE_BRANCH")
                 .map(String::as_str),
-            Some(format!("u1-loop-fix-{slot}").as_str()),
+            Some(format!("u1-loop-fix-{store_wave_id}-{slot}").as_str()),
             "fix slot {slot} branch must follow the convention"
         );
         assert!(
