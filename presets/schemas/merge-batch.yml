@@ -38,7 +38,18 @@ schemas:
       - target_branch
       - branch_order
       - per_branch_intent
+      - predicted_conflicts
+      - resolution_methods
     payload: json_object
+    field_docs:
+      predicted_conflicts:
+        meaning: For each predicted merge conflict point, the conflict type and rationale.
+        source: Reviewer writes from `git merge-tree` output + design understanding (per-branch intent).
+        fill_rule: Array of objects {branch, file, conflict_type, rationale}; one entry per predicted conflict.
+      resolution_methods:
+        meaning: Per predicted conflict, the resolution method the integrator must apply.
+        source: Reviewer writes from design understanding of both sides.
+        fill_rule: Array of objects {branch, file, method, rationale}; one entry per predicted conflict.
 
   # integrator → all prompt branches merged (or skipped because
   # already merged). Stabilizer picks this up. The integration
@@ -56,6 +67,38 @@ schemas:
       - branches_failed
       - merge_commit_shas
     payload: json_object
+    field_docs:
+      integration_complete:
+        meaning: True iff every prompt branch is merged (this run or pre-merged);
+          false aborts stabilization immediately.
+        source: Integrator writes from final state of `git merge` attempts.
+        fill_rule: true only if `branches_failed` is empty AND every prompt branch
+          is in `branches_merged` or `branches_skipped`.
+      ready_for_stabilization:
+        meaning: Mirror of `integration_complete`; false tells stabilizer to skip
+          the verification loop and emit `merge.stabilized(passed:false, reason:merge_incomplete)`.
+        source: Integrator writes equal to `integration_complete`.
+        fill_rule: Same value as `integration_complete`.
+      branches_merged:
+        meaning: Branches successfully merged into `<target>` during this run.
+        source: Integrator writes from `git merge` outputs.
+        fill_rule: Array of branch names; no overlap with `branches_failed` or
+          `branches_skipped`.
+      branches_skipped:
+        meaning: Branches already merged into `<target>` before this run
+          (verified via `git branch --merged <target>`).
+        source: Integrator writes from `git branch --merged <target>`.
+        fill_rule: Array of branch names; no overlap with `branches_merged`.
+      branches_failed:
+        meaning: Branches whose merge was aborted or could not complete,
+          with per-branch reasons.
+        source: Integrator writes from `git merge --abort` / conflict resolution failures.
+        fill_rule: Array of {branch, reason} objects; no overlap with `branches_merged`.
+      merge_commit_shas:
+        meaning: SHAs of merge commits created during this run, for the reporter
+          to include in REPORT.md.
+        source: Integrator writes from `git rev-parse HEAD` after each successful merge.
+        fill_rule: Array of full commit SHAs.
 
   # stabilizer → self-loop retry signal. The hat itself emits
   # this after a fix attempt; the next activation re-enters
@@ -67,6 +110,17 @@ schemas:
       - attempt
       - classification
     payload: json_object
+    field_docs:
+      attempt:
+        meaning: 1-indexed stabilization attempt number.
+        source: Stabilizer reads from `.ralph/merge/stabilize-state.json`
+          (or 1 on first attempt).
+        fill_rule: Increment from prior attempt; emit on every `merge.retest`.
+      classification:
+        meaning: Failure class from the last verification run.
+        source: Stabilizer writes from failure protocol §A
+          (`test_problem` | `business_problem`).
+        fill_rule: One of `test_problem` or `business_problem`; do not invent other values.
 
   # stabilizer → terminal workflow event. Reporter picks this
   # up to write the report and emit `merge.batch.complete`.
@@ -76,6 +130,28 @@ schemas:
     required_fields:
       - passed
     payload: json_object
+    field_docs:
+      passed:
+        meaning: True iff verification passed AND the integrator gate
+          (`integration_complete`) was true.
+        source: Stabilizer writes from verification outcome.
+        fill_rule: true only when verification passes AND merge was complete;
+          false otherwise (incl. `merge_incomplete` and `stabilization_exhausted`).
+      reason:
+        meaning: Why `passed` is false; null/omit when passed is true.
+        source: Stabilizer writes from failure / exhaustion gate.
+        fill_rule: One of `merge_incomplete` | `stabilization_exhausted`;
+          omit or null when `passed` is true.
+      branches_failed:
+        meaning: Echoed from `merge.integrated.branches_failed` when stabilization
+          short-circuits due to incomplete merge. Omit when merge was complete.
+        source: Stabilizer forwards from `merge.integrated.branches_failed`.
+        fill_rule: Same shape as `merge.integrated.branches_failed`;
+          only set when `reason == merge_incomplete`.
+      attempts:
+        meaning: Number of stabilization attempts made before this terminal event.
+        source: Stabilizer counts from `.ralph/merge/stabilize-state.json`.
+        fill_rule: Positive integer; ≥ 1 when stabilization actually ran.
 
   # reporter → sole completion token for merge-batch. Mirrors
   # the `merge.handled` shape in merge-loop: a single required

@@ -14,11 +14,16 @@
 #   ralph run -H builtin:merge-batch -P merge.prompt.md
 #   ralph run -c ralph.merge.yml -H builtin:merge-batch
 #
-# Artifacts (preset-owned paths under .ralph/merge/):
-#   .ralph/merge/stabilize-log.md
-#   .ralph/merge/stabilize-state.json
-#   .ralph/merge/REPORT.md  (operator-facing; required before complete)
-#   .ralph/merge/reports/<timestamp>.md  (optional stamped copy)
+# Artifacts (canonical layout under .ralph/merge/, owned by hats — not by this preset):
+#   .ralph/merge/stabilize-log.md        — stabilizer writes per attempt
+#   .ralph/merge/stabilize-state.json    — stabilizer writes/reads across attempts
+#   .ralph/merge/REPORT.md               — reporter writes (operator-facing; required
+#                                          before merge.batch.complete)
+#   .ralph/merge/reports/<timestamp>.md  — reporter optional stamped copy
+#
+# Lifecycle: stabilize-* files persist across the stabilization self-loop and are
+# the authoritative audit trail. REPORT.md is the durable operator-facing record;
+# reporter retains the entire .ralph/merge/ tree (no cleanup in this preset).
 
 topic_format_whitelist:
   - merge.batch.complete
@@ -207,7 +212,9 @@ hats:
       - branch order
       - per-branch design intent and risks
       - cross-branch interactions
-      - predicted conflicts and resolution methods
+      - predicted conflicts (`predicted_conflicts` array) and resolution methods
+        (`resolution_methods` array) — both are required schema fields; integrator
+        consumes them verbatim when applying each `git merge`.
 
       Merge WILL proceed after review — your job is to enable safe merging, not to block.
 
@@ -255,10 +262,12 @@ hats:
          ```
 
       3. **If conflicts occur:**
-         - Apply the resolution method from `merge.reviewed`
+         - Apply the resolution method from `merge.reviewed.resolution_methods`
+           (matched by branch + file)
          - Understand BOTH sides' design intent before editing
          - Resolve markers, `git add`, complete the merge commit
-         - If a conflict was not predicted, reason from design intent
+         - If a conflict was not predicted in `merge.reviewed.predicted_conflicts`,
+           reason from design intent
          - If truly stuck after reasonable effort:
            ```bash
            git merge --abort
@@ -275,9 +284,11 @@ hats:
         (merged this run or already merged); **false** if any branch was
         aborted, failed, or skipped while still outstanding
       - `ready_for_stabilization`: same as `integration_complete` (false → skip verify loop)
-      - `branches_merged` — successfully merged this run
+      - `branches_merged` — successfully merged this run (no overlap with
+        `branches_skipped` or `branches_failed`)
       - `branches_skipped` — already on target before this run
-      - `branches_failed` — aborted or could not merge (with reasons)
+      - `branches_failed` — aborted or could not merge (with reasons;
+        no overlap with `branches_merged`)
       - `merge_commit_shas` — SHAs for commits made this run
 
   stabilizer:
@@ -393,10 +404,10 @@ hats:
 
       Write the final report and signal completion.
 
-      OPAC reference: follow `ralph-tools-opac` (Observe → Precheck → Apply → Confirm).
-      Before each real emit: `--policy-check` first; Confirm with `--output json`
-      (`ok`/`recorded`), not by reading event files. Do not reproduce command
-      syntax tables in this hat.
+      OPAC reference: follow `ralph-tools-opac` (Observe → Precheck → Apply → Confirm)
+      and `ralph-tools-emit` §5 precheck. Before each real emit: `--policy-check`
+      first; Confirm with `--output json` (`ok`/`recorded`), not by reading event
+      files. Do not reproduce command syntax tables in this hat.
 
       ### HARD RULE — deliverable path first
       Canonical path: `.ralph/merge/REPORT.md`
@@ -436,12 +447,13 @@ hats:
 
       ### On success (`passed: true` from `merge.stabilized`)
 
-      For each branch listed in `branches_merged` from the integrator payload
-      (only branches merged in this batch — not `branches_skipped`):
+      Discover which branches are now merged into `<target>` via the
+      git-first commands below; this is the authoritative list (not the
+      `merge.integrated` payload, which is not visible to this hat):
 
       ```bash
       git worktree list
-      git branch --merged <target>   # confirm before delete
+      git branch --merged <target>   # authoritative merged branch list
       git worktree remove <path>
       git branch -d <branch>
       git worktree prune
