@@ -23,4 +23,12 @@
 # non-cargo processes; this only affects `cargo` children.
 [env]
 NO_PROXY = { value = "127.0.0.1,localhost,::1", force = true }
-TMPDIR = { value = "/private/tmp", force = true }
+# 2026-07-28-002 fix S1 (R-F2): do NOT force TMPDIR to
+# `/private/tmp` here — that path is macOS-only and forces
+# every cargo subprocess (incl. `tempfile` / `std::env::temp_dir()`
+# users) onto the platform-specific private tmp. The Ubuntu CI
+# runners under `.github/workflows/ci.yml` have no `/private/tmp`
+# and the entire test suite breaks on TMPDIR-not-found. Cargo
+# defaults TMPDIR to the platform-correct temp directory
+# (`/tmp` on Linux, `/var/folders/...` on macOS) without help.
+# Removed: TMPDIR = { value = "/private/tmp", force = true }

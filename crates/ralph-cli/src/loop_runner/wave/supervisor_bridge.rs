@@ -238,7 +238,12 @@ impl CoordinatorSupervisorBridge {
 
 impl SupervisorBridge for CoordinatorSupervisorBridge {
     fn store(&self) -> Option<std::sync::Arc<dyn ralph_core::supervisor::SupervisorStore>> {
-        Some(self.store())
+        // 2026-07-28-002 fix A0 (R-F3): do NOT call `self.store()`
+        // inside this trait impl — Rust resolves the bare name to
+        // the trait method, causing infinite recursion. Forward
+        // to the inherent accessor `CoordinatorSupervisorBridge::store`
+        // via UFCS to break the cycle.
+        Some(CoordinatorSupervisorBridge::store(self))
     }
 
     fn tick(&self, wave_id: &str, inputs: PhaseInputs) -> Result<CoordinatorAction, BridgeError> {

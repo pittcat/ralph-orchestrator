@@ -1939,11 +1939,18 @@ impl SupervisorStore for RusqliteSupervisorStore {
         })
     }
 
-    /// 2026-07-28-002 plan U2 (R5 / S2a): persist a slot
-    /// descriptor. Uses INSERT OR REPLACE so repeated calls from
-    /// the dispatcher (post-`create_redrive_wave`) overwrite only
-    /// the payload fields; `slot_index_in_parent` is preserved
-    /// because the row was seeded by `create_redrive_wave`.
+    /// 2026-07-28-002 plan U2 (R5 / S2a) + fix A1 (R-F4): persist a
+    /// slot descriptor without clobbering the parent mapping the
+    /// `create_redrive_wave` step wrote. The previous version used
+    /// `INSERT OR REPLACE` and silently overwrote *all* columns
+    /// including `slot_index_in_parent` — a dispatcher-side persist
+    /// could therefore null out the parent anchor and misroute the
+    /// descriptor to the wrong source slot. The fix is an
+    /// explicit `UPDATE ... COALESCE(slot_index_in_parent, ?)`:
+    /// when the new descriptor passes `None`, the previously
+    /// seeded value is preserved; when it passes `Some(_)`, that
+    /// override wins. The mutation is idempotent at the API level
+    /// — repeated persists only update mutable payload fields.
     fn persist_slot_descriptor(
         &self,
         wave_id: &str,
@@ -1963,17 +1970,21 @@ impl SupervisorStore for RusqliteSupervisorStore {
                 return Err(SupervisorStoreError::UnknownWave(wave_id.to_string()));
             }
             conn.execute(
-                "INSERT OR REPLACE INTO slot_descriptors
-                 (wave_id, slot_index, slot_index_in_parent, topic, payload_json, wave_kind, payload_digest)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                "UPDATE slot_descriptors
+                 SET topic = ?1,
+                     payload_json = ?2,
+                     wave_kind = ?3,
+                     payload_digest = ?4,
+                     slot_index_in_parent = COALESCE(?5, slot_index_in_parent)
+                 WHERE wave_id = ?6 AND slot_index = ?7",
                 rusqlite::params![
-                    wave_id,
-                    i64::from(descriptor.slot_index),
-                    descriptor.slot_index_in_parent.map(i64::from),
                     &descriptor.topic,
                     &descriptor.payload_json,
                     &descriptor.wave_kind.to_string(),
                     &descriptor.payload_digest,
+                    descriptor.slot_index_in_parent.map(i64::from),
+                    wave_id,
+                    i64::from(descriptor.slot_index),
                 ],
             )
             .map_err(|e| SupervisorStoreError::Storage(e.to_string()))?;
