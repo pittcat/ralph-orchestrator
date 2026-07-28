@@ -4,9 +4,11 @@ All notable changes to ralph-orchestrator are documented here.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+### Changed
 
-### Removed
+- State projection topic activation is now opt-in by configured action key; custom presets must explicitly declare topics. Added atomic `ensure_task_batch` projection for task DAG materialization with all-or-nothing validation.
+
+### Added
 
 - Removed backends: amp, roo, kiro, kiro-acp, copilot. Remaining backends: claude, gemini, codex, opencode, pi, traecli, custom. The full backend
   surface is now 7 named backends + 1 custom adapter. Removed in plan

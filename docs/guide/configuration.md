@@ -38,7 +38,12 @@ running inside the loop inherit the same project config without
 re-passing `-c`. Custom project filenames no longer need a
 `ralph.yml` symlink — the runner-supplied env var closes the gap.
 
-### User-level config (`~/.ralph/config.yml`)
+### State projection action keys
+
+启用 `event_loop.state_projection` 后，只有在 `actions` 或 `actions_chain` 中显式配置的事件 topic 才会触发状态投影；未配置的 topic 保持 inert。`ensure_task_batch` 可在一次事件中原子创建或复用多个 task，并将 item 间的依赖 key 解析为 live task ID；任一 item 校验失败时整批拒绝且不会写入部分 task。
+
+仓库外 custom preset 如需投影自定义 topic，必须在配置中显式声明对应 action key；移除声明不会产生隐式兼容行为。
+
 
 Use `~/.ralph/config.yml` for defaults you want everywhere, such as shared backend settings, global lifecycle hooks, or organization-wide guardrails.
 

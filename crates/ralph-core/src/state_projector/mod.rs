@@ -773,8 +773,7 @@ impl StateProjector {
     }
 
     /// Apply a batch of events to the ledgers. Events whose topic
-    /// is not in [`PROJECTED_TOPICS`] (or for which the config has
-    /// no matching action) are passed through without touching
+    /// has no configured action are passed through without touching
     /// disk. Events that fail to project are recorded as
     /// `rejected` and the function returns an [`ApplyReport`]; the
     /// caller decides whether to drop those events from the bus
@@ -804,7 +803,9 @@ impl StateProjector {
                 self.ctx.progress_cache = ProgressSnapshot::parse(&content);
             }
 
-            if !PROJECTED_TOPICS.contains(&event.topic.as_str()) {
+            if !self.ctx.config.actions.contains_key(&event.topic)
+                && !self.ctx.config.actions_chain.contains_key(&event.topic)
+            {
                 continue;
             }
             // Resolve the action chain for this topic.
@@ -857,6 +858,21 @@ impl StateProjector {
                             title.as_deref(),
                         )
                     }
+                    crate::config::StateProjectionAction::EnsureTaskBatch {
+                        items,
+                        count,
+                        key,
+                        title,
+                        blocked_by_keys,
+                    } => crate::state_projector::task::project_ensure_task_batch(
+                        &mut self.ctx,
+                        &parsed,
+                        &items,
+                        &count,
+                        &key,
+                        &title,
+                        &blocked_by_keys,
+                    ),
                     crate::config::StateProjectionAction::CloseTask { task_id, step } => {
                         crate::state_projector::task::project_close_task(
                             &mut self.ctx,

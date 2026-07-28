@@ -22,6 +22,7 @@
 // intentional and unavoidable.
 #![allow(deprecated)]
 
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use serde_json::Value;
@@ -324,6 +325,220 @@ pub(crate) fn project_ensure_task(
     }
     store.ensure(task);
     persist(&ctx.tasks_path, &store, &mut ctx.tasks_cache)
+}
+
+pub(crate) fn project_ensure_task_batch(
+    ctx: &mut ProjectionContext,
+    payload: &Value,
+    items_pointer: &str,
+    count_pointer: &str,
+    key_pointer: &str,
+    title_pointer: &str,
+    blocked_by_keys_pointer: &str,
+) -> Result<(), String> {
+    let items_value = json_value_pointer(payload, items_pointer)
+        .ok_or_else(|| format!("missing required pointer '{items_pointer}'"))?;
+    let items = items_value
+        .as_array()
+        .ok_or_else(|| format!("pointer '{items_pointer}' must be an array"))?;
+    if items.is_empty() {
+        return Err(format!("pointer '{items_pointer}' must be non-empty"));
+    }
+    let declared_count = json_value_pointer(payload, count_pointer)
+        .and_then(Value::as_u64)
+        .and_then(|value| usize::try_from(value).ok())
+        .ok_or_else(|| format!("pointer '{count_pointer}' must be a non-negative integer"))?;
+    if declared_count != items.len() {
+        return Err(format!(
+            "count mismatch: '{count_pointer}' is {declared_count}, but '{items_pointer}' has {} items",
+            items.len()
+        ));
+    }
+
+    #[derive(Clone)]
+    struct Spec {
+        key: String,
+        title: String,
+        blocker_keys: Vec<String>,
+    }
+
+    let mut specs = Vec::with_capacity(items.len());
+    let mut keys = HashSet::with_capacity(items.len());
+    for (index, item) in items.iter().enumerate() {
+        let key = json_pointer(item, key_pointer)
+            .filter(|value| !value.trim().is_empty())
+            .ok_or_else(|| {
+                format!("batch item {index}: missing non-empty pointer '{key_pointer}'")
+            })?
+            .to_string();
+        if !keys.insert(key.clone()) {
+            return Err(format!("batch item {index}: duplicate task key '{key}'"));
+        }
+        let title = json_pointer(item, title_pointer)
+            .filter(|value| !value.trim().is_empty())
+            .ok_or_else(|| {
+                format!(
+                    "batch item {index} key '{key}': missing non-empty pointer '{title_pointer}'"
+                )
+            })?
+            .to_string();
+        let blocker_values = json_value_pointer(item, blocked_by_keys_pointer)
+            .and_then(Value::as_array)
+            .ok_or_else(|| {
+                format!(
+                    "batch item {index} key '{key}': pointer '{blocked_by_keys_pointer}' must be an array"
+                )
+            })?;
+        let mut blocker_keys = Vec::with_capacity(blocker_values.len());
+        let mut seen_blockers = HashSet::new();
+        for blocker in blocker_values {
+            let blocker = blocker.as_str().ok_or_else(|| {
+                format!(
+                    "batch item {index} key '{key}': '{blocked_by_keys_pointer}' must contain strings"
+                )
+            })?;
+            if blocker == key {
+                return Err(format!("batch item {index} key '{key}': self dependency"));
+            }
+            if !seen_blockers.insert(blocker) {
+                return Err(format!(
+                    "batch item {index} key '{key}': duplicate dependency '{blocker}'"
+                ));
+            }
+            blocker_keys.push(blocker.to_string());
+        }
+        specs.push(Spec {
+            key,
+            title,
+            blocker_keys,
+        });
+    }
+    for spec in &specs {
+        for blocker in &spec.blocker_keys {
+            if !keys.contains(blocker) {
+                return Err(format!(
+                    "batch item key '{}': unknown dependency '{blocker}'",
+                    spec.key
+                ));
+            }
+        }
+    }
+    reject_dependency_cycles(
+        &specs
+            .iter()
+            .map(|spec| {
+                (
+                    spec.key.as_str(),
+                    spec.blocker_keys.iter().map(String::as_str).collect(),
+                )
+            })
+            .collect::<Vec<(&str, Vec<&str>)>>(),
+    )?;
+
+    let loop_id = ctx.current_loop_id.clone();
+    let mut store = TaskStore::load(&ctx.tasks_path).map_err(|e| format!("tasks_load: {e}"))?;
+    store.set_enforce_current_unit(ctx.enforce_current_unit);
+    store.try_with_exclusive_lock(|store| {
+        let mut live_ids = HashMap::with_capacity(specs.len());
+        let mut used_ids = store
+            .all()
+            .iter()
+            .map(|task| task.id.clone())
+            .collect::<HashSet<_>>();
+
+        for spec in &specs {
+            if let Some(existing) = store.get_by_key_in_loop(&spec.key, loop_id.as_deref()) {
+                if existing.title != spec.title
+                    || existing.owner_hat_id.as_deref() != Some("executor")
+                {
+                    return Err(format!(
+                        "batch item key '{}': existing task metadata conflicts",
+                        spec.key
+                    ));
+                }
+                live_ids.insert(spec.key.clone(), existing.id.clone());
+            } else {
+                let id = mint_unique_task_id(&mut used_ids)?;
+                live_ids.insert(spec.key.clone(), id);
+            }
+        }
+
+        for spec in &specs {
+            let blocked_by = spec
+                .blocker_keys
+                .iter()
+                .map(|key| live_ids.get(key).cloned().unwrap())
+                .collect::<Vec<_>>();
+            if let Some(existing) = store.get_by_key_in_loop(&spec.key, loop_id.as_deref()) {
+                if existing.blocked_by != blocked_by {
+                    return Err(format!(
+                        "batch item key '{}': existing dependency graph conflicts",
+                        spec.key
+                    ));
+                }
+                continue;
+            }
+            let mut task = Task::new(spec.title.clone(), 1)
+                .with_key(Some(spec.key.clone()))
+                .with_loop_id(loop_id.clone())
+                .with_owner_hat(Some("executor".to_string()));
+            task.id = live_ids[&spec.key].clone();
+            task.blocked_by = blocked_by;
+            store.add(task);
+        }
+        Ok(())
+    })?;
+    ctx.tasks_cache = store.all().to_vec();
+    Ok(())
+}
+
+fn json_value_pointer<'a>(value: &'a Value, pointer: &str) -> Option<&'a Value> {
+    if pointer.is_empty() {
+        return Some(value);
+    }
+    pointer
+        .split('.')
+        .try_fold(value, |current, segment| current.get(segment))
+}
+
+fn mint_unique_task_id(used_ids: &mut HashSet<String>) -> Result<String, String> {
+    for _ in 0..256 {
+        let candidate = Task::generate_id();
+        if used_ids.insert(candidate.clone()) {
+            return Ok(candidate);
+        }
+    }
+    Err("unable to mint a unique task id after 256 attempts".to_string())
+}
+
+fn reject_dependency_cycles(specs: &[(&str, Vec<&str>)]) -> Result<(), String> {
+    fn visit(
+        key: &str,
+        graph: &HashMap<&str, Vec<&str>>,
+        visiting: &mut HashSet<String>,
+        visited: &mut HashSet<String>,
+    ) -> Result<(), String> {
+        if visited.contains(key) {
+            return Ok(());
+        }
+        if !visiting.insert(key.to_string()) {
+            return Err(format!("batch dependency cycle includes '{key}'"));
+        }
+        for dependency in graph.get(key).into_iter().flatten() {
+            visit(dependency, graph, visiting, visited)?;
+        }
+        visiting.remove(key);
+        visited.insert(key.to_string());
+        Ok(())
+    }
+
+    let graph = specs.iter().cloned().collect::<HashMap<_, _>>();
+    let mut visiting = HashSet::new();
+    let mut visited = HashSet::new();
+    for key in graph.keys() {
+        visit(key, &graph, &mut visiting, &mut visited)?;
+    }
+    Ok(())
 }
 
 pub(crate) fn project_close_task(

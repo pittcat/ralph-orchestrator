@@ -78,6 +78,173 @@ fn make_config() -> StateProjectionConfig {
 }
 
 #[test]
+fn configured_custom_topic_projects_task_batch() {
+    let tmp = workspace();
+    let config: StateProjectionConfig = serde_yaml::from_str(
+        r#"
+enabled: true
+actions:
+  custom.plan.ready:
+    kind: ensure_task_batch
+    items: unit_tasks
+    count: unit_count
+    key: task_key
+    title: title
+    blocked_by_keys: depends_on_task_keys
+"#,
+    )
+    .expect("batch action config must parse");
+    let mut projector = StateProjector::new(ProjectionContext::new_legacy(tmp.path(), config));
+    let event = make_event(
+        "custom.plan.ready",
+        json!({
+            "unit_count": 2,
+            "unit_tasks": [
+                {
+                    "task_key": "custom:p:U1",
+                    "title": "First",
+                    "depends_on_task_keys": []
+                },
+                {
+                    "task_key": "custom:p:U2",
+                    "title": "Second",
+                    "depends_on_task_keys": ["custom:p:U1"]
+                }
+            ]
+        })
+        .to_string(),
+    );
+
+    let report = projector.apply(&[event]);
+
+    assert_eq!(report.applied, 1);
+    assert_eq!(report.rejected, 0, "{:?}", report.rejections);
+    let store = crate::task_store::TaskStore::load(&tasks_path(tmp.path())).unwrap();
+    assert_eq!(store.all().len(), 2);
+    assert_eq!(store.all()[1].blocked_by, vec![store.all()[0].id.clone()]);
+}
+
+#[test]
+fn unconfigured_custom_topic_remains_inert() {
+    let tmp = workspace();
+    let mut projector =
+        StateProjector::new(ProjectionContext::new_legacy(tmp.path(), make_config()));
+    let event = make_event("custom.plan.ready", json!({}).to_string());
+
+    let report = projector.apply(&[event]);
+
+    assert_eq!(report.applied, 0);
+    assert_eq!(report.rejected, 0);
+    assert!(!tasks_path(tmp.path()).exists());
+}
+
+#[test]
+fn batch_rejection_is_atomic_and_replay_reuses_ids() {
+    let tmp = workspace();
+    let config: StateProjectionConfig = serde_yaml::from_str(
+        r#"
+enabled: true
+actions:
+  custom.plan.ready:
+    kind: ensure_task_batch
+    items: unit_tasks
+    count: unit_count
+    key: task_key
+    title: title
+    blocked_by_keys: depends_on_task_keys
+"#,
+    )
+    .unwrap();
+    let mut projector = StateProjector::new(ProjectionContext::new_legacy(tmp.path(), config));
+    let event = |payload: serde_json::Value| make_event("custom.plan.ready", payload.to_string());
+    let invalid = event(json!({
+        "unit_count": 2,
+        "unit_tasks": [{
+            "task_key": "custom:p:U1",
+            "title": "First",
+            "depends_on_task_keys": ["missing"]
+        }]
+    }));
+    let path = tasks_path(tmp.path());
+    crate::task_store::reset_successful_persist_count(&path);
+    let before = std::fs::read(&path).unwrap_or_default();
+    let rejected = projector.apply(&[invalid]);
+    assert_eq!(rejected.applied, 0);
+    assert_eq!(rejected.rejected, 1);
+    assert_eq!(std::fs::read(&path).unwrap_or_default(), before);
+    assert_eq!(crate::task_store::successful_persist_count(&path), 0);
+
+    let valid = event(json!({
+        "unit_count": 2,
+        "unit_tasks": [
+            {"task_key": "custom:p:U1", "title": "First", "depends_on_task_keys": []},
+            {"task_key": "custom:p:U2", "title": "Second", "depends_on_task_keys": ["custom:p:U1"]}
+        ]
+    }));
+    let accepted = projector.apply(std::slice::from_ref(&valid));
+    assert_eq!(accepted.applied, 1);
+    assert_eq!(crate::task_store::successful_persist_count(&path), 1);
+    let first = crate::task_store::TaskStore::load(&path).unwrap();
+    let ids = first
+        .all()
+        .iter()
+        .map(|task| task.id.clone())
+        .collect::<Vec<_>>();
+    let accepted_again = projector.apply(&[valid]);
+    assert_eq!(accepted_again.applied, 1);
+    let replay = crate::task_store::TaskStore::load(&path).unwrap();
+    assert_eq!(replay.all().len(), 2);
+    assert_eq!(
+        replay
+            .all()
+            .iter()
+            .map(|task| task.id.clone())
+            .collect::<Vec<_>>(),
+        ids
+    );
+}
+
+#[test]
+fn batch_of_64_items_persists_once() {
+    let tmp = workspace();
+    let config: StateProjectionConfig = serde_yaml::from_str(
+        r#"
+enabled: true
+actions:
+  custom.plan.ready:
+    kind: ensure_task_batch
+    items: unit_tasks
+    count: unit_count
+    key: task_key
+    title: title
+    blocked_by_keys: depends_on_task_keys
+"#,
+    )
+    .unwrap();
+    let mut projector = StateProjector::new(ProjectionContext::new_legacy(tmp.path(), config));
+    let unit_tasks = (1..=64)
+        .map(|index| json!({
+            "task_key": format!("custom:p:U{index}"),
+            "title": format!("Unit {index}"),
+            "depends_on_task_keys": if index == 1 { vec![] } else { vec![format!("custom:p:U{}", index - 1)] }
+        }))
+        .collect::<Vec<_>>();
+    let path = tasks_path(tmp.path());
+    crate::task_store::reset_successful_persist_count(&path);
+    let report = projector.apply(&[make_event(
+        "custom.plan.ready",
+        json!({"unit_count": 64, "unit_tasks": unit_tasks}).to_string(),
+    )]);
+    assert_eq!(report.rejected, 0, "{:?}", report.rejections);
+    assert_eq!(crate::task_store::successful_persist_count(&path), 1);
+    let store = crate::task_store::TaskStore::load(&path).unwrap();
+    assert_eq!(store.all().len(), 64);
+    for pair in store.all().windows(2) {
+        assert_eq!(pair[1].blocked_by, vec![pair[0].id.clone()]);
+    }
+}
+
+#[test]
 fn disabled_config_is_a_noop() {
     let tmp = workspace();
     let cfg = StateProjectionConfig::default();

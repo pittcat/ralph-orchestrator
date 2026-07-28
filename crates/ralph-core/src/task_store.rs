@@ -19,6 +19,8 @@ use crate::state::idempotent_log::IdempotentLog;
 use crate::task::{Task, TaskStatus};
 use std::io;
 use std::path::Path;
+#[cfg(test)]
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use tracing::warn;
 
@@ -89,15 +91,10 @@ fn write_jsonl_atomic(target: &Path, body: &str) -> io::Result<()> {
     {
         let mut file = std::fs::File::create(&tmp_path)?;
         if let Err(e) = file.write_all(body.as_bytes()) {
-            // Best-effort cleanup; ignore ENOENT.
             drop(file);
             let _ = std::fs::remove_file(&tmp_path);
             return Err(e);
         }
-        // fsync the temp file before the atomic rename so the
-        // bytes are durably on disk before the directory entry
-        // swap (POSIX rename is atomic only over the directory
-        // entry, not over the file contents).
         if let Err(e) = file.sync_all() {
             drop(file);
             let _ = std::fs::remove_file(&tmp_path);
@@ -108,7 +105,51 @@ fn write_jsonl_atomic(target: &Path, body: &str) -> io::Result<()> {
         let _ = std::fs::remove_file(&tmp_path);
         return Err(e);
     }
+    record_successful_persist(target);
     Ok(())
+}
+
+#[cfg(test)]
+static SUCCESSFUL_PERSISTS: std::sync::OnceLock<Mutex<std::collections::HashMap<PathBuf, usize>>> =
+    std::sync::OnceLock::new();
+
+#[cfg(test)]
+fn observer_path(path: &Path) -> PathBuf {
+    path.canonicalize().unwrap_or_else(|_| {
+        if path.is_absolute() {
+            path.to_path_buf()
+        } else {
+            std::env::current_dir().unwrap().join(path)
+        }
+    })
+}
+
+#[cfg(test)]
+fn record_successful_persist(path: &Path) {
+    let counts = SUCCESSFUL_PERSISTS.get_or_init(|| Mutex::new(std::collections::HashMap::new()));
+    *counts
+        .lock()
+        .unwrap()
+        .entry(observer_path(path))
+        .or_default() += 1;
+}
+
+#[cfg(not(test))]
+fn record_successful_persist(_path: &Path) {}
+
+#[cfg(test)]
+pub(crate) fn reset_successful_persist_count(path: &Path) {
+    if let Some(counts) = SUCCESSFUL_PERSISTS.get() {
+        counts.lock().unwrap().remove(&observer_path(path));
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn successful_persist_count(path: &Path) -> usize {
+    SUCCESSFUL_PERSISTS
+        .get()
+        .and_then(|counts| counts.lock().ok()?.get(&observer_path(path)).copied())
+        .unwrap_or(0)
 }
 
 /// Parses a JSONL line into a Task, logging a warning on failure.
@@ -429,6 +470,59 @@ impl TaskStore {
         // same path as the no-arg `save()`.
         write_jsonl_atomic(&self.path, &body)?;
 
+        Ok(result)
+    }
+
+    pub(crate) fn try_with_exclusive_lock<F, T>(&mut self, f: F) -> Result<T, String>
+    where
+        F: FnOnce(&mut Self) -> Result<T, String>,
+    {
+        let _guard = self.lock.exclusive().map_err(|e| e.to_string())?;
+        self.tasks = if self.path.exists() {
+            let content = std::fs::read_to_string(&self.path).map_err(|e| e.to_string())?;
+            content
+                .lines()
+                .filter(|line| !line.trim().is_empty())
+                .filter_map(parse_task_line)
+                .collect()
+        } else {
+            Vec::new()
+        };
+        let snapshot = self.tasks.clone();
+        let result = match f(self) {
+            Ok(value) => value,
+            Err(reason) => {
+                self.tasks = snapshot;
+                return Err(reason);
+            }
+        };
+        if let Some(parent) = self.path.parent()
+            && let Err(error) = std::fs::create_dir_all(parent)
+        {
+            self.tasks = snapshot;
+            return Err(error.to_string());
+        }
+        let content = match self
+            .tasks
+            .iter()
+            .map(serde_json::to_string)
+            .collect::<Result<Vec<_>, _>>()
+        {
+            Ok(lines) => lines.join("\n"),
+            Err(error) => {
+                self.tasks = snapshot;
+                return Err(format!("task serialization failed: {error}"));
+            }
+        };
+        let body = if content.is_empty() {
+            String::new()
+        } else {
+            content + "\n"
+        };
+        if let Err(error) = write_jsonl_atomic(&self.path, &body) {
+            self.tasks = snapshot;
+            return Err(error.to_string());
+        }
         Ok(result)
     }
 

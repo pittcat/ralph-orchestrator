@@ -90,6 +90,19 @@ pub enum StateProjectionAction {
         #[serde(default)]
         title: Option<String>,
     },
+    /// Atomically create or reuse a task DAG from one event payload.
+    EnsureTaskBatch {
+        /// JSON pointer for the non-empty array of task specifications.
+        items: String,
+        /// JSON pointer for the declared item count.
+        count: String,
+        /// Item-relative JSON pointer for each stable task key.
+        key: String,
+        /// Item-relative JSON pointer for each non-empty title.
+        title: String,
+        /// Item-relative JSON pointer for dependency task keys.
+        blocked_by_keys: String,
+    },
     /// Mark a task as closed. Driven by `work.done`. The
     /// projector also flips progress's `Completed Steps`
     /// when a `step` payload field is present.
