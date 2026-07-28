@@ -658,6 +658,18 @@ mod tests {
         idle: Option<u32>,
         cap: Option<u32>,
     ) -> DetectedWave {
+        detected_wave_with_hat_grace(timeout, idle, cap, None)
+    }
+
+    fn detected_wave_with_hat_grace(
+        timeout: Option<u32>,
+        idle: Option<u32>,
+        cap: Option<u32>,
+        startup_grace: Option<u32>,
+    ) -> DetectedWave {
+        let grace_line = startup_grace
+            .map(|n| format!("    startup_grace_secs: {n}\n"))
+            .unwrap_or_default();
         let yaml = format!(
             r#"
 hats:
@@ -670,6 +682,7 @@ hats:
     timeout: {timeout_val}
     idle_heartbeat_secs: {idle_val}
     idle_weak_signal_cap: {cap_val}
+{grace_line}
 "#,
             timeout_val = timeout
                 .map(|n| n.to_string())
@@ -726,15 +739,18 @@ hats:
     #[test]
     fn startup_grace_secs_accessor_table() {
         // None → disabled
-        let w = detected_wave_with_hat_timeout(Some(600), None, None);
+        let w = detected_wave_with_hat_grace(Some(600), Some(120), Some(8), None);
         assert_eq!(w.startup_grace_secs(), None);
         // Some(0) → disabled (explicit opt-out)
-        // We need a helper for these checks too; use the existing
-        // helper that ignores its `cap` parameter and look up via
-        // the registry directly with `startup_grace_secs` injected
-        // — for the most truthful accessor behaviour we exercise it
-        // on the round-trip in `hat.rs` tests and skip extra yaml
-        // parsing here.
+        let w = detected_wave_with_hat_grace(Some(600), Some(120), Some(8), Some(0));
+        assert_eq!(
+            w.startup_grace_secs(),
+            None,
+            "Some(0) should collapse to None (mirror idle_heartbeat_secs)"
+        );
+        // Some(n>0) → use as-is
+        let w = detected_wave_with_hat_grace(Some(600), Some(120), Some(8), Some(300));
+        assert_eq!(w.startup_grace_secs(), Some(300));
     }
 
     #[test]

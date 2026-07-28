@@ -201,15 +201,15 @@ pub fn decide_lease(cfg: &LeaseConfig, snap: LeaseSnapshot) -> LeaseDecision {
     // `StartupKill` (a `worker_timeout` family variant). Once
     // `seen_first_signal` flips to true this branch is skipped and
     // the normal idle-window rule takes over.
-    if !snap.seen_first_signal {
-        if let Some(grace_ms) = cfg.startup_grace_ms {
-            if snap.now_ms >= grace_ms {
-                return LeaseDecision::StartupKill;
-            }
-            // Still inside grace → Continue (do NOT let the idle-window
-            // branch kill the worker before its cold start completes).
-            return LeaseDecision::Continue;
+    if !snap.seen_first_signal
+        && let Some(grace_ms) = cfg.startup_grace_ms
+    {
+        if snap.now_ms >= grace_ms {
+            return LeaseDecision::StartupKill;
         }
+        // Still inside grace → Continue (do NOT let the idle-window
+        // branch kill the worker before its cold start completes).
+        return LeaseDecision::Continue;
     }
 
     // (R7 / KTD2) Idle disabled → just HardKill (already checked)
