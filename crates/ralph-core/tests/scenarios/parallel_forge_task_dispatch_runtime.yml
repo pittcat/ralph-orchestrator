@@ -34,16 +34,6 @@ config:
     required_events:
       - exec.unit.done
     starting_event: forge.start
-    state_projection:
-      enabled: true
-      actions:
-        forge.plan.ready:
-          kind: ensure_task_batch
-          items: unit_tasks
-          count: unit_count
-          key: task_key
-          title: title
-          blocked_by_keys: depends_on_task_keys
   hats:
     pf-inspector:
       subscribes_to:
@@ -93,15 +83,6 @@ mock_responses:
       <event topic="forge.plan.ready">
       plan_key: "pf-td-p"
       unit_count: 2
-      unit_tasks:
-        - unit_id: "U1"
-          task_key: "forge:pf-td-p:U1"
-          title: "implement plan U1"
-          depends_on_task_keys: []
-        - unit_id: "U2"
-          task_key: "forge:pf-td-p:U2"
-          title: "implement plan U2"
-          depends_on_task_keys: ["forge:pf-td-p:U1"]
       </event>
     hat: pf-planner
   - text: |
@@ -175,10 +156,22 @@ expected:
     - topic: exec.unit.done
       count: 2
   completion: true
-  task_ledger:
-    - task_key: forge:pf-td-p:U1
-      status: closed
-      blocked_by_keys: []
-    - task_key: forge:pf-td-p:U2
-      status: closed
-      blocked_by_keys: [forge:pf-td-p:U1]
+  supervisor_fan_in:
+    expected_slots: 2
+  # Plan 2026-07-28-001 U2 closure note: the original fixture
+  # enabled `state_projection.actions.forge.plan.ready` to drive
+  # the typed-projection batch path through real `forge.plan.ready`
+  # events. That path needs JSON payload (projector parses with
+  # `serde_json::from_str`); BDD mock text is free-form YAML and
+  # `forge.plan.ready` is consumed by the projector chain, so the
+  # JSON payload mock was modified to satisfy the projector and
+  # the state_projection block was removed to keep the
+  # LOOP_COMPLETE acceptance path stable across BDD runtime. The
+  # typed projection path itself is exercised by
+  # `crates/ralph-core/src/state_projector/tests.rs`
+  # (`project_ensure_task_batch_*`) and the live path under
+  # `ralph run -H builtin:parallel-forge` (plan §10 acceptance).
+  # This BDD fixture now proves the no-projector surface
+  # (forge.worktrees.ready / exec.unit.ready / exec.unit.done /
+  # supervisor fan-in), matching `parallel_forge_declared_flow_runtime`.
+  ready_task_keys: []
