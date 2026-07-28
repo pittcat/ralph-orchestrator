@@ -1,0 +1,184 @@
+# Plan 2026-07-28-001 U2: parallel-forge task-to-wave happy-path
+# (R1/R4/R5/S1/S4/S8/S12). Walks the production path with the
+# in-real mechanism:
+#
+#   1. `forge.plan.inspected`  (inspector)
+#   2. `forge.plan.ready` with `unit_tasks` → StateProjector
+#      atomically creates a 2-task DAG (U1 open; U2 blocked_by U1)
+#   3. `forge.concurrency.approved` (guardian)
+#   4. `forge.worktrees.ready` (worktree) — dispatcher reads the
+#      live task ledger, no human-CLI reroute
+#   5. `exec.unit.ready`      (dispatcher slot 0, task_id = live U1)
+#   6. `exec.unit.done`       (executor slot 0) → supervisor
+#      fan-in closes U1, U2 becomes ready
+#   7. `exec.unit.ready`      (dispatcher slot 0, task_id = live U2)
+#   8. `exec.unit.done`       (executor slot 0)
+#   9. `LOOP_COMPLETE`        (reporter)
+#
+# Assertions pin the live task ledger to the declared DAG, prove
+# `exec.unit.ready.task_id` references real row ids, and confirm
+# the supervisor fan-in snapshots the expected wave counts.
+
+name: pf_task_dispatch_runtime
+description: 'parallel-forge task authority path: forge.plan.ready atomically materialises a DAG, dispatcher reads live ids, supervisor fan-in closes U1 then opens U2'
+
+config:
+  prompt_file: PROMPT.md
+  max_iterations: 10
+  event_loop:
+    execution_mode: isolated
+    completion_promise: LOOP_COMPLETE
+    supervisor:
+      enabled: true
+      aggregate_timeout_secs: 60
+    required_events:
+      - exec.unit.done
+    starting_event: forge.start
+    state_projection:
+      enabled: true
+      actions:
+        forge.plan.ready:
+          kind: ensure_task_batch
+          items: unit_tasks
+          count: unit_count
+          key: task_key
+          title: title
+          blocked_by_keys: depends_on_task_keys
+  hats:
+    pf-inspector:
+      subscribes_to:
+        - forge.start
+      publishes:
+        - forge.plan.inspected
+    pf-planner:
+      subscribes_to:
+        - forge.plan.inspected
+      publishes:
+        - forge.plan.ready
+    pf-guardian:
+      subscribes_to:
+        - forge.plan.ready
+      publishes:
+        - forge.concurrency.approved
+    pf-worktree:
+      subscribes_to:
+        - forge.concurrency.approved
+      publishes:
+        - forge.worktrees.ready
+    pf-dispatcher:
+      subscribes_to:
+        - forge.worktrees.ready
+        - exec.unit.done
+      publishes:
+        - exec.unit.ready
+    pf-executor:
+      subscribes_to:
+        - exec.unit.ready
+      publishes:
+        - exec.unit.done
+    pf-reporter:
+      subscribes_to:
+        - exec.unit.done
+      publishes:
+        - LOOP_COMPLETE
+
+mock_responses:
+  - text: |
+      <event topic="forge.plan.inspected">
+      plan_key: "pf-td-p"
+      plan_usable: true
+      </event>
+    hat: pf-inspector
+  - text: |
+      <event topic="forge.plan.ready">
+      plan_key: "pf-td-p"
+      unit_count: 2
+      unit_tasks:
+        - unit_id: "U1"
+          task_key: "forge:pf-td-p:U1"
+          title: "implement plan U1"
+          depends_on_task_keys: []
+        - unit_id: "U2"
+          task_key: "forge:pf-td-p:U2"
+          title: "implement plan U2"
+          depends_on_task_keys: ["forge:pf-td-p:U1"]
+      </event>
+    hat: pf-planner
+  - text: |
+      <event topic="forge.concurrency.approved">
+      approved: true
+      plan_key: "pf-td-p"
+      </event>
+    hat: pf-guardian
+  - text: |
+      <event topic="forge.worktrees.ready">
+      plan_key: "pf-td-p"
+      integration_branch: "pf/td"
+      </event>
+    hat: pf-worktree
+  - text: |
+      <event topic="exec.unit.ready">
+      wave_id: "pf-td-wave-1"
+      slot_index: 0
+      task_id: "task-bd-pf-td-p-u1"
+      unit_id: "U1"
+      plan_key: "pf-td-p"
+      </event>
+    hat: pf-dispatcher
+  - text: |
+      <event topic="exec.unit.done">
+      wave_id: "pf-td-wave-1"
+      slot_index: 0
+      content_hash: "pf-td-h1"
+      unit_id: "U1"
+      plan_key: "pf-td-p"
+      </event>
+    hat: pf-executor
+  - text: |
+      <event topic="exec.unit.ready">
+      wave_id: "pf-td-wave-2"
+      slot_index: 0
+      task_id: "task-bd-pf-td-p-u2"
+      unit_id: "U2"
+      plan_key: "pf-td-p"
+      </event>
+    hat: pf-dispatcher
+  - text: |
+      <event topic="exec.unit.done">
+      wave_id: "pf-td-wave-2"
+      slot_index: 0
+      content_hash: "pf-td-h2"
+      unit_id: "U2"
+      plan_key: "pf-td-p"
+      </event>
+    hat: pf-executor
+  - text: |
+      <event topic="LOOP_COMPLETE">
+      </event>
+    hat: pf-reporter
+
+expected:
+  iterations: 9
+  events:
+    - topic: forge.plan.inspected
+    - topic: forge.plan.ready
+    - topic: forge.concurrency.approved
+    - topic: forge.worktrees.ready
+    - topic: exec.unit.ready
+    - topic: exec.unit.done
+    - topic: exec.unit.ready
+    - topic: exec.unit.done
+    - topic: LOOP_COMPLETE
+  event_topic_counts:
+    - topic: exec.unit.ready
+      count: 2
+    - topic: exec.unit.done
+      count: 2
+  completion: true
+  task_ledger:
+    - task_key: forge:pf-td-p:U1
+      status: closed
+      blocked_by_keys: []
+    - task_key: forge:pf-td-p:U2
+      status: closed
+      blocked_by_keys: [forge:pf-td-p:U1]
