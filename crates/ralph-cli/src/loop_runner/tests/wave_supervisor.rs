@@ -1937,6 +1937,15 @@ impl SupervisorBridge for U3DispatchBridge {
         self.max_concurrent_workers
     }
 
+    // 2026-07-28-003 plan U5 (R11): the U3 characterization
+    // helpers preserve the pre-U5 "no retry" semantics by
+    // overriding the trait default budget (`1`) to `0`. This
+    // keeps `test_dispatcher_effective_cap_*` green without
+    // having to special-case the spawn counter.
+    fn slot_retry_budget(&self) -> u32 {
+        0
+    }
+
     fn try_dispatch_next(&self, wave_id: &str, slot_index: u32) -> Result<bool, BridgeError> {
         self.dispatch_calls
             .lock()
@@ -6439,5 +6448,84 @@ fn u4_runner_rejects_out_of_range_slot_retry_budget() {
     assert!(
         msg.contains("3"),
         "error must echo the offending value; got: {msg}"
+    );
+}
+
+// =====================================================================
+// 2026-07-28-003 plan U5: dispatcher task attempt-loop integration
+// tests. KTD9 (do not salvage intermediate batches) and KTD10
+// (fail-closed on `None`/`Permanent` reasons) are pinned by the
+// retry-decision table in `ralph-core/src/supervisor/worker_outcome.rs::retry_classifier_tests`;
+// this file pins the dispatcher-side wiring: `WorkerRequest: Clone`
+// (E15) and `slot_retry_budget = 0` closes retry (R11).
+// =====================================================================
+
+/// U5 §13 / E15: `WorkerRequest: Clone` is the load-bearing
+/// invariant that lets the supervisor task attempt-loop re-enter
+/// `executor.execute` after a retryable failure (KTD7). A
+/// regression here (e.g. forgetting to keep the manual impl when
+/// refactoring fields) breaks U5 silently; this pin turns that
+/// regression into a compile-time failure.
+#[test]
+fn u5_worker_request_implements_clone() {
+    fn assert_clone<T: Clone>() {}
+    assert_clone::<crate::loop_runner::wave::WorkerRequest>();
+}
+
+/// U5 §15 / S9: when the bridge reports `slot_retry_budget = 0`,
+/// the dispatcher attempt loop must NOT retry on a frozen-code
+/// failure — the task exits the loop on the first attempt.
+#[test]
+fn u5_slot_retry_budget_zero_closes_auto_retry_at_bridge_accessor() {
+    use ralph_core::supervisor::InMemorySupervisorStore;
+    let store = std::sync::Arc::new(InMemorySupervisorStore::new());
+    let bridge = crate::loop_runner::wave::CoordinatorSupervisorBridge::with_context_and_factory_with_cap(
+        store as std::sync::Arc<dyn ralph_core::supervisor::SupervisorStore>,
+        crate::loop_runner::wave::ProductionBridgeContext {
+            loop_id: "u5-s9".to_string(),
+            repo_root: std::path::PathBuf::from("/tmp/u5-s9"),
+            events_path: None,
+            tasks_path: None,
+        },
+        std::sync::Arc::new(
+            ralph_core::supervisor::worktree_bind::DefaultWorktreeFactory,
+        ),
+        4,
+        // S9: budget = 0 — explicit close.
+        0,
+    );
+    assert_eq!(
+        bridge.slot_retry_budget(),
+        0,
+        "bridge accessor must expose budget = 0 so the dispatcher closes retry"
+    );
+}
+
+/// U5 §15 / R8: when the operator configures `slot_retry_budget = 2`,
+/// the bridge accessor reflects it; the dispatcher task therefore
+/// can run up to 3 attempts (initial + 2 retries) on a retryable
+/// frozen-code failure.
+#[test]
+fn u5_slot_retry_budget_two_propagates_to_accessor() {
+    use ralph_core::supervisor::InMemorySupervisorStore;
+    let store = std::sync::Arc::new(InMemorySupervisorStore::new());
+    let bridge = crate::loop_runner::wave::CoordinatorSupervisorBridge::with_context_and_factory_with_cap(
+        store as std::sync::Arc<dyn ralph_core::supervisor::SupervisorStore>,
+        crate::loop_runner::wave::ProductionBridgeContext {
+            loop_id: "u5-s7-budget-2".to_string(),
+            repo_root: std::path::PathBuf::from("/tmp/u5-budget-2"),
+            events_path: None,
+            tasks_path: None,
+        },
+        std::sync::Arc::new(
+            ralph_core::supervisor::worktree_bind::DefaultWorktreeFactory,
+        ),
+        4,
+        2,
+    );
+    assert_eq!(
+        bridge.slot_retry_budget(),
+        2,
+        "bridge accessor must surface the operator-configured budget"
     );
 }

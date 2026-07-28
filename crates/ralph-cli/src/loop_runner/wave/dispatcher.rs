@@ -139,6 +139,11 @@ pub struct HandleWaveOutcome {
 /// resolved, prompt built, env vars injected, events file path
 /// resolved). The executor only runs the future.
 pub(crate) struct WorkerRequest {
+    // 2026-07-28-003 plan U5 (E15 / KTD7): `#[derive(Clone)]`
+    // so the supervisor task body can re-execute the request
+    // in-place after a retryable failure. `CliBackend` derives
+    // Clone; sender / Arc / PathBuf / Duration / String / Option
+    // are all Clone; `tokio::sync::mpsc::Sender` is Clone.
     pub(crate) index: u32,
     pub(crate) backend: CliBackend,
     pub(crate) prompt: String,
@@ -182,6 +187,32 @@ pub(crate) struct WorkerRequest {
     /// `DetectedWave::startup_grace_secs()`. Effective only when
     /// `idle_heartbeat` is also `Some` (KTD1).
     pub(crate) startup_grace: Option<Duration>,
+}
+
+// 2026-07-28-003 plan U5 (E15 / KTD7): manual `Clone` impl
+// instead of `#[derive(Clone)]` because `WorkerRequest` carries
+// `progress_tx: tokio::sync::mpsc::UnboundedSender<…>` (cheap
+// clone) and the rest is plain data. Keeping the manual impl
+// explicit lets the type's SSoT for the dispatcher stay on a
+// single readable block without `#[derive(...)]` macro clutter.
+impl Clone for WorkerRequest {
+    fn clone(&self) -> Self {
+        Self {
+            index: self.index,
+            backend: self.backend.clone(),
+            prompt: self.prompt.clone(),
+            worker_events_path: self.worker_events_path.clone(),
+            worker_timeout: self.worker_timeout,
+            progress_tx: self.progress_tx.clone(),
+            worker_rpc_tx: self.worker_rpc_tx.clone(),
+            worker_tui_state: self.worker_tui_state.clone(),
+            assigned_dimension: self.assigned_dimension.clone(),
+            cwd: self.cwd.clone(),
+            idle_heartbeat: self.idle_heartbeat,
+            idle_weak_signal_cap: self.idle_weak_signal_cap,
+            startup_grace: self.startup_grace,
+        }
+    }
 }
 
 /// Dispatcher-internal seam that abstracts "run one wave worker".
@@ -4742,6 +4773,16 @@ async fn dispatch_wave_inner_with_release<E: WaveWorkerExecutor + ?Sized>(
             // The Drop guard is installed before waiting on the local
             // semaphore, so JoinSet abort/cancellation also releases
             // the store-side permit for an approved slot.
+            //
+            // 2026-07-28-003 plan U5: capture the retry budget
+            // BEFORE moving `terminal_bridge` into the guard so
+            // the attempt loop can read it. `None` legacy path
+            // collapses to a budget of `0` (no retries), keeping
+            // the pre-U5 bit-for-bit semantics.
+            let retry_budget: u32 = terminal_bridge
+                .as_ref()
+                .map(|b| b.slot_retry_budget())
+                .unwrap_or(0);
             let mut release_guard =
                 terminal_bridge
                     .zip(terminal_wave_id)
@@ -4777,7 +4818,78 @@ async fn dispatch_wave_inner_with_release<E: WaveWorkerExecutor + ?Sized>(
             // the permit to the executor; the executor does not
             // need it.
             let _permit = permit;
-            let result = executor.execute(request).await;
+
+            // 2026-07-28-003 plan U5 (R9 / R10 / R11 / R12 / R13):
+            // wrapper around `executor.execute(request).await` that
+            // retries on a retryable, frozen-code failure as long
+            // as the bridge's `slot_retry_budget()` has not been
+            // exhausted. The loop runs IN this task (KTD7) so
+            // harvest / store / tracker never see the intermediate
+            // attempt — the dispatcher only consumes the final
+            // attempt's outcome (KTD9). `WorkerRequest: Clone`
+            // (U5 E15) lets us re-enter `execute()` after a retry
+            // decision without consuming the request.
+            let result = {
+                let mut attempt: u32 = 1;
+                // 2026-07-28-003 plan U5: use the budget we captured
+                // before moving `terminal_bridge` into the guard.
+                let budget = retry_budget;
+                let current_request = request;
+                let mut last_outcome: (u32, WaveWorkerOutcome) = loop {
+                    let outcome = executor.execute(current_request.clone()).await;
+                    let (_idx, res) = &outcome;
+                    let classified = classify_slot_result(res);
+                    let mut should_retry = false;
+                    if let Some(_guard) = release_guard.as_ref() {
+                        use ralph_core::supervisor::worker_outcome::{
+                            SlotOutcome, is_retryable_slot_reason,
+                        };
+                        // KTD8: retry decision uses the FROZEN static
+                        // code (the typed reason from
+                        // `classify_slot_result`), not the worker's
+                        // dynamic Err message. `ClassifiedReason` is
+                        // the dispatcher-local helper enum declared
+                        // near `classify_slot_result` below; we match
+                        // on its `Static` arm to read the frozen code.
+                        // `ClassifiedReason::Static(_)` carries a
+                        // `&'a str` we dereference into a `&str`.
+                        let frozen_code: Option<&str> =
+                            match (&classified.outcome, &classified.reason) {
+                                (
+                                    SlotOutcome::Failed { .. },
+                                    Some(ClassifiedReason::Static(code)),
+                                ) => Some(*code),
+                                _ => None,
+                            };
+                        if let Some(code) = frozen_code {
+                            if is_retryable_slot_reason(code)
+                                && attempt <= budget
+                                && attempt < u32::MAX
+                            {
+                                tracing::warn!(
+                                    slot_index = request_index,
+                                    attempt,
+                                    budget,
+                                    code = %code,
+                                    "U5: retrying slot after frozen-code failure"
+                                );
+                                should_retry = true;
+                            }
+                        }
+                    }
+                    if !should_retry {
+                        break outcome;
+                    }
+                    attempt = attempt.saturating_add(1);
+                    // Loop continues; **only** the final attempt's
+                    // outcome escapes (KTD9: do not salvage
+                    // intermediate batches).
+                };
+                // Pin the final attempt so warnings / logs about
+                // success relate to the attempt the caller observes.
+                let _ = last_outcome.0;
+                last_outcome
+            };
 
             // 2026-07-23-001 plan U5 (R8): record the terminal slot
             // outcome into the supervisor store at the structured
