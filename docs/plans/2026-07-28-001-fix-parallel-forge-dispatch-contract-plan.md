@@ -113,6 +113,8 @@ execution: code
 - R8. strict preset lint 必须拒绝 agent instructions 中不可执行的 `task add` / plain `task ensure`，同时允许 human-only 文档、只读 task 命令和合法 fix-unit mint。
 - R9. 真实组合验收必须证明 planner payload 建立 tasks、重复 worktree handoff 只提交一次、dispatcher 在 recovery 之前激活并进入 supervisor fan-out。
 - R10. 所有受影响的 preset schema、injected agent skill guides、preset operator skills 和 CLI drift 文档必须与新契约一致。
+- R11. 取消 `PROJECTED_TOPICS` 硬编码门禁前，必须枚举仓库内全部 builtin、fixture 与示例配置的 `actions` / `actions_chain` topic，形成旧门禁与新 action-key 权威的迁移审计；任何旧实现中 inert、变更后会激活的 topic 都必须逐项确认并有回归测试。
+- R12. commit-aware over-emit 语义必须通过一个不依赖 `parallel-forge` topic、task projector 或 supervisor 的通用 isolated preset fixture 验证，证明该机制对其他 isolated preset 的 committed-first、zero-commit、terminal/default-publish 与 handoff 路径不造成回归。
 
 ### BDD 行为规格
 
@@ -172,6 +174,19 @@ Feature: Parallel Forge task materialization and dispatch
     Then it emits ready payloads with live task ids for the dependency-ready units
     And supervisor records the expected slots
     And completion of the first wave makes the dependent unit ready
+
+  Scenario S9: Configured projection topics migrate without accidental activation
+    Given every repository builtin, fixture and example state-projection config is inventoried
+    When action keys replace the hard-coded projected-topic gate
+    Then every newly activated topic is explicitly approved and covered
+    And a topic with no configured action remains inert
+
+  Scenario S10: Generic isolated presets preserve recovery semantics
+    Given an isolated fixture with generic producer and consumer hats
+    When the producer commits one handoff and over-emits another business event
+    Then the consumer receives the committed handoff before any recovery
+    And when all business candidates fail before commit the producer receives one bounded recovery
+    And terminal and default-publish behavior remains unchanged
 ```
 
 ---
@@ -280,6 +295,8 @@ operator 可观察 loop 推进 → embedded preset/schema → EventLoop admissio
 | dependency key 无法解析 | payload 缺少被依赖 Unit | projection rejection + 零写断言 | 全批预验证，错误携带 item/key | 低 |
 | recovery 被过度抑制 | 首候选早期通过 budget、后续 gate 拒绝 | post-commit zero-business scenario | 决策必须依据最终 published/accepted business set，不依据早期 `accepted` | 中低 |
 | lint 误报文档示例 | instructions 只描述禁止命令或 human CLI | positive/negative lint matrix | 识别 executable imperative 与否定上下文；finding 只对 agent hat instructions | 中 |
+| action-key 切换意外激活旧配置 | builtin、fixture、示例或外部 preset 已声明非 whitelist topic | 仓库配置迁移审计 + newly-activated topic matrix | 逐项确认旧 inert topic；无 action topic 保持 inert；变更说明披露外部 preset 行为变化 | 中 |
+| recovery 修复只对 forge 成立 | 测试依赖 forge topic、task projector 或 supervisor 才通过 | generic isolated fixture 的 commit-first/zero-commit 双向回归 | 用最小 producer/consumer preset 覆盖通用 EventLoop，不复用 forge 特例 | 中低 |
 | preset/schema 漂移 | 只改一侧 | schema parity + embedded preset tests | 同 Unit 修改并跑三组 preset 校验 | 低 |
 | 测试再次只验证 dummy events | fixture 不触达 task ledger | 明确 tasks file、next hat、wave slot 断言 | U2/U3 禁止 mock 掉 projector、EventBus、SupervisorCoordinator | 低 |
 
@@ -299,6 +316,8 @@ operator 可观察 loop 推进 → embedded preset/schema → EventLoop admissio
 | S6 | strict lint Error，稳定 finding_id | preset lint | unit + CLI integration | mutation-style negative matrix | 否 |
 | S7 | projection ownership 下 plain ensure 被 lint 拒绝 | preset lint | unit | authorization | 否 |
 | S8 | tasks → ready set → supervisor slots → dependent next wave | workflow scenario + loop runner | BDD/integration | replay + fan-in | 是，mock |
+| S9 | action-key 迁移清单完整、无意外 topic 激活、无 action 仍 inert | projector migration audit tests | unit + config integration | compatibility | 否 |
+| S10 | generic committed-first 让路、zero-commit 恢复、terminal/default-publish 不变 | event-loop generic isolated regression | state-machine integration | cross-preset compatibility | 否 |
 
 每项断言同时检查副作用：没有重复 task、没有错误 targeted recovery、没有伪造 development done、没有 partial ledger、没有额外 wave slot。
 
@@ -316,6 +335,8 @@ operator 可观察 loop 推进 → embedded preset/schema → EventLoop admissio
 | R8 | S6/S7 | impossible preset fails strict lint | lint matrix | preset check | — | E1-E4/E15 | U2 |
 | R9 | S8 | full composition reaches wave | — | BDD + loop runner | mock | E14-E16 | U2（无重复 handoff）/U3（含重复 handoff） |
 | R10 | S6/S8 | docs/schema/operator rules aligned | drift assertions | preset parity | — | E13/E15 | U2/U3 |
+| R11 | S9 | repository action-key migration audit | topic inventory + inert matrix | projector config/apply | — | E6 | U1 |
+| R12 | S10 | generic isolated recovery compatibility | commit decision table | EventLoop generic fixture | — | E9-E12 | U3 |
 
 ---
 
@@ -326,7 +347,7 @@ operator 可观察 loop 推进 → embedded preset/schema → EventLoop admissio
 ### U1. 原子批量 task projection
 
 1. **Unit 目标：** 一个声明式事件把 `unit_tasks[]` 原子投影为带 live ID 和依赖的 task DAG。
-2. **对应：** R1-R3；S1-S3；KTD1-KTD4；E5-E8。
+2. **对应：** R1-R3、R11；S1-S3、S9；KTD1-KTD4；E5-E8。
 3. **外部可观察结果：** 接受事件后 task API 返回完整 DAG；非法 batch 后 task ledger 无新增。
 4. **当前行为基线：** projector 只支持单 task action，并用 `PROJECTED_TOPICS` 跳过非白名单 topic。
 5. **输入输出：** 输入非空 JSON array、key/title/dependency/count pointers；输出 N 个 task rows或一个 projection rejection；空数组、计数不一致、重复 key、未知依赖均拒绝；单次 persist；replay 幂等。
@@ -343,14 +364,16 @@ operator 可观察 loop 推进 → embedded preset/schema → EventLoop admissio
    - 64-item finite batch → 单次 persist 且依赖解析正确；不人为发明最大 Unit 数。
    - identical replay → 行数和 IDs 不变。
    - configured custom topic with batch action → 被处理；无 action topic → inert。
+   - 枚举 `presets/`、`crates/ralph-core/tests/`、`crates/ralph-cli/` 中全部 `actions` / `actions_chain` topic，对比旧 `PROJECTED_TOPICS`；测试固定“新增激活集合”必须为空或等于逐项批准的显式集合，禁止未审计扩面。
+   - 对每个逐项批准的新激活 topic 建立行为回归；仓库外自定义 preset 的兼容性变化写入用户可见变更说明。
    - 命令：`cargo nextest run -p ralph-core -- state_projector`。
 10. **Acceptance Red：** 先增加 custom-topic batch integration；预期 config enum无法解析或 projector 不生成 tasks。编译环境、fixture path 或命令错误不是有效 Red。
 11. **单元测试拆分：** payload array解析；batch key uniqueness；dependency resolution；existing-key reuse；generated-ID uniqueness；transactional persist failure。
 12. **TDD 顺序：** config parse Red → enum Green → batch validation Red → validation Green → dependency/ID Red → DAG Green → atomic persistence Red → single-persist Green → replay Red/Green → Refactor。
 13. **最小实现：** 只新增通用 batch action、action-key topic opt-in 和原子 task helper；错误必须指出 batch item/key；不新增文件格式或依赖。
 14. **集成验证：** 使用真实 `StateProjector`、临时 task file和 `TaskStore` reload；不得 mock `TaskStore` 持久化。
-15. **风险驱动测试：** idempotency、fault injection、state-machine atomicity；依据 E7-E8。
-16. **回归：** 单 task ensure/close、fix-unit ID、projector disabled、empty action、progress projection。
+15. **风险驱动测试：** idempotency、fault injection、state-machine atomicity、旧 whitelist → action-key topic 激活差异；依据 E6-E8。
+16. **回归：** 单 task ensure/close、fix-unit ID、projector disabled、empty action、progress projection、全部仓库内 projection 配置的 topic 迁移审计。
 17. **预期文件变更：**
 
 | 位置 | 类型 | 原因 | Evidence |
@@ -359,7 +382,7 @@ operator 可观察 loop 推进 → embedded preset/schema → EventLoop admissio
 | `crates/ralph-core/src/state_projector/mod.rs` | 修改生产/测试 | action-key topic authority与dispatch | E6 |
 | `crates/ralph-core/src/state_projector/task.rs` | 修改生产/测试 | 原子 DAG materialization | E7-E8 |
 
-18. **完成标准：** S1-S3 全绿；targeted nextest、fmt、clippy相关 target通过；无 partial writes；可独立提交。
+18. **完成标准：** S1-S3、S9 全绿；仓库内 action-key 迁移清单已审计且没有未批准的新激活 topic；targeted nextest、fmt、clippy相关 target通过；无 partial writes；可独立提交。
 19. **停止条件：** `TaskStore` 无法在单锁/单 persist 下保持现有幂等语义，或 task dependency不是 live ID；记录证据并重做 KTD3。
 20. **风险：** batch ID collision和旧 task复用；通过唯一性与 replay测试检测。
 
@@ -409,7 +432,7 @@ operator 可观察 loop 推进 → embedded preset/schema → EventLoop admissio
 ### U3. Commit-aware isolated over-emit recovery
 
 1. **Unit 目标：** over-emit recovery只在零业务 commit时定向重试；已提交 handoff永不被本分支抢占。
-2. **对应：** R6-R7、R9-R10；S4-S5、S8（重复 handoff 终态）；KTD5、KTD7；E9-E16。
+2. **对应：** R6-R7、R9-R10、R12；S4-S5、S8（重复 handoff 终态）、S10；KTD5、KTD7；E9-E16。
 3. **外部结果：** duplicate ready产生一条业务事件、一条诊断、零 publisher resume；dispatcher 继续两轮 wave；全拒绝 turn仍有一条 resume。
 4. **基线：** 现有测试明确锁定“首事件已接受仍 targeted resume”，并由 next_hat保证它抢占 handoff。
 5. **输入输出：** early over-emit candidate + final committed business set；输出 diagnostic-only或 bounded resume。
@@ -417,19 +440,20 @@ operator 可观察 loop 推进 → embedded preset/schema → EventLoop admissio
    - `crates/ralph-core/src/event_loop/mod.rs`：把 over-emit recovery intent延迟到最终 validation/publish结果后结算；保留早期 drop和诊断。
    - `crates/ralph-core/src/event_loop/tests/isolated_complex_regression.rs`：替换旧契约并增加零 commit回归。
    - `crates/ralph-core/src/event_loop/tests/next_hat_topic_preemption.rs`：保留通用 targeted优先级，新增 committed handoff不制造target的组合测试。
+   - `crates/ralph-core/src/event_loop/tests/` 下新增或扩展 generic isolated fixture：只使用 producer/consumer、普通 handoff topic 和最小 schema，不依赖 `parallel-forge`、task projector、wave 或 supervisor；覆盖 committed-first、zero-commit、terminal/default-publish 与 handoff priority。
    - `crates/ralph-core/tests/scenarios/parallel_forge_duplicate_handoff_runtime.yml`（计划新增）与 `crates/ralph-core/tests/scenarios.rs`：在 U2 主路径上加入 duplicate handoff，真实断言 dispatcher、task 与 wave 状态。
    - `crates/ralph-e2e/src/scenarios/parallel_forge.rs`（计划新增）、`crates/ralph-e2e/src/scenarios/mod.rs`、`crates/ralph-e2e/src/lib.rs`、`crates/ralph-e2e/src/main.rs`：注册 CI-safe mock scenario；不得 mock projector、EventBus 或 `SupervisorCoordinator`。
    - `crates/ralph-core/data/ralph-tools-emit.md`：更新“何时会收到 resume”，说明已成功事件后停止重发。
 7. **可依赖：** accepted/pending publish集合、rejection breaker、targeted event与handoff priority。
 8. **禁止未来依赖：** 不修改 `next_hat` 全局优先级；不得设置独立的“后续补组合测试” Unit。
-9. **验收：** first commit+extra drop；first候选后续schema/contract reject导致零 commit；breaker exhaustion；no safe target；diagnostic payload；两 Unit duplicate-handoff mock 主路径产生一条 accepted ready、零 worktree-target resume、两轮 wave 和一条 development done。
+9. **验收：** first commit+extra drop；first候选后续schema/contract reject导致零 commit；breaker exhaustion；no safe target；diagnostic payload；generic isolated fixture 证明 committed-first/zero-commit 双向语义且 terminal/default-publish 不变；两 Unit duplicate-handoff mock 主路径产生一条 accepted ready、零 worktree-target resume、两轮 wave 和一条 development done。
 10. **Acceptance Red：** duplicate worktrees-ready测试当前看到 worktree-target resume并选择worktree；这是正确 Red。若只失败于测试hat未注册则无效。
 11. **单测：** post-commit decision table；business/control分类；breaker仅在恢复分支计数；had_events/no-progress。
 12. **TDD：** characterization Green →新 committed-first断言 Red → deferred feedback Green → zero-commit Red/Green → breaker Red/Green → duplicate-handoff BDD Red →真实组合 Green → mock E2E Red/Green → Refactor。
 13. **最小实现：** 保存结构化 feedback intent，最终基于真实 committed business events结算；不撤销首事件、不改变所有 targeted事件语义。
 14. **集成：** 真实 EventLoop/EventBus、`run_workflow_guard_scenario`、真实 `SupervisorCoordinator` 与 mock backend；不得 mock next_hat、bus pending、projector 或 supervisor store。
 15. **风险测试：** state-machine、fault injection、priority interaction；依据 E9-E12。
-16. **回归：** origin/contract rejection recovery、terminal priority、default publishes、stall detector、handoff priority、U2 无重复主路径、supervisor minimal/full-chain、mock E2E、所有 crates 与 doctest。
+16. **回归：** generic non-forge isolated committed-first/zero-commit、origin/contract rejection recovery、terminal priority、default publishes、stall detector、handoff priority、U2 无重复主路径、supervisor minimal/full-chain、mock E2E、所有 crates 与 doctest。
 17. **文件变更：**
 
 | 位置 | 类型 | 原因 | Evidence |
@@ -437,13 +461,14 @@ operator 可观察 loop 推进 → embedded preset/schema → EventLoop admissio
 | `crates/ralph-core/src/event_loop/mod.rs` | 修改生产 | post-commit feedback | E9-E10 |
 | `crates/ralph-core/src/event_loop/tests/isolated_complex_regression.rs` | 修改/新增测试 | 新旧恢复边界 | E11 |
 | `crates/ralph-core/src/event_loop/tests/next_hat_topic_preemption.rs` | 新增组合测试 | 合法handoff不可饥饿 | E10 |
+| `crates/ralph-core/src/event_loop/tests/` generic isolated fixture | 新增/修改测试 | 跨 preset 的 commit-first/zero-commit 兼容门禁 | E9-E12 |
 | `crates/ralph-core/tests/scenarios/parallel_forge_duplicate_handoff_runtime.yml` | 新增 fixture | duplicate handoff 真实组合验收 | E14-E16 |
 | `crates/ralph-core/tests/scenarios.rs` | 修改测试注册 | real EventLoop 入口 | E14 |
 | `crates/ralph-e2e/src/scenarios/parallel_forge.rs` | 新增测试 scenario | CI-safe mock E2E | E16 |
 | `crates/ralph-e2e/src/scenarios/mod.rs`、`crates/ralph-e2e/src/lib.rs`、`crates/ralph-e2e/src/main.rs` | 修改测试注册 | 暴露并注册现有 `TestScenario` harness | E16 |
 | `crates/ralph-core/data/ralph-tools-emit.md` | 修改 agent guide | 恢复语义同步 | E9 |
 
-18. **完成：** S4-S5及含 duplicate 的 S8 全绿，既有真正 rejection recovery 不回归，mock E2E、doc drift、build/clippy/fmt、`./scripts/run-tests.sh` 全绿；无 skip/only/弱化断言；可独立提交。
+18. **完成：** S4-S5、S10及含 duplicate 的 S8 全绿，generic fixture 不依赖 forge/projector/supervisor，既有真正 rejection recovery 不回归，mock E2E、doc drift、build/clippy/fmt、`./scripts/run-tests.sh` 全绿；无 skip/only/弱化断言；可独立提交。
 19. **停止：** 最终 committed集合在当前函数边界不可可靠获得；不得用 early accepted近似，需重画调用链。
 20. **风险：** had_events与stall detector顺序，以及 fixture 误走 dummy 路径；通过 zero-commit/commit-first 双向测试并断言 task file 与 supervisor 真实状态检测。
 
@@ -477,6 +502,7 @@ flowchart TB
 | U2/U3 docs | `scripts/check-cli-doc-drift.sh` | agent CLI guide drift | 必须通过 |
 | U3 recovery | `cargo nextest run -p ralph-core -- isolated_extra_business_event` | recovery边界 | 必须通过 |
 | U3 routing | `cargo nextest run -p ralph-core -- next_hat` | priority回归 | 必须通过 |
+| U3 generic compatibility | `cargo nextest run -p ralph-core -- generic_isolated` | 非 forge 的 commit-first/zero-commit 与 terminal/default-publish 回归 | 必须通过 |
 | U3 BDD | `cargo nextest run -p ralph-core --test scenarios -- parallel_forge_duplicate_handoff_runtime` | duplicate handoff real EventLoop | 必须通过 |
 | U3 mock E2E | `cargo run -p ralph-e2e -- --mock --filter parallel-forge` | CI-safe主路径 | 必须通过 |
 | 每Unit格式 | `cargo fmt --all -- --check` | 格式 | 必须通过 |
@@ -489,9 +515,11 @@ flowchart TB
 
 ### 10. 最终质量门禁
 
-- S1-S8 全部通过且每个 R1-R10 可追踪到可执行测试。
+- S1-S10 全部通过且每个 R1-R12 可追踪到可执行测试。
 - batch atomicity、idempotency、dependency resolution和持久化失败覆盖。
+- 仓库内全部 projection action keys 已完成旧 whitelist → 新 action-key 权威迁移审计；没有未批准的新激活 topic；外部 preset 兼容性变化已披露。
 - commit-first与zero-commit recovery双向覆盖，targeted priority原有契约不回归。
+- 非 `parallel-forge` 的 generic isolated fixture 已证明其他 preset 的 terminal/default-publish/handoff 主路径不回归。
 - strict lint positive/negative matrix通过，finding rubric同步。
 - parallel-forge preset/schema/embedded parity通过。
 - 真实 EventLoop、supervisor integration和mock E2E通过。
