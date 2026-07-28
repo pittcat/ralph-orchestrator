@@ -434,6 +434,40 @@ mechanism:
     );
 }
 
+/// U4 exemption: one explicit target is enough to avoid the fully positional shape.
+#[test]
+fn flow_linear_positional_ambiguity_silent_with_partial_forward_intersection() {
+    let yaml = r#"
+mechanism:
+  flow:
+    type: declared
+    version: 1
+    terminal_emits: [LOOP_COMPLETE]
+    steps:
+      - id: planning
+        kind: linear
+        allowed_emits:
+          - forge.plan.inspected
+          - forge.plan.deferred
+      - id: plan_authoring
+        kind: linear
+        "on": forge.plan.inspected
+        allowed_emits:
+          - forge.plan.ready
+      - id: plan_end
+        kind: terminal
+        allowed_emits:
+          - LOOP_COMPLETE
+"#;
+    let findings = check_flow_declaration(yaml).unwrap();
+    assert!(
+        findings
+            .iter()
+            .all(|f| f.id != FINDING_FLOW_LINEAR_POSITIONAL_AMBIGUITY),
+        "any explicit forward intersection must silence the narrow finding; got {findings:?}"
+    );
+}
+
 /// U4 exemption: linear step with `on_any_of` branch — no finding.
 #[test]
 fn flow_linear_positional_ambiguity_silent_with_on_any_of_branch() {
@@ -647,17 +681,9 @@ mechanism:
     );
 }
 
-/// U4: only transition-capable topics trigger the finding.
+/// U4 exemption: a later target for any transition-capable topic prevents the finding.
 #[test]
-fn flow_linear_positional_ambiguity_fires_on_transition_topic_only() {
-    // integration step has 3 allowed emits. Two of them
-    // (`work.failed`, `forge.report.done`) are non-transition /
-    // non-ambiguous. The remaining one (`forge.integration.done`)
-    // is transition-capable. Here we drop the `on: forge.integration.done`
-    // declaration on incremental_verify so the U4 finding fires on
-    // the transition topic only — the non-transition topics
-    // (`work.failed`, `forge.report.done`) are correctly NOT
-    // surfaced in the finding's topic list.
+fn flow_linear_positional_ambiguity_silent_when_report_target_exists() {
     let yaml = r#"
 mechanism:
   flow:
@@ -705,27 +731,8 @@ mechanism:
         .iter()
         .filter(|f| f.id == FINDING_FLOW_LINEAR_POSITIONAL_AMBIGUITY)
         .collect();
-    assert_eq!(
-        positional_findings.len(),
-        1,
-        "forge.integration.done ambiguity must trigger U4; got {:?}",
-        findings
-    );
-    let f = positional_findings[0];
-    assert!(f.message.contains("integration"));
-    assert!(f.message.contains("forge.integration.done"));
-    // The non-transition topics (`work.failed`, `forge.report.done`)
-    // are in the message's `topics_str` (all allowed emits) but
-    // NOT in the ambiguous topics list. Verify the action_hint
-    // only surfaces the transition-capable topic.
-    let hint = f.action_hint.as_ref().expect("action_hint must be Some");
-    assert!(hint.contains("forge.integration.done"));
     assert!(
-        !hint.contains("work.failed"),
-        "non-transition topic must not appear in the action_hint; got: {hint}"
-    );
-    assert!(
-        !hint.contains("forge.report.done"),
-        "forge.report.done is reachable via on_any_of on report step; must not appear in ambiguous list"
+        positional_findings.is_empty(),
+        "forge.report.done has an explicit forward target, so the flow is not fully positional; got {findings:?}"
     );
 }

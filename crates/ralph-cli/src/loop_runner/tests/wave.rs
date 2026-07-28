@@ -6,6 +6,13 @@ use super::super::*;
 use super::fake_path::*;
 use std::collections::HashSet;
 
+#[cfg(unix)]
+fn isolated_events_file(temp_dir: &tempfile::TempDir) -> PathBuf {
+    let ralph_dir = temp_dir.path().join(".ralph");
+    std::fs::create_dir_all(&ralph_dir).expect("ralph dir");
+    ralph_dir.join("events.jsonl")
+}
+
 #[test]
 fn test_wave_worker_execution_mode_supports_all_backend_formats() {
     assert_eq!(
@@ -269,7 +276,7 @@ async fn run_wave_for_backend_with_test_env(
             .collect(),
     };
 
-    let events_file = temp_dir.path().join("events.jsonl");
+    let events_file = isolated_events_file(&temp_dir);
     let wave = make_test_wave_with_timeout(vec!["review.done".to_string()], timeout_secs);
     execute_wave(
         &wave,
@@ -308,7 +315,7 @@ async fn run_wave_for_named_backend(name: &str, body: &str) -> ralph_core::Compl
     };
     backend.env_vars.push(("PATH".to_string(), path_value));
 
-    let events_file = temp_dir.path().join("events.jsonl");
+    let events_file = isolated_events_file(&temp_dir);
     let wave = make_test_wave(vec!["review.done".to_string()]);
     execute_wave(
         &wave,
@@ -356,7 +363,6 @@ async fn run_wave_for_named_backend_with_capture_and_task_payload(
     let bin_dir = temp_dir.path().join("bin");
     std::fs::create_dir_all(&bin_dir).expect("bin dir");
 
-    let worker_capture_path = temp_dir.path().join("wave-w-test-0.jsonl.capture");
     let mut backend = CliBackend::from_name(name).expect("named backend");
     let executable_name = Path::new(&backend.command)
         .file_name()
@@ -377,7 +383,11 @@ async fn run_wave_for_named_backend_with_capture_and_task_payload(
     };
     backend.env_vars.push(("PATH".to_string(), path_value));
 
-    let events_file = temp_dir.path().join("events.jsonl");
+    let events_file = isolated_events_file(&temp_dir);
+    let worker_capture_path = events_file
+        .parent()
+        .expect("events parent")
+        .join("wave-w-test-0.jsonl.capture");
     let wave = make_test_wave_with_timeout_and_payload(
         vec!["review.done".to_string()],
         30,
@@ -434,7 +444,7 @@ async fn run_wave_for_hat_backend(
     global_backend: CliBackend,
 ) -> ralph_core::CompletedWave {
     let temp_dir = tempfile::tempdir().expect("temp dir");
-    let events_file = temp_dir.path().join("events.jsonl");
+    let events_file = isolated_events_file(&temp_dir);
     let mut wave = make_test_wave(vec!["review.done".to_string()]);
     wave.hat_config.backend = Some(hat_backend);
     wave.hat_config.backend_args = backend_args;
@@ -474,8 +484,11 @@ async fn run_wave_for_hat_backend_with_capture_and_task_payload(
     task_payload: &str,
 ) -> (ralph_core::CompletedWave, CapturedWaveInvocation) {
     let temp_dir = tempfile::tempdir().expect("temp dir");
-    let worker_capture_path = temp_dir.path().join("wave-w-test-0.jsonl.capture");
-    let events_file = temp_dir.path().join("events.jsonl");
+    let events_file = isolated_events_file(&temp_dir);
+    let worker_capture_path = events_file
+        .parent()
+        .expect("events parent")
+        .join("wave-w-test-0.jsonl.capture");
     let mut wave = make_test_wave_with_timeout_and_payload(
         vec!["review.done".to_string()],
         30,
@@ -1732,7 +1745,7 @@ async fn test_execute_wave_synthesizes_failure_events_for_missing_custom_hat_bac
 #[tokio::test]
 async fn test_execute_wave_synthesizes_failure_events_for_missing_text_backend_command() {
     let temp_dir = tempfile::tempdir().expect("temp dir");
-    let events_file = temp_dir.path().join("events.jsonl");
+    let events_file = isolated_events_file(&temp_dir);
     let wave = make_test_wave(vec!["review.done".to_string()]);
 
     let completed = execute_wave(
@@ -2214,7 +2227,7 @@ async fn test_run_wave_worker_pty_events_file_growth_keeps_lease_alive() {
 #[test]
 fn test_merge_wave_results_to_events_file_synthesizes_failure_events() {
     let temp_dir = tempfile::tempdir().expect("temp dir");
-    let events_file = temp_dir.path().join("events.jsonl");
+    let events_file = isolated_events_file(&temp_dir);
     let completed = ralph_core::CompletedWave {
         wave_id: "w-test".to_string(),
         wave_total: 2,

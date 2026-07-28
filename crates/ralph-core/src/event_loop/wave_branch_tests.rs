@@ -3,121 +3,30 @@
 //   R3/S3 (unit topics non-transition): exec.unit.{ready,done,failed}
 //     do not advance exec_wave step
 //   R4/S4 (wave terminal transition): exec.wave.complete / exec.wave.failed
-//     advance exec_wave → unit_review
+//     advance to exec_finalize / exec_failure
 //
-// This module is self-contained: it duplicates parallel_forge_flow()
-// so it does not depend on sibling cfg(test) modules. The BDD fixture
-// (tests/scenarios/parallel_forge_exec_wave_branch.yml) exercises the
-// same topology via run_workflow_guard_scenario (real EventLoop).
+// Parse the actual preset so this test cannot drift into a second flow model.
 
 #[cfg(test)]
 mod wave_branch_tests {
-    use crate::config::{
-        EventLoopConfig, FlowDeclarationConfig, FlowStepConfig, MechanismConfig, RalphConfig,
-    };
-    // Access helpers at the crate root (mod.rs level) — these are pub(crate)
-    // and visible to all cfg(test) modules in the event_loop module group.
+    use crate::config::RalphConfig;
     use crate::event_loop::advance_plan_step;
     use crate::event_loop::recover_current_plan_step;
 
-    /// Build a RalphConfig mirroring parallel-forge's flow declaration.
-    /// Self-contained duplicate — does NOT pull from flow_authority_pf_recovery_tests
-    /// so this module compiles independently.
     fn parallel_forge_flow() -> RalphConfig {
-        let mk = |id: &str,
-                  allowed: Vec<&str>,
-                  on: Option<&str>,
-                  on_any_of: Vec<&str>,
-                  runs: Option<&str>| FlowStepConfig {
-            id: id.to_string(),
-            kind: if runs.is_some() {
-                Some("side_effect".to_string())
-            } else if id == "planning" {
-                Some("linear".to_string())
-            } else if id == "integration" {
-                Some("linear".to_string())
-            } else {
-                None
-            },
-            allowed_emits: allowed.into_iter().map(String::from).collect(),
-            terminal_when: None,
-            on_partial: std::collections::BTreeMap::new(),
-            runs: runs.map(String::from),
-            on: on.map(String::from),
-            on_any_of: on_any_of.into_iter().map(String::from).collect(),
-        };
+        RalphConfig::parse_yaml(include_str!("../../../../presets/en/parallel-forge.yml"))
+            .expect("parallel-forge preset must parse")
+    }
 
-        let mut cfg = RalphConfig::default();
-        cfg.event_loop = EventLoopConfig {
-            mechanism: Some(MechanismConfig {
-                flow: Some(FlowDeclarationConfig {
-                    flow_type: "declared".to_string(),
-                    version: 1,
-                    terminal_emits: vec!["LOOP_COMPLETE".to_string()],
-                    steps: vec![
-                        mk(
-                            "planning",
-                            vec![
-                                "forge.plan.inspected",
-                                "forge.plan.ready",
-                                "forge.concurrency.approved",
-                                "forge.worktrees.ready",
-                                "forge.plan.blocked",
-                            ],
-                            None,
-                            vec![],
-                            None,
-                        ),
-                        mk(
-                            "exec_wave",
-                            vec![
-                                "exec.wave.complete",
-                                "exec.wave.failed",
-                                "exec.unit.ready",
-                                "exec.unit.done",
-                                "exec.unit.failed",
-                                "forge.exec.development.done",
-                            ],
-                            Some("forge.worktrees.ready"),
-                            vec![],
-                            Some("supervisor.exec.wave"),
-                        ),
-                        mk(
-                            "unit_review",
-                            vec!["forge.units.reviewed"],
-                            Some("forge.exec.development.done"),
-                            vec![],
-                            None,
-                        ),
-                        mk(
-                            "integration",
-                            vec![
-                                "forge.integration.done",
-                                "forge.incremental.verified",
-                                "forge.full.verified",
-                                "forge.audit.done",
-                                "forge.report.done",
-                                "work.failed",
-                            ],
-                            Some("forge.units.reviewed"),
-                            vec![],
-                            None,
-                        ),
-                        mk(
-                            "plan_end",
-                            vec!["forge.report.done", "LOOP_COMPLETE"],
-                            None,
-                            vec![],
-                            None,
-                        ),
-                    ],
-                    ..FlowDeclarationConfig::default()
-                }),
-                phase_authority: None,
-            }),
-            ..EventLoopConfig::default()
-        };
-        cfg
+    fn recover_from_exec(cfg: &RalphConfig, subsequent_topics: &[&str]) -> String {
+        let mut topics = vec![
+            "forge.plan.inspected",
+            "forge.plan.ready",
+            "forge.concurrency.approved",
+            "forge.worktrees.ready",
+        ];
+        topics.extend_from_slice(subsequent_topics);
+        recover_current_plan_step(cfg, &topics)
     }
 
     // -------------------------------------------------------------------------
@@ -128,7 +37,7 @@ mod wave_branch_tests {
     #[test]
     fn pf_wave_r3_exec_unit_done_is_non_transition() {
         let cfg = parallel_forge_flow();
-        let at_exec = recover_current_plan_step(&cfg, &["forge.concurrency.approved"]);
+        let at_exec = recover_from_exec(&cfg, &[]);
         assert_eq!(at_exec, "exec_wave", "pre-condition: must be at exec_wave");
         let next = advance_plan_step(&cfg, &at_exec, "exec.unit.done");
         assert_eq!(
@@ -141,7 +50,7 @@ mod wave_branch_tests {
     #[test]
     fn pf_wave_r3_exec_unit_failed_is_non_transition() {
         let cfg = parallel_forge_flow();
-        let at_exec = recover_current_plan_step(&cfg, &["forge.concurrency.approved"]);
+        let at_exec = recover_from_exec(&cfg, &[]);
         assert_eq!(at_exec, "exec_wave", "pre-condition: must be at exec_wave");
         let next = advance_plan_step(&cfg, &at_exec, "exec.unit.failed");
         assert_eq!(
@@ -154,7 +63,7 @@ mod wave_branch_tests {
     #[test]
     fn pf_wave_s3_exec_unit_ready_is_non_transition() {
         let cfg = parallel_forge_flow();
-        let at_exec = recover_current_plan_step(&cfg, &["forge.concurrency.approved"]);
+        let at_exec = recover_from_exec(&cfg, &[]);
         assert_eq!(at_exec, "exec_wave", "pre-condition: must be at exec_wave");
         let next = advance_plan_step(&cfg, &at_exec, "exec.unit.ready");
         assert_eq!(
@@ -167,10 +76,9 @@ mod wave_branch_tests {
     #[test]
     fn pf_wave_s3_recover_fold_exec_unit_done_stays() {
         let cfg = parallel_forge_flow();
-        let at_exec = recover_current_plan_step(&cfg, &["forge.concurrency.approved"]);
+        let at_exec = recover_from_exec(&cfg, &[]);
         assert_eq!(at_exec, "exec_wave", "pre-condition: must be at exec_wave");
-        let recovered =
-            recover_current_plan_step(&cfg, &["forge.concurrency.approved", "exec.unit.done"]);
+        let recovered = recover_from_exec(&cfg, &["exec.unit.done"]);
         assert_eq!(
             recovered, "exec_wave",
             "S3: recover_current_plan_step fold with exec.unit.done stays at exec_wave"
@@ -181,10 +89,9 @@ mod wave_branch_tests {
     #[test]
     fn pf_wave_s3_recover_fold_exec_unit_failed_stays() {
         let cfg = parallel_forge_flow();
-        let at_exec = recover_current_plan_step(&cfg, &["forge.concurrency.approved"]);
+        let at_exec = recover_from_exec(&cfg, &[]);
         assert_eq!(at_exec, "exec_wave", "pre-condition: must be at exec_wave");
-        let recovered =
-            recover_current_plan_step(&cfg, &["forge.concurrency.approved", "exec.unit.failed"]);
+        let recovered = recover_from_exec(&cfg, &["exec.unit.failed"]);
         assert_eq!(
             recovered, "exec_wave",
             "S3: recover_current_plan_step fold with exec.unit.failed stays at exec_wave"
@@ -195,55 +102,53 @@ mod wave_branch_tests {
     // R4 / S4: exec.wave.complete / exec.wave.failed ARE step transitions
     // -------------------------------------------------------------------------
 
-    /// R4: exec.wave.complete advances exec_wave → unit_review.
+    /// R4: exec.wave.complete advances exec_wave → exec_finalize.
     #[test]
-    fn pf_wave_r4_exec_wave_complete_advances_to_unit_review() {
+    fn pf_wave_r4_exec_wave_complete_advances_to_exec_finalize() {
         let cfg = parallel_forge_flow();
-        let at_exec = recover_current_plan_step(&cfg, &["forge.concurrency.approved"]);
+        let at_exec = recover_from_exec(&cfg, &[]);
         assert_eq!(at_exec, "exec_wave", "pre-condition: must be at exec_wave");
         let next = advance_plan_step(&cfg, &at_exec, "exec.wave.complete");
         assert_eq!(
             next,
-            Some("unit_review".to_string()),
-            "R4: exec.wave.complete must advance exec_wave → unit_review"
+            Some("exec_finalize".to_string()),
+            "R4: exec.wave.complete must advance exec_wave → exec_finalize"
         );
     }
 
-    /// R4: exec.wave.failed advances exec_wave → unit_review.
+    /// R4: exec.wave.failed advances exec_wave → exec_failure.
     #[test]
-    fn pf_wave_r4_exec_wave_failed_advances_to_unit_review() {
+    fn pf_wave_r4_exec_wave_failed_advances_to_exec_failure() {
         let cfg = parallel_forge_flow();
-        let at_exec = recover_current_plan_step(&cfg, &["forge.concurrency.approved"]);
+        let at_exec = recover_from_exec(&cfg, &[]);
         assert_eq!(at_exec, "exec_wave", "pre-condition: must be at exec_wave");
         let next = advance_plan_step(&cfg, &at_exec, "exec.wave.failed");
         assert_eq!(
             next,
-            Some("unit_review".to_string()),
-            "R4: exec.wave.failed must advance exec_wave → unit_review"
+            Some("exec_failure".to_string()),
+            "R4: exec.wave.failed must advance exec_wave → exec_failure"
         );
     }
 
-    /// S4: recover_current_plan_step fold exec.wave.complete → unit_review.
+    /// S4: recover_current_plan_step fold exec.wave.complete → exec_finalize.
     #[test]
-    fn pf_wave_s4_recover_fold_exec_wave_complete_to_unit_review() {
+    fn pf_wave_s4_recover_fold_exec_wave_complete_to_exec_finalize() {
         let cfg = parallel_forge_flow();
-        let recovered =
-            recover_current_plan_step(&cfg, &["forge.concurrency.approved", "exec.wave.complete"]);
+        let recovered = recover_from_exec(&cfg, &["exec.wave.complete"]);
         assert_eq!(
-            recovered, "unit_review",
-            "S4: recover_current_plan_step fold exec.wave.complete → unit_review"
+            recovered, "exec_finalize",
+            "S4: recover_current_plan_step fold exec.wave.complete → exec_finalize"
         );
     }
 
-    /// S4: recover_current_plan_step fold exec.wave.failed → unit_review.
+    /// S4: recover_current_plan_step fold exec.wave.failed → exec_failure.
     #[test]
-    fn pf_wave_s4_recover_fold_exec_wave_failed_to_unit_review() {
+    fn pf_wave_s4_recover_fold_exec_wave_failed_to_exec_failure() {
         let cfg = parallel_forge_flow();
-        let recovered =
-            recover_current_plan_step(&cfg, &["forge.concurrency.approved", "exec.wave.failed"]);
+        let recovered = recover_from_exec(&cfg, &["exec.wave.failed"]);
         assert_eq!(
-            recovered, "unit_review",
-            "S4: recover_current_plan_step fold exec.wave.failed → unit_review"
+            recovered, "exec_failure",
+            "S4: recover_current_plan_step fold exec.wave.failed → exec_failure"
         );
     }
 
@@ -251,51 +156,35 @@ mod wave_branch_tests {
     // Idempotency: repeated wave terminals do not double-advance
     // -------------------------------------------------------------------------
 
-    /// Idempotency: repeated exec.wave.complete at unit_review stays put.
+    /// Idempotency: repeated exec.wave.complete at exec_finalize stays put.
     #[test]
-    fn pf_wave_repeated_exec_wave_complete_stays_at_unit_review() {
+    fn pf_wave_repeated_exec_wave_complete_stays_at_exec_finalize() {
         let cfg = parallel_forge_flow();
-        let at_review =
-            recover_current_plan_step(&cfg, &["forge.concurrency.approved", "exec.wave.complete"]);
+        let at_review = recover_from_exec(&cfg, &["exec.wave.complete"]);
         assert_eq!(
-            at_review, "unit_review",
-            "pre-condition: must be at unit_review"
+            at_review, "exec_finalize",
+            "pre-condition: must be at exec_finalize"
         );
-        let recovered = recover_current_plan_step(
-            &cfg,
-            &[
-                "forge.concurrency.approved",
-                "exec.wave.complete",
-                "exec.wave.complete",
-            ],
-        );
+        let recovered = recover_from_exec(&cfg, &["exec.wave.complete", "exec.wave.complete"]);
         assert_eq!(
-            recovered, "unit_review",
-            "repeated exec.wave.complete must not backstep from unit_review"
+            recovered, "exec_finalize",
+            "repeated exec.wave.complete must not backstep from exec_finalize"
         );
     }
 
-    /// Idempotency: repeated exec.wave.failed at unit_review stays put.
+    /// Idempotency: repeated exec.wave.failed at exec_failure stays put.
     #[test]
-    fn pf_wave_repeated_exec_wave_failed_stays_at_unit_review() {
+    fn pf_wave_repeated_exec_wave_failed_stays_at_exec_failure() {
         let cfg = parallel_forge_flow();
-        let at_review =
-            recover_current_plan_step(&cfg, &["forge.concurrency.approved", "exec.wave.failed"]);
+        let at_review = recover_from_exec(&cfg, &["exec.wave.failed"]);
         assert_eq!(
-            at_review, "unit_review",
-            "pre-condition: must be at unit_review"
+            at_review, "exec_failure",
+            "pre-condition: must be at exec_failure"
         );
-        let recovered = recover_current_plan_step(
-            &cfg,
-            &[
-                "forge.concurrency.approved",
-                "exec.wave.failed",
-                "exec.wave.failed",
-            ],
-        );
+        let recovered = recover_from_exec(&cfg, &["exec.wave.failed", "exec.wave.failed"]);
         assert_eq!(
-            recovered, "unit_review",
-            "repeated exec.wave.failed must not backstep from unit_review"
+            recovered, "exec_failure",
+            "repeated exec.wave.failed must not backstep from exec_failure"
         );
     }
 
@@ -307,7 +196,7 @@ mod wave_branch_tests {
     #[test]
     fn pf_wave_all_exec_unit_topics_are_non_transitions() {
         let cfg = parallel_forge_flow();
-        let at_exec = recover_current_plan_step(&cfg, &["forge.concurrency.approved"]);
+        let at_exec = recover_from_exec(&cfg, &[]);
         assert_eq!(at_exec, "exec_wave");
         for topic in &["exec.unit.ready", "exec.unit.done", "exec.unit.failed"] {
             let next = advance_plan_step(&cfg, at_exec.as_str(), topic);
@@ -322,14 +211,17 @@ mod wave_branch_tests {
     #[test]
     fn pf_wave_all_exec_wave_topics_are_transitions() {
         let cfg = parallel_forge_flow();
-        let at_exec = recover_current_plan_step(&cfg, &["forge.concurrency.approved"]);
+        let at_exec = recover_from_exec(&cfg, &[]);
         assert_eq!(at_exec, "exec_wave");
-        for topic in &["exec.wave.complete", "exec.wave.failed"] {
+        for (topic, expected) in [
+            ("exec.wave.complete", "exec_finalize"),
+            ("exec.wave.failed", "exec_failure"),
+        ] {
             let next = advance_plan_step(&cfg, at_exec.as_str(), topic);
             assert_eq!(
                 next,
-                Some("unit_review".to_string()),
-                "{topic} must be a transition within exec_wave → unit_review"
+                Some(expected.to_string()),
+                "{topic} must take its declared transition from exec_wave"
             );
         }
     }

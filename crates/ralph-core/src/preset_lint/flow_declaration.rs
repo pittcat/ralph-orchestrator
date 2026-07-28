@@ -284,22 +284,23 @@ pub fn check_flow_linear_positional_ambiguity(raw_yaml: &str) -> Vec<LintFinding
         // failure-capable step explicitly keeps `work.failed` in
         // its `allowed_emits` to satisfy the FlowStepScope gate
         // even though it never advances the step.
-        let ambiguous: Vec<&String> = allowed_topics
+        let transition_topics: Vec<&String> = allowed_topics
             .iter()
-            .filter(|t| {
-                !NON_TRANSITION_TOPICS.contains(&t.as_str()) && !forward_targets.contains(*t)
-            })
+            .filter(|t| !NON_TRANSITION_TOPICS.contains(&t.as_str()))
             .collect();
-        if ambiguous.is_empty() {
+        if transition_topics.is_empty()
+            || transition_topics
+                .iter()
+                .any(|topic| forward_targets.contains(*topic))
+        {
             continue;
         }
-        // The finding fires only when the step has at least one
-        // topic that the runtime would fall back to advance
-        // positionally for. We surface all such topics in the
-        // message so the operator can wire each one.
+        // The finding is intentionally narrow: it fires only when no
+        // transition-capable topic has any explicit forward target.
         let topics_list: Vec<String> = allowed_topics.iter().map(|s| format!("`{s}`")).collect();
         let topics_str = topics_list.join(", ");
-        let ambiguous_list: Vec<String> = ambiguous.iter().map(|s| format!("`{s}`")).collect();
+        let ambiguous_list: Vec<String> =
+            transition_topics.iter().map(|s| format!("`{s}`")).collect();
         let ambiguous_str = ambiguous_list.join(", ");
         let mut f = LintFinding::new(
             FINDING_FLOW_LINEAR_POSITIONAL_AMBIGUITY,
@@ -314,8 +315,8 @@ pub fn check_flow_linear_positional_ambiguity(raw_yaml: &str) -> Vec<LintFinding
         f.hat = Some(id.to_string());
         f.action_hint = Some(format!(
             "add `on: <topic>` (single target) or `on_any_of: [<topics>]` (branch) to the next step, \
-             and ensure every transition-capable topic in step '{id}'.allowed_emits appears in some \
-             forward step's on/on_any_of. Topics needing forward targets: {ambiguous_str}"
+             so at least one transition-capable topic in step '{id}'.allowed_emits appears in a \
+             forward step's on/on_any_of. Topics without targets: {ambiguous_str}"
         ));
         findings.push(f);
     }
