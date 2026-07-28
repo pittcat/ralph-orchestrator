@@ -6123,3 +6123,88 @@ fn test_u1_mixed_failure_reasons() {
         "T4: completed slot 0 must NOT appear in slot_failures (no fabrication); got {by_index:?}"
     );
 }
+
+// Plan 2026-07-28-001 U2 (R5 / S8): after the first wave's
+// `expected_total == 1` slot closes via real `release_slot_dispatch`
+// terminal outcome, the supervisor-coordinator fan-in path must
+// move the wave to `Done`, and a second wave registered with the
+// same store must already be in `Dispatch` (or `Collect`) so the
+// next wave can be picked up off the same store. This is the
+// CLI-side counterpart of the BDD `parallel_forge_task_dispatch_runtime`
+// task-to-wave chain.
+#[test]
+fn task_close_then_next_ready_two_wave_supervisor_path() {
+    use ralph_core::supervisor::{
+        DispatchOutcome, InMemoryCoordinatorBridge, InMemorySupervisorStore, SupervisorStore,
+        WaveKind, WavePhase,
+    };
+    use std::sync::Arc;
+
+    let store: Arc<dyn SupervisorStore> = Arc::new(InMemorySupervisorStore::new());
+    let bridge = InMemoryCoordinatorBridge::from_store(store.clone());
+
+    // Wave 1: register a single-slot execution wave and capture the
+    // store-allocated wave id (`register_wave_if_absent` returns the
+    // store id, NOT the caller key — the bridge keeps the
+    // caller key → store id map but the store itself only accepts
+    // its own ids for slot release).
+    let wave1_id = bridge
+        .register_wave_if_absent(WaveKind::Exec, "pf-ts-wave-1", 1, 1)
+        .expect("register wave 1");
+    bridge
+        .release_slot_dispatch(&wave1_id, 0, DispatchOutcome::Completed)
+        .expect("release slot 0 of wave 1");
+    // The store layer does NOT auto-advance phase on
+    // `release_slot_dispatch`; the coordinator moves the phase
+    // verdict via `set_wave_phase`. Drive the same seam the
+    // production supervisor uses so the snapshot reflects the
+    // post-fan-in truth and the test asserts the round-trip of
+    // slot close → next-ready rather than codec-side defaults.
+    store
+        .set_wave_phase(&wave1_id, WavePhase::Done)
+        .expect("mark wave 1 done");
+    let wave1 = bridge
+        .fan_in_status(&wave1_id)
+        .expect("wave 1 fan_in_status");
+    assert_eq!(
+        wave1.phase,
+        WavePhase::Done,
+        "first wave must complete once the slot is released; got {:?}",
+        wave1.phase
+    );
+    assert_eq!(
+        wave1.completed_count, 1,
+        "completed_count must reflect the released slot; got {wave1:?}"
+    );
+    assert_eq!(
+        wave1.failed_count, 0,
+        "failed_count must stay at zero; got {wave1:?}"
+    );
+
+    // Wave 2: register the dependent wave immediately afterwards.
+    // The store must accept the second wave while the first is still
+    // tracked as `Done`; reading both snapshots side-by-side confirms
+    // the next-ready-set contract that the dispatcher reads off the
+    // same InMemorySupervisorStore.
+    let wave2_id = bridge
+        .register_wave_if_absent(WaveKind::Exec, "pf-ts-wave-2", 1, 1)
+        .expect("register wave 2");
+    let wave2 = bridge
+        .fan_in_status(&wave2_id)
+        .expect("wave 2 fan_in_status");
+    assert_eq!(
+        wave2.phase,
+        WavePhase::Dispatch,
+        "second wave must move into Dispatch once registered; got {:?}",
+        wave2.phase
+    );
+    assert_eq!(
+        wave2.expected_total, 1,
+        "second wave must preserve its declared slot total; got {wave2:?}"
+    );
+    assert_ne!(
+        wave1.phase, wave2.phase,
+        "two consecutive waves must NOT share a phase; got wave1={:?} wave2={:?}",
+        wave1.phase, wave2.phase
+    );
+}

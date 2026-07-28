@@ -2519,6 +2519,130 @@ mod tests {
         );
     }
 
+    /// Plan 2026-07-28-001 U2 / R14 / S9: the **newly-activated
+    /// builtin projector action keys** (i.e. configured keys that
+    /// fall outside the legacy `work.*` / `queue.advance` /
+    /// `plan.complete` / `review.dimensions.complete` whitelist)
+    /// must be **exactly `{forge.plan.ready}`** across every
+    /// embedded builtin. Synthesizing a new builtin that activates
+    /// another projected topic without an explicit plan amendment
+    /// silently widens the action-key surface, so we pin the set
+    /// structurally here (R14 / S9, plan §4.2).
+    #[test]
+    fn test_builtin_state_projection_action_keys_migration_inventory() {
+        use ralph_core::config::StateProjectionAction;
+        use std::collections::BTreeSet;
+
+        // Legacy `PROBE`-only keys: inventory from the pre-U2 builtin
+        // baseline. These keep the projector live but add no
+        // newly-typed action. Anything outside this whitelist is part
+        // of the new (approved) set and must end up in the new-key
+        // pin.
+        let legacy_keys: BTreeSet<String> = [
+            "work.ready",
+            "work.done",
+            "queue.advance",
+            "plan.complete",
+            "review.dimensions.complete",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        let expected_new_keys: BTreeSet<String> = ["forge.plan.ready"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+
+        let mut full_legacy: BTreeSet<String> = legacy_keys.clone();
+        let mut full_new: BTreeSet<String> = BTreeSet::new();
+
+        let mut bad_presets: Vec<String> = Vec::new();
+        for preset in PRESETS {
+            let config = RalphConfig::parse_yaml(preset.content)
+                .unwrap_or_else(|e| panic!("{}: parse error: {e}", preset.name));
+            if !config.event_loop.state_projection.enabled {
+                continue;
+            }
+            let mut configured: BTreeSet<String> = BTreeSet::new();
+            for key in config.event_loop.state_projection.actions.keys() {
+                configured.insert(key.clone());
+            }
+            for (key, chain) in &config.event_loop.state_projection.actions_chain {
+                if chain.is_empty() {
+                    continue;
+                }
+                configured.insert(key.clone());
+            }
+            // The configure-time action kind (ensure_task / ensure
+            // / mark_progress / chain) is irrelevant to this audit —
+            // what matters is whether the topic key itself is part
+            // of the legacy set or the post-2026-07-28 approved set.
+            for key in &configured {
+                if legacy_keys.contains(key) {
+                    full_legacy.insert(key.clone());
+                } else {
+                    full_new.insert(key.clone());
+                }
+            }
+            // The preset's per-key contribution still has to make
+            // sense: every non-legacy configured key on a builtin
+            // must be `expected_new_keys`. If a sibling preset adds a
+            // new key of its own, surface it as a per-preset failure.
+            let preset_extras: BTreeSet<String> = configured
+                .iter()
+                .filter(|k| !legacy_keys.contains(*k))
+                .filter(|k| !expected_new_keys.contains(*k))
+                .cloned()
+                .collect();
+            if !preset_extras.is_empty() {
+                bad_presets.push(format!(
+                    "{}: {} unexpected new action key(s)",
+                    preset.name,
+                    preset_extras.into_iter().collect::<Vec<_>>().join(", ")
+                ));
+            }
+            // Sanity: ensure `forge.plan.ready` is configured as a
+            // batch action on the parallel-forge preset — this is the
+            // one and only place its action is declared.
+            if preset.name == "parallel-forge" {
+                let Some(action) = config
+                    .event_loop
+                    .state_projection
+                    .actions
+                    .get("forge.plan.ready")
+                else {
+                    bad_presets.push(format!(
+                        "{}: `forge.plan.ready` not declared in state_projection.actions",
+                        preset.name
+                    ));
+                    continue;
+                };
+                if !matches!(action, StateProjectionAction::EnsureTaskBatch { .. }) {
+                    bad_presets.push(format!(
+                        "{}: forge.plan.ready is not an EnsureTaskBatch action",
+                        preset.name
+                    ));
+                }
+            }
+        }
+
+        assert_eq!(
+            full_legacy, legacy_keys,
+            "legacy action-key inventory drifted; expected {:?}, got {:?}",
+            legacy_keys, full_legacy
+        );
+        assert_eq!(
+            full_new, expected_new_keys,
+            "newly-activated action keys drift; expected {:?}, got {:?}; offending presets: {:?}",
+            expected_new_keys, full_new, bad_presets
+        );
+        assert!(
+            bad_presets.is_empty(),
+            "preset-level key errors: {}",
+            bad_presets.join("; ")
+        );
+    }
+
     // WRC-U3 / T-WRC-U3-04 (Tier-0 contract): every preset listed in
     // `TIER_0_WAC_PRESETS` must produce a `RuntimeContractReport`
     // with **zero WAC `lint.preset.*` errors** when checked under
