@@ -274,6 +274,32 @@ ralph emit <TOPIC> -j '...' --output json                  # 落盘：看 ok=tru
 
 ---
 
+## Over-Emit Recovery（isolated 模式单业务事件预算）
+
+isolated 模式每个 activation 只允许一个业务事件最终 commit。本节解释当你多发了 event 时 runner 的实际处理，以及你怎么读懂 runner 的提示而不是凭直觉加塞。
+
+### 触发条件
+- 同一 activation 在 JSONL 里写了 **两个或更多属于本 hat `publishes:` 的业务 topic**。
+- 第二（含）事件被 per-turn budget 拦截，runner 在 bus 上 publish 一条 `event.isolation.boundary_violation` 诊断（target = 当前 hat），同时视情形再追加一条 hat-targeted `task.resume`。
+- 末态事件（`LOOP_COMPLETE`、`plan.blocked`、`work.failed`、其他被 preset `terminal_events` 标记的 topic）享受优先级保留：只要终态事件**作为首个 commit 业务事件**提交，额外的次级业务事件就被丢，不被认作 over-emit resume 触发条件。
+
+### Commit-First 决策（关键）
+runtime **不**在 budget 拦截那一刻决定是否发 `task.resume`；它只在 `process_parse_result` 末尾**结算最终 accepted 业务集合**之后再决定。结算规则：
+
+- **零业务 commit**：所有候选在 origin / schema / contract gate 前后均未存活 → 记一次 bounded 拒绝，注入一条 hat-targeted `task.resume`（带 breaker 累计）；下次 activation 你应只发**一条**事件。
+- **≥1 业务 commit**：第一个 commit 已锁定下游 handoff，budget 拦截的 extra 视作纯噪声 —— **不**注入 `task.resume`，你的下一轮 prompt 不会被强制改写，但会带上 `event.isolation.boundary_violation` 诊断提示你下次注意。
+
+### 你该做什么
+1. **第一轮 commit 后不要追加**：看见 `event.isolation.boundary_violation` 就**不要**试图在同一 activation 再补一条「补救 emit」，预算已经用尽。
+2. **`task.resume` 到达时**：内容会包含「EXACTLY ONE business event」字样。不要把 resume payload 里的强制说明理解成「必须先解释错误」，hat instructions 允许你直接重新 emit 一条事件作为下一 activation 的回应。
+3. **末态优先**：若你**确实**需要把一个事件作为终态发出（LOOP_COMPLETE、plan.blocked），把终态事件放到同一 activation 的**第一条**业务 commit；后面的次级业务事件就只是「伴随噪声」，不影响终态落地。
+4. **不要**调用 `--unsafe-no-policy-check` / `allow_unsafe_cli_emit: true` 试图「绕过预算」——预算不是 policy 上的，是 `state.isolated_turn_business_event_accepted` 运行时旗，绕过会破坏下游 consumer 触发顺序。
+
+### 反模式
+- 在 `task.resume` 到达后立刻 emit 上一轮被拦的事件，结果 budget 又被消耗，可能再次 zero-commit → 第二条 resume → 死循环直到 breaker 触发 `plan.blocked(reason=protocol_violation_repeated:...)`。
+- 把 `event.isolation.boundary_violation` 当成「下次记得发两条」的提示信号。
+- 用 `ralph emit <TOPIC> --policy-check -j '...'` 通过后再**额外**绕开 `--policy-check` 写第二条业务事件——`--policy-check` 不控制落盘，只会通过 schema 检查。
+
 ## 错误恢复
 
 | 错误 | 原因 | 修复 |
@@ -287,6 +313,8 @@ ralph emit <TOPIC> -j '...' --output json                  # 落盘：看 ok=tru
 | `cannot write to events file` | 文件不存在或权限不足 | 确认 `.ralph/` 目录存在，检查权限 |
 | `Invalid JSON payload` | 用 `-j` 但 payload 不是合法 JSON | 用 `jq` 验证 payload：`echo '{"a":1}' \| jq .` |
 | `task_id cannot be empty` | payload 中 `task_id` 为空字符串 | 从 `.ralph/agent/tasks.jsonl` 取得真实 task id 后再 emit；任何带 `task_id` 的事件都适用 |
+| `extra business event dropped` (`event.isolation.boundary_violation`) | isolated 模式单 activation 多发业务事件 | 见下「**Over-Emit Recovery**」节，不要用回声退路 |
+
 | `Event provenance required` | 配置要求 hat 但 `--hat` 未设且 `RALPH_CURRENT_HAT` 空 | 显式 `--hat <hat-id>` 或设置环境变量 |
 | `.ralph/` 目录不存在 | 在非 ralph 工作区调用 | 确认在 ralph 编排工作区内；或 `mkdir -p .ralph` 手动初始化（不推荐） |
 | `Refusing urgent steer marker` | 上轮 urgent steer 未处理 | 先处理 urgent steer 内容（参见 error 信息中的指引），再重试 emit |

@@ -102,6 +102,45 @@ tasks:
     - worker
 ```
 
+### Projection-Owned Task Creation
+
+Builtin presets may declare a **single declarative handoff** that
+hands a batch of tasks to the StateProjector (e.g.
+`forge.plan.ready` with `unit_tasks`). In that case the projector
+is the **single writer** for `.ralph/agent/tasks.jsonl` during
+the projection, and the planning hat **must not** also call
+`task add` / `task ensure`:
+
+- The typed action lives under `event_loop.state_projection.actions`
+  in the preset's `presets/en/<name>.yml` and the SSOT schema
+  (`presets/schemas/<name>.yml`).
+- Items ride inside the payload as a JSON array; item fields are
+  `unit_id`, `task_key`, `title`, and `depends_on_task_keys`
+  (the first three are mandatory; `depends_on_task_keys` may be
+  omitted when there are no blockers).
+- `task_key` must match the registered identity
+  (`forge:<plan_key>:<unit_id>`); `title` is non-empty;
+  `count` must equal `items.length`; cycles, self-edges, unknown
+  dependencies, and missing items all fail the batch atomically
+  (no partial rows are written).
+- Live task ids are minted by the projector; agents must read them
+  via `ralph tools task list` (or the prompt's
+  `## ORCHESTRATOR CONTEXT` block) — never hand-write one.
+- A hat whose `instructions` directs the agent to mutate task
+  records via `ralph tools task add` / `task ensure` while the
+  preset declares a projector batch action fails the
+  `preset.instructions_task_mutation_authority_conflict` lint at
+  preset-load time. Treat that finding as **fatal**: replace the
+  CLI mutation with the declarative handoff, not by mutating the
+  preset to silence the lint.
+
+> **Single writer**: while a projector action is configured for a
+> given topic, the projector owns the task-creation path for that
+> topic. `ralph tools task add` / `task ensure` from the same hat
+> in the same activation will either be silently rejected (because
+> the projector already wrote the rows) or leave the ledger in an
+> inconsistent state. Pick one path per handoff.
+
 > **OPAC Precheck (zero-write)**: 任何 `task add` / `ensure` / `start` / `close` / `fail` / `reopen` 前先跑 `ralph tools task verify <verb>`（与正式写盘同源校验，零写盘）。三字段一致性走 `ralph tools task verify-emit-bridge --task-id ID --task-key KEY --step STEP`，详见 always-injected `ralph-tools-opac` Precheck 段。
 >
 > **OPAC Confirm (close 后)**: agent context 下 `task close` 成功后若 hat-channel 无 completion topic，CLI 会 stderr 输出 `close_without_completion_emit` warning，含 `expected_topics` + `next_step`——**忽略它等于进入 stall 30s 等待 rescue**。详见 `ralph-tools-opac` Confirm 段。
