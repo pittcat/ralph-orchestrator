@@ -1,3 +1,0 @@
-# 执行目标（execution target）— 换开发计划只改下一行路径
-# 格式：repo 相对路径；目录（内含 plan.md）或单个 plan 文件
-docs/plans/2026-07-28-002-fix-wave-slot-worktree-namespace-redrive-dispatch-plan.md
