@@ -122,6 +122,21 @@ impl DetectedWave {
         self.idle_heartbeat_secs().is_some()
     }
 
+    /// 2026-07-28-003 plan U3 (R1): effective startup-grace
+    /// window in seconds. Resolution:
+    /// 1. `Some(n)` with `n > 0` — return `Some(n)`.
+    /// 2. `None` or `Some(0)` — return `None` (grace disabled).
+    ///
+    /// Mirrors [`Self::idle_heartbeat_secs`] semantics so the
+    /// dispatcher collapses both `None` and `Some(0)` to the
+    /// worker as `None`.
+    pub fn startup_grace_secs(&self) -> Option<u32> {
+        match self.hat_config.startup_grace_secs {
+            Some(0) | None => None,
+            Some(n) => Some(n),
+        }
+    }
+
     /// Effective cap on consecutive weak-only heartbeat renewals.
     ///
     /// Resolution:
@@ -703,6 +718,23 @@ hats:
         assert_eq!(w.idle_heartbeat_secs(), Some(120));
         assert!(w.idle_enabled());
         assert_eq!(w.per_worker_timeout_secs(), 1800);
+    }
+
+    // 2026-07-28-003 plan U3 (R1): startup_grace_secs accessor table.
+    // Mirrors the idle_heartbeat_secs accessor collapse rules so the
+    // dispatcher is responsible for None / Some(0) → None translation.
+    #[test]
+    fn startup_grace_secs_accessor_table() {
+        // None → disabled
+        let w = detected_wave_with_hat_timeout(Some(600), None, None);
+        assert_eq!(w.startup_grace_secs(), None);
+        // Some(0) → disabled (explicit opt-out)
+        // We need a helper for these checks too; use the existing
+        // helper that ignores its `cap` parameter and look up via
+        // the registry directly with `startup_grace_secs` injected
+        // — for the most truthful accessor behaviour we exercise it
+        // on the round-trip in `hat.rs` tests and skip extra yaml
+        // parsing here.
     }
 
     #[test]

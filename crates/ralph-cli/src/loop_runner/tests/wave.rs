@@ -208,6 +208,11 @@ fn make_test_wave_with_timeout_and_payload(
             // wall-clock behaviour is pinned untouched.
             idle_heartbeat_secs: None,
             idle_weak_signal_cap: None,
+            // 2026-07-28-003 plan U3 (R1): default None keeps
+            // the helper at pre-U3 behaviour; tests that want
+            // startup grace cover it via the dedicated
+            // run_wave_worker_pty integration cases.
+            startup_grace_secs: None,
             // 2026-06-17-004 U2 (R3): explicit `None` for new
             // field keeps the test helper aligned with
             // `HatConfig::default()`.

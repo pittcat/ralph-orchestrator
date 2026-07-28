@@ -3639,6 +3639,10 @@ fn make_wave_with_count(
             // not accidentally reinterpreted as lease-enabled.
             idle_heartbeat_secs: None,
             idle_weak_signal_cap: None,
+            // 2026-07-28-003 plan U3 (R1): default None keeps
+            // the existing legacy-wave fixtures bit-for-bit
+            // identical to the pre-U3 behaviour.
+            startup_grace_secs: None,
             // 2026-06-17-004 U2 (R3): explicit `None` for new
             // field keeps the test helper aligned with
             // `HatConfig::default()`.

@@ -43,6 +43,10 @@ pub async fn run_wave_worker(
     // sourced from `SlotBinding.worktree_path`. `None` keeps
     // the legacy `std::env::current_dir()` behaviour.
     worker_cwd: Option<&Path>,
+    // 2026-07-28-003 plan U3 (R1): optional startup grace window.
+    // Mirrors the `run_wave_worker_pty` semantics — see the
+    // matching parameter docs on that function.
+    startup_grace: Option<Duration>,
 ) -> (u32, WaveWorkerOutcome) {
     match wave_worker_execution_mode(worker_backend.output_format) {
         WaveWorkerExecutionMode::Pty => {
@@ -58,12 +62,7 @@ pub async fn run_wave_worker(
                 worker_rpc_tx,
                 worker_tui_state,
                 worker_cwd,
-                // 2026-07-28-003 plan U2: `startup_grace` is wired
-                // into the dual-clock lease by default `None`
-                // (legacy-equivalent); U3 replaces this with the
-                // dispatcher-resolved value coming from the hat's
-                // `startup_grace_secs` config.
-                None,
+                startup_grace,
             )
             .await
         }

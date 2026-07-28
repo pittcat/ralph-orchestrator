@@ -174,6 +174,14 @@ pub(crate) struct WorkerRequest {
     /// Only meaningful when `idle_heartbeat` is `Some`; the default
     /// (8) is set by `DetectedWave::idle_weak_signal_cap()`.
     pub(crate) idle_weak_signal_cap: u32,
+    /// 2026-07-28-003 plan U3 (R1): wave worker startup grace window.
+    /// Resolution mirrors `idle_heartbeat`: `None` disables the
+    /// grace half of the dual-clock lease (`seen_first_signal`
+    /// stays `false` forever in practice because no grace deadline
+    /// is computed). `Some(0)` is collapsed upstream by
+    /// `DetectedWave::startup_grace_secs()`. Effective only when
+    /// `idle_heartbeat` is also `Some` (KTD1).
+    pub(crate) startup_grace: Option<Duration>,
 }
 
 /// Dispatcher-internal seam that abstracts "run one wave worker".
@@ -245,6 +253,12 @@ impl WaveWorkerExecutor for ProductionExecutor {
         mut request: WorkerRequest,
     ) -> Pin<Box<dyn Future<Output = (u32, WaveWorkerOutcome)> + Send>> {
         Box::pin(async move {
+            // 2026-07-28-003 plan U3 (R1): forward `startup_grace`
+            // out of the request so the worker can plug it into
+            // `LeaseConfig.startup_grace_ms`. `take()` is fine
+            // because the request is moved into `run_wave_worker`
+            // and never reused (the executor owns the dispatch).
+            let startup_grace = request.startup_grace.take();
             run_wave_worker(
                 request.index,
                 &request.backend,
@@ -261,6 +275,7 @@ impl WaveWorkerExecutor for ProductionExecutor {
                 // to the spawned worker process. `None` keeps the
                 // legacy `std::env::current_dir()` behaviour.
                 request.cwd.as_deref(),
+                startup_grace,
             )
             .await
         })
@@ -1292,6 +1307,12 @@ pub async fn execute_wave_structured(
         .idle_heartbeat_secs()
         .map(|secs| Duration::from_secs(secs as u64));
     let idle_weak_signal_cap = wave.idle_weak_signal_cap();
+    // 2026-07-28-003 plan U3 (R1): startup_grace resolved through
+    // `DetectedWave::startup_grace_secs` — `None` / `Some(0)`
+    // already collapsed to `None` upstream.
+    let startup_grace: Option<Duration> = wave
+        .startup_grace_secs()
+        .map(|secs| Duration::from_secs(secs as u64));
     // Use an explicitly-configured aggregate timeout (worker or consumer)
     // directly.  Only fall back to the per-worker-timeout × batches formula
     // when no aggregate timeout is available.
@@ -1450,6 +1471,10 @@ pub async fn execute_wave_structured(
             cwd: None,
             idle_heartbeat,
             idle_weak_signal_cap,
+            // 2026-07-28-003 plan U3 (R1): forward the hat-configured
+            // startup grace to the worker. Both `None` and `Some(0)`
+            // were collapsed to `None` by `DetectedWave::startup_grace_secs`.
+            startup_grace,
         });
     }
 
@@ -1612,6 +1637,11 @@ pub(crate) async fn execute_wave_via_supervisor_with_executor(
         .idle_heartbeat_secs()
         .map(|secs| Duration::from_secs(secs as u64));
     let idle_weak_signal_cap = wave.idle_weak_signal_cap();
+    // 2026-07-28-003 plan U3 (R1): symmetric to the legacy path.
+    // Mirrors `idle_heartbeat` resolution above.
+    let startup_grace: Option<Duration> = wave
+        .startup_grace_secs()
+        .map(|secs| Duration::from_secs(secs as u64));
     let aggregate_timeout =
         if wave.has_explicit_aggregate_timeout() || wave.consumer_aggregate_timeout.is_some() {
             Duration::from_secs(wave.aggregate_timeout_secs())
@@ -1944,6 +1974,10 @@ pub(crate) async fn execute_wave_via_supervisor_with_executor(
                 cwd: slot_cwd,
                 idle_heartbeat,
                 idle_weak_signal_cap,
+                // 2026-07-28-003 plan U3 (R1): forward startup grace
+                // through the supervisor dispatch path. Same accessors
+                // as the legacy path.
+                startup_grace,
             }),
             preview,
             dimension: assigned_dimension,
@@ -6242,6 +6276,11 @@ hats: {}
             cwd: None,
             idle_heartbeat: None,
             idle_weak_signal_cap: 8,
+            // 2026-07-28-003 plan U3 (R1): the dispatcher test
+            // fixtures pass `None` here so the worker runs the
+            // legacy / no-grace path even when idle is enabled
+            // via the helper's own idle config.
+            startup_grace: None,
         }
     }
 
