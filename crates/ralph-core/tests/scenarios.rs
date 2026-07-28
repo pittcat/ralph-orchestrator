@@ -1826,7 +1826,7 @@ fn implementation_review_runtime_topics_remain_agent_denied() {
 
 /// U2 Red 4: structural proof that review-dispatcher does NOT subscribe
 /// to task.resume and does NOT own any coordination topic.
-/// The dispatcher must only publish review.unit.ready.
+/// The dispatcher may only publish review.unit.ready or dispatch.blocked.
 #[test]
 fn implementation_review_dispatcher_contract_has_no_resume_redrive() {
     use ralph_core::runtime_contract::RuntimeContractStrictness;
@@ -1874,19 +1874,19 @@ fn implementation_review_dispatcher_contract_has_no_resume_redrive() {
         dispatcher_hat.publishes
     );
 
-    // Red 4c: dispatcher publishes ONLY review.unit.ready (single business topic)
+    // Red 4c: dispatcher publishes exactly its mutually exclusive outcomes
+    let expected_publishes = std::collections::BTreeSet::from([
+        "dispatch.blocked".to_string(),
+        "review.unit.ready".to_string(),
+    ]);
+    let actual_publishes = dispatcher_hat
+        .publishes
+        .iter()
+        .cloned()
+        .collect::<std::collections::BTreeSet<_>>();
     assert_eq!(
-        dispatcher_hat.publishes.len(),
-        1,
-        "U2 Red 4c: review-dispatcher must publish exactly 1 topic (review.unit.ready); \
-         publishes={:?}",
-        dispatcher_hat.publishes
-    );
-    assert!(
-        dispatcher_hat
-            .publishes
-            .contains(&"review.unit.ready".to_string()),
-        "U2 Red 4c: the single publish must be review.unit.ready"
+        actual_publishes, expected_publishes,
+        "U2 Red 4c: review-dispatcher publishes must be exactly review.unit.ready and dispatch.blocked"
     );
 
     // The preset overall must pass strict lint (no other violations)
