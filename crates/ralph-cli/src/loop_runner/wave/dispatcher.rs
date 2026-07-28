@@ -4835,7 +4835,7 @@ async fn dispatch_wave_inner_with_release<E: WaveWorkerExecutor + ?Sized>(
                 // before moving `terminal_bridge` into the guard.
                 let budget = retry_budget;
                 let current_request = request;
-                let mut last_outcome: (u32, WaveWorkerOutcome) = loop {
+                let last_outcome: (u32, WaveWorkerOutcome) = loop {
                     let outcome = executor.execute(current_request.clone()).await;
                     let (_idx, res) = &outcome;
                     let classified = classify_slot_result(res);

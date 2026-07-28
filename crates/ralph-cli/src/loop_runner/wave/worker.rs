@@ -340,16 +340,15 @@ pub async fn run_wave_worker_pty(
         // the grace window collapses to zero and the helper naturally
         // falls back to idle-window arithmetic.
         let idle_window_ms = idle_heartbeat.unwrap().as_millis() as u64;
-        let startup_grace_ms: Option<u64> = lease_cfg
-            .as_ref()
-            .and_then(|c| c.startup_grace_ms);
+        let startup_grace_ms: Option<u64> = lease_cfg.as_ref().and_then(|c| c.startup_grace_ms);
         let compute_next_deadline = |lease_state: &super::heartbeat::LeaseState| -> Duration {
             let now = start.elapsed();
             let hard_remaining = hard_deadline.saturating_duration_since(start);
             let now_ms = now.as_millis() as u64;
             let grace_remaining = match (startup_grace_ms, lease_state.seen_first_signal) {
-                (Some(grace_ms), false) => Duration::from_millis(grace_ms)
-                    .saturating_sub(Duration::from_millis(now_ms)),
+                (Some(grace_ms), false) => {
+                    Duration::from_millis(grace_ms).saturating_sub(Duration::from_millis(now_ms))
+                }
                 _ => Duration::MAX,
             };
             let idle_remaining = if lease_state.last_hb_ms >= now_ms {

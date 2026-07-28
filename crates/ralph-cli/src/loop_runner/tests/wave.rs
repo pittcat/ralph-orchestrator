@@ -2296,8 +2296,7 @@ async fn test_run_wave_worker_pty_startup_grace_survives_idle_window() {
         "worker should exit cleanly within grace window, got duration={duration:?}",
     );
     assert!(
-        duration >= Duration::from_secs(4)
-            && duration <= Duration::from_secs(8),
+        duration >= Duration::from_secs(4) && duration <= Duration::from_secs(8),
         "worker should run at least 4 s and finish well within grace, got {duration:?}",
     );
     emit_wave_validation_marker(
@@ -2346,8 +2345,7 @@ async fn test_run_wave_worker_pty_startup_grace_exceeded_kills() {
     )
     .await;
 
-    let (error, duration) =
-        outcome.expect_err("silent worker past startup_grace must be killed");
+    let (error, duration) = outcome.expect_err("silent worker past startup_grace must be killed");
     assert!(
         error.starts_with("Worker timed out after"),
         "expected START_OF_KILL_REASON_PREFIX, got: {error}",
@@ -2359,8 +2357,7 @@ async fn test_run_wave_worker_pty_startup_grace_exceeded_kills() {
     // Duration must be just past the 2 s grace (give 3.5 s upper
     // bound to leave slack for slow CI runners).
     assert!(
-        duration >= Duration::from_secs_f64(1.5)
-            && duration <= Duration::from_secs_f64(3.5),
+        duration >= Duration::from_secs_f64(1.5) && duration <= Duration::from_secs_f64(3.5),
         "expected kill around grace+ε, got {duration:?}",
     );
     emit_wave_validation_marker(
@@ -2408,8 +2405,8 @@ async fn test_run_wave_worker_pty_startup_grace_then_idle_semantics() {
     )
     .await;
 
-    let (error, duration) = outcome
-        .expect_err("first-signal then silence must be idle-killed (not startup-killed)");
+    let (error, duration) =
+        outcome.expect_err("first-signal then silence must be idle-killed (not startup-killed)");
     assert!(
         error.contains("idle_kill"),
         "expected `idle_kill` token after first signal, got: {error}",
@@ -2420,8 +2417,7 @@ async fn test_run_wave_worker_pty_startup_grace_then_idle_semantics() {
     );
     // First signal at ~1 s, then ~2 s idle window → kill at ~3 s.
     assert!(
-        duration >= Duration::from_secs_f64(2.5)
-            && duration <= Duration::from_secs_f64(4.5),
+        duration >= Duration::from_secs_f64(2.5) && duration <= Duration::from_secs_f64(4.5),
         "expected idle-kill around 3 s, got {duration:?}",
     );
     emit_wave_validation_marker(
@@ -2469,9 +2465,12 @@ async fn test_run_wave_worker_pty_startup_grace_ignored_when_idle_disabled() {
     )
     .await;
 
-    let (_events, duration, success) = outcome
-        .expect("legacy path with idle disabled must succeed regardless of startup_grace");
-    assert!(success, "worker should exit cleanly, got duration={duration:?}");
+    let (_events, duration, success) =
+        outcome.expect("legacy path with idle disabled must succeed regardless of startup_grace");
+    assert!(
+        success,
+        "worker should exit cleanly, got duration={duration:?}"
+    );
     assert!(
         duration <= Duration::from_secs(3),
         "expected quick exit, got {duration:?}",
