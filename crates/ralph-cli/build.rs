@@ -214,40 +214,71 @@ fn copy_artifact_templates(manifest_dir: &str, out_dir: &str) {
         .join("..")
         .join("presets")
         .join("templates");
-    let parallel_forge_src = templates_root.join("parallel-forge");
     let dest_root = PathBuf::from(out_dir).join("artifact-templates");
 
-    // Required set must stay in sync with
-    // `builtin_artifact_templates::PARALLEL_FORGE_TEMPLATE_NAMES`.
-    const REQUIRED: &[&str] = &[
-        "development-plan.template.md",
-        "unit.template.yml",
-        "execution-plan.template.yml",
-        "unit-completion.template.md",
-        "manager-report.template.md",
-        "README.md",
-    ];
+    // parallel-forge templates
+    copy_preset_templates(
+        &templates_root,
+        &dest_root,
+        "parallel-forge",
+        &[
+            "development-plan.template.md",
+            "unit.template.yml",
+            "execution-plan.template.yml",
+            "unit-completion.template.md",
+            "manager-report.template.md",
+            "README.md",
+        ],
+    );
 
-    if !parallel_forge_src.is_dir() {
+    // red-team-attack templates
+    copy_preset_templates(
+        &templates_root,
+        &dest_root,
+        "red-team-attack",
+        &[
+            "experiment.template.yml",
+            "finding.template.yml",
+            "report.template.md",
+            "plan.template.md",
+            "README.md",
+        ],
+    );
+}
+
+/// Copy one preset's template directory into `$OUT_DIR/artifact-templates/<preset>/`.
+///
+/// Fail-closed: if the source directory is missing or empty, panic so the
+/// release binary cannot silently omit templates that hats depend on.
+fn copy_preset_templates(
+    templates_root: &PathBuf,
+    dest_root: &PathBuf,
+    preset_name: &str,
+    required: &[&str],
+) {
+    let src_dir = templates_root.join(preset_name);
+    let dest_dir = dest_root.join(preset_name);
+
+    if !src_dir.is_dir() {
         panic!(
             "build.rs: required artifact templates dir missing: {} \
-             (needed for ralph preset materialize-artifacts)",
-            parallel_forge_src.display()
+             (needed for ralph preset materialize-artifacts {})",
+            src_dir.display(),
+            preset_name
         );
     }
 
-    println!("cargo:rerun-if-changed={}", parallel_forge_src.display());
+    println!("cargo:rerun-if-changed={}", src_dir.display());
 
-    let dest = dest_root.join("parallel-forge");
-    if let Err(e) = fs::create_dir_all(&dest) {
-        panic!("build.rs: failed to create {}: {}", dest.display(), e);
+    if let Err(e) = fs::create_dir_all(&dest_dir) {
+        panic!("build.rs: failed to create {}: {}", dest_dir.display(), e);
     }
 
     let mut copied = 0usize;
-    for entry in fs::read_dir(&parallel_forge_src).unwrap_or_else(|e| {
+    for entry in fs::read_dir(&src_dir).unwrap_or_else(|e| {
         panic!(
             "build.rs: failed to read {}: {}",
-            parallel_forge_src.display(),
+            src_dir.display(),
             e
         )
     }) {
@@ -256,7 +287,7 @@ fn copy_artifact_templates(manifest_dir: &str, out_dir: &str) {
             continue;
         }
         let file_name = entry.file_name();
-        let dest_file = dest.join(&file_name);
+        let dest_file = dest_dir.join(&file_name);
         println!("cargo:rerun-if-changed={}", entry.path().display());
         fs::copy(entry.path(), &dest_file).unwrap_or_else(|e| {
             panic!(
@@ -269,28 +300,31 @@ fn copy_artifact_templates(manifest_dir: &str, out_dir: &str) {
         copied += 1;
     }
 
-    for required in REQUIRED {
-        let path = dest.join(required);
+    for req in required {
+        let path = dest_dir.join(req);
         if !path.is_file() {
             panic!(
-                "build.rs: required parallel-forge artifact template missing after copy: {}",
+                "build.rs: required {} artifact template missing after copy: {}",
+                preset_name,
                 path.display()
             );
         }
     }
 
-    if copied < REQUIRED.len() {
+    if copied < required.len() {
         panic!(
-            "build.rs: expected at least {} parallel-forge templates, copied {}",
-            REQUIRED.len(),
+            "build.rs: expected at least {} {} templates, copied {}",
+            required.len(),
+            preset_name,
             copied
         );
     }
 
     eprintln!(
-        "build.rs: copied {} parallel-forge artifact template(s) to {}",
+        "build.rs: copied {} {} artifact template(s) to {}",
         copied,
-        dest.display()
+        preset_name,
+        dest_dir.display()
     );
 }
 

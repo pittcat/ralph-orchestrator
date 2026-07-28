@@ -50,3 +50,4 @@ embedded:
   - merge-batch
   - post-merge-converge
   - parallel-forge
+  - red-team-attack

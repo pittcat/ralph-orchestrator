@@ -1,0 +1,7 @@
+cli:
+  backend: auto
+
+event_loop:
+  prompt_file: .ralph/red-team.prompt.md
+  max_iterations: 100
+  max_runtime_seconds: 28800

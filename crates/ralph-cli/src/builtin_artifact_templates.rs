@@ -51,6 +51,16 @@ pub const PARALLEL_FORGE_TEMPLATE_NAMES: &[&str] = &[
     "README.md",
 ];
 
+/// Expected basenames for `red-team-attack` (keep in sync with
+/// `presets/templates/red-team-attack/` and `build.rs` copy).
+pub const RED_TEAM_ATTACK_TEMPLATE_NAMES: &[&str] = &[
+    "experiment.template.yml",
+    "finding.template.yml",
+    "report.template.md",
+    "plan.template.md",
+    "README.md",
+];
+
 const PARALLEL_FORGE_TEMPLATES: &[ArtifactTemplate] = &[
     ArtifactTemplate {
         file_name: "development-plan.template.md",
@@ -96,6 +106,44 @@ const PARALLEL_FORGE_TEMPLATES: &[ArtifactTemplate] = &[
     },
 ];
 
+const RED_TEAM_ATTACK_TEMPLATES: &[ArtifactTemplate] = &[
+    ArtifactTemplate {
+        file_name: "experiment.template.yml",
+        content: include_str!(concat!(
+            env!("OUT_DIR"),
+            "/artifact-templates/red-team-attack/experiment.template.yml"
+        )),
+    },
+    ArtifactTemplate {
+        file_name: "finding.template.yml",
+        content: include_str!(concat!(
+            env!("OUT_DIR"),
+            "/artifact-templates/red-team-attack/finding.template.yml"
+        )),
+    },
+    ArtifactTemplate {
+        file_name: "report.template.md",
+        content: include_str!(concat!(
+            env!("OUT_DIR"),
+            "/artifact-templates/red-team-attack/report.template.md"
+        )),
+    },
+    ArtifactTemplate {
+        file_name: "plan.template.md",
+        content: include_str!(concat!(
+            env!("OUT_DIR"),
+            "/artifact-templates/red-team-attack/plan.template.md"
+        )),
+    },
+    ArtifactTemplate {
+        file_name: "README.md",
+        content: include_str!(concat!(
+            env!("OUT_DIR"),
+            "/artifact-templates/red-team-attack/README.md"
+        )),
+    },
+];
+
 /// Strip optional `builtin:` prefix from preset names.
 ///
 /// Agents and operators commonly pass `builtin:parallel-forge` (same as
@@ -115,6 +163,17 @@ pub fn default_forge_templates_dir(plan_key: &str) -> PathBuf {
         .join("templates")
 }
 
+/// Default templates directory for a red-team-attack plan key (cwd-relative).
+///
+/// Layout matches red-team-attack hat instructions:
+/// `.ralph/red-team/<plan-key>/templates/`.
+pub fn default_red_team_templates_dir(plan_key: &str) -> PathBuf {
+    PathBuf::from(".ralph")
+        .join("red-team")
+        .join(plan_key)
+        .join("templates")
+}
+
 /// List embedded template basenames for a preset.
 pub fn list_template_names(preset: &str) -> Result<Vec<&'static str>> {
     let templates = templates_for_preset(normalize_preset_name(preset))?;
@@ -124,9 +183,10 @@ pub fn list_template_names(preset: &str) -> Result<Vec<&'static str>> {
 fn templates_for_preset(preset: &str) -> Result<&'static [ArtifactTemplate]> {
     match preset {
         "parallel-forge" => Ok(PARALLEL_FORGE_TEMPLATES),
+        "red-team-attack" => Ok(RED_TEAM_ATTACK_TEMPLATES),
         other => bail!(
             "no embedded artifact templates for preset '{other}' \
-             (supported: parallel-forge)"
+             (supported: parallel-forge, red-team-attack)"
         ),
     }
 }
@@ -145,6 +205,14 @@ pub fn materialize(preset: &str, dest_dir: &Path) -> Result<Vec<PathBuf>> {
              expected {}",
             templates.len(),
             PARALLEL_FORGE_TEMPLATE_NAMES.len()
+        );
+    }
+    if preset_key == "red-team-attack" && templates.len() != RED_TEAM_ATTACK_TEMPLATE_NAMES.len() {
+        bail!(
+            "internal catalog drift for red-team-attack: embedded {} files, \
+             expected {}",
+            templates.len(),
+            RED_TEAM_ATTACK_TEMPLATE_NAMES.len()
         );
     }
 

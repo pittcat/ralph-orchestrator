@@ -43,5 +43,10 @@
     "name": "post-merge-converge",
     "description": "After one or more development plans have landed in the current branch: baseline, change map, six-dimension audit, test-gap, per-finding reproduce/fix with confidence redo-first, clean-env + final review, then operator REPORT.md before complete",
     "category": "workflow"
+  },
+  {
+    "name": "red-team-attack",
+    "description": "Experiment-driven Red Team analysis: reverse-locate plan commits from Git history, reconstruct patches, execute real attack experiments with control groups, apply hard-threshold evidence gating, and produce a zero-regression repair plan awaiting human confirmation",
+    "category": "workflow"
   }
 ]

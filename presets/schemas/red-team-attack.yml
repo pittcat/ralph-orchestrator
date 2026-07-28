@@ -1,0 +1,313 @@
+# Authoring SSOT for `red-team-attack` `event_policy.schemas`.
+#
+# `build.rs` deep-merges this file's `schemas:` mapping into
+# `event_loop.event_policy.schemas` of `presets/en/red-team-attack.yml`
+# at compile time. Edit ONLY this file when changing payload contract
+# requirements for any hat below.
+#
+# Topic coverage (8 hats):
+#   target-locker       -> redteam.target.locked
+#   plan-resolver       -> redteam.plan.resolved / redteam.plan.unresolved
+#   attack-surface-mapper -> redteam.attack.mapped / redteam.retry.required
+#   experiment-runner   -> redteam.experiment.done
+#   evidence-gate       -> redteam.evidence.gated / redteam.retry.required
+#   impact-boundary     -> redteam.impact.qualified / redteam.impact.rejected
+#   independent-reviewer -> redteam.reviewed
+#   reporter            -> redteam.complete (terminal completion token)
+#
+# Retry routing: evidence-gate emits redteam.retry.required back to
+# attack-surface-mapper (which doubles as experiment designer), then
+# experiment-runner re-executes, then evidence-gate re-scores.
+#
+# Topic deny rules live in `presets/en/red-team-attack.yml`
+# `event_policy.topic_deny_rules` (not in this SSOT).
+
+schemas:
+  # target-locker -> lock confirmed. All downstream hats read the lock
+  # file to verify HEAD/tree unchanged before and after their work.
+  redteam.target.locked:
+    required_fields:
+      - target_head
+      - target_tree
+      - plan_count
+      - lock_file_path
+    payload: json_object
+    field_docs:
+      target_head:
+        meaning: Locked Git HEAD SHA at experiment start.
+        source: "git rev-parse HEAD at lock time."
+        fill_rule: "Full 40-char SHA; must match git rev-parse HEAD at emit time."
+      target_tree:
+        meaning: Locked Git tree SHA at experiment start.
+        source: "git rev-parse HEAD^{tree} at lock time."
+        fill_rule: "Full 40-char SHA; must match git rev-parse HEAD^{tree} at emit time."
+      plan_count:
+        meaning: Number of development plans provided as input.
+        source: Count of plan paths from prompt file.
+        fill_rule: Positive integer.
+      lock_file_path:
+        meaning: Path to the target-lock artifact (`.ralph/red-team/01-target-lock.md`).
+        source: File actually written this activation.
+        fill_rule: Real readable path; agent must verify `test -f` before emit.
+
+  # plan-resolver -> per-plan commit resolution result. attack-surface-mapper
+  # reads the resolution artifact to build attack surfaces.
+  redteam.plan.resolved:
+    required_fields:
+      - resolved_count
+      - unresolved_count
+      - resolution_file_path
+    payload: json_object
+    field_docs:
+      resolved_count:
+        meaning: Plans with commit match confidence >= 85 and at least one hard evidence.
+        source: Count from `.ralph/red-team/02-plan-resolution.md`.
+        fill_rule: Integer >= 0.
+      unresolved_count:
+        meaning: Plans that exhausted retry and still below threshold.
+        source: Count from `.ralph/red-team/02-plan-resolution.md`.
+        fill_rule: Integer >= 0.
+      resolution_file_path:
+        meaning: Path to the plan-resolution artifact.
+        source: File actually written this activation.
+        fill_rule: Real readable path; agent must verify `test -f` before emit.
+
+  # plan-resolver -> all plans failed to resolve. Terminal for this branch.
+  redteam.plan.unresolved:
+    required_fields:
+      - reason
+      - resolution_file_path
+    payload: json_object
+    field_docs:
+      reason:
+        meaning: Why no plan could be resolved.
+        source: Resolver writes from final retry state.
+        fill_rule: One of `REJECTED_NO_RESOLVED_PLAN`.
+      resolution_file_path:
+        meaning: Path to the plan-resolution artifact (contains retry history).
+        source: File actually written this activation.
+        fill_rule: Real readable path.
+
+  # attack-surface-mapper -> attack surfaces identified and experiments designed.
+  # experiment-runner reads the experiment plan artifact.
+  redteam.attack.mapped:
+    required_fields:
+      - surface_count
+      - experiment_count
+      - attack_surface_path
+      - experiment_plan_path
+    payload: json_object
+    field_docs:
+      surface_count:
+        meaning: Number of attack surfaces identified.
+        source: Count from `.ralph/red-team/04-attack-surface.md`.
+        fill_rule: Integer >= 0.
+      experiment_count:
+        meaning: Number of experiments designed.
+        source: Count from `.ralph/red-team/05-experiment-plan.md`.
+        fill_rule: Integer >= 0.
+      attack_surface_path:
+        meaning: Path to attack-surface artifact.
+        source: File actually written this activation.
+        fill_rule: Real readable path.
+      experiment_plan_path:
+        meaning: Path to experiment-plan artifact.
+        source: File actually written this activation.
+        fill_rule: Real readable path.
+
+  # experiment-runner -> one experiment completed with raw evidence saved.
+  # evidence-gate reads the experiment artifact and evidence files.
+  redteam.experiment.done:
+    required_fields:
+      - experiment_id
+      - control_passed
+      - attack_reproduced
+      - evidence_paths
+      - experiment_file_path
+    payload: json_object
+    field_docs:
+      experiment_id:
+        meaning: Unique experiment identifier (RTE-NNN).
+        source: Runner assigns from experiment plan.
+        fill_rule: Format `RTE-\d{3,}`; must match experiment artifact filename.
+      control_passed:
+        meaning: Whether control group passed all required repetitions.
+        source: Runner writes from control execution results.
+        fill_rule: Boolean.
+      attack_reproduced:
+        meaning: Whether attack group reproduced the invariant violation.
+        source: Runner writes from attack execution results.
+        fill_rule: Boolean.
+      evidence_paths:
+        meaning: Paths to raw evidence files (stdout, stderr, state dumps, screenshots).
+        source: Runner writes from actual files saved under `.ralph/red-team/evidence/RTE-<NNN>/`.
+        fill_rule: Array of real readable paths; agent must verify each exists.
+      experiment_file_path:
+        meaning: Path to the experiment artifact (`.ralph/red-team/experiments/RTE-<NNN>.md`).
+        source: File actually written this activation.
+        fill_rule: Real readable path.
+
+  # evidence-gate -> experiment passed all thresholds. impact-boundary reads
+  # the evidence board to bound impact.
+  redteam.evidence.gated:
+    required_fields:
+      - experiment_id
+      - confidence
+      - evidence_coverage
+      - verifiability
+      - impact_certainty
+      - evidence_board_path
+    payload: json_object
+    field_docs:
+      experiment_id:
+        meaning: Experiment that was scored.
+        source: Gate reads from trigger payload.
+        fill_rule: Must match trigger `experiment_id`.
+      confidence:
+        meaning: Confidence score (0-100).
+        source: Gate computes from raw evidence.
+        fill_rule: Integer 0-100; must be >= threshold (85 or 90 for P0/P1).
+      evidence_coverage:
+        meaning: Evidence coverage score (0-100).
+        source: Gate computes from mandatory evidence checklist.
+        fill_rule: Integer 0-100; must be >= threshold.
+      verifiability:
+        meaning: Verifiability score (0-100).
+        source: Gate computes from reproducibility analysis.
+        fill_rule: Integer 0-100; must be >= threshold (90).
+      impact_certainty:
+        meaning: Impact certainty score (0-100).
+        source: Gate computes from preliminary impact analysis.
+        fill_rule: Integer 0-100; must be >= threshold (85 or 90).
+      evidence_board_path:
+        meaning: Path to evidence board artifact (`.ralph/red-team/07-evidence-board.md`).
+        source: File actually written this activation.
+        fill_rule: Real readable path.
+
+  # evidence-gate -> experiment below threshold, retry required.
+  # attack-surface-mapper (as designer) reads retry delta and redesigns.
+  redteam.retry.required:
+    required_fields:
+      - experiment_id
+      - attempt
+      - failed_metrics
+      - retry_delta
+      - retry_board_path
+    payload: json_object
+    field_docs:
+      experiment_id:
+        meaning: Experiment that needs retry.
+        source: Gate reads from trigger payload.
+        fill_rule: Must match trigger `experiment_id`.
+      attempt:
+        meaning: Current retry attempt number (1-indexed, excluding initial run).
+        source: Gate counts from retry history in evidence board.
+        fill_rule: Integer >= 1; must not exceed max_retries (default 2, P0/P1 3).
+      failed_metrics:
+        meaning: Which metrics are below threshold.
+        source: Gate writes from scoring results.
+        fill_rule: Array of metric names from `confidence`, `evidence_coverage`, `verifiability`, `impact_certainty`.
+      retry_delta:
+        meaning: What must change in the next attempt (new evidence, more repetitions, tighter controls).
+        source: Gate writes from failure analysis.
+        fill_rule: Non-empty string; must specify concrete additions, not "try again".
+      retry_board_path:
+        meaning: Path to retry board artifact (`.ralph/red-team/07-retry-board.md`).
+        source: File actually written this activation.
+        fill_rule: Real readable path.
+
+  # impact-boundary -> impact qualified, formal finding created.
+  # repair-planner reads the finding artifact to build repair units.
+  redteam.impact.qualified:
+    required_fields:
+      - finding_id
+      - severity
+      - finding_file_path
+      - impact_file_path
+    payload: json_object
+    field_docs:
+      finding_id:
+        meaning: Unique finding identifier (RTF-NNN).
+        source: Boundary assigns from qualified experiment.
+        fill_rule: Format `RTF-\d{3,}`; must match finding artifact filename.
+      severity:
+        meaning: Finding severity.
+        source: Boundary assigns from impact analysis.
+        fill_rule: One of `P0`, `P1`, `P2`, `P3`.
+      finding_file_path:
+        meaning: Path to finding artifact (`.ralph/red-team/findings/RTF-<NNN>.md`).
+        source: File actually written this activation.
+        fill_rule: Real readable path.
+      impact_file_path:
+        meaning: Path to impact boundary artifact (`.ralph/red-team/08-impact-boundary.md`).
+        source: File actually written this activation.
+        fill_rule: Real readable path.
+
+  # impact-boundary -> impact uncertain after retry exhausted, finding rejected.
+  redteam.impact.rejected:
+    required_fields:
+      - experiment_id
+      - reason
+      - impact_file_path
+    payload: json_object
+    field_docs:
+      experiment_id:
+        meaning: Experiment that was rejected.
+        source: Boundary reads from trigger payload.
+        fill_rule: Must match trigger `experiment_id`.
+      reason:
+        meaning: Rejection reason.
+        source: Boundary writes from final retry state.
+        fill_rule: One of `REJECTED_AFTER_RETRY_UNCERTAIN_IMPACT`, `REJECTED_AFTER_RETRY_LOW_CONFIDENCE`, `REJECTED_AFTER_RETRY_LOW_EVIDENCE`, `REJECTED_AFTER_RETRY_LOW_VERIFIABILITY`, `REJECTED_AFTER_RETRY_MISSING_MANDATORY_EVIDENCE`, `REJECTED_AFTER_RETRY_DIRTY_WORKTREE`, `REJECTED_AFTER_RETRY_NOT_EXECUTED`, `REJECTED_AFTER_RETRY_CONTROL_FAILED`, `REJECTED_AFTER_RETRY_NOT_REPRODUCIBLE`.
+      impact_file_path:
+        meaning: Path to impact boundary artifact (contains rejection history).
+        source: File actually written this activation.
+        fill_rule: Real readable path.
+
+  # independent-reviewer -> final review complete. reporter reads review
+  # artifact to write REPORT.md and emit completion.
+  redteam.reviewed:
+    required_fields:
+      - verdict
+      - review_file_path
+      - plan_file_path
+    payload: json_object
+    field_docs:
+      verdict:
+        meaning: Final review verdict.
+        source: Reviewer writes from audit checklist.
+        fill_rule: One of `PLAN_READY`, `PLAN_REJECTED`.
+      review_file_path:
+        meaning: Path to independent review artifact (`.ralph/red-team/10-independent-review.md`).
+        source: File actually written this activation.
+        fill_rule: Real readable path.
+      plan_file_path:
+        meaning: Path to repair plan artifact (`.ralph/red-team/PLAN.md`).
+        source: File actually written this activation (by repair-planner, verified by reviewer).
+        fill_rule: Real readable path.
+
+  # reporter -> sole completion token for red-team-attack.
+  redteam.complete:
+    required_fields:
+      - success
+      - report_path
+      - plan_path
+      - questions_path
+    payload: json_object
+    field_docs:
+      success:
+        meaning: Whether the red team analysis completed successfully (PLAN_READY).
+        source: Reporter copies from `redteam.reviewed.verdict`.
+        fill_rule: true only when verdict is `PLAN_READY`; otherwise false.
+      report_path:
+        meaning: Path to operator-facing report (`.ralph/red-team/REPORT.md`).
+        source: File actually written this activation.
+        fill_rule: Real readable path; agent must verify `test -f` before emit.
+      plan_path:
+        meaning: Path to repair plan (`.ralph/red-team/PLAN.md`).
+        source: File actually written by repair-planner, verified by reporter.
+        fill_rule: Real readable path.
+      questions_path:
+        meaning: Path to questions file (`.ralph/red-team/QUESTIONS.md`).
+        source: File actually written this activation (may be empty if no questions).
+        fill_rule: Real readable path.

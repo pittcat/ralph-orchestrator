@@ -110,6 +110,15 @@ const PRESETS: &[EmbeddedPreset] = &[
         )),
         public: true,
     },
+    EmbeddedPreset {
+        name: "red-team-attack",
+        description: "Experiment-driven Red Team analysis: reverse-locate plan commits from Git history, reconstruct patches, execute real attack experiments with control groups, apply hard-threshold evidence gating, and produce a zero-regression repair plan awaiting human confirmation",
+        content: include_str!(concat!(
+            env!("OUT_DIR"),
+            "/presets/red-team-attack.yml"
+        )),
+        public: true,
+    },
 ];
 
 /// WRC-U5 (2026-06-12-003) / KTD-WRC-5: Tier-0 list of builtin
@@ -709,10 +718,12 @@ mod tests {
         // (ce-executor-supervisor / ce-executor-pipeline / debug /
         // merge-batch / merge-loop / autoresearch). 2026-07-24
         // plan U5 added `implementation-review`; bump to 7.
+        // 2026-07-27 added `parallel-forge`; bump to 9.
+        // 2026-07-28 added `red-team-attack`; bump to 10.
         assert_eq!(
             presets.len(),
-            9,
-            "Expected 9 public presets (added parallel-forge 2026-07-27)"
+            10,
+            "Expected 10 public presets (added red-team-attack 2026-07-28)"
         );
     }
 
@@ -840,7 +851,8 @@ mod tests {
         let names = preset_names();
         // 2026-07-24 plan U5: added `implementation-review`, the
         // post-implementation six-dimension wave-review preset.
-        assert_eq!(names.len(), 9);
+        // 2026-07-28: added `red-team-attack`.
+        assert_eq!(names.len(), 10);
         assert!(names.contains(&"autoresearch"));
         assert!(names.contains(&"ce-executor-pipeline"));
         assert!(names.contains(&"ce-executor-pipeline-loop"));
@@ -850,6 +862,7 @@ mod tests {
         assert!(names.contains(&"parallel-forge"));
         assert!(names.contains(&"post-merge-converge"));
         assert!(names.contains(&"implementation-review"));
+        assert!(names.contains(&"red-team-attack"));
     }
 
     #[test]
@@ -1999,6 +2012,7 @@ mod tests {
             // wave-review preset; mirrored in
             // scripts/ralph-zsh-plugin.zsh _RALPH_BUILTIN_HAT_VALUES.
             "builtin:implementation-review",
+            "builtin:red-team-attack",
         ]
         .iter()
         .map(|s| s.to_string())

@@ -1,0 +1,766 @@
+# Red Team Attack Preset
+#
+# Experiment-driven, read-only Red Team analysis. Takes one or more completed
+# development plans, reverse-locates their implementation commits from Git
+# history, reconstructs patches, designs and executes real attack experiments,
+# applies hard-threshold evidence gating, and produces a zero-regression repair
+# plan. Does NOT modify production code, formal tests, or git history.
+#
+# Prompt contract (operator provides via `.ralph/red-team.prompt.md`,
+# referenced by `ralph.red-team-attack.yml`):
+#   - Required: list of development plan paths
+#   - Optional: target_branch, target_commit, verification_commands,
+#     allowed_test_environments, forbidden_external_targets
+#
+# Usage:
+#   ralph run -c ralph.red-team-attack.yml -H builtin:red-team-attack
+#
+# Artifacts (under gitignored .ralph/red-team/, owned by hats — not by this preset):
+#   .ralph/red-team/01-target-lock.md            — target-locker writes
+#   .ralph/red-team/02-plan-resolution.md        — plan-resolver writes
+#   .ralph/red-team/commits/PLAN-*.md            — plan-resolver writes
+#   .ralph/red-team/03-patch-reconstruction.md   — plan-resolver writes
+#   .ralph/red-team/patches/**                   — plan-resolver writes
+#   .ralph/red-team/04-attack-surface.md         — attack-surface-mapper writes
+#   .ralph/red-team/05-experiment-plan.md        — attack-surface-mapper writes
+#   .ralph/red-team/experiments/RTE-*.md         — experiment-runner writes
+#   .ralph/red-team/evidence/RTE-*/**            — experiment-runner writes
+#   .ralph/red-team/repros/RTE-*/**              — experiment-runner writes
+#   .ralph/red-team/07-evidence-board.md         — evidence-gate writes
+#   .ralph/red-team/07-retry-board.md            — evidence-gate writes
+#   .ralph/red-team/08-impact-boundary.md        — impact-boundary writes
+#   .ralph/red-team/findings/RTF-*.md            — impact-boundary writes
+#   .ralph/red-team/PLAN.md                      — impact-boundary (as repair-planner) writes
+#   .ralph/red-team/10-independent-review.md     — independent-reviewer writes
+#   .ralph/red-team/REPORT.md                    — reporter writes
+#   .ralph/red-team/QUESTIONS.md                 — reporter writes
+#
+# Artifact lifecycle:
+#   owner: this loop's hats (writer of each file); operator is the final reader
+#   retention: keep until the operator archives or deletes; agents MUST NOT
+#     wipe `.ralph/red-team/` as cleanup
+#   cleanup: operator-owned (manual archive/delete); no automatic purge
+#
+# Artifact templates (SSOT):
+#   Embedded in the `ralph` binary. Materialize at runtime:
+#     ralph preset materialize-artifacts red-team-attack --plan-key <plan-key>
+#   Default output: `.ralph/red-team/<plan-key>/templates/`
+#     experiment.template.yml   → experiments/RTE-*.md
+#     finding.template.yml      → findings/RTF-*.md
+#     report.template.md        → REPORT.md
+#     plan.template.md          → PLAN.md
+
+topic_format_whitelist:
+  - redteam.complete
+
+# No `mechanism.flow`: flat hat-only linear chain with evidence-gate retry
+# loop. Routing comes from hat triggers/publishes and isolated mode.
+
+tasks:
+  enabled: false
+
+event_loop:
+  execution_mode: isolated
+  prompt: |
+    Red Team attack analysis on one or more completed development plans.
+
+    Read the prompt file for:
+    - Required: list of development plan paths
+    - Optional: target_branch, target_commit, verification_commands,
+      allowed_test_environments, forbidden_external_targets
+
+    Do NOT modify production code, formal tests, tracked config, or git history.
+    Do NOT run `git add`, `git commit`, `git merge`, `git rebase`,
+    `git cherry-pick`, or `git reset --hard`.
+    All experiment artifacts go under `.ralph/red-team/`.
+  completion_promise: "redteam.complete"
+  required_events:
+    - "redteam.target.locked"
+  max_iterations: 100
+  max_runtime_seconds: 28800
+  starting_event: "redteam.start"
+  # Payload schemas SSOT: `presets/schemas/red-team-attack.yml`
+  # (build.rs deep-merges into event_policy.schemas).
+  event_policy:
+    enabled: true
+    mode: enforce
+    on_violation: reject_with_resume
+    require_policy_check_for_cli_emit: true
+    allow_unsafe_cli_emit: false
+    require_emit_provenance: true
+    terminal_topics:
+      - "redteam.complete"
+    business_topics:
+      - "redteam.target.locked"
+      - "redteam.plan.resolved"
+      - "redteam.plan.unresolved"
+      - "redteam.attack.mapped"
+      - "redteam.experiment.done"
+      - "redteam.evidence.gated"
+      - "redteam.retry.required"
+      - "redteam.impact.qualified"
+      - "redteam.impact.rejected"
+      - "redteam.reviewed"
+    completion_after_terminal:
+      duplicate_terminal: reject
+      business_after_completion: reject
+      write_diagnostic_event: true
+    topic_deny_rules:
+      # target-locker owns target.locked
+      - {hat_id: plan-resolver, topic: redteam.target.locked}
+      - {hat_id: attack-surface-mapper, topic: redteam.target.locked}
+      - {hat_id: experiment-runner, topic: redteam.target.locked}
+      - {hat_id: evidence-gate, topic: redteam.target.locked}
+      - {hat_id: impact-boundary, topic: redteam.target.locked}
+      - {hat_id: independent-reviewer, topic: redteam.target.locked}
+      - {hat_id: reporter, topic: redteam.target.locked}
+      # plan-resolver owns plan.resolved / plan.unresolved
+      - {hat_id: target-locker, topic: redteam.plan.resolved}
+      - {hat_id: attack-surface-mapper, topic: redteam.plan.resolved}
+      - {hat_id: experiment-runner, topic: redteam.plan.resolved}
+      - {hat_id: evidence-gate, topic: redteam.plan.resolved}
+      - {hat_id: impact-boundary, topic: redteam.plan.resolved}
+      - {hat_id: independent-reviewer, topic: redteam.plan.resolved}
+      - {hat_id: reporter, topic: redteam.plan.resolved}
+      - {hat_id: target-locker, topic: redteam.plan.unresolved}
+      - {hat_id: attack-surface-mapper, topic: redteam.plan.unresolved}
+      - {hat_id: experiment-runner, topic: redteam.plan.unresolved}
+      - {hat_id: evidence-gate, topic: redteam.plan.unresolved}
+      - {hat_id: impact-boundary, topic: redteam.plan.unresolved}
+      - {hat_id: independent-reviewer, topic: redteam.plan.unresolved}
+      - {hat_id: reporter, topic: redteam.plan.unresolved}
+      # attack-surface-mapper owns attack.mapped / retry.required
+      - {hat_id: target-locker, topic: redteam.attack.mapped}
+      - {hat_id: plan-resolver, topic: redteam.attack.mapped}
+      - {hat_id: experiment-runner, topic: redteam.attack.mapped}
+      - {hat_id: evidence-gate, topic: redteam.attack.mapped}
+      - {hat_id: impact-boundary, topic: redteam.attack.mapped}
+      - {hat_id: independent-reviewer, topic: redteam.attack.mapped}
+      - {hat_id: reporter, topic: redteam.attack.mapped}
+      - {hat_id: target-locker, topic: redteam.retry.required}
+      - {hat_id: plan-resolver, topic: redteam.retry.required}
+      - {hat_id: experiment-runner, topic: redteam.retry.required}
+      - {hat_id: evidence-gate, topic: redteam.retry.required}
+      - {hat_id: impact-boundary, topic: redteam.retry.required}
+      - {hat_id: independent-reviewer, topic: redteam.retry.required}
+      - {hat_id: reporter, topic: redteam.retry.required}
+      # experiment-runner owns experiment.done
+      - {hat_id: target-locker, topic: redteam.experiment.done}
+      - {hat_id: plan-resolver, topic: redteam.experiment.done}
+      - {hat_id: attack-surface-mapper, topic: redteam.experiment.done}
+      - {hat_id: evidence-gate, topic: redteam.experiment.done}
+      - {hat_id: impact-boundary, topic: redteam.experiment.done}
+      - {hat_id: independent-reviewer, topic: redteam.experiment.done}
+      - {hat_id: reporter, topic: redteam.experiment.done}
+      # evidence-gate owns evidence.gated
+      - {hat_id: target-locker, topic: redteam.evidence.gated}
+      - {hat_id: plan-resolver, topic: redteam.evidence.gated}
+      - {hat_id: attack-surface-mapper, topic: redteam.evidence.gated}
+      - {hat_id: experiment-runner, topic: redteam.evidence.gated}
+      - {hat_id: impact-boundary, topic: redteam.evidence.gated}
+      - {hat_id: independent-reviewer, topic: redteam.evidence.gated}
+      - {hat_id: reporter, topic: redteam.evidence.gated}
+      # impact-boundary owns impact.qualified / impact.rejected
+      - {hat_id: target-locker, topic: redteam.impact.qualified}
+      - {hat_id: plan-resolver, topic: redteam.impact.qualified}
+      - {hat_id: attack-surface-mapper, topic: redteam.impact.qualified}
+      - {hat_id: experiment-runner, topic: redteam.impact.qualified}
+      - {hat_id: evidence-gate, topic: redteam.impact.qualified}
+      - {hat_id: independent-reviewer, topic: redteam.impact.qualified}
+      - {hat_id: reporter, topic: redteam.impact.qualified}
+      - {hat_id: target-locker, topic: redteam.impact.rejected}
+      - {hat_id: plan-resolver, topic: redteam.impact.rejected}
+      - {hat_id: attack-surface-mapper, topic: redteam.impact.rejected}
+      - {hat_id: experiment-runner, topic: redteam.impact.rejected}
+      - {hat_id: evidence-gate, topic: redteam.impact.rejected}
+      - {hat_id: independent-reviewer, topic: redteam.impact.rejected}
+      - {hat_id: reporter, topic: redteam.impact.rejected}
+      # independent-reviewer owns reviewed
+      - {hat_id: target-locker, topic: redteam.reviewed}
+      - {hat_id: plan-resolver, topic: redteam.reviewed}
+      - {hat_id: attack-surface-mapper, topic: redteam.reviewed}
+      - {hat_id: experiment-runner, topic: redteam.reviewed}
+      - {hat_id: evidence-gate, topic: redteam.reviewed}
+      - {hat_id: impact-boundary, topic: redteam.reviewed}
+      - {hat_id: reporter, topic: redteam.reviewed}
+      # reporter owns complete
+      - {hat_id: target-locker, topic: redteam.complete}
+      - {hat_id: plan-resolver, topic: redteam.complete}
+      - {hat_id: attack-surface-mapper, topic: redteam.complete}
+      - {hat_id: experiment-runner, topic: redteam.complete}
+      - {hat_id: evidence-gate, topic: redteam.complete}
+      - {hat_id: impact-boundary, topic: redteam.complete}
+      - {hat_id: independent-reviewer, topic: redteam.complete}
+      # ralph locked out
+      - {hat_id: ralph, topic: redteam.target.locked}
+      - {hat_id: ralph, topic: redteam.plan.resolved}
+      - {hat_id: ralph, topic: redteam.plan.unresolved}
+      - {hat_id: ralph, topic: redteam.attack.mapped}
+      - {hat_id: ralph, topic: redteam.experiment.done}
+      - {hat_id: ralph, topic: redteam.evidence.gated}
+      - {hat_id: ralph, topic: redteam.retry.required}
+      - {hat_id: ralph, topic: redteam.impact.qualified}
+      - {hat_id: ralph, topic: redteam.impact.rejected}
+      - {hat_id: ralph, topic: redteam.reviewed}
+      - {hat_id: ralph, topic: redteam.complete}
+
+cli:
+  backend: "auto"
+
+core:
+  specs_dir: "./specs/"
+  guardrails:
+    - "OPAC Observe: `ralph inspect loop`. Do not read runtime-private orchestration ledgers; use inspect/tools APIs only."
+    - "OPAC Precheck: `ralph tools skill load ralph-tools-emit` then `ralph emit --policy-check` before every real emit (per `ralph-tools` §5)."
+    - "Artifact templates: run `ralph preset materialize-artifacts red-team-attack --plan-key <plan-key>` then copy from `.ralph/red-team/<plan-key>/templates/` — do not write free-form artifacts."
+    - "Artifact lifecycle: `.ralph/red-team/` owner=operator; agents must not wipe or delete as cleanup."
+    - "ALLOWED `.ralph/` writes: only under `.ralph/red-team/`. Do not modify other `.ralph/` runtime state."
+    - "ABSOLUTE PROHIBITION: NEVER kill, signal, or terminate any `ralph` / `ralph-orchestrator` process."
+    - "Do not modify production code, formal tests, tracked config, or git history. No `git add` / `git commit` / `git merge` / `git rebase` / `git cherry-pick` / `git reset --hard`."
+    - "Every experiment must have a control group and an attack group. No control group = no formal Finding."
+    - "Every experiment must save raw evidence (stdout, stderr, state dumps) under `.ralph/red-team/evidence/RTE-<NNN>/`. Agent narrative is not evidence."
+    - "After every experiment, verify `git status --porcelain=v1` is empty and `git diff --exit-code` / `git diff --cached --exit-code` pass. Dirty tree = experiment invalid."
+    - "One business event per isolated activation. Terminal events must not carry other business events before them."
+
+hats:
+  target-locker:
+    name: "Target Locker"
+    description: "Locks the attack target (branch, HEAD, tree) and proves the code tree did not change during the entire analysis."
+    triggers: ["redteam.start"]
+    publishes: ["redteam.target.locked"]
+    exempt_topics: ["redteam.target.locked"]
+    terminal_events: ["redteam.target.locked"]
+    event_filter:
+      enabled: true
+      events: ["redteam.start"]
+    instructions: |
+      ## TARGET LOCKER MODE
+
+      Read-only. Lock the target and write the lock artifact.
+
+      OPAC: `ralph-tools-opac` (auto-injected). Before emit:
+      `ralph tools skill load ralph-tools-emit` then `--policy-check` per emit skill §5.
+
+      ### Mission
+      Lock the current branch, HEAD, and tree SHA. Write `.ralph/red-team/01-target-lock.md`.
+      Emit exactly one `redteam.target.locked` event.
+
+      ### Steps
+      1. Read prompt for plan paths, optional target_branch, optional target_commit.
+      2. Run lock commands:
+         ```bash
+         git rev-parse --show-toplevel
+         git branch --show-current
+         git rev-parse HEAD
+         git rev-parse HEAD^{tree}
+         git status --porcelain=v1
+         git remote -v
+         git log -1 --date=iso --format=fuller
+         git diff --check
+         git rev-parse -q --verify MERGE_HEAD
+         git rev-parse -q --verify REBASE_HEAD
+         git rev-parse -q --verify CHERRY_PICK_HEAD
+         ```
+      3. Compute SHA-256 for each plan file: `sha256sum <plan-path>`.
+      4. Write `.ralph/red-team/01-target-lock.md` with all lock data.
+      5. If any in-progress operation detected (MERGE_HEAD / REBASE_HEAD / CHERRY_PICK_HEAD exists),
+         or working tree is dirty, emit `redteam.target.locked` with `lock_status: failed`
+         and the reason. Otherwise `lock_status: locked`.
+      6. Precheck then emit `redteam.target.locked` with required fields.
+
+      Single business event only.
+
+  plan-resolver:
+    name: "Plan Resolver"
+    description: "Reverse-locates implementation commits from Git history for each development plan, reconstructs patches, and builds claim traceability matrix."
+    triggers: ["redteam.target.locked"]
+    publishes: ["redteam.plan.resolved", "redteam.plan.unresolved"]
+    exempt_topics: ["redteam.plan.resolved", "redteam.plan.unresolved"]
+    terminal_events: ["redteam.plan.resolved", "redteam.plan.unresolved"]
+    event_filter:
+      enabled: true
+      events: ["redteam.target.locked"]
+    instructions: |
+      ## PLAN RESOLVER MODE
+
+      Read-only. Do NOT modify code or git history.
+
+      OPAC: `ralph-tools-opac`. Before emit: `ralph tools skill load ralph-tools-emit` then `--policy-check`.
+
+      ### Mission
+      For each development plan, find the real implementation commits from Git history.
+      Reconstruct per-plan patch series and combined patch. Build claim traceability matrix.
+      Write artifacts, then emit exactly one event.
+
+      ### Steps
+      1. Read `redteam.target.locked` payload. Verify `lock_status == locked` and
+         `git rev-parse HEAD` == `target_head`, `git rev-parse HEAD^{tree}` == `target_tree`.
+         If mismatch, emit `redteam.plan.unresolved` with reason `TARGET_HEAD_CHANGED`.
+      2. For each plan:
+         a. Extract plan fingerprint (title, plan_id, date, units, scenarios, acceptance_criteria,
+            expected_files, expected_symbols, expected_tests, commands, cli_flags, config_keys,
+            state_fields, data_formats, migration_names, explicit_commit_ids, change_ids, issue_ids).
+         b. Run Git searches:
+            ```bash
+            git log --all --decorate --date=iso --name-status
+            git log --first-parent --date=iso
+            git log --merges --date=iso
+            git log --all --grep="<plan-id>"
+            git log --all --grep="<plan-title>"
+            git log --all -- "<planned-path>"
+            git log --all -S"<config-key>"
+            git log --all -S"<symbol>"
+            git log --all -G"<regex>"
+            git blame <suspected-file>
+            git show --stat --summary <sha>
+            git show --name-status <sha>
+            git show --format=fuller <sha>
+            git diff-tree --root --no-commit-id --name-status -r <sha>
+            git show <sha> | git patch-id --stable
+            ```
+         c. Score each candidate commit (hard evidence required, min 85).
+            Hard evidence: plan ID in commit message, plan path in commit message,
+            Change-Id, unique file/symbol/config/CLI/test added by commit,
+            patch-id match.
+            Soft evidence (cannot standalone): time proximity, author match,
+            message similarity, module match, commit order.
+         d. If score < 85, execute resolution retry (max 2 rounds):
+            - Expand `git log --all` time/path range
+            - Use more unique symbols/configs/tests for `-S` / `-G` search
+            - Check merge, squash, rebase, cherry-pick, patch-id equivalence
+            - Check subsequent override commits and multi-plan commits
+            - Line-by-line hunk comparison, not just commit message
+            - Recompute score with new evidence paths
+         e. Write `.ralph/red-team/commits/PLAN-<NNN>.md` per plan.
+      3. Reconstruct patches:
+         - Per-commit: `git format-patch -1 --stdout --binary --full-index <sha>`
+           → `.ralph/red-team/patches/PLAN-<NNN>/`
+         - Per-plan series: combine in true commit order
+           → `.ralph/red-team/patches/PLAN-<NNN>.series.patch`
+         - Combined current patch: `git diff --binary --full-index --find-renames --find-copies <global-baseline>..<locked-head>`
+           → `.ralph/red-team/patches/combined-current.patch`
+      4. Classify each hunk: PLAN_OWNED / SHARED_BY_MULTIPLE_PLANS / OVERRIDDEN_LATER / UNATTRIBUTED / RELATED_NEIGHBOR_CHANGE.
+      5. Build claim traceability matrix: plan claim → commit → patch hunk → current code → callers → tests → implementation status.
+      6. Write `.ralph/red-team/02-plan-resolution.md` and `.ralph/red-team/03-patch-reconstruction.md`.
+      7. Gate check:
+         - resolved_count >= 1 AND patch_attribution_coverage >= 90 AND critical_claim_traceability == 100
+           → emit `redteam.plan.resolved`
+         - All plans unresolved after retry → emit `redteam.plan.unresolved` with reason `REJECTED_NO_RESOLVED_PLAN`
+      8. Precheck then emit. Single business event only.
+
+  attack-surface-mapper:
+    name: "Attack Surface Mapper"
+    description: "Identifies attack surfaces from plans, commits, patches, and current code tree; designs concrete experiments; handles retry from evidence-gate."
+    triggers: ["redteam.plan.resolved", "redteam.retry.required"]
+    publishes: ["redteam.attack.mapped"]
+    exempt_topics: ["redteam.attack.mapped"]
+    terminal_events: ["redteam.attack.mapped"]
+    event_filter:
+      enabled: true
+      events: ["redteam.plan.resolved", "redteam.retry.required"]
+    instructions: |
+      ## ATTACK SURFACE MAPPER MODE
+
+      Read-only on code. Do NOT modify anything.
+
+      OPAC: `ralph-tools-opac`. Before emit: `ralph tools skill load ralph-tools-emit` then `--policy-check`.
+
+      ### Template (must materialize first)
+      ```bash
+      ralph preset materialize-artifacts red-team-attack --plan-key <plan-key>
+      ```
+      Copy `experiment.template.yml` from `.ralph/red-team/<plan-key>/templates/` for each experiment.
+
+      ### Mission (on `redteam.plan.resolved`)
+      Identify attack surfaces and design concrete experiments.
+      Write `.ralph/red-team/04-attack-surface.md` and `.ralph/red-team/05-experiment-plan.md`.
+      Emit `redteam.attack.mapped`.
+
+      ### Mission (on `redteam.retry.required`)
+      Read retry delta from evidence-gate. Redesign or extend the experiment.
+      Update `.ralph/red-team/05-experiment-plan.md` with the retry delta applied.
+      Emit `redteam.attack.mapped` again (with updated `experiment_count` if new experiments added).
+
+      ### Attack Dimensions (mandatory coverage)
+      - Contract attack: callers using old semantics, new errors swallowed, new fields ignored, enum/state drift, false success
+      - State attack: memory vs persistence mismatch, dual state authority, partial write exposure, dangling references after delete, restart recovery
+      - Lifecycle attack: first start, repeated start, normal shutdown, forced kill, crash restart, upgrade, downgrade, uninstall, cleanup
+      - Config attack: defaults, feature off, invalid combinations, env/config/CLI priority, old config compatibility, missing config
+      - Concurrency & idempotency attack: double-click, double-submit, concurrent processes, retry, timeout retry, scheduler duplicate dispatch, cleanup vs execution race
+      - External system attack: network down, 4xx/5xx, timeout, corrupted response, duplicate response, browser refresh/back, session expiry, cookie/localStorage/server state mismatch
+
+      ### Experiment Design Rules
+      - Every experiment MUST have: control group, attack group, machine-checkable invariant, state inspection, repeat policy, cleanup policy
+      - No vague descriptions like "test concurrency" or "check restart"
+      - Use the experiment template; fill every section
+      - Control group proves environment is normal; attack group proves the vulnerability exists
+
+      ### Steps (on plan.resolved)
+      1. Read `redteam.plan.resolved` payload. Read plan-resolution and patch-reconstruction artifacts.
+      2. Verify HEAD/tree still match lock (`git rev-parse HEAD`, `git rev-parse HEAD^{tree}`).
+      3. For each resolved plan, identify attack surfaces using the dimensions above.
+      4. For each surface, design one or more concrete experiments using the template.
+      5. Write `.ralph/red-team/04-attack-surface.md` and `.ralph/red-team/05-experiment-plan.md`.
+      6. Precheck then emit `redteam.attack.mapped`.
+
+      ### Steps (on retry.required)
+      1. Read `redteam.retry.required` payload (`experiment_id`, `failed_metrics`, `retry_delta`).
+      2. Read the original experiment artifact and evidence board.
+      3. Apply the retry delta: add repetitions, tighten controls, add state snapshots,
+         construct independent environment, add restart verification, or add boundary experiments.
+      4. Update `.ralph/red-team/05-experiment-plan.md` with the modified experiment.
+      5. Precheck then emit `redteam.attack.mapped` (same or updated `experiment_count`).
+
+      Single business event only.
+
+  experiment-runner:
+    name: "Experiment Runner"
+    description: "Executes one experiment per activation, saves raw evidence, verifies tracked tree unchanged."
+    triggers: ["redteam.attack.mapped"]
+    publishes: ["redteam.experiment.done"]
+    exempt_topics: ["redteam.experiment.done"]
+    terminal_events: ["redteam.experiment.done"]
+    event_filter:
+      enabled: true
+      events: ["redteam.attack.mapped"]
+    instructions: |
+      ## EXPERIMENT RUNNER MODE
+
+      Execute experiments. Save raw evidence. Do NOT modify tracked code.
+
+      OPAC: `ralph-tools-opac`. Before emit: `ralph tools skill load ralph-tools-emit` then `--policy-check`.
+
+      ### Mission
+      Execute one experiment from the experiment plan. Save raw evidence.
+      Verify tracked tree unchanged. Emit `redteam.experiment.done`.
+
+      ### Steps
+      1. Read `redteam.attack.mapped` payload. Read experiment plan artifact.
+      2. Verify HEAD/tree match lock (`git rev-parse HEAD`, `git rev-parse HEAD^{tree}`).
+         If mismatch, emit `redteam.experiment.done` with `control_passed: false`,
+         `attack_reproduced: false`, and evidence showing `TARGET_HEAD_CHANGED`.
+      3. Select next unexecuted experiment from the plan.
+      4. Prepare isolation environment (temp dir, container, mock server as specified).
+      5. Record initial state (files, processes, network, DB, etc.).
+      6. Execute control group commands. Record stdout, stderr, exit codes, state after.
+      7. Restore initial state.
+      8. Execute attack group commands. Record stdout, stderr, exit codes, state after, side effects.
+      9. Repeat as specified in repeat_policy.
+      10. Execute cleanup commands. Verify cleanup success.
+      11. Verify tracked tree unchanged:
+          ```bash
+          git status --porcelain=v1
+          git diff --exit-code
+          git diff --cached --exit-code
+          ```
+          If dirty, mark experiment `EXPERIMENT_INVALID_CODE_MUTATION`.
+      12. Save all evidence under `.ralph/red-team/evidence/RTE-<NNN>/`.
+      13. Write `.ralph/red-team/experiments/RTE-<NNN>.md` from template.
+      14. Precheck then emit `redteam.experiment.done`.
+
+      ### Allowed Operations
+      - Build project, run existing tests, lint, format-check, static check, benchmark, fuzz
+      - Start programs, execute commands, pass invalid/boundary args, concurrent execution,
+        terminate self-started processes, timeout retry, compare before/after state
+      - File/persistence experiments ONLY in isolated dirs / temp data / copies
+      - Process/resource experiments ONLY on self-started processes
+      - HTTP/API experiments ONLY on local / test / staging / mock / explicitly authorized non-production
+      - Web operations ONLY with test accounts, no real payment/order/notification/SMS/email
+
+      ### Absolute Prohibitions
+      - Terminate ralph / ralph-orchestrator / unknown processes
+      - Real payment, real orders, mass notifications, real SMS/email, delete production data, modify production permissions
+      - Modify tracked code, formal tests, tracked config
+      - `git add` / `git commit` / `git merge` / `git rebase` / `git cherry-pick` / `git reset --hard`
+
+      Single business event only.
+
+  evidence-gate:
+    name: "Evidence Gate"
+    description: "Independently scores experiment evidence against hard thresholds, routes retry or qualification."
+    triggers: ["redteam.experiment.done"]
+    publishes: ["redteam.evidence.gated", "redteam.retry.required"]
+    exempt_topics: ["redteam.evidence.gated", "redteam.retry.required"]
+    terminal_events: ["redteam.evidence.gated", "redteam.retry.required"]
+    event_filter:
+      enabled: true
+      events: ["redteam.experiment.done"]
+    instructions: |
+      ## EVIDENCE GATE MODE
+
+      Independent review. Do NOT accept experiment-runner's subjective conclusions.
+      Read only raw evidence.
+
+      OPAC: `ralph-tools-opac`. Before emit: `ralph tools skill load ralph-tools-emit` then `--policy-check`.
+
+      ### Mission
+      Score one experiment against binary execution gates and four metrics.
+      Emit `redteam.evidence.gated` if all pass, or `redteam.retry.required` with retry delta.
+
+      ### Binary Execution Gates (all must be true)
+      - experiment_actually_executed: true
+      - target_head_matches: true
+      - control_case_passed: true
+      - attack_case_completed: true
+      - concrete_invariant_defined: true
+      - actual_state_inspected: true
+      - repeat_requirement_met: true
+      - cleanup_verified: true
+      - tracked_tree_unchanged: true
+      - raw_evidence_present: true
+
+      ### Four Metrics (0-100 each, no averaging, no compensation)
+      | Metric | Default Threshold | P0/P1 Threshold |
+      |---|---|---|
+      | Confidence | 85 | 90 |
+      | Evidence Coverage | 85 | 90 |
+      | Verifiability | 90 | 90 |
+      | Impact Certainty | 85 | 90 |
+
+      ### Scoring Method
+      - Confidence: repetition stability (35) + control/attack discrimination (25) + alternative cause exclusion (20) + multi-source consistency (20)
+      - Evidence Coverage: completed mandatory evidence weight / total mandatory evidence weight * 100
+      - Verifiability: step precision (25) + input/environment preparable (20) + machine-decidable result (25) + isolated repeatable (20) + independent rerun success (10)
+      - Impact Certainty: direct modules clear (25) + state propagation clear (25) + lifecycle/config clear (20) + compatibility clear (15) + unaffected boundary clear (15)
+
+      ### Steps
+      1. Read `redteam.experiment.done` payload. Read experiment artifact and ALL raw evidence files.
+      2. Verify binary execution gates. If any false:
+         - Retryable (control insufficient, attack incomplete, state check insufficient,
+           repeat insufficient, evidence missing but safe to rerun, cleanup incomplete,
+           invariant not decidable) → emit `redteam.retry.required`
+         - Not retryable (HEAD changed, tree dirty unknown source, unauthorized production,
+           unsafe cleanup, code/git constraint violation) → stop, restore safety, emit
+           `redteam.retry.required` with `failed_metrics: [binary_gate_violation]`
+           and note that old evidence is invalid
+      3. Compute four metrics from raw evidence only.
+      4. Check thresholds. If any below threshold:
+         - Identify failed metric(s) and missing evidence
+         - Generate retry delta (what MUST be added: more repetitions, tighter controls,
+           additional state snapshots, independent environment, restart verification,
+           boundary experiments)
+         - Write `.ralph/red-team/07-retry-board.md`
+         - Emit `redteam.retry.required` with `experiment_id`, `attempt`, `failed_metrics`, `retry_delta`, `retry_board_path`
+      5. If all thresholds pass AND all mandatory evidence present AND binary gates pass:
+         - Write `.ralph/red-team/07-evidence-board.md`
+         - Emit `redteam.evidence.gated` with scores and `evidence_board_path`
+      6. Precheck then emit. Single business event only.
+
+      ### Retry Constraints
+      - default_max_retries: 2 (initial + 2 retries)
+      - p0_p1_max_retries: 3 (initial + 3 retries)
+      - Blind rerun forbidden: retry must have substantive changes
+      - New raw evidence required each retry
+      - Full rescore required after each retry (no carrying over high scores)
+
+  impact-boundary:
+    name: "Impact Boundary"
+    description: "Bounds impact scope for qualified findings, creates formal findings, and writes the repair plan."
+    triggers: ["redteam.evidence.gated"]
+    publishes: ["redteam.impact.qualified", "redteam.impact.rejected"]
+    exempt_topics: ["redteam.impact.qualified", "redteam.impact.rejected"]
+    terminal_events: ["redteam.impact.qualified", "redteam.impact.rejected"]
+    event_filter:
+      enabled: true
+      events: ["redteam.evidence.gated"]
+    instructions: |
+      ## IMPACT BOUNDARY MODE
+
+      Continue hands-on verification. Do NOT rely on evidence-gate's preliminary impact score.
+
+      OPAC: `ralph-tools-opac`. Before emit: `ralph tools skill load ralph-tools-emit` then `--policy-check`.
+
+      ### Template (must materialize first)
+      ```bash
+      ralph preset materialize-artifacts red-team-attack --plan-key <plan-key>
+      ```
+      Copy `finding.template.yml` and `plan.template.md` from `.ralph/red-team/<plan-key>/templates/`.
+
+      ### Mission
+      For each qualified experiment, bound the impact scope through real commands and tests.
+      Create formal finding (RTF-NNN). If impact uncertain after retry, reject.
+      After all findings processed, write `.ralph/red-team/PLAN.md`.
+
+      ### Steps
+      1. Read `redteam.evidence.gated` payload. Read evidence board and experiment artifact.
+      2. Verify HEAD/tree match lock.
+      3. Run impact boundary experiments:
+         - Run direct affected component tests
+         - Run upstream caller tests
+         - Run downstream consumer tests
+         - Run feature-off scenario
+         - Run old config scenario
+         - Run old data/format scenario
+         - Restart verification
+         - Cleanup verification
+         - Repeat execution verification
+         - Concurrent entry verification
+         - Web refresh/re-login verification
+         - API caller compatibility verification
+      4. Determine:
+         - Earliest failure layer
+         - Which invariant broken
+         - Which module owns fix responsibility
+         - Affected callers and downstream consumers
+         - Affected persistent state
+         - Affected config combinations
+         - Default-off mode impact
+         - Restart/recovery impact
+         - Upgrade/downgrade impact
+         - Compatibility impact
+         - Confirmed unaffected modules
+         - Minimal safe fix boundary
+      5. Recompute impact_certainty from boundary experiment results (not from evidence-gate).
+      6. If impact_certainty < threshold:
+         - Emit `redteam.impact.rejected` with reason `REJECTED_AFTER_RETRY_UNCERTAIN_IMPACT`
+           (shares retry budget with evidence-gate: default 2, P0/P1 3)
+      7. If all thresholds pass:
+         - Write `.ralph/red-team/findings/RTF-<NNN>.md` from finding template
+         - Write `.ralph/red-team/08-impact-boundary.md`
+         - Emit `redteam.impact.qualified` with `finding_id`, `severity`, `finding_file_path`, `impact_file_path`
+      8. After all findings processed (check if more experiments remain in evidence board):
+         - If more qualified experiments pending → wait for next trigger
+         - If all done → write `.ralph/red-team/PLAN.md` from plan template
+      9. Precheck then emit. Single business event only.
+
+      ### Repair Plan Rules
+      - Only include findings with `eligible_for_repair_plan: true`
+      - Strict serial: Unit 0 (baseline) → Unit 1..N (per finding) → Final Regression → Clean Environment → Independent Review
+      - Each unit must bind: source (finding_id, experiment_id, plans, commits, patch_hunks), metrics,
+        broken_invariant, minimal_fix_locus, allowed_files, forbidden_scope,
+        existing_behavior_to_preserve, red_test_source, regression_matrix, rollback_condition
+      - Methodology: Spec-First + BDD + ATDD + Outside-In + TDD + Regression + Clean Environment + Compatibility + Rollback
+      - Prohibited: unrelated refactoring, fixing other findings, deleting failing tests, weakening assertions,
+        catch-and-ignore, fake success, changing public behavior to avoid issue, expanding public interface,
+        masking defect by default-off, using unqualified findings
+
+  independent-reviewer:
+    name: "Independent Reviewer"
+    description: "Independently audits the final repair plan, evidence chain, and threshold compliance. Cannot reinterpret low-score experiments or add rejected items."
+    triggers: ["redteam.impact.qualified", "redteam.impact.rejected"]
+    publishes: ["redteam.reviewed"]
+    exempt_topics: ["redteam.reviewed"]
+    terminal_events: ["redteam.reviewed"]
+    event_filter:
+      enabled: true
+      events: ["redteam.impact.qualified", "redteam.impact.rejected"]
+    instructions: |
+      ## INDEPENDENT REVIEWER MODE
+
+      Independent audit. Do NOT reinterpret low-score experiments.
+      Do NOT add rejected items back to the plan.
+
+      OPAC: `ralph-tools-opac`. Before emit: `ralph tools skill load ralph-tools-emit` then `--policy-check`.
+
+      ### Mission
+      Audit the final `PLAN.md` and all supporting artifacts.
+      Emit `redteam.reviewed` with verdict `PLAN_READY` or `PLAN_REJECTED`.
+
+      ### Audit Checklist
+      - Every Finding has a real experiment (not just static analysis)
+      - Control group passed for every Finding
+      - Attack group reproduced stably for every Finding
+      - Raw evidence exists for every Finding
+      - Four metrics all meet thresholds for every Finding
+      - Commit match confidence >= 85 for every plan
+      - Patch attribution coverage >= 90
+      - Critical claim traceability == 100
+      - Every repair unit is minimal
+      - Red before Green in every unit
+      - Existing behavior preserved
+      - Callers and consumers covered
+      - Failure recovery covered
+      - Concurrency and repeat execution covered
+      - Compatibility covered
+      - Clean environment covered
+      - No evidence-free architectural decisions
+      - No rejected experiments mixed into the plan
+      - No scope expansion without user confirmation
+
+      ### Steps
+      1. Read all available artifacts: target-lock, plan-resolution, patch-reconstruction,
+         attack-surface, experiment-plan, experiments, evidence board, retry board,
+         impact boundary, findings, PLAN.md.
+      2. Verify HEAD/tree match lock.
+      3. Run through the audit checklist above.
+      4. Write `.ralph/red-team/10-independent-review.md` with detailed findings.
+      5. Verdict:
+         - All checks pass → `PLAN_READY`
+         - Any check fails → `PLAN_REJECTED` (with specific reasons)
+      6. Precheck then emit `redteam.reviewed` with `verdict`, `review_file_path`, `plan_file_path`.
+
+      Single business event only.
+
+  reporter:
+    name: "Red Team Reporter"
+    description: "Writes the final operator-facing report, questions file, and emits redteam.complete."
+    triggers: ["redteam.reviewed", "redteam.plan.unresolved"]
+    publishes: ["redteam.complete"]
+    exempt_topics: ["redteam.complete"]
+    terminal_events: ["redteam.complete"]
+    event_filter:
+      enabled: true
+      events: ["redteam.reviewed", "redteam.plan.unresolved"]
+    instructions: |
+      ## RED TEAM REPORTER MODE
+
+      Write the final report and signal completion.
+
+      OPAC: `ralph-tools-opac`. Before emit: `ralph tools skill load ralph-tools-emit` then `--policy-check`.
+
+      ### Template (must materialize first)
+      ```bash
+      ralph preset materialize-artifacts red-team-attack --plan-key <plan-key>
+      ```
+      Copy `report.template.md` from `.ralph/red-team/<plan-key>/templates/`.
+
+      ### HARD RULE — deliverable paths first
+      Canonical paths:
+      - `.ralph/red-team/REPORT.md` — operator-facing report
+      - `.ralph/red-team/PLAN.md` — repair plan (written by impact-boundary, verified by reporter)
+      - `.ralph/red-team/QUESTIONS.md` — questions for operator (may be empty)
+      Create parent dirs if missing.
+      **No readable `report_path` / `plan_path` / `questions_path` ⇒ no `redteam.complete`.**
+
+      ### Steps (on `redteam.reviewed`)
+      1. Read `redteam.reviewed` payload (`verdict`, `review_file_path`, `plan_file_path`).
+      2. Verify HEAD/tree match lock.
+      3. Verify `plan_file_path` exists and is readable.
+      4. Write `.ralph/red-team/REPORT.md` from report template.
+         Fill every section: conclusion, summary, inputs, execution summary,
+         finding list, rejected candidates, repair plan summary,
+         zero-regression checklist, questions, evidence index, delivery statement.
+      5. Write `.ralph/red-team/QUESTIONS.md` (may be empty if no questions).
+         Include any items requiring operator decision:
+         - Product behavior choices
+         - Public interface changes
+         - Data format changes
+         - Migrations
+         - Default behavior changes
+         - Scope expansions
+         - Risk acceptances
+         - Architecture tradeoffs
+         - Compatibility tradeoffs
+         - Old capability removals
+      6. Verify all three files readable (`test -f` + `wc`/`head`).
+      7. Precheck then emit `redteam.complete` with `success`, `report_path`, `plan_path`, `questions_path`.
+         `success: true` only when `verdict == PLAN_READY`.
+      8. Confirm emit via `--output json` (`ok`/`recorded`), then print
+         `DELIVERABLE_PATH: <report_path>` in this activation's visible reply.
+
+      ### Steps (on `redteam.plan.unresolved`)
+      1. Read `redteam.plan.unresolved` payload (`reason`, `resolution_file_path`).
+      2. Verify HEAD/tree match lock.
+      3. Write `.ralph/red-team/REPORT.md` with FAIL conclusion:
+         - No plans could be resolved from Git history
+         - Include retry history from resolution artifact
+         - State that no experiments were executed
+         - State that no PLAN.md was generated
+      4. Write `.ralph/red-team/QUESTIONS.md` asking operator to verify plan paths
+         and provide additional context if needed.
+      5. Verify files readable.
+      6. Precheck then emit `redteam.complete` with `success: false`,
+         `report_path`, `plan_path: ""`, `questions_path`.
+      7. Confirm emit and print `DELIVERABLE_PATH: <report_path>`.
+
+      Single business event only.

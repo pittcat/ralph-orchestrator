@@ -1,0 +1,70 @@
+# Finding Template
+#
+# Copy to `.ralph/red-team/findings/RTF-<NNN>.md` and fill every section.
+# Only findings that pass ALL thresholds become formal RTF entries.
+#
+# Artifact lifecycle:
+#   owner: impact-boundary (writes this file after impact experiments pass)
+#   readers: repair-planner (builds units), independent-reviewer (audits)
+#   retention: keep until operator archives; rejected candidates stay in
+#     `.ralph/red-team/07-evidence-board.md` (not promoted to findings/)
+
+finding_id: RTF-<NNN>
+title: ""
+severity: P2          # P0 | P1 | P2 | P3
+status: EVIDENCE_GATED # EVIDENCE_GATED | IMPACT_QUALIFIED | REJECTED
+
+## Source Traceability
+plans: []
+commits: []
+patch_hunks: []
+experiment_id: RTE-<NNN>
+
+## Broken Invariant
+# The exact machine-checkable condition that was violated.
+broken_invariant: ""
+
+## Root Failure Layer
+# Where the failure originates: caller / callee / state / config / lifecycle / concurrency.
+root_failure_layer: ""
+
+## Impact Boundary
+affected_modules: []
+unaffected_modules: []
+compatibility_impact: ""
+state_impact: ""
+lifecycle_impact: ""
+configuration_impact: ""
+
+## Metrics (0-100 each, no averaging)
+metrics:
+  confidence: 0
+  evidence_coverage: 0
+  verifiability: 0
+  impact_certainty: 0
+
+## Thresholds Applied
+thresholds:
+  confidence_min: 85
+  evidence_coverage_min: 85
+  verifiability_min: 90
+  impact_certainty_min: 85
+  # P0/P1: all mins become 90
+
+## Raw Evidence
+raw_evidence_paths: []
+
+## Retry History
+# One entry per attempt. Empty if first attempt passed.
+retry_history: []
+
+## Final Qualified Attempt
+final_qualified_attempt: 1
+
+## Minimal Safe Fix Boundary
+minimal_safe_fix_boundary: ""
+
+## Eligibility
+eligible_for_repair_plan: true
+discarded_from_final_plan: false
+retry_exhausted: false

@@ -1,0 +1,78 @@
+# Red Team Experiment Template
+#
+# Copy this file to `.ralph/red-team/experiments/RTE-<NNN>.md` and fill every
+# section. Do not leave placeholders empty — write "N/A" with justification if
+# a section does not apply.
+#
+# Artifact lifecycle:
+#   owner: experiment-runner (writes this file)
+#   readers: evidence-gate (scores), impact-boundary (bounds), independent-reviewer (audits)
+#   retention: keep until operator archives; do not delete during retry loops
+
+experiment_id: RTE-<NNN>
+surface_id: RTS-<NNN>
+plan_ids: []
+commit_ids: []
+patch_hunks: []
+
+## Hypothesis
+# What you believe will happen. One sentence. Must be falsifiable.
+hypothesis: ""
+
+## Invariant
+# The machine-checkable condition that must hold. No vague terms like
+# "should work" or "is safe". Use observable state.
+invariant: ""
+
+## Environment
+environment:
+  required_services: []
+  required_devices: []
+  required_credentials: []
+  isolation_method: ""   # e.g. "docker container", "temp dir", "mock server"
+
+## Setup
+setup_commands: []
+# Each entry: {cmd: "...", expected_exit: 0, note: "..."}
+
+## Control Group
+control_commands: []
+# Each entry: {cmd: "...", expected_result: "...", state_check: "..."}
+expected_control: ""
+
+## Attack Group
+attack_commands: []
+# Each entry: {cmd: "...", expected_safe_result: "...", state_check: "..."}
+expected_attack_safe_result: ""
+
+## Failure Oracle
+# How to decide PASS / FAIL. Must be machine-checkable.
+failure_oracle: ""
+
+## Repeat Policy
+repeat_policy:
+  control_passes_required: 2
+  attack_reproduced_required: 2
+  max_attempts: 5
+
+## Mandatory Evidence
+mandatory_evidence:
+  - control_stdout
+  - control_stderr
+  - attack_stdout
+  - attack_stderr
+  - state_before
+  - state_after
+  - exit_codes
+
+## Cleanup
+cleanup_commands: []
+# Each entry: {cmd: "...", verify: "..."}
+
+## Results (filled by experiment-runner)
+results:
+  control_runs: []
+  attack_runs: []
+  cleanup_verified: false
+  tracked_tree_clean: false
+  evidence_paths: []
