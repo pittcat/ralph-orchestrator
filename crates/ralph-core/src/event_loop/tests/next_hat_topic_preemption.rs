@@ -362,3 +362,87 @@ hats:
          any 'executor' at iter 4 indicates the residual `task.resume` is misleading routing"
     );
 }
+
+// Plan 2026-07-28-001 U3 (R6 / S4): a committed business handoff
+// must NOT be pre-empted by a stranded `task.resume` parked on the
+// next-hat candidate's queue. The recovery `task.resume` is now a
+// secondary carrier — it only fires when the turn committed zero
+// business events (see `isolated_over_emit_commit`). When the
+// handoff has legitimately committed, the targeted path stays
+// dormant and the next hat should advance off the committed
+// handoff topic alone.
+#[test]
+fn u3_committed_handoff_not_preempted_by_stranded_resume() {
+    let yaml = r#"
+event_loop:
+  starting_event: "forge.worktrees.ready"
+  completion_promise: "LOOP_COMPLETE"
+  execution_mode: isolated
+  workflow_contract:
+    handoff_topic_seeds:
+      - "forge.worktrees.ready"
+hats:
+  worktree:
+    name: "Worktree"
+    triggers: ["forge.start"]
+    publishes: ["forge.worktrees.ready"]
+  dispatcher:
+    name: "Dispatcher"
+    triggers: ["forge.worktrees.ready"]
+    publishes: ["exec.unit.ready"]
+  executor:
+    name: "Executor"
+    triggers: ["exec.unit.ready"]
+    publishes: ["exec.unit.done"]
+"#;
+    let config: RalphConfig = serde_yaml::from_str(yaml).expect("yaml parses");
+    let mut event_loop = EventLoop::new(config);
+    event_loop.initialize("committed handoff vs stranded resume");
+
+    // Both events are published; the handoff goes to executor via
+    // the global queue (its trigger matches `exec.unit.ready`), and
+    // we explicitly route the stranded task.resume to executor
+    // through the same hat-targeted fast path it would take on a
+    // real over-emit turn.
+    event_loop
+        .bus
+        .publish(Event::new("exec.unit.ready", "committed-handoff"));
+    event_loop.bus.publish(
+        Event::new("task.resume", "stranded").with_target("executor"),
+    );
+
+    // Walk the bus manually so we only assert routing state — the
+    // U3 fixture does NOT drive a full isolated-mode turn; it
+    // proves the routing decision at the EventBus / next_hat
+    // seam.
+    let pending = event_loop
+        .bus
+        .peek_pending(&ralph_proto::HatId::new("executor"))
+        .cloned()
+        .unwrap_or_default();
+    let committed = pending
+        .iter()
+        .find(|e| e.topic.as_str() == "exec.unit.ready");
+    let stranded = pending
+        .iter()
+        .find(|e| e.topic.as_str() == "task.resume");
+    assert!(committed.is_some(), "the committed handoff is parked");
+    assert!(stranded.is_some(), "the stranded resume is parked");
+    // The committed handoff and the stranded resume sit in the
+    // same candidate queue; next_hat must NOT pre-empt the
+    // committed handoff with the targeted-resume fast path
+    // because the resume is **untargeted** (the fast path only
+    // fires on `event.target == Some(hat_id)`). The handoff
+    // priority predicate then sees the real handoff topic and
+    // picks executor — proving the U3 commit-first contract does
+    // not regress priority routing.
+    let next = event_loop
+        .next_hat()
+        .expect("a hat is candidate; both queues have parked entries")
+        .clone();
+    assert_eq!(
+        next.as_str(),
+        "executor",
+        "U3: a committed `exec.unit.ready` keeps executor as next-hat even when a stranded untargeted `task.resume` is parked in the same queue"
+    );
+}

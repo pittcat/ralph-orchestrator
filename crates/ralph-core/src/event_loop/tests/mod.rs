@@ -38,6 +38,13 @@ mod isolated_complex_regression;
 mod isolated_wave_budget;
 mod loop_context;
 mod next_hat_topic_preemption;
+/// Plan 2026-07-28-001 U3: generic isolated fixture for the
+/// commit-aware over-emit recovery contract. The three production
+/// scenarios (committed-first / zero-commit / terminal priority) plus
+/// the breaker-reset regression live here — distinct from the U2
+/// multi-hat complex regression so the plan-specified nextest
+/// substring can pick them out independently.
+mod isolated_over_emit_commit;
 mod objective;
 mod origin_guard;
 mod payload_types;
