@@ -1499,11 +1499,15 @@ impl SupervisorStore for InMemorySupervisorStore {
         })
     }
 
-    /// 2026-07-27-004 plan U4 (R11 / R14 / S11): persist the
-    /// bounded activation descriptor for a slot. The in-memory
-    /// store holds descriptors in `slot_descriptors`, keyed by
-    /// `(wave_id, slot_index)`. The mutation is idempotent at
-    /// the API level so a re-registration does not flip state.
+    /// 2026-07-27-004 plan U4 (R11 / R14 / S11) + 2026-07-28-002
+    /// fix A1 (R-F4): persist the bounded activation descriptor for
+    /// a slot. Mirrors the rusqlite store's `UPDATE ...
+    /// COALESCE(slot_index_in_parent, ?)` semantics: when the new
+    /// descriptor passes `None` for `slot_index_in_parent`, the prior
+    /// value (which `create_redrive_wave` seeded) is preserved. A
+    /// `Some(_)` override always wins. Payload fields (topic /
+    /// payload_json / wave_kind / payload_digest) are overwritten
+    /// unconditionally — those are the mutating channel.
     fn persist_slot_descriptor(
         &self,
         wave_id: &str,
@@ -1517,10 +1521,14 @@ impl SupervisorStore for InMemorySupervisorStore {
         if !inner.waves_by_id.contains_key(wave_id) {
             return Err(SupervisorStoreError::UnknownWave(wave_id.to_string()));
         }
-        inner.slot_descriptors.insert(
-            (wave_id.to_string(), descriptor.slot_index),
-            descriptor.clone(),
-        );
+        let key = (wave_id.to_string(), descriptor.slot_index);
+        let mut merged = descriptor.clone();
+        if merged.slot_index_in_parent.is_none() {
+            if let Some(existing) = inner.slot_descriptors.get(&key) {
+                merged.slot_index_in_parent = existing.slot_index_in_parent;
+            }
+        }
+        inner.slot_descriptors.insert(key, merged);
         Ok(())
     }
 
