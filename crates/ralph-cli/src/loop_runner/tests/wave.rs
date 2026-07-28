@@ -1959,6 +1959,9 @@ async fn test_run_wave_worker_pty_surfaces_spawn_failure() {
         None,
         None,
         None,
+        // 2026-07-28-003 plan U2: startup_grace unused in this
+        // legacy spawn-failure path; explicit `None`.
+        None,
     )
     .await;
 
@@ -2010,6 +2013,9 @@ async fn test_run_wave_worker_pty_idle_kill_on_silence() {
         tx,
         None,
         None,
+        None,
+        // 2026-07-28-003 plan U2: existing idle-kill test;
+        // startup_grace = None preserves the pre-U6 baseline.
         None,
     )
     .await;
@@ -2069,6 +2075,8 @@ exit 0
         None,
         None,
         None,
+        // 2026-07-28-003 plan U2: startup_grace = None; legacy weak-cap idle-kill test.
+        None,
     )
     .await;
 
@@ -2126,6 +2134,9 @@ exit 0
         tx,
         None,
         None,
+        None,
+        // 2026-07-28-003 plan U2: startup_grace = None; the strong signal at ~1 s still flips
+        // `seen_first_signal` and idle semantic kicks in normally.
         None,
     )
     .await;
@@ -2205,6 +2216,9 @@ async fn test_run_wave_worker_pty_events_file_growth_keeps_lease_alive() {
         None,
         None,
         None,
+        // 2026-07-28-003 plan U2: startup_grace = None; events-file growth is a Strong signal
+        // that flips `seen_first_signal` once it lands.
+        None,
     )
     .await;
 
@@ -2220,6 +2234,246 @@ async fn test_run_wave_worker_pty_events_file_growth_keeps_lease_alive() {
     emit_wave_validation_marker(
         "events-file-growth:keeps-alive",
         &["strong", "lease", "events"],
+    );
+}
+
+// =====================================================================
+// 2026-07-28-003 plan U2: `startup_grace_secs` integration tests.
+// Each test feeds `run_wave_worker_pty` a synthetic backend that
+// drives the scenarios required by the plan's BDD §4.
+// =====================================================================
+
+/// S1: a silent worker that emits its first line AFTER the idle window
+/// would otherwise fire, but within the startup_grace window must
+/// survive. With grace=8 s and idle=2 s, a 4 s silence must NOT kill
+/// the worker; the first line at 4 s flips `seen_first_signal`, then
+/// the worker exits normally.
+#[cfg(unix)]
+#[tokio::test]
+async fn test_run_wave_worker_pty_startup_grace_survives_idle_window() {
+    let temp_dir = tempfile::tempdir().expect("temp dir");
+    // Print first line after 4 s, then exit 0 cleanly.
+    let body = "sleep 4 && echo first_signal\nexit 0\n";
+    write_fake_executable(temp_dir.path(), "wave-worker", body);
+    let worker_events_path = temp_dir.path().join("wave-events.jsonl");
+    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    let backend = CliBackend {
+        command: temp_dir.path().join("wave-worker").display().to_string(),
+        args: vec![],
+        prompt_mode: ralph_adapters::PromptMode::Arg,
+        prompt_flag: None,
+        output_format: BackendOutputFormat::Text,
+        env_vars: vec![],
+    };
+
+    let (_index, outcome) = run_wave_worker_pty(
+        0,
+        &backend,
+        "prompt",
+        &worker_events_path,
+        Duration::from_secs(60),
+        Some(Duration::from_secs(2)),
+        4,
+        tx,
+        None,
+        None,
+        None,
+        // 2026-07-28-003 plan U2 S1: grace 8 s, idle 2 s;
+        // a 4 s pre-signal silence must NOT kill.
+        Some(Duration::from_secs(8)),
+    )
+    .await;
+
+    let (_events, duration, success) =
+        outcome.expect("worker should survive until it prints its first line");
+    assert!(
+        success,
+        "worker should exit cleanly within grace window, got duration={duration:?}",
+    );
+    assert!(
+        duration >= Duration::from_secs(4)
+            && duration <= Duration::from_secs(8),
+        "worker should run at least 4 s and finish well within grace, got {duration:?}",
+    );
+    emit_wave_validation_marker(
+        "startup-grace:survives-idle-window",
+        &["startup-grace", "survive"],
+    );
+}
+
+/// S2: when the worker stays silent past startup_grace, the Err reason
+/// must carry the `startup_kill` tag (the `worker_timeout` family).
+/// grace=2 s, idle=60 s, worker never emits a line.
+#[cfg(unix)]
+#[tokio::test]
+async fn test_run_wave_worker_pty_startup_grace_exceeded_kills() {
+    let temp_dir = tempfile::tempdir().expect("temp dir");
+    // Sleep 12 s — well past grace=2 s and observable before idle=60 s
+    // would fire (the assertion uses `duration < 10 s` so we do not
+    // accidentally wait for the idle window in the test).
+    let body = "sleep 12\nexit 0\n";
+    write_fake_executable(temp_dir.path(), "wave-worker", body);
+    let worker_events_path = temp_dir.path().join("wave-events.jsonl");
+    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    let backend = CliBackend {
+        command: temp_dir.path().join("wave-worker").display().to_string(),
+        args: vec![],
+        prompt_mode: ralph_adapters::PromptMode::Arg,
+        prompt_flag: None,
+        output_format: BackendOutputFormat::Text,
+        env_vars: vec![],
+    };
+
+    let (_index, outcome) = run_wave_worker_pty(
+        0,
+        &backend,
+        "prompt",
+        &worker_events_path,
+        Duration::from_secs(60),
+        Some(Duration::from_secs(60)),
+        4,
+        tx,
+        None,
+        None,
+        None,
+        // 2026-07-28-003 plan U2 S2: grace=2 s kills well before idle.
+        Some(Duration::from_secs(2)),
+    )
+    .await;
+
+    let (error, duration) =
+        outcome.expect_err("silent worker past startup_grace must be killed");
+    assert!(
+        error.starts_with("Worker timed out after"),
+        "expected START_OF_KILL_REASON_PREFIX, got: {error}",
+    );
+    assert!(
+        error.contains("startup_kill"),
+        "expected `startup_kill` token in error: {error}",
+    );
+    // Duration must be just past the 2 s grace (give 3.5 s upper
+    // bound to leave slack for slow CI runners).
+    assert!(
+        duration >= Duration::from_secs_f64(1.5)
+            && duration <= Duration::from_secs_f64(3.5),
+        "expected kill around grace+ε, got {duration:?}",
+    );
+    emit_wave_validation_marker(
+        "startup-grace:exceeded-kills",
+        &["startup-grace", "kill", "reason"],
+    );
+}
+
+/// S3: after the first qualifying signal the lease migrates back to
+/// idle semantics. grace=8 s, idle=2 s; line at 1 s, then 4 s of
+/// silence — the idle window kills at ~3 s.
+#[cfg(unix)]
+#[tokio::test]
+async fn test_run_wave_worker_pty_startup_grace_then_idle_semantics() {
+    let temp_dir = tempfile::tempdir().expect("temp dir");
+    // Echo at 1 s, then sleep 4 s.
+    let body = "sleep 1 && echo first_signal && sleep 4\nexit 0\n";
+    write_fake_executable(temp_dir.path(), "wave-worker", body);
+    let worker_events_path = temp_dir.path().join("wave-events.jsonl");
+    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    let backend = CliBackend {
+        command: temp_dir.path().join("wave-worker").display().to_string(),
+        args: vec![],
+        prompt_mode: ralph_adapters::PromptMode::Arg,
+        prompt_flag: None,
+        output_format: BackendOutputFormat::Text,
+        env_vars: vec![],
+    };
+
+    let (_index, outcome) = run_wave_worker_pty(
+        0,
+        &backend,
+        "prompt",
+        &worker_events_path,
+        Duration::from_secs(60),
+        Some(Duration::from_secs(2)),
+        4,
+        tx,
+        None,
+        None,
+        None,
+        // 2026-07-28-003 plan U2 S3: grace=8 s. After the first
+        // line at ~1 s, the lease falls back to idle=2 s.
+        Some(Duration::from_secs(8)),
+    )
+    .await;
+
+    let (error, duration) = outcome
+        .expect_err("first-signal then silence must be idle-killed (not startup-killed)");
+    assert!(
+        error.contains("idle_kill"),
+        "expected `idle_kill` token after first signal, got: {error}",
+    );
+    assert!(
+        !error.contains("startup_kill"),
+        "must NOT use `startup_kill` after first signal, got: {error}",
+    );
+    // First signal at ~1 s, then ~2 s idle window → kill at ~3 s.
+    assert!(
+        duration >= Duration::from_secs_f64(2.5)
+            && duration <= Duration::from_secs_f64(4.5),
+        "expected idle-kill around 3 s, got {duration:?}",
+    );
+    emit_wave_validation_marker(
+        "startup-grace:then-idle-semantics",
+        &["startup-grace", "idle", "kill"],
+    );
+}
+
+/// S7 variant: startup_grace is irrelevant when idle mode is
+/// disabled (`idle_heartbeat == None`). KTD1: idle-disabled means
+/// only the hard cap matters; startup_grace never fires.
+#[cfg(unix)]
+#[tokio::test]
+async fn test_run_wave_worker_pty_startup_grace_ignored_when_idle_disabled() {
+    let temp_dir = tempfile::tempdir().expect("temp dir");
+    let body = "sleep 1 && echo ok && exit 0\n";
+    write_fake_executable(temp_dir.path(), "wave-worker", body);
+    let worker_events_path = temp_dir.path().join("wave-events.jsonl");
+    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    let backend = CliBackend {
+        command: temp_dir.path().join("wave-worker").display().to_string(),
+        args: vec![],
+        prompt_mode: ralph_adapters::PromptMode::Arg,
+        prompt_flag: None,
+        output_format: BackendOutputFormat::Text,
+        env_vars: vec![],
+    };
+
+    let (_index, outcome) = run_wave_worker_pty(
+        0,
+        &backend,
+        "prompt",
+        &worker_events_path,
+        // hard cap 60 s, idle = None (legacy single-clock).
+        Duration::from_secs(60),
+        None,
+        4,
+        tx,
+        None,
+        None,
+        None,
+        // 2026-07-28-003 plan U2 S7-variant: grace configured
+        // but idle-disabled → grace never fires (KTD1).
+        Some(Duration::from_secs(2)),
+    )
+    .await;
+
+    let (_events, duration, success) = outcome
+        .expect("legacy path with idle disabled must succeed regardless of startup_grace");
+    assert!(success, "worker should exit cleanly, got duration={duration:?}");
+    assert!(
+        duration <= Duration::from_secs(3),
+        "expected quick exit, got {duration:?}",
+    );
+    emit_wave_validation_marker(
+        "startup-grace:ignored-when-idle-disabled",
+        &["startup-grace", "legacy"],
     );
 }
 
