@@ -317,3 +317,13 @@ expected:
     - topic: LOOP_COMPLETE
       count: 1
   completion: true
+  # Plan 2026-07-28-001 U1 R11: the declared flow fixture's happy
+  # path stays structurally untouched for the existing dashboard
+  # promotion. The new `ready_task_keys` block is intentionally
+  # empty here because the fixture does NOT embed typed
+  # `state_projection.actions.forge.plan.ready` — the projector
+  # is not exercised, so the task ledger has no rows. The empty
+  # set is the source of truth for the no-projector path. A
+  # parallel fixture (`parallel_forge_task_dispatch_runtime.yml`)
+  # exercises the typed action and asserts the actual ledger.
+  ready_task_keys: []  # empty by design
