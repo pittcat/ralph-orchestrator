@@ -154,7 +154,7 @@ event_loop:
   supervisor:
     enabled: true
     db_path: .ralph/supervisor.db
-    max_concurrent_workers: 4
+    max_concurrent_workers: 10
     aggregate_timeout_secs: 7200
   ephemeral_isolation: true
   enforce_current_unit: true
@@ -513,7 +513,7 @@ hats:
     description: "Per-slot TDD implementation in an isolated worktree for one Unit."
     concurrency: 4
     timeout: 3600
-    idle_heartbeat_secs: 120
+    idle_heartbeat_secs: 600
     idle_weak_signal_cap: 8
     triggers: [exec.unit.ready]
     publishes: [exec.unit.done, exec.unit.failed]
