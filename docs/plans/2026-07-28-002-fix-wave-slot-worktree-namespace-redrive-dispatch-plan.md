@@ -1,25 +1,42 @@
 ---
-title: Wave Slot Worktree 命名空间迁移 + Redrive 派发闭环
+title: Wave Slot Worktree 命名空间迁移 + Redrive 派发闭环（含 descriptor 生产闭环补齐）
 type: fix
 date: 2026-07-28
 artifact_contract: ce-unified-plan/v1
 artifact_readiness: implementation-ready
-product_contract_source: ce-plan-bootstrap
+product_contract_source: ce-plan
 execution: code
-rewrite_of: 同一文件首版（事实勘察后重写）
+rewrite_of: 同一文件 v1 首版与 v1.1 重写版（审计发现 G1/G2/G3 生产闭环缺口后修订）
 ---
 
-# Wave Slot Worktree 命名空间迁移 + Redrive 派发闭环
+# Wave Slot Worktree 命名空间迁移 + Redrive 派发闭环（含 descriptor 生产闭环补齐）
 
 ## Goal Capsule
 
-- **目标：** 修复两个**真实存在且高置信度**的机制层缺口：
-  1. `bind_slot` branch 命名不含 `wave_id` → 同 loop 跨 wave 同 slot_index 必撞名 → `slot_never_started`
-  2. `ralph run --resume` 启动时未消费 `take_dispatchable_redrive_descriptor` → redrive 子 wave 只建 DB 行不执行
-- **来源：** 第一版基于过时事实（E7 证据失真、`BindSlotContext` 缺 `wave_id` 等错误陈述），本版基于代码事实勘察 + 1f955f6b commit message 自承 TODO 重写。
-- **执行方式：** 单一合并 Unit（U1）；按 Acceptance Red → Unit Red → Green → Refactor → 集成 → 回归 → 提交边界串行推进。
+- **目标：** 修复同一根因链上的四层机制缺口：
+  1. `bind_slot` branch 命名不含 `wave_id` → 同 loop 跨 wave 同 slot_index 必撞名 → `slot_never_started`；
+  2. `persist_slot_descriptor` 生产零调用 → 没有任何 descriptor 被持久化；
+  3. rusqlite 生产 store 无 descriptor 存取实现（无 v10 表、无 override）→ 默认 impl 恒 `DescriptorUnavailable`；
+  4. `create_redrive_wave` 不把父 wave descriptor 复制/重映射到子 wave（且 child slot 被重编号）→ 即使 2/3 修好，`take(child_id, child_slot)` 也永远拿不到；随后 runner boot 无 redrive 派发步骤。
+- **审计来源：** 本会话对 v1.1 的逐条源码核验（E1-E12 + G1-G3），修订点见「修订日志」。
+- **执行方式：** U1 → U2 → U3 → U4 → U5 严格串行；每 Unit Acceptance Red → Green → 回归 → 独立提交边界。
 - **停止条件：** 真实调用链与 Evidence 冲突、预期 Red 未触达目标逻辑、需要新增未计划的公开接口或依赖、任一关键决策置信度降到 0.85 以下。
-- **完成归属：** U1 完成命名空间迁移 + boot 时 redrive 派发两件同一行为切片的最终验收；不设置"以后补测试"的独立 Unit。
+
+---
+
+## 修订日志（相对 v1.1）
+
+| # | v1.1 的问题 | 本版处置 | 证据 |
+|---|---|---|---|
+| M1 | E2 称「`worktree.rs` 无 `AlreadyExists` 变体」——字面错误 | 修正为：变体存在（`worktree.rs:113-115`），但失败链经 `worktree_bind.rs:94-100` From-impl 塌缩为 `CreateFailed`、经 `supervisor_bridge.rs:346` 归 `BridgeError::Store`，结论不变 | E2 |
+| M2 | E5 引用 `1f955f6b` 时略去「rusqlite store + v10 migration 同上（留待后续）」半句 | 补全引用；rusqlite override + v10 列入正式范围（U2） | E5 |
+| M3 | KTD4「不改 store 层，memory override 已存在」置信度 0.95 虚高——对生产 rusqlite 为假 | 废止 KTD4，替换为 KTD4'：store 层 descriptor 闭环必须补齐（G1） | E6/E7 |
+| M4 | 未发现 `persist_slot_descriptor` 生产零调用（G2） | U3：dispatcher spawn 时 persist 接线 | E8 |
+| M5 | 未发现 `create_redrive_wave` 不复制 descriptor + child slot 重编号（G3）——v1.1 的 S2 即使在 in-memory + 手动 persist 下也是以「测试手动往 child key 塞 descriptor」的方式造假通过 | U2：`create_redrive_wave` 复制并重映射 descriptor（两 store）；`list_redrive_pending_child_waves` 返回携带 parent slot 映射与期望 digest 的 enriched 元组 | E9/E10 |
+| M6 | R7 强制「调 `take_dispatchable_redrive_descriptor`」但未解决「take 前不知道 parent slot 映射与 expected_digest」的鸡生蛋问题 | KTD8：list 方法返回 enriched 元组（child_slot → parent_slot + expected_digest），take 按 004 契约做 store 侧三态校验 | E9/E11 |
+| M7 | 实现注记写 `ctx.wave_id`——实际 `wave_id` 是 `bind_slot` 的直接参数（`supervisor_bridge.rs:307`） | 修正 | E1 |
+| M8 | 「boot 能否凑齐 executor 参数」作为 <0.85 假设混入 READY | 已勘察闭合：合成 `DetectedWave` 的字段来源全部定位（KTD9），pre-registered 注册模式消除 idempotency key 缺口 | E11/E12 |
+| M9 | S2-S4 全部 in-memory，生产 rusqlite 闭环零覆盖 | U4 至少一个 rusqlite-backed boot dispatch 集成测试（feature `supervisor-db` 默认启用） | E7 |
 
 ---
 
@@ -27,147 +44,136 @@ rewrite_of: 同一文件首版（事实勘察后重写）
 
 ### 0. 计划状态
 
-**READY，重写版（替换同一文件首版）。**
+**READY（v2 修订版）。**
 
-- **代码基线：** 当前工作区 HEAD（重写前先做事实勘察，无需钉死 commit）。
-- **工作区基线：** 重写时 `git status` 干净；重写后原文件被覆盖、未 commit（保留 plan id 不变）。
-- **调查范围：** `crates/ralph-cli/src/loop_runner/wave/{supervisor_bridge,dispatcher}.rs`、`crates/ralph-cli/src/loop_runner/runner.rs`、`crates/ralph-core/src/supervisor/{mod,memory,rusqlite}.rs`、`crates/ralph-core/src/supervisor/worktree_bind.rs`、`crates/ralph-core/src/supervisor/u4_descriptor_tests.rs`、`crates/ralph-cli/src/loop_runner/tests/wave_supervisor.rs`。
-- **已执行验证：** 源码 grep、commit 历史勘察、诊断报告原文核对、call site 零命中验证。
-- **启动门禁：** 首版无需消除既有红色基线；U1 完成后必须保证 `./scripts/run-tests.sh` 全绿。
-- **最终门禁：** `./scripts/run-tests.sh` 必须全绿。
-- **阻塞项处置：** 无 launch-blocking 假设。
+- **代码基线：** `8968e44a`（`docs(plans): 新增 Wave Slot 与 Worker 启动宽限期两份修复计划`）。
+- **调查范围：** `crates/ralph-cli/src/loop_runner/wave/{supervisor_bridge,dispatcher}.rs`、`crates/ralph-cli/src/loop_runner/runner.rs`、`crates/ralph-core/src/supervisor/{mod,memory,rusqlite,worktree_bind,u4_descriptor_tests}.rs`、`crates/ralph-core/src/{worktree.rs,wave_detection.rs}`、`crates/ralph-proto/src/event.rs`、`crates/ralph-cli/src/loop_runner/tests/wave_supervisor.rs`、`1f955f6b` commit。
+- **已执行验证：** 全部 Evidence 逐条源码/grep 核验（含 v1.1 未发现的 G1/G2/G3 三处零命中验证）；commit message 原文核对。
+- **尚未执行验证：** 各 Unit 的 Acceptance Red/Green、build、clippy、全量测试。
+- **阻塞项：** 无。
 
 ### 1. 功能目标
 
 #### 业务目标
 
-让 operator 和 preset 作者可以依赖一个确定契约：
+1. 同一 loop 内任意新 exec/fix wave（含第二波、redrive 子 wave）的 slot 都拿到**全新且独立**的 worktree（branch 名含 `wave_id`）。
+2. slot 派发时其 activation descriptor 被**生产路径**持久化（memory + rusqlite 双 store）。
+3. `ralph wave redrive` 创建的子 wave 携带从父 wave 复制/重映射的 descriptor；`ralph run --resume` boot 时扫描处于 `dispatch` 相位的子 wave，经三态校验后复用现有 dispatcher 链路真正派发 worker。
 
-1. 同一 loop 内的第二波 exec/fix wave，以及任何 redrive 子 wave，都拿到**全新且独立**的 slot worktree（branch 名包含 `wave_id` 维度）。
-2. `ralph run --resume` 启动时自动扫描 redrive 子 wave，把 dispatchable slot 接上 `execute_wave_via_supervisor_with_executor`，子 wave 不再"只建 DB 行不执行"。
+#### 当前行为（均有证据）
 
-#### 用户或调用方
-
-- `ce-executor-supervisor` / `parallel-forge` operator：期望同 loop 内第二波 + redrive 子 wave 不再因命名撞名 fail-closed；redrive 子 wave 在 `ralph run --resume` 后真正派发。
-- preset 作者：依赖命名空间保证 slot worktree 唯一性。
-- runtime 维护者：依赖 boot 时 redrive 派发闭环（承接 plan 2026-07-27-004 U4 commit message 自承 TODO）。
-
-#### 当前行为
-
-1. `CoordinatorSupervisorBridge::bind_slot` 用 `format!("{}-{}-{}", ctx.loop_id, kind, slot_index)`（`supervisor_bridge.rs:342`），**不含 `wave_id`**。`worktree_bind::bind_slot_worktree` 在 `worktree_bind.rs:166` 有同样命名（两处对称）。
-2. 同 loop 内**第二波 exec/fix wave**（`ce-executor-supervisor` 的 dependency-aware iterative waves，slot_index 每波从 0 重编）→ 与第一波残留 worktree 撞名 → `factory.create` 失败 → `BridgeError::Store` → `slot_never_started`。
-3. `ralph wave redrive` 通过 `create_redrive_wave`（`rusqlite.rs:1687`）创建子 wave 后，**生产路径零调用** `take_dispatchable_redrive_descriptor`（grep `crates/ralph-cli/src/loop_runner/{runner,dispatcher}.rs` 零命中）。
-4. `recover_active_waves_at_startup`（`runner.rs:1373 / 1462`）只做超时标记 + `recover_pending_projections` 重放 task projection，**不重新派发**已建 redrive 子 wave 的 slot。
-5. `1f955f6b fix(supervisor): U4 redrive 持久 descriptor + take 派发 ready 边界` commit message 显式声明："`ralph run --resume` 启动时消费 take_dispatchable_redrive_descriptor 的接线留待后续 plan 收尾"——这是 plan 004 自承的已知 TODO。
+1. **命名撞名（G0）：** `supervisor_bridge.rs:342` 与 `worktree_bind.rs:166` 两处 branch 命名均为 `{loop_id}-{kind}-{slot_index}`，不含 `wave_id`；slot_index 是 per-wave 0..N 重编（`memory.rs:1420-1435` 亦是），同 loop 第二波 exec/fix 必撞 → `factory.create` 失败 → `BridgeError::Store` → `slot_never_started`。
+2. **persist 零调用（G2）：** `persist_slot_descriptor` 全仓生产零调用（grep 仅 `u4_descriptor_tests.rs:64/113/135` 三处测试调用）。
+3. **rusqlite 无 descriptor 实现（G1）：** `rusqlite.rs` 全文 grep `descriptor` 零命中——无 v10 表、无 override；trait 默认 impl 恒返回 `Ok(())` / `DescriptorUnavailable`（`mod.rs:1485-1520`，注释明写 "production stores MUST override"）。
+4. **redrive 复制缺失 + slot 重编号（G3）：** `create_redrive_wave`（`memory.rs:1281-1462`）把 parent 失败 slot 按 `enumerate()` 重编号为 child slot 0..n（`memory.rs:1420-1435`），**不复制** `slot_descriptors`；`take` 按 `(child_wave_id, child_slot)` 直查（`memory.rs:1496-1497`）→ 永远 `DescriptorUnavailable`。
+5. **boot 无派发（v1.1 已识别）：** `take_dispatchable_redrive_descriptor` 生产零调用；`runner.rs:1373-1396 / 1462-1484` 两处启动恢复只做超时标记 + projection 重放。`1f955f6b` commit message 自承：「`ralph run --resume` 启动时消费 take_dispatchable_redrive_descriptor 的接线留待后续 plan 收尾；**rusqlite store + v10 migration 同上**」。
 
 #### 目标行为与行为差异
 
-- `bind_slot` 命名改为 `{loop_id}-{kind}-{wave_id}-{slot_index}`（两处对称），同 loop 内**任意**新 wave 的 slot 拿到全新 branch/path。
-- `ralph run --resume` 在 boot 时（`recover_active_waves_at_startup` 之后）扫描所有 `parent_wave_id IS NOT NULL AND phase = 'dispatch'` 的子 wave，对每个 `pending` slot 调 `take_dispatchable_redrive_descriptor`，命中 `Dispatchable` 即触发 `execute_wave_via_supervisor_with_executor` 派发；`DescriptorUnavailable` / `DescriptorConflict` 标 `slot_never_started` + 记诊断。
-- **不引入**"撞名兜底"——命名迁移后跨 wave 不撞名；**不引入**"dispatcher tick 兜底"——boot 一次扫描已覆盖 `ralph wave redrive` 崩溃后重启主路径。
+- `bind_slot` 命名改为 `{loop_id}-{kind}-{wave_id}-{slot_index}`（两处对称，`wave_id` = store wave id，即 `bind_slot` 已有的直接参数）。
+- dispatcher 在 slot 绑定成功、worker spawn 前持久化 `SlotDescriptor`（topic/payload/wave_kind/digest 全部来自当前 dispatch 上下文）。
+- `create_redrive_wave` 把 parent 失败 slot 的 descriptor 按「parent_slot → child_slot」重映射复制到 child key；descriptor 内 `slot_index` 字段保留 **parent** 原始下标。
+- `ralph run --resume` boot 时对每个 pending child slot：经 enriched list 取得 `(child_slot, parent_slot, expected_digest)` → `take_dispatchable_redrive_descriptor` 三态校验 → `Dispatchable` 则以 descriptor 合成单 wave 的 `DetectedWave` 复用 `execute_wave_via_supervisor_with_executor`（pre-registered 模式）派发；`DescriptorUnavailable` / `DescriptorConflict` fail-closed 标 `slot_never_started` + 诊断。
 
-#### 输入、输出与状态变化
+#### 输入 / 输出 / 状态变化 / 错误语义
 
-- **输入：** `SupervisorStore` 的 wave 拓扑、boot 时 `continue_mode` 标志、`ralph run --resume` 启动路径。
-- **输出：** 每次 `bind_slot` 成功都返回全新 `Worktree { path, branch }`；`ralph run --resume` boot 时把 redrive 子 wave 的 dispatchable slot 派发出去。
-- **状态变化：** 同 loop 内 wave 数增加不再受 worktree 命名空间限制；崩溃后 redrive 子 wave 自动派发。
-- **错误语义：** 命名撞名已被命名迁移消解；redrive descriptor 缺失/冲突 fail-closed。
+- **输入：** `SupervisorStore` wave 拓扑与 descriptor 存储、`ralph run --resume` 启动路径、preset hat 配置（合成 `DetectedWave` 的 `hat_config` 来源）。
+- **输出：** 每次 `bind_slot` 返回全新 `Worktree { path, branch }`；boot 时 redrive 子 wave 的 dispatchable slot 被派发（日志可见）；失败 slot 诊断落 `diagnostics`。
+- **状态变化：** 同 loop 多 wave 不再受命名空间限制；descriptor 生命周期完整（spawn persist → redrive copy → boot take）。
+- **错误语义：** descriptor 缺失/digest 冲突/映射缺失一律 fail-closed（`slot_never_started` + 诊断），绝不静默派发。
 
 #### 兼容、性能、安全与约束
 
-- **兼容：** 老 loop 残留 worktree（命名 `{loop_id}-{kind}-{slot_index}`）在新代码下永远不会被新 wave 撞名（新命名多了 `wave_id` 段），它们仅占用磁盘空间，由 `finalize_terminal_cleanup` 在 loop 终态回收，不在本计划范围。
-- **性能：** `bind_slot` 不再撞名，不引入新 hot path；`list_redrive_pending_child_waves` 是 boot 一次扫描（不是 tick），无可观测开销。
-- **安全：** 不放宽 EventOriginGuard / HatCommandPolicy / wave permit 任何权限边界；redrive 派发复用现有 `execute_wave_via_supervisor_with_executor` 链路。
-- **持久化：** 不新增数据库表；只新增一个查询。
-- **依赖：** 不新增 crate。
-- **测试入口：** 严禁裸跑 `cargo test -p ralph-cli`；按 `AGENTS.md` 使用 nextest 和两阶段全量脚本。
+- **兼容：** 老命名残留 worktree 不被新 wave 撞名（新命名多 `wave_id` 段），由既有 `finalize_terminal_cleanup` 回收；v10 migration 为纯增量表，旧 DB 打开自动迁移；`create_redrive_wave` 的 API 签名与 `RedriveResult` 不变（仅行为补齐：多写 descriptor 副本）。
+- **性能：** persist 是每 slot 一次小写；boot 扫描一次性；无热路径开销。
+- **安全：** 不放宽 EventOriginGuard / HatCommandPolicy / wave permit 边界；descriptor 不含 prompt/agent stdout/凭据（`mod.rs:883-885` 既有约束）；digest 比较 fail-closed。
+- **测试入口：** 严禁裸跑 `cargo test -p ralph-cli`；一律 nextest 两阶段（`AGENTS.md` HARD RULE 1/2）；spawn `ralph` 的测试遵守 HARD RULE 5。
 
 #### 本次范围
 
-- `bind_slot` 命名空间迁移（`{loop_id}-{kind}-{wave_id}-{slot_index}`），两处对称（`supervisor_bridge.rs` + `worktree_bind.rs`）。
-- 同步更新 `worktree_bind.rs` 三个测试断言（line 276/318/386）。
-- `SupervisorStore` 新增 `list_redrive_pending_child_waves` trait 方法（默认空 Vec）+ memory/rusqlite 真实实现。
-- runner 在 `recover_active_waves_at_startup` 之后（line 1373 + 1462 两处对称）追加 `dispatch_pending_redrive_waves` 步骤。
-- 新增 `wave_supervisor.rs` 集成测试 S1（同 loop 跨 wave 不撞）+ S2（redrive boot 派发）。
+- 命名空间迁移（`supervisor_bridge.rs:342` + `worktree_bind.rs:166` 两处 + `worktree_bind.rs` 测试断言同步）。
+- v10 migration（`slot_descriptors` 表）+ rusqlite `persist_slot_descriptor` / `take_dispatchable_redrive_descriptor` / `slot_descriptor`（读）三个 override + memory 对称读方法。
+- `create_redrive_wave`（memory + rusqlite）descriptor 复制与 slot 重映射。
+- dispatcher spawn 时 persist 接线（新 `SupervisorBridge::persist_slot_descriptor` 转发方法）。
+- `SupervisorStore::list_redrive_pending_child_waves`（enriched：child_slot / parent_slot / expected_digest）trait + 双 store 实现。
+- runner boot `dispatch_pending_redrive_waves`（两处对称插入点）+ 合成 `DetectedWave` + pre-registered 派发模式。
+- 测试：`wave_supervisor.rs`（S1 真 git worktree、S2-S4 含 rusqlite-backed）+ store 层单测。
 
 #### 非目标
 
-- 不引入"撞名兜底"（用户决策）：命名迁移后跨 wave 不撞名；"同 wave 同 slot 重派"是 DB 异常场景，不在本计划范围。
-- 不在 dispatcher tick 兜底（用户决策）：`ralph run --resume` boot 一次扫描已覆盖 `ralph wave redrive` 崩溃后重启主路径；operator 运行时执行 redrive 触发的二次消费属于未来用例。
-- 不改 `create_redrive_wave` 的 DB schema、API 语义或 `RedriveTakeOutcome` 状态机。
-- 不改变 worker 进程模型、PTY/spawn 机制或 `worker.rs`。
-- 不修改 `ce-executor-supervisor` / `parallel-forge` preset 拓扑或 hat 指令。
-- 不重构 `merge-queue.jsonl` / `loops.json` / 整 loop 级 `--reuse-worktree` 路径。
-- 不删除/重命名旧 worktree 命名；老 loop 残留由现有 `finalize_terminal_cleanup` 处理。
-- 不增改 `AGENTS.md` / `CLAUDE.md` / `crates/ralph-core/data/*.md`（agent 行为不变）。
-
-#### 已确认事实、假设与未确认假设
-
-- **已确认事实：** Evidence Ledger E1-E5。
-- **已确认假设：** `wave_id` 在两个 `bind_slot` 调用点都已可访问——`bind_slot_worktree` 签名（`worktree_bind.rs:119`）有 `wave_id: &str`；`supervisor_bridge.rs:342` 内联实现的 `ctx` 也含 wave_id。
-- **待验证假设：** "runner boot 上下文（`runner.rs:1373 / 1462`）能凑齐 `execute_wave_via_supervisor_with_executor` 所需全部参数"——实施时确认，缺则就地适配不外抽。
+- 不引入「撞名兜底」（命名迁移后跨 wave 不撞名；同 wave 同 slot 重派是 DB 异常场景）。
+- 不在 dispatcher tick 兜底 redrive 扫描（boot 一次扫描覆盖主路径；operator 运行时 redrive 的二次消费属未来用例）。
+- 不改 `create_redrive_wave` 的 API 签名 / `RedriveResult` / `RedriveTakeOutcome` 三态定义。
+- 不改 worker 进程模型 / PTY / `worker.rs`；不改 preset 拓扑与 hat 指令。
+- 不重构 merge-queue / loops.json / `--reuse-worktree` 整 loop 路径；不回收老命名残留（既有 cleanup 负责）。
+- 不改 `crates/ralph-core/data/*.md`：`ralph-tools-wave.md:314` 已按目标行为成文（"operator 必须接着执行 `ralph run --resume`，由 loop 启动 seam 消费 child descriptor"），本计划是把实现补齐到既有文档语义；U5 仅核对不扩写。
 
 ### Requirements
 
-#### 命名空间迁移
-
-- **R1.** `bind_slot` 的 branch/path 命名必须包含 `wave_id`，同一 loop 内不同 wave 的同 slot_index 不再撞名。
-- **R2.** 新命名必须满足 git branch 合法字符集，且长度不超过 255 字节。
-- **R3.** 命名规则必须对 exec / fix / review 等所有 wave kind 一致；review 仍走 SharedReadonly 不创建 worktree。
-- **R4.** `supervisor_bridge.rs:342` 与 `worktree_bind.rs:166` 两处必须**对称**修改，命名规则在代码中只剩这两处。
-
-#### Redrive 派发闭环
-
-- **R5.** `SupervisorStore` 新增 `list_redrive_pending_child_waves() -> SupervisorStoreResult<Vec<RedrivePendingChild>>` trait 方法，默认 impl 返回空 Vec；memory + rusqlite 都需真实实现。
-- **R6.** `recover_active_waves_at_startup` 之后，runner 必须扫描所有 `parent_wave_id IS NOT NULL AND phase = 'dispatch'` 的子 wave（line 1373 + line 1462 两处对称修改）。
-- **R7.** 对每个子 wave 的 `pending` slot，必须调 `take_dispatchable_redrive_descriptor`，仅在 `Dispatchable` 时触发 worker spawn；`DescriptorUnavailable` / `DescriptorConflict` 必须 fail-closed 并记录诊断。
-- **R8.** redrive 派发必须复用 `execute_wave_via_supervisor_with_executor` 现有链路，不引入新的 dispatch 旁路。
-
-#### 文档与诊断
-
-- **R9.** 集成测试 `crates/ralph-cli/src/loop_runner/tests/wave_supervisor.rs` 新增 S1（同 loop 跨 wave 不撞）+ S2（redrive boot 派发）覆盖 R1-R8。
+- **R1.** branch 命名含 `wave_id`（store wave id），同 loop 跨 wave 不撞名；两处在代码中只剩两处。
+- **R2.** 命名满足 git branch 合法字符集与长度约束；exec/fix/review 一致（review 仍 SharedReadonly 不建 worktree）。
+- **R3.** slot 派发成功绑定后、spawn 前，descriptor 被持久化到当前 store（memory + rusqlite）；persist 失败 fail-closed（slot 记 `slot_never_started` 等价诊断，不静默继续）。
+- **R4.** rusqlite descriptor 存取与 memory 语义一致（v10 表 + 三 override）；`InMemory` 新增 `slot_descriptor` 读方法，trait 默认返回 `None`。
+- **R5.** `create_redrive_wave` 把每个 target parent slot 的 descriptor 复制到 child key（child slot 下标），descriptor 内 `slot_index` 保留 parent 下标；无 descriptor 的 parent slot 在 enriched list 中 `expected_digest = None`（boot fail-closed 为 Unavailable）。
+- **R6.** `list_redrive_pending_child_waves` 返回 `Vec<RedrivePendingChild>`：`{ child_wave_id, parent_wave_id, kind, slots: Vec<{ child_slot_index, parent_slot_index, expected_digest: Option<String> }> }`，过滤 `parent_wave_id IS NOT NULL AND phase = 'dispatch'`。
+- **R7.** boot 对每个 pending child slot 调 `take_dispatchable_redrive_descriptor(child_wave_id, child_slot, expected_digest)`，三态分支：`Dispatchable` → 派发；其余 → `slot_never_started` + 诊断。
+- **R8.** 派发复用 `execute_wave_via_supervisor_with_executor`，通过 pre-registered 模式跳过 `register_wave_if_absent`（child 已注册，无 idempotency key）；不新增 dispatch 旁路函数。
+- **R9.** 合成 `DetectedWave`：`wave_id` = child store wave id；`events` 按 child_slot 序由 descriptor 还原（topic/payload + `wave_index = child_slot`、`wave_total = child.expected_total`、`wave_id = child_wave_id`）；`target_hat`/`hat_config` 经 `HatRegistry::find_by_trigger(descriptor.topic)` 解析；`consumer_aggregate_timeout = None`（走 dispatcher 既有回退公式）。
+- **R10.** S2-S4 至少各一个集成测试；S2 必须含 rusqlite-backed 变体。
+- **R11.** 命名迁移集成测试 S1 用真 git worktree。
 
 ### BDD 行为规格
 
 ```gherkin
-Feature: Wave slot worktree namespace migration and redrive dispatch closure
+Feature: Wave slot worktree namespace migration
 
-  Background:
-    Given a supervisor-enabled loop with event_loop.supervisor.enabled=true
-    And the loop is running ce-executor-supervisor or parallel-forge preset
+  Scenario S1: 同 loop 第二波 exec 不撞第一波 worktree
+    Given wave w-1 exec slot 0 已在 branch loop-1-exec-w-1-0 建 worktree 且终态
+    When wave w-2 exec slot 0 绑定
+    Then bind 成功且 branch 为 loop-1-exec-w-2-0
+    And 无任何 factory 错误
 
-  Scenario S1: Second exec wave in the same loop does not collide with first wave worktree
-    Given wave w-1 exec with slot 0 created worktree on branch loop-1-exec-w-1-0
-    And wave w-1 slot 0 reached terminal state
-    When wave w-2 exec slot 0 binds
-    Then bind_slot succeeds with branch loop-1-exec-w-2-0
-    And no WorktreeError is raised
+Feature: Descriptor 生产闭环
 
-  Scenario S2: Redrive child wave is dispatched after ralph run --resume
-    Given parent wave w-1 exec slot 0 failed and its descriptor is persisted
-    And ralph wave redrive --wave-id w-1 created child wave w-2 in phase=dispatch
-    And the loop crashed before child wave w-2 slot 0 was dispatched
-    When ralph run --resume is invoked
-    Then recover_active_waves_at_startup completes
-    And dispatch_pending_redrive_waves scans for parent_wave_id IS NOT NULL children
-    And calls take_dispatchable_redrive_descriptor for w-2 slot 0
-    And Dispatchable is returned
-    And execute_wave_via_supervisor_with_executor spawns a worker for the slot
+  Scenario S2a: spawn 时 descriptor 持久化（双 store）
+    Given 一个 exec wave 注册并绑定 slot 0
+    When worker spawn 链路执行到绑定成功
+    Then store 的 (wave_id, 0) 处可读到 SlotDescriptor
+    And topic/payload/wave_kind 与当前 dispatch 上下文一致
+    And payload_digest == fingerprint_payload(payload)
 
-  Scenario S3: Redrive descriptor missing fails closed
-    Given child wave w-2 slot 0 is pending but has no persisted descriptor
-    When ralph run --resume invokes dispatch_pending_redrive_waves
-    Then take_dispatchable_redrive_descriptor returns DescriptorUnavailable
-    And the slot is marked slot_never_started with diagnostic
-    And no worker is spawned
+  Scenario S2b: redrive 复制 descriptor 并重映射
+    Given 父 wave w-1 slot 4 已持久化 descriptor 且 slot 4 Failed
+    When operator 执行 ralph wave redrive --wave-id w-1
+    Then 子 wave w-2 的 (w-2, 0) 处可读到同一 descriptor
+    And 该 descriptor 的 slot_index 字段 == 4（parent 下标）
 
-  Scenario S4: Redrive descriptor digest conflict fails closed
-    Given child wave w-2 slot 0 has a persisted descriptor
-    And the runtime payload digest disagrees with the descriptor's payload_digest
-    When ralph run --resume invokes dispatch_pending_redrive_waves
-    Then take_dispatchable_redrive_descriptor returns DescriptorConflict
-    And the slot is marked slot_never_started with diagnostic
-    And no worker is spawned
+Feature: Redrive boot 派发
+
+  Scenario S3: resume 后子 wave 自动派发
+    Given 父 wave 失败 slot 已 persist descriptor，redrive 已创建子 wave w-2（phase=dispatch）
+    And loop 崩溃重启
+    When ralph run --resume 完成 recover_active_waves_at_startup
+    Then dispatch_pending_redrive_waves 扫描到 w-2
+    And take 返回 Dispatchable
+    And execute_wave_via_supervisor_with_executor 以 pre-registered 模式 spawn worker（spawn 计数 == 1）
+
+  Scenario S4: descriptor 缺失 fail-closed
+    Given 子 wave w-2 slot 0 pending 但无 descriptor（pre-U4 legacy 行）
+    When boot 扫描执行
+    Then take 返回 DescriptorUnavailable
+    And slot 标 slot_never_started + 诊断，不 spawn
+
+  Scenario S5: digest 冲突 fail-closed
+    Given 子 wave descriptor 的 digest 与父 descriptor digest 不一致（复制后被篡改）
+    When boot 扫描执行
+    Then take 返回 DescriptorConflict
+    And slot 标 slot_never_started + 诊断，不 spawn
+
+  Scenario S6: 非 resume 的全新 boot 不触发 redrive 扫描
+    Given 一个全新 loop（无 --resume）
+    When loop 启动
+    Then 不执行 dispatch_pending_redrive_waves
 ```
 
 ---
@@ -178,127 +184,113 @@ Feature: Wave slot worktree namespace migration and redrive dispatch closure
 
 #### 2.1 当前实现入口
 
-- **`bind_slot` 命名点：** `crates/ralph-cli/src/loop_runner/wave/supervisor_bridge.rs:342` + `crates/ralph-core/src/supervisor/worktree_bind.rs:166`（**两处对称**）。
-- **`bind_slot_worktree` 签名：** `crates/ralph-core/src/supervisor/worktree_bind.rs:114-128` 已含 `wave_id: &str` 参数——本计划**不**新增 `BindSlotContext` 字段（首版该陈述错误）。
-- **撞名 fail-closed：** `crates/ralph-core/src/worktree.rs:102-131` `WorktreeError`（无 `AlreadyExists` 变体，撞名通过 `Git(String)` 经 `worktree_bind.rs:94-100` 翻译成 `WorktreeError::CreateFailed`）；`supervisor_bridge.rs:346` 返回 `BridgeError::Store`。
-- **redrive 创建：** `crates/ralph-cli/src/wave.rs:376-450` `execute_redrive` → `crates/ralph-core/src/supervisor/rusqlite.rs:1687-1889` `create_redrive_wave`。
-- **redrive descriptor API：** `crates/ralph-core/src/supervisor/mod.rs:1485-1520` `persist_slot_descriptor` + `take_dispatchable_redrive_descriptor`（默认 impl `DescriptorUnavailable`）；`crates/ralph-core/src/supervisor/memory.rs:1489-1514` 真实 override（`Dispatchable` / `DescriptorUnavailable` / `DescriptorConflict` 三态）；`crates/ralph-core/src/supervisor/u4_descriptor_tests.rs` 4 个三态单测覆盖。
-- **生产调用方 grep：** `take_dispatchable_redrive_descriptor` 在 `crates/ralph-cli/` 生产路径**零调用**；仅在 `u4_descriptor_tests.rs:68/91/117` 测试中调用。
-- **启动恢复：** `crates/ralph-cli/src/loop_runner/runner.rs:1373-1396` 与 `1462-1484` 两处 `recover_active_waves_at_startup` + `recover_pending_projections`。
-- **wave dispatch：** `crates/ralph-cli/src/loop_runner/wave/dispatcher.rs:1586` `execute_wave_via_supervisor_with_executor`（已存在可复用入口）。
-- **首版事故证据 E7（已砍掉）：** 原文 `docs/report/2026-07-25-ce-executor-supervisor-primary-20260725-130345-diagnosis.md:82` 是"手动 commit/merge + 手动整合 worktree 完成业务目标"，**根因是 FlowStepScope 作用域门禁**（plan 003 已修），与命名冲突无关。首版 E7 是二次转述失真。
-- **plan 004 自承 TODO：** `1f955f6b fix(supervisor): U4 redrive 持久 descriptor + take 派发 ready 边界` commit message 显式声明接线留待后续 plan。
+- **命名点（两处对称）：** `crates/ralph-cli/src/loop_runner/wave/supervisor_bridge.rs:342`（内联，`bind_slot(kind, wave_id, slot_index)` 签名于 `:304-309`，`wave_id` 为直接参数）；`crates/ralph-core/src/supervisor/worktree_bind.rs:166`（helper，`bind_slot_worktree(..., wave_id: &str, ...)` 签名于 `:114-128`，wave_id 已传但未用于命名）。
+- **失败链：** `worktree.rs:113-115` `AlreadyExists` 变体存在；`worktree_bind.rs:94-100` From-impl 把非 `NotARepo` 一律塌缩为 `CreateFailed`；`supervisor_bridge.rs:346` 一律归 `BridgeError::Store`；`dispatcher.rs:1786-1792` `fail_closed_on_bind_error` → slot skipped。
+- **spawn 派发上下文（persist 接线点）：** `dispatcher.rs:1783` `bridge.bind_slot(...)` 成功分支；`wave.events[index]`（topic/payload）与 `wave_kind` 同作用域。
+- **descriptor 契约：** `mod.rs:887-912`（`SlotDescriptor` + `digest_of`）；`mod.rs:787` `fingerprint_payload`；`mod.rs:1485-1520`（trait persist/take 默认 impl）；`memory.rs:1469-1514`（memory override）；`u4_descriptor_tests.rs`（4 个三态单测，但 persist/take 同 key，未覆盖 parent→child 流程）。
+- **redrive 创建：** `memory.rs:1281-1462`（child slot `enumerate()` 重编号于 `:1420-1435`；`WaveRow` 无 descriptor 复制、无 idempotency key 注册）；`rusqlite.rs:1687-1889`（同语义 SQL 版）；`crates/ralph-cli/src/wave.rs:376-450` CLI。
+- **注册契约：** `memory.rs:388-400`（重复注册 kind/total/budget 不一致报错）；`rusqlite.rs:347,379-384`（`waves.idempotency_key` 列存在，注释 `:419-422` 称其 alias public id）。
+- **boot 恢复点：** `runner.rs:1373-1396` 与 `1462-1484`（两处对称）；`runner.rs:796` `run_loop_impl_inner`。
+- **合成 DetectedWave 依据：** `wave_detection.rs:25-46`（字段）；`wave_detection.rs:353-361`（构造：target_hat/hat_config/consumer_aggregate_timeout 解析）；`wave_detection.rs:368-374`（`HatRegistry::find_by_trigger`）；`dispatcher.rs:1615-1620`（`consumer_aggregate_timeout=None` 时的回退公式）；`event.rs:21-31`（`wave_id/wave_index/wave_total` 为 Event 一等字段）。
+- **目标行为既有文档：** `crates/ralph-core/data/ralph-tools-wave.md:314`（resume 消费 child descriptor 的语义已成文）。
 
 #### 2.2 Evidence Ledger
 
 | Evidence ID | 来源 | 观察结果 | 对计划的影响 | 可靠性 |
 |---|---|---|---|---|
-| E1 | `supervisor_bridge.rs:342` + `worktree_bind.rs:166` | 两处都用 `format!("{loop_id}-{kind}-{slot_index}")`，不含 `wave_id` | 必须迁移命名空间，两处对称 | 高 |
-| E2 | `worktree.rs:102-131` + `worktree_bind.rs:94-100` + `supervisor_bridge.rs:346` | `factory.create` 失败链：撞名 → `Git(String)` → `CreateFailed` → `BridgeError::Store` → `slot_never_started` | 命名迁移消除撞名根因；无需兜底 | 高 |
-| E3 | `ce-executor-supervisor.yml`（dependency-aware iterative waves） | slot_index 每波从 0 重编 | 第二波必撞第一波 | 高 |
-| E4 | grep `crates/ralph-cli/src/loop_runner/{runner,dispatcher}.rs` | `take_dispatchable_redrive_descriptor` 生产路径零调用 | 必须接入 boot dispatch 步骤 | 高 |
-| E5 | `1f955f6b` commit message | "`ralph run --resume` 启动时消费 take_dispatchable_redrive_descriptor 的接线留待后续 plan 收尾" | 计划 004 自承 TODO；本计划承接 | 高 |
+| E1 | `supervisor_bridge.rs:304-309,342` + `worktree_bind.rs:114-128,166` | 两处命名均 `{loop_id}-{kind}-{slot_index}`；`wave_id` 在两处签名都已可访问（直接参数） | 迁移对称且无需新增字段 | 高 |
+| E2 | `worktree.rs:113-115` + `worktree_bind.rs:94-100` + `supervisor_bridge.rs:346` | `AlreadyExists` 变体存在；From-impl 塌缩为 `CreateFailed` → `BridgeError::Store` | 失败链结论成立；v1.1「无 AlreadyExists 变体」陈述错误已修正 | 高 |
+| E3 | `memory.rs:1420-1435` + dispatcher slot 语义 | slot_index per-wave 0..N 重编 | 第二波必撞（G0） | 高 |
+| E4 | grep `take_dispatchable_redrive_descriptor` 生产路径 | 零调用（仅 `u4_descriptor_tests.rs:68/91/117`） | 必须接 boot 消费 | 高 |
+| E5 | `1f955f6b` commit message 原文 | resume 接线 **与** rusqlite store + v10 migration 均自承留待后续 | 两项都入范围（废止 v1.1 KTD4） | 高 |
+| E6 | grep `rusqlite.rs` `descriptor` | 零命中：无 v10 表、无 override | U2 必须补 rusqlite 实现 | 高 |
+| E7 | `mod.rs:1485-1520` | 默认 impl：`persist → Ok(())`、`take → DescriptorUnavailable`；注释 "production stores MUST override" | 生产 rusqlite 当前恒 fail-closed；双 store 实现是硬要求 | 高 |
+| E8 | grep `persist_slot_descriptor` 生产路径 | 零调用（仅测试 `u4_descriptor_tests.rs:64/113/135`） | U3 persist 接线是硬要求 | 高 |
+| E9 | `memory.rs:1420-1435, 1496-1497` | child slot 按 `enumerate()` 重编号；take 按 `(child_wave_id, child_slot)` 直查；`create_redrive_wave` 不复制 descriptor | U2 必须复制+重映射 descriptor；list 必须带 parent slot 映射 | 高 |
+| E10 | `u4_descriptor_tests.rs:51-70` | 既有测试 persist/take 同 wave 同 slot，未覆盖 parent→child | v1.1 的 S2 测试设计造假路径已识别；新测试必须走真 redrive 流程 | 高 |
+| E11 | `wave_detection.rs:25-46,353-361,368-374` + `dispatcher.rs:1615-1620` | `DetectedWave` 构造依赖 HatRegistry 解析 + `consumer_aggregate_timeout` 私有 helper；dispatcher 有 None 回退 | 合成 wave 可行；`consumer_aggregate_timeout=None` 有既有回退承接 | 高 |
+| E12 | `event.rs:21-31` + `memory.rs:1437-1453` | Event 一等字段 `wave_id/wave_index/wave_total`；child `WaveRow` 无 idempotency key | 合成 Event 合法；pre-registered 模式（跳过 register）是必需而非可选 | 高 |
+| E13 | `runner.rs:1360-1405, 796` | boot 作用域持有 concrete bridge（`store()` 可取）、supervisor_cfg、loop_id | boot 派发所需上下文齐备 | 高 |
+| E14 | `mod.rs:1531-1543` | emit 侧 `reserve_emission` 已做 scope_key digest Conflict | digest 冲突的首要防线在 emit 侧；boot 侧 digest 用「同 DB 父 descriptor」作锚即可，无需 ledger 扫描 | 高 |
 
 #### 2.3 受影响范围
 
-- **唯一权威范围：** 见 4.4 的逐文件清单。
-- **不受影响：** UI、网络服务、公开 RPC、数据库 schema、外部服务、presets、`crates/ralph-core/data/*.md` agent skill 指南、`AGENTS.md` / `CLAUDE.md`（agent 行为不变）。
-- **明确不改：** `create_redrive_wave` 的 DB schema 与 API、`RedriveTakeOutcome` 状态机、worker PTY 进程模型、preset 拓扑、merge-queue、`--reuse-worktree` 整 loop 路径、首版的"撞名兜底"逻辑、首版的 dispatcher tick 兜底扫描。
+- **生产：** `supervisor_bridge.rs`（cli）、`worktree_bind.rs`、`mod.rs`（trait+类型）、`memory.rs`、`rusqlite.rs`、`migrations/v10.sql`（新增）、`migrations.rs`（注册）、`dispatcher.rs`（persist 接线 + pre-registered 模式）、`runner.rs`（boot 步骤）。
+- **测试：** `wave_supervisor.rs`、`u4_descriptor_tests.rs`（或同目录新文件）、`worktree_bind.rs` 内联测试断言。
+- **不受影响：** DB 既有表结构（v10 纯增量）、preset/CLI 表面/worker.rs/`create_redrive_wave` 签名、`crates/ralph-core/data/*.md`（语义已成文）。
 
 ### 3. 决策记录与置信度
 
 | Decision ID | 决策问题 | 候选方案 | 最终选择 | 支持证据 | 排除其他方案的原因 | 置信度 |
 |---|---|---|---|---|---|---|
-| KTD1 | 命名空间维度 | 仅加 wave_id；加 wave_id + slot_retry_budget；加 attempt_epoch | `{loop_id}-{kind}-{wave_id}-{slot_index}` | E1, E3 | attempt_epoch 不覆盖「同 loop 不同 wave」；slot_retry_budget 会让同一 wave 内重试产生不同 branch，违反「同 wave 同 slot 同 branch」语义 | 0.93 |
-| KTD2 | 撞名兜底策略 | 一律 fail-closed；wave-phase 检查后回收；文件系统 mtime 判断；**不引入兜底** | **不引入兜底**（命名迁移后跨 wave 不撞名） | E1, E3 | 用户决策：跨 wave 不撞名；"同 wave 同 slot 重派"是 DB 异常场景，引入 store 状态查询和兜底分支得不偿失 | 0.90 |
-| KTD3 | redrive dispatch 接入点 | dispatcher tick 内部；runner 启动时；独立子命令；**仅 boot 一次扫描** | **仅 boot 一次扫描**（runner.rs:1373 + 1462 两处对称） | E4, E5 | 用户决策：`ralph run --resume` 是约定消费方，boot 一次扫描已覆盖 `ralph wave redrive` 崩溃后重启主路径；operator 运行时 redrive 触发的二次消费属于未来用例 | 0.90 |
-| KTD4 | `take_dispatchable_redrive_descriptor` 实现 | 在 rusqlite.rs override；在 runner 层绕过 | **不修改 store 层**——memory override 已存在（`memory.rs:1489`），只需在 runner 真实调用 | E5 | runner 层绕过破坏 SupervisorStore 抽象；store 层已有正确实现 | 0.95 |
-| KTD5 | worker prompt 是否携带「redrive-resume」标记 | 携带；不携带 | 不携带（本计划不变 prompt；hat 通过 task ledger 与 trigger payload 自然识别上下文） | KTD4；prompt 简洁性 | 携带标记会让 worker 行为分裂，违反"worker 看到的环境一致"原则 | 0.85 |
+| KTD1 | 命名空间维度 | 加 wave_id；加 attempt_epoch；加 retry budget | `{loop_id}-{kind}-{wave_id}-{slot_index}`，`wave_id` = store wave id（`bind_slot` 直接参数） | E1, E3 | attempt_epoch 不覆盖跨 wave；budget 破坏「同 wave 同 slot 同 branch」 | 0.93 |
+| KTD2 | 撞名兜底 | fail-closed；wave-phase 回收；不兜底 | 不兜底（跨 wave 不撞名后，撞名即 DB 异常） | E1, E3 | 用户决策；引入 store 状态查询得不偿失 | 0.90 |
+| KTD3 | redrive 消费点 | dispatcher tick；boot 一次扫描；独立子命令 | boot 一次扫描（两处对称插入点） | E4, E5 | 用户决策；覆盖 `ralph wave redrive` 后重启主路径 | 0.90 |
+| KTD4' | store 层缺口处置 | 只做 runner 接线（v1.1）；补 rusqlite + v10 + 复制 | **补齐 store 闭环**：v10 表 + rusqlite 三 override + memory 读方法 + `create_redrive_wave` descriptor 复制（双 store） | E5, E6, E7, E9 | v1.1 方案在生产 rusqlite 恒 fail-closed（Dead on arrival）；G3 使 in-memory 也不闭环 | 0.92 |
+| KTD5 | worker prompt 携带 redrive 标记 | 携带；不携带 | 不携带（hat 经 task ledger/trigger payload 识别上下文） | prompt 简洁性；worker 环境一致原则 | 行为分裂风险 | 0.85 |
+| KTD6 | persist 接线点与通道 | dispatcher spawn 前经 bridge 转发；runner 侧事后补写；emit 时写 | `dispatcher.rs:1783` bind 成功后、spawn 前，经新 `SupervisorBridge::persist_slot_descriptor` 转发（无默认实现，编译器驱动全 impl） | E8 + `dispatcher.rs:1783` 作用域证据 + 004 设计原文（"registers the ready-event snapshot at spawn time"） | runner 补写脱离 dispatch 上下文（topic/payload 不在手）；emit 时写早于 bind/dispatch 成功，会残留虚假 descriptor | 0.88 |
+| KTD7 | digest 锚 | ledger 扫描父 ready 批次；同 DB 父 descriptor | **同 DB 父 descriptor**（enriched list 携带 `expected_digest`） | E14（emit 侧已有 digest Conflict 首道防线） | ledger 扫描需 public↔store 双 ID 换算 + 轮换脆弱性；同 DB 锚的增量风险已被 emit 侧承接 | 0.86 |
+| KTD8 | take 的 expected_digest 来源 | list 返回 enriched 元组；boot 先读后比 | `list_redrive_pending_child_waves` 返回 `(child_slot, parent_slot, expected_digest)`，take 按 004 契约 store 侧三态 | E9, E10 | 「先读 child descriptor 拿 parent_slot 再比」把三态校验移出 store，削弱 fail-closed 构造保证 | 0.87 |
+| KTD9 | 合成 DetectedWave 与注册 | 新建旁路 dispatch；pre-registered 模式复用现有函数 | `execute_wave_via_supervisor_with_executor` 增加 pre-registered 入口（`store_wave_id` 已存在时跳过 `register_wave_if_absent`）；`DetectedWave.wave_id` = child store id；`consumer_aggregate_timeout = None` | E11, E12 | child 无 idempotency key，走 register 必然新铸 wave 或撞 E12 mismatch；旁路函数违背 R8 | 0.85 |
+| KTD10 | child slot 重编号语义 | 改 create_redrive_wave 不重编号；保留重编号 + descriptor 携带 parent 下标 | 保留重编号；复制的 descriptor `slot_index` 字段 = parent 下标 | E9；`RedriveResult.slots` 契约不变 | 改重编号破坏 004 已发布行为与 CLI 输出语义 | 0.90 |
 
-### 4. 三项实施契约闭合
+### 4. 实施契约
 
 #### 4.1 命名空间契约
 
-新 branch 名固定为：
+`{loop_id}-{kind}-{wave_id}-{slot_index}`，`wave_id` = store wave id（`bind_slot`/`bind_slot_worktree` 的直接参数）。仅 `supervisor_bridge.rs:342` 与 `worktree_bind.rs:166` 两处；`worktree_bind.rs:276/318/386` 三处测试断言同步（已核验 `:276` 现状为 `"loop-1-exec-0"`）。
 
+#### 4.2 Descriptor 生命周期契约
+
+```text
+spawn（U3）          redrive CLI（U2）              boot（U4）
+dispatcher bind 成功 → persist(parent_wave, parent_slot)
+                     → create_redrive_wave 复制:
+                       (parent, p) → (child, c)，descriptor.slot_index 保持 p
+                     → list 返回 (c, p, expected_digest=parent digest)
+                     → take(child, c, expected_digest) 三态
+                     → Dispatchable → 合成 wave → pre-registered 派发
 ```
-{loop_id}-{kind}-{wave_id}-{slot_index}
-```
 
-- `loop_id`：来自调用上下文（不变）。
-- `kind`：来自 wave kind（`exec` / `fix` / `review`），用现有序列化。
-- `wave_id`：来自调用上下文（**已可访问**，无需新增字段）。
-- `slot_index`：来自调用上下文（不变）。
+- v10.sql：`slot_descriptors(wave_id TEXT, slot_index INTEGER, slot_index_in_parent INTEGER, topic TEXT, payload_json TEXT, wave_kind TEXT, payload_digest TEXT, PRIMARY KEY (wave_id, slot_index))`（`slot_index_in_parent` 支撑 enriched list 的 SQL JOIN；memory 侧用 descriptor.slot_index 字段即可，无需镜像列）。
+- rusqlite override 语义与 memory 逐条对齐（persist 未知 wave → `UnknownWave`；take 三态；digest 比较严格相等）。
 
-**字符集与长度：** 全部字段来自 runtime 内部生成，已知为 ASCII；最大长度约 64+16+16+8 = 104 字节，远低于 git 255 限制。
+#### 4.3 Boot dispatch 契约
 
-**worktree 路径：** `path` 仍由 `DefaultWorktreeFactory` 内部决定（基于 branch 名派生）；本计划不改变路径生成规则。
+1. 两处 `recover_active_waves_at_startup` 之后（`runner.rs:1373-1396` / `1462-1484`）插入 `dispatch_pending_redrive_waves`，仅 resume/带 supervisor store 路径执行（S6）。
+2. `list_redrive_pending_child_waves` → 逐 child slot：`expected_digest = None` → Unavailable 分支；否则 `take(child, c, digest)` 三态。
+3. `Dispatchable` → 按 R9 合成 `DetectedWave` → `execute_wave_via_supervisor_with_executor(..., pre_registered = Some(child_wave_id))`。
+4. 失败分支写诊断（沿用 `RecoveryDiagnosisEnvelope` 既有通道）+ slot `slot_never_started`。
+5. 幂等：dispatched 后 slot 非 pending，二次扫描自然跳过（单测锁定）。
 
-**唯一修改点：** `crates/ralph-cli/src/loop_runner/wave/supervisor_bridge.rs:342` + `crates/ralph-core/src/supervisor/worktree_bind.rs:166`（两处对称）。
-
-#### 4.2 Redrive dispatch 闭环契约
-
-**runner 启动时**（`runner.rs:1373-1396` 与 `1462-1484` 两处 `recover_active_waves_at_startup` 之后）新增：
-
-1. 调 `SupervisorStore::list_redrive_pending_child_waves()`（**新增方法**）：返回 `Vec<RedrivePendingChild>`，过滤条件 `parent_wave_id IS NOT NULL AND phase = 'dispatch'`。
-2. 对每个 child wave：
-   a. 对每个 `pending` slot_index：
-      - 调 `take_dispatchable_redrive_descriptor(child_wave_id, slot_index, expected_digest)`。
-      - `Dispatchable(descriptor)` → 复用 `execute_wave_via_supervisor_with_executor` 派发该 slot。
-      - `DescriptorUnavailable` / `DescriptorConflict` → 标记 slot 为 `slot_never_started` 并记录诊断；**不**触发 worker。
-3. dispatch 完成后 runner 才进入主循环。
-
-**dispatcher tick 兜底：** **不引入**——`ralph run --resume` boot 一次扫描已覆盖 `ralph wave redrive` 崩溃后重启主路径；operator 运行时 redrive 触发的二次消费属于未来用例。
-
-**store 层：** `SupervisorStore` trait 新增 `list_redrive_pending_child_waves` 方法签名 + 默认 impl（返回空 Vec）；`memory.rs` + `rusqlite.rs` 各写真实实现。
-
-#### 4.3 封闭文件清单
-
-以下文件是本计划允许修改/新增的完整集合；不允许目录通配或条件式追加：
+#### 4.4 封闭文件清单
 
 | # | 文件 | 动作 | 原因 |
 |---:|---|---|---|
-| 1 | `crates/ralph-cli/src/loop_runner/wave/supervisor_bridge.rs` | 修改 | line 342 branch 命名加 `wave_id` 段 |
-| 2 | `crates/ralph-core/src/supervisor/worktree_bind.rs` | 修改 | line 166 branch 命名 + 同步 line 276/318/386 三个测试断言 |
-| 3 | `crates/ralph-core/src/supervisor/mod.rs` | 修改 | `SupervisorStore` trait 新增 `list_redrive_pending_child_waves` 方法签名与默认 impl（返回空 Vec） |
-| 4 | `crates/ralph-core/src/supervisor/memory.rs` | 修改 | `list_redrive_pending_child_waves` 真实实现 |
-| 5 | `crates/ralph-core/src/supervisor/rusqlite.rs` | 修改 | `list_redrive_pending_child_waves` 真实实现（不增改 schema，只加一个查询） |
-| 6 | `crates/ralph-cli/src/loop_runner/runner.rs` | 修改 | 在 `recover_active_waves_at_startup` 之后（line 1373 + 1462 两处对称）追加 `dispatch_pending_redrive_waves` 步骤 |
-| 7 | `crates/ralph-cli/src/loop_runner/tests/wave_supervisor.rs` | 修改 | 新增 S1（同 loop 跨 wave 不撞）+ S2（redrive boot 派发）集成测试 |
+| 1 | `crates/ralph-cli/src/loop_runner/wave/supervisor_bridge.rs` | 修改 | `:342` 命名加 `wave_id` 段 |
+| 2 | `crates/ralph-core/src/supervisor/worktree_bind.rs` | 修改 | `:166` 命名 + `:276/318/386` 断言 |
+| 3 | `crates/ralph-core/src/supervisor/mod.rs` | 修改 | `list_redrive_pending_child_waves` / `slot_descriptor` trait 方法与类型；`SupervisorBridge::persist_slot_descriptor` 转发（ralph-core 侧 trait 若在别处则就近） |
+| 4 | `crates/ralph-core/src/supervisor/memory.rs` | 修改 | 三个 descriptor 方法 + `create_redrive_wave` 复制 + list 实现 |
+| 5 | `crates/ralph-core/src/supervisor/rusqlite.rs` | 修改 | v10 读写 + 三个 override + `create_redrive_wave` 复制 + list 实现 |
+| 6 | `crates/ralph-core/src/supervisor/migrations/v10.sql` | 新增 | `slot_descriptors` 表 |
+| 7 | `crates/ralph-core/src/supervisor/migrations.rs` | 修改 | 注册 v10 |
+| 8 | `crates/ralph-cli/src/loop_runner/wave/dispatcher.rs` | 修改 | spawn persist 接线 + pre-registered 模式 + bridge trait 新方法的 impl/stub 同步 |
+| 9 | `crates/ralph-cli/src/loop_runner/runner.rs` | 修改 | boot `dispatch_pending_redrive_waves`（两处对称） |
+| 10 | `crates/ralph-cli/src/loop_runner/tests/wave_supervisor.rs` | 修改 | S1-S6 集成测试（含 rusqlite-backed S3） |
+| 11 | `crates/ralph-core/src/supervisor/u4_descriptor_tests.rs` | 修改 | parent→child 复制/重映射/enriched list/三态单测 |
 
-计划文件本身不计入实施 diff。无需更新 `presets/en/*.yml` / `presets/schemas/*.yml`（preset 不变）、`crates/ralph-core/data/*.md`（agent 行为不变）、`AGENTS.md` / `CLAUDE.md`（无新硬规则）、`scripts/ralph-zsh-plugin.zsh`（CLI 表面不变）、`CHANGELOG.md`（fix 类，留给发布节奏）。
-
-### High-Level Technical Design
-
-```mermaid
-flowchart TB
-  Boot[Loop boot / ralph run --resume] --> Recover[recover_active_waves_at_startup]
-  Recover --> ReplayProj[recover_pending_projections]
-  ReplayProj --> ScanRedrive[list_redrive_pending_child_waves]
-  ScanRedrive --> ForEachChild{any child wave?}
-  ForEachChild -->|yes| TakeDesc[take_dispatchable_redrive_descriptor]
-  TakeDesc -->|Dispatchable| Dispatch[execute_wave_via_supervisor_with_executor]
-  TakeDesc -->|Unavailable/Conflict| Diag[diagnostic + slot_never_started]
-  ForEachChild -->|no| Main[enter main loop]
-  Dispatch --> Main
-  Diag --> Main
-```
-
-```mermaid
-flowchart LR
-  BindSlot[bind_slot] --> Create[factory.create]
-  Create -->|ok| Done[return Worktree with branch loop-X-kind-wave-N-idx]
-  Create -->|err| Fail[BridgeError::Store<br/>no fallback by design]
-```
+计划文件本身不计入实施 diff。
 
 ### 风险与系统影响
 
-| 风险 | 触发条件 | 检测 | 缓解 | 剩余风险 |
+| 风险 | 触发条件 | 检测 | 缓解 | 剩余 |
 |---|---|---|---|---|
-| 命名迁移破坏依赖旧 branch 名的外部脚本 | 外部脚本硬编码旧 branch 名 | grep `loop-.*-exec-\|loop-.*-fix-` 在 `scripts/` / `tests/` | branch 名是 git 内部标识，外部脚本应通过 `git worktree list --porcelain` 解析 | 低 |
-| `list_redrive_pending_child_waves` 返回大结果集 | 长期 loop 积累大量 redrive 子 wave | 仅在 `phase = 'dispatch'` 状态扫描，dispatched 后 phase 转移 | boot 一次扫描，无热路径开销 | 低 |
-| `continue_mode` 路径与非 resume 路径行为分裂 | 新 dispatch 步骤仅在 resume 时执行 | runner.rs:1373 + 1462 两处对称修改；非 resume boot 不调 dispatch | 用户决策：覆盖主路径 | 中 |
-| 修改 2 的 `dispatch_pending_redrive_waves` 需要 `execute_wave_via_supervisor_with_executor` 全部参数 | runner.rs 上下文缺参数 | 实施时确认 | 就地适配不外抽；如实在凑不齐，改用最小可派发入口 | 低 |
+| v10 migration 与既有 DB 不兼容 | 旧 supervisor.db 打开 | rusqlite 打开路径既有 migration 测试 + U2 集成 | 纯增量表；migration 失败按既有 fail-closed | 低 |
+| persist 失败阻断派发 | store 写错误 | persist 返回 Err → slot 诊断 | fail-closed 标诊断，不静默继续 | 低 |
+| enriched list 的 parent digest 缺失 | pre-U4 legacy 行 | `expected_digest = None` 分支 | 按 Unavailable fail-closed（S4） | 低 |
+| 合成 wave 的 hat 解析失败 | descriptor.topic 无消费者 hat | `find_by_trigger` None → 诊断 | fail-closed 不派发 | 低 |
+| pre-registered 模式误用于未注册 wave | 调用方传错 id | register 跳过路径断言 wave 存在（`fan_in_status` 或 UnknownWave） | fail-closed | 低 |
+| 测试 fixture 依赖旧 branch 名 | 硬编码旧名 | targeted nextest 回归 | 同步更新 | 低 |
 
 ---
 
@@ -308,26 +300,28 @@ flowchart LR
 
 | Scenario | 验收条件 | 测试入口 | 层级 | 风险补充 |
 |---|---|---|---|---|
-| S1 | 第二波 exec 不撞第一波 worktree | `wave_supervisor.rs` 新增测试 | integration | naming uniqueness |
-| S2 | `ralph run --resume` 后 redrive 子 wave 自动 dispatch | `wave_supervisor.rs` 新增测试 | integration | dispatch closure |
-| S3 | descriptor 缺失 fail-closed | `u4_descriptor_tests.rs` 既有测试 + `wave_supervisor.rs` 新增 | unit + integration | fault injection |
-| S4 | descriptor digest 冲突 fail-closed | `u4_descriptor_tests.rs` 既有测试 + `wave_supervisor.rs` 新增 | unit + integration | fault injection |
-
-每项断言同时检查副作用：没有命名撞名、没有 redrive 重复派发、没有 `slot_never_started` 误标。
+| S1 | 第二波 exec 不撞名 | `wave_supervisor.rs`（真 git worktree） | 集成 | 命名唯一性 |
+| S2a | spawn persist（双 store） | `wave_supervisor.rs` + store 单测 | 集成+单元 | 写失败 fault injection |
+| S2b | redrive 复制+重映射 | `u4_descriptor_tests.rs`（真 create_redrive_wave 流程） | 单元 | 映射边界（多失败 slot） |
+| S3 | resume boot 派发 | `wave_supervisor.rs`（**rusqlite-backed** + in-memory 双变体） | 集成 | dispatch 闭环 |
+| S4 | descriptor 缺失 fail-closed | store 单测 + 集成 | 单元+集成 | fault injection |
+| S5 | digest 冲突 fail-closed | store 单测 + 集成 | 单元+集成 | fault injection |
+| S6 | 非 resume 不扫描 | `wave_supervisor.rs` | 集成 | 状态机 |
 
 ### 6. 需求—测试追踪矩阵
 
-| Requirement | Scenario | 验收测试 | 单元测试 | 集成/契约 | Unit |
-|---|---|---|---|---|---|
-| R1 | S1 | 跨 wave 同 slot 不撞 | 命名规则单测 | wave_supervisor 集成 | U1 |
-| R2 | S1 | branch 合法字符 | 命名规则单测 | — | U1 |
-| R3 | S1 | exec/fix/review 一致 | 命名规则单测 | wave_supervisor 集成 | U1 |
-| R4 | — | 命名规则在代码中只剩两处（两文件各一处） | grep 自检 | — | U1 |
-| R5 | S2-S4 | `list_redrive_pending_child_waves` 默认 impl + memory + rusqlite | 单测 | wave_supervisor 集成 | U1 |
-| R6 | S2 | boot 扫描 redrive 子 wave | list_..._child_waves 单测 | boot 集成 | U1 |
-| R7 | S2-S4 | descriptor 三态分支 | take_dispatchable_... 单测 | wave_supervisor 集成 | U1 |
-| R8 | S2 | 复用 executor 链路 | — | wave_supervisor 集成 | U1 |
-| R9 | — | wave_supervisor 新增 S1+S2 | — | — | U1 |
+| Req | Scenario | 验收测试 | 单元测试 | 集成 | Evidence | Unit |
+|---|---|---|---|---|---|---|
+| R1/R2 | S1 | 跨 wave 不撞 + 字符合法 | 命名规则 | wave_supervisor | E1, E3 | U1 |
+| R3 | S2a | spawn persist | bridge 转发 | wave_supervisor | E8 | U3 |
+| R4 | S2a/S4 | 双 store 语义对齐 | rusqlite+memory 表驱动 | — | E6, E7 | U2 |
+| R5 | S2b | 复制+重映射 | u4_descriptor_tests 扩展 | — | E9 | U2 |
+| R6 | S3-S5 | enriched list 三态内容 | list 单测（空/单/多/legacy） | — | E9 | U2 |
+| R7 | S3-S5 | take 三态分支 | 既有 4 测 + 新增 | wave_supervisor | E7, E10 | U4 |
+| R8/R9 | S3 | pre-registered 派发 + 合成 wave 字段 | — | wave_supervisor（rusqlite 变体） | E11, E12 | U4 |
+| R10 | S3 | rusqlite-backed 变体存在且绿 | — | — | E6 | U4 |
+| R11 | S1 | 真 git worktree | — | — | E1 | U1 |
+| — | S6 | 非 resume 不扫描 | — | wave_supervisor | E13 | U4 |
 
 ---
 
@@ -335,57 +329,110 @@ flowchart LR
 
 ### 7. 严格串行开发单元
 
-### U1. Wave slot worktree 命名空间迁移 + redrive dispatch 闭环（合并 Unit）
+```text
+U1（命名空间迁移）
+  ↓
+U2（store descriptor 闭环：v10 + rusqlite + 复制 + enriched list）
+  ↓
+U3（dispatcher spawn persist 接线）
+  ↓
+U4（runner boot redrive 派发 + rusqlite-backed 集成）
+  ↓
+U5（全量回归 + 文档核对）
+```
 
-1. **Unit 目标：** 同 loop 跨 wave 不再撞名；`ralph run --resume` boot 后 redrive 子 wave 自动 dispatch。
-2. **对应：** R1-R9；S1-S4；KTD1-KTD5；E1-E5。
-3. **外部可观察结果：**
-   - 同 loop 内第二波 exec/fix wave 的 slot bind 成功，branch 名包含 `wave_id`。
-   - `ralph run --resume` boot 后，redrive 子 wave 的 dispatchable slot 自动派发。
-4. **当前行为基线：** `bind_slot` 用 `{loop_id}-{kind}-{slot_index}`（两处对称）；redrive 子 wave 创建后无生产 dispatch 接线。
-5. **输入输出：** `SupervisorStore` 新增 `list_redrive_pending_child_waves` 方法；runner 启动时（line 1373 + 1462 两处对称）扫描并派发。
-6. **修改位置：**
-   - `crates/ralph-core/src/supervisor/mod.rs`：`SupervisorStore` trait 新增 `list_redrive_pending_child_waves` 方法签名与默认 impl（返回空 Vec）；定义 `RedrivePendingChild` 结构体（`{ wave_id, parent_wave_id, kind, pending_slots: Vec<u32> }`）。
-   - `crates/ralph-core/src/supervisor/memory.rs`：`list_redrive_pending_child_waves` 真实实现，扫 `inner.waves_by_id` 过滤 `parent_wave_id.is_some() && phase == WavePhase::Dispatch`，收集每个 child wave 的 pending slot_index。
-   - `crates/ralph-core/src/supervisor/rusqlite.rs`：`list_redrive_pending_child_waves` 真实实现，SQL：`SELECT wave_id, parent_wave_id, kind, slot_index FROM waves JOIN wave_slots USING (wave_id) WHERE parent_wave_id IS NOT NULL AND phase = 'dispatch' AND slot_status = 'pending'`。
-   - `crates/ralph-cli/src/loop_runner/wave/supervisor_bridge.rs`：line 342 branch 命名改为 `format!("{}-{}-{}-{}", ctx.loop_id, kind, ctx.wave_id, slot_index)`。
-   - `crates/ralph-core/src/supervisor/worktree_bind.rs`：line 166 branch 命名改为 `format!("{loop_id}-{kind}-{wave_id}-{slot_index}")`；同步 line 276/318/386 三个测试断言（`loop-1-exec-0` → `loop-1-exec-w-1-0`、`loop-z-fix-3` → `loop-z-fix-w-99-3`、`loop-2-exec-0` → `loop-2-exec-w-2-0`）。
-   - `crates/ralph-cli/src/loop_runner/runner.rs`：在 `recover_active_waves_at_startup` 之后（line 1373 + 1462 两处对称）追加 `dispatch_pending_redrive_waves` 步骤；在 `run_loop_impl_inner`（runner.rs:796）内部实现，直接访问同 scope 的 bridge / events_file / config_path；不外抽独立函数。
-   - `crates/ralph-cli/src/loop_runner/tests/wave_supervisor.rs`：新增 S1（同 loop 跨 wave 不撞，用真 git worktree）+ S2（redrive boot 派发，用 in-memory store + mock executor）集成测试。
-7. **可依赖能力：** `SupervisorStore::fan_in_status`、`take_dispatchable_redrive_descriptor`（memory + 默认 impl）、`execute_wave_via_supervisor_with_executor`、`DefaultWorktreeFactory::create`。
-8. **禁止依赖未来能力：** 不依赖任何 preset 修改；不引入新的 CLI 子命令；不改变 `create_redrive_wave` API；**不引入**撞名兜底；**不引入**dispatcher tick 兜底。
-9. **验收测试：**
-   - S1：在 `wave_supervisor.rs` 新增 `same_loop_second_exec_wave_does_not_collide`：用真 git worktree（非 mock factory），跑两波 exec，断言第二波 slot bind 成功且 branch 名不同。
-   - S2：在 `wave_supervisor.rs` 新增 `redrive_child_wave_dispatches_on_resume`：用 in-memory store + mock executor，构造父 wave 失败 slot → `create_redrive_wave` → 调 boot dispatch 步骤 → 断言 mock executor.spawn_count == 1。
-   - S3/S4：复用 `u4_descriptor_tests.rs` 既有 4 个单测 + `wave_supervisor.rs` 新增 descriptor 三态分支集成测试。
-   - 命令：
-     - `cargo nextest run -p ralph-core -- supervisor`
-     - `cargo nextest run -p ralph-cli --bin ralph -- supervisor`
-     - `cargo nextest run -p ralph-cli --bin ralph -- wave_supervisor`
-10. **Acceptance Red：**
-    - 先加测试 S1，跑两波 exec，断言第二波 slot bind 成功且 branch 名包含 wave_id——**当前必失败**（撞名 + branch 名不含 wave_id）。
-    - 先加测试 S2，模拟 `ralph run --resume` boot，断言 child wave 自动 dispatch——**当前必失败**（无 boot dispatch 步骤）。
-    - 编译错误、fixture 路径错误、命令错误均不是有效 Red。
-11. **单元测试拆分：**
-    - 命名规则：各种 kind × 各种 wave_id 的 branch 合法性与唯一性（既有 `worktree_bind.rs` 测试扩展即可）。
-    - `list_redrive_pending_child_waves`：空 / 单 wave 单 slot / 单 wave 多 slot / 多 wave。
-    - descriptor 三态：DescriptorBound / DescriptorUnavailable / DescriptorConflict（既有 `u4_descriptor_tests.rs` 已覆盖）。
-    - boot dispatch 幂等性：连续两次调用不重复 dispatch。
-12. **TDD 顺序：** 命名规则 Red → 命名 Green → list_..._child_waves Red → store 实现 Green → boot dispatch Red → boot dispatch Green → 集成测试 S1+S2 Red → S1+S2 Green → Refactor。
-13. **最小实现：** 只新增 1 个 trait 方法（含默认 impl）+ 1 个结构体 + 2 个真实 store 实现 + 2 处命名修改 + 2 处 runner 步骤 + 2 个集成测试；不引入新 crate；不改变现有 public API 签名。
-14. **集成验证：** 用真 git worktree（非 mock factory）跑 S1；用 in-memory supervisor store 跑 S2-S4。
-15. **风险驱动测试：** descriptor 冲突（fault injection）、boot dispatch 幂等性（state-machine）、命名撞名（边界条件）。
-16. **回归：** `cargo nextest run -p ralph-core -- supervisor` + `cargo nextest run -p ralph-cli --bin ralph -- supervisor` + `cargo nextest run -p ralph-cli --bin ralph -- wave_supervisor` 全绿；`./scripts/run-tests.sh` 全绿。
-17. **预期文件变更：** 见 4.4 封闭文件清单（7 个文件）。
-18. **完成标准：**
-    - S1-S4 全绿。
-    - `bind_slot` / `bind_slot_worktree` 命名规则在代码中只剩两处（两文件各一处），且都已包含 `wave_id`。
-    - `git diff --name-only` 全部命中 4.4 白名单。
-    - `cargo fmt --all -- --check`、`cargo build --workspace`、`cargo clippy --workspace --all-targets` 全绿。
-    - `./scripts/run-tests.sh` 全绿。
-    - 可独立提交。
-19. **停止条件：** `fan_in_status` 无法在 `bind_slot` 上下文同步获取（比如 store 锁冲突），或 `wave_id` 在 `bind_slot` 调用点不可用（首版 plan 误判，需要实施时复核）；记录证据并重做 KTD1/KTD3。
-20. **风险：** 仅靠命名迁移消除撞名，"同 wave 同 slot 重派"是 DB 异常场景——通过集成测试覆盖 S1 跨 wave 边界确认；不引入兜底，依赖 DB 状态正确性。
+#### U1：命名空间迁移
+
+1. **目标：** branch 命名含 store wave id；同 loop 跨 wave 不撞名。
+2. **对应：** R1/R2/R11；S1；KTD1/KTD2；E1/E3。
+3. **可观察结果：** 两波 exec 的 slot branch 分别为 `…-w-1-0` / `…-w-2-0`。
+4. **基线：** 两处 `{loop_id}-{kind}-{slot_index}`（E1）。
+5. **修改位置：** `supervisor_bridge.rs:342`（用直接参数 `wave_id`，非 `ctx.wave_id`）；`worktree_bind.rs:166`；`worktree_bind.rs:276/318/386` 断言同步；`wave_supervisor.rs` 新增 S1。
+6. **验收：** S1 真 git worktree 两波 exec，断言第二波 bind 成功且 branch 名不同；命令 `cargo nextest run -p ralph-cli --bin ralph -- wave_supervisor` + `cargo nextest run -p ralph-core -- worktree`。
+7. **Acceptance Red：** S1 当前必失败（撞名 + 断言新命名格式不符）。
+8. **单测拆分：** 命名格式（kind × wave_id 矩阵）、唯一性、git 合法性。
+9. **TDD 顺序：** 命名断言 Red → 两处 Green → S1 集成 Red → Green → Refactor。
+10. **最小实现：** 两个 format! 串 + 断言更新；不动 helper 签名（wave_id 已在参数里）。
+11. **集成验证：** S1 真 git worktree。
+12. **风险测试：** 命名撞名边界（同一 wave 重复 bind 的幂等由 store 既有语义承接，不加新逻辑）。
+13. **回归：** `cargo nextest run -p ralph-cli --bin ralph -- supervisor` + `cargo nextest run -p ralph-cli --bin ralph -- wave_supervisor` + `cargo nextest run -p ralph-core -- supervisor`。
+14. **变更：** 文件清单 #1/#2/#10（仅 S1 部分）。
+15. **完成标准：** S1 绿 + 回归绿 + build/clippy/fmt 绿 + 独立提交。
+16. **停止条件：** `bind_slot` 调用方传入的 `wave_id` 不是 store wave id（与 `dispatcher.rs:1783` 证据冲突）。
+17. **风险：** 测试 fixture 硬编码旧名——回归扫出即同步。
+
+#### U2：store descriptor 闭环（v10 + rusqlite + 复制 + enriched list）
+
+1. **目标：** 双 store 具备完整 descriptor 存取；`create_redrive_wave` 复制并重映射；enriched list 可查。
+2. **对应：** R4/R5/R6；S2a(store 侧)/S2b/S4/S5(store 侧)；KTD4'/KTD7/KTD8/KTD10；E5/E6/E7/E9/E10。
+3. **可观察结果：** rusqlite 与 memory 的 persist/take/slot_descriptor 语义一致；redrive 后 child key 可读 descriptor（slot_index=parent 下标）；list 返回 enriched 元组。
+4. **基线：** rusqlite 零实现（E6）；memory 有 persist/take 无 `slot_descriptor` 读；`create_redrive_wave` 不复制（E9）。
+5. **修改位置：** `migrations/v10.sql`（新增）+ `migrations.rs`（注册）；`mod.rs`（trait：`slot_descriptor` 读 + `list_redrive_pending_child_waves` + `RedrivePendingChild` 类型，默认 impl 空/None）；`memory.rs`（读方法、复制逻辑、list 实现）；`rusqlite.rs`（三 override + 复制 + list）；`u4_descriptor_tests.rs`（扩展）。
+6. **验收（表驱动 + 流程测试）：** persist/take/slot_descriptor 双 store 对齐矩阵；`create_redrive_wave` 复制（单失败 slot / 多失败 slot 重编号序 / 无 descriptor 的 slot → list 中 `expected_digest=None`）；list 过滤（空 / 非 dispatch 相位排除 / legacy 行）；命令 `cargo nextest run -p ralph-core -- supervisor`。
+7. **Acceptance Red：** rusqlite persist 后 `slot_descriptor` 读回（当前：无方法编译失败）；redrive 后 take(child, 0, parent_digest) → Dispatchable（当前：DescriptorUnavailable）。
+8. **单测拆分：** v10 迁移幂等（旧 v9 DB 打开升级）；digest 严格相等比较；复制时 `descriptor.slot_index` 保持 parent 下标。
+9. **TDD 顺序：** v10+rusqlite persist/read Red→Green → take Red→Green → memory 读方法 Red→Green → 复制 Red→Green → enriched list Red→Green → Refactor。
+10. **最小实现：** 一张表 + 三个 override + 一个读方法 + 复制段 + list 查询；不改 `create_redrive_wave` 签名。
+11. **集成验证：** rusqlite 真实文件 DB 跑全部新增单测（既有 rusqlite 测试模式）。
+12. **风险测试：** migration fault（损坏 DB）；digest 冲突（fault injection）；多 slot 重编号（property 式矩阵）。
+13. **回归：** `cargo nextest run -p ralph-core -- supervisor` 全量。
+14. **变更：** 文件清单 #3/#4/#5/#6/#7/#11。
+15. **完成标准：** 上述全绿 + build/clippy 绿 + 独立提交。
+16. **停止条件：** rusqlite `create_redrive_wave` 的 SQL 结构与 memory 语义存在未盘点差异（停并对齐后再写复制段）；`waves` 表实际列与 E12 不符。
+17. **风险：** v10 与进行中的其他 migration 冲突——migrations 目录顺序执行，冲突即停。
+
+#### U3：dispatcher spawn persist 接线
+
+1. **目标：** slot 绑定成功、spawn 前，descriptor 落当前 store。
+2. **对应：** R3；S2a；KTD6；E8。
+3. **可观察结果：** 派发后 store 中 `(store_wave_id, slot)` 存在 descriptor，字段与 dispatch 上下文一致。
+4. **基线：** 生产零调用（E8）。
+5. **修改位置：** `dispatcher.rs:1783` bind 成功分支（构建 `SlotDescriptor { slot_index: index_u32, topic: event.topic.clone(), payload_json: event.payload.clone(), wave_kind, payload_digest: fingerprint_payload(&event.payload) }`，经新 `SupervisorBridge::persist_slot_descriptor` 转发）；`SupervisorBridge` trait 及全部 impl/stub（编译器驱动：core bridge、cli supervisor_bridge、dispatcher 内联 stub、wave_supervisor stub）；测试。
+6. **验收：** `wave_supervisor.rs`：派发后经 `slot_descriptor(store_wave_id, 0)` 断言四字段 + digest；persist 失败注入 → slot 诊断且不 spawn（fail-closed）；命令 `cargo nextest run -p ralph-cli --bin ralph -- wave_supervisor`。
+7. **Acceptance Red：** `SupervisorBridge::persist_slot_descriptor` 不存在（编译 Red）；断言读回 descriptor（语义 Red）。
+8. **单测拆分：** descriptor 构建（topic/payload/digest/wave_kind 四字段）；persist 失败分支。
+9. **TDD 顺序：** trait+impl 编译 Red→Green → S2a 集成 Red→Green → 失败注入 Red→Green → Refactor。
+10. **最小实现：** 一个 trait 转发 + 调用点构建 + 失败处理；不改 spawn 其余流程。
+11. **集成验证：** in-memory + rusqlite 双变体（store 由 U2 备好）。
+12. **风险测试：** persist 与 record_slot_result 的顺序（persist 先于 worker 完成，崩溃后 descriptor 仍在——这正是设计意图，测试锁定）。
+13. **回归：** wave_supervisor + supervisor 全量。
+14. **变更：** 文件清单 #8/#10。
+15. **完成标准：** S2a 双变体绿 + 回归绿 + 独立提交。
+16. **停止条件：** bind 成功分支的实际作用域无法同时拿到 `event` 与 `store_wave_id`（停并重定位接线点，备选：worker request 构建段）。
+17. **风险：** review 波（SharedReadonly）bind 返回 None——review slot 也应 persist descriptor（redrive 对 review 波同样适用）；若 review 分支作用域不同，就地在该分支同构接线，不停（两个分支都在同一函数内，证据 `dispatcher.rs:1783-1808`）。
+
+#### U4：runner boot redrive 派发
+
+1. **目标：** resume boot 扫描 enriched list → take 三态 → 合成 wave 派发；rusqlite-backed 闭环可证。
+2. **对应：** R6-R10；S3/S4/S5/S6；KTD3/KTD8/KTD9；E4/E11/E12/E13。
+3. **可观察结果：** rusqlite-backed：构造崩溃现场后 resume，mock executor spawn 计数 == 1；三态失败分支各有诊断。
+4. **基线：** 生产零消费（E4）。
+5. **修改位置：** `runner.rs`（两处对称插入 `dispatch_pending_redrive_waves`；S6 仅在带 store 的 resume 路径执行）；`dispatcher.rs`（pre-registered 模式：`store_wave_id` 入参为 `Some` 时跳过 `register_wave_if_absent` 并校验 wave 存在）；`wave_supervisor.rs`（S3 双变体 / S4 / S5 / S6）。
+6. **验收：**
+   - S3（双变体）：完整链路 persist→fail→redrive→崩溃态→resume→spawn==1，且 record/bind 落在 child store wave id 上。
+   - S4：legacy 行（无 descriptor）→ Unavailable 诊断、不 spawn。
+   - S5：篡改 child descriptor digest → Conflict 诊断、不 spawn。
+   - S6：全新 boot → mock executor spawn==0。
+   - 命令 `cargo nextest run -p ralph-cli --bin ralph -- wave_supervisor`。
+7. **Acceptance Red：** S3 当前必失败（无 boot 步骤，spawn==0）。
+8. **单测拆分：** 合成 `DetectedWave` 字段（topic 解析、wave_index/total 赋值、consumer_aggregate_timeout=None）；pre-registered 跳过注册但校验存在；扫描幂等（二次调用 spawn 不重复）。
+9. **TDD 顺序：** pre-registered Red→Green → 合成 wave Red→Green → S4 Red→Green → S5 Red→Green → S3 in-memory Red→Green → S3 rusqlite Red→Green → S6 Red→Green → Refactor。
+10. **最小实现：** 一个扫描函数（runner 内不外抽）+ pre-registered 分支 + 合成段；不引入新 CLI/新事件。
+11. **集成验证：** rusqlite-backed 变体是生产闭环判定的硬证据（in-memory 变体防回归）。
+12. **风险测试：** 幂等（state-machine）；三态（fault injection）；boot 与 in-flight wave 冲突（recover 先跑，串行化已由插入点保证）。
+13. **回归：** wave_supervisor + supervisor 全量 + `cargo nextest run -p ralph-core -- supervisor`。
+14. **变更：** 文件清单 #8/#9/#10。
+15. **完成标准：** S3-S6 全绿 + 回归绿 + 独立提交。
+16. **停止条件：** 合成 wave 所需 `HatRegistry` 在 runner 插入点作用域不可得（停并重定位插入点，备选：event_loop 启动早期 seam）；pre-registered 与 fan-in 的 `register_wave_if_absent` 第二调用点（`dispatcher.rs:2347`）产生 E12 mismatch（停并统一两处策略）。
+17. **风险：** `consumer_aggregate_timeout=None` 改变聚合超时回退——由 `dispatcher.rs:1615-1620` 既有公式承接，测试断言 wave 正常收敛即可。
+
+#### U5：全量回归 + 文档核对
+
+1. **目标：** `./scripts/run-tests.sh` 全绿；`ralph-tools-wave.md:314` 与 CONCEPTS.md redrive 段与实际行为逐句核对（预期无需改动——语义已成文；如有漂移仅改漂移句）。
+2. **对应：** 全部 R 的收口；KTD 全表。
+3. **验收：** 全量两阶段 + doctest + clippy + fmt；`git diff --name-only` 命中 4.4 白名单。
+4. **完成标准：** 全绿 + 无 skipped/`.only`/削弱断言 + 各 Unit 独立提交边界清晰。
+5. **停止条件：** 出现与本计划无关的基线红——记录并上报，不顺手修。
 
 ---
 
@@ -393,61 +440,54 @@ flowchart LR
 
 ### 8. Unit 串行依赖图
 
-```mermaid
-flowchart TB
-  U1[U1 Wave slot worktree 命名空间迁移 + redrive dispatch 闭环]
+```text
+U1 → U2 → U3 → U4 → U5
 ```
 
-- 单一合并 Unit，无串行依赖。
+- U2 依赖 U1？否（无代码耦合），但串行执行以隔离回归归因；U1 先行因 redrive 派发也依赖命名迁移后的 worktree 绑定。
+- U3 依赖 U2：persist 需要双 store 实现就绪。
+- U4 依赖 U2+U3：boot 闭环需要「已 persist + 已复制」的 descriptor 存在。
+- U5 依赖全部。
 
 ### 9. 执行命令清单
 
-| 时机 | 命令 | 目的 | 通过要求 |
+| 时机 | 命令 | 目的 | 放行 |
 |---|---|---|---|
-| U1 Red/Green | `cargo nextest run -p ralph-core -- supervisor` | core supervisor 层 | 必须通过 |
-| U1 Red/Green | `cargo nextest run -p ralph-cli --bin ralph -- supervisor` | CLI supervisor 集成 | 必须通过 |
-| U1 Red/Green | `cargo nextest run -p ralph-cli --bin ralph -- wave_supervisor` | wave supervisor 集成 | 必须通过 |
-| U1 格式 | `cargo fmt --all -- --check` | 格式 | 必须通过 |
-| U1 范围 | `git diff --name-only <unit-start>...HEAD` 与 4.4 白名单逐项比对 | 防范围漂移 | 出现未列路径立即停止 |
-| 最终构建 | `cargo build --workspace` | build/typecheck | 必须通过 |
-| 最终 lint | `cargo clippy --workspace --all-targets` | lint | 必须通过 |
-| 最终全量 | `./scripts/run-tests.sh` | nextest 两阶段 + doctest | 必须通过 |
-| flake 兜底 | `RALPH_BASELINE_SERIAL=1 ./scripts/run-tests.sh` | 仅竞态 flake 恢复 | serial 仍失败则真失败 |
+| U1 | `cargo nextest run -p ralph-cli --bin ralph -- wave_supervisor` + `cargo nextest run -p ralph-core -- worktree` | 命名迁移 | 否 |
+| U2 | `cargo nextest run -p ralph-core -- supervisor` | store 闭环 | 否 |
+| U3/U4 | `cargo nextest run -p ralph-cli --bin ralph -- wave_supervisor` + `cargo nextest run -p ralph-cli --bin ralph -- supervisor` | persist/派发 | 否 |
+| 每 Unit | `cargo build --workspace` + `cargo clippy --workspace --all-targets` + `cargo fmt --all -- --check` | 门禁 | 否 |
+| U4 | `git diff --name-only` 对 4.4 白名单 | 范围封闭 | 越界即停 |
+| U5 | `./scripts/run-tests.sh`（flake 兜底 `RALPH_BASELINE_SERIAL=1` 一次） | 全量 | 否 |
 
-测试若带外层 hat env，涉及 spawn `ralph` 的 fixture 必须用 `common::ralph_bin()` 或 `scrub_agent_runtime_env`；新增测试还要用污染环境复跑相关 integration target。
+HARD RULE 5：新增 spawn `ralph` 的测试用 `common::ralph_bin()` / `scrub_agent_runtime_env`，污染环境复跑。
 
 ### 10. 最终质量门禁
 
-- S1-S4 全部通过且每个 R1-R9 均可追踪到可执行测试。
-- `bind_slot` / `bind_slot_worktree` 命名规则在代码中只剩两处（两文件各一处），且都已包含 `wave_id`。
-- `list_redrive_pending_child_waves` 在 default trait impl + memory + rusqlite 都有真实实现，且被生产 runner 调用。
-- `take_dispatchable_redrive_descriptor` 三态分支全部有测试覆盖（既有 + 新增）。
-- `cargo fmt --check`、build、clippy、targeted nextest、`./scripts/run-tests.sh` 全绿。
-- 未新增 skipped/ignored/`.only`；未削弱断言。
-- 实际变更未触及 supervisor DB schema、preset 拓扑、worker PTY、merge-queue、`--reuse-worktree` 整 loop 路径、`AGENTS.md` / `CLAUDE.md` / `crates/ralph-core/data/*.md`。
-- `git diff --name-only` 中实施文件全部属于 4.4 的 7 项白名单。
-- 单一 Unit 独立提交边界，没有"最后统一补测试"的尾巴。
-- 所有关键 Decision 置信度仍 ≥0.85；无 BLOCKED。
-- 删除实验性和失败方案代码；不提交 `.ralph/review/<plan-id>/scratch/` 等过程产物。
+- S1-S6 全绿，R1-R11 全部可追踪到可执行测试；S3 含 rusqlite-backed 变体。
+- descriptor 生命周期三段（persist/copy/take）双 store 语义一致；生产路径不再有「默认 impl 恒 Unavailable」缺口。
+- 命名规则在代码中只剩两处且都含 `wave_id`。
+- 未改 `create_redrive_wave` 签名 / `RedriveTakeOutcome` / preset / worker.rs / CLI 表面。
+- fmt/build/clippy/targeted/全量全绿；无 skipped/`.only`/削弱断言。
+- `git diff --name-only` 全部命中 4.4 白名单（11 项）。
+- 每个 Unit 独立提交；KTD 全部 ≥0.85 且无 BLOCKED。
 
 ### 11. 最终计划自检
 
 | 检查项 | 结果 | 证据或说明 |
 |---|---|---|
-| 这是实施计划而不是 Roadmap 吗 | 是 | U1 绑定行为、代码入口、Red/Green 与完成门 |
-| Executor 是否仍需做关键设计决策 | 否 | KTD1-KTD5 已锁定命名维度、不引入兜底、boot-only dispatch、store 不修改、prompt 不变 |
-| 所有文件和接口是否有代码库证据 | 是 | E1-E5 全部带文件:行号 |
-| 所有关键决策置信度是否 ≥0.85 | 是 | 最低 KTD5=0.85 |
-| 是否存在未处理的低置信度假设 | 否 | 无 launch blocker |
-| 每个 Unit 是否只有一个可观察行为 | 是 | U1 一个行为切片：跨 wave 不撞名 + redrive 自动 dispatch |
+| 这是实施计划而不是 Roadmap 吗 | 是 | 5 Unit 均绑定符号级入口、Red/Green、命令与完成门 |
+| Executor 是否仍需做关键设计决策 | 否 | KTD1-KTD10 锁定；v1.1 遗留的「boot 凑参数」开放项已由 E11-E13 闭合为 KTD9 |
+| 所有文件和接口是否有代码库证据 | 是 | E1-E14 全部 file:line / commit 原文 |
+| 所有关键决策置信度是否 ≥0.85 | 是 | 最低 KTD5/KTD9=0.85 |
+| 是否存在未处理的低置信度假设 | 否 | v1.1 的 KTD4（0.95 虚高）已废止并重估 |
+| 每个 Unit 是否只有一个可观察行为 | 是 | 命名 / store 闭环 / persist / boot 派发 / 回归核对 |
 | 每个 Unit 是否可以独立验证 | 是 | targeted nextest + 完成门 |
-| 每个 Unit 是否有真实 Red | 是 | U1 列明两例当前必失败测试 |
-| 每个 Unit 是否包含回归范围 | 是 | U1 第 16 项 |
-| 是否存在未来 Unit 依赖 | 否 | 单一 Unit |
-| 是否存在泛化任务描述 | 否 | 所有动作绑定符号、文件、断言和命令 |
+| 每个 Unit 是否有真实 Red | 是 | 编译 Red 与语义 Red 分别注明 |
+| 每个 Unit 是否包含回归范围 | 是 | 各 Unit 回归项 |
+| 是否存在未来 Unit 依赖 | 否 | 依赖图单向 |
+| 是否存在泛化任务描述 | 否 | 全部绑定文件、符号、断言、命令 |
 | 所有 Scenario 是否可追踪到测试和 Unit | 是 | 追踪矩阵 |
-| 所有关键决策是否有 Evidence | 是 | KTD 表 |
-| 修改范围是否封闭 | 是 | 4.4 列出 7 项；新增路径触发停止和重评审 |
-| 已知红色基线是否与最终门禁一致 | 是 | 首版无 baseline 红；最终门禁 `./scripts/run-tests.sh` 全绿 |
-| 计划是否可以严格串行执行 | 是 | 单 Unit |
-| 是否相对首版真正去掉了低置信度/失真内容 | 是 | E7 业务故事已砍；撞名兜底 KTD2 已砍（用户决策）；dispatcher tick 兜底 KTD3 另一半已砍（用户决策）；`BindSlotContext` 缺 `wave_id` 错误陈述已纠正 |
+| 所有关键决策是否有 Evidence | 是 | KTD 表逐行引用 E 编号 |
+| 生产闭环是否可验证（rusqlite-backed） | 是 | S3  rusqlite 变体为硬门禁（v1.1 缺失项 M9 已补） |
+| 计划是否可以严格串行执行 | 是 | 单链 5 Unit |
