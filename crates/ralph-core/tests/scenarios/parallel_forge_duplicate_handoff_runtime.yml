@@ -1,0 +1,135 @@
+# Plan 2026-07-28-001 U3 (S4 / S8): duplicate-fanout over-emit guard.
+#
+# A worktree hat accidentally emits `forge.worktrees.ready`
+# twice in a single activation. The first wave emits its real
+# dispatch; the second is a duplicate `forge.worktrees.ready`.
+# U3's commit-aware recovery must:
+#   - admit exactly ONE `forge.worktrees.ready` to the bus
+#     (only the first event reaches the consumer), and
+#   - emit a boundary diagnostic for the dropped second event,
+#     and
+#   - inject ZERO hat-targeted `task.resume` because the first
+#     event committed (commit-first contract).
+#
+# Mirrors `parallel_forge_task_dispatch_runtime.yml`'s topology
+# (isolated / supervisor enabled / plain dummy hats) so the
+# consumer-side semantics of `forge.worktrees.ready` are the
+# only thing the fixture varies. The harness's
+# `supervisor_fan_in.expected_slots: 1` keeps the supervisor
+# tick in lock-step with the first wave's completion.
+
+name: pf_duplicate_worktrees_ready
+description: 'plan U3 duplicate handoff fixture: worktree emits two forge.worktrees.ready in one activation, only the first survives and zero task.resume reach worktree'
+
+config:
+  prompt_file: PROMPT.md
+  max_iterations: 6
+  event_loop:
+    execution_mode: isolated
+    completion_promise: LOOP_COMPLETE
+    supervisor:
+      enabled: true
+      aggregate_timeout_secs: 60
+    required_events:
+      - exec.unit.done
+    starting_event: forge.start
+  hats:
+    pf-inspector:
+      subscribes_to:
+        - forge.start
+      publishes:
+        - forge.plan.inspected
+    pf-planner:
+      subscribes_to:
+        - forge.plan.inspected
+      publishes:
+        - forge.plan.ready
+    pf-guardian:
+      subscribes_to:
+        - forge.plan.ready
+      publishes:
+        - forge.concurrency.approved
+    pf-worktree:
+      subscribes_to:
+        - forge.concurrency.approved
+      publishes:
+        - forge.worktrees.ready
+    pf-dispatcher:
+      subscribes_to:
+        - forge.worktrees.ready
+      publishes:
+        - exec.unit.ready
+    pf-executor:
+      subscribes_to:
+        - exec.unit.ready
+      publishes:
+        - exec.unit.done
+    pf-reporter:
+      subscribes_to:
+        - exec.unit.done
+      publishes:
+        - LOOP_COMPLETE
+
+mock_responses:
+  - text: |
+      <event topic="forge.plan.inspected">
+      plan_key: "pf-dup"
+      plan_usable: true
+      </event>
+    hat: pf-inspector
+  - text: |
+      <event topic="forge.plan.ready">
+      plan_key: "pf-dup"
+      unit_count: 1
+      </event>
+    hat: pf-planner
+  - text: |
+      <event topic="forge.concurrency.approved">
+      approved: true
+      plan_key: "pf-dup"
+      </event>
+    hat: pf-guardian
+  # Turn 4: worktree emits two IDENTICAL forge.worktrees.ready
+  # events in one activation. The duplicate must be dropped with a
+  # boundary diagnostic, and the committed handoff must NOT be
+  # pre-empted by a hat-targeted recovery resume.
+  - text: |
+      <event topic="forge.worktrees.ready">
+      plan_key: "pf-dup"
+      integration_branch: "pf/dup"
+      </event>
+      <event topic="forge.worktrees.ready">
+      plan_key: "pf-dup"
+      integration_branch: "pf/dup"
+      </event>
+    hat: pf-worktree
+  - text: |
+      <event topic="exec.unit.ready">
+      wave_id: "pf-dup-wave"
+      slot_index: 0
+      unit_id: "U1"
+      plan_key: "pf-dup"
+      </event>
+    hat: pf-dispatcher
+
+supervisor_fan_in:
+  expected_slots: 1
+
+expected:
+  iterations: 5
+  events:
+    - topic: forge.plan.inspected
+    - topic: forge.plan.ready
+    - topic: forge.concurrency.approved
+    - topic: forge.worktrees.ready
+    - topic: exec.unit.ready
+  event_topic_counts:
+    - topic: forge.worktrees.ready
+      count: 1
+  absent_events:
+    # The duplicate emit must NOT be admitted as a second
+    # accepted event. Absent in the canonical sense means
+    # `seen_topics` has only one observation.
+    - topic: work.failed
+    - topic: forge.plan.blocked
+  completion: false

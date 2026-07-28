@@ -1876,6 +1876,18 @@ fn test_parallel_forge_task_dispatch_runtime() {
     run_workflow_guard_scenario(yaml);
 }
 
+/// Plan 2026-07-28-001 U3 (S4 / S8): duplicate-fanout guard.
+/// Worktree emits two `forge.worktrees.ready` in one isolated
+/// activation. The harness asserts that exactly one of them
+/// reaches the bus (`event_topic_counts: forge.worktrees.ready =
+/// 1`), the second fires a boundary diagnostic, and zero
+/// hat-targeted `task.resume` injections reach the worktree.
+#[test]
+fn test_parallel_forge_duplicate_handoff_runtime() {
+    let yaml = load_scenario("tests/scenarios/parallel_forge_duplicate_handoff_runtime.yml");
+    run_workflow_guard_scenario(yaml);
+}
+
 #[test]
 fn test_review_passed_while_wave_open() {
     let yaml = load_scenario("tests/scenarios/flow_reliability/review_passed_while_wave_open.yml");
