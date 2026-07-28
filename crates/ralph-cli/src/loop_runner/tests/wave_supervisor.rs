@@ -2171,10 +2171,14 @@ impl SupervisorBridge for U3DispatchBridge {
         Ok(Vec::new())
     }
 
-    fn fan_in_status(&self, _wave_id: &str) -> Result<WaveSnapshot, BridgeError> {
-        Err(BridgeError::Store(
-            "U3DispatchBridge has no store".to_string(),
-        ))
+    fn fan_in_status(&self, wave_id: &str) -> Result<WaveSnapshot, BridgeError> {
+        // 2026-07-28-002 plan U4 (S6): the pre-registered redrive path
+        // verifies the wave row via `fan_in_status`; delegate to the
+        // real store so pre-registered child waves pass the existence
+        // check instead of failing closed.
+        self.store
+            .fan_in_status(wave_id)
+            .map_err(|err| BridgeError::Store(err.to_string()))
     }
 
     fn register_wave_if_absent(
@@ -2303,6 +2307,7 @@ async fn run_u3_execute_wave_with_prebound_slots(
         &bridge_arc,
         executor_dyn,
         None, // pre_registered_id: not pre-registered in test path
+        None, // slot_index_override: test path uses events-array position
     )
     .await;
     (outcome, started)
@@ -2353,6 +2358,7 @@ async fn run_u3_execute_wave(
         &bridge_arc,
         executor_dyn,
         None, // pre_registered_id: not pre-registered in test path
+        None, // slot_index_override: test path uses events-array position
     )
     .await;
     (outcome, started)
@@ -3176,6 +3182,7 @@ async fn run_u5_execute_wave(
         &bridge_arc,
         executor_dyn,
         None, // pre_registered_id: not pre-registered in test path
+        None, // slot_index_override: test path uses events-array position
     )
     .await;
     (outcome, bridge)
@@ -3490,6 +3497,7 @@ async fn run_u2_execute_wave_with_env_capture(
         &bridge_arc,
         executor_dyn,
         None, // pre_registered_id: not pre-registered in test path
+        None, // slot_index_override: test path uses events-array position
     )
     .await
 }
@@ -5142,6 +5150,7 @@ async fn run_u3_dispatch_wave<E: WaveWorkerExecutor + 'static>(
         &bridge_arc,
         executor_dyn,
         None, // pre_registered_id: not pre-registered in test path
+        None, // slot_index_override: test path uses events-array position
     )
     .await
 }
@@ -6560,10 +6569,558 @@ async fn test_s2a_persist_slot_descriptor_on_dispatch() {
     );
 }
 
-// Note: the fail-closed variant of S2a (persist failure → no spawn)
-// is covered by the existing `test_dispatcher_awaits_store_approval`
-// (AlwaysDeny path) and by the dispatcher's explicit fail-closed
-// handling in dispatcher.rs:1963-1977 (warn + record_slot_failure + continue).
-// A dedicated persist-failure inject test would require a
-// PersistFailingSupervisorStore wrapper that intercepts
-// persist_slot_descriptor — deferred to a follow-up.
+// The fail-closed variant of S2a (persist failure → no spawn) is
+// implemented below via `PersistFailingSupervisorStore`
+// (`test_s2a_persist_failure_fails_closed_no_spawn`) — the follow-up
+// that the original S2a landing deferred.
+
+// =============================================================================
+// 2026-07-28-002 plan U3 follow-up (S2a fail-closed): persist fault injection.
+//
+// The dispatcher persists a `SlotDescriptor` after `bind_slot` and before
+// spawning the worker (dispatcher.rs, U3 wiring). When that persist fails,
+// the slot MUST be skipped (no spawn) and the failure MUST be recorded on
+// the bridge. `PersistFailingSupervisorStore` delegates every store method
+// to a real `InMemorySupervisorStore` except `persist_slot_descriptor`,
+// which always errors — proving the fail-closed branch end to end.
+// =============================================================================
+
+/// Fault-injecting store wrapper: all methods delegate to `inner`,
+/// except `persist_slot_descriptor`, which always fails.
+#[derive(Debug)]
+struct PersistFailingSupervisorStore {
+    inner: std::sync::Arc<ralph_core::supervisor::InMemorySupervisorStore>,
+}
+
+impl ralph_core::supervisor::SupervisorStore for PersistFailingSupervisorStore {
+    fn persist_slot_descriptor(
+        &self,
+        _wave_id: &str,
+        _descriptor: &ralph_core::supervisor::SlotDescriptor,
+    ) -> ralph_core::supervisor::SupervisorStoreResult<()> {
+        Err(ralph_core::supervisor::SupervisorStoreError::Storage(
+            "synthetic persist failure (fault injection)".to_string(),
+        ))
+    }
+
+    fn register_wave(&self, idempotency_key: &str, kind: ralph_core::supervisor::WaveKind, expected_total: u32, slot_retry_budget: u32) -> ralph_core::supervisor::SupervisorStoreResult<String> {
+        self.inner.register_wave(idempotency_key, kind, expected_total, slot_retry_budget)
+    }
+
+    fn enqueue_wave(&self, idempotency_key: &str, kind: ralph_core::supervisor::WaveKind, expected_total: u32, slot_retry_budget: u32) -> ralph_core::supervisor::SupervisorStoreResult<String> {
+        self.inner.enqueue_wave(idempotency_key, kind, expected_total, slot_retry_budget)
+    }
+
+    fn try_dispatch_next(&self, max_concurrent_workers: u32) -> ralph_core::supervisor::SupervisorStoreResult<Option<(String, u32)>> {
+        self.inner.try_dispatch_next(max_concurrent_workers)
+    }
+
+    fn release_slot_dispatch(&self, wave_id: &str, slot_index: u32, outcome: ralph_core::supervisor::DispatchOutcome) -> ralph_core::supervisor::SupervisorStoreResult<()> {
+        self.inner.release_slot_dispatch(wave_id, slot_index, outcome)
+    }
+
+    fn bind_worktree(&self, wave_id: &str, slot_index: u32, binding: ralph_core::supervisor::SlotResource) -> ralph_core::supervisor::SupervisorStoreResult<()> {
+        self.inner.bind_worktree(wave_id, slot_index, binding)
+    }
+
+    fn record_slot_result(&self, wave_id: &str, slot_index: u32, content_hash: &str, event_count: usize) -> ralph_core::supervisor::SupervisorStoreResult<()> {
+        self.inner.record_slot_result(wave_id, slot_index, content_hash, event_count)
+    }
+
+    fn record_slot_failure(&self, wave_id: &str, slot_index: u32, reason: &str) -> ralph_core::supervisor::SupervisorStoreResult<()> {
+        self.inner.record_slot_failure(wave_id, slot_index, reason)
+    }
+
+    fn slot_failure_reason(&self, wave_id: &str, slot_index: u32) -> ralph_core::supervisor::SupervisorStoreResult<Option<String>> {
+        self.inner.slot_failure_reason(wave_id, slot_index)
+    }
+
+    fn cancel_wave(&self, wave_id: &str) -> ralph_core::supervisor::SupervisorStoreResult<()> {
+        self.inner.cancel_wave(wave_id)
+    }
+
+    fn record_slot_pid(&self, wave_id: &str, slot_index: u32, pid: u32) -> ralph_core::supervisor::SupervisorStoreResult<()> {
+        self.inner.record_slot_pid(wave_id, slot_index, pid)
+    }
+
+    fn pid_for_slot(&self, wave_id: &str, slot_index: u32) -> ralph_core::supervisor::SupervisorStoreResult<Option<u32>> {
+        self.inner.pid_for_slot(wave_id, slot_index)
+    }
+
+    fn fan_in_status(&self, wave_id: &str) -> ralph_core::supervisor::SupervisorStoreResult<ralph_core::supervisor::WaveSnapshot> {
+        self.inner.fan_in_status(wave_id)
+    }
+
+    fn commit_salvage_projection(&self, wave_id: &str, receipt: &ralph_core::supervisor::ProjectionReceiptSummary) -> ralph_core::supervisor::SupervisorStoreResult<()> {
+        self.inner.commit_salvage_projection(wave_id, receipt)
+    }
+
+    fn record_coordination_written(&self, wave_id: &str, receipt: &ralph_core::supervisor::CoordinationReceiptSummary) -> ralph_core::supervisor::SupervisorStoreResult<()> {
+        self.inner.record_coordination_written(wave_id, receipt)
+    }
+
+    fn commit_coordination_event(&self, wave_id: &str, receipt: &ralph_core::supervisor::CoordinationReceiptSummary, terminal_phase: ralph_core::supervisor::WavePhase) -> ralph_core::supervisor::SupervisorStoreResult<()> {
+        self.inner.commit_coordination_event(wave_id, receipt, terminal_phase)
+    }
+
+    fn list_wave_ids(&self) -> ralph_core::supervisor::SupervisorStoreResult<Vec<String>> {
+        self.inner.list_wave_ids()
+    }
+
+    fn wave_id_for_idempotency_key(&self, idempotency_key: &str) -> ralph_core::supervisor::SupervisorStoreResult<Option<String>> {
+        self.inner.wave_id_for_idempotency_key(idempotency_key)
+    }
+
+    fn recover_active_waves(&self) -> ralph_core::supervisor::SupervisorStoreResult<Vec<ralph_core::supervisor::WaveSnapshot>> {
+        self.inner.recover_active_waves()
+    }
+
+    fn list_worktree_paths(&self, wave_id: &str) -> ralph_core::supervisor::SupervisorStoreResult<Vec<ralph_core::supervisor::SlotResource>> {
+        self.inner.list_worktree_paths(wave_id)
+    }
+
+    fn get_slot_resource(&self, wave_id: &str, slot_index: u32) -> ralph_core::supervisor::SupervisorStoreResult<Option<ralph_core::supervisor::SlotResource>> {
+        self.inner.get_slot_resource(wave_id, slot_index)
+    }
+
+    fn set_wave_phase(&self, wave_id: &str, phase: ralph_core::supervisor::WavePhase) -> ralph_core::supervisor::SupervisorStoreResult<()> {
+        self.inner.set_wave_phase(wave_id, phase)
+    }
+
+    fn enqueue_compensation(&self, wave_id: &str, kind: ralph_core::supervisor::CompensationKind) -> ralph_core::supervisor::SupervisorStoreResult<()> {
+        self.inner.enqueue_compensation(wave_id, kind)
+    }
+
+    fn take_pending_compensations(&self) -> ralph_core::supervisor::SupervisorStoreResult<Vec<(String, ralph_core::supervisor::CompensationKind)>> {
+        self.inner.take_pending_compensations()
+    }
+
+    fn complete_compensation(&self, wave_id: &str, kind: ralph_core::supervisor::CompensationKind, ok: bool) -> ralph_core::supervisor::SupervisorStoreResult<()> {
+        self.inner.complete_compensation(wave_id, kind, ok)
+    }
+
+    fn create_redrive_wave(&self, parent_wave_id: &str, slots: Option<&[u32]>) -> ralph_core::supervisor::SupervisorStoreResult<ralph_core::supervisor::RedriveResult> {
+        self.inner.create_redrive_wave(parent_wave_id, slots)
+    }
+
+    fn reserve_emission(&self, scope_key: &str, payload_digest: &str, expected_count: u32, count_events_on_disk: &dyn Fn(&str) -> u32) -> ralph_core::supervisor::SupervisorStoreResult<ralph_core::supervisor::EmissionReservation> {
+        self.inner.reserve_emission(scope_key, payload_digest, expected_count, count_events_on_disk)
+    }
+
+    fn mark_emission_applying(&self, scope_key: &str) -> ralph_core::supervisor::SupervisorStoreResult<()> {
+        self.inner.mark_emission_applying(scope_key)
+    }
+
+    fn mark_emission_applied(&self, scope_key: &str, applied_at_unix_secs: u64) -> ralph_core::supervisor::SupervisorStoreResult<()> {
+        self.inner.mark_emission_applied(scope_key, applied_at_unix_secs)
+    }
+
+    fn mark_emission_recovery_required(&self, scope_key: &str) -> ralph_core::supervisor::SupervisorStoreResult<()> {
+        self.inner.mark_emission_recovery_required(scope_key)
+    }
+
+    fn mark_emission_failed(&self, scope_key: &str) -> ralph_core::supervisor::SupervisorStoreResult<()> {
+        self.inner.mark_emission_failed(scope_key)
+    }
+
+    fn emission_state_for_wave_id(&self, public_wave_id: &str) -> ralph_core::supervisor::SupervisorStoreResult<Option<ralph_core::supervisor::EmissionState>> {
+        self.inner.emission_state_for_wave_id(public_wave_id)
+    }
+
+    fn adopt_legacy_emission(&self, scope_key: &str, payload_digest: &str, expected_count: u32, legacy_wave_id: &str) -> ralph_core::supervisor::SupervisorStoreResult<String> {
+        self.inner.adopt_legacy_emission(scope_key, payload_digest, expected_count, legacy_wave_id)
+    }
+
+}
+
+/// S2a fail-closed: persist failure ⇒ no worker spawned, no descriptor
+/// reaches the inner store.
+#[tokio::test]
+async fn test_s2a_persist_failure_fails_closed_no_spawn() {
+    use ralph_core::supervisor::{InMemorySupervisorStore, SupervisorStore};
+    use std::sync::Arc;
+
+    let inner = Arc::new(InMemorySupervisorStore::new());
+    let failing: Arc<dyn SupervisorStore> = Arc::new(PersistFailingSupervisorStore {
+        inner: inner.clone(),
+    });
+    let bridge = U3DispatchBridge::new(failing, 4);
+
+    let wave = make_u3_wave_with_concurrency("s2a-persist-fail", 1, 1, 1);
+    let wave = ralph_core::DetectedWave {
+        events: vec![ralph_core::Event {
+            topic: "exec.unit.ready".to_string(),
+            payload: Some(r#"{"content_hash":"s2a-fault"}"#.to_string()),
+            ts: String::new(),
+            hat: None,
+            triggered: None,
+            source: None,
+            wave_id: None,
+            wave_index: None,
+            wave_total: None,
+            system_injected: None,
+        }],
+        ..wave
+    };
+
+    let started = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let (_outcome, _) =
+        run_u3_execute_wave_with_prebound_slots(&bridge, &wave, &[0], started.clone()).await;
+
+    assert_eq!(
+        started.load(std::sync::atomic::Ordering::SeqCst),
+        0,
+        "S2a fail-closed: persist failure must skip the slot (no spawn)"
+    );
+
+    // The inner store received every call EXCEPT a successful persist:
+    // the wave row exists (register delegated) but no descriptor does.
+    let snaps = inner.recover_active_waves().expect("recover");
+    assert_eq!(snaps.len(), 1, "the wave must be registered via delegation");
+    let store_wave_id = snaps.into_iter().next().unwrap().wave_id;
+    let descriptor = inner
+        .slot_descriptor(&store_wave_id, 0)
+        .expect("slot_descriptor must not error");
+    assert!(
+        descriptor.is_none(),
+        "S2a fail-closed: no descriptor may reach the store when persist fails"
+    );
+}
+
+// =============================================================================
+// 2026-07-28-002 plan U4 (G1 / R-F1 / S3-S6): boot redrive dispatch.
+//
+// `dispatch_pending_redrive_waves` scans the supervisor store for redrive
+// child waves created by a previous loop (`create_redrive_wave`) but never
+// dispatched (crash between create and spawn), takes each slot's descriptor
+// (fail-closed on unavailable / digest conflict), and dispatches each slot
+// as a single-slot wave through the supervisor path with the TRUE child
+// slot index (C3: multi-slot child waves must bind 0/1/2, not 0/0/0).
+// =============================================================================
+
+/// Executor that records the slot index of every spawn request, so
+/// tests can assert the dispatcher bound the true child slot index.
+#[derive(Clone, Default)]
+struct U4SlotRecordingExecutor {
+    indices: std::sync::Arc<std::sync::Mutex<Vec<u32>>>,
+}
+
+impl WaveWorkerExecutor for U4SlotRecordingExecutor {
+    fn execute(
+        &self,
+        mut request: crate::loop_runner::wave::WorkerRequest,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = (u32, WaveWorkerOutcome)> + Send>> {
+        let indices = std::sync::Arc::clone(&self.indices);
+        Box::pin(async move {
+            indices.lock().unwrap().push(request.index);
+            let _ = request.worker_rpc_tx.take();
+            let _ = request.worker_tui_state.take();
+            let event = ralph_core::Event {
+                topic: "exec.done".to_string(),
+                payload: Some("ok".to_string()),
+                ts: String::new(),
+                hat: None,
+                triggered: None,
+                source: None,
+                wave_id: None,
+                wave_index: None,
+                wave_total: None,
+                system_injected: None,
+            };
+            (
+                request.index,
+                Ok((vec![event], Duration::from_millis(5), true)),
+            )
+        })
+    }
+}
+
+/// A hat registry with one hat subscribed to `exec.unit.ready` so
+/// `dispatch_redrive_child_wave` can resolve the descriptor topic.
+fn redrive_test_registry() -> ralph_core::HatRegistry {
+    let mut registry = ralph_core::HatRegistry::new();
+    let hat = ralph_proto::Hat {
+        id: ralph_proto::HatId::new("redrive-worker"),
+        name: "Redrive Worker".to_string(),
+        description: "test hat for redrive boot dispatch".to_string(),
+        subscriptions: vec![ralph_proto::Topic::new("exec.unit.ready")],
+        publishes: vec![ralph_proto::Topic::new("exec.done")],
+        instructions: String::new(),
+    };
+    registry.register_with_config(hat, ralph_core::config::HatConfig::default());
+    registry
+}
+
+/// Register a parent wave with `slots` failed slots, optionally
+/// persisting a descriptor per slot first (the U3 spawn-time record).
+fn make_redrive_parent_with_descriptors(
+    store: &dyn ralph_core::supervisor::SupervisorStore,
+    key: &str,
+    slots: u32,
+    persist_descriptors: bool,
+) -> String {
+    use ralph_core::supervisor::{SlotDescriptor, SlotResource, WaveKind};
+    let wave = store.register_wave(key, WaveKind::Exec, slots, 1).unwrap();
+    for i in 0..slots {
+        store
+            .bind_worktree(
+                &wave,
+                i,
+                SlotResource {
+                    slot_index: i,
+                    worktree_path: Some(format!("/tmp/u4-redrive/{key}-{i}")),
+                    branch: Some(format!("u4-{key}-{i}")),
+                },
+            )
+            .unwrap();
+        if persist_descriptors {
+            let payload = format!(r#"{{"unit":"u{i}"}}"#);
+            store
+                .persist_slot_descriptor(
+                    &wave,
+                    &SlotDescriptor {
+                        slot_index: i,
+                        topic: "exec.unit.ready".to_string(),
+                        payload_json: payload.clone(),
+                        wave_kind: WaveKind::Exec,
+                        payload_digest: SlotDescriptor::digest_of(&payload),
+                        slot_index_in_parent: None,
+                    },
+                )
+                .unwrap();
+        }
+        store
+            .record_slot_failure(&wave, i, "synthetic parent failure")
+            .unwrap();
+    }
+    wave
+}
+
+/// S3 / R-F1 happy path (in-memory): a 3-slot child wave created from a
+/// descriptor-bearing parent is fully dispatched by the boot scan —
+/// each child slot binds its OWN index (C3), and a second scan is a
+/// no-op (take consumed the descriptors ⇒ resume-after-dispatch never
+/// double-spawns).
+#[tokio::test]
+async fn test_u4_redrive_boot_dispatch_in_memory_multi_slot() {
+    use ralph_core::supervisor::{InMemorySupervisorStore, SupervisorStore};
+    use std::sync::Arc;
+
+    let store: Arc<dyn SupervisorStore> = Arc::new(InMemorySupervisorStore::new());
+    let parent = make_redrive_parent_with_descriptors(store.as_ref(), "u4-boot", 3, true);
+    let redrive = store.create_redrive_wave(&parent, Some(&[0, 1, 2])).unwrap();
+
+    // Sanity: the enriched pending list sees all 3 child slots with digests.
+    let pending = store.list_redrive_pending_child_waves().unwrap();
+    assert_eq!(pending.len(), 1, "one pending child wave expected");
+    assert_eq!(pending[0].child_wave_id, redrive.child_wave_id);
+    assert_eq!(pending[0].slots.len(), 3);
+    assert!(
+        pending[0].slots.iter().all(|s| s.expected_digest.is_some()),
+        "parent descriptors must enrich child slots with expected_digest"
+    );
+
+    // Production `bind_slot` binds a per-slot worktree in the store
+    // before the store approves dispatch; `U3DispatchBridge` leaves
+    // binding to the test, so pre-bind the child slots (same pattern
+    // as `run_u3_execute_wave_with_prebound_slots`).
+    for i in 0..3u32 {
+        store
+            .bind_worktree(
+                &redrive.child_wave_id,
+                i,
+                ralph_core::supervisor::SlotResource {
+                    slot_index: i,
+                    worktree_path: Some(format!("/tmp/u4-redrive/child-{}-{i}", redrive.child_wave_id)),
+                    branch: Some(format!("u4-child-{}-{i}", redrive.child_wave_id)),
+                },
+            )
+            .unwrap();
+    }
+
+    let bridge: Arc<dyn ralph_core::supervisor::SupervisorBridge> =
+        Arc::new(U3DispatchBridge::new(store.clone(), 4));
+    let registry = redrive_test_registry();
+    let backend = make_test_cli_backend();
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let events_path = tmp.path().join("events.jsonl");
+    let executor = U4SlotRecordingExecutor::default();
+    let recorded = executor.indices.clone();
+
+    let dispatched = crate::loop_runner::wave::dispatch_pending_redrive_waves(
+        &store,
+        "loop-u4-boot",
+        &registry,
+        &backend,
+        &bridge,
+        &events_path,
+        Arc::new(executor.clone()),
+    )
+    .await;
+    assert_eq!(dispatched, 3, "all 3 child slots must be dispatched");
+
+    let mut indices = recorded.lock().unwrap().clone();
+    indices.sort_unstable();
+    assert_eq!(
+        indices,
+        vec![0, 1, 2],
+        "C3: each child slot must spawn under its own slot index, not all slot 0"
+    );
+
+    // Idempotency (R-F5): descriptors were consumed by `take`; a second
+    // boot scan (simulating a later `ralph run --resume`) finds nothing
+    // dispatchable and spawns nothing.
+    let again = crate::loop_runner::wave::dispatch_pending_redrive_waves(
+        &store,
+        "loop-u4-boot",
+        &registry,
+        &backend,
+        &bridge,
+        &events_path,
+        Arc::new(executor),
+    )
+    .await;
+    assert_eq!(
+        again, 0,
+        "resume after successful dispatch must not re-spawn (take consumed descriptors)"
+    );
+    assert_eq!(
+        recorded.lock().unwrap().len(),
+        3,
+        "second scan must not add spawn requests"
+    );
+}
+
+/// S4 fail-closed: a legacy parent whose slots never persisted
+/// descriptors yields child slots with `expected_digest = None`; the
+/// boot scan must skip them all (slot_never_started fail-close) and
+/// spawn nothing.
+#[tokio::test]
+async fn test_u4_redrive_boot_legacy_slot_fail_closed() {
+    use ralph_core::supervisor::{InMemorySupervisorStore, SupervisorStore};
+    use std::sync::Arc;
+
+    let store: Arc<dyn SupervisorStore> = Arc::new(InMemorySupervisorStore::new());
+    let parent = make_redrive_parent_with_descriptors(store.as_ref(), "u4-legacy", 2, false);
+    let redrive = store.create_redrive_wave(&parent, None).unwrap();
+
+    // Enriched list must expose the slots WITHOUT a digest.
+    let pending = store.list_redrive_pending_child_waves().unwrap();
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0].child_wave_id, redrive.child_wave_id);
+    assert!(
+        pending[0].slots.iter().all(|s| s.expected_digest.is_none()),
+        "legacy parent slots must surface expected_digest = None"
+    );
+
+    let bridge: Arc<dyn ralph_core::supervisor::SupervisorBridge> =
+        Arc::new(U3DispatchBridge::new(store.clone(), 4));
+    let registry = redrive_test_registry();
+    let backend = make_test_cli_backend();
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let events_path = tmp.path().join("events.jsonl");
+    let executor = U4SlotRecordingExecutor::default();
+    let recorded = executor.indices.clone();
+
+    let dispatched = crate::loop_runner::wave::dispatch_pending_redrive_waves(
+        &store,
+        "loop-u4-legacy",
+        &registry,
+        &backend,
+        &bridge,
+        &events_path,
+        Arc::new(executor),
+    )
+    .await;
+    assert_eq!(
+        dispatched, 0,
+        "slots without a persisted descriptor must fail closed (no dispatch)"
+    );
+    assert!(
+        recorded.lock().unwrap().is_empty(),
+        "no worker may spawn for descriptor-less legacy slots"
+    );
+}
+
+/// S3 rusqlite-backed variant: the same multi-slot boot dispatch must
+/// work against the production persistent store (real v10 schema, real
+/// take/delete semantics), including the idempotent second scan.
+#[cfg(feature = "supervisor-db")]
+#[tokio::test]
+async fn test_s3_rusqlite_backed_wave_supervisor_dispatch() {
+    use ralph_core::supervisor::{RusqliteSupervisorStore, SupervisorStore};
+    use std::sync::Arc;
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let db_path = tmp.path().join("supervisor.db");
+    let store: Arc<dyn SupervisorStore> =
+        Arc::new(RusqliteSupervisorStore::open(&db_path).expect("open rusqlite store"));
+
+    let parent = make_redrive_parent_with_descriptors(store.as_ref(), "s3-rusqlite", 3, true);
+    let _redrive = store.create_redrive_wave(&parent, Some(&[0, 1, 2])).unwrap();
+
+    // Sanity: the parent descriptor must have landed (rusqlite
+    // first-persist regression guard, see the persist_slot_descriptor
+    // UPDATE-then-INSERT fix) and the enriched pending list must see
+    // all three child slots.
+    assert!(
+        store.slot_descriptor(&parent, 0).unwrap().is_some(),
+        "rusqlite: first persist must actually store the descriptor"
+    );
+    let pending = store.list_redrive_pending_child_waves().unwrap();
+    assert_eq!(pending.len(), 1, "rusqlite: one pending child wave expected");
+    assert_eq!(pending[0].slots.len(), 3);
+
+    // Pre-bind child slot worktrees (see the in-memory variant).
+    for i in 0..3u32 {
+        store
+            .bind_worktree(
+                &_redrive.child_wave_id,
+                i,
+                ralph_core::supervisor::SlotResource {
+                    slot_index: i,
+                    worktree_path: Some(format!("/tmp/u4-redrive/s3-child-{}-{i}", _redrive.child_wave_id)),
+                    branch: Some(format!("u4-s3-child-{}-{i}", _redrive.child_wave_id)),
+                },
+            )
+            .unwrap();
+    }
+
+    let bridge: Arc<dyn ralph_core::supervisor::SupervisorBridge> =
+        Arc::new(U3DispatchBridge::new(store.clone(), 4));
+    let registry = redrive_test_registry();
+    let backend = make_test_cli_backend();
+    let events_path = tmp.path().join("events.jsonl");
+    let executor = U4SlotRecordingExecutor::default();
+    let recorded = executor.indices.clone();
+
+    let dispatched = crate::loop_runner::wave::dispatch_pending_redrive_waves(
+        &store,
+        "loop-s3",
+        &registry,
+        &backend,
+        &bridge,
+        &events_path,
+        Arc::new(executor.clone()),
+    )
+    .await;
+    assert_eq!(
+        dispatched, 3,
+        "rusqlite-backed: all 3 child slots must be dispatched"
+    );
+    let mut indices = recorded.lock().unwrap().clone();
+    indices.sort_unstable();
+    assert_eq!(indices, vec![0, 1, 2], "rusqlite-backed: C3 slot indices");
+
+    let again = crate::loop_runner::wave::dispatch_pending_redrive_waves(
+        &store,
+        "loop-s3",
+        &registry,
+        &backend,
+        &bridge,
+        &events_path,
+        Arc::new(executor),
+    )
+    .await;
+    assert_eq!(again, 0, "rusqlite-backed: second scan is a no-op");
+}

@@ -1336,6 +1336,12 @@ async fn run_loop_impl_inner(
             ralph_core::config::HatExecutionMode::Isolated
         ),
     );
+    // 2026-07-28-002 plan U4 (G1): capture the supervisor store here so
+    // it survives the `if supervisor_path_enabled { ... } else { ... }`
+    // block scope. The redrive boot scan (below, after `backend` is
+    // constructed) needs both the bridge and the store.
+    let mut supervisor_store: Option<std::sync::Arc<dyn ralph_core::supervisor::SupervisorStore>> =
+        None;
     let supervisor_bridge: Option<Arc<dyn ralph_core::supervisor::SupervisorBridge>> =
         if supervisor_path_enabled {
             // U6: resolve the loop's main ledger path so the
@@ -1394,6 +1400,10 @@ async fn run_loop_impl_inner(
                             );
                         }
                     }
+                    // 2026-07-28-002 plan U4 (G1): capture the store for
+                    // the redrive boot scan that runs after `backend` is
+                    // constructed below.
+                    supervisor_store = Some(store.clone());
                     info!(
                         db_path = %supervisor_cfg.db_path,
                         max_concurrent_workers = supervisor_cfg.max_concurrent_workers,
@@ -1482,6 +1492,10 @@ async fn run_loop_impl_inner(
                                     );
                                 }
                             }
+                            // 2026-07-28-002 plan U4 (G1): capture the
+                            // store for the redrive boot scan (same as
+                            // the supervisor-enabled path above).
+                            supervisor_store = Some(store.clone());
                             info!(
                                 db_path = %supervisor_cfg.db_path,
                                 "default wave path picked up supervisor-db (KTD-2 / 2026-07-22-001 U3)"
@@ -1670,6 +1684,46 @@ async fn run_loop_impl_inner(
     // Append custom args from CLI if provided (e.g., `ralph run -b opencode -- --model="some-model"`)
     if !custom_args.is_empty() {
         backend.args.extend(custom_args);
+    }
+
+    // 2026-07-28-002 plan U4 (G1 / R-F1): redrive boot dispatch. When
+    // resuming, scan the supervisor store for pending redrive child
+    // waves (created by a previous loop via `create_redrive_wave` but
+    // never dispatched, e.g. crash between create and spawn) and
+    // dispatch each slot whose descriptor is dispatchable (digest
+    // matches, not yet terminal). Runs AFTER `backend` construction so
+    // the dispatcher can spawn real workers, and BEFORE the main event
+    // loop so recovered workers join the same iteration context as a
+    // normal dispatch. Gated on `resume`: a fresh boot never consumes
+    // leftover redrive state (plan U4 fresh-boot exclusion). Failures
+    // inside the scan are warn+continue (see the helper) so a corrupt
+    // child wave can never abort loop startup.
+    if resume {
+        if let (Some(bridge), Some(store)) = (&supervisor_bridge, &supervisor_store) {
+            // Re-derive the supervisor events path (same derivation as
+            // the bridge construction above).
+            let supervisor_events_path = resolve_emit_events_path(
+                &ctx,
+                crate::loop_runner::paths::config_state_machine_enabled(&config),
+            );
+            let hat_registry = ralph_core::HatRegistry::from_config(&config);
+            let dispatched = crate::loop_runner::wave::dispatch_pending_redrive_waves(
+                store,
+                &loop_id,
+                &hat_registry,
+                &backend,
+                bridge,
+                &supervisor_events_path,
+                std::sync::Arc::new(crate::loop_runner::wave::ProductionExecutor),
+            )
+            .await;
+            if dispatched > 0 {
+                info!(
+                    dispatched,
+                    "U4: redrive boot scan dispatched {dispatched} pending child wave slot(s)"
+                );
+            }
+        }
     }
 
     // Create PTY executor if using interactive mode

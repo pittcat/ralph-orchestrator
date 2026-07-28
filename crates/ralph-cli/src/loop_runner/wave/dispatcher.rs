@@ -1277,6 +1277,7 @@ pub async fn execute_wave_structured(
             bridge,
             executor as Arc<dyn WaveWorkerExecutor>,
             None, // pre_registered_id: not pre-registered in normal dispatch path
+            None, // slot_index_override: events-array position is authoritative
         )
         .await;
     }
@@ -1574,6 +1575,7 @@ async fn execute_wave_via_supervisor(
         bridge,
         executor as Arc<dyn WaveWorkerExecutor>,
         None, // pre_registered_id: not pre-registered in normal dispatch path
+        None, // slot_index_override: events-array position is authoritative
     )
     .await
 }
@@ -1607,6 +1609,14 @@ pub(crate) async fn execute_wave_via_supervisor_with_executor(
     bridge: &Arc<dyn ralph_core::supervisor::SupervisorBridge>,
     executor: Arc<dyn WaveWorkerExecutor>,
     pre_registered_id: Option<&str>,
+    // 2026-07-28-002 plan U3/U4 (C3): when `Some`, every slot in this
+    // dispatch uses this store slot index instead of its position in
+    // `wave.events`. Redrive child dispatch synthesizes a single-event
+    // wave whose real store slot is the child slot index (which can be
+    // 1 or 2 in a multi-slot child wave), not the events-array position
+    // (always 0). Without this override every child slot would mis-bind
+    // to slot 0.
+    slot_index_override: Option<u32>,
 ) -> WaveDispatchOutcome {
     use ralph_core::supervisor::{SupervisorBridge as _, WaveKind};
     use ralph_core::{WaveTracker, WaveWorkerContext, build_wave_worker_prompt};
@@ -1756,7 +1766,10 @@ pub(crate) async fn execute_wave_via_supervisor_with_executor(
 
     for (index, event) in wave.events.iter().enumerate() {
         let wave_id = wave.wave_id.clone();
-        let index_u32 = index as u32;
+        // 2026-07-28-002 plan U3/U4 (C3): redrive single-slot dispatch
+        // passes the true child slot index; normal waves use the
+        // events-array position.
+        let index_u32 = slot_index_override.unwrap_or(index as u32);
         let hat_config = wave.hat_config.clone();
         let assigned_dimension = parse_assigned_dimension(event.payload.as_deref());
         let preview = event.payload.as_deref().unwrap_or("").replace('\n', " ");
@@ -1966,7 +1979,14 @@ pub(crate) async fn execute_wave_via_supervisor_with_executor(
         // before the worker process is actually spawned. Fail-closed: if
         // the store is unavailable or returns an error, skip this slot
         // entirely (no WorkerRequest pushed).
-        if let Some(store) = bridge.store() {
+        //
+        // U4 (S6): skip persistence for pre-registered redrive dispatches —
+        // the descriptor was taken FROM the store to synthesize this wave,
+        // so re-persisting would be redundant (and would drop the
+        // `slot_index_in_parent` anchor that `take` already consumed).
+        if pre_registered_id.is_none()
+            && let Some(store) = bridge.store()
+        {
             use ralph_core::supervisor::{SlotDescriptor, fingerprint_payload};
             // `wave.events[i].payload` is `Option<String>` from
             // `ralph_core::event_reader::Event` (not `ralph_proto::Event`).
@@ -11472,7 +11492,7 @@ pub(crate) async fn dispatch_redrive_child_wave(
     hat_registry: &ralph_core::HatRegistry,
     child_wave_id: String,
     descriptor: ralph_core::supervisor::SlotDescriptor,
-    _child_slot_index: u32,
+    child_slot_index: u32,
     expected_total: u32,
     main_events_file: &std::path::Path,
 ) -> WaveDispatchOutcome {
@@ -11534,6 +11554,11 @@ pub(crate) async fn dispatch_redrive_child_wave(
         &bridge,
         executor,
         Some(&child_wave_id),
+        // 2026-07-28-002 plan U3/U4 (C3): the synthesized wave carries
+        // exactly one event, but its store slot is the child slot index
+        // (which differs from the events-array position 0 for multi-slot
+        // child waves).
+        Some(child_slot_index),
     )
     .await
 }
@@ -11615,7 +11640,13 @@ pub(crate) async fn dispatch_pending_redrive_waves(
 
             match outcome {
                 RedriveTakeOutcome::Dispatchable { descriptor } => {
-                    let expected_total = child.slots.len() as u32;
+                    // 2026-07-28-002 plan U4 (S6): each boot dispatch is a
+                    // single-slot wave (`dispatch_redrive_child_wave`
+                    // synthesizes exactly one event), so the wave total is
+                    // 1 regardless of how many slots the child wave has.
+                    // The other slots are dispatched by their own loop
+                    // iterations.
+                    let expected_total = 1u32;
                     dispatch_redrive_child_wave(
                         bridge.clone(),
                         worker_executor.clone(),
