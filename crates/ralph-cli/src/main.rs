@@ -390,8 +390,21 @@ async fn main() -> Result<()> {
 
     match cli.command {
         Some(Commands::Run(args)) => {
+            // Forward explicit `-c` values only. When the operator did
+            // not pass `-c`, do not synthesise `default_config_path()`
+            // into the RPC child argv — that turns every in-loop
+            // missing-default lookup into a `Config file "ralph.yml"
+            // not found, using defaults` warning when the workspace
+            // has no ralph.yml (e.g. dogfooding a builtin preset).
+            // The child re-resolves its own config from RALPH_CONFIG
+            // or the same default path on first use.
+            let run_config_sources: Vec<ConfigSource> = if config_was_explicit {
+                config_sources.clone()
+            } else {
+                Vec::new()
+            };
             commands::run::run_command(
-                &config_sources,
+                &run_config_sources,
                 hats_source.as_ref(),
                 cli.verbose,
                 cli.color,
