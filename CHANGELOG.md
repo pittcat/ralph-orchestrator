@@ -4,11 +4,9 @@ All notable changes to ralph-orchestrator are documented here.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-### Changed
+## [Unreleased]
 
-- State projection topic activation is now opt-in by configured action key; custom presets must explicitly declare topics. Added atomic `ensure_task_batch` projection for task DAG materialization with all-or-nothing validation.
-
-### Added
+### Removed
 
 - Removed backends: amp, roo, kiro, kiro-acp, copilot. Remaining backends: claude, gemini, codex, opencode, pi, traecli, custom. The full backend
   surface is now 7 named backends + 1 custom adapter. Removed in plan
@@ -54,9 +52,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
     `crates/ralph-e2e/src/backend.rs` (and propagated through
     `auth.rs` / `runner.rs` / all `scenarios/*.rs`).
 
+### Changed
+
+- State projection topic activation is now opt-in by configured action key; custom presets must explicitly declare topics. Added atomic `ensure_task_batch` projection for task DAG materialization with all-or-nothing validation. Plan: `docs/plans/2026-07-28-001-fix-parallel-forge-dispatch-contract-plan.md` U1.
+
 ### Added
 
-- New TDD tests covering the deletion: `test_valid_backends_does_not_contain_*`
+- New generic isolated fixture coverage for commit-aware over-emit recovery (`generic_isolated_committed_first_keeps_handoff` / `generic_isolated_zero_commit_injects_one_resume` / `generic_isolated_terminal_and_default_publish_unchanged`); commit-first decision contract for the recovered `task.resume` path. Plan: `docs/plans/2026-07-28-001-fix-parallel-forge-dispatch-contract-plan.md` U3.
+
+- Parallel Forge task authority: planner no longer calls task mutation CLI; new `preset.instructions_task_mutation_authority_conflict` lint rejects agent-side mutation in projection-owned hats at preset-load time. Plan: `docs/plans/2026-07-28-001-fix-parallel-forge-dispatch-contract-plan.md` U2.
+
+- New TDD tests covering the backend deletion: `test_valid_backends_does_not_contain_*`
   in `backend_support.rs`; `test_default_priority_does_not_contain_*` in
   `auto_detect.rs`; `test_copilot_stream_module_removed` /
   `test_acp_executor_module_removed` in `ralph-adapters/src/lib.rs`;

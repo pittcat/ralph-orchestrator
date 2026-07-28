@@ -71,6 +71,10 @@ schemas:
         meaning: Non-empty ordered Unit task specifications projected atomically into the task ledger.
         source: Parsed execution-plan.yml units[].
         fill_rule: Each item has unit_id, task_key, title, and depends_on_task_keys; task_key is forge:<plan-key>:<unit-id>; no task mutation CLI.
+      plan_key:
+        meaning: Forge plan key basename for artifact roots.
+        source: Basename of plan_path without .md/.html.
+        fill_rule: Must match .ralph/forge/<plan-key>/ directory name.
 
   forge.concurrency.approved:
     required_fields:

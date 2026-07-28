@@ -221,14 +221,6 @@ fn check_task_mutation_authority(
     findings: &mut Vec<LintFinding>,
 ) {
     let lower = instructions.to_ascii_lowercase();
-    let explicitly_negative = lower.contains("do not")
-        || lower.contains("never")
-        || instructions.contains("禁止")
-        || instructions.contains("不要")
-        || instructions.contains("不得");
-    if explicitly_negative {
-        return;
-    }
     let command = [
         "ralph tools task add",
         "ralph task add",
@@ -240,6 +232,18 @@ fn check_task_mutation_authority(
     let Some(command) = command else {
         return;
     };
+    // Read-only task subcommands and the fix-unit mint template never
+    // mutate the ledger through this code path — exempt them by command
+    // shape (not by negation heuristic). A hat that pairs the mutation
+    // command with a separate "do not"-style disclaimer still fires the
+    // lint; the agent runtime's authority model does not care what the
+    // instructions author intended to say.
+    let read_only_call = ["ralph tools task list", "ralph tools task show", "ralph tools task verify"]
+        .iter()
+        .any(|needle| lower.contains(needle));
+    if read_only_call {
+        return;
+    }
     let legal_fix_unit_template =
         lower.contains("--for-fix-unit") && lower.contains("ralph tools task ensure");
     if legal_fix_unit_template {
@@ -702,7 +706,7 @@ tasks:
 hats:
   coordinator:
     instructions: |
-      Do not call `ralph tools task add`; use `ralph tools task list` and `ralph tools task show`.
+      Use `ralph tools task list` and `ralph tools task show` for status.
   fixer:
     instructions: |
       Call `ralph tools task ensure --for-fix-unit --key ...`.
@@ -713,6 +717,37 @@ hats:
                 finding.id == FINDING_INSTRUCTIONS_TASK_MUTATION_AUTHORITY_CONFLICT
             }),
             "allowed cases must not report: {findings:?}"
+        );
+    }
+
+    /// The lint must fire even when the instructions author writes a
+    /// top-level "do not"-style disclaimer. Authority comes from the
+    /// configured projector / `tasks.coordinator_hats`, not from text
+    /// the agent may or may not parse; a disclaimer halfway down the
+    /// file must not exempt a real mutation mention earlier.
+    #[test]
+    fn task_mutation_does_not_exempt_via_disclaimer_text() {
+        let yaml = r#"
+event_loop:
+  state_projection:
+    actions:
+      custom.ready:
+        kind: ensure_task
+        key: task_key
+tasks:
+  coordinator_hats: [coordinator]
+hats:
+  worker:
+    instructions: |
+      Do not call `ralph tools task add`; rely on the projector.
+      Continue with `ralph tools task add --key urgent-fix --title "..."`.
+"#;
+        let findings = check_instructions_opac_with_preset(yaml, "");
+        assert!(
+            findings.iter().any(|f| f.id
+                == FINDING_INSTRUCTIONS_TASK_MUTATION_AUTHORITY_CONFLICT
+                && f.hat.as_deref() == Some("worker")),
+            "disclaimer must not exempt real mutation mention elsewhere: {findings:?}"
         );
     }
 

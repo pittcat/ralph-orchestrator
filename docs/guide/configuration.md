@@ -44,6 +44,7 @@ re-passing `-c`. Custom project filenames no longer need a
 
 仓库外 custom preset 如需投影自定义 topic，必须在配置中显式声明对应 action key；移除声明不会产生隐式兼容行为。
 
+### User-level config (`~/.ralph/config.yml`)
 
 Use `~/.ralph/config.yml` for defaults you want everywhere, such as shared backend settings, global lifecycle hooks, or organization-wide guardrails.
 
