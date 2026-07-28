@@ -248,6 +248,14 @@ pub async fn run_wave_worker_pty(
             hard_cap_ms: wave_timeout.as_millis() as u64,
             idle_window_ms: Some(idle_heartbeat.unwrap().as_millis() as u64),
             weak_cap: idle_weak_signal_cap,
+            // 2026-07-28-003 plan U1/U2: startup_grace is wired in
+            // U3 via a new `startup_grace: Option<Duration>` parameter
+            // on `run_wave_worker` / `run_wave_worker_pty`. Until
+            // U3 lands we conservatively leave it `None` so the
+            // behaviour is bit-for-bit identical to the pre-U6
+            // baseline (which is what U2's placeholder contract
+            // promises).
+            startup_grace_ms: None,
         })
     } else {
         None
@@ -352,6 +360,17 @@ pub async fn run_wave_worker_pty(
                             killed = true;
                             timed_out = true;
                         }
+                        // 2026-07-28-003 U1 §20 placeholder arm:
+                        // behaviour-equivalent to IdleKill here;
+                        // U2 promotes this to a distinct
+                        // `startup_kill` attribution string.
+                        super::heartbeat::LeaseDecision::StartupKill => {
+                            warn!(worker = index,
+                                  "Wave worker startup grace exceeded (U1 placeholder; U2 promotes to startup_kill)");
+                            let _ = child.kill();
+                            killed = true;
+                            timed_out = true;
+                        }
                         super::heartbeat::LeaseDecision::Continue => {
                             // The hard sleep fired but neither kill condition was met.
                             // This means the hard deadline hasn't been reached yet and the
@@ -393,6 +412,15 @@ pub async fn run_wave_worker_pty(
                                     warn!(worker = index, idle_window_secs = idle_heartbeat.unwrap().as_secs(),
                                           weak_count = lease_state.weak_count,
                                           "Wave worker idle heartbeat exceeded, killing process");
+                                    let _ = child.kill();
+                                    killed = true;
+                                    timed_out = true;
+                                }
+                                // 2026-07-28-003 U1 §20 placeholder arm
+                                // (U2 promotes to startup_kill attribution).
+                                super::heartbeat::LeaseDecision::StartupKill => {
+                                    warn!(worker = index,
+                                          "Wave worker startup grace exceeded (U1 placeholder; U2 promotes to startup_kill)");
                                     let _ = child.kill();
                                     killed = true;
                                     timed_out = true;
@@ -453,6 +481,15 @@ pub async fn run_wave_worker_pty(
                                 warn!(worker = index, idle_window_secs = idle_heartbeat.unwrap().as_secs(),
                                       weak_count = lease_state.weak_count,
                                       "Wave worker idle heartbeat exceeded, killing process");
+                                let _ = child.kill();
+                                killed = true;
+                                timed_out = true;
+                            }
+                            // 2026-07-28-003 U1 §20 placeholder arm
+                            // (U2 promotes to startup_kill attribution).
+                            super::heartbeat::LeaseDecision::StartupKill => {
+                                warn!(worker = index,
+                                      "Wave worker startup grace exceeded (U1 placeholder; U2 promotes to startup_kill)");
                                 let _ = child.kill();
                                 killed = true;
                                 timed_out = true;

@@ -91,6 +91,18 @@ pub struct LeaseConfig {
     /// it. Per KTD3 — cap exhaustion forces `IdleKill` even though
     /// `< idle_window`.
     pub weak_cap: u32,
+    /// 2026-07-28-003 plan U1: startup grace window in milliseconds
+    /// (`Some(ms)` when the hat configures `startup_grace_secs`).
+    ///
+    /// **Semantics:** while the worker has not yet observed its
+    /// first qualifying signal (Strong / Weak / events-file growth),
+    /// the silence window is bounded by `startup_grace_ms` instead of
+    /// `idle_window_ms`. Once `seen_first_signal` flips to true,
+    /// decision falls back to the existing idle semantics.
+    ///
+    /// `None` (or `Some(0)` collapsed upstream) keeps the legacy idle
+    /// semantics unchanged — `seen_first_signal` is irrelevant.
+    pub startup_grace_ms: Option<u64>,
 }
 
 /// Input snapshot for one `decide_lease` call. All values are relative
@@ -113,6 +125,13 @@ pub struct LeaseSnapshot {
     /// timer tick (e.g. while waiting for stdout before any line has
     /// arrived).
     pub kind: HeartbeatKind,
+    /// 2026-07-28-003 plan U1: whether the worker has observed at
+    /// least one qualifying signal since spawn. `false` (the worker
+    /// initial state) means startup grace is active when configured;
+    /// `true` migrates the decision to the existing idle semantics.
+    /// `None`-kind ticks must NEVER set this flag — only Strong /
+    /// Weak / events-file growth count.
+    pub seen_first_signal: bool,
 }
 
 /// Outcome of consulting the lease on one tick.
@@ -125,6 +144,12 @@ pub enum LeaseDecision {
     /// Worker exceeded the idle heartbeat window. The caller MUST
     /// tear the worker down with reason `idle heartbeat exceeded`.
     IdleKill,
+    /// 2026-07-28-003 plan U1: worker exceeded the startup grace
+    /// window before producing any qualifying signal. Still maps to
+    /// the `worker_timeout` family for downstream classification
+    /// (KTD3) but gets its own `startup_kill` mark so operators can
+    /// tell apart cold-start misses from runtime idle hangs.
+    StartupKill,
     /// Worker exceeded the StartToClose hard ceiling. The caller MUST
     /// tear the worker down with reason `start-to-close exceeded`.
     HardKill,
@@ -135,6 +160,7 @@ impl std::fmt::Display for LeaseDecision {
         match self {
             LeaseDecision::Continue => f.write_str("continue"),
             LeaseDecision::IdleKill => f.write_str("idle_kill"),
+            LeaseDecision::StartupKill => f.write_str("startup_kill"),
             LeaseDecision::HardKill => f.write_str("hard_kill"),
         }
     }
@@ -166,6 +192,24 @@ pub fn decide_lease(cfg: &LeaseConfig, snap: LeaseSnapshot) -> LeaseDecision {
     // (R1) Hard ceiling always wins.
     if snap.now_ms >= cfg.hard_cap_ms {
         return LeaseDecision::HardKill;
+    }
+
+    // 2026-07-28-003 U1 (R2 / S1 / S2): when the worker has not yet
+    // observed its first qualifying signal AND a startup grace is
+    // configured, the silence window is bounded by `startup_grace_ms`
+    // instead of `idle_window_ms`. Crossing the grace boundary returns
+    // `StartupKill` (a `worker_timeout` family variant). Once
+    // `seen_first_signal` flips to true this branch is skipped and
+    // the normal idle-window rule takes over.
+    if !snap.seen_first_signal {
+        if let Some(grace_ms) = cfg.startup_grace_ms {
+            if snap.now_ms >= grace_ms {
+                return LeaseDecision::StartupKill;
+            }
+            // Still inside grace → Continue (do NOT let the idle-window
+            // branch kill the worker before its cold start completes).
+            return LeaseDecision::Continue;
+        }
     }
 
     // (R7 / KTD2) Idle disabled → just HardKill (already checked)
@@ -223,6 +267,12 @@ pub struct LeaseState {
     pub now_ms: u64,
     pub last_hb_ms: u64,
     pub weak_count: u32,
+    /// 2026-07-28-003 plan U1: tracks whether the worker has
+    /// observed at least one qualifying signal (Strong / Weak-under-cap /
+    /// events-file growth) since spawn. `false` at spawn; flips to
+    /// `true` on the first such tick and stays `true` for the rest
+    /// of the worker's life. `None`-kind ticks MUST NOT flip it.
+    pub seen_first_signal: bool,
 }
 
 impl LeaseState {
@@ -235,6 +285,7 @@ impl LeaseState {
             now_ms,
             last_hb_ms: now_ms,
             weak_count: 0,
+            seen_first_signal: false,
         }
     }
 
@@ -251,6 +302,7 @@ impl LeaseState {
             last_hb_ms: self.last_hb_ms,
             weak_count: self.weak_count,
             kind,
+            seen_first_signal: self.seen_first_signal,
         };
         let decision = decide_lease(cfg, snap);
         match (decision, kind) {
@@ -262,6 +314,11 @@ impl LeaseState {
             // kind-specific refresh arms so Strong / Weak arrivals
             // at the cap do not bump last_hb or weak_count.
             (LeaseDecision::HardKill, _) => {}
+            // 2026-07-28-003 U1: StartupKill freezes the clock
+            // too — once the worker is being torn down for
+            // exceeding its cold-start grace, repeated ticks must
+            // not advance the visible last_hb / weak_count / clock.
+            (LeaseDecision::StartupKill, _) => {}
             // Strong refreshes and resets weak_count regardless of
             // decision (we may be inside an idle window that
             // successfully refreshed).
@@ -269,6 +326,8 @@ impl LeaseState {
                 self.now_ms = now_ms;
                 self.last_hb_ms = now_ms;
                 self.weak_count = 0;
+                // Strong tick flips the grace gate.
+                self.seen_first_signal = true;
             }
             // Weak refreshes only if we decided to continue. When
             // the cap ticks over, we refuse to refresh.
@@ -276,6 +335,9 @@ impl LeaseState {
                 self.now_ms = now_ms;
                 self.last_hb_ms = now_ms;
                 self.weak_count = self.weak_count.saturating_add(1);
+                // Weak under-cap counts as a qualifying signal for
+                // grace purposes — the cold start is alive.
+                self.seen_first_signal = true;
             }
             // Weak on IdleKill: do not advance last_hb or weak_count;
             // the rejection must not reset the idle window, and the
@@ -285,7 +347,10 @@ impl LeaseState {
                 self.now_ms = now_ms;
             }
             // None does not refresh and does not move the weak
-            // counter — only the clock moves.
+            // counter — only the clock moves. Critically, None
+            // ticks MUST NOT flip seen_first_signal: a stream of
+            // unclassified blank lines / unknown shapes still
+            // counts as pre-first-signal silence.
             (_, HeartbeatKind::None) => {
                 self.now_ms = now_ms;
             } // (LeaseDecision::Continue, HeartbeatKind::Strong)
@@ -739,6 +804,7 @@ mod tests {
             hard_cap_ms,
             idle_window_ms: Some(idle_window_ms),
             weak_cap,
+            startup_grace_ms: None,
         }
     }
 
@@ -747,6 +813,7 @@ mod tests {
             hard_cap_ms,
             idle_window_ms: None,
             weak_cap: 0,
+            startup_grace_ms: None,
         }
     }
 
@@ -756,6 +823,10 @@ mod tests {
             last_hb_ms,
             weak_count,
             kind,
+            // Pre-U1 fixture: legacy/old tests never exercised
+            // startup grace, so behave as if the worker has already
+            // observed its first signal (i.e. grace is irrelevant).
+            seen_first_signal: true,
         }
     }
 
@@ -1060,5 +1131,197 @@ mod tests {
         assert_eq!(LeaseDecision::Continue.to_string(), "continue");
         assert_eq!(LeaseDecision::IdleKill.to_string(), "idle_kill");
         assert_eq!(LeaseDecision::HardKill.to_string(), "hard_kill");
+    }
+
+    // =====================================================================
+    // 2026-07-28-003 plan U1: startup-grace lease semantics. New
+    // `LeaseConfig::startup_grace_ms`, `LeaseState::seen_first_signal`,
+    // and `LeaseDecision::StartupKill` variant. Pure-function tests.
+    // =====================================================================
+
+    fn cfg_with_grace(
+        hard_cap_ms: u64,
+        idle_window_ms: u64,
+        weak_cap: u32,
+        startup_grace_ms: Option<u64>,
+    ) -> LeaseConfig {
+        LeaseConfig {
+            hard_cap_ms,
+            idle_window_ms: Some(idle_window_ms),
+            weak_cap,
+            startup_grace_ms,
+        }
+    }
+
+    // ---- R2/S1: pre-first-signal silence within startup_grace → Continue ----
+    #[test]
+    fn lease_startup_grace_survives_within_window() {
+        // grace=600s, idle=120s. At elapsed=150s with no qualifying
+        // signal, the decision must be Continue (we are still inside
+        // startup_grace).
+        let cfg = cfg_with_grace(600_000, 120_000, 4, Some(600_000));
+        assert_eq!(
+            decide_lease(
+                &cfg,
+                LeaseSnapshot {
+                    now_ms: 150_000,
+                    last_hb_ms: 0,
+                    weak_count: 0,
+                    kind: HeartbeatKind::None,
+                    seen_first_signal: false,
+                }
+            ),
+            LeaseDecision::Continue
+        );
+    }
+
+    // ---- R2/S2: pre-first-signal silence past startup_grace → StartupKill ----
+    #[test]
+    fn lease_startup_grace_exceeded_kills() {
+        let cfg = cfg_with_grace(60_000, 30_000, 4, Some(2_000));
+        // 2.5s elapsed, no signal yet, grace=2s → StartupKill
+        assert_eq!(
+            decide_lease(
+                &cfg,
+                LeaseSnapshot {
+                    now_ms: 2_500,
+                    last_hb_ms: 0,
+                    weak_count: 0,
+                    kind: HeartbeatKind::None,
+                    seen_first_signal: false,
+                }
+            ),
+            LeaseDecision::StartupKill
+        );
+        // At the boundary (== startup_grace) → in-band StartupKill
+        assert_eq!(
+            decide_lease(
+                &cfg,
+                LeaseSnapshot {
+                    now_ms: 2_000,
+                    last_hb_ms: 0,
+                    weak_count: 0,
+                    kind: HeartbeatKind::None,
+                    seen_first_signal: false,
+                }
+            ),
+            LeaseDecision::StartupKill
+        );
+        // Just before the boundary → Continue
+        assert_eq!(
+            decide_lease(
+                &cfg,
+                LeaseSnapshot {
+                    now_ms: 1_999,
+                    last_hb_ms: 0,
+                    weak_count: 0,
+                    kind: HeartbeatKind::None,
+                    seen_first_signal: false,
+                }
+            ),
+            LeaseDecision::Continue
+        );
+    }
+
+    // ---- R7/S4: startup_grace_ms=None collapses to legacy idle semantics ----
+    #[test]
+    fn lease_startup_grace_none_uses_legacy_idle() {
+        // grace=None, idle=2s. At 2.5s with no signal → IdleKill, not StartupKill.
+        let cfg = cfg_with_grace(60_000, 2_000, 4, None);
+        assert_eq!(
+            decide_lease(
+                &cfg,
+                LeaseSnapshot {
+                    now_ms: 2_500,
+                    last_hb_ms: 0,
+                    weak_count: 0,
+                    kind: HeartbeatKind::None,
+                    seen_first_signal: false,
+                }
+            ),
+            LeaseDecision::IdleKill
+        );
+    }
+
+    // ---- R3/S3: first qualifying signal transitions grace → idle window ----
+    #[test]
+    fn lease_first_signal_migrates_to_idle_semantics() {
+        let cfg = cfg_with_grace(60_000, 2_000, 4, Some(8_000));
+        // Pre-signal silence → still in grace → Continue
+        assert_eq!(
+            decide_lease(
+                &cfg,
+                LeaseSnapshot {
+                    now_ms: 1_500,
+                    last_hb_ms: 0,
+                    weak_count: 0,
+                    kind: HeartbeatKind::None,
+                    seen_first_signal: false,
+                }
+            ),
+            LeaseDecision::Continue
+        );
+        // After a Strong at t=1s and 2s of silence → idle window kicks in
+        assert_eq!(
+            decide_lease(
+                &cfg,
+                LeaseSnapshot {
+                    now_ms: 3_000,
+                    last_hb_ms: 1_000,
+                    weak_count: 0,
+                    kind: HeartbeatKind::None,
+                    seen_first_signal: true,
+                }
+            ),
+            LeaseDecision::IdleKill
+        );
+    }
+
+    // ---- R4/S5: None-classified signal does not end startup grace ----
+    #[test]
+    fn lease_none_tick_does_not_end_startup_grace() {
+        let cfg = cfg_with_grace(60_000, 600_000, 4, Some(600_000));
+        // None tick inside idle window AFTER seen_first_signal is irrelevant;
+        // here seen_first_signal=false so we stay in grace. Critically:
+        // None tick must NOT set seen_first_signal → grace still active.
+        assert_eq!(
+            decide_lease(
+                &cfg,
+                LeaseSnapshot {
+                    now_ms: 0,
+                    last_hb_ms: 0,
+                    weak_count: 0,
+                    kind: HeartbeatKind::None,
+                    seen_first_signal: false,
+                }
+            ),
+            LeaseDecision::Continue
+        );
+    }
+
+    // ---- Hard cap still wins over startup-grace ----
+    #[test]
+    fn lease_hard_cap_wins_over_startup_grace() {
+        let cfg = cfg_with_grace(1_000, 5_000, 4, Some(600_000));
+        // grace is wide, but hard cap is 1s; at t=1s, HardKill not StartupKill.
+        assert_eq!(
+            decide_lease(
+                &cfg,
+                LeaseSnapshot {
+                    now_ms: 1_000,
+                    last_hb_ms: 0,
+                    weak_count: 0,
+                    kind: HeartbeatKind::None,
+                    seen_first_signal: false,
+                }
+            ),
+            LeaseDecision::HardKill
+        );
+    }
+
+    // ---- Display stable for greppable kill reason ----
+    #[test]
+    fn lease_startup_kill_display_is_stable() {
+        assert_eq!(LeaseDecision::StartupKill.to_string(), "startup_kill");
     }
 }
