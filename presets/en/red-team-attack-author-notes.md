@@ -274,6 +274,24 @@ N/A — execution_model=single-chain，未引入 `event_loop.supervisor.enabled`
 - `cargo nextest run -p ralph-cli --bin ralph -- presets`：✓ 57/57 通过（含 `test_all_embedded_presets_pass_strict_lint` / `test_all_public_presets_pass_authoring_contract`）
 - `./scripts/run-tests.sh`：1 个失败（`implementation_review_dispatcher_contract_has_no_resume_redrive`），已验证为修改前既有问题（git stash 后依然失败），与本 preset 无关
 
+## Review 修复记录（2026-07-28）
+
+AAF 评审发现 3 个问题，已全部修复：
+
+1. **P0-1: PLAN.md 完成无显式信号** — impact-boundary 写 `PLAN.md` 后没有 emit 事件，independent-reviewer 可能在 `PLAN.md` 写完前被触发。
+   - 修复：新增 `redteam.plan.ready` topic；impact-boundary 在「所有 findings 处理完且 PLAN.md 写完」时 emit `redteam.plan.ready`；independent-reviewer 的 trigger 改为 `redteam.plan.ready` + `redteam.impact.rejected`。
+   - 同时删除 `redteam.impact.qualified` topic（原设计让 reviewer 跟踪每个 qualified finding，但 isolated 模式下中间信号无 consumer 会挂起 lint）。impact-boundary 在单个 finding 达标时只写 finding artifact 不 emit；全部完成后才 emit `redteam.plan.ready`。
+
+2. **P1-1: `lock_status` 幽灵字段** — target-locker instructions 要求 emit `lock_status: locked/failed`，plan-resolver 依赖它做判断，但 schema `required_fields` 未声明。
+   - 修复：`redteam.target.locked` schema 增加 `lock_status` 到 `required_fields` 和 `field_docs`（meaning / source / fill_rule 完整）。
+
+3. **P1-2: `TARGET_HEAD_CHANGED` 不在 `reason` 允许值中** — plan-resolver instructions 说 HEAD 不匹配时 emit `redteam.plan.unresolved` with `reason: TARGET_HEAD_CHANGED`，但 schema `fill_rule` 只提到 `REJECTED_NO_RESOLVED_PLAN`。
+   - 修复：`redteam.plan.unresolved` schema `field_docs.reason.fill_rule` 扩展为 `One of REJECTED_NO_RESOLVED_PLAN, TARGET_HEAD_CHANGED, TARGET_TREE_CHANGED`。
+
+修复后校验：
+- `ralph preset check -H builtin:red-team-attack --strict`：✓ PASS
+- `cargo nextest run -p ralph-cli --bin ralph -- presets`：✓ 57/57 通过
+
 ## 建议
 
 调用 `ralph-preset-review` 对 `presets/en/red-team-attack.yml` + `presets/schemas/red-team-attack.yml` 做 AAF 评审（不替代 `ralph preset check -H builtin:red-team-attack --strict`）。

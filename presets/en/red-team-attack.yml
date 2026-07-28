@@ -98,8 +98,8 @@ event_loop:
       - "redteam.experiment.done"
       - "redteam.evidence.gated"
       - "redteam.retry.required"
-      - "redteam.impact.qualified"
       - "redteam.impact.rejected"
+      - "redteam.plan.ready"
       - "redteam.reviewed"
     completion_after_terminal:
       duplicate_terminal: reject
@@ -160,14 +160,7 @@ event_loop:
       - {hat_id: impact-boundary, topic: redteam.evidence.gated}
       - {hat_id: independent-reviewer, topic: redteam.evidence.gated}
       - {hat_id: reporter, topic: redteam.evidence.gated}
-      # impact-boundary owns impact.qualified / impact.rejected
-      - {hat_id: target-locker, topic: redteam.impact.qualified}
-      - {hat_id: plan-resolver, topic: redteam.impact.qualified}
-      - {hat_id: attack-surface-mapper, topic: redteam.impact.qualified}
-      - {hat_id: experiment-runner, topic: redteam.impact.qualified}
-      - {hat_id: evidence-gate, topic: redteam.impact.qualified}
-      - {hat_id: independent-reviewer, topic: redteam.impact.qualified}
-      - {hat_id: reporter, topic: redteam.impact.qualified}
+      # impact-boundary owns impact.rejected / plan.ready
       - {hat_id: target-locker, topic: redteam.impact.rejected}
       - {hat_id: plan-resolver, topic: redteam.impact.rejected}
       - {hat_id: attack-surface-mapper, topic: redteam.impact.rejected}
@@ -175,6 +168,13 @@ event_loop:
       - {hat_id: evidence-gate, topic: redteam.impact.rejected}
       - {hat_id: independent-reviewer, topic: redteam.impact.rejected}
       - {hat_id: reporter, topic: redteam.impact.rejected}
+      - {hat_id: target-locker, topic: redteam.plan.ready}
+      - {hat_id: plan-resolver, topic: redteam.plan.ready}
+      - {hat_id: attack-surface-mapper, topic: redteam.plan.ready}
+      - {hat_id: experiment-runner, topic: redteam.plan.ready}
+      - {hat_id: evidence-gate, topic: redteam.plan.ready}
+      - {hat_id: independent-reviewer, topic: redteam.plan.ready}
+      - {hat_id: reporter, topic: redteam.plan.ready}
       # independent-reviewer owns reviewed
       - {hat_id: target-locker, topic: redteam.reviewed}
       - {hat_id: plan-resolver, topic: redteam.reviewed}
@@ -199,8 +199,8 @@ event_loop:
       - {hat_id: ralph, topic: redteam.experiment.done}
       - {hat_id: ralph, topic: redteam.evidence.gated}
       - {hat_id: ralph, topic: redteam.retry.required}
-      - {hat_id: ralph, topic: redteam.impact.qualified}
       - {hat_id: ralph, topic: redteam.impact.rejected}
+      - {hat_id: ralph, topic: redteam.plan.ready}
       - {hat_id: ralph, topic: redteam.reviewed}
       - {hat_id: ralph, topic: redteam.complete}
 
@@ -557,9 +557,9 @@ hats:
     name: "Impact Boundary"
     description: "Bounds impact scope for qualified findings, creates formal findings, and writes the repair plan."
     triggers: ["redteam.evidence.gated"]
-    publishes: ["redteam.impact.qualified", "redteam.impact.rejected"]
-    exempt_topics: ["redteam.impact.qualified", "redteam.impact.rejected"]
-    terminal_events: ["redteam.impact.qualified", "redteam.impact.rejected"]
+    publishes: ["redteam.impact.rejected", "redteam.plan.ready"]
+    exempt_topics: ["redteam.impact.rejected", "redteam.plan.ready"]
+    terminal_events: ["redteam.impact.rejected", "redteam.plan.ready"]
     event_filter:
       enabled: true
       events: ["redteam.evidence.gated"]
@@ -617,10 +617,11 @@ hats:
       7. If all thresholds pass:
          - Write `.ralph/red-team/findings/RTF-<NNN>.md` from finding template
          - Write `.ralph/red-team/08-impact-boundary.md`
-         - Emit `redteam.impact.qualified` with `finding_id`, `severity`, `finding_file_path`, `impact_file_path`
+         - Do NOT emit yet; continue to step 8 to check if more experiments remain
       8. After all findings processed (check if more experiments remain in evidence board):
          - If more qualified experiments pending → wait for next trigger
-         - If all done → write `.ralph/red-team/PLAN.md` from plan template
+         - If all done → write `.ralph/red-team/PLAN.md` from plan template,
+           then emit `redteam.plan.ready` with `plan_file_path`, `finding_count`, `impact_file_path`
       9. Precheck then emit. Single business event only.
 
       ### Repair Plan Rules
@@ -637,13 +638,13 @@ hats:
   independent-reviewer:
     name: "Independent Reviewer"
     description: "Independently audits the final repair plan, evidence chain, and threshold compliance. Cannot reinterpret low-score experiments or add rejected items."
-    triggers: ["redteam.impact.qualified", "redteam.impact.rejected"]
+    triggers: ["redteam.plan.ready", "redteam.impact.rejected"]
     publishes: ["redteam.reviewed"]
     exempt_topics: ["redteam.reviewed"]
     terminal_events: ["redteam.reviewed"]
     event_filter:
       enabled: true
-      events: ["redteam.impact.qualified", "redteam.impact.rejected"]
+      events: ["redteam.plan.ready", "redteam.impact.rejected"]
     instructions: |
       ## INDEPENDENT REVIEWER MODE
 
@@ -655,6 +656,12 @@ hats:
       ### Mission
       Audit the final `PLAN.md` and all supporting artifacts.
       Emit `redteam.reviewed` with verdict `PLAN_READY` or `PLAN_REJECTED`.
+
+      ### Trigger Handling
+      - On `redteam.plan.ready`: all findings qualified and PLAN.md is complete. Run full audit.
+      - On `redteam.impact.rejected`: one or more findings were rejected after retry.
+        Audit the rejection history and verify it complies with retry budget rules.
+        Verdict is `PLAN_REJECTED` (rejected findings cannot enter the plan).
 
       ### Audit Checklist
       - Every Finding has a real experiment (not just static analysis)
@@ -678,16 +685,21 @@ hats:
       - No scope expansion without user confirmation
 
       ### Steps
-      1. Read all available artifacts: target-lock, plan-resolution, patch-reconstruction,
+      1. Read trigger payload.
+         - On `redteam.plan.ready`: read `plan_file_path`, `finding_count`, `impact_file_path`.
+         - On `redteam.impact.rejected`: read `experiment_id`, `reason`, `impact_file_path`.
+      2. Read all available artifacts: target-lock, plan-resolution, patch-reconstruction,
          attack-surface, experiment-plan, experiments, evidence board, retry board,
-         impact boundary, findings, PLAN.md.
-      2. Verify HEAD/tree match lock.
-      3. Run through the audit checklist above.
-      4. Write `.ralph/red-team/10-independent-review.md` with detailed findings.
-      5. Verdict:
-         - All checks pass → `PLAN_READY`
-         - Any check fails → `PLAN_REJECTED` (with specific reasons)
-      6. Precheck then emit `redteam.reviewed` with `verdict`, `review_file_path`, `plan_file_path`.
+         impact boundary, findings, PLAN.md (on plan.ready only).
+      3. Verify HEAD/tree match lock.
+      4. Run through the audit checklist above.
+      5. Write `.ralph/red-team/10-independent-review.md` with detailed findings.
+      6. Verdict:
+         - On `redteam.plan.ready` and all checks pass → `PLAN_READY`
+         - On `redteam.plan.ready` and any check fails → `PLAN_REJECTED` (with specific reasons)
+         - On `redteam.impact.rejected` → `PLAN_REJECTED` (rejected findings cannot enter plan)
+      7. Precheck then emit `redteam.reviewed` with `verdict`, `review_file_path`, `plan_file_path`.
+         On `redteam.impact.rejected`, `plan_file_path` may be empty string if no PLAN.md exists.
 
       Single business event only.
 

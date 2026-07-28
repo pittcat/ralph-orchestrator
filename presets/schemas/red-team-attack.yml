@@ -31,6 +31,7 @@ schemas:
       - target_tree
       - plan_count
       - lock_file_path
+      - lock_status
     payload: json_object
     field_docs:
       target_head:
@@ -49,6 +50,10 @@ schemas:
         meaning: Path to the target-lock artifact (`.ralph/red-team/01-target-lock.md`).
         source: File actually written this activation.
         fill_rule: Real readable path; agent must verify `test -f` before emit.
+      lock_status:
+        meaning: Whether the target was successfully locked (no in-progress git operations, clean tree).
+        source: Locker writes from git status checks.
+        fill_rule: One of `locked`, `failed`. `locked` means clean tree and no MERGE_HEAD/REBASE_HEAD/CHERRY_PICK_HEAD; `failed` means any check failed.
 
   # plan-resolver -> per-plan commit resolution result. attack-surface-mapper
   # reads the resolution artifact to build attack surfaces.
@@ -82,7 +87,7 @@ schemas:
       reason:
         meaning: Why no plan could be resolved.
         source: Resolver writes from final retry state.
-        fill_rule: One of `REJECTED_NO_RESOLVED_PLAN`.
+        fill_rule: One of `REJECTED_NO_RESOLVED_PLAN`, `TARGET_HEAD_CHANGED`, `TARGET_TREE_CHANGED`.
       resolution_file_path:
         meaning: Path to the plan-resolution artifact (contains retry history).
         source: File actually written this activation.
@@ -216,33 +221,6 @@ schemas:
         source: File actually written this activation.
         fill_rule: Real readable path.
 
-  # impact-boundary -> impact qualified, formal finding created.
-  # repair-planner reads the finding artifact to build repair units.
-  redteam.impact.qualified:
-    required_fields:
-      - finding_id
-      - severity
-      - finding_file_path
-      - impact_file_path
-    payload: json_object
-    field_docs:
-      finding_id:
-        meaning: Unique finding identifier (RTF-NNN).
-        source: Boundary assigns from qualified experiment.
-        fill_rule: Format `RTF-\d{3,}`; must match finding artifact filename.
-      severity:
-        meaning: Finding severity.
-        source: Boundary assigns from impact analysis.
-        fill_rule: One of `P0`, `P1`, `P2`, `P3`.
-      finding_file_path:
-        meaning: Path to finding artifact (`.ralph/red-team/findings/RTF-<NNN>.md`).
-        source: File actually written this activation.
-        fill_rule: Real readable path.
-      impact_file_path:
-        meaning: Path to impact boundary artifact (`.ralph/red-team/08-impact-boundary.md`).
-        source: File actually written this activation.
-        fill_rule: Real readable path.
-
   # impact-boundary -> impact uncertain after retry exhausted, finding rejected.
   redteam.impact.rejected:
     required_fields:
@@ -261,6 +239,28 @@ schemas:
         fill_rule: One of `REJECTED_AFTER_RETRY_UNCERTAIN_IMPACT`, `REJECTED_AFTER_RETRY_LOW_CONFIDENCE`, `REJECTED_AFTER_RETRY_LOW_EVIDENCE`, `REJECTED_AFTER_RETRY_LOW_VERIFIABILITY`, `REJECTED_AFTER_RETRY_MISSING_MANDATORY_EVIDENCE`, `REJECTED_AFTER_RETRY_DIRTY_WORKTREE`, `REJECTED_AFTER_RETRY_NOT_EXECUTED`, `REJECTED_AFTER_RETRY_CONTROL_FAILED`, `REJECTED_AFTER_RETRY_NOT_REPRODUCIBLE`.
       impact_file_path:
         meaning: Path to impact boundary artifact (contains rejection history).
+        source: File actually written this activation.
+        fill_rule: Real readable path.
+
+  # impact-boundary -> all findings processed and PLAN.md written.
+  # independent-reviewer picks this up to run the final audit.
+  redteam.plan.ready:
+    required_fields:
+      - plan_file_path
+      - finding_count
+      - impact_file_path
+    payload: json_object
+    field_docs:
+      plan_file_path:
+        meaning: Path to the completed repair plan artifact (`.ralph/red-team/PLAN.md`).
+        source: File actually written this activation.
+        fill_rule: Real readable path; agent must verify `test -f` before emit.
+      finding_count:
+        meaning: Number of formal findings (RTF-*) included in the plan.
+        source: Count from `.ralph/red-team/findings/`.
+        fill_rule: Integer >= 0.
+      impact_file_path:
+        meaning: Path to impact boundary artifact (`.ralph/red-team/08-impact-boundary.md`).
         source: File actually written this activation.
         fill_rule: Real readable path.
 
