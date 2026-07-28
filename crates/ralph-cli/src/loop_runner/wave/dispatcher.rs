@@ -1616,6 +1616,7 @@ pub(crate) async fn dispatch_redrive_child_wave(
     expected_total: u32,
     main_events_file: &Path,
     _events_ledger: &Path,
+    executor: Arc<dyn WaveWorkerExecutor>,
 ) -> WaveDispatchOutcome {
     use ralph_core::supervisor::SupervisorBridge as _;
 
@@ -1689,7 +1690,7 @@ pub(crate) async fn dispatch_redrive_child_wave(
         None, // hats_source_label
         None, // config_path
         bridge,
-        Arc::new(ProductionExecutor),
+        executor,
         Some(&child_wave_id), // pre_registered_id: U4 S6
     )
     .await
@@ -1723,6 +1724,7 @@ pub(crate) async fn dispatch_pending_redrive_waves(
     bridge: &Arc<dyn ralph_core::supervisor::SupervisorBridge>,
     main_events_file: &Path,
     events_ledger: &Path,
+    executor: Arc<dyn WaveWorkerExecutor>,
 ) {
     use ralph_core::supervisor::{RedriveTakeOutcome, SupervisorStore};
 
@@ -1784,6 +1786,7 @@ pub(crate) async fn dispatch_pending_redrive_waves(
                         1,
                         main_events_file,
                         events_ledger,
+                        executor.clone(),
                     )
                     .await
                 }

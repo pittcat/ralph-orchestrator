@@ -1747,6 +1747,7 @@ async fn run_loop_impl_inner(
             bridge,
             &supervisor_events_path,
             &supervisor_events_path,
+            std::sync::Arc::new(crate::loop_runner::wave::ProductionExecutor),
         )
         .await;
     }
