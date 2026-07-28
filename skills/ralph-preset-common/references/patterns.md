@@ -210,6 +210,16 @@ work.done / fix.done
     收敛 topic（如 `forge.report.done`），使 reporter 在 work.failed 后
     不会再次被 FlowStepScope 拒。
 
+## Projection-Owned Task DAG pattern（通用：单事件原子建 task DAG）
+
+适用范围：任何 preset 由一个 hat 一次性声明 N 个内部 task（unit / fix-unit / dimension 等），并交给 StateProjector 一次性原子落盘。下游 hat 通过 `ralph tools task list` 读取 live `task_id`，**不再**走 agent 自己 `task add`。
+
+- 唯一写者：在 `event_loop.state_projection.actions` 配置 typed action，例如 `forge.plan.ready: { kind: ensure_task_batch, items: unit_tasks, count: unit_count, key: task_key, title: title, blocked_by_keys: depends_on_task_keys }`。Projector 在 `try_with_exclusive_lock` 闭包内完成全批校验 → ID mint → 持久化，任一失败整批零写。atomicity 是关键，禁止把 batch 拆成多次 `task add`。
+- Schema 配套：preset `presets/schemas/<name>.yml` 在 `schemas.<topic>` 加 `unit_tasks` 到 `required_fields`，并在 `field_docs.unit_tasks` 里说明 item 字段、key 格式与依赖语义。
+- Hat `instructions`：**禁止**让 projector-owned hat 同时调 `ralph tools task add` / `task ensure` 走 CLI；lint `preset.instructions_task_mutation_authority_conflict` 会拒收并强制改为 declarative payload。
+- 下游消费：`unit_done` / `exec.unit.done` 等执行类触发携带 `task_id`（live id，由 `ralph tools task list` 取得），projector 不参与 link 解析；dispatcher / executor 只读 `task_id` 字段。
+- 起草后用结构性契约测试验证：一笔 emit 完成 → `TaskStore` 的 `all()` 行数等于 `count`，IDS 唯一且 `blocked_by` 反解为 payload 中的 `depends_on_task_keys`；64 项 batch 的 `successful_persist_count` 增量恰好 1（path-scoped observer）；invalid batch 增量 0 且原 bytes 不变。
+
 ## 起草反模式（禁止抄进 instructions）
 
 | 反模式 | 应改为 |

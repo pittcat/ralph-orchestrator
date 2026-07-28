@@ -133,6 +133,7 @@ Review skill 将 mechanical lint 与软性 AAF 缺口映射为 P0/P1/P2 + confid
 | `preset.payload_consistency_unknown_op` | P0 | 90 | Q4 | lint | `when.op` 不在 `eq`/`ne`/`gt`/`gte`/`exists`/`non_empty` 白名单 |
 | `preset.payload_consistency_non_object_when` | P0 | 90 | Q4 | lint | `when` 不是 object（单谓词或 `all`/`any` 组合） |
 | `preset.payload_consistency_unsafe_message` | P0 | 90 | Q4 | lint | `rule.message` 含 ANSI escape / C0/C1 控制字符 / 零宽字符 / 长度超过 1024 UTF-8 bytes |
+| `preset.instructions_task_mutation_authority_conflict` | P0 | 90 | Q5 | lint | hat `instructions` 在 projector-owned batch action 或非 coordinator 角色下仍要求 `ralph tools task add` / `task ensure`；单写者冲突由 lint 兜底 |
 
 ### Artifact-First Handoff finding_id（review-only，lint 不直接产出）
 

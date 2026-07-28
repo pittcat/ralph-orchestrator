@@ -88,6 +88,7 @@
 - [ ] 终态报告类 hat：正文面向决策者、技术附录面向核验证据者；正文不得是 payload 字段流水账，失败路径不得写成 silent-success
 - [ ] **操作者交付文件路径可见（硬）**：凡「本轮写操作者可读文件 + schema 要求路径字段」的 hat，payload 必须带真实路径字段；instructions 须自洽写明「先落盘 → `test -f` → `--policy-check` → 真实 emit → Confirm 打印 `DELIVERABLE_PATH:`」（不依赖 emit skill 已注入）；schema 只验字段非空、不验文件系统
 - [ ] `task_id` / `task_key` / `step`：引用 `ralph-tools-tasks` red box
+- [ ] **task authority 单写者**：若 preset 在 `event_loop.state_projection.actions` 配了 task-creation action（例如 `forge.plan.ready` → `ensure_task_batch`），对应 hat 的 instructions **不得**再调用 `ralph tools task add` / `task ensure` 走 CLI；lint `preset.instructions_task_mutation_authority_conflict` 会拒收。修补：从 hat instructions 删除 CLI mutation 文字，统一通过 declarative handoff payload 走 projector。
 - [ ] 不复述 `ralph-tools*.md` 参数表
 - [ ] **对每个 emit topic，按 payload audit 五列填行**（见下）—— schema 通过不等于字段可达
 - [ ] **对每个 payload 字段，反查 schema metadata**：`field_docs.meaning/source/fill_rule` 与 Payload Contract 的值源、可见性、下游消费一致
