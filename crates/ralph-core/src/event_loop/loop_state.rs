@@ -307,6 +307,10 @@ pub struct LoopState {
     /// written by `check_default_publishes` so a later JSONL business event
     /// in the same turn still hits the boundary_violation gate.
     pub isolated_turn_business_event_accepted: bool,
+    /// 2026-07-28-001 plan U3: staged over-emit recovery intent.
+    /// Resolved at the end of `process_parse_result` so a
+    /// committed business event cancels the resume injection.
+    pub pending_over_emit_recovery: Option<crate::event_loop::OverEmitRecovery>,
 
     /// Per-hat activation counts (used for max_activations).
     pub hat_activation_counts: HashMap<HatId, u32>,
@@ -851,6 +855,7 @@ impl Default for LoopState {
             // crosses it with the on-disk check.
             seen_fix_unit_completions: 0,
             isolated_turn_business_event_accepted: false,
+            pending_over_emit_recovery: None,
             hat_activation_counts: HashMap::new(),
             exhausted_hats: HashSet::new(),
             last_active_hat_ids: Vec::new(),

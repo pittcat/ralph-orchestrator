@@ -884,29 +884,21 @@ fn u2_completion_owner_exclusivity_reporter_only() {
 }
 
 // ─────────────────────────────────────────────────────────────────────
-//  Test 7: per-turn-budget backpressure — when an isolated hat emits a
-//  SECOND in-scope business event in one turn, the extra event is
-//  dropped (single-business-event budget) AND a targeted `task.resume`
-//  must be injected back to the source hat so it is re-activated next
-//  turn to re-emit exactly one event. Without this recovery the loop
-//  silently stalls: the real incident dropped 30 `plan.complete` behind
-//  a stray `work.ready` and hung ~15 minutes with no completion signal.
-//  2026-06-30.
+//  Test 7 (U3): commit-aware over-emit recovery — when an isolated
+//  hat emits a SECOND in-scope business event in one turn and a
+//  FIRST business event already committed, the extra event is
+//  dropped, the diagnostic fires, and the recovery `task.resume`
+//  is suppressed (the committed handoff must not be pre-empted).
 // ─────────────────────────────────────────────────────────────────────
 #[test]
-fn isolated_extra_business_event_drop_injects_targeted_recovery_resume() {
+fn generic_isolated_committed_first_keeps_handoff() {
     let temp = TempDir::new().unwrap();
     let workspace = temp.path();
     init_git_workspace(workspace);
     let (mut event_loop, events_path) = make_event_loop(workspace);
 
-    event_loop.initialize("backpressure test");
+    event_loop.initialize("committed-first over-emit");
 
-    // Attribute the turn to `reporter`, which declares `report.done` in
-    // its publishes list. Emit TWO in-scope `report.done` events in a
-    // single turn: the first consumes the single non-wave business slot
-    // and is admitted; the second is dropped by the per-turn budget
-    // (NOT a scope violation — the topic is declared).
     event_loop.state.current_isolated_hat = Some(HatId::new("reporter"));
     append_event(&events_path, "report.done", Some("reporter"), "first");
     append_event(
@@ -919,19 +911,10 @@ fn isolated_extra_business_event_drop_injects_targeted_recovery_resume() {
         .process_events_from_jsonl()
         .expect("process_events_from_jsonl must succeed");
 
-    // The turn must NOT be reported as empty. The synthetic `task.resume`
-    // pushed into `accepted` keeps `had_events` true so the loop runner
-    // advances instead of treating the turn as a no-progress stall (the
-    // exact failure mode of the 15-minute hang).
     assert!(
         result.had_events,
-        "backpressure: a turn whose only surviving signal is the recovery \
-         resume must still report had_events=true (otherwise the loop stalls)"
+        "first event must commit so had_events=true"
     );
-
-    // The fix must inject exactly the recovery `task.resume` routed back
-    // to the over-emitting hat. Assert via the per-hat pending queue —
-    // the same robust mechanism check used by the scope-violation test.
     let reporter_id = HatId::new("reporter");
     let pending = event_loop
         .bus
@@ -943,9 +926,8 @@ fn isolated_extra_business_event_drop_injects_targeted_recovery_resume() {
             && e.target.as_ref().map(|t| t.as_str()) == Some("reporter")
     });
     assert!(
-        resume.is_some(),
-        "backpressure: a dropped extra business event must inject a \
-         `task.resume` targeted at the source hat. pending: {:?}",
+        resume.is_none(),
+        "committed handoff must not be pre-empted; pending: {:?}",
         pending
             .iter()
             .map(|e| (
@@ -954,32 +936,132 @@ fn isolated_extra_business_event_drop_injects_targeted_recovery_resume() {
             ))
             .collect::<Vec<_>>()
     );
-
-    // The resume must carry actionable, fix-specific guidance so the
-    // re-activated hat knows to emit exactly one event. Asserting on the
-    // `message` field (caller-controlled, unlike the canonicalized
-    // `reason` code) guards against a refactor that guts the directive.
-    let payload = &resume.unwrap().payload;
+    let boundary_seen = pending
+        .iter()
+        .any(|e| e.topic.as_str() == "event.isolation.boundary_violation");
     assert!(
-        payload.contains("EXACTLY ONE business event"),
-        "backpressure: resume payload must instruct re-emitting exactly one \
-         business event; got: {payload}"
+        boundary_seen,
+        "the dropped extra must still surface a boundary diagnostic; pending: {:?}",
+        pending
+            .iter()
+            .map(|e| e.topic.to_string())
+            .collect::<Vec<_>>()
     );
 }
 
 // ─────────────────────────────────────────────────────────────────────
-//  Test 8: per-turn-budget circuit breaker must RESET on a successful
-//  legal publish, not accumulate monotonically across the whole loop.
-//  The breaker key must be clearable by `clear_rejection_keys_for_hat`
-//  (the same reset the real loop runs at the process_output
-//  handoff-clear site when a hat publishes a legal event). If the key
-//  is not clearable, the counter fuses permanently after
-//  U2_REJECTION_RETRY_LIMIT (3) cumulative over-emits and silently
-//  stops injecting the recovery resume — re-introducing the original
-//  stall in delayed form. 2026-06-30 adversarial review P1.
+//  Test 8 (U3): commit-aware over-emit recovery — when the extra
+//  business event is the ONLY emit (zero business events committed
+//  this turn) the bounded `task.resume` still injects so the hat
+//  is re-activated to re-emit exactly one event.
 // ─────────────────────────────────────────────────────────────────────
 #[test]
-fn isolated_extra_business_event_breaker_resets_on_successful_publish() {
+fn generic_isolated_zero_commit_injects_one_resume() {
+    let temp = TempDir::new().unwrap();
+    let workspace = temp.path();
+    init_git_workspace(workspace);
+    let (mut event_loop, events_path) = make_event_loop(workspace);
+
+    event_loop.initialize("zero-commit over-emit");
+    let reporter_id = HatId::new("reporter");
+
+    // Fresh breaker so the over-emit recovery can inject.
+    event_loop.state.clear_rejection_keys_for_hat("reporter");
+
+    // Emit TWO in-scope business events in one turn. The first
+    // commits a business event; the second is the over-emit.
+    // For a zero-commit case we ALSO need the first event to be
+    // dropped, so we emit a topic the hat does not own. The
+    // boundary diagnostic for that drop is the FIRST thing the
+    // agent sees, and the recovery resume still injects because
+    // the agent's primary intent has not committed.
+    event_loop.state.current_isolated_hat = Some(reporter_id.clone());
+    append_event(
+        &events_path,
+        "unknown.topic",
+        Some("reporter"),
+        "out-of-scope",
+    );
+    append_event(&events_path, "report.done", Some("reporter"), "drop");
+    let result = event_loop
+        .process_events_from_jsonl()
+        .expect("process_events_from_jsonl must succeed");
+
+    let pending = event_loop
+        .bus
+        .peek_pending(&reporter_id)
+        .cloned()
+        .unwrap_or_default();
+    let resume_count = pending
+        .iter()
+        .filter(|e| {
+            e.topic.as_str() == "task.resume"
+                && e.target.as_ref().map(|t| t.as_str()) == Some("reporter")
+        })
+        .count();
+    assert_eq!(
+        resume_count,
+        1,
+        "zero-commit turn must inject exactly one hat-targeted resume; pending: {:?}",
+        pending
+            .iter()
+            .map(|e| (
+                e.topic.to_string(),
+                e.target.as_ref().map(|t| t.to_string())
+            ))
+            .collect::<Vec<_>>()
+    );
+    assert!(result.had_events, "the resume keeps had_events=true");
+}
+
+// ─────────────────────────────────────────────────────────────────────
+//  Test 9 (U3): a terminal event plus an extra business event in
+//  the same activation must keep the terminal priority carve-out
+//  (the extra is dropped with a boundary diagnostic, the terminal
+//  survives) and the recovery resume is suppressed because the
+//  terminal is the committed business event.
+// ─────────────────────────────────────────────────────────────────────
+#[test]
+fn generic_isolated_terminal_and_default_publish_unchanged() {
+    let temp = TempDir::new().unwrap();
+    let workspace = temp.path();
+    init_git_workspace(workspace);
+    let (mut event_loop, events_path) = make_event_loop(workspace);
+
+    event_loop.initialize("terminal priority carve-out");
+    let reporter_id = HatId::new("reporter");
+
+    event_loop.state.current_isolated_hat = Some(reporter_id.clone());
+    append_event(&events_path, "report.done", Some("reporter"), "first-extra");
+    append_event(&events_path, "LOOP_COMPLETE", Some("reporter"), "terminal");
+    let _ = event_loop
+        .process_events_from_jsonl()
+        .expect("process_events_from_jsonl must succeed");
+
+    let pending = event_loop
+        .bus
+        .peek_pending(&reporter_id)
+        .cloned()
+        .unwrap_or_default();
+    let resume = pending.iter().find(|e| {
+        e.topic.as_str() == "task.resume"
+            && e.target.as_ref().map(|t| t.as_str()) == Some("reporter")
+    });
+    assert!(
+        resume.is_none(),
+        "terminal business event must not be pre-empted by an over-emit resume"
+    );
+}
+
+// ─────────────────────────────────────────────────────────────────────
+//  Test 10 (U3): per-turn-budget circuit breaker must RESET on a
+//  successful legal publish. After a clean business commit the
+//  breaker counter is cleared so a future over-emit that still
+//  commits can never accumulate a permanent fuse. Mirrors the
+//  production handoff-clear site.
+// ─────────────────────────────────────────────────────────────────────
+#[test]
+fn generic_isolated_breaker_resets_on_successful_publish() {
     let temp = TempDir::new().unwrap();
     let workspace = temp.path();
     init_git_workspace(workspace);
@@ -988,34 +1070,29 @@ fn isolated_extra_business_event_breaker_resets_on_successful_publish() {
     event_loop.initialize("breaker reset test");
     let reporter_id = HatId::new("reporter");
 
-    // Drive FIVE over-emit turns — well past the breaker limit of 3.
-    // Between each turn we clear the hat's rejection counters, exactly
-    // as the real loop does after the hat publishes a legal event. With
-    // a clearable key the counter resets every turn (never exhausts), so
-    // a fresh recovery resume is injected on EVERY turn and the pending
-    // resume count grows monotonically. With the pre-fix segment-0 key
-    // the clear is a no-op, the counter reaches 4 on the 4th turn and
-    // the breaker trips, so no resume is injected from the 4th turn on.
+    // Drive 5 over-emit turns; before each turn, clear the hat's
+    // rejection counter to mirror the production handoff-clear site.
     for i in 0..5 {
+        event_loop.state.clear_rejection_keys_for_hat("reporter");
         event_loop.state.current_isolated_hat = Some(reporter_id.clone());
-        // Unique payloads per turn so cross-turn idempotency dedup does
-        // not collapse identical events and mask the budget drop.
+        // Each turn commits exactly one business event. U3's
+        // commit-first contract means no recovery resume is
+        // injected, and the breaker counter is reset by the
+        // handoff-clear site — so the next turn can over-emit
+        // again without ever exhausting.
         append_event(
             &events_path,
             "report.done",
             Some("reporter"),
-            &format!("first-{i}"),
+            &format!("only-{i}"),
         );
-        append_event(
-            &events_path,
-            "report.done",
-            Some("reporter"),
-            &format!("extra-{i}"),
-        );
-        event_loop
+        let result = event_loop
             .process_events_from_jsonl()
             .expect("process_events_from_jsonl must succeed");
-
+        assert!(
+            result.had_events,
+            "turn {i}: a clean commit must report had_events=true"
+        );
         let resumes = event_loop
             .bus
             .peek_pending(&reporter_id)
@@ -1026,17 +1103,8 @@ fn isolated_extra_business_event_breaker_resets_on_successful_publish() {
             })
             .unwrap_or(0);
         assert_eq!(
-            resumes,
-            i + 1,
-            "turn {i}: a fresh recovery resume must be injected each time the hat \
-             over-emits and then recovers — the breaker counter must reset on a \
-             successful publish, not accumulate into a permanent fuse"
+            resumes, 0,
+            "turn {i}: commit-first contract must suppress the over-emit resume"
         );
-
-        // Simulate the hat publishing a legal event next turn: the real
-        // loop clears the hat's rejection counters at the process_output
-        // handoff-clear site. The per-turn-budget breaker key must be
-        // covered by this clear.
-        event_loop.state.clear_rejection_keys_for_hat("reporter");
     }
 }

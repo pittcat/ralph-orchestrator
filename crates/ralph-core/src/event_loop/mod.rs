@@ -367,6 +367,19 @@ pub struct RecoverableExhaustion {
     pub count: u32,
 }
 
+/// 2026-07-28-001 plan U3: staged over-emit recovery intent. The
+/// per-turn drop path sets this on the first violation; the end
+/// of `process_parse_result` resolves it AFTER the business
+/// events have been admitted. When at least one business event
+/// has committed the recovery becomes diagnostic-only (so the
+/// pre-fix `task.resume` cannot starve a legitimate handoff);
+/// when zero committed it injects the bounded `task.resume`.
+#[derive(Debug, Clone)]
+pub struct OverEmitRecovery {
+    pub hat: HatId,
+    pub dropped_topic: String,
+}
+
 /// Unit 2 (2026-06-16-002 plan) take-3: a single recoverable
 /// rejection surfaced from the policy validator.  The validator
 /// does **not** call `state.record_recoverable_rejection_key`
@@ -451,7 +464,10 @@ pub struct PromptPreview {
     pub skill_gates: Option<SkillGateFlags>,
     /// Evidence level: "static" (default), "runtime" (scenario args supplied),
     /// or "unverified".
-    #[serde(default = "default_evidence_level", skip_serializing_if = "is_static_evidence_level")]
+    #[serde(
+        default = "default_evidence_level",
+        skip_serializing_if = "is_static_evidence_level"
+    )]
     pub evidence_level: String,
 
     /// 2026-07-27-002 plan Unit 2: candidate emit evaluation (when --topic
@@ -9075,6 +9091,9 @@ impl EventLoop {
             // canonical "no progress" turn. Run the stall
             // detector before returning so the loop does not
             // silently starve when the JSONL is empty.
+            // 2026-07-28-001 plan U3: an empty-activation
+            // turn never has a staged over-emit recovery,
+            // so no settlement is needed here.
             run_stall_detector_on_state(
                 &mut self.state,
                 &self.config.event_loop.progress_steward,
@@ -9142,6 +9161,9 @@ impl EventLoop {
             // a stray `work.ready`; without this guard each drop would
             // inject a duplicate resume (event storm).
             let mut per_turn_budget_feedback_injected = false;
+            // 2026-07-28-001 plan U3: the over-emit recovery
+            // intent is staged on `self.state.pending_over_emit_recovery`
+            // from the drop branch so it survives block exit.
             // 2026-07-04-002 plan U13 carve-out enforcement: the carve-out
             // admits at most ONE exempt topic per activation, regardless
             // of how many `exempt_topics` the preset declared. A second
@@ -9960,97 +9982,30 @@ impl EventLoop {
                             "Isolated mode: dropped extra event '{}' — only one business event per turn allowed",
                             event.topic
                         ),
-                    );
+                    )
+                    .with_target(isolated_hat.clone());
                     self.bus.publish(diagnostic);
 
-                    // 2026-06-30 backpressure fix: a silently-dropped
-                    // extra business event previously left the agent
-                    // with zero actionable feedback. In a real run the
-                    // coordinator emitted a stray `work.ready` first plus
-                    // 30 correct `plan.complete` — the stray event
-                    // consumed the only slot, all 30 `plan.complete` were
-                    // silently dropped, and the loop stalled ~15 minutes
-                    // with no completion signal. Mirror the out-of-scope
-                    // drop path: inject ONE hat-targeted `task.resume`
-                    // this turn so the agent learns to re-emit EXACTLY
-                    // one business event, and push a synthetic
-                    // `task.resume` into `accepted` so the turn is not
-                    // reported as empty (which would itself trip the
-                    // stall detector). This is feedback-only — no
-                    // business event reaches the bus that wouldn't today;
-                    // the dropped event stays dropped.
+                    // 2026-07-28-001 plan U3 (commit-aware
+                    // over-emit recovery): the previous path
+                    // injected a hat-targeted `task.resume`
+                    // immediately, which let a co-emitted
+                    // first business event (already admitted in
+                    // the same turn) be silently displaced by
+                    // `next_hat` priority. Instead, stage the
+                    // intent here and resolve it AFTER the loop
+                    // has determined whether any business event
+                    // actually committed. The recovery is only
+                    // useful when zero business events landed;
+                    // otherwise the over-emit is a pure
+                    // cosmetic extra and the agent already
+                    // succeeded on its primary emit.
                     if !per_turn_budget_feedback_injected {
-                        // Reuse the U2 circuit breaker so a hat that keeps
-                        // over-emitting eventually stops getting resumes
-                        // instead of looping forever. Record BEFORE the
-                        // exhaustion check so the count includes this
-                        // attempt (matches the out-of-scope path).
-                        //
-                        // The key MUST keep the hat in segment 1
-                        // (`prefix:{hat}:suffix`) using the SAME
-                        // `normalize_part` form that
-                        // `clear_rejection_keys_for_hat` matches on (it
-                        // is invoked when a hat publishes a legal event —
-                        // see the process_output handoff-clear site). A
-                        // key with the hat in segment 0 is never cleared,
-                        // so the counter would accumulate monotonically
-                        // across the whole loop and trip a PERMANENT fuse
-                        // after `U2_REJECTION_RETRY_LIMIT` cumulative
-                        // over-emits, silently disabling the recovery
-                        // resume and re-introducing the very stall this
-                        // fix removes. Clearing on success keeps the fuse
-                        // scoped to *consecutive* over-emit turns.
-                        let key = format!(
-                            "isolated_budget:{}:per_turn",
-                            crate::diagnosis::normalize_part(isolated_hat.as_str())
-                        );
-                        let count = self.state.record_rejection_key(&key);
-                        if self.state.rejection_key_is_exhausted(&key) {
-                            // Breaker tripped: fall back to diagnostic-only.
-                            warn!(
-                                key = %key,
-                                hat = %isolated_hat.as_str(),
-                                topic = %event.topic,
-                                count = count,
-                                "Isolated per-turn budget circuit breaker: no more task.resume injections for key '{}'",
-                                key
-                            );
-                        } else {
-                            let free_form = format!(
-                                "Isolated mode dropped an extra business event ('{}') this turn — only the FIRST business event per activation is kept; everything emitted after it is discarded regardless of topic. Re-emit EXACTLY ONE business event (the one you actually intend, e.g. plan.complete) and nothing else.",
-                                event.topic
-                            );
-                            let payload = enrich_task_resume_payload(
-                                &free_form,
-                                "isolated_extra_business_event_dropped",
-                                Some(isolated_hat.as_str()),
-                                Some(RejectionKind::ContractViolation),
-                            );
-                            self.bus.publish(
-                                Event::new("task.resume", payload.clone())
-                                    .with_target(isolated_hat.clone()),
-                            );
-                            // Push a synthetic `task.resume`
-                            // (`event_reader::Event`) into `accepted` so
-                            // the JSONL-derived `accepted_events` (and thus
-                            // `had_events`) sees the recovery and the turn
-                            // is not treated as empty. Same struct shape as
-                            // the out-of-scope path above.
-                            let resume_jsonl = crate::event_reader::Event {
-                                topic: "task.resume".to_string(),
-                                payload: Some(payload),
-                                ts: chrono::Utc::now().to_rfc3339(),
-                                hat: None,
-                                triggered: Some(isolated_hat.as_str().to_string()),
-                                source: None,
-                                wave_id: None,
-                                wave_index: None,
-                                wave_total: None,
-                                system_injected: None,
-                            };
-                            accepted.push(resume_jsonl);
-                            per_turn_budget_feedback_injected = true;
-                        }
+                        per_turn_budget_feedback_injected = true;
+                        self.state.pending_over_emit_recovery = Some(OverEmitRecovery {
+                            hat: isolated_hat.clone(),
+                            dropped_topic: event.topic.clone(),
+                        });
                     }
                 }
             }
@@ -10098,7 +10053,6 @@ impl EventLoop {
         } else {
             result.events
         };
-        // --- End scope enforcement ---
 
         // --- Origin guard: validate JSONL event provenance before bus publication ---
         // Events from JSONL are untrusted until provenance and scope checks accept them.
@@ -12626,6 +12580,16 @@ impl EventLoop {
         // step-close stage fires first when both apply.
         self.drive_precheck_gate_obligation(&accepted_log_events);
 
+        // 2026-07-28-001 plan U3: stage the over-emit
+        // recovery intent and resolve it AFTER we know
+        // whether the turn committed a business event. The
+        // recovery is stored in `state.pending_over_emit_recovery`
+        // by the drop branch above and settled here so a
+        // legitimate handoff emitted in the same
+        // activation can never be pre-empted by an extra
+        // event's `task.resume` injection.
+        self.resolve_over_emit_recovery(&accepted_log_events);
+
         Ok(ProcessedEvents {
             had_events,
             had_raw_events,
@@ -12671,6 +12635,70 @@ impl EventLoop {
             .count() as u32;
         self.stage_pipeline
             .update_step_close_progress(&step_id, done, total_units);
+    }
+
+    /// 2026-07-28-001 plan U3: settle the staged over-emit
+    /// recovery intent. If at least one real business event
+    /// (not a scope-violation replay, not a boundary
+    /// diagnostic, not a default publish) committed this
+    /// turn, the recovery is purely diagnostic — drop the
+    /// pending `task.resume` injection so the legitimate
+    /// handoff is not pre-empted. If zero committed, inject
+    /// the bounded `task.resume` (still behind the existing
+    /// breaker).
+    fn resolve_over_emit_recovery(&mut self, accepted_log_events: &[ralph_proto::Event]) {
+        let pending = match self.state.pending_over_emit_recovery.take() {
+            Some(recovery) => recovery,
+            None => return,
+        };
+        let committed_business = accepted_log_events.iter().any(|event| {
+            let topic = event.topic.as_str();
+            if topic == "task.resume" || topic == "LOOP_COMPLETE" || topic == "plan.blocked" {
+                return false;
+            }
+            if topic.starts_with("event.isolation.") {
+                return false;
+            }
+            if topic.ends_with(".scope_violation") {
+                return false;
+            }
+            true
+        });
+        if committed_business {
+            tracing::debug!(
+                hat = %pending.hat.as_str(),
+                dropped_topic = %pending.dropped_topic,
+                "U3: over-emit recovery bypassed because a business event already committed"
+            );
+            return;
+        }
+        let key = format!(
+            "isolated_budget:{}:per_turn",
+            crate::diagnosis::normalize_part(pending.hat.as_str())
+        );
+        let count = self.state.record_rejection_key(&key);
+        if self.state.rejection_key_is_exhausted(&key) {
+            warn!(
+                key = %key,
+                hat = %pending.hat.as_str(),
+                dropped_topic = %pending.dropped_topic,
+                count = count,
+                "U3: isolated over-emit recovery breaker tripped; no task.resume injected"
+            );
+            return;
+        }
+        let free_form = format!(
+            "Isolated mode dropped an extra business event ('{}') and zero business events committed this turn — only the FIRST business event per activation is kept. Re-emit EXACTLY ONE business event (the one you actually intend, e.g. plan.complete) and nothing else.",
+            pending.dropped_topic
+        );
+        let payload = enrich_task_resume_payload(
+            &free_form,
+            "isolated_extra_business_event_dropped",
+            Some(pending.hat.as_str()),
+            Some(RejectionKind::ContractViolation),
+        );
+        self.bus
+            .publish(Event::new("task.resume", payload.clone()).with_target(pending.hat.clone()));
     }
 
     /// 2026-06-29-007 plan U1b: drive the `current_step`

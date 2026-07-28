@@ -529,6 +529,7 @@ mod tests {
             // fixture mirrors the production default.
             seen_fix_unit_completions: 0,
             isolated_turn_business_event_accepted: false,
+            pending_over_emit_recovery: None,
             hat_activation_counts: std::collections::HashMap::new(),
             exhausted_hats: std::collections::HashSet::new(),
             last_active_hat_ids: Vec::new(),
