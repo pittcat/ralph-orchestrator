@@ -2035,7 +2035,9 @@ hats:
         detailed in `decisions.md`.
       - **Re-entry continuation (HARD RULE)**: when this hat re-activates
         on a reused worktree / loop, reconcile BEFORE dispatching
-        anything. Read `.ralph/agent/decisions.md` for prior `executor
+        anything and BEFORE the baseline verification snapshot. First
+        run **Step 1.25 — Re-entry Dirty-Worktree Reconciliation** below;
+        then read `.ralph/agent/decisions.md` for prior `executor
         checkpoint: <U-ID> committed=<sha> ...` lines and cross-check
         `git log --oneline <DIFF_BASE>..HEAD` (`<DIFF_BASE>` per the Diff
         base chain: `plan_baseline_sha` → `loop_start_sha` → origin/main
@@ -2044,9 +2046,12 @@ hats:
         NEVER re-implement or re-commit it. A U-ID with a checkpoint
         failure brief counts as attempted: spend only the retry attempts
         the prior activation did not already use, else carry it into
-        `failed_units`. Dispatch ONLY the remaining U-IDs. There is no
-        runtime resume API and you MUST NOT call one — decisions.md plus
-        git log ARE the resume source of truth.
+        `failed_units`. An attributable uncommitted diff is the starting
+        state of its owning remaining U-ID, not a reason to discard or
+        duplicate it. Dispatch ONLY the remaining U-IDs. There is no
+        runtime resume API and you MUST NOT call one — decisions.md, git
+        log, and the reconciled working-tree diff ARE the resume source
+        of truth.
       - **Per-U commit (HARD RULE)**: each Implementation Unit (U-ID) that
         passes its unit-level tests MUST get its own `git commit` before you
         start the next U-ID. Do NOT batch multiple U-IDs into one commit.
@@ -2127,14 +2132,14 @@ hats:
            recompute `executor_head_sha` and `commit_count`.
          - If the file is not attributable to any U-ID or you cannot
            form a safe commit (failing tests, partial work, ambiguous
-           ownership), stop the emit, document the dirty path in
-           `.ralph/agent/decisions.md`, then revert the unowned
-           modification or reconcile it before settlement. Only if the
-           tree cannot be reconciled at all: settle `work.done`
-           (partial, dirty path documented) when other Units already
-           committed — `work.failed` is reserved for the
-           zero-completed-Unit case. Do NOT fold unowned changes into a
-           fabricated executor commit.
+           ownership), stop the emit and document every dirty path in
+           `.ralph/agent/decisions.md`. Preserve the files exactly as
+           found: NEVER run `git reset`, `git restore`, `git checkout --`,
+           `git clean`, or `git stash`, and NEVER delete untracked files.
+           Settle `work.done` (partial, dirty paths documented) when
+           other Units already committed; `work.failed` is reserved for
+           the zero-completed-Unit case. Do NOT fold unowned changes into
+           a fabricated executor commit.
       2. Compute the handoff SHAs and metrics from the final state:
          ```bash
          FINAL_HEAD="$(git rev-parse HEAD)"
@@ -2187,6 +2192,58 @@ hats:
          this list visible in your working notes until the final emit.
       4. Search memories for relevant patterns (`ralph tools memory search ...`).
       5. Check current branch: `git branch --show-current` (record for context, do NOT modify).
+
+      ### Step 1.25 — Re-entry Dirty-Worktree Reconciliation (HARD RULE)
+
+      Run this step before Step 1.5, before the baseline-verifier, and
+      before launching any Unit subagent. Its purpose is to resume an
+      interrupted activation without losing or duplicating unfinished
+      work.
+
+      1. Capture all staged, unstaged, and untracked project paths with:
+         ```bash
+         git status --porcelain --untracked-files=all \
+           | awk '!/^\?\? \.ralph\// && !/^\?\? \.ralph$/ { print }'
+         ```
+         Also inspect `git diff`, `git diff --cached`, relevant untracked
+         files, `.ralph/agent/decisions.md`, and
+         `git log --oneline <DIFF_BASE>..HEAD`. This inspection is
+         read-only.
+      2. If the filtered porcelain is empty, continue normally.
+      3. If it is non-empty, map the complete dirty path set to the
+         plan's remaining U-IDs using the Unit's allowed files, approach,
+         tests, prior checkpoint/failure notes, and actual diff semantics:
+         - **Exactly one owning U-ID, with no contradictory edits**:
+           append one `executor re-entry:` line to
+           `.ralph/agent/decisions.md` naming the U-ID and paths. Treat
+           the existing diff as that U-ID's in-progress starting state.
+           Pass a concise summary of the existing changes to that U-ID's
+           subagent and require it to inspect, complete, test, and return
+           the combined result. Do not replay already-present edits.
+         - **Several U-IDs, but each path has one unambiguous owner**:
+           record the per-path ownership map and resume those U-IDs in
+           dependency order. A path may have only one owner.
+         - **Ambiguous ownership, cross-U partial change, unrelated
+           operator change, conflict marker, or unsafe/unreadable
+           untracked content**: append an `executor re-entry blocked:`
+           line naming every dirty path and the ambiguity. Preserve the
+           worktree exactly as found. NEVER reset, restore, checkout,
+           clean, stash, overwrite, delete, stage, or commit these
+           changes. Emit `work.done` partial only when prior matching
+           U-ID commits already provide at least one completed Unit;
+           otherwise emit `work.failed` with
+           `reason: "unattributable_dirty_worktree: <paths>"`. Do not
+           launch the baseline-verifier or any Unit subagent.
+      4. For attributable dirt, do not create a checkpoint or commit
+         merely because files exist. Resume the owning U-ID, run its
+         required RED/GREEN/REFACTOR verification, review the full
+         combined diff, and only then make that U-ID's single commit.
+      5. The baseline snapshot now describes the resumed worktree state,
+         not a pristine pre-plan state. Record
+         `baseline_context: resumed_attributable_dirty_worktree` and the
+         owning U-ID/path map in `baseline-verification.md` so the final
+         delta is interpreted against the state actually inherited by
+         this activation.
 
       ### Step 1.5 — Flow-Audit Cross-Check (HARD RULE — gates Execution Loop)
       Do **not** start the Execution Loop until this step passes. This
