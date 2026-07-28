@@ -31,6 +31,7 @@ schemas:
       - "trace_file"
       - "plan_revised"
       - "review_summary"
+      - "reuse_guidance_file"
       - "flow_audit"
       - "resolved_baseline_sha"
     field_docs:
@@ -66,6 +67,10 @@ schemas:
         meaning: "one or two sentence summary of the plan-reviewer's verdict and any in-place edits"
         source: "plan-reviewer"
         fill_rule: "short prose; mention revision outcome and any unresolved concerns the executor must know"
+      reuse_guidance_file:
+        meaning: "business artifact containing plan-reviewer's current-run guidance distilled from any prior reuse archive; it records useful experience without inheriting the prior verdict"
+        source: "plan-reviewer reads .ralph/agent/resume-context.md when present, inspects the referenced archive and current Git state, then writes .ralph/review/<plan_name>/reuse-guidance.md"
+        fill_rule: "always write and reopen the current-run artifact before emit; on first use record that no prior archive exists; never point directly at an archived summary or handoff"
       flow_audit:
         meaning: "execution-loop skip verdict decided by plan-reviewer §Step 2.5; tells executor whether to skip the per-Unit TDD round"
         source: "plan-reviewer §Step 2.5"

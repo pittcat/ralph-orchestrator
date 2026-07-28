@@ -932,6 +932,39 @@ pub enum RedriveTakeOutcome {
     DescriptorConflict,
 }
 
+/// 2026-07-28-002 plan U4 (Step 2): a pending child wave that
+/// was created by `create_redrive_wave` but whose slots have not
+/// yet been dispatched. The boot redrive scanner returns this
+/// list so the runner can re-dispatch each child slot.
+#[derive(Debug, Clone)]
+pub struct RedrivePendingChild {
+    /// The child wave's store-allocated id.
+    pub child_wave_id: String,
+    /// The parent wave id (for diagnostics only).
+    pub parent_wave_id: String,
+    /// The attempt epoch of this redrive (= parent.attempt_epoch + 1).
+    pub attempt_epoch: u32,
+    /// Per-slot redrive descriptors: the slot index within the
+    /// child wave and the expected payload digest at that slot.
+    pub slots: Vec<RedrivePendingChildSlot>,
+}
+
+/// 2026-07-28-002 plan U4 (Step 2): one slot within a pending
+/// redrive child wave.
+#[derive(Debug, Clone)]
+pub struct RedrivePendingChildSlot {
+    /// The slot index within the child wave.
+    pub child_slot_index: u32,
+    /// The corresponding slot index in the parent wave (for
+    /// diagnostics only).
+    pub parent_slot_index: u32,
+    /// The expected payload digest for this slot, derived from
+    /// the descriptor persisted at the original wave's spawn time.
+    /// `None` when no descriptor was persisted (the slot never
+    /// started — S4 fail-close path).
+    pub expected_digest: Option<String>,
+}
+
 /// 2026-07-27-004 plan U3 (R8 / S7): the supervisor persistence
 /// + dispatch-decision trait. Both the
 /// in-memory (U3/U4) and rusqlite (U5) implementations satisfy this
@@ -1517,6 +1550,26 @@ pub trait SupervisorStore: fmt::Debug + Send + Sync {
         _expected_digest: &str,
     ) -> SupervisorStoreResult<RedriveTakeOutcome> {
         Ok(RedriveTakeOutcome::DescriptorUnavailable)
+    }
+
+    /// 2026-07-28-002 plan U4 (Step 2): return all redrive child
+    /// waves that have a `parent_wave_id` but whose slots have not
+    /// yet been dispatched. These are the children the boot
+    /// scanner picks up to resume after a crash.
+    ///
+    /// A child wave is "pending dispatch" when it has
+    /// `parent_wave_id = Some(_)` and none of its slots are in a
+    /// terminal state (`Completed | Failed | Cancelled`).
+    ///
+    /// For each child, the `slots` list contains every slot that
+    /// is not yet terminal, together with the `expected_digest`
+    /// from the persisted `SlotDescriptor` (or `None` if no
+    /// descriptor was persisted — S4 fail-close path).
+    ///
+    /// Default impl returns `Ok([])` so a store without U4
+    /// support is a no-op at boot.
+    fn list_redrive_pending_child_waves(&self) -> SupervisorStoreResult<Vec<RedrivePendingChild>> {
+        Ok(Vec::new())
     }
 
     // ─────────────────────────────────────────────────────────────────

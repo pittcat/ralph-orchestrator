@@ -1336,6 +1336,12 @@ async fn run_loop_impl_inner(
             ralph_core::config::HatExecutionMode::Isolated
         ),
     );
+    // 2026-07-28-002 plan U4 (Step 2): capture the supervisor store
+    // here so it survives the `if supervisor_path_enabled { ... } else { ... }`
+    // block scope and is available for the redrive scan call after
+    // `backend` is constructed.
+    let mut supervisor_store: Option<std::sync::Arc<dyn ralph_core::supervisor::SupervisorStore>> =
+        None;
     let supervisor_bridge: Option<Arc<dyn ralph_core::supervisor::SupervisorBridge>> =
         if supervisor_path_enabled {
             // U6: resolve the loop's main ledger path so the
@@ -1394,6 +1400,10 @@ async fn run_loop_impl_inner(
                             );
                         }
                     }
+                    // 2026-07-28-002 plan U4 (Step 2): capture the store
+                    // for the redrive scan that runs after `backend`
+                    // is constructed below.
+                    supervisor_store = Some(store.clone());
                     info!(
                         db_path = %supervisor_cfg.db_path,
                         max_concurrent_workers = supervisor_cfg.max_concurrent_workers,
@@ -1482,6 +1492,9 @@ async fn run_loop_impl_inner(
                                     );
                                 }
                             }
+                            // 2026-07-28-002 plan U4 (Step 2): capture the store
+                            // for the redrive scan (same as the supervisor-enabled path above).
+                            supervisor_store = Some(store.clone());
                             info!(
                                 db_path = %supervisor_cfg.db_path,
                                 "default wave path picked up supervisor-db (KTD-2 / 2026-07-22-001 U3)"
@@ -1707,6 +1720,36 @@ async fn run_loop_impl_inner(
     } else {
         None
     };
+
+    // 2026-07-28-002 plan U4 (Step 2): if the supervisor store
+    // was opened (either the supervisor-enabled path or the
+    // default-path supervisor-db pick-up), scan for pending
+    // redrive child waves and dispatch any whose slots have a
+    // dispatchable descriptor. This recovers any waves that were
+    // created but not yet dispatched when the previous loop
+    // crashed. Run this AFTER the backend is constructed so we
+    // can pass it to the dispatcher; run it BEFORE the event
+    // loop starts so the redrive workers appear in the same
+    // iteration 0 context as if they had been dispatched normally.
+    if let (Some(bridge), Some(store)) = (&supervisor_bridge, &supervisor_store) {
+        // Re-derive the supervisor events path (not stored from the
+        // branch to avoid extra scope complexity).
+        let supervisor_events_path = resolve_emit_events_path(
+            &ctx,
+            crate::loop_runner::paths::config_state_machine_enabled(&config),
+        );
+        let hat_registry = ralph_core::HatRegistry::from_config(&config);
+        crate::loop_runner::wave::dispatch_pending_redrive_waves(
+            store,
+            &loop_id,
+            &hat_registry,
+            &backend,
+            bridge,
+            &supervisor_events_path,
+            &supervisor_events_path,
+        )
+        .await;
+    }
 
     // Create termination signal for TUI shutdown
     let (terminated_tx, terminated_rx) = tokio::sync::watch::channel(false);

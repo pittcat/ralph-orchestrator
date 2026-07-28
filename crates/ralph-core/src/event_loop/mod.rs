@@ -668,7 +668,6 @@ impl SkillInjector {
 /// takes precedence for backwards compatibility with the
 /// `ce-executor-serial` preset, which declared
 /// `exempt_topics: ["review.dimension.ready", "review.dimensions.complete"]`.
-
 /// Returns `true` when `topic` is a real business event for the
 /// commit-aware over-emit recovery decision. Diagnostic /
 /// control-plane topics (`task.resume`, `LOOP_COMPLETE`,
@@ -15467,9 +15466,7 @@ mod flow_authority_pf_recovery_tests {
             id: id.to_string(),
             kind: if runs.is_some() {
                 Some("side_effect".to_string())
-            } else if id == "planning" {
-                Some("linear".to_string())
-            } else if id == "integration" {
+            } else if matches!(id, "planning" | "integration") {
                 Some("linear".to_string())
             } else {
                 None

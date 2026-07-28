@@ -147,11 +147,11 @@ pub struct RunArgs {
     /// basename (without `.md`/`.html`). When `--worktree-name` is
     /// provided, Ralph looks up that exact worktree name instead.
     /// A matching completed worktree listed in `.ralph/loops.json`
-    /// is reused after runtime-only artifacts (events, scratchpad,
-    /// tasks, summary, handoff, diagnostics) are cleaned up.
+    /// is reused after prior runtime artifacts are archived under
+    /// `.ralph/reuse-history/` and removed from the live runtime paths.
     ///
-    /// If no matching worktree is found, the run fails closed. It does
-    /// not create a new worktree under `--reuse-worktree`.
+    /// If no matching worktree exists yet, Ralph creates the first
+    /// worktree with that exact name. It does not add a random suffix.
     /// A worktree whose loop is still running is never reused; the
     /// runner always refuses to attach to it.
     ///
@@ -1064,7 +1064,7 @@ pub async fn run_command(
         //
         // When `--reuse-worktree` is also set, look up an existing
         // completed worktree by exact name and reuse it. If no match
-        // exists, fail closed instead of silently creating a new one.
+        // exists yet, create the first worktree with that exact name.
         if args.reuse_worktree {
             debug!("Reusing worktree for explicit --worktree --reuse-worktree mode");
             match exact_worktree_name.as_deref() {
@@ -1075,9 +1075,14 @@ pub async fn run_command(
                             reusable.path.display(),
                             reusable.loop_id
                         );
-                        clean_worktree_runtime_artifacts(&reusable.path)
+                        let archive_dir = clean_worktree_runtime_artifacts(&reusable.path)
                             .context("Failed to clean runtime artifacts in reused worktree")?;
-                        info!("Cleaned runtime artifacts in reused worktree");
+                        if let Some(path) = archive_dir {
+                            info!(
+                                "Archived prior runtime artifacts to {} before reuse",
+                                path.display()
+                            );
+                        }
 
                         // Re-create the worktree's symlinks (in case the
                         // previous loop removed them) and refresh the
@@ -1121,11 +1126,23 @@ pub async fn run_command(
                             Some(reused_ctx.workspace().to_path_buf());
                         (reused_ctx, None)
                     }
-                    Ok(None) => anyhow::bail!(
-                        "--reuse-worktree requires an existing worktree named '{}'; \
-                         refusing to create a new one",
-                        name
-                    ),
+                    Ok(None) => {
+                        info!(
+                            "No existing worktree named {}; creating the first exact-name worktree",
+                            name
+                        );
+                        let (wt_ctx, _wt_guard) = spawn_worktree_loop(
+                            workspace_root,
+                            &prompt_summary,
+                            None,
+                            Some(name),
+                            &config.features.loop_naming,
+                            &mut pending_worktree_registration,
+                        )?;
+                        subprocess_tui_args.worktree = false;
+                        subprocess_tui_args.worktree_path = Some(wt_ctx.workspace().to_path_buf());
+                        (wt_ctx, None)
+                    }
                     Err(e) => {
                         return Err(anyhow::Error::new(e).context(
                             "Failed to look up reusable worktree; aborting to avoid stale state",

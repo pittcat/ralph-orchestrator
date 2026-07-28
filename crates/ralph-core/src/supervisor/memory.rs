@@ -20,8 +20,8 @@ use std::time::SystemTime;
 use super::ProjectionKind;
 use super::{
     CompensationKind, CoordinationReceiptSummary, DispatchOutcome, EmissionReservation,
-    EmissionState, IdempotencyKey, IsolationMode, ProjectionReceiptSummary, RedriveResult,
-    RedriveTakeOutcome, SlotDescriptor, SlotResource, SlotStatus, SupervisorStore,
+    EmissionState, IdempotencyKey, IsolationMode, ProjectionReceiptSummary, RedrivePendingChild,
+    RedriveResult, RedriveTakeOutcome, SlotDescriptor, SlotResource, SlotStatus, SupervisorStore,
     SupervisorStoreError, SupervisorStoreResult, WaveDeliveryState, WaveId, WaveKind, WavePhase,
     WaveSnapshot,
 };
@@ -84,6 +84,10 @@ struct SlotRow {
     /// 2026-07-26-004 plan U2 (KTD3): bounded terminal evidence for
     /// a `Completed` slot. `None` for legacy / not-provably-done.
     terminal_evidence: Option<super::TerminalEvidence>,
+    /// 2026-07-28-002 plan U4 (Step 2): for redrive child waves, the
+    /// slot index in the parent wave this slot was redriven from.
+    /// `None` for original (non-redrive) waves.
+    parent_slot_index: Option<u32>,
 }
 
 /// In-memory implementation of `SupervisorStore`. The store
@@ -334,6 +338,8 @@ impl SupervisorStore for InMemorySupervisorStore {
                     event_count: None,
                     failure_reason: None,
                     terminal_evidence: None,
+                    // Original (non-redrive) wave: no parent slot
+                    parent_slot_index: None,
                 },
             );
         }
@@ -419,6 +425,8 @@ impl SupervisorStore for InMemorySupervisorStore {
                     event_count: None,
                     failure_reason: None,
                     terminal_evidence: None,
+                    // Original (non-redrive) wave: no parent slot
+                    parent_slot_index: None,
                 },
             );
         }
@@ -1418,7 +1426,7 @@ impl SupervisorStore for InMemorySupervisorStore {
         };
 
         let mut child_slots = BTreeMap::new();
-        for (i, &_slot_index) in target_slots.iter().enumerate() {
+        for (i, &parent_slot) in target_slots.iter().enumerate() {
             child_slots.insert(
                 i as u32,
                 SlotRow {
@@ -1430,6 +1438,11 @@ impl SupervisorStore for InMemorySupervisorStore {
                     event_count: None,
                     failure_reason: None,
                     terminal_evidence: None,
+                    // 2026-07-28-002 plan U4 (Step 2): track which
+                    // parent slot this redrive slot came from so the
+                    // boot scanner can report parent_slot_index in
+                    // `RedrivePendingChildSlot`.
+                    parent_slot_index: Some(parent_slot),
                 },
             );
         }
@@ -1511,6 +1524,63 @@ impl SupervisorStore for InMemorySupervisorStore {
         Ok(RedriveTakeOutcome::Dispatchable {
             descriptor: descriptor.clone(),
         })
+    }
+
+    fn list_redrive_pending_child_waves(&self) -> SupervisorStoreResult<Vec<RedrivePendingChild>> {
+        use super::{RedrivePendingChild, RedrivePendingChildSlot, SlotStatus};
+
+        let inner = self.lock()?;
+        let mut children = Vec::new();
+
+        for wave in inner.waves_by_id.values() {
+            // Only child waves (have a parent)
+            let Some(ref parent_wave_id) = wave.parent_wave_id else {
+                continue;
+            };
+
+            // Skip waves that are already in a terminal phase
+            if matches!(
+                wave.phase,
+                super::WavePhase::Done | super::WavePhase::Failed
+            ) {
+                continue;
+            }
+
+            // Collect non-terminal slots: each non-terminal child slot is
+            // a redrive candidate.
+            let mut pending_slots = Vec::new();
+            for (child_slot_index, slot) in &wave.slots {
+                let status_terminal = matches!(
+                    slot.status,
+                    SlotStatus::Completed | SlotStatus::Failed | SlotStatus::Cancelled
+                );
+                if status_terminal {
+                    continue;
+                }
+                // Look up the expected digest from the persisted descriptor
+                let descriptor_key = (wave.wave_id.clone(), *child_slot_index);
+                let expected_digest = inner
+                    .slot_descriptors
+                    .get(&descriptor_key)
+                    .map(|d| d.payload_digest.clone());
+                pending_slots.push(RedrivePendingChildSlot {
+                    child_slot_index: *child_slot_index,
+                    parent_slot_index: slot.parent_slot_index.unwrap_or(*child_slot_index),
+                    expected_digest,
+                });
+            }
+
+            if !pending_slots.is_empty() {
+                children.push(RedrivePendingChild {
+                    child_wave_id: wave.wave_id.clone(),
+                    parent_wave_id: parent_wave_id.clone(),
+                    attempt_epoch: wave.attempt_epoch,
+                    slots: pending_slots,
+                });
+            }
+        }
+
+        Ok(children)
     }
 
     // ─────────────────────────────────────────────────────────────────

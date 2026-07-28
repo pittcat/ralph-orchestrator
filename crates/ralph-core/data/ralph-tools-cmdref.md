@@ -91,7 +91,7 @@ ralph run [OPTIONS] [-- <CUSTOM_ARGS>...]
 | `--no-tui` | flag | 否 | — | 禁用 TUI 观测模式 |
 | `-a, --autonomous` | flag | 否 | — | 强制自主模式 |
 | `--worktree` | flag | 否 | — | 创建隔离的 git worktree（强制关闭 auto-merge） |
-| `--reuse-worktree` | flag | 否 | — | 复用已完成的 worktree；必须与 `--plan` 或 `--worktree-name` 一起使用；找不到匹配项时直接报错，不会自动新建 |
+| `--reuse-worktree` | flag | 否 | — | 按 `--plan` basename 或 `--worktree-name` 精确绑定；已有则归档上一轮 runtime 记录后复用，首次不存在则按精确名称创建 |
 | `--plan <PLAN_FILE>` | path | 否 | — | 显式 plan 文件；其 basename 作为 worktree 名称的精确绑定值 |
 | `--worktree-name <NAME>` | string | 否 | — | 显式 worktree 名称（与 `--plan` 互斥） |
 | `--no-auto-merge` | flag | 否 | — | 跳过循环结束后的自动合并（worktree 模式下也适用） |
@@ -113,7 +113,7 @@ ralph run [OPTIONS] [-- <CUSTOM_ARGS>...]
 **反模式 / 注意事项：**
 - 🔴 `--continue` 仅在未启用 memories/tasks 的 legacy scratchpad 模式下有效。
 - 🔴 `--worktree` 创建的隔离目录不会自动合并回主分支（可用 `--no-auto-merge` 控制）。
-- 🔴 **Worktree 复用必须显式**: `--reuse-worktree` 现在要求同时提供 `--plan <plan.md>` 或 `--worktree-name <name>`，不再从 prompt 文本中自动猜测 plan 路径（该行为已废弃）；找不到匹配 worktree 时会直接报错，不会自动新建。推荐做法：
+- 🔴 **Worktree 复用必须显式**: `--reuse-worktree` 要求同时提供 `--plan <plan.md>` 或 `--worktree-name <name>`，不从 prompt 文本猜测 plan 路径。已有同名已完成 worktree 时，Ralph 先将旧 runtime 记录归档到 `.ralph/reuse-history/` 再复用；第一次不存在时按同一精确名称创建，不追加随机后缀。推荐做法：
   ```bash
   ralph -H builtin:<preset> run --worktree --reuse-worktree \
     --plan docs/plans/<your-plan>.md

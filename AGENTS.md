@@ -217,7 +217,7 @@ Presets define collections of hats. Located in `presets/` directory and `crates/
   - **故意模拟 agent 的测试**:先 scrub,再显式 `.env("RALPH_CURRENT_HAT", ...)` 等覆盖;不要依赖外层残留值。
   - **全量入口**:`./scripts/run-tests.sh` 开头会 unset 这些键(第二道保险),但**不能替代**测试侧 scrub——直接 `cargo nextest` 或其它入口仍可能带污染。
   - **最低验收**:新增/改动相关集成测后,用污染环境复跑必须绿,例如 `RALPH_CURRENT_HAT=executor RALPH_CURRENT_LOOP_ID=loop-x RALPH_EVENTS_FILE=/tmp/x.jsonl cargo nextest run -p ralph-cli --test <your_test>`。
-- **Worktree 复用规则(HARD RULE 3)**:任何使用 `--worktree` 的 `ralph run` 都必须显式指定复用键:**`--plan <plan.md>`** 或 **`--worktree-name <name>`**。Ralph 会按 plan 的 basename(去掉 `.md`/`.html` 后缀)或精确名称在 `.ralph/loops.json` 与 `git worktree list` 中查找已完成的 worktree 并自动复用;**严禁**不看参数就 `EnterWorktree` / `git worktree add` 创建新 worktree,也禁止靠 prompt 文本"猜测"plan 路径。旧版"从 prompt 文本自动提取 plan 路径做模糊匹配"的行为已废弃,因为它对中文、标点或附加说明极其脆弱。推荐写法:
+- **Worktree 复用规则(HARD RULE 3)**:任何使用 `--worktree` 的 `ralph run` 都必须显式指定复用键:**`--plan <plan.md>`** 或 **`--worktree-name <name>`**。Ralph 按 plan basename(去掉 `.md`/`.html` 后缀)或精确名称绑定 worktree:已有同名已完成 worktree 时,先把旧 runtime 记录归档到该 worktree 的 `.ralph/reuse-history/` 再复用;第一次不存在时按同一精确名称创建,不追加随机后缀。正在运行的同名 worktree 不可复用。严禁 agent 自行 `EnterWorktree` / `git worktree add`,也禁止靠 prompt 文本"猜测"plan 路径。旧版"从 prompt 文本自动提取 plan 路径做模糊匹配"的行为已废弃,因为它对中文、标点或附加说明极其脆弱。推荐写法:
   ```bash
   ralph run --worktree --reuse-worktree --plan docs/plans/2026-06-25-002-feat-profiles-for-preset-role-tuning-plan.md
   # 或精确复用指定 worktree

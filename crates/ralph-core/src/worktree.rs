@@ -797,33 +797,55 @@ fn read_loop_registry_entries(registry_path: &Path) -> Result<Vec<LoopEntry>, Wo
     Ok(wrapper.loops)
 }
 
-/// Remove a runtime artifact from a worktree if it exists.
-///
-/// We deliberately use `fs::remove_file` / `fs::remove_dir_all` and treat
-/// `NotFound` as a no-op so the cleanup is idempotent. The caller does
-/// not need to know in advance whether the file was created by a
-/// previous run.
-fn remove_if_exists(path: &Path) -> std::io::Result<()> {
-    match fs::metadata(path) {
-        Ok(meta) if meta.is_dir() => fs::remove_dir_all(path),
-        Ok(_) => fs::remove_file(path),
-        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
+fn unique_reuse_archive_dir(ralph_dir: &Path) -> std::io::Result<PathBuf> {
+    let archive_root = ralph_dir.join("reuse-history");
+    fs::create_dir_all(&archive_root)?;
+    let timestamp = Utc::now().format("%Y%m%dT%H%M%S%.9fZ").to_string();
+    for suffix in 0..1000_u16 {
+        let name = if suffix == 0 {
+            timestamp.clone()
+        } else {
+            format!("{timestamp}-{suffix}")
+        };
+        let candidate = archive_root.join(name);
+        match fs::create_dir(&candidate) {
+            Ok(()) => return Ok(candidate),
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(e),
+        }
+    }
+    Err(io::Error::new(
+        io::ErrorKind::AlreadyExists,
+        "could not allocate a unique reuse-history archive directory",
+    ))
+}
+
+fn archive_if_exists(source: &Path, archive_root: &Path, relative: &Path) -> std::io::Result<bool> {
+    match fs::symlink_metadata(source) {
+        Ok(_) => {
+            let destination = archive_root.join(relative);
+            if let Some(parent) = destination.parent() {
+                fs::create_dir_all(parent)?;
+            }
+            fs::rename(source, destination)?;
+            Ok(true)
+        }
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(false),
         Err(e) => Err(e),
     }
 }
 
-/// Remove files matching a glob pattern under a directory, leaving
-/// non-matches alone.
-///
-/// We use a lightweight manual filter instead of pulling in the
-/// `glob` crate to keep `ralph-core`'s dependency footprint
-/// unchanged. The match is on `file_name()` only, so paths like
-/// `.ralph/events-20250101-120000.jsonl` (which the spec needs to
-/// support) are picked up while the parent directory is left intact.
-fn remove_files_matching(dir: &Path, suffix: &str, prefix: &str) -> std::io::Result<()> {
+fn archive_files_matching(
+    dir: &Path,
+    suffix: &str,
+    prefix: &str,
+    archive_root: &Path,
+    relative_parent: &Path,
+) -> std::io::Result<bool> {
     if !dir.is_dir() {
-        return Ok(());
+        return Ok(false);
     }
+    let mut archived = false;
     for entry in fs::read_dir(dir)? {
         let entry = entry?;
         let name = entry.file_name();
@@ -831,14 +853,13 @@ fn remove_files_matching(dir: &Path, suffix: &str, prefix: &str) -> std::io::Res
         if !name_str.starts_with(prefix) || !name_str.ends_with(suffix) {
             continue;
         }
-        let path = entry.path();
-        if path.is_dir() {
-            fs::remove_dir_all(&path)?;
-        } else {
-            fs::remove_file(&path)?;
-        }
+        archived |= archive_if_exists(
+            &entry.path(),
+            archive_root,
+            &relative_parent.join(Path::new(&name)),
+        )?;
     }
-    Ok(())
+    Ok(archived)
 }
 
 /// Clean Ralph runtime artifacts from an existing worktree directory
@@ -846,8 +867,10 @@ fn remove_files_matching(dir: &Path, suffix: &str, prefix: &str) -> std::io::Res
 ///
 /// `find_reusable_worktree` finds a worktree that was previously used
 /// by a finished loop. The directory still contains that loop's
-/// event history, scratchpad, tasks, and diagnostics, which we want
-/// to discard so the new loop starts on a clean slate. We *preserve*
+/// event history, scratchpad, tasks, and diagnostics. We move those
+/// records into `.ralph/reuse-history/<timestamp>/` before clearing
+/// the live runtime paths, so the new loop starts clean without losing
+/// prior-run experience. We *preserve*
 /// the worktree's git branch state and the symlinks that point at the
 /// main repository (memories, specs, code tasks) — these are the
 /// reason the user opted into reuse in the first place.
@@ -864,12 +887,15 @@ fn remove_files_matching(dir: &Path, suffix: &str, prefix: &str) -> std::io::Res
 /// - `.ralph/agent/tasks.jsonl`
 /// - `.ralph/agent/summary.md`
 /// - `.ralph/agent/handoff.md`
+/// - `.ralph/agent/decisions.md`
+/// - `.ralph/review/` (entire tree)
 ///
 /// # Files preserved
 ///
 /// - `.ralph/agent/context.md` (worktree metadata)
 /// - `.ralph/agent/memories.md` (symlink into main repo)
 /// - `.ralph/specs/`, `.ralph/tasks/` (symlinks into main repo)
+/// - `.ralph/reuse-history/` (prior-run archives)
 /// - The `.ralph/` and `.ralph/agent/` directories themselves
 /// - The git worktree (branch, history, tracked files)
 ///
@@ -881,7 +907,7 @@ fn remove_files_matching(dir: &Path, suffix: &str, prefix: &str) -> std::io::Res
 /// state would silently corrupt the new run.
 pub fn clean_worktree_runtime_artifacts(
     worktree_path: impl AsRef<Path>,
-) -> Result<(), WorktreeError> {
+) -> Result<Option<PathBuf>, WorktreeError> {
     let worktree_path = worktree_path.as_ref();
     if !worktree_path.is_dir() {
         return Err(WorktreeError::NotFound(
@@ -891,39 +917,101 @@ pub fn clean_worktree_runtime_artifacts(
 
     let ralph_dir = worktree_path.join(".ralph");
     let agent_dir = ralph_dir.join("agent");
+    fs::create_dir_all(&ralph_dir)?;
+    fs::create_dir_all(&agent_dir)?;
+
+    let archive_dir = unique_reuse_archive_dir(&ralph_dir)?;
+    let mut archived_any = false;
 
     // --- .ralph/ top-level artifacts ---
     // events.jsonl
-    remove_if_exists(&ralph_dir.join("events.jsonl"))?;
+    archived_any |= archive_if_exists(
+        &ralph_dir.join("events.jsonl"),
+        &archive_dir,
+        Path::new("events.jsonl"),
+    )?;
     // events-YYYYMMDD-HHMMSS.jsonl
-    remove_files_matching(&ralph_dir, ".jsonl", "events-")?;
+    archived_any |=
+        archive_files_matching(&ralph_dir, ".jsonl", "events-", &archive_dir, Path::new(""))?;
     // current-events marker
-    remove_if_exists(&ralph_dir.join("current-events"))?;
+    archived_any |= archive_if_exists(
+        &ralph_dir.join("current-events"),
+        &archive_dir,
+        Path::new("current-events"),
+    )?;
     // history.jsonl
-    remove_if_exists(&ralph_dir.join("history.jsonl"))?;
+    archived_any |= archive_if_exists(
+        &ralph_dir.join("history.jsonl"),
+        &archive_dir,
+        Path::new("history.jsonl"),
+    )?;
     // history-*.jsonl
-    remove_files_matching(&ralph_dir, ".jsonl", "history-")?;
+    archived_any |= archive_files_matching(
+        &ralph_dir,
+        ".jsonl",
+        "history-",
+        &archive_dir,
+        Path::new(""),
+    )?;
     // diagnostics/ (full subtree)
-    let diagnostics_dir = ralph_dir.join("diagnostics");
-    if diagnostics_dir.is_dir() {
-        fs::remove_dir_all(&diagnostics_dir)?;
-    }
+    archived_any |= archive_if_exists(
+        &ralph_dir.join("diagnostics"),
+        &archive_dir,
+        Path::new("diagnostics"),
+    )?;
     // urgent-steer.json
-    remove_if_exists(&ralph_dir.join("urgent-steer.json"))?;
+    archived_any |= archive_if_exists(
+        &ralph_dir.join("urgent-steer.json"),
+        &archive_dir,
+        Path::new("urgent-steer.json"),
+    )?;
     // current-loop-id
-    remove_if_exists(&ralph_dir.join("current-loop-id"))?;
+    archived_any |= archive_if_exists(
+        &ralph_dir.join("current-loop-id"),
+        &archive_dir,
+        Path::new("current-loop-id"),
+    )?;
+    archived_any |=
+        archive_if_exists(&ralph_dir.join("review"), &archive_dir, Path::new("review"))?;
 
     // --- .ralph/agent/ artifacts ---
     // scratchpad.md
-    remove_if_exists(&agent_dir.join("scratchpad.md"))?;
+    archived_any |= archive_if_exists(
+        &agent_dir.join("scratchpad.md"),
+        &archive_dir,
+        Path::new("agent/scratchpad.md"),
+    )?;
     // scratchpad-{loop_id}.md (ephemeral isolation artifacts)
-    remove_files_matching(&agent_dir, ".md", "scratchpad-")?;
+    archived_any |= archive_files_matching(
+        &agent_dir,
+        ".md",
+        "scratchpad-",
+        &archive_dir,
+        Path::new("agent"),
+    )?;
     // tasks.jsonl
-    remove_if_exists(&agent_dir.join("tasks.jsonl"))?;
+    archived_any |= archive_if_exists(
+        &agent_dir.join("tasks.jsonl"),
+        &archive_dir,
+        Path::new("agent/tasks.jsonl"),
+    )?;
     // summary.md
-    remove_if_exists(&agent_dir.join("summary.md"))?;
+    archived_any |= archive_if_exists(
+        &agent_dir.join("summary.md"),
+        &archive_dir,
+        Path::new("agent/summary.md"),
+    )?;
     // handoff.md
-    remove_if_exists(&agent_dir.join("handoff.md"))?;
+    archived_any |= archive_if_exists(
+        &agent_dir.join("handoff.md"),
+        &archive_dir,
+        Path::new("agent/handoff.md"),
+    )?;
+    archived_any |= archive_if_exists(
+        &agent_dir.join("decisions.md"),
+        &archive_dir,
+        Path::new("agent/decisions.md"),
+    )?;
 
     // --- Re-create the parent directories so a fresh loop has a
     // clean slate to write into. We deliberately do not create
@@ -935,11 +1023,32 @@ pub fn clean_worktree_runtime_artifacts(
     fs::create_dir_all(&ralph_dir)?;
     fs::create_dir_all(&agent_dir)?;
 
+    if !archived_any {
+        fs::remove_dir(&archive_dir)?;
+        return Ok(None);
+    }
+
+    let archive_relative = archive_dir
+        .strip_prefix(worktree_path)
+        .unwrap_or(&archive_dir)
+        .to_string_lossy();
+    fs::write(
+        agent_dir.join("resume-context.md"),
+        format!(
+            "# Reused worktree context\n\n\
+             Previous runtime archive: `{archive_relative}`\n\n\
+             Treat archived records as advisory evidence, not as the current run's verdict. \
+             Revalidate against the current plan, Git history, working-tree diff, and tests. \
+             Prior failures must inform a new approach but must not consume this run's retry budget.\n"
+        ),
+    )?;
+
     tracing::info!(
-        "Cleaned runtime artifacts in worktree {}",
-        worktree_path.display()
+        "Archived prior runtime artifacts to {} and cleaned live paths in worktree {}",
+        archive_dir.display(),
+        worktree_path.display(),
     );
-    Ok(())
+    Ok(Some(archive_dir))
 }
 
 /// Check if a worktree exists for the given loop ID.
@@ -1948,6 +2057,9 @@ branch refs/heads/ralph/loop-1
         fs::write(agent_dir.join("tasks.jsonl"), "{}\n").unwrap();
         fs::write(agent_dir.join("summary.md"), "# summary\n").unwrap();
         fs::write(agent_dir.join("handoff.md"), "# handoff\n").unwrap();
+        fs::write(agent_dir.join("decisions.md"), "# decisions\n").unwrap();
+        fs::create_dir_all(ralph_dir.join("review/plan")).unwrap();
+        fs::write(ralph_dir.join("review/plan/report.md"), "# report\n").unwrap();
 
         // Must-be-preserved files
         fs::write(agent_dir.join("context.md"), "# Worktree Context\n").unwrap();
@@ -1956,10 +2068,9 @@ branch refs/heads/ralph/loop-1
     }
 
     #[test]
-    fn test_clean_worktree_runtime_artifacts_removes_runs_state() {
-        // The cleanup must delete every runtime artifact listed in the
-        // spec, including the event/history rotation files and the
-        // diagnostics directory tree.
+    fn test_clean_worktree_runtime_artifacts_archives_runs_state() {
+        // Reuse must clear every live runtime path while retaining the
+        // prior run under one immutable reuse-history directory.
         let temp_dir = TempDir::new().unwrap();
         init_git_repo(temp_dir.path());
 
@@ -1967,7 +2078,9 @@ branch refs/heads/ralph/loop-1
         let ralph_dir = worktree_path.join(".ralph");
         let agent_dir = ralph_dir.join("agent");
 
-        clean_worktree_runtime_artifacts(&worktree_path).unwrap();
+        let archive = clean_worktree_runtime_artifacts(&worktree_path)
+            .unwrap()
+            .expect("populated prior run should produce an archive");
 
         // Removables gone
         assert!(!ralph_dir.join("events.jsonl").exists());
@@ -1983,6 +2096,31 @@ branch refs/heads/ralph/loop-1
         assert!(!agent_dir.join("tasks.jsonl").exists());
         assert!(!agent_dir.join("summary.md").exists());
         assert!(!agent_dir.join("handoff.md").exists());
+        assert!(!agent_dir.join("decisions.md").exists());
+        assert!(!ralph_dir.join("review").exists());
+
+        assert_eq!(
+            fs::read_to_string(archive.join("events.jsonl")).unwrap(),
+            "{\"x\":1}\n"
+        );
+        assert_eq!(
+            fs::read_to_string(archive.join("agent/summary.md")).unwrap(),
+            "# summary\n"
+        );
+        assert_eq!(
+            fs::read_to_string(archive.join("agent/handoff.md")).unwrap(),
+            "# handoff\n"
+        );
+        assert_eq!(
+            fs::read_to_string(archive.join("agent/decisions.md")).unwrap(),
+            "# decisions\n"
+        );
+        assert_eq!(
+            fs::read_to_string(archive.join("review/plan/report.md")).unwrap(),
+            "# report\n"
+        );
+        let resume_context = fs::read_to_string(agent_dir.join("resume-context.md")).unwrap();
+        assert!(resume_context.contains("advisory evidence"));
 
         // Parent directories still exist (clean slate, not nuked)
         assert!(ralph_dir.is_dir());
@@ -2079,10 +2217,18 @@ branch refs/heads/ralph/loop-1
 
         // No runtime artifacts were ever written; just the worktree
         // directory and its git metadata exist.
-        clean_worktree_runtime_artifacts(&worktree.path).unwrap();
+        assert!(
+            clean_worktree_runtime_artifacts(&worktree.path)
+                .unwrap()
+                .is_none()
+        );
 
         // Second call must also succeed.
-        clean_worktree_runtime_artifacts(&worktree.path).unwrap();
+        assert!(
+            clean_worktree_runtime_artifacts(&worktree.path)
+                .unwrap()
+                .is_none()
+        );
 
         // The worktree's .ralph/ and .ralph/agent/ must now exist as
         // empty directories.

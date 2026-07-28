@@ -58,7 +58,7 @@ metadata:
 4. **失败时先查 `--help`** — 不要猜测参数，文档可能已更新
 5. **emit step handoff 事件前，先用 schema 预检** — `ralph emit --schema <TOPIC>` 会列出 `required_fields`；payload 必须包含全部 required fields，且字段之间不自相矛盾（例如 `step` 与 `task_key` 中的 step 段必须一致）。不要凭记忆构造 payload。
 6. **isolated 模式:一个 activation 只发 1 个业务事件** —— 运行时只保留你这一回合最先发出的那个,其后的全部静默丢弃(不分 topic)。发完即停,**终态事件(如 `plan.complete`)前面绝不要夹带 `work.ready` 等其它 emit**,否则终态事件会被丢弃。细则见 `ralph emit` 深参考「isolated mode 单业务事件 / 重发规则」。
-7. **Worktree 复用规则（显式参数,严禁盲目创建）**:使用 `--worktree --reuse-worktree` 时必须同时给出 `--plan <plan.md>` 或 `--worktree-name <name>`。Ralph 会按 plan 的 basename 或精确名称查找 `.ralph/loops.json` 与 `git worktree list` 中已完成的 worktree 并自动复用;**找不到匹配项时必须报错,不允许自动新建 worktree**。`--plan` 对应的 worktree 名称与 plan basename 死绑定,**不要**在后面追加随机数字。**严禁**不看参数就 `EnterWorktree` / `git worktree add` 创建新 worktree。旧版"从 prompt 文本自动猜测 plan 路径"的行为已废弃。推荐示例:
+7. **Worktree 复用规则（显式参数）**:使用 `--worktree --reuse-worktree` 时必须同时给出 `--plan <plan.md>` 或 `--worktree-name <name>`。Ralph 按 plan basename 或精确名称查找已完成的 worktree：找到时先把上一轮 runtime 记录归档到该 worktree 的 `.ralph/reuse-history/`，再清理活动状态并复用；第一次找不到时以同一精确名称创建，不追加随机数字。正在运行的同名 worktree 不可复用，遇到占用错误时停止并交给 operator 处理。旧版"从 prompt 文本自动猜测 plan 路径"的行为已废弃。推荐示例:
    ```bash
    ralph -H builtin:<preset> run --worktree --reuse-worktree \
      --plan docs/plans/<your-plan>.md

@@ -413,6 +413,7 @@ event_loop:
           - "trace_file"
           - "plan_revised"
           - "review_summary"
+          - "reuse_guidance_file"
           - "flow_audit"
           - "resolved_baseline_sha"  # written by plan-reviewer §Step 2.5b
         field_docs:
@@ -448,6 +449,10 @@ event_loop:
             meaning: "one or two sentence summary of the plan-reviewer's verdict and any in-place edits"
             source: "plan-reviewer"
             fill_rule: "short prose; mention revision outcome and any unresolved concerns the executor must know"
+          reuse_guidance_file:
+            meaning: "business artifact containing plan-reviewer's current-run guidance distilled from any prior reuse archive; it records useful experience without inheriting the prior verdict"
+            source: "plan-reviewer reads .ralph/agent/resume-context.md when present, inspects the referenced archive and current Git state, then writes .ralph/review/<plan_name>/reuse-guidance.md"
+            fill_rule: "always write and reopen the current-run artifact before emit; on first use record that no prior archive exists; never point directly at an archived summary or handoff"
           flow_audit:
             meaning: "execution-loop skip verdict decided by plan-reviewer §Step 2.5; tells executor whether to skip the per-Unit TDD round"
             source: "plan-reviewer §Step 2.5"
@@ -1678,7 +1683,9 @@ hats:
       ### HARD RULES
       - Emit EXACTLY ONE event per activation: `plan.ready` or `plan.blocked`.
       - Do NOT emit any code/build/test/review/fix topic — those are owned by downstream hats.
-      - Do NOT modify any source file. The plan file is the ONLY allowed edit target.
+      - Do NOT modify implementation source files. The plan file is the
+        only non-`.ralph/` edit target; current-run review artifacts under
+        `.ralph/review/<plan_name>/` are required outputs.
       - Do NOT create, switch, or rename branches / worktrees (operator's decision).
 
       ### Step 1 — Plan File Resolution (on `work.start`)
@@ -1699,6 +1706,45 @@ hats:
       - File lacks a semantically identifiable, strictly ordered executable Unit sequence → `{"reason": "plan_semantic_contract_incomplete", "semantic_gaps": ["ordered_units"]}`
       - File empty or placeholder content (e.g. only `TODO` or `<plan TBD>`) → `{"reason": "plan_content_empty_or_placeholder"}`
       - File is otherwise unusable (contradictory requirements, ambiguous scope, missing hard rules) → `{"reason": "plan_unusable: <brief reason>"}`
+
+      ### Step 2.25 — Reuse Experience Review (HARD RULE)
+
+      You are the first hat activated after worktree reuse, so you own
+      distilling prior-run experience into current plan guidance. This is
+      read-only analysis of code and archived records; do not implement or
+      repair source files.
+
+      1. Check `.ralph/agent/resume-context.md`.
+         - If absent, this is a first-use worktree. Write
+           `.ralph/review/<plan_name>/reuse-guidance.md` stating that no
+           prior archive was available and that execution starts from
+           current Git/worktree facts.
+         - If present, read the archive path recorded there. Inspect only
+           useful evidence that exists: archived `agent/summary.md`,
+           `agent/handoff.md`, `agent/decisions.md`, review products, and
+           the current `git log`, `git diff`, staged diff, and untracked
+           paths. Do not treat archived events or verdicts as live state.
+      2. Write `.ralph/review/<plan_name>/reuse-guidance.md` with exactly
+         these decision sections:
+         - `Prior progress confirmed now` — only facts still supported by
+           current Git/diff; otherwise `none`.
+         - `Prior failures and lessons` — observed failed approaches and
+           why they failed; otherwise `none`.
+         - `Do not mechanically repeat` — concrete approaches to avoid,
+           never a blanket prohibition on solving the Unit.
+         - `Fresh options for this run` — one or more new angles derived
+           from the current plan and repository state.
+         - `Dirty-path ownership hints` — candidate U-ID mapping for
+           current uncommitted paths, explicitly marked `confirmed`,
+           `candidate`, or `ambiguous`.
+      3. Archived `failed`, `blocked`, retry counts, and verdicts are
+         advisory history only. They MUST NOT make the current plan
+         blocked, consume this run's retry budget, or prevent a new
+         implementation approach. Current source, diff, dependencies,
+         and verification results are authoritative.
+      4. Reopen the artifact after writing it. Carry its path in
+         `plan.ready.reuse_guidance_file`. Never point the payload directly
+         at an archived file.
 
       ### Step 2.5 — Git Flow Audit (HARD RULE — runs BEFORE Step 3)
       Before any plan-content quality gate, audit whether the plan's
@@ -1892,10 +1938,11 @@ hats:
       the `flow_audit` verdict, emit EXACTLY ONE `plan.ready` event:
       ```
       <event topic="plan.ready">
-      {"plan_name":"<basename>","plan_path":"<repo-relative source>","plan_contract_version":"ce-unified-plan/v1","normalized_plan_file":".ralph/review/<plan>/normalized-plan.md","plan_contract_digest":"<digest binding source+projection>","trace_file":".ralph/review/<plan>/trace.md","plan_revised":<true|false>,"review_summary":"<summary>","flow_audit":"<post_merge_complete|post_merge_no_canary|first_run>","resolved_baseline_sha":"<sha>"}
+      {"plan_name":"<basename>","plan_path":"<repo-relative source>","plan_contract_version":"ce-unified-plan/v1","normalized_plan_file":".ralph/review/<plan>/normalized-plan.md","plan_contract_digest":"<digest binding source+projection>","trace_file":".ralph/review/<plan>/trace.md","plan_revised":<true|false>,"review_summary":"<summary>","reuse_guidance_file":".ralph/review/<plan>/reuse-guidance.md","flow_audit":"<post_merge_complete|post_merge_no_canary|first_run>","resolved_baseline_sha":"<sha>"}
       </event>
       ```
       `plan_name`, `plan_path`, `plan_revised`, `review_summary`,
+      `reuse_guidance_file`,
       `flow_audit`, and `resolved_baseline_sha` are required by the
       payload schema (`plan_revised` must be a boolean; `flow_audit`
       must be one of the three valid strings from Step 2.5;
@@ -2044,9 +2091,10 @@ hats:
         → …). A U-ID with a checkpoint line AND a matching commit in that
         range is already delivered: count it in `completed_units` and
         NEVER re-implement or re-commit it. A U-ID with a checkpoint
-        failure brief counts as attempted: spend only the retry attempts
-        the prior activation did not already use, else carry it into
-        `failed_units`. An attributable uncommitted diff is the starting
+        failure brief is prior-run experience, not a current failure:
+        use it to avoid mechanically repeating the same approach, but
+        give the U-ID this activation's full retry budget and permit a
+        fresh solution. An attributable uncommitted diff is the starting
         state of its owning remaining U-ID, not a reason to discard or
         duplicate it. Dispatch ONLY the remaining U-IDs. There is no
         runtime resume API and you MUST NOT call one — decisions.md, git
@@ -2180,7 +2228,11 @@ hats:
       ### Read State (on every activation)
 
       1. Read the `plan.ready` payload for `plan_name`, `plan_path`,
-         `plan_revised`, `review_summary`, and `flow_audit`. Older
+         `plan_revised`, `review_summary`, `reuse_guidance_file`, and
+         `flow_audit`. Reopen `reuse_guidance_file` and use it as the
+         concise prior-experience input for this activation. Its old
+         failures and ownership hints remain advisory until confirmed
+         against the current Git state. Older
          presets / hand-rolled runs may not include `flow_audit` —
          treat absence as `"first_run"`.
       2. Read the plan file end-to-end. The plan-reviewer already
@@ -2206,7 +2258,8 @@ hats:
            | awk '!/^\?\? \.ralph\// && !/^\?\? \.ralph$/ { print }'
          ```
          Also inspect `git diff`, `git diff --cached`, relevant untracked
-         files, `.ralph/agent/decisions.md`, and
+         files, the current `.ralph/agent/decisions.md`,
+         `reuse_guidance_file`, and
          `git log --oneline <DIFF_BASE>..HEAD`. This inspection is
          read-only.
       2. If the filtered porcelain is empty, continue normally.

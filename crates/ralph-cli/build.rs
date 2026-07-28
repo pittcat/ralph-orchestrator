@@ -41,7 +41,7 @@
 //                              read from the canonical path at runtime.
 
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 fn main() {
     let manifest_dir = match std::env::var("CARGO_MANIFEST_DIR") {
@@ -251,8 +251,8 @@ fn copy_artifact_templates(manifest_dir: &str, out_dir: &str) {
 /// Fail-closed: if the source directory is missing or empty, panic so the
 /// release binary cannot silently omit templates that hats depend on.
 fn copy_preset_templates(
-    templates_root: &PathBuf,
-    dest_root: &PathBuf,
+    templates_root: &Path,
+    dest_root: &Path,
     preset_name: &str,
     required: &[&str],
 ) {

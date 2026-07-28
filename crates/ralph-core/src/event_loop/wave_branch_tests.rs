@@ -8,7 +8,7 @@
 // Parse the actual preset so this test cannot drift into a second flow model.
 
 #[cfg(test)]
-mod wave_branch_tests {
+mod tests {
     use crate::config::RalphConfig;
     use crate::event_loop::advance_plan_step;
     use crate::event_loop::recover_current_plan_step;
