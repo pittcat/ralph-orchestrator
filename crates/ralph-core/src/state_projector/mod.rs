@@ -86,18 +86,31 @@ use crate::event_reader::Event;
 use crate::state::LedgerSnapshot;
 use crate::step_handoff::ProgressSnapshot;
 
-/// Topics the projector inspects. Other topics are inert (no
-/// projection). The list is locked in a unit test so a future
-/// refactor cannot silently widen the surface.
+/// Topics the projector inspects. **Plan 2026-07-28-001 U1 R3 /
+/// S9 (4.2)** supersedes the legacy hard-coded allow-list below:
+/// after the action-key migration, the only activation trigger is
+/// the configured key on `StateProjectionConfig`; topics with no
+/// matching key are inert no-ops and the projector returns
+/// silently without bumping any rejection counter. The legacy
+/// constant is kept as a documentation-only marker so any future
+/// reader knows which historical topics the projector once
+/// auto-detected before the action-key gate replaced it.
 ///
 /// R6 (2026-06-17-005 fix plan): `review.passed` / `review.failed`
 /// / `plan.blocked` were declared in this list during Phase 1 but
 /// have **no** `StateProjectionAction` mapping — they would have
 /// been inert no-ops in practice. They are removed to keep the
-/// declared surface in lock-step with the implementation. A future
-/// Phase 2 unit that needs them must add the matching
-/// `StateProjectionAction` variant *and* the topic here in the
-/// same commit.
+/// declared surface in lock-step with the implementation.
+///
+/// Topics that were historically whitelisted (for migration
+/// documentation only — **not** consulted at runtime anymore):
+/// - `work.ready`, `work.done`, `queue.advance`, `plan.complete`,
+///   `review.dimensions.complete` (legacy Phase 1 surface).
+/// If a future feature genuinely needs a topic to be projected,
+/// add a typed `StateProjectionAction` variant *and* the matching
+/// `actions` map key in the same commit. Do **not** extend this
+/// allow-list.
+#[deprecated(note = "legacy Phase-1 allow-list — superseded by action-key authority")]
 pub const PROJECTED_TOPICS: &[&str] = &[
     "work.ready",
     "work.done",

@@ -11,10 +11,10 @@
 //! in the prompt — see U4).
 //!
 //! Phase 1 keeps the surface area deliberately narrow:
-//! - The mapping is **preset-driven** (declarative YAML), not hard-coded.
-//! - The projection runs **only** on the topics in
-//!   [`crate::state_projector::PROJECTED_TOPICS`]; all others are
-//!   no-ops.
+//! - The mapping is **preset-driven** (declarative YAML via
+//!   `actions` / `actions_chain`), not hard-coded. Topics outside
+//!   the configured key set are inert no-ops per the action-key
+//!   authority gate (see plan §4.2).
 //! - Failures are **fail-closed** — a malformed event payload that
 //!   cannot be projected drops the event with a diagnostic (see U1
 //!   risk note).

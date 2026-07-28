@@ -443,44 +443,59 @@ fn serial_preset_queue_advance_payload_drives_progress_with_next_step_pointer() 
 }
 
 #[test]
-fn projected_topics_list_is_locked() {
-    // R6 (2026-06-17-005 fix plan): review/plan-blocked topics
-    // removed; declared surface must match implementation.
-    //
-    // The assert_eq! below doubles as the "removed topics stay
-    // out" check: any future re-add of `review.passed` /
-    // `review.failed` / `plan.blocked` must come with a
-    // matching `StateProjectionAction` variant and an
-    // explanation in commit / plan / docs. See the comment on
-    // `PROJECTED_TOPICS` in `state_projector/mod.rs` for the
-    // Phase 2 re-introduction protocol.
-    assert_eq!(
-        PROJECTED_TOPICS,
-        &[
-            "work.ready",
-            "work.done",
-            "queue.advance",
-            "plan.complete",
-            // U3 of plan 2026-07-05-005: `review.dimensions.complete`
-            // was re-added with the matching
-            // `StateProjectionAction::ReviewDimensionsComplete`
-            // variant — see `state_projector/review.rs`.
-            "review.dimensions.complete",
-        ]
+fn unconfigured_topic_is_inert_per_action_key_authority() {
+    // Plan 2026-07-28-001 R11 / S9 (4.2 action-key migration):
+    // after the legacy `PROJECTED_TOPICS` allow-list was removed,
+    // the only activation trigger is the configured action key on
+    // `StateProjectionConfig`. A topic with no matching key is
+    // literally inert: `apply()` walks past it without bumping
+    // the rejection counter.
+    use crate::config::{StateProjectionAction, StateProjectionConfig};
+    use crate::event_reader::Event;
+    use crate::state_projector::{ProjectionContext, StateProjector};
+    use tempfile::TempDir;
+
+    let temp = TempDir::new().unwrap();
+    let workspace = temp.path();
+
+    let mut config = StateProjectionConfig::default();
+    config.enabled = true;
+    config.actions.insert(
+        "configured.topic".to_string(),
+        StateProjectionAction::EnsureTask {
+            key: "k".to_string(),
+            title: None,
+        },
     );
-    // Belt-and-suspenders reverse check: if a future refactor
-    // ever widens the list without the corresponding
-    // `StateProjectionAction` mapping, this catches the
-    // mismatch before it ships.
-    for forbidden in ["review.passed", "review.failed", "plan.blocked"] {
-        assert!(
-            !PROJECTED_TOPICS.contains(&forbidden),
-            "PROJECTED_TOPICS must not contain `{forbidden}`; \
-             re-introducing it requires a matching StateProjectionAction variant \
-             and a plan / commit message explaining why (R6 of 2026-06-17-005)"
-        );
-    }
+    let ctx = ProjectionContext::new_legacy(workspace, config);
+    let mut projector = StateProjector::new(ctx);
+    let events = vec![Event {
+        topic: "forbidden.topic".to_string(),
+        payload: Some("{}".to_string()),
+        ts: "2024-01-01T00:00:00Z".to_string(),
+        hat: None,
+        triggered: None,
+        source: None,
+        wave_id: None,
+        wave_index: None,
+        wave_total: None,
+        system_injected: None,
+    }];
+    let report = projector.apply(events.as_slice());
+    // The unconfigured topic must stay silent (no rejection, no
+    // error) because the action-key gate filters it before the
+    // dispatch arm ever sees it.
+    assert_eq!(
+        report.rejected, 0,
+        "action-key gate must skip inert topics without counting them"
+    );
+    assert!(
+        report.rejections.is_empty(),
+        "inert topics must not produce rejection diagnostics: {:?}",
+        report.rejections
+    );
 }
+
 
 #[test]
 fn json_pointer_reads_nested_keys() {
