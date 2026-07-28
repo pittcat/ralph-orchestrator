@@ -24,7 +24,8 @@ use rusqlite::{Connection, OptionalExtension};
 use super::migrations;
 use super::{
     CompensationKind, CoordinationReceiptSummary, DispatchOutcome, EmissionReservation,
-    EmissionState, IsolationMode, ProjectionReceiptSummary, RedriveResult, SlotResource,
+    EmissionState, IsolationMode, ProjectionReceiptSummary, RedrivePendingChild,
+    RedrivePendingChildSlot, RedriveResult, RedriveTakeOutcome, SlotDescriptor, SlotResource,
     SlotStatus, SupervisorStore, SupervisorStoreError, SupervisorStoreResult, WaveDeliveryState,
     WaveId, WaveKind, WavePhase, WaveSnapshot,
 };
@@ -1878,6 +1879,56 @@ impl SupervisorStore for RusqliteSupervisorStore {
                 .map_err(|e| SupervisorStoreError::Storage(e.to_string()))?;
             }
 
+            // 8b. 2026-07-28-002 plan U2 (R5 / S2a): copy each target
+            // parent slot's descriptor into the child key so U4's
+            // boot `take_dispatchable_redrive_descriptor(child, c,
+            // expected_digest)` can find it. The cloned
+            // descriptor keeps `slot_index` = parent_slot (audit
+            // / digest anchor) and `slot_index_in_parent` is set
+            // for explicit tracing. Pre-U4 parent slots without a
+            // descriptor are intentionally skipped — the boot path
+            // surfaces `expected_digest = None` and fails closed
+            // (S4).
+            for (i, &parent_slot) in target_slots.iter().enumerate() {
+                let parent_descriptor: Option<(u32, String, String, String, String)> = conn
+                    .query_row(
+                        "SELECT slot_index, topic, payload_json, wave_kind, payload_digest
+                         FROM slot_descriptors WHERE wave_id = ?1 AND slot_index = ?2",
+                        rusqlite::params![parent_wave_id, i64::from(parent_slot)],
+                        |row| {
+                            Ok((
+                                row.get::<_, i64>(0)? as u32,
+                                row.get::<_, String>(1)?,
+                                row.get::<_, String>(2)?,
+                                row.get::<_, String>(3)?,
+                                row.get::<_, String>(4)?,
+                            ))
+                        },
+                    )
+                    .optional()
+                    .map_err(|e| SupervisorStoreError::Storage(e.to_string()))?;
+
+                if let Some((slot_idx, topic, payload_json, kind_str, digest)) = parent_descriptor {
+                    let kind = parse_kind(&kind_str)
+                        .map_err(|e| SupervisorStoreError::InvalidTransition(e.to_string()))?;
+                    conn.execute(
+                        "INSERT INTO slot_descriptors
+                         (wave_id, slot_index, slot_index_in_parent, topic, payload_json, wave_kind, payload_digest)
+                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                        rusqlite::params![
+                            &child_wave_id,
+                            i64::from(i as u32),
+                            i64::from(parent_slot),
+                            topic,
+                            payload_json,
+                            kind.to_string(),
+                            digest,
+                        ],
+                    )
+                    .map_err(|e| SupervisorStoreError::Storage(e.to_string()))?;
+                }
+            }
+
             Ok(RedriveResult {
                 redrive_request_id,
                 child_wave_id,
@@ -1885,6 +1936,253 @@ impl SupervisorStore for RusqliteSupervisorStore {
                 parent_wave_id: parent_wave_id.to_string(),
                 slots: target_slots,
             })
+        })
+    }
+
+    /// 2026-07-28-002 plan U2 (R5 / S2a): persist a slot
+    /// descriptor. Uses INSERT OR REPLACE so repeated calls from
+    /// the dispatcher (post-`create_redrive_wave`) overwrite only
+    /// the payload fields; `slot_index_in_parent` is preserved
+    /// because the row was seeded by `create_redrive_wave`.
+    fn persist_slot_descriptor(
+        &self,
+        wave_id: &str,
+        descriptor: &SlotDescriptor,
+    ) -> SupervisorStoreResult<()> {
+        self.with_conn(|conn| {
+            // The wave must exist (fail-closed).
+            let exists: bool = conn
+                .query_row(
+                    "SELECT 1 FROM waves WHERE wave_id = ?1",
+                    [wave_id],
+                    |_| Ok(true),
+                )
+                .optional()?
+                .unwrap_or(false);
+            if !exists {
+                return Err(SupervisorStoreError::UnknownWave(wave_id.to_string()));
+            }
+            conn.execute(
+                "INSERT OR REPLACE INTO slot_descriptors
+                 (wave_id, slot_index, slot_index_in_parent, topic, payload_json, wave_kind, payload_digest)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                rusqlite::params![
+                    wave_id,
+                    i64::from(descriptor.slot_index),
+                    descriptor.slot_index_in_parent.map(i64::from),
+                    &descriptor.topic,
+                    &descriptor.payload_json,
+                    &descriptor.wave_kind.to_string(),
+                    &descriptor.payload_digest,
+                ],
+            )
+            .map_err(|e| SupervisorStoreError::Storage(e.to_string()))?;
+            Ok(())
+        })
+    }
+
+    /// 2026-07-28-002 plan U2 (R4 / R6): read a persisted
+    /// descriptor for `(wave_id, slot_index)`.
+    fn slot_descriptor(
+        &self,
+        wave_id: &str,
+        slot_index: u32,
+    ) -> SupervisorStoreResult<Option<SlotDescriptor>> {
+        self.with_conn(|conn| {
+            let row = conn
+                .query_row(
+                    "SELECT slot_index, topic, payload_json, wave_kind, payload_digest, slot_index_in_parent
+                     FROM slot_descriptors
+                     WHERE wave_id = ?1 AND slot_index = ?2",
+                    rusqlite::params![wave_id, i64::from(slot_index)],
+                    |row| {
+                        Ok((
+                            row.get::<_, i64>(0)?,
+                            row.get::<_, String>(1)?,
+                            row.get::<_, String>(2)?,
+                            row.get::<_, String>(3)?,
+                            row.get::<_, String>(4)?,
+                            row.get::<_, Option<i64>>(5)?,
+                        ))
+                    },
+                )
+                .optional()?;
+
+            match row {
+                Some((slot_idx, topic, payload_json, kind_str, digest, slot_in_parent)) => {
+                    let kind = parse_kind(&kind_str)
+                        .map_err(|e| SupervisorStoreError::InvalidTransition(e.to_string()))?;
+                    Ok(Some(SlotDescriptor {
+                        slot_index: slot_idx as u32,
+                        topic,
+                        payload_json,
+                        wave_kind: kind,
+                        payload_digest: digest,
+                        slot_index_in_parent: slot_in_parent.map(|v| v as u32),
+                    }))
+                }
+                None => Ok(None),
+            }
+        })
+    }
+
+    /// 2026-07-28-002 plan U2 (R4 / R6 / S13): for a redrive
+    /// CHILD wave, return the dispatchable descriptor for the
+    /// given `slot_index`. Three-state outcome: Dispatchable /
+    /// DescriptorUnavailable / DescriptorConflict. Strict digest
+    /// comparison — mismatches fail-close.
+    fn take_dispatchable_redrive_descriptor(
+        &self,
+        child_wave_id: &str,
+        slot_index: u32,
+        expected_digest: &str,
+    ) -> SupervisorStoreResult<RedriveTakeOutcome> {
+        self.with_conn(|conn| {
+            let row: Option<(String, String, String, String, Option<i64>)> = conn
+                .query_row(
+                    "SELECT topic, payload_json, wave_kind, payload_digest, slot_index_in_parent
+                     FROM slot_descriptors
+                     WHERE wave_id = ?1 AND slot_index = ?2",
+                    rusqlite::params![child_wave_id, i64::from(slot_index)],
+                    |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, String>(1)?,
+                            row.get::<_, String>(2)?,
+                            row.get::<_, String>(3)?,
+                            row.get::<_, Option<i64>>(4)?,
+                        ))
+                    },
+                )
+                .optional()?;
+
+            let (topic, payload_json, kind_str, stored_digest, slot_in_parent) = match row {
+                Some(r) => r,
+                None => {
+                    // S13: no persisted descriptor (legacy pre-U4 row).
+                    // Fail-closed.
+                    return Ok(RedriveTakeOutcome::DescriptorUnavailable);
+                }
+            };
+
+            // S13: strict digest mismatch → fail-close.
+            if stored_digest != expected_digest {
+                return Ok(RedriveTakeOutcome::DescriptorConflict);
+            }
+
+            let kind = parse_kind(&kind_str)
+                .map_err(|e| SupervisorStoreError::InvalidTransition(e.to_string()))?;
+
+            let descriptor = SlotDescriptor {
+                slot_index,
+                topic,
+                payload_json,
+                wave_kind: kind,
+                payload_digest: stored_digest,
+                slot_index_in_parent: slot_in_parent.map(|v| v as u32),
+            };
+
+            // DELETE the row so a second `ralph run --resume`
+            // finds no descriptor (fail-closed at boot, not a
+            // stale re-dispatch).
+            conn.execute(
+                "DELETE FROM slot_descriptors WHERE wave_id = ?1 AND slot_index = ?2",
+                rusqlite::params![child_wave_id, i64::from(slot_index)],
+            )
+            .map_err(|e| SupervisorStoreError::Storage(e.to_string()))?;
+
+            Ok(RedriveTakeOutcome::Dispatchable { descriptor })
+        })
+    }
+
+    /// 2026-07-28-002 plan U2 (R5 / R6 / S2a / S4): list child
+    /// waves with `parent_wave_id IS NOT NULL AND phase =
+    /// 'dispatch'`, enriched per slot with `parent_slot_index`
+    /// and `expected_digest` (None when the parent slot had no
+    /// descriptor — pre-U4 legacy row; fail-closed at boot).
+    fn list_redrive_pending_child_waves(&self) -> SupervisorStoreResult<Vec<RedrivePendingChild>> {
+        self.with_conn(|conn| {
+            let mut stmt = conn.prepare(
+                "SELECT wave_id, parent_wave_id, kind
+                 FROM waves
+                 WHERE parent_wave_id IS NOT NULL AND phase = 'dispatch'",
+            )?;
+            let children: Vec<(String, String, String)> = stmt
+                .query_map([], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                    ))
+                })?
+                .filter_map(|r| r.ok())
+                .collect();
+
+            let mut results = Vec::new();
+            for (child_wave_id, parent_wave_id, kind_str) in children {
+                let kind = parse_kind(&kind_str)
+                    .map_err(|e| SupervisorStoreError::InvalidTransition(e.to_string()))?;
+
+                // Get all slots for this child wave.
+                let mut slot_stmt =
+                    conn.prepare("SELECT slot_index FROM wave_slots WHERE wave_id = ?1")?;
+                let child_slots: Vec<u32> = slot_stmt
+                    .query_map([&child_wave_id], |row| {
+                        let idx: i64 = row.get(0)?;
+                        Ok(idx as u32)
+                    })?
+                    .filter_map(|r| r.ok())
+                    .collect();
+                drop(slot_stmt);
+
+                let mut enriched_slots = Vec::new();
+                for child_slot_index in child_slots {
+                    // Look up the slot_descriptor row to get slot_index_in_parent
+                    // and expected_digest.
+                    let row: Option<(Option<i64>, String)> = conn
+                        .query_row(
+                            "SELECT slot_index_in_parent, payload_digest
+                             FROM slot_descriptors
+                             WHERE wave_id = ?1 AND slot_index = ?2",
+                            rusqlite::params![&child_wave_id, i64::from(child_slot_index)],
+                            |row| Ok((row.get::<_, Option<i64>>(0)?, row.get::<_, String>(1)?)),
+                        )
+                        .optional()?;
+
+                    let (parent_slot_index, expected_digest) = match row {
+                        Some((slot_in_parent, digest)) => {
+                            let idx = slot_in_parent.unwrap_or(child_slot_index as i64) as u32;
+                            let dig = if digest.is_empty() {
+                                None
+                            } else {
+                                Some(digest)
+                            };
+                            (idx, dig)
+                        }
+                        None => {
+                            // No descriptor row — skip this slot.
+                            continue;
+                        }
+                    };
+
+                    enriched_slots.push(RedrivePendingChildSlot {
+                        child_slot_index,
+                        parent_slot_index,
+                        expected_digest,
+                    });
+                }
+
+                if !enriched_slots.is_empty() {
+                    results.push(RedrivePendingChild {
+                        child_wave_id,
+                        parent_wave_id,
+                        kind,
+                        slots: enriched_slots,
+                    });
+                }
+            }
+
+            Ok(results)
         })
     }
 

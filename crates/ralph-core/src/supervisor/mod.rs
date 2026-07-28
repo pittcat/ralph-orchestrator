@@ -902,6 +902,12 @@ pub struct SlotDescriptor {
     /// runtime's re-derived ready event. Mismatch is
     /// `descriptor_conflict` (S13).
     pub payload_digest: String,
+    /// 2026-07-28-002 plan U2 (R5 / S2a): for a child wave
+    /// slot, the parent slot index this was derived from.
+    /// `None` for parent-wave descriptors; `Some(parent_slot)`
+    /// when this descriptor belongs to a child wave and was
+    /// copied from the parent during `create_redrive_wave`.
+    pub slot_index_in_parent: Option<u32>,
 }
 
 impl SlotDescriptor {
@@ -909,6 +915,34 @@ impl SlotDescriptor {
     pub fn digest_of(payload: &str) -> String {
         fingerprint_payload(payload)
     }
+}
+
+/// 2026-07-28-002 plan U2 (R5 / R6 / S2a / S4): a child wave
+/// with `parent_wave_id IS NOT NULL` that is in `Dispatch` phase
+/// and therefore eligible for the redrive pending list.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RedrivePendingChild {
+    pub child_wave_id: String,
+    pub parent_wave_id: String,
+    pub kind: WaveKind,
+    pub slots: Vec<RedrivePendingChildSlot>,
+}
+
+/// 2026-07-28-002 plan U2 (R5 / R6 / S2a / S4): one slot of a
+/// `RedrivePendingChild`, enriched with the parent slot index and
+/// the expected payload digest from the parent's persisted descriptor.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RedrivePendingChildSlot {
+    /// The child's slot index (0..N via enumerate on creation).
+    pub child_slot_index: u32,
+    /// The parent's slot index this child slot was derived from.
+    /// This is the slot_index stored in the descriptor, not the
+    /// child's slot_index.
+    pub parent_slot_index: u32,
+    /// `None` when the parent slot had no persisted descriptor
+    /// (pre-U4 legacy row); `Some(digest)` when the parent slot
+    /// had a descriptor — fail-closed at boot.
+    pub expected_digest: Option<String>,
 }
 
 /// 2026-07-27-004 plan U4 (R16 / S13): reasons a redrive can
@@ -1517,6 +1551,37 @@ pub trait SupervisorStore: fmt::Debug + Send + Sync {
         _expected_digest: &str,
     ) -> SupervisorStoreResult<RedriveTakeOutcome> {
         Ok(RedriveTakeOutcome::DescriptorUnavailable)
+    }
+
+    /// 2026-07-28-002 plan U2 (R4 / R6): read a persisted
+    /// descriptor for `(wave_id, slot_index)`. The boot redrive
+    /// scan calls this to build `expected_digest` for the
+    /// parent → child mapping.
+    ///
+    /// Default returns `None` so legacy callers (pre-U2) compile;
+    /// production stores MUST override it so the boot redrive
+    /// scan can build the `expected_digest` for the parent →
+    /// child mapping.
+    fn slot_descriptor(
+        &self,
+        _wave_id: &str,
+        _slot_index: u32,
+    ) -> SupervisorStoreResult<Option<SlotDescriptor>> {
+        Ok(None)
+    }
+
+    /// 2026-07-28-002 plan U2 (R5 / R6 / S2a / S4): list child
+    /// waves with `parent_wave_id IS NOT NULL AND phase =
+    /// 'dispatch'`, enriched per slot with `parent_slot_index`
+    /// and `expected_digest`. When a parent slot had no
+    /// persisted descriptor (pre-U4 legacy row),
+    /// `expected_digest` is `None` — fail-closed at boot.
+    ///
+    /// Default returns an empty vec so legacy callers compile;
+    /// production stores MUST override it for the redrive
+    /// pending child scan.
+    fn list_redrive_pending_child_waves(&self) -> SupervisorStoreResult<Vec<RedrivePendingChild>> {
+        Ok(Vec::new())
     }
 
     // ─────────────────────────────────────────────────────────────────

@@ -59,6 +59,7 @@ mod tests {
             payload_json: payload.to_string(),
             wave_kind: WaveKind::Exec,
             payload_digest: SlotDescriptor::digest_of(payload),
+            slot_index_in_parent: None,
         };
         store
             .persist_slot_descriptor(&wave, &descriptor)
@@ -73,6 +74,7 @@ mod tests {
                 assert_eq!(d.topic, "exec.unit.ready");
                 assert_eq!(d.wave_kind, WaveKind::Exec);
                 assert_eq!(d.payload_json, payload);
+                assert_eq!(d.slot_index_in_parent, None);
             }
             other => panic!("expected Dispatchable, got {other:?}"),
         }
@@ -108,6 +110,7 @@ mod tests {
             payload_json: payload.to_string(),
             wave_kind: WaveKind::Exec,
             payload_digest: SlotDescriptor::digest_of(payload),
+            slot_index_in_parent: None,
         };
         store
             .persist_slot_descriptor(&wave, &descriptor)
@@ -130,6 +133,7 @@ mod tests {
             payload_json: "{}".to_string(),
             wave_kind: WaveKind::Exec,
             payload_digest: SlotDescriptor::digest_of("{}"),
+            slot_index_in_parent: None,
         };
         let err = store
             .persist_slot_descriptor("never-registered", &descriptor)

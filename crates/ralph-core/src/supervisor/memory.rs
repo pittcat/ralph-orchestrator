@@ -20,10 +20,10 @@ use std::time::SystemTime;
 use super::ProjectionKind;
 use super::{
     CompensationKind, CoordinationReceiptSummary, DispatchOutcome, EmissionReservation,
-    EmissionState, IdempotencyKey, IsolationMode, ProjectionReceiptSummary, RedriveResult,
-    RedriveTakeOutcome, SlotDescriptor, SlotResource, SlotStatus, SupervisorStore,
-    SupervisorStoreError, SupervisorStoreResult, WaveDeliveryState, WaveId, WaveKind, WavePhase,
-    WaveSnapshot,
+    EmissionState, IdempotencyKey, IsolationMode, ProjectionReceiptSummary, RedrivePendingChild,
+    RedrivePendingChildSlot, RedriveResult, RedriveTakeOutcome, SlotDescriptor, SlotResource,
+    SlotStatus, SupervisorStore, SupervisorStoreError, SupervisorStoreResult, WaveDeliveryState,
+    WaveId, WaveKind, WavePhase, WaveSnapshot,
 };
 
 /// Per-wave descriptor held in `InMemorySupervisorStore::waves`.
@@ -161,6 +161,15 @@ struct Inner {
     /// the existing dispatcher seam (no parallel hot path,
     /// no fabricated events).
     slot_descriptors: HashMap<(String, u32), SlotDescriptor>,
+    /// 2026-07-28-002 plan U2 (R5 / R6 / S2a): maps
+    /// `(child_wave_id, child_slot_index) -> parent_slot_index`.
+    /// Populated when `create_redrive_wave` builds child slots.
+    /// Used by `slot_descriptor` to redirect child-wave lookups
+    /// to their parent descriptor, and by
+    /// `list_redrive_pending_child_waves` to build the
+    /// `parent_slot_index` + `expected_digest` enrichment.
+    #[allow(dead_code)] // used in slot_descriptor and create_redrive_wave
+    child_parent_slots: HashMap<(String, u32), u32>,
 }
 
 /// 2026-07-24-003 plan U4: in-memory emission reservation row.
@@ -1452,6 +1461,35 @@ impl SupervisorStore for InMemorySupervisorStore {
 
         inner.waves_by_id.insert(child_wave_id.clone(), row);
 
+        // 8. 2026-07-28-002 plan U2 (R5 / S2a): record the
+        // parent → child slot mapping so
+        // `list_redrive_pending_child_waves` can build the
+        // enriched slot list, AND copy each target parent
+        // slot's descriptor into the child key so U4's boot
+        // `take_dispatchable_redrive_descriptor(child, c, ...)`
+        // can find it. The cloned descriptor keeps
+        // `slot_index` = parent_slot (audit/digest anchor) and
+        // gains `slot_index_in_parent = Some(parent_slot)` for
+        // explicit tracing.
+        for (i, &parent_slot) in target_slots.iter().enumerate() {
+            inner
+                .child_parent_slots
+                .insert((child_wave_id.clone(), i as u32), parent_slot);
+
+            // Copy parent descriptor into child key (if the
+            // parent had one). Pre-U4 parent slots without a
+            // descriptor are intentionally skipped here — the
+            // boot path will surface `expected_digest = None`
+            // and fail-closed (S4).
+            let parent_key = (parent_wave_id.to_string(), parent_slot);
+            if let Some(parent_desc) = inner.slot_descriptors.get(&parent_key).cloned() {
+                let mut child_desc = parent_desc;
+                child_desc.slot_index_in_parent = Some(parent_slot);
+                let child_key = (child_wave_id.clone(), i as u32);
+                inner.slot_descriptors.insert(child_key, child_desc);
+            }
+        }
+
         Ok(RedriveResult {
             redrive_request_id,
             child_wave_id,
@@ -1511,6 +1549,104 @@ impl SupervisorStore for InMemorySupervisorStore {
         Ok(RedriveTakeOutcome::Dispatchable {
             descriptor: descriptor.clone(),
         })
+    }
+
+    /// 2026-07-28-002 plan U2 (R4 / R6): read a persisted
+    /// descriptor for `(wave_id, slot_index)`.
+    ///
+    /// For a CHILD wave slot, the descriptor was stored at
+    /// `(child_wave_id, parent_slot_index)` (because the
+    /// dispatcher calls `persist_slot_descriptor(child_wave_id,
+    /// child_slot, descriptor)` where `descriptor.slot_index`
+    /// is the parent's slot). We redirect the lookup to
+    /// `(parent_wave_id, parent_slot_index)` via
+    /// `child_parent_slots`.
+    ///
+    /// For a PARENT wave, no redirect exists; we do a direct
+    /// lookup in `slot_descriptors`.
+    fn slot_descriptor(
+        &self,
+        wave_id: &str,
+        slot_index: u32,
+    ) -> SupervisorStoreResult<Option<SlotDescriptor>> {
+        let inner = self.lock()?;
+        let key = (wave_id.to_string(), slot_index);
+        // R4 / R6: direct lookup in `slot_descriptors`. Both
+        // parent and child slots store their descriptors under
+        // their own `(wave_id, slot_index)` key — child slots
+        // carry the descriptor copied by `create_redrive_wave`
+        // (with `slot_index` / `slot_index_in_parent` set to
+        // the parent slot for audit).
+        Ok(inner.slot_descriptors.get(&key).cloned())
+    }
+
+    /// 2026-07-28-002 plan U2 (R5 / R6 / S2a / S4): list all
+    /// child waves with `parent_wave_id IS NOT NULL` and phase
+    /// `Dispatch`, enriched per slot with `parent_slot_index`
+    /// and `expected_digest` (None when the parent slot had no
+    /// descriptor — pre-U4 legacy row; fail-closed at boot).
+    fn list_redrive_pending_child_waves(&self) -> SupervisorStoreResult<Vec<RedrivePendingChild>> {
+        let inner = self.lock()?;
+        let mut results = Vec::new();
+
+        for wave_row in inner.waves_by_id.values() {
+            let parent_wave_id = match wave_row.parent_wave_id.as_deref() {
+                Some(id) => id,
+                None => continue,
+            };
+
+            if wave_row.phase != WavePhase::Dispatch {
+                continue;
+            }
+
+            // Build the enriched slot list. child_slot_index 0..N
+            // maps to parent_slot via child_parent_slots. The
+            // `expected_digest` is read from the descriptor we
+            // already copied into the child key during
+            // `create_redrive_wave` (i.e. the same digest the
+            // parent carried — `take` will compare against it).
+            // A missing descriptor means pre-U4 legacy row
+            // (S4) and surfaces as `expected_digest = None`
+            // so the boot fails closed.
+            let mut slots = Vec::new();
+            for &child_slot_index in wave_row.slots.keys() {
+                let parent_slot_index = inner
+                    .child_parent_slots
+                    .get(&(wave_row.wave_id.clone(), child_slot_index))
+                    .copied();
+
+                let parent_slot_index = match parent_slot_index {
+                    Some(idx) => idx,
+                    None => continue, // no parent mapping — skip this slot
+                };
+
+                // Look up the child descriptor (the one
+                // copied in from the parent) for
+                // `expected_digest`. Falls through to `None`
+                // when the parent slot had no descriptor.
+                let expected_digest = inner
+                    .slot_descriptors
+                    .get(&(wave_row.wave_id.clone(), child_slot_index))
+                    .map(|d| d.payload_digest.clone());
+
+                slots.push(RedrivePendingChildSlot {
+                    child_slot_index,
+                    parent_slot_index,
+                    expected_digest,
+                });
+            }
+
+            if !slots.is_empty() {
+                results.push(RedrivePendingChild {
+                    child_wave_id: wave_row.wave_id.clone(),
+                    parent_wave_id: parent_wave_id.to_string(),
+                    kind: wave_row.kind,
+                    slots,
+                });
+            }
+        }
+
+        Ok(results)
     }
 
     // ─────────────────────────────────────────────────────────────────
