@@ -113,20 +113,14 @@ pub trait SupervisorBridge: std::fmt::Debug + Send + Sync {
     /// first attempt so the loop count matches the configured
     /// budget.
     ///
-    /// Production bridges must surface the operator's
-    /// `SupervisorConfig.slot_retry_budget` explicitly. The
-    /// default of `1` keeps legacy / mock bridges (`from_store`,
-    /// `InMemoryCoordinatorBridge`, the BDD fixtures, etc.)
-    /// bit-for-bit identical to the pre-U4 budget hard-code so
-    /// characterization tests stay green without a parallel
-    /// field on every test stub. U4 §20's "no default" warning
-    /// is honored by the dedicated `U4BudgetPassesThroughBridge`
-    /// pin test in `loop_runner::tests::wave_supervisor` which
-    /// forces `with_context_and_factory_with_cap` to fail loud
-    /// if a future change drops the budget at the call site.
-    fn slot_retry_budget(&self) -> u32 {
-        1
-    }
+    /// **No default implementation** — every `SupervisorBridge`
+    /// impl MUST provide a value. Production bridges surface the
+    /// operator's `SupervisorConfig.slot_retry_budget` explicitly;
+    /// mock / BDD / stub bridges must declare their own
+    /// `slot_retry_budget()` (typically `0` to disable auto-retry
+    /// for characterization tests). This makes "missing override"
+    /// a compile error instead of a silent default of `1`.
+    fn slot_retry_budget(&self) -> u32;
 
     /// 2026-07-23-007 plan U2 (R-W1): return the loop's primary
     /// workspace root when the bridge was constructed with one
@@ -505,6 +499,13 @@ impl SupervisorBridge for InMemoryCoordinatorBridge {
         self.store
             .list_worktree_paths(wave_id)
             .map_err(|err| BridgeError::Store(err.to_string()))
+    }
+
+    /// BDD / in-memory bridge: return 0 so the BDD scenarios
+    /// don't auto-retry — they assert specific failure shapes
+    /// and intermediate-attempt counts.
+    fn slot_retry_budget(&self) -> u32 {
+        0
     }
 
     fn bind_slot(
@@ -905,6 +906,10 @@ mod tests {
             inputs: PhaseInputs,
         ) -> Result<CoordinatorAction, BridgeError> {
             self.inner.tick(wave_id, inputs)
+        }
+
+        fn slot_retry_budget(&self) -> u32 {
+            self.inner.slot_retry_budget()
         }
 
         fn bind_slot(

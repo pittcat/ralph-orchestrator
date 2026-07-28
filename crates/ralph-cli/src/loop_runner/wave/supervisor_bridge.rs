@@ -834,6 +834,14 @@ impl SupervisorBridge for MockSupervisorBridge {
     ) -> Result<(), BridgeError> {
         Ok(())
     }
+
+    /// Mock bridge: return 0 so the legacy characterization
+    /// tests don't accidentally trigger auto-retry. Tests that
+    /// exercise the retry path use the explicit budget fields
+    /// on `CoordinatorSupervisorBridge` instead.
+    fn slot_retry_budget(&self) -> u32 {
+        0
+    }
 }
 
 #[cfg(test)]
@@ -1322,6 +1330,10 @@ mod tests {
                 reason: &str,
             ) -> Result<(), BridgeError> {
                 self.inner.record_slot_failure(wave_id, slot_index, reason)
+            }
+
+            fn slot_retry_budget(&self) -> u32 {
+                self.inner.slot_retry_budget()
             }
         }
 

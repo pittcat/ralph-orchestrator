@@ -309,7 +309,7 @@ work.done / fix.done
 > 与 `ralph-preset-review` 沟通，确认单链语义确实表达不了，再立项。
 > `references/finding-rubric.md` 的「Single-chain-first audit」段列出对应 finding。
 
-## Wave worker 双时钟（hat 级 idle_heartbeat_secs）
+## Wave worker 双时钟（hat 级 idle_heartbeat_secs + startup_grace_secs）
 
 Wave worker 走双时钟（仅限 wave worker PTY 路径，不影响主 loop `PtyExecutor`），
 三个字段挂在 hat 级而非 `SupervisorConfig`：
@@ -320,14 +320,40 @@ Wave worker 走双时钟（仅限 wave worker PTY 路径，不影响主 loop `Pt
 - `hats.<id>.idle_weak_signal_cap`（u32 次）— 连续仅靠弱信号（assistant text /
   thinking / `TextDelta`）续租的次数上限；用尽后必须等到强信号（tool 事件 /
   events file 增长）或硬顶到达，否则 idle kill。
+- `hats.<id>.startup_grace_secs`（u32 秒）— **可选**，冷启动容忍窗口。**仅
+  在 `idle_heartbeat_secs > 0` 时生效**（idle 关闭时该字段被忽略）。在首个
+  合格进度信号到达之前用 startup_grace 取代 idle 窗口；首信号到达后恢复
+  idle 语义。`0` 或省略 = 关闭。超时归因为 `startup_kill`（归
+  `worker_timeout` family，可重试可 redrive）。
 
 KTD7 推荐值：worker / fix-worker 用 `timeout: 1800, idle_heartbeat_secs: 120,
 idle_weak_signal_cap: 8`；review-batch-worker 用 `timeout: 900,
-idle_heartbeat_secs: 90, idle_weak_signal_cap: 8`。这是 `ce-executor-supervisor`
-builtin preset 的当前值；新建 preset 应当按 `commands.md` 提到的 `preset_lint`
-+ `cargo nextest run -p ralph-core -- hat` 验证 hat 字段解析。
+idle_heartbeat_secs: 90, idle_weak_signal_cap: 8`。若 backend 实测冷启动
+P50 > `idle_heartbeat_secs`（典型场景：Claude / Gemini / Codex headless 在
+spawn 到第一行输出之间超过 120s），加 `startup_grace_secs: 300` 保护慢热
+backend。这是 `ce-executor-supervisor` builtin preset 的当前值；新建
+preset 应当按 `commands.md` 提到的 `preset_lint` + `cargo nextest run -p
+ralph-core -- hat` 验证 hat 字段解析。
 
 agent 不需要主动刷 heartbeat：orchestrator 观察 stream JSON 与
 `RALPH_EVENTS_FILE` 增长来续租 idle 窗口。hat `instructions:` 写「不需要主动
 发 heartbeat」即可，**不要**复述 idle / hard 文案细节；具体分类与 family 映射
 在 `crates/ralph-core/data/ralph-tools-wave.md`「Worker 终止语义」段落。
+
+## Wave slot 自动重试（`event_loop.supervisor.slot_retry_budget`）
+
+`event_loop.supervisor.slot_retry_budget`（u32，默认 1，允许 0..=2，>2 启
+动期拒绝）控制同一 wave 内 supervisor 对单个 slot 的自动重派次数。preset
+作者配置时注意：
+
+- `0` = 关闭自动重派，任何可重试失败直接走 redrive 路径。
+- `1`（默认）= 初始执行 + 1 次自动重派，吸收瞬时 backend 错误。
+- `2` = 初始执行 + 2 次重派，副作用必须保证幂等（agent 工作可能在原 slot
+  上重新执行）。
+
+可重试 reason 固定为 4 个 frozen code（`worker_timeout` /
+`empty_worker_result` / `missing_worker_terminal` / `slot_never_started`），
+非白名单 reason 永不重试。中间 attempt 的 progress / RPC / TUI 副作用被
+截断（只有最终 attempt 的 outcome 暴露给 reporter），不会让 TUI 计数
+漂移。preset 启用 `slot_retry_budget > 0` 时，确认 agent 副作用可幂等
+可重入。

@@ -7818,6 +7818,9 @@ hats: {}
             ) -> Result<(), BridgeError> {
                 Ok(())
             }
+            fn slot_retry_budget(&self) -> u32 {
+                0
+            }
         }
 
         let capturing = Arc::new(CapturingBridge {
@@ -10817,6 +10820,9 @@ hats: {}
             ) -> Result<(), BridgeError> {
                 self.inner.set_wave_phase(id, p)
             }
+            fn slot_retry_budget(&self) -> u32 {
+                self.inner.slot_retry_budget()
+            }
         }
 
         let workspace = tempfile::TempDir::new().expect("temp workspace");
@@ -11550,6 +11556,9 @@ hats: {}
             // only assert the side effects they care about.
             let _ = wave_id;
             Ok(())
+        }
+        fn slot_retry_budget(&self) -> u32 {
+            0
         }
     }
 }

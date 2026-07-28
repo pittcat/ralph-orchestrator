@@ -70,7 +70,7 @@ Supervisor 在注入 `*.wave.failed` 之前，把本波次已 `Completed` 槽的
 
 ### slot_retry_budget
 
-`event_loop.supervisor.slot_retry_budget`：同一 public `wave_id` 内、对可重试 slot 失败的自动 redispatch 次数上限（默认 1 = 初始执行后再试 1 次，硬上限 2）。耗尽后槽永久 Failed，进入 salvage / `*.wave.failed` 路径。与 review dimension mismatch 的 `task.resume` 预算不是同一机制。
+`event_loop.supervisor.slot_retry_budget`：同一 public `wave_id` 内、对可重试 slot 失败的自动 redispatch 次数上限（默认 1 = 初始执行后再试 1 次，硬上限 2）。可重试 reason 固定为 4 个 frozen code：`worker_timeout` / `empty_worker_result` / `missing_worker_terminal` / `slot_never_started`（见 `ralph-core::supervisor::worker_outcome::RETRYABLE_REASONS`）。重试在同一 task 内执行，中间 attempt 不写 store（slot 永远不进入 `Failed` 中间态），且中间 attempt 的 progress / RPC / TUI side-effect 被截断（只最终 attempt 的 outcome 暴露给 reporter），让 TUI `wave.completed` 计数与 store 真实 record 保持一致。预算耗尽后槽永久 Failed，进入 salvage / `*.wave.failed` 路径；与 review dimension mismatch 的 `task.resume` 预算不是同一机制。`>2` 启动期 fail-closed。
 
 ### ralph wave redrive
 
@@ -83,6 +83,10 @@ Wave worker 硬顶：自 PTY spawn 起的最长存活时间，对应 hat 级 `ti
 ### idle heartbeat（wave worker）
 
 Wave worker 静默窗口（HeartbeatTimeout）：自上次合格进度信号起，超过 `hats.<id>.idle_heartbeat_secs` 无强/弱合格信号则 kill。`0` 或省略 = 关闭，仅 StartToClose 墙钟（legacy）。强信号优先（tool stream / events 文件增长）；弱信号（text/thinking）可续租但受 `idle_weak_signal_cap` 连续次数上限。不要求模型主动调 heartbeat API。与 `cli.idle_timeout_secs`（主 loop PtyExecutor）作用域不同。
+
+### startup grace（wave worker）
+
+Wave worker 冷启动容忍窗口（`hats.<id>.startup_grace_secs`，u32 秒）：仅当 idle 模式启用（`idle_heartbeat_secs > 0`）时生效。在首个合格进度信号到达之前，用 startup_grace 窗口取代 idle 心跳窗口以保护慢热的 backend（如 Claude headless 冷启动）；首个信号到达后即恢复 idle 语义。`0` 或省略 = 关闭，worker 行为与既有 idle 语义一致。超时归因为 `startup_kill`（仍归 `worker_timeout` family，可重试可 redrive）。与 `idle_heartbeat_secs` 是「首信号前 / 首信号后」的关系，作用域不重叠。
 
 ### OPAC
 

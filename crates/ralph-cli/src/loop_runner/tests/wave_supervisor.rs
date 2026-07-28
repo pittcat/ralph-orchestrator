@@ -158,6 +158,12 @@ impl SupervisorBridge for SpyBindingBridge {
     ) -> Result<(), BridgeError> {
         Ok(())
     }
+
+    /// Spy: 0 so the spy doesn't auto-retry; tests that
+    /// exercise the retry path use other bridges.
+    fn slot_retry_budget(&self) -> u32 {
+        0
+    }
 }
 
 /// U9 happy path: supervisor `enabled == false` → the
