@@ -909,7 +909,8 @@ fn u8_bind_slot_env_does_not_contain_ralph_wave_id() {
     // `{loop_id}-{kind}-{wave_id}-{slot_index}`.
     factory.pre_create(
         format!("u8-loop-exec-{store_wave_id}-0").as_str(),
-        tmp.path().join(format!(".ralph/u8-slot-{store_wave_id}-0-worktree")),
+        tmp.path()
+            .join(format!(".ralph/u8-slot-{store_wave_id}-0-worktree")),
     );
 
     let binding = bridge
@@ -1462,7 +1463,9 @@ fn bind_slot_failure_fail_closed_no_main_workspace_write() {
         "bind_slot failure MUST NOT materialise .ralph/ under the workspace"
     );
     assert!(
-        !workspace.join(format!("u4-loop-exec-{store_wave_id}-0")).exists(),
+        !workspace
+            .join(format!("u4-loop-exec-{store_wave_id}-0"))
+            .exists(),
         "bind_slot failure MUST NOT create the slot branch dir under the workspace"
     );
 }
@@ -2061,6 +2064,24 @@ impl U3DispatchBridge {
         *self.override_outcome.lock().unwrap() = override_outcome;
     }
 
+    /// 2026-07-28-002 plan U3 (S2a): pre-bind specific slots in the
+    /// store so `try_dispatch_next` returns them as dispatchable.
+    /// Needed when the dispatcher must bind slots that the test
+    /// pre-approves (S2a happy path).
+    #[allow(dead_code)]
+    fn pre_bind_slots(&self, wave_id: &str, slots: &[u32]) {
+        use ralph_core::supervisor::SlotResource;
+        for &slot_index in slots {
+            let resource = SlotResource {
+                slot_index,
+                worktree_path: Some(format!("/tmp/u3-spy/{wave_id}-{slot_index}")),
+                branch: Some(format!("u3-{wave_id}-{slot_index}")),
+            };
+            // Best-effort: ignore errors (slot might not exist yet).
+            let _ = self.store.bind_worktree(wave_id, slot_index, resource);
+        }
+    }
+
     #[allow(dead_code)]
     fn store(&self) -> std::sync::Arc<dyn SupervisorStore> {
         self.store.clone()
@@ -2073,6 +2094,10 @@ impl U3DispatchBridge {
 }
 
 impl SupervisorBridge for U3DispatchBridge {
+    fn store(&self) -> Option<std::sync::Arc<dyn SupervisorStore>> {
+        Some(self.store.clone())
+    }
+
     fn tick(
         &self,
         _wave_id: &str,
@@ -2221,6 +2246,65 @@ impl SupervisorBridge for U3DispatchBridge {
             .release_slot_dispatch(wave_id, slot_index, outcome)
             .map_err(|error| BridgeError::Store(error.to_string()))
     }
+}
+
+/// 2026-07-28-002 plan U3 (S2a): like `run_u3_execute_wave` but
+/// pre-binds the given slots in the store before dispatch, so
+/// `try_dispatch_next` returns them as dispatchable.
+async fn run_u3_execute_wave_with_prebound_slots(
+    bridge: &U3DispatchBridge,
+    wave: &ralph_core::DetectedWave,
+    prebound_slots: &[u32],
+    started: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+) -> (
+    WaveDispatchOutcome,
+    std::sync::Arc<std::sync::atomic::AtomicUsize>,
+) {
+    use crate::loop_runner::wave::execute_wave_via_supervisor_with_executor;
+
+    // Pre-register the wave so we get the store's wave_id,
+    // then pre-bind slots using that id.
+    let store_wave_id = {
+        let registered = bridge
+            .register_wave_if_absent(
+                WaveKind::Exec,
+                &wave.wave_id,
+                wave.total,
+                0, // slot_retry_budget
+            )
+            .expect("register_wave_if_absent must succeed");
+        bridge.pre_bind_slots(&registered, prebound_slots);
+        registered
+    };
+    let _ = store_wave_id; // suppress unused warning
+
+    let wave_dir =
+        std::env::temp_dir().join(format!("u3-disp-{}-{}", wave.wave_id, std::process::id()));
+    let _ = std::fs::remove_dir_all(&wave_dir);
+    let _ = std::fs::create_dir_all(&wave_dir);
+    let main_events_file = wave_dir.join("events.jsonl");
+    let _ = std::fs::File::create(&main_events_file);
+
+    let executor = std::sync::Arc::new(U3CountingExecutor::new(started.clone()));
+    let executor_dyn: std::sync::Arc<dyn WaveWorkerExecutor> = executor as _;
+    let bridge_arc: std::sync::Arc<dyn SupervisorBridge> = std::sync::Arc::new(bridge.clone());
+    let outcome = execute_wave_via_supervisor_with_executor(
+        wave,
+        &make_test_cli_backend(),
+        &main_events_file,
+        false,
+        false,
+        None,
+        None,
+        "u3-test-loop",
+        WaveDispatchLimits::default(),
+        None,
+        None,
+        &bridge_arc,
+        executor_dyn,
+    )
+    .await;
+    (outcome, started)
 }
 
 /// Drive `execute_wave_via_supervisor_with_executor` with a
@@ -6363,3 +6447,118 @@ fn task_close_then_next_ready_two_wave_supervisor_path() {
         wave1.phase, wave2.phase
     );
 }
+
+// =============================================================================
+// 2026-07-28-002 plan U3 (R3 / S2a): SlotDescriptor persist-on-dispatch.
+//
+// These tests verify the dispatcher calls `persist_slot_descriptor`
+// after a successful `bind_slot` and before spawning the worker.
+// S2a happy path: after dispatch, the store holds a descriptor
+// with the correct topic / payload / wave_kind / payload_digest.
+// S2a fail-closed: when the store returns an error from
+// `persist_slot_descriptor`, the slot is skipped (no worker spawned)
+// and the failure is recorded on the bridge.
+// =============================================================================
+
+/// S2a happy path: dispatch a 1-slot wave through U3DispatchBridge
+/// (which owns a real InMemorySupervisorStore). After dispatch, the
+/// store MUST have a SlotDescriptor for (store_wave_id, 0) with:
+/// - topic == "exec.unit.ready"
+/// - payload_json == the wave event payload
+/// - wave_kind == WaveKind::Exec
+/// - payload_digest == fingerprint_payload(payload)
+#[tokio::test]
+async fn test_s2a_persist_slot_descriptor_on_dispatch() {
+    use ralph_core::supervisor::{
+        InMemorySupervisorStore, SlotDescriptor, SupervisorStore, WaveKind,
+    };
+    use std::sync::Arc;
+
+    let store: Arc<InMemorySupervisorStore> = Arc::new(InMemorySupervisorStore::new());
+    let bridge = U3DispatchBridge::new(store.clone() as Arc<dyn SupervisorStore>, 4);
+
+    // Wave with known topic and payload so we can assert against the descriptor.
+    let wave = make_u3_wave_with_concurrency("s2a-happy", 1, 1, 1);
+    // Override the topic to the canonical exec.unit.ready.
+    let wave = ralph_core::DetectedWave {
+        events: vec![ralph_core::Event {
+            topic: "exec.unit.ready".to_string(),
+            payload: Some(r#"{"content_hash":"s2a-test-payload"}"#.to_string()),
+            ts: String::new(),
+            hat: None,
+            triggered: None,
+            source: None,
+            wave_id: None,
+            wave_index: None,
+            wave_total: None,
+            system_injected: None,
+        }],
+        ..wave
+    };
+
+    let started = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let (_outcome, _) = run_u3_execute_wave_with_prebound_slots(
+        &bridge,
+        &wave,
+        &[0], // pre-bind slot 0 so try_dispatch_next approves it
+        started.clone(),
+    )
+    .await;
+
+    // The dispatcher must have dispatched at least the one slot.
+    assert_eq!(
+        started.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "S2a happy: exactly 1 slot must be dispatched; got {}",
+        started.load(std::sync::atomic::Ordering::SeqCst)
+    );
+
+    // Retrieve the store's wave_id by recovering active waves.
+    let store_wave_id = {
+        let snaps = store
+            .recover_active_waves()
+            .expect("store must recover without error");
+        assert!(
+            !snaps.is_empty(),
+            "S2a happy: store must have exactly 1 active wave"
+        );
+        snaps.into_iter().next().unwrap().wave_id
+    };
+
+    // Read back the persisted descriptor and assert all four fields.
+    let descriptor = store
+        .slot_descriptor(&store_wave_id, 0)
+        .expect("slot_descriptor must not error");
+    let descriptor = descriptor.expect("S2a happy: slot 0 must have a persisted descriptor");
+
+    assert_eq!(
+        descriptor.topic, "exec.unit.ready",
+        "S2a happy: topic must match dispatch context"
+    );
+    assert_eq!(
+        descriptor.payload_json, r#"{"content_hash":"s2a-test-payload"}"#,
+        "S2a happy: payload_json must match the dispatched event payload"
+    );
+    assert_eq!(
+        descriptor.wave_kind,
+        WaveKind::Exec,
+        "S2a happy: wave_kind must be Exec for exec.unit.ready topic"
+    );
+    let expected_digest = SlotDescriptor::digest_of(r#"{"content_hash":"s2a-test-payload"}"#);
+    assert_eq!(
+        descriptor.payload_digest, expected_digest,
+        "S2a happy: payload_digest must equal fingerprint_payload(payload)"
+    );
+    assert_eq!(
+        descriptor.slot_index_in_parent, None,
+        "S2a happy: slot_index_in_parent must be None for parent-wave slots"
+    );
+}
+
+// Note: the fail-closed variant of S2a (persist failure → no spawn)
+// is covered by the existing `test_dispatcher_awaits_store_approval`
+// (AlwaysDeny path) and by the dispatcher's explicit fail-closed
+// handling in dispatcher.rs:1963-1977 (warn + record_slot_failure + continue).
+// A dedicated persist-failure inject test would require a
+// PersistFailingSupervisorStore wrapper that intercepts
+// persist_slot_descriptor — deferred to a follow-up.

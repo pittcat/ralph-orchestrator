@@ -237,6 +237,10 @@ impl CoordinatorSupervisorBridge {
 }
 
 impl SupervisorBridge for CoordinatorSupervisorBridge {
+    fn store(&self) -> Option<std::sync::Arc<dyn ralph_core::supervisor::SupervisorStore>> {
+        Some(self.store())
+    }
+
     fn tick(&self, wave_id: &str, inputs: PhaseInputs) -> Result<CoordinatorAction, BridgeError> {
         self.coordinator
             .tick(wave_id, inputs)

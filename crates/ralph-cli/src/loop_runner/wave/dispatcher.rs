@@ -1929,6 +1929,45 @@ pub(crate) async fn execute_wave_via_supervisor_with_executor(
         let worker_rpc_tx = rpc_event_tx.clone();
         let worker_tui_state = tui_state.clone();
 
+        // 2026-07-28-002 plan U3 (R3 / S2a): persist the SlotDescriptor
+        // after bind_slot succeeds and all pre-spawn validation has passed.
+        // This makes the bounded activation record available for redrive
+        // before the worker process is actually spawned. Fail-closed: if
+        // the store is unavailable or returns an error, skip this slot
+        // entirely (no WorkerRequest pushed).
+        if let Some(store) = bridge.store() {
+            use ralph_core::supervisor::{SlotDescriptor, fingerprint_payload};
+            // `wave.events[i].payload` is `Option<String>` from
+            // `ralph_core::event_reader::Event` (not `ralph_proto::Event`).
+            let payload_json = event.payload.clone().unwrap_or_default();
+            let descriptor = SlotDescriptor {
+                slot_index: index_u32,
+                topic: event.topic.clone(),
+                payload_json: payload_json.clone(),
+                wave_kind,
+                payload_digest: fingerprint_payload(&payload_json),
+                slot_index_in_parent: None,
+            };
+            if let Err(err) = store.persist_slot_descriptor(&store_wave_id, &descriptor) {
+                // Fail-closed: a slot whose descriptor cannot be persisted
+                // MUST NOT spawn. Record the failure on the bridge so the
+                // store sees a structured reason.
+                warn!(
+                    wave_id = %wave.wave_id,
+                    slot_index = index_u32,
+                    wave_kind = ?wave_kind,
+                    error = %err,
+                    "U3: persist_slot_descriptor failed; failing closed (slot skipped)"
+                );
+                let _ = bridge.record_slot_failure(
+                    &store_wave_id,
+                    index_u32,
+                    &format!("persist_slot_descriptor failed: {err}"),
+                );
+                continue;
+            }
+        }
+
         prepared.push(PreparedSlot {
             index: index_u32,
             request: Some(WorkerRequest {

@@ -119,6 +119,15 @@ pub trait SupervisorBridge: std::fmt::Debug + Send + Sync {
         None
     }
 
+    /// 2026-07-28-002 plan U3 (R3 / S2a): return the
+    /// underlying `Arc<dyn SupervisorStore>` when the bridge was
+    /// constructed with one. Used by the dispatcher to call
+    /// `persist_slot_descriptor` after a successful `bind_slot`.
+    /// Default `None` keeps the existing mock contracts working.
+    fn store(&self) -> Option<std::sync::Arc<dyn SupervisorStore>> {
+        None
+    }
+
     /// 2026-07-23-007 plan U4 (R-W5): return the loop's
     /// `tasks.jsonl` path when the bridge was constructed with
     /// one. The dispatcher projects slot transitions onto the
@@ -463,6 +472,10 @@ impl InMemoryCoordinatorBridge {
 }
 
 impl SupervisorBridge for InMemoryCoordinatorBridge {
+    fn store(&self) -> Option<std::sync::Arc<dyn SupervisorStore>> {
+        Some(self.store.clone())
+    }
+
     fn tick(&self, wave_id: &str, inputs: PhaseInputs) -> Result<CoordinatorAction, BridgeError> {
         self.coordinator
             .tick(wave_id, inputs)
