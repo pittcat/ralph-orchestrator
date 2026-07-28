@@ -47,6 +47,7 @@ schemas:
       - development_plan_path
       - execution_plan_path
       - unit_count
+      - unit_tasks
       - plan_key
     payload: json_object
     field_docs:
@@ -66,10 +67,10 @@ schemas:
         meaning: Number of Units in the execution plan.
         source: Parsed execution-plan.yml unit list length.
         fill_rule: Non-negative integer matching execution plan.
-      plan_key:
-        meaning: Forge plan key basename.
-        source: Same key used for .ralph/forge/<plan-key>/ and materialize --plan-key.
-        fill_rule: Must match directory name.
+      unit_tasks:
+        meaning: Non-empty ordered Unit task specifications projected atomically into the task ledger.
+        source: Parsed execution-plan.yml units[].
+        fill_rule: Each item has unit_id, task_key, title, and depends_on_task_keys; task_key is forge:<plan-key>:<unit-id>; no task mutation CLI.
 
   forge.concurrency.approved:
     required_fields:
@@ -493,3 +494,14 @@ schemas:
         meaning: Forge plan key basename.
         source: Basename of plan_path or prior trigger plan_key.
         fill_rule: Must match forge_artifact_root segment.
+
+state_projection:
+  enabled: true
+  actions:
+    forge.plan.ready:
+      kind: ensure_task_batch
+      items: unit_tasks
+      count: unit_count
+      key: task_key
+      title: title
+      blocked_by_keys: depends_on_task_keys

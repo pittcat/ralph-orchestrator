@@ -28,6 +28,7 @@ use super::finding_id::{
     FINDING_INSTRUCTIONS_FIX_UNIT_MINT_TEMPLATE_MISSING,
     FINDING_INSTRUCTIONS_OPAC_SKILL_REFERENCE_MISSING, FINDING_INSTRUCTIONS_READ_INTERNAL_LEDGER,
     FINDING_INSTRUCTIONS_SUPERVISOR_COORDINATION_TOPIC, FINDING_INSTRUCTIONS_TASK_CREATE_LITERAL,
+    FINDING_INSTRUCTIONS_TASK_MUTATION_AUTHORITY_CONFLICT,
 };
 
 /// Supervisor-only coordination topics. Agents emitting these will be
@@ -69,8 +70,22 @@ pub fn check_instructions_opac_with_preset(raw_yaml: &str, preset_name: &str) ->
         return findings;
     };
 
-    // U7 lint whitelist gate: only the presets on the
-    // whitelist reach `check_emit_feedback_skill_reference`.
+    let projection_owned = parsed
+        .get("event_loop")
+        .and_then(|value| value.get("state_projection"))
+        .and_then(|value| value.get("actions"))
+        .is_some_and(|actions| actions.as_mapping().is_some_and(|map| !map.is_empty()));
+    let coordinator_hats = parsed
+        .get("tasks")
+        .and_then(|value| value.get("coordinator_hats"))
+        .and_then(Value::as_sequence)
+        .map(|hats| {
+            hats.iter()
+                .filter_map(Value::as_str)
+                .collect::<std::collections::HashSet<_>>()
+        })
+        .unwrap_or_default();
+
     let lint_active = U7_EMIT_FEEDBACK_LINT_PRESET_WHITELIST.contains(&preset_name);
 
     for (hat_id, hat_value) in hats {
@@ -92,12 +107,38 @@ pub fn check_instructions_opac_with_preset(raw_yaml: &str, preset_name: &str) ->
                     .and_then(|s| s.iter().next().and_then(|v| v.as_str()))
             }) {
             Some(s) if !s.is_empty() => s.to_string(),
-            _ => continue, // hat with no instructions is not subject to this lint
+            _ => String::new(),
         };
+        let extra_instructions = hat_value
+            .get("extra_instructions")
+            .and_then(Value::as_sequence)
+            .map(|values| {
+                values
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            })
+            .unwrap_or_default();
+        let instructions = if extra_instructions.is_empty() {
+            instructions
+        } else {
+            format!("{instructions}\n{extra_instructions}")
+        };
+        if instructions.is_empty() {
+            continue;
+        }
 
         let publishes = hat_publishes(hat_value);
 
         check_task_create_literal(hat_id_str, &instructions, &mut findings);
+        check_task_mutation_authority(
+            hat_id_str,
+            &instructions,
+            projection_owned,
+            coordinator_hats.contains(hat_id_str),
+            &mut findings,
+        );
         check_internal_ledger_read(hat_id_str, &instructions, &mut findings);
         check_supervisor_coordination_emit(hat_id_str, &instructions, &mut findings);
 
@@ -170,6 +211,57 @@ fn check_task_create_literal(hat_id: &str, instructions: &str, findings: &mut Ve
             return;
         }
     }
+}
+
+fn check_task_mutation_authority(
+    hat_id: &str,
+    instructions: &str,
+    projection_owned: bool,
+    is_coordinator: bool,
+    findings: &mut Vec<LintFinding>,
+) {
+    let lower = instructions.to_ascii_lowercase();
+    let explicitly_negative = lower.contains("do not")
+        || lower.contains("never")
+        || instructions.contains("禁止")
+        || instructions.contains("不要")
+        || instructions.contains("不得");
+    if explicitly_negative {
+        return;
+    }
+    let command = [
+        "ralph tools task add",
+        "ralph task add",
+        "ralph tools task ensure",
+        "ralph task ensure",
+    ]
+    .iter()
+    .find(|needle| lower.contains(**needle));
+    let Some(command) = command else {
+        return;
+    };
+    let legal_fix_unit_template =
+        lower.contains("--for-fix-unit") && lower.contains("ralph tools task ensure");
+    if legal_fix_unit_template {
+        return;
+    }
+    let reason = if projection_owned {
+        "projector_single_writer_conflict"
+    } else if !is_coordinator {
+        "non_coordinator_task_mutation"
+    } else {
+        return;
+    };
+    findings.push(
+        LintFinding::new(
+            FINDING_INSTRUCTIONS_TASK_MUTATION_AUTHORITY_CONFLICT,
+            format!(
+                "hat `{hat_id}` requires `{command}` ({reason}); task creation must use the configured projector or an authorized coordinator"
+            ),
+        )
+        .with_hat(hat_id)
+        .with_action_hint("Remove agent-side task mutation and emit the declarative task handoff; read live task IDs through the task API."),
+    );
 }
 
 fn check_internal_ledger_read(hat_id: &str, instructions: &str, findings: &mut Vec<LintFinding>) {
@@ -563,7 +655,66 @@ hats:
         );
     }
 
-    // 2026-07-09-001 plan (U7): emit-feedback-skill-reference lint.
+    #[test]
+    fn task_mutation_authority_matrix() {
+        let cases = [
+            (
+                "non-coordinator",
+                "ralph tools task add \"Unit\" --key k",
+                false,
+                true,
+            ),
+            (
+                "projection-owner",
+                "ralph tools task ensure --key k",
+                true,
+                true,
+            ),
+        ];
+        for (name, command, projection_owned, is_coordinator) in cases {
+            let yaml = format!(
+                "event_loop:\n  state_projection:\n    actions:\n      custom.ready:\n        kind: ensure_task\n        key: task_key\ntasks:\n  coordinator_hats: [{}]\nhats:\n  worker:\n    instructions: |\n      {command}\n",
+                if is_coordinator { "worker" } else { "other" }
+            );
+            let findings = check_instructions_opac_with_preset(&yaml, "");
+            assert!(
+                findings.iter().any(|finding| {
+                    finding.id == FINDING_INSTRUCTIONS_TASK_MUTATION_AUTHORITY_CONFLICT
+                        && finding.hat.as_deref() == Some("worker")
+                }),
+                "{name} must be rejected: {findings:?}"
+            );
+            let _ = projection_owned;
+        }
+    }
+
+    #[test]
+    fn task_mutation_negative_read_only_and_fix_unit_cases_are_allowed() {
+        let yaml = r#"
+event_loop:
+  state_projection:
+    actions:
+      custom.ready:
+        kind: ensure_task
+        key: task_key
+tasks:
+  coordinator_hats: [coordinator]
+hats:
+  coordinator:
+    instructions: |
+      Do not call `ralph tools task add`; use `ralph tools task list` and `ralph tools task show`.
+  fixer:
+    instructions: |
+      Call `ralph tools task ensure --for-fix-unit --key ...`.
+"#;
+        let findings = check_instructions_opac_with_preset(yaml, "");
+        assert!(
+            !findings.iter().any(|finding| {
+                finding.id == FINDING_INSTRUCTIONS_TASK_MUTATION_AUTHORITY_CONFLICT
+            }),
+            "allowed cases must not report: {findings:?}"
+        );
+    }
 
     /// U7 error path: hat publishes a business event, the
     /// `instructions` text talks about `payload` / `ralph

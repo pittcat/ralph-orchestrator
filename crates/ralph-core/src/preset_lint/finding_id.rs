@@ -416,7 +416,12 @@ pub const FINDING_SUPERVISOR_DELETED_HAT_REFERENCED: &str =
 // OPAC instructions lint finding IDs (2026-07-04-001 plan U11)
 // ──────────────────────────────────────────────────────────────────────────
 
-/// Hat `instructions:` reference the fictional `ralph tools task create`
+/// Hat instructions require task creation/mutation although the hat is not
+/// authorized to write tasks, or a projection-owned task writer conflicts with
+/// an agent-side mutation instruction.
+pub const FINDING_INSTRUCTIONS_TASK_MUTATION_AUTHORITY_CONFLICT: &str =
+    "preset.instructions_task_mutation_authority_conflict";
+
 /// (or `ralph task create`) command. The real CLI exposes only `add` and
 /// `ensure`. Agents copy-pasting this string will hit a hard CLI error at
 /// runtime; surface the anti-pattern at preset-load time.

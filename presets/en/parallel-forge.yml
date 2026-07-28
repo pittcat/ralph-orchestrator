@@ -329,9 +329,9 @@ hats:
       1. 按 templates 写 `execution-plan.yml`（含 `units[]` DAG 字段）。
       2. 校验无环；并行 Unit 无共享写冲突；设 `plan_key` / `source_plan_path` / `development_plan_path`。
 
-      ### 步骤 4 — 注册 tasks
+      ### 步骤 4 — 声明 Unit tasks
 
-      对每个 unit：`ralph tools task add "<title>" --key forge:<plan-key>:<unit-id>`（记录 live `task_id`）。
+      不要调用任何 task mutation CLI。把每个 Unit 写入 `forge.plan.ready` 的 `unit_tasks[]`：每项必须包含 `unit_id`、`task_key`（`forge:<plan-key>:<unit-id>`）、非空 `title` 和 `depends_on_task_keys`。`unit_count` 必须等于 `unit_tasks` 长度；runtime projector 会原子创建或复用 task，并把依赖 key 解析为 live task ID。dispatcher 后续只通过 task API 读取 live `task_id`。
 
       ### 步骤 5 — Emit
 
