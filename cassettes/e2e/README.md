@@ -81,6 +81,77 @@ Each line is a JSON object with these fields:
 }
 ```
 
+## Marker Cassettes (Plan 2026-07-28-001 U3 / R16 / S13)
+
+Cassettes used by the **per-activation mock-cli harness** (see
+`crates/ralph-e2e/src/scenarios/parallel_forge.rs` and
+`crates/ralph-e2e/src/mock_cli.rs`) follow a stricter wire format.
+The scenario ID `parallel-forge-dispatch-contract` is the first
+consumer; the format is intentionally reusable for future preset
+E2E suites that need deterministic per-activation grouping.
+
+### Layout
+
+Each cassette is a JSONL stream whose records are one of:
+
+```jsonc
+{
+  "ts": 1700000000000,                          // RFC 3339-ish millis
+  "event": "_meta.activation",                   // group boundary marker
+  "data": { "index": 0 }                        // monotonic 0..N-1
+}
+```
+
+```jsonc
+{
+  "ts": 1700000000100,
+  "event": "ux.terminal.write",
+  "data": { "bytes": "SGVsbG8=", "stdout": true, "offset_ms": 10 }
+}
+```
+
+Activation groups start on a `_meta.activation` marker and end at
+the next such marker. Indices are contiguous and 0-based; the
+mock-cli harness aborts non-zero on any gap or duplicate. Markers
+themselves are **not** forwarded to the `SessionPlayer`; they are
+pure boundary signals for the harness cursor.
+
+`bus.publish` records carry a `data.command` field; for marker
+cassettes that field MUST be exactly `ralph emit`,
+`ralph wave verify`, or `ralph wave emit` (the mock-cli replaces
+the leading `ralph` with `--ralph-bin`). Any other command verb is
+non-zero exit and the cursor does not advance.
+
+### Cursor
+
+The harness advances a workspace-local cursor at
+`.ralph/e2e-mock/<scenario-id>-<backend>.cursor` (atomic temp +
+rename under `ralph_core::FileLock`); each invocation consumes the
+current group, on success writes the next index, then releases the
+lock. The scenario's `cleanup` removes the directory after the
+scenario's run body finishes; the run body asserts `cursor_index`
+equals the declared group count.
+
+### Recording Recipe (per-activation cassettes)
+
+Recording by `--record-session` does not currently emit
+`_meta.activation` markers. Until the recording path is upgraded,
+follow this recipe to extend a marker cassette manually:
+
+```text
+1. ralph run --worktree --plan docs/plans/... (live, real backend)
+   each backend invocation writes its full stdout / stderr plus
+   the parsed `bus.publish` events to cassettes/e2e/<id>.jsonl
+2. Insert `_meta.activation` markers at every hat boundary
+   between recorded groups; consecutive markers may not skip an
+   index and may not collide on the same index.
+3. Replace any local file / worktree paths with the cassette
+   workspace-relative forms; the harness substitutes
+   `{{task_id:<plan_key>:<unit_id>}}` in `bus.publish.data.command`
+   payloads against the workspace's `tasks.jsonl` after the projector
+   pass.
+```
+
 ## Usage
 
 Run E2E tests in mock mode:

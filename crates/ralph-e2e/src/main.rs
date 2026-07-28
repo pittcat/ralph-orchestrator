@@ -56,6 +56,13 @@ use ralph_e2e::{
     MemorySearchScenario,
     MockConfig,
     MultiIterScenario,
+    // Plan 2026-07-28-001 U3 (R16 / S13): parallel-forge task
+    // authority mock-E2E scenario. The full marker-cassette +
+    // activation-cursor harness lands in a follow-up plan; the
+    // shell registers the scenario id today so the dispatcher
+    // does not silently grow without the matching
+    // `cassettes/e2e/parallel-forge-dispatch-contract.jsonl`.
+    scenarios::ParallelForgeDispatchContractScenario,
     ReportFormat as LibReportFormat,
     ReportWriter,
     RunConfig,
@@ -250,6 +257,13 @@ fn get_all_scenarios() -> Vec<Box<dyn TestScenario>> {
         Box::new(MaxIterationsScenario::new()),
         Box::new(AuthFailureScenario::new()),
         Box::new(BackendUnavailableScenario::new()),
+        // Plan 2026-07-28-001 U3 (R16 / S13): task authority E2E
+        // placeholder. Disabled by default; the dispatcher-side
+        // harness should run it once the marker cassette lands.
+        // To re-enable locally, pass `--scenario parallel-forge-dispatch-contract`
+        // on the CLI; the run body currently yields a single
+        // assertion that the cassette harness is still pending.
+        Box::new(ParallelForgeDispatchContractScenario::new()),
     ]
 }
 

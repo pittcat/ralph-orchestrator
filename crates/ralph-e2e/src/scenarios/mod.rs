@@ -50,6 +50,13 @@ mod incremental;
 mod memory;
 mod orchestration;
 mod tasks;
+// Plan 2026-07-28-001 U3 (R16 / S13): the parallel-forge task
+// authority scenario is registered but its activation-group
+// cassette + cursor harness is pending a follow-up plan. The
+// shell + scenario trait placeholder stills pins the scenario ID
+// so the existing ralph-e2e dispatcher does not silently grow
+// without it.
+mod parallel_forge;
 
 pub use capabilities::{StreamingScenario, ToolUseScenario};
 pub use connectivity::ConnectivityScenario;
@@ -68,6 +75,7 @@ pub use memory::{
     MemoryRapidWriteScenario, MemorySearchScenario,
 };
 pub use orchestration::{CompletionScenario, MultiIterScenario, SingleIterScenario};
+pub use parallel_forge::ParallelForgeDispatchContractScenario;
 pub use tasks::{TaskAddScenario, TaskCloseScenario, TaskCompletionScenario, TaskReadyScenario};
 
 use crate::Backend;
