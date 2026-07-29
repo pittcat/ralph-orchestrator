@@ -3268,6 +3268,7 @@ event_loop:
                 runs: None,
                 on: on.map(String::from),
                 on_any_of: on_any_of.into_iter().map(String::from).collect(),
+                transition_emits: Vec::new(),
             }
         };
         let mut cfg = RalphConfig::default();
@@ -3360,6 +3361,7 @@ event_loop:
                 runs: None,
                 on: on.map(String::from),
                 on_any_of: on_any_of.into_iter().map(String::from).collect(),
+                transition_emits: Vec::new(),
             }
         };
         let mut cfg = RalphConfig::default();
@@ -3436,6 +3438,7 @@ event_loop:
                 runs: None,
                 on: on.map(String::from),
                 on_any_of: on_any_of.into_iter().map(String::from).collect(),
+                transition_emits: Vec::new(),
             }
         };
 
@@ -3523,6 +3526,7 @@ event_loop:
                                 runs: None,
                                 on: None,
                                 on_any_of: Vec::new(),
+                                transition_emits: Vec::new(),
                             },
                             FlowStepConfig {
                                 id: "review_wave".to_string(),
@@ -3533,6 +3537,7 @@ event_loop:
                                 runs: None,
                                 on: None,
                                 on_any_of: Vec::new(),
+                                transition_emits: Vec::new(),
                             },
                         ],
                         enforce_schema: "hard".to_string(),
