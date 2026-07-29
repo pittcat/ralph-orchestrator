@@ -244,6 +244,18 @@ fn copy_artifact_templates(manifest_dir: &str, out_dir: &str) {
             "README.md",
         ],
     );
+
+    // ce-executor-pipeline templates (plan 2026-07-29-001 U2)
+    copy_preset_templates(
+        &templates_root,
+        &dest_root,
+        "ce-executor-pipeline",
+        &[
+            "fail-confidence-rubric.template.md",
+            "settlement-evidence.template.md",
+            "README.md",
+        ],
+    );
 }
 
 /// Copy one preset's template directory into `$OUT_DIR/artifact-templates/<preset>/`.

@@ -1434,7 +1434,10 @@ mod tests {
             "baseline_existing_count": 0,
             "new_business_regressions_count": 0,
             "test_compatibility_updates_count": 0,
-            "flaky_or_environmental_count": 0
+            "flaky_or_environmental_count": 0,
+            "settlement_confidence": 92,
+            "settlement_evidence_coverage": 80,
+            "settlement_evidence_file": ".ralph/review/2026-07-12-003-demo-plan/fix-settlement-evidence.md"
         });
 
         // 1. Legal blocked exit (fix_status=blocked + failure_reason)

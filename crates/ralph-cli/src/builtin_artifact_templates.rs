@@ -61,6 +61,14 @@ pub const RED_TEAM_ATTACK_TEMPLATE_NAMES: &[&str] = &[
     "README.md",
 ];
 
+/// Expected basenames for `ce-executor-pipeline` (keep in sync with
+/// `presets/templates/ce-executor-pipeline/` and `build.rs` copy).
+pub const CE_EXECUTOR_PIPELINE_TEMPLATE_NAMES: &[&str] = &[
+    "fail-confidence-rubric.template.md",
+    "settlement-evidence.template.md",
+    "README.md",
+];
+
 const PARALLEL_FORGE_TEMPLATES: &[ArtifactTemplate] = &[
     ArtifactTemplate {
         file_name: "development-plan.template.md",
@@ -144,6 +152,30 @@ const RED_TEAM_ATTACK_TEMPLATES: &[ArtifactTemplate] = &[
     },
 ];
 
+const CE_EXECUTOR_PIPELINE_TEMPLATES: &[ArtifactTemplate] = &[
+    ArtifactTemplate {
+        file_name: "fail-confidence-rubric.template.md",
+        content: include_str!(concat!(
+            env!("OUT_DIR"),
+            "/artifact-templates/ce-executor-pipeline/fail-confidence-rubric.template.md"
+        )),
+    },
+    ArtifactTemplate {
+        file_name: "settlement-evidence.template.md",
+        content: include_str!(concat!(
+            env!("OUT_DIR"),
+            "/artifact-templates/ce-executor-pipeline/settlement-evidence.template.md"
+        )),
+    },
+    ArtifactTemplate {
+        file_name: "README.md",
+        content: include_str!(concat!(
+            env!("OUT_DIR"),
+            "/artifact-templates/ce-executor-pipeline/README.md"
+        )),
+    },
+];
+
 /// Strip optional `builtin:` prefix from preset names.
 ///
 /// Agents and operators commonly pass `builtin:parallel-forge` (same as
@@ -184,9 +216,10 @@ fn templates_for_preset(preset: &str) -> Result<&'static [ArtifactTemplate]> {
     match preset {
         "parallel-forge" => Ok(PARALLEL_FORGE_TEMPLATES),
         "red-team-attack" => Ok(RED_TEAM_ATTACK_TEMPLATES),
+        "ce-executor-pipeline" => Ok(CE_EXECUTOR_PIPELINE_TEMPLATES),
         other => bail!(
             "no embedded artifact templates for preset '{other}' \
-             (supported: parallel-forge, red-team-attack)"
+             (supported: parallel-forge, red-team-attack, ce-executor-pipeline)"
         ),
     }
 }
@@ -213,6 +246,16 @@ pub fn materialize(preset: &str, dest_dir: &Path) -> Result<Vec<PathBuf>> {
              expected {}",
             templates.len(),
             RED_TEAM_ATTACK_TEMPLATE_NAMES.len()
+        );
+    }
+    if preset_key == "ce-executor-pipeline"
+        && templates.len() != CE_EXECUTOR_PIPELINE_TEMPLATE_NAMES.len()
+    {
+        bail!(
+            "internal catalog drift for ce-executor-pipeline: embedded {} files, \
+             expected {}",
+            templates.len(),
+            CE_EXECUTOR_PIPELINE_TEMPLATE_NAMES.len()
         );
     }
 
@@ -337,9 +380,116 @@ mod tests {
     #[test]
     fn materialize_unknown_preset_fails_without_writing() {
         let dir = tempfile::tempdir().unwrap();
-        let err = materialize("ce-executor-pipeline", dir.path()).unwrap_err();
+        let err = materialize("no-such-preset", dir.path()).unwrap_err();
         assert!(err.to_string().contains("no embedded artifact templates"));
         assert!(fs::read_dir(dir.path()).unwrap().next().is_none());
+    }
+
+    // plan 2026-07-29-001 U2: ce-executor-pipeline template registration.
+    // Three templates (rubric + settlement-evidence + README) ship in the
+    // binary so executor / fixer / precheck gates can materialize them
+    // without a repo checkout.
+
+    #[test]
+    fn ce_executor_pipeline_embeds_expected_count_and_names() {
+        assert_eq!(
+            CE_EXECUTOR_PIPELINE_TEMPLATES.len(),
+            CE_EXECUTOR_PIPELINE_TEMPLATE_NAMES.len()
+        );
+        let names = list_template_names("ce-executor-pipeline").unwrap();
+        for expected in CE_EXECUTOR_PIPELINE_TEMPLATE_NAMES {
+            assert!(
+                names.contains(expected),
+                "missing embedded template {expected}"
+            );
+        }
+        for t in CE_EXECUTOR_PIPELINE_TEMPLATES {
+            assert!(!t.content.is_empty(), "{} must be non-empty", t.file_name);
+            assert!(
+                !t.content.contains('\0'),
+                "{} must be valid UTF-8 text",
+                t.file_name
+            );
+        }
+    }
+
+    #[test]
+    fn ce_executor_pipeline_materialize_writes_all_files_with_content() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = materialize("ce-executor-pipeline", dir.path()).unwrap();
+        assert_eq!(paths.len(), CE_EXECUTOR_PIPELINE_TEMPLATE_NAMES.len());
+        for name in CE_EXECUTOR_PIPELINE_TEMPLATE_NAMES {
+            let path = dir.path().join(name);
+            assert!(path.is_file(), "{name} missing");
+            let on_disk = fs::read_to_string(&path).unwrap();
+            let embedded = CE_EXECUTOR_PIPELINE_TEMPLATES
+                .iter()
+                .find(|t| t.file_name == *name)
+                .unwrap()
+                .content;
+            assert_eq!(on_disk, embedded, "{name} content mismatch");
+        }
+    }
+
+    #[test]
+    fn ce_executor_pipeline_materialize_is_idempotent() {
+        let dir = tempfile::tempdir().unwrap();
+        let first = materialize("ce-executor-pipeline", dir.path()).unwrap();
+        let second = materialize("ce-executor-pipeline", dir.path()).unwrap();
+        assert_eq!(first.len(), second.len());
+        let marker = dir.path().join("fail-confidence-rubric.template.md");
+        assert!(
+            fs::read_to_string(&marker)
+                .unwrap()
+                .contains("## §1. 四维度评分对照表")
+        );
+    }
+
+    #[test]
+    fn ce_executor_pipeline_rubric_template_keeps_four_sections() {
+        let body = CE_EXECUTOR_PIPELINE_TEMPLATES
+            .iter()
+            .find(|t| t.file_name == "fail-confidence-rubric.template.md")
+            .unwrap()
+            .content;
+        for marker in [
+            "## §1. 四维度评分对照表",
+            "## §2. 阈值表",
+            "## §3. Coverage 计算规则",
+            "## §4. 六类 failed_checks 命名清单",
+            "missing_attempt_record",
+            "single_angle_retries",
+            "broken_causal_chain",
+            "unverifiable_evidence",
+            "confidence_inflated",
+            "uneliminated_alternatives",
+        ] {
+            assert!(
+                body.contains(marker),
+                "fail-confidence-rubric.template.md missing marker: {marker}"
+            );
+        }
+    }
+
+    #[test]
+    fn ce_executor_pipeline_evidence_template_keeps_unit_section_structure() {
+        let body = CE_EXECUTOR_PIPELINE_TEMPLATES
+            .iter()
+            .find(|t| t.file_name == "settlement-evidence.template.md")
+            .unwrap()
+            .content;
+        for marker in [
+            "### 尝试记录（1 初始 + 3 retry，共 4 次）",
+            "### 最终假设的因果链",
+            "### 假因排除记录",
+            "### 证据来源清单",
+            "## 自评（Self-Assessment）",
+        ] {
+            assert!(
+                body.contains(marker),
+                "settlement-evidence.template.md missing marker: {marker}"
+            );
+        }
     }
 
     /// Contract: development-plan template keeps Spec-First / BDD / TDD scaffolding.

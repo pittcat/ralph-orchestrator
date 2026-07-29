@@ -74,6 +74,45 @@ event_loop:
   max_runtime_seconds: 28800  # 8 hours
   enforce_hat_scope: true
   ephemeral_isolation: true
+  # plan 2026-07-29-001 U3: fail-gate precheck rules. Each rule attaches a
+  # checklist to a fail-shaped topic (`work.failed` / `fix.done`). Desugar
+  # rewrites the producer's publishes/terminal_events to `<X>.proposed`,
+  # synthesizes a `precheck-<X>` gate hat that consumes `<X>.proposed` and
+  # emits either `<X>` (pass, payload forwarded verbatim) or `<X>.rejected`
+  # (fail with `failed_checks` + `reason`). Retry budget 3; on exhaustion
+  # the runtime emits `plan.blocked{kind: precheck_exhausted}` directly.
+  # The gate is transparent to producers: they keep emitting `<X>` exactly
+  # as today; the runtime handles the `.proposed` rewrite. Producers must
+  # still meet the new schema required fields (U1: `dead_end_*` /
+  # `settlement_*`) — the gate opens the evidence file and re-scores the
+  # same rubric the producer used.
+  precheck:
+    enabled: true
+    rules:
+      work.failed:
+        prompt:
+          - "Step 1: run `ralph preset materialize-artifacts ce-executor-pipeline --plan-key <plan_name>`; from the materialized templates directory read `fail-confidence-rubric.template.md` and `settlement-evidence.template.md`. Use ONLY that rubric as the audit standard for this review."
+          - "Step 2: open the `dead_end_evidence_file` referenced by the payload. Reject (work.failed.rejected) if the file is missing, empty, or not formatted per `settlement-evidence.template.md`."
+          - "Step 3: for each Unit listed in `failed_units` + `blocked_units`, audit the evidence against rubric §1 (attempt count, hypothesis diversity, causal chain, alternative elimination). Map every gap to the corresponding failed_check name from rubric §4."
+          - "Step 4: spot-check at least 2 evidence sources (open the referenced file:line or rerun the referenced command). Any claim without a verifiable source → `unverifiable_evidence`."
+          - "Step 5: independently re-score `dead_end_confidence` per rubric §1 (must be >=90 and consistent with the evidence quality; inflated → `confidence_inflated`); independently recompute `dead_end_evidence_coverage` per rubric §3 (must be >=75, or have a written gap explanation in the evidence file)."
+          - "Step 6: if ALL checks pass, re-emit `work.failed` with the payload forwarded VERBATIM (every field copied exactly, no rewrites). If ANY check fails, emit `work.failed.rejected` with `failed_checks` (using ONLY the six names from rubric §4) and `reason` (one actionable sentence naming the gap)."
+        on_fail:
+          target: "executor"
+          retry_budget: 3
+          on_exhausted: "plan.blocked(reason=precheck_failed)"
+          reason: "dead_end_evidence_insufficient"
+      fix.done:
+        prompt:
+          - "Step 1: run `ralph preset materialize-artifacts ce-executor-pipeline --plan-key <plan_name>`; from the materialized templates directory read `fail-confidence-rubric.template.md` and `settlement-evidence.template.md`. Use ONLY that rubric as the audit standard for this review."
+          - "Step 2: if `fix_status` is `applied`, forward the `fix.done` payload VERBATIM without further evidence review (applied is the happy path; no fail-gate scrutiny needed)."
+          - "Step 3: if `fix_status` is `partial` or `blocked`, open `settlement_evidence_file` and audit the evidence for each Unit listed in `failed_fix_units` + `blocked_fix_units` against rubric §1 (same four dimensions, field names use `settlement_*` instead of `dead_end_*`). Map gaps to failed_check names from rubric §4."
+          - "Step 4: if ALL checks pass, re-emit `fix.done` with the payload forwarded VERBATIM. If ANY check fails, emit `fix.done.rejected` with `failed_checks` (six names from rubric §4) and `reason` (one actionable sentence)."
+        on_fail:
+          target: "fixer"
+          retry_budget: 3
+          on_exhausted: "plan.blocked(reason=precheck_failed)"
+          reason: "fix_evidence_insufficient"
   event_policy:
     enabled: true
     mode: enforce
@@ -144,6 +183,30 @@ event_loop:
               - {field: new_business_regressions_count, gt: 0}
               - {field: post_verification_status, eq: green}
           message: "post_verification_status=green contradicts new_business_regressions_count>0; set post_verification_status to red or resolve the introduced regressions"
+        # plan 2026-07-29-001 U1: fail-gate shape rules — harden the existing
+        # soft instructions ("never emit work.failed with completed units")
+        # into deterministic gates. Both rules predicate on the CURRENT
+        # payload only; each guards a true-contradiction shape so the rule
+        # never fires on legitimate exits:
+        #   rule work-failed-with-completed-units: only fires when the
+        #     producer claims work.failed while completed_units is non-empty
+        #     (correct shape is work.done with execution_status=partial).
+        #   rule fix-done-blocked-with-completed-fix-units: only fires when
+        #     fix_status=blocked while completed_fix_units is non-empty
+        #     (correct shape is fix_status=partial).
+        - id: work-failed-with-completed-units
+          topic: work.failed
+          when:
+            all:
+              - {field: completed_units, non_empty: true}
+          message: "work.failed contradicts completed_units being non-empty; emit work.done with execution_status=partial instead and route the failed Units through failed_units/blocked_units there"
+        - id: fix-done-blocked-with-completed-fix-units
+          topic: fix.done
+          when:
+            all:
+              - {field: fix_status, eq: blocked}
+              - {field: completed_fix_units, non_empty: true}
+          message: "fix_status=blocked contradicts completed_fix_units being non-empty; set fix_status to partial and list the landed fix Units under completed_fix_units"
     # Topic-deny rules: every business topic has exactly one owner hat.
     # Every other hat is denied the topic. This is the runtime's second
     # line of defense after `publishes` declarations on each hat — if
@@ -690,6 +753,9 @@ event_loop:
           - "decisions_file"
           - "reason"
           - "report_input_file"
+          - "dead_end_confidence"
+          - "dead_end_evidence_coverage"
+          - "dead_end_evidence_file"
         field_docs:
           report_input_file:
             meaning: "repo-relative path to the report-input bundle the executor wrote for reporter consumption; reporter reads ONLY this file"
@@ -739,6 +805,18 @@ event_loop:
             meaning: "execution ledger containing dispatch, acceptance, commit, failure, and dependency evidence"
             source: "executor writes .ralph/agent/decisions.md"
             fill_rule: "literal .ralph/agent/decisions.md after recording every planned Unit's disposition"
+          dead_end_confidence:
+            meaning: "self-assessed confidence (0-100) that the declared work.failed dead-end is truly unreachable; scored against the four-dimension rubric in presets/templates/ce-executor-pipeline/fail-confidence-rubric.template.md; >=90 required to emit work.failed, <90 means keep retrying"
+            source: "executor scores its own per-Unit attempt ledger against the materialized rubric template"
+            fill_rule: "integer 0-100; never fabricate a number — the precheck gate independently re-scores the same evidence and rejects inflated values as confidence_inflated"
+          dead_end_evidence_coverage:
+            meaning: "self-assessed percentage (0-100) of fail-relevant claims in dead_end_evidence_file backed by a verifiable source (file:line / command output excerpt / log fragment / test name / doc path); >=75 required, <75 must carry a written gap explanation in the evidence file"
+            source: "executor counts verifiable claims vs total claims in dead_end_evidence_file per the rubric's coverage rule"
+            fill_rule: "integer 0-100; never fabricate — the precheck gate spot-checks sources and rejects unverifiable_evidence"
+          dead_end_evidence_file:
+            meaning: "repo-relative path to the per-Unit dead-end evidence ledger written before emit, formatted per presets/templates/ce-executor-pipeline/settlement-evidence.template.md"
+            source: "executor writes .ralph/review/<plan>/dead-end-evidence.md before emit"
+            fill_rule: "existing repo-relative path; never point to a missing or empty file — the precheck gate opens it and rejects missing/empty/misformatted evidence"
       stabilization.done:
         required_fields:
           - "plan_name"
@@ -1318,6 +1396,9 @@ event_loop:
           - "new_business_regressions_count"
           - "test_compatibility_updates_count"
           - "flaky_or_environmental_count"
+          - "settlement_confidence"
+          - "settlement_evidence_coverage"
+          - "settlement_evidence_file"
         field_docs:
           plan_name:
             meaning: "plan file basename without extension; copied from review.complete for alignment routing"
@@ -1451,6 +1532,18 @@ event_loop:
             meaning: "failures that cannot be trusted without a repro-worthy environment signal; report-only"
             source: "fixer / delta-verifier classifies"
             fill_rule: "integer >= 0; report-only — record in verification_delta_file; never force fix_status=blocked for this count alone"
+          settlement_confidence:
+            meaning: "self-assessed confidence (0-100) that the declared fix.done settlement (fix_status=partial or blocked) is final and correct; for fix_status=applied it represents confidence in the 'fixes complete' conclusion; scored against the four-dimension rubric in presets/templates/ce-executor-pipeline/fail-confidence-rubric.template.md; >=90 required for partial/blocked, <90 means keep retrying"
+            source: "fixer scores its own per-Unit fix ledger against the materialized rubric template"
+            fill_rule: "integer 0-100; never fabricate a number — the precheck gate independently re-scores the same evidence and rejects inflated values as confidence_inflated"
+          settlement_evidence_coverage:
+            meaning: "self-assessed percentage (0-100) of settlement-relevant claims in settlement_evidence_file backed by a verifiable source (file:line / command output excerpt / log fragment / test name / doc path); >=75 required, <75 must carry a written gap explanation in the evidence file"
+            source: "fixer counts verifiable claims vs total claims in settlement_evidence_file per the rubric's coverage rule"
+            fill_rule: "integer 0-100; never fabricate — the precheck gate spot-checks sources and rejects unverifiable_evidence"
+          settlement_evidence_file:
+            meaning: "repo-relative path to the per-Unit settlement evidence ledger written before emit, formatted per presets/templates/ce-executor-pipeline/settlement-evidence.template.md; for fix_status=applied the fixer may reference .ralph/agent/decisions.md; for partial/blocked it MUST reference .ralph/review/<plan>/fix-settlement-evidence.md"
+            source: "fixer writes .ralph/review/<plan>/fix-settlement-evidence.md before emit (partial/blocked), or reuses .ralph/agent/decisions.md (applied)"
+            fill_rule: "existing repo-relative path; never point to a missing or empty file — the precheck gate opens it for partial/blocked and rejects missing/empty/misformatted evidence"
         examples:
           # Shape-illustration only. Mirror loop preset's examples style.
           - plan_name: "2026-07-12-003-feat-ce-executor-pipeline-schema-metadata-backfill-plan"
