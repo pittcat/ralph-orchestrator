@@ -2863,6 +2863,48 @@ mod tests {
         );
     }
 
+    // Plan 2026-07-29-005 U2 (G3): the planner hat instructions
+    // must be non-empty and the embedded `forge.plan.ready`
+    // schema must declare `execution_plan_digest` and
+    // `wave_total` as required fields. We do NOT lock the prose
+    // (HARD RULE against instructions-text tests); the
+    // behavioural gate is enforced by the schema SSOT below.
+    #[test]
+    fn test_parallel_forge_planner_instructions_nonempty_and_schema_wave_fields() {
+        let preset = get_preset("parallel-forge").expect("parallel-forge preset must exist");
+        let config =
+            RalphConfig::parse_yaml(preset.content).expect("parallel-forge YAML should parse");
+        let registry = HatRegistry::from_config(&config);
+        use ralph_proto::HatId;
+        let planner_id = HatId::new("planner");
+        let planner_cfg = registry
+            .get_config(&planner_id)
+            .expect("planner hat must exist");
+        assert!(
+            !planner_cfg.instructions.trim().is_empty(),
+            "planner hat instructions must be non-empty (plan 005 U2)"
+        );
+
+        // Behavioural gate: forge.plan.ready schema must require
+        // execution_plan_digest and wave_total (G2 / G3); without
+        // these, runtime validate_wave_schedule cannot activate.
+        let event_policy = config
+            .event_loop
+            .event_policy
+            .as_ref()
+            .expect("event_policy must be declared for parallel-forge");
+        let forge_plan_ready = event_policy
+            .schemas
+            .get("forge.plan.ready")
+            .expect("forge.plan.ready schema must exist");
+        for required in ["execution_plan_digest", "wave_total"] {
+            assert!(
+                forge_plan_ready.required_fields.iter().any(|f| f == required),
+                "forge.plan.ready schema must require `{required}` (plan 005 U2/G2/G3)"
+            );
+        }
+    }
+
     // WRC-U3 / T-WRC-U3-04 (Tier-0 contract): every preset listed in
     // `TIER_0_WAC_PRESETS` must produce a `RuntimeContractReport`
     // with **zero WAC `lint.preset.*` errors** when checked under
