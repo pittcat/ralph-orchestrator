@@ -162,3 +162,237 @@ pub fn inject_precheck_event_schemas(config: &mut crate::config::RalphConfig, to
             ..Default::default()
         });
 }
+
+/// 2026-07-29-006 plan U2 (R2, R4, S2, S4, S5): pure function that
+/// decides whether a `ralph emit` topic should be transparently
+/// rewritten to `<topic>.proposed` before any policy / scope / origin
+/// gate runs.
+///
+/// Rules, in order:
+/// 1. precheck runtime not enabled (`precheck_runtime_enabled()` is
+///    false, the config has no enabled `precheck` block, or the
+///    rules map is empty) -> return the topic unchanged.
+/// 2. `hat_id` is `None` or empty (no producer identity) -> return
+///    the topic unchanged. Provenance still fails-closed on its own
+///    gate; this function does not extend the producer set.
+/// 3. The topic already ends with `.proposed` -> return it
+///    unchanged (idempotent: prevents `.proposed.proposed` from
+///    leaking out).
+/// 4. The topic is NOT in the rule map -> return unchanged.
+/// 5. The current hat's `publishes` does NOT include
+///    `<topic>.proposed` -> return unchanged. **This is the
+///    scope-preserving rule**: a hat that was not already a
+///    producer of the proposed variant must not be promoted to one
+///    by this function. The downstream isolated-scope / origin
+///    guard will reject the bare emit, exactly as it does today.
+/// 6. Otherwise -> return `<topic>.proposed`.
+pub fn resolve_precheck_emit_topic(
+    config: &crate::config::RalphConfig,
+    hat_id: Option<&str>,
+    topic: &str,
+) -> String {
+    // Rule 1: precheck runtime gating.
+    let precheck = match config.event_loop.precheck.as_ref() {
+        Some(p) if p.enabled && !p.rules.is_empty() => p,
+        _ => return topic.to_string(),
+    };
+    if !precheck_runtime_enabled() {
+        return topic.to_string();
+    }
+
+    // Rule 2: no hat identity -> leave scope decision to the
+    // provenance gate.
+    let hat_id = match hat_id {
+        Some(id) if !id.is_empty() => id,
+        _ => return topic.to_string(),
+    };
+
+    // Rule 3: idempotent -- already-proposed is fine, do not
+    // double-suffix.
+    if topic.ends_with(".proposed") {
+        return topic.to_string();
+    }
+
+    // Rule 4: precheck has no rule guarding this topic.
+    if !precheck.rules.contains_key(topic) {
+        return topic.to_string();
+    }
+
+    // Rule 5: scope-preserving. The hat must already be a
+    // producer of `<topic>.proposed` (i.e. desugar has run and
+    // the hat is a real producer). A bare `<topic>` from a hat
+    // whose `publishes` does not name the proposed variant is
+    // left for the existing isolated-scope / origin gate to
+    // reject.
+    let proposed = format!("{topic}.proposed");
+    let hat_publishes_proposed = config
+        .hats
+        .get(hat_id)
+        .map(|hat| hat.publishes.iter().any(|p| p == proposed.as_str()))
+        .unwrap_or(false);
+    if !hat_publishes_proposed {
+        return topic.to_string();
+    }
+
+    // Rule 6: rewrite.
+    proposed
+}
+
+#[cfg(test)]
+mod resolve_precheck_emit_topic_tests {
+    use super::*;
+    use crate::config::{
+        HatConfig, HatExecutionMode, PrecheckConfig, PrecheckOnFail, PrecheckRule,
+    };
+    use std::collections::{BTreeMap, HashMap};
+
+    fn rule(_target: &str) -> PrecheckRule {
+        PrecheckRule {
+            prompt: vec!["evidence exists".into()],
+            on_fail: PrecheckOnFail {
+                target: "executor".into(),
+                retry_budget: 3,
+                on_exhausted: String::new(),
+                reason: String::new(),
+            },
+        }
+    }
+
+    fn hat_with_publishes(publishes: &[&str]) -> HatConfig {
+        let mut hat = HatConfig::default();
+        hat.name = "Executor".into();
+        hat.description = Some("test".into());
+        hat.publishes = publishes.iter().map(|s| s.to_string()).collect();
+        hat
+    }
+
+    fn config_with(
+        publishes: &[&str],
+        enabled: bool,
+        rules: &[&str],
+    ) -> crate::config::RalphConfig {
+        let mut cfg = crate::config::RalphConfig::default();
+        cfg.event_loop.execution_mode = HatExecutionMode::Isolated;
+        if enabled {
+            let mut map = BTreeMap::new();
+            for topic in rules {
+                map.insert((*topic).to_string(), rule(topic));
+            }
+            cfg.event_loop.precheck = Some(PrecheckConfig {
+                enabled: true,
+                rules: map,
+            });
+        }
+        let mut hats = HashMap::new();
+        hats.insert("executor".to_string(), hat_with_publishes(publishes));
+        cfg.hats = hats;
+        cfg
+    }
+
+    // S2: already-proposed is idempotent.
+    #[test]
+    fn resolve_is_idempotent_for_proposed_suffix() {
+        let cfg = config_with(&["work.failed.proposed"], true, &["work.failed"]);
+        let resolved =
+            resolve_precheck_emit_topic(&cfg, Some("executor"), "work.failed.proposed");
+        assert_eq!(
+            resolved, "work.failed.proposed",
+            "S2: must not double-suffix"
+        );
+    }
+
+    // S4: precheck disabled -> unchanged.
+    #[test]
+    fn resolve_leaves_topic_unchanged_when_precheck_disabled() {
+        let cfg = config_with(&["work.failed.proposed"], false, &["work.failed"]);
+        let resolved = resolve_precheck_emit_topic(&cfg, Some("executor"), "work.failed");
+        assert_eq!(
+            resolved, "work.failed",
+            "S4 disabled: no rewrite"
+        );
+    }
+
+    // S4 (variant): empty rules map.
+    #[test]
+    fn resolve_leaves_topic_unchanged_when_rules_empty() {
+        let cfg = config_with(&["work.failed.proposed"], true, &[]);
+        let resolved = resolve_precheck_emit_topic(&cfg, Some("executor"), "work.failed");
+        assert_eq!(
+            resolved, "work.failed",
+            "S4 empty rules: no rewrite"
+        );
+    }
+
+    // S4 (variant): kill-switch flips `precheck_runtime_enabled` to
+    // false.
+    #[test]
+    fn resolve_leaves_topic_unchanged_when_kill_switch_active() {
+        let _guard = precheck_kill_switch_guard();
+        let cfg = config_with(&["work.failed.proposed"], true, &["work.failed"]);
+        let resolved = resolve_precheck_emit_topic(&cfg, Some("executor"), "work.failed");
+        assert_eq!(
+            resolved, "work.failed",
+            "S4 kill-switch: no rewrite"
+        );
+    }
+
+    // S5: non-producer hat is not promoted.
+    #[test]
+    fn resolve_preserves_scope_for_non_producer_hat() {
+        let cfg = config_with(&["work.done"], true, &["work.failed"]);
+        let resolved = resolve_precheck_emit_topic(&cfg, Some("executor"), "work.failed");
+        assert_eq!(
+            resolved, "work.failed",
+            "S5: must not promote a non-producer hat"
+        );
+    }
+
+    // S5 (variant): unknown hat id.
+    #[test]
+    fn resolve_preserves_scope_for_unknown_hat() {
+        let cfg = config_with(&["work.failed.proposed"], true, &["work.failed"]);
+        let resolved = resolve_precheck_emit_topic(&cfg, Some("ghost"), "work.failed");
+        assert_eq!(
+            resolved, "work.failed",
+            "S5: unknown hat must not be promoted"
+        );
+    }
+
+    // Rule 2: no hat identity.
+    #[test]
+    fn resolve_leaves_topic_unchanged_when_hat_id_is_none() {
+        let cfg = config_with(&["work.failed.proposed"], true, &["work.failed"]);
+        let resolved = resolve_precheck_emit_topic(&cfg, None, "work.failed");
+        assert_eq!(resolved, "work.failed", "no hat -> no rewrite");
+    }
+
+    // Rule 2 (variant): empty hat id.
+    #[test]
+    fn resolve_leaves_topic_unchanged_when_hat_id_is_empty() {
+        let cfg = config_with(&["work.failed.proposed"], true, &["work.failed"]);
+        let resolved = resolve_precheck_emit_topic(&cfg, Some(""), "work.failed");
+        assert_eq!(resolved, "work.failed", "empty hat -> no rewrite");
+    }
+
+    // Rule 4: precheck has no rule guarding the topic.
+    #[test]
+    fn resolve_leaves_topic_unchanged_when_topic_not_guarded() {
+        let cfg = config_with(&["review.passed.proposed"], true, &["review.passed"]);
+        let resolved = resolve_precheck_emit_topic(&cfg, Some("executor"), "work.failed");
+        assert_eq!(
+            resolved, "work.failed",
+            "Rule 4: unguarded topic must not be rewritten"
+        );
+    }
+
+    // Happy path: producer + precheck enabled + guarded topic.
+    #[test]
+    fn resolve_rewrites_when_hat_publishes_proposed() {
+        let cfg = config_with(&["work.failed.proposed"], true, &["work.failed"]);
+        let resolved = resolve_precheck_emit_topic(&cfg, Some("executor"), "work.failed");
+        assert_eq!(
+            resolved, "work.failed.proposed",
+            "happy path: rewrite to proposed"
+        );
+    }
+}
