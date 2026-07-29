@@ -940,6 +940,42 @@ fn emit_command_with_root_and_hats(
     let triggered =
         maybe_derive_triggered_for_isolated(topic, hat.as_deref(), triggered, config.as_ref());
 
+    // 2026-07-29-006 plan U3 (R2, S1, S2, S5): the precheck desugar
+    // rewrites a guarded topic's producer to emit `<X>.proposed` and
+    // synthesizes a gate hat that consumes the proposed variant. The
+    // synthetic topic gate is what gives producers actionable
+    // backpressure (evidence, retry budget, `plan.blocked` escalation)
+    // on every emit, so a hat running inside the loop MUST be able
+    // to write `ralph emit <X>` with a bare topic and have the CLI
+    // transparently land the event on the `<X>.proposed` channel
+    // before any topic-dependent gate runs.
+    //
+    // The rewrite must happen at the very first topic-dependent
+    // gate boundary, BEFORE:
+    //   - `check_emit_provenance` / origin guard
+    //   - `check_isolated_scope`
+    //   - `validate_event` / unified policy / legacy policy
+    //   - step handoff / wave dimension / recovery envelope
+    //   - the JSONL write
+    // Otherwise the scope guard sees the bare topic, the producer
+    // has been stripped of it by desugar, and the event is rejected
+    // (P0 E3 symptom: `origin:out_of_scope`).
+    //
+    // The pure resolver lives in `ralph_core::config::precheck` and
+    // encodes the six rules from plan U2 Approach (idempotent,
+    // kill-switch aware, scope-preserving); this block just owns
+    // the binding shadow so every downstream gate sees the same
+    // effective topic.
+    let topic_owned: String = match config.as_ref() {
+        Some(cfg) => ralph_core::config::resolve_precheck_emit_topic(
+            cfg,
+            hat.as_deref(),
+            topic,
+        ),
+        None => topic.to_string(),
+    };
+    let topic: &str = topic_owned.as_str();
+
     // Enforce provenance requirements when hat is missing.
     //
     // U1 (2026-06-17-004 plan, R1+R2): the blanket precheck is replaced
@@ -1455,7 +1491,13 @@ fn emit_command_with_root_and_hats(
     }
 
     let mut record = serde_json::json!({
-        "topic": args.topic,
+        // 2026-07-29-006 plan U3 (R2): the on-disk event must carry
+        // the effective topic, not the bare user input. The
+        // precheck desugar rewrites the producer's `publishes` to
+        // `<X>.proposed`; the gate hat subscribes on that variant;
+        // writing `<X>` would land the event on a channel no one
+        // reads and bypass the gate entirely.
+        "topic": topic,
         "payload": payload_value,
         "ts": ts
     });

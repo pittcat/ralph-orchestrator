@@ -70,6 +70,12 @@ pub use multi_hat_policy::{
 };
 pub use notifications::{NotificationEndpoint, NotificationsConfig, OnStatus};
 pub use precheck::{PrecheckConfig, PrecheckOnFail, PrecheckRule, precheck_runtime_enabled};
+// 2026-07-29-006 plan U3 (R2): the CLI rewrites bare guarded
+// topics to `<X>.proposed` before the first topic-dependent
+// gate. The pure resolver lives in `config::precheck`; expose
+// it (along with the kill-switch guard re-export already below)
+// so the CLI can call it without reaching into a private module.
+pub use precheck::resolve_precheck_emit_topic;
 #[cfg(test)]
 pub use precheck::{PrecheckKillSwitchGuard, precheck_kill_switch_guard};
 pub use preflight_ext::{HookStage, PreflightExtensionsConfig, PreflightHook};
