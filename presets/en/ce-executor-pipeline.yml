@@ -2371,15 +2371,36 @@ hats:
            dependency order. A path may have only one owner.
          - **Ambiguous ownership, cross-U partial change, unrelated
            operator change, conflict marker, or unsafe/unreadable
-           untracked content**: append an `executor re-entry blocked:`
-           line naming every dirty path and the ambiguity. Preserve the
-           worktree exactly as found. NEVER reset, restore, checkout,
-           clean, stash, overwrite, delete, stage, or commit these
-           changes. Emit `work.done` partial only when prior matching
-           U-ID commits already provide at least one completed Unit;
-           otherwise emit `work.failed` with
-           `reason: "unattributable_dirty_worktree: <paths>"`. Do not
-           launch the baseline-verifier or any Unit subagent.
+           untracked content**: first run the **`foreign_dirt` overlap
+           check** below; only when the check shows overlap with the
+           remaining Units does the path escalate to
+           `work.failed{unattributable_dirty_worktree}`.
+
+           **`foreign_dirt` overlap check (plan 2026-07-29-001 U4)**:
+           compute the intersection of the dirty path set with the
+           `allowed files` declared by every remaining U-ID in the
+           original plan. Two outcomes:
+
+           - **No overlap with ANY remaining Unit's allowed files**:
+             the dirt cannot block any future Unit. Append one
+             `executor re-entry foreign_dirt: <paths>` line to
+             `.ralph/agent/decisions.md`, declare the same list under a
+             `foreign_dirt_paths:` section in `baseline-verification.md`,
+             and **leave the dirt untouched** — never delete, move,
+             stage, commit, restore, or clean it. Continue with
+             Step 1.5 / baseline-verifier / the Execution Loop normally.
+             Do NOT emit `work.failed{unattributable_dirty_worktree}`.
+           - **Overlap with at least one remaining Unit's allowed
+             files AND the diff semantics conflict with that Unit's
+             approach**: append an `executor re-entry blocked:` line
+             naming every dirty path and the ambiguity. Preserve the
+             worktree exactly as found. NEVER reset, restore, checkout,
+             clean, stash, overwrite, delete, stage, or commit these
+             changes. Emit `work.done` partial only when prior matching
+             U-ID commits already provide at least one completed Unit;
+             otherwise emit `work.failed` with
+             `reason: "unattributable_dirty_worktree: <paths>"`. Do not
+             launch the baseline-verifier or any Unit subagent.
       4. For attributable dirt, do not create a checkpoint or commit
          merely because files exist. Resume the owning U-ID, run its
          required RED/GREEN/REFACTOR verification, review the full
