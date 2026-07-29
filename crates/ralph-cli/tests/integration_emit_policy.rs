@@ -468,6 +468,87 @@ fn test_precheck_emit_rewrite_does_not_promote_non_producer() {
     );
 }
 
+/// U1 (correctness:C1 + adversarial:A1): when a producer emits a
+/// bare guarded topic, the on-disk JSONL row MUST carry `topic`
+/// and `triggered` derived from the SAME effective topic after
+/// precheck rewrite. Before this fix, `maybe_derive_triggered_for_isolated`
+/// was called with the bare topic, then the desugar rewrote
+/// `topic` to `<X>.proposed` — so the JSONL row recorded
+/// `topic="work.failed.proposed"` but `triggered="reporter"`
+/// (the unique consumer of the bare `work.failed` topic). The
+/// `check_envelope_triggered` gate only checked the hat id was
+/// known, not that it matched the effective topic, so the
+/// mismatch slipped through silently.
+///
+/// This test is the regression guard for that drift. It lives
+/// here next to S1–S5 (no `.proposed` schema, no policy gate)
+/// and is **not** expected to feed any other Unit's claims.
+#[test]
+fn test_precheck_emit_writes_topic_and_triggered_from_effective_topic() {
+    let temp_dir = TempDir::new().expect("temp dir");
+    let temp_path = temp_dir.path();
+    std::fs::create_dir_all(temp_path.join(".ralph")).unwrap();
+
+    // Use the SAME 15-field valid payload as S1/S2/S3; this time
+    // we drop `--policy-check` so the event actually lands in
+    // `temp_path/.ralph/events.jsonl`.
+    let output = common::ralph_bin()
+        .args([
+            "emit",
+            "work.failed",
+            "--json",
+            &work_failed_minimal_valid_json(),
+        ])
+        .current_dir(temp_path)
+        .env("RALPH_HATS_SOURCE", "builtin:ce-executor-pipeline")
+        .env("RALPH_CURRENT_HAT", "executor")
+        .env("RALPH_EVENTS_FILE", temp_path.join(".ralph/events.jsonl"))
+        .output()
+        .expect("failed to execute ralph emit (no --policy-check)");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success(),
+        "U1: bare `work.failed` from executor must write successfully; \
+         exit={:?} stdout={stdout} stderr={stderr}",
+        output.status.code()
+    );
+
+    let events_path = temp_path.join(".ralph/events.jsonl");
+    assert!(
+        events_path.exists(),
+        "U1: events file must exist at {events_path:?}; stdout={stdout} stderr={stderr}"
+    );
+    let events_contents =
+        std::fs::read_to_string(&events_path).expect("read events.jsonl");
+    let last_line = events_contents
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .last()
+        .unwrap_or_else(|| panic!("U1: events.jsonl must contain at least one line; got: {events_contents}"));
+    let record: serde_json::Value = serde_json::from_str(last_line)
+        .unwrap_or_else(|e| panic!("U1: events.jsonl last line must be valid JSON: {e}; line={last_line}"));
+
+    assert_eq!(
+        record.get("topic").and_then(|v| v.as_str()),
+        Some("work.failed.proposed"),
+        "U1: on-disk topic must equal the rewritten `.proposed` topic; record={record}"
+    );
+    // `work.failed.proposed` is consumed in `ce-executor-pipeline`
+    // by the synthesized `precheck-work.failed` hat; the bare
+    // `work.failed` topic was consumed by `reporter`. The C1+A1
+    // bug had the JSONL row record `triggered="reporter"` while
+    // `topic="work.failed.proposed"`. Asserting the consumer of
+    // the *effective* topic locks the fix in place.
+    assert_eq!(
+        record.get("triggered").and_then(|v| v.as_str()),
+        Some("precheck-work.failed"),
+        "U1: triggered must equal the unique consumer of `work.failed.proposed`, \
+         not the bare `work.failed` consumer; record={record}"
+    );
+}
+
 /// S3 (U4 / R3): a producer emit that is missing a required field
 /// from the guarded schema MUST be rejected on the proposed path,
 /// not silently accepted (which would have been the pre-U4

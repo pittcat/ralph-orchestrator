@@ -930,37 +930,20 @@ fn emit_command_with_root_and_hats(
         hat
     };
 
-    // 2026-07-03: isolated mode auto-derive `triggered` from the topic's
-    // registered subscriber. The runner previously set RALPH_TRIGGERED_HAT to
-    // the round-robin "next hat", which caused events like
-    // `review.dimension.ready` to be routed to the wrong hat (e.g. `shipper`
-    // instead of `dimension-reviewer`). When the agent is inside a runner-
-    // injected hat context and did not explicitly request a target, derive the
-    // target from the preset topology so the event bus routes correctly.
-    let triggered =
-        maybe_derive_triggered_for_isolated(topic, hat.as_deref(), triggered, config.as_ref());
+    // 2026-07-29-006 fix U1 (correctness:C1 + adversarial:A1): the
+    // `maybe_derive_triggered_for_isolated` derivation MUST run AFTER
+    // the precheck rewrite below so it sees the effective topic, not
+    // the bare one. Before this reorder the JSONL row recorded
+    // `topic="work.failed.proposed"` (rewritten) but
+    // `triggered="reporter"` (consumer of the bare `work.failed`
+    // topic), and `check_envelope_triggered` only validated the hat
+    // id was in topology — it never cross-checked that
+    // `triggered` matched the effective topic, so the mismatch
+    // slipped through silently. There is intentionally no other
+    // change in this block: signature, body, surrounding gates, and
+    // the on-disk `record["triggered"] = serde_json::Value::String(triggered);`
+    // write at lines 1537-1538 are all left untouched.
 
-    // 2026-07-29-006 plan U3 (R2, S1, S2, S5): the precheck desugar
-    // rewrites a guarded topic's producer to emit `<X>.proposed` and
-    // synthesizes a gate hat that consumes the proposed variant. The
-    // synthetic topic gate is what gives producers actionable
-    // backpressure (evidence, retry budget, `plan.blocked` escalation)
-    // on every emit, so a hat running inside the loop MUST be able
-    // to write `ralph emit <X>` with a bare topic and have the CLI
-    // transparently land the event on the `<X>.proposed` channel
-    // before any topic-dependent gate runs.
-    //
-    // The rewrite must happen at the very first topic-dependent
-    // gate boundary, BEFORE:
-    //   - `check_emit_provenance` / origin guard
-    //   - `check_isolated_scope`
-    //   - `validate_event` / unified policy / legacy policy
-    //   - step handoff / wave dimension / recovery envelope
-    //   - the JSONL write
-    // Otherwise the scope guard sees the bare topic, the producer
-    // has been stripped of it by desugar, and the event is rejected
-    // (P0 E3 symptom: `origin:out_of_scope`).
-    //
     // The pure resolver lives in `ralph_core::config::precheck` and
     // encodes the six rules from plan U2 Approach (idempotent,
     // kill-switch aware, scope-preserving); this block just owns
@@ -975,6 +958,19 @@ fn emit_command_with_root_and_hats(
         None => topic.to_string(),
     };
     let topic: &str = topic_owned.as_str();
+
+    // 2026-07-03: isolated mode auto-derive `triggered` from the
+    // topic's registered subscriber. The runner previously set
+    // RALPH_TRIGGERED_HAT to the round-robin "next hat", which
+    // caused events like `review.dimension.ready` to be routed to
+    // the wrong hat (e.g. `shipper` instead of `dimension-reviewer`).
+    // When the agent is inside a runner-injected hat context and
+    // did not explicitly request a target, derive the target from
+    // the preset topology so the event bus routes correctly. The
+    // topic passed here must be the EFFECTIVE (rewritten) topic so
+    // the JSONL row's `triggered` value matches its `topic`.
+    let triggered =
+        maybe_derive_triggered_for_isolated(topic, hat.as_deref(), triggered, config.as_ref());
 
     // Enforce provenance requirements when hat is missing.
     //
