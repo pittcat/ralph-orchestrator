@@ -181,18 +181,6 @@ impl RalphConfig {
                     continue;
                 }
 
-                // `default_publishes` is a runtime fallback emit path
-                // (`check_default_publishes` injects the topic directly onto
-                // the bus when the hat wrote no events). Without this rewrite
-                // the injected bare `<X>` bypasses the gate entirely: the gate
-                // only triggers on `<X>.proposed`, so the fallback event would
-                // reach downstream consumers with no evidence audit, no retry
-                // budget, and no `plan.blocked` escalation. Route the fallback
-                // through the same gate as a producer emit.
-                if default_topic {
-                    hat.default_publishes = Some(proposed.clone());
-                }
-
                 // Every emit-side topic list on the producer has to move
                 // together. A list left pointing at the bare `<X>` is not
                 // merely stale — the hat can no longer emit `<X>` at all, so
@@ -203,18 +191,21 @@ impl RalphConfig {
                 // sending every activation down the missing-event branch.
                 // `triggers` / `on_trigger` are deliberately absent: those are
                 // consumer-side, and the gate re-emits `<X>` for them.
-                rewrite_emit_topic(&mut hat.publishes, topic, &proposed);
-                rewrite_emit_topic(&mut hat.terminal_events, topic, &proposed);
-                rewrite_emit_topic(&mut hat.exempt_topics, topic, &proposed);
-                for obligation in &mut hat.obligations {
-                    rewrite_emit_topic(&mut obligation.must_emit_any_of, topic, &proposed);
-                    for conditional in &mut obligation.conditional_must_emit {
-                        rewrite_emit_topic(&mut conditional.must_emit_any_of, topic, &proposed);
-                    }
-                    for forbid in &mut obligation.conditional_forbid_topics {
-                        rewrite_emit_topic(&mut forbid.forbid_topics, topic, &proposed);
-                    }
-                }
+                //
+                // `default_publishes` is a runtime fallback emit path
+                // (`check_default_publishes` injects the topic directly onto
+                // the bus when the hat wrote no events). Without this rewrite
+                // the injected bare `<X>` bypasses the gate entirely: the gate
+                // only triggers on `<X>.proposed`, so the fallback event would
+                // reach downstream consumers with no evidence audit, no retry
+                // budget, and no `plan.blocked` escalation. Route the fallback
+                // through the same gate as a producer emit.
+                //
+                // 2026-07-29-006 plan U1 (R1): route every emit-side rewrite
+                // through `HatConfig::rewrite_emit_topics` so the producer
+                // view stays in lock-step with itself; new emit-side fields
+                // become part of the same API and cannot be forgotten.
+                hat.rewrite_emit_topics(topic, &proposed);
                 debug!(hat = %hat_id, topic = %topic, "Rewrote producer to emit proposed variant");
             }
 
@@ -963,23 +954,13 @@ impl RalphConfig {
 ///         command: ["./scripts/hooks/env-guard.sh"]
 ///         on_error: block
 /// ```
-/// Point one emit-side topic list at `to` wherever it named `from`,
-/// keeping the list sorted and deduped. No-op when `from` is absent.
 ///
-/// Used by the precheck desugar for every list that describes what a
-/// producer *emits*. Routing them all through one helper is deliberate:
-/// the original desugar open-coded the rewrite per field, and each
-/// `HatConfig` emit field it did not enumerate became a silent
-/// contradiction after the rewrite.
-fn rewrite_emit_topic(list: &mut Vec<String>, from: &str, to: &str) {
-    if !list.iter().any(|t| t == from) {
-        return;
-    }
-    list.retain(|t| t != from);
-    list.push(to.to_string());
-    list.sort();
-    list.dedup();
-}
+/// 2026-07-29-006 plan U1 (R1): the per-list emit-side rewrite
+/// helper moved onto `HatConfig::rewrite_emit_topics` so the
+/// producer view cannot drift when new emit-side fields land.
+/// The precheck desugar now routes every emit-side rewrite
+/// through that single API; this module no longer carries the
+/// per-list helper.
 
 /// 2026-07-02-004 plan milestone A (U3): render the
 /// declared checklist + hard-constraint instructions for a

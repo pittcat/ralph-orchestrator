@@ -786,6 +786,89 @@ impl HatConfig {
     pub fn has_obligation_for(&self, trigger_topic: &str) -> bool {
         self.obligation_for_trigger(trigger_topic).is_some()
     }
+
+    /// 2026-07-29-006 plan U1 (R1): rewrite every emit-side topic
+    /// reference on this hat from `from` to `to`.
+    ///
+    /// This is the single owner of producer emit-side desugar
+    /// rewrites (plan 2026-07-29-006, D1/D4). Covering the full set
+    /// here keeps the producer view in lock-step with itself: a
+    /// field left at the bare `<X>` after the gate hat is
+    /// synthesised becomes a live contradiction (e.g. an
+    /// `obligations.must_emit_any_of` of `["work.failed"]` can
+    /// never be satisfied because the hat no longer publishes the
+    /// bare topic, sending every activation down the
+    /// missing-event branch).
+    ///
+    /// Scope (deliberately narrow):
+    /// - `publishes`
+    /// - `terminal_events`
+    /// - `default_publishes`
+    /// - `exempt_topics`
+    /// - `obligations[].must_emit_any_of`
+    /// - `obligations[].conditional_must_emit[].must_emit_any_of`
+    /// - `obligations[].conditional_forbid_topics[].forbid_topics`
+    ///
+    /// NOT touched (consumer-side; the gate re-emits the bare
+    /// topic for them):
+    /// - `triggers`
+    /// - `on_trigger`
+    /// - `event_filter`
+    /// - `phase_triggers`
+    ///
+    /// Returns `true` when at least one slot was rewritten; `false`
+    /// is a safe no-op (idempotent second call / `from` absent).
+    pub fn rewrite_emit_topics(&mut self, from: &str, to: &str) -> bool {
+        debug_assert!(!from.is_empty() && !to.is_empty() && from != to);
+        let mut changed = false;
+
+        if rewrite_vec(&mut self.publishes, from, to) {
+            changed = true;
+        }
+        if rewrite_vec(&mut self.terminal_events, from, to) {
+            changed = true;
+        }
+        if let Some(ref mut default) = self.default_publishes
+            && default == from
+        {
+            *default = to.to_string();
+            changed = true;
+        }
+        if rewrite_vec(&mut self.exempt_topics, from, to) {
+            changed = true;
+        }
+
+        for obligation in &mut self.obligations {
+            if rewrite_vec(&mut obligation.must_emit_any_of, from, to) {
+                changed = true;
+            }
+            for conditional in &mut obligation.conditional_must_emit {
+                if rewrite_vec(&mut conditional.must_emit_any_of, from, to) {
+                    changed = true;
+                }
+            }
+            for forbid in &mut obligation.conditional_forbid_topics {
+                if rewrite_vec(&mut forbid.forbid_topics, from, to) {
+                    changed = true;
+                }
+            }
+        }
+
+        changed
+    }
+}
+
+/// Helper: rewrite a single `Vec<String>` field, keeping it sorted
+/// and deduped. Returns `true` when at least one entry moved.
+fn rewrite_vec(list: &mut Vec<String>, from: &str, to: &str) -> bool {
+    if !list.iter().any(|t| t == from) {
+        return false;
+    }
+    list.retain(|t| t != from);
+    list.push(to.to_string());
+    list.sort();
+    list.dedup();
+    true
 }
 
 /// Returns `true` when the candidate topic set satisfies the
@@ -1101,6 +1184,163 @@ startup_grace_secs: 0
             obligations,
             trigger_multi_consumer_topics: HashSet::new(),
         }
+    }
+
+    // ------------------------------------------------------------------
+    // 2026-07-29-006 plan U1 (R1) / S6: HatConfig::rewrite_emit_topics
+    // ------------------------------------------------------------------
+
+    fn hat_with_full_emit_surface() -> HatConfig {
+        let mut hat = hat_with_obligations(vec![]);
+        hat.publishes = vec!["work.done".into(), "work.failed".into()];
+        hat.terminal_events = vec!["work.failed".into()];
+        hat.default_publishes = Some("work.failed".into());
+        hat.exempt_topics = vec!["work.failed".into()];
+        hat.triggers = vec!["plan.ready".into(), "work.failed".into()];
+        hat.obligations = vec![ActivationObligation {
+            on_trigger: "plan.ready".into(),
+            must_emit_any_of: vec!["work.failed".into(), "work.done".into()],
+            conditional_must_emit: vec![ConditionalEmission {
+                when: TriggerPredicate::default(),
+                must_emit_any_of: vec!["work.failed".into()],
+            }],
+            conditional_forbid_topics: vec![ConditionalForbid {
+                when: TriggerPredicate::default(),
+                forbid_topics: vec!["work.failed".into()],
+            }],
+        }];
+        hat
+    }
+
+    /// Happy path: every emit-side slot that names the guarded topic
+    /// is rewritten to `<topic>.proposed` in a single call. Consumer-
+    /// side slots (triggers) are untouched. S6 + R1.
+    #[test]
+    fn rewrite_emit_topics_moves_every_emit_side_slot() {
+        let mut hat = hat_with_full_emit_surface();
+        let changed = hat.rewrite_emit_topics("work.failed", "work.failed.proposed");
+        assert!(changed, "API must signal at least one slot moved");
+
+        assert_eq!(
+            hat.publishes,
+            vec!["work.done".to_string(), "work.failed.proposed".to_string()],
+            "publishes must contain the proposed variant"
+        );
+        assert_eq!(
+            hat.terminal_events,
+            vec!["work.failed.proposed".to_string()],
+            "terminal_events must move to the proposed variant"
+        );
+        assert_eq!(
+            hat.default_publishes.as_deref(),
+            Some("work.failed.proposed"),
+            "default_publishes must move to the proposed variant"
+        );
+        assert_eq!(
+            hat.exempt_topics,
+            vec!["work.failed.proposed".to_string()],
+            "exempt_topics must move with the rest"
+        );
+        let obligation = &hat.obligations[0];
+        assert_eq!(
+            obligation.must_emit_any_of,
+            vec!["work.done".to_string(), "work.failed.proposed".to_string()],
+            "top-level must_emit_any_of must move"
+        );
+        assert_eq!(
+            obligation.conditional_must_emit[0].must_emit_any_of,
+            vec!["work.failed.proposed".to_string()],
+            "conditional must_emit_any_of must move"
+        );
+        assert_eq!(
+            obligation.conditional_forbid_topics[0].forbid_topics,
+            vec!["work.failed.proposed".to_string()],
+            "conditional_forbid_topics must move"
+        );
+
+        // consumer-side untouched
+        assert_eq!(
+            hat.triggers,
+            vec!["plan.ready".to_string(), "work.failed".to_string()],
+            "triggers are consumer-side and must NOT be rewritten"
+        );
+        assert_eq!(
+            hat.obligations[0].on_trigger, "plan.ready",
+            "on_trigger is consumer-side and must NOT be rewritten"
+        );
+    }
+
+    /// No matching topic: the call is a safe no-op and returns false.
+    #[test]
+    fn rewrite_emit_topics_no_op_when_topic_absent() {
+        let original = hat_with_full_emit_surface();
+        let mut hat = original.clone();
+        let changed = hat.rewrite_emit_topics("never.mentioned", "never.mentioned.proposed");
+        assert!(!changed, "no slot moved → API must report false");
+        assert_eq!(hat.publishes, original.publishes);
+        assert_eq!(hat.terminal_events, original.terminal_events);
+        assert_eq!(hat.default_publishes, original.default_publishes);
+        assert_eq!(hat.exempt_topics, original.exempt_topics);
+        assert_eq!(hat.obligations, original.obligations);
+    }
+
+    /// Idempotent: a second call with the same `from → to` is safe
+    /// and reports `false` (no further slot moved).
+    #[test]
+    fn rewrite_emit_topics_is_idempotent() {
+        let mut hat = hat_with_full_emit_surface();
+        assert!(hat.rewrite_emit_topics("work.failed", "work.failed.proposed"));
+        let after_first = hat.clone();
+        assert!(
+            !hat.rewrite_emit_topics("work.failed", "work.failed.proposed"),
+            "second identical call must report no change"
+        );
+        assert_eq!(hat.publishes, after_first.publishes);
+        assert_eq!(hat.terminal_events, after_first.terminal_events);
+        assert_eq!(hat.default_publishes, after_first.default_publishes);
+        assert_eq!(hat.exempt_topics, after_first.exempt_topics);
+        assert_eq!(hat.obligations, after_first.obligations);
+    }
+
+    /// Lists stay sorted and deduped after a rewrite (matching the
+    /// legacy helper's invariant).
+    #[test]
+    fn rewrite_emit_topics_keeps_lists_sorted_and_deduped() {
+        let mut hat = hat_with_obligations(vec![]);
+        hat.publishes = vec![
+            "zeta".into(),
+            "work.failed".into(),
+            "alpha".into(),
+            "work.failed".into(),
+        ];
+        hat.rewrite_emit_topics("work.failed", "work.failed.proposed");
+        assert_eq!(
+            hat.publishes,
+            vec![
+                "alpha".to_string(),
+                "work.failed.proposed".to_string(),
+                "zeta".to_string(),
+            ],
+            "publishes must be sorted and deduped after rewrite"
+        );
+    }
+
+    /// `default_publishes` that does NOT match `from` is left
+    /// untouched (mirrors the per-list no-op contract).
+    #[test]
+    fn rewrite_emit_topics_leaves_unrelated_default_publishes_untouched() {
+        let mut hat = hat_with_obligations(vec![]);
+        hat.default_publishes = Some("work.done".into());
+        let changed = hat.rewrite_emit_topics("work.failed", "work.failed.proposed");
+        assert!(
+            !changed,
+            "no slot matched → API must report false even with default_publishes set"
+        );
+        assert_eq!(
+            hat.default_publishes.as_deref(),
+            Some("work.done"),
+            "unrelated default_publishes must stay put"
+        );
     }
 
     #[test]
