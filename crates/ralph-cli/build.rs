@@ -227,6 +227,10 @@ fn copy_artifact_templates(manifest_dir: &str, out_dir: &str) {
             "execution-plan.template.yml",
             "unit-completion.template.md",
             "manager-report.template.md",
+            "wave-settlement.template.md",
+            "wave-failure.template.md",
+            "merge-conflict.template.md",
+            "correction.template.md",
             "README.md",
         ],
     );
