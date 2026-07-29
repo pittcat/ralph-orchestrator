@@ -82,6 +82,17 @@ pub(crate) fn default_core_value() -> Result<Value> {
             // the preset opt-in (e.g. ce-executor-supervisor's
             // `supervisor.enabled: true`).
             "supervisor",
+            // 2026-07-29-002 plan residual: `precheck` is opt-in.
+            // Without this strip the framework default
+            // `precheck: None` serialises to Value::Null under
+            // `event_loop`, and `merge_hats_overlay`'s
+            // `!contains_key` guard always sees the key as
+            // present and silently keeps `enabled: false`,
+            // blocking preset opt-ins such as
+            // ce-executor-pipeline's `precheck.enabled: true`
+            // (whose rules synthesize the precheck-work.failed /
+            // precheck-fix.done gate hats).
+            "precheck",
         ];
         if let Some(event_loop) = mapping
             .get_mut(Value::String("event_loop".to_string()))
@@ -574,6 +585,15 @@ event_loop:
             // (`supervisor.enabled: true`) to survive operator
             // omission.
             "supervisor",
+            // 2026-07-29-002 plan residual: precheck is opt-in.
+            // The framework default `precheck: None` would
+            // serialise to Value::Null under `event_loop`, which
+            // `merge_hats_overlay` would mistake for "operator
+            // already declared" — silently dropping the preset
+            // `precheck.enabled: true` and breaking the
+            // synthesized `precheck-work.failed` / `precheck-fix.done`
+            // gate hats.
+            "precheck",
         ] {
             let key_value = Value::String(key.to_string());
             assert!(

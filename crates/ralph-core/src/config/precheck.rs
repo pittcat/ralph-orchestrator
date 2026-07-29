@@ -78,6 +78,36 @@ pub fn reset_precheck_kill_switch_for_test() {
     PRECHECK_KILL_SWITCH_FOR_TEST.store(false, Ordering::SeqCst);
 }
 
+/// RAII guard for [`set_precheck_kill_switch_for_test`]. Sets the
+/// kill switch on construction and clears it on drop, so a test
+/// that opts out of precheck enforcement cannot leak its state into
+/// the next test in the same binary.
+///
+/// Returns a small owned struct; assign to `_guard` to bind its
+/// lifetime to the test scope:
+/// ```ignore
+/// let _guard = precheck_kill_switch_guard();
+/// // ...precheck_runtime_enabled() returns false for this scope...
+/// // drop on scope exit auto-clears the atom.
+/// ```
+#[cfg(test)]
+pub struct PrecheckKillSwitchGuard {
+    _private: (),
+}
+
+#[cfg(test)]
+pub fn precheck_kill_switch_guard() -> PrecheckKillSwitchGuard {
+    PRECHECK_KILL_SWITCH_FOR_TEST.store(true, Ordering::SeqCst);
+    PrecheckKillSwitchGuard { _private: () }
+}
+
+#[cfg(test)]
+impl Drop for PrecheckKillSwitchGuard {
+    fn drop(&mut self) {
+        PRECHECK_KILL_SWITCH_FOR_TEST.store(false, Ordering::SeqCst);
+    }
+}
+
 /// Whether precheck desugar / runtime wiring is allowed. False when
 /// `RALPH_PRECHECK_MODE=off` or the test override is active.
 pub fn precheck_runtime_enabled() -> bool {

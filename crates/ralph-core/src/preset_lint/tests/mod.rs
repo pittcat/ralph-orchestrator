@@ -16,5 +16,6 @@ use super::*;
 
 mod finding_id_lock;
 mod ownership;
+mod precheck_gate_hat;
 mod run_preset_lint;
 mod topic_format;

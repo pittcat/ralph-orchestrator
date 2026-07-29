@@ -70,6 +70,8 @@ pub use multi_hat_policy::{
 };
 pub use notifications::{NotificationEndpoint, NotificationsConfig, OnStatus};
 pub use precheck::{PrecheckConfig, PrecheckOnFail, PrecheckRule, precheck_runtime_enabled};
+#[cfg(test)]
+pub use precheck::{PrecheckKillSwitchGuard, precheck_kill_switch_guard};
 pub use preflight_ext::{HookStage, PreflightExtensionsConfig, PreflightHook};
 pub use profiles::{ProfileScope, ProfileSpec, ProfilesConfig};
 pub use skills::{SkillOverride, SkillsConfig};

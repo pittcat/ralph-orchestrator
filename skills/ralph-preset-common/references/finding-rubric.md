@@ -224,6 +224,7 @@ review 命中时按上表 `finding_id` + `default_severity` + 默认 confidence 
 | `agent_skill.leaks_internals` | P0 | 95 | Q3 | lint | skill 文档泄漏了 agent 不可见的内部实现细节（内部函数名 / 模块名 / 内部 ledger 路径 / review-only 注释 / 一次性事故报告路径 / 过窄 preset 案例） |
 | `agent_skill.unreadable` | P1 | 85 | Q3 | style | skill 文档可读性差（术语未解释 / 触发条件缺失 / 失败停止条件缺失 / 未按「agent 下一步能执行什么」写） |
 | `agent_skill.inject_claim_false` | P0 | 95 | Q3 / Q4 | lint | skill 文档 / hat `instructions:` 错误声称某 skill 已自动注入，或把 on-demand skill 写成 auto-inject；对账源：`ralph inspect prompt --hat <id> --format json` |
+| `preset.precheck_rule_without_synthesized_gate_hat` | P1 (default mode) / P0 (strict mode) | 90 | Q3 / Q4 | lint | `event_loop.precheck.rules.<X>` 声明 `enabled: true` 且 producer 已发 `<X>.proposed`，但有效 config 缺 `precheck-<X>` 拦截 hat（半 desugar 状态，proposed 事件无消费者）；常见于手工拼装 config 或 desugar 回归 — 跑 `normalize()`（标准加载路径会自动做）或恢复合成 gate hat 可修。merge 层整块剥掉 `event_loop.precheck` 的场景由 `merge_hats_overlay_preserves_precheck_when_operator_omits_it` 集成测试覆盖，不走本 finding |
 
 ### CE pipeline review/fix artifacts（review-only 软性缺口）
 

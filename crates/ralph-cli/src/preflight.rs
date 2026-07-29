@@ -789,6 +789,19 @@ const PRESET_OPT_IN_WHEN_OPERATOR_OMITS: &[&str] = &[
     // always sees the key as present and silently keeps the
     // framework default `enabled: false`.
     "supervisor",
+    // 2026-07-29-002 plan residual: precheck is opt-in. Without
+    // the `default_core_value()` strip in `config_resolution.rs`
+    // the framework default `precheck: None` serialises to
+    // Value::Null under `event_loop`, and the `!contains_key`
+    // guard in `merge_hats_overlay` always sees the key as
+    // present and silently keeps the preset's
+    // `precheck.enabled: false` framework default — silently
+    // dropping preset opt-ins like ce-executor-pipeline's
+    // `precheck.enabled: true` (which synthesizes the
+    // precheck-work.failed / precheck-fix.done gate hats and
+    // attaches a 3-attempt retry budget with
+    // `plan.blocked{kind: precheck_exhausted}` exhaustion).
+    "precheck",
 ];
 
 fn hats_disallowed_keys(mapping: &Mapping) -> Vec<String> {
@@ -2045,6 +2058,60 @@ hats:
                 .as_ref()
                 .is_some_and(|wc| wc.step_handoff.progress_task_gate),
             "preset workflow_contract.step_handoff.progress_task_gate must apply when operator omits it"
+        );
+    }
+
+    #[test]
+    fn merge_hats_overlay_preserves_precheck_when_operator_omits_it() {
+        // 2026-07-29-002: `precheck` is a preset opt-in key. When the
+        // operator ralph.yml omits `event_loop.precheck`, the preset's
+        // block must survive the merge. Before `precheck` was added to
+        // `PRESET_OPT_IN_WHEN_OPERATOR_OMITS` (and stripped from
+        // `default_core_value`), the merge silently dropped it,
+        // `apply_precheck_desugar` early-returned, and the
+        // `precheck-work.failed` / `precheck-fix.done` gate hats were
+        // never synthesized (the 2026-07-29 ce-executor-pipeline
+        // silent-drop regression).
+        let core: Value = serde_yaml::from_str(
+            r"
+event_loop:
+  completion_promise: LOOP_COMPLETE
+",
+        )
+        .unwrap();
+
+        let hats: Value = serde_yaml::from_str(
+            r"
+event_loop:
+  precheck:
+    enabled: true
+    rules:
+      work.failed:
+        on_fail:
+          target: executor
+          retry_budget: 3
+hats:
+  executor:
+    name: Executor
+",
+        )
+        .unwrap();
+
+        let merged = merge_hats_overlay(core, hats).unwrap();
+        let config: RalphConfig = serde_yaml::from_value(merged).unwrap();
+
+        let precheck = config
+            .event_loop
+            .precheck
+            .as_ref()
+            .expect("preset precheck block must survive merge when operator omits it");
+        assert!(
+            precheck.enabled,
+            "preset precheck.enabled: true must apply when operator omits it"
+        );
+        assert!(
+            precheck.rules.contains_key("work.failed"),
+            "preset precheck rules must survive merge when operator omits them"
         );
     }
 

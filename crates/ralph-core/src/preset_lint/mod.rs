@@ -44,6 +44,13 @@ pub mod ownership;
 // schema) so a misconfigured gate fails close at preset-load time
 // instead of silently rejecting every gated event at runtime.
 pub mod payload_consistency;
+// 2026-07-29-002 plan residual: precheck gate hat coverage lint.
+// Catches the half-desugared shape where a preset's
+// `event_loop.precheck.rules.<X>` is enabled and producers already emit
+// `<X>.proposed`, but the `precheck-<X>` gate hat is missing from the
+// effective config — the proposed event has no consumer, so evidence
+// audit and retry budget silently vanish.
+pub mod precheck_gate_hat;
 // 2026-07-04-004 plan U3: review-synthesizer block-guard drift
 // lint. Catches presets whose `review-synthesizer` `instructions:`
 // drift away from the explicit "all 6 dimensions status == failed"
@@ -120,6 +127,10 @@ pub use review_synthesizer_block_guard::{
 // exported alongside U3 so callers have a single import surface.
 pub use ownership::{check_owner_references, check_ownership_rules};
 pub use payload_consistency::check_payload_consistency;
+// 2026-07-29-002 plan residual: re-export precheck gate hat
+// coverage lint entry point and the strictness-aware severity.
+pub use finding_id::FINDING_PRECHECK_RULE_WITHOUT_SYNTHESIZED_GATE_HAT;
+pub use precheck_gate_hat::check_precheck_rule_without_synthesized_gate_hat;
 pub use state_projection::check_work_done_action_chain_order;
 // 2026-07-03-001 plan U9: export the supervisor lint entry
 // point so `ralph preset check` / `run_preset_lint` callers
@@ -700,6 +711,18 @@ pub fn run_preset_lint_with_preset_name(
             }
         }
     }
+
+    // 2026-07-29-002 plan residual: precheck gate hat coverage check.
+    // Flags the half-desugared shape: `event_loop.precheck.rules.<X>`
+    // declared with `enabled: true` and `<X>.proposed` already in
+    // circulation, but no `precheck-<X>` gate hat — the proposed event
+    // would have no consumer. The merge-layer whole-block strip is
+    // covered by `merge_hats_overlay_preserves_precheck_when_operator_omits_it`
+    // (ralph-cli preflight tests), not by this lint. Strict-mode
+    // promotion mirrors `MissingTopicOwner` semantics.
+    findings.extend(lint_findings_to_contract_findings(
+        &check_precheck_rule_without_synthesized_gate_hat(config, strictness),
+    ));
 
     // Sort by id, then topic for deterministic output.
     findings.sort_by(|a, b| {

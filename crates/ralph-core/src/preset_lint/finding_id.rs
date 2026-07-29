@@ -66,6 +66,17 @@ pub const FINDING_COORDINATOR_MISSING: &str = "preset.coordinator_missing";
 /// Always `Error` severity.
 pub const FINDING_TASK_PUBLISHER_NOT_COORDINATED: &str = "preset.task_publisher_not_coordinated";
 
+/// `event_loop.precheck.rules.<X>` is declared with `enabled: true` and the
+/// desugar's `<X>.proposed` rewrite is already in circulation, but the
+/// effective config has no `precheck-<X>` gate hat (half-desugared state).
+/// Without the gate hat the producer's `<X>.proposed` has no consumer —
+/// evidence audit + retry budget are silently bypassed.
+///
+/// `Warn` in default mode, `Error` in strict (mirrors `MissingTopicOwner`
+/// semantics — fail-shaped contract drift should not pass `ralph run --strict`).
+pub const FINDING_PRECHECK_RULE_WITHOUT_SYNTHESIZED_GATE_HAT: &str =
+    "preset.precheck_rule_without_synthesized_gate_hat";
+
 // ──────────────────────────────────────────────────────────────────────────
 // U1 of 2026-06-11-003: Multi-hat isolation policy
 // ──────────────────────────────────────────────────────────────────────────
@@ -704,4 +715,5 @@ pub const ALL_FINDING_IDS: &[&str] = &[
     FINDING_PAYLOAD_CONSISTENCY_NON_OBJECT_WHEN,
     FINDING_PAYLOAD_CONSISTENCY_UNSAFE_MESSAGE,
     FINDING_FLOW_LINEAR_POSITIONAL_AMBIGUITY,
+    FINDING_PRECHECK_RULE_WITHOUT_SYNTHESIZED_GATE_HAT,
 ];
