@@ -1,0 +1,83 @@
+# ralph.forge.yml
+# 配套 builtin:parallel-forge 的项目级 overlay
+#
+# 用法（推荐）:
+#   # 1) 换开发计划：只改 execution.target 第一行非注释路径
+#   # 2) 启动（--plan 与 execution.target 指向同一份 plan，满足 worktree 复用键）:
+#   ralph run -H builtin:parallel-forge \
+#     -c ralph.forge.yml \
+#     --worktree --reuse-worktree \
+#     --plan docs/plans/<plan>.md
+#
+# 字段职责:
+# - preset 自带: hat 拓扑 / execution_mode=isolated / supervisor.enabled /
+#   event_policy / mechanism.flow / artifact 约定 / starting_event=forge.start
+#   等（算子省略时 preset opt-in 自动生效），此处不重写。
+# - 此处只放: CLI backend、prompt 契约、迭代/时长预算、supervisor 调优、
+#   telemetry、tasks/memories、项目级 guardrails。
+
+cli:
+  backend: claude
+  autonomous_idle_timeout_secs: 900
+
+event_loop:
+  # 固定编排契约；换 plan 只改 execution.target（见 PROMPT.forge.md）
+  # 注意: CLI `--plan` 在未显式 `-P` 时会覆盖本字段为 plan 路径；
+  # 仍建议始终传 `--plan`，以便 worktree 复用键与 plan basename 对齐。
+  prompt_file: PROMPT.forge.md
+
+  completion_promise: LOOP_COMPLETE
+  max_iterations: 120
+  max_runtime_seconds: 28800 # 8h；多 wave + 全量回归偏长
+
+  # Supervisor 调优（覆盖 preset 默认；preset 默认 max_concurrent_workers=10）
+  supervisor:
+    enabled: true
+    db_path: .ralph/supervisor.db
+    max_concurrent_workers: 10 # 全局 worker 上限；按运行机器资源调整，更多 unit 排队 FIFO
+    aggregate_timeout_secs: 7200 # 与 preset 对齐；单 wave 全量 nextest 可能很长
+
+  # 隔离 / 单事件预算（preset 已声明；显式写便于审计）
+  ephemeral_isolation: true
+  enforce_current_unit: true
+  enforce_hat_scope: true
+
+tasks:
+  enabled: true
+  coordinator_hats:
+    - forge-dispatcher
+
+memories:
+  enabled: true
+
+telemetry:
+  runtime_diagnosis:
+    enabled: true
+    write_artifacts: true
+    prompt_injection_enabled: true
+    max_repeated_recoveries: 2
+    max_prompt_findings: 8
+    artifact_retention: 20
+    max_prompt_chars: 4096
+    retry_window_iterations: 8
+    drift:
+      field_completeness_threshold: 0.85
+      coord_join_mode: parallel # forge 开发波次并发；serial 会误报 join rate
+      coord_join_rate_threshold: 0.6
+      emit_cadence_sigma: 2.0
+
+core:
+  guardrails:
+    - "Fresh context each iteration — re-read execution.target, the pointed plan, and current hat instructions."
+    - "Commit after each completed Unit. Never commit Ralph runtime files (`.ralph/events*`, `.ralph/supervisor.db`, loop locks)."
+    - "Artifact templates first: `ralph preset materialize-artifacts parallel-forge --plan-key <plan-key>` then copy from `.ralph/forge/<plan-key>/templates/`; do not write free-form forge artifacts."
+    - "Business artifacts live under `.ralph/forge/<plan-key>/`; progress and upstream handoffs come from trigger payload + those paths — never read `.ralph/events.jsonl` or `.ralph/supervisor.db`."
+    - "For code-writing hats (`executor`, `integrator`, `wave-fixer`), Rust compiler warnings are forbidden before success: run `RUSTFLAGS='-D warnings' rtk cargo check --workspace --all-targets`; fix every diagnostic and rerun until exit 0."
+    - "Verification hats (`verifier`, `tester`) must run the warning gate but remain read-only: on any diagnostic, record the evidence and emit the failure event required by the current hat instructions; do not modify code or bypass the correction workflow."
+    - "After the warning gate, run project-authoritative tests required by the current hat instructions and AGENTS.md. A non-zero exit blocks that hat's success event."
+    - "During implementation/fixing, prefer targeted `rtk cargo nextest run -p <crate> -- <relevant-test>`; at full-suite gates run `./scripts/run-tests.sh`. Race/timing flake only: `RALPH_BASELINE_SERIAL=1 ./scripts/run-tests.sh`."
+    - "Acceptance / BDD checks must verify runtime behavior; placeholder, pending, or `Ok(())`-only evaluator passes are invalid."
+    - "Confidence protocol: >80 proceed; 50-80 proceed + note in `.ralph/agent/decisions.md`; <50 choose safe default + note."
+    - "Never push to a remote, create/switch/rename branches, or create worktrees. Supervisor owns per-unit worktrees; the operator owns remotes and top-level `--worktree`."
+    - "Never kill, signal, or terminate Ralph processes. Stop/restart is operator-owned or via the current hat's allowed terminal emit."
+    - "When `RALPH_CURRENT_HAT` is set, only emit topics listed in the current hat `publishes`. Wave experiments must not write into the live loop events file."

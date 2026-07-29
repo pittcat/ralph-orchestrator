@@ -7,269 +7,145 @@ artifact_contract: ce-unified-plan/v1
 artifact_readiness: implementation-ready
 product_contract_source: ce-plan-bootstrap
 execution: code
+parallel_model: wave-barrier-worktree
+rewrite: 2026-07-30 Parallel Planner（串行 U1→U8 → 并行 Wave 模型）
 ---
 
 # Parallel Forge 跨运行 Reuse Status 与证据复用 - Plan
 
 ## 0. 计划状态
 
-- **状态：READY（受 P0 完成门禁约束）**
-- **代码基线：** `d737b9b79a5683b2b59819c7f3ddf38e6590a8d7`
-- **前置依赖：** 必须先完成
-  `docs/plans/2026-07-29-001-fix-parallel-forge-static-wave-settlement-plan.md`
-  的 Definition of Done。P0 计划新增的静态 wave、`forge.wave.settled`、
-  `CloseTaskBatch`、per-wave review/integration/verification、correction artifacts
-  是本计划的前置合同，不是当前代码已存在的事实。
-- **调查范围：** `--reuse-worktree` 精确 worktree 复用与 runtime archive、
-  plan baseline、`--continue` 同运行恢复、supervisor store/recovery、
-  `ralph inspect`、precheck desugar/重试、state projection、Parallel Forge
-  preset/schema/templates/BDD、模板嵌入与物化、相关 Git 历史和
-  `docs/solutions/`。
-- **已执行的验证：**
-  - 读取 `crates/ralph-core/src/worktree.rs` 中 worktree 精确匹配、archive 和
-    `resume-context.md` 生成路径。
-  - 读取 `crates/ralph-cli/src/commands/run.rs` 中
-    `--worktree --reuse-worktree` 与 `--continue` 的分流。
-  - 读取 `crates/ralph-core/src/plan_baseline.rs`，确认 baseline 在
-    `--reuse-worktree` 和 `--continue` 间保留。
-  - 读取 supervisor startup recovery、redrive resume-only 约束和
-    `ralph inspect loop` 的 agent-safe summary。
-  - 读取 precheck 配置、desugar、synthetic rejection、3 次 budget 和
-    `on_exhausted` 实现。
-  - 读取 Parallel Forge preset/schema/templates、真实 EventLoop BDD 入口、
-    模板 embed/materialize 注册表和 P0 计划合同。
-  - 检查 Git 基线、工作区状态和 reuse 相关历史提交。
-- **本轮未运行测试：** `ce-plan` 只调查和规划，不执行 Acceptance Red、
-  nextest、lint、build 或 E2E。
-- **实施入口门禁：**
-  1. P0 全部 DoD 已通过；
-  2. P0 实际落地的 topic、required fields、模板路径和 `CloseTaskBatch`
-     与本计划引用一致；
-  3. `cargo run -p ralph-e2e -- --mock --list` 包含
-     `parallel-forge-dispatch-contract`，且
-     `cargo run -p ralph-e2e -- --mock --filter parallel-forge-dispatch-contract`
-     退出码为 0、输出不含 `placeholder`；这证明 P0 没有用“未注册占位场景”
-     伪装 E2E Green；
-  4. `git status --short` 不含计划范围外改动；
-  5. baseline preset tests 没有新增触及 `parallel-forge` 的失败。
-  任一不满足时停止 U1，更新 Evidence/KTD/Unit 后再实施。
-- **阻塞项：** 无设计阻塞。P0 尚未实施是有明确验收条件的串行依赖，不授权
-  Executor 在 P0 落地前提前实现本计划。
+- **状态：`PARALLEL READY`**
+  - 所有实施关键决策置信度 ≥ 0.85（KTD1–KTD21）
+  - 所有 Wave 并发安全置信度 ≥ 0.85（W0–W5）
+  - 所有 Worktree 修改边界、契约 Owner、合并顺序已冻结
+- **代码基线（Wave 0 起）：** `dffb6a33ae1e5a7bfe0340f2d310cf53d6852fa7`
+  （`pittcat-dev`；原计划基线 `6ccacc37…` / `d737b9b7…` 已过时）
+- **当前分支：** `pittcat-dev`
+- **调查范围：** `--reuse-worktree` archive、`clean_worktree_runtime_artifacts`、
+  supervisor.db 三件套、`.ralph/forge/`、`ralph inspect`、precheck/006 透明 emit、
+  `CloseTaskBatch`、parallel-forge preset/schema/templates、BDD scenarios、
+  template embed registry、sibling 007 InspectCommands 命名空间、001/005/006 落地接口
+- **已执行的验证（2026-07-30 Parallel Planner 重勘）：**
+  - `git rev-parse HEAD` = `dffb6a33…`
+  - `clean_worktree_runtime_artifacts`（`worktree.rs:748`）仍为直接 rename；
+    **不**归档 `supervisor.db{,-wal,-shm}`、**不**归档 `.ralph/forge/`、
+    **无** `reuse-manifest.v1.json` / `COMPLETE`（E3/E32）
+  - `InspectCommands` 仅 `Profiles|Loop|Prompt`（`inspect.rs:46`）；无 `reuse-status`（E11）
+  - `StateProjectionAction` 有 `CloseTaskBatch`，**无** `CloseTaskWavePrefix`（E14）
+  - `presets/templates/parallel-forge/` 现 **10** basename；
+    `PARALLEL_FORGE_TEMPLATE_NAMES` / `presets.rs` 期望 10（E18）
+  - parallel-forge preset **无** `event_loop.precheck`、**无** reuse-reconciler、
+    **无** `forge.reuse.*` topic（E15）
+  - 真实 EventLoop BDD 已有 two_wave_settlement / correction / exhaustion（E19/E29/E30）
+  - E2E `parallel-forge-dispatch-contract` 仍为未注册 placeholder；**非**本计划硬门禁（E27）
+- **本轮未运行：** Acceptance Red、全量 nextest、clippy、build（Planner 禁止写生产代码）
+- **实施入口门禁（F1 前）：**
+  1. HEAD = `dffb6a33…` 或其后已含同等 P0 spine 的提交；
+  2. `cargo nextest run -p ralph-core --test scenarios -- parallel_forge_two_wave_settlement`
+     与 `… parallel_forge_correction` 绿；
+  3. `cargo nextest run -p ralph-cli --bin ralph -- presets` 绿；
+  4. 工作区无计划范围外脏改动。
+- **阻塞项：** 无
+- **最大安全并发数：** **3**（仅 Wave 1：U1∥U2∥U3；由文件所有权矩阵推导，非主观）
+- **推荐 Worktree 数量：** Wave 1 同时 3 个；其余 Wave 每 Unit 1 个（峰值 3）
+- **可启动 / 不可启动：**
+  - 可启动：Wave 0 F1（入口门禁通过后）
+  - Wave 1 三 Unit：仅在 Barrier 0 通过后并行启动
+  - Wave 2+：各自 Barrier 通过前不得启动
 
-## Goal Capsule
+### 并发模型总览
 
-- **目标：** 当操作者用 `--reuse-worktree` 在同一代码 worktree 启动一个
-  新运行时，Ralph 能从上一运行的 Git、静态 execution plan、wave settlement
-  和失败 artifacts 中计算可信 reuse status，并只从最早未被证据证明的检查点
-  继续。
-- **通俗解释：** 代码还在，不代表“做完了”；上一轮说通过，也不代表现在仍然
-  通过。本功能让系统逐项回答“哪些真的还能用、哪些只需重验、哪些应继续修、
-  哪些必须重跑、哪些证据互相打架必须停下”，而不是全盘重做或盲信旧结论。
-- **权威顺序：** 当前 operator plan
-  → 当前 `execution-plan.yml`/digest
-  → 当前 Git object graph 和 working tree
-  → 上一运行完整 archive manifest
-  → P0 settlement/failure artifacts 及 digest
-  → runtime reuse evaluator
-  → precheck 独立重算
-  → 当前运行的 accepted reuse event/state projection。
-- **执行模型：** 保持 `supervisor + wave`。Reuse 只决定从哪个 P0 checkpoint
-  继续，不新增第二套调度器、重试系统或 supervisor 数据库。
-- **恢复边界：** 只自动接受“从 wave 1 开始的连续已证明 settlement 前缀”。
-  第一个未证明 wave 及其后继不能被跳过；复杂 DAG 通过静态 wave 和传递依赖
-  闭包计算，不靠 hat 猜 ready set。
-- **失败经验：** 上次匹配失败的 fingerprint、尝试、证据和排除原因会注入新
-  correction；旧 verdict、旧 correction round 和旧 retry budget 不继承。
-- **停止条件：** archive 未完成或被篡改、settlement SHA 不可达、同一身份出现
-  冲突证据、当前 plan/DAG 无法与旧合同对应、dirty paths 归属不清、或 precheck
-  三次重算仍不一致时 fail closed。
+```text
+Global Prep / Wave 0: F1 契约冻结 + Characterization
+        ↓ Barrier 0
+Wave 1: U1 Archive ∥ U2 Evaluator+Inspect ∥ U3 Templates
+        ↓ Barrier 1
+Wave 2: U4 Prefix accept + CloseTaskWavePrefix + reconciler/precheck
+        ↓ Barrier 2
+Wave 3: U5 Partial checkpoint + failure experience
+        ↓ Barrier 3
+Wave 4: U6 Tamper fail-closed ∥ U7 Precheck exhaustion BDD
+        ↓ Barrier 4
+Wave 5: U8 Docs + live checklist
+        ↓ Final Integration + Full Regression
+```
+
+---
 
 ## 1. 功能目标
 
 ### 1.1 业务目标
 
-降低长计划在进程退出、人工停止或新一轮运行后的重复劳动，同时不把“目录里还有
-代码”误当成“行为已验证”。Reuse 必须节省已证明的工作，也必须保住 P0 的
-依赖、审查、集成和验证门禁。
+降低长计划在进程退出/人工停止后的重复劳动，同时不把「目录里还有代码」误当成
+「行为已验证」。Reuse 只从最早未被证据证明的 P0 checkpoint 继续。
 
 ### 1.2 用户或调用方
 
-- 操作者：使用
-  `ralph run --worktree --reuse-worktree --plan <plan> -H builtin:parallel-forge`
-  开启新运行。
-- `clean_worktree_runtime_artifacts`：归档旧运行并建立机器可核验的 reuse 来源。
-- `ralph inspect reuse-status`：只读计算并输出 agent-safe reuse assessment。
-- reuse-reconciler：物化模板、解释 runtime 结果并提出当前运行的 reuse handoff。
-- precheck gate：独立重跑相同 evaluator，拒绝 stale/tampered assessment。
-- P0 dispatcher/failure handler/reviewer/integrator/verifier：从 assessment 指定的
-  checkpoint 继续。
-- Reporter/操作者：从最终报告看到哪些工作被复用、重新验证、修复或重跑。
+- 操作者：`ralph run --worktree --reuse-worktree --plan <plan> -H builtin:parallel-forge`
+- `clean_worktree_runtime_artifacts`：归档并建立可核验 reuse 来源
+- `ralph inspect reuse-status`：只读 assessment
+- reuse-reconciler + precheck：物化/提出/独立重算
+- P0 dispatcher/failure/review/integrate/verify：按 checkpoint 继续
+- Reporter：报告 reuse/reverify/correction/rerun/blocked 汇总
 
-### 1.3 当前行为
+### 1.3 当前行为（已确认）
 
-1. `--reuse-worktree` 精确复用已结束的 worktree，并把事件、任务、diagnostics、
-   review、scratchpad、summary、handoff 和 decisions 移到
-   `.ralph/reuse-history/<timestamp>/`。
-2. cleanup 不归档 `.ralph/supervisor.db` 及其 WAL/SHM sidecars，也不归档
-   Parallel Forge 的 `.ralph/forge/` business artifacts；fresh run 可能看到旧
-   wave ledger，并会与同 plan-key 的旧 artifact paths 相撞。
-3. cleanup 只写自然语言 `resume-context.md`。该文件说明旧记录是 advisory，
-   但没有 previous HEAD、loop ID、文件 digest、archive completeness 或完成标记。
-4. `--continue` 会读取现有 scratchpad/events/supervisor state，恢复同一运行；
-   `--reuse-worktree` 是清理 runtime state 后的新运行。二者没有共同的恢复语义。
-5. Parallel Forge 目前没有 runtime reuse evaluator，也没有五态状态表、DAG
-   downgrade 规则或 accepted reuse event。
-6. `ce-executor-pipeline` 已有 prompt-driven archive mining，但主要依赖 agent
-   读 archive/Git 后写 guidance，不能替代 runtime 权威判定。
+1. `--reuse-worktree` 精确复用已结束 worktree，runtime 文件直接 rename 到
+   `.ralph/reuse-history/<timestamp>/`，无 staging/manifest/COMPLETE（E2/E3）
+2. cleanup **不**归档 supervisor DB/WAL/SHM 与 `.ralph/forge/`（E3/E32）
+3. 仅写 advisory `resume-context.md`（E4）
+4. `--continue` 读 live state；`--reuse-worktree` 是清理后的新运行（E8/E9）
+5. P0 spine 已落地（settlement/`CloseTaskBatch`/templates/BDD）；无 reuse 路径（E14/E20）
+6. 无五态 evaluator、`forge.reuse.assessed`、`CloseTaskWavePrefix`、
+   `inspect reuse-status`（E11/E14/E15）
 
-### 1.4 目标行为与行为差异
+### 1.4 目标行为与差异
 
-- cleanup 在启动新运行前以“完整复制到 staging → 校验 digest → 按 manifest
-  删除 live artifacts → 原子发布完整目录”的顺序归档旧 supervisor DB/WAL/SHM
-  和其他 runtime 文件。中途失败由同一 cleanup lock 下的下一次调用继续，不把
-  半成品当成可消费 archive。
-- `ralph inspect reuse-status --execution-plan <path>
-  --approved-base-commit <sha> --format json` 只读当前 plan、Git 和最新完整
-  manifest，输出每 Unit 的证据状态、每 wave 的有效状态、连续 reusable prefix、
-  首个恢复 checkpoint、失败经验和 stable digest。
-- 五种公开状态固定为：
-  - `reusable`：当前证据足以重建已结算事实；
-  - `reverify`：实现仍可用，但 review/integration/verification/settlement 中至少
-    一个证明已过期或缺失；
-  - `resume_correction`：存在与当前合同仍匹配的失败，需要用上次经验继续修；
-  - `rerun`：实现身份、依赖、路径合同或 commit 证据已改变，必须重新执行 Unit；
-  - `blocked`：证据矛盾、archive 不完整或无法安全决定。
-- 只有完整 reusable wave 构成的连续前缀可以在当前运行原子关闭 task。部分可复用
-  wave 只保留实现/失败证据，不提前关闭任何 task。
-- 第一个非 reusable wave 用 `resume_checkpoint` 选择 P0 的 `execute`、
-  `correction`、`review`、`integration` 或 `verification` 入口；后续 wave 保持
-  open，直到前置 wave 在当前运行 settlement。
-- reuse-reconciler 不能自行改变 runtime 结果。precheck 必须重新调用 evaluator，
-  比较 assessment digest、archive manifest digest、current HEAD 和 plan digest。
-- 没有 archive 的首次运行输出全 `rerun`，不是错误；legacy/incomplete archive
-  不猜测，输出 `blocked` 及稳定 reason code。
+- cleanup：lock → staging copy+hash → manifest → 删 live → `COMPLETE` → 原子 rename
+- `ralph inspect reuse-status … --format json` 输出 `reuse_status.v1` 五态 assessment
+- 仅连续完整 reusable wave 前缀可经 `CloseTaskWavePrefix` 原子关 task
+- precheck 独立重跑 evaluator，比较 digest；三次耗尽 → `plan.blocked{kind=precheck_exhausted}`
+- 无 archive → 全 `rerun`（非错误）；legacy/incomplete → `blocked`
 
-### 1.5 输入
+### 1.5 输入 / 输出 / 状态 / 错误
 
-- 当前 repo-relative operator plan path。
-- P0 当前 `execution-plan.yml`、`execution_plan_digest`、静态 Unit DAG/waves。
-- 当前 `HEAD`、branch、working tree path set、plan baseline。
-- 最新完整 reuse archive manifest。
-- archive 中的 P0 execution plan、events、settlement/review/integration/
-  verification/correction/failure artifacts。
-- Git 中 manifest/artifacts 引用的 full SHA、commit ancestry 和 changed paths。
+- **输入：** operator plan、execution-plan.yml/digest、approved_base_commit、
+  Git object graph、完整 archive manifest
+- **输出：** `reuse-manifest.v1.json`+`COMPLETE`、`reuse_status.v1`、
+  物化 `reuse-status.yml`/`reuse-evidence.md`、accepted `forge.reuse.assessed`、
+  prefix task close、resume checkpoint
+- **状态变化：** live runtime 清空；accepted 后 prefix tasks done；verified base 推进
+- **错误语义：** cleanup 失败不启动新 run；assessment `blocked` 为零副作用 JSON/事件；
+  precheck reject 回 producer；耗尽 blocked
+- **兼容：** 不读旧 supervisor store；不继承旧 correction round/budget；
+  不扩展 `loop_inspect.v2`
+- **性能：** inspect 不做测试/backend；cleanup O(归档字节)
+- **安全：** inspect/agent-safe DTO 不暴露 DB path/raw events；Verifier/Tester 不写 code
 
-### 1.6 输出
+### 1.6 本次范围 / 非目标
 
-- `.ralph/reuse-history/<timestamp>/reuse-manifest.v1.json`。
-- `.ralph/reuse-history/<timestamp>/COMPLETE` 原子完成标记。
-- `ralph inspect reuse-status --format json` 的 `reuse_status.v1` 输出。
-- `.ralph/forge/<plan-key>/reuse/reuse-status.yml`，按 builtin template 物化。
-- `.ralph/forge/<plan-key>/reuse/reuse-evidence.md`，使用统一 rubric。
-- accepted `forge.reuse.assessed` event 及 state projection。
-- 最终 manager report 中的 reuse summary。
+**范围：** archive 完整性、五态 evaluator、inspect CLI、两模板、reuse-reconciler+precheck、
+`CloseTaskWavePrefix`、partial checkpoint、tamper/exhaustion、docs/live 清单
 
-### 1.7 状态变化
+**非目标：** 第二套调度器/supervisor schema 迁移、全 presets 通用化、完整 mock E2E cassette、
+003 readonly gates 补齐、004 auditor 终态、007 `inspect execution-plan` 实现
+（仅共享 `InspectCommands` 命名空间，互不覆盖）
 
-- cleanup 只改变 runtime artifact 位置，不改变 Git branch、commit 或 plan baseline。
-- accepted `forge.reuse.assessed` 可原子关闭“完整 reusable 连续 wave 前缀”的
-  tasks，并把 `verified_base_commit` 投影为最后一个 reused settlement SHA。
-- 部分 wave 不关闭 task；只投影 `resume_checkpoint`、affected Unit IDs 和
-  prior failure references。
-- 新运行的 precheck/correction 计数从 0 开始。
+### 1.7 已知约束与假设
 
-### 1.8 错误语义
+**已确认事实：** E1–E32（见 §2.3）；P0/005/006 已落地；cleanup 缺口仍在。
 
-| Reason code | 语义 | 结果 |
-|---|---|---|
-| `no_prior_archive` | 首次运行或无旧 runtime | 全部 `rerun`，允许继续 |
-| `legacy_archive_unverifiable` | 旧 archive 无 v1 manifest/complete marker | `blocked` |
-| `archive_incomplete` | manifest、COMPLETE 或成员 digest 缺失 | `blocked` |
-| `artifact_digest_mismatch` | archive 文件内容与 manifest 不同 | `blocked` |
-| `plan_identity_changed` | Unit ID 可对应但合同 digest 改变 | Unit/wave `rerun` |
-| `dependency_not_reusable` | 传递前置未证明 | 下游不得 `reusable`；降级到 `rerun` |
-| `commit_unreachable` | 引用 SHA 不在当前 Git object graph | `blocked` |
-| `settlement_sha_conflict` | 同一 wave 有冲突 accepted settlement | `blocked` |
-| `verification_stale` | 实现/commit 可达但验证不覆盖当前树 | `reverify` |
-| `prior_failure_relevant` | failure fingerprint 与当前合同匹配 | `resume_correction` |
-| `dirty_path_ambiguous` | dirty path 命中多个/零 Unit owner | `blocked` |
-| `assessment_digest_changed` | proposal 后 plan/HEAD/archive 变化 | precheck reject |
-| `precheck_exhausted` | 三次拒绝仍不能一致 | `plan.blocked` |
+**待验证假设（实施前/F1 内关闭，不得留给 Executor 拍板）：**
 
-### 1.9 兼容性要求
+| ID | 假设 | 验证方法 | 失败影响 |
+|---|---|---|---|
+| H1 | supervisor DB 路径固定为 worktree `.ralph/supervisor.db{,-wal,-shm}` | F1 characterization + U1 fixture | 若可配置到 `.ralph/` 外 → BLOCKED，重开 KTD2 |
+| H2 | `TaskStore::with_exclusive_lock` 可承载「先全验证再按 wave 组关闭」 | U4 Red 前读 `task_store.rs` + projector 试验 | 失败则 KTD13 重开，禁止逐个 CloseTask 伪装 |
+| H3 | 007 未在同基线合并 `InspectCommands::ExecutionPlan` | F1/U2 前 `rg InspectCommands` | 若已合并 → U2 机械追加 variant，禁止覆盖 007 route |
 
-- 不要求旧 reuse archive 自动升级；证据不足必须 fail closed。
-- 不改变 `--continue` 行为、same-run supervisor recovery 或 redrive budget。
-- 未使用 `parallel-forge` 的 preset 继续获得现有 archive cleanup；除旧 supervisor
-  ledger 被正确归档外，不启用 reuse assessment/topology。
-- P0 topic/schema 允许按本计划扩展，不要求兼容旧 Parallel Forge event log。
 
-### 1.10 性能要求
-
-- archive manifest 生成和 evaluator 对 archive 文件做单次线性扫描。
-- DAG/状态传播为 O(V+E)。
-- Git ancestry/path 检查可按 SHA 去重；不得为每个 Unit 重复遍历全部历史。
-- `inspect reuse-status` 不运行测试、不启动 backend、不打开新 supervisor ledger。
-- 100 Units、20 waves、500 archive artifacts 的本地 assessment 目标为 2 秒内；
-  超时只作为性能回归门禁，不改变 correctness。
-
-### 1.11 安全与权限要求
-
-- evaluator 和 reuse-reconciler 只读代码与 archive；不得修改生产代码。
-- archive path 必须 canonicalize 后仍位于当前 worktree
-  `.ralph/reuse-history/`；拒绝 symlink/path traversal。
-- JSON 输出不得泄漏 supervisor DB 路径、raw event log 或非必要 prompt 内容。
-- reuse-reconciler 只能发布 assessment proposal/blocked；不能发布
-  `exec.unit.done`、`forge.wave.settled` 或 `work.failed`。
-- Verifier/Tester 继续只读；修复仍由 P0 executor/wave-fixer 完成。
-
-### 1.12 本次范围
-
-- Parallel Forge 的跨运行 reuse assessment。
-- archive manifest/complete marker/supervisor ledger hygiene。
-- 五态分类、复杂 DAG 闭包、连续 reusable prefix 和 checkpoint 选择。
-- 失败经验继承但 retry/correction round 重置。
-- runtime evaluator + read-only inspect CLI + precheck 独立重算。
-- 两份复杂模板及 embed/materialize。
-- 当前运行 task/state projection 与 P0 resume routing。
-- CLI/AI skill/preset operator docs、schema、BDD 和 regression。
-
-### 1.13 非目标
-
-- 不为所有 builtin presets 建立通用 checkpoint DSL。
-- 不把 `--continue` 改成 archive reuse。
-- 不自动 cherry-pick、reset、force-push 或解决语义冲突。
-- 不复用旧 supervisor store 作为当前运行状态。
-- 不继承旧 retry budget、precheck rejection count 或 correction round。
-- 不新增 Web UI、远程 artifact store 或数据库迁移。
-- 不允许 hat 用主观 confidence 覆盖 runtime 的 hard evidence gate。
-
-### 1.14 已知约束、事实与假设
-
-**已确认事实**
-
-- worktree reuse 已是 exact-name + completed-loop lookup。
-- cleanup 当前使用 rename 把 runtime artifacts 移入 timestamp archive，I/O 错误会
-  阻止新运行启动。
-- plan baseline 已持久化且不会在 reuse 时重写。
-- fresh boot 不消费旧 redrive；resume-only recovery 是现有明确边界。
-- precheck 现有默认 retry budget 为 3，会在拒绝后给 producer 注入
-  `task.resume`，耗尽可发 `plan.blocked`。
-- `ralph inspect` 是现有 read-only/agent-safe 命名空间。
-- P0 已锁定 static wave、settlement、failure/correction 和
-  `supervisor + wave` 合同。
-
-**已确认假设**
-
-- P0 按其计划落地后，每个 accepted settlement 和 failure artifact 都能由
-  repo-relative path、full SHA 和 digest 唯一锚定。
-- Git object graph 与完整 archive 足以做跨运行 reuse 判断，不需要复用旧
-  supervisor DB 的活状态。
-
-**待验证假设**
-
-- 无可推迟到 Executor 临时决定的假设。U1 的 P0 entry gate 是验证前置合同；
-  失败时修订计划，不允许边写代码边猜 P0 接口。
+---
 
 ## Product Contract
 
@@ -486,15 +362,15 @@ Feature: Parallel Forge 跨运行状态复用
     And 输出目录包含 reuse-status-rubric.template.md
     And machine template 字段与 reuse_status.v1 JSON 合同一致
 
-  Scenario S14: mock E2E 证明跨运行复用主路径
-    Given P0 Parallel Forge marker cassette 场景已注册并可独立通过
-    And 上一运行留下两个 settled waves 和第三 wave 的 correction failure
-    When 新运行通过 --reuse-worktree 执行该 mock 场景
+  Scenario S14: 操作者 live 验收跨运行复用主路径（真端到端）
+    Given 上一运行留下两个 settled waves 和第三 wave 的 correction failure
+    And 操作者用 --worktree --reuse-worktree 启动新 live 运行（真实 backend）
+    When reuse assessment 被接受且 development loop 收敛
     Then 前两个 waves 不重复执行并原子关闭其当前 tasks
     And 第三 wave 收到旧失败经验、完成 correction 和重新 settlement
-    And full Tester、Auditor、Reporter 各按 P0 终局合同完成
-    And 场景退出码为 0 且不使用 live API
-
+    And full Tester、Auditor、Reporter 按合同完成
+    And 自动化不要求完整 mock marker cassette；可选只冒烟关键节点
+      （accepted assessment / prefix close / resume checkpoint）
 ```
 
 ### Success Criteria
@@ -517,14 +393,24 @@ Feature: Parallel Forge 跨运行状态复用
 
 ### Sources
 
-- 前置合同：
+- 前置合同（已落地）：
   `docs/plans/2026-07-29-001-fix-parallel-forge-static-wave-settlement-plan.md`
+  + `docs/plans/2026-07-29-005-fix-parallel-forge-preset-integration-gap-plan.md`
+- 集成缺口修法：
+  `docs/solutions/workflow-orchestration/parallel-forge-preset-integration-gap.md`
+- precheck 透明 emit：
+  `docs/plans/2026-07-29-006-fix-precheck-desugar-emit-transparency-plan.md`
+- sibling（边界，不阻塞 U1）：003 readonly / 004 terminal / 007 execution-plan
+  inspect
 - archive 当前实现：`crates/ralph-core/src/worktree.rs`
 - reuse CLI 接线：`crates/ralph-cli/src/commands/run.rs`
 - baseline：`crates/ralph-core/src/plan_baseline.rs`
 - inspect 模式：`crates/ralph-cli/src/commands/inspect.rs`
+- CloseTaskBatch：`crates/ralph-core/src/config/state_projection.rs`、
+  `crates/ralph-core/src/state_projector/task.rs`
 - supervisor agent-safe summary：`crates/ralph-core/src/supervisor/mod.rs`
 - precheck：`crates/ralph-core/src/config/precheck.rs`、
+  `crates/ralph-core/src/config/hat.rs::rewrite_emit_topics`、
   `crates/ralph-core/src/event_loop/precheck_gate_runner.rs`
 - template embed：`crates/ralph-cli/src/builtin_artifact_templates.rs`、
   `crates/ralph-cli/build.rs`
@@ -542,116 +428,127 @@ Feature: Parallel Forge 跨运行状态复用
 ralph run --worktree --reuse-worktree --plan <plan>
   → commands/run.rs 精确解析 worktree 名
   → worktree.rs::find_reusable_worktree_by_name
-  → worktree.rs::clean_worktree_runtime_artifacts
-  → 旧 runtime rename 到 .ralph/reuse-history/<timestamp>/
+  → worktree.rs::clean_worktree_runtime_artifacts   # 直接 rename，无 manifest
   → 写 .ralph/agent/resume-context.md
-  → 重建 LoopContext / symlink / context / PROMPT
-  → fresh EventLoop + supervisor startup
+  → 重建 LoopContext → fresh EventLoop + supervisor
 ```
 
-`--continue` 在 `run_command` 更早读取 live scratchpad，并在 runner 中调用
-resume 初始化和 active-wave recovery；它不调用上述 archive cleanup。
+`--continue` 不调用上述 cleanup；读 live scratchpad / supervisor recovery。
 
-### 2.2 Evidence Ledger
+### 2.2 并发热点（默认同 Wave 禁止多 Owner）
+
+| 热点 | 路径 | 处理 |
+|---|---|---|
+| Archive cleanup | `crates/ralph-core/src/worktree.rs` | Wave1 仅 U1 |
+| Reuse DTO/evaluator | `crates/ralph-core/src/reuse_status.rs`（计划新增） | F1 建类型；Wave1 仅 U2 扩 evaluator |
+| Inspect 路由 | `crates/ralph-cli/src/commands/inspect.rs` | Wave1 仅 U2；与 007 协调 |
+| Template registry | `builtin_artifact_templates.rs` + `build.rs` | Wave1 仅 U3 |
+| State projection | `config/state_projection.rs` + `state_projector/*` | Wave2 仅 U4 |
+| Preset/schema | `presets/en|schemas/parallel-forge.yml` | Wave2 U4 → Wave3 U5 串行；其后冻结 |
+| Scenario 注册 | `crates/ralph-core/tests/scenarios.rs` | append-only；按 Merge Order |
+| Skill docs | `crates/ralph-core/data/ralph-tools*.md` | Wave5 仅 U8 |
+| Cargo.lock | — | 本计划禁止改依赖（KTD18） |
+
+### 2.3 Evidence Ledger
 
 | Evidence ID | 来源 | 观察结果 | 对计划的影响 | 可靠性 |
 |---|---|---|---|---|
-| E1 | `crates/ralph-core/src/worktree.rs::find_reusable_worktree_by_name` | 精确 worktree path、git worktree list 和 live registry 三重检查 | 保留 exact reuse identity，不新增模糊匹配 | 高 |
-| E2 | `crates/ralph-cli/src/commands/run.rs` reuse 分支 | cleanup 在新 LoopContext 启动前执行 | manifest/ledger hygiene 应在此原子边界完成 | 高 |
-| E3 | `crates/ralph-core/src/worktree.rs::clean_worktree_runtime_artifacts` | 归档 events/history/diagnostics/agent/review；不含 supervisor DB 和 `.ralph/forge/` | R1 是真实缺口 | 高 |
-| E4 | 同函数 `resume-context.md` | 只写 advisory 文本与 archive path | 需要 machine manifest；保留人类提示作为补充 | 高 |
-| E5 | `crates/ralph-core/src/worktree.rs` cleanup tests | 覆盖 archive、symlink、context、幂等；无 supervisor/manifest 测试 | U1 测试位置已确认 | 高 |
-| E6 | `crates/ralph-cli/tests/integration_worktree_isolation.rs` | 覆盖 exact reuse、archive、代码保留 | 扩展真实 CLI reuse 场景 | 高 |
-| E7 | `crates/ralph-core/src/plan_baseline.rs` | baseline create-new、有效 SHA、reuse/continue 保留 | evaluator 使用原 baseline，不重锚定 | 高 |
-| E8 | `crates/ralph-cli/src/commands/run.rs` continue 分支 | continue 要求 live scratchpad | 明确 same-run 与 cross-run 分离 | 高 |
-| E9 | runner supervisor startup/recovery | active wave recovery 属于 resume；fresh boot 不消费旧 redrive | 旧 supervisor DB 不能成为 cross-run 状态 | 高 |
-| E10 | `crates/ralph-core/src/supervisor/mod.rs::SupervisorInspectSummary` | 公开 summary 不暴露 DB path/raw events | reuse inspect 遵循同一安全边界 | 高 |
-| E11 | `crates/ralph-cli/src/commands/inspect.rs` | inspect 是 read-only；human/JSON 同源；loop schema 变更需 bump | 新增独立子命令，不污染 loop_inspect.v2 | 高 |
-| E12 | `crates/ralph-core/src/config/precheck.rs` | precheck desugar为 proposed/gate/rejected；default budget 3 | 复用现有 gate，不建第二套 retry | 高 |
-| E13 | `precheck_gate_runner.rs` | rejection 注入 producer；耗尽发 configured topic | assessment mismatch 有现成恢复链 | 高 |
-| E14 | `crates/ralph-core/src/config/state_projection.rs` | 现有 EnsureTaskBatch/CloseTask；P0 计划新增 CloseTaskBatch | accepted assessment 可复用 P0 batch close | 高 |
-| E15 | `presets/en/parallel-forge.yml` | supervisor+wave、isolated、task projection、artifact-first 已存在 | P1 只加前置 reconcile 和 resume route | 高 |
-| E16 | `presets/schemas/parallel-forge.yml` | schema 是 event required-fields SSOT | 新 topic/fields 必须同步 | 高 |
-| E17 | `presets/templates/parallel-forge/README.md` | 明确 producer、路径、先 materialize | 新复杂表必须进入 templates | 高 |
-| E18 | `builtin_artifact_templates.rs` / `build.rs` | template basename 显式双注册 | 两处及 materialization tests 必改 | 高 |
-| E19 | `crates/ralph-core/tests/scenarios.rs::run_workflow_guard_scenario` | 真实 EventLoop BDD 已用于 parallel_forge fixtures | reuse 拓扑必须用此入口 | 高 |
-| E20 | P0 plan Product/Planning Contract | 锁定 static waves、settlement、failure correction、task close 时点 | 本计划按 P0 checkpoint 恢复 | 高 |
-| E21 | Git `756f9ffa` | archive reuse 明确为 advisory，旧失败不消耗新 budget | failure experience 与 verdict 分离 | 高 |
-| E22 | redrive solution | fresh boot 不消费残留；descriptor 缺失/digest conflict fail closed | reuse manifest 缺失/冲突同样 fail closed | 高 |
-| E23 | SQLite concurrency solution | strict 中间态不可当成功；WAL/SHM 是 DB 状态一部分 | archive 三文件且不放宽状态机 | 高 |
-| E24 | `agent_doc_sync::compute_sha256_hex` 等现有用法 | 仓库已有 SHA-256 helper/pattern | 不引入 hashing dependency | 高 |
-| E25 | AGENTS.md preset hard rules | schema、runtime、BDD、docs、operator skills 有固定同步清单 | U4–U8 文件/验证范围不可省略 | 高 |
-| E26 | `crates/ralph-core/src/task_store.rs::TaskStore::{load,all,with_exclusive_lock}` | shared lock只读live tasks；exclusive API在同锁内reload/modify/save | inspect可经公开TaskStore取identity，prefix action可在现有原子边界实施 | 高 |
-| E27 | `crates/ralph-e2e/src/scenarios/parallel_forge.rs`、`crates/ralph-e2e/src/main.rs::get_all_scenarios`、`cassettes/e2e/README.md` | Parallel Forge E2E 当前只是固定 scenario ID 的失败占位壳；未注册到 runner，marker cassette/harness 仅有书面 wire contract | P0 完成门禁必须证明该 scenario 已注册且 filtered mock run 真通过；P1 只能扩展已落地的 scenario/cassette，不得把“全量 E2E 退出 0”误当成覆盖 Parallel Forge | 高 |
+| E1 | `worktree.rs::find_reusable_worktree_by_name` | 精确 path/git list/registry 三重检查 | 保留 exact reuse，不加模糊匹配 | 高 |
+| E2 | `commands/run.rs` reuse 分支 ~1078 | cleanup 在新 LoopContext 前 | archive 原子边界在此完成 | 高 |
+| E3 | `worktree.rs::clean_worktree_runtime_artifacts:748` | 归档 events/history/diagnostics/agent/review；无 DB/forge/manifest | R1 真实缺口；U1 Owner | 高 |
+| E4 | 同函数 `resume-context.md` | 仅 advisory 文本 | 保留人类提示；机器真相在 manifest | 高 |
+| E5 | `worktree.rs` cleanup tests ~1729+ | 有 archive/symlink/idempotent；无 supervisor/manifest | U1/F1 测试落点 | 高 |
+| E6 | `tests/integration_worktree_isolation.rs` | exact reuse/archive/代码保留 | 扩展 S10 CLI | 高 |
+| E7 | `plan_baseline.rs` | reuse/continue 保留 baseline | evaluator 不重锚定 | 高 |
+| E8 | `run.rs` continue 分支 | continue 要 live scratchpad | cross-run 与 same-run 分离 | 高 |
+| E9 | runner supervisor recovery | active wave 属 resume | 旧 DB 不得作 cross-run 状态 | 高 |
+| E10 | `SupervisorInspectSummary` | 不暴露 DB path/raw events | reuse inspect 同安全边界 | 高 |
+| E11 | `inspect.rs::InspectCommands` | 仅 Profiles/Loop/Prompt | 新增独立子命令，不改 loop_inspect.v2 | 高 |
+| E12 | `config/precheck.rs` | desugar proposed/gate/rejected；budget 默认 3 | 复用 gate，不建第二套 retry | 高 |
+| E13 | `precheck_gate_runner.rs` | reject→producer；耗尽→configured topic | mismatch 恢复链现成 | 高 |
+| E14 | `state_projection.rs::CloseTaskBatch` | 单 wave batch close；无 WavePrefix | 必须新 action，禁止多次 CloseTaskBatch 伪装原子前缀 | 高 |
+| E15 | `presets/en/parallel-forge.yml` | supervisor+wave+P0；无 reuse hat/precheck | U4 首次接线须守 006 | 高 |
+| E16 | `presets/schemas/parallel-forge.yml` | event required-fields SSOT | 新 topic 必须同步 | 高 |
+| E17 | `presets/templates/parallel-forge/README.md` | producer/path/先 materialize | 新模板进 templates | 高 |
+| E18 | `builtin_artifact_templates.rs` + `presets.rs:888` | 10 basename 双注册 | U3 加 2 个并更新期望 | 高 |
+| E19 | `scenarios.rs::run_workflow_guard_scenario` | 真实 EventLoop BDD | reuse fixtures 必须用此入口 | 高 |
+| E20 | HEAD + 001/005 merge | P0 settlement/CloseTaskBatch/BDD 可观测 | 按已落地 checkpoint 恢复 | 高 |
+| E21 | Git `756f9ffa` 等 archive 语义 | advisory；旧失败不耗新 budget | failure experience ≠ verdict | 高 |
+| E22 | redrive solution docs | fresh boot 不消费残留；冲突 fail closed | manifest 缺失/冲突同策略 | 高 |
+| E23 | SQLite concurrency solution | WAL/SHM 是 DB 状态一部分 | 三文件同归档 | 高 |
+| E24 | `agent_doc_sync::compute_sha256_hex` | 已有 SHA-256 | 无新 hashing 依赖 | 高 |
+| E25 | AGENTS.md preset hard rules | schema/runtime/BDD/docs/skills 同步清单 | 不可省略下游 | 高 |
+| E26 | `TaskStore::{load,all,with_exclusive_lock}` | exclusive 可原子改 | prefix action 落现有锁 | 高 |
+| E27 | `ralph-e2e/.../parallel_forge.rs` | placeholder 未注册 | mock 全流程非硬门禁 | 高 |
+| E28 | schema `forge.wave.settled` required fields | wave_id/settled_* /verified_base/plan_key/… | evaluator 锚点固定 | 高 |
+| E29 | `parallel_forge_two_wave_settlement_runtime.yml` | 两 wave settled + CloseTaskBatch | 入口门禁/U4 基线 | 高 |
+| E30 | `parallel_forge_correction_runtime.yml` | correction→re-settlement | U5 基线 | 高 |
+| E31 | plan 006 + `HatConfig::rewrite_emit_topics` | bare→`.proposed` | reconciler 发 bare | 高 |
+| E32 | HEAD cleanup 行为 | 仍无 DB/forge/manifest/COMPLETE | U1 Red 成立 | 高 |
+| E33 | `PARALLEL_FORGE_TEMPLATE_NAMES` 10 项 | 与目录一致 | U3 必须同步常量+build.rs+测试期望 | 高 |
+| E34 | sibling `2026-07-29-007-…inspector-plan.md` 存在 | 共享 InspectCommands | U2 只追加 ReuseStatus，不覆盖 007 | 高 |
 
-### 2.3 受影响范围
+### 2.4 受影响范围
 
-**当前已确认文件**
+**生产：** `worktree.rs`、`run.rs`、`reuse_status.rs`（新）、`lib.rs`、`inspect.rs`、
+`state_projection.rs`、`state_projector/{mod,task,tests}.rs`、
+`presets/en|schemas/parallel-forge.yml`、`presets/templates/parallel-forge/*`、
+`builtin_artifact_templates.rs`、`build.rs`、`presets.rs`（测试）
 
-- 通用 archive：`crates/ralph-core/src/worktree.rs`
-- reuse CLI 启动：`crates/ralph-cli/src/commands/run.rs`
-- inspect CLI：`crates/ralph-cli/src/commands/inspect.rs`、
-  `crates/ralph-cli/src/main.rs`
-- preset/schema：`presets/en/parallel-forge.yml`、
-  `presets/schemas/parallel-forge.yml`
-- templates：`presets/templates/parallel-forge/`
-- template embed/materialize：`crates/ralph-cli/src/builtin_artifact_templates.rs`、
-  `crates/ralph-cli/build.rs`、
-  `crates/ralph-cli/tests/integration_preset_materialize_artifacts.rs`
-- preset structural tests：`crates/ralph-cli/src/presets.rs`
-- state projection：`crates/ralph-core/src/config/state_projection.rs`、
-  `crates/ralph-core/src/state_projector/mod.rs`、
-  `crates/ralph-core/src/state_projector/tests.rs`
-- BDD：`crates/ralph-core/tests/scenarios.rs`、
-  `crates/ralph-core/tests/scenarios/parallel_forge_*.yml`
-- agent docs：`crates/ralph-core/data/ralph-tools.md`、
-  `crates/ralph-core/data/ralph-tools-cmdref.md`、
-  `crates/ralph-core/data/ralph-tools-opac.md`
-- preset operator references：
-  `skills/ralph-preset-common/references/{agent-native-model,author-checklist,commands,finding-rubric,patterns}.md`
-- domain/docs：`CONCEPTS.md`、`CLAUDE.md`、`AGENTS.md`。
+**测试：** worktree unit、`integration_worktree_isolation`、`integration_reuse_status`（新）、
+`integration_preset_materialize_artifacts`、`state_projector` tests、
+`scenarios/parallel_forge_reuse_*.yml`（新）、`scenarios.rs`
 
-**计划新增文件**
+**文档：** `ralph-tools*.md`、preset operator references、`CONCEPTS.md`、`CLAUDE.md`/`AGENTS.md`
 
-- `crates/ralph-core/src/reuse_status.rs`
-- `crates/ralph-cli/tests/integration_reuse_status.rs`
-- `presets/templates/parallel-forge/reuse-status-rubric.template.md`
-- `presets/templates/parallel-forge/reuse-status.template.yml`
-- `crates/ralph-core/tests/scenarios/parallel_forge_reuse_*.yml`
+**不受影响：** Web/API、supervisor schema/migrations、非 parallel-forge topology、Cargo.lock
 
-**不受影响**
-
-- Web dashboard/API。
-- supervisor schema/migrations/store；旧 store 只被归档，不被 reuse evaluator读取。
-- 非 Parallel Forge preset 的 event topology。
+---
 
 ## 3. 决策记录与置信度
 
 | Decision ID | 决策问题 | 候选方案 | 最终选择 | 支持证据 | 排除其他方案的原因 | 置信度 |
 |---|---|---|---|---|---|---|
-| KTD1 | reuse 与 continue 是否共用状态 | 共用；完全分离 | 完全分离 | E2,E8,E9,E21 | 旧 runtime retry/active wave 不能跨新运行 | 0.99 |
-| KTD2 | 旧 supervisor DB 怎么处理 | 原地复用；删除；连 WAL/SHM 归档 | 同 archive 归档 DB/WAL/SHM | E3,E9,E22,E23 | 原地复用污染 fresh run；删除丢证据 | 0.98 |
-| KTD3 | archive 可消费条件与失败恢复 | 直接 rename；不可恢复 partial；lock+copy staging+manifest驱动清理+原子发布 | lock+可恢复 staging+原子 COMPLETE目录 | E3–E5,E22,E23 | 直接 rename 中途失败会把证据拆在 live/partial 两处；只看目录会误收 | 0.95 |
-| KTD4 | 谁计算 reuse status | hat；runtime；runtime+hat解释 | runtime pure evaluator，hat只物化解释 | E10–E13,E21 | hat-only 可主观提升；runtime-only 缺 artifact workflow | 0.97 |
-| KTD5 | CLI 放哪里 | 新顶级 reuse；inspect 子命令；diagnose | `ralph inspect reuse-status` | E11 | read-only语义与现有 inspect一致；diagnose 太重 | 0.95 |
-| KTD6 | 状态集合 | bool；三态；五态 | 固定五态 | R5–R12,E20,E21 | bool/三态不能区分重验、继续修和矛盾阻塞 | 0.96 |
-| KTD7 | Unit identity | unit_id；commit；合同 digest | unit_id + contract digest | E15–E20 | 名称/commit 单独都不能证明当前意图相同 | 0.95 |
-| KTD8 | DAG reuse 粒度 | 任意 Unit；整 plan；连续 wave prefix | Unit评估、wave保守聚合、只接受连续 prefix | E14,E15,E20 | 任意跳过破坏依赖；整 plan 浪费可证明工作 | 0.98 |
-| KTD9 | 部分 wave task 何时关闭 | 可复用 Unit立即关；整 wave当前运行 settlement | 非完整 reusable wave 零 task 提前关闭 | E14,E20 | 依赖可消费边界是 wave settlement | 0.99 |
-| KTD10 | 从哪里继续 | 永远 executor；固定 correction；最早未证明 checkpoint | 固定 checkpoint 顺序取最早值 | E20,E21 | 全重跑浪费；固定 correction 不覆盖 stale verify/plan变化 | 0.96 |
-| KTD11 | 失败历史继承什么 | 全状态；只文本；结构化经验但重置计数 | fingerprint/证据/尝试继承，round/budget 重置 | E12,E13,E21 | 继承 verdict/预算把新运行变成旧运行延续 | 0.99 |
-| KTD12 | event 前如何证明 | schema；LLM precheck；runtime结果+precheck重算 | runtime assessment digest + 现有 precheck独立重算 | E11–E13,E20 | schema 不检查事实；单次 hat判断不独立 | 0.94 |
-| KTD13 | accepted reuse 如何影响 tasks | 伪造 slot done；逐 wave agent事件；新 prefix batch projection；手工 task CLI | 新 `CloseTaskWavePrefix` projection action按 wave拓扑原子关闭 | E14,E20,E25 | 伪造 supervisor terminal错误；逐 wave agent事件扩大重放窗口；P0单-wave action不能表达多wave原子前缀 | 0.93 |
-| KTD14 | 模板数量 | prompt内大表；一个自由文档；rubric+machine YAML | 两个嵌入模板 | E17,E18,用户约束 | prompt复制漂移；单文档不能同时服务机器和人 | 0.99 |
-| KTD15 | legacy archive | 尽量推断；全 rerun；blocked | blocked | E21,E22 | 无 digest 不能区分旧结论与真实 settlement | 0.91 |
-| KTD16 | 通用化范围 | 所有 presets；Parallel Forge 专用；完全硬编码 | pure evaluator可复用，topology只 opt-in Parallel Forge | E15,E20,Anti-Pattern | 全平台超范围；全硬编码难测试 | 0.93 |
-| KTD17 | 是否扩展 loop_inspect.v2 | 增可选字段并 bump；独立命令 | 独立命令 | E10,E11 | loop inspect 是当前 live state，不是 archive comparison | 0.94 |
-| KTD18 | 是否新增依赖/DB migration | 新库/表；复用 serde_yaml/sha2/Git | 无新依赖、无迁移 | E18,E23,E24 | 现有能力足够且避免平台化 | 0.96 |
+| KTD1 | reuse vs continue 状态 | 共用；分离 | **完全分离** | E2,E8,E9,E21 | 旧 retry/active wave 不可跨新运行 | 0.99 |
+| KTD2 | 旧 supervisor DB | 复用；删除；归档三件套 | **归档 DB/WAL/SHM** | E3,E9,E22,E23 | 复用污染；删除丢证据 | 0.98 |
+| KTD3 | archive 完成条件 | 直接 rename；不可恢复 partial；staging+COMPLETE | **lock+staging+COMPLETE 原子发布** | E3–E5,E22,E23 | rename 中途拆证据 | 0.95 |
+| KTD4 | 谁算 status | hat；runtime；runtime+hat 解释 | **runtime pure evaluator；hat 只物化** | E10–E13,E21 | hat 可主观提升 | 0.97 |
+| KTD5 | CLI 位置 | 顶级 reuse；inspect；diagnose | **`ralph inspect reuse-status`** | E11,E34 | 与 inspect 只读语义一致 | 0.95 |
+| KTD6 | 状态集合 | bool；三态；五态 | **五态固定** | R5–R12,E20,E21 | 无法区分重验/续修/阻塞 | 0.96 |
+| KTD7 | Unit identity | id；commit；合同 digest | **unit_id + contract digest** | E15–E20 | 名称/commit 不足 | 0.95 |
+| KTD8 | DAG 粒度 | 任意 Unit；整 plan；连续 prefix | **Unit 评估 + wave 聚合 + 连续 prefix** | E14,E15,E20 | 跳过破坏依赖 | 0.98 |
+| KTD9 | 部分 wave 关 task | 可复用 Unit 即关；整 wave settlement | **非完整 reusable wave 零提前关闭** | E14,E20 | 依赖边界是 wave settlement | 0.99 |
+| KTD10 | 继续点 | 永远 executor；固定 correction；最早 checkpoint | **最早未证明 checkpoint** | E20,E21 | 全重跑浪费；固定 correction 覆盖不全 | 0.96 |
+| KTD11 | 失败历史 | 全状态；只文本；经验+重置计数 | **fingerprint/证据继承，round/budget 重置** | E12,E13,E21 | 继承预算=旧运行延续 | 0.99 |
+| KTD12 | 接受前证明 | schema；LLM；runtime+precheck 重算 | **assessment digest + precheck 重算** | E11–E13,E20 | schema 不验事实 | 0.94 |
+| KTD13 | 关 prefix tasks | 伪造 slot；逐 wave 事件；新 prefix action；手工 CLI | **`CloseTaskWavePrefix`** | E14,E20,E25,E26 | 单 wave CloseTaskBatch 不能表达多 wave 原子前缀 | 0.93 |
+| KTD14 | 模板 | prompt 大表；单文档；rubric+YAML | **两嵌入模板** | E17,E18 | 防漂移 | 0.99 |
+| KTD15 | legacy archive | 推断；全 rerun；blocked | **blocked** | E21,E22 | 无 digest 不可验 | 0.91 |
+| KTD16 | 通用化 | 全 preset；PF 专用；硬编码 | **pure evaluator 可复用；topology 仅 PF opt-in** | E15,E20 | 全平台超范围 | 0.93 |
+| KTD17 | loop_inspect.v2 | 加字段 bump；独立命令 | **独立命令** | E10,E11 | loop inspect≠archive 比较 | 0.94 |
+| KTD18 | 新依赖/迁移 | 新库/表；复用现有 | **无新依赖、无 DB migration** | E18,E23,E24 | 现有足够 | 0.96 |
+| KTD19 | 原串行能否并行 | 保持 U1→U8 串行；安全并行拆 Wave | **Wave1 三角并行；preset 热点串行 U4→U5；U6∥U7** | E3,E11,E14,E15,E18,§2.2 | 强行并行 preset/schema 必语义冲突 | 0.92 |
+| KTD20 | 共享 DTO Owner | U1/U2 各写一份；F1 冻结 | **F1 唯一定义 manifest/status DTO** | 并发热点规则 | 禁止双 SSOT | 0.97 |
+| KTD21 | exhaustion 配置 Owner | U7 改 preset；U4 一次配齐 | **U4 配齐 budget/on_exhausted；U7 只 BDD 证明** | E12,E13,KTD19 | 避免 Wave4 与 preset 热点重叠 | 0.90 |
 
-所有实施关键决策均 ≥0.85。若 P0 实际实现改变 E14/E20 的接口，相关 KTD 失去
-证据基础，U1 必须停止并重新评估，不能只修改置信度数字。
+无 <0.85 决策。若 P0 字段/action 与 E14/E20/E28 冲突，停止并重开相关 KTD（禁止只改数字）。
 
-## Planning Contract
+### Wave 并发安全置信度
+
+| Wave | 结论 | 支持证据 | 潜在冲突 | 缓解 | 置信度 |
+|---|---|---|---|---|---|
+| W0 | 可串行执行 | E3,E5,KTD20 | 无并发 | 单 Worktree | 0.97 |
+| W1 | **可三路并行** | 文件矩阵无交集；契约已冻 | `lib.rs` 导出 | F1 已 `pub mod`；U2 只扩模块内 | 0.91 |
+| W2 | 单 Unit | preset/projection 热点 | 无 | 唯一 Owner U4 | 0.94 |
+| W3 | 单 Unit | 续改 preset | 与 U4 同文件 | Barrier2 后基线；禁止回改 U4 事件合同字段语义 | 0.90 |
+| W4 | **可两路并行** | U6/U7 预设冻结后只加 scenario；U6 可修 evaluator | `scenarios.rs` append | Merge Order U6→U7；机械冲突 | 0.88 |
+| W5 | 单 Unit | docs Owner | 无 | — | 0.95 |
+
+W4 置信度 0.88≥0.85：若实施中发现必须改 `parallel-forge.yml`，立即取消并行，改为 U6→U7 串行并修订计划。
+
+---
+
+## Planning Contract（决策冻结后的设计 SSOT；实施不得偏离）
 
 ### 高层技术设计
 
@@ -836,1408 +733,1063 @@ sha256(plan_key + execution_plan_digest + approved_base_commit + archive_manifes
 - 不新增 builtin preset 名，因此 zsh completion 名单无需改；仍需检查脚本无描述
   绑定漂移。
 
+
+---
+
 ## 4. BDD 行为规格
 
-Product Contract 的 S1–S14 是完整 BDD SSOT。实施时拆成至少以下真实 runtime
-fixtures，不允许 source-text assertion：
+Product Contract S1–S14 为 SSOT。完整 Gherkin：
 
-- `parallel_forge_reuse_no_archive_runtime.yml`：S1。
-- `parallel_forge_reuse_prefix_runtime.yml`：S2、S11。
-- `parallel_forge_reuse_partial_wave_runtime.yml`：S3、S5、S6。
-- `parallel_forge_reuse_correction_runtime.yml`：S4。
-- `parallel_forge_reuse_tamper_runtime.yml`：S7、S8、S9、S12。
-- CLI/worktree integration 单独覆盖 S10。
-- artifact materialize integration 单独覆盖 S13。
-- `ralph-e2e` marker cassette 单独覆盖 S14。
+```gherkin
+Feature: Parallel Forge 跨运行状态复用
 
-每个 fixture 由 `crates/ralph-core/tests/scenarios.rs` 的
-`run_workflow_guard_scenario` 驱动真实 EventLoop；不得用 `run_scenario` stub。
+  Background:
+    Given P0 static-wave settlement 已完成并通过其 Definition of Done
+    And 当前运行使用 --worktree --reuse-worktree 和同一 operator plan
+
+  Scenario S1: 首次运行没有历史证据
+    Given worktree 中没有完整 reuse archive
+    When runtime 计算 reuse status
+    Then 每个 Unit 状态为 rerun 且 reason_code 为 no_prior_archive
+    And 不读取或创建 supervisor.db
+    And 正常从 wave 1 execute 开始
+
+  Scenario S2: 完整结算的连续 wave 前缀被复用
+    Given wave 1 和 wave 2 的合同 digest 未变
+    And settlement artifacts、verified SHA 和 Git ancestry 全部匹配
+    And wave 3 没有 settlement
+    When precheck 接受 forge.reuse.assessed
+    Then wave 1 和 wave 2 tasks 被一次原子投影为 done
+    And verified_base_commit 等于 wave 2 settlement SHA
+    And dispatcher 只能从 wave 3 开始
+
+  Scenario S3: 同 wave 的一个 Unit 需要重跑
+    Given wave 2 的 U2 合同未变且实现证据可用
+    And wave 2 的 U3 allowed_paths 与当前 plan 不同
+    When runtime 计算 wave 2
+    Then U2 保留 preserved evidence
+    And U3 状态为 rerun
+    And wave 2 resume_checkpoint 为 execute
+    And wave 2 任一 task 都不因 reuse 提前关闭
+
+  Scenario S4: 上次验证失败后继续修复
+    Given settled prefix 到 wave 1
+    And wave 2 有与当前合同匹配的 verification failure fingerprint
+    When runtime 计算 wave 2
+    Then wave 2 状态为 resume_correction
+    And 输出上次失败证据、已尝试方案及未采用理由
+    And current correction_round 从 1 开始而不是继承旧值
+
+  Scenario S5: 实现可用但验证已过期
+    Given Unit commit 可达且合同未变
+    And 当前 HEAD 的相关路径不再等于旧 verified tree
+    When runtime 计算 reuse status
+    Then Unit 状态为 reverify
+    And checkpoint 是最早缺失的 review、integration 或 verification
+    And Unit 不进入 reusable prefix
+
+  Scenario S6: 下游不能越过未证明依赖
+    Given wave 1 reusable
+    And wave 2 rerun
+    And archive 声称 wave 3 settled
+    When runtime 传播 DAG 状态
+    Then wave 3 不得 reusable
+    And reason_code 包含 dependency_not_reusable
+    And dispatcher 不得跳到 wave 3
+
+  Scenario S7: 证据被篡改时阻塞
+    Given settlement artifact 内容与 archive manifest digest 不同
+    When runtime 计算 reuse status
+    Then assessment 为 blocked
+    And reason_code 为 artifact_digest_mismatch
+    And 零 task 状态变化
+
+  Scenario S8: proposal 后 HEAD 漂移
+    Given reconciler 写出的 assessment 绑定 HEAD A
+    And precheck 前当前 HEAD 变为 B
+    When gate 独立重算
+    Then forge.reuse.assessed 被拒绝
+    And failed_checks 包含 assessment_digest_changed
+    And 新 assessment 不继承旧 rejection count 之外的任何 verdict
+
+  Scenario S9: 三次 precheck 仍无法稳定
+    Given 同一 reuse scope 已连续三次 assessment mismatch
+    When 第三次 rejection 被 runtime 接受
+    Then runtime 发布 plan.blocked kind=precheck_exhausted
+    And 不关闭任何尚未被 accepted assessment 覆盖的 task
+
+  Scenario S10: reuse cleanup 隔离 supervisor 状态
+    Given 上一运行留下 supervisor.db、supervisor.db-wal 和 supervisor.db-shm
+    When --reuse-worktree 启动新运行
+    Then 三个文件都进入同一个完整 archive
+    And live .ralph 下不存在这些文件
+    And fresh inspect 不显示旧 active wave
+
+  Scenario S11: 同一 assessment 重放幂等
+    Given forge.reuse.assessed digest D 已投影 reusable prefix
+    When 相同 scope 和 digest D 被重放
+    Then task、verified base 和 resume checkpoint 不重复变化
+    And 不创建第二份 accepted reuse settlement
+
+  Scenario S12: legacy archive 不被猜测
+    Given reuse-history 只有旧式 archive 且没有 v1 COMPLETE marker
+    When runtime 计算 reuse status
+    Then assessment 为 blocked
+    And reason_code 为 legacy_archive_unverifiable
+    And 输出建议启动非 reuse 新运行或人工补充可验证证据
+
+  Scenario S13: binary-only 环境物化统一 reuse 模板
+    Given 操作者只安装了 ralph binary 而没有源码 templates 目录
+    When 执行 ralph preset materialize-artifacts parallel-forge --plan-key demo
+    Then 输出目录包含 reuse-status.template.yml
+    And 输出目录包含 reuse-status-rubric.template.md
+    And machine template 字段与 reuse_status.v1 JSON 合同一致
+
+  Scenario S14: 操作者 live 验收跨运行复用主路径（真端到端）
+    Given 上一运行留下两个 settled waves 和第三 wave 的 correction failure
+    And 操作者用 --worktree --reuse-worktree 启动新 live 运行（真实 backend）
+    When reuse assessment 被接受且 development loop 收敛
+    Then 前两个 waves 不重复执行并原子关闭其当前 tasks
+    And 第三 wave 收到旧失败经验、完成 correction 和重新 settlement
+    And full Tester、Auditor、Reporter 按合同完成
+    And 自动化不要求完整 mock marker cassette；可选只冒烟关键节点
+      （accepted assessment / prefix close / resume checkpoint）
+```
+
+实施 fixtures（真实 `run_workflow_guard_scenario`，禁止 `run_scenario` stub）：
+
+| Fixture（计划新增） | Scenarios | Owner |
+|---|---|---|
+| `parallel_forge_reuse_no_archive_runtime.yml` | S1 | U4（路由）+ U2（分类） |
+| `parallel_forge_reuse_prefix_runtime.yml` | S2,S11 | U4 |
+| `parallel_forge_reuse_partial_wave_runtime.yml` | S3,S5,S6 | U5 |
+| `parallel_forge_reuse_correction_runtime.yml` | S4 | U5 |
+| `parallel_forge_reuse_tamper_runtime.yml` | S7,S8,S12 | U6 |
+| `parallel_forge_reuse_exhaustion_runtime.yml` | S9 | U7 |
+| CLI/worktree integration | S10 | U1 |
+| materialize integration | S13 | U3 |
+| live checklist | S14 | U8（人工；可选关键节点冒烟） |
+
+---
 
 ## 5. 验收与测试策略
 
-| Scenario | 验收条件 | 测试入口 | 推荐测试层级 | 风险补充测试 | 是否需要 E2E |
+| Scenario | 验收条件 | 测试入口 | 层级 | 风险补充 | Owner | 合并后重跑 |
+|---|---|---|---|---|---|---|
+| S1 | 全 rerun；零 DB open | `reuse_status` + BDD | 单元+集成 | Characterization | U2+U4 | 是 |
+| S2 | prefix 原子关闭；从 wave3 起 | projector + BDD | 集成 | Idempotency | U4 | 是 |
+| S3 | partial 零提前关闭 | evaluator + BDD | 单元+集成 | DAG property | U5 | 是 |
+| S4 | failure 注入；round=1 | correction BDD | 集成 | Differential | U5 | 是 |
+| S5 | 最早 checkpoint | table tests | 单元 | Mutation checkpoint | U2+U5 | 是 |
+| S6 | 非连续降级 | evaluator + BDD | 单元+集成 | Property DAG | U2+U5 | 是 |
+| S7 | digest mismatch 零副作用 | tamper BDD | 集成 | Fault Injection | U6 | 是 |
+| S8 | HEAD 漂移 reject | precheck BDD | 集成 | Fault Injection | U6 | 是 |
+| S9 | 第三次 exhausted | exhaustion BDD | 集成 | boundary 2/3/4 | U7 | 是 |
+| S10 | DB 三件套归档 | worktree+CLI | 集成 | crash-window | U1 | 是 |
+| S11 | digest replay 幂等 | projector | 单元+集成 | Idempotency | U4 | 是 |
+| S12 | legacy blocked | CLI+evaluator+BDD | 集成 | malformed manifest | U1+U2+U6 | 是 |
+| S13 | 两模板物化 | materialize | 集成/契约 | registry parity | U3 | 是 |
+| S14 | live 主路径 | 人工 checklist | 人工 | 可选 key-node smoke | U8 | 否（人工） |
+
+**共同断言：** status/reason/checkpoint/digest/task batch/verified SHA/event 序列精确匹配；
+proposal/reject/blocked 零 task close；inspect 零写盘；cleanup 不改 HEAD/branch/baseline。
+
+**命令基线（真实）：** `cargo nextest run …`；禁止裸 `cargo test -p ralph-cli`。
+
+---
+
+## 6. 需求—测试—Unit 追踪矩阵
+
+| Requirement ID | 需求 | Scenario | 验收/单元/集成 | E2E | Owner Unit | Evidence |
+|---|---|---|---|---|---|---|
+| R1–R4 | archive 边界 | S10,S12 | worktree+CLI | 否 | F1(表征)+U1 | E1–E9,E23,E32 |
+| R5–R12 | 五态/identity | S1,S3–S7,S12 | reuse_status+inspect | 否 | F1(DTO)+U2 | E7,E11,E20–E24 |
+| R13–R19 | DAG/prefix/checkpoint | S2–S6,S11 | BDD+projector | 否 | U4+U5 | E14,E15,E19,E20 |
+| R20–R24 | precheck/幂等 | S7–S9,S11 | precheck BDD | 否 | U4+U6+U7 | E12–E14,E22 |
+| R25–R27 | 模板 SSOT | S13 | materialize | 否 | U3 | E17,E18,E33 |
+| R28–R30 | inspect/report/docs | S1,S2,S4,S7–S9,S13,S14 | CLI+docs+live | 人工 S14 | U2+U8 | E10,E11,E25,E27 |
+
+无无测试需求、无 Owner 行为、无 Evidence 关键决策。
+
+---
+
+## 7. 依赖图
+
+```text
+F1 (DTO + Characterization + 契约冻结)
+  ├── U1 Archive          [需 F1::ReuseManifestV1]
+  ├── U2 Evaluator+Inspect [需 F1::ReuseStatusV1 + fixture manifest]
+  └── U3 Templates         [需 F1 字段冻结列表]
+
+U1 ──┐
+U2 ──┼── U4 Prefix+Precheck+CloseTaskWavePrefix
+U3 ──┘
+
+U4 ──── U5 Partial checkpoint + failure experience
+
+U5 ──┬── U6 Tamper fail-closed
+     └── U7 Exhaustion BDD
+
+U6 ──┐
+U7 ──┴── U8 Docs + live checklist
+```
+
+| 边 | 依赖能力 | 类型 | 为何不能同 Wave | 可否用 Fake 消除 |
+|---|---|---|---|---|
+| F1→U1 | Manifest DTO | 接口 | U1 消费冻结类型 | 否，必须同类型 |
+| F1→U2 | Status DTO | 接口 | 同上 | fixture 可代 U1 产物，仍需 F1 |
+| F1→U3 | 字段列表 | 合同 | 模板必须对齐 JSON | 否 |
+| U1→U4 | 完整 archive | 行为/数据 | U4 BDD 需真实 cleanup 产物或等价 fixture；合并后组合验 | Wave1 内 U4 不可并行；U4 可用 U1 fixture 格式 |
+| U2→U4 | inspect 命令 | 行为 | reconciler 调真实命令 | 不可与 U4 同 Wave |
+| U3→U4 | 两模板 | 数据 | materialize 路径 | 不可与 U4 同 Wave |
+| U4→U5 | accepted projection + 冻结 event 合同 | 行为 | U5 改 dispatcher 路由依赖 U4 topology | 否 |
+| U5→U6/U7 | preset 冻结 | 基线 | U6/U7 不得再改 schema 语义 | U6/U7 互不依赖，可并行 |
+| U6/U7→U8 | 行为稳定 | 文档 | docs 描述最终行为 | 否 |
+
+---
+
+## 8. 并发 Wave 总览
+
+| Wave | Unit | 可并发 | 基线 | 输出 Barrier | 并发安全置信度 |
 |---|---|---|---|---|---|
-| S1 | no archive→全 rerun、零 DB open | new evaluator tests + CLI integration + BDD | 单元+集成 | Characterization | 否 |
-| S2 | prefix batch close、base推进、从 wave3开始 | state projector + BDD | 集成 | State-machine/Idempotency | 是，mock |
-| S3 | partial wave零提前关闭、只 rerun affected | evaluator + BDD | 单元+集成 | DAG property cases | 否 |
-| S4 | prior failure注入、round重置 | evaluator + correction BDD | 集成 | Differential | 否 |
-| S5 | stale verify选最早checkpoint | evaluator table tests | 单元 | Mutation-style checkpoint deletion | 否 |
-| S6 | non-contiguous settlement downgrade | evaluator + BDD | 单元+集成 | Property-Based DAG | 否 |
-| S7 | digest mismatch blocked零副作用 | archive/evaluator/state projector | 单元+集成 | Fault Injection | 是，mock |
-| S8 | HEAD漂移 precheck reject | precheck runtime + BDD | 集成 | Concurrency/Fault Injection | 否 |
-| S9 | 第三次 exhausted blocked | precheck BDD | 集成 | boundary 2/3/4 | 否 |
-| S10 | DB/WAL/SHM归档且 fresh inspect无旧 wave | worktree unit + CLI integration | 集成 | crash-window | 是，mock |
-| S11 | same digest replay无重复变化 | projector/evaluator | 单元+集成 | Idempotency | 否 |
-| S12 | legacy archive blocked | CLI integration | 集成 | malformed/fuzzed manifest | 否 |
-| S13 | binary物化两份模板且字段对齐 | materialize integration | 集成/契约 | registry parity | 否 |
-| S14 | settled prefix→correction→终局报告完整闭环 | registered marker-cassette scenario | mock E2E | activation cursor/group completeness | 是，mock |
-
-**共同断言**
-
-- 具体断言：status、reason code、checkpoint、digest、task batch、verified SHA、
-  event sequence 完全匹配。
-- 副作用断言：proposal/reject/blocked 零 task close；inspect 零文件创建；
-  cleanup 不改 Git HEAD/branch/plan baseline。
-- 不变量：不能越过 first unproven wave；旧 budget 不继承；Verifier/Tester 不写
-  code；不读取旧 supervisor store 作为状态。
-- 测试层级理由：分类/DAG 是纯规则，用单元/属性测试；archive/CLI/Git 用集成；
-  event routing/state mutation 用真实 EventLoop BDD；关键 operator flow 用 mock E2E。
-
-## 6. 需求—测试追踪矩阵
-
-| Requirement ID | 需求 | Scenario | 验收测试 | 单元测试 | 集成/契约测试 | E2E | Evidence |
-|---|---|---|---|---|---|---|---|
-| R1–R4 | archive与运行边界 | S10,S12 | reuse cleanup integration | worktree cleanup | integration_worktree_isolation | S10 | E1–E9,E23 |
-| R5–R12 | 五态与identity | S1,S3–S7,S12 | inspect JSON contract | reuse_status module | integration_reuse_status | S7 | E7,E11,E20–E24 |
-| R13–R19 | DAG/prefix/checkpoint | S2–S6,S11 | runtime BDD | DAG/state table | scenarios + projector | S2 | E14,E15,E19,E20 |
-| R20–R24 | runtime+precheck+幂等 | S7–S9,S11 | precheck BDD | digest/replay | real EventLoop | S7 | E12–E14,E22 |
-| R25–R27 | 模板SSOT | S13 | materialize integration | template registry | CLI materialize | 否 | E17,E18 |
-| R28–R30 | inspect/report/docs | S1,S2,S4,S7–S9,S13,S14 | CLI JSON/human + report BDD | serialization | presets/docs drift | S14 | E10,E11,E25,E27 |
-
-Scenario→Unit 的执行归属固定为：
-
-| Scenario | Owner Unit |
-|---|---|
-| S1 | U2（分类）+ U4（正常路由） |
-| S2 | U4 |
-| S3–S6 | U5 |
-| S7–S8 | U6 |
-| S9 | U7 |
-| S10 | U1 |
-| S11 | U4 |
-| S12 | U1（archive形态）+ U2（分类）+ U6（终局路由） |
-| S13 | U3 |
-| S14 | U8 |
-
-不存在无 Unit、无测试或无 Evidence 的需求。
-
-## 7. 严格串行开发单元
+| 0 | F1 | 否（串行） | `dffb6a33…` | 冻结 DTO+表征绿 | 0.97 |
+| 1 | U1,U2,U3 | **三路并行** | Barrier0 commit | archive+inspect+templates | 0.91 |
+| 2 | U4 | 否 | Barrier1 commit | prefix/precheck 绿 | 0.94 |
+| 3 | U5 | 否 | Barrier2 commit | partial/correction 绿 | 0.90 |
+| 4 | U6,U7 | **两路并行** | Barrier3 commit | tamper+exhaustion 绿 | 0.88 |
+| 5 | U8 | 否 | Barrier4 commit | docs/drift 绿 | 0.95 |
 
 ```text
-U1 Archive 完整性与 supervisor 隔离
-  ↓ 完成全部测试、重构和回归
-U2 Runtime 五态 evaluator 与 inspect CLI
-  ↓ 完成全部测试、重构和回归
-U3 Reuse templates 的嵌入与物化
-  ↓ 完成全部测试、重构和回归
-U4 Accepted reusable prefix 的 precheck 与原子投影
-  ↓ 完成全部测试、重构和回归
-U5 Partial wave 的 checkpoint 恢复与失败经验
-  ↓ 完成全部测试、重构和回归
-U6 篡改与漂移证据 fail-closed
-  ↓ 完成全部测试、重构和回归
-U7 Precheck exhaustion 阻塞闭环
-  ↓ 完成全部测试、重构和回归
-U8 Mock E2E、agent guides 与下游合同闭合
+Wave 0:
+  F1
+
+Barrier 0
+  ↓
+
+Wave 1:
+  U1 ─┐
+  U2 ─┼─ Parallel (max=3)
+  U3 ─┘
+
+Barrier 1
+  ↓
+
+Wave 2:
+  U4
+
+Barrier 2
+  ↓
+
+Wave 3:
+  U5
+
+Barrier 3
+  ↓
+
+Wave 4:
+  U6 ─┐
+  U7 ─┴─ Parallel (max=2)
+
+Barrier 4
+  ↓
+
+Wave 5:
+  U8
+
+Final Integration → Full Regression
 ```
 
-## Implementation Units
+---
 
-### U1：生成完整 archive manifest 并隔离旧 supervisor ledger
+## 9. 文件、行为与契约所有权
 
-#### 1. Unit 目标
+### 9.1 文件所有权矩阵
 
-操作者复用 completed worktree 时，新运行只能看到 clean live runtime；旧 runtime
-、Parallel Forge business artifacts 和 supervisor DB 三件套被归档为一个可机器
-核验、完成标记原子提交的证据包。
+| 路径或模块 | Owner | Wave | 其他只读 | 冲突风险 | 策略 |
+|---|---|---|---|---|---|
+| `crates/ralph-core/src/reuse_status.rs` | F1 创建类型；U2 实现 evaluator；U6 仅修 fail-open | 0/1/4 | 是 | 中 | 分 Wave；禁止同 Wave 双写 |
+| `crates/ralph-core/src/lib.rs` | F1（`pub mod`） | 0 | 是 | 低 | 后续只读 |
+| `crates/ralph-core/src/worktree.rs` | F1 表征测试；U1 生产实现 | 0/1 | 是 | 中 | 分 Wave |
+| `crates/ralph-cli/src/commands/run.rs` | U1（summary 显示） | 1 | 是 | 低 | — |
+| `crates/ralph-cli/tests/integration_worktree_isolation.rs` | U1 | 1 | 是 | 低 | — |
+| `crates/ralph-cli/src/commands/inspect.rs` | U2 | 1 | 是 | 中（007） | 只追加 variant |
+| `crates/ralph-cli/tests/integration_reuse_status.rs` | U2（新） | 1 | — | 无 | — |
+| `presets/templates/parallel-forge/reuse-status*.template.*` | U3（新） | 1 | 是 | 低 | — |
+| `builtin_artifact_templates.rs` / `build.rs` | U3 | 1 | 是 | 低 | — |
+| `integration_preset_materialize_artifacts.rs` | U3 | 1 | 是 | 低 | — |
+| `config/state_projection.rs` + `state_projector/*` | U4 | 2 | 是 | 高 | 唯一 Owner |
+| `presets/en/parallel-forge.yml` | U4→U5 | 2/3 | 之后只读 | 高 | 串行；Barrier3 后冻结 |
+| `presets/schemas/parallel-forge.yml` | U4→U5 | 2/3 | 之后只读 | 高 | 同上 |
+| `scenarios/parallel_forge_reuse_prefix_*.yml` | U4 | 2 | — | 无 | — |
+| `scenarios/parallel_forge_reuse_partial_*.yml` + `*_correction_*.yml` | U5 | 3 | — | 无 | — |
+| `scenarios/parallel_forge_reuse_tamper_*.yml` | U6 | 4 | — | 无 | — |
+| `scenarios/parallel_forge_reuse_exhaustion_*.yml` | U7 | 4 | — | 无 | — |
+| `tests/scenarios.rs` | 各 Unit append 自己的 `fn test_…` | 2–4 | — | 中 | Merge Order；机械冲突 |
+| `crates/ralph-core/data/ralph-tools*.md` + skills refs | U8 | 5 | 是 | 低 | — |
+| `CONCEPTS.md` / `CLAUDE.md` / `AGENTS.md` | U8 | 5 | 是 | 低 | `cp CLAUDE.md AGENTS.md` |
 
-#### 2. 对应需求与 Scenario
+### 9.2 行为所有权矩阵
 
-- Requirements：R1–R4。
-- Scenario：S10、S12 的 archive 前置部分。
-- Decisions：KTD1–KTD3、KTD18。
-- Evidence：E1–E9、E22、E23。
+| 行为/规则 | Owner | 消费者 | SSOT | 验证 |
+|---|---|---|---|---|
+| Manifest 字段/COMPLETE 语义 | F1/U1 | U2,U4 | `ReuseManifestV1` | U1 tests |
+| 五态分类与 DAG 传播 | U2 | U4–U7 | `reuse_status` evaluator | unit+inspect |
+| 模板内容与 embed | U3 | U4,U8 | templates + registry | materialize |
+| precheck + CloseTaskWavePrefix + reconciler topology | U4 | U5–U7 | preset/schema/projection | BDD S2/S11 |
+| partial checkpoint / failure experience 路由 | U5 | U8 | preset instructions + BDD | S3–S6 |
+| tamper/legacy 零副作用 | U6 | U8 | evaluator reason + BDD | S7/S8/S12 |
+| exhaustion 终态可观测性 | U7 | U8 | BDD（配置属 U4） | S9 |
+| docs/live 清单 | U8 | 操作者 | skill/CONCEPTS | drift+S14 |
 
-#### 3. 外部可观察结果
+### 9.3 共享契约矩阵
 
-`--reuse-worktree` 成功后，latest archive 有 manifest+COMPLETE；live
-`.ralph/supervisor.db{,-wal,-shm}` 与旧 `.ralph/forge/` 不存在；Git HEAD、
-branch、user code 和 plan baseline 不变。两个进程同时申请同一 worktree reuse
-时只有持有 cleanup lock 的进程可继续，另一个明确失败且零 archive/live
-mutation。
+| 契约 | 定义 Owner | 消费者 | 冻结时机 | 修改规则 |
+|---|---|---|---|---|
+| `reuse_manifest.v1` | F1 | U1,U2,U4 | Barrier 0 | 禁止私改；需重规划 |
+| `reuse_status.v1` JSON 字段 | F1 | U2,U3,U4 | Barrier 0 | 同上 |
+| 五态/reason code 枚举 | F1 | U2,U5–U7 | Barrier 0 | 同上 |
+| checkpoint 全序 | F1/计划 | U2,U5 | Barrier 0 | 同上 |
+| `CloseTaskWavePrefix` 输入形状 | U4 | projector/BDD | Barrier 2 | 后续只消费 |
+| `forge.reuse.assessed` required_fields | U4 | schema/precheck/U5 | Barrier 2 | U5 只加 resume 上下文字段，不改已冻语义 |
+| 两模板 basename | U3 | registry | Barrier 1 | U5 若缺字段→停止重规划，不私加第三模板 |
+| InspectCommands::ReuseStatus | U2 | CLI | Barrier 1 | 007 不得覆盖 |
 
-#### 4. 当前行为基线
 
-E3–E6 证明当前 cleanup 会 archive 多数 runtime 文件并写 advisory
-`resume-context.md`，但 supervisor DB 和 machine manifest 缺失。先扩展现有
-characterization test，固定当前保留/删除集合，再写新断言形成 Red。
+---
 
-#### 5. 输入与输出
+## 10. Worktree 执行单元
 
-- 输入：completed worktree path、cleanup 前 HEAD、现有 runtime paths。
-- 输出：archive dir、`reuse-manifest.v1.json`、`COMPLETE`、
-  保留的 `resume-context.md`。
-- 错误：git HEAD 读取失败、path escape、copy/hash/write/sync/delete 失败均返回
-  `WorktreeError`，新 run 不启动。
-- 不变量：不删除旧 archive；不修改 Git refs；不打开 supervisor DB。
+**分支命名约定（仓库无强制规则时的描述性占位）：**
+- Worktree 名：`reuse-002-<unit-id>-<slug>`
+- 本地分支：`plan/2026-07-29-002/<unit-id>-<slug>`
+- 创建：`git worktree add -b <branch> .worktrees/<name> <Wave基线commit>`
 
-#### 6. 修改位置
+---
 
-- `crates/ralph-core/src/worktree.rs`：当前 archive owner；新增 manifest DTO、
-  canonical member hashing、supervisor sidecars、complete marker 和 tests。
-- `crates/ralph-cli/src/commands/run.rs`：只消费 richer cleanup result 并打印
-  archive/manifest summary；不承载分类逻辑。
-- `crates/ralph-cli/tests/integration_worktree_isolation.rs`：真实 CLI reuse 验证。
+### Wave 0
 
-不修改 supervisor store/migrations；archive 是文件生命周期操作。
+#### Wave 目标
 
-#### 7. 可依赖能力
+冻结 `reuse_manifest.v1` / `reuse_status.v1` DTO 与表征测试，消除 Wave 1 双 SSOT 风险。
 
-- 现有 target 命名/筛选逻辑可从 `unique_reuse_archive_dir`、
-  `archive_if_exists`、`archive_files_matching` 提取；`archive_if_exists` 的直接
-  rename 语义必须被 discover→copy→verify→delete 取代，不能在 staging完成前
-  移走唯一 live copy。
-- `agent_doc_sync::compute_sha256_hex` 或现有 sha2 dependency。
-- `plan_baseline::read_plan_baseline`、`git_ops::get_head_sha`。
+#### Wave 基线
 
-#### 8. 禁止依赖的未来能力
+- Base：`dffb6a33ae1e5a7bfe0340f2d310cf53d6852fa7`
+- 前置：§0 入口门禁
+- 冻结产出：DTO 字段名/默认/sentinel/`none`、reason code 枚举、checkpoint 全序
+- 启动条件：入口门禁绿
 
-不得依赖 U2 evaluator、U3 templates、P1 events；本 Unit 只建立可信来源。
+#### Wave 并发安全说明
 
-#### 9. 验收测试
+单 Unit；置信度 0.97。
 
-- `test_clean_worktree_runtime_artifacts_writes_complete_manifest`。
-- `test_clean_worktree_runtime_artifacts_archives_supervisor_sidecars`。
-- `test_cleanup_failure_leaves_resumable_staging_and_refuses_current_start`。
-- CLI integration：填充 `.ralph/forge/<plan-key>/` 和 supervisor DB/WAL/SHM 后
-  reuse，断言 live clean、archive members/digests、HEAD/baseline/code preserved。
-- 运行：
-  `cargo nextest run -p ralph-core -- worktree::tests::test_clean_worktree_runtime_artifacts`
-  和
-  `cargo nextest run -p ralph-cli --test integration_worktree_isolation -- reuse`。
+---
 
-#### 10. Acceptance Red
+#### Unit F1：契约冻结与 cleanup Characterization
 
-先在现有 cleanup test fixture 创建 DB/WAL/SHM，并断言 archive manifest/COMPLETE
-存在。当前实现既不移动三文件，也不写 manifest，因目标能力缺失而 Red。
-环境错误、git fixture 未初始化、fixture 路径错不算有效 Red。
+##### 1. Unit 目标
 
-#### 11. 单元测试拆分
+在不改变生产 cleanup 行为的前提下，落地可序列化 DTO + roundtrip 测试，并表征
+「当前不归档 supervisor DB / forge / 无 COMPLETE」的基线，供 U1 形成真实 Red。
 
-1. manifest member path 只能是 archive-relative regular file。
-2. member size/digest 与真实 bytes 相同。
-3. canonical manifest digest 排除自引用字段。
-4. COMPLETE 在全部 member 复制、校验且 live target 全部清理后才存在。
-5. 任一 copy/hash/delete failure 不产生 COMPLETE。
-6. DB absent 时不虚构 members；任一 sidecar present 时正确归档。
-7. `.ralph/forge/` 整棵旧 artifact tree 进入 archive，live path 被清空。
-8. cleanup 二次调用产生独立 archive，不覆盖旧 archive。
-9. resume-context 指向 latest complete archive。
-10. 同一 staging 在 copy、delete、COMPLETE 前三个失败窗口都可继续。
-11. 并发 cleanup 只有一个持锁者。
+##### 2. Worktree Contract
 
-不允许 Mock Git HEAD 或真实 copy/delete/rename；只对时间/ID生成使用
-deterministic seam。
+- Worktree ID：`WT-F1`
+- 基线：`dffb6a33…`
+- 名：`reuse-002-f1-contracts` / 分支 `plan/2026-07-29-002/f1-contracts`
+- **允许：**
+  - 新增 `crates/ralph-core/src/reuse_status.rs`（仅 DTO/枚举/canonical digest helper/roundtrip tests；**无**五态业务规则实现）
+  - `crates/ralph-core/src/lib.rs`：`pub mod reuse_status;`
+  - `worktree.rs` **仅测试**：characterization 断言当前 live 仍保留 supervisor.db（若 fixture 创建）且无 manifest/COMPLETE
+  - 可选 fixtures：`crates/ralph-core/src/reuse_status/fixtures/*.json`（若用子目录则 `mod fixtures`）
+- **禁止：** 修改生产 `clean_worktree_runtime_artifacts` 行为；改 preset/schema/inspect/projection；加依赖；实现 evaluator 状态表
+- 行为所有权：契约形状 + 当前 cleanup 缺口表征
+- 数据所有权：DTO schema_version 常量
+- 依赖冻结契约：无（本 Unit 定义）
+- 对外输出：`ReuseManifestV1`、`ReuseStatusV1`、`ReuseUnitStatus` 五态枚举、`ReuseReasonCode`、`assessment_digest`/`archive_digest` 计算规则（不含业务分类）
+- 合并前置：DTO roundtrip + characterization 绿；clippy/fmt
+- 合并顺序：Wave0 唯一
 
-#### 12. Red → Green → Refactor 顺序
+##### 3. 需求与 Scenario
 
-```text
-supervisor sidecar Red
-→ 扩展归档集合
-→ Green
-→ manifest member/digest Red
-→ copy-to-staging manifest writer
-→ Green
-→ partial failure/continue Red
-→ manifest驱动 live cleanup + staging resume
-→ Green
-→ concurrent cleanup Red
-→ create-new worktree-scoped lock
-→ Green
-→ COMPLETE目录原子发布 Red
-→ staging内complete + directory rename
-→ Green
-→ CLI reuse Red
-→ 接线 richer result
-→ Green
-→ Refactor 共用 member collector
-```
+- R2/R5 字段形状；S10/S12 表征前置；KTD6/15/18/20；E3,E5,E24,E32
 
-#### 13. 最小实现范围
+##### 4. 外部可观察结果
 
-必须归档当前已列 runtime artifacts、`.ralph/forge/` 和 DB/WAL/SHM；必须 lock/staging/
-version/digest/complete；必须保留 advisory context。不得读取 DB 内容、做
-migration、压缩 archive 或删除历史 archive。
+代码可 `serde_json` roundtrip 冻结字段；characterization 测试固定「DB 仍留在 live」的现状。
 
-#### 14. 集成验证
+##### 5. 当前行为基线
 
-用 temp Git repo 和真实 worktree运行 cleanup/CLI；真实比较 `git rev-parse HEAD`、
-plan baseline、user file、archive bytes。不得 fake filesystem rename。
+E3/E32：无 manifest。先写表征，再在 U1 翻转断言。
 
-#### 15. 风险驱动测试
+##### 6. 输入输出
 
-- Fault Injection：copy 中、manifest 后、部分 live delete 后、COMPLETE 前失败。
-- Idempotency：同一 worktree 连续两次 reuse。
-- Concurrency：两个进程同时 cleanup 同一 worktree。
-- Fuzz/validation：`../`、symlink、非法 SHA/member path。
-- SQLite lifecycle：DB-only、DB+WAL、DB+SHM 三组合。
+- 输入：计划 §Planning Contract 字段表
+- 输出：Rust 类型 + 测试
+- 错误：非法 schema_version 反序列化失败
+- 不变量：不改变磁盘上任何 worktree
 
-#### 16. 回归范围
+##### 7. 修改位置
 
-现有 worktree create/list/remove/sync、exact reuse、symlink preservation、
-plan baseline、fresh worktree create。原因：cleanup result/保留集合发生变化。
-
-#### 17. 预期文件变更
-
-| 位置 | 变更类型 | 变更原因 | Evidence |
+| 位置 | 职责 | 为何改 | 边界 |
 |---|---|---|---|
-| `crates/ralph-core/src/worktree.rs` | 修改现有生产/测试 | archive manifest + DB hygiene | E1–E5,E23 |
-| `crates/ralph-cli/src/commands/run.rs` | 修改现有生产文件 | 消费/显示完整 archive | E2 |
-| `crates/ralph-cli/tests/integration_worktree_isolation.rs` | 修改集成测试 | S10 | E6 |
+| `reuse_status.rs`（新） | DTO SSOT | Wave1 共享 | 无 evaluator match 臂业务 |
+| `lib.rs` | 导出 | 可见性 | 只加 mod |
+| `worktree.rs` tests | 表征 | 钉住缺口 | 不改生产函数体 |
 
-#### 18. 完成标准
+##### 8. 同 Wave 隔离
 
-当前 Scenario、单元/集成/回归、build/clippy/fmt 通过；无 `.skip/.only`；旧 archive
-不丢失；Evidence 更新；可独立提交。
+仅 F1。
 
-#### 19. 停止条件
+##### 9–10. 可依赖 / 禁止依赖
 
-发现 supervisor DB path 可配置到 `.ralph/` 外、cleanup 与 live supervisor
-进程并发、或 rename 后无法定义可恢复事务边界时停止，重新调查 exact target/
-locking；不得用 recursive delete 或把 partial archive标 COMPLETE。
+可依赖 serde/sha2 现有；禁止依赖 U1–U8 未合并实现。
 
-#### 20. 风险与注意事项
+##### 11. 验收测试
 
-最大风险是 manifest 承诺完整但 cleanup 中途失败。检测靠 COMPLETE 最后提交和
-fault injection；剩余风险是 fsync 在不同文件系统语义差异，必须在 plan支持平台
-上用原子 rename/create-new，不声称跨文件系统事务。
+- `reuse_manifest_v1_roundtrip`
+- `reuse_status_v1_roundtrip_excludes_assessed_at_from_digest`
+- `characterization_cleanup_leaves_supervisor_db_without_manifest`
+- 命令：`cargo nextest run -p ralph-core -- reuse_status` 与
+  `cargo nextest run -p ralph-core -- worktree::tests::characterization`
 
-### U2：提供 runtime 五态 evaluator 与只读 inspect CLI
+##### 12. Acceptance Red
 
-#### 1. Unit 目标
+表征测试若在改生产前已绿（描述现状）——F1 的「Red」针对 **缺失 DTO 模块**：先写 roundtrip 编译失败/mod 缺失，再加空壳类型 Green。不得通过改生产 cleanup 让表征「提前」变成目标行为。
 
-操作者和 hat 能用一个只读命令获得对当前 plan/Git/archive 的确定五态 assessment，
-相同输入得到相同 digest。
-
-#### 2. 对应需求与 Scenario
-
-- R5–R19、R28；S1、S3–S7、S12。
-- KTD4–KTD11、KTD15–KTD18。
-- E7、E10、E11、E20–E24。
-
-#### 3. 外部可观察结果
-
-`ralph inspect reuse-status --execution-plan <path>
---approved-base-commit <sha> --format json` 返回 `reuse_status.v1`；human 输出来自
-同一 DTO；命令不创建文件、不启动 loop/backend/supervisor。
-
-#### 4. 当前行为基线
-
-`ralph inspect` 只有 profiles/loop/prompt；没有 archive comparison。当前 archive
-无 manifest 的基线由 U1 改变。先写 CLI parse/JSON contract test，当前缺
-subcommand 而 Red。
-
-#### 5. 输入与输出
-
-- 输入：root、execution plan path、Guardian 批准的 full
-  `approved_base_commit`、可选 explicit archive id；默认 latest complete
-  archive；经 `TaskStore::load/all` 读取 current plan 的 live task identity。
-- 输出：完整 assessment DTO/JSON/human。
-- 首次运行：全 rerun。
-- 错误：current execution plan 本身 invalid 是 CLI error；历史矛盾是
-  successful JSON with `blocked`，便于流程报告。
-- 不变量：不写 artifact；不读取 live supervisor DB。
-
-#### 6. 修改位置
-
-- 计划新增 `crates/ralph-core/src/reuse_status.rs`：DTO、manifest reader、
-  contract digest、Git evidence adapter input、五态/DAG/checkpoint pure evaluator。
-- `crates/ralph-core/src/lib.rs`：公开 agent-safe API。
-- `crates/ralph-cli/src/commands/inspect.rs`：新增 args、解析、Git/file adapter、
-  human/JSON rendering。
-- `crates/ralph-cli/src/main.rs`：Clap route/parse tests。
-- 计划新增
-  `crates/ralph-cli/tests/integration_reuse_status.rs`，使用
-  `tests/common::ralph_bin()` scrub 外层 hat env。
-
-#### 7. 可依赖能力
-
-U1 manifest、P0 execution plan/settlement合同、serde/serde_yaml/serde_json、
-sha2 helper、git command pattern、inspect output模式。
-
-#### 8. 禁止依赖的未来能力
-
-不得写 U3 artifact或发事件；不得关闭 task；不得依赖 U4 precheck。
-
-#### 9. 验收测试
-
-- JSON schema/version/field contract。
-- no archive/legacy/incomplete/tampered。
-- per-state table和 checkpoint。
-- complex DAG：diamond、multi-root、10+ waves、非连续旧 settlement。
-- current dirty paths 单 owner、多 owner、无 owner。
-- unreachable/conflicting SHA。
-- CLI read-only：before/after filesystem tree除 access time 外一致。
-- 命令：
-  `cargo nextest run -p ralph-core -- reuse_status`
-  和
-  `cargo nextest run -p ralph-cli --test integration_reuse_status`。
-
-#### 10. Acceptance Red
-
-新增 CLI integration 调用 subcommand 并断言 JSON schema。当前 Clap 报 unknown
-subcommand，证明外部能力缺失；错误 command 拼写或无 binary 不算有效 Red。
-
-#### 11. 单元测试拆分
-
-1. Unit contract canonicalization 不受 YAML map key 顺序影响。
-2. 任一合同字段变化改变 digest。
-3. status 五态表逐行测试。
-4. checkpoint minimum。
-5. transitive dependency downgrade。
-6. continuous prefix stop-on-first-gap。
-7. archive selection只取 COMPLETE，timestamp相同用 archive_id稳定排序。
-8. assessment digest排除 assessed_at/path。
-9. prior failure summary不含旧 round/budget verdict。
-10. public DTO不序列化 internal ledger/raw events。
-
-Git adapter必须真实运行 temp repo ancestry/diff；pure evaluator可用 fixture input，
-不 Mock 目标状态规则。
-
-#### 12. Red → Green → Refactor 顺序
+##### 13–14. 单元拆分与 TDD 序
 
 ```text
-CLI parse/JSON Red
-→ 最小 subcommand + no_archive DTO
-→ Green
-→ contract digest Red
-→ canonical identity
-→ Green
-→ 五态表 Red
-→ evaluator
-→ Green
-→ DAG/prefix Red
-→ topology propagation
-→ Green
-→ Git/archive hard gates Red
-→ adapters
-→ Green
-→ human/JSON parity
+mod 缺失 Red → 空模块 + 类型骨架 Green
+→ roundtrip Red → serde 实现 Green
+→ digest 排除 assessed_at Red → Green
+→ characterization 断言现状 Green（钉基线）
 → Refactor
 ```
 
-#### 13. 最小实现范围
+##### 15. 最小实现
 
-只读 evaluator/CLI；不自动修复 archive、不运行 tests、不推断 legacy。reason
-codes 使用本计划固定枚举；unknown evidence 默认 blocked，不加 `Unknown` 第六态。
+只类型与表征；不实现 staging/COMPLETE/evaluator。
 
-#### 14. 集成验证
+##### 16–18. 本地集成 / 风险 / 回归
 
-temp Git repo 构造真实 commits/branches/diffs和 U1 archives；CLI JSON反序列化为
-测试 DTO；运行两次比较 assessment digest；检查无新 supervisor DB/文件。
+`cargo nextest run -p ralph-core -- reuse_status worktree::tests`；
+风险：表征写错导致 U1 假 Green——要求断言「manifest 不存在」而非「DB 存在即可」。
 
-#### 15. 风险驱动测试
+##### 19. 预期文件变更
 
-- Property-Based：随机 DAG 的 prefix/依赖不变量。
-- Fuzz：manifest/YAML truncated、duplicate IDs、超长 path。
-- Differential：相同 semantic YAML不同 key 顺序同 digest。
-- Performance：100 Units/500 artifacts 2 秒门禁。
-
-#### 16. 回归范围
-
-inspect profiles/loop/prompt parse与输出、loop_inspect.v2、plan baseline、Git helper、
-hat env scrub。原因：新增同 namespace subcommand/共享 imports。
-
-#### 17. 预期文件变更
-
-| 位置 | 变更类型 | 变更原因 | Evidence |
+| 位置 | 类型 | 原因 | Evidence |
 |---|---|---|---|
-| `crates/ralph-core/src/reuse_status.rs` | 新增生产/单元测试 | evaluator SSOT | E20–E24 |
-| `crates/ralph-core/src/lib.rs` | 修改公开模块 | 暴露 DTO/API | E10 |
-| `crates/ralph-cli/src/commands/inspect.rs` | 修改生产/测试 | read-only CLI | E11 |
-| `crates/ralph-cli/src/main.rs` | 修改 CLI parse tests | route | E11 |
-| `crates/ralph-cli/tests/integration_reuse_status.rs` | 新增集成测试 | Git/archive/CLI | E6,E11 |
+| `reuse_status.rs` | 新增 | DTO | KTD20 |
+| `lib.rs` | 修改 | mod | — |
+| `worktree.rs` tests | 修改 | 表征 | E3 |
 
-#### 18. 完成标准
+##### 20–21. 提交与完成标准
 
-五态/复杂 DAG/CLI parity/read-only/performance 全绿；schema/reason codes稳定；无
-新依赖；相关回归通过；Evidence/KTD仍 ≥0.85；可独立提交。
+1–2 commits：`test(reuse): characterize cleanup gap` + `feat(reuse): freeze manifest/status DTOs`；
+完成：roundtrip绿、表征绿、未改生产 cleanup、可独立提交。
 
-#### 19. 停止条件
+##### 22. 停止条件
 
-P0 execution plan 无法提供稳定 Unit contract字段、Git ancestry 不能锚定
-settlement SHA、或 evaluator需要读 supervisor DB 才能决定时停止。不得降低为
-hat猜测或读取内部 ledger。
+H1 失败（DB 路径可配置外置）；或发现已有冲突模块名——停止重规划。
 
-#### 20. 风险与注意事项
+##### 23. 风险
 
-最大风险是 canonical digest 漂移。检测靠 map-order differential与全部字段
-mutation；缓解为独立 canonical DTO，不对原 YAML bytes直接 hash。
+DTO 过度超前实现业务规则 → 禁止；检测：PR diff 不得含 status 匹配表。
 
-### U3：嵌入并物化 reuse status 复杂模板
+---
 
-#### 1. Unit 目标
+### Wave 1
 
-binary-only 安装环境也能物化一份机器 status 模板和一份统一复杂决策 rubric，
-reconciler/precheck/reporter 不再在 prompt 内复制状态表。
+#### Wave 目标
 
-#### 2. 对应需求与 Scenario
+并行交付：完整可消费 archive、只读五态 inspect、两 reuse 模板 embed。
 
-- R25–R27；S13，并为 S2–S9 提供证据载体。
-- KTD14、KTD18。
-- E17、E18、用户明确约束。
+#### Wave 基线
 
-#### 3. 外部可观察结果
+- Base：Barrier 0 合并后的 commit（记为 `B0`）
+- 冻结契约：F1 DTO
+- 启动：三 Worktree 均从 `B0` 创建
 
-materialize parallel-forge 后 templates 目录包含
-`reuse-status.template.yml` 和 `reuse-status-rubric.template.md`；README 列出
-producer/consumer/output path；重复 materialize 与现有语义一致。
+#### Wave 并发安全说明
 
-#### 4. 当前行为基线
+| Unit | 独占写 | 为何不冲突 |
+|---|---|---|
+| U1 | `worktree.rs` 生产 + `run.rs` + worktree integration | 不碰 inspect/templates |
+| U2 | `reuse_status.rs` evaluator + `inspect.rs` + 新 integration | 不碰 worktree 生产；读 F1 类型 |
+| U3 | templates + registry + build.rs | 不碰 core evaluator |
 
-registry 只有六个 Parallel Forge 模板；P0 完成后会再增加四个。测试先以 P0
-落地后的 registry 为基线，再断言本计划两个 basename，当前缺失而 Red。
+置信度 0.91。`scenarios.rs` 本 Wave **不改**。
 
-#### 5. 输入与输出
+---
 
-- 输入：preset name、plan key。
-- 输出：两个原样嵌入模板。
-- 错误：registry/build copy/README 不一致应在 build/test fail。
-- 不变量：不覆盖用户已填写业务 artifacts；模板不含具体 plan实例。
+#### Unit U1：完整 archive manifest 与 supervisor 隔离
 
-#### 6. 修改位置
+##### 1. Unit 目标
 
-- 新增两个 template files。
-- 更新 `presets/templates/parallel-forge/README.md`。
-- 更新 `crates/ralph-cli/build.rs` copy list。
-- 更新 `crates/ralph-cli/src/builtin_artifact_templates.rs` names/includes/tests。
-- 扩展 `integration_preset_materialize_artifacts.rs`。
+`--reuse-worktree` 后 latest archive 含 manifest+COMPLETE；live 无旧 DB/forge；代码/HEAD/baseline 不变。
 
-#### 7. 可依赖能力
+##### 2. Worktree Contract
 
-现有 materialize command、U2 DTO字段、P0 templates registry。
+- WT-U1 / `reuse-002-u1-archive` / `plan/2026-07-29-002/u1-archive`
+- 基线：`B0`
+- **允许：** `worktree.rs`（生产+测试）、`run.rs`（仅打印 archive/manifest 摘要）、
+  `integration_worktree_isolation.rs`
+- **禁止：** `reuse_status` evaluator、`inspect.rs`、preset/schema、templates、projection、skill docs
+- 行为：archive 生命周期；数据：archive 目录成员
+- 依赖：F1 `ReuseManifestV1`
+- 输出：可消费 archive（COMPLETE+manifest）；cleanup API 仍返回 archive path（可扩展摘要字段，但不得迫使 U2 改签名——若改返回类型，须保持向后可解包或同 PR 文档化，且仅 U1/run.rs 消费）
+- 合并序：Barrier1 内 **先 U1**（为组合验提供真实 archive 路径习惯）
 
-#### 8. 禁止依赖的未来能力
+##### 3. 对应：R1–R4；S10；KTD1–3,18；E1–E6,E22,E23,E32
 
-不得修改 preset topology/state projection；模板只定义合同。
+##### 4–6. 可观察 / 基线 / IO
 
-#### 9. 验收测试
+见原 U1；基线由 F1 表征钉住。错误→`WorktreeError`，新 run 不启动。
 
-- registry count/names。
-- binary materialize 输出两个文件。
-- YAML template 可 parse，含所有 reuse_status.v1 语义字段。
-- rubric 含五态、checkpoint、hard block、DAG downgrade、prior failure、
-  precheck failed_checks 表。
-- 不断言完整 prompt/模板 byte equality。
-- 命令：
-  `cargo nextest run -p ralph-cli -- builtin_artifact_templates`
-  和
-  `cargo nextest run -p ralph-cli --test integration_preset_materialize_artifacts`。
+##### 7. 修改位置
 
-#### 10. Acceptance Red
+`worktree.rs`：将 `archive_if_exists` 的 rename-before-verify 改为
+discover→copy→hash→manifest→delete live→COMPLETE→rename staging；纳入 DB/WAL/SHM/`.ralph/forge/`；
+worktree-scoped create-new lock；可恢复 staging。
+`run.rs`：显示摘要。
+不打开 DB 内容、不做 migration。
 
-materialize integration 断言两个 basename存在；当前 registry不认识而失败。构建
-环境损坏或 OUT_DIR stale 不算有效 Red。
+##### 8. 同 Wave 隔离
 
-#### 11. 单元测试拆分
+与 U2/U3 无文件交集；不读其他 WT 未合并代码；manifest 字节合同以 F1 为准。
 
-1. template name registry与include count。
-2. YAML required keys/enum/checkpoint parse。
-3. rubric稳定章节 marker而非全文。
-4. README producer/consumer/path结构。
-5. unsafe plan key仍拒绝 path traversal。
+##### 9–10. 依赖 / 禁止
 
-#### 12. Red → Green → Refactor 顺序
+可依赖 F1、`compute_sha256_hex`、`get_head_sha`、`read_plan_baseline`；
+禁止 U2 命令、U4 事件。
+
+##### 11–14. 测试与 TDD
+
+验收名：
+- `test_clean_worktree_runtime_artifacts_writes_complete_manifest`
+- `test_clean_worktree_runtime_artifacts_archives_supervisor_sidecars`
+- `test_cleanup_failure_leaves_resumable_staging_and_refuses_current_start`
+- CLI reuse 断言 live clean
+
+命令：
+`cargo nextest run -p ralph-core -- worktree::tests::test_clean_worktree_runtime_artifacts`
+`cargo nextest run -p ralph-cli --test integration_worktree_isolation -- reuse`
+
+Acceptance Red：表征断言翻转——期望 manifest/COMPLETE/DB 进入 archive；当前缺失→失败。
 
 ```text
-materialize basename Red
-→ build copy/include registry
-→ Green
-→ YAML contract Red
-→ 完整 machine template
-→ Green
-→ rubric contract Red
-→ 五态/硬门/failed_checks表
-→ Green
-→ README + registry parity
+sidecar Red → 扩归档集合 Green
+→ manifest digest Red → staging writer Green
+→ partial failure Red → resume staging Green
+→ concurrent lock Red → Green
+→ COMPLETE 原子发布 Red → Green
+→ CLI Red → run.rs 接线 Green
 → Refactor
 ```
 
-#### 13. 最小实现范围
+##### 15–18. 范围 / 集成 / 风险 / 回归
 
-只加两模板。rubric 是 reference SSOT，不直接作为业务 artifact；reconciler 将其
-复制/填写为 reuse-evidence.md。不得把整张表再复制进 hat instructions。
+必须：lock/staging/digest/COMPLETE/forge/DB 三件套；保留 resume-context。
+禁止：读 DB、压缩、删历史 archive。
+风险测试：fault injection、idempotency、concurrency、path escape、DB-only/WAL/SHM 组合。
+回归：worktree create/list/remove/exact reuse/symlink/baseline。
 
-#### 14. 集成验证
+##### 19–21. 变更 / 提交 / 完成
 
-运行真实 `ralph preset materialize-artifacts parallel-forge --plan-key reuse-demo`
-到 temp root；解析 YAML并检查文件集合。
+| 位置 | 类型 | Evidence |
+|---|---|---|
+| `worktree.rs` | 改生产/测 | E3 |
+| `run.rs` | 改 | E2 |
+| `integration_worktree_isolation.rs` | 改 | E6 |
 
-#### 15. 风险驱动测试
+完成：S10 相关绿；表征旧断言删除或改为目标行为；无越界；可提交。
 
-- Contract：U2 DTO字段与模板字段一一对应。
-- Path traversal：恶意 plan key。
-- Differential：源码 checkout和 embedded output结构相同，不用完整 byte lock。
+##### 22–23. 停止 / 风险
 
-#### 16. 回归范围
+H1/并发 live supervisor 持锁 DB 无法定义边界→停止。最大风险：COMPLETE 承诺不完整——靠最后写 COMPLETE + fault injection。
 
-red-team/ce-pipeline template registries、现有 parallel-forge六个+P0四个模板、
-materialize overwrite/path rules。
+---
 
-#### 17. 预期文件变更
+#### Unit U2：五态 evaluator 与 `inspect reuse-status`
 
-| 位置 | 变更类型 | 变更原因 | Evidence |
-|---|---|---|---|
-| `presets/templates/parallel-forge/reuse-status.template.yml` | 新增模板 | machine artifact | E17,E18 |
-| `presets/templates/parallel-forge/reuse-status-rubric.template.md` | 新增模板 | 复杂状态/证据SSOT | E17,用户约束 |
-| `presets/templates/parallel-forge/README.md` | 修改文档 | lifecycle | E17 |
-| `crates/ralph-cli/build.rs` | 修改 build | embed copy | E18 |
-| `crates/ralph-cli/src/builtin_artifact_templates.rs` | 修改生产/测试 | registry/include | E18 |
-| `crates/ralph-cli/tests/integration_preset_materialize_artifacts.rs` | 修改测试 | binary materialize | E18 |
+##### 1. Unit 目标
 
-#### 18. 完成标准
+`ralph inspect reuse-status --execution-plan <p> --approved-base-commit <sha> --format json`
+返回确定 `reuse_status.v1`；只读；同输入同 digest。
 
-两个模板在 source/build/binary/runtime四层可见；结构化测试通过；无全文 prompt
-锁定；P0 template集合不丢；可独立提交。
+##### 2. Worktree Contract
 
-#### 19. 停止条件
+- WT-U2 / `reuse-002-u2-inspect` / `plan/2026-07-29-002/u2-inspect`
+- 基线：`B0`
+- **允许：** `reuse_status.rs`（在 F1 DTO 上实现 evaluator/adapters）、
+  `inspect.rs`（追加 `ReuseStatus` variant+args+handler）、
+  新 `integration_reuse_status.rs`（必须 `common::ralph_bin()` scrub）、
+  如需：`main.rs` 仅当现有路由未覆盖 subcommand 测试时补 parse 测试
+- **禁止：** `worktree.rs`、templates/registry、preset/schema、projection、skill docs、改 loop_inspect schema
+- 依赖：F1 DTO；**可用 fixture manifest**（不依赖 U1 未合并代码）
+- 输出：公开 evaluator API + CLI
+- 合并序：Barrier1 内 U1 之后、U3 之前或之后均可（建议 U1→U2→U3）
 
-若 P0 改用动态目录扫描而非显式 registry，停止并以实际实现更新变更位置；不得
-同时保留两套注册机制。
+##### 3. 对应：R5–R19,R28；S1,S3–S7,S12 分类；KTD4–11,15–18；E7,E10,E11,E20–E24,E34
 
-#### 20. 风险与注意事项
+##### 4–7. 行为 / 修改
 
-主要风险是三处 basename drift。build-time explicit list + registry parity +
-integration materialize 三层检测；README 仍需人工审查 producer/consumer。
+无 archive→全 rerun + `archive_id="none"`；legacy/incomplete→blocked JSON（成功退出码+blocked）；
+plan invalid→CLI error。
+实现：contract digest、Git ancestry adapter（真实 temp repo）、DAG 传播、prefix 扫描、
+prior failure summary（无 round/budget）。
 
-### U4：通过 precheck 接受并原子投影 reusable 连续前缀
+##### 8. 隔离
 
-#### 1. Unit 目标
+不写 `worktree.rs`；不与 U3 抢 registry。
 
-当前 plan 经 Guardian 批准后，reconciler 物化 runtime assessment；只有 precheck
-独立重算一致时，`CloseTaskWavePrefix` 才按静态 wave 顺序在一个 task-store
-exclusive lock 内关闭完整 reusable prefix 并推进 base。
+##### 9–10. 依赖 / 禁止
 
-#### 2. 对应需求与 Scenario
+可依赖 F1、TaskStore load/all、serde、git 命令模式；禁止关 task、发事件、写 artifact。
 
-- R13–R16、R20–R24、R28；S2、S6、S8、S11。
-- KTD8–KTD10、KTD12、KTD13、KTD16。
-- E12–E20、E25。
+##### 11–14. 测试与 TDD
 
-#### 3. 外部可观察结果
+`cargo nextest run -p ralph-core -- reuse_status`
+`cargo nextest run -p ralph-cli --test integration_reuse_status`
+污染回归：
+`RALPH_CURRENT_HAT=executor RALPH_EVENTS_FILE=/tmp/x.jsonl cargo nextest run -p ralph-cli --test integration_reuse_status`
 
-事件序列出现 proposed→accepted；task list只关闭 prefix；projection含
-verified base/resume wave；相同 digest replay无重复变化。
-
-#### 4. 当前行为基线
-
-P0 实现后 Guardian直接进入 wave 1 preparation；没有 reuse reconcile。先新增
-two-wave-prefix BDD，预期旧 topology仍派发 wave1而 Red。
-
-#### 5. 输入与输出
-
-- 输入：Guardian approved current plan/digest、U2 assessment。
-- 输出：filled status/evidence artifacts、accepted event、projection。
-- 错误：blocked assessment发 `forge.plan.blocked`，不发 success。
-- 不变量：gate 重算；proposal/reject零 task mutation；prefix之外全 open。
-
-#### 6. 修改位置
-
-- `presets/en/parallel-forge.yml`：新增 reuse-reconciler hat、precheck rule、
-  Guardian→reuse→dispatcher flow、projection。
-- `presets/schemas/parallel-forge.yml`：新增 topic required fields/field_docs。
-- `crates/ralph-core/src/config/state_projection.rs`、
-  `crates/ralph-core/src/state_projector/mod.rs` 和
-  `crates/ralph-core/src/state_projector/tests.rs`：新增确定的
-  `CloseTaskWavePrefix` action。输入为
-  ordered `waves[]`、declared wave count、每 wave live task IDs；先验证 wave 从
-  1 连续、每组 task exact/open、依赖只指向更早组或已 done task，再在一个 lock
-  内按组关闭。verified base/resume metadata 由同 topic 的普通 projection set
-  完成。
-- `crates/ralph-cli/src/presets.rs`：结构化 topology/schema/projection tests。
-- new BDD fixture/scenarios.rs。
-
-#### 7. 可依赖能力
-
-U1 archive、U2 command、U3 templates、P0 Ensure/CloseTaskBatch与TaskStore锁、
-precheck desugar和 static dispatcher。
-
-#### 8. 禁止依赖的未来能力
-
-不得实现 partial wave/correction routing（U5）；本 Unit只处理 no archive 和
-完整 reusable prefix，首个非reusable先按 execute继续。
-
-#### 9. 验收测试
-
-- no archive accepted with prefix=0 and wave1 execute。
-- wave1/2 prefix accepted，一次 batch close，wave3 prepare。
-- mismatched assessment digest rejected/producer resume。
-- replay同 digest idempotent；different digest conflict。
--真实 EventLoop BDD + state projector tests。
-- 命令：
-  `cargo nextest run -p ralph-core -- state_projector`
-  和
-  `cargo nextest run -p ralph-core --test scenarios -- parallel_forge_reuse_prefix`
-  及 preset tests。
-
-#### 10. Acceptance Red
-
-BDD archive提供两 wave settlements，断言 wave1/2无 exec.unit.ready且 wave3有。
-P0-only flow没有 `forge.reuse.assessed`，会派发 wave1，正确 Red。
-
-#### 11. 单元测试拆分
-
-1. schema required fields。
-2. precheck desugar producer/gate ownership。
-3. reusable wave groups必须从1连续，task IDs live、全局唯一、exact prefix。
-4. prefix close前全验证，任一invalid零写。
-5. prefix verified SHA与最后 settlement一致。
-6. resume wave=prefix+1或 all-settled sentinel。
-7. projection replay same digest no-op；conflict reject。
-8. blocked true不得走 success。
-
-不 Mock TaskStore batch atomicity或 evaluator命令输出的 digest comparison。
-
-#### 12. Red → Green → Refactor 顺序
+Red：unknown subcommand。
 
 ```text
-topology Red
-→ reuse-reconciler + proposed/accepted route
-→ Green
-→ precheck digest Red
-→ 独立重算 checklist/fields
-→ Green
-→ prefix batch projection Red
-→ CloseTaskWavePrefix action chain
-→ Green
-→ replay/conflict Red
-→ scope+digest idempotency
-→ Green
-→ two-wave BDD
-→ Refactor prompt重复到rubric引用
+CLI parse Red → 最小 no_archive DTO Green
+→ 五态表 Red → Green
+→ DAG/prefix Red → Green
+→ Git/archive gates Red → Green
+→ human/JSON parity → Refactor
 ```
 
-#### 13. 最小实现范围
+##### 15–23. 范围 / 完成 / 停止
 
-reconciler只运行 U2 inspect、复制 U3 templates、填 artifacts、emit。precheck读取
-rubric并重跑同命令。accepted event只驱动 `CloseTaskWavePrefix` 和 resume
-metadata；不伪造 `forge.wave.settled`或 supervisor events。
+最小：只读 evaluator/CLI；unknown→blocked 非第六态。
+停止：007 已占用同名 variant；或必须读 supervisor DB——重开 KTD。
+风险：与 007 机械冲突→按 KTD5/E34 并列追加。
 
-#### 14. 集成验证
+---
 
-真实 EventLoop、真实 TaskStore、fixture artifacts/Git；precheck gate使用mock
-backend response但走真实 desugar/obligation/rejection；验证 events顺序和tasks。
+#### Unit U3：reuse 模板 embed 与物化
 
-#### 15. 风险驱动测试
+##### 1. Unit 目标
 
-- State-machine：proposal/rejected/accepted/replay/conflict。
-- Idempotency：crash after task close before next dispatch。
-- Concurrency：assessment后HEAD改变。
-- Mutation-style：逐个删 digest/count/path，必须 rejected。
+binary-only 环境 `ralph preset materialize-artifacts parallel-forge --plan-key <k>`
+产出两模板且字段对齐 `reuse_status.v1`。
 
-#### 16. 回归范围
+##### 2. Worktree Contract
 
-P0 static dispatcher、CloseTaskBatch、precheck synthetic hats、multi-hat isolation、
-topic ownership、single-event budget、existing parallel-forge success BDD。
+- WT-U3 / `reuse-002-u3-templates` / `plan/2026-07-29-002/u3-templates`
+- 基线：`B0`
+- **允许：**
+  - 新 `presets/templates/parallel-forge/reuse-status-rubric.template.md`
+  - 新 `presets/templates/parallel-forge/reuse-status.template.yml`
+  - `builtin_artifact_templates.rs`、`build.rs`、`integration_preset_materialize_artifacts.rs`
+  - `presets.rs` 中 **仅** 与 template 计数相关的断言（`names.len()` 10→12）
+- **禁止：** evaluator、worktree、preset event topology、schema topics、inspect
+- 依赖：F1 字段列表（只读）
+- 合并序：Barrier1 建议最后（更新计数断言）
 
-#### 17. 预期文件变更
+##### 3. 对应：R25–R27；S13；KTD14；E17,E18,E33
 
-| 位置 | 变更类型 | 变更原因 | Evidence |
-|---|---|---|---|
-| `presets/en/parallel-forge.yml` | 修改配置 | reconciler/precheck/flow | E12,E15,E20 |
-| `presets/schemas/parallel-forge.yml` | 修改 schema | accepted event | E16,E25 |
-| `crates/ralph-core/src/config/state_projection.rs` | 修改生产 | 新增 prefix action 配置 | E14,E20 |
-| `crates/ralph-core/src/state_projector/mod.rs` / `tests.rs` | 修改生产/测试 | atomic wave-prefix projection | E14 |
-| `crates/ralph-cli/src/presets.rs` | 修改结构化测试 | topology/schema | E16 |
-| `crates/ralph-core/tests/scenarios/parallel_forge_reuse_prefix_runtime.yml` | 新增BDD | S2,S11 | E19 |
-| `crates/ralph-core/tests/scenarios.rs` | 修改测试注册 | 真实runtime | E19 |
+##### 4–14. 要点
 
-#### 18. 完成标准
+Acceptance Red：materialize 后缺两文件或 registry len≠12。
+TDD：加文件→常量→embed→materialize 断言→README 索引一行（若 README 列出 templates）。
 
-prefix acceptance、precheck mismatch、atomicity、replay、P0 regression全绿；
-schema/preset parity通过；无 text-only prompt tests；可独立提交。
+##### 15–23.
 
-#### 19. 停止条件
+禁止在 prompt 复制状态表；停止条件：需要第三模板或改 DTO 字段——回 F1 重冻。
 
-TaskStore现有锁边界无法承载 `CloseTaskWavePrefix` 的“先全验证、后按组关闭”、
-precheck无法从公开命令重算、或 flow必须伪造 supervisor terminal才能跳prefix
-时停止并重决策；不得逐个手工 task close。
+---
 
-#### 20. 风险与注意事项
+### Wave 2
 
-最大风险是“accepted event 与 task batch不同步”。state projector必须先全量验证
-再持锁写；event被拒绝时不得留下半关 tasks。
+#### Wave 目标
 
-### U5：从 partial wave 的最早 checkpoint 恢复并注入失败经验
+Guardian 后插入 reuse-reconciler；precheck 独立重算；accepted 后 `CloseTaskWavePrefix` 原子关闭连续 reusable 前缀。
 
-#### 1. Unit 目标
+#### Wave 基线
 
-第一个非 reusable wave 不被全盘重做：系统按 wave effective checkpoint只运行
-必要 Unit/阶段，保留成功 sibling证据，并让匹配失败经验进入新 correction。
+- Base：`B1`（Wave1 三 Unit 按 U1→U2→U3 合并且 Barrier1 绿）
+- 冻结：F1 DTO、U2 CLI、U3 模板路径
+- 启动：单 WT-U4
 
-#### 2. 对应需求与 Scenario
+#### Wave 并发安全：单 Owner；置信度 0.94
 
-- R8–R19、R29；S3–S6。
-- KTD6–KTD11。
-- E15、E20、E21。
+---
 
-#### 3. 外部可观察结果
+#### Unit U4：precheck 接受与 CloseTaskWavePrefix
 
-partial assessment 中可看到 affected/preserved Unit；dispatcher只派发 rerun Unit；
-resume_correction进入 fixer；reverify从准确 gate开始；最终仍对整 wave
-review/integrate/verify并产生 current-run settlement。
+##### 1. Unit 目标
 
-#### 4. 当前行为基线
+proposed→accepted 后，一次性按 wave 拓扑关闭完整 reusable prefix，推进 verified base；
+同 digest 重放幂等；**并在本 Unit 配齐** precheck budget=3 与 `on_exhausted→plan.blocked`（供 U7 只测）。
 
-P0 dispatcher只从一个 static wave的准备/exec开始；没有 reuse checkpoint route。
-先写 partial/correction BDD，旧 flow会重跑全部或无法触发目标 hat，形成 Red。
+##### 2. Worktree Contract
 
-#### 5. 输入与输出
+- WT-U4 / `reuse-002-u4-prefix` / `plan/2026-07-29-002/u4-prefix`
+- 基线：`B1`
+- **允许：**
+  - `presets/en/parallel-forge.yml`（reuse-reconciler hat、precheck、Guardian→reuse→dispatcher、projection、exhaustion 配置）
+  - `presets/schemas/parallel-forge.yml`（`forge.reuse.assessed` / `.rejected` required_fields）
+  - `state_projection.rs`、`state_projector/mod.rs`、`task.rs`、`tests.rs`：`CloseTaskWavePrefix`
+  - `presets.rs` 结构化 topology 测试
+  - 新 `parallel_forge_reuse_no_archive_runtime.yml`、`parallel_forge_reuse_prefix_runtime.yml`
+  - `scenarios.rs` 注册上述测试
+- **禁止：** 实现 partial/correction 细路由（属 U5）；改 U1 archive；改模板 basename；改 inspect DTO 字段语义；教手写 `.proposed`（006）
+- 依赖：U1–U3 已合并能力
+- 输出：可运行 prefix 路径 + 冻结 event/projection 合同
+- 合并序：Wave2 唯一
 
-- 输入：accepted assessment的 resume wave/checkpoint、affected/preserved units、
-  prior failure summaries、P0 worktree/candidate refs。
-- 输出：subset exec/correction handoff、preserved completion map、全 wave review/
-  integrate/verify/current settlement。
-- 错误：preserved commit/evidence在路由前失效→回 U2重算/blocked。
-- 不变量：partial wave task全 open直到 current settlement；后继不启动。
+##### 3. 对应：R13–R16,R20–R24；S1路由,S2,S11；KTD8–13,16,21；E12–E20,E25,E26,E31
 
-#### 6. 修改位置
+##### 4–7. 行为 / 修改
 
-- Parallel Forge dispatcher、worktree、failure-handler、reviewer/integrator/verifier
-  instructions/triggers/projection。
-- schema required fields：resume checkpoint、affected/preserved units、prior failures。
-- P0 execution-plan/reuse status templates引用，不复制状态表。
-- BDD partial/correction fixtures。
-- Reporter reuse summary。
+006：emit bare `forge.reuse.assessed`。
+`CloseTaskWavePrefix`：输入 ordered waves[] + counts；先全验证再单锁按组关；
+verified base/resume metadata 同 topic 普通 set。
+禁止伪造 `forge.wave.settled`。
 
-#### 7. 可依赖能力
+##### 8. 隔离：本 Wave 仅 U4
 
-U4 accepted projection、P0 lazy worktree/candidate/correction/review chain、U2 prior
-failure结构。
+##### 11–14. 测试
 
-#### 8. 禁止依赖的未来能力
+`cargo nextest run -p ralph-core -- state_projector`
+`cargo nextest run -p ralph-core --test scenarios -- parallel_forge_reuse_prefix`
+`cargo nextest run -p ralph-core --test scenarios -- parallel_forge_reuse_no_archive`
+`cargo nextest run -p ralph-cli --bin ralph -- preset_lint`
+`cargo nextest run -p ralph-cli --bin ralph -- presets`
 
-不得自动解决 semantic conflict；不得关闭 partial tasks；不得让 tester/verifier
-修 code；不得继承旧 correction round。
-
-#### 9. 验收测试
-
-- mixed wave: one preserved + one rerun，只发一个 exec slot；review覆盖两 Unit。
-- resume_correction：旧 fingerprint可见、round=1、不同策略、修后全 wave gate。
-- reverify review/integration/verification 三 checkpoint table。
-- downstream archived settlement因 dependency gap不被调度。
-- current settlement后才关闭 wave tasks。
-
-#### 10. Acceptance Red
-
-partial fixture断言只 affected Unit出现 `exec.unit.ready`，preserved sibling无 slot
-但出现在 review coverage。P0/U4 flow会派发whole wave或缺coverage，正确 Red。
-
-#### 11. 单元测试拆分
-
-1. effective checkpoint最小值。
-2. affected/preserved partition完整、互斥。
-3. subset wave payload count/slot index连续。
-4. preserved evidence digest在review前复核。
-5. correction context只带历史经验，不带旧 round/budget。
-6. reviewer coverage=affected completions + preserved completions。
-7. integration candidate以最后 verified base重建。
-8. reverify checkpoint不能跳过更早缺失artifact。
-9. partial settlement task IDs=整 wave。
-
-不允许 Mock reviewer coverage或Git commit reachability。
-
-#### 12. Red → Green → Refactor 顺序
+Red：BDD 期望跳过 wave1/2 exec，旧拓扑仍派 wave1。
 
 ```text
-affected partition Red
-→ dispatcher subset route
-→ Green
-→ preserved review coverage Red
-→ completion map合并
-→ Green
-→ correction history Red
-→ fresh round context
-→ Green
-→ checkpoint table Red
-→ review/integration/verification routes
-→ Green
-→ current settlement Red
-→ 回接P0完整chain
-→ Green
-→ Refactor共用 wave resume context
+topology Red → reconciler route Green
+→ precheck digest Red → Green
+→ CloseTaskWavePrefix Red → Green
+→ replay/conflict Red → Green
+→ no_archive+prefix BDD → Refactor
 ```
 
-#### 13. 最小实现范围
+##### 15–23.
 
-只支持本计划五态/checkpoint；不增加任意 stage字符串。成功 sibling不执行新 slot，
-但其 commit/evidence在current review重新审查；`rerun` Unit在当前代码基础上执行
-完整TDD验证，不要求先回滚旧实现。
+停止：TaskStore 锁无法「先验后写」或必须伪造 supervisor terminal——重开 KTD13。
+风险：accepted 与 task batch 不同步——projector 全量验证后再写。
 
-#### 14. 集成验证
+---
 
-真实 EventLoop BDD、supervisor subset fan-in、temp Git branches、P0 correction和
-state projector；断言 event顺序、slot count、review coverage、task close时点。
+### Wave 3
 
-#### 15. 风险驱动测试
+#### Wave 目标
 
-- Complex state-machine：5 status × checkpoint组合。
-- Fault Injection：preserved artifact在assessment后删除。
-- Differential：uninterrupted P0与reuse recovery最终 tree/tasks相同。
-- Concurrency：rerun Unit与preserved shared contract path冲突→blocked。
+第一个非 reusable wave 按最早 checkpoint 恢复；注入失败经验；partial 零提前关 task。
 
-#### 16. 回归范围
+#### Wave 基线：`B2`；单 WT-U5；置信度 0.90
 
-P0 full-wave exec/fan-in、failure correction、review coverage、candidate promotion、
-final Tester、reporter status。
+---
 
-#### 17. 预期文件变更
+#### Unit U5：partial checkpoint 与失败经验
 
-| 位置 | 变更类型 | 变更原因 | Evidence |
-|---|---|---|---|
-| `presets/en/parallel-forge.yml` | 修改配置 | checkpoint routes/hat contracts | E15,E20 |
-| `presets/schemas/parallel-forge.yml` | 修改 schema | resume context fields | E16 |
-| `presets/templates/parallel-forge/reuse-status.template.yml` | 修改模板 | 若U5发现已决字段缺失 | U2,U3合同 |
-| `presets/templates/parallel-forge/manager-report.template.md` | 修改模板 | reuse summary | E17,R29 |
-| `crates/ralph-core/tests/scenarios/parallel_forge_reuse_partial_wave_runtime.yml` | 新增BDD | S3,S5,S6 | E19 |
-| `crates/ralph-core/tests/scenarios/parallel_forge_reuse_correction_runtime.yml` | 新增BDD | S4 | E19 |
-| `crates/ralph-core/tests/scenarios.rs` | 修改注册 | real EventLoop | E19 |
+##### 1. Unit 目标
 
-#### 18. 完成标准
+affected 才派 exec slot；preserved 参与全 wave review；`resume_correction` 进 correction 且 round=1；
+仍产出 current-run settlement。
 
-三checkpoint、subset exec、fresh correction、整wave re-settlement、DAG barrier、
-P0 regression全绿；模板/schema同步；可独立提交。
+##### 2. Worktree Contract
 
-#### 19. 停止条件
+- WT-U5 / `reuse-002-u5-partial` / `plan/2026-07-29-002/u5-partial`
+- 基线：`B2`
+- **允许：** `presets/en|schemas/parallel-forge.yml`（resume/affected/preserved/prior failure 字段与 hat 路由）、
+  新 partial/correction BDD + `scenarios.rs` 注册、
+  `manager-report.template.md` reuse 摘要区（若 R29 需要）
+- **禁止：** 改 `CloseTaskWavePrefix` 语义；改 F1/U2 DTO；改 U3 basename；关 partial tasks；继承旧 round
+- **若发现模板缺字段：** 停止并重规划（禁止私改冻结 YAML 合同字段名）
+- 合并序：Wave3 唯一；之后 **preset/schema 语义冻结**
 
-若 preserved sibling无法由 current review重新证明、P0 supervisor要求whole-wave
-slot count且不支持subset fan-in、或旧 candidate ref无法安全定位，停止并更新
-P0/P1合同；不得合成假的 `exec.unit.done`。
+##### 3. 对应：R8–R19,R29；S3–S6；KTD6–11；E15,E20,E21,E30
 
-#### 20. 风险与注意事项
+##### 11–14.
 
-最大风险是 subset fan-in 与 whole-wave review coverage混淆。二者必须使用不同
-计数：supervisor expected slots只等于 affected Unit；review expected units等于
-current execution plan整 wave。
+`cargo nextest run -p ralph-core --test scenarios -- parallel_forge_reuse_partial`
+`cargo nextest run -p ralph-core --test scenarios -- parallel_forge_reuse_correction`
++ P0 correction/settlement 回归
 
-### U6：篡改、legacy 与 proposal 漂移必须零副作用阻塞
+Red：whole-wave 派发或缺 review coverage。
 
-#### 1. Unit 目标
+停止：supervisor 不支持 subset fan-in——更新合同，禁止合成 `exec.unit.done`。
 
-任何无法核验的 archive、被篡改的 artifact 或 precheck 时发生的 HEAD/plan 漂移，
-都只产生稳定的拒绝/阻塞证据，不关闭 task、不推进 verified base。
+---
 
-#### 2. 对应需求与 Scenario
+### Wave 4
 
-- Requirements：R11、R20–R23。
-- Scenarios：S7、S8、S12。
-- Decisions：KTD12、KTD15。
-- Evidence：E10–E13、E19、E21、E22。
+#### Wave 目标
 
-#### 3. 外部可观察结果
+证明篡改/漂移零副作用；证明三次 precheck 耗尽终态。Preset **只读**。
 
-`ralph inspect reuse-status` 返回 `blocked` 和稳定 reason code；真实 EventLoop
-不发布 accepted `forge.reuse.assessed`，TaskStore 与 verified base 保持不变。
+#### Wave 基线：`B3`；U6∥U7 从同一 `B3` 创建；置信度 0.88
 
-#### 4. 当前行为基线
+#### 并发安全
 
-U1–U5 已有 happy/partial 路径，但尚未用真实 runtime 场景证明 artifact byte
-变化、legacy archive 和 proposal 后 HEAD 漂移不会被降级成可继续的 `rerun`。
+- U6 独占：`parallel_forge_reuse_tamper_runtime.yml` + 必要时 `reuse_status.rs` 最小 fail-open 修复
+- U7 独占：`parallel_forge_reuse_exhaustion_runtime.yml`
+- 共享：`scenarios.rs` append-only；合并 U6→U7
+- **禁止** 任一修改 `presets/en|schemas/parallel-forge.yml`（已冻）；若 Red 证明缺配置→停止改回串行并重开 KTD21
 
-#### 5. 输入与输出
+---
 
-- 输入：digest mismatch、无 v1 COMPLETE 的 archive、assessment 后 HEAD/plan 变化。
-- 输出：`artifact_digest_mismatch`、`legacy_archive_unverifiable` 或
-  `assessment_digest_changed`；rejected/block artifact。
-- 状态变化：零 task close、零 verified-base advance。
-- 不变量：hard mismatch 永远不能自动转成 `rerun`。
+#### Unit U6：篡改 / legacy / 漂移零副作用
 
-#### 6. 修改位置
+##### 1. 目标
 
-- `crates/ralph-core/tests/scenarios/parallel_forge_reuse_tamper_runtime.yml`
-  （计划新增）。
-- `crates/ralph-core/tests/scenarios.rs`。
-- U2 evaluator、U4 precheck/state projection 的已确认实现位置，仅在 Red 证明
-  fail-open 时作最小修正。
-- `presets/en/parallel-forge.yml` 与 `presets/schemas/parallel-forge.yml` 的
-  rejected/blocked 合同。
+blocked/reject 路径零 task close、零 verified-base 推进；稳定 reason code。
 
-#### 7. 可依赖能力
+##### 2. Worktree Contract
 
-U1 immutable archive、U2 pure evaluator、U4 independent recompute 与原子投影。
+- WT-U6 / `reuse-002-u6-tamper` / `plan/2026-07-29-002/u6-tamper`
+- 允许：tamper BDD、`scenarios.rs` 追加、`reuse_status.rs` 仅当 Red 证明 fail-open 的最小修复、
+  `integration_reuse_status` 补充 legacy/tamper 用例（若需）
+- 禁止：preset/schema、projection、templates registry、docs
+- 对应：R11,R20–R23；S7,S8,S12；KTD12,15；E10–E13,E22
 
-#### 8. 禁止依赖的未来能力
+##### 11–14.
 
-不得依赖 U7 的 exhaustion 计数或 U8 的 E2E/docs；不得新增人工 override。
+`cargo nextest run -p ralph-core --test scenarios -- parallel_forge_reuse_tamper`
++ reuse_status / integration_reuse_status 相关
 
-#### 9. 验收测试
+Red：被降级成 rerun 或产生 task 副作用。
 
-真实 EventLoop fixture 分别构造 S7、S8、S12，断言 accepted topic 缺席、拒绝
-reason 精确、TaskStore 快照与 verified base 前后一致。
+---
 
-#### 10. Acceptance Red
+#### Unit U7：precheck exhaustion BDD
 
-先修改 settlement artifact byte但保留旧 digest；当前实现若仍发布 accepted event
-或关闭 task 即为有效 Red。fixture 未执行 evaluator、YAML parse 失败不算 Red。
+##### 1. 目标
 
-#### 11. 单元测试拆分
+同 scope 第 3 次 mismatch → 恰好一次 `plan.blocked{kind=precheck_exhausted}`；第 4 次无第二终态。
 
-1. manifest/artifact digest mismatch 分类。
-2. legacy archive 无 COMPLETE 分类。
-3. assessment/current HEAD mismatch 分类。
-4. blocked assessment 禁止进入 projection。
-5. 同 mismatch 重放保持相同 reason/digest。
+##### 2. Worktree Contract
 
-不允许 Mock TaskStore 的状态不变量或跳过真实 EventLoop 路由。
+- WT-U7 / `reuse-002-u7-exhaustion` / `plan/2026-07-29-002/u7-exhaustion`
+- 允许：exhaustion BDD + `scenarios.rs` 追加
+- 禁止：改 preset（配置属 U4）；改 evaluator；改 docs
+- 对应：R22,R24；S9；KTD11,12,21；E12,E13
 
-#### 12. Red → Green → Refactor 顺序
+##### 11–14.
 
-```text
-S7 Red → digest hard reject → Green
-→ S12 Red → legacy hard reject → Green
-→ S8 Red → precheck 独立重算与拒绝 → Green
-→ 幂等/零副作用回归 → Refactor
+`cargo nextest run -p ralph-core --test scenarios -- parallel_forge_reuse_exhaustion`
+
+若失败因缺 on_exhausted 配置→**停止**，不得在本 WT 改 yml；回 U4 补丁。
+
+---
+
+### Wave 5
+
+#### Unit U8：Agent guides、下游合同与 live 清单
+
+##### 1. 目标
+
+skill/CONCEPTS/AGENTS 与真实 CLI/事件一致；S14 live 验收清单可执行；可选关键节点冒烟（非硬门禁）。
+
+##### 2. Worktree Contract
+
+- WT-U8 / `reuse-002-u8-docs` / `plan/2026-07-29-002/u8-docs`
+- 基线：`B4`
+- 允许：`ralph-tools.md`/`cmdref`/`opac`、`skills/ralph-preset-common/references/*`、
+  `CONCEPTS.md`、`CLAUDE.md`+同步 `AGENTS.md`；可选 e2e key-node（不得注册完整假 cassette 当硬门禁）
+- 禁止：改 runtime 行为「补锅」；改 preset topology；把 S14 写成 CI 硬红
+- 对应：R28–R30；S14；E25,E27
+
+##### 11–14.
+
+`scripts/check-cli-doc-drift.sh`
+`cargo run -p ralph-cli --bin ralph -- inspect reuse-status --help`
+preset author/review 相关引用人工核对 finding-rubric
+
+完成：drift 绿；CLAUDE=AGENTS；live checklist 写入计划 DoD 附录。
+
+---
+
+## 11. Wave 汇合计划
+
+### Wave 0 Merge Order
+
+| 顺序 | Unit | 原因 | 合并前 | 合并后 |
+|---|---|---|---|---|
+| 1 | F1 | 冻结契约 | reuse_status+characterization | 同左 + `cargo check -p ralph-core` |
+
+**Gate0：** DTO 字段与 §Planning Contract 表一致；生产 cleanup **未**改；无 skip 测试。
+
+### Wave 1 Merge Order
+
+| 顺序 | Unit | 原因 | 合并前 | 合并后 |
+|---|---|---|---|---|
+| 1 | U1 | archive 真相来源 | worktree+CLI reuse | 同上 + 表征目标行为 |
+| 2 | U2 | 消费 manifest 合同 | reuse_status+integration_reuse_status | 用真实 U1 archive 再跑 inspect 烟雾 |
+| 3 | U3 | registry 计数 | materialize+presets len | materialize 12 + presets |
+
+**Gate1：** 三 Unit 无越界；用 U1 产出的 archive 跑一次 `inspect reuse-status`（组合）；
+`cargo nextest run -p ralph-cli --bin ralph -- presets`；无语义冲突。
+
+**失败：** 机械冲突（import）可修；DTO 字段分歧→语义冲突→停并重冻 F1。
+
+### Wave 2 Merge Order
+
+| 1 | U4 | — | projector+reuse BDD+preset_lint+presets | 加跑 P0 two_wave_settlement/correction 回归 |
+
+**Gate2：** schema/preset parity；006 bare emit；CloseTaskWavePrefix 单测+BDD；
+冻结 `forge.reuse.*` 与 projection 合同文本。
+
+### Wave 3 Merge Order
+
+| 1 | U5 | — | partial/correction BDD + P0 回归 | reporter 字段若改则 materialize 回归 |
+
+**Gate3：** preset/schema **冻结声明**；subset fan-in 与 review coverage 计数分离已测。
+
+### Wave 4 Merge Order
+
+| 顺序 | Unit | 原因 | 合并前 | 合并后 |
+|---|---|---|---|---|
+| 1 | U6 | tamper 先于 exhaustion 叙述 | tamper BDD | 组合 scenarios |
+| 2 | U7 | append scenarios.rs | exhaustion BDD | 全 reuse scenarios 子集 |
+
+**Gate4：** 未改 preset；S7–S9 绿；若有人改了 yml→门禁失败。
+
+### Wave 5 Merge Order
+
+| 1 | U8 | — | drift+help | 文档与 `--help` 一致 |
+
+**Gate5：** CLAUDE=AGENTS；无计划残留文件进 git。
+
+### 各 Wave 失败处理
+
+- 可直接修：格式化、append 冲突、测试注册顺序
+- 必须回退 Unit：越界改冻结契约、削弱断言、引入新依赖
+- 语义冲突：双 reason code、双默认值、投影与 evaluator 不一致→停+重规划
+- 不得在 Barrier 失败时启动下一 Wave
+
+---
+
+## 12. 最终集成计划
+
+**最终合并顺序：** F1 → U1 → U2 → U3 → U4 → U5 → U6 → U7 → U8
+
+**最终基线：** Barrier5 commit
+
+**关键主路径（自动化）：** S1/S2/S7/S9/S10/S13 fixtures + inspect CLI + materialize  
+**关键主路径（人工）：** S14 live reuse→correction→Tester/Auditor/Reporter
+
+**跨模块不变量：**
+- 不读旧 supervisor store 作状态
+- 不继承旧 round/budget
+- 不跳过 first unproven wave
+- proposal/reject/blocked 零 task close
+- Verifier/Tester 不写 code
+
+**最终回归：**
+```bash
+./scripts/run-tests.sh
 ```
+（含 nextest 两阶段 + doctest；禁止手动 `--workspace` 跳过 phase2）
 
-#### 13. 最小实现范围
+可选：`cargo nextest run -p ralph-core --test scenarios -- parallel_forge_reuse`
+`cargo nextest run -p ralph-cli --bin ralph -- presets`
 
-只补 hard mismatch 分类、拒绝和零副作用保证；不实现 retry exhaustion、报告终局
-或 E2E harness。
+---
 
-#### 14. 集成验证
+## 13. 执行命令清单
 
-运行 tamper runtime fixture、reuse-status CLI integration、precheck 和
-state-projector targeted tests；所有测试必须经过 nextest。
-
-#### 15. 风险驱动测试
-
-Fault Injection：truncate manifest、missing COMPLETE、digest mismatch、HEAD race；
-Mutation-style：逐个翻转 hard gate，确保断言会失败。
-
-#### 16. 回归范围
-
-U1 archive tests、U2 evaluator/CLI、U4 precheck/projector、P0 Parallel Forge BDD；
-原因是 U6 收紧这些边界的失败语义。
-
-#### 17. 预期文件变更
-
-| 位置 | 变更类型 | 变更原因 | Evidence |
+| 时机 | 命令 | 目的 | 失败可否继续 |
 |---|---|---|---|
-| `crates/ralph-core/tests/scenarios/parallel_forge_reuse_tamper_runtime.yml` | 新增BDD | S7,S8,S12 | E19 |
-| `crates/ralph-core/tests/scenarios.rs` | 修改测试注册 | 真实 EventLoop入口 | E19 |
-| `presets/en/parallel-forge.yml` | 修改preset | hard reject路由 | E15 |
-| `presets/schemas/parallel-forge.yml` | 修改schema | rejected/blocked字段parity | E16 |
-| U2/U4 已确认生产文件 | 仅按 Red 修改 | 修复 fail-open | E11–E14 |
-
-#### 18. 完成标准
-
-S7、S8、S12 全绿；accepted event 缺席和零状态变化均有断言；targeted lint/build
-通过；无 skip/only/弱断言；可独立提交。
-
-#### 19. 停止条件
-
-若 mismatch 必须读取 raw supervisor DB、需要人工 override、或实际拒绝点不在
-U2/U4 调用链，停止并更新 Evidence/KTD。
-
-#### 20. 风险与注意事项
-
-最大风险是把“无法证明”当作“证明需要重跑”。前者是矛盾/损坏，必须 blocked；
-只有证据完整但能力缺失才是 rerun。
-
-### U7：连续三次 precheck 不稳定时形成可诊断阻塞
-
-#### 1. Unit 目标
-
-同一 reuse scope 的 assessment 连续三次被独立 precheck 拒绝后，系统恰好一次
-发布带 artifact 的 `plan.blocked(kind=precheck_exhausted)`，不再无限重算。
-
-#### 2. 对应需求与 Scenario
-
-- Requirements：R24、R29、R30。
-- Scenario：S9。
-- Decisions：KTD11、KTD12。
-- Evidence：E12、E13、E21、E25。
-
-#### 3. 外部可观察结果
-
-第 1、2 次拒绝唤醒 reconciler 重算；第 3 次生成 block artifact 并终止该 flow；
-Reporter 能准确显示 exhaustion，未 accepted 的 tasks 保持 open。
-
-#### 4. 当前行为基线
-
-通用 precheck 已有 default budget 3 和 `on_exhausted`，但 Parallel Forge reuse
-尚未把 rejection scope、block artifact 和 reporter 合同接入。
-
-#### 5. 输入与输出
-
-- 输入：同一 `reuse_scope_key` 的三次 rejected assessment。
-- 输出：前两次 retry；第三次 `plan.blocked`、`kind=precheck_exhausted`、
-  `block_artifact_path`。
-- 不变量：新 scope 计数从 0 开始；旧运行 budget 不继承；终态只发一次。
-
-#### 6. 修改位置
-
-- `presets/en/parallel-forge.yml` reuse precheck 配置。
-- `presets/schemas/parallel-forge.yml` exhausted payload。
-- `crates/ralph-core/tests/scenarios/parallel_forge_reuse_exhaustion_runtime.yml`
-  （计划新增）。
-- `crates/ralph-core/tests/scenarios.rs`。
-- `presets/templates/parallel-forge/reuse-status-rubric.template.md` 的失败记录区。
-
-#### 7. 可依赖能力
-
-U6 stable rejection reasons，以及现有 precheck gate 的 attempt/budget/on_exhausted。
-
-#### 8. 禁止依赖的未来能力
-
-不得依赖 U8 E2E/docs；不得建立第二套 retry counter 或继承旧运行 budget。
-
-#### 9. 验收测试
-
-真实 EventLoop 依次送入 1、2、3、4 次 mismatch：1/2 只产生 rejected+retry；
-第 3 次恰好一次 blocked 且 artifact 存在；第 4 次不得产生第二终态。
-
-#### 10. Acceptance Red
-
-先启用 S9 fixture；当前 topology 若第 3 次仍重算、没有 artifact 或重复终态，即为
-有效 Red。不相关 producer 失败不算 Red。
-
-#### 11. 单元测试拆分
-
-1. attempt 1/2 返回 retry。
-2. attempt 3 返回 exhausted。
-3. attempt 4 幂等。
-4. scope key 改变重置计数。
-5. block artifact path 必填且文件存在。
-6. 未 accepted tasks 保持 open。
-
-#### 12. Red → Green → Refactor 顺序
-
-```text
-attempt 1/2 Red → reuse现有retry → Green
-→ attempt 3 Red → artifact + exhausted终态 → Green
-→ attempt 4 Red → terminal幂等 → Green
-→ new-scope reset Red → Green → Refactor
-```
-
-#### 13. 最小实现范围
-
-只接线现有 precheck exhaustion、artifact 与 reporter projection；不修改通用 budget
-默认值，不新增通用恢复框架。
-
-#### 14. 集成验证
-
-运行 exhaustion fixture、precheck targeted tests、preset/schema strict lint；断言
-事件数量和 task 快照，而非 prompt 文案。
-
-#### 15. 风险驱动测试
-
-State-machine boundary 0/1/2/3/4；Idempotency 验证终态重放；不做 fuzz，因为输入
-集合有限且风险在计数边界。
-
-#### 16. 回归范围
-
-通用 precheck fixtures、P0 precheck gates、Parallel Forge reporter/blocked route；
-原因是共享 desugar/runner 行为。
-
-#### 17. 预期文件变更
-
-| 位置 | 变更类型 | 变更原因 | Evidence |
-|---|---|---|---|
-| `presets/en/parallel-forge.yml` | 修改preset | reuse exhaustion接线 | E12,E15 |
-| `presets/schemas/parallel-forge.yml` | 修改schema | blocked payload parity | E16 |
-| `crates/ralph-core/tests/scenarios/parallel_forge_reuse_exhaustion_runtime.yml` | 新增BDD | S9 | E19 |
-| `crates/ralph-core/tests/scenarios.rs` | 修改注册 | 真实runtime验收 | E19 |
-| `presets/templates/parallel-forge/reuse-status-rubric.template.md` | 修改模板 | 记录拒绝与耗尽证据 | E17 |
-
-#### 18. 完成标准
-
-S9 及 0–4 边界全绿；第三次恰好一个终态；artifact 可读；strict lint 与相关回归
-通过；可独立提交。
-
-#### 19. 停止条件
-
-若现有 precheck attempt 不能按 reuse scope 隔离、on_exhausted 无法携带 artifact
-path、或必须改变全局 budget 语义，停止并重做 KTD12。
-
-#### 20. 风险与注意事项
-
-最大风险是把不同 HEAD/plan 的 assessment 误算成同一 retry chain；
-`reuse_scope_key` 必须参与计数身份。
-
-### U8：公开 mock E2E 与 agent-facing 合同闭合 reuse 主路径
-
-#### 1. Unit 目标
-
-一个已注册、可单独运行的 mock E2E 从 settled prefix 经 correction 到终局报告
-完整通过，并且 agent/operator 文档只暴露可执行的公开命令和字段。
-
-#### 2. 对应需求与 Scenario
-
-- Requirements：R25–R30。
-- Scenario：S14；回归引用 S2、S4、S10、S13。
-- Decisions：KTD14、KTD16–KTD18。
-- Evidence：E17–E19、E25、E27。
-
-#### 3. 外部可观察结果
-
-`--list` 能看到 `parallel-forge-dispatch-contract`；filtered mock run exit 0，
-证明两个 waves 被复用、失败 wave 完成 correction、full Tester/Auditor/Reporter
-收口；agent 可按 guide 完成 Observe→Precheck→Apply→Confirm。
-
-#### 4. 当前行为基线
-
-E27 证明当前 scenario 是未注册的失败占位壳。实施入口要求 P0 先将原始
-Parallel Forge marker scenario 落地；U8 只在其上扩展 reuse groups，不负责设计
-marker harness。
-
-#### 5. 输入与输出
-
-- 输入：P0 marker cassette + reuse archive/assessment fixtures。
-- 输出：E2E pass、准确 final report、更新后的公开 help/guides。
-- 副作用：只在 E2E 临时 workspace；不调用 live API。
-- 不变量：AGENTS/CLAUDE byte-identical；无 internal ledger/path 泄漏。
-
-#### 6. 修改位置
-
-- `crates/ralph-e2e/src/scenarios/parallel_forge.rs`。
-- `crates/ralph-e2e/src/main.rs::get_all_scenarios`。
-- `cassettes/e2e/parallel-forge-dispatch-contract.jsonl`（P0 计划新增）。
-- `cassettes/e2e/README.md`。
-- `crates/ralph-core/data/ralph-tools.md`、
-  `crates/ralph-core/data/ralph-tools-cmdref.md`、
-  `crates/ralph-core/data/ralph-tools-opac.md`。
-- `skills/ralph-preset-common/references/` 中受 event/template/gate 影响的文件。
-- `CONCEPTS.md`、`CLAUDE.md`、`AGENTS.md`；按实际影响检查
-  `.cursor/rules/multi-hat-isolation.mdc`。
-
-#### 7. 可依赖能力
-
-U1–U7 全部已验证能力、P0 已注册 marker scenario/cassette、doc drift 脚本。
-进入 U8 前必须执行 P0 filtered E2E 门禁；不满足即停止。
-
-#### 8. 禁止依赖的未来能力
-
-不得新增 Web UI、generic reuse DSL、live API cassette recording 或手工 runtime
-ledger 编辑。
-
-#### 9. 验收测试
-
-S14 filtered mock E2E；`--list` 注册断言；污染 hat env 的 CLI integration；
-docs command help/drift；strict preset/schema/template parity；最终全量 gate。
-
-#### 10. Acceptance Red
-
-先在 P0 cassette 增加 reuse activation groups 和场景断言；当前实现会重复执行
-settled waves、缺 correction experience 或未到终局，因此 filtered run 非零。
-找不到 cassette/仍是 placeholder 不是 P1 Red，而是 P0 前置门禁失败。
-
-#### 11. 单元测试拆分
-
-1. scenario 显式注册且 ID 稳定。
-2. activation group 数与 cursor 终值一致。
-3. settled waves 无 executor activation。
-4. correction group 含 prior failure fingerprint 且 round=1。
-5. Tester/Auditor/Reporter 次数符合 P0 合同。
-6. docs 仅引用公开命令/字段。
-7. AGENTS/CLAUDE byte-equal。
-
-#### 12. Red → Green → Refactor 顺序
-
-```text
-S14 marker cassette Red
-→ 补最小reuse groups/断言
-→ filtered E2E Green
-→ --list/污染env Red→Green
-→ docs help/drift Red→Green
-→ strict parity与全量回归
-→ Refactor仅在测试保护下
-```
-
-#### 13. 最小实现范围
-
-只补 P1 reuse 的 E2E activation groups、场景断言和下游公开文档。若 E2E 暴露
-U1–U7 bug，回到拥有该行为的 Unit 修订并重跑，不在 U8 堆积生产逻辑。
-
-#### 14. 集成验证
-
-先跑 filtered E2E，再跑全 mock E2E；使用 replay/mock backend。所有 spawn
-`ralph` 的 human-CLI 测试先 scrub agent runtime env。
-
-#### 15. 风险驱动测试
-
-Differential：reuse 与 uninterrupted 最终 tree/tasks/report；marker group
-completeness；无需 live fault injection。
-
-#### 16. 回归范围
-
-全 workspace nextest/doctest、P0/P1 BDD、worktree reuse、inspect、precheck、
-state projector、template materialize、supervisor recovery、全 mock E2E、CLI docs
-drift。
-
-#### 17. 预期文件变更
-
-| 位置 | 变更类型 | 变更原因 | Evidence |
-|---|---|---|---|
-| `crates/ralph-e2e/src/scenarios/parallel_forge.rs` | 修改E2E scenario | S14主路径 | E27 |
-| `crates/ralph-e2e/src/main.rs` | 修改/确认注册 | 禁止全量命令静默漏跑 | E27 |
-| `cassettes/e2e/parallel-forge-dispatch-contract.jsonl` | 修改cassette | reuse activation groups | E27 |
-| `cassettes/e2e/README.md` | 修改文档 | group contract | E27 |
-| `crates/ralph-core/data/ralph-tools.md` | 修改AI guide | 新Observe命令 | E25 |
-| `crates/ralph-core/data/ralph-tools-cmdref.md` | 修改AI guide | CLI args/output | E25 |
-| `crates/ralph-core/data/ralph-tools-opac.md` | 修改AI guide | Observe/Precheck动作 | E25 |
-| `skills/ralph-preset-common/references/*.md`（仅受影响文件） | 修改operator docs | event/template/gate审计 | E25 |
-| `CONCEPTS.md` | 修改域词汇 | reuse terms | E25 |
-| `CLAUDE.md` / `AGENTS.md` | 同步修改 | builtin行为说明 | E25 |
-
-#### 18. 完成标准
-
-S1–S14、targeted、strict lint、docs drift、build/clippy/fmt、filtered/full mock E2E、
-`./scripts/run-tests.sh` 全部通过；无新增 skip/only/弱断言；AGENTS/CLAUDE一致；
-实际 diff 无超范围；可独立提交。
-
-#### 19. 停止条件
-
-P0 scenario 未注册/仍 placeholder、E2E 需要 live API、docs 与实际 help 不一致、
-新 public caller 扩大范围或任何 KTD 低于 0.85 时停止并修订计划。
-
-#### 20. 风险与注意事项
-
-最大风险是全量 E2E 因 scenario 未注册而假绿；filtered scenario 和 `--list` 两个
-断言都必须执行，不能只看 `cargo run -p ralph-e2e -- --mock` 的总退出码。
-
-## 8. Unit 串行依赖图
-
-```text
-U1 Archive manifest + clean supervisor boundary
-  ↓ U2 读取 U1 的完整 immutable archive
-U2 Runtime evaluator + inspect JSON
-  ↓ U3 按 U2 DTO 冻结 machine/human templates
-U3 Embedded templates
-  ↓ U4 reconciler/precheck 使用 U2 命令与 U3 SSOT
-U4 Accepted reusable prefix
-  ↓ U5 在 U4 accepted projection 上路由 partial checkpoint
-U5 Partial/correction recovery
-  ↓ U6 用负向证据证明 hard mismatch 零副作用
-U6 Tamper/legacy/drift fail-closed
-  ↓ U7 在稳定 rejection identity 上验证 exhaustion
-U7 Precheck exhaustion
-  ↓ U8 扩展完整实现链的 public mock E2E 与文档
-U8 E2E/docs closure
-```
-
-- U2 不能先于 U1：否则 evaluator会依赖不完整、无 digest 的 archive。
-- U3 不能先于 U2：machine template字段必须来自稳定 DTO。
-- U4 不能先于 U3：hat/precheck不得复制自由格式状态表。
-- U5 不能先于 U4：partial route需要 accepted assessment和prefix projection。
-- U6 不能先于 U5：negative cases 必须覆盖完整 assessment/projection 调用链。
-- U7 不能先于 U6：exhaustion 必须按 U6 稳定的 rejection scope/reason 计数。
-- U8 最后：它验证完整链并同步所有 public/operator contract。
-- 每 Unit 只实现本 Unit 外部行为；禁止提前写后续 topology/docs来“顺手完成”。
-
-## 9. 执行命令清单
-
-以下命令基于 AGENTS.md 和当前 repo 配置；禁止裸跑 ralph-cli `cargo test`。
-
-| 时机 | 命令 | 目的 | 进入下一步条件 |
-|---|---|---|---|
-| 每 Unit 编辑后 | `cargo fmt --all -- --check` | Rust格式 | 必须通过 |
-| U1 | `cargo nextest run -p ralph-core -- worktree::tests::test_clean_worktree_runtime_artifacts` | archive单元 | 必须通过 |
-| U1 | `cargo nextest run -p ralph-cli --test integration_worktree_isolation -- reuse` | CLI worktree复用 | 必须通过 |
-| U2 | `cargo nextest run -p ralph-core -- reuse_status` | evaluator | 必须通过 |
-| U2 | `cargo nextest run -p ralph-cli --test integration_reuse_status` | inspect/Git/archive | 必须通过 |
-| U3 | `cargo nextest run -p ralph-cli -- builtin_artifact_templates` | embed registry | 必须通过 |
-| U3 | `cargo nextest run -p ralph-cli --test integration_preset_materialize_artifacts` | runtime materialize | 必须通过 |
-| U4–U8 | `cargo nextest run -p ralph-core -- state_projector` | atomic projection | 必须通过 |
-| U4–U8 | `cargo nextest run -p ralph-core -- precheck` | gate/retry/exhaust | 必须通过 |
-| U4–U8 | `cargo nextest run -p ralph-core --test scenarios -- parallel_forge_reuse` | real EventLoop BDD | 必须通过 |
-| preset每次改动 | `cargo nextest run -p ralph-cli --bin ralph -- preset_lint` | CLI preset lint | 必须通过 |
-| preset每次改动 | `cargo nextest run -p ralph-core -- preset_lint` | core lint | 必须通过 |
-| preset每次改动 | `cargo nextest run -p ralph-cli --bin ralph -- presets` | manifest/embedded/strict parity | 必须通过 |
-| CLI/docs改动 | `cargo run -p ralph-cli -- inspect reuse-status --help` | help冒烟 | 必须通过 |
-| CLI/docs改动 | `scripts/check-cli-doc-drift.sh` | skill/docs drift | 必须通过 |
-| 污染环境回归 | `RALPH_CURRENT_HAT=executor RALPH_CURRENT_LOOP_ID=loop-x RALPH_EVENTS_FILE=/tmp/x.jsonl cargo nextest run -p ralph-cli --test integration_reuse_status` | env scrub | 必须通过 |
-| U8 E2E注册 | `cargo run -p ralph-e2e -- --mock --list` | scenario不可静默漏跑 | 输出包含`parallel-forge-dispatch-contract` |
-| U8 filtered E2E | `cargo run -p ralph-e2e -- --mock --filter parallel-forge-dispatch-contract` | S14 operator主路径 | 必须通过且不含placeholder |
-| E2E | `cargo run -p ralph-e2e -- --mock` | 全mock回归 | 必须通过 |
-| lint | `cargo clippy --workspace --all-targets --all-features -- -D warnings` | Rust lint | 必须通过 |
-| build | `cargo build --workspace --all-targets` | build | 必须通过 |
-| docs | `cargo test --workspace --exclude ralph-e2e --doc` | doctest允许例外 | 必须通过 |
-| final | `./scripts/run-tests.sh` | 两阶段nextest+doctest全量 | 必须通过 |
-| flake兜底 | `RALPH_BASELINE_SERIAL=1 ./scripts/run-tests.sh` | 仅竞态/时序flake恢复 | serial仍失败则停止 |
-
-单测命令可按真实 test substring进一步缩小，但不得用错误 subset获得假 Green。
-`cargo run -p ralph-cli -- ...` 的 binary参数若当前 package要求 `--bin ralph`，实施者
-在 U2 以 `cargo run -p ralph-cli --bin ralph -- inspect reuse-status --help`
-为准，并同步文档；这是命令包装差异，不是架构决策。
-
-## Verification Contract
-
-### Acceptance Red 规则
-
-每 Unit 首先运行其明示验收测试并记录实际失败。只有因当前能力缺失的 assertion/
-unknown subcommand/missing event失败才有效。编译环境、fixture语法、错误命令、
-不相关 baseline failure均不得作为 Red。
-
-### Unit Red/Green/Refactor
-
-每个最小规则单独 Red→最小 Green；禁止删除/弱化断言、skip/only、mock目标行为、
-无解释更新 snapshot/golden、扩大 timeout掩盖 race。Refactor后重复 Unit全部
-targeted tests。
-
-### Integration 与 Regression
-
-- archive/Git用真实 temp repo/worktree。
-- event/state用 `run_workflow_guard_scenario`。
-- supervisor不读/写旧 DB作为 reuse依据。
-- full E2E用 mock/replay，不用 live API。
-- 每 Unit结束运行直接和相邻回归；U8运行全量。
-
-### Evidence 更新
-
-Executor在每 Unit close前把实际 Red、Green、命令、commit和新发现更新到 plan
-执行记录或最终可提交 solution文档；不得把
-`.ralph/review/<plan-id>/scratch|residuals|draft` commit。
-
-## 10. 最终质量门禁
-
-- S1–S14 全部通过。
-- R1–R30 全部有测试和 Unit trace。
-- archive manifest/COMPLETE/DB sidecars 负面与正面测试通过。
-- 五态、checkpoint、DAG propagation/property tests通过。
-- CLI human/JSON同源、read-only、agent-safe。
-- reusable prefix task batch atomic/idempotent。
-- partial wave不提前关闭task，后继不越过gap。
-- prior failure经验注入且旧round/budget不继承。
-- precheck独立重算、HEAD race、tamper、三次耗尽通过。
-- templates source/build/embed/materialize/README parity通过。
-- preset/schema/topic ownership/state projection/BDD parity通过。
-- P0全部回归继续通过。
-- mock E2E通过。
-- `cargo fmt`、clippy、build、doctest、docs drift、全量 tests通过。
-- 无新增失败/skip/only、无弱断言、无无解释snapshot/golden变化。
-- AGENTS.md/CLAUDE.md完全一致。
-- AI skill docs不泄漏内部 ledger/path/function，命令与help一致。
-- 无未处理 BLOCKED decision，所有执行关键KTD ≥0.85。
-- 实际变更不超本计划；每 Unit独立提交且严格串行。
-
-## Definition of Done
-
-- U1–U8 按顺序各自完成 Acceptance Red → Unit Red → Green → Refactor →
-  Integration → Regression → Close。
-- P0 DoD和本计划DoD同时为真。
-- 一个完整成功 replay证明“旧运行settled prefix + failed wave”可在新运行从
-  correction恢复，并与 uninterrupted run得到相同最终 tree/tasks/report。
-- 一个 tamper replay证明任何 hard evidence冲突零task副作用且产生可操作blocked
-  report。
-- abandoned experiments、临时fixtures、dead code、过程产物从diff移除。
-- 最终 manager report明确复用/重验/修复/重跑/阻塞统计和恢复点。
-
-## 11. 最终计划自检
+| 入口 | `cargo nextest run -p ralph-core --test scenarios -- parallel_forge_two_wave_settlement` | P0 门禁 | 否 |
+| 入口 | `cargo nextest run -p ralph-core --test scenarios -- parallel_forge_correction` | P0 门禁 | 否 |
+| 入口 | `cargo nextest run -p ralph-cli --bin ralph -- presets` | preset 基线 | 否 |
+| F1 | `cargo nextest run -p ralph-core -- reuse_status` | DTO | 否 |
+| U1 | `cargo nextest run -p ralph-core -- worktree::tests::test_clean_worktree_runtime_artifacts` | archive | 否 |
+| U1 | `cargo nextest run -p ralph-cli --test integration_worktree_isolation -- reuse` | S10 | 否 |
+| U2 | `cargo nextest run -p ralph-core -- reuse_status` | evaluator | 否 |
+| U2 | `cargo nextest run -p ralph-cli --test integration_reuse_status` | CLI | 否 |
+| U2 | 带 `RALPH_CURRENT_HAT=…` 的同上 | HARD RULE 5 | 否 |
+| U3 | `cargo nextest run -p ralph-cli --test integration_preset_materialize_artifacts` | S13 | 否 |
+| U4 | `cargo nextest run -p ralph-core -- state_projector` | prefix action | 否 |
+| U4 | `cargo nextest run -p ralph-core --test scenarios -- parallel_forge_reuse_prefix` | S2/S11 | 否 |
+| U4 | `cargo nextest run -p ralph-cli --bin ralph -- preset_lint` | lint | 否 |
+| U5 | `… parallel_forge_reuse_partial` / `…_correction` | S3–S6 | 否 |
+| U6 | `… parallel_forge_reuse_tamper` | S7/S8/S12 | 否 |
+| U7 | `… parallel_forge_reuse_exhaustion` | S9 | 否 |
+| U8 | `scripts/check-cli-doc-drift.sh` | docs | 否 |
+| U8 | `cargo run -p ralph-cli --bin ralph -- inspect reuse-status --help` | 冒烟 | 否 |
+| 每 Unit | `cargo fmt` / `cargo clippy -p <affected> -- -D warnings`（或仓库惯用 clippy 入口） | 质量 | 否 |
+| 最终 | `./scripts/run-tests.sh` | 全量 | 否 |
+| E2E | `cargo run -p ralph-e2e -- --mock` | 仅可选冒烟 | 是（非硬门禁） |
+
+不得编造 nextest 以外的 ralph-cli 测试入口。
+
+---
+
+## 14. 最终质量门禁
+
+- [ ] S1–S13 自动化通过；S14 人工清单完成或明确延期签字
+- [ ] R1–R30 均有测试/清单追踪
+- [ ] 无新增 skip/only；无削弱断言；无无解释 snapshot
+- [ ] 无 BLOCKED 决策；KTD 与 Wave 置信度 ≥0.85
+- [ ] Worktree 无越界；契约唯一 Owner
+- [ ] 无重复业务规则实现
+- [ ] 全部 Barrier 通过；`./scripts/run-tests.sh` 绿
+- [ ] CLAUDE.md 与 AGENTS.md 一致
+- [ ] 无 `.ralph/review/**/residuals|scratch|draft` 入 git
+- [ ] 实际 diff ⊆ 本计划所有权矩阵
+
+---
+
+## 15. 最终计划自检
 
 | 检查项 | 结果 | 证据或说明 |
 |---|---|---|
-| 这是实施计划而不是 Roadmap 吗 | 是 | 八个纵向行为 Unit，含文件/Red/验证 |
-| Executor 是否仍需做关键设计决策 | 否 | KTD1–KTD18已固定 |
-| 所有文件和接口是否有代码库证据 | 是 | 已存在路径见E；新增路径明确标记 |
-| 所有关键决策置信度是否 ≥ 0.85 | 是 | 最低KTD15=0.91 |
-| 是否存在未处理的低置信度假设 | 否 | P0是entry gate，不是隐含假设 |
-| 每个 Unit 是否只有一个可观察行为 | 是 | archive、inspect、模板、prefix、partial、tamper、exhaustion、E2E/docs contract |
-| 每个 Unit 是否可以独立验证 | 是 | 各Unit有targeted命令和回归 |
-| 每个 Unit 是否有真实 Red | 是 | 每Unit §10明确旧行为失败原因 |
-| 每个 Unit 是否包含回归范围 | 是 | 每Unit §16 |
-| 是否存在未来 Unit 依赖 | 否 | 只依赖已完成前置Unit |
-| 是否存在泛化任务描述 | 否 | 均给出具体入口、行为、断言 |
-| 所有 Scenario 是否可追踪到测试和 Unit | 是 | §5、§6、U1–U8 |
-| 所有关键决策是否有 Evidence | 是 | KTD表引用E1–E27 |
-| 计划是否可以严格串行执行 | 是 | §7、§8 |
+| 是实施计划而非 Roadmap | 是 | Wave/Worktree/文件边界/命令均具体 |
+| Executor 仍需关键设计决策 | 否 | KTD1–21 已冻；未决仅 H1–H3 在 F1/U4 关闭 |
+| 文件/接口有代码库证据 | 是 | E1–E34 |
+| 关键决策置信度 ≥0.85 | 是 | 最低 KTD21=0.90 |
+| Wave 并发安全 ≥0.85 | 是 | 最低 W4=0.88 |
+| 未处理低置信度假设 | 否 | H1–H3 有验证动作与失败影响 |
+| 明确 DAG | 是 | §7 |
+| 明确 Wave | 是 | §8 |
+| 每 Unit 单一可观察行为 | 是 | F1/U1–U8 |
+| 独立 Worktree 可验证 | 是 | §10 Contract |
+| Worktree 修改边界明确 | 是 | 允许/禁止列表 |
+| 同 Wave 未处理文件重叠 | 否 | W1/W4 矩阵无未处理重叠 |
+| 同 Wave 未处理行为重叠 | 否 | 行为 Owner 唯一 |
+| 共享契约唯一 Owner | 是 | §9.3 |
+| 共享热点有策略 | 是 | §2.2 / Foundation / 串行 preset |
+| 每 Unit 真实 Red | 是 | §10 各 Acceptance Red |
+| 每 Unit 本地回归 | 是 | §10 |
+| 每 Wave 汇合门禁 | 是 | §11 |
+| 确定性合并顺序 | 是 | F1→U1→…→U8 |
+| 机械/语义冲突处理 | 是 | §11 |
+| Scenario 可追踪 | 是 | §5–6 |
+| 决策有 Evidence | 是 | §3 |
+| 最大并发由证据推导 | 是 | max=3（W1 文件不相交） |
+| 组合验证+全量回归 | 是 | §12–14 |
+| 存在泛化任务描述 | 否 | 已消除「相关模块并行」类表述 |
+
+---
+
+## Definition of Done
+
+1. Barrier0–5 全部通过且最终 `./scripts/run-tests.sh` 绿
+2. `--reuse-worktree` 产生 COMPLETE archive（含 DB 三件套与 `.ralph/forge/`）
+3. `ralph inspect reuse-status` human/JSON 同源可用
+4. PF reuse 路径：prefix 原子关闭、partial checkpoint、tamper/exhaustion 行为符合 S1–S13
+5. 两模板可 materialize；docs/skills 同步
+6. S14 live 验收完成或产品签字延期（不得用 mock 全链冒充）
+
+---
+
+## 执行纪律（Coding Agent）
+
+1. 一 Agent 一 Worktree 一 Unit；不读其他 WT 未合并实现
+2. 不改冻结契约与他者所有权文件
+3. 不在 Barrier 前开下一 Wave
+4. 语义冲突停止并重规划
+5. Unit 完成必须提交：实际文件、Red/Green 证据、回归、clippy/fmt、偏差、Commit ID
