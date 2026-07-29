@@ -696,31 +696,6 @@ schemas:
         source: Trigger / execution_plan_path parent.
         fill_rule: Must match .ralph/forge/<plan-key>/.
 
-  forge.incremental.verified:
-    required_fields:
-      - last_integrated_unit
-      - verification_log_path
-      - passed
-      - plan_key
-    payload: json_object
-    field_docs:
-      last_integrated_unit:
-        meaning: Unit id of the last integrated Unit covered by this incremental run.
-        source: integration_log_path / commit-map last entry.
-        fill_rule: Exact unit_id string.
-      verification_log_path:
-        meaning: Incremental regression evidence after last integration step.
-        source: File at .ralph/forge/plan-key/incremental-verification.md.
-        fill_rule: Records commands run and pass/fail per integrated Unit.
-      passed:
-        meaning: Whether incremental regression passed.
-        source: Command outcomes in verification_log_path.
-        fill_rule: '"false" must pair with work.failed instead of this success topic when blocking.'
-      plan_key:
-        meaning: Forge plan key basename.
-        source: Trigger / forge artifact root.
-        fill_rule: Must match directory name.
-
   forge.full.verified:
     required_fields:
       - verification_report_path

@@ -572,12 +572,15 @@ hats:
       - forge.verification.failed
     publishes:
       - forge.correction.requested
+      - forge.final.correction.settled
       - work.failed
     exempt_topics:
       - forge.correction.requested
+      - forge.final.correction.settled
       - work.failed
     terminal_events:
       - forge.correction.requested
+      - forge.final.correction.settled
       - work.failed
     event_filter:
       enabled: true
@@ -814,9 +817,9 @@ hats:
     name: "Verifier"
     description: "Per-wave verification on candidate HEAD; emits forge.wave.verified (pass) or forge.verification.failed (fail)."
     triggers: [forge.wave.integrated, forge.integration.done]
-    publishes: [forge.wave.verified, forge.verification.failed, forge.incremental.verified, work.failed]
-    exempt_topics: [forge.wave.verified, forge.verification.failed, forge.incremental.verified, work.failed]
-    terminal_events: [forge.wave.verified, forge.verification.failed, forge.incremental.verified, work.failed]
+    publishes: [forge.wave.verified, forge.verification.failed, work.failed]
+    exempt_topics: [forge.wave.verified, forge.verification.failed, work.failed]
+    terminal_events: [forge.wave.verified, forge.verification.failed, work.failed]
     event_filter:
       enabled: true
       events:
@@ -1025,10 +1028,6 @@ state_projection:
       set:
         forge.integration_log_path: "$.integration_log_path"
         forge.commit_map_path: "$.commit_map_path"
-        forge.plan_key: "$.plan_key"
-    - on: forge.incremental.verified
-      set:
-        forge.incremental_verification_path: "$.verification_log_path"
         forge.plan_key: "$.plan_key"
     - on: forge.full.verified
       set:
