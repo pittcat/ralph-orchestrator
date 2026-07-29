@@ -4781,6 +4781,18 @@ hats:
         actionable Units. There is no runtime resume API and you MUST NOT
         call one — decisions.md plus git log ARE the resume source of
         truth.
+      - **Reuse-archive fallback (plan 2026-07-29-001 U5)**: when the
+        current `.ralph/agent/decisions.md` contains NO `fixer checkpoint:`
+        lines (typical after a worktree reuse), check
+        `.ralph/agent/resume-context.md`. If that file exists, follow the
+        archived-decisions pointer inside it to the previous run's
+        archived `decisions.md` (under `.ralph/reuse-history/<ts>/`).
+        Read `fixer checkpoint:` lines and failure briefs from THAT
+        archived file. Apply the same rule: an already-committed fix Unit
+        counts into `completed_fix_units` and is NOT re-implemented.
+        Archived failure briefs are advisory only — they tell you which
+        angles NOT to mechanically repeat, but they do NOT consume this
+        activation's retry budget.
       - Read **only** the fix-plan file at `fix_plan_file`.
       - **Fast path** (jump to Step 4 — no per-Unit code):
         - File starts with `# fix-plan: no fixes required` (§7b), OR
@@ -4908,9 +4920,89 @@ hats:
       Pass through `plan_path`, `executor_head_sha`, `fix_plan_file`, and
       `verdict` as `review_verdict`.
       ```bash
-      ralph emit fix.done --json '{"plan_name":"<plan>","plan_path":"<original plan repo-relative path>","executor_head_sha":"<sha>","head_sha":"<git rev-parse HEAD after final fixer commit / revert>","fix_attempt_commit_sha":"<same as head_sha or unchanged HEAD when no files changed>","worktree_status":"clean","fix_plan_file":"<fix-plan path>","resolved_baseline_sha":"<sha from review.complete>","review_verdict":"<pass|pass_with_residuals|blocked>","fixes_applied":<N>,"fixes_skipped":<M>,"planned_fix_units":["U1","U2"],"attempted_fix_units":["U1","U2"],"completed_fix_units":["U1"],"failed_fix_units":["U2"],"blocked_fix_units":[],"skipped_fix_units":[],"fix_status":"partial","failure_reason":"U2 verification remained red after an actual attempt","decisions_file":".ralph/agent/decisions.md","baseline_verification_status":"red","baseline_verification_file":".ralph/review/<plan>/baseline-verification.md","post_verification_status":"red","post_verification_file":".ralph/review/<plan>/final-verification.md","verification_delta_file":".ralph/review/<plan>/verification-delta.md","baseline_existing_count":2,"new_business_regressions_count":0,"test_compatibility_updates_count":1,"flaky_or_environmental_count":0,"fix_summary":"<brief summary>"}'
+      ralph emit fix.done --json '{"plan_name":"<plan>","plan_path":"<original plan repo-relative path>","executor_head_sha":"<sha>","head_sha":"<git rev-parse HEAD after final fixer commit / revert>","fix_attempt_commit_sha":"<same as head_sha or unchanged HEAD when no files changed>","worktree_status":"clean","fix_plan_file":"<fix-plan path>","resolved_baseline_sha":"<sha from review.complete>","review_verdict":"<pass|pass_with_residuals|blocked>","fixes_applied":<N>,"fixes_skipped":<M>,"planned_fix_units":["U1","U2"],"attempted_fix_units":["U1","U2"],"completed_fix_units":["U1"],"failed_fix_units":["U2"],"blocked_fix_units":[],"skipped_fix_units":[],"fix_status":"partial","failure_reason":"U2 verification remained red after an actual attempt","decisions_file":".ralph/agent/decisions.md","baseline_verification_status":"red","baseline_verification_file":".ralph/review/<plan>/baseline-verification.md","post_verification_status":"red","post_verification_file":".ralph/review/<plan>/final-verification.md","verification_delta_file":".ralph/review/<plan>/verification-delta.md","baseline_existing_count":2,"new_business_regressions_count":0,"test_compatibility_updates_count":1,"flaky_or_environmental_count":0,"fix_summary":"<brief summary>","settlement_confidence":92,"settlement_evidence_coverage":80,"settlement_evidence_file":".ralph/review/<plan>/fix-settlement-evidence.md"}'
       ```
+      The payload MUST include `settlement_confidence`,
+      `settlement_evidence_coverage`, and `settlement_evidence_file` —
+      see **Settlement Confidence (fail-gate enforced)** below for how to
+      derive them. The runtime rejects the emit when any of the three
+      fields is missing.
       Then stop. Alignment will be triggered next.
+
+      ### Settlement Confidence (fail-gate enforced)
+
+      Before emitting `fix.done` with `fix_status: partial` or
+      `fix_status: blocked` (and only those two — `applied` is the happy
+      path and skips the gate's evidence audit):
+
+      1. Run
+         `ralph preset materialize-artifacts ce-executor-pipeline --plan-key <plan_name>`
+         and from the materialized templates directory read
+         `fail-confidence-rubric.template.md` and
+         `settlement-evidence.template.md`. Use ONLY that rubric as the
+         scoring standard — do NOT copy the rubric text into
+         `decisions.md`, just reference the materialized path.
+      2. Write `.ralph/review/<plan>/fix-settlement-evidence.md` by
+         copying the `settlement-evidence.template.md` structure and
+         filling every `<...>` placeholder. Each failed/blocked fix Unit
+         gets its own section; include the 4-attempt ledger, the causal
+         chain with `file:line` anchors, the alternative-elimination
+         record, and the source list.
+      3. Score `settlement_confidence` per rubric §1 (four-dimension
+         rubric, arithmetic mean across failed/blocked fix Units) and
+         `settlement_evidence_coverage` per rubric §3. Decide whether
+         settling as partial/blocked is allowed per rubric §2 (>=90
+         required; 75-89 means verify one or two key hypotheses first;
+         60-74 means keep retrying; <60 means never settle partial or
+         blocked).
+      4. Include `settlement_confidence`,
+         `settlement_evidence_coverage`, and `settlement_evidence_file`
+         (the path you just wrote) in the `fix.done` payload. After you
+         emit, a precheck gate will independently re-score the same
+         evidence and either forward `fix.done` verbatim or send you a
+         `fix.done.rejected{failed_checks, reason}` correction. See
+         `ralph-tools-precheck` for the producer-side contract.
+
+      For `fix_status: applied`, you may set
+      `settlement_evidence_file` to `.ralph/agent/decisions.md` and use
+      `settlement_confidence` / `settlement_evidence_coverage` to reflect
+      your confidence in the "fixes complete" conclusion (no separate
+      evidence file is required).
+
+      ### Rejected-Resume Discipline (fix.done gate)
+
+      After you emit `fix.done`, a precheck gate audits your evidence
+      when `fix_status` is `partial` or `blocked`. If the gate rejects
+      (`fix.done.rejected`), the runtime routes a `task.resume` back to
+      you with `failed_checks` and `reason`. Act on each failed_check by
+      name (see rubric §4 for the six canonical names — do not invent
+      your own):
+
+      - `missing_attempt_record` → return to Step 2 / Step 4 and use the
+        remaining retry budget for that fix Unit; record the new attempts
+        in `fix-settlement-evidence.md`.
+      - `single_angle_retries` → re-read `.ralph/agent/decisions.md`
+        failure briefs and the reuse-guidance `Do not mechanically
+        repeat` section; pick a genuinely different angle from
+        `Fresh options for this run` and retry.
+      - `broken_causal_chain` → stop coding and run more diagnostics
+        until the trigger → steps → symptom chain is fully documented
+        with `file:line` anchors.
+      - `unverifiable_evidence` → add verifiable sources (file:line,
+        command output excerpt, log fragment, test name) for the
+        unsupported claims.
+      - `confidence_inflated` → re-score against rubric §1 honestly; if
+        the new score is <90, keep working — do NOT re-emit `fix.done`
+        with the same `fix_status`.
+      - `uneliminated_alternatives` → re-run the baseline / isolation
+        checks to eliminate environment, dependency, flake, baseline,
+        or residual-dirt alternative explanations.
+
+      You get at most 3 rejections per `fix.done` emit. After the third
+      rejection the runtime emits
+      `plan.blocked{kind: precheck_exhausted}` directly and the
+      reporter takes over — do NOT try to re-emit past the budget or
+      route around the gate.
 
       ### Failure Handling
       The response to failure depends on `review_verdict` from
