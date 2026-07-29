@@ -1812,13 +1812,34 @@ hats:
            `.ralph/review/<plan_name>/reuse-guidance.md` stating that no
            prior archive was available and that execution starts from
            current Git/worktree facts.
-         - If present, read the archive path recorded there. Inspect only
-           useful evidence that exists: archived `agent/summary.md`,
-           `agent/handoff.md`, `agent/decisions.md`, review products, and
-           the current `git log`, `git diff`, staged diff, and untracked
-           paths. Do not treat archived events or verdicts as live state.
+         - If present, read the archive path recorded there and adopt a
+           **report-first** mining order (plan 2026-07-29-001 U6):
+           1. Locate the most recent archived report bundle:
+              `.ralph/reuse-history/<ts>/review/<plan_name>/report.md` and
+              its sibling `report-input.*.json`. Use these as the
+              experience skeleton — they already encode the prior run's
+              verdict, completed/failed Units, residuals, and reporter
+              synthesis.
+           2. Only after the report skeleton is in place, fill in
+              per-Unit detail from archived `agent/decisions.md` (per-Unit
+              attempt briefs, checkpoint lines), `agent/summary.md`,
+              `agent/handoff.md`, and review products.
+           3. Cross-check with the current `git log`, `git diff`, staged
+              diff, and untracked paths. Do not treat archived events or
+              verdicts as live state.
+           4. If no archived `report.md` exists for the prior run (the
+              previous activation never reached the reporter), fall back
+              to the legacy mining order (decisions.md → summary.md →
+              handoff.md → review products) and note the degradation in
+              the reuse-guidance.
       2. Write `.ralph/review/<plan_name>/reuse-guidance.md` with exactly
-         these decision sections:
+         these decision sections (in this order):
+         - `Last run terminal state` (plan 2026-07-29-001 U6) — the prior
+           run's `verdict` (pass / pass_with_residuals / blocked), the
+           `completed_units` + `failed_units` + `blocked_units` lists,
+           the top residuals, and the path to the source
+           `report.md` (or `no archived report` when the previous run
+           stopped earlier).
          - `Prior progress confirmed now` — only facts still supported by
            current Git/diff; otherwise `none`.
          - `Prior failures and lessons` — observed failed approaches and
@@ -5226,6 +5247,31 @@ hats:
       - Before each real `ralph emit`, follow `ralph-tools-emit` §5: run the
         same command with `--policy-check`; only emit for real after the
         policy check passes.
+
+      ### Branch: precheck_exhausted plan.blocked (plan 2026-07-29-001 U6)
+
+      When the trigger is `plan.blocked` AND its payload contains
+      `kind: precheck_exhausted`, the runtime emitted this event directly
+      after the fail-gate burned through its retry budget — no producer
+      ever wrote a `report_input_file` bundle. Do NOT try to read
+      `report_input_file` (it does not exist).
+
+      Instead, write a simplified blocked report at
+      `.ralph/review/precheck-exhausted-<ISO-8601-ts>/report.md`
+      (create the directory first). The report MUST record:
+
+      - the guarded topic (`payload.topic` — e.g. `work.failed` or
+        `fix.done`),
+      - the fact that the gate rejected the producer's emit N times in a
+        row (read `payload.reason` for the short reason),
+      - a one-paragraph Chinese manager summary explaining that the
+        producer's self-declared dead-end / settlement evidence failed
+        independent gate audit three times, so the run is blocked
+        pending human review.
+
+      Then emit `report.done{verdict: blocked, plan_name: "<from payload if present, else precheck-exhausted>", ...}`
+      followed by `LOOP_COMPLETE`. Skip the artifact-first contract
+      below — there is no bundle to read.
 
       ### Artifact-first input contract
 
