@@ -76,6 +76,13 @@ def parse_args():
     )
 
     parser.add_argument(
+        "-c",
+        "--config",
+        default="ralph.pipeline.yml",
+        help="Ralph config file (default: ralph.pipeline.yml)",
+    )
+
+    parser.add_argument(
         "--session",
         default=DEFAULT_SESSION,
         help="tmux session name"
@@ -193,7 +200,8 @@ exec ralph run \
 --worktree \
 --reuse-worktree \
 -H builtin:ce-executor-pipeline \
---plan '{args.plan}'
+--plan '{args.plan}' \
+-c '{args.config}'
 """
 
     subprocess.Popen(
@@ -247,6 +255,9 @@ Session:
 
 Plan:
 {self.args.plan}
+
+Config:
+{self.args.config}
 """
             )
 
@@ -271,6 +282,9 @@ Remaining:
 
 Plan:
 {self.args.plan}
+
+Config:
+{self.args.config}
 
 Session:
 {self.args.session}
