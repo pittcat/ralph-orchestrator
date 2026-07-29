@@ -717,6 +717,163 @@ pub(crate) fn project_close_task(
     }
 }
 
+/// U3 of plan 2026-07-29-001
+/// (`fix-parallel-forge-static-wave-settlement-plan`):
+/// atomically close the set of tasks named in a
+/// `forge.wave.settled` payload.
+///
+/// Invariants (R7/R14, scenario S3, unit-test split §11):
+/// 1. Empty input → fail-closed (no task is touched).
+/// 2. Duplicate `task_id`s in the payload → fail-closed.
+/// 3. Any unknown `task_id` (not in the ledger) → fail-closed
+///    with zero side effects.
+/// 4. Identity drift: mixed open/closed batch is fail-closed.
+///    A batch that is **entirely** already-closed is an
+///    idempotent no-op (replay-friendly, matches the U2
+///    `EnsureTaskBatch` replay contract).
+/// 5. Atomicity: every close is staged in memory, then
+///    persisted exactly once. Any pre-validation failure leaves
+///    the ledger untouched.
+///
+/// The projector consumes the array at `task_ids_pointer` (a
+/// JSON pointer relative to the event payload). The action
+/// carries no `step` field — wave settlement is a task-ledger
+/// concept, not a progress-gate concept; the progress module
+/// stays untouched.
+pub(crate) fn project_close_task_batch(
+    ctx: &mut ProjectionContext,
+    payload: &Value,
+    task_ids_pointer: &str,
+) -> Result<(), String> {
+    // `json_pointer` is string-only — for an array we have to
+    // hand-route through the raw payload. This keeps the pointer
+    // contract aligned with the rest of the projector (string
+    // pointer → string value) while letting specs embed a JSON
+    // array under a top-level key.
+    let raw = lookup_pointer(payload, task_ids_pointer)
+        .ok_or_else(|| format!("missing required pointer '{task_ids_pointer}'"))?;
+
+    let arr = raw.as_array().ok_or_else(|| {
+        format!(
+            "close_task_batch: pointer '{task_ids_pointer}' must resolve to an array \
+             (got {})",
+            type_of_value(raw)
+        )
+    })?;
+
+    if arr.is_empty() {
+        return Err("close_task_batch: empty task_ids array".to_string());
+    }
+
+    // Pre-validate identities (duplicate detection is the cheapest
+    // check; run it before opening the ledger so we don't pay for
+    // a reload on malformed payloads).
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut task_ids: Vec<String> = Vec::with_capacity(arr.len());
+    for (idx, v) in arr.iter().enumerate() {
+        let id = v
+            .as_str()
+            .ok_or_else(|| {
+                format!(
+                    "close_task_batch: task_ids[{idx}] is not a string (got {})",
+                    type_of_value(v)
+                )
+            })?;
+        if id.is_empty() {
+            return Err(format!("close_task_batch: task_ids[{idx}] is empty"));
+        }
+        if !seen.insert(id.to_string()) {
+            return Err(format!("close_task_batch: duplicate task_id '{id}' in batch"));
+        }
+        task_ids.push(id.to_string());
+    }
+
+    let mut store = TaskStore::load(&ctx.tasks_path).map_err(|e| format!("tasks_load: {e}"))?;
+
+    // Validate every target ID exists, and the open/closed
+    // distribution is either "all open" (active settlement) or
+    // "all closed" (idempotent replay). Mixed states are identity
+    // drift and must fail.
+    let mut any_open = false;
+    let mut any_closed = false;
+    let mut all_ids: Vec<&str> = Vec::with_capacity(task_ids.len());
+    for id in &task_ids {
+        match store.get(id) {
+            Some(row) => {
+                if row.closed.is_some() {
+                    any_closed = true;
+                } else {
+                    any_open = true;
+                }
+                all_ids.push(id.as_str());
+            }
+            None => {
+                return Err(format!("close_task_batch: unknown task_id '{id}'"));
+            }
+        }
+    }
+    if any_open && any_closed {
+        return Err(
+            "close_task_batch: task_id batch mixes open and closed rows \
+             (identity drift — reject to avoid silent partial close)"
+                .to_string(),
+        );
+    }
+
+    // Idempotent replay: every target already closed → no-op.
+    if !any_open {
+        return Ok(());
+    }
+
+    // Active settlement: every target open → close all.
+    // `TaskStore::close` rejects rows with `started.is_none()`
+    // (the P0-4 guard introduced by plan 2026-06-30-001). The
+    // projection for `work.done` works around the same guard by
+    // calling `row.start()` first; we mirror that here so the
+    // batch projection does not silently no-op on rows that the
+    // planner created but the slot never explicitly started.
+    for id in &task_ids {
+        if let Some(row) = store.get_mut(id) {
+            if row.started.is_none() {
+                row.start();
+            }
+        }
+        if store.close(id).is_none() {
+            return Err(format!("close_task_batch: failed to close task_id '{id}'"));
+        }
+    }
+
+    persist(&ctx.tasks_path, &store, &mut ctx.tasks_cache)?;
+    Ok(())
+}
+
+fn type_of_value(v: &Value) -> &'static str {
+    match v {
+        Value::Null => "null",
+        Value::Bool(_) => "bool",
+        Value::Number(_) => "number",
+        Value::String(_) => "string",
+        Value::Array(_) => "array",
+        Value::Object(_) => "object",
+    }
+}
+
+/// Resolve a dotted JSON pointer against an arbitrary JSON
+/// value. Unlike `json_pointer` (string-only), this returns the
+/// raw `Value` so non-string payloads (arrays, objects) can be
+/// consumed by actions like `CloseTaskBatch`. Returns `None`
+/// when any segment is missing.
+fn lookup_pointer<'a>(value: &'a Value, pointer: &str) -> Option<&'a Value> {
+    if pointer.is_empty() {
+        return Some(value);
+    }
+    let mut current = value;
+    for segment in pointer.split('.') {
+        current = current.get(segment)?;
+    }
+    Some(current)
+}
+
 fn persist(_path: &Path, store: &TaskStore, cache: &mut Vec<Task>) -> Result<(), String> {
     // `_path` is reserved for a future diagnostic event that
     // records the on-disk write site (e.g. via the

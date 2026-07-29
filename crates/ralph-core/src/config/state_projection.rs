@@ -142,6 +142,23 @@ pub enum StateProjectionAction {
         #[serde(default)]
         step: Option<String>,
     },
+    /// U3 of plan 2026-07-29-001
+    /// (`fix-parallel-forge-static-wave-settlement-plan`):
+    /// atomically close all tasks listed in a single
+    /// `forge.wave.settled` payload. Distinct from `CloseTask`
+    /// (which closes a single task per event): `CloseTaskBatch`
+    /// is the **only** state-authority path that closes more
+    /// than one task at once, and it must keep the ledger
+    /// consistent under failure — empty input, duplicate IDs,
+    /// unknown IDs, mixed open/closed identities, or replay
+    /// mismatches all reject before any task row is touched.
+    /// Re-applying the same already-closed payload is a
+    /// idempotent no-op.
+    CloseTaskBatch {
+        /// JSON pointer for the non-empty array of task IDs to
+        /// close. Duplicate IDs fail-close; empty arrays fail-close.
+        task_ids: String,
+    },
     /// Advance the plan's `Current Step` heading in
     /// `progress.md`. Driven by `queue.advance`.
     AdvanceStep {

@@ -901,6 +901,13 @@ impl StateProjector {
                             step.as_deref(),
                         )
                     }
+                    crate::config::StateProjectionAction::CloseTaskBatch { task_ids } => {
+                        crate::state_projector::task::project_close_task_batch(
+                            &mut self.ctx,
+                            &parsed,
+                            &task_ids,
+                        )
+                    }
                     crate::config::StateProjectionAction::AdvanceStep {
                         current_step,
                         completed_step,

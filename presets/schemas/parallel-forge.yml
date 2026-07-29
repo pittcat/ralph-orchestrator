@@ -519,6 +519,6 @@ state_projection:
       key: task_key
       title: title
       blocked_by_keys: depends_on_task_keys
-    exec.unit.done:
-      kind: close_task
-      task_id: task_id
+    forge.wave.settled:
+      kind: close_task_batch
+      task_ids: settled_task_ids
