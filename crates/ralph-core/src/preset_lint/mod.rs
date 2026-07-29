@@ -64,6 +64,7 @@ pub mod schema_parity;
 // the phase_authority block so the operator sees a single
 // coordinated report.
 pub mod state_projection;
+pub mod strict_readonly_hat;
 pub mod supervisor;
 pub mod topic_format;
 /// 2026-07-09-003 plan (U4): schema-backed trigger context
@@ -132,6 +133,10 @@ pub use payload_consistency::check_payload_consistency;
 pub use finding_id::FINDING_PRECHECK_RULE_WITHOUT_SYNTHESIZED_GATE_HAT;
 pub use precheck_gate_hat::check_precheck_rule_without_synthesized_gate_hat;
 pub use state_projection::check_work_done_action_chain_order;
+pub use strict_readonly_hat::{
+    FINDING_STRICT_READONLY_INVALID_WRITE_PATH, FINDING_STRICT_READONLY_MISSING_WRITE_CONTRACT,
+    check_strict_readonly_hat,
+};
 // 2026-07-03-001 plan U9: export the supervisor lint entry
 // point so `ralph preset check` / `run_preset_lint` callers
 // can wire it (next line: into the unified orchestrator).
@@ -566,6 +571,15 @@ pub fn run_preset_lint_with_preset_name(
     // preset-load hard gate rejects the offending preset.
     findings.extend(lint_findings_to_contract_findings(
         &check_dimension_reviewer_write_paths(config, strictness),
+    ));
+
+    // 2026-07-29-003 plan U1: strict read-only hat lint. A hat that
+    // denies both Edit and Write MUST declare an `allowed_write_paths`
+    // contract; each entry must pass `validate_allowed_path`. Always
+    // `Error` severity so the preset fails to load with a clear
+    // remediation hint before the workspace mutation guard runs.
+    findings.extend(lint_findings_to_contract_findings(
+        &check_strict_readonly_hat(config, strictness),
     ));
 
     // 2026-07-04-004 plan U3: review-synthesizer block-guard drift
