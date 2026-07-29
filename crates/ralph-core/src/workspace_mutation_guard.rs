@@ -127,12 +127,11 @@ pub fn validate_allowed_path(rule: &str) -> Result<(), PathError> {
         return Err(PathError::NonTrailingStarStar(rule.to_string()));
     }
     // variable expansion: only `{plan_key}` allowed
-    let mut depth = 0usize;
     let mut var_name = String::new();
     let mut in_var = false;
     for ch in rule.chars() {
         match ch {
-            '{' => { in_var = true; var_name.clear(); depth += 1; }
+            '{' => { in_var = true; var_name.clear(); }
             '}' => {
                 if !in_var { continue; }
                 if var_name != "plan_key" { return Err(PathError::UnknownVariable(var_name.clone())); }
