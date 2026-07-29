@@ -3044,50 +3044,48 @@ impl EventLoop {
         // Completion payload match gate: when configured, the completion
         // payload must carry the same top-level field values as the most
         // recent accepted predecessor event on the configured topic.
-        if let Some(match_cfg) = self.config.event_loop.completion_payload_match.clone() {
-            if let Some((predecessor_topic, predecessor_payload)) =
+        if let Some(match_cfg) = self.config.event_loop.completion_payload_match.clone()
+            && let Some((predecessor_topic, predecessor_payload)) =
                 self.state.last_completion_predecessor.clone()
-            {
-                let completion_payload = self
-                    .state
-                    .last_completion_payload
-                    .as_deref()
-                    .unwrap_or("{}");
-                let mismatch = Self::completion_payload_mismatch(
-                    &match_cfg,
-                    &predecessor_payload,
-                    completion_payload,
+        {
+            let completion_payload = self
+                .state
+                .last_completion_payload
+                .as_deref()
+                .unwrap_or("{}");
+            let mismatch = Self::completion_payload_mismatch(
+                &match_cfg,
+                &predecessor_payload,
+                completion_payload,
+            );
+            if let Some(reason) = mismatch {
+                warn!(
+                    topic = %predecessor_topic,
+                    reason = %reason,
+                    "Rejecting LOOP_COMPLETE: completion payload mismatch"
                 );
-                if let Some(reason) = mismatch {
-                    warn!(
-                        topic = %predecessor_topic,
-                        reason = %reason,
-                        "Rejecting LOOP_COMPLETE: completion payload mismatch"
-                    );
-                    let sig = format!("completion_payload_mismatch:{predecessor_topic}");
-                    if let Some(reason) = self.handle_completion_rejection(sig, self.count_tasks())
-                    {
-                        return Some(reason);
-                    }
-                    self.state.completion_requested = false;
-
-                    let free_form = format!(
-                        "LOOP_COMPLETE rejected: payload mismatch on {topic} ({reason}). \
-                         The completion payload must carry the same field values as the \
-                         most recent accepted {topic} event. Re-emit with matching values \
-                         or use loop.cancel to abort.",
-                        topic = predecessor_topic,
-                        reason = reason,
-                    );
-                    if let Some(stuck) = Self::inject_completion_correction(
-                        &mut self.state,
-                        "completion_payload_mismatch",
-                        &free_form,
-                    ) {
-                        return Some(stuck);
-                    }
-                    return None;
+                let sig = format!("completion_payload_mismatch:{predecessor_topic}");
+                if let Some(reason) = self.handle_completion_rejection(sig, self.count_tasks()) {
+                    return Some(reason);
                 }
+                self.state.completion_requested = false;
+
+                let free_form = format!(
+                    "LOOP_COMPLETE rejected: payload mismatch on {topic} ({reason}). \
+                     The completion payload must carry the same field values as the \
+                     most recent accepted {topic} event. Re-emit with matching values \
+                     or use loop.cancel to abort.",
+                    topic = predecessor_topic,
+                    reason = reason,
+                );
+                if let Some(stuck) = Self::inject_completion_correction(
+                    &mut self.state,
+                    "completion_payload_mismatch",
+                    &free_form,
+                ) {
+                    return Some(stuck);
+                }
+                return None;
             }
         }
 

@@ -13,10 +13,14 @@
 //!   same way both backends.
 
 #[cfg(feature = "supervisor-db")]
+use ralph_core::supervisor::InMemorySupervisorStore;
+#[cfg(feature = "supervisor-db")]
 use ralph_core::supervisor::RusqliteSupervisorStore;
+#[cfg(feature = "supervisor-db")]
 use ralph_core::supervisor::SupervisorStore;
-use ralph_core::supervisor::{InMemorySupervisorStore, WaveKind};
+use ralph_core::supervisor::WaveKind;
 
+#[cfg(feature = "supervisor-db")]
 use tempfile::TempDir;
 
 /// Boundary check: `evaluate_phase` must NOT fire

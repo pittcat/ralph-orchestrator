@@ -1150,7 +1150,7 @@ actions:
     let by_id: std::collections::HashMap<_, _> = store
         .all()
         .iter()
-        .map(|t| (t.id.clone(), t.status.clone()))
+        .map(|t| (t.id.clone(), t.status))
         .collect();
     assert!(
         matches!(by_id.get(&ids[0]), Some(crate::task::TaskStatus::Closed)),

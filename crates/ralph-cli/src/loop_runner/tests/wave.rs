@@ -2303,7 +2303,10 @@ async fn test_run_wave_worker_pty_startup_grace_ended_by_events_file_growth() {
 
     let (_events, duration, success) = outcome
         .expect("events-file Strong during grace must end grace and keep the silent worker alive");
-    assert!(success, "worker should exit cleanly, not be startup/idle-killed");
+    assert!(
+        success,
+        "worker should exit cleanly, not be startup/idle-killed"
+    );
     assert!(
         duration >= Duration::from_secs(5),
         "events-file growth during grace must refresh past idle=2s; ran {duration:?}"
