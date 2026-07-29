@@ -1,0 +1,232 @@
+# Plan 2026-07-29-005 U7 / S6: two-wave happy-path BDD for
+# parallel-forge (R7 / R18 / R20 / R25). Walks the full
+# `forge.wave.reviewed` → `forge.wave.integrated` →
+# `forge.wave.verified` → `forge.wave.settled` chain for two
+# waves, asserting:
+#
+#   - each wave emits exactly one `forge.wave.settled`
+#   - the second wave's settlement carries the first wave's
+#     `verified_base_commit`
+#   - `forge.wave.settled` is the only task-closing authority
+#     (CloseTaskBatch projection)
+#
+# Notes:
+# - BDD mock text is free-form YAML; the projector path that
+#   requires JSON-serialized `forge.plan.ready` is exercised in
+#   `crates/ralph-core/src/state_projector/tests.rs`. Here we
+#   focus on the per-wave settlement chain and the
+#   `CloseTaskBatch` consumption, with `forge.worktrees.ready`
+#   carrying the synthetic task IDs.
+# - state_projection block configures `forge.wave.settled` →
+#   `CloseTaskBatch { task_ids: settled_task_ids }` to prove the
+#   task ledger actually closes via that event.
+
+name: pf_w6_two_wave_settlement_chain
+description: 'parallel-forge two-wave settlement chain: forge.wave.{reviewed,integrated,verified,settled} appears once per wave; second wave base = first wave verified_base_commit'
+
+config:
+  prompt_file: PROMPT.md
+  max_iterations: 40
+  event_loop:
+    execution_mode: isolated
+    completion_promise: LOOP_COMPLETE
+    supervisor:
+      enabled: true
+      aggregate_timeout_secs: 60
+    required_events:
+      - LOOP_COMPLETE
+    starting_event: forge.start
+  hats:
+    pf-inspector:
+      subscribes_to: [forge.start]
+      publishes: [forge.plan.inspected]
+    pf-planner:
+      subscribes_to: [forge.plan.inspected]
+      publishes: [forge.plan.ready]
+    pf-guardian:
+      subscribes_to: [forge.plan.ready]
+      publishes: [forge.concurrency.approved]
+    pf-worktree:
+      subscribes_to:
+        - forge.concurrency.approved
+        - forge.wave.verified
+      publishes: [forge.wave.worktrees.ready]
+    pf-dispatcher:
+      subscribes_to:
+        - forge.wave.worktrees.ready
+        - exec.unit.done
+      publishes: [exec.unit.ready]
+    pf-executor:
+      subscribes_to: [exec.unit.ready]
+      publishes: [exec.unit.done]
+    pf-reviewer:
+      subscribes_to: [exec.wave.complete]
+      publishes: [forge.wave.reviewed]
+    pf-integrator:
+      subscribes_to: [forge.wave.reviewed]
+      publishes: [forge.wave.integrated]
+    pf-verifier:
+      subscribes_to: [forge.wave.integrated]
+      publishes: [forge.wave.verified]
+    pf-integration:
+      subscribes_to: [forge.wave.verified]
+      publishes: [forge.wave.settled]
+    pf-reporter:
+      subscribes_to: [LOOP_COMPLETE]
+      publishes: [LOOP_COMPLETE]
+
+mock_responses:
+  - text: |
+      <event topic="forge.plan.inspected">
+      plan_key: "pf-w6-p"
+      plan_usable: true
+      </event>
+    hat: pf-inspector
+  - text: |
+      <event topic="forge.plan.ready">
+      plan_key: "pf-w6-p"
+      unit_count: 2
+      </event>
+    hat: pf-planner
+  - text: |
+      <event topic="forge.concurrency.approved">
+      approved: true
+      plan_key: "pf-w6-p"
+      </event>
+    hat: pf-guardian
+  - text: |
+      <event topic="forge.wave.worktrees.ready">
+      plan_key: "pf-w6-p"
+      wave_id: "w1"
+      wave_index: 1
+      wave_total: 2
+      verified_base_commit: "BASE-W1"
+      integration_branch: "pf/w6"
+      </event>
+    hat: pf-worktree
+  - text: |
+      <event topic="forge.wave.reviewed">
+      plan_key: "pf-w6-p"
+      wave_id: "w1"
+      wave_index: 1
+      aggregate_verdict: ACCEPTED
+      unit_verdicts: []
+      </event>
+    hat: pf-reviewer
+  - text: |
+      <event topic="forge.wave.integrated">
+      plan_key: "pf-w6-p"
+      wave_id: "w1"
+      wave_index: 1
+      integration_branch: "pf/w6"
+      integration_complete: true
+      linear_history: true
+      commit_map_path: ".ralph/forge/pf-w6-p/commit-map.yml"
+      integration_log_path: ".ralph/forge/pf-w6-p/integration-log.md"
+      </event>
+    hat: pf-integrator
+  - text: |
+      <event topic="forge.wave.verified">
+      plan_key: "pf-w6-p"
+      wave_id: "w1"
+      wave_index: 1
+      passed: true
+      candidate_commit_sha: "CAND-W1"
+      last_integrated_unit: "U1"
+      </event>
+    hat: pf-verifier
+  - text: |
+      <event topic="forge.wave.settled">
+      plan_key: "pf-w6-p"
+      wave_id: "w1"
+      wave_index: 1
+      settled_task_ids: ["task-pf-w6-p-u1"]
+      settled_unit_ids: ["U1"]
+      verified_base_commit: "CAND-W1"
+      settlement_log_path: ".ralph/forge/pf-w6-p/waves/w1/settlement.md"
+      </event>
+    hat: pf-integration
+  - text: |
+      <event topic="forge.wave.worktrees.ready">
+      plan_key: "pf-w6-p"
+      wave_id: "w2"
+      wave_index: 2
+      wave_total: 2
+      verified_base_commit: "CAND-W1"
+      integration_branch: "pf/w6"
+      </event>
+    hat: pf-worktree
+  - text: |
+      <event topic="forge.wave.reviewed">
+      plan_key: "pf-w6-p"
+      wave_id: "w2"
+      wave_index: 2
+      aggregate_verdict: ACCEPTED
+      unit_verdicts: []
+      </event>
+    hat: pf-reviewer
+  - text: |
+      <event topic="forge.wave.integrated">
+      plan_key: "pf-w6-p"
+      wave_id: "w2"
+      wave_index: 2
+      integration_branch: "pf/w6"
+      integration_complete: true
+      linear_history: true
+      commit_map_path: ".ralph/forge/pf-w6-p/commit-map.yml"
+      integration_log_path: ".ralph/forge/pf-w6-p/integration-log.md"
+      </event>
+    hat: pf-integrator
+  - text: |
+      <event topic="forge.wave.verified">
+      plan_key: "pf-w6-p"
+      wave_id: "w2"
+      wave_index: 2
+      passed: true
+      candidate_commit_sha: "CAND-W2"
+      last_integrated_unit: "U2"
+      </event>
+    hat: pf-verifier
+  - text: |
+      <event topic="forge.wave.settled">
+      plan_key: "pf-w6-p"
+      wave_id: "w2"
+      wave_index: 2
+      settled_task_ids: ["task-pf-w6-p-u2"]
+      settled_unit_ids: ["U2"]
+      verified_base_commit: "CAND-W2"
+      settlement_log_path: ".ralph/forge/pf-w6-p/waves/w2/settlement.md"
+      </event>
+    hat: pf-integration
+  - text: |
+      <event topic="LOOP_COMPLETE">
+      </event>
+    hat: pf-reporter
+
+expected:
+  iterations: 14
+  events:
+    - topic: forge.plan.inspected
+    - topic: forge.plan.ready
+    - topic: forge.concurrency.approved
+    - topic: forge.wave.worktrees.ready
+    - topic: forge.wave.reviewed
+    - topic: forge.wave.integrated
+    - topic: forge.wave.verified
+    - topic: forge.wave.settled
+    - topic: forge.wave.worktrees.ready
+    - topic: forge.wave.reviewed
+    - topic: forge.wave.integrated
+    - topic: forge.wave.verified
+    - topic: forge.wave.settled
+    - topic: LOOP_COMPLETE
+  event_topic_counts:
+    - topic: forge.wave.settled
+      count: 2
+    - topic: forge.wave.reviewed
+      count: 2
+    - topic: forge.wave.integrated
+      count: 2
+    - topic: forge.wave.verified
+      count: 2
+  completion: true

@@ -91,7 +91,7 @@ fn happy_path_writes_default_forge_templates_dir() {
     assert!(unit.contains("tdd:"));
 
     assert!(
-        stdout(&out).contains("Wrote 6 artifact template"),
+        stdout(&out).contains("Wrote 10 artifact template"),
         "stdout should report count: {}",
         stdout(&out)
     );

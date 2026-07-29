@@ -2746,6 +2746,34 @@ mod tests {
                         preset.name
                     ));
                 }
+                // Plan 2026-07-29-005 U1: the static wave / order /
+                // digest pointers must be declared so the projector
+                // activates `validate_wave_schedule` for parallel-forge
+                // (R2–R4). Without these three pointers the projector
+                // silently takes the legacy DAG-only branch and the
+                // static schedule contract is unenforced.
+                if let StateProjectionAction::EnsureTaskBatch {
+                    execution_wave,
+                    integration_order,
+                    execution_plan_digest,
+                    ..
+                } = action
+                {
+                    let pointers = [
+                        ("execution_wave", execution_wave.as_deref()),
+                        ("integration_order", integration_order.as_deref()),
+                        ("execution_plan_digest", execution_plan_digest.as_deref()),
+                    ];
+                    for (field, value) in pointers {
+                        if value.is_none() {
+                            bad_presets.push(format!(
+                                "{}: forge.plan.ready EnsureTaskBatch must declare `{}` pointer; \
+                                 without it the projector skips validate_wave_schedule (plan 005 U1)",
+                                preset.name, field
+                            ));
+                        }
+                    }
+                }
                 // Plan 2026-07-29-001 U3: `forge.wave.settled`
                 // is now the only state-authority path that closes
                 // tasks for parallel-forge (slot → wave settlement
@@ -2784,6 +2812,156 @@ mod tests {
             "preset-level key errors: {}",
             bad_presets.join("; ")
         );
+    }
+
+    // Plan 2026-07-29-005 U3: the four per-wave hats
+    // (reviewer / integrator / verifier / tester) must declare
+    // `event_filter.events` that cover the business-entry topics
+    // listed in their `triggers`. Without this coverage the runtime
+    // event filter silently drops new wave-scoped topics and the
+    // hat never activates.
+    //
+    // The matcher is structural: every `triggers` topic must
+    // appear in `event_filter.events`. Topics still present in
+    // `publishes` for backward-compat aliases do not have to be
+    // mirrored in the filter.
+    #[test]
+    fn test_parallel_forge_event_filter_covers_triggers() {
+        let preset = get_preset("parallel-forge").expect("parallel-forge preset must exist");
+        let config =
+            RalphConfig::parse_yaml(preset.content).expect("parallel-forge YAML should parse");
+        let registry = HatRegistry::from_config(&config);
+        use ralph_proto::HatId;
+        let target_hats = ["reviewer", "integrator", "verifier", "tester"];
+        let mut problems: Vec<String> = Vec::new();
+        for hat_id in target_hats {
+            let hat_id_typed = HatId::new(hat_id);
+            let Some(hat_cfg) = registry.get_config(&hat_id_typed) else {
+                problems.push(format!("hat `{hat_id}` missing from parallel-forge registry"));
+                continue;
+            };
+            let filter_events: std::collections::BTreeSet<&str> = match hat_cfg.event_filter.as_ref() {
+                Some(f) => f.events.iter().map(String::as_str).collect(),
+                None => std::collections::BTreeSet::new(),
+            };
+            for trigger in &hat_cfg.triggers {
+                if !filter_events.contains(trigger.as_str()) {
+                    problems.push(format!(
+                        "hat `{hat_id}` trigger `{trigger}` not covered by event_filter.events {:?}",
+                        filter_events
+                    ));
+                }
+            }
+        }
+        assert!(
+            problems.is_empty(),
+            "parallel-forge event_filter does not cover triggers: {}",
+            problems.join("; ")
+        );
+    }
+
+    // Plan 2026-07-29-005 U4 / G8: the forge-failure-handler hat
+    // instructions must use a single consecutive step-number
+    // sequence. Before U4 the "Final correction (3 rounds
+    // exhausted)" sub-section reused the same `4.` / `5.` labels
+    // as the main correction flow, making agent navigation
+    // ambiguous (the same step number mapped to two distinct
+    // actions). The structural assertion below scans for any
+    // numbered list inside the hat instructions and rejects
+    // duplicate step numbers across the document.
+    #[test]
+    fn test_parallel_forge_failure_handler_step_numbering_is_consecutive() {
+        let preset = get_preset("parallel-forge").expect("parallel-forge preset must exist");
+        let config =
+            RalphConfig::parse_yaml(preset.content).expect("parallel-forge YAML should parse");
+        let registry = HatRegistry::from_config(&config);
+        use ralph_proto::HatId;
+        let hat_id_typed = HatId::new("forge-failure-handler");
+        let hat_cfg = registry
+            .get_config(&hat_id_typed)
+            .expect("forge-failure-handler must exist");
+        let body = &hat_cfg.instructions;
+
+        // Collect every "^\s*N\.\s" markdown numbered step.
+        // We do not assert the text of any step (avoid literal
+        // locking); only the numbering invariant.
+        let mut seen: Vec<u32> = Vec::new();
+        for line in body.lines() {
+            let trimmed = line.trim_start();
+            let digits: String = trimmed
+                .chars()
+                .take_while(|c| c.is_ascii_digit())
+                .collect();
+            if digits.is_empty() {
+                continue;
+            }
+            // require "<digits>. " (a period + whitespace) so we
+            // don't pick up arbitrary inline numbers.
+            let rest = &trimmed[digits.len()..];
+            if !rest.starts_with(". ") {
+                continue;
+            }
+            if let Ok(n) = digits.parse::<u32>() {
+                seen.push(n);
+            }
+        }
+        // Find any number that appears more than once.
+        let mut counts: std::collections::BTreeMap<u32, u32> =
+            std::collections::BTreeMap::new();
+        for n in &seen {
+            *counts.entry(*n).or_insert(0) += 1;
+        }
+        let duplicates: Vec<u32> = counts
+            .iter()
+            .filter_map(|(n, c)| if *c > 1 { Some(*n) } else { None })
+            .collect();
+        assert!(
+            duplicates.is_empty(),
+            "forge-failure-handler instructions reuse step numbers {duplicates:?}; \
+             plan 005 U4/G8 requires a single consecutive sequence"
+        );
+    }
+
+    // Plan 2026-07-29-005 U2 (G3): the planner hat instructions
+    // must be non-empty and the embedded `forge.plan.ready`
+    // schema must declare `execution_plan_digest` and
+    // `wave_total` as required fields. We do NOT lock the prose
+    // (HARD RULE against instructions-text tests); the
+    // behavioural gate is enforced by the schema SSOT below.
+    #[test]
+    fn test_parallel_forge_planner_instructions_nonempty_and_schema_wave_fields() {
+        let preset = get_preset("parallel-forge").expect("parallel-forge preset must exist");
+        let config =
+            RalphConfig::parse_yaml(preset.content).expect("parallel-forge YAML should parse");
+        let registry = HatRegistry::from_config(&config);
+        use ralph_proto::HatId;
+        let planner_id = HatId::new("planner");
+        let planner_cfg = registry
+            .get_config(&planner_id)
+            .expect("planner hat must exist");
+        assert!(
+            !planner_cfg.instructions.trim().is_empty(),
+            "planner hat instructions must be non-empty (plan 005 U2)"
+        );
+
+        // Behavioural gate: forge.plan.ready schema must require
+        // execution_plan_digest and wave_total (G2 / G3); without
+        // these, runtime validate_wave_schedule cannot activate.
+        let event_policy = config
+            .event_loop
+            .event_policy
+            .as_ref()
+            .expect("event_policy must be declared for parallel-forge");
+        let forge_plan_ready = event_policy
+            .schemas
+            .get("forge.plan.ready")
+            .expect("forge.plan.ready schema must exist");
+        for required in ["execution_plan_digest", "wave_total"] {
+            assert!(
+                forge_plan_ready.required_fields.iter().any(|f| f == required),
+                "forge.plan.ready schema must require `{required}` (plan 005 U2/G2/G3)"
+            );
+        }
     }
 
     // WRC-U3 / T-WRC-U3-04 (Tier-0 contract): every preset listed in

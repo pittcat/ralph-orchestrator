@@ -48,6 +48,10 @@ pub const PARALLEL_FORGE_TEMPLATE_NAMES: &[&str] = &[
     "execution-plan.template.yml",
     "unit-completion.template.md",
     "manager-report.template.md",
+    "wave-settlement.template.md",
+    "wave-failure.template.md",
+    "merge-conflict.template.md",
+    "correction.template.md",
     "README.md",
 ];
 
@@ -103,6 +107,34 @@ const PARALLEL_FORGE_TEMPLATES: &[ArtifactTemplate] = &[
         content: include_str!(concat!(
             env!("OUT_DIR"),
             "/artifact-templates/parallel-forge/manager-report.template.md"
+        )),
+    },
+    ArtifactTemplate {
+        file_name: "wave-settlement.template.md",
+        content: include_str!(concat!(
+            env!("OUT_DIR"),
+            "/artifact-templates/parallel-forge/wave-settlement.template.md"
+        )),
+    },
+    ArtifactTemplate {
+        file_name: "wave-failure.template.md",
+        content: include_str!(concat!(
+            env!("OUT_DIR"),
+            "/artifact-templates/parallel-forge/wave-failure.template.md"
+        )),
+    },
+    ArtifactTemplate {
+        file_name: "merge-conflict.template.md",
+        content: include_str!(concat!(
+            env!("OUT_DIR"),
+            "/artifact-templates/parallel-forge/merge-conflict.template.md"
+        )),
+    },
+    ArtifactTemplate {
+        file_name: "correction.template.md",
+        content: include_str!(concat!(
+            env!("OUT_DIR"),
+            "/artifact-templates/parallel-forge/correction.template.md"
         )),
     },
     ArtifactTemplate {
@@ -360,7 +392,7 @@ mod tests {
     fn materialize_accepts_builtin_prefix() {
         let dir = tempfile::tempdir().unwrap();
         let paths = materialize("builtin:parallel-forge", dir.path()).unwrap();
-        assert_eq!(paths.len(), 6);
+        assert_eq!(paths.len(), PARALLEL_FORGE_TEMPLATE_NAMES.len());
     }
 
     #[test]

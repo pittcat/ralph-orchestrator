@@ -9,6 +9,10 @@ Builtin preset `parallel-forge` 的 **artifact SSOT**（源自 `parallel-dev-pre
 | `execution-plan.template.yml` | §7–§11 机器可读 | planner | `.ralph/forge/<plan-key>/execution-plan.yml` |
 | `unit-completion.template.md` | §13.4 | executor | `.ralph/forge/<plan-key>/units/<unit-id>-completion.md` |
 | `manager-report.template.md` | §21–§23 | reporter | `docs/reports/<YYYY-MM-DD>-<task>-manager-report.md` |
+| `wave-settlement.template.md` | wave settlement | integrator | `.ralph/forge/<plan-key>/waves/<wave_id>/settlement.md` |
+| `wave-failure.template.md` | `*.failed` 证据 | forge-failure-handler / integrator / verifier | `.ralph/forge/<plan-key>/waves/<wave_id>/failure-<round>.md` |
+| `merge-conflict.template.md` | integrator 冲突 | integrator | `.ralph/forge/<plan-key>/waves/<wave_id>/merge-conflicts/<unit-id>.md` |
+| `correction.template.md` | correction round | wave-fixer | `.ralph/forge/<plan-key>/waves/<wave_id>/corrections/round-<n>/report.md` |
 
 **用法**：各 hat 在 activation 内 **先 materialize 内置模板，再复制到产出路径，按模板内章节/字段填满**；禁止跳过模板直接写自由格式文档。
 

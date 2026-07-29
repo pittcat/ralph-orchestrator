@@ -46,6 +46,8 @@ schemas:
       - plan_path
       - development_plan_path
       - execution_plan_path
+      - execution_plan_digest
+      - wave_total
       - unit_count
       - unit_tasks
       - plan_key
@@ -63,6 +65,14 @@ schemas:
         meaning: Machine-readable Unit DAG SSOT for supervisor dispatch.
         source: File written this activation at .ralph/forge/plan-key/execution-plan.yml.
         fill_rule: Must exist and list units with depends_on / integration_order.
+      execution_plan_digest:
+        meaning: Stable content hash of the execution-plan SSOT (SHA-256 hex preferred).
+        source: Computed by Planner when materialising execution-plan.yml.
+        fill_rule: Non-empty string; projector cross-checks this against the digest embedded in unit_tasks or the action's execution_plan_digest pointer.
+      wave_total:
+        meaning: Total number of static execution waves the planner computed for this plan.
+        source: Planner wave algorithm output.
+        fill_rule: Positive integer; equals max(unit_tasks[].execution_wave).
       unit_count:
         meaning: Number of Units in the execution plan.
         source: Parsed execution-plan.yml unit list length.
@@ -70,7 +80,7 @@ schemas:
       unit_tasks:
         meaning: Non-empty ordered Unit task specifications projected atomically into the task ledger.
         source: Parsed execution-plan.yml units[].
-        fill_rule: Each item has unit_id, task_key, title, and depends_on_task_keys; task_key is forge:<plan-key>:<unit-id>; no task mutation CLI.
+        fill_rule: Each item has unit_id, task_key, title, depends_on_task_keys, execution_wave (positive integer, 1..wave_total), and integration_order (positive integer, globally unique 1..unit_count, dependency-respecting); task_key is forge:<plan-key>:<unit-id>; no task mutation CLI.
       plan_key:
         meaning: Forge plan key basename for artifact roots.
         source: Basename of plan_path without .md/.html.
@@ -456,6 +466,31 @@ schemas:
         source: File at .ralph/forge/<plan-key>/waves/<wave_id>/corrections/round-<n>/report.md.
         fill_rule: Must exist; fixes applied, evidence, prior match.
 
+  forge.final.correction.settled:
+    required_fields:
+      - plan_key
+      - wave_id
+      - correction_round
+      - verification_log_path
+    payload: json_object
+    field_docs:
+      plan_key:
+        meaning: Forge plan key basename.
+        source: forge.correction.done.plan_key.
+        fill_rule: Must match .ralph/forge/<plan-key>/.
+      wave_id:
+        meaning: Final wave that exhausted the 3-round correction budget.
+        source: Last correction done event for this plan.
+        fill_rule: Stable id from forge.wave.worktrees.ready.
+      correction_round:
+        meaning: The final round number that exhausted the budget.
+        source: forge-failure-handler correction counter.
+        fill_rule: Integer 0..3.
+      verification_log_path:
+        meaning: Path to the final-correction verification log written by the tester.
+        source: File under .ralph/forge/<plan-key>/final-correction/verification.log.
+        fill_rule: Must exist before emit.
+
   forge.wave.settled:
     required_fields:
       - wave_id
@@ -660,31 +695,6 @@ schemas:
         meaning: Forge plan key basename.
         source: Trigger / execution_plan_path parent.
         fill_rule: Must match .ralph/forge/<plan-key>/.
-
-  forge.incremental.verified:
-    required_fields:
-      - last_integrated_unit
-      - verification_log_path
-      - passed
-      - plan_key
-    payload: json_object
-    field_docs:
-      last_integrated_unit:
-        meaning: Unit id of the last integrated Unit covered by this incremental run.
-        source: integration_log_path / commit-map last entry.
-        fill_rule: Exact unit_id string.
-      verification_log_path:
-        meaning: Incremental regression evidence after last integration step.
-        source: File at .ralph/forge/plan-key/incremental-verification.md.
-        fill_rule: Records commands run and pass/fail per integrated Unit.
-      passed:
-        meaning: Whether incremental regression passed.
-        source: Command outcomes in verification_log_path.
-        fill_rule: '"false" must pair with work.failed instead of this success topic when blocking.'
-      plan_key:
-        meaning: Forge plan key basename.
-        source: Trigger / forge artifact root.
-        fill_rule: Must match directory name.
 
   forge.full.verified:
     required_fields:
@@ -919,6 +929,9 @@ state_projection:
       key: task_key
       title: title
       blocked_by_keys: depends_on_task_keys
+      execution_wave: execution_wave
+      integration_order: integration_order
+      execution_plan_digest: execution_plan_digest
     forge.wave.settled:
       kind: close_task_batch
       task_ids: settled_task_ids

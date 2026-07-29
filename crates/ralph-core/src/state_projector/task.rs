@@ -826,29 +826,37 @@ pub(crate) fn project_close_task_batch(
     }
 
     // Active settlement: every target open → close all.
-    // `TaskStore::close` rejects rows with `started.is_none()`
-    // (the P0-4 guard introduced by plan 2026-06-30-001). The
-    // projection for `work.done` works around the same guard by
-    // calling `row.start()` first; we mirror that here so the
-    // batch projection does not silently no-op on rows that the
-    // planner created but the slot never explicitly started.
+    //
+    // U5 of plan 2026-07-29-005 (G9, R14, AE-G5): the batch close
+    // runs on a staging clone of `store.tasks` so any per-id failure
+    // (e.g. `TaskStore::close` returning `None` because of the
+    // P0-4 `started.is_none()` guard) leaves the on-disk ledger and
+    // `ctx.tasks_cache` byte-identical to the pre-call state. The
+    // clone is cheap (a `Vec<Task>` per-row copy) and only ever
+    // reaches `persist` when every id closes successfully.
+    let mut staging = store.tasks().to_vec();
     for id in &task_ids {
-        if let Some(row) = store.get_mut(id) {
-            if row.started.is_none() {
-                row.start();
-            }
-        }
-        if store.close(id).is_none() {
+        let target = staging.iter_mut().find(|t| t.id == *id);
+        let Some(row) = target else {
             return Err(format!("close_task_batch: failed to close task_id '{id}'"));
+        };
+        if row.started.is_none() {
+            row.start();
         }
+        // Mirror `TaskStore::close`'s logic: a fix-unit id is exempt
+        // from the started.is_none() guard, so `row.start()` above is
+        // a no-op for fix-units but the close still proceeds.
+        row.status = crate::task::TaskStatus::Closed;
+        row.closed = Some(chrono::Utc::now().to_rfc3339());
     }
-
+    // Commit: only NOW do we touch the live store + disk + cache.
+    store.replace_tasks_for_atomic_batch(staging);
     persist(&ctx.tasks_path, &store, &mut ctx.tasks_cache)?;
     Ok(())
 }
 
 fn type_of_value(v: &Value) -> &'static str {
-    match v {
+        match v {
         Value::Null => "null",
         Value::Bool(_) => "bool",
         Value::Number(_) => "number",
