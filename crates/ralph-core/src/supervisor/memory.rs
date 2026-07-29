@@ -1606,8 +1606,15 @@ impl SupervisorStore for InMemorySupervisorStore {
             // A missing descriptor means pre-U4 legacy row
             // (S4) and surfaces as `expected_digest = None`
             // so the boot fails closed.
+            //
+            // Only Pending slots are boot-dispatchable (plan
+            // idempotency + review P0): once a slot leaves Pending,
+            // a later resume must not re-spawn it.
             let mut slots = Vec::new();
-            for &child_slot_index in wave_row.slots.keys() {
+            for (&child_slot_index, slot_row) in &wave_row.slots {
+                if slot_row.status != SlotStatus::Pending {
+                    continue;
+                }
                 let parent_slot_index = inner
                     .child_parent_slots
                     .get(&(wave_row.wave_id.clone(), child_slot_index))
@@ -1639,6 +1646,7 @@ impl SupervisorStore for InMemorySupervisorStore {
                     child_wave_id: wave_row.wave_id.clone(),
                     parent_wave_id: parent_wave_id.to_string(),
                     kind: wave_row.kind,
+                    expected_total: wave_row.expected_total,
                     slots,
                 });
             }

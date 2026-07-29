@@ -2242,6 +2242,79 @@ async fn test_run_wave_worker_pty_events_file_growth_keeps_lease_alive() {
     );
 }
 
+/// 2026-07-28-003 plan R5: events-file growth during startup grace
+/// is a Strong signal that ends grace and then refreshes the idle
+/// lease. Silent stdout + growing RALPH_EVENTS_FILE must survive
+/// past idle=2s when grace=8s is configured.
+#[cfg(unix)]
+#[tokio::test]
+async fn test_run_wave_worker_pty_startup_grace_ended_by_events_file_growth() {
+    let temp_dir = tempfile::tempdir().expect("temp dir");
+    // Completely silent stdout — only events-file can end grace.
+    let body = "sleep 6\nexit 0\n";
+    write_fake_executable(temp_dir.path(), "wave-worker", body);
+    let worker_events_path = temp_dir.path().join("wave-events.jsonl");
+    let events_path = temp_dir.path().join("runtime-events.jsonl");
+    std::fs::write(&events_path, "").expect("seed empty events file");
+
+    let appender_path = events_path.clone();
+    let appender = tokio::spawn(async move {
+        use std::io::Write;
+        for _ in 0..14 {
+            if let Ok(mut file) = std::fs::OpenOptions::new()
+                .append(true)
+                .create(true)
+                .open(&appender_path)
+            {
+                let _ = writeln!(file, "{{\"topic\":\"x\"}}");
+            }
+            tokio::time::sleep(Duration::from_millis(500)).await;
+        }
+    });
+
+    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    let backend = CliBackend {
+        command: temp_dir.path().join("wave-worker").display().to_string(),
+        args: vec![],
+        prompt_mode: ralph_adapters::PromptMode::Arg,
+        prompt_flag: None,
+        output_format: BackendOutputFormat::Text,
+        env_vars: vec![(
+            "RALPH_EVENTS_FILE".to_string(),
+            events_path.display().to_string(),
+        )],
+    };
+
+    let (_index, outcome) = run_wave_worker_pty(
+        0,
+        &backend,
+        "prompt",
+        &worker_events_path,
+        Duration::from_secs(60),
+        Some(Duration::from_secs(2)),
+        4,
+        tx,
+        None,
+        None,
+        None,
+        Some(Duration::from_secs(8)),
+    )
+    .await;
+
+    let (_events, duration, success) = outcome
+        .expect("events-file Strong during grace must end grace and keep the silent worker alive");
+    assert!(success, "worker should exit cleanly, not be startup/idle-killed");
+    assert!(
+        duration >= Duration::from_secs(5),
+        "events-file growth during grace must refresh past idle=2s; ran {duration:?}"
+    );
+    let _ = appender.await;
+    emit_wave_validation_marker(
+        "startup-grace:events-file-ends-grace",
+        &["startup-grace", "strong", "events"],
+    );
+}
+
 // =====================================================================
 // 2026-07-28-003 plan U2: `startup_grace_secs` integration tests.
 // Each test feeds `run_wave_worker_pty` a synthetic backend that

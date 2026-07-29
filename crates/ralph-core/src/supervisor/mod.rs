@@ -925,6 +925,10 @@ pub struct RedrivePendingChild {
     pub child_wave_id: String,
     pub parent_wave_id: String,
     pub kind: WaveKind,
+    /// 2026-07-28-002 plan R9: child wave's store `expected_total`.
+    /// Boot synthesis stamps `DetectedWave.total` / event
+    /// `wave_total` with this value (not `1`).
+    pub expected_total: u32,
     pub slots: Vec<RedrivePendingChildSlot>,
 }
 
@@ -1529,6 +1533,12 @@ pub trait SupervisorStore: fmt::Debug + Send + Sync {
     /// given `slot_index`. The `ralph run --resume` startup
     /// seam iterates over pending child slots and calls this
     /// to decide whether a worker can be spawned.
+    ///
+    /// This is a **non-destructive** read + digest check: the
+    /// descriptor row stays so a crash between take and spawn
+    /// can still resume. Idempotency is "slot left Pending" —
+    /// `list_redrive_pending_child_waves` only returns Pending
+    /// slots.
     ///
     /// - `RedriveTakeOutcome::Dispatchable` — the descriptor
     ///   is bound and matches the runtime's digest; a worker

@@ -6349,9 +6349,11 @@ pub(crate) async fn dispatch_redrive_child_wave(
 // spawn; this routine just orchestrates the scan + take + per-slot
 // dispatch using `dispatch_redrive_child_wave` above.
 //
-// Returns the number of slots dispatched. Wired in
+// Returns the number of slots that actually produced a worker /
+// terminal dispatch outcome. Wired in
 // `runner.rs::run_loop_impl_inner` (both supervisor boot seams),
-// gated on `--resume`, after `recover_active_waves_at_startup`
+// gated on `--resume` via `boot_dispatch_pending_redrive_if_resuming`,
+// after `recover_active_waves_at_startup`
 // and backend construction — so an operator-driven `ralph run
 // --resume` catches redrive children that the previous loop did
 // not finish spawning. A fresh boot never calls this.
@@ -6427,14 +6429,14 @@ pub(crate) async fn dispatch_pending_redrive_waves(
 
             match outcome {
                 RedriveTakeOutcome::Dispatchable { descriptor } => {
-                    // 2026-07-28-002 plan U4 (S6): each boot dispatch is a
-                    // single-slot wave (`dispatch_redrive_child_wave`
-                    // synthesizes exactly one event), so the wave total is
-                    // 1 regardless of how many slots the child wave has.
-                    // The other slots are dispatched by their own loop
-                    // iterations.
-                    let expected_total = 1u32;
-                    dispatch_redrive_child_wave(
+                    // 2026-07-28-002 plan R9: wave_total / DetectedWave.total
+                    // must be the child wave's store expected_total, not 1.
+                    // Each iteration still synthesizes one event for one
+                    // Pending child slot; the coordinates carry the true
+                    // multi-slot total so worker prompt/env see the real
+                    // wave shape.
+                    let expected_total = child.expected_total.max(1);
+                    let dispatch_outcome = dispatch_redrive_child_wave(
                         bridge.clone(),
                         worker_executor.clone(),
                         cli_backend,
@@ -6447,7 +6449,25 @@ pub(crate) async fn dispatch_pending_redrive_waves(
                         main_events_file,
                     )
                     .await;
-                    dispatched += 1;
+                    // Only count slots that actually produced a worker
+                    // (or reached a terminal dispatch outcome). Spawn /
+                    // preparation failures must not inflate the boot
+                    // scan counter.
+                    match dispatch_outcome {
+                        WaveDispatchOutcome::Completed(_)
+                        | WaveDispatchOutcome::Partial(_)
+                        | WaveDispatchOutcome::AggregateDeadlineExceeded(_) => {
+                            dispatched += 1;
+                        }
+                        WaveDispatchOutcome::SpawnFailed { spawned_count, .. }
+                            if spawned_count > 0 =>
+                        {
+                            dispatched += 1;
+                        }
+                        WaveDispatchOutcome::SpawnFailed { .. }
+                        | WaveDispatchOutcome::PreparationFailed { .. }
+                        | WaveDispatchOutcome::GlobalDeadlineExceeded => {}
+                    }
                 }
                 RedriveTakeOutcome::DescriptorUnavailable => {
                     tracing::warn!(
@@ -6479,6 +6499,35 @@ pub(crate) async fn dispatch_pending_redrive_waves(
         }
     }
     dispatched
+}
+
+/// Runner boot seam for redrive: only `--resume` consumes pending
+/// child waves (plan U4 S6 / fresh-boot exclusion). Extracted so
+/// tests can pin the resume gate without driving the full loop.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn boot_dispatch_pending_redrive_if_resuming(
+    resume: bool,
+    store: &std::sync::Arc<dyn ralph_core::supervisor::SupervisorStore>,
+    loop_id: &str,
+    hat_registry: &ralph_core::HatRegistry,
+    cli_backend: &CliBackend,
+    bridge: &Arc<dyn ralph_core::supervisor::SupervisorBridge>,
+    main_events_file: &std::path::Path,
+    worker_executor: std::sync::Arc<dyn WaveWorkerExecutor>,
+) -> usize {
+    if !resume {
+        return 0;
+    }
+    dispatch_pending_redrive_waves(
+        store,
+        loop_id,
+        hat_registry,
+        cli_backend,
+        bridge,
+        main_events_file,
+        worker_executor,
+    )
+    .await
 }
 
 

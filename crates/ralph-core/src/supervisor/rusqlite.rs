@@ -2142,15 +2142,12 @@ impl SupervisorStore for RusqliteSupervisorStore {
                 slot_index_in_parent: slot_in_parent.map(|v| v as u32),
             };
 
-            // DELETE the row so a second `ralph run --resume`
-            // finds no descriptor (fail-closed at boot, not a
-            // stale re-dispatch).
-            conn.execute(
-                "DELETE FROM slot_descriptors WHERE wave_id = ?1 AND slot_index = ?2",
-                rusqlite::params![child_wave_id, i64::from(slot_index)],
-            )
-            .map_err(|e| SupervisorStoreError::Storage(e.to_string()))?;
-
+            // 2026-07-28-002 plan R4 + review P0: do NOT delete the
+            // descriptor here. Destructive take opened a crash window
+            // (delete → spawn) where resume permanently saw
+            // `DescriptorUnavailable`. Idempotency is "slot left
+            // Pending" — `list_redrive_pending_child_waves` only
+            // returns Pending slots (mirrors in-memory store).
             Ok(RedriveTakeOutcome::Dispatchable { descriptor })
         })
     }
@@ -2163,29 +2160,35 @@ impl SupervisorStore for RusqliteSupervisorStore {
     fn list_redrive_pending_child_waves(&self) -> SupervisorStoreResult<Vec<RedrivePendingChild>> {
         self.with_conn(|conn| {
             let mut stmt = conn.prepare(
-                "SELECT wave_id, parent_wave_id, kind
+                "SELECT wave_id, parent_wave_id, kind, expected_total
                  FROM waves
                  WHERE parent_wave_id IS NOT NULL AND phase = 'dispatch'",
             )?;
-            let children: Vec<(String, String, String)> = stmt
+            let children: Vec<(String, String, String, u32)> = stmt
                 .query_map([], |row| {
                     Ok((
                         row.get::<_, String>(0)?,
                         row.get::<_, String>(1)?,
                         row.get::<_, String>(2)?,
+                        row.get::<_, i64>(3)? as u32,
                     ))
                 })?
                 .filter_map(|r| r.ok())
                 .collect();
 
             let mut results = Vec::new();
-            for (child_wave_id, parent_wave_id, kind_str) in children {
+            for (child_wave_id, parent_wave_id, kind_str, expected_total) in children {
                 let kind = parse_kind(&kind_str)
                     .map_err(|e| SupervisorStoreError::InvalidTransition(e.to_string()))?;
 
-                // Get all slots for this child wave.
-                let mut slot_stmt =
-                    conn.prepare("SELECT slot_index FROM wave_slots WHERE wave_id = ?1")?;
+                // Only Pending slots are boot-dispatchable (plan
+                // idempotency: once try_dispatch_next / terminal
+                // record moves the slot out of Pending, a later
+                // resume must not re-spawn).
+                let mut slot_stmt = conn.prepare(
+                    "SELECT slot_index FROM wave_slots
+                     WHERE wave_id = ?1 AND status = 'pending'",
+                )?;
                 let child_slots: Vec<u32> = slot_stmt
                     .query_map([&child_wave_id], |row| {
                         let idx: i64 = row.get(0)?;
@@ -2246,6 +2249,7 @@ impl SupervisorStore for RusqliteSupervisorStore {
                         child_wave_id,
                         parent_wave_id,
                         kind,
+                        expected_total,
                         slots: enriched_slots,
                     });
                 }

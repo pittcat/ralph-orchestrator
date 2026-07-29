@@ -32,8 +32,8 @@ pub use dispatcher::{
 // stays `pub(crate)` so no new public API escapes the crate.
 pub(crate) use dispatcher::{
     ProductionExecutor, SupervisorFanInOutcome, WaveWorkerExecutor, WorkerRequest,
-    dispatch_pending_redrive_waves, dispatch_redrive_child_wave,
-    execute_wave_via_supervisor_with_executor, run_supervisor_fan_in,
+    boot_dispatch_pending_redrive_if_resuming, dispatch_pending_redrive_waves,
+    dispatch_redrive_child_wave, execute_wave_via_supervisor_with_executor, run_supervisor_fan_in,
 };
 // 2026-07-26-002 plan U8 (R10): expose the shared
 // worker-timeout prefix constant so the wave_supervisor test can

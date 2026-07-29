@@ -344,7 +344,7 @@ Wave worker 走双时钟（仅限 wave worker PTY 路径，不影响主 loop）�
 
   **何时启用**：当 `idle_heartbeat_secs` < backend 冷启动实测 P50 时启用；典型场景是 Claude / Gemini / Codex headless backend 在 spawn 后到第一行输出之间超过 idle 窗口。与 `idle_heartbeat_secs` 同处配置。
 
-  **停止条件**：该字段为 `0` 或省略时,`startup_grace` 关闭,worker 行为退回到仅 StartToClose + idle 语义(无 grace 保护)；预算是「首信号到达之前」,首信号到达后即恢复 idle 语义。预算耗尽后会触发 `startup_kill` 归因(归入 `worker_timeout` family,可在 `ralph wave inspect <wave_id>` 中通过 `worker_timeout/startup_kill` 标签识别),不再自动重派,由 operator 决定 redrive。
+  **停止条件**：该字段为 `0` 或省略时,`startup_grace` 关闭,worker 行为退回到仅 StartToClose + idle 语义(无 grace 保护)；预算是「首信号到达之前」,首信号到达后即恢复 idle 语义。预算耗尽后会触发 `startup_kill` 归因(归入 `worker_timeout` family,可在 `ralph wave inspect <wave_id>` 中通过 `worker_timeout/startup_kill` 标签识别)。触发 `startup_kill` 后按 `worker_timeout` 进入 slot 自动重试(`event_loop.supervisor.slot_retry_budget`,默认 1)；仅预算为 0 或耗尽后才进入人工 redrive。
 
 agent 不需要主动刷 heartbeat：orchestrator 观察 stream JSON 与 `RALPH_EVENTS_FILE` 增长来续租 idle 窗口。worker 看到 `timed_out=true` 且 supervised 路径分类为 `worker_timeout` 时,**同时**可能是硬顶到达(reason 文案 `Worker timed out after Ns without emitting events`)、idle 静默(reason 文案 `idle heartbeat exceeded: Ns since last activity, weak_count=K`)或 startup grace 超时(reason 文案 `Worker timed out after Ns of startup grace (worker_timeout/startup_kill, no first signal)`)。三者下游 family 都对齐 `worker_timeout`,区别仅在 reason 字符串。
 

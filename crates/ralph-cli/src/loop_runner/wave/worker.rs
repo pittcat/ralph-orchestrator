@@ -21,6 +21,26 @@ enum KillReason {
     Startup,
 }
 
+/// Next sleep deadline for the dual-clock lease loop.
+///
+/// While `in_startup_grace` is true (configured grace + no first
+/// qualifying signal yet), idle is excluded: folding a zero
+/// `idle_remaining` into the min caused a busy-wait until grace
+/// expired (review P1#2). After the first signal, restore
+/// `min(hard, idle)`.
+pub(crate) fn next_lease_sleep(
+    hard_remaining: Duration,
+    idle_remaining: Duration,
+    grace_remaining: Duration,
+    in_startup_grace: bool,
+) -> Duration {
+    if in_startup_grace {
+        hard_remaining.min(grace_remaining)
+    } else {
+        hard_remaining.min(idle_remaining)
+    }
+}
+
 use super::io::{
     extract_readable_delta, push_to_wave_worker_buffer, read_worker_events,
     read_worker_events_with_retry, truncate_wave_worker_preview,
@@ -372,6 +392,10 @@ pub async fn run_wave_worker_pty(
             let now = start.elapsed();
             let hard_remaining = hard_deadline.saturating_duration_since(start);
             let now_ms = now.as_millis() as u64;
+            let in_startup_grace = matches!(
+                (startup_grace_ms, lease_state.seen_first_signal),
+                (Some(_), false)
+            );
             let grace_remaining = match (startup_grace_ms, lease_state.seen_first_signal) {
                 (Some(grace_ms), false) => {
                     Duration::from_millis(grace_ms).saturating_sub(Duration::from_millis(now_ms))
@@ -384,7 +408,12 @@ pub async fn run_wave_worker_pty(
                 let elapsed_since_hb = Duration::from_millis(now_ms - lease_state.last_hb_ms);
                 Duration::from_millis(idle_window_ms).saturating_sub(elapsed_since_hb)
             };
-            hard_remaining.min(grace_remaining).min(idle_remaining)
+            next_lease_sleep(
+                hard_remaining,
+                idle_remaining,
+                grace_remaining,
+                in_startup_grace,
+            )
         };
 
         loop {
@@ -655,5 +684,50 @@ pub async fn run_wave_worker_pty(
     } else {
         let _ = tx.send((index, success, duration));
         (index, Ok((events, duration, success)))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::next_lease_sleep;
+    use std::time::Duration;
+
+    #[test]
+    fn grace_phase_excludes_zero_idle_from_deadline() {
+        // Simulate: idle already expired (ZERO), grace still has 180s,
+        // hard has 1800s. Pre-fix this returned ZERO → busy-wait.
+        let sleep = next_lease_sleep(
+            Duration::from_secs(1800),
+            Duration::ZERO,
+            Duration::from_secs(180),
+            true,
+        );
+        assert_eq!(
+            sleep,
+            Duration::from_secs(180),
+            "grace phase must sleep until grace/hard, never idle=0"
+        );
+    }
+
+    #[test]
+    fn post_signal_uses_idle_deadline() {
+        let sleep = next_lease_sleep(
+            Duration::from_secs(1800),
+            Duration::from_secs(30),
+            Duration::from_secs(180), // ignored once grace ended
+            false,
+        );
+        assert_eq!(sleep, Duration::from_secs(30));
+    }
+
+    #[test]
+    fn grace_phase_respects_hard_cap() {
+        let sleep = next_lease_sleep(
+            Duration::from_secs(10),
+            Duration::ZERO,
+            Duration::from_secs(300),
+            true,
+        );
+        assert_eq!(sleep, Duration::from_secs(10));
     }
 }

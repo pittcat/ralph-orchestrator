@@ -1730,7 +1730,8 @@ async fn run_loop_impl_inner(
             crate::loop_runner::paths::config_state_machine_enabled(&config),
         );
         let hat_registry = ralph_core::HatRegistry::from_config(&config);
-        let dispatched = crate::loop_runner::wave::dispatch_pending_redrive_waves(
+        let dispatched = crate::loop_runner::wave::boot_dispatch_pending_redrive_if_resuming(
+            resume,
             store,
             &loop_id,
             &hat_registry,

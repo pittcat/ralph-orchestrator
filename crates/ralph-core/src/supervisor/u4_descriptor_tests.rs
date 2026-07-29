@@ -389,4 +389,81 @@ mod rusqlite_backed_tests {
             "legacy slots surface expected_digest = None for boot fail-close"
         );
     }
+
+    /// Review P0: take must NOT delete the descriptor. Simulates the
+    /// crash window (take → process exit → reopen DB → resume): the
+    /// descriptor must still be Dispatchable so boot can re-dispatch.
+    /// After the slot leaves Pending, list must exclude it (idempotency
+    /// via slot status, not destructive take).
+    #[test]
+    fn rusqlite_take_survives_reopen_crash_window() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("supervisor.db");
+        let digest;
+        let child;
+        {
+            let store = RusqliteSupervisorStore::open(&path).expect("open");
+            let parent = register_exec(&store, "u4r-crash");
+            let payload = r#"{"unit":"crash-window"}"#;
+            digest = SlotDescriptor::digest_of(payload);
+            store
+                .persist_slot_descriptor(
+                    &parent,
+                    &SlotDescriptor {
+                        slot_index: 0,
+                        topic: "exec.unit.ready".to_string(),
+                        payload_json: payload.to_string(),
+                        wave_kind: WaveKind::Exec,
+                        payload_digest: digest.clone(),
+                        slot_index_in_parent: None,
+                    },
+                )
+                .unwrap();
+            store.record_slot_failure(&parent, 0, "synthetic").unwrap();
+            // Fail only slot 0 so the child has one Pending slot.
+            let redrive = store.create_redrive_wave(&parent, Some(&[0])).unwrap();
+            child = redrive.child_wave_id;
+
+            match store
+                .take_dispatchable_redrive_descriptor(&child, 0, digest.as_str())
+                .unwrap()
+            {
+                RedriveTakeOutcome::Dispatchable { .. } => {}
+                other => panic!("expected Dispatchable before crash, got {other:?}"),
+            }
+            // Process "crashes" here — drop store without spawning.
+        }
+
+        // Reopen: descriptor must still be present (no DELETE on take).
+        let store = RusqliteSupervisorStore::open(&path).expect("reopen");
+        match store
+            .take_dispatchable_redrive_descriptor(&child, 0, digest.as_str())
+            .unwrap()
+        {
+            RedriveTakeOutcome::Dispatchable { descriptor: d } => {
+                assert_eq!(d.payload_digest, digest);
+            }
+            other => panic!(
+                "resume after take-without-spawn must still see Dispatchable, got {other:?}"
+            ),
+        }
+        let pending = store.list_redrive_pending_child_waves().unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].expected_total, 1);
+        assert_eq!(pending[0].slots.len(), 1);
+
+        // Mark slot terminal via failure — list must drop it (Pending filter).
+        store
+            .record_slot_failure(&child, 0, "post-reopen-terminal")
+            .unwrap();
+        let pending_after = store.list_redrive_pending_child_waves().unwrap();
+        assert!(
+            pending_after
+                .iter()
+                .all(|c| c.child_wave_id != child || c.slots.is_empty())
+                || pending_after.is_empty()
+                || pending_after.iter().all(|c| c.child_wave_id != child),
+            "non-Pending slots must leave the boot pending list; got {pending_after:?}"
+        );
+    }
 }

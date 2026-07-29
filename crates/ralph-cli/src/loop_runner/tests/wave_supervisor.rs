@@ -6992,7 +6992,7 @@ async fn test_s4_no_descriptor_is_fail_closed() {
     let events_file = tmp_dir.path().join("events.jsonl");
     std::fs::File::create(&events_file).expect("create events file");
 
-    dispatch_pending_redrive_waves(
+    let dispatched = dispatch_pending_redrive_waves(
         &store,
         "s4-loop",
         &hat_registry,
@@ -7002,16 +7002,17 @@ async fn test_s4_no_descriptor_is_fail_closed() {
         std::sync::Arc::new(crate::loop_runner::wave::ProductionExecutor),
     )
     .await;
+    assert_eq!(dispatched, 0, "S4: no worker may spawn without a descriptor");
 
-    // 6. After dispatch, the pending child should STILL be in the list
-    //    (the slot was skipped due to fail-close).
+    // A3: fail-close records `slot_never_started` so the slot leaves
+    // Pending (and therefore leaves the boot pending list). A silent
+    // Pending row would forever reappear on every --resume.
     let pending_after = store
         .list_redrive_pending_child_waves()
         .expect("list after");
-    assert_eq!(
-        pending_after.len(),
-        1,
-        "S4 fail-close: child must remain pending after skip"
+    assert!(
+        pending_after.is_empty(),
+        "S4 fail-close must terminalize the slot (Pending filter); got {pending_after:?}"
     );
 }
 
@@ -7843,11 +7844,12 @@ async fn test_s2a_persist_failure_fails_closed_no_spawn() {
 // slot index (C3: multi-slot child waves must bind 0/1/2, not 0/0/0).
 // =============================================================================
 
-/// Executor that records the slot index of every spawn request, so
-/// tests can assert the dispatcher bound the true child slot index.
+/// Executor that records the slot index and wave_total (from the
+/// worker prompt `worker **i/N**` line) of every spawn request.
 #[derive(Clone, Default)]
 struct U4SlotRecordingExecutor {
     indices: std::sync::Arc<std::sync::Mutex<Vec<u32>>>,
+    totals: std::sync::Arc<std::sync::Mutex<Vec<u32>>>,
 }
 
 impl WaveWorkerExecutor for U4SlotRecordingExecutor {
@@ -7856,8 +7858,22 @@ impl WaveWorkerExecutor for U4SlotRecordingExecutor {
         mut request: crate::loop_runner::wave::WorkerRequest,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = (u32, WaveWorkerOutcome)> + Send>> {
         let indices = std::sync::Arc::clone(&self.indices);
+        let totals = std::sync::Arc::clone(&self.totals);
         Box::pin(async move {
             indices.lock().unwrap().push(request.index);
+            // Prompt line: "You are worker **{i}/{total}** in wave ..."
+            let total = request
+                .prompt
+                .lines()
+                .find_map(|line| {
+                    let start = line.find("worker **")?;
+                    let rest = &line[start + "worker **".len()..];
+                    let (_idx, after_slash) = rest.split_once('/')?;
+                    let (total_s, _) = after_slash.split_once("**")?;
+                    total_s.parse::<u32>().ok()
+                })
+                .unwrap_or(0);
+            totals.lock().unwrap().push(total);
             let _ = request.worker_rpc_tx.take();
             let _ = request.worker_tui_state.take();
             let event = ralph_core::Event {
@@ -7955,10 +7971,12 @@ async fn test_u4_redrive_boot_dispatch_in_memory_multi_slot() {
     let parent = make_redrive_parent_with_descriptors(store.as_ref(), "u4-boot", 3, true);
     let redrive = store.create_redrive_wave(&parent, Some(&[0, 1, 2])).unwrap();
 
-    // Sanity: the enriched pending list sees all 3 child slots with digests.
+    // Sanity: the enriched pending list sees all 3 child slots with digests
+    // and the child wave's true expected_total (R9).
     let pending = store.list_redrive_pending_child_waves().unwrap();
     assert_eq!(pending.len(), 1, "one pending child wave expected");
     assert_eq!(pending[0].child_wave_id, redrive.child_wave_id);
+    assert_eq!(pending[0].expected_total, 3, "R9: list must carry child.expected_total");
     assert_eq!(pending[0].slots.len(), 3);
     assert!(
         pending[0].slots.iter().all(|s| s.expected_digest.is_some()),
@@ -7991,6 +8009,7 @@ async fn test_u4_redrive_boot_dispatch_in_memory_multi_slot() {
     let events_path = tmp.path().join("events.jsonl");
     let executor = U4SlotRecordingExecutor::default();
     let recorded = executor.indices.clone();
+    let recorded_totals = executor.totals.clone();
 
     let dispatched = crate::loop_runner::wave::dispatch_pending_redrive_waves(
         &store,
@@ -8011,6 +8030,11 @@ async fn test_u4_redrive_boot_dispatch_in_memory_multi_slot() {
         vec![0, 1, 2],
         "C3: each child slot must spawn under its own slot index, not all slot 0"
     );
+    let totals = recorded_totals.lock().unwrap().clone();
+    assert!(
+        totals.iter().all(|&t| t == 3),
+        "R9: worker prompt must see wave_total=child.expected_total (3), got {totals:?}"
+    );
 
     // Idempotency (R-F5): descriptors were consumed by `take`; a second
     // boot scan (simulating a later `ralph run --resume`) finds nothing
@@ -8027,13 +8051,66 @@ async fn test_u4_redrive_boot_dispatch_in_memory_multi_slot() {
     .await;
     assert_eq!(
         again, 0,
-        "resume after successful dispatch must not re-spawn (take consumed descriptors)"
+        "resume after successful dispatch must not re-spawn (Pending filter consumed slots)"
     );
     assert_eq!(
         recorded.lock().unwrap().len(),
         3,
         "second scan must not add spawn requests"
     );
+}
+
+/// S6 / review P1#4: the runner boot seam must refuse to scan when
+/// `resume=false`, even if the store already holds a pending redrive
+/// child (fresh-boot exclusion).
+#[tokio::test]
+async fn test_boot_redrive_skipped_when_not_resuming() {
+    use ralph_core::supervisor::{InMemorySupervisorStore, SupervisorStore};
+    use std::sync::Arc;
+
+    let store: Arc<dyn SupervisorStore> = Arc::new(InMemorySupervisorStore::new());
+    let parent = make_redrive_parent_with_descriptors(store.as_ref(), "s6-fresh", 1, true);
+    let redrive = store.create_redrive_wave(&parent, None).unwrap();
+    store
+        .bind_worktree(
+            &redrive.child_wave_id,
+            0,
+            ralph_core::supervisor::SlotResource {
+                slot_index: 0,
+                worktree_path: Some("/tmp/s6-fresh/0".into()),
+                branch: Some("s6-fresh-0".into()),
+            },
+        )
+        .unwrap();
+
+    let bridge: Arc<dyn ralph_core::supervisor::SupervisorBridge> =
+        Arc::new(U3DispatchBridge::new(store.clone(), 4));
+    let registry = redrive_test_registry();
+    let backend = make_test_cli_backend();
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let events_path = tmp.path().join("events.jsonl");
+    let executor = U4SlotRecordingExecutor::default();
+    let recorded = executor.indices.clone();
+
+    let dispatched = crate::loop_runner::wave::boot_dispatch_pending_redrive_if_resuming(
+        false, // fresh boot
+        &store,
+        "loop-s6-fresh",
+        &registry,
+        &backend,
+        &bridge,
+        &events_path,
+        Arc::new(executor),
+    )
+    .await;
+    assert_eq!(dispatched, 0, "fresh boot must not consume pending redrive");
+    assert!(
+        recorded.lock().unwrap().is_empty(),
+        "fresh boot must not spawn redrive workers"
+    );
+    // Store still holds the pending child for a later --resume.
+    let pending = store.list_redrive_pending_child_waves().unwrap();
+    assert_eq!(pending.len(), 1);
 }
 
 /// S4 fail-closed: a legacy parent whose slots never persisted
