@@ -46,7 +46,7 @@ metadata:
 
 对每条 `rules.<X>`：
 
-1. 原 producer 的 `publishes`/`terminal_events` 里的 `<X>` 被改写为 `<X>.proposed`
+1. 原 producer 的 `publishes`/`terminal_events` 里的 `<X>` 被改写为 `<X>.proposed`；若 producer 声明了 `default_publishes: <X>`（沉默时 runtime 兜底注入的 topic），同样改写为 `<X>.proposed` —— 兜底注入也必须过 gate，不会绕过审计直达下游
 2. 合成 hat `precheck-<X>`：`triggers=[<X>.proposed]`，`publishes=[<X>, <X>.rejected]`
 3. producer 发 `<X>.proposed` → gate hat 激活一轮 → 过则发 `<X>`，不过则发 `<X>.rejected`
 4. `<X>.rejected` → runtime 自动 `task.resume(target=on_fail.target)`；`retry_budget`（再试上限）耗尽 → 执行 `on_exhausted`（默认 `plan.blocked(reason=precheck_failed)`）

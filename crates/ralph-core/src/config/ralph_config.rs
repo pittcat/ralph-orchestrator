@@ -143,6 +143,10 @@ impl RalphConfig {
     ///    `terminal_events` contains `X` so those entries become
     ///    `X.proposed`. Consumer hats (which only reference `X` in
     ///    their `triggers`) are NOT touched.
+    /// 1b. Rewrite `default_publishes: X` to `X.proposed` as well —
+    ///    the runtime fallback injection must pass through the same
+    ///    gate as a producer emit, otherwise a silent hat's fallback
+    ///    event bypasses evidence audit / retry budget / escalation.
     /// 2. Synthesize a new hat `precheck-<X>` that:
     ///    - triggers on `X.proposed`,
     ///    - publishes `X` and `X.rejected`,
@@ -171,9 +175,22 @@ impl RalphConfig {
             for (hat_id, hat) in &mut self.hats {
                 let publishes_topic = hat.publishes.iter().any(|p| p == topic);
                 let terminal_topic = hat.terminal_events.iter().any(|t| t == topic);
+                let default_topic = hat.default_publishes.as_deref() == Some(topic.as_str());
 
-                if !publishes_topic && !terminal_topic {
+                if !publishes_topic && !terminal_topic && !default_topic {
                     continue;
+                }
+
+                // `default_publishes` is a runtime fallback emit path
+                // (`check_default_publishes` injects the topic directly onto
+                // the bus when the hat wrote no events). Without this rewrite
+                // the injected bare `<X>` bypasses the gate entirely: the gate
+                // only triggers on `<X>.proposed`, so the fallback event would
+                // reach downstream consumers with no evidence audit, no retry
+                // budget, and no `plan.blocked` escalation. Route the fallback
+                // through the same gate as a producer emit.
+                if default_topic {
+                    hat.default_publishes = Some(proposed.clone());
                 }
 
                 if publishes_topic {
@@ -4407,6 +4424,88 @@ hats:
             !builder.publishes.contains(&"build.done".to_string()),
             "builder must no longer publish raw topic; got {:?}",
             builder.publishes
+        );
+    }
+
+    /// `default_publishes` fallback must route through the gate too:
+    /// a silent hat's runtime-injected event lands directly on the bus,
+    /// so a bare `<X>` default would bypass evidence audit, retry budget,
+    /// and `plan.blocked` escalation. The desugar rewrites it to
+    /// `<X>.proposed` so the injection triggers the gate hat.
+    #[test]
+    fn precheck_desugar_rewrites_default_publishes() {
+        let yaml = r#"
+event_loop:
+  precheck:
+    enabled: true
+    rules:
+      work.failed:
+        prompt:
+          - "Evidence file exists"
+        on_fail:
+          target: "executor"
+hats:
+  executor:
+    name: "Executor"
+    description: "exec"
+    triggers: ["work.start"]
+    publishes: ["work.done", "work.failed"]
+    default_publishes: "work.failed"
+"#;
+        let mut cfg = RalphConfig::parse_yaml(yaml).expect("parse");
+        cfg.normalize();
+
+        let executor = cfg.hats.get("executor").expect("executor hat");
+        assert_eq!(
+            executor.default_publishes.as_deref(),
+            Some("work.failed.proposed"),
+            "default_publishes must be rewritten to the proposed variant"
+        );
+        // Gate-1 scope invariant in `check_default_publishes`: the default
+        // topic must remain a member of the hat's publishes after desugar.
+        assert!(
+            executor
+                .publishes
+                .contains(&"work.failed.proposed".to_string()),
+            "publishes must contain the proposed variant; got {:?}",
+            executor.publishes
+        );
+        assert!(
+            cfg.hats.contains_key("precheck-work.failed"),
+            "gate hat must be synthesized"
+        );
+    }
+
+    /// A hat whose `default_publishes` is NOT guarded by any precheck
+    /// rule keeps its raw default topic (no spurious rewrite).
+    #[test]
+    fn precheck_desugar_leaves_unguarded_default_publishes_untouched() {
+        let yaml = r#"
+event_loop:
+  precheck:
+    enabled: true
+    rules:
+      work.failed:
+        prompt:
+          - "Evidence file exists"
+        on_fail:
+          target: "executor"
+hats:
+  executor:
+    name: "Executor"
+    description: "exec"
+    triggers: ["work.start"]
+    publishes: ["work.done", "work.failed"]
+    default_publishes: "work.done"
+"#;
+        let mut cfg = RalphConfig::parse_yaml(yaml).expect("parse");
+        cfg.normalize();
+
+        let executor = cfg.hats.get("executor").expect("executor hat");
+        assert_eq!(
+            executor.default_publishes.as_deref(),
+            Some("work.done"),
+            "unguarded default topic must stay raw"
         );
     }
 
