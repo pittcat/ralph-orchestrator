@@ -1,0 +1,103 @@
+# plan 2026-07-29-001 U7: ce-executor-pipeline fail-gate rejected→pass path.
+#
+# Flow after normalize():
+#   executor publishes work.failed.proposed (with the three new required
+#   dead_end_* fields) → precheck-work.failed gate rejects once with
+#   failed_checks → runtime task.resume → executor re-emits
+#   work.failed.proposed → gate forwards work.failed verbatim →
+#   reporter consumes work.failed and emits report.done + LOOP_COMPLETE.
+
+name: ce_executor_pipeline_fail_gate_rejected_then_pass
+description: ce-executor-pipeline fail gate rejects once, executor resumes, gate forwards
+
+config:
+  prompt_file: PROMPT.md
+  max_iterations: 8
+  hats:
+    executor:
+      name: "Executor"
+      subscribes_to:
+        - task.start
+        - task.resume
+      publishes:
+        - work.failed
+    reporter:
+      name: "Reporter"
+      subscribes_to:
+        - work.failed
+      publishes:
+        - report.done
+        - LOOP_COMPLETE
+  event_loop:
+    execution_mode: isolated
+    starting_event: "task.start"
+    completion_promise: "LOOP_COMPLETE"
+    precheck:
+      enabled: true
+      rules:
+        work.failed:
+          prompt:
+            - "evidence-backed dead-end audit"
+          on_fail:
+            target: executor
+            retry_budget: 3
+            on_exhausted: "plan.blocked(reason=precheck_failed)"
+            reason: "dead_end_evidence_insufficient"
+    event_policy:
+      enabled: true
+      mode: enforce
+      on_violation: reject_with_resume
+      schemas:
+        task.start:
+          payload: json_object
+        work.failed:
+          required_fields:
+            - plan_name
+            - dead_end_confidence
+            - dead_end_evidence_coverage
+            - dead_end_evidence_file
+        report.done:
+          payload: json_object
+
+mock_responses:
+  - hat: executor
+    text: |
+      <event topic="work.failed.proposed">
+      {"plan_name":"demo","dead_end_confidence":60,"dead_end_evidence_coverage":40,"dead_end_evidence_file":".ralph/review/demo/dead-end-evidence.md"}
+      </event>
+  - hat: precheck-work.failed
+    text: |
+      <event topic="work.failed.rejected">
+      {"failed_checks":["confidence_inflated"],"reason":"confidence 60 < 90 — keep retrying","synthetic":false}
+      </event>
+  - hat: executor
+    text: |
+      <event topic="work.failed.proposed">
+      {"plan_name":"demo","dead_end_confidence":92,"dead_end_evidence_coverage":80,"dead_end_evidence_file":".ralph/review/demo/dead-end-evidence.md"}
+      </event>
+  - hat: precheck-work.failed
+    text: |
+      <event topic="work.failed">
+      {"plan_name":"demo","dead_end_confidence":92,"dead_end_evidence_coverage":80,"dead_end_evidence_file":".ralph/review/demo/dead-end-evidence.md"}
+      </event>
+  - hat: reporter
+    text: |
+      <event topic="report.done">
+      {"verdict":"blocked","plan_name":"demo"}
+      </event>
+  - hat: reporter
+    text: |
+      <event topic="LOOP_COMPLETE">
+      {"reason":"reported"}
+      </event>
+
+expected:
+  iterations: 6
+  events:
+    - topic: work.failed.proposed
+    - topic: work.failed.rejected
+    - topic: work.failed
+    - topic: report.done
+  absent_events:
+    - topic: plan.blocked
+  completion: true

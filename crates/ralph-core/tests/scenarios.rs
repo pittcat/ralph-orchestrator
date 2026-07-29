@@ -3952,6 +3952,26 @@ fn test_precheck_gate_exhaust() {
     run_workflow_guard_scenario(yaml);
 }
 
+/// plan 2026-07-29-001 U7: ce-executor-pipeline fail-gate rejected→pass path.
+/// Executor's `work.failed.proposed` is rejected once by the synthesized
+/// precheck gate, then re-emitted with sufficient evidence and forwarded.
+#[test]
+fn test_ce_executor_pipeline_fail_gate_rejected_then_pass() {
+    let yaml = load_scenario(
+        "tests/scenarios/ce_executor_pipeline_fail_gate_rejected_then_pass.yml",
+    );
+    run_workflow_guard_scenario(yaml);
+}
+
+/// plan 2026-07-29-001 U7: ce-executor-pipeline fail-gate exhaust path.
+/// Three consecutive rejections burn the retry budget; runtime emits
+/// plan.blocked(kind=precheck_exhausted) and work.failed never lands.
+#[test]
+fn test_ce_executor_pipeline_fail_gate_exhaust() {
+    let yaml = load_scenario("tests/scenarios/ce_executor_pipeline_fail_gate_exhaust.yml");
+    run_workflow_guard_scenario(yaml);
+}
+
 // 2026-07-04-002 plan U9 (R11 BDD): ME-1 macro-edge next_hint
 // → ## NEXT ACTION prompt injection。Emitter hat 在 business
 // event payload 携带 `next_hint`;下游 hat 的 prompt 顶部应当
