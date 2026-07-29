@@ -309,6 +309,23 @@ work.done / fix.done
 > 与 `ralph-preset-review` 沟通，确认单链语义确实表达不了，再立项。
 > `references/finding-rubric.md` 的「Single-chain-first audit」段列出对应 finding。
 
+## Re-entry dirty-worktree reconciliation pattern（Step 1.25，2026-07-28-002）
+
+写入型 executor hat（如 `ce-executor-pipeline` 的 executor）在**再入激活**（loop 重启 / resume / 崩溃恢复后重新进入同一 worktree）时，工作区可能残留上一次激活未提交的脏改动。preset 的 executor instructions 必须包含 Step 1.25「Re-entry Dirty-Worktree Reconciliation」协议，核心契约：
+
+- **先只读盘点，后归因**：`git status --porcelain --untracked-files=all` + `git diff` / `git diff --cached` + `.ralph/agent/decisions.md` checkpoint 行 + `git log <DIFF_BASE>..HEAD`，把脏路径集合映射到 plan 的剩余 U-ID（按 Unit 白名单文件 + approach + checkpoint 记录）。
+- **唯一归属 → 续做不重放**：脏改动恰好归属一个 U-ID 且无矛盾编辑时，追加 `executor re-entry:` 决策行，把现有 diff 当作该 U-ID 的进行中起点，要求子代理检查、补完、测试后合并提交一次；**不得**重放已存在的编辑。
+- **不可归属 → 原样保留 + fail-closed**：归属歧义、跨 U 部分改动、无关 operator 改动、冲突标记或不可读 untracked 内容时，追加 `executor re-entry blocked:` 决策行，**严禁** reset / restore / checkout / clean / stash / overwrite / delete / stage / commit 这些改动；仅在已有匹配 U-ID commit 时发 `work.done` partial，否则发 `work.failed` 且 `reason: "unattributable_dirty_worktree: <paths>"`。
+- **基线重定义**：可归属脏树接管后，baseline 描述的是续做后的 worktree 状态，必须在 `baseline-verification.md` 记录 `baseline_context: resumed_attributable_dirty_worktree`。
+
+**评审检查点**（ralph-preset-review 对写入型 executor hat 的 AAF 扩展轴）：
+
+- executor instructions 缺少再入脏树盘点步骤 → `executor_reentry_reconciliation_missing`（P1）；
+- instructions 允许对不可归属脏改动执行破坏性 git 操作（reset/checkout/clean/stash/overwrite）→ `executor_reentry_destructive_on_unattributable`（P0）；
+- 不可归属分支没有 fail-closed 终态（既不 `work.failed` 也不 partial）→ `executor_reentry_no_fail_closed`（P0）。
+
+正/反例见 `fixtures/reentry-dirty-worktree-positive-fixture.yml` 与 `fixtures/reentry-dirty-worktree-negative-fixture.yml`。
+
 ## Wave worker 双时钟（hat 级 idle_heartbeat_secs + startup_grace_secs）
 
 Wave worker 走双时钟（仅限 wave worker PTY 路径，不影响主 loop `PtyExecutor`），

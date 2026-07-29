@@ -259,6 +259,15 @@ impl CoordinatorSupervisorBridge {
 }
 
 impl SupervisorBridge for CoordinatorSupervisorBridge {
+    fn store(&self) -> Option<std::sync::Arc<dyn ralph_core::supervisor::SupervisorStore>> {
+        // 2026-07-28-002 fix A0 (R-F3): do NOT call `self.store()`
+        // inside this trait impl — Rust resolves the bare name to
+        // the trait method, causing infinite recursion. Forward
+        // to the inherent accessor `CoordinatorSupervisorBridge::store`
+        // via UFCS to break the cycle.
+        Some(CoordinatorSupervisorBridge::store(self))
+    }
+
     fn tick(&self, wave_id: &str, inputs: PhaseInputs) -> Result<CoordinatorAction, BridgeError> {
         self.coordinator
             .tick(wave_id, inputs)
@@ -370,7 +379,7 @@ impl SupervisorBridge for CoordinatorSupervisorBridge {
         // storage. The factory contract is the same: success
         // yields a `Worktree { path, branch }`, failure yields
         // `BridgeError::Store`.
-        let branch = format!("{}-{}-{}", ctx.loop_id, kind, slot_index);
+        let branch = format!("{}-{}-{}-{}", ctx.loop_id, kind, wave_id, slot_index);
         let wt = self
             .factory
             .create(ctx.repo_root.clone(), branch.clone())

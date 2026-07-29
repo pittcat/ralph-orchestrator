@@ -475,7 +475,7 @@ pub fn list_ralph_worktrees(repo_root: impl AsRef<Path>) -> Result<Vec<Worktree>
 
 /// Information about a reusable worktree found via prefix matching.
 ///
-/// Returned by [`find_reusable_worktree`]. Holds enough information for
+/// Returned by [`find_reusable_worktree_by_name`]. Holds enough information for
 /// the caller to construct a `LoopContext::worktree(...)` and register a
 /// new loop entry without re-creating the git worktree.
 #[derive(Debug, Clone)]
@@ -508,160 +508,6 @@ impl ReusableWorktree {
     }
 }
 
-/// Find a reusable worktree for reuse mode (`--reuse-worktree`).
-///
-/// Scans `.ralph/loops.json` for completed worktree entries whose loop ID
-/// (or the suffix of the `ralph/<id>` branch) starts with `prefix` and
-/// returns the most recent match. Cross-validates against
-/// `git worktree list --porcelain` to ensure git also knows the worktree.
-///
-/// # Semantics
-///
-/// - Only entries with `worktree_path == Some(_)` are considered (primary
-///   loops running in the main workspace are excluded).
-/// - Only entries whose PID is no longer alive (the loop has finished or
-///   crashed) are considered. The combined `is_alive()` check (PID +
-///   directory existence) is the canonical "completed" detector.
-/// - If the recorded `worktree_path` no longer exists on disk, the entry
-///   is silently skipped — these are zombie records and we want to fall
-///   through to "create new worktree" rather than fail.
-/// - The worktree must also appear in `git worktree list` output, so we
-///   never reuse a path that git has forgotten about.
-/// - When multiple entries match the same prefix, the one with the most
-///   recent `started` timestamp wins.
-///
-/// # Arguments
-///
-/// * `repo_root` - Root of the git repository (used to locate
-///   `.ralph/loops.json` and to invoke `git worktree list`).
-/// * `prefix` - Loop name prefix to match against (the same prefix used
-///   by `LoopNameGenerator::generate_unique_with_prefix`).
-///
-/// # Returns
-///
-/// - `Ok(Some(_))` if a completed, git-known worktree matches.
-/// - `Ok(None)` if no entry matches, all matches have stale directories,
-///   or the registry is missing/empty.
-/// - `Err(_)` only on I/O errors reading the registry or running git.
-pub fn find_reusable_worktree(
-    repo_root: impl AsRef<Path>,
-    prefix: &str,
-) -> Result<Option<ReusableWorktree>, WorktreeError> {
-    if prefix.is_empty() {
-        return Ok(None);
-    }
-
-    let repo_root = repo_root.as_ref();
-    let registry_path = repo_root.join(".ralph").join("loops.json");
-
-    // Missing registry ⇒ nothing to reuse, but not an error.
-    if !registry_path.exists() {
-        return Ok(None);
-    }
-
-    let entries: Vec<LoopEntry> = read_loop_registry_entries(&registry_path)?;
-    if entries.is_empty() {
-        return Ok(None);
-    }
-
-    // Pre-compute the set of git-known worktree paths for cross-validation.
-    // `git worktree list` reports canonicalized paths (e.g. on macOS the
-    // `/var` symlink resolves to `/private/var`), but registry entries
-    // store whatever absolute path the original loop happened to be
-    // running with. Canonicalize both sides so symlinked prefixes don't
-    // cause spurious mismatches.
-    let known_paths: HashSet<PathBuf> = match list_worktrees(repo_root) {
-        Ok(list) => list
-            .into_iter()
-            .map(|wt| canonicalize_for_compare(&wt.path))
-            .collect(),
-        Err(_) => HashSet::new(),
-    };
-
-    // Iterate once; the last-write-wins in chronological order is fine
-    // because we walk `entries` in the order they were registered, and
-    // tie-break by comparing `started` timestamps explicitly.
-    let mut best: Option<(DateTime<Utc>, ReusableWorktree)> = None;
-    for entry in entries {
-        let wt_path = match &entry.worktree_path {
-            Some(p) => PathBuf::from(p),
-            None => continue, // skip primary (non-worktree) loops
-        };
-
-        // Extract the loop ID component (worktree dir name).
-        let loop_id = match wt_path.file_name().and_then(|n| n.to_str()) {
-            Some(name) => name.to_string(),
-            None => continue,
-        };
-
-        // Match by loop ID (the most common case). The branch name
-        // `ralph/<id>` is derivable from the directory name so we do
-        // not need a separate prefix match.
-        if !loop_id.starts_with(prefix) && !entry.id.starts_with(prefix) {
-            continue;
-        }
-
-        // Reuse is opt-in for completed worktrees only. `is_alive()` is
-        // the canonical "is this loop still running?" check used
-        // throughout the registry; for worktree entries it combines
-        // PID liveness with directory existence.
-        if entry.is_alive() {
-            continue;
-        }
-
-        // The recorded worktree_path must still exist on disk.
-        if !wt_path.is_dir() {
-            tracing::debug!(
-                "Skipping reusable candidate {}: directory no longer exists",
-                wt_path.display()
-            );
-            continue;
-        }
-
-        // Cross-validate against git's view of the worktrees. If git
-        // has pruned the worktree, the branch ref is unreliable. We
-        // canonicalize the candidate path so symlinked prefixes (the
-        // classic example being `/var` ↔ `/private/var` on macOS) do
-        // not produce false negatives.
-        let candidate_canonical = canonicalize_for_compare(&wt_path);
-        if !known_paths.is_empty() && !known_paths.contains(&candidate_canonical) {
-            tracing::debug!(
-                "Skipping reusable candidate {}: not in git worktree list",
-                wt_path.display()
-            );
-            continue;
-        }
-
-        let candidate = ReusableWorktree {
-            path: wt_path.clone(),
-            branch: format!("ralph/{loop_id}"),
-            loop_id: loop_id.clone(),
-            started: entry.started,
-            head: get_head_commit(&wt_path).ok(),
-        };
-
-        match &best {
-            Some((existing_started, _)) if *existing_started >= candidate.started => {
-                // keep existing
-            }
-            _ => best = Some((entry.started, candidate)),
-        }
-    }
-
-    Ok(best.map(|(_, w)| w))
-}
-
-/// Find a reusable worktree by its exact loop/worktree name.
-///
-/// This is the precise-match counterpart to [`find_reusable_worktree`].
-/// It is used when the operator passes `--worktree-name <name>` together
-/// with `--reuse-worktree`: we look for a registry entry whose loop ID
-/// or worktree directory name equals `name`, verify the loop is no longer
-/// alive, and cross-check the directory against `git worktree list`.
-///
-/// Returns `Ok(Some(_))` if a matching, reusable worktree is found;
-/// `Ok(None)` if no such worktree exists or the directory is gone;
-/// `Err(_)` if the worktree is still in use by a live loop.
 pub fn find_reusable_worktree_by_name(
     repo_root: impl AsRef<Path>,
     name: &str,
@@ -764,13 +610,7 @@ fn read_loop_registry_entries(registry_path: &Path) -> Result<Vec<LoopEntry>, Wo
     // `LoopRegistry::list()` because that method takes the registry
     // write-lock and prunes entries whose PID is no longer alive,
     // which would erase the very entries we are trying to find
-    // (completed worktree loops). `find_reusable_worktree` is a
-    // read-only lookup; performing its own filtering means the
-    // registry can keep its auto-cleanup invariant intact.
-    // `LoopRegistry::list()` because that method takes the registry
-    // write-lock and prunes entries whose PID is no longer alive,
-    // which would erase the very entries we are trying to find
-    // (completed worktree loops). `find_reusable_worktree` is a
+    // (completed worktree loops). `find_reusable_worktree_by_name` is a
     // read-only lookup; performing its own filtering means the
     // registry can keep its auto-cleanup invariant intact.
     let contents = fs::read_to_string(registry_path).map_err(|e| {
@@ -865,7 +705,7 @@ fn archive_files_matching(
 /// Clean Ralph runtime artifacts from an existing worktree directory
 /// in preparation for reuse.
 ///
-/// `find_reusable_worktree` finds a worktree that was previously used
+/// `find_reusable_worktree_by_name` matches a worktree that was previously used
 /// by a finished loop. The directory still contains that loop's
 /// event history, scratchpad, tasks, and diagnostics. We move those
 /// records into `.ralph/reuse-history/<timestamp>/` before clearing
@@ -1754,31 +1594,9 @@ branch refs/heads/ralph/loop-1
         assert_eq!(stats.errors, 0);
     }
 
-    // -------------------------------------------------------------------------
-    // U1: find_reusable_worktree tests
-    // -------------------------------------------------------------------------
-
-    /// Helper: write a completed LoopEntry into `.ralph/loops.json` for a
-    /// real, on-disk worktree directory.
-    ///
-    /// We bypass `LoopRegistry::register()` on purpose: that method takes
-    /// the registry write-lock and prunes dead-PID entries inside
-    /// `with_lock`, which would erase the very entry we are trying to
-    /// stage. A read-only caller (`find_reusable_worktree`) must be
-    /// able to see completed entries without first triggering the
-    /// registry's auto-cleanup. The test therefore writes the JSON file
-    /// directly using the same on-disk shape the registry uses, so the
-    /// lookup code path is exercised end-to-end.
-    ///
-    /// The PID is set to a sentinel that is not running on any test
-    /// machine, so the entry behaves as "completed" (`is_alive() ==
-    /// false`) without us having to wait for a real process to exit.
-    /// We use a value above Linux's `PID_MAX_LIMIT` (typically 4_194_304
-    /// on 64-bit systems, much lower on 32-bit) so that `kill(pid,
-    /// None)` returns ESRCH and `is_alive()` reports the process as
-    /// dead. A value with the high bit set (e.g. `0x7fff_ffff`) would
-    /// wrap into a negative `i32` and be interpreted by `kill(2)` as
-    /// "send to process group -1", which falsely succeeds.
+    /// Write a completed LoopEntry into `.ralph/loops.json` directly,
+    /// bypassing `LoopRegistry::register()`'s write-lock + auto-cleanup
+    /// that would erase the entry we are trying to stage.
     const DEAD_PID_SENTINEL: u32 = 4_194_305;
     fn register_completed_entry(
         repo_root: &Path,
@@ -1808,166 +1626,6 @@ branch refs/heads/ralph/loop-1
         let loops = vec![entry];
         let json = serde_json::to_string_pretty(&Wrapper { loops: &loops }).unwrap();
         fs::write(&registry_path, json).unwrap();
-    }
-
-    #[test]
-    fn test_find_reusable_worktree_happy_path() {
-        let temp_dir = TempDir::new().unwrap();
-        init_git_repo(temp_dir.path());
-
-        // Create a real worktree (git knows about it)
-        let config = WorktreeConfig::default();
-        let worktree =
-            create_worktree(temp_dir.path(), "fix-header-swift-peacock", &config).unwrap();
-
-        // Register a completed entry pointing at that worktree
-        register_completed_entry(
-            temp_dir.path(),
-            "fix-header-swift-peacock",
-            &worktree.path,
-            Utc::now() - chrono::Duration::seconds(60),
-        );
-
-        // Look up by prefix that matches the loop_id
-        let result = find_reusable_worktree(temp_dir.path(), "fix-header").unwrap();
-        assert!(result.is_some(), "expected a reusable worktree");
-        let reusable = result.unwrap();
-        assert_eq!(reusable.loop_id, "fix-header-swift-peacock");
-        assert_eq!(reusable.path, worktree.path);
-        assert_eq!(reusable.branch, "ralph/fix-header-swift-peacock");
-    }
-
-    #[test]
-    fn test_find_reusable_worktree_no_match_returns_none() {
-        let temp_dir = TempDir::new().unwrap();
-        init_git_repo(temp_dir.path());
-
-        // No registry, no worktree — should be a clean None.
-        let result = find_reusable_worktree(temp_dir.path(), "does-not-exist").unwrap();
-        assert!(result.is_none());
-    }
-
-    #[test]
-    fn test_find_reusable_worktree_picks_most_recent() {
-        let temp_dir = TempDir::new().unwrap();
-        init_git_repo(temp_dir.path());
-
-        let config = WorktreeConfig::default();
-        let older = create_worktree(temp_dir.path(), "fix-header-swift-peacock", &config).unwrap();
-        let newer = create_worktree(temp_dir.path(), "fix-header-bright-falcon", &config).unwrap();
-
-        let older_started = Utc::now() - chrono::Duration::seconds(120);
-        let newer_started = Utc::now() - chrono::Duration::seconds(10);
-
-        register_completed_entry(
-            temp_dir.path(),
-            "fix-header-swift-peacock",
-            &older.path,
-            older_started,
-        );
-        register_completed_entry(
-            temp_dir.path(),
-            "fix-header-bright-falcon",
-            &newer.path,
-            newer_started,
-        );
-
-        let result = find_reusable_worktree(temp_dir.path(), "fix-header").unwrap();
-        let reusable = result.expect("expected a reusable worktree");
-        assert_eq!(
-            reusable.loop_id, "fix-header-bright-falcon",
-            "the more recently started worktree should win"
-        );
-    }
-
-    #[test]
-    fn test_find_reusable_worktree_excludes_alive_entry() {
-        // An entry whose PID is still alive must NOT be considered for
-        // reuse. The test mirrors the live-LoopEntry contract by writing
-        // a registry entry with the current PID, which is always alive.
-        let temp_dir = TempDir::new().unwrap();
-        init_git_repo(temp_dir.path());
-
-        let config = WorktreeConfig::default();
-        let worktree =
-            create_worktree(temp_dir.path(), "fix-header-swift-peacock", &config).unwrap();
-
-        let registry = crate::loop_registry::LoopRegistry::new(temp_dir.path());
-        let entry = crate::loop_registry::LoopEntry::with_id(
-            "fix-header-swift-peacock",
-            "running prompt",
-            Some(worktree.path.to_string_lossy().to_string()),
-            worktree.path.to_string_lossy().to_string(),
-        );
-        registry.register(entry).unwrap();
-
-        // Same prefix, but the live entry must be filtered out.
-        let result = find_reusable_worktree(temp_dir.path(), "fix-header").unwrap();
-        assert!(
-            result.is_none(),
-            "a still-running worktree should not be reusable"
-        );
-    }
-
-    #[test]
-    fn test_find_reusable_worktree_skips_missing_directory() {
-        // R4: a registry entry that points at a deleted worktree
-        // directory must be treated as "no match" rather than a hard
-        // error, so the caller can fall through to "create new".
-        let temp_dir = TempDir::new().unwrap();
-        init_git_repo(temp_dir.path());
-
-        let phantom = temp_dir.path().join(".worktrees/fix-header-swift-peacock");
-        // Note: the directory is *not* created.
-
-        register_completed_entry(
-            temp_dir.path(),
-            "fix-header-swift-peacock",
-            &phantom,
-            Utc::now() - chrono::Duration::seconds(60),
-        );
-
-        let result = find_reusable_worktree(temp_dir.path(), "fix-header").unwrap();
-        assert!(
-            result.is_none(),
-            "a missing worktree directory should be silently skipped"
-        );
-    }
-
-    #[test]
-    fn test_find_reusable_worktree_excludes_primary_entry() {
-        // Primary loops have worktree_path == None and must not be
-        // treated as reusable worktrees.
-        let temp_dir = TempDir::new().unwrap();
-        init_git_repo(temp_dir.path());
-
-        // No worktree; register a primary entry.
-        let registry = crate::loop_registry::LoopRegistry::new(temp_dir.path());
-        let mut entry = crate::loop_registry::LoopEntry::with_id(
-            "fix-header-primary",
-            "primary prompt",
-            None::<String>,
-            temp_dir.path().to_string_lossy().to_string(),
-        );
-        entry.pid = 0x7fff_ffff;
-        registry.register(entry).unwrap();
-
-        let result = find_reusable_worktree(temp_dir.path(), "fix-header").unwrap();
-        assert!(
-            result.is_none(),
-            "primary (non-worktree) entries must not be reused"
-        );
-    }
-
-    #[test]
-    fn test_find_reusable_worktree_empty_prefix() {
-        // An empty prefix would match every worktree; treat as "no match"
-        // to keep the contract explicit at the call site.
-        let temp_dir = TempDir::new().unwrap();
-        init_git_repo(temp_dir.path());
-
-        let result = find_reusable_worktree(temp_dir.path(), "").unwrap();
-        assert!(result.is_none());
     }
 
     #[test]

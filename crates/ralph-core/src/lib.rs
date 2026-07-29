@@ -295,7 +295,7 @@ pub use workspace::{
 };
 pub use worktree::{
     ReusableWorktree, SyncStats, Worktree, WorktreeConfig, WorktreeError,
-    clean_worktree_runtime_artifacts, create_worktree, ensure_gitignore, find_reusable_worktree,
+    clean_worktree_runtime_artifacts, create_worktree, ensure_gitignore,
     list_ralph_worktrees, list_worktrees, remove_worktree, sync_working_directory_to_worktree,
     worktree_exists,
 };

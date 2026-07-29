@@ -38,7 +38,7 @@ mod imp {
     /// CoordinationCommitted) and persists the salvage /
     /// coordination receipt summaries.
     #[allow(dead_code)] // pinned by `migrations_idempotent_across_reopen`; production writes via pragma_update
-    pub const CURRENT_VERSION: i64 = 9;
+    pub const CURRENT_VERSION: i64 = 10;
 
     /// Apply migrations sequentially. Each migration is a
     /// closure that performs the SQL DDL and bumps the
@@ -340,6 +340,17 @@ mod imp {
             Migration {
                 version: 9,
                 ddl: include_str!("migrations/v9.sql"),
+                column_probe: None,
+            },
+            // 2026-07-28-002 plan U2 (R4 / R5 / R6 / S2a / S4 / S5):
+            // adds `slot_descriptors` table for bounded redrive
+            // activation descriptors. The boot redrive scan reads
+            // this table to build the expected_digest for the
+            // parent → child mapping. The column-probe path is
+            // NOT needed (no ALTER TABLE).
+            Migration {
+                version: 10,
+                ddl: include_str!("migrations/v10.sql"),
                 column_probe: None,
             },
         ]

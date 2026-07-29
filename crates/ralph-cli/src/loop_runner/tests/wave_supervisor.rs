@@ -901,12 +901,6 @@ fn u8_bind_slot_env_does_not_contain_ralph_wave_id() {
     let factory = std::sync::Arc::new(RecordingFactory::new());
     let tmp = tempfile::tempdir().expect("temp dir");
     let repo_root = tmp.path().to_path_buf();
-    // RecordingFactory needs the branch pre-registered so create()
-    // returns Ok instead of `RecordingFactory: no path for branch`.
-    factory.pre_create(
-        "u8-loop-exec-0",
-        tmp.path().join(".ralph/u8-slot-0-worktree"),
-    );
     let loop_ctx = LoopContext::worktree("u8-loop".to_string(), repo_root.clone(), repo_root);
     let context = ProductionBridgeContext {
         loop_id: "u8-loop".to_string(),
@@ -923,6 +917,14 @@ fn u8_bind_slot_env_does_not_contain_ralph_wave_id() {
     let store_wave_id = bridge
         .register_wave_if_absent(WaveKind::Exec, "u8-wave", 1, 0)
         .expect("register must succeed");
+
+    // 2026-07-28-002 plan U1: branch naming now follows
+    // `{loop_id}-{kind}-{wave_id}-{slot_index}`.
+    factory.pre_create(
+        format!("u8-loop-exec-{store_wave_id}-0").as_str(),
+        tmp.path()
+            .join(format!(".ralph/u8-slot-{store_wave_id}-0-worktree")),
+    );
 
     let binding = bridge
         .bind_slot(WaveKind::Exec, &store_wave_id, 0)
@@ -946,6 +948,111 @@ fn u8_bind_slot_env_does_not_contain_ralph_wave_id() {
         1,
         "RecordingFactory must record exactly one worktree creation"
     );
+}
+
+/// S1 (2026-07-28-002 plan U1): same loop, two consecutive exec waves,
+/// same slot index (0) — the branch names must be different so the
+/// second wave does not conflict with the first wave's worktree.
+///
+/// Branch naming follows `{loop_id}-{kind}-{wave_id}-{slot_index}`.
+///
+/// This is the core regression test for the wave-slot namespace fix:
+/// without `wave_id` in the branch name, both waves would produce
+/// `loop-S1-exec-0` and the second `bind_slot` would either reuse
+/// the first wave's worktree or fail if the branch already exists.
+#[test]
+fn s1_same_loop_different_waves_get_distinct_branches() {
+    let factory = std::sync::Arc::new(RecordingFactory::new());
+    let tmp = tempfile::tempdir().expect("temp dir");
+
+    // Pre-register branch names following the new convention:
+    // {loop_id}-{kind}-{wave_id}-{slot_index}
+    let loop_id = "S1";
+    let wave_id_1 = "w-1";
+    let wave_id_2 = "w-2";
+    let slot_index = 0u32;
+
+    factory.pre_create(
+        &format!("{loop_id}-exec-{wave_id_1}-{slot_index}"),
+        tmp.path().join("wt-wave-1"),
+    );
+    factory.pre_create(
+        &format!("{loop_id}-exec-{wave_id_2}-{slot_index}"),
+        tmp.path().join("wt-wave-2"),
+    );
+
+    let (bridge, _store) = production_bridge_with_factory(
+        factory.clone() as std::sync::Arc<dyn WorktreeFactory>,
+        tmp.path().to_path_buf(),
+        loop_id,
+    );
+
+    // Register two distinct waves.
+    let store_wave_id_1 = bridge
+        .register_wave_if_absent(WaveKind::Exec, wave_id_1, 1, 0)
+        .expect("register wave 1 must succeed");
+    let store_wave_id_2 = bridge
+        .register_wave_if_absent(WaveKind::Exec, wave_id_2, 1, 0)
+        .expect("register wave 2 must succeed");
+
+    // Bind slot 0 for wave 1.
+    let binding_1 = bridge
+        .bind_slot(WaveKind::Exec, &store_wave_id_1, slot_index)
+        .expect("bind_slot wave 1 must succeed")
+        .expect("Exec binding must be Some");
+
+    // Bind slot 0 for wave 2.
+    let binding_2 = bridge
+        .bind_slot(WaveKind::Exec, &store_wave_id_2, slot_index)
+        .expect("bind_slot wave 2 must succeed")
+        .expect("Exec binding must be Some");
+
+    // Both bindings succeeded.
+    assert!(
+        binding_1.worktree_path.is_some(),
+        "wave 1 binding must have worktree_path"
+    );
+    assert!(
+        binding_2.worktree_path.is_some(),
+        "wave 2 binding must have worktree_path"
+    );
+
+    // Distinct worktree paths.
+    assert_ne!(
+        binding_1.worktree_path, binding_2.worktree_path,
+        "two waves with the same slot_index must receive distinct worktree paths"
+    );
+
+    // Branch names follow the new convention and are distinct.
+    let branch_1 = binding_1
+        .env
+        .get("RALPH_WAVE_WORKTREE_BRANCH")
+        .map(String::as_str);
+    let branch_2 = binding_2
+        .env
+        .get("RALPH_WAVE_WORKTREE_BRANCH")
+        .map(String::as_str);
+
+    assert_eq!(
+        branch_1,
+        Some("S1-exec-w-1-0"),
+        "wave 1 branch must follow {{loop_id}}-{{kind}}-{{wave_id}}-{{slot_index}}"
+    );
+    assert_eq!(
+        branch_2,
+        Some("S1-exec-w-2-0"),
+        "wave 2 branch must follow {{loop_id}}-{{kind}}-{{wave_id}}-{{slot_index}}"
+    );
+    assert_ne!(
+        branch_1, branch_2,
+        "two waves must produce distinct branch names even for the same slot_index"
+    );
+
+    // Factory was called exactly twice with different branch names.
+    let calls = factory.calls_snapshot();
+    assert_eq!(calls.len(), 2, "two waves must call the factory twice");
+    assert_eq!(calls[0].1, "S1-exec-w-1-0");
+    assert_eq!(calls[1].1, "S1-exec-w-2-0");
 }
 
 /// 2026-07-26-002 plan U8 (R10): the worker timeout message and
@@ -1127,8 +1234,6 @@ fn production_bridge_with_factory(
 fn exec_kind_produces_unique_branch_path_cwd() {
     let factory = std::sync::Arc::new(RecordingFactory::new());
     let tmp = tempfile::tempdir().expect("temp dir");
-    factory.pre_create("u4-loop-exec-0", tmp.path().join("wt-0"));
-    factory.pre_create("u4-loop-exec-1", tmp.path().join("wt-1"));
 
     let (bridge, store) = production_bridge_with_factory(
         factory.clone() as std::sync::Arc<dyn WorktreeFactory>,
@@ -1139,6 +1244,20 @@ fn exec_kind_produces_unique_branch_path_cwd() {
     let store_wave_id = bridge
         .register_wave_if_absent(WaveKind::Exec, "u4-wave", 2, 0)
         .expect("register must succeed");
+
+    // 2026-07-28-002 plan U1: branch naming now follows
+    // `{loop_id}-{kind}-{wave_id}-{slot_index}`. The store assigns
+    // `store_wave_id` (= `w-{seq}`) on register, so pre-register the
+    // factory paths using the live id rather than a hard-coded
+    // branch string.
+    factory.pre_create(
+        format!("u4-loop-exec-{store_wave_id}-0").as_str(),
+        tmp.path().join("wt-0"),
+    );
+    factory.pre_create(
+        format!("u4-loop-exec-{store_wave_id}-1").as_str(),
+        tmp.path().join("wt-1"),
+    );
 
     let binding_0 = bridge
         .bind_slot(WaveKind::Exec, &store_wave_id, 0)
@@ -1159,23 +1278,23 @@ fn exec_kind_produces_unique_branch_path_cwd() {
             .env
             .get("RALPH_WAVE_WORKTREE_BRANCH")
             .map(String::as_str),
-        Some("u4-loop-exec-0"),
-        "slot 0 branch must follow the {{loop_id}}-{{kind}}-{{slot_index}} convention"
+        Some(format!("u4-loop-exec-{store_wave_id}-0").as_str()),
+        "slot 0 branch must follow the {{loop_id}}-{{kind}}-{{wave_id}}-{{slot_index}} convention"
     );
     assert_eq!(
         binding_1
             .env
             .get("RALPH_WAVE_WORKTREE_BRANCH")
             .map(String::as_str),
-        Some("u4-loop-exec-1"),
-        "slot 1 branch must follow the {{loop_id}}-{{kind}}-{{slot_index}} convention"
+        Some(format!("u4-loop-exec-{store_wave_id}-1").as_str()),
+        "slot 1 branch must follow the {{loop_id}}-{{kind}}-{{wave_id}}-{{slot_index}} convention"
     );
 
     // Factory observed both calls.
     let calls = factory.calls_snapshot();
     assert_eq!(calls.len(), 2, "two exec slots must call the factory twice");
-    assert_eq!(calls[0].1, "u4-loop-exec-0");
-    assert_eq!(calls[1].1, "u4-loop-exec-1");
+    assert_eq!(calls[0].1, format!("u4-loop-exec-{store_wave_id}-0"));
+    assert_eq!(calls[1].1, format!("u4-loop-exec-{store_wave_id}-1"));
 
     // Store has the per-slot `SlotResource` recorded so fan-in can
     // resolve them later (R7 / R10).
@@ -1189,20 +1308,23 @@ fn exec_kind_produces_unique_branch_path_cwd() {
         .iter()
         .find(|r| r.slot_index == 1)
         .expect("slot 1 resource");
-    assert_eq!(branch_0.branch.as_deref(), Some("u4-loop-exec-0"));
-    assert_eq!(branch_1.branch.as_deref(), Some("u4-loop-exec-1"));
+    assert_eq!(
+        branch_0.branch.as_deref(),
+        Some(format!("u4-loop-exec-{store_wave_id}-0").as_str())
+    );
+    assert_eq!(
+        branch_1.branch.as_deref(),
+        Some(format!("u4-loop-exec-{store_wave_id}-1").as_str())
+    );
 }
 
 /// U4 R7: production `bind_slot` for `Fix` MUST use the same
-/// `{loop_id}-{kind}-{slot_index}` branch convention and hand
+/// `{loop_id}-{kind}-{wave_id}-{slot_index}` branch convention and hand
 /// back distinct worktree paths.
 #[test]
 fn fix_kind_produces_unique_branch_path_cwd() {
     let factory = std::sync::Arc::new(RecordingFactory::new());
     let tmp = tempfile::tempdir().expect("temp dir");
-    factory.pre_create("u4-loop-fix-0", tmp.path().join("fix-wt-0"));
-    factory.pre_create("u4-loop-fix-1", tmp.path().join("fix-wt-1"));
-    factory.pre_create("u4-loop-fix-2", tmp.path().join("fix-wt-2"));
 
     let (bridge, store) = production_bridge_with_factory(
         factory.clone() as std::sync::Arc<dyn WorktreeFactory>,
@@ -1214,6 +1336,15 @@ fn fix_kind_produces_unique_branch_path_cwd() {
         .register_wave_if_absent(WaveKind::Fix, "u4-fix-wave", 3, 0)
         .expect("register must succeed");
 
+    // 2026-07-28-002 plan U1: branch naming now follows
+    // `{loop_id}-{kind}-{wave_id}-{slot_index}`.
+    for slot in 0u32..3 {
+        factory.pre_create(
+            format!("u4-loop-fix-{store_wave_id}-{slot}").as_str(),
+            tmp.path().join(format!("fix-wt-{slot}")),
+        );
+    }
+
     for slot in 0u32..3 {
         let binding = bridge
             .bind_slot(WaveKind::Fix, &store_wave_id, slot)
@@ -1224,7 +1355,7 @@ fn fix_kind_produces_unique_branch_path_cwd() {
                 .env
                 .get("RALPH_WAVE_WORKTREE_BRANCH")
                 .map(String::as_str),
-            Some(format!("u4-loop-fix-{slot}").as_str()),
+            Some(format!("u4-loop-fix-{store_wave_id}-{slot}").as_str()),
             "fix slot {slot} branch must follow the convention"
         );
         assert!(
@@ -1242,11 +1373,11 @@ fn fix_kind_produces_unique_branch_path_cwd() {
     assert_eq!(
         branches,
         vec![
-            "u4-loop-fix-0".to_string(),
-            "u4-loop-fix-1".to_string(),
-            "u4-loop-fix-2".to_string()
+            format!("u4-loop-fix-{store_wave_id}-0"),
+            format!("u4-loop-fix-{store_wave_id}-1"),
+            format!("u4-loop-fix-{store_wave_id}-2"),
         ],
-        "fix branch names must follow the loop-kind-index convention"
+        "fix branch names must follow the loop-kind-wave_id-index convention"
     );
 }
 
@@ -1345,7 +1476,9 @@ fn bind_slot_failure_fail_closed_no_main_workspace_write() {
         "bind_slot failure MUST NOT materialise .ralph/ under the workspace"
     );
     assert!(
-        !workspace.join("u4-loop-exec-0").exists(),
+        !workspace
+            .join(format!("u4-loop-exec-{store_wave_id}-0"))
+            .exists(),
         "bind_slot failure MUST NOT create the slot branch dir under the workspace"
     );
 }
@@ -1424,8 +1557,6 @@ fn dispatcher_fail_closed_for_exec_bind_failure() {
 fn production_bridge_only_returns_none_for_review() {
     let factory = std::sync::Arc::new(RecordingFactory::new());
     let tmp = tempfile::tempdir().expect("temp dir");
-    factory.pre_create("u4-loop-exec-0", tmp.path().join("exec-wt"));
-    factory.pre_create("u4-loop-fix-0", tmp.path().join("fix-wt"));
 
     let (bridge, _store) = production_bridge_with_factory(
         factory.clone() as std::sync::Arc<dyn WorktreeFactory>,
@@ -1433,9 +1564,24 @@ fn production_bridge_only_returns_none_for_review() {
         "u4-loop",
     );
 
+    // 2026-07-28-002 plan U1: branch naming now follows
+    // `{loop_id}-{kind}-{wave_id}-{slot_index}`. Pre-create using
+    // the actual store wave ids.
     let exec_wave = bridge
         .register_wave_if_absent(WaveKind::Exec, "u4-exec-pin", 1, 0)
         .expect("register");
+    factory.pre_create(
+        format!("u4-loop-exec-{exec_wave}-0").as_str(),
+        tmp.path().join("exec-wt"),
+    );
+    let fix_wave = bridge
+        .register_wave_if_absent(WaveKind::Fix, "u4-fix-pin", 1, 0)
+        .expect("register");
+    factory.pre_create(
+        format!("u4-loop-fix-{fix_wave}-0").as_str(),
+        tmp.path().join("fix-wt"),
+    );
+
     let exec_binding = bridge
         .bind_slot(WaveKind::Exec, &exec_wave, 0)
         .expect("exec bind must succeed");
@@ -1444,9 +1590,6 @@ fn production_bridge_only_returns_none_for_review() {
         "production Exec bind MUST NOT return None; got None (old behaviour)"
     );
 
-    let fix_wave = bridge
-        .register_wave_if_absent(WaveKind::Fix, "u4-fix-pin", 1, 0)
-        .expect("register");
     let fix_binding = bridge
         .bind_slot(WaveKind::Fix, &fix_wave, 0)
         .expect("fix bind must succeed");
@@ -1489,8 +1632,6 @@ fn test_build_supervisor_bridge_provides_context_for_exec() {
 
     let factory = std::sync::Arc::new(RecordingFactory::new());
     let tmp = tempfile::tempdir().expect("temp dir");
-    factory.pre_create("u1-loop-exec-0", tmp.path().join("exec-wt-0"));
-    factory.pre_create("u1-loop-exec-1", tmp.path().join("exec-wt-1"));
 
     crate::loop_runner::install_factory_override_for_test(
         factory.clone() as std::sync::Arc<dyn WorktreeFactory>
@@ -1517,6 +1658,17 @@ fn test_build_supervisor_bridge_provides_context_for_exec() {
         .register_wave_if_absent(WaveKind::Exec, "u1-wave-exec", 2, 0)
         .expect("register must succeed");
 
+    // 2026-07-28-002 plan U1: branch naming now follows
+    // `{loop_id}-{kind}-{wave_id}-{slot_index}`.
+    factory.pre_create(
+        format!("u1-loop-exec-{store_wave_id}-0").as_str(),
+        tmp.path().join("exec-wt-0"),
+    );
+    factory.pre_create(
+        format!("u1-loop-exec-{store_wave_id}-1").as_str(),
+        tmp.path().join("exec-wt-1"),
+    );
+
     let binding_0 = bridge
         .bind_slot(WaveKind::Exec, &store_wave_id, 0)
         .expect("exec slot 0 must succeed");
@@ -1541,16 +1693,16 @@ fn test_build_supervisor_bridge_provides_context_for_exec() {
             .env
             .get("RALPH_WAVE_WORKTREE_BRANCH")
             .map(String::as_str),
-        Some("u1-loop-exec-0"),
-        "slot 0 branch must follow the {{loop_id}}-{{kind}}-{{slot_index}} convention"
+        Some(format!("u1-loop-exec-{store_wave_id}-0").as_str()),
+        "slot 0 branch must follow the {{loop_id}}-{{kind}}-{{wave_id}}-{{slot_index}} convention"
     );
     assert_eq!(
         binding_1
             .env
             .get("RALPH_WAVE_WORKTREE_BRANCH")
             .map(String::as_str),
-        Some("u1-loop-exec-1"),
-        "slot 1 branch must follow the {{loop_id}}-{{kind}}-{{slot_index}} convention"
+        Some(format!("u1-loop-exec-{store_wave_id}-1").as_str()),
+        "slot 1 branch must follow the {{loop_id}}-{{kind}}-{{wave_id}}-{{slot_index}} convention"
     );
 
     let calls = factory.calls_snapshot();
@@ -1575,9 +1727,6 @@ fn test_build_supervisor_bridge_provides_context_for_fix() {
 
     let factory = std::sync::Arc::new(RecordingFactory::new());
     let tmp = tempfile::tempdir().expect("temp dir");
-    factory.pre_create("u1-loop-fix-0", tmp.path().join("fix-wt-0"));
-    factory.pre_create("u1-loop-fix-1", tmp.path().join("fix-wt-1"));
-    factory.pre_create("u1-loop-fix-2", tmp.path().join("fix-wt-2"));
 
     crate::loop_runner::install_factory_override_for_test(
         factory.clone() as std::sync::Arc<dyn WorktreeFactory>
@@ -1604,6 +1753,15 @@ fn test_build_supervisor_bridge_provides_context_for_fix() {
         .register_wave_if_absent(WaveKind::Fix, "u1-wave-fix", 3, 0)
         .expect("register must succeed");
 
+    // 2026-07-28-002 plan U1: branch naming now follows
+    // `{loop_id}-{kind}-{wave_id}-{slot_index}`.
+    for slot in 0u32..3 {
+        factory.pre_create(
+            format!("u1-loop-fix-{store_wave_id}-{slot}").as_str(),
+            tmp.path().join(format!("fix-wt-{slot}")),
+        );
+    }
+
     for slot in 0u32..3 {
         let binding = bridge
             .bind_slot(WaveKind::Fix, &store_wave_id, slot)
@@ -1619,7 +1777,7 @@ fn test_build_supervisor_bridge_provides_context_for_fix() {
                 .env
                 .get("RALPH_WAVE_WORKTREE_BRANCH")
                 .map(String::as_str),
-            Some(format!("u1-loop-fix-{slot}").as_str()),
+            Some(format!("u1-loop-fix-{store_wave_id}-{slot}").as_str()),
             "fix slot {slot} branch must follow the convention"
         );
         assert!(
@@ -1919,6 +2077,24 @@ impl U3DispatchBridge {
         *self.override_outcome.lock().unwrap() = override_outcome;
     }
 
+    /// 2026-07-28-002 plan U3 (S2a): pre-bind specific slots in the
+    /// store so `try_dispatch_next` returns them as dispatchable.
+    /// Needed when the dispatcher must bind slots that the test
+    /// pre-approves (S2a happy path).
+    #[allow(dead_code)]
+    fn pre_bind_slots(&self, wave_id: &str, slots: &[u32]) {
+        use ralph_core::supervisor::SlotResource;
+        for &slot_index in slots {
+            let resource = SlotResource {
+                slot_index,
+                worktree_path: Some(format!("/tmp/u3-spy/{wave_id}-{slot_index}")),
+                branch: Some(format!("u3-{wave_id}-{slot_index}")),
+            };
+            // Best-effort: ignore errors (slot might not exist yet).
+            let _ = self.store.bind_worktree(wave_id, slot_index, resource);
+        }
+    }
+
     #[allow(dead_code)]
     fn store(&self) -> std::sync::Arc<dyn SupervisorStore> {
         self.store.clone()
@@ -1931,6 +2107,10 @@ impl U3DispatchBridge {
 }
 
 impl SupervisorBridge for U3DispatchBridge {
+    fn store(&self) -> Option<std::sync::Arc<dyn SupervisorStore>> {
+        Some(self.store.clone())
+    }
+
     fn tick(
         &self,
         _wave_id: &str,
@@ -2020,6 +2200,10 @@ impl SupervisorBridge for U3DispatchBridge {
     }
 
     fn fan_in_status(&self, wave_id: &str) -> Result<WaveSnapshot, BridgeError> {
+        // 2026-07-28-002 plan U4 (S6): the pre-registered redrive path
+        // verifies the wave row via `fan_in_status`; delegate to the
+        // real store so pre-registered child waves pass the existence
+        // check instead of failing closed.
         self.store
             .fan_in_status(wave_id)
             .map_err(|err| BridgeError::Store(err.to_string()))
@@ -2096,6 +2280,67 @@ impl SupervisorBridge for U3DispatchBridge {
     }
 }
 
+/// 2026-07-28-002 plan U3 (S2a): like `run_u3_execute_wave` but
+/// pre-binds the given slots in the store before dispatch, so
+/// `try_dispatch_next` returns them as dispatchable.
+async fn run_u3_execute_wave_with_prebound_slots(
+    bridge: &U3DispatchBridge,
+    wave: &ralph_core::DetectedWave,
+    prebound_slots: &[u32],
+    started: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+) -> (
+    WaveDispatchOutcome,
+    std::sync::Arc<std::sync::atomic::AtomicUsize>,
+) {
+    use crate::loop_runner::wave::execute_wave_via_supervisor_with_executor;
+
+    // Pre-register the wave so we get the store's wave_id,
+    // then pre-bind slots using that id.
+    let store_wave_id = {
+        let registered = bridge
+            .register_wave_if_absent(
+                WaveKind::Exec,
+                &wave.wave_id,
+                wave.total,
+                0, // slot_retry_budget
+            )
+            .expect("register_wave_if_absent must succeed");
+        bridge.pre_bind_slots(&registered, prebound_slots);
+        registered
+    };
+    let _ = store_wave_id; // suppress unused warning
+
+    let wave_dir =
+        std::env::temp_dir().join(format!("u3-disp-{}-{}", wave.wave_id, std::process::id()));
+    let _ = std::fs::remove_dir_all(&wave_dir);
+    let _ = std::fs::create_dir_all(&wave_dir);
+    let main_events_file = wave_dir.join("events.jsonl");
+    let _ = std::fs::File::create(&main_events_file);
+
+    let executor = std::sync::Arc::new(U3CountingExecutor::new(started.clone()));
+    let executor_dyn: std::sync::Arc<dyn WaveWorkerExecutor> = executor as _;
+    let bridge_arc: std::sync::Arc<dyn SupervisorBridge> = std::sync::Arc::new(bridge.clone());
+    let outcome = execute_wave_via_supervisor_with_executor(
+        wave,
+        &make_test_cli_backend(),
+        &main_events_file,
+        false,
+        false,
+        None,
+        None,
+        "u3-test-loop",
+        WaveDispatchLimits::default(),
+        None,
+        None,
+        &bridge_arc,
+        executor_dyn,
+        None, // pre_registered_id: not pre-registered in test path
+        None, // slot_index_override: test path uses events-array position
+    )
+    .await;
+    (outcome, started)
+}
+
 /// Drive `execute_wave_via_supervisor_with_executor` with a
 /// `U3DispatchBridge` and an injected `U3CountingExecutor`. The
 /// helper returns the dispatch outcome and the `started`
@@ -2140,7 +2385,8 @@ async fn run_u3_execute_wave(
         None,
         &bridge_arc,
         executor_dyn,
-        None, // pre_registered_id: normal test path
+        None, // pre_registered_id: not pre-registered in test path
+        None, // slot_index_override: test path uses events-array position
     )
     .await;
     (outcome, started)
@@ -3064,7 +3310,8 @@ async fn run_u5_execute_wave(
         None,
         &bridge_arc,
         executor_dyn,
-        None, // pre_registered_id: normal test path
+        None, // pre_registered_id: not pre-registered in test path
+        None, // slot_index_override: test path uses events-array position
     )
     .await;
     let probe = U5RecordingExecutor {
@@ -3583,7 +3830,8 @@ async fn run_u2_execute_wave_with_env_capture(
         None,
         &bridge_arc,
         executor_dyn,
-        None, // pre_registered_id: normal test path
+        None, // pre_registered_id: not pre-registered in test path
+        None, // slot_index_override: test path uses events-array position
     )
     .await
 }
@@ -5241,7 +5489,8 @@ async fn run_u3_dispatch_wave<E: WaveWorkerExecutor + 'static>(
         None,
         &bridge_arc,
         executor_dyn,
-        None, // pre_registered_id: normal test path
+        None, // pre_registered_id: not pre-registered in test path
+        None, // slot_index_override: test path uses events-array position
     )
     .await
 }
@@ -6639,6 +6888,7 @@ async fn test_s3_dispatch_pending_redrive_wave_in_memory() {
         payload_digest: ralph_core::supervisor::SlotDescriptor::digest_of(
             r#"{"unit_id":"s3-test-unit"}"#,
         ),
+        slot_index_in_parent: None,
     };
     store
         .persist_slot_descriptor(&child_id, &descriptor)
@@ -6678,10 +6928,14 @@ async fn test_s3_dispatch_pending_redrive_wave_in_memory() {
     //    bridge's `bind_slot` would return `Err`, and the dispatcher
     //    would fail-close the slot — leaving it `Pending` forever and
     //    never spawning a worker. The production bridge names the
-    //    branch `{loop_id}-{kind}-{slot}` = `s3-loop-exec-0`.
+    //    branch `{loop_id}-{kind}-{wave_id}-{slot_index}` per the
+    //    2026-07-28-002 plan U1 namespaced naming. For the redrive
+    //    dispatch path, the bridge receives the public `child_wave_id`
+    //    (the same id used to register the child wave in the store),
+    //    so the expected branch becomes `s3-loop-exec-{child_id}-0`.
     let factory = std::sync::Arc::new(RecordingFactory::new());
     factory.pre_create(
-        "s3-loop-exec-0",
+        &format!("s3-loop-exec-{child_id}-0"),
         std::path::PathBuf::from("/tmp/s3-test/child-0-worktree"),
     );
     let bridge: Arc<dyn ralph_core::supervisor::SupervisorBridge> = Arc::new(
@@ -6725,17 +6979,20 @@ async fn test_s3_dispatch_pending_redrive_wave_in_memory() {
     let started = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let executor: Arc<dyn crate::loop_runner::wave::WaveWorkerExecutor> =
         Arc::new(U3CountingExecutor::new(started.clone()).with_topic("exec.unit.done"));
-    dispatch_pending_redrive_waves(
+    let dispatched = dispatch_pending_redrive_waves(
         &store,
         "s3-loop",
         &hat_registry,
         &backend,
         &bridge,
         &events_file,
-        &events_file,
         executor,
     )
     .await;
+    assert_eq!(
+        dispatched, 1,
+        "S3: boot scan must dispatch exactly one child slot"
+    );
 
     // 8. The boot scan dispatched the child: exactly one worker spawned,
     //    and the production bridge created exactly one worktree for it.
@@ -6837,7 +7094,6 @@ async fn test_s4_no_descriptor_is_fail_closed() {
         &backend,
         &bridge,
         &events_file,
-        &events_file,
         std::sync::Arc::new(crate::loop_runner::wave::ProductionExecutor),
     )
     .await;
@@ -6894,6 +7150,7 @@ async fn test_s5_digest_conflict_is_fail_closed() {
         payload_json: original_payload.to_string(),
         wave_kind: WaveKind::Exec,
         payload_digest: correct_digest.clone(),
+        slot_index_in_parent: None,
     };
     store
         .persist_slot_descriptor(&parent_id, &descriptor)
@@ -6915,6 +7172,7 @@ async fn test_s5_digest_conflict_is_fail_closed() {
         payload_digest: ralph_core::supervisor::SlotDescriptor::digest_of(
             r#"{"unit_id":"s5-tampered"}"#,
         ),
+        slot_index_in_parent: None,
     };
     store
         .persist_slot_descriptor(&child_id, &tampered_descriptor)
@@ -6959,7 +7217,6 @@ async fn test_s5_digest_conflict_is_fail_closed() {
         &hat_registry,
         &backend,
         &bridge,
-        &events_file,
         &events_file,
         std::sync::Arc::new(crate::loop_runner::wave::ProductionExecutor),
     )
@@ -7025,17 +7282,20 @@ async fn test_s6_no_pending_children_is_noop() {
 
     // The dispatch function should return early since there are no pending children.
     // No panic, no executor call, no store mutation.
-    dispatch_pending_redrive_waves(
+    let dispatched = dispatch_pending_redrive_waves(
         &store,
         "s6-loop",
         &hat_registry,
         &backend,
         &bridge,
         &events_file,
-        &events_file,
         std::sync::Arc::new(crate::loop_runner::wave::ProductionExecutor),
     )
     .await;
+    assert_eq!(
+        dispatched, 0,
+        "S6: no pending children ⇒ boot scan dispatches zero slots"
+    );
 
     // Still no pending children after the call.
     let pending_after = store
@@ -7341,4 +7601,666 @@ fn u5_slot_retry_budget_two_propagates_to_accessor() {
         2,
         "bridge accessor must surface the operator-configured budget"
     );
+}
+// =============================================================================
+// 2026-07-28-002 plan U3 (R3 / S2a): SlotDescriptor persist-on-dispatch.
+//
+// These tests verify the dispatcher calls `persist_slot_descriptor`
+// after a successful `bind_slot` and before spawning the worker.
+// S2a happy path: after dispatch, the store holds a descriptor
+// with the correct topic / payload / wave_kind / payload_digest.
+// S2a fail-closed: when the store returns an error from
+// `persist_slot_descriptor`, the slot is skipped (no worker spawned)
+// and the failure is recorded on the bridge.
+// =============================================================================
+
+/// S2a happy path: dispatch a 1-slot wave through U3DispatchBridge
+/// (which owns a real InMemorySupervisorStore). After dispatch, the
+/// store MUST have a SlotDescriptor for (store_wave_id, 0) with:
+/// - topic == "exec.unit.ready"
+/// - payload_json == the wave event payload
+/// - wave_kind == WaveKind::Exec
+/// - payload_digest == fingerprint_payload(payload)
+#[tokio::test]
+async fn test_s2a_persist_slot_descriptor_on_dispatch() {
+    use ralph_core::supervisor::{
+        InMemorySupervisorStore, SlotDescriptor, SupervisorStore, WaveKind,
+    };
+    use std::sync::Arc;
+
+    let store: Arc<InMemorySupervisorStore> = Arc::new(InMemorySupervisorStore::new());
+    let bridge = U3DispatchBridge::new(store.clone() as Arc<dyn SupervisorStore>, 4);
+
+    // Wave with known topic and payload so we can assert against the descriptor.
+    let wave = make_u3_wave_with_concurrency("s2a-happy", 1, 1, 1);
+    // Override the topic to the canonical exec.unit.ready.
+    let wave = ralph_core::DetectedWave {
+        events: vec![ralph_core::Event {
+            topic: "exec.unit.ready".to_string(),
+            payload: Some(r#"{"content_hash":"s2a-test-payload"}"#.to_string()),
+            ts: String::new(),
+            hat: None,
+            triggered: None,
+            source: None,
+            wave_id: None,
+            wave_index: None,
+            wave_total: None,
+            system_injected: None,
+        }],
+        ..wave
+    };
+
+    let started = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let (_outcome, _) = run_u3_execute_wave_with_prebound_slots(
+        &bridge,
+        &wave,
+        &[0], // pre-bind slot 0 so try_dispatch_next approves it
+        started.clone(),
+    )
+    .await;
+
+    // The dispatcher must have dispatched at least the one slot.
+    assert_eq!(
+        started.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "S2a happy: exactly 1 slot must be dispatched; got {}",
+        started.load(std::sync::atomic::Ordering::SeqCst)
+    );
+
+    // Retrieve the store's wave_id by recovering active waves.
+    let store_wave_id = {
+        let snaps = store
+            .recover_active_waves()
+            .expect("store must recover without error");
+        assert!(
+            !snaps.is_empty(),
+            "S2a happy: store must have exactly 1 active wave"
+        );
+        snaps.into_iter().next().unwrap().wave_id
+    };
+
+    // Read back the persisted descriptor and assert all four fields.
+    let descriptor = store
+        .slot_descriptor(&store_wave_id, 0)
+        .expect("slot_descriptor must not error");
+    let descriptor = descriptor.expect("S2a happy: slot 0 must have a persisted descriptor");
+
+    assert_eq!(
+        descriptor.topic, "exec.unit.ready",
+        "S2a happy: topic must match dispatch context"
+    );
+    assert_eq!(
+        descriptor.payload_json, r#"{"content_hash":"s2a-test-payload"}"#,
+        "S2a happy: payload_json must match the dispatched event payload"
+    );
+    assert_eq!(
+        descriptor.wave_kind,
+        WaveKind::Exec,
+        "S2a happy: wave_kind must be Exec for exec.unit.ready topic"
+    );
+    let expected_digest = SlotDescriptor::digest_of(r#"{"content_hash":"s2a-test-payload"}"#);
+    assert_eq!(
+        descriptor.payload_digest, expected_digest,
+        "S2a happy: payload_digest must equal fingerprint_payload(payload)"
+    );
+    assert_eq!(
+        descriptor.slot_index_in_parent, None,
+        "S2a happy: slot_index_in_parent must be None for parent-wave slots"
+    );
+}
+
+// The fail-closed variant of S2a (persist failure → no spawn) is
+// implemented below via `PersistFailingSupervisorStore`
+// (`test_s2a_persist_failure_fails_closed_no_spawn`) — the follow-up
+// that the original S2a landing deferred.
+
+// =============================================================================
+// 2026-07-28-002 plan U3 follow-up (S2a fail-closed): persist fault injection.
+//
+// The dispatcher persists a `SlotDescriptor` after `bind_slot` and before
+// spawning the worker (dispatcher.rs, U3 wiring). When that persist fails,
+// the slot MUST be skipped (no spawn) and the failure MUST be recorded on
+// the bridge. `PersistFailingSupervisorStore` delegates every store method
+// to a real `InMemorySupervisorStore` except `persist_slot_descriptor`,
+// which always errors — proving the fail-closed branch end to end.
+// =============================================================================
+
+/// Fault-injecting store wrapper: all methods delegate to `inner`,
+/// except `persist_slot_descriptor`, which always fails.
+#[derive(Debug)]
+struct PersistFailingSupervisorStore {
+    inner: std::sync::Arc<ralph_core::supervisor::InMemorySupervisorStore>,
+}
+
+impl ralph_core::supervisor::SupervisorStore for PersistFailingSupervisorStore {
+    fn persist_slot_descriptor(
+        &self,
+        _wave_id: &str,
+        _descriptor: &ralph_core::supervisor::SlotDescriptor,
+    ) -> ralph_core::supervisor::SupervisorStoreResult<()> {
+        Err(ralph_core::supervisor::SupervisorStoreError::Storage(
+            "synthetic persist failure (fault injection)".to_string(),
+        ))
+    }
+
+    fn register_wave(&self, idempotency_key: &str, kind: ralph_core::supervisor::WaveKind, expected_total: u32, slot_retry_budget: u32) -> ralph_core::supervisor::SupervisorStoreResult<String> {
+        self.inner.register_wave(idempotency_key, kind, expected_total, slot_retry_budget)
+    }
+
+    fn enqueue_wave(&self, idempotency_key: &str, kind: ralph_core::supervisor::WaveKind, expected_total: u32, slot_retry_budget: u32) -> ralph_core::supervisor::SupervisorStoreResult<String> {
+        self.inner.enqueue_wave(idempotency_key, kind, expected_total, slot_retry_budget)
+    }
+
+    fn try_dispatch_next(&self, max_concurrent_workers: u32) -> ralph_core::supervisor::SupervisorStoreResult<Option<(String, u32)>> {
+        self.inner.try_dispatch_next(max_concurrent_workers)
+    }
+
+    fn release_slot_dispatch(&self, wave_id: &str, slot_index: u32, outcome: ralph_core::supervisor::DispatchOutcome) -> ralph_core::supervisor::SupervisorStoreResult<()> {
+        self.inner.release_slot_dispatch(wave_id, slot_index, outcome)
+    }
+
+    fn bind_worktree(&self, wave_id: &str, slot_index: u32, binding: ralph_core::supervisor::SlotResource) -> ralph_core::supervisor::SupervisorStoreResult<()> {
+        self.inner.bind_worktree(wave_id, slot_index, binding)
+    }
+
+    fn record_slot_result(&self, wave_id: &str, slot_index: u32, content_hash: &str, event_count: usize) -> ralph_core::supervisor::SupervisorStoreResult<()> {
+        self.inner.record_slot_result(wave_id, slot_index, content_hash, event_count)
+    }
+
+    fn record_slot_failure(&self, wave_id: &str, slot_index: u32, reason: &str) -> ralph_core::supervisor::SupervisorStoreResult<()> {
+        self.inner.record_slot_failure(wave_id, slot_index, reason)
+    }
+
+    fn slot_failure_reason(&self, wave_id: &str, slot_index: u32) -> ralph_core::supervisor::SupervisorStoreResult<Option<String>> {
+        self.inner.slot_failure_reason(wave_id, slot_index)
+    }
+
+    fn cancel_wave(&self, wave_id: &str) -> ralph_core::supervisor::SupervisorStoreResult<()> {
+        self.inner.cancel_wave(wave_id)
+    }
+
+    fn record_slot_pid(&self, wave_id: &str, slot_index: u32, pid: u32) -> ralph_core::supervisor::SupervisorStoreResult<()> {
+        self.inner.record_slot_pid(wave_id, slot_index, pid)
+    }
+
+    fn pid_for_slot(&self, wave_id: &str, slot_index: u32) -> ralph_core::supervisor::SupervisorStoreResult<Option<u32>> {
+        self.inner.pid_for_slot(wave_id, slot_index)
+    }
+
+    fn fan_in_status(&self, wave_id: &str) -> ralph_core::supervisor::SupervisorStoreResult<ralph_core::supervisor::WaveSnapshot> {
+        self.inner.fan_in_status(wave_id)
+    }
+
+    fn commit_salvage_projection(&self, wave_id: &str, receipt: &ralph_core::supervisor::ProjectionReceiptSummary) -> ralph_core::supervisor::SupervisorStoreResult<()> {
+        self.inner.commit_salvage_projection(wave_id, receipt)
+    }
+
+    fn record_coordination_written(&self, wave_id: &str, receipt: &ralph_core::supervisor::CoordinationReceiptSummary) -> ralph_core::supervisor::SupervisorStoreResult<()> {
+        self.inner.record_coordination_written(wave_id, receipt)
+    }
+
+    fn commit_coordination_event(&self, wave_id: &str, receipt: &ralph_core::supervisor::CoordinationReceiptSummary, terminal_phase: ralph_core::supervisor::WavePhase) -> ralph_core::supervisor::SupervisorStoreResult<()> {
+        self.inner.commit_coordination_event(wave_id, receipt, terminal_phase)
+    }
+
+    fn list_wave_ids(&self) -> ralph_core::supervisor::SupervisorStoreResult<Vec<String>> {
+        self.inner.list_wave_ids()
+    }
+
+    fn wave_id_for_idempotency_key(&self, idempotency_key: &str) -> ralph_core::supervisor::SupervisorStoreResult<Option<String>> {
+        self.inner.wave_id_for_idempotency_key(idempotency_key)
+    }
+
+    fn recover_active_waves(&self) -> ralph_core::supervisor::SupervisorStoreResult<Vec<ralph_core::supervisor::WaveSnapshot>> {
+        self.inner.recover_active_waves()
+    }
+
+    fn list_worktree_paths(&self, wave_id: &str) -> ralph_core::supervisor::SupervisorStoreResult<Vec<ralph_core::supervisor::SlotResource>> {
+        self.inner.list_worktree_paths(wave_id)
+    }
+
+    fn get_slot_resource(&self, wave_id: &str, slot_index: u32) -> ralph_core::supervisor::SupervisorStoreResult<Option<ralph_core::supervisor::SlotResource>> {
+        self.inner.get_slot_resource(wave_id, slot_index)
+    }
+
+    fn set_wave_phase(&self, wave_id: &str, phase: ralph_core::supervisor::WavePhase) -> ralph_core::supervisor::SupervisorStoreResult<()> {
+        self.inner.set_wave_phase(wave_id, phase)
+    }
+
+    fn enqueue_compensation(&self, wave_id: &str, kind: ralph_core::supervisor::CompensationKind) -> ralph_core::supervisor::SupervisorStoreResult<()> {
+        self.inner.enqueue_compensation(wave_id, kind)
+    }
+
+    fn take_pending_compensations(&self) -> ralph_core::supervisor::SupervisorStoreResult<Vec<(String, ralph_core::supervisor::CompensationKind)>> {
+        self.inner.take_pending_compensations()
+    }
+
+    fn complete_compensation(&self, wave_id: &str, kind: ralph_core::supervisor::CompensationKind, ok: bool) -> ralph_core::supervisor::SupervisorStoreResult<()> {
+        self.inner.complete_compensation(wave_id, kind, ok)
+    }
+
+    fn create_redrive_wave(&self, parent_wave_id: &str, slots: Option<&[u32]>) -> ralph_core::supervisor::SupervisorStoreResult<ralph_core::supervisor::RedriveResult> {
+        self.inner.create_redrive_wave(parent_wave_id, slots)
+    }
+
+    fn reserve_emission(&self, scope_key: &str, payload_digest: &str, expected_count: u32, count_events_on_disk: &dyn Fn(&str) -> u32) -> ralph_core::supervisor::SupervisorStoreResult<ralph_core::supervisor::EmissionReservation> {
+        self.inner.reserve_emission(scope_key, payload_digest, expected_count, count_events_on_disk)
+    }
+
+    fn mark_emission_applying(&self, scope_key: &str) -> ralph_core::supervisor::SupervisorStoreResult<()> {
+        self.inner.mark_emission_applying(scope_key)
+    }
+
+    fn mark_emission_applied(&self, scope_key: &str, applied_at_unix_secs: u64) -> ralph_core::supervisor::SupervisorStoreResult<()> {
+        self.inner.mark_emission_applied(scope_key, applied_at_unix_secs)
+    }
+
+    fn mark_emission_recovery_required(&self, scope_key: &str) -> ralph_core::supervisor::SupervisorStoreResult<()> {
+        self.inner.mark_emission_recovery_required(scope_key)
+    }
+
+    fn mark_emission_failed(&self, scope_key: &str) -> ralph_core::supervisor::SupervisorStoreResult<()> {
+        self.inner.mark_emission_failed(scope_key)
+    }
+
+    fn emission_state_for_wave_id(&self, public_wave_id: &str) -> ralph_core::supervisor::SupervisorStoreResult<Option<ralph_core::supervisor::EmissionState>> {
+        self.inner.emission_state_for_wave_id(public_wave_id)
+    }
+
+    fn adopt_legacy_emission(&self, scope_key: &str, payload_digest: &str, expected_count: u32, legacy_wave_id: &str) -> ralph_core::supervisor::SupervisorStoreResult<String> {
+        self.inner.adopt_legacy_emission(scope_key, payload_digest, expected_count, legacy_wave_id)
+    }
+
+}
+
+/// S2a fail-closed: persist failure ⇒ no worker spawned, no descriptor
+/// reaches the inner store.
+#[tokio::test]
+async fn test_s2a_persist_failure_fails_closed_no_spawn() {
+    use ralph_core::supervisor::{InMemorySupervisorStore, SupervisorStore};
+    use std::sync::Arc;
+
+    let inner = Arc::new(InMemorySupervisorStore::new());
+    let failing: Arc<dyn SupervisorStore> = Arc::new(PersistFailingSupervisorStore {
+        inner: inner.clone(),
+    });
+    let bridge = U3DispatchBridge::new(failing, 4);
+
+    let wave = make_u3_wave_with_concurrency("s2a-persist-fail", 1, 1, 1);
+    let wave = ralph_core::DetectedWave {
+        events: vec![ralph_core::Event {
+            topic: "exec.unit.ready".to_string(),
+            payload: Some(r#"{"content_hash":"s2a-fault"}"#.to_string()),
+            ts: String::new(),
+            hat: None,
+            triggered: None,
+            source: None,
+            wave_id: None,
+            wave_index: None,
+            wave_total: None,
+            system_injected: None,
+        }],
+        ..wave
+    };
+
+    let started = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let (_outcome, _) =
+        run_u3_execute_wave_with_prebound_slots(&bridge, &wave, &[0], started.clone()).await;
+
+    assert_eq!(
+        started.load(std::sync::atomic::Ordering::SeqCst),
+        0,
+        "S2a fail-closed: persist failure must skip the slot (no spawn)"
+    );
+
+    // The inner store received every call EXCEPT a successful persist:
+    // the wave row exists (register delegated) but no descriptor does.
+    let snaps = inner.recover_active_waves().expect("recover");
+    assert_eq!(snaps.len(), 1, "the wave must be registered via delegation");
+    let store_wave_id = snaps.into_iter().next().unwrap().wave_id;
+    let descriptor = inner
+        .slot_descriptor(&store_wave_id, 0)
+        .expect("slot_descriptor must not error");
+    assert!(
+        descriptor.is_none(),
+        "S2a fail-closed: no descriptor may reach the store when persist fails"
+    );
+}
+
+// =============================================================================
+// 2026-07-28-002 plan U4 (G1 / R-F1 / S3-S6): boot redrive dispatch.
+//
+// `dispatch_pending_redrive_waves` scans the supervisor store for redrive
+// child waves created by a previous loop (`create_redrive_wave`) but never
+// dispatched (crash between create and spawn), takes each slot's descriptor
+// (fail-closed on unavailable / digest conflict), and dispatches each slot
+// as a single-slot wave through the supervisor path with the TRUE child
+// slot index (C3: multi-slot child waves must bind 0/1/2, not 0/0/0).
+// =============================================================================
+
+/// Executor that records the slot index of every spawn request, so
+/// tests can assert the dispatcher bound the true child slot index.
+#[derive(Clone, Default)]
+struct U4SlotRecordingExecutor {
+    indices: std::sync::Arc<std::sync::Mutex<Vec<u32>>>,
+}
+
+impl WaveWorkerExecutor for U4SlotRecordingExecutor {
+    fn execute(
+        &self,
+        mut request: crate::loop_runner::wave::WorkerRequest,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = (u32, WaveWorkerOutcome)> + Send>> {
+        let indices = std::sync::Arc::clone(&self.indices);
+        Box::pin(async move {
+            indices.lock().unwrap().push(request.index);
+            let _ = request.worker_rpc_tx.take();
+            let _ = request.worker_tui_state.take();
+            let event = ralph_core::Event {
+                topic: "exec.done".to_string(),
+                payload: Some("ok".to_string()),
+                ts: String::new(),
+                hat: None,
+                triggered: None,
+                source: None,
+                wave_id: None,
+                wave_index: None,
+                wave_total: None,
+                system_injected: None,
+            };
+            (
+                request.index,
+                Ok((vec![event], Duration::from_millis(5), true)),
+            )
+        })
+    }
+}
+
+/// A hat registry with one hat subscribed to `exec.unit.ready` so
+/// `dispatch_redrive_child_wave` can resolve the descriptor topic.
+fn redrive_test_registry() -> ralph_core::HatRegistry {
+    let mut registry = ralph_core::HatRegistry::new();
+    let hat = ralph_proto::Hat {
+        id: ralph_proto::HatId::new("redrive-worker"),
+        name: "Redrive Worker".to_string(),
+        description: "test hat for redrive boot dispatch".to_string(),
+        subscriptions: vec![ralph_proto::Topic::new("exec.unit.ready")],
+        publishes: vec![ralph_proto::Topic::new("exec.done")],
+        instructions: String::new(),
+    };
+    registry.register_with_config(hat, ralph_core::config::HatConfig::default());
+    registry
+}
+
+/// Register a parent wave with `slots` failed slots, optionally
+/// persisting a descriptor per slot first (the U3 spawn-time record).
+fn make_redrive_parent_with_descriptors(
+    store: &dyn ralph_core::supervisor::SupervisorStore,
+    key: &str,
+    slots: u32,
+    persist_descriptors: bool,
+) -> String {
+    use ralph_core::supervisor::{SlotDescriptor, SlotResource, WaveKind};
+    let wave = store.register_wave(key, WaveKind::Exec, slots, 1).unwrap();
+    for i in 0..slots {
+        store
+            .bind_worktree(
+                &wave,
+                i,
+                SlotResource {
+                    slot_index: i,
+                    worktree_path: Some(format!("/tmp/u4-redrive/{key}-{i}")),
+                    branch: Some(format!("u4-{key}-{i}")),
+                },
+            )
+            .unwrap();
+        if persist_descriptors {
+            let payload = format!(r#"{{"unit":"u{i}"}}"#);
+            store
+                .persist_slot_descriptor(
+                    &wave,
+                    &SlotDescriptor {
+                        slot_index: i,
+                        topic: "exec.unit.ready".to_string(),
+                        payload_json: payload.clone(),
+                        wave_kind: WaveKind::Exec,
+                        payload_digest: SlotDescriptor::digest_of(&payload),
+                        slot_index_in_parent: None,
+                    },
+                )
+                .unwrap();
+        }
+        store
+            .record_slot_failure(&wave, i, "synthetic parent failure")
+            .unwrap();
+    }
+    wave
+}
+
+/// S3 / R-F1 happy path (in-memory): a 3-slot child wave created from a
+/// descriptor-bearing parent is fully dispatched by the boot scan —
+/// each child slot binds its OWN index (C3), and a second scan is a
+/// no-op (take consumed the descriptors ⇒ resume-after-dispatch never
+/// double-spawns).
+#[tokio::test]
+async fn test_u4_redrive_boot_dispatch_in_memory_multi_slot() {
+    use ralph_core::supervisor::{InMemorySupervisorStore, SupervisorStore};
+    use std::sync::Arc;
+
+    let store: Arc<dyn SupervisorStore> = Arc::new(InMemorySupervisorStore::new());
+    let parent = make_redrive_parent_with_descriptors(store.as_ref(), "u4-boot", 3, true);
+    let redrive = store.create_redrive_wave(&parent, Some(&[0, 1, 2])).unwrap();
+
+    // Sanity: the enriched pending list sees all 3 child slots with digests.
+    let pending = store.list_redrive_pending_child_waves().unwrap();
+    assert_eq!(pending.len(), 1, "one pending child wave expected");
+    assert_eq!(pending[0].child_wave_id, redrive.child_wave_id);
+    assert_eq!(pending[0].slots.len(), 3);
+    assert!(
+        pending[0].slots.iter().all(|s| s.expected_digest.is_some()),
+        "parent descriptors must enrich child slots with expected_digest"
+    );
+
+    // Production `bind_slot` binds a per-slot worktree in the store
+    // before the store approves dispatch; `U3DispatchBridge` leaves
+    // binding to the test, so pre-bind the child slots (same pattern
+    // as `run_u3_execute_wave_with_prebound_slots`).
+    for i in 0..3u32 {
+        store
+            .bind_worktree(
+                &redrive.child_wave_id,
+                i,
+                ralph_core::supervisor::SlotResource {
+                    slot_index: i,
+                    worktree_path: Some(format!("/tmp/u4-redrive/child-{}-{i}", redrive.child_wave_id)),
+                    branch: Some(format!("u4-child-{}-{i}", redrive.child_wave_id)),
+                },
+            )
+            .unwrap();
+    }
+
+    let bridge: Arc<dyn ralph_core::supervisor::SupervisorBridge> =
+        Arc::new(U3DispatchBridge::new(store.clone(), 4));
+    let registry = redrive_test_registry();
+    let backend = make_test_cli_backend();
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let events_path = tmp.path().join("events.jsonl");
+    let executor = U4SlotRecordingExecutor::default();
+    let recorded = executor.indices.clone();
+
+    let dispatched = crate::loop_runner::wave::dispatch_pending_redrive_waves(
+        &store,
+        "loop-u4-boot",
+        &registry,
+        &backend,
+        &bridge,
+        &events_path,
+        Arc::new(executor.clone()),
+    )
+    .await;
+    assert_eq!(dispatched, 3, "all 3 child slots must be dispatched");
+
+    let mut indices = recorded.lock().unwrap().clone();
+    indices.sort_unstable();
+    assert_eq!(
+        indices,
+        vec![0, 1, 2],
+        "C3: each child slot must spawn under its own slot index, not all slot 0"
+    );
+
+    // Idempotency (R-F5): descriptors were consumed by `take`; a second
+    // boot scan (simulating a later `ralph run --resume`) finds nothing
+    // dispatchable and spawns nothing.
+    let again = crate::loop_runner::wave::dispatch_pending_redrive_waves(
+        &store,
+        "loop-u4-boot",
+        &registry,
+        &backend,
+        &bridge,
+        &events_path,
+        Arc::new(executor),
+    )
+    .await;
+    assert_eq!(
+        again, 0,
+        "resume after successful dispatch must not re-spawn (take consumed descriptors)"
+    );
+    assert_eq!(
+        recorded.lock().unwrap().len(),
+        3,
+        "second scan must not add spawn requests"
+    );
+}
+
+/// S4 fail-closed: a legacy parent whose slots never persisted
+/// descriptors yields child slots with `expected_digest = None`; the
+/// boot scan must skip them all (slot_never_started fail-close) and
+/// spawn nothing.
+#[tokio::test]
+async fn test_u4_redrive_boot_legacy_slot_fail_closed() {
+    use ralph_core::supervisor::{InMemorySupervisorStore, SupervisorStore};
+    use std::sync::Arc;
+
+    let store: Arc<dyn SupervisorStore> = Arc::new(InMemorySupervisorStore::new());
+    let parent = make_redrive_parent_with_descriptors(store.as_ref(), "u4-legacy", 2, false);
+    let redrive = store.create_redrive_wave(&parent, None).unwrap();
+
+    // Enriched list must expose the slots WITHOUT a digest.
+    let pending = store.list_redrive_pending_child_waves().unwrap();
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0].child_wave_id, redrive.child_wave_id);
+    assert!(
+        pending[0].slots.iter().all(|s| s.expected_digest.is_none()),
+        "legacy parent slots must surface expected_digest = None"
+    );
+
+    let bridge: Arc<dyn ralph_core::supervisor::SupervisorBridge> =
+        Arc::new(U3DispatchBridge::new(store.clone(), 4));
+    let registry = redrive_test_registry();
+    let backend = make_test_cli_backend();
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let events_path = tmp.path().join("events.jsonl");
+    let executor = U4SlotRecordingExecutor::default();
+    let recorded = executor.indices.clone();
+
+    let dispatched = crate::loop_runner::wave::dispatch_pending_redrive_waves(
+        &store,
+        "loop-u4-legacy",
+        &registry,
+        &backend,
+        &bridge,
+        &events_path,
+        Arc::new(executor),
+    )
+    .await;
+    assert_eq!(
+        dispatched, 0,
+        "slots without a persisted descriptor must fail closed (no dispatch)"
+    );
+    assert!(
+        recorded.lock().unwrap().is_empty(),
+        "no worker may spawn for descriptor-less legacy slots"
+    );
+}
+
+/// S3 rusqlite-backed variant: the same multi-slot boot dispatch must
+/// work against the production persistent store (real v10 schema, real
+/// take/delete semantics), including the idempotent second scan.
+#[cfg(feature = "supervisor-db")]
+#[tokio::test]
+async fn test_s3_rusqlite_backed_wave_supervisor_dispatch() {
+    use ralph_core::supervisor::{RusqliteSupervisorStore, SupervisorStore};
+    use std::sync::Arc;
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let db_path = tmp.path().join("supervisor.db");
+    let store: Arc<dyn SupervisorStore> =
+        Arc::new(RusqliteSupervisorStore::open(&db_path).expect("open rusqlite store"));
+
+    let parent = make_redrive_parent_with_descriptors(store.as_ref(), "s3-rusqlite", 3, true);
+    let _redrive = store.create_redrive_wave(&parent, Some(&[0, 1, 2])).unwrap();
+
+    // Sanity: the parent descriptor must have landed (rusqlite
+    // first-persist regression guard, see the persist_slot_descriptor
+    // UPDATE-then-INSERT fix) and the enriched pending list must see
+    // all three child slots.
+    assert!(
+        store.slot_descriptor(&parent, 0).unwrap().is_some(),
+        "rusqlite: first persist must actually store the descriptor"
+    );
+    let pending = store.list_redrive_pending_child_waves().unwrap();
+    assert_eq!(pending.len(), 1, "rusqlite: one pending child wave expected");
+    assert_eq!(pending[0].slots.len(), 3);
+
+    // Pre-bind child slot worktrees (see the in-memory variant).
+    for i in 0..3u32 {
+        store
+            .bind_worktree(
+                &_redrive.child_wave_id,
+                i,
+                ralph_core::supervisor::SlotResource {
+                    slot_index: i,
+                    worktree_path: Some(format!("/tmp/u4-redrive/s3-child-{}-{i}", _redrive.child_wave_id)),
+                    branch: Some(format!("u4-s3-child-{}-{i}", _redrive.child_wave_id)),
+                },
+            )
+            .unwrap();
+    }
+
+    let bridge: Arc<dyn ralph_core::supervisor::SupervisorBridge> =
+        Arc::new(U3DispatchBridge::new(store.clone(), 4));
+    let registry = redrive_test_registry();
+    let backend = make_test_cli_backend();
+    let events_path = tmp.path().join("events.jsonl");
+    let executor = U4SlotRecordingExecutor::default();
+    let recorded = executor.indices.clone();
+
+    let dispatched = crate::loop_runner::wave::dispatch_pending_redrive_waves(
+        &store,
+        "loop-s3",
+        &registry,
+        &backend,
+        &bridge,
+        &events_path,
+        Arc::new(executor.clone()),
+    )
+    .await;
+    assert_eq!(
+        dispatched, 3,
+        "rusqlite-backed: all 3 child slots must be dispatched"
+    );
+    let mut indices = recorded.lock().unwrap().clone();
+    indices.sort_unstable();
+    assert_eq!(indices, vec![0, 1, 2], "rusqlite-backed: C3 slot indices");
+
+    let again = crate::loop_runner::wave::dispatch_pending_redrive_waves(
+        &store,
+        "loop-s3",
+        &registry,
+        &backend,
+        &bridge,
+        &events_path,
+        Arc::new(executor),
+    )
+    .await;
+    assert_eq!(again, 0, "rusqlite-backed: second scan is a no-op");
 }
