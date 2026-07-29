@@ -447,6 +447,7 @@ hats:
       - forge.worktrees.ready
       - forge.wave.settled
     trigger_multi_consumer_topics:
+      - forge.wave.worktrees.ready
       - forge.wave.settled
     publishes:
       - exec.unit.ready
@@ -528,7 +529,8 @@ hats:
       2. If `forge.wave.settled` just landed: select the next
          static wave (smallest open wave_index) and emit
          `forge.wave.prepare` with the new wave's Unit ids and
-         the **settled** `verified_base_commit`.
+         the **settled** `verified_base_commit` (the new verified
+         base that Settlement just pinned).
       3. If `forge.wave.worktrees.ready` just landed: ready set
          = that wave's Unit ids; sort by `integration_order`; verify
          → wave emit.
@@ -618,11 +620,13 @@ hats:
 
   reviewer:
     name: "Reviewer"
-    description: "Independent per-Unit review after all supervisor exec waves complete."
-    triggers: [forge.exec.development.done]
-    publishes: [forge.units.reviewed, forge.plan.blocked]
-    exempt_topics: [forge.units.reviewed, forge.plan.blocked]
-    terminal_events: [forge.units.reviewed, forge.plan.blocked]
+    description: "Per-wave independent review after supervisor fan-in; emits forge.wave.reviewed."
+    triggers: [forge.wave.worktrees.ready]
+    trigger_multi_consumer_topics:
+      - forge.wave.worktrees.ready
+    publishes: [forge.wave.reviewed, forge.units.reviewed, forge.plan.blocked]
+    exempt_topics: [forge.wave.reviewed, forge.units.reviewed, forge.plan.blocked]
+    terminal_events: [forge.wave.reviewed, forge.units.reviewed, forge.plan.blocked]
     event_filter:
       enabled: true
       events: [forge.exec.development.done]
@@ -645,11 +649,11 @@ hats:
 
   integrator:
     name: "Integrator"
-    description: "Per-wave sequential rebase/merge of approved Units; includes commit linearization (Curator duties)."
-    triggers: [forge.units.reviewed]
-    publishes: [forge.integration.done, forge.wave.settled, work.failed]
-    exempt_topics: [forge.integration.done, forge.wave.settled, work.failed]
-    terminal_events: [forge.integration.done, forge.wave.settled, work.failed]
+    description: "Per-wave sequential rebase/merge of approved Units; emits forge.wave.integrated then fast-forwards and emits forge.wave.settled."
+    triggers: [forge.wave.reviewed, forge.wave.verified]
+    publishes: [forge.wave.integrated, forge.wave.settled, forge.integration.done, work.failed]
+    exempt_topics: [forge.wave.integrated, forge.wave.settled, forge.integration.done, work.failed]
+    terminal_events: [forge.wave.integrated, forge.wave.settled, forge.integration.done, work.failed]
     event_filter:
       enabled: true
       events: [forge.units.reviewed]
@@ -678,11 +682,11 @@ hats:
 
   verifier:
     name: "Verifier"
-    description: "Incremental regression after integration."
-    triggers: [forge.integration.done]
-    publishes: [forge.incremental.verified, work.failed]
-    exempt_topics: [forge.incremental.verified, work.failed]
-    terminal_events: [forge.incremental.verified, work.failed]
+    description: "Per-wave verification on candidate HEAD; runs only between Integrator promotion and Settlement."
+    triggers: [forge.wave.integrated, forge.integration.done]
+    publishes: [forge.wave.verified, forge.incremental.verified, work.failed]
+    exempt_topics: [forge.wave.verified, forge.incremental.verified, work.failed]
+    terminal_events: [forge.wave.verified, forge.incremental.verified, work.failed]
     event_filter:
       enabled: true
       events: [forge.integration.done]
@@ -705,7 +709,7 @@ hats:
   tester:
     name: "Tester"
     description: "Full regression and CI-equivalent gates after all Units integrated."
-    triggers: [forge.incremental.verified]
+    triggers: [forge.incremental.verified, forge.exec.development.done]
     publishes: [forge.full.verified, work.failed]
     exempt_topics: [forge.full.verified, work.failed]
     terminal_events: [forge.full.verified, work.failed]
@@ -757,7 +761,7 @@ hats:
   reporter:
     name: "Reporter"
     description: "Writes manager-readable Markdown report; terminal hat."
-    triggers: [forge.audit.done, forge.plan.blocked, work.failed]
+    triggers: [forge.audit.done, forge.plan.blocked, work.failed, forge.units.reviewed]
     publishes: [forge.report.done, LOOP_COMPLETE]
     exempt_topics: [forge.report.done, LOOP_COMPLETE]
     terminal_events: [forge.report.done, LOOP_COMPLETE]

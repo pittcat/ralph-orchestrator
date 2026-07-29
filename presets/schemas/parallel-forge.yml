@@ -161,6 +161,116 @@ schemas:
         source: forge.wave.prepare.plan_key.
         fill_rule: Must match .ralph/forge/<plan-key>/.
 
+  forge.wave.reviewed:
+    required_fields:
+      - wave_id
+      - wave_index
+      - unit_verdicts
+      - aggregate_verdict
+      - review_report_path
+      - plan_key
+    payload: json_object
+    field_docs:
+      wave_id:
+        meaning: Stable identifier for the wave whose Units were reviewed.
+        source: Reviewer after consuming the current wave's fan-in.
+        fill_rule: Must match forge.wave.worktrees.ready.wave_id.
+      wave_index:
+        meaning: Wave index just reviewed.
+        source: Reviewer reading the current wave.
+        fill_rule: Non-negative integer.
+      unit_verdicts:
+        meaning: Per-Unit verdict map (unit_id → ACCEPTED / REJECTED).
+        source: Reviewer six-dimension audit.
+        fill_rule: One entry per fan-in unit, no duplicates.
+      aggregate_verdict:
+        meaning: Wave-level verdict (ACCEPTED / REJECTED) consumed by Integrator.
+        source: Reviewer aggregation.
+        fill_rule: "ACCEPTED only when every unit's verdict is ACCEPTED."
+      review_report_path:
+        meaning: Repo-relative path to the wave review artifact.
+        source: File at .ralph/forge/<plan-key>/waves/<wave_id>/review.md.
+        fill_rule: Must exist; one entry per fan-in unit.
+      plan_key:
+        meaning: Forge plan key basename.
+        source: forge.wave.prepare.plan_key.
+        fill_rule: Must match .ralph/forge/<plan-key>/.
+
+  forge.wave.integrated:
+    required_fields:
+      - wave_id
+      - wave_index
+      - candidate_branch
+      - candidate_commit_sha
+      - commit_map_path
+      - units_integrated
+      - plan_key
+    payload: json_object
+    field_docs:
+      wave_id:
+        meaning: Stable identifier for the wave just integrated.
+        source: Integrator after sequential merge.
+        fill_rule: Must match forge.wave.reviewed.wave_id.
+      wave_index:
+        meaning: Wave index just integrated.
+        source: Integrator.
+        fill_rule: Non-negative integer.
+      candidate_branch:
+        meaning: Branch carrying the wave's candidate commits.
+        source: Integrator.
+        fill_rule: Branch name; not the formal integration branch.
+      candidate_commit_sha:
+        meaning: HEAD of the candidate branch after merge.
+        source: Integrator git rev-parse.
+        fill_rule: 40-char SHA; Verifier uses this as the gate target.
+      commit_map_path:
+        meaning: Path to the per-Unit commit map artifact.
+        source: File at .ralph/forge/<plan-key>/waves/<wave_id>/commit-map.yml.
+        fill_rule: Must exist; one commit SHA per integrated Unit.
+      units_integrated:
+        meaning: Count of Units successfully integrated in order.
+        source: Integrator.
+        fill_rule: Non-negative integer ≤ wave unit count.
+      plan_key:
+        meaning: Forge plan key basename.
+        source: Forge.wave.prepare.plan_key.
+        fill_rule: Must match .ralph/forge/<plan-key>/.
+
+  forge.wave.verified:
+    required_fields:
+      - wave_id
+      - wave_index
+      - candidate_commit_sha
+      - verification_log_path
+      - passed
+      - plan_key
+    payload: json_object
+    field_docs:
+      wave_id:
+        meaning: Stable identifier for the wave just verified.
+        source: Verifier after running the candidate commit's gate suite.
+        fill_rule: Must match forge.wave.integrated.wave_id.
+      wave_index:
+        meaning: Wave index just verified.
+        source: Verifier.
+        fill_rule: Non-negative integer.
+      candidate_commit_sha:
+        meaning: Candidate HEAD SHA that the verification ran against.
+        source: Verifier; equal to forge.wave.integrated.candidate_commit_sha.
+        fill_rule: 40-char SHA; mismatch with candidate rejects the verification.
+      verification_log_path:
+        meaning: Repo-relative path to the per-wave verification log.
+        source: File at .ralph/forge/<plan-key>/waves/<wave_id>/verification.md.
+        fill_rule: Must list every command run and its outcome.
+      passed:
+        meaning: Whether every required gate command passed.
+        source: Verifier outcome.
+        fill_rule: '"false" routes to correction; never to settlement directly.'
+      plan_key:
+        meaning: Forge plan key basename.
+        source: Forge.wave.prepare.plan_key.
+        fill_rule: Must match .ralph/forge/<plan-key>/.
+
   forge.wave.settled:
     required_fields:
       - wave_id
