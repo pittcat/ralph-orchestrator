@@ -4937,6 +4937,52 @@ impl EventLoop {
     /// If memories are configured with `inject: auto`, this method also prepends
     /// primed memories to the prompt context. If a scratchpad file exists and is
     /// non-empty, its content is also prepended (before memories).
+    fn append_terminal_deliverable_contract(&self, prompt: String, hat_id: &HatId) -> String {
+        let promise = self.config.event_loop.completion_promise.as_str();
+        let Some(hat) = self.registry.get_config(hat_id) else {
+            return prompt;
+        };
+        let publishes_completion = hat.publishes.iter().any(|topic| topic == promise)
+            || hat.default_publishes.as_deref() == Some(promise);
+        if !publishes_completion {
+            return prompt;
+        }
+
+        let Some(policy) = self.config.event_loop.event_policy.as_ref() else {
+            return prompt;
+        };
+        let Some(schema) = policy.schemas.get(promise) else {
+            return prompt;
+        };
+        let Some(path_field) = ["report_path", "artifact_path"]
+            .iter()
+            .find(|field| schema.required_fields.iter().any(|required| required == **field))
+        else {
+            return prompt;
+        };
+        let field_doc = schema.field_docs.get(*path_field);
+        let path_source = field_doc
+            .map(|doc| doc.source.trim())
+            .filter(|source| !source.is_empty())
+            .unwrap_or("the real operator-facing artifact available in this activation");
+        let fill_rule = field_doc
+            .map(|doc| doc.fill_rule.trim())
+            .filter(|rule| !rule.is_empty())
+            .unwrap_or("use the real repo-relative path; never invent a path");
+
+        format!(
+            "{prompt}\n\n## TERMINAL DELIVERABLE CONTRACT\n\
+             This is the final activation for completion topic `{promise}`.\n\
+             - Before emitting, resolve `{path_field}` from: {path_source}.\n\
+             - Contract: {fill_rule}.\n\
+             - Verify the file is readable with `test -f` before policy-check and the real emit.\n\
+             - The `{promise}` payload MUST include `{path_field}` with that exact repo-relative path.\n\
+             - After the emit succeeds, your final visible reply MUST contain exactly one standalone line:\n\
+             `DELIVERABLE_PATH: <{path_field}>`\n\
+             Replace the placeholder with the same path carried in `{path_field}`. Do not finish with only a prose summary.\n"
+        )
+    }
+
     pub fn build_prompt(&mut self, hat_id: &HatId) -> Option<String> {
         // 2026-06-13-004 U8 (P1-2): clear any pending handoff
         // deadlines for this hat. The hat is now actually
@@ -5436,6 +5482,7 @@ impl EventLoop {
             // workflow order (in `### GUARDRAILS`) stays authoritative.
             let base_prompt =
                 append_runtime_config_block(base_prompt, self.config.event_loop.max_residuals);
+            let base_prompt = self.append_terminal_deliverable_contract(base_prompt, hat_id);
 
             // Inject the cached `human.guidance` text as a `## ROBOT GUIDANCE`
             // block so isolated hats (whose `build_custom_hat` template does
@@ -5612,6 +5659,7 @@ impl EventLoop {
         // `inject_phase_into_prompt` so the phase block (if any) sits
         // just above RUNTIME CONFIG at the tail of the prompt.
         let base = append_runtime_config_block(base, self.config.event_loop.max_residuals);
+        let base = self.append_terminal_deliverable_contract(base, hat_id);
         let with_phase = self.inject_phase_into_prompt(base);
         let with_diagnosis = self.apply_runtime_diagnosis_prompt(with_phase, hat_id);
         // R5 (2026-06-17-005 fix plan): the

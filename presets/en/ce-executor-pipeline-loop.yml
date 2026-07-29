@@ -87,6 +87,9 @@ event_loop:
   prompt_file: "PROMPT.md"
   completion_promise: "LOOP_COMPLETE"
   required_events: ["report.done"]
+  completion_payload_match:
+    topic: report.done
+    fields: [report_path]
   starting_event: "work.start"
   max_iterations: 80
   max_runtime_seconds: 28800  # 8 hours
@@ -1515,12 +1518,16 @@ event_loop:
             source: "reporter aggregates from upstream triggers + report bundle"
             fill_rule: "literal one-of enum; never empty; matches downstream LOOP_COMPLETE routing"
       LOOP_COMPLETE:
-        required_fields: ["reason"]
+        required_fields: ["reason", "report_path"]
         field_docs:
           reason:
             meaning: "short stable phrase identifying why the loop ended; one of 'completed' / 'blocked' / 'max_iterations' / 'max_runtime'"
             source: "reporter (or runtime) sets based on the trigger that activated it"
             fill_rule: "literal one-of enum; never empty; do NOT hand-write business summaries"
+          report_path:
+            meaning: "repo-relative path to the final aggregated report"
+            source: "reporter copies the exact accepted report.done.report_path"
+            fill_rule: "must match report.done.report_path and the readable report file"
 
 cli:
   backend: "claude"
@@ -5315,9 +5322,9 @@ hats:
       4. Confirm: print `DELIVERABLE_PATH: .ralph/review/{plan_name}/report.md`
          in this activation's visible reply (operator TUI search).
          Do this on the `report.done` activation (the one that writes the
-         file). If a later activation only emits `LOOP_COMPLETE`, reprint
-         the same `DELIVERABLE_PATH` line; do not invent a new path and do
-         not put `report_path` on `LOOP_COMPLETE`.
+         file). If a later activation also emits `LOOP_COMPLETE`, reprint
+         the same `DELIVERABLE_PATH` line and carry the same `report_path`
+         into `LOOP_COMPLETE`; do not invent a new path.
          Also Confirm emit with `--output json` (`ok`/`recorded`); schema
          does not check the filesystem — use `test -f` before emit.
       Then emit `LOOP_COMPLETE` on the same or next activation per HARD RULES.
@@ -5375,8 +5382,8 @@ hats:
       9. Emit `LOOP_COMPLETE` with policy-check first (next activation is OK, or
          same activation if the runtime allows; usually separate):
          ```bash
-         ralph emit LOOP_COMPLETE --policy-check --json '{"reason":"<Chinese or English 1-2 sentence summary matching the report verdict>"}'
-         ralph emit LOOP_COMPLETE --json '{"reason":"<Chinese or English 1-2 sentence summary matching the report verdict>"}'
+         ralph emit LOOP_COMPLETE --policy-check --json '{"reason":"<Chinese or English 1-2 sentence summary matching the report verdict>","report_path":".ralph/review/<plan>/report.md"}'
+         ralph emit LOOP_COMPLETE --json '{"reason":"<Chinese or English 1-2 sentence summary matching the report verdict>","report_path":".ralph/review/<plan>/report.md"}'
          ```
 
       ### Branch B — Dead-end failure path (trigger = `work.failed` or `plan.blocked`)
@@ -5400,8 +5407,8 @@ hats:
          ```
       5. Emit `LOOP_COMPLETE` with policy-check first:
          ```bash
-         ralph emit LOOP_COMPLETE --policy-check --json '{"reason":"blocked: <upstream reason>"}'
-         ralph emit LOOP_COMPLETE --json '{"reason":"blocked: <upstream reason>"}'
+         ralph emit LOOP_COMPLETE --policy-check --json '{"reason":"blocked: <upstream reason>","report_path":".ralph/review/<plan>/report.md"}'
+         ralph emit LOOP_COMPLETE --json '{"reason":"blocked: <upstream reason>","report_path":".ralph/review/<plan>/report.md"}'
          ```
 
       ### Branch C — Loop exhausted path (trigger = `review.loop.blocked`)
@@ -5428,8 +5435,8 @@ hats:
          ```
       5. Emit `LOOP_COMPLETE` with policy-check first:
          ```bash
-         ralph emit LOOP_COMPLETE --policy-check --json '{"reason":"blocked: <loop_decision_basis> (<reason>)"}'
-         ralph emit LOOP_COMPLETE --json '{"reason":"blocked: <loop_decision_basis> (<reason>)"}'
+         ralph emit LOOP_COMPLETE --policy-check --json '{"reason":"blocked: <loop_decision_basis> (<reason>)","report_path":".ralph/review/<plan>/report.md"}'
+         ralph emit LOOP_COMPLETE --json '{"reason":"blocked: <loop_decision_basis> (<reason>)","report_path":".ralph/review/<plan>/report.md"}'
          ```
 
       ### Notes

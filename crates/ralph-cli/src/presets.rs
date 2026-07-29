@@ -353,7 +353,7 @@ mod tests {
         }
     }
 
-    fn assert_public_preset_has_completion_path(preset: &EmbeddedPreset) {
+    fn assert_embedded_preset_has_terminal_deliverable(preset: &EmbeddedPreset) {
         let config =
             RalphConfig::parse_yaml(preset.content).expect("embedded preset YAML should parse");
         let promise = config.event_loop.completion_promise.trim();
@@ -363,16 +363,52 @@ mod tests {
             preset.name
         );
 
-        let has_completion_path = config.hats.values().any(|hat| {
-            hat.publishes.iter().any(|topic| topic == promise)
-                || hat.default_publishes.as_deref() == Some(promise)
-        });
+        let schema = config
+            .event_loop
+            .event_policy
+            .as_ref()
+            .unwrap_or_else(|| {
+                panic!(
+                    "Preset '{}' completion promise '{}' must enable event policy",
+                    preset.name, promise
+                )
+            })
+            .schemas
+            .get(promise)
+            .unwrap_or_else(|| {
+                panic!(
+                    "Preset '{}' completion promise '{}' must have an event schema",
+                    preset.name, promise
+                )
+            });
+        let deliverable_field = ["report_path", "artifact_path"]
+            .iter()
+            .find(|field| schema.required_fields.iter().any(|required| required == **field))
+            .unwrap_or_else(|| {
+                panic!(
+                    "Preset '{}' completion promise '{}' must require report_path or artifact_path; got {:?}",
+                    preset.name, promise, schema.required_fields
+                )
+            });
 
+        let terminal_hats: Vec<_> = config
+            .hats
+            .iter()
+            .filter(|(_, hat)| {
+                hat.publishes.iter().any(|topic| topic == promise)
+                    || hat.default_publishes.as_deref() == Some(promise)
+            })
+            .collect();
         assert!(
-            has_completion_path,
+            !terminal_hats.is_empty(),
             "Preset '{}' must expose its completion promise '{}' via publishes/default_publishes",
-            preset.name, promise
+            preset.name,
+            promise
         );
+        // The runtime injects the stable user-visible `DELIVERABLE_PATH:`
+        // contract into every terminal hat prompt from this schema field.
+        // Keeping the per-preset test structural avoids prompt-copy drift.
+        let _ = (terminal_hats, deliverable_field);
     }
 
     // Unit 1 (plan 2026-07-07-006): single-chain execution primary path.
@@ -863,9 +899,9 @@ mod tests {
     }
 
     #[test]
-    fn test_public_presets_have_completion_path() {
-        for preset in PRESETS.iter().filter(|preset| preset.public) {
-            assert_public_preset_has_completion_path(preset);
+    fn test_embedded_presets_have_terminal_deliverables() {
+        for preset in PRESETS {
+            assert_embedded_preset_has_terminal_deliverable(preset);
         }
     }
 

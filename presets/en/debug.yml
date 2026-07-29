@@ -88,6 +88,12 @@ event_loop:
         type: object
       DEBUG_COMPLETE:
         type: object
+        required_fields: [report_path]
+        field_docs:
+          report_path:
+            meaning: Repo-relative path to the final evidence-backed root-cause note.
+            source: The note written by the fixer at `.eval-sandbox/debug/counter.md`, or the prompt-specified replacement path.
+            fill_rule: Use the real readable note path; never invent a path.
       hypothesis.confirmed:
         type: object
       hypothesis.rejected:

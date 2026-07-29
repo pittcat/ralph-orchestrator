@@ -3,6 +3,81 @@
 use super::*;
 
 #[test]
+fn terminal_hat_prompt_injects_deliverable_path_contract_from_completion_schema() {
+    let yaml = r#"
+event_loop:
+  execution_mode: isolated
+  completion_promise: LOOP_COMPLETE
+  event_policy:
+    enabled: true
+    mode: enforce
+    schemas:
+      LOOP_COMPLETE:
+        payload: json_object
+        required_fields: [reason, report_path]
+        field_docs:
+          report_path:
+            source: ".ralph/reports/REPORT.md written by this activation"
+            fill_rule: "use the readable repo-relative report path"
+hats:
+  worker:
+    name: Worker
+    triggers: [work.start]
+    publishes: [work.done]
+    instructions: "Do the work."
+  reporter:
+    name: Reporter
+    triggers: [work.done]
+    publishes: [LOOP_COMPLETE]
+    terminal_events: [LOOP_COMPLETE]
+    instructions: "Write the final report."
+"#;
+    let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
+    let mut event_loop = EventLoop::new(config);
+    event_loop.initialize("Test terminal deliverable");
+
+    let prompt = event_loop
+        .build_prompt(&HatId::new("reporter"))
+        .expect("terminal reporter prompt");
+
+    assert!(prompt.contains("## TERMINAL DELIVERABLE CONTRACT"));
+    assert!(prompt.contains(".ralph/reports/REPORT.md written by this activation"));
+    assert!(prompt.contains("`report_path`"));
+    assert!(prompt.contains("DELIVERABLE_PATH: <report_path>"));
+}
+
+#[test]
+fn non_terminal_hat_prompt_does_not_inject_deliverable_path_contract() {
+    let yaml = r#"
+event_loop:
+  execution_mode: isolated
+  completion_promise: LOOP_COMPLETE
+  event_policy:
+    enabled: true
+    mode: enforce
+    schemas:
+      LOOP_COMPLETE:
+        payload: json_object
+        required_fields: [report_path]
+hats:
+  worker:
+    name: Worker
+    triggers: [work.start]
+    publishes: [work.done]
+    instructions: "Do the work."
+"#;
+    let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
+    let mut event_loop = EventLoop::new(config);
+    event_loop.initialize("Test intermediate prompt");
+
+    let prompt = event_loop
+        .build_prompt(&HatId::new("worker"))
+        .expect("worker prompt");
+
+    assert!(!prompt.contains("## TERMINAL DELIVERABLE CONTRACT"));
+}
+
+#[test]
 fn test_build_prompt_uses_ghuntley_style_for_all_hats() {
     // Per Hatless Ralph spec: All hats use build_custom_hat with ghuntley-style prompts
     let yaml = r#"

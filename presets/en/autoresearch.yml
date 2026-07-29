@@ -86,6 +86,12 @@ event_loop:
         type: object
       LOOP_COMPLETE:
         type: object
+        required_fields: [report_path]
+        field_docs:
+          report_path:
+            meaning: Repo-relative path to the final autoresearch session report.
+            source: The existing readable `autoresearch.md` maintained throughout the session.
+            fill_rule: Use exactly `autoresearch.md`; verify it is readable before completion.
       experiment.ready:
         type: object
       experiment.blocked:

@@ -238,7 +238,7 @@ ralph emit <TOPIC> -j '...' --output json                  # 落盘：看 ok=tru
 **何时不适用：**
 - 只 emit 中间业务事件，且该 topic 的 schema **不要求**路径字段；
 - 本轮不写操作者文件，只转发上游路径；
-- 本 activation 只发收尾的纯完成信号（例如某些 preset 第二次 activation 只发 `LOOP_COMPLETE` 且 schema 只有 `reason`）——此时若上一 activation 已打印过 `DELIVERABLE_PATH`，本轮可再打印同一行提醒操作者，但**不要**伪造新路径，也**不要**往无路径字段的 schema 里塞 `report_path`。
+- 本 activation 只发收尾的纯完成信号，且该终态 schema **没有**路径字段——此时若上一 activation 已打印过 `DELIVERABLE_PATH`，本轮可再打印同一行提醒操作者，但**不要**伪造新路径，也**不要**往无路径字段的 schema 里塞 `report_path`。
 
 **怎么做：**
 1. **先落盘**：按 hat instructions 写出文件。
@@ -259,7 +259,7 @@ ralph emit <TOPIC> -j '...' --output json                  # 落盘：看 ok=tru
 
 **重要边界（避免误解）：**
 - Schema / `--policy-check` 通常只检查「路径字段是否存在且非空」，**不会**替你检查磁盘上文件是否可读。文件可读性必须你自己用第 2 步确认。
-- 若 hat instructions 允许「先 `report.done`（带 `report_path`）再 `LOOP_COMPLETE`」：路径字段与 `DELIVERABLE_PATH` 落在 **带路径字段的那次 emit / 那次 activation**；不要把 `report_path` 错绑到只有 `reason` 的 `LOOP_COMPLETE` 上。
+- 若 hat instructions 允许「先 `report.done`（带 `report_path`）再 `LOOP_COMPLETE`」且 `LOOP_COMPLETE` 也要求路径字段：路径字段与 `DELIVERABLE_PATH` 落在 **同一真实路径**；不要把两次 emit 写成不同值。若终态本身不要求路径字段，则不要把 `report_path` 错绑到只有 `reason` 的终态上。
 - **Paired completion 字段一致性**：当 preset 启用 `completion_payload_match` 时，`LOOP_COMPLETE` 的声明字段必须与最近 accepted 的 paired topic（如 `forge.report.done`）完全一致。runtime 会拒收不一致的 completion 并注入 correction；resume 时不得重写既有报告事实来制造新的成功终态。
 
 **停止条件：**

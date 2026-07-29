@@ -104,4 +104,14 @@ schemas:
   merge.handled:
     required_fields:
       - cleanup_status
+      - report_path
     payload: json_object
+    field_docs:
+      cleanup_status:
+        meaning: Whether merge cleanup or failure handling completed.
+        source: Cleaner or failure-handler result from this activation.
+        fill_rule: Summarize the real terminal state; do not report clean when cleanup failed.
+      report_path:
+        meaning: Repo-relative path to the operator-facing merge-loop terminal report.
+        source: File written by the terminal hat under `.ralph/merge/loops/<loop_id>.md`.
+        fill_rule: Use the real readable report path; verify it before completion.
