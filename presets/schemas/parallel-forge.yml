@@ -96,6 +96,111 @@ schemas:
         source: Guardian audit of DAG, shared resources, and path boundaries.
         fill_rule: '"false" blocks worktree creation; emit forge.plan.blocked instead.'
 
+  forge.wave.prepare:
+    required_fields:
+      - wave_index
+      - wave_id
+      - unit_ids
+      - verified_base_commit
+      - plan_key
+      - execution_plan_path
+    payload: json_object
+    field_docs:
+      wave_index:
+        meaning: Static wave index from execution-plan.yml (1-based, sequential).
+        source: forge-dispatcher reading execution_plan_path.
+        fill_rule: Equals the smallest wave_index whose tasks are still open.
+      wave_id:
+        meaning: Stable identifier for this wave round (unique per plan).
+        source: Dispatcher-generated; format wave-<plan-key>-<index>.
+        fill_rule: Non-empty string; stable across re-entry.
+      unit_ids:
+        meaning: Ordered (by integration_order) Unit ids to be fanned out in this wave.
+        source: execution-plan.yml wave filter.
+        fill_rule: Non-empty; subset of execution plan units.
+      verified_base_commit:
+        meaning: Commit SHA the worktree base must match before fan-out.
+        source: Initial draft base or last forge.wave.settled.verified_base_commit.
+        fill_rule: 40-char git SHA; must be a valid commit.
+      plan_key:
+        meaning: Forge plan key basename.
+        source: Trigger / loop anchor.
+        fill_rule: Must match .ralph/forge/<plan-key>/.
+      execution_plan_path:
+        meaning: Execution plan SSOT.
+        source: Planner handoff.
+        fill_rule: Same path used since Planner handoff.
+
+  forge.wave.worktrees.ready:
+    required_fields:
+      - wave_id
+      - wave_index
+      - worktree_map_path
+      - verified_base_commit
+      - plan_key
+    payload: json_object
+    field_docs:
+      wave_id:
+        meaning: Stable identifier for the wave that just created worktrees.
+        source: forge.wave.prepare trigger.
+        fill_rule: Must match the prepare payload's wave_id.
+      wave_index:
+        meaning: Wave index that was prepared.
+        source: forge.wave.prepare.wave_index.
+        fill_rule: Non-negative integer.
+      worktree_map_path:
+        meaning: Repo-relative path to the wave-scoped worktree map.
+        source: File at .ralph/forge/<plan-key>/worktree-map.yml.
+        fill_rule: Must describe only the current wave's worktrees; future waves absent.
+      verified_base_commit:
+        meaning: Verified base commit the worktrees were created from.
+        source: forge.wave.prepare.verified_base_commit.
+        fill_rule: 40-char git SHA; must equal the prepare payload.
+      plan_key:
+        meaning: Forge plan key basename.
+        source: forge.wave.prepare.plan_key.
+        fill_rule: Must match .ralph/forge/<plan-key>/.
+
+  forge.wave.settled:
+    required_fields:
+      - wave_id
+      - wave_index
+      - settled_task_ids
+      - settled_unit_ids
+      - verified_base_commit
+      - plan_key
+      - settlement_log_path
+    payload: json_object
+    field_docs:
+      wave_id:
+        meaning: Stable identifier for the wave that was just settled.
+        source: Integrator after the wave's verify pass.
+        fill_rule: Must match the prepare / worktrees.ready payload.
+      wave_index:
+        meaning: Wave index that was just settled.
+        source: Integrator reading the current work.
+        fill_rule: Non-negative integer.
+      settled_task_ids:
+        meaning: Live task IDs to close atomically (U3 CloseTaskBatch).
+        source: ralph tools task list filtered by unit_ids in this wave.
+        fill_rule: Must equal the live task IDs for the wave's unit_ids; duplicates / unknown IDs reject.
+      settled_unit_ids:
+        meaning: Unit ids that were settled in this wave.
+        source: Integrator reading the current wave's Unit roster.
+        fill_rule: Same length as settled_task_ids.
+      verified_base_commit:
+        meaning: Verified base commit for the next wave's worktree creation.
+        source: integrator after verifier pass.
+        fill_rule: 40-char git SHA; must equal candidate merge HEAD.
+      plan_key:
+        meaning: Forge plan key basename.
+        source: Forge.wave.prepare.plan_key.
+        fill_rule: Must match .ralph/forge/<plan-key>/.
+      settlement_log_path:
+        meaning: Repo-relative path to the wave settlement log artifact.
+        source: File at .ralph/forge/<plan-key>/waves/<wave_id>/settlement.md.
+        fill_rule: Must exist; contains review/integration/verification outcome + commit map.
+
   forge.exec.development.done:
     required_fields:
       - execution_plan_path

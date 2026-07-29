@@ -9,7 +9,13 @@ development_plan_path: ".ralph/forge/<PLAN_KEY>/development-plan.md"
 
 # 可选：Guardian / Worktree 填写
 integration_branch: "<INTEGRATION_BRANCH_OR_TBD>"
+# `base_commit` 是 Planner 启动时的初始基线（plan_baseline_sha）；仅作审计，不再被用作运行 base。
 base_commit: "<SHA_AFTER_FOUNDATION_OR_TBD>"
+
+# U4 / R8: 跟踪当前已 verified 的工作基线。初始时与 base_commit 一致；
+# 每一 wave Verifier pass 并 promotion 后由 Integrator 写入最新 verified HEAD。
+# 下一个 wave 的 worktree 必须从该 SHA 懒创建，确保依赖代码可见。
+verified_base_commit: "<VERIFIED_BASE_COMMIT_OR_TBD>"
 
 units: []
   # - 将 unit.template.yml 的字段作为 YAML 对象逐项追加到 units[]

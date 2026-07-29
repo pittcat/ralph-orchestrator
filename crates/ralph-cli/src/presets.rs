@@ -2598,10 +2598,11 @@ mod tests {
         .iter()
         .map(|s| s.to_string())
         .collect();
-        let expected_new_keys: BTreeSet<String> = ["forge.plan.ready", "exec.unit.done"]
-            .iter()
-            .map(|s| s.to_string())
-            .collect();
+        let expected_new_keys: BTreeSet<String> =
+            ["forge.plan.ready", "forge.wave.settled"]
+                .iter()
+                .map(|s| s.to_string())
+                .collect();
 
         let mut full_legacy: BTreeSet<String> = legacy_keys.clone();
         let mut full_new: BTreeSet<String> = BTreeSet::new();
@@ -2673,19 +2674,23 @@ mod tests {
                         preset.name
                     ));
                 }
-                // Plan 2026-07-29-002 U1 / R1: `exec.unit.done` must
-                // be a CloseTask action so accepted unit completions
-                // close the live task atomically.
+                // Plan 2026-07-29-001 U3: `forge.wave.settled`
+                // is now the only state-authority path that closes
+                // tasks for parallel-forge (slot → wave settlement
+                // rather than slot → close_task). The legacy
+                // `exec.unit.done → close_task` mapping was removed
+                // because fan-out completion must not release
+                // downstream Unit dependencies early (R7).
                 match config
                     .event_loop
                     .state_projection
                     .actions
-                    .get("exec.unit.done")
+                    .get("forge.wave.settled")
                 {
-                    Some(StateProjectionAction::CloseTask { task_id, .. })
-                        if task_id == "task_id" => {}
+                    Some(StateProjectionAction::CloseTaskBatch { task_ids, .. })
+                        if task_ids == "settled_task_ids" => {}
                     other => bad_presets.push(format!(
-                        "{}: exec.unit.done must be CloseTask{{task_id:\"task_id\"}}, got {:?}",
+                        "{}: forge.wave.settled must be CloseTaskBatch{{task_ids:\"settled_task_ids\"}}, got {:?}",
                         preset.name, other
                     )),
                 }
