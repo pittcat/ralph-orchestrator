@@ -3957,9 +3957,8 @@ fn test_precheck_gate_exhaust() {
 /// precheck gate, then re-emitted with sufficient evidence and forwarded.
 #[test]
 fn test_ce_executor_pipeline_fail_gate_rejected_then_pass() {
-    let yaml = load_scenario(
-        "tests/scenarios/ce_executor_pipeline_fail_gate_rejected_then_pass.yml",
-    );
+    let yaml =
+        load_scenario("tests/scenarios/ce_executor_pipeline_fail_gate_rejected_then_pass.yml");
     run_workflow_guard_scenario(yaml);
 }
 

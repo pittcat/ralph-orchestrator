@@ -2132,9 +2132,7 @@ impl SupervisorStore for RusqliteSupervisorStore {
             // not the child row's own slot. Callers that need the child
             // slot use the list-enriched `child_slot_index`.
             let descriptor = SlotDescriptor {
-                slot_index: slot_in_parent
-                    .map(|v| v as u32)
-                    .unwrap_or(slot_index),
+                slot_index: slot_in_parent.map(|v| v as u32).unwrap_or(slot_index),
                 topic,
                 payload_json,
                 wave_kind: kind,

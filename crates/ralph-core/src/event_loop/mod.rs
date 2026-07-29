@@ -14917,6 +14917,27 @@ pub(crate) fn advance_plan_step(
         return None;
     }
 
+    // 2026-07-29-001 plan U1 (R1): explicit `transition_emits`
+    // narrows the per-step transition authority. Empty keeps
+    // the legacy behaviour (any `allowed_emits` topic advances
+    // the step) for presets that have not opted in. Once
+    // declared, only topics named in `transition_emits`
+    // advance the step; the remaining `allowed_emits` topics
+    // stay in scope for the FlowStepScope gate (so a
+    // failure-capable step can keep `work.failed` in
+    // `allowed_emits` without collapsing the step on the first
+    // failure), but they no longer drive the positional /
+    // declared forward advance. The lint graph
+    // (`preset_lint::flow_declaration`) refuses to load a
+    // preset whose `transition_emits` is not a subset of
+    // `allowed_emits`, so this branch can trust the topic is
+    // already in-scope.
+    if !step.transition_emits.is_empty()
+        && !step.transition_emits.iter().any(|t| t == accepted_topic)
+    {
+        return None;
+    }
+
     // 2026-07-26-004 plan U6 (R7 / R8): declared-transition authority.
     // A FORWARD step (`j > idx`) whose `on` / `on_any_of` names the
     // accepted topic is the transition target. Forward-only makes the
@@ -15014,6 +15035,7 @@ mod u4_current_plan_step_tests {
                 runs: None,
                 on: None,
                 on_any_of: Vec::new(),
+                transition_emits: Vec::new(),
             })
             .collect();
         let mut cfg = RalphConfig::default();
@@ -15053,6 +15075,7 @@ mod u4_current_plan_step_tests {
                     runs: None,
                     on: None,
                     on_any_of: Vec::new(),
+                    transition_emits: Vec::new(),
                 }],
                 ..FlowDeclarationConfig::default()
             }),
@@ -15145,6 +15168,7 @@ mod u4_current_plan_step_tests {
                 runs: None,
                 on: on.map(String::from),
                 on_any_of: on_any_of.into_iter().map(String::from).collect(),
+                transition_emits: Vec::new(),
             }
         };
         let mut cfg = RalphConfig::default();
@@ -15258,6 +15282,7 @@ mod u4_current_plan_step_tests {
                 runs: None,
                 on: on.map(String::from),
                 on_any_of: on_any_of.into_iter().map(String::from).collect(),
+                transition_emits: Vec::new(),
             }
         };
         let mut cfg = RalphConfig::default();
@@ -15328,6 +15353,158 @@ mod u4_current_plan_step_tests {
     //
     // KTD3: the whitelist is the smaller change vs. the
     // alternative of an `exec_unit_*` non-transition bucket.
+    /// 2026-07-29-001 plan U1 (R1): when a step declares an
+    /// explicit `transition_emits`, only those topics advance
+    /// the plan-mode current step. Other topics that remain
+    /// in `allowed_emits` (e.g. `forge.review.ready`) are
+    /// still accepted in the current step (FlowStepScope) but
+    /// no longer collapse the step boundary through the
+    /// positional-advance fallback. Topic names use a bespoke
+    /// namespace that avoids the runtime's NON_TRANSITION_TOPICS
+    /// whitelist, so the assertions actually prove the
+    /// transition_emits field narrows the authority (the
+    /// whitelist would otherwise mask the failure on
+    /// `work.ready`/`work.failed`-style topics).
+    #[test]
+    fn u1_transition_emits_only_named_topics_advance() {
+        let mk = |id: &str, allowed: Vec<&str>, transition: Vec<&str>| -> FlowStepConfig {
+            FlowStepConfig {
+                id: id.to_string(),
+                kind: None,
+                allowed_emits: allowed.into_iter().map(String::from).collect(),
+                terminal_when: None,
+                on_partial: std::collections::BTreeMap::new(),
+                runs: None,
+                on: None,
+                on_any_of: Vec::new(),
+                transition_emits: transition.into_iter().map(String::from).collect(),
+            }
+        };
+        let mut cfg = RalphConfig::default();
+        cfg.event_loop = EventLoopConfig {
+            mechanism: Some(MechanismConfig {
+                flow: Some(FlowDeclarationConfig {
+                    flow_type: "declared".to_string(),
+                    version: 1,
+                    terminal_emits: vec!["LOOP_COMPLETE".to_string()],
+                    steps: vec![
+                        mk(
+                            "unit_loop",
+                            vec![
+                                "forge.triage.ready",
+                                "forge.triage.partial",
+                                "forge.triage.done",
+                            ],
+                            vec!["forge.triage.done"],
+                        ),
+                        mk(
+                            "review_walk",
+                            vec!["forge.review.complete"],
+                            vec!["forge.review.complete"],
+                        ),
+                    ],
+                    ..FlowDeclarationConfig::default()
+                }),
+                phase_authority: None,
+            }),
+            ..EventLoopConfig::default()
+        };
+        // forge.triage.done is in transition_emits → advances.
+        assert_eq!(
+            advance_plan_step(&cfg, "unit_loop", "forge.triage.done"),
+            Some("review_walk".to_string())
+        );
+        // forge.triage.ready is in allowed_emits but NOT in
+        // transition_emits → must NOT advance.
+        assert_eq!(
+            advance_plan_step(&cfg, "unit_loop", "forge.triage.ready"),
+            None
+        );
+        // forge.triage.partial is in allowed_emits but NOT in
+        // transition_emits → must NOT advance.
+        assert_eq!(
+            advance_plan_step(&cfg, "unit_loop", "forge.triage.partial"),
+            None
+        );
+    }
+
+    /// 2026-07-29-001 plan U1 (R1 / R8): when `transition_emits`
+    /// is empty (the legacy default), every `allowed_emits`
+    /// topic remains transition-capable — the contract a
+    /// preset wrote before this field was introduced.
+    #[test]
+    fn u1_empty_transition_emits_keeps_legacy_allowed_emits_authority() {
+        let cfg = flow_config(vec![
+            ("unit_loop", vec!["work.done", "review.start"]),
+            ("review_walk", vec!["review.complete"]),
+        ]);
+        // review.start advances (legacy contract).
+        assert_eq!(
+            advance_plan_step(&cfg, "unit_loop", "review.start"),
+            Some("review_walk".to_string())
+        );
+    }
+
+    /// 2026-07-29-001 plan U1 (R8): resident EventLoop
+    /// (`advance_plan_step`) and replay (`recover_current_plan_step`)
+    /// share the same authority. When `transition_emits` is
+    /// explicit, the replay-folding must agree with the live
+    /// incremental advance on every accepted topic sequence.
+    #[test]
+    fn u1_recover_current_plan_step_matches_incremental_with_transition_emits() {
+        let mk = |id: &str, allowed: Vec<&str>, transition: Vec<&str>| -> FlowStepConfig {
+            FlowStepConfig {
+                id: id.to_string(),
+                kind: None,
+                allowed_emits: allowed.into_iter().map(String::from).collect(),
+                terminal_when: None,
+                on_partial: std::collections::BTreeMap::new(),
+                runs: None,
+                on: None,
+                on_any_of: Vec::new(),
+                transition_emits: transition.into_iter().map(String::from).collect(),
+            }
+        };
+        let mut cfg = RalphConfig::default();
+        cfg.event_loop = EventLoopConfig {
+            mechanism: Some(MechanismConfig {
+                flow: Some(FlowDeclarationConfig {
+                    flow_type: "declared".to_string(),
+                    version: 1,
+                    terminal_emits: vec!["LOOP_COMPLETE".to_string()],
+                    steps: vec![
+                        mk(
+                            "unit_loop",
+                            vec!["work.ready", "work.failed", "review.start"],
+                            vec!["review.start"],
+                        ),
+                        mk(
+                            "review_walk",
+                            vec!["review.complete"],
+                            vec!["review.complete"],
+                        ),
+                    ],
+                    ..FlowDeclarationConfig::default()
+                }),
+                phase_authority: None,
+            }),
+            ..EventLoopConfig::default()
+        };
+        // Resident path.
+        let mut live = initial_current_plan_step(&cfg);
+        assert_eq!(live, "unit_loop");
+        for topic in ["work.ready", "work.failed", "review.start"] {
+            if let Some(next) = advance_plan_step(&cfg, &live, topic) {
+                live = next;
+            }
+        }
+        assert_eq!(live, "review_walk");
+        // Replay path — must agree.
+        let replayed =
+            recover_current_plan_step(&cfg, &["work.ready", "work.failed", "review.start"]);
+        assert_eq!(replayed, live);
+    }
+
     fn exec_wave_flow() -> RalphConfig {
         flow_config(vec![
             ("unit_loop", vec!["work.ready", "execution.plan.ready"]),
@@ -15607,6 +15784,7 @@ mod flow_authority_pf_recovery_tests {
             runs: runs.map(String::from),
             on: on.map(String::from),
             on_any_of: on_any_of.into_iter().map(String::from).collect(),
+            transition_emits: Vec::new(),
         };
 
         let mut cfg = RalphConfig::default();
@@ -15940,6 +16118,7 @@ mod flow_authority_pf_declared_14step_tests {
             runs: runs.map(String::from),
             on: on.map(String::from),
             on_any_of: on_any_of.into_iter().map(String::from).collect(),
+            transition_emits: Vec::new(),
         };
 
         let mut cfg = RalphConfig::default();

@@ -925,6 +925,7 @@ mod tests {
             runs: None,
             on: None,
             on_any_of: Vec::new(),
+            transition_emits: Vec::new(),
         };
         event_loop.stage_pipeline =
             crate::event_loop::stage_pipeline::StagePipeline::with_default_stages(flow);

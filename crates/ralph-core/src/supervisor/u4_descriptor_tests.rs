@@ -312,7 +312,10 @@ mod rusqlite_backed_tests {
             .unwrap()
         {
             RedriveTakeOutcome::Dispatchable { descriptor: d } => {
-                assert_eq!(d.slot_index, 1, "descriptor.slot_index must be the parent slot");
+                assert_eq!(
+                    d.slot_index, 1,
+                    "descriptor.slot_index must be the parent slot"
+                );
                 assert_eq!(d.slot_index_in_parent, Some(1));
                 assert_eq!(d.payload_json, payload);
             }
@@ -359,7 +362,10 @@ mod rusqlite_backed_tests {
                 },
             )
             .unwrap();
-        let read = store.slot_descriptor(&child, 0).unwrap().expect("row exists");
+        let read = store
+            .slot_descriptor(&child, 0)
+            .unwrap()
+            .expect("row exists");
         assert_eq!(
             read.slot_index_in_parent,
             Some(0),
@@ -381,9 +387,17 @@ mod rusqlite_backed_tests {
 
         let redrive = store.create_redrive_wave(&parent, None).unwrap();
         let pending = store.list_redrive_pending_child_waves().unwrap();
-        assert_eq!(pending.len(), 1, "child wave must be listed even without descriptors");
+        assert_eq!(
+            pending.len(),
+            1,
+            "child wave must be listed even without descriptors"
+        );
         assert_eq!(pending[0].child_wave_id, redrive.child_wave_id);
-        assert_eq!(pending[0].slots.len(), 2, "legacy slots must NOT be dropped");
+        assert_eq!(
+            pending[0].slots.len(),
+            2,
+            "legacy slots must NOT be dropped"
+        );
         assert!(
             pending[0].slots.iter().all(|s| s.expected_digest.is_none()),
             "legacy slots surface expected_digest = None for boot fail-close"
@@ -443,9 +457,9 @@ mod rusqlite_backed_tests {
             RedriveTakeOutcome::Dispatchable { descriptor: d } => {
                 assert_eq!(d.payload_digest, digest);
             }
-            other => panic!(
-                "resume after take-without-spawn must still see Dispatchable, got {other:?}"
-            ),
+            other => {
+                panic!("resume after take-without-spawn must still see Dispatchable, got {other:?}")
+            }
         }
         let pending = store.list_redrive_pending_child_waves().unwrap();
         assert_eq!(pending.len(), 1);
