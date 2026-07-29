@@ -131,6 +131,26 @@ impl Default for PrecheckOnFail {
 /// Inject `event_policy.schemas` entries for the derived topics
 /// introduced by desugar (`<X>.proposed`, `<X>.rejected`). Idempotent:
 /// existing schema entries are left untouched.
+///
+/// 2026-07-29-006 plan U4 (R3, S3): when the guarded topic `<X>`
+/// already has a schema with a non-empty `required_fields` list,
+/// the synthesized `<X>.proposed` schema inherits `payload` and
+/// `required_fields` so the producer emit path catches missing
+/// fields BEFORE the event is written to disk. The pre-U4 shell
+/// was `EventSchema { payload: JsonObject, ..Default::default() }`,
+/// which meant a guard like `dead_end_confidence >= 90` never
+/// fired on the proposed path — the bare payload was accepted,
+/// the gate then rejected it with `X.rejected` for the same
+/// reason, and every retry burned budget on a check the producer
+/// should have caught in the first place.
+///
+/// Inheritance scope is deliberately narrow (D3): only
+/// `payload` + `required_fields` flow from the guarded schema to
+/// the proposed schema. `allowed_values`, `hat_allowed_values`,
+/// `element_constraints`, `field_docs`, `examples`,
+/// `trigger_context`, and `known_fields` are **not** copied —
+/// those are topic-level concerns that the gate hat and the
+/// existing `<X>` schema already own.
 pub fn inject_precheck_event_schemas(config: &mut crate::config::RalphConfig, topic: &str) {
     use crate::config::{EventSchema, PayloadType};
 
@@ -140,10 +160,31 @@ pub fn inject_precheck_event_schemas(config: &mut crate::config::RalphConfig, to
         .get_or_insert_with(crate::config::EventPolicyConfig::default);
     let schemas = &mut policy.schemas;
 
+    // Capture the guarded schema's shape BEFORE we touch the
+    // proposed entry. The desugar runs after the guarded entry
+    // is already in the map (preset YAML + inline_schemas merge),
+    // so this read is a plain lookup with no borrow juggling.
+    let guarded_shape: Option<(Option<PayloadType>, Vec<String>)> =
+        schemas.get(topic).map(|s| (s.payload.clone(), s.required_fields.clone()));
+
     let proposed = format!("{topic}.proposed");
-    schemas.entry(proposed).or_insert_with(|| EventSchema {
-        payload: Some(PayloadType::JsonObject),
-        ..Default::default()
+    schemas.entry(proposed).or_insert_with(|| {
+        // 2026-07-29-006 U4 (R3): copy guarded `payload` +
+        // `required_fields` so missing-field validation runs on
+        // the proposed path. When the guarded topic has no
+        // schema (the common case for hat-derivable topics) the
+        // default shell is used — the existing pre-U4 behaviour.
+        match &guarded_shape {
+            Some((payload, required_fields)) if !required_fields.is_empty() => EventSchema {
+                payload: payload.clone().or(Some(PayloadType::JsonObject)),
+                required_fields: required_fields.clone(),
+                ..Default::default()
+            },
+            _ => EventSchema {
+                payload: Some(PayloadType::JsonObject),
+                ..Default::default()
+            },
+        }
     });
 
     let rejected = format!("{topic}.rejected");
@@ -393,6 +434,150 @@ mod resolve_precheck_emit_topic_tests {
         assert_eq!(
             resolved, "work.failed.proposed",
             "happy path: rewrite to proposed"
+        );
+    }
+}
+
+#[cfg(test)]
+mod inject_precheck_event_schemas_tests {
+    //! 2026-07-29-006 plan U4 (R3, S3): the synthesized
+    //! `<X>.proposed` schema must inherit `payload` +
+    //! `required_fields` from the guarded `<X>` schema so
+    //! missing-field validation runs on the proposed path.
+    use super::*;
+    use crate::config::{EventPolicyConfig, EventSchema, PayloadType};
+    use std::collections::HashMap;
+
+    fn config_with_guarded_schema(
+        topic: &str,
+        required_fields: Vec<&str>,
+    ) -> crate::config::RalphConfig {
+        let mut cfg = crate::config::RalphConfig::default();
+        let mut schemas = HashMap::new();
+        schemas.insert(
+            topic.to_string(),
+            EventSchema {
+                payload: Some(PayloadType::JsonObject),
+                required_fields: required_fields.into_iter().map(String::from).collect(),
+                ..Default::default()
+            },
+        );
+        cfg.event_loop.event_policy = Some(EventPolicyConfig {
+            enabled: true,
+            schemas,
+            ..EventPolicyConfig::default()
+        });
+        cfg
+    }
+
+    /// Happy path (R3): the guarded schema's `payload` and
+    /// `required_fields` are copied to the proposed entry.
+    #[test]
+    fn inject_proposed_inherits_required_fields_from_guarded() {
+        let mut cfg = config_with_guarded_schema(
+            "work.failed",
+            vec!["plan_name", "decisions_file", "reason"],
+        );
+        inject_precheck_event_schemas(&mut cfg, "work.failed");
+        let schemas = &cfg.event_loop.event_policy.as_ref().unwrap().schemas;
+        let proposed = schemas.get("work.failed.proposed").expect("proposed");
+        assert_eq!(
+            proposed.payload,
+            Some(PayloadType::JsonObject),
+            "payload must be inherited"
+        );
+        assert_eq!(
+            proposed.required_fields,
+            vec![
+                "plan_name".to_string(),
+                "decisions_file".to_string(),
+                "reason".to_string(),
+            ],
+            "required_fields must be inherited from guarded schema"
+        );
+    }
+
+    /// Empty `required_fields` falls back to the default shell —
+    /// no spurious inheritance that would have rejected legal
+    /// payloads.
+    #[test]
+    fn inject_proposed_uses_default_shell_when_guarded_has_no_required() {
+        let mut cfg = config_with_guarded_schema("work.failed", vec![]);
+        inject_precheck_event_schemas(&mut cfg, "work.failed");
+        let schemas = &cfg.event_loop.event_policy.as_ref().unwrap().schemas;
+        let proposed = schemas.get("work.failed.proposed").expect("proposed");
+        assert_eq!(proposed.required_fields, Vec::<String>::new());
+    }
+
+    /// Idempotency: an explicit existing proposed schema is NOT
+    /// overwritten by the guarded schema. Authors can opt in to a
+    /// different shape by declaring it ahead of normalize.
+    #[test]
+    fn inject_does_not_overwrite_existing_proposed_schema() {
+        let mut cfg = crate::config::RalphConfig::default();
+        let mut schemas = HashMap::new();
+        schemas.insert(
+            "work.failed".to_string(),
+            EventSchema {
+                payload: Some(PayloadType::JsonObject),
+                required_fields: vec!["a".into(), "b".into()],
+                ..Default::default()
+            },
+        );
+        // Hand-author a stricter proposed schema ahead of inject.
+        schemas.insert(
+            "work.failed.proposed".to_string(),
+            EventSchema {
+                payload: Some(PayloadType::JsonObject),
+                required_fields: vec!["a".into()],
+                ..Default::default()
+            },
+        );
+        cfg.event_loop.event_policy = Some(EventPolicyConfig {
+            enabled: true,
+            schemas,
+            ..EventPolicyConfig::default()
+        });
+        inject_precheck_event_schemas(&mut cfg, "work.failed");
+        let schemas = &cfg.event_loop.event_policy.as_ref().unwrap().schemas;
+        let proposed = schemas.get("work.failed.proposed").expect("proposed");
+        assert_eq!(
+            proposed.required_fields,
+            vec!["a".to_string()],
+            "explicit proposed schema must NOT be overwritten"
+        );
+    }
+
+    /// Negative inheritance: `allowed_values`, `field_docs`, and
+    /// `element_constraints` are NOT copied to the proposed
+    /// schema. Those are topic-level concerns owned by the
+    /// guarded schema and the gate hat.
+    #[test]
+    fn inject_does_not_inherit_out_of_scope_fields() {
+        let mut cfg = crate::config::RalphConfig::default();
+        let mut allowed_values = HashMap::new();
+        allowed_values.insert("reason".to_string(), vec![serde_json::json!("unreachable")]);
+        let mut schemas = HashMap::new();
+        schemas.insert(
+            "work.failed".to_string(),
+            EventSchema {
+                payload: Some(PayloadType::JsonObject),
+                required_fields: vec!["reason".into()],
+                allowed_values: allowed_values.clone(),
+                ..Default::default()
+            },
+        );
+        cfg.event_loop.event_policy = Some(EventPolicyConfig {
+            enabled: true,
+            schemas,
+            ..EventPolicyConfig::default()
+        });
+        inject_precheck_event_schemas(&mut cfg, "work.failed");
+        let schemas = &cfg.event_loop.event_policy.as_ref().unwrap().schemas;
+        let proposed = schemas.get("work.failed.proposed").expect("proposed");
+        assert!(
+            proposed.allowed_values.is_empty(),
+            "allowed_values must NOT be inherited (D3 scope)"
         );
     }
 }

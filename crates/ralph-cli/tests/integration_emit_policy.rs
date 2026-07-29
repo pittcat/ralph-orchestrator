@@ -306,14 +306,14 @@ fn test_emit_policy_check_rejects_non_allowlisted_events_file() {
 // ---------------------------------------------------------------------------
 
 /// Build a minimal `--json` payload for `work.failed` that satisfies
-/// every required field declared by the `ce-executor-pipeline`
-/// schema. Returned as an owned `String` so the test can `--json`
-/// pass it through `ralph emit`.
+/// every required field declared by the inline
+/// `event_policy.schemas.work.failed` in the
+/// `ce-executor-pipeline` preset (15 entries: the 12 from
+/// `presets/schemas/ce-executor-pipeline.yml` + `dead_end_confidence`
+/// + `dead_end_evidence_coverage` + `dead_end_evidence_file`).
+/// Returned as an owned `String` so the test can `--json` pass it
+/// through `ralph emit`.
 fn work_failed_minimal_valid_json() -> String {
-    // Schema: plan_name, plan_path, planned_units, attempted_units,
-    // completed_units, failed_units, blocked_units, skipped_units,
-    // baseline_verification_file, decisions_file, reason,
-    // report_input_file.
     serde_json::json!({
         "plan_name": "2026-07-29-006-fixture",
         "plan_path": "docs/plans/2026-07-29-006-fixture.md",
@@ -326,7 +326,10 @@ fn work_failed_minimal_valid_json() -> String {
         "baseline_verification_file": ".ralph/review/fixture/baseline-verification.md",
         "decisions_file": ".ralph/agent/decisions.md",
         "reason": "no_deliverable_commits: fixture",
-        "report_input_file": ".ralph/review/fixture/report-input.work-failed.json"
+        "report_input_file": ".ralph/review/fixture/report-input.work-failed.json",
+        "dead_end_confidence": 92,
+        "dead_end_evidence_coverage": 80,
+        "dead_end_evidence_file": ".ralph/review/fixture/dead-end-evidence.md"
     })
     .to_string()
 }
@@ -462,5 +465,70 @@ fn test_precheck_emit_rewrite_does_not_promote_non_producer() {
             || stderr.contains("origin:out_of_scope")
             || stderr.contains("Event rejected"),
         "S5: stderr must surface the scope/origin rejection; stderr={stderr}"
+    );
+}
+
+/// S3 (U4 / R3): a producer emit that is missing a required field
+/// from the guarded schema MUST be rejected on the proposed path,
+/// not silently accepted (which would have been the pre-U4
+/// behaviour, because the synthesized `<X>.proposed` schema was
+/// a default `JsonObject` shell with no inherited
+/// `required_fields`).
+#[test]
+fn test_precheck_emit_missing_required_field_rejected_on_proposed() {
+    let temp_dir = TempDir::new().expect("temp dir");
+    let temp_path = temp_dir.path();
+    std::fs::create_dir_all(temp_path.join(".ralph")).unwrap();
+
+    // Same 14 of 15 required fields as the S1 fixture, but
+    // `dead_end_confidence` is omitted. The bare topic is
+    // rewritten to `work.failed.proposed` (S1 wiring), and the
+    // proposed schema inherits the guarded required fields (U4
+    // wiring), so policy-check must reject with
+    // `missing_required_field` for `dead_end_confidence`.
+    let payload = serde_json::json!({
+        "plan_name": "2026-07-29-006-fixture",
+        "plan_path": "docs/plans/2026-07-29-006-fixture.md",
+        "planned_units": ["U1"],
+        "attempted_units": [],
+        "completed_units": [],
+        "failed_units": [],
+        "blocked_units": [],
+        "skipped_units": [],
+        "baseline_verification_file": ".ralph/review/fixture/baseline-verification.md",
+        "decisions_file": ".ralph/agent/decisions.md",
+        "reason": "no_deliverable_commits: fixture",
+        "report_input_file": ".ralph/review/fixture/report-input.work-failed.json",
+        "dead_end_evidence_coverage": 80,
+        "dead_end_evidence_file": ".ralph/review/fixture/dead-end-evidence.md"
+    })
+    .to_string();
+
+    let output = common::ralph_bin()
+        .args([
+            "emit",
+            "work.failed",
+            "--json",
+            &payload,
+            "--policy-check",
+        ])
+        .current_dir(temp_path)
+        .env("RALPH_HATS_SOURCE", "builtin:ce-executor-pipeline")
+        .env("RALPH_CURRENT_HAT", "executor")
+        .env("RALPH_EVENTS_FILE", temp_path.join(".ralph/events.jsonl"))
+        .output()
+        .expect("failed to execute ralph emit --policy-check");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !output.status.success(),
+        "S3: missing required field must be rejected on the proposed path; \
+         exit={:?} stdout={stdout} stderr={stderr}",
+        output.status.code()
+    );
+    assert!(
+        stdout.contains("reason") || stderr.contains("reason") || stdout.contains("missing"),
+        "S3: stderr/stdout must name the missing field; stdout={stdout} stderr={stderr}"
     );
 }
