@@ -2094,6 +2094,10 @@ hats:
     exempt_topics: ["work.done", "work.failed"]
     default_publishes: "work.failed"
     terminal_events: ["work.done", "work.failed"]
+    ignore_payload_fields:
+      - "dead_end_confidence"
+      - "dead_end_evidence_coverage"
+      - "dead_end_evidence_file"
     event_filter:
       enabled: true
       events:
@@ -4610,6 +4614,10 @@ hats:
     publishes: ["fix.done"]
     exempt_topics: ["fix.done"]
     terminal_events: ["fix.done"]
+    ignore_payload_fields:
+      - "settlement_confidence"
+      - "settlement_evidence_coverage"
+      - "settlement_evidence_file"
     event_filter:
       enabled: true
       events:
