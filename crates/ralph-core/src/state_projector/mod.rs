@@ -878,6 +878,9 @@ impl StateProjector {
                         key,
                         title,
                         blocked_by_keys,
+                        execution_wave,
+                        integration_order,
+                        execution_plan_digest,
                     } => crate::state_projector::task::project_ensure_task_batch(
                         &mut self.ctx,
                         &parsed,
@@ -886,6 +889,9 @@ impl StateProjector {
                         &key,
                         &title,
                         &blocked_by_keys,
+                        execution_wave.as_deref(),
+                        integration_order.as_deref(),
+                        execution_plan_digest.as_deref(),
                     ),
                     crate::config::StateProjectionAction::CloseTask { task_id, step } => {
                         crate::state_projector::task::project_close_task(
@@ -893,6 +899,13 @@ impl StateProjector {
                             &parsed,
                             &task_id,
                             step.as_deref(),
+                        )
+                    }
+                    crate::config::StateProjectionAction::CloseTaskBatch { task_ids } => {
+                        crate::state_projector::task::project_close_task_batch(
+                            &mut self.ctx,
+                            &parsed,
+                            &task_ids,
                         )
                     }
                     crate::config::StateProjectionAction::AdvanceStep {

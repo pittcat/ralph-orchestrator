@@ -18,6 +18,12 @@ use tempfile::TempDir;
 
 use super::*;
 use crate::config::{StateProjectionAction, StateProjectionConfig};
+
+#[test]
+fn u2_quick_diag() {
+    let _ = 42;
+}
+
 use crate::event_reader::Event;
 
 fn make_event(topic: &str, payload: impl Into<String>) -> Event {
@@ -1224,4 +1230,761 @@ actions:
             .all(|t| matches!(t.status, crate::task::TaskStatus::Open)),
         "no task may be closed by an unknown-id event"
     );
+}
+
+// (U2 schedule validation tests follow in the inner module below.)
+
+#[test]
+fn u2_diagnostic_smoke() {
+    // If this test runs, the parent tests module is being scanned
+    // correctly. Remove once the schedule_* tests are visible.
+}
+
+mod u2_schedule_validation {
+    //! U2 of plan 2026-07-29-001
+    //! (`fix-parallel-forge-static-wave-settlement-plan`).
+    //!
+    //! Table-driven cases for the static `execution_wave` /
+    //! `integration_order` schedule validation inside
+    //! `EnsureTaskBatch`. Each case builds a real
+    //! `StateProjector::apply` with the new optional pointers and
+    //! asserts either acceptance (write to ledger) or rejection
+    //! (no side effect, structured reason).
+    //!
+    //! Cases:
+    //! 1. AE1 longest-path DAG: 4 layers with 8 units.
+    //! 2. wave 缺号 (gap).
+    //! 3. 同 wave 依赖 (same-wave edge rejected).
+    //! 4. 后 wave 依赖 (dep pointing to a larger wave rejected).
+    //! 5. 重复 integration_order (duplicate).
+    //! 6. order 逆依赖 (dep.order >= unit.order rejected).
+    //! 7. digest 不匹配被拒 (empty digest rejected).
+    //! 8. replay 幂等 (same payload accepted twice).
+    //! 9. legacy path (no pointers) still accepted.
+    //! 10. only one pointer declared is rejected.
+
+    use super::*;
+    use serde_json::json;
+
+    fn workspace() -> TempDir {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join(".ralph").join("agent")).unwrap();
+        tmp
+    }
+
+    fn batch_config(
+        execution_wave: Option<&'static str>,
+        integration_order: Option<&'static str>,
+        execution_plan_digest: Option<&'static str>,
+    ) -> StateProjectionConfig {
+        let yaml = format!(
+            r#"
+enabled: true
+actions:
+  forge.plan.ready:
+    kind: ensure_task_batch
+    items: unit_tasks
+    count: unit_count
+    key: task_key
+    title: title
+    blocked_by_keys: depends_on_task_keys
+    execution_wave: {}
+    integration_order: {}
+    execution_plan_digest: {}
+"#,
+            execution_wave
+                .map(|s| format!("\"{s}\""))
+                .unwrap_or_else(|| "~".to_string()),
+            integration_order
+                .map(|s| format!("\"{s}\""))
+                .unwrap_or_else(|| "~".to_string()),
+            execution_plan_digest
+                .map(|s| format!("\"{s}\""))
+                .unwrap_or_else(|| "~".to_string()),
+        );
+        serde_yaml::from_str(&yaml).expect("batch action config must parse")
+    }
+
+    fn apply_batch(
+        projector: &mut StateProjector,
+        payload: serde_json::Value,
+    ) -> crate::state_projector::ApplyReport {
+        projector.apply(&[make_event("forge.plan.ready", payload.to_string())])
+    }
+
+    /// AE1: longest-path DAG.
+    ///   A,B                  -> wave 1
+    ///   C(A),D(A,B),E(B)     -> wave 2
+    ///   F(C,D),G(D,E)        -> wave 3
+    ///   H(F,G)               -> wave 4
+    /// integration_order [1..8] all unique, all deps respected.
+    #[test]
+    fn schedule_ae1_longest_path_dag_is_accepted() {
+        let tmp = workspace();
+        let cfg = batch_config(Some("execution_wave"), Some("integration_order"), None);
+        let mut proj = StateProjector::new(ProjectionContext::new_legacy(tmp.path(), cfg));
+
+        let payload = json!({
+            "unit_count": 8,
+            "unit_tasks": [
+                {"task_key": "forge:p:A", "title": "A", "depends_on_task_keys": [], "execution_wave": 1, "integration_order": 1},
+                {"task_key": "forge:p:B", "title": "B", "depends_on_task_keys": [], "execution_wave": 1, "integration_order": 2},
+                {"task_key": "forge:p:C", "title": "C", "depends_on_task_keys": ["forge:p:A"], "execution_wave": 2, "integration_order": 3},
+                {"task_key": "forge:p:D", "title": "D", "depends_on_task_keys": ["forge:p:A", "forge:p:B"], "execution_wave": 2, "integration_order": 4},
+                {"task_key": "forge:p:E", "title": "E", "depends_on_task_keys": ["forge:p:B"], "execution_wave": 2, "integration_order": 5},
+                {"task_key": "forge:p:F", "title": "F", "depends_on_task_keys": ["forge:p:C", "forge:p:D"], "execution_wave": 3, "integration_order": 6},
+                {"task_key": "forge:p:G", "title": "G", "depends_on_task_keys": ["forge:p:D", "forge:p:E"], "execution_wave": 3, "integration_order": 7},
+                {"task_key": "forge:p:H", "title": "H", "depends_on_task_keys": ["forge:p:F", "forge:p:G"], "execution_wave": 4, "integration_order": 8}
+            ]
+        });
+
+        let report = apply_batch(&mut proj, payload);
+        assert_eq!(
+            report.applied, 1,
+            "AE1 schedule must be accepted; rejections={:?}",
+            report.rejections
+        );
+        let store = crate::task_store::TaskStore::load(&tasks_path(tmp.path())).unwrap();
+        assert_eq!(store.all().len(), 8, "AE1 must write 8 tasks");
+    }
+
+    /// Wave gap: declared waves [1, 3] (missing 2) is rejected.
+    #[test]
+    fn schedule_wave_gap_is_rejected() {
+        let tmp = workspace();
+        let cfg = batch_config(Some("execution_wave"), Some("integration_order"), None);
+        let mut proj = StateProjector::new(ProjectionContext::new_legacy(tmp.path(), cfg));
+        let payload = json!({
+            "unit_count": 2,
+            "unit_tasks": [
+                {"task_key": "forge:p:A", "title": "A", "depends_on_task_keys": [], "execution_wave": 1, "integration_order": 1},
+                {"task_key": "forge:p:B", "title": "B", "depends_on_task_keys": ["forge:p:A"], "execution_wave": 3, "integration_order": 2}
+            ]
+        });
+        let report = apply_batch(&mut proj, payload);
+        assert_eq!(report.applied, 0, "wave gap must reject the batch");
+        assert_eq!(report.rejected, 1);
+        let reason = &report.rejections[0].reason;
+        assert!(
+            reason.contains("wave") || reason.contains("consecutive"),
+            "rejection reason must name the wave rule: got {reason}"
+        );
+        assert!(
+            !tasks_path(tmp.path()).exists(),
+            "rejected schedule must not write tasks.jsonl"
+        );
+    }
+
+    /// Same-wave edge (A and B both wave=1, but B depends on A) is rejected.
+    #[test]
+    fn schedule_same_wave_edge_is_rejected() {
+        let tmp = workspace();
+        let cfg = batch_config(Some("execution_wave"), Some("integration_order"), None);
+        let mut proj = StateProjector::new(ProjectionContext::new_legacy(tmp.path(), cfg));
+        let payload = json!({
+            "unit_count": 2,
+            "unit_tasks": [
+                {"task_key": "forge:p:A", "title": "A", "depends_on_task_keys": [], "execution_wave": 1, "integration_order": 1},
+                {"task_key": "forge:p:B", "title": "B", "depends_on_task_keys": ["forge:p:A"], "execution_wave": 1, "integration_order": 2}
+            ]
+        });
+        let report = apply_batch(&mut proj, payload);
+        assert_eq!(report.applied, 0, "same-wave edge must reject");
+        assert_eq!(report.rejected, 1);
+        let reason = &report.rejections[0].reason;
+        assert!(
+            reason.contains("wave"),
+            "rejection must reference the wave rule: got {reason}"
+        );
+        assert!(!tasks_path(tmp.path()).exists());
+    }
+
+    /// Dep pointing to a larger wave than the dependent is rejected
+    /// (wave(B) > wave(A) where A depends on B).
+    #[test]
+    fn schedule_later_wave_dependency_is_rejected() {
+        let tmp = workspace();
+        let cfg = batch_config(Some("execution_wave"), Some("integration_order"), None);
+        let mut proj = StateProjector::new(ProjectionContext::new_legacy(tmp.path(), cfg));
+        // B is wave 1 but depends on A (wave 2): illegal direction.
+        let payload = json!({
+            "unit_count": 2,
+            "unit_tasks": [
+                {"task_key": "forge:p:A", "title": "A", "depends_on_task_keys": [], "execution_wave": 2, "integration_order": 2},
+                {"task_key": "forge:p:B", "title": "B", "depends_on_task_keys": ["forge:p:A"], "execution_wave": 1, "integration_order": 1}
+            ]
+        });
+        let report = apply_batch(&mut proj, payload);
+        assert_eq!(report.applied, 0, "later-wave dep must reject");
+        assert_eq!(report.rejected, 1);
+        let reason = &report.rejections[0].reason;
+        assert!(
+            reason.contains("wave"),
+            "rejection must name the wave rule: got {reason}"
+        );
+        assert!(!tasks_path(tmp.path()).exists());
+    }
+
+    /// Duplicate `integration_order` is rejected.
+    #[test]
+    fn schedule_duplicate_integration_order_is_rejected() {
+        let tmp = workspace();
+        let cfg = batch_config(Some("execution_wave"), Some("integration_order"), None);
+        let mut proj = StateProjector::new(ProjectionContext::new_legacy(tmp.path(), cfg));
+        let payload = json!({
+            "unit_count": 3,
+            "unit_tasks": [
+                {"task_key": "forge:p:A", "title": "A", "depends_on_task_keys": [], "execution_wave": 1, "integration_order": 1},
+                {"task_key": "forge:p:B", "title": "B", "depends_on_task_keys": [], "execution_wave": 1, "integration_order": 1},
+                {"task_key": "forge:p:C", "title": "C", "depends_on_task_keys": ["forge:p:A"], "execution_wave": 2, "integration_order": 3}
+            ]
+        });
+        let report = apply_batch(&mut proj, payload);
+        assert_eq!(report.applied, 0, "duplicate order must reject");
+        assert_eq!(report.rejected, 1);
+        let reason = &report.rejections[0].reason;
+        assert!(
+            reason.contains("integration_order") || reason.contains("order"),
+            "rejection must name the order rule: got {reason}"
+        );
+        assert!(!tasks_path(tmp.path()).exists());
+    }
+
+    /// `integration_order` of a dep must be < that of the unit
+    /// (i.e. order on the dep edge must point earlier in the
+    /// topological sequence).
+    #[test]
+    fn schedule_inverse_integration_order_is_rejected() {
+        let tmp = workspace();
+        let cfg = batch_config(Some("execution_wave"), Some("integration_order"), None);
+        let mut proj = StateProjector::new(ProjectionContext::new_legacy(tmp.path(), cfg));
+        // A has order 2; B depends on A but has order 1. dep.order(2) > unit.order(1).
+        let payload = json!({
+            "unit_count": 2,
+            "unit_tasks": [
+                {"task_key": "forge:p:A", "title": "A", "depends_on_task_keys": [], "execution_wave": 1, "integration_order": 2},
+                {"task_key": "forge:p:B", "title": "B", "depends_on_task_keys": ["forge:p:A"], "execution_wave": 2, "integration_order": 1}
+            ]
+        });
+        let report = apply_batch(&mut proj, payload);
+        assert_eq!(report.applied, 0, "inverse order must reject");
+        assert_eq!(report.rejected, 1);
+        let reason = &report.rejections[0].reason;
+        assert!(
+            reason.contains("integration_order") || reason.contains("order"),
+            "rejection must name the order rule: got {reason}"
+        );
+        assert!(!tasks_path(tmp.path()).exists());
+    }
+
+    /// Empty digest rejected (digest pointer present but value is empty).
+    #[test]
+    fn schedule_empty_digest_is_rejected() {
+        let tmp = workspace();
+        let cfg = batch_config(
+            Some("execution_wave"),
+            Some("integration_order"),
+            Some("execution_plan_digest"),
+        );
+        let mut proj = StateProjector::new(ProjectionContext::new_legacy(tmp.path(), cfg));
+        let payload_empty = json!({
+            "execution_plan_digest": "",
+            "unit_count": 2,
+            "unit_tasks": [
+                {"task_key": "forge:p:A", "title": "A", "depends_on_task_keys": [], "execution_wave": 1, "integration_order": 1},
+                {"task_key": "forge:p:B", "title": "B", "depends_on_task_keys": ["forge:p:A"], "execution_wave": 2, "integration_order": 2}
+            ]
+        });
+        let report = apply_batch(&mut proj, payload_empty);
+        assert_eq!(report.applied, 0, "empty digest must reject");
+        assert_eq!(report.rejected, 1);
+        let reason = &report.rejections[0].reason;
+        assert!(
+            reason.contains("digest"),
+            "rejection must name the digest rule: got {reason}"
+        );
+    }
+
+    /// Non-empty digest accepted (digest pointer present and value is non-empty).
+    #[test]
+    fn schedule_non_empty_digest_is_accepted() {
+        let tmp = workspace();
+        let cfg = batch_config(
+            Some("execution_wave"),
+            Some("integration_order"),
+            Some("execution_plan_digest"),
+        );
+        let mut proj = StateProjector::new(ProjectionContext::new_legacy(tmp.path(), cfg));
+        let payload = json!({
+            "execution_plan_digest": "deadbeef",
+            "unit_count": 2,
+            "unit_tasks": [
+                {"task_key": "forge:p:A", "title": "A", "depends_on_task_keys": [], "execution_wave": 1, "integration_order": 1},
+                {"task_key": "forge:p:B", "title": "B", "depends_on_task_keys": ["forge:p:A"], "execution_wave": 2, "integration_order": 2}
+            ]
+        });
+        let report = apply_batch(&mut proj, payload);
+        assert_eq!(
+            report.applied, 1,
+            "non-empty digest must be accepted: rejections={:?}",
+            report.rejections
+        );
+    }
+
+    /// Replaying the same accepted payload must be idempotent (no
+    /// duplicate tasks, no rejection).
+    #[test]
+    fn schedule_replay_is_idempotent() {
+        let tmp = workspace();
+        let cfg = batch_config(Some("execution_wave"), Some("integration_order"), None);
+        let mut proj = StateProjector::new(ProjectionContext::new_legacy(tmp.path(), cfg));
+        let payload = json!({
+            "unit_count": 3,
+            "unit_tasks": [
+                {"task_key": "forge:p:A", "title": "A", "depends_on_task_keys": [], "execution_wave": 1, "integration_order": 1},
+                {"task_key": "forge:p:B", "title": "B", "depends_on_task_keys": ["forge:p:A"], "execution_wave": 2, "integration_order": 2},
+                {"task_key": "forge:p:C", "title": "C", "depends_on_task_keys": ["forge:p:B"], "execution_wave": 3, "integration_order": 3}
+            ]
+        });
+
+        let first = apply_batch(&mut proj, payload.clone());
+        assert_eq!(first.applied, 1, "first accept must succeed");
+        let store = crate::task_store::TaskStore::load(&tasks_path(tmp.path())).unwrap();
+        let ids_first: Vec<String> = store.all().iter().map(|t| t.id.clone()).collect();
+
+        let second = apply_batch(&mut proj, payload);
+        assert_eq!(
+            second.applied, 1,
+            "replay must still succeed (idempotent): rejections={:?}",
+            second.rejections
+        );
+        let store2 = crate::task_store::TaskStore::load(&tasks_path(tmp.path())).unwrap();
+        assert_eq!(
+            store2.all().len(),
+            3,
+            "replay must not duplicate rows: got {}",
+            store2.all().len()
+        );
+        let ids_second: Vec<String> = store2.all().iter().map(|t| t.id.clone()).collect();
+        let mut ids_first_sorted = ids_first.clone();
+        ids_first_sorted.sort();
+        let mut ids_second_sorted = ids_second.clone();
+        ids_second_sorted.sort();
+        assert_eq!(
+            ids_first_sorted, ids_second_sorted,
+            "replay must reuse existing task ids"
+        );
+    }
+
+    /// Legacy compatibility: when neither pointer is supplied, the
+    /// projector skips wave/order validation (unchanged behaviour).
+    #[test]
+    fn schedule_legacy_no_pointers_is_accepted() {
+        let tmp = workspace();
+        let cfg = batch_config(None, None, None);
+        let mut proj = StateProjector::new(ProjectionContext::new_legacy(tmp.path(), cfg));
+        let payload = json!({
+            "unit_count": 2,
+            "unit_tasks": [
+                {"task_key": "custom:p:U1", "title": "First", "depends_on_task_keys": []},
+                {"task_key": "custom:p:U2", "title": "Second", "depends_on_task_keys": ["custom:p:U1"]}
+            ]
+        });
+        let report = apply_batch(&mut proj, payload);
+        assert_eq!(
+            report.applied, 1,
+            "legacy path without pointers must be accepted: rejections={:?}",
+            report.rejections
+        );
+        let store = crate::task_store::TaskStore::load(&tasks_path(tmp.path())).unwrap();
+        assert_eq!(store.all().len(), 2);
+    }
+
+    /// Only one pointer declared -> reject (both pointers must be
+    /// present together for schedule validation to be meaningful).
+    #[test]
+    fn schedule_only_one_pointer_declared_is_rejected() {
+        let tmp = workspace();
+        let cfg = batch_config(Some("execution_wave"), None, None);
+        let mut proj = StateProjector::new(ProjectionContext::new_legacy(tmp.path(), cfg));
+        let payload = json!({
+            "unit_count": 2,
+            "unit_tasks": [
+                {"task_key": "forge:p:A", "title": "A", "depends_on_task_keys": [], "execution_wave": 1},
+                {"task_key": "forge:p:B", "title": "B", "depends_on_task_keys": ["forge:p:A"], "execution_wave": 2}
+            ]
+        });
+        let report = apply_batch(&mut proj, payload);
+        assert_eq!(
+            report.applied, 0,
+            "single-pointer config must reject (validation needs both)"
+        );
+        assert_eq!(report.rejected, 1);
+        let reason = &report.rejections[0].reason;
+        assert!(
+            reason.contains("pointer") || reason.contains("integration_order"),
+            "rejection must name the missing pointer: got {reason}"
+        );
+    }
+}
+
+// Plan 2026-07-29-001 U3 acceptance tests — see §11 unit-test
+// split (1..6). The projector now exposes a `CloseTaskBatch`
+// action that closes a wave's tasks atomically when the
+// `forge.wave.settled` event arrives, while leaving each per-unit
+// `exec.unit.done` event strictly read-only with respect to the
+// task ledger. The tests below drive the run-down sequence the
+// spec promises:
+//
+//   1. exec done inert to tasks.
+//   2. settlement close exact batch.
+//   3. future wave untouched.
+//   4. duplicate IDs fail-close.
+//   5. one unknown ID causes zero close.
+//   6. replay duplicate不产生额外状态。
+mod u3_close_task_batch {
+    use super::*;
+
+    fn config_with_batch_close() -> StateProjectionConfig {
+        // The preset's actual state_projection.actions map for
+        // parallel-forge. `exec.unit.done` is inert on purpose (it
+        // maps to nothing); settlement is the only path that
+        // closes tasks.
+        serde_yaml::from_str(
+            r#"
+enabled: true
+actions:
+  forge.plan.ready:
+    kind: ensure_task_batch
+    items: unit_tasks
+    count: unit_count
+    key: task_key
+    title: title
+    blocked_by_keys: depends_on_task_keys
+  forge.wave.settled:
+    kind: close_task_batch
+    task_ids: settled_task_ids
+"#,
+        )
+        .unwrap()
+    }
+
+    fn seed_two_waves(projector: &mut StateProjector) -> (Vec<String>, Vec<String>) {
+        // wave 1: U1, U2 (no deps); wave 2: U3, U4 (each depend
+        // on wave 1). Two distinct units-per-wave arrays so we can
+        // later prove U3+U4 keep their open state when only
+        // wave 1 settles.
+        let ready = make_event(
+            "forge.plan.ready",
+            json!({
+                "unit_count": 4,
+                "unit_tasks": [
+                    {"task_key": "forge:p:U1", "title": "U1", "depends_on_task_keys": []},
+                    {"task_key": "forge:p:U2", "title": "U2", "depends_on_task_keys": []},
+                    {"task_key": "forge:p:U3", "title": "U3", "depends_on_task_keys": ["forge:p:U1", "forge:p:U2"]},
+                    {"task_key": "forge:p:U4", "title": "U4", "depends_on_task_keys": ["forge:p:U1", "forge:p:U2"]}
+                ]
+            })
+            .to_string(),
+        );
+        let report = projector.apply(&[ready]);
+        assert_eq!(report.applied, 1, "planner event must apply");
+
+        let ids: Vec<String> = projector
+            .context()
+            .tasks_cache
+            .iter()
+            .map(|t| t.id.clone())
+            .collect();
+        assert_eq!(ids.len(), 4);
+
+        // Pairs are stable by task_key order:
+        //   U1, U2 → wave 1
+        //   U3, U4 → wave 2
+        let mut wave1: Vec<String> = Vec::new();
+        let mut wave2: Vec<String> = Vec::new();
+        for t in projector.context().tasks_cache.iter() {
+            let key = t.key.clone().unwrap_or_default();
+            match key.as_str() {
+                "forge:p:U1" => wave1.push(t.id.clone()),
+                "forge:p:U2" => wave1.push(t.id.clone()),
+                "forge:p:U3" => wave2.push(t.id.clone()),
+                "forge:p:U4" => wave2.push(t.id.clone()),
+                _ => {}
+            }
+        }
+        wave1.sort();
+        wave2.sort();
+        let _ = ids;
+        (wave1, wave2)
+    }
+
+    // Unit-test split §11.1: exec.unit.done must be inert with
+    // respect to the task ledger. The action map does not even
+    // register `exec.unit.done`, so the projector must report
+    // it as a no-op (`applied == 0`, `rejected == 0`).
+    #[test]
+    fn exec_unit_done_does_not_close_task() {
+        let tmp = workspace();
+        let cfg = config_with_batch_close();
+        let mut projector = StateProjector::new(ProjectionContext::new_legacy(tmp.path(), cfg));
+        let (wave1, _wave2) = seed_two_waves(&mut projector);
+
+        let done = make_event(
+            "exec.unit.done",
+            json!({
+                "wave_id": "w1",
+                "slot_index": 0,
+                "task_id": wave1[0],
+                "task_key": "forge:p:U1",
+                "content_hash": "abc",
+                "unit_id": "U1",
+                "unit_report_path": "u.md",
+                "plan_key": "p"
+            })
+            .to_string(),
+        );
+        let report = projector.apply(&[done]);
+        assert_eq!(report.applied, 0, "exec.unit.done must be inert");
+        assert_eq!(report.rejected, 0);
+
+        let store = crate::task_store::TaskStore::load(&tasks_path(tmp.path())).unwrap();
+        for row in store.all() {
+            assert!(
+                matches!(row.status, crate::task::TaskStatus::Open),
+                "task {} must remain open after exec.unit.done",
+                row.id
+            );
+        }
+    }
+
+    // Unit-test split §11.2 + §11.3: a `forge.wave.settled`
+    // payload closes exactly the named batch, and future wave
+    // tasks are untouched.
+    #[test]
+    fn settlement_closes_exact_batch_and_leaves_future_wave_open() {
+        let tmp = workspace();
+        let cfg = config_with_batch_close();
+        let mut projector = StateProjector::new(ProjectionContext::new_legacy(tmp.path(), cfg));
+        let (wave1, wave2) = seed_two_waves(&mut projector);
+
+        let settled = make_event(
+            "forge.wave.settled",
+            json!({
+                "wave_id": "w1",
+                "wave_index": 1,
+                "settled_task_ids": wave1,
+                "settled_unit_ids": ["U1", "U2"],
+                "verified_base_commit": "deadbeef"
+            })
+            .to_string(),
+        );
+        let report = projector.apply(&[settled]);
+        assert_eq!(report.applied, 1, "settlement must apply: {:?}", report.rejections);
+        assert_eq!(report.rejected, 0);
+
+        let store = crate::task_store::TaskStore::load(&tasks_path(tmp.path())).unwrap();
+        let by_id: std::collections::HashMap<_, _> = store
+            .all()
+            .iter()
+            .map(|t| (t.id.clone(), t.status.clone()))
+            .collect();
+        for id in &wave1 {
+            assert!(
+                matches!(by_id.get(id), Some(crate::task::TaskStatus::Closed)),
+                "wave1 task {id} must be closed"
+            );
+        }
+        for id in &wave2 {
+            assert!(
+                matches!(by_id.get(id), Some(crate::task::TaskStatus::Open)),
+                "wave2 task {id} must remain open"
+            );
+        }
+    }
+
+    // Unit-test split §11.4: duplicate task_ids in the payload
+    // fail-close with zero side effects.
+    #[test]
+    fn settlement_with_duplicate_ids_rejects_with_zero_side_effect() {
+        let tmp = workspace();
+        let cfg = config_with_batch_close();
+        let mut projector = StateProjector::new(ProjectionContext::new_legacy(tmp.path(), cfg));
+        let (wave1, _wave2) = seed_two_waves(&mut projector);
+
+        let mut dup = wave1.clone();
+        dup.push(wave1[0].clone());
+        let settled = make_event(
+            "forge.wave.settled",
+            json!({
+                "wave_id": "w1",
+                "wave_index": 1,
+                "settled_task_ids": dup,
+                "settled_unit_ids": ["U1", "U2"],
+                "verified_base_commit": "deadbeef"
+            })
+            .to_string(),
+        );
+        let report = projector.apply(&[settled]);
+        assert_eq!(report.rejected, 1, "duplicate batch must be rejected");
+        assert!(report.rejections[0].reason.contains("duplicate"));
+
+        let store = crate::task_store::TaskStore::load(&tasks_path(tmp.path())).unwrap();
+        for row in store.all() {
+            assert!(
+                matches!(row.status, crate::task::TaskStatus::Open),
+                "duplicate batch must not close any task (saw {} closed)",
+                row.id
+            );
+        }
+    }
+
+    // Unit-test split §11.5: one unknown task_id in the batch
+    // closes zero tasks (atomicity).
+    #[test]
+    fn settlement_with_one_unknown_id_closes_nothing() {
+        let tmp = workspace();
+        let cfg = config_with_batch_close();
+        let mut projector = StateProjector::new(ProjectionContext::new_legacy(tmp.path(), cfg));
+        let (mut wave1, _wave2) = seed_two_waves(&mut projector);
+        wave1.push("no-such-task".to_string());
+
+        let settled = make_event(
+            "forge.wave.settled",
+            json!({
+                "wave_id": "w1",
+                "wave_index": 1,
+                "settled_task_ids": wave1,
+                "settled_unit_ids": ["U1", "U2"],
+                "verified_base_commit": "deadbeef"
+            })
+            .to_string(),
+        );
+        let report = projector.apply(&[settled]);
+        assert_eq!(report.rejected, 1, "unknown id must reject");
+        assert!(report.rejections[0].reason.contains("unknown"));
+
+        let store = crate::task_store::TaskStore::load(&tasks_path(tmp.path())).unwrap();
+        for row in store.all() {
+            assert!(
+                matches!(row.status, crate::task::TaskStatus::Open),
+                "unknown id must not close any task"
+            );
+        }
+    }
+
+    // Unit-test split §11.6: replaying the same already-closed
+    // settlement is an idempotent no-op (matches U2's
+    // `EnsureTaskBatch` replay contract).
+    #[test]
+    fn settlement_replay_is_idempotent_noop() {
+        let tmp = workspace();
+        let cfg = config_with_batch_close();
+        let mut projector = StateProjector::new(ProjectionContext::new_legacy(tmp.path(), cfg));
+        let (wave1, _wave2) = seed_two_waves(&mut projector);
+
+        let payload = json!({
+            "wave_id": "w1",
+            "wave_index": 1,
+            "settled_task_ids": wave1,
+            "settled_unit_ids": ["U1", "U2"],
+            "verified_base_commit": "deadbeef"
+        })
+        .to_string();
+
+        let first = projector.apply(&[make_event("forge.wave.settled", payload.clone())]);
+        assert_eq!(first.applied, 1);
+
+        let replay = projector.apply(&[make_event("forge.wave.settled", payload)]);
+        assert_eq!(replay.applied, 1, "replay must still apply (idempotent no-op)");
+        assert_eq!(replay.rejected, 0);
+
+        let store = crate::task_store::TaskStore::load(&tasks_path(tmp.path())).unwrap();
+        let by_id: std::collections::HashMap<_, _> = store
+            .all()
+            .iter()
+            .map(|t| (t.id.clone(), t.status.clone()))
+            .collect();
+        for id in &wave1 {
+            assert!(
+                matches!(by_id.get(id), Some(crate::task::TaskStatus::Closed)),
+                "wave1 task {} should still be closed after replay",
+                id
+            );
+        }
+    }
+
+    // Negative companion: an empty `settled_task_ids` array is
+    // a contract violation (no task to close) and must be
+    // rejected rather than silently no-op.
+    #[test]
+    fn settlement_with_empty_ids_is_rejected() {
+        let tmp = workspace();
+        let cfg = config_with_batch_close();
+        let mut projector = StateProjector::new(ProjectionContext::new_legacy(tmp.path(), cfg));
+        let _ = seed_two_waves(&mut projector);
+
+        let settled = make_event(
+            "forge.wave.settled",
+            json!({
+                "wave_id": "w1",
+                "wave_index": 1,
+                "settled_task_ids": [],
+                "settled_unit_ids": [],
+                "verified_base_commit": "deadbeef"
+            })
+            .to_string(),
+        );
+        let report = projector.apply(&[settled]);
+        assert_eq!(report.rejected, 1);
+        assert!(report.rejections[0].reason.contains("empty"));
+    }
+
+    // Negative companion: a payload that mixes open and closed
+    // rows in the same batch is identity drift and must fail
+    // (no silent partial close).
+    #[test]
+    fn settlement_with_mixed_open_closed_ids_is_rejected() {
+        let tmp = workspace();
+        let cfg = config_with_batch_close();
+        let mut projector = StateProjector::new(ProjectionContext::new_legacy(tmp.path(), cfg));
+        let (wave1, _wave2) = seed_two_waves(&mut projector);
+
+        // Pre-close wave1[0] via a direct settlement.
+        let first = make_event(
+            "forge.wave.settled",
+            json!({
+                "wave_id": "w1",
+                "wave_index": 1,
+                "settled_task_ids": vec![wave1[0].clone()],
+                "settled_unit_ids": ["U1"],
+                "verified_base_commit": "deadbeef"
+            })
+            .to_string(),
+        );
+        let pre = projector.apply(&[first]);
+        assert_eq!(pre.applied, 1);
+
+        // Now mix closed batch (wave1[0]) with an open one
+        // (wave1[1]). Must reject.
+        let mixed = make_event(
+            "forge.wave.settled",
+            json!({
+                "wave_id": "w1",
+                "wave_index": 1,
+                "settled_task_ids": wave1,
+                "settled_unit_ids": ["U1", "U2"],
+                "verified_base_commit": "deadbeef"
+            })
+            .to_string(),
+        );
+        let report = projector.apply(&[mixed]);
+        assert_eq!(report.rejected, 1, "mixed batch must reject");
+        assert!(
+            report.rejections[0].reason.contains("mixes open") ||
+                report.rejections[0].reason.contains("identity drift"),
+            "rejection must call out identity drift: got {}",
+            report.rejections[0].reason
+        );
+    }
 }

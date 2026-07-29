@@ -31,6 +31,7 @@ use crate::preset_lint::finding_id::{
     FINDING_FLOW_DECLARATION_MISSING, FINDING_FLOW_LINEAR_POSITIONAL_AMBIGUITY,
     FINDING_FLOW_PARTIAL_BRANCH_EMPTY, FINDING_FLOW_PARTIAL_STATE_UNDECLARED,
     FINDING_FLOW_REVIEW_COMPLETE_IN_UNIT_LOOP_BODY, FINDING_FLOW_TERMINAL_EMIT_MISSING,
+    FINDING_FLOW_TRANSITION_EMIT_NO_FORWARD_TARGET, FINDING_FLOW_TRANSITION_EMIT_NOT_IN_ALLOWED,
     FINDING_FLOW_UNKNOWN_EMIT_REJECTED,
 };
 use serde_yaml::Value;
@@ -171,6 +172,16 @@ pub fn check_flow_declaration(raw_yaml: &str) -> Result<Vec<LintFinding>, FlowPa
     //    at preset-load time prevents authoring a flow that
     //    relies on positional fallback to wire up handoffs.
     findings.extend(check_flow_linear_positional_ambiguity(raw_yaml));
+
+    // 6. U1 (2026-07-29-001 plan): `transition_emits` must
+    //    (a) be a subset of `allowed_emits` on the same step,
+    //    and (b) every transition must be picked up by a
+    //    forward step's `on` / `on_any_of`. The two guards
+    //    are split so the action hints name the exact
+    //    remediation (allow the topic on this step vs.
+    //    declare the forward `on` / `on_any_of`).
+    findings.extend(check_transition_emits_subset_of_allowed(raw_yaml));
+    findings.extend(check_transition_emits_have_forward_target(raw_yaml));
 
     Ok(findings)
 }
@@ -504,6 +515,137 @@ pub fn check_flow_declaration_with_config(
 ) -> Result<Vec<LintFinding>, FlowParseError> {
     let raw = serde_yaml::to_string(config).unwrap_or_default();
     check_flow_declaration(&raw)
+}
+
+/// 2026-07-29-001 plan U1 (R5): every entry in a step's
+/// `transition_emits` must also appear in that step's
+/// `allowed_emits`. Otherwise the FlowStepScope gate would
+/// reject the topic before it ever reached the advance
+/// authority — the transition signal can never fire.
+fn check_transition_emits_subset_of_allowed(raw_yaml: &str) -> Vec<LintFinding> {
+    let mut findings = Vec::new();
+    let Ok(value) = serde_yaml::from_str::<Value>(raw_yaml) else {
+        return findings;
+    };
+    let Some(steps) = value
+        .get("mechanism")
+        .and_then(|m| m.get("flow"))
+        .and_then(|f| f.get("steps"))
+        .and_then(|s| s.as_sequence())
+    else {
+        return findings;
+    };
+    for step in steps {
+        let id = step.get("id").and_then(|v| v.as_str()).unwrap_or("");
+        let transition: Vec<String> = step
+            .get("transition_emits")
+            .and_then(|t| t.as_sequence())
+            .map(|seq| {
+                seq.iter()
+                    .filter_map(|v| v.as_str().map(String::from))
+                    .collect()
+            })
+            .unwrap_or_default();
+        if transition.is_empty() {
+            continue;
+        }
+        let allowed: std::collections::HashSet<String> = step
+            .get("allowed_emits")
+            .and_then(|a| a.as_sequence())
+            .map(|seq| {
+                seq.iter()
+                    .filter_map(|v| v.as_str().map(String::from))
+                    .collect()
+            })
+            .unwrap_or_default();
+        for topic in &transition {
+            if allowed.contains(topic) {
+                continue;
+            }
+            let mut f = LintFinding::new(
+                FINDING_FLOW_TRANSITION_EMIT_NOT_IN_ALLOWED,
+                format!(
+                    "step '{id}' declares `transition_emits: [{topic}]` but the topic                      is not in the same step's `allowed_emits`. FlowStepScopeStage will                      reject the topic before it can advance the step, so the transition                      signal can never fire."
+                ),
+            );
+            f.hat = Some(id.to_string());
+            f.action_hint = Some(format!(
+                "add `{topic}` to step '{id}'.allowed_emits (and, if the topic should                  also be in-scope only inside this step, consider whether the runtime                  should keep emitting it on a later step)"
+            ));
+            findings.push(f);
+        }
+    }
+    findings
+}
+
+/// 2026-07-29-001 plan U1 (R5): every transition topic must be
+/// named by a forward step's `on` / `on_any_of`. Authoring a
+/// transition without a forward target forces the runtime to
+/// fall back to positional advance — silently producing the
+/// `flow_drift_positional_fallback` class of bug the
+/// parallel-forge run was meant to surface.
+fn check_transition_emits_have_forward_target(raw_yaml: &str) -> Vec<LintFinding> {
+    let mut findings = Vec::new();
+    let Ok(value) = serde_yaml::from_str::<Value>(raw_yaml) else {
+        return findings;
+    };
+    let Some(steps) = value
+        .get("mechanism")
+        .and_then(|m| m.get("flow"))
+        .and_then(|f| f.get("steps"))
+        .and_then(|s| s.as_sequence())
+    else {
+        return findings;
+    };
+    let step_count = steps.len();
+    for (idx, step) in steps.iter().enumerate() {
+        let id = step.get("id").and_then(|v| v.as_str()).unwrap_or("");
+        let transition: Vec<String> = step
+            .get("transition_emits")
+            .and_then(|t| t.as_sequence())
+            .map(|seq| {
+                seq.iter()
+                    .filter_map(|v| v.as_str().map(String::from))
+                    .collect()
+            })
+            .unwrap_or_default();
+        if transition.is_empty() {
+            continue;
+        }
+        let mut forward_targets: std::collections::HashSet<String> =
+            std::collections::HashSet::new();
+        if idx + 1 < step_count {
+            for later in steps.iter().skip(idx + 1) {
+                if let Some(on) = later.get("on").and_then(|v| v.as_str()) {
+                    forward_targets.insert(on.to_string());
+                }
+                if let Some(seq) = later.get("on_any_of").and_then(|a| a.as_sequence()) {
+                    for t in seq {
+                        if let Some(s) = t.as_str() {
+                            forward_targets.insert(s.to_string());
+                        }
+                    }
+                }
+            }
+        }
+        for topic in &transition {
+            if forward_targets.contains(topic) {
+                continue;
+            }
+            let mut f = LintFinding::new(
+                FINDING_FLOW_TRANSITION_EMIT_NO_FORWARD_TARGET,
+                format!(
+                    "step '{id}' declares `transition_emits: [{topic}]` but no forward                      step in the flow names `{topic}` via `on` or `on_any_of`. The runtime                      will fall back to positional advance, silently producing the                      `flow_drift_positional_fallback` class of bug."
+                ),
+            );
+            f.hat = Some(id.to_string());
+            f.action_hint = Some(format!(
+                "add `on: {topic}` to the next step (single target) or include `{topic}`                  in a later step's `on_any_of:` (multi-source branch). If the runtime                  should keep this transition inside the loop (e.g. as a per-wave                  sentinel), drop the topic from `transition_emits` so it stays in                  `allowed_emits` only."
+            ));
+            findings.push(f);
+        }
+    }
+    findings
 }
 
 #[cfg(test)]

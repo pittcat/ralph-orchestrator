@@ -736,3 +736,235 @@ mechanism:
         "forge.report.done has an explicit forward target, so the flow is not fully positional; got {findings:?}"
     );
 }
+
+// 2026-07-29-001 plan U1 (R5): two new transition-emits
+// guards. The first ensures transition_emits is a strict
+// subset of the same step's allowed_emits; the second
+// ensures each transition topic has a forward target.
+
+#[test]
+fn flow_transition_emits_must_be_subset_of_allowed_emits_finding() {
+    let yaml = r#"
+event_loop:
+  event_policy:
+    enabled: true
+    schemas:
+      forge.plan.ready:
+        required_fields: []
+mechanism:
+  flow:
+    type: declared
+    version: 1
+    terminal_emits: [LOOP_COMPLETE]
+    steps:
+      - id: planning
+        kind: linear
+        allowed_emits: [forge.plan.ready]
+        transition_emits: [forge.plan.ready, forge.ghost]
+      - id: plan_end
+        kind: terminal
+        allowed_emits: [LOOP_COMPLETE]
+"#;
+    let findings = check_flow_declaration(yaml).unwrap();
+    let bad: Vec<_> = findings
+        .iter()
+        .filter(|f| f.id == FINDING_FLOW_TRANSITION_EMIT_NOT_IN_ALLOWED)
+        .collect();
+    assert_eq!(
+        bad.len(),
+        1,
+        "exactly one NOT_IN_ALLOWED finding expected (forge.ghost is not in allowed_emits); got {:?}",
+        findings
+    );
+    let f = bad[0];
+    assert!(f.message.contains("planning"));
+    assert!(f.message.contains("forge.ghost"));
+    assert_eq!(f.hat.as_deref(), Some("planning"));
+}
+
+#[test]
+fn flow_transition_emits_subset_silent_when_subset_holds() {
+    let yaml = r#"
+event_loop:
+  event_policy:
+    enabled: true
+    schemas:
+      forge.plan.ready:
+        required_fields: []
+mechanism:
+  flow:
+    type: declared
+    version: 1
+    terminal_emits: [LOOP_COMPLETE]
+    steps:
+      - id: planning
+        kind: linear
+        allowed_emits: [forge.plan.ready, work.failed]
+        transition_emits: [forge.plan.ready]
+      - id: plan_authoring
+        kind: linear
+        "on": forge.plan.ready
+        allowed_emits: [forge.plan.ready]
+      - id: plan_end
+        kind: terminal
+        allowed_emits: [LOOP_COMPLETE]
+"#;
+    let findings = check_flow_declaration(yaml).unwrap();
+    assert!(
+        findings
+            .iter()
+            .all(|f| f.id != FINDING_FLOW_TRANSITION_EMIT_NOT_IN_ALLOWED),
+        "subset=allowed_emits must NOT trigger NOT_IN_ALLOWED; got {:?}",
+        findings
+    );
+}
+
+#[test]
+fn flow_transition_emits_without_forward_target_fires() {
+    let yaml = r#"
+event_loop:
+  event_policy:
+    enabled: true
+    schemas:
+      forge.plan.ready:
+        required_fields: []
+mechanism:
+  flow:
+    type: declared
+    version: 1
+    terminal_emits: [LOOP_COMPLETE]
+    steps:
+      - id: planning
+        kind: linear
+        allowed_emits: [forge.plan.ready, work.failed]
+        transition_emits: [forge.plan.ready]
+      - id: plan_end
+        kind: terminal
+        allowed_emits: [LOOP_COMPLETE]
+"#;
+    let findings = check_flow_declaration(yaml).unwrap();
+    let bad: Vec<_> = findings
+        .iter()
+        .filter(|f| f.id == FINDING_FLOW_TRANSITION_EMIT_NO_FORWARD_TARGET)
+        .collect();
+    assert_eq!(
+        bad.len(),
+        1,
+        "exactly one NO_FORWARD_TARGET finding expected (planning has no successor that names forge.plan.ready); got {:?}",
+        findings
+    );
+    let f = bad[0];
+    assert!(f.message.contains("planning"));
+    assert!(f.message.contains("forge.plan.ready"));
+    assert_eq!(f.hat.as_deref(), Some("planning"));
+}
+
+#[test]
+fn flow_transition_emits_with_on_target_silent() {
+    let yaml = r#"
+event_loop:
+  event_policy:
+    enabled: true
+    schemas:
+      forge.plan.ready:
+        required_fields: []
+mechanism:
+  flow:
+    type: declared
+    version: 1
+    terminal_emits: [LOOP_COMPLETE]
+    steps:
+      - id: planning
+        kind: linear
+        allowed_emits: [forge.plan.ready]
+        transition_emits: [forge.plan.ready]
+      - id: plan_authoring
+        kind: linear
+        "on": forge.plan.ready
+        allowed_emits: [forge.plan.ready]
+      - id: plan_end
+        kind: terminal
+        allowed_emits: [LOOP_COMPLETE]
+"#;
+    let findings = check_flow_declaration(yaml).unwrap();
+    assert!(
+        findings
+            .iter()
+            .all(|f| f.id != FINDING_FLOW_TRANSITION_EMIT_NO_FORWARD_TARGET),
+        "explicit `on:` target must silence NO_FORWARD_TARGET; got {:?}",
+        findings
+    );
+}
+
+#[test]
+fn flow_transition_emits_with_on_any_of_target_silent() {
+    let yaml = r#"
+event_loop:
+  event_policy:
+    enabled: true
+    schemas:
+      forge.audit.done:
+        required_fields: []
+mechanism:
+  flow:
+    type: declared
+    version: 1
+    terminal_emits: [LOOP_COMPLETE]
+    steps:
+      - id: audit
+        kind: linear
+        allowed_emits: [forge.audit.done]
+        transition_emits: [forge.audit.done]
+      - id: report
+        kind: await
+        on_any_of: [forge.audit.done, forge.plan.blocked]
+        allowed_emits: [forge.report.done]
+      - id: plan_end
+        kind: terminal
+        allowed_emits: [LOOP_COMPLETE]
+"#;
+    let findings = check_flow_declaration(yaml).unwrap();
+    assert!(
+        findings
+            .iter()
+            .all(|f| f.id != FINDING_FLOW_TRANSITION_EMIT_NO_FORWARD_TARGET),
+        "`on_any_of:` forward target must silence NO_FORWARD_TARGET; got {:?}",
+        findings
+    );
+}
+
+#[test]
+fn flow_transition_emits_on_last_step_fires() {
+    // The terminal step has no successor — declaring a
+    // transition on it is structurally impossible. The
+    // guard must fire so the operator notices.
+    let yaml = r#"
+event_loop:
+  event_policy:
+    enabled: true
+    schemas:
+      LOOP_COMPLETE:
+        required_fields: []
+mechanism:
+  flow:
+    type: declared
+    version: 1
+    terminal_emits: [LOOP_COMPLETE]
+    steps:
+      - id: ship
+        kind: terminal
+        allowed_emits: [LOOP_COMPLETE]
+        transition_emits: [LOOP_COMPLETE]
+"#;
+    let findings = check_flow_declaration(yaml).unwrap();
+    let bad: Vec<_> = findings
+        .iter()
+        .filter(|f| f.id == FINDING_FLOW_TRANSITION_EMIT_NO_FORWARD_TARGET)
+        .collect();
+    assert_eq!(
+        bad.len(),
+        1,
+        "transition on the last step has no successor; got {:?}",
+        findings
+    );
+}

@@ -647,6 +647,26 @@ pub const FINDING_PAYLOAD_CONSISTENCY_UNSAFE_MESSAGE: &str =
 pub const FINDING_FLOW_LINEAR_POSITIONAL_AMBIGUITY: &str =
     "preset.flow_linear_positional_ambiguity";
 
+/// 2026-07-29-001 plan U1 (R5): a step declares a topic in
+/// `transition_emits` that is NOT in its own `allowed_emits`.
+/// Such a topic can never be accepted by FlowStepScopeStage,
+/// so declaring it as a transition signal is a dead contract.
+/// Surfaces the "transition emits a topic the step does not allow"
+/// anti-pattern at preset-load time instead of silently dropping
+/// the transition at runtime.
+pub const FINDING_FLOW_TRANSITION_EMIT_NOT_IN_ALLOWED: &str =
+    "preset.flow_transition_emit_not_in_allowed";
+
+/// 2026-07-29-001 plan U1 (R5): a step declares a transition
+/// topic that has no forward step in the flow with an
+/// `on` / `on_any_of` naming that topic. Authoring a transition
+/// without a forward target is the same class of bug as a
+/// linear step with no `on` — the runtime falls through to
+/// legacy positional advance, which can silently misroute
+/// the flow.
+pub const FINDING_FLOW_TRANSITION_EMIT_NO_FORWARD_TARGET: &str =
+    "preset.flow_transition_emit_no_forward_target";
+
 /// Inventory of every finding id in this module. Use this in tests
 /// that assert the lint surface does not silently re-introduce a
 /// serial-only or coordinator-loop finding. Plan 2026-07-07-006
@@ -716,4 +736,6 @@ pub const ALL_FINDING_IDS: &[&str] = &[
     FINDING_PAYLOAD_CONSISTENCY_UNSAFE_MESSAGE,
     FINDING_FLOW_LINEAR_POSITIONAL_AMBIGUITY,
     FINDING_PRECHECK_RULE_WITHOUT_SYNTHESIZED_GATE_HAT,
+    FINDING_FLOW_TRANSITION_EMIT_NOT_IN_ALLOWED,
+    FINDING_FLOW_TRANSITION_EMIT_NO_FORWARD_TARGET,
 ];

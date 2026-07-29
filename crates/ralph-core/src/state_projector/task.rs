@@ -339,6 +339,19 @@ pub(crate) fn project_ensure_task(
     persist(&ctx.tasks_path, &store, &mut ctx.tasks_cache)
 }
 
+/// U2 (plan 2026-07-29-001): per-unit spec built from
+/// `EnsureTaskBatch` payloads. `execution_wave` /
+/// `integration_order` are `None` when the action does not
+/// declare the corresponding pointer (legacy path).
+#[derive(Clone)]
+struct BatchSpec {
+    key: String,
+    title: String,
+    blocker_keys: Vec<String>,
+    execution_wave: Option<u32>,
+    integration_order: Option<u32>,
+}
+
 pub(crate) fn project_ensure_task_batch(
     ctx: &mut ProjectionContext,
     payload: &Value,
@@ -347,6 +360,9 @@ pub(crate) fn project_ensure_task_batch(
     key_pointer: &str,
     title_pointer: &str,
     blocked_by_keys_pointer: &str,
+    execution_wave_pointer: Option<&str>,
+    integration_order_pointer: Option<&str>,
+    execution_plan_digest_pointer: Option<&str>,
 ) -> Result<(), String> {
     let items_value = json_value_pointer(payload, items_pointer)
         .ok_or_else(|| format!("missing required pointer '{items_pointer}'"))?;
@@ -367,14 +383,7 @@ pub(crate) fn project_ensure_task_batch(
         ));
     }
 
-    #[derive(Clone)]
-    struct Spec {
-        key: String,
-        title: String,
-        blocker_keys: Vec<String>,
-    }
-
-    let mut specs = Vec::with_capacity(items.len());
+    let mut specs: Vec<BatchSpec> = Vec::with_capacity(items.len());
     let mut keys = HashSet::with_capacity(items.len());
     for (index, item) in items.iter().enumerate() {
         let key = json_pointer(item, key_pointer)
@@ -419,10 +428,31 @@ pub(crate) fn project_ensure_task_batch(
             }
             blocker_keys.push(blocker.to_string());
         }
-        specs.push(Spec {
+        // U2 (plan 2026-07-29-001): parse optional static
+        // schedule fields when the corresponding pointer is
+        // declared on the action. Both pointers must be present
+        // together — declaring only one is rejected below in the
+        // schedule-validation block.
+        let execution_wave = if let Some(ptr) = execution_wave_pointer {
+            json_value_pointer(item, ptr)
+                .and_then(Value::as_u64)
+                .and_then(|v| u32::try_from(v).ok())
+        } else {
+            None
+        };
+        let integration_order = if let Some(ptr) = integration_order_pointer {
+            json_value_pointer(item, ptr)
+                .and_then(Value::as_u64)
+                .and_then(|v| u32::try_from(v).ok())
+        } else {
+            None
+        };
+        specs.push(BatchSpec {
             key,
             title,
             blocker_keys,
+            execution_wave,
+            integration_order,
         });
     }
     for spec in &specs {
@@ -446,6 +476,27 @@ pub(crate) fn project_ensure_task_batch(
             })
             .collect::<Vec<(&str, Vec<&str>)>>(),
     )?;
+
+    // U2 (plan 2026-07-29-001): static wave/order schedule validation.
+    //
+    // Activation rule: when **both** `execution_wave_pointer` and
+    // `integration_order_pointer` are present on the action, the
+    // payload must declare a valid schedule. When neither pointer
+    // is present, skip validation (legacy path — preserves the
+    // behaviour for non-Parallel-Forge presets). Declaring only
+    // one pointer is a configuration error and rejects the batch.
+    match (execution_wave_pointer, integration_order_pointer) {
+        (None, None) => {}
+        (Some(_), None) | (None, Some(_)) => {
+            return Err(
+                "EnsureTaskBatch schedule validation requires both                  `execution_wave` and `integration_order` pointers to be                  declared; only one was set"
+                    .to_string(),
+            );
+        }
+        (Some(_), Some(_)) => {
+            validate_wave_schedule(&specs, execution_plan_digest_pointer, payload)?;
+        }
+    }
 
     let loop_id = ctx.current_loop_id.clone();
     let mut store = TaskStore::load(&ctx.tasks_path).map_err(|e| format!("tasks_load: {e}"))?;
@@ -664,6 +715,163 @@ pub(crate) fn project_close_task(
     } else {
         Ok(())
     }
+}
+
+/// U3 of plan 2026-07-29-001
+/// (`fix-parallel-forge-static-wave-settlement-plan`):
+/// atomically close the set of tasks named in a
+/// `forge.wave.settled` payload.
+///
+/// Invariants (R7/R14, scenario S3, unit-test split §11):
+/// 1. Empty input → fail-closed (no task is touched).
+/// 2. Duplicate `task_id`s in the payload → fail-closed.
+/// 3. Any unknown `task_id` (not in the ledger) → fail-closed
+///    with zero side effects.
+/// 4. Identity drift: mixed open/closed batch is fail-closed.
+///    A batch that is **entirely** already-closed is an
+///    idempotent no-op (replay-friendly, matches the U2
+///    `EnsureTaskBatch` replay contract).
+/// 5. Atomicity: every close is staged in memory, then
+///    persisted exactly once. Any pre-validation failure leaves
+///    the ledger untouched.
+///
+/// The projector consumes the array at `task_ids_pointer` (a
+/// JSON pointer relative to the event payload). The action
+/// carries no `step` field — wave settlement is a task-ledger
+/// concept, not a progress-gate concept; the progress module
+/// stays untouched.
+pub(crate) fn project_close_task_batch(
+    ctx: &mut ProjectionContext,
+    payload: &Value,
+    task_ids_pointer: &str,
+) -> Result<(), String> {
+    // `json_pointer` is string-only — for an array we have to
+    // hand-route through the raw payload. This keeps the pointer
+    // contract aligned with the rest of the projector (string
+    // pointer → string value) while letting specs embed a JSON
+    // array under a top-level key.
+    let raw = lookup_pointer(payload, task_ids_pointer)
+        .ok_or_else(|| format!("missing required pointer '{task_ids_pointer}'"))?;
+
+    let arr = raw.as_array().ok_or_else(|| {
+        format!(
+            "close_task_batch: pointer '{task_ids_pointer}' must resolve to an array \
+             (got {})",
+            type_of_value(raw)
+        )
+    })?;
+
+    if arr.is_empty() {
+        return Err("close_task_batch: empty task_ids array".to_string());
+    }
+
+    // Pre-validate identities (duplicate detection is the cheapest
+    // check; run it before opening the ledger so we don't pay for
+    // a reload on malformed payloads).
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut task_ids: Vec<String> = Vec::with_capacity(arr.len());
+    for (idx, v) in arr.iter().enumerate() {
+        let id = v
+            .as_str()
+            .ok_or_else(|| {
+                format!(
+                    "close_task_batch: task_ids[{idx}] is not a string (got {})",
+                    type_of_value(v)
+                )
+            })?;
+        if id.is_empty() {
+            return Err(format!("close_task_batch: task_ids[{idx}] is empty"));
+        }
+        if !seen.insert(id.to_string()) {
+            return Err(format!("close_task_batch: duplicate task_id '{id}' in batch"));
+        }
+        task_ids.push(id.to_string());
+    }
+
+    let mut store = TaskStore::load(&ctx.tasks_path).map_err(|e| format!("tasks_load: {e}"))?;
+
+    // Validate every target ID exists, and the open/closed
+    // distribution is either "all open" (active settlement) or
+    // "all closed" (idempotent replay). Mixed states are identity
+    // drift and must fail.
+    let mut any_open = false;
+    let mut any_closed = false;
+    let mut all_ids: Vec<&str> = Vec::with_capacity(task_ids.len());
+    for id in &task_ids {
+        match store.get(id) {
+            Some(row) => {
+                if row.closed.is_some() {
+                    any_closed = true;
+                } else {
+                    any_open = true;
+                }
+                all_ids.push(id.as_str());
+            }
+            None => {
+                return Err(format!("close_task_batch: unknown task_id '{id}'"));
+            }
+        }
+    }
+    if any_open && any_closed {
+        return Err(
+            "close_task_batch: task_id batch mixes open and closed rows \
+             (identity drift — reject to avoid silent partial close)"
+                .to_string(),
+        );
+    }
+
+    // Idempotent replay: every target already closed → no-op.
+    if !any_open {
+        return Ok(());
+    }
+
+    // Active settlement: every target open → close all.
+    // `TaskStore::close` rejects rows with `started.is_none()`
+    // (the P0-4 guard introduced by plan 2026-06-30-001). The
+    // projection for `work.done` works around the same guard by
+    // calling `row.start()` first; we mirror that here so the
+    // batch projection does not silently no-op on rows that the
+    // planner created but the slot never explicitly started.
+    for id in &task_ids {
+        if let Some(row) = store.get_mut(id) {
+            if row.started.is_none() {
+                row.start();
+            }
+        }
+        if store.close(id).is_none() {
+            return Err(format!("close_task_batch: failed to close task_id '{id}'"));
+        }
+    }
+
+    persist(&ctx.tasks_path, &store, &mut ctx.tasks_cache)?;
+    Ok(())
+}
+
+fn type_of_value(v: &Value) -> &'static str {
+    match v {
+        Value::Null => "null",
+        Value::Bool(_) => "bool",
+        Value::Number(_) => "number",
+        Value::String(_) => "string",
+        Value::Array(_) => "array",
+        Value::Object(_) => "object",
+    }
+}
+
+/// Resolve a dotted JSON pointer against an arbitrary JSON
+/// value. Unlike `json_pointer` (string-only), this returns the
+/// raw `Value` so non-string payloads (arrays, objects) can be
+/// consumed by actions like `CloseTaskBatch`. Returns `None`
+/// when any segment is missing.
+fn lookup_pointer<'a>(value: &'a Value, pointer: &str) -> Option<&'a Value> {
+    if pointer.is_empty() {
+        return Some(value);
+    }
+    let mut current = value;
+    for segment in pointer.split('.') {
+        current = current.get(segment)?;
+    }
+    Some(current)
 }
 
 fn persist(_path: &Path, store: &TaskStore, cache: &mut Vec<Task>) -> Result<(), String> {
@@ -1286,4 +1494,150 @@ mod tests {
         let id = format!("task-ce_executor_serial-fix02u02-{old:x}");
         assert!(!is_valid_task_id_format(&id));
     }
+}
+
+/// U2 (plan 2026-07-29-001): validate the static `execution_wave` /
+/// `integration_order` schedule for an `EnsureTaskBatch` payload.
+///
+/// Rules (matches plan §5/§6 + KTD1):
+///   1. Every unit must declare both fields when this validator runs.
+///   2. `execution_wave` is a positive integer (`u32 > 0`).
+///   3. `integration_order` is a positive integer (`u32 > 0`).
+///   4. `execution_wave` values form a contiguous sequence
+///      starting at 1 with no gaps (`max_wave == n_waves`).
+///   5. `integration_order` values are unique across all units
+///      and form a contiguous sequence 1..=n.
+///   6. For every dep edge `unit <- dep`: `wave(dep) < wave(unit)`.
+///   7. For every dep edge: `order(dep) < order(unit)`.
+///   8. When `execution_plan_digest_pointer` resolves, the digest
+///      value must be a non-empty string.
+///
+/// The validator is `O(V + E)` because every unit and every dep
+/// edge are visited exactly once. Rejection messages include the
+/// offending item key / edge / rule so the operator can pinpoint
+/// the source of the inconsistency.
+fn validate_wave_schedule(
+    specs: &[BatchSpec],
+    execution_plan_digest_pointer: Option<&str>,
+    payload: &Value,
+) -> Result<(), String> {
+    // Rule 1: every unit must declare both fields.
+    for spec in specs {
+        match (spec.execution_wave, spec.integration_order) {
+            (Some(w), Some(o)) if w > 0 && o > 0 => {}
+            _ => {
+                return Err(format!(
+                    "schedule field missing or non-positive:                      unit '{}' execution_wave={:?} integration_order={:?}                      (both must be positive integers)",
+                    spec.key, spec.execution_wave, spec.integration_order,
+                ));
+            }
+        }
+    }
+
+    // Rule 4: wave must be a contiguous sequence starting at 1.
+    let max_wave = specs
+        .iter()
+        .filter_map(|s| s.execution_wave)
+        .max()
+        .unwrap_or(0);
+    let wave_set: std::collections::HashSet<u32> =
+        specs.iter().filter_map(|s| s.execution_wave).collect();
+    for w in 1..=max_wave {
+        if !wave_set.contains(&w) {
+            return Err(format!(
+                "schedule wave not consecutive: missing wave {w}                  (declared waves: {sorted})",
+                sorted = {
+                    let mut v: Vec<u32> = wave_set.iter().copied().collect();
+                    v.sort();
+                    v.iter()
+                        .map(|x| x.to_string())
+                        .collect::<Vec<_>>()
+                        .join(",")
+                }
+            ));
+        }
+    }
+    // wave 0 (and any other non-positive) is rejected by Rule 1
+    // above; we additionally guard against the upper-bound having
+    // been declared as 0 by checking the max again.
+    if max_wave == 0 {
+        return Err(
+            "schedule wave set is empty: every unit must declare              execution_wave >= 1"
+                .to_string(),
+        );
+    }
+
+    // Rule 5: integration_order unique and contiguous 1..=n.
+    let n = specs.len();
+    let mut order_seen = std::collections::HashSet::with_capacity(n);
+    for spec in specs {
+        let o = spec.integration_order.expect("Rule 1 already checked");
+        if !order_seen.insert(o) {
+            return Err(format!(
+                "schedule integration_order duplicate: order {o} appears on                  multiple units (e.g. '{}')",
+                spec.key
+            ));
+        }
+        if o as usize > n {
+            return Err(format!(
+                "schedule integration_order exceeds unit count:                  order {o} > unit_count {n}",
+            ));
+        }
+    }
+    // Contiguity 1..=n must hold.
+    for o in 1..=n as u32 {
+        if !order_seen.contains(&o) {
+            return Err(format!(
+                "schedule integration_order not consecutive: missing order {o}                  (unit_count={n})",
+            ));
+        }
+    }
+
+    // Build a quick key -> spec lookup for dep-edge checks.
+    let key_index: std::collections::HashMap<&str, &BatchSpec> =
+        specs.iter().map(|s| (s.key.as_str(), s)).collect();
+
+    // Rules 6 & 7: dep edges must respect wave and order monotonicity.
+    for spec in specs {
+        let my_wave = spec.execution_wave.expect("Rule 1 already checked");
+        let my_order = spec.integration_order.expect("Rule 1 already checked");
+        for dep in &spec.blocker_keys {
+            let dep_spec = key_index.get(dep.as_str()).copied().ok_or_else(|| {
+                format!(
+                    "schedule dep edge unknown dependency:                      unit '{}' -> dep '{}' (no such unit)",
+                    spec.key, dep
+                )
+            })?;
+            let dep_wave = dep_spec.execution_wave.expect("Rule 1 already checked");
+            let dep_order = dep_spec.integration_order.expect("Rule 1 already checked");
+            if dep_wave >= my_wave {
+                return Err(format!(
+                    "schedule wave invariant violated:                      dep '{}' (wave {}) is not strictly less than                      unit '{}' (wave {})",
+                    dep, dep_wave, spec.key, my_wave,
+                ));
+            }
+            if dep_order >= my_order {
+                return Err(format!(
+                    "schedule integration_order invariant violated:                      dep '{}' (order {}) is not strictly less than                      unit '{}' (order {})",
+                    dep, dep_order, spec.key, my_order,
+                ));
+            }
+        }
+    }
+
+    // Rule 8: digest must resolve to a non-empty string when the
+    // pointer is set.
+    if let Some(ptr) = execution_plan_digest_pointer {
+        let digest = json_value_pointer(payload, ptr)
+            .and_then(Value::as_str)
+            .ok_or_else(|| {
+                format!("execution_plan_digest pointer '{ptr}' missing or not a string")
+            })?;
+        let trimmed = digest.trim();
+        if trimmed.is_empty() {
+            return Err(format!("execution_plan_digest pointer '{ptr}' is empty"));
+        }
+    }
+
+    Ok(())
 }

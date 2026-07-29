@@ -1428,6 +1428,15 @@ pub struct FlowStepConfig {
     /// `synth_await` / `fix_plan`.
     #[serde(default)]
     pub on_any_of: Vec<String>,
+    /// 2026-07-29-001 plan U1: explicit subset of
+    /// `allowed_emits` whose acceptance advances the
+    /// plan-mode current step. Empty (the default) keeps
+    /// the legacy contract — every topic in
+    /// `allowed_emits` is transition-capable — so
+    /// presets that have not opted in keep their
+    /// existing semantics.
+    #[serde(default)]
+    pub transition_emits: Vec<String>,
 }
 
 impl FlowStepConfig {

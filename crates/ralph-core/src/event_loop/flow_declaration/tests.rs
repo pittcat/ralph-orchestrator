@@ -147,6 +147,55 @@ fn is_partial_state_matches_three_terminal_when_values() {
     assert!(!is_partial_state(""));
 }
 
+/// 2026-07-29-001 plan U1 (R1): the `transition_emits` field
+/// declares the explicit subset of `allowed_emits` whose
+/// acceptance advances the plan-mode current step. Empty
+/// keeps the legacy behaviour (every `allowed_emits` topic
+/// is transition-capable) so presets that have not opted in
+/// keep their semantics.
+#[test]
+fn flow_declaration_transition_emits_defaults_to_empty() {
+    let decl = FlowDeclaration::from_yaml(CE_EXECUTOR_SERIAL_FLOW).unwrap();
+    for step in &decl.steps {
+        assert!(
+            step.transition_emits.is_empty(),
+            "transition_emits must default to empty; step `{}` had {:?}",
+            step.id,
+            step.transition_emits
+        );
+    }
+}
+
+/// 2026-07-29-001 plan U1 (R1): `transition_emits` round-trips
+/// through YAML parsing without dropping the value.
+#[test]
+fn flow_declaration_transition_emits_parses_from_yaml() {
+    let yaml = r#"
+mechanism:
+  flow:
+    type: declared
+    terminal_emits: [LOOP_COMPLETE]
+    steps:
+      - id: unit_loop
+        kind: linear
+        transition_emits: [forge.plan.ready]
+        allowed_emits:
+          - forge.plan.ready
+          - work.failed
+      - id: plan_end
+        kind: terminal
+        allowed_emits: [LOOP_COMPLETE]
+"#;
+    let decl = FlowDeclaration::from_yaml(yaml).unwrap();
+    let step = decl.step("unit_loop").expect("unit_loop step must exist");
+    assert_eq!(
+        step.transition_emits,
+        vec!["forge.plan.ready".to_string()],
+        "explicit transition_emits must round-trip; got {:?}",
+        step.transition_emits
+    );
+}
+
 #[test]
 fn flow_declaration_allows_topic_returns_false_for_unknown_step() {
     let decl = FlowDeclaration::from_yaml(CE_EXECUTOR_SERIAL_FLOW).unwrap();

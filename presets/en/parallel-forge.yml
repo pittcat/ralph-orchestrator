@@ -73,51 +73,45 @@ mechanism:
         "on": forge.concurrency.approved
         allowed_emits:
           - forge.worktrees.ready
+          - forge.wave.worktrees.ready
           - forge.plan.blocked
-      - id: exec_wave
-        kind: side_effect
-        runs: supervisor.exec.wave
+      # U7 (plan 2026-07-29-001): repeatable per-wave spine. The
+      # development loop runs once per static wave. Each iteration
+      # emits the wave's full handoff chain and a `forge.wave.settled`
+      # terminal that triggers the next iteration's prepare (or the
+      # final `forge.exec.development.done` once the plan is empty).
+      # `transition_emits` controls the loop body's step ordering; the
+      # outside-this-loop flow advances to `final_verify` only when the
+      # last wave's `forge.wave.settled` lands.
+      - id: development_loop
+        kind: loop
+        runs: forge.development_loop
         "on": forge.worktrees.ready
         allowed_emits:
+          - forge.wave.worktrees.ready
+          - forge.wave.prepare
           - exec.unit.ready
           - exec.unit.done
           - exec.unit.failed
           - exec.wave.complete
           - exec.wave.failed
-      - id: exec_finalize
-        kind: await
-        "on": exec.wave.complete
-        allowed_emits:
+          - forge.wave.reviewed
+          - forge.wave.review.failed
+          - forge.wave.integrated
+          - forge.wave.verified
+          - forge.verification.failed
+          - forge.correction.requested
+          - forge.correction.done
+          - forge.wave.settled
           - forge.exec.development.done
-      - id: exec_failure
-        kind: await
-        "on": exec.wave.failed
-        allowed_emits:
-          - work.failed
-          - forge.report.done
-      - id: unit_review
-        kind: linear
-        "on": forge.exec.development.done
-        allowed_emits:
-          - forge.units.reviewed
           - forge.plan.blocked
-      - id: integration
-        kind: linear
-        "on": forge.units.reviewed
-        allowed_emits:
-          - forge.integration.done
           - work.failed
-          - forge.report.done
-      - id: incremental_verify
-        kind: linear
-        "on": forge.integration.done
-        allowed_emits:
-          - forge.incremental.verified
+        transition_emits:
+          - forge.exec.development.done
           - work.failed
-          - forge.report.done
       - id: full_verify
         kind: linear
-        "on": forge.incremental.verified
+        "on": forge.exec.development.done
         allowed_emits:
           - forge.full.verified
           - work.failed
@@ -133,6 +127,7 @@ mechanism:
         on_any_of:
           - forge.audit.done
           - forge.plan.blocked
+          - work.failed
         allowed_emits:
           - forge.report.done
       - id: plan_end
@@ -382,26 +377,54 @@ hats:
 
   worktree:
     name: "Worktree"
-    description: "Creates integration branch and per-Unit worktrees; freezes concurrent baseline."
-    triggers: [forge.concurrency.approved]
-    publishes: [forge.worktrees.ready, forge.plan.blocked]
-    exempt_topics: [forge.worktrees.ready, forge.plan.blocked]
-    terminal_events: [forge.worktrees.ready, forge.plan.blocked]
+    description: "Per-wave integration branch + lazy worktree creation from verified_base_commit."
+    triggers:
+      - forge.concurrency.approved
+      - forge.wave.prepare
+    publishes:
+      - forge.wave.worktrees.ready
+      - forge.worktrees.ready
+      - forge.plan.blocked
+    exempt_topics:
+      - forge.wave.worktrees.ready
+      - forge.worktrees.ready
+      - forge.plan.blocked
+    terminal_events:
+      - forge.wave.worktrees.ready
+      - forge.worktrees.ready
+      - forge.plan.blocked
     event_filter:
       enabled: true
-      events: [forge.concurrency.approved]
+      events:
+        - forge.concurrency.approved
+        - forge.wave.prepare
     instructions: |
-      ## WORKTREE MODE
+      ## WORKTREE MODE — lazy per-wave worktrees
 
-      Git/worktree operations only for this activation.
+      U4 / R8: create worktrees **only for the current wave**, never
+      for future waves. The trigger carries an explicit
+      `verified_base_commit`; only honour it after `git cat-file -t`
+      proves it is a real commit. If the commit does not exist or
+      the branch/path already exists with a different SHA, fail
+      closed — never rebase / reset / force push.
 
       OPAC: `ralph-tools-opac`. Before emit: `ralph tools skill load ralph-tools-emit` then `--policy-check`.
 
       ### Mission
-      Create integration branch, run Foundation units serially on main worktree if needed, then create one branch+worktree per parallel Unit.
-      Unit worktrees are cleaned by **reporter** after the manager report (lifecycle owner).
+      - On `forge.concurrency.approved`: create the integration
+        branch (or reuse it) and emit `forge.worktrees.ready` with
+        the **first** wave's worktree map (R5: minimum open wave
+        index from the plan).
+      - On each `forge.wave.prepare`: ensure the named branch /
+        worktree exists at `verified_base_commit`, then emit
+        `forge.wave.worktrees.ready` with the wave-scoped map.
+        Future waves are **absent** from the map.
 
-      ### Steps
+      Worktrees are cleaned by **reporter** after the manager
+      report (lifecycle owner). When reused, the prior wave's
+      runtime record is archived to the worktree's
+      `.ralph/reuse-history/` first, matching the
+      `--worktree --reuse-worktree` rule.
       1. Read `execution_plan_path` from trigger; derive `plan_key`; run from main repo root (`git worktree list` first entry).
       2. Create integration branch; record `base_commit` after Foundation units land.
       3. For each parallel Unit: `git worktree add` + dedicated branch (one worktree per Unit).
@@ -413,59 +436,75 @@ hats:
 
   forge-dispatcher:
     name: "Forge Dispatcher"
-    description: "Supervisor exec-wave dispatcher: iterative ready-wave fan-out via ralph wave emit exec.unit.ready."
+    description: "Supervisor exec-wave dispatcher: static-wave fan-out from execution-plan.yml via ralph wave emit exec.unit.ready."
     triggers:
+      - forge.wave.worktrees.ready
       - forge.worktrees.ready
-      - exec.wave.complete
+      - forge.wave.settled
     trigger_multi_consumer_topics:
-      - exec.wave.complete
+      - forge.wave.worktrees.ready
+      - forge.wave.settled
     publishes:
       - exec.unit.ready
+      - forge.wave.prepare
       - forge.exec.development.done
     event_filter:
       enabled: true
       events:
+        - forge.wave.worktrees.ready
         - forge.worktrees.ready
-        - exec.wave.complete
+        - forge.wave.settled
     exempt_topics:
       - exec.unit.ready
+      - forge.wave.prepare
       - forge.exec.development.done
     terminal_events:
       - exec.unit.ready
+      - forge.wave.prepare
       - forge.exec.development.done
     instructions: |
-      ## FORGE DISPATCHER MODE — Supervisor exec-wave dispatch
+      ## FORGE DISPATCHER MODE — Static-wave fan-out
 
-      Dispatcher hat for `event_loop.supervisor.enabled: true`. You do not
-      implement code. You read the static execution-plan artifact and
-      `ralph tools task list`, compute the ready set, and either fan out
-      one `exec.unit.ready` wave OR signal development complete.
+      Dispatcher hat for `event_loop.supervisor.enabled: true`. The
+      execution plan's **static** `execution_wave` field is the
+      single source of truth for which Units may run now. You never
+      recompute the ready set from task state or dependency edges.
+      The integration_order / execution_wave schedule was
+      validated by Guardian and remains valid until plan revocation.
 
       OPAC: follow `ralph-tools-opac` for Observe/Precheck/Apply/Confirm.
-      Load on demand: `ralph tools skill load ralph-tools-wave` (red box) and
-      `ralph tools skill load ralph-tools-emit` (§5 precheck for non-wave emits).
+      Load on demand: `ralph tools skill load ralph-tools-wave` (red box)
+      and `ralph tools skill load ralph-tools-emit` (§5 precheck).
 
       ### Single-shot budget
 
       Per activation publish **at most one** of:
-      - one `ralph wave emit exec.unit.ready --payloads-stdin` batch, OR
-      - `ralph emit forge.exec.development.done`
+      - one `ralph wave emit exec.unit.ready --payloads-stdin` batch (current wave fan-out), OR
+      - `ralph emit forge.wave.prepare` (request next wave's worktree creation), OR
+      - `ralph emit forge.exec.development.done` (all waves settled).
 
-      Do **not** publish supervisor fan-in topics (`exec.wave.*`); the runtime
-      injects those after slot fan-in. Your triggers may *receive* fan-in
-      signals; you never write them.
+      Do **not** publish supervisor fan-in topics (`exec.wave.*`).
+      The runtime injects those after slot fan-in. Your triggers
+      may *receive* fan-in signals; you never write them.
 
-      ### Ready set
+      ### Static wave selection
 
-      A unit is ready when its task is `open` and all `depends_on` units are `done`
-      (per execution-plan.yml). Sort by `unit_id` ascending.
+      U4 / R5: read `execution_plan_path` from the trigger. Find
+      the **smallest** `wave_index` whose Units are still open in
+      `ralph tools task list`. If no open wave exists, transition
+      to `forge.exec.development.done` (after U5 has settled
+      the previous wave). Re-entry on the same `wave_id` is
+      idempotent — never re-prepare a wave that already has
+      `forge.worktrees.ready`.
 
       ### Wave payload (per ready unit) — required fields
 
-      Include every required field: `wave_id`, `slot_index`, `unit_id`, live
-      `task_id` / `task_key` from `ralph tools task list` (never hand-write
-      `task_id`), `plan_key`, `execution_plan_path`, `worktree_map_path`
-      (from trigger/projection).
+      Sort by `integration_order` ascending (ties broken by `unit_id`).
+      For each unit look up the **live** `task_id` / `task_key` from
+      `ralph tools task list`; never hand-write `task_id`. Include
+      `wave_id`, `slot_index`, `unit_id`, `plan_key`,
+      `execution_plan_path`, `worktree_map_path` (from the trigger
+      / projection).
 
       ### Wave OPAC (HARD)
 
@@ -478,35 +517,73 @@ hats:
 
       Schema `--policy-check` alone is **not** a substitute for `wave verify`.
 
-      ### On worktrees-ready or supervisor fan-in re-entry
+      ### On worktrees-ready, settlement, or supervisor fan-in re-entry
 
-      1. Read `execution_plan_path`, `worktree_map_path`, `plan_key` from trigger/projection.
-      2. If ready set non-empty: verify → wave emit (above).
-      3. If ready set empty and all units terminal with zero blocking failures:
-         emit `forge.exec.development.done` (`execution_plan_path`, counts, `plan_key`).
-      4. If failures block progress: stop; failure-handler owns the failed-wave path.
+      1. Read `execution_plan_path`, `worktree_map_path`, `plan_key`,
+         `verified_base_commit` from trigger/projection.
+      2. If `forge.wave.settled` just landed: select the next
+         static wave (smallest open wave_index) and emit
+         `forge.wave.prepare` with the new wave's Unit ids and
+         the **settled** `verified_base_commit` (the new verified
+         base that Settlement just pinned).
+      3. If `forge.wave.worktrees.ready` just landed: ready set
+         = that wave's Unit ids; sort by `integration_order`; verify
+         → wave emit.
+      4. If every static wave is settled and no open tasks remain:
+         emit `forge.exec.development.done` (`execution_plan_path`,
+         counts, `plan_key`).
 
   forge-failure-handler:
     name: "Forge Failure Handler"
-    description: "Translates exec.wave.failed into work.failed for reporter."
-    triggers: [exec.wave.failed]
-    publishes: [work.failed]
-    exempt_topics: [work.failed]
-    terminal_events: [work.failed]
+    description: "Routes review/verification failures to bounded wave-fixer correction; never short-circuits to work.failed."
+    triggers:
+      - forge.wave.review.failed
+      - forge.verification.failed
+    publishes:
+      - forge.correction.requested
+      - work.failed
+    exempt_topics:
+      - forge.correction.requested
+      - work.failed
+    terminal_events:
+      - forge.correction.requested
+      - work.failed
     event_filter:
       enabled: true
-      events: [exec.wave.failed]
+      events:
+        - forge.wave.review.failed
+        - forge.verification.failed
     instructions: |
-      ## FORGE FAILURE HANDLER MODE
+      ## FORGE FAILURE HANDLER MODE — evidence-first correction
 
-      Activated on supervisor-injected `exec.wave.failed`.
+      U6 / R16–R24: a **single** failure event never terminates
+      the plan. Route to `forge.correction.requested` instead.
+      `work.failed` is reserved for the 3-round exhaustion + 90/75
+      confidence gate.
 
       OPAC: `ralph-tools-opac`. Before emit: `ralph tools skill load ralph-tools-emit` then `--policy-check`.
 
       ### Steps
-      1. Read wave `reason` / `blocking_slots` from trigger.
-      2. Derive `plan_key` / `plan_path` from `ralph inspect loop` / projection / task keys.
-      3. Write `.ralph/forge/<plan-key>/failures/forge-failure-handler-failed.md`.
+      1. Read wave_id, wave_index, failure_fingerprint, affected_task_ids from the trigger.
+      2. Read `ralph tools task list` to confirm ids are live; record `correction_round` from `.ralph/forge/<plan-key>/waves/<wave_id>/corrections/counter` (start at 0).
+      3. Scan `.ralph/forge/<plan-key>/waves/<wave_id>/corrections/` for prior round
+         fingerprints; reject duplicate-round requests (no confidence gain).
+      4. Read `execution_plan_path` from trigger / projection.
+         Derive `allowed_paths` from each `affected_unit_ids`'s
+         `unit.template.yml` `allowed_paths`; `forbidden_paths` is the
+         complement of the union.
+      5. Write `.ralph/forge/<plan-key>/waves/<wave_id>/corrections/round-<n>.md`
+         (round, fingerprint, scope, evidence path).
+      6. Emit `forge.correction.requested` with `correction_request_path`.
+
+      ### Final correction (3 rounds exhausted)
+
+      When the round counter is 3 and the fingerprint is new (or the
+      evidence is independently sufficient), score per the
+      `fail-confidence-rubric` template. Confidence ≥90 +
+      coverage ≥75 + accepted precheck → `work.failed` with
+      `dead_end_confidence` / `dead_end_evidence_*` payload. Otherwise
+      keep retrying — never re-emit round 4.
       4. Emit exactly one `work.failed` with `reason`, `plan_path`,
          `context_artifact_path`, `forge_artifact_root`, `plan_key`.
       5. Do not re-dispatch workers.
@@ -568,11 +645,15 @@ hats:
 
   reviewer:
     name: "Reviewer"
-    description: "Independent per-Unit review after all supervisor exec waves complete."
-    triggers: [forge.exec.development.done]
-    publishes: [forge.units.reviewed, forge.plan.blocked]
-    exempt_topics: [forge.units.reviewed, forge.plan.blocked]
-    terminal_events: [forge.units.reviewed, forge.plan.blocked]
+    description: "Per-wave independent review after supervisor fan-in; emits forge.wave.reviewed (accept) or forge.wave.review.failed (reject)."
+    triggers: [forge.wave.worktrees.ready, exec.wave.complete, forge.correction.done]
+    trigger_multi_consumer_topics:
+      - forge.wave.worktrees.ready
+      - exec.wave.complete
+      - forge.correction.done
+    publishes: [forge.wave.reviewed, forge.wave.review.failed, forge.units.reviewed, forge.plan.blocked]
+    exempt_topics: [forge.wave.reviewed, forge.wave.review.failed, forge.units.reviewed, forge.plan.blocked]
+    terminal_events: [forge.wave.reviewed, forge.wave.review.failed, forge.units.reviewed, forge.plan.blocked]
     event_filter:
       enabled: true
       events: [forge.exec.development.done]
@@ -588,18 +669,56 @@ hats:
       2. List units from execution-plan + `ralph tools task list`.
       3. Per unit: read `.ralph/forge/<plan_key>/units/<unit-id>-completion.md`; inspect diff in unit worktree (via worktree-map if needed).
       4. Write `.ralph/forge/<plan_key>/reviews/<unit-id>-review.md` and `reviews/summary.md`.
-      5. If all APPROVED: emit `forge.units.reviewed` (`summary_path`, `all_approved`, `execution_plan_path`, `plan_key`).
-      6. Else: write `blocks/reviewer-blocked.md`, emit `forge.plan.blocked` with context paths.
+      5. If all APPROVED: emit `forge.wave.reviewed` (`wave_id`, `wave_index`, `unit_verdicts`, `aggregate_verdict: ACCEPTED`, `review_report_path`, `plan_key`).
+      6. Else: write `waves/<wave_id>/failure-observation.md`, emit `forge.wave.review.failed` with `failure_fingerprint` (kind + command + base SHA), `unit_verdicts`, `affected_task_ids`, `failure_observation_path`. The failure-handler owns the next step.
 
       Single business event per activation.
 
+  wave-fixer:
+    name: "Wave Fixer"
+    description: "Bounded correction agent for failed wave; modifies only failed Units' paths on candidate branch."
+    triggers: [forge.correction.requested]
+    publishes: [forge.correction.done, forge.plan.blocked]
+    exempt_topics: [forge.correction.done, forge.plan.blocked]
+    terminal_events: [forge.correction.done, forge.plan.blocked]
+    event_filter:
+      enabled: true
+      events: [forge.correction.requested]
+    instructions: |
+      ## WAVE FIXER MODE
+
+      U6 / R20 / R21: bounded correction agent. You share the same
+      isolated worktree semantics as the executor slot. You **only**
+      touch files in `allowed_paths`; any change outside is a hard
+      block (`forge.plan.blocked`).
+
+      OPAC: `ralph-tools-opac`. Before emit: `ralph tools skill load ralph-tools-emit` then `--policy-check`.
+
+      ### Steps
+      1. Read `wave_id`, `wave_index`, `correction_round`, `affected_unit_ids`,
+         `allowed_paths`, `forbidden_paths`, `base_commit`, `candidate_branch`,
+         `failure_fingerprint` from `forge.correction.requested`.
+      2. Check candidate branch ref; checkout fixer's own worktree
+         at `base_commit`. Never reset or force push.
+      3. Read `.ralph/forge/<plan-key>/waves/<wave_id>/failure-observation.md`
+         (or `verification-failure.md`) for the prior failure context.
+      4. Apply the minimum fix; run **only** the affected Units'
+         focused tests; commit on candidate branch.
+      5. Write `.ralph/forge/<plan-key>/waves/<wave_id>/corrections/round-<n>/report.md`.
+      6. Emit `forge.correction.done` (`commit_sha`, `affected_unit_ids`,
+         `correction_report_path`).
+
+      Re-review/reverify happens next: reviewer → integrator → verifier
+      must re-run before any settlement. The next wave's
+      `forge.wave.settled` is the only place tasks move to closed.
+
   integrator:
     name: "Integrator"
-    description: "Sequential rebase/merge of approved Units; includes commit linearization (Curator duties)."
-    triggers: [forge.units.reviewed]
-    publishes: [forge.integration.done, work.failed]
-    exempt_topics: [forge.integration.done, work.failed]
-    terminal_events: [forge.integration.done, work.failed]
+    description: "Per-wave sequential rebase/merge of approved Units; emits forge.wave.integrated then fast-forwards and emits forge.wave.settled."
+    triggers: [forge.wave.reviewed, forge.wave.verified]
+    publishes: [forge.wave.integrated, forge.wave.settled, forge.integration.done, work.failed]
+    exempt_topics: [forge.wave.integrated, forge.wave.settled, forge.integration.done, work.failed]
+    terminal_events: [forge.wave.integrated, forge.wave.settled, forge.integration.done, work.failed]
     event_filter:
       enabled: true
       events: [forge.units.reviewed]
@@ -628,11 +747,11 @@ hats:
 
   verifier:
     name: "Verifier"
-    description: "Incremental regression after integration."
-    triggers: [forge.integration.done]
-    publishes: [forge.incremental.verified, work.failed]
-    exempt_topics: [forge.incremental.verified, work.failed]
-    terminal_events: [forge.incremental.verified, work.failed]
+    description: "Per-wave verification on candidate HEAD; emits forge.wave.verified (pass) or forge.verification.failed (fail)."
+    triggers: [forge.wave.integrated, forge.integration.done]
+    publishes: [forge.wave.verified, forge.verification.failed, forge.incremental.verified, work.failed]
+    exempt_topics: [forge.wave.verified, forge.verification.failed, forge.incremental.verified, work.failed]
+    terminal_events: [forge.wave.verified, forge.verification.failed, forge.incremental.verified, work.failed]
     event_filter:
       enabled: true
       events: [forge.integration.done]
@@ -655,7 +774,7 @@ hats:
   tester:
     name: "Tester"
     description: "Full regression and CI-equivalent gates after all Units integrated."
-    triggers: [forge.incremental.verified]
+    triggers: [forge.incremental.verified, forge.exec.development.done]
     publishes: [forge.full.verified, work.failed]
     exempt_topics: [forge.full.verified, work.failed]
     terminal_events: [forge.full.verified, work.failed]
@@ -707,7 +826,7 @@ hats:
   reporter:
     name: "Reporter"
     description: "Writes manager-readable Markdown report; terminal hat."
-    triggers: [forge.audit.done, forge.plan.blocked, work.failed]
+    triggers: [forge.audit.done, forge.plan.blocked, work.failed, forge.units.reviewed]
     publishes: [forge.report.done, LOOP_COMPLETE]
     exempt_topics: [forge.report.done, LOOP_COMPLETE]
     terminal_events: [forge.report.done, LOOP_COMPLETE]
