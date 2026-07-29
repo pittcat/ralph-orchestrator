@@ -706,3 +706,113 @@ def test_no_new_preset_name_gates_for_supervisor_wave(path: Path) -> None:
             f"{path}:{idx + 1} introduces a preset-name gate inside "
             f"execution_model / capability context:\n  {line}"
         )
+
+
+# ---------------------------------------------------------------------------
+# U3 (plan 2026-07-29-002): diagnosis terminal-event chronology
+# ---------------------------------------------------------------------------
+
+DIAGNOSIS_LOG_RECONCILIATION = (
+    ROOT / "skills" / "ralph-run-diagnosis" / "references" / "log-reconciliation.md"
+)
+DIAGNOSIS_LOG_RECONCILIATION_MIRROR = (
+    ROOT / ".agents" / "skills" / "ralph-run-diagnosis" / "references" / "log-reconciliation.md"
+)
+DIAGNOSIS_REPORT_TEMPLATE = (
+    ROOT / "skills" / "ralph-run-diagnosis" / "references" / "report-template.md"
+)
+DIAGNOSIS_REPORT_TEMPLATE_MIRROR = (
+    ROOT / ".agents" / "skills" / "ralph-run-diagnosis" / "references" / "report-template.md"
+)
+DIAGNOSIS_VERIFICATION_PIPELINE = (
+    ROOT / "skills" / "ralph-run-diagnosis" / "references" / "verification-pipeline.md"
+)
+DIAGNOSIS_VERIFICATION_PIPELINE_MIRROR = (
+    ROOT / ".agents" / "skills" / "ralph-run-diagnosis" / "references" / "verification-pipeline.md"
+)
+
+
+def test_diagnosis_requires_terminal_event_artifact_chronology() -> None:
+    """Log reconciliation must define the event-artifact chronology decision table."""
+    text = _read(DIAGNOSIS_LOG_RECONCILIATION)
+    assert "终态时序一致性" in text or "event-artifact chronology" in text, (
+        "log-reconciliation.md must contain a terminal-event chronology section"
+    )
+    assert "首轮成功" in text, "must define first-pass success"
+    assert "失败终态后恢复" in text, "must define failed-terminal-then-recovered"
+    assert "恢复后成功" in text, "must define recovered-then-success"
+    assert "证据不足" in text, "must define insufficient-evidence"
+    assert "LOOP_COMPLETE" in text, "must mention LOOP_COMPLETE"
+    assert "不等于" in text or "not equal" in text.lower(), (
+        "must state LOOP_COMPLETE does not equal success"
+    )
+
+
+def test_diagnosis_forbids_zero_rejection_claim_after_failed_terminal() -> None:
+    """Report template must forbid 'zero rejection' claims after a failed terminal."""
+    text = _read(DIAGNOSIS_REPORT_TEMPLATE)
+    assert "首轮终态" in text or "initial_terminal_status" in text, (
+        "report-template.md must contain initial_terminal_status"
+    )
+    assert "恢复状态" in text or "recovery_status" in text, (
+        "report-template.md must contain recovery_status"
+    )
+    assert "最终代码状态" in text or "final_code_state" in text, (
+        "report-template.md must contain final_code_state"
+    )
+    assert "失败终态后恢复" in text, (
+        "report-template.md must mention failed-terminal-then-recovered"
+    )
+    assert "零拒收" in text, (
+        "report-template.md must explicitly forbid 'zero rejection' output"
+    )
+
+
+def test_diagnosis_preserves_clean_first_pass_success() -> None:
+    """Verification pipeline must include event-artifact temporal consistency as L4 item."""
+    text = _read(DIAGNOSIS_VERIFICATION_PIPELINE)
+    assert "Event-artifact temporal consistency" in text or "终态时序一致性" in text, (
+        "verification-pipeline.md L4 must include event-artifact temporal consistency"
+    )
+    assert "失败终态后恢复" in text, (
+        "verification-pipeline.md must mention failed-terminal-then-recovered"
+    )
+    assert "零拒收" in text, (
+        "verification-pipeline.md must forbid 'zero rejection' output"
+    )
+
+
+def test_diagnosis_canonical_and_mirror_are_in_sync() -> None:
+    """Canonical and .agents mirror copies must be identical."""
+    for canonical, mirror in [
+        (DIAGNOSIS_LOG_RECONCILIATION, DIAGNOSIS_LOG_RECONCILIATION_MIRROR),
+        (DIAGNOSIS_REPORT_TEMPLATE, DIAGNOSIS_REPORT_TEMPLATE_MIRROR),
+        (DIAGNOSIS_VERIFICATION_PIPELINE, DIAGNOSIS_VERIFICATION_PIPELINE_MIRROR),
+    ]:
+        assert canonical.is_file(), f"missing canonical: {canonical}"
+        assert mirror.is_file(), f"missing mirror: {mirror}"
+        assert canonical.read_text(encoding="utf-8") == mirror.read_text(encoding="utf-8"), (
+            f"canonical and mirror drifted: {canonical} vs {mirror}"
+        )
+
+
+def test_diagnosis_chronology_rules_use_generic_vocabulary() -> None:
+    """Chronology rules must not leak plan ids, incident paths, or preset names."""
+    for path in [
+        DIAGNOSIS_LOG_RECONCILIATION,
+        DIAGNOSIS_REPORT_TEMPLATE,
+        DIAGNOSIS_VERIFICATION_PIPELINE,
+    ]:
+        text = _read(path)
+        assert "2026-07-29-002" not in text, (
+            f"{path} must not contain the plan id"
+        )
+        assert "parallel-forge" not in text, (
+            f"{path} must not contain a specific preset name"
+        )
+        assert "20260729-020808" not in text, (
+            f"{path} must not contain the incident run id"
+        )
+        assert "docs/report/2026-07-29" not in text, (
+            f"{path} must not reference the incident report path"
+        )

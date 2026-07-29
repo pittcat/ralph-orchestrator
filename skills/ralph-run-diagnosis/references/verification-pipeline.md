@@ -107,6 +107,7 @@ L0 盘点 → L1 拓扑 → L2 日志三联 → L3 产物五证 → L4 机制十
 10. Drift monitor（三指标）
 11. Dedup / duplicate_work_done
 12. Terminal / completion_after_terminal / silent-success 检测
+13. Event-artifact temporal consistency（终态时序一致性）：accepted event chronology 是终态事实源；artifact 被后续修改但无对应 accepted 成功事件时，必须标记「失败终态后恢复」，不得输出「零拒收」
 
 **产出**：《机制生效矩阵》— 生效 / 失效 / 未触发 + 文件:行号。
 

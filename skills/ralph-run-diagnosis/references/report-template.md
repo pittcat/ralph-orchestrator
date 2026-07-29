@@ -77,6 +77,17 @@ history_search: disabled | preset-only | full   # 来自主 SKILL §0.1 的 AskU
 
 ...（附 **置信度 NN**）
 
+### 1.4 终态时序一致性（event-artifact chronology）
+
+> 强制分栏：先按 accepted event 确定首轮终态，再解释后续 artifact/commit 恢复。禁止用 mutable artifact 反向覆盖先前 accepted verdict。
+
+| 项目 | 内容 |
+|------|------|
+| **首轮终态（initial_terminal_status）** | 按 accepted audit/report 事件序列判定：首轮成功 / 首轮失败（REJECTED/FAILED/BLOCKED） / 证据不足 |
+| **恢复状态（recovery_status）** | 无恢复 / 失败终态后恢复（artifact 被改但无后续 accepted 成功事件） / 恢复后成功（有后续 accepted 成功事件） |
+| **最终代码状态（final_code_state）** | 按最终 Git diff / artifact 内容描述（仅陈述事实，不反写 event verdict） |
+| **一致性告警** | 若存在失败终态后恢复：输出「⚠️ 失败终态后恢复：首轮 audit/report 为 REJECTED/FAILED，后续 artifact 被修改但无对应 accepted 成功事件」；**禁止**输出「零拒收」或「首轮完整成功」 |
+
 ---
 
 ## 2. 执行链路对比图

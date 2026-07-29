@@ -84,6 +84,24 @@ recovery 有 topic、events 无 → phantom / repair-stream 候选。
 | user quit | `trace.jsonl`（FULL）或 logs 中 Quit/Abort |
 | 无终态 | 无 terminal topic + lock/stale |
 
+### 终态时序一致性（event-artifact chronology）
+
+accepted event chronology 是终态事实的唯一来源。mutable artifact（报告文件、audit 文件）和 Git commit 只能用于**解释**后续恢复，不能反向覆盖先前 accepted verdict。
+
+**决策表**：
+
+| 场景 | accepted event 序列 | artifact / commit 后续状态 | 诊断结论 |
+|------|---------------------|---------------------------|----------|
+| 首轮成功 | audit=ACCEPTED → report=COMPLETED → LOOP_COMPLETE | artifact 与事件一致 | **首轮成功** |
+| 失败终态后恢复 | audit=REJECTED → report=FAILED → LOOP_COMPLETE（匹配路径） | artifact 被后续改为 ACCEPTED，但**无后续 accepted 成功 audit/report** | **失败终态后恢复**；不得输出「零拒收」或「首轮完整成功」 |
+| 二次成功 | audit=REJECTED → report=FAILED → **后续 accepted** audit=ACCEPTED → report=COMPLETED → LOOP_COMPLETE | artifact 与最终事件一致 | **恢复后成功**；保留首轮记录，最终按最新 accepted 事件定 |
+| 证据不足 | 无 accepted audit/report，或 artifact 与事件矛盾且无后续 accepted 成功事件 | — | **证据不足，不确定**；不得猜测成功 |
+
+**冲突优先级**：
+1. accepted event（含 topic、payload、时序）> mutable artifact > Git commit。
+2. `LOOP_COMPLETE` 只证明「工作流已终止」，**不等于**「工作流成功」。
+3. 若 `completion_payload_match` 启用，mismatch 的 `LOOP_COMPLETE` 已被 runtime 拒收；诊断不得把被拒收的 completion 当作终态事实。
+
 ---
 
 ## 7. 三联对账表（报告）
