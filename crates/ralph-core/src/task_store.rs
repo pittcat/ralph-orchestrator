@@ -168,6 +168,24 @@ fn parse_task_line(line: &str) -> Option<Task> {
 }
 
 impl TaskStore {
+    /// U5 of plan 2026-07-29-005 (G9, R14, AE-G5): snapshot the
+    /// in-memory task list so a batch projection can stage a
+    /// multi-row mutation on a clone and only commit on full
+    /// success. Cheap (Vec<Task> per-row copy), read-only.
+    pub(crate) fn tasks(&self) -> &[Task] {
+        &self.tasks
+    }
+
+    /// U5 of plan 2026-07-29-005 (G9, R14, AE-G5): atomically
+    /// replace the in-memory task list with a staged batch
+    /// result. Caller is responsible for having validated every
+    /// per-row step on the staged vec beforehand; this is the
+    /// single commit point that the projector pairs with
+    /// `persist`.
+    pub(crate) fn replace_tasks_for_atomic_batch(&mut self, tasks: Vec<Task>) {
+        self.tasks = tasks;
+    }
+
     /// Loads tasks from the JSONL file at the given path.
     ///
     /// If the file doesn't exist, returns an empty store.
