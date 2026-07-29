@@ -1905,6 +1905,19 @@ fn test_parallel_forge_correction_runtime() {
     run_workflow_guard_scenario(yaml);
 }
 
+/// Plan 2026-07-29-005 U7 / S11 (#2): `forge.final.correction.settled`
+/// must only be accepted at `correction_round: 3` (the budget-exhausted
+/// final round). The runtime gate is the schema's `allowed_values: {3}`
+/// — payload_consistency cannot express `<3 reject` (no lt/not in the
+/// predicate whitelist). This BDD exercises both sides of the gate
+/// through the real EventLoop runner.
+#[test]
+fn test_parallel_forge_round_exhaustion_gate_runtime() {
+    let yaml =
+        load_scenario("tests/scenarios/parallel_forge_round_exhaustion_gate_runtime.yml");
+    run_workflow_guard_scenario(yaml);
+}
+
 #[test]
 fn test_review_passed_while_wave_open() {
     let yaml = load_scenario("tests/scenarios/flow_reliability/review_passed_while_wave_open.yml");

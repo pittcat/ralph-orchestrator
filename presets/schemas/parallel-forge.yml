@@ -473,6 +473,17 @@ schemas:
       - correction_round
       - verification_log_path
     payload: json_object
+    # Post-review fix (#2): the FINAL settled is only meaningful at
+    # the budget-exhausted round. Earlier rounds are intermediate
+    # forge.correction.requested/done; emitting final settled at
+    # round 0..2 would prematurely hand off to the full tester and
+    # bypass the correction ladder. `allowed_values` is runtime-
+    # enforced by the event policy validator (payload_consistency
+    # cannot express "<3 reject" because the predicate whitelist
+    # lacks lt/not; allowed_values:[3] is the equivalent runtime-
+    # enforceable mechanism).
+    allowed_values:
+      correction_round: [3]
     field_docs:
       plan_key:
         meaning: Forge plan key basename.
@@ -485,7 +496,7 @@ schemas:
       correction_round:
         meaning: The final round number that exhausted the budget.
         source: forge-failure-handler correction counter.
-        fill_rule: Integer 0..3.
+        fill_rule: Must be 3 — the budget-exhausted final round. Earlier rounds (0..2) belong to forge.correction.requested/done; the FINAL settled is only valid at the exhaustion round, and runtime allowed_values enforces this.
       verification_log_path:
         meaning: Path to the final-correction verification log written by the tester.
         source: File under .ralph/forge/<plan-key>/final-correction/verification.log.

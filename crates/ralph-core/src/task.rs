@@ -197,6 +197,24 @@ impl Task {
         self.closed = None;
     }
 
+    /// Transitions the task to the closed terminal state and records
+    /// the close timestamp.
+    ///
+    /// This is the single shared "what a close writes" mutation used
+    /// by every close path (`TaskStore::close`, `close_by_key`, and
+    /// the batch settlement projection) so the close ledger shape
+    /// cannot drift between them. It deliberately does NOT touch
+    /// `started`: the decision of whether a never-started row is
+    /// defensively started first belongs to the caller's guard
+    /// (`TaskStore::close` rejects a never-started non-fix-unit;
+    /// the batch path defensively starts non-fix-units but never
+    /// fix-units). Fix-unit rows must always be closed with
+    /// `started` left untouched.
+    pub fn mark_closed(&mut self) {
+        self.status = TaskStatus::Closed;
+        self.closed = Some(chrono::Utc::now().to_rfc3339());
+    }
+
     /// Reopens a terminal task for further work.
     pub fn reopen(&mut self) {
         self.status = TaskStatus::Open;

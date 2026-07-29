@@ -142,6 +142,20 @@ the projection, and the planning hat **must not** also call
 > the projector already wrote the rows) or leave the ledger in an
 > inconsistent state. Pick one path per handoff.
 
+### Projection-Owned Batch Close（结算事件关 task）
+
+> **对偶于上一节**：当 preset 的 `state_projection.actions` 为某结算事件声明了 `close_task_batch`（典型形态：wave settle / fix settled / final correction），**该 hat 不调用 `ralph tools task close`**。runtime 投影器在结算事件 accept 后原子批量关闭；该 hat 与下游任何 hat 都不再手工关 task。
+
+- **何时走这条路径**：你的 hat instructions 声明「该事件由 runtime 原子批量关闭 task，禁止手工 close」时。
+- **agent 动作**：不调用 `ralph tools task close`。结算事件 payload 必须携带 live task IDs（`ralph tools task list` / trigger payload / `## ORCHESTRATOR CONTEXT`），runtime 接到结算事件后一次性投影；任何前置 close 都是冗余且可能与投影结果冲突。
+- **停止条件**（任一即停 emit 并报告）：
+  - IDs 缺失 / 为空 → runtime 整批拒绝。
+  - IDs 含重复 / 未知 id → runtime 整批零写拒绝（拒绝先于任何持久化）。
+  - IDs 混合 open + closed → runtime 整批拒绝（identity drift）。
+  - ID 与实际 ledger row 不一致（跨 hat 互相覆盖）→ 整批拒绝。
+- **fix-unit 例外**：结算里包含 fix-unit id（`is_fix_unit_id`）时，runtime 跳过 defensive-start、把 fix-unit row 直接 close 且保留 `started` 为 `None`（与单条 close 路径一致）。不要为了「补 started」去手工 start fix-unit——会与单条 close 路径产生 ledger 分叉。
+- **OPAC Precheck (zero-write)**：结算事件 emit 前先 `ralph emit ... --policy-check`（同源校验，零写盘），同 always-injected `ralph-tools-opac` Precheck 段。
+
 > **OPAC Precheck (zero-write)**: 任何 `task add` / `ensure` / `start` / `close` / `fail` / `reopen` 前先跑 `ralph tools task verify <verb>`（与正式写盘同源校验，零写盘）。三字段一致性走 `ralph tools task verify-emit-bridge --task-id ID --task-key KEY --step STEP`，详见 always-injected `ralph-tools-opac` Precheck 段。
 >
 > **OPAC Confirm (close 后)**: agent context 下 `task close` 成功后若 hat-channel 无 completion topic，CLI 会 stderr 输出 `close_without_completion_emit` warning，含 `expected_topics` + `next_step`——**忽略它等于进入 stall 30s 等待 rescue**。详见 `ralph-tools-opac` Confirm 段。

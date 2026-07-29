@@ -677,8 +677,7 @@ impl TaskStore {
             return None;
         }
         if let Some(task) = self.get_mut(id) {
-            task.status = TaskStatus::Closed;
-            task.closed = Some(chrono::Utc::now().to_rfc3339());
+            task.mark_closed();
             return self.get(id);
         }
         None
@@ -716,8 +715,7 @@ impl TaskStore {
             return None;
         }
         if let Some(task) = self.get_by_key_mut(key) {
-            task.status = TaskStatus::Closed;
-            task.closed = Some(chrono::Utc::now().to_rfc3339());
+            task.mark_closed();
             return self.get_by_key(key);
         }
         None

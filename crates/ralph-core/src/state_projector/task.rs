@@ -829,25 +829,32 @@ pub(crate) fn project_close_task_batch(
     //
     // U5 of plan 2026-07-29-005 (G9, R14, AE-G5): the batch close
     // runs on a staging clone of `store.tasks` so any per-id failure
-    // (e.g. `TaskStore::close` returning `None` because of the
-    // P0-4 `started.is_none()` guard) leaves the on-disk ledger and
-    // `ctx.tasks_cache` byte-identical to the pre-call state. The
-    // clone is cheap (a `Vec<Task>` per-row copy) and only ever
-    // reaches `persist` when every id closes successfully.
+    // leaves the on-disk ledger and `ctx.tasks_cache` byte-identical
+    // to the pre-call state. The clone is cheap (a `Vec<Task>`
+    // per-row copy) and only ever reaches `persist` when every id
+    // closes successfully.
+    //
+    // Post-review fix (#4): the close mutation is shared via
+    // `Task::mark_closed`, and the defensive-start guard mirrors
+    // `TaskStore::close`'s fix-unit exemption — a fix-unit id is
+    // closed with `started` left untouched (`None`), exactly as the
+    // single-row `project_close_task` path does. Previously this loop
+    // called `row.start()` unconditionally, which wrote
+    // `started=Some(now)` for never-started fix-units and produced a
+    // different ledger than the single-close path for the same task.
     let mut staging = store.tasks().to_vec();
     for id in &task_ids {
         let target = staging.iter_mut().find(|t| t.id == *id);
         let Some(row) = target else {
             return Err(format!("close_task_batch: failed to close task_id '{id}'"));
         };
-        if row.started.is_none() {
+        // Defensive start (P0-4) for never-started rows, EXCEPT
+        // fix-units: `is_fix_unit_id` mirrors `TaskStore::close`'s
+        // guard so fix-unit rows keep `started=None` on both paths.
+        if row.started.is_none() && !is_fix_unit_id(&row.id) {
             row.start();
         }
-        // Mirror `TaskStore::close`'s logic: a fix-unit id is exempt
-        // from the started.is_none() guard, so `row.start()` above is
-        // a no-op for fix-units but the close still proceeds.
-        row.status = crate::task::TaskStatus::Closed;
-        row.closed = Some(chrono::Utc::now().to_rfc3339());
+        row.mark_closed();
     }
     // Commit: only NOW do we touch the live store + disk + cache.
     store.replace_tasks_for_atomic_batch(staging);
@@ -1147,6 +1154,95 @@ mod tests {
         let err = project_close_task(&mut ctx, &bogus, "task_id", Some("step"))
             .expect_err("unknown task_key must surface task_not_found");
         assert!(err.contains("task_not_found"), "got: {err}");
+    }
+
+    // Post-review fix (#4): the batch settlement path must close
+    // fix-unit rows with `started` left untouched (`None`), exactly
+    // like the single-row `project_close_task` path above. Before
+    // the fix, `project_close_task_batch` called `row.start()`
+    // unconditionally and wrote `started=Some(now)` for never-started
+    // fix-units, so the same task produced a different ledger
+    // depending on whether it was closed singly or in a batch. This
+    // test seeds two never-started fix-units, batch-closes them via
+    // `forge.wave.settled`, and asserts the close succeeded while
+    // `started` stayed `None` on both rows.
+    #[test]
+    fn batch_close_fix_units_keeps_started_none() {
+        use crate::state_projector::ProjectionContext;
+        use crate::state_projector::StateProjectionConfig;
+
+        let dir = tempdir().unwrap();
+        let mut ctx = ProjectionContext::new(dir.path(), StateProjectionConfig::default(), false)
+            .with_current_loop_id("loop-A");
+        // Pin a single ts so the ensure() ids and the payload ids
+        // below are byte-identical (see p0_3 for the drift rationale).
+        let ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let fix01_id = Task::fix_unit_task_id("p", 1, 1, Some(ts));
+        let fix02_id = Task::fix_unit_task_id("p", 1, 2, Some(ts));
+
+        // Fix-units are created without an intervening start, by
+        // coordinator design.
+        project_ensure_task(
+            &mut ctx,
+            &serde_json::json!({
+                "task_id": fix01_id,
+                "task_key": "ce-executor:p:fix-01:u1",
+                "plan_name": "p",
+            }),
+            "task_key",
+            None,
+        )
+        .unwrap();
+        project_ensure_task(
+            &mut ctx,
+            &serde_json::json!({
+                "task_id": fix02_id,
+                "task_key": "ce-executor:p:fix-02:u2",
+                "plan_name": "p",
+            }),
+            "task_key",
+            None,
+        )
+        .unwrap();
+
+        // Sanity: both rows exist and were never started.
+        {
+            let tasks = ctx.task_snapshot().0;
+            assert_eq!(tasks.len(), 2);
+            for t in tasks {
+                assert!(t.started.is_none(), "fix-unit must start life unstarted");
+            }
+        }
+
+        // Batch-close both via the settlement projection.
+        let payload = serde_json::json!({
+            "wave_id": "w1",
+            "settled_task_ids": [fix01_id.clone(), fix02_id.clone()],
+        });
+        project_close_task_batch(&mut ctx, &payload, "settled_task_ids")
+            .expect("batch close of fix-units must succeed");
+
+        // Both closed, and crucially `started` is still `None`
+        // (the single-close parity this fix restores).
+        let tasks = ctx.task_snapshot().0;
+        assert_eq!(tasks.len(), 2);
+        for t in tasks {
+            assert_eq!(
+                t.status,
+                crate::task::TaskStatus::Closed,
+                "fix-unit {} must be closed by the batch",
+                t.id
+            );
+            assert!(
+                t.started.is_none(),
+                "fix-unit {} must keep started=None after batch close (was: written by unconditional start())",
+                t.id
+            );
+            assert!(t.closed.is_some(), "fix-unit {} must record a close ts", t.id);
+        }
     }
 
     #[test]

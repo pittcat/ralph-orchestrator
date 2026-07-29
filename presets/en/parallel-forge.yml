@@ -104,6 +104,7 @@ mechanism:
           - forge.correction.done
           - forge.wave.settled
           - forge.exec.development.done
+          - forge.final.correction.settled
           - forge.plan.blocked
           - work.failed
         transition_emits:
@@ -232,6 +233,30 @@ event_loop:
       - {hat_id: inspector, topic: forge.report.done}
       - {hat_id: executor, topic: LOOP_COMPLETE}
       - {hat_id: reviewer, topic: LOOP_COMPLETE}
+    payload_consistency:
+      # Post-review fix (#5): `verified_base_commit` is documented as a
+      # 40-char git SHA but was only `required_fields`-checked (field
+      # present), so an EMPTY string passed and a lazy worktree could
+      # fan out the next wave from an empty base, breaking the S5
+      # trust boundary. No format/length predicate exists in the
+      # whitelist (eq/ne/gt/gte/exists/non_empty), so we gate the
+      # positively-detectable violation: a base that IS the empty
+      # string. `eq: ""` fires (Hit => violation) exactly when the
+      # producer emits an empty base; a real SHA misses and passes.
+      enabled: true
+      rules:
+        - id: parallel-forge-prepare-empty-base
+          topic: forge.wave.prepare
+          when: {field: verified_base_commit, eq: ""}
+          message: "verified_base_commit must be a non-empty commit SHA; an empty base breaks the lazy-worktree trust boundary."
+        - id: parallel-forge-worktrees-ready-empty-base
+          topic: forge.wave.worktrees.ready
+          when: {field: verified_base_commit, eq: ""}
+          message: "verified_base_commit must be a non-empty commit SHA; an empty base breaks the lazy-worktree trust boundary."
+        - id: parallel-forge-settled-empty-base
+          topic: forge.wave.settled
+          when: {field: verified_base_commit, eq: ""}
+          message: "verified_base_commit must be a non-empty commit SHA; the next wave's worktree base is taken from this value."
 
 cli:
   backend: auto
@@ -612,15 +637,28 @@ hats:
 
       ### Final correction (3 rounds exhausted)
 
-      When the round counter is 3 and the fingerprint is new (or the
-      evidence is independently sufficient), score per the
-      `fail-confidence-rubric` template. Confidence ≥90 +
-      coverage ≥75 + accepted precheck → `work.failed` with
-      `dead_end_confidence` / `dead_end_evidence_*` payload. Otherwise
-      keep retrying — never re-emit round 4.
-      7. Emit exactly one `work.failed` with `reason`, `plan_path`,
-         `context_artifact_path`, `forge_artifact_root`, `plan_key`.
-      8. Do not re-dispatch workers.
+      When the round counter is 3 the budget is exhausted. You have
+      exactly one decision to make, and the two terminal emits are
+      mutually exclusive (at most one of them per activation):
+
+      - **Hand off to the final full tester** (preferred path when
+        the failure is not a dead-end): emit exactly one
+        `forge.final.correction.settled` with `correction_round: 3`
+        + `plan_key` + `wave_id` + `verification_log_path`. The
+        `correction_round` field is runtime-validated to be exactly
+        `3` (the budget-exhausted final round); emitting it at an
+        earlier round is rejected. Use `ralph tools task list` (or
+        the trigger payload) for the live `wave_id` / `plan_key`.
+      - **Dead-end escape** (only when the fail-confidence-rubric
+        scores confidence ≥90 + coverage ≥75 AND the dead-end
+        precheck passes): emit exactly one `work.failed` with
+        `dead_end_confidence` + `dead_end_evidence_*` + `reason` +
+        `plan_path` + `context_artifact_path` + `forge_artifact_root`
+        + `plan_key`. Do NOT also emit `forge.final.correction.settled`.
+
+      9. Never re-emit round 4. Never emit both terminal events for
+         the same exhaustion. After either terminal emit, do not
+         re-dispatch workers.
 
   executor:
     name: "Executor"

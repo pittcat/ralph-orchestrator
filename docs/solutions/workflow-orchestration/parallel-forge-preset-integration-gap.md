@@ -82,15 +82,8 @@ preset 端从未接到新机制。其它 preset 不依赖这些 pointer,看不�
   `PARALLEL_FORGE_TEMPLATES` / `build.rs::copy_artifact_templates` /
   `README.md` 同步注册。`materialize --plan-key` 实测产出 10 个
   文件。
-- **U7**(BDD): 新增 `parallel_forge_two_wave_settlement_runtime.yml`
-  (S6) 与 `parallel_forge_correction_runtime.yml`(S7),均用
-  `run_workflow_guard_scenario` 真实 EventLoop 跑(禁止
-  `run_scenario` stub)。S6 锁两波 settlement 各出现一次;S7 锁
-  `work.failed` absent + correction 路径走通。
-- **U8**(文档 + skill): `AGENTS.md` ≡ `CLAUDE.md` 中 parallel-forge
-  描述从「旧 14-step」改为「静态 wave + per-wave settlement +
-  development_loop」;`docs/solutions/` 新增本文档。skill 注入文
-  不动(`plan-id / preset 案例去计划化`)。
+- **U7**(BDD): 新增/改写 `parallel_forge_*.yml`(S6、S7 既有)+ 新增 `parallel_forge_round_exhaustion_gate_runtime.yml`(S11,#2 三轮终态门禁 e2e),均用 `run_workflow_guard_scenario` 真实 EventLoop 跑(禁止 `run_scenario` stub)。S11 锁 `forge.final.correction.settled` 只接受 `correction_round=3`(round=1 拒绝、round=3 接受,事件计数=1);S6 锁两波 settlement 各出现一次;S7 锁 `work.failed` absent + correction 路径走通。
+- **U8**(文档 + skill): `AGENTS.md` ≡ `CLAUDE.md` 中 parallel-forge 描述从「旧 14-step」改为「静态 wave + per-wave settlement + development_loop」;`docs/solutions/` 新增本文档。通用 `ralph-tools-tasks.md` 新增「Projection-Owned Batch Close」段(对偶 Projection-Owned Task Creation),沉淀 fix-unit 豁免等通用规则。
 
 ## 复盘
 

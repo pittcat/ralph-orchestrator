@@ -3063,6 +3063,39 @@ mod tests {
         }
     }
 
+    // Post-review fix (#2): the FINAL settled event is only valid at
+    // the budget-exhausted round. The runtime-enforceable mechanism
+    // for "exactly 3" is `allowed_values:[3]` on the schema (the
+    // payload_consistency whitelist lacks lt/not, so `<3 reject`
+    // cannot be expressed as a payload_consistency rule). This
+    // regression test loads the embedded parallel-forge preset and
+    // asserts the schema SSOT declares the gate; pulling it out
+    // reverts to the advisory-only `field_docs.fill_rule` state
+    // where agents could emit `correction_round: 0..2` and have it
+    // accepted by the runtime.
+    #[test]
+    fn test_parallel_forge_final_correction_settled_correction_round_gate() {
+        let preset = get_preset("parallel-forge").expect("parallel-forge preset must exist");
+        let config =
+            RalphConfig::parse_yaml(preset.content).expect("parallel-forge YAML should parse");
+        let allowed = config
+            .event_loop
+            .event_policy
+            .as_ref()
+            .and_then(|p| p.schemas.get("forge.final.correction.settled"))
+            .and_then(|s| s.allowed_values.get("correction_round"))
+            .cloned()
+            .expect(
+                "forge.final.correction.settled schema must declare \
+                 allowed_values.correction_round == [3] (post-review fix #2)",
+            );
+        assert_eq!(
+            allowed,
+            vec![serde_json::json!(3)],
+            "correction_round must be restricted to [3] for the final settled"
+        );
+    }
+
     fn collect_required_field_docs(
         preset: &RalphConfig,
         topic: &str,

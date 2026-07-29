@@ -1,0 +1,88 @@
+# Plan 2026-07-29-005 U7 / S11 (#2): the FINAL correction settled event
+# is only valid at the budget-exhausted round. The runtime gate is the
+# schema's `allowed_values: {correction_round: [3]}` on
+# `forge.final.correction.settled` (payload_consistency cannot express
+# `<3 reject` because the predicate whitelist lacks lt/not). Asserts:
+#
+#   - emitting the settled event with correction_round=1 is rejected
+#     by the event policy validator (absent + correction_block with
+#     reason_code_prefix "policy:");
+#   - emitting it with correction_round=3 is accepted.
+#
+# run_workflow_guard_scenario (real EventLoop runner). Locks the
+# external behavior of the post-review fix end-to-end.
+
+name: pf_final_correction_round_gate
+description: forge.final.correction.settled only accepts correction_round=3; earlier rounds are rejected
+
+config:
+  prompt_file: PROMPT.md
+  max_iterations: 3
+  hats:
+    failure-handler:
+      subscribes_to:
+        - forge.verification.failed
+      publishes:
+        - forge.final.correction.settled
+      default_publishes: forge.final.correction.settled
+    tester:
+      subscribes_to:
+        - forge.final.correction.settled
+      publishes:
+        - forge.full.verified
+  event_loop:
+    execution_mode: isolated
+    starting_event: "forge.verification.failed"
+    completion_promise: "LOOP_COMPLETE"
+    event_policy:
+      enabled: true
+      mode: enforce
+      on_violation: reject_with_resume
+      schemas:
+        forge.final.correction.settled:
+          required_fields:
+            - plan_key
+            - wave_id
+            - correction_round
+            - verification_log_path
+          payload: json_object
+          allowed_values:
+            correction_round: [3]
+
+mock_responses:
+  # iter 1: failure-handler emits final settled at the wrong round
+  # (correction_round=1). The allowed_values gate rejects it; the
+  # tester never wakes; a correction_block is queued.
+  - hat: failure-handler
+    text: |
+      <event topic="forge.final.correction.settled">
+      {"plan_key":"pf-r3-p","wave_id":"w1","correction_round":1,"verification_log_path":".ralph/forge/pf-r3-p/final/verification.log"}
+      </event>
+  # iter 2: same wrong round again — still rejected.
+  - hat: failure-handler
+    text: |
+      <event topic="forge.final.correction.settled">
+      {"plan_key":"pf-r3-p","wave_id":"w1","correction_round":1,"verification_log_path":".ralph/forge/pf-r3-p/final/verification.log"}
+      </event>
+  # iter 3: failure-handler emits the correct round=3 — accepted.
+  - hat: failure-handler
+    text: |
+      <event topic="forge.final.correction.settled">
+      {"plan_key":"pf-r3-p","wave_id":"w1","correction_round":3,"verification_log_path":".ralph/forge/pf-r3-p/final/verification.log"}
+      </event>
+
+expected:
+  iterations: 3
+  # Only the round=3 event makes it to the bus. The two round=1
+  # attempts are rejected by the allowed_values gate, so the topic
+  # count is exactly 1 (not 3). The gate is the single source of
+  # truth — there is no other constraint here that would mask
+  # the count.
+  events:
+    - topic: forge.final.correction.settled
+  event_topic_counts:
+    - topic: forge.final.correction.settled
+      count: 1
+  absent_events:
+    - topic: work.failed
+  completion: false

@@ -133,16 +133,25 @@ impl Default for PrecheckOnFail {
 /// existing schema entries are left untouched.
 ///
 /// 2026-07-29-006 plan U4 (R3, S3): when the guarded topic `<X>`
-/// already has a schema with a non-empty `required_fields` list,
-/// the synthesized `<X>.proposed` schema inherits `payload` and
-/// `required_fields` so the producer emit path catches missing
-/// fields BEFORE the event is written to disk. The pre-U4 shell
-/// was `EventSchema { payload: JsonObject, ..Default::default() }`,
+/// already has a schema, the synthesized `<X>.proposed` schema
+/// **unconditionally** inherits its `payload` and `required_fields`
+/// so the producer emit path catches missing fields BEFORE the
+/// event is written to disk. The pre-U4 shell was
+/// `EventSchema { payload: JsonObject, ..Default::default() }`,
 /// which meant a guard like `dead_end_confidence >= 90` never
 /// fired on the proposed path — the bare payload was accepted,
 /// the gate then rejected it with `X.rejected` for the same
 /// reason, and every retry burned budget on a check the producer
 /// should have caught in the first place.
+///
+/// Inheritance is NOT gated on `required_fields` being non-empty
+/// (post-review fix): conditioning on a non-empty list forced the
+/// default `JsonObject` shell whenever the guarded schema had an
+/// empty `required_fields`, which silently rewrote a guarded
+/// `payload: string` (or any non-JSON shape) into `JsonObject` and
+/// rejected otherwise-legal payloads on the proposed path. The
+/// default shell is now used ONLY when the guarded topic has no
+/// schema at all.
 ///
 /// Inheritance scope is deliberately narrow (D3): only
 /// `payload` + `required_fields` flow from the guarded schema to
@@ -169,18 +178,20 @@ pub fn inject_precheck_event_schemas(config: &mut crate::config::RalphConfig, to
 
     let proposed = format!("{topic}.proposed");
     schemas.entry(proposed).or_insert_with(|| {
-        // 2026-07-29-006 U4 (R3): copy guarded `payload` +
-        // `required_fields` so missing-field validation runs on
-        // the proposed path. When the guarded topic has no
-        // schema (the common case for hat-derivable topics) the
-        // default shell is used — the existing pre-U4 behaviour.
+        // 2026-07-29-006 U4 (R3) + post-review fix: whenever the
+        // guarded topic has a schema, copy its `payload` +
+        // `required_fields` unconditionally so missing-field
+        // validation runs on the proposed path AND a non-JSON
+        // guarded payload (e.g. `string`) is not silently rewritten
+        // to `JsonObject`. The default shell is reserved for the
+        // no-guarded-schema case (the common hat-derivable topic).
         match &guarded_shape {
-            Some((payload, required_fields)) if !required_fields.is_empty() => EventSchema {
+            Some((payload, required_fields)) => EventSchema {
                 payload: payload.clone().or(Some(PayloadType::JsonObject)),
                 required_fields: required_fields.clone(),
                 ..Default::default()
             },
-            _ => EventSchema {
+            None => EventSchema {
                 payload: Some(PayloadType::JsonObject),
                 ..Default::default()
             },
@@ -452,12 +463,20 @@ mod inject_precheck_event_schemas_tests {
         topic: &str,
         required_fields: Vec<&str>,
     ) -> crate::config::RalphConfig {
+        config_with_guarded_schema_payload(topic, Some(PayloadType::JsonObject), required_fields)
+    }
+
+    fn config_with_guarded_schema_payload(
+        topic: &str,
+        payload: Option<PayloadType>,
+        required_fields: Vec<&str>,
+    ) -> crate::config::RalphConfig {
         let mut cfg = crate::config::RalphConfig::default();
         let mut schemas = HashMap::new();
         schemas.insert(
             topic.to_string(),
             EventSchema {
-                payload: Some(PayloadType::JsonObject),
+                payload,
                 required_fields: required_fields.into_iter().map(String::from).collect(),
                 ..Default::default()
             },
@@ -497,15 +516,60 @@ mod inject_precheck_event_schemas_tests {
         );
     }
 
-    /// Empty `required_fields` falls back to the default shell —
-    /// no spurious inheritance that would have rejected legal
-    /// payloads.
+    /// A guarded schema with empty `required_fields` still inherits
+    /// its `payload` to the proposed entry (post-review fix). The
+    /// pre-fix behaviour forced the default `JsonObject` shell here,
+    /// which is a no-op for a `JsonObject` guarded payload but
+    /// silently rewrote any non-JSON shape.
     #[test]
-    fn inject_proposed_uses_default_shell_when_guarded_has_no_required() {
+    fn inject_proposed_inherits_payload_when_guarded_has_no_required() {
         let mut cfg = config_with_guarded_schema("work.failed", vec![]);
         inject_precheck_event_schemas(&mut cfg, "work.failed");
         let schemas = &cfg.event_loop.event_policy.as_ref().unwrap().schemas;
         let proposed = schemas.get("work.failed.proposed").expect("proposed");
+        assert_eq!(proposed.required_fields, Vec::<String>::new());
+        assert_eq!(
+            proposed.payload,
+            Some(PayloadType::JsonObject),
+            "guarded payload must be inherited even with empty required_fields"
+        );
+    }
+
+    /// Boundary that locked the pre-fix bug: a guarded `payload: string`
+    /// with empty `required_fields` must NOT be rewritten to
+    /// `JsonObject` on the proposed path. Before the fix the
+    /// `!required_fields.is_empty()` guard dropped this into the
+    /// default shell, rejecting otherwise-legal text payloads.
+    #[test]
+    fn inject_proposed_preserves_non_json_guarded_payload() {
+        let mut cfg =
+            config_with_guarded_schema_payload("work.failed", Some(PayloadType::String), vec![]);
+        inject_precheck_event_schemas(&mut cfg, "work.failed");
+        let schemas = &cfg.event_loop.event_policy.as_ref().unwrap().schemas;
+        let proposed = schemas.get("work.failed.proposed").expect("proposed");
+        assert_eq!(
+            proposed.payload,
+            Some(PayloadType::String),
+            "non-JSON guarded payload must be inherited, not rewritten to JsonObject"
+        );
+        assert_eq!(proposed.required_fields, Vec::<String>::new());
+    }
+
+    /// When the guarded topic has NO schema at all, the proposed
+    /// entry falls back to the default `JsonObject` shell (the
+    /// common hat-derivable-topic case).
+    #[test]
+    fn inject_proposed_uses_default_shell_when_guarded_schema_absent() {
+        let mut cfg = crate::config::RalphConfig::default();
+        cfg.event_loop.event_policy = Some(EventPolicyConfig {
+            enabled: true,
+            schemas: HashMap::new(),
+            ..EventPolicyConfig::default()
+        });
+        inject_precheck_event_schemas(&mut cfg, "work.failed");
+        let schemas = &cfg.event_loop.event_policy.as_ref().unwrap().schemas;
+        let proposed = schemas.get("work.failed.proposed").expect("proposed");
+        assert_eq!(proposed.payload, Some(PayloadType::JsonObject));
         assert_eq!(proposed.required_fields, Vec::<String>::new());
     }
 
