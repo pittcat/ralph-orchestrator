@@ -1188,7 +1188,15 @@ mod tests {
     /// `on_any_of` on `report`; exec_wave unit topics and
     /// `work.failed` are non-transitions; `exec.wave.complete` and
     /// `exec.wave.failed` route to distinct branches
-    /// (`exec_finalize` vs `exec_failure`).
+    /// Plan 2026-07-29-001 U7: the parallel-forge flow now uses
+    /// a `development_loop` step (kind: loop) instead of the
+    /// legacy single-shot `exec_wave` / `exec_finalize` /
+    /// `exec_failure` triple. The planning handoff chain still
+    /// reaches `development_loop` deterministically (R1);
+    /// `forge.plan.blocked` still branches to `report` (R2);
+    /// and the loop's `transition_emits` (`forge.exec.development.done`,
+    /// `work.failed`) advance to `full_verify` / `report` exactly
+    /// once the final wave settles.
     #[test]
     fn test_parallel_forge_adopts_declared_14step_flow_authority() {
         use ralph_core::event_loop::recover_current_plan_step;
@@ -1197,7 +1205,7 @@ mod tests {
         let config = RalphConfig::parse_yaml(preset.content).expect("YAML parses");
 
         // R1: planning handoff steps advance explicitly (not via
-        // positional fallback).
+        // positional fallback) into the development loop.
         assert_eq!(
             recover_current_plan_step(
                 &config,
@@ -1208,11 +1216,11 @@ mod tests {
                     "forge.worktrees.ready",
                 ],
             ),
-            "exec_wave",
-            "R1: full planning handoff chain must reach exec_wave"
+            "development_loop",
+            "R1: full planning handoff chain must reach development_loop"
         );
 
-        // R2: forge.plan.blocked branches to report (not exec_wave).
+        // R2: forge.plan.blocked branches to report (not development_loop).
         let flow = config
             .mechanism
             .as_ref()
@@ -1234,28 +1242,29 @@ mod tests {
             "R2: forge.plan.blocked must advance to report"
         );
 
-        // R4: exec.wave.complete and exec.wave.failed route to
-        // distinct branches.
-        let exec_finalize = flow
+        // R4 / R5 (U7): the development_loop's `transition_emits`
+        // is the single advance path. `forge.exec.development.done`
+        // exits the loop into `full_verify`, and `work.failed`
+        // exits the loop into `report`.
+        let dev_loop = flow
             .steps
             .iter()
-            .find(|s| s.id == "exec_finalize")
-            .expect("exec_finalize step");
-        assert_eq!(
-            exec_finalize.on.as_deref(),
-            Some("exec.wave.complete"),
-            "exec_finalize.on must be exec.wave.complete (R4)"
+            .find(|s| s.id == "development_loop")
+            .expect("development_loop step");
+        let transition_emits: Vec<String> = dev_loop.transition_emits.clone();
+        assert!(
+            transition_emits.iter().any(|s| s == "forge.exec.development.done"),
+            "development_loop.transition_emits must include forge.exec.development.done (R5); got {:?}",
+            transition_emits
         );
-        let exec_failure = flow
-            .steps
-            .iter()
-            .find(|s| s.id == "exec_failure")
-            .expect("exec_failure step");
-        assert_eq!(
-            exec_failure.on.as_deref(),
-            Some("exec.wave.failed"),
-            "exec_failure.on must be exec.wave.failed (R4)"
+        assert!(
+            transition_emits.iter().any(|s| s == "work.failed"),
+            "development_loop.transition_emits must include work.failed (R7); got {:?}",
+            transition_emits
         );
+
+        // R5: full success path: planning chain → development_loop
+        // (transition) → full_verify → audit → report → plan_end.
         assert_eq!(
             recover_current_plan_step(
                 &config,
@@ -1264,11 +1273,7 @@ mod tests {
                     "forge.plan.ready",
                     "forge.concurrency.approved",
                     "forge.worktrees.ready",
-                    "exec.wave.complete",
                     "forge.exec.development.done",
-                    "forge.units.reviewed",
-                    "forge.integration.done",
-                    "forge.incremental.verified",
                     "forge.full.verified",
                     "forge.audit.done",
                     "forge.report.done",
@@ -1285,7 +1290,7 @@ mod tests {
                     "forge.plan.ready",
                     "forge.concurrency.approved",
                     "forge.worktrees.ready",
-                    "exec.wave.failed",
+                    "work.failed",
                     "forge.report.done",
                 ],
             ),
@@ -1307,20 +1312,28 @@ mod tests {
             "plan_end must be kind: terminal"
         );
 
-        // S3: exec_wave must NOT allow forge.exec.development.done
-        // (only exec_finalize does).
-        let exec_wave = flow
+        // S3 (U7): development_loop's `transition_emits` is the
+        // single advance path. Forge-side wave topics are
+        // allowed (in-scope) but only `forge.exec.development.done`
+        // and `work.failed` advance the step.
+        let dev_loop = flow
             .steps
             .iter()
-            .find(|s| s.id == "exec_wave")
-            .expect("exec_wave step");
+            .find(|s| s.id == "development_loop")
+            .expect("development_loop step");
         assert!(
-            !exec_wave
+            dev_loop
                 .allowed_emits
                 .iter()
+                .any(|t| t == "forge.wave.settled"),
+            "development_loop must allow forge.wave.settled (per-wave terminal)"
+        );
+        assert!(
+            dev_loop
+                .transition_emits
+                .iter()
                 .any(|t| t == "forge.exec.development.done"),
-            "exec_wave must NOT allow forge.exec.development.done (S3): got {:?}",
-            exec_wave.allowed_emits
+            "development_loop.transition_emits must include forge.exec.development.done (loop exit)"
         );
         assert!(
             !plan_end

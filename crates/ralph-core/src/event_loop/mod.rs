@@ -14897,7 +14897,6 @@ pub(crate) fn advance_plan_step(
     // still advances when it has truly closed.
     const NON_TRANSITION_TOPICS: &[&str] = &[
         "work.done",
-        "work.failed",
         "work.ready",
         "exec.unit.ready",
         "exec.unit.done",
@@ -16240,7 +16239,15 @@ mod flow_authority_pf_declared_14step_tests {
                             Some("await"),
                             vec!["forge.report.done"],
                             None,
-                            vec!["forge.audit.done", "forge.plan.blocked"],
+                            // U7 (plan 2026-07-29-001): plan-level
+                            // `work.failed` is now a transition.
+                            // The `report` step is the universal
+                            // funnel for terminal failures.
+                            vec![
+                                "forge.audit.done",
+                                "forge.plan.blocked",
+                                "work.failed",
+                            ],
                             None,
                         ),
                         mk(
@@ -16452,12 +16459,21 @@ mod flow_authority_pf_declared_14step_tests {
         );
     }
 
-    /// R4: work.failed stays at exec_failure (non-transition).
+    /// R4 (U7): work.failed at exec_failure is now a transition
+    /// (drives the `report` step via `on_any_of`). The legacy
+    /// non-transition contract applied only to per-unit `work.failed`
+    /// inside the exec_wave step; the plan-level `work.failed` at
+    /// exec_failure / integration must advance to keep the route
+    /// open.
     #[test]
-    fn pf_14step_work_failed_at_exec_failure_stays() {
+    fn pf_14step_work_failed_at_exec_failure_advances_to_report() {
         let cfg = parallel_forge_14step_flow();
         let next = advance_plan_step(&cfg, "exec_failure", "work.failed");
-        assert_eq!(next, None, "R4: work.failed must not advance exec_failure");
+        assert_eq!(
+            next,
+            Some("report".to_string()),
+            "R4 (U7): work.failed at exec_failure must advance → report"
+        );
     }
 
     /// R4: forge.report.done at exec_failure enters plan_end.
@@ -16544,12 +16560,18 @@ mod flow_authority_pf_declared_14step_tests {
 
     // ── R6/S6: failure-capable post-exec steps route to plan_end ────────────
 
-    /// R6: work.failed at integration stays put (non-transition).
+    /// R6 (U7): work.failed at integration is now a transition to
+    /// `report` (via `on_any_of`). The legacy non-transition
+    /// contract was relaxed for plan-level `work.failed`.
     #[test]
-    fn pf_14step_work_failed_at_integration_stays() {
+    fn pf_14step_work_failed_at_integration_advances_to_report() {
         let cfg = parallel_forge_14step_flow();
         let next = advance_plan_step(&cfg, "integration", "work.failed");
-        assert_eq!(next, None, "R6: work.failed must not advance integration");
+        assert_eq!(
+            next,
+            Some("report".to_string()),
+            "R6 (U7): work.failed at integration must advance → report"
+        );
     }
 
     /// R6: forge.report.done at integration enters plan_end.
