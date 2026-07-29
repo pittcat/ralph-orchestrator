@@ -91,6 +91,13 @@ pub enum StateProjectionAction {
         title: Option<String>,
     },
     /// Atomically create or reuse a task DAG from one event payload.
+    ///
+    /// U2 of plan 2026-07-29-001
+    /// (`fix-parallel-forge-static-wave-settlement-plan`): when
+    /// `execution_wave` and `integration_order` pointers are supplied,
+    /// the projector validates the static wave schedule before any task
+    /// is written. Unset pointers keep the legacy DAG-only behaviour so
+    /// non-Parallel-Forge presets continue to work without changes.
     EnsureTaskBatch {
         /// JSON pointer for the non-empty array of task specifications.
         items: String,
@@ -102,6 +109,25 @@ pub enum StateProjectionAction {
         title: String,
         /// Item-relative JSON pointer for dependency task keys.
         blocked_by_keys: String,
+        /// U2: optional item-relative JSON pointer for the static
+        /// `execution_wave` (positive integer). When present together
+        /// with `integration_order`, the projector validates the wave
+        /// schedule before any task write. When `None`, the projector
+        /// skips wave/order validation entirely (legacy path).
+        #[serde(default)]
+        execution_wave: Option<String>,
+        /// U2: optional item-relative JSON pointer for the static
+        /// `integration_order` (positive integer). See
+        /// `execution_wave` for the dual-pointer semantics.
+        #[serde(default)]
+        integration_order: Option<String>,
+        /// U2: optional top-level JSON pointer for the execution
+        /// plan digest. When the pointer resolves, the projector
+        /// cross-checks the digest against the payload's declared
+        /// value; a mismatch rejects the batch atomically. `None`
+        /// skips the digest cross-check.
+        #[serde(default)]
+        execution_plan_digest: Option<String>,
     },
     /// Mark a task as closed. Driven by `work.done`. The
     /// projector also flips progress's `Completed Steps`

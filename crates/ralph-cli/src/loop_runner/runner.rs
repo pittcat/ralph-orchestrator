@@ -1720,9 +1720,7 @@ async fn run_loop_impl_inner(
     // leftover redrive state (plan U4 fresh-boot exclusion). Failures
     // inside the scan are warn+continue (see the helper) so a corrupt
     // child wave can never abort loop startup.
-    if resume
-        && let (Some(bridge), Some(store)) = (&supervisor_bridge, &supervisor_store)
-    {
+    if resume && let (Some(bridge), Some(store)) = (&supervisor_bridge, &supervisor_store) {
         // Re-derive the supervisor events path (same derivation as
         // the bridge construction above).
         let supervisor_events_path = resolve_emit_events_path(

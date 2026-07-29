@@ -7002,7 +7002,10 @@ async fn test_s4_no_descriptor_is_fail_closed() {
         std::sync::Arc::new(crate::loop_runner::wave::ProductionExecutor),
     )
     .await;
-    assert_eq!(dispatched, 0, "S4: no worker may spawn without a descriptor");
+    assert_eq!(
+        dispatched, 0,
+        "S4: no worker may spawn without a descriptor"
+    );
 
     // A3: fail-close records `slot_never_started` so the slot leaves
     // Pending (and therefore leaves the boot pending list). A silent
@@ -7649,35 +7652,79 @@ impl ralph_core::supervisor::SupervisorStore for PersistFailingSupervisorStore {
         ))
     }
 
-    fn register_wave(&self, idempotency_key: &str, kind: ralph_core::supervisor::WaveKind, expected_total: u32, slot_retry_budget: u32) -> ralph_core::supervisor::SupervisorStoreResult<String> {
-        self.inner.register_wave(idempotency_key, kind, expected_total, slot_retry_budget)
+    fn register_wave(
+        &self,
+        idempotency_key: &str,
+        kind: ralph_core::supervisor::WaveKind,
+        expected_total: u32,
+        slot_retry_budget: u32,
+    ) -> ralph_core::supervisor::SupervisorStoreResult<String> {
+        self.inner
+            .register_wave(idempotency_key, kind, expected_total, slot_retry_budget)
     }
 
-    fn enqueue_wave(&self, idempotency_key: &str, kind: ralph_core::supervisor::WaveKind, expected_total: u32, slot_retry_budget: u32) -> ralph_core::supervisor::SupervisorStoreResult<String> {
-        self.inner.enqueue_wave(idempotency_key, kind, expected_total, slot_retry_budget)
+    fn enqueue_wave(
+        &self,
+        idempotency_key: &str,
+        kind: ralph_core::supervisor::WaveKind,
+        expected_total: u32,
+        slot_retry_budget: u32,
+    ) -> ralph_core::supervisor::SupervisorStoreResult<String> {
+        self.inner
+            .enqueue_wave(idempotency_key, kind, expected_total, slot_retry_budget)
     }
 
-    fn try_dispatch_next(&self, max_concurrent_workers: u32) -> ralph_core::supervisor::SupervisorStoreResult<Option<(String, u32)>> {
+    fn try_dispatch_next(
+        &self,
+        max_concurrent_workers: u32,
+    ) -> ralph_core::supervisor::SupervisorStoreResult<Option<(String, u32)>> {
         self.inner.try_dispatch_next(max_concurrent_workers)
     }
 
-    fn release_slot_dispatch(&self, wave_id: &str, slot_index: u32, outcome: ralph_core::supervisor::DispatchOutcome) -> ralph_core::supervisor::SupervisorStoreResult<()> {
-        self.inner.release_slot_dispatch(wave_id, slot_index, outcome)
+    fn release_slot_dispatch(
+        &self,
+        wave_id: &str,
+        slot_index: u32,
+        outcome: ralph_core::supervisor::DispatchOutcome,
+    ) -> ralph_core::supervisor::SupervisorStoreResult<()> {
+        self.inner
+            .release_slot_dispatch(wave_id, slot_index, outcome)
     }
 
-    fn bind_worktree(&self, wave_id: &str, slot_index: u32, binding: ralph_core::supervisor::SlotResource) -> ralph_core::supervisor::SupervisorStoreResult<()> {
+    fn bind_worktree(
+        &self,
+        wave_id: &str,
+        slot_index: u32,
+        binding: ralph_core::supervisor::SlotResource,
+    ) -> ralph_core::supervisor::SupervisorStoreResult<()> {
         self.inner.bind_worktree(wave_id, slot_index, binding)
     }
 
-    fn record_slot_result(&self, wave_id: &str, slot_index: u32, content_hash: &str, event_count: usize) -> ralph_core::supervisor::SupervisorStoreResult<()> {
-        self.inner.record_slot_result(wave_id, slot_index, content_hash, event_count)
+    fn record_slot_result(
+        &self,
+        wave_id: &str,
+        slot_index: u32,
+        content_hash: &str,
+        event_count: usize,
+    ) -> ralph_core::supervisor::SupervisorStoreResult<()> {
+        self.inner
+            .record_slot_result(wave_id, slot_index, content_hash, event_count)
     }
 
-    fn record_slot_failure(&self, wave_id: &str, slot_index: u32, reason: &str) -> ralph_core::supervisor::SupervisorStoreResult<()> {
+    fn record_slot_failure(
+        &self,
+        wave_id: &str,
+        slot_index: u32,
+        reason: &str,
+    ) -> ralph_core::supervisor::SupervisorStoreResult<()> {
         self.inner.record_slot_failure(wave_id, slot_index, reason)
     }
 
-    fn slot_failure_reason(&self, wave_id: &str, slot_index: u32) -> ralph_core::supervisor::SupervisorStoreResult<Option<String>> {
+    fn slot_failure_reason(
+        &self,
+        wave_id: &str,
+        slot_index: u32,
+    ) -> ralph_core::supervisor::SupervisorStoreResult<Option<String>> {
         self.inner.slot_failure_reason(wave_id, slot_index)
     }
 
@@ -7685,98 +7732,196 @@ impl ralph_core::supervisor::SupervisorStore for PersistFailingSupervisorStore {
         self.inner.cancel_wave(wave_id)
     }
 
-    fn record_slot_pid(&self, wave_id: &str, slot_index: u32, pid: u32) -> ralph_core::supervisor::SupervisorStoreResult<()> {
+    fn record_slot_pid(
+        &self,
+        wave_id: &str,
+        slot_index: u32,
+        pid: u32,
+    ) -> ralph_core::supervisor::SupervisorStoreResult<()> {
         self.inner.record_slot_pid(wave_id, slot_index, pid)
     }
 
-    fn pid_for_slot(&self, wave_id: &str, slot_index: u32) -> ralph_core::supervisor::SupervisorStoreResult<Option<u32>> {
+    fn pid_for_slot(
+        &self,
+        wave_id: &str,
+        slot_index: u32,
+    ) -> ralph_core::supervisor::SupervisorStoreResult<Option<u32>> {
         self.inner.pid_for_slot(wave_id, slot_index)
     }
 
-    fn fan_in_status(&self, wave_id: &str) -> ralph_core::supervisor::SupervisorStoreResult<ralph_core::supervisor::WaveSnapshot> {
+    fn fan_in_status(
+        &self,
+        wave_id: &str,
+    ) -> ralph_core::supervisor::SupervisorStoreResult<ralph_core::supervisor::WaveSnapshot> {
         self.inner.fan_in_status(wave_id)
     }
 
-    fn commit_salvage_projection(&self, wave_id: &str, receipt: &ralph_core::supervisor::ProjectionReceiptSummary) -> ralph_core::supervisor::SupervisorStoreResult<()> {
+    fn commit_salvage_projection(
+        &self,
+        wave_id: &str,
+        receipt: &ralph_core::supervisor::ProjectionReceiptSummary,
+    ) -> ralph_core::supervisor::SupervisorStoreResult<()> {
         self.inner.commit_salvage_projection(wave_id, receipt)
     }
 
-    fn record_coordination_written(&self, wave_id: &str, receipt: &ralph_core::supervisor::CoordinationReceiptSummary) -> ralph_core::supervisor::SupervisorStoreResult<()> {
+    fn record_coordination_written(
+        &self,
+        wave_id: &str,
+        receipt: &ralph_core::supervisor::CoordinationReceiptSummary,
+    ) -> ralph_core::supervisor::SupervisorStoreResult<()> {
         self.inner.record_coordination_written(wave_id, receipt)
     }
 
-    fn commit_coordination_event(&self, wave_id: &str, receipt: &ralph_core::supervisor::CoordinationReceiptSummary, terminal_phase: ralph_core::supervisor::WavePhase) -> ralph_core::supervisor::SupervisorStoreResult<()> {
-        self.inner.commit_coordination_event(wave_id, receipt, terminal_phase)
+    fn commit_coordination_event(
+        &self,
+        wave_id: &str,
+        receipt: &ralph_core::supervisor::CoordinationReceiptSummary,
+        terminal_phase: ralph_core::supervisor::WavePhase,
+    ) -> ralph_core::supervisor::SupervisorStoreResult<()> {
+        self.inner
+            .commit_coordination_event(wave_id, receipt, terminal_phase)
     }
 
     fn list_wave_ids(&self) -> ralph_core::supervisor::SupervisorStoreResult<Vec<String>> {
         self.inner.list_wave_ids()
     }
 
-    fn wave_id_for_idempotency_key(&self, idempotency_key: &str) -> ralph_core::supervisor::SupervisorStoreResult<Option<String>> {
+    fn wave_id_for_idempotency_key(
+        &self,
+        idempotency_key: &str,
+    ) -> ralph_core::supervisor::SupervisorStoreResult<Option<String>> {
         self.inner.wave_id_for_idempotency_key(idempotency_key)
     }
 
-    fn recover_active_waves(&self) -> ralph_core::supervisor::SupervisorStoreResult<Vec<ralph_core::supervisor::WaveSnapshot>> {
+    fn recover_active_waves(
+        &self,
+    ) -> ralph_core::supervisor::SupervisorStoreResult<Vec<ralph_core::supervisor::WaveSnapshot>>
+    {
         self.inner.recover_active_waves()
     }
 
-    fn list_worktree_paths(&self, wave_id: &str) -> ralph_core::supervisor::SupervisorStoreResult<Vec<ralph_core::supervisor::SlotResource>> {
+    fn list_worktree_paths(
+        &self,
+        wave_id: &str,
+    ) -> ralph_core::supervisor::SupervisorStoreResult<Vec<ralph_core::supervisor::SlotResource>>
+    {
         self.inner.list_worktree_paths(wave_id)
     }
 
-    fn get_slot_resource(&self, wave_id: &str, slot_index: u32) -> ralph_core::supervisor::SupervisorStoreResult<Option<ralph_core::supervisor::SlotResource>> {
+    fn get_slot_resource(
+        &self,
+        wave_id: &str,
+        slot_index: u32,
+    ) -> ralph_core::supervisor::SupervisorStoreResult<Option<ralph_core::supervisor::SlotResource>>
+    {
         self.inner.get_slot_resource(wave_id, slot_index)
     }
 
-    fn set_wave_phase(&self, wave_id: &str, phase: ralph_core::supervisor::WavePhase) -> ralph_core::supervisor::SupervisorStoreResult<()> {
+    fn set_wave_phase(
+        &self,
+        wave_id: &str,
+        phase: ralph_core::supervisor::WavePhase,
+    ) -> ralph_core::supervisor::SupervisorStoreResult<()> {
         self.inner.set_wave_phase(wave_id, phase)
     }
 
-    fn enqueue_compensation(&self, wave_id: &str, kind: ralph_core::supervisor::CompensationKind) -> ralph_core::supervisor::SupervisorStoreResult<()> {
+    fn enqueue_compensation(
+        &self,
+        wave_id: &str,
+        kind: ralph_core::supervisor::CompensationKind,
+    ) -> ralph_core::supervisor::SupervisorStoreResult<()> {
         self.inner.enqueue_compensation(wave_id, kind)
     }
 
-    fn take_pending_compensations(&self) -> ralph_core::supervisor::SupervisorStoreResult<Vec<(String, ralph_core::supervisor::CompensationKind)>> {
+    fn take_pending_compensations(
+        &self,
+    ) -> ralph_core::supervisor::SupervisorStoreResult<
+        Vec<(String, ralph_core::supervisor::CompensationKind)>,
+    > {
         self.inner.take_pending_compensations()
     }
 
-    fn complete_compensation(&self, wave_id: &str, kind: ralph_core::supervisor::CompensationKind, ok: bool) -> ralph_core::supervisor::SupervisorStoreResult<()> {
+    fn complete_compensation(
+        &self,
+        wave_id: &str,
+        kind: ralph_core::supervisor::CompensationKind,
+        ok: bool,
+    ) -> ralph_core::supervisor::SupervisorStoreResult<()> {
         self.inner.complete_compensation(wave_id, kind, ok)
     }
 
-    fn create_redrive_wave(&self, parent_wave_id: &str, slots: Option<&[u32]>) -> ralph_core::supervisor::SupervisorStoreResult<ralph_core::supervisor::RedriveResult> {
+    fn create_redrive_wave(
+        &self,
+        parent_wave_id: &str,
+        slots: Option<&[u32]>,
+    ) -> ralph_core::supervisor::SupervisorStoreResult<ralph_core::supervisor::RedriveResult> {
         self.inner.create_redrive_wave(parent_wave_id, slots)
     }
 
-    fn reserve_emission(&self, scope_key: &str, payload_digest: &str, expected_count: u32, count_events_on_disk: &dyn Fn(&str) -> u32) -> ralph_core::supervisor::SupervisorStoreResult<ralph_core::supervisor::EmissionReservation> {
-        self.inner.reserve_emission(scope_key, payload_digest, expected_count, count_events_on_disk)
+    fn reserve_emission(
+        &self,
+        scope_key: &str,
+        payload_digest: &str,
+        expected_count: u32,
+        count_events_on_disk: &dyn Fn(&str) -> u32,
+    ) -> ralph_core::supervisor::SupervisorStoreResult<ralph_core::supervisor::EmissionReservation>
+    {
+        self.inner.reserve_emission(
+            scope_key,
+            payload_digest,
+            expected_count,
+            count_events_on_disk,
+        )
     }
 
-    fn mark_emission_applying(&self, scope_key: &str) -> ralph_core::supervisor::SupervisorStoreResult<()> {
+    fn mark_emission_applying(
+        &self,
+        scope_key: &str,
+    ) -> ralph_core::supervisor::SupervisorStoreResult<()> {
         self.inner.mark_emission_applying(scope_key)
     }
 
-    fn mark_emission_applied(&self, scope_key: &str, applied_at_unix_secs: u64) -> ralph_core::supervisor::SupervisorStoreResult<()> {
-        self.inner.mark_emission_applied(scope_key, applied_at_unix_secs)
+    fn mark_emission_applied(
+        &self,
+        scope_key: &str,
+        applied_at_unix_secs: u64,
+    ) -> ralph_core::supervisor::SupervisorStoreResult<()> {
+        self.inner
+            .mark_emission_applied(scope_key, applied_at_unix_secs)
     }
 
-    fn mark_emission_recovery_required(&self, scope_key: &str) -> ralph_core::supervisor::SupervisorStoreResult<()> {
+    fn mark_emission_recovery_required(
+        &self,
+        scope_key: &str,
+    ) -> ralph_core::supervisor::SupervisorStoreResult<()> {
         self.inner.mark_emission_recovery_required(scope_key)
     }
 
-    fn mark_emission_failed(&self, scope_key: &str) -> ralph_core::supervisor::SupervisorStoreResult<()> {
+    fn mark_emission_failed(
+        &self,
+        scope_key: &str,
+    ) -> ralph_core::supervisor::SupervisorStoreResult<()> {
         self.inner.mark_emission_failed(scope_key)
     }
 
-    fn emission_state_for_wave_id(&self, public_wave_id: &str) -> ralph_core::supervisor::SupervisorStoreResult<Option<ralph_core::supervisor::EmissionState>> {
+    fn emission_state_for_wave_id(
+        &self,
+        public_wave_id: &str,
+    ) -> ralph_core::supervisor::SupervisorStoreResult<Option<ralph_core::supervisor::EmissionState>>
+    {
         self.inner.emission_state_for_wave_id(public_wave_id)
     }
 
-    fn adopt_legacy_emission(&self, scope_key: &str, payload_digest: &str, expected_count: u32, legacy_wave_id: &str) -> ralph_core::supervisor::SupervisorStoreResult<String> {
-        self.inner.adopt_legacy_emission(scope_key, payload_digest, expected_count, legacy_wave_id)
+    fn adopt_legacy_emission(
+        &self,
+        scope_key: &str,
+        payload_digest: &str,
+        expected_count: u32,
+        legacy_wave_id: &str,
+    ) -> ralph_core::supervisor::SupervisorStoreResult<String> {
+        self.inner
+            .adopt_legacy_emission(scope_key, payload_digest, expected_count, legacy_wave_id)
     }
-
 }
 
 /// S2a fail-closed: persist failure ⇒ no worker spawned, no descriptor
@@ -7969,14 +8114,19 @@ async fn test_u4_redrive_boot_dispatch_in_memory_multi_slot() {
 
     let store: Arc<dyn SupervisorStore> = Arc::new(InMemorySupervisorStore::new());
     let parent = make_redrive_parent_with_descriptors(store.as_ref(), "u4-boot", 3, true);
-    let redrive = store.create_redrive_wave(&parent, Some(&[0, 1, 2])).unwrap();
+    let redrive = store
+        .create_redrive_wave(&parent, Some(&[0, 1, 2]))
+        .unwrap();
 
     // Sanity: the enriched pending list sees all 3 child slots with digests
     // and the child wave's true expected_total (R9).
     let pending = store.list_redrive_pending_child_waves().unwrap();
     assert_eq!(pending.len(), 1, "one pending child wave expected");
     assert_eq!(pending[0].child_wave_id, redrive.child_wave_id);
-    assert_eq!(pending[0].expected_total, 3, "R9: list must carry child.expected_total");
+    assert_eq!(
+        pending[0].expected_total, 3,
+        "R9: list must carry child.expected_total"
+    );
     assert_eq!(pending[0].slots.len(), 3);
     assert!(
         pending[0].slots.iter().all(|s| s.expected_digest.is_some()),
@@ -7994,7 +8144,10 @@ async fn test_u4_redrive_boot_dispatch_in_memory_multi_slot() {
                 i,
                 ralph_core::supervisor::SlotResource {
                     slot_index: i,
-                    worktree_path: Some(format!("/tmp/u4-redrive/child-{}-{i}", redrive.child_wave_id)),
+                    worktree_path: Some(format!(
+                        "/tmp/u4-redrive/child-{}-{i}",
+                        redrive.child_wave_id
+                    )),
                     branch: Some(format!("u4-child-{}-{i}", redrive.child_wave_id)),
                 },
             )
@@ -8179,7 +8332,9 @@ async fn test_s3_rusqlite_backed_wave_supervisor_dispatch() {
         Arc::new(RusqliteSupervisorStore::open(&db_path).expect("open rusqlite store"));
 
     let parent = make_redrive_parent_with_descriptors(store.as_ref(), "s3-rusqlite", 3, true);
-    let _redrive = store.create_redrive_wave(&parent, Some(&[0, 1, 2])).unwrap();
+    let _redrive = store
+        .create_redrive_wave(&parent, Some(&[0, 1, 2]))
+        .unwrap();
 
     // Sanity: the parent descriptor must have landed (rusqlite
     // first-persist regression guard, see the persist_slot_descriptor
@@ -8190,7 +8345,11 @@ async fn test_s3_rusqlite_backed_wave_supervisor_dispatch() {
         "rusqlite: first persist must actually store the descriptor"
     );
     let pending = store.list_redrive_pending_child_waves().unwrap();
-    assert_eq!(pending.len(), 1, "rusqlite: one pending child wave expected");
+    assert_eq!(
+        pending.len(),
+        1,
+        "rusqlite: one pending child wave expected"
+    );
     assert_eq!(pending[0].slots.len(), 3);
 
     // Pre-bind child slot worktrees (see the in-memory variant).
@@ -8201,7 +8360,10 @@ async fn test_s3_rusqlite_backed_wave_supervisor_dispatch() {
                 i,
                 ralph_core::supervisor::SlotResource {
                     slot_index: i,
-                    worktree_path: Some(format!("/tmp/u4-redrive/s3-child-{}-{i}", _redrive.child_wave_id)),
+                    worktree_path: Some(format!(
+                        "/tmp/u4-redrive/s3-child-{}-{i}",
+                        _redrive.child_wave_id
+                    )),
                     branch: Some(format!("u4-s3-child-{}-{i}", _redrive.child_wave_id)),
                 },
             )

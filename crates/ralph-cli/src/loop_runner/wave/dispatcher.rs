@@ -6530,7 +6530,6 @@ pub(crate) async fn boot_dispatch_pending_redrive_if_resuming(
     .await
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;

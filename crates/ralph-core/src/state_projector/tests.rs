@@ -18,6 +18,12 @@ use tempfile::TempDir;
 
 use super::*;
 use crate::config::{StateProjectionAction, StateProjectionConfig};
+
+#[test]
+fn u2_quick_diag() {
+    let _ = 42;
+}
+
 use crate::event_reader::Event;
 
 fn make_event(topic: &str, payload: impl Into<String>) -> Event {
@@ -1224,4 +1230,400 @@ actions:
             .all(|t| matches!(t.status, crate::task::TaskStatus::Open)),
         "no task may be closed by an unknown-id event"
     );
+}
+
+// (U2 schedule validation tests follow in the inner module below.)
+
+#[test]
+fn u2_diagnostic_smoke() {
+    // If this test runs, the parent tests module is being scanned
+    // correctly. Remove once the schedule_* tests are visible.
+}
+
+mod u2_schedule_validation {
+    //! U2 of plan 2026-07-29-001
+    //! (`fix-parallel-forge-static-wave-settlement-plan`).
+    //!
+    //! Table-driven cases for the static `execution_wave` /
+    //! `integration_order` schedule validation inside
+    //! `EnsureTaskBatch`. Each case builds a real
+    //! `StateProjector::apply` with the new optional pointers and
+    //! asserts either acceptance (write to ledger) or rejection
+    //! (no side effect, structured reason).
+    //!
+    //! Cases:
+    //! 1. AE1 longest-path DAG: 4 layers with 8 units.
+    //! 2. wave 缺号 (gap).
+    //! 3. 同 wave 依赖 (same-wave edge rejected).
+    //! 4. 后 wave 依赖 (dep pointing to a larger wave rejected).
+    //! 5. 重复 integration_order (duplicate).
+    //! 6. order 逆依赖 (dep.order >= unit.order rejected).
+    //! 7. digest 不匹配被拒 (empty digest rejected).
+    //! 8. replay 幂等 (same payload accepted twice).
+    //! 9. legacy path (no pointers) still accepted.
+    //! 10. only one pointer declared is rejected.
+
+    use super::*;
+    use serde_json::json;
+
+    fn workspace() -> TempDir {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join(".ralph").join("agent")).unwrap();
+        tmp
+    }
+
+    fn batch_config(
+        execution_wave: Option<&'static str>,
+        integration_order: Option<&'static str>,
+        execution_plan_digest: Option<&'static str>,
+    ) -> StateProjectionConfig {
+        let yaml = format!(
+            r#"
+enabled: true
+actions:
+  forge.plan.ready:
+    kind: ensure_task_batch
+    items: unit_tasks
+    count: unit_count
+    key: task_key
+    title: title
+    blocked_by_keys: depends_on_task_keys
+    execution_wave: {}
+    integration_order: {}
+    execution_plan_digest: {}
+"#,
+            execution_wave
+                .map(|s| format!("\"{s}\""))
+                .unwrap_or_else(|| "~".to_string()),
+            integration_order
+                .map(|s| format!("\"{s}\""))
+                .unwrap_or_else(|| "~".to_string()),
+            execution_plan_digest
+                .map(|s| format!("\"{s}\""))
+                .unwrap_or_else(|| "~".to_string()),
+        );
+        serde_yaml::from_str(&yaml).expect("batch action config must parse")
+    }
+
+    fn apply_batch(
+        projector: &mut StateProjector,
+        payload: serde_json::Value,
+    ) -> crate::state_projector::ApplyReport {
+        projector.apply(&[make_event("forge.plan.ready", payload.to_string())])
+    }
+
+    /// AE1: longest-path DAG.
+    ///   A,B                  -> wave 1
+    ///   C(A),D(A,B),E(B)     -> wave 2
+    ///   F(C,D),G(D,E)        -> wave 3
+    ///   H(F,G)               -> wave 4
+    /// integration_order [1..8] all unique, all deps respected.
+    #[test]
+    fn schedule_ae1_longest_path_dag_is_accepted() {
+        let tmp = workspace();
+        let cfg = batch_config(Some("execution_wave"), Some("integration_order"), None);
+        let mut proj = StateProjector::new(ProjectionContext::new_legacy(tmp.path(), cfg));
+
+        let payload = json!({
+            "unit_count": 8,
+            "unit_tasks": [
+                {"task_key": "forge:p:A", "title": "A", "depends_on_task_keys": [], "execution_wave": 1, "integration_order": 1},
+                {"task_key": "forge:p:B", "title": "B", "depends_on_task_keys": [], "execution_wave": 1, "integration_order": 2},
+                {"task_key": "forge:p:C", "title": "C", "depends_on_task_keys": ["forge:p:A"], "execution_wave": 2, "integration_order": 3},
+                {"task_key": "forge:p:D", "title": "D", "depends_on_task_keys": ["forge:p:A", "forge:p:B"], "execution_wave": 2, "integration_order": 4},
+                {"task_key": "forge:p:E", "title": "E", "depends_on_task_keys": ["forge:p:B"], "execution_wave": 2, "integration_order": 5},
+                {"task_key": "forge:p:F", "title": "F", "depends_on_task_keys": ["forge:p:C", "forge:p:D"], "execution_wave": 3, "integration_order": 6},
+                {"task_key": "forge:p:G", "title": "G", "depends_on_task_keys": ["forge:p:D", "forge:p:E"], "execution_wave": 3, "integration_order": 7},
+                {"task_key": "forge:p:H", "title": "H", "depends_on_task_keys": ["forge:p:F", "forge:p:G"], "execution_wave": 4, "integration_order": 8}
+            ]
+        });
+
+        let report = apply_batch(&mut proj, payload);
+        assert_eq!(
+            report.applied, 1,
+            "AE1 schedule must be accepted; rejections={:?}",
+            report.rejections
+        );
+        let store = crate::task_store::TaskStore::load(&tasks_path(tmp.path())).unwrap();
+        assert_eq!(store.all().len(), 8, "AE1 must write 8 tasks");
+    }
+
+    /// Wave gap: declared waves [1, 3] (missing 2) is rejected.
+    #[test]
+    fn schedule_wave_gap_is_rejected() {
+        let tmp = workspace();
+        let cfg = batch_config(Some("execution_wave"), Some("integration_order"), None);
+        let mut proj = StateProjector::new(ProjectionContext::new_legacy(tmp.path(), cfg));
+        let payload = json!({
+            "unit_count": 2,
+            "unit_tasks": [
+                {"task_key": "forge:p:A", "title": "A", "depends_on_task_keys": [], "execution_wave": 1, "integration_order": 1},
+                {"task_key": "forge:p:B", "title": "B", "depends_on_task_keys": ["forge:p:A"], "execution_wave": 3, "integration_order": 2}
+            ]
+        });
+        let report = apply_batch(&mut proj, payload);
+        assert_eq!(report.applied, 0, "wave gap must reject the batch");
+        assert_eq!(report.rejected, 1);
+        let reason = &report.rejections[0].reason;
+        assert!(
+            reason.contains("wave") || reason.contains("consecutive"),
+            "rejection reason must name the wave rule: got {reason}"
+        );
+        assert!(
+            !tasks_path(tmp.path()).exists(),
+            "rejected schedule must not write tasks.jsonl"
+        );
+    }
+
+    /// Same-wave edge (A and B both wave=1, but B depends on A) is rejected.
+    #[test]
+    fn schedule_same_wave_edge_is_rejected() {
+        let tmp = workspace();
+        let cfg = batch_config(Some("execution_wave"), Some("integration_order"), None);
+        let mut proj = StateProjector::new(ProjectionContext::new_legacy(tmp.path(), cfg));
+        let payload = json!({
+            "unit_count": 2,
+            "unit_tasks": [
+                {"task_key": "forge:p:A", "title": "A", "depends_on_task_keys": [], "execution_wave": 1, "integration_order": 1},
+                {"task_key": "forge:p:B", "title": "B", "depends_on_task_keys": ["forge:p:A"], "execution_wave": 1, "integration_order": 2}
+            ]
+        });
+        let report = apply_batch(&mut proj, payload);
+        assert_eq!(report.applied, 0, "same-wave edge must reject");
+        assert_eq!(report.rejected, 1);
+        let reason = &report.rejections[0].reason;
+        assert!(
+            reason.contains("wave"),
+            "rejection must reference the wave rule: got {reason}"
+        );
+        assert!(!tasks_path(tmp.path()).exists());
+    }
+
+    /// Dep pointing to a larger wave than the dependent is rejected
+    /// (wave(B) > wave(A) where A depends on B).
+    #[test]
+    fn schedule_later_wave_dependency_is_rejected() {
+        let tmp = workspace();
+        let cfg = batch_config(Some("execution_wave"), Some("integration_order"), None);
+        let mut proj = StateProjector::new(ProjectionContext::new_legacy(tmp.path(), cfg));
+        // B is wave 1 but depends on A (wave 2): illegal direction.
+        let payload = json!({
+            "unit_count": 2,
+            "unit_tasks": [
+                {"task_key": "forge:p:A", "title": "A", "depends_on_task_keys": [], "execution_wave": 2, "integration_order": 2},
+                {"task_key": "forge:p:B", "title": "B", "depends_on_task_keys": ["forge:p:A"], "execution_wave": 1, "integration_order": 1}
+            ]
+        });
+        let report = apply_batch(&mut proj, payload);
+        assert_eq!(report.applied, 0, "later-wave dep must reject");
+        assert_eq!(report.rejected, 1);
+        let reason = &report.rejections[0].reason;
+        assert!(
+            reason.contains("wave"),
+            "rejection must name the wave rule: got {reason}"
+        );
+        assert!(!tasks_path(tmp.path()).exists());
+    }
+
+    /// Duplicate `integration_order` is rejected.
+    #[test]
+    fn schedule_duplicate_integration_order_is_rejected() {
+        let tmp = workspace();
+        let cfg = batch_config(Some("execution_wave"), Some("integration_order"), None);
+        let mut proj = StateProjector::new(ProjectionContext::new_legacy(tmp.path(), cfg));
+        let payload = json!({
+            "unit_count": 3,
+            "unit_tasks": [
+                {"task_key": "forge:p:A", "title": "A", "depends_on_task_keys": [], "execution_wave": 1, "integration_order": 1},
+                {"task_key": "forge:p:B", "title": "B", "depends_on_task_keys": [], "execution_wave": 1, "integration_order": 1},
+                {"task_key": "forge:p:C", "title": "C", "depends_on_task_keys": ["forge:p:A"], "execution_wave": 2, "integration_order": 3}
+            ]
+        });
+        let report = apply_batch(&mut proj, payload);
+        assert_eq!(report.applied, 0, "duplicate order must reject");
+        assert_eq!(report.rejected, 1);
+        let reason = &report.rejections[0].reason;
+        assert!(
+            reason.contains("integration_order") || reason.contains("order"),
+            "rejection must name the order rule: got {reason}"
+        );
+        assert!(!tasks_path(tmp.path()).exists());
+    }
+
+    /// `integration_order` of a dep must be < that of the unit
+    /// (i.e. order on the dep edge must point earlier in the
+    /// topological sequence).
+    #[test]
+    fn schedule_inverse_integration_order_is_rejected() {
+        let tmp = workspace();
+        let cfg = batch_config(Some("execution_wave"), Some("integration_order"), None);
+        let mut proj = StateProjector::new(ProjectionContext::new_legacy(tmp.path(), cfg));
+        // A has order 2; B depends on A but has order 1. dep.order(2) > unit.order(1).
+        let payload = json!({
+            "unit_count": 2,
+            "unit_tasks": [
+                {"task_key": "forge:p:A", "title": "A", "depends_on_task_keys": [], "execution_wave": 1, "integration_order": 2},
+                {"task_key": "forge:p:B", "title": "B", "depends_on_task_keys": ["forge:p:A"], "execution_wave": 2, "integration_order": 1}
+            ]
+        });
+        let report = apply_batch(&mut proj, payload);
+        assert_eq!(report.applied, 0, "inverse order must reject");
+        assert_eq!(report.rejected, 1);
+        let reason = &report.rejections[0].reason;
+        assert!(
+            reason.contains("integration_order") || reason.contains("order"),
+            "rejection must name the order rule: got {reason}"
+        );
+        assert!(!tasks_path(tmp.path()).exists());
+    }
+
+    /// Empty digest rejected (digest pointer present but value is empty).
+    #[test]
+    fn schedule_empty_digest_is_rejected() {
+        let tmp = workspace();
+        let cfg = batch_config(
+            Some("execution_wave"),
+            Some("integration_order"),
+            Some("execution_plan_digest"),
+        );
+        let mut proj = StateProjector::new(ProjectionContext::new_legacy(tmp.path(), cfg));
+        let payload_empty = json!({
+            "execution_plan_digest": "",
+            "unit_count": 2,
+            "unit_tasks": [
+                {"task_key": "forge:p:A", "title": "A", "depends_on_task_keys": [], "execution_wave": 1, "integration_order": 1},
+                {"task_key": "forge:p:B", "title": "B", "depends_on_task_keys": ["forge:p:A"], "execution_wave": 2, "integration_order": 2}
+            ]
+        });
+        let report = apply_batch(&mut proj, payload_empty);
+        assert_eq!(report.applied, 0, "empty digest must reject");
+        assert_eq!(report.rejected, 1);
+        let reason = &report.rejections[0].reason;
+        assert!(
+            reason.contains("digest"),
+            "rejection must name the digest rule: got {reason}"
+        );
+    }
+
+    /// Non-empty digest accepted (digest pointer present and value is non-empty).
+    #[test]
+    fn schedule_non_empty_digest_is_accepted() {
+        let tmp = workspace();
+        let cfg = batch_config(
+            Some("execution_wave"),
+            Some("integration_order"),
+            Some("execution_plan_digest"),
+        );
+        let mut proj = StateProjector::new(ProjectionContext::new_legacy(tmp.path(), cfg));
+        let payload = json!({
+            "execution_plan_digest": "deadbeef",
+            "unit_count": 2,
+            "unit_tasks": [
+                {"task_key": "forge:p:A", "title": "A", "depends_on_task_keys": [], "execution_wave": 1, "integration_order": 1},
+                {"task_key": "forge:p:B", "title": "B", "depends_on_task_keys": ["forge:p:A"], "execution_wave": 2, "integration_order": 2}
+            ]
+        });
+        let report = apply_batch(&mut proj, payload);
+        assert_eq!(
+            report.applied, 1,
+            "non-empty digest must be accepted: rejections={:?}",
+            report.rejections
+        );
+    }
+
+    /// Replaying the same accepted payload must be idempotent (no
+    /// duplicate tasks, no rejection).
+    #[test]
+    fn schedule_replay_is_idempotent() {
+        let tmp = workspace();
+        let cfg = batch_config(Some("execution_wave"), Some("integration_order"), None);
+        let mut proj = StateProjector::new(ProjectionContext::new_legacy(tmp.path(), cfg));
+        let payload = json!({
+            "unit_count": 3,
+            "unit_tasks": [
+                {"task_key": "forge:p:A", "title": "A", "depends_on_task_keys": [], "execution_wave": 1, "integration_order": 1},
+                {"task_key": "forge:p:B", "title": "B", "depends_on_task_keys": ["forge:p:A"], "execution_wave": 2, "integration_order": 2},
+                {"task_key": "forge:p:C", "title": "C", "depends_on_task_keys": ["forge:p:B"], "execution_wave": 3, "integration_order": 3}
+            ]
+        });
+
+        let first = apply_batch(&mut proj, payload.clone());
+        assert_eq!(first.applied, 1, "first accept must succeed");
+        let store = crate::task_store::TaskStore::load(&tasks_path(tmp.path())).unwrap();
+        let ids_first: Vec<String> = store.all().iter().map(|t| t.id.clone()).collect();
+
+        let second = apply_batch(&mut proj, payload);
+        assert_eq!(
+            second.applied, 1,
+            "replay must still succeed (idempotent): rejections={:?}",
+            second.rejections
+        );
+        let store2 = crate::task_store::TaskStore::load(&tasks_path(tmp.path())).unwrap();
+        assert_eq!(
+            store2.all().len(),
+            3,
+            "replay must not duplicate rows: got {}",
+            store2.all().len()
+        );
+        let ids_second: Vec<String> = store2.all().iter().map(|t| t.id.clone()).collect();
+        let mut ids_first_sorted = ids_first.clone();
+        ids_first_sorted.sort();
+        let mut ids_second_sorted = ids_second.clone();
+        ids_second_sorted.sort();
+        assert_eq!(
+            ids_first_sorted, ids_second_sorted,
+            "replay must reuse existing task ids"
+        );
+    }
+
+    /// Legacy compatibility: when neither pointer is supplied, the
+    /// projector skips wave/order validation (unchanged behaviour).
+    #[test]
+    fn schedule_legacy_no_pointers_is_accepted() {
+        let tmp = workspace();
+        let cfg = batch_config(None, None, None);
+        let mut proj = StateProjector::new(ProjectionContext::new_legacy(tmp.path(), cfg));
+        let payload = json!({
+            "unit_count": 2,
+            "unit_tasks": [
+                {"task_key": "custom:p:U1", "title": "First", "depends_on_task_keys": []},
+                {"task_key": "custom:p:U2", "title": "Second", "depends_on_task_keys": ["custom:p:U1"]}
+            ]
+        });
+        let report = apply_batch(&mut proj, payload);
+        assert_eq!(
+            report.applied, 1,
+            "legacy path without pointers must be accepted: rejections={:?}",
+            report.rejections
+        );
+        let store = crate::task_store::TaskStore::load(&tasks_path(tmp.path())).unwrap();
+        assert_eq!(store.all().len(), 2);
+    }
+
+    /// Only one pointer declared -> reject (both pointers must be
+    /// present together for schedule validation to be meaningful).
+    #[test]
+    fn schedule_only_one_pointer_declared_is_rejected() {
+        let tmp = workspace();
+        let cfg = batch_config(Some("execution_wave"), None, None);
+        let mut proj = StateProjector::new(ProjectionContext::new_legacy(tmp.path(), cfg));
+        let payload = json!({
+            "unit_count": 2,
+            "unit_tasks": [
+                {"task_key": "forge:p:A", "title": "A", "depends_on_task_keys": [], "execution_wave": 1},
+                {"task_key": "forge:p:B", "title": "B", "depends_on_task_keys": ["forge:p:A"], "execution_wave": 2}
+            ]
+        });
+        let report = apply_batch(&mut proj, payload);
+        assert_eq!(
+            report.applied, 0,
+            "single-pointer config must reject (validation needs both)"
+        );
+        assert_eq!(report.rejected, 1);
+        let reason = &report.rejections[0].reason;
+        assert!(
+            reason.contains("pointer") || reason.contains("integration_order"),
+            "rejection must name the missing pointer: got {reason}"
+        );
+    }
 }
