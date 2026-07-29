@@ -765,6 +765,25 @@ fn payload_warning_finding(warning: &str) -> RuntimeContractFinding {
     finding
 }
 
+/// Whether `topic` is a `<X>.rejected` variant that the precheck
+/// desugar synthesized for a declared `event_loop.precheck.rules.<X>`.
+///
+/// The rejected event never reaches a hat: the runtime
+/// (`event_loop::precheck_gate_runner`) consumes it and converts it into
+/// a correction plus a `task.resume` addressed at the rule's
+/// `on_fail.target`. Demanding a hat subscriber would force every
+/// precheck-enabled preset to declare a throwaway consumer.
+fn is_precheck_rejected_topic(config: &crate::config::RalphConfig, topic: &str) -> bool {
+    let Some(guarded) = topic.strip_suffix(".rejected") else {
+        return false;
+    };
+    config
+        .event_loop
+        .precheck
+        .as_ref()
+        .is_some_and(|p| p.enabled && p.rules.contains_key(guarded))
+}
+
 /// Detect orphan topics — published by a custom hat but with no
 /// non-fallback hat subscriber — and return them as warning findings.
 ///
@@ -835,6 +854,9 @@ pub fn detect_orphan_topics(
                     || topic.ends_with(".unit.done")
                     || topic.ends_with(".unit.failed"))
             {
+                continue;
+            }
+            if is_precheck_rejected_topic(config, topic) {
                 continue;
             }
             if !registry.has_specific_subscriber(topic) {
@@ -1027,10 +1049,12 @@ pub fn detect_required_topic_gaps(
         // their declared `event_policy.schemas` unit topics.
         let is_wave_slot =
             preset_uses_wave_runtime(config) && is_supervisor_slot_topic(topic.as_str());
+        let is_precheck_rejected = is_precheck_rejected_topic(config, topic.as_str());
         if !has_subscriber
             && !publishing_hat_also_publishes_completion
             && !is_supervisor_slot
             && !is_wave_slot
+            && !is_precheck_rejected
         {
             let finding = RuntimeContractFinding::try_new_core(
                 "required.no_subscriber",
@@ -2832,6 +2856,59 @@ event_loop:
         assert!(
             codes.contains(&"required.no_publisher"),
             "missing publisher must surface required.no_publisher, got: {codes:?}"
+        );
+    }
+
+    /// `<X>.rejected` is consumed by the precheck gate runner, which turns
+    /// it into a correction plus a `task.resume` for the rule's
+    /// `on_fail.target`. No hat subscribes to it, so both the required-topic
+    /// gap check and the orphan check must stay silent — otherwise every
+    /// precheck-enabled preset reports a phantom broken topology.
+    #[test]
+    fn precheck_rejected_topic_needs_no_hat_subscriber() {
+        let yaml = r#"
+event_loop:
+  completion_promise: "LOOP_COMPLETE"
+  starting_event: "work.start"
+  precheck:
+    enabled: true
+    rules:
+      work.failed:
+        prompt:
+          - "Evidence file exists"
+        on_fail:
+          target: "worker"
+hats:
+  worker:
+    name: "Worker"
+    description: "work"
+    triggers: ["work.start"]
+    publishes: ["work.done", "work.failed", "LOOP_COMPLETE"]
+"#;
+        let mut config: RalphConfig = serde_yaml::from_str(yaml).expect("parse");
+        config.normalize();
+        let registry = HatRegistry::from_runtime_config(&config);
+
+        let gap_codes: Vec<String> = detect_required_topic_gaps(&config, &registry)
+            .iter()
+            .map(|f| format!("{}:{:?}", f.id, f.details.get("topic")))
+            .collect();
+        assert!(
+            !gap_codes
+                .iter()
+                .any(|c| c.contains("required.no_subscriber") && c.contains("work.failed.rejected")),
+            "rejected topic must not report a subscriber gap, got: {gap_codes:?}"
+        );
+
+        let orphan_topics: Vec<Option<String>> = detect_orphan_topics(&config, &registry)
+            .iter()
+            .map(|f| f.details.get("topic").cloned())
+            .collect();
+        assert!(
+            !orphan_topics
+                .iter()
+                .any(|t| t.as_deref() == Some("work.failed.rejected")),
+            "rejected topic must not report an orphan warning, got: {orphan_topics:?}"
         );
     }
 

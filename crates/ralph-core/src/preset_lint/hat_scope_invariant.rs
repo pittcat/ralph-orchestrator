@@ -636,6 +636,47 @@ hats:
         );
     }
 
+    /// The runtime lints the **normalized** config, which includes the
+    /// hats the precheck desugar synthesizes and the producer rewrites it
+    /// performs. Rules 1 and 2 fired on all of them until the desugar
+    /// started carrying `event_filter` / `exempt_topics`, which rejected
+    /// every precheck-enabled preset at startup.
+    #[test]
+    fn rules_silent_on_desugared_precheck_config() {
+        let yaml = r#"
+event_loop:
+  execution_mode: isolated
+  event_policy:
+    enabled: true
+    mode: enforce
+  precheck:
+    enabled: true
+    rules:
+      work.failed:
+        prompt:
+          - "Evidence file exists"
+        on_fail:
+          target: "worker"
+hats:
+  worker:
+    name: Worker
+    description: "work"
+    triggers: ["work.start"]
+    publishes: ["work.done", "work.failed"]
+    exempt_topics: ["work.done", "work.failed"]
+    event_filter:
+      enabled: true
+      events: ["work.start"]
+"#;
+        let mut cfg: RalphConfig = serde_yaml::from_str(yaml).expect("test config must parse");
+        cfg.normalize();
+        let findings = check_hat_scope_invariant(&cfg);
+        assert!(
+            findings.is_empty(),
+            "desugared precheck config must be scope-clean, got: {findings:#?}"
+        );
+    }
+
     #[test]
     fn rule_skipped_in_coordinator_mode() {
         // Coordinator mode keeps the soft-hint semantics; the

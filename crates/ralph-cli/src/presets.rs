@@ -1253,7 +1253,9 @@ mod tests {
             .expect("development_loop step");
         let transition_emits: Vec<String> = dev_loop.transition_emits.clone();
         assert!(
-            transition_emits.iter().any(|s| s == "forge.exec.development.done"),
+            transition_emits
+                .iter()
+                .any(|s| s == "forge.exec.development.done"),
             "development_loop.transition_emits must include forge.exec.development.done (R5); got {:?}",
             transition_emits
         );
@@ -2582,6 +2584,64 @@ mod tests {
         );
     }
 
+    /// Same strict-lint gate as `test_all_embedded_presets_pass_strict_lint`,
+    /// but against the **normalized** config — the shape the runtime
+    /// actually loads. `normalize()` runs `apply_precheck_desugar`, which
+    /// rewrites producers to emit `<X>.proposed` and synthesizes the
+    /// `precheck-<X>` gate hat. The pre-normalize test cannot see those
+    /// hats at all, so every lint invariant over the desugared shape was
+    /// unguarded: `ce-executor-pipeline` shipped six false-positive
+    /// `hat_scope_*` errors that rejected the preset at startup.
+    #[test]
+    fn test_all_embedded_presets_pass_strict_lint_after_normalize() {
+        let topology_exempt: &[&str] = &["autoresearch", "debug"];
+
+        let mut failures = Vec::new();
+        for preset in PRESETS {
+            let mut config =
+                RalphConfig::parse_yaml(preset.content).expect("embedded preset YAML should parse");
+            config.normalize();
+            let registry = HatRegistry::from_runtime_config(&config);
+            let strictness = RuntimeContractStrictness::preset_check_strict();
+            let report = RuntimeContractAggregator::aggregate(
+                format!("builtin:{}", preset.name),
+                &config,
+                &registry,
+                strictness,
+                Some(preset.content),
+            );
+            if report.passed {
+                continue;
+            }
+            if topology_exempt.contains(&preset.name) {
+                let all_exempt = report.findings.iter().all(|f| {
+                    matches!(
+                        f.source,
+                        ralph_core::runtime_contract::FindingSource::Topology
+                            | ralph_core::runtime_contract::FindingSource::Orphan
+                    )
+                });
+                if all_exempt {
+                    continue;
+                }
+            }
+            failures.push(format!(
+                "'{}': {:?}",
+                preset.name,
+                report
+                    .findings
+                    .iter()
+                    .map(|f| format!("[{:?}] {}: {}", f.severity, f.id, f.message))
+                    .collect::<Vec<_>>()
+            ));
+        }
+        assert!(
+            failures.is_empty(),
+            "Normalized embedded presets failed strict lint:\n{}",
+            failures.join("\n")
+        );
+    }
+
     /// Plan 2026-07-28-001 U2 / R14 / S9: the **newly-activated
     /// builtin projector action keys** (i.e. configured keys that
     /// fall outside the legacy `work.*` / `queue.advance` /
@@ -2611,11 +2671,10 @@ mod tests {
         .iter()
         .map(|s| s.to_string())
         .collect();
-        let expected_new_keys: BTreeSet<String> =
-            ["forge.plan.ready", "forge.wave.settled"]
-                .iter()
-                .map(|s| s.to_string())
-                .collect();
+        let expected_new_keys: BTreeSet<String> = ["forge.plan.ready", "forge.wave.settled"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
 
         let mut full_legacy: BTreeSet<String> = legacy_keys.clone();
         let mut full_new: BTreeSet<String> = BTreeSet::new();

@@ -193,17 +193,27 @@ impl RalphConfig {
                     hat.default_publishes = Some(proposed.clone());
                 }
 
-                if publishes_topic {
-                    hat.publishes.retain(|p| p != topic);
-                    hat.publishes.push(proposed.clone());
-                    hat.publishes.sort();
-                    hat.publishes.dedup();
-                }
-                if terminal_topic {
-                    hat.terminal_events.retain(|t| t != topic);
-                    hat.terminal_events.push(proposed.clone());
-                    hat.terminal_events.sort();
-                    hat.terminal_events.dedup();
+                // Every emit-side topic list on the producer has to move
+                // together. A list left pointing at the bare `<X>` is not
+                // merely stale — the hat can no longer emit `<X>` at all, so
+                // each stranded reference becomes a live contradiction:
+                // `exempt_topics` loses the single-business-event carve-out
+                // and trips `hat_scope_invariant` rule 2, and `obligations`
+                // (matched by exact topic equality) can never be satisfied,
+                // sending every activation down the missing-event branch.
+                // `triggers` / `on_trigger` are deliberately absent: those are
+                // consumer-side, and the gate re-emits `<X>` for them.
+                rewrite_emit_topic(&mut hat.publishes, topic, &proposed);
+                rewrite_emit_topic(&mut hat.terminal_events, topic, &proposed);
+                rewrite_emit_topic(&mut hat.exempt_topics, topic, &proposed);
+                for obligation in &mut hat.obligations {
+                    rewrite_emit_topic(&mut obligation.must_emit_any_of, topic, &proposed);
+                    for conditional in &mut obligation.conditional_must_emit {
+                        rewrite_emit_topic(&mut conditional.must_emit_any_of, topic, &proposed);
+                    }
+                    for forbid in &mut obligation.conditional_forbid_topics {
+                        rewrite_emit_topic(&mut forbid.forbid_topics, topic, &proposed);
+                    }
                 }
                 debug!(hat = %hat_id, topic = %topic, "Rewrote producer to emit proposed variant");
             }
@@ -223,6 +233,18 @@ impl RalphConfig {
                 terminal_events: vec![topic.clone(), rejected.clone()],
                 instructions,
                 max_activations: Some(max_activations),
+                // The synthesized hat must satisfy the same isolated-mode
+                // scope invariants as a hand-written one. Nobody can author
+                // these fields (the hat does not exist in the preset YAML),
+                // so desugar owns them: the filter pins the gate's prompt to
+                // the single event it reacts to, and the exempt list declares
+                // the two topics it owns.
+                event_filter: Some(super::EventFilterConfig {
+                    enabled: true,
+                    mode: super::EventFilterMode::default(),
+                    events: vec![proposed.clone()],
+                }),
+                exempt_topics: vec![topic.clone(), rejected.clone()],
                 ..Default::default()
             };
             self.hats.insert(gate_id.clone(), gate);
@@ -941,6 +963,24 @@ impl RalphConfig {
 ///         command: ["./scripts/hooks/env-guard.sh"]
 ///         on_error: block
 /// ```
+/// Point one emit-side topic list at `to` wherever it named `from`,
+/// keeping the list sorted and deduped. No-op when `from` is absent.
+///
+/// Used by the precheck desugar for every list that describes what a
+/// producer *emits*. Routing them all through one helper is deliberate:
+/// the original desugar open-coded the rewrite per field, and each
+/// `HatConfig` emit field it did not enumerate became a silent
+/// contradiction after the rewrite.
+fn rewrite_emit_topic(list: &mut Vec<String>, from: &str, to: &str) {
+    if !list.iter().any(|t| t == from) {
+        return;
+    }
+    list.retain(|t| t != from);
+    list.push(to.to_string());
+    list.sort();
+    list.dedup();
+}
+
 /// 2026-07-02-004 plan milestone A (U3): render the
 /// declared checklist + hard-constraint instructions for a
 /// synthesized precheck gate hat.
@@ -4424,6 +4464,117 @@ hats:
             !builder.publishes.contains(&"build.done".to_string()),
             "builder must no longer publish raw topic; got {:?}",
             builder.publishes
+        );
+    }
+
+    /// The desugared config is what the runtime lints, so the
+    /// synthesized gate hat must carry the isolated-mode scope fields
+    /// nobody can hand-author, and a producer's `exempt_topics` must
+    /// follow its rewritten `publishes`. Without both, every
+    /// precheck-enabled preset is rejected at startup by
+    /// `hat_scope_invariant` rules 1 and 2.
+    #[test]
+    fn precheck_desugar_carries_hat_scope_fields() {
+        let yaml = r#"
+event_loop:
+  execution_mode: isolated
+  precheck:
+    enabled: true
+    rules:
+      build.done:
+        prompt:
+          - "Tests were run"
+        on_fail:
+          target: "builder"
+hats:
+  builder:
+    name: "Builder"
+    description: "build"
+    triggers: ["task.start"]
+    publishes: ["build.done", "build.failed"]
+    exempt_topics: ["build.done", "build.failed"]
+"#;
+        let mut cfg = RalphConfig::parse_yaml(yaml).expect("parse");
+        cfg.normalize();
+
+        let gate = cfg.hats.get("precheck-build.done").expect("gate hat");
+        let filter = gate.event_filter.as_ref().expect("gate event_filter");
+        assert!(filter.enabled, "gate filter must be enabled");
+        assert_eq!(filter.events, vec!["build.done.proposed".to_string()]);
+        assert_eq!(
+            gate.exempt_topics,
+            vec!["build.done".to_string(), "build.done.rejected".to_string()],
+            "gate must declare the two topics it owns"
+        );
+
+        let builder = cfg.hats.get("builder").expect("builder hat");
+        assert_eq!(
+            builder.exempt_topics,
+            vec![
+                "build.done.proposed".to_string(),
+                "build.failed".to_string()
+            ],
+            "guarded exempt entry follows the publishes rewrite; unguarded one is untouched"
+        );
+    }
+
+    /// A producer's `obligations` are checked by exact topic match
+    /// against what it actually emitted, so an obligation left pointing
+    /// at the bare `<X>` can never be satisfied once the publishes
+    /// rewrite lands — the runtime takes the missing-event branch every
+    /// time, and `detect_obligation_topics_not_in_publishes` reports the
+    /// topic as unpublishable. `on_trigger` is the consumer side and
+    /// stays raw: the gate re-emits `<X>`, which is what activates the
+    /// obligation in the first place.
+    #[test]
+    fn precheck_desugar_rewrites_producer_obligations() {
+        let yaml = r#"
+event_loop:
+  precheck:
+    enabled: true
+    rules:
+      work.failed:
+        prompt:
+          - "Evidence file exists"
+        on_fail:
+          target: "executor"
+hats:
+  executor:
+    name: "Executor"
+    description: "exec"
+    triggers: ["work.ready"]
+    publishes: ["work.done", "work.failed"]
+    obligations:
+      - on_trigger: "work.ready"
+        must_emit_any_of: ["work.done", "work.failed"]
+        conditional_must_emit:
+          - when: {}
+            must_emit_any_of: ["work.failed"]
+        conditional_forbid_topics:
+          - when: {}
+            forbid_topics: ["work.failed"]
+"#;
+        let mut cfg = RalphConfig::parse_yaml(yaml).expect("parse");
+        cfg.normalize();
+
+        let obligation = &cfg.hats.get("executor").expect("executor").obligations[0];
+        assert_eq!(
+            obligation.on_trigger, "work.ready",
+            "trigger side must stay raw"
+        );
+        assert_eq!(
+            obligation.must_emit_any_of,
+            vec!["work.done".to_string(), "work.failed.proposed".to_string()],
+            "guarded emit target follows the publishes rewrite"
+        );
+        assert_eq!(
+            obligation.conditional_must_emit[0].must_emit_any_of,
+            vec!["work.failed.proposed".to_string()]
+        );
+        assert_eq!(
+            obligation.conditional_forbid_topics[0].forbid_topics,
+            vec!["work.failed.proposed".to_string()],
+            "a forbid on the guarded topic must still bite after the rewrite"
         );
     }
 
