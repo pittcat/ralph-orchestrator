@@ -300,3 +300,316 @@ fn test_emit_policy_check_rejects_non_allowlisted_events_file() {
         "stderr must carry the outer-hat leak hint: {stderr}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// 2026-07-29-006 plan U3 (R2, S1, S2): precheck emit transparency
+// ---------------------------------------------------------------------------
+
+/// Build a minimal `--json` payload for `work.failed` that satisfies
+/// every required field declared by the inline
+/// `event_policy.schemas.work.failed` in the
+/// `ce-executor-pipeline` preset (15 entries: the 12 from
+/// `presets/schemas/ce-executor-pipeline.yml` + `dead_end_confidence`
+/// + `dead_end_evidence_coverage` + `dead_end_evidence_file`).
+/// Returned as an owned `String` so the test can `--json` pass it
+/// through `ralph emit`.
+fn work_failed_minimal_valid_json() -> String {
+    serde_json::json!({
+        "plan_name": "2026-07-29-006-fixture",
+        "plan_path": "docs/plans/2026-07-29-006-fixture.md",
+        "planned_units": ["U1"],
+        "attempted_units": [],
+        "completed_units": [],
+        "failed_units": [],
+        "blocked_units": [],
+        "skipped_units": [],
+        "baseline_verification_file": ".ralph/review/fixture/baseline-verification.md",
+        "decisions_file": ".ralph/agent/decisions.md",
+        "reason": "no_deliverable_commits: fixture",
+        "report_input_file": ".ralph/review/fixture/report-input.work-failed.json",
+        "dead_end_confidence": 92,
+        "dead_end_evidence_coverage": 80,
+        "dead_end_evidence_file": ".ralph/review/fixture/dead-end-evidence.md"
+    })
+    .to_string()
+}
+
+/// S1: when the producer is the `executor` hat and the preset has
+/// precheck enabled on `work.failed`, `ralph emit work.failed
+/// --policy-check` MUST be accepted. Before U3, the bare topic was
+/// rejected by `check_isolated_scope` with `origin:out_of_scope`
+/// (P0 E3). The CLI now rewrites the bare topic to the producer's
+/// `<X>.proposed` variant before the first topic-dependent gate.
+#[test]
+fn test_precheck_emit_bare_topic_rewritten_to_proposed() {
+    let temp_dir = TempDir::new().expect("temp dir");
+    let temp_path = temp_dir.path();
+    std::fs::create_dir_all(temp_path.join(".ralph")).unwrap();
+
+    let output = common::ralph_bin()
+        .args([
+            "emit",
+            "work.failed",
+            "--json",
+            &work_failed_minimal_valid_json(),
+            "--policy-check",
+        ])
+        .current_dir(temp_path)
+        .env("RALPH_HATS_SOURCE", "builtin:ce-executor-pipeline")
+        .env("RALPH_CURRENT_HAT", "executor")
+        .env("RALPH_EVENTS_FILE", temp_path.join(".ralph/events.jsonl"))
+        .output()
+        .expect("failed to execute ralph emit --policy-check");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success(),
+        "S1: bare `work.failed` from executor with precheck enabled must be \
+         accepted via the proposed rewrite; exit={:?} stdout={stdout} stderr={stderr}",
+        output.status.code()
+    );
+    // The accepted event must land on the proposed topic, not the bare
+    // one. --policy-check prints the stable accept summary
+    // ("emit accepted [policy_check_only]") and reports the
+    // effective topic.
+    assert!(
+        stdout.contains("work.failed.proposed") || stdout.contains("work.failed"),
+        "S1: stdout must reflect the accepted topic; stdout={stdout}"
+    );
+    assert!(
+        !stderr.contains("origin:out_of_scope")
+            && !stderr.contains("Event rejected by isolated scope guard"),
+        "S1: must not surface the pre-U3 scope rejection; stderr={stderr}"
+    );
+}
+
+/// S2: explicit `work.failed.proposed` from the producer is also
+/// accepted (idempotent: no `.proposed.proposed` leakage).
+#[test]
+fn test_precheck_emit_explicit_proposed_topic_accepted() {
+    let temp_dir = TempDir::new().expect("temp dir");
+    let temp_path = temp_dir.path();
+    std::fs::create_dir_all(temp_path.join(".ralph")).unwrap();
+
+    let output = common::ralph_bin()
+        .args([
+            "emit",
+            "work.failed.proposed",
+            "--json",
+            &work_failed_minimal_valid_json(),
+            "--policy-check",
+        ])
+        .current_dir(temp_path)
+        .env("RALPH_HATS_SOURCE", "builtin:ce-executor-pipeline")
+        .env("RALPH_CURRENT_HAT", "executor")
+        .env("RALPH_EVENTS_FILE", temp_path.join(".ralph/events.jsonl"))
+        .output()
+        .expect("failed to execute ralph emit --policy-check");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success(),
+        "S2: explicit `work.failed.proposed` from executor must be accepted; \
+         exit={:?} stdout={stdout} stderr={stderr}",
+        output.status.code()
+    );
+    assert!(
+        !stdout.contains("work.failed.proposed.proposed"),
+        "S2: must not double-suffix `.proposed.proposed`; stdout={stdout}"
+    );
+}
+
+/// Scope-preserving guard: a hat that does NOT publish
+/// `work.failed.proposed` (after desugar) cannot ride the rewrite
+/// to emit a bare `work.failed`. This keeps the existing
+/// isolated-scope / origin guard authoritative for non-producers.
+#[test]
+fn test_precheck_emit_rewrite_does_not_promote_non_producer() {
+    let temp_dir = TempDir::new().expect("temp dir");
+    let temp_path = temp_dir.path();
+    std::fs::create_dir_all(temp_path.join(".ralph")).unwrap();
+
+    // `fixer` is a real hat in `ce-executor-pipeline` but does not
+    // publish `work.failed` (or its proposed variant) in the
+    // normalized config.
+    let output = common::ralph_bin()
+        .args([
+            "emit",
+            "work.failed",
+            "--json",
+            &work_failed_minimal_valid_json(),
+            "--policy-check",
+        ])
+        .current_dir(temp_path)
+        .env("RALPH_HATS_SOURCE", "builtin:ce-executor-pipeline")
+        .env("RALPH_CURRENT_HAT", "fixer")
+        .env("RALPH_EVENTS_FILE", temp_path.join(".ralph/events.jsonl"))
+        .output()
+        .expect("failed to execute ralph emit --policy-check");
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    // Non-producer bare emit must be rejected at the scope gate.
+    // (S5: resolver returns the bare topic; the downstream
+    // `check_isolated_scope` rejects it because `fixer` does not
+    // publish `work.failed.proposed`.)
+    assert!(
+        !output.status.success(),
+        "S5: non-producer hat must not be promoted by the rewrite; \
+         exit={:?} stderr={stderr}",
+        output.status.code()
+    );
+    assert!(
+        stderr.contains("isolated scope guard")
+            || stderr.contains("origin:out_of_scope")
+            || stderr.contains("Event rejected"),
+        "S5: stderr must surface the scope/origin rejection; stderr={stderr}"
+    );
+}
+
+/// U1 (correctness:C1 + adversarial:A1): when a producer emits a
+/// bare guarded topic, the on-disk JSONL row MUST carry `topic`
+/// and `triggered` derived from the SAME effective topic after
+/// precheck rewrite. Before this fix, `maybe_derive_triggered_for_isolated`
+/// was called with the bare topic, then the desugar rewrote
+/// `topic` to `<X>.proposed` — so the JSONL row recorded
+/// `topic="work.failed.proposed"` but `triggered="reporter"`
+/// (the unique consumer of the bare `work.failed` topic). The
+/// `check_envelope_triggered` gate only checked the hat id was
+/// known, not that it matched the effective topic, so the
+/// mismatch slipped through silently.
+///
+/// This test is the regression guard for that drift. It lives
+/// here next to S1–S5 (no `.proposed` schema, no policy gate)
+/// and is **not** expected to feed any other Unit's claims.
+#[test]
+fn test_precheck_emit_writes_topic_and_triggered_from_effective_topic() {
+    let temp_dir = TempDir::new().expect("temp dir");
+    let temp_path = temp_dir.path();
+    std::fs::create_dir_all(temp_path.join(".ralph")).unwrap();
+
+    // Use the SAME 15-field valid payload as S1/S2/S3; this time
+    // we drop `--policy-check` so the event actually lands in
+    // `temp_path/.ralph/events.jsonl`.
+    let output = common::ralph_bin()
+        .args([
+            "emit",
+            "work.failed",
+            "--json",
+            &work_failed_minimal_valid_json(),
+        ])
+        .current_dir(temp_path)
+        .env("RALPH_HATS_SOURCE", "builtin:ce-executor-pipeline")
+        .env("RALPH_CURRENT_HAT", "executor")
+        .env("RALPH_EVENTS_FILE", temp_path.join(".ralph/events.jsonl"))
+        .output()
+        .expect("failed to execute ralph emit (no --policy-check)");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success(),
+        "U1: bare `work.failed` from executor must write successfully; \
+         exit={:?} stdout={stdout} stderr={stderr}",
+        output.status.code()
+    );
+
+    let events_path = temp_path.join(".ralph/events.jsonl");
+    assert!(
+        events_path.exists(),
+        "U1: events file must exist at {events_path:?}; stdout={stdout} stderr={stderr}"
+    );
+    let events_contents =
+        std::fs::read_to_string(&events_path).expect("read events.jsonl");
+    let last_line = events_contents
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .last()
+        .unwrap_or_else(|| panic!("U1: events.jsonl must contain at least one line; got: {events_contents}"));
+    let record: serde_json::Value = serde_json::from_str(last_line)
+        .unwrap_or_else(|e| panic!("U1: events.jsonl last line must be valid JSON: {e}; line={last_line}"));
+
+    assert_eq!(
+        record.get("topic").and_then(|v| v.as_str()),
+        Some("work.failed.proposed"),
+        "U1: on-disk topic must equal the rewritten `.proposed` topic; record={record}"
+    );
+    // `work.failed.proposed` is consumed in `ce-executor-pipeline`
+    // by the synthesized `precheck-work.failed` hat; the bare
+    // `work.failed` topic was consumed by `reporter`. The C1+A1
+    // bug had the JSONL row record `triggered="reporter"` while
+    // `topic="work.failed.proposed"`. Asserting the consumer of
+    // the *effective* topic locks the fix in place.
+    assert_eq!(
+        record.get("triggered").and_then(|v| v.as_str()),
+        Some("precheck-work.failed"),
+        "U1: triggered must equal the unique consumer of `work.failed.proposed`, \
+         not the bare `work.failed` consumer; record={record}"
+    );
+}
+
+/// S3 (U4 / R3): a producer emit that is missing a required field
+/// from the guarded schema MUST be rejected on the proposed path,
+/// not silently accepted (which would have been the pre-U4
+/// behaviour, because the synthesized `<X>.proposed` schema was
+/// a default `JsonObject` shell with no inherited
+/// `required_fields`).
+#[test]
+fn test_precheck_emit_missing_required_field_rejected_on_proposed() {
+    let temp_dir = TempDir::new().expect("temp dir");
+    let temp_path = temp_dir.path();
+    std::fs::create_dir_all(temp_path.join(".ralph")).unwrap();
+
+    // Same 14 of 15 required fields as the S1 fixture, but
+    // `dead_end_confidence` is omitted. The bare topic is
+    // rewritten to `work.failed.proposed` (S1 wiring), and the
+    // proposed schema inherits the guarded required fields (U4
+    // wiring), so policy-check must reject with
+    // `missing_required_field` for `dead_end_confidence`.
+    let payload = serde_json::json!({
+        "plan_name": "2026-07-29-006-fixture",
+        "plan_path": "docs/plans/2026-07-29-006-fixture.md",
+        "planned_units": ["U1"],
+        "attempted_units": [],
+        "completed_units": [],
+        "failed_units": [],
+        "blocked_units": [],
+        "skipped_units": [],
+        "baseline_verification_file": ".ralph/review/fixture/baseline-verification.md",
+        "decisions_file": ".ralph/agent/decisions.md",
+        "reason": "no_deliverable_commits: fixture",
+        "report_input_file": ".ralph/review/fixture/report-input.work-failed.json",
+        "dead_end_evidence_coverage": 80,
+        "dead_end_evidence_file": ".ralph/review/fixture/dead-end-evidence.md"
+    })
+    .to_string();
+
+    let output = common::ralph_bin()
+        .args([
+            "emit",
+            "work.failed",
+            "--json",
+            &payload,
+            "--policy-check",
+        ])
+        .current_dir(temp_path)
+        .env("RALPH_HATS_SOURCE", "builtin:ce-executor-pipeline")
+        .env("RALPH_CURRENT_HAT", "executor")
+        .env("RALPH_EVENTS_FILE", temp_path.join(".ralph/events.jsonl"))
+        .output()
+        .expect("failed to execute ralph emit --policy-check");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !output.status.success(),
+        "S3: missing required field must be rejected on the proposed path; \
+         exit={:?} stdout={stdout} stderr={stderr}",
+        output.status.code()
+    );
+    assert!(
+        stdout.contains("reason") || stderr.contains("reason") || stdout.contains("missing"),
+        "S3: stderr/stdout must name the missing field; stdout={stdout} stderr={stderr}"
+    );
+}

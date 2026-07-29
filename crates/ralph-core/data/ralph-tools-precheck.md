@@ -92,7 +92,7 @@ RALPH_PRECHECK_MODE=off ralph run ...
 
 ## 反模式
 
-- ❌ 手 emit `<X>.proposed` 绕过 producer 改写 — origin guard 会拒收
+- ❌ 手 emit `<X>.proposed` 试图绕过 producer 改写 — producer hat 显式发 `.proposed` 是合法且幂等的，但**仅当 hat 已发布该 proposed topic 时**；非 producer hat 发 `.proposed` 仍被 origin guard 拒收
 - ❌ 下游 hat 订阅 `<X>.proposed` 或 `<X>.rejected` — 拓扑错误；consumer 只订 `<X>`
 - ❌ 把 git diff / test pass / task 关闭等塞进 `precheck.rules.<X>.prompt` — 用 execution_contracts / event_policy
 - ❌ 看到 `<X>.rejected` 后自己再 emit bare `<X>` — 等 `task.resume` 打回 producer 重做

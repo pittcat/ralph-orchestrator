@@ -930,13 +930,45 @@ fn emit_command_with_root_and_hats(
         hat
     };
 
-    // 2026-07-03: isolated mode auto-derive `triggered` from the topic's
-    // registered subscriber. The runner previously set RALPH_TRIGGERED_HAT to
-    // the round-robin "next hat", which caused events like
-    // `review.dimension.ready` to be routed to the wrong hat (e.g. `shipper`
-    // instead of `dimension-reviewer`). When the agent is inside a runner-
-    // injected hat context and did not explicitly request a target, derive the
-    // target from the preset topology so the event bus routes correctly.
+    // 2026-07-29-006 fix U1 (correctness:C1 + adversarial:A1): the
+    // `maybe_derive_triggered_for_isolated` derivation MUST run AFTER
+    // the precheck rewrite below so it sees the effective topic, not
+    // the bare one. Before this reorder the JSONL row recorded
+    // `topic="work.failed.proposed"` (rewritten) but
+    // `triggered="reporter"` (consumer of the bare `work.failed`
+    // topic), and `check_envelope_triggered` only validated the hat
+    // id was in topology — it never cross-checked that
+    // `triggered` matched the effective topic, so the mismatch
+    // slipped through silently. There is intentionally no other
+    // change in this block: signature, body, surrounding gates, and
+    // the on-disk `record["triggered"] = serde_json::Value::String(triggered);`
+    // write at lines 1537-1538 are all left untouched.
+
+    // The pure resolver lives in `ralph_core::config::precheck` and
+    // encodes the six rules from plan U2 Approach (idempotent,
+    // kill-switch aware, scope-preserving); this block just owns
+    // the binding shadow so every downstream gate sees the same
+    // effective topic.
+    let topic_owned: String = match config.as_ref() {
+        Some(cfg) => ralph_core::config::resolve_precheck_emit_topic(
+            cfg,
+            hat.as_deref(),
+            topic,
+        ),
+        None => topic.to_string(),
+    };
+    let topic: &str = topic_owned.as_str();
+
+    // 2026-07-03: isolated mode auto-derive `triggered` from the
+    // topic's registered subscriber. The runner previously set
+    // RALPH_TRIGGERED_HAT to the round-robin "next hat", which
+    // caused events like `review.dimension.ready` to be routed to
+    // the wrong hat (e.g. `shipper` instead of `dimension-reviewer`).
+    // When the agent is inside a runner-injected hat context and
+    // did not explicitly request a target, derive the target from
+    // the preset topology so the event bus routes correctly. The
+    // topic passed here must be the EFFECTIVE (rewritten) topic so
+    // the JSONL row's `triggered` value matches its `topic`.
     let triggered =
         maybe_derive_triggered_for_isolated(topic, hat.as_deref(), triggered, config.as_ref());
 
@@ -1455,7 +1487,13 @@ fn emit_command_with_root_and_hats(
     }
 
     let mut record = serde_json::json!({
-        "topic": args.topic,
+        // 2026-07-29-006 plan U3 (R2): the on-disk event must carry
+        // the effective topic, not the bare user input. The
+        // precheck desugar rewrites the producer's `publishes` to
+        // `<X>.proposed`; the gate hat subscribes on that variant;
+        // writing `<X>` would land the event on a channel no one
+        // reads and bypass the gate entirely.
+        "topic": topic,
         "payload": payload_value,
         "ts": ts
     });
