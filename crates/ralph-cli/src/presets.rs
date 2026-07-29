@@ -2755,6 +2755,52 @@ mod tests {
         );
     }
 
+    // Plan 2026-07-29-005 U3: the four per-wave hats
+    // (reviewer / integrator / verifier / tester) must declare
+    // `event_filter.events` that cover the business-entry topics
+    // listed in their `triggers`. Without this coverage the runtime
+    // event filter silently drops new wave-scoped topics and the
+    // hat never activates.
+    //
+    // The matcher is structural: every `triggers` topic must
+    // appear in `event_filter.events`. Topics still present in
+    // `publishes` for backward-compat aliases do not have to be
+    // mirrored in the filter.
+    #[test]
+    fn test_parallel_forge_event_filter_covers_triggers() {
+        let preset = get_preset("parallel-forge").expect("parallel-forge preset must exist");
+        let config =
+            RalphConfig::parse_yaml(preset.content).expect("parallel-forge YAML should parse");
+        let registry = HatRegistry::from_config(&config);
+        use ralph_proto::HatId;
+        let target_hats = ["reviewer", "integrator", "verifier", "tester"];
+        let mut problems: Vec<String> = Vec::new();
+        for hat_id in target_hats {
+            let hat_id_typed = HatId::new(hat_id);
+            let Some(hat_cfg) = registry.get_config(&hat_id_typed) else {
+                problems.push(format!("hat `{hat_id}` missing from parallel-forge registry"));
+                continue;
+            };
+            let filter_events: std::collections::BTreeSet<&str> = match hat_cfg.event_filter.as_ref() {
+                Some(f) => f.events.iter().map(String::as_str).collect(),
+                None => std::collections::BTreeSet::new(),
+            };
+            for trigger in &hat_cfg.triggers {
+                if !filter_events.contains(trigger.as_str()) {
+                    problems.push(format!(
+                        "hat `{hat_id}` trigger `{trigger}` not covered by event_filter.events {:?}",
+                        filter_events
+                    ));
+                }
+            }
+        }
+        assert!(
+            problems.is_empty(),
+            "parallel-forge event_filter does not cover triggers: {}",
+            problems.join("; ")
+        );
+    }
+
     // WRC-U3 / T-WRC-U3-04 (Tier-0 contract): every preset listed in
     // `TIER_0_WAC_PRESETS` must produce a `RuntimeContractReport`
     // with **zero WAC `lint.preset.*` errors** when checked under

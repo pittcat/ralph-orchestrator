@@ -466,6 +466,31 @@ schemas:
         source: File at .ralph/forge/<plan-key>/waves/<wave_id>/corrections/round-<n>/report.md.
         fill_rule: Must exist; fixes applied, evidence, prior match.
 
+  forge.final.correction.settled:
+    required_fields:
+      - plan_key
+      - wave_id
+      - correction_round
+      - verification_log_path
+    payload: json_object
+    field_docs:
+      plan_key:
+        meaning: Forge plan key basename.
+        source: forge.correction.done.plan_key.
+        fill_rule: Must match .ralph/forge/<plan-key>/.
+      wave_id:
+        meaning: Final wave that exhausted the 3-round correction budget.
+        source: Last correction done event for this plan.
+        fill_rule: Stable id from forge.wave.worktrees.ready.
+      correction_round:
+        meaning: The final round number that exhausted the budget.
+        source: forge-failure-handler correction counter.
+        fill_rule: Integer 0..3.
+      verification_log_path:
+        meaning: Path to the final-correction verification log written by the tester.
+        source: File under .ralph/forge/<plan-key>/final-correction/verification.log.
+        fill_rule: Must exist before emit.
+
   forge.wave.settled:
     required_fields:
       - wave_id

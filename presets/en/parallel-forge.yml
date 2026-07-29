@@ -656,7 +656,10 @@ hats:
     terminal_events: [forge.wave.reviewed, forge.wave.review.failed, forge.units.reviewed, forge.plan.blocked]
     event_filter:
       enabled: true
-      events: [forge.exec.development.done]
+      events:
+        - forge.wave.worktrees.ready
+        - exec.wave.complete
+        - forge.correction.done
     instructions: |
       ## REVIEWER MODE
 
@@ -721,7 +724,9 @@ hats:
     terminal_events: [forge.wave.integrated, forge.wave.settled, forge.integration.done, work.failed]
     event_filter:
       enabled: true
-      events: [forge.units.reviewed]
+      events:
+        - forge.wave.reviewed
+        - forge.wave.verified
     instructions: |
       ## INTEGRATOR MODE
 
@@ -754,7 +759,9 @@ hats:
     terminal_events: [forge.wave.verified, forge.verification.failed, forge.incremental.verified, work.failed]
     event_filter:
       enabled: true
-      events: [forge.integration.done]
+      events:
+        - forge.wave.integrated
+        - forge.integration.done
     instructions: |
       ## VERIFIER MODE
 
@@ -774,13 +781,15 @@ hats:
   tester:
     name: "Tester"
     description: "Full regression and CI-equivalent gates after all Units integrated."
-    triggers: [forge.incremental.verified, forge.exec.development.done]
+    triggers: [forge.exec.development.done, forge.final.correction.settled]
     publishes: [forge.full.verified, work.failed]
     exempt_topics: [forge.full.verified, work.failed]
     terminal_events: [forge.full.verified, work.failed]
     event_filter:
       enabled: true
-      events: [forge.incremental.verified]
+      events:
+        - forge.exec.development.done
+        - forge.final.correction.settled
     instructions: |
       ## TESTER MODE
 
