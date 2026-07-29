@@ -636,6 +636,22 @@ pub const FINDING_PAYLOAD_CONSISTENCY_UNSAFE_MESSAGE: &str =
 pub const FINDING_FLOW_LINEAR_POSITIONAL_AMBIGUITY: &str =
     "preset.flow_linear_positional_ambiguity";
 
+// ──────────────────────────────────────────────────────────────────────────
+// 2026-07-29-003 plan U1: strict read-only hat lint finding IDs
+// ──────────────────────────────────────────────────────────────────────────
+
+/// 2026-07-29-003 plan U1: a strict read-only hat (denies both Edit and
+/// Write) declares no `allowed_write_paths` contract. Without the contract
+/// the workspace mutation guard cannot filter expected deltas, so every
+/// delta is a violation. Always `Error`.
+pub const FINDING_STRICT_READONLY_MISSING_WRITE_CONTRACT: &str =
+    "preset.strict_readonly_missing_write_contract";
+
+/// 2026-07-29-003 plan U1: an `allowed_write_paths` entry fails
+/// `workspace_mutation_guard::validate_allowed_path`. Always `Error`.
+pub const FINDING_STRICT_READONLY_INVALID_WRITE_PATH: &str =
+    "preset.strict_readonly_invalid_write_path";
+
 /// Inventory of every finding id in this module. Use this in tests
 /// that assert the lint surface does not silently re-introduce a
 /// serial-only or coordinator-loop finding. Plan 2026-07-07-006
@@ -704,4 +720,6 @@ pub const ALL_FINDING_IDS: &[&str] = &[
     FINDING_PAYLOAD_CONSISTENCY_NON_OBJECT_WHEN,
     FINDING_PAYLOAD_CONSISTENCY_UNSAFE_MESSAGE,
     FINDING_FLOW_LINEAR_POSITIONAL_AMBIGUITY,
+    FINDING_STRICT_READONLY_MISSING_WRITE_CONTRACT,
+    FINDING_STRICT_READONLY_INVALID_WRITE_PATH,
 ];

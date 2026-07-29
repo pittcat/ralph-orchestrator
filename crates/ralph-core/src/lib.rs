@@ -138,6 +138,7 @@ pub mod wave_prompt;
 pub mod wave_tracker;
 pub mod workflow_contract;
 pub mod workspace;
+pub mod workspace_mutation_guard;
 pub mod worktree;
 
 #[cfg(feature = "recording")]
