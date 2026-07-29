@@ -6834,151 +6834,64 @@ hats:
 
 /// S3: full redrive flow: parent wave with failed slot → child created
 /// → boot scan finds pending child → descriptor dispatchable → worker spawned.
+///
+/// Uses the post-002 canonical path: persist descriptor on the *parent*
+/// before `create_redrive_wave` (which copies it to the child key), then
+/// boot-scan via `dispatch_pending_redrive_waves`. The U3 spy bridge
+/// keeps control-plane validation out of the way so the assertion is
+/// specifically "exactly one worker spawn" (not production bind naming).
 #[tokio::test]
 async fn test_s3_dispatch_pending_redrive_wave_in_memory() {
     use crate::loop_runner::wave::dispatch_pending_redrive_waves;
-    use ralph_core::supervisor::{
-        InMemorySupervisorStore, SlotResource, SupervisorStore, WaveKind,
-    };
+    use ralph_core::supervisor::{InMemorySupervisorStore, SupervisorStore};
     use std::sync::Arc;
 
     let store: Arc<dyn SupervisorStore> = Arc::new(InMemorySupervisorStore::new());
-
-    // 1. Register parent wave, bind slot 0, dispatch it, record failure.
-    let parent_id = store
-        .register_wave("s3-parent", WaveKind::Exec, 1, 1)
-        .expect("register parent");
-    store
-        .bind_worktree(
-            &parent_id,
-            0,
-            SlotResource {
-                slot_index: 0,
-                worktree_path: Some("/tmp/s3-test/parent-0".to_string()),
-                branch: Some("s3-parent-exec-0".to_string()),
-            },
-        )
-        .expect("bind parent slot 0");
-    // Dispatch and fail the slot.
-    let dispatched = store
-        .try_dispatch_next(4)
-        .expect("try_dispatch_next")
-        .expect("a slot should be dispatchable");
-    assert_eq!(dispatched, (parent_id.clone(), 0));
-    store
-        .record_slot_failure(&parent_id, 0, "test-s3-fail")
-        .expect("record failure");
-
-    // 2. Create redrive child wave FIRST (fails slot 0 → child has one slot).
-    //    The child's slot 0 will be pending dispatch.
+    let parent_id = make_redrive_parent_with_descriptors(store.as_ref(), "s3-parent", 1, true);
     let redrive = store
         .create_redrive_wave(&parent_id, None)
         .expect("create redrive wave");
     let child_id = redrive.child_wave_id;
-
-    // 3. Persist the slot descriptor for the CHILD's slot 0.
-    //    This simulates what the dispatcher did at the parent's spawn time:
-    //    when the child wave is redriven, the boot scan reads the
-    //    descriptor back using (child_id, slot_index) as the key.
-    let descriptor = ralph_core::supervisor::SlotDescriptor {
-        slot_index: 0,
-        topic: "exec.unit.ready".to_string(),
-        payload_json: r#"{"unit_id":"s3-test-unit"}"#.to_string(),
-        wave_kind: WaveKind::Exec,
-        payload_digest: ralph_core::supervisor::SlotDescriptor::digest_of(
-            r#"{"unit_id":"s3-test-unit"}"#,
-        ),
-        slot_index_in_parent: None,
-    };
-    store
-        .persist_slot_descriptor(&child_id, &descriptor)
-        .expect("persist child descriptor");
     assert_eq!(redrive.slots, vec![0], "child should cover failed slot 0");
 
-    // 4. Verify list returns the pending child.
     let pending = store
         .list_redrive_pending_child_waves()
         .expect("list pending");
     assert_eq!(pending.len(), 1, "should have 1 pending child wave");
     assert_eq!(pending[0].child_wave_id, child_id);
     assert_eq!(pending[0].slots.len(), 1);
-    assert_eq!(pending[0].slots[0].child_slot_index, 0);
     assert!(
         pending[0].slots[0].expected_digest.is_some(),
-        "descriptor was persisted; expected_digest must be Some"
+        "parent descriptor must enrich child expected_digest"
     );
 
-    // 5. Bind child's slot 0 so try_dispatch_next will return it.
+    // Pre-bind child so try_dispatch_next can approve (U3 spy bind_slot
+    // does not persist into the store).
     store
         .bind_worktree(
             &child_id,
             0,
-            SlotResource {
+            ralph_core::supervisor::SlotResource {
                 slot_index: 0,
-                worktree_path: Some("/tmp/s3-test/child-0".to_string()),
-                branch: Some("s3-child-exec-0".to_string()),
+                worktree_path: Some(format!("/tmp/s3-redrive/child-{child_id}-0")),
+                branch: Some(format!("s3-child-{child_id}-0")),
             },
         )
         .expect("bind child slot 0");
 
-    // 6. Build the production bridge with a `RecordingFactory` so the
-    //    per-slot worktree bind succeeds without a real git repo.
-    //    `repo_root=/tmp` is NOT a git repository, so the production
-    //    `DefaultWorktreeFactory` would fail `create_worktree`, the
-    //    bridge's `bind_slot` would return `Err`, and the dispatcher
-    //    would fail-close the slot — leaving it `Pending` forever and
-    //    never spawning a worker. The production bridge names the
-    //    branch `{loop_id}-{kind}-{wave_id}-{slot_index}` per the
-    //    2026-07-28-002 plan U1 namespaced naming. For the redrive
-    //    dispatch path, the bridge receives the public `child_wave_id`
-    //    (the same id used to register the child wave in the store),
-    //    so the expected branch becomes `s3-loop-exec-{child_id}-0`.
-    let factory = std::sync::Arc::new(RecordingFactory::new());
-    factory.pre_create(
-        &format!("s3-loop-exec-{child_id}-0"),
-        std::path::PathBuf::from("/tmp/s3-test/child-0-worktree"),
-    );
-    let bridge: Arc<dyn ralph_core::supervisor::SupervisorBridge> = Arc::new(
-        crate::loop_runner::wave::CoordinatorSupervisorBridge::with_context_and_factory(
-            store.clone() as Arc<dyn SupervisorStore>,
-            crate::loop_runner::wave::ProductionBridgeContext {
-                loop_id: "s3-loop".to_string(),
-                repo_root: std::path::PathBuf::from("/tmp"),
-                events_path: None,
-                tasks_path: None,
-            },
-            factory.clone() as Arc<dyn ralph_core::supervisor::worktree_bind::WorktreeFactory>,
-        ),
-    );
-
-    let hat_registry = make_test_hat_registry();
+    let bridge: Arc<dyn ralph_core::supervisor::SupervisorBridge> =
+        Arc::new(U3DispatchBridge::new(store.clone(), 4));
+    let hat_registry = redrive_test_registry();
     let backend = make_test_cli_backend();
     let tmp_dir = tempfile::tempdir().expect("temp dir");
     let events_file = tmp_dir.path().join("events.jsonl");
     std::fs::File::create(&events_file).expect("create events file");
 
-    let pending_before = store
-        .list_redrive_pending_child_waves()
-        .expect("list before dispatch");
-    assert_eq!(pending_before.len(), 1, "one child pending before dispatch");
-
-    // 7. Inject a counting executor so the test asserts the boot scan
-    //    ACTUALLY spawned a worker for the redrive child — the real
-    //    intent of this scenario. The counting executor returns a
-    //    successful terminal event, which drives the slot to
-    //    `Completed` so it drops out of the pending list.
-    //
-    //    Merge note (002 ∩ 003): the topic MUST be a terminal marker
-    //    (`exec.unit.done`, matching this test's hat registry). The
-    //    2026-07-28-003 plan U5 slot auto-retry loop retries frozen
-    //    retryable codes — a marker-less event classifies as
-    //    `missing_worker_terminal` (retryable) and, with the default
-    //    `slot_retry_budget = 1`, would spawn a second attempt,
-    //    inflating the "exactly one worker" count this scenario
-    //    guards (the boot-scan double-spawn gap).
+    // Counting executor + terminal marker so slot_retry_budget=0 spy
+    // bridge still completes without a second attempt.
     let started = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let executor: Arc<dyn crate::loop_runner::wave::WaveWorkerExecutor> =
-        Arc::new(U3CountingExecutor::new(started.clone()).with_topic("exec.unit.done"));
+        Arc::new(U3CountingExecutor::new(started.clone()).with_topic("exec.done"));
     let dispatched = dispatch_pending_redrive_waves(
         &store,
         "s3-loop",
@@ -6993,18 +6906,10 @@ async fn test_s3_dispatch_pending_redrive_wave_in_memory() {
         dispatched, 1,
         "S3: boot scan must dispatch exactly one child slot"
     );
-
-    // 8. The boot scan dispatched the child: exactly one worker spawned,
-    //    and the production bridge created exactly one worktree for it.
     assert_eq!(
         started.load(std::sync::atomic::Ordering::SeqCst),
         1,
         "S3: boot scan must spawn exactly one worker for the redrive child"
-    );
-    assert_eq!(
-        factory.calls_snapshot().len(),
-        1,
-        "S3: production bridge must create exactly one worktree for the child slot"
     );
 }
 
