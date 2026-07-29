@@ -584,9 +584,9 @@ hats:
       coverage ≥75 + accepted precheck → `work.failed` with
       `dead_end_confidence` / `dead_end_evidence_*` payload. Otherwise
       keep retrying — never re-emit round 4.
-      4. Emit exactly one `work.failed` with `reason`, `plan_path`,
+      7. Emit exactly one `work.failed` with `reason`, `plan_path`,
          `context_artifact_path`, `forge_artifact_root`, `plan_key`.
-      5. Do not re-dispatch workers.
+      8. Do not re-dispatch workers.
 
   executor:
     name: "Executor"
@@ -640,8 +640,15 @@ hats:
 
       ### 步骤 8 — Emit
 
-      成功：`exec.unit.done`（透传 trigger 的 `task_id`、`task_key`、`wave_id`、`slot_index`、`unit_id`、`plan_key`,并附 `unit_report_path`、`content_hash`)。**禁止**手工 `ralph tools task close`;runtime 由事件投影原子关闭对应 task。
-      失败：`exec.unit.failed`（含 `reason`、`plan_key`）。本 activation 仅一条业务事件。
+      成功：`exec.unit.done`（透传 trigger 的 `task_id`、`task_key`、`wave_id`、`slot_index`、`unit_id`、`plan_key`，附 `unit_report_path`、`content_hash`）。
+      失败：`exec.unit.failed`（含 `reason`、`plan_key`）。
+
+      **task 不在本 activation 内关闭**：本 Unit 的 task 只在 `forge.wave.settled` 由
+      integrator 投影后，由 `state_projection.actions.forge.wave.settled`
+      `CloseTaskBatch` 原子批量关闭（settled_task_ids）。**禁止**手工调用
+      `ralph tools task close` 或在指令里暗示 `exec.unit.done` 会关 task。
+
+      本 activation 仅一条业务事件。
 
   reviewer:
     name: "Reviewer"
@@ -668,14 +675,21 @@ hats:
       OPAC: `ralph-tools-opac`. Before emit: `ralph tools skill load ralph-tools-emit` then `--policy-check`.
 
       ### Steps
-      1. From trigger `forge.exec.development.done` read `execution_plan_path` and `plan_key`.
-      2. List units from execution-plan + `ralph tools task list`.
-      3. Per unit: read `.ralph/forge/<plan_key>/units/<unit-id>-completion.md`; inspect diff in unit worktree (via worktree-map if needed).
-      4. Write `.ralph/forge/<plan_key>/reviews/<unit-id>-review.md` and `reviews/summary.md`.
-      5. If all APPROVED: emit `forge.wave.reviewed` (`wave_id`, `wave_index`, `unit_verdicts`, `aggregate_verdict: ACCEPTED`, `review_report_path`, `plan_key`).
-      6. Else: write `waves/<wave_id>/failure-observation.md`, emit `forge.wave.review.failed` with `failure_fingerprint` (kind + command + base SHA), `unit_verdicts`, `affected_task_ids`, `failure_observation_path`. The failure-handler owns the next step.
+      1. 从 trigger 读 `wave_id` / `wave_index` / `wave_total` /
+         `unit_verdicts` / `execution_plan_path` / `plan_key`。
+         trigger 入口固定为 `forge.wave.worktrees.ready` /
+         `exec.wave.complete` / `forge.correction.done`（per U3
+         event_filter 三选一）。
+      2. 列 unit：execution-plan + `ralph tools task list`。
+      3. 每 unit：读 `.ralph/forge/<plan_key>/units/<unit-id>-completion.md`；按 worktree-map 跳进 unit worktree 看 diff。
+      4. 写 `.ralph/forge/<plan_key>/reviews/<unit-id>-review.md` 与 `reviews/summary.md`。
+      5. 全 APPROVED：emit `forge.wave.reviewed`（`wave_id`、`wave_index`、`unit_verdicts`、`aggregate_verdict: ACCEPTED`、`review_report_path`、`plan_key`）。
+      6. 否则：写 `waves/<wave_id>/failure-observation.md`，emit `forge.wave.review.failed`（`failure_fingerprint` = kind + command + base SHA、`unit_verdicts`、`affected_task_ids`、`failure_observation_path`、`plan_key`）。forge-failure-handler 接管下一步。
 
-      Single business event per activation.
+      **禁止** emit `forge.units.reviewed`（旧 topic 仍保留在 `publishes` 作兼容别名；不在主路径上）。
+      **禁止** 直接 `work.failed` —— 失败走 `forge.wave.review.failed` observation。
+
+      单条业务事件 / activation。
 
   wave-fixer:
     name: "Wave Fixer"
@@ -735,20 +749,35 @@ hats:
       OPAC: `ralph-tools-opac`. Before emit: `ralph tools skill load ralph-tools-emit` then `--policy-check`.
 
       ### Steps
-      1. From trigger read `all_approved`, `execution_plan_path`, `plan_key`, `summary_path`. Abort if not all approved → write failure note, emit `work.failed` with context paths.
-      2. Observe `integration_branch`: read `.ralph/forge/<plan_key>/worktree-map.yml` (or projection
-         `forge.worktree_map_path` / `forge.integration_branch` if present). Use the real branch name
-         from that map — do not invent. Confirm with `git branch --list` on the main repo.
-      3. For each Unit in integration_order: rebase onto `integration_branch`, squash to one commit,
-         fast-forward merge; append `integration-log.md`.
-      4. Write `.ralph/forge/<plan_key>/integration-log.md` and `commit-map.yml`.
-      5. Verify linear history (one commit per Unit; no merge/WIP tails).
-      6. Precheck then emit `forge.integration.done` with all required fields:
-         `integration_branch`, `units_integrated`, `integration_log_path`, `integration_complete`,
-         `commit_map_path`, `linear_history`, `plan_key`.
-      7. On failure: write `failures/integrator-failed.md`, emit `work.failed` with context paths.
+      1. **入口一**（`forge.wave.reviewed`）：reviewer 接受，开始 candidate 写入。
+         从 trigger 取 `all_approved` / `execution_plan_path` / `plan_key` / `unit_verdicts` /
+         `review_report_path`。任一 unit REJECTED → 写 `waves/<wave_id>/failure-observation.md`，
+         emit `forge.wave.integration.failed`（schema 字段 + `failure_fingerprint` /
+         `affected_task_ids` / `affected_unit_ids`）；**禁止** 直接 `work.failed`。
+      2. **入口二**（`forge.wave.verified`）：verifier 通过。正式 FF `integration_branch`。
+         从 trigger 取 `verification_log_path` / `integration_branch` / `verified_base_commit` /
+         `candidate_commit_sha` / `settled_unit_ids` / `plan_key`。
+      3. 读取 `integration_branch`：从 worktree-map / projection `forge.integration_branch`；
+         用真名，不要发明；`git branch --list` 在主仓确认。
+      4. 按 `integration_order` 逐 unit rebase → squash → FF merge；append `integration-log.md`。
+      5. 写 `.ralph/forge/<plan_key>/integration-log.md` + `commit-map.yml`。
+      6. 校验线性历史（一 unit / 一 commit；无 merge/WIP tail）。
+      7. 入口一成功：emit `forge.wave.integrated`（`integration_branch`、`integration_log_path`、
+         `integration_complete`、`commit_map_path`、`linear_history`、`plan_key` 等 schema 字段）。
+      8. 入口二成功：emit `forge.wave.settled`（`wave_id`、`wave_index`、`settled_task_ids`、
+         `settled_unit_ids`、`verified_base_commit`、`plan_key`、`settlement_log_path`）。
+         **任务关闭由 runtime 在收到 `forge.wave.settled` 时通过 `CloseTaskBatch` 投影原子批量完成**；
+         本 hat 不调用 `ralph tools task close`。
+      9. 失败：写 `failures/integrator-failed.md` + 模板 `wave-failure.template.md` /
+         `merge-conflict.template.md`（per case），emit 对应 `forge.wave.integration.failed`
+         或 `forge.wave.settled` 缺路径的 `plan.blocked`；**禁止** 直接 `work.failed`。
 
-      Single business event only.
+      单 activation 一条业务事件（终态发 `forge.wave.integrated` /
+      `forge.wave.settled`；非终态失败发对应 `forge.wave.integration.failed` /
+      `plan.blocked`，不要再补 `work.failed`）。
+
+      主路径只用新 topic；旧 `forge.integration.done` 仅作兼容别名保留在
+      `publishes`，禁止在 steps 里 emit。
 
   verifier:
     name: "Verifier"
@@ -770,13 +799,24 @@ hats:
       OPAC: `ralph-tools-opac`. Before emit: `ralph tools skill load ralph-tools-emit` then `--policy-check`.
 
       ### Steps
-      1. Read `integration_log_path` and `plan_key` from trigger.
-      2. Run incremental test commands from development-plan / execution-plan.
-      3. Write `.ralph/forge/<plan_key>/incremental-verification.md`.
-      4. Success: emit `forge.incremental.verified` (`verification_log_path`, `passed`, `last_integrated_unit`, `plan_key`).
-      5. Failure: write `failures/verifier-failed.md`, emit `work.failed` with context paths.
+      1. 从 trigger 读 `integration_log_path` / `integration_branch` /
+         `verified_base_commit` / `plan_key`。trigger 入口固定为
+         `forge.wave.integrated` / `forge.integration.done`（后者仅兼容别名）。
+      2. 按 development-plan / execution-plan 跑 incremental test 命令。
+      3. 写 `.ralph/forge/<plan_key>/incremental-verification.md`。
+      4. 成功：emit `forge.wave.verified`（`wave_id`、`wave_index`、
+         `verification_log_path`、`passed`、`last_integrated_unit`、
+         `candidate_commit_sha`、`plan_key`）。
+      5. 失败：写 `failures/verifier-failed.md`（建议用 `wave-failure.template.md`
+         骨架），emit `forge.verification.failed`（`wave_id`、`wave_index`、
+         `candidate_commit_sha`、`failure_fingerprint`、`affected_task_ids`、
+         `plan_key`、`verification_failure_path`）。
+         **禁止** 直接 `work.failed`（plan 005 G5）；forge-failure-handler
+         接管下一轮。
 
-      Single business event.
+      单 activation 一条业务事件；主路径只用新 topic `forge.wave.verified` /
+      `forge.verification.failed`，旧 `forge.incremental.verified` 仅在
+      `publishes` 中作兼容别名保留。
 
   tester:
     name: "Tester"
@@ -798,13 +838,21 @@ hats:
       OPAC: `ralph-tools-opac`. Before emit: `ralph tools skill load ralph-tools-emit` then `--policy-check`.
 
       ### Steps
-      1. Read `verification_log_path` / `plan_key` from trigger (or projection).
-      2. Discover test/lint/build/CI commands from repo (README, CI, Makefile).
-      3. Run full regression; write `.ralph/forge/<plan_key>/full-verification.md`.
-      4. Success: emit `forge.full.verified` (`verification_report_path`, `all_required_passed`, `plan_key`).
-      5. Failure: write `failures/tester-failed.md`, emit `work.failed` with context paths.
+      1. 从 trigger 读 `verification_log_path`（或 final correction 的 `correction_report_path`）/
+         `plan_key`。trigger 入口为 `forge.exec.development.done`（首次全测）或
+         `forge.final.correction.settled`（3 轮 correction 耗尽后全测）。
+      2. 跑 development-plan / repo README+CI+Makefile 中声明的全量 test / lint /
+         build / typecheck 命令（per `ralph-tools-cmdref` 「materialize-artifacts」）。
+      3. 写 `.ralph/forge/<plan_key>/full-verification.md`。
+      4. 成功：emit `forge.full.verified`（`verification_report_path`、
+         `all_required_passed`、`plan_key`）。
+      5. 失败：写 `failures/tester-failed.md`（模板 `wave-failure.template.md`），
+         emit `forge.full.verification.failed` observation（schema 字段）；
+         **禁止** 直接 `work.failed` —— 失败走 observation，forge-failure-handler
+         接管是否进入 final correction（3 轮后 emit `forge.final.correction.settled`）。
 
-      Single business event.
+      单 activation 一条业务事件；主路径只发 `forge.full.verified` /
+      `forge.full.verification.failed`。
 
   auditor:
     name: "Auditor"

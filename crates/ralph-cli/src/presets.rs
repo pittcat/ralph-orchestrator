@@ -2801,6 +2801,68 @@ mod tests {
         );
     }
 
+    // Plan 2026-07-29-005 U4 / G8: the forge-failure-handler hat
+    // instructions must use a single consecutive step-number
+    // sequence. Before U4 the "Final correction (3 rounds
+    // exhausted)" sub-section reused the same `4.` / `5.` labels
+    // as the main correction flow, making agent navigation
+    // ambiguous (the same step number mapped to two distinct
+    // actions). The structural assertion below scans for any
+    // numbered list inside the hat instructions and rejects
+    // duplicate step numbers across the document.
+    #[test]
+    fn test_parallel_forge_failure_handler_step_numbering_is_consecutive() {
+        let preset = get_preset("parallel-forge").expect("parallel-forge preset must exist");
+        let config =
+            RalphConfig::parse_yaml(preset.content).expect("parallel-forge YAML should parse");
+        let registry = HatRegistry::from_config(&config);
+        use ralph_proto::HatId;
+        let hat_id_typed = HatId::new("forge-failure-handler");
+        let hat_cfg = registry
+            .get_config(&hat_id_typed)
+            .expect("forge-failure-handler must exist");
+        let body = &hat_cfg.instructions;
+
+        // Collect every "^\s*N\.\s" markdown numbered step.
+        // We do not assert the text of any step (avoid literal
+        // locking); only the numbering invariant.
+        let mut seen: Vec<u32> = Vec::new();
+        for line in body.lines() {
+            let trimmed = line.trim_start();
+            let digits: String = trimmed
+                .chars()
+                .take_while(|c| c.is_ascii_digit())
+                .collect();
+            if digits.is_empty() {
+                continue;
+            }
+            // require "<digits>. " (a period + whitespace) so we
+            // don't pick up arbitrary inline numbers.
+            let rest = &trimmed[digits.len()..];
+            if !rest.starts_with(". ") {
+                continue;
+            }
+            if let Ok(n) = digits.parse::<u32>() {
+                seen.push(n);
+            }
+        }
+        // Find any number that appears more than once.
+        let mut counts: std::collections::BTreeMap<u32, u32> =
+            std::collections::BTreeMap::new();
+        for n in &seen {
+            *counts.entry(*n).or_insert(0) += 1;
+        }
+        let duplicates: Vec<u32> = counts
+            .iter()
+            .filter_map(|(n, c)| if *c > 1 { Some(*n) } else { None })
+            .collect();
+        assert!(
+            duplicates.is_empty(),
+            "forge-failure-handler instructions reuse step numbers {duplicates:?}; \
+             plan 005 U4/G8 requires a single consecutive sequence"
+        );
+    }
+
     // WRC-U3 / T-WRC-U3-04 (Tier-0 contract): every preset listed in
     // `TIER_0_WAC_PRESETS` must produce a `RuntimeContractReport`
     // with **zero WAC `lint.preset.*` errors** when checked under
