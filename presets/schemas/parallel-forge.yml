@@ -271,6 +271,191 @@ schemas:
         source: Forge.wave.prepare.plan_key.
         fill_rule: Must match .ralph/forge/<plan-key>/.
 
+  forge.wave.review.failed:
+    required_fields:
+      - wave_id
+      - wave_index
+      - unit_verdicts
+      - failure_fingerprint
+      - affected_task_ids
+      - plan_key
+      - failure_observation_path
+    payload: json_object
+    field_docs:
+      wave_id:
+        meaning: Wave whose review failed.
+        source: Reviewer after collecting per-Unit verdicts.
+        fill_rule: Must match forge.wave.worktrees.ready.wave_id.
+      wave_index:
+        meaning: Wave index whose review failed.
+        source: Reviewer.
+        fill_rule: Non-negative integer.
+      unit_verdicts:
+        meaning: Per-Unit verdict map (unit_id → ACCEPTED / REJECTED).
+        source: Reviewer six-dimension audit.
+        fill_rule: One entry per fan-in unit, no duplicates.
+      failure_fingerprint:
+        meaning: Stable identifier for the failure pattern (kind+command+conflict+base SHA).
+        source: Reviewer.
+        fill_rule: Hash-like string; reused across rounds to detect duplicate hypotheses.
+      affected_task_ids:
+        meaning: Live task IDs in the failed wave.
+        source: ralph tools task list.
+        fill_rule: All failures only involve these tasks.
+      plan_key:
+        meaning: Forge plan key basename.
+        source: forge.wave.prepare.plan_key.
+        fill_rule: Must match .ralph/forge/<plan-key>/.
+      failure_observation_path:
+        meaning: Per-wave failure observation artifact.
+        source: File at .ralph/forge/<plan-key>/waves/<wave_id>/failure-observation.md.
+        fill_rule: Must exist; contains per-Unit SHA, command, conflict facts, prior match.
+
+  forge.verification.failed:
+    required_fields:
+      - wave_id
+      - wave_index
+      - candidate_commit_sha
+      - failure_fingerprint
+      - affected_task_ids
+      - plan_key
+      - verification_failure_path
+    payload: json_object
+    field_docs:
+      wave_id:
+        meaning: Wave whose verification failed.
+        source: Verifier.
+        fill_rule: Must match forge.wave.integrated.wave_id.
+      wave_index:
+        meaning: Wave index whose verification failed.
+        source: Verifier.
+        fill_rule: Non-negative integer.
+      candidate_commit_sha:
+        meaning: Candidate HEAD SHA that failed verification.
+        source: Verifier.
+        fill_rule: 40-char SHA.
+      failure_fingerprint:
+        meaning: Stable identifier for the verification failure.
+        source: Verifier.
+        fill_rule: Hash-like string; reused across rounds.
+      affected_task_ids:
+        meaning: Live task IDs in the failed wave.
+        source: ralph tools task list.
+        fill_rule: All failures only involve these tasks.
+      plan_key:
+        meaning: Forge plan key basename.
+        source: Forge.wave.prepare.plan_key.
+        fill_rule: Must match .ralph/forge/<plan-key>/.
+      verification_failure_path:
+        meaning: Per-wave verification failure log artifact.
+        source: File at .ralph/forge/<plan-key>/waves/<wave_id>/verification-failure.md.
+        fill_rule: Must list commands run and the failure manifest.
+
+  forge.correction.requested:
+    required_fields:
+      - wave_id
+      - wave_index
+      - correction_round
+      - affected_unit_ids
+      - affected_task_ids
+      - base_commit
+      - candidate_branch
+      - allowed_paths
+      - forbidden_paths
+      - plan_key
+      - failure_fingerprint
+      - correction_request_path
+    payload: json_object
+    field_docs:
+      wave_id:
+        meaning: Wave whose correction is requested.
+        source: forge-failure-handler.
+        fill_rule: Must match the failure event's wave_id.
+      wave_index:
+        meaning: Wave index whose correction is requested.
+        source: forge-failure-handler.
+        fill_rule: Non-negative integer.
+      correction_round:
+        meaning: 0-indexed round counter (max 3 different hypotheses).
+        source: forge-failure-handler.
+        fill_rule: 0..3; identical rounds not allowed.
+      affected_unit_ids:
+        meaning: Unit ids the wave-fixer is allowed to edit.
+        source: forge-failure-handler.
+        fill_rule: Subset of the wave's unit_ids.
+      affected_task_ids:
+        meaning: Live task IDs corresponding to affected_unit_ids.
+        source: ralph tools task list.
+        fill_rule: Each task_id maps to one affected_unit_id.
+      base_commit:
+        meaning: Verified base commit the fixer should branch from.
+        source: forge-failure-handler.
+        fill_rule: 40-char SHA.
+      candidate_branch:
+        meaning: Candidate branch carrying the failed work.
+        source: forge-failure-handler.
+        fill_rule: Branch name; never the formal integration branch.
+      allowed_paths:
+        meaning: Repo-relative paths the wave-fixer may modify.
+        source: forge-failure-handler from execution-plan unit allowed_files.
+        fill_rule: Subset of unit.template.yml allowed_paths.
+      forbidden_paths:
+        meaning: Repo-relative paths the wave-fixer must not touch.
+        source: forge-failure-handler from outside-of-unit scope.
+        fill_rule: Path policy guard.
+      plan_key:
+        meaning: Forge plan key basename.
+        source: forge.wave.prepare.plan_key.
+        fill_rule: Must match .ralph/forge/<plan-key>/.
+      failure_fingerprint:
+        meaning: Failure fingerprint the fixer must address.
+        source: forge-failure-handler.
+        fill_rule: Reads same fingerprint from failure event.
+      correction_request_path:
+        meaning: Correction request artifact.
+        source: File at .ralph/forge/<plan-key>/waves/<wave_id>/corrections/round-<n>.md.
+        fill_rule: Must exist; contains round, fingerprint, scope, evidence path.
+
+  forge.correction.done:
+    required_fields:
+      - wave_id
+      - wave_index
+      - correction_round
+      - commit_sha
+      - affected_unit_ids
+      - plan_key
+      - correction_report_path
+    payload: json_object
+    field_docs:
+      wave_id:
+        meaning: Wave whose correction is complete.
+        source: wave-fixer.
+        fill_rule: Must match the correction request's wave_id.
+      wave_index:
+        meaning: Wave index whose correction is complete.
+        source: wave-fixer.
+        fill_rule: Non-negative integer.
+      correction_round:
+        meaning: Round number that was just completed.
+        source: wave-fixer.
+        fill_rule: 0..3.
+      commit_sha:
+        meaning: Commit SHA the fixer pushed on the candidate branch.
+        source: wave-fixer.
+        fill_rule: 40-char SHA; on candidate branch.
+      affected_unit_ids:
+        meaning: Unit ids the fixer actually touched.
+        source: wave-fixer per diff.
+        fill_rule: Subset of allowed unit_ids.
+      plan_key:
+        meaning: Forge plan key basename.
+        source: forge.wave.prepare.plan_key.
+        fill_rule: Must match .ralph/forge/<plan-key>/.
+      correction_report_path:
+        meaning: Correction report artifact.
+        source: File at .ralph/forge/<plan-key>/waves/<wave_id>/corrections/round-<n>/report.md.
+        fill_rule: Must exist; fixes applied, evidence, prior match.
+
   forge.wave.settled:
     required_fields:
       - wave_id
