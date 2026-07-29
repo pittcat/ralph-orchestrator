@@ -171,6 +171,15 @@ work.done / fix.done
 - 报告 prose 不应用 byte-equality 测试锁死；用 schema、lint、事件场景和人工
   checklist 验证结构化合同。
 
+## Paired completion pattern（通用：终态事件字段一致性）
+
+适用范围：preset 的收尾 hat 需要先发出一个终态报告事件（如 `forge.report.done`），再发出 `LOOP_COMPLETE`。为防止 resume 或 recovery 用不同路径覆盖既有终态事实，启用 `event_loop.completion_payload_match` 强制两事件声明字段一致。
+
+- 配置：在 `event_loop.completion_payload_match` 声明 `topic`（前置终态事件）和 `fields`（必须一致的顶层字段，如 `report_path`）。runtime 会记录最近 accepted 的 `topic` payload，并在 `LOOP_COMPLETE` 时比较声明字段。
+- Reporter instructions：必须写明「resume 时不得重写既有报告事实，只能补发匹配 completion；若需新报告，必须先重发 `topic` 建立新基准」。
+- Schema 配套：`LOOP_COMPLETE` 的 schema `required_fields` 必须包含 `completion_payload_match.fields` 中声明的字段。
+- 未配置时行为不变（默认关闭）。FAILED / BLOCKED 报告仍可通过匹配 completion 正常终止。
+
 ## Declarative flow authority pattern（通用：跨 hat handoff 必须显式声明）
 
 适用范围：任何 preset 通过 `mechanism.flow` 表达多 hat handoff 时。

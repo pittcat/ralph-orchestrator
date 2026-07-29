@@ -231,6 +231,12 @@ pub enum CommitDelta {
         last_ts: String,
         last_topic: String,
     },
+
+    /// The most recent accepted event matched the configured
+    /// `completion_payload_match.topic`. The payload is recorded
+    /// so the completion gate can compare field values on resume
+    /// without re-scanning the full event log.
+    CompletionPredecessorRecorded { topic: String, payload: String },
 }
 
 /// Task state transition kind. Mirrors the lifecycle in

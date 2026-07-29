@@ -260,6 +260,7 @@ ralph emit <TOPIC> -j '...' --output json                  # 落盘：看 ok=tru
 **重要边界（避免误解）：**
 - Schema / `--policy-check` 通常只检查「路径字段是否存在且非空」，**不会**替你检查磁盘上文件是否可读。文件可读性必须你自己用第 2 步确认。
 - 若 hat instructions 允许「先 `report.done`（带 `report_path`）再 `LOOP_COMPLETE`」：路径字段与 `DELIVERABLE_PATH` 落在 **带路径字段的那次 emit / 那次 activation**；不要把 `report_path` 错绑到只有 `reason` 的 `LOOP_COMPLETE` 上。
+- **Paired completion 字段一致性**：当 preset 启用 `completion_payload_match` 时，`LOOP_COMPLETE` 的声明字段必须与最近 accepted 的 paired topic（如 `forge.report.done`）完全一致。runtime 会拒收不一致的 completion 并注入 correction；resume 时不得重写既有报告事实来制造新的成功终态。
 
 **停止条件：**
 - 文件写不出 / 不可读 → **不要** emit 那个要求路径字段的 topic；按 hat instructions 走失败/阻塞路径（通常仍须先落一份可读的失败说明，再带真实路径 emit）。

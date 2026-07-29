@@ -1071,3 +1071,216 @@ fn test_scope_violation_counter_reset_on_accepted_event() {
         "workflow_guard:coordinator:build_done:isolated_scope_violation:*"
     ));
 }
+
+// ============================================================================
+// U2: completion payload match gate
+// ============================================================================
+
+/// U2 / S4: matching `report_path` on `forge.report.done` and
+/// `LOOP_COMPLETE` is accepted for all terminal statuses
+/// (COMPLETED, FAILED, BLOCKED).
+#[test]
+fn completion_payload_match_accepts_matching_report_path_for_all_terminal_statuses() {
+    use crate::config::CompletionPayloadMatchConfig;
+    use tempfile::TempDir;
+
+    for status in ["COMPLETED", "FAILED", "BLOCKED"] {
+        let temp_dir = TempDir::new().unwrap();
+        let events_path = temp_dir.path().join("events.jsonl");
+
+        let mut config = RalphConfig::default();
+        config.core.workspace_root = temp_dir.path().to_path_buf();
+        config.event_loop.completion_payload_match = Some(CompletionPayloadMatchConfig {
+            topic: "forge.report.done".to_string(),
+            fields: vec!["report_path".to_string()],
+        });
+        config.event_loop.required_events = vec!["forge.report.done".to_string()];
+        let mut event_loop = EventLoop::new(config);
+        event_loop.initialize("Test");
+        event_loop.event_reader = crate::event_reader::EventReader::new(&events_path);
+
+        // Seed the predecessor payload.
+        let report_payload = format!(
+            r#"{{"report_path":"docs/reports/r.md","status":"{status}","final_audit":"ACCEPTED","plan_key":"p"}}"#
+        );
+        write_event_to_jsonl(&events_path, "forge.report.done", &report_payload);
+        let _ = event_loop.process_events_from_jsonl();
+
+        // Now emit LOOP_COMPLETE with the same report_path.
+        write_event_to_jsonl(
+            &events_path,
+            "LOOP_COMPLETE",
+            r#"{"report_path":"docs/reports/r.md"}"#,
+        );
+        let _ = event_loop.process_events_from_jsonl();
+
+        let reason = event_loop.check_completion_event();
+        assert_eq!(
+            reason,
+            Some(TerminationReason::CompletionPromise),
+            "status={status}: matching report_path must be accepted"
+        );
+    }
+}
+
+/// U2 / S5: mismatching `report_path` on `LOOP_COMPLETE` is rejected
+/// and produces a completion correction.
+#[test]
+fn completion_payload_match_rejects_different_report_path_and_injects_correction() {
+    use crate::config::CompletionPayloadMatchConfig;
+    use tempfile::TempDir;
+
+    let temp_dir = TempDir::new().unwrap();
+    let events_path = temp_dir.path().join("events.jsonl");
+
+    let mut config = RalphConfig::default();
+    config.core.workspace_root = temp_dir.path().to_path_buf();
+    config.event_loop.completion_payload_match = Some(CompletionPayloadMatchConfig {
+        topic: "forge.report.done".to_string(),
+        fields: vec!["report_path".to_string()],
+    });
+    config.event_loop.required_events = vec!["forge.report.done".to_string()];
+    let mut event_loop = EventLoop::new(config);
+    event_loop.initialize("Test");
+    event_loop.event_reader = crate::event_reader::EventReader::new(&events_path);
+
+    // Seed the predecessor payload.
+    write_event_to_jsonl(
+        &events_path,
+        "forge.report.done",
+        r#"{"report_path":"docs/reports/p1.md","status":"FAILED","final_audit":"REJECTED","plan_key":"p"}"#,
+    );
+    let _ = event_loop.process_events_from_jsonl();
+    assert!(
+        event_loop.state().last_completion_predecessor.is_some(),
+        "predecessor must be recorded after forge.report.done"
+    );
+
+    // Emit LOOP_COMPLETE with a different report_path.
+    write_event_to_jsonl(
+        &events_path,
+        "LOOP_COMPLETE",
+        r#"{"report_path":"docs/reports/p2.md"}"#,
+    );
+    let _ = event_loop.process_events_from_jsonl();
+    assert!(
+        event_loop.state().last_completion_payload.is_some(),
+        "completion payload must be recorded after LOOP_COMPLETE"
+    );
+
+    let reason = event_loop.check_completion_event();
+    assert!(
+        reason.is_none(),
+        "mismatched report_path must reject LOOP_COMPLETE without terminating (retryable), got {reason:?}"
+    );
+    assert!(
+        !event_loop.state().completion_requested,
+        "completion_requested must be cleared after rejection"
+    );
+    assert!(
+        event_loop
+            .state()
+            .prompt_context
+            .correction_blocks
+            .iter()
+            .any(|b| b.last_message.contains("payload mismatch")),
+        "correction block must mention payload mismatch"
+    );
+}
+
+/// U2 / S6: the match baseline survives snapshot replay; resume after
+/// `forge.report.done` still accepts a matching `LOOP_COMPLETE`.
+#[test]
+fn completion_payload_match_survives_snapshot_resume() {
+    use crate::config::CompletionPayloadMatchConfig;
+    use tempfile::TempDir;
+
+    let temp_dir = TempDir::new().unwrap();
+    let events_path = temp_dir.path().join("events.jsonl");
+
+    let mut config = RalphConfig::default();
+    config.core.workspace_root = temp_dir.path().to_path_buf();
+    config.event_loop.completion_payload_match = Some(CompletionPayloadMatchConfig {
+        topic: "forge.report.done".to_string(),
+        fields: vec!["report_path".to_string()],
+    });
+    config.event_loop.required_events = vec!["forge.report.done".to_string()];
+    let mut event_loop = EventLoop::new(config);
+    event_loop.initialize("Test");
+    event_loop.event_reader = crate::event_reader::EventReader::new(&events_path);
+
+    // Seed the predecessor payload.
+    write_event_to_jsonl(
+        &events_path,
+        "forge.report.done",
+        r#"{"report_path":"docs/reports/r.md","status":"COMPLETED","final_audit":"ACCEPTED","plan_key":"p"}"#,
+    );
+    let _ = event_loop.process_events_from_jsonl();
+
+    // Simulate resume: rebuild state from the ledger snapshot.
+    let snapshot = event_loop
+        .state()
+        .state_ledger
+        .as_ref()
+        .map(|l| l.snapshot().clone());
+    if let Some(snap) = snapshot {
+        assert!(
+            snap.last_completion_predecessor.is_some(),
+            "snapshot must carry the predecessor baseline"
+        );
+    }
+
+    // Emit LOOP_COMPLETE with the same report_path.
+    write_event_to_jsonl(
+        &events_path,
+        "LOOP_COMPLETE",
+        r#"{"report_path":"docs/reports/r.md"}"#,
+    );
+    let _ = event_loop.process_events_from_jsonl();
+
+    let reason = event_loop.check_completion_event();
+    assert_eq!(
+        reason,
+        Some(TerminationReason::CompletionPromise),
+        "resume with matching report_path must be accepted"
+    );
+}
+
+/// U2 / characterization: when `completion_payload_match` is not
+/// configured, the completion gate is a no-op and mismatched paths
+/// are accepted (preserving pre-U2 behaviour).
+#[test]
+fn completion_payload_match_is_noop_when_unconfigured() {
+    use tempfile::TempDir;
+
+    let temp_dir = TempDir::new().unwrap();
+    let events_path = temp_dir.path().join("events.jsonl");
+
+    let mut config = RalphConfig::default();
+    config.core.workspace_root = temp_dir.path().to_path_buf();
+    config.event_loop.required_events = vec!["forge.report.done".to_string()];
+    let mut event_loop = EventLoop::new(config);
+    event_loop.initialize("Test");
+    event_loop.event_reader = crate::event_reader::EventReader::new(&events_path);
+
+    write_event_to_jsonl(
+        &events_path,
+        "forge.report.done",
+        r#"{"report_path":"docs/reports/p1.md","status":"FAILED","final_audit":"REJECTED","plan_key":"p"}"#,
+    );
+    let _ = event_loop.process_events_from_jsonl();
+
+    write_event_to_jsonl(
+        &events_path,
+        "LOOP_COMPLETE",
+        r#"{"report_path":"docs/reports/p2.md"}"#,
+    );
+    let _ = event_loop.process_events_from_jsonl();
+
+    let reason = event_loop.check_completion_event();
+    assert_eq!(
+        reason,
+        Some(TerminationReason::CompletionPromise),
+        "unconfigured gate must accept mismatched paths"
+    );
+}

@@ -800,6 +800,10 @@ fn apply_delta_is_exhaustive() {
         last_ts: "t".to_string(),
         last_topic: "topic".to_string(),
     });
+    snap.apply_delta(&CommitDelta::CompletionPredecessorRecorded {
+        topic: "forge.report.done".to_string(),
+        payload: r#"{"report_path":"a.md"}"#.to_string(),
+    });
 
     // The exhaustive walk is the assertion: if any variant is
     // added without a branch, this test fails to compile.
@@ -1225,6 +1229,37 @@ fn p1_4_no_progress_turn_observed_preserves_dimension() {
     assert_eq!(
         snap.iteration, 3,
         "P1-4: replayed iter must equal the last CounterChanged value (3)"
+    );
+}
+
+/// U2 (plan 2026-07-29-002): `CompletionPredecessorRecorded`
+/// round-trips through commit → replay and restores the
+/// `last_completion_predecessor` baseline.
+#[test]
+fn completion_predecessor_recorded_survives_replay() {
+    let dir = workspace();
+    let workspace = dir.path();
+
+    let mut ledger = StateLedger::new(workspace, true);
+    ledger
+        .commit(
+            CommitDelta::CompletionPredecessorRecorded {
+                topic: "forge.report.done".to_string(),
+                payload: r#"{"report_path":"docs/reports/r.md","status":"COMPLETED"}"#.to_string(),
+            },
+            Some("loop.completion_predecessor".to_string()),
+        )
+        .unwrap();
+    drop(ledger);
+
+    let snap = StateLedger::replay_from_disk(workspace).expect("replay");
+    assert_eq!(
+        snap.last_completion_predecessor,
+        Some((
+            "forge.report.done".to_string(),
+            r#"{"report_path":"docs/reports/r.md","status":"COMPLETED"}"#.to_string()
+        )),
+        "replay must restore the predecessor baseline"
     );
 }
 

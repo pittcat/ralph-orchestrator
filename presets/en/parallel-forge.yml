@@ -164,6 +164,9 @@ event_loop:
   completion_promise: "LOOP_COMPLETE"
   required_events:
     - forge.report.done
+  completion_payload_match:
+    topic: forge.report.done
+    fields: [report_path]
   path_required_events: []
   starting_event: forge.start
   max_iterations: 60
@@ -766,9 +769,17 @@ hats:
       1. `test -f` 报告路径；记下同一 `report_path`。
       2. emit `forge.report.done`（`report_path`、`status`、`final_audit`、`plan_key`）。
       3. 再 emit `LOOP_COMPLETE`（reporter 窄例外双终态），payload 必须含同一 `report_path`
-        （与 schema required_fields 一致；禁止省略）。
+        （与 schema required_fields 一致；禁止省略）。**runtime 门禁会强制比较**
+        `LOOP_COMPLETE.report_path` 与最近 accepted `forge.report.done.report_path`；
+        不一致会被拒收并 correction。
       4. 打印 `DELIVERABLE_PATH: <report_path>`。
       5. 执行 worktree cleanup（见上）。
+
+      ### Resume 规则
+
+      若 loop 在 `forge.report.done` 后中断，resume 时**不得**重写既有 audit/report
+      事实来制造新的成功终态。只能补发与先前 `forge.report.done.report_path` 匹配的
+      `LOOP_COMPLETE`；若需新报告，必须先重发 `forge.report.done` 建立新基准。
 
 state_projection:
   actions:

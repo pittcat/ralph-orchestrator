@@ -545,6 +545,8 @@ mod tests {
             state_machine_runtime_state: None,
             last_verdict_payload: None,
             last_upstream_verdict_payload: None,
+            last_completion_predecessor: None,
+            last_completion_payload: None,
             completion_rejection_signature: None,
             consecutive_completion_rejections: 0,
             // 2026-06-16-001 U5: progress-steward counters in the

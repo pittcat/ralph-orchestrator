@@ -3041,6 +3041,56 @@ impl EventLoop {
             }
         }
 
+        // Completion payload match gate: when configured, the completion
+        // payload must carry the same top-level field values as the most
+        // recent accepted predecessor event on the configured topic.
+        if let Some(match_cfg) = self.config.event_loop.completion_payload_match.clone() {
+            if let Some((predecessor_topic, predecessor_payload)) =
+                self.state.last_completion_predecessor.clone()
+            {
+                let completion_payload = self
+                    .state
+                    .last_completion_payload
+                    .as_deref()
+                    .unwrap_or("{}");
+                let mismatch = Self::completion_payload_mismatch(
+                    &match_cfg,
+                    &predecessor_payload,
+                    completion_payload,
+                );
+                if let Some(reason) = mismatch {
+                    warn!(
+                        topic = %predecessor_topic,
+                        reason = %reason,
+                        "Rejecting LOOP_COMPLETE: completion payload mismatch"
+                    );
+                    let sig = format!("completion_payload_mismatch:{predecessor_topic}");
+                    if let Some(reason) = self.handle_completion_rejection(sig, self.count_tasks())
+                    {
+                        return Some(reason);
+                    }
+                    self.state.completion_requested = false;
+
+                    let free_form = format!(
+                        "LOOP_COMPLETE rejected: payload mismatch on {topic} ({reason}). \
+                         The completion payload must carry the same field values as the \
+                         most recent accepted {topic} event. Re-emit with matching values \
+                         or use loop.cancel to abort.",
+                        topic = predecessor_topic,
+                        reason = reason,
+                    );
+                    if let Some(stuck) = Self::inject_completion_correction(
+                        &mut self.state,
+                        "completion_payload_mismatch",
+                        &free_form,
+                    ) {
+                        return Some(stuck);
+                    }
+                    return None;
+                }
+            }
+        }
+
         // Workflow guard completion validation: ensure all started guarded instances are terminal.
         // State-machine configs use their instance lifecycle as the completion source of truth.
         if !state_machine_enabled
@@ -3419,6 +3469,49 @@ impl EventLoop {
                 .and_then(|v| v.as_str())
                 .is_some_and(|s| s == gate.fail_value)
         }
+    }
+
+    /// Compare the top-level fields declared in `match_cfg` between
+    /// the predecessor payload and the completion payload. Returns
+    /// `Some(reason)` on mismatch, missing field, or non-object
+    /// payload; `None` when all declared fields match.
+    fn completion_payload_mismatch(
+        match_cfg: &crate::config::CompletionPayloadMatchConfig,
+        predecessor_payload: &str,
+        completion_payload: &str,
+    ) -> Option<String> {
+        let pred: serde_json::Value = match serde_json::from_str(predecessor_payload) {
+            Ok(v) => v,
+            Err(_) => return Some("predecessor payload is not valid JSON".to_string()),
+        };
+        let comp: serde_json::Value = match serde_json::from_str(completion_payload) {
+            Ok(v) => v,
+            Err(_) => return Some("completion payload is not valid JSON".to_string()),
+        };
+        let pred_obj = pred.as_object()?;
+        let comp_obj = comp.as_object()?;
+        for field in &match_cfg.fields {
+            let pred_val = pred_obj.get(field);
+            let comp_val = comp_obj.get(field);
+            match (pred_val, comp_val) {
+                (Some(p), Some(c)) if p == c => continue,
+                (Some(p), Some(c)) => {
+                    return Some(format!(
+                        "field '{field}' mismatch: predecessor={p}, completion={c}"
+                    ));
+                }
+                (Some(_), None) => {
+                    return Some(format!("field '{field}' missing in completion payload"));
+                }
+                (None, Some(_)) => {
+                    return Some(format!("field '{field}' missing in predecessor payload"));
+                }
+                (None, None) => {
+                    return Some(format!("field '{field}' missing in both payloads"));
+                }
+            }
+        }
+        None
     }
 
     /// Initializes the loop by publishing the start event.
@@ -8007,6 +8100,10 @@ impl EventLoop {
         let verdict_topics_slice = verdict_topics.as_deref();
         self.state
             .record_verdict_if_match(&default_event, verdict_topics_slice);
+        self.state.record_completion_predecessor_if_match(
+            &default_event,
+            self.config.event_loop.completion_payload_match.as_ref(),
+        );
 
         debug!(
             hat = %hat_id.as_str(),
@@ -11655,6 +11752,7 @@ impl EventLoop {
                 let accepted = Event::new(event.topic.as_str(), &payload);
                 accepted_log_events.push(accepted.clone());
                 self.state.record_event(&accepted);
+                self.state.last_completion_payload = Some(payload.to_string());
                 self.diagnostics.log_orchestration(
                     self.state.iteration,
                     "jsonl",
@@ -12166,6 +12264,8 @@ impl EventLoop {
         // Record and diagnose validated events (before consuming them).
         let verdict_topics = self.verdict_gate_topics();
         let verdict_topics_slice = verdict_topics.as_deref();
+        // U2: collect predecessor deltas for post-loop ledger commit.
+        let mut completion_predecessor_deltas: Vec<crate::state::CommitDelta> = Vec::new();
         for event in &validated_events {
             // 2026-06-30-001 P0-3 (primary-20260630-032648
             // diagnosis): the runtime rejects
@@ -12262,6 +12362,21 @@ impl EventLoop {
             self.mark_required_event_seen(event.topic.as_str());
             self.state
                 .record_verdict_if_match(event, verdict_topics_slice);
+            self.state.record_completion_predecessor_if_match(
+                event,
+                self.config.event_loop.completion_payload_match.as_ref(),
+            );
+            // U2: collect predecessor delta for post-loop ledger commit.
+            if let Some(cfg) = self.config.event_loop.completion_payload_match.as_ref()
+                && event.topic.as_str() == cfg.topic
+            {
+                completion_predecessor_deltas.push(
+                    crate::state::CommitDelta::CompletionPredecessorRecorded {
+                        topic: event.topic.to_string(),
+                        payload: event.payload.to_string(),
+                    },
+                );
+            }
 
             // U3: Update hat lifecycle tracker for accepted events.
             // Find the source hat for this event and update the tracker.
@@ -12504,6 +12619,21 @@ impl EventLoop {
         // coordinator hat now derives plan structure from the
         // plan file via prompt context instead of engine-side
         // regex parsing.
+
+        // U2: commit collected predecessor deltas now that
+        // `state_ledger` is restored.
+        if let Some(ref mut ledger) = self.state.state_ledger {
+            for delta in completion_predecessor_deltas {
+                if let Err(e) =
+                    ledger.commit(delta, Some("loop.completion_predecessor".to_string()))
+                {
+                    tracing::warn!(
+                        error = %e,
+                        "U2: completion predecessor commit failed; loop continues"
+                    );
+                }
+            }
+        }
 
         // A1 (002-adversarial-review / 003-adversarial-review
         // P0-1): when the unified ledger is wired in, mirror

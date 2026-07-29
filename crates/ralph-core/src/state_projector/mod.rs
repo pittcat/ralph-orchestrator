@@ -705,7 +705,8 @@ impl StateProjector {
             | CommitDelta::TaskAbandoned { .. }
             | CommitDelta::ReviewStepUpdated { .. }
             | CommitDelta::FlowLifecycleUpdated { .. }
-            | CommitDelta::RejectionDigestUpdated { .. } => {
+            | CommitDelta::RejectionDigestUpdated { .. }
+            | CommitDelta::CompletionPredecessorRecorded { .. } => {
                 debug!(
                     delta_kind = ?std::mem::discriminant(&commit.delta),
                     "apply_from_ledger no-op for non-ledger delta"

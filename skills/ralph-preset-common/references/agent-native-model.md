@@ -175,6 +175,7 @@ Review 模拟每 hat 时，按上面七段核对每条 Q2 Observe / Q4 字段的
 - 终态 emit 前夹带其它业务事件
 - 在 `crates/ralph-core/data/*.md` 写 preset 专用 hat 名 / 拓扑 / 一次性诊断术语（专用知识只放 preset instructions）
 - 引用未声明的 payload 字段（即便 schema 通过）
+- `LOOP_COMPLETE` 与前置终态事件路径字段不一致（启用 `completion_payload_match` 时 runtime 会拒收）
 
 ### Artifact-First 边界（业务 artifact vs runtime internal ledger）
 

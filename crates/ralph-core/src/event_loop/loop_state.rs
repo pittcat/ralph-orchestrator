@@ -416,6 +416,21 @@ pub struct LoopState {
     /// seen.
     pub last_upstream_verdict_payload: Option<String>,
 
+    /// Topic and payload of the most recent accepted event that
+    /// matched the configured `completion_payload_match.topic`.
+    /// Used by the completion payload match gate to enforce that
+    /// `LOOP_COMPLETE` carries the same field values as the
+    /// terminal report. `None` when no such event has been
+    /// observed or no gate is configured.
+    pub last_completion_predecessor: Option<(String, String)>,
+
+    /// Payload of the most recent completion event that was
+    /// accepted by `mark_completion_requested`. Used by the
+    /// completion payload match gate to compare field values
+    /// against the predecessor payload. `None` until a
+    /// completion event is accepted.
+    pub last_completion_payload: Option<String>,
+
     /// Signature of the most recent completion rejection (for stale-breaker).
     pub completion_rejection_signature: Option<String>,
 
@@ -872,6 +887,8 @@ impl Default for LoopState {
             last_verdict_payload: None,
             last_verdict_topic: None,
             last_upstream_verdict_payload: None,
+            last_completion_predecessor: None,
+            last_completion_payload: None,
             completion_rejection_signature: None,
             consecutive_completion_rejections: 0,
             // 2026-06-16-001 U5: stall counter starts at 0. The
@@ -1590,6 +1607,25 @@ impl LoopState {
         } else {
             self.consecutive_same_signature = 1;
             self.last_emitted_signature = Some(signature);
+        }
+    }
+
+    /// Records the payload of an event if its topic matches the
+    /// configured `completion_payload_match.topic`. Called alongside
+    /// `record_event` at every accepted-event site. The most recent
+    /// matching payload is retained so `check_completion_event` can
+    /// compare field values without re-scanning event history.
+    pub fn record_completion_predecessor_if_match(
+        &mut self,
+        event: &Event,
+        match_config: Option<&crate::config::CompletionPayloadMatchConfig>,
+    ) {
+        let Some(cfg) = match_config else {
+            return;
+        };
+        if event.topic.as_str() == cfg.topic {
+            self.last_completion_predecessor =
+                Some((event.topic.to_string(), event.payload.clone()));
         }
     }
 

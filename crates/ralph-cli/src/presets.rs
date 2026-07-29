@@ -1360,6 +1360,25 @@ mod tests {
         }
     }
 
+    /// Plan 2026-07-29-002 U2 / R2: the embedded parallel-forge
+    /// preset must enable `completion_payload_match` on
+    /// `forge.report.done` with `report_path` as the compared field.
+    /// This is the runtime contract that prevents a mismatched
+    /// `LOOP_COMPLETE` from overwriting the terminal report fact.
+    #[test]
+    fn test_parallel_forge_configures_report_done_path_match() {
+        let preset = get_preset("parallel-forge").expect("parallel-forge preset");
+        let config = RalphConfig::parse_yaml(preset.content).expect("parallel-forge YAML parses");
+        let match_cfg = config
+            .event_loop
+            .completion_payload_match
+            .as_ref()
+            .expect("parallel-forge must configure completion_payload_match");
+        assert_eq!(match_cfg.topic, "forge.report.done");
+        assert_eq!(match_cfg.fields, vec!["report_path"]);
+        assert!(match_cfg.validate().is_ok());
+    }
+
     #[test]
     fn test_ce_executor_reporter_publishes_report_done() {
         // Static-config guard for the completion-gate event. The chain test above

@@ -430,6 +430,17 @@ pub struct EventLoopConfig {
     #[serde(default)]
     pub phase_config: Option<PhaseConfig>,
 
+    /// Opt-in completion payload match gate: rejects `completion_promise`
+    /// when the payload of the most recent accepted `topic` event does not
+    /// match the completion payload on the declared `fields`.
+    ///
+    /// Use to enforce that a terminal report event (e.g. `forge.report.done`)
+    /// and the final `LOOP_COMPLETE` carry the same artifact path. When
+    /// `None` (default), no payload match check is performed — preserves
+    /// backward compatibility.
+    #[serde(default)]
+    pub completion_payload_match: Option<CompletionPayloadMatchConfig>,
+
     /// Opt-in verdict gate: rejects LOOP_COMPLETE when the most recent event
     /// matching `topic` carries `fail_field == fail_value` in its payload.
     ///
@@ -715,6 +726,7 @@ impl Default for EventLoopConfig {
             event_policy: None,
             state_machine: None,
             phase_config: None,
+            completion_payload_match: None,
             verdict_gate: None,
             execution_contracts: None,
             // 2026-07-02-004 plan milestone A (U1):
@@ -834,6 +846,51 @@ pub struct VerdictGateConfig {
     /// `None` (legacy binary match path).
     #[serde(default)]
     pub residual_count_field: Option<String>,
+}
+
+/// Opt-in completion payload match gate. When configured, the loop
+/// records the payload of the most recent accepted event on `topic`
+/// and rejects `completion_promise` unless the declared top-level
+/// `fields` have equal values in both payloads.
+///
+/// Plan ref: U2 of
+/// `docs/plans/2026-07-29-002-fix-parallel-forge-terminal-consistency-plan.md`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct CompletionPayloadMatchConfig {
+    /// Topic whose most recent accepted payload is the match baseline.
+    pub topic: String,
+
+    /// Top-level JSON field names to compare between the baseline
+    /// payload and the completion payload. Must be non-empty and
+    /// contain no duplicates.
+    pub fields: Vec<String>,
+}
+
+impl CompletionPayloadMatchConfig {
+    /// Validate the config: topic non-empty, fields non-empty and unique.
+    pub fn validate(&self) -> Result<(), String> {
+        if self.topic.trim().is_empty() {
+            return Err("completion_payload_match.topic must be non-empty".to_string());
+        }
+        if self.fields.is_empty() {
+            return Err("completion_payload_match.fields must be non-empty".to_string());
+        }
+        let mut seen = std::collections::HashSet::new();
+        for f in &self.fields {
+            if f.trim().is_empty() {
+                return Err(
+                    "completion_payload_match.fields must not contain empty names".to_string(),
+                );
+            }
+            if !seen.insert(f) {
+                return Err(format!(
+                    "completion_payload_match.fields contains duplicate: {f}"
+                ));
+            }
+        }
+        Ok(())
+    }
 }
 
 /// Orchestration phase enum.
@@ -1103,6 +1160,52 @@ handoff_envelope:
         assert!(cfg.handoff_envelope.enabled);
         assert!(cfg.handoff_envelope.validate_payload);
         assert!(!cfg.handoff_envelope.prompt_injection);
+    }
+
+    /// U2 (plan 2026-07-29-002): `completion_payload_match` config
+    /// parses from YAML and validates topic/fields constraints.
+    #[test]
+    fn completion_payload_match_config_parses_and_validates() {
+        let yaml = r"
+topic: forge.report.done
+fields: [report_path]
+";
+        let cfg: CompletionPayloadMatchConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(cfg.topic, "forge.report.done");
+        assert_eq!(cfg.fields, vec!["report_path"]);
+        assert!(cfg.validate().is_ok());
+
+        // Empty topic rejected.
+        let bad = CompletionPayloadMatchConfig {
+            topic: "".to_string(),
+            fields: vec!["report_path".to_string()],
+        };
+        assert!(bad.validate().is_err());
+
+        // Empty fields rejected.
+        let bad = CompletionPayloadMatchConfig {
+            topic: "forge.report.done".to_string(),
+            fields: vec![],
+        };
+        assert!(bad.validate().is_err());
+
+        // Duplicate fields rejected.
+        let bad = CompletionPayloadMatchConfig {
+            topic: "forge.report.done".to_string(),
+            fields: vec!["a".to_string(), "a".to_string()],
+        };
+        assert!(bad.validate().is_err());
+    }
+
+    /// U2: `EventLoopConfig` without `completion_payload_match`
+    /// defaults to `None` (zero regression).
+    #[test]
+    fn event_loop_config_defaults_completion_payload_match_to_none() {
+        let yaml = r#"
+prompt_file: "PROMPT.md"
+"#;
+        let cfg: EventLoopConfig = serde_yaml::from_str(yaml).unwrap();
+        assert!(cfg.completion_payload_match.is_none());
     }
 }
 

@@ -239,6 +239,13 @@ pub struct LedgerSnapshot {
     /// Most recent upstream verdict payload.
     pub last_upstream_verdict_payload: Option<String>,
 
+    // ---- completion payload match (U2) --------------------------
+    /// Topic and payload of the most recent accepted event that
+    /// matched the configured `completion_payload_match.topic`.
+    /// Persisted so resume can rebuild the match baseline without
+    /// re-scanning the full event log.
+    pub last_completion_predecessor: Option<(String, String)>,
+
     // ---- recovery envelope state (U6 responder) ---------------
     /// Sticky findings the responder still has to publish. U6
     /// wires the responder; U1 models the storage only.
@@ -501,6 +508,9 @@ impl LedgerSnapshot {
                         last_topic: last_topic.clone(),
                     },
                 );
+            }
+            CommitDelta::CompletionPredecessorRecorded { topic, payload } => {
+                self.last_completion_predecessor = Some((topic.clone(), payload.clone()));
             }
         }
     }
