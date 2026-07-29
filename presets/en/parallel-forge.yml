@@ -515,6 +515,13 @@ hats:
     timeout: 3600
     idle_heartbeat_secs: 600
     idle_weak_signal_cap: 8
+    # Cold-start grace window (mirrors ce-executor-supervisor worker). Before
+    # the first qualifying signal (Strong/Weak stdout line or events-file
+    # growth), the supervisor uses `startup_grace_secs` as the idle window so
+    # slow-warming backends (Claude / Gemini / Codex headless) are not
+    # idle-killed during their startup phase. After the first signal, the
+    # regular `idle_heartbeat_secs` window takes over.
+    startup_grace_secs: 300
     triggers: [exec.unit.ready]
     publishes: [exec.unit.done, exec.unit.failed]
     exempt_topics: [exec.unit.done, exec.unit.failed]
