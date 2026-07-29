@@ -2687,6 +2687,34 @@ mod tests {
                         preset.name
                     ));
                 }
+                // Plan 2026-07-29-005 U1: the static wave / order /
+                // digest pointers must be declared so the projector
+                // activates `validate_wave_schedule` for parallel-forge
+                // (R2–R4). Without these three pointers the projector
+                // silently takes the legacy DAG-only branch and the
+                // static schedule contract is unenforced.
+                if let StateProjectionAction::EnsureTaskBatch {
+                    execution_wave,
+                    integration_order,
+                    execution_plan_digest,
+                    ..
+                } = action
+                {
+                    let pointers = [
+                        ("execution_wave", execution_wave.as_deref()),
+                        ("integration_order", integration_order.as_deref()),
+                        ("execution_plan_digest", execution_plan_digest.as_deref()),
+                    ];
+                    for (field, value) in pointers {
+                        if value.is_none() {
+                            bad_presets.push(format!(
+                                "{}: forge.plan.ready EnsureTaskBatch must declare `{}` pointer; \
+                                 without it the projector skips validate_wave_schedule (plan 005 U1)",
+                                preset.name, field
+                            ));
+                        }
+                    }
+                }
                 // Plan 2026-07-29-001 U3: `forge.wave.settled`
                 // is now the only state-authority path that closes
                 // tasks for parallel-forge (slot → wave settlement
