@@ -70,6 +70,7 @@ ralph tools task show <task-id> [--format table|json|quiet]
   - `task_key` 中的 step 段（例如 `:fix-02:`）必须与 `step` 字段完全一致。
   - 不要手写 `task_id`；从 trigger payload、`ralph tools task list` / `show`，或 prompt 里的 `## ORCHESTRATOR CONTEXT` 取得 live id。
   - **`work.done` 等 execution contract topic**：必须先 `ralph tools task close <task_id>`，再 emit（close-before-done 顺序固定）。
+  - **例外：emit 即自动关闭 task**：当 hat instructions 明确说明「emit 该事件即原子关闭 task、禁止手工 close」时，跳过 `ralph tools task close`，直接 emit；`task_id`/`task_key` 仍需与 trigger payload 同源。
 
 ### Cross-Loop and Cross-Hat Authorization
 

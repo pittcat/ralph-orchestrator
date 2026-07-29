@@ -1332,6 +1332,34 @@ mod tests {
         );
     }
 
+    /// Plan 2026-07-29-002 U1 / R1: the embedded parallel-forge
+    /// schema must declare `task_id` / `task_key` as required fields
+    /// on `exec.unit.done`, and the same preset must wire the
+    /// projection that closes that task atomically. This is a
+    /// structural contract — the agent never calls `task close`.
+    #[test]
+    fn test_parallel_forge_exec_unit_done_requires_task_identity() {
+        let preset = get_preset("parallel-forge").expect("parallel-forge preset");
+        let config = RalphConfig::parse_yaml(preset.content).expect("parallel-forge YAML parses");
+        let policy = config
+            .event_loop
+            .event_policy
+            .as_ref()
+            .expect("parallel-forge declares event_policy");
+        let entry = policy
+            .schemas
+            .get("exec.unit.done")
+            .expect("parallel-forge schema must declare exec.unit.done");
+        let required: std::collections::BTreeSet<&str> =
+            entry.required_fields.iter().map(String::as_str).collect();
+        for field in ["task_id", "task_key"] {
+            assert!(
+                required.contains(field),
+                "exec.unit.done.required_fields missing `{field}`; got {required:?}"
+            );
+        }
+    }
+
     #[test]
     fn test_ce_executor_reporter_publishes_report_done() {
         // Static-config guard for the completion-gate event. The chain test above
@@ -2551,8 +2579,10 @@ mod tests {
         .iter()
         .map(|s| s.to_string())
         .collect();
-        let expected_new_keys: BTreeSet<String> =
-            ["forge.plan.ready"].iter().map(|s| s.to_string()).collect();
+        let expected_new_keys: BTreeSet<String> = ["forge.plan.ready", "exec.unit.done"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
 
         let mut full_legacy: BTreeSet<String> = legacy_keys.clone();
         let mut full_new: BTreeSet<String> = BTreeSet::new();
@@ -2623,6 +2653,22 @@ mod tests {
                         "{}: forge.plan.ready is not an EnsureTaskBatch action",
                         preset.name
                     ));
+                }
+                // Plan 2026-07-29-002 U1 / R1: `exec.unit.done` must
+                // be a CloseTask action so accepted unit completions
+                // close the live task atomically.
+                match config
+                    .event_loop
+                    .state_projection
+                    .actions
+                    .get("exec.unit.done")
+                {
+                    Some(StateProjectionAction::CloseTask { task_id, .. })
+                        if task_id == "task_id" => {}
+                    other => bad_presets.push(format!(
+                        "{}: exec.unit.done must be CloseTask{{task_id:\"task_id\"}}, got {:?}",
+                        preset.name, other
+                    )),
                 }
             }
         }

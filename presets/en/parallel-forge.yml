@@ -560,7 +560,7 @@ hats:
 
       ### 步骤 8 — Emit
 
-      成功：`exec.unit.done`（含 `unit_report_path`、`content_hash`、`plan_key`、wave/slot/unit 字段）。
+      成功：`exec.unit.done`（透传 trigger 的 `task_id`、`task_key`、`wave_id`、`slot_index`、`unit_id`、`plan_key`,并附 `unit_report_path`、`content_hash`)。**禁止**手工 `ralph tools task close`;runtime 由事件投影原子关闭对应 task。
       失败：`exec.unit.failed`（含 `reason`、`plan_key`）。本 activation 仅一条业务事件。
 
   reviewer:

@@ -396,6 +396,8 @@ schemas:
     required_fields:
       - wave_id
       - slot_index
+      - task_id
+      - task_key
       - content_hash
       - unit_id
       - unit_report_path
@@ -410,6 +412,14 @@ schemas:
         meaning: Slot index from the triggering exec.unit.ready.
         source: Trigger payload.
         fill_rule: Copy unchanged.
+      task_id:
+        meaning: Live runtime task id for this unit; used by the projection to close the task atomically.
+        source: Trigger exec.unit.ready.task_id (the live id copied from ralph tools task list).
+        fill_rule: Copy unchanged from exec.unit.ready; never hand-write.
+      task_key:
+        meaning: Stable task key registered by planner.
+        source: Trigger exec.unit.ready.task_key.
+        fill_rule: Copy unchanged from exec.unit.ready; must match forge:<plan-key>:<unit-id>.
       content_hash:
         meaning: Hash of the unit worktree diff or commit content for idempotency.
         source: Computed this activation from unit commit / tree.
@@ -509,3 +519,6 @@ state_projection:
       key: task_key
       title: title
       blocked_by_keys: depends_on_task_keys
+    exec.unit.done:
+      kind: close_task
+      task_id: task_id

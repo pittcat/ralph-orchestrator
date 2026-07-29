@@ -123,6 +123,21 @@ Review 模拟每 hat 时，按上面七段核对每条 Q2 Observe / Q4 字段的
 - Q3 适用：在 batch 模式下"task 创建"的 OPAC 命令是 Planner **emit handoff**，不是 `ralph tools task add`。
 - 下游 hat 的 `task_id` 字段必须来自 `ralph tools task list` 实时返回（prompt 的 `## ORCHESTRATOR CONTEXT` 块会注入），禁止把 inventory 里的占位 ID 抄进 payload。
 
+### Projection-Owned Task Close（单事件原子关 task）
+
+当执行类 hat 的完成事件与 task 关闭必须原子发生时，配置 typed `close_task`：
+
+```
+上游 hat emit exec.unit.done (Q4, payload: task_id, task_key, ...)
+  → state_projection.actions.exec.unit.done = close_task
+  → Projector 关闭 payload.task_id 指向的 live task
+  → 下游 hat 通过 ralph tools task list 读到真实 closed 状态
+```
+
+- hat instructions 在 close action 配置存在时**不得**让同一 hat 调 `ralph tools task close` 走 CLI；emit 即关闭。
+- `task_id`/`task_key` 必须透传 trigger payload，不得手写。
+- 未知 `task_id` 会被 schema/projection fail-closed 拒绝，不产生"已关闭"假象。
+
 **允许的路径（Q3 白名单入口）**
 
 | 用途 | 引用 skill / 命令 |

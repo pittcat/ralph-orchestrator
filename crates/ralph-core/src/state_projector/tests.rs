@@ -1079,3 +1079,149 @@ fn r1_enforce_current_unit_true_different_step_no_collision() {
         "both sibling tasks (step-01, step-02) must be on disk"
     );
 }
+
+// Plan 2026-07-29-002 U1 (R1 / S1): an accepted `exec.unit.done`
+// closes exactly the live task addressed by `payload.task_id` and
+// leaves siblings untouched. The projector never emits a
+// "close everything" side effect.
+#[test]
+fn accepted_exec_unit_done_closes_exact_task() {
+    let tmp = workspace();
+    let config: StateProjectionConfig = serde_yaml::from_str(
+        r#"
+enabled: true
+actions:
+  forge.plan.ready:
+    kind: ensure_task_batch
+    items: unit_tasks
+    count: unit_count
+    key: task_key
+    title: title
+    blocked_by_keys: depends_on_task_keys
+  exec.unit.done:
+    kind: close_task
+    task_id: task_id
+"#,
+    )
+    .unwrap();
+    let mut projector = StateProjector::new(ProjectionContext::new_legacy(tmp.path(), config));
+    // Seed two tasks via the same planner event the preset uses.
+    let ready = make_event(
+        "forge.plan.ready",
+        json!({
+            "unit_count": 2,
+            "unit_tasks": [
+                {"task_key": "forge:p:U1", "title": "U1", "depends_on_task_keys": []},
+                {"task_key": "forge:p:U2", "title": "U2", "depends_on_task_keys": []}
+            ]
+        })
+        .to_string(),
+    );
+    let ready_report = projector.apply(&[ready]);
+    assert_eq!(ready_report.applied, 1);
+    let ids: Vec<String> = projector
+        .context()
+        .tasks_cache
+        .iter()
+        .map(|t| t.id.clone())
+        .collect();
+    assert_eq!(ids.len(), 2);
+
+    // Accepted exec.unit.done for task[0] only.
+    let done = make_event(
+        "exec.unit.done",
+        json!({
+            "wave_id": "w1",
+            "slot_index": 0,
+            "task_id": ids[0],
+            "task_key": "forge:p:U1",
+            "content_hash": "abc",
+            "unit_id": "U1",
+            "unit_report_path": "u.md",
+            "plan_key": "p"
+        })
+        .to_string(),
+    );
+    let report = projector.apply(&[done]);
+    assert_eq!(report.applied, 1, "{:?}", report.rejections);
+    assert_eq!(report.rejected, 0);
+
+    let store = crate::task_store::TaskStore::load(&tasks_path(tmp.path())).unwrap();
+    let by_id: std::collections::HashMap<_, _> = store
+        .all()
+        .iter()
+        .map(|t| (t.id.clone(), t.status.clone()))
+        .collect();
+    assert!(
+        matches!(by_id.get(&ids[0]), Some(crate::task::TaskStatus::Closed)),
+        "target task must be closed"
+    );
+    assert!(
+        matches!(by_id.get(&ids[1]), Some(crate::task::TaskStatus::Open)),
+        "sibling task must remain open"
+    );
+}
+
+// Plan 2026-07-29-002 U1 (R1 / S3): an `exec.unit.done` whose
+// `task_id` does not match any live task is rejected, and the
+// projection produces zero task-state side effects.
+#[test]
+fn exec_unit_done_unknown_task_does_not_close_any_task() {
+    let tmp = workspace();
+    let config: StateProjectionConfig = serde_yaml::from_str(
+        r#"
+enabled: true
+actions:
+  forge.plan.ready:
+    kind: ensure_task_batch
+    items: unit_tasks
+    count: unit_count
+    key: task_key
+    title: title
+    blocked_by_keys: depends_on_task_keys
+  exec.unit.done:
+    kind: close_task
+    task_id: task_id
+"#,
+    )
+    .unwrap();
+    let mut projector = StateProjector::new(ProjectionContext::new_legacy(tmp.path(), config));
+    let ready = make_event(
+        "forge.plan.ready",
+        json!({
+            "unit_count": 1,
+            "unit_tasks": [
+                {"task_key": "forge:p:U1", "title": "U1", "depends_on_task_keys": []}
+            ]
+        })
+        .to_string(),
+    );
+    projector.apply(&[ready]);
+
+    let done = make_event(
+        "exec.unit.done",
+        json!({
+            "wave_id": "w1",
+            "slot_index": 0,
+            "task_id": "no-such-task",
+            "task_key": "forge:p:no-such-key",
+            "content_hash": "abc",
+            "unit_id": "U1",
+            "unit_report_path": "u.md",
+            "plan_key": "p"
+        })
+        .to_string(),
+    );
+    let report = projector.apply(&[done]);
+    assert_eq!(report.applied, 0);
+    assert_eq!(report.rejected, 1);
+
+    let store = crate::task_store::TaskStore::load(&tasks_path(tmp.path())).unwrap();
+    assert!(
+        store
+            .all()
+            .iter()
+            .all(|t| matches!(t.status, crate::task::TaskStatus::Open)),
+        "no task may be closed by an unknown-id event"
+    );
+}

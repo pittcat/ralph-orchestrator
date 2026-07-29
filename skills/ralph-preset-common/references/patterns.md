@@ -220,6 +220,16 @@ work.done / fix.done
 - 下游消费：`unit_done` / `exec.unit.done` 等执行类触发携带 `task_id`（live id，由 `ralph tools task list` 取得），projector 不参与 link 解析；dispatcher / executor 只读 `task_id` 字段。
 - 起草后用结构性契约测试验证：一笔 emit 完成 → `TaskStore` 的 `all()` 行数等于 `count`，IDS 唯一且 `blocked_by` 反解为 payload 中的 `depends_on_task_keys`；64 项 batch 的 `successful_persist_count` 增量恰好 1（path-scoped observer）；invalid batch 增量 0 且原 bytes 不变。
 
+## Projection-Owned Task Close pattern（通用：单事件原子关 task）
+
+适用范围：执行类 hat 的完成事件与 task 关闭必须原子发生，避免「Unit 已完成但 task 仍 open」的漂移。配置后 emit 即关闭，agent 不再手工 `task close`。
+
+- 唯一写者：在 `event_loop.state_projection.actions` 配置 typed action，例如 `exec.unit.done: { kind: close_task, task_id: task_id }`。Projector 在 accepted event 上原子关闭 payload 指向的 live task。
+- Schema 配套：preset `presets/schemas/<name>.yml` 在 `schemas.<topic>` 把 `task_id`/`task_key` 加到 `required_fields`，`field_docs.task_id.source` 指向 trigger payload。
+- Hat `instructions`：**禁止**让 projector-owned hat 同时调 `ralph tools task close` 走 CLI；改为「emit 即关闭，禁止手工 close」。
+- 下游消费：dispatcher / supervisor 通过 `ralph tools task list` 读到真实 closed 状态，不再依赖 agent 自觉。
+- 起草后用结构性契约测试验证：accepted `exec.unit.done` 只关闭 payload 指向的 task，sibling 保持 open；未知 `task_id` 被 fail-closed 拒绝且零副作用。
+
 ## 起草反模式（禁止抄进 instructions）
 
 | 反模式 | 应改为 |
