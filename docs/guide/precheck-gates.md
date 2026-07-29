@@ -41,6 +41,8 @@ producer --emit--> X.proposed --> precheck-X (LLM) --+--> X --> downstream
                                                     +--> X.rejected --> task.resume --> producer
 ```
 
+> **Producer 视角（2026-07-29-006 计划）**：在 `event_loop.precheck` 启用且当前 hat 已是 `<X>.proposed` 的 producer 时，**`ralph emit <X>` 在 CLI 进入第一个 topic-dependent gate 之前会被透明改写为 `<X>.proposed`**。`ralph emit <X>.proposed` 也是合法且幂等的（不会被改写成 `<X>.proposed.proposed`）。显式 `<X>.proposed` 不会因「手 emit」被 origin guard 拒收。`<X>.proposed` 的 schema 继承 guarded `<X>` 的 `payload` + `required_fields`，所以缺字段的 emit 在写盘前就被拒。
+
 ## 快速启用（本地 preset）
 
 在 hat YAML 的 `event_loop` 段加入：
