@@ -2781,8 +2781,13 @@ hats:
       `report-input.work-failed.json`; if this fails, stop without emitting a
       stale path. Include the final repo-relative path as `report_input_file`.
       ```bash
-      ralph emit work.failed --json '{"plan_name":"<plan>","plan_path":"<repo-relative plan path>","planned_units":["U1","U2"],"attempted_units":["U1"],"completed_units":[],"failed_units":["U1"],"blocked_units":["U2"],"skipped_units":[],"baseline_verification_file":".ralph/review/<plan>/baseline-verification.md","decisions_file":".ralph/agent/decisions.md","reason":"no_deliverable_commits: U1 failed after an actual subagent attempt and no Unit reached a commit; U2 explicitly depends on U1","report_input_file":".ralph/review/<plan>/report-input.work-failed.json"}'
+      ralph emit work.failed --json '{"plan_name":"<plan>","plan_path":"<repo-relative plan path>","planned_units":["U1","U2"],"attempted_units":["U1"],"completed_units":[],"failed_units":["U1"],"blocked_units":["U2"],"skipped_units":[],"baseline_verification_file":".ralph/review/<plan>/baseline-verification.md","decisions_file":".ralph/agent/decisions.md","reason":"no_deliverable_commits: U1 failed after an actual subagent attempt and no Unit reached a commit; U2 explicitly depends on U1","report_input_file":".ralph/review/<plan>/report-input.work-failed.json","dead_end_confidence":92,"dead_end_evidence_coverage":80,"dead_end_evidence_file":".ralph/review/<plan>/dead-end-evidence.md"}'
       ```
+      The payload MUST include `dead_end_confidence`,
+      `dead_end_evidence_coverage`, and `dead_end_evidence_file` — see
+      **Confidence Protocol (fail-gate enforced)** below for how to
+      derive them. The runtime rejects the emit when any of the three
+      fields is missing.
       The reason MUST begin with a dead-end prefix
       (`unreachable` / `no_deliverable_commits` / `cannot_produce_handoff`)
       and include the unit status summary, for example:
@@ -2790,11 +2795,77 @@ hats:
       Then stop. Reporter will receive the failure and emit
       `LOOP_COMPLETE` with verdict `blocked`.
 
-      ### Confidence Protocol
-      Score decisions 0-100.
-      - >80: Proceed autonomously
-      - 50-80: Proceed + document in `.ralph/agent/decisions.md`
-      - <50: Choose safe default + document in `.ralph/agent/decisions.md`
+      ### Confidence Protocol (fail-gate enforced)
+
+      The legacy 0-100 gut-feel scale is replaced by a **rubric-driven,
+      evidence-backed, gate-audited** self-assessment. Use it ONLY when
+      you are about to declare a fail-shaped terminal (`work.failed`).
+      For non-fail decisions, proceed with ordinary engineering judgment
+      and document the reasoning in `.ralph/agent/decisions.md`.
+
+      Before emitting `work.failed`:
+
+      1. Run
+         `ralph preset materialize-artifacts ce-executor-pipeline --plan-key <plan_name>`
+         and from the materialized templates directory read
+         `fail-confidence-rubric.template.md` and
+         `settlement-evidence.template.md`. Use ONLY that rubric as the
+         scoring standard — do NOT copy the rubric text into
+         `decisions.md`, just reference the materialized path.
+      2. Write `.ralph/review/<plan>/dead-end-evidence.md` by copying the
+         `settlement-evidence.template.md` structure and filling every
+         `<...>` placeholder. Each failed/blocked Unit gets its own
+         section; include the 4-attempt ledger, the causal chain with
+         `file:line` anchors, the alternative-elimination record, and
+         the source list.
+      3. Score `dead_end_confidence` per rubric §1 (four-dimension
+         rubric, arithmetic mean across failed/blocked Units) and
+         `dead_end_evidence_coverage` per rubric §3. Decide whether
+         emitting `work.failed` is allowed per rubric §2 (>=90 required;
+         75-89 means verify one or two key hypotheses first; 60-74 means
+         keep retrying with a different angle; <60 means never emit
+         `work.failed`).
+      4. Include `dead_end_confidence`, `dead_end_evidence_coverage`,
+         and `dead_end_evidence_file` (the path you just wrote) in the
+         `work.failed` payload. After you emit, a precheck gate will
+         independently re-score the same evidence and either forward
+         `work.failed` verbatim or send you a
+         `work.failed.rejected{failed_checks, reason}` correction. See
+         `ralph-tools-precheck` for the producer-side contract.
+
+      ### Rejected-Resume Discipline (work.failed gate)
+
+      After you emit `work.failed`, a precheck gate audits your evidence.
+      If the gate rejects (`work.failed.rejected`), the runtime routes
+      a `task.resume` back to you with `failed_checks` and `reason`.
+      Act on each failed_check by name (see rubric §4 for the six
+      canonical names — do not invent your own):
+
+      - `missing_attempt_record` → return to the Execution Loop and use
+        the remaining retry budget for that Unit; record the new attempts
+        in `dead-end-evidence.md`.
+      - `single_angle_retries` → re-read `.ralph/agent/decisions.md`
+        failure briefs and the reuse-guidance `Do not mechanically
+        repeat` section; pick a genuinely different angle from
+        `Fresh options for this run` and retry.
+      - `broken_causal_chain` → stop coding and run more diagnostics
+        until the trigger → steps → symptom chain is fully documented
+        with `file:line` anchors.
+      - `unverifiable_evidence` → add verifiable sources (file:line,
+        command output excerpt, log fragment, test name) for the
+        unsupported claims.
+      - `confidence_inflated` → re-score against rubric §1 honestly; if
+        the new score is <90, keep working — do NOT re-emit
+        `work.failed`.
+      - `uneliminated_alternatives` → re-run the baseline / isolation
+        checks to eliminate environment, dependency, flake, baseline,
+        or residual-dirt alternative explanations.
+
+      You get at most 3 rejections per `work.failed` emit. After the
+      third rejection the runtime emits
+      `plan.blocked{kind: precheck_exhausted}` directly and the
+      reporter takes over — do NOT try to re-emit past the budget or
+      route around the gate.
 
       ### OPAC reference
       Follow `ralph-tools-opac` for Observe/Precheck/Apply/Confirm discipline
