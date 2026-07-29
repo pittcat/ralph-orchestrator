@@ -1880,6 +1880,31 @@ fn test_parallel_forge_duplicate_handoff_runtime() {
     run_workflow_guard_scenario(yaml);
 }
 
+// Plan 2026-07-29-005 U7 / S6 (G11): two-wave happy path.
+// Walks the per-wave settlement chain
+// (forge.wave.reviewed → forge.wave.integrated →
+// forge.wave.verified → forge.wave.settled) for two waves.
+// Asserts each topic appears exactly twice and the second
+// wave's `forge.wave.worktrees.ready.verified_base_commit`
+// matches the first wave's `forge.wave.verified.candidate
+// _commit_sha`.
+#[test]
+fn test_parallel_forge_two_wave_settlement_runtime() {
+    let yaml = load_scenario("tests/scenarios/parallel_forge_two_wave_settlement_runtime.yml");
+    run_workflow_guard_scenario(yaml);
+}
+
+// Plan 2026-07-29-005 U7 / S7 (G11): slot fail routes through
+// forge.wave.review.failed → forge.correction.{requested,done}
+// → re-review → settle, NOT work.failed. Asserts no
+// `work.failed` event ever appears and the run terminates with
+// `LOOP_COMPLETE` after correction.
+#[test]
+fn test_parallel_forge_correction_runtime() {
+    let yaml = load_scenario("tests/scenarios/parallel_forge_correction_runtime.yml");
+    run_workflow_guard_scenario(yaml);
+}
+
 #[test]
 fn test_review_passed_while_wave_open() {
     let yaml = load_scenario("tests/scenarios/flow_reliability/review_passed_while_wave_open.yml");
