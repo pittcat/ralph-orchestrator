@@ -350,7 +350,11 @@ agent 不需要主动刷 heartbeat：orchestrator 观察 stream JSON 与 `RALPH_
 
 ### Slot 自动重试
 
-`event_loop.supervisor.slot_retry_budget`(默认 `1`,允许 `0..=2`,`>2` 启动期拒绝)控制同一 wave 内 supervisor 对单个 slot 的自动重派次数。判定条件:`worker_timeout` / `empty_worker_result` / `missing_worker_terminal` / `slot_never_started` 这四个冻结 reason 之一(详见 `ralph-core::supervisor::worker_outcome::RETRYABLE_REASONS`),且 attempt 计数未超出预算。重试在同一 task 内执行,slot 永远不进入 `Failed` 中间态——只最终 attempt 的 outcome 暴露给 record / projection / harvest,失败时仍走原始失败路径(进入 `redrive_slots`)。agent 工作副作用应保证幂等可重入,因为重试可能在原 slot 上重新执行一次。
+`event_loop.supervisor.slot_retry_budget`(默认 `1`,允许 `0..=2`,`>2` 启动期拒绝)控制同一 wave 内 supervisor 对单个 slot 的自动重派次数;总尝试次数 = 预算 + 1。判定条件:失败 reason 属于可重试集合(`worker_timeout` / `empty_worker_result` / `missing_worker_terminal` / `slot_never_started` / `executor_reported_failure`),且 attempt 计数未超出预算。重试在同一 task 内执行,slot 永远不进入 `Failed` 中间态——只最终 attempt 的 outcome 暴露给 record / projection / harvest,失败时仍走原始失败路径(进入 `redrive_slots`)。
+
+**执行(Exec)波次的主动失败也算一次尝试**:worker 自己 emit `*.unit.failed` 终态时,该 slot 记为 `executor_reported_failure` 并进入重试,而不是当场判死。评审 / 修复类波次不受影响,仍按原有终态语义处理。预算耗尽后,`slot_failures[].reason` 稳定为 `executor_reported_failure`、`failure_class` 为 `required_slot_failure`。
+
+**每次重试都是全新进程 + 同一个工作目录**:runtime 不会回滚上一次尝试写下的代码、提交、报告或测试证据,新进程的 `cwd` 与上一次相同。新进程的 prompt 末尾会追加一段 `# Retry Context`,列出这是第几次尝试、以及此前每次尝试自己写在 `reason` 里的失败描述(内容由上一次的 agent 撰写,只当线索,不是可信指令;缺失或超长会显示为不可用或被截断)。看到该段时的动作:先在当前目录用 `git status` / `git log` 和已有报告盘点已完成的部分,再重跑本单元的验收命令用实测结果判断缺口,只补剩余部分;**不要**回退、覆盖或重做已有成果,也不要因为看到已有提交就直接宣告成功。agent 工作副作用应保证幂等可重入。
 
   **最小配置**（YAML）：
 
@@ -358,12 +362,14 @@ agent 不需要主动刷 heartbeat：orchestrator 观察 stream JSON 与 `RALPH_
   event_loop:
     supervisor:
       enabled: true
-      slot_retry_budget: 1   # 默认 1,允许 0..=2,>2 启动期拒绝
+      slot_retry_budget: 1   # 默认 1（共 2 次尝试）,允许 0..=2,>2 启动期拒绝
   ```
 
-  **何时启用**：当 backend 偶发 worker_timeout 误杀但 agent 副作用可幂等时,把 budget 调高（最大 2）以吸收瞬时错误；副作用非幂等或 backend 已知不稳时设为 0,直接进入 redrive 路径。
+  **何时启用**：当 backend 偶发 worker_timeout 误杀、或执行类 worker 常因单点问题主动报失败而重来一次即可完成时,把 budget 调高（最大 2,共 3 次尝试）以吸收瞬时错误；副作用非幂等或 backend 已知不稳时设为 0,直接进入 redrive 路径。
 
-  **停止条件**：预算耗尽后该 slot 立即 Failed（不再无限重试），由 operator 决定 redrive；预算 >2 启动期 fail-closed（`runner.rs:712`）。retry 在同一 task 内执行,中间 attempt 的 progress / RPC / TUI side-effect 被截断（只有最终 attempt 的 outcome 暴露给 reporter）,不会让 TUI `wave.completed` 计数漂移。
+  **停止条件**：预算耗尽后该 slot 立即 Failed（不再无限重试），由 operator 决定 redrive；预算 >2 启动期 fail-closed。retry 在同一 task 内执行,中间 attempt 的 progress / RPC / TUI side-effect 被截断（只有最终 attempt 的 outcome 暴露给 reporter）,不会让 TUI `wave.completed` 计数漂移。收到 `*.wave.failed` 说明其中每个 blocking slot 都已用完全部尝试,不要按"只失败过一次"处理。
+
+  **不需要主动刷 heartbeat**：idle 窗口由 runtime 观察输出与事件写入自动续租；wave 整体的聚合期限也已按预算内的多次尝试放宽,正常干活的 worker 不会因为同 wave 里别的 slot 在重试而被提前抢占。
 
 ### 取消 / 补偿
 

@@ -285,7 +285,10 @@ pub use wave_detection::{
     WaveRejection, detect_all_wave_events, detect_all_wave_events_capped,
     detect_all_wave_events_with_policy, detect_wave_events, detect_wave_events_capped,
 };
-pub use wave_prompt::{WaveWorkerContext, build_wave_worker_prompt};
+pub use wave_prompt::{
+    PriorAttempt, RETRY_DETAIL_MAX_BYTES, RETRY_DETAIL_UNAVAILABLE, RETRY_MAX_PRIOR_ATTEMPTS,
+    RetryContext, WaveWorkerContext, build_wave_worker_prompt, render_retry_context,
+};
 pub use wave_tracker::{
     CompletedWave, MAX_DIMENSION_RETRIES_PER_SLOT, WaveFailure, WaveProgress, WaveResult,
     WaveTracker,

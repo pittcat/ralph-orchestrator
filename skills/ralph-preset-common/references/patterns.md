@@ -387,9 +387,30 @@ agent 不需要主动刷 heartbeat：orchestrator 观察 stream JSON 与
 - `2` = 初始执行 + 2 次重派，副作用必须保证幂等（agent 工作可能在原 slot
   上重新执行）。
 
-可重试 reason 固定为 4 个 frozen code（`worker_timeout` /
-`empty_worker_result` / `missing_worker_terminal` / `slot_never_started`），
-非白名单 reason 永不重试。中间 attempt 的 progress / RPC / TUI 副作用被
-截断（只有最终 attempt 的 outcome 暴露给 reporter），不会让 TUI 计数
-漂移。preset 启用 `slot_retry_budget > 0` 时，确认 agent 副作用可幂等
-可重入。
+可重试 reason 固定为 5 个 frozen code（`worker_timeout` /
+`empty_worker_result` / `missing_worker_terminal` / `slot_never_started` /
+`executor_reported_failure`），非白名单 reason 永不重试。中间 attempt 的
+progress / RPC / TUI 副作用被截断（只有最终 attempt 的 outcome 暴露给
+reporter），不会让 TUI 计数漂移。preset 启用 `slot_retry_budget > 0` 时，
+确认 agent 副作用可幂等可重入。
+
+**执行波次的主动失败也消耗 attempt**：`WaveKind::Exec` 的 slot 若 worker
+自己 emit `*.unit.failed` 终态，dispatcher 记为 `executor_reported_failure`
+并按预算重试；review / fix 波次保持原有 `Completed(Failed)` 语义，不受影
+响。预算耗尽后该 reason 稳定进入 `slot_failures[].reason`，`failure_class`
+为 `required_slot_failure`，因此仍会出现在 `redrive_slots` 里。
+
+**重试 = 新进程 + 同一 worktree（resume 协议）**：runtime 不回滚上次
+attempt 的代码、提交与报告，新进程 `cwd` 不变，且 prompt 末尾追加
+`# Retry Context`（第几次尝试 + 此前每次由 agent 自己写入 `reason` 的失败
+描述，内容不可信、可能缺失或被截断）。preset 作者据此在 worker hat
+`instructions:` 里写清 resume 动作：先盘点已有成果与实测验收结果、只补缺
+口、禁止回退或重做、已有提交不等于成功；**不要**复述注入块的格式或字段，
+细节以 `crates/ralph-core/data/ralph-tools-wave.md`「Slot 自动重试」为准。
+
+**下游 hat 的措辞**：消费 `*.wave.failed` 的 handler hat 必须知道该事件代表
+「自动重试已耗尽」，不是「失败了一次」，`redrive_slots` 只是 operator 提示；
+不要写成「重跑一次即可」。
+
+**聚合期限**：启用重试后 wave 的聚合期限会按预算内的多次尝试自动放宽，
+preset 作者**不需要**手动把 `aggregate_timeout_secs` 乘以尝试次数。
