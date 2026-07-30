@@ -1705,6 +1705,32 @@ impl EventLoop {
             }
         }
 
+        // U3 (plan 2026-07-30-004): open the persistent activation registry.
+        // Best-effort: a corrupt or unreadable registry file causes the
+        // field to be `None` and the loop proceeds without cross-process
+        // activation identity tracking. The CLI can still check via
+        // `load_registry_readonly` which returns the error explicitly.
+        let activation_registry = {
+            let registry_path = context
+                .workspace()
+                .join(".ralph")
+                .join(crate::execution_contract::ACTIVATION_REGISTRY_RELATIVE_PATH);
+            match crate::execution_contract::ActivationRegistry::open(registry_path) {
+                Ok(r) => {
+                    debug!("U3: activation registry opened");
+                    Some(r)
+                }
+                Err(e) => {
+                    warn!(
+                        error = %e,
+                        "U3: activation registry failed to open; proceeding without it. \
+                         Concurrent activation enforcement is disabled."
+                    );
+                    None
+                }
+            }
+        };
+
         Ok(Self {
             config: config.clone(),
             registry,
@@ -1722,6 +1748,7 @@ impl EventLoop {
                 config.telemetry.runtime_diagnosis.clone(),
             )),
             hat_lifecycle_tracker: ActivationLifecycleTracker::new(),
+            activation_registry,
             ephemeral_isolation: crate::ephemeral_isolation::EphemeralIsolation::new(),
             idempotent_log,
             stage_pipeline,
@@ -1902,6 +1929,9 @@ impl EventLoop {
                 config.telemetry.runtime_diagnosis.clone(),
             )),
             hat_lifecycle_tracker: ActivationLifecycleTracker::new(),
+            // U3: no-context path (e.g. `ralph inspect prompt`) has no
+            // workspace, so the registry cannot be opened.
+            activation_registry: None,
             ephemeral_isolation: crate::ephemeral_isolation::EphemeralIsolation::new(),
             idempotent_log: std::sync::Mutex::new(
                 crate::state::idempotent_log::IdempotentLog::disabled(),

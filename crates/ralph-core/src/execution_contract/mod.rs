@@ -46,6 +46,14 @@ pub use compiler::{
     EffectiveExecutionContract, ResolvedRuntimeConfig, compile,
 };
 
+// U3 (plan 2026-07-30-004): persistent activation registry that provides
+// shared identity agreement between the resident loop and the independent CLI.
+pub mod activation;
+pub use activation::{
+    ActivationRecord, ActivationRegistry, ActivationRegistryError, ActivationStatus,
+    ACTIVATION_REGISTRY_RELATIVE_PATH,
+};
+
 /// Hint appended to the `TaskNotTerminal` rejection message so the rejected
 /// agent (or human reader) sees an actionable `ralph tools task close`
 /// command and knows the next concrete step. The `<task_id>` placeholder
