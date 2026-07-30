@@ -780,6 +780,7 @@ mod tests {
             source: None,
             schema: None,
             output: "text".to_string(),
+            policy_check_token: None,
         }));
         assert!(!is_diagnostics_eligible_command(command.as_ref()));
     }
