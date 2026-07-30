@@ -168,3 +168,9 @@ mod u8_legacy_relocate_and_close;
 /// from schema + runtime. Only `LOOP_COMPLETE`
 /// terminates the dispatcher.
 mod u9_verdict_legacy_retire;
+/// U1 (2026-07-30-004 refactor-unified-execution-contract-plan):
+/// freeze the production `EventBus::publish` ingress
+/// inventory and the JSONL/CLI/system side-effect ordering
+/// that U4 must replace. See
+/// `transition_ingress_inventory.rs` for the full list.
+mod transition_ingress_inventory;
