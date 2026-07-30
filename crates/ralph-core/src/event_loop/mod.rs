@@ -12769,8 +12769,74 @@ impl EventLoop {
             }
             pending
         };
+
+        // U7: pre-compute idempotent-transition context once per batch
+        // so the per-event loop only needs field-level borrows.
+        let u7_contract_digest = self
+            .execution_contract
+            .as_ref()
+            .map(|c| c.contract_digest.clone());
+        let u7_loop_id = self.current_loop_id_for_contract();
+        let u7_iteration = self.state.iteration;
+
         for event in pending_publish {
-            self.bus.publish(event.clone());
+            // U7: route business events through the idempotent
+            // Accepted Transition API when the execution contract is
+            // compiled. Control / diagnostic / system events bypass
+            // the outbox and publish directly.
+            let u7_is_control = {
+                let topic = event.topic.as_str();
+                topic.starts_with("event.")
+                    || topic.starts_with("human.")
+                    || matches!(
+                        topic,
+                        "LOOP_COMPLETE"
+                            | "REVIEW_COMPLETE"
+                            | "loop.cancel"
+                            | "task.resume"
+                            | "build.task.abandoned"
+                            | "event.isolation.boundary_violation"
+                    )
+            };
+
+            let mut published_via_transition = false;
+            if !u7_is_control
+                && let Some(ref digest) = u7_contract_digest
+                && let Some(ref ledger) = self.state.state_ledger
+            {
+                let activation_id = format!(
+                    "{}:{u7_iteration}",
+                    event
+                        .source
+                        .as_ref()
+                        .map(|h| h.as_str())
+                        .unwrap_or("unknown")
+                );
+                match crate::event_loop::accepted_transition::AcceptedTransition::commit_idempotent(
+                    &event,
+                    &u7_loop_id,
+                    &activation_id,
+                    digest,
+                    ledger,
+                    &mut self.bus,
+                    |_| Ok(()),
+                    || {},
+                ) {
+                    Ok(_entry) => {
+                        published_via_transition = true;
+                    }
+                    Err(e) => {
+                        warn!(
+                            topic = %event.topic,
+                            error = %e,
+                            "U7: transition commit failed, falling back to direct publish"
+                        );
+                    }
+                }
+            }
+            if !published_via_transition {
+                self.bus.publish(event.clone());
+            }
             self.diagnose_plan_complete_channel(
                 &event,
                 crate::event_loop::phase_authority::diagnosis::Channel::Main,

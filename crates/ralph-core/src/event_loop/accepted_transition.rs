@@ -52,6 +52,15 @@ pub struct OutboxEntry {
     pub committed_at: String,
     /// The contract revision in effect at commit time.
     pub contract_revision: String,
+    /// Whether the transition has been acknowledged as delivered.
+    ///
+    /// U7: set to `true` by [`AcceptedTransition::ack`]. Once
+    /// delivered, [`AcceptedTransition::commit_idempotent`] skips
+    /// re-publish (exactly-once *delivery* after ack; at-least-once
+    /// before ack). Defaults to `false` for entries written by the
+    /// original U6 [`AcceptedTransition::commit`] path.
+    #[serde(default)]
+    pub delivered: bool,
     /// The loop this transition belongs to.
     pub loop_id: String,
     /// The canonical payload digest (`sha256(event.payload)`).
@@ -172,6 +181,7 @@ impl AcceptedTransition {
             activation_id: activation_id.to_string(),
             committed_at: chrono::Utc::now().to_rfc3339(),
             contract_revision: contract_revision.to_string(),
+            delivered: false,
             loop_id: loop_id.to_string(),
             payload_digest,
             topic: event.topic.as_str().to_string(),
@@ -189,6 +199,147 @@ impl AcceptedTransition {
         bus.publish(event.clone());
 
         Ok(entry)
+    }
+
+    /// Check whether a `transition_id` already exists in the outbox.
+    ///
+    /// Reads the durable outbox from `workspace` and returns `true` if
+    /// any entry carries the given `transition_id`. This is the
+    /// deduplication primitive used by [`Self::commit_idempotent`].
+    pub fn is_committed(workspace: &Path, transition_id: &str) -> bool {
+        read_outbox(workspace)
+            .map(|entries| entries.iter().any(|e| e.transition_id == transition_id))
+            .unwrap_or(false)
+    }
+
+    /// Look up a committed outbox entry by `transition_id`.
+    ///
+    /// Returns `None` when the transition has not been committed yet.
+    fn find_committed(workspace: &Path, transition_id: &str) -> Option<OutboxEntry> {
+        read_outbox(workspace)
+            .ok()
+            .and_then(|entries| {
+                entries
+                    .into_iter()
+                    .find(|e| e.transition_id == transition_id)
+            })
+    }
+
+    /// Commit a business transition with idempotency.
+    ///
+    /// # Idempotency guarantee
+    ///
+    /// Replaying the same transition (identical `loop_id`,
+    /// `activation_id`, `contract_revision`, event topic+source, and
+    /// payload) always yields the same `transition_id`. On replay:
+    ///
+    /// - **committed** (regardless of `delivered`): returns the
+    ///   existing entry with **zero side effects** — no outbox write,
+    ///   no publish, no materialize.
+    /// - **not committed**: delegates to [`Self::commit`] (validate →
+    ///   durable write → publish) after running the `materialize`
+    ///   closure.
+    ///
+    /// The `delivered` flag (set by [`Self::ack`]) is metadata for
+    /// downstream delivery tracking; it does not change the dedup
+    /// behaviour of this method.
+    ///
+    /// The `materialize` closure runs **only** on the first commit
+    /// (not-committed path). On replay it is never invoked, making
+    /// materialization idempotent.
+    pub fn commit_idempotent(
+        event: &Event,
+        loop_id: &str,
+        activation_id: &str,
+        contract_revision: &str,
+        ledger: &StateLedger,
+        bus: &mut EventBus,
+        validate: impl FnOnce(&Event) -> Result<(), String>,
+        materialize: impl FnOnce(),
+    ) -> Result<OutboxEntry, TransitionError> {
+        // 1. Derive the deterministic identity tuple (same as commit).
+        let payload_digest = {
+            let mut h = Sha256::new();
+            h.update(event.payload.as_bytes());
+            format!("{:x}", h.finalize())
+        };
+        let event_identity = format!(
+            "{}:{}",
+            event.topic.as_str(),
+            event.source.as_ref().map(|h| h.as_str()).unwrap_or("")
+        );
+        let transition_id = Self::compute_transition_id(
+            loop_id,
+            activation_id,
+            contract_revision,
+            &event_identity,
+            &payload_digest,
+        );
+
+        let workspace = ledger.workspace();
+
+        // 2. Idempotency check: if already committed, handle replay.
+        if let Some(existing) = Self::find_committed(workspace, &transition_id) {
+            // Committed — dedup: no second outbox write, no re-publish,
+            // no materialize. The `delivered` flag is metadata for
+            // downstream ack tracking; it does not change the dedup
+            // behaviour of `commit_idempotent`.
+            return Ok(existing);
+        }
+
+        // 3. First commit — run materialize side effect, then commit.
+        materialize();
+        Self::commit(
+            event,
+            loop_id,
+            activation_id,
+            contract_revision,
+            ledger,
+            bus,
+            validate,
+        )
+    }
+
+    /// Acknowledge a transition as delivered.
+    ///
+    /// Marks the outbox entry with the given `transition_id` as
+    /// `delivered = true`. After ack, [`Self::commit_idempotent`]
+    /// replays become no-ops (exactly-once delivery).
+    ///
+    /// The outbox file is rewritten in place under an exclusive lock.
+    /// If no entry matches, this is a silent no-op.
+    pub fn ack(workspace: &Path, transition_id: &str) -> Result<(), std::io::Error> {
+        let path = outbox_path(workspace);
+        let entries = read_outbox(workspace)?;
+        if !entries.iter().any(|e| e.transition_id == transition_id) {
+            return Ok(()); // nothing to ack
+        }
+
+        let updated: Vec<OutboxEntry> = entries
+            .into_iter()
+            .map(|mut e| {
+                if e.transition_id == transition_id {
+                    e.delivered = true;
+                }
+                e
+            })
+            .collect();
+
+        // Rewrite the outbox atomically: serialize all entries, write
+        // to the same path.
+        let mut body = String::new();
+        for entry in &updated {
+            let line = serde_json::to_string(entry).map_err(|e| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("outbox serialize failed: {e}"),
+                )
+            })?;
+            body.push_str(&line);
+            body.push('\n');
+        }
+        std::fs::write(&path, body)?;
+        Ok(())
     }
 }
 
@@ -426,6 +577,7 @@ mod tests {
             activation_id: "act-1".into(),
             committed_at: "2026-07-31T00:00:00Z".into(),
             contract_revision: "rev-1".into(),
+            delivered: false,
             loop_id: "loop-1".into(),
             payload_digest: "deadbeef".into(),
             topic: "work.done".into(),
@@ -436,6 +588,188 @@ mod tests {
             serde_json::to_string(&a).unwrap(),
             serde_json::to_string(&b).unwrap(),
             "identical entries must serialize to identical bytes"
+        );
+    }
+
+    // ── U7: idempotent materialize / delivery / ack ──────────────────
+
+    #[test]
+    fn u7_replayed_transition_id_is_deduplicated() {
+        let (_dir, ledger, mut bus, _store) = fixture();
+        let ws = ledger.workspace().to_path_buf();
+
+        let seen = Arc::new(Mutex::new(0usize));
+        let seen_clone = Arc::clone(&seen);
+        bus.add_observer(move |_| *seen_clone.lock().unwrap() += 1);
+
+        let event = valid_event();
+
+        // First commit — should write outbox + publish.
+        let entry1 = AcceptedTransition::commit_idempotent(
+            &event,
+            "loop-1",
+            "act-1",
+            "rev-1",
+            &ledger,
+            &mut bus,
+            |_| Ok(()),
+            || {},
+        )
+        .expect("first commit must succeed");
+
+        // Replay the SAME transition (same identity tuple).
+        let entry2 = AcceptedTransition::commit_idempotent(
+            &event,
+            "loop-1",
+            "act-1",
+            "rev-1",
+            &ledger,
+            &mut bus,
+            |_| Ok(()),
+            || {},
+        )
+        .expect("replay commit must succeed");
+
+        // Same transition_id.
+        assert_eq!(
+            entry1.transition_id, entry2.transition_id,
+            "replayed transition must yield the same transition_id"
+        );
+
+        // Outbox has exactly 1 entry (not 2).
+        let entries = read_outbox(&ws).unwrap();
+        assert_eq!(entries.len(), 1, "outbox must have exactly 1 entry after replay");
+
+        // EventBus saw exactly 1 event (the replay was deduplicated).
+        assert_eq!(
+            *seen.lock().unwrap(),
+            1,
+            "bus must see exactly 1 event after replay (dedup)"
+        );
+    }
+
+    #[test]
+    fn u7_materialize_is_idempotent() {
+        let (_dir, ledger, mut bus, store) = fixture();
+
+        // Persist the fixture's seed task to disk so the materialize
+        // closure (which loads a fresh TaskStore) sees it.
+        store.save().unwrap();
+
+        let event = valid_event();
+        let tasks_path = ledger.workspace().join(".ralph").join("agent").join("tasks.jsonl");
+
+        // First commit — materialize adds a task.
+        AcceptedTransition::commit_idempotent(
+            &event,
+            "loop-1",
+            "act-1",
+            "rev-1",
+            &ledger,
+            &mut bus,
+            |_| Ok(()),
+            || {
+                let mut s = TaskStore::load(&tasks_path).unwrap();
+                s.ensure(Task::new("u7 materialized task".to_string(), 2));
+                s.save().unwrap();
+            },
+        )
+        .expect("first commit must succeed");
+
+        // Reload and count: fixture seeds 1 task + 1 materialized = 2.
+        let store_after_first = TaskStore::load(&tasks_path).unwrap();
+        assert_eq!(
+            store_after_first.all().len(),
+            2,
+            "after first commit: 1 seed + 1 materialized"
+        );
+
+        // Replay the SAME transition — materialize must NOT run again.
+        AcceptedTransition::commit_idempotent(
+            &event,
+            "loop-1",
+            "act-1",
+            "rev-1",
+            &ledger,
+            &mut bus,
+            |_| Ok(()),
+            || {
+                let mut s = TaskStore::load(&tasks_path).unwrap();
+                s.ensure(Task::new("u7 SHOULD NOT appear".to_string(), 3));
+                s.save().unwrap();
+            },
+        )
+        .expect("replay commit must succeed");
+
+        // Task count must still be 2 (materialize not called on replay).
+        let store_after_replay = TaskStore::load(&tasks_path).unwrap();
+        assert_eq!(
+            store_after_replay.all().len(),
+            2,
+            "after replay: materialize must not run again"
+        );
+
+        drop(store);
+    }
+
+    #[test]
+    fn u7_ack_prevents_redelivery() {
+        let (_dir, ledger, mut bus, _store) = fixture();
+        let ws = ledger.workspace().to_path_buf();
+
+        let seen = Arc::new(Mutex::new(0usize));
+        let seen_clone = Arc::clone(&seen);
+        bus.add_observer(move |_| *seen_clone.lock().unwrap() += 1);
+
+        let event = valid_event();
+
+        // Commit.
+        let entry = AcceptedTransition::commit_idempotent(
+            &event,
+            "loop-1",
+            "act-1",
+            "rev-1",
+            &ledger,
+            &mut bus,
+            |_| Ok(()),
+            || {},
+        )
+        .expect("commit must succeed");
+
+        assert_eq!(*seen.lock().unwrap(), 1, "bus must see the initial publish");
+
+        // Ack the transition — marks it as delivered.
+        AcceptedTransition::ack(&ws, &entry.transition_id)
+            .expect("ack must succeed");
+
+        // Verify the outbox entry is now marked delivered.
+        let entries = read_outbox(&ws).unwrap();
+        assert_eq!(entries.len(), 1);
+        assert!(entries[0].delivered, "entry must be marked delivered after ack");
+
+        // Replay the SAME transition — ack'd, so no re-publish.
+        let replayed = AcceptedTransition::commit_idempotent(
+            &event,
+            "loop-1",
+            "act-1",
+            "rev-1",
+            &ledger,
+            &mut bus,
+            |_| Ok(()),
+            || {},
+        )
+        .expect("replay after ack must succeed");
+
+        assert_eq!(
+            replayed.transition_id, entry.transition_id,
+            "replayed transition_id must match"
+        );
+
+        // EventBus still saw exactly 1 event — the replay was suppressed.
+        assert_eq!(
+            *seen.lock().unwrap(),
+            1,
+            "bus must see exactly 1 event after ack'd replay"
         );
     }
 }
