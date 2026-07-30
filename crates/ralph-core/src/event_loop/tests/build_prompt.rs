@@ -2,6 +2,40 @@
 
 use super::*;
 
+fn head_chars(s: &str, max_chars: usize) -> &str {
+    match s.char_indices().nth(max_chars) {
+        Some((idx, _)) => &s[..idx],
+        None => s,
+    }
+}
+
+/// Return true if the ready-tasks block contains a line for `title`
+/// (matched at the start of the line, after any leading `- [ ] [P1] `)
+/// that ends with the `[read-only]` marker. Used to assert on the
+/// rendered task line specifically, since the broader prompt may
+/// legitimately mention `[read-only]` as a concept in injected skill
+/// docs.
+fn task_line_is_read_only(prompt: &str, title: &str) -> bool {
+    let Some(start) = prompt.find("<ready-tasks>") else {
+        return false;
+    };
+    let after_start = &prompt[start..];
+    let Some(end) = after_start.find("</ready-tasks>") else {
+        return false;
+    };
+    let block = &after_start[..end];
+    for line in block.lines() {
+        let trimmed = line.trim_start();
+        if !trimmed.starts_with("- ") {
+            continue;
+        }
+        if trimmed.contains(title) && trimmed.contains("[read-only]") {
+            return true;
+        }
+    }
+    false
+}
+
 #[test]
 fn terminal_hat_prompt_injects_deliverable_path_contract_from_completion_schema() {
     let yaml = r#"
@@ -723,14 +757,14 @@ tasks:
         .expect("worktree prompt");
 
     assert!(
-        prompt.contains("[read-only]"),
-        "non-coordinator hat must see [read-only] marker; got prompt:\n{}",
-        &prompt[..prompt.len().min(4000)]
+        task_line_is_read_only(&prompt, "F1 impl"),
+        "non-coordinator hat must see [read-only] marker on the task line; ready block:\n{}",
+        head_chars(&prompt, 4000)
     );
     assert!(
         prompt.contains("none actionable for this hat"),
         "non-coordinator hat with no mutable tasks must see 'none actionable' header; got prompt:\n{}",
-        &prompt[..prompt.len().min(4000)]
+        head_chars(&prompt, 4000)
     );
 }
 
@@ -777,11 +811,16 @@ tasks:
     assert!(
         prompt.contains("<ready-tasks>"),
         "owner hat must still see the ready-tasks block; got prompt head:\n{}",
-        &prompt[..prompt.len().min(2000)]
+        head_chars(&prompt, 2000)
     );
+    // The `[read-only]` marker in the skill doc is a generic concept
+    // description; assert against the rendered task line for F1 impl so
+    // this test stays focused on the actionable-rendering contract for
+    // the owner hat.
     assert!(
-        !prompt.contains("[read-only]"),
-        "owner hat must NOT see [read-only] marker on its own task"
+        !task_line_is_read_only(&prompt, "F1 impl"),
+        "owner hat must NOT see [read-only] marker on its own task; ready block:\n{}",
+        head_chars(&prompt, 4000)
     );
     assert!(
         !prompt.contains("none actionable for this hat"),
@@ -790,10 +829,15 @@ tasks:
 }
 
 #[test]
-fn ready_tasks_no_read_only_marker_for_coordinator_hat() {
-    // Coordinators can lifecycle-mutate ANY task regardless of owner, so
-    // they must see actionable rendering (no read-only markers) even when
-    // the task owner is a different hat.
+fn ready_tasks_marks_non_self_owner_read_only_for_coordinator_hat() {
+    // A coordinator hat (i.e. one listed in `tasks.coordinator_hats`) sees
+    // ready tasks it does NOT own rendered with a `[read-only]` marker plus
+    // a "none actionable for this hat" header. The coordinator's lifecycle
+    // mutation rights are preserved (CLI `start` / `close` / `fail` / `reopen`
+    // / `add` / `ensure` are still authorized), but the prompt must not
+    // invite the coordinator to *execute* a unit task it does not own.
+    // This test pins the prompt-injection behaviour; ACL behaviour is
+    // covered by the task_cli auth tests.
     use crate::task::Task;
     use crate::task_store::TaskStore;
 
@@ -829,7 +873,7 @@ tasks:
 
     let loop_context = crate::loop_context::LoopContext::primary(temp.path().to_path_buf());
     let mut event_loop = EventLoop::with_context(config, loop_context);
-    event_loop.initialize("coordinator actionable test");
+    event_loop.initialize("coordinator non-self-owner read-only test");
 
     let prompt = event_loop
         .build_prompt(&HatId::new("forge-dispatcher"))
@@ -837,14 +881,153 @@ tasks:
 
     assert!(
         prompt.contains("<ready-tasks>"),
-        "coordinator must see the ready-tasks block"
+        "coordinator must still see the ready-tasks block; got prompt head:\n{}",
+        head_chars(&prompt, 2000)
     );
     assert!(
-        !prompt.contains("[read-only]"),
-        "coordinator must NOT see [read-only] marker (it can mutate any task)"
+        task_line_is_read_only(&prompt, "F1 impl"),
+        "coordinator hat must see [read-only] marker on a non-self-owner task; ready block:\n{}",
+        head_chars(&prompt, 4000)
+    );
+    assert!(
+        prompt.contains("none actionable for this hat"),
+        "coordinator hat with no actionable ready task must see 'none actionable' header; got prompt:\n{}",
+        head_chars(&prompt, 4000)
+    );
+}
+
+#[test]
+fn ready_tasks_no_read_only_marker_for_coordinator_on_self_owner_task() {
+    // Forward edge: a coordinator hat still sees its own ready task WITHOUT
+    // a `[read-only]` marker and WITHOUT the "none actionable" header. This
+    // proves the new owner-only check does not over-degrade coordinators to
+    // read-only across the board — they remain actionable for tasks they
+    // own.
+    use crate::task::Task;
+    use crate::task_store::TaskStore;
+
+    let temp = tempfile::tempdir().unwrap();
+    let tasks_path = temp.path().join(".ralph/agent/tasks.jsonl");
+    std::fs::create_dir_all(tasks_path.parent().unwrap()).unwrap();
+
+    let mut store = TaskStore::load(&tasks_path).unwrap();
+    let task = Task::new("dispatch the next wave".to_string(), 1)
+        .with_owner_hat(Some("forge-dispatcher".to_string()));
+    store.add(task);
+    store.save().unwrap();
+
+    let yaml = r#"
+event_loop:
+  execution_mode: isolated
+hats:
+  forge-dispatcher:
+    name: "Forge Dispatcher"
+    triggers: ["forge.worktrees.ready"]
+    publishes: ["exec.unit.ready"]
+    instructions: "Dispatch waves."
+  executor:
+    name: "Executor"
+    triggers: ["exec.unit.ready"]
+    publishes: ["exec.unit.done"]
+    instructions: "Implement units."
+tasks:
+  enabled: true
+  coordinator_hats: ["forge-dispatcher"]
+"#;
+    let mut config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
+    config.core.workspace_root = temp.path().to_path_buf();
+
+    let loop_context = crate::loop_context::LoopContext::primary(temp.path().to_path_buf());
+    let mut event_loop = EventLoop::with_context(config, loop_context);
+    event_loop.initialize("coordinator self-owner actionable test");
+
+    let prompt = event_loop
+        .build_prompt(&HatId::new("forge-dispatcher"))
+        .expect("dispatcher prompt");
+
+    assert!(
+        prompt.contains("<ready-tasks>"),
+        "coordinator must see the ready-tasks block; got prompt head:\n{}",
+        head_chars(&prompt, 2000)
+    );
+    assert!(
+        !task_line_is_read_only(&prompt, "dispatch the next wave"),
+        "coordinator must NOT see [read-only] marker on its own task; ready block:\n{}",
+        head_chars(&prompt, 4000)
     );
     assert!(
         !prompt.contains("none actionable for this hat"),
-        "coordinator must NOT see the 'none actionable' header"
+        "coordinator must NOT see the 'none actionable' header when it owns a ready task; got prompt:\n{}",
+        head_chars(&prompt, 4000)
+    );
+}
+
+#[test]
+fn ready_tasks_mixed_owner_marks_only_non_self_read_only_for_coordinator() {
+    // Mixed case: a coordinator hat has one self-owned task and one task
+    // owned by another hat. The self-owned task must be unmarked; the
+    // non-self-owned task must be marked `[read-only]`. Because at least
+    // one ready task is actionable, the header must NOT be the
+    // "none actionable" variant — it is the normal `## Tasks: N ready...`
+    // header.
+    use crate::task::Task;
+    use crate::task_store::TaskStore;
+
+    let temp = tempfile::tempdir().unwrap();
+    let tasks_path = temp.path().join(".ralph/agent/tasks.jsonl");
+    std::fs::create_dir_all(tasks_path.parent().unwrap()).unwrap();
+
+    let mut store = TaskStore::load(&tasks_path).unwrap();
+    let self_task = Task::new("dispatch the next wave".to_string(), 1)
+        .with_owner_hat(Some("forge-dispatcher".to_string()));
+    let other_task = Task::new("F1 impl".to_string(), 1)
+        .with_owner_hat(Some("executor".to_string()));
+    store.add(self_task);
+    store.add(other_task);
+    store.save().unwrap();
+
+    let yaml = r#"
+event_loop:
+  execution_mode: isolated
+hats:
+  forge-dispatcher:
+    name: "Forge Dispatcher"
+    triggers: ["forge.worktrees.ready"]
+    publishes: ["exec.unit.ready"]
+    instructions: "Dispatch waves."
+  executor:
+    name: "Executor"
+    triggers: ["exec.unit.ready"]
+    publishes: ["exec.unit.done"]
+    instructions: "Implement units."
+tasks:
+  enabled: true
+  coordinator_hats: ["forge-dispatcher"]
+"#;
+    let mut config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
+    config.core.workspace_root = temp.path().to_path_buf();
+
+    let loop_context = crate::loop_context::LoopContext::primary(temp.path().to_path_buf());
+    let mut event_loop = EventLoop::with_context(config, loop_context);
+    event_loop.initialize("coordinator mixed owner test");
+
+    let prompt = event_loop
+        .build_prompt(&HatId::new("forge-dispatcher"))
+        .expect("dispatcher prompt");
+
+    assert!(
+        task_line_is_read_only(&prompt, "F1 impl"),
+        "non-self-owner task must carry the [read-only] marker; ready block:\n{}",
+        head_chars(&prompt, 4000)
+    );
+    assert!(
+        !task_line_is_read_only(&prompt, "dispatch the next wave"),
+        "self-owner task must NOT carry the [read-only] marker; ready block:\n{}",
+        head_chars(&prompt, 4000)
+    );
+    assert!(
+        !prompt.contains("none actionable for this hat"),
+        "header must be the normal variant when at least one ready task is actionable; got prompt:\n{}",
+        head_chars(&prompt, 4000)
     );
 }

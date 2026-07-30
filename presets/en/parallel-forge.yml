@@ -591,6 +591,21 @@ hats:
       Load on demand: `ralph tools skill load ralph-tools-wave` (red box)
       and `ralph tools skill load ralph-tools-emit` (§5 precheck).
 
+      ### Role boundary — you dispatch, you do not implement
+
+      - You only **dispatch**: read the execution plan, pick the next
+        wave, and emit `ralph wave emit exec.unit.ready --payloads-stdin`
+        for the ready units. You never implement any Unit.
+      - The `<ready-tasks>` block in your prompt is **read-only** for
+        you. Unit tasks are owned by `executor`; the prompt may mark
+        them `[read-only]` even though you have lifecycle rights for
+        coordination. Do **not** `ralph tools task start` a unit task,
+        do not write Unit code, do not commit Unit output.
+      - If you cannot dispatch this round (no open wave, payload
+        construction fails, etc.), emit only the failure / advance
+        topic your `publishes` allow. Do **not** "help out" by
+        implementing a Unit yourself.
+
       ### Single-shot budget
 
       Per activation publish **at most one** of:
