@@ -1277,6 +1277,9 @@ impl EventLoop {
         resolved: crate::execution_contract::ResolvedRuntimeConfig,
         context: LoopContext,
     ) -> Self {
+        // U4: retain the compiled contract so `prepend_hat_identity`
+        // can project contract actionability into the prompt block.
+        let contract = std::sync::Arc::new(resolved.contract().clone());
         let config = resolved.into_inner();
         let diagnostics = match context.prebuilt_diagnostics() {
             Some(collector) => (**collector).clone(),
@@ -1290,8 +1293,10 @@ impl EventLoop {
                 }),
         };
 
-        Self::build_with_context(config, context, diagnostics)
-            .expect("U13: archive failed; the loop cannot start on stale state. Use with_context_and_diagnostics to receive the error explicitly.")
+        let mut event_loop = Self::build_with_context(config, context, diagnostics)
+            .expect("U13: archive failed; the loop cannot start on stale state. Use with_context_and_diagnostics to receive the error explicitly.");
+        event_loop.execution_contract = Some(contract);
+        event_loop
     }
 
     /// Production constructor for the no-context path (mirrors
@@ -1300,6 +1305,8 @@ impl EventLoop {
     pub fn from_resolved_no_context(
         resolved: crate::execution_contract::ResolvedRuntimeConfig,
     ) -> Self {
+        // U4: retain the compiled contract for prompt projection.
+        let contract = std::sync::Arc::new(resolved.contract().clone());
         let config = resolved.into_inner();
         let diagnostics = crate::diagnostics::DiagnosticsCollector::new(std::path::Path::new("."))
             .unwrap_or_else(|e| {
@@ -1310,7 +1317,9 @@ impl EventLoop {
                 crate::diagnostics::DiagnosticsCollector::disabled()
             });
 
-        Self::build_no_context(config, diagnostics)
+        let mut event_loop = Self::build_no_context(config, diagnostics);
+        event_loop.execution_contract = Some(contract);
+        event_loop
     }
 
     /// Creates a new event loop with explicit loop context and diagnostics.
@@ -1773,6 +1782,9 @@ impl EventLoop {
             // stall_recovery_counts).
             precheck_retries: crate::event_loop::precheck_gate_runner::PrecheckRetryRegistry::new(),
             phase_authority,
+            // U4: set post-construction by `from_resolved`; the shared
+            // builder always starts with `None` (legacy / test paths).
+            execution_contract: None,
         })
     }
 
@@ -1953,6 +1965,8 @@ impl EventLoop {
             // `with_context_and_diagnostics` body).
             precheck_retries: crate::event_loop::precheck_gate_runner::PrecheckRetryRegistry::new(),
             phase_authority,
+            // U4: set post-construction by `from_resolved_no_context`.
+            execution_contract: None,
         }
     }
 
@@ -7485,9 +7499,17 @@ impl EventLoop {
         if hat_id.as_str() == "ralph" {
             return prompt;
         }
-        let Some(snapshot) =
-            crate::hat_identity::HatIdentitySnapshot::from_config(&self.config, hat_id)
-        else {
+        // U4 (plan 2026-07-30-004): prefer the contract-projected
+        // snapshot so the prompt and runtime enforcement are provably
+        // in sync. Fall back to raw config when the contract is not
+        // available (legacy / test constructors).
+        let snapshot = match &self.execution_contract {
+            Some(contract) => crate::hat_identity::HatIdentitySnapshot::from_config_and_contract(
+                &self.config, hat_id, contract,
+            ),
+            None => crate::hat_identity::HatIdentitySnapshot::from_config(&self.config, hat_id),
+        };
+        let Some(snapshot) = snapshot else {
             tracing::debug!(
                 hat_id = %hat_id.as_str(),
                 "OPAC U2: skipping ## HAT IDENTITY injection for unknown hat"

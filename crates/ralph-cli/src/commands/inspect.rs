@@ -1513,6 +1513,22 @@ fn print_loop_view(view: &LoopInspectView, use_colors: bool) {
                         println!("      - {v}");
                     }
                 }
+                // U4 (plan 2026-07-30-004): surface denied_topics and
+                // contract_digest when the snapshot was built via the
+                // contract-projected path.
+                if let Some(denied) = map.get("denied_topics").and_then(|v| v.as_array())
+                    && !denied.is_empty()
+                {
+                    println!("    denied_topics:");
+                    for v in denied {
+                        println!("      - {v}");
+                    }
+                }
+                if let Some(digest) = map.get("contract_digest").and_then(|v| v.as_str())
+                    && !digest.is_empty()
+                {
+                    println!("    contract_digest: {digest}");
+                }
             }
             _ => println!("    {dim}(unparseable){reset}"),
         }

@@ -419,4 +419,15 @@ pub struct EventLoop {
     /// 2026-07-02-006 plan: shared phase authority engine (opt-in).
     pub(crate) phase_authority:
         std::sync::Arc<crate::event_loop::phase_authority::WorkflowPhaseAuthority>,
+
+    /// U4 (plan 2026-07-30-004): the compiled Effective Execution
+    /// Contract, when the loop was constructed via the production
+    /// `from_resolved` / `from_resolved_no_context` constructors.
+    /// `None` for test-only constructors (`new`, `with_context`, etc.)
+    /// and the legacy no-context path. When present, `prepend_hat_identity`
+    /// projects the contract's actionability into the `## HAT IDENTITY`
+    /// prompt block so the prompt and runtime enforcement are provably
+    /// in sync.
+    pub(crate) execution_contract:
+        Option<std::sync::Arc<crate::execution_contract::EffectiveExecutionContract>>,
 }
