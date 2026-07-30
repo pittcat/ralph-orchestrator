@@ -7046,12 +7046,21 @@ impl EventLoop {
     /// a `<ready-tasks>` XML block. This saves the agent a tool call per
     /// iteration and puts tasks at the same prominence as the scratchpad.
     ///
-    /// When `hat_id` is provided, tasks the hat cannot lifecycle-mutate
-    /// (neither owner nor in `tasks.coordinator_hats`) are rendered with
-    /// a `[read-only]` marker so the agent does not attempt `task start`
-    /// on a task the runtime ACL will reject. Hats with no mutable task
-    /// in the entire ready set see a one-line "no actionable tasks" header
-    /// instead of an actionable-looking list.
+    /// The `is_actionable` check below intentionally decouples
+    /// **execution-ability** (whether this hat should *run* the task —
+    /// owner match only) from **lifecycle mutation rights** (whether
+    /// the hat can `start` / `close` / `fail` / `reopen` — owner OR
+    /// membership in `tasks.coordinator_hats`, see
+    /// `task::can_hat_mutate_task_lifecycle` and the `task_cli` auth
+    /// paths). A coordinator hat may still mutate any task for
+    /// coordination purposes, but the prompt must not invite it to
+    /// *execute* a unit task it does not own: non-self-owner ready
+    /// tasks are rendered with a `[read-only]` marker so the
+    /// coordinator does not call `task start` on someone else's unit.
+    /// When no ready task is actionable for the caller, a one-line
+    /// "no actionable tasks" header replaces the actionable-looking
+    /// list (which historically parked the activation until the
+    /// no-progress watchdog killed the loop).
     fn prepend_ready_tasks(&self, prompt: String, hat_id: Option<&HatId>) -> String {
         if !self.config.tasks.enabled {
             return prompt;
@@ -7096,20 +7105,19 @@ impl EventLoop {
         if ready.is_empty() && open.is_empty() {
             section.push_str("No open tasks. Create tasks with `ralph tools task add`.\n");
         } else {
-            // Compute ACL view: a task is "actionable" for `hat_id` iff the hat
-            // may lifecycle-mutate it (owner or in `tasks.coordinator_hats`).
-            // When the hat cannot mutate ANY ready task, we render a one-line
-            // "no actionable tasks" header so the agent does not start a task
-            // that the runtime ACL will reject (which historically parked the
-            // activation until the no-progress watchdog killed the loop).
-            let coordinator_hats: &[String] = &self.config.tasks.coordinator_hats;
+            // Compute the prompt's "actionable" view: a ready task is
+            // actionable for `hat_id` iff the hat *owns* it. This is
+            // deliberately narrower than the lifecycle ACL
+            // (`task::can_hat_mutate_task_lifecycle`, which also admits
+            // `tasks.coordinator_hats` members). The prompt only needs to
+            // steer the agent away from tasks it should not execute;
+            // coordinator rights for coordination (e.g. closing another
+            // hat's task) are preserved by the `task_cli` auth path.
             let caller_hat_str: Option<&str> = hat_id.map(|h| h.as_str());
             let is_actionable = |task: &crate::task::Task| -> bool {
                 match caller_hat_str {
                     None => true, // no caller context (e.g. tests) — keep legacy
-                    Some(caller) => {
-                        crate::task::can_hat_mutate_task_lifecycle(task, caller, coordinator_hats)
-                    }
+                    Some(caller) => task.owner_hat_id.as_deref() == Some(caller),
                 }
             };
             let any_actionable_ready = ready.iter().any(|t| is_actionable(t));
