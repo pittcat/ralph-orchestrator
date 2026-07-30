@@ -2576,6 +2576,7 @@ dependencies = [
  "jsonschema",
  "keyring",
  "nix 0.29.0",
+ "ralph-core",
  "ralph-proto",
  "regex",
  "reqwest",

@@ -1209,6 +1209,12 @@ impl EventLoop {
     }
 
     /// Creates a new event loop from configuration.
+    ///
+    /// **Test-only.** Production code must construct via
+    /// [`EventLoop::from_resolved_no_context`] (or [`EventLoop::from_resolved`])
+    /// so the config passes the fallible execution-contract compile boundary
+    /// (U2, plan 2026-07-30-004) before the loop is built.
+    #[cfg(any(test, feature = "test-support"))]
     pub fn new(config: RalphConfig) -> Self {
         // Try to create diagnostics collector, but fall back to disabled if it fails
         // (e.g., in tests without proper directory setup)
@@ -1221,7 +1227,7 @@ impl EventLoop {
                 crate::diagnostics::DiagnosticsCollector::disabled()
             });
 
-        Self::with_diagnostics(config, diagnostics)
+        Self::build_no_context(config, diagnostics)
     }
 
     /// Creates a new event loop with a loop context for path resolution.
@@ -1237,6 +1243,10 @@ impl EventLoop {
     /// fresh `DiagnosticsCollector::new(workspace)` is created. Either way,
     /// init failure falls back to a disabled collector (with a `tracing::warn!`)
     /// — diagnostics never panic the loop.
+    /// **Test-only.** Production code must construct via
+    /// [`EventLoop::from_resolved`] so the config passes the fallible
+    /// execution-contract compile boundary (U2) first.
+    #[cfg(any(test, feature = "test-support"))]
     pub fn with_context(config: RalphConfig, context: LoopContext) -> Self {
         let diagnostics = match context.prebuilt_diagnostics() {
             Some(collector) => (**collector).clone(),
@@ -1250,17 +1260,82 @@ impl EventLoop {
                 }),
         };
 
-        Self::with_context_and_diagnostics(config, context, diagnostics)
+        Self::build_with_context(config, context, diagnostics)
             .expect("U13: archive failed; the loop cannot start on stale state. Use with_context_and_diagnostics to receive the error explicitly.")
     }
 
+    /// Production constructor: build the loop from a config that has already
+    /// passed the fallible execution-contract compile boundary (U2, plan
+    /// 2026-07-30-004). Mirrors the context-aware path of
+    /// [`EventLoop::with_context`].
+    ///
+    /// Callers must obtain `resolved` via
+    /// [`crate::execution_contract::compile`] and fail non-zero on `Err`
+    /// *before* reaching this point — a config gap must abort startup before
+    /// loop initialization.
+    pub fn from_resolved(
+        resolved: crate::execution_contract::ResolvedRuntimeConfig,
+        context: LoopContext,
+    ) -> Self {
+        let config = resolved.into_inner();
+        let diagnostics = match context.prebuilt_diagnostics() {
+            Some(collector) => (**collector).clone(),
+            None => crate::diagnostics::DiagnosticsCollector::new(context.workspace())
+                .unwrap_or_else(|e| {
+                    warn!(
+                        "Failed to initialize diagnostics: {}, using disabled collector",
+                        e
+                    );
+                    crate::diagnostics::DiagnosticsCollector::disabled()
+                }),
+        };
+
+        Self::build_with_context(config, context, diagnostics)
+            .expect("U13: archive failed; the loop cannot start on stale state. Use with_context_and_diagnostics to receive the error explicitly.")
+    }
+
+    /// Production constructor for the no-context path (mirrors
+    /// [`EventLoop::new`]). See [`EventLoop::from_resolved`] for the contract
+    /// compile requirement.
+    pub fn from_resolved_no_context(
+        resolved: crate::execution_contract::ResolvedRuntimeConfig,
+    ) -> Self {
+        let config = resolved.into_inner();
+        let diagnostics = crate::diagnostics::DiagnosticsCollector::new(std::path::Path::new("."))
+            .unwrap_or_else(|e| {
+                debug!(
+                    "Failed to initialize diagnostics: {}, using disabled collector",
+                    e
+                );
+                crate::diagnostics::DiagnosticsCollector::disabled()
+            });
+
+        Self::build_no_context(config, diagnostics)
+    }
+
     /// Creates a new event loop with explicit loop context and diagnostics.
+    ///
+    /// **Test-only.** Production code must construct via
+    /// [`EventLoop::from_resolved`] so the config passes the fallible
+    /// execution-contract compile boundary (U2) first.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn with_context_and_diagnostics(
+        config: RalphConfig,
+        context: LoopContext,
+        diagnostics: crate::diagnostics::DiagnosticsCollector,
+    ) -> std::io::Result<Self> {
+        Self::build_with_context(config, context, diagnostics)
+    }
+
+    /// Ungated context-aware builder shared by the test-only
+    /// [`EventLoop::with_context_and_diagnostics`] / [`EventLoop::with_context`]
+    /// and the production [`EventLoop::from_resolved`].
     // U11 wiring: archive_state_for_loop 在 new() 路径调用
     // U13 (2026-06-27-002 plan completion): a failed
     // archive now returns `Err` instead of warning and
     // continuing, so stale `.ralph/` state can never
     // poison a fresh loop (SC-6).
-    pub fn with_context_and_diagnostics(
+    fn build_with_context(
         mut config: RalphConfig,
         context: LoopContext,
         diagnostics: crate::diagnostics::DiagnosticsCollector,
@@ -1687,7 +1762,22 @@ impl EventLoop {
     }
 
     /// Creates a new event loop with explicit diagnostics collector (for testing).
+    ///
+    /// **Test-only.** Production code must construct via
+    /// [`EventLoop::from_resolved_no_context`] so the config passes the
+    /// fallible execution-contract compile boundary (U2) first.
+    #[cfg(any(test, feature = "test-support"))]
     pub fn with_diagnostics(
+        config: RalphConfig,
+        diagnostics: crate::diagnostics::DiagnosticsCollector,
+    ) -> Self {
+        Self::build_no_context(config, diagnostics)
+    }
+
+    /// Ungated no-context builder shared by the test-only
+    /// [`EventLoop::with_diagnostics`] / [`EventLoop::new`] and the production
+    /// [`EventLoop::from_resolved_no_context`].
+    fn build_no_context(
         mut config: RalphConfig,
         diagnostics: crate::diagnostics::DiagnosticsCollector,
     ) -> Self {

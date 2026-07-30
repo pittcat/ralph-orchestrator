@@ -37,6 +37,15 @@ use std::path::Path;
 use std::process::Command;
 use tracing::warn;
 
+// U2 (plan 2026-07-30-004): the fallible startup boundary that compiles the
+// final resolved config into a frozen, fingerprinted `ResolvedRuntimeConfig`.
+// Every production `EventLoop` construction must go through `compile` first.
+pub mod compiler;
+pub use compiler::{
+    ContractCompileFinding, ContractCompileFindingKind, ContractFindings, EmitDecision,
+    EffectiveExecutionContract, ResolvedRuntimeConfig, compile,
+};
+
 /// Hint appended to the `TaskNotTerminal` rejection message so the rejected
 /// agent (or human reader) sees an actionable `ralph tools task close`
 /// command and knows the next concrete step. The `<task_id>` placeholder

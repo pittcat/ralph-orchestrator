@@ -575,7 +575,12 @@ pub async fn inspect_prompt_command(
     let _guard =
         tracing::dispatcher::set_default(&tracing_subscriber::registry().with(suppressed).into());
 
-    let mut event_loop = ralph_core::event_loop::EventLoop::new(preview_config);
+    // U2 (plan 2026-07-30-004): compile the final config through the fallible
+    // execution-contract boundary before constructing the loop; a contract gap
+    // fails the read-only inspect non-zero before loop initialization.
+    let resolved = ralph_core::execution_contract::compile(preview_config)
+        .map_err(|findings| anyhow::anyhow!("{findings}"))?;
+    let mut event_loop = ralph_core::event_loop::EventLoop::from_resolved_no_context(resolved);
     event_loop.initialize("ralph inspect prompt (read-only)");
     if let Some(iteration) = args.iteration {
         event_loop.set_iteration_for_test(iteration);

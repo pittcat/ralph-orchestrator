@@ -8,6 +8,12 @@ description = "Core orchestration loop, configuration, and state management for 
 [features]
 default = []
 recording = []
+# U2 (plan 2026-07-30-004): exposes the raw-config `EventLoop` constructors
+# (`new` / `with_context` / `with_diagnostics` / `with_context_and_diagnostics`)
+# for test code across the workspace. Production builds leave this OFF so the
+# only reachable construction path is the fallible `from_resolved*` boundary
+# (`cargo build` proves production cannot reach the raw constructors).
+test-support = []
 # 2026-07-03-001 plan U5: opt-in rusqlite-backed supervisor
 # store. The feature is OFF by default so the framework binary
 # does not link the SQLite engine when supervisors are disabled
@@ -54,6 +60,11 @@ rusqlite = { version = "0.32", features = ["bundled"], optional = true }
 nix = { workspace = true }
 
 [dev-dependencies]
+# U2 (plan 2026-07-30-004): enable the test-only raw `EventLoop` constructors
+# for ralph-core's OWN integration tests (`tests/*.rs`), which link the lib
+# without the `test` cfg. A self dev-dependency is the standard way to switch a
+# feature on for integration tests; it never affects production `cargo build`.
+ralph-core = { path = ".", features = ["test-support"] }
 jsonschema = { version = "0.18", features = ["draft202012"] }
 # U11-T7: env-isolation tests (`UNIFIED_PROTOCOL_VIEW`) flip the
 # global env var, so they must run serially relative to one another.

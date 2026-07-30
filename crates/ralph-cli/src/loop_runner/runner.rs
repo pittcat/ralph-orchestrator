@@ -1104,8 +1104,14 @@ async fn run_loop_impl_inner(
         }
     }
 
+    // U2 (plan 2026-07-30-004): compile the final resolved config through the
+    // fallible execution-contract boundary BEFORE constructing the loop. A
+    // contract gap (e.g. a declared contract topic with no consumer) fails
+    // non-zero here, before loop initialization.
+    let resolved = ralph_core::execution_contract::compile(config.clone())
+        .map_err(|findings| anyhow::anyhow!("{findings}"))?;
     // Initialize event loop with context for proper path resolution
-    let mut event_loop = EventLoop::with_context(config.clone(), ctx.clone());
+    let mut event_loop = EventLoop::from_resolved(resolved, ctx.clone());
     // U5 (2026-06-17-004 R5): the trusted events file now contains the
     // starting event we just persisted.  Push the EventReader cursor to
     // the end of the file so the live loop does not re-read and
