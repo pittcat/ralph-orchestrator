@@ -29,12 +29,12 @@
 //! The registry is owned by the `EventLoop`. The CLI reads it via a
 //! read-only load that returns an error on corruption rather than falling back.
 
+use crate::file_lock::FileLock;
 use crate::hat_lifecycle::ActivationKey;
 use std::collections::HashMap;
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufRead, BufReader, Write};
 use std::path::PathBuf;
-use std::sync::RwLock;
 use tracing::debug;
 
 /// The relative path within the workspace `.ralph/` directory.
@@ -126,8 +126,8 @@ pub struct ActivationRegistry {
     records: HashMap<ActivationKey, ActivationRecord>,
     /// Path to the registry file.
     registry_path: PathBuf,
-    /// Writer for appending new entries.
-    writer: RwLock<Option<File>>,
+    /// Cross-process file lock for serialising reads and writes.
+    file_lock: FileLock,
 }
 
 impl ActivationRegistry {
@@ -144,9 +144,18 @@ impl ActivationRegistry {
     ///
     /// If the file does not exist it is created empty.
     /// If the file exists but is corrupt, returns `Err`.
+    ///
+    /// Uses a cross-process `FileLock` to serialise reads and writes
+    /// across concurrent Ralph processes.
     pub fn open(registry_path: PathBuf) -> Result<Self, ActivationRegistryError> {
+        let file_lock = FileLock::new(&registry_path).map_err(|e| {
+            ActivationRegistryError::IoError {
+                source: format!("failed to create file lock for registry: {}", e),
+            }
+        })?;
+
         let records = if registry_path.exists() {
-            Self::load_from_file(&registry_path)?
+            Self::load_from_file_locked(&registry_path, &file_lock)?
         } else {
             // Create the file so subsequent opens don't race on create.
             if let Some(parent) = registry_path.parent() {
@@ -154,33 +163,32 @@ impl ActivationRegistry {
                     source: format!("failed to create registry directory: {}", e),
                 })?;
             }
-            let file = OpenOptions::new()
+            OpenOptions::new()
                 .create(true)
                 .append(true)
                 .open(&registry_path)
                 .map_err(|e| ActivationRegistryError::IoError {
                     source: format!("failed to create registry file: {}", e),
                 })?;
-            let writer = RwLock::new(Some(file));
-            return Ok(Self {
-                records: HashMap::new(),
-                registry_path,
-                writer,
-            });
+            HashMap::new()
         };
 
-        let file = OpenOptions::new()
-            .append(true)
-            .open(&registry_path)
-            .map_err(|e| ActivationRegistryError::IoError {
-                source: format!("failed to reopen registry for append: {}", e),
-            })?;
-        let writer = RwLock::new(Some(file));
         Ok(Self {
             records,
             registry_path,
-            writer,
+            file_lock,
         })
+    }
+
+    /// Load and parse the registry file under a shared lock.
+    fn load_from_file_locked(
+        path: &PathBuf,
+        file_lock: &FileLock,
+    ) -> Result<HashMap<ActivationKey, ActivationRecord>, ActivationRegistryError> {
+        let _guard = file_lock.shared().map_err(|e| ActivationRegistryError::IoError {
+            source: format!("failed to acquire shared lock: {}", e),
+        })?;
+        Self::load_from_file(path)
     }
 
     /// Load and parse the registry file. Returns an error on any corruption.
@@ -210,28 +218,30 @@ impl ActivationRegistry {
         Ok(records)
     }
 
-    /// Append a record to the registry file.
-    fn append_record(&self, record: &ActivationRecord) -> Result<(), ActivationRegistryError> {
-        let guard = self.writer.read().unwrap();
-        let mut file = guard.as_ref().ok_or_else(|| ActivationRegistryError::IoError {
-            source: "registry file not open for writing".to_string(),
-        })?;
-        let json = serde_json::to_string(record)
-            .map_err(|e| ActivationRegistryError::IoError {
+    /// Append a record to the registry file. Assumes the caller already
+    /// holds an exclusive lock guard.
+    fn append_record_locked(
+        &self,
+        file: &mut File,
+        record: &ActivationRecord,
+    ) -> Result<(), ActivationRegistryError> {
+        let json =
+            serde_json::to_string(record).map_err(|e| ActivationRegistryError::IoError {
                 source: format!("failed to serialize record: {}", e),
             })?;
-        writeln!(file, "{}", json)
-            .map_err(|e| ActivationRegistryError::IoError {
-                source: format!("failed to write record: {}", e),
-            })?;
-        file.flush()
-            .map_err(|e| ActivationRegistryError::IoError {
-                source: format!("failed to flush record: {}", e),
-            })?;
+        writeln!(file, "{}", json).map_err(|e| ActivationRegistryError::IoError {
+            source: format!("failed to write record: {}", e),
+        })?;
+        file.flush().map_err(|e| ActivationRegistryError::IoError {
+            source: format!("failed to flush record: {}", e),
+        })?;
         Ok(())
     }
 
     /// Register a new activation.
+    ///
+    /// Acquires an exclusive file lock for the entire check-then-write
+    /// sequence, preventing cross-process concurrent slot conflicts.
     ///
     /// Returns an error if:
     /// - The slot is already active (`SlotAlreadyActive`).
@@ -241,7 +251,20 @@ impl ActivationRegistry {
         key: ActivationKey,
         revision: u64,
     ) -> Result<ActivationRecord, ActivationRegistryError> {
-        // Check for concurrent slot conflict.
+        // Hold the exclusive lock for the entire operation.
+        let _guard = self.file_lock.exclusive().map_err(|e| {
+            ActivationRegistryError::IoError {
+                source: format!("failed to acquire exclusive lock: {}", e),
+            }
+        })?;
+
+        // Reload state from disk under the exclusive lock so we see any
+        // writes from other processes/threads that completed before us.
+        if self.registry_path.exists() {
+            self.records = Self::load_from_file(&self.registry_path)?;
+        }
+
+        // Check for concurrent slot conflict (under lock, with fresh state).
         if let Some(existing) = self.records.get(&key) {
             match existing.status {
                 ActivationStatus::Active => {
@@ -271,12 +294,21 @@ impl ActivationRegistry {
             updated_at: now,
         };
 
-        self.append_record(&record)?;
+        let mut file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&self.registry_path)
+            .map_err(|e| ActivationRegistryError::IoError {
+                source: format!("failed to open registry for append: {}", e),
+            })?;
+        self.append_record_locked(&mut file, &record)?;
         self.records.insert(key, record.clone());
         Ok(record)
     }
 
     /// Mark an activation as completed.
+    ///
+    /// Acquires an exclusive file lock for the entire operation.
     ///
     /// Returns an error if:
     /// - The slot is not found and revision is stale.
@@ -285,18 +317,26 @@ impl ActivationRegistry {
         key: &ActivationKey,
         revision: u64,
     ) -> Result<ActivationRecord, ActivationRegistryError> {
-        let existing = self.records.get(key)
-            .ok_or_else(|| {
-                // No record found — check if it could be a stale revision.
-                // Return a generic not-found that signals the caller to
-                // investigate the revision.
-                debug!("completion request for unknown activation {key} r{}", revision);
-                ActivationRegistryError::StaleRevision {
-                    key: key.clone(),
-                    expected: revision,
-                    actual: 0,
-                }
-            })?;
+        let _guard = self.file_lock.exclusive().map_err(|e| {
+            ActivationRegistryError::IoError {
+                source: format!("failed to acquire exclusive lock: {}", e),
+            }
+        })?;
+
+        // Reload state from disk under the exclusive lock.
+        if self.registry_path.exists() {
+            self.records = Self::load_from_file(&self.registry_path)?;
+        }
+
+        let existing = self.records.get(key).ok_or_else(|| {
+            // No record found — check if it could be a stale revision.
+            debug!("completion request for unknown activation {key} r{}", revision);
+            ActivationRegistryError::StaleRevision {
+                key: key.clone(),
+                expected: revision,
+                actual: 0,
+            }
+        })?;
 
         if revision <= existing.revision {
             return Err(ActivationRegistryError::StaleRevision {
@@ -315,24 +355,45 @@ impl ActivationRegistry {
             updated_at: now,
         };
 
-        self.append_record(&record)?;
+        let mut file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&self.registry_path)
+            .map_err(|e| ActivationRegistryError::IoError {
+                source: format!("failed to open registry for append: {}", e),
+            })?;
+        self.append_record_locked(&mut file, &record)?;
         self.records.insert(key.clone(), record.clone());
         Ok(record)
     }
 
     /// Mark an activation as superseded (replaced by a newer activation
     /// for the same hat).
+    ///
+    /// Acquires an exclusive file lock for the entire operation.
     pub fn supersede(
         &mut self,
         key: &ActivationKey,
         revision: u64,
     ) -> Result<ActivationRecord, ActivationRegistryError> {
-        let existing = self.records.get(key)
-            .ok_or_else(|| ActivationRegistryError::StaleRevision {
+        let _guard = self.file_lock.exclusive().map_err(|e| {
+            ActivationRegistryError::IoError {
+                source: format!("failed to acquire exclusive lock: {}", e),
+            }
+        })?;
+
+        // Reload state from disk under the exclusive lock.
+        if self.registry_path.exists() {
+            self.records = Self::load_from_file(&self.registry_path)?;
+        }
+
+        let existing = self.records.get(key).ok_or_else(|| {
+            ActivationRegistryError::StaleRevision {
                 key: key.clone(),
                 expected: revision,
                 actual: 0,
-            })?;
+            }
+        })?;
 
         if revision <= existing.revision {
             return Err(ActivationRegistryError::StaleRevision {
@@ -351,7 +412,14 @@ impl ActivationRegistry {
             updated_at: now,
         };
 
-        self.append_record(&record)?;
+        let mut file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&self.registry_path)
+            .map_err(|e| ActivationRegistryError::IoError {
+                source: format!("failed to open registry for append: {}", e),
+            })?;
+        self.append_record_locked(&mut file, &record)?;
         self.records.insert(key.clone(), record.clone());
         Ok(record)
     }
@@ -376,14 +444,6 @@ impl ActivationRegistry {
             .map(|r| r.status == ActivationStatus::Completed)
             .unwrap_or(false)
     }
-
-    /// Check if the registry contains any corrupt record.
-    /// This is called during open; the result is stored and used
-    /// to fail-closed on any subsequent operation.
-    #[cfg(test)]
-    fn is_corrupt(&self) -> bool {
-        false // Records are validated on load; if we got here, they're valid.
-    }
 }
 
 /// Read-only view of the activation registry for the CLI path.
@@ -402,6 +462,58 @@ pub fn load_registry_readonly(
     }
 
     ActivationRegistry::open(registry_path)
+}
+
+/// Environment variable holding the absolute path to the activation
+/// registry JSONL file. Set by the event loop when spawning a hat
+/// subprocess so the child can locate the shared registry without
+/// deriving it from the workspace root.
+pub const ENV_ACTIVATION_REGISTRY_PATH: &str = "RALPH_ACTIVATION_REGISTRY";
+
+/// Environment variable holding the contract revision (u64 as a decimal
+/// string) that the spawned hat must agree on. Pairs with
+/// `ENV_ACTIVATION_REGISTRY_PATH` so the child process can validate
+/// that its compiled contract matches the one the loop is running.
+pub const ENV_CONTRACT_REVISION: &str = "RALPH_CONTRACT_REVISION";
+
+/// Resolved activation registry locator passed via spawn environment.
+///
+/// Constructed by [`resolve_activation_registry_env`] from the two
+/// `RALPH_ACTIVATION_*` environment variables. The event loop sets
+/// these before spawning a hat subprocess; the CLI reads them when
+/// it needs to locate the registry without a workspace root.
+#[derive(Debug, Clone)]
+pub struct ActivationRegistryLocator {
+    /// Absolute path to the registry JSONL file.
+    pub registry_path: PathBuf,
+    /// Contract revision the spawned hat must agree on.
+    pub contract_revision: u64,
+}
+
+/// Resolve the activation registry locator from spawn environment
+/// variables.
+///
+/// Returns `None` when neither env var is set (the common case for
+/// human CLI invocations). Returns `Some(Err(_))` when the path is
+/// set but the revision is missing or unparseable — this is a
+/// fail-closed signal that the spawn env is corrupt.
+pub fn resolve_activation_registry_env() -> Option<Result<ActivationRegistryLocator, String>> {
+    let path_str = std::env::var(ENV_ACTIVATION_REGISTRY_PATH).ok()?;
+    let revision_str = std::env::var(ENV_CONTRACT_REVISION);
+    match revision_str {
+        Ok(s) => match s.parse::<u64>() {
+            Ok(rev) => Some(Ok(ActivationRegistryLocator {
+                registry_path: PathBuf::from(path_str),
+                contract_revision: rev,
+            })),
+            Err(e) => Some(Err(format!(
+                "{ENV_CONTRACT_REVISION}={s:?} is not a valid u64: {e}"
+            ))),
+        },
+        Err(_) => Some(Err(format!(
+            "{ENV_ACTIVATION_REGISTRY_PATH} is set but {ENV_CONTRACT_REVISION} is missing"
+        ))),
+    }
 }
 
 #[cfg(test)]
@@ -469,12 +581,19 @@ mod tests {
         let key = make_key("worker");
         registry.activate(key.clone(), 1).unwrap();
 
-        // Same revision is stale.
-        let err = registry.activate(key.clone(), 1).unwrap_err();
+        // Same slot while Active is SlotAlreadyActive (not StaleRevision).
+        let err = registry.activate(key.clone(), 2).unwrap_err();
+        assert!(matches!(err, ActivationRegistryError::SlotAlreadyActive { .. }));
+
+        // Complete the activation.
+        registry.complete(&key, 2).unwrap();
+
+        // Now a lower revision than the persisted one is stale.
+        let err = registry.activate(key.clone(), 2).unwrap_err();
         assert!(matches!(err, ActivationRegistryError::StaleRevision { .. }));
 
-        // Lower revision is stale.
-        let err = registry.complete(&key, 1).unwrap_err();
+        // Same revision is also stale (must be strictly greater).
+        let err = registry.activate(key.clone(), 2).unwrap_err();
         assert!(matches!(err, ActivationRegistryError::StaleRevision { .. }));
     }
 
@@ -556,5 +675,131 @@ mod tests {
         registry.complete(&key, 2).unwrap();
         assert!(!registry.is_active(&key));
         assert!(registry.is_completed(&key));
+    }
+
+    // ─────────────────────────────────────────────────────────────────────
+    // U3 acceptance tests (plan 2026-07-30-004 §U3)
+    // ─────────────────────────────────────────────────────────────────────
+
+    /// U3-Red-1: same (loop_id, iteration, hat_id) key with a different
+    /// revision must be rejected as StaleRevision when the existing record
+    /// is not Active.
+    #[test]
+    fn u3_activation_registry_persistence_stale_revision() {
+        let tmp = TempDir::new().unwrap();
+        let mut registry = ActivationRegistry::open(tmp_path(&tmp)).unwrap();
+
+        let key = make_key("worker");
+        // First: activate at r1.
+        registry.activate(key.clone(), 1).unwrap();
+        // Complete it at r2.
+        registry.complete(&key, 2).unwrap();
+
+        // Now try to activate the same key at r2 again — stale because
+        // existing revision is already 2 and we require revision > existing.
+        let err = registry.activate(key.clone(), 2).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                ActivationRegistryError::StaleRevision {
+                    key: _,
+                    expected: 3,
+                    actual: 2
+                }
+            ),
+            "expected StaleRevision {{ expected: 3, actual: 2 }}, got: {err:?}"
+        );
+    }
+
+    /// U3-Red-2: close the registry and reopen it from the same path — the
+    /// active record must be readable from disk.
+    #[test]
+    fn u3_activation_registry_persistence_reopen_readable() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp_path(&tmp);
+
+        let (loop_id, iteration, hat_id) = ("loop-x".to_string(), 3, "replayer".to_string());
+        let key = ActivationKey {
+            loop_id: loop_id.clone(),
+            iteration,
+            hat_id: hat_id.clone(),
+        };
+
+        // Write phase.
+        {
+            let mut registry = ActivationRegistry::open(path.clone()).unwrap();
+            registry.activate(key.clone(), 1).unwrap();
+            // Leave it Active — this is the record we will verify on reopen.
+        }
+
+        // Reopen phase: the Active record must be readable from disk.
+        let registry = ActivationRegistry::open(path).unwrap();
+        let record = registry.get(&key).unwrap();
+        assert_eq!(record.status, ActivationStatus::Active);
+        assert_eq!(record.revision, 1);
+        assert_eq!(record.key.loop_id, loop_id);
+        assert_eq!(record.key.iteration, iteration);
+        assert_eq!(record.key.hat_id, hat_id);
+    }
+
+    /// U3-Red-3: concurrent register_active on the same key — one thread
+    /// succeeds, the other gets SlotAlreadyActive.  Uses Arc + Barrier to
+    /// synchronise the two threads so they race on the same activation key.
+    #[test]
+    fn u3_activation_registry_persistence_concurrent_race() {
+        use std::sync::{Arc, Barrier};
+        use std::thread;
+
+        let tmp = TempDir::new().unwrap();
+        let path = tmp_path(&tmp);
+
+        // Pre-create the registry so both threads open the same file.
+        let registry = ActivationRegistry::open(path.clone()).unwrap();
+        drop(registry);
+
+        let key = Arc::new(make_key("racer"));
+        let path = Arc::new(path);
+        let barrier = Arc::new(Barrier::new(2));
+
+        let key_a = key.clone();
+        let key_b = key.clone();
+        let path_a = path.clone();
+        let path_b = path.clone();
+        let bar_a = barrier.clone();
+        let bar_b = barrier.clone();
+
+        let handle_a = thread::spawn(move || {
+            let mut registry = ActivationRegistry::open((*path_a).clone()).unwrap();
+            bar_a.wait();
+            registry.activate((*key_a).clone(), 1)
+        });
+
+        let handle_b = thread::spawn(move || {
+            let mut registry = ActivationRegistry::open((*path_b).clone()).unwrap();
+            bar_b.wait();
+            registry.activate((*key_b).clone(), 1)
+        });
+
+        // Collect results.
+        let (res_a, res_b) = (handle_a.join().unwrap(), handle_b.join().unwrap());
+
+        // Exactly one must succeed; the other must be SlotAlreadyActive.
+        let successes = [res_a.as_ref().ok(), res_b.as_ref().ok()]
+            .iter()
+            .filter(|r| r.is_some())
+            .count();
+        let slot_already_actives = [&res_a, &res_b]
+            .iter()
+            .filter(|r| matches!(r, Err(ActivationRegistryError::SlotAlreadyActive { .. })))
+            .count();
+
+        assert_eq!(
+            successes, 1,
+            "exactly one thread must succeed; got successes={successes}, slot_already_actives={slot_already_actives}"
+        );
+        assert_eq!(
+            slot_already_actives, 1,
+            "exactly one thread must get SlotAlreadyActive; got successes={successes}, slot_already_actives={slot_already_actives}"
+        );
     }
 }

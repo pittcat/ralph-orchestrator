@@ -488,6 +488,13 @@ pub async fn inspect_loop_command(
         warnings.push(loop_anchor_unattached_warning().to_string());
     }
 
+    // U3 (plan 2026-07-30-004): load the activation registry summary.
+    let (activation_registry, activation_warning) =
+        load_activation_registry_for_inspect(&root);
+    if let Some(w) = activation_warning {
+        warnings.push(w);
+    }
+
     let view = LoopInspectView {
         workspace_root: root.display().to_string(),
         loop_id: ctx.current_loop_id.clone(),
@@ -505,6 +512,7 @@ pub async fn inspect_loop_command(
         schema_version: LOOP_INSPECT_SCHEMA_VERSION.to_string(),
         loop_anchor,
         supervisor: build_supervisor_summary(&config, &root),
+        activation_registry,
     };
 
     match args.format {
@@ -1029,6 +1037,33 @@ struct LoopInspectView {
     /// store can be opened. `None` → JSON has no `supervisor` key.
     #[serde(skip_serializing_if = "Option::is_none")]
     supervisor: Option<ralph_core::supervisor::SupervisorInspectSummary>,
+    /// U3 (plan 2026-07-30-004): persistent activation registry summary.
+    /// `None` when the registry file does not exist (no activations
+    /// have been recorded yet). The key is omitted from JSON when absent.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    activation_registry: Option<ActivationRegistryInspectView>,
+}
+
+/// U3 (plan 2026-07-30-004): activation registry summary for the
+/// `ralph inspect loop` output. Surfaces the persistent activation
+/// lineage so operators and agents can confirm identity agreement
+/// between the resident loop and the independent CLI.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ActivationRegistryInspectView {
+    /// Registry file path relative to the workspace `.ralph/` directory.
+    pub registry_path: String,
+    /// Number of records currently in Active status.
+    pub active_count: usize,
+    /// Total number of records across all statuses.
+    pub total_records: usize,
+    /// Per-loop last revision: maps loop_id → highest revision seen
+    /// for any hat activation in that loop.
+    pub per_loop_last_revision: std::collections::BTreeMap<String, u64>,
+    /// SHA256 hex digest of the last contract compiled by this loop
+    /// (from the activation registry's `contract_digest` field if
+    /// present, or `None` when not recorded).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_contract_digest: Option<String>,
 }
 
 /// U1 (plan 2026-07-04-004): build the loop anchor summary from on-disk
@@ -1326,6 +1361,87 @@ fn build_supervisor_summary(
     }
 }
 
+/// U3 (plan 2026-07-30-004): load and summarise the activation registry
+/// for the `ralph inspect loop` output. Returns `None` when the registry
+/// file does not exist (no activations recorded yet). Corrupt registries
+/// are surfaced as a warning on the view (fail-closed: the operator must
+/// handle corruption explicitly).
+fn load_activation_registry_for_inspect(
+    workspace_root: &std::path::Path,
+) -> (Option<ActivationRegistryInspectView>, Option<String>) {
+    let registry_path = workspace_root
+        .join(".ralph")
+        .join(ralph_core::execution_contract::ACTIVATION_REGISTRY_RELATIVE_PATH);
+
+    if !registry_path.exists() {
+        return (None, None);
+    }
+
+    match ralph_core::execution_contract::ActivationRegistry::open(registry_path.clone()) {
+        Ok(_registry) => {
+            // Count records by status and build per-loop revision map.
+            let mut active_count = 0usize;
+            let mut total_records = 0usize;
+            let mut per_loop: std::collections::BTreeMap<String, u64> =
+                std::collections::BTreeMap::new();
+
+            // Iterate over all records via the public get API.
+            // Since we don't have a direct iteration API, we reconstruct
+            // the summary from what's available. The registry path is
+            // known, and we can derive counts from the file directly.
+            // For now, use a best-effort approach: read the JSONL file
+            // and count lines (each line = one record).
+            if let Ok(contents) = std::fs::read_to_string(&registry_path) {
+                for line in contents.lines() {
+                    let line = line.trim();
+                    if line.is_empty() {
+                        continue;
+                    }
+                    total_records += 1;
+                    if let Ok(record) = serde_json::from_str::<
+                        ralph_core::execution_contract::ActivationRecord,
+                    >(line)
+                    {
+                        if record.status
+                            == ralph_core::execution_contract::ActivationStatus::Active
+                        {
+                            active_count += 1;
+                        }
+                        let entry = per_loop
+                            .entry(record.key.loop_id.clone())
+                            .or_insert(0);
+                        if record.revision > *entry {
+                            *entry = record.revision;
+                        }
+                    }
+                }
+            }
+
+            let relative_path = format!(
+                ".ralph/{}",
+                ralph_core::execution_contract::ACTIVATION_REGISTRY_RELATIVE_PATH
+            );
+
+            (
+                Some(ActivationRegistryInspectView {
+                    registry_path: relative_path,
+                    active_count,
+                    total_records,
+                    per_loop_last_revision: per_loop,
+                    last_contract_digest: None,
+                }),
+                None,
+            )
+        }
+        Err(e) => (
+            None,
+            Some(format!(
+                "activation registry is corrupt or unreadable: {e}"
+            )),
+        ),
+    }
+}
+
 /// Resolve the canonical main + hat-channel events file paths for a
 /// given workspace root. The function only composes paths; it does not
 /// stat or read the files (callers decide). The `ctx` argument is kept
@@ -1406,6 +1522,23 @@ fn print_loop_view(view: &LoopInspectView, use_colors: bool) {
         println!("  {yellow}warnings:{reset}");
         for w in &view.warnings {
             println!("    - {w}");
+        }
+    }
+
+    // U3 (plan 2026-07-30-004): activation registry section.
+    if let Some(reg) = &view.activation_registry {
+        println!("  {cyan}Activation Registry{reset}");
+        println!("    registry_path:    {}", reg.registry_path);
+        println!("    active_count:     {}", reg.active_count);
+        println!("    total_records:    {}", reg.total_records);
+        if !reg.per_loop_last_revision.is_empty() {
+            println!("    per_loop_last_revision:");
+            for (loop_id, rev) in &reg.per_loop_last_revision {
+                println!("      {loop_id}: r{rev}");
+            }
+        }
+        if let Some(digest) = &reg.last_contract_digest {
+            println!("    last_contract_digest: {digest}");
         }
     }
 }
@@ -2270,6 +2403,7 @@ mod tests {
             schema_version: LOOP_INSPECT_SCHEMA_VERSION.to_string(),
             loop_anchor: None,
             supervisor: None,
+            activation_registry: None,
         };
         assert!(view.loop_id.is_none());
         assert!(view.current_hat.is_none());
@@ -2313,6 +2447,7 @@ mod tests {
             schema_version: LOOP_INSPECT_SCHEMA_VERSION.to_string(),
             loop_anchor: None,
             supervisor: None,
+            activation_registry: None,
         };
 
         let json = serde_json::to_value(&view).expect("serialise");
@@ -2731,6 +2866,7 @@ mod tests {
             schema_version: LOOP_INSPECT_SCHEMA_VERSION.to_string(),
             loop_anchor: None,
             supervisor: None,
+            activation_registry: None,
         };
         let json = serde_json::to_value(&view).expect("serialise");
         assert!(
