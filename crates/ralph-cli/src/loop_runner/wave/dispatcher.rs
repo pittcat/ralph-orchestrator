@@ -187,6 +187,12 @@ pub(crate) struct WorkerRequest {
     /// `DetectedWave::startup_grace_secs()`. Effective only when
     /// `idle_heartbeat` is also `Some` (KTD1).
     pub(crate) startup_grace: Option<Duration>,
+    /// 2026-07-30-001 plan U1: the supervisor wave kind this slot
+    /// belongs to. `None` means "not dispatched through the
+    /// supervisor" (the legacy `WaveTracker` path), which keeps the
+    /// pre-plan attempt semantics: a worker-reported `*.unit.failed`
+    /// terminal stays a Completed slot and is never retried.
+    pub(crate) wave_kind: Option<ralph_core::supervisor::WaveKind>,
 }
 
 // 2026-07-28-003 plan U5 (E15 / KTD7): manual `Clone` impl
@@ -211,6 +217,7 @@ impl Clone for WorkerRequest {
             idle_heartbeat: self.idle_heartbeat,
             idle_weak_signal_cap: self.idle_weak_signal_cap,
             startup_grace: self.startup_grace,
+            wave_kind: self.wave_kind,
         }
     }
 }
@@ -393,7 +400,12 @@ impl DispatchContext {
         assigned_dimensions: std::collections::HashMap<u32, String>,
     ) -> Self {
         let started_at = tokio::time::Instant::now();
-        let partial_threshold = Duration::from_secs((aggregate_timeout.as_secs() * 8).div_ceil(10));
+        let partial_threshold = Duration::from_secs(
+            aggregate_timeout
+                .as_secs()
+                .saturating_mul(PARTIAL_THRESHOLD_NUM)
+                .div_ceil(PARTIAL_THRESHOLD_DEN),
+        );
         let partial_deadline = started_at + partial_threshold;
         let aggregate_deadline = started_at + aggregate_timeout;
         // Clamp global_deadline to never exceed aggregate_deadline —
@@ -1427,6 +1439,10 @@ pub async fn execute_wave_structured(
             wave_total: wave.total,
             result_topics: hat_config.publishes.clone(),
             assigned_dimension: assigned_dimension.clone(),
+            // 2026-07-30-001 plan U2: the first attempt has no retry
+            // history. The dispatcher appends the rendered retry block
+            // to this prompt when it re-dispatches the slot.
+            retry: None,
         };
         let prompt = build_wave_worker_prompt(&hat_config, event, &ctx);
 
@@ -1526,6 +1542,9 @@ pub async fn execute_wave_structured(
             // `std::env::current_dir()` behaviour. The supervisor
             // path overrides this via `execute_wave_via_supervisor`.
             cwd: None,
+            // 2026-07-30-001 plan U1: the legacy dispatcher never
+            // enables the Exec reported-failure retry.
+            wave_kind: None,
             idle_heartbeat,
             idle_weak_signal_cap,
             // 2026-07-28-003 plan U3 (R1): forward the hat-configured
@@ -1720,12 +1739,33 @@ pub(crate) async fn execute_wave_via_supervisor_with_executor(
     let startup_grace: Option<Duration> = wave
         .startup_grace_secs()
         .map(|secs| Duration::from_secs(secs as u64));
-    let aggregate_timeout =
+    let configured_aggregate_timeout =
         if wave.has_explicit_aggregate_timeout() || wave.consumer_aggregate_timeout.is_some() {
             Duration::from_secs(wave.aggregate_timeout_secs())
         } else {
             aggregate_timeout_for(wave_timeout, wave.events.len(), concurrency)
         };
+    // U3 KTD-5: the local effective cap is
+    // `min(hat.concurrency, bridge.max_concurrent_workers())`.
+    let effective_cap: u32 = wave
+        .hat_config
+        .concurrency
+        .min(bridge.max_concurrent_workers())
+        .max(1);
+    // 2026-07-30-001 plan U3: a slot may legally run up to
+    // `retry_budget + 1` attempts, and the dispatcher stops admitting
+    // work at 80% of the aggregate timeout. Raising the aggregate to the
+    // attempt-aware floor keeps that threshold from preempting a slot's
+    // final legal attempt. An operator who configured something longer
+    // keeps it; the runner's global deadline and the per-worker timeout
+    // are untouched and still cut the wave short.
+    let aggregate_timeout = attempt_aware_aggregate_timeout(
+        configured_aggregate_timeout,
+        wave_timeout,
+        wave.events.len(),
+        effective_cap as usize,
+        bridge.slot_retry_budget(),
+    );
 
     // 2026-07-03-001 supervisor real-wiring: infer the wave
     // kind from the first event's topic. `review.*` (both
@@ -1847,14 +1887,6 @@ pub(crate) async fn execute_wave_via_supervisor_with_executor(
         .unwrap_or(Path::new(".ralph"))
         .to_path_buf();
 
-    // U3 KTD-5: the local effective cap is
-    // `min(hat.concurrency, bridge.max_concurrent_workers())`.
-    let effective_cap: u32 = wave
-        .hat_config
-        .concurrency
-        .min(bridge.max_concurrent_workers())
-        .max(1);
-
     struct PreparedSlot {
         index: u32,
         request: Option<WorkerRequest>,
@@ -1881,6 +1913,10 @@ pub(crate) async fn execute_wave_via_supervisor_with_executor(
             wave_total: wave.total,
             result_topics: hat_config.publishes.clone(),
             assigned_dimension: assigned_dimension.clone(),
+            // 2026-07-30-001 plan U2: the first attempt has no retry
+            // history. The dispatcher appends the rendered retry block
+            // to this prompt when it re-dispatches the slot.
+            retry: None,
         };
         let prompt = build_wave_worker_prompt(&hat_config, event, &ctx);
 
@@ -2132,6 +2168,11 @@ pub(crate) async fn execute_wave_via_supervisor_with_executor(
                 worker_tui_state,
                 assigned_dimension: assigned_dimension.clone(),
                 cwd: slot_cwd,
+                // 2026-07-30-001 plan U1: supervisor slots carry their
+                // typed wave kind so the attempt classifier can treat
+                // an Exec worker's own `exec.unit.failed` as a
+                // retryable attempt without touching Review / Fix.
+                wave_kind: Some(wave_kind),
                 idle_heartbeat,
                 idle_weak_signal_cap,
                 // 2026-07-28-003 plan U3 (R1): forward startup grace
@@ -4702,21 +4743,104 @@ fn open_default_supervisor_store(
     ))
 }
 
-/// Compute the aggregate timeout from per-worker timeout and the
-/// number of concurrent batches.
+/// Fraction of the aggregate timeout after which the dispatcher stops
+/// admitting new work and starts winding the wave down (the "partial"
+/// threshold), expressed as `PARTIAL_THRESHOLD_NUM / PARTIAL_THRESHOLD_DEN`.
+const PARTIAL_THRESHOLD_NUM: u64 = 8;
+const PARTIAL_THRESHOLD_DEN: u64 = 10;
+
+/// Slack added to every work budget so a wave that uses its full
+/// per-worker budget still has room to collect and record results.
+const WAVE_WORK_BUDGET_SLACK_SECS: u64 = 30;
+
+/// How long a wave legitimately needs: every batch, every attempt, plus
+/// the collection slack.
 ///
 /// KTD-U3 §4: `actual_worker_count = wave.events.len()` (NOT
 /// `wave.total`, which is the protocol-declared count and may
 /// exceed actual events for malformed partial waves).
+///
+/// 2026-07-30-001 plan U3: `max_attempts` folds the supervisor's retry
+/// budget in. `max_attempts = 1` reproduces the pre-plan formula
+/// exactly, which is what the legacy (non-supervisor) dispatch path
+/// still uses.
+fn wave_work_budget(
+    wave_timeout: Duration,
+    events_count: usize,
+    concurrency: usize,
+    max_attempts: u32,
+) -> Duration {
+    let events_count = events_count.max(1) as u64;
+    let concurrency = concurrency.max(1) as u64;
+    let batches = events_count.div_ceil(concurrency);
+    Duration::from_secs(
+        wave_timeout
+            .as_secs()
+            .saturating_mul(batches)
+            .saturating_mul(u64::from(max_attempts.max(1)))
+            .saturating_add(WAVE_WORK_BUDGET_SLACK_SECS),
+    )
+}
+
+/// Compute the aggregate timeout from per-worker timeout and the
+/// number of concurrent batches (single attempt, legacy path).
 fn aggregate_timeout_for(
     wave_timeout: Duration,
     events_count: usize,
     concurrency: usize,
 ) -> Duration {
-    let events_count = events_count.max(1) as u64;
-    let concurrency = concurrency.max(1) as u64;
-    let batches = events_count.div_ceil(concurrency);
-    Duration::from_secs(wave_timeout.as_secs().saturating_mul(batches)) + Duration::from_secs(30)
+    wave_work_budget(wave_timeout, events_count, concurrency, 1)
+}
+
+/// 2026-07-30-001 plan U3: the smallest aggregate timeout that keeps
+/// the partial threshold from firing before the wave's legitimate work
+/// budget has been spent.
+///
+/// The dispatcher stops admitting work at 80% of the aggregate timeout,
+/// so an aggregate equal to the work budget would preempt the last 20%
+/// of legal work — including a slot's final retry. Inverting the
+/// threshold gives `ceil(work_budget * 10 / 8)`.
+///
+/// The multiply is done after dividing so a caller-supplied timeout
+/// near `u64::MAX` cannot wrap: `ceil(w * 10 / 8) == ceil(w * 5 / 4)`,
+/// evaluated as `(w / 4) * 5 + ceil((w % 4) * 5 / 4)`.
+fn aggregate_floor_for_attempts(
+    wave_timeout: Duration,
+    events_count: usize,
+    concurrency: usize,
+    retry_budget: u32,
+) -> Duration {
+    let work = wave_work_budget(
+        wave_timeout,
+        events_count,
+        concurrency,
+        retry_budget.saturating_add(1),
+    )
+    .as_secs();
+    let whole = work / PARTIAL_THRESHOLD_NUM;
+    let remainder = work % PARTIAL_THRESHOLD_NUM;
+    Duration::from_secs(
+        whole.saturating_mul(PARTIAL_THRESHOLD_DEN).saturating_add(
+            remainder
+                .saturating_mul(PARTIAL_THRESHOLD_DEN)
+                .div_ceil(PARTIAL_THRESHOLD_NUM),
+        ),
+    )
+}
+
+fn attempt_aware_aggregate_timeout(
+    configured_aggregate_timeout: Duration,
+    wave_timeout: Duration,
+    events_count: usize,
+    effective_concurrency: usize,
+    retry_budget: u32,
+) -> Duration {
+    configured_aggregate_timeout.max(aggregate_floor_for_attempts(
+        wave_timeout,
+        events_count,
+        effective_concurrency,
+        retry_budget,
+    ))
 }
 
 /// U1/R1: extract the `dimension` field from a `review.wave.ready`
@@ -4906,17 +5030,34 @@ async fn dispatch_wave_inner_with_release<E: WaveWorkerExecutor + ?Sized>(
             // the final attempt's outcome take the natural record
             // path — we never extend a single slot beyond the
             // wave's budget.
+            // 2026-07-30-001 plan U1: the wave kind decides whether a
+            // worker-reported `*.unit.failed` terminal counts as a
+            // failed attempt (Exec) or as a Completed slot (Review /
+            // Fix / legacy). Captured before the request is moved into
+            // the attempt loop.
+            let slot_wave_kind = request.wave_kind;
             let result = {
+                use ralph_core::supervisor::worker_outcome::REASON_EXECUTOR_REPORTED_FAILURE;
                 let mut attempt: u32 = 1;
                 // 2026-07-28-003 plan U5: use the budget we captured
                 // before moving `terminal_bridge` into the guard.
                 let budget = retry_budget;
+                // 2026-07-30-001 plan U2: a retried worker gets the
+                // ORIGINAL prompt plus a rendered retry block, so the
+                // block never stacks across attempts.
+                let base_prompt = request.prompt.clone();
+                let max_attempts = budget.saturating_add(1);
+                let mut prior_attempts: Vec<ralph_core::PriorAttempt> = Vec::new();
                 let mut current_request = request;
                 let last_outcome: (u32, WaveWorkerOutcome) = loop {
                     let outcome = executor.execute(current_request.clone()).await;
                     let (_idx, res) = &outcome;
-                    let classified = classify_slot_result(res);
+                    let classified = classify_slot_attempt(res, slot_wave_kind);
                     let mut should_retry = false;
+                    // 2026-07-30-001 plan U2: the stable code of the
+                    // attempt we are about to abandon, owned so it
+                    // outlives the borrow of `outcome`.
+                    let mut retry_failure_code: Option<String> = None;
                     if let Some(_guard) = release_guard.as_ref() {
                         use ralph_core::supervisor::worker_outcome::{
                             SlotOutcome, is_retryable_slot_reason,
@@ -4964,6 +5105,7 @@ async fn dispatch_wave_inner_with_release<E: WaveWorkerExecutor + ?Sized>(
                                     "U5: retrying slot after frozen-code failure"
                                 );
                                 should_retry = true;
+                                retry_failure_code = Some(code.to_string());
                             } else if deadline_passed {
                                 tracing::warn!(
                                     slot_index = request_index,
@@ -4984,12 +5126,56 @@ async fn dispatch_wave_inner_with_release<E: WaveWorkerExecutor + ?Sized>(
                     // so the dispatcher / TUI / RPC subscribers
                     // observe exactly one Done / Failed notification
                     // per (wave, slot).
+                    // 2026-07-30-001 plan U2: record what this attempt
+                    // hit before handing the slot to a fresh worker.
+                    // Only the first `RETRY_MAX_PRIOR_ATTEMPTS` are
+                    // kept so the prompt stays bounded.
+                    if let Some(code) = retry_failure_code
+                        && prior_attempts.len() < ralph_core::RETRY_MAX_PRIOR_ATTEMPTS
+                    {
+                        prior_attempts.push(ralph_core::PriorAttempt::new(
+                            attempt,
+                            code,
+                            reported_failure_detail(&outcome.1).as_deref(),
+                        ));
+                    }
                     attempt = attempt.saturating_add(1);
                     current_request = silent_request(&current_request);
+                    // The next attempt runs in the SAME worktree, so it
+                    // must be told what is already there and what the
+                    // earlier attempts hit.
+                    current_request.prompt = format!(
+                        "{base_prompt}{}",
+                        ralph_core::render_retry_context(&ralph_core::RetryContext {
+                            attempt,
+                            max_attempts,
+                            prior_attempts: prior_attempts.clone(),
+                        })
+                    );
                     // Loop continues; **only** the final attempt's
                     // outcome escapes (KTD9: do not salvage
                     // intermediate batches).
                 };
+                // 2026-07-30-001 plan U1 (D15): an Exec worker's final
+                // `exec.unit.failed` batch is a *valid* terminal, so
+                // `record_outcome` would happily file it as a tracker
+                // RESULT — the store would say Failed while the wave
+                // said "this slot produced events". Normalize it into
+                // the stable failure the store already recorded and
+                // drop the business batch, so the failed unit can
+                // never activate a downstream consumer.
+                let mut last_outcome = last_outcome;
+                if let Ok((_events, duration, _success)) = &last_outcome.1 {
+                    let duration = *duration;
+                    let is_reported_failure = matches!(
+                        classify_slot_attempt(&last_outcome.1, slot_wave_kind).reason,
+                        Some(ClassifiedReason::Static(REASON_EXECUTOR_REPORTED_FAILURE))
+                    );
+                    if is_reported_failure {
+                        last_outcome.1 =
+                            Err((REASON_EXECUTOR_REPORTED_FAILURE.to_string(), duration));
+                    }
+                }
                 last_outcome
             };
 
@@ -5030,7 +5216,11 @@ async fn dispatch_wave_inner_with_release<E: WaveWorkerExecutor + ?Sized>(
             // the same classification — no duplicated loop, no
             // redundant `result.1.as_ref().unwrap().2`, no dead
             // tuple.
-            let classified = classify_slot_result(&result.1);
+            // 2026-07-30-001 plan U1: the store write and the drop
+            // guard read the SAME wave-kind-aware classification the
+            // attempt loop used, so an exhausted Exec slot can never
+            // be recorded as Completed.
+            let classified = classify_slot_attempt(&result.1, slot_wave_kind);
             if let Some(guard) = release_guard.as_ref() {
                 use ralph_core::supervisor::worker_outcome::SlotOutcome;
                 match (&classified.outcome, &classified.reason) {
@@ -5651,6 +5841,83 @@ fn classify_slot_result<'a>(result: &'a WaveWorkerOutcome) -> ClassifiedSlot<'a>
             }
         }
     }
+}
+
+/// 2026-07-30-001 plan U1: wave-kind-aware view of a single attempt's
+/// outcome.
+///
+/// The generic truth table in `classify_slot_result` answers "did the
+/// worker produce a valid terminal?". That is the right question for
+/// the wave-level bookkeeping, but it is the wrong question for the
+/// attempt loop: an Exec worker that ran to completion and emitted
+/// `exec.unit.failed` produced a *valid* terminal describing a *failed*
+/// unit. A fresh worker process resuming the same worktree may still
+/// finish that unit, so the attempt loop must see a retryable failure
+/// carrying the stable `executor_reported_failure` code.
+///
+/// Only `Some(WaveKind::Exec)` is rewritten. Review / Fix waves and the
+/// legacy (non-supervisor) dispatch path pass straight through, so the
+/// existing failed-terminal semantics are untouched.
+///
+/// The helper also recognises the *normalized* form the attempt loop
+/// produces once the budget is exhausted (`Err((code, duration))` with
+/// the stable code), so the final store write and the drop guard read
+/// the same classification as the loop did.
+fn classify_slot_attempt<'a>(
+    result: &'a WaveWorkerOutcome,
+    wave_kind: Option<ralph_core::supervisor::WaveKind>,
+) -> ClassifiedSlot<'a> {
+    use ralph_core::supervisor::WaveKind;
+    use ralph_core::supervisor::worker_outcome::{
+        REASON_EXECUTOR_REPORTED_FAILURE, SlotOutcome, WorkerTerminalKind,
+    };
+
+    if !matches!(wave_kind, Some(WaveKind::Exec)) {
+        return classify_slot_result(result);
+    }
+    if let Err((reason, _duration)) = result
+        && reason == REASON_EXECUTOR_REPORTED_FAILURE
+    {
+        return ClassifiedSlot {
+            outcome: SlotOutcome::Failed {
+                reason: REASON_EXECUTOR_REPORTED_FAILURE,
+            },
+            reason: Some(ClassifiedReason::Static(REASON_EXECUTOR_REPORTED_FAILURE)),
+        };
+    }
+    let classified = classify_slot_result(result);
+    if matches!(
+        classified.outcome,
+        SlotOutcome::Completed(WorkerTerminalKind::Failed)
+    ) {
+        return ClassifiedSlot {
+            outcome: SlotOutcome::Failed {
+                reason: REASON_EXECUTOR_REPORTED_FAILURE,
+            },
+            reason: Some(ClassifiedReason::Static(REASON_EXECUTOR_REPORTED_FAILURE)),
+        };
+    }
+    classified
+}
+
+/// 2026-07-30-001 plan U2: read the `reason` an Exec worker put in its
+/// own `*.unit.failed` terminal, so the next attempt can be told what
+/// the abandoned one hit.
+///
+/// The text is agent-authored and therefore untrusted; it is bounded by
+/// [`ralph_core::PriorAttempt::new`] and framed as evidence in the
+/// rendered block. Returns `None` whenever there is nothing solid to
+/// quote (worker died without events, payload is absent or not JSON, no
+/// `reason` key, or the reason is blank) — we never invent a detail.
+fn reported_failure_detail(result: &WaveWorkerOutcome) -> Option<String> {
+    let (events, _duration, _success) = result.as_ref().ok()?;
+    let failed = events
+        .iter()
+        .find(|event| event.topic.as_str().ends_with(".unit.failed"))?;
+    let payload = failed.payload.as_deref()?;
+    let value: serde_json::Value = serde_json::from_str(payload).ok()?;
+    let reason = value.get("reason")?.as_str()?.trim();
+    (!reason.is_empty()).then(|| reason.to_string())
 }
 
 fn take_results(
@@ -6788,6 +7055,7 @@ hats: {}
             worker_tui_state: None,
             assigned_dimension,
             cwd: None,
+            wave_kind: None,
             idle_heartbeat: None,
             idle_weak_signal_cap: 8,
             // 2026-07-28-003 plan U3 (R1): the dispatcher test
@@ -9109,6 +9377,220 @@ hats: {}
                 .any(|(k, _)| k == "RALPH_WAVE_DIMENSION"),
             "U2: RALPH_WAVE_DIMENSION must NOT be injected when assigned_dimension is None, got {:?}",
             request.backend.env_vars
+        );
+    }
+
+    // ── 2026-07-30-001 plan U3: attempt-aware aggregate floor ──────────────
+
+    /// The partial threshold the dispatcher will derive from a given
+    /// aggregate timeout — mirrors `DispatchContext::build`.
+    fn partial_threshold_of(aggregate: Duration) -> Duration {
+        Duration::from_secs(
+            aggregate
+                .as_secs()
+                .saturating_mul(PARTIAL_THRESHOLD_NUM)
+                .div_ceil(PARTIAL_THRESHOLD_DEN),
+        )
+    }
+
+    /// U3 验收 #1: with no retry budget the work budget is exactly the
+    /// pre-plan formula, so the legacy dispatch path is untouched.
+    #[test]
+    fn aggregate_work_budget_zero_retry_matches_legacy_formula() {
+        for (events, concurrency) in [(1usize, 1usize), (4, 2), (5, 2), (3, 8), (0, 0)] {
+            let legacy = aggregate_timeout_for(Duration::from_secs(300), events, concurrency);
+            let budgeted = wave_work_budget(Duration::from_secs(300), events, concurrency, 1);
+            assert_eq!(
+                legacy, budgeted,
+                "U3: max_attempts=1 must reproduce the legacy budget for {events}/{concurrency}"
+            );
+        }
+        // N=0 and C=0 both collapse to 1.
+        assert_eq!(
+            wave_work_budget(Duration::from_secs(300), 0, 0, 1),
+            Duration::from_secs(330)
+        );
+    }
+
+    /// U3 验收 #2: the floor counts BOTH the concurrency batches and
+    /// every legal attempt.
+    #[test]
+    fn aggregate_floor_counts_three_attempts_and_batches() {
+        // T=300, N=2, C=1 → 2 batches; budget=2 → 3 attempts.
+        // work = 300*2*3 + 30 = 1830; floor = ceil(1830 * 10 / 8) = 2288.
+        assert_eq!(
+            wave_work_budget(Duration::from_secs(300), 2, 1, 3),
+            Duration::from_secs(1830)
+        );
+        assert_eq!(
+            aggregate_floor_for_attempts(Duration::from_secs(300), 2, 1, 2),
+            Duration::from_secs(2288)
+        );
+        // Same wave without retries stays at the single-attempt budget.
+        assert_eq!(
+            aggregate_floor_for_attempts(Duration::from_secs(300), 2, 1, 0),
+            Duration::from_secs(788),
+            "U3: budget=0 still needs the 80% headroom, but only for one attempt"
+        );
+    }
+
+    /// U3 验收 #3: the whole point of the floor — the partial threshold
+    /// must never fire before the work budget is spent.
+    #[test]
+    fn aggregate_floor_keeps_partial_at_or_after_work_budget() {
+        for (timeout, events, concurrency, budget) in [
+            (300u64, 1usize, 1usize, 0u32),
+            (300, 2, 1, 2),
+            (60, 7, 3, 1),
+            (1, 1, 1, 2),
+            (3600, 12, 4, 2),
+        ] {
+            let work = wave_work_budget(
+                Duration::from_secs(timeout),
+                events,
+                concurrency,
+                budget + 1,
+            );
+            let floor = aggregate_floor_for_attempts(
+                Duration::from_secs(timeout),
+                events,
+                concurrency,
+                budget,
+            );
+            assert!(
+                partial_threshold_of(floor) >= work,
+                "U3: partial ({:?}) must not preempt the work budget ({work:?}) \
+                 for T={timeout} N={events} C={concurrency} budget={budget}",
+                partial_threshold_of(floor)
+            );
+        }
+    }
+
+    /// U3 验收 #4: an operator who asked for a longer aggregate keeps
+    /// it — the floor only ever raises.
+    #[test]
+    fn configured_aggregate_above_floor_is_preserved() {
+        let floor = aggregate_floor_for_attempts(Duration::from_secs(300), 2, 1, 2);
+        let generous = Duration::from_secs(7 * 3600);
+        assert!(generous > floor);
+        assert_eq!(generous.max(floor), generous);
+
+        let stingy = Duration::from_secs(60);
+        assert_eq!(stingy.max(floor), floor, "U3: a too-small config is raised");
+    }
+
+    /// U3 验收 #5: the floor saturates instead of wrapping.
+    #[test]
+    fn aggregate_floor_saturates_without_overflow() {
+        let huge = aggregate_floor_for_attempts(Duration::from_secs(u64::MAX), 1000, 1, 2);
+        assert_eq!(huge, Duration::from_secs(u64::MAX));
+        // A large-but-not-saturating case must still be exact.
+        assert_eq!(
+            aggregate_floor_for_attempts(Duration::from_secs(8), 1, 1, 0),
+            Duration::from_secs(48),
+            "U3: work=38 → ceil(38*10/8)=48"
+        );
+    }
+
+    /// U3 regression guard: the attempt-aware aggregate floor must use
+    /// the local effective cap, not the hat's declared concurrency.
+    #[test]
+    fn attempt_aware_aggregate_timeout_uses_effective_cap() {
+        let configured = Duration::from_secs(0);
+        let wave_timeout = Duration::from_secs(300);
+        let events_count = 7;
+        let retry_budget = 2;
+
+        let declared_concurrency = attempt_aware_aggregate_timeout(
+            configured,
+            wave_timeout,
+            events_count,
+            4,
+            retry_budget,
+        );
+        let effective_cap = attempt_aware_aggregate_timeout(
+            configured,
+            wave_timeout,
+            events_count,
+            1,
+            retry_budget,
+        );
+
+        assert_eq!(declared_concurrency, Duration::from_secs(2288));
+        assert_eq!(effective_cap, Duration::from_secs(7913));
+        assert!(
+            effective_cap > declared_concurrency,
+            "U3: the real effective cap must produce a larger floor when it is lower"
+        );
+    }
+
+    // ── 2026-07-30-001 plan U2: prior-attempt detail extraction ────────────
+
+    fn u2_outcome_with(topic: &str, payload: Option<&str>) -> WaveWorkerOutcome {
+        Ok((
+            vec![ralph_core::Event {
+                topic: topic.to_string(),
+                payload: payload.map(str::to_string),
+                ts: String::new(),
+                hat: None,
+                triggered: None,
+                source: None,
+                wave_id: None,
+                wave_index: None,
+                wave_total: None,
+                system_injected: None,
+            }],
+            Duration::from_secs(1),
+            true,
+        ))
+    }
+
+    #[test]
+    fn u2_reported_failure_detail_reads_reason_from_terminal_payload() {
+        let outcome = u2_outcome_with(
+            "exec.unit.failed",
+            Some(r#"{"reason":"tests are red","unit_id":"u1"}"#),
+        );
+        assert_eq!(
+            reported_failure_detail(&outcome),
+            Some("tests are red".to_string())
+        );
+    }
+
+    #[test]
+    fn u2_reported_failure_detail_is_none_without_a_usable_reason() {
+        // Worker died before writing anything.
+        assert_eq!(
+            reported_failure_detail(&Err(("worker_timeout".to_string(), Duration::from_secs(1)))),
+            None
+        );
+        // Terminal is a success, not a failure.
+        assert_eq!(
+            reported_failure_detail(&u2_outcome_with("exec.unit.done", Some(r#"{"ok":true}"#))),
+            None
+        );
+        // Payload is not JSON.
+        assert_eq!(
+            reported_failure_detail(&u2_outcome_with("exec.unit.failed", Some("boom"))),
+            None
+        );
+        // JSON without a `reason` key.
+        assert_eq!(
+            reported_failure_detail(&u2_outcome_with("exec.unit.failed", Some(r#"{"code":7}"#))),
+            None
+        );
+        // `reason` present but blank.
+        assert_eq!(
+            reported_failure_detail(&u2_outcome_with(
+                "exec.unit.failed",
+                Some(r#"{"reason":"   "}"#)
+            )),
+            None
+        );
+        // No payload at all.
+        assert_eq!(
+            reported_failure_detail(&u2_outcome_with("exec.unit.failed", None)),
+            None
         );
     }
 

@@ -2859,12 +2859,25 @@ fn make_u3_wave_with_concurrency(
     total: u32,
     concurrency: u32,
 ) -> ralph_core::DetectedWave {
+    make_u3_wave_with_topic(name, events_count, total, concurrency, "exec.unit.ready")
+}
+
+/// 2026-07-30-001 plan U1: same as [`make_u3_wave_with_concurrency`]
+/// but with an explicit trigger topic, so a test can drive the
+/// Review / Fix wave kinds through the same supervisor path.
+fn make_u3_wave_with_topic(
+    name: &str,
+    events_count: u32,
+    total: u32,
+    concurrency: u32,
+    trigger_topic: &str,
+) -> ralph_core::DetectedWave {
     use ralph_core::DetectedWave;
     use ralph_core::config::HatConfig;
 
     let events: Vec<ralph_core::Event> = (0..events_count)
         .map(|i| ralph_core::Event {
-            topic: "exec.unit.ready".to_string(),
+            topic: trigger_topic.to_string(),
             payload: Some(format!("{{\"unit_id\":\"u3-{name}-{i}\"}}")),
             ts: String::new(),
             hat: None,
@@ -2980,6 +2993,17 @@ enum U5SlotOutcome {
         initial: Box<U5SlotOutcome>,
         follow_up: Box<U5SlotOutcome>,
     },
+    /// 2026-07-30-001 plan U1: the worker accepted the request and
+    /// actively emitted a `<kind>.unit.failed` terminal carrying the
+    /// given `reason` detail. The process itself exits successfully —
+    /// this is a business failure, not a process failure.
+    ReportedFailure {
+        terminal_topic: &'static str,
+        reason: String,
+    },
+    /// 2026-07-30-001 plan U1: per-attempt script. Attempt `n` uses
+    /// `steps[n - 1]`; attempts beyond the script reuse the last step.
+    PerAttempt(Vec<U5SlotOutcome>),
 }
 
 /// Executor whose per-slot outcome is scripted by the test. Slots
@@ -2989,6 +3013,12 @@ struct U5RecordingExecutor {
     default: U5SlotOutcome,
     /// Number of times each slot has been executed.
     calls: std::sync::Arc<Mutex<std::collections::HashMap<u32, u32>>>,
+    /// 2026-07-30-001 plan U2: every prompt each slot was handed, in
+    /// attempt order, so a test can assert what a retry was told.
+    prompts: std::sync::Arc<Mutex<std::collections::HashMap<u32, Vec<String>>>>,
+    /// 2026-07-30-001 plan U3: how long each attempt occupies its slot.
+    /// Under `start_paused` this consumes wave budget without wall time.
+    delay: Duration,
 }
 
 impl U5RecordingExecutor {
@@ -2997,7 +3027,16 @@ impl U5RecordingExecutor {
             plan: std::sync::Arc::new(std::collections::HashMap::new()),
             default,
             calls: std::sync::Arc::new(Mutex::new(std::collections::HashMap::new())),
+            prompts: std::sync::Arc::new(Mutex::new(std::collections::HashMap::new())),
+            delay: Duration::ZERO,
         }
+    }
+
+    /// 2026-07-30-001 plan U3: make every attempt take `delay` of wave
+    /// budget.
+    fn with_delay(mut self, delay: Duration) -> Self {
+        self.delay = delay;
+        self
     }
 
     fn with_slot(mut self, index: u32, outcome: U5SlotOutcome) -> Self {
@@ -3029,6 +3068,13 @@ impl U5RecordingExecutor {
         self
     }
 
+    /// 2026-07-30-001 plan U1: script one outcome per attempt.
+    fn with_attempts(mut self, index: u32, steps: Vec<U5SlotOutcome>) -> Self {
+        let map = std::sync::Arc::make_mut(&mut self.plan);
+        map.insert(index, U5SlotOutcome::PerAttempt(steps));
+        self
+    }
+
     fn call_count(&self, slot_index: u32) -> u32 {
         self.calls
             .lock()
@@ -3036,6 +3082,37 @@ impl U5RecordingExecutor {
             .get(&slot_index)
             .copied()
             .unwrap_or(0)
+    }
+
+    /// 2026-07-30-001 plan U2: the prompts this slot received, in
+    /// attempt order.
+    fn prompts_for(&self, slot_index: u32) -> Vec<String> {
+        self.prompts
+            .lock()
+            .unwrap()
+            .get(&slot_index)
+            .cloned()
+            .unwrap_or_default()
+    }
+}
+
+/// 2026-07-30-001 plan U1: an actively-reported terminal failure event
+/// (`exec.unit.failed` / `review.unit.failed`) carrying a `reason`.
+fn u5_failed_event(terminal_topic: &'static str, reason: &str) -> ralph_core::Event {
+    ralph_core::Event {
+        topic: terminal_topic.to_string(),
+        payload: Some(format!(
+            "{}",
+            serde_json::json!({ "reason": reason, "unit_id": "u1" })
+        )),
+        ts: String::new(),
+        hat: None,
+        triggered: None,
+        source: None,
+        wave_id: None,
+        wave_index: None,
+        wave_total: None,
+        system_injected: None,
     }
 }
 /// Build a deterministic `ralph_core::Event` for a (slot, seq) pair so
@@ -3068,7 +3145,18 @@ impl WaveWorkerExecutor for U5RecordingExecutor {
         let plan = std::sync::Arc::clone(&self.plan);
         let default = self.default.clone();
         let calls = std::sync::Arc::clone(&self.calls);
+        let prompts = std::sync::Arc::clone(&self.prompts);
+        let delay = self.delay;
         Box::pin(async move {
+            if !delay.is_zero() {
+                tokio::time::sleep(delay).await;
+            }
+            prompts
+                .lock()
+                .unwrap()
+                .entry(request.index)
+                .or_default()
+                .push(request.prompt.clone());
             // U2/007: capture the per-slot env map so the test
             // surface can assert on RALPH_WORKSPACE_ROOT and
             // RALPH_EVENTS_FILE. The executor runs in the dispatcher's
@@ -3096,6 +3184,15 @@ impl WaveWorkerExecutor for U5RecordingExecutor {
                         (*follow_up).clone()
                     }
                 }
+                U5SlotOutcome::PerAttempt(steps) => {
+                    let idx = (attempt_number as usize).saturating_sub(1).min(
+                        steps
+                            .len()
+                            .checked_sub(1)
+                            .expect("PerAttempt script must not be empty"),
+                    );
+                    steps[idx].clone()
+                }
                 other => other,
             };
             let outcome = mapped;
@@ -3106,7 +3203,20 @@ impl WaveWorkerExecutor for U5RecordingExecutor {
                     (index, Ok((events, Duration::from_millis(5), true)))
                 }
                 U5SlotOutcome::Fail(reason) => (index, Err((reason, Duration::from_millis(5)))),
-                U5SlotOutcome::ScriptedThen { .. } => unreachable!("mapped above"),
+                U5SlotOutcome::ReportedFailure {
+                    terminal_topic,
+                    reason,
+                } => (
+                    index,
+                    Ok((
+                        vec![u5_failed_event(terminal_topic, &reason)],
+                        Duration::from_millis(5),
+                        true,
+                    )),
+                ),
+                U5SlotOutcome::ScriptedThen { .. } | U5SlotOutcome::PerAttempt(_) => {
+                    unreachable!("mapped above")
+                }
             }
         })
     }
@@ -3127,6 +3237,11 @@ struct U5RecordingBridge {
     /// Defaults to 0 so the existing characterization tests stay
     /// bit-identical to pre-U5; new S7/S8/S10/S12 tests override it.
     retry_budget_override: std::sync::Arc<Mutex<Option<u32>>>,
+    /// 2026-07-30-001 plan U2: per-test override for the slot's
+    /// worktree path. The fresh-process test needs a directory that
+    /// really exists, because the spawned worker actually chdirs into
+    /// it.
+    worktree_override: std::sync::Arc<Mutex<Option<std::path::PathBuf>>>,
 }
 
 impl std::fmt::Debug for U5RecordingBridge {
@@ -3142,11 +3257,20 @@ impl U5RecordingBridge {
             slot_results: std::sync::Arc::new(Mutex::new(Vec::new())),
             slot_failures: std::sync::Arc::new(Mutex::new(Vec::new())),
             retry_budget_override: std::sync::Arc::new(Mutex::new(None)),
+            worktree_override: std::sync::Arc::new(Mutex::new(None)),
         }
     }
 
     fn with_retry_budget(self, budget: u32) -> Self {
         *self.retry_budget_override.lock().unwrap() = Some(budget);
+        self
+    }
+
+    /// 2026-07-30-001 plan U2: pin every slot to a real directory so a
+    /// spawned worker can chdir into it.
+    #[cfg(unix)]
+    fn with_worktree(self, path: std::path::PathBuf) -> Self {
+        *self.worktree_override.lock().unwrap() = Some(path);
         self
     }
 
@@ -3177,10 +3301,16 @@ impl SupervisorBridge for U5RecordingBridge {
     ) -> Result<Option<SlotBinding>, BridgeError> {
         // Return a real binding (worktree_path = Some) so Exec/Fix
         // slots pass the U1 KTD-4 fail-closed gate.
+        let worktree_path = self
+            .worktree_override
+            .lock()
+            .unwrap()
+            .clone()
+            .unwrap_or_else(|| format!("/tmp/u5/{wave_id}-{slot_index}").into());
         Ok(Some(SlotBinding {
             slot_index,
             env: HashMap::new(),
-            worktree_path: Some(format!("/tmp/u5/{wave_id}-{slot_index}").into()),
+            worktree_path: Some(worktree_path),
         }))
     }
 
@@ -3294,6 +3424,7 @@ async fn run_u5_execute_wave(
     // call counter between the dispatcher-side Arc<dyn..> and the
     // returned probe so the test surface can assert attempt counts.
     let calls = std::sync::Arc::clone(&executor.calls);
+    let prompts = std::sync::Arc::clone(&executor.prompts);
     let executor_dyn: std::sync::Arc<dyn WaveWorkerExecutor> = std::sync::Arc::new(executor) as _;
     let bridge_arc: std::sync::Arc<dyn SupervisorBridge> = std::sync::Arc::new(bridge.clone());
     let outcome = execute_wave_via_supervisor_with_executor(
@@ -3318,6 +3449,8 @@ async fn run_u5_execute_wave(
         plan: std::sync::Arc::new(std::collections::HashMap::new()),
         default: U5SlotOutcome::Success(0),
         calls,
+        prompts,
+        delay: Duration::ZERO,
     };
     (outcome, bridge, probe)
 }
@@ -3772,6 +3905,712 @@ async fn u5_s12_final_attempt_fingerprint_only() {
     assert_eq!(
         *count, 3,
         "U5/S12: event_count must reflect the final attempt's batch (3 events), not the failed attempt"
+    );
+}
+
+// =============================================================================
+// 2026-07-30-001 plan U1: an Exec worker that actively emits
+// `exec.unit.failed` is a retryable failed ATTEMPT, not a Completed
+// slot. These tests drive the real supervisor dispatch path and assert
+// on executor call counts, the store's record_slot_* calls and the
+// event batch that escapes to the tracker.
+// =============================================================================
+
+/// Convenience: the reported-failure script for an Exec slot.
+fn exec_reported_failure(reason: &str) -> U5SlotOutcome {
+    U5SlotOutcome::ReportedFailure {
+        terminal_topic: "exec.unit.failed",
+        reason: reason.to_string(),
+    }
+}
+
+fn completed_wave_of(outcome: &WaveDispatchOutcome) -> &ralph_core::CompletedWave {
+    match outcome {
+        WaveDispatchOutcome::Completed(w)
+        | WaveDispatchOutcome::Partial(w)
+        | WaveDispatchOutcome::AggregateDeadlineExceeded(w) => w,
+        other => panic!("expected a completed/partial wave, got {other:?}"),
+    }
+}
+
+/// U1 验收 #1 / S1+S3: attempt 1 emits `exec.unit.failed`, attempt 2
+/// emits `exec.unit.done`. The dispatcher must run TWO attempts, record
+/// exactly one `record_slot_result` (attempt 2) and zero
+/// `record_slot_failure`, and only attempt 2's event batch may escape.
+#[tokio::test]
+async fn executor_failed_terminal_retries_then_done() {
+    let store = std::sync::Arc::new(InMemorySupervisorStore::new());
+    let bridge = U5RecordingBridge::new(store.clone() as std::sync::Arc<dyn SupervisorStore>)
+        .with_retry_budget(2);
+
+    let wave = make_u3_wave("u1-failed-then-done", 1, 1);
+    let executor = U5RecordingExecutor::new(U5SlotOutcome::Success(0)).with_attempts(
+        0,
+        vec![
+            exec_reported_failure("compile error in unit F1"),
+            U5SlotOutcome::Success(1),
+        ],
+    );
+
+    let (outcome, bridge, exec) = run_u5_execute_wave(bridge, wave, executor).await;
+
+    assert_eq!(
+        exec.call_count(0),
+        2,
+        "U1: exec.unit.failed must be treated as a retryable attempt, got {} call(s)",
+        exec.call_count(0)
+    );
+    assert!(
+        bridge.failures_snapshot().is_empty(),
+        "U1: an intermediate reported failure must not record_slot_failure, got {:?}",
+        bridge.failures_snapshot()
+    );
+    let results = bridge.results_snapshot();
+    assert_eq!(
+        results.len(),
+        1,
+        "U1: only the final successful attempt may record_slot_result, got {results:?}"
+    );
+
+    let completed = completed_wave_of(&outcome);
+    let topics: Vec<&str> = completed
+        .results
+        .iter()
+        .flat_map(|r| r.events.iter().map(|e| e.topic.as_str()))
+        .collect();
+    assert_eq!(
+        topics,
+        vec!["exec.unit.done"],
+        "U1: only attempt 2's terminal may reach the tracker, got {topics:?}"
+    );
+}
+
+/// U1 验收 #2 / S5: with `slot_retry_budget = 0` a reported failure
+/// must NOT be retried; the slot goes straight to its final failure.
+#[tokio::test]
+async fn executor_failed_terminal_budget_zero_does_not_retry() {
+    let store = std::sync::Arc::new(InMemorySupervisorStore::new());
+    let bridge = U5RecordingBridge::new(store.clone() as std::sync::Arc<dyn SupervisorStore>)
+        .with_retry_budget(0);
+
+    let wave = make_u3_wave("u1-budget-zero", 1, 1);
+    let executor = U5RecordingExecutor::new(exec_reported_failure("no budget"));
+
+    let (_outcome, bridge, exec) = run_u5_execute_wave(bridge, wave, executor).await;
+
+    assert_eq!(
+        exec.call_count(0),
+        1,
+        "U1: budget=0 must keep the single-attempt semantics, got {}",
+        exec.call_count(0)
+    );
+    let failures = bridge.failures_snapshot();
+    assert_eq!(
+        failures,
+        vec![(0u32, "executor_reported_failure".to_string())],
+        "U1: the terminal failure must be stored under the stable code"
+    );
+    assert!(
+        bridge.results_snapshot().is_empty(),
+        "U1: a reported failure must never take the record_slot_result path"
+    );
+}
+
+/// U1 验收 #3 / S6: Review waves keep the pre-existing truth table —
+/// `review.unit.failed` is a Completed terminal, never retried, and
+/// never labelled `executor_reported_failure`.
+#[tokio::test]
+async fn non_exec_failed_terminal_keeps_existing_semantics() {
+    let store = std::sync::Arc::new(InMemorySupervisorStore::new());
+    let bridge = U5RecordingBridge::new(store.clone() as std::sync::Arc<dyn SupervisorStore>)
+        .with_retry_budget(2);
+
+    let wave = make_u3_wave_with_topic("u1-review-failed", 1, 1, 1, "review.unit.ready");
+    let executor = U5RecordingExecutor::new(U5SlotOutcome::ReportedFailure {
+        terminal_topic: "review.unit.failed",
+        reason: "finding".to_string(),
+    });
+
+    let (_outcome, bridge, exec) = run_u5_execute_wave(bridge, wave, executor).await;
+
+    assert_eq!(
+        exec.call_count(0),
+        1,
+        "U1: a Review failed terminal must not enter the Exec retry path, got {}",
+        exec.call_count(0)
+    );
+    assert_eq!(
+        bridge.results_snapshot().len(),
+        1,
+        "U1: Review failed terminal keeps the Completed record path"
+    );
+    assert!(
+        bridge.failures_snapshot().is_empty(),
+        "U1: Review failed terminal must not record_slot_failure, got {:?}",
+        bridge.failures_snapshot()
+    );
+}
+
+/// U1 验收 #4 / S3: the intermediate attempt's `exec.unit.failed`
+/// event batch must never reach the tracker (and therefore never the
+/// main ledger).
+#[tokio::test]
+async fn intermediate_exec_failed_event_does_not_escape() {
+    let store = std::sync::Arc::new(InMemorySupervisorStore::new());
+    let bridge = U5RecordingBridge::new(store.clone() as std::sync::Arc<dyn SupervisorStore>)
+        .with_retry_budget(2);
+
+    let wave = make_u3_wave("u1-no-leak", 1, 1);
+    let executor = U5RecordingExecutor::new(U5SlotOutcome::Success(0)).with_attempts(
+        0,
+        vec![
+            exec_reported_failure("attempt 1 detail"),
+            exec_reported_failure("attempt 2 detail"),
+            U5SlotOutcome::Success(2),
+        ],
+    );
+
+    let (outcome, _bridge, exec) = run_u5_execute_wave(bridge, wave, executor).await;
+
+    assert_eq!(exec.call_count(0), 3, "U1: budget=2 allows three attempts");
+    let completed = completed_wave_of(&outcome);
+    let failed_topics: Vec<&str> = completed
+        .results
+        .iter()
+        .flat_map(|r| r.events.iter().map(|e| e.topic.as_str()))
+        .filter(|t| *t == "exec.unit.failed")
+        .collect();
+    assert!(
+        failed_topics.is_empty(),
+        "U1: no intermediate exec.unit.failed may escape to the tracker, got {failed_topics:?}"
+    );
+}
+
+/// U1 验收 #5 / S4 + D15: after the budget is exhausted the final
+/// `exec.unit.failed` batch must be normalized into a stable slot
+/// failure — it must NOT appear in `CompletedWave.results`.
+#[tokio::test]
+async fn exhausted_exec_failed_event_is_normalized_before_tracker() {
+    let store = std::sync::Arc::new(InMemorySupervisorStore::new());
+    let bridge = U5RecordingBridge::new(store.clone() as std::sync::Arc<dyn SupervisorStore>)
+        .with_retry_budget(2);
+
+    let wave = make_u3_wave("u1-exhausted", 1, 1);
+    let executor = U5RecordingExecutor::new(exec_reported_failure("still broken"));
+
+    let (outcome, bridge, exec) = run_u5_execute_wave(bridge, wave, executor).await;
+
+    assert_eq!(
+        exec.call_count(0),
+        3,
+        "U1: budget=2 means initial + 2 redispatches = 3 attempts, got {}",
+        exec.call_count(0)
+    );
+
+    let completed = completed_wave_of(&outcome);
+    assert!(
+        completed.results.is_empty(),
+        "U1: the exhausted failure batch must not become a tracker result, got {:?}",
+        completed.results
+    );
+    let reasons: Vec<&str> = completed
+        .failures
+        .iter()
+        .map(|f| f.error.as_str())
+        .collect();
+    assert_eq!(
+        reasons,
+        vec!["executor_reported_failure"],
+        "U1: the tracker failure must carry the stable code, got {reasons:?}"
+    );
+    assert_eq!(
+        bridge.failures_snapshot(),
+        vec![(0u32, "executor_reported_failure".to_string())],
+        "U1: the store must record exactly one stable failure"
+    );
+    assert!(
+        bridge.results_snapshot().is_empty(),
+        "U1: an exhausted slot must never record_slot_result"
+    );
+}
+
+// =============================================================================
+// 2026-07-30-001 plan U2: a retry is a NEW backend process in the SAME
+// worktree, and it is told what the previous attempts hit.
+//
+// These tests spawn a real fake backend through `ProductionExecutor`, so
+// they prove the second invocation is a distinct OS process (distinct
+// PID) that chdir'd into the same directory and received a prompt
+// carrying the retry block. A recording executor could not prove any of
+// that.
+// =============================================================================
+
+/// One captured backend invocation.
+#[cfg(unix)]
+struct U2AttemptRecord {
+    pid: String,
+    cwd: std::path::PathBuf,
+    prompt: String,
+}
+
+/// Body of the fake backend used by the U2 fresh-process tests.
+///
+/// Each invocation appends one record file to `$U2_RECORD_DIR` holding
+/// its own PID, its working directory, and everything it was handed as
+/// a prompt (inline argument or prompt temp file — the loop covers both
+/// delivery shapes). It then writes the terminal event scripted for
+/// that attempt number.
+#[cfg(unix)]
+const U2_FRESH_PROCESS_BACKEND: &str = r#"
+n=$(ls "$U2_RECORD_DIR" | wc -l | tr -d ' ')
+n=$((n + 1))
+rec="$U2_RECORD_DIR/attempt-$n"
+{
+  echo "pid=$$"
+  echo "cwd=$(pwd)"
+  echo "--PROMPT--"
+  for arg in "$@"; do
+    if [ -f "$arg" ]; then cat "$arg"; else printf '%s\n' "$arg"; fi
+  done
+} > "$rec"
+if [ "$n" -eq 1 ]; then
+  cat <<'EOF' > "$RALPH_EVENTS_FILE"
+{"topic":"exec.unit.failed","payload":"{\"reason\":\"u2 first attempt left the unit tests red\"}","ts":"2026-01-01T00:00:00Z"}
+EOF
+else
+  cat <<'EOF' > "$RALPH_EVENTS_FILE"
+{"topic":"exec.unit.done","payload":"{\"unit_id\":\"u2\"}","ts":"2026-01-01T00:00:00Z"}
+EOF
+fi
+"#;
+
+/// Read every record the fake backend wrote, in attempt order.
+#[cfg(unix)]
+fn u2_read_attempts(record_dir: &std::path::Path) -> Vec<U2AttemptRecord> {
+    let mut names: Vec<_> = std::fs::read_dir(record_dir)
+        .expect("record dir must exist")
+        .map(|entry| entry.expect("record entry").path())
+        .collect();
+    names.sort();
+    names
+        .iter()
+        .map(|path| {
+            let raw = std::fs::read_to_string(path).expect("record must be readable");
+            let (head, prompt) = raw
+                .split_once("--PROMPT--\n")
+                .expect("record must carry a prompt section");
+            let mut pid = String::new();
+            let mut cwd = std::path::PathBuf::new();
+            for line in head.lines() {
+                if let Some(v) = line.strip_prefix("pid=") {
+                    pid = v.trim().to_string();
+                } else if let Some(v) = line.strip_prefix("cwd=") {
+                    cwd = std::path::PathBuf::from(v.trim());
+                }
+            }
+            U2AttemptRecord {
+                pid,
+                cwd,
+                prompt: prompt.to_string(),
+            }
+        })
+        .collect()
+}
+
+/// Drive the real supervisor path with `ProductionExecutor` and a fake
+/// backend script, so every attempt is an actual spawned process.
+///
+/// Returns the captured per-attempt records plus the spy bridge.
+#[cfg(unix)]
+async fn run_u2_fresh_process_wave(
+    wave_name: &str,
+    retry_budget: u32,
+    prepare_worktree: impl FnOnce(&std::path::Path),
+) -> (
+    Vec<U2AttemptRecord>,
+    U5RecordingBridge,
+    std::path::PathBuf,
+    // Returned so the caller keeps the worktree alive while asserting.
+    tempfile::TempDir,
+) {
+    use crate::loop_runner::wave::execute_wave_via_supervisor_with_executor;
+
+    let tmp = tempfile::tempdir().expect("temp dir");
+    let ralph_dir = tmp.path().join(".ralph");
+    let worktree = tmp.path().join("worktree");
+    let record_dir = tmp.path().join("records");
+    let bin_dir = tmp.path().join("bin");
+    for dir in [&ralph_dir, &worktree, &record_dir, &bin_dir] {
+        std::fs::create_dir_all(dir).expect("create test dir");
+    }
+    prepare_worktree(&worktree);
+
+    let main_events_file = ralph_dir.join("events.jsonl");
+    std::fs::File::create(&main_events_file).expect("create events file");
+    let script = super::fake_path::write_fake_executable(
+        &bin_dir,
+        "u2-fresh-backend",
+        U2_FRESH_PROCESS_BACKEND,
+    );
+
+    let backend = CliBackend {
+        command: script.display().to_string(),
+        args: vec![],
+        prompt_mode: ralph_adapters::PromptMode::Arg,
+        prompt_flag: None,
+        output_format: ralph_adapters::OutputFormat::Text,
+        env_vars: vec![(
+            "U2_RECORD_DIR".to_string(),
+            record_dir.display().to_string(),
+        )],
+    };
+
+    let store = std::sync::Arc::new(InMemorySupervisorStore::new());
+    let bridge = U5RecordingBridge::new(store as std::sync::Arc<dyn SupervisorStore>)
+        .with_retry_budget(retry_budget)
+        .with_worktree(worktree.clone());
+    let bridge_arc: std::sync::Arc<dyn SupervisorBridge> = std::sync::Arc::new(bridge.clone());
+
+    let _outcome = execute_wave_via_supervisor_with_executor(
+        &make_u3_wave(wave_name, 1, 1),
+        &backend,
+        &main_events_file,
+        false,
+        false,
+        None,
+        None,
+        "u2-test-loop",
+        WaveDispatchLimits::default(),
+        None,
+        None,
+        &bridge_arc,
+        std::sync::Arc::new(crate::loop_runner::wave::ProductionExecutor),
+        None,
+        None,
+    )
+    .await;
+
+    (u2_read_attempts(&record_dir), bridge, worktree, tmp)
+}
+
+/// U2 验收 #3: after a reported failure the slot is handed to a NEW
+/// backend process, running in the SAME worktree, whose prompt carries
+/// the retry block describing attempt 1.
+#[cfg(unix)]
+#[tokio::test]
+async fn executor_retry_uses_fresh_pid_same_cwd() {
+    let (attempts, bridge, worktree, _tmp) =
+        run_u2_fresh_process_wave("u2-fresh-pid", 2, |_| {}).await;
+
+    assert_eq!(
+        attempts.len(),
+        2,
+        "U2: a reported failure must be followed by exactly one more attempt"
+    );
+    assert_ne!(
+        attempts[0].pid, attempts[1].pid,
+        "U2: the retry must be a fresh process, not the same one resumed"
+    );
+
+    let expected_cwd = worktree.canonicalize().expect("canonicalize worktree");
+    for (i, attempt) in attempts.iter().enumerate() {
+        assert_eq!(
+            attempt
+                .cwd
+                .canonicalize()
+                .expect("canonicalize attempt cwd"),
+            expected_cwd,
+            "U2: attempt {} must run in the slot's worktree",
+            i + 1
+        );
+    }
+
+    assert!(
+        !attempts[0].prompt.contains("# Retry Context"),
+        "U2: the first attempt has no history and must not carry a retry block"
+    );
+    let retry_prompt = &attempts[1].prompt;
+    assert!(
+        retry_prompt.contains("# Retry Context"),
+        "U2: the retry must be told it is a retry; got prompt:\n{retry_prompt}"
+    );
+    assert!(
+        retry_prompt.contains("attempt **2/3**"),
+        "U2: the retry must know which attempt it is; got prompt:\n{retry_prompt}"
+    );
+    assert!(
+        retry_prompt.contains("executor_reported_failure"),
+        "U2: the retry must see the stable code of attempt 1"
+    );
+    assert!(
+        retry_prompt.contains("u2 first attempt left the unit tests red"),
+        "U2: the retry must see the detail attempt 1 reported"
+    );
+    assert!(
+        retry_prompt.contains(attempts[0].prompt.trim()),
+        "U2: the retry block must be appended to the original prompt, not replace it"
+    );
+
+    assert_eq!(
+        bridge.results_snapshot().len(),
+        1,
+        "U2: only the successful final attempt may be recorded"
+    );
+    assert!(
+        bridge.failures_snapshot().is_empty(),
+        "U2: a slot that succeeded on retry must not record a failure"
+    );
+}
+
+/// U2 验收 #4: a worktree that already carries a commit from an earlier
+/// attempt is NOT a success signal — the slot only completes because the
+/// second process published its own terminal event.
+#[cfg(unix)]
+#[tokio::test]
+async fn timeout_retry_does_not_claim_existing_commit_success() {
+    let (attempts, bridge, _worktree, _tmp) =
+        run_u2_fresh_process_wave("u2-existing-commit", 2, |worktree| {
+            std::fs::write(worktree.join("done-by-attempt-1.txt"), "partial work")
+                .expect("seed prior attempt output");
+        })
+        .await;
+
+    assert_eq!(
+        attempts.len(),
+        2,
+        "U2: pre-existing work must not short-circuit the retry"
+    );
+    assert_eq!(
+        bridge.results_snapshot().len(),
+        1,
+        "U2: the slot completes only because attempt 2 published its own terminal"
+    );
+    assert!(
+        attempts[1]
+            .prompt
+            .contains("Re-run this task's tests to find out what actually still fails"),
+        "U2: the retry must be told to verify the existing state itself"
+    );
+}
+
+/// U2 验收 #5: a third attempt is told about BOTH earlier failures, in
+/// order, each with its own stable code — the reported failure of
+/// attempt 1 and the timeout of attempt 2 (which leaves no detail).
+#[tokio::test]
+async fn third_attempt_prompt_contains_both_prior_failures() {
+    let store = std::sync::Arc::new(InMemorySupervisorStore::new());
+    let bridge = U5RecordingBridge::new(store.clone() as std::sync::Arc<dyn SupervisorStore>)
+        .with_retry_budget(2);
+
+    let wave = make_u3_wave("u2-third-attempt", 1, 1);
+    let executor = U5RecordingExecutor::new(U5SlotOutcome::Success(0)).with_attempts(
+        0,
+        vec![
+            exec_reported_failure("attempt 1 left the build broken"),
+            U5SlotOutcome::Fail(U5_RETRYABLE_REASON.to_string()),
+            U5SlotOutcome::Success(1),
+        ],
+    );
+
+    let (_outcome, _bridge, exec) = run_u5_execute_wave(bridge, wave, executor).await;
+
+    let prompts = exec.prompts_for(0);
+    assert_eq!(prompts.len(), 3, "U2: budget=2 must allow three attempts");
+    assert!(
+        !prompts[0].contains("# Retry Context"),
+        "U2: attempt 1 has no history"
+    );
+
+    let third = &prompts[2];
+    assert!(
+        third.contains("attempt **3/3**"),
+        "U2: attempt 3 must know it is the last one; got:\n{third}"
+    );
+    let first_line = third
+        .find("- attempt 1: failure code `executor_reported_failure`")
+        .expect("U2: attempt 1's reported failure must survive into attempt 3");
+    let second_line = third
+        .find("- attempt 2: failure code `worker_timeout`")
+        .expect("U2: attempt 2's timeout must be listed too");
+    assert!(
+        first_line < second_line,
+        "U2: prior failures must be listed in ascending attempt order"
+    );
+    assert!(
+        third.contains("reported detail: attempt 1 left the build broken"),
+        "U2: attempt 1's detail must reach attempt 3"
+    );
+    assert!(
+        third.contains("reported detail: unavailable"),
+        "U2: a timeout leaves no detail, and that must be stated rather than guessed"
+    );
+    assert_eq!(
+        third.matches("- attempt 1:").count(),
+        1,
+        "U2: the retry block must not stack across attempts"
+    );
+}
+
+/// U3 验收 #6: a slot that uses its full per-worker budget on every
+/// legal attempt must not be preempted by the wave's partial threshold.
+///
+/// The wave is `T=300s` per worker, 2 events at concurrency 1 and a
+/// retry budget of 2, so the legal work budget is
+/// `300 × 2 batches × 3 attempts + 30s = 1830s`. Each attempt here
+/// burns 250s, for 1000s total — comfortably inside that budget but
+/// well past the 504s partial threshold the pre-plan aggregate
+/// (`300 × 2 + 30 = 630s`) would have produced.
+#[tokio::test(start_paused = true)]
+async fn healthy_worker_is_not_preempted_before_attempt_budget() {
+    let store = std::sync::Arc::new(InMemorySupervisorStore::new());
+    let bridge = U5RecordingBridge::new(store.clone() as std::sync::Arc<dyn SupervisorStore>)
+        .with_retry_budget(2);
+
+    let wave = make_u3_wave_with_concurrency("u3-healthy", 2, 2, 1);
+    let executor = U5RecordingExecutor::new(U5SlotOutcome::Success(1))
+        .with_delay(Duration::from_secs(250))
+        .with_attempts(
+            0,
+            vec![
+                exec_reported_failure("attempt 1 still red"),
+                exec_reported_failure("attempt 2 still red"),
+                U5SlotOutcome::Success(1),
+            ],
+        );
+
+    let (outcome, bridge, exec) = run_u5_execute_wave(bridge, wave, executor).await;
+
+    assert_eq!(
+        exec.call_count(0),
+        3,
+        "U3: the wave budget must cover all three legal attempts"
+    );
+    let completed = completed_wave_of(&outcome);
+    assert_eq!(
+        completed.results.len(),
+        2,
+        "U3: both slots must finish inside the attempt-aware budget, got {:?} / {:?}",
+        completed.results,
+        completed.failures
+    );
+    assert!(
+        bridge.failures_snapshot().is_empty(),
+        "U3: no slot may be recorded as failed, got {:?}",
+        bridge.failures_snapshot()
+    );
+}
+
+/// U4 验收 #2: with the `parallel-forge` budget of 2, a unit that keeps
+/// reporting its own failure burns exactly three attempts, and only the
+/// exhausted result reaches the wave level — as one `exec.wave.failed`
+/// naming the slot as redrivable.
+///
+/// Phase 1 runs the real supervisor dispatch; phase 2 feeds the
+/// `CompletedWave` it produced into the real fan-in, so the "three
+/// attempts" and "one wave failure" facts are linked by the same
+/// artifact rather than asserted independently.
+#[tokio::test]
+async fn parallel_forge_executor_retry_exhaustion() {
+    use crate::loop_runner::wave::{SupervisorFanInOutcome, run_supervisor_fan_in};
+    use ralph_core::supervisor::worker_outcome::REASON_EXECUTOR_REPORTED_FAILURE;
+
+    let store = std::sync::Arc::new(InMemorySupervisorStore::new());
+    let spy = U5RecordingBridge::new(store.clone() as std::sync::Arc<dyn SupervisorStore>)
+        .with_retry_budget(2);
+    let executor = U5RecordingExecutor::new(exec_reported_failure("unit still failing"));
+
+    let (outcome, spy, exec) =
+        run_u5_execute_wave(spy, make_u3_wave("forge-exhaust", 1, 1), executor).await;
+
+    assert_eq!(
+        exec.call_count(0),
+        3,
+        "U4: the parallel-forge budget must yield three total attempts"
+    );
+    let completed = completed_wave_of(&outcome);
+    assert!(
+        completed.results.is_empty(),
+        "U4: an exhausted unit must not publish a business result, got {:?}",
+        completed.results
+    );
+    assert_eq!(
+        spy.failures_snapshot(),
+        vec![(0u32, REASON_EXECUTOR_REPORTED_FAILURE.to_string())],
+        "U4: exactly one stable slot failure, recorded only after exhaustion"
+    );
+
+    // Phase 2: the exhausted wave goes through the production fan-in.
+    let (_tmp, bridge, _store, store_wave_id, events_path) =
+        setup_u3_partial_failure_bridge(WaveKind::Exec, "forge-exhaust", 1);
+    bridge
+        .record_slot_failure(&store_wave_id, 0, REASON_EXECUTOR_REPORTED_FAILURE)
+        .expect("record exhausted slot failure");
+    bridge
+        .commit_salvage_projection(
+            &store_wave_id,
+            &ralph_core::supervisor::ProjectionReceiptSummary {
+                kind: ralph_core::supervisor::ProjectionKind::Business,
+                batch_fingerprint: "forge-exhaust-fp".into(),
+                write_count: 0,
+                already_present_count: 0,
+                committed_at_unix_secs: 0,
+            },
+        )
+        .expect("mark salvage");
+
+    let bridge: std::sync::Arc<dyn SupervisorBridge> = std::sync::Arc::new(bridge);
+    let fan_in = run_supervisor_fan_in(
+        &bridge,
+        completed,
+        &make_u3_wave("forge-exhaust", 1, 1),
+        &events_path,
+        600,
+        None,
+    );
+    assert_eq!(
+        fan_in,
+        SupervisorFanInOutcome::InjectedFailed,
+        "U4: an exhausted unit must reach the wave-level failure path"
+    );
+
+    let content = std::fs::read_to_string(&events_path).unwrap_or_default();
+    let failed: Vec<serde_json::Value> = content
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| serde_json::from_str(line).expect("ledger line must be JSON"))
+        .filter(|v: &serde_json::Value| {
+            v.get("topic").and_then(|t| t.as_str()) == Some("exec.wave.failed")
+        })
+        .collect();
+    assert_eq!(
+        failed.len(),
+        1,
+        "U4: three attempts must produce exactly one exec.wave.failed, got {failed:?}"
+    );
+
+    let payload = failed[0].get("payload").expect("wave failure payload");
+    let redrive: Vec<u64> = payload
+        .get("redrive_slots")
+        .and_then(|v| v.as_array())
+        .expect("payload.redrive_slots")
+        .iter()
+        .filter_map(serde_json::Value::as_u64)
+        .collect();
+    assert_eq!(
+        redrive,
+        vec![0],
+        "U4: the exhausted slot stays redrivable by an operator"
+    );
+    let slot_reason = payload
+        .get("slot_failures")
+        .and_then(|v| v.as_array())
+        .and_then(|slots| slots.first())
+        .and_then(|slot| slot.get("reason"))
+        .and_then(|r| r.as_str());
+    assert_eq!(
+        slot_reason,
+        Some(REASON_EXECUTOR_REPORTED_FAILURE),
+        "U4: the wave failure must carry the stable exhaustion reason"
     );
 }
 

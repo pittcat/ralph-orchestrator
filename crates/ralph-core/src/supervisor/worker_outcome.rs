@@ -46,6 +46,18 @@ pub const REASON_INVALID_CONTROL_PLANE_PATH: &str = "invalid_control_plane_path"
 /// Pre-spawn infrastructure failure: the dispatcher could not atomically
 /// register every worker channel, so no slot was started.
 pub const REASON_WAVE_CHANNEL_REGISTRATION_FAILED: &str = "wave_channel_registration_failed";
+/// 2026-07-30-001 plan U1: an Exec wave worker accepted its request,
+/// ran, and actively emitted `exec.unit.failed` instead of
+/// `exec.unit.done`. The slot produced no usable result, but a fresh
+/// worker process starting from the same worktree may still succeed —
+/// so this is retryable. The dynamic `reason` carried in the failed
+/// event's payload is diagnostic detail only; the store and the
+/// `slot_failures[]` contract always use this stable code.
+///
+/// Only the supervisor's `WaveKind::Exec` path produces this reason;
+/// Review / Fix waves keep the pre-existing `Completed(Failed)`
+/// terminal semantics.
+pub const REASON_EXECUTOR_REPORTED_FAILURE: &str = "executor_reported_failure";
 
 // ── Retry classifier ─────────────────────────────────────────────────────────
 
@@ -55,6 +67,7 @@ const RETRYABLE_REASONS: &[&str] = &[
     REASON_EMPTY_WORKER_RESULT,
     REASON_MISSING_WORKER_TERMINAL,
     REASON_SLOT_NEVER_STARTED,
+    REASON_EXECUTOR_REPORTED_FAILURE,
 ];
 
 /// Reasons that are permanent failures — retrying is futile.
@@ -152,8 +165,13 @@ pub fn map_failure_class(reason: &str) -> &'static str {
         REASON_CONFLICTING_WORKER_TERMINAL => FAILURE_CLASS_IDENTITY_MISMATCH,
         // cancel family (slot-level + wave-level aggregate codes)
         REASON_WORKER_CANCELLED | "cancelled" | "wave_cancelled" => FAILURE_CLASS_CANCEL,
-        // wave-level aggregate reason used by the failed payload
-        "required_slot_failure" => FAILURE_CLASS_REQUIRED_SLOT_FAILURE,
+        // wave-level aggregate reason used by the failed payload, and
+        // the slot-level Exec worker that reported its own failure
+        // (2026-07-30-001 plan U1): both mean "a required slot did not
+        // deliver", so they share the consumer-facing class.
+        "required_slot_failure" | REASON_EXECUTOR_REPORTED_FAILURE => {
+            FAILURE_CLASS_REQUIRED_SLOT_FAILURE
+        }
         // Fail-closed: unrecognised reasons, and known permanent
         // reasons without a consumer class (e.g.
         // REASON_INVALID_CONTROL_PLANE_PATH), collapse to `unknown`.
@@ -621,6 +639,7 @@ mod tests {
             REASON_EMPTY_WORKER_RESULT,
             REASON_MISSING_WORKER_TERMINAL,
             REASON_SLOT_NEVER_STARTED,
+            REASON_EXECUTOR_REPORTED_FAILURE,
         ];
         for reason in retryable {
             assert!(
@@ -678,6 +697,49 @@ mod tests {
             SlotOutcome::Failed {
                 reason: REASON_MISSING_WORKER_TERMINAL
             }
+        );
+    }
+
+    // --- 2026-07-30-001 plan U1: executor_reported_failure ---
+
+    /// The Exec worker's own `exec.unit.failed` terminal is a
+    /// retryable slot reason: a fresh process resuming the same
+    /// worktree may still finish the unit.
+    #[test]
+    fn u1_executor_reported_failure_is_retryable() {
+        assert!(is_retryable_slot_reason(REASON_EXECUTOR_REPORTED_FAILURE));
+        assert_eq!(
+            classify_failure_reason(REASON_EXECUTOR_REPORTED_FAILURE),
+            FailureClassification::Retryable
+        );
+    }
+
+    /// Once the retry budget is exhausted the reason travels into the
+    /// `slot_failures[].failure_class` contract as a concrete
+    /// `required_slot_failure` — never the fail-closed `unknown`
+    /// bucket (which would exclude it from `redrive_slots`).
+    #[test]
+    fn u1_executor_reported_failure_maps_to_required_slot_failure_class() {
+        assert_eq!(
+            map_failure_class(REASON_EXECUTOR_REPORTED_FAILURE),
+            FAILURE_CLASS_REQUIRED_SLOT_FAILURE
+        );
+        assert_ne!(
+            map_failure_class(REASON_EXECUTOR_REPORTED_FAILURE),
+            FAILURE_CLASS_UNKNOWN
+        );
+    }
+
+    /// The generic truth table is unchanged: a `Failed` terminal
+    /// marker still resolves to `Completed(Failed)`. Turning an Exec
+    /// worker's reported failure into a retryable attempt is a
+    /// wave-kind-aware decision the dispatcher makes on top of this
+    /// table, not a rewrite of the table itself.
+    #[test]
+    fn u1_generic_truth_table_still_completes_on_failed_marker() {
+        assert_eq!(
+            classify_worker_outcome(WorkerExit::Exit0, 1, &[TerminalMarker::Failed]),
+            SlotOutcome::Completed(WorkerTerminalKind::Failed)
         );
     }
 
