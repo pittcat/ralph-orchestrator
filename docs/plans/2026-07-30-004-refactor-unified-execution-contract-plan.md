@@ -138,7 +138,7 @@ Ralph 必须对同一次 hat activation 给出唯一、可查询、可执行且�
 
 - 项目规则明确 backwards compatibility 不重要；不保留错误的 agent/preset 行为。
 - 本计划只完整迁移 `parallel-forge`。
-- 其他 builtin preset 通过 legacy compiled view 继续消费原有声明和行为；不得要求其新增 YAML 字段。
+- 其他 builtin preset 通过 passthrough compiled view 继续消费原有声明和行为；不得要求其新增 YAML 字段。
 - human CLI 的现有 operator 管理能力不因 agent capability 收紧而消失。
 - 现有 public event topics 除 `forge.plan.ready` payload 收缩外保持；该 payload 变更同步 preset/schema/BDD/skill docs，不保留双写兼容字段。
 - `task.resume` 不重新引入；deterministic `CorrectionContext` 保持主恢复通道。
@@ -200,7 +200,7 @@ Ralph 必须对同一次 hat activation 给出唯一、可查询、可执行且�
 - R20. strict lint/startup 必须证明 contract 声明能解析、resolved 后仍存在、且有 production consumer。
 - R21. inspect 必须输出机器可读 activation contract、digest、能力来源与 deny 原因，且与 resident loop 恢复出的 current step 一致。
 - R22. `parallel-forge` 成功、拒收修正、fail-close、重启、重复提交与 artifact 竞态必须由真实 EventLoop BDD/ATDD 覆盖。
-- R23. 其他 builtin preset 必须通过 legacy compiled view 的 differential regression，行为不因本计划意外改变。
+- R23. 其他 builtin preset 必须通过 passthrough compiled view 的 differential regression，行为不因本计划意外改变。
 - R24. agent 注入 skill 与 loop 外 preset author/review skill 必须同步新能力、命令、finding 与 artifact-first 行为。
 - R25. Effective Contract 必须在 preset overlay、schema resolution、profile 与 CLI override 全部完成后、`EventLoop` 构造前编译；compile 后本次 loop 的 resolved config 不得再变异。
 - R26. activation contract 必须持久化并版本化；身份至少包含 `loop_id`、`activation_id`、`hat_id`、`trigger_event_id`、`step_id`、`contract_revision` 与 config fingerprint。独立 CLI 进程必须读取 resident loop 的同一实例，stale/mismatch 一律 fail-closed。
@@ -208,7 +208,7 @@ Ralph 必须对同一次 hat activation 给出唯一、可查询、可执行且�
 - R28. artifact canonicalizer 必须拒绝 root 外路径、`..`、symlink escape、超限文件、超限 Unit/依赖边与非 regular file；digest 绑定单次读取的 raw bytes，不能由 artifact 内自报字段充当证明。
 - R29. `--policy-check` 的成功只能凭同一 activation/revision 的 evaluation token 进入 apply；apply 必须重新验证 token、contract revision 与 artifact identity，不能把早先 precheck 当授权缓存。
 - R30. 除 core EventLoop BDD 外，必须用 `ralph-e2e` mock cassette 驱动一次真实 Parallel Forge CLI 主路径，证明跨进程 contract、artifact、task dispatch 与终态接线。
-- R31. Parallel Forge 必须生成结构化 migration matrix，覆盖每个 hat × trigger/step × `observe/act/emit/complete/recover` 能力及 consumer；验收必须证明所有实际 activation 均为 explicit contract，未使用 legacy adapter、`DEFENSIVE_BYPASS` 或旧 authority 决策。
+- R31. Parallel Forge 必须生成结构化 migration matrix，覆盖每个 hat × trigger/step × `observe/act/emit/complete/recover` 能力及 consumer；验收必须证明所有实际 activation 均为 explicit contract，未使用 passthrough adapter、`DEFENSIVE_BYPASS` 或旧 authority 决策。
 - R32. U1 必须盘点所有 authority reader/writer；U4完成后业务 writer 只能是 StateLedger outbox commit，TaskStore/progress/flow/phase/event ledger 必须逐项标为 materialized read model、transport log 或删除，禁止出现未分类的第二权威。
 
 #### 1.13 Scope Boundaries
@@ -228,7 +228,7 @@ Ralph 必须对同一次 hat activation 给出唯一、可查询、可执行且�
 ##### Deferred to Follow-Up Work
 
 - 其他 builtin preset 逐个迁移到显式 capability/contract metadata；
-- 清理 legacy compiled view；
+- 清理 passthrough compiled view；
 - 在所有 preset 上移除历史 `FlowStepScopeStage::DEFENSIVE_BYPASS`；
 - 更广泛的 artifact-backed event payload 收缩；
 - web dashboard 的 contract 可视化。
@@ -254,7 +254,7 @@ Ralph 必须对同一次 hat activation 给出唯一、可查询、可执行且�
 #### 1.15 已确认假设
 
 - A1. 现有 flow/hat/schema/execution-contract/projection 声明足以作为 compiler 输入，不需要新 DSL。由 E3/E4/E10 支持。
-- A2. `parallel-forge` 可作为首条完整迁移而不要求其他 preset 同期修改。由现有 builtin 独立 preset/schema/BDD 与 legacy overlay 支持。
+- A2. `parallel-forge` 可作为首条完整迁移而不要求其他 preset 同期修改。由现有 builtin 独立 preset/schema/BDD 与 passthrough overlay 支持。
 - A3. existing `Rejection`、`CorrectionContext`、PromptContext 和 recovery ledger 可演进为统一 Recovery Intent，不需要第二套恢复通道。由 E12/E17 支持。
 
 #### 1.16 待验证假设
@@ -272,7 +272,7 @@ U1 仍需执行调用点分类 Characterization；这是已决迁移清单的证
 - AE5. 同一 candidate event 经 JSONL、CLI 与 synthetic ingress 得到相同 gate 结论。
 - AE6. precheck exhausted 与 stall fail-close 均先 accepted blocked transition、推进 authority，再唤醒 reporter；终态恰好一次。
 - AE7. recoverable schema/flow/artifact Reject 回到有修复 primitive 的 hat，restart 后预算连续。
-- AE8. 非 Parallel Forge builtin preset 在 legacy view 下的现有 structured tests 无差异。
+- AE8. 非 Parallel Forge builtin preset 在 passthrough view 下的现有 structured tests 无差异。
 
 ---
 
@@ -345,7 +345,7 @@ Mechanism synthetic events 当前分散在 EventLoop/correction/precheck/stall �
 | E1 | `crates/ralph-cli/src/config_resolution.rs::default_core_value` | `PRESET_OPT_IN_KEYS` 手工移除默认 placeholder；遗漏会让 overlay 静默吞 preset 值 | compiler 必须位于 resolved+normalized config 后；完整性不能依赖新增白名单 | 高 |
 | E2 | `crates/ralph-cli/src/preflight.rs::merge_hats_overlay` | event_loop opt-in、tasks、mechanism 有不同 merge 分支 | 必须测试真实 production resolution，不以 serde unit 代替 | 高 |
 | E3 | `crates/ralph-core/src/config/ralph_config.rs::normalize/apply_precheck_desugar`、`config/hat.rs::rewrite_emit_topics` | 已存在“声明 → resolved runtime shape”的编译式先例 | Effective Contract 复用 normalize 后声明，不新增 DSL | 高 |
-| E4 | `config/loop_config.rs`、`event_loop/flow_declaration.rs`、`config/hat.rs`、`config/execution_contracts.rs` | flow、hat、schema、obligation 已有结构化声明但彼此分散 | compiler 输入与 legacy view 可由现有类型组成 | 高 |
+| E4 | `config/loop_config.rs`、`event_loop/flow_declaration.rs`、`config/hat.rs`、`config/execution_contracts.rs` | flow、hat、schema、obligation 已有结构化声明但彼此分散 | compiler 输入与 passthrough view 可由现有类型组成 | 高 |
 | E5 | `event_loop/policy.rs::build_unified_validation_pipeline`、`validation/pipeline.rs::ValidationPipeline::from_registry` | loop 与 CLI 已共用 Origin→Publisher→RequiredFields→EventPolicy→StepHandoff 和 post-commit rules | 统一 transition 扩展既有 pipeline，不重写验证器 | 高 |
 | E6 | `crates/ralph-core/src/event_loop/mod.rs::process_parse_result` | `StateProjector::apply` 发生在 unified pre-commit validation 之前 | 必须引入 prepare/commit 边界；仅包 facade 不足 | 高 |
 | E7 | `event_loop/emit_gate.rs`、`stage_pipeline.rs` | 已有 AcceptMainBus/AcceptRepairStream/Reject facade | Accepted Transition 可复用 outcome 与 stage ordering | 高 |
@@ -359,7 +359,7 @@ Mechanism synthetic events 当前分散在 EventLoop/correction/precheck/stall �
 | E15 | `correction/mod.rs` | deterministic correction 已 always-on；PromptContext 是统一 prompt 恢复入口 | Recovery Intent 应演进现有类型，不恢复 `task.resume` | 高 |
 | E16 | `event_loop/rejection.rs`、`loop_runner/hard_gate.rs` | 已有 typed Rejection、retry key、bounded handling，但 source target 与 budget 分散 | 统一 responsibility/remaining budget/persistence | 高 |
 | E17 | `event_loop/precheck_gate_runner.rs::PrecheckRetryRegistry` | retry registry 是 HashMap，restart 重置 | R18 需要持久化单一 budget ledger | 高 |
-| E18 | `FlowStepScopeStage::DEFENSIVE_BYPASS` | 临时 bypass 仍包含 hat/topic 特例 | legacy view 可兼容；Parallel Forge 不得依赖 bypass | 高 |
+| E18 | `FlowStepScopeStage::DEFENSIVE_BYPASS` | 临时 bypass 仍包含 hat/topic 特例 | passthrough view 可兼容；Parallel Forge 不得依赖 bypass | 高 |
 | E19 | `parallel_forge_fail_close_runtime.yml` | fixture 注释确认 blocked 直接 bus publish，不进入 seen JSONL | U5 改造后测试必须反转为 accepted ledger 可见 | 高 |
 | E20 | `parallel_forge_declared_flow_runtime.yml`、`scenarios.rs::run_workflow_guard_scenario` | 已有真实 EventLoop 14-step 成功路径 | U8 扩展，不另造 stub harness | 高 |
 | E21 | `docs/solutions/workflow-orchestration/parallel-forge-preset-integration-gap.md` | schema pointer 未接曾让 runtime 校验静默跳过，全量仍绿 | completeness 必须证明真实 consumer 接线 | 高 |
@@ -426,7 +426,7 @@ Mechanism synthetic events 当前分散在 EventLoop/correction/precheck/stall �
 | D9 | artifact 事务与信任边界 | precheck/apply 两次读取；一次 raw-byte snapshot；文件锁 | apply 在 root realpath containment/regular-file、1 MiB raw bytes、最多512 Units/4096依赖边通过后只读一次 bytes，外部声明 digest 对该 snapshot 验证；parser、validator、projector共享同一 canonical snapshot | E6、E12-E15、E28-E30、E32 | 两次读取有 TOCTOU；artifact 自报 digest 可伪造；长期文件锁跨平台且无现有模式；上限覆盖现有样本并阻断无界内存与图遍历 | 0.88 |
 | D10 | recovery 模型与 key | 新 envelope；保留各预算；演进现有类型并统一 ledger | Recovery Intent 演进现有类型；retry key 固定包含 activation lineage、contract revision、rule/artifact/event identity，预算在 StateLedger 原子递增 | E15-E17、E25、E27 | 新 envelope 再复制；省略 revision 会让配置变化复用旧预算；多 budget 继续漂移 | 0.96 |
 | D11 | recovery target | 总回 source；总回 coordinator；按 allowed fix primitive 选择责任 hat | contract capability 决定 target；无安全 target fail-close | E16、E22 | source 未必能修；coordinator 会越权 | 0.93 |
-| D12 | 其他 preset 兼容 | 同期迁移；strict重解释；行为镜像 legacy adapter | 未迁移 builtin 的 adapter 只把现有 runtime decision 包成 contract result，不新增完整性约束或启动失败；strict completeness 仅对声明 explicit-migration 的 Parallel Forge 生效 | 用户范围、E3-E5、E18、E21 | 同期迁移超范围；strict重解释会改变旧 preset；完全跳过会保留 consumer 旁路 | 0.94 |
+| D12 | 其他 preset 兼容 | 同期迁移；strict重解释；行为镜像 passthrough adapter | 未迁移 builtin 的 adapter 只把现有 runtime decision 包成 contract result，不新增完整性约束或启动失败；strict completeness 仅对声明 explicit-migration 的 Parallel Forge 生效 | 用户范围、E3-E5、E18、E21 | 同期迁移超范围；strict重解释会改变旧 preset；完全跳过会保留 consumer 旁路 | 0.94 |
 | D13 | introspection 与跨进程身份 | 仅 Prompt；进程内 query；持久化 activation snapshot + inspect | StateLedger 持久化版本化 activation contract；CLI/Prompt/inspect读取同一 `activation_id/revision/digest`，stale fail-closed | E20、E22、E26-E27、E30 | 进程内对象无法约束独立 CLI；Prompt/日志不可做 parity 自动测试 | 0.97 |
 | D14 | 实施顺序 | 8个技术大包；按模块并行；14个原子纵切 | 采用§7.2的U1→U14：基线→typed config→activation→Prompt→CLI→outbox→delivery→synthetic→artifact→PF→recovery→lint→E2E→docs | E6-E31、文本审查 | 大包违反Unit原子性；并行会让后序依赖未验证 | 0.98 |
 | D15 | policy-check 与 apply 的关系 | precheck 成功永久授权；apply无条件全重算；revision token + apply复核 | policy-check 返回短生命周期 evaluation token；apply 校验 activation/revision/contract/artifact identity 并重跑会受外部状态影响的 gate | E5、E12、E26、E30 | 永久授权会 stale；完全忽略 precheck 无法证明同源且诊断漂移 | 0.94 |
@@ -507,7 +507,7 @@ sequenceDiagram
 flowchart TB
   A[Normalized config] --> B{Preset migrated?}
   B -->|parallel-forge| C[Explicit activation capabilities]
-  B -->|other builtin| D[Legacy compiled view]
+  B -->|other builtin| D[Passthrough compiled view]
   C --> E[Same query and transition APIs]
   D --> E
   E --> F[Differential regression]
@@ -519,7 +519,7 @@ flowchart TB
 - **新建完整 execution-contract YAML：** 会要求 preset 作者同步 flow/hat/schema/task/projection 的重复事实；拒绝。
 - **把 WorkflowPhaseAuthority 提升为总权威：** Parallel Forge 主要使用 declared flow，会保留双状态机；拒绝。
 - **只迁移 Parallel Forge 特例，不设计 orchestrator-wide API：** 无法阻止下一 preset 重复漂移；拒绝。
-- **所有 builtin 一次迁移：** 超出已确认范围并扩大回归面；采用 legacy view。
+- **所有 builtin 一次迁移：** 超出已确认范围并扩大回归面；采用 passthrough view。
 
 ### 3.3 系统级不变量
 
@@ -663,7 +663,7 @@ Feature: 拒收、重试与耗尽形成可执行且有界的恢复闭环
     And reporter 终态通过且不重复 fail-close
 ```
 
-### Feature F5: Contract completeness and legacy compatibility
+### Feature F5: Contract completeness and passthrough compatibility
 
 ```gherkin
 Feature: contract 声明必须有 production consumer 且旧 preset 不被意外改变
@@ -680,7 +680,7 @@ Feature: contract 声明必须有 production consumer 且旧 preset 不被意外
     When strict lint 运行
     Then以稳定 finding 拒绝
 
-  Scenario S18: 非迁移 preset 使用 legacy compiled view
+  Scenario S18: 非迁移 preset 使用 passthrough compiled view
     Given builtin preset 未提供显式迁移 metadata
     When其现有 structured runtime scenarios 运行
     Then accepted/rejected topics、task behavior 与 terminal behavior 保持不变
@@ -756,7 +756,7 @@ Feature: Parallel Forge artifact 在有界信任域内进入真实 CLI 主路径
 | S12-S14 | target、budget、restart、single blocked | recovery ledger + EventLoop BDD | integration | state-machine/concurrency | 是 |
 | S15 | fail-close visible in accepted ledger/authority | `parallel_forge_fail_close_runtime.yml` | BDD | regression | 是 |
 | S16-S17 | strict lint/startup fail-closed | preset lint/config resolution tests | integration | mutation of consumer registry | 否 |
-| S18 | legacy behavior differential | existing builtin structured tests | differential regression | broad preset regression | 否 |
+| S18 | passthrough behavior differential | existing builtin structured tests | differential regression | broad preset regression | 否 |
 | S19-S20 | stale/revision/fingerprint fail-closed | StateLedger replay + CLI integration | integration | characterization + restart | 否 |
 | S21-S22 | commit→materialize/publish crash 与并发去重 | StateLedger/Accepted Transition fault harness | integration | fault injection + concurrency | 是，BDD |
 | S23-S24 | path/resource/token 边界拒收且零副作用 | artifact canonicalizer + emit CLI | integration | traversal/symlink/bounds/TOCTOU | 否 |
@@ -779,7 +779,7 @@ Feature: Parallel Forge artifact 在有界信任域内进入真实 CLI 主路径
 | R16-R19 | S12-S15 | Recovery Intent/budget | target/budget | restart + EventLoop | S14,S15 | E15-E17,E22 | U7 |
 | R20-R21 | S3,S16-S17 | lint/startup/inspect | registry completeness | CLI preset check | 否 | E1-E5,E21 | U2,U7 |
 | R22 | S1-S15,S19-S25 | Parallel Forge suite | 各 owning Unit | scenarios + restart/outbox/artifact | 是 | E19-E20,E23,E28-E29 | U8-U13 |
-| R23 | S18 | legacy differential | legacy view | builtin preset suites | 否 | E3-E5,E18 | U2,U8 |
+| R23 | S18 | passthrough differential | passthrough view | builtin preset suites | 否 | E3-E5,E18 | U2,U8 |
 | R24 | S1,S7,S12,S16 | docs/command drift | 文档静态检查 | preset operator review fixture | 否 | 项目硬规则 | U8 |
 | R25-R26 | S1-S3,S19-S20,S24-S25 | final compile + persisted activation parity | compiler identity/revision | config resolution + CLI restart | S25 | E26-E27,E30 | U2,U3,U8 |
 | R27 | S5-S6,S21-S22 | durable transition receipt | receipt state machine | StateLedger fault/replay | S21 | E6-E7,E27,E31 | U4 |
