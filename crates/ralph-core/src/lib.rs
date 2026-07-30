@@ -56,6 +56,9 @@ mod hat_registry;
 mod hatless_ralph;
 pub mod hooks;
 pub mod parallel_forge_handoff;
+/// U11 (plan 2026-07-30-004): durable Recovery Intent store with a
+/// persistent retry budget that survives loop restarts.
+pub mod recovery_intent;
 pub mod recovery_runtime;
 pub mod safe_display;
 pub mod shipper_reason;
