@@ -7,6 +7,11 @@ pub mod accepted_event;
 // atomic entry point for all business state changes. Validates
 // pre-commit, writes a durable outbox entry, then publishes to the bus.
 pub mod accepted_transition;
+// U8 (plan 2026-07-30-004): typed disposition classification. Every
+// topic maps to one of {Business, Recovery, DiagnosticObservation,
+// LoopControl}; only Business / Recovery advance business flow through
+// the Accepted Transition API.
+pub mod disposition;
 pub mod loop_state;
 pub mod plan_blocked_reason;
 pub mod rejection;
@@ -87,6 +92,7 @@ pub mod lifecycle;
 pub use lifecycle::build_state_ledger_from_env;
 // U6 (plan 2026-07-30-004): Accepted Transition API re-exports.
 pub use accepted_transition::{AcceptedTransition, OutboxEntry, TransitionError};
+pub use disposition::{Disposition, publish_synthetic};
 pub mod policy;
 pub mod process;
 pub mod prompt;
@@ -12770,8 +12776,8 @@ impl EventLoop {
             pending
         };
 
-        // U7: pre-compute idempotent-transition context once per batch
-        // so the per-event loop only needs field-level borrows.
+        // U7/U8: pre-compute idempotent-transition context once per
+        // batch so the per-event loop only needs field-level borrows.
         let u7_contract_digest = self
             .execution_contract
             .as_ref()
@@ -12780,28 +12786,19 @@ impl EventLoop {
         let u7_iteration = self.state.iteration;
 
         for event in pending_publish {
-            // U7: route business events through the idempotent
-            // Accepted Transition API when the execution contract is
-            // compiled. Control / diagnostic / system events bypass
-            // the outbox and publish directly.
-            let u7_is_control = {
-                let topic = event.topic.as_str();
-                topic.starts_with("event.")
-                    || topic.starts_with("human.")
-                    || matches!(
-                        topic,
-                        "LOOP_COMPLETE"
-                            | "REVIEW_COMPLETE"
-                            | "loop.cancel"
-                            | "task.resume"
-                            | "build.task.abandoned"
-                            | "event.isolation.boundary_violation"
-                    )
-            };
+            // U8 (plan 2026-07-30-004): route by typed disposition.
+            // Business / Recovery events go through the idempotent
+            // Accepted Transition API (durable outbox + publish) when
+            // the execution contract is compiled; DiagnosticObservation
+            // / LoopControl events use the explicit direct channel and
+            // never advance phase authority. Without a compiled
+            // contract (legacy / test paths) every event falls back to
+            // a direct publish.
+            let u8_disposition =
+                crate::event_loop::disposition::classify(event.topic.as_str());
 
-            let mut published_via_transition = false;
-            if !u7_is_control
-                && let Some(ref digest) = u7_contract_digest
+            let mut published_via_disposition_channel = false;
+            if let Some(ref digest) = u7_contract_digest
                 && let Some(ref ledger) = self.state.state_ledger
             {
                 let activation_id = format!(
@@ -12812,36 +12809,46 @@ impl EventLoop {
                         .map(|h| h.as_str())
                         .unwrap_or("unknown")
                 );
-                match crate::event_loop::accepted_transition::AcceptedTransition::commit_idempotent(
+                match crate::event_loop::disposition::publish_synthetic(
                     &event,
+                    u8_disposition,
                     &u7_loop_id,
                     &activation_id,
                     digest,
                     ledger,
                     &mut self.bus,
-                    |_| Ok(()),
-                    || {},
                 ) {
-                    Ok(_entry) => {
-                        published_via_transition = true;
+                    Ok(_maybe_entry) => {
+                        // `Some(entry)` = accepted transition (outbox +
+                        // publish); `None` = explicit diagnostic /
+                        // control channel (direct publish). Either way
+                        // the event reached the bus through the
+                        // disposition-aware route.
+                        published_via_disposition_channel = true;
                     }
                     Err(e) => {
                         warn!(
                             topic = %event.topic,
                             error = %e,
-                            "U7: transition commit failed, falling back to direct publish"
+                            "U8: transition commit failed, falling back to direct publish"
                         );
                     }
                 }
             }
-            if !published_via_transition {
+            if !published_via_disposition_channel {
                 self.bus.publish(event.clone());
             }
             self.diagnose_plan_complete_channel(
                 &event,
                 crate::event_loop::phase_authority::diagnosis::Channel::Main,
             );
-            self.apply_phase_authority_on_accepted(&event);
+            // U8: only Business / Recovery dispositions advance flow.
+            // Diagnostic / loop-control events are observations about
+            // the loop, not transitions of business state, so phase
+            // authority MUST NOT run for them.
+            if u8_disposition.advances_flow() {
+                self.apply_phase_authority_on_accepted(&event);
+            }
         }
 
         // --- U3: Invariant assertion checks ---
@@ -13949,7 +13956,14 @@ impl EventLoop {
                     &event,
                     crate::event_loop::phase_authority::diagnosis::Channel::Main,
                 );
-                self.apply_phase_authority_on_accepted(&event);
+                // U8 (plan 2026-07-30-004): only Business / Recovery
+                // dispositions advance flow; diagnostic / loop-control
+                // topics never reach phase authority.
+                if crate::event_loop::disposition::classify(event.topic.as_str())
+                    .advances_flow()
+                {
+                    self.apply_phase_authority_on_accepted(&event);
+                }
             }
             crate::event_loop::emit_gate::EmitGateOutcome::AcceptRepairStream => {
                 // U7 (2026-06-27-002 plan completion): the
