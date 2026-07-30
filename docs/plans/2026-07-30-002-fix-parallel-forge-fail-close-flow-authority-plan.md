@@ -158,7 +158,7 @@ flowchart TD
   - `config.event_loop.mechanism.flow`：精简复制 parallel-forge steps（`planning → plan_authoring → concurrency_review → worktree_setup → development_loop（含 transition_emits）→ report（on_any_of）→ plan_end`）。
   - hats：真实 hat id（`inspector / planner / guardian / worktree / reporter`——`reporter` 必须字面命名，E8）；reporter 订阅 `forge.plan.blocked`、`work.failed`，publishes `forge.report.done`、`LOOP_COMPLETE`。
   - mock_responses：4 个 planning 链 handoff（iter 1-4）→ 3 个空事件响应（iter 5-7，触发 fail-close）→ reporter `forge.report.done`（iter 8）→ reporter `LOOP_COMPLETE`（iter 9）。
-  - expected：`events` 含 `forge.report.done`、`LOOP_COMPLETE`；`completion: true`；测试函数末尾读 TempDir 的 `.ralph/flow-authority.jsonl`，断言末行 `step == "report"` 且 `topic == "forge.plan.blocked"`。
+  - expected：`events` 含 `forge.report.done`、`LOOP_COMPLETE`；`completion: true`；测试函数末尾读 TempDir 的 `.ralph/flow-authority.jsonl`，**按行反向扫描**，断言最后一个 `topic == "forge.plan.blocked"` 的 snapshot 行 `step == "report"`（注意：reporter 的 `forge.report.done` / `LOOP_COMPLETE` 被 accept 后会各自再追加 snapshot——E2 的 accept 路径对每个 accepted 事件无条件写 ledger——故 fail-close 行**不是**全文件末行，禁止断言末行）。
 
 **Execution note:** Test-first。先落 BDD scenario 与派生 / escape 单测并确认 Red（BDD 的失败必须是 `forge.report.done` 在 `development_loop` 被 FlowStepScope 拒收导致 `expected.events` 断言失败 / `completion` 为 false；单测的失败必须是 helper 不存在导致的编译错误或断言失败），再做最小实现转 Green。
 
@@ -175,7 +175,7 @@ flowchart TD
 - Integration（EventLoop 级）：带 parallel-forge 形态 flow 的 loop，预置 `consecutive_no_progress_turns = max` 后跑空 turn → bus 观察到 `forge.plan.blocked` ×1（无 `plan.blocked`）、`current_plan_step == "report"`、`.ralph/flow-authority.jsonl` 末行 `step=report / topic=forge.plan.blocked`。
 - Integration（回归·无 flow）：现有 `progress_steward_disabled` / `progress_steward` fixture（无 flow）→ 仍 emit `plan.blocked` ×1；追加断言 flow-authority 有 snapshot 且 step 为空字符串（与 accept 路径一致行为）。
 - Integration（U5 分支）：steward enabled 且唤醒耗尽的 loop（带 forge 形态 flow）→ escalation 事件 topic 同为 `forge.plan.blocked`，snapshot 追加。
-- Acceptance（BDD）：上述 scenario 全链通过——`forge.report.done` / `LOOP_COMPLETE` 均 accepted、`completion: true`、flow-authority 末行断言成立。
+- Acceptance（BDD）：上述 scenario 全链通过——`forge.report.done` / `LOOP_COMPLETE` 均 accepted、`completion: true`、flow-authority 包含行断言成立（反向扫描最后一个 `topic == "forge.plan.blocked"` 行其 `step == "report"`，非全文末行）。
 
 **Verification:**
 - 新 BDD 与全部新增单测通过；`progress_steward*` 既有测试无修改或通过且断言未被削弱。

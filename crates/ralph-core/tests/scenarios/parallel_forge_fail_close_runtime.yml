@@ -1,0 +1,217 @@
+# 2026-07-30-002 plan U1 (R3/S3): parallel-forge fail-close BDD fixture.
+#
+# Covers the parallel-forge fail-close path:
+#   1. planning chain lands through forge.worktrees.ready
+#   2. forge.exec.development.done advances development_loop forward
+#      (the loop body is not exercised; the supervisor fan-in is
+#      disabled so no exec wave slots need to complete)
+#   3. after forge.exec.development.done the loop must produce no
+#      progress for 3 consecutive turns; the fail-close detector
+#      publishes the preset's derived blocked topic
+#      (`forge.plan.blocked`) instead of the legacy `plan.blocked`
+#      so the reporter's `forge.report.done` clears FlowStepScope
+#      in `report` and the loop can close via LOOP_COMPLETE.
+#   4. flow-authority.jsonl must record the escape advance so the
+#      CLI --policy-check / restart recovery both see
+#      `current_plan_step == "report"`.
+#
+# Uses run_scenario_with_snapshots directly so the test function
+# can read .ralph/flow-authority.jsonl post-loop.
+
+name: pf_fail_close_runtime
+description: U1 - parallel-forge fail-close derives `forge.plan.blocked` and advances flow-authority to `report`
+
+config:
+  prompt_file: PROMPT.md
+  max_iterations: 10
+  event_loop:
+    execution_mode: isolated
+    completion_promise: LOOP_COMPLETE
+    progress_steward:
+      enabled: false
+      max_steward_iterations: 3
+    required_events:
+      - forge.report.done
+    starting_event: forge.start
+    mechanism:
+      flow:
+        type: declared
+        version: 1
+        terminal_emits:
+          - LOOP_COMPLETE
+        steps:
+          - id: planning
+            kind: linear
+            "on": forge.start
+            allowed_emits:
+              - forge.plan.inspected
+              - forge.plan.blocked
+          - id: plan_authoring
+            kind: linear
+            "on": forge.plan.inspected
+            allowed_emits:
+              - forge.plan.ready
+              - forge.plan.blocked
+          - id: concurrency_review
+            kind: linear
+            "on": forge.plan.ready
+            allowed_emits:
+              - forge.concurrency.approved
+              - forge.plan.blocked
+          - id: worktree_setup
+            kind: linear
+            "on": forge.concurrency.approved
+            allowed_emits:
+              - forge.worktrees.ready
+              - forge.plan.blocked
+          - id: development_loop
+            kind: linear
+            "on": forge.worktrees.ready
+            allowed_emits:
+              - forge.exec.development.done
+              - forge.plan.blocked
+              - work.failed
+            transition_emits:
+              - forge.exec.development.done
+              - work.failed
+          - id: report
+            kind: await
+            on_any_of:
+              - forge.audit.done
+              - forge.plan.blocked
+              - work.failed
+            allowed_emits:
+              - forge.report.done
+          - id: plan_end
+            kind: terminal
+            "on": forge.report.done
+            allowed_emits:
+              - LOOP_COMPLETE
+  hats:
+    pf-inspector:
+      subscribes_to:
+        - forge.start
+      publishes:
+        - forge.plan.inspected
+    pf-planner:
+      subscribes_to:
+        - forge.plan.inspected
+      publishes:
+        - forge.plan.ready
+    pf-guardian:
+      subscribes_to:
+        - forge.plan.ready
+      publishes:
+        - forge.concurrency.approved
+    pf-worktree:
+      subscribes_to:
+        - forge.concurrency.approved
+      publishes:
+        - forge.worktrees.ready
+    pf-dev-done:
+      subscribes_to:
+        - forge.worktrees.ready
+      publishes:
+        - forge.exec.development.done
+    # Spins idly so next_hat round-robin picks it on the
+    # three "no progress" turns — its empty text gives the
+    # stall detector a no-progress turn without involving
+    # the reporter (reporter must be triggered by the
+    # fail-close `forge.plan.blocked` itself).
+    pf-idle:
+      subscribes_to:
+        - forge.exec.development.done
+      publishes:
+        - queue.advance
+    pf-reporter:
+      subscribes_to:
+        - forge.plan.blocked
+        - work.failed
+      publishes:
+        - forge.report.done
+        - LOOP_COMPLETE
+
+# Stub: ignore run_scenario stubs and supply our own minimal
+# responses. The fixture still needs to land the planning chain
+# + dev-done, then three empty turns to trip the fail-close.
+mock_responses:
+  - text: |
+      <event topic="forge.plan.inspected">
+      plan_key: "pf-u1-fail-close"
+      plan_usable: true
+      </event>
+    hat: pf-inspector
+  - text: |
+      <event topic="forge.plan.ready">
+      plan_key: "pf-u1-fail-close"
+      unit_count: 1
+      </event>
+    hat: pf-planner
+  - text: |
+      <event topic="forge.concurrency.approved">
+      approved: true
+      plan_key: "pf-u1-fail-close"
+      </event>
+    hat: pf-guardian
+  - text: |
+      <event topic="forge.worktrees.ready">
+      plan_key: "pf-u1-fail-close"
+      integration_branch: "pf/u1-fail-close"
+      </event>
+    hat: pf-worktree
+  - text: |
+      <event topic="forge.exec.development.done">
+      completed_unit_count: 0
+      plan_key: "pf-u1-fail-close"
+      </event>
+    hat: pf-dev-done
+  # Iter 6-8: idle hat produces nothing — empty turn, no
+  # business event admitted. The fail-close detector
+  # accumulates the no-progress counter until it crosses
+  # max_steward_iterations = 3, then publishes
+  # forge.plan.blocked (derived from the declared flow),
+  # advances to `report`, and routes the reporter.
+  - text: ""
+    hat: pf-idle
+  - text: ""
+    hat: pf-idle
+  - text: ""
+    hat: pf-idle
+  # Iter 9: reporter writes the BLOCKED report and emits
+  # forge.report.done (FlowStepScope now lives in `report`
+  # because the fail-close escape advance already moved
+  # current_plan_step). The loop closes via LOOP_COMPLETE.
+  - text: |
+      <event topic="forge.report.done">
+      status: "BLOCKED"
+      report_path: "docs/reports/2026-07-30-pf-u1-fail-close-manager-report.md"
+      plan_key: "pf-u1-fail-close"
+      </event>
+    hat: pf-reporter
+  - text: |
+      <event topic="LOOP_COMPLETE">
+      </event>
+    hat: pf-reporter
+
+expected:
+  iterations: 10
+  # `forge.plan.blocked` is published via `EventBus::publish`
+  # directly from the fail-close detector; it never lands in
+  # the JSONL stream the runner reads, so `seen_topics` (which
+  # only counts JSONL-accepted events) does NOT include it.
+  # The pre-fix symptom was that the reporter never received
+  # the blocked signal because the topic name did not match
+  # its subscription — here the reporter's `forge.report.done`
+  # IS admitted, which proves the fail-close emit reached it
+  # via the bus's `with_target("reporter")` route.
+  events:
+    - topic: forge.plan.inspected
+    - topic: forge.plan.ready
+    - topic: forge.concurrency.approved
+    - topic: forge.worktrees.ready
+    - topic: forge.exec.development.done
+    - topic: forge.report.done
+    - topic: LOOP_COMPLETE
+  absent_events:
+    - topic: plan.blocked
+  completion: true

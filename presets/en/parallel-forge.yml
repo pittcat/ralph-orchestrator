@@ -1112,6 +1112,12 @@ hats:
       - `forge.plan.blocked` / `work.failed`：`context_artifact_path`、
         `forge_artifact_root`、`plan_key`、`reason`、`plan_path`
 
+      若 trigger 是 `forge.plan.blocked` 且 payload 缺 `plan_key` /
+      `context_artifact_path`，从 `.ralph/forge/` 下唯一子目录名解析
+      `plan_key`，再读对应 `worktree-map.yml` / `execution-plan.yml` 兜底；
+      仍无法解析时，报告写「信息缺失，无法确认」并把 `status=BLOCKED`、
+      `final_audit=BLOCKED`。
+
       再读 trigger/projection 指向的完整 artifact：
       - `<forge_artifact_root>/development-plan.md`、`execution-plan.yml`
       - `units/*-completion.md`、`reviews/summary.md`（若存在）
@@ -1137,7 +1143,14 @@ hats:
       ### 步骤 4 — Confirm & emit
 
       1. `test -f` 报告路径；记下同一 `report_path`。
-      2. emit `forge.report.done`（`report_path`、`status`、`final_audit`、`plan_key`）。
+      2. 先 `ralph emit forge.report.done --policy-check`（payload 含
+         `report_path`、`status`、`final_audit`、`plan_key`），通过后再去掉
+         `--policy-check` 真正写盘。若 `--policy-check` 失败或正式 emit 被
+         runtime 拒收（拒收原因如 `flow_unknown_emit`），**禁止** emit
+         `LOOP_COMPLETE` 或任何其他业务事件 — 跳过 `forge.report.done` 直接
+         发 `LOOP_COMPLETE` 必被 required_events 门禁拒收。把拒收原因与当前
+         trigger 上下文写入报告附录后停止本轮（遵守单业务事件预算 + Resume
+         规则，让 `ralph run` 自然结束）。
       3. 再 emit `LOOP_COMPLETE`（reporter 窄例外双终态），payload 必须含同一 `report_path`
         （与 schema required_fields 一致；禁止省略）。**runtime 门禁会强制比较**
         `LOOP_COMPLETE.report_path` 与最近 accepted `forge.report.done.report_path`；

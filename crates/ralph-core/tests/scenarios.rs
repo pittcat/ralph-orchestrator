@@ -1917,6 +1917,57 @@ fn test_parallel_forge_round_exhaustion_gate_runtime() {
     run_workflow_guard_scenario(yaml);
 }
 
+/// 2026-07-30-002 plan U1 (R3/S3): parallel-forge fail-close BDD.
+/// After the planning chain lands and `forge.exec.development.done`
+/// advances to `development_loop`, three empty turns trip the
+/// fail-close detector. The runtime must (a) publish the
+/// preset-derived blocked topic `forge.plan.blocked` (not the
+/// legacy `plan.blocked`), (b) advance `current_plan_step` to
+/// `report` and append a flow-authority snapshot, so (c) the
+/// reporter's `forge.report.done` clears FlowStepScope and the
+/// loop closes via `LOOP_COMPLETE`.
+///
+/// This test calls `run_scenario_with_snapshots` directly (not
+/// the `run_workflow_guard_scenario` wrapper) so it can read
+/// `.ralph/flow-authority.jsonl` post-loop and assert the
+/// escape snapshot was written.
+#[test]
+fn test_parallel_forge_fail_close_runtime() {
+    let yaml = load_scenario("tests/scenarios/parallel_forge_fail_close_runtime.yml");
+    let temp_dir = run_scenario_with_snapshots(&yaml, |config, yaml| {
+        apply_yaml_hats(yaml, config);
+        if !yaml.config.mechanism.is_null() {
+            config.mechanism = serde_yaml::from_value(yaml.config.mechanism.clone())
+                .unwrap_or_else(|e| {
+                    panic!("{}: failed to parse config.mechanism: {e}", yaml.name);
+                });
+        }
+        if !yaml.config.event_loop.is_null() {
+            config.event_loop = serde_yaml::from_value(yaml.config.event_loop.clone()).unwrap();
+        }
+        config.normalize();
+    });
+    let ledger = temp_dir.path().join(".ralph/flow-authority.jsonl");
+    let contents = std::fs::read_to_string(&ledger).unwrap_or_default();
+    let last_forge_blocked = contents
+        .lines()
+        .rev()
+        .find(|line| {
+            let v: serde_json::Value = serde_json::from_str(line).unwrap_or_default();
+            v.get("topic").and_then(|t| t.as_str()) == Some("forge.plan.blocked")
+        })
+        .expect(
+            "expected a flow-authority snapshot with topic=forge.plan.blocked (fail-close escape \
+             advance); none found in ledger",
+        );
+    let snap: serde_json::Value = serde_json::from_str(last_forge_blocked).unwrap();
+    assert_eq!(
+        snap.get("step").and_then(|s| s.as_str()),
+        Some("report"),
+        "expected the fail-close escape to advance current_plan_step to report; got {snap}",
+    );
+}
+
 #[test]
 fn test_review_passed_while_wave_open() {
     let yaml = load_scenario("tests/scenarios/flow_reliability/review_passed_while_wave_open.yml");

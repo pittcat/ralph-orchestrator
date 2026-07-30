@@ -24,6 +24,9 @@ mod drift_integration;
 mod enrich_kind_wiring;
 mod ephemeral_isolation_integration;
 mod event_filter;
+// 2026-07-30-002 plan U1 (R1/R2): fail-close blocked-topic
+// derivation + escape step resolution.
+mod fail_close_flow_authority;
 mod event_policy;
 mod execution_contract;
 mod execution_contract_commit_boundary;

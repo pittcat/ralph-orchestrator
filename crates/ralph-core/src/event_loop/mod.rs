@@ -9312,12 +9312,10 @@ impl EventLoop {
             // 2026-07-28-001 plan U3: an empty-activation
             // turn never has a staged over-emit recovery,
             // so no settlement is needed here.
-            run_stall_detector_on_state(
-                &mut self.state,
-                &self.config.event_loop.progress_steward,
-                &self.registry,
-                &mut self.bus,
-            );
+            // 2026-07-30-002 plan U1 (R1/D4): route through
+            // the wrapper so the fail-close emit also advances
+            // the flow step + appends the snapshot.
+            self.run_stall_detector_with_authority_advance();
             return Ok(ProcessedEvents {
                 had_events: false,
                 had_raw_events: false,
@@ -12674,12 +12672,10 @@ impl EventLoop {
         // have run so it reflects the *post-validation* state
         // (a turn that only produced rejections is a
         // no-progress turn, not a turn that advanced).
-        run_stall_detector_on_state(
-            &mut self.state,
-            &self.config.event_loop.progress_steward,
-            &self.registry,
-            &mut self.bus,
-        );
+        // 2026-07-30-002 plan U1 (R1/D4): route through the
+        // wrapper so the fail-close emit also advances the
+        // flow step + appends the snapshot.
+        self.run_stall_detector_with_authority_advance();
         // --- End U5 stall detection ---
 
         // 2026-07-01-001 plan U6: capture the most recent
@@ -14279,6 +14275,41 @@ impl EventLoop {
     /// the current step, so they read the same authority the
     /// resident EventLoop holds. Rejected events never reach this
     /// method, so the ledger only records accepted transitions.
+    /// 2026-07-30-002 plan U1 (R1/D4): wrapper that calls
+    /// the free `run_stall_detector_on_state` with the
+    /// preset-derived blocked topic and, on a real fail-close
+    /// emit, advances `current_plan_step` to the first
+    /// forward step that accepts the topic and persists a
+    /// flow-authority snapshot. Both call sites in
+    /// `process_parse_result` (empty-turn early return and
+    /// post-validation tail) route through here so the
+    /// escape advance cannot diverge.
+    fn run_stall_detector_with_authority_advance(&mut self) {
+        let blocked_topic = derive_blocked_topic(&self.config);
+        let fired = run_stall_detector_on_state(
+            &mut self.state,
+            &self.config.event_loop.progress_steward,
+            &self.registry,
+            &mut self.bus,
+            &blocked_topic,
+        );
+        if !fired {
+            return;
+        }
+        if let Some(next) =
+            resolve_escape_step(&self.config, &self.current_plan_step, &blocked_topic)
+        {
+            self.current_plan_step = next;
+        }
+        // Mirror `apply_phase_authority_on_accepted`: the
+        // ledger must always record the snapshot even when
+        // no forward step accepts the topic, so restart /
+        // CLI `--policy-check` see the same view the
+        // resident EventLoop holds (the accept path writes
+        // the same shape for accepted business topics).
+        self.append_flow_authority_snapshot(&blocked_topic);
+    }
+
     fn append_flow_authority_snapshot(&self, topic: &str) {
         use std::io::Write;
         let path = std::path::Path::new(&self.config.core.workspace_root)
@@ -14545,12 +14576,23 @@ pub struct UserPrompt {
 /// steward hat to the preset, or (b) the runtime escalates
 /// to `plan.blocked` via the U5 escalation branch. The
 /// runtime never silently dies.
+///
+/// 2026-07-30-002 plan U1 (R1/R2/D1/D3): the function now
+/// takes the preset's derived `blocked_topic` so the
+/// fail-close emit matches the preset's blocked protocol
+/// namespace (parallel-forge → `forge.plan.blocked`,
+/// ce-executor-supervisor → `plan.blocked`, undeclared
+/// flows fall back to `plan.blocked`). It returns `true`
+/// when a blocked topic was actually published this turn so
+/// the caller can run the escape step advance + flow-authority
+/// snapshot in a single place.
 fn run_stall_detector_on_state(
     state: &mut crate::event_loop::loop_state::LoopState,
     config_progress_steward: &crate::config::ProgressStewardConfig,
     registry: &crate::hat_registry::HatRegistry,
     bus: &mut ralph_proto::EventBus,
-) {
+    blocked_topic: &str,
+) -> bool {
     if state.stall_detector_had_events {
         // A business event was admitted in this turn — reset
         // the no-progress counter and clear the per-turn
@@ -14570,12 +14612,12 @@ fn run_stall_detector_on_state(
         }
         state.consecutive_steward_activations = 0;
         state.steward_woken_this_turn = false;
-        return;
+        return false;
     }
     if state.steward_woken_this_turn && config_progress_steward.enabled {
         // Self-protection: the steward was already woken in
         // this turn. Suppress recursive wakes (enabled path only).
-        return;
+        return false;
     }
     state.consecutive_no_progress_turns = state.consecutive_no_progress_turns.saturating_add(1);
     let max_iter = config_progress_steward.max_steward_iterations;
@@ -14589,21 +14631,27 @@ fn run_stall_detector_on_state(
                 consecutive_no_progress = state.consecutive_no_progress_turns,
                 max_iter,
                 "isolated loop: no progress for {} turns with progress_steward disabled — \
-                 emitting plan.blocked (fail-close)",
+                 emitting {blocked_topic} (fail-close)",
                 max_iter,
             );
             // 2026-07-24-005 plan U1: target is `reporter` (was
             // `shipper`); the shipper hat is removed from the
             // supervisor preset — reporter is the canonical
             // `plan.blocked` terminal owner.
+            //
+            // 2026-07-30-002 plan U1: topic is the preset's
+            // derived blocked namespace (e.g. `forge.plan.blocked`
+            // for parallel-forge), so the reporter's terminal
+            // emit clears FlowStepScope. See `derive_blocked_topic`.
             let blocked = ralph_proto::Event::new(
-                "plan.blocked",
+                blocked_topic,
                 "{\"reason\":\"loop_stalled_max_iterations\"}".to_string(),
             )
             .with_target(ralph_proto::HatId::new("reporter"));
             bus.publish(blocked);
             state.consecutive_no_progress_turns = 0;
             state.consecutive_steward_activations = 0;
+            return true;
         }
     } else if state.consecutive_no_progress_turns >= max_iter
         && state.consecutive_steward_activations < max_iter
@@ -14632,7 +14680,7 @@ fn run_stall_detector_on_state(
             // persists.
             state.consecutive_steward_activations =
                 state.consecutive_steward_activations.saturating_add(1);
-            return;
+            return false;
         }
         // First-time wake: auto-emit `loop.stalled` diagnostic
         // and increment the steward activation counter. The
@@ -14672,11 +14720,11 @@ fn run_stall_detector_on_state(
         warn!(
             consecutive_steward_activations = state.consecutive_steward_activations,
             max_iter,
-            "isolated loop: steward did not produce progress after {} wakes — emitting plan.blocked",
+            "isolated loop: steward did not produce progress after {} wakes — emitting {blocked_topic}",
             max_iter,
         );
         let blocked = ralph_proto::Event::new(
-            "plan.blocked",
+            blocked_topic,
             "{\"reason\":\"loop_stalled_max_iterations\"}".to_string(),
         )
         // 2026-06-16-001 review fix (CORR-P1-2): explicit
@@ -14700,6 +14748,10 @@ fn run_stall_detector_on_state(
         // or operator restart) starts from a clean state.
         state.consecutive_no_progress_turns = 0;
         state.consecutive_steward_activations = 0;
+        // 2026-07-30-002 plan U1: tell the caller we just
+        // fired the fail-close emit so it can advance the
+        // flow step + append the snapshot in one place.
+        return true;
     }
 
     // 2026-06-23 fix plan U3 (CB-6): typed rejection-stall
@@ -14727,6 +14779,9 @@ fn run_stall_detector_on_state(
         );
         bus.publish(stall_event);
     }
+    // 2026-07-30-002 plan U1: no blocked topic was fired this
+    // turn — caller skips the escape-step advance.
+    false
 }
 
 /// 2026-06-16-001 U3: freshness filter for `task.resume` injection.
@@ -14900,6 +14955,71 @@ fn self_is_state_idempotency_required(config: &RalphConfig) -> bool {
         .and_then(|m| m.flow.as_ref())
         .map(|f| f.state_idempotency == "required")
         .unwrap_or(false)
+}
+
+/// 2026-07-30-002 plan U1 (R2/D1): derive the topic the
+/// mechanism fail-close must publish. Scans the preset's
+/// declared flow for `*.plan.blocked` topics; exactly one
+/// distinct match wins (e.g. `forge.plan.blocked` for
+/// `parallel-forge`), zero or multiple distinct matches
+/// fall back to the legacy `plan.blocked` so unrelated
+/// presets are not disturbed. The check is intentionally
+/// narrow: only `== "plan.blocked"` or `ends_with(".plan.blocked")`
+/// qualify, so a generic `plan.blocked`-suffixed topic never
+/// wins by accident.
+pub(crate) fn derive_blocked_topic(config: &RalphConfig) -> String {
+    let Some(mechanism) = effective_mechanism_config(config) else {
+        return "plan.blocked".to_string();
+    };
+    let Some(flow) = mechanism.flow.as_ref() else {
+        return "plan.blocked".to_string();
+    };
+    let mut matches: std::collections::BTreeSet<&str> = std::collections::BTreeSet::new();
+    for step in &flow.steps {
+        for topic in &step.allowed_emits {
+            if topic == "plan.blocked" || topic.ends_with(".plan.blocked") {
+                matches.insert(topic.as_str());
+                if matches.len() > 1 {
+                    return "plan.blocked".to_string();
+                }
+            }
+        }
+    }
+    if matches.len() == 1 {
+        matches.into_iter().next().unwrap().to_string()
+    } else {
+        "plan.blocked".to_string()
+    }
+}
+
+/// 2026-07-30-002 plan U1 (R1/D3): forward-only escape step
+/// resolution. Given the current step and a blocked topic,
+/// return the FIRST forward step whose `on` or `on_any_of`
+/// accepts the topic. Returns `None` when (a) the flow has
+/// no declared entry, (b) the current step is not found,
+/// (c) no forward step accepts the topic. The helper is
+/// intentionally a one-shot escape: once `current_plan_step`
+/// has advanced, no second jump is performed.
+pub(crate) fn resolve_escape_step(
+    config: &RalphConfig,
+    current: &str,
+    topic: &str,
+) -> Option<String> {
+    let mechanism = effective_mechanism_config(config)?;
+    let flow = mechanism.flow.as_ref()?;
+    let steps = &flow.steps;
+    let idx = steps.iter().position(|s| s.id == current)?;
+    for (j, candidate) in steps.iter().enumerate() {
+        if j <= idx {
+            continue;
+        }
+        let enters = candidate.on.as_deref() == Some(topic)
+            || candidate.on_any_of.iter().any(|t| t == topic);
+        if enters {
+            return Some(candidate.id.clone());
+        }
+    }
+    None
 }
 
 /// 2026-07-01-001 plan U6: extract the canonical step id
