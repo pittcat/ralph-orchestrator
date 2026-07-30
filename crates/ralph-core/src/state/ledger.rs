@@ -59,6 +59,8 @@ use std::path::{Path, PathBuf};
 use chrono::Utc;
 use tracing::{debug, warn};
 
+use crate::file_lock::FileLock;
+
 use super::commit::{Commit, CommitDelta};
 use super::snapshot::LedgerSnapshot;
 
@@ -482,6 +484,51 @@ impl StateLedger {
         // corruption would have already returned an error.
         let _ = last_good_line;
         Ok(snapshot)
+    }
+
+    /// Append an [`OutboxEntry`](crate::event_loop::accepted_transition::OutboxEntry)
+    /// to the durable transition outbox
+    /// (`.ralph/agent/accepted-transitions.jsonl`).
+    ///
+    /// U6 (plan 2026-07-30-004): this is the durability barrier the
+    /// Accepted Transition API writes through *before* publishing to
+    /// the event bus. The write is append-only and guarded by an
+    /// exclusive cross-process [`FileLock`] (the same pattern used by
+    /// `ActivationRegistry`), then `fsync`'d so the record is durable
+    /// before the caller proceeds to publish.
+    ///
+    /// On any error the outbox is left unchanged and the caller MUST
+    /// NOT publish the corresponding event (the Accepted Transition
+    /// API maps this to `TransitionError::CommitFailed`).
+    pub fn append_outbox(
+        &self,
+        entry: &crate::event_loop::accepted_transition::OutboxEntry,
+    ) -> Result<(), std::io::Error> {
+        use crate::event_loop::accepted_transition::OUTBOX_RELATIVE_PATH;
+        use std::io::Write;
+
+        let outbox_path = self.workspace.join(OUTBOX_RELATIVE_PATH);
+        if let Some(parent) = outbox_path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+
+        let lock = FileLock::new(&outbox_path)?;
+        let _guard = lock.exclusive()?;
+
+        let mut file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&outbox_path)?;
+        let mut line = serde_json::to_string(entry).map_err(|e| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("outbox serialize failed: {e}"),
+            )
+        })?;
+        line.push('\n');
+        file.write_all(line.as_bytes())?;
+        file.sync_all()?;
+        Ok(())
     }
 }
 

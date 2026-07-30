@@ -3,6 +3,10 @@
 //! The event loop coordinates the execution of hats via pub/sub messaging.
 
 pub mod accepted_event;
+// U6 (plan 2026-07-30-004): the Accepted Transition API — the single,
+// atomic entry point for all business state changes. Validates
+// pre-commit, writes a durable outbox entry, then publishes to the bus.
+pub mod accepted_transition;
 pub mod loop_state;
 pub mod plan_blocked_reason;
 pub mod rejection;
@@ -81,6 +85,8 @@ pub mod lifecycle;
 // U5a: EventLoop 生命周期相关 free function SSOT 转发。
 // impl EventLoop 方法留到 U5b-U5e 阶段。
 pub use lifecycle::build_state_ledger_from_env;
+// U6 (plan 2026-07-30-004): Accepted Transition API re-exports.
+pub use accepted_transition::{AcceptedTransition, OutboxEntry, TransitionError};
 pub mod policy;
 pub mod process;
 pub mod prompt;
