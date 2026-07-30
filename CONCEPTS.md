@@ -24,6 +24,18 @@ A hat modified tracked files despite its read-only or tool-restriction contract.
 
 一种跨 hat 或 hat 与 sub-agent 的交接原则：完整结果、可恢复状态、证据和关键决策依据优先写入当前 workspace/worktree 的 `.ralph/` 业务 artifact，消息与事件只传递短状态、摘要、路径、必要身份和路由字段。Ralph 的内部 ledger 不属于可供 hat 自定义读写的业务 artifact。
 
+### Effective Activation Contract
+
+Orchestrator 在最终 resolved config、当前 flow step、hat、trigger event 与已接纳状态之上编译并持久化的版本化执行契约。它是 Prompt、agent CLI、事件接纳、投影与恢复共同使用的权限和动作真相；任何 activation identity、revision 或 config fingerprint 不匹配都必须拒绝继续执行。
+
+### Accepted Transition
+
+业务事件被正式接纳时的唯一状态变化边界：先完成契约、schema、flow、artifact 与投影准备校验，再原子写入可恢复的 transition receipt，随后幂等 materialize task/progress/authority 并发布事件。Reject 不产生业务副作用；commit 后崩溃由 receipt replay 补齐。
+
+### Recovery Intent
+
+可恢复拒收产生的结构化修复责任，至少绑定 activation lineage、contract revision、稳定 reason、责任 hat、允许的修复 primitive、retry key 与剩余预算。它用于下一次 activation 的确定性恢复，不从自由文本诊断消息推断动作。
+
 ### follow-on loop
 
 跨两次独立 `ralph run` 的串联：第一环终态成功且交接校验通过后，再启动第二环（另一 preset/config）。与同一 preset 内的 hat 链、以及 `ce-executor-pipeline-loop` 的 review/fix 环不同。近亲行为是 worktree 成功后的 `auto_merge → merge-loop` spawn。
@@ -124,5 +136,4 @@ Python，**不改 Rust**（共享 probe 可同时带 `--prompt-file` 与 `--plan
 ### E2E 沙箱目录
 
 Operator 指定的、用本仓编译出的 `ralph` 对真实 plan 手跑 preset 的可写沙箱（典型为独立 sibling 仓）。**不是**本仓 `crates/ralph-e2e` 测试 harness。
-
 
