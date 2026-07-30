@@ -503,6 +503,15 @@ impl TestRunner {
                             .collect(),
                     ),
                 ),
+                // U13: `mock-cli` accepts no prompt argument. Without this, the
+                // custom backend defaults to `prompt_mode: arg` and ralph appends
+                // `-p <prompt>`, which clap rejects — leaving the backend silent
+                // (empty response, 0 iterations). Passing the prompt via stdin
+                // (which mock-cli ignores) keeps the replay deterministic.
+                (
+                    serde_yaml::Value::String("prompt_mode".to_string()),
+                    serde_yaml::Value::String("stdin".to_string()),
+                ),
             ]);
 
             map.insert(

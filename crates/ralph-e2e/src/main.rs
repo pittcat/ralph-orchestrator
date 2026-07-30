@@ -56,6 +56,8 @@ use ralph_e2e::{
     MemorySearchScenario,
     MockConfig,
     MultiIterScenario,
+    // Tier 9: Parallel Forge (mock cassette)
+    ParallelForgeDispatchContractScenario,
     ReportFormat as LibReportFormat,
     ReportWriter,
     RunConfig,
@@ -250,6 +252,8 @@ fn get_all_scenarios() -> Vec<Box<dyn TestScenario>> {
         Box::new(MaxIterationsScenario::new()),
         Box::new(AuthFailureScenario::new()),
         Box::new(BackendUnavailableScenario::new()),
+        // Tier 9: Parallel Forge (U13, mock cassette replay)
+        Box::new(ParallelForgeDispatchContractScenario::new()),
     ]
 }
 

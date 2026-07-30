@@ -91,6 +91,8 @@ pub use crate::scenarios::{
     MemoryRapidWriteScenario,
     MemorySearchScenario,
     MultiIterScenario,
+    // Tier 9: Parallel Forge (U13, mock cassette)
+    ParallelForgeDispatchContractScenario,
     ScenarioError,
     SingleIterScenario,
     // Tier 4: Capabilities (backend-agnostic)
