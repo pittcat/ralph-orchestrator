@@ -6,7 +6,7 @@
   },
   {
     "name": "ce-executor-pipeline",
-    "description": "Ralph primary CE executor: linear single-chain plan-driven execution with TDD executor (subagents internal), 6 serial dimension reviewers, synthesized review, fix planner, fix, alignment, and final report; evidence-gated fail + rerun reuse guidance (plan 2026-07-29-001)",
+    "description": "Ralph primary CE executor: linear single-chain plan-driven execution with TDD executor (subagents internal), 6 serial dimension reviewers, synthesized review, fix planner, fix, alignment, and final report; evidence-gated success + fail — done/failed-symmetric precheck gates plus structural consistency guards (plan 2026-07-29-001 / 2026-07-30)",
     "category": "development"
   },
   {
