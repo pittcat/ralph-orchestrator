@@ -84,6 +84,12 @@ ralph tools task show <task-id> [--format table|json|quiet]
 - Within the same loop, only the task's owner hat (or any hat listed in
   `tasks.coordinator_hats` in `ralph.yml`) may mutate it. An executor
   hat cannot start a reviewer hat's task.
+- `tasks.coordinator_hats` membership grants **lifecycle mutation rights**
+  for coordination (e.g. closing another hat's task); the prompt's
+  `[read-only]` marker indicates **execution-ability** — i.e. whether
+  this hat should *run* the task. A coordinator sees another hat's
+  task marked `[read-only]` because it is not the one that should
+  execute it, even though it may still mutate it.
 - Legacy tasks with no `loop_id` and no `owner_hat_id` are **not
   mutable** from an agent context. Recreate them via `task add` or
   `task ensure` so they pick up the current loop/owner.
