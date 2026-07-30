@@ -8,6 +8,13 @@ execution: code
 product_contract_source: ce-plan-bootstrap
 plan_depth: deep
 deepened: 2026-07-30
+status: ready
+prerequisites:
+  - id: 003-fix-coordinator-hat-task-actionability
+    plan: docs/plans/2026-07-30-003-fix-coordinator-hat-task-actionability-plan.md
+    status: merged
+    merged_commit: 202b14d1
+    note: "003 已合入 main，coordinator hat task prompt actionability 语义就位；004 复用其 owner-only 行为，不重复实现，也不改变 lifecycle ACL。"
 origin:
   - docs/plans/2026-07-30-003-fix-coordinator-hat-task-actionability-plan.md
   - docs/report/2026-07-30-parallel-forge-primary-20260730-002911-diagnosis.md
@@ -20,8 +27,9 @@ origin:
 
 **READY**
 
-- **代码基线：** `pittcat-dev@52394257`。
-- **前置依赖：** `docs/plans/2026-07-30-003-fix-coordinator-hat-task-actionability-plan.md` 必须先实施并通过其 Definition of Done。003 只修 coordinator task prompt actionability；本计划不重复实现，也不改变 lifecycle ACL。
+- **代码基线：** `pittcat-dev@52394257`(003 合入后的最新基线,commit `202b14d1`)。
+- **前置依赖：** ✅ `003` 已合入(`202b14d1 merge: coordinator hat task actionability fix`),coordinator hat task prompt actionability 语义已就位。003 只修 prompt 侧的 owner 判定；本计划在 U3/U4 复用其 owner-only 行为,不重复实现,也不改变 lifecycle ACL。
+- **可开工性：** READY。所有进入实施路径的关键技术决策置信度均 ≥ 0.85,无悬挂 blocker;U1 可立即启动。
 - **调查范围：** resolved config/overlay/normalize、hat/flow/schema/execution-contract 声明、prompt task/action 注入、agent CLI command policy、统一 validation pipeline、state projector、flow authority、phase authority、precheck/retry/correction、mechanism synthetic events、Parallel Forge artifact/task/wave 拓扑、真实 EventLoop BDD、相关 Git 历史与 `docs/solutions/`。
 - **已执行验证：** 源码调用链、测试入口、preset/schema、StateLedger/outbox可复用边界、知识库与 2026-07-28 至 2026-07-30 Git 历史只读核对；完成 coherence/feasibility/scope/adversarial 文本审查并修正P0/P1问题；规划阶段未修改生产代码。
 - **尚未执行验证：** 按 `ce-plan` 的规划/实施分离约束，本计划未运行测试、构建、lint 或 runtime 实验。各 Unit 明确规定 Acceptance Red、targeted nextest 与最终全量门禁。
@@ -35,9 +43,9 @@ origin:
 - **目标：** 将配置、Prompt、CLI、事件验收、状态投影、authority、恢复与终态对“当前 activation 可以做什么”的判断收敛为同一份 Effective Activation Contract，并用唯一 Accepted Transition API 原子执行业务状态变化。
 - **首条完整迁移：** `builtin:parallel-forge` 从 planner artifact handoff 到 task DAG 投影、wave 派发、拒收恢复、fail-close 和 reporter 终态全部使用统一层。
 - **权威顺序：** operator 显式配置 → builtin preset → `RalphConfig` merge/normalize/desugar 后的 resolved config → Effective Contract 静态视图 → accepted flow/task/artifact 动态状态 → activation contract。
-- **执行纪律：** 严格串行 U1 → U14；每个 Unit 完成 Acceptance Red、最小实现、Refactor、集成、回归和独立提交后才进入下一个 Unit。
+- **执行纪律：** 严格串行 U1 → U15；每个 Unit 完成 Acceptance Red、最小实现、Refactor、集成、回归和独立提交后才进入下一个 Unit。
 - **停止条件：** 任一关键接口、调用链或 Red 失败原因与本计划 Evidence 冲突，或任何 Decision 置信度下降到 0.85 以下时，停止当前 Unit，更新 Evidence/Decision/后续 Unit 后再继续。
-- **尾部所有权：** U13只替换真实mock E2E占位链路，U14只同步文档并执行全量门禁；每个行为的Acceptance Red与生产Green归其owning Unit，不把测试债务推迟到尾部。
+- **尾部所有权：** U13只替换真实mock E2E占位链路，U14只同步已验证的 agent/operator skill 文档并执行全量门禁，U15只产出设计/使用说明 companion 文档（不修改 plan R/D 表，不替代 skill doc）；每个行为的Acceptance Red与生产Green归其owning Unit，不把测试债务推迟到尾部。
 
 ---
 
@@ -249,7 +257,7 @@ Ralph 必须对同一次 hat activation 给出唯一、可查询、可执行且�
 - BDD 必须使用真实 EventLoop runner，禁止 `run_scenario` stub。
 - preset/schema 拓扑变更必须同步 runtime、lint、BDD、config、manifest/index、文档与 operator skills。
 - agent skill guide 必须以可执行动作描述，不泄漏内部实现名或计划编号。
-- 003 当前在基线仅有计划提交；实施本计划前必须先验证 003 已落地。
+- 003 已在基线合入(`202b14d1`);U3/U4 复用其 owner-only prompt 行为,本计划不再阻塞于 003 落地。
 
 #### 1.15 已确认假设
 
@@ -428,7 +436,7 @@ Mechanism synthetic events 当前分散在 EventLoop/correction/precheck/stall �
 | D11 | recovery target | 总回 source；总回 coordinator；按 allowed fix primitive 选择责任 hat | contract capability 决定 target；无安全 target fail-close | E16、E22 | source 未必能修；coordinator 会越权 | 0.93 |
 | D12 | 其他 preset 兼容 | 同期迁移；strict重解释；行为镜像 passthrough adapter | 未迁移 builtin 的 adapter 只把现有 runtime decision 包成 contract result，不新增完整性约束或启动失败；strict completeness 仅对声明 explicit-migration 的 Parallel Forge 生效 | 用户范围、E3-E5、E18、E21 | 同期迁移超范围；strict重解释会改变旧 preset；完全跳过会保留 consumer 旁路 | 0.94 |
 | D13 | introspection 与跨进程身份 | 仅 Prompt；进程内 query；持久化 activation snapshot + inspect | StateLedger 持久化版本化 activation contract；CLI/Prompt/inspect读取同一 `activation_id/revision/digest`，stale fail-closed | E20、E22、E26-E27、E30 | 进程内对象无法约束独立 CLI；Prompt/日志不可做 parity 自动测试 | 0.97 |
-| D14 | 实施顺序 | 8个技术大包；按模块并行；14个原子纵切 | 采用§7.2的U1→U14：基线→typed config→activation→Prompt→CLI→outbox→delivery→synthetic→artifact→PF→recovery→lint→E2E→docs | E6-E31、文本审查 | 大包违反Unit原子性；并行会让后序依赖未验证 | 0.98 |
+| D14 | 实施顺序 | 8个技术大包；按模块并行；14个原子纵切 | 采用§7.2的U1→U15：基线→typed config→activation→Prompt→CLI→outbox→delivery→synthetic→artifact→PF→recovery→lint→E2E→docs→companion | E6-E31、文本审查 | 大包违反Unit原子性；并行会让后序依赖未验证 | 0.98 |
 | D15 | policy-check 与 apply 的关系 | precheck 成功永久授权；apply无条件全重算；revision token + apply复核 | policy-check 返回短生命周期 evaluation token；apply 校验 activation/revision/contract/artifact identity 并重跑会受外部状态影响的 gate | E5、E12、E26、E30 | 永久授权会 stale；完全忽略 precheck 无法证明同源且诊断漂移 | 0.94 |
 | D16 | accepted event 对外形态 | 原 candidate；artifact全量展开；runtime receipt summary | accepted `forge.plan.ready` 是 runtime-owned normalized summary，包含 artifact identity/digest、plan/wave/task counts 与 transition_id；完整 DAG 保存在 authoritative state，不复制回 agent payload | E12-E14、E27、E29 | 原 candidate 不可信；全量展开继续双写且膨胀 event | 0.95 |
 | D17 | E2E 边界 | 只做 core BDD；live API；mock cassette CLI E2E | 保留真实 EventLoop BDD，并补 `ralph-e2e --mock` 的跨进程主路径；不调用 live backend | E20、E28、项目 replay-first 规则 | core BDD无法发现 CLI持久化身份漂移；live API不稳定且不适合CI | 0.97 |
@@ -912,7 +920,7 @@ Inventory coverage Red → 补测试侧分类 → Green → 三 ingress characte
 
 #### 1. Unit 目标
 
-从所有 preset/profile/CLI mutation 完成后的最终 resolved config 编译并冻结静态契约，结合 current step/hat/accepted state 派生、持久化带 revision/digest 的 activation contract；Parallel Forge使用explicit view，其他builtin使用不新增约束的行为镜像legacy view。
+从所有 preset/profile/CLI mutation 完成后的最终 resolved config 编译并冻结静态契约，结合 current step/hat/accepted state 派生、持久化带 revision/digest 的 activation contract；Parallel Forge使用explicit view，其他builtin使用不新增约束的行为镜像passthrough view。
 
 #### 2. 对应需求与 Scenario
 
@@ -933,16 +941,16 @@ Inventory coverage Red → 补测试侧分类 → Green → 三 ingress characte
 
 - 输入：最终 resolved `RalphConfig`、HatRegistry、flow declaration、hat/step/trigger、task/authority snapshot。
 - 输出：planned-new `EffectiveExecutionContract`、持久化 `EffectiveActivationContract`、config fingerprint、revision、digest、capability provenance。
-- 错误：compile finding、unknown hat/step、consumer missing、legacy mapping ambiguity、replay fingerprint mismatch。
+- 错误：compile finding、unknown hat/step、consumer missing、passthrough mapping ambiguity、replay fingerprint mismatch。
 - 状态：compiler/query 为纯函数；activation 创建时通过 StateLedger 写入版本化 snapshot。
-- 不变量：operator explicit override 优先；legacy preset 行为不变。
+- 不变量：operator explicit override 优先；passthrough preset 行为不变。
 
 #### 6. 修改位置
 
 - 新增 `crates/ralph-core/src/execution_contract/mod.rs`：公开 compiler/query 类型边界。
 - 新增 `crates/ralph-core/src/execution_contract/compiler.rs`：normalized declarations 编译。
 - 新增 `crates/ralph-core/src/execution_contract/capability.rs`：五类 primitive 与 deny-wins。
-- 新增 `crates/ralph-core/src/execution_contract/legacy.rs`：未迁移 preset 的 compiled view。
+- 新增 `crates/ralph-core/src/execution_contract/passthrough.rs`：未迁移 preset 的 compiled view。
 - 新增 `crates/ralph-core/src/execution_contract/tests.rs`。
 - 修改 `crates/ralph-core/src/lib.rs`：导出模块。
 - 修改 `crates/ralph-core/src/config/ralph_config.rs`：normalize 完成后提供 compile 调用点，不新增用户字段。
@@ -965,7 +973,7 @@ U1 inventory；FlowDeclaration、HatConfig、ExecutionContractsConfig、EventPol
 - resolved config omission/operator override 产生预期 contract；
 - unknown hat/step fail-closed；
 - 相同输入 digest stable，动态 step/task version 改变 activation digest；
-- Parallel Forge 使用 explicit view；其他 builtin 使用 legacy view；
+- Parallel Forge 使用 explicit view；其他 builtin 使用 passthrough view；
 - inspect JSON 与 query 完全相等。
 - 命令：`cargo nextest run -p ralph-core --lib -- execution_contract`；`cargo nextest run -p ralph-cli --bin ralph -- inspect`。
 
@@ -978,17 +986,17 @@ inspect contract 测试先因 command/view 不存在失败；compiler tests 先�
 1. compiler 合并 hat/step/schema/task/projection。
 2. deny-wins。
 3. digest deterministic/field sensitivity。
-4. legacy view differential。
+4. passthrough view differential。
 5. compile finding 对 declaration/resolution/consumer 分类。
 6. 不 Mock config merge；CLI integration 走真实 resolved config。
 
 #### 12. Red → Green → Refactor 顺序
 
-Compiler shape Red → 最小 types/compiler → Green → deny/digest tests Red/Green → legacy differential Red/Green → inspect Red/Green → 抽 provenance/serialization。
+Compiler shape Red → 最小 types/compiler → Green → deny/digest tests Red/Green → passthrough differential Red/Green → inspect Red/Green → 抽 provenance/serialization。
 
 #### 13. 最小实现范围
 
-只实现 compile/query/introspection；不执行动作。必须处理 compile error、unknown identity、digest、legacy adapter。
+只实现 compile/query/introspection；不执行动作。必须处理 compile error、unknown identity、digest、passthrough adapter。
 
 #### 14. 集成验证
 
@@ -996,7 +1004,7 @@ Compiler shape Red → 最小 types/compiler → Green → deny/digest tests Red
 
 #### 15. 风险驱动测试
 
-- Differential：legacy preset。
+- Differential：passthrough preset。
 - Property-based 风格 deterministic permutations：mapping 顺序不改变 digest。
 - Mutation：删除 consumer registration 时 completeness test 必须 fail。
 
@@ -1015,11 +1023,11 @@ config resolution、preflight、preset parse/lint、inspect；因为 compiler �
 
 #### 18. 完成标准
 
-compiler/query/inspect/legacy differential 全绿；所有 compile failures 稳定；无新 YAML；contract digest 可对账；Unit 独立提交。
+compiler/query/inspect/passthrough differential 全绿；所有 compile failures 稳定；无新 YAML；contract digest 可对账；Unit 独立提交。
 
 #### 19. 停止条件
 
-现有声明不足以决定某关键 capability、legacy view 改变 structured behavior、或 digest 需要新依赖时停止，新增证据并重新决策。
+现有声明不足以决定某关键 capability、passthrough view 改变 structured behavior、或 digest 需要新依赖时停止，新增证据并重新决策。
 
 #### 20. 风险与注意事项
 
@@ -1358,7 +1366,7 @@ U1 inventory 中 business/control direct publish 为零；diagnostic 均分类�
 | 风险 | 触发 | 检测 | 缓解 | 剩余风险 |
 |---|---|---|---|---|
 | transition递归 | reject 又发业务 reject | recursion test | recovery 记录与业务 blocked分层 | postcommit escalation |
-| targeted bus 路由变化 | reporter 未激活 | BDD | contract target metadata | legacy preset differential |
+| targeted bus 路由变化 | reporter 未激活 | BDD | contract target metadata | passthrough preset differential |
 
 ### WP6. 将 forge.plan.ready 改为 artifact-first canonical transition
 
@@ -1579,14 +1587,14 @@ S12-S17、并发/restart/fault tests、lint/inspect回归绿；无独立 budget 
 
 #### 19. 停止条件
 
-现有 recovery ledger格式无法原子计数、safe target需要未声明 role metadata、或 completeness 对 legacy preset产生无法适配的 false positive时停止重决策。
+现有 recovery ledger格式无法原子计数、safe target需要未声明 role metadata、或 completeness 对 passthrough preset产生无法适配的 false positive时停止重决策。
 
 #### 20. 风险与注意事项
 
 | 风险 | 触发 | 检测 | 缓解 | 剩余风险 |
 |---|---|---|---|---|
 | 双计数迁移 | old/new都增 | exact count test | 删除旧 mutation owner | 旧 ledger无需兼容 |
-| lint误报 | legacy view | builtin strict suite | legacy consumer registry | 后续迁移逐步删除 |
+| lint误报 | passthrough view | builtin strict suite | passthrough consumer registry | 后续迁移逐步删除 |
 
 ### WP8. 完成 Parallel Forge 真实纵向验收、文档同步与全量门禁
 
@@ -1666,7 +1674,7 @@ U1-U7 全部已提交并通过各自 targeted 门禁。
 - State-machine：全 flow/recovery。
 - Idempotency/concurrency：artifact/retry。
 - Fault injection：artifact/persistence。
-- Differential：legacy presets。
+- Differential：passthrough presets。
 - Contract：skill docs/CLI help/schema。
 
 #### 16. 回归范围
@@ -1689,7 +1697,7 @@ S1-S25、trace matrix、mock E2E、preset三门禁、docs drift、全量、clipp
 
 #### 19. 停止条件
 
-任何场景需要新生产能力、legacy regression揭示实质行为改变、docs与CLI不一致、full serial fallback仍失败，停止并返回 owning Unit或修订计划。
+任何场景需要新生产能力、passthrough regression揭示实质行为改变、docs与CLI不一致、full serial fallback仍失败，停止并返回 owning Unit或修订计划。
 
 #### 20. 风险与注意事项
 
@@ -1706,7 +1714,7 @@ WP1-WP8 是按技术主题整理的证据与修改细目，不是执行单元。
 
 | Work Package | 新增绑定的 Requirement / Scenario / Decision / Evidence | 必须被§7.2 owning Unit纳入的 Red 与 Green | 明确修改边界 |
 |---|---|---|---|
-| WP2 | R25-R26；S19-S20；D1、D12-D13、D18-D20；E26-E27 | 使用 profile/CLI override 后的最终 config 编译；cold replay 恢复相同 revision；fingerprint drift/corruption fail-closed；legacy adapter保持现有decision | 除 `execution_contract/` 外，新增typed `ResolvedRuntimeConfig`并迁移所有production EventLoop constructors/callers，修改 `state/{commit,snapshot,ledger}.rs` 的activation registry；不得仅把对象留在EventLoop内存 |
+| WP2 | R25-R26；S19-S20；D1、D12-D13、D18-D20；E26-E27 | 使用 profile/CLI override 后的最终 config 编译；cold replay 恢复相同 revision；fingerprint drift/corruption fail-closed；passthrough adapter保持现有decision | 除 `execution_contract/` 外，新增typed `ResolvedRuntimeConfig`并迁移所有production EventLoop constructors/callers，修改 `state/{commit,snapshot,ledger}.rs` 的activation registry；不得仅把对象留在EventLoop内存 |
 | WP3 | R26、R29；S19、S24；D7、D13、D15；E27、E30 | 旧 activation CLI、错 hat/step、旧 evaluation token 必须真实命中目标逻辑并保持零副作用；human CLI 仍走 operator authority | agent env 只携带受控 activation locator/revision；task/wave/emit/Prompt 读取持久化 contract；policy-check 返回 token，apply 复核 revision/identity 与动态 gate |
 | WP4 | R27；S21-S22；D4；E27、E31 | 注入commit、materialize、publish、ack四类崩溃窗；restart以at-least-once delivery与consumer dedup幂等补齐 | StateLedger durable outbox是权威；TaskStore/progress/authority/activation是materialized consumers，禁止新增第二数据库 |
 | WP5 | R10-R11；S15、S21；D5-D6；E8-E10、E19 | 每个 direct publish 调用归入四种 disposition；business/recovery direct publish归零；diagnostic/loop-control不触发flow | blocked recovery走outbox；非业务API显式typed，不能用topic猜分类 |
@@ -1946,7 +1954,7 @@ U2/U3 的 activation registry 固定为：
 
 #### Unit 10：完成 Parallel Forge explicit contract 与 plan handoff
 
-1. **目标：** `forge.plan.ready` reference→canonical tasks/non-empty ready wave，无legacy/bypass。  
+1. **目标：** `forge.plan.ready` reference→canonical tasks/non-empty ready wave，无passthrough/bypass。  
 2. **追踪：** R12-R15、R22、R31；S7、S10-S11；D8-D9、D16；E13-E14、E20、E29。  
 3. **结果：** runtime-owned summary、TaskStore与artifact一致；14-step每activation显式contract。  
 4. **基线：** agent双写unit_tasks，task dispatch fixture为空。  
@@ -1955,7 +1963,7 @@ U2/U3 的 activation registry 固定为：
 7. **依赖：** Unit7 materializer、Unit9 snapshot。  
 8. **禁止：** 其他preset explicit migration。  
 9. **验收：** non-empty ready_task_keys、identity idempotent/conflict、hat×step×5 capability matrix。  
-10. **Red：** reference-only事件缺unit_tasks失败、matrix出现legacy/bypass。  
+10. **Red：** reference-only事件缺unit_tasks失败、matrix出现passthrough/bypass。  
 11. **Unit：** canonical batch、summary、explicit consumer source。  
 12. **顺序：** payload Red→projection Green→matrix Red/Green→two-wave BDD Green。  
 13. **最小：** 仅Parallel Forge。  
@@ -1963,7 +1971,7 @@ U2/U3 的 activation registry 固定为：
 15. **风险：** Contract、Idempotency、State-machine。  
 16. **回归：** preset/schema parity、projector tasks。  
 17. **文件：** WP6 + planned test-only migration matrix fixture。  
-18. **完成：** agent不能写derived tasks；PF无legacy/DEFENSIVE_BYPASS。  
+18. **完成：** agent不能写derived tasks；PF无passthrough/DEFENSIVE_BYPASS。  
 19. **停止：** 任一hat capability来源不明确。  
 20. **风险：** manifest变成新DSL；它仅是test expected output，不进入runtime配置。
 
@@ -1994,23 +2002,23 @@ U2/U3 的 activation registry 固定为：
 
 1. **目标：** explicit migration声明无consumer启动失败，inspect精确呈现active contract/recovery。  
 2. **追踪：** R20-R21、R23、R31；S3、S16-S18、S20；D12-D13、D20；E18、E21-E22。  
-3. **结果：** PF strict；legacy builtin行为镜像且不新增失败。  
+3. **结果：** PF strict；passthrough builtin行为镜像且不新增失败。  
 4. **基线：** 装饰性配置曾静默通过；inspect无统一view。  
 5. **I/O：** compiled/runtime registry→findings/JSON。  
-6. **位置：** preset_lint、runtime_contract findings、inspect、legacy adapter。  
+6. **位置：** preset_lint、runtime_contract findings、inspect、passthrough adapter。  
 7. **依赖：** Unit10 PF matrix、Unit11 recovery view。  
 8. **禁止：** 改其他preset行为/YAML。  
-9. **验收：** explicit consumer缺失fail；legacy differential；inspect与CLI/resident相等。  
-10. **Red：** dead declaration仍pass或legacy新增startup failure。  
-11. **Unit：** completeness registry、legacy mirror、JSON provenance。  
-12. **顺序：** lint Red/Green→inspect Red/Green→legacy differential Red/Green。  
+9. **验收：** explicit consumer缺失fail；passthrough differential；inspect与CLI/resident相等。  
+10. **Red：** dead declaration仍pass或passthrough新增startup failure。  
+11. **Unit：** completeness registry、passthrough mirror、JSON provenance。  
+12. **顺序：** lint Red/Green→inspect Red/Green→passthrough differential Red/Green。  
 13. **最小：** 只审计/查询。  
 14. **集成：** preset_lint、presets、inspect tests。  
 15. **风险：** Differential、Mutation of consumer registry。  
 16. **回归：** 全builtin structured tests。  
 17. **文件：** WP2/WP7 lint/inspect files。  
-18. **完成：** strict只作用explicit PF，legacy无行为漂移。  
-19. **停止：** legacy adapter改变既有decision。  
+18. **完成：** strict只作用explicit PF，passthrough无行为漂移。  
+19. **停止：** passthrough adapter改变既有decision。  
 20. **风险：** false positive；scope marker隔离。
 
 #### Unit 13：替换 Parallel Forge mock E2E 占位链路
@@ -2059,6 +2067,38 @@ U2/U3 的 activation registry 固定为：
 19. **停止：** 任一验证揭示生产缺口即修订计划与owning Unit，不能在本Unit偷修。  
 20. **风险：** 全量flake；仅按仓库规则使用serial fallback判真伪。
 
+#### Unit 15：产出 execution-contract 设计说明与使用说明 companion 文档
+
+1. **目标：** 在 U14 闭合全部生产行为与最终门禁后，落地两份独立、通俗易懂、面向读者而非实施者的 companion 文档：`docs/explanation/execution-contract-design.md`（设计说明：为什么要有统一 contract 层、解决什么根因、为什么分 explicit / passthrough 两视图、为什么 Parallel Forge 是首条迁移、安全/性能/兼容 trade-off）与 `docs/explanation/execution-contract-usage.md`（使用说明：operator/agent 如何查询 activation contract、读 inspect 输出、对账 Recovery Intent、下游消费方如何适配 `forge.plan.ready` 新 payload、新 preset 作者如何在 explicit / passthrough 之间选择）。两份文档必须**独立可读**，不依赖读者先读 004 plan 全文，但需要与 plan 的 R/D/E 引用一致。
+2. **追踪：** R21、R24；S3、S16-S18；D12-D13；E20-E22。
+3. **结果：** 普通工程师用 30 分钟读完两份文档能回答"它是什么 / 为什么有 / 怎么用 / 出错时去哪查"。
+4. **基线：** 004 plan 全是 R/D/E 表格与 Unit 列表，**缺乏面向读者的解释层**；本 Unit 补足该 gap。
+5. **I/O：** 已落地的 contract 类型、capability matrix、inspect 输出格式、Recovery Intent schema、forge.plan.ready payload 收→canonical summary 的 diff → 两份 markdown 文档。
+6. **位置：**
+   - 新增 `docs/explanation/execution-contract-design.md`：覆盖"问题陈述 → 设计原则 → 两视图分工 → 关键 trade-off → 与状态机/ledger/recovery 的关系 → 已知限制 → 后续迁移路径"。
+   - 新增 `docs/explanation/execution-contract-usage.md`：覆盖"operator 查询路径（`ralph inspect`/CLI flag/JSON shape）→ agent 视角（哪份 skill doc 读、capability matrix 怎么读、deny 怎么解读）→ 下游消费者（如何订阅 `forge.plan.ready` 新 payload、如何对账 artifact identity 与 digest）→ 常见诊断路径（stale contract / capability denial / Recovery Intent / budget exhausted）"。
+7. **依赖：** U12 完成 inspect 稳定 API；U14 完成全部 docs drift 与最终门禁。
+8. **禁止：** 引入新生产能力；不修改 plan R/D/E 表；不替换现有 skill/operator docs（companion 是补充，不替代）。
+9. **验收：**
+   - 两份文档均存在且文件大小 ≥ 4KB（避免"占位文档"）;
+   - 设计说明至少包含 5 个 mermaid 图：问题域架构图、两视图关系图、activation lifecycle 序列图、artifact handoff 时序图、Recovery Intent 状态图；
+   - 使用说明至少包含 3 个 walkthrough 示例（PF dispatcher activation、agent CLI capability denial、Recovery Intent 触发的 fixer 自环）；
+   - 文档中所有 `xxx.rs:NN-MM` / 字段名 / 命令名经 `sed -n` 反查源码或 `ralph <cmd> --help` 验证一致（按 CLAUDE.md skill 同步硬规则）;
+   - 与 `crates/ralph-core/data/*.md`（已同步的 agent skill）字段名/命令/示例对账，无冲突;
+   - `scripts/check-cli-doc-drift.sh` 通过（即使 companion 不直接被脚本检查，所引用的命令名也不应制造已知 drift）;
+   - 至少 2 名 reader review（不在本 Unit 自动覆盖范围内，仅作为停止条件触发器）。
+10. **Red：** 文档中引用了不存在的命令/字段/行号；或 walkthrough 复现真实 CLI 失败；或两份文档互相矛盾；或"为什么"段落与 004 plan R/D 决策表相悖。
+11. **Unit：** design.md 草稿、usage.md 草稿、mermaid 图、源码引用对账、reader review。
+12. **顺序：** outline Red → design.md 初稿 → mermaid 验证 → usage.md 初稿 → 反查源码与 --help → reader review（手动）→ Green → 链接进 CONCEPTS.md 或 README 索引。
+13. **最小：** 两份 markdown + 一条 README/CONCEPTS 链接。
+14. **集成：** 文档中所有命令示例用真实 `ralph <cmd> --help` 输出对账；所有行号引用 `sed -n 'NN,MMp' <file>` 反查。
+15. **风险：** Documentation drift（按 CLAUDE.md 硬规则这是阻断项）、与 skill doc 内容重复反而成第二真相源（必须以"引用"而非"复述"方式衔接 skill doc）、walkthrough 沦为伪示例。
+16. **回归：** 设计说明引用的 R/D/E 不漂移；使用说明引用的命令/字段不漂移；mermaid 块全绿。
+17. **文件：** `docs/explanation/execution-contract-design.md`、`docs/explanation/execution-contract-usage.md`、可能更新的 `docs/explanation/README.md` 或 `CONCEPTS.md` 索引行。
+18. **完成：** 两份文档 commit；mermaid 验证全绿；与 U14 全量门禁同步通过；独立提交。
+19. **停止：** 任一文档存在与已落地行为冲突；mermaid 验证失败；反查源码发现行号漂移；reader review 揭示结构性误解。
+20. **风险：** 文档被当 plan 实施契约（companion 是解释层而非 spec，结构变化不触发 plan 重审）；文档被翻译为复述 skill doc（违反 CLAUDE.md skill 去计划化硬规则——companion 同样不允许只针对 004 一次性的内容，应保持通用）。
+
 U6 的资源上限固定为 raw artifact 1 MiB、512 Units、4096 dependency edges；边界值与边界值+1都必须测试。该选择覆盖当前 builtin/fixtures，同时给现有50KB event记录上限留出 artifact 正文不进入 event 的数量级余量。若实施时发现仓库内已有合法样本超过任一值，必须按停止条件记录 Evidence、修订 D9，不能静默放宽。
 
 ---
@@ -2081,7 +2121,8 @@ flowchart TB
   U12[U12 Lint 与 inspect]
   U13[U13 Mock E2E]
   U14[U14 Docs 与最终门禁]
-  U1 --> U2 --> U3 --> U4 --> U5 --> U6 --> U7 --> U8 --> U9 --> U10 --> U11 --> U12 --> U13 --> U14
+  U15[U15 Companion 设计/使用说明]
+  U1 --> U2 --> U3 --> U4 --> U5 --> U6 --> U7 --> U8 --> U9 --> U10 --> U11 --> U12 --> U13 --> U14 --> U15
 ```
 
 - U2使用U1 caller/authority清单；U3使用U2 typed contract；U4/U5分别接Prompt与CLI，避免同时改两个consumer。
@@ -2114,6 +2155,8 @@ flowchart TB
 | U11 | `cargo nextest run -p ralph-core -- recovery` | durable intent/budget | 全绿 | 禁止进U12 |
 | U10-U13 | `cargo nextest run -p ralph-core --test scenarios -- parallel_forge` | 真 EventLoop全链 | 全绿 | 禁止完成 |
 | U13 | `cargo run -p ralph-e2e -- --mock` | 真实CLI跨进程 Parallel Forge cassette | 非空 ready wave 到 reporter terminal | 禁止进U14 |
+| U14 | `scripts/check-cli-doc-drift.sh` + `./scripts/run-tests.sh` | skill/CLI drift + 全量 | 全绿 | 禁止进U15 |
+| U15 | 两份 companion markdown + mermaid 验证 + 源码/--help 反查 | 设计/使用说明 | 全绿 | 禁止完成 |
 | Preset | `cargo nextest run -p ralph-cli --bin ralph -- preset_lint` | CLI lint | 全绿 | 禁止完成 |
 | Preset | `cargo nextest run -p ralph-core -- preset_lint` | core lint | 全绿 | 禁止完成 |
 | Preset | `cargo nextest run -p ralph-cli --bin ralph -- presets` | manifest/schema/embedded parity | 全绿 | 禁止完成 |
@@ -2144,7 +2187,7 @@ flowchart TB
 
 ### 10. 最终质量门禁
 
-- [ ] U1-U14 严格串行完成，每个 Unit 可独立提交。
+- [ ] U1-U15 严格串行完成，每个 Unit 可独立提交。
 - [ ] S1-S25 全部通过且可追踪到 Requirement/Test/Unit/Evidence。
 - [ ] Prompt、inspect、agent CLI、runtime 的 contract digest 与 allow/deny 一致。
 - [ ] 所有生产EventLoop构造入口只接受fallible `ResolvedRuntimeConfig`；并发activation locator不串权，existing-run ledger损坏硬失败。
@@ -2158,12 +2201,13 @@ flowchart TB
 - [ ] artifact realpath/symlink/regular-file/1MiB/512 Units/4096 edges 边界测试通过。
 - [ ] Recovery Intent、restart budget、并发计数、exhausted single blocked通过。
 - [ ] Parallel Forge真实 EventLoop成功/失败/恢复/终态与 `ralph-e2e --mock` CLI主路径通过。
-- [ ] legacy builtin structured differential无意外变化。
-- [ ] Parallel Forge migration matrix证明所有activation均为explicit contract，无legacy adapter、`DEFENSIVE_BYPASS`或旧authority决策。
+- [ ] passthrough builtin structured differential无意外变化。
+- [ ] Parallel Forge migration matrix证明所有activation均为explicit contract，无passthrough adapter、`DEFENSIVE_BYPASS`或旧authority决策。
 - [ ] preset/schema/manifest/index/runtime/lint/BDD/文档下游同步完成。
 - [ ] agent skill与operator preset skills同步，CLI docs drift通过。
 - [ ] 无新增skip/only/ignore，无弱化断言，无无解释snapshot/golden更新。
 - [ ] `cargo build`、`cargo clippy`、preset三门禁、`./scripts/run-tests.sh`全绿。
+- [ ] `docs/explanation/execution-contract-design.md` 与 `docs/explanation/execution-contract-usage.md` 存在，文件大小 ≥ 4KB，设计说明 ≥ 5 个 mermaid 图，使用说明 ≥ 3 个 walkthrough 示例；所有 `xxx.rs:NN-MM` / 命令名 / 字段名经 `sed -n` 与 `ralph <cmd> --help` 反查一致，mermaid 验证全绿。
 - [ ] 所有关键 Decision置信度仍≥0.85，无未处理BLOCKED。
 - [ ] 实际变更未迁移其他 builtin preset，未引入新DSL/外部依赖。
 
@@ -2186,7 +2230,7 @@ flowchart TB
 | 是否存在泛化任务描述 | 否 | 所有改动定位真实模块/职责/测试 |
 | 所有 Scenario 是否可追踪到测试和 Unit | 是 | §6矩阵与§7.1绑定表覆盖S1-S25 |
 | 所有关键决策是否有 Evidence | 是 | §3 Decision表 |
-| 计划是否可以严格串行执行 | 是 | U1→U14，交换理由见§8 |
+| 计划是否可以严格串行执行 | 是 | U1→U15，交换理由见§8 |
 
 ---
 
