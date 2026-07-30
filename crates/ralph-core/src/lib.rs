@@ -55,6 +55,7 @@ pub mod hat_lifecycle;
 mod hat_registry;
 mod hatless_ralph;
 pub mod hooks;
+pub mod parallel_forge_handoff;
 pub mod recovery_runtime;
 pub mod safe_display;
 pub mod shipper_reason;
