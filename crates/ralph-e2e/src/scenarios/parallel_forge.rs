@@ -52,6 +52,7 @@ fn workspace_cursor(workspace: &Path, backend: Backend) -> PathBuf {
         .join(format!("{}-{}.cursor", SCENARIO_ID, backend))
 }
 
+#[derive(Default)]
 pub struct ParallelForgeDispatchContractScenario;
 
 impl ParallelForgeDispatchContractScenario {

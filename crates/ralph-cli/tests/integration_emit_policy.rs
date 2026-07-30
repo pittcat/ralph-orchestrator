@@ -523,8 +523,7 @@ fn test_precheck_emit_writes_topic_and_triggered_from_effective_topic() {
     let events_contents = std::fs::read_to_string(&events_path).expect("read events.jsonl");
     let last_line = events_contents
         .lines()
-        .filter(|l| !l.trim().is_empty())
-        .last()
+        .rfind(|l| !l.trim().is_empty())
         .unwrap_or_else(|| {
             panic!("U1: events.jsonl must contain at least one line; got: {events_contents}")
         });
