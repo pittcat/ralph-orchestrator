@@ -263,6 +263,32 @@ fn check_task_mutation_authority(
         if legal_fix_unit_template {
             continue;
         }
+        // 2026-07-30: skip lines that mention the command only to forbid it.
+        // Without this exemption, instructions like
+        // "禁止 `ralph tools task add`" / "do not run `ralph tools task add`"
+        // (which are *defensive* red lines telling the agent NOT to mutate
+        // tasks) would be falsely flagged as `requires {command}`. The
+        // exemption is per-line so a genuine "you must run `ralph tools task
+        // add`" on the next line still fires the lint.
+        const FORBIDDEN_CONTEXT: &[&str] = &[
+            "禁止",
+            "不允许",
+            "不得",
+            "不要",
+            "do not",
+            "don't",
+            "must not",
+            "mustn't",
+            "never",
+            "forbidden",
+            "prohibited",
+            "denied",
+            "read-only",
+            "readonly",
+        ];
+        if FORBIDDEN_CONTEXT.iter().any(|kw| lower.contains(kw)) {
+            continue;
+        }
         let reason = if projection_owned {
             "projector_single_writer_conflict"
         } else if !is_coordinator {
@@ -790,6 +816,64 @@ hats:
                     && finding.message.contains("projector_single_writer_conflict")
             }),
             "actions_chain must count as projector ownership: {findings:?}"
+        );
+    }
+
+    /// 2026-07-30: lines that mention the mutation command only to FORBID
+    /// it must not fire the lint. Without this exemption, defensive red-line
+    /// instructions (e.g. parallel-forge `worktree` hat's "禁止
+    /// `ralph tools task add`") would be falsely flagged as
+    /// `requires {command}` even though their entire purpose is to prevent
+    /// the agent from running that command.
+    #[test]
+    fn task_mutation_authority_skips_forbidden_context_lines() {
+        let cases: &[(&str, &str)] = &[
+            ("chinese-jin-zhi", "禁止 `ralph tools task add`（owner 不是本 hat）"),
+            ("chinese-bu-yao", "不要运行 `ralph tools task ensure`"),
+            ("chinese-bu-de", "不得调用 ralph tools task add，task 由 dispatcher 管"),
+            ("english-do-not", "do not run `ralph tools task add`"),
+            ("english-must-not", "you must not call `ralph tools task ensure` here"),
+            ("english-never", "never invoke `ralph tools task add`"),
+            ("english-forbidden", "`ralph tools task add` is forbidden in this hat"),
+            ("english-denied", "`ralph tools task ensure` will be denied by the runtime ACL"),
+        ];
+        for (name, line) in cases {
+            let yaml = format!(
+                "tasks:\n  coordinator_hats: [other]\nhats:\n  worker:\n    instructions: |\n      {line}\n"
+            );
+            let findings = check_instructions_opac_with_preset(&yaml, "");
+            assert!(
+                !findings
+                    .iter()
+                    .any(|f| f.id == FINDING_INSTRUCTIONS_TASK_MUTATION_AUTHORITY_CONFLICT),
+                "{name}: forbidden-context line must NOT fire the lint; got: {findings:?}"
+            );
+        }
+    }
+
+    /// Companion to `task_mutation_authority_skips_forbidden_context_lines`:
+    /// a genuinely affirmative instruction on a separate line must still
+    /// fire even when a forbidden-context line appears elsewhere in the
+    /// same instructions block. The exemption is per-line, not per-block.
+    #[test]
+    fn task_mutation_authority_still_fires_when_other_line_requires_it() {
+        let yaml = r#"
+tasks:
+  coordinator_hats: [other]
+hats:
+  worker:
+    instructions: |
+      禁止 `ralph tools task close` — task 由 dispatcher 管。
+      Then run `ralph tools task add "Unit" --key k` to register your work.
+"#;
+        let findings = check_instructions_opac_with_preset(yaml, "");
+        assert!(
+            findings.iter().any(|f| {
+                f.id == FINDING_INSTRUCTIONS_TASK_MUTATION_AUTHORITY_CONFLICT
+                    && f.hat.as_deref() == Some("worker")
+                    && f.message.contains("non_coordinator_task_mutation")
+            }),
+            "affirmative `ralph tools task add` on a separate line must still fire; got: {findings:?}"
         );
     }
 

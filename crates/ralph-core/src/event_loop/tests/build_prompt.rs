@@ -672,3 +672,179 @@ hats:
         "shipper must still hold plan.complete after isolated ralph activation"
     );
 }
+
+#[test]
+fn ready_tasks_marks_non_mutable_tasks_read_only_for_non_coordinator_hat() {
+    // Regression (2026-07-30 parallel-forge worktree hang): a non-coordinator
+    // hat that can see tasks but cannot lifecycle-mutate any of them must
+    // see a `[read-only]` marker per task plus a "none actionable" header,
+    // so the agent does not call `ralph tools task start` on a task the
+    // runtime ACL will reject (which historically parked the activation
+    // until the no-progress watchdog killed the loop).
+    use crate::task::Task;
+    use crate::task_store::TaskStore;
+
+    let temp = tempfile::tempdir().unwrap();
+    let tasks_path = temp.path().join(".ralph/agent/tasks.jsonl");
+    std::fs::create_dir_all(tasks_path.parent().unwrap()).unwrap();
+
+    let mut store = TaskStore::load(&tasks_path).unwrap();
+    let task = Task::new("F1 impl".to_string(), 1).with_owner_hat(Some("executor".to_string()));
+    store.add(task);
+    store.save().unwrap();
+
+    let yaml = r#"
+event_loop:
+  execution_mode: isolated
+hats:
+  worktree:
+    name: "Worktree"
+    triggers: ["forge.concurrency.approved"]
+    publishes: ["forge.worktrees.ready"]
+    instructions: "Create worktrees."
+  executor:
+    name: "Executor"
+    triggers: ["exec.unit.ready"]
+    publishes: ["exec.unit.done"]
+    instructions: "Implement units."
+tasks:
+  enabled: true
+  coordinator_hats: []
+"#;
+    let mut config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
+    config.core.workspace_root = temp.path().to_path_buf();
+
+    let loop_context = crate::loop_context::LoopContext::primary(temp.path().to_path_buf());
+    let mut event_loop = EventLoop::with_context(config, loop_context);
+    event_loop.initialize("read-only marker test");
+
+    let prompt = event_loop
+        .build_prompt(&HatId::new("worktree"))
+        .expect("worktree prompt");
+
+    assert!(
+        prompt.contains("[read-only]"),
+        "non-coordinator hat must see [read-only] marker; got prompt:\n{}",
+        &prompt[..prompt.len().min(4000)]
+    );
+    assert!(
+        prompt.contains("none actionable for this hat"),
+        "non-coordinator hat with no mutable tasks must see 'none actionable' header; got prompt:\n{}",
+        &prompt[..prompt.len().min(4000)]
+    );
+}
+
+#[test]
+fn ready_tasks_no_read_only_marker_for_owner_hat() {
+    // The owner hat sees tasks without a [read-only] marker (it CAN mutate
+    // its own tasks), preserving the legacy actionable rendering.
+    use crate::task::Task;
+    use crate::task_store::TaskStore;
+
+    let temp = tempfile::tempdir().unwrap();
+    let tasks_path = temp.path().join(".ralph/agent/tasks.jsonl");
+    std::fs::create_dir_all(tasks_path.parent().unwrap()).unwrap();
+
+    let mut store = TaskStore::load(&tasks_path).unwrap();
+    let task = Task::new("F1 impl".to_string(), 1).with_owner_hat(Some("executor".to_string()));
+    store.add(task);
+    store.save().unwrap();
+
+    let yaml = r#"
+event_loop:
+  execution_mode: isolated
+hats:
+  executor:
+    name: "Executor"
+    triggers: ["exec.unit.ready"]
+    publishes: ["exec.unit.done"]
+    instructions: "Implement units."
+tasks:
+  enabled: true
+  coordinator_hats: []
+"#;
+    let mut config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
+    config.core.workspace_root = temp.path().to_path_buf();
+
+    let loop_context = crate::loop_context::LoopContext::primary(temp.path().to_path_buf());
+    let mut event_loop = EventLoop::with_context(config, loop_context);
+    event_loop.initialize("owner actionable test");
+
+    let prompt = event_loop
+        .build_prompt(&HatId::new("executor"))
+        .expect("executor prompt");
+
+    assert!(
+        prompt.contains("<ready-tasks>"),
+        "owner hat must still see the ready-tasks block; got prompt head:\n{}",
+        &prompt[..prompt.len().min(2000)]
+    );
+    assert!(
+        !prompt.contains("[read-only]"),
+        "owner hat must NOT see [read-only] marker on its own task"
+    );
+    assert!(
+        !prompt.contains("none actionable for this hat"),
+        "owner hat must NOT see the 'none actionable' header"
+    );
+}
+
+#[test]
+fn ready_tasks_no_read_only_marker_for_coordinator_hat() {
+    // Coordinators can lifecycle-mutate ANY task regardless of owner, so
+    // they must see actionable rendering (no read-only markers) even when
+    // the task owner is a different hat.
+    use crate::task::Task;
+    use crate::task_store::TaskStore;
+
+    let temp = tempfile::tempdir().unwrap();
+    let tasks_path = temp.path().join(".ralph/agent/tasks.jsonl");
+    std::fs::create_dir_all(tasks_path.parent().unwrap()).unwrap();
+
+    let mut store = TaskStore::load(&tasks_path).unwrap();
+    let task = Task::new("F1 impl".to_string(), 1).with_owner_hat(Some("executor".to_string()));
+    store.add(task);
+    store.save().unwrap();
+
+    let yaml = r#"
+event_loop:
+  execution_mode: isolated
+hats:
+  forge-dispatcher:
+    name: "Forge Dispatcher"
+    triggers: ["forge.worktrees.ready"]
+    publishes: ["exec.unit.ready"]
+    instructions: "Dispatch waves."
+  executor:
+    name: "Executor"
+    triggers: ["exec.unit.ready"]
+    publishes: ["exec.unit.done"]
+    instructions: "Implement units."
+tasks:
+  enabled: true
+  coordinator_hats: ["forge-dispatcher"]
+"#;
+    let mut config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
+    config.core.workspace_root = temp.path().to_path_buf();
+
+    let loop_context = crate::loop_context::LoopContext::primary(temp.path().to_path_buf());
+    let mut event_loop = EventLoop::with_context(config, loop_context);
+    event_loop.initialize("coordinator actionable test");
+
+    let prompt = event_loop
+        .build_prompt(&HatId::new("forge-dispatcher"))
+        .expect("dispatcher prompt");
+
+    assert!(
+        prompt.contains("<ready-tasks>"),
+        "coordinator must see the ready-tasks block"
+    );
+    assert!(
+        !prompt.contains("[read-only]"),
+        "coordinator must NOT see [read-only] marker (it can mutate any task)"
+    );
+    assert!(
+        !prompt.contains("none actionable for this hat"),
+        "coordinator must NOT see the 'none actionable' header"
+    );
+}

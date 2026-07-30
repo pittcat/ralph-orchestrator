@@ -489,6 +489,26 @@ hats:
 
       OPAC: `ralph-tools-opac`. Before emit: `ralph tools skill load ralph-tools-emit` then `--policy-check`.
 
+      ### Task visibility（红线）
+
+      本 hat **不在** `tasks.coordinator_hats` 中，所有 unit task 的
+      `owner_hat_id` 都是 `executor`。你可能会在 prompt 里看到
+      `<ready-tasks>` 列表（runtime 注入），但那些 task 对你
+      **只读可见，不可 mutate**。
+
+      **禁止**调用任何 task lifecycle mutation：
+
+      - 禁止 `ralph tools task start <id>` — 会被 runtime 拒（owner≠worktree）
+      - 禁止 `ralph tools task close <id>` — 同上
+      - 禁止 `ralph tools task fail <id>` / `ralph tools task reopen <id>` — 同上
+      - 禁止 `ralph tools task add` / `ralph tools task ensure` — 非 coordinator 拒绝
+
+      唯一允许的 task 命令是只读：`ralph tools task list` /
+      `ralph tools task show` / `ralph tools task ready`，且**仅用于
+      定位 unit 元数据**（例如对 `task_key` 反查 `unit_id`）。
+      撞 ACL（exit≠0 含 "owned by hat"）**不要重试**——继续按
+      Mission 走 worktree 创建，task 由 dispatcher / executor 管。
+
       ### Mission
       - On `forge.concurrency.approved`: create the integration
         branch (or reuse it) and emit `forge.worktrees.ready` with

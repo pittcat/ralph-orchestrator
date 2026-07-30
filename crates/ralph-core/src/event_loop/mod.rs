@@ -5072,7 +5072,7 @@ impl EventLoop {
                 let with_skills = self.prepend_auto_inject_skills(base_prompt, hat_id);
                 let with_scratchpad = self.prepend_scratchpad(with_skills, Some(hat_id));
                 let with_state_files = self.prepend_state_files(with_scratchpad);
-                let final_prompt = self.prepend_ready_tasks(with_state_files);
+                let final_prompt = self.prepend_ready_tasks(with_state_files, Some(hat_id));
                 // U7a (plan 2026-06-21-002): prepend the
                 // deterministic correction + resume blocks.  The
                 // queue lives on `LoopState::prompt_context` and
@@ -5366,7 +5366,7 @@ impl EventLoop {
                 let with_skills = self.prepend_auto_inject_skills(base_prompt, hat_id);
                 let with_scratchpad = self.prepend_scratchpad(with_skills, Some(hat_id));
                 let with_state_files = self.prepend_state_files(with_scratchpad);
-                let final_prompt = self.prepend_ready_tasks(with_state_files);
+                let final_prompt = self.prepend_ready_tasks(with_state_files, Some(hat_id));
                 // U7a (plan 2026-06-21-002): prepend deterministic
                 // correction + resume blocks.  No-op when the
                 // queue is empty.
@@ -5574,7 +5574,7 @@ impl EventLoop {
             let with_skills = self.prepend_auto_inject_skills(base_prompt, hat_id);
             let with_scratchpad = self.prepend_scratchpad(with_skills, Some(hat_id));
             let with_state_files = self.prepend_state_files(with_scratchpad);
-            let final_prompt = self.prepend_ready_tasks(with_state_files);
+            let final_prompt = self.prepend_ready_tasks(with_state_files, Some(hat_id));
             // U18: macro edge next hint — when `event_loop.macro_edge_next_hint.enabled`
             // is true, prepend a one-line `## NEXT ACTION` derived from the most recent
             // accepted business event payload's `next_hint` field (≤120 chars). When the
@@ -7043,7 +7043,14 @@ impl EventLoop {
     /// Loads the task store and formats ready (unblocked, open) tasks into
     /// a `<ready-tasks>` XML block. This saves the agent a tool call per
     /// iteration and puts tasks at the same prominence as the scratchpad.
-    fn prepend_ready_tasks(&self, prompt: String) -> String {
+    ///
+    /// When `hat_id` is provided, tasks the hat cannot lifecycle-mutate
+    /// (neither owner nor in `tasks.coordinator_hats`) are rendered with
+    /// a `[read-only]` marker so the agent does not attempt `task start`
+    /// on a task the runtime ACL will reject. Hats with no mutable task
+    /// in the entire ready set see a one-line "no actionable tasks" header
+    /// instead of an actionable-looking list.
+    fn prepend_ready_tasks(&self, prompt: String, hat_id: Option<&HatId>) -> String {
         if !self.config.tasks.enabled {
             return prompt;
         }
@@ -7087,20 +7094,54 @@ impl EventLoop {
         if ready.is_empty() && open.is_empty() {
             section.push_str("No open tasks. Create tasks with `ralph tools task add`.\n");
         } else {
-            section.push_str(&format!(
-                "## Tasks: {} ready, {} open, {} closed\n\n",
-                ready.len(),
-                open.len(),
-                closed_count
-            ));
+            // Compute ACL view: a task is "actionable" for `hat_id` iff the hat
+            // may lifecycle-mutate it (owner or in `tasks.coordinator_hats`).
+            // When the hat cannot mutate ANY ready task, we render a one-line
+            // "no actionable tasks" header so the agent does not start a task
+            // that the runtime ACL will reject (which historically parked the
+            // activation until the no-progress watchdog killed the loop).
+            let coordinator_hats: &[String] = &self.config.tasks.coordinator_hats;
+            let caller_hat_str: Option<&str> = hat_id.map(|h| h.as_str());
+            let is_actionable = |task: &crate::task::Task| -> bool {
+                match caller_hat_str {
+                    None => true, // no caller context (e.g. tests) — keep legacy
+                    Some(caller) => crate::task::can_hat_mutate_task_lifecycle(
+                        task,
+                        caller,
+                        coordinator_hats,
+                    ),
+                }
+            };
+            let any_actionable_ready = ready.iter().any(|t| is_actionable(t));
+            let header = if caller_hat_str.is_some() && !any_actionable_ready {
+                format!(
+                    "## Tasks: {} ready, {} open, {} closed — none actionable for this hat (all read-only)\n\n",
+                    ready.len(),
+                    open.len(),
+                    closed_count
+                )
+            } else {
+                format!(
+                    "## Tasks: {} ready, {} open, {} closed\n\n",
+                    ready.len(),
+                    open.len(),
+                    closed_count
+                )
+            };
+            section.push_str(&header);
             for task in &ready {
                 let status_icon = match task.status {
                     TaskStatus::Open => "[ ]",
                     TaskStatus::InProgress => "[~]",
                     _ => "[?]",
                 };
+                let ro_marker = if is_actionable(task) {
+                    ""
+                } else {
+                    " [read-only]"
+                };
                 section.push_str(&format!(
-                    "- {} [P{}] {} ({}){}\n",
+                    "- {} [P{}] {} ({}){}{}\n",
                     status_icon,
                     task.priority,
                     task.title,
@@ -7108,7 +7149,8 @@ impl EventLoop {
                     task.key
                         .as_deref()
                         .map(|key| format!(" — key: {key}"))
-                        .unwrap_or_default()
+                        .unwrap_or_default(),
+                    ro_marker
                 ));
             }
             // Show blocked tasks separately so agent knows they exist
@@ -7120,8 +7162,13 @@ impl EventLoop {
             if !blocked.is_empty() {
                 section.push_str("\nBlocked:\n");
                 for task in blocked {
+                    let ro_marker = if is_actionable(task) {
+                        ""
+                    } else {
+                        " [read-only]"
+                    };
                     section.push_str(&format!(
-                        "- [blocked] [P{}] {} ({}){} — blocked by: {}\n",
+                        "- [blocked] [P{}] {} ({}){} — blocked by: {}{}\n",
                         task.priority,
                         task.title,
                         task.id,
@@ -7129,7 +7176,8 @@ impl EventLoop {
                             .as_deref()
                             .map(|key| format!(" — key: {key}"))
                             .unwrap_or_default(),
-                        task.blocked_by.join(", ")
+                        task.blocked_by.join(", "),
+                        ro_marker
                     ));
                 }
             }
