@@ -238,6 +238,7 @@
 5. **timeout / partial 有业务可见出口**：supervisor 触发 partial / timeout 时必须通过 dispatcher 发 `plan.blocked` 或 `work.failed` 等业务可见事件；不得 silent-success 留在 supervisor 内部。✓ / ✗ + 列事件与 schema 字段
 6. **与 Intent 一致**：preset `event_loop.supervisor.enabled` 必须与 Intent.execution_model 一致;不一致按 `finding-rubric.md` 「Supervisor capability audit」 段 `preset.execution_model_intent_mismatch` 入 review 主表。✓ / ✗ + 字段值
 7. **wave consumer `concurrency > 1`**：每个 `triggers:` 含 `*.unit.ready` 的 hat 必须显式声明 `concurrency > 1`；缺省（=1）会被 wave detector 静默拒收（`SequentialTarget`），整个 batch 不会被分发。✓ / ✗ + 列出每个 wave consumer hat 的 `concurrency` 值
+8. **`slot_retry_budget > 0` 时 resume 协议已写清**：worker hat `instructions:` 必须要求「先盘点同一目录下已有成果与实测验收结果、只补缺口、禁止回退或重做、已有提交不等于成功」；消费 `*.wave.failed` 的 handler hat 必须把该事件表述为「自动重试已耗尽」而非「失败一次」。禁止复述注入块格式或把 `aggregate_timeout_secs` 手动乘以尝试次数。✓ / ✗ + 引用 `patterns.md`「Wave slot 自动重试」段
 
 任一问 ✗ → 必须改写或显式说明为何 supervisor 无法表达。完整 finding 默认 severity / confidence / aaf_question 见 `finding-rubric.md`「Supervisor capability audit」段。
 
@@ -247,7 +248,7 @@
 |---|---|---|---|
 | `single-chain`（默认 / 用户否认） | 必填（5 问全 ✓） | **N/A**（不得留空假装已答;不写 wave 字段、不写 dispatcher emit、不写 supervisor） | **N/A**（不得引入 `event_loop.supervisor.enabled`） |
 | `wave` | 必填（与 wave 同存） | 必填（7 问全 ✓ + 证据） | **N/A** |
-| `supervisor` | 必填（single-chain-first 默认也仍答,作为基线） | **N/A** | 必填（6 问全 ✓ + 证据） |
+| `supervisor` | 必填（single-chain-first 默认也仍答,作为基线） | **N/A** | 必填（8 问全 ✓ + 证据） |
 | `supervisor+wave` | 必填 | 必填 | 必填（三段并列;每段独立判定） |
 
 **N/A 写法**:勾选框标 `N/A` + ≤30 字理由（如「execution_model=single-chain,无 wave 拓扑」），**不得**留空 / 写「同上」 / 写「由 wave 段覆盖」。N/A 不是「跳过」而是「显式不适用」。

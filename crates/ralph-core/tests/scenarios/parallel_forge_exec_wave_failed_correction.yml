@@ -11,6 +11,13 @@
 # the production shape when a worker never answers: the coordinator
 # fails the wave on the aggregate deadline rather than waiting forever.
 #
+# Scope: this fixture covers the *downstream* of an already-exhausted
+# wave. In production `exec.wave.failed` is only injected after a slot
+# has spent its whole attempt budget, so the single failure event below
+# stands for "automatic retries are used up", not "failed once". The
+# attempt loop itself is not exercised here — no backend is started —
+# and is covered by the CLI supervisor integration tests instead.
+#
 # Uses run_workflow_guard_scenario (real EventLoop runner; not the stub).
 
 name: pf_exec_wave_failed_correction

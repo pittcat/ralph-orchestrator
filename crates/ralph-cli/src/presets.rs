@@ -1411,6 +1411,25 @@ mod tests {
         }
     }
 
+    /// Plan 2026-07-30-001 U4 / R4: the embedded parallel-forge preset
+    /// must give every executor slot three attempts in total, so a unit
+    /// that fails on its own is retried by a fresh process twice before
+    /// the wave-level failure path is used.
+    #[test]
+    fn parallel_forge_sets_three_total_executor_attempts() {
+        let preset = get_preset("parallel-forge").expect("parallel-forge preset");
+        let config = RalphConfig::parse_yaml(preset.content).expect("parallel-forge YAML parses");
+        let supervisor = &config.event_loop.supervisor;
+        assert!(
+            supervisor.enabled,
+            "parallel-forge dispatches through the supervisor"
+        );
+        assert_eq!(
+            supervisor.slot_retry_budget, 2,
+            "a retry budget of 2 means 3 total attempts per unit"
+        );
+    }
+
     /// Plan 2026-07-29-002 U2 / R2: the embedded parallel-forge
     /// preset must enable `completion_payload_match` on
     /// `forge.report.done` with `report_path` as the compared field.

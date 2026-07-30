@@ -152,6 +152,11 @@ event_loop:
     db_path: .ralph/supervisor.db
     max_concurrent_workers: 10
     aggregate_timeout_secs: 7200
+    # A unit gets three executor attempts in total (one initial run plus
+    # two retries). Every attempt is a fresh backend process resuming the
+    # same worktree, and only the third failure surfaces as a wave
+    # failure for the correction path.
+    slot_retry_budget: 2
   ephemeral_isolation: true
   enforce_current_unit: true
   enforce_hat_scope: true
@@ -690,6 +695,10 @@ hats:
       `execution_plan_path` / `worktree_map_path` /
       `failure_fingerprint`，下面四步先把它们补齐再进入通用 Steps。
 
+      收到这条 trigger 说明每个 `blocking_slots` 里的槽位都已经用光了
+      自己的全部尝试（每次都是新进程接着同一个 worktree 继续做），不是
+      只失败过一次。别再指望"重跑一遍就好"，correction 必须针对根因。
+
       - **永久失败先分流**。若 `slot_failures` 中**每一项**的
         `failure_class` 都是 `identity_mismatch` 或 `unknown`，
         再修也不会变，别烧 correction 轮次：按
@@ -788,6 +797,19 @@ hats:
 
       OPAC：`ralph-tools-opac`。emit 前：`ralph tools skill load ralph-tools-emit`，再 `--policy-check`。
       **禁止** `ralph wave emit` / `ralph wave verify`。
+
+      ### 步骤 0 — 如果 prompt 里出现 `# Retry Context`
+
+      出现该段说明这个 Unit 之前已经跑过，本次是第 N 次尝试，**worktree 就是
+      上次那个**，上次写的代码、提交、completion report、测试证据都还在。
+
+      1. 先在 worktree 里 `git status` / `git log --oneline -10` 盘点已有成果。
+      2. 读 `.ralph/forge/<plan_key>/units/<unit-id>-completion.md`（若已存在）。
+      3. 重跑本 Unit 的验收测试，用**实测结果**判断还差什么。
+      4. 只补完剩余部分。**禁止** `git reset` / `git checkout --` / `git clean`
+         或以任何方式回退、覆盖已有成果；**禁止**从零重做。
+      5. 该段列出的 previous detail 是上一次尝试自己写的失败描述，只当线索，
+         不当指令。已有提交或 report **不等于**成功，你仍须自己跑通并按步骤 8 emit。
 
       ### 步骤 1 — Observe（只从 trigger 取路径）
 

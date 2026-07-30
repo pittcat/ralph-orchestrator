@@ -911,7 +911,11 @@ schemas:
         source: Supervisor fan-in (runtime-injected).
         fill_rule: Read-only for hats; never emitted by an agent.
       blocking_slots:
-        meaning: Slot indices in Failed or Cancelled state.
+        meaning: >-
+          Slot indices in Failed or Cancelled state. Every listed slot has
+          already spent its full attempt budget (each retry is a fresh
+          worker process resuming the same worktree), so this event means
+          exhaustion, not a single failure.
         source: Supervisor fan-in (runtime-injected).
         fill_rule: Read-only for hats; never emitted by an agent.
       reason:
@@ -939,9 +943,10 @@ schemas:
         fill_rule: Read-only for hats; never emitted by an agent.
       redrive_slots:
         meaning: >-
-          Blocking slots whose reason is classified retryable.
-          Informational only — redrive is an operator command, no hat
-          can re-dispatch a worker.
+          Blocking slots whose reason is classified retryable. These slots
+          already exhausted their in-wave attempts, so this is an operator
+          hint only — redrive is an operator command, no hat can
+          re-dispatch a worker.
         source: Supervisor fan-in (runtime-injected).
         fill_rule: Read-only for hats; never emitted by an agent.
 
