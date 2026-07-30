@@ -159,18 +159,22 @@ U01 公共基础
 
 ## 10. Execution Waves
 
+> **编号规则**：本节标题「Wave N」与 `execution-plan.yml` 的
+> `execution_wave: N` **同号**，且 **N 从 1 起**（无依赖 Unit = Wave 1）。
+> 禁止写「Wave 0」——`execution_wave` 不允许 0。
+
 ```text
-Wave 0：Foundation
+Wave 1：Foundation
   U01
 
-Wave 1：Parallel Behavior Development
+Wave 2：Parallel Behavior Development
   U02
   U03
 
-Wave 2：Integration
+Wave 3：Integration
   U05
 
-Wave 3：System Verification
+Wave 4：System Verification
   U06
 ```
 
@@ -178,7 +182,7 @@ Wave 3：System Verification
 
 | Wave | 启动条件 | 可并发 Unit | 等待依赖 | 完成条件 | 下一 Wave 入口 |
 |---|---|---|---|---|---|
-| 0 | | | | | |
+| 1 | | | | | |
 
 ---
 

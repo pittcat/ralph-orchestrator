@@ -351,48 +351,71 @@ hats:
 
       1. 按 templates 写 `execution-plan.yml`（含 `units[]` DAG 字段）。
       2. 校验无环；并行 Unit 无共享写冲突；设 `plan_key` / `source_plan_path` / `development_plan_path`。
+      3. **`execution_wave` 在 YAML 里就是 1-based 正整数**（无依赖 = 1；
+         `wave(unit) = 1 + max(wave(dep))`）。`development-plan.md` 章节标题
+         也写「Wave 1..W」，与 YAML 同号；**禁止**写「Wave 0」叙事标签。
 
-      ### 步骤 4 — 声明 Unit tasks（wave / order / digest 必填）
+      ### 步骤 4 — 声明 Unit tasks（disk 是 SSOT；禁止手算 schedule）
 
-      不要调用任何 task mutation CLI。把每个 Unit 写入 `forge.plan.ready`
-      的 `unit_tasks[]`；每项必须包含：
+      不要调用任何 task mutation CLI。
+
+      **红线（违反则 `--policy-check` 拒收，本 activation 单事件预算浪费）**：
+
+      1. **从已写盘的 `execution-plan.yml` 逐字段拷贝**构造
+         `forge.plan.ready` 的 `unit_tasks[]`。读 `units[]` 的
+         `unit_id` / `task_key` / `title` / `depends_on_task_keys` /
+         `execution_wave` / `integration_order`，原样写入 payload。
+      2. **禁止**凭 `development-plan.md` 叙事或记忆重新推算 wave / order
+         再手写进 payload。disk YAML 与 payload 必须字节级同值
+         （同 `task_key` 对齐后 `execution_wave` / `integration_order` 相等）。
+      3. **禁止**把文档标题「Wave N」字面赋给 `execution_wave: N` 当 N 从 0
+         起算。`execution_wave` **永远 ≥ 1**；`0` 非法。若操作者 plan 原文
+         仍写「Wave 0」，写入 YAML / payload 时必须映射为 `execution_wave: 1`
+         （其余 wave 同步 +1），并在 `development-plan.md` 改成「Wave 1..W」。
+      4. **`execution_plan_digest`** 必须等于刚写盘的 `execution-plan.yml`
+         文件内（或按该文件 canonical 规则重算）的 digest；禁止另起一套
+         手算 schedule 再另算 digest。
+      5. **`wave_total`** = `max(units[].execution_wave)`（与 YAML 顶层一致）。
+
+      每项 `unit_tasks[]` 必须包含：
 
       - `unit_id`、`task_key`（`forge:<plan-key>:<unit-id>`）、非空 `title`、
         `depends_on_task_keys`
-      - **`execution_wave`**：正整数。算法 `wave(unit) = 1 + max(wave(dep))`；
-        无依赖 = 1
+      - **`execution_wave`**：正整数 1..W（来自 disk，不是手算）
       - **`integration_order`**：正整数，全局唯一 1..N，且依赖边
-        `order(dep) < order(unit)`
+        `order(dep) < order(unit)`（来自 disk）
 
-      顶层 payload 必填额外字段：
-      - **`execution_plan_digest`**：稳定的内容 hash（建议 SHA-256 hex）；
-        与 execution-plan.yml 的 hash 一致
-      - **`wave_total`**：正整数，等于 `max(unit_tasks[].execution_wave)`
-
-      自检：
-      - wave 集合必须从 1 开始连续（1..W），不允许跳号
+      自检（emit 前对 disk + payload 各扫一遍）：
+      - wave 集合从 1 开始连续（1..W），无 0、无跳号
       - 同一 wave 内 Unit 之间互不依赖
       - `integration_order` 全局唯一连续 1..N
       - 每条依赖边 `order(dep) < order(unit)`
-      - runtime projector 会原子创建或复用 task，并把依赖 key 解析为
-        live task ID；dispatcher 后续只通过 task API 读取 live `task_id`
+      - payload 每个 `task_key` 的 wave / order **等于** YAML 同 key 行
+      - payload `execution_plan_digest` **等于** YAML 内 digest
 
-      缺上述任一字段 → `ralph emit forge.plan.ready --policy-check` 会被
-      schema gate 拒收（required fields 校验 + state_projection 的
-      `validate_wave_schedule`）；写完后先跑 precheck，再正式 emit。
+      缺字段、wave=0、或 disk≠payload →
+      `ralph emit forge.plan.ready --policy-check` 拒收
+      （schema required fields + disk-vs-payload 一致性检查）。
+      **precheck 失败时：改 YAML 或改 payload 对齐后再 check，禁止跳过
+      `--policy-check` 强行 emit。**
 
       ### 步骤 5 — Emit
 
-      1. `test -f` 两个 artifact。
-      2. `ralph emit forge.plan.ready --policy-check` 通过后真实 emit（含
-         `plan_path`、`plan_key`、`development_plan_path`、
-         `execution_plan_path`、`execution_plan_digest`、`wave_total`、
-         `unit_count`、`unit_tasks`）。`plan_path` 取自步骤 1 Observe
+      1. `test -f` 两个 artifact；再 `cat`/`yq` 读一遍 `execution-plan.yml`
+         确认 `units[].execution_wave` 全 ≥ 1 且 digest 已写入。
+      2. 用 **刚读到的 YAML 值**拼 payload（不要凭记忆）。然后
+         `ralph emit forge.plan.ready --policy-check`；通过后去掉
+         `--policy-check` 真实 emit（含 `plan_path`、`plan_key`、
+         `development_plan_path`、`execution_plan_path`、
+         `execution_plan_digest`、`wave_total`、`unit_count`、
+         `unit_tasks`）。`plan_path` 取自步骤 1 Observe
          （`ralph inspect loop` / 操作者 plan），禁止手写。
-      3. 阻塞：写 `blocks/planner-blocked.md`，emit `forge.plan.blocked`
+      3. 若 `--policy-check` 报 `disk_payload_inconsistency`：停下来对照
+         YAML 与 payload，修正后重新 check；不要改发同一错误 payload。
+      4. 阻塞：写 `blocks/planner-blocked.md`，emit `forge.plan.blocked`
          （含 `reason`、`plan_path`、`context_artifact_path`、
          `forge_artifact_root`、`plan_key`）。
-      4. 本 activation 仅一条业务事件。
+      5. 本 activation 仅一条业务事件。
 
   guardian:
     name: "Guardian"

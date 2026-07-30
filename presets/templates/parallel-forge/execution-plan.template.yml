@@ -20,4 +20,6 @@ verified_base_commit: "<VERIFIED_BASE_COMMIT_OR_TBD>"
 units: []
   # - 将 unit.template.yml 的字段作为 YAML 对象逐项追加到 units[]
   # - depends_on / execution_wave / integration_order 必须形成无环 DAG
+  # - execution_wave 是 1-based 正整数（无依赖 = 1）；禁止 0
+  # - forge.plan.ready 的 unit_tasks[] 必须从本文件 units[] 逐字段拷贝，禁止手算
   # - parallel Unit 必须满足 parallel-dev-preset.md §5 并发安全规则

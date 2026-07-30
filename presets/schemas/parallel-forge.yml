@@ -80,7 +80,7 @@ schemas:
       unit_tasks:
         meaning: Non-empty ordered Unit task specifications projected atomically into the task ledger.
         source: Parsed execution-plan.yml units[].
-        fill_rule: Each item has unit_id, task_key, title, depends_on_task_keys, execution_wave (positive integer, 1..wave_total), and integration_order (positive integer, globally unique 1..unit_count, dependency-respecting); task_key is forge:<plan-key>:<unit-id>; no task mutation CLI.
+        fill_rule: Each item has unit_id, task_key, title, depends_on_task_keys, execution_wave (positive integer, 1..wave_total; never 0; must equal the same task_key's execution_wave in execution-plan.yml on disk), and integration_order (positive integer, globally unique 1..unit_count, dependency-respecting; must equal disk); task_key is forge:<plan-key>:<unit-id>; copy unit_tasks from disk units[] — do not recompute from plan narrative; no task mutation CLI.
       plan_key:
         meaning: Forge plan key basename for artifact roots.
         source: Basename of plan_path without .md/.html.
