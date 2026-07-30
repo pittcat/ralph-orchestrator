@@ -32,7 +32,8 @@ ralph emit [OPTIONS] <TOPIC> [PAYLOAD]
 | `[PAYLOAD]` | string/json | 否 | `""` | 事件负载；配合 `-j` 可解析为 JSON 对象 |
 | `-j, --json` | flag | 否 | — | 将 payload 按 JSON 对象解析而非普通字符串 |
 | `--file <FILE>` | path | 否 | `.ralph/events.jsonl` | 目标事件文件路径 |
-| `--policy-check` | flag | 否 | — | 发射前按当前事件策略校验；**校验通过不写盘**（dry-run 探测，与正式 `ralph emit` 区分） |
+| `--policy-check` | flag | 否 | — | 发射前按当前事件策略校验；**校验通过不写盘**（dry-run 探测，与正式 `ralph emit` 区分）。agent 上下文 + 无 event-policy 管线时，校验通过会在 stdout 打印一行 `policy_check_token` JSON（见下方「Evaluation Token」段） |
+| `--policy-check-token <TOKEN>` | string | 否 | — | apply（去掉 `--policy-check` 的真正写盘）时携带的评估令牌；值取自上一次 `--policy-check` 打印的 `policy_check_token` 字段。**仅在 agent 上下文 + 无 event-policy 管线时强制**（缺 → `missing_policy_check_token`，过期/不匹配 → `policy_check_token_mismatch`）；其它场景忽略 |
 | `--unsafe-no-policy-check` | flag | 否 | — | 跳过强制策略检查（仅当配置允许时） |
 | `--hat <HAT>` | string | 否 | `$RALPH_CURRENT_HAT` | 发布此事件的 hat |
 | `--triggered <TRIGGERED>` | string | 否 | `$RALPH_TRIGGERED_HAT` | 被此事件触发的目标 hat |
@@ -217,6 +218,46 @@ JSON 写法：`ralph emit work.done --policy-check -j '{"plan_path": "...", "tas
 
 > **OPAC Precheck/Apply（agent context 默认 enforce）**: agent 上下文下，`ralph emit` 在无 `--policy-check` 且无 `--unsafe-no-policy-check` 写盘会被拒。`allow_unsafe_cli_emit: true` 可作为 preset opt-out（打印 deprecation warning）。详见 always-injected `ralph-tools-opac` skill Apply 段。
 
+### Evaluation Token（agent 上下文 + 无 event-policy 管线时的强制两步 emit）
+
+**何时适用**：你处于 agent 上下文（`RALPH_CURRENT_HAT` 已由 runner 注入），且当前 preset **没有**启用完整的 `event_policy` 校验管线。此时 `ralph emit` 的 apply 路径会额外要求一个「评估令牌」，证明你这份 payload 已经在**同一份合约版本**下通过了 `--policy-check`。若 preset 已启用 `event_policy`（统一管线本身就是合约执行点），或你在 human CLI（无 `RALPH_CURRENT_HAT`）下操作，本节不适用——沿用原有两步 precheck→apply 即可，令牌会被忽略。
+
+**触发条件**：agent 上下文 + 无 event-policy 管线。是否强制由 runtime 自动判定，你无需检测；按下面流程走即可，不适用的 preset 会自然跳过令牌校验。
+
+**Agent 流程（在普通两步 precheck→apply 之上多带一个令牌）：**
+
+1. **Precheck 并领取令牌**：
+   ```bash
+   ralph emit <TOPIC> --policy-check -j '<payload>' --output json
+   ```
+   校验通过时，stdout 会**额外**打印一行 JSON：
+   ```json
+   {"policy_check_token": "<TOKEN>", "topic": "<TOPIC>", "hat": "<HAT>", "contract_revision": "<DIGEST>"}
+   ```
+   取其中的 `policy_check_token` 值。校验仍按原有 `validation_errors[]` 反馈修 payload（见上方「Policy-Check 反馈」段）。
+2. **Apply 时携带令牌**：用**完全相同**的 `<TOPIC>` 和 `<payload>` 去掉 `--policy-check` 真正写盘，并带上令牌：
+   ```bash
+   ralph emit <TOPIC> -j '<payload>' --policy-check-token <TOKEN> --output json
+   ```
+3. **Confirm**：看 `--output json` 的 `ok` / `recorded`（见下文「`ralph emit` 响应：`EmitResult`」）。
+
+**令牌绑定规则（为什么会被拒）**：令牌绑定到精确的 `(hat, topic, payload, 合约版本)` 四元组。因此：
+
+- apply 的 payload 必须与 precheck 时**逐字相同**；改了任何字段，旧令牌失效 → 重跑 precheck 领新令牌。
+- 配置/合约在两步之间变更（`contract_revision` 变了），旧令牌失效 → 重跑 precheck。
+- **不要**缓存、复用、跨 topic/跨 activation 共享令牌；每次 apply 用它自己那次 precheck 打印的令牌。
+- `--policy-check` 阶段**不需要**也**不接受**用令牌来写盘——令牌只用于 apply。
+
+**相关错误码（apply 路径）**：
+
+| 错误码 | 原因 | 修复 |
+|--------|------|------|
+| `missing_policy_check_token` | agent 上下文 + 无 event-policy 管线下 apply 未带 `--policy-check-token` | 先跑 `ralph emit <TOPIC> --policy-check -j '<payload>'` 领取 `policy_check_token`，再用它重跑 apply |
+| `policy_check_token_mismatch` | 令牌与当前 `(hat, topic, payload, 合约版本)` 不一致（payload 改了 / 配置变了 / 复用了别处的令牌） | 用**最终要写盘的 payload** 重跑 `--policy-check`，取最新 `policy_check_token` 再 apply |
+| `capability_denied` | 当前 hat 按 Effective Execution Contract 不允许发这个 topic（不在其可发布 topic / 不归它所有的终态 topic） | 用 `ralph emit --schema <TOPIC>` 看该 topic 合约；改用本 hat 实际可发的 topic。**不要**靠 `--unsafe-no-policy-check` 绕过 |
+
+> 这三个错误码在 `--policy-check` 与 apply 两条路径上的拒收条件一致——precheck 绿了再带令牌 apply，不会因合约/作用域再挂一次。
+
 ### Confirm（普通 emit）
 
 优先用公开反馈，不要读事件文件：
@@ -311,6 +352,9 @@ runtime **不**在 budget 拦截那一刻决定是否发 `task.resume`；它只�
 | `policy check failed` | payload 不符合策略 | 读 stderr / 用 `--output json` 取 `validation_errors[].field` 一次拿全部缺失字段；修正后用 `ralph emit <topic> --policy-check -j '...'` 预检通过再发。**不要**首选 `--unsafe-no-policy-check`（当配置未显式允许时该参数会被拒） |
 | `triggered_not_in_topology` | `--triggered <hat>` 不在当前 preset `hats[]` 里 | 用 `ralph hats list` 或 preset YAML 查合法 hat id；改 `--triggered` 为拓扑内 hat，或省略 `--triggered`（缺省允许）。ralph-control / orchestrator diagnostic topic 跳过此检查 |
 | `agent policy-check required` | agent context + 业务 topic + 无 `--policy-check` | 先 `ralph emit <TOPIC> --policy-check -j '...'` 通过，再去掉 `--policy-check` 正式 emit。preset `allow_unsafe_cli_emit: true` 可 opt-out（deprecated warning） |
+| `missing_policy_check_token` | agent context + 无 event-policy 管线，apply 未带 `--policy-check-token` | 见上方「Evaluation Token」段：先 `--policy-check` 领取 `policy_check_token`，再用它重跑 apply |
+| `policy_check_token_mismatch` | 令牌与当前 `(hat, topic, payload, 合约版本)` 不一致 | 用最终 payload 重跑 `--policy-check` 取最新令牌；不要复用/缓存旧令牌 |
+| `capability_denied` | 当前 hat 按 Effective Execution Contract 不可发该 topic | `ralph emit --schema <TOPIC>` 看合约；改用本 hat 可发 topic，不要用 `--unsafe-no-policy-check` 绕过 |
 | `cannot write to events file` | 文件不存在或权限不足 | 确认 `.ralph/` 目录存在，检查权限 |
 | `Invalid JSON payload` | 用 `-j` 但 payload 不是合法 JSON | 用 `jq` 验证 payload：`echo '{"a":1}' \| jq .` |
 | `task_id cannot be empty` | payload 中 `task_id` 为空字符串 | 从 `.ralph/agent/tasks.jsonl` 取得真实 task id 后再 emit；任何带 `task_id` 的事件都适用 |
@@ -521,5 +565,12 @@ policy-check 拒收:
 ### 进程崩溃后恢复
 
 进程崩溃后，loop 重启时自动从 events 文件重建状态：迭代计数、rejection 重试计数、handoff 审计轨迹、workflow phase 与 counter 集合。
+
+**已 commit 的业务事件是持久的、且对下游恰好交付一次**：一个业务事件一旦通过校验并 commit，它就进入持久队列，loop 重启后会继续把它交付给下游 hat，**不会**因为重启而丢失，也**不会**重复交付。因此：
+
+- 崩溃/重启后，**不要**盲目重发你上一轮已经成功 commit 的事件——它已在队列里，会被交付。先用公开只读接口确认状态（`ralph inspect loop --format json` / `ralph tools task list` / 上一次 `ralph emit --output json` 的 `recorded`），等价事件已落盘就停止 emit，等待下游或 `task.resume`。
+- 盲目重发不会「双份」推进下游（交付层去重），但会在 isolated 模式下浪费你唯一的业务事件槽位。
+
+**纠正/重试额度是持久的**：协议违规、越权、correction 等产生的重试额度会持久记录，**跨 loop 重启保留**。不要指望「重启 loop 把额度清零」来绕过 `protocol_violation_repeated:*` / `correction_3_strike_exhausted` 阻塞——重启后额度仍在，阻塞仍在。按 `task.resume` / correction 指定的唯一动作修复，而不是重启。
 
 若状态文件损坏导致重建失败，loop 会降级到冷启动并打印 warning。修复方式：`ralph loops clean --ledger` 截断损坏文件后重试。

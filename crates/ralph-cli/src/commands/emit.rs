@@ -306,6 +306,9 @@ fn compute_policy_check_token(
 /// enforcement, so it (a) denies `(hat, topic)` pairs the Effective Execution
 /// Contract does not allow and (b) requires an evaluation token proving the
 /// payload passed `--policy-check` against the same contract revision.
+/// The gate also stands down for the orchestrator pseudo-hat `ralph`
+/// (hatless loops), wave workers, and presets with no hats — see
+/// [`U5Gate::resolve`].
 struct U5Gate {
     /// Whether the gate applies to this invocation.
     active: bool,
@@ -319,6 +322,16 @@ impl U5Gate {
     /// Resolve the gate for this invocation. `env_hat_set` is whether
     /// `RALPH_CURRENT_HAT` is present (the agent-context signal); `hat` is the
     /// resolved emitting hat; `topic` is the EFFECTIVE (post-desugar) topic.
+    ///
+    /// Stand-down conditions: the gate governs only REAL agent hats in
+    /// governed presets. It stays inactive for:
+    /// - the orchestrator pseudo-hat `ralph` (hatless loops inject
+    ///   `RALPH_CURRENT_HAT=ralph`; the contract compiled there has empty
+    ///   `emit_allows`, so gating would deny `LOOP_COMPLETE` and the loop
+    ///   could never terminate),
+    /// - wave workers (`RALPH_WAVE_WORKER` set) — their rejections are owned
+    ///   by the wave-channel guard, which must surface its own reason, and
+    /// - presets defining no hats (there is nothing to govern).
     fn resolve(
         env_hat_set: bool,
         unified_active: bool,
@@ -327,7 +340,10 @@ impl U5Gate {
         topic: &str,
         payload: &str,
     ) -> Self {
-        let active = env_hat_set && !unified_active && config.is_some();
+        let stands_down = hat == Some("ralph")
+            || std::env::var("RALPH_WAVE_WORKER").is_ok()
+            || config.is_some_and(|c| c.hats.is_empty());
+        let active = env_hat_set && !unified_active && config.is_some() && !stands_down;
         if !active {
             return Self {
                 active: false,

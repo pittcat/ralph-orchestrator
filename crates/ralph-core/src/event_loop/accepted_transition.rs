@@ -559,11 +559,8 @@ mod tests {
         // No durable entry may exist: the outbox is not a valid JSONL
         // file (here it is a directory), so either the read fails or
         // yields zero entries.
-        match read_outbox(&ws) {
-            Ok(entries) => {
-                assert!(entries.is_empty(), "no outbox entry after failed commit")
-            }
-            Err(_) => {}
+        if let Ok(entries) = read_outbox(&ws) {
+            assert!(entries.is_empty(), "no outbox entry after failed commit")
         }
         drop(dir);
     }
