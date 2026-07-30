@@ -1024,6 +1024,28 @@ fn emit_command_with_root_and_hats(
         );
     }
 
+    // 2026-07-30 fix: CLI-side disk-vs-payload consistency check for
+    // `forge.plan.ready`. The planner hat has been observed (primary-
+    // 20260730-002911) hand-constructing the payload with shifted
+    // execution_wave values, then being rejected at projection time
+    // with no recovery path (guidance topic removed by plan
+    // 2026-06-28-005). Run this check before the unified pipeline so
+    // the agent sees the failure on the first attempt.
+    if check_mode != PolicyCheckMode::Skip {
+        if let Err(err) = crate::policy_check::check_forge_plan_ready_disk_consistency(
+            topic,
+            &args.payload,
+            &workspace_root,
+        ) {
+            anyhow::bail!(
+                "forge.plan.ready disk consistency check failed (field='{}' reason='{}'): {}",
+                err.field,
+                err.reason_code,
+                err.message
+            );
+        }
+    }
+
     // U6 (2026-06-21-002 plan §U6): CLI `--policy-check` always
     // routes through the unified `validate_event` pipeline. The
     // legacy `validate_event_with_hat` path below is preserved as
