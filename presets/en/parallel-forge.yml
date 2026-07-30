@@ -208,6 +208,17 @@ event_loop:
       - {hat_id: integrator, topic: exec.wave.complete}
       - {hat_id: forge-dispatcher, topic: exec.wave.complete}
       - {hat_id: forge-failure-handler, topic: exec.wave.complete}
+      # `exec.wave.failed` is injected by the supervisor fan-in only.
+      # forge-failure-handler consumes it and must never forge one.
+      - {hat_id: inspector, topic: exec.wave.failed}
+      - {hat_id: planner, topic: exec.wave.failed}
+      - {hat_id: guardian, topic: exec.wave.failed}
+      - {hat_id: worktree, topic: exec.wave.failed}
+      - {hat_id: executor, topic: exec.wave.failed}
+      - {hat_id: reviewer, topic: exec.wave.failed}
+      - {hat_id: integrator, topic: exec.wave.failed}
+      - {hat_id: forge-dispatcher, topic: exec.wave.failed}
+      - {hat_id: forge-failure-handler, topic: exec.wave.failed}
       - {hat_id: executor, topic: exec.unit.ready}
       - {hat_id: reviewer, topic: exec.unit.ready}
       - {hat_id: integrator, topic: exec.unit.ready}
@@ -634,25 +645,30 @@ hats:
 
   forge-failure-handler:
     name: "Forge Failure Handler"
-    description: "Routes review/verification failures to bounded wave-fixer correction; never short-circuits to work.failed."
+    description: "Routes execution/review/verification failures to bounded wave-fixer correction; never short-circuits to work.failed."
     triggers:
+      - exec.wave.failed
       - forge.wave.review.failed
       - forge.verification.failed
     publishes:
       - forge.correction.requested
       - forge.final.correction.settled
+      - forge.plan.blocked
       - work.failed
     exempt_topics:
       - forge.correction.requested
       - forge.final.correction.settled
+      - forge.plan.blocked
       - work.failed
     terminal_events:
       - forge.correction.requested
       - forge.final.correction.settled
+      - forge.plan.blocked
       - work.failed
     event_filter:
       enabled: true
       events:
+        - exec.wave.failed
         - forge.wave.review.failed
         - forge.verification.failed
     instructions: |
@@ -664,6 +680,47 @@ hats:
       confidence gate.
 
       OPAC: `ralph-tools-opac`. Before emit: `ralph tools skill load ralph-tools-emit` then `--policy-check`.
+
+      ### 当 trigger 是 `exec.wave.failed`（执行波次整体失败）
+
+      这条 trigger 的 payload 只有 `wave_id`、`reason`、
+      `blocking_slots`、`slot_failures`（每项含 `slot_index` /
+      `reason` / `failure_class`）、`salvaged_slots`、
+      `redrive_slots`。它**没有** `plan_key` / `wave_index` /
+      `execution_plan_path` / `worktree_map_path` /
+      `failure_fingerprint`，下面四步先把它们补齐再进入通用 Steps。
+
+      - **永久失败先分流**。若 `slot_failures` 中**每一项**的
+        `failure_class` 都是 `identity_mismatch` 或 `unknown`，
+        再修也不会变，别烧 correction 轮次：按
+        `blocks/forge-failure-handler-blocked.md` 写清哪些 slot、
+        哪些 `failure_class`，然后 emit 一条
+        `forge.plan.blocked`（`reason` / `plan_path` /
+        `context_artifact_path` / `forge_artifact_root` /
+        `plan_key`）并结束本轮。只要有一项是 `timeout` /
+        `orphan_or_empty_result` / `required_slot_failure` /
+        `cancel`，就说明活可能干了一半，继续往下走。
+      - **补齐 wave 上下文**。`plan_key`、`wave_index`、
+        `execution_plan_path`、`worktree_map_path`、
+        `verified_base_commit` 从 projection 里本 `wave_id` 的
+        `forge.wave.prepare` / `forge.wave.worktrees.ready` 取；
+        对不上 `wave_id` 的一律不用。
+      - **slot 映射回 unit**。用 `worktree_map_path` 把
+        `blocking_slots` 的每个 `slot_index` 映射成 `unit_id` 和
+        `candidate_branch`，得到 `affected_unit_ids`；
+        `affected_task_ids` 用 `ralph tools task list` 取 live id
+        （字段约束见 `ralph-tools-tasks` red box，禁止手写
+        `task_id`）。
+      - **合成 `failure_fingerprint`**。执行波次失败没有上游
+        fingerprint，自己按固定格式拼一个，使同一组 slot 以同样方式
+        再失败时得到同一个值（否则重复轮次检测失效）：
+        `exec:<wave_id>:<blocking_slots 升序逗号连接>:<failure_class
+        去重升序逗号连接>`。
+
+      补齐后按下面 Steps 的 2-6 继续，`failure_topic` 记
+      `exec.wave.failed`。`salvaged_slots` 里的 Unit 已经完成，
+      不要放进 `affected_unit_ids`。`redrive_slots` 只是信息字段，
+      你无权重新派发 worker——修复只能由 correction 完成。
 
       ### Steps
       1. Read wave_id, wave_index, failure_fingerprint, affected_task_ids from the trigger.

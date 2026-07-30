@@ -4954,10 +4954,12 @@ impl EventLoop {
         let Some(schema) = policy.schemas.get(promise) else {
             return prompt;
         };
-        let Some(path_field) = ["report_path", "artifact_path"]
-            .iter()
-            .find(|field| schema.required_fields.iter().any(|required| required == **field))
-        else {
+        let Some(path_field) = ["report_path", "artifact_path"].iter().find(|field| {
+            schema
+                .required_fields
+                .iter()
+                .any(|required| required == **field)
+        }) else {
             return prompt;
         };
         let field_doc = schema.field_docs.get(*path_field);
@@ -7105,11 +7107,9 @@ impl EventLoop {
             let is_actionable = |task: &crate::task::Task| -> bool {
                 match caller_hat_str {
                     None => true, // no caller context (e.g. tests) — keep legacy
-                    Some(caller) => crate::task::can_hat_mutate_task_lifecycle(
-                        task,
-                        caller,
-                        coordinator_hats,
-                    ),
+                    Some(caller) => {
+                        crate::task::can_hat_mutate_task_lifecycle(task, caller, coordinator_hats)
+                    }
                 }
             };
             let any_actionable_ready = ready.iter().any(|t| is_actionable(t));
@@ -16337,11 +16337,7 @@ mod flow_authority_pf_declared_14step_tests {
                             // `work.failed` is now a transition.
                             // The `report` step is the universal
                             // funnel for terminal failures.
-                            vec![
-                                "forge.audit.done",
-                                "forge.plan.blocked",
-                                "work.failed",
-                            ],
+                            vec!["forge.audit.done", "forge.plan.blocked", "work.failed"],
                             None,
                         ),
                         mk(

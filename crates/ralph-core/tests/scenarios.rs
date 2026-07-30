@@ -1913,8 +1913,7 @@ fn test_parallel_forge_correction_runtime() {
 /// through the real EventLoop runner.
 #[test]
 fn test_parallel_forge_round_exhaustion_gate_runtime() {
-    let yaml =
-        load_scenario("tests/scenarios/parallel_forge_round_exhaustion_gate_runtime.yml");
+    let yaml = load_scenario("tests/scenarios/parallel_forge_round_exhaustion_gate_runtime.yml");
     run_workflow_guard_scenario(yaml);
 }
 
@@ -2490,6 +2489,17 @@ fn test_u13_supervisor_minimal() {
 #[test]
 fn test_parallel_forge_exec_wave_branch() {
     let yaml = load_scenario("tests/scenarios/parallel_forge_exec_wave_branch.yml");
+    run_workflow_guard_scenario(yaml);
+}
+
+// A force-terminalled exec wave must inject `exec.wave.failed` AND find
+// a subscriber. The failure arm was previously injected into a preset
+// where no hat listened for it, so a silent worker ended the run with
+// no correction and no report. This pins the closed loop:
+// exec.wave.failed → failure handler → forge.correction.requested.
+#[test]
+fn test_parallel_forge_exec_wave_failed_routes_to_correction() {
+    let yaml = load_scenario("tests/scenarios/parallel_forge_exec_wave_failed_correction.yml");
     run_workflow_guard_scenario(yaml);
 }
 

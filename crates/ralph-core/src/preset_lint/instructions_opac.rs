@@ -828,14 +828,29 @@ hats:
     #[test]
     fn task_mutation_authority_skips_forbidden_context_lines() {
         let cases: &[(&str, &str)] = &[
-            ("chinese-jin-zhi", "禁止 `ralph tools task add`（owner 不是本 hat）"),
+            (
+                "chinese-jin-zhi",
+                "禁止 `ralph tools task add`（owner 不是本 hat）",
+            ),
             ("chinese-bu-yao", "不要运行 `ralph tools task ensure`"),
-            ("chinese-bu-de", "不得调用 ralph tools task add，task 由 dispatcher 管"),
+            (
+                "chinese-bu-de",
+                "不得调用 ralph tools task add，task 由 dispatcher 管",
+            ),
             ("english-do-not", "do not run `ralph tools task add`"),
-            ("english-must-not", "you must not call `ralph tools task ensure` here"),
+            (
+                "english-must-not",
+                "you must not call `ralph tools task ensure` here",
+            ),
             ("english-never", "never invoke `ralph tools task add`"),
-            ("english-forbidden", "`ralph tools task add` is forbidden in this hat"),
-            ("english-denied", "`ralph tools task ensure` will be denied by the runtime ACL"),
+            (
+                "english-forbidden",
+                "`ralph tools task add` is forbidden in this hat",
+            ),
+            (
+                "english-denied",
+                "`ralph tools task ensure` will be denied by the runtime ACL",
+            ),
         ];
         for (name, line) in cases {
             let yaml = format!(

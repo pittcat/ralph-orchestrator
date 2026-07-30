@@ -1,0 +1,101 @@
+# BDD fixture: a failed execution wave must reach a subscriber.
+#
+# Before this fixture, `exec.wave.failed` had no consumer in
+# parallel-forge: the supervisor injected it and nothing woke up, so a
+# wave whose worker went silent ended the run with no correction and no
+# report. The topology below pins the closed loop — supervisor fan-in
+# injects `exec.wave.failed`, the failure handler is activated by it,
+# and it routes to `forge.correction.requested`.
+#
+# The wave is force-terminalled after one of two slots reports, which is
+# the production shape when a worker never answers: the coordinator
+# fails the wave on the aggregate deadline rather than waiting forever.
+#
+# Uses run_workflow_guard_scenario (real EventLoop runner; not the stub).
+
+name: pf_exec_wave_failed_correction
+description: parallel-forge exec.wave.failed activates the failure handler and routes to correction
+
+supervisor_fan_in:
+  expected_slots: 2
+  force_terminal: timeout
+  min_slots_before_force: 1
+
+config:
+  prompt_file: PROMPT.md
+  max_iterations: 6
+  event_loop:
+    execution_mode: isolated
+    starting_event: forge.worktrees.ready
+    supervisor:
+      enabled: true
+      aggregate_timeout_secs: 60
+  hats:
+    pf-dispatcher:
+      subscribes_to:
+        - forge.worktrees.ready
+      publishes:
+        - exec.unit.ready
+    pf-executor:
+      subscribes_to:
+        - exec.unit.ready
+      publishes:
+        - exec.unit.done
+    pf-failure-handler:
+      subscribes_to:
+        - exec.wave.failed
+      publishes:
+        - forge.correction.requested
+
+mock_responses:
+  # Iter 1: dispatcher fans out slot 0 of a two-slot wave.
+  - text: |
+      <event topic="exec.unit.ready">
+      wave_id: "pf-failed-wave"
+      slot_index: 0
+      unit_id: "u1"
+      plan_key: "pf-exec-failed"
+      </event>
+    hat: pf-dispatcher
+  # Iter 2: slot 0 reports; slot 1 never does. The fan-in force-terminals
+  # on the aggregate deadline and injects exec.wave.failed (produced by
+  # the real coordinator, not by a mock response).
+  - text: |
+      <event topic="exec.unit.done">
+      wave_id: "pf-failed-wave"
+      slot_index: 0
+      content_hash: "pf-exec-failed-h0"
+      plan_key: "pf-exec-failed"
+      </event>
+    hat: pf-executor
+  # Iter 3: the failure handler is woken by exec.wave.failed and opens a
+  # correction round instead of terminating the plan.
+  - text: |
+      <event topic="forge.correction.requested">
+      wave_id: "pf-failed-wave"
+      correction_round: 0
+      failure_fingerprint: "exec:pf-failed-wave:1:timeout"
+      plan_key: "pf-exec-failed"
+      </event>
+    hat: pf-failure-handler
+
+expected:
+  iterations: 3
+  events:
+    - topic: exec.unit.ready
+    - topic: exec.unit.done
+    - topic: exec.wave.failed
+    - topic: forge.correction.requested
+  # A force-terminalled wave must never look like a success.
+  absent_events:
+    - topic: exec.wave.complete
+    - topic: forge.plan.blocked
+    - topic: work.failed
+  event_topic_counts:
+    - topic: exec.wave.failed
+      count: 1
+    - topic: forge.correction.requested
+      count: 1
+    - topic: exec.wave.complete
+      count: 0
+  completion: false

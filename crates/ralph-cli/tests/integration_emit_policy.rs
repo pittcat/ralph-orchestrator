@@ -520,15 +520,17 @@ fn test_precheck_emit_writes_topic_and_triggered_from_effective_topic() {
         events_path.exists(),
         "U1: events file must exist at {events_path:?}; stdout={stdout} stderr={stderr}"
     );
-    let events_contents =
-        std::fs::read_to_string(&events_path).expect("read events.jsonl");
+    let events_contents = std::fs::read_to_string(&events_path).expect("read events.jsonl");
     let last_line = events_contents
         .lines()
         .filter(|l| !l.trim().is_empty())
         .last()
-        .unwrap_or_else(|| panic!("U1: events.jsonl must contain at least one line; got: {events_contents}"));
-    let record: serde_json::Value = serde_json::from_str(last_line)
-        .unwrap_or_else(|e| panic!("U1: events.jsonl last line must be valid JSON: {e}; line={last_line}"));
+        .unwrap_or_else(|| {
+            panic!("U1: events.jsonl must contain at least one line; got: {events_contents}")
+        });
+    let record: serde_json::Value = serde_json::from_str(last_line).unwrap_or_else(|e| {
+        panic!("U1: events.jsonl last line must be valid JSON: {e}; line={last_line}")
+    });
 
     assert_eq!(
         record.get("topic").and_then(|v| v.as_str()),
@@ -586,13 +588,7 @@ fn test_precheck_emit_missing_required_field_rejected_on_proposed() {
     .to_string();
 
     let output = common::ralph_bin()
-        .args([
-            "emit",
-            "work.failed",
-            "--json",
-            &payload,
-            "--policy-check",
-        ])
+        .args(["emit", "work.failed", "--json", &payload, "--policy-check"])
         .current_dir(temp_path)
         .env("RALPH_HATS_SOURCE", "builtin:ce-executor-pipeline")
         .env("RALPH_CURRENT_HAT", "executor")

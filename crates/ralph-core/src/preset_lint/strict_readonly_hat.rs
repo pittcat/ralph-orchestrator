@@ -121,10 +121,7 @@ mod tests {
         let cfg = cfg_with_hat("reviewer", Some(vec![".git/HEAD"]), vec!["Edit", "Write"]);
         let findings = check_strict_readonly_hat(&cfg, LintStrictness::Default);
         assert_eq!(findings.len(), 1);
-        assert_eq!(
-            findings[0].id,
-            FINDING_STRICT_READONLY_INVALID_WRITE_PATH
-        );
+        assert_eq!(findings[0].id, FINDING_STRICT_READONLY_INVALID_WRITE_PATH);
     }
 
     #[test]
@@ -132,10 +129,7 @@ mod tests {
         let cfg = cfg_with_hat("reviewer", Some(vec!["/abs"]), vec!["Edit", "Write"]);
         let findings = check_strict_readonly_hat(&cfg, LintStrictness::Default);
         assert_eq!(findings.len(), 1);
-        assert_eq!(
-            findings[0].id,
-            FINDING_STRICT_READONLY_INVALID_WRITE_PATH
-        );
+        assert_eq!(findings[0].id, FINDING_STRICT_READONLY_INVALID_WRITE_PATH);
     }
 
     #[test]
@@ -143,10 +137,7 @@ mod tests {
         let cfg = cfg_with_hat("reviewer", Some(vec![".."]), vec!["Edit", "Write"]);
         let findings = check_strict_readonly_hat(&cfg, LintStrictness::Default);
         assert_eq!(findings.len(), 1);
-        assert_eq!(
-            findings[0].id,
-            FINDING_STRICT_READONLY_INVALID_WRITE_PATH
-        );
+        assert_eq!(findings[0].id, FINDING_STRICT_READONLY_INVALID_WRITE_PATH);
     }
 
     #[test]

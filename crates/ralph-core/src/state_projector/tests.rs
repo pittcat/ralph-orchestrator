@@ -1780,7 +1780,11 @@ actions:
             .to_string(),
         );
         let report = projector.apply(&[settled]);
-        assert_eq!(report.applied, 1, "settlement must apply: {:?}", report.rejections);
+        assert_eq!(
+            report.applied, 1,
+            "settlement must apply: {:?}",
+            report.rejections
+        );
         assert_eq!(report.rejected, 0);
 
         let store = crate::task_store::TaskStore::load(&tasks_path(tmp.path())).unwrap();
@@ -1896,7 +1900,10 @@ actions:
         assert_eq!(first.applied, 1);
 
         let replay = projector.apply(&[make_event("forge.wave.settled", payload)]);
-        assert_eq!(replay.applied, 1, "replay must still apply (idempotent no-op)");
+        assert_eq!(
+            replay.applied, 1,
+            "replay must still apply (idempotent no-op)"
+        );
         assert_eq!(replay.rejected, 0);
 
         let store = crate::task_store::TaskStore::load(&tasks_path(tmp.path())).unwrap();
@@ -1981,8 +1988,8 @@ actions:
         let report = projector.apply(&[mixed]);
         assert_eq!(report.rejected, 1, "mixed batch must reject");
         assert!(
-            report.rejections[0].reason.contains("mixes open") ||
-                report.rejections[0].reason.contains("identity drift"),
+            report.rejections[0].reason.contains("mixes open")
+                || report.rejections[0].reason.contains("identity drift"),
             "rejection must call out identity drift: got {}",
             report.rejections[0].reason
         );
@@ -2019,8 +2026,7 @@ actions:
             .unwrap()
             .read_to_end(&mut before_bytes)
             .unwrap();
-        let before_cache: Vec<crate::task::Task> =
-            projector.context().tasks_cache.clone();
+        let before_cache: Vec<crate::task::Task> = projector.context().tasks_cache.clone();
 
         // Corrupt wave1[1] so `close()` on it would have failed
         // via the P0-4 `started.is_none()` guard — but only when
@@ -2064,8 +2070,7 @@ actions:
         );
 
         // Cache: identical snapshot.
-        let after_cache: Vec<crate::task::Task> =
-            projector.context().tasks_cache.clone();
+        let after_cache: Vec<crate::task::Task> = projector.context().tasks_cache.clone();
         assert_eq!(
             before_cache.len(),
             after_cache.len(),

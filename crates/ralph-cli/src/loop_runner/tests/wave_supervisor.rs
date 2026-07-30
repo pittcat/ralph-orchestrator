@@ -5971,6 +5971,180 @@ fn exec_fix_partial_failure_does_not_salvage_completed_slot_events() {
     );
 }
 
+/// Regression: an exec wave where EVERY slot failed (zero Completed
+/// slots) must still reach `InjectedFailed`.
+///
+/// This is the shape a silent worker produces: the dispatcher records
+/// a synthetic slot failure, the wave settles with `results=0
+/// failures=1`, and the salvage seam has nothing to append. The seam
+/// must nevertheless commit both delivery phases, otherwise
+/// `fail_wave` answers `SalvageNotMerged` on every tick and the
+/// fan-in degrades to `StoreError` / `fan_in_failed` — no
+/// `exec.wave.failed` is ever injected and the loop dies without
+/// telling the preset anything.
+///
+/// Unlike the partial-failure test above, this one deliberately does
+/// NOT pre-commit the salvage projection: pre-committing is exactly
+/// what hid the empty-batch gap.
+#[test]
+fn exec_wave_with_zero_completed_slots_injects_failed_without_precommitted_salvage() {
+    use crate::loop_runner::wave::{SupervisorFanInOutcome, run_supervisor_fan_in};
+    use ralph_core::supervisor::WaveKind;
+
+    let (_tmp, bridge, _store, store_wave_id, events_path) =
+        setup_u3_partial_failure_bridge(WaveKind::Exec, "empty-salvage-exec", 1);
+
+    // The only slot never reported; the dispatcher synthesises a
+    // worker_timeout failure for it.
+    bridge
+        .record_slot_failure(
+            &store_wave_id,
+            0,
+            ralph_core::supervisor::worker_outcome::REASON_WORKER_TIMEOUT,
+        )
+        .expect("s0 failure");
+
+    let bridge: std::sync::Arc<dyn SupervisorBridge> = std::sync::Arc::new(bridge);
+
+    let completed = ralph_core::CompletedWave {
+        wave_id: "empty-salvage-exec".to_string(),
+        wave_total: 1,
+        results: vec![],
+        failures: vec![ralph_core::WaveFailure {
+            index: 0,
+            error: "worker did not report".to_string(),
+            duration: std::time::Duration::from_millis(1),
+            expected_dimension: None,
+            actual_dimension: None,
+        }],
+        duration: std::time::Duration::from_millis(1),
+        partial: true,
+        expected_source_hat: None,
+        assigned_dimensions: std::collections::HashMap::new(),
+        dimension_retry_counts: std::collections::HashMap::new(),
+        worker_events: vec![],
+    };
+    let detected = make_u3_wave("empty-salvage-exec", 1, 1);
+
+    let outcome = run_supervisor_fan_in(&bridge, &completed, &detected, &events_path, 600, None);
+    assert_eq!(
+        outcome,
+        SupervisorFanInOutcome::InjectedFailed,
+        "a zero-completed exec wave must inject exec.wave.failed, not degrade to StoreError"
+    );
+
+    let content = std::fs::read_to_string(&events_path).unwrap_or_default();
+    let lines: Vec<serde_json::Value> = content
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .map(|l| serde_json::from_str(l).expect("ledger line must be JSON"))
+        .collect();
+    let failed: Vec<&serde_json::Value> = lines
+        .iter()
+        .filter(|v| v.get("topic").and_then(|t| t.as_str()) == Some("exec.wave.failed"))
+        .collect();
+    assert_eq!(
+        failed.len(),
+        1,
+        "exactly one exec.wave.failed coord event expected; got {}",
+        failed.len()
+    );
+    let blocking: Vec<u32> = failed[0]
+        .get("payload")
+        .and_then(|p| p.get("blocking_slots"))
+        .and_then(|b| b.as_array())
+        .expect("payload.blocking_slots")
+        .iter()
+        .filter_map(|v| v.as_u64().map(|n| n as u32))
+        .collect();
+    assert_eq!(blocking, vec![0], "the single failed slot must be blocking");
+
+    // Nothing to salvage means nothing business-shaped on main.
+    let business = lines
+        .iter()
+        .filter(|v| {
+            matches!(
+                v.get("topic").and_then(|t| t.as_str()),
+                Some("exec.unit.done") | Some("exec.wave.complete")
+            )
+        })
+        .count();
+    assert_eq!(
+        business, 0,
+        "an all-failed wave must not fabricate completion events; got {business}"
+    );
+}
+
+/// Regression: the review seam shares the same empty-batch tail, so a
+/// review wave with zero Completed slots must also reach
+/// `InjectedFailed` rather than stalling on `SalvageNotMerged`.
+#[test]
+fn review_wave_with_zero_completed_slots_injects_failed_without_precommitted_salvage() {
+    use crate::loop_runner::wave::{SupervisorFanInOutcome, run_supervisor_fan_in};
+    use ralph_core::supervisor::WaveKind;
+
+    // Review slots are SharedReadonly, so the shared exec fixture (which
+    // binds a worktree per slot) cannot be reused here.
+    let tmp = tempfile::tempdir().expect("temp dir");
+    let events_path = tmp.path().join(".ralph").join("events.jsonl");
+    let store = std::sync::Arc::new(InMemorySupervisorStore::new());
+    let context = crate::loop_runner::wave::ProductionBridgeContext {
+        loop_id: "empty-salvage-review".to_string(),
+        repo_root: std::path::PathBuf::from("/tmp/empty-salvage-repo"),
+        events_path: Some(events_path.clone()),
+        tasks_path: None,
+    };
+    let bridge =
+        crate::loop_runner::wave::CoordinatorSupervisorBridge::with_context_and_factory_with_cap(
+            store.clone() as std::sync::Arc<dyn SupervisorStore>,
+            context,
+            std::sync::Arc::new(DefaultWorktreeFactory),
+            1,
+            1,
+        );
+    let store_wave_id = bridge
+        .register_wave_if_absent(WaveKind::Review, "empty-salvage-review", 1, 0)
+        .expect("register");
+    bridge.store().try_dispatch_next(1).expect("dispatch");
+
+    bridge
+        .record_slot_failure(
+            &store_wave_id,
+            0,
+            ralph_core::supervisor::worker_outcome::REASON_WORKER_TIMEOUT,
+        )
+        .expect("s0 failure");
+
+    let bridge: std::sync::Arc<dyn SupervisorBridge> = std::sync::Arc::new(bridge);
+
+    let completed = ralph_core::CompletedWave {
+        wave_id: "empty-salvage-review".to_string(),
+        wave_total: 1,
+        results: vec![],
+        failures: vec![ralph_core::WaveFailure {
+            index: 0,
+            error: "worker did not report".to_string(),
+            duration: std::time::Duration::from_millis(1),
+            expected_dimension: None,
+            actual_dimension: None,
+        }],
+        duration: std::time::Duration::from_millis(1),
+        partial: true,
+        expected_source_hat: None,
+        assigned_dimensions: std::collections::HashMap::new(),
+        dimension_retry_counts: std::collections::HashMap::new(),
+        worker_events: vec![],
+    };
+    let detected = make_u3_wave("empty-salvage-review", 1, 1);
+
+    let outcome = run_supervisor_fan_in(&bridge, &completed, &detected, &events_path, 600, None);
+    assert_eq!(
+        outcome,
+        SupervisorFanInOutcome::InjectedFailed,
+        "a zero-completed review wave must inject review.wave.failed, not degrade to StoreError"
+    );
+}
+
 /// U1 Test 2 (GREEN — characterization of review path stability):
 /// the review wave kind has its own salvage helper
 /// (`review_salvage_collect_done_results` in `coordinator.rs`)

@@ -771,19 +771,19 @@ pub(crate) fn project_close_task_batch(
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut task_ids: Vec<String> = Vec::with_capacity(arr.len());
     for (idx, v) in arr.iter().enumerate() {
-        let id = v
-            .as_str()
-            .ok_or_else(|| {
-                format!(
-                    "close_task_batch: task_ids[{idx}] is not a string (got {})",
-                    type_of_value(v)
-                )
-            })?;
+        let id = v.as_str().ok_or_else(|| {
+            format!(
+                "close_task_batch: task_ids[{idx}] is not a string (got {})",
+                type_of_value(v)
+            )
+        })?;
         if id.is_empty() {
             return Err(format!("close_task_batch: task_ids[{idx}] is empty"));
         }
         if !seen.insert(id.to_string()) {
-            return Err(format!("close_task_batch: duplicate task_id '{id}' in batch"));
+            return Err(format!(
+                "close_task_batch: duplicate task_id '{id}' in batch"
+            ));
         }
         task_ids.push(id.to_string());
     }
@@ -863,7 +863,7 @@ pub(crate) fn project_close_task_batch(
 }
 
 fn type_of_value(v: &Value) -> &'static str {
-        match v {
+    match v {
         Value::Null => "null",
         Value::Bool(_) => "bool",
         Value::Number(_) => "number",
@@ -1241,7 +1241,11 @@ mod tests {
                 "fix-unit {} must keep started=None after batch close (was: written by unconditional start())",
                 t.id
             );
-            assert!(t.closed.is_some(), "fix-unit {} must record a close ts", t.id);
+            assert!(
+                t.closed.is_some(),
+                "fix-unit {} must record a close ts",
+                t.id
+            );
         }
     }
 

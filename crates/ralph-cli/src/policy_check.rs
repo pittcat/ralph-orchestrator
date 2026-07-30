@@ -2835,10 +2835,7 @@ pub fn check_forge_plan_ready_disk_consistency(
         .get("execution_plan_digest")
         .and_then(|v| v.as_str())
         .unwrap_or("");
-    if !payload_digest.is_empty()
-        && !disk_digest.is_empty()
-        && payload_digest != disk_digest
-    {
+    if !payload_digest.is_empty() && !disk_digest.is_empty() && payload_digest != disk_digest {
         return Err(ValidationError {
             payload_index: 0,
             field: "execution_plan_digest".to_string(),
@@ -5740,12 +5737,9 @@ units:
         payload["unit_tasks"][0]["execution_wave"] = serde_json::json!(0);
         let payload_str = serde_json::to_string(&payload).unwrap();
 
-        let err = check_forge_plan_ready_disk_consistency(
-            "forge.plan.ready",
-            &payload_str,
-            tmp.path(),
-        )
-        .expect_err("wave=0 must be rejected");
+        let err =
+            check_forge_plan_ready_disk_consistency("forge.plan.ready", &payload_str, tmp.path())
+                .expect_err("wave=0 must be rejected");
         assert_eq!(err.reason_code, "disk_payload_inconsistency");
         assert!(err.message.contains("execution_wave=0"));
         assert!(err.message.contains("forge:p:F1"));
@@ -5767,12 +5761,8 @@ units:
         // Payload declares a different digest than the disk file.
         let payload = aligned_payload(&plan_path, "different-digest-hash");
 
-        let err = check_forge_plan_ready_disk_consistency(
-            "forge.plan.ready",
-            &payload,
-            tmp.path(),
-        )
-        .expect_err("digest mismatch must be rejected");
+        let err = check_forge_plan_ready_disk_consistency("forge.plan.ready", &payload, tmp.path())
+            .expect_err("digest mismatch must be rejected");
         assert_eq!(err.reason_code, "disk_payload_inconsistency");
         assert_eq!(err.field, "execution_plan_digest");
         assert!(err.message.contains("different-digest-hash"));

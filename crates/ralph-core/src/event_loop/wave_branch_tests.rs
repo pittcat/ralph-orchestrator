@@ -47,7 +47,10 @@ mod tests {
     fn pf_wave_r3_exec_unit_done_is_non_transition() {
         let cfg = parallel_forge_flow();
         let at_loop = recover_from_exec(&cfg, &[]);
-        assert_eq!(at_loop, "development_loop", "pre-condition: must be at development_loop");
+        assert_eq!(
+            at_loop, "development_loop",
+            "pre-condition: must be at development_loop"
+        );
         let next = advance_plan_step(&cfg, &at_loop, "exec.unit.done");
         assert_eq!(
             next, None,
@@ -60,7 +63,10 @@ mod tests {
     fn pf_wave_r3_exec_unit_failed_is_non_transition() {
         let cfg = parallel_forge_flow();
         let at_loop = recover_from_exec(&cfg, &[]);
-        assert_eq!(at_loop, "development_loop", "pre-condition: must be at development_loop");
+        assert_eq!(
+            at_loop, "development_loop",
+            "pre-condition: must be at development_loop"
+        );
         let next = advance_plan_step(&cfg, &at_loop, "exec.unit.failed");
         assert_eq!(
             next, None,
@@ -73,7 +79,10 @@ mod tests {
     fn pf_wave_s3_exec_unit_ready_is_non_transition() {
         let cfg = parallel_forge_flow();
         let at_loop = recover_from_exec(&cfg, &[]);
-        assert_eq!(at_loop, "development_loop", "pre-condition: must be at development_loop");
+        assert_eq!(
+            at_loop, "development_loop",
+            "pre-condition: must be at development_loop"
+        );
         let next = advance_plan_step(&cfg, &at_loop, "exec.unit.ready");
         assert_eq!(
             next, None,
@@ -87,7 +96,10 @@ mod tests {
     fn pf_wave_s3_recover_fold_exec_unit_done_stays() {
         let cfg = parallel_forge_flow();
         let at_loop = recover_from_exec(&cfg, &[]);
-        assert_eq!(at_loop, "development_loop", "pre-condition: must be at development_loop");
+        assert_eq!(
+            at_loop, "development_loop",
+            "pre-condition: must be at development_loop"
+        );
         let recovered = recover_from_exec(&cfg, &["exec.unit.done"]);
         assert_eq!(
             recovered, "development_loop",
@@ -100,7 +112,10 @@ mod tests {
     fn pf_wave_s3_recover_fold_exec_unit_failed_stays() {
         let cfg = parallel_forge_flow();
         let at_loop = recover_from_exec(&cfg, &[]);
-        assert_eq!(at_loop, "development_loop", "pre-condition: must be at development_loop");
+        assert_eq!(
+            at_loop, "development_loop",
+            "pre-condition: must be at development_loop"
+        );
         let recovered = recover_from_exec(&cfg, &["exec.unit.failed"]);
         assert_eq!(
             recovered, "development_loop",

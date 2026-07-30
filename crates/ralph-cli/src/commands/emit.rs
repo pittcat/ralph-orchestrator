@@ -950,11 +950,7 @@ fn emit_command_with_root_and_hats(
     // the binding shadow so every downstream gate sees the same
     // effective topic.
     let topic_owned: String = match config.as_ref() {
-        Some(cfg) => ralph_core::config::resolve_precheck_emit_topic(
-            cfg,
-            hat.as_deref(),
-            topic,
-        ),
+        Some(cfg) => ralph_core::config::resolve_precheck_emit_topic(cfg, hat.as_deref(), topic),
         None => topic.to_string(),
     };
     let topic: &str = topic_owned.as_str();

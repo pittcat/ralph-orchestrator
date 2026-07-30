@@ -16,7 +16,7 @@
 | wave_id | |
 | wave_index | |
 | correction_round | |
-| trigger_topic | (`forge.wave.review.failed` / `forge.verification.failed`) |
+| trigger_topic | (`exec.wave.failed` / `forge.wave.review.failed` / `forge.verification.failed`) |
 | trigger_fingerprint | |
 
 ## 修复摘要

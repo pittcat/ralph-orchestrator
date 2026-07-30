@@ -420,7 +420,12 @@ schemas:
       failure_fingerprint:
         meaning: Failure fingerprint the fixer must address.
         source: forge-failure-handler.
-        fill_rule: Reads same fingerprint from failure event.
+        fill_rule: >-
+          Copy the fingerprint from the failure event. exec.wave.failed
+          carries none, so synthesise the stable form
+          `exec:<wave_id>:<sorted blocking_slots>:<sorted distinct
+          failure_class>` — an identical re-failure must produce an
+          identical fingerprint or duplicate-round detection breaks.
       correction_request_path:
         meaning: Correction request artifact.
         source: File at .ralph/forge/<plan-key>/waves/<wave_id>/corrections/round-<n>.md.
@@ -899,6 +904,46 @@ schemas:
       - wave_id
       - blocking_slots
       - reason
+    payload: json_object
+    field_docs:
+      wave_id:
+        meaning: Execution wave that failed fan-in.
+        source: Supervisor fan-in (runtime-injected).
+        fill_rule: Read-only for hats; never emitted by an agent.
+      blocking_slots:
+        meaning: Slot indices in Failed or Cancelled state.
+        source: Supervisor fan-in (runtime-injected).
+        fill_rule: Read-only for hats; never emitted by an agent.
+      reason:
+        meaning: >-
+          Wave-level failure reason: cancelled / timeout /
+          required_slot_failure / incomplete_evidence /
+          expected_total_zero.
+        source: Supervisor fan-in (runtime-injected).
+        fill_rule: Read-only for hats; never emitted by an agent.
+      slot_failures:
+        meaning: >-
+          Per-slot detail, one entry per blocking slot, each with
+          slot_index / reason / duration_ms / failure_class. The
+          failure_class labels (timeout / orphan_or_empty_result /
+          identity_mismatch / cancel / required_slot_failure /
+          unknown) are what the failure handler triages on.
+        source: Supervisor fan-in (runtime-injected).
+        fill_rule: Read-only for hats; never emitted by an agent.
+      salvaged_slots:
+        meaning: >-
+          Completed slot indices whose business events were merged to
+          the main ledger before this failure. Their Units are done and
+          must stay out of any correction scope.
+        source: Supervisor fan-in (runtime-injected).
+        fill_rule: Read-only for hats; never emitted by an agent.
+      redrive_slots:
+        meaning: >-
+          Blocking slots whose reason is classified retryable.
+          Informational only — redrive is an operator command, no hat
+          can re-dispatch a worker.
+        source: Supervisor fan-in (runtime-injected).
+        fill_rule: Read-only for hats; never emitted by an agent.
 
   work.failed:
     required_fields:

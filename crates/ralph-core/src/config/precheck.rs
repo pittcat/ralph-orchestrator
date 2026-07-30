@@ -173,8 +173,9 @@ pub fn inject_precheck_event_schemas(config: &mut crate::config::RalphConfig, to
     // proposed entry. The desugar runs after the guarded entry
     // is already in the map (preset YAML + inline_schemas merge),
     // so this read is a plain lookup with no borrow juggling.
-    let guarded_shape: Option<(Option<PayloadType>, Vec<String>)> =
-        schemas.get(topic).map(|s| (s.payload.clone(), s.required_fields.clone()));
+    let guarded_shape: Option<(Option<PayloadType>, Vec<String>)> = schemas
+        .get(topic)
+        .map(|s| (s.payload.clone(), s.required_fields.clone()));
 
     let proposed = format!("{topic}.proposed");
     schemas.entry(proposed).or_insert_with(|| {
@@ -345,8 +346,7 @@ mod resolve_precheck_emit_topic_tests {
     #[test]
     fn resolve_is_idempotent_for_proposed_suffix() {
         let cfg = config_with(&["work.failed.proposed"], true, &["work.failed"]);
-        let resolved =
-            resolve_precheck_emit_topic(&cfg, Some("executor"), "work.failed.proposed");
+        let resolved = resolve_precheck_emit_topic(&cfg, Some("executor"), "work.failed.proposed");
         assert_eq!(
             resolved, "work.failed.proposed",
             "S2: must not double-suffix"
@@ -358,10 +358,7 @@ mod resolve_precheck_emit_topic_tests {
     fn resolve_leaves_topic_unchanged_when_precheck_disabled() {
         let cfg = config_with(&["work.failed.proposed"], false, &["work.failed"]);
         let resolved = resolve_precheck_emit_topic(&cfg, Some("executor"), "work.failed");
-        assert_eq!(
-            resolved, "work.failed",
-            "S4 disabled: no rewrite"
-        );
+        assert_eq!(resolved, "work.failed", "S4 disabled: no rewrite");
     }
 
     // S4 (variant): empty rules map.
@@ -369,10 +366,7 @@ mod resolve_precheck_emit_topic_tests {
     fn resolve_leaves_topic_unchanged_when_rules_empty() {
         let cfg = config_with(&["work.failed.proposed"], true, &[]);
         let resolved = resolve_precheck_emit_topic(&cfg, Some("executor"), "work.failed");
-        assert_eq!(
-            resolved, "work.failed",
-            "S4 empty rules: no rewrite"
-        );
+        assert_eq!(resolved, "work.failed", "S4 empty rules: no rewrite");
     }
 
     // S4 (variant): kill-switch flips `precheck_runtime_enabled` to
@@ -382,10 +376,7 @@ mod resolve_precheck_emit_topic_tests {
         let _guard = precheck_kill_switch_guard();
         let cfg = config_with(&["work.failed.proposed"], true, &["work.failed"]);
         let resolved = resolve_precheck_emit_topic(&cfg, Some("executor"), "work.failed");
-        assert_eq!(
-            resolved, "work.failed",
-            "S4 kill-switch: no rewrite"
-        );
+        assert_eq!(resolved, "work.failed", "S4 kill-switch: no rewrite");
     }
 
     // S5: non-producer hat is not promoted.

@@ -2873,13 +2873,16 @@ mod tests {
         for hat_id in target_hats {
             let hat_id_typed = HatId::new(hat_id);
             let Some(hat_cfg) = registry.get_config(&hat_id_typed) else {
-                problems.push(format!("hat `{hat_id}` missing from parallel-forge registry"));
+                problems.push(format!(
+                    "hat `{hat_id}` missing from parallel-forge registry"
+                ));
                 continue;
             };
-            let filter_events: std::collections::BTreeSet<&str> = match hat_cfg.event_filter.as_ref() {
-                Some(f) => f.events.iter().map(String::as_str).collect(),
-                None => std::collections::BTreeSet::new(),
-            };
+            let filter_events: std::collections::BTreeSet<&str> =
+                match hat_cfg.event_filter.as_ref() {
+                    Some(f) => f.events.iter().map(String::as_str).collect(),
+                    None => std::collections::BTreeSet::new(),
+                };
             for trigger in &hat_cfg.triggers {
                 if !filter_events.contains(trigger.as_str()) {
                     problems.push(format!(
@@ -2924,10 +2927,7 @@ mod tests {
         let mut seen: Vec<u32> = Vec::new();
         for line in body.lines() {
             let trimmed = line.trim_start();
-            let digits: String = trimmed
-                .chars()
-                .take_while(|c| c.is_ascii_digit())
-                .collect();
+            let digits: String = trimmed.chars().take_while(|c| c.is_ascii_digit()).collect();
             if digits.is_empty() {
                 continue;
             }
@@ -2942,8 +2942,7 @@ mod tests {
             }
         }
         // Find any number that appears more than once.
-        let mut counts: std::collections::BTreeMap<u32, u32> =
-            std::collections::BTreeMap::new();
+        let mut counts: std::collections::BTreeMap<u32, u32> = std::collections::BTreeMap::new();
         for n in &seen {
             *counts.entry(*n).or_insert(0) += 1;
         }
@@ -2994,7 +2993,10 @@ mod tests {
             .expect("forge.plan.ready schema must exist");
         for required in ["execution_plan_digest", "wave_total"] {
             assert!(
-                forge_plan_ready.required_fields.iter().any(|f| f == required),
+                forge_plan_ready
+                    .required_fields
+                    .iter()
+                    .any(|f| f == required),
                 "forge.plan.ready schema must require `{required}` (plan 005 U2/G2/G3)"
             );
         }
