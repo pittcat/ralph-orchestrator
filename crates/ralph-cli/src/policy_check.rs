@@ -1108,7 +1108,22 @@ fn check_cli_flow_step_scope(
     let active_main_ledger = OperationContext::detect(workspace_root.to_path_buf())
         .resolve_accepted_events_path()
         .unwrap_or_else(|| default_events_path.clone());
-    let current = if let Some(step) = load_flow_authority_current_step(workspace_root) {
+    // Plan 2026-07-31-001: pass the active loop_id (read from
+    // `.ralph/current-loop-id`) so `load_flow_authority_current_step`
+    // ignores stale entries left by a previous loop. Without this
+    // filter, `ralph emit --policy-check` would inherit the
+    // previous loop's terminal step (e.g. `finalize`) and reject
+    // the very first emit of the new loop via `flow_unknown_emit`
+    // even though the resident EventLoop's in-memory
+    // `current_plan_step` is correct — a dual-source drift the CLI
+    // surfaces but the resident loop does not.
+    let active_loop_id = std::fs::read_to_string(workspace_root.join(".ralph/current-loop-id"))
+        .ok()
+        .map(|id| id.trim().to_string())
+        .filter(|id| !id.is_empty());
+    let current = if let Some(step) =
+        load_flow_authority_current_step(workspace_root, active_loop_id.as_deref())
+    {
         if step.is_empty() {
             recover_from_workspace_state(config, workspace_root)
         } else {
@@ -1188,6 +1203,19 @@ fn recover_from_workspace_state(
 /// read another loop's ledger. When `events_file` is `None`
 /// we fall back to the default location, preserving the
 /// pre-P1-8 behaviour for single-loop invocations.
+///
+/// Plan 2026-07-31-001 (regression test for implementation-review
+/// runs primary-20260731-131515 + primary-20260731-133437):
+/// entries with `"system_injected": true` are runtime
+/// fallbacks (e.g. `scope.blocked` injected when a hat emits
+/// no events) and MUST NOT be treated as accepted topics by
+/// `recover_current_plan_step`. Without this filter the CLI
+/// advances the recovered step to `finalize` because
+/// `scope.blocked ∈ finalize.on_any_of`, then rejects the
+/// fresh `scope.ready.proposed` emit via `flow_unknown_emit`.
+/// The filter matches the EventLoop's own accepted-event rule
+/// (the resident loop only calls
+/// `append_flow_authority_snapshot` from the accept branch).
 fn read_main_ledger_topics(workspace_root: &Path, events_file: Option<&Path>) -> Vec<String> {
     let path = match events_file {
         Some(p) => p.to_path_buf(),
@@ -1199,12 +1227,79 @@ fn read_main_ledger_topics(workspace_root: &Path, events_file: Option<&Path>) ->
     contents
         .lines()
         .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        // Plan 2026-07-31-001: drop runtime-injected fallbacks.
+        // They carry `"system_injected": true` (see
+        // `inject_default_publishes_topic` in event_loop/mod.rs);
+        // treating them as accepted topics would advance the
+        // recovered step to a terminal value and reject every
+        // fresh emit of the next loop iteration.
+        .filter(|v| v.get("system_injected").and_then(|b| b.as_bool()) != Some(true))
         .filter_map(|v| {
             v.get("topic")
                 .and_then(|t| t.as_str())
                 .map(|s| s.to_string())
         })
         .collect()
+}
+
+#[cfg(test)]
+mod read_main_ledger_topics_tests {
+    use super::*;
+    use std::io::Write;
+    use tempfile::TempDir;
+
+    fn write_events(dir: &TempDir, lines: &[&str]) -> std::path::PathBuf {
+        let path = dir.path().join(".ralph").join("events.jsonl");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let mut f = std::fs::File::create(&path).unwrap();
+        for line in lines {
+            writeln!(f, "{line}").unwrap();
+        }
+        path
+    }
+
+    #[test]
+    fn drops_system_injected_fallback_topics() {
+        // Plan 2026-07-31-001 regression: a runtime-injected
+        // `scope.blocked` fallback (system_injected=true) must NOT
+        // be replayed as an accepted topic. Otherwise
+        // `recover_current_plan_step` advances the recovered step
+        // to `finalize` and the next loop's first `scope.ready`
+        // emit is rejected with `flow_unknown_emit`.
+        let dir = TempDir::new().unwrap();
+        let path = write_events(
+            &dir,
+            &[
+                r#"{"topic":"review.start"}"#,
+                r#"{"topic":"scope.blocked","system_injected":true}"#,
+                r#"{"topic":"LOOP_COMPLETE"}"#,
+            ],
+        );
+        let topics = read_main_ledger_topics(dir.path(), Some(path.as_path()));
+        assert_eq!(
+            topics,
+            vec!["review.start".to_string(), "LOOP_COMPLETE".to_string()],
+            "system_injected=true entries must be filtered out"
+        );
+    }
+
+    #[test]
+    fn keeps_normal_topics_and_absent_flag() {
+        let dir = TempDir::new().unwrap();
+        let path = write_events(
+            &dir,
+            &[
+                r#"{"topic":"review.start"}"#,
+                r#"{"topic":"scope.ready","system_injected":false}"#,
+            ],
+        );
+        let topics = read_main_ledger_topics(dir.path(), Some(path.as_path()));
+        assert_eq!(
+            topics,
+            vec!["review.start".to_string(), "scope.ready".to_string()],
+            "system_injected=false / absent must be retained"
+        );
+    }
 }
 
 /// 2026-06-28-002 U7: append a `repair_dispatch` envelope to

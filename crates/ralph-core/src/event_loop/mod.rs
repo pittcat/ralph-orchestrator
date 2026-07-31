@@ -14587,6 +14587,30 @@ impl EventLoop {
             "topic".to_string(),
             serde_json::Value::String(topic.to_string()),
         );
+        // Plan 2026-07-31-001 (root cause from implementation-review
+        // runs primary-20260731-131515 + primary-20260731-133437):
+        // stamp each accepted-step entry with the active loop_id so a
+        // new loop cold-start on the same workspace does not inherit
+        // the previous loop's terminal step. Without the stamp,
+        // `load_flow_authority_current_step` (consumed by
+        // `ralph emit --policy-check` and by R7 restart recovery)
+        // returns the last entry of the previous loop — e.g.
+        // `finalize` — and the very first emit of the new loop
+        // (`scope.ready.proposed`) hits `flow_unknown_emit` because
+        // `finalize.allowed_emits = [LOOP_COMPLETE]`. The CLI uses
+        // the ledger value for `FlowStepScopeStage::current_step`
+        // even on the resident EventLoop's own `--policy-check`
+        // path; the resident loop's in-memory `current_plan_step`
+        // is initialised to `initial_current_plan_step` and is not
+        // synchronised with the ledger — the stamp makes the
+        // ledger partitionable so each loop sees only its own
+        // authoritative step transitions.
+        if let Some(loop_id) = self.current_loop_id() {
+            entry.insert(
+                "loop_id".to_string(),
+                serde_json::Value::String(loop_id),
+            );
+        }
         let line = serde_json::Value::Object(entry).to_string();
         let Ok(mut f) = std::fs::OpenOptions::new()
             .create(true)
@@ -15458,8 +15482,34 @@ pub fn recover_current_plan_step(config: &RalphConfig, accepted_topics: &[&str])
 /// restart recovery reads the same ledger so they never disagree
 /// on the current step — and so rejected events, which never reach
 /// the accept branch, do not pollute the recovered step. Returns
-/// `None` if the file is missing or contains no accepted entries.
-pub fn load_flow_authority_current_step(workspace_root: &std::path::Path) -> Option<String> {
+/// `None` if the file is missing or contains no accepted entries
+/// for the active `loop_id`.
+///
+/// Plan 2026-07-31-001 (root cause from implementation-review runs
+/// primary-20260731-131515 + primary-20260731-133437): when the
+/// resident EventLoop appends a snapshot it also stamps the active
+/// `loop_id` (read from the `.ralph/current-loop-id` marker).
+/// Without the stamp, a new loop cold-start on the same workspace
+/// would inherit the previous loop's terminal step (e.g.
+/// `finalize`) and reject every fresh emit via `flow_unknown_emit`
+/// — `ralph emit --policy-check` reads the ledger independently of
+/// the resident loop's in-memory `current_plan_step`, so the dual
+/// views drifted across loops and the very first emit of each
+/// implementation-review run failed.
+///
+/// The `loop_id` filter here makes the recover semantics
+/// loop-scoped: only entries belonging to the current loop are
+/// considered; older loops' entries are treated as absent. Worktree
+/// loops and primary loops share the same marker file, but each
+/// writes its own `loop_id` so the filter cleanly partitions them.
+/// When `loop_id` is `None` (no marker on disk) the function falls
+/// back to the historical loop-blind read for backward
+/// compatibility with tests that author entries without a marker
+/// or with entries authored before the stamp.
+pub fn load_flow_authority_current_step(
+    workspace_root: &std::path::Path,
+    loop_id: Option<&str>,
+) -> Option<String> {
     let path = workspace_root.join(".ralph/flow-authority.jsonl");
     let contents = std::fs::read_to_string(&path).ok()?;
     let mut last: Option<String> = None;
@@ -15470,9 +15520,24 @@ pub fn load_flow_authority_current_step(workspace_root: &std::path::Path) -> Opt
         let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else {
             continue;
         };
-        if let Some(step) = v.get("step").and_then(|s| s.as_str()) {
-            last = Some(step.to_string());
+        let Some(step) = v.get("step").and_then(|s| s.as_str()) else {
+            continue;
+        };
+        // Plan 2026-07-31-001: when the caller passes a `loop_id`,
+        // skip entries that belong to a different loop. Entries
+        // without a `loop_id` field predate the stamp and are
+        // accepted unconditionally (legacy behaviour) — this lets
+        // pre-fix runs on the same workspace stay readable until
+        // the first new entry overwrites the file.
+        if let Some(active) = loop_id {
+            let entry_loop = v.get("loop_id").and_then(|s| s.as_str());
+            if let Some(entry_loop) = entry_loop {
+                if entry_loop != active {
+                    continue;
+                }
+            }
         }
+        last = Some(step.to_string());
     }
     last
 }
@@ -16106,8 +16171,20 @@ mod p0_4_flow_authority_ledger_tests {
     use super::*;
     use std::path::PathBuf;
 
-    fn workspace_root() -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("ralph-p0-4-flow-auth-{}", std::process::id()));
+    // Plan 2026-07-31-001 (nextest process-per-test
+    // compatibility): the prior helper shared one directory
+    // per process id, which caused races when nextest ran tests
+    // in parallel. Each test now gets its own sub-directory
+    // rooted at the shared per-process temp dir; the helper
+    // accepts the test name so two tests never collide on
+    // `flow-authority.jsonl` writes. The `test_name` is the
+    // `&str` the caller passes — usually the literal test fn
+    // name to keep a 1:1 audit trail between the test and its
+    // scratch space.
+    fn workspace_root(test_name: &str) -> PathBuf {
+        let dir = std::env::temp_dir()
+            .join(format!("ralph-p0-4-flow-auth-{}", std::process::id()))
+            .join(test_name);
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(dir.join(".ralph")).unwrap();
         dir
@@ -16115,14 +16192,14 @@ mod p0_4_flow_authority_ledger_tests {
 
     #[test]
     fn load_returns_none_when_ledger_missing() {
-        let root = workspace_root();
-        let got = load_flow_authority_current_step(&root);
+        let root = workspace_root("load_returns_none_when_ledger_missing");
+        let got = load_flow_authority_current_step(&root, None);
         assert!(got.is_none(), "missing ledger must yield None");
     }
 
     #[test]
     fn load_returns_last_step_from_ledger() {
-        let root = workspace_root();
+        let root = workspace_root("load_returns_last_step_from_ledger");
         let path = root.join(".ralph/flow-authority.jsonl");
         std::fs::write(
             &path,
@@ -16131,13 +16208,13 @@ mod p0_4_flow_authority_ledger_tests {
              {\"step\":\"synth_await\",\"topic\":\"review.wave.complete\"}\n",
         )
         .unwrap();
-        let got = load_flow_authority_current_step(&root);
+        let got = load_flow_authority_current_step(&root, None);
         assert_eq!(got.as_deref(), Some("synth_await"));
     }
 
     #[test]
     fn load_skips_blank_and_malformed_lines() {
-        let root = workspace_root();
+        let root = workspace_root("load_skips_blank_and_malformed_lines");
         let path = root.join(".ralph/flow-authority.jsonl");
         std::fs::write(
             &path,
@@ -16146,7 +16223,7 @@ mod p0_4_flow_authority_ledger_tests {
              {\"step\":\"synth_await\"}\n",
         )
         .unwrap();
-        let got = load_flow_authority_current_step(&root);
+        let got = load_flow_authority_current_step(&root, None);
         assert_eq!(got.as_deref(), Some("synth_await"));
     }
 
@@ -16163,7 +16240,7 @@ mod p0_4_flow_authority_ledger_tests {
         // `advance_plan_step`. The post-fix CLI reads only the
         // accepted ledger; the test pins that rejected events
         // never reach this file.
-        let root = workspace_root();
+        let root = workspace_root("rejected_events_do_not_pollute_authority");
         let path = root.join(".ralph/flow-authority.jsonl");
         // Simulate the EventLoop having accepted exactly one
         // event: scope.ready, which advanced review_wave.
@@ -16173,7 +16250,7 @@ mod p0_4_flow_authority_ledger_tests {
              {\"step\":\"review_wave\",\"topic\":\"scope.ready\"}\n",
         )
         .unwrap();
-        let got = load_flow_authority_current_step(&root);
+        let got = load_flow_authority_current_step(&root, None);
         assert_eq!(got.as_deref(), Some("review_wave"));
     }
 
@@ -16184,7 +16261,7 @@ mod p0_4_flow_authority_ledger_tests {
     /// ledger must produce the same step.
     #[test]
     fn restart_consistency_across_reads() {
-        let root = workspace_root();
+        let root = workspace_root("restart_consistency_across_reads");
         let path = root.join(".ralph/flow-authority.jsonl");
         std::fs::write(
             &path,
@@ -16193,10 +16270,88 @@ mod p0_4_flow_authority_ledger_tests {
              {\"step\":\"synth_await\",\"topic\":\"review.wave.complete\"}\n",
         )
         .unwrap();
-        let a = load_flow_authority_current_step(&root);
-        let b = load_flow_authority_current_step(&root);
+        let a = load_flow_authority_current_step(&root, None);
+        let b = load_flow_authority_current_step(&root, None);
         assert_eq!(a, b, "restart must observe the same authority");
         assert_eq!(a.as_deref(), Some("synth_await"));
+    }
+
+    // Plan 2026-07-31-001 regression tests: the loop_id filter
+    // must partition flow-authority.jsonl entries by their active
+    // loop so a new loop cold-start on the same workspace does NOT
+    // inherit the previous loop's terminal step (root cause:
+    // implementation-review runs primary-20260731-131515 +
+    // primary-20260731-133437 both failed `ralph emit
+    // scope.ready.proposed --policy-check` with
+    // `flow_unknown_emit` because the previous loop's `finalize`
+    // entry was carried over via the loop-blind read).
+
+    #[test]
+    fn load_filters_entries_by_loop_id() {
+        let root = workspace_root("load_filters_entries_by_loop_id");
+        let path = root.join(".ralph/flow-authority.jsonl");
+        std::fs::write(
+            &path,
+            "{\"step\":\"scope_freeze\",\"topic\":\"scope.ready\",\"loop_id\":\"loop-A\"}\n\
+             {\"step\":\"review_wave\",\"topic\":\"scope.ready\",\"loop_id\":\"loop-A\"}\n\
+             {\"step\":\"finalize\",\"topic\":\"scope.blocked\",\"loop_id\":\"loop-B\"}\n",
+        )
+        .unwrap();
+        // loop-A caller — must see the latest loop-A entry,
+        // NOT the stale `finalize` from loop-B.
+        let a = load_flow_authority_current_step(&root, Some("loop-A"));
+        assert_eq!(
+            a.as_deref(),
+            Some("review_wave"),
+            "loop-A caller must ignore loop-B entries"
+        );
+        // loop-B caller — must see the loop-B entry.
+        let b = load_flow_authority_current_step(&root, Some("loop-B"));
+        assert_eq!(b.as_deref(), Some("finalize"));
+        // No loop_id passed (legacy / tests / CLI sub-process
+        // without a marker on disk) — last entry wins (loop-B's
+        // finalize) so older flows and tests keep working.
+        let none = load_flow_authority_current_step(&root, None);
+        assert_eq!(none.as_deref(), Some("finalize"));
+    }
+
+    #[test]
+    fn load_keeps_unstamped_entries_for_backward_compat() {
+        let root = workspace_root("load_keeps_unstamped_entries_for_backward_compat");
+        let path = root.join(".ralph/flow-authority.jsonl");
+        std::fs::write(
+            &path,
+            "{\"step\":\"scope_freeze\",\"topic\":\"scope.ready\"}\n\
+             {\"step\":\"review_wave\",\"topic\":\"scope.ready\"}\n",
+        )
+        .unwrap();
+        let got = load_flow_authority_current_step(&root, Some("loop-C"));
+        assert_eq!(
+            got.as_deref(),
+            Some("review_wave"),
+            "unstamped entries must remain readable so pre-fix loops and tests don't break"
+        );
+    }
+
+    #[test]
+    fn load_returns_none_for_empty_loop_scoped_ledger() {
+        let root = workspace_root("load_returns_none_for_empty_loop_scoped_ledger");
+        let path = root.join(".ralph/flow-authority.jsonl");
+        std::fs::write(
+            &path,
+            "{\"step\":\"finalize\",\"topic\":\"scope.blocked\",\"loop_id\":\"loop-A\"}\n",
+        )
+        .unwrap();
+        // loop-B caller — no entry for this loop — must return
+        // None (fall back to initial_current_plan_step on the
+        // consumer side) so `ralph emit --policy-check` does not
+        // pick up another loop's terminal step.
+        let got = load_flow_authority_current_step(&root, Some("loop-B"));
+        assert!(
+            got.is_none(),
+            "loop-B caller must see no entries; the loop-A `finalize` \
+             must not leak across loops"
+        );
     }
 }
 
