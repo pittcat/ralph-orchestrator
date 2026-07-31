@@ -4287,10 +4287,20 @@ pub(crate) fn merge_completed_review_slots_to_main(
             // never eat another wave's `review.unit.done`. Dropping the
             // wave id here was what made cross-source reconciliation
             // unsafe before U3.
+            // 2026-07-31-002 plan U0: salvage fingerprint stability — drop
+            // the `ts` field so re-tick salvages produce byte-identical lines.
+            // `fingerprint_lines` (line 4542) hashes the serialized row bytes;
+            // a per-call `Utc::now()` made the fingerprint drift each tick,
+            // tripping the strict rusqlite `commit_salvage_projection` gate
+            // (rusqlite.rs:1240-1248). `Event` does not carry a `ts` field
+            // (see crates/ralph-proto/src/event.rs:8), so we cannot backfill
+            // a stable timestamp; omitting `ts` is the fingerprint-stable
+            // choice and does not break downstream consumers
+            // (compute_missing_dimensions reads topic/payload/wave_id/
+            // wave_index, never `ts`).
             let record = serde_json::json!({
                 "topic": event.topic.as_str(),
                 "payload": event.payload.as_str(),
-                "ts": chrono::Utc::now().to_rfc3339(),
                 "hat": "review-worker",
                 "source": "review-worker",
                 "wave_id": event.wave_id,
@@ -4354,10 +4364,13 @@ fn merge_completed_exec_fix_slots_to_main(
                 .as_ref()
                 .map(|h| h.as_str())
                 .unwrap_or("worker");
+            // 2026-07-31-002 plan U0: same rationale as the review arm —
+            // keep the exec/fix salvage fingerprint stable across retry
+            // ticks so the strict rusqlite `commit_salvage_projection`
+            // gate accepts the re-tick salvage (rusqlite.rs:1240-1248).
             let record = serde_json::json!({
                 "topic": event.topic.as_str(),
                 "payload": event.payload.as_str(),
-                "ts": chrono::Utc::now().to_rfc3339(),
                 "hat": attribution,
                 "source": attribution,
                 "wave_id": event.wave_id,
