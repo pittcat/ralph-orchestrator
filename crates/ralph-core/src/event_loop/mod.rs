@@ -9599,6 +9599,23 @@ impl EventLoop {
                 // coordination event before it reaches the EventBus,
                 // leaving the integrator hat's pending queue empty.
                 if event.system_injected == Some(true) {
+                    // Plan 2026-07-31-001 fix: also count system-injected
+                    // events as progress so the post-turn stall detector
+                    // does not false-positive fail-close when
+                    // `check_default_publishes` injects `<X>.proposed`
+                    // into the JSONL for a downstream `precheck-<X>` gate
+                    // hat to consume. Without this, the gate hat's PTY
+                    // session races the fail-close: while it runs its
+                    // LLM-as-judge evaluation, the next
+                    // `process_events_from_jsonl` re-reads the injected
+                    // event via the bypass branch above, and the
+                    // subsequent `run_stall_detector_*` sees
+                    // `stall_detector_had_events == false`, incrementing
+                    // `consecutive_no_progress_turns` until it hits
+                    // `max_steward_iterations` and emits `plan.blocked`
+                    // before the gate has a chance to emit `work.failed`
+                    // or `work.failed.rejected`.
+                    self.state.stall_detector_had_events = true;
                     accepted.push(event);
                     continue;
                 }
