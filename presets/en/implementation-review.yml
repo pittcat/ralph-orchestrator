@@ -100,28 +100,6 @@ event_loop:
   # spawn in one round: effective_cap = min(hat.concurrency, this).
   supervisor:
     max_concurrent_workers: 6
-  # Precheck gate for scope.ready (plan 2026-07-31-001). The
-  # gate hat is synthesized by normalize(); scope-preparer is
-  # auto-rewritten to emit `scope.ready.proposed`, and the gate
-  # runs the JSON parse + line-strip digest re-verify before
-  # forwarding to `scope.ready`. On reject the producer gets
-  # `retry_budget` round trips to fix the manifest before the
-  # event is escalated to `scope.blocked`. Mirrors the
-  # `precheck` block used by `ce-executor-pipeline.yml`.
-  precheck:
-    enabled: true
-    rules:
-      scope.ready:
-        prompt:
-          - "Step 1: read the `scope_manifest_path` field from the proposed payload; run `jq -e . <scope_manifest_path>` to confirm the manifest is valid JSON."
-          - "Step 2: re-run `grep -v '\"scope_digest\"' <scope_manifest_path> | sha256sum | awk '{print $1}'` (or `shasum -a 256` on macOS without sha256sum) and verify it equals the payload's `scope_digest` field."
-          - "Step 3: confirm `dirty_verdict` is one of `clean | blocked` and `first_implementation_commit_sha` / `resolved_baseline_sha` / `review_head_sha` are 40-char git SHAs."
-          - "Step 4: if ALL checks pass, re-emit `scope.ready` with the payload forwarded VERBATIM (every field copied exactly). If ANY check fails, emit `scope.ready.rejected` with `reason` (one actionable sentence naming the failing check)."
-        on_fail:
-          target: "scope-preparer"
-          retry_budget: 3
-          on_exhausted: "scope.blocked(reason=precheck_failed)"
-          reason: "scope_manifest_invalid_or_digest_mismatch"
   event_policy:
     enabled: true
     mode: enforce
@@ -735,8 +713,6 @@ mechanism:
         "on": review.start
         allowed_emits:
           - scope.ready
-          - scope.ready.proposed
-          - scope.ready.rejected
           - scope.blocked
       - id: review_wave
         kind: side_effect
