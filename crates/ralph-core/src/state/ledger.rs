@@ -531,10 +531,33 @@ impl StateLedger {
             std::fs::create_dir_all(parent)?;
         }
 
+        // RTF-001: ensure the existing file ends on a newline boundary
+        // before appending. A crash mid-append can leave a torn last line
+        // with no trailing `\n`; a bare `O_APPEND` would then fuse the new
+        // record onto that torn tail, producing an unrecoverable line. The
+        // caller already holds the exclusive outbox lock, so no other
+        // writer can interleave here. Use a separate read handle for the
+        // last-byte probe to avoid seeking an append-mode file.
+        let needs_newline = match std::fs::metadata(&outbox_path) {
+            Ok(meta) if meta.len() > 0 => {
+                use std::io::{Read, Seek, SeekFrom};
+                let mut probe = std::fs::File::open(&outbox_path)?;
+                probe.seek(SeekFrom::End(-1))?;
+                let mut last = [0u8; 1];
+                probe.read_exact(&mut last)?;
+                last[0] != b'\n'
+            }
+            _ => false,
+        };
+
         let mut file = std::fs::OpenOptions::new()
             .create(true)
             .append(true)
             .open(&outbox_path)?;
+        if needs_newline {
+            file.write_all(b"\n")?;
+            file.sync_all()?;
+        }
         let mut line = serde_json::to_string(entry).map_err(|e| {
             std::io::Error::new(
                 std::io::ErrorKind::InvalidData,

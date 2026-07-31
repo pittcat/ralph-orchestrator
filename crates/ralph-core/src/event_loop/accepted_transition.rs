@@ -223,24 +223,37 @@ impl AcceptedTransition {
 
     /// Check whether a `transition_id` already exists in the outbox.
     ///
-    /// Reads the durable outbox from `workspace` and returns `true` if
-    /// any entry carries the given `transition_id`. This is the
+    /// Reads the durable outbox from `workspace` and returns `Ok(true)`
+    /// if any entry carries the given `transition_id`. This is the
     /// deduplication primitive used by [`Self::commit_idempotent`].
-    pub fn is_committed(workspace: &Path, transition_id: &str) -> bool {
+    ///
+    /// `Ok(false)` means the transition is genuinely not committed
+    /// (absent outbox, or not present among the salvageable entries).
+    /// `Err` means the outbox could not be read for a real filesystem
+    /// reason (RTF-001: callers must not swallow this into "not
+    /// committed", which silently degraded exactly-once to at-least-
+    /// twice on a corrupted outbox).
+    pub fn is_committed(
+        workspace: &Path,
+        transition_id: &str,
+    ) -> std::io::Result<bool> {
         read_outbox(workspace)
             .map(|entries| entries.iter().any(|e| e.transition_id == transition_id))
-            .unwrap_or(false)
     }
 
     /// Look up a committed outbox entry by `transition_id`.
     ///
-    /// Returns `None` when the transition has not been committed yet.
-    fn find_committed(workspace: &Path, transition_id: &str) -> Option<OutboxEntry> {
-        read_outbox(workspace).ok().and_then(|entries| {
-            entries
-                .into_iter()
-                .find(|e| e.transition_id == transition_id)
-        })
+    /// Returns `Ok(None)` when the transition has not been committed
+    /// yet, `Ok(Some(entry))` when it has, and `Err` on a genuine
+    /// filesystem read failure (RTF-001: the caller fails closed on
+    /// `Err` rather than treating an unreadable outbox as "not
+    /// committed").
+    fn find_committed(
+        workspace: &Path,
+        transition_id: &str,
+    ) -> std::io::Result<Option<OutboxEntry>> {
+        read_outbox(workspace)
+            .map(|entries| entries.into_iter().find(|e| e.transition_id == transition_id))
     }
 
     /// Commit a business transition with idempotency.
@@ -333,12 +346,27 @@ impl AcceptedTransition {
         let workspace = ledger.workspace();
 
         // 2. Idempotency check: if already committed, handle replay.
-        if let Some(existing) = Self::find_committed(workspace, &transition_id) {
-            // Committed — dedup: no second outbox write, no re-publish,
-            // no materialize. The `delivered` flag is metadata for
-            // downstream ack tracking; it does not change the dedup
-            // behaviour of `commit_idempotent`.
-            return Ok(existing);
+        //
+        // RTF-001: a genuine outbox read failure is fail-closed. We
+        // refuse to commit (and therefore never publish) rather than
+        // blindly treating an unreadable outbox as "not committed" —
+        // the old swallow turned exactly-once into at-least-twice and
+        // permanently poisoned dedup for the whole loop on any torn
+        // outbox line.
+        match Self::find_committed(workspace, &transition_id) {
+            Ok(Some(existing)) => {
+                // Committed — dedup: no second outbox write, no
+                // re-publish, no materialize. The `delivered` flag is
+                // metadata for downstream ack tracking; it does not
+                // change the dedup behaviour of `commit_idempotent`.
+                return Ok(existing);
+            }
+            Ok(None) => {}
+            Err(e) => {
+                return Err(TransitionError::CommitFailed {
+                    source: format!("outbox read failed: {e}"),
+                });
+            }
         }
 
         // Validate before materializing so a rejected transition has no
@@ -423,8 +451,16 @@ pub fn outbox_path(workspace: &Path) -> PathBuf {
 /// Read all outbox entries for a workspace.
 ///
 /// Returns an empty `Vec` when the outbox file does not exist yet.
-/// Blank lines are skipped. A malformed line is an error (the outbox
-/// is append-only and must never contain a torn record).
+/// Blank lines are skipped. On a malformed line the read **salvages**:
+/// the bad line is isolated (skipped) and every well-formed line — both
+/// before and after it — is kept. The outbox is append-only + fsync'd
+/// and only ever atomically rewritten by [`AcceptedTransition::ack`], so
+/// the only realistic corruption is an incomplete (torn) append. Keeping
+/// all salvageable entries — instead of failing the whole file — keeps
+/// dedup working for every committed transition (RTF-001: the old
+/// whole-file `Err` made one torn line poison dedup for the entire loop).
+/// A genuine filesystem error (e.g. the path is a directory) still
+/// propagates as `Err`.
 pub fn read_outbox(workspace: &Path) -> std::io::Result<Vec<OutboxEntry>> {
     let path = outbox_path(workspace);
     let body = match std::fs::read_to_string(&path) {
@@ -438,9 +474,15 @@ pub fn read_outbox(workspace: &Path) -> std::io::Result<Vec<OutboxEntry>> {
         if trimmed.is_empty() {
             continue;
         }
-        let entry: OutboxEntry = serde_json::from_str(trimmed)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?;
-        entries.push(entry);
+        match serde_json::from_str::<OutboxEntry>(trimmed) {
+            Ok(entry) => entries.push(entry),
+            // Salvage: isolate the torn/corrupt line, keep all valid
+            // lines (RTF-001). A dropped torn record was never durably
+            // committed, so `commit_idempotent` will re-commit it —
+            // at-least-once for that single crashed append, which is the
+            // documented pre-ack contract.
+            Err(_) => continue,
+        }
     }
     Ok(entries)
 }
@@ -864,5 +906,173 @@ mod tests {
             1,
             "bus must see exactly 1 event after ack'd replay"
         );
+    }
+
+    // ── RTF-001 / W1: outbox torn-line salvage + fail-closed ────────
+
+    /// Append raw bytes to the outbox, bypassing the serializer, so tests
+    /// can inject a torn (partial) trailing line.
+    fn append_raw_outbox(ws: &Path, bytes: &str) {
+        use std::io::Write;
+        let path = outbox_path(ws);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+        let mut f = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+            .unwrap();
+        f.write_all(bytes.as_bytes()).unwrap();
+        f.sync_all().unwrap();
+    }
+
+    /// A hand-built valid outbox entry for salvage tests.
+    fn raw_entry(transition_id: &str, activation_id: &str) -> OutboxEntry {
+        OutboxEntry {
+            activation_id: activation_id.to_string(),
+            committed_at: "2026-07-31T00:00:00Z".to_string(),
+            contract_revision: "rev-1".to_string(),
+            delivered: false,
+            loop_id: "loop-1".to_string(),
+            payload_digest: "deadbeef".to_string(),
+            topic: "work.done".to_string(),
+            transition_id: transition_id.to_string(),
+        }
+    }
+
+    #[test]
+    fn u1a_read_outbox_salvages_torn_tail() {
+        let (_dir, ledger, _bus, _store) = fixture();
+        let ws = ledger.workspace().to_path_buf();
+
+        // One valid entry, then a torn (no trailing newline) partial line.
+        let mut valid = serde_json::to_string(&raw_entry("id-1", "act-1")).unwrap();
+        valid.push('\n');
+        append_raw_outbox(&ws, &valid);
+        append_raw_outbox(&ws, r#"{"activation_id":"act-1","committed_at":"#); // torn, no '\n'
+
+        // Salvage: the valid entry is recovered; the torn tail is isolated
+        // (pre-fix: the whole file was a hard Err).
+        let entries = read_outbox(&ws).expect("salvage must not Err on a torn tail");
+        assert_eq!(entries.len(), 1, "must recover exactly the valid entry");
+        assert_eq!(entries[0].transition_id, "id-1");
+    }
+
+    #[test]
+    fn u1a_torn_tail_does_not_break_dedup() {
+        let (_dir, ledger, mut bus, _store) = fixture();
+        let ws = ledger.workspace().to_path_buf();
+
+        let seen = Arc::new(Mutex::new(0usize));
+        let seen_clone = Arc::clone(&seen);
+        bus.add_observer(move |_| *seen_clone.lock().unwrap() += 1);
+
+        let event = valid_event();
+        AcceptedTransition::commit_idempotent(
+            &event,
+            "loop-1",
+            "act-1",
+            "rev-1",
+            &ledger,
+            &mut bus,
+            |_| Ok(()),
+            || {},
+        )
+        .expect("first commit must succeed");
+        assert_eq!(*seen.lock().unwrap(), 1);
+
+        // Poison the outbox with a torn trailing line.
+        append_raw_outbox(&ws, r#"{"loop_id":"loop-1","broken":#); // torn, no '\n'
+
+        // Replay the SAME transition — dedup must still hold despite the
+        // torn tail (pre-fix: read_outbox Err -> swallowed -> re-commit).
+        AcceptedTransition::commit_idempotent(
+            &event,
+            "loop-1",
+            "act-1",
+            "rev-1",
+            &ledger,
+            &mut bus,
+            |_| Ok(()),
+            || {},
+        )
+        .expect("replay must succeed");
+
+        assert_eq!(
+            *seen.lock().unwrap(),
+            1,
+            "bus must still see exactly 1 event after replay (dedup)"
+        );
+        let entries = read_outbox(&ws).unwrap();
+        assert_eq!(entries.len(), 1, "outbox must still hold exactly 1 valid entry");
+    }
+
+    #[test]
+    fn u1b_genuine_read_error_fails_closed() {
+        let (_dir, ledger, mut bus, _store) = fixture();
+        let ws = ledger.workspace().to_path_buf();
+
+        let seen = Arc::new(Mutex::new(0usize));
+        let seen_clone = Arc::clone(&seen);
+        bus.add_observer(move |_| *seen_clone.lock().unwrap() += 1);
+
+        // Make the outbox path a DIRECTORY: read_to_string yields EISDIR,
+        // a genuine fs error (not NotFound, not a torn line).
+        std::fs::create_dir_all(outbox_path(&ws)).unwrap();
+
+        // find_committed must surface the error (no swallow).
+        assert!(
+            AcceptedTransition::find_committed(&ws, "any").is_err(),
+            "find_committed must Err on a genuine fs error"
+        );
+
+        // commit_idempotent must fail closed: no publish, no blind commit.
+        let result = AcceptedTransition::commit_idempotent(
+            &valid_event(),
+            "loop-1",
+            "act-1",
+            "rev-1",
+            &ledger,
+            &mut bus,
+            |_| Ok(()),
+            || {},
+        );
+        match result {
+            Err(TransitionError::CommitFailed { .. }) => {}
+            other => panic!("expected CommitFailed (fail-closed), got {other:?}"),
+        }
+        assert_eq!(
+            *seen.lock().unwrap(),
+            0,
+            "bus must see zero events on a genuine read failure"
+        );
+    }
+
+    #[test]
+    fn u1c_append_after_torn_tail_is_recoverable() {
+        let (_dir, ledger, _bus, _store) = fixture();
+        let ws = ledger.workspace().to_path_buf();
+
+        // Pre-existing torn tail with NO trailing newline.
+        append_raw_outbox(&ws, r#"{"loop_id":"loop-1","torn":true"#); // no '\n'
+
+        // Append a fresh valid entry through the real (locking) path. The
+        // newline-boundary guard must separate it from the torn tail so it
+        // stays independently parseable (pre-fix: fused -> unrecoverable).
+        ledger
+            .append_outbox(&raw_entry("id-2", "act-2"))
+            .expect("append must succeed");
+
+        let entries = read_outbox(&ws).unwrap();
+        assert!(
+            entries.iter().any(|e| e.transition_id == "id-2"),
+            "newly appended entry must be recoverable after a torn tail"
+        );
+    }
+
+    #[test]
+    fn zzz_canary_registers() {
+        assert!(true);
     }
 }
