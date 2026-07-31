@@ -83,6 +83,16 @@ pub struct EmitArgs {
     /// `text` keeps the legacy human-readable stderr format.
     #[arg(long, value_name = "MODE", default_value = "text")]
     pub output: String,
+
+    /// Evaluation token (U5, plan 2026-07-30-004) proving this payload
+    /// passed `ralph emit <topic> --policy-check` against the SAME
+    /// Effective Execution Contract revision. Required on the apply path
+    /// in an agent context (`RALPH_CURRENT_HAT` set) when the preset has
+    /// no event-policy pipeline to validate the emit; ignored otherwise.
+    /// Obtain it from the `policy_check_token` field printed by a prior
+    /// `--policy-check` run.
+    #[arg(long = "policy-check-token", value_name = "TOKEN")]
+    pub policy_check_token: Option<String>,
 }
 
 /// Plan 001 §4.3 C3: build the hat-scoped fix hint shown to the agent when
@@ -235,6 +245,187 @@ pub fn should_policy_check_emit_with_ctx(
 pub fn looks_like_json(payload: &str) -> bool {
     let trimmed = payload.trim_start();
     trimmed.starts_with('{') || trimmed.starts_with('[')
+}
+
+/// U5 (plan 2026-07-30-004): canonicalize a payload string for evaluation
+/// token hashing. Parses the payload as JSON and re-serializes it so that
+/// whitespace / key-order variations of the SAME logical payload produce the
+/// same token (serde_json maps are key-sorted, so the output is
+/// deterministic). When the payload is empty or not valid JSON, the trimmed
+/// raw string is used verbatim so non-JSON payloads still get a stable token.
+fn canonical_payload_for_token(payload: &str) -> String {
+    let trimmed = payload.trim();
+    if trimmed.is_empty() {
+        return String::new();
+    }
+    match serde_json::from_str::<serde_json::Value>(trimmed) {
+        Ok(value) => serde_json::to_string(&value).unwrap_or_else(|_| trimmed.to_string()),
+        Err(_) => trimmed.to_string(),
+    }
+}
+
+/// U5: compute the evaluation token binding a `(hat, topic, payload)` tuple
+/// to a specific Effective Execution Contract revision. Deterministic: the
+/// same inputs always yield the same hex digest. Folding the contract
+/// revision (the compiled contract's `contract_digest`) into the hash means a
+/// token minted against a stale config is rejected as soon as the config
+/// changes. The same function mints the token on `--policy-check` and
+/// recomputes it for verification on apply, so the two paths cannot drift.
+fn compute_policy_check_token(
+    hat: &str,
+    topic: &str,
+    payload: &str,
+    contract_revision: &str,
+) -> String {
+    use sha2::{Digest, Sha256};
+    let canonical = canonical_payload_for_token(payload);
+    let mut hasher = Sha256::new();
+    hasher.update(b"u5-policy-check-token-v1\n");
+    hasher.update(hat.as_bytes());
+    hasher.update(b"\n");
+    hasher.update(topic.as_bytes());
+    hasher.update(b"\n");
+    hasher.update(canonical.as_bytes());
+    hasher.update(b"\n");
+    hasher.update(contract_revision.as_bytes());
+    hasher
+        .finalize()
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
+}
+
+/// U5 (plan 2026-07-30-004): resolved state of the unified agent-CLI
+/// capability + evaluation-token gate for a single emit invocation.
+///
+/// The gate is ACTIVE only in an agent context (`RALPH_CURRENT_HAT` set) AND
+/// only when the preset has no event-policy pipeline validating the emit
+/// (`unified_active == false`). When a full `event_policy` is active, the
+/// unified validation pipeline upstream IS the contract enforcement and this
+/// gate is redundant; when no `event_policy` exists, this gate is the sole
+/// enforcement, so it (a) denies `(hat, topic)` pairs the Effective Execution
+/// Contract does not allow and (b) requires an evaluation token proving the
+/// payload passed `--policy-check` against the same contract revision.
+/// The gate also stands down for the orchestrator pseudo-hat `ralph`
+/// (hatless loops), wave workers, and presets with no hats — see
+/// [`U5Gate::resolve`].
+struct U5Gate {
+    /// Whether the gate applies to this invocation.
+    active: bool,
+    /// The compiled contract (when active AND the config compiled cleanly).
+    resolved: Option<ralph_core::execution_contract::ResolvedRuntimeConfig>,
+    /// The evaluation token for this `(hat, topic, payload, revision)`.
+    token: Option<String>,
+}
+
+impl U5Gate {
+    /// Resolve the gate for this invocation. `env_hat_set` is whether
+    /// `RALPH_CURRENT_HAT` is present (the agent-context signal); `hat` is the
+    /// resolved emitting hat; `topic` is the EFFECTIVE (post-desugar) topic.
+    ///
+    /// Stand-down conditions: the gate governs only REAL agent hats in
+    /// governed presets. It stays inactive for:
+    /// - the orchestrator pseudo-hat `ralph` (hatless loops inject
+    ///   `RALPH_CURRENT_HAT=ralph`; the contract compiled there has empty
+    ///   `emit_allows`, so gating would deny `LOOP_COMPLETE` and the loop
+    ///   could never terminate),
+    /// - wave workers (`RALPH_WAVE_WORKER` set) — their rejections are owned
+    ///   by the wave-channel guard, which must surface its own reason, and
+    /// - presets defining no hats (there is nothing to govern).
+    fn resolve(
+        env_hat_set: bool,
+        unified_active: bool,
+        config: Option<&RalphConfig>,
+        hat: Option<&str>,
+        topic: &str,
+        payload: &str,
+    ) -> Self {
+        let stands_down = hat == Some("ralph")
+            || std::env::var("RALPH_WAVE_WORKER").is_ok()
+            || config.is_some_and(|c| c.hats.is_empty());
+        let active = env_hat_set && !unified_active && config.is_some() && !stands_down;
+        if !active {
+            return Self {
+                active: false,
+                resolved: None,
+                token: None,
+            };
+        }
+        // Compile the config to obtain the contract + revision. If the config
+        // fails to compile, fall back to an inactive gate: the loop runner
+        // owns the hard compile boundary (it aborts startup on a finding), and
+        // the CLI must not turn a contract finding into an opaque emit failure
+        // here. With no compiled contract there is no revision to bind a token
+        // to, so the gate stands down.
+        let resolved =
+            config.and_then(|cfg| ralph_core::execution_contract::compile(cfg.clone()).ok());
+        let token = resolved.as_ref().and_then(|r| {
+            hat.map(|hat_id| compute_policy_check_token(hat_id, topic, payload, r.digest()))
+        });
+        Self {
+            active: true,
+            resolved,
+            token,
+        }
+    }
+
+    /// Enforce the capability decision. Returns an error message when the
+    /// contract denies `(hat, topic)`; `None` means proceed.
+    fn capability_denied(&self, hat: Option<&str>, topic: &str) -> Option<String> {
+        if !self.active {
+            return None;
+        }
+        let resolved = self.resolved.as_ref()?;
+        let hat_id = hat?;
+        use ralph_core::execution_contract::EmitDecision;
+        match resolved.contract().emit_decision(hat_id, topic) {
+            EmitDecision::Allow => None,
+            EmitDecision::Deny => Some(format!(
+                "capability_denied: hat '{hat_id}' cannot emit '{topic}' per the Effective \
+                 Execution Contract. Only topics this hat publishes (or terminal topics it \
+                 owns) are allowed. Run `ralph emit --schema {topic}` to inspect the contract \
+                 for this topic, or emit a topic your hat is authorised for."
+            )),
+        }
+    }
+
+    /// Enforce the evaluation token on the apply path. Returns `(code,
+    /// message)` when the token is missing or mismatched; `None` means the
+    /// apply may proceed.
+    fn token_violation(&self, provided: Option<&str>) -> Option<(&'static str, String)> {
+        if !self.active {
+            return None;
+        }
+        match provided {
+            None => Some((
+                "missing_policy_check_token",
+                "missing_policy_check_token: this emit runs in an agent context with no \
+                 event-policy pipeline, so it requires an evaluation token proving the \
+                 payload was pre-checked against the same contract revision. Run \
+                 `ralph emit <topic> --policy-check -j '<payload>'` first, then re-run the \
+                 emit with `--policy-check-token <token>` using the `policy_check_token` \
+                 value it prints."
+                    .to_string(),
+            )),
+            Some(provided) => {
+                let expected = self.token.as_deref().unwrap_or_default();
+                if provided == expected && !expected.is_empty() {
+                    None
+                } else {
+                    Some((
+                        "policy_check_token_mismatch",
+                        "policy_check_token_mismatch: the supplied --policy-check-token does \
+                         not match this (hat, topic, payload, contract revision). The token is \
+                         bound to the exact payload and the current contract revision; if the \
+                         config changed or the payload differs, re-run \
+                         `ralph emit <topic> --policy-check -j '<payload>'` and use the fresh \
+                         `policy_check_token` it prints."
+                            .to_string(),
+                    ))
+                }
+            }
+        }
+    }
 }
 
 /// 2026-07-27-004 plan U2 (R5-R7 / D3 / D8): apply runtime-owned
@@ -1027,19 +1218,19 @@ fn emit_command_with_root_and_hats(
     // with no recovery path (guidance topic removed by plan
     // 2026-06-28-005). Run this check before the unified pipeline so
     // the agent sees the failure on the first attempt.
-    if check_mode != PolicyCheckMode::Skip {
-        if let Err(err) = crate::policy_check::check_forge_plan_ready_disk_consistency(
+    if check_mode != PolicyCheckMode::Skip
+        && let Err(err) = crate::policy_check::check_forge_plan_ready_disk_consistency(
             topic,
             &args.payload,
             &workspace_root,
-        ) {
+        )
+    {
             anyhow::bail!(
                 "forge.plan.ready disk consistency check failed (field='{}' reason='{}'): {}",
                 err.field,
                 err.reason_code,
                 err.message
             );
-        }
     }
 
     // U6 (2026-06-21-002 plan §U6): CLI `--policy-check` always
@@ -1426,6 +1617,34 @@ fn emit_command_with_root_and_hats(
         }
     }
 
+    // U5 (plan 2026-07-30-004): unified agent-CLI capability + evaluation
+    // token gate. Resolved AFTER the policy / scope / provenance / wave /
+    // step-handoff guards above so those rejections keep their existing error
+    // shape, and BEFORE the dry-run return + disk write so a denied capability
+    // or a missing / stale token fails both `--policy-check` and apply. Only
+    // active in an agent context (`RALPH_CURRENT_HAT` set) with no event-policy
+    // pipeline (see `U5Gate`); a preset with an enabled `event_policy` already
+    // enforces the contract via the unified pipeline above, so this gate stands
+    // down there to avoid double enforcement.
+    let u5_gate = U5Gate::resolve(
+        env_hat.is_some(),
+        unified_active,
+        config.as_ref(),
+        hat.as_deref(),
+        topic,
+        &args.payload,
+    );
+    if let Some(err) = u5_gate.capability_denied(hat.as_deref(), topic) {
+        print_emit_reject_summary(args.output == "json", "capability_denied", &err);
+        anyhow::bail!("{err}");
+    }
+    if !args.policy_check
+        && let Some((code, err)) = u5_gate.token_violation(args.policy_check_token.as_deref())
+    {
+        print_emit_reject_summary(args.output == "json", code, &err);
+        anyhow::bail!("{err}");
+    }
+
     // Generate timestamp internally — agents cannot forge timestamps
     let ts = chrono::Utc::now().to_rfc3339();
 
@@ -1809,6 +2028,26 @@ fn emit_command_with_root_and_hats(
         } else {
             println!("Policy check passed: {} (not written to disk)", topic);
         }
+        // U5 (plan 2026-07-30-004): advertise the evaluation token so the
+        // agent can apply the pre-checked payload with
+        // `--policy-check-token`. Only printed when the gate is active
+        // (agent context + no event-policy pipeline); otherwise
+        // `u5_gate.token` is `None` and the output shape stays stable for
+        // presets that already enforce the contract via the unified
+        // pipeline. The token binds the exact (hat, topic, payload,
+        // contract revision) that was just pre-checked.
+        if let Some(token) = u5_gate.token.as_deref() {
+            let envelope = serde_json::json!({
+                "policy_check_token": token,
+                "topic": topic,
+                "hat": hat,
+                "contract_revision":
+                    u5_gate.resolved.as_ref().map(|r| r.digest().to_string()),
+            });
+            if let Ok(line) = serde_json::to_string(&envelope) {
+                println!("{line}");
+            }
+        }
         return Ok(());
     }
 
@@ -1912,6 +2151,7 @@ mod tests {
                 source: None,
                 schema: None,
                 output: "text".to_string(),
+                policy_check_token: None,
             },
             Some(&workspace),
         )
@@ -1973,6 +2213,7 @@ mod tests {
                 source: None,
                 schema: None,
                 output: "text".to_string(),
+                policy_check_token: None,
             },
             Some(&workspace),
         );
@@ -2028,6 +2269,7 @@ mod tests {
                 source: None,
                 schema: None,
                 output: "text".to_string(),
+                policy_check_token: None,
             },
             Some(&workspace),
         )
@@ -2099,6 +2341,7 @@ event_loop:
                 source: None,
                 schema: None,
                 output: "text".to_string(),
+                policy_check_token: None,
             },
             Some(&workspace),
         )
@@ -2160,6 +2403,7 @@ event_loop:
                 source: None,
                 schema: None,
                 output: "text".to_string(),
+                policy_check_token: None,
             },
             Some(&workspace),
         )
@@ -2218,6 +2462,7 @@ event_loop:
                 source: None,
                 schema: None,
                 output: "text".to_string(),
+                policy_check_token: None,
             },
             Some(&workspace),
         )
@@ -2295,6 +2540,7 @@ event_loop:
                 source: Some("cli".to_string()),
                 schema: None,
                 output: "text".to_string(),
+                policy_check_token: None,
             },
             Some(&workspace),
         )
@@ -2383,6 +2629,7 @@ event_loop:
                 source: None,
                 schema: None,
                 output: "text".to_string(),
+                policy_check_token: None,
             },
             Some(&workspace),
         )
@@ -2423,6 +2670,7 @@ event_loop:
                 source: None,
                 schema: None,
                 output: "text".to_string(),
+                policy_check_token: None,
             },
             Some(&workspace),
         )
@@ -2453,6 +2701,7 @@ event_loop:
                 source: None,
                 schema: None,
                 output: "text".to_string(),
+                policy_check_token: None,
             },
             Some(&workspace),
         )
@@ -2484,6 +2733,7 @@ event_loop:
                 source: None,
                 schema: None,
                 output: "text".to_string(),
+                policy_check_token: None,
             },
             Some(&workspace),
         )
@@ -2516,6 +2766,7 @@ event_loop:
                 source: None,
                 schema: None,
                 output: "text".to_string(),
+                policy_check_token: None,
             },
             Some(&workspace),
         )
@@ -2549,6 +2800,7 @@ event_loop:
                 source: None,
                 schema: None,
                 output: "text".to_string(),
+                policy_check_token: None,
             },
             Some(&workspace),
         )
@@ -2604,6 +2856,7 @@ event_loop:
                 source: None,
                 schema: None,
                 output: "text".to_string(),
+                policy_check_token: None,
             },
             Some(&workspace),
         )
@@ -2655,6 +2908,7 @@ event_loop:
                 source: None,
                 schema: None,
                 output: "text".to_string(),
+                policy_check_token: None,
             },
             Some(&workspace),
         )
@@ -2707,6 +2961,7 @@ event_loop:
                 source: None,
                 schema: None,
                 output: "text".to_string(),
+                policy_check_token: None,
             },
             Some(&workspace),
         )
@@ -2771,6 +3026,7 @@ event_loop:
                 source: None,
                 schema: None,
                 output: "text".to_string(),
+                policy_check_token: None,
             },
             Some(&workspace),
         )
@@ -2826,6 +3082,7 @@ event_loop:
                 source: None,
                 schema: None,
                 output: "text".to_string(),
+                policy_check_token: None,
             },
             Some(&workspace),
         )
@@ -2883,6 +3140,7 @@ event_loop:
                 source: None,
                 schema: None,
                 output: "text".to_string(),
+                policy_check_token: None,
             },
             Some(&workspace),
         )
@@ -2939,6 +3197,7 @@ event_loop:
                 source: None,
                 schema: None,
                 output: "text".to_string(),
+                policy_check_token: None,
             },
             Some(&workspace),
         )
@@ -2995,6 +3254,7 @@ event_loop:
                 source: None,
                 schema: None,
                 output: "text".to_string(),
+                policy_check_token: None,
             },
             Some(&workspace),
         )
@@ -3115,6 +3375,7 @@ hats:
                 source: Some("cli".to_string()),
                 schema: None,
                 output: "text".to_string(),
+                policy_check_token: None,
             },
             Some(&workspace),
         )
@@ -3153,6 +3414,7 @@ hats:
                 source: None,
                 schema: None,
                 output: "text".to_string(),
+                policy_check_token: None,
             },
             Some(&workspace),
         )
@@ -3198,6 +3460,7 @@ hats:
                 source: None,
                 schema: None,
                 output: "text".to_string(),
+                policy_check_token: None,
             },
             Some(&workspace),
         )
@@ -3237,6 +3500,7 @@ hats:
                 source: None,
                 schema: None,
                 output: "text".to_string(),
+                policy_check_token: None,
             },
             Some(&workspace),
         )
@@ -3319,6 +3583,7 @@ hats:
                     source: None,
                     schema: None,
                     output: "text".to_string(),
+                    policy_check_token: None,
                 },
                 Some(&workspace),
             );
@@ -3401,6 +3666,7 @@ hats:
                 source: Some("cli".to_string()),
                 schema: None,
                 output: "text".to_string(),
+                policy_check_token: None,
             },
             Some(&workspace),
         )
@@ -3693,6 +3959,7 @@ hats:
                 source: None,
                 schema: None,
                 output: "text".to_string(),
+                policy_check_token: None,
             },
             Some(&workspace),
         );
@@ -3754,6 +4021,7 @@ hats:
                 source: None,
                 schema: None,
                 output: "text".to_string(),
+                policy_check_token: None,
             },
             Some(&workspace),
         );
@@ -3823,6 +4091,7 @@ hats:
                 source: None,
                 schema: None,
                 output: "text".to_string(),
+                policy_check_token: None,
             },
             Some(&workspace),
         );
@@ -4463,6 +4732,7 @@ hats:
             source: None,
             schema: None,
             output: "text".to_string(),
+            policy_check_token: None,
         };
 
         emit_command_with_root(ColorMode::Never, args, Some(&workspace)).unwrap();
@@ -4497,6 +4767,7 @@ hats:
             source: None,
             schema: None,
             output: "text".to_string(),
+            policy_check_token: None,
         };
 
         emit_command_with_root(ColorMode::Never, args, Some(&workspace)).unwrap();
@@ -4572,6 +4843,7 @@ event_loop:
             source: None,
             schema: Some("work.done".to_string()),
             output: "text".to_string(),
+            policy_check_token: None,
         };
 
         // R6: read-only mode must succeed without producing an event.
@@ -4689,6 +4961,7 @@ event_loop:
             source: None,
             schema: Some("work.done".to_string()),
             output: "text".to_string(),
+            policy_check_token: None,
         };
 
         let err = emit_command_with_root(ColorMode::Never, args, Some(&workspace))
@@ -4775,6 +5048,7 @@ event_loop:
                 source: None,
                 schema: None,
                 output: "text".to_string(),
+                policy_check_token: None,
             },
             Some(&workspace),
         )
@@ -4815,6 +5089,7 @@ event_loop:
                 source: None,
                 schema: None,
                 output: "text".to_string(),
+                policy_check_token: None,
             },
             Some(&workspace),
         )
@@ -4849,6 +5124,7 @@ event_loop:
                 source: None,
                 schema: None,
                 output: "text".to_string(),
+                policy_check_token: None,
             },
             Some(&workspace),
         )
@@ -4882,6 +5158,7 @@ event_loop:
                 source: None,
                 schema: None,
                 output: "text".to_string(),
+                policy_check_token: None,
             },
             Some(&workspace),
         )
@@ -4921,6 +5198,7 @@ event_loop:
                 source: None,
                 schema: None,
                 output: "text".to_string(),
+                policy_check_token: None,
             },
             Some(&workspace),
         )
@@ -4983,6 +5261,7 @@ hats:
                 source: None,
                 schema: None,
                 output: "text".to_string(),
+                policy_check_token: None,
             },
             Some(&workspace),
         );
@@ -5049,6 +5328,7 @@ hats:
                 source: None,
                 schema: None,
                 output: "text".to_string(),
+                policy_check_token: None,
             },
             Some(&workspace),
         );
@@ -5107,6 +5387,7 @@ hats:
                 source: None,
                 schema: None,
                 output: "text".to_string(),
+                policy_check_token: None,
             },
             Some(&workspace),
         );
@@ -5305,6 +5586,7 @@ mod emit_schema_emit_result_tests {
             source: None,
             schema: Some("EMIT_RESULT".to_string()),
             output: "text".to_string(),
+            policy_check_token: None,
         }
     }
 
@@ -5349,6 +5631,7 @@ mod emit_schema_emit_result_tests {
             source: None,
             schema: Some("EMIT_RESULT".to_string()),
             output: "text".to_string(),
+            policy_check_token: None,
         };
 
         let workspace = tempfile::TempDir::new()
@@ -5430,6 +5713,7 @@ hats:
             source: None,
             schema: None,
             output: "text".to_string(),
+            policy_check_token: None,
         };
 
         // 调用 emit_command 应返回 Err（policy 拒收 → non-zero）
@@ -5458,6 +5742,7 @@ hats:
             source: None,
             schema: None,
             output: "text".to_string(),
+            policy_check_token: None,
         };
 
         let result = emit_command_with_root(ColorMode::Never, args, Some(&workspace));
@@ -5553,6 +5838,7 @@ hats:
             source: None,
             schema: None,
             output: "json".to_string(),
+            policy_check_token: None,
         };
 
         let result = emit_command_with_root(ColorMode::Never, args, Some(&workspace));
@@ -5739,6 +6025,7 @@ hats:
             source: None,
             schema: None,
             output: "json".to_string(),
+            policy_check_token: None,
         };
 
         let result = emit_command_with_root(ColorMode::Never, args, Some(&workspace));
@@ -5802,6 +6089,7 @@ hats:
                 source: None,
                 schema: None,
                 output: "json".to_string(),
+                policy_check_token: None,
             };
             // 引导 stdout 重定向到一个 Vec——通过 std::env / shell pipe
             // 不可行(EmitResult 直接 `println!` 到 stdout),改用更轻

@@ -1788,20 +1788,20 @@ actions:
         assert_eq!(report.rejected, 0);
 
         let store = crate::task_store::TaskStore::load(&tasks_path(tmp.path())).unwrap();
-        let by_id: std::collections::HashMap<_, _> = store
+        let by_id: std::collections::HashMap<&str, _> = store
             .all()
             .iter()
-            .map(|t| (t.id.clone(), t.status.clone()))
+            .map(|t| (t.id.as_str(), t.status))
             .collect();
         for id in &wave1 {
             assert!(
-                matches!(by_id.get(id), Some(crate::task::TaskStatus::Closed)),
+                matches!(by_id.get(id.as_str()), Some(crate::task::TaskStatus::Closed)),
                 "wave1 task {id} must be closed"
             );
         }
         for id in &wave2 {
             assert!(
-                matches!(by_id.get(id), Some(crate::task::TaskStatus::Open)),
+                matches!(by_id.get(id.as_str()), Some(crate::task::TaskStatus::Open)),
                 "wave2 task {id} must remain open"
             );
         }
@@ -1907,14 +1907,14 @@ actions:
         assert_eq!(replay.rejected, 0);
 
         let store = crate::task_store::TaskStore::load(&tasks_path(tmp.path())).unwrap();
-        let by_id: std::collections::HashMap<_, _> = store
+        let by_id: std::collections::HashMap<&str, _> = store
             .all()
             .iter()
-            .map(|t| (t.id.clone(), t.status.clone()))
+            .map(|t| (t.id.as_str(), t.status))
             .collect();
         for id in &wave1 {
             assert!(
-                matches!(by_id.get(id), Some(crate::task::TaskStatus::Closed)),
+                matches!(by_id.get(id.as_str()), Some(crate::task::TaskStatus::Closed)),
                 "wave1 task {} should still be closed after replay",
                 id
             );

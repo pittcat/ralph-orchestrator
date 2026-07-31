@@ -83,7 +83,7 @@ metadata:
    - `reason` / `kind`：结构化 reason code
    - `target_hat`：应当修复并重发的目标 hat
 2. **若 prompt 含 `## CORRECTION CONTEXT`**：runtime correction **高于** agent narrative；只执行 correction 的 `required_action`，遵守 `forbidden_action`；细则见 `ralph tools skill load ralph-tools-recovery-directives`。
-3. **对照 `required_fields` 补齐 payload**；用 `ralph emit <topic> --policy-check -j '...'` 预检（与 loop gate 同源 schema，**不写盘**）；通过后再正式 `ralph emit` 落盘。
+3. **对照 `required_fields` 补齐 payload**；用 `ralph emit <topic> --policy-check -j '...'` 预检（与 loop gate 同源 schema，**不写盘**）；通过后再正式 `ralph emit` 落盘。部分 preset（agent 上下文且无 event-policy 管线）会在 `--policy-check` 通过时打印一行 `policy_check_token`，apply 时必须用 `--policy-check-token <token>` 带上它（`missing_policy_check_token` / `policy_check_token_mismatch` 即此路径；细则见 `ralph-tools-emit`「Evaluation Token」段）。
 4. **bounded retry**：同类协议违规（同一 hat + topic + `task_key` + step + violation code）**第一次**给 structured correction；**第二次**同类违规 runtime 阻塞 loop（`plan.blocked(reason=protocol_violation_repeated:…)`），**不得** infinite `task.resume` 或在没有 `LOOP_COMPLETE` 的情况下静默继续。post-terminal 业务 emit **无 retry**。
 5. **确认 hat 作用域**：isolated 模式下未在 `allowed_topics`（与 hat `publishes` 交集）的 topic 越权 — 改用 hat 实际可发的 topic，不要靠 `--unsafe-no-policy-check` 绕过。
 6. **复杂 violation**：按需加载 `ralph-tools-emit`（EmitResult `ok`/`recorded`/`errors[].code`/`suggested_command`）与 `ralph-tools-recovery-directives`。

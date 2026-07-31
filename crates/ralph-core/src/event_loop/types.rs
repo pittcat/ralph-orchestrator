@@ -336,6 +336,16 @@ pub struct EventLoop {
     /// the tracker to avoid implicit feedback loops.
     pub(crate) hat_lifecycle_tracker: ActivationLifecycleTracker<SystemTimeClock>,
 
+    /// U3 (plan 2026-07-30-004): persistent activation registry for
+    /// cross-process identity agreement between the resident loop and
+    /// the CLI (`ralph inspect`). Written by the loop during hat
+    /// activation and completion; read by the CLI via
+    /// [`crate::execution_contract::load_registry_readonly`].
+    /// `None` when the registry cannot be opened (e.g., corrupt file)
+    /// and the loop chose to proceed without it (best-effort).
+    #[allow(dead_code)]
+    pub(crate) activation_registry: Option<crate::execution_contract::ActivationRegistry>,
+
     /// R3 (2026-06-14-003 plan): ephemeral file isolation engine.
     /// Used by `process_output` to relocate agent-written runtime
     /// artefacts (scratchpad.md / tmp*.md) out of source trees into
@@ -409,4 +419,15 @@ pub struct EventLoop {
     /// 2026-07-02-006 plan: shared phase authority engine (opt-in).
     pub(crate) phase_authority:
         std::sync::Arc<crate::event_loop::phase_authority::WorkflowPhaseAuthority>,
+
+    /// U4 (plan 2026-07-30-004): the compiled Effective Execution
+    /// Contract, when the loop was constructed via the production
+    /// `from_resolved` / `from_resolved_no_context` constructors.
+    /// `None` for test-only constructors (`new`, `with_context`, etc.)
+    /// and the legacy no-context path. When present, `prepend_hat_identity`
+    /// projects the contract's actionability into the `## HAT IDENTITY`
+    /// prompt block so the prompt and runtime enforcement are provably
+    /// in sync.
+    pub(crate) execution_contract:
+        Option<std::sync::Arc<crate::execution_contract::EffectiveExecutionContract>>,
 }

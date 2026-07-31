@@ -935,33 +935,6 @@ impl RalphConfig {
     }
 }
 
-/// Hooks configuration.
-///
-/// Controls per-project orchestrator lifecycle hooks. Hooks are disabled by
-/// default and are inert until explicitly enabled.
-///
-/// Example configuration:
-/// ```yaml
-/// hooks:
-///   enabled: true
-///   defaults:
-///     timeout_seconds: 30
-///     max_output_bytes: 8192
-///     suspend_mode: wait_for_resume
-///   events:
-///     pre.loop.start:
-///       - name: env-guard
-///         command: ["./scripts/hooks/env-guard.sh"]
-///         on_error: block
-/// ```
-///
-/// 2026-07-29-006 plan U1 (R1): the per-list emit-side rewrite
-/// helper moved onto `HatConfig::rewrite_emit_topics` so the
-/// producer view cannot drift when new emit-side fields land.
-/// The precheck desugar now routes every emit-side rewrite
-/// through that single API; this module no longer carries the
-/// per-list helper.
-
 /// 2026-07-02-004 plan milestone A (U3): render the
 /// declared checklist + hard-constraint instructions for a
 /// synthesized precheck gate hat.

@@ -523,8 +523,7 @@ fn test_precheck_emit_writes_topic_and_triggered_from_effective_topic() {
     let events_contents = std::fs::read_to_string(&events_path).expect("read events.jsonl");
     let last_line = events_contents
         .lines()
-        .filter(|l| !l.trim().is_empty())
-        .last()
+        .rfind(|l| !l.trim().is_empty())
         .unwrap_or_else(|| {
             panic!("U1: events.jsonl must contain at least one line; got: {events_contents}")
         });
@@ -607,5 +606,159 @@ fn test_precheck_emit_missing_required_field_rejected_on_proposed() {
     assert!(
         stdout.contains("reason") || stderr.contains("reason") || stdout.contains("missing"),
         "S3: stderr/stdout must name the missing field; stdout={stdout} stderr={stderr}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// U5 (plan 2026-07-30-004): unified agent-CLI capability + evaluation token
+// ---------------------------------------------------------------------------
+
+/// Write a minimal single-hat preset (`worker` publishes `work.done`) with NO
+/// `event_policy`. Without an event-policy pipeline the unified validation
+/// path is inactive, so the U5 evaluation-token gate is the sole enforcement
+/// for an agent-context emit. Returns the payload used across the steps.
+fn u5_write_minimal_worker_preset(temp_path: &std::path::Path) {
+    std::fs::create_dir_all(temp_path.join(".ralph")).unwrap();
+    std::fs::write(
+        temp_path.join("ralph.yml"),
+        r#"
+event_loop:
+  completion_promise: "LOOP_COMPLETE"
+cli:
+  backend: "claude"
+hats:
+  worker:
+    name: "Worker"
+    description: "Does the work"
+    triggers: ["work.ready"]
+    publishes: ["work.done"]
+    terminal_events: ["work.done"]
+    instructions: "do work"
+"#,
+    )
+    .unwrap();
+}
+
+/// U5: an agent-context apply (`RALPH_CURRENT_HAT` set) on a preset without
+/// an event-policy pipeline must carry an evaluation token minted by a prior
+/// `--policy-check`. The token binds the exact (hat, topic, payload, contract
+/// revision):
+/// - `--policy-check` prints a `policy_check_token` JSON line,
+/// - apply WITHOUT the token fails `missing_policy_check_token`,
+/// - apply with a WRONG token fails `policy_check_token_mismatch`,
+/// - apply with the minted token succeeds and writes the event.
+#[test]
+fn u5_emit_apply_requires_policy_check_token() {
+    let temp_dir = TempDir::new().expect("temp dir");
+    let temp_path = temp_dir.path();
+    u5_write_minimal_worker_preset(temp_path);
+
+    let payload = r#"{"step":"step-01"}"#;
+
+    // 1) --policy-check mints an evaluation token.
+    let check_output = common::ralph_bin()
+        .args(["emit", "work.done", "--policy-check", "-j", payload])
+        .current_dir(temp_path)
+        .env("RALPH_CURRENT_HAT", "worker")
+        .output()
+        .expect("failed to run ralph emit --policy-check");
+
+    let check_stdout = String::from_utf8_lossy(&check_output.stdout);
+    let check_stderr = String::from_utf8_lossy(&check_output.stderr);
+    assert!(
+        check_output.status.success(),
+        "policy-check must succeed for an authorised (worker, work.done) emit; \
+         stdout={check_stdout} stderr={check_stderr}"
+    );
+    let token = check_stdout
+        .lines()
+        .find_map(|line| {
+            serde_json::from_str::<serde_json::Value>(line)
+                .ok()
+                .and_then(|v| {
+                    v.get("policy_check_token")
+                        .and_then(|t| t.as_str())
+                        .map(String::from)
+                })
+        })
+        .unwrap_or_else(|| {
+            panic!(
+                "policy-check stdout must carry a policy_check_token JSON line; \
+                 stdout={check_stdout} stderr={check_stderr}"
+            )
+        });
+    assert!(!token.is_empty(), "token must be non-empty");
+
+    // 2) Apply WITHOUT the token → missing_policy_check_token.
+    let no_token = common::ralph_bin()
+        .args(["emit", "work.done", "-j", payload])
+        .current_dir(temp_path)
+        .env("RALPH_CURRENT_HAT", "worker")
+        .output()
+        .expect("failed to run ralph emit (no token)");
+    let no_token_stdout = String::from_utf8_lossy(&no_token.stdout);
+    let no_token_stderr = String::from_utf8_lossy(&no_token.stderr);
+    assert!(
+        !no_token.status.success(),
+        "apply without a token must fail in agent context; \
+         stdout={no_token_stdout} stderr={no_token_stderr}"
+    );
+    assert!(
+        no_token_stderr.contains("missing_policy_check_token")
+            || no_token_stdout.contains("missing_policy_check_token"),
+        "expected missing_policy_check_token; stdout={no_token_stdout} stderr={no_token_stderr}"
+    );
+
+    // 2b) Apply with a WRONG / stale token → policy_check_token_mismatch.
+    let bad_token = common::ralph_bin()
+        .args([
+            "emit",
+            "work.done",
+            "-j",
+            payload,
+            "--policy-check-token",
+            "deadbeef",
+        ])
+        .current_dir(temp_path)
+        .env("RALPH_CURRENT_HAT", "worker")
+        .output()
+        .expect("failed to run ralph emit (bad token)");
+    let bad_stdout = String::from_utf8_lossy(&bad_token.stdout);
+    let bad_stderr = String::from_utf8_lossy(&bad_token.stderr);
+    assert!(
+        !bad_token.status.success(),
+        "apply with a mismatched token must fail; stdout={bad_stdout} stderr={bad_stderr}"
+    );
+    assert!(
+        bad_stderr.contains("policy_check_token_mismatch")
+            || bad_stdout.contains("policy_check_token_mismatch"),
+        "expected policy_check_token_mismatch; stdout={bad_stdout} stderr={bad_stderr}"
+    );
+
+    // 3) Apply WITH the minted token → succeeds and writes the event.
+    let with_token = common::ralph_bin()
+        .args([
+            "emit",
+            "work.done",
+            "-j",
+            payload,
+            "--policy-check-token",
+            &token,
+        ])
+        .current_dir(temp_path)
+        .env("RALPH_CURRENT_HAT", "worker")
+        .output()
+        .expect("failed to run ralph emit (with token)");
+    let with_stdout = String::from_utf8_lossy(&with_token.stdout);
+    let with_stderr = String::from_utf8_lossy(&with_token.stderr);
+    assert!(
+        with_token.status.success(),
+        "apply with the minted token must succeed; stdout={with_stdout} stderr={with_stderr}"
+    );
+    let events_path = temp_path.join(".ralph/events.jsonl");
+    let events = std::fs::read_to_string(&events_path).unwrap_or_default();
+    assert!(
+        events.contains("\"topic\":\"work.done\""),
+        "the event must land in .ralph/events.jsonl; events={events}"
     );
 }

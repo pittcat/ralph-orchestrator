@@ -452,11 +452,11 @@ mod tests {
 
     #[test]
     fn strict_read_only_detects_dual_deny() {
-        assert!(is_strict_read_only(&vec!["Edit".into(), "Write".into()]));
-        assert!(!is_strict_read_only(&vec!["Edit".into()]));
-        assert!(!is_strict_read_only(&vec!["Write".into()]));
-        assert!(!is_strict_read_only(&vec![]));
-        assert!(!is_strict_read_only(&vec!["Edit".into(), "Bash".into()]));
+        assert!(is_strict_read_only(&["Edit".into(), "Write".into()]));
+        assert!(!is_strict_read_only(&["Edit".into()]));
+        assert!(!is_strict_read_only(&["Write".into()]));
+        assert!(!is_strict_read_only(&[]));
+        assert!(!is_strict_read_only(&["Edit".into(), "Bash".into()]));
     }
 
     #[test]

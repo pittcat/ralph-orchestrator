@@ -11,6 +11,7 @@
 //! - Benchmark task definitions and workspace isolation
 
 pub mod agent_doc_sync;
+pub mod artifact_canonicalizer;
 pub mod capability_inventory;
 #[cfg(feature = "recording")]
 mod cli_capture;
@@ -22,6 +23,11 @@ pub mod config;
 /// `invalid_control_plane_path` reason code has exactly one
 /// definition.
 pub mod control_plane;
+/// U12 (plan 2026-07-30-004): contract completeness lint + machine-readable
+/// contract inspect. Guards emitting hats against passthrough activations and
+/// surfaces the compiled [`execution_contract::EffectiveExecutionContract`] for
+/// any hat.
+pub mod contract_completeness;
 /// U7a deterministic-correction injection — replaces
 /// `task.resume` events on the policy rejection path with
 /// in-prompt `## ORCHESTRATOR CORRECTION` blocks.
@@ -54,6 +60,10 @@ pub mod hat_lifecycle;
 mod hat_registry;
 mod hatless_ralph;
 pub mod hooks;
+pub mod parallel_forge_handoff;
+/// U11 (plan 2026-07-30-004): durable Recovery Intent store with a
+/// persistent retry budget that survives loop restarts.
+pub mod recovery_intent;
 pub mod recovery_runtime;
 pub mod safe_display;
 pub mod shipper_reason;

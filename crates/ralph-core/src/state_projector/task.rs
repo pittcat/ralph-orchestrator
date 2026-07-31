@@ -904,6 +904,132 @@ fn ctx_loop_id(payload: &Value) -> Option<&str> {
     json_pointer(payload, "loop_id")
 }
 
+fn validate_wave_schedule(
+    specs: &[BatchSpec],
+    execution_plan_digest_pointer: Option<&str>,
+    payload: &Value,
+) -> Result<(), String> {
+    // Rule 1: every unit must declare both fields.
+    for spec in specs {
+        match (spec.execution_wave, spec.integration_order) {
+            (Some(w), Some(o)) if w > 0 && o > 0 => {}
+            _ => {
+                return Err(format!(
+                    "schedule field missing or non-positive:                      unit '{}' execution_wave={:?} integration_order={:?}                      (both must be positive integers)",
+                    spec.key, spec.execution_wave, spec.integration_order,
+                ));
+            }
+        }
+    }
+
+    // Rule 4: wave must be a contiguous sequence starting at 1.
+    let max_wave = specs
+        .iter()
+        .filter_map(|s| s.execution_wave)
+        .max()
+        .unwrap_or(0);
+    let wave_set: std::collections::HashSet<u32> =
+        specs.iter().filter_map(|s| s.execution_wave).collect();
+    for w in 1..=max_wave {
+        if !wave_set.contains(&w) {
+            return Err(format!(
+                "schedule wave not consecutive: missing wave {w}                  (declared waves: {sorted})",
+                sorted = {
+                    let mut v: Vec<u32> = wave_set.iter().copied().collect();
+                    v.sort();
+                    v.iter()
+                        .map(|x| x.to_string())
+                        .collect::<Vec<_>>()
+                        .join(",")
+                }
+            ));
+        }
+    }
+    // wave 0 (and any other non-positive) is rejected by Rule 1
+    // above; we additionally guard against the upper-bound having
+    // been declared as 0 by checking the max again.
+    if max_wave == 0 {
+        return Err(
+            "schedule wave set is empty: every unit must declare              execution_wave >= 1"
+                .to_string(),
+        );
+    }
+
+    // Rule 5: integration_order unique and contiguous 1..=n.
+    let n = specs.len();
+    let mut order_seen = std::collections::HashSet::with_capacity(n);
+    for spec in specs {
+        let o = spec.integration_order.expect("Rule 1 already checked");
+        if !order_seen.insert(o) {
+            return Err(format!(
+                "schedule integration_order duplicate: order {o} appears on                  multiple units (e.g. '{}')",
+                spec.key
+            ));
+        }
+        if o as usize > n {
+            return Err(format!(
+                "schedule integration_order exceeds unit count:                  order {o} > unit_count {n}",
+            ));
+        }
+    }
+    // Contiguity 1..=n must hold.
+    for o in 1..=n as u32 {
+        if !order_seen.contains(&o) {
+            return Err(format!(
+                "schedule integration_order not consecutive: missing order {o}                  (unit_count={n})",
+            ));
+        }
+    }
+
+    // Build a quick key -> spec lookup for dep-edge checks.
+    let key_index: std::collections::HashMap<&str, &BatchSpec> =
+        specs.iter().map(|s| (s.key.as_str(), s)).collect();
+
+    // Rules 6 & 7: dep edges must respect wave and order monotonicity.
+    for spec in specs {
+        let my_wave = spec.execution_wave.expect("Rule 1 already checked");
+        let my_order = spec.integration_order.expect("Rule 1 already checked");
+        for dep in &spec.blocker_keys {
+            let dep_spec = key_index.get(dep.as_str()).copied().ok_or_else(|| {
+                format!(
+                    "schedule dep edge unknown dependency:                      unit '{}' -> dep '{}' (no such unit)",
+                    spec.key, dep
+                )
+            })?;
+            let dep_wave = dep_spec.execution_wave.expect("Rule 1 already checked");
+            let dep_order = dep_spec.integration_order.expect("Rule 1 already checked");
+            if dep_wave >= my_wave {
+                return Err(format!(
+                    "schedule wave invariant violated:                      dep '{}' (wave {}) is not strictly less than                      unit '{}' (wave {})",
+                    dep, dep_wave, spec.key, my_wave,
+                ));
+            }
+            if dep_order >= my_order {
+                return Err(format!(
+                    "schedule integration_order invariant violated:                      dep '{}' (order {}) is not strictly less than                      unit '{}' (order {})",
+                    dep, dep_order, spec.key, my_order,
+                ));
+            }
+        }
+    }
+
+    // Rule 8: digest must resolve to a non-empty string when the
+    // pointer is set.
+    if let Some(ptr) = execution_plan_digest_pointer {
+        let digest = json_value_pointer(payload, ptr)
+            .and_then(Value::as_str)
+            .ok_or_else(|| {
+                format!("execution_plan_digest pointer '{ptr}' missing or not a string")
+            })?;
+        let trimmed = digest.trim();
+        if trimmed.is_empty() {
+            return Err(format!("execution_plan_digest pointer '{ptr}' is empty"));
+        }
+    }
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     //! P0-2 (plan 2026-06-29-006): the projector must fall back
@@ -1602,150 +1728,4 @@ mod tests {
         let id = format!("task-ce_executor_serial-fix02u02-{old:x}");
         assert!(!is_valid_task_id_format(&id));
     }
-}
-
-/// U2 (plan 2026-07-29-001): validate the static `execution_wave` /
-/// `integration_order` schedule for an `EnsureTaskBatch` payload.
-///
-/// Rules (matches plan §5/§6 + KTD1):
-///   1. Every unit must declare both fields when this validator runs.
-///   2. `execution_wave` is a positive integer (`u32 > 0`).
-///   3. `integration_order` is a positive integer (`u32 > 0`).
-///   4. `execution_wave` values form a contiguous sequence
-///      starting at 1 with no gaps (`max_wave == n_waves`).
-///   5. `integration_order` values are unique across all units
-///      and form a contiguous sequence 1..=n.
-///   6. For every dep edge `unit <- dep`: `wave(dep) < wave(unit)`.
-///   7. For every dep edge: `order(dep) < order(unit)`.
-///   8. When `execution_plan_digest_pointer` resolves, the digest
-///      value must be a non-empty string.
-///
-/// The validator is `O(V + E)` because every unit and every dep
-/// edge are visited exactly once. Rejection messages include the
-/// offending item key / edge / rule so the operator can pinpoint
-/// the source of the inconsistency.
-fn validate_wave_schedule(
-    specs: &[BatchSpec],
-    execution_plan_digest_pointer: Option<&str>,
-    payload: &Value,
-) -> Result<(), String> {
-    // Rule 1: every unit must declare both fields.
-    for spec in specs {
-        match (spec.execution_wave, spec.integration_order) {
-            (Some(w), Some(o)) if w > 0 && o > 0 => {}
-            _ => {
-                return Err(format!(
-                    "schedule field missing or non-positive:                      unit '{}' execution_wave={:?} integration_order={:?}                      (both must be positive integers)",
-                    spec.key, spec.execution_wave, spec.integration_order,
-                ));
-            }
-        }
-    }
-
-    // Rule 4: wave must be a contiguous sequence starting at 1.
-    let max_wave = specs
-        .iter()
-        .filter_map(|s| s.execution_wave)
-        .max()
-        .unwrap_or(0);
-    let wave_set: std::collections::HashSet<u32> =
-        specs.iter().filter_map(|s| s.execution_wave).collect();
-    for w in 1..=max_wave {
-        if !wave_set.contains(&w) {
-            return Err(format!(
-                "schedule wave not consecutive: missing wave {w}                  (declared waves: {sorted})",
-                sorted = {
-                    let mut v: Vec<u32> = wave_set.iter().copied().collect();
-                    v.sort();
-                    v.iter()
-                        .map(|x| x.to_string())
-                        .collect::<Vec<_>>()
-                        .join(",")
-                }
-            ));
-        }
-    }
-    // wave 0 (and any other non-positive) is rejected by Rule 1
-    // above; we additionally guard against the upper-bound having
-    // been declared as 0 by checking the max again.
-    if max_wave == 0 {
-        return Err(
-            "schedule wave set is empty: every unit must declare              execution_wave >= 1"
-                .to_string(),
-        );
-    }
-
-    // Rule 5: integration_order unique and contiguous 1..=n.
-    let n = specs.len();
-    let mut order_seen = std::collections::HashSet::with_capacity(n);
-    for spec in specs {
-        let o = spec.integration_order.expect("Rule 1 already checked");
-        if !order_seen.insert(o) {
-            return Err(format!(
-                "schedule integration_order duplicate: order {o} appears on                  multiple units (e.g. '{}')",
-                spec.key
-            ));
-        }
-        if o as usize > n {
-            return Err(format!(
-                "schedule integration_order exceeds unit count:                  order {o} > unit_count {n}",
-            ));
-        }
-    }
-    // Contiguity 1..=n must hold.
-    for o in 1..=n as u32 {
-        if !order_seen.contains(&o) {
-            return Err(format!(
-                "schedule integration_order not consecutive: missing order {o}                  (unit_count={n})",
-            ));
-        }
-    }
-
-    // Build a quick key -> spec lookup for dep-edge checks.
-    let key_index: std::collections::HashMap<&str, &BatchSpec> =
-        specs.iter().map(|s| (s.key.as_str(), s)).collect();
-
-    // Rules 6 & 7: dep edges must respect wave and order monotonicity.
-    for spec in specs {
-        let my_wave = spec.execution_wave.expect("Rule 1 already checked");
-        let my_order = spec.integration_order.expect("Rule 1 already checked");
-        for dep in &spec.blocker_keys {
-            let dep_spec = key_index.get(dep.as_str()).copied().ok_or_else(|| {
-                format!(
-                    "schedule dep edge unknown dependency:                      unit '{}' -> dep '{}' (no such unit)",
-                    spec.key, dep
-                )
-            })?;
-            let dep_wave = dep_spec.execution_wave.expect("Rule 1 already checked");
-            let dep_order = dep_spec.integration_order.expect("Rule 1 already checked");
-            if dep_wave >= my_wave {
-                return Err(format!(
-                    "schedule wave invariant violated:                      dep '{}' (wave {}) is not strictly less than                      unit '{}' (wave {})",
-                    dep, dep_wave, spec.key, my_wave,
-                ));
-            }
-            if dep_order >= my_order {
-                return Err(format!(
-                    "schedule integration_order invariant violated:                      dep '{}' (order {}) is not strictly less than                      unit '{}' (order {})",
-                    dep, dep_order, spec.key, my_order,
-                ));
-            }
-        }
-    }
-
-    // Rule 8: digest must resolve to a non-empty string when the
-    // pointer is set.
-    if let Some(ptr) = execution_plan_digest_pointer {
-        let digest = json_value_pointer(payload, ptr)
-            .and_then(Value::as_str)
-            .ok_or_else(|| {
-                format!("execution_plan_digest pointer '{ptr}' missing or not a string")
-            })?;
-        let trimmed = digest.trim();
-        if trimmed.is_empty() {
-            return Err(format!("execution_plan_digest pointer '{ptr}' is empty"));
-        }
-    }
-
-    Ok(())
 }

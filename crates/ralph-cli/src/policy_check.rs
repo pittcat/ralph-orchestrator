@@ -2783,6 +2783,14 @@ pub fn validate_batch_against_config(
 /// caller is bypassed (`Ok(())`) because the projection layer already
 /// rejects malformed events downstream — we only catch the
 /// silent-drift case here.
+// Pre-existing structural lint: `ValidationError` is a large
+// public error struct (>256 bytes) intentionally returned by
+// value so callers can pattern-match / format fields without an
+// extra allocation. The minimal fix (`Box<ValidationError>`)
+// would ripple through the CLI emit path + 4+ test sites and
+// is out of scope for U2's baseline-gate cleanup. This allow is
+// intentional and scoped to the single function.
+#[allow(clippy::result_large_err)]
 pub fn check_forge_plan_ready_disk_consistency(
     topic: &str,
     payload_str: &str,

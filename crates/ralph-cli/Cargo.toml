@@ -96,6 +96,12 @@ nix = { workspace = true }
 # `test-util`, so we add it here.
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }
+# U2 (plan 2026-07-30-004): enable ralph-core's test-only raw `EventLoop`
+# constructors for ralph-cli's test modules. In a `--workspace`/`--all-targets`
+# build this also unifies the feature on for ralph-core's own integration
+# tests. Production `cargo build` excludes dev-dependencies, so the raw
+# constructors stay unreachable from non-test code.
+ralph-core = { workspace = true, features = ["test-support"] }
 
 [[example]]
 name = "calculator"

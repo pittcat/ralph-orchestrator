@@ -362,8 +362,13 @@ async fn run_task_loop(
         }
     }
 
+    // U2 (plan 2026-07-30-004): compile the config through the fallible
+    // execution-contract boundary before constructing the loop; a contract gap
+    // fails the bench task non-zero before loop initialization.
+    let resolved = ralph_core::execution_contract::compile(config.clone())
+        .map_err(|findings| anyhow::anyhow!("{findings}"))?;
     // Initialize event loop
-    let mut event_loop = EventLoop::new(config.clone());
+    let mut event_loop = EventLoop::from_resolved_no_context(resolved);
     event_loop.initialize(&prompt_content);
 
     // Create CLI executor

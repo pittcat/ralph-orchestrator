@@ -28,6 +28,8 @@ A hat modified tracked files despite its read-only or tool-restriction contract.
 
 Orchestrator 在最终 resolved config、当前 flow step、hat、trigger event 与已接纳状态之上编译并持久化的版本化执行契约。它是 Prompt、agent CLI、事件接纳、投影与恢复共同使用的权限和动作真相；任何 activation identity、revision 或 config fingerprint 不匹配都必须拒绝继续执行。
 
+> **See also**: [`docs/explanation/execution-contract-design.md`](./docs/explanation/execution-contract-design.md)（设计说明）| [`docs/explanation/execution-contract-usage.md`](./docs/explanation/execution-contract-usage.md)（使用指南）
+
 ### Accepted Transition
 
 业务事件被正式接纳时的唯一状态变化边界：先完成契约、schema、flow、artifact 与投影准备校验，再原子写入可恢复的 transition receipt，随后幂等 materialize task/progress/authority 并发布事件。Reject 不产生业务副作用；commit 后崩溃由 receipt replay 补齐。

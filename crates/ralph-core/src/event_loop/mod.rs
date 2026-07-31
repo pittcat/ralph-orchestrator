@@ -3,6 +3,15 @@
 //! The event loop coordinates the execution of hats via pub/sub messaging.
 
 pub mod accepted_event;
+// U6 (plan 2026-07-30-004): the Accepted Transition API — the single,
+// atomic entry point for all business state changes. Validates
+// pre-commit, writes a durable outbox entry, then publishes to the bus.
+pub mod accepted_transition;
+// U8 (plan 2026-07-30-004): typed disposition classification. Every
+// topic maps to one of {Business, Recovery, DiagnosticObservation,
+// LoopControl}; only Business / Recovery advance business flow through
+// the Accepted Transition API.
+pub mod disposition;
 pub mod loop_state;
 pub mod plan_blocked_reason;
 pub mod rejection;
@@ -81,6 +90,9 @@ pub mod lifecycle;
 // U5a: EventLoop 生命周期相关 free function SSOT 转发。
 // impl EventLoop 方法留到 U5b-U5e 阶段。
 pub use lifecycle::build_state_ledger_from_env;
+// U6 (plan 2026-07-30-004): Accepted Transition API re-exports.
+pub use accepted_transition::{AcceptedTransition, OutboxEntry, TransitionError};
+pub use disposition::{Disposition, publish_synthetic};
 pub mod policy;
 pub mod process;
 pub mod prompt;
@@ -1209,6 +1221,12 @@ impl EventLoop {
     }
 
     /// Creates a new event loop from configuration.
+    ///
+    /// **Test-only.** Production code must construct via
+    /// [`EventLoop::from_resolved_no_context`] (or [`EventLoop::from_resolved`])
+    /// so the config passes the fallible execution-contract compile boundary
+    /// (U2, plan 2026-07-30-004) before the loop is built.
+    #[cfg(any(test, feature = "test-support"))]
     pub fn new(config: RalphConfig) -> Self {
         // Try to create diagnostics collector, but fall back to disabled if it fails
         // (e.g., in tests without proper directory setup)
@@ -1221,7 +1239,7 @@ impl EventLoop {
                 crate::diagnostics::DiagnosticsCollector::disabled()
             });
 
-        Self::with_diagnostics(config, diagnostics)
+        Self::build_no_context(config, diagnostics)
     }
 
     /// Creates a new event loop with a loop context for path resolution.
@@ -1237,6 +1255,10 @@ impl EventLoop {
     /// fresh `DiagnosticsCollector::new(workspace)` is created. Either way,
     /// init failure falls back to a disabled collector (with a `tracing::warn!`)
     /// — diagnostics never panic the loop.
+    /// **Test-only.** Production code must construct via
+    /// [`EventLoop::from_resolved`] so the config passes the fallible
+    /// execution-contract compile boundary (U2) first.
+    #[cfg(any(test, feature = "test-support"))]
     pub fn with_context(config: RalphConfig, context: LoopContext) -> Self {
         let diagnostics = match context.prebuilt_diagnostics() {
             Some(collector) => (**collector).clone(),
@@ -1250,17 +1272,91 @@ impl EventLoop {
                 }),
         };
 
-        Self::with_context_and_diagnostics(config, context, diagnostics)
+        Self::build_with_context(config, context, diagnostics)
             .expect("U13: archive failed; the loop cannot start on stale state. Use with_context_and_diagnostics to receive the error explicitly.")
     }
 
+    /// Production constructor: build the loop from a config that has already
+    /// passed the fallible execution-contract compile boundary (U2, plan
+    /// 2026-07-30-004). Mirrors the context-aware path of
+    /// [`EventLoop::with_context`].
+    ///
+    /// Callers must obtain `resolved` via
+    /// [`crate::execution_contract::compile`] and fail non-zero on `Err`
+    /// *before* reaching this point — a config gap must abort startup before
+    /// loop initialization.
+    pub fn from_resolved(
+        resolved: crate::execution_contract::ResolvedRuntimeConfig,
+        context: LoopContext,
+    ) -> Self {
+        // U4: retain the compiled contract so `prepend_hat_identity`
+        // can project contract actionability into the prompt block.
+        let contract = std::sync::Arc::new(resolved.contract().clone());
+        let config = resolved.into_inner();
+        let diagnostics = match context.prebuilt_diagnostics() {
+            Some(collector) => (**collector).clone(),
+            None => crate::diagnostics::DiagnosticsCollector::new(context.workspace())
+                .unwrap_or_else(|e| {
+                    warn!(
+                        "Failed to initialize diagnostics: {}, using disabled collector",
+                        e
+                    );
+                    crate::diagnostics::DiagnosticsCollector::disabled()
+                }),
+        };
+
+        let mut event_loop = Self::build_with_context(config, context, diagnostics)
+            .expect("U13: archive failed; the loop cannot start on stale state. Use with_context_and_diagnostics to receive the error explicitly.");
+        event_loop.execution_contract = Some(contract);
+        event_loop
+    }
+
+    /// Production constructor for the no-context path (mirrors
+    /// [`EventLoop::new`]). See [`EventLoop::from_resolved`] for the contract
+    /// compile requirement.
+    pub fn from_resolved_no_context(
+        resolved: crate::execution_contract::ResolvedRuntimeConfig,
+    ) -> Self {
+        // U4: retain the compiled contract for prompt projection.
+        let contract = std::sync::Arc::new(resolved.contract().clone());
+        let config = resolved.into_inner();
+        let diagnostics = crate::diagnostics::DiagnosticsCollector::new(std::path::Path::new("."))
+            .unwrap_or_else(|e| {
+                debug!(
+                    "Failed to initialize diagnostics: {}, using disabled collector",
+                    e
+                );
+                crate::diagnostics::DiagnosticsCollector::disabled()
+            });
+
+        let mut event_loop = Self::build_no_context(config, diagnostics);
+        event_loop.execution_contract = Some(contract);
+        event_loop
+    }
+
     /// Creates a new event loop with explicit loop context and diagnostics.
+    ///
+    /// **Test-only.** Production code must construct via
+    /// [`EventLoop::from_resolved`] so the config passes the fallible
+    /// execution-contract compile boundary (U2) first.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn with_context_and_diagnostics(
+        config: RalphConfig,
+        context: LoopContext,
+        diagnostics: crate::diagnostics::DiagnosticsCollector,
+    ) -> std::io::Result<Self> {
+        Self::build_with_context(config, context, diagnostics)
+    }
+
+    /// Ungated context-aware builder shared by the test-only
+    /// [`EventLoop::with_context_and_diagnostics`] / [`EventLoop::with_context`]
+    /// and the production [`EventLoop::from_resolved`].
     // U11 wiring: archive_state_for_loop 在 new() 路径调用
     // U13 (2026-06-27-002 plan completion): a failed
     // archive now returns `Err` instead of warning and
     // continuing, so stale `.ralph/` state can never
     // poison a fresh loop (SC-6).
-    pub fn with_context_and_diagnostics(
+    fn build_with_context(
         mut config: RalphConfig,
         context: LoopContext,
         diagnostics: crate::diagnostics::DiagnosticsCollector,
@@ -1630,6 +1726,32 @@ impl EventLoop {
             }
         }
 
+        // U3 (plan 2026-07-30-004): open the persistent activation registry.
+        // Best-effort: a corrupt or unreadable registry file causes the
+        // field to be `None` and the loop proceeds without cross-process
+        // activation identity tracking. The CLI can still check via
+        // `load_registry_readonly` which returns the error explicitly.
+        let activation_registry = {
+            let registry_path = context
+                .workspace()
+                .join(".ralph")
+                .join(crate::execution_contract::ACTIVATION_REGISTRY_RELATIVE_PATH);
+            match crate::execution_contract::ActivationRegistry::open(registry_path) {
+                Ok(r) => {
+                    debug!("U3: activation registry opened");
+                    Some(r)
+                }
+                Err(e) => {
+                    warn!(
+                        error = %e,
+                        "U3: activation registry failed to open; proceeding without it. \
+                         Concurrent activation enforcement is disabled."
+                    );
+                    None
+                }
+            }
+        };
+
         Ok(Self {
             config: config.clone(),
             registry,
@@ -1647,6 +1769,7 @@ impl EventLoop {
                 config.telemetry.runtime_diagnosis.clone(),
             )),
             hat_lifecycle_tracker: ActivationLifecycleTracker::new(),
+            activation_registry,
             ephemeral_isolation: crate::ephemeral_isolation::EphemeralIsolation::new(),
             idempotent_log,
             stage_pipeline,
@@ -1671,6 +1794,9 @@ impl EventLoop {
             // stall_recovery_counts).
             precheck_retries: crate::event_loop::precheck_gate_runner::PrecheckRetryRegistry::new(),
             phase_authority,
+            // U4: set post-construction by `from_resolved`; the shared
+            // builder always starts with `None` (legacy / test paths).
+            execution_contract: None,
         })
     }
 
@@ -1687,7 +1813,22 @@ impl EventLoop {
     }
 
     /// Creates a new event loop with explicit diagnostics collector (for testing).
+    ///
+    /// **Test-only.** Production code must construct via
+    /// [`EventLoop::from_resolved_no_context`] so the config passes the
+    /// fallible execution-contract compile boundary (U2) first.
+    #[cfg(any(test, feature = "test-support"))]
     pub fn with_diagnostics(
+        config: RalphConfig,
+        diagnostics: crate::diagnostics::DiagnosticsCollector,
+    ) -> Self {
+        Self::build_no_context(config, diagnostics)
+    }
+
+    /// Ungated no-context builder shared by the test-only
+    /// [`EventLoop::with_diagnostics`] / [`EventLoop::new`] and the production
+    /// [`EventLoop::from_resolved_no_context`].
+    fn build_no_context(
         mut config: RalphConfig,
         diagnostics: crate::diagnostics::DiagnosticsCollector,
     ) -> Self {
@@ -1812,6 +1953,9 @@ impl EventLoop {
                 config.telemetry.runtime_diagnosis.clone(),
             )),
             hat_lifecycle_tracker: ActivationLifecycleTracker::new(),
+            // U3: no-context path (e.g. `ralph inspect prompt`) has no
+            // workspace, so the registry cannot be opened.
+            activation_registry: None,
             ephemeral_isolation: crate::ephemeral_isolation::EphemeralIsolation::new(),
             idempotent_log: std::sync::Mutex::new(
                 crate::state::idempotent_log::IdempotentLog::disabled(),
@@ -1833,6 +1977,8 @@ impl EventLoop {
             // `with_context_and_diagnostics` body).
             precheck_retries: crate::event_loop::precheck_gate_runner::PrecheckRetryRegistry::new(),
             phase_authority,
+            // U4: set post-construction by `from_resolved_no_context`.
+            execution_contract: None,
         }
     }
 
@@ -7365,9 +7511,17 @@ impl EventLoop {
         if hat_id.as_str() == "ralph" {
             return prompt;
         }
-        let Some(snapshot) =
-            crate::hat_identity::HatIdentitySnapshot::from_config(&self.config, hat_id)
-        else {
+        // U4 (plan 2026-07-30-004): prefer the contract-projected
+        // snapshot so the prompt and runtime enforcement are provably
+        // in sync. Fall back to raw config when the contract is not
+        // available (legacy / test constructors).
+        let snapshot = match &self.execution_contract {
+            Some(contract) => crate::hat_identity::HatIdentitySnapshot::from_config_and_contract(
+                &self.config, hat_id, contract,
+            ),
+            None => crate::hat_identity::HatIdentitySnapshot::from_config(&self.config, hat_id),
+        };
+        let Some(snapshot) = snapshot else {
             tracing::debug!(
                 hat_id = %hat_id.as_str(),
                 "OPAC U2: skipping ## HAT IDENTITY injection for unknown hat"
@@ -12621,13 +12775,80 @@ impl EventLoop {
             }
             pending
         };
+
+        // U7/U8: pre-compute idempotent-transition context once per
+        // batch so the per-event loop only needs field-level borrows.
+        let u7_contract_digest = self
+            .execution_contract
+            .as_ref()
+            .map(|c| c.contract_digest.clone());
+        let u7_loop_id = self.current_loop_id_for_contract();
+        let u7_iteration = self.state.iteration;
+
         for event in pending_publish {
-            self.bus.publish(event.clone());
+            // U8 (plan 2026-07-30-004): route by typed disposition.
+            // Business / Recovery events go through the idempotent
+            // Accepted Transition API (durable outbox + publish) when
+            // the execution contract is compiled; DiagnosticObservation
+            // / LoopControl events use the explicit direct channel and
+            // never advance phase authority. Without a compiled
+            // contract (legacy / test paths) every event falls back to
+            // a direct publish.
+            let u8_disposition =
+                crate::event_loop::disposition::classify(event.topic.as_str());
+
+            let mut published_via_disposition_channel = false;
+            if let Some(ref digest) = u7_contract_digest
+                && let Some(ref ledger) = self.state.state_ledger
+            {
+                let activation_id = format!(
+                    "{}:{u7_iteration}",
+                    event
+                        .source
+                        .as_ref()
+                        .map(|h| h.as_str())
+                        .unwrap_or("unknown")
+                );
+                match crate::event_loop::disposition::publish_synthetic(
+                    &event,
+                    u8_disposition,
+                    &u7_loop_id,
+                    &activation_id,
+                    digest,
+                    ledger,
+                    &mut self.bus,
+                ) {
+                    Ok(_maybe_entry) => {
+                        // `Some(entry)` = accepted transition (outbox +
+                        // publish); `None` = explicit diagnostic /
+                        // control channel (direct publish). Either way
+                        // the event reached the bus through the
+                        // disposition-aware route.
+                        published_via_disposition_channel = true;
+                    }
+                    Err(e) => {
+                        warn!(
+                            topic = %event.topic,
+                            error = %e,
+                            "U8: transition commit failed, falling back to direct publish"
+                        );
+                    }
+                }
+            }
+            if !published_via_disposition_channel {
+                self.bus.publish(event.clone());
+            }
             self.diagnose_plan_complete_channel(
                 &event,
                 crate::event_loop::phase_authority::diagnosis::Channel::Main,
             );
-            self.apply_phase_authority_on_accepted(&event);
+            // U8: only Business / Recovery dispositions advance flow.
+            // Diagnostic / loop-control events are observations about
+            // the loop, not transitions of business state, so phase
+            // authority MUST NOT run for them.
+            if u8_disposition.advances_flow() {
+                self.apply_phase_authority_on_accepted(&event);
+            }
         }
 
         // --- U3: Invariant assertion checks ---
@@ -13735,7 +13956,14 @@ impl EventLoop {
                     &event,
                     crate::event_loop::phase_authority::diagnosis::Channel::Main,
                 );
-                self.apply_phase_authority_on_accepted(&event);
+                // U8 (plan 2026-07-30-004): only Business / Recovery
+                // dispositions advance flow; diagnostic / loop-control
+                // topics never reach phase authority.
+                if crate::event_loop::disposition::classify(event.topic.as_str())
+                    .advances_flow()
+                {
+                    self.apply_phase_authority_on_accepted(&event);
+                }
             }
             crate::event_loop::emit_gate::EmitGateOutcome::AcceptRepairStream => {
                 // U7 (2026-06-27-002 plan completion): the
