@@ -27,6 +27,7 @@
 //! can never happen.
 
 use crate::state::StateLedger;
+use crate::file_lock::FileLock;
 use ralph_proto::{Event, EventBus};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -153,6 +154,25 @@ impl AcceptedTransition {
         bus: &mut EventBus,
         validate: impl FnOnce(&Event) -> Result<(), String>,
     ) -> Result<OutboxEntry, TransitionError> {
+        let lock = FileLock::new(ledger.workspace().join(OUTBOX_RELATIVE_PATH))
+            .map_err(|e| TransitionError::CommitFailed { source: e.to_string() })?;
+        let _guard = lock
+            .exclusive()
+            .map_err(|e| TransitionError::CommitFailed { source: e.to_string() })?;
+        Self::commit_unlocked(
+            event, loop_id, activation_id, contract_revision, ledger, bus, validate,
+        )
+    }
+
+    fn commit_unlocked(
+        event: &Event,
+        loop_id: &str,
+        activation_id: &str,
+        contract_revision: &str,
+        ledger: &StateLedger,
+        bus: &mut EventBus,
+        validate: impl FnOnce(&Event) -> Result<(), String>,
+    ) -> Result<OutboxEntry, TransitionError> {
         // 1. Pre-commit validation — zero side effects on reject.
         if let Err(reason) = validate(event) {
             return Err(TransitionError::PreCommitRejected { reason });
@@ -190,7 +210,7 @@ impl AcceptedTransition {
 
         // 3. Durable outbox write — on failure, publish nothing.
         ledger
-            .append_outbox(&entry)
+            .append_outbox_unlocked(&entry)
             .map_err(|e| TransitionError::CommitFailed {
                 source: e.to_string(),
             })?;
@@ -216,13 +236,11 @@ impl AcceptedTransition {
     ///
     /// Returns `None` when the transition has not been committed yet.
     fn find_committed(workspace: &Path, transition_id: &str) -> Option<OutboxEntry> {
-        read_outbox(workspace)
-            .ok()
-            .and_then(|entries| {
-                entries
-                    .into_iter()
-                    .find(|e| e.transition_id == transition_id)
-            })
+        read_outbox(workspace).ok().and_then(|entries| {
+            entries
+                .into_iter()
+                .find(|e| e.transition_id == transition_id)
+        })
     }
 
     /// Commit a business transition with idempotency.
@@ -257,6 +275,42 @@ impl AcceptedTransition {
         validate: impl FnOnce(&Event) -> Result<(), String>,
         materialize: impl FnOnce(),
     ) -> Result<OutboxEntry, TransitionError> {
+        Self::commit_idempotent_with_rollback(
+            event,
+            loop_id,
+            activation_id,
+            contract_revision,
+            ledger,
+            bus,
+            validate,
+            || {
+                materialize();
+                Ok(Box::new(|| {}) as Box<dyn FnOnce()>)
+            },
+        )
+    }
+
+    /// Idempotent transition with an explicit materialization rollback.
+    ///
+    /// The apply closure is executed only after validation and returns a
+    /// rollback closure. If the durable outbox append fails, rollback is
+    /// executed before the error is returned, so a rejected transition
+    /// cannot leave a projection side effect behind.
+    pub fn commit_idempotent_with_rollback(
+        event: &Event,
+        loop_id: &str,
+        activation_id: &str,
+        contract_revision: &str,
+        ledger: &StateLedger,
+        bus: &mut EventBus,
+        validate: impl FnOnce(&Event) -> Result<(), String>,
+        materialize: impl FnOnce() -> Result<Box<dyn FnOnce()>, String>,
+    ) -> Result<OutboxEntry, TransitionError> {
+        let lock = FileLock::new(ledger.workspace().join(OUTBOX_RELATIVE_PATH))
+            .map_err(|e| TransitionError::CommitFailed { source: e.to_string() })?;
+        let _guard = lock
+            .exclusive()
+            .map_err(|e| TransitionError::CommitFailed { source: e.to_string() })?;
         // 1. Derive the deterministic identity tuple (same as commit).
         let payload_digest = {
             let mut h = Sha256::new();
@@ -287,17 +341,25 @@ impl AcceptedTransition {
             return Ok(existing);
         }
 
-        // 3. First commit — run materialize side effect, then commit.
-        materialize();
-        Self::commit(
+        // Validate before materializing so a rejected transition has no
+        // projection side effect at all.
+        validate(event).map_err(|reason| TransitionError::PreCommitRejected { reason })?;
+
+        // 3. First commit — stage materialization and retain rollback.
+        let rollback = materialize().map_err(|reason| TransitionError::PreCommitRejected { reason })?;
+        let result = Self::commit_unlocked(
             event,
             loop_id,
             activation_id,
             contract_revision,
             ledger,
             bus,
-            validate,
-        )
+            |_| Ok(()),
+        );
+        if result.is_err() {
+            rollback();
+        }
+        result
     }
 
     /// Acknowledge a transition as delivered.
@@ -325,8 +387,8 @@ impl AcceptedTransition {
             })
             .collect();
 
-        // Rewrite the outbox atomically: serialize all entries, write
-        // to the same path.
+        // Rewrite the outbox atomically. A direct write can truncate the
+        // durable receipt if the process dies between truncate and write.
         let mut body = String::new();
         for entry in &updated {
             let line = serde_json::to_string(entry).map_err(|e| {
@@ -338,7 +400,17 @@ impl AcceptedTransition {
             body.push_str(&line);
             body.push('\n');
         }
-        std::fs::write(&path, body)?;
+        let tmp = path.with_extension("jsonl.tmp");
+        {
+            use std::io::Write;
+            let mut file = std::fs::File::create(&tmp)?;
+            file.write_all(body.as_bytes())?;
+            file.sync_all()?;
+        }
+        std::fs::rename(&tmp, &path)?;
+        if let Some(parent) = path.parent() {
+            std::fs::File::open(parent)?.sync_all()?;
+        }
         Ok(())
     }
 }
@@ -441,13 +513,24 @@ mod tests {
 
         // Zero side effects: TaskStore unchanged, ledger commit log
         // empty, outbox empty, bus saw nothing.
-        assert_eq!(store.all().len(), tasks_before, "TaskStore must be unchanged");
-        assert!(ledger.commit_log().is_empty(), "ledger commit log must be empty");
+        assert_eq!(
+            store.all().len(),
+            tasks_before,
+            "TaskStore must be unchanged"
+        );
+        assert!(
+            ledger.commit_log().is_empty(),
+            "ledger commit log must be empty"
+        );
         assert!(
             read_outbox(&ws).unwrap().is_empty(),
             "outbox must have zero entries on reject"
         );
-        assert_eq!(*seen.lock().unwrap(), 0, "bus must have zero events on reject");
+        assert_eq!(
+            *seen.lock().unwrap(),
+            0,
+            "bus must have zero events on reject"
+        );
     }
 
     #[test]
@@ -508,7 +591,10 @@ mod tests {
             event_identity,
             &canonical_digest,
         );
-        assert_eq!(entry.transition_id, expected, "transition_id must be deterministic");
+        assert_eq!(
+            entry.transition_id, expected,
+            "transition_id must be deterministic"
+        );
         assert_eq!(entry.payload_digest, canonical_digest);
 
         // Exactly one event published, and only after the outbox write.
@@ -635,7 +721,11 @@ mod tests {
 
         // Outbox has exactly 1 entry (not 2).
         let entries = read_outbox(&ws).unwrap();
-        assert_eq!(entries.len(), 1, "outbox must have exactly 1 entry after replay");
+        assert_eq!(
+            entries.len(),
+            1,
+            "outbox must have exactly 1 entry after replay"
+        );
 
         // EventBus saw exactly 1 event (the replay was deduplicated).
         assert_eq!(
@@ -654,7 +744,11 @@ mod tests {
         store.save().unwrap();
 
         let event = valid_event();
-        let tasks_path = ledger.workspace().join(".ralph").join("agent").join("tasks.jsonl");
+        let tasks_path = ledger
+            .workspace()
+            .join(".ralph")
+            .join("agent")
+            .join("tasks.jsonl");
 
         // First commit — materialize adds a task.
         AcceptedTransition::commit_idempotent(
@@ -736,13 +830,15 @@ mod tests {
         assert_eq!(*seen.lock().unwrap(), 1, "bus must see the initial publish");
 
         // Ack the transition — marks it as delivered.
-        AcceptedTransition::ack(&ws, &entry.transition_id)
-            .expect("ack must succeed");
+        AcceptedTransition::ack(&ws, &entry.transition_id).expect("ack must succeed");
 
         // Verify the outbox entry is now marked delivered.
         let entries = read_outbox(&ws).unwrap();
         assert_eq!(entries.len(), 1);
-        assert!(entries[0].delivered, "entry must be marked delivered after ack");
+        assert!(
+            entries[0].delivered,
+            "entry must be marked delivered after ack"
+        );
 
         // Replay the SAME transition — ack'd, so no re-publish.
         let replayed = AcceptedTransition::commit_idempotent(

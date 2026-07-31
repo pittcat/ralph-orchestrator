@@ -505,8 +505,6 @@ impl StateLedger {
         entry: &crate::event_loop::accepted_transition::OutboxEntry,
     ) -> Result<(), std::io::Error> {
         use crate::event_loop::accepted_transition::OUTBOX_RELATIVE_PATH;
-        use std::io::Write;
-
         let outbox_path = self.workspace.join(OUTBOX_RELATIVE_PATH);
         if let Some(parent) = outbox_path.parent() {
             std::fs::create_dir_all(parent)?;
@@ -514,6 +512,24 @@ impl StateLedger {
 
         let lock = FileLock::new(&outbox_path)?;
         let _guard = lock.exclusive()?;
+
+        self.append_outbox_unlocked(entry)
+    }
+
+    /// Append an outbox entry while the caller already holds the outbox
+    /// lock. This is used by Accepted Transition's check-and-append
+    /// transaction to avoid recursively acquiring the same flock.
+    pub(crate) fn append_outbox_unlocked(
+        &self,
+        entry: &crate::event_loop::accepted_transition::OutboxEntry,
+    ) -> Result<(), std::io::Error> {
+        use crate::event_loop::accepted_transition::OUTBOX_RELATIVE_PATH;
+        use std::io::Write;
+
+        let outbox_path = self.workspace.join(OUTBOX_RELATIVE_PATH);
+        if let Some(parent) = outbox_path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
 
         let mut file = std::fs::OpenOptions::new()
             .create(true)

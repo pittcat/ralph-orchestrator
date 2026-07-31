@@ -17,10 +17,20 @@
 
 use crate::artifact_canonicalizer::{canonicalize, ArtifactError};
 use serde_json::Value;
+use std::path::Path;
 
 /// Error from plan handoff verification.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum HandoffError {
+    /// The artifact path escapes the workspace root or contains a parent
+    /// traversal component.
+    PathEscape { path: String },
+    /// The artifact path is not a regular file.
+    NotRegularFile { path: String },
+    /// The artifact changed while it was being read.
+    ChangedDuringRead { path: String },
+    /// The artifact could not be read.
+    Io { path: String, source: String },
     /// The digest in the event payload did not match the canonical digest.
     DigestMismatch {
         /// The digest the event payload claimed.
@@ -59,6 +69,10 @@ pub enum HandoffError {
 impl std::fmt::Display for HandoffError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            HandoffError::PathEscape { path } => write!(f, "artifact path escapes workspace: {path}"),
+            HandoffError::NotRegularFile { path } => write!(f, "artifact is not a regular file: {path}"),
+            HandoffError::ChangedDuringRead { path } => write!(f, "artifact changed during read: {path}"),
+            HandoffError::Io { path, source } => write!(f, "failed to read artifact {path}: {source}"),
             HandoffError::DigestMismatch { expected, actual } => write!(
                 f,
                 "plan digest mismatch: event claimed {expected}, artifact canonicalized to {actual}"
@@ -133,6 +147,49 @@ pub fn verify_plan_handoff(
     }
 
     Ok(canonical)
+}
+
+/// Read and verify an artifact from a contract-bounded workspace path.
+/// The file is opened once, checked as a regular file, read completely, and
+/// checked again before canonicalization to detect replacement/TOCTOU races.
+pub fn verify_plan_handoff_path(
+    payload: &Value,
+    workspace: &Path,
+    artifact_path: &Path,
+) -> Result<crate::artifact_canonicalizer::CanonicalArtifact, HandoffError> {
+    if artifact_path.components().any(|c| matches!(c, std::path::Component::ParentDir)) {
+        return Err(HandoffError::PathEscape { path: artifact_path.display().to_string() });
+    }
+    let root = workspace.canonicalize().map_err(|e| HandoffError::Io {
+        path: workspace.display().to_string(), source: e.to_string(),
+    })?;
+    let candidate = if artifact_path.is_absolute() {
+        artifact_path.to_path_buf()
+    } else {
+        workspace.join(artifact_path)
+    };
+    let resolved = candidate.canonicalize().map_err(|e| HandoffError::Io {
+        path: candidate.display().to_string(), source: e.to_string(),
+    })?;
+    if !resolved.starts_with(&root) {
+        return Err(HandoffError::PathEscape { path: artifact_path.display().to_string() });
+    }
+    let before = std::fs::metadata(&resolved).map_err(|e| HandoffError::Io {
+        path: resolved.display().to_string(), source: e.to_string(),
+    })?;
+    if !before.is_file() {
+        return Err(HandoffError::NotRegularFile { path: resolved.display().to_string() });
+    }
+    let bytes = std::fs::read(&resolved).map_err(|e| HandoffError::Io {
+        path: resolved.display().to_string(), source: e.to_string(),
+    })?;
+    let after = std::fs::metadata(&resolved).map_err(|e| HandoffError::Io {
+        path: resolved.display().to_string(), source: e.to_string(),
+    })?;
+    if before.len() != after.len() || before.modified().ok() != after.modified().ok() {
+        return Err(HandoffError::ChangedDuringRead { path: resolved.display().to_string() });
+    }
+    verify_plan_handoff(payload, &bytes)
 }
 
 #[cfg(test)]
