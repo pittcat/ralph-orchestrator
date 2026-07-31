@@ -67,6 +67,15 @@ pub enum ArtifactError {
         /// The underlying parser/serializer message.
         source: String,
     },
+    /// The artifact used YAML anchors or aliases, which are forbidden in
+    /// canonical artifacts.
+    ///
+    /// W6: the YAML parser expands anchors/aliases with no size cap, so a
+    /// sub-1-MiB "billion laughs" alias bomb can expand to gigabytes and
+    /// exhaust memory *after* the raw-size gate. Rejecting any document
+    /// containing an anchor/alias is a fail-closed mitigation (machine-
+    /// generated execution-plan artifacts never use them).
+    AliasesForbidden,
 }
 
 impl fmt::Display for ArtifactError {
@@ -86,6 +95,10 @@ impl fmt::Display for ArtifactError {
             ArtifactError::ParseError { source } => {
                 write!(f, "failed to parse artifact YAML: {source}")
             }
+            ArtifactError::AliasesForbidden => write!(
+                f,
+                "artifact uses YAML anchors/aliases, which are forbidden in canonical artifacts"
+            ),
         }
     }
 }
@@ -129,6 +142,13 @@ pub fn canonicalize(raw: &[u8]) -> Result<CanonicalArtifact, ArtifactError> {
         });
     }
 
+    // 1b. Reject YAML anchors/aliases before parsing (W6). The parser
+    //     expands them with no size cap, so a sub-1-MiB alias bomb would
+    //     otherwise blow past the raw-size bound during parse. Fail-closed.
+    if has_yaml_anchor_or_alias(raw) {
+        return Err(ArtifactError::AliasesForbidden);
+    }
+
     // 2. Parse.
     let value: Value = serde_yaml::from_slice(raw)
         .map_err(|e| ArtifactError::ParseError { source: e.to_string() })?;
@@ -167,6 +187,92 @@ pub fn canonicalize(raw: &[u8]) -> Result<CanonicalArtifact, ArtifactError> {
         edge_count,
         canonical_bytes,
     })
+}
+
+/// Detect YAML anchor (`&name`) or alias (`*name`) tokens in raw bytes,
+/// ignoring occurrences inside quoted scalars or comments.
+///
+/// W6: `serde_yaml` 0.9 (over `unsafe-libyaml`) expands anchors/aliases
+/// during parsing with no size cap, so a sub-1-MiB "billion laughs" alias
+/// bomb can expand to gigabytes and exhaust memory *after* the raw-size
+/// gate. Alias expansion is impossible without an anchor *definition*
+/// (`&name` in node position), so flagging any document that contains a
+/// real anchor/alias sigil is a fail-closed, deterministic mitigation with
+/// no false negatives for expansion bombs. Canonical execution-plan
+/// artifacts are machine-generated and never use anchors/aliases.
+///
+/// The scan is position-aware to avoid false positives on `&`/`*` that are
+/// not YAML node anchors/aliases: it tracks single/double-quoted scalars and
+/// `#` comments, and only flags a sigil that is (a) outside quotes/comments,
+/// (b) at a token boundary (start of line, or preceded by whitespace or one
+/// of `[ ] { } ,`), and (c) immediately followed by an anchor-name start
+/// char (`A-Za-z0-9_-`). Scalars like `cmd: "ls *.rs && echo a & b"`,
+/// `glob: '*.yml'`, and unquoted `pattern: *.rs` therefore pass through.
+fn has_yaml_anchor_or_alias(raw: &[u8]) -> bool {
+    let is_name_start = |c: u8| c.is_ascii_alphanumeric() || c == b'_' || c == b'-';
+    let is_boundary = |c: u8| matches!(c, b' ' | b'\t' | b'[' | b']' | b'{' | b'}' | b',');
+
+    let mut in_single = false;
+    let mut in_double = false;
+    let mut in_comment = false;
+    let mut at_token_start = true;
+
+    let mut i = 0;
+    while i < raw.len() {
+        let c = raw[i];
+        if in_comment {
+            if c == b'\n' {
+                in_comment = false;
+                at_token_start = true;
+            }
+            i += 1;
+            continue;
+        }
+        if in_single {
+            if c == b'\'' {
+                in_single = false;
+            }
+            at_token_start = false;
+            i += 1;
+            continue;
+        }
+        if in_double {
+            if c == b'\\' {
+                // Skip the escaped byte so a quoted \" does not end the string.
+                i += 2;
+                at_token_start = false;
+                continue;
+            }
+            if c == b'"' {
+                in_double = false;
+            }
+            at_token_start = false;
+            i += 1;
+            continue;
+        }
+        match c {
+            b'\'' => {
+                in_single = true;
+                at_token_start = false;
+            }
+            b'"' => {
+                in_double = true;
+                at_token_start = false;
+            }
+            b'#' if at_token_start => in_comment = true,
+            b'&' | b'*' if at_token_start => {
+                if i + 1 < raw.len() && is_name_start(raw[i + 1]) {
+                    return true;
+                }
+                at_token_start = false;
+            }
+            b'\n' => at_token_start = true,
+            c if is_boundary(c) => at_token_start = true,
+            _ => at_token_start = false,
+        }
+        i += 1;
+    }
+    false
 }
 
 /// Count the artifact's Units: entries in the top-level `units` (preferred)
@@ -343,5 +449,93 @@ mod tests {
         let raw = edges_yaml(MAX_EDGES);
         let ok = canonicalize(&raw).expect("exactly 4096 edges must be accepted");
         assert_eq!(ok.edge_count, MAX_EDGES);
+    }
+
+    // ── W6: YAML anchor/alias billion-laughs rejection ──────────────
+
+    /// The classic exponential alias bomb: a few hundred raw bytes that
+    /// expand to ~gigabytes (nine levels of 9x aliasing).
+    fn billion_laughs_yaml() -> Vec<u8> {
+        let mut s = String::from(
+            "a: &a [\"lol\",\"lol\",\"lol\",\"lol\",\"lol\",\"lol\",\"lol\",\"lol\",\"lol\"]\n",
+        );
+        for (name, prev) in [
+            ("b", "a"),
+            ("c", "b"),
+            ("d", "c"),
+            ("e", "d"),
+            ("f", "e"),
+            ("g", "f"),
+            ("h", "g"),
+            ("i", "h"),
+        ] {
+            s.push_str(&format!(
+                "{name}: &{name} [*{prev},*{prev},*{prev},*{prev},*{prev},*{prev},*{prev},*{prev},*{prev}]\n"
+            ));
+        }
+        s.into_bytes()
+    }
+
+    #[test]
+    fn u6w_rejects_billion_laughs_fast_and_bounded() {
+        let raw = billion_laughs_yaml();
+        assert!(
+            raw.len() < MAX_ARTIFACT_BYTES,
+            "bomb raw size must be under the size gate"
+        );
+        let start = std::time::Instant::now();
+        let err = canonicalize(&raw).expect_err("alias bomb must be rejected");
+        assert!(
+            matches!(err, ArtifactError::AliasesForbidden),
+            "unexpected error: {err:?}"
+        );
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(1),
+            "rejection must be fast (no alias expansion)"
+        );
+    }
+
+    #[test]
+    fn u6w_rejects_simple_anchor_and_alias() {
+        let anchor = b"units:\n  - id: &x u0\nedges: []\n";
+        assert!(matches!(
+            canonicalize(anchor).expect_err("anchor must be rejected"),
+            ArtifactError::AliasesForbidden
+        ));
+
+        let alias = b"base: &b u0\nunits:\n  - id: *b\nedges: []\n";
+        assert!(matches!(
+            canonicalize(alias).expect_err("alias must be rejected"),
+            ArtifactError::AliasesForbidden
+        ));
+    }
+
+    #[test]
+    fn u6w_normal_artifact_still_canonicalizes() {
+        let raw = b"units:\n  - id: u0\nedges: []\n";
+        let c = canonicalize(raw).expect("clean artifact must canonicalize");
+        assert_eq!(c.unit_count, 1);
+        assert_eq!(c.edge_count, 0);
+        assert!(!c.digest.is_empty());
+        // Determinism is unchanged by the pre-parse scanner.
+        assert_eq!(c.digest, canonicalize(raw).unwrap().digest);
+    }
+
+    #[test]
+    fn u6w_false_positive_guard() {
+        // `&`/`*` in non-anchor positions must NOT be rejected.
+        let cases: &[&[u8]] = &[
+            b"cmd: \"ls *.rs && echo a & b\"\nunits: []\n", // quoted glob + && / &
+            b"glob: '*.yml'\nunits: []\n",                  // single-quoted glob
+            b"note: \"a & b\"\nunits: []\n",                // quoted ampersand
+            b"math: 2*3\nunits: []\n",                       // unquoted '*' not at token start
+            b"expr: a && b\nunits: []\n",                    // unquoted && (& then '&')
+            b"path: /a/b#c\nunits: []\n",                   // '#' mid-scalar, not a comment
+        ];
+        for raw in cases {
+            canonicalize(raw).unwrap_or_else(|e| {
+                panic!("false positive on {:?}: {e:?}", String::from_utf8_lossy(raw))
+            });
+        }
     }
 }

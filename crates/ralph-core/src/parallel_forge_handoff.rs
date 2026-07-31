@@ -110,6 +110,9 @@ impl From<ArtifactError> for HandoffError {
                 HandoffError::TooManyEdges { count, limit }
             }
             ArtifactError::ParseError { source } => HandoffError::ParseError { source },
+            ArtifactError::AliasesForbidden => HandoffError::ParseError {
+                source: "artifact uses YAML anchors/aliases, which are forbidden".to_string(),
+            },
         }
     }
 }

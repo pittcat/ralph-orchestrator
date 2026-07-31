@@ -116,10 +116,13 @@ pub struct AcceptedTransition;
 impl AcceptedTransition {
     /// Compute the deterministic `transition_id`.
     ///
-    /// The id is `sha256(loop_id ‖ activation_id ‖ contract_revision
-    /// ‖ event_identity ‖ canonical_digest)`. Because every input is a
-    /// stable string derived from the commit arguments, the same
-    /// transition always yields the same id — enabling idempotent
+    /// The id is `sha256` over each identity field framed with its byte
+    /// length (a length-prefixed, injective encoding): `loop_id`,
+    /// `activation_id`, `contract_revision`, `event_identity`,
+    /// `canonical_digest`. Length-prefixing keeps distinct tuples distinct
+    /// (W3: a bare concatenation collided across field boundaries). Because
+    /// every input is a stable string derived from the commit arguments,
+    /// the same transition always yields the same id — enabling idempotent
     /// replay and cross-process dedup.
     pub fn compute_transition_id(
         loop_id: &str,
@@ -129,11 +132,16 @@ impl AcceptedTransition {
         canonical_digest: &str,
     ) -> String {
         let mut hasher = Sha256::new();
-        hasher.update(loop_id.as_bytes());
-        hasher.update(activation_id.as_bytes());
-        hasher.update(contract_revision.as_bytes());
-        hasher.update(event_identity.as_bytes());
-        hasher.update(canonical_digest.as_bytes());
+        for field in [
+            loop_id,
+            activation_id,
+            contract_revision,
+            event_identity,
+            canonical_digest,
+        ] {
+            hasher.update((field.len() as u64).to_le_bytes());
+            hasher.update(field.as_bytes());
+        }
         format!("{:x}", hasher.finalize())
     }
 
@@ -400,6 +408,16 @@ impl AcceptedTransition {
     /// If no entry matches, this is a silent no-op.
     pub fn ack(workspace: &Path, transition_id: &str) -> Result<(), std::io::Error> {
         let path = outbox_path(workspace);
+        // W2: hold the exclusive outbox lock across the entire
+        // read → modify → rename critical section. Without it, a
+        // concurrent `commit_idempotent` append landing between our read
+        // and our rename is overwritten by our stale snapshot, losing the
+        // durable record (lost-update). `commit` / `commit_idempotent` /
+        // `append_outbox` all serialize on the same `{outbox}.jsonl.lock`
+        // sidecar; the rename below replaces only the data file, never the
+        // lock sidecar, so this guard stays valid for the whole section.
+        let lock = FileLock::new(&path)?;
+        let _guard = lock.exclusive()?;
         let entries = read_outbox(workspace)?;
         if !entries.iter().any(|e| e.transition_id == transition_id) {
             return Ok(()); // nothing to ack
@@ -983,7 +1001,7 @@ mod tests {
         assert_eq!(*seen.lock().unwrap(), 1);
 
         // Poison the outbox with a torn trailing line.
-        append_raw_outbox(&ws, r#"{"loop_id":"loop-1","broken":#); // torn, no '\n'
+        append_raw_outbox(&ws, r#"{"loop_id":"loop-1","broken":"#); // torn, no '\n'
 
         // Replay the SAME transition — dedup must still hold despite the
         // torn tail (pre-fix: read_outbox Err -> swallowed -> re-commit).
@@ -1071,8 +1089,104 @@ mod tests {
         );
     }
 
+    // ── W2: ack lost-update (missing FileLock) ──────────────────────
+
     #[test]
-    fn zzz_canary_registers() {
-        assert!(true);
+    fn u2_ack_is_excluded_by_external_lock() {
+        let (_dir, ledger, mut bus, _store) = fixture();
+        let ws = ledger.workspace().to_path_buf();
+
+        // Commit a transition so there is an entry to ack.
+        let entry = AcceptedTransition::commit_idempotent(
+            &valid_event(),
+            "loop-1",
+            "act-1",
+            "rev-1",
+            &ledger,
+            &mut bus,
+            |_| Ok(()),
+            || {},
+        )
+        .expect("commit must succeed");
+
+        // Take the outbox lock externally, as a concurrent writer would.
+        let lock = FileLock::new(outbox_path(&ws)).unwrap();
+        let guard = lock.exclusive().unwrap();
+
+        // `ack` must block while the lock is held elsewhere (pre-fix: it
+        // took no lock and returned immediately, opening the lost-update
+        // window against a concurrent commit append).
+        let ack_ws = ws.clone();
+        let ack_id = entry.transition_id.clone();
+        let handle =
+            std::thread::spawn(move || AcceptedTransition::ack(&ack_ws, &ack_id));
+
+        // Give the thread ample time to (incorrectly) finish if lockless.
+        std::thread::sleep(std::time::Duration::from_millis(150));
+        assert!(
+            !handle.is_finished(),
+            "ack must block while the outbox lock is held elsewhere"
+        );
+
+        // Release the lock; ack must now acquire it and complete.
+        drop(guard);
+        drop(lock);
+        handle
+            .join()
+            .unwrap()
+            .expect("ack must succeed after the lock is released");
+
+        // And it really did mark the entry delivered.
+        let entries = read_outbox(&ws).unwrap();
+        assert!(
+            entries.iter().any(|e| e.transition_id == entry.transition_id && e.delivered),
+            "entry must be marked delivered after ack"
+        );
+    }
+
+    // ── W3: transition_id field-boundary collision ──────────────────
+
+    #[test]
+    fn u3_transition_id_is_injective_across_field_boundaries() {
+        // These two tuples concatenate to identical bytes under a bare
+        // (un-framed) hash, so they collided to one transition_id pre-fix
+        // and the later transition was silently dropped as a "duplicate".
+        let a = AcceptedTransition::compute_transition_id(
+            "loop-1",
+            "act-1x",
+            "rev",
+            "topic:src",
+            "digest",
+        );
+        let b = AcceptedTransition::compute_transition_id(
+            "loop-1x",
+            "act-1",
+            "rev",
+            "topic:src",
+            "digest",
+        );
+        assert_ne!(
+            a, b,
+            "distinct identity tuples must not collide to one transition_id"
+        );
+    }
+
+    #[test]
+    fn u3_transition_id_is_deterministic() {
+        let a = AcceptedTransition::compute_transition_id(
+            "loop-1",
+            "act-1",
+            "rev-1",
+            "work.done:executor",
+            "cafe",
+        );
+        let b = AcceptedTransition::compute_transition_id(
+            "loop-1",
+            "act-1",
+            "rev-1",
+            "work.done:executor",
+            "cafe",
+        );
+        assert_eq!(a, b, "identical tuples must yield identical ids");
     }
 }
