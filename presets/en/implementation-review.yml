@@ -252,18 +252,6 @@ event_loop:
             meaning: scope-preparer's verdict on the dirty intersection at freeze time
             source: scope-preparer applies the Step 4 decision matrix
             fill_rule: literal one of `clean | blocked`
-      # 2026-07-31-001 (precheck desugar): intermediate topics that
-      # the gate hat produces / consumes. `apply_precheck_desugar`
-      # injects field shapes at runtime, but raw YAML must declare
-      # the topic entries so `publishes_missing_schema` /
-      # `required.*` lints pass against the raw graph. Required
-      # fields are deliberately empty here — the gate inherits
-      # `scope.ready` schema shape and `inject_precheck_event_schemas`
-      # stamps the desugared schema at load time.
-      scope.ready.proposed:
-        required_fields: []
-      scope.ready.rejected:
-        required_fields: []
       scope.blocked:
         required_fields:
         - plan_name
@@ -785,84 +773,14 @@ mechanism:
     state_idempotency: required
 
 hats:
-  # 2026-07-31-001 (precheck gate desugar): explicitly author the
-  # `precheck-scope.ready` gate hat so the raw YAML hat graph is
-  # complete (the runtime's `apply_precheck_desugar` synthesises the
-  # same hat on the normalised config, but the preset_lint `flow_*`
-  # and `required.*` rules inspect the raw YAML — leaving the
-  # synthesis implicit broke strict lint and caused runtime
-  # `flow_unknown_emit` on the next implementation-review run).
-  precheck-scope.ready:
-    name: "Precheck Gate: scope.ready"
-    description: "LLM-as-judge gate for scope.ready. Re-verifies scope-manifest.json parses as JSON and the line-strip scope_digest matches the payload field before forwarding scope.ready to the dispatcher."
-    triggers: ["scope.ready.proposed"]
-    publishes: ["scope.ready", "scope.ready.rejected"]
-    exempt_topics: ["scope.ready", "scope.ready.rejected"]
-    default_publishes: "scope.ready.rejected"
-    terminal_events: ["scope.ready", "scope.ready.rejected"]
-    event_filter:
-      enabled: true
-      events:
-        - scope.ready.proposed
-    instructions: |
-      ## PRECHECK GATE — scope.ready → scope-manifest.json integrity audit
-
-      You are the gate between `scope-preparer` and the review wave. The
-      proposed payload already passed structural schema validation;
-      your job is the **file-level integrity audit** that the schema
-      cannot do on its own.
-
-      ### Checklist (apply in order, take the FIRST failing one)
-
-      1. Open the `scope_manifest_path` field from the proposed
-         payload and run `jq -e . <scope_manifest_path>`. Non-zero
-         exit (or any `parse error` on stderr) → `failed_checks:
-         ["scope_manifest_invalid_json"]`, `reason: "manifest at
-         <path> is not valid JSON; rewrite the file with the missing
-         comma(s) and re-emit scope.ready.proposed"`.
-      2. Re-compute the digest via the canonical line-strip recipe:
-         `grep -v '"scope_digest"' <scope_manifest_path> | sha256sum
-         | awk '{print $1}'` (or `shasum -a 256` on macOS without
-         `sha256sum`). Compare against the payload's `scope_digest`
-         field. Mismatch → `failed_checks:
-         ["scope_digest_mismatch"]`, `reason: "scope_digest in
-         payload does not match line-strip digest of <path>; recompute
-         after every manifest regeneration"`.
-      3. Confirm `dirty_verdict` is one of `clean | blocked` and
-         `first_implementation_commit_sha` /
-         `resolved_baseline_sha` / `review_head_sha` are 40-char git
-         SHAs. Mismatch → `failed_checks: ["scope_identity_malformed"]`,
-         `reason: "<failing-field> has shape <actual>"`.
-
-      ### Emit
-
-      - All three checks pass → re-emit `scope.ready` with the payload
-         forwarded **VERBATIM** (every field copied exactly, no
-         rewrites).
-      - Any check fails → emit `scope.ready.rejected` with the
-         `failed_checks` + `reason` recorded above; on `reason` keep
-         it to one actionable sentence naming the failing file /
-         field.
-
-      `ralph-tools-opac` is auto-injected. Before any emit, follow
-      Observe / Precheck / Apply / Confirm (cite `ralph-tools-emit`
-      §5 for `--policy-check` feedback; this gate is an emitter so
-      the same discipline applies).
-
   scope-preparer:
     name: "Scope Preparer"
     description: "Resolves the first implementation commit C, freezes baseline C^, writes the scope manifest, binary review.diff.patch, scope-analysis.md and digests. Emits scope.ready (success) or scope.blocked (ambiguous / root / dirty / drift)."
-    # 2026-07-31-001 (precheck desugar): raw YAML publishes mirrors
-    # the normalised config so preset_lint sees the same topology
-    # the runtime will after `apply_precheck_desugar`. Scope-preparer
-    # emits `scope.ready.proposed`; the `precheck-scope.ready` gate
-    # forwards to `scope.ready` on pass or `scope.ready.rejected` on
-    # fail.
     triggers: ["review.start"]
-    publishes: ["scope.ready.proposed", "scope.blocked"]
-    exempt_topics: ["scope.ready.proposed", "scope.blocked"]
+    publishes: ["scope.ready", "scope.blocked"]
+    exempt_topics: ["scope.ready", "scope.blocked"]
     default_publishes: "scope.blocked"
-    terminal_events: ["scope.ready.proposed", "scope.blocked"]
+    terminal_events: ["scope.ready", "scope.blocked"]
     event_filter:
       enabled: true
       events:
