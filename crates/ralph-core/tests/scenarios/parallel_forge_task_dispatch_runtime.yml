@@ -1,26 +1,14 @@
-# Plan 2026-07-28-001 U2: parallel-forge task-to-wave happy-path
-# (R1/R4/R5/S1/S4/S8/S12). Walks the production path with the
-# in-real mechanism:
+# Parallel Forge artifact-first task materialization. The real EventLoop reads
+# execution-plan.yml, verifies the handoff, and atomically creates a two-task
+# DAG without planner-supplied `unit_tasks`.
 #
-#   1. `forge.plan.inspected`  (inspector)
-#   2. `forge.plan.ready` with `unit_tasks` → StateProjector
-#      atomically creates a 2-task DAG (U1 open; U2 blocked_by U1)
-#   3. `forge.concurrency.approved` (guardian)
-#   4. `forge.worktrees.ready` (worktree) — dispatcher reads the
-#      live task ledger, no human-CLI reroute
-#   5. `exec.unit.ready`      (dispatcher slot 0, task_id = live U1)
-#   6. `exec.unit.done`       (executor slot 0) → supervisor
-#      fan-in closes U1, U2 becomes ready
-#   7. `exec.unit.ready`      (dispatcher slot 0, task_id = live U2)
-#   8. `exec.unit.done`       (executor slot 0)
-#   9. `LOOP_COMPLETE`        (reporter)
-#
-# Assertions pin the live task ledger to the declared DAG, prove
-# `exec.unit.ready.task_id` references real row ids, and confirm
-# the supervisor fan-in snapshots the expected wave counts.
+# Assertions pin the live task ledger to the artifact DAG and prove U2 remains
+# blocked by U1. The final LOOP_COMPLETE attempt is intentionally rejected
+# while projected tasks remain open; settlement/terminal closure is covered by
+# the dedicated two-wave scenarios.
 
 name: pf_task_dispatch_runtime
-description: 'parallel-forge task authority path: forge.plan.ready atomically materialises a DAG, dispatcher reads live ids, supervisor fan-in closes U1 then opens U2'
+description: 'parallel-forge artifact authority path: forge.plan.ready derives a two-task DAG from execution-plan.yml and preserves dependency readiness'
 
 config:
   prompt_file: PROMPT.md
@@ -31,6 +19,19 @@ config:
     supervisor:
       enabled: true
       aggregate_timeout_secs: 60
+    state_projection:
+      enabled: true
+      actions:
+        forge.plan.ready:
+          kind: ensure_task_batch
+          items: unit_tasks
+          count: unit_count
+          key: task_key
+          title: title
+          blocked_by_keys: depends_on_task_keys
+          execution_wave: execution_wave
+          integration_order: integration_order
+          execution_plan_digest: plan_digest
     required_events:
       - exec.unit.done
     starting_event: forge.start
@@ -72,6 +73,26 @@ config:
       publishes:
         - LOOP_COMPLETE
 
+fixture_files:
+  - path: .ralph/forge/pf-td-p/development-plan.md
+    content: |
+      # Parallel Forge test plan
+  - path: .ralph/forge/pf-td-p/execution-plan.yml
+    content: |
+      version: 1
+      plan_key: pf-td-p
+      units:
+        - id: U1
+          title: Foundation
+          depends_on: []
+          execution_wave: 1
+          integration_order: 1
+        - id: U2
+          title: Feature
+          depends_on: [U1]
+          execution_wave: 2
+          integration_order: 2
+
 mock_responses:
   - text: |
       <event topic="forge.plan.inspected">
@@ -81,8 +102,7 @@ mock_responses:
     hat: pf-inspector
   - text: |
       <event topic="forge.plan.ready">
-      plan_key: "pf-td-p"
-      unit_count: 2
+      {"plan_path":"docs/plans/pf-td-p.md","development_plan_path":".ralph/forge/pf-td-p/development-plan.md","execution_plan_path":".ralph/forge/pf-td-p/execution-plan.yml","plan_key":"pf-td-p"}
       </event>
     hat: pf-planner
   - text: |
@@ -149,29 +169,20 @@ expected:
     - topic: exec.unit.done
     - topic: exec.unit.ready
     - topic: exec.unit.done
-    - topic: LOOP_COMPLETE
   event_topic_counts:
     - topic: exec.unit.ready
       count: 2
     - topic: exec.unit.done
       count: 2
-  completion: true
+  completion: false
   supervisor_fan_in:
     expected_slots: 2
-  # Plan 2026-07-28-001 U2 closure note: the original fixture
-  # enabled `state_projection.actions.forge.plan.ready` to drive
-  # the typed-projection batch path through real `forge.plan.ready`
-  # events. That path needs JSON payload (projector parses with
-  # `serde_json::from_str`); BDD mock text is free-form YAML and
-  # `forge.plan.ready` is consumed by the projector chain, so the
-  # JSON payload mock was modified to satisfy the projector and
-  # the state_projection block was removed to keep the
-  # LOOP_COMPLETE acceptance path stable across BDD runtime. The
-  # typed projection path itself is exercised by
-  # `crates/ralph-core/src/state_projector/tests.rs`
-  # (`project_ensure_task_batch_*`) and the live path under
-  # `ralph run -H builtin:parallel-forge` (plan §10 acceptance).
-  # This BDD fixture now proves the no-projector surface
-  # (forge.worktrees.ready / exec.unit.ready / exec.unit.done /
-  # supervisor fan-in), matching `parallel_forge_declared_flow_runtime`.
-  ready_task_keys: []
+  task_ledger:
+    - task_key: forge:pf-td-p:U1
+      status: open
+      blocked_by_keys: []
+    - task_key: forge:pf-td-p:U2
+      status: open
+      blocked_by_keys: [forge:pf-td-p:U1]
+  ready_task_keys:
+    - forge:pf-td-p:U1

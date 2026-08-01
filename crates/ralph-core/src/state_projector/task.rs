@@ -364,6 +364,51 @@ pub(crate) fn project_ensure_task_batch(
     integration_order_pointer: Option<&str>,
     execution_plan_digest_pointer: Option<&str>,
 ) -> Result<(), String> {
+    // Parallel Forge artifact-first mode. Only parallel-forge currently uses
+    // EnsureTaskBatch; when the event carries an execution-plan reference the
+    // artifact is the sole task/schedule authority. The handoff verifier
+    // rejects payload-owned `unit_tasks`, enforces workspace/digest bounds,
+    // and returns canonical task specs. The derived JSON exists only inside
+    // the projector so the public event remains reference-only.
+    if payload.get("execution_plan_path").is_some() {
+        let handoff =
+            crate::parallel_forge_handoff::load_plan_handoff(payload, &ctx.workspace_root)
+                .map_err(|error| format!("artifact_handoff_rejected: {error}"))?;
+        let mut derived = payload.clone();
+        let object = derived
+            .as_object_mut()
+            .ok_or_else(|| "forge.plan.ready payload must be a JSON object".to_string())?;
+        object.insert(
+            items_pointer.to_string(),
+            serde_json::to_value(&handoff.tasks)
+                .map_err(|error| format!("artifact_task_serialize: {error}"))?,
+        );
+        object.insert(
+            count_pointer.to_string(),
+            Value::from(u64::try_from(handoff.tasks.len()).unwrap_or(u64::MAX)),
+        );
+        object.insert(
+            "plan_digest".to_string(),
+            Value::String(handoff.artifact.digest),
+        );
+        object.insert("wave_total".to_string(), Value::from(handoff.wave_total));
+        // Mark this in-memory payload as derived so the recursive call enters
+        // the existing validated batch path instead of re-reading the file.
+        object.remove("execution_plan_path");
+        return project_ensure_task_batch(
+            ctx,
+            &derived,
+            items_pointer,
+            count_pointer,
+            key_pointer,
+            title_pointer,
+            blocked_by_keys_pointer,
+            execution_wave_pointer,
+            integration_order_pointer,
+            execution_plan_digest_pointer,
+        );
+    }
+
     let items_value = json_value_pointer(payload, items_pointer)
         .ok_or_else(|| format!("missing required pointer '{items_pointer}'"))?;
     let items = items_value

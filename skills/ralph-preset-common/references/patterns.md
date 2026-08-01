@@ -223,11 +223,12 @@ work.done / fix.done
 
 适用范围：任何 preset 由一个 hat 一次性声明 N 个内部 task（unit / fix-unit / dimension 等），并交给 StateProjector 一次性原子落盘。下游 hat 通过 `ralph tools task list` 读取 live `task_id`，**不再**走 agent 自己 `task add`。
 
-- 唯一写者：在 `event_loop.state_projection.actions` 配置 typed action，例如 `forge.plan.ready: { kind: ensure_task_batch, items: unit_tasks, count: unit_count, key: task_key, title: title, blocked_by_keys: depends_on_task_keys }`。Projector 在 `try_with_exclusive_lock` 闭包内完成全批校验 → ID mint → 持久化，任一失败整批零写。atomicity 是关键，禁止把 batch 拆成多次 `task add`。
-- Schema 配套：preset `presets/schemas/<name>.yml` 在 `schemas.<topic>` 加 `unit_tasks` 到 `required_fields`，并在 `field_docs.unit_tasks` 里说明 item 字段、key 格式与依赖语义。
-- Hat `instructions`：**禁止**让 projector-owned hat 同时调 `ralph tools task add` / `task ensure` 走 CLI；lint `preset.instructions_task_mutation_authority_conflict` 会拒收并强制改为 declarative payload。
-- 下游消费：`unit_done` / `exec.unit.done` 等执行类触发携带 `task_id`（live id，由 `ralph tools task list` 取得），projector 不参与 link 解析；dispatcher / executor 只读 `task_id` 字段。
-- 起草后用结构性契约测试验证：一笔 emit 完成 → `TaskStore` 的 `all()` 行数等于 `count`，IDS 唯一且 `blocked_by` 反解为 payload 中的 `depends_on_task_keys`；64 项 batch 的 `successful_persist_count` 增量恰好 1（path-scoped observer）；invalid batch 增量 0 且原 bytes 不变。
+- 唯一写者：在 `event_loop.state_projection.actions` 配置 typed `ensure_task_batch` action；Projector 在单次原子边界内完成全批校验 → ID mint → 持久化，任一失败整批零写。禁止把 batch 拆成多次 `task add`。
+- 输入权威二选一：普通 batch 可由 schema-required payload items 提供；artifact-first batch 的公开 event 只声明 artifact path / identity / digest，runtime 从有界 artifact 派生内部 items。artifact-first 模式禁止把 derived task/wave/order 数组同时放进 payload。
+- Schema 配套：payload-backed 模式声明 items/count 字段；artifact-backed 模式只声明 artifact reference/identity 字段，并在 field_docs 写清 artifact 路径来源、runtime 派生字段和失败停止条件。
+- Hat `instructions`：**禁止**让 projector-owned hat 同时调 `ralph tools task add` / `task ensure`；lint `preset.instructions_task_mutation_authority_conflict` 会拒收。artifact-backed instructions 必须要求先写 artifact、再 policy-check、且不得手抄 derived task 数组。
+- 下游消费：下游 hat 只从 `ralph tools task list` 取得 runtime mint 的 live `task_id`，不从上游 payload 猜测。
+- 起草后用结构性契约测试验证：一笔 handoff 后 `TaskStore` 行数/依赖与权威输入一致；重复 handoff 幂等；invalid payload/artifact 整批零写；另跑一个非 artifact-backed preset 的 differential regression，证明 legacy projector 行为未变。
 
 ## Projection-Owned Task Close pattern（通用：单事件原子关 task）
 

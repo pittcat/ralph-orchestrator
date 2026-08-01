@@ -822,7 +822,7 @@ fn should_warn_on_missing_default_config(
 
 fn emit_command_with_root_and_hats(
     color_mode: ColorMode,
-    args: EmitArgs,
+    mut args: EmitArgs,
     root: Option<&PathBuf>,
     hats_source: Option<&HatsSource>,
     config_sources: &[ConfigSource],
@@ -1063,8 +1063,21 @@ fn emit_command_with_root_and_hats(
     // argument, so we enforce the precondition here.
     let topic = args
         .topic
-        .as_deref()
+        .clone()
         .ok_or_else(|| anyhow::anyhow!("missing event topic (required unless --schema is set)"))?;
+
+    // Parallel Forge artifact-first handoff. CLI precheck and apply both
+    // normalize the same reference-only payload, deriving the canonical plan
+    // digest/count summary from the workspace-bounded artifact. The runtime
+    // projector performs the same verification before creating tasks.
+    if topic == "forge.plan.ready" {
+        args.payload = ralph_core::parallel_forge_handoff::canonicalize_plan_ready_payload(
+            &args.payload,
+            &workspace_root,
+        )
+        .map_err(|error| anyhow::anyhow!("forge.plan.ready artifact handoff rejected: {error}"))?;
+    }
+    let topic = topic.as_str();
 
     // Determine whether policy validation is required. U15: agent
     // context (env-detected) defaults to strict policy-check, even
@@ -1209,28 +1222,6 @@ fn emit_command_with_root_and_hats(
             ralph_core::event_origin::RALPH_CONTROL_TOPICS,
             topic
         );
-    }
-
-    // 2026-07-30 fix: CLI-side disk-vs-payload consistency check for
-    // `forge.plan.ready`. The planner hat has been observed (primary-
-    // 20260730-002911) hand-constructing the payload with shifted
-    // execution_wave values, then being rejected at projection time
-    // with no recovery path (guidance topic removed by plan
-    // 2026-06-28-005). Run this check before the unified pipeline so
-    // the agent sees the failure on the first attempt.
-    if check_mode != PolicyCheckMode::Skip
-        && let Err(err) = crate::policy_check::check_forge_plan_ready_disk_consistency(
-            topic,
-            &args.payload,
-            &workspace_root,
-        )
-    {
-            anyhow::bail!(
-                "forge.plan.ready disk consistency check failed (field='{}' reason='{}'): {}",
-                err.field,
-                err.reason_code,
-                err.message
-            );
     }
 
     // U6 (2026-06-21-002 plan §U6): CLI `--policy-check` always

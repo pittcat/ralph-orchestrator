@@ -281,11 +281,29 @@ fn count_units(value: &Value) -> usize {
     sequence_len(value, "units").or_else(|| sequence_len(value, "tasks")).unwrap_or(0)
 }
 
-/// Count the artifact's dependency edges: entries in the top-level `edges`
-/// (preferred) or `dependencies` sequence. Absent/non-sequence fields count
-/// as zero.
+/// Count dependency edges from the top-level `edges`/`dependencies` sequence
+/// when present, otherwise from each `units[].depends_on` list used by the
+/// Parallel Forge execution-plan format.
 fn count_edges(value: &Value) -> usize {
-    sequence_len(value, "edges").or_else(|| sequence_len(value, "dependencies")).unwrap_or(0)
+    sequence_len(value, "edges")
+        .or_else(|| sequence_len(value, "dependencies"))
+        .unwrap_or_else(|| {
+            value
+                .get("units")
+                .and_then(Value::as_sequence)
+                .map(|units| {
+                    units
+                        .iter()
+                        .map(|unit| {
+                            unit.get("depends_on")
+                                .and_then(Value::as_sequence)
+                                .map(Vec::len)
+                                .unwrap_or(0)
+                        })
+                        .sum()
+                })
+                .unwrap_or(0)
+        })
 }
 
 /// Return the length of the top-level sequence field `key`, if `value` is a

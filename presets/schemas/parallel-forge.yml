@@ -46,10 +46,6 @@ schemas:
       - plan_path
       - development_plan_path
       - execution_plan_path
-      - execution_plan_digest
-      - wave_total
-      - unit_count
-      - unit_tasks
       - plan_key
     payload: json_object
     field_docs:
@@ -64,23 +60,11 @@ schemas:
       execution_plan_path:
         meaning: Machine-readable Unit DAG SSOT for supervisor dispatch.
         source: File written this activation at .ralph/forge/plan-key/execution-plan.yml.
-        fill_rule: Must exist and list units with depends_on / integration_order.
-      execution_plan_digest:
-        meaning: Stable content hash of the execution-plan SSOT (SHA-256 hex preferred).
-        source: Computed by Planner when materialising execution-plan.yml.
-        fill_rule: Non-empty string; projector cross-checks this against the digest embedded in unit_tasks or the action's execution_plan_digest pointer.
-      unit_tasks:
-        meaning: Ordered Unit task specifications projected atomically into the task ledger.
-        source: Planner payload, cross-checked against execution-plan.yml by the existing CLI policy gate.
-        fill_rule: Each item must contain unit_id, task_key, title, depends_on_task_keys, execution_wave, and integration_order; values must match the on-disk execution plan.
-      wave_total:
-        meaning: Total number of static execution waves the planner computed for this plan.
-        source: Planner wave algorithm output.
-        fill_rule: Positive integer; equals max(unit_tasks[].execution_wave).
-      unit_count:
-        meaning: Number of Units in the execution plan.
-        source: Parsed execution-plan.yml unit list length.
-        fill_rule: Non-negative integer matching execution plan.
+        fill_rule: Must exist; runtime reads it once inside the workspace boundary and derives the task DAG.
+      plan_digest:
+        meaning: Runtime-verifiable canonical SHA-256 digest of execution-plan.yml.
+        source: Ralph CLI derives it from the referenced artifact during policy-check/apply.
+        fill_rule: Do not hand-calculate; omit it from the CLI payload and let ralph emit add the verified value.
       plan_key:
         meaning: Forge plan key basename for artifact roots.
         source: Basename of plan_path without .md/.html.
@@ -985,6 +969,10 @@ state_projection:
   actions:
     forge.plan.ready:
       kind: ensure_task_batch
+      # Runtime-only derived fields. The public event carries only the
+      # artifact reference/identity/digest; the projector materializes these
+      # pointers from execution-plan.yml before entering the validated batch
+      # path. Non-Parallel-Forge EnsureTaskBatch behavior is unchanged.
       items: unit_tasks
       count: unit_count
       key: task_key
@@ -992,7 +980,7 @@ state_projection:
       blocked_by_keys: depends_on_task_keys
       execution_wave: execution_wave
       integration_order: integration_order
-      execution_plan_digest: execution_plan_digest
+      execution_plan_digest: plan_digest
     forge.wave.settled:
       kind: close_task_batch
       task_ids: settled_task_ids

@@ -112,12 +112,14 @@ Review 模拟每 hat 时，按上面七段核对每条 Q2 Observe / Q4 字段的
 当 hat 的输出是「一组内部 task」而不是单事件，普通 `state_projection.actions` 单 action 模式不够用。配置 typed `ensure_task_batch`：
 
 ```
-上游 hat emit forge.plan.ready (Q4, payload: unit_tasks[])
-  → state_projection.actions.forge.plan.ready = ensure_task_batch
-  → Projector.try_with_exclusive_lock 一次性校验 + ID mint + 持久化（任一失败整批零写）
-  → .ralph/agent/tasks.jsonl 全批新增
-  → 下游 hat 通过 ralph tools task list 读 live task_id（不是 planner 在 instructions 里手写）
+上游 hat 写入 task-plan artifact，并 emit reference-only handoff (Q4)
+  → state_projection.actions.<topic> = ensure_task_batch
+  → runtime 校验 artifact path/digest，派生 canonical task DAG
+  → Projector 一次性校验 + ID mint + 持久化（任一失败整批零写）
+  → 下游 hat 通过 ralph tools task list 读 live task_id
 ```
+
+`ensure_task_batch` 也可使用 schema-required payload items；同一 handoff 只能选择一种 task authority。artifact-backed 模式不得在 payload 中重复 derived task/wave/order 数组。
 
 - hat instructions 在 batch action 配置存在时**不得**让同一 hat 调 `ralph tools task add` / `task ensure` 走 CLI；preset lint `preset.instructions_task_mutation_authority_conflict` 会在载入时拒收。
 - Q3 适用：在 batch 模式下"task 创建"的 OPAC 命令是 Planner **emit handoff**，不是 `ralph tools task add`。
