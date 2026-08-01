@@ -608,10 +608,24 @@ fn authorize_lifecycle(
         anyhow::anyhow!("{operation}: agent context requires a current hat (set RALPH_CURRENT_HAT)")
     })?;
 
-    if task.owner_hat_id.as_deref() == Some(caller_hat) {
-        return Ok(());
+    let capability = ralph_core::execution_contract::evaluate_task_capability(
+        task,
+        Some(caller_hat),
+        ctx.current_loop_id.as_deref(),
+        coordinator_hats,
+    );
+    if operation == "start" {
+        if capability.actionable_now {
+            return Ok(());
+        }
+        bail!(
+            "start: capability denied for task {task_id}: constraint={} (caller_hat={caller_hat}, owner_hat={owner})",
+            capability.deny_reason.unwrap_or("not_actionable"),
+            task_id = task.id,
+            owner = task.owner_hat_id.as_deref().unwrap_or("none"),
+        );
     }
-    if coordinator_hats.iter().any(|h| h == caller_hat) {
+    if capability.lifecycle_administration {
         return Ok(());
     }
     bail!(ralph_core::task::task_lifecycle_denied_message(
@@ -3461,6 +3475,30 @@ tasks:
         let err = start_task_with_context(&mut store, "", &ctx, &["executor".to_string()], false)
             .expect_err("empty task_id must be rejected");
         assert!(err.to_string().contains("cannot be empty"));
+    }
+
+    #[test]
+    fn test_coordinator_cannot_start_non_owned_task() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let root = temp_dir.path();
+        write_marker(root, "current-loop-id", "loop-a");
+        let mut store = open_store(root);
+        let task = Task::new("unit".to_string(), 1)
+            .with_loop_id(Some("loop-a".to_string()))
+            .with_owner_hat(Some("executor".to_string()));
+        let task_id = task.id.clone();
+        store.add(task);
+        let ctx = ctx_for(root, Some("loop-a"), Some("dispatcher"));
+
+        let error = start_task_with_context(
+            &mut store,
+            &task_id,
+            &ctx,
+            &["dispatcher".to_string()],
+            false,
+        )
+        .expect_err("coordinator administration must not grant execution ownership");
+        assert!(error.to_string().contains("not_execution_owner"));
     }
 
     #[test]

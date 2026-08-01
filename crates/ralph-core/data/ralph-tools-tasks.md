@@ -81,15 +81,13 @@ ralph tools task show <task-id> [--format table|json|quiet]
   `task ready --all`.
 - `start` / `close` / `fail` / `reopen` on a task in another loop is
   rejected outright.
-- Within the same loop, only the task's owner hat (or any hat listed in
-  `tasks.coordinator_hats` in `ralph.yml`) may mutate it. An executor
-  hat cannot start a reviewer hat's task.
-- `tasks.coordinator_hats` membership grants **lifecycle mutation rights**
-  for coordination (e.g. closing another hat's task); the prompt's
-  `[read-only]` marker indicates **execution-ability** — i.e. whether
-  this hat should *run* the task. A coordinator sees another hat's
-  task marked `[read-only]` because it is not the one that should
-  execute it, even though it may still mutate it.
+- Within the same loop, the task owner may execute and administer its task.
+  A hat listed in `tasks.coordinator_hats` may administer lifecycle state
+  (`close` / `fail` / `reopen`) for coordination, but **cannot `start` or
+  implement another hat's task**. `start` requires execution ownership and an
+  open, unblocked task.
+- The prompt's `[read-only]` marker uses the same execution-ownership decision
+  as `task start`; coordinator administration never removes that marker.
 - Legacy tasks with no `loop_id` and no `owner_hat_id` are **not
   mutable** from an agent context. Recreate them via `task add` or
   `task ensure` so they pick up the current loop/owner.
@@ -111,42 +109,36 @@ tasks:
 
 ### Projection-Owned Task Creation
 
-Builtin presets may declare a **single declarative handoff** that
-hands a batch of tasks to the StateProjector (e.g.
-`forge.plan.ready` with `unit_tasks`). In that case the projector
-is the **single writer** for `.ralph/agent/tasks.jsonl` during
-the projection, and the planning hat **must not** also call
-`task add` / `task ensure`:
+Builtin presets may declare a **single declarative handoff** that gives a
+batch of tasks to the runtime projector. When your hat instructions identify
+such a handoff, the projector is the single task writer and you **must not**
+also call `task add` / `task ensure`.
 
-- The typed action lives under `event_loop.state_projection.actions`
-  in the preset's `presets/en/<name>.yml` and the SSOT schema
-  (`presets/schemas/<name>.yml`).
-- Items ride inside the payload as a JSON array; item fields are
-  `unit_id`, `task_key`, `title`, and `depends_on_task_keys`
-  (the first three are mandatory; `depends_on_task_keys` may be
-  omitted when there are no blockers).
-- `task_key` must match the registered identity
-  (`forge:<plan_key>:<unit_id>`); `title` is non-empty;
-  `count` must equal `items.length`; cycles, self-edges, unknown
-  dependencies, and missing items all fail the batch atomically
-  (no partial rows are written).
-- Live task ids are minted by the projector; agents must read them
-  via `ralph tools task list` (or the prompt's
-  `## ORCHESTRATOR CONTEXT` block) — never hand-write one.
-- A hat whose `instructions` directs the agent to mutate task
-  records via `ralph tools task add` / `task ensure` while the
-  preset declares a projector batch action fails the
-  `preset.instructions_task_mutation_authority_conflict` lint at
-  preset-load time. Treat that finding as **fatal**: replace the
-  CLI mutation with the declarative handoff, not by mutating the
-  preset to silence the lint.
+Two input forms exist; follow the form named by your hat instructions/schema:
 
-> **Single writer**: while a projector action is configured for a
-> given topic, the projector owns the task-creation path for that
-> topic. `ralph tools task add` / `task ensure` from the same hat
-> in the same activation will either be silently rejected (because
-> the projector already wrote the rows) or leave the ledger in an
-> inconsistent state. Pick one path per handoff.
+- **Payload-backed batch**: the event carries an items array with stable task
+  keys, titles, dependency keys, and the declared count. Missing items,
+  duplicate keys, cycles, self-edges, unknown dependencies, or count mismatch
+  reject the entire batch before any task is written.
+- **Artifact-backed batch**: the event carries only the repo-relative artifact
+  path and identity fields. Write and validate the artifact first, then run the
+  required `ralph emit ... --policy-check`; do not copy derived task, wave, or
+  ordering arrays into the payload. The runtime reads the bounded artifact,
+  verifies its digest and path boundary, and derives the task DAG atomically.
+  If precheck reports an artifact error, fix the artifact and stop until the
+  same payload passes precheck.
+
+For either form:
+
+- Live task IDs are minted by the runtime. Read them with
+  `ralph tools task list` (or the prompt task block); never hand-write one.
+- A task-mutation-authority lint finding is fatal: remove the CLI mutation and
+  use the declared handoff rather than weakening the preset.
+- Do not emit the handoff after any task mutation in the same activation.
+
+> **Single writer**: while a projector action is configured for a topic, the
+> projector owns task creation for that topic. Pick one creation path per
+> handoff; mixing CLI mutation and projection can leave task state inconsistent.
 
 ### Projection-Owned Batch Close（结算事件关 task）
 

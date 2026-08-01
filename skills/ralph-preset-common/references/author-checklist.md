@@ -89,7 +89,8 @@
 - [ ] 终态报告类 hat：正文面向决策者、技术附录面向核验证据者；正文不得是 payload 字段流水账，失败路径不得写成 silent-success
 - [ ] **操作者交付文件路径可见（硬）**：凡「本轮写操作者可读文件 + schema 要求路径字段」的 hat，payload 必须带真实路径字段；instructions 须自洽写明「先落盘 → `test -f` → `--policy-check` → 真实 emit → Confirm 打印 `DELIVERABLE_PATH:`」（不依赖 emit skill 已注入）；schema 只验字段非空、不验文件系统
 - [ ] `task_id` / `task_key` / `step`：引用 `ralph-tools-tasks` red box
-- [ ] **task authority 单写者**：若 preset 在 `event_loop.state_projection.actions` 配了 task-creation action（例如 `forge.plan.ready` → `ensure_task_batch`），对应 hat 的 instructions **不得**再调用 `ralph tools task add` / `task ensure` 走 CLI；lint `preset.instructions_task_mutation_authority_conflict` 会拒收。修补：从 hat instructions 删除 CLI mutation 文字，统一通过 declarative handoff payload 走 projector。
+- [ ] **task authority 单写者**：若 preset 在 `event_loop.state_projection.actions` 配了 task-creation action（例如某 handoff → `ensure_task_batch`），对应 hat 的 instructions **不得**再调用 `ralph tools task add` / `task ensure` 走 CLI；lint `preset.instructions_task_mutation_authority_conflict` 会拒收。修补：从 hat instructions 删除 CLI mutation，统一走声明的 payload-backed 或 artifact-backed handoff；两种 task authority 不得混用。
+- [ ] **task 三语义分离**：`tasks.coordinator_hats` 只授予 lifecycle administration（close/fail/reopen），不授予 execution ownership；非 owner coordinator 的 instructions 只能调度/管理，禁止 `task start` 或实现该 task。Prompt `[read-only]`、CLI start 与 wave dispatcher 检查必须对同一 owner/loop/task 状态得出一致结论。
 - [ ] **task close 投影单写者**：若 preset 在 `event_loop.state_projection.actions` 配了 task-close action（例如 `exec.unit.done` → `close_task`），对应 hat 的 instructions **不得**再调用 `ralph tools task close` 走 CLI；emit 该事件即原子关闭 task。修补：从 hat instructions 删除手工 close 文字，改为「emit 即关闭，禁止手工 close」。
 - [ ] 不复述 `ralph-tools*.md` 参数表
 - [ ] **对每个 emit topic，按 payload audit 五列填行**（见下）—— schema 通过不等于字段可达

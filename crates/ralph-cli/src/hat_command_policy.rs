@@ -400,13 +400,24 @@ impl HatCommandPolicy {
             };
         };
 
+        let resolved = match ralph_core::execution_contract::compile(config.clone()) {
+            Ok(resolved) => resolved,
+            Err(error) => {
+                return PolicyDecision::Deny {
+                    reason: "contract_compile_failed",
+                    hint: error.to_string(),
+                };
+            }
+        };
         let is_dispatcher = config
             .hats
             .get(caller_hat)
-            .map(|h| {
-                h.publishes
-                    .iter()
-                    .any(|t| t.ends_with(".unit.ready") || t == "review.wave.ready")
+            .map(|hat| {
+                hat.publishes.iter().any(|topic| {
+                    (topic.ends_with(".unit.ready") || topic == "review.wave.ready")
+                        && resolved.contract().emit_decision(caller_hat, topic)
+                            == ralph_core::execution_contract::EmitDecision::Allow
+                })
             })
             .unwrap_or(false);
 
@@ -592,6 +603,30 @@ hats:
             decision.is_allow(),
             "dispatcher must be allowed: {decision:?}"
         );
+    }
+
+    #[test]
+    fn wave_dispatcher_explicit_topic_deny_wins() {
+        let yaml = r#"
+event_loop:
+  execution_mode: isolated
+  event_policy:
+    enabled: true
+    mode: enforce
+    on_violation: reject_with_resume
+    topic_deny_rules:
+      - {hat_id: coordinator, topic: exec.unit.ready}
+tasks:
+  enabled: true
+  coordinator_hats: [coordinator]
+hats:
+  coordinator:
+    name: "Coordinator"
+    publishes: ["exec.unit.ready"]
+"#;
+        let cfg: RalphConfig = serde_yaml::from_str(yaml).unwrap();
+        let decision = HatCommandPolicy::check_wave_emit(&agent_ctx("coordinator"), &cfg);
+        assert!(decision.is_deny(), "contract deny must override publishes");
     }
 
     #[test]
