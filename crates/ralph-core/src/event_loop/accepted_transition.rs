@@ -145,6 +145,32 @@ impl AcceptedTransition {
         format!("{:x}", hasher.finalize())
     }
 
+    fn derive_identity(
+        event: &Event,
+        loop_id: &str,
+        activation_id: &str,
+        contract_revision: &str,
+    ) -> (String, String) {
+        let payload_digest = {
+            let mut hasher = Sha256::new();
+            hasher.update(event.payload.as_bytes());
+            format!("{:x}", hasher.finalize())
+        };
+        let event_identity = format!(
+            "{}:{}",
+            event.topic.as_str(),
+            event.source.as_ref().map(|hat| hat.as_str()).unwrap_or("")
+        );
+        let transition_id = Self::compute_transition_id(
+            loop_id,
+            activation_id,
+            contract_revision,
+            &event_identity,
+            &payload_digest,
+        );
+        (payload_digest, transition_id)
+    }
+
     /// Commit a business transition atomically.
     ///
     /// 1. Validate (pre-commit) → reject with zero side effects.
@@ -187,23 +213,8 @@ impl AcceptedTransition {
         }
 
         // 2. Derive the deterministic identity tuple.
-        let payload_digest = {
-            let mut h = Sha256::new();
-            h.update(event.payload.as_bytes());
-            format!("{:x}", h.finalize())
-        };
-        let event_identity = format!(
-            "{}:{}",
-            event.topic.as_str(),
-            event.source.as_ref().map(|h| h.as_str()).unwrap_or("")
-        );
-        let transition_id = Self::compute_transition_id(
-            loop_id,
-            activation_id,
-            contract_revision,
-            &event_identity,
-            &payload_digest,
-        );
+        let (payload_digest, transition_id) =
+            Self::derive_identity(event, loop_id, activation_id, contract_revision);
 
         let entry = OutboxEntry {
             activation_id: activation_id.to_string(),
@@ -333,23 +344,8 @@ impl AcceptedTransition {
             .exclusive()
             .map_err(|e| TransitionError::CommitFailed { source: e.to_string() })?;
         // 1. Derive the deterministic identity tuple (same as commit).
-        let payload_digest = {
-            let mut h = Sha256::new();
-            h.update(event.payload.as_bytes());
-            format!("{:x}", h.finalize())
-        };
-        let event_identity = format!(
-            "{}:{}",
-            event.topic.as_str(),
-            event.source.as_ref().map(|h| h.as_str()).unwrap_or("")
-        );
-        let transition_id = Self::compute_transition_id(
-            loop_id,
-            activation_id,
-            contract_revision,
-            &event_identity,
-            &payload_digest,
-        );
+        let (_payload_digest, transition_id) =
+            Self::derive_identity(event, loop_id, activation_id, contract_revision);
 
         let workspace = ledger.workspace();
 
@@ -656,6 +652,14 @@ mod tests {
             "transition_id must be deterministic"
         );
         assert_eq!(entry.payload_digest, canonical_digest);
+
+        // U4: derive_identity must produce the same canonical inputs as the
+        // public compute_transition_id helper, so the new internal boundary
+        // does not change the on-disk transition_id format.
+        let (derived_digest, derived_id) =
+            AcceptedTransition::derive_identity(&event, "loop-1", "act-1", "rev-1");
+        assert_eq!(derived_digest, canonical_digest);
+        assert_eq!(derived_id, entry.transition_id);
 
         // Exactly one event published, and only after the outbox write.
         let seen = seen.lock().unwrap();
