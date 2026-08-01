@@ -7251,20 +7251,19 @@ impl EventLoop {
         if ready.is_empty() && open.is_empty() {
             section.push_str("No open tasks. Create tasks with `ralph tools task add`.\n");
         } else {
-            // Compute the prompt's "actionable" view: a ready task is
-            // actionable for `hat_id` iff the hat *owns* it. This is
-            // deliberately narrower than the lifecycle ACL
-            // (`task::can_hat_mutate_task_lifecycle`, which also admits
-            // `tasks.coordinator_hats` members). The prompt only needs to
-            // steer the agent away from tasks it should not execute;
-            // coordinator rights for coordination (e.g. closing another
-            // hat's task) are preserved by the `task_cli` auth path.
-            let caller_hat_str: Option<&str> = hat_id.map(|h| h.as_str());
+            // Use the shared execution-contract evaluator so prompt
+            // actionability and agent CLI authorization cannot drift.
+            let caller_hat_str: Option<&str> = hat_id.map(|hat| hat.as_str());
+            let task_capability = |task: &crate::task::Task| {
+                crate::execution_contract::evaluate_task_capability(
+                    task,
+                    caller_hat_str,
+                    current_loop_id.as_deref(),
+                    &self.config.tasks.coordinator_hats,
+                )
+            };
             let is_actionable = |task: &crate::task::Task| -> bool {
-                match caller_hat_str {
-                    None => true, // no caller context (e.g. tests) — keep legacy
-                    Some(caller) => task.owner_hat_id.as_deref() == Some(caller),
-                }
+                caller_hat_str.is_none() || task_capability(task).actionable_now
             };
             let any_actionable_ready = ready.iter().any(|t| is_actionable(t));
             let header = if caller_hat_str.is_some() && !any_actionable_ready {
@@ -7316,7 +7315,9 @@ impl EventLoop {
             if !blocked.is_empty() {
                 section.push_str("\nBlocked:\n");
                 for task in blocked {
-                    let ro_marker = if is_actionable(task) {
+                    let ro_marker = if caller_hat_str.is_none()
+                        || task_capability(task).execution_ownership
+                    {
                         ""
                     } else {
                         " [read-only]"
@@ -9477,7 +9478,7 @@ impl EventLoop {
             // 2026-07-30-002 plan U1 (R1/D4): route through
             // the wrapper so the fail-close emit also advances
             // the flow step + appends the snapshot.
-            self.run_stall_detector_with_authority_advance();
+            self.run_stall_detector_with_authority_advance()?;
             return Ok(ProcessedEvents {
                 had_events: false,
                 had_raw_events: false,
@@ -12814,19 +12815,23 @@ impl EventLoop {
             let u8_disposition =
                 crate::event_loop::disposition::classify(event.topic.as_str());
 
-            let mut published_via_disposition_channel = false;
-            if let Some(ref digest) = u7_contract_digest
-                && let Some(ref ledger) = self.state.state_ledger
-            {
+            if u8_disposition.advances_flow() && u7_contract_digest.is_some() {
+                let digest = u7_contract_digest.as_deref().expect("checked above");
+                let ledger = self.state.state_ledger.as_ref().ok_or_else(|| {
+                    std::io::Error::other(format!(
+                        "accepted transition unavailable for business/recovery topic '{}': state ledger missing",
+                        event.topic
+                    ))
+                })?;
                 let activation_id = format!(
                     "{}:{u7_iteration}",
                     event
                         .source
                         .as_ref()
-                        .map(|h| h.as_str())
+                        .map(|hat| hat.as_str())
                         .unwrap_or("unknown")
                 );
-                match crate::event_loop::disposition::publish_synthetic(
+                crate::event_loop::disposition::publish_synthetic(
                     &event,
                     u8_disposition,
                     &u7_loop_id,
@@ -12834,25 +12839,17 @@ impl EventLoop {
                     digest,
                     ledger,
                     &mut self.bus,
-                ) {
-                    Ok(_maybe_entry) => {
-                        // `Some(entry)` = accepted transition (outbox +
-                        // publish); `None` = explicit diagnostic /
-                        // control channel (direct publish). Either way
-                        // the event reached the bus through the
-                        // disposition-aware route.
-                        published_via_disposition_channel = true;
-                    }
-                    Err(e) => {
-                        warn!(
-                            topic = %event.topic,
-                            error = %e,
-                            "U8: transition commit failed, falling back to direct publish"
-                        );
-                    }
-                }
-            }
-            if !published_via_disposition_channel {
+                )
+                .map_err(|error| {
+                    std::io::Error::other(format!(
+                        "accepted transition commit failed for topic '{}': {error}",
+                        event.topic
+                    ))
+                })?;
+            } else {
+                // Legacy loops without a compiled contract retain their
+                // existing direct channel. Diagnostic/loop-control events also
+                // use this explicit non-outbox route and never advance flow.
                 self.bus.publish(event.clone());
             }
             self.diagnose_plan_complete_channel(
@@ -12921,7 +12918,7 @@ impl EventLoop {
         // 2026-07-30-002 plan U1 (R1/D4): route through the
         // wrapper so the fail-close emit also advances the
         // flow step + appends the snapshot.
-        self.run_stall_detector_with_authority_advance();
+        self.run_stall_detector_with_authority_advance()?;
         // --- End U5 stall detection ---
 
         // 2026-07-01-001 plan U6: capture the most recent
@@ -14537,18 +14534,46 @@ impl EventLoop {
     /// `process_parse_result` (empty-turn early return and
     /// post-validation tail) route through here so the
     /// escape advance cannot diverge.
-    fn run_stall_detector_with_authority_advance(&mut self) {
+    fn run_stall_detector_with_authority_advance(&mut self) -> std::io::Result<()> {
         let blocked_topic = derive_blocked_topic(&self.config);
-        let fired = run_stall_detector_on_state(
+        let Some(blocked) = run_stall_detector_on_state(
             &mut self.state,
             &self.config.event_loop.progress_steward,
             &self.registry,
             &mut self.bus,
             &blocked_topic,
-        );
-        if !fired {
-            return;
+        ) else {
+            return Ok(());
+        };
+
+        if let Some(contract) = self.execution_contract.as_ref() {
+            let ledger = self.state.state_ledger.as_ref().ok_or_else(|| {
+                std::io::Error::other(
+                    "fail-close blocked transition requires an initialized state ledger",
+                )
+            })?;
+            let loop_id = self.current_loop_id_for_contract();
+            let activation_id = format!("stall-detector:{}", self.state.iteration);
+            crate::event_loop::disposition::publish_synthetic(
+                &blocked,
+                crate::event_loop::disposition::Disposition::Recovery,
+                &loop_id,
+                &activation_id,
+                &contract.contract_digest,
+                ledger,
+                &mut self.bus,
+            )
+            .map_err(|error| {
+                std::io::Error::other(format!(
+                    "fail-close blocked transition commit failed: {error}"
+                ))
+            })?;
+        } else {
+            // Test/legacy loops that did not compile a contract retain the
+            // historical direct route.
+            self.bus.publish(blocked);
         }
+
         if let Some(next) =
             resolve_escape_step(&self.config, &self.current_plan_step, &blocked_topic)
         {
@@ -14561,6 +14586,7 @@ impl EventLoop {
         // resident EventLoop holds (the accept path writes
         // the same shape for accepted business topics).
         self.append_flow_authority_snapshot(&blocked_topic);
+        Ok(())
     }
 
     fn append_flow_authority_snapshot(&self, topic: &str) {
@@ -14869,7 +14895,7 @@ fn run_stall_detector_on_state(
     registry: &crate::hat_registry::HatRegistry,
     bus: &mut ralph_proto::EventBus,
     blocked_topic: &str,
-) -> bool {
+) -> Option<ralph_proto::Event> {
     if state.stall_detector_had_events {
         // A business event was admitted in this turn — reset
         // the no-progress counter and clear the per-turn
@@ -14889,12 +14915,12 @@ fn run_stall_detector_on_state(
         }
         state.consecutive_steward_activations = 0;
         state.steward_woken_this_turn = false;
-        return false;
+        return None;
     }
     if state.steward_woken_this_turn && config_progress_steward.enabled {
         // Self-protection: the steward was already woken in
         // this turn. Suppress recursive wakes (enabled path only).
-        return false;
+        return None;
     }
     state.consecutive_no_progress_turns = state.consecutive_no_progress_turns.saturating_add(1);
     let max_iter = config_progress_steward.max_steward_iterations;
@@ -14925,10 +14951,9 @@ fn run_stall_detector_on_state(
                 "{\"reason\":\"loop_stalled_max_iterations\"}".to_string(),
             )
             .with_target(ralph_proto::HatId::new("reporter"));
-            bus.publish(blocked);
             state.consecutive_no_progress_turns = 0;
             state.consecutive_steward_activations = 0;
-            return true;
+            return Some(blocked);
         }
     } else if state.consecutive_no_progress_turns >= max_iter
         && state.consecutive_steward_activations < max_iter
@@ -14957,7 +14982,7 @@ fn run_stall_detector_on_state(
             // persists.
             state.consecutive_steward_activations =
                 state.consecutive_steward_activations.saturating_add(1);
-            return false;
+            return None;
         }
         // First-time wake: auto-emit `loop.stalled` diagnostic
         // and increment the steward activation counter. The
@@ -15020,15 +15045,13 @@ fn run_stall_detector_on_state(
         // (was `shipper`); the shipper hat is removed from
         // the supervisor preset.
         .with_target(ralph_proto::HatId::new("reporter"));
-        bus.publish(blocked);
         // Reset so the next loop (e.g. a follow-up diagnostic
         // or operator restart) starts from a clean state.
         state.consecutive_no_progress_turns = 0;
         state.consecutive_steward_activations = 0;
-        // 2026-07-30-002 plan U1: tell the caller we just
-        // fired the fail-close emit so it can advance the
-        // flow step + append the snapshot in one place.
-        return true;
+        // Return the proposed blocked transition to the caller; the caller
+        // must durably accept it before advancing flow authority.
+        return Some(blocked);
     }
 
     // 2026-06-23 fix plan U3 (CB-6): typed rejection-stall
@@ -15058,7 +15081,7 @@ fn run_stall_detector_on_state(
     }
     // 2026-07-30-002 plan U1: no blocked topic was fired this
     // turn — caller skips the escape-step advance.
-    false
+    None
 }
 
 /// 2026-06-16-001 U3: freshness filter for `task.resume` injection.

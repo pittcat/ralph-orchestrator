@@ -35,6 +35,8 @@ struct ScenarioYaml {
     name: String,
     description: String,
     config: ConfigYaml,
+    #[serde(default)]
+    compiled_contract: bool,
     /// Mock responses: each entry is either a raw XML string
     /// (the LLM's emitted text) or a `{text, hat}` object. The
     /// `hat` field, when present, is stamped on every event parsed
@@ -1053,7 +1055,13 @@ fn run_scenario_with_snapshots(
 
     let context = LoopContext::primary(temp_dir.path().to_path_buf());
 
-    let mut event_loop = EventLoop::with_context(config, context);
+    let mut event_loop = if yaml.compiled_contract {
+        let resolved = ralph_core::execution_contract::compile(config)
+            .unwrap_or_else(|error| panic!("{}: contract compile failed: {error}", yaml.name));
+        EventLoop::from_resolved(resolved, context)
+    } else {
+        EventLoop::with_context(config, context)
+    };
     event_loop.initialize("Test");
 
     let parser = EventParser::new();
@@ -1965,6 +1973,16 @@ fn test_parallel_forge_fail_close_runtime() {
         snap.get("step").and_then(|s| s.as_str()),
         Some("report"),
         "expected the fail-close escape to advance current_plan_step to report; got {snap}",
+    );
+    let outbox = ralph_core::event_loop::accepted_transition::read_outbox(temp_dir.path())
+        .expect("accepted transition outbox must be readable");
+    let blocked_count = outbox
+        .iter()
+        .filter(|entry| entry.topic == "forge.plan.blocked")
+        .count();
+    assert_eq!(
+        blocked_count, 1,
+        "fail-close must durably accept forge.plan.blocked exactly once"
     );
 }
 

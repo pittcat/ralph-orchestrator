@@ -20,6 +20,7 @@
 
 name: pf_fail_close_runtime
 description: U1 - parallel-forge fail-close derives `forge.plan.blocked` and advances flow-authority to `report`
+compiled_contract: true
 
 config:
   prompt_file: PROMPT.md
@@ -195,15 +196,10 @@ mock_responses:
 
 expected:
   iterations: 10
-  # `forge.plan.blocked` is published via `EventBus::publish`
-  # directly from the fail-close detector; it never lands in
-  # the JSONL stream the runner reads, so `seen_topics` (which
-  # only counts JSONL-accepted events) does NOT include it.
-  # The pre-fix symptom was that the reporter never received
-  # the blocked signal because the topic name did not match
-  # its subscription — here the reporter's `forge.report.done`
-  # IS admitted, which proves the fail-close emit reached it
-  # via the bus's `with_target("reporter")` route.
+  # The compiled-contract path commits `forge.plan.blocked` to the durable
+  # Accepted Transition outbox before publishing it to reporter. The Rust
+  # scenario assertion checks exactly one outbox entry and the flow-authority
+  # escape snapshot; `events` below remains the JSONL-input view.
   events:
     - topic: forge.plan.inspected
     - topic: forge.plan.ready
