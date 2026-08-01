@@ -17,7 +17,7 @@
 //! - runs consumer-completeness checks (a declared execution-contract topic
 //!   with no runtime consumer is a finding).
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use sha2::{Digest, Sha256};
 
@@ -83,6 +83,66 @@ impl std::fmt::Display for ContractFindings {
 
 impl std::error::Error for ContractFindings {}
 
+/// Contract-derived capability for one task and caller activation.
+///
+/// Lifecycle administration, execution ownership, and immediate actionability
+/// are deliberately separate: coordinator rights may administer another hat's
+/// task but never grant permission to execute it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TaskCapability {
+    /// Caller may perform lifecycle administration (`close`, `fail`, `reopen`).
+    pub lifecycle_administration: bool,
+    /// Caller is the task's execution owner in the same loop.
+    pub execution_ownership: bool,
+    /// Caller owns the task and it is open with no unresolved blockers.
+    pub actionable_now: bool,
+    /// Stable explanation for the first denied execution constraint.
+    pub deny_reason: Option<&'static str>,
+}
+
+/// Evaluate task capabilities from the same task/loop/hat inputs used by the
+/// prompt and agent CLI.
+#[must_use]
+pub fn evaluate_task_capability(
+    task: &crate::task::Task,
+    caller_hat: Option<&str>,
+    current_loop_id: Option<&str>,
+    coordinator_hats: &[String],
+) -> TaskCapability {
+    let loop_matches = match (current_loop_id, task.loop_id.as_deref()) {
+        (Some(current), Some(target)) => current == target,
+        (None, None) => true,
+        _ => false,
+    };
+    let caller_hat = caller_hat.unwrap_or("");
+    let owns_task = !caller_hat.is_empty() && task.owner_hat_id.as_deref() == Some(caller_hat);
+    let is_coordinator = !caller_hat.is_empty()
+        && coordinator_hats.iter().any(|hat| hat == caller_hat);
+    let lifecycle_administration = loop_matches && (owns_task || is_coordinator);
+    let execution_ownership = loop_matches && owns_task;
+    let actionable_now = execution_ownership
+        && task.status == crate::task::TaskStatus::Open
+        && task.blocked_by.is_empty();
+    let deny_reason = if !loop_matches {
+        Some("task_wrong_loop")
+    } else if !owns_task {
+        Some("not_execution_owner")
+    } else if task.status != crate::task::TaskStatus::Open {
+        Some("task_not_open")
+    } else if !task.blocked_by.is_empty() {
+        Some("task_blocked")
+    } else {
+        None
+    };
+
+    TaskCapability {
+        lifecycle_administration,
+        execution_ownership,
+        actionable_now,
+        deny_reason,
+    }
+}
+
 /// The compiled, frozen Effective Execution Contract: the deterministic
 /// identity plus the resolved capability/consumer view derived from the final
 /// config. Pure data — no runtime behaviour.
@@ -94,6 +154,10 @@ pub struct EffectiveExecutionContract {
     pub contract_digest: String,
     /// `(hat_id, topic)` pairs explicitly denied via `topic_deny_rules`.
     pub emit_denies: BTreeSet<(String, String)>,
+    /// Glob-bearing deny patterns keyed by hat. Resolved lazily by
+    /// [`EffectiveExecutionContract::emit_decision`] to share the same
+    /// matcher the runtime uses for `check_topic_deny_rules`.
+    pub glob_denies: BTreeMap<String, Vec<String>>,
     /// `(hat_id, topic)` pairs the hat may emit (publish/terminal/default),
     /// after deny-wins removal of `emit_denies`.
     pub emit_allows: BTreeSet<(String, String)>,
@@ -118,6 +182,14 @@ impl EffectiveExecutionContract {
         let key = (hat.to_string(), topic.to_string());
         if self.emit_denies.contains(&key) {
             return EmitDecision::Deny;
+        }
+        if let Some(patterns) = self.glob_denies.get(hat) {
+            if patterns
+                .iter()
+                .any(|pattern| crate::event_policy::matches_topic_rule(pattern, topic))
+            {
+                return EmitDecision::Deny;
+            }
         }
         if self.emit_allows.contains(&key) {
             return EmitDecision::Allow;
@@ -174,9 +246,17 @@ pub fn compile(final_config: RalphConfig) -> Result<ResolvedRuntimeConfig, Contr
     // Explicit `topic_deny_rules` are collected first; a deny always wins
     // over any publish-side allow for the same `(hat, topic)`.
     let mut emit_denies: BTreeSet<(String, String)> = BTreeSet::new();
+    let mut glob_denies: BTreeMap<String, Vec<String>> = BTreeMap::new();
     if let Some(policy) = &final_config.event_loop.event_policy {
         for rule in &policy.topic_deny_rules {
-            emit_denies.insert((rule.hat_id.clone(), rule.topic.clone()));
+            if rule.topic.contains('*') {
+                glob_denies
+                    .entry(rule.hat_id.clone())
+                    .or_default()
+                    .push(rule.topic.clone());
+            } else {
+                emit_denies.insert((rule.hat_id.clone(), rule.topic.clone()));
+            }
         }
     }
 
@@ -251,6 +331,7 @@ pub fn compile(final_config: RalphConfig) -> Result<ResolvedRuntimeConfig, Contr
     let contract = EffectiveExecutionContract {
         contract_digest: sha256_hex(&canonical_contract_bytes(&final_config)),
         emit_denies,
+        glob_denies,
         emit_allows,
         consumed_topics,
         declared_contract_topics,
@@ -467,6 +548,107 @@ hats:
     instructions: "coordinate"
 "#;
         RalphConfig::parse_yaml(yaml).expect("valid config must parse")
+    }
+
+    #[test]
+    fn task_capability_separates_coordinator_admin_from_execution() {
+        let task = crate::task::Task::new("unit".to_string(), 1)
+            .with_loop_id(Some("loop-1".to_string()))
+            .with_owner_hat(Some("executor".to_string()));
+        let coordinators = vec!["dispatcher".to_string()];
+
+        let capability = evaluate_task_capability(
+            &task,
+            Some("dispatcher"),
+            Some("loop-1"),
+            &coordinators,
+        );
+        assert!(capability.lifecycle_administration);
+        assert!(!capability.execution_ownership);
+        assert!(!capability.actionable_now);
+        assert_eq!(capability.deny_reason, Some("not_execution_owner"));
+    }
+
+    #[test]
+    fn task_capability_owner_is_actionable_only_when_ready() {
+        let mut task = crate::task::Task::new("unit".to_string(), 1)
+            .with_loop_id(Some("loop-1".to_string()))
+            .with_owner_hat(Some("executor".to_string()));
+        let capability =
+            evaluate_task_capability(&task, Some("executor"), Some("loop-1"), &[]);
+        assert!(capability.lifecycle_administration);
+        assert!(capability.execution_ownership);
+        assert!(capability.actionable_now);
+
+        task.blocked_by.push("task-blocker".to_string());
+        let blocked = evaluate_task_capability(&task, Some("executor"), Some("loop-1"), &[]);
+        assert!(blocked.execution_ownership);
+        assert!(!blocked.actionable_now);
+        assert_eq!(blocked.deny_reason, Some("task_blocked"));
+    }
+
+    #[test]
+    fn glob_deny_pattern_denies_matching_topic() {
+        let yaml = r#"
+event_loop:
+  completion_promise: "LOOP_COMPLETE"
+  event_policy:
+    enabled: true
+    mode: enforce
+    on_violation: reject_with_resume
+    topic_deny_rules:
+      - {hat_id: debug, topic: "debug.*"}
+cli:
+  backend: "claude"
+hats:
+  executor:
+    name: "Executor"
+    triggers: ["work.ready"]
+    publishes: ["work.done"]
+    terminal_events: ["work.done"]
+    instructions: "do work"
+  debug:
+    name: "Debug"
+    triggers: ["work.done"]
+    publishes: ["debug.step"]
+    instructions: "debug"
+"#;
+        let resolved = compile(RalphConfig::parse_yaml(yaml).expect("parse"))
+            .expect("compile must succeed");
+        let glob = resolved
+            .contract()
+            .glob_denies
+            .get("debug")
+            .expect("glob must be stored for hat=debug");
+        assert_eq!(glob, &vec!["debug.*".to_string()]);
+        assert_eq!(
+            resolved.contract().emit_decision("debug", "debug.step"),
+            EmitDecision::Deny,
+            "glob deny must reject matching topic"
+        );
+        assert_eq!(
+            resolved.contract().emit_decision("debug", "debug.done"),
+            EmitDecision::Deny,
+            "glob deny must cover every concrete matching topic"
+        );
+        assert_eq!(
+            resolved.contract().emit_decision("executor", "work.done"),
+            EmitDecision::Allow,
+            "non-denied (hat, topic) stays allow"
+        );
+    }
+
+    #[test]
+    fn task_capability_fails_closed_across_loops() {
+        let task = crate::task::Task::new("unit".to_string(), 1)
+            .with_loop_id(Some("loop-2".to_string()))
+            .with_owner_hat(Some("executor".to_string()));
+        let capability =
+            evaluate_task_capability(&task, Some("executor"), Some("loop-1"), &[]);
+        assert!(!capability.lifecycle_administration);
+        assert!(!capability.execution_ownership);
+        assert!(!capability.actionable_now);
+        assert_eq!(capability.deny_reason, Some("task_wrong_loop"));
     }
 
     #[test]

@@ -43,7 +43,8 @@ use tracing::warn;
 pub mod compiler;
 pub use compiler::{
     ContractCompileFinding, ContractCompileFindingKind, ContractFindings, EmitDecision,
-    EffectiveExecutionContract, ResolvedRuntimeConfig, compile,
+    EffectiveExecutionContract, ResolvedRuntimeConfig, TaskCapability, compile,
+    evaluate_task_capability,
 };
 
 // U3 (plan 2026-07-30-004): persistent activation registry that provides

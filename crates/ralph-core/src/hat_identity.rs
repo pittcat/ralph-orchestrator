@@ -481,7 +481,7 @@ hats:
 
     #[test]
     fn u4_prompt_projects_contract_actionability_not_raw_config() {
-        use std::collections::BTreeSet;
+        use std::collections::{BTreeMap, BTreeSet};
 
         use crate::execution_contract::EffectiveExecutionContract;
 
@@ -499,6 +499,7 @@ hats:
         let contract = EffectiveExecutionContract {
             contract_digest: "abc123digest".to_string(),
             emit_denies: BTreeSet::from([("worker".to_string(), "work.ready".to_string())]),
+            glob_denies: BTreeMap::new(),
             emit_allows: BTreeSet::from([
                 ("worker".to_string(), "work.done".to_string()),
                 ("worker".to_string(), "work.failed".to_string()),

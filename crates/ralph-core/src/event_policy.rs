@@ -1248,6 +1248,16 @@ pub fn is_null_payload_rejected_topic(topic: &str) -> bool {
     NULL_PAYLOAD_REJECT_TOPICS.contains(&topic)
 }
 
+/// Glob-capable topic match for `topic_deny_rules` (and any other
+/// per-rule matcher the runtime shares with the contract compiler).
+pub fn matches_topic_rule(rule_topic: &str, event_topic: &str) -> bool {
+    if rule_topic.contains('*') {
+        Topic::new(rule_topic).matches_str(event_topic)
+    } else {
+        rule_topic == event_topic
+    }
+}
+
 /// Check topic-deny rules against a (hat, topic) pair.
 ///
 /// When the event policy is in `Enforce` mode and the (hat_id, topic) pair
@@ -1294,13 +1304,7 @@ pub fn check_topic_deny_rules(
         return None;
     }
     for rule in &config.topic_deny_rules {
-        if rule.hat_id == hat_id {
-            let matches = if rule.topic.contains('*') {
-                Topic::new(&rule.topic).matches_str(topic)
-            } else {
-                rule.topic == topic
-            };
-            if matches {
+        if rule.hat_id == hat_id && matches_topic_rule(&rule.topic, topic) {
                 let finding = PolicyFinding {
                     topic: topic.to_string(),
                     violation_type: ViolationType::TopicDenied {
@@ -1324,7 +1328,6 @@ pub fn check_topic_deny_rules(
                     },
                 });
             }
-        }
     }
     None
 }
@@ -3050,6 +3053,32 @@ mod tests {
             business_topics: vec!["experiment.planned".to_string()],
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn test_matches_topic_rule_exact_and_glob() {
+        assert!(matches_topic_rule("build.done", "build.done"));
+        assert!(!matches_topic_rule("build.done", "build.done.rejected"));
+        assert!(matches_topic_rule("debug.*", "debug.step"));
+        assert!(matches_topic_rule("debug.*", "debug.done"));
+        assert!(!matches_topic_rule("debug.*", "build.done"));
+        assert!(matches_topic_rule("*", "anything.at.all"));
+    }
+
+    #[test]
+    fn test_check_topic_deny_rules_uses_shared_glob_matcher() {
+        let mut config = test_config();
+        config.topic_deny_rules.push(TopicDenyRule {
+            hat_id: "validator".to_string(),
+            topic: "debug.*".to_string(),
+        });
+        let decision = check_topic_deny_rules(Some("validator"), "debug.step", &config);
+        assert!(
+            matches!(decision, Some(PolicyDecision::RejectWithResume(_))),
+            "glob deny must surface RejectWithResume in Enforce mode; got {decision:?}"
+        );
+        let miss = check_topic_deny_rules(Some("validator"), "build.done", &config);
+        assert!(miss.is_none(), "non-matching topic must not be denied");
     }
 
     #[test]

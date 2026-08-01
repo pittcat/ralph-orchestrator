@@ -29,6 +29,8 @@ ralph emit [OPTIONS] <TOPIC> [PAYLOAD]
 | `<TOPIC>` | string | 是 | — | 事件主题，如 `task.completed`、`my-event` |
 
 > ⚠️ **Hat 作用域规则（Isolated 模式）**：在 `execution_mode: isolated` 下，每个 hat 只能发布其 `publishes` 列表中声明的 topic。发布未声明的 topic 会被 `EventOriginGuard` 拒绝，并触发指向该 hat 的 `task.resume`。连续 4 次越权将触发熔断终止。上例中的 `task.completed` 和 `my-event` 仅为通用占位符，实际可发布的 topic 以当前 hat 的 `publishes` 配置为准。
+
+> **Topic deny 解析共享**：runtime 的 `check_topic_deny_rules` 与 `EffectiveExecutionContract::emit_decision` 都走 `event_policy::matches_topic_rule`。`topic_deny_rules` 中带 `*` 的 glob（如 `debug.*`）按段级通配解释；事件 topic 与 deny 规则完全一致或被通配匹配即视为命中，`Observe` 模式返回 `Warn`，`Enforce` 模式按 `on_violation` 返回 `RejectWithResume` / `Hold` / `Block`。CLI `--policy-check`、hat 授权和契约 emit 决策因此对同一 (hat, topic) 给出同一结论。
 | `[PAYLOAD]` | string/json | 否 | `""` | 事件负载；配合 `-j` 可解析为 JSON 对象 |
 | `-j, --json` | flag | 否 | — | 将 payload 按 JSON 对象解析而非普通字符串 |
 | `--file <FILE>` | path | 否 | `.ralph/events.jsonl` | 目标事件文件路径 |
