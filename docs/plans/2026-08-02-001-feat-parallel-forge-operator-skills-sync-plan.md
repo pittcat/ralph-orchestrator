@@ -3,18 +3,18 @@ artifact_contract: ce-unified-plan/v1
 artifact_readiness: implementation-ready
 product_contract_source: ce-plan-bootstrap
 execution: code
-title: "feat: 同步 Parallel Forge 最新 operator skills"
-type: feat
+title: "refactor: 独立化 preset operator skills 并清理旧 skills"
+type: refactor
 date: 2026-08-02
 ---
 
-# feat: 同步 Parallel Forge 最新 operator skills
+# refactor: 独立化 preset operator skills 并清理旧 skills
 
 ## Goal Capsule
 
-- 目标：让 `skills/ralph-preset-author`、`skills/ralph-preset-review` 及其共享 reference/fixture 能审查当前 `builtin:parallel-forge` 的真实契约，而不是停留在 7 月 28 日至 8 月 1 日前半段的旧模型。
+- 目标：让 `skills/ralph-preset-author`、`skills/ralph-preset-review` 各自成为可独立安装的、按 capability 触发的 operator skill，能够审查当前 `builtin:parallel-forge` 以及后续生成的任意 preset；同时删除 `skills/ralph-loop` 与 `skills/ralph-preset-common`。
 - 权威顺序：当前源码、当前 preset/schema、可执行测试入口高于 Git 提交说明和计划文字；本计划不把 plan 文档中的未落地内容当成现状。
-- 实现边界：只修改 `skills/ralph-preset-*` 下的 operator 文档与 fixture/anchor 测试；不修改生产 Rust、`presets/en/parallel-forge.yml`、schema、`crates/ralph-core/data/*.md` 或 builtin 注册。
+- 实现边界：将必要 reference 分别放入 author/review 自己的 `references/`，将 review fixture/test 放入 review skill；修改 author/review 入口、Rust compile-time include、诊断/fixture 引用和文档；删除 `skills/ralph-loop` 与 `skills/ralph-preset-common`。不新增 `ralph-preset-operator-contract`，不使用跨 skill symlink，不修改 `parallel-forge` preset/schema 或 runtime 行为。
 - 停止条件：若当前 preset/schema 与本计划引用的事件、字段或权限事实不一致，停止当前 Unit，更新 Evidence Ledger 和 Decision Record 后再继续。
 
 ## Product Contract
@@ -23,9 +23,9 @@ date: 2026-08-02
 
 - R1. Preset author 能从 operator skill 判断当前 Parallel Forge 的 artifact-derived `forge.plan.ready` handoff、静态 wave、task settlement 和字段值源。
 - R2. Preset reviewer 能独立审查 per-wave review/integration/verification/settlement、失败 observation、bounded correction 和 `correction_round=3` 终局门禁。
-- R3. Preset reviewer 能审查当前 `--reuse-worktree` / reuse-history 与 `forge.worktrees.ready` 的复用边界、证据状态和“reuse 不得伪造 `forge.wave.settled`”的边界；未来的 `forge.reuse.assessed` 不得被写成当前 topic。
+- R3. Preset reviewer 能以 capability 信号审查任意 preset 的 worktree reuse/history 复用边界、证据状态和“reuse 不得伪造 settlement”的边界；`parallel-forge` 仅作为当前验证样本。
 - R4. Preset reviewer 能审查 readonly hat gate、auditor 单业务终态、reporter 合法的 `forge.report.done → LOOP_COMPLETE` 窄例外、completion payload 一致性和 fail-close Accepted Transition。
-- R5. 新规则必须保持 loop 外 operator skill 的知识分层：具体路径和 topic 属于 preset/schema；通用审查模型、finding 和验证命令属于 `skills/ralph-preset-*`；runtime 内部 ledger 不得被写成 agent-facing 业务接口。
+- R5. 新规则必须保持 loop 外 operator skill 的知识分层：具体路径和 topic 属于被审查 preset/schema；通用审查模型、finding 和验证命令分别随 author/review skill 分发；runtime 内部 ledger 不得被写成 agent-facing 业务接口。
 - R6. 所有新增规则必须有可复现的 anchor/fixture/CLI 验收；不能用锁定完整 prompt 文案的测试代替结构化行为验证。
 
 ### 调用方与行为变化
@@ -33,8 +33,8 @@ date: 2026-08-02
 - 调用方是创建或评审 Ralph preset 的人类 operator，以及执行 `ralph-preset-author` / `ralph-preset-review` 的 agent。
 - 当前行为：operator skill 已覆盖 artifact-first、wave/supervisor capability、single-chain 和部分 terminal 规则，但对当前 worktree reuse evidence、新版失败 topic、`failure_fingerprint`、`correction_round`、readonly gate、auditor/reporting terminal ownership 和 accepted flow authority 没有专门规则；`forge.reuse.assessed` 仍是计划中的未落地 topic。
 - 目标行为：面对当前 `parallel-forge` YAML/schema，author/reviewer 能定位所有新字段的值源、可见性、消费动作、权限边界和失败恢复路径，并能用现有 CLI/nextest 入口验证。
-- 输入：当前 `presets/en/parallel-forge.yml`、`presets/schemas/parallel-forge.yml`、`presets/templates/parallel-forge/`、现有 operator references、fixture 和 `test_skill_anchors.py`。
-- 输出：更新后的 author/review SKILL、五个共享 reference、fixture README/新增 fixture、anchor/结构测试，以及本计划要求的验证记录。
+- 输入：当前 `presets/en/parallel-forge.yml`、`presets/schemas/parallel-forge.yml`、现有 operator references、fixture、`capability_inventory.rs` 和 active reference consumers。
+- 输出：author/review 各自的 references、review skill 内的 fixtures/tests、更新后的 author/review SKILL、Rust include 路径、诊断/fixture/项目文档引用，以及本计划要求的验证记录。
 - 状态变化：仅改变文档与 operator review contract；不改变 runtime event、TaskStore、preset topology、CLI 行为或持久化数据。
 - 错误语义：文档或 fixture 发现当前契约不一致时必须 fail closed，不能用模糊措辞或把缺口标为 FYI；真实 preset 的结构化检查失败时不得通过修改测试削弱断言。
 - 兼容性：保留现有通用 preset author/review 规则和全部既有 fixture；新增规则只针对实际使用对应能力的 preset 生效。
@@ -43,9 +43,9 @@ date: 2026-08-02
 
 ### Scope Boundaries
 
-本次范围：worktree reuse/status evidence、artifact-derived plan handoff、静态 wave settlement、失败 observation/correction、readonly gates、auditor/reporter terminal ownership、Accepted Transition/fail-close、统一 task capability 的 operator 文档和 review fixtures。
+本次范围：operator contract 分发、author/review 入口更新、worktree reuse/status evidence、artifact-first handoff、静态 wave/settlement、失败 observation/correction、readonly gates、terminal ownership、Accepted Transition/fail-close，以及删除 `ralph-loop` / `ralph-preset-common` 后的所有活跃引用修复。
 
-非目标：实现上述 runtime 能力；修改 `parallel-forge` YAML/schema；新增 `ralph` CLI；更新 injected `ralph-tools*.md`；新增 finding lint 规则；修改 preset 注册、manifest、index 或 zsh completion。
+非目标：实现上述 runtime 能力；修改 `parallel-forge` YAML/schema；新增 `ralph` CLI；更新 injected `ralph-tools*.md`；新增 finding lint 规则；修改 preset 注册、manifest、index 或 zsh completion；保留 `ralph-loop`、`ralph-preset-common` 或新增共享 contract skill 作为兼容别名。
 
 ### Deferred to Follow-Up Work
 
@@ -73,6 +73,9 @@ date: 2026-08-02
 | E12 | `AGENTS.md` 当前硬规则 | 测试入口必须使用 nextest；preset/schema 拓扑变化需同步下游；operator skill 允许编辑范围明确；文档必须中文。 | 计划验证命令统一用 nextest，并要求中英文技术标识之外的人类文档使用中文。 | 高 |
 | E13 | 独立 repo research：`presets/en/parallel-forge.yml`、`presets/schemas/parallel-forge.yml`、`crates/ralph-cli/src/presets.rs` | 当前 `forge.wave.settled` 通过 `settled_task_ids` 触发 projection-owned batch close；`failure_fingerprint` 和 final `correction_round: [3]` 已是结构化契约；当前源文件未发现 `forge.reuse.assessed`。 | 把 settlement 验收落到 `forge.wave.settled`/`settled_task_ids`；把 reuse topic 改为未落地提案，不作为当前事件契约。 | 高 |
 | E14 | 独立 repo research：`presets/en/parallel-forge.yml`、`skills/ralph-preset-common/tests/test_skill_anchors.py` | auditor 是 `forge.audit.done`/`forge.plan.blocked` 单业务终态；reporter 保留 `forge.report.done` 后 `LOOP_COMPLETE` 窄例外；anchor 文件由 `__main__` 直接执行，不是 pytest 收集测试。 | 修正 terminal 规则与 Python 验证命令，避免错误声称存在统一 single-event 或 pytest suite。 | 高 |
+| E15 | `skills/ralph-preset-author/references`、`skills/ralph-preset-review/references` symlink 与 `crates/ralph-core/src/capability_inventory.rs` | author/review 的 references 均指向 `../ralph-preset-common/references`；Rust 用 `include_str!` 直接嵌入 common 下的 3 个文件。 | 删除 common 前必须把内容复制到两个本地 references 目录，移除 symlink，更新 include_str/evidence_sources，并跑编译/anchor 回归。 | 高 |
+| E16 | `scripts/check-aaf-fixtures.sh`、`skills/ralph-run-diagnosis/**`、`AGENTS.md`/`CLAUDE.md`、`crates/ralph-core/src/capability_inventory.rs` 全仓检索 | common 路径还被 fixture acceptance、diagnosis prompt、项目硬规则和 capability inventory 引用。 | 删除 common 是跨 skill/脚本/Rust/文档的迁移 Unit，不能只删目录。 | 高 |
+| E17 | 当前 skill 目录布局与安装约束 | author/review 是带 `SKILL.md` 的独立入口；跨 skill symlink 要求安装者额外保留 common 目录，不能保证独立安装。 | shared contract 必须复制到两个 skill 的本地 references；增加同步校验，禁止把外部共享目录作为运行前提。 | 高 |
 
 ### 未确认假设
 
@@ -85,13 +88,13 @@ date: 2026-08-02
 
 | Decision ID | 决策问题 | 候选方案 | 最终选择 | 支持证据 | 排除其他方案 | 置信度 |
 |---|---|---|---|---|---|---|
-| KTD1 | 新能力放在哪一层 | 写入 injected `ralph-tools*.md`；写入 preset YAML；写入 operator references | 写入 `skills/ralph-preset-common/references/`，具体 preset 路径仍留在 YAML/schema | E1,E2,E4,E12 | 本次不改变 agent-facing runtime command；把具体 preset 细节写进通用 tools 会违反去计划化和知识分层 | 0.98 |
+| KTD1 | 通用 contract 的归属 | 保留 common；复制到 author/review 两份；迁移到中性的非-skill contract 目录 | 将可复用 reference 分别复制到 author/review 的本地 `references/`，并以同步校验防止漂移；不建立共享目录或 symlink | E12,E15,E16,E17 | common 和外部共享目录都不适合独立安装；symlink 依赖宿主目录结构；复制是独立安装的唯一直接路径 | 0.96 |
 | KTD2 | 是否为每个新 topic 新增 finding lint | 新增 runtime lint；全部 review-only；混合 | 本计划全部作为 review-only checklist/rubric，机械 lint 只验证现有结构 | E6,E7,E9,E11 | 用户目标是 skills 同步；新增 lint 会扩大到生产代码、finding registry 和回归范围 | 0.96 |
 | KTD3 | 如何验证文档同步 | 完整文本/byte equality；anchor/fixture/真实 CLI smoke | anchor + fixture 结构 + 当前 preset CLI smoke + nextest | E9,E10,E11,E12 | 全文 equality 会锁 prompt 文案；只 grep 文本不能证明行为 | 0.98 |
 | KTD4 | reuse 如何建模 | 把未来 `forge.reuse.assessed` 当当前 topic；审查现有 reuse-worktree/reuse-history；只写概念说明 | 审查当前 `--reuse-worktree` / reuse-history、`forge.worktrees.ready`、artifact/commit evidence 和禁止伪造 `forge.wave.settled`；未来 assessment topic 单独标为 deferred | E5,E8,E13 | 当前 schema 没有 `forge.reuse.assessed`，不能把计划设计写成现状；只写概念又无法指导 author/reviewer | 0.98 |
 | KTD5 | readonly 如何判定 | hat ID 硬编码；新增 preset 字段；依据现有 write-path/mutation contract | 依据当前计划和 preset 的 allowed write path / mutation capture / verdict gate 规则建立通用审查表 | E1,E6 | 不新增字段或 runtime guard；避免只对 Parallel Forge 名称硬编码 | 0.94 |
 | KTD6 | terminal 规则 | 所有 terminal 都强制单事件；任意 hat 可双 emit；auditor 单业务终态 + reporter 窄例外 | auditor 只允许 `forge.audit.done`/blocked 终态；reporter 遵守 `forge.report.done` 后 `LOOP_COMPLETE` 的现有窄例外和相同 `report_path` | E1,E2,E7,E14 | “全都单事件”与当前 reporter schema/config 冲突；任意双 emit 又会误放其它 hat | 0.99 |
-| KTD7 | Unit 顺序 | 按目录文件并行；先 fixtures；先契约模型再流程再验收 | U1 rubric/command contract → U2 author/review workflow → U3 fixtures/anchors → U4 final validation | E9,E10,E11,E12 | 后续 fixture 和验收依赖前置 finding/命令语义；并行会产生双 SSOT | 0.97 |
+| KTD7 | Unit 顺序 | 先删 common；先改入口；迁移 contract/入口 → 消费者迁移与删除 → fixture/anchors → final validation | U1 准备两个独立 skill 的本地 references → U2 迁移入口、消费者并删除 common/loop → U3 fixtures/anchors 与同步校验 → U4 final validation | E9,E10,E15,E16,E17 | 删除必须晚于所有 include/reference 消费者迁移；fixture 和最终回归依赖新路径稳定 | 0.99 |
 
 所有关键决策置信度均 ≥ 0.85；A1/A2 是执行前验证项，不被伪装为已确认事实。
 
@@ -99,10 +102,10 @@ date: 2026-08-02
 
 ```mermaid
 flowchart LR
-  P[当前 parallel-forge preset/schema] --> C[共享 operator contract]
-  C --> A[author SKILL + author-checklist]
-  C --> R[review SKILL + finding-rubric]
-  C --> X[commands + patterns + agent-native-model]
+  P[当前 parallel-forge preset/schema] --> A[author 本地 operator contract]
+  P --> R[review 本地 operator contract]
+  A --> X[author references]
+  R --> Y[review references + fixtures]
   A --> F[fixtures / anchor tests]
   R --> F
   F --> V[现有 preset check + nextest + CLI smoke]
@@ -112,11 +115,11 @@ flowchart LR
 
 ## BDD 行为规格
 
-### Feature: Parallel Forge operator contract coverage
+### Feature: Capability-triggered preset operator contract coverage
 
   Background:
-    Given 当前仓库的 `presets/en/parallel-forge.yml` 与 `presets/schemas/parallel-forge.yml` 是被审查的真实输入
-    And operator skill 使用 `references/commands.md` 中已有的 CLI 与 nextest 入口
+    Given 当前仓库的 `presets/en/parallel-forge.yml` 与 `presets/schemas/parallel-forge.yml` 是 capability contract 的验证样本
+    And operator skill 使用 contract references 中已有的 CLI 与 nextest 入口
 
   Scenario: author identifies artifact-derived plan handoff
     Given `forge.plan.ready` 只携带 artifact reference/identity/digest
@@ -163,7 +166,7 @@ flowchart LR
 
 | Scenario | 验收条件 | 测试入口 | 层级 | 风险补充 | E2E |
 |---|---|---|---|---|---|
-| artifact-derived handoff | reference/identity/digest、derived DAG、禁止 payload 双写均有 checklist/rubric 条目 | `skills/ralph-preset-common/tests/test_skill_anchors.py` + review 自检 | 文档 contract/fixture | 结构化 grep，防止只写 prose | 否 |
+| artifact-derived handoff | reference/identity/digest、derived DAG、禁止 payload 双写均有 checklist/rubric 条目 | `skills/ralph-preset-review/tests/test_skill_anchors.py` + review 自检 | 文档 contract/fixture | 结构化 grep，防止只写 prose | 否 |
 | worktree reuse | `--reuse-worktree`、reuse-history、`forge.worktrees.ready`、plan/artifact/commit evidence、no fake settlement 均出现 | 新增 fixture + `ralph preset check` smoke | fixture/CLI 集成 | dirty/tampered/drift/legacy evidence | 否 |
 | correction exhaustion | fingerprint、round 0–2、final round 3 的 finding/放行规则可区分 | 新增 fixture + operator review protocol | fixture/结构化 | round=1 冒充 final、重复 fingerprint | 否 |
 | readonly gate | protected snapshot、allowed path、hard stop、无自动清理写入 rubric | 新增 fixture + reference anchor | fixture/文档 contract | pre-existing dirty workspace | 否 |
@@ -181,23 +184,22 @@ flowchart LR
 | R3 | worktree reuse boundary | S3 | U2/U3 reuse fixture | anchor + rubric | preset check if supported | — | E5,E13 |
 | R4 | readonly/terminal/authority | S5,S6 | U2/U3 fixtures | rubric + anchors | current preset/schema smoke | — | E1,E2,E6,E7 |
 | R5 | knowledge layering | all | U1/U2 reference review | path/ledger scans | `check-cli-doc-drift.sh` only if affected command reference | — | E4,E11,E12 |
-| R6 | reproducible verification | S7 | U3/U4 test suite | `test_skill_anchors.py` + pytest | preset lint/strict smoke | — | E9,E10 |
+| R6 | reproducible verification | S7 | U3/U4 test suite | `test_skill_anchors.py` + pytest | preset lint/strict smoke | — | E9,E10,E15,E16 |
 
 ## Implementation Units
 
-### U1. 冻结当前 Parallel Forge operator contract 与 finding taxonomy
+### U1. 为 author/review 建立独立 references 并改为 capability-triggered 模型
 
-1. Unit 目标：建立一份不重复 runtime 实现、但完整覆盖当前 PF topic/field/capability 的共享 operator contract。
+1. Unit 目标：把现有 common reference 的必要内容分别复制到 author/review 的本地 `references/`，并将规则表达为可供未来 preset 复用的 capability-triggered contract。
 2. 对应需求与 Scenario：R1,R2,R3,R4,R5；S1–S6；KTD1–KTD6；E1–E8,E11。
-3. 外部可观察结果：author/reviewer reference 能明确区分 artifact path、control payload、runtime ledger、reuse evidence、failure observation、terminal event。
-4. 当前行为基线：`references/agent-native-model.md` 已有 artifact-first、task authority、wave/supervisor 基础段，但对本计划列出的新 PF-specific fields/topics 无覆盖；`finding-rubric.md` 现有 finding 表未出现当前 reuse-worktree evidence、`failure_fingerprint`、`correction_round`、readonly snapshot 等完整专项规则。当前 schema 也没有 `forge.reuse.assessed`，不得把它当现状。
+3. 外部可观察结果：author/reviewer 能通过中性 contract 目录明确区分 artifact path、control payload、runtime ledger、reuse evidence、failure observation、terminal event；规则触发条件使用 `execution_model`、声明的 topic/field、supervisor/wave/tool capability，不使用 `parallel-forge` 名称分支。
+4. 当前行为基线：common references 已有 artifact-first、task authority、wave/supervisor 基础段，但对本计划列出的 capability-triggered fields/topics 无覆盖；`finding-rubric.md` 现有 finding 表未出现当前 reuse-worktree evidence、`failure_fingerprint`、`correction_round`、readonly snapshot 等完整专项规则。当前 schema 也没有 `forge.reuse.assessed`，不得把它当现状。
 5. 输入输出：输入为当前 preset/schema；输出为 reference 中的术语、审查问题、finding ID/严重度建议、命令证据等级；不得改 runtime。
 6. 修改位置：
-   - `skills/ralph-preset-common/references/agent-native-model.md`：补 PF handoff/wave/reuse/readonly/terminal 的通用模型，禁止写某次 plan ID。
-   - `skills/ralph-preset-common/references/finding-rubric.md`：补 review-only finding 表、默认 severity/confidence/aaf question 与 lint-vs-review-only 边界。
-   - `skills/ralph-preset-common/references/patterns.md`：补 per-wave settlement、correction、worktree reuse evidence、single-event/paired terminal pattern。
-   - 明确不修改 `crates/ralph-core/src/`、`presets/*`、`crates/ralph-core/data/*`。
-7. 可依赖能力：E1/E2 的当前 schema/preset；现有 artifact-first/wave/supervisor rubric。
+   - `skills/ralph-preset-author/references/`、`skills/ralph-preset-review/references/`：删除 common symlink，分别建立独立的 reference 文件；共享内容必须保持一致，但不能依赖外部目录。
+   - 本 Unit 明确不新增 `skills/ralph-preset-operator-contract/`；anchor test 的迁移留给 U3。
+   - 明确不在本 Unit 修改 `parallel-forge` preset/schema、Rust runtime 或 injected `ralph-tools*.md`。
+7. 可依赖能力：E1/E2 的当前 schema/preset；common 中现有 artifact-first/wave/supervisor rubric；E15 的迁移结构证据。
 8. 禁止依赖未来能力：不依赖新 lint、`forge.reuse.assessed`、`inspect execution-plan`、新 runtime guard 或未注册 E2E。
 9. 验收测试：检查每个当前 PF 新 topic/field 在 reference 中有 source/visibility/consumer/错误语义；检查 runtime internal ledger 禁止项仍存在；检查 finding ID 不与现有 finding 冲突。
 10. Acceptance Red：先对当前 references 做关键词和 capability inventory 对照；预期发现 reuse/failure fingerprint/readonly/auditor 的覆盖缺失。若只得到命令环境错误、路径不存在或未执行到 reference 内容，不算有效 Red。
@@ -206,26 +208,26 @@ flowchart LR
 13. 最小实现范围：只建立可被 U2 引用的共享模型和 finding 语义，不写 author/reviewer 流程步骤，不新增 CLI。
 14. 集成验证：以当前 schema/preset 的 `rg`/YAML 结构为真实输入，运行现有 `ralph capability inventory --format json`（若 binary 可用）确认引用的 capability ID 可追溯；失败则记录环境原因。
 15. 风险驱动测试：Characterization（当前 reference anchors）；结构化 coverage scan（防漏新 topic）；不做全文 snapshot。
-16. 回归范围：现有 `test_skill_anchors.py`、所有现有 fixture README 交叉引用、现有 finding ID 表；原因是新增通用条目可能改变 reviewer 的 finding 解释。
-17. 预期文件变更：见第 6 项，全部为修改现有 operator reference；Evidence E1–E11。
+16. 回归范围：迁移后 anchor、所有 finding ID、author/review symlink 目标可读性；原因是 common 内容迁移会影响编译期 capability coverage 和两个入口的 reference 解析。
+17. 预期文件变更：author/review 本地 references；删除动作留到 U2；Evidence E1–E17。
 18. 完成标准：contract coverage 完整、finding ID 唯一、中文说明可执行、无计划编号/过窄 preset 事故泄漏、anchor 测试仍通过、可独立提交。
 19. 停止条件：发现 schema 中的 topic/field 与 E1/E2 不一致；无法确定 finding 是 review-only 还是 lint；需要新生产接口；任一决策低于 0.85。
 20. 风险与注意事项：最大风险是把具体 PF 行为误写成全局 runtime 规则；检测为逐条核对知识分层；缓解是只引用 agent 可见动作和 operator 可执行命令。
 
-### U2. 同步 preset author/review 的执行流程与专项检查
+### U2. 更新 author/review 入口、Rust include 和所有 active consumers，删除 common/loop
 
-1. Unit 目标：让 author/reviewer workflow 能使用 U1 contract 审查当前 Parallel Forge，而不是只知道通用 artifact-first。
+1. Unit 目标：让 author/reviewer workflow 使用各自本地 contract，并在所有 active consumers 迁移完成后删除 `skills/ralph-preset-common` 与 `skills/ralph-loop`。
 2. 对应需求与 Scenario：R1–R5；S1–S6；KTD1–KTD6；E1–E8,E11,E12。
 3. 外部可观察结果：运行 author/review skill 时，报告会要求检查 reuse、readonly、failure correction、auditor/reporter terminal、accepted flow authority，并给出当前可执行验证命令。
 4. 当前行为基线：`skills/ralph-preset-author/SKILL.md` 已有 artifact-first、capability discovery、wave/supervisor、template 规则；`skills/ralph-preset-review/SKILL.md` 已有 artifact-first、wave/supervisor、single-chain、payload/terminal 规则，但无上述最新 PF 专项流程。规则必须采用 capability-triggered gating，不能按 builtin 名称硬编码。
 5. 输入输出：输入为 U1 references + 当前 preset/schema；输出为 author draft gate、review workflow、report sections、命令顺序和停止条件。
 6. 修改位置：
-   - `skills/ralph-preset-author/SKILL.md`：在 capability discovery/Payload Contract/自检流程中加入 PF-specific contract 使用规则。
-   - `skills/ralph-preset-review/SKILL.md`：加入 PF 专项审查步骤、报告表列、failure/readonly/terminal/reuse finding 映射。
-   - `skills/ralph-preset-common/references/author-checklist.md`：加入可执行 checklist。
-   - `skills/ralph-preset-common/references/commands.md`：只补已确认存在的命令/验证顺序；A2 命令未确认前不得写成当前事实。
-   - 明确不修改 preset YAML/schema 和 injected skill。
-7. 可依赖能力：U1 的 finding/术语；现有 `ralph preset check`、`ralph emit --policy-check`、`inspect prompt`、`capability inventory` 命令。
+   - `skills/ralph-preset-author/SKILL.md`、`skills/ralph-preset-review/SKILL.md`：改为引用各自 skill 内的 `references/`，加入 capability-triggered workflow。
+   - `skills/ralph-preset-author/references`、`skills/ralph-preset-review/references`：必须是实际目录，不得保留 symlink。
+   - `crates/ralph-core/src/capability_inventory.rs`：更新 `include_str!` 和 `evidence_sources`，保持 anchor coverage 语义不变。
+   - `skills/ralph-run-diagnosis/**`、`scripts/check-aaf-fixtures.sh`、`docs/handbook/serial-preset-development.md`、`AGENTS.md`、`CLAUDE.md`：更新 active common/loop 路径。
+   - 删除 `skills/ralph-loop/` 与 `skills/ralph-preset-common/`，仅在上述消费者迁移并通过编译/fixture smoke 后执行。
+7. 可依赖能力：U1 的中性 contract；现有 `ralph preset check`、`ralph emit --policy-check`、`inspect prompt`、`capability inventory` 命令。
 8. 禁止依赖未来能力：不要求 reviewer 运行未确认的 `inspect execution-plan`；不引入新的 lint ID；不要求读取 runtime ledger。
 9. 验收测试：author checklist 能逐 topic 要求 source/visibility/identity/downstream/artifact；review workflow 能在 lint fail 时继续 review-only audit；报告 Executive Summary 能分别列 mechanical lint、payload、artifact-first、reuse、readonly、terminal 结果。
 10. Acceptance Red：用当前 PF preset 走 reference checklist，预期在新增专项 section 出现前无法定位 reuse/readonly/final correction/accepted transition；若执行失败仅来自命令不存在而未阅读文档，不算有效 Red。
@@ -234,23 +236,23 @@ flowchart LR
 13. 最小实现范围：使两套 SKILL 能调用 U1 contract；不改变通用 AAF 五问、artifact-first finding 名称或已有 fixture 预期。
 14. 集成验证：对 `builtin:parallel-forge` 执行 `ralph preset check --strict`、`ralph emit --schema`/`--policy-check` 的只读 smoke；命令失败必须记录真实输出并区分 preset finding 与环境失败。
 15. 风险驱动测试：contract test（commands.md 与 `--help`）；negative path review（lint fail 仍继续 AAF）；knowledge-layer scan。
-16. 回归范围：现有 author/review SKILL anchors、artifact-first/wave/supervisor fixture 说明、commands.md 现有命令；原因是 workflow 扩展容易覆盖旧窄例外。
-17. 预期文件变更：`skills/ralph-preset-author/SKILL.md`、`skills/ralph-preset-review/SKILL.md`、`skills/ralph-preset-common/references/author-checklist.md`、`commands.md`；Evidence E1,E2,E4–E8,E11。
+16. 回归范围：author/review SKILL anchors、Rust capability inventory、fixture script、diagnosis/loop 文档引用、编译期 include；原因是删除 common 会影响所有 active consumers。
+17. 预期文件变更：author/review SKILL、两个本地 references 目录、`capability_inventory.rs`、active consumer docs/scripts，以及删除 `skills/ralph-loop/` 与 `skills/ralph-preset-common/`；Evidence E1,E2,E4–E8,E11,E15–E17。
 18. 完成标准：author/review 都能从当前 preset/schema 找到新规则；命令未确认项被明确标记；无假设性 CLI；review report contract 完整。
 19. 停止条件：CLI help 与 commands.md 冲突；出现必须改 runtime 的规则；发现 author/review 需要不同 SSOT；置信度下降。
-20. 风险与注意事项：review 流程可能将 PF-specific rule 误套到普通 preset；缓解是显式以“capability applies_when” gating，并保留通用路径。
+20. 风险与注意事项：review 流程可能将 capability rule 误套到不具备该能力的 preset；缓解是显式以 `applies_when` gating，并保留通用路径。
 
-### U3. 增加专项 fixture 与 anchor/结构化验收
+### U3. 增加 review capability fixture、anchor 与 references 同步验收
 
-1. Unit 目标：用最小 fixture 证明 U1/U2 的新规则能区分反例，不锁定完整 prompt 文案。
+1. Unit 目标：用最小、preset-neutral fixture 证明 U1/U2 的 capability rules 能区分反例，不锁定完整 prompt 文案或 `parallel-forge` 拓扑。
 2. 对应需求与 Scenario：R2–R6；S3–S7；KTD2,KTD3,KTD7；E9,E10。
 3. 外部可观察结果：reviewer 能针对 reuse、readonly、correction exhaustion、terminal ownership 看到预期 finding；既有 fixture 继续验证旧规则。
 4. 当前行为基线：现有 fixtures 覆盖 artifact-first、wave/supervisor、trigger-context、reentry、terminal，但没有四类 PF 专项 fixture；`test_skill_anchors.py` 只有四个 anchor。
 5. 输入输出：输入为最小 YAML anti-pattern；输出为可读 README 说明、预期 finding 类别和 anchor/结构测试结果；不要求新增生产 parser。
 6. 修改位置：
-   - `skills/ralph-preset-common/fixtures/README.md`：登记专项 fixture、运行入口和预期边界。
-   - `skills/ralph-preset-common/fixtures/`：计划新增 worktree-reuse、readonly、correction exhaustion、terminal ownership 四个最小负例；实际文件名在 Unit 3 开始前按现有命名与 fixture runner 约定冻结，不能在执行中随意扩展。
-   - `skills/ralph-preset-common/tests/test_skill_anchors.py`：增加稳定 section/anchor/唯一性检查，不做全文 equality；保持脚本直接执行入口。
+   - `skills/ralph-preset-review/fixtures/README.md`：登记通用 capability fixture、运行入口和预期边界。
+   - `skills/ralph-preset-review/fixtures/`：计划新增 worktree-reuse、readonly、correction exhaustion、terminal ownership 四个最小负例。
+   - `skills/ralph-preset-review/tests/test_skill_anchors.py`：增加稳定 section/anchor/唯一性检查，并校验 author/review 中标记为共享的 references 一致；不做全文 equality。
 7. 可依赖能力：U1 finding taxonomy、U2 workflow 条目、现有 fixture schema/README 运行说明。
 8. 禁止依赖未来能力：不编写真实 runtime BDD；不要求 fixture 触发尚未存在的 mechanical lint ID；不把计划 ID 写入通用 fixture 文本。
 9. 验收测试：四个专项 fixture 可加载；每个 fixture 的反例轴可被人工 review protocol 定位；anchors 只检查稳定标题/关键词存在且无重复；既有 fixture 仍保留。
@@ -258,15 +260,15 @@ flowchart LR
 11. 单元测试拆分：fixture YAML parse/load；finding axis presence；anchor uniqueness；existing fixture inventory；README command references。
 12. Red → Green → Refactor：fixture loader/anchor Red → 添加最小 fixture → 让每个 axis 可被 review protocol 识别 → 收敛重复 YAML → 运行旧 fixture 回归。
 13. 最小实现范围：只增加能证明新规则的最小反例；不新增正例全文 preset，不复制 `parallel-forge.yml`。
-14. 集成验证：使用当前 `ralph preset check -H <fixture> --strict --format json`（若 fixture 支持该入口）和 `.venv/bin/python skills/ralph-preset-common/tests/test_skill_anchors.py`；对 review-only finding 必须以人工 protocol 记录，不声称 CLI 自动吐出。
+14. 集成验证：使用当前 `ralph preset check -H <fixture> --strict --format json`（若 fixture 支持该入口）和 `./.venv/bin/python skills/ralph-preset-review/tests/test_skill_anchors.py`；对 review-only finding 必须以人工 protocol 记录，不声称 CLI 自动吐出。
 15. 风险驱动测试：Characterization（旧 fixture）；negative fixture；唯一性扫描；不做 mutation/fuzz，因为输入是受控文档 fixture 且没有 parser 生产边界变化。
 16. 回归范围：所有旧 fixture、`test_skill_anchors.py`、fixture README 的命令和路径；原因是新增 fixture/anchor 可能造成遗漏或命名冲突。
-17. 预期文件变更：`fixtures/README.md`、四个计划新增 fixture（Unit 3 起先确认实际名称）、`tests/test_skill_anchors.py`；Evidence E9,E10。
+17. 预期文件变更：`skills/ralph-preset-review/fixtures/README.md`、四个计划新增 fixture、`skills/ralph-preset-review/tests/test_skill_anchors.py`，以及必要的 author/review reference 同步校验；Evidence E9,E10,E15–E17。
 18. 完成标准：每个新增 fixture 有单一主要反例、预期 finding、运行说明；旧 fixture 不减少；无 skip/only/弱断言。
 19. 停止条件：fixture 无法被现有流程加载；需要新增 parser/dependency；expected finding 只能靠全文 prompt 比较；发现旧 fixture 行为改变。
 20. 风险与注意事项：review-only finding 不会自动出现在 `preset check` JSON；README 必须明确这一点，避免将人工 review 误报为机械 lint 通过。
 
-### U4. 完成文档漂移、CLI 契约和全量质量门禁
+### U4. 完成通用 contract 文档漂移、CLI 契约和全量质量门禁
 
 1. Unit 目标：证明更新后的 operator skill 与当前 CLI、preset/schema、anchor/fixture 测试一致，并形成可独立提交的最终文档变更。
 2. 对应需求与 Scenario：R1–R6；S1–S7；KTD3,KTD7；E1–E12。
@@ -274,8 +276,8 @@ flowchart LR
 4. 当前行为基线：仓库硬规则要求 nextest；已有 fixture README 指定 `ralph preset check`；`test_skill_anchors.py` 是当前 skill contract 测试入口，使用 `__main__` 直接执行而非 pytest 收集。
 5. 输入输出：输入为 U1–U3 完成的 docs/fixture 变更；输出为验证结果、更新后的 Evidence/Decision 记录和 implementation-ready plan completion evidence。
 6. 修改位置：
-   - `skills/ralph-preset-common/references/*.md`：仅修复验证发现的交叉引用/命令 drift。
-   - `skills/ralph-preset-common/fixtures/README.md` 与 anchor test：仅修复验证发现的路径/anchor drift。
+   - author/review 本地 `references/*.md`：仅修复验证发现的交叉引用/命令 drift。
+   - `skills/ralph-preset-review/fixtures/README.md` 与 anchor test：仅修复验证发现的路径/anchor drift。
    - 不修改生产代码；不修改计划残留 runtime 状态。
 7. 可依赖能力：U1–U3 全部已验证能力；仓库已有 `scripts/check-cli-doc-drift.sh`、`./scripts/run-tests.sh`、cargo nextest、Python `.venv` 约束。
 8. 禁止依赖未来能力：不因某条命令缺失而新增 CLI；不把未注册 E2E placeholder 作为完成条件。
@@ -286,7 +288,7 @@ flowchart LR
 13. 最小实现范围：只闭合 U1–U3 的交叉引用和验证，不新增内容型规则。
 14. 集成验证：真实 `builtin:parallel-forge` preset/schema、现有 CLI、skill tests 联合验证；runtime 生产行为不在本计划变更，但 strict lint/scenario smoke 仍需确认未被文档同步误导。
 15. 风险驱动测试：command contract、full regression、旧 fixture characterization；不做新 E2E。
-16. 回归范围：`skills/ralph-preset-common/tests`、所有 fixture、`ralph-cli` preset_lint/presets、`ralph-core` preset_lint、BDD scenarios、`scripts/check-cli-doc-drift.sh`、最终 `./scripts/run-tests.sh`；原因是 operator docs 引用这些公开契约。
+16. 回归范围：author/review references 与 review tests、所有 fixture、`ralph-cli` preset_lint/presets、`ralph-core` preset_lint、BDD scenarios、`scripts/check-cli-doc-drift.sh`、最终 `./scripts/run-tests.sh`；原因是 operator docs、Rust include 和公开契约都已迁移。
 17. 预期文件变更：仅 U1–U3 文件及必要的交叉引用修正；Evidence E9–E12。
 18. 完成标准：所有验证命令通过或有明确非代码环境 blocker；无新增 skip/only；plan evidence/decision 更新；可独立提交。
 19. 停止条件：发现需要生产代码、preset/schema、injected skill 或新增依赖；全量回归暴露与 docs 无关失败；任何关键决策低于 0.85。
@@ -312,12 +314,12 @@ U2 不能先于 U1，因为 author/review 不得各自创造字段语义或 find
 
 | 时机 | 命令 | 目的 | 预期结果 |
 |---|---|---|---|
-| U1/U2 targeted | `./.venv/bin/python skills/ralph-preset-common/tests/test_skill_anchors.py` | 验证稳定 skill anchors | 通过；这是当前脚本的直接执行入口，不依赖 pytest 收集 |
+| U1/U2 targeted | `./.venv/bin/python skills/ralph-preset-review/tests/test_skill_anchors.py` | 验证稳定 contract anchors 与 author/review reference 同步 | 通过；这是迁移后的直接执行入口，不依赖 pytest 收集 |
 | U2 CLI contract | `ralph preset check -H builtin:parallel-forge --strict --format json` | 验证当前 builtin preset 结构化契约 | 无新的 preset finding |
 | U2 schema smoke | `ralph emit --schema <topic> -H builtin:parallel-forge` | 验证当前 topic schema 仍可查询 | 对计划列出的 topic 返回 schema；topic 名必须从当前 schema 读取 |
 | U2 policy smoke | `ralph emit --policy-check --output json <topic> '<payload>' -H builtin:parallel-forge` | 验证文档引用的 policy-check 入口真实存在 | 返回结构化结果；payload 使用当前 schema 最小合法/非法样本 |
-| U3 fixture | `ralph preset check -H skills/ralph-preset-common/fixtures/<fixture>.yml --strict --format json` | 验证 fixture 可加载 | 只接受预期的结构化 finding；review-only finding 不得声称由该命令产生 |
-| U3/U4 skill regression | `./.venv/bin/python -m pytest skills/ralph-preset-common/tests`（先确认 pytest 收集到实际测试；anchor 脚本仍单独直接执行） | 验证可收集的 Python skill tests | 通过；若无收集项，不得把“0 tests”当通过，需记录实际入口 |
+| U3 fixture | `ralph preset check -H skills/ralph-preset-review/fixtures/<fixture>.yml --strict --format json` | 验证通用 capability fixture 可加载 | 只接受预期的结构化 finding；review-only finding 不得声称由该命令产生 |
+| U3/U4 skill regression | `./.venv/bin/python -m pytest skills/ralph-preset-review/tests`（先确认 pytest 收集到实际测试；anchor 脚本仍单独直接执行） | 验证可收集的 review tests | 通过；若无收集项，不得把“0 tests”当通过，需记录实际入口 |
 | U4 docs drift | `scripts/check-cli-doc-drift.sh` | 检查命令/参数文档漂移 | 通过；只有实际修改 agent CLI docs 时才是硬门禁 |
 | U4 package regression | `cargo nextest run -p ralph-cli --bin ralph -- preset_lint` | 验证 preset lint 消费者未被文档改动影响 | 通过 |
 | U4 package regression | `cargo nextest run -p ralph-core -- preset_lint` | 验证 core preset lint baseline | 通过 |
@@ -346,7 +348,8 @@ U2 不能先于 U1，因为 author/review 不得各自创造字段语义或 find
 - reuse、readonly、correction exhaustion、auditor/reporter terminal、artifact-derived handoff 和 accepted authority 均有明确触发条件、动作、证据来源和停止条件。
 - 现有 generic fixtures/anchors 保持通过；新 fixture 不依赖全文 prompt equality。
 - 所有文档人类说明使用中文；技术标识符、文件名、命令和事件名保持真实拼写。
-- 未修改生产代码、preset/schema、injected skill、manifest/index/zsh completion，除非停止条件证明 scope 已变且重新决策达到阈值。
+- 未修改 `parallel-forge` preset/schema、injected skill、manifest/index/zsh completion；允许按 U2 更新 compile-time include、active consumer docs/scripts 和删除 common 目录，这是本计划明确范围。
+- `skills/ralph-loop/` 与 `skills/ralph-preset-common/` 不存在；author/review 各自 references、Rust、diagnosis、fixture 引用均指向独立 skill 目录或已被明确删除；不存在 `skills/ralph-preset-operator-contract/`。
 - 没有新增 skip、only、弱化断言、无解释 snapshot/golden 或 ephemeral `.ralph/review` 残留。
 - 每个 Unit 可独立提交，且最终变更只落在计划文件列出的 operator skill/reference/fixture/test 范围。
 
@@ -356,7 +359,7 @@ U2 不能先于 U1，因为 author/review 不得各自创造字段语义或 find
 |---|---|---|
 | 这是实施计划而不是 Roadmap | 是 | 四个 Unit 都以可观察 operator 行为、真实文件、Red/Green 和回归门禁定义 |
 | Executor 仍需做关键设计决策 | 否 | KTD1–KTD7 已冻结；A1/A2 有 Unit 内验证和停止条件 |
-| 所有文件和接口有代码库证据 | 是 | E1–E14；计划新增 fixture 已明确标为“计划新增” |
+| 所有文件和接口有代码库证据 | 是 | E1–E16；计划新增 contract/fixture 文件已明确标为“计划新增” |
 | 所有关键决策置信度 ≥ 0.85 | 是 | KTD1–KTD7 为 0.94–0.98 |
 | 存在未处理低置信度假设 | 否 | A1/A2 已给出验证动作、失败影响，不作为已确认事实 |
 | 每个 Unit 只有一个可观察行为 | 是 | contract、workflow、fixture、final gate 四个单一纵向切片 |
