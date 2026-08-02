@@ -18,6 +18,7 @@ Use this skill to design and draft Ralph **presets** (builtin or local) with **A
 - **Declaring schema-backed `trigger_context`** (`summary_fields` + `routing_hints` + `known_fields`) for trigger-consuming hats — collapses duplicated payload if/else in `instructions` into a single injected `## TRIGGER CONTEXT` block
 - Writing per-hat `instructions:` in isolated mode (one agent per activation)
 - Producing `preset-author-notes.md` (AAF 五问表 per hat) before review
+- **Per-key-hat scope and opt-in decision confidence gate (Author side)**: forming a Gate Scope table for hats that carry terminal authority, production mutation, phase branching, multi-hat aggregation, critical artifact production, or key handoff responsibility; asking the operator to choose hard/record/off before YAML drafting; recording the chosen metric matrix in `preset-author-notes.md`.
 - **Artifact-First Handoff authoring** (R1–R7): declaring artifact 落盘点、消费方、生命周期责任，并在 Payload Contract 与 AAF 五问表中固化每一份重要信息的落盘判定
 - **模板文件压缩 instructions（软性推荐）**: 当 hat `instructions:` 需要承载大段固定格式文档（报告模板、计划模板、验收清单、SOP 步骤等）时，推荐采用 `presets/templates/` + `ralph preset materialize-artifacts` 机制（参考 `parallel-forge`），把模板内容移出 prompt、改为运行时复制填写，从而压缩上下文。此推荐不强制，但 author 应在 Drafting phase 前通过菜单询问用户是否采用。
 
@@ -64,6 +65,57 @@ Use this skill to design and draft Ralph **presets** (builtin or local) with **A
    - Before drafting, show a concise **Preset Intent Confirmation** containing: goal, operator journey, inputs/source of truth, success condition, blocked condition, allowed mutation scope, required independent review, important artifacts/consumers, non-goals, and author assumptions. Use a final choice menu: **确认并开始设计（recommended） / 返回修改 / 暂停**.
    - For a new preset or any material behavior change (topology, terminal semantics, mutation authority, handoff, recovery), explicit confirmation is mandatory. For a narrow mechanical edit with no behavioral ambiguity, state the inferred intent and proceed without forcing an interview.
    - **If a material ambiguity remains or the user has not confirmed: STOP.** Do not draft YAML/schema and do not present a topology as final.
+
+0d. **Key-hat scope and opt-in decision gate (capability-triggered; operator chooses the mode):**
+   - Author builds a **preliminary scope (初评)** table from capability signals (one row per key-hat before drafting). The reviewer will independently re-derive its own scope later; author's preliminary scope is preserved as a comparison source, not as a binding scope.
+   - Capability triggers that put a hat into Gate Scope (Chinese/English anchors both kept so review can grep either vocabulary):
+
+     | Trigger signal | Plain-language description |
+     | --- | --- |
+     | terminal authority / 终态 authority / 终态 决策 | Hat can publish success, failure, or blocked terminal events. |
+     | production mutation / production code / 修改 生产 | Hat can change production code, tests, or configuration. |
+     | phase branching / 重试 决策 / 阶段 分支 | Hat decides stage transitions, retry, fix, rollback, or stop. |
+     | multi-hat aggregation / 跨 hat 汇总 | Hat merges results from multiple hats into one downstream artifact. |
+     | artifact producer / 关键 artifact | Hat writes a downstream-critical artifact. |
+     | key handoff / 关键 handoff | Hat publishes a handoff whose downstream consumer must rely on the payload to decide. |
+
+   - **Plain passthrough hats** (pure read-only reformatting that makes no decision, no authority, no mutation) are **out of scope**. They are not forced to fill any metric and are not blocked by gate failures.
+   - **Ask the user once per authoring session, after Intent Confirmation and before topology/instructions drafting**:
+
+     1. **启用硬门禁 (hard, recommended when the preset is material)** — apply the thresholds below and treat non-zero `Critical Ambiguities` / `Critical Unverified Assumptions` as a hard block.
+     2. **仅记录不阻塞 (record)** — record the metrics and evidence in the notes; do not block the existing AAF / Payload workflow.
+     3. **不启用 (off)** — do not run this gate at all; existing AAF, Payload Contract and mechanical-lint rules continue unchanged.
+
+     Provide the choice via the same interactive choice menu used in Workflow 0. The user may supply a custom answer; non-observable answers must be grilled into the same three options before drafting.
+   - **Metric applicability matrix (skill chooses; the user does NOT tick boxes per hat)**:
+
+     | Role signals                                | Always-applied metrics                              |
+     | -------------------------------------------- | --------------------------------------------------- |
+     | terminal authority / phase branching / multi-hat aggregation | `Confidence`, `Evidence Coverage`, `Verifiability` |
+     | production mutation (code / test / config)   | `Evidence Coverage`, `Verifiability`, `Impact Certainty` |
+     | artifact producer / key handoff             | `Evidence Coverage`, `Impact Certainty`, `Verifiability` |
+     | every hat that enters Gate Scope            | `Unverified Assumptions` (full list) **plus** the structured subsets `Critical Ambiguities` and `Critical Unverified Assumptions` |
+
+   - **Thresholds (hard gate uses each value independently; no average-score escape hatch)**:
+
+     | Metric                              | Hard-gate threshold                |
+     | ----------------------------------- | ---------------------------------- |
+     | `Confidence`                        | `>= 85`                            |
+     | `Evidence Coverage`                 | `>= 80`                            |
+     | `Verifiability`                     | `>= 80`                            |
+     | `Impact Certainty`                  | `>= 75`                            |
+     | `Critical Ambiguities`              | `= 0`  (structurally enforced: cannot be individually disabled when the gate is enabled) |
+     | `Critical Unverified Assumptions`   | `= 0`  (structurally enforced: cannot be individually disabled when the gate is enabled) |
+   - **Critical checks are structural, not opinion**: when the gate is enabled the two `Critical ...` counts must be filled in for every Gate Scope hat; the agent is not free to mark them N/A. The `off` choice is the only way to skip them entirely; that choice preserves all existing AAF/Payload/lint rules.
+   - **What goes into `preset-author-notes.md`** — append a **Gate Scope** table after the Intent Confirmation:
+
+     ```
+     | Hat | Trigger reason | Applicable metrics | Evidence | Unverified assumptions | Critical ambiguities | Critical unverified assumptions | Mode | Decision |
+     ```
+
+     Evidence is one row per source (`ralph capability inventory --format json` excerpt, `ralph inspect prompt --hat <id> --format json` excerpt, schema field, doc reference, prior plan commit, etc.). `Decision` is `pass | re-confirm | block` per hat — for the `record` mode it must be set but does not block the workflow.
+   - **Reconciliation before pre-review gate**: if topology drafting changed any hat's authority / mutation / handoff, recompute the Gate Scope table before Workflow 5. Notes and YAML scope must not silently diverge.
+   - **Identity rule (capability-triggered, 不得 name-prefix)**: this section is a hard-rule, capability-triggered identification. Author must never identify a key hat by preset or hat name; equal capabilities yield equal rules regardless of preset or hat name.
 
 1. **Classify target:** local (`.ralph/hats/*.yml`) vs builtin (`presets/en/` + `presets/schemas/`). Note `execution_mode` and hat count (4+ → `isolated` mandatory). This step begins only after the Discovery gate passes.
 
@@ -172,6 +224,10 @@ Use this skill to design and draft Ralph **presets** (builtin or local) with **A
 - **`--triggered`:** only use hat ids declared in preset `hats[]`; verify with `ralph emit --policy-check --triggered <hat> …` (see `references/commands.md`).
 - **`task_id` / `task_key` / `step`:** cite `ralph-tools-tasks` red box; never hand-write `task_id`.
 - **Single business event budget** per isolated activation; no business events before terminal emit.
+- **Decision-gate scope is capability-triggered, not name-prefixed.** The Gate Scope table is built from authority / mutation / branching / aggregation / artifact / handoff signals. Two hats with the same capability must receive the same rule regardless of preset or hat name. Hard rule: 禁止 identifying a key hat by preset or hat name.
+- **Decision-gate off mode preserves existing AAF / Payload / lint.** The `off` choice is the only way to opt out entirely; it must not be described as "all review disabled".
+- **Decision-gate record mode does not invent approval.** Under `record`, metrics and evidence are written but never used to claim pass. The real pass criterion remains the existing AAF + Payload + mechanical lint.
+- **Decision-gate hard mode keeps Critical checks structural.** Under `hard`, `Critical Ambiguities = 0` and `Critical Unverified Assumptions = 0` are independently enforced per Gate Scope hat. The agent must not mark either as N/A while the gate is enabled.
 - **Do not duplicate** `ralph-tools*.md` content into instructions.
 
 ## Output Expectations
