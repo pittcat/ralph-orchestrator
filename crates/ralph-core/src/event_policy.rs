@@ -1396,13 +1396,15 @@ pub fn validate_event_with_options<H: HandoffEnvelopeConfigAccess>(
 
     let mut findings = Vec::new();
 
-    // 2026-07-02-004 U7 (R6): close or advance the precheck gate
-    // obligation — prune pending `<X>.proposed` keys when the
-    // gate emits `<X>.rejected` (fail) or bare `<X>` (pass).
+    // 2026-07-02-004 U7 (R6): close the retryable precheck gate
+    // obligation when the gate emits `<X>.rejected`. A passed
+    // candidate stays deduplicated for the lifetime of this loop:
+    // clearing it on `<X>` allowed the same successful
+    // `<X>.proposed` payload to activate the gate again on a later
+    // iteration. A new candidate is still allowed because its
+    // payload produces a different dedup key.
     if let Some(guarded) = topic.strip_suffix(".rejected") {
         state.prune_precheck_proposed_bucket(guarded);
-    } else if !topic.ends_with(".proposed") {
-        state.prune_precheck_proposed_bucket(topic);
     }
 
     // 2026-07-02-004 U7 (R6): duplicate `<X>.proposed` detection.
@@ -7057,6 +7059,46 @@ mod tests {
             validate_event("work.done.proposed", Some(payload), &config, &mut state),
             PolicyDecision::Accept,
             "after gate rejection the same candidate may be re-proposed"
+        );
+    }
+
+    #[test]
+    fn u7_precheck_proposed_remains_deduplicated_after_pass() {
+        let config = test_config();
+        let mut state = PolicyRuntimeState::default();
+        let payload = r#"{"step":"s1"}"#;
+
+        assert_eq!(
+            validate_event("work.done.proposed", Some(payload), &config, &mut state),
+            PolicyDecision::Accept
+        );
+        assert_eq!(
+            validate_event("work.done", Some(payload), &config, &mut state),
+            PolicyDecision::Accept
+        );
+
+        let duplicate = validate_event("work.done.proposed", Some(payload), &config, &mut state);
+        assert!(
+            matches!(
+                duplicate,
+                PolicyDecision::RejectWithResume(PolicyFinding {
+                    violation_type: ViolationType::DuplicateWorkDone { ref key, .. },
+                    ..
+                }) if key == "work.done::{\"step\":\"s1\"}"
+            ),
+            "same candidate must remain deduplicated after gate pass, got {:?}",
+            duplicate
+        );
+
+        assert_eq!(
+            validate_event(
+                "work.done.proposed",
+                Some(r#"{"step":"s2"}"#),
+                &config,
+                &mut state
+            ),
+            PolicyDecision::Accept,
+            "a new payload remains a valid candidate after a prior pass"
         );
     }
 
