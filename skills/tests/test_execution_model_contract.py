@@ -1046,3 +1046,185 @@ def test_author_metadata_mentions_key_hat_scope() -> None:
     ), (
         "ralph-preset-author metadata must reference the opt-in question"
     )
+
+
+# ---------------------------------------------------------------------------
+# U2 (plan 2026-08-02-002): Reviewer independent scope + opt-in decision gate
+# ---------------------------------------------------------------------------
+
+
+def test_review_skill_documents_key_hat_triggers() -> None:
+    """Reviewer SKILL.md must enumerate the same key-hat capability triggers as Author."""
+    text = _read(REVIEW_SKILL)
+    for phrase in KEY_HAT_TRIGGER_PHRASES:
+        assert phrase in text, (
+            f"ralph-preset-review SKILL.md must document key-hat trigger phrase "
+            f"{phrase!r}"
+        )
+
+
+def test_review_skill_documents_independent_scope() -> None:
+    """Reviewer must rebuild key-hat scope independently; forbid inheriting author scope."""
+    text = _read(REVIEW_SKILL)
+    # Must contain the workflow ordering: scope follows topology-only discovery,
+    # scope precedes Per-Hat AAF, and independence is explicit.
+    assert re.search(
+        r"independent[\s_-]*scope|独立\s*scope|独立\s*关键\s*hat|reviewer[\s_-]*independence|independence",
+        text,
+        re.IGNORECASE,
+    ), (
+        "ralph-preset-review SKILL.md must declare reviewer-scoped independent scope"
+    )
+    # Author scope must NOT be admitted as the reviewer's scope source.
+    assert re.search(
+        r"(do\s*not|不得|不\s*应|不\s*允许).{0,80}(inheriting|trust|reusing).{0,80}(author|preset-author-notes)",
+        text,
+        re.IGNORECASE | re.DOTALL,
+    ), (
+        "ralph-preset-review SKILL.md must forbid inheriting or trusting author scope "
+        "as the reviewer's scope"
+    )
+
+
+def test_review_skill_ask_separate_opt_in() -> None:
+    """Reviewer must ask the user the three-mode opt-in again, separately from author."""
+    text = _read(REVIEW_SKILL)
+    for mode in KEY_HAT_GATE_MODES:
+        assert mode in text, (
+            f"ralph-preset-review SKILL.md must list gate mode '{mode}'"
+        )
+    # Reviewer must re-ask; not inherit author's choice.
+    assert re.search(
+        r"(re[\s_-]*?ask|再次\s*询问|重新\s*询问|ask\s+again|own\s+opt[\s_-]*in)",
+        text,
+        re.IGNORECASE,
+    ), (
+        "ralph-preset-review SKILL.md must require a separate opt-in question "
+        "for the reviewer"
+    )
+
+
+def test_review_skill_report_decision_fields() -> None:
+    """Reviewer report must include gate decision fields, scope delta, critical counts."""
+    text = _read(REVIEW_SKILL)
+    # decision_gate must appear in the report structure guidance.
+    assert re.search(
+        r"decision[\s_-]*gate|gate[\s_-]*decision|decision_gate_mode",
+        text,
+        re.IGNORECASE,
+    ), (
+        "ralph-preset-review SKILL.md must require a decision_gate field on the report"
+    )
+    # scope delta / author-vs-reviewer delta must be recorded.
+    assert re.search(
+        r"scope[\s_-]*(delta|gap|差异)|author.{0,40}reviewer.{0,40}(delta|diff|差异)",
+        text,
+        re.IGNORECASE | re.DOTALL,
+    ), (
+        "ralph-preset-review SKILL.md must require an author/reviewer scope delta"
+    )
+    # critical counts are recorded in the report.
+    for critical in ("Critical Ambiguities", "Critical Unverified Assumptions"):
+        assert critical in text, (
+            f"ralph-preset-review SKILL.md must reference {critical} in the report contract"
+        )
+
+
+def test_review_skill_hard_mode_blocks_on_critical() -> None:
+    """Reviewer hard-gate must block on non-zero Critical counts."""
+    text = _read(REVIEW_SKILL)
+    assert re.search(
+        r"(hard|启用\s*硬门禁).{0,200}(Critical|critical).{0,200}(block|阻塞)",
+        text,
+        re.IGNORECASE | re.DOTALL,
+    ), (
+        "ralph-preset-review SKILL.md must state that hard mode blocks on Critical counts"
+    )
+
+
+def test_review_skill_record_mode_does_not_reclassify_p0() -> None:
+    """Reviewer record mode must not downgrade existing P0/P1 findings."""
+    text = _read(REVIEW_SKILL)
+    assert re.search(
+        r"(record|仅\s*记录).{0,200}(P0|P1|既有|existing|prior)",
+        text,
+        re.IGNORECASE | re.DOTALL,
+    ), (
+        "ralph-preset-review SKILL.md must clarify that record mode does not "
+        "downgrade existing P0/P1 findings"
+    )
+
+
+def test_review_skill_off_mode_keeps_existing_audit() -> None:
+    """Reviewer off mode must keep existing AAF / Payload / lint audit intact."""
+    text = _read(REVIEW_SKILL)
+    assert re.search(
+        r"(off|不\s*启用).{0,200}(保留|keep|preserve|不\s*改变|既\s*有|existing)",
+        text,
+        re.IGNORECASE | re.DOTALL,
+    ), (
+        "ralph-preset-review SKILL.md must declare off mode keeps existing audit"
+    )
+
+
+def test_review_skill_no_preset_name_prefix_gate() -> None:
+    """Reviewer key-hat identification must not be gated by preset-name prefix."""
+    text = _read(REVIEW_SKILL)
+    lines = text.splitlines()
+    for idx, line in enumerate(lines):
+        if not any(
+            marker in line
+            for marker in (
+                "terminal authority",
+                "production mutation",
+                "phase branching",
+                "multi-hat aggregation",
+                "artifact producer",
+                "key handoff",
+                "终态 authority",
+                "关键 handoff",
+                "关键 artifact",
+                "production code",
+                "scope",
+                "key hat",
+                "关键 hat",
+            )
+        ):
+            continue
+        if not re.search(
+            r"(?:preset name|preset_name).{0,40}(starts? with|begins? with|prefix)|"
+            r"名称以.{0,40}开头",
+            line,
+            re.IGNORECASE,
+        ):
+            continue
+        if re.search(
+            r"禁止|forbid|not allowed|do not|不得|不允许|hard rule|硬约束|capability",
+            line,
+            re.IGNORECASE,
+        ):
+            continue
+        pytest.fail(
+            f"ralph-preset-review SKILL.md key-hat scope line encodes a "
+            f"preset-name gate:\n  {line}"
+        )
+
+
+def test_review_metadata_mentions_independent_scope() -> None:
+    """Reviewer default prompt must advertise independent key-hat scope to implicit callers."""
+    text = _read(REVIEW_METADATA)
+    assert re.search(
+        r"key[\s_-]*hat|关键\s*hat|关键\s*关键",
+        text,
+        re.IGNORECASE,
+    ), (
+        "ralph-preset-review agents/openai.yaml must reference the key-hat "
+        "scope-first workflow"
+    )
+    assert re.search(
+        r"independent|独立\s*复核|independence",
+        text,
+        re.IGNORECASE,
+    ), (
+        "ralph-preset-review metadata must reference independent scope"
+    )
