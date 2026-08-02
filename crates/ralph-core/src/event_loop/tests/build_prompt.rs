@@ -980,8 +980,8 @@ fn ready_tasks_mixed_owner_marks_only_non_self_read_only_for_coordinator() {
     let mut store = TaskStore::load(&tasks_path).unwrap();
     let self_task = Task::new("dispatch the next wave".to_string(), 1)
         .with_owner_hat(Some("forge-dispatcher".to_string()));
-    let other_task = Task::new("F1 impl".to_string(), 1)
-        .with_owner_hat(Some("executor".to_string()));
+    let other_task =
+        Task::new("F1 impl".to_string(), 1).with_owner_hat(Some("executor".to_string()));
     store.add(self_task);
     store.add(other_task);
     store.save().unwrap();

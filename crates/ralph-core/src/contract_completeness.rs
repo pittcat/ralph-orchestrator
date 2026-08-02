@@ -142,8 +142,8 @@ pub fn inspect_contract_json(resolved: &ResolvedRuntimeConfig, hat_id: &str) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::execution_contracts::ExecutionContractsConfig;
     use crate::config::ExecutionContractRule;
+    use crate::config::execution_contracts::ExecutionContractsConfig;
     use crate::execution_contract::compile;
 
     /// A two-hat config: `worker` emits `work.done`, `coordinator` consumes it
@@ -247,8 +247,14 @@ hats:
         );
         // The emit allow/deny arrays must be present. `worker` publishes
         // `work.done`, so it must appear in emit_allows.
-        assert!(json["emit_allows"].is_array(), "emit_allows must be an array");
-        assert!(json["emit_denies"].is_array(), "emit_denies must be an array");
+        assert!(
+            json["emit_allows"].is_array(),
+            "emit_allows must be an array"
+        );
+        assert!(
+            json["emit_denies"].is_array(),
+            "emit_denies must be an array"
+        );
         let allows: Vec<&str> = json["emit_allows"]
             .as_array()
             .unwrap()

@@ -77,7 +77,11 @@ pub enum ActivationRegistryError {
     /// The activation identity is already active (concurrent slot conflict).
     SlotAlreadyActive { key: ActivationKey },
     /// A stale revision was rejected.
-    StaleRevision { key: ActivationKey, expected: u64, actual: u64 },
+    StaleRevision {
+        key: ActivationKey,
+        expected: u64,
+        actual: u64,
+    },
 }
 
 impl std::fmt::Display for ActivationRegistryError {
@@ -92,7 +96,11 @@ impl std::fmt::Display for ActivationRegistryError {
             Self::SlotAlreadyActive { key } => {
                 write!(f, "activation slot already active: {key}")
             }
-            Self::StaleRevision { key, expected, actual } => {
+            Self::StaleRevision {
+                key,
+                expected,
+                actual,
+            } => {
                 write!(
                     f,
                     "stale revision for {key}: expected r{expected}, found r{actual}",
@@ -148,11 +156,10 @@ impl ActivationRegistry {
     /// Uses a cross-process `FileLock` to serialise reads and writes
     /// across concurrent Ralph processes.
     pub fn open(registry_path: PathBuf) -> Result<Self, ActivationRegistryError> {
-        let file_lock = FileLock::new(&registry_path).map_err(|e| {
-            ActivationRegistryError::IoError {
+        let file_lock =
+            FileLock::new(&registry_path).map_err(|e| ActivationRegistryError::IoError {
                 source: format!("failed to create file lock for registry: {}", e),
-            }
-        })?;
+            })?;
 
         let records = if registry_path.exists() {
             Self::load_from_file_locked(&registry_path, &file_lock)?
@@ -185,14 +192,18 @@ impl ActivationRegistry {
         path: &PathBuf,
         file_lock: &FileLock,
     ) -> Result<HashMap<ActivationKey, ActivationRecord>, ActivationRegistryError> {
-        let _guard = file_lock.shared().map_err(|e| ActivationRegistryError::IoError {
-            source: format!("failed to acquire shared lock: {}", e),
-        })?;
+        let _guard = file_lock
+            .shared()
+            .map_err(|e| ActivationRegistryError::IoError {
+                source: format!("failed to acquire shared lock: {}", e),
+            })?;
         Self::load_from_file(path)
     }
 
     /// Load and parse the registry file. Returns an error on any corruption.
-    fn load_from_file(path: &PathBuf) -> Result<HashMap<ActivationKey, ActivationRecord>, ActivationRegistryError> {
+    fn load_from_file(
+        path: &PathBuf,
+    ) -> Result<HashMap<ActivationKey, ActivationRecord>, ActivationRegistryError> {
         let file = File::open(path).map_err(|e| ActivationRegistryError::IoError {
             source: format!("failed to open registry: {}", e),
         })?;
@@ -207,10 +218,11 @@ impl ActivationRegistry {
             if line.is_empty() {
                 continue;
             }
-            let record: ActivationRecord = serde_json::from_str(line)
-                .map_err(|e| ActivationRegistryError::CorruptRegistry {
+            let record: ActivationRecord = serde_json::from_str(line).map_err(|e| {
+                ActivationRegistryError::CorruptRegistry {
                     source: format!("line {}: {}", line_no + 1, e),
-                })?;
+                }
+            })?;
             // Use the latest record per key (append-only semantics).
             records.insert(record.key.clone(), record);
         }
@@ -225,10 +237,9 @@ impl ActivationRegistry {
         file: &mut File,
         record: &ActivationRecord,
     ) -> Result<(), ActivationRegistryError> {
-        let json =
-            serde_json::to_string(record).map_err(|e| ActivationRegistryError::IoError {
-                source: format!("failed to serialize record: {}", e),
-            })?;
+        let json = serde_json::to_string(record).map_err(|e| ActivationRegistryError::IoError {
+            source: format!("failed to serialize record: {}", e),
+        })?;
         writeln!(file, "{}", json).map_err(|e| ActivationRegistryError::IoError {
             source: format!("failed to write record: {}", e),
         })?;
@@ -252,11 +263,12 @@ impl ActivationRegistry {
         revision: u64,
     ) -> Result<ActivationRecord, ActivationRegistryError> {
         // Hold the exclusive lock for the entire operation.
-        let _guard = self.file_lock.exclusive().map_err(|e| {
-            ActivationRegistryError::IoError {
+        let _guard = self
+            .file_lock
+            .exclusive()
+            .map_err(|e| ActivationRegistryError::IoError {
                 source: format!("failed to acquire exclusive lock: {}", e),
-            }
-        })?;
+            })?;
 
         // Reload state from disk under the exclusive lock so we see any
         // writes from other processes/threads that completed before us.
@@ -268,9 +280,7 @@ impl ActivationRegistry {
         if let Some(existing) = self.records.get(&key) {
             match existing.status {
                 ActivationStatus::Active => {
-                    return Err(ActivationRegistryError::SlotAlreadyActive {
-                        key: key.clone(),
-                    });
+                    return Err(ActivationRegistryError::SlotAlreadyActive { key: key.clone() });
                 }
                 ActivationStatus::Completed | ActivationStatus::Superseded => {
                     // Completed/superseded: check revision.
@@ -317,11 +327,12 @@ impl ActivationRegistry {
         key: &ActivationKey,
         revision: u64,
     ) -> Result<ActivationRecord, ActivationRegistryError> {
-        let _guard = self.file_lock.exclusive().map_err(|e| {
-            ActivationRegistryError::IoError {
+        let _guard = self
+            .file_lock
+            .exclusive()
+            .map_err(|e| ActivationRegistryError::IoError {
                 source: format!("failed to acquire exclusive lock: {}", e),
-            }
-        })?;
+            })?;
 
         // Reload state from disk under the exclusive lock.
         if self.registry_path.exists() {
@@ -330,7 +341,10 @@ impl ActivationRegistry {
 
         let existing = self.records.get(key).ok_or_else(|| {
             // No record found — check if it could be a stale revision.
-            debug!("completion request for unknown activation {key} r{}", revision);
+            debug!(
+                "completion request for unknown activation {key} r{}",
+                revision
+            );
             ActivationRegistryError::StaleRevision {
                 key: key.clone(),
                 expected: revision,
@@ -376,24 +390,26 @@ impl ActivationRegistry {
         key: &ActivationKey,
         revision: u64,
     ) -> Result<ActivationRecord, ActivationRegistryError> {
-        let _guard = self.file_lock.exclusive().map_err(|e| {
-            ActivationRegistryError::IoError {
+        let _guard = self
+            .file_lock
+            .exclusive()
+            .map_err(|e| ActivationRegistryError::IoError {
                 source: format!("failed to acquire exclusive lock: {}", e),
-            }
-        })?;
+            })?;
 
         // Reload state from disk under the exclusive lock.
         if self.registry_path.exists() {
             self.records = Self::load_from_file(&self.registry_path)?;
         }
 
-        let existing = self.records.get(key).ok_or_else(|| {
-            ActivationRegistryError::StaleRevision {
-                key: key.clone(),
-                expected: revision,
-                actual: 0,
-            }
-        })?;
+        let existing =
+            self.records
+                .get(key)
+                .ok_or_else(|| ActivationRegistryError::StaleRevision {
+                    key: key.clone(),
+                    expected: revision,
+                    actual: 0,
+                })?;
 
         if revision <= existing.revision {
             return Err(ActivationRegistryError::StaleRevision {
@@ -531,7 +547,9 @@ mod tests {
     }
 
     fn tmp_path(tmp: &TempDir) -> PathBuf {
-        tmp.path().join(".ralph").join(ACTIVATION_REGISTRY_RELATIVE_PATH)
+        tmp.path()
+            .join(".ralph")
+            .join(ACTIVATION_REGISTRY_RELATIVE_PATH)
     }
 
     #[test]
@@ -557,7 +575,10 @@ mod tests {
 
         // Second activation on the same slot is rejected.
         let err = registry.activate(key.clone(), 2).unwrap_err();
-        assert!(matches!(err, ActivationRegistryError::SlotAlreadyActive { .. }));
+        assert!(matches!(
+            err,
+            ActivationRegistryError::SlotAlreadyActive { .. }
+        ));
     }
 
     #[test]
@@ -583,7 +604,10 @@ mod tests {
 
         // Same slot while Active is SlotAlreadyActive (not StaleRevision).
         let err = registry.activate(key.clone(), 2).unwrap_err();
-        assert!(matches!(err, ActivationRegistryError::SlotAlreadyActive { .. }));
+        assert!(matches!(
+            err,
+            ActivationRegistryError::SlotAlreadyActive { .. }
+        ));
 
         // Complete the activation.
         registry.complete(&key, 2).unwrap();
@@ -656,7 +680,10 @@ mod tests {
         std::fs::write(&path, "not valid json\n").unwrap();
 
         let err = ActivationRegistry::open(path).unwrap_err();
-        assert!(matches!(err, ActivationRegistryError::CorruptRegistry { .. }));
+        assert!(matches!(
+            err,
+            ActivationRegistryError::CorruptRegistry { .. }
+        ));
     }
 
     #[test]

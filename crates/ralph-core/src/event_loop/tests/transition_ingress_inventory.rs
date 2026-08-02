@@ -58,75 +58,343 @@ enum IngressDisposition {
 #[allow(dead_code)]
 const PRODUCTION_PUBLISH_INVENTORY: &[(&str, IngressDisposition, &str)] = &[
     // ---- event_loop/mod.rs (63 call sites as of baseline 57b2e804) ----
-    ("event_loop/mod.rs:1901", IngressDisposition::DiagnosticObservation, "task.resume.misrouted"),
-    ("event_loop/mod.rs:1970", IngressDisposition::Recovery, "fix.exhausted"),
-    ("event_loop/mod.rs:2040", IngressDisposition::DiagnosticObservation, "event.post_terminal.rejected"),
-    ("event_loop/mod.rs:3158", IngressDisposition::Recovery, "task.resume"),
-    ("event_loop/mod.rs:3613", IngressDisposition::Business, "loop start_event (orchestrator-published)"),
-    ("event_loop/mod.rs:4090", IngressDisposition::Recovery, "plan.blocked (dimension_reviewers_failed_to_converge)"),
-    ("event_loop/mod.rs:4513", IngressDisposition::DiagnosticObservation, "event.recovery.routing_blocked"),
-    ("event_loop/mod.rs:4625", IngressDisposition::Recovery, "task.resume (no_event_fallback)"),
-    ("event_loop/mod.rs:5136", IngressDisposition::LoopControl, "system_events (orchestrator-published)"),
-    ("event_loop/mod.rs:6325", IngressDisposition::Recovery, "plan.blocked (step_handoff gate)"),
-    ("event_loop/mod.rs:6334", IngressDisposition::DiagnosticObservation, "event.step_handoff.gate_rejected"),
-    ("event_loop/mod.rs:6495", IngressDisposition::Recovery, "blocked (recovery action)"),
-    ("event_loop/mod.rs:6534", IngressDisposition::Recovery, "blocked (recovery action, alt path)"),
-    ("event_loop/mod.rs:8184", IngressDisposition::DiagnosticObservation, "diagnostic (default_publishes_pre)"),
-    ("event_loop/mod.rs:8304", IngressDisposition::Business, "default_event (default_publishes)"),
-    ("event_loop/mod.rs:8544", IngressDisposition::Recovery, "task.resume (esc.safe_target)"),
-    ("event_loop/mod.rs:8581", IngressDisposition::Business, "loop.stalled (consumer-cumulative)"),
-    ("event_loop/mod.rs:8816", IngressDisposition::DiagnosticObservation, "violation (scope-violation)"),
-    ("event_loop/mod.rs:9301", IngressDisposition::DiagnosticObservation, "event.malformed"),
-    ("event_loop/mod.rs:9476", IngressDisposition::DiagnosticObservation, "violation (isolated_anonymous)"),
-    ("event_loop/mod.rs:9510", IngressDisposition::DiagnosticObservation, "violation (isolated_anonymous, alt)"),
-    ("event_loop/mod.rs:9519", IngressDisposition::Recovery, "task.resume (isolated path)"),
-    ("event_loop/mod.rs:9562", IngressDisposition::DiagnosticObservation, "violation (isolated, alt)"),
-    ("event_loop/mod.rs:9782", IngressDisposition::Business, "breaker_event"),
-    ("event_loop/mod.rs:9854", IngressDisposition::Recovery, "task.resume (retry via contract)"),
-    ("event_loop/mod.rs:9890", IngressDisposition::Recovery, "task.resume (out-of-scope)"),
-    ("event_loop/mod.rs:10109", IngressDisposition::DiagnosticObservation, "diagnostic"),
-    ("event_loop/mod.rs:10211", IngressDisposition::DiagnosticObservation, "diagnostic"),
-    ("event_loop/mod.rs:10273", IngressDisposition::DiagnosticObservation, "violation"),
-    ("event_loop/mod.rs:10362", IngressDisposition::DiagnosticObservation, "diagnostic"),
-    ("event_loop/mod.rs:10407", IngressDisposition::DiagnosticObservation, "diagnostic"),
-    ("event_loop/mod.rs:10417", IngressDisposition::DiagnosticObservation, "diagnostic"),
-    ("event_loop/mod.rs:10427", IngressDisposition::DiagnosticObservation, "diagnostic"),
-    ("event_loop/mod.rs:10509", IngressDisposition::Recovery, "task.resume (no_safe_target)"),
-    ("event_loop/mod.rs:10832", IngressDisposition::DiagnosticObservation, "event.policy_warning"),
-    ("event_loop/mod.rs:11395", IngressDisposition::Recovery, "blocked (task_not_terminal)"),
-    ("event_loop/mod.rs:11452", IngressDisposition::Recovery, "task.resume (retry_event)"),
-    ("event_loop/mod.rs:11475", IngressDisposition::DiagnosticObservation, "diagnostic_event"),
-    ("event_loop/mod.rs:11508", IngressDisposition::LoopControl, "guidance_event (human.guidance)"),
-    ("event_loop/mod.rs:11683", IngressDisposition::Business, "publish_event facade entry"),
-    ("event_loop/mod.rs:11733", IngressDisposition::DiagnosticObservation, "diagnostic"),
-    ("event_loop/mod.rs:11757", IngressDisposition::DiagnosticObservation, "diagnostic"),
-    ("event_loop/mod.rs:11906", IngressDisposition::Business, "publish_event (U1 emit gate facade)"),
-    ("event_loop/mod.rs:11923", IngressDisposition::Business, "publish_event (facade, alt)"),
-    ("event_loop/mod.rs:11934", IngressDisposition::Business, "publish_event (facade, alt 2)"),
-    ("event_loop/mod.rs:11945", IngressDisposition::Business, "publish_event (facade, alt 3)"),
-    ("event_loop/mod.rs:11971", IngressDisposition::Business, "publish_event (facade, alt 4)"),
-    ("event_loop/mod.rs:11982", IngressDisposition::Business, "publish_event (facade, alt 5)"),
-    ("event_loop/mod.rs:11993", IngressDisposition::Business, "publish_event (facade, alt 6)"),
-    ("event_loop/mod.rs:12345", IngressDisposition::Business, "abandoned_event"),
-    ("event_loop/mod.rs:12625", IngressDisposition::Business, "event (system ingress)"),
-    ("event_loop/mod.rs:13161", IngressDisposition::Business, "system_events (post-process_output)"),
-    ("event_loop/mod.rs:13181", IngressDisposition::Recovery, "blocked (exhausted escalation)"),
-    ("event_loop/mod.rs:13345", IngressDisposition::DiagnosticObservation, "diagnostic"),
-    ("event_loop/mod.rs:13416", IngressDisposition::DiagnosticObservation, "event.policy_warning"),
-    ("event_loop/mod.rs:13621", IngressDisposition::LoopControl, "event (loop.terminate / system)"),
-    ("event_loop/mod.rs:13661", IngressDisposition::DiagnosticObservation, "violation"),
-    ("event_loop/mod.rs:13733", IngressDisposition::Business, "event (system ingress)"),
-    ("event_loop/mod.rs:14041", IngressDisposition::Business, "system event (init)"),
-    ("event_loop/mod.rs:14430", IngressDisposition::Recovery, "task.resume (U7 repair)"),
-    ("event_loop/mod.rs:14443", IngressDisposition::Recovery, "blocked (escalation)"),
-    ("event_loop/mod.rs:14474", IngressDisposition::Recovery, "blocked (escalation)"),
+    (
+        "event_loop/mod.rs:1901",
+        IngressDisposition::DiagnosticObservation,
+        "task.resume.misrouted",
+    ),
+    (
+        "event_loop/mod.rs:1970",
+        IngressDisposition::Recovery,
+        "fix.exhausted",
+    ),
+    (
+        "event_loop/mod.rs:2040",
+        IngressDisposition::DiagnosticObservation,
+        "event.post_terminal.rejected",
+    ),
+    (
+        "event_loop/mod.rs:3158",
+        IngressDisposition::Recovery,
+        "task.resume",
+    ),
+    (
+        "event_loop/mod.rs:3613",
+        IngressDisposition::Business,
+        "loop start_event (orchestrator-published)",
+    ),
+    (
+        "event_loop/mod.rs:4090",
+        IngressDisposition::Recovery,
+        "plan.blocked (dimension_reviewers_failed_to_converge)",
+    ),
+    (
+        "event_loop/mod.rs:4513",
+        IngressDisposition::DiagnosticObservation,
+        "event.recovery.routing_blocked",
+    ),
+    (
+        "event_loop/mod.rs:4625",
+        IngressDisposition::Recovery,
+        "task.resume (no_event_fallback)",
+    ),
+    (
+        "event_loop/mod.rs:5136",
+        IngressDisposition::LoopControl,
+        "system_events (orchestrator-published)",
+    ),
+    (
+        "event_loop/mod.rs:6325",
+        IngressDisposition::Recovery,
+        "plan.blocked (step_handoff gate)",
+    ),
+    (
+        "event_loop/mod.rs:6334",
+        IngressDisposition::DiagnosticObservation,
+        "event.step_handoff.gate_rejected",
+    ),
+    (
+        "event_loop/mod.rs:6495",
+        IngressDisposition::Recovery,
+        "blocked (recovery action)",
+    ),
+    (
+        "event_loop/mod.rs:6534",
+        IngressDisposition::Recovery,
+        "blocked (recovery action, alt path)",
+    ),
+    (
+        "event_loop/mod.rs:8184",
+        IngressDisposition::DiagnosticObservation,
+        "diagnostic (default_publishes_pre)",
+    ),
+    (
+        "event_loop/mod.rs:8304",
+        IngressDisposition::Business,
+        "default_event (default_publishes)",
+    ),
+    (
+        "event_loop/mod.rs:8544",
+        IngressDisposition::Recovery,
+        "task.resume (esc.safe_target)",
+    ),
+    (
+        "event_loop/mod.rs:8581",
+        IngressDisposition::Business,
+        "loop.stalled (consumer-cumulative)",
+    ),
+    (
+        "event_loop/mod.rs:8816",
+        IngressDisposition::DiagnosticObservation,
+        "violation (scope-violation)",
+    ),
+    (
+        "event_loop/mod.rs:9301",
+        IngressDisposition::DiagnosticObservation,
+        "event.malformed",
+    ),
+    (
+        "event_loop/mod.rs:9476",
+        IngressDisposition::DiagnosticObservation,
+        "violation (isolated_anonymous)",
+    ),
+    (
+        "event_loop/mod.rs:9510",
+        IngressDisposition::DiagnosticObservation,
+        "violation (isolated_anonymous, alt)",
+    ),
+    (
+        "event_loop/mod.rs:9519",
+        IngressDisposition::Recovery,
+        "task.resume (isolated path)",
+    ),
+    (
+        "event_loop/mod.rs:9562",
+        IngressDisposition::DiagnosticObservation,
+        "violation (isolated, alt)",
+    ),
+    (
+        "event_loop/mod.rs:9782",
+        IngressDisposition::Business,
+        "breaker_event",
+    ),
+    (
+        "event_loop/mod.rs:9854",
+        IngressDisposition::Recovery,
+        "task.resume (retry via contract)",
+    ),
+    (
+        "event_loop/mod.rs:9890",
+        IngressDisposition::Recovery,
+        "task.resume (out-of-scope)",
+    ),
+    (
+        "event_loop/mod.rs:10109",
+        IngressDisposition::DiagnosticObservation,
+        "diagnostic",
+    ),
+    (
+        "event_loop/mod.rs:10211",
+        IngressDisposition::DiagnosticObservation,
+        "diagnostic",
+    ),
+    (
+        "event_loop/mod.rs:10273",
+        IngressDisposition::DiagnosticObservation,
+        "violation",
+    ),
+    (
+        "event_loop/mod.rs:10362",
+        IngressDisposition::DiagnosticObservation,
+        "diagnostic",
+    ),
+    (
+        "event_loop/mod.rs:10407",
+        IngressDisposition::DiagnosticObservation,
+        "diagnostic",
+    ),
+    (
+        "event_loop/mod.rs:10417",
+        IngressDisposition::DiagnosticObservation,
+        "diagnostic",
+    ),
+    (
+        "event_loop/mod.rs:10427",
+        IngressDisposition::DiagnosticObservation,
+        "diagnostic",
+    ),
+    (
+        "event_loop/mod.rs:10509",
+        IngressDisposition::Recovery,
+        "task.resume (no_safe_target)",
+    ),
+    (
+        "event_loop/mod.rs:10832",
+        IngressDisposition::DiagnosticObservation,
+        "event.policy_warning",
+    ),
+    (
+        "event_loop/mod.rs:11395",
+        IngressDisposition::Recovery,
+        "blocked (task_not_terminal)",
+    ),
+    (
+        "event_loop/mod.rs:11452",
+        IngressDisposition::Recovery,
+        "task.resume (retry_event)",
+    ),
+    (
+        "event_loop/mod.rs:11475",
+        IngressDisposition::DiagnosticObservation,
+        "diagnostic_event",
+    ),
+    (
+        "event_loop/mod.rs:11508",
+        IngressDisposition::LoopControl,
+        "guidance_event (human.guidance)",
+    ),
+    (
+        "event_loop/mod.rs:11683",
+        IngressDisposition::Business,
+        "publish_event facade entry",
+    ),
+    (
+        "event_loop/mod.rs:11733",
+        IngressDisposition::DiagnosticObservation,
+        "diagnostic",
+    ),
+    (
+        "event_loop/mod.rs:11757",
+        IngressDisposition::DiagnosticObservation,
+        "diagnostic",
+    ),
+    (
+        "event_loop/mod.rs:11906",
+        IngressDisposition::Business,
+        "publish_event (U1 emit gate facade)",
+    ),
+    (
+        "event_loop/mod.rs:11923",
+        IngressDisposition::Business,
+        "publish_event (facade, alt)",
+    ),
+    (
+        "event_loop/mod.rs:11934",
+        IngressDisposition::Business,
+        "publish_event (facade, alt 2)",
+    ),
+    (
+        "event_loop/mod.rs:11945",
+        IngressDisposition::Business,
+        "publish_event (facade, alt 3)",
+    ),
+    (
+        "event_loop/mod.rs:11971",
+        IngressDisposition::Business,
+        "publish_event (facade, alt 4)",
+    ),
+    (
+        "event_loop/mod.rs:11982",
+        IngressDisposition::Business,
+        "publish_event (facade, alt 5)",
+    ),
+    (
+        "event_loop/mod.rs:11993",
+        IngressDisposition::Business,
+        "publish_event (facade, alt 6)",
+    ),
+    (
+        "event_loop/mod.rs:12345",
+        IngressDisposition::Business,
+        "abandoned_event",
+    ),
+    (
+        "event_loop/mod.rs:12625",
+        IngressDisposition::Business,
+        "event (system ingress)",
+    ),
+    (
+        "event_loop/mod.rs:13161",
+        IngressDisposition::Business,
+        "system_events (post-process_output)",
+    ),
+    (
+        "event_loop/mod.rs:13181",
+        IngressDisposition::Recovery,
+        "blocked (exhausted escalation)",
+    ),
+    (
+        "event_loop/mod.rs:13345",
+        IngressDisposition::DiagnosticObservation,
+        "diagnostic",
+    ),
+    (
+        "event_loop/mod.rs:13416",
+        IngressDisposition::DiagnosticObservation,
+        "event.policy_warning",
+    ),
+    (
+        "event_loop/mod.rs:13621",
+        IngressDisposition::LoopControl,
+        "event (loop.terminate / system)",
+    ),
+    (
+        "event_loop/mod.rs:13661",
+        IngressDisposition::DiagnosticObservation,
+        "violation",
+    ),
+    (
+        "event_loop/mod.rs:13733",
+        IngressDisposition::Business,
+        "event (system ingress)",
+    ),
+    (
+        "event_loop/mod.rs:14041",
+        IngressDisposition::Business,
+        "system event (init)",
+    ),
+    (
+        "event_loop/mod.rs:14430",
+        IngressDisposition::Recovery,
+        "task.resume (U7 repair)",
+    ),
+    (
+        "event_loop/mod.rs:14443",
+        IngressDisposition::Recovery,
+        "blocked (escalation)",
+    ),
+    (
+        "event_loop/mod.rs:14474",
+        IngressDisposition::Recovery,
+        "blocked (escalation)",
+    ),
     // ---- correction/mod.rs: one production site ----
-    ("correction/mod.rs:740", IngressDisposition::Recovery, "blocked (correction escalation)"),
+    (
+        "correction/mod.rs:740",
+        IngressDisposition::Recovery,
+        "blocked (correction escalation)",
+    ),
     // ---- run_stall_detector_with_authority_advance (E9 local wrapper) ----
-    ("event_loop/mod.rs:14659", IngressDisposition::Recovery, "blocked_topic (stall fail-close)"),
-    ("event_loop/mod.rs:14711", IngressDisposition::Business, "loop.stalled (waking steward)"),
-    ("event_loop/mod.rs:14754", IngressDisposition::Recovery, "blocked (U5 escalation)"),
-    ("event_loop/mod.rs:14788", IngressDisposition::Business, "loop.stalled (escalation)"),
+    (
+        "event_loop/mod.rs:14659",
+        IngressDisposition::Recovery,
+        "blocked_topic (stall fail-close)",
+    ),
+    (
+        "event_loop/mod.rs:14711",
+        IngressDisposition::Business,
+        "loop.stalled (waking steward)",
+    ),
+    (
+        "event_loop/mod.rs:14754",
+        IngressDisposition::Recovery,
+        "blocked (U5 escalation)",
+    ),
+    (
+        "event_loop/mod.rs:14788",
+        IngressDisposition::Business,
+        "loop.stalled (escalation)",
+    ),
 ];
 
 // Total: 65 production sites (event_loop/mod.rs: 63 + correction/mod.rs: 1 + 4 in
@@ -298,7 +566,10 @@ fn u1_characterize_publish_event_routes_through_facade() {
         cap_clone.lock().unwrap().push(event.topic.to_string());
     });
 
-    let event = Event::new("work.done", r#"{"plan_name":"p","plan_path":"/p","task_id":"t1","task_key":"k1","step":"step-01"}"#);
+    let event = Event::new(
+        "work.done",
+        r#"{"plan_name":"p","plan_path":"/p","task_id":"t1","task_key":"k1","step":"step-01"}"#,
+    );
     event_loop.publish_event(event);
 
     let topics = captured.lock().unwrap().clone();

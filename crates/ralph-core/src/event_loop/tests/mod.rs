@@ -26,10 +26,10 @@ mod ephemeral_isolation_integration;
 mod event_filter;
 // 2026-07-30-002 plan U1 (R1/R2): fail-close blocked-topic
 // derivation + escape step resolution.
-mod fail_close_flow_authority;
 mod event_policy;
 mod execution_contract;
 mod execution_contract_commit_boundary;
+mod fail_close_flow_authority;
 mod handoff_dispatch;
 mod hat_backend;
 mod hat_exhaustion;
@@ -115,6 +115,12 @@ mod wave_recovery_timeout;
 mod wave_results;
 mod workflow_guard;
 
+/// U1 (2026-07-30-004 refactor-unified-execution-contract-plan):
+/// freeze the production `EventBus::publish` ingress
+/// inventory and the JSONL/CLI/system side-effect ordering
+/// that U4 must replace. See
+/// `transition_ingress_inventory.rs` for the full list.
+mod transition_ingress_inventory;
 /// U10 (2026-06-27-002 plan): `VerdictGate` is the
 /// sole termination dispatcher. The stage pipeline's
 /// `is_terminal` probe writes a loop-termination
@@ -168,9 +174,3 @@ mod u8_legacy_relocate_and_close;
 /// from schema + runtime. Only `LOOP_COMPLETE`
 /// terminates the dispatcher.
 mod u9_verdict_legacy_retire;
-/// U1 (2026-07-30-004 refactor-unified-execution-contract-plan):
-/// freeze the production `EventBus::publish` ingress
-/// inventory and the JSONL/CLI/system side-effect ordering
-/// that U4 must replace. See
-/// `transition_ingress_inventory.rs` for the full list.
-mod transition_ingress_inventory;

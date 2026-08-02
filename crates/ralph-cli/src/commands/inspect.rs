@@ -489,8 +489,7 @@ pub async fn inspect_loop_command(
     }
 
     // U3 (plan 2026-07-30-004): load the activation registry summary.
-    let (activation_registry, activation_warning) =
-        load_activation_registry_for_inspect(&root);
+    let (activation_registry, activation_warning) = load_activation_registry_for_inspect(&root);
     if let Some(w) = activation_warning {
         warnings.push(w);
     }
@@ -1402,14 +1401,11 @@ fn load_activation_registry_for_inspect(
                         ralph_core::execution_contract::ActivationRecord,
                     >(line)
                     {
-                        if record.status
-                            == ralph_core::execution_contract::ActivationStatus::Active
+                        if record.status == ralph_core::execution_contract::ActivationStatus::Active
                         {
                             active_count += 1;
                         }
-                        let entry = per_loop
-                            .entry(record.key.loop_id.clone())
-                            .or_insert(0);
+                        let entry = per_loop.entry(record.key.loop_id.clone()).or_insert(0);
                         if record.revision > *entry {
                             *entry = record.revision;
                         }
@@ -1435,9 +1431,7 @@ fn load_activation_registry_for_inspect(
         }
         Err(e) => (
             None,
-            Some(format!(
-                "activation registry is corrupt or unreadable: {e}"
-            )),
+            Some(format!("activation registry is corrupt or unreadable: {e}")),
         ),
     }
 }

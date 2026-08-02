@@ -17,12 +17,12 @@
 
 #[cfg(feature = "supervisor-db")]
 use ralph_core::supervisor::RusqliteSupervisorStore;
+#[cfg(feature = "supervisor-db")]
+use ralph_core::supervisor::WaveKind;
 use ralph_core::supervisor::{
     EmissionReservation, EmissionState, InMemorySupervisorStore, SupervisorStore,
     SupervisorStoreError,
 };
-#[cfg(feature = "supervisor-db")]
-use ralph_core::supervisor::WaveKind;
 use std::sync::atomic::{AtomicU64, Ordering};
 #[cfg(feature = "supervisor-db")]
 use tempfile::TempDir;

@@ -153,9 +153,10 @@ integrator -> verifier -> reporter). Signal LOOP_COMPLETE once the chain settles
     ) -> Result<TestResult, ScenarioError> {
         let start = std::time::Instant::now();
 
-        let execution = executor.run(config).await.map_err(|e| {
-            ScenarioError::ExecutionError(format!("ralph execution failed: {e}"))
-        })?;
+        let execution = executor
+            .run(config)
+            .await
+            .map_err(|e| ScenarioError::ExecutionError(format!("ralph execution failed: {e}")))?;
 
         let duration = start.elapsed();
 
@@ -169,7 +170,11 @@ integrator -> verifier -> reporter). Signal LOOP_COMPLETE once the chain settles
             Assertions::exit_code_success_or_limit(&execution),
             Assertions::no_timeout(&execution),
             self.reporter_terminal_reached(&execution),
-            self.chain_step_present(&execution, "forge.plan.ready", "planner emits forge.plan.ready"),
+            self.chain_step_present(
+                &execution,
+                "forge.plan.ready",
+                "planner emits forge.plan.ready",
+            ),
             self.non_empty_ready_wave_dispatched(&execution),
             self.chain_step_present(
                 &execution,
@@ -202,7 +207,10 @@ impl ParallelForgeDispatchContractScenario {
             || result.stdout.contains("LOOP_COMPLETE");
         super::AssertionBuilder::new("Reporter reaches terminal (LOOP_COMPLETE)")
             .expected("termination via LOOP_COMPLETE")
-            .actual(format!("termination_reason={:?}", result.termination_reason))
+            .actual(format!(
+                "termination_reason={:?}",
+                result.termination_reason
+            ))
             .build()
             .with_passed(reached)
     }
@@ -214,9 +222,7 @@ impl ParallelForgeDispatchContractScenario {
     ) -> crate::models::Assertion {
         let token = first_ready_units_token(&result.stdout);
         let dispatched = result.stdout.contains("forge.wave.worktrees.ready")
-            && token
-                .as_ref()
-                .is_some_and(|t| !t.is_empty() && t != "[]");
+            && token.as_ref().is_some_and(|t| !t.is_empty() && t != "[]");
         super::AssertionBuilder::new("Non-empty ready wave dispatched")
             .expected("forge.wave.worktrees.ready with non-empty ready_units")
             .actual(match &token {
@@ -365,7 +371,10 @@ mod tests {
             "must exempt LOOP_COMPLETE from the dot-case lint"
         );
         assert!(content.contains("completion_promise: \"LOOP_COMPLETE\""));
-        assert!(content.contains("enabled: false"), "tasks/memories disabled");
+        assert!(
+            content.contains("enabled: false"),
+            "tasks/memories disabled"
+        );
         assert_eq!(config.max_iterations, 3);
     }
 
@@ -376,7 +385,10 @@ mod tests {
             Some("U1".to_string())
         );
         assert_eq!(first_ready_units_token("no marker here"), None);
-        assert_eq!(first_ready_units_token("ready_units= end"), Some(String::new()));
+        assert_eq!(
+            first_ready_units_token("ready_units= end"),
+            Some(String::new())
+        );
     }
 
     #[test]
@@ -421,13 +433,19 @@ mod tests {
         // non-empty ready wave, and that the bus ledger has ready-wave events.
         let file = std::fs::File::open(cassette_path()).expect("cassette exists");
         let player = SessionPlayer::from_reader(BufReader::new(file)).expect("cassette parses");
-        let text = player.collect_terminal_output().expect("terminal output decodes");
+        let text = player
+            .collect_terminal_output()
+            .expect("terminal output decodes");
 
         assert!(
             text.contains("LOOP_COMPLETE"),
             "reporter must reach the LOOP_COMPLETE terminal"
         );
-        for marker in ["forge.plan.ready", "forge.wave.worktrees.ready", "forge.full.verified"] {
+        for marker in [
+            "forge.plan.ready",
+            "forge.wave.worktrees.ready",
+            "forge.full.verified",
+        ] {
             assert!(text.contains(marker), "chain missing {marker}");
         }
         assert!(
@@ -454,15 +472,17 @@ mod tests {
     /// non-empty ready wave.
     #[tokio::test]
     async fn u13_parallel_forge_e2e_reaches_reporter_terminal() {
-        let workspace = std::env::temp_dir().join(format!(
-            "ralph-e2e-u13-pf-{}",
-            std::process::id()
-        ));
+        let workspace =
+            std::env::temp_dir().join(format!("ralph-e2e-u13-pf-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&workspace);
         std::fs::create_dir_all(workspace.join(".agent")).expect("create workspace");
 
         let cassette = cassette_path();
-        assert!(cassette.exists(), "cassette must exist at {}", cassette.display());
+        assert!(
+            cassette.exists(),
+            "cassette must exist at {}",
+            cassette.display()
+        );
 
         // Same effective config the runner's configure_mock_mode produces in the
         // CLI path (custom backend -> mock-cli -> cassette, prompt via stdin),
@@ -483,12 +503,13 @@ mod tests {
             timeout: Duration::from_secs(120),
             extra_args: vec![],
         };
-        let executor = RalphExecutor::with_binary(
-            workspace.clone(),
-            crate::executor::resolve_ralph_binary(),
-        );
+        let executor =
+            RalphExecutor::with_binary(workspace.clone(), crate::executor::resolve_ralph_binary());
 
-        let result = scenario.run(&executor, &config).await.expect("scenario runs");
+        let result = scenario
+            .run(&executor, &config)
+            .await
+            .expect("scenario runs");
         let _ = std::fs::remove_dir_all(&workspace);
 
         assert!(

@@ -129,7 +129,9 @@ impl RecoveryIntentStore {
     /// intents are loaded (under a shared lock); a corrupt file returns
     /// [`RecoveryError::Corrupt`].
     pub fn open(workspace: &Path) -> Result<Self, RecoveryError> {
-        let path = workspace.join(".ralph").join(RECOVERY_INTENTS_RELATIVE_PATH);
+        let path = workspace
+            .join(".ralph")
+            .join(RECOVERY_INTENTS_RELATIVE_PATH);
         let file_lock = FileLock::new(&path).map_err(|e| RecoveryError::IoError {
             source: format!("failed to create file lock for recovery store: {e}"),
         })?;
@@ -154,9 +156,12 @@ impl RecoveryIntentStore {
     /// The write is flushed to disk under an exclusive lock before returning, so
     /// the intent is durable across restarts immediately.
     pub fn record(&mut self, intent: RecoveryIntent) -> Result<(), RecoveryError> {
-        let _guard = self.file_lock.exclusive().map_err(|e| RecoveryError::IoError {
-            source: format!("failed to acquire exclusive lock: {e}"),
-        })?;
+        let _guard = self
+            .file_lock
+            .exclusive()
+            .map_err(|e| RecoveryError::IoError {
+                source: format!("failed to acquire exclusive lock: {e}"),
+            })?;
         // Reload under the exclusive lock so concurrent writes are preserved.
         self.intents = Self::load_from_file(&self.path)?;
         self.intents.insert(intent.intent_id.clone(), intent);
@@ -178,9 +183,12 @@ impl RecoveryIntentStore {
     /// `BudgetExhausted` (idempotently, never panicking) and stay blocked
     /// across restarts — the budget does not reset.
     pub fn increment_attempt(&mut self, intent_id: &str) -> Result<u32, RecoveryError> {
-        let _guard = self.file_lock.exclusive().map_err(|e| RecoveryError::IoError {
-            source: format!("failed to acquire exclusive lock: {e}"),
-        })?;
+        let _guard = self
+            .file_lock
+            .exclusive()
+            .map_err(|e| RecoveryError::IoError {
+                source: format!("failed to acquire exclusive lock: {e}"),
+            })?;
         // Reload under the exclusive lock so concurrent writes are preserved.
         self.intents = Self::load_from_file(&self.path)?;
 
@@ -324,7 +332,10 @@ mod tests {
         let mut store = RecoveryIntentStore::open(workspace).unwrap();
 
         let new_count = store.increment_attempt("intent-1").unwrap();
-        assert_eq!(new_count, 3, "budget continues: 2 + 1 = 3, not a reset to 1");
+        assert_eq!(
+            new_count, 3,
+            "budget continues: 2 + 1 = 3, not a reset to 1"
+        );
 
         let err = store.increment_attempt("intent-1").unwrap_err();
         assert_eq!(
@@ -411,7 +422,9 @@ mod tests {
     fn u11_corrupt_store_fails_closed() {
         let tmp = TempDir::new().unwrap();
         let workspace = tmp.path();
-        let path = workspace.join(".ralph").join(RECOVERY_INTENTS_RELATIVE_PATH);
+        let path = workspace
+            .join(".ralph")
+            .join(RECOVERY_INTENTS_RELATIVE_PATH);
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(&path, "not valid json\n").unwrap();
 

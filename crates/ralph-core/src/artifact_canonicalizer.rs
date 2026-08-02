@@ -86,7 +86,10 @@ impl fmt::Display for ArtifactError {
                 "artifact is {size} bytes, exceeding the {limit}-byte (1 MiB) limit"
             ),
             ArtifactError::TooManyUnits { count, limit } => {
-                write!(f, "artifact declares {count} units, exceeding the limit of {limit}")
+                write!(
+                    f,
+                    "artifact declares {count} units, exceeding the limit of {limit}"
+                )
             }
             ArtifactError::TooManyEdges { count, limit } => write!(
                 f,
@@ -150,8 +153,9 @@ pub fn canonicalize(raw: &[u8]) -> Result<CanonicalArtifact, ArtifactError> {
     }
 
     // 2. Parse.
-    let value: Value = serde_yaml::from_slice(raw)
-        .map_err(|e| ArtifactError::ParseError { source: e.to_string() })?;
+    let value: Value = serde_yaml::from_slice(raw).map_err(|e| ArtifactError::ParseError {
+        source: e.to_string(),
+    })?;
 
     // 3. Count and bound Units / edges.
     let unit_count = count_units(&value);
@@ -174,7 +178,9 @@ pub fn canonicalize(raw: &[u8]) -> Result<CanonicalArtifact, ArtifactError> {
     let normalized = normalize(&value);
     let canonical_bytes = serde_yaml::to_string(&normalized)
         .map(String::into_bytes)
-        .map_err(|e| ArtifactError::ParseError { source: e.to_string() })?;
+        .map_err(|e| ArtifactError::ParseError {
+            source: e.to_string(),
+        })?;
 
     // 5. Digest of the canonical bytes.
     let mut hasher = Sha256::new();
@@ -278,7 +284,9 @@ fn has_yaml_anchor_or_alias(raw: &[u8]) -> bool {
 /// Count the artifact's Units: entries in the top-level `units` (preferred)
 /// or `tasks` sequence. Absent/non-sequence fields count as zero.
 fn count_units(value: &Value) -> usize {
-    sequence_len(value, "units").or_else(|| sequence_len(value, "tasks")).unwrap_or(0)
+    sequence_len(value, "units")
+        .or_else(|| sequence_len(value, "tasks"))
+        .unwrap_or(0)
 }
 
 /// Count dependency edges from the top-level `edges`/`dependencies` sequence
@@ -318,8 +326,10 @@ fn sequence_len(value: &Value, key: &str) -> Option<usize> {
 fn normalize(value: &Value) -> Value {
     match value {
         Value::Mapping(map) => {
-            let mut entries: Vec<(Value, Value)> =
-                map.iter().map(|(k, v)| (normalize(k), normalize(v))).collect();
+            let mut entries: Vec<(Value, Value)> = map
+                .iter()
+                .map(|(k, v)| (normalize(k), normalize(v)))
+                .collect();
             entries.sort_by_key(|a| key_repr(&a.0));
             let mut out = Mapping::new();
             for (k, v) in entries {
@@ -378,7 +388,11 @@ mod tests {
         s.push_str(header);
         s.push_str(&"a".repeat(pad_len));
         s.push_str(footer);
-        assert_eq!(s.len(), size, "scaffolding math produced the wrong byte count");
+        assert_eq!(
+            s.len(),
+            size,
+            "scaffolding math produced the wrong byte count"
+        );
         s.into_bytes()
     }
 
@@ -393,7 +407,10 @@ mod tests {
         assert!(!first.canonical_bytes.is_empty());
 
         let second = canonicalize(raw).expect("re-canonicalizing must succeed");
-        assert_eq!(first.digest, second.digest, "same bytes must yield the same digest");
+        assert_eq!(
+            first.digest, second.digest,
+            "same bytes must yield the same digest"
+        );
         assert_eq!(first.canonical_bytes, second.canonical_bytes);
     }
 
@@ -546,13 +563,16 @@ mod tests {
             b"cmd: \"ls *.rs && echo a & b\"\nunits: []\n", // quoted glob + && / &
             b"glob: '*.yml'\nunits: []\n",                  // single-quoted glob
             b"note: \"a & b\"\nunits: []\n",                // quoted ampersand
-            b"math: 2*3\nunits: []\n",                       // unquoted '*' not at token start
-            b"expr: a && b\nunits: []\n",                    // unquoted && (& then '&')
+            b"math: 2*3\nunits: []\n",                      // unquoted '*' not at token start
+            b"expr: a && b\nunits: []\n",                   // unquoted && (& then '&')
             b"path: /a/b#c\nunits: []\n",                   // '#' mid-scalar, not a comment
         ];
         for raw in cases {
             canonicalize(raw).unwrap_or_else(|e| {
-                panic!("false positive on {:?}: {e:?}", String::from_utf8_lossy(raw))
+                panic!(
+                    "false positive on {:?}: {e:?}",
+                    String::from_utf8_lossy(raw)
+                )
             });
         }
     }

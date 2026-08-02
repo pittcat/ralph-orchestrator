@@ -1795,7 +1795,10 @@ actions:
             .collect();
         for id in &wave1 {
             assert!(
-                matches!(by_id.get(id.as_str()), Some(crate::task::TaskStatus::Closed)),
+                matches!(
+                    by_id.get(id.as_str()),
+                    Some(crate::task::TaskStatus::Closed)
+                ),
                 "wave1 task {id} must be closed"
             );
         }
@@ -1914,7 +1917,10 @@ actions:
             .collect();
         for id in &wave1 {
             assert!(
-                matches!(by_id.get(id.as_str()), Some(crate::task::TaskStatus::Closed)),
+                matches!(
+                    by_id.get(id.as_str()),
+                    Some(crate::task::TaskStatus::Closed)
+                ),
                 "wave1 task {} should still be closed after replay",
                 id
             );

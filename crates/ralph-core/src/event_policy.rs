@@ -1305,29 +1305,27 @@ pub fn check_topic_deny_rules(
     }
     for rule in &config.topic_deny_rules {
         if rule.hat_id == hat_id && matches_topic_rule(&rule.topic, topic) {
-                let finding = PolicyFinding {
-                    topic: topic.to_string(),
-                    violation_type: ViolationType::TopicDenied {
-                        rule_hat: rule.hat_id.clone(),
-                        rule_topic: rule.topic.clone(),
-                    },
-                    message: format!(
-                        "Hat '{}' is denied from publishing topic '{}'",
-                        rule.hat_id, rule.topic
-                    ),
-                };
-                return Some(match config.mode {
-                    EventPolicyMode::Observe => PolicyDecision::Warn(vec![finding]),
-                    EventPolicyMode::Enforce => match config.on_violation {
-                        ViolationAction::Warn => PolicyDecision::Warn(vec![finding]),
-                        ViolationAction::RejectWithResume => {
-                            PolicyDecision::RejectWithResume(finding)
-                        }
-                        ViolationAction::Hold => PolicyDecision::Hold(finding),
-                        ViolationAction::Block => PolicyDecision::Block(finding),
-                    },
-                });
-            }
+            let finding = PolicyFinding {
+                topic: topic.to_string(),
+                violation_type: ViolationType::TopicDenied {
+                    rule_hat: rule.hat_id.clone(),
+                    rule_topic: rule.topic.clone(),
+                },
+                message: format!(
+                    "Hat '{}' is denied from publishing topic '{}'",
+                    rule.hat_id, rule.topic
+                ),
+            };
+            return Some(match config.mode {
+                EventPolicyMode::Observe => PolicyDecision::Warn(vec![finding]),
+                EventPolicyMode::Enforce => match config.on_violation {
+                    ViolationAction::Warn => PolicyDecision::Warn(vec![finding]),
+                    ViolationAction::RejectWithResume => PolicyDecision::RejectWithResume(finding),
+                    ViolationAction::Hold => PolicyDecision::Hold(finding),
+                    ViolationAction::Block => PolicyDecision::Block(finding),
+                },
+            });
+        }
     }
     None
 }

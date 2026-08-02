@@ -17,17 +17,17 @@ pub mod capability_inventory;
 mod cli_capture;
 pub mod completion_emit;
 pub mod config;
+/// U12 (plan 2026-07-30-004): contract completeness lint + machine-readable
+/// contract inspect. Guards emitting hats against passthrough activations and
+/// surfaces the compiled [`execution_contract::EffectiveExecutionContract`] for
+/// any hat.
+pub mod contract_completeness;
 /// 2026-07-23-004 plan U3 (R-A1): worker control-plane
 /// binding validator. Shared by both the production dispatcher
 /// (`ralph-cli`) and the integration test fixture so the
 /// `invalid_control_plane_path` reason code has exactly one
 /// definition.
 pub mod control_plane;
-/// U12 (plan 2026-07-30-004): contract completeness lint + machine-readable
-/// contract inspect. Guards emitting hats against passthrough activations and
-/// surfaces the compiled [`execution_contract::EffectiveExecutionContract`] for
-/// any hat.
-pub mod contract_completeness;
 /// U7a deterministic-correction injection — replaces
 /// `task.resume` events on the policy rejection path with
 /// in-prompt `## ORCHESTRATOR CORRECTION` blocks.

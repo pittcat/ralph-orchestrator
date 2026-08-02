@@ -42,8 +42,8 @@ use tracing::warn;
 // Every production `EventLoop` construction must go through `compile` first.
 pub mod compiler;
 pub use compiler::{
-    ContractCompileFinding, ContractCompileFindingKind, ContractFindings, EmitDecision,
-    EffectiveExecutionContract, ResolvedRuntimeConfig, TaskCapability, compile,
+    ContractCompileFinding, ContractCompileFindingKind, ContractFindings,
+    EffectiveExecutionContract, EmitDecision, ResolvedRuntimeConfig, TaskCapability, compile,
     evaluate_task_capability,
 };
 
@@ -51,8 +51,8 @@ pub use compiler::{
 // shared identity agreement between the resident loop and the independent CLI.
 pub mod activation;
 pub use activation::{
-    ActivationRecord, ActivationRegistry, ActivationRegistryError, ActivationStatus,
-    ACTIVATION_REGISTRY_RELATIVE_PATH,
+    ACTIVATION_REGISTRY_RELATIVE_PATH, ActivationRecord, ActivationRegistry,
+    ActivationRegistryError, ActivationStatus,
 };
 
 /// Hint appended to the `TaskNotTerminal` rejection message so the rejected

@@ -56,7 +56,12 @@ fn config_with_mechanism(mechanism: MechanismConfig) -> RalphConfig {
 #[test]
 fn derive_blocked_topic_single_forge_match_wins() {
     let mechanism = flow_with_steps(vec![
-        step("planning", vec!["forge.plan.inspected"], Some("forge.start"), vec![]),
+        step(
+            "planning",
+            vec!["forge.plan.inspected"],
+            Some("forge.start"),
+            vec![],
+        ),
         step(
             "development_loop",
             vec!["forge.wave.settled", "forge.plan.blocked", "work.failed"],
@@ -78,7 +83,12 @@ fn derive_blocked_topic_single_forge_match_wins() {
 fn derive_blocked_topic_plain_plan_blocked_only_wins() {
     // ce-executor-supervisor shape: only `plan.blocked` shows up.
     let mechanism = flow_with_steps(vec![
-        step("exec_wave", vec!["exec.wave.complete", "plan.blocked"], None, vec![]),
+        step(
+            "exec_wave",
+            vec!["exec.wave.complete", "plan.blocked"],
+            None,
+            vec![],
+        ),
         step("finalize", vec!["plan.complete"], None, vec![]),
     ]);
     let cfg = config_with_mechanism(mechanism);
@@ -108,12 +118,7 @@ fn derive_blocked_topic_falls_back_when_multiple_distinct_matches() {
     // Defensive: if a future preset ever declares two distinct
     // `*.plan.blocked` topics, the conservative rule wins.
     let mechanism = flow_with_steps(vec![
-        step(
-            "alpha",
-            vec!["alpha.plan.blocked"],
-            None,
-            vec![],
-        ),
+        step("alpha", vec!["alpha.plan.blocked"], None, vec![]),
         step("beta", vec!["beta.plan.blocked"], None, vec![]),
     ]);
     let cfg = config_with_mechanism(mechanism);
@@ -125,7 +130,12 @@ fn derive_blocked_topic_falls_back_when_multiple_distinct_matches() {
 #[test]
 fn resolve_escape_step_finds_report_via_on_any_of() {
     let mechanism = flow_with_steps(vec![
-        step("planning", vec!["forge.plan.inspected"], Some("forge.start"), vec![]),
+        step(
+            "planning",
+            vec!["forge.plan.inspected"],
+            Some("forge.start"),
+            vec![],
+        ),
         step(
             "development_loop",
             vec!["forge.wave.settled", "forge.plan.blocked", "work.failed"],
@@ -158,7 +168,12 @@ fn resolve_escape_step_returns_none_when_current_is_already_report() {
             None,
             vec!["forge.plan.blocked"],
         ),
-        step("plan_end", vec!["LOOP_COMPLETE"], Some("forge.report.done"), vec![]),
+        step(
+            "plan_end",
+            vec!["LOOP_COMPLETE"],
+            Some("forge.report.done"),
+            vec![],
+        ),
     ]);
     let cfg = config_with_mechanism(mechanism);
     assert_eq!(
@@ -172,12 +187,14 @@ fn resolve_escape_step_returns_none_when_no_forward_match() {
     // Supervisor shape: `plan.blocked` is in `allowed_emits`
     // somewhere, but no step declares `on`/`on_any_of` for it.
     let mechanism = flow_with_steps(vec![
-        step("exec_wave", vec!["exec.wave.complete", "plan.blocked"], None, vec![]),
+        step(
+            "exec_wave",
+            vec!["exec.wave.complete", "plan.blocked"],
+            None,
+            vec![],
+        ),
         step("finalize", vec!["plan.complete"], None, vec![]),
     ]);
     let cfg = config_with_mechanism(mechanism);
-    assert_eq!(
-        resolve_escape_step(&cfg, "exec_wave", "plan.blocked"),
-        None
-    );
+    assert_eq!(resolve_escape_step(&cfg, "exec_wave", "plan.blocked"), None);
 }
