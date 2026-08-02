@@ -819,6 +819,15 @@ hats:
 
       ### 步骤 8 — Emit
 
+      **前置校验**：emit 前必须先 `test -f .ralph/forge/<plan_key>/units/<unit-id>-completion.md`
+      （completion report 不在 = 步骤 7 未完成）。缺文件**改发** `exec.unit.failed`
+      （`reason: "completion report missing for unit <unit_id>"`，不引用路径），
+      不要补救、不要伪造文件；这是单业务事件预算下的**唯一**失败路径。
+
+      **强制 precheck**：成功路径必须先 `ralph emit exec.unit.done --policy-check`
+      通过，再用同一 payload 去掉 `--policy-check` 正式写盘（per `ralph-tools-emit` §5），
+      **禁止** 跳过 `--policy-check` 直发真盘。
+
       成功：`exec.unit.done`（透传 trigger 的 `task_id`、`task_key`、`wave_id`、`slot_index`、`unit_id`、`plan_key`，附 `unit_report_path`、`content_hash`）。
       失败：`exec.unit.failed`（含 `reason`、`plan_key`）。
 
@@ -1079,8 +1088,11 @@ hats:
       ### Lifecycle（本 hat 是 forge artifact / worktree 清理 owner）
 
       写完 manager report 并确认后：若存在 `worktree_map_path`（projection 或
-      `.ralph/forge/<plan_key>/worktree-map.yml`），对 map 中每个 unit worktree
-      执行 `git worktree remove`（失败记入报告附录，不阻断 LOOP_COMPLETE）。
+      `.ralph/forge/<plan_key>/worktree-map.yml`），**逐 unit 循环**对 map 中每个
+      unit worktree 执行 `git worktree remove`——每个结果**独立**记入报告附录
+      （一行一 entry：`unit_id` / `success` | `failure_reason`）。任一失败**不阻断**
+      后续 worktree 的清理尝试，也不阻断 LOOP_COMPLETE；保留的 unit worktree
+      在附录里列出，由运维手工处理。
       不删 `.ralph/forge/<plan_key>/` 业务文件（留给操作者）。
 
       ### 模板
