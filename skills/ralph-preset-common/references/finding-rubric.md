@@ -105,6 +105,7 @@ Review skill 将 mechanical lint 与软性 AAF 缺口映射为 P0/P1/P2 + confid
 | `preset.state_projection_work_done_order` | P1 | 85 | Q5 | state |
 | `preset.publishes_missing_schema` | P0 | 95 | Q4 | lint |
 | `preset.schema_reference_parity` | P0 | 95 | Q4 | lint |
+| `preset.instructions_schema_required_fields_drift` | P0 | 95 | Q4 | policy-feedback |
 | `preset.owner_not_publisher` | P1 | 85 | Q4 | topology |
 | `preset.cross_hat_unauthorized_publish` | P1 | 85 | Q4 | topology |
 | `preset.owner_unknown_hat` | P0 | 95 | Q4 | topology |

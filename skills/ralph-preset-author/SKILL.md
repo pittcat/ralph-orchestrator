@@ -109,6 +109,7 @@ Use this skill to design and draft Ralph **presets** (builtin or local) with **A
      - `field_docs.<field>.source`: where the emitting agent obtains the value.
      - `field_docs.<field>.fill_rule`: how to fill or repair the value after policy-check rejects it.
      - `examples[]`: topic-level example payloads only when they do not invent business facts.
+   - **Instructions ↔ schema required-fields SSOT 对账（强制）**：每写一个 emitter hat 的 `ralph emit <topic>` 示例，立即提取示例 payload 的实际字段集合，与同一 preset 的 `event_policy.schemas.<topic>.required_fields` 做集合对账；逐字段确认占位值能从当前 trigger、注入上下文或本 hat 产物取得。缺字段、字段名漂移、错误上游引用或无法取得值时，必须先修正 schema / instructions / Payload Contract，不能交给 review 或让 agent 自己猜字段。
    - In `instructions:`, cite `ralph-tools-emit` Policy-Check feedback instead of copying field tables. The prompt builder supplies the per-topic schema-aware publish section.
    - **Artifact-First handoff closure (单 hat 视角)**：每条 hat 的 instructions 必须明确产出顺序——「实际执行的 hat 或其 sub-agent 先写 artifact → hat 验收文件 → `ralph emit --policy-check` → 真实 emit」。消费型 hat 的 instructions 必须明确「从路径读完整内容后再决策」。
    - **Trigger Context 收敛**：trigger-consuming hats 的分支判定（accept / fix-now / blocked、residual 处理边界）若用 payload if/else 表达，必须先收敛到 `event_policy.schemas.<topic>.trigger_context.routing_hints`，再用 `summary_fields` 暴露关键计数；`instructions` 只引用 `## TRIGGER CONTEXT` 区块，不复制 hint 条件值。详情见 `references/author-checklist.md`「Trigger Context 审核项」。
@@ -140,6 +141,7 @@ Use this skill to design and draft Ralph **presets** (builtin or local) with **A
    - Multi-trigger hats split Payload Contract by trigger, not collapsed into one row.
    - Required handoff / identity / decision fields have `field_docs` metadata or a documented reason why existing injected docs already explain the field.
    - Emitter instructions reference `ralph-tools-emit` Policy-Check feedback when they mention payload construction, `ralph emit`, `ralph wave emit`, required fields, or field shape.
+   - **Instructions ↔ schema required-fields SSOT 对账已完成**：每个 emitter 示例字段集合等于对应 schema 的 `required_fields`，并且每个字段都有可验证值源；在 `preset-author-notes.md` 记录 schema 行与 instructions 行证据。
    - Ask: "If I only received this hat's instructions + injection, can I complete Q1? Can I construct every Q4 field from visible sources?"
    - **Single-chain-first 5 问全 ✓**: 填 `references/author-checklist.md` 的「Hard questions — single-chain-first」段；任一 ✗ 必须改写或显式 justify。
    - **执行模型分支 Hard questions 全 ✓（按 model 分支强制 / N/A）**: 按 `references/author-checklist.md`「Hard questions — N/A 规则」段的模型-分支矩阵填：

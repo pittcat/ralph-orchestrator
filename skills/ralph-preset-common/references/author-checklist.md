@@ -68,6 +68,7 @@
 - [ ] **Artifact 产出责任**：每条写入型 hat（executor / fixer / sub-agent 拥有方）必须显式声明本 activation 会写入的 artifact 路径集合；sub-agent 的完整结果、证据与未解决问题必须先落盘，再只返回短状态、摘要和路径；不得把 preset 描述为文件创建者。
 - [ ] **Artifact 消费与生命周期**：每条消费型 hat 必须显式声明从哪个可见路径读取 artifact，不得依赖 prompt 中的长文本；每份重要 artifact 还要指定消费方以及最终保留、归档或清理责任。
 - [ ] 每个 agent-authored emit topic 的 `event_policy.schemas.<topic>` 已检查：required handoff / identity / verdict / count / path / reason 字段有 `field_docs`，高风险 topic 有不会伪造业务事实的 `examples`
+- [ ] **Instructions ↔ schema required-fields SSOT 对账**：每个 `ralph emit <topic>` 示例的 payload 字段集合与对应 `event_policy.schemas.<topic>.required_fields` 完全一致；每个字段的占位值都能从当前 trigger、注入上下文或本 hat 产物取得，并在 `preset-author-notes.md` 记录 schema 行 + instructions 行证据
 - [ ] 若 hat `publishes` 含 `review.dimensions.complete`，`state_projection.actions_chain` 须有对应投影 action（否则下游 Q2 看不到 review 汇总）
 - [ ] emitter 若 instructions 要求 `--triggered <hat>`，该 `<hat>` 必须在 preset `hats[]` 里声明（否则 runtime 拒收 `triggered_not_in_topology`）
 - [ ] loop preset 中 `fix.done.next_review_plan` 必须是非空 object 合同；schema、example、fixer instructions 都不能允许 `null`
@@ -173,6 +174,7 @@
 - `examples` 填了业务结论占位（例如固定 `0` / `pass`），而不是安全示例
 - event payload 直接携带完整结果正文（尤其是超过 200 字符，或任意长度但具有恢复、审计、下游依赖价值的内容）；字符数仅是提示，不是主判据
 - emitter hat instructions 未要求「先写业务 artifact，再 emit 携带路径的 event」
+- emitter instructions 的 emit 示例少于 schema `required_fields`、字段名漂移、引用错误上游 topic 或字段值无可见来源
 - consumer hat instructions 未要求从当前可见路径读取完整内容，仍依赖 prompt 或 trigger payload 中的长文本
 - artifact 路径未指定消费方、消费动作或最终保留 / 归档 / 清理责任
 - event payload 把 `.ralph/events.jsonl`、`.ralph/loops.json`、`.ralph/supervisor.db` 等 runtime internal ledger 路径当作业务 artifact

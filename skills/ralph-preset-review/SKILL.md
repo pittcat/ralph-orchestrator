@@ -123,6 +123,8 @@ Use this skill to **review** Ralph presets with **Agent 视角可行性（AAF）
      - 任一项缺失或不一致 → `preset.artifact_first_field_docs_missing`(P1);若诱导伪造 → 升 P0。
    - Inspect `examples[]`: examples may show shape, but must not encode fake business conclusions that an agent could copy as facts.
 
+   - **Instructions ↔ schema required-fields SSOT 对账（强制）**：对每个 emitter hat 的每个 `ralph emit <topic>` 示例，提取示例 payload 中实际出现的字段集合，与同一 preset 的 `event_policy.schemas.<topic>.required_fields` 做集合对账；再检查示例中的每个占位值是否能从当前 trigger / 本 hat 产物获得。缺字段、字段名漂移或示例指向错误上游 topic 时，必须入主表 `preset.instructions_schema_required_fields_drift`（P0，confidence 95，Q4，category policy-feedback），不得以“agent 可以自己补字段”降级。对账证据必须同时引用 schema 行和 instructions 行。该检查是本 skill 的 SSOT 审计，不要求锁定完整 prompt 文案。
+
 5a. **Artifact-First 跨 hat 独立审核(独立于第 4 / 5 步 AAF,必做)**:
    - **路径可见性闭环**：每条 emit topic 携带的 path 字段,沿「emit → projection → 下游 hat 可见输入」逐跳检查;任一节点路径不可见 → `preset.artifact_path_not_in_visible_context`(P0)。
    - **消费动作闭环**：下游 consumer hat 的 instructions 必须**显式要求**读路径,且读盘后做验收 / 确认(文件存在、可解析、足以支撑本 hat Q1)。判定规程:

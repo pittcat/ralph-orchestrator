@@ -3593,7 +3593,7 @@ hats:
          and the post-emit porcelain snapshot).
       5. Pass through `plan_path` and `executor_head_sha` from the trigger.
       ```bash
-      ralph emit review.goalalign.done --json '{"plan_name":"<plan>","plan_path":"<repo-relative plan path>","executor_head_sha":"<sha>","resolved_baseline_sha":"<sha from plan.ready>","diff_patch_file":".ralph/review/<plan>/review.diff.patch","dimension":"goal-alignment","findings_file":".ralph/review/<plan>/goal-alignment.md","findings_count":<N>}'
+      ralph emit review.goalalign.done --json '{"review_phase":"initial","normalized_plan_file":"<path from trigger>","plan_contract_version":"ce-unified-plan/v1","plan_contract_digest":"<digest from trigger>","trace_file":"<trace from trigger>","stabilization_audit_file":"<path from trigger>","correction_ids":[],"plan_name":"<plan>","plan_path":"<repo-relative plan path>","executor_head_sha":"<sha>","resolved_baseline_sha":"<sha from plan.ready>","diff_patch_file":".ralph/review/<plan>/review.diff.patch","dimension":"goal-alignment","findings_file":".ralph/review/<plan>/goal-alignment.md","findings_count":<N>}'
       ```
       Then stop. The next dim (`dim:correctness`) will be
       triggered by this event.
@@ -3740,7 +3740,7 @@ hats:
       4. Save end evidence to
          `.ralph/review/{plan_name}/git-state-correctness-end.txt`.
       ```bash
-      ralph emit review.correctness.done --json '{"plan_name":"<plan>","plan_path":"<repo-relative plan path>","executor_head_sha":"<sha>","resolved_baseline_sha":"<sha from review.goalalign.done>","diff_patch_file":".ralph/review/<plan>/review.diff.patch","dimension":"correctness","findings_file":".ralph/review/<plan>/correctness.md","findings_count":<N>}'
+      ralph emit review.correctness.done --json '{"review_phase":"initial","normalized_plan_file":"<path from trigger>","plan_contract_version":"ce-unified-plan/v1","plan_contract_digest":"<digest from trigger>","trace_file":"<trace from trigger>","stabilization_audit_file":"<path from trigger>","correction_ids":[],"plan_name":"<plan>","plan_path":"<repo-relative plan path>","executor_head_sha":"<sha>","resolved_baseline_sha":"<sha from review.goalalign.done>","diff_patch_file":".ralph/review/<plan>/review.diff.patch","dimension":"correctness","findings_file":".ralph/review/<plan>/correctness.md","findings_count":<N>}'
       ```
       Then stop. The next dim (`dim:testing`) will be triggered.
 
@@ -3869,7 +3869,7 @@ hats:
       save end evidence to
       `.ralph/review/{plan_name}/git-state-testing-end.txt`.
       ```bash
-      ralph emit review.testing.done --json '{"plan_name":"<plan>","plan_path":"<repo-relative plan path>","executor_head_sha":"<sha>","resolved_baseline_sha":"<sha from review.correctness.done>","diff_patch_file":".ralph/review/<plan>/review.diff.patch","dimension":"testing","findings_file":".ralph/review/<plan>/testing.md","findings_count":<N>}'
+      ralph emit review.testing.done --json '{"review_phase":"initial","normalized_plan_file":"<path from trigger>","plan_contract_version":"ce-unified-plan/v1","plan_contract_digest":"<digest from trigger>","trace_file":"<trace from trigger>","stabilization_audit_file":"<path from trigger>","correction_ids":[],"plan_name":"<plan>","plan_path":"<repo-relative plan path>","executor_head_sha":"<sha>","resolved_baseline_sha":"<sha from review.correctness.done>","diff_patch_file":".ralph/review/<plan>/review.diff.patch","dimension":"testing","findings_file":".ralph/review/<plan>/testing.md","findings_count":<N>}'
       ```
       Then stop. Next dim (`dim:maintainability`) triggered.
 
@@ -3993,7 +3993,7 @@ hats:
       save end evidence to
       `.ralph/review/{plan_name}/git-state-maintainability-end.txt`.
       ```bash
-      ralph emit review.maintainability.done --json '{"plan_name":"<plan>","plan_path":"<repo-relative plan path>","executor_head_sha":"<sha>","resolved_baseline_sha":"<sha from review.testing.done>","diff_patch_file":".ralph/review/<plan>/review.diff.patch","dimension":"maintainability","findings_file":".ralph/review/<plan>/maintainability.md","findings_count":<N>}'
+      ralph emit review.maintainability.done --json '{"review_phase":"initial","normalized_plan_file":"<path from trigger>","plan_contract_version":"ce-unified-plan/v1","plan_contract_digest":"<digest from trigger>","trace_file":"<trace from trigger>","stabilization_audit_file":"<path from trigger>","correction_ids":[],"plan_name":"<plan>","plan_path":"<repo-relative plan path>","executor_head_sha":"<sha>","resolved_baseline_sha":"<sha from review.testing.done>","diff_patch_file":".ralph/review/<plan>/review.diff.patch","dimension":"maintainability","findings_file":".ralph/review/<plan>/maintainability.md","findings_count":<N>}'
       ```
       Then stop. Next dim (`dim:project-standards`) triggered.
 
