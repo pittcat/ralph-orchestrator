@@ -8,9 +8,9 @@ when_to_use: |
   under-provisioned target project, restore a missing Ralph pipeline
   suite, or fix a target whose static checks fail because the suite is
   incomplete. Do NOT use this skill to author or review presets
-  (`ralph-preset-author` / `ralph-preset-review`), to monitor or resume
-  loops (`ralph-loop`), or to diagnose a loop that already ran
-  (`ralph-run-diagnosis`).
+  (`ralph-preset-author` / `ralph-preset-review`), to operate the
+  in-loop CLI (`ralph run` / `ralph loops` / `ralph diagnose`), or to
+  diagnose a loop that already ran (`ralph-run-diagnosis`).
 inputs:
   - project_root
   - preset (path or builtin id, already passing strict lint)

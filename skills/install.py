@@ -8,10 +8,11 @@ Default (local): install into both ``./.claude/skills`` and
 ``./.agents/skills``. Use ``--global`` for ``~/.claude/skills`` and
 ``~/.agents/skills``, or ``--dir <path>`` for a single custom directory.
 
-By default, only the five public operator skills listed in
-``skills/README.md`` are exposed as installable units. The shared
-``ralph-preset-common`` fixtures/references directory is bundled as a
-regular copy when one of the preset skills requests it.
+By default, only the public operator skills listed in
+``skills/README.md`` are exposed as installable units. Each preset-author
+and preset-review skill carries its own ``references/`` directory as
+plain files, so there is no shared ``ralph-preset-common`` directory to
+materialise at install time (plan 2026-08-02-001).
 
 Examples
 --------
@@ -19,7 +20,7 @@ Examples
     ./skills/install.py
 
     # Install a subset (still both local targets)
-    ./skills/install.py ralph-loop ralph-run-diagnosis
+    ./skills/install.py ralph-preset-author ralph-run-diagnosis
 
     # Global: ~/.claude/skills + ~/.agents/skills
     ./skills/install.py --global
@@ -34,7 +35,6 @@ Examples
 from __future__ import annotations
 
 import argparse
-import os
 import shutil
 import sys
 from dataclasses import dataclass
@@ -43,7 +43,6 @@ from typing import Iterable
 
 PUBLIC_SKILLS: tuple[str, ...] = (
     "ralph-e2e-bootstrap",
-    "ralph-loop",
     "ralph-preset-author",
     "ralph-preset-review",
     "ralph-project-bootstrap",
@@ -55,7 +54,11 @@ PUBLIC_SKILLS: tuple[str, ...] = (
 # stray ``SKILL.md`` directories cannot leak into install/listing.
 CATALOG_NAMES: frozenset[str] = frozenset(PUBLIC_SKILLS)
 
-SHARED_COMMON = "ralph-preset-common"
+# Plan 2026-08-02-001: ``ralph-loop`` and the shared
+# ``ralph-preset-common`` directory are removed; each preset-author /
+# preset-review skill now ships its own references/ directory.
+REMOVED_LEGACY_SKILLS: frozenset[str] = frozenset({"ralph-loop"})
+
 SCRIPT_DIR = Path(__file__).resolve().parent
 SOURCE_ROOT = SCRIPT_DIR
 TARGET_LOCAL = Path(".claude/skills")
@@ -68,7 +71,6 @@ TARGET_AGENTS_GLOBAL = Path.home() / ".agents/skills"
 class SkillSpec:
     name: str
     src: Path
-    carries_common_refs: bool
 
 
 class InstallError(RuntimeError):
@@ -88,18 +90,15 @@ def discover_skills(source: Path) -> dict[str, SkillSpec]:
     for entry in sorted(source.iterdir()):
         if not entry.is_dir():
             continue
-        if entry.name == SHARED_COMMON:
+        if entry.name in REMOVED_LEGACY_SKILLS:
+            # Plan 2026-08-02-001: ``ralph-loop`` was retired; refuse to
+            # re-introduce it even if a stray directory reappears.
             continue
         if entry.name not in CATALOG_NAMES:
             continue
         if not (entry / "SKILL.md").is_file():
             continue
-        found[entry.name] = SkillSpec(
-            name=entry.name,
-            src=entry,
-            carries_common_refs=(entry / "references").is_symlink()
-            or (entry / "references").is_dir(),
-        )
+        found[entry.name] = SkillSpec(name=entry.name, src=entry)
     return found
 
 
@@ -166,26 +165,6 @@ def plan_install(
     return requested_names, to_keep, to_prune
 
 
-def _resolve_common_refs_source(skill_src: Path) -> Path | None:
-    """Return the directory backing ``references`` if it is a symlink.
-
-    Resolves the symlink target relative to the directory containing the
-    symlink itself (not its parent), matching the `..` semantics used in
-    ``skills/README.md``.
-    """
-    refs = skill_src / "references"
-    if not refs.is_symlink():
-        return None
-    raw = os.readlink(refs)
-    target = Path(raw)
-    if target.is_absolute():
-        return target
-    # `os.readlink` returns the link string verbatim; resolve it against
-    # the directory the symlink lives in so `../ralph-preset-common/...`
-    # resolves to the shared directory rather than nesting twice.
-    return (refs.parent / target).resolve()
-
-
 def copy_skill(spec: SkillSpec, target: Path, *, force: bool) -> str:
     """Copy one skill and return ``installed``, ``replaced``, or ``skipped``.
 
@@ -206,25 +185,15 @@ def copy_skill(spec: SkillSpec, target: Path, *, force: bool) -> str:
             dest.unlink()
         else:
             shutil.rmtree(dest)
-    # Skip symlinks at the source: ``references`` at the skill root
-    # points to ``../ralph-preset-common/references`` relative to the
-    # source skill directory (which does not exist in the destination),
-    # and the shared ``ralph-preset-common/references/`` directory
-    # itself contains a stale ``references`` symlink. Both are
-    # reconstructed as real directories below.
+
+    # Plan 2026-08-02-001: each skill's references/ directory is a real
+    # directory of plain files (no symlinks); we copy it verbatim. Sources
+    # still containing any stray symlink are dropped to satisfy the
+    # "no destination symlinks" guarantee.
     def _skip_symlinks(directory: str, contents: list[str]) -> list[str]:
         return [name for name in contents if (Path(directory) / name).is_symlink()]
 
     shutil.copytree(spec.src, dest, symlinks=False, ignore=_skip_symlinks)
-    common_refs = _resolve_common_refs_source(spec.src)
-    if common_refs is not None and common_refs.is_dir():
-        common_dest = dest / "references"
-        if common_dest.exists() or common_dest.is_symlink():
-            if common_dest.is_symlink() or common_dest.is_file():
-                common_dest.unlink()
-            elif common_dest.is_dir():
-                shutil.rmtree(common_dest)
-        shutil.copytree(common_refs, common_dest, ignore=_skip_symlinks)
     linked_paths = [path for path in dest.rglob("*") if path.is_symlink()]
     if linked_paths:
         rendered = ", ".join(str(path) for path in linked_paths)

@@ -98,7 +98,7 @@ test -f "$RUN/.ralph/loop.lock" && echo "LOCK_HELD" || echo "lock_released"
 
 ## Step 5b：执行能力推断（execution_capabilities）
 
-在写《产物盘点表》之前，按主 skill「Phase 0 能力推断」段产出 `execution_capabilities`（字符串数组）。检测信号冻结在 [`../../ralph-preset-common/references/agent-native-model.md`](../../ralph-preset-common/references/agent-native-model.md)「执行模型（Execution Model）」段：
+在写《产物盘点表》之前，按主 skill「Phase 0 能力推断」段产出 `execution_capabilities`（字符串数组）。检测信号冻结在 [`../../ralph-preset-review/references/agent-native-model.md`](../../ralph-preset-review/references/agent-native-model.md)「执行模型（Execution Model）」段：
 
 | 信号 | → capability / Observe |
 |------|----------------|

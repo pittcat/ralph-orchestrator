@@ -202,7 +202,7 @@ Review 模拟每 hat 时，按上面七段核对每条 Q2 Observe / Q4 字段的
 |---|---|---|
 | 通用 agent guide | `crates/ralph-core/data/ralph-tools*.md` | emit/task/recovery/precheck 通用语义、EmitResult、bounded retry、live task identity |
 | Preset 专用 | `presets/en/<name>.yml` hat `instructions:` | 触发状态表、hat 角色、topic 编排、禁止动作 |
-| Loop 外评审 | `skills/ralph-preset-common/references/` | 作者/评审如何检查分层与 AAF、payload audit 表、confidence 校准 |
+| Loop 外评审 | `skills/ralph-preset-review/references/` + `skills/ralph-preset-author/references/` | 作者 / 评审如何检查分层与 AAF、payload audit 表、confidence 校准（review 与 author 各自持有一份能力一致的副本，覆盖独立安装契约）|
 | Artifact-First Handoff 知识分层 | 三层见下「Artifact-First Handoff 知识分层」段 | 本 hat 创建 / 读 artifact 的具体路径、生命周期责任、例外与理由（YAML）；artifact-first 模型、判定标准、违规列表（本 reference）；不在 `ralph-tools*.md` 写通用规则 |
 
 Author 起草 recovery 路径时：**data docs 引用 + preset 状态表行**，不得在 data docs 复制 preset 状态表。
@@ -212,7 +212,7 @@ Skill doc 不复述 `ralph-tools*.md` 的命令参数表；需要时**引用章�
 ### Artifact-First Handoff 知识分层（三层职责划分）
 
 - **`presets/en/<name>.yml` hat `instructions:`**（preset 决策层）：写**本 hat**创建 / 读 artifact 的具体路径、生命周期责任（产出方 / 消费方 / 保留 / 归档 / 清理）、例外与例外理由。粒度到字段级：「写到哪里」「从哪读」「谁负责」。
-- **`skills/ralph-preset-common/references/agent-native-model.md`**（loop 外评审层，本文件）：写 artifact-first 模型、判定标准（恢复价值 / 审计价值 / 下游依赖）、违规列表、边界（业务 artifact vs internal ledger）、灰色地带判定方法。**不写**具体的「`.ralph/<...>` 子目录命名约定」，由 preset 自决。
+- **`skills/ralph-preset-review/references/agent-native-model.md`**（loop 外评审层，本文件）+ `skills/ralph-preset-author/references/agent-native-model.md` 同步副本：写 artifact-first 模型、判定标准（恢复价值 / 审计价值 / 下游依赖）、违规列表、边界（业务 artifact vs internal ledger）、灰色地带判定方法。**不写**具体的「`.ralph/<...>` 子目录命名约定」，由 preset 自决。
 - **`crates/ralph-core/data/ralph-tools*.md`**（runtime 注入层）：**不写** artifact-first 通用规则。artifact-first 是 **preset 决策**，不是 runtime 决策；运行时只提供文件读写命令（如 OPAC Apply 阶段的 `Write` / `Edit`），不约束写哪里、什么时候写、是否落盘。`ralph-tools*.md` 最多以引用形式指向本 reference 的「Artifact-First Handoff 模型」或「Artifact-First 边界」段，不复制判定标准。
 
 ## 执行模型（Execution Model）

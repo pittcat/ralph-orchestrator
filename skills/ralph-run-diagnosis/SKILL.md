@@ -91,11 +91,11 @@ argument-hint: "[run_dir] [preset_file_or_builtin] [optional: plan_file] [--incl
 
 ## 强制对账：prompt visibility（hat 这一轮真看到什么）
 
-> **触发条件**：诊断怀疑「agent 看不到某 skill」或「agent 引用了不该看到的内部实现」时，**必须**在 Phase 0 之后、Phase 1 之前用 `ralph -c <preset> inspect prompt --hat <id> --format json` 跑一次可见性对账。对账源即 [../ralph-preset-common/references/prompt-visibility.md](../ralph-preset-common/references/prompt-visibility.md) 的 `auto_inject` / `on_demand` / `block_titles` 字段。
+> **触发条件**：诊断怀疑「agent 看不到某 skill」或「agent 引用了不该看到的内部实现」时，**必须**在 Phase 0 之后、Phase 1 之前用 `ralph -c <preset> inspect prompt --hat <id> --format json` 跑一次可见性对账。对账源即 [../ralph-preset-review/references/prompt-visibility.md](../ralph-preset-review/references/prompt-visibility.md) 的 `auto_inject` / `on_demand` / `block_titles` 字段。
 >
 > **对账要点**：
 >
-> 1. **auto vs on-demand 矛盾**：hat `instructions:` 把 on-demand skill 当成 auto-inject 用 → `agent_skill.inject_claim_false`（见 [../ralph-preset-common/references/finding-rubric.md](../ralph-preset-common/references/finding-rubric.md)）。
+> 1. **auto vs on-demand 矛盾**：hat `instructions:` 把 on-demand skill 当成 auto-inject 用 → `agent_skill.inject_claim_false`（见 [../ralph-preset-review/references/finding-rubric.md](../ralph-preset-review/references/finding-rubric.md)）。
 > 2. **skill 文档泄漏内部实现**：auto_inject 的 skill 内容含内部函数名 / 模块名 / 内部 ledger 路径 / review-only 注释 → `agent_skill.leaks_internals`。
 > 3. **Confirm 路径与 `ralph tools skill load` 期望**：`on_demand[]` 里有 skill 但 hat `instructions:` 没要求 agent 先 `ralph tools skill load` → 行为缺口，按 Q3 入栏。
 >
@@ -132,12 +132,12 @@ Diagnostics 四档：`FULL` | `MINIMAL` | `LOGS_ONLY` | `DISABLED` — 决定 L2
 
 **推断步骤（顺序固定）**：
 
-1. 读 [`../ralph-preset-common/references/agent-native-model.md`](../ralph-preset-common/references/agent-native-model.md)「执行模型（Execution Model）」段确认枚举与检测信号；该节是 frozen vocabulary，本 plan 不再扩展。
+1. 读 [`../ralph-preset-review/references/agent-native-model.md`](../ralph-preset-review/references/agent-native-model.md)「执行模型（Execution Model）」段确认枚举与检测信号；该节是 frozen vocabulary，本 plan 不再扩展。
 2. 解析 preset：
    - `event_loop.supervisor.enabled: true` → capability +supervisor
    - hat `instructions` 含 `ralph wave emit` / `ralph wave verify`，或 hat 依赖 `## WAVE CONTEXT` → capability +wave
    - **禁止**用 `exec.wave.*` / `slot.*` 等协调 topic 推断 +wave（那些是 supervisor 协调面，走 supervisor audit，不是 wave fan-out 信号）
-3. 解析 Intent（如有作者 notes）：`execution_model: wave | supervisor | supervisor+wave` → 与上面 capability 一致则 OK；不一致 → 主表 P0（详见 [`../ralph-preset-common/references/finding-rubric.md`](../ralph-preset-common/references/finding-rubric.md)「Supervisor capability audit」段 `preset.execution_model_intent_mismatch`）。
+3. 解析 Intent（如有作者 notes）：`execution_model: wave | supervisor | supervisor+wave` → 与上面 capability 一致则 OK；不一致 → 主表 P0（详见 [`../ralph-preset-review/references/finding-rubric.md`](../ralph-preset-review/references/finding-rubric.md)「Supervisor capability audit」段 `preset.execution_model_intent_mismatch`）。
 4. 扫描产物与 Observe 门控：
    - `.ralph/supervisor.db` 存在 → ledger 证据。若 YAML 已 `supervisor.enabled: true`，加固 +supervisor；若 enabled=false（常见 default-wave），**不要**因此否定 `ralph inspect loop` 可能出现的 `supervisor` 键——键在 **enabled 或盘上已有可打开 wave 账本** 时都会出现；先 `jq 'has("supervisor")'` 再读块
    - events 含 `wave_id` → capability +wave

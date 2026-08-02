@@ -34,8 +34,8 @@ Author should **not** deliver notes with「待定」「上游会处理」「约�
 ### 2. Review negative fixtures
 
 ```bash
-ralph preset check -H skills/ralph-preset-common/fixtures/aaf-review-negative-fixture.yml --strict --format json
-ralph preset check -H skills/ralph-preset-common/fixtures/payload-audit-negative-fixture.yml --strict --format json
+ralph preset check -H skills/ralph-preset-review/fixtures/aaf-review-negative-fixture.yml --strict --format json
+ralph preset check -H skills/ralph-preset-review/fixtures/payload-audit-negative-fixture.yml --strict --format json
 ```
 
 **机械 lint（preset check）：**
@@ -146,8 +146,8 @@ shape error the soft AAF path is supposed to catch.
 ```bash
 # CLI 冒烟 — 不要求 strict 模式吐出新 finding (无新增 lint); 仅验证
 # fixture 可被加载 + 结构化 lint 不崩.
-ralph preset check -H skills/ralph-preset-common/fixtures/aaf-wave-capability-negative-fixture.yml --strict --format json
-ralph preset check -H skills/ralph-preset-common/fixtures/aaf-supervisor-capability-negative-fixture.yml --strict --format json
+ralph preset check -H skills/ralph-preset-review/fixtures/aaf-wave-capability-negative-fixture.yml --strict --format json
+ralph preset check -H skills/ralph-preset-review/fixtures/aaf-supervisor-capability-negative-fixture.yml --strict --format json
 
 # 软性 AAF (Wave/Supervisor capability audit) 是 review-only, 通过阅读
 # fixture 配合 references/finding-rubric.md 新增段对照命中。

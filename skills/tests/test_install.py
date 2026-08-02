@@ -169,8 +169,8 @@ def test_select_skills_rejects_unknown() -> None:
 def test_select_skills_dedupes() -> None:
     """Duplicate explicit requests collapse to a single install."""
     available = install.discover_skills(SKILLS_DIR)
-    selected = install.select_skills(available, ["ralph-loop", "ralph-loop"])
-    assert [s.name for s in selected] == ["ralph-loop"]
+    selected = install.select_skills(available, ["ralph-preset-author", "ralph-preset-author"])
+    assert [s.name for s in selected] == ["ralph-preset-author"]
 
 
 def test_select_skills_default_returns_catalog(tmp_path: Path) -> None:
@@ -249,7 +249,7 @@ def test_global_dry_run_prints_both_absolute_destinations() -> None:
 def test_prune_removes_unrequested(fresh_target: Path) -> None:
     """``--prune`` must only remove skills outside the requested set."""
     # Seed the target with a skill that is NOT in the request set.
-    seed = fresh_target / "ralph-loop"
+    seed = fresh_target / "ralph-not-in-catalog"
     seed.mkdir(parents=True)
     (seed / "SKILL.md").write_text("# user-edited\n", encoding="utf-8")
     result = _run(
@@ -269,14 +269,14 @@ def test_prune_removes_unrequested(fresh_target: Path) -> None:
 def test_install_keeps_existing_without_force(fresh_target: Path) -> None:
     """Default install keeps an existing copy unless ``--force`` is supplied."""
     fresh_target.mkdir(parents=True)
-    kept = fresh_target / "ralph-loop"
+    kept = fresh_target / "ralph-preset-author"
     kept.mkdir()
     sentinel = kept / "user-note.txt"
     sentinel.write_text("user edited me\n", encoding="utf-8")
     (kept / "SKILL.md").write_text("# user\n", encoding="utf-8")
     # Feed ``n`` over stdin so the interactive prompt resolves to "keep".
     result = subprocess.run(
-        [sys.executable, str(SKILLS_DIR / "install.py"), "--dir", str(fresh_target), "ralph-loop"],
+        [sys.executable, str(SKILLS_DIR / "install.py"), "--dir", str(fresh_target), "ralph-preset-author"],
         input="n\n",
         capture_output=True,
         text=True,

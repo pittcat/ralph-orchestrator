@@ -397,7 +397,7 @@ ralph run -c ralph.yml -H .ralph/hats/my-flow.yml --skip-preflight -p "smoke mig
 
 **两 skill 共同构成 agent-flow 闭环**：author 写 per-hat payload 合同（字段 / 值源 / 可见性 / 身份 / 下游消费），review 从 activated-hat 视角独立审计每个 emit topic 的字段可见性、值源可达性、运行时身份一致性、语义充分性与下游消费。两 skill 都不替代 `ralph preset check`——lint 只验 shape 与拓扑，看不见 / 算不出 / 决策字段语义不足这类问题由 audit 兜底。
 
-AAF 模型 + Payload Audit 模型详见 [`skills/ralph-preset-common/references/agent-native-model.md`](../skills/ralph-preset-common/references/agent-native-model.md)；finding → severity 映射（含 `payload-content`）见 [`skills/ralph-preset-common/references/finding-rubric.md`](../skills/ralph-preset-common/references/finding-rubric.md)。
+AAF 模型 + Payload Audit 模型详见 [`skills/ralph-preset-author/references/agent-native-model.md`](../skills/ralph-preset-author/references/agent-native-model.md)；finding → severity 映射（含 `payload-content`）见 [`skills/ralph-preset-review/references/finding-rubric.md`](../skills/ralph-preset-review/references/finding-rubric.md)。
 
 ## 相关文档
 

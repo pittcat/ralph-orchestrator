@@ -40,7 +40,7 @@ The official [ralph-wiggum plugin](https://github.com/anthropics/claude-code/tre
 
 | Command                  | Description                                               |
 | ------------------------ | --------------------------------------------------------- |
-| `/ralph-loop "<prompt>"` | Start an autonomous loop with optional `--max-iterations` |
+| `/ralph-run "<prompt>"` | Start an autonomous loop with `ralph run --plan <file>` (the `/ralph-loop` slash command was retired with the `ralph-loop` skill in plan 2026-08-02-001) |
 | `/cancel-ralph`          | Stop an active Ralph loop                                 |
 | `/help`                  | Display plugin help and documentation                     |
 

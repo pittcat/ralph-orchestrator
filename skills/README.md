@@ -8,13 +8,18 @@ It ships operator skills:
 | Skill | Purpose |
 |---|---|
 | `ralph-e2e-bootstrap` | Bootstrap an E2E sandbox directory from a development plan + git diff via combo-box decisions and static gates; deliver a copy-paste launch command |
-| `ralph-loop` | Run, monitor, resume, merge, debug Ralph loops |
 | `ralph-preset-author` | Draft presets (builtin + local) with per-hat AAF tables **+ payload contract notes** before review |
 | `ralph-preset-review` | Per-hat activation dry-run + **payload audit** + mechanical lint → `preset-review-report.md` |
 | `ralph-project-bootstrap` | Audit a target project, generate or safely update its AGENTS.md / CLAUDE.md / `ralph.pipeline.yml` / `PROMPT.pipeline.md` from an existing preset + plan/task, run staged validation, and hand off the official launch command |
 | `ralph-run-diagnosis` | Post-run deep diagnosis: artifacts, OPAC, mechanism vs preset attribution |
 
-`ralph-preset-common/` holds shared `references/` and fixtures (not a standalone marketplace skill).
+> **Plan 2026-08-02-001:** the previously bundled `ralph-loop` and
+> `ralph-preset-common` skills are gone. `ralph-loop` is retired (loop
+> operations stay in the runner CLI / web dashboard). The author/review
+> pair now ships its own `references/`, `fixtures/`, and `tests/` files,
+> so there is no shared common directory to bundle. `install.py` rejects
+> `ralph-loop` requests and copies each skill's local `references/`
+> directory verbatim.
 
 These are public agent skills. They are not part of Ralph's internal
 `ralph tools skill` registry.
@@ -30,19 +35,20 @@ Mechanical lint (`ralph preset check`) only proves shape and topology. **Invisib
 
 ## Symlinks (local dev)
 
-Author and review skills symlink `references/` to `ralph-preset-common/references/`:
+> Both skills now ship their own `references/` directory as plain files,
+> so the legacy `ln -sf ../ralph-preset-common/references …` step is no
+> longer needed. If you want them visible under `.claude/skills` /
+> `.cursor/skills` for local development, symlink the whole skill:
 
 ```bash
-ln -sf ../ralph-preset-common/references skills/ralph-preset-author/references
-ln -sf ../ralph-preset-common/references skills/ralph-preset-review/references
-ln -sf ../../skills/ralph-preset-author .claude/skills/ralph-preset-author
-ln -sf ../../skills/ralph-preset-review .claude/skills/ralph-preset-review
-ln -sf ../../skills/ralph-run-diagnosis .claude/skills/ralph-run-diagnosis
-mkdir -p .cursor/skills
-ln -sf ../../skills/ralph-run-diagnosis .cursor/skills/ralph-run-diagnosis
+mkdir -p .claude/skills .cursor/skills
+ln -sf ../../skills/ralph-preset-author    .claude/skills/ralph-preset-author
+ln -sf ../../skills/ralph-preset-review    .claude/skills/ralph-preset-review
+ln -sf ../../skills/ralph-run-diagnosis    .claude/skills/ralph-run-diagnosis
+ln -sf ../../skills/ralph-run-diagnosis    .cursor/skills/ralph-run-diagnosis
 ```
 
-On Windows without symlink support, duplicate `references/` and keep in sync manually.
+On Windows without symlink support, copy the skills manually.
 
 ## Install with Claude Code
 
@@ -62,11 +68,10 @@ List the skills in this repository:
 npx skills add mikeyobrien/ralph-orchestrator --list
 ```
 
-Install preset + loop + bootstrap skills for Claude Code:
+Install preset + bootstrap skills for Claude Code:
 
 ```bash
 npx skills add mikeyobrien/ralph-orchestrator \
-  --skill ralph-loop \
   --skill ralph-preset-author \
   --skill ralph-preset-review \
   --skill ralph-project-bootstrap \

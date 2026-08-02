@@ -9,8 +9,8 @@ from pathlib import Path
 ANCHORS = [
     ("skills/ralph-preset-author/SKILL.md", "Capability discovery"),
     ("skills/ralph-preset-review/SKILL.md", "Capability-triggered audit"),
-    ("skills/ralph-preset-common/references/commands.md", "Capability inventory"),
-    ("skills/ralph-preset-common/references/agent-native-model.md", "Runtime Audit Model"),
+    ("skills/ralph-preset-author/references/commands.md", "Capability inventory"),
+    ("skills/ralph-preset-author/references/agent-native-model.md", "Runtime Audit Model"),
 ]
 
 def test_anchor_present(path: str, anchor: str) -> bool:

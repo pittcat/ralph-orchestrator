@@ -141,7 +141,7 @@
 | Preset 状态表 | `presets/en/ce-executor-serial.yml`（coordinator/executor/validator/shipper/reporter 触发状态表） |
 | 静态测试 | `crates/ralph-cli/src/presets.rs::test_ce_executor_serial_protocol_state_tables_unit9` |
 | 通用 skill docs | `crates/ralph-core/data/ralph-tools{,-emit,-tasks,-precheck,-recovery-directives}.md` |
-| Preset operator skills | `skills/ralph-preset-common/references/{agent-native-model,author-checklist,patterns,finding-rubric}.md` |
+| Preset operator skills | `skills/ralph-preset-author/references/{agent-native-model,author-checklist,patterns,finding-rubric}.md` + `skills/ralph-preset-review/references/{agent-native-model,author-checklist,patterns,finding-rubric}.md`（已拆分为各自本地目录,不再有共享 `skills/ralph-preset-common/references/`）|
 
 **未完成 / 未验证**:
 
