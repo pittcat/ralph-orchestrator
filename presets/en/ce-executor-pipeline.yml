@@ -3539,6 +3539,22 @@ hats:
       ...
       ```
 
+      After writing the product, the summary counts and the parsed
+      finding rows must agree before you emit:
+
+      1. **Recount from the parsed rows** — `findings_count` in
+         `## Summary` MUST equal the number of `- id:` entries under
+         `## Findings`. Do not infer the count from your draft; count
+         the entries after you have written them. Re-count `p0_count`
+         and `p1_count` from the `severity:` of every finding.
+      2. **Re-read and re-verify** — re-read the file from disk after
+         writing so the summary and the rows cannot drift. A count
+         that disagrees with the parsed rows is an internal
+         inconsistency in your own product; fix it before the emit.
+      3. **Zero-finding case** — if you wrote only the `G0` no-issues
+         placeholder, `findings_count` MUST be `1` (the placeholder row
+         itself) and `p3_count` MUST be `1`.
+
       ### Step 5 — Exit Precheck and emit event
       After writing the findings product, before `ralph emit`:
 
@@ -3697,6 +3713,19 @@ hats:
       ### Step 4 — Write product file
       Write findings to `.ralph/review/{plan_name}/correctness.md`.
 
+      After writing the product, the summary counts and the parsed
+      finding rows must agree before you emit:
+
+      1. **Recount from the parsed rows** — `findings_count` in
+         `## Summary` MUST equal the number of `- id:` entries under
+         `## Findings`. Do not infer the count from your draft; count
+         the entries after you have written them. Re-count `p0_count`
+         and `p1_count` from the `severity:` of every finding.
+      2. **Re-read and re-verify** — re-read the file from disk after
+         writing so the summary and the rows cannot drift. A count
+         that disagrees with the parsed rows is an internal
+         inconsistency in your own product; fix it before the emit.
+
       ### Step 5 — Exit Precheck and emit event
       Pass through `plan_path` and `executor_head_sha` from the trigger.
       Follow the same two-stage Exit Precheck as `dim:goal-alignment`
@@ -3819,6 +3848,19 @@ hats:
       ### Step 4 — Write product file
       Write findings to `.ralph/review/{plan_name}/testing.md`.
 
+      After writing the product, the summary counts and the parsed
+      finding rows must agree before you emit:
+
+      1. **Recount from the parsed rows** — `findings_count` in
+         `## Summary` MUST equal the number of `- id:` entries under
+         `## Findings`. Do not infer the count from your draft; count
+         the entries after you have written them. Re-count `p0_count`
+         and `p1_count` from the `severity:` of every finding.
+      2. **Re-read and re-verify** — re-read the file from disk after
+         writing so the summary and the rows cannot drift. A count
+         that disagrees with the parsed rows is an internal
+         inconsistency in your own product; fix it before the emit.
+
       ### Step 5 — Exit Precheck and emit event
       Pass through `plan_path` and `executor_head_sha` from the trigger.
       Follow the same two-stage Exit Precheck as `dim:goal-alignment`
@@ -3929,6 +3971,19 @@ hats:
 
       ### Step 4 — Write product file
       Write findings to `.ralph/review/{plan_name}/maintainability.md`.
+
+      After writing the product, the summary counts and the parsed
+      finding rows must agree before you emit:
+
+      1. **Recount from the parsed rows** — `findings_count` in
+         `## Summary` MUST equal the number of `- id:` entries under
+         `## Findings`. Do not infer the count from your draft; count
+         the entries after you have written them. Re-count `p0_count`
+         and `p1_count` from the `severity:` of every finding.
+      2. **Re-read and re-verify** — re-read the file from disk after
+         writing so the summary and the rows cannot drift. A count
+         that disagrees with the parsed rows is an internal
+         inconsistency in your own product; fix it before the emit.
 
       ### Step 5 — Exit Precheck and emit event
       Pass through `plan_path` and `executor_head_sha` from the trigger.
@@ -4044,6 +4099,19 @@ hats:
       ### Step 4 — Write product file
       Write findings to `.ralph/review/{plan_name}/standards.md`.
 
+      After writing the product, the summary counts and the parsed
+      finding rows must agree before you emit:
+
+      1. **Recount from the parsed rows** — `findings_count` in
+         `## Summary` MUST equal the number of `- id:` entries under
+         `## Findings`. Do not infer the count from your draft; count
+         the entries after you have written them. Re-count `p0_count`
+         and `p1_count` from the `severity:` of every finding.
+      2. **Re-read and re-verify** — re-read the file from disk after
+         writing so the summary and the rows cannot drift. A count
+         that disagrees with the parsed rows is an internal
+         inconsistency in your own product; fix it before the emit.
+
       ### Step 5 — Exit Precheck and emit event
       Pass through `plan_path` and `executor_head_sha` from the trigger.
       Follow the same two-stage Exit Precheck as `dim:goal-alignment`
@@ -4155,6 +4223,19 @@ hats:
 
       ### Step 4 — Write product file
       Write findings to `.ralph/review/{plan_name}/adversarial.md`.
+
+      After writing the product, the summary counts and the parsed
+      finding rows must agree before you emit:
+
+      1. **Recount from the parsed rows** — `findings_count` in
+         `## Summary` MUST equal the number of `- id:` entries under
+         `## Findings`. Do not infer the count from your draft; count
+         the entries after you have written them. Re-count `p0_count`
+         and `p1_count` from the `severity:` of every finding.
+      2. **Re-read and re-verify** — re-read the file from disk after
+         writing so the summary and the rows cannot drift. A count
+         that disagrees with the parsed rows is an internal
+         inconsistency in your own product; fix it before the emit.
 
       ### Step 5 — Exit Precheck and emit event
       Pass through `plan_path` and `executor_head_sha` from the trigger.
