@@ -105,6 +105,7 @@ Review skill 将 mechanical lint 与软性 AAF 缺口映射为 P0/P1/P2 + confid
 | `preset.state_projection_work_done_order` | P1 | 85 | Q5 | state |
 | `preset.publishes_missing_schema` | P0 | 95 | Q4 | lint |
 | `preset.schema_reference_parity` | P0 | 95 | Q4 | lint |
+| `preset.instructions_schema_required_fields_drift` | P0 | 95 | Q4 | policy-feedback |
 | `preset.owner_not_publisher` | P1 | 85 | Q4 | topology |
 | `preset.cross_hat_unauthorized_publish` | P1 | 85 | Q4 | topology |
 | `preset.owner_unknown_hat` | P0 | 95 | Q4 | topology |
@@ -116,8 +117,10 @@ Review skill 将 mechanical lint 与软性 AAF 缺口映射为 P0/P1/P2 + confid
 | `preset.hat_scope_coordinator_review_leak` | P0 | 95 | Q2 | visibility |
 | `preset.flow_declaration_missing` | P1 | 85 | Q4 | topology |
 | `preset.flow_unknown_emit_rejected` | P0 | 95 | Q4 | topology |
+| `preset.flow_linear_positional_ambiguity` | P0 | 90 | Q4 | topology |
 | `preset.supervisor_requires_isolated` | P0 | 95 | Q3 | lint |
 | `preset.supervisor_hat_publishes_coord_topic` | P0 | 95 | Q4 | lint |
+| `preset.supervisor_wave_consumer_low_concurrency` | P0 | 95 | Q3 | lint |
 | `preset.metadata_runtime_drift` | P1 | 85 | — | lint |
 | `preset.dimension_reviewer_write_plan` | P0 | 95 | Q3 | lint |
 | `preset.trigger_context_unknown_field` | P0 | 90 | Q4 | lint |
@@ -125,6 +128,13 @@ Review skill 将 mechanical lint 与软性 AAF 缺口映射为 P0/P1/P2 + confid
 | `preset.trigger_context_value_shape` | P0 | 90 | Q4 | lint |
 | `preset.trigger_context_duplicate_label` | P0 | 90 | Q4 | lint |
 | `preset.trigger_context_no_consumer` | P0 | 90 | Q4 | topology |
+| `preset.payload_consistency_duplicate_id` | P0 | 90 | Q4 | lint |
+| `preset.payload_consistency_unknown_topic` | P0 | 90 | Q4 | lint |
+| `preset.payload_consistency_unknown_field` | P0 | 90 | Q4 | lint |
+| `preset.payload_consistency_unknown_op` | P0 | 90 | Q4 | lint | `when.op` 不在 `eq`/`ne`/`gt`/`gte`/`exists`/`non_empty` 白名单 |
+| `preset.payload_consistency_non_object_when` | P0 | 90 | Q4 | lint | `when` 不是 object（单谓词或 `all`/`any` 组合） |
+| `preset.payload_consistency_unsafe_message` | P0 | 90 | Q4 | lint | `rule.message` 含 ANSI escape / C0/C1 控制字符 / 零宽字符 / 长度超过 1024 UTF-8 bytes |
+| `preset.instructions_task_mutation_authority_conflict` | P0 | 90 | Q5 | lint | hat `instructions` 在 projector-owned batch action 或非 coordinator 角色下仍要求 `ralph tools task add` / `task ensure`；单写者冲突由 lint 兜底 |
 
 ### Artifact-First Handoff finding_id（review-only，lint 不直接产出）
 
@@ -169,6 +179,54 @@ Review skill 将 mechanical lint 与软性 AAF 缺口映射为 P0/P1/P2 + confid
 | `post_fix_review_reopens_unbounded_fix` | P0 | explicit post-fix phase with accept-or-block branch | topology | Q4 |
 | `prompt_wall_serial_style` | P1 | reference skill doc, do not inline | style | Q3 |
 
+### Wave capability audit (2026-07-22-002 plan U4)
+
+> **触发条件**：`execution_model ∈ {wave, supervisor+wave}`；或 YAML / hat `instructions` 含 `ralph wave emit` / `ralph wave verify`；或 hat 依赖 `## WAVE CONTEXT`。**capability-triggered**，**禁止**按 preset 名称点名门控。
+> **未触发**：review 把本段记为 N/A（按 plan U5 SKILL §3d 规则），不假装已审。
+
+| 缺口 | Severity | category | aaf_question | finding_id |
+|---|---|---|---|---|
+| 非 dispatcher hat `instructions` 要求 / 暗示调用 `ralph wave emit` 或 `ralph wave verify` | P0 | feasibility | Q3 | `preset.wave_worker_calls_wave_emit` |
+| dispatcher 在 `ralph wave emit --payloads-stdin` 之前未先跑 `ralph wave verify --payloads-stdin`（拿 ticket）预检 | P0 | opac | Q3 / Q4 | `preset.wave_missing_verify_before_emit` |
+| worker 完成态由 hat-channel 验证（应走 `ralph events --events-source main`） | P0 | visibility | Q2 | `preset.wave_confirm_uses_hat_channel` |
+| 任何 hat `publishes` 含 `wave.*` / `exec.wave.*` 等协调 topic | P0 | topology | Q4 | `preset.wave_agent_emits_coordination_topic` |
+
+review 命中时按上表 `finding_id` + `default_severity` + 默认 confidence 起点 60 入主表（与 `ralph-tools-wave` §「Policy-Check 反馈」联动）。若 `ralph wave verify` policy-check JSON 缺 `payload_index` 导致 wave batch 无法定位失败 item，按「Policy-Check Feedback → Severity」段 `payload_index` 缺失行入栏。
+
+### Supervisor capability audit (2026-07-22-002 plan U4)
+
+> **触发条件**：`event_loop.supervisor.enabled: true`；或 `execution_model ∈ {supervisor, supervisor+wave}`；或 hat `instructions` 含 supervisor 协调 topic / 引用 `supervisor.db`。**capability-triggered**，**禁止**按 preset 名称点名门控。
+> **未触发**：review 把本段记为 N/A。
+
+| 缺口 | Severity | category | aaf_question | finding_id |
+|---|---|---|---|---|
+| preset 启用了 `event_loop.supervisor.enabled` 但 `event_loop.execution_mode` 不是 `isolated` | P0 | feasibility | Q3 | `preset.supervisor_requires_isolated` |
+| hat `publishes` 含 supervisor 协调 topic（`exec.wave.*` / `slot.*` 等） | P0 | topology | Q4 | `preset.supervisor_hat_publishes_coord_topic` |
+| supervisor wave consumer hat（`triggers:` 含 `*.unit.ready`）未声明 `concurrency > 1`（默认 1） | P0 | feasibility | Q3 | `preset.supervisor_wave_consumer_low_concurrency` |
+| supervisor sub-unit 状态未走 `ralph tools task list` 或业务 artifact，而是依赖读 `.ralph/supervisor.db` | P0 | visibility | Q2 / Q5 | `preset.supervisor_unit_state_not_via_task_api` |
+| hat `instructions` 要求把 `.ralph/supervisor.db` 当业务 artifact 接口（写或读） | P0 | visibility | Q2 | `preset.artifact_uses_internal_ledger` |
+| `execution_model` Intent 字段与 YAML 能力信号不一致（如 Intent= `single-chain` 但 `event_loop.supervisor.enabled: true`） | P0 | payload-content | Q4 | `preset.execution_model_intent_mismatch` |
+| supervisor preset 缺少 `event_loop.supervisor.max_concurrent_workers` 或上限超过合理范围（生产应 ≤ 8） | P1 | feasibility | Q3 | review-only（`supervisor_missing_global_cap`） |
+| integrator hat 在 `success_slots` 资源缺失 / 不可读时仍发 `work.done` | P0 | payload-content | Q4 / Q5 | review-only（`supervisor_integrator_skips_resource_verification`） |
+| 主 ledger 出现多个 `LOOP_COMPLETE`、`loop_stale` 或重复协调终态 | P0 | topology | Q4 | review-only（`supervisor_duplicate_or_stale_terminal`） |
+| supervisor preset 缺少 fan-in sink 失败的明确 fail-closed 路径（sink 失败仍冒充成功） | P0 | topology | Q4 | review-only（`supervisor_sink_failure_fake_success`） |
+| supervisor preset 在终态（成功或失败）后未释放 permit / 未关闭 child / 未清理临时 worktree/branch | P0 | state | Q5 | review-only（`supervisor_terminal_cleanup_missing`） |
+| supervisor preset 的 restart 路径会重复注入协调终态或重复消费 `success_slots` 资源 | P0 | topology | Q4 | review-only（`supervisor_restart_not_idempotent`） |
+| supervisor happy path 接受 `Failed` / `Cancelled` slot 作为成功 | P0 | payload-content | Q4 | review-only（`supervisor_happy_path_accepts_failure`） |
+
+命中按上表入主表；`preset.execution_model_intent_mismatch` 是 U4 新增 review-only 软性 finding，与既有 lint id `preset.supervisor_requires_isolated` / `preset.supervisor_hat_publishes_coord_topic` / `preset.artifact_uses_internal_ledger` 复用底层问题，但触发条件是 **capability + Intent 一致性**而非 preset 名。`presets/en/ce-executor-supervisor.yml` 等既有 builtin 仍受既有 lint 约束，不在本表新触发条件内。
+
+### Agent skill audit（review-only，由 review SKILL Workflow 0a 弹窗默认跳过、选审触发）
+
+按 `references/agent-skill-audit.md` 的规程，对注入给 agent 的 skill 文档（`crates/ralph-core/data/*.md` / 外仓二进制内嵌）做内容级审计。**默认不审**，review SKILL 第 0a 步必须弹出交互选择菜单，默认选项是「仅审查 preset YAML（推荐）」。命中按上表 `default_severity` + `default_confidence` 入主表（与 `ralph preset check --strict` 输出的 lint ID 分开——本表 ID 不带 `lint.` 前缀，也**不**出现在 `ralph preset check` JSON）。
+
+| finding_id（裸 ID） | default_severity | default_confidence | aaf_question | category | 含义 |
+|---|---|---|---|---|---|
+| `agent_skill.leaks_internals` | P0 | 95 | Q3 | lint | skill 文档泄漏了 agent 不可见的内部实现细节（内部函数名 / 模块名 / 内部 ledger 路径 / review-only 注释 / 一次性事故报告路径 / 过窄 preset 案例） |
+| `agent_skill.unreadable` | P1 | 85 | Q3 | style | skill 文档可读性差（术语未解释 / 触发条件缺失 / 失败停止条件缺失 / 未按「agent 下一步能执行什么」写） |
+| `agent_skill.inject_claim_false` | P0 | 95 | Q3 / Q4 | lint | skill 文档 / hat `instructions:` 错误声称某 skill 已自动注入，或把 on-demand skill 写成 auto-inject；对账源：`ralph inspect prompt --hat <id> --format json` |
+| `preset.precheck_rule_without_synthesized_gate_hat` | P1 (default mode) / P0 (strict mode) | 90 | Q3 / Q4 | lint | `event_loop.precheck.rules.<X>` 声明 `enabled: true` 且 producer 已发 `<X>.proposed`，但有效 config 缺 `precheck-<X>` 拦截 hat（半 desugar 状态，proposed 事件无消费者）；常见于手工拼装 config 或 desugar 回归 — 跑 `normalize()`（标准加载路径会自动做）或恢复合成 gate hat 可修。merge 层整块剥掉 `event_loop.precheck` 的场景由 `merge_hats_overlay_preserves_precheck_when_operator_omits_it` 集成测试覆盖，不走本 finding |
+
 ### CE pipeline review/fix artifacts（review-only 软性缺口）
 
 Reviewer 在做 CE builtin preset review 时按本表入主表（不进 `ralph preset check` JSON，机制同 Artifact-First finding）。
@@ -179,6 +237,7 @@ Reviewer 在做 CE builtin preset review 时按本表入主表（不进 `ralph p
 | mandatory review artifact 缺失 / 不可读但 preset 没有任何阻塞事件路径 | P0 | topology | Q4 | reporter 之外的下游禁止消费阻塞事件 |
 | reporter 用 `ralph events --events-source main` 重建跨 hat 状态（业务字段而不是诊断字段） | P0 | visibility | Q2 | 必须只读 trigger payload 与 `report_input_file` bundle |
 | reporter 的 trigger topic schema 没有 `report_input_file` required field 或 field_docs 三段不完整 | P0（缺字段）/ P1（field_docs 缺段） | payload-content | Q4 / Q5 | CE builtin 结构化契约测试在 `crates/ralph-cli/src/presets.rs` 兜底 |
+| 「写操作者文件 + emit 完成 topic」的 hat，completion schema 缺路径字段 required，或 instructions 未要求 Confirm 打印 `DELIVERABLE_PATH` | P0 | visibility | Q4 / Q5 | 操作者必须能在 TUI 看到可读交付路径；触发条件以 instructions 为准，不以 hat 名为准 |
 | preset 把 `report.done` + `completion_promise` 双事件配对声明，但触发 hat 身份不是 preset 的 sole 收尾 hat（多个 hat 都 publish 这对） | P0 | topology | Q4 | 只允许唯一收尾 hat 享受窄例外 |
 | 同 activation 内 emit 第三个业务事件（即使前两个合法配对） | P0 | feasibility | Q4 | 窄例外只覆盖两个事件；第三仍按单事件预算被丢弃 |
 | 本次新增或修改的 handoff / identity / artifact reference / decision 字段缺 `field_docs` 三段 | P0（缺 `source`）/ P1（缺 `meaning` 或 `fill_rule`） | policy-feedback | Q4 | 结构化契约测试只覆盖本次新增合同，不借机强制迁移无关历史字段 |
@@ -202,6 +261,35 @@ artifact-first review-only finding **不**出现在 `ralph preset check` JSON；
 
 若后续 `crates/ralph-core/src/preset_lint/` 要把这些 finding 升级为 lint（实现 R8 / R9 / R10 / R11 / R12 的机械拦截），须先把 ID 加入 `crates/ralph-core/src/preset_lint/finding_id.rs` 并同步更新 `ALL_FINDING_IDS` 数组，同时把 `default_severity` / `default_confidence` 与本表保持一致；升级前 review 仍按本表入主表，并在 Remediation Plan 中标注 review-only 来源。本任务不涉及 Rust 代码修改。
 
+### Flow declaration topology finding（`ralph preset check` JSON 直接产出）
+
+`mechanism.flow.steps[]` 是公开 stable contract。这些 finding 在 `ralph preset check --strict` JSON 中按 `lint.preset.<id>` 输出。
+
+| finding_id | default_severity | 含义 | 怎么改 |
+|---|---|---|---|
+| `preset.flow_declaration_missing` | P1 / 85 | preset 声明了多 hat handoff 但 `mechanism.flow` 整段缺失，`advance_plan_step` 退化到 positional fallback，多 topic 路径不可审计 | 增加 `mechanism.flow.steps`，把每个跨 hat handoff 拆成单 step |
+| `preset.flow_unknown_emit_rejected` | P0 / 95 | 当前 step `allowed_emits` 不含该 topic，FlowStepScope 拒收 | 把该 topic 加到对应 step 的 `allowed_emits`；或拆出独立 step 显式声明 `on` |
+| `preset.flow_linear_positional_ambiguity` | P0 / 90 | 非末尾 `kind: linear` step 声明了 ≥2 个 allowed emits，且后续 step 全无 `on` / `on_any_of` 引用其中任一 topic——运行时仍会按位置回退推进，隐藏真实拓扑 | 把多个顺序 handoff 拆成各自 step，使用下一 step 的 `on` 声明进入条件；多源 block 走 `on_any_of` |
+
+`flow_linear_positional_ambiguity` 的精确触发条件（plan Unit 4 §13）：
+
+1. 当前 step 不是 steps 数组末尾；
+2. `kind == "linear"`；
+3. `allowed_emits.len() >= 2`；
+4. 所有后续 step 的 `on` ∪ `on_any_of` 与当前 allowed topics 交集为空。
+
+不在上述形状内的 multi-topic linear step（如已有显式 `on` / `on_any_of` 引用其中一个 topic）不会被该 finding 命中，**也不**读取 hat prompt 或修改 severity 随 strictness 的通用机制。
+
+### Runtime-contract topology finding（`ralph preset check` JSON 直接产出）
+
+这些 id **不带** `lint.` 前缀，来自 `runtime_contract` / `preset_validator`：
+
+| finding_id | default_severity | 含义 | 怎么改 |
+|---|---|---|---|
+| `topology.required_event_not_on_all_paths` | Error | `required_events` 某 topic 不在所有通往 completion 的路径上 | 换成真收敛 topic，或把成功脊门禁改到 `path_required_events` |
+| `topology.path_required_event_not_on_all_paths` | Error | `path_required_events.require` 可被绕过到达 `anchor` | 去掉绕过边，或调整 `anchor` / `require` |
+| `topology.unreachable_path_required` | Error | `path_required_events` 的 `anchor`/`require` 从起点不可达 | 补齐 publishes/triggers |
+
 ## required-event-to-completion 窄例外（review 复核条件）
 
 上方「同一 hat emit 多条业务事件」「终态 emit 前夹带其它业务事件」两条 P0 不再 blanket 适用。当且仅当以下**全部条件**成立时，review 可在不重新触发 P0 的前提下放过该 hat 的双事件 emit：
@@ -220,3 +308,86 @@ review 在放过此类双事件时，应在 Remediation Plan / 报告「AAF Deci
 - 标注当前 hat 是该 preset 的收尾 hat，其它 hat 不享受本例外。
 
 不满足上述任一条件时，仍按 P0 入主表并要求 author 修复。
+
+## Capability coverage finding_id (Unit 4 / plan 2026-07-27-002)
+
+<!-- anchor: wave-emit -->
+<!-- anchor: supervisor-emit -->
+<!-- anchor: task-id-live -->
+<!-- anchor: artifact-first -->
+<!-- anchor: payload-consistency -->
+<!-- anchor: trigger-context -->
+
+## Capability-triggered parallel-forge review-only findings (plan 2026-08-02-001 U3)
+
+下列 finding 全部为 review-only，不进 `ralph preset check` JSON。触发条件
+按 capability（`execution_model: supervisor` / wave / terminal ownership
+等）而非 preset 名称；`parallel-forge` 仅作验证样本。fixture 顶部注释与
+`skills/ralph-preset-review/fixtures/README.md` §8 标注 anti-pattern 轴、
+expected finding id 与本段对照命中。
+
+| finding_id | default_severity | default_confidence | aaf_question | category |
+|---|---|---|---|---|
+| `preset.worktree_reuse_fabricates_settlement` | P0 | 90 | Q4 / Q5 | payload-content |
+| `preset.readonly_hat_writes_artifacts` | P0 | 95 | Q3 | visibility |
+| `preset.correction_round_below_final_min` | P0 | 90 | Q4 | topology |
+| `preset.auditor_multi_terminal_publisher` | P0 | 95 | Q4 | topology |
+
+### Worktree reuse evidence 段
+
+| 缺口 | Severity | category | aaf_question | finding_id |
+|---|---|---|---|---|
+| hat `instructions` 把 `.ralph/reuse-history/<plan>/` 当作当前 wave 的新鲜 `forge.wave.settled` / `settled_task_ids` 证据（未重跑 wave 即宣称 settlement） | P0 | payload-content | Q4 / Q5 | `preset.worktree_reuse_fabricates_settlement` |
+| hat 把 `--reuse-worktree` / reuse-history 检索结果冒充新 plan identity / 复用 prefix 误当成 retry 路径 | P0 | payload-content | Q4 | `preset.worktree_reuse_fabricates_settlement` |
+| reuse 路径未声明可证据化的 artifact / commit SHA / plan identity 三件套 | P1 | payload-content | Q4 | review-only（`worktree_reuse_evidence_incomplete`） |
+
+review 命中后必须要求：要么在当前 activation 重跑 wave 并以新 emit 形成 settlement，要么把 reuse 写为「本次 loop 不进入 settlement，request `forge.reuse.assessed`」并阻塞到 deferred 实现落地；不得伪造 `settled_task_ids`。
+
+### Readonly hat gate 段
+
+| 缺口 | Severity | category | aaf_question | finding_id |
+|---|---|---|---|---|
+| hat 声明 `readonly: true`，但 `instructions` 仍要求 `cat >` / `tee` / `sed -i` / `ralph emit` 非 `review.*` 终态 / `git add` / `git commit` | P0 | visibility | Q3 | `preset.readonly_hat_writes_artifacts` |
+| readonly hat 缺 `allowed_write_paths` / `mutation_capture` 声明，且 instructions 含副作用动词 | P0 | visibility | Q3 | `preset.readonly_hat_writes_artifacts` |
+| readonly hat 命中 verdict 后静默 `git checkout . && git clean -fd` | P0 | visibility | Q3 | review-only（`readonly_hat_silently_resets_workspace`） |
+| readonly hat 试图用 artifact 写入代替 verdict 决策（mutation capture 越界） | P1 | state | Q5 | review-only（`readonly_artifact_overreach`） |
+
+review 命中后必须 fail-close：要么改 hat 为非 readonly 并把 verdict 写盘动作显式列在 `allowed_write_paths`，要么把写入动作移到独立非 readonly hat；不得在 review 流程中自动 reset 用户工作区。
+
+### Final correction 段
+
+| 缺口 | Severity | category | aaf_question | finding_id |
+|---|---|---|---|---|
+| dispatcher 在 `correction_round` < 3 时发 `forge.final.correction.settled`（schema `allowed_values: correction_round=[3]` runtime 强制） | P0 | topology | Q4 | `preset.correction_round_below_final_min` |
+| `forge.final.correction.settled` 的 `correction_round` 不在 schema 允许集（`{3}`） | P0 | topology | Q4 | review-only（`final_correction_round_out_of_range`） |
+| round 0–2 直接发终态，跳过 `forge.correction.requested` / `forge.correction.done` 中间路径 | P0 | topology | Q4 | `preset.correction_round_below_final_min` |
+| 同一 `failure_fingerprint` 在多轮 `forge.correction.done` 重复出现但 dispatcher 仍判 final | P0 | payload-content | Q4 | review-only（`final_correction_duplicate_fingerprint`） |
+
+review 命中后必须要求 dispatcher 把 round 强制 ≥ 3，否则继续走 `forge.correction.requested` → `forge.correction.done` 循环；不得绕过 `correction_round` schema 约束。
+
+### Auditor / reporter terminal ownership 段
+
+| 缺口 | Severity | category | aaf_question | finding_id |
+|---|---|---|---|---|
+| auditor hat `publishes` 同时含 `forge.audit.done` 与 `forge.report.done`（auditor 单业务终态被破坏） | P0 | topology | Q4 | `preset.auditor_multi_terminal_publisher` |
+| reporter 的 `forge.report.done` 后续 `LOOP_COMPLETE` 窄例外用在非 sole 收尾 hat 上 | P0 | topology | Q4 | review-only（`reporter_dual_emit_narrow_exception_overuse`） |
+| `forge.report.done` 的 `report_path` 与 `event_loop.completion_promise` 配对声明缺 `report_input_file` 字段或路径与 trigger payload 不一致 | P0 | payload-content | Q4 / Q5 | review-only（`reporter_completion_payload_mismatch`） |
+| preset 声明 `forge.audit.done` + `forge.report.done` 同时由同一 hat publish，缺一独立的 reporter | P0 | topology | Q4 | `preset.auditor_multi_terminal_publisher` |
+
+review 命中后必须要求：auditor 仅 publish `forge.audit.done`（或 `forge.plan.blocked`）；reporter 单独 publish `forge.report.done` 并在符合 `required-event-to-completion 窄例外` 时配 `event_loop.completion_promise`；completion payload 与 trigger `report_path` 一致。
+
+## review-only finding 默认值（capability-triggered parallel-forge 子集）
+
+| finding_id | default_severity | default_confidence |
+|---|---|---|
+| `preset.worktree_reuse_fabricates_settlement` | P0 | 90 |
+| `preset.readonly_hat_writes_artifacts` | P0 | 95 |
+| `preset.correction_round_below_final_min` | P0 | 90 |
+| `preset.auditor_multi_terminal_publisher` | P0 | 95 |
+
+fixture README §8、fixture 顶部注释与本表 ID 一一对应；review 命中按本表 `default_severity` + `default_confidence` 入主表（confidence ≥ 60 门槛仍适用），并在 Mechanical Lint Results 段注明「capability-triggered 项：review-only，不进 lint JSON」。
+
+| finding_id | description | severity | confidence起点 |
+|---|---|---|---|
+| `preset.capability_discovery_missing` | preset exercises a capability not covered in `preset-author-notes.md` | P1 | 60 |
+| `preset.review_evidence_coverage_gap` | review lacks evidence path to capability audit | P1 | 60 |

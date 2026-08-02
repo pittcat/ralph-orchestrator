@@ -7,13 +7,16 @@ It ships operator skills:
 
 | Skill | Purpose |
 |---|---|
-| `ralph-hats` | Create, inspect, validate user `.ralph/hats/` collections |
-| `ralph-loop` | Run, monitor, resume, merge, debug Ralph loops |
+| `ralh-hats` | Create, inspect, validate user `.ralph/hats/` collections |
 | `ralph-preset-author` | Draft presets (builtin + local) with per-hat AAF tables **+ payload contract notes** before review |
 | `ralph-preset-review` | Per-hat activation dry-run + **payload audit** + mechanical lint → `preset-review-report.md` |
 | `ralph-run-diagnosis` | Post-run deep diagnosis: artifacts, OPAC, mechanism vs preset attribution |
 
-`ralph-preset-common/` holds shared `references/` and fixtures (not a standalone marketplace skill).
+> **Plan 2026-08-02-001:** the previously bundled `ralph-loop` and
+> `ralph-preset-common` skills are gone. `ralph-loop` is retired (loop
+> operations stay in the runner CLI / web dashboard). The
+> author/review pair now ships its own `references/`, `fixtures/`,
+> and `tests/` files, so there is no shared common directory to bundle.
 
 These are public agent skills. They are not part of Ralph's internal
 `ralph tools skill` registry.
@@ -29,19 +32,19 @@ Mechanical lint (`ralph preset check`) only proves shape and topology. **Invisib
 
 ## Symlinks (local dev)
 
-Author and review skills symlink `references/` to `ralph-preset-common/references/`:
+> Symlinks are no longer required for `references/`: both author and
+> review ship their own. If you want them in `.claude/skills` and
+> `.cursor/skills` for local development, use plain `ln -s`:
 
 ```bash
-ln -sf ../ralph-preset-common/references skills/ralph-preset-author/references
-ln -sf ../ralph-preset-common/references skills/ralph-preset-review/references
-ln -sf ../../skills/ralph-preset-author .claude/skills/ralph-preset-author
-ln -sf ../../skills/ralph-preset-review .claude/skills/ralph-preset-review
-ln -sf ../../skills/ralph-run-diagnosis .claude/skills/ralph-run-diagnosis
-mkdir -p .cursor/skills
-ln -sf ../../skills/ralph-run-diagnosis .cursor/skills/ralph-run-diagnosis
+mkdir -p .claude/skills .cursor/skills
+ln -sf ../../skills/ralph-preset-author    .claude/skills/ralph-preset-author
+ln -sf ../../skills/ralph-preset-review    .claude/skills/ralph-preset-review
+ln -sf ../../skills/ralph-run-diagnosis    .claude/skills/ralph-run-diagnosis
+ln -sf ../../skills/ralph-run-diagnosis    .cursor/skills/ralph-run-diagnosis
 ```
 
-On Windows without symlink support, duplicate `references/` and keep in sync manually.
+On Windows without symlink support, copy the skills manually.
 
 ## Install with Claude Code
 
@@ -61,12 +64,11 @@ List the skills in this repository:
 npx skills add mikeyobrien/ralph-orchestrator --list
 ```
 
-Install hat + loop + preset skills for Claude Code:
+Install hat + preset skills for Claude Code:
 
 ```bash
 npx skills add mikeyobrien/ralph-orchestrator \
   --skill ralph-hats \
-  --skill ralph-loop \
   --skill ralph-preset-author \
   --skill ralph-preset-review \
   --skill ralph-run-diagnosis \

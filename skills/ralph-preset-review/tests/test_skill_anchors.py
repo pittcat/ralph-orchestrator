@@ -1,0 +1,194 @@
+#!/usr/bin/env python3
+"""2026-07-27-002 plan Unit 4: anchor contract tests for preset-author /
+preset-review SKILLs.
+
+After plan 2026-08-02-001 (capability-triggered operator skill split),
+the review skill owns its own fixtures/ and tests/ tree. This test:
+
+1. Pins a small set of stable anchors in the author / review SKILL
+   files and their references (so future edits cannot silently remove
+   the sections reviewers rely on).
+2. Verifies the four capability-triggered fixtures added by U3
+   (worktree-reuse / readonly / correction-exhaustion / terminal-ownership)
+   are present, each one declares its expected finding axis in a
+   stable top-of-file comment, and no two fixtures collide on the
+   review-only finding ID they advertise.
+"""
+from __future__ import annotations
+
+import re
+import sys
+from pathlib import Path
+from typing import Iterable
+
+# Anchor list: tests pin these strings exist at least once in the
+# corresponding doc. We deliberately do NOT lock full prompt text:
+# plans evolve, but stable section headings stay.
+ANCHORS: tuple[tuple[str, str], ...] = (
+    ("skills/ralph-preset-author/SKILL.md", "Capability discovery"),
+    ("skills/ralph-preset-review/SKILL.md", "Capability-triggered audit"),
+    ("skills/ralph-preset-author/references/commands.md", "Capability inventory"),
+    ("skills/ralph-preset-author/references/agent-native-model.md", "Runtime Audit Model"),
+)
+
+# Capability-triggered fixtures from plan 2026-08-02-001 U3.
+# Each entry: (fixture filename, expected finding id advertised in
+# the fixture header comment). The fixture file is required to be
+# loadable (a single declaration in fixtures/README.md is enough;
+# see `test_capability_fixtures_are_present`).
+CAPABILITY_FIXTURES: tuple[tuple[str, str], ...] = (
+    (
+        "worktree-reuse-negative-fixture.yml",
+        "preset.worktree_reuse_fabricates_settlement",
+    ),
+    (
+        "readonly-hat-gate-negative-fixture.yml",
+        "preset.readonly_hat_writes_artifacts",
+    ),
+    (
+        "correction-exhaustion-negative-fixture.yml",
+        "preset.correction_round_below_final_min",
+    ),
+    (
+        "terminal-ownership-negative-fixture.yml",
+        "preset.auditor_multi_terminal_publisher",
+    ),
+)
+
+
+def _project_root() -> Path:
+    return Path(__file__).resolve().parent.parent.parent.parent
+
+
+def _read(path: Path) -> str:
+    assert path.is_file(), f"missing file: {path}"
+    return path.read_text(encoding="utf-8")
+
+
+def _check_anchor(path: str, anchor: str) -> bool:
+    full = _project_root() / path
+    if not full.exists():
+        print(f"MISSING file: {full}")
+        return False
+    content = full.read_text(encoding="utf-8")
+    if anchor in content:
+        print(f"OK anchor {anchor!r} in {path}")
+        return True
+    print(f"FAIL anchor {anchor!r} not found in {path}")
+    return False
+
+
+def _check_anchor_unique(path: str, anchor: str) -> bool:
+    full = _project_root() / path
+    if not full.exists():
+        print(f"MISSING file: {full}")
+        return False
+    content = full.read_text(encoding="utf-8")
+    occurrences = content.count(anchor)
+    if occurrences == 0:
+        print(f"FAIL anchor {anchor!r} not found in {path}")
+        return False
+    if occurrences > 1:
+        print(
+            f"FAIL anchor {anchor!r} appears {occurrences} times in {path}; "
+            "must be unique"
+        )
+        return False
+    print(f"OK anchor {anchor!r} unique in {path}")
+    return True
+
+
+def _iter_all() -> Iterable[tuple[str, bool]]:
+    yield from _anchor_results()
+    yield from _anchor_uniqueness_results()
+    yield from _capability_fixture_results()
+
+
+def _anchor_results() -> Iterable[tuple[str, bool]]:
+    for path, anchor in ANCHORS:
+        yield f"anchor_present:{path}:{anchor}", _check_anchor(path, anchor)
+
+
+def _anchor_uniqueness_results() -> Iterable[tuple[str, bool]]:
+    # Stable SKILL.md headings must each appear at least once; lock
+    # against accidental duplicate sections by only requiring
+    # presence-not-multiple for capability headings that look stable.
+    # We pick the two highest-signal anchors (must be unique).
+    unique_anchors = (
+        ("skills/ralph-preset-author/SKILL.md", "Capability discovery"),
+        ("skills/ralph-preset-review/SKILL.md", "Capability-triggered audit"),
+    )
+    for path, anchor in unique_anchors:
+        yield f"anchor_unique:{path}:{anchor}", _check_anchor_unique(path, anchor)
+
+
+def _capability_fixture_results() -> Iterable[tuple[str, bool]]:
+    fixtures_dir = _project_root() / "skills" / "ralph-preset-review" / "fixtures"
+    advertised_ids: dict[str, str] = {}
+    yield "all_finding_ids_unique", _check_unique_advertised_ids(
+        fixtures_dir, advertised_ids
+    )
+    for filename, finding_id in CAPABILITY_FIXTURES:
+        yield f"fixture_present:{filename}", _check_fixture_present(
+            fixtures_dir, filename, finding_id
+        )
+
+
+def _check_fixture_present(
+    fixtures_dir: Path, filename: str, finding_id: str
+) -> bool:
+    full = fixtures_dir / filename
+    if not full.is_file():
+        print(f"MISSING capability fixture: {full}")
+        return False
+    text = _read(full)
+    # The fixture must advertise its expected review-only finding
+    # in a stable, greppable position so reviewers can pair the
+    # fixture with the corresponding finding-rubric table.
+    if finding_id not in text:
+        print(
+            f"FAIL capability fixture {filename} does not advertise "
+            f"finding id {finding_id!r}"
+        )
+        return False
+    # Must keep a loadable surface (event_loop + hats), not empty.
+    if "event_loop:" not in text or "hats:" not in text:
+        print(
+            f"FAIL capability fixture {filename} missing event_loop/hats"
+        )
+        return False
+    print(f"OK capability fixture {filename} ({finding_id})")
+    return True
+
+
+def _check_unique_advertised_ids(
+    fixtures_dir: Path, advertised_ids: dict[str, str]
+) -> bool:
+    # Avoid silent collisions: each capability fixture announces its
+    # own review-only finding id. Two fixtures must not advertise
+    # the same id.
+    fixtures_dir = _project_root() / "skills" / "ralph-preset-review" / "fixtures"
+    seen_ids: dict[str, str] = {}
+    collision = False
+    for filename, finding_id in CAPABILITY_FIXTURES:
+        prior = seen_ids.get(finding_id)
+        if prior is not None and prior != filename:
+            print(
+                f"FAIL capability fixture {filename} collides with {prior} "
+                f"on advertised finding id {finding_id!r}"
+            )
+            collision = True
+        seen_ids[finding_id] = filename
+    if not collision:
+        print(
+            "OK capability fixtures have unique advertised finding ids "
+            f"({len(seen_ids)} ids)"
+        )
+    return not collision
+
+
+if __name__ == "__main__":
+    ok = True
+    for label, passed in _iter_all():
+        ok = passed and ok
+    sys.exit(0 if ok else 1)

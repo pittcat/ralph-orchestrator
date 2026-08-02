@@ -44,7 +44,7 @@
    详细字段形状、写入流程、与 `--policy-check` 的边界见
    [Payload Contracts → Schema Metadata / Policy-Check 反馈 / Trigger Context](../guide/payload-contracts.md)。
 
-> **去双写硬规则**:hat `instructions` 不复述 schema 提示的字段含义，也不复述 `trigger_context.routing_hints` 的判定条件；要写就只引用 `## TRIGGER CONTEXT` 区块 / `--policy-check` 的 `field_docs`/`examples`。Lint 会检查 emitter hat 的 instructions 是否引用了 `ralph-tools-emit` 与新章节（详见 `skills/ralph-preset-common/references/finding-rubric.md`）。
+> **去双写硬规则**:hat `instructions` 不复述 schema 提示的字段含义，也不复述 `trigger_context.routing_hints` 的判定条件；要写就只引用 `## TRIGGER CONTEXT` 区块 / `--policy-check` 的 `field_docs`/`examples`。Lint 会检查 emitter hat 的 instructions 是否引用了 `ralph-tools-emit` 与新章节（详见 `skills/ralph-preset-review/references/finding-rubric.md`）。
 
 ---
 

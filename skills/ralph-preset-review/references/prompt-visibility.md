@@ -1,7 +1,7 @@
 # Prompt Visibility（共享规程）
 
 > **共享**：author / review / diagnose 三套 skill 都引用本文件。
-> **仅改 `skills/`**：本文件路径在 `skills/ralph-preset-common/references/`，author 与 review 的 `references` 已是 symlink 指向此处，**编辑时只动一处**。**禁止**把本文件写入 `.claude/skills/**`（那是 getaLawyer / 安装树副本）。
+> **仅改 `skills/`**：本文件路径在 `skills/ralph-preset-review/references/`（author skill 持有同一份的字节一致副本，覆盖 install 树比较契约）；**编辑时必须同步改动 author 与 review 两份**。**禁止**把本文件写入 `.claude/skills/**`（那是 getaLawyer / 安装树副本）。
 
 ## 1. 为什么需要这条规程
 

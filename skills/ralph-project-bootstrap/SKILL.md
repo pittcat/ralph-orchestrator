@@ -30,7 +30,9 @@ and vetted by `ralph-preset-review`.
   builtin completions live in `ralph-preset-author` / `ralph-preset-review`.
   If the caller needs to change the preset, hand off there.
 - **No day-to-day loop ops.** Once the suite ships, monitor / resume /
-  merge / debug work belongs to `ralph-loop`. Once a loop has run and
+  merge / debug work belongs to the in-loop CLI / web dashboard
+  (`ralph run`, `ralph loops`, `ralph diagnose`).  Once a loop has
+  run and
   needs post-mortem diagnosis, hand off to `ralph-run-diagnosis`.
 - **No silent backend spawning.** A safe loop smoke (if available) is
   always bounded by iteration / idle / wall-clock caps; any target-project

@@ -32,8 +32,8 @@ if ! command -v ralph >/dev/null 2>&1; then
   exit 2
 fi
 
-FALLBACK_FIXTURE="$REPO_ROOT/skills/ralph-preset-common/fixtures/aaf-fallback-success-terminal.yml"
-UNIT_LOOP_FIXTURE="$REPO_ROOT/skills/ralph-preset-common/fixtures/aaf-runtime-unit-loop.yml"
+FALLBACK_FIXTURE="$REPO_ROOT/skills/ralph-preset-review/fixtures/aaf-fallback-success-terminal.yml"
+UNIT_LOOP_FIXTURE="$REPO_ROOT/skills/ralph-preset-review/fixtures/aaf-runtime-unit-loop.yml"
 
 run_fixture_check() {
   local fixture="$1"

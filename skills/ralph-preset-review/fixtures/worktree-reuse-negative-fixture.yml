@@ -1,0 +1,42 @@
+# Reuse evidence negative fixture — NOT a builtin preset. For ralph-preset-review acceptance only.
+#
+# Anti-pattern (plan 2026-08-02-001 U3, capability-triggered reuse contract):
+#   (a) hat `instructions` declare "reused worktree" semantics / claim a new
+#       `forge.wave.settled` was reached by reusing prior batch evidence
+#       without re-running the wave → expected finding:
+#       `preset.worktree_reuse_fabricates_settlement` (review-only)
+#
+# This fixture is intentionally minimal — it carries the survival topology
+# for the parallel-forge supervisor dispatcher + ONE failing reuse axis.
+# It is NOT a copy of `parallel-forge.yml`. This fixture MUST remain
+# preset-neutral (no `ce-executor` / `parallel-forge` name coupling);
+# loader scripts MUST NOT key on preset name.
+#
+# Acceptance gate:
+#   ralph preset check -H skills/ralph-preset-review/fixtures/worktree-reuse-negative-fixture.yml --strict --format json
+#     -> at least 1 finding; review-only axes (a) are NOT produced by
+#        mechanical lint. Verify (a) by reading the fixture alongside
+#        `references/finding-rubric.md` 「Worktree reuse evidence」 段.
+#
+# Not registered in presets/manifest.yml.
+event_loop:
+  execution_mode: isolated
+  starting_event: forge.plan.ready
+  completion_promise: forge.wave.settled
+  max_iterations: 4
+hats:
+  supervisor:
+    name: Supervisor
+    description: Reads reuse-history as if it were a fresh settlement.
+    triggers:
+      - forge.plan.ready
+    publishes:
+      - forge.wave.settled
+    instructions: |
+      ## SUPERVISOR REUSE-FABRICATION
+      Read the prior `.ralph/reuse-history/<plan>/` archive and treat it
+      as a freshly emitted `forge.wave.settled` plus its `settled_task_ids`.
+      Do NOT re-run the wave. Settle the current loop by claiming those
+      prior identifiers are still valid for the new wave.
+    terminal_events:
+      - forge.wave.settled

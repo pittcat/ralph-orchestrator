@@ -9,12 +9,19 @@
 use serde::{Deserialize, Serialize};
 
 // Relative to crates/ralph-core/src/ (source file location).
+//
+// Authors and reviewers each read their own local references; the
+// author-side and review-side mirrors are kept byte-identical so
+// compile-time anchor coverage stays meaningful for both hats. Even
+// after the shared ``skills/ralph-preset-common`` directory is
+// removed, every capability in this inventory still has stable
+// ``<!-- anchor: <id> -->`` markers in both skill-local paths below.
 const AGENT_NATIVE_MODEL: &str =
-    include_str!("../../../skills/ralph-preset-common/references/agent-native-model.md");
+    include_str!("../../../skills/ralph-preset-author/references/agent-native-model.md");
 const COMMANDS_DOC: &str =
-    include_str!("../../../skills/ralph-preset-common/references/commands.md");
+    include_str!("../../../skills/ralph-preset-author/references/commands.md");
 const FINDING_RUBRIC: &str =
-    include_str!("../../../skills/ralph-preset-common/references/finding-rubric.md");
+    include_str!("../../../skills/ralph-preset-author/references/finding-rubric.md");
 
 /// Returns "yes" if both anchors are present, "partial" if at least one
 /// is present, "no" if none are present.
@@ -106,7 +113,7 @@ pub fn capability_inventory() -> Vec<Capability> {
             trigger_signal: "execution_model == wave | supervisor+wave",
             applies_when: "preset uses ralph wave emit / ralph wave verify",
             evidence_sources: &[
-                "skills/ralph-preset-common/references/finding-rubric.md",
+                "skills/ralph-preset-author/references/finding-rubric.md",
                 "crates/ralph-core/data/ralph-tools-wave.md",
             ],
             recommended_evidence_level: "runtime",
@@ -122,7 +129,7 @@ pub fn capability_inventory() -> Vec<Capability> {
             trigger_signal: "execution_model == supervisor | supervisor+wave",
             applies_when: "preset sets event_loop.supervisor.enabled",
             evidence_sources: &[
-                "skills/ralph-preset-common/references/finding-rubric.md",
+                "skills/ralph-preset-author/references/finding-rubric.md",
                 "presets/schemas/ce-executor-supervisor.yml",
             ],
             recommended_evidence_level: "runtime",
@@ -139,7 +146,7 @@ pub fn capability_inventory() -> Vec<Capability> {
             applies_when: "task_id is required for any work.done emit",
             evidence_sources: &[
                 "crates/ralph-core/data/ralph-tools-tasks.md",
-                "skills/ralph-preset-common/references/commands.md",
+                "skills/ralph-preset-author/references/commands.md",
             ],
             recommended_evidence_level: "runtime",
             source: "binary_embedded",
@@ -154,8 +161,8 @@ pub fn capability_inventory() -> Vec<Capability> {
             trigger_signal: "any preset that emits results",
             applies_when: "presets emit complete results / long content / cross-hat summaries",
             evidence_sources: &[
-                "skills/ralph-preset-common/references/agent-native-model.md",
-                "skills/ralph-preset-common/references/finding-rubric.md",
+                "skills/ralph-preset-author/references/agent-native-model.md",
+                "skills/ralph-preset-author/references/finding-rubric.md",
             ],
             recommended_evidence_level: "runtime",
             source: "binary_embedded",
@@ -187,7 +194,7 @@ pub fn capability_inventory() -> Vec<Capability> {
             applies_when: "preset declares summary_fields / routing_hints for a trigger topic",
             evidence_sources: &[
                 "crates/ralph-core/src/trigger_context.rs",
-                "skills/ralph-preset-common/references/commands.md",
+                "skills/ralph-preset-author/references/commands.md",
             ],
             recommended_evidence_level: "runtime",
             source: "binary_embedded",

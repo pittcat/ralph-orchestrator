@@ -107,6 +107,39 @@ Review 模拟每 hat 时，按上面七段核对每条 Q2 Observe / Q4 字段的
 
 `state_projection` 本身不直接喂下游 hat；它把 emit 字段写到 task / progress / orchestrator context 视图，下游 hat 通过 `ralph tools task list` / `ralph inspect loop` / trigger payload 字段名 读到。**review 必须把"上游 emit → projection → 下游可见视图 → 下游 Q2 Observe 命令"这条完整链路拉通**。
 
+### Projection-Owned Task Creation（单事件原子建 task DAG）
+
+当 hat 的输出是「一组内部 task」而不是单事件，普通 `state_projection.actions` 单 action 模式不够用。配置 typed `ensure_task_batch`：
+
+```
+上游 hat 写入 task-plan artifact，并 emit reference-only handoff (Q4)
+  → state_projection.actions.<topic> = ensure_task_batch
+  → runtime 校验 artifact path/digest，派生 canonical task DAG
+  → Projector 一次性校验 + ID mint + 持久化（任一失败整批零写）
+  → 下游 hat 通过 ralph tools task list 读 live task_id
+```
+
+`ensure_task_batch` 也可使用 schema-required payload items；同一 handoff 只能选择一种 task authority。artifact-backed 模式不得在 payload 中重复 derived task/wave/order 数组。
+
+- hat instructions 在 batch action 配置存在时**不得**让同一 hat 调 `ralph tools task add` / `task ensure` 走 CLI；preset lint `preset.instructions_task_mutation_authority_conflict` 会在载入时拒收。
+- Q3 适用：在 batch 模式下"task 创建"的 OPAC 命令是 Planner **emit handoff**，不是 `ralph tools task add`。
+- 下游 hat 的 `task_id` 字段必须来自 `ralph tools task list` 实时返回（prompt 的 `## ORCHESTRATOR CONTEXT` 块会注入），禁止把 inventory 里的占位 ID 抄进 payload。
+
+### Projection-Owned Task Close（单事件原子关 task）
+
+当执行类 hat 的完成事件与 task 关闭必须原子发生时，配置 typed `close_task`：
+
+```
+上游 hat emit exec.unit.done (Q4, payload: task_id, task_key, ...)
+  → state_projection.actions.exec.unit.done = close_task
+  → Projector 关闭 payload.task_id 指向的 live task
+  → 下游 hat 通过 ralph tools task list 读到真实 closed 状态
+```
+
+- hat instructions 在 close action 配置存在时**不得**让同一 hat 调 `ralph tools task close` 走 CLI；emit 即关闭。
+- `task_id`/`task_key` 必须透传 trigger payload，不得手写。
+- 未知 `task_id` 会被 schema/projection fail-closed 拒绝，不产生"已关闭"假象。
+
 **允许的路径（Q3 白名单入口）**
 
 | 用途 | 引用 skill / 命令 |
@@ -144,6 +177,7 @@ Review 模拟每 hat 时，按上面七段核对每条 Q2 Observe / Q4 字段的
 - 终态 emit 前夹带其它业务事件
 - 在 `crates/ralph-core/data/*.md` 写 preset 专用 hat 名 / 拓扑 / 一次性诊断术语（专用知识只放 preset instructions）
 - 引用未声明的 payload 字段（即便 schema 通过）
+- `LOOP_COMPLETE` 与前置终态事件路径字段不一致（启用 `completion_payload_match` 时 runtime 会拒收）
 
 ### Artifact-First 边界（业务 artifact vs runtime internal ledger）
 
@@ -168,7 +202,7 @@ Review 模拟每 hat 时，按上面七段核对每条 Q2 Observe / Q4 字段的
 |---|---|---|
 | 通用 agent guide | `crates/ralph-core/data/ralph-tools*.md` | emit/task/recovery/precheck 通用语义、EmitResult、bounded retry、live task identity |
 | Preset 专用 | `presets/en/<name>.yml` hat `instructions:` | 触发状态表、hat 角色、topic 编排、禁止动作 |
-| Loop 外评审 | `skills/ralph-preset-common/references/` | 作者/评审如何检查分层与 AAF、payload audit 表、confidence 校准 |
+| Loop 外评审 | `skills/ralph-preset-review/references/` + `skills/ralph-preset-author/references/` | 作者 / 评审如何检查分层与 AAF、payload audit 表、confidence 校准（review 与 author 各自持有一份能力一致的副本，覆盖独立安装契约）|
 | Artifact-First Handoff 知识分层 | 三层见下「Artifact-First Handoff 知识分层」段 | 本 hat 创建 / 读 artifact 的具体路径、生命周期责任、例外与理由（YAML）；artifact-first 模型、判定标准、违规列表（本 reference）；不在 `ralph-tools*.md` 写通用规则 |
 
 Author 起草 recovery 路径时：**data docs 引用 + preset 状态表行**，不得在 data docs 复制 preset 状态表。
@@ -178,8 +212,34 @@ Skill doc 不复述 `ralph-tools*.md` 的命令参数表；需要时**引用章�
 ### Artifact-First Handoff 知识分层（三层职责划分）
 
 - **`presets/en/<name>.yml` hat `instructions:`**（preset 决策层）：写**本 hat**创建 / 读 artifact 的具体路径、生命周期责任（产出方 / 消费方 / 保留 / 归档 / 清理）、例外与例外理由。粒度到字段级：「写到哪里」「从哪读」「谁负责」。
-- **`skills/ralph-preset-common/references/agent-native-model.md`**（loop 外评审层，本文件）：写 artifact-first 模型、判定标准（恢复价值 / 审计价值 / 下游依赖）、违规列表、边界（业务 artifact vs internal ledger）、灰色地带判定方法。**不写**具体的「`.ralph/<...>` 子目录命名约定」，由 preset 自决。
+- **`skills/ralph-preset-review/references/agent-native-model.md`**（loop 外评审层，本文件）+ `skills/ralph-preset-author/references/agent-native-model.md` 同步副本：写 artifact-first 模型、判定标准（恢复价值 / 审计价值 / 下游依赖）、违规列表、边界（业务 artifact vs internal ledger）、灰色地带判定方法。**不写**具体的「`.ralph/<...>` 子目录命名约定」，由 preset 自决。
 - **`crates/ralph-core/data/ralph-tools*.md`**（runtime 注入层）：**不写** artifact-first 通用规则。artifact-first 是 **preset 决策**，不是 runtime 决策；运行时只提供文件读写命令（如 OPAC Apply 阶段的 `Write` / `Edit`），不约束写哪里、什么时候写、是否落盘。`ralph-tools*.md` 最多以引用形式指向本 reference 的「Artifact-First Handoff 模型」或「Artifact-First 边界」段，不复制判定标准。
+
+## 执行模型（Execution Model）
+
+> **范围**：本节冻结「执行模型」枚举与能力检测信号，供 `ralph-preset-author` / `ralph-preset-review` / `ralph-run-diagnosis` 三套通用 skill 共用。**禁止**按 builtin preset 名称点名门控（例如不得新增「`ce-executor-supervisor*` 风格」类专检）；所有 audit / checklist / 诊断一律 **capability-triggered**（Intent + YAML / 产物信号触发）。
+
+**枚举（冻结，跨 plan 不再扩）**：
+
+| 值 | 含义 | 关键可见差异 |
+|---|---|---|
+| `single-chain` | 单条主链顺序推进，并行只在执行 hat 内部 subagent 拆分 | 默认推荐；无 `event_loop.supervisor.enabled`；无 dispatcher `ralph wave emit` |
+| `wave` | 主链上某步对多份同构工作做同 topic 批并行 fan-out | hat 依赖 `## WAVE CONTEXT`；dispatcher 调 `ralph wave emit` + `ralph wave verify` |
+| `supervisor` | runtime 管理多 slot / worktree / 排队与 fan-in | `event_loop.supervisor.enabled: true`；存在 `.ralph/supervisor.db`；协调 topic 由 runtime 管 |
+| `supervisor+wave` | supervisor 且 dispatcher 使用 wave fan-out | 上述两类信号同时出现 |
+
+**能力检测信号（冻结，供 review / diagnose 共用）**：
+
+| 信号来源 | 触发字段 / 关键字 |
+|---|---|
+| Intent 字段 | `execution_model` ∈ {`wave`, `supervisor`, `supervisor+wave`} |
+| YAML 拓扑 | `event_loop.supervisor.enabled: true` |
+| YAML / instructions | 出现 `ralph wave emit` / `ralph wave verify`，或 hat 依赖 `## WAVE CONTEXT` |
+| 产物（diagnose） | 存在 `.ralph/supervisor.db`，或 events 含 `wave_id`，或日志出现 wave fan-out |
+
+**默认推荐**：菜单第一项永远是 `single-chain`。用户否认 wave / supervisor → 锁定 `execution_model: single-chain`，后续拓扑不得引入 `event_loop.supervisor.enabled`、dispatcher 不得调用 `ralph wave emit`。
+
+**通用性硬约束**：**禁止**「preset 名称以 X 开头」之类名缀门控。`ce-executor-pipeline` 的 3b 既有规则保留，本计划不扩展该模式；**新加内容必须按 capability 触发**。
 
 ## Coordinator 分支（≤3 hat）
 
@@ -210,3 +270,14 @@ Skill doc 不复述 `ralph-tools*.md` 的命令参数表；需要时**引用章�
 - 本节列出的检查项属于「模型 / 边界」层，不是机械 lint 规则；review 报告以引用本 reference 的相应段（如「Artifact-First Handoff 模型」 / 「Artifact-First 边界」 / 「Artifact-First 状态传递」）作为 finding 的根因证据。
 - 后续如需把这些检查固化为 lint finding（带 `finding_id`），应在 `finding-rubric.md` 维护；本文件不引入新 finding_id。
 - author 与 reviewer 通过引用本 reference 段保持术语一致；review 不另造「Artifact-First」定义。
+
+## Runtime Audit Model (Unit 4 / plan 2026-07-27-002)
+
+<!-- anchor: wave-emit -->
+<!-- anchor: supervisor-emit -->
+<!-- anchor: task-id-live -->
+<!-- anchor: artifact-first -->
+<!-- anchor: payload-consistency -->
+<!-- anchor: trigger-context -->
+
+Preset author/review audits now use `ralph inspect prompt --trigger/--payload/--topic` to simulate hat activation without running the loop, and `ralph capability inventory --format json` to discover which runtime capabilities a preset exercises. The four evidence levels (`simulated` / `static` / `runtime` / `unverified`) classify findings by where the proof came from.

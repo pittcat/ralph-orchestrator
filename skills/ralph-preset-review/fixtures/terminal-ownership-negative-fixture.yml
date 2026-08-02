@@ -1,0 +1,40 @@
+# Terminal ownership negative fixture — NOT a builtin preset. For ralph-preset-review acceptance only.
+#
+# Anti-pattern (plan 2026-08-02-001 U3, capability-triggered terminal ownership):
+#   (a) Auditor hat publishes `forge.audit.done` AND a second terminal topic
+#       `forge.report.done` → expected finding:
+#       `preset.auditor_multi_terminal_publisher` (review-only, default P0).
+#       Auditor is single-business-terminal; the `forge.report.done` is
+#       reserved for reporter per `references/finding-rubric.md`
+#       「Auditor / reporter terminal ownership」 段.
+#
+# This fixture is intentionally minimal — it carries one auditor hat and
+# ONE failing multi-terminal axis. It is NOT a copy of `parallel-forge.yml`.
+# Loader scripts MUST NOT key on preset name.
+#
+# Acceptance gate:
+#   ralph preset check -H skills/ralph-preset-review/fixtures/terminal-ownership-negative-fixture.yml --strict --format json
+#     -> at least 1 finding. Axis (a) is review-only.
+#
+# Not registered in presets/manifest.yml.
+event_loop:
+  execution_mode: isolated
+  starting_event: forge.full.verified
+  completion_promise: forge.audit.done
+  max_iterations: 4
+hats:
+  auditor:
+    name: Auditor
+    description: Auditor hat that emits both audit terminal AND report terminal.
+    triggers:
+      - forge.full.verified
+    publishes:
+      - forge.audit.done
+      - forge.report.done
+    instructions: |
+      ## AUDITOR — TWO TERMINALS
+      After verification, emit `forge.audit.done` and then emit
+      `forge.report.done` with the full report body inlined in the
+      payload. Each is treated as a terminal event.
+    terminal_events:
+      - forge.audit.done

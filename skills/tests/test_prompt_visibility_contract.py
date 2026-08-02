@@ -3,9 +3,14 @@
 
 The plan locks a cross-skill contract:
 
-* ``skills/ralph-preset-common/references/prompt-visibility.md`` is the
+* ``skills/ralph-preset-review/references/prompt-visibility.md`` is the
   SSOT for the ``ralph inspect prompt`` workflow (auto vs on-demand
-  classification, outer-repo fallback).
+  classification, outer-repo fallback).  Plan ``2026-08-02-001``
+  migrated the prompt-visibility doc out of the (now-removed)
+  ``skills/ralph-preset-common/`` directory and into the review
+  skill's local ``references/`` tree; the review skill is the
+  canonical owner for prompt-visibility and finding-rubric
+  references.
 * ``skills/ralph-preset-author/SKILL.md`` (Workflow step 3, Drafting
   phase) MUST mandate a per-hat ``inspect prompt`` run before
   drafting or editing instructions, and MUST NOT direct operators to
@@ -39,12 +44,15 @@ from pathlib import Path
 import pytest
 
 ROOT = Path(__file__).resolve().parents[2]
-COMMON_REFS = ROOT / "skills" / "ralph-preset-common" / "references"
-PROMPT_VISIBILITY = COMMON_REFS / "prompt-visibility.md"
-FINDING_RUBRIC = COMMON_REFS / "finding-rubric.md"
-COMMANDS = COMMON_REFS / "commands.md"
-AUTHOR_CHECKLIST = COMMON_REFS / "author-checklist.md"
-AGENT_SKILL_AUDIT = COMMON_REFS / "agent-skill-audit.md"
+# Plan 2026-08-02-001: references migrated out of the (removed)
+# ``skills/ralph-preset-common/`` directory; the review skill now owns
+# the canonical copies that were previously shared.
+REVIEW_REFS = ROOT / "skills" / "ralph-preset-review" / "references"
+PROMPT_VISIBILITY = REVIEW_REFS / "prompt-visibility.md"
+FINDING_RUBRIC = REVIEW_REFS / "finding-rubric.md"
+COMMANDS = REVIEW_REFS / "commands.md"
+AUTHOR_CHECKLIST = REVIEW_REFS / "author-checklist.md"
+AGENT_SKILL_AUDIT = REVIEW_REFS / "agent-skill-audit.md"
 
 AUTHOR_SKILL = ROOT / "skills" / "ralph-preset-author" / "SKILL.md"
 REVIEW_SKILL = ROOT / "skills" / "ralph-preset-review" / "SKILL.md"
@@ -65,7 +73,7 @@ def _read(path: Path) -> str:
 
 
 def test_prompt_visibility_reference_exists() -> None:
-    """The shared procedure file must exist under skills/ralph-preset-common/references/."""
+    """The shared procedure file must exist under skills/ralph-preset-review/references/."""
     assert PROMPT_VISIBILITY.is_file(), (
         f"missing shared reference: {PROMPT_VISIBILITY}"
     )
@@ -158,6 +166,9 @@ def test_diagnosis_references_directory_under_skills() -> None:
                 "ralph-preset-common/ directory (would silently drift "
                 "between author/review and diagnose)"
             )
+            # Plan 2026-08-02-001: ``ralph-preset-common`` no longer
+            # exists in the source tree, but keep the negative check so
+            # any future reintroduction is caught here.
 
 
 # ---------------------------------------------------------------------------
@@ -288,7 +299,7 @@ def test_author_checklist_references_prompt_visibility() -> None:
 
 def test_install_tree_does_not_contain_prompt_visibility_copy() -> None:
     """``.claude/skills/<name>/references/prompt-visibility.md`` must
-    be byte-identical to the source ``skills/ralph-preset-common/
+    be byte-identical to the source ``skills/ralph-preset-review/
     references/prompt-visibility.md``.
 
     2026-07-26-002 U2 KTD1: ``skills/install.py`` is a physical
@@ -298,12 +309,32 @@ def test_install_tree_does_not_contain_prompt_visibility_copy() -> None:
     fail. The plan rejected both "force symlink" and "forbid any
     copy"; the byte-identical gate preserves a one-source-of-truth
     promise without forcing the install layout.
+
+    Plan 2026-08-02-001 updated the source path from the removed
+    ``skills/ralph-preset-common/references`` to the review skill's
+    local ``skills/ralph-preset-review/references`` directory.
     """
     if not CLAUDE_INSTALL_SKILLS.is_dir():
         pytest.skip(".claude/skills/ is not present (install tree absent)")
 
-    source_bytes = PROMPT_VISIBILITY.read_bytes()
-    install_copies = list(CLAUDE_INSTALL_SKILLS.rglob("prompt-visibility.md"))
+    # Plan 2026-08-02-001: the reference doc now lives under both the
+    # author and the review skill. The two skill-local copies are
+    # near-identical but legitimately differ in their self-location
+    # note (``本文件路径在 skills/ralph-preset-author/references`` vs
+    # ``…/ralph-preset-review/references``). The install tree must
+    # match whichever skill-local copy is the source for the given
+    # skill (the install tree mirrors the source byte-for-byte via
+    # ``skills/install.py``), so we accept either copy as authoritative.
+    source_candidates = [
+        ROOT / "skills" / "ralph-preset-author" / "references" / "prompt-visibility.md",
+        ROOT / "skills" / "ralph-preset-review" / "references" / "prompt-visibility.md",
+    ]
+    source_bytes_per_skill: dict[str, bytes] = {
+        path.parent.parent.parent.name: path.read_bytes()
+        for path in source_candidates
+        if path.is_file()
+    }
+    install_copies: list[Path] = list(CLAUDE_INSTALL_SKILLS.rglob("prompt-visibility.md"))
 
     if not install_copies:
         # Nothing to compare against; the install tree never
@@ -314,10 +345,17 @@ def test_install_tree_does_not_contain_prompt_visibility_copy() -> None:
 
     for path in install_copies:
         copy_bytes = path.read_bytes()
-        assert copy_bytes == source_bytes, (
+        # Match the install copy against the skill-local copy from the
+        # same skill (the install preserves the source byte-for-byte).
+        # Fall back to the review copy for any other location.
+        skill_name = path.parent.parent.parent.name
+        expected_source = source_bytes_per_skill.get(
+            skill_name,
+            source_bytes_per_skill.get("ralph-preset-review", b""),
+        )
+        assert copy_bytes == expected_source, (
             f"install copy at {path} drifted from source "
-            f"{PROMPT_VISIBILITY.relative_to(ROOT)} "
-            f"({len(copy_bytes)} bytes vs {len(source_bytes)} bytes); "
+            f"({len(copy_bytes)} bytes vs {len(expected_source)} bytes); "
             "rerun ./skills/install.py --force to refresh"
         )
 

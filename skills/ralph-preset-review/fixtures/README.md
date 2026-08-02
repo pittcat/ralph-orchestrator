@@ -13,6 +13,10 @@
 | `aaf-supervisor-capability-negative-fixture.yml` | Supervisor capability audit axes (2026-07-22-002 plan U6): supervisor with non-isolated mode, hat publishes `exec.wave.*`, dispatcher reads `supervisor.db`, execution_model Intent mismatch |
 | `reentry-dirty-worktree-positive-fixture.yml` | Step 1.25 re-entry dirty-worktree reconciliation (2026-07-28-002 plan R-F13): writable executor hat with full attributable/unattributable protocol — zero reentry findings expected |
 | `reentry-dirty-worktree-negative-fixture.yml` | Step 1.25 anti-patterns: missing reconciliation (P1), unconditional `git checkout . && git clean -fd` on unattributable dirt (P0), no fail-closed terminal (P0) |
+| `worktree-reuse-negative-fixture.yml` | Plan 2026-08-02-001 U3 capability-triggered reuse fixture — supervisor hat that fabricates a fresh `forge.wave.settled` from prior `.ralph/reuse-history/<plan>/` records |
+| `readonly-hat-gate-negative-fixture.yml` | Plan 2026-08-02-001 U3 — hat declared `readonly` whose `instructions` still `cat > file.md`, `git add`, and `git commit` (mutation capture missing) |
+| `correction-exhaustion-negative-fixture.yml` | Plan 2026-08-02-001 U3 — dispatcher emits `forge.final.correction.settled` after a single correction_round instead of the schema-required `correction_round: 3` |
+| `terminal-ownership-negative-fixture.yml` | Plan 2026-08-02-001 U3 — auditor hat publishes both `forge.audit.done` and `forge.report.done` (multi-terminal anti-pattern; auditor is single-business-terminal) |
 
 ## Acceptance Checklist
 
@@ -34,8 +38,8 @@ Author should **not** deliver notes with「待定」「上游会处理」「约�
 ### 2. Review negative fixtures
 
 ```bash
-ralph preset check -H skills/ralph-preset-common/fixtures/aaf-review-negative-fixture.yml --strict --format json
-ralph preset check -H skills/ralph-preset-common/fixtures/payload-audit-negative-fixture.yml --strict --format json
+ralph preset check -H skills/ralph-preset-review/fixtures/aaf-review-negative-fixture.yml --strict --format json
+ralph preset check -H skills/ralph-preset-review/fixtures/payload-audit-negative-fixture.yml --strict --format json
 ```
 
 **机械 lint（preset check）：**
@@ -146,8 +150,8 @@ shape error the soft AAF path is supposed to catch.
 ```bash
 # CLI 冒烟 — 不要求 strict 模式吐出新 finding (无新增 lint); 仅验证
 # fixture 可被加载 + 结构化 lint 不崩.
-ralph preset check -H skills/ralph-preset-common/fixtures/aaf-wave-capability-negative-fixture.yml --strict --format json
-ralph preset check -H skills/ralph-preset-common/fixtures/aaf-supervisor-capability-negative-fixture.yml --strict --format json
+ralph preset check -H skills/ralph-preset-review/fixtures/aaf-wave-capability-negative-fixture.yml --strict --format json
+ralph preset check -H skills/ralph-preset-review/fixtures/aaf-supervisor-capability-negative-fixture.yml --strict --format json
 
 # 软性 AAF (Wave/Supervisor capability audit) 是 review-only, 通过阅读
 # fixture 配合 references/finding-rubric.md 新增段对照命中。
@@ -157,6 +161,47 @@ ralph preset check -H skills/ralph-preset-common/fixtures/aaf-supervisor-capabil
 或任何 builtin preset 的全拓扑; 触发条件写在 fixture 顶部注释里, 与 builtin
 preset 名称完全无关。 任何 review 脚本不得按 `name starts with ce-executor-supervisor`
 对这两个 fixture 做特殊分支。
+
+### 8. Capability-triggered parallel-forge fixtures (2026-08-02-001 plan U3)
+
+`worktree-reuse-negative-fixture.yml` / `readonly-hat-gate-negative-fixture.yml` /
+`correction-exhaustion-negative-fixture.yml` / `terminal-ownership-negative-fixture.yml`
+carry the four capability-triggered axes that plan 2026-08-02-001
+documents in its R/U matrix:
+
+| Axis | What the YAML contains | Expected finding | Source |
+|---|---|---|---|
+| Reuse (a) | supervisor instructions treat prior reuse-history archive as a fresh `forge.wave.settled` | `preset.worktree_reuse_fabricates_settlement` | review-only |
+| Readonly (a) | `readonly: true` hat instructions still `cat > …` and `git add` and `git commit` | `preset.readonly_hat_writes_artifacts` (review-only, P0) | review-only |
+| Correction (a) | `forge.final.correction.settled` emitted after a single correction_round | `preset.correction_round_below_final_min` (review-only) | review-only |
+| Terminal (a) | auditor hat publishes BOTH `forge.audit.done` AND `forge.report.done` | `preset.auditor_multi_terminal_publisher` (review-only, default P0) | review-only |
+
+每个 fixture 顶部注释明示其 anti-pattern 轴、expected finding、和被审查
+的 review-only path。fixture 故意保持 preset-neutral（不复制
+`parallel-forge.yml`；无 preset 名称耦合）。
+
+**Acceptance gates:**
+
+```bash
+# CLI 冒烟 — 不要求 strict 模式吐出新 finding（review-only 不进 lint）；
+# 仅验证 fixture 可被加载 + 结构化 lint 不崩。
+for f in worktree-reuse-negative readonly-hat-gate-negative \
+         correction-exhaustion-negative terminal-ownership-negative; do
+  ralph preset check -H "skills/ralph-preset-review/fixtures/${f}.yml" \
+    --strict --format json >/dev/null
+done
+
+# 软性 AAF (worktree-reuse / readonly / correction / terminal) 是
+# review-only, 通过阅读 fixture 配合 references/finding-rubric.md
+# 「Worktree reuse evidence / Readonly hat gate / Final correction /
+# Terminal ownership」 段对照命中。
+```
+
+**Review-only finding 必须显式人工审**：4 个新 fixture 的 expected finding
+**不会**由 `ralph preset check` 自动吐出 (per `ralph-tools-precheck` /
+preset-lint 现状)；Mechanical Lint Results 段需显式注明「capability
+triggered 项：review-only，不进 lint JSON」。命中按 review-only ID +
+default severity + default confidence 入主表。
 
 ## Report output
 

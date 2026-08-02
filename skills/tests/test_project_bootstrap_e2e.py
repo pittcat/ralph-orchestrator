@@ -713,8 +713,11 @@ class TestCrossLayerBootstrap:
         """
         target = tmp_path / "skills"
         target.mkdir()
+        # Plan 2026-08-02-001: ``ralph-loop`` retired; the public
+        # catalog now lists author / review / bootstrap / diagnosis /
+        # e2e-bootstrap.
         expected = (
-            "ralph-loop",
+            "ralph-e2e-bootstrap",
             "ralph-preset-author",
             "ralph-preset-review",
             "ralph-project-bootstrap",
