@@ -7315,13 +7315,12 @@ impl EventLoop {
             if !blocked.is_empty() {
                 section.push_str("\nBlocked:\n");
                 for task in blocked {
-                    let ro_marker = if caller_hat_str.is_none()
-                        || task_capability(task).execution_ownership
-                    {
-                        ""
-                    } else {
-                        " [read-only]"
-                    };
+                    let ro_marker =
+                        if caller_hat_str.is_none() || task_capability(task).execution_ownership {
+                            ""
+                        } else {
+                            " [read-only]"
+                        };
                     section.push_str(&format!(
                         "- [blocked] [P{}] {} ({}){} — blocked by: {}{}\n",
                         task.priority,
@@ -7518,7 +7517,9 @@ impl EventLoop {
         // available (legacy / test constructors).
         let snapshot = match &self.execution_contract {
             Some(contract) => crate::hat_identity::HatIdentitySnapshot::from_config_and_contract(
-                &self.config, hat_id, contract,
+                &self.config,
+                hat_id,
+                contract,
             ),
             None => crate::hat_identity::HatIdentitySnapshot::from_config(&self.config, hat_id),
         };
@@ -12812,12 +12813,21 @@ impl EventLoop {
             // never advance phase authority. Without a compiled
             // contract (legacy / test paths) every event falls back to
             // a direct publish.
-            let u8_disposition =
-                crate::event_loop::disposition::classify(event.topic.as_str());
+            let u8_disposition = crate::event_loop::disposition::classify(event.topic.as_str());
 
             if u8_disposition.advances_flow() && u7_contract_digest.is_some() {
                 let digest = u7_contract_digest.as_deref().expect("checked above");
                 let ledger = self.state.state_ledger.as_ref().ok_or_else(|| {
+                    self.diagnostics.log_orchestration(
+                        self.state.iteration,
+                        event.source.as_ref().map(|h| h.as_str()).unwrap_or("unknown"),
+                        crate::diagnostics::OrchestrationEvent::BackpressureTriggered {
+                            reason: format!(
+                                "accepted transition unavailable for topic '{}': state ledger missing",
+                                event.topic
+                            ),
+                        },
+                    );
                     std::io::Error::other(format!(
                         "accepted transition unavailable for business/recovery topic '{}': state ledger missing",
                         event.topic
@@ -13973,9 +13983,7 @@ impl EventLoop {
                 // U8 (plan 2026-07-30-004): only Business / Recovery
                 // dispositions advance flow; diagnostic / loop-control
                 // topics never reach phase authority.
-                if crate::event_loop::disposition::classify(event.topic.as_str())
-                    .advances_flow()
-                {
+                if crate::event_loop::disposition::classify(event.topic.as_str()).advances_flow() {
                     self.apply_phase_authority_on_accepted(&event);
                 }
             }
@@ -14534,6 +14542,15 @@ impl EventLoop {
     /// `process_parse_result` (empty-turn early return and
     /// post-validation tail) route through here so the
     /// escape advance cannot diverge.
+    ///
+    /// 2026-08-01 plan P0-3 (U3 third-state): when a compiled
+    /// execution contract is attached but the state ledger is
+    /// uninitialised, the function fails closed via `io::Error`
+    /// and emits a `BackpressureTriggered` orchestration event
+    /// so operators can distinguish this from a normal commit
+    /// failure. See `docs/report/2026-08-01-ce-executor-pipeline-
+    /// 2026-08-01-001-fix-unified-execution-contract-p0-p1-plan-diagnosis.md`
+    /// §7 for the original observation.
     fn run_stall_detector_with_authority_advance(&mut self) -> std::io::Result<()> {
         let blocked_topic = derive_blocked_topic(&self.config);
         let Some(blocked) = run_stall_detector_on_state(
@@ -14548,6 +14565,15 @@ impl EventLoop {
 
         if let Some(contract) = self.execution_contract.as_ref() {
             let ledger = self.state.state_ledger.as_ref().ok_or_else(|| {
+                self.diagnostics.log_orchestration(
+                    self.state.iteration,
+                    "stall-detector",
+                    crate::diagnostics::OrchestrationEvent::BackpressureTriggered {
+                        reason:
+                            "fail-close blocked transition requires an initialized state ledger"
+                                .to_string(),
+                    },
+                );
                 std::io::Error::other(
                     "fail-close blocked transition requires an initialized state ledger",
                 )
@@ -14632,10 +14658,7 @@ impl EventLoop {
         // ledger partitionable so each loop sees only its own
         // authoritative step transitions.
         if let Some(loop_id) = self.current_loop_id() {
-            entry.insert(
-                "loop_id".to_string(),
-                serde_json::Value::String(loop_id),
-            );
+            entry.insert("loop_id".to_string(), serde_json::Value::String(loop_id));
         }
         let line = serde_json::Value::Object(entry).to_string();
         let Ok(mut f) = std::fs::OpenOptions::new()
@@ -15554,10 +15577,10 @@ pub fn load_flow_authority_current_step(
         // the first new entry overwrites the file.
         if let Some(active) = loop_id {
             let entry_loop = v.get("loop_id").and_then(|s| s.as_str());
-            if let Some(entry_loop) = entry_loop {
-                if entry_loop != active {
-                    continue;
-                }
+            if let Some(entry_loop) = entry_loop
+                && entry_loop != active
+            {
+                continue;
             }
         }
         last = Some(step.to_string());

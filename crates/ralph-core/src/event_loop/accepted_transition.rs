@@ -26,8 +26,8 @@
 //! the in-memory bus never saw it; the reverse (publish-without-outbox)
 //! can never happen.
 
-use crate::state::StateLedger;
 use crate::file_lock::FileLock;
+use crate::state::StateLedger;
 use ralph_proto::{Event, EventBus};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -188,13 +188,24 @@ impl AcceptedTransition {
         bus: &mut EventBus,
         validate: impl FnOnce(&Event) -> Result<(), String>,
     ) -> Result<OutboxEntry, TransitionError> {
-        let lock = FileLock::new(ledger.workspace().join(OUTBOX_RELATIVE_PATH))
-            .map_err(|e| TransitionError::CommitFailed { source: e.to_string() })?;
+        let lock = FileLock::new(ledger.workspace().join(OUTBOX_RELATIVE_PATH)).map_err(|e| {
+            TransitionError::CommitFailed {
+                source: e.to_string(),
+            }
+        })?;
         let _guard = lock
             .exclusive()
-            .map_err(|e| TransitionError::CommitFailed { source: e.to_string() })?;
+            .map_err(|e| TransitionError::CommitFailed {
+                source: e.to_string(),
+            })?;
         Self::commit_unlocked(
-            event, loop_id, activation_id, contract_revision, ledger, bus, validate,
+            event,
+            loop_id,
+            activation_id,
+            contract_revision,
+            ledger,
+            bus,
+            validate,
         )
     }
 
@@ -252,10 +263,7 @@ impl AcceptedTransition {
     /// reason (RTF-001: callers must not swallow this into "not
     /// committed", which silently degraded exactly-once to at-least-
     /// twice on a corrupted outbox).
-    pub fn is_committed(
-        workspace: &Path,
-        transition_id: &str,
-    ) -> std::io::Result<bool> {
+    pub fn is_committed(workspace: &Path, transition_id: &str) -> std::io::Result<bool> {
         read_outbox(workspace)
             .map(|entries| entries.iter().any(|e| e.transition_id == transition_id))
     }
@@ -271,8 +279,11 @@ impl AcceptedTransition {
         workspace: &Path,
         transition_id: &str,
     ) -> std::io::Result<Option<OutboxEntry>> {
-        read_outbox(workspace)
-            .map(|entries| entries.into_iter().find(|e| e.transition_id == transition_id))
+        read_outbox(workspace).map(|entries| {
+            entries
+                .into_iter()
+                .find(|e| e.transition_id == transition_id)
+        })
     }
 
     /// Commit a business transition with idempotency.
@@ -338,13 +349,21 @@ impl AcceptedTransition {
         validate: impl FnOnce(&Event) -> Result<(), String>,
         materialize: impl FnOnce() -> Result<Box<dyn FnOnce()>, String>,
     ) -> Result<OutboxEntry, TransitionError> {
-        let lock = FileLock::new(ledger.workspace().join(OUTBOX_RELATIVE_PATH))
-            .map_err(|e| TransitionError::CommitFailed { source: e.to_string() })?;
+        let lock = FileLock::new(ledger.workspace().join(OUTBOX_RELATIVE_PATH)).map_err(|e| {
+            TransitionError::CommitFailed {
+                source: e.to_string(),
+            }
+        })?;
         let _guard = lock
             .exclusive()
-            .map_err(|e| TransitionError::CommitFailed { source: e.to_string() })?;
-        // 1. Derive the deterministic identity tuple (same as commit).
-        let (_payload_digest, transition_id) =
+            .map_err(|e| TransitionError::CommitFailed {
+                source: e.to_string(),
+            })?;
+        // 1. Derive the deterministic identity tuple (same as commit). The
+        // payload digest is discarded here because replay dedup is keyed on
+        // transition_id only; commit() also derives it for the OutboxEntry
+        // payload_digest field, so the helper stays the single source.
+        let (_, transition_id) =
             Self::derive_identity(event, loop_id, activation_id, contract_revision);
 
         let workspace = ledger.workspace();
@@ -378,7 +397,8 @@ impl AcceptedTransition {
         validate(event).map_err(|reason| TransitionError::PreCommitRejected { reason })?;
 
         // 3. First commit — stage materialization and retain rollback.
-        let rollback = materialize().map_err(|reason| TransitionError::PreCommitRejected { reason })?;
+        let rollback =
+            materialize().map_err(|reason| TransitionError::PreCommitRejected { reason })?;
         let result = Self::commit_unlocked(
             event,
             loop_id,
@@ -1027,7 +1047,11 @@ mod tests {
             "bus must still see exactly 1 event after replay (dedup)"
         );
         let entries = read_outbox(&ws).unwrap();
-        assert_eq!(entries.len(), 1, "outbox must still hold exactly 1 valid entry");
+        assert_eq!(
+            entries.len(),
+            1,
+            "outbox must still hold exactly 1 valid entry"
+        );
     }
 
     #[test]
@@ -1122,8 +1146,7 @@ mod tests {
         // window against a concurrent commit append).
         let ack_ws = ws.clone();
         let ack_id = entry.transition_id.clone();
-        let handle =
-            std::thread::spawn(move || AcceptedTransition::ack(&ack_ws, &ack_id));
+        let handle = std::thread::spawn(move || AcceptedTransition::ack(&ack_ws, &ack_id));
 
         // Give the thread ample time to (incorrectly) finish if lockless.
         std::thread::sleep(std::time::Duration::from_millis(150));
@@ -1143,7 +1166,9 @@ mod tests {
         // And it really did mark the entry delivered.
         let entries = read_outbox(&ws).unwrap();
         assert!(
-            entries.iter().any(|e| e.transition_id == entry.transition_id && e.delivered),
+            entries
+                .iter()
+                .any(|e| e.transition_id == entry.transition_id && e.delivered),
             "entry must be marked delivered after ack"
         );
     }

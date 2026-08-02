@@ -116,8 +116,8 @@ pub fn evaluate_task_capability(
     };
     let caller_hat = caller_hat.unwrap_or("");
     let owns_task = !caller_hat.is_empty() && task.owner_hat_id.as_deref() == Some(caller_hat);
-    let is_coordinator = !caller_hat.is_empty()
-        && coordinator_hats.iter().any(|hat| hat == caller_hat);
+    let is_coordinator =
+        !caller_hat.is_empty() && coordinator_hats.iter().any(|hat| hat == caller_hat);
     let lifecycle_administration = loop_matches && (owns_task || is_coordinator);
     let execution_ownership = loop_matches && owns_task;
     let actionable_now = execution_ownership
@@ -183,13 +183,12 @@ impl EffectiveExecutionContract {
         if self.emit_denies.contains(&key) {
             return EmitDecision::Deny;
         }
-        if let Some(patterns) = self.glob_denies.get(hat) {
-            if patterns
+        if let Some(patterns) = self.glob_denies.get(hat)
+            && patterns
                 .iter()
                 .any(|pattern| crate::event_policy::matches_topic_rule(pattern, topic))
-            {
-                return EmitDecision::Deny;
-            }
+        {
+            return EmitDecision::Deny;
         }
         if self.emit_allows.contains(&key) {
             return EmitDecision::Allow;
@@ -353,7 +352,12 @@ fn canonical_contract_bytes(config: &RalphConfig) -> Vec<u8> {
 
     // Profile overlay.
     out.push_str("[profile]\n");
-    let mut specs: Vec<String> = config.profiles.default.iter().map(|s| s.to_string()).collect();
+    let mut specs: Vec<String> = config
+        .profiles
+        .default
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
     specs.sort();
     for spec in specs {
         out.push_str(&spec);
@@ -369,7 +373,10 @@ fn canonical_contract_bytes(config: &RalphConfig) -> Vec<u8> {
     ));
     out.push_str(&format!("prompt_mode={}\n", config.cli.prompt_mode));
     out.push_str(&format!("default_mode={}\n", config.cli.default_mode));
-    out.push_str(&format!("idle_timeout_secs={}\n", config.cli.idle_timeout_secs));
+    out.push_str(&format!(
+        "idle_timeout_secs={}\n",
+        config.cli.idle_timeout_secs
+    ));
     out.push_str(&format!(
         "autonomous_idle_timeout_secs={}\n",
         config
@@ -403,7 +410,10 @@ fn canonical_contract_bytes(config: &RalphConfig) -> Vec<u8> {
             let mut allowed_keys: Vec<&str> =
                 schema.allowed_values.keys().map(String::as_str).collect();
             allowed_keys.sort();
-            out.push_str(&format!("  allowed_values_keys={}\n", allowed_keys.join(",")));
+            out.push_str(&format!(
+                "  allowed_values_keys={}\n",
+                allowed_keys.join(",")
+            ));
         }
     }
 
@@ -444,7 +454,9 @@ fn canonical_contract_bytes(config: &RalphConfig) -> Vec<u8> {
         ));
         out.push_str(&format!(
             "  max_activations={}\n",
-            hat.max_activations.map(|v| v.to_string()).unwrap_or_default()
+            hat.max_activations
+                .map(|v| v.to_string())
+                .unwrap_or_default()
         ));
         out.push_str(&format!("  exempt={}\n", exempt.join(",")));
         out.push_str(&format!(
@@ -557,12 +569,8 @@ hats:
             .with_owner_hat(Some("executor".to_string()));
         let coordinators = vec!["dispatcher".to_string()];
 
-        let capability = evaluate_task_capability(
-            &task,
-            Some("dispatcher"),
-            Some("loop-1"),
-            &coordinators,
-        );
+        let capability =
+            evaluate_task_capability(&task, Some("dispatcher"), Some("loop-1"), &coordinators);
         assert!(capability.lifecycle_administration);
         assert!(!capability.execution_ownership);
         assert!(!capability.actionable_now);
@@ -574,8 +582,7 @@ hats:
         let mut task = crate::task::Task::new("unit".to_string(), 1)
             .with_loop_id(Some("loop-1".to_string()))
             .with_owner_hat(Some("executor".to_string()));
-        let capability =
-            evaluate_task_capability(&task, Some("executor"), Some("loop-1"), &[]);
+        let capability = evaluate_task_capability(&task, Some("executor"), Some("loop-1"), &[]);
         assert!(capability.lifecycle_administration);
         assert!(capability.execution_ownership);
         assert!(capability.actionable_now);
@@ -585,6 +592,23 @@ hats:
         assert!(blocked.execution_ownership);
         assert!(!blocked.actionable_now);
         assert_eq!(blocked.deny_reason, Some("task_blocked"));
+    }
+
+    #[test]
+    fn task_capability_in_progress_owner_is_not_actionable_now() {
+        // 2026-08-01 plan P1-3: U2 prompt now uses
+        // evaluate_task_capability.actionable_now (was owner-only);
+        // pin that an InProgress task is not actionable_now even
+        // though the owner still has execution_ownership.
+        let mut task = crate::task::Task::new("unit".to_string(), 1)
+            .with_loop_id(Some("loop-1".to_string()))
+            .with_owner_hat(Some("executor".to_string()));
+        task.status = crate::task::TaskStatus::InProgress;
+        let capability = evaluate_task_capability(&task, Some("executor"), Some("loop-1"), &[]);
+        assert!(capability.lifecycle_administration);
+        assert!(capability.execution_ownership);
+        assert!(!capability.actionable_now);
+        assert_eq!(capability.deny_reason, Some("task_not_open"));
     }
 
     #[test]
@@ -613,8 +637,8 @@ hats:
     publishes: ["debug.step"]
     instructions: "debug"
 "#;
-        let resolved = compile(RalphConfig::parse_yaml(yaml).expect("parse"))
-            .expect("compile must succeed");
+        let resolved =
+            compile(RalphConfig::parse_yaml(yaml).expect("parse")).expect("compile must succeed");
         let glob = resolved
             .contract()
             .glob_denies
@@ -643,8 +667,7 @@ hats:
         let task = crate::task::Task::new("unit".to_string(), 1)
             .with_loop_id(Some("loop-2".to_string()))
             .with_owner_hat(Some("executor".to_string()));
-        let capability =
-            evaluate_task_capability(&task, Some("executor"), Some("loop-1"), &[]);
+        let capability = evaluate_task_capability(&task, Some("executor"), Some("loop-1"), &[]);
         assert!(!capability.lifecycle_administration);
         assert!(!capability.execution_ownership);
         assert!(!capability.actionable_now);
@@ -672,8 +695,9 @@ hats:
     fn digest_is_sensitive_to_profile_overlay() {
         let base = compile(valid_config()).expect("base");
         let mut changed = valid_config();
-        changed.profiles.default = vec![crate::config::ProfileSpec::parse_str("repo:strict")
-            .expect("profile spec parses")];
+        changed.profiles.default = vec![
+            crate::config::ProfileSpec::parse_str("repo:strict").expect("profile spec parses"),
+        ];
         let changed = compile(changed).expect("changed");
         assert_ne!(
             base.digest(),
@@ -784,7 +808,9 @@ hats:
         // `executor` does not publish `LOOP_COMPLETE` and there is no rule for
         // it → fail-closed deny (R4 unknown capability).
         assert_eq!(
-            resolved.contract().emit_decision("executor", "LOOP_COMPLETE"),
+            resolved
+                .contract()
+                .emit_decision("executor", "LOOP_COMPLETE"),
             EmitDecision::Deny,
             "unknown emit capability must fail closed"
         );
@@ -835,10 +861,12 @@ hats:
         config.event_loop.execution_contracts = Some(contracts);
 
         let resolved = compile(config).expect("contract topic with a consumer must compile");
-        assert!(resolved
-            .contract()
-            .declared_contract_topics
-            .contains("work.done"));
+        assert!(
+            resolved
+                .contract()
+                .declared_contract_topics
+                .contains("work.done")
+        );
     }
 
     #[test]
@@ -848,10 +876,9 @@ hats:
         // consumer check runs even for an orphan topic.
         let mut contracts = ExecutionContractsConfig::default();
         contracts.enabled = false;
-        contracts.rules.insert(
-            "orphan.topic".to_string(),
-            ExecutionContractRule::default(),
-        );
+        contracts
+            .rules
+            .insert("orphan.topic".to_string(), ExecutionContractRule::default());
         config.event_loop.execution_contracts = Some(contracts);
 
         compile(config).expect("disabled contracts must not produce findings");
@@ -864,9 +891,10 @@ hats:
         // it needs no downstream consumer.
         let mut contracts = ExecutionContractsConfig::default();
         contracts.enabled = true;
-        contracts
-            .rules
-            .insert("LOOP_COMPLETE".to_string(), ExecutionContractRule::default());
+        contracts.rules.insert(
+            "LOOP_COMPLETE".to_string(),
+            ExecutionContractRule::default(),
+        );
         config.event_loop.execution_contracts = Some(contracts);
 
         compile(config).expect("terminal contract topic must compile without a consumer");
