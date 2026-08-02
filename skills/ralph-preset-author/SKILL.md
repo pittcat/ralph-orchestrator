@@ -67,6 +67,7 @@ Use this skill to design and draft Ralph **presets** (builtin or local) with **A
    - **If a material ambiguity remains or the user has not confirmed: STOP.** Do not draft YAML/schema and do not present a topology as final.
 
 0d. **Key-hat scope and opt-in decision gate (capability-triggered; operator chooses the mode):**
+   - Author builds a **preliminary scope (初评)** table from capability signals (one row per key-hat before drafting). The reviewer will independently re-derive its own scope later; author's preliminary scope is preserved as a comparison source, not as a binding scope.
    - Capability triggers that put a hat into Gate Scope (Chinese/English anchors both kept so review can grep either vocabulary):
 
      | Trigger signal | Plain-language description |

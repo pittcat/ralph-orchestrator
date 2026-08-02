@@ -1228,3 +1228,162 @@ def test_review_metadata_mentions_independent_scope() -> None:
     ), (
         "ralph-preset-review metadata must reference independent scope"
     )
+
+
+# ---------------------------------------------------------------------------
+# U3 (plan 2026-08-02-002): cross-skill metadata + structural regression
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("skill_path", [AUTHOR_SKILL, REVIEW_SKILL])
+def test_both_skills_use_six_metric_vocabulary(skill_path: Path) -> None:
+    """Both skills must reference the six metric names verbatim.
+
+    Lock cross-skill parity: same English metric anchors appear on both
+    sides so author notes and review report stay reconcilable.
+    """
+    text = _read(skill_path)
+    for metric in KEY_HAT_METRICS:
+        assert metric in text, (
+            f"{skill_path.name} must reference metric '{metric}'"
+        )
+
+
+@pytest.mark.parametrize("skill_path", [AUTHOR_SKILL, REVIEW_SKILL])
+def test_both_skills_list_three_gate_modes(skill_path: Path) -> None:
+    """Both skills must enumerate the three gate modes: hard / record / off."""
+    text = _read(skill_path)
+    for mode in KEY_HAT_GATE_MODES:
+        assert mode in text or mode.replace("-", "_") in text, (
+            f"{skill_path.name} must reference gate mode '{mode}'"
+        )
+
+
+@pytest.mark.parametrize("skill_path", [AUTHOR_SKILL, REVIEW_SKILL])
+def test_both_skills_reference_both_critical_structured_checks(skill_path: Path) -> None:
+    """Both skills must mention both Critical structured checks."""
+    text = _read(skill_path)
+    for critical in ("Critical Ambiguities", "Critical Unverified Assumptions"):
+        assert critical in text, (
+            f"{skill_path.name} must reference {critical}"
+        )
+
+
+def test_author_has_initial_scope_reviewer_has_independent_scope() -> None:
+    """Author side declares its preliminary scope; Reviewer side declares independent scope."""
+    author_text = _read(AUTHOR_SKILL)
+    review_text = _read(REVIEW_SKILL)
+    assert re.search(
+        r"preliminary[\s_-]*scope|初评|初步\s*scope|author[\s_-]*scope",
+        author_text,
+        re.IGNORECASE,
+    ), "Author SKILL.md must declare a preliminary scope concept"
+    assert re.search(
+        r"independent[\s_-]*scope|独立\s*scope|重新\s*识别|独立\s*重新",
+        review_text,
+        re.IGNORECASE,
+    ), "Reviewer SKILL.md must declare independent scope (re-derived)"
+
+
+def test_review_records_author_reviewer_scope_delta() -> None:
+    """Review report must record the author/reviewer scope delta."""
+    text = _read(REVIEW_SKILL)
+    assert re.search(
+        r"author.{0,40}reviewer.{0,40}(delta|diff|差异|gap)|scope[\s_-]*(delta|gap|差异)",
+        text,
+        re.IGNORECASE | re.DOTALL,
+    ), "Review SKILL.md must record author/reviewer scope delta"
+
+
+def test_metadata_prompts_keep_original_tasks() -> None:
+    """Adding scope prompts must not delete the original AAF/Payload/Handoff task language."""
+    author_text = _read(AUTHOR_METADATA).lower()
+    review_text = _read(REVIEW_METADATA).lower()
+    # Original Author: must still reference AAF 五问 and Payload Contract
+    assert "aaf" in author_text, "Author metadata must retain AAF 五问 reference"
+    assert "payload contract" in author_text, (
+        "Author metadata must retain Payload Contract reference"
+    )
+    # Original Reviewer: must still reference AAF, payload audit / per-hat AAF, and handoff audit
+    for token in ("aaf", "payload", "handoff"):
+        assert token in review_text, (
+            f"Reviewer metadata must retain {token} reference"
+        )
+
+
+def test_new_key_hat_rules_do_not_introduce_name_prefix_gate_anywhere() -> None:
+    """Across both skills + both metadata files, key-hat rules must not encode preset-name gates.
+
+    The pre-existing CE pipeline 3b check (grandfathered) is the only allowed
+    preset-name gate in scope; it lives in Workflow 3b and explicitly
+    references ``ce-executor-pipeline*``.  We allow that one line and any
+    line that forbids the pattern in negation context.
+    """
+    files = [AUTHOR_SKILL, REVIEW_SKILL, AUTHOR_METADATA, REVIEW_METADATA]
+    pattern = re.compile(
+        r"(?:preset name|preset_name).{0,40}(starts? with|begins? with|prefix)|"
+        r"名称以.{0,40}开头",
+        re.IGNORECASE,
+    )
+    for path in files:
+        text = path.read_text(encoding="utf-8")
+        for idx, line in enumerate(text.splitlines()):
+            if not pattern.search(line):
+                continue
+            if re.search(
+                r"禁止|forbid|not allowed|do not|不得|不允许|hard rule|硬约束|capability|不得\s*名",
+                line,
+                re.IGNORECASE,
+            ):
+                continue
+            # Grandfather the existing 3b CE pipeline exemption.
+            if "3b" in line or "ce-executor-pipeline" in line or "其他 preset 不强制" in line:
+                continue
+            pytest.fail(
+                f"{path}:{idx + 1} introduces an active preset-name gate:\n  {line}"
+            )
+
+
+def test_existing_execution_model_contract_suite_intact() -> None:
+    """Regression: the previously collected execution-model contract tests still collect and pass."""
+    # Reuse a few stable anchors already proven in U1/U2 above; this test
+    # # is a structural smoke that asserts key existing contract tests are
+    # # still in the collection.
+    import importlib
+
+    mod = importlib.import_module("skills.tests.test_execution_model_contract")
+    names = {n for n in dir(mod) if n.startswith("test_")}
+    expected = {
+        "test_author_skill_asks_execution_model",
+        "test_author_deny_locks_single_chain",
+        "test_prereview_gate_references_model_branches",
+        "test_review_skill_capability_gates",
+        "test_review_skill_preserves_ce_pipeline_3b",
+        "test_agent_native_model_defines_execution_models",
+        "test_rubric_has_wave_capability_audit",
+        "test_rubric_has_supervisor_capability_audit",
+    }
+    missing = expected - names
+    assert not missing, (
+        f"existing execution-model contract tests missing from module: {sorted(missing)}"
+    )
+
+
+def test_author_notes_gate_scope_table_field_contract() -> None:
+    """Author SKILL.md must lock the Gate Scope table columns required for review alignment."""
+    text = _read(AUTHOR_SKILL)
+    expected_columns = (
+        "Hat",
+        "Trigger reason",
+        "Applicable metrics",
+        "Evidence",
+        "Unverified assumptions",
+        "Critical ambiguities",
+        "Critical unverified assumptions",
+        "Mode",
+        "Decision",
+    )
+    for col in expected_columns:
+        assert col in text or col.lower() in text.lower(), (
+            f"Author SKILL.md Gate Scope table must include column '{col}'"
+        )
