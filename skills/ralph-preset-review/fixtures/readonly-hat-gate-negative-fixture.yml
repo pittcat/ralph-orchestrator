@@ -1,0 +1,44 @@
+# Readonly hat gate negative fixture — NOT a builtin preset. For ralph-preset-review acceptance only.
+#
+# Anti-pattern (plan 2026-08-02-001 U3, capability-triggered readonly contract):
+#   (a) hat declared `readonly: true` with `instructions` writing files /
+#      `ralph emit`-ing non-terminal topics → expected finding:
+#      `preset.readonly_hat_writes_artifacts` (review-only)
+#      AND review must surface lack of `allowed_write_paths` /
+#      `mutation_capture` declaration as a strict P0 (via
+#      references/finding-rubric.md 「Readonly hat gate」 段).
+#
+# This fixture is intentionally minimal — it carries one readonly
+# hat with concrete write-style instructions. It is NOT a copy of
+# any preset. Loader scripts MUST NOT key on preset name.
+#
+# Acceptance gate:
+#   ralph preset check -H skills/ralph-preset-review/fixtures/readonly-hat-gate-negative-fixture.yml --strict --format json
+#     -> at least 1 finding; review-only axis (a) is NOT produced by
+#        mechanical lint — verify by reading the fixture alongside
+#        `references/finding-rubric.md` 「Readonly hat gate」 段.
+#
+# Not registered in presets/manifest.yml.
+event_loop:
+  execution_mode: isolated
+  starting_event: build.verified
+  completion_promise: review.complete
+  max_iterations: 3
+hats:
+  reviewer:
+    name: Reviewer
+    description: Readonly review hat; its instructions nonetheless edit files.
+    triggers:
+      - build.verified
+    publishes:
+      - review.complete
+    instructions: |
+      ## REVIEWER — DECLARED READONLY, ACTUALLY WRITES
+      Although hat is declared readonly, you SHOULD write
+      `.ralph/reviews/<plan>-review.md` with the verdict before
+      emitting. Use `cat > path/to/file.md << EOF` for this. Also
+      `git add` and `git commit` the resulting file once you are
+      satisfied with the verdict body.
+    readonly: true
+    terminal_events:
+      - review.complete

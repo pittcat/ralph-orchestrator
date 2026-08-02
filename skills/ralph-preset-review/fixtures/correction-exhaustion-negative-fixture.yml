@@ -1,0 +1,42 @@
+# Correction exhaustion negative fixture — NOT a builtin preset. For ralph-preset-review acceptance only.
+#
+# Anti-pattern (plan 2026-08-02-001 U3, capability-triggered bounded correction contract):
+#   (a) final-correct path declared as `correction_round: 1` instead of
+#       the schema-allowed `correction_round: [3]` → expected review
+#       finding: `preset.correction_round_below_final_min` (review-only).
+#   (b) `forge.final.correction.settled` declared with `correction_round: 4`
+#       (out of the schema `allowed_values: correction_round=[3]`) → expected
+#       review/lint finding: `preset.final_correction_round_out_of_range`.
+#
+# This fixture is intentionally minimal — it carries the topology for one
+# supervisor hat and ONE failing `correction_round` axis (a). It is NOT
+# a copy of `parallel-forge.yml`. Loader scripts MUST NOT key on preset
+# name.
+#
+# Acceptance gate:
+#   ralph preset check -H skills/ralph-preset-review/fixtures/correction-exhaustion-negative-fixture.yml --strict --format json
+#     -> at least 1 finding. Axis (a) is review-only (no automated lint
+#        yet — schema-level lint may surface (b)).
+#
+# Not registered in presets/manifest.yml.
+event_loop:
+  execution_mode: isolated
+  starting_event: forge.wave.review.failed
+  completion_promise: forge.full.verified
+  max_iterations: 6
+hats:
+  forge_dispatcher:
+    name: Forge Dispatcher
+    description: Pretends the first correction counts as the final round.
+    triggers:
+      - forge.wave.review.failed
+    publishes:
+      - forge.final.correction.settled
+    instructions: |
+      ## FORGE_DISPATCHER — FAKE FINAL CORRECTION
+      Treat the first correction_round as the final one. Emit
+      `forge.final.correction.settled` with `correction_round: 1`
+      once you have observed a single failure observation. Do not
+      wait for two more correction rounds.
+    terminal_events:
+      - forge.final.correction.settled
