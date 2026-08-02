@@ -317,6 +317,75 @@ review 在放过此类双事件时，应在 Remediation Plan / 报告「AAF Deci
 <!-- anchor: payload-consistency -->
 <!-- anchor: trigger-context -->
 
+## Capability-triggered parallel-forge review-only findings (plan 2026-08-02-001 U3)
+
+下列 finding 全部为 review-only，不进 `ralph preset check` JSON。触发条件
+按 capability（`execution_model: supervisor` / wave / terminal ownership
+等）而非 preset 名称；`parallel-forge` 仅作验证样本。fixture 顶部注释与
+`skills/ralph-preset-review/fixtures/README.md` §8 标注 anti-pattern 轴、
+expected finding id 与本段对照命中。
+
+| finding_id | default_severity | default_confidence | aaf_question | category |
+|---|---|---|---|---|
+| `preset.worktree_reuse_fabricates_settlement` | P0 | 90 | Q4 / Q5 | payload-content |
+| `preset.readonly_hat_writes_artifacts` | P0 | 95 | Q3 | visibility |
+| `preset.correction_round_below_final_min` | P0 | 90 | Q4 | topology |
+| `preset.auditor_multi_terminal_publisher` | P0 | 95 | Q4 | topology |
+
+### Worktree reuse evidence 段
+
+| 缺口 | Severity | category | aaf_question | finding_id |
+|---|---|---|---|---|
+| hat `instructions` 把 `.ralph/reuse-history/<plan>/` 当作当前 wave 的新鲜 `forge.wave.settled` / `settled_task_ids` 证据（未重跑 wave 即宣称 settlement） | P0 | payload-content | Q4 / Q5 | `preset.worktree_reuse_fabricates_settlement` |
+| hat 把 `--reuse-worktree` / reuse-history 检索结果冒充新 plan identity / 复用 prefix 误当成 retry 路径 | P0 | payload-content | Q4 | `preset.worktree_reuse_fabricates_settlement` |
+| reuse 路径未声明可证据化的 artifact / commit SHA / plan identity 三件套 | P1 | payload-content | Q4 | review-only（`worktree_reuse_evidence_incomplete`） |
+
+review 命中后必须要求：要么在当前 activation 重跑 wave 并以新 emit 形成 settlement，要么把 reuse 写为「本次 loop 不进入 settlement，request `forge.reuse.assessed`」并阻塞到 deferred 实现落地；不得伪造 `settled_task_ids`。
+
+### Readonly hat gate 段
+
+| 缺口 | Severity | category | aaf_question | finding_id |
+|---|---|---|---|---|
+| hat 声明 `readonly: true`，但 `instructions` 仍要求 `cat >` / `tee` / `sed -i` / `ralph emit` 非 `review.*` 终态 / `git add` / `git commit` | P0 | visibility | Q3 | `preset.readonly_hat_writes_artifacts` |
+| readonly hat 缺 `allowed_write_paths` / `mutation_capture` 声明，且 instructions 含副作用动词 | P0 | visibility | Q3 | `preset.readonly_hat_writes_artifacts` |
+| readonly hat 命中 verdict 后静默 `git checkout . && git clean -fd` | P0 | visibility | Q3 | review-only（`readonly_hat_silently_resets_workspace`） |
+| readonly hat 试图用 artifact 写入代替 verdict 决策（mutation capture 越界） | P1 | state | Q5 | review-only（`readonly_artifact_overreach`） |
+
+review 命中后必须 fail-close：要么改 hat 为非 readonly 并把 verdict 写盘动作显式列在 `allowed_write_paths`，要么把写入动作移到独立非 readonly hat；不得在 review 流程中自动 reset 用户工作区。
+
+### Final correction 段
+
+| 缺口 | Severity | category | aaf_question | finding_id |
+|---|---|---|---|---|
+| dispatcher 在 `correction_round` < 3 时发 `forge.final.correction.settled`（schema `allowed_values: correction_round=[3]` runtime 强制） | P0 | topology | Q4 | `preset.correction_round_below_final_min` |
+| `forge.final.correction.settled` 的 `correction_round` 不在 schema 允许集（`{3}`） | P0 | topology | Q4 | review-only（`final_correction_round_out_of_range`） |
+| round 0–2 直接发终态，跳过 `forge.correction.requested` / `forge.correction.done` 中间路径 | P0 | topology | Q4 | `preset.correction_round_below_final_min` |
+| 同一 `failure_fingerprint` 在多轮 `forge.correction.done` 重复出现但 dispatcher 仍判 final | P0 | payload-content | Q4 | review-only（`final_correction_duplicate_fingerprint`） |
+
+review 命中后必须要求 dispatcher 把 round 强制 ≥ 3，否则继续走 `forge.correction.requested` → `forge.correction.done` 循环；不得绕过 `correction_round` schema 约束。
+
+### Auditor / reporter terminal ownership 段
+
+| 缺口 | Severity | category | aaf_question | finding_id |
+|---|---|---|---|---|
+| auditor hat `publishes` 同时含 `forge.audit.done` 与 `forge.report.done`（auditor 单业务终态被破坏） | P0 | topology | Q4 | `preset.auditor_multi_terminal_publisher` |
+| reporter 的 `forge.report.done` 后续 `LOOP_COMPLETE` 窄例外用在非 sole 收尾 hat 上 | P0 | topology | Q4 | review-only（`reporter_dual_emit_narrow_exception_overuse`） |
+| `forge.report.done` 的 `report_path` 与 `event_loop.completion_promise` 配对声明缺 `report_input_file` 字段或路径与 trigger payload 不一致 | P0 | payload-content | Q4 / Q5 | review-only（`reporter_completion_payload_mismatch`） |
+| preset 声明 `forge.audit.done` + `forge.report.done` 同时由同一 hat publish，缺一独立的 reporter | P0 | topology | Q4 | `preset.auditor_multi_terminal_publisher` |
+
+review 命中后必须要求：auditor 仅 publish `forge.audit.done`（或 `forge.plan.blocked`）；reporter 单独 publish `forge.report.done` 并在符合 `required-event-to-completion 窄例外` 时配 `event_loop.completion_promise`；completion payload 与 trigger `report_path` 一致。
+
+## review-only finding 默认值（capability-triggered parallel-forge 子集）
+
+| finding_id | default_severity | default_confidence |
+|---|---|---|
+| `preset.worktree_reuse_fabricates_settlement` | P0 | 90 |
+| `preset.readonly_hat_writes_artifacts` | P0 | 95 |
+| `preset.correction_round_below_final_min` | P0 | 90 |
+| `preset.auditor_multi_terminal_publisher` | P0 | 95 |
+
+fixture README §8、fixture 顶部注释与本表 ID 一一对应；review 命中按本表 `default_severity` + `default_confidence` 入主表（confidence ≥ 60 门槛仍适用），并在 Mechanical Lint Results 段注明「capability-triggered 项：review-only，不进 lint JSON」。
+
 | finding_id | description | severity | confidence起点 |
 |---|---|---|---|
 | `preset.capability_discovery_missing` | preset exercises a capability not covered in `preset-author-notes.md` | P1 | 60 |
