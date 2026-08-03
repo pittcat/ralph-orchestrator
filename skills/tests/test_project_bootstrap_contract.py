@@ -1865,7 +1865,7 @@ def test_cli_probe_capability_gate_does_not_throw() -> None:
 
 def test_cli_probe_dry_run_argv_matches_expected_command_shape() -> None:
     """The dry-run argv must be ``<binary> -c <config> -H <preset>
-    run --dry-run --plan <plan>`` and must NOT carry
+    run --dry-run --prompt-file <prompt> --plan <plan>`` and must NOT carry
     ``--strict`` (the real ``ralph run`` does not accept it)."""
     runner = _make_runner("green")
     decisions = cli_probe.validate_pipeline(runner=runner, **_PIPELINE_KW)  # type: ignore[arg-type]
@@ -1877,7 +1877,8 @@ def test_cli_probe_dry_run_argv_matches_expected_command_shape() -> None:
         "real ralph run does not accept --strict; the dry-run argv must "
         "not invent one (strict gating is owned by preflight --strict)"
     )
-    assert "--prompt-file" not in argv
+    prompt_idx = argv.index("--prompt-file")
+    assert argv[prompt_idx + 1] == "PROMPT.pipeline.md"
     plan_idx = argv.index("--plan")
     assert argv[plan_idx + 1] == "plan.md"
 
