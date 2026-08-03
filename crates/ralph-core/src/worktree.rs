@@ -745,8 +745,21 @@ fn archive_files_matching(
 /// so the caller can exit before launching the loop. A partial
 /// cleanup is worse than a refused start: starting on a stale
 /// state would silently corrupt the new run.
+///
+/// # Resume manifest capture (U1, plan 2026-08-03-004)
+///
+/// When `resume_inputs` is `Some`, a `parallel-forge-resume-manifest.v1`
+/// is captured from the OLD live runtime files BEFORE any file is
+/// archived or removed, and written into the archive directory as
+/// [`crate::parallel_forge_resume::MANIFEST_FILE_NAME`]. Capture happens
+/// first because archiving moves the evidence (events, outbox, task
+/// ledger) out of the live paths. The manifest can mark itself
+/// incomplete; the start-time validation gate in the CLI is responsible
+/// for refusing the loop. When `resume_inputs` is `None`, no manifest
+/// is captured (legacy behavior).
 pub fn clean_worktree_runtime_artifacts(
     worktree_path: impl AsRef<Path>,
+    resume_inputs: Option<&crate::parallel_forge_resume::CaptureInputs>,
 ) -> Result<Option<PathBuf>, WorktreeError> {
     let worktree_path = worktree_path.as_ref();
     if !worktree_path.is_dir() {
@@ -759,6 +772,11 @@ pub fn clean_worktree_runtime_artifacts(
     let agent_dir = ralph_dir.join("agent");
     fs::create_dir_all(&ralph_dir)?;
     fs::create_dir_all(&agent_dir)?;
+
+    // U1: capture resume evidence BEFORE any live file moves. Reading
+    // after the archive would race the very renames we are about to do.
+    let manifest = resume_inputs
+        .map(|inputs| crate::parallel_forge_resume::capture_manifest(worktree_path, inputs));
 
     let archive_dir = unique_reuse_archive_dir(&ralph_dir)?;
     let mut archived_any = false;
@@ -866,6 +884,15 @@ pub fn clean_worktree_runtime_artifacts(
     if !archived_any {
         fs::remove_dir(&archive_dir)?;
         return Ok(None);
+    }
+
+    // U1: persist the captured resume manifest into the archive. The
+    // manifest was captured from the live paths BEFORE the renames
+    // above, so it reflects exactly the run we just archived. An
+    // incomplete manifest is written as-is; the CLI validation gate
+    // refuses the start fail-closed.
+    if let Some(manifest) = manifest {
+        crate::parallel_forge_resume::write_manifest(&manifest, &archive_dir)?;
     }
 
     let archive_relative = archive_dir
@@ -1736,7 +1763,7 @@ branch refs/heads/ralph/loop-1
         let ralph_dir = worktree_path.join(".ralph");
         let agent_dir = ralph_dir.join("agent");
 
-        let archive = clean_worktree_runtime_artifacts(&worktree_path)
+        let archive = clean_worktree_runtime_artifacts(&worktree_path, None)
             .unwrap()
             .expect("populated prior run should produce an archive");
 
@@ -1834,7 +1861,7 @@ branch refs/heads/ralph/loop-1
         )
         .unwrap();
 
-        clean_worktree_runtime_artifacts(&worktree_path).unwrap();
+        clean_worktree_runtime_artifacts(&worktree_path, None).unwrap();
 
         // Symlinks must still exist
         assert!(agent_dir.join("memories.md").is_symlink());
@@ -1857,7 +1884,7 @@ branch refs/heads/ralph/loop-1
         init_git_repo(temp_dir.path());
 
         let phantom = temp_dir.path().join(".worktrees/ghost");
-        let result = clean_worktree_runtime_artifacts(&phantom);
+        let result = clean_worktree_runtime_artifacts(&phantom, None);
         assert!(matches!(result, Err(WorktreeError::NotFound(_))));
     }
 
@@ -1876,14 +1903,14 @@ branch refs/heads/ralph/loop-1
         // No runtime artifacts were ever written; just the worktree
         // directory and its git metadata exist.
         assert!(
-            clean_worktree_runtime_artifacts(&worktree.path)
+            clean_worktree_runtime_artifacts(&worktree.path, None)
                 .unwrap()
                 .is_none()
         );
 
         // Second call must also succeed.
         assert!(
-            clean_worktree_runtime_artifacts(&worktree.path)
+            clean_worktree_runtime_artifacts(&worktree.path, None)
                 .unwrap()
                 .is_none()
         );
@@ -1910,9 +1937,136 @@ branch refs/heads/ralph/loop-1
         fs::create_dir_all(src.parent().unwrap()).unwrap();
         fs::write(&src, "pub fn hello() {}\n").unwrap();
 
-        clean_worktree_runtime_artifacts(&worktree_path).unwrap();
+        clean_worktree_runtime_artifacts(&worktree_path, None).unwrap();
 
         assert!(src.exists(), "user code must not be removed");
         assert_eq!(fs::read_to_string(&src).unwrap(), "pub fn hello() {}\n");
+    }
+
+    // -------------------------------------------------------------------------
+    // U1 (2026-08-03-004): resume manifest capture during cleanup
+    // -------------------------------------------------------------------------
+
+    /// Seed accepted-boundary evidence into the fixture worktree's live
+    /// runtime (replaces the generic `{"x":1}` events fixture with a
+    /// parseable accepted `forge.plan.ready` boundary).
+    fn seed_accepted_boundary(worktree_path: &Path) {
+        use crate::parallel_forge_resume::sha256_hex;
+
+        let ralph_dir = worktree_path.join(".ralph");
+        let agent_dir = ralph_dir.join("agent");
+        // The generic fixture's rotated channel carries an unparseable
+        // line; the boundary fixture replaces it with a clean log.
+        let _ = fs::remove_file(ralph_dir.join("events-20250101-120000.jsonl"));
+        let payload = "{\"plan_key\":\"pf-wt\"}";
+        let event_line = format!(
+            "{{\"ts\":\"2026-08-03T00:00:00Z\",\"iteration\":1,\"hat\":\"planner\",\"topic\":\"forge.plan.ready\",\"triggered\":\"guardian\",\"payload\":{}}}\n",
+            serde_json::to_string(payload).unwrap()
+        );
+        fs::write(ralph_dir.join("events.jsonl"), &event_line).unwrap();
+
+        let payload_digest = sha256_hex(payload.as_bytes());
+        let transition_id =
+            crate::event_loop::accepted_transition::AcceptedTransition::compute_transition_id(
+                "old-loop-wt",
+                "planner:1",
+                "rev-1",
+                "forge.plan.ready:planner",
+                &payload_digest,
+            );
+        let outbox_line = serde_json::json!({
+            "activation_id": "planner:1",
+            "committed_at": "2026-08-03T00:00:01Z",
+            "contract_revision": "rev-1",
+            "delivered": false,
+            "loop_id": "old-loop-wt",
+            "payload_digest": payload_digest,
+            "topic": "forge.plan.ready",
+            "transition_id": transition_id,
+        });
+        fs::write(
+            agent_dir.join("accepted-transitions.jsonl"),
+            format!("{outbox_line}\n"),
+        )
+        .unwrap();
+        // The generic fixture tasks.jsonl (`{}`) is malformed; replace
+        // it with a valid ledger line so capture stays complete.
+        fs::write(
+            agent_dir.join("tasks.jsonl"),
+            "{\"id\":\"task-1\",\"title\":\"U1\",\"key\":\"forge:pf-wt:U1\",\"status\":\"closed\",\"priority\":1,\"created\":\"2026-08-03T00:00:00Z\"}\n",
+        )
+        .unwrap();
+        fs::write(ralph_dir.join("current-loop-id"), "old-loop-wt\n").unwrap();
+    }
+
+    #[test]
+    fn test_clean_worktree_runtime_artifacts_captures_resume_manifest() {
+        let temp_dir = TempDir::new().unwrap();
+        init_git_repo(temp_dir.path());
+
+        let worktree_path = setup_worktree_with_artifacts(temp_dir.path());
+        seed_accepted_boundary(&worktree_path);
+        let ralph_dir = worktree_path.join(".ralph");
+
+        let inputs = crate::parallel_forge_resume::CaptureInputs {
+            plan_path: "docs/plans/clean-test-loop.md".to_string(),
+            plan_digest: crate::parallel_forge_resume::sha256_hex(b"plan"),
+            preset_name: "parallel-forge".to_string(),
+            config_digest: crate::parallel_forge_resume::sha256_hex(b"config"),
+            worktree_name: "clean-test-loop".to_string(),
+        };
+
+        let archive = clean_worktree_runtime_artifacts(&worktree_path, Some(&inputs))
+            .unwrap()
+            .expect("populated prior run should produce an archive");
+
+        // The manifest lands inside the archive, captured BEFORE the
+        // live files moved.
+        let manifest_path = archive.join(crate::parallel_forge_resume::MANIFEST_FILE_NAME);
+        assert!(
+            manifest_path.exists(),
+            "resume manifest must be written into the reuse archive"
+        );
+        let manifest = crate::parallel_forge_resume::read_manifest(&manifest_path)
+            .expect("manifest must parse");
+        assert!(
+            manifest.is_complete(),
+            "manifest must be complete: {:?}",
+            manifest.incomplete_reasons
+        );
+        assert_eq!(manifest.boundary.accepted.len(), 1);
+        assert_eq!(manifest.boundary.accepted[0].topic, "forge.plan.ready");
+        assert_eq!(manifest.boundary.pending_hat.as_deref(), Some("guardian"));
+        assert_eq!(manifest.identity.worktree_name, "clean-test-loop");
+        assert_eq!(manifest.identity.loop_id, "old-loop-wt");
+        assert_eq!(manifest.tasks.len(), 1);
+        assert_eq!(manifest.tasks[0].task_key, "forge:pf-wt:U1");
+
+        // Existing cleanup semantics unchanged: live event log archived.
+        assert!(!ralph_dir.join("events.jsonl").exists());
+        assert!(
+            fs::read_to_string(archive.join("events.jsonl"))
+                .unwrap()
+                .contains("forge.plan.ready")
+        );
+    }
+
+    #[test]
+    fn test_clean_worktree_runtime_artifacts_no_inputs_keeps_legacy_semantics() {
+        let temp_dir = TempDir::new().unwrap();
+        init_git_repo(temp_dir.path());
+
+        let worktree_path = setup_worktree_with_artifacts(temp_dir.path());
+
+        let archive = clean_worktree_runtime_artifacts(&worktree_path, None)
+            .unwrap()
+            .expect("populated prior run should produce an archive");
+
+        // No capture inputs → no manifest (legacy behavior preserved).
+        assert!(
+            !archive
+                .join(crate::parallel_forge_resume::MANIFEST_FILE_NAME)
+                .exists()
+        );
     }
 }

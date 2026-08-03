@@ -61,6 +61,11 @@ mod hat_registry;
 mod hatless_ralph;
 pub mod hooks;
 pub mod parallel_forge_handoff;
+/// U1 (plan 2026-08-03-004): `parallel-forge-resume-manifest.v1` —
+/// structured resume evidence captured from the old live runtime before
+/// a `--reuse-worktree` cleanup destroys it, validated fail-closed
+/// before the new loop starts.
+pub mod parallel_forge_resume;
 /// U11 (plan 2026-07-30-004): durable Recovery Intent store with a
 /// persistent retry budget that survives loop restarts.
 pub mod recovery_intent;
