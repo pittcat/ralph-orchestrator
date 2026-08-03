@@ -4,6 +4,8 @@ mod common;
 
 use ralph_core::{Task, TaskStatus};
 use std::process::Command;
+use std::sync::{Arc, Barrier};
+use std::thread;
 use tempfile::TempDir;
 
 fn ralph_task(temp_path: &std::path::Path, args: &[&str]) -> std::process::Output {
@@ -279,4 +281,206 @@ fn test_task_start_and_reopen_update_lifecycle_fields() {
     assert_eq!(task.status, TaskStatus::Open);
     assert!(task.started.is_some());
     assert!(task.closed.is_none());
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// U1 (2026-08-03-001-fix-opac-high-confidence-gates-plan): race-safe
+// verify-then-apply claim lifecycle at the subprocess level.
+// ─────────────────────────────────────────────────────────────────────────
+
+/// Write a minimal `ralph.yml` that enables the task verify gate
+/// for agents and pins `coordinator_hats` to `coordinator` so the
+/// subprocess task policy allow-lists the simulated hat.
+fn write_agent_gate_preset(temp_path: &std::path::Path) {
+    std::fs::create_dir_all(temp_path.join(".ralph")).unwrap();
+    std::fs::write(
+        temp_path.join("ralph.yml"),
+        r#"
+tasks:
+  enabled: true
+  require_verify_for_cli_mutate: true
+  allow_unsafe_task_mutate: false
+  coordinator_hats:
+    - coordinator
+event_loop:
+  execution_mode: isolated
+"#,
+    )
+    .unwrap();
+}
+
+/// Spawn a `ralph tools task verify <verb>` subprocess that runs
+/// as the simulated `coordinator` hat inside the gate-enabled
+/// preset. Scrubs inherited hat env first per HARD RULE 5.
+fn spawn_verify_add(temp_path: &std::path::Path, title: &str) -> std::process::Output {
+    let mut cmd = common::ralph_bin();
+    cmd.env("RALPH_CURRENT_HAT", "coordinator")
+        .env("RALPH_CURRENT_LOOP_ID", "loop-u1")
+        .arg("tools")
+        .arg("task")
+        .arg("verify")
+        .arg("add")
+        .arg(title)
+        .arg("--root")
+        .arg(temp_path)
+        .current_dir(temp_path);
+    cmd.output().expect("spawn ralph tools task verify add")
+}
+
+/// Spawn a `ralph tools task add <title>` subprocess that runs
+/// as the simulated `coordinator` hat inside the gate-enabled
+/// preset.
+fn spawn_apply_add(temp_path: &std::path::Path, title: &str) -> std::process::Output {
+    let mut cmd = common::ralph_bin();
+    cmd.env("RALPH_CURRENT_HAT", "coordinator")
+        .env("RALPH_CURRENT_LOOP_ID", "loop-u1")
+        .arg("tools")
+        .arg("task")
+        .arg("add")
+        .arg(title)
+        .arg("--root")
+        .arg(temp_path)
+        .current_dir(temp_path);
+    cmd.output().expect("spawn ralph tools task add")
+}
+
+/// U1: two real `ralph tools task add` subprocesses racing the
+/// same prepared ticket must produce exactly one winner. The
+/// loser must receive `task_verify_gate denied` and the task
+/// store must record at most one Apply.
+#[test]
+fn test_task_verify_concurrent_apply_claims_once() {
+    let temp_dir = TempDir::new().expect("temp dir");
+    let temp_path = temp_dir.path();
+    write_agent_gate_preset(temp_path);
+
+    // Record a single matching prepared ticket.
+    let verify = spawn_verify_add(temp_path, "Concurrent target");
+    assert!(
+        verify.status.success(),
+        "verify must succeed before concurrent Apply; stderr={}",
+        String::from_utf8_lossy(&verify.stderr)
+    );
+
+    // Race two Apply processes against the same prepared ticket.
+    let barrier = Arc::new(Barrier::new(2));
+    let temp_path_a = temp_path.to_path_buf();
+    let temp_path_b = temp_path.to_path_buf();
+    let barrier_a = barrier.clone();
+    let barrier_b = barrier.clone();
+
+    let handle_a = thread::spawn(move || {
+        barrier_a.wait();
+        spawn_apply_add(&temp_path_a, "Concurrent target")
+    });
+    let handle_b = thread::spawn(move || {
+        barrier_b.wait();
+        spawn_apply_add(&temp_path_b, "Concurrent target")
+    });
+    let result_a = handle_a.join().expect("join a");
+    let result_b = handle_b.join().expect("join b");
+
+    let oks = [&result_a, &result_b]
+        .iter()
+        .filter(|o| o.status.success())
+        .count();
+    let denials = [&result_a, &result_b]
+        .iter()
+        .filter(|o| {
+            !o.status.success()
+                && String::from_utf8_lossy(&o.stderr).contains("task_verify_gate denied")
+        })
+        .count();
+
+    assert_eq!(
+        oks, 1,
+        "exactly one Apply must win: a.success={} b.success={}; a.stderr={} b.stderr={}",
+        result_a.status.success(),
+        result_b.status.success(),
+        String::from_utf8_lossy(&result_a.stderr),
+        String::from_utf8_lossy(&result_b.stderr)
+    );
+    assert_eq!(
+        denials, 1,
+        "the loser must be denied with task_verify_gate denied prefix; \
+         a.stderr={} b.stderr={}",
+        String::from_utf8_lossy(&result_a.stderr),
+        String::from_utf8_lossy(&result_b.stderr)
+    );
+
+    // The task store must record exactly one task — at most one
+    // Apply actually wrote.
+    let tasks = list_tasks(temp_path, &[]);
+    let concurrent_tasks: Vec<&Task> = tasks
+        .iter()
+        .filter(|t| t.title == "Concurrent target")
+        .collect();
+    assert_eq!(
+        concurrent_tasks.len(),
+        1,
+        "exactly one task must be written: tasks={:?}",
+        tasks
+    );
+}
+
+/// U1: a fingerprint mismatch (recorded for one title, Apply
+/// uses another) must leave the prepared record on disk so a
+/// corrected retry succeeds without re-running verify.
+#[test]
+fn test_task_verify_mismatch_preserves_prepared_record() {
+    let temp_dir = TempDir::new().expect("temp dir");
+    let temp_path = temp_dir.path();
+    write_agent_gate_preset(temp_path);
+
+    // Verify a ticket for "Original title".
+    let verify = spawn_verify_add(temp_path, "Original title");
+    assert!(
+        verify.status.success(),
+        "verify must succeed; stderr={}",
+        String::from_utf8_lossy(&verify.stderr)
+    );
+
+    // Apply with a different title — must be denied and leave the
+    // prepared record on disk.
+    let mismatched = spawn_apply_add(temp_path, "Different title");
+    let mismatched_stderr = String::from_utf8_lossy(&mismatched.stderr);
+    assert!(
+        !mismatched.status.success(),
+        "mismatch must deny; stderr={}",
+        mismatched_stderr
+    );
+    assert!(
+        mismatched_stderr.contains("task_verify_gate denied"),
+        "denial must carry stable prefix; stderr={}",
+        mismatched_stderr
+    );
+    assert!(
+        mismatched_stderr.contains("fingerprint mismatch"),
+        "denial must explain root cause; stderr={}",
+        mismatched_stderr
+    );
+
+    // The prepared ticket must still be on disk.
+    let ticket_path = temp_path.join(".ralph/agent/.ralph-task-verify-ticket");
+    assert!(
+        ticket_path.exists(),
+        "mismatch must leave the prepared record on disk"
+    );
+
+    // A corrected Apply against the original title must now
+    // succeed without a fresh verify.
+    let corrected = spawn_apply_add(temp_path, "Original title");
+    let corrected_stderr = String::from_utf8_lossy(&corrected.stderr);
+    assert!(
+        corrected.status.success(),
+        "corrected Apply must succeed without re-verify; stderr={}",
+        corrected_stderr
+    );
+
+    let tasks = list_tasks(temp_path, &[]);
+    assert_eq!(
+        tasks.iter().filter(|t| t.title == "Original title").count(),
+        1,
+        "exactly one Original-title task must exist"
+    );
 }
