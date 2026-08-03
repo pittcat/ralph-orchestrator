@@ -1,0 +1,58 @@
+# 矛盾证据样例:同一主题(timeout_semantics)出现两条互相矛盾的 E3 证据。
+# 新证据不得静默覆盖旧事实:在用户裁决之前禁止 author_ready,收敛到
+# needs_user_decision。裁决路径:resolved 的 blocking 决策必须同时引用
+# 该主题的全部冲突证据(见 rubric「矛盾证据处置」)。
+schema_version: "1.0"
+project_root: /workspace/demo-repo
+status: needs_user_decision
+previous_status: needs_investigation
+attempt_count: 2
+goal: "对齐请求超时语义与实现"
+confidence:
+  goal_clarity: 0.86
+  project_fact_coverage: 0.86
+  acceptance_evidence: 0.86
+  execution_feasibility: 0.86
+  risk_coverage: 0.85
+evidence:
+  - id: E1
+    source: "load-test 报告 run #412"
+    observation: "conflicting_evidence:timeout_semantics: 压测下请求在 30s 超时并重试"
+    level: E3
+  - id: E2
+    source: "replay 场景 replay/timeout-60s"
+    observation: "conflicting_evidence:timeout_semantics: replay 显示请求在 60s 才超时"
+    level: E3
+  - id: E3
+    source: "src/http/client.rs"
+    observation: "超时配置入口与默认值位置已确认"
+    level: E2
+decisions:
+  - id: D1
+    question: "超时语义以 30s 还是 60s 为准?(裁决前两侧事实都保留,不覆盖任何一条)"
+    confidence: 0.86
+    supporting_evidence: [E1, E2]
+    blocking: true
+    resolved: false
+candidates:
+  - id: C1
+    summary: "按压测口径统一超时语义,replay 口径等待用户裁决后再动"
+    confidence: 0.86
+    goal_coverage: 0.86
+    acceptance_coverage: 0.86
+    project_fit: 0.82
+    supporting_evidence: [E1, E3]
+    selected: true
+user_confirmations:
+  goal:
+    confirmed: true
+    note: "用户确认目标为对齐超时语义"
+  scope:
+    confirmed: true
+    note: "只改超时语义相关链路"
+  completion_evidence:
+    confirmed: true
+    note: "压测与 replay 收敛到同一超时值"
+  failure_boundaries:
+    confirmed: true
+    note: "语义裁决前不得改动默认配置"

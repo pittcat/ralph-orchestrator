@@ -34,6 +34,9 @@ TRANSCRIPT_FIXTURES = (
     "bug-without-loop.yml",
     "unknown-project.yml",
     "unavailable-external-skill.yml",
+    # U3:多候选淘汰 / 补证据重算
+    "alternative-candidates.yml",
+    "recompute-with-new-evidence.yml",
 )
 
 
@@ -279,6 +282,69 @@ def test_bug_without_red_capable_loop_needs_investigation() -> None:
     loop_questions = [q for q in questions if q.topic == "red_capable_loop"]
     assert len(loop_questions) == 1
     assert loop_questions[0].routed_to == "environment"
+
+
+# --- 多候选 transcript:低覆盖候选被淘汰,高分不掩盖单维度 --------------------
+
+
+def test_alternative_candidates_transcript_rejects_low_coverage() -> None:
+    # 验收:两候选均 confidence 0.9,A acceptance_coverage=0.70、B 全达标
+    # → A rejected_insufficient_coverage,B selected,author_ready 成立
+    brief = _build("alternative-candidates.yml")
+    result = validate_brief_data(brief)
+    assert result.valid is True
+    assert result.author_ready is True
+    assert brief["status"] == "author_ready"
+    assert result.recommended_status == "author_ready"
+    assert result.next_action == "ready_for_handoff"
+    gates = {g.candidate_id: g for g in result.candidate_gates}
+    assert gates["C-A"].outcome == "rejected_insufficient_coverage"
+    assert "acceptance_coverage" in gates["C-A"].failed_gates
+    assert gates["C-B"].outcome == "selected"
+    assert gates["C-B"].failed_gates == ()
+    # 两个候选声明相同的高 confidence:单维度短板不能被平均分掩盖
+    candidates = {c["id"]: c for c in brief["candidates"]}
+    assert candidates["C-A"]["confidence"] == pytest.approx(0.90)
+    assert candidates["C-B"]["confidence"] == pytest.approx(0.90)
+    assert candidates["C-A"]["status"] == "rejected_insufficient_coverage"
+    assert candidates["C-A"]["rejection_reason"]
+    assert candidates["C-B"]["status"] == "selected"
+    # 类型化视图同步携带候选状态
+    assert result.brief is not None
+    by_id = {c.id: c for c in result.brief.candidates}
+    assert by_id["C-A"].status == "rejected_insufficient_coverage"
+    assert by_id["C-B"].status == "selected"
+
+
+# --- 重算 transcript:新增 E3/E4 证据后 0.78 → 0.87 --------------------------
+
+
+def test_recompute_transcript_reaches_author_ready_with_audit_trail() -> None:
+    # 验收:investigation_attempts 记录新增 E3/E4 后分数 0.78→0.87,
+    # validator 确认重算一致且 author_ready
+    brief = _build("recompute-with-new-evidence.yml")
+    result = validate_brief_data(brief)
+    assert result.valid is True
+    assert result.author_ready is True
+    assert brief["status"] == "author_ready"
+    assert result.recommended_status == "author_ready"
+    assert result.next_action == "ready_for_handoff"
+    assert "score_inflation" not in {e.code for e in result.errors}
+
+    attempts = brief["investigation_attempts"]
+    assert [a["round"] for a in attempts] == [1, 2]
+    assert [a["candidate_id"] for a in attempts] == ["C1", "C1"]
+    assert attempts[0]["score_after"] == pytest.approx(0.78)
+    assert attempts[1]["score_before"] == pytest.approx(0.78)
+    assert attempts[1]["score_after"] == pytest.approx(0.87)
+    assert brief["candidates"][0]["confidence"] == pytest.approx(0.87)
+
+    # 第二轮新增的证据必须是 E3/E4 完成证据,且被候选引用(重算可回溯)
+    ledger = {e["id"]: e["level"] for e in brief["evidence"]}
+    added_round2 = attempts[1]["added_evidence"]
+    assert added_round2, "第二轮必须引入新证据"
+    assert {ledger[eid] for eid in added_round2} == {"E3", "E4"}
+    assert set(added_round2) <= set(brief["candidates"][0]["supporting_evidence"])
 
 
 # --- 外部 corpus 不可用:显式标记 + fallback provenance,不伪造执行 -----------

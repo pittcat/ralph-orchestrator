@@ -1,0 +1,69 @@
+# 重算 transcript(deterministic):第一轮只有文档/源码证据 → 0.78 停留调查带;
+# 第二轮新增 E3(真实执行)与 E4(独立验收 replay)证据 → 重算到 0.87,
+# 覆盖达标 → author_ready。investigation_attempts 保留完整重算审计链。
+project_root: /workspace/demo-repo
+goal_request: "稳定超时路径的 flaky 测试并给出回归证据"
+task_type: feature
+previous_status: needs_investigation
+attempt_count: 2
+project_facts:
+  - topic: package_manifest
+    source: Cargo.toml
+    observation: "ralph-core 为 workspace 成员,测试入口为 nextest"
+    level: E1
+  - topic: test_command
+    source: "cargo nextest run -p ralph-core 实际执行输出"
+    observation: "ralph-core 测试入口真实可运行,修复后连续 10 次运行全绿"
+    level: E3
+  - topic: ci_workflow
+    source: .github/workflows/ci.yml
+    observation: "CI 覆盖 ralph-core"
+    level: E1
+  - topic: flake_history
+    source: docs/solutions/testing/timeout-flake-history.md
+    observation: "该 flake 历史出现 3 次,均在超时路径"
+    level: E1
+  - topic: race_window
+    source: crates/ralph-core/src/event_loop/timeout.rs
+    observation: "竞态窗口定位在 producer/consumer 唤醒之间"
+    level: E2
+  - topic: acceptance_replay
+    source: replay/timeout-flake
+    observation: "独立 replay 场景确认回归不再复现"
+    level: E4
+user_answers:
+  - topic: goal
+    clarity: explicit
+    answer: "目标是消除超时路径 flake 并留下回归 replay"
+  - topic: scope
+    clarity: explicit
+    answer: "只改超时路径与其测试"
+  - topic: completion_evidence
+    clarity: explicit
+    answer: "连续 10 次绿且 replay 不复现"
+  - topic: failure_boundaries
+    clarity: explicit
+    answer: "其它测试套件出现回归即停止"
+candidates:
+  - id: C1
+    summary: "事件驱动等待替代固定 sleep,并补 replay 回归场景"
+    confidence: 0.87
+    goal_coverage: 0.90
+    acceptance_coverage: 0.88
+    project_fit: 0.85
+    evidence_topics: [flake_history, race_window]
+    selected: true
+    status: selected
+investigation_attempts:
+  - round: 1
+    candidate_id: C1
+    added_topics: [package_manifest, flake_history, race_window]
+    score_before: 0.50
+    score_after: 0.78
+    provenance: "第一轮:文档 + 源码证据,无可执行验证"
+  - round: 2
+    candidate_id: C1
+    added_topics: [test_command, acceptance_replay]
+    score_before: 0.78
+    score_after: 0.87
+    provenance: "第二轮:新增真实执行(连续 10 次绿)与独立 replay"

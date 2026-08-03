@@ -358,10 +358,58 @@ def build_brief(transcript: Mapping[str, Any]) -> dict[str, Any]:
         )
 
     # 6) 候选方案(bug 无 red-capable 回路 → 不产生执行方案)
+    #    transcript 可携带 `candidates`(多候选淘汰流)与
+    #    `investigation_attempts`(补证据重算流);缺省时保持单候选 C1 行为。
     red_loop_known = "red_capable_loop" in facts
+    fact_topic_evidence = dict(zip(fact_order, fact_evidence_ids))
+    attempts_raw = transcript.get("investigation_attempts") or ()
+
+    def _topic_ids(topics: Any) -> list[str]:
+        """事实主题 → 证据 id(去重保序;未知主题忽略)。"""
+        ids: list[str] = []
+        for topic in topics or ():
+            evidence_id = fact_topic_evidence.get(topic)
+            if evidence_id is not None and evidence_id not in ids:
+                ids.append(evidence_id)
+        return ids
+
+    # 调查尝试新增的主题并入对应候选的 supporting_evidence(重算可回溯)
+    attempt_topics_by_candidate: dict[str, list[str]] = {}
+    for attempt in attempts_raw:
+        if isinstance(attempt, Mapping) and isinstance(attempt.get("candidate_id"), str):
+            attempt_topics_by_candidate.setdefault(
+                attempt["candidate_id"], []
+            ).extend(attempt.get("added_topics") or ())
+
+    transcript_candidates = transcript.get("candidates")
     candidates: list[dict[str, Any]] = []
     if task_type == "bug" and not red_loop_known:
         candidates = []
+    elif isinstance(transcript_candidates, list) and transcript_candidates:
+        for index, cand in enumerate(transcript_candidates):
+            if not isinstance(cand, Mapping):
+                continue
+            cand_id = (
+                cand.get("id")
+                if isinstance(cand.get("id"), str) and cand.get("id")
+                else f"C{index + 1}"
+            )
+            topics = list(cand.get("evidence_topics") or ())
+            topics.extend(attempt_topics_by_candidate.get(cand_id, ()))
+            cand_entry: dict[str, Any] = {
+                "id": cand_id,
+                "summary": str(cand.get("summary", "")),
+                "confidence": cand.get("confidence"),
+                "goal_coverage": cand.get("goal_coverage"),
+                "acceptance_coverage": cand.get("acceptance_coverage"),
+                "project_fit": cand.get("project_fit"),
+                "supporting_evidence": _topic_ids(topics),
+                "selected": cand.get("selected") is True,
+            }
+            for optional_key in ("risk_coverage", "status", "rejection_reason"):
+                if cand.get(optional_key) is not None:
+                    cand_entry[optional_key] = cand[optional_key]
+            candidates.append(cand_entry)
     elif fact_evidence_ids:
         candidates.append(
             {
@@ -436,6 +484,22 @@ def build_brief(transcript: Mapping[str, Any]) -> dict[str, Any]:
     else:
         goal = goal_request
 
+    # 11) 调查/重算尝试透传(added_topics → 证据 id)
+    attempts_out: list[dict[str, Any]] = []
+    for attempt in attempts_raw:
+        if not isinstance(attempt, Mapping):
+            continue
+        attempts_out.append(
+            {
+                "round": attempt.get("round"),
+                "candidate_id": attempt.get("candidate_id", ""),
+                "added_evidence": _topic_ids(attempt.get("added_topics")),
+                "score_before": attempt.get("score_before"),
+                "score_after": attempt.get("score_after"),
+                "provenance": attempt.get("provenance"),
+            }
+        )
+
     brief: dict[str, Any] = {
         "schema_version": SUPPORTED_SCHEMA_VERSION,
         "project_root": transcript.get("project_root", ""),
@@ -448,6 +512,8 @@ def build_brief(transcript: Mapping[str, Any]) -> dict[str, Any]:
         "candidates": candidates,
         "user_confirmations": user_confirmations,
     }
+    if attempts_out:
+        brief["investigation_attempts"] = attempts_out
     previous_status = transcript.get("previous_status")
     if previous_status:
         brief["previous_status"] = previous_status

@@ -1,0 +1,77 @@
+# 多候选淘汰样例:候选 C-A / C-B 声明相同的高 confidence(0.90),
+# 但 C-A acceptance_coverage = 0.70 < 0.85,未通过独立覆盖门禁 →
+# rejected_insufficient_coverage;C-B 通过全部门禁且带 E3/E4 完成证据并被
+# 显式选中 → author_ready。高 confidence / 总平均分不能掩盖单维度覆盖门禁。
+schema_version: "1.0"
+project_root: /workspace/demo-repo
+status: author_ready
+previous_status: needs_investigation
+attempt_count: 2
+goal: "为订单服务增加订单项部分取消入口"
+confidence:
+  goal_clarity: 0.86
+  project_fact_coverage: 0.87
+  acceptance_evidence: 0.86
+  execution_feasibility: 0.88
+  risk_coverage: 0.85
+evidence:
+  - id: E1
+    source: "src/orders/cancel.rs"
+    observation: "cancel_items() seam 可复用于部分取消,无需新增外部依赖"
+    level: E2
+  - id: E2
+    source: "cargo nextest run -p orders 实际执行输出"
+    observation: "orders 包测试入口真实可运行,部分取消集成测试可按现有模式挂载"
+    level: E3
+  - id: E3
+    source: "独立验收 replay 场景 replay/partial-cancel"
+    observation: "replay 独立验证部分取消链路端到端成立"
+    level: E4
+  - id: E4
+    source: "CONTEXT.md"
+    observation: "glossary 对「部分取消」术语已由用户裁决对齐(见 D1)"
+    level: E1
+decisions:
+  - id: D1
+    question: "部分取消走既有 cancel_items seam 还是新增独立入口?"
+    confidence: 0.90
+    supporting_evidence: [E1, E2]
+    blocking: true
+    resolved: true
+    resolution: "复用 cancel_items seam,避免重复实现"
+    uncovered_risks: []
+candidates:
+  - id: C-A
+    summary: "新建 cancellation-service crate 承载全部取消逻辑"
+    confidence: 0.90
+    goal_coverage: 0.88
+    acceptance_coverage: 0.70
+    project_fit: 0.80
+    risk_coverage: 0.62
+    supporting_evidence: [E1]
+    selected: false
+    status: rejected_insufficient_coverage
+    rejection_reason: "acceptance_coverage 0.70 < 0.85:新 crate 的验收路径没有可执行完成证据"
+  - id: C-B
+    summary: "沿既有 cancel_items seam 扩展部分取消能力"
+    confidence: 0.90
+    goal_coverage: 0.90
+    acceptance_coverage: 0.88
+    project_fit: 0.86
+    risk_coverage: 0.84
+    supporting_evidence: [E1, E2, E3]
+    selected: true
+    status: selected
+user_confirmations:
+  goal:
+    confirmed: true
+    note: "用户确认目标为部分取消"
+  scope:
+    confirmed: true
+    note: "只改 orders crate 的取消链路"
+  completion_evidence:
+    confirmed: true
+    note: "部分取消集成测试由红转绿"
+  failure_boundaries:
+    confirmed: true
+    note: "已发货订单项禁止取消,必须显式报错"
