@@ -309,13 +309,35 @@ fn compute_policy_check_token(
 /// The gate also stands down for the orchestrator pseudo-hat `ralph`
 /// (hatless loops), wave workers, and presets with no hats — see
 /// [`U5Gate::resolve`].
+///
+/// **U3 (2026-08-03-001-fix-opac-high-confidence-gates-plan):**
+/// when the execution contract fails to compile in an agent governed
+/// context, the gate now produces an explicit
+/// [`U5GateState::CompileFailed`] state and refuses BOTH the
+/// capability check and the token check with the same stable
+/// `contract_compile_failed` reason. The previous
+/// `resolved: Option<…>` collapsed compile failure into a silent
+/// stand-down that let the capability gate skip and the token
+/// gate return `policy_check_token_mismatch` (or fall through
+/// with an empty token) — the exact "fail-open" anti-pattern
+/// S6 calls out.
+enum U5GateState {
+    /// The gate does not apply to this invocation (human CLI,
+    /// pseudo-hat `ralph`, wave worker, or preset without hats).
+    Inactive,
+    /// The contract compiled cleanly; the gate is enforcing.
+    Active {
+        resolved: ralph_core::execution_contract::ResolvedRuntimeConfig,
+    },
+    /// The contract failed to compile. The gate denies with
+    /// `contract_compile_failed` BEFORE evaluating capability or
+    /// token, and BEFORE the emit dry-run return / disk write —
+    /// no event, idempotency row, or ticket side effect occurs.
+    CompileFailed { reason: String },
+}
+
 struct U5Gate {
-    /// Whether the gate applies to this invocation.
-    active: bool,
-    /// The compiled contract (when active AND the config compiled cleanly).
-    resolved: Option<ralph_core::execution_contract::ResolvedRuntimeConfig>,
-    /// The evaluation token for this `(hat, topic, payload, revision)`.
-    token: Option<String>,
+    state: U5GateState,
 }
 
 impl U5Gate {
@@ -337,8 +359,8 @@ impl U5Gate {
         unified_active: bool,
         config: Option<&RalphConfig>,
         hat: Option<&str>,
-        topic: &str,
-        payload: &str,
+        _topic: &str,
+        _payload: &str,
     ) -> Self {
         let stands_down = hat == Some("ralph")
             || std::env::var("RALPH_WAVE_WORKER").is_ok()
@@ -346,36 +368,49 @@ impl U5Gate {
         let active = env_hat_set && !unified_active && config.is_some() && !stands_down;
         if !active {
             return Self {
-                active: false,
-                resolved: None,
-                token: None,
+                state: U5GateState::Inactive,
             };
         }
-        // Compile the config to obtain the contract + revision. If the config
-        // fails to compile, fall back to an inactive gate: the loop runner
-        // owns the hard compile boundary (it aborts startup on a finding), and
-        // the CLI must not turn a contract finding into an opaque emit failure
-        // here. With no compiled contract there is no revision to bind a token
-        // to, so the gate stands down.
-        let resolved =
-            config.and_then(|cfg| ralph_core::execution_contract::compile(cfg.clone()).ok());
-        let token = resolved.as_ref().and_then(|r| {
-            hat.map(|hat_id| compute_policy_check_token(hat_id, topic, payload, r.digest()))
-        });
-        Self {
-            active: true,
-            resolved,
-            token,
+        // Compile the config to obtain the contract + revision. The
+        // U3 rule: agent context + compile failure is a hard deny
+        // — never fall back to inactive and never let the
+        // capability / token checks slip through with a half-built
+        // gate.
+        let cfg = config.expect("active implies config.is_some()");
+        match ralph_core::execution_contract::compile(cfg.clone()) {
+            Ok(resolved) => Self {
+                state: U5GateState::Active { resolved },
+            },
+            Err(error) => Self {
+                state: U5GateState::CompileFailed {
+                    reason: format!("contract_compile_failed: {}", error),
+                },
+            },
+        }
+    }
+
+    /// U3: explicit compile-failure check. Both `--policy-check`
+    /// and Apply must surface this with the stable
+    /// `contract_compile_failed` reason and a hint that names the
+    /// compilation finding. Returns `Some((reason, hint))` when
+    /// the gate is in the CompileFailed state; `None` otherwise.
+    fn compile_failure(&self) -> Option<(&'static str, String)> {
+        match &self.state {
+            U5GateState::CompileFailed { reason } => Some(("contract_compile_failed", reason.clone())),
+            _ => None,
         }
     }
 
     /// Enforce the capability decision. Returns an error message when the
     /// contract denies `(hat, topic)`; `None` means proceed.
     fn capability_denied(&self, hat: Option<&str>, topic: &str) -> Option<String> {
-        if !self.active {
-            return None;
+        if let Some((code, hint)) = self.compile_failure() {
+            return Some(format!("{code}: the Effective Execution Contract could not be compiled for this emit, so neither capability nor token checks can be evaluated safely. Re-validate the preset config (`{hint}`) and try again."));
         }
-        let resolved = self.resolved.as_ref()?;
+        let resolved = match &self.state {
+            U5GateState::Active { resolved } => resolved,
+            _ => return None,
+        };
         let hat_id = hat?;
         use ralph_core::execution_contract::EmitDecision;
         match resolved.contract().emit_decision(hat_id, topic) {
@@ -392,10 +427,31 @@ impl U5Gate {
     /// Enforce the evaluation token on the apply path. Returns `(code,
     /// message)` when the token is missing or mismatched; `None` means the
     /// apply may proceed.
-    fn token_violation(&self, provided: Option<&str>) -> Option<(&'static str, String)> {
-        if !self.active {
-            return None;
+    ///
+    /// U3: a CompileFailed gate denies with `contract_compile_failed`
+    /// BEFORE the token check. The previous fall-through returned
+    /// `policy_check_token_mismatch` against an empty expected token,
+    /// which is misleading and gave agents no actionable signal.
+    fn token_violation(
+        &self,
+        hat: Option<&str>,
+        topic: &str,
+        payload: &str,
+        provided: Option<&str>,
+    ) -> Option<(&'static str, String)> {
+        if let Some((code, hint)) = self.compile_failure() {
+            return Some((
+                code,
+                format!("{code}: the Effective Execution Contract could not be compiled for this emit, so the evaluation token cannot be verified. Re-validate the preset config (`{hint}`) and try again."),
+            ));
         }
+        let resolved = match &self.state {
+            U5GateState::Active { resolved } => resolved,
+            _ => return None,
+        };
+        let expected = hat
+            .map(|hat_id| compute_policy_check_token(hat_id, topic, payload, resolved.digest()))
+            .unwrap_or_default();
         match provided {
             None => Some((
                 "missing_policy_check_token",
@@ -408,7 +464,6 @@ impl U5Gate {
                     .to_string(),
             )),
             Some(provided) => {
-                let expected = self.token.as_deref().unwrap_or_default();
                 if provided == expected && !expected.is_empty() {
                     None
                 } else {
@@ -424,6 +479,27 @@ impl U5Gate {
                     ))
                 }
             }
+        }
+    }
+
+    /// Resolve the evaluation token that `token_violation` would compare
+    /// against. Returns an empty string when the gate is not active
+    /// (used to preserve the legacy "empty expected = mismatch" shape
+    /// for callers that already short-circuit on `Inactive`).
+    fn token(&self, hat: Option<&str>, topic: &str, payload: &str) -> Option<String> {
+        match &self.state {
+            U5GateState::Active { resolved } => hat
+                .map(|hat_id| compute_policy_check_token(hat_id, topic, payload, resolved.digest())),
+            _ => None,
+        }
+    }
+
+    /// Resolve the contract revision for callers that need it (e.g.
+    /// the JSON envelope in the `--policy-check` success path).
+    fn resolved_digest(&self) -> Option<String> {
+        match &self.state {
+            U5GateState::Active { resolved } => Some(resolved.digest().to_string()),
+            _ => None,
         }
     }
 }
@@ -1625,12 +1701,28 @@ fn emit_command_with_root_and_hats(
         topic,
         &args.payload,
     );
+    // U3 (2026-08-03-001-fix-opac-high-confidence-gates-plan):
+    // a compile failure in an agent governed path is a hard deny
+    // BEFORE any event / idempotency / ticket side effect. The
+    // previous behaviour let the capability gate skip (resolved
+    // was None) and the token gate return a misleading
+    // `policy_check_token_mismatch` against an empty expected
+    // token.
+    if let Some((code, err)) = u5_gate.compile_failure() {
+        print_emit_reject_summary(args.output == "json", code, &err);
+        anyhow::bail!("{err}");
+    }
     if let Some(err) = u5_gate.capability_denied(hat.as_deref(), topic) {
         print_emit_reject_summary(args.output == "json", "capability_denied", &err);
         anyhow::bail!("{err}");
     }
     if !args.policy_check
-        && let Some((code, err)) = u5_gate.token_violation(args.policy_check_token.as_deref())
+        && let Some((code, err)) = u5_gate.token_violation(
+            hat.as_deref(),
+            topic,
+            &args.payload,
+            args.policy_check_token.as_deref(),
+        )
     {
         print_emit_reject_summary(args.output == "json", code, &err);
         anyhow::bail!("{err}");
@@ -2027,13 +2119,12 @@ fn emit_command_with_root_and_hats(
         // presets that already enforce the contract via the unified
         // pipeline. The token binds the exact (hat, topic, payload,
         // contract revision) that was just pre-checked.
-        if let Some(token) = u5_gate.token.as_deref() {
+        if let Some(token) = u5_gate.token(hat.as_deref(), topic, payload.as_str()) {
             let envelope = serde_json::json!({
                 "policy_check_token": token,
                 "topic": topic,
                 "hat": hat,
-                "contract_revision":
-                    u5_gate.resolved.as_ref().map(|r| r.digest().to_string()),
+                "contract_revision": u5_gate.resolved_digest(),
             });
             if let Ok(line) = serde_json::to_string(&envelope) {
                 println!("{line}");
@@ -5543,6 +5634,271 @@ hats:
                 Some(&config)
             ),
             None
+        );
+    }
+
+    // ─────────────────────────────────────────────────────────────────
+    // U3 (2026-08-03-001-fix-opac-high-confidence-gates-plan):
+    // U5 contract compile-failure must fail-closed (deny with
+    // `contract_compile_failed`) BEFORE any event / idempotency /
+    // ticket side effect.
+    // ─────────────────────────────────────────────────────────────────
+
+    /// A minimal preset config: single `worker` hat publishing
+    /// `work.done`, no event-policy pipeline.
+    ///
+    /// `contracts_yaml` is the rendered `event_loop.execution_contracts`
+    /// block (S7: `enabled: false` for a valid contract; S6: a contract
+    /// that declares an orphan topic with no consumer). The block is
+    /// inserted with 4-space leading indent so it nests correctly under
+    /// `event_loop.execution_contracts:`.
+    fn u3_worker_config(contracts_yaml: &str) -> RalphConfig {
+        let yaml = format!(
+            r#"
+event_loop:
+  completion_promise: "LOOP_COMPLETE"
+  execution_contracts:{contracts_yaml}
+cli:
+  backend: "claude"
+hats:
+  worker:
+    name: "Worker"
+    description: "Does the work"
+    triggers: ["work.ready"]
+    publishes: ["work.done"]
+    terminal_events: ["work.done"]
+    instructions: "do work"
+"#,
+            contracts_yaml = contracts_yaml,
+        );
+        serde_yaml::from_str(&yaml).expect("parse yaml")
+    }
+
+    /// S7 — valid empty contract (the default).
+    const U3_VALID_CONTRACTS_YAML: &str = r#"
+    enabled: false
+    rules: {}
+"#;
+
+    /// S6 — broken contract: declares `orphan.topic` (no hat
+    /// triggers on it, it is not terminal / completion / starting),
+    /// which `execution_contract::compile` rejects with a
+    /// `MissingConsumer` finding.
+    const U3_BROKEN_CONTRACTS_YAML: &str = r#"
+    enabled: true
+    rules:
+      orphan.topic:
+        require_payload_fields:
+          - task_id
+"#;
+
+    /// U3 S6: a config that fails to compile (an execution
+    /// contract declared for an orphan topic with no consumer)
+    /// must produce an explicit `CompileFailed` state. Both the
+    /// capability gate and the token gate deny with
+    /// `contract_compile_failed`. `token()` returns `None` so the
+    /// `--policy-check` envelope is suppressed (no
+    /// `policy_check_token` is printed when the contract cannot
+    /// be compiled).
+    #[test]
+    fn u3_compile_failure_denies_capability_and_token() {
+        let config = u3_worker_config(U3_BROKEN_CONTRACTS_YAML);
+        let gate = U5Gate::resolve(
+            true,
+            false,
+            Some(&config),
+            Some("worker"),
+            "work.done",
+            r#"{"step":"step-01"}"#,
+        );
+
+        let (code, _hint) = gate
+            .compile_failure()
+            .expect("compile failure must produce an explicit CompileFailed state");
+        assert_eq!(
+            code, "contract_compile_failed",
+            "compile failure must surface the stable reason code"
+        );
+
+        // Capability gate MUST deny with the stable reason, not
+        // silently pass through.
+        let cap = gate
+            .capability_denied(Some("worker"), "work.done")
+            .expect("capability must deny under compile failure");
+        assert!(
+            cap.contains("contract_compile_failed"),
+            "capability deny must cite contract_compile_failed: {cap}"
+        );
+
+        // Token gate MUST deny with the stable reason, not
+        // produce a misleading `policy_check_token_mismatch`
+        // against an empty expected token.
+        let (token_code, token_hint) = gate
+            .token_violation(Some("worker"), "work.done", r#"{"step":"step-01"}"#, None)
+            .expect("token check must deny under compile failure");
+        assert_eq!(
+            token_code, "contract_compile_failed",
+            "token gate must reuse the same stable reason"
+        );
+        assert!(
+            token_hint.contains("contract_compile_failed"),
+            "token deny must cite contract_compile_failed: {token_hint}"
+        );
+
+        // The matching token (had the agent passed one) is also
+        // rejected with the same reason rather than silently
+        // matching.
+        let some_token = "any-token-the-agent-might-pass";
+        let (mismatch_code, _) = gate
+            .token_violation(
+                Some("worker"),
+                "work.done",
+                r#"{"step":"step-01"}"#,
+                Some(some_token),
+            )
+            .expect("any token must deny under compile failure");
+        assert_eq!(
+            mismatch_code, "contract_compile_failed",
+            "token mismatch path must surface contract_compile_failed"
+        );
+
+        // The dry-run advertise-token envelope is suppressed
+        // when the contract failed to compile.
+        assert_eq!(
+            gate.token(Some("worker"), "work.done", r#"{"step":"step-01"}"#),
+            None,
+            "no policy_check_token may be advertised under compile failure"
+        );
+        assert_eq!(
+            gate.resolved_digest(),
+            None,
+            "no contract digest may be advertised under compile failure"
+        );
+    }
+
+    /// U3 S7: a valid compiled contract must keep the existing
+    /// capability allow / token mismatch / token success contract.
+    #[test]
+    fn u3_compile_success_keeps_legacy_capability_and_token_shape() {
+        let config = u3_worker_config(U3_VALID_CONTRACTS_YAML);
+        let gate = U5Gate::resolve(
+            true,
+            false,
+            Some(&config),
+            Some("worker"),
+            "work.done",
+            r#"{"step":"step-01"}"#,
+        );
+
+        assert!(
+            gate.compile_failure().is_none(),
+            "valid contract must not surface CompileFailed"
+        );
+        assert!(
+            gate.capability_denied(Some("worker"), "work.done").is_none(),
+            "valid contract + allowed hat/topic must allow"
+        );
+
+        // Missing token still says missing_policy_check_token
+        // (not contract_compile_failed) under a valid contract.
+        let (missing_code, missing_hint) = gate
+            .token_violation(Some("worker"), "work.done", r#"{"step":"step-01"}"#, None)
+            .expect("missing token must deny with the legacy code");
+        assert_eq!(
+            missing_code, "missing_policy_check_token",
+            "valid contract + missing token must keep legacy code"
+        );
+        assert!(
+            missing_hint.contains("missing_policy_check_token"),
+            "missing token hint must keep legacy wording: {missing_hint}"
+        );
+
+        // A garbage token under a valid contract still says
+        // policy_check_token_mismatch (not contract_compile_failed).
+        let (mismatch_code, _) = gate
+            .token_violation(
+                Some("worker"),
+                "work.done",
+                r#"{"step":"step-01"}"#,
+                Some("definitely-not-the-right-token"),
+            )
+            .expect("garbage token must deny with the legacy mismatch code");
+        assert_eq!(
+            mismatch_code, "policy_check_token_mismatch",
+            "valid contract + wrong token must keep legacy mismatch code"
+        );
+
+        // The token advertised for a valid contract is non-empty.
+        let advertised = gate
+            .token(Some("worker"), "work.done", r#"{"step":"step-01"}"#)
+            .expect("valid contract + active gate must advertise a token");
+        assert!(
+            !advertised.is_empty(),
+            "advertised token must be non-empty"
+        );
+        // Same hat/topic/payload/revision must produce a stable token.
+        let advertised_again = gate
+            .token(Some("worker"), "work.done", r#"{"step":"step-01"}"#)
+            .expect("token mint must be deterministic");
+        assert_eq!(
+            advertised, advertised_again,
+            "same inputs must mint the same token"
+        );
+
+        // The CORRECT (matching) token must be accepted (None
+        // means no violation) — guards the dead-code
+        // `compute_policy_check_token_for` regression where the
+        // helper always returned an empty expected token and
+        // every legitimate token was wrongly classified as a
+        // mismatch.
+        assert!(
+            gate.token_violation(
+                Some("worker"),
+                "work.done",
+                r#"{"step":"step-01"}"#,
+                Some(&advertised),
+            )
+            .is_none(),
+            "the contract-advertised token MUST verify under the same (hat, topic, payload)"
+        );
+    }
+
+    /// U3 S7: stand-down conditions (human CLI, pseudo-hat
+    /// `ralph`, wave worker, preset without hats) keep the gate
+    /// inactive regardless of contract state.
+    #[test]
+    fn u3_stand_down_keeps_gate_inactive() {
+        // Stand-down cases use the same broken contract; the
+        // gate must NOT activate and so must NOT report
+        // contract_compile_failed (the loop runner owns that
+        // signal at startup).
+        let config = u3_worker_config(U3_BROKEN_CONTRACTS_YAML);
+
+        // 1. Hatless pseudo-hat `ralph` stands down.
+        let gate = U5Gate::resolve(true, false, Some(&config), Some("ralph"), "work.done", "{}");
+        assert!(
+            gate.compile_failure().is_none(),
+            "ralph pseudo-hat must stand down even when the contract is broken"
+        );
+        assert!(
+            gate.capability_denied(Some("ralph"), "work.done").is_none(),
+            "ralph pseudo-hat must stand down"
+        );
+
+        // 2. Preset with no hats stands down.
+        let mut bare = config.clone();
+        bare.hats.clear();
+        let gate = U5Gate::resolve(true, false, Some(&bare), Some("worker"), "work.done", "{}");
+        assert!(
+            gate.compile_failure().is_none(),
+            "preset with no hats must stand down"
+        );
+
+        // 3. `env_hat_set == false` (human CLI) stands down.
+        let gate = U5Gate::resolve(false, false, Some(&config), Some("worker"), "work.done", "{}");
+        assert!(
+            gate.compile_failure().is_none(),
+            "human CLI must stand down"
         );
     }
 }
