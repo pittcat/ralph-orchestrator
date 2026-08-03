@@ -147,6 +147,12 @@ _BUILTIN_PRESET_LIST: dict[str, object] = {
             "source": "builtin:ce-executor-pipeline",
             "tags": [],
         },
+        {
+            "name": "replay-demo",
+            "description": "Replay-safe demo preset",
+            "source": "builtin:replay-demo",
+            "tags": [],
+        },
     ]
 }
 
@@ -184,6 +190,20 @@ _BUILTIN_PRESET_SHOW: dict[str, str] = {
         "    Read the supplied plan and follow it end-to-end.\n"
         "  max_iterations: 12\n"
         "  max_runtime_seconds: 7200\n"
+    ),
+    # The ONLY builtin stub whose resolved ``cli.backend`` equals the
+    # smoke harness's auto-authorised kind; the corrected authorization
+    # model promotes replay smoke positives through this preset.
+    "replay-demo": (
+        "name: replay-demo\n"
+        "cli:\n"
+        "  backend: content_fixed_replay\n"
+        "event_loop:\n"
+        "  prompt: |\n"
+        "    # replay prompt\n"
+        "    Replay the fixed transcript end-to-end.\n"
+        "  max_iterations: 3\n"
+        "  max_runtime_seconds: 300\n"
     ),
 }
 
@@ -244,12 +264,19 @@ def _builtin_resolver_runner(
             args=argv, returncode=0, stdout="", stderr=""
         )
     if len(argv) >= 3 and "run" in argv and "--dry-run" in argv:
+        # Echo the prompt file the caller requested so the dry-run
+        # effective-value gate matches for EVERY preset stem (the
+        # pipeline forwards ``--prompt-file PROMPT.<stem>.md``); fall
+        # back to the historical debug token when the argv carries none.
+        prompt_file = "PROMPT.debug.md"
+        if "--prompt-file" in argv:
+            prompt_file = argv[argv.index("--prompt-file") + 1]
         return subprocess.CompletedProcess(
             args=argv,
             returncode=0,
             stdout=(
                 "Dry run mode - configuration:\n"
-                "  Prompt file: PROMPT.debug.md\n"
+                f"  Prompt file: {prompt_file}\n"
                 "  Max iterations: 8\n"
                 "  Max runtime: 1800s\n"
                 "  Backend: claude\n"
@@ -1740,11 +1767,12 @@ def test_pipeline_replay_smoke_terminal_promotes_to_complete(tmp_path: Path) -> 
     """Replay-bounded smoke that reaches ``LOOP_COMPLETE`` advances the
     handoff level to ``complete`` and emits the official command.
 
-    The pipeline constructs a ``SafeBackend`` from the
-    ``content_fixed_replay`` kind; the fake transcript is staged by
-    the helper when the operator supplies ``--replay-transcript``
-    later, so this test injects a pre-built transcript directly into
-    the smoke harness.
+    Under the corrected authorization model smoke is authorised ONLY
+    when the preset's RESOLVED backend equals ``content_fixed_replay``,
+    so the positive path uses the replay-safe builtin stub
+    (``builtin:replay-demo``) — ``builtin:debug`` resolves to
+    ``claude`` and is not_authorized even under a replay-labelled
+    smoke backend.
     """
     project = _seed_blank_project(tmp_path)
     invocations = cli_probe.load_fixture("green")
@@ -1760,7 +1788,7 @@ def test_pipeline_replay_smoke_terminal_promotes_to_complete(tmp_path: Path) -> 
 
     result = bootstrap_pipeline.run_pipeline(
         cwd=project,
-        preset="builtin:debug",
+        preset="builtin:replay-demo",
         plan_path="plan.md",
         binary="ralph",
         runner=runner,
@@ -1769,10 +1797,156 @@ def test_pipeline_replay_smoke_terminal_promotes_to_complete(tmp_path: Path) -> 
     assert result.level == "complete"
     assert result.smoke_outcome == "bounded_terminal_reached"
     assert result.handoff_command
-    assert "ralph -c ralph.debug.yml" in result.handoff_command
-    assert "-H builtin:debug" in result.handoff_command
+    assert "ralph -c ralph.replay-demo.yml" in result.handoff_command
+    assert "-H builtin:replay-demo" in result.handoff_command
     assert "[CANDIDATE" not in result.handoff_command
     assert "PLAN_PATH" not in result.handoff_command
+
+
+def test_pipeline_real_backend_under_replay_label_is_not_authorized(
+    tmp_path: Path,
+) -> None:
+    """U3-fix: a preset whose RESOLVED backend is a real backend
+    (``claude`` via ``builtin:debug``) must NOT be smoked even when the
+    smoke backend carries the replay capability label. Authorization
+    compares the resolved backend against ``content_fixed_replay``
+    BEFORE any subprocess is constructed: the smoke argv stays empty,
+    no smoke-shaped argv ever reaches the runner, and the handoff level
+    can never be promoted to ``complete``.
+    """
+    project = _seed_blank_project(tmp_path)
+    invocations = cli_probe.load_fixture("green")
+    fallback = _static_runner_factory(invocations)
+    requested: list[tuple[str, ...]] = []
+
+    def _recording_runner(argv, timeout=None, capture_output=False, text=False):
+        requested.append(tuple(argv))
+        return fallback(
+            argv, timeout=timeout, capture_output=capture_output, text=text
+        )
+
+    transcript = _transcript_dir(tmp_path)
+    transcript.mkdir(parents=True, exist_ok=True)
+    backend = smoke_runner.SafeBackend(
+        name="replay",
+        kind="content_fixed_replay",
+        transcript_path=transcript,
+    )
+
+    result = bootstrap_pipeline.run_pipeline(
+        cwd=project,
+        preset="builtin:debug",  # resolves to backend ``claude``
+        plan_path="plan.md",
+        binary="ralph",
+        runner=_recording_runner,
+        smoke_backend=backend,
+    )
+
+    assert result.level == "incomplete_static_only"
+    assert result.blocked is False
+    assert result.smoke_outcome == "not_authorized"
+    # No subprocess was constructed for the smoke.
+    assert result.smoke_argv == ()
+    # The evidence explains the resolved-backend mismatch.
+    assert any("claude" in ev for ev in result.smoke_evidence)
+    assert any(
+        smoke_runner.SAFE_BACKEND_KIND in ev for ev in result.smoke_evidence
+    )
+    # The runner never saw a smoke-shaped argv: the static-stage calls
+    # are the only ones recorded.
+    assert not any(
+        "--max-iterations" in argv and "--idle-timeout" in argv
+        for argv in requested
+    )
+    # The handoff stays a static-only candidate command.
+    assert "[CANDIDATE" in result.handoff_command
+
+
+def test_pipeline_smoke_override_cannot_launder_real_backend(
+    tmp_path: Path,
+) -> None:
+    """U3-fix: ``smoke_result_override`` bypasses the harness but NOT
+    the resolved-backend authorization check. For a preset resolving to
+    ``claude``, an injected override claiming
+    ``bounded_terminal_reached`` must never reach the handoff — the
+    authorization gate fires before the override is honoured, so the
+    level can never be promoted to ``complete``.
+    """
+    project = _seed_blank_project(tmp_path)
+    invocations = cli_probe.load_fixture("green")
+    runner = _static_runner_factory(invocations)
+    backend = smoke_runner.SafeBackend(
+        name="replay", kind="content_fixed_replay"
+    )
+    fake_result = smoke_runner.SmokeResult(
+        outcome="bounded_terminal_reached",
+        evidence=("injected by test",),
+        argv=("ralph", "-c", "ralph.debug.yml", "-H", "builtin:debug"),
+        stderr_excerpt="",
+        stdout_excerpt="",
+        elapsed_seconds=1.0,
+        failure_bucket="none",
+    )
+
+    result = bootstrap_pipeline.run_pipeline(
+        cwd=project,
+        preset="builtin:debug",  # resolves to backend ``claude``
+        plan_path="plan.md",
+        binary="ralph",
+        runner=runner,
+        smoke_backend=backend,
+        smoke_result_override=fake_result,
+    )
+
+    assert result.level == "incomplete_static_only"
+    assert result.blocked is False
+    assert result.smoke_outcome == "not_authorized"
+    assert result.smoke_argv == ()
+    assert result.smoke_evidence != ("injected by test",)
+    assert "[CANDIDATE" in result.handoff_command
+
+
+def test_pipeline_replay_smoke_wires_transcript_dir(tmp_path: Path) -> None:
+    """U3-fix happy path: for a replay-safe preset the staged
+    transcript dir is genuinely wired through ``main`` →
+    ``run_pipeline`` → ``_run_smoke_stage`` → ``run_smoke``: the
+    authorised-path evidence records it, and the bounded-terminal
+    outcome still promotes the handoff to ``complete``.
+    """
+    project = _seed_blank_project(tmp_path)
+    invocations = cli_probe.load_fixture("green")
+    runner = _static_runner_factory(invocations)
+
+    transcript = _transcript_dir(tmp_path)
+    transcript.mkdir(parents=True, exist_ok=True)
+    (transcript / "events.jsonl").write_text(
+        "plan.ready\nLOOP_COMPLETE\n", encoding="utf-8"
+    )
+    backend = smoke_runner.SafeBackend(
+        name="replay",
+        kind="content_fixed_replay",
+        transcript_path=transcript,
+    )
+
+    result = bootstrap_pipeline.run_pipeline(
+        cwd=project,
+        preset="builtin:replay-demo",
+        plan_path="plan.md",
+        binary="ralph",
+        runner=runner,
+        smoke_backend=backend,
+    )
+
+    assert result.level == "complete"
+    assert result.smoke_outcome == "bounded_terminal_reached"
+    # The transcript dir reached ``run_smoke``: the authorised-path
+    # evidence carries the recorded ``transcript_dir=`` entry.
+    assert any(
+        "transcript_dir=" in ev and str(transcript) in ev
+        for ev in result.smoke_evidence
+    )
+    assert result.handoff_command
+    assert "[CANDIDATE" not in result.handoff_command
 
 
 def test_pipeline_unsafe_backend_no_spawn(tmp_path: Path) -> None:
@@ -1801,7 +1975,12 @@ def test_pipeline_unsafe_backend_no_spawn(tmp_path: Path) -> None:
 
 
 def test_pipeline_typed_smoke_failure_blocks(tmp_path: Path) -> None:
-    """A typed smoke failure (``timeout_no_event``) blocks the handoff."""
+    """A typed smoke failure (``timeout_no_event``) blocks the handoff.
+
+    Uses the replay-safe builtin stub so the resolved-backend
+    authorization passes and the injected override stays reachable —
+    the test's intent is "typed smoke failure ⇒ blocked handoff".
+    """
     project = _seed_blank_project(tmp_path)
     invocations = cli_probe.load_fixture("green")
     runner = _static_runner_factory(invocations)
@@ -1812,7 +1991,7 @@ def test_pipeline_typed_smoke_failure_blocks(tmp_path: Path) -> None:
     fake_result = smoke_runner.SmokeResult(
         outcome="timeout_no_event",
         evidence=("idle timeout elapsed",),
-        argv=("ralph", "-c", "ralph.debug.yml", "-H", "builtin:debug"),
+        argv=("ralph", "-c", "ralph.replay-demo.yml", "-H", "builtin:replay-demo"),
         stderr_excerpt="",
         stdout_excerpt="",
         elapsed_seconds=30.0,
@@ -1820,7 +1999,7 @@ def test_pipeline_typed_smoke_failure_blocks(tmp_path: Path) -> None:
     )
     result = bootstrap_pipeline.run_pipeline(
         cwd=project,
-        preset="builtin:debug",
+        preset="builtin:replay-demo",
         plan_path="plan.md",
         binary="ralph",
         runner=runner,
@@ -1925,6 +2104,9 @@ def test_pipeline_typed_smoke_failure_bucket_blocks_and_reports(
     The handoff level is ``blocked``, the command is empty, the typed
     ``smoke_failure_bucket`` flows into ``PipelineResult``, and the
     report surfaces the outcome + bucket so the operator can reconcile.
+
+    Uses the replay-safe builtin stub so the resolved-backend
+    authorization passes and the injected override stays reachable.
     """
     project = _seed_blank_project(tmp_path)
     invocations = cli_probe.load_fixture("green")
@@ -1935,7 +2117,7 @@ def test_pipeline_typed_smoke_failure_bucket_blocks_and_reports(
     fake_result = smoke_runner.SmokeResult(
         outcome=scenario["outcome"],
         evidence=(scenario["evidence"],),
-        argv=("ralph", "-c", "ralph.debug.yml", "-H", "builtin:debug"),
+        argv=("ralph", "-c", "ralph.replay-demo.yml", "-H", "builtin:replay-demo"),
         stderr_excerpt="smoke failed",
         stdout_excerpt="",
         elapsed_seconds=12.0,
@@ -1944,7 +2126,7 @@ def test_pipeline_typed_smoke_failure_bucket_blocks_and_reports(
 
     result = bootstrap_pipeline.run_pipeline(
         cwd=project,
-        preset="builtin:debug",
+        preset="builtin:replay-demo",
         plan_path="plan.md",
         binary="ralph",
         runner=runner,
@@ -2251,25 +2433,66 @@ def test_cli_exit_code_zero_for_static_only(tmp_path: Path, monkeypatch, capsys)
 
 def test_cli_exit_code_zero_for_complete(tmp_path: Path, monkeypatch, capsys) -> None:
     """U5: a replay-bounded smoke that reaches the terminal promotes to
-    ``complete`` and exits 0 via ``main``."""
+    ``complete`` and exits 0 via ``main``.
+
+    The transcript token is repo-relative (anchored on ``--cwd``) and
+    the preset resolves to ``content_fixed_replay`` — the only
+    combination the corrected authorization model authorises.
+    """
     project = _seed_blank_project(tmp_path)
     invocations = cli_probe.load_fixture("green")
     _patch_pipeline_runner(monkeypatch, _static_runner_factory(invocations))
-    transcript = tmp_path / "transcripts"
+    transcript = project / "transcripts"
     transcript.mkdir(parents=True, exist_ok=True)
 
     exit_code = bootstrap_pipeline.main(
         [
             "--cwd", str(project),
-            "--preset", "builtin:debug",
+            "--preset", "builtin:replay-demo",
             "--plan", "plan.md",
-            "--replay-transcript", str(transcript),
+            "--replay-transcript", "transcripts",
         ]
     )
     captured = capsys.readouterr()
     assert exit_code == 0
     assert "level: complete" in captured.out
     assert "smoke_outcome: bounded_terminal_reached" in captured.out
+
+
+@pytest.mark.parametrize(
+    "token",
+    ["/tmp/transcripts", "../transcripts"],
+    ids=["absolute", "dotdot-escape"],
+)
+def test_cli_replay_transcript_unsafe_path_blocked(
+    tmp_path: Path, monkeypatch, capsys, token
+) -> None:
+    """U3-fix: ``--replay-transcript`` passes the SAME repo-relative
+    input gate family as plan/prompt/preset: absolute paths and ``..``
+    escapes are rejected typed ``input_path_unsafe`` with exit 2,
+    BEFORE ``run_pipeline`` is invoked.
+    """
+    project = _seed_blank_project(tmp_path)
+
+    def _never_called(**kwargs):  # pragma: no cover - asserts below
+        raise AssertionError(
+            "unsafe replay transcript must not reach run_pipeline"
+        )
+
+    monkeypatch.setattr(bootstrap_pipeline, "run_pipeline", _never_called)
+
+    exit_code = bootstrap_pipeline.main(
+        [
+            "--cwd", str(project),
+            "--preset", "builtin:debug",
+            "--replay-transcript", token,
+        ]
+    )
+    captured = capsys.readouterr()
+    assert exit_code == 2
+    assert "level: blocked" in captured.out
+    assert "stage: audit" in captured.out
+    assert "code: input_path_unsafe" in captured.out
 
 
 def test_cli_exit_code_two_for_blocked_input(tmp_path: Path, capsys) -> None:
@@ -2328,7 +2551,12 @@ def test_cli_replay_transcript_is_only_safe_backend_switch(
     tmp_path: Path, monkeypatch
 ) -> None:
     """U5: ``--replay-transcript`` is the ONLY switch that enables a
-    ``SafeBackend``; without it the smoke backend stays ``None``."""
+    ``SafeBackend``; without it the smoke backend stays ``None``.
+
+    The repo-relative transcript token is anchored on ``--cwd``: the
+    constructed ``SafeBackend`` carries the cwd-anchored resolved path,
+    never a process-cwd interpretation of the token.
+    """
     project = _seed_blank_project(tmp_path)
     captured_kwargs: dict[str, object] = {}
 
@@ -2349,14 +2577,14 @@ def test_cli_replay_transcript_is_only_safe_backend_switch(
     assert captured_kwargs["smoke_backend"] is None
 
     # --replay-transcript: the ONLY enabling switch constructs the
-    # bounded SafeBackend.
-    transcript = tmp_path / "transcripts"
+    # bounded SafeBackend; the token is anchored on ``--cwd``.
+    transcript = project / "transcripts"
     transcript.mkdir(parents=True, exist_ok=True)
     bootstrap_pipeline.main(
         [
             "--cwd", str(project),
             "--preset", "builtin:debug",
-            "--replay-transcript", str(transcript),
+            "--replay-transcript", "transcripts",
         ]
     )
     backend = captured_kwargs["smoke_backend"]

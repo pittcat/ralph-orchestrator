@@ -24,9 +24,13 @@ Design rules:
 * **Static evidence is typed.** The four ``StageDecision`` rows from
   ``cli_probe.validate_pipeline`` are recorded verbatim; the handoff
   must reference them rather than re-derive a static-only claim.
-* **Smoke authorization is strict.** Only the
-  ``content_fixed_replay`` kind auto-spawns; any other backend
-  produces ``SmokeResult(outcome="not_authorized")`` with empty argv.
+* **Smoke authorization is strict.** Authorization compares the
+  preset's RESOLVED backend (``cli.backend`` from preset resolution)
+  against the single auto-authorised kind ``content_fixed_replay``
+  BEFORE any subprocess is constructed and before any injected smoke
+  override is honoured; a mismatch produces
+  ``SmokeResult(outcome="not_authorized")`` with empty argv regardless
+  of the smoke backend's capability label.
 * **Handoff level is typed.** The pipeline never produces a
   ``complete`` handoff unless the typed smoke outcome is
   ``bounded_terminal_reached``; a free-text ``smoke_evidence`` line
@@ -788,6 +792,7 @@ def _run_static_stage(
 def _run_smoke_stage(
     *,
     backend: smoke_runner.SafeBackend | smoke_runner.UnsafeBackend | None,
+    resolved_backend: str,
     binary: str,
     config_path: str,
     preset: str,
@@ -798,12 +803,38 @@ def _run_smoke_stage(
 ) -> tuple[smoke_runner.SmokeResult | None, PipelineResult]:
     """Run the bounded smoke harness against ``backend``.
 
-    Returns ``(smoke_result, partial_result)``. When the caller
-    supplies ``smoke_result_override`` the harness is bypassed (used
-    by tests to inject typed failures deterministically).
+    Returns ``(smoke_result, partial_result)``.
+
+    Authorization is decided BEFORE any subprocess is constructed and
+    BEFORE ``smoke_result_override`` is honoured: the preset's RESOLVED
+    backend (``cli.backend`` from preset resolution) must equal the
+    single auto-authorised kind ``content_fixed_replay``. The smoke
+    backend's capability label alone can never authorise a spawn — a
+    preset resolving to a real backend gets a typed
+    ``SmokeResult(outcome="not_authorized")`` with empty argv, so the
+    handoff level can never be promoted to ``complete`` through a
+    mislabelled smoke. ``smoke_result_override`` still bypasses the
+    harness (test seam for typed failures) but only on setups that
+    already passed the resolved-backend check.
     """
     if backend is None:
         return None, _ok_partial()
+    if resolved_backend != smoke_runner.SAFE_BACKEND_KIND:
+        smoke_result = smoke_runner.SmokeResult(
+            outcome="not_authorized",
+            evidence=(
+                f"preset resolves to backend {resolved_backend!r}; only "
+                f"{smoke_runner.SAFE_BACKEND_KIND!r} is auto-authorised "
+                f"for bounded smoke",
+                "refused before any subprocess was constructed",
+            ),
+            argv=(),
+            stderr_excerpt="",
+            stdout_excerpt="",
+            elapsed_seconds=0.0,
+            failure_bucket="none",
+        )
+        return smoke_result, _ok_partial()
     if smoke_result_override is not None:
         smoke_result = smoke_result_override
     else:
@@ -815,7 +846,14 @@ def _run_smoke_stage(
             plan_path=plan_path,
             max_iterations=3,
         )
-        smoke_result = smoke_runner.run_smoke(backend, smoke_cfg, runner=runner)
+        # The replay transcript the operator staged via
+        # ``--replay-transcript`` rides on the SafeBackend capability
+        # token; hand it to the harness so the authorised path records
+        # which transcript the smoke was staged against.
+        transcript_dir = getattr(backend, "transcript_path", None)
+        smoke_result = smoke_runner.run_smoke(
+            backend, smoke_cfg, transcript_dir=transcript_dir, runner=runner
+        )
     if smoke_result.outcome not in smoke_runner.OUTCOMES:
         return smoke_result, _make_blocker(
             stage="smoke",
@@ -1150,6 +1188,7 @@ def run_pipeline(
     # --- smoke stage ---------------------------------------------------
     smoke_result, smoke_partial = _run_smoke_stage(
         backend=smoke_backend,
+        resolved_backend=resolved.backend,
         binary=binary,
         config_path=suite.config_path,
         preset=preset_clean,
@@ -1346,7 +1385,11 @@ def build_cli_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--replay-transcript",
-        help="Path to a content_fixed_replay transcript dir; enables the SafeBackend smoke path.",
+        help=(
+            "Repo-relative path (anchored on --cwd) to a "
+            "content_fixed_replay transcript dir; enables the SafeBackend "
+            "smoke path. Absolute paths and .. escapes are rejected."
+        ),
     )
     parser.add_argument(
         "--json",
@@ -1360,44 +1403,60 @@ def main(argv: list[str] | None = None) -> int:
     parser = build_cli_parser()
     args = parser.parse_args(argv)
     smoke_backend: smoke_runner.SafeBackend | smoke_runner.UnsafeBackend | None = None
+    result: PipelineResult | None = None
     if args.replay_transcript:
-        smoke_backend = smoke_runner.SafeBackend(
-            name="replay",
-            kind="content_fixed_replay",
-            transcript_path=Path(args.replay_transcript).resolve(),
-        )
-    try:
-        result = run_pipeline(
-            cwd=args.cwd,
-            preset=args.preset,
-            plan_path=args.plan,
-            prompt_file=args.prompt_file,
-            binary=args.binary,
-            refresh_existing=args.refresh_existing,
-            smoke_backend=smoke_backend,
-        )
-    except ValueError as exc:
-        # The handoff helper rejects malformed launch inputs at
-        # construction time (e.g. a worktree run without an explicit
-        # reuse key) by raising ``ValueError``. Render the rejection
-        # as a blocked-shaped result instead of a traceback so the
-        # CLI contract holds: blocked always exits 2 with a typed
-        # code the operator can act on. No business logic is
-        # duplicated — ``run_pipeline`` remains the only layer that
-        # classifies pipeline stages.
-        message = str(exc)
-        code = (
-            "worktree_reuse_key_missing"
-            if "worktree reuse key" in message
-            else "handoff_inputs_rejected"
-        )
-        result = PipelineResult(
-            level="blocked",
-            blocked=True,
-            stage="handoff",
-            code=code,
-            message=message,
-        )
+        # The transcript token passes the SAME repo-relative input gate
+        # family as plan/prompt/preset: absolute paths, ``..`` escapes
+        # and control bytes are rejected typed BEFORE any pipeline work.
+        # Safe tokens are anchored on ``--cwd`` so the staged transcript
+        # the harness consumes is exactly the one the audit validated.
+        if not _paths.is_safe_relative(args.replay_transcript):
+            result = PipelineResult(
+                level="blocked",
+                blocked=True,
+                stage="audit",
+                code="input_path_unsafe",
+                message="input rejected: input_path_unsafe",
+            )
+        else:
+            smoke_backend = smoke_runner.SafeBackend(
+                name="replay",
+                kind="content_fixed_replay",
+                transcript_path=(Path(args.cwd) / args.replay_transcript).resolve(),
+            )
+    if result is None:
+        try:
+            result = run_pipeline(
+                cwd=args.cwd,
+                preset=args.preset,
+                plan_path=args.plan,
+                prompt_file=args.prompt_file,
+                binary=args.binary,
+                refresh_existing=args.refresh_existing,
+                smoke_backend=smoke_backend,
+            )
+        except ValueError as exc:
+            # The handoff helper rejects malformed launch inputs at
+            # construction time (e.g. a worktree run without an explicit
+            # reuse key) by raising ``ValueError``. Render the rejection
+            # as a blocked-shaped result instead of a traceback so the
+            # CLI contract holds: blocked always exits 2 with a typed
+            # code the operator can act on. No business logic is
+            # duplicated — ``run_pipeline`` remains the only layer that
+            # classifies pipeline stages.
+            message = str(exc)
+            code = (
+                "worktree_reuse_key_missing"
+                if "worktree reuse key" in message
+                else "handoff_inputs_rejected"
+            )
+            result = PipelineResult(
+                level="blocked",
+                blocked=True,
+                stage="handoff",
+                code=code,
+                message=message,
+            )
     if args.json:
         sys.stdout.write(render_cli_json(result))
         sys.stdout.write("\n")
