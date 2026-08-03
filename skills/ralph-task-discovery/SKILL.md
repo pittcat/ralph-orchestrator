@@ -18,8 +18,9 @@ description: >-
 且只在 `author_ready` 状态交接给计划作者。
 
 **契约速查**:字段与门禁语义 → [references/task-brief-schema.md](references/task-brief-schema.md);
-外部 skill 方法规程 → [references/external-skill-adapters.md](references/external-skill-adapters.md)。
-本文档不复述这两份契约的细节,只定义调用顺序、状态与停止条件。
+外部 skill 方法规程 → [references/external-skill-adapters.md](references/external-skill-adapters.md);
+评分与候选裁决规程(SSOT)→ [references/confidence-and-candidate-rubric.md](references/confidence-and-candidate-rubric.md)。
+本文档不复述这些契约的细节,只定义调用顺序、状态与停止条件。
 
 ## 边界
 
@@ -116,6 +117,8 @@ provenance)在 [references/external-skill-adapters.md](references/external-skill
   `next_action == ready_for_handoff`。
 - 交接物:**仅 task brief 路径**(YAML);下游 `ralph-preset-author`
   自行读取 brief 与 validator 结果。
+- 交接消费协议(author 侧读取顺序 / stale 判据 / 停止 code / 端到端映射)→
+  [references/author-handoff.md](references/author-handoff.md)。
 - 其余状态(`draft` / `needs_investigation` / `needs_user_decision` /
   `blocked`)一律不得交接。
 
@@ -123,6 +126,8 @@ provenance)在 [references/external-skill-adapters.md](references/external-skill
 
 - [references/task-brief-schema.md](references/task-brief-schema.md) — task brief 数据契约与硬门禁 validator 使用手册
 - [references/external-skill-adapters.md](references/external-skill-adapters.md) — 外部 skill adapter 规程(provenance / fallback / 停止条件)
+- [references/confidence-and-candidate-rubric.md](references/confidence-and-candidate-rubric.md) — 评分与候选裁决规程(冻结 SSOT)
+- [references/author-handoff.md](references/author-handoff.md) — task brief 交接与消费规程(author 侧读取顺序与停止 code)
 - [scripts/task_brief.py](scripts/task_brief.py) — 数据契约(纯数据结构)
 - [scripts/brief_validator.py](scripts/brief_validator.py) — 硬门禁 validator
 - [scripts/discovery_transcript.py](scripts/discovery_transcript.py) — 工作流规则的确定性实现

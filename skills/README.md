@@ -45,6 +45,19 @@ ralph-task-discovery → ralph-preset-author → ralph-preset-review
   that already ran. None of them replaces task discovery before planning,
   and task discovery never authors presets itself.
 
+## Verification levels
+
+Three test layers guard these skills (interpreter: `skills/.venv/bin/python`,
+run from the repo root):
+
+| Layer | Suite | Locks |
+|---|---|---|
+| Contract | `skills/tests/test_task_discovery_contract.py` | Frozen task-brief constants, hard gates, stable error codes / next_action vocabulary |
+| E2E transcript | `skills/tests/test_task_discovery_e2e.py` | Deterministic transcripts and the full transcript → brief → validator → author-handoff pipeline; no failure branch may reach the author |
+| Install parity | `skills/tests/test_install.py` (+ execution-model / prompt-visibility / project-bootstrap contract suites) | Skill catalog, marketplace manifest, installed-tree parity |
+
+`skills/.venv/bin/python -m pytest skills/tests -q` runs all three layers.
+
 ## External skill corpus (task discovery only)
 
 `ralph-task-discovery` consults an operator-local external skill corpus at

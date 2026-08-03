@@ -91,18 +91,46 @@ author 只消费以下字段;任何清单外的 brief 内容都不得当作已�
 向调用方报告 verdict + 错误清单(code/path/message),不生成任何 preset
 YAML,不消费 brief 的任何字段。
 
-## 端到端证据/错误映射(U6 预留结构)
+## 端到端证据/错误映射(U6 落地)
 
-下表是 discovery 产出 → author 消费/停止的端到端映射,作为后续 e2e
-测试(U6)的结构化基础:
+pipeline 分三段:discovery(transcript → brief mapping)、
+validator(brief → 硬门禁裁定)、handoff(brief 路径 → author 消费裁定)。
+每段的输入、输出、失败 code 与下一动作如下;行为由
+`skills/tests/test_task_discovery_e2e.py` 的端到端 pipeline 段锁定
+(任一阶段失败都不得穿透到 author 之后):
 
-| 环节 | discovery 侧输出 | author 侧消费 / 停止 |
-|---|---|---|
-| 交接物 | brief 文件路径(`author_ready` + `ready_for_handoff`) | Workflow 0 接收 `task_brief_path`,只传路径,不复制长文本 |
-| 文件 | brief YAML 落盘 | 存在性检查;缺失 → `task_brief_file_not_found` |
-| 格式 | YAML 文本 | `validate_brief_text` 真实解析;失败 → `invalid_yaml` |
-| provenance | `schema_version` / `project_root` | 版本支持 + 目标根匹配;失败 → `schema_version_invalid` / `root_provenance_missing` / `task_brief_root_mismatch` |
-| 门禁 | validator 裁定(`valid` / `author_ready` / `errors`) | 复核认证;失败 → 透传 validator code |
-| 状态 | `status` / `recommended_status` / `handoff_block_reasons` | 仅接受认证通过的 brief;未认证 → `task_brief_not_author_ready` |
-| 事实 | goal / confirmations / candidates / evidence | Intent Confirmation 引用;selected 仅取 `candidate_gates` 结论为 selected 的候选 |
-| 门禁不豁免 | — | brief 通过后,author 既有 Discovery / AAF / Payload Contract / review handoff 照常执行 |
+### 阶段 1:discovery(transcript → brief mapping)
+
+| 项 | 内容 |
+|---|---|
+| 输入 | deterministic transcript(项目事实 + 用户回答序列)+ 任务类型(`feature` / `bug`) |
+| 输出 | task brief mapping(`status` / `confidence` 五维 / `evidence` 台账 / `decisions` / `candidates` / `user_confirmations`) |
+| 失败形态 | 不是异常,而是状态收敛:事实缺口 → `needs_investigation`;未决决策或未确认主题 → `needs_user_decision`;`attempt_count >= 3` 仍不达标 → `blocked`;外部 corpus 不可用 → `external_skill_unavailable:` + `fallback:` provenance(绝不写 `external_skill_applied:`) |
+| 下一动作 | `rerun_investigation`(事实问题只路由环境调查,不反问用户)/ `confirm_with_user`(决策一次一问,附推荐项)/ `blocked` 只等人工输入 |
+
+### 阶段 2:brief_validator(brief → 硬门禁裁定)
+
+| 项 | 内容 |
+|---|---|
+| 输入 | brief YAML 文本(`validate_brief_text`,真实 `yaml.safe_load`)或已解析 mapping(`validate_brief_data`) |
+| 输出 | `ValidationResult`:`valid` / `author_ready`(认证结论)/ `recommended_status` / `next_action` / `errors`(稳定 code + path)/ `candidate_gates` / `rejections` / `handoff_block_reasons` / `missing_evidence` |
+| 失败 code(示例) | `invalid_yaml` / `schema_version_invalid` / `root_provenance_missing` / `candidate_coverage_gate_failed` / `author_ready_gate_violation` / `ambiguous_selected_candidates` / `selected_candidate_missing_acceptance_evidence` / `candidate_status_inconsistent` / `score_inflation` / `state_transition_invalid` / `unreferenced_evidence` |
+| 下一动作 | 认证通过 → `ready_for_handoff`;否则按错误性质 `rerun_investigation` / `confirm_with_user` / `switch_candidate`,`blocked` 时只指向人工输入(`confirm_with_user`),不建议第四轮自动调查 |
+
+### 阶段 3:author_handoff(brief 路径 → author 消费裁定)
+
+| 项 | 内容 |
+|---|---|
+| 输入 | brief 文件路径 + 当前目标项目根:`evaluate_task_brief(brief_path, target_project_root)` |
+| 输出(ok) | verdict `author_handoff_ok` + 已确认事实:`goal` / `scope_note` / `acceptance_note` / `failure_boundaries_note` / `selected_candidate_*`(仅 `candidate_gates` 结论为 `selected` 的候选)/ `evidence_ids` |
+| 失败 code | `task_brief_file_not_found`(author 侧)/ 透传 validator 全部 code / `task_brief_root_mismatch`(author 侧,stale)/ `task_brief_not_author_ready`(author 侧,message 携带 `handoff_block_reasons`) |
+| 下一动作(invalid) | 停在 Discovery gate,报告 verdict + 错误清单(code/path/message),不生成任何 preset YAML,不消费 brief 任何字段 |
+
+### 短路语义(失败不得穿透)
+
+| 失败阶段 | 后续阻断 |
+|---|---|
+| discovery 收敛到非 `author_ready` 状态 | validator `author_ready == false`,认证不通过 |
+| validator 报任一错误 | handoff verdict `task_brief_invalid`,validator code 原样透传 |
+| validator 无错误但未认证(诚实声明 blocked / needs_user_decision / needs_investigation) | handoff 补 `task_brief_not_author_ready` |
+| handoff 判 invalid | `HandoffDecision` 全部已确认事实字段为 None/空,author 不启动、不生成 preset |

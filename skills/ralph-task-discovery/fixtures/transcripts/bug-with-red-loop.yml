@@ -1,0 +1,46 @@
+# Bug 带 red-capable 回路 transcript(deterministic):bug 任务已具备针对真实症状的
+# red-capable 反馈回路(独立 replay,E4 级),事实齐全且用户逐题显式确认。
+# 与 bug-without-loop.yml 成对照:无回路 → needs_investigation、无候选;
+# 有回路且 selected 候选支撑证据含 E3/E4 完成证据 → author_ready,
+# handoff verdict=author_handoff_ok。
+project_root: /workspace/demo-repo
+goal_request: "修复订单导出在大数据量下超时报错的问题"
+task_type: bug
+previous_status: needs_investigation
+attempt_count: 2
+project_facts:
+  - topic: entry_point
+    source: src/export/order_export.rs
+    observation: "导出入口为 export_orders(),内部一次性装载全部订单行"
+    level: E2
+  - topic: test_command
+    source: "cargo nextest run -p orders 实际执行输出"
+    observation: "针对该症状新增的失败用例在修复前真实变红,测试入口可运行"
+    level: E3
+  - topic: red_capable_loop
+    source: replay/order-export-timeout
+    observation: "独立 replay 场景以 10 万行订单稳定复现超时症状(red-capable),修复后由红转绿"
+    level: E4
+user_answers:
+  - topic: goal
+    clarity: explicit
+    answer: "目标是让 10 万行订单导出在 60 秒内完成且不报错"
+  - topic: scope
+    clarity: explicit
+    answer: "只改导出链路,不动订单写入"
+  - topic: completion_evidence
+    clarity: explicit
+    answer: "完成证据为 replay 回路由红转绿且连续 10 次运行不超时"
+  - topic: failure_boundaries
+    clarity: explicit
+    answer: "导出中途失败必须输出可读错误,禁止产出半截文件"
+candidates:
+  - id: C1
+    summary: "以 red-capable replay 回路驱动修复:分批流式装载订单行,先复现再修,绿后保留回归用例"
+    confidence: 0.88
+    goal_coverage: 0.90
+    acceptance_coverage: 0.88
+    project_fit: 0.82
+    evidence_topics: [entry_point, test_command, red_capable_loop]
+    selected: true
+    status: selected

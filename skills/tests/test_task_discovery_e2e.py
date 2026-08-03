@@ -7,8 +7,13 @@
 * ``scripts/discovery_transcript.py`` —— SKILL.md 工作流规则的确定性实现
   (transcript → task brief mapping),由 conftest 以 flat module 注册;
 * U1 的 ``brief_validator`` —— 对生成的 brief 做硬门禁裁定;
+* U4 的 ``author_handoff`` —— author 侧消费/停止裁定;
 * ``SKILL.md`` / ``references/external-skill-adapters.md`` /
   ``agents/openai.yaml`` / ``references/task-brief-schema.md`` 的结构化契约。
+
+U6 增补:端到端 pipeline 段把 transcript → discovery mapping → validator →
+author handoff 串成一条确定性链(测试内组装,不新增生产模块),验证
+低置信度/冲突/缺证据/外部不可用/三轮失败均不能穿透到 author 之后。
 
 测试语义(HARD):断言的是状态、Evidence ID、决策记录与 next_action,
 不做"markdown 包含某词"式的文案断言。仅有的结构化词汇断言针对稳定
@@ -17,12 +22,14 @@ agent-facing contract,且每处都在注释中说明契约原因。
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
 import yaml
 
 from brief_validator import validate_brief_data, validate_brief_text
+from task_brief import KEY_DIMENSIONS
 
 SKILL_DIR = Path(__file__).resolve().parents[1] / "ralph-task-discovery"
 TRANSCRIPTS = SKILL_DIR / "fixtures" / "transcripts"
@@ -37,6 +44,8 @@ TRANSCRIPT_FIXTURES = (
     # U3:多候选淘汰 / 补证据重算
     "alternative-candidates.yml",
     "recompute-with-new-evidence.yml",
+    # U6:bug 带 red-capable 回路(与 bug-without-loop.yml 成对照)
+    "bug-with-red-loop.yml",
 )
 
 
@@ -820,3 +829,378 @@ def test_author_handoff_doc_exists_and_defines_contract() -> None:
     )
     # 端到端证据/错误映射表(U6 预留结构)
     assert "映射" in text and "U6" in text
+
+
+# --- U6:端到端 pipeline(transcript → discovery → validator → author handoff) ---
+#
+# 把 SKILL.md 工作流的确定性实现串成一条链:transcript → build_brief →
+# brief YAML 落盘 → validate_brief_text(真实 yaml.safe_load)→
+# author_handoff.evaluate_task_brief(文件路径 + 目标项目根)。链在测试内
+# 组装,不新增生产模块。断言语义:状态、分数、Evidence ID、候选状态、
+# next action、handoff verdict;每一阶段的失败都必须阻断后续 author 消费
+# (invalid 裁定断言「无任何已确认事实被输出」)。
+
+
+@dataclass(frozen=True)
+class PipelineRun:
+    """一次端到端 pipeline 运行的完整产物(brief 数据 + 落盘路径 +
+    validator 裁定 + author handoff 裁定)。"""
+
+    label: str
+    brief_path: Path
+    brief_data: dict
+    validation: object  # brief_validator.ValidationResult
+    decision: object  # author_handoff.HandoffDecision
+
+
+def _pipeline_finish(
+    label: str, brief: dict, text: str, target_root: str, tmp_path: Path
+) -> PipelineRun:
+    """brief YAML 落盘后,validator 走文本入口、handoff 走文件路径入口。"""
+    brief_path = tmp_path / f"{label.removesuffix('.yml')}-brief.yml"
+    brief_path.write_text(text, encoding="utf-8")
+    validation = validate_brief_text(brief_path.read_text(encoding="utf-8"))
+    decision = _ah().evaluate_task_brief(brief_path, target_root)
+    return PipelineRun(
+        label=label,
+        brief_path=brief_path,
+        brief_data=brief,
+        validation=validation,
+        decision=decision,
+    )
+
+
+def _pipeline_run_from_transcript(name: str, tmp_path: Path) -> PipelineRun:
+    """transcript → discovery mapping → brief 落盘 → validator → handoff。"""
+    transcript = _transcript(name)
+    brief = _dt().build_brief(transcript)
+    text = yaml.safe_dump(brief, allow_unicode=True)
+    return _pipeline_finish(name, brief, text, transcript["project_root"], tmp_path)
+
+
+def _pipeline_run_from_brief_fixture(name: str, tmp_path: Path) -> PipelineRun:
+    """brief fixture 原文 → 落盘 → validator → handoff(目标根取 brief 自身
+    project_root,使裁定只取决于门禁语义而非 stale 根)。"""
+    text = (BRIEF_FIXTURES / name).read_text(encoding="utf-8")
+    brief = yaml.safe_load(text)
+    return _pipeline_finish(name, brief, text, brief["project_root"], tmp_path)
+
+
+def test_pipeline_green_flow_transcript_to_handoff_ok(tmp_path) -> None:
+    # green transcript → discovery 收敛 author_ready → validator 认证
+    # ready_for_handoff → author handoff 裁定可交接,已确认事实被消费。
+    ah = _ah()
+    run = _pipeline_run_from_transcript("green.yml", tmp_path)
+    brief, validation, decision = run.brief_data, run.validation, run.decision
+
+    # 阶段 1(discovery):状态收敛 + 事实/决策齐全
+    assert brief["status"] == "author_ready"
+    assert all(score == pytest.approx(0.85) for score in brief["confidence"].values())
+    ledger = {entry["id"]: entry["level"] for entry in brief["evidence"]}
+    assert {"E1", "E2", "E3"} <= set(ledger), "项目事实调查产生 E1-E3 证据"
+    assert {d["id"]: d["resolved"] for d in brief["decisions"]} == {
+        "D1": True,
+        "D2": True,
+        "D3": True,
+        "D4": True,
+    }
+
+    # 阶段 2(validator):认证通过,next_action 可交接
+    assert validation.valid is True
+    assert validation.author_ready is True
+    assert validation.recommended_status == "author_ready"
+    assert validation.next_action == "ready_for_handoff"
+    assert validation.errors == ()
+    assert validation.handoff_block_reasons == ()
+    gates = {gate.candidate_id: gate for gate in validation.candidate_gates}
+    assert gates["C1"].outcome == "selected"
+    assert gates["C1"].failed_gates == ()
+
+    # 阶段 3(author handoff):可交接,消费的已确认事实与 brief 一致
+    assert decision.verdict == ah.VERDICT_OK
+    assert decision.errors == ()
+    assert decision.goal == brief["goal"]
+    confirmations = brief["user_confirmations"]
+    assert decision.scope_note == confirmations["scope"]["note"]
+    assert decision.acceptance_note == confirmations["completion_evidence"]["note"]
+    assert decision.failure_boundaries_note == confirmations["failure_boundaries"]["note"]
+    assert decision.selected_candidate_id == "C1"
+    assert decision.selected_candidate_evidence == tuple(
+        brief["candidates"][0]["supporting_evidence"]
+    )
+    assert set(decision.evidence_ids) == set(ledger)
+    # selected 候选的支撑证据含 E3/E4 完成证据(真实执行级别)
+    assert {
+        ledger[eid] for eid in decision.selected_candidate_evidence
+    } & {"E3", "E4"}
+
+
+def test_pipeline_low_confidence_transcript_never_reaches_author(tmp_path) -> None:
+    # 低置信度链:无项目事实/无回答 → 五维全部落入丢弃带 →
+    # needs_investigation;validator 不认证;handoff 判 task_brief_invalid,
+    # author 不启动(无任何已确认事实被消费)。
+    ah = _ah()
+    run = _pipeline_run_from_transcript("unknown-project.yml", tmp_path)
+    brief, validation, decision = run.brief_data, run.validation, run.decision
+
+    assert brief["status"] == "needs_investigation"
+    assert brief["evidence"] == []
+    assert brief["candidates"] == []
+    assert all(score == pytest.approx(0.50) for score in brief["confidence"].values())
+
+    assert validation.valid is True
+    assert validation.author_ready is False
+    assert validation.recommended_status == "needs_investigation"
+    assert validation.next_action == "rerun_investigation"
+    # 五维逐个诚实丢弃(rejected_low_confidence),禁止平均值绕过
+    dim_rejections = [r for r in validation.rejections if r.kind == "dimension"]
+    assert {r.id for r in dim_rejections} == set(KEY_DIMENSIONS)
+    assert all(r.reason == "rejected_low_confidence" for r in dim_rejections)
+
+    assert decision.verdict == ah.VERDICT_INVALID
+    assert [e.code for e in decision.errors] == [ah.CODE_NOT_AUTHOR_READY]
+    assert decision.goal is None
+    assert decision.selected_candidate_id is None
+    assert decision.evidence_ids == ()
+
+
+def test_pipeline_medium_confidence_brief_stops_at_handoff(tmp_path) -> None:
+    # 中置信度链:project_fact_coverage 0.84 落调查带 → needs_investigation;
+    # brief 内部一致(valid)但未认证 → handoff 拒绝,author 不启动。
+    ah = _ah()
+    run = _pipeline_run_from_brief_fixture("medium-confidence.yml", tmp_path)
+    brief, validation, decision = run.brief_data, run.validation, run.decision
+
+    assert brief["status"] == "needs_investigation"
+    assert brief["confidence"]["project_fact_coverage"] == pytest.approx(0.84)
+    # 其余四维全部达标:单维度短板不被其它维度补偿
+    others = {
+        dim: score
+        for dim, score in brief["confidence"].items()
+        if dim != "project_fact_coverage"
+    }
+    assert all(score >= 0.85 for score in others.values())
+
+    assert validation.valid is True
+    assert validation.author_ready is False
+    assert validation.recommended_status == "needs_investigation"
+    assert validation.next_action == "rerun_investigation"
+
+    assert decision.verdict == ah.VERDICT_INVALID
+    assert [e.code for e in decision.errors] == [ah.CODE_NOT_AUTHOR_READY]
+    assert decision.goal is None
+    assert decision.selected_candidate_id is None
+    assert decision.evidence_ids == ()
+
+
+def test_pipeline_rejected_candidate_flow_only_selected_reaches_author(tmp_path) -> None:
+    # 多候选链:C-A coverage 不足被 rejected(rejection reason 保留),
+    # 替代候选 C-B 达标后才继续 → validator 认证 author_ready,
+    # handoff 只消费 C-B,rejected 候选不得进入交接消费。
+    ah = _ah()
+    run = _pipeline_run_from_transcript("alternative-candidates.yml", tmp_path)
+    brief, validation, decision = run.brief_data, run.validation, run.decision
+
+    assert brief["status"] == "author_ready"
+    candidates = {c["id"]: c for c in brief["candidates"]}
+    assert candidates["C-A"]["status"] == "rejected_insufficient_coverage"
+    assert candidates["C-A"]["rejection_reason"], "被淘汰候选的 rejection reason 必须保留"
+    assert candidates["C-B"]["status"] == "selected"
+
+    gates = {gate.candidate_id: gate for gate in validation.candidate_gates}
+    assert gates["C-A"].outcome == "rejected_insufficient_coverage"
+    assert gates["C-A"].failed_gates == ("acceptance_coverage",)
+    assert gates["C-B"].outcome == "selected"
+    assert gates["C-B"].failed_gates == ()
+    assert validation.author_ready is True
+    assert validation.next_action == "ready_for_handoff"
+
+    assert decision.verdict == ah.VERDICT_OK
+    assert decision.selected_candidate_id == "C-B"
+    assert decision.selected_candidate_id != "C-A"
+    assert decision.selected_candidate_summary == candidates["C-B"]["summary"]
+    assert decision.selected_candidate_evidence == tuple(
+        candidates["C-B"]["supporting_evidence"]
+    )
+    assert decision.goal == brief["goal"]
+
+
+def test_pipeline_blocked_flow_reports_gaps_and_refuses_handoff(tmp_path) -> None:
+    # 三轮失败链:blocked brief → validator 报告缺失维度/已尝试候选/人工动作,
+    # 不建议第四轮自动调查;handoff 拒绝且不伪造任何 launch/preset 输入。
+    ah = _ah()
+    run = _pipeline_run_from_brief_fixture("blocked.yml", tmp_path)
+    brief, validation, decision = run.brief_data, run.validation, run.decision
+
+    assert brief["status"] == "blocked"
+    assert brief["attempt_count"] == 3
+    assert validation.valid is True
+    assert validation.author_ready is False
+    assert validation.recommended_status == "blocked"
+    assert validation.next_action == "confirm_with_user"
+
+    reasons = validation.handoff_block_reasons
+    # 缺失证据/维度逐条列出(五维门禁未过 + 无达标候选)
+    assert any("0.85" in reason for reason in reasons)
+    # 已尝试候选及其结论可追溯
+    assert any("C1=needs_investigation" in reason for reason in reasons)
+    # 人工动作:只等人工输入,不建议第四轮自动调查
+    assert any("人工输入" in reason for reason in reasons)
+    assert any("不得自动开启第四轮调查" in reason for reason in reasons)
+
+    assert decision.verdict == ah.VERDICT_INVALID
+    assert [e.code for e in decision.errors] == [ah.CODE_NOT_AUTHOR_READY]
+    assert "人工输入" in decision.errors[0].message
+    assert "status=blocked" in decision.errors[0].message
+    # 不伪造 launch/preset 输入:无任何可消费事实
+    assert decision.goal is None
+    assert decision.selected_candidate_id is None
+    assert decision.selected_candidate_evidence == ()
+    assert decision.evidence_ids == ()
+
+
+def test_pipeline_external_unavailable_flow_records_fallback_and_refuses_handoff(
+    tmp_path,
+) -> None:
+    # 外部 corpus 不可用链:static fallback + provenance 显式记录,不伪造已执行;
+    # 置信度不被静默改动,阻断来自未确认主题 → validator 不认证 → handoff 拒绝。
+    dt = _dt()
+    ah = _ah()
+    run = _pipeline_run_from_transcript("unavailable-external-skill.yml", tmp_path)
+    brief, validation, decision = run.brief_data, run.validation, run.decision
+
+    markers = [
+        entry
+        for entry in brief["evidence"]
+        if entry["observation"].startswith(dt.MARKER_UNAVAILABLE)
+    ]
+    assert len(markers) == 1
+    assert "grilling" in markers[0]["observation"]
+    assert "domain-modeling" in markers[0]["observation"]
+    # static fallback 与预期 provenance 同时出现;不伪装外部 skill 已执行
+    assert markers[0]["source"].startswith("fallback:")
+    assert "grilling/SKILL.md" in markers[0]["source"]
+    assert not any(
+        entry["observation"].startswith(dt.MARKER_APPLIED)
+        for entry in brief["evidence"]
+    )
+
+    # confidence impact:五维保持达标带(未因 fallback 虚增或扣减),
+    # 阻断原因是用户确认缺失而不是分数
+    assert all(score == pytest.approx(0.85) for score in brief["confidence"].values())
+    assert brief["status"] == "needs_user_decision"
+    assert validation.valid is True
+    assert validation.author_ready is False
+    assert validation.recommended_status == "needs_user_decision"
+    assert validation.next_action == "confirm_with_user"
+    assert any("确认记录" in reason for reason in validation.handoff_block_reasons)
+
+    assert decision.verdict == ah.VERDICT_INVALID
+    assert [e.code for e in decision.errors] == [ah.CODE_NOT_AUTHOR_READY]
+    assert decision.goal is None
+    assert decision.evidence_ids == ()
+
+
+def test_pipeline_bug_flow_requires_red_capable_e3_e4_before_author_ready(tmp_path) -> None:
+    # bug 链对照:无 red-capable 回路 → needs_investigation、无候选、handoff 拒绝;
+    # 补上 red-capable replay 事实(E4)后 acceptance 证据等级提升到 E3/E4,
+    # selected 候选含完成证据才 author_ready → handoff 可交接。
+    dt = _dt()
+    ah = _ah()
+
+    without = _pipeline_run_from_transcript("bug-without-loop.yml", tmp_path)
+    assert without.brief_data["status"] == "needs_investigation"
+    assert without.brief_data["candidates"] == []
+    assert without.brief_data["confidence"]["acceptance_evidence"] == pytest.approx(0.75)
+    assert without.validation.valid is True
+    assert without.validation.author_ready is False
+    assert without.validation.recommended_status == "needs_investigation"
+    assert without.validation.next_action == "rerun_investigation"
+    assert without.decision.verdict == ah.VERDICT_INVALID
+    assert without.decision.selected_candidate_id is None
+    assert without.decision.evidence_ids == ()
+
+    with_loop = _pipeline_run_from_transcript("bug-with-red-loop.yml", tmp_path)
+    brief, validation, decision = (
+        with_loop.brief_data,
+        with_loop.validation,
+        with_loop.decision,
+    )
+    # red-capable 回路事实进入环境问题清单后,该 transcript 无遗留开放问题
+    assert dt.open_questions(_transcript("bug-with-red-loop.yml")) == ()
+    assert brief["status"] == "author_ready"
+    assert brief["confidence"]["acceptance_evidence"] == pytest.approx(0.85)
+    assert validation.valid is True
+    assert validation.author_ready is True
+    assert validation.recommended_status == "author_ready"
+    assert validation.next_action == "ready_for_handoff"
+    gates = {gate.candidate_id: gate for gate in validation.candidate_gates}
+    assert gates["C1"].outcome == "selected"
+    # selected 候选支撑证据必须含 E3/E4 完成证据(实际执行/独立验收级别)
+    ledger = {entry["id"]: entry["level"] for entry in brief["evidence"]}
+    selected = brief["candidates"][0]
+    selected_levels = {ledger[eid] for eid in selected["supporting_evidence"]}
+    assert selected_levels & {"E3", "E4"}
+    assert "E4" in ledger.values(), "red-capable replay 事实以 E4 等级进入台账"
+
+    assert decision.verdict == ah.VERDICT_OK
+    assert decision.selected_candidate_id == "C1"
+    assert decision.selected_candidate_evidence == tuple(selected["supporting_evidence"])
+    assert decision.goal == brief["goal"]
+
+
+# 每一阶段的失败都必须阻断后续 author 消费:validator 不认证 →
+# handoff 判 invalid → invalid 裁定不携带任何已确认事实。
+FAILING_PIPELINE_SOURCES = (
+    ("transcript", "unknown-project.yml"),  # 低置信度:五维丢弃带
+    ("transcript", "bug-without-loop.yml"),  # bug 无 red-capable 回路
+    ("transcript", "unavailable-external-skill.yml"),  # 外部不可用 + 未确认主题
+    ("transcript", "vague-success-criteria.yml"),  # 模糊回答 → 未决 blocking 决策
+    ("transcript", "conflicting-doc.yml"),  # 术语冲突未裁决
+    ("brief", "blocked.yml"),  # 三轮耗尽
+    ("brief", "medium-confidence.yml"),  # 单维度调查带
+    ("brief", "low-confidence.yml"),  # 单维度丢弃带
+    ("brief", "coverage-fail.yml"),  # 覆盖门禁失败 + 虚假 author_ready 声明
+    ("brief", "ambiguous-selected.yml"),  # 候选等分歧义
+    ("brief", "conflicting-evidence.yml"),  # 矛盾证据未裁决
+)
+
+
+@pytest.mark.parametrize("kind, name", FAILING_PIPELINE_SOURCES)
+def test_pipeline_failure_short_circuit_blocks_author_consumption(
+    kind: str, name: str, tmp_path
+) -> None:
+    ah = _ah()
+    run = (
+        _pipeline_run_from_transcript(name, tmp_path)
+        if kind == "transcript"
+        else _pipeline_run_from_brief_fixture(name, tmp_path)
+    )
+    assert run.validation.author_ready is False, name
+    assert run.decision.verdict == ah.VERDICT_INVALID, name
+    assert run.decision.errors, name
+    # invalid 裁定不输出任何已确认事实(停止语义)
+    assert run.decision.goal is None, name
+    assert run.decision.scope_note is None, name
+    assert run.decision.acceptance_note is None, name
+    assert run.decision.failure_boundaries_note is None, name
+    assert run.decision.selected_candidate_id is None, name
+    assert run.decision.selected_candidate_summary is None, name
+    assert run.decision.selected_candidate_evidence == (), name
+    assert run.decision.evidence_ids == (), name
+
+
+def test_pipeline_validator_errors_propagate_through_handoff(tmp_path) -> None:
+    # validator 结构错误必须原样透传到 handoff 裁定(不被吞、不降级):
+    # 覆盖门禁失败 + 虚假 author_ready 声明;候选等分歧义。
+    ah = _ah()
+    failing = _pipeline_run_from_brief_fixture("coverage-fail.yml", tmp_path)
+    codes = [error.code for error in failing.decision.errors]
+    assert "candidate_coverage_gate_failed" in codes
+    assert "author_ready_gate_violation" in codes
+    assert failing.decision.verdict == ah.VERDICT_INVALID
+
+    ambiguous = _pipeline_run_from_brief_fixture("ambiguous-selected.yml", tmp_path)
+    codes = [error.code for error in ambiguous.decision.errors]
+    assert "ambiguous_selected_candidates" in codes
+    assert ambiguous.decision.verdict == ah.VERDICT_INVALID
