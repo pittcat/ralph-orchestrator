@@ -330,7 +330,7 @@ def test_install_tree_does_not_contain_prompt_visibility_copy() -> None:
         ROOT / "skills" / "ralph-preset-review" / "references" / "prompt-visibility.md",
     ]
     source_bytes_per_skill: dict[str, bytes] = {
-        path.parent.parent.parent.name: path.read_bytes()
+        path.parent.parent.name: path.read_bytes()
         for path in source_candidates
         if path.is_file()
     }
@@ -348,7 +348,11 @@ def test_install_tree_does_not_contain_prompt_visibility_copy() -> None:
         # Match the install copy against the skill-local copy from the
         # same skill (the install preserves the source byte-for-byte).
         # Fall back to the review copy for any other location.
-        skill_name = path.parent.parent.parent.name
+        # ``path`` is .../<skill>/references/prompt-visibility.md.
+        # The skill directory is therefore two parents above the file;
+        # using three parents resolves to ``skills`` and incorrectly
+        # selects the review copy for the author install.
+        skill_name = path.parent.parent.name
         expected_source = source_bytes_per_skill.get(
             skill_name,
             source_bytes_per_skill.get("ralph-preset-review", b""),

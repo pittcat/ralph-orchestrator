@@ -20,8 +20,12 @@ const AGENT_NATIVE_MODEL: &str =
     include_str!("../../../skills/ralph-preset-author/references/agent-native-model.md");
 const COMMANDS_DOC: &str =
     include_str!("../../../skills/ralph-preset-author/references/commands.md");
-const FINDING_RUBRIC: &str =
-    include_str!("../../../skills/ralph-preset-author/references/finding-rubric.md");
+const REVIEW_AGENT_NATIVE_MODEL: &str =
+    include_str!("../../../skills/ralph-preset-review/references/agent-native-model.md");
+const REVIEW_COMMANDS_DOC: &str =
+    include_str!("../../../skills/ralph-preset-review/references/commands.md");
+const REVIEW_FINDING_RUBRIC: &str =
+    include_str!("../../../skills/ralph-preset-review/references/finding-rubric.md");
 
 /// Returns "yes" if both anchors are present, "partial" if at least one
 /// is present, "no" if none are present.
@@ -121,7 +125,9 @@ pub fn capability_inventory() -> Vec<Capability> {
             covered_in_author_review: compute_coverage(
                 doc_has_anchor(AGENT_NATIVE_MODEL, ANCHOR_WAVE_EMIT)
                     || doc_has_anchor(COMMANDS_DOC, ANCHOR_WAVE_EMIT),
-                doc_has_anchor(FINDING_RUBRIC, ANCHOR_WAVE_EMIT),
+                doc_has_anchor(REVIEW_AGENT_NATIVE_MODEL, ANCHOR_WAVE_EMIT)
+                    || doc_has_anchor(REVIEW_COMMANDS_DOC, ANCHOR_WAVE_EMIT)
+                    || doc_has_anchor(REVIEW_FINDING_RUBRIC, ANCHOR_WAVE_EMIT),
             ),
         },
         Capability {
@@ -137,7 +143,9 @@ pub fn capability_inventory() -> Vec<Capability> {
             covered_in_author_review: compute_coverage(
                 doc_has_anchor(AGENT_NATIVE_MODEL, ANCHOR_SUPERVISOR_EMIT)
                     || doc_has_anchor(COMMANDS_DOC, ANCHOR_SUPERVISOR_EMIT),
-                doc_has_anchor(FINDING_RUBRIC, ANCHOR_SUPERVISOR_EMIT),
+                doc_has_anchor(REVIEW_AGENT_NATIVE_MODEL, ANCHOR_SUPERVISOR_EMIT)
+                    || doc_has_anchor(REVIEW_COMMANDS_DOC, ANCHOR_SUPERVISOR_EMIT)
+                    || doc_has_anchor(REVIEW_FINDING_RUBRIC, ANCHOR_SUPERVISOR_EMIT),
             ),
         },
         Capability {
@@ -153,7 +161,9 @@ pub fn capability_inventory() -> Vec<Capability> {
             covered_in_author_review: compute_coverage(
                 doc_has_anchor(AGENT_NATIVE_MODEL, ANCHOR_TASK_ID_LIVE)
                     || doc_has_anchor(COMMANDS_DOC, ANCHOR_TASK_ID_LIVE),
-                doc_has_anchor(FINDING_RUBRIC, ANCHOR_TASK_ID_LIVE),
+                doc_has_anchor(REVIEW_AGENT_NATIVE_MODEL, ANCHOR_TASK_ID_LIVE)
+                    || doc_has_anchor(REVIEW_COMMANDS_DOC, ANCHOR_TASK_ID_LIVE)
+                    || doc_has_anchor(REVIEW_FINDING_RUBRIC, ANCHOR_TASK_ID_LIVE),
             ),
         },
         Capability {
@@ -169,7 +179,9 @@ pub fn capability_inventory() -> Vec<Capability> {
             covered_in_author_review: compute_coverage(
                 doc_has_anchor(AGENT_NATIVE_MODEL, ANCHOR_ARTIFACT_FIRST)
                     || doc_has_anchor(COMMANDS_DOC, ANCHOR_ARTIFACT_FIRST),
-                doc_has_anchor(FINDING_RUBRIC, ANCHOR_ARTIFACT_FIRST),
+                doc_has_anchor(REVIEW_AGENT_NATIVE_MODEL, ANCHOR_ARTIFACT_FIRST)
+                    || doc_has_anchor(REVIEW_COMMANDS_DOC, ANCHOR_ARTIFACT_FIRST)
+                    || doc_has_anchor(REVIEW_FINDING_RUBRIC, ANCHOR_ARTIFACT_FIRST),
             ),
         },
         Capability {
@@ -185,7 +197,9 @@ pub fn capability_inventory() -> Vec<Capability> {
             covered_in_author_review: compute_coverage(
                 doc_has_anchor(AGENT_NATIVE_MODEL, ANCHOR_PAYLOAD_CONSISTENCY)
                     || doc_has_anchor(COMMANDS_DOC, ANCHOR_PAYLOAD_CONSISTENCY),
-                doc_has_anchor(FINDING_RUBRIC, ANCHOR_PAYLOAD_CONSISTENCY),
+                doc_has_anchor(REVIEW_AGENT_NATIVE_MODEL, ANCHOR_PAYLOAD_CONSISTENCY)
+                    || doc_has_anchor(REVIEW_COMMANDS_DOC, ANCHOR_PAYLOAD_CONSISTENCY)
+                    || doc_has_anchor(REVIEW_FINDING_RUBRIC, ANCHOR_PAYLOAD_CONSISTENCY),
             ),
         },
         Capability {
@@ -201,7 +215,9 @@ pub fn capability_inventory() -> Vec<Capability> {
             covered_in_author_review: compute_coverage(
                 doc_has_anchor(AGENT_NATIVE_MODEL, ANCHOR_TRIGGER_CONTEXT)
                     || doc_has_anchor(COMMANDS_DOC, ANCHOR_TRIGGER_CONTEXT),
-                doc_has_anchor(FINDING_RUBRIC, ANCHOR_TRIGGER_CONTEXT),
+                doc_has_anchor(REVIEW_AGENT_NATIVE_MODEL, ANCHOR_TRIGGER_CONTEXT)
+                    || doc_has_anchor(REVIEW_COMMANDS_DOC, ANCHOR_TRIGGER_CONTEXT)
+                    || doc_has_anchor(REVIEW_FINDING_RUBRIC, ANCHOR_TRIGGER_CONTEXT),
             ),
         },
     ]
@@ -276,6 +292,27 @@ mod tests {
                 c.covered_in_author_review, "yes",
                 "capability {} should have 'yes' coverage (anchors exist in all three docs)",
                 c.id
+            );
+        }
+    }
+
+    #[test]
+    fn capability_inventory_checks_review_skill_references() {
+        let anchors = [
+            ANCHOR_WAVE_EMIT,
+            ANCHOR_SUPERVISOR_EMIT,
+            ANCHOR_TASK_ID_LIVE,
+            ANCHOR_ARTIFACT_FIRST,
+            ANCHOR_PAYLOAD_CONSISTENCY,
+            ANCHOR_TRIGGER_CONTEXT,
+        ];
+
+        for anchor in anchors {
+            assert!(
+                doc_has_anchor(REVIEW_AGENT_NATIVE_MODEL, anchor)
+                    || doc_has_anchor(REVIEW_COMMANDS_DOC, anchor)
+                    || doc_has_anchor(REVIEW_FINDING_RUBRIC, anchor),
+                "review skill references are missing capability anchor: {anchor}"
             );
         }
     }
