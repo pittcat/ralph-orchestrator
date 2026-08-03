@@ -5,7 +5,7 @@ from __future__ import annotations
 import subprocess
 from pathlib import Path
 
-import bootstrap_pipeline  # type: ignore[import-not-found]
+import e2e_bootstrap_pipeline as bootstrap_pipeline  # type: ignore[import-not-found]
 import plan_resolve  # type: ignore[import-not-found]
 import sandbox_suite  # type: ignore[import-not-found]
 import pytest
