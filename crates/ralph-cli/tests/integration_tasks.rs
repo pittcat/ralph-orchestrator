@@ -440,8 +440,14 @@ fn test_task_verify_mismatch_preserves_prepared_record() {
         String::from_utf8_lossy(&verify.stderr)
     );
 
-    // Apply with a different title — must be denied and leave the
-    // prepared record on disk.
+    // Apply with a different title. Under U2's per-intent
+    // namespacing, the apply path is derived from the (verb,
+    // payload, loop, hat) tuple, so the apply for "Different
+    // title" looks for a different on-disk file than the one
+    // verify wrote for "Original title". The gate denies with
+    // `task_verify_gate denied` and explains the missing ticket;
+    // the prepared record for "Original title" must remain on
+    // disk untouched.
     let mismatched = spawn_apply_add(temp_path, "Different title");
     let mismatched_stderr = String::from_utf8_lossy(&mismatched.stderr);
     assert!(
@@ -454,17 +460,21 @@ fn test_task_verify_mismatch_preserves_prepared_record() {
         "denial must carry stable prefix; stderr={}",
         mismatched_stderr
     );
-    assert!(
-        mismatched_stderr.contains("fingerprint mismatch"),
-        "denial must explain root cause; stderr={}",
-        mismatched_stderr
-    );
 
-    // The prepared ticket must still be on disk.
-    let ticket_path = temp_path.join(".ralph/agent/.ralph-task-verify-ticket");
+    // The prepared ticket for "Original title" must still be on
+    // disk under the per-intent namespace.
+    let ticket_dir = temp_path.join(".ralph/agent/task-tickets");
     assert!(
-        ticket_path.exists(),
-        "mismatch must leave the prepared record on disk"
+        ticket_dir.is_dir(),
+        "scoped ticket directory must exist"
+    );
+    let ticket_count = std::fs::read_dir(&ticket_dir)
+        .expect("read ticket dir")
+        .filter_map(|e| e.ok())
+        .count();
+    assert!(
+        ticket_count >= 1,
+        "mismatch must leave the prepared record on disk (found {ticket_count} entries)"
     );
 
     // A corrected Apply against the original title must now
@@ -483,4 +493,179 @@ fn test_task_verify_mismatch_preserves_prepared_record() {
         1,
         "exactly one Original-title task must exist"
     );
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// U2 (2026-08-03-001-fix-opac-high-confidence-gates-plan): per-operation
+// ticket namespace at the subprocess level.
+// ─────────────────────────────────────────────────────────────────────────
+
+/// Spawn a `ralph tools task verify <verb>` subprocess for any
+/// task verb (`add` or `ensure`). Mirrors `spawn_verify_add` but
+/// parametrises the verb so we can drive the add/ensure
+/// coexistence scenarios.
+fn spawn_verify(temp_path: &std::path::Path, verb: &str, args: &[&str]) -> std::process::Output {
+    let mut cmd = common::ralph_bin();
+    cmd.env("RALPH_CURRENT_HAT", "coordinator")
+        .env("RALPH_CURRENT_LOOP_ID", "loop-u2")
+        .arg("tools")
+        .arg("task")
+        .arg("verify")
+        .arg(verb)
+        .args(args)
+        .arg("--root")
+        .arg(temp_path)
+        .current_dir(temp_path);
+    cmd.output().expect("spawn ralph tools task verify")
+}
+
+/// Spawn a `ralph tools task <verb>` subprocess for any verb.
+fn spawn_apply(temp_path: &std::path::Path, verb: &str, args: &[&str]) -> std::process::Output {
+    let mut cmd = common::ralph_bin();
+    cmd.env("RALPH_CURRENT_HAT", "coordinator")
+        .env("RALPH_CURRENT_LOOP_ID", "loop-u2")
+        .arg("tools")
+        .arg("task")
+        .arg(verb)
+        .args(args)
+        .arg("--root")
+        .arg(temp_path)
+        .current_dir(temp_path);
+    cmd.output().expect("spawn ralph tools task apply")
+}
+
+/// U2: `verify add A` and `verify ensure B` must each write to
+/// independent ticket files; both subsequent Apply invocations
+/// must succeed (one task each) and neither verify must
+/// overwrite the other.
+#[test]
+fn test_task_verify_add_and_ensure_tickets_coexist() {
+    let temp_dir = TempDir::new().expect("temp dir");
+    let temp_path = temp_dir.path();
+    write_agent_gate_preset(temp_path);
+
+    // Step 1: verify both intents in the same workspace.
+    let verify_add =
+        spawn_verify(temp_path, "add", &["Scoped add target"]);
+    let verify_ensure = spawn_verify(
+        temp_path,
+        "ensure",
+        &["Scoped ensure target", "--key", "scoped:ensure"],
+    );
+    assert!(
+        verify_add.status.success(),
+        "verify add must succeed; stderr={}",
+        String::from_utf8_lossy(&verify_add.stderr)
+    );
+    assert!(
+        verify_ensure.status.success(),
+        "verify ensure must succeed; stderr={}",
+        String::from_utf8_lossy(&verify_ensure.stderr)
+    );
+
+    // Both ticket files exist independently under the namespace.
+    let ticket_dir = temp_path.join(".ralph/agent/task-tickets");
+    assert!(
+        ticket_dir.is_dir(),
+        "scoped ticket directory must exist: {}",
+        ticket_dir.display()
+    );
+    let entries: Vec<_> = std::fs::read_dir(&ticket_dir)
+        .expect("read ticket dir")
+        .filter_map(|e| e.ok())
+        .collect();
+    assert!(
+        entries.len() >= 2,
+        "both scoped tickets must exist: entries={:?}",
+        entries
+    );
+
+    // Step 2: apply the add intent — must succeed without
+    // disturbing the ensure ticket.
+    let apply_add = spawn_apply(temp_path, "add", &["Scoped add target"]);
+    let apply_add_stderr = String::from_utf8_lossy(&apply_add.stderr);
+    assert!(
+        apply_add.status.success(),
+        "apply add must succeed; stderr={}",
+        apply_add_stderr
+    );
+    assert!(
+        apply_add_stderr.contains("task_verify_gate denied") == false,
+        "apply add must not be denied; stderr={}",
+        apply_add_stderr
+    );
+
+    // Step 3: apply the ensure intent — must still succeed (its
+    // ticket was not consumed by the add apply).
+    let apply_ensure = spawn_apply(
+        temp_path,
+        "ensure",
+        &["Scoped ensure target", "--key", "scoped:ensure"],
+    );
+    let apply_ensure_stderr = String::from_utf8_lossy(&apply_ensure.stderr);
+    assert!(
+        apply_ensure.status.success(),
+        "apply ensure must succeed after add apply; stderr={}",
+        apply_ensure_stderr
+    );
+
+    // Both tasks must be present in the store.
+    let tasks = list_tasks(temp_path, &[]);
+    assert!(
+        tasks.iter().any(|t| t.title == "Scoped add target"),
+        "add task must be present"
+    );
+    assert!(
+        tasks.iter().any(|t| t.title == "Scoped ensure target"),
+        "ensure task must be present"
+    );
+}
+
+/// U2: a fresh verify for a different intent must not
+/// invalidate a previously-pending, yet-unconsumed ticket.
+#[test]
+fn test_task_later_verify_does_not_invalidate_prior_intent() {
+    let temp_dir = TempDir::new().expect("temp dir");
+    let temp_path = temp_dir.path();
+    write_agent_gate_preset(temp_path);
+
+    // Verify intent A.
+    let verify_a = spawn_verify(temp_path, "add", &["Intent A"]);
+    assert!(verify_a.status.success());
+
+    // Verify intent B — must not invalidate A.
+    let verify_b = spawn_verify(temp_path, "add", &["Intent B"]);
+    assert!(verify_b.status.success());
+
+    // Both tickets are independently present.
+    let tickets: Vec<_> = std::fs::read_dir(temp_path.join(".ralph/agent/task-tickets"))
+        .expect("read ticket dir")
+        .filter_map(|e| e.ok())
+        .map(|e| e.file_name())
+        .collect();
+    assert!(
+        tickets.len() >= 2,
+        "both scoped tickets must coexist: tickets={:?}",
+        tickets
+    );
+
+    // Apply A succeeds; B's ticket is untouched.
+    let apply_a = spawn_apply(temp_path, "add", &["Intent A"]);
+    assert!(
+        apply_a.status.success(),
+        "apply A must succeed; stderr={}",
+        String::from_utf8_lossy(&apply_a.stderr)
+    );
+
+    // Apply B also succeeds; both tasks recorded.
+    let apply_b = spawn_apply(temp_path, "add", &["Intent B"]);
+    assert!(
+        apply_b.status.success(),
+        "apply B must succeed after A; stderr={}",
+        String::from_utf8_lossy(&apply_b.stderr)
+    );
+
+    let tasks = list_tasks(temp_path, &[]);
+    assert!(tasks.iter().any(|t| t.title == "Intent A"));
+    assert!(tasks.iter().any(|t| t.title == "Intent B"));
 }

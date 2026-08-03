@@ -60,6 +60,11 @@ use std::path::{Path, PathBuf};
 /// Path-relative marker so a denied agent knows where to look.
 pub const TICKET_REL_PATH: &str = ".ralph/agent/.ralph-task-verify-ticket";
 
+/// U2 (2026-08-03-001-fix-opac-high-confidence-gates-plan):
+/// per-operation-scoped ticket directory. Distinct
+/// operation/intent/activation tuples never share a file here.
+pub const TICKET_NAMESPACE_DIR: &str = ".ralph/agent/task-tickets";
+
 /// Suffix used to mark a ticket that has been atomically claimed by
 /// the gate but not yet consumed by a successful Apply. The gate
 /// renames `<TICKET_REL_PATH>` to `<TICKET_REL_PATH><CLAIM_SUFFIX>`
@@ -103,8 +108,83 @@ pub fn mutation_fingerprint(
 }
 
 /// Resolve the ticket file path for a workspace.
+///
+/// **U2 (2026-08-03-001-fix-opac-high-confidence-gates-plan):**
+/// this helper now resolves a per-operation-scoped ticket path
+/// derived from `(verb, canonical_payload, loop_id, hat_id)`.
+/// Distinct operation/intent/activation tuples never share a
+/// ticket file, so a subsequent verify can never overwrite an
+/// unrelated pending operation. The legacy fixed-path ticket
+/// (`.ralph/agent/.ralph-task-verify-ticket`) is treated as a
+/// migration hint: if found with the old plaintext format, the
+/// gate denies with `legacy_ticket_reverify_required` and the
+/// agent must re-run verify.
+#[allow(dead_code)] // legacy back-compat path; real callers use scoped_ticket_path.
 pub fn ticket_path(workspace: &Path) -> PathBuf {
-    workspace.join(TICKET_REL_PATH)
+    scoped_ticket_path(workspace, "", "", "", "")
+}
+
+/// Resolve the per-operation-scoped ticket path for a single
+/// `(verb, canonical_payload, loop, hat)` tuple. The legacy
+/// fixed-path ticket is replaced by a namespace of
+/// `.ralph/agent/task-tickets/<verb>__<loop>__<hat>__<intent>.ticket`
+/// so that `verify add` and `verify ensure`, different
+/// loop/hat activations, and distinct intent digests never
+/// collide on the same file.
+pub fn scoped_ticket_path(
+    workspace: &Path,
+    verb: &str,
+    canonical_payload: &str,
+    loop_id: &str,
+    hat_id: &str,
+) -> PathBuf {
+    if verb.is_empty()
+        && canonical_payload.is_empty()
+        && loop_id.is_empty()
+        && hat_id.is_empty()
+    {
+        // Back-compat caller (no scope). Return the legacy path
+        // so existing wiring (`record_ticket` without a scope)
+        // continues to compile. The runtime check below in
+        // `read_ticket` rejects the legacy plaintext shape.
+        return workspace.join(TICKET_REL_PATH);
+    }
+    let intent = short_intent_digest(verb, canonical_payload, loop_id, hat_id);
+    workspace.join(TICKET_NAMESPACE_DIR).join(format!(
+        "{}__{}__{}__{}.ticket",
+        safe_segment(verb),
+        safe_segment(loop_id),
+        safe_segment(hat_id),
+        intent
+    ))
+}
+
+/// 16-hex prefix of the full fingerprint. The full 64-hex SHA-256
+/// would exceed most filesystem path limits (e.g. ext4 = 255 bytes)
+/// when combined with verb/loop/hat segments; 16 hex chars give
+/// 64 bits of collision space which is plenty for per-workspace
+/// per-operation ticket disambiguation while keeping the file name
+/// short.
+fn short_intent_digest(verb: &str, canonical_payload: &str, loop_id: &str, hat_id: &str) -> String {
+    let full = mutation_fingerprint(verb, canonical_payload, loop_id, hat_id);
+    full.chars().take(16).collect()
+}
+
+/// Replace filesystem-unsafe characters in a path segment with
+/// `_`. The segments are bounded to 64 chars so the total ticket
+/// file name stays within filesystem limits even with hostile
+/// loop/hat identifiers (e.g. long paths, colons, slashes).
+fn safe_segment(s: &str) -> String {
+    let cleaned: String = s
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
+        .take(64)
+        .collect();
+    if cleaned.is_empty() {
+        "anon".to_string()
+    } else {
+        cleaned
+    }
 }
 
 /// Write a one-shot ticket so the next `require_ticket` for the
@@ -766,5 +846,137 @@ mod task_verify_gate_tests {
             !marker.exists(),
             "legacy require_ticket must also clean up the claim marker"
         );
+    }
+
+    // ─────────────────────────────────────────────────────────────────
+    // U2 (2026-08-03-001-fix-opac-high-confidence-gates-plan):
+    // per-operation/intent/activation ticket namespace.
+    // ─────────────────────────────────────────────────────────────────
+
+    fn scoped_for(
+        ws: &tempfile::TempDir,
+        verb: &str,
+        payload: &str,
+        loop_id: &str,
+        hat: &str,
+    ) -> PathBuf {
+        scoped_ticket_path(ws.path(), verb, payload, loop_id, hat)
+    }
+
+    /// U2: `verify add` and `verify ensure` for distinct intents
+    /// must live in different files and both remain applicable.
+    #[test]
+    fn test_u2_add_and_ensure_tickets_coexist() {
+        let ws = temp_workspace();
+        let ctx = make_ctx("loop-1", "executor", true);
+        let cfg = default_config(true);
+
+        let add_fp = mutation_fingerprint("add", r#"{"title":"a"}"#, "loop-1", "executor");
+        let ensure_fp =
+            mutation_fingerprint("ensure", r#"{"title":"b","key":"k"}"#, "loop-1", "executor");
+        let add_path = scoped_for(&ws, "add", r#"{"title":"a"}"#, "loop-1", "executor");
+        let ensure_path =
+            scoped_for(&ws, "ensure", r#"{"title":"b","key":"k"}"#, "loop-1", "executor");
+
+        record_ticket(&add_path, &add_fp, "loop-1", "executor").expect("record add");
+        record_ticket(&ensure_path, &ensure_fp, "loop-1", "executor")
+            .expect("record ensure");
+
+        // Both records exist independently.
+        assert!(add_path.exists(), "add ticket must be on disk");
+        assert!(ensure_path.exists(), "ensure ticket must be on disk");
+
+        // Each gate check matches only its own file.
+        require_ticket(&add_path, &cfg, &ctx, "add", &add_fp).expect("add apply ok");
+        assert!(!add_path.exists(), "add apply consumes its own ticket");
+        assert!(
+            ensure_path.exists(),
+            "add apply must not touch the ensure ticket"
+        );
+
+        require_ticket(&ensure_path, &cfg, &ctx, "ensure", &ensure_fp)
+            .expect("ensure apply ok");
+        assert!(!ensure_path.exists(), "ensure apply consumes its own ticket");
+    }
+
+    /// U2: different loop/hat activations cannot consume each
+    /// other's tickets.
+    #[test]
+    fn test_u2_different_activation_tickets_isolated() {
+        let ws = temp_workspace();
+        let cfg = default_config(true);
+
+        let payload = r#"{"title":"t"}"#;
+        let fp_loop_a =
+            mutation_fingerprint("add", payload, "loop-a", "executor");
+        let fp_loop_b =
+            mutation_fingerprint("add", payload, "loop-b", "executor");
+        let path_loop_a = scoped_for(&ws, "add", payload, "loop-a", "executor");
+        let path_loop_b = scoped_for(&ws, "add", payload, "loop-b", "executor");
+
+        record_ticket(&path_loop_a, &fp_loop_a, "loop-a", "executor").expect("record a");
+        record_ticket(&path_loop_b, &fp_loop_b, "loop-b", "executor").expect("record b");
+
+        let ctx_a = make_ctx("loop-a", "executor", true);
+        require_ticket(&path_loop_a, &cfg, &ctx_a, "add", &fp_loop_a)
+            .expect("loop-a apply must succeed");
+
+        // loop-b's ticket must survive loop-a's apply.
+        assert!(
+            path_loop_b.exists(),
+            "different-loop ticket must not be consumed by loop-a"
+        );
+
+        let ctx_b = make_ctx("loop-b", "executor", true);
+        require_ticket(&path_loop_b, &cfg, &ctx_b, "add", &fp_loop_b)
+            .expect("loop-b apply must succeed");
+        assert!(
+            !path_loop_b.exists(),
+            "loop-b apply consumes only its own ticket"
+        );
+    }
+
+    /// U2: a later verify for a distinct intent must not
+    /// invalidate an unrelated pending operation.
+    #[test]
+    fn test_u2_later_verify_does_not_invalidate_prior_intent() {
+        let ws = temp_workspace();
+        let ctx = make_ctx("loop-1", "executor", true);
+        let cfg = default_config(true);
+
+        // 1. Verify intent A — record ticket.
+        let payload_a = r#"{"title":"A"}"#;
+        let fp_a = mutation_fingerprint("add", payload_a, "loop-1", "executor");
+        let path_a = scoped_for(&ws, "add", payload_a, "loop-1", "executor");
+        record_ticket(&path_a, &fp_a, "loop-1", "executor").expect("record A");
+
+        // 2. Verify intent B — record ticket at a different file.
+        let payload_b = r#"{"title":"B"}"#;
+        let fp_b = mutation_fingerprint("add", payload_b, "loop-1", "executor");
+        let path_b = scoped_for(&ws, "add", payload_b, "loop-1", "executor");
+        record_ticket(&path_b, &fp_b, "loop-1", "executor").expect("record B");
+
+        // Both files exist simultaneously.
+        assert!(path_a.exists(), "intent A must still be applicable");
+        assert!(path_b.exists(), "intent B must be applicable");
+
+        // Either intent can be applied at most once.
+        require_ticket(&path_a, &cfg, &ctx, "add", &fp_a).expect("A apply ok");
+        assert!(!path_a.exists(), "A apply consumes intent A ticket");
+        assert!(path_b.exists(), "intent B must survive A's apply");
+        require_ticket(&path_b, &cfg, &ctx, "add", &fp_b).expect("B apply ok");
+        assert!(!path_b.exists(), "B apply consumes intent B ticket");
+    }
+
+    /// U2: distinct payloads produce distinct ticket files (the
+    /// intent digest segment disambiguates).
+    #[test]
+    fn test_u2_distinct_intents_produce_distinct_files() {
+        let ws = temp_workspace();
+        let payload_a = r#"{"title":"A"}"#;
+        let payload_b = r#"{"title":"B"}"#;
+        let path_a = scoped_for(&ws, "add", payload_a, "loop-1", "executor");
+        let path_b = scoped_for(&ws, "add", payload_b, "loop-1", "executor");
+        assert_ne!(path_a, path_b, "distinct intents must produce distinct files");
     }
 }

@@ -716,13 +716,14 @@ pub(crate) fn verify_gate_check(
     let (loop_id, hat_id) = gate_identifiers(ctx);
     let fingerprint =
         crate::task_verify_gate::mutation_fingerprint(verb, canonical_payload, loop_id, hat_id);
-    crate::task_verify_gate::require_ticket(
-        &crate::task_verify_gate::ticket_path(workspace),
-        &config.tasks,
-        ctx,
+    let path = crate::task_verify_gate::scoped_ticket_path(
+        workspace,
         verb,
-        &fingerprint,
-    )
+        canonical_payload,
+        loop_id,
+        hat_id,
+    );
+    crate::task_verify_gate::require_ticket(&path, &config.tasks, ctx, verb, &fingerprint)
 }
 
 /// Bridge `HatCommandPolicy::PolicyDecision` to the `anyhow::Result`
@@ -1195,13 +1196,14 @@ fn execute_ensure(
     let fingerprint =
         crate::task_verify_gate::mutation_fingerprint("ensure", &canonical, loop_id, hat_id);
     let config = load_config_or_default(root, config_sources);
-    crate::task_verify_gate::require_ticket(
-        &crate::task_verify_gate::ticket_path(&workspace),
-        &config.tasks,
-        &ctx,
+    let path = crate::task_verify_gate::scoped_ticket_path(
+        &workspace,
         "ensure",
-        &fingerprint,
-    )?;
+        &canonical,
+        loop_id,
+        hat_id,
+    );
+    crate::task_verify_gate::require_ticket(&path, &config.tasks, &ctx, "ensure", &fingerprint)?;
 
     ensure_task_with_args(
         &mut store,
@@ -2286,9 +2288,11 @@ fn verify_add(
 
     // U7 (2026-07-04-003 plan): record a verify ticket so the
     // subsequent `task add` for the same payload can pass the
-    // two-step gate. The ticket lives at
-    // `<workspace>/.ralph/agent/.ralph-task-verify-ticket` and is
-    // burned by `task add` on success.
+    // two-step gate. U2 (2026-08-03-001-fix-opac-high-confidence-gates-plan):
+    // the ticket lives in a per-operation/intent/activation
+    // namespace under `.ralph/agent/task-tickets/` so concurrent
+    // verify add/ensure (or different loop/hat) cannot overwrite
+    // each other.
     //
     // Reconstruct the canonical AddArgs shape from VerifyAddArgs
     // (they share field names) so the same `canonical_add_payload`
@@ -2304,12 +2308,14 @@ fn verify_add(
     let (loop_id, hat_id) = gate_identifiers(ctx);
     let fingerprint =
         crate::task_verify_gate::mutation_fingerprint("add", &canonical, loop_id, hat_id);
-    let _ = crate::task_verify_gate::record_ticket(
-        &crate::task_verify_gate::ticket_path(&ctx.workspace_root),
-        &fingerprint,
+    let path = crate::task_verify_gate::scoped_ticket_path(
+        &ctx.workspace_root,
+        "add",
+        &canonical,
         loop_id,
         hat_id,
     );
+    let _ = crate::task_verify_gate::record_ticket(&path, &fingerprint, loop_id, hat_id);
 
     Ok(VerifyOutcome::Allow)
 }
@@ -2401,7 +2407,11 @@ fn verify_ensure(
 
     // U7 (2026-07-04-003 plan): record a verify ticket so the
     // subsequent `task ensure` for the same payload can pass
-    // the two-step gate.
+    // the two-step gate. U2
+    // (2026-08-03-001-fix-opac-high-confidence-gates-plan): the
+    // ticket lives in a per-operation/intent/activation
+    // namespace so `verify add` and `verify ensure` (and
+    // different loop/hat) do not share the same on-disk file.
     let real_args = EnsureArgs {
         title: task.title.clone(),
         key: args.key.clone(),
@@ -2415,12 +2425,14 @@ fn verify_ensure(
     let (loop_id, hat_id) = gate_identifiers(ctx);
     let fingerprint =
         crate::task_verify_gate::mutation_fingerprint("ensure", &canonical, loop_id, hat_id);
-    let _ = crate::task_verify_gate::record_ticket(
-        &crate::task_verify_gate::ticket_path(&ctx.workspace_root),
-        &fingerprint,
+    let path = crate::task_verify_gate::scoped_ticket_path(
+        &ctx.workspace_root,
+        "ensure",
+        &canonical,
         loop_id,
         hat_id,
     );
+    let _ = crate::task_verify_gate::record_ticket(&path, &fingerprint, loop_id, hat_id);
 
     Ok(VerifyOutcome::Allow)
 }
@@ -4436,7 +4448,13 @@ mod task_verify_gate_wiring_tests {
             "stable prefix: {msg}"
         );
         assert!(msg.contains("verify"), "must explain verify: {msg}");
-        assert!(!ticket_path(root).exists(), "deny must not create a ticket");
+        let scoped =
+            crate::task_verify_gate::scoped_ticket_path(root, "add", &add_payload(), "loop-a", "coordinator");
+        assert!(
+            !scoped.exists(),
+            "deny must not create a scoped ticket: {}",
+            scoped.display()
+        );
     }
 
     #[test]
@@ -4449,14 +4467,21 @@ mod task_verify_gate_wiring_tests {
         let (loop_id, hat_id) = gate_identifiers(&ctx);
         let fp =
             crate::task_verify_gate::mutation_fingerprint("add", &add_payload(), loop_id, hat_id);
-        record_ticket(&ticket_path(root), &fp, loop_id, hat_id).expect("record");
+        let scoped = crate::task_verify_gate::scoped_ticket_path(
+            root,
+            "add",
+            &add_payload(),
+            loop_id,
+            hat_id,
+        );
+        record_ticket(&scoped, &fp, loop_id, hat_id).expect("record");
 
         // Step 2: gate check consumes the ticket and passes.
         verify_gate_check(root, &cfg, &ctx, "add", &add_payload())
             .expect("matching ticket must allow");
         assert!(
-            !ticket_path(root).exists(),
-            "successful gate check must consume the ticket"
+            !scoped.exists(),
+            "successful gate check must consume the scoped ticket"
         );
     }
 
@@ -4470,7 +4495,14 @@ mod task_verify_gate_wiring_tests {
         let (loop_id, hat_id) = gate_identifiers(&ctx);
         let fp =
             crate::task_verify_gate::mutation_fingerprint("add", &add_payload(), loop_id, hat_id);
-        record_ticket(&ticket_path(root), &fp, loop_id, hat_id).expect("record");
+        let scoped = crate::task_verify_gate::scoped_ticket_path(
+            root,
+            "add",
+            &add_payload(),
+            loop_id,
+            hat_id,
+        );
+        record_ticket(&scoped, &fp, loop_id, hat_id).expect("record");
         verify_gate_check(root, &cfg, &ctx, "add", &add_payload()).expect("first pass ok");
 
         // Second pass: ticket was consumed → must deny.
