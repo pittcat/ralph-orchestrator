@@ -293,6 +293,58 @@ def test_bug_without_red_capable_loop_needs_investigation() -> None:
     assert loop_questions[0].routed_to == "environment"
 
 
+def test_attempt_exhaustion_converges_build_brief_to_blocked(tmp_path) -> None:
+    # 契约原因:三轮调查/替代仍不达标 → blocked(SKILL.md attempt 收敛规则 +
+    # author-handoff.md 阶段 1 失败形态 "attempt_count >= 3 仍不达标 → blocked")。
+    # build_brief 的状态推导必须与 validator recommended_status 一致:
+    # attempt_count >= 3 且仍不达标时声明 needs_investigation 会被 validator
+    # 拒为 state_transition_invalid,且语义上等于默许第四轮自动调查。
+    dt = _dt()
+
+    # 未达上限(attempt_count <= 2):保持调查带,不误阻塞
+    transcript = _transcript("unknown-project.yml")
+    transcript["attempt_count"] = 2
+    brief = dt.build_brief(transcript)
+    result = validate_brief_data(brief)
+    assert result.valid is True
+    assert brief["status"] == "needs_investigation"
+    assert result.recommended_status == "needs_investigation"
+
+    # 达到上限:收敛 blocked,validator 与 build_brief 一致
+    transcript["attempt_count"] = 3
+    brief = dt.build_brief(transcript)
+    result = validate_brief_data(brief)
+    assert result.valid is True
+    assert brief["status"] == "blocked"
+    assert brief["attempt_count"] == 3
+    assert result.recommended_status == "blocked"
+    assert result.next_action == "confirm_with_user"
+    assert result.author_ready is False
+    assert "state_transition_invalid" not in {e.code for e in result.errors}
+
+    # blocked brief 的 author handoff:不消费,稳定 code 可定位
+    ah = _ah()
+    brief_path = tmp_path / "task-brief.yml"
+    brief_path.write_text(yaml.safe_dump(brief, allow_unicode=True), encoding="utf-8")
+    decision = ah.evaluate_task_brief(brief_path, transcript["project_root"])
+    assert decision.verdict == ah.VERDICT_INVALID
+    assert "task_brief_not_author_ready" in {e.code for e in decision.errors}
+    assert decision.selected_candidate_id is None
+
+
+def test_attempt_exhaustion_does_not_block_qualifying_flow() -> None:
+    # 契约原因:blocked 只针对"仍不达标"路径;第三轮达标的 brief 仍正常
+    # author_ready,不得被 attempt 上限误阻塞。
+    transcript = _transcript("green.yml")
+    transcript["attempt_count"] = 3
+    brief = _dt().build_brief(transcript)
+    result = validate_brief_data(brief)
+    assert result.valid is True
+    assert brief["status"] == "author_ready"
+    assert result.recommended_status == "author_ready"
+    assert result.author_ready is True
+
+
 # --- 多候选 transcript:低覆盖候选被淘汰,高分不掩盖单维度 --------------------
 
 

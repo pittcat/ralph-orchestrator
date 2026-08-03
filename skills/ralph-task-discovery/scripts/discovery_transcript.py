@@ -18,6 +18,10 @@
 * **bug 任务必须先有 red-capable 反馈回路**:缺少 ``red_capable_loop``
   事实时状态收敛到 ``needs_investigation``,不产生已确认根因决策,
   不产生执行方案(候选为空)。
+* **三轮调查/替代仍不达标 → blocked**:``attempt_count >= 3`` 且未收敛
+  到 ``author_ready`` 时状态为 ``blocked``,等待人工输入,不得开启第四轮
+  自动调查(与 ``brief_validator`` 的 recommended_status 及
+  ``references/author-handoff.md`` 阶段 1 失败形态一致)。
 * **外部 skill 必须带 provenance**:corpus 可用且方法被应用 →
   ``external_skill_applied:<name>`` + 出处路径(E1);corpus 不可用 →
   ``external_skill_unavailable:<names>`` + ``fallback:`` 替代规则与预期
@@ -31,7 +35,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Mapping
 
-from task_brief import SUPPORTED_SCHEMA_VERSION, USER_CONFIRMATION_KEYS
+from task_brief import ATTEMPT_LIMIT, SUPPORTED_SCHEMA_VERSION, USER_CONFIRMATION_KEYS
 
 # --- 稳定标记(agent-facing contract) ----------------------------------------
 
@@ -468,6 +472,7 @@ def build_brief(transcript: Mapping[str, Any]) -> dict[str, Any]:
     all_confirmed = all(
         entry["confirmed"] for entry in user_confirmations.values()
     )
+    attempt_count = transcript.get("attempt_count", 1)
     if task_type == "bug" and not red_loop_known:
         status = "needs_investigation"
     elif any(score < 0.85 for score in confidence.values()) or not candidates:
@@ -476,6 +481,11 @@ def build_brief(transcript: Mapping[str, Any]) -> dict[str, Any]:
         status = "needs_user_decision"
     else:
         status = "author_ready"
+    if attempt_count >= ATTEMPT_LIMIT and status != "author_ready":
+        # 三轮调查/替代后仍不达标 → blocked(validator 对 attempt_count >= 3
+        # 且 failing 的 brief 强制 recommended=blocked;author-handoff.md
+        # 阶段 1 失败形态)。不得开启第四轮自动调查。
+        status = "blocked"
 
     # 10) 目标陈述(显式 goal 回答优先于原始请求)
     goal_answer = answers.get("goal")
@@ -504,7 +514,7 @@ def build_brief(transcript: Mapping[str, Any]) -> dict[str, Any]:
         "schema_version": SUPPORTED_SCHEMA_VERSION,
         "project_root": transcript.get("project_root", ""),
         "status": status,
-        "attempt_count": transcript.get("attempt_count", 1),
+        "attempt_count": attempt_count,
         "goal": goal,
         "confidence": confidence,
         "evidence": evidence,
