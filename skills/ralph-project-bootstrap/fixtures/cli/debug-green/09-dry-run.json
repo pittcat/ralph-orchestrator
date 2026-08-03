@@ -1,0 +1,22 @@
+{
+  "description": "stage: ralph run --dry-run reports the requested prompt file (static load only)",
+  "argv_expected": [
+    "ralph", "-c", "ralph.debug.yml", "-H", "builtin:debug",
+    "run", "--dry-run",
+    "--prompt-file", "PROMPT.debug.md",
+    "--plan", "plan.md"
+  ],
+  "stdout_chunks": [
+    "Dry run mode - configuration:\n",
+    "  Prompt file: PROMPT.debug.md\n",
+    "  Max iterations: 12\n",
+    "  Max runtime: 7200s\n",
+    "  Backend: claude\n",
+    "  Idle timeout: 30s\n"
+  ],
+  "stderr_chunks": [],
+  "exit_code": 0,
+  "expected_stage": "dry_run",
+  "expected_outcome": "ok",
+  "expected_blocked_reason_regex": ""
+}

@@ -1,0 +1,23 @@
+{
+  "description": "probe: ralph --help does NOT mention --dry-run anywhere",
+  "argv_expected": ["ralph", "--help"],
+  "stdout_chunks": [
+    "Usage: ralph [OPTIONS] [COMMAND]\n",
+    "\n",
+    "Commands:\n",
+    "  preset   preset operations\n",
+    "  preflight preflight checks\n",
+    "  run       run a loop\n",
+    "\n",
+    "Options:\n",
+    "  -c PATH   config file path\n",
+    "  -H NAME   hat preset name\n",
+    "      --strict  enable strict mode (preset/preflight only)\n",
+    "      --json    emit JSON output\n"
+  ],
+  "stderr_chunks": [],
+  "exit_code": 0,
+  "expected_stage": "capability",
+  "expected_outcome": "blocked_cli",
+  "expected_blocked_reason_regex": "required flags missing"
+}
