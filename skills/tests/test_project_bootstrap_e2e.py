@@ -819,7 +819,7 @@ def _unified_entry_runner(argv, timeout=None, capture_output=False, text=False):
         return subprocess.CompletedProcess(
             args=tuple(argv), returncode=0, stdout="ok", stderr=""
         )
-    if len(argv) >= 2 and argv[-1] == "--dry-run":
+    if len(argv) >= 2 and "--dry-run" in argv:
         return subprocess.CompletedProcess(
             args=tuple(argv),
             returncode=0,

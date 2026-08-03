@@ -670,12 +670,22 @@ def _run_static_stage(
     config_path: str,
     preset: str,
     runner: SubprocessRunner,
+    prompt_file: str | None = None,
+    plan_path: str | None = None,
 ) -> tuple[PipelineResult, tuple[Any, ...]]:
-    """Invoke ``cli_probe.validate_pipeline`` and classify the result."""
+    """Invoke ``cli_probe.validate_pipeline`` and classify the result.
+
+    ``prompt_file`` / ``plan_path`` forward the suite's source tokens so
+    the dry-run stage emits ``--prompt-file`` / ``--plan`` and proves
+    the effective ``Prompt file`` label against the suite; a mismatch
+    surfaces as ``blocked_command`` instead of a silent pass.
+    """
     decisions = cli_probe.validate_pipeline(
         binary=binary,
         config_path=config_path,
         preset=preset,
+        prompt_file=prompt_file,
+        plan_path=plan_path,
         runner=runner,
     )
     evidence: list[str] = []
@@ -1034,6 +1044,8 @@ def run_pipeline(
         config_path=suite.config_path,
         preset=preset_clean,
         runner=active_runner,
+        prompt_file=suite.prompt_path,
+        plan_path=plan_path,
     )
     validation_evidence: tuple[str, ...] = static_partial.validation_evidence
 

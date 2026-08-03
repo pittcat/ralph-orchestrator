@@ -121,6 +121,12 @@ _BUILTIN_PRESET_LIST: dict[str, object] = {
             "source": "builtin:ce-executor-lite",
             "tags": [],
         },
+        {
+            "name": "ce-executor-pipeline",
+            "description": "Pipeline preset",
+            "source": "builtin:ce-executor-pipeline",
+            "tags": [],
+        },
     ]
 }
 
@@ -147,6 +153,17 @@ _BUILTIN_PRESET_SHOW: dict[str, str] = {
         "    Use this prompt as the agent instructions.\n"
         "  max_iterations: 4\n"
         "  max_runtime_seconds: 600\n"
+    ),
+    "ce-executor-pipeline": (
+        "name: ce-executor-pipeline\n"
+        "cli:\n"
+        "  backend: claude\n"
+        "event_loop:\n"
+        "  prompt: |\n"
+        "    # ce-executor-pipeline prompt\n"
+        "    Read the supplied plan and follow it end-to-end.\n"
+        "  max_iterations: 12\n"
+        "  max_runtime_seconds: 7200\n"
     ),
 }
 
@@ -206,7 +223,7 @@ def _builtin_resolver_runner(
         return subprocess.CompletedProcess(
             args=argv, returncode=0, stdout="", stderr=""
         )
-    if len(argv) >= 3 and "run" in argv and argv[-1] == "--dry-run":
+    if len(argv) >= 3 and "run" in argv and "--dry-run" in argv:
         return subprocess.CompletedProcess(
             args=argv,
             returncode=0,
@@ -847,6 +864,360 @@ def test_pipeline_static_blocker_short_circuits(tmp_path: Path) -> None:
     assert result.stage_decisions[0].outcome == "blocked_cli"
     for decision in result.stage_decisions[1:]:
         assert decision.outcome == "blocked_unknown"
+
+
+# ---------------------------------------------------------------------------
+# U3 — Per-class static blocker gate over the full cli fixture corpus
+# ---------------------------------------------------------------------------
+
+
+# The helper-level cli fixture corpus was authored against the contract
+# suite's literal source tokens (``_PIPELINE_KW``: ``ralph.pipeline.yml``
+# / ``builtin:ce-executor-pipeline`` / ``PROMPT.pipeline.md``). The
+# unified pipeline derives its artifact stem from the preset id
+# (``builtin:ce-executor-pipeline`` → ``ralph.ce-executor-pipeline.yml``),
+# so replaying the corpus through ``run_pipeline`` rebinds the fixture
+# tokens onto the pipeline-derived artifacts. Only the "as requested"
+# tokens are rebound: a dry-run stdout that reports a DIFFERENT prompt
+# file (the source-mismatch fixture) keeps its mismatching value so the
+# gate still classifies it.
+_FIXTURE_SOURCE_TOKENS = {
+    "config_path": "ralph.pipeline.yml",
+    "prompt_file": "PROMPT.pipeline.md",
+}
+
+
+def _rebind_fixture_invocations(
+    invocations: list[cli_probe.FakeInvocation],
+    *,
+    config_path: str,
+    prompt_path: str,
+) -> list[cli_probe.FakeInvocation]:
+    """Rewrite the fixture's source tokens onto pipeline-derived tokens."""
+    argv_map = {
+        _FIXTURE_SOURCE_TOKENS["config_path"]: config_path,
+        _FIXTURE_SOURCE_TOKENS["prompt_file"]: prompt_path,
+    }
+    stdout_requested = (
+        f"Prompt file: {_FIXTURE_SOURCE_TOKENS['prompt_file']}"
+    )
+    stdout_rebound = f"Prompt file: {prompt_path}"
+    rebound: list[cli_probe.FakeInvocation] = []
+    for invocation in invocations:
+        argv = tuple(argv_map.get(token, token) for token in invocation.argv_expected)
+        stdout = tuple(
+            chunk.replace(stdout_requested, stdout_rebound)
+            for chunk in invocation.stdout_chunks
+        )
+        rebound.append(
+            cli_probe.FakeInvocation(
+                argv_expected=argv,
+                stdout_chunks=stdout,
+                stderr_chunks=invocation.stderr_chunks,
+                exit_code=invocation.exit_code,
+            )
+        )
+    return rebound
+
+
+def _bound_fixture_runner(
+    invocations: list[cli_probe.FakeInvocation],
+    *,
+    config_path: str,
+    prompt_path: str,
+    requested: list[tuple[str, ...]],
+) -> tuple[Callable[..., subprocess.CompletedProcess], list[cli_probe.FakeInvocation]]:
+    """Return ``(runner, remaining_queue)`` replaying the rebound corpus.
+
+    The runner records every requested argv, raises loudly on any
+    smoke-shaped argv (a static blocker must never spawn smoke), and
+    replays the rebound fixture invocations on an exact-argv match —
+    consuming each once. Only the builtin-resolution argv
+    (``preset list`` / ``preset show``) may bypass the fixture replay;
+    any other unmatched argv fails closed.
+    """
+    queue = _rebind_fixture_invocations(
+        invocations, config_path=config_path, prompt_path=prompt_path
+    )
+
+    def _runner(argv, timeout=None, capture_output=False, text=False):
+        argv = tuple(argv)
+        if "--max-iterations" in argv and "--idle-timeout" in argv:
+            raise AssertionError(
+                f"static short-circuit violated: smoke argv requested: {list(argv)}"
+            )
+        requested.append(argv)
+        for index, invocation in enumerate(queue):
+            if invocation.argv_expected == argv:
+                queue.pop(index)
+                return subprocess.CompletedProcess(
+                    args=argv,
+                    returncode=invocation.exit_code,
+                    stdout="".join(invocation.stdout_chunks),
+                    stderr="".join(invocation.stderr_chunks),
+                )
+        if len(argv) >= 3 and argv[1] == "preset" and argv[2] in ("list", "show"):
+            return _builtin_resolver_runner(
+                list(argv), timeout=timeout, capture_output=capture_output, text=text
+            )
+        raise AssertionError(
+            f"bound fixture runner: no recorded invocation for argv={list(argv)}"
+        )
+
+    return _runner, queue
+
+
+def _stage_of_argv(argv: tuple[str, ...]) -> str:
+    """Classify a requested argv into the pipeline stage that emits it."""
+    if "--max-iterations" in argv and "--idle-timeout" in argv:
+        return "smoke"
+    if "preset" in argv and "list" in argv:
+        return "preset_list"
+    if "preset" in argv and "show" in argv:
+        return "preset_show"
+    if argv[1:] == ("--version",) or argv[-1] == "--help":
+        return "capability"
+    if "check" in argv and "--strict" in argv:
+        return "preset_check"
+    if "preflight" in argv and "--strict" in argv:
+        return "preflight"
+    if "--dry-run" in argv:
+        return "dry_run"
+    return "unknown"
+
+
+_STATIC_STAGE_INDEX = {"capability": 0, "preset_check": 1, "preflight": 2, "dry_run": 3}
+
+# One scenario per blocker class the fixture corpus encodes. The
+# expected codes mirror the canonical classification locked by the
+# helper-level contract suite (``-k cli_probe``).
+_U3_BLOCKER_SCENARIOS = (
+    {
+        "fixture": "preset-strict-fail",
+        "expected_code": "blocked_preset",
+        "blocked_stage": "preset_check",
+        "reason_token": "unknown preset id",
+        "requested_stages": ["capability"] * 6 + ["preset_check"],
+        "evidence": (
+            "capability:ok",
+            "preset_check:blocked_preset",
+            "preflight:blocked_unknown",
+            "dry_run:blocked_unknown",
+        ),
+    },
+    {
+        "fixture": "backend-missing",
+        "expected_code": "blocked_backend",
+        "blocked_stage": "preflight",
+        "reason_token": "executable not found",
+        "requested_stages": ["capability"] * 6 + ["preset_check", "preflight"],
+        "evidence": (
+            "capability:ok",
+            "preset_check:ok",
+            "preflight:blocked_backend",
+            "dry_run:blocked_unknown",
+        ),
+    },
+    {
+        "fixture": "dry-run-source-mismatch",
+        "expected_code": "blocked_command",
+        "blocked_stage": "dry_run",
+        "reason_token": "prompt_file",
+        "requested_stages": ["capability"] * 6
+        + ["preset_check", "preflight", "dry_run"],
+        "evidence": (
+            "capability:ok",
+            "preset_check:ok",
+            "preflight:ok",
+            "dry_run:blocked_command",
+        ),
+    },
+)
+
+
+@pytest.mark.parametrize(
+    "scenario",
+    _U3_BLOCKER_SCENARIOS,
+    ids=[s["fixture"] for s in _U3_BLOCKER_SCENARIOS],
+)
+def test_pipeline_static_blocker_classification(tmp_path: Path, scenario) -> None:
+    """U3: each blocker class is classified at the pipeline level and
+    short-circuits the gate — tail stages are recorded skipped, the
+    executed evidence prefix is preserved, and smoke never runs even
+    when an authorized smoke backend is supplied.
+    """
+    project = _seed_blank_project(tmp_path)
+    invocations = cli_probe.load_fixture(scenario["fixture"])
+    requested: list[tuple[str, ...]] = []
+    runner, queue = _bound_fixture_runner(
+        invocations,
+        config_path="ralph.ce-executor-pipeline.yml",
+        prompt_path="PROMPT.ce-executor-pipeline.md",
+        requested=requested,
+    )
+    transcript = tmp_path / "transcripts"
+    transcript.mkdir(parents=True, exist_ok=True)
+    backend = smoke_runner.SafeBackend(
+        name="replay",
+        kind="content_fixed_replay",
+        transcript_path=transcript,
+    )
+
+    result = bootstrap_pipeline.run_pipeline(
+        cwd=project,
+        preset="builtin:ce-executor-pipeline",
+        plan_path="plan.md",
+        binary="ralph",
+        runner=runner,
+        smoke_backend=backend,
+    )
+
+    # Classification: the pipeline surfaces the fixture's blocker class.
+    assert result.level == "blocked"
+    assert result.blocked is True
+    assert result.stage == "static_validation"
+    assert result.code == scenario["expected_code"]
+    assert scenario["reason_token"] in result.message
+    assert result.config_path == "ralph.ce-executor-pipeline.yml"
+    assert result.prompt_path == "PROMPT.ce-executor-pipeline.md"
+
+    # Typed evidence: four decisions in strict stage order; the prefix
+    # before the blocker is ok, the blocker row carries the class, the
+    # tail is skipped.
+    assert len(result.stage_decisions) == 4
+    assert [d.stage for d in result.stage_decisions] == [
+        "capability",
+        "preset_check",
+        "preflight",
+        "dry_run",
+    ]
+    blocked_index = _STATIC_STAGE_INDEX[scenario["blocked_stage"]]
+    for decision in result.stage_decisions[:blocked_index]:
+        assert decision.outcome == "ok"
+    blocker = result.stage_decisions[blocked_index]
+    assert blocker.outcome == scenario["expected_code"]
+    assert blocker.next_allowed_stage is None
+    assert scenario["reason_token"] in blocker.blocked_reason
+    for decision in result.stage_decisions[blocked_index + 1 :]:
+        assert decision.outcome == "blocked_unknown"
+        assert decision.next_allowed_stage is None
+        assert decision.evidence
+        assert decision.evidence[0].startswith("skipped:")
+
+    # Evidence records the executed prefix (plus blocker and skip rows).
+    assert result.validation_evidence == scenario["evidence"]
+
+    # Proof of argv: every preserved decision carries the explicit
+    # ``-c <config> -H <preset>`` sources; the dry-run argv additionally
+    # carries the source tokens and never ``--strict``.
+    for decision in result.stage_decisions:
+        argv = decision.argv
+        assert "-c" in argv and result.config_path in argv
+        assert "-H" in argv and "builtin:ce-executor-pipeline" in argv
+    dry_run_argv = result.stage_decisions[3].argv
+    assert "--dry-run" in dry_run_argv
+    assert "--prompt-file" in dry_run_argv
+    assert "PROMPT.ce-executor-pipeline.md" in dry_run_argv
+    assert "--plan" in dry_run_argv and "plan.md" in dry_run_argv
+    assert "--strict" not in dry_run_argv
+
+    # Strict order at the spawn level: resolution → capability ×6 → the
+    # executed static prefix; no smoke argv is ever requested, and every
+    # fixture invocation is consumed exactly once.
+    assert [_stage_of_argv(argv) for argv in requested] == [
+        "preset_list",
+        "preset_show",
+    ] + scenario["requested_stages"]
+    assert result.smoke_outcome is None
+    assert result.smoke_argv == ()
+    assert result.smoke_failure_bucket is None
+    assert queue == []
+
+
+def test_pipeline_static_green_is_not_loop_closed(tmp_path: Path) -> None:
+    """U3: a four-stage green run is ``incomplete_static_only`` — the
+    handoff makes "static load passed; loop not closed" explicit and
+    never presents a ready / loop-closed command.
+
+    Driven by the ``debug-green`` corpus whose argv matches the
+    pipeline-derived ``builtin:debug`` artifacts byte-for-byte, so the
+    full fixture queue must be consumed without any fallback replay.
+    """
+    project = _seed_blank_project(tmp_path)
+    invocations = cli_probe.load_fixture("debug-green")
+    requested: list[tuple[str, ...]] = []
+    runner, queue = _bound_fixture_runner(
+        invocations,
+        config_path="ralph.debug.yml",
+        prompt_path="PROMPT.debug.md",
+        requested=requested,
+    )
+
+    result = bootstrap_pipeline.run_pipeline(
+        cwd=project,
+        preset="builtin:debug",
+        plan_path="plan.md",
+        binary="ralph",
+        runner=runner,
+    )
+
+    assert result.blocked is False
+    assert result.level == "incomplete_static_only"
+    assert result.smoke_outcome is None
+    assert [d.outcome for d in result.stage_decisions] == ["ok"] * 4
+
+    # The command is a candidate (plan supplied), never a ready command
+    # and never the bare PLAN_PATH template.
+    assert result.handoff_command.startswith(
+        "[CANDIDATE - operator must run manually]"
+    )
+    assert "PLAN_PATH" not in result.handoff_command
+    assert "-c ralph.debug.yml" in result.handoff_command
+    assert "--plan plan.md" in result.handoff_command
+
+    # The report states the static-load-only semantics explicitly.
+    assert "Level: `incomplete_static_only`" in result.handoff_report
+    assert "Static load passed" in result.handoff_report
+    assert "loop has not been verified end-to-end" in result.handoff_report
+
+    # The full fixture corpus was consumed byte-exactly, in order.
+    assert queue == []
+    assert [_stage_of_argv(argv) for argv in requested] == [
+        "preset_list",
+        "preset_show",
+    ] + ["capability"] * 6 + ["preset_check", "preflight", "dry_run"]
+
+
+def test_pipeline_static_green_rebound_fixture(tmp_path: Path) -> None:
+    """U3: the pipeline-bound fixture shape (``ralph.pipeline.yml``
+    source tokens) also reaches a static-only handoff once rebound onto
+    the pipeline-derived artifacts — locking the dry-run argv contract
+    (``--prompt-file`` / ``--plan``) and the as-requested stdout
+    rewrite against the ``green`` corpus.
+    """
+    project = _seed_blank_project(tmp_path)
+    invocations = cli_probe.load_fixture("green")
+    requested: list[tuple[str, ...]] = []
+    runner, queue = _bound_fixture_runner(
+        invocations,
+        config_path="ralph.ce-executor-pipeline.yml",
+        prompt_path="PROMPT.ce-executor-pipeline.md",
+        requested=requested,
+    )
+
+    result = bootstrap_pipeline.run_pipeline(
+        cwd=project,
+        preset="builtin:ce-executor-pipeline",
+        plan_path="plan.md",
+        binary="ralph",
+        runner=runner,
+    )
+
+    assert result.blocked is False
+    assert result.level == "incomplete_static_only"
+    assert [d.outcome for d in result.stage_decisions] == ["ok"] * 4
+    assert result.smoke_outcome is None
+    assert queue == []
 
 
 # ---------------------------------------------------------------------------
