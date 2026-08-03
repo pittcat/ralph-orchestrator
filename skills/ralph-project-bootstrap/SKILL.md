@@ -50,7 +50,7 @@ text view or `--json` — and exits `0` for `complete` /
 | prompt file | `--prompt-file` | Repo-relative operator-owned prompt (optional) |
 | binary | `--binary` | `ralph` binary path/name (default `ralph`) |
 | refresh | `--refresh-existing` | Overwrite an existing suite when provenance matches |
-| replay smoke | `--replay-transcript` | The ONLY switch that enables an auto-running smoke backend (`content_fixed_replay`) |
+| replay smoke | `--replay-transcript` | Repo-relative transcript dir (anchored on `--cwd`; absolute paths and `..` escapes rejected). The ONLY switch that enables an auto-running smoke backend, and only when the preset resolves to `content_fixed_replay` |
 
 A plan / prompt file is required only when the preset has no non-empty
 inline `event_loop.prompt`. Missing first-run business input does
@@ -95,10 +95,13 @@ rolls every target back to its pre-write state.
    `preflight --strict` → `ralph run --dry-run`, every argv carrying
    `-c ralph.<stem>.yml -H <preset>`. A blocker skips the tail stages
    with typed evidence (see Static Validation below).
-5. **smoke (authorized replay only)** — only a `content_fixed_replay`
-   backend supplied via `--replay-transcript` auto-spawns, bounded by
-   iteration / idle / wall-clock caps. Any other backend is refused
-   (`not_authorized`) and never spawns.
+5. **smoke (authorized replay only)** — authorization compares the
+   preset's RESOLVED backend (`cli.backend`) against
+   `content_fixed_replay` BEFORE any subprocess is constructed. Only a
+   preset resolving to `content_fixed_replay` with `--replay-transcript`
+   supplied auto-spawns the bounded replay smoke (iteration / idle /
+   wall-clock caps). Presets resolving to real backends are refused
+   (`not_authorized`) and never spawn, replay switch or not.
 6. **handoff** — typed level + command + Markdown report, derived from
    the typed smoke outcome alone; free-text evidence can never promote
    the level.
@@ -112,7 +115,7 @@ that a loop can run to completion.
 | Level | Meaning | Exit | Command shape | Operator action |
 | --- | --- | --- | --- | --- |
 | `blocked` | A stage returned a typed blocker | 2 | empty | Fix exactly what `code` names, then rerun the entry. `root_ambiguous`: reconcile the project root scope. `sync_mirror_conflict` / marker blockers: reconcile AGENTS.md / CLAUDE.md by hand. `owned_value_user_modified` / `provenance_corrupt`: reconcile the owned suite files. `blocked_cli` / `blocked_preset` / `blocked_backend` / `blocked_command`: repair binary capability, preset lint, backend readiness, or prompt-source binding. `worktree_reuse_key_missing`: pass an explicit reuse key. Never launch. |
-| `incomplete_static_only` | Artifacts provisioned, static gate green, loop NOT closed (no authorized smoke) | 0 | `[CANDIDATE - operator must run manually] …`, or `[TEMPLATE - replace PLAN_PATH before running] …` when no plan exists yet | Re-confirm the target backend, then run the candidate command yourself; or rerun the entry with `--replay-transcript` to seek a bounded promotion. Never treat this as a ready command. |
+| `incomplete_static_only` | Artifacts provisioned, static gate green, loop NOT closed (no authorized smoke) | 0 | `[CANDIDATE - operator must run manually] …`, or `[TEMPLATE - replace PLAN_PATH before running] …` when no plan exists yet | Re-confirm the target backend, then run the candidate command yourself; or, when the preset resolves to `content_fixed_replay`, rerun the entry with `--replay-transcript` to seek a bounded promotion. Never treat this as a ready command. |
 | `complete` | Static gate green AND bounded replay smoke reached the terminal marker | 0 | the official launch command, no prefix | Run it. The loop was verified only under the replay harness caps; real-backend behaviour is still the operator's responsibility. |
 
 Worktree launches (`run_pipeline(..., use_worktree=True, ...)`) must

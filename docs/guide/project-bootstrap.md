@@ -30,8 +30,13 @@ python skills/ralph-project-bootstrap/scripts/bootstrap_pipeline.py \
 （capability → preset check → preflight → dry-run）→ 经授权的 replay
 smoke → 类型化 handoff。
 
-阶段顺序不可跳过；`--replay-transcript` 是唯一能启用自动 smoke 的开关
-（仅 `content_fixed_replay` 有界回放后端；其它后端一律拒绝并不 spawn）。
+阶段顺序不可跳过；`--replay-transcript` 是唯一能启用自动 smoke 的开关，
+但授权判定发生在构造任何子进程之前：入口把 preset 解析出的后端
+（`cli.backend`）与 `content_fixed_replay` 核对，只有 preset 解析为
+`content_fixed_replay` 时才有界回放 smoke 才会自动运行；解析为真实后端
+（claude/gemini 等）的 preset 一律返回 `not_authorized` 并不 spawn。
+transcript 路径走与 plan/prompt/preset 同族的输入门：必须是相对 `--cwd`
+的 repo-relative 路径，绝对路径与 `..` 逃逸被拒绝。
 
 入口输出一份 `PipelineResult`（默认文本视图，`--json` 输出同构 JSON），
 并按三个验证等级决定退出码与操作者权限：
@@ -39,7 +44,7 @@ smoke → 类型化 handoff。
 | 等级 | 含义 | 退出码 | 操作者动作 |
 | --- | --- | --- | --- |
 | `blocked` | 某阶段返回类型化阻塞（root 歧义、镜像冲突、provenance 损坏、静态门禁失败等） | 2 | 没有可执行命令；按结果中 `code` 指出的问题修复后重跑入口 |
-| `incomplete_static_only` | 产物已生成且静态门禁全绿，但 loop 未闭环（未跑授权 smoke） | 0 | 命令带 `[CANDIDATE - operator must run manually]` 前缀（缺 plan 时为 `[TEMPLATE - replace PLAN_PATH before running]`）；操作者自行确认 backend 后手动执行，或带 `--replay-transcript` 重跑入口争取升级 |
+| `incomplete_static_only` | 产物已生成且静态门禁全绿，但 loop 未闭环（未跑授权 smoke） | 0 | 命令带 `[CANDIDATE - operator must run manually]` 前缀（缺 plan 时为 `[TEMPLATE - replace PLAN_PATH before running]`）；操作者自行确认 backend 后手动执行，或在 preset 解析为 `content_fixed_replay` 时带 `--replay-transcript` 重跑入口争取升级 |
 | `complete` | 静态门禁全绿且有界 replay smoke 到达终态标记 | 0 | 命令为正式 launch 命令，可直接执行 |
 
 **dry-run 全绿 != loop 已闭环**：green dry-run 只证明 runtime 能静态装载
@@ -86,4 +91,4 @@ prompt，bootstrap 必须以 `preset_prompt_missing` 停止，不能生成依赖
 
 green dry-run 只证明配置与 prompt 来源解析正确，不证明 loop 已闭环。真实或
 mock backend smoke 仍需操作者授权；只有 skill 自带的固定 replay harness 可以
-自动运行。
+自动运行，且前提同样是 preset 解析后端为 `content_fixed_replay`。

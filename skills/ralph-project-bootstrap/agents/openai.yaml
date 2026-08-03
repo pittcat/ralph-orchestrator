@@ -20,7 +20,10 @@ entry_point: |
        [--refresh-existing] [--replay-transcript <dir>] [--json]
   Code: bootstrap_pipeline.run_pipeline(cwd=..., preset=..., ...)
   --replay-transcript is the ONLY switch that enables an auto-running
-  (content_fixed_replay, bounded) smoke backend.
+  (content_fixed_replay, bounded) smoke backend, and only when the preset
+  resolves to content_fixed_replay; a preset resolving to a real backend
+  is refused (not_authorized) and never spawns. The transcript path must
+  be repo-relative to --cwd (absolute paths and .. escapes are rejected).
 inputs:
   - project_root
   - preset (path or builtin id, already passing strict lint)
