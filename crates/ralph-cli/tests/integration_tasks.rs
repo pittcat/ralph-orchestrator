@@ -344,6 +344,53 @@ fn spawn_apply_add(temp_path: &std::path::Path, title: &str) -> std::process::Ou
     cmd.output().expect("spawn ralph tools task add")
 }
 
+/// Spawn a `ralph tools task verify add <title> <extra_args...>`
+/// subprocess as the simulated `coordinator` hat (loop-u1). Mirrors
+/// `spawn_verify_add` but parametrises the trailing args so the
+/// verified payload can include e.g. `--blocked-by`.
+fn spawn_verify_add_with_args(
+    temp_path: &std::path::Path,
+    title: &str,
+    extra_args: &[&str],
+) -> std::process::Output {
+    let mut cmd = common::ralph_bin();
+    cmd.env("RALPH_CURRENT_HAT", "coordinator")
+        .env("RALPH_CURRENT_LOOP_ID", "loop-u1")
+        .arg("tools")
+        .arg("task")
+        .arg("verify")
+        .arg("add")
+        .arg(title)
+        .args(extra_args)
+        .arg("--root")
+        .arg(temp_path)
+        .current_dir(temp_path);
+    cmd.output().expect("spawn ralph tools task verify add")
+}
+
+/// Spawn a `ralph tools task add <title> <extra_args...>` subprocess
+/// as the simulated `coordinator` hat (loop-u1). Mirrors
+/// `spawn_apply_add` but parametrises the trailing args so the Apply
+/// payload can include e.g. `--blocked-by`.
+fn spawn_apply_add_with_args(
+    temp_path: &std::path::Path,
+    title: &str,
+    extra_args: &[&str],
+) -> std::process::Output {
+    let mut cmd = common::ralph_bin();
+    cmd.env("RALPH_CURRENT_HAT", "coordinator")
+        .env("RALPH_CURRENT_LOOP_ID", "loop-u1")
+        .arg("tools")
+        .arg("task")
+        .arg("add")
+        .arg(title)
+        .args(extra_args)
+        .arg("--root")
+        .arg(temp_path)
+        .current_dir(temp_path);
+    cmd.output().expect("spawn ralph tools task add")
+}
+
 /// U1: two real `ralph tools task add` subprocesses racing the
 /// same prepared ticket must produce exactly one winner. The
 /// loser must receive `task_verify_gate denied` and the task
@@ -492,6 +539,14 @@ fn test_task_verify_mismatch_preserves_prepared_record() {
         tasks.iter().filter(|t| t.title == "Original title").count(),
         1,
         "exactly one Original-title task must exist"
+    );
+    assert_eq!(
+        tasks
+            .iter()
+            .filter(|t| t.title == "Different title")
+            .count(),
+        0,
+        "mismatch Apply must not create any task"
     );
 }
 
@@ -668,4 +723,219 @@ fn test_task_later_verify_does_not_invalidate_prior_intent() {
     let tasks = list_tasks(temp_path, &[]);
     assert!(tasks.iter().any(|t| t.title == "Intent A"));
     assert!(tasks.iter().any(|t| t.title == "Intent B"));
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// U1 contract (2026-08-03-001-fix-opac-high-confidence-gates-plan):
+// only a successful Apply may consume the ticket. A post-gate store
+// failure must restore the ticket so the agent can retry without
+// re-running verify.
+// ─────────────────────────────────────────────────────────────────────────
+
+/// Remove the task with `task_id` from the TempDir fixture's
+/// `tasks.jsonl` and return the removed JSONL line so the test can
+/// restore it later. Simulates the blocker disappearing from the
+/// store between verify and Apply (the CLI has no delete verb).
+fn remove_task_line_from_store(temp_path: &std::path::Path, task_id: &str) -> String {
+    let store_path = temp_path.join(".ralph/agent/tasks.jsonl");
+    let raw = std::fs::read_to_string(&store_path).expect("read tasks.jsonl fixture");
+    let mut removed = None;
+    let mut kept = Vec::new();
+    for line in raw.lines() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let is_target = serde_json::from_str::<serde_json::Value>(line)
+            .map(|v| v.get("id").and_then(|i| i.as_str()) == Some(task_id))
+            .unwrap_or(false);
+        if is_target && removed.is_none() {
+            removed = Some(line.to_string());
+        } else {
+            kept.push(line.to_string());
+        }
+    }
+    let removed = removed.expect("blocker line must exist in tasks.jsonl fixture");
+    let body = if kept.is_empty() {
+        String::new()
+    } else {
+        kept.join("\n") + "\n"
+    };
+    std::fs::write(&store_path, body).expect("rewrite tasks.jsonl fixture");
+    removed
+}
+
+/// Append a previously removed JSONL line back to the fixture store
+/// ("the agent fixed the cause of the failed Apply").
+fn append_task_line_to_store(temp_path: &std::path::Path, line: &str) {
+    let store_path = temp_path.join(".ralph/agent/tasks.jsonl");
+    let mut body = std::fs::read_to_string(&store_path).unwrap_or_default();
+    if !body.is_empty() && !body.ends_with('\n') {
+        body.push('\n');
+    }
+    body.push_str(line);
+    body.push('\n');
+    std::fs::write(&store_path, body).expect("append to tasks.jsonl fixture");
+}
+
+/// U1: when the gate passes but the store mutation fails afterwards,
+/// the ticket must be restored so a retry succeeds without re-verify.
+///
+/// Trigger note: the failure must happen AFTER the gate matched, so the
+/// Apply payload must be identical to the verified payload — U2
+/// namespaces tickets by an intent digest that includes `blocked_by`
+/// (`canonical_add_payload`), so verifying title-only and applying with
+/// an extra `--blocked-by` is denied at the gate (different intent
+/// path) and never reaches the store; and `task verify add` itself
+/// refuses to record a ticket for a nonexistent blocker. This test
+/// therefore verifies `add "Retry target" --blocked-by <real blocker>`,
+/// drops the blocker from the fixture store, then applies the identical
+/// payload: the gate passes and blocked_by validation fails.
+///
+/// Pre-fix, `execute_add` consumes the ticket at claim time (before the
+/// mutation), so the ticket-survival assertion fails; post-fix the
+/// ticket is restored and the same-payload retry succeeds.
+#[test]
+fn test_task_add_failure_after_claim_restores_ticket_for_retry() {
+    let temp_dir = TempDir::new().expect("temp dir");
+    let temp_path = temp_dir.path();
+    write_agent_gate_preset(temp_path);
+
+    // Seed a blocker task into loop-u1 through the normal
+    // verify → apply path (its own ticket is consumed on success —
+    // the happy path works both pre- and post-fix).
+    let verify_blocker = spawn_verify_add(temp_path, "Blocker task");
+    assert!(
+        verify_blocker.status.success(),
+        "verify blocker must succeed; stderr={}",
+        String::from_utf8_lossy(&verify_blocker.stderr)
+    );
+    let apply_blocker = spawn_apply_add(temp_path, "Blocker task");
+    assert!(
+        apply_blocker.status.success(),
+        "apply blocker must succeed; stderr={}",
+        String::from_utf8_lossy(&apply_blocker.stderr)
+    );
+    let blocker_id = list_tasks(temp_path, &[])
+        .iter()
+        .find(|t| t.title == "Blocker task")
+        .map(|t| t.id.clone())
+        .expect("blocker task must be listed");
+
+    // Verify the real target with the blocker inside the payload.
+    let blocked_by_args = ["--blocked-by", blocker_id.as_str()];
+    let verify = spawn_verify_add_with_args(temp_path, "Retry target", &blocked_by_args);
+    assert!(
+        verify.status.success(),
+        "verify must succeed; stderr={}",
+        String::from_utf8_lossy(&verify.stderr)
+    );
+
+    // Drop the blocker from the fixture store so the identical Apply
+    // payload now fails blocked_by validation after the gate passes.
+    let blocker_line = remove_task_line_from_store(temp_path, &blocker_id);
+
+    // Apply the verified (identical) payload: the gate passes, the
+    // store mutation fails on blocked_by validation.
+    let failed_apply = spawn_apply_add_with_args(temp_path, "Retry target", &blocked_by_args);
+    let failed_stderr = String::from_utf8_lossy(&failed_apply.stderr);
+    assert!(
+        !failed_apply.status.success(),
+        "apply with a vanished blocker must fail; stderr={failed_stderr}"
+    );
+    assert!(
+        !failed_stderr.contains("task_verify_gate denied"),
+        "failure must come from blocked_by validation after a passed gate, \
+         not from the gate itself; stderr={failed_stderr}"
+    );
+    assert!(
+        failed_stderr.contains("blocked_by"),
+        "stderr must surface the blocked_by validation failure; stderr={failed_stderr}"
+    );
+    let tasks = list_tasks(temp_path, &[]);
+    assert!(
+        tasks.is_empty(),
+        "failed Apply must not write to the store; tasks={tasks:?}"
+    );
+
+    // U1 contract: the ticket must survive the failed Apply — a
+    // prepared `.ticket` file exists and no `.ticket.claimed` marker
+    // lingers. (`.ticket.lock` siblings from the gate's FileLock are
+    // excluded by the exact `.ticket` suffix match.)
+    let ticket_dir = temp_path.join(".ralph/agent/task-tickets");
+    let entries: Vec<String> = std::fs::read_dir(&ticket_dir)
+        .expect("read ticket dir")
+        .filter_map(|e| e.ok())
+        .map(|e| e.file_name().to_string_lossy().to_string())
+        .collect();
+    let prepared = entries.iter().filter(|n| n.ends_with(".ticket")).count();
+    let claimed = entries
+        .iter()
+        .filter(|n| n.ends_with(".ticket.claimed"))
+        .count();
+    assert!(
+        prepared >= 1,
+        "failed Apply must leave a prepared ticket for retry; entries={entries:?}"
+    );
+    assert_eq!(
+        claimed, 0,
+        "no claim marker may linger after a failed Apply; entries={entries:?}"
+    );
+
+    // Fix the failure cause (blocker is back in the store) and retry
+    // the identical payload — must succeed without re-running verify.
+    append_task_line_to_store(temp_path, &blocker_line);
+    let retry = spawn_apply_add_with_args(temp_path, "Retry target", &blocked_by_args);
+    assert!(
+        retry.status.success(),
+        "retry Apply must succeed without re-verify; stderr={}",
+        String::from_utf8_lossy(&retry.stderr)
+    );
+
+    let tasks = list_tasks(temp_path, &[]);
+    assert_eq!(
+        tasks.iter().filter(|t| t.title == "Retry target").count(),
+        1,
+        "exactly one Retry target task must exist; tasks={tasks:?}"
+    );
+}
+
+/// U2 behavior lock: the legacy fixed-path plaintext ticket
+/// (`.ralph/agent/.ralph-task-verify-ticket`) must never satisfy the
+/// scoped gate. A planted legacy file is ignored, the Apply is denied
+/// with the stable prefix, the file stays on disk byte-identical
+/// (never consumed or accepted), and the store stays empty.
+#[test]
+fn test_legacy_plaintext_ticket_is_not_trusted() {
+    let temp_dir = TempDir::new().expect("temp dir");
+    let temp_path = temp_dir.path();
+    write_agent_gate_preset(temp_path);
+
+    // Plant a legacy plaintext ticket at the old fixed path.
+    let legacy_path = temp_path.join(".ralph/agent/.ralph-task-verify-ticket");
+    std::fs::create_dir_all(legacy_path.parent().expect("legacy parent dir"))
+        .expect("create .ralph/agent");
+    let legacy_content = "legacy-ticket-v0 garbage";
+    std::fs::write(&legacy_path, legacy_content).expect("write legacy ticket fixture");
+
+    let apply = spawn_apply_add(temp_path, "Legacy bait");
+    let stderr = String::from_utf8_lossy(&apply.stderr);
+    assert!(
+        !apply.status.success(),
+        "legacy plaintext ticket must not satisfy the gate; stderr={stderr}"
+    );
+    assert!(
+        stderr.contains("task_verify_gate denied"),
+        "denial must carry the stable prefix; stderr={stderr}"
+    );
+
+    // The legacy file must remain in place, byte-identical.
+    let after = std::fs::read(&legacy_path).expect("legacy ticket must still exist");
+    assert_eq!(
+        after,
+        legacy_content.as_bytes(),
+        "legacy ticket must be untouched (not consumed or accepted)"
+    );
+
+    let tasks = list_tasks(temp_path, &[]);
+    assert!(tasks.is_empty(), "store must stay empty; tasks={tasks:?}");
 }

@@ -11,18 +11,20 @@
 //!    `<workspace>/.ralph/agent/.ralph-task-verify-ticket`.
 //! 2. The same agent (same `loop_id` + `hat_id`) then invokes
 //!    `ralph tools task <verb>` → success path calls
-//!    `require_ticket` *before* any store mutation. If the
-//!    on-disk ticket's fingerprint matches the payload the agent
-//!    is about to write, the gate claims the ticket (atomically
-//!    renames it to `.ralph-task-verify-ticket.claimed` under an
-//!    exclusive `FileLock`) and the mutation proceeds. The
-//!    caller MUST then invoke `consume_claimed_ticket` once the
-//!    Apply side effect has committed; if Apply fails the caller
-//!    MUST invoke `restore_ticket_from_claim` so the next attempt
-//!    can re-use the prepared record. If the ticket is missing,
-//!    mismatched, or stale, the gate denies with a stable prefix
-//!    and a recovery hint, leaving the on-disk ticket
-//!    **untouched** so the agent can retry with the correct
+//!    `try_claim_matching_ticket` *before* any store mutation. If
+//!    the on-disk ticket's fingerprint matches the payload the
+//!    agent is about to write, the gate claims the ticket
+//!    (atomically renames it to
+//!    `.ralph-task-verify-ticket.claimed` under an exclusive
+//!    `FileLock`) and the mutation proceeds. The caller MUST then
+//!    settle the claim once the Apply side effect finishes:
+//!    `consume_claimed_ticket` after a successful Apply;
+//!    `restore_ticket_from_claim` after a failed Apply so the next
+//!    attempt can re-use the prepared record. Burning the ticket
+//!    before the mutation commits is forbidden (U1). If the ticket
+//!    is missing, mismatched, or stale, the gate denies with a
+//!    stable prefix and a recovery hint, leaving the on-disk
+//!    ticket **untouched** so the agent can retry with the correct
 //!    payload.
 //!
 //! The fingerprint is a SHA-256 hex of:
@@ -335,7 +337,6 @@ pub fn consume_claimed_ticket(ticket_path: &Path) -> anyhow::Result<()> {
 /// `ticket_path` is the prepared-ticket path. The marker path is
 /// derived from it so callers do not need to know the workspace
 /// root.
-#[allow(dead_code)]
 pub fn restore_ticket_from_claim(ticket_path: &Path) -> anyhow::Result<()> {
     let marker = claim_marker_path(ticket_path);
     if !marker.exists() {
@@ -399,43 +400,8 @@ pub fn gate_is_active(ctx: &OperationContext, config: &TasksConfig) -> bool {
     true
 }
 
-/// The full gate check. Returns `Ok(())` when the mutation may
-/// proceed; `Err` with a stable, machine-grepable deny prefix
-/// when the gate denies.
-///
-/// Behavior:
-/// - Human CLI (`!ctx.is_agent_context`) → `Ok(())` always.
-/// - Agent + config gate off → `Ok(())` always.
-/// - Agent + config gate on + `allow_unsafe_task_mutate` →
-///   `Ok(())` (escape hatch).
-/// - Agent + gate on + no ticket on disk → `Err(denied: missing ticket)`.
-/// - Agent + gate on + ticket with wrong (loop|hat|fingerprint)
-///   → `Err(denied: stale or mismatched ticket)`; the prepared
-///   record is **left on disk** so a corrected Apply can
-///   re-claim without a fresh verify.
-/// - Agent + gate on + ticket matches → atomically rename the
-///   ticket to the claim marker under an exclusive `FileLock`
-///   (concurrent Apply observes no prepared record) and return
-///   `Ok(())`. The caller MUST invoke
-///   [`consume_claimed_ticket`] on successful Apply or
-///   [`restore_ticket_from_claim`] on Apply failure.
-pub fn require_ticket(
-    path: &Path,
-    config: &TasksConfig,
-    ctx: &OperationContext,
-    verb: &str,
-    fingerprint: &str,
-) -> anyhow::Result<()> {
-    try_claim_matching_ticket(path, config, ctx, verb, fingerprint)?;
-    // Match: ticket has been atomically renamed to the claim
-    // marker. Burn it now so the existing one-shot contract holds
-    // for callers that don't drive the new restore/restoration
-    // helpers directly.
-    consume_claimed_ticket(path)
-}
-
 /// U1 (2026-08-03-001-fix-opac-high-confidence-gates-plan):
-/// race-safe variant of the gate check.
+/// race-safe gate claim — the single gate entry point.
 ///
 /// Holds an exclusive `FileLock` across the read, the full
 /// fingerprint/loop/hat validation, and an atomic
@@ -445,12 +411,12 @@ pub fn require_ticket(
 /// prepared ticket is **left untouched** on disk so a corrected
 /// Apply can re-claim without re-running `verify`.
 ///
-/// Callers that want the legacy "consume on accept" behavior
-/// should keep using [`require_ticket`]. Callers that need to
-/// defer consume until after the Apply side effect commits
-/// should call `try_claim_matching_ticket` and then either
-/// [`consume_claimed_ticket`] (success) or
-/// [`restore_ticket_from_claim`] (failure).
+/// U1 contract (plan §1 "目标行为"): only a successful Apply
+/// consumes the ticket. Callers MUST settle the claim after the
+/// Apply side effect: [`consume_claimed_ticket`] on success or
+/// [`restore_ticket_from_claim`] on failure, so a failed Apply
+/// leaves the prepared record available for retry. Burning the
+/// ticket before the mutation commits is forbidden.
 pub fn try_claim_matching_ticket(
     path: &Path,
     config: &TasksConfig,
@@ -603,14 +569,14 @@ mod task_verify_gate_tests {
     }
 
     #[test]
-    fn test_require_ticket_agent_no_record_denied() {
+    fn test_claim_agent_no_record_denied() {
         let ws = temp_workspace();
         let path = ticket_path(ws.path());
         let ctx = make_ctx("loop-1", "executor", true);
         let cfg = default_config(true);
         let fp = mutation_fingerprint("add", "{}", "loop-1", "executor");
-        let err =
-            require_ticket(&path, &cfg, &ctx, "add", &fp).expect_err("missing ticket must deny");
+        let err = try_claim_matching_ticket(&path, &cfg, &ctx, "add", &fp)
+            .expect_err("missing ticket must deny");
         let msg = err.to_string();
         assert!(
             msg.starts_with(DENY_PREFIX),
@@ -629,29 +595,30 @@ mod task_verify_gate_tests {
     }
 
     #[test]
-    fn test_require_ticket_human_bypass() {
+    fn test_claim_human_bypass() {
         let ws = temp_workspace();
         let path = ticket_path(ws.path());
         let ctx = make_ctx("loop-1", "executor", false);
         let cfg = default_config(true);
         let fp = mutation_fingerprint("add", "{}", "loop-1", "executor");
         // Human CLI with no ticket on disk → still Ok.
-        require_ticket(&path, &cfg, &ctx, "add", &fp).expect("human must bypass");
+        try_claim_matching_ticket(&path, &cfg, &ctx, "add", &fp).expect("human must bypass");
     }
 
     #[test]
-    fn test_require_ticket_agent_or_config_strict() {
+    fn test_claim_gate_off_bypasses() {
         // config gate OFF + agent ctx → still Ok without ticket.
         let ws = temp_workspace();
         let path = ticket_path(ws.path());
         let ctx = make_ctx("loop-1", "executor", true);
         let cfg = default_config(false);
         let fp = mutation_fingerprint("add", "{}", "loop-1", "executor");
-        require_ticket(&path, &cfg, &ctx, "add", &fp).expect("gate off must bypass for agent");
+        try_claim_matching_ticket(&path, &cfg, &ctx, "add", &fp)
+            .expect("gate off must bypass for agent");
     }
 
     #[test]
-    fn test_require_ticket_unsafe_escape_hatch_bypasses() {
+    fn test_claim_unsafe_escape_hatch_bypasses() {
         let ws = temp_workspace();
         let path = ticket_path(ws.path());
         let ctx = make_ctx("loop-1", "executor", true);
@@ -663,24 +630,31 @@ mod task_verify_gate_tests {
         };
         let fp = mutation_fingerprint("add", "{}", "loop-1", "executor");
         // unsafe escape hatch: agent with no ticket is allowed.
-        require_ticket(&path, &cfg, &ctx, "add", &fp).expect("unsafe escape must bypass");
+        try_claim_matching_ticket(&path, &cfg, &ctx, "add", &fp)
+            .expect("unsafe escape must bypass");
     }
 
     #[test]
-    fn test_require_ticket_match_consumes_and_allows() {
+    fn test_claim_match_claims_marker_and_settle_consumes() {
         let ws = temp_workspace();
         let path = ticket_path(ws.path());
         let ctx = make_ctx("loop-1", "executor", true);
         let cfg = default_config(true);
         let fp = mutation_fingerprint("add", r#"{"title":"t"}"#, "loop-1", "executor");
         record_ticket(&path, &fp, "loop-1", "executor").expect("record");
-        require_ticket(&path, &cfg, &ctx, "add", &fp).expect("matching ticket must allow");
-        // Ticket is consumed.
-        assert!(!path.exists(), "matching apply must consume the ticket");
+        try_claim_matching_ticket(&path, &cfg, &ctx, "add", &fp)
+            .expect("matching ticket must claim");
+        // Claim moved the prepared record to the marker; nothing
+        // is burned until the Apply side effect settles.
+        assert!(!path.exists(), "claim must move the prepared record");
+        let marker = claim_marker_path(&path);
+        assert!(marker.exists(), "claim marker must be present");
+        consume_claimed_ticket(&path).expect("settle after successful apply");
+        assert!(!marker.exists(), "consume must remove the claim marker");
     }
 
     #[test]
-    fn test_require_ticket_fingerprint_mismatch_denied() {
+    fn test_claim_fingerprint_mismatch_denied() {
         let ws = temp_workspace();
         let path = ticket_path(ws.path());
         let ctx = make_ctx("loop-1", "executor", true);
@@ -688,8 +662,8 @@ mod task_verify_gate_tests {
         let on_disk_fp = mutation_fingerprint("add", r#"{"title":"t1"}"#, "loop-1", "executor");
         let pending_fp = mutation_fingerprint("add", r#"{"title":"t2"}"#, "loop-1", "executor");
         record_ticket(&path, &on_disk_fp, "loop-1", "executor").expect("record");
-        let err =
-            require_ticket(&path, &cfg, &ctx, "add", &pending_fp).expect_err("mismatch must deny");
+        let err = try_claim_matching_ticket(&path, &cfg, &ctx, "add", &pending_fp)
+            .expect_err("mismatch must deny");
         let msg = err.to_string();
         assert!(msg.contains("fingerprint mismatch"), "must explain: {msg}");
         // U1: mismatch preserves the prepared record. A corrected
@@ -702,15 +676,15 @@ mod task_verify_gate_tests {
     }
 
     #[test]
-    fn test_require_ticket_loop_hat_mismatch_denied() {
+    fn test_claim_loop_hat_mismatch_denied() {
         let ws = temp_workspace();
         let path = ticket_path(ws.path());
         let ctx = make_ctx("loop-1", "worker", true);
         let cfg = default_config(true);
         let fp = mutation_fingerprint("add", "{}", "loop-1", "executor");
         record_ticket(&path, &fp, "loop-1", "executor").expect("record");
-        let err =
-            require_ticket(&path, &cfg, &ctx, "add", &fp).expect_err("hat mismatch must deny");
+        let err = try_claim_matching_ticket(&path, &cfg, &ctx, "add", &fp)
+            .expect_err("hat mismatch must deny");
         let msg = err.to_string();
         assert!(
             msg.contains("ticket (loop, hat)"),
@@ -753,11 +727,11 @@ mod task_verify_gate_tests {
         let fp_b = fp.clone();
         let handle_a = thread::spawn(move || {
             barrier_a.wait();
-            require_ticket(&path_a, &cfg_a, &ctx_a, "add", &fp_a)
+            try_claim_matching_ticket(&path_a, &cfg_a, &ctx_a, "add", &fp_a)
         });
         let handle_b = thread::spawn(move || {
             barrier_b.wait();
-            require_ticket(&path_b, &cfg_b, &ctx_b, "add", &fp_b)
+            try_claim_matching_ticket(&path_b, &cfg_b, &ctx_b, "add", &fp_b)
         });
         let result_a = handle_a.join().expect("thread a");
         let result_b = handle_b.join().expect("thread b");
@@ -820,34 +794,6 @@ mod task_verify_gate_tests {
         );
     }
 
-    /// U1: legacy `require_ticket` continues to consume on
-    /// success so existing callers (which don't drive the
-    /// restore/restoration helpers directly) keep their
-    /// one-shot contract.
-    #[test]
-    fn test_legacy_require_ticket_consumes_on_match() {
-        let ws = temp_workspace();
-        let path = ticket_path(ws.path());
-        let ctx = make_ctx("loop-1", "executor", true);
-        let cfg = default_config(true);
-        let fp = mutation_fingerprint("add", r#"{"title":"t"}"#, "loop-1", "executor");
-        record_ticket(&path, &fp, "loop-1", "executor").expect("record");
-        require_ticket(&path, &cfg, &ctx, "add", &fp).expect("match must allow");
-        assert!(
-            !path.exists(),
-            "legacy require_ticket must consume the prepared record on match"
-        );
-        let marker = path.with_file_name(format!(
-            "{}{}",
-            path.file_name().and_then(|s| s.to_str()).unwrap(),
-            CLAIM_SUFFIX
-        ));
-        assert!(
-            !marker.exists(),
-            "legacy require_ticket must also clean up the claim marker"
-        );
-    }
-
     // ─────────────────────────────────────────────────────────────────
     // U2 (2026-08-03-001-fix-opac-high-confidence-gates-plan):
     // per-operation/intent/activation ticket namespace.
@@ -886,17 +832,23 @@ mod task_verify_gate_tests {
         assert!(add_path.exists(), "add ticket must be on disk");
         assert!(ensure_path.exists(), "ensure ticket must be on disk");
 
-        // Each gate check matches only its own file.
-        require_ticket(&add_path, &cfg, &ctx, "add", &add_fp).expect("add apply ok");
+        // Each gate claim matches only its own file; settle
+        // consumes the claimed ticket after the Apply succeeds.
+        try_claim_matching_ticket(&add_path, &cfg, &ctx, "add", &add_fp).expect("add apply claims");
+        consume_claimed_ticket(&add_path).expect("add apply settles");
         assert!(!add_path.exists(), "add apply consumes its own ticket");
         assert!(
             ensure_path.exists(),
             "add apply must not touch the ensure ticket"
         );
 
-        require_ticket(&ensure_path, &cfg, &ctx, "ensure", &ensure_fp)
-            .expect("ensure apply ok");
-        assert!(!ensure_path.exists(), "ensure apply consumes its own ticket");
+        try_claim_matching_ticket(&ensure_path, &cfg, &ctx, "ensure", &ensure_fp)
+            .expect("ensure apply claims");
+        consume_claimed_ticket(&ensure_path).expect("ensure apply settles");
+        assert!(
+            !ensure_path.exists(),
+            "ensure apply consumes its own ticket"
+        );
     }
 
     /// U2: different loop/hat activations cannot consume each
@@ -918,8 +870,9 @@ mod task_verify_gate_tests {
         record_ticket(&path_loop_b, &fp_loop_b, "loop-b", "executor").expect("record b");
 
         let ctx_a = make_ctx("loop-a", "executor", true);
-        require_ticket(&path_loop_a, &cfg, &ctx_a, "add", &fp_loop_a)
-            .expect("loop-a apply must succeed");
+        try_claim_matching_ticket(&path_loop_a, &cfg, &ctx_a, "add", &fp_loop_a)
+            .expect("loop-a apply must claim");
+        consume_claimed_ticket(&path_loop_a).expect("loop-a apply settles");
 
         // loop-b's ticket must survive loop-a's apply.
         assert!(
@@ -928,8 +881,9 @@ mod task_verify_gate_tests {
         );
 
         let ctx_b = make_ctx("loop-b", "executor", true);
-        require_ticket(&path_loop_b, &cfg, &ctx_b, "add", &fp_loop_b)
-            .expect("loop-b apply must succeed");
+        try_claim_matching_ticket(&path_loop_b, &cfg, &ctx_b, "add", &fp_loop_b)
+            .expect("loop-b apply must claim");
+        consume_claimed_ticket(&path_loop_b).expect("loop-b apply settles");
         assert!(
             !path_loop_b.exists(),
             "loop-b apply consumes only its own ticket"
@@ -961,10 +915,12 @@ mod task_verify_gate_tests {
         assert!(path_b.exists(), "intent B must be applicable");
 
         // Either intent can be applied at most once.
-        require_ticket(&path_a, &cfg, &ctx, "add", &fp_a).expect("A apply ok");
+        try_claim_matching_ticket(&path_a, &cfg, &ctx, "add", &fp_a).expect("A apply claims");
+        consume_claimed_ticket(&path_a).expect("A apply settles");
         assert!(!path_a.exists(), "A apply consumes intent A ticket");
         assert!(path_b.exists(), "intent B must survive A's apply");
-        require_ticket(&path_b, &cfg, &ctx, "add", &fp_b).expect("B apply ok");
+        try_claim_matching_ticket(&path_b, &cfg, &ctx, "add", &fp_b).expect("B apply claims");
+        consume_claimed_ticket(&path_b).expect("B apply settles");
         assert!(!path_b.exists(), "B apply consumes intent B ticket");
     }
 
