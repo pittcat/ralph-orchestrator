@@ -115,6 +115,43 @@ author_ready 要求**五个维度全部** `>= 0.85`;任何一个维度不达标,
 必须存在于证据台账,且列表不得为空。违反 → `unreferenced_evidence`,
 缺失的 id 会进入验证结果的 `missing_evidence` 清单。
 
+### 5.1 事实、决策、假设必须分台账记录
+
+三类条目语义不同,不得互相冒充:
+
+| 类别 | 载体 | 规则 |
+|---|---|---|
+| **事实** | `evidence` 台账条目 | 从环境/项目/用户处获得的陈述;等级 E1–E4 表示可验证程度(E0 为用户陈述,见 §4) |
+| **决策** | `decisions` 记录 | 「问题 → 结论」,结论必须引用事实证据;blocking 决策的结论只能来自用户显式回答(见 §6.1) |
+| **假设** | 未决决策(`resolved: false`)或调查带候选 | 未验证的解释/方案;**禁止**写进事实条目的 `observation`,也**禁止**当作决策 `resolution` 陈述 |
+
+判定口径:一条陈述如果不能指出出处(`source`)与观察方式,就不是事实;
+如果还没有用户回答支撑,就不是已定决策;其余一律按假设对待并留在
+调查带(`needs_investigation`)。
+
+### 5.2 事实不可被用户回答覆盖
+
+- 用户回答是 **E0**(用户陈述)。E0 **不能覆盖、不能删除、不能改写**
+  既有的 E1–E4 事实条目;
+- 用户陈述与既有事实冲突时,**新增**一条冲突证据(observation 以
+  `terminology_conflict:` 前缀显式标记),原事实条目保持不动,状态进入
+  `needs_user_decision` 等待用户裁决;
+- glossary 与代码冲突同理:discovery 阶段只记录冲突证据与未决 blocking
+  决策,**不自动覆盖 glossary 或代码任何一侧**;裁决后的修改属于后续计划。
+
+### 5.3 外部 skill 结果必须有 source/provenance
+
+外部 skill(方法语料库)的产出写入证据台账时,必须能追溯出处:
+
+| 情形 | observation | source | level |
+|---|---|---|---|
+| corpus 可用且方法被应用 | 以 `external_skill_applied:<name>` 开头 | 外部文件路径(或 `external-corpus:` 前缀的 corpus 相对路径) | E1(规则文件级) |
+| corpus 不可用 | 以 `external_skill_unavailable:<name>` 开头 | 必须含 `fallback:` 描述替代规则与预期出处 | E1 |
+| 规则无法从外部文件确认 | observation 显式标注 `unverified` | 记录尝试确认的出处 | **降为 E0** |
+
+禁止事项:corpus 不可用时不得出现 `external_skill_applied:` 条目
+(即**不伪造外部 skill 已执行**);不得把未确认规则写成"外部 skill 支持"。
+
 ## 6. Decision Record(决策记录)
 
 每条决策是一个 mapping:
@@ -135,6 +172,23 @@ author-blocking 决策的额外硬门禁:
 - 每条 author-blocking 决策的 `confidence` 必须**单独** `>= 0.85`才能支撑 author_ready;
 - blocking 决策 `confidence < 0.70` → 立即丢弃(`rejected_low_confidence`);
 - 存在未决(blocking 且 `resolved: false`)决策 → 不能 author_ready。
+
+### 6.1 决策确认权在用户,agent 不得替用户确认
+
+- blocking 决策的 `resolution` **只能**来自用户的显式回答:该回答必须先
+  记为 E0 证据,并被该决策的 `supporting_evidence` 引用;
+- 用户未回答或回答模糊时,决策必须保持 `resolved: false`,状态停留/进入
+  `needs_user_decision`;**禁止**用 agent 的推荐项、默认值或猜测直接填
+  `resolution`;
+- agent 的推荐项只允许出现在「向用户提出的问题」里,不允许出现在已定
+  决策的结论里。
+
+### 6.2 模糊回答必须产生带推荐项的下一问
+
+- 用户对某决策主题的回答模糊(无法作为可验证结论)时,必须生成**恰好
+  一个**澄清问题(一次一问),且该问题带推荐项,直到获得显式回答;
+- 澄清期间对应决策保持未决,`user_confirmations` 对应项保持
+  `confirmed: false`。
 
 ## 7. Candidate(候选方案)
 

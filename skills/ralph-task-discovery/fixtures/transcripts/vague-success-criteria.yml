@@ -1,0 +1,33 @@
+# 模糊回答 transcript(deterministic):用户对成功条件(completion_evidence)模糊回答。
+# 预期:产生恰好一个带推荐项的澄清问题(一次一问);brief 保持 needs_user_decision。
+project_root: /workspace/demo-repo
+goal_request: "为订单服务增加退款审批流"
+task_type: feature
+previous_status: needs_investigation
+attempt_count: 1
+project_facts:
+  - topic: package_manifest
+    source: package.json
+    observation: "monorepo 含 orders / billing 两个 workspace,测试入口为 vitest"
+    level: E1
+  - topic: test_command
+    source: "npm run test 实际执行输出"
+    observation: "vitest 全量跑通,orders 包已有审批流相近用例可参照"
+    level: E3
+  - topic: ci_workflow
+    source: .github/workflows/ci.yml
+    observation: "CI 在 PR 上跑 lint + vitest,门禁稳定"
+    level: E1
+user_answers:
+  - topic: goal
+    clarity: explicit
+    answer: "目标是给退款加一道人工审批,防止误退"
+  - topic: scope
+    clarity: explicit
+    answer: "只做 orders 包的退款链路,不动 billing"
+  - topic: completion_evidence
+    clarity: vague
+    answer: "能跑就行,细节你看着办"
+  - topic: failure_boundaries
+    clarity: explicit
+    answer: "审批服务不可用时退款必须保持待审状态,禁止自动放行"

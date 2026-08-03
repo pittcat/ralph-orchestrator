@@ -1,0 +1,38 @@
+# Green transcript(deterministic):项目事实(package/test/CI)已由环境调查齐全,
+# 用户逐题显式确认四个决策主题,外部 corpus 可用且应用了 grilling 方法。
+# 预期收敛:status=author_ready,next_action=ready_for_handoff。
+project_root: /workspace/demo-repo
+goal_request: "为 ralph-task-discovery 的 task brief 增加机器可读的硬门禁校验"
+task_type: feature
+previous_status: needs_investigation
+attempt_count: 2
+external_skills:
+  corpus_available: true
+  corpus_root: external-corpus
+  applied_methods: [grilling]
+project_facts:
+  - topic: package_manifest
+    source: Cargo.toml
+    observation: "workspace 包含 8 个 crate,测试入口为 nextest;新校验能力可按独立 skill 脚本挂载"
+    level: E1
+  - topic: test_command
+    source: "cargo nextest run -p ralph-cli 实际执行输出"
+    observation: "目标测试入口真实可运行且退出码正常,验证命令可直接复用"
+    level: E3
+  - topic: ci_workflow
+    source: .github/workflows/ci.yml
+    observation: "CI 走 nextest 全量门禁,新增测试放入 skills/tests 即被覆盖"
+    level: E1
+user_answers:
+  - topic: goal
+    clarity: explicit
+    answer: "目标是让 task brief 可被机器验证,交接前必须全绿"
+  - topic: scope
+    clarity: explicit
+    answer: "范围限定为数据契约与 validator,不含 CLI 集成"
+  - topic: completion_evidence
+    clarity: explicit
+    answer: "完成证据为 contract 测试全绿且样例 brief 通过验证"
+  - topic: failure_boundaries
+    clarity: explicit
+    answer: "任一硬门禁失败即停止 handoff 并输出 next_action"

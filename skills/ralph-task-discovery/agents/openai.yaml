@@ -1,0 +1,40 @@
+name: ralph-task-discovery
+display_name: "Ralph Task Discovery"
+description: |
+  Structured task discovery before formal planning: investigate project
+  facts from the environment, confirm business decisions with the user one
+  question at a time, and converge a hard-gated task brief
+  (Evidence/Decision/Candidate) validated by brief_validator.
+when_to_use: |
+  Use when a task request needs structured discovery before a plan is
+  written: facts are unknown, business decisions are open, terminology or
+  boundary conflicts are suspected, or a bug task needs a red-capable
+  feedback loop before root-causing. Do NOT use this skill to author or
+  review presets (`ralph-preset-author` / `ralph-preset-review`), to
+  provision runtime suites (`ralph-project-bootstrap`), to operate the
+  in-loop CLI, or to diagnose a loop that already ran
+  (`ralph-run-diagnosis`).
+inputs:
+  - project_root (cwd of the target project)
+  - goal request (one-sentence task objective from the user)
+outputs:
+  - task brief YAML path (Evidence/Decision/Candidate ledger)
+  - ValidationResult (recommended_status / next_action / handoff_block_reasons)
+boundaries:
+  - Does not generate or review presets; hands off to ralph-preset-author only
+    at author_ready, and the handoff artifact is only the brief path.
+  - Does not modify target-project code, glossaries, or docs; conflicts are
+    recorded, never auto-overwritten.
+  - Facts are looked up from the environment and never re-asked of the user;
+    decisions are confirmed by the user one question at a time, and the agent
+    never confirms on the user's behalf.
+  - Bug tasks require a red-capable feedback loop before any confirmed root
+    cause or execution plan.
+  - External skill results must carry provenance; an unavailable corpus is
+    recorded as external_skill_unavailable with a fallback, never faked as
+    executed.
+verification_gates:
+  - brief_validator.validate_brief_text (five-dimension hard gates, candidate
+    coverage gates, reference integrity, author_ready necessary conditions)
+  - pytest skills/tests/test_task_discovery_contract.py
+  - pytest skills/tests/test_task_discovery_e2e.py
