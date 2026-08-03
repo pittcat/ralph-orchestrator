@@ -1,0 +1,42 @@
+# 证据缺失样例(负例):
+#  1. E2 缺少 source 字段(missing_required_field);
+#  2. D1 引用了证据台账中不存在的 E9(unreferenced_evidence,进入 missing_evidence 清单)。
+# 两个置信度维度也落在调查带,诚实声明 needs_investigation。
+schema_version: "1.0"
+project_root: /workspace/demo-repo
+status: needs_investigation
+previous_status: draft
+attempt_count: 1
+goal: "为任务简报(task brief)增加机器可验证的硬门禁 validator"
+confidence:
+  goal_clarity: 0.85
+  project_fact_coverage: 0.80
+  acceptance_evidence: 0.78
+  execution_feasibility: 0.85
+  risk_coverage: 0.85
+evidence:
+  - id: E1
+    source: "crates/ralph-cli/src/commands/tools.rs"
+    observation: "确认了子命令入口与参数风格"
+    level: E2
+  - id: E2
+    observation: "记录了事件解析调用链,但忘记登记来源文件"
+    level: E2
+decisions:
+  - id: D1
+    question: "校验器放在 skill 脚本目录还是 crates 里?"
+    confidence: 0.88
+    supporting_evidence: [E1, E9]
+    blocking: true
+    resolved: true
+    resolution: "放在 skill 脚本目录"
+    uncovered_risks: []
+candidates:
+  - id: C1
+    summary: "纯 Python dataclass 契约 + 独立 validator"
+    confidence: 0.86
+    goal_coverage: 0.84
+    acceptance_coverage: 0.86
+    project_fit: 0.80
+    supporting_evidence: [E1]
+    selected: true

@@ -64,3 +64,15 @@ for _name, _path in (
 ):
     if _path.is_file():
         _load(_name, _path)
+
+
+# ralph-task-discovery ships the task-brief data contract and its hard-gate
+# validator as flat modules; ``task_brief`` must load first because
+# ``brief_validator`` imports it.
+_TASK_DISCOVERY_SCRIPTS = SKILLS_DIR / "ralph-task-discovery" / "scripts"
+for _name, _path in (
+    ("task_brief", _TASK_DISCOVERY_SCRIPTS / "task_brief.py"),
+    ("brief_validator", _TASK_DISCOVERY_SCRIPTS / "brief_validator.py"),
+):
+    if _path.is_file():
+        _load(_name, _path)

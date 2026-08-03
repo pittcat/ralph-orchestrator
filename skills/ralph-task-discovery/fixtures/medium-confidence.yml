@@ -1,0 +1,38 @@
+# 中置信度样例:project_fact_coverage = 0.84 落在 [0.70, 0.85) 调查带,
+# 诚实声明 needs_investigation(与门禁结论一致,valid=true 但禁止 handoff)。
+# 其余条件全部就绪,说明只缺新证据这一件事。
+schema_version: "1.0"
+project_root: /workspace/demo-repo
+status: needs_investigation
+previous_status: draft
+attempt_count: 1
+goal: "为任务简报(task brief)增加机器可验证的硬门禁 validator"
+confidence:
+  goal_clarity: 0.86
+  project_fact_coverage: 0.84
+  acceptance_evidence: 0.85
+  execution_feasibility: 0.87
+  risk_coverage: 0.85
+evidence:
+  - id: E1
+    source: "crates/ralph-cli/src/commands/tools.rs"
+    observation: "确认了子命令入口,但调用链中两段分支尚未读到源码"
+    level: E2
+decisions:
+  - id: D1
+    question: "校验器以 skill 内置脚本提供,还是直接做成 ralph CLI 子命令?"
+    confidence: 0.86
+    supporting_evidence: [E1]
+    blocking: true
+    resolved: true
+    resolution: "先以 skill 内置纯 Python 脚本提供"
+    uncovered_risks: []
+candidates:
+  - id: C1
+    summary: "纯 Python dataclass 契约 + 独立 validator"
+    confidence: 0.88
+    goal_coverage: 0.88
+    acceptance_coverage: 0.87
+    project_fit: 0.82
+    supporting_evidence: [E1]
+    selected: true

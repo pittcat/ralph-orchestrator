@@ -1,0 +1,73 @@
+# 合规样例:满足 author_ready 全部充要条件。
+# 五个关键置信度维度恰好位于达标阈值 0.85(边界包含语义);
+# 候选 C1 通过全部硬门禁并被选中;决策均有证据引用;
+# 用户四项确认齐全;schema_version 与 project_root provenance 有效。
+schema_version: "1.0"
+project_root: /workspace/demo-repo
+status: author_ready
+previous_status: needs_investigation
+attempt_count: 2
+goal: "为任务简报(task brief)增加机器可验证的硬门禁 validator"
+confidence:
+  goal_clarity: 0.85
+  project_fact_coverage: 0.85
+  acceptance_evidence: 0.85
+  execution_feasibility: 0.85
+  risk_coverage: 0.85
+evidence:
+  - id: E1
+    source: "crates/ralph-cli/src/commands/tools.rs"
+    observation: "ralph tools 子命令的现有入口与参数风格,确认新校验能力可以按同样模式挂载"
+    level: E2
+  - id: E2
+    source: "crates/ralph-core/data/ralph-tools-tasks.md"
+    observation: "现有任务文档注入格式,确认 task brief 字段命名与既有术语兼容"
+    level: E1
+  - id: E3
+    source: "cargo nextest run -p ralph-cli 实际执行输出"
+    observation: "目标测试入口真实可运行,验证命令有效"
+    level: E3
+  - id: E4
+    source: "与用户的对话记录"
+    observation: "用户口头确认了目标与完成标准,尚未落到可执行测试"
+    level: E0
+decisions:
+  - id: D1
+    question: "校验器以 skill 内置脚本提供,还是直接做成 ralph CLI 子命令?"
+    confidence: 0.90
+    supporting_evidence: [E1, E2]
+    blocking: true
+    resolved: true
+    resolution: "先以 skill 内置纯 Python 脚本提供,CLI 集成留给后续计划"
+    uncovered_risks:
+      - "CLI 集成阶段参数命名可能需要对齐 clap 约定"
+candidates:
+  - id: C1
+    summary: "纯 Python dataclass 契约 + 独立 validator,不引入新依赖"
+    confidence: 0.90
+    goal_coverage: 0.90
+    acceptance_coverage: 0.90
+    project_fit: 0.85
+    supporting_evidence: [E1, E3]
+    selected: true
+  - id: C2
+    summary: "引入 pydantic 做 schema 校验"
+    confidence: 0.72
+    goal_coverage: 0.85
+    acceptance_coverage: 0.86
+    project_fit: 0.60
+    supporting_evidence: [E2]
+    selected: false
+user_confirmations:
+  goal:
+    confirmed: true
+    note: "用户确认目标是让 task brief 可被机器验证"
+  scope:
+    confirmed: true
+    note: "范围限定为数据契约与 validator,不含 CLI 集成"
+  completion_evidence:
+    confirmed: true
+    note: "完成证据为 contract 测试全绿"
+  failure_boundaries:
+    confirmed: true
+    note: "任一硬门禁失败即停止 handoff 并给出 next_action"
