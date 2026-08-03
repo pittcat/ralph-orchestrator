@@ -8,14 +8,15 @@
 //! 1. Agent invokes `ralph tools task verify <verb>` → success
 //!    path calls `record_ticket(ticket_path, fingerprint, loop, hat)`
 //!    which writes a one-shot file at
-//!    `<workspace>/.ralph/agent/.ralph-task-verify-ticket`.
+//!    `<workspace>/.ralph/agent/task-tickets/<verb>__<loop>__<hat>__<intent>.ticket`
+//!    (per-operation scoped namespace; U2).
 //! 2. The same agent (same `loop_id` + `hat_id`) then invokes
 //!    `ralph tools task <verb>` → success path calls
 //!    `try_claim_matching_ticket` *before* any store mutation. If
 //!    the on-disk ticket's fingerprint matches the payload the
 //!    agent is about to write, the gate claims the ticket
-//!    (atomically renames it to
-//!    `.ralph-task-verify-ticket.claimed` under an exclusive
+//!    (atomically renames it to a sibling `<ticket>.claimed`
+//!    marker under an exclusive
 //!    `FileLock`) and the mutation proceeds. The caller MUST then
 //!    settle the claim once the Apply side effect finishes:
 //!    `consume_claimed_ticket` after a successful Apply;
@@ -116,11 +117,17 @@ pub fn mutation_fingerprint(
 /// derived from `(verb, canonical_payload, loop_id, hat_id)`.
 /// Distinct operation/intent/activation tuples never share a
 /// ticket file, so a subsequent verify can never overwrite an
-/// unrelated pending operation. The legacy fixed-path ticket
-/// (`.ralph/agent/.ralph-task-verify-ticket`) is treated as a
-/// migration hint: if found with the old plaintext format, the
-/// gate denies with `legacy_ticket_reverify_required` and the
-/// agent must re-run verify.
+/// unrelated pending operation.
+///
+/// Legacy behavior (STAB-OPAC-GATES-002, documented to match the
+/// code): the old fixed path
+/// (`.ralph/agent/.ralph-task-verify-ticket`) is never consulted
+/// by the gate — Apply only reads scoped paths. A legacy
+/// plaintext ticket left at the old path is therefore ignored,
+/// never accepted as authority, and never cleaned up; an Apply
+/// attempt is denied with the stable `no verify ticket` re-verify
+/// hint. Pinned by the integration test
+/// `test_legacy_plaintext_ticket_is_not_trusted`.
 #[allow(dead_code)] // legacy back-compat path; real callers use scoped_ticket_path.
 pub fn ticket_path(workspace: &Path) -> PathBuf {
     scoped_ticket_path(workspace, "", "", "", "")
