@@ -740,6 +740,293 @@ def test_preset_without_prompt_blocker(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
+# U2-fix — B4: unreadable / non-UTF-8 inputs normalize to typed blockers
+# ---------------------------------------------------------------------------
+#
+# Contract pinned here: every IO/decode failure while reading the preset
+# file or pre-existing owned artifacts becomes a TYPED blocker — blocked
+# level, locatable code, CLI exit 2, zero disk writes before the block,
+# no bare traceback and no misattribution to the handoff catch-all.
+# Non-UTF-8 preset bytes pin plan requirement B4 ("preset file 不可读 →
+# blocked + 可定位错误码") which previously had neither implementation
+# nor tests.
+
+
+def test_pipeline_non_utf8_preset_file_blocker(tmp_path: Path) -> None:
+    """B4 (U2): a preset file carrying invalid UTF-8 bytes blocks at
+    ``preset_resolution`` with the typed ``preset_yaml_invalid`` code.
+
+    The file EXISTS and passes the ``is_file()`` short-circuit, so the
+    typed blocker proves the decode failure was normalized instead of
+    leaking as an unpacked ``UnicodeDecodeError``. Nothing is written
+    and no subprocess is spawned.
+    """
+    project = _seed_blank_project(tmp_path)
+    (project / "binary.yml").write_bytes(
+        b"\xff\xfe\x00binary\nname: not-decodable\n"
+    )
+    captured: dict[str, object] = {"called": False}
+
+    def _never_called_runner(*args, **kwargs):  # pragma: no cover - asserts below
+        captured["called"] = True
+        raise AssertionError(
+            "non-decodable preset files must not trigger subprocess calls"
+        )
+
+    result = bootstrap_pipeline.run_pipeline(
+        cwd=project,
+        preset="binary.yml",
+        plan_path="plan.md",
+        binary="ralph",
+        runner=_never_called_runner,
+    )
+
+    assert result.level == "blocked"
+    assert result.blocked is True
+    assert result.stage == "preset_resolution"
+    assert result.code == "preset_yaml_invalid"
+    # The message stays informative: it names the offending preset token.
+    assert "binary.yml" in result.message
+    assert result.files_created == ()
+    assert result.files_updated == ()
+    assert captured["called"] is False
+    assert not list(project.glob("ralph.*.yml"))
+    assert not list(project.glob("PROMPT.*.md"))
+
+
+def test_cli_main_non_utf8_preset_exits_two_with_real_stage(
+    tmp_path: Path, capsys
+) -> None:
+    """B4 (U2, CLI contract): the binary preset through ``main()`` exits
+    2 and the JSON view names the TRUE stage (``preset_resolution``) and
+    typed code — never ``handoff`` / ``handoff_inputs_rejected``.
+
+    Before U2 the ``UnicodeDecodeError`` reached ``run_pipeline``'s
+    ``except ValueError`` unpack site, whose ``exc.args[0]`` is the
+    encoding string; the resulting unpack error escaped and ``main``'s
+    outer catch misattributed the failure to the handoff stage.
+    """
+    project = _seed_blank_project(tmp_path)
+    (project / "binary.yml").write_bytes(
+        b"\xff\xfe\x00binary\nname: not-decodable\n"
+    )
+
+    exit_code = bootstrap_pipeline.main(
+        [
+            "--cwd", str(project),
+            "--preset", "binary.yml",
+            "--plan", "plan.md",
+            "--json",
+        ]
+    )
+    captured = capsys.readouterr()
+    assert exit_code == 2
+    payload = json.loads(captured.out)
+    assert payload["level"] == "blocked"
+    assert payload["blocked"] is True
+    assert payload["stage"] == "preset_resolution"
+    assert payload["code"] == "preset_yaml_invalid"
+    # Explicit misattribution guards.
+    assert payload["stage"] != "handoff"
+    assert payload["code"] != "handoff_inputs_rejected"
+    assert payload["files_created"] == []
+    assert "Traceback" not in captured.out + captured.err
+
+
+def test_pipeline_unreadable_preset_file_permission_blocker(
+    tmp_path: Path, capsys
+) -> None:
+    """B4 (U2): a chmod-0 preset file (exists, ``is_file()`` green, but
+    unreadable) blocks with ``input_missing_preset_file`` and exit 2.
+
+    ``PermissionError`` is an ``OSError`` and was previously uncaught on
+    the preset read path; the typed code keeps the "not readable"
+    semantics the audit stage already uses for missing files.
+    """
+    project = _seed_blank_project(tmp_path)
+    preset_file = project / "locked.yml"
+    preset_file.write_text(_VALID_FILE_PRESET_YAML, encoding="utf-8")
+    preset_file.chmod(0)
+    try:
+        preset_file.read_text(encoding="utf-8")
+    except PermissionError:
+        pass
+    else:
+        preset_file.chmod(0o644)
+        pytest.skip("chmod 0 does not block reads for this user")
+    try:
+        result = bootstrap_pipeline.run_pipeline(
+            cwd=project,
+            preset="locked.yml",
+            plan_path="plan.md",
+            binary="ralph",
+            runner=_builtin_resolver_runner,
+        )
+        assert result.level == "blocked"
+        assert result.blocked is True
+        assert result.stage == "preset_resolution"
+        assert result.code == "input_missing_preset_file"
+        assert "locked.yml" in result.message
+        assert result.files_created == ()
+
+        exit_code = bootstrap_pipeline.main(
+            [
+                "--cwd", str(project),
+                "--preset", "locked.yml",
+                "--plan", "plan.md",
+                "--json",
+            ]
+        )
+        captured = capsys.readouterr()
+        assert exit_code == 2
+        payload = json.loads(captured.out)
+        assert payload["stage"] == "preset_resolution"
+        assert payload["code"] == "input_missing_preset_file"
+        assert payload["code"] != "handoff_inputs_rejected"
+    finally:
+        preset_file.chmod(0o644)
+
+
+def test_pipeline_existing_config_non_utf8_blocks_before_write(
+    tmp_path: Path,
+) -> None:
+    """U2: a pre-existing preset-bound config carrying non-UTF-8 bytes
+    blocks the batch before any write.
+
+    Stage choice: the failing read feeds
+    ``pipeline_suite.reconcile_preset_bound_suite`` (the provenance gate
+    over the existing suite files), so the blocker is reported at
+    ``stage="reconcile"`` with the existing ``provenance_corrupt`` code
+    ("on-disk text cannot be parsed or is corrupt") — the stage that
+    owns the read is the reconcile input path. AtomicWriter is never
+    constructed: the undecodable original bytes survive verbatim and no
+    ``.bootstrap.tmp`` residue exists.
+    """
+    project = _seed_blank_project(tmp_path)
+    config = project / "ralph.debug.yml"
+    binary_bytes = b"\xff\xfe\x00\x01binary-config"
+    config.write_bytes(binary_bytes)
+
+    result = bootstrap_pipeline.run_pipeline(
+        cwd=project,
+        preset="builtin:debug",
+        plan_path="plan.md",
+        binary="ralph",
+        runner=_builtin_resolver_runner,
+    )
+
+    assert result.level == "blocked"
+    assert result.blocked is True
+    assert result.stage == "reconcile"
+    assert result.code == "provenance_corrupt"
+    assert result.files_created == ()
+    assert result.files_updated == ()
+    assert result.files_noop == ()
+    # No half-applied state: original bytes intact, nothing else written.
+    assert config.read_bytes() == binary_bytes
+    assert not (project / "PROMPT.debug.md").exists()
+    assert not (project / "AGENTS.md").exists()
+    assert not (project / "CLAUDE.md").exists()
+    assert not list(project.rglob("*.bootstrap.tmp"))
+
+
+def test_pipeline_existing_agents_doc_non_utf8_blocks_before_write(
+    tmp_path: Path,
+) -> None:
+    """U2: a pre-existing AGENTS.md carrying non-UTF-8 bytes blocks the
+    batch before any write.
+
+    Stage choice: the failing read happens while composing the managed
+    docs, so the blocker is reported at ``stage="generation"`` (the
+    stage that owns the doc compose) with the same
+    ``provenance_corrupt`` code for corrupt on-disk text. The whole
+    batch stops: mirror doc, config and prompt are never written.
+    """
+    project = _seed_blank_project(tmp_path)
+    agents = project / "AGENTS.md"
+    binary_bytes = b"\xff\xfe\x00\x01binary-doc"
+    agents.write_bytes(binary_bytes)
+
+    result = bootstrap_pipeline.run_pipeline(
+        cwd=project,
+        preset="builtin:debug",
+        plan_path="plan.md",
+        binary="ralph",
+        runner=_builtin_resolver_runner,
+    )
+
+    assert result.level == "blocked"
+    assert result.blocked is True
+    assert result.stage == "generation"
+    assert result.code == "provenance_corrupt"
+    assert result.files_created == ()
+    assert result.files_updated == ()
+    # Original bytes intact; no other artifact written; no tmp residue.
+    assert agents.read_bytes() == binary_bytes
+    assert not (project / "CLAUDE.md").exists()
+    assert not (project / "ralph.debug.yml").exists()
+    assert not (project / "PROMPT.debug.md").exists()
+    assert not list(project.rglob("*.bootstrap.tmp"))
+
+
+def test_pipeline_untyped_resolution_value_error_normalized(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """U2 (guard): a ``ValueError`` without a well-formed ``(code,
+    reason)`` tuple payload can never escape preset resolution — the
+    unpack sites normalize it to a typed ``preset_resolution`` blocker
+    instead of raising an unpack error that ``main`` would misattribute
+    to the handoff stage.
+    """
+
+    def _raising(*args, **kwargs):
+        raise ValueError("plain untyped resolver failure")
+
+    monkeypatch.setattr(bootstrap_pipeline, "_resolve_preset", _raising)
+    project = _seed_blank_project(tmp_path)
+
+    result = bootstrap_pipeline.run_pipeline(
+        cwd=project,
+        preset="builtin:debug",
+        plan_path="plan.md",
+        binary="ralph",
+        runner=_builtin_resolver_runner,
+    )
+
+    assert result.level == "blocked"
+    assert result.blocked is True
+    assert result.stage == "preset_resolution"
+    assert result.code == "preset_yaml_invalid"
+    assert "plain untyped resolver failure" in result.message
+
+
+def test_atomic_writer_non_utf8_target_rolls_back_without_residue(
+    tmp_path: Path,
+) -> None:
+    """U2 (agent_docs contract): ``AtomicWriter`` treats an undecodable
+    existing target like any other staging failure — the whole batch
+    rolls back, every original byte survives and no sibling ``.tmp``
+    remains. Pins the ``_stage`` normalization of ``UnicodeDecodeError``
+    into the already-handled ``OSError`` rollback path.
+    """
+    a = tmp_path / "a.txt"
+    a.write_text("original\n", encoding="utf-8")
+    b = tmp_path / "b.txt"
+    b.write_bytes(b"\xff\xfe\x00binary")
+
+    with agent_docs.AtomicWriter([(a, "new-a\n"), (b, "new-b\n")]) as writer:
+        committed, rolled = writer.execute()
+
+    assert committed == ()
+    # The staged-only first target is reported rolled back; the
+    # undecodable second target never reaches the planned set.
+    assert a in rolled
+    assert a.read_text(encoding="utf-8") == "original\n"
+    assert b.read_bytes() == b"\xff\xfe\x00binary"
+    assert not list(tmp_path.glob("*.bootstrap.tmp"))
+
+
+# ---------------------------------------------------------------------------
 # B5 / R4 — Owned artifacts are created on a fresh project
 # ---------------------------------------------------------------------------
 

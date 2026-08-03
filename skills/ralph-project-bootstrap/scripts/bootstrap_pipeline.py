@@ -246,6 +246,28 @@ def _load_yaml_mapping(text: str) -> dict[str, Any]:
     return loaded
 
 
+def _typed_blocker_payload(exc: ValueError) -> tuple[str, str]:
+    """Return the well-formed ``(code, reason)`` payload carried by ``exc``.
+
+    Typed errors in this module carry a single ``(code, reason)`` tuple
+    argument. Any other ``ValueError`` shape — e.g. a
+    ``UnicodeDecodeError`` whose ``args`` are
+    ``(encoding, start, end, reason)`` — is normalised to a typed code
+    here so every unpack site yields a locatable blocker instead of an
+    unpack error that escapes ``run_pipeline`` and gets misattributed
+    to the handoff stage.
+    """
+    payload = exc.args[0] if exc.args else None
+    if (
+        isinstance(payload, tuple)
+        and len(payload) == 2
+        and isinstance(payload[0], str)
+        and isinstance(payload[1], str)
+    ):
+        return payload[0], payload[1]
+    return "preset_yaml_invalid", str(exc) or repr(exc)
+
+
 def _derive_runtime_fields(loaded: Mapping[str, Any]) -> tuple[str, int, int, bool]:
     """Extract ``(backend, max_iterations, max_runtime_seconds, inline_prompt_present)``.
 
@@ -294,14 +316,29 @@ def _resolve_file_preset(root: Path, preset: str) -> ResolvedPreset:
     preset_path = root / preset
     if not preset_path.is_file():
         raise ValueError(("input_missing_preset_file", f"preset file not readable: {preset}"))
-    text = preset_path.read_text(encoding="utf-8")
+    try:
+        text = preset_path.read_text(encoding="utf-8")
+    except UnicodeDecodeError as exc:
+        raise ValueError(
+            (
+                "preset_yaml_invalid",
+                f"preset file is not valid UTF-8: {preset} -- {exc}",
+            )
+        ) from exc
+    except OSError as exc:
+        raise ValueError(
+            (
+                "input_missing_preset_file",
+                f"preset file not readable: {preset} -- {exc}",
+            )
+        ) from exc
     loaded = _load_yaml_mapping(text)
     try:
         backend, max_iterations, max_runtime_seconds, inline_prompt_present = (
             _derive_runtime_fields(loaded)
         )
     except ValueError as exc:
-        code, reason = exc.args[0]
+        code, reason = _typed_blocker_payload(exc)
         raise ValueError((code, reason)) from exc
     template_name = Path(preset).stem
     return ResolvedPreset(
@@ -382,7 +419,7 @@ def _resolve_builtin_preset(
             _derive_runtime_fields(loaded)
         )
     except ValueError as exc:
-        code, reason = exc.args[0]
+        code, reason = _typed_blocker_payload(exc)
         raise ValueError((code, reason)) from exc
     return ResolvedPreset(
         preset_id=builtin_id,
@@ -537,8 +574,19 @@ def _run_generation_stage(
             message=exc.reason or exc.code,
         ), None, None
 
-    existing_config = _read_existing_text(cwd, suite.config_path)
-    existing_prompt = _read_existing_text(cwd, suite.prompt_path)
+    try:
+        existing_config = _read_existing_text(cwd, suite.config_path)
+        existing_prompt = _read_existing_text(cwd, suite.prompt_path)
+    except (OSError, UnicodeDecodeError) as exc:
+        # An existing preset-bound artifact that cannot be read /
+        # decoded is corrupt on-disk text: provenance cannot be
+        # established, so reconcile cannot proceed. Block typed before
+        # any write instead of leaking a bare traceback.
+        return _make_blocker(
+            stage="reconcile",
+            code="provenance_corrupt",
+            message=f"existing preset-bound artifact is unreadable or not UTF-8: {exc}",
+        ), suite, None
     apply = pipeline_suite.reconcile_preset_bound_suite(
         existing_config, existing_prompt, suite
     )
@@ -550,9 +598,19 @@ def _run_generation_stage(
         ), suite, None
 
     docs_body = _docs_body_from_facts(facts)
-    agents_result, claude_result, agents_name, claude_name = _compose_managed_docs(
-        cwd=cwd, docs_body=docs_body
-    )
+    try:
+        agents_result, claude_result, agents_name, claude_name = _compose_managed_docs(
+            cwd=cwd, docs_body=docs_body
+        )
+    except (OSError, UnicodeDecodeError) as exc:
+        # An existing AGENTS.md / CLAUDE.md that cannot be read /
+        # decoded is corrupt on-disk text the doc compose cannot
+        # reason about; block the whole batch typed before any write.
+        return _make_blocker(
+            stage="generation",
+            code="provenance_corrupt",
+            message=f"existing agent docs are unreadable or not UTF-8: {exc}",
+        ), suite, None
     for doc_result in (agents_result, claude_result):
         if doc_result.is_blocker:
             return _make_blocker(
@@ -1003,7 +1061,7 @@ def run_pipeline(
             runner=active_runner,
         )
     except ValueError as exc:
-        code, reason = exc.args[0]
+        code, reason = _typed_blocker_payload(exc)
         return _make_blocker(
             stage="preset_resolution",
             code=code,
