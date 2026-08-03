@@ -58,7 +58,7 @@ metadata:
 4. **失败时先查 `--help`** — 不要猜测参数，文档可能已更新
 5. **emit step handoff 事件前，先用 schema 预检** — `ralph emit --schema <TOPIC>` 会列出 `required_fields`；payload 必须包含全部 required fields，且字段之间不自相矛盾（例如 `step` 与 `task_key` 中的 step 段必须一致）。不要凭记忆构造 payload。
 6. **isolated 模式:一个 activation 只发 1 个业务事件** —— 运行时只保留你这一回合最先发出的那个,其后的全部静默丢弃(不分 topic)。发完即停,**终态事件(如 `plan.complete`)前面绝不要夹带 `work.ready` 等其它 emit**,否则终态事件会被丢弃。细则见 `ralph emit` 深参考「isolated mode 单业务事件 / 重发规则」。
-7. **Worktree 复用规则（显式参数）**:使用 `--worktree --reuse-worktree` 时必须同时给出 `--plan <plan.md>` 或 `--worktree-name <name>`。Ralph 按 plan basename 或精确名称查找已完成的 worktree：找到时先把上一轮 runtime 记录归档到该 worktree 的 `.ralph/reuse-history/`，再清理活动状态并复用；第一次找不到时以同一精确名称创建，不追加随机数字。正在运行的同名 worktree 不可复用，遇到占用错误时停止并交给 operator 处理。旧版"从 prompt 文本自动猜测 plan 路径"的行为已废弃。推荐示例:
+7. **Worktree 复用规则（显式参数）**:使用 `--worktree --reuse-worktree` 时必须同时给出 `--plan <plan.md>` 或 `--worktree-name <name>`。Ralph 按 plan basename 或精确名称查找已完成的 worktree：找到时先把上一轮 runtime 记录归档到该 worktree 的 `.ralph/reuse-history/`，再清理活动状态并复用；第一次找不到时以同一精确名称创建，不追加随机数字。正在运行的同名 worktree 不可复用，遇到占用错误时停止并交给 operator 处理。旧版"从 prompt 文本自动猜测 plan 路径"的行为已废弃。**`parallel-forge` 预设的复用附带恢复语义**：清理旧状态前，Ralph 先记录一个恢复边界（resume manifest，描述上一轮停在哪里的归档文件）——哪个 hat 已被触发但尚未执行完（pending hat）、它当时收到的原始触发事件快照。下次启动时若身份校验通过（plan 文件、preset、配置、worktree 名称四项均与上一轮一致），loop **不会**重启整个流程：而是通过标准 `task.resume` 恢复通道把该 pending hat 重新绑定，原始触发内嵌在 `task.resume` payload 的 `original_trigger_topic` / `original_trigger_payload` 字段里，已接受的交接事件不会重放；被恢复的 hat 按恢复引导处理它（见 `ralph-tools-recovery-directives` skill 的 `RD-MANIFEST-RESUME-CONTINUE` 段），**不要**当作 emit 拒收去修 `violation` / `required_fields`，从原始触发继续工作即可。重复同样的复用启动不会产生重复恢复。**身份任一项不一致时，复用在 loop 启动前被拒绝**：没有 task 会被关闭、没有 wave 会被派发，错误信息会指向该 worktree 的 `.ralph/reuse-history/` 归档；此时停止，核对 `--plan` / `--worktree-name` / preset 与上一轮一致后重试。推荐示例:
    ```bash
    ralph -H builtin:<preset> run --worktree --reuse-worktree \
      --plan docs/plans/<your-plan>.md
@@ -73,6 +73,8 @@ metadata:
 ## 收到 `task.resume` 时（policy / origin / contract 拒收后自动注入）
 
 编排器拒收后会在 PENDING EVENTS 注入 `task.resume`（payload 形状见 `ralph-tools-recovery-directives` skill）。**不要重发同样 payload**，按以下顺序修复：
+
+> **例外**：payload 的 `reason=manifest_resume` 时，这是 worktree 复用的恢复引导（见核心规则第 7 条），**不是** emit 拒收纠正——读 `original_trigger_payload` 从原始触发继续工作，不要走下方拒收修复流程（完整规范见 `ralph tools skill load ralph-tools-recovery-directives` 的 `RD-MANIFEST-RESUME-CONTINUE` 段）。
 
 1. **读 PENDING EVENTS 里 `task.resume` 的 JSON payload**，关键字段：
    - `stage`：`origin` / `policy` / `execution_contract` / `payload_contract`
