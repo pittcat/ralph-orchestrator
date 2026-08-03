@@ -6511,7 +6511,12 @@ pub(crate) async fn dispatch_redrive_child_wave(
         .unwrap_or_default();
 
     let synthesized = ralph_core::DetectedWave {
-        wave_id: child_wave_id.clone(),
+        // A redrive child is dispatched one slot at a time, but all of
+        // those dispatches share the same persisted child wave. Channel
+        // registration is keyed by the public wave id, so give each
+        // synthetic slot dispatch its own channel identity while keeping
+        // `pre_registered_id` below anchored to the real store wave.
+        wave_id: format!("{child_wave_id}-slot-{child_slot_index}"),
         target_hat,
         hat_config,
         events: vec![Event {
