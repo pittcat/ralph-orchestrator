@@ -1,7 +1,7 @@
 interface:
   display_name: "Ralph Preset Author"
   short_description: "Draft Ralph presets with per-hat AAF tables and payload contract notes"
-  default_prompt: "Use $ralph-preset-author to draft or revise a Ralph preset. Before drafting each hat, identify the key hat by capability (terminal authority / production mutation / phase branching / multi-hat aggregation / artifact producer / key handoff) and ask the operator to opt in (hard / record / off) to the decision confidence gate; then fill the AAF 五问表 plus a Payload Contract table (field, value source, visibility evidence, identity check, downstream use), append the Gate Scope table to preset-author-notes.md, and only then recommend review."
+  default_prompt: "Use $ralph-preset-author to draft or revise a Ralph preset. If the caller provides a task brief path from $ralph-task-discovery, validate it first per skills/ralph-task-discovery/references/author-handoff.md: an invalid, stale, or non-author_ready brief stops at the Discovery gate (task_brief_invalid) and no preset YAML is drafted; a certified brief only supplies confirmed inputs and never exempts the existing gates. Before drafting each hat, identify the key hat by capability (terminal authority / production mutation / phase branching / multi-hat aggregation / artifact producer / key handoff) and ask the operator to opt in (hard / record / off) to the decision confidence gate; then fill the AAF 五问表 plus a Payload Contract table (field, value source, visibility evidence, identity check, downstream use), append the Gate Scope table to preset-author-notes.md, and only then recommend review."
 
 policy:
   allow_implicit_invocation: true

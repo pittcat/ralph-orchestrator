@@ -540,3 +540,283 @@ def test_schema_doc_keeps_anchors_and_adds_rules() -> None:
         "terminology_conflict",
     ):
         assert rule_marker in text, f"缺少 U2 扩充规则标记:{rule_marker}"
+
+
+# --- U4:author handoff contract(task brief → ralph-preset-author Workflow 0) ---
+#
+# 契约原因:ralph-preset-author 以 task brief 为 Workflow 0 的前置输入。
+# 行为侧测试使用真实 fixtures + 真实 brief_validator + author_handoff
+# (author 应执行的校验序列的确定性参考实现,conftest 注册的 flat module);
+# anchor 侧仅断言稳定的 agent-facing contract anchor(task_brief_path 输入 /
+# task_brief_invalid 停止输出 / author_ready 校验步骤的存在与顺序 /
+# validator 集成指令),不做普通文案包含断言。
+
+AUTHOR_SKILL = Path(__file__).resolve().parents[1] / "ralph-preset-author" / "SKILL.md"
+AUTHOR_CHECKLIST = AUTHOR_SKILL.parent / "references" / "author-checklist.md"
+HANDOFF_DOC = SKILL_DIR / "references" / "author-handoff.md"
+BRIEF_FIXTURES = SKILL_DIR / "fixtures"
+
+
+def _ah():
+    """Import inside the test body so a missing helper surfaces as a
+    per-test failure instead of a collection error."""
+    import author_handoff  # registered by conftest when the script exists
+
+    return author_handoff
+
+
+def _author_skill_text() -> str:
+    assert AUTHOR_SKILL.is_file(), f"missing {AUTHOR_SKILL}"
+    return AUTHOR_SKILL.read_text(encoding="utf-8")
+
+
+def _workflow0(text: str) -> str:
+    """截取 author SKILL.md Workflow 步骤 0 段(Discovery gate,0d 小节之前)。"""
+    start = text.index("## Workflow")
+    end = text.index("0d.", start)
+    return text[start:end]
+
+
+def _load_brief_fixture(name: str) -> dict:
+    return yaml.safe_load((BRIEF_FIXTURES / name).read_text(encoding="utf-8"))
+
+
+# --- invalid brief 五种情形 → task_brief_invalid,不消费任何事实 ---------------
+
+
+def test_handoff_missing_brief_file_is_task_brief_invalid(tmp_path) -> None:
+    # 验收:缺文件 → task_brief_invalid + author 侧稳定 code;停止语义 = 无事实被消费
+    ah = _ah()
+    decision = ah.evaluate_task_brief(
+        tmp_path / "no-such-brief.yml", "/workspace/demo-repo"
+    )
+    assert decision.verdict == ah.VERDICT_INVALID
+    assert decision.errors[0].code == ah.CODE_FILE_NOT_FOUND
+    assert decision.goal is None
+    assert decision.selected_candidate_id is None
+
+
+def test_handoff_invalid_yaml_is_task_brief_invalid(tmp_path) -> None:
+    # 验收:坏 YAML → 透传 validator 稳定 code invalid_yaml(真实 yaml.safe_load)
+    ah = _ah()
+    broken = tmp_path / "broken.yml"
+    broken.write_text("schema_version: [unclosed\n", encoding="utf-8")
+    decision = ah.evaluate_task_brief(broken, "/workspace/demo-repo")
+    assert decision.verdict == ah.VERDICT_INVALID
+    assert decision.errors[0].code == "invalid_yaml"
+    assert decision.selected_candidate_id is None
+
+
+def test_handoff_schema_version_mismatch_is_task_brief_invalid(tmp_path) -> None:
+    # 验收:schema_version 不受支持 → validator code schema_version_invalid
+    ah = _ah()
+    data = _load_brief_fixture("valid.yml")
+    data["schema_version"] = "2.0"
+    path = tmp_path / "schema-mismatch.yml"
+    path.write_text(yaml.safe_dump(data, allow_unicode=True), encoding="utf-8")
+    decision = ah.evaluate_task_brief(path, data["project_root"])
+    assert decision.verdict == ah.VERDICT_INVALID
+    assert "schema_version_invalid" in {e.code for e in decision.errors}
+    assert decision.selected_candidate_id is None
+
+
+def test_handoff_root_mismatch_is_task_brief_invalid() -> None:
+    # 验收:brief 内部全绿但 project_root 与当前目标项目根不一致(stale)
+    # → author 侧 code task_brief_root_mismatch;valid brief 也不得被消费
+    ah = _ah()
+    decision = ah.evaluate_task_brief(
+        BRIEF_FIXTURES / "valid.yml", "/workspace/other-repo"
+    )
+    assert decision.verdict == ah.VERDICT_INVALID
+    assert decision.errors[0].code == ah.CODE_ROOT_MISMATCH
+    assert decision.goal is None
+    assert decision.selected_candidate_id is None
+
+
+def test_handoff_declared_author_ready_without_confirmation_is_invalid(tmp_path) -> None:
+    # 验收:author_ready=false(声明 author_ready 但用户确认缺失)
+    # → task_brief_invalid + validator code author_ready_gate_violation
+    ah = _ah()
+    data = _load_brief_fixture("valid.yml")
+    data["user_confirmations"]["scope"]["confirmed"] = False
+    path = tmp_path / "unconfirmed-scope.yml"
+    path.write_text(yaml.safe_dump(data, allow_unicode=True), encoding="utf-8")
+    decision = ah.evaluate_task_brief(path, data["project_root"])
+    assert decision.verdict == ah.VERDICT_INVALID
+    assert "author_ready_gate_violation" in {e.code for e in decision.errors}
+    assert decision.selected_candidate_id is None
+
+
+def test_handoff_blocked_brief_is_task_brief_invalid() -> None:
+    # 验收:blocked brief(valid 但未认证)→ task_brief_invalid +
+    # author 侧 code task_brief_not_author_ready,禁止 handoff 原因可见
+    ah = _ah()
+    decision = ah.evaluate_task_brief(
+        BRIEF_FIXTURES / "blocked.yml", "/workspace/demo-repo"
+    )
+    assert decision.verdict == ah.VERDICT_INVALID
+    assert decision.errors[0].code == ah.CODE_NOT_AUTHOR_READY
+    assert "人工输入" in decision.errors[0].message
+    assert decision.selected_candidate_id is None
+
+
+def test_handoff_error_priority_follows_read_order(tmp_path) -> None:
+    # 验收:错误按读取顺序汇报——validator 的 schema 错误先于 author 侧
+    # root mismatch(schema 不受支持时 project_root 语义不可信)
+    ah = _ah()
+    data = _load_brief_fixture("valid.yml")
+    data["schema_version"] = "2.0"
+    path = tmp_path / "schema-and-root.yml"
+    path.write_text(yaml.safe_dump(data, allow_unicode=True), encoding="utf-8")
+    decision = ah.evaluate_task_brief(path, "/workspace/other-repo")
+    codes = [e.code for e in decision.errors]
+    assert "schema_version_invalid" in codes
+    assert ah.CODE_ROOT_MISMATCH in codes
+    assert codes.index("schema_version_invalid") < codes.index(ah.CODE_ROOT_MISMATCH)
+
+
+# --- valid author_ready brief → 已确认输入进入 author 既有流程 ----------------
+
+
+def test_handoff_valid_brief_enters_author_flow_with_confirmed_inputs() -> None:
+    # 验收:valid.yml → handoff 成立,Intent Confirmation 所需的 goal / 成功条件 /
+    # 阻塞条件 / scope / evidence refs 全部可从 brief 消费
+    ah = _ah()
+    decision = ah.evaluate_task_brief(
+        BRIEF_FIXTURES / "valid.yml", "/workspace/demo-repo"
+    )
+    assert decision.verdict == ah.VERDICT_OK
+    assert decision.errors == ()
+    data = _load_brief_fixture("valid.yml")
+    assert decision.goal == data["goal"]
+    confirmations = data["user_confirmations"]
+    assert decision.acceptance_note == confirmations["completion_evidence"]["note"]
+    assert decision.failure_boundaries_note == confirmations["failure_boundaries"]["note"]
+    assert decision.scope_note == confirmations["scope"]["note"]
+    # evidence refs:完整证据台账 + selected 候选的支撑证据引用
+    assert set(decision.evidence_ids) == {e["id"] for e in data["evidence"]}
+    assert decision.selected_candidate_id == "C1"
+    assert decision.selected_candidate_summary == data["candidates"][0]["summary"]
+    assert decision.selected_candidate_evidence == tuple(
+        data["candidates"][0]["supporting_evidence"]
+    )
+    # project_root 规范化匹配:尾随斜杠不影响一致性判定
+    trailing = ah.evaluate_task_brief(
+        BRIEF_FIXTURES / "valid.yml", "/workspace/demo-repo/"
+    )
+    assert trailing.verdict == ah.VERDICT_OK
+
+
+def test_handoff_rejected_candidate_is_not_consumed_as_selected() -> None:
+    # 验收:coverage-fail.yml 的 C1 被标 selected:true 但 validator 判
+    # rejected_insufficient_coverage → 不得被当作 selected 消费;
+    # 对照组 alternative.yml 中被 rejected 的 C-A 同样不可消费,只有 C-B 可消费
+    ah = _ah()
+    failing = ah.evaluate_task_brief(
+        BRIEF_FIXTURES / "coverage-fail.yml", "/workspace/demo-repo"
+    )
+    assert failing.verdict == ah.VERDICT_INVALID
+    assert failing.selected_candidate_id is None
+
+    ok = ah.evaluate_task_brief(
+        BRIEF_FIXTURES / "alternative.yml", "/workspace/demo-repo"
+    )
+    assert ok.verdict == ah.VERDICT_OK
+    assert ok.selected_candidate_id == "C-B"
+    assert ok.selected_candidate_id != "C-A"
+
+
+# --- author 侧文档契约 anchor -------------------------------------------------
+
+
+def test_author_skill_workflow0_declares_brief_consumption_contract() -> None:
+    # 契约原因:task_brief_path(输入)/ task_brief_invalid(停止输出)/
+    # author_ready(校验步骤)是 author Workflow 0 brief 消费协议的稳定
+    # agent-facing anchor;顺序(输入 → validator 复核 → 停止判定)以及
+    # "invalid 不生成 YAML" 的停止语义是跨 skill 契约,不是普通文案。
+    text = _author_skill_text()
+    section0 = _workflow0(text)
+    for anchor in ("task_brief_path", "task_brief_invalid", "author_ready"):
+        assert anchor in section0, (
+            f"author SKILL.md Workflow 0 缺少 brief 消费 anchor {anchor}"
+        )
+    assert section0.index("task_brief_path") < section0.index("task_brief_invalid")
+    # validator 集成指令:必须要求运行 brief_validator,不得信任 brief 自我声明
+    assert "brief_validator" in section0 or "validate_brief_text" in section0
+    # 停止语义:invalid brief 不生成任何 preset YAML
+    assert re.search(r"不生成.{0,40}(preset\s*)?YAML", section0), (
+        "author SKILL.md Workflow 0 必须声明 invalid brief 不生成 preset YAML"
+    )
+    # 交接书面协议引用
+    assert "author-handoff.md" in section0
+
+
+def test_author_skill_brief_input_does_not_exempt_existing_gates() -> None:
+    # 契约原因:brief 只是已确认输入,不是门禁豁免许可;既有门禁 anchor 必须
+    # 仍在原位,且 Workflow 0 必须显式声明 brief 不豁免任何既有门禁。
+    text = _author_skill_text()
+    section0 = _workflow0(text)
+    assert re.search(r"brief\s*不豁免|不豁免.*既有门禁", section0), (
+        "author SKILL.md Workflow 0 必须声明 brief 不豁免既有门禁"
+    )
+    for anchor in (
+        "Discovery and user-confirmation gate",
+        "Preset Intent Confirmation",
+        "Payload Contract",
+        "Pre-review gate",
+        "ralph-preset-review",
+    ):
+        assert anchor in text, f"author SKILL.md 既有门禁 anchor 缺失:{anchor}"
+    # Intent Confirmation 对 brief 已确认事实的引用项(成功/阻塞/scope/证据)
+    for token in ("Goal", "acceptance", "failure boundaries", "scope", "Evidence refs"):
+        assert token in section0, f"Intent Confirmation brief 引用项缺失 {token}"
+
+
+def test_author_checklist_has_task_brief_ssot_reconciliation() -> None:
+    # 契约原因:author-checklist.md 是 author 逐项对账清单;task brief SSOT
+    # 对账项必须覆盖路径/validator 结论记录、rejected 候选禁消费、
+    # 既有门禁不因 brief 跳过。
+    text = AUTHOR_CHECKLIST.read_text(encoding="utf-8")
+    for anchor in ("task_brief_path", "task_brief_invalid", "candidate_gates"):
+        assert anchor in text, f"author-checklist.md 缺少 brief 对账 anchor {anchor}"
+    assert re.search(r"rejected.{0,60}不得.{0,60}selected", text, re.S), (
+        "author-checklist.md 必须禁止把 rejected 候选当作 selected 消费"
+    )
+    assert re.search(r"未因\s*brief|不因\s*brief", text), (
+        "author-checklist.md 必须声明既有门禁未因 brief 跳过或削弱"
+    )
+
+
+def test_author_handoff_doc_exists_and_defines_contract() -> None:
+    # 契约原因:author-handoff.md 是跨 skill 交接的唯一书面协议;读取顺序、
+    # stale 判据、停止条件错误码与端到端映射表是 U6 e2e 的结构化基础。
+    assert HANDOFF_DOC.is_file(), f"missing {HANDOFF_DOC}"
+    text = HANDOFF_DOC.read_text(encoding="utf-8")
+    # 读取顺序锚点必须在「消费顺序」段内按协议顺序首次出现
+    order_section_start = text.index("消费顺序")
+    section = text[order_section_start:]
+    order = ("文件存在", "YAML", "schema_version", "project_root", "author_ready")
+    positions = []
+    for token in order:
+        assert token in section, f"author-handoff.md 消费顺序段缺少锚点 {token}"
+        positions.append(section.index(token))
+    assert positions == sorted(positions), "author-handoff.md 读取顺序锚点顺序错误"
+    # 停止条件错误码(task_brief_invalid + validator/author 侧稳定 code)
+    for code in (
+        "task_brief_invalid",
+        "task_brief_file_not_found",
+        "task_brief_root_mismatch",
+        "task_brief_not_author_ready",
+        "schema_version_invalid",
+        "invalid_yaml",
+        "author_ready_gate_violation",
+    ):
+        assert code in text, f"author-handoff.md 缺少停止条件 code {code}"
+    # stale 判据必须显式定义
+    assert "stale" in text.lower(), "author-handoff.md 必须定义 stale brief 判据"
+    # 交接只传 brief 路径,不复制长文本进 prompt
+    assert re.search(r"只传|不复制长文本", text), (
+        "author-handoff.md 必须声明 handoff 只传 brief 路径"
+    )
+    # 端到端证据/错误映射表(U6 预留结构)
+    assert "映射" in text and "U6" in text

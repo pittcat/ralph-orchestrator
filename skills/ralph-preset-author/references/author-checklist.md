@@ -18,6 +18,12 @@
   - [ ] YAML 能力信号（`event_loop.supervisor.enabled` / hat instructions 含 `ralph wave emit`）与 Intent.execution_model 一致；不一致按 `finding-rubric.md`「Wave / Supervisor capability audit」 段 `preset.execution_model_intent_mismatch` 入 review 主表
 - [ ] 新 preset 或实质行为变更已通过最终菜单获得明确确认：「确认并开始设计 / 返回修改 / 暂停」
 - [ ] 用户未确认或仍有重大歧义时已 STOP，未起草 YAML/schema
+- [ ] **Task brief 前置输入对账**（仅当调用方提供 `task_brief_path` 时；书面规程见 `skills/ralph-task-discovery/references/author-handoff.md`，确定性参考实现 `author_handoff.py`）：
+  - [ ] brief 路径与 validator 结论（`valid` / `author_ready` / `next_action`）已记录到 `preset-author-notes.md`
+  - [ ] 复核顺序完整：文件存在 → YAML → `schema_version` → `project_root` 与当前目标项目根一致 → `brief_validator.validate_brief_text` → `status` / `author_ready`；任一失败输出 `task_brief_invalid` + validator code/path，停在 Discovery gate，不生成任何 preset YAML
+  - [ ] brief 的 Goal、成功条件（acceptance）、阻塞条件（failure boundaries）、scope、Evidence refs 已引用进 Preset Intent Confirmation
+  - [ ] selected candidate 仅取自 validator `candidate_gates` 结论为 `selected` 的候选；被 rejected 的候选不得被当作 selected 消费
+  - [ ] 既有 Discovery / Intent Confirmation / AAF / Payload Contract / prompt visibility / pre-review gate / review handoff 门禁未因 brief 跳过或削弱
 
 ### 提问菜单示例（按真实缺口选用，不得照抄为固定问卷）
 
