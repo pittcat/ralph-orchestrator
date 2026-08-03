@@ -12,6 +12,7 @@ It ships operator skills:
 | `ralph-preset-review` | Per-hat activation dry-run + **payload audit** + mechanical lint → `preset-review-report.md` |
 | `ralph-project-bootstrap` | Audit a target project, generate or safely update its AGENTS.md / CLAUDE.md / `ralph.pipeline.yml` / `PROMPT.pipeline.md` from an existing preset + plan/task, run staged validation, and hand off the official launch command |
 | `ralph-run-diagnosis` | Post-run deep diagnosis: artifacts, OPAC, mechanism vs preset attribution |
+| `ralph-task-discovery` | Structured task discovery before formal planning: environment-sourced evidence, one-question-at-a-time business decisions, and a validated task brief handed off to `ralph-preset-author` |
 
 > **Plan 2026-08-02-001:** the previously bundled `ralph-loop` and
 > `ralph-preset-common` skills are gone. `ralph-loop` is retired (loop
@@ -23,6 +24,37 @@ It ships operator skills:
 
 These are public agent skills. They are not part of Ralph's internal
 `ralph tools skill` registry.
+
+## Invocation order
+
+```text
+ralph-task-discovery → ralph-preset-author → ralph-preset-review
+```
+
+- `ralph-task-discovery` runs **before any plan is written**: facts are
+  unknown, business decisions are open, terminology or boundary conflicts
+  are suspected, or a bug task needs a red-capable feedback loop before
+  root-causing. It converges a validated task brief
+  (Evidence/Decision/Candidate ledger) and hands off **only the brief
+  path**, at `author_ready`, to `ralph-preset-author`.
+- `ralph-preset-author` drafts the preset from the brief;
+  `ralph-preset-review` then audits it (the closed-loop pair below).
+- Orthogonal to this chain: `ralph-project-bootstrap` provisions a target
+  project onto an existing preset, `ralph-e2e-bootstrap` builds an E2E
+  sandbox from a plan + diff, and `ralph-run-diagnosis` diagnoses a loop
+  that already ran. None of them replaces task discovery before planning,
+  and task discovery never authors presets itself.
+
+## External skill corpus (task discovery only)
+
+`ralph-task-discovery` consults an operator-local external skill corpus at
+`/Users/pittcat/Dev/agent_tools/skills` in **read-only** mode: its skills
+inform discovery methods (grilling, domain modeling, bug diagnosis, triage,
+etc.) but are never modified, copied, or bundled by this repository. When
+the corpus is unavailable, discovery records `external_skill_unavailable:`
++ `fallback:` provenance in the brief and continues with the built-in
+fallback checklists — it never fakes an executed external skill. Adapter
+rules live in `ralph-task-discovery/references/external-skill-adapters.md`.
 
 ## Agent-flow audit standard
 
@@ -68,10 +100,11 @@ List the skills in this repository:
 npx skills add mikeyobrien/ralph-orchestrator --list
 ```
 
-Install preset + bootstrap skills for Claude Code:
+Install discovery + preset + bootstrap skills for Claude Code:
 
 ```bash
 npx skills add mikeyobrien/ralph-orchestrator \
+  --skill ralph-task-discovery \
   --skill ralph-preset-author \
   --skill ralph-preset-review \
   --skill ralph-project-bootstrap \

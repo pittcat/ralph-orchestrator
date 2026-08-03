@@ -18,7 +18,8 @@
         "./skills/ralph-preset-author",
         "./skills/ralph-preset-review",
         "./skills/ralph-project-bootstrap",
-        "./skills/ralph-run-diagnosis"
+        "./skills/ralph-run-diagnosis",
+        "./skills/ralph-task-discovery"
       ]
     }
   ]
