@@ -5616,7 +5616,10 @@ impl EventLoop {
             let filtered_events: Vec<&Event> = if should_filter {
                 regular_events
                     .iter()
-                    .filter(|e| allowlist.contains(e.topic.as_str()))
+                    .filter(|e| {
+                        allowlist.contains(e.topic.as_str())
+                            || Self::is_recovery_channel_event(e)
+                    })
                     .collect()
             } else {
                 regular_events.iter().collect()
@@ -8165,6 +8168,23 @@ impl EventLoop {
 
     fn is_kickoff_or_recovery_event(topic: &str) -> bool {
         topic == "task.start" || topic == "task.resume" || topic.strip_suffix(".start").is_some()
+    }
+
+    /// U3 (plan 2026-08-03-004): system-injected recovery-channel events
+    /// (`task.resume` / `loop.resume`) must survive a hat's
+    /// `event_filter` allowlist. The parallel-forge manifest-resume
+    /// bootstrap (and every targeted recovery injection) re-binds the
+    /// pending hat through this channel with the original trigger
+    /// embedded in the payload; the allowlist only declares the hat's
+    /// business trigger topics, so filtering the recovery payload would
+    /// leave the resumed hat without its original trigger and the chain
+    /// could not continue. The exemption is narrow: only
+    /// runtime-injected (`system_injected == true`) recovery topics —
+    /// hat-emitted events on these topics stay filtered as before.
+    fn is_recovery_channel_event(event: &Event) -> bool {
+        event.system_injected == Some(true)
+            && (event.topic.as_str() == ralph_proto::TASK_RESUME
+                || event.topic.as_str() == ralph_proto::LOOP_RESUME)
     }
 
     /// Returns true for system/observability event topics that should not

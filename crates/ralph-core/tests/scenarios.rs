@@ -61,6 +61,67 @@ struct ScenarioYaml {
     /// tick (expected slot total + optional forced terminal).
     #[serde(default)]
     supervisor_fan_in: Option<SupervisorFanInYaml>,
+    /// U3 (plan 2026-08-03-004): optional parallel-forge resume
+    /// bootstrap. When present, the runner builds a real U1
+    /// `ResumeManifest` from this block, converts it through
+    /// `rejection::task_resume_from_manifest` (digest / pending-hat
+    /// validation), and boots the loop with
+    /// `EventLoop::initialize_manifest_resume` INSTEAD of the
+    /// configured starting event. Models a reused worktree whose old
+    /// runtime state is gone: only the manifest boundary survives.
+    #[serde(default)]
+    resume_bootstrap: Option<ResumeBootstrapYaml>,
+}
+
+/// U3 (plan 2026-08-03-004): fixture-side shape of the resume
+/// manifest boundary. Mirrors the fields of
+/// `ralph_core::parallel_forge_resume::BoundaryRecord` that the
+/// U2 conversion consumes.
+#[derive(Debug, Deserialize, Clone)]
+struct ResumeBootstrapYaml {
+    /// Accepted terminal boundaries of the OLD run, in commit order.
+    /// The last entry becomes the resume payload's
+    /// `accepted_boundary_topic`.
+    accepted: Vec<ResumeAcceptedBoundaryYaml>,
+    /// The hat the bootstrap `task.resume` must target.
+    pending_hat: String,
+    /// Snapshot of the event that originally triggered the pending hat.
+    original_trigger: ResumeOriginalTriggerYaml,
+    /// Wave correlation metadata of the boundary event.
+    #[serde(default)]
+    wave: Option<ResumeWaveYaml>,
+    /// How many times the bootstrap runs before the first iteration.
+    /// Defaults to 1; S7 idempotence scenarios set 2 to prove a
+    /// repeated manifest bootstrap stays a no-op.
+    #[serde(default = "default_resume_repeat")]
+    repeat: usize,
+}
+
+fn default_resume_repeat() -> usize {
+    1
+}
+
+#[derive(Debug, Deserialize, Clone)]
+struct ResumeAcceptedBoundaryYaml {
+    topic: String,
+    #[serde(default)]
+    hat: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+struct ResumeOriginalTriggerYaml {
+    topic: String,
+    /// JSON payload snapshot embedded in the resume message.
+    payload: String,
+    #[serde(default)]
+    hat: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+struct ResumeWaveYaml {
+    wave_id: String,
+    wave_index: u32,
+    wave_total: u32,
 }
 
 /// Controls how `run_bdd_supervisor_fan_in` registers and ticks waves.
@@ -264,6 +325,14 @@ struct ExpectedYaml {
     /// set flows from `forge.worktrees.ready` into the supervisor.
     #[serde(default)]
     ready_task_keys: Vec<String>,
+    /// U3 (plan 2026-08-03-004). Exact ordered list of hats that must
+    /// have had a prompt built (one entry per activation), in
+    /// iteration order. Iterations without an activation contribute
+    /// nothing. Pins resume routing: the pending hat activates first
+    /// and upstream hats do not re-activate; a repeated bootstrap must
+    /// not duplicate activations.
+    #[serde(default)]
+    activation_hats: Vec<String>,
 }
 
 /// One entry in `ExpectedYaml.assert_state` (2026-06-20-002 plan U1).
@@ -974,6 +1043,70 @@ fn run_bdd_supervisor_fan_in(
 /// Returns the `TempDir` guard so callers that need to inspect
 /// out-of-band artifacts (e.g. `projected-events.jsonl`) keep the
 /// directory alive through their post-loop assertions.
+/// U3 (plan 2026-08-03-004): build a real U1 `ResumeManifest` from the
+/// fixture's `resume_bootstrap` block and convert it through the U2
+/// `task_resume_from_manifest` path — the same chain the CLI runner
+/// uses at a reused-worktree bootstrap. Panics (failing the scenario)
+/// when the conversion rejects the fixture manifest.
+fn build_manifest_resume_recovery(
+    name: &str,
+    bootstrap: &ResumeBootstrapYaml,
+    registered_hats: &std::collections::BTreeSet<String>,
+) -> ralph_core::event_loop::rejection::ManifestResumeRecovery {
+    use ralph_core::parallel_forge_resume::{
+        AcceptedBoundary, BoundaryRecord, ResumeIdentity, ResumeManifest, TriggerSnapshot,
+        WaveMetadata, MANIFEST_SCHEMA_VERSION,
+    };
+    let accepted = bootstrap
+        .accepted
+        .iter()
+        .enumerate()
+        .map(|(idx, entry)| AcceptedBoundary {
+            topic: entry.topic.clone(),
+            transition_id: format!("bdd-resume-transition-{}", idx + 1),
+            committed_at: format!("2026-08-03T00:00:{:02}Z", idx + 1),
+            hat: entry.hat.clone(),
+            in_event_log: true,
+        })
+        .collect();
+    let mut manifest = ResumeManifest {
+        schema_version: MANIFEST_SCHEMA_VERSION.to_string(),
+        captured_at: "2026-08-03T00:00:00Z".to_string(),
+        identity: ResumeIdentity {
+            plan_path: "docs/plans/bdd-resume.md".to_string(),
+            plan_digest: "bdd-plan-digest".to_string(),
+            preset_name: "parallel-forge".to_string(),
+            config_digest: "bdd-config-digest".to_string(),
+            worktree_name: "bdd-resume".to_string(),
+            source_head_sha: String::new(),
+            loop_id: "bdd-old-loop".to_string(),
+        },
+        boundary: BoundaryRecord {
+            accepted,
+            pending_hat: Some(bootstrap.pending_hat.clone()),
+            original_trigger: Some(TriggerSnapshot {
+                topic: bootstrap.original_trigger.topic.clone(),
+                payload: Some(bootstrap.original_trigger.payload.clone()),
+                hat: bootstrap.original_trigger.hat.clone(),
+                triggered: Some(bootstrap.pending_hat.clone()),
+                ts: "2026-08-03T00:00:59Z".to_string(),
+            }),
+            wave: bootstrap.wave.as_ref().map(|wave| WaveMetadata {
+                wave_id: wave.wave_id.clone(),
+                wave_index: wave.wave_index,
+                wave_total: wave.wave_total,
+            }),
+        },
+        tasks: Vec::new(),
+        artifacts: Vec::new(),
+        incomplete_reasons: Vec::new(),
+        manifest_digest: String::new(),
+    };
+    manifest.finalize_digest();
+    ralph_core::event_loop::rejection::task_resume_from_manifest(&manifest, registered_hats)
+        .unwrap_or_else(|e| panic!("{name}: resume manifest conversion failed: {e}"))
+}
+
 fn run_scenario_with_snapshots(
     yaml: &ScenarioYaml,
     extra_config: impl FnOnce(&mut RalphConfig, &ScenarioYaml),
@@ -1055,6 +1188,13 @@ fn run_scenario_with_snapshots(
 
     let context = LoopContext::primary(temp_dir.path().to_path_buf());
 
+    // U3 (plan 2026-08-03-004): capture the registered hat ids BEFORE
+    // `config` moves into the EventLoop — the manifest → task.resume
+    // conversion validates the pending hat against this set, exactly
+    // like the CLI runner does at bootstrap.
+    let registered_hats: std::collections::BTreeSet<String> =
+        config.hats.keys().cloned().collect();
+
     let mut event_loop = if yaml.compiled_contract {
         let resolved = ralph_core::execution_contract::compile(config)
             .unwrap_or_else(|error| panic!("{}: contract compile failed: {error}", yaml.name));
@@ -1062,7 +1202,17 @@ fn run_scenario_with_snapshots(
     } else {
         EventLoop::with_context(config, context)
     };
-    event_loop.initialize("Test");
+    if let Some(ref bootstrap) = yaml.resume_bootstrap {
+        // Resume bootstrap: the old run's runtime state is gone; only
+        // the manifest boundary survives. Boot through the real U1/U2
+        // conversion chain instead of the configured starting event.
+        let recovery = build_manifest_resume_recovery(&yaml.name, bootstrap, &registered_hats);
+        for _ in 0..bootstrap.repeat.max(1) {
+            event_loop.initialize_manifest_resume("Test", recovery.clone());
+        }
+    } else {
+        event_loop.initialize("Test");
+    }
 
     let parser = EventParser::new();
 
@@ -1415,6 +1565,24 @@ fn run_scenario_with_snapshots(
                 &prompt[..prompt.len().min(800)],
             );
         }
+    }
+
+    // U3 (plan 2026-08-03-004): assert the exact ordered activation
+    // sequence (hats that had a prompt built). Iterations without an
+    // activation are skipped. Pins resume routing: the pending hat
+    // activates first, upstream hats do not re-activate, and a
+    // repeated bootstrap never duplicates activations.
+    if !yaml.expected.activation_hats.is_empty() {
+        let actual: Vec<String> = prompt_snapshots
+            .iter()
+            .filter(|snap| !snap.hat.is_empty())
+            .map(|snap| snap.hat.clone())
+            .collect();
+        assert_eq!(
+            actual, yaml.expected.activation_hats,
+            "{}: activation hat sequence mismatch (resume routing)",
+            yaml.name
+        );
     }
 
     // Verify final workflow progress
@@ -1984,6 +2152,41 @@ fn test_parallel_forge_fail_close_runtime() {
         blocked_count, 1,
         "fail-close must durably accept forge.plan.blocked exactly once"
     );
+}
+
+/// U3 (plan 2026-08-03-004) / S2: mid-wave resume replays only the
+/// unfinished unit; tasks close only via `forge.wave.settled`.
+#[test]
+fn test_parallel_forge_resume_wave_replay_runtime() {
+    let yaml = load_scenario("tests/scenarios/parallel_forge_resume_wave_replay_runtime.yml");
+    run_workflow_guard_scenario(yaml);
+}
+
+/// U3 (plan 2026-08-03-004) / S3: after an accepted
+/// `forge.wave.integrated` boundary only the verifier resumes;
+/// upstream hat activations do not increase.
+#[test]
+fn test_parallel_forge_resume_verifier_only_runtime() {
+    let yaml = load_scenario("tests/scenarios/parallel_forge_resume_verifier_only_runtime.yml");
+    run_workflow_guard_scenario(yaml);
+}
+
+/// U3 (plan 2026-08-03-004) / S4: correction-interrupted resume
+/// re-binds the correction executor with consistent wave metadata and
+/// a fresh round budget.
+#[test]
+fn test_parallel_forge_resume_correction_runtime() {
+    let yaml = load_scenario("tests/scenarios/parallel_forge_resume_correction_runtime.yml");
+    run_workflow_guard_scenario(yaml);
+}
+
+/// U3 (plan 2026-08-03-004) / S7: a repeated manifest bootstrap is a
+/// no-op — one recovery obligation, one activation per resumed hat.
+#[test]
+fn test_parallel_forge_resume_idempotent_bootstrap_runtime() {
+    let yaml =
+        load_scenario("tests/scenarios/parallel_forge_resume_idempotent_bootstrap_runtime.yml");
+    run_workflow_guard_scenario(yaml);
 }
 
 #[test]
