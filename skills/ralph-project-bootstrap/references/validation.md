@@ -21,9 +21,11 @@ The gate runs in strict order:
 3. **preflight** — invoke `ralph -c <config> -H <preset> preflight
    --strict` and require exit zero. Backend-class failures are
    surfaced as `blocked_backend`; everything else is `blocked_cli`.
-4. **dry_run** — invoke `ralph -c <config> -H <preset> run --dry-run
-   --strict` and verify the output references the requested config
-   path. A passing dry-run is a **static-load pass**, not a loop
+4. **dry_run** — invoke `ralph -c <config> -H <preset> run --dry-run`
+   (`ralph run` does not accept `--strict`; strict gating is owned by
+   the preflight stage) and verify the effective values match the
+   suite — the reported prompt source must equal `PROMPT.<stem>.md`.
+   A passing dry-run is a **static-load pass**, not a loop
    closure.
 
 The proof level advances monotonically: a blocker at stage N skips
@@ -42,7 +44,7 @@ callers can route them correctly:
 | `blocked_cli`       | capability, preset_check, preflight, dry_run | Binary missing, required flag missing, unknown command, generic CLI failure |
 | `blocked_preset`    | preset_check                           | Strict preset lint rejected the suite's preset |
 | `blocked_backend`   | preflight, dry_run                     | Backend executable missing, unknown backend, auth not ready |
-| `blocked_command`   | dry_run                                | Dry-run succeeded but the output did not reference the requested config path (source mismatch) |
+| `blocked_command`   | dry_run                                | Dry-run succeeded but the effective values do not match the suite (prompt source mismatch) |
 | `blocked_unknown`   | any                                    | Timeout, OSError, or skipped-stage marker |
 
 ## The no-`--skip-preflight` rule

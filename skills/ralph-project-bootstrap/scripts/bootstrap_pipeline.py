@@ -1285,15 +1285,38 @@ def main(argv: list[str] | None = None) -> int:
             kind="content_fixed_replay",
             transcript_path=Path(args.replay_transcript).resolve(),
         )
-    result = run_pipeline(
-        cwd=args.cwd,
-        preset=args.preset,
-        plan_path=args.plan,
-        prompt_file=args.prompt_file,
-        binary=args.binary,
-        refresh_existing=args.refresh_existing,
-        smoke_backend=smoke_backend,
-    )
+    try:
+        result = run_pipeline(
+            cwd=args.cwd,
+            preset=args.preset,
+            plan_path=args.plan,
+            prompt_file=args.prompt_file,
+            binary=args.binary,
+            refresh_existing=args.refresh_existing,
+            smoke_backend=smoke_backend,
+        )
+    except ValueError as exc:
+        # The handoff helper rejects malformed launch inputs at
+        # construction time (e.g. a worktree run without an explicit
+        # reuse key) by raising ``ValueError``. Render the rejection
+        # as a blocked-shaped result instead of a traceback so the
+        # CLI contract holds: blocked always exits 2 with a typed
+        # code the operator can act on. No business logic is
+        # duplicated — ``run_pipeline`` remains the only layer that
+        # classifies pipeline stages.
+        message = str(exc)
+        code = (
+            "worktree_reuse_key_missing"
+            if "worktree reuse key" in message
+            else "handoff_inputs_rejected"
+        )
+        result = PipelineResult(
+            level="blocked",
+            blocked=True,
+            stage="handoff",
+            code=code,
+            message=message,
+        )
     if args.json:
         sys.stdout.write(render_cli_json(result))
         sys.stdout.write("\n")

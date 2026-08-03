@@ -23,6 +23,7 @@ from __future__ import annotations
 import json
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 from typing import Callable
 
@@ -34,6 +35,7 @@ import agent_docs
 import bootstrap_pipeline
 import cli_probe
 import handoff
+import install  # type: ignore[import-not-found]  # added via conftest sys.path
 import pipeline_suite
 import smoke_runner
 
@@ -1641,3 +1643,309 @@ def test_pipeline_skill_files_canonical() -> None:
     # Unified entry point must be discoverable from operator docs.
     assert "bootstrap_pipeline" in skill_md or "run_pipeline" in skill_md
     assert "bootstrap_pipeline" in openai_yaml or "run_pipeline" in openai_yaml
+    # All three handoff levels must be described in both surfaces.
+    for level in bootstrap_pipeline.HANDOFF_LEVELS:
+        assert level in skill_md, f"SKILL.md must describe level {level!r}"
+        assert level in openai_yaml, f"openai.yaml must describe level {level!r}"
+    # The static-load caveat must stay explicit in the operator docs.
+    assert "`dry-run green != loop closed`" in skill_md
+
+
+# ---------------------------------------------------------------------------
+# U5 — CLI contract: in-process main() + exit codes + backend switch
+# ---------------------------------------------------------------------------
+
+
+PIPELINE_SCRIPT = (
+    ROOT / "skills" / "ralph-project-bootstrap" / "scripts" / "bootstrap_pipeline.py"
+)
+
+
+def _patch_pipeline_runner(monkeypatch, runner) -> None:
+    """Route ``main``'s ``run_pipeline`` call through ``runner``.
+
+    The real ``run_pipeline`` stays in charge of every stage; only the
+    subprocess runner is injected so no real binary spawns. ``main``
+    itself is exercised unchanged.
+    """
+    real = bootstrap_pipeline.run_pipeline
+
+    def _patched(**kwargs):
+        kwargs["runner"] = runner
+        return real(**kwargs)
+
+    monkeypatch.setattr(bootstrap_pipeline, "run_pipeline", _patched)
+
+
+def test_cli_main_blocked_when_worktree_reuse_key_missing(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    """U5: the handoff helper's ``ValueError("worktree reuse key
+    required")`` must surface as a blocked-shaped result view with exit
+    code 2 — never a traceback."""
+    project = _seed_blank_project(tmp_path)
+
+    def _raising(**kwargs):
+        raise ValueError("worktree reuse key required")
+
+    monkeypatch.setattr(bootstrap_pipeline, "run_pipeline", _raising)
+
+    exit_code = bootstrap_pipeline.main(
+        ["--cwd", str(project), "--preset", "builtin:debug"]
+    )
+    captured = capsys.readouterr()
+    assert exit_code == 2
+    assert "level: blocked" in captured.out
+    assert "stage: handoff" in captured.out
+    assert "code: worktree_reuse_key_missing" in captured.out
+    assert "message: worktree reuse key required" in captured.out
+    assert "Traceback" not in captured.out + captured.err
+
+
+def test_cli_main_json_blocked_when_worktree_reuse_key_missing(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    """U5: ``--json`` renders the same blocked-shaped record."""
+    project = _seed_blank_project(tmp_path)
+
+    def _raising(**kwargs):
+        raise ValueError("worktree reuse key required")
+
+    monkeypatch.setattr(bootstrap_pipeline, "run_pipeline", _raising)
+
+    exit_code = bootstrap_pipeline.main(
+        ["--cwd", str(project), "--preset", "builtin:debug", "--json"]
+    )
+    captured = capsys.readouterr()
+    assert exit_code == 2
+    payload = json.loads(captured.out)
+    assert payload["level"] == "blocked"
+    assert payload["blocked"] is True
+    assert payload["stage"] == "handoff"
+    assert payload["code"] == "worktree_reuse_key_missing"
+    assert payload["message"] == "worktree reuse key required"
+    assert payload["handoff_command"] == ""
+
+
+def test_cli_exit_code_zero_for_static_only(tmp_path: Path, monkeypatch, capsys) -> None:
+    """U5: ``incomplete_static_only`` (green static gate, no smoke)
+    exits 0 in the text view."""
+    project = _seed_blank_project(tmp_path)
+    invocations = cli_probe.load_fixture("debug-green")
+    _patch_pipeline_runner(monkeypatch, _static_runner_factory(invocations))
+
+    exit_code = bootstrap_pipeline.main(
+        ["--cwd", str(project), "--preset", "builtin:debug", "--plan", "plan.md"]
+    )
+    captured = capsys.readouterr()
+    assert exit_code == 0
+    assert "level: incomplete_static_only" in captured.out
+    assert "config: ralph.debug.yml" in captured.out
+    assert "prompt: PROMPT.debug.md" in captured.out
+
+
+def test_cli_exit_code_zero_for_complete(tmp_path: Path, monkeypatch, capsys) -> None:
+    """U5: a replay-bounded smoke that reaches the terminal promotes to
+    ``complete`` and exits 0 via ``main``."""
+    project = _seed_blank_project(tmp_path)
+    invocations = cli_probe.load_fixture("green")
+    _patch_pipeline_runner(monkeypatch, _static_runner_factory(invocations))
+    transcript = tmp_path / "transcripts"
+    transcript.mkdir(parents=True, exist_ok=True)
+
+    exit_code = bootstrap_pipeline.main(
+        [
+            "--cwd", str(project),
+            "--preset", "builtin:debug",
+            "--plan", "plan.md",
+            "--replay-transcript", str(transcript),
+        ]
+    )
+    captured = capsys.readouterr()
+    assert exit_code == 0
+    assert "level: complete" in captured.out
+    assert "smoke_outcome: bounded_terminal_reached" in captured.out
+
+
+def test_cli_exit_code_two_for_blocked_input(tmp_path: Path, capsys) -> None:
+    """U5: a typed input blocker exits 2 (no runner injection needed —
+    the pipeline short-circuits before any subprocess call)."""
+    exit_code = bootstrap_pipeline.main(
+        [
+            "--cwd", str(tmp_path / "does-not-exist"),
+            "--preset", "builtin:debug",
+        ]
+    )
+    captured = capsys.readouterr()
+    assert exit_code == 2
+    assert "level: blocked" in captured.out
+    assert "code: input_cwd_missing" in captured.out
+
+
+def test_cli_text_and_json_express_same_result(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    """U5: the text view and ``--json`` derive from the SAME
+    ``PipelineResult`` — every structured field the JSON view carries
+    must surface in the text view for an identical run."""
+    project_text = _seed_blank_project(tmp_path / "text")
+    project_json = _seed_blank_project(tmp_path / "json")
+    argv_tail = ["--preset", "builtin:debug", "--plan", "plan.md"]
+
+    invocations = cli_probe.load_fixture("debug-green")
+    _patch_pipeline_runner(monkeypatch, _static_runner_factory(invocations))
+    assert bootstrap_pipeline.main(["--cwd", str(project_json), "--json", *argv_tail]) == 0
+    payload = json.loads(capsys.readouterr().out)
+
+    invocations = cli_probe.load_fixture("debug-green")
+    _patch_pipeline_runner(monkeypatch, _static_runner_factory(invocations))
+    assert bootstrap_pipeline.main(["--cwd", str(project_text), *argv_tail]) == 0
+    text_out = capsys.readouterr().out
+
+    # Scalar fields render verbatim in the text view.
+    assert f"level: {payload['level']}" in text_out
+    assert f"stage: {payload['stage']}" in text_out
+    assert f"root: {payload['root']}" in text_out
+    assert f"preset: {payload['preset']}" in text_out
+    assert f"config: {payload['config_path']}" in text_out
+    assert f"prompt: {payload['prompt_path']}" in text_out
+    # File lists and validation evidence render one line per entry.
+    for path in payload["files_created"]:
+        assert f"  - {path}" in text_out
+    for entry in payload["validation_evidence"]:
+        assert f"  - {entry}" in text_out
+    # The handoff command block is identical in both views.
+    if payload["handoff_command"]:
+        assert payload["handoff_command"] in text_out
+
+
+def test_cli_replay_transcript_is_only_safe_backend_switch(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """U5: ``--replay-transcript`` is the ONLY switch that enables a
+    ``SafeBackend``; without it the smoke backend stays ``None``."""
+    project = _seed_blank_project(tmp_path)
+    captured_kwargs: dict[str, object] = {}
+
+    def _capture(**kwargs):
+        captured_kwargs.update(kwargs)
+        return bootstrap_pipeline.PipelineResult(
+            level="incomplete_static_only",
+            blocked=False,
+            stage="handoff",
+            code="",
+            message="",
+        )
+
+    monkeypatch.setattr(bootstrap_pipeline, "run_pipeline", _capture)
+
+    # No switch: the smoke backend must stay disabled.
+    bootstrap_pipeline.main(["--cwd", str(project), "--preset", "builtin:debug"])
+    assert captured_kwargs["smoke_backend"] is None
+
+    # --replay-transcript: the ONLY enabling switch constructs the
+    # bounded SafeBackend.
+    transcript = tmp_path / "transcripts"
+    transcript.mkdir(parents=True, exist_ok=True)
+    bootstrap_pipeline.main(
+        [
+            "--cwd", str(project),
+            "--preset", "builtin:debug",
+            "--replay-transcript", str(transcript),
+        ]
+    )
+    backend = captured_kwargs["smoke_backend"]
+    assert isinstance(backend, smoke_runner.SafeBackend)
+    assert backend.kind == "content_fixed_replay"
+    assert backend.transcript_path == transcript.resolve()
+
+    # Structural guard: no other CLI flag mentions smoke / backend.
+    parser = bootstrap_pipeline.build_cli_parser()
+    smoke_flags = [
+        action.dest
+        for action in parser._actions
+        if "smoke" in action.dest or "backend" in action.dest or "replay" in action.dest
+    ]
+    assert smoke_flags == ["replay_transcript"]
+
+
+def test_cli_help_subprocess_smoke() -> None:
+    """U5: the script is directly executable and its --help lists the
+    full public flag surface."""
+    proc = subprocess.run(
+        [sys.executable, str(PIPELINE_SCRIPT), "--help"],
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert proc.returncode == 0, proc.stderr
+    for token in (
+        "--cwd",
+        "--preset",
+        "--plan",
+        "--prompt-file",
+        "--binary",
+        "--refresh-existing",
+        "--replay-transcript",
+        "--json",
+    ):
+        assert token in proc.stdout, f"--help must list {token}"
+
+
+# ---------------------------------------------------------------------------
+# U5 — Installed skill copy parity
+# ---------------------------------------------------------------------------
+
+
+def _relative_files(root: Path) -> set[str]:
+    """Relative file set under ``root`` excluding bytecode caches.
+
+    ``__pycache__`` contents are environment-dependent (present only
+    after the modules were imported) and carry no contract value, so
+    both sides of the parity comparison drop them.
+    """
+    return {
+        str(path.relative_to(root))
+        for path in root.rglob("*")
+        if path.is_file() and "__pycache__" not in path.parts
+    }
+
+
+def test_project_bootstrap_skill_copies_are_in_sync(tmp_path: Path) -> None:
+    """U5: an installed copy of the skill is byte-for-byte identical to
+    the source tree.
+
+    The test installs into a temp dir via the installer's ``--dir``
+    entry so it passes in environments where the gitignored local
+    copies (``.claude/skills`` / ``.agents/skills``) do not exist.
+    """
+    target = tmp_path / "skills-target"
+    exit_code = install.main(
+        ["--dir", str(target), "--force", "ralph-project-bootstrap"]
+    )
+    assert exit_code == 0
+
+    source = ROOT / "skills" / "ralph-project-bootstrap"
+    copied = target / "ralph-project-bootstrap"
+    assert copied.is_dir()
+
+    source_files = _relative_files(source)
+    copied_files = _relative_files(copied)
+    assert source_files == copied_files, (
+        f"copy diverged from source: missing={source_files - copied_files} "
+        f"extra={copied_files - source_files}"
+    )
+    # Every copied file is a byte-equal regular file, never a symlink.
+    for rel in sorted(source_files):
+        copied_path = copied / rel
+        assert not copied_path.is_symlink(), rel
+        assert copied_path.read_bytes() == (source / rel).read_bytes(), rel
+    # The unified entry point and its public description are covered
+    # by the parity walk above; name them explicitly so a future
+    # ignore-pattern that drops them fails loudly.
+    for rel in (
+        "SKILL.md",
+        "agents/openai.yaml",
+        "scripts/bootstrap_pipeline.py",
+    ):
+        assert rel in source_files
