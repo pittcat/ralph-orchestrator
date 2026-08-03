@@ -32,6 +32,7 @@ import yaml
 
 import _fixtures
 import agent_docs
+import audit
 import bootstrap_pipeline
 import cli_probe
 import handoff
@@ -103,6 +104,23 @@ def _seed_ambiguous_root(tmp_path: Path) -> Path:
 def _file_preset_text(relative_path: str) -> str:
     """Return the bytes of a fixture file used as a file preset."""
     return (FIXTURES_PROJECTS / relative_path).read_text(encoding="utf-8")
+
+
+# A complete, valid file preset used by the unsafe-preset gate tests.
+# The file EXISTS on disk wherever the test plants it, so any pipeline
+# run that fails to block at the input boundary would read it, parse
+# it and proceed past the audit stage — the typed blocker is the proof
+# that no filesystem read of the path happened.
+_VALID_FILE_PRESET_YAML = (
+    "name: outside-preset\n"
+    "cli:\n"
+    "  backend: claude\n"
+    "event_loop:\n"
+    "  prompt: |\n"
+    "    inline prompt\n"
+    "  max_iterations: 5\n"
+    "  max_runtime_seconds: 600\n"
+)
 
 
 # Stub transcripts the fake ``subprocess.run`` replays for builtin
@@ -384,6 +402,206 @@ def test_pipeline_escape_path_blocker(tmp_path: Path) -> None:
     )
     assert result.level == "blocked"
     assert result.code == "input_path_unsafe"
+
+
+# ---------------------------------------------------------------------------
+# U1-fix — File presets pass the SAME repo-relative input gate as plan/prompt
+# ---------------------------------------------------------------------------
+
+
+def test_pipeline_absolute_preset_path_blocker(tmp_path: Path) -> None:
+    """U1-fix: an absolute preset path is blocked at the input boundary.
+
+    Mirrors the plan-path gate. The outside file EXISTS and carries a
+    valid preset YAML, so any filesystem read of it would promote the
+    run past the audit stage — the typed blocker proves no read
+    happened, no subprocess was spawned and nothing was written.
+    """
+    project = _seed_blank_project(tmp_path)
+    outside = tmp_path / "outside.yml"
+    outside.write_text(_VALID_FILE_PRESET_YAML, encoding="utf-8")
+    captured: dict[str, object] = {"called": False}
+
+    def _fail_runner(*args, **kwargs):  # pragma: no cover - asserts below
+        captured["called"] = True
+        raise AssertionError(
+            "unsafe preset paths must not trigger subprocess calls"
+        )
+
+    result = bootstrap_pipeline.run_pipeline(
+        cwd=project,
+        preset=str(outside),
+        plan_path="plan.md",
+        binary="ralph",
+        runner=_fail_runner,
+    )
+    assert result.level == "blocked"
+    assert result.blocked is True
+    assert result.stage == "audit"
+    assert result.code == "input_path_unsafe"
+    assert captured["called"] is False
+    # Blocked before resolution / generation: nothing resolved or written.
+    assert result.resolved_preset is None
+    assert result.files_created == ()
+    assert not list(project.glob("ralph.*.yml"))
+
+
+def test_pipeline_escape_preset_path_blocker(tmp_path: Path) -> None:
+    """U1-fix: a ``..``-escaping preset is blocked at the input boundary.
+
+    The escape target exists one level above the project with valid
+    preset YAML, so a run that reached the YAML parse / generation /
+    static stages would have read it. The typed blocker stage/code plus
+    zero runner calls prove the run stopped before all of them.
+    """
+    project = _seed_blank_project(tmp_path)
+    (tmp_path / "outside.yml").write_text(
+        _VALID_FILE_PRESET_YAML, encoding="utf-8"
+    )
+    captured: dict[str, object] = {"called": False}
+
+    def _fail_runner(*args, **kwargs):  # pragma: no cover - asserts below
+        captured["called"] = True
+        raise AssertionError(
+            "escape preset paths must not trigger subprocess calls"
+        )
+
+    result = bootstrap_pipeline.run_pipeline(
+        cwd=project,
+        preset="../outside.yml",
+        plan_path="plan.md",
+        binary="ralph",
+        runner=_fail_runner,
+    )
+    assert result.level == "blocked"
+    assert result.blocked is True
+    assert result.stage == "audit"
+    assert result.code == "input_path_unsafe"
+    assert captured["called"] is False
+    assert result.resolved_preset is None
+    assert result.files_created == ()
+    # Never reaches generation: no owned artifacts in the project.
+    assert not list(project.glob("ralph.*.yml"))
+    assert not list(project.glob("PROMPT.*.md"))
+
+
+def test_pipeline_control_byte_preset_blocker(tmp_path: Path) -> None:
+    """U1-fix: presets carrying C0 control bytes are rejected by the
+    same lexical gate before any filesystem call."""
+    project = _seed_blank_project(tmp_path)
+    captured: dict[str, object] = {"called": False}
+
+    def _fail_runner(*args, **kwargs):  # pragma: no cover - asserts below
+        captured["called"] = True
+        raise AssertionError(
+            "control-byte preset paths must not trigger subprocess calls"
+        )
+
+    result = bootstrap_pipeline.run_pipeline(
+        cwd=project,
+        preset="evil\x00preset.yml",
+        plan_path="plan.md",
+        binary="ralph",
+        runner=_fail_runner,
+    )
+    assert result.level == "blocked"
+    assert result.stage == "audit"
+    assert result.code == "input_path_unsafe"
+    assert captured["called"] is False
+    assert result.resolved_preset is None
+
+
+def test_audit_rejects_unsafe_preset_path_directly(tmp_path: Path) -> None:
+    """U1-fix (defense in depth): ``audit.run_audit`` refuses a preset
+    that is not a safe repo-relative token BEFORE any existence probe,
+    so direct audit callers share the pipeline's input gate.
+
+    The absolute target exists, so a bare existence check would
+    silently pass — the typed ``input_path_unsafe`` issue proves the
+    lexical gate fired first.
+    """
+    project = _seed_blank_project(tmp_path)
+    outside = tmp_path / "outside.yml"
+    outside.write_text(_VALID_FILE_PRESET_YAML, encoding="utf-8")
+    decision = audit.run_audit(project, preset=str(outside), plan_path="plan.md")
+    assert decision.is_blocking
+    codes = {issue.code for issue in decision.issues}
+    assert "input_path_unsafe" in codes
+
+
+# ---------------------------------------------------------------------------
+# U1-fix — Audit existence check and preset resolution share ONE anchor
+# ---------------------------------------------------------------------------
+
+
+def test_pipeline_file_preset_resolves_at_audit_root_from_subdirectory(
+    tmp_path: Path,
+) -> None:
+    """U1-fix: audit says "exists at root R" ⇒ resolution reads from R.
+
+    The project carries a vcs root marker at the top level while the
+    pipeline is invoked from a nested subdirectory, so the audit root
+    is the project root (``..`` relative to the bare cwd). The preset
+    lives ONLY at that audit root; the resolver must read it from the
+    audit-resolved root instead of re-anchoring on the bare cwd (which
+    would surface a spurious ``input_missing_preset_file``).
+    """
+    project = tmp_path / "anchor-project"
+    _fixtures.materialise("blank", project)
+    (project / ".git").mkdir()
+    (project / "debug.yml").write_text(_VALID_FILE_PRESET_YAML, encoding="utf-8")
+    cwd = project / "nested"
+    cwd.mkdir()
+
+    result = bootstrap_pipeline.run_pipeline(
+        cwd=cwd,
+        preset="debug.yml",
+        binary="ralph",
+        runner=_builtin_resolver_runner,
+    )
+    # Resolution succeeds at the audit root; the run reaches the static
+    # stage (green with the fake runner) instead of a resolution blocker.
+    assert result.blocked is False
+    assert result.level == "incomplete_static_only"
+    assert result.root == ".."
+    assert result.preset == "debug.yml"
+    assert result.resolved_preset is not None
+    assert result.resolved_preset.source_kind == "file"
+    assert result.resolved_preset.template_name == "debug"
+    assert result.resolved_preset.backend == "claude"
+    assert result.resolved_preset.inline_prompt_present is True
+
+
+def test_pipeline_file_preset_only_under_bare_cwd_is_rejected(
+    tmp_path: Path,
+) -> None:
+    """U1-fix: canonical anchor direction — a preset present ONLY under
+    the bare cwd but missing at the audit root is rejected.
+
+    The audit root (vcs root at the project top level) is the single
+    anchor for BOTH the existence check and the resolution read; a
+    preset that exists only in the nested cwd is outside that root and
+    must be refused by the audit stage — the resolver never falls back
+    to the bare cwd to pick it up.
+    """
+    project = tmp_path / "anchor-project"
+    _fixtures.materialise("blank", project)
+    (project / ".git").mkdir()
+    cwd = project / "nested"
+    cwd.mkdir()
+    (cwd / "only-here.yml").write_text(_VALID_FILE_PRESET_YAML, encoding="utf-8")
+
+    result = bootstrap_pipeline.run_pipeline(
+        cwd=cwd,
+        preset="only-here.yml",
+        binary="ralph",
+        runner=_builtin_resolver_runner,
+    )
+    assert result.level == "blocked"
+    assert result.stage == "audit"
+    assert result.code == "input_missing_preset_file"
+    assert result.resolved_preset is None
+    assert result.files_created == ()
 
 
 # ---------------------------------------------------------------------------

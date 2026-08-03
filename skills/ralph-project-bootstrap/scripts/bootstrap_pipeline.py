@@ -206,6 +206,13 @@ def _normalize_inputs(
         return cwd_path, preset, plan_path, prompt_file, "input_missing_preset"
     if not preset.strip():
         return cwd_path, preset, plan_path, prompt_file, "input_missing_preset"
+    # File presets pass the SAME repo-relative gate as plan/prompt so
+    # absolute paths, ``..`` escapes and control bytes are rejected
+    # before any filesystem read or subprocess call. ``builtin:<id>``
+    # presets are not path tokens; audit keeps its dedicated id-shape
+    # branch for them and this gate must not touch them.
+    if not preset.startswith("builtin:") and not _paths.is_safe_relative(preset):
+        return cwd_path, preset, plan_path, prompt_file, "input_path_unsafe"
     ok_plan, code_plan = _check_repo_relative("plan", plan_path)
     if not ok_plan:
         return cwd_path, preset, plan_path, prompt_file, code_plan
@@ -277,9 +284,14 @@ def _derive_runtime_fields(loaded: Mapping[str, Any]) -> tuple[str, int, int, bo
     return backend, max_iterations, max_runtime_seconds, inline_prompt_present
 
 
-def _resolve_file_preset(cwd: Path, preset: str) -> ResolvedPreset:
-    """Read a repo-relative file preset and derive runtime fields."""
-    preset_path = cwd / preset
+def _resolve_file_preset(root: Path, preset: str) -> ResolvedPreset:
+    """Read a repo-relative file preset and derive runtime fields.
+
+    ``root`` is the canonical project root the audit stage already
+    validated the preset against; the read MUST stay anchored there so
+    "exists at root R" and "reads from root R" can never disagree.
+    """
+    preset_path = root / preset
     if not preset_path.is_file():
         raise ValueError(("input_missing_preset_file", f"preset file not readable: {preset}"))
     text = preset_path.read_text(encoding="utf-8")
@@ -386,17 +398,22 @@ def _resolve_builtin_preset(
 
 def _resolve_preset(
     *,
-    cwd: Path,
+    root: Path,
     preset: str,
     binary: str,
     runner: SubprocessRunner,
 ) -> ResolvedPreset:
-    """Resolve a file or builtin preset, normalising errors."""
+    """Resolve a file or builtin preset, normalising errors.
+
+    ``root`` is the canonical project root: file presets are read from
+    ``root / preset`` (the same anchor the audit existence check used);
+    builtin ids ignore it.
+    """
     if preset.startswith("builtin:"):
         return _resolve_builtin_preset(
             builtin_id=preset, binary=binary, runner=runner
         )
-    return _resolve_file_preset(cwd, preset)
+    return _resolve_file_preset(root, preset)
 
 
 # ---------------------------------------------------------------------------
@@ -972,9 +989,15 @@ def run_pipeline(
         )
 
     # --- preset resolution stage ---------------------------------------
+    # The audit stage validated the preset against the audit-resolved
+    # root; resolution MUST read from the same canonical anchor so
+    # "exists at root R" implies "reads from root R" — even when the
+    # pipeline runs from a subdirectory and the bare cwd differs from
+    # the project root.
+    preset_root = (cwd_path / (audit_decision.root or "./")).resolve()
     try:
         resolved = _resolve_preset(
-            cwd=cwd_path,
+            root=preset_root,
             preset=preset_clean,
             binary=binary,
             runner=active_runner,
