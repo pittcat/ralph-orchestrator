@@ -17,8 +17,10 @@ Design rules:
 * **Writes are bounded.** The pipeline refuses to write a target
   file unless the audit and preset-resolution stages pass and the
   owned-artifact stage reports ``created`` / ``updated`` /
-  ``noop``. All writes go through ``agent_docs.AtomicWriter`` so a
-  partial batch rolls back.
+  ``noop``. The preset-bound config/prompt pair and the managed
+  AGENTS.md / CLAUDE.md sections are composed into ONE
+  ``agent_docs.AtomicWriter`` batch so any conflict or failure rolls
+  every target back to its pre-write state.
 * **Static evidence is typed.** The four ``StageDecision`` rows from
   ``cli_probe.validate_pipeline`` are recorded verbatim; the handoff
   must reference them rather than re-derive a static-only claim.
@@ -74,6 +76,12 @@ _PIPELINE_STAGES: tuple[str, ...] = (
 # declared locally so this module can be imported even when the
 # handoff helper is being refactored.
 HANDOFF_LEVELS: tuple[str, ...] = ("complete", "incomplete_static_only", "blocked")
+
+# Marker id for the AGENTS.md / CLAUDE.md managed sections. Mirrors
+# the fixture convention (``existing-docs`` / ``conflicting-docs``)
+# and the helper-level e2e chain; the agent_docs helper owns the
+# marker bytes themselves.
+_DOCS_MARKER_ID = "agents-docs-v1"
 
 SubprocessRunner = Callable[..., subprocess.CompletedProcess]
 
@@ -140,6 +148,27 @@ class PipelineResult:
         """
         payload = asdict(self)
         return json.dumps(payload, indent=2, ensure_ascii=False)
+
+
+@dataclass(frozen=True)
+class _GenerationOutcome:
+    """Per-artifact dispositions produced by the generation stage.
+
+    ``suite_kind`` applies to BOTH preset-bound files
+    (``ralph.<stem>.yml`` + ``PROMPT.<stem>.md``); the two managed
+    docs carry independent dispositions because a rerun may need to
+    recreate a doc the operator deleted while the suite itself is a
+    noop. ``written_docs`` lists the doc paths committed by this run
+    so the post-write verify reopens exactly the artifacts the batch
+    touched.
+    """
+
+    suite_kind: str  # one of {"created", "updated", "noop"}
+    agents_kind: str  # one of {"created", "updated", "noop"}
+    claude_kind: str  # one of {"created", "updated", "noop"}
+    docs_body: str
+    marker_id: str
+    written_docs: tuple[str, ...] = ()
 
 
 # ---------------------------------------------------------------------------
@@ -401,19 +430,85 @@ def _read_existing_text(cwd: Path, path: str) -> str | None:
     return full.read_text(encoding="utf-8")
 
 
+def _docs_body_from_facts(facts: audit.ProjectFacts) -> str:
+    """Derive the managed-section body for AGENTS.md / CLAUDE.md.
+
+    The body mirrors the audited verification commands so both docs
+    carry identical, project-backed guidance; the audit never invents
+    commands, so an unknown stack carries a single discovery note
+    instead of a fabricated gate. The body deliberately depends only
+    on project facts (not on the preset or budgets) so reruns with
+    identical project state stay byte-stable noops.
+    """
+    lines: list[str] = []
+    if facts.lint:
+        lines.append(f"linter: {facts.lint[0]}")
+    if facts.test:
+        lines.append(f"test_runner: {facts.test[0]}")
+    if not lines:
+        lines.append(
+            "verification: no authoritative verification command was "
+            "discovered; inspect project documentation and CI before "
+            "choosing a gate"
+        )
+    return "\n".join(lines) + "\n"
+
+
+def _compose_managed_docs(
+    *,
+    cwd: Path,
+    docs_body: str,
+) -> tuple[agent_docs.ComposeResult, agent_docs.ComposeResult, str, str]:
+    """Compose both managed docs against the on-disk mirrors.
+
+    Each side is composed with ``sync_with_other_doc=True`` against
+    the OTHER doc's existing text, so any state in which the two
+    mirrors disagree with each other — or with the body this run
+    wants to write — surfaces ``sync_mirror_conflict`` before the
+    batch is staged. Both docs always receive the identical body; an
+    asymmetric on-disk pair is a blocker the operator must reconcile.
+
+    Returns ``(agents_result, claude_result, agents_name, claude_name)``.
+    """
+    agents_name, claude_name = audit.DEFAULT_AGENTS_NAMES
+    agents_existing = _read_existing_text(cwd, agents_name)
+    claude_existing = _read_existing_text(cwd, claude_name)
+    agents_result = agent_docs.compose_agent_docs(
+        agents_existing,
+        docs_body,
+        marker_id=_DOCS_MARKER_ID,
+        sync_with_other_doc=True,
+        other_existing_text=claude_existing,
+    )
+    claude_result = agent_docs.compose_agent_docs(
+        claude_existing,
+        docs_body,
+        marker_id=_DOCS_MARKER_ID,
+        sync_with_other_doc=True,
+        other_existing_text=agents_existing,
+    )
+    return agents_result, claude_result, agents_name, claude_name
+
+
 def _run_generation_stage(
     *,
     cwd: Path,
     resolved: ResolvedPreset,
     refresh_existing: bool,
-) -> tuple[PipelineResult, pipeline_suite.PresetBoundSuite | None, str]:
-    """Compose + atomic-write the preset-bound suite.
+    facts: audit.ProjectFacts,
+) -> tuple[
+    PipelineResult,
+    pipeline_suite.PresetBoundSuite | None,
+    _GenerationOutcome | None,
+]:
+    """Compose + atomic-write the preset-bound suite AND the managed
+    AGENTS.md / CLAUDE.md sections as ONE batch.
 
-    Returns ``(partial_result, suite_or_none, outcome_kind)`` where
-    ``outcome_kind`` is one of ``"created"``, ``"updated"``,
-    ``"noop"`` or ``"blocker"``. ``partial_result`` carries the
-    blocker view when ``outcome_kind == "blocker"``; otherwise it is
-    a placeholder the caller can ignore.
+    Returns ``(partial_result, suite_or_none, outcome_or_none)``.
+    ``partial_result`` carries the blocker view on failure; on success
+    ``outcome`` records the per-artifact dispositions so the caller
+    can build ``files_created`` / ``files_updated`` / ``files_noop``
+    and reopen-verify exactly the artifacts that were committed.
     """
     preset_id = resolved.preset_id
     try:
@@ -423,7 +518,7 @@ def _run_generation_stage(
             stage="generation",
             code=exc.code,
             message=exc.reason or exc.code,
-        ), None, "blocker"
+        ), None, None
 
     existing_config = _read_existing_text(cwd, suite.config_path)
     existing_prompt = _read_existing_text(cwd, suite.prompt_path)
@@ -435,55 +530,101 @@ def _run_generation_stage(
             stage="reconcile",
             code=apply.code,
             message=apply.reason or apply.code,
-        ), suite, "blocker"
-    if apply.kind == "noop":
-        return _ok_partial(), suite, "noop"
+        ), suite, None
 
-    write_target = refresh_existing or apply.kind in {"created", "updated"}
-    if not write_target:
-        # Operator did not request a refresh and there is nothing new to
-        # write: a clean second run short-circuits to noop.
-        return _ok_partial(), suite, "noop"
+    docs_body = _docs_body_from_facts(facts)
+    agents_result, claude_result, agents_name, claude_name = _compose_managed_docs(
+        cwd=cwd, docs_body=docs_body
+    )
+    for doc_result in (agents_result, claude_result):
+        if doc_result.is_blocker:
+            return _make_blocker(
+                stage="generation",
+                code=doc_result.code,
+                message=doc_result.reason or doc_result.code,
+            ), suite, None
+
+    write_suite = apply.kind != "noop" and (
+        refresh_existing or apply.kind in {"created", "updated"}
+    )
 
     config_path = cwd / suite.config_path
     prompt_path = cwd / suite.prompt_path
-    if not _paths.contain(suite.config_path, cwd) or not _paths.contain(suite.prompt_path, cwd):
-        return _make_blocker(
-            stage="generation",
-            code="input_path_unsafe",
-            message="derived artifact paths escape the project root",
-        ), suite, "blocker"
-    try:
-        with agent_docs.AtomicWriter(
+    operations: list[tuple[Path, str]] = []
+    if write_suite:
+        operations.extend(
             [
                 (config_path, suite.config),
                 (prompt_path, suite.prompt),
             ]
-        ) as writer:
+        )
+    if agents_result.kind in {"created", "updated"}:
+        operations.append((cwd / agents_name, agents_result.text or ""))
+    if claude_result.kind in {"created", "updated"}:
+        operations.append((cwd / claude_name, claude_result.text or ""))
+
+    suite_kind = apply.kind if write_suite else "noop"
+    outcome = _GenerationOutcome(
+        suite_kind=suite_kind,
+        agents_kind=agents_result.kind,
+        claude_kind=claude_result.kind,
+        docs_body=docs_body,
+        marker_id=_DOCS_MARKER_ID,
+        written_docs=tuple(
+            name
+            for name, doc_result in (
+                (agents_name, agents_result),
+                (claude_name, claude_result),
+            )
+            if doc_result.kind in {"created", "updated"}
+        ),
+    )
+    if not operations:
+        # Operator did not request a refresh and there is nothing new
+        # to write: a clean second run short-circuits to noop.
+        return _ok_partial(), suite, outcome
+
+    for rel in (suite.config_path, suite.prompt_path, agents_name, claude_name):
+        if not _paths.contain(rel, cwd):
+            return _make_blocker(
+                stage="generation",
+                code="input_path_unsafe",
+                message="derived artifact paths escape the project root",
+            ), suite, None
+    try:
+        with agent_docs.AtomicWriter(operations) as writer:
             committed, rolled = writer.execute()
     except OSError as exc:
         return _make_blocker(
             stage="generation",
             code="atomic_write_failed",
             message=str(exc),
-        ), suite, "blocker"
-    if rolled or set(committed) != {config_path, prompt_path}:
+        ), suite, None
+    if rolled or set(committed) != {target for target, _ in operations}:
         rolled_paths = tuple(str(p) for p in rolled)
         return _make_blocker(
             stage="generation",
             code="atomic_write_failed",
             message=f"atomic write rolled back: {rolled_paths}",
             blocker_paths=rolled_paths,
-        ), suite, "blocker"
-    return _ok_partial(), suite, apply.kind
+        ), suite, None
+    return _ok_partial(), suite, outcome
 
 
 def _run_post_write_verify(
     *,
     cwd: Path,
     suite: pipeline_suite.PresetBoundSuite,
+    outcome: _GenerationOutcome,
 ) -> PipelineResult:
-    """Reopen the on-disk suite and verify prompt binding + provenance."""
+    """Reopen the written artifacts and verify binding + provenance.
+
+    The suite files are verified through
+    ``pipeline_suite.verify_preset_bound_files``; every managed doc
+    committed by this run is reopened and must parse as exactly one
+    well-formed managed section whose body byte-equals the requested
+    body (a noop recompose proves both).
+    """
     verify = pipeline_suite.verify_preset_bound_files(cwd, suite)
     if verify.is_blocker:
         return _make_blocker(
@@ -491,6 +632,30 @@ def _run_post_write_verify(
             code=verify.code,
             message=verify.reason or verify.code,
         )
+    for name in outcome.written_docs:
+        text = _read_existing_text(cwd, name)
+        if text is None:
+            return _make_blocker(
+                stage="reconcile",
+                code="managed_section_stale",
+                message=f"{name} disappeared after the atomic write",
+            )
+        parse = agent_docs.parse_managed_section(text, outcome.marker_id)
+        if not parse.is_ok:
+            return _make_blocker(
+                stage="reconcile",
+                code="managed_section_stale",
+                message=f"{name} managed section is not well-formed after write",
+            )
+        recompose = agent_docs.compose_agent_docs(
+            text, outcome.docs_body, marker_id=outcome.marker_id
+        )
+        if recompose.kind != "noop":
+            return _make_blocker(
+                stage="reconcile",
+                code="managed_section_stale",
+                message=f"{name} managed section does not match the requested body",
+            )
     return _ok_partial()
 
 
@@ -818,10 +983,11 @@ def run_pipeline(
         )
 
     # --- generation stage ----------------------------------------------
-    partial, suite, kind = _run_generation_stage(
+    partial, suite, outcome = _run_generation_stage(
         cwd=cwd_path,
         resolved=resolved,
         refresh_existing=refresh_existing,
+        facts=audit_decision.facts,
     )
     if partial.blocked:
         return _attach_fields(
@@ -831,10 +997,10 @@ def run_pipeline(
             resolved_preset=resolved,
             next_action="reconcile on-disk owned artifacts before retrying",
         )
-    assert suite is not None
+    assert suite is not None and outcome is not None
 
     # --- post-write verify (reopen + provenance) -----------------------
-    verify_partial = _run_post_write_verify(cwd=cwd_path, suite=suite)
+    verify_partial = _run_post_write_verify(cwd=cwd_path, suite=suite, outcome=outcome)
     if verify_partial.blocked:
         return _attach_fields(
             verify_partial,
@@ -848,12 +1014,19 @@ def run_pipeline(
     files_created: list[str] = []
     files_updated: list[str] = []
     files_noop: list[str] = []
-    if kind == "created":
-        files_created = [suite.config_path, suite.prompt_path]
-    elif kind == "updated":
-        files_updated = [suite.config_path, suite.prompt_path]
-    elif kind == "noop":
-        files_noop = [suite.config_path, suite.prompt_path]
+    dispositions = (
+        (suite.config_path, outcome.suite_kind),
+        (suite.prompt_path, outcome.suite_kind),
+        (audit.DEFAULT_AGENTS_NAMES[0], outcome.agents_kind),
+        (audit.DEFAULT_AGENTS_NAMES[1], outcome.claude_kind),
+    )
+    for path, kind in dispositions:
+        if kind == "created":
+            files_created.append(path)
+        elif kind == "updated":
+            files_updated.append(path)
+        else:
+            files_noop.append(path)
 
     # --- static validation stage ---------------------------------------
     static_partial, decisions = _run_static_stage(

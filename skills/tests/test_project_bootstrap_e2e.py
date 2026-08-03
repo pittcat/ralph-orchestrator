@@ -48,6 +48,7 @@ from pathlib import Path
 import pytest
 
 import agent_docs  # noqa: F401  (Unit-3 helper)
+import bootstrap_pipeline  # noqa: F401  (unified entry)
 import cli_probe  # noqa: F401  (Unit-5 helper)
 import handoff  # noqa: F401  (Unit-7 helper)
 import pipeline_suite  # noqa: F401  (Unit-4 helper)
@@ -748,3 +749,186 @@ class TestCrossLayerBootstrap:
             assert (target / name / "SKILL.md").is_file(), (
                 f"{name}/SKILL.md missing"
             )
+
+
+# ---------------------------------------------------------------------------
+# Unified-entry (``run_pipeline``) cross-layer coverage
+# ---------------------------------------------------------------------------
+
+
+_BUILTIN_LIST_JSON = json.dumps(
+    {
+        "manifests": [
+            {
+                "name": "debug",
+                "description": "Debug preset",
+                "source": "builtin:debug",
+                "tags": ["debug"],
+            }
+        ]
+    }
+)
+
+_BUILTIN_SHOW_YAML = (
+    "name: debug\n"
+    "cli:\n"
+    "  backend: claude\n"
+    "event_loop:\n"
+    "  prompt: |\n"
+    "    # debug prompt\n"
+    "    Read the supplied plan and follow it end-to-end.\n"
+    "  max_iterations: 8\n"
+    "  max_runtime_seconds: 1800\n"
+)
+
+
+def _unified_entry_runner(argv, timeout=None, capture_output=False, text=False):
+    """Fake ``subprocess.run`` for ``run_pipeline`` cross-layer tests.
+
+    Honours the builtin-resolution argv (``preset list`` / ``preset
+    show``) plus the minimum capability / static-gate surface. Any
+    other argv raises so unexpected stage traffic fails loudly. The
+    real ``ralph`` binary is never spawned.
+    """
+    ok = subprocess.CompletedProcess(args=tuple(argv), returncode=0, stdout="", stderr="")
+    if argv[1:] == ["preset", "list", "--format", "json"]:
+        return subprocess.CompletedProcess(
+            args=tuple(argv), returncode=0, stdout=_BUILTIN_LIST_JSON, stderr=""
+        )
+    if len(argv) == 6 and argv[1:3] == ["preset", "show"] and argv[4] == "--format":
+        if argv[3] != "debug":
+            return subprocess.CompletedProcess(
+                args=tuple(argv), returncode=2, stdout="", stderr="unknown template"
+            )
+        return subprocess.CompletedProcess(
+            args=tuple(argv), returncode=0, stdout=_BUILTIN_SHOW_YAML, stderr=""
+        )
+    if argv[1:] == ["--version"]:
+        return subprocess.CompletedProcess(
+            args=tuple(argv), returncode=0, stdout="ralph 0.1.0-test", stderr=""
+        )
+    if argv[1:] in (["--help"], ["--json", "--help"]):
+        return subprocess.CompletedProcess(
+            args=tuple(argv), returncode=0, stdout="usage: ralph ...", stderr=""
+        )
+    if len(argv) >= 2 and argv[-1] == "--help":
+        return subprocess.CompletedProcess(
+            args=tuple(argv), returncode=0, stdout="--strict --dry-run", stderr=""
+        )
+    if len(argv) >= 2 and argv[-1] == "--strict":
+        return subprocess.CompletedProcess(
+            args=tuple(argv), returncode=0, stdout="ok", stderr=""
+        )
+    if len(argv) >= 2 and argv[-1] == "--dry-run":
+        return subprocess.CompletedProcess(
+            args=tuple(argv),
+            returncode=0,
+            stdout=(
+                "Dry run mode - configuration:\n"
+                "  Prompt file: PROMPT.debug.md\n"
+                "  Max iterations: 8\n"
+                "  Max runtime: 1800s\n"
+                "  Backend: claude\n"
+                "  Idle timeout: 30s\n"
+            ),
+            stderr="",
+        )
+    raise AssertionError(f"unified-entry runner: unexpected argv={list(argv)}")
+
+
+class TestUnifiedEntryPipeline:
+    """Cross-layer proof for the single ``run_pipeline`` entry point.
+
+    The helper-level tests above stitch audit / compose / write /
+    probe / smoke / handoff by hand; the unified entry must expose the
+    same observable contract through one call. These tests exercise
+    ``bootstrap_pipeline.run_pipeline`` end-to-end against the public
+    fixtures without spawning the real binary.
+    """
+
+    def test_e2e_unified_entry_blank_project(self, tmp_path: Path) -> None:
+        """Blank project → ``run_pipeline`` produces the suite, the
+        managed docs, and typed static evidence in one call; a second
+        identical call is a noop."""
+        project = _seed_blank_project(tmp_path / "project")
+
+        result = bootstrap_pipeline.run_pipeline(
+            cwd=project,
+            preset="builtin:debug",
+            plan_path="plan.md",
+            binary="ralph",
+            runner=_unified_entry_runner,
+        )
+
+        assert result.blocked is False
+        assert result.level == "incomplete_static_only"
+        # Owned suite + managed docs all report ``created``.
+        assert result.files_created == (
+            "ralph.debug.yml",
+            "PROMPT.debug.md",
+            "AGENTS.md",
+            "CLAUDE.md",
+        )
+        assert (project / "ralph.debug.yml").is_file()
+        assert (project / "PROMPT.debug.md").is_file()
+        for name in ("AGENTS.md", "CLAUDE.md"):
+            doc_text = (project / name).read_text(encoding="utf-8")
+            assert doc_text.count("RALPH-BOOTSTRAP-START") == 1
+            assert doc_text.count("RALPH-BOOTSTRAP-END") == 1
+            assert agent_docs.parse_managed_section(doc_text, MARKER_ID).is_ok
+        # Static evidence is typed: one row per gate stage, all ok.
+        assert len(result.validation_evidence) == 4
+        assert all(entry.endswith(":ok") for entry in result.validation_evidence)
+        # Write boundaries hold end-to-end.
+        assert not (project / "ralph.pipeline.yml").exists()
+        assert not (project / "PROMPT.pipeline.md").exists()
+        assert not (project / "ralph.bootstrap.yml").exists()
+        assert not list(project.rglob("*.bootstrap.tmp"))
+
+        # Second identical run: every owned artifact is a noop.
+        second = bootstrap_pipeline.run_pipeline(
+            cwd=project,
+            preset="builtin:debug",
+            plan_path="plan.md",
+            binary="ralph",
+            runner=_unified_entry_runner,
+        )
+        assert second.blocked is False
+        assert second.files_created == ()
+        assert second.files_updated == ()
+        assert second.files_noop == (
+            "ralph.debug.yml",
+            "PROMPT.debug.md",
+            "AGENTS.md",
+            "CLAUDE.md",
+        )
+
+    def test_e2e_unified_entry_conflicting_docs_blocks(self, tmp_path: Path) -> None:
+        """Conflicting-docs project → ``run_pipeline`` blocks with
+        ``sync_mirror_conflict`` and leaves the project untouched."""
+        project = tmp_path / "project"
+        _fixtures.materialise("conflicting-docs", project)
+        (project / "plan.md").write_text(
+            "# plan\n\nBootstrap pipeline fixture plan.\n", encoding="utf-8"
+        )
+        agents_before = (project / "AGENTS.md").read_text(encoding="utf-8")
+        claude_before = (project / "CLAUDE.md").read_text(encoding="utf-8")
+
+        result = bootstrap_pipeline.run_pipeline(
+            cwd=project,
+            preset="builtin:debug",
+            plan_path="plan.md",
+            binary="ralph",
+            runner=_unified_entry_runner,
+        )
+
+        assert result.blocked is True
+        assert result.code == "sync_mirror_conflict"
+        assert result.files_created == ()
+        assert result.files_updated == ()
+        assert result.files_noop == ()
+        assert not (project / "ralph.debug.yml").exists()
+        assert not (project / "PROMPT.debug.md").exists()
+        assert (project / "AGENTS.md").read_text(encoding="utf-8") == agents_before
+        assert (project / "CLAUDE.md").read_text(encoding="utf-8") == claude_before
+        assert not list(project.rglob("*.bootstrap.tmp"))

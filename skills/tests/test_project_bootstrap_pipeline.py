@@ -27,8 +27,10 @@ from pathlib import Path
 from typing import Callable
 
 import pytest
+import yaml
 
 import _fixtures
+import agent_docs
 import bootstrap_pipeline
 import cli_probe
 import handoff
@@ -37,6 +39,30 @@ import smoke_runner
 
 ROOT = Path(__file__).resolve().parents[2]
 FIXTURES_PROJECTS = ROOT / "skills" / "ralph-project-bootstrap" / "fixtures" / "projects"
+
+# Marker id the pipeline owns for the AGENTS.md / CLAUDE.md managed
+# sections. Mirrors the fixture convention (``existing-docs`` /
+# ``conflicting-docs``) and the helper-level e2e chain.
+DOCS_MARKER_ID = "agents-docs-v1"
+
+
+def _managed_bodies(project: Path) -> tuple[str, str]:
+    """Extract the managed-section bodies from AGENTS.md / CLAUDE.md.
+
+    The marker bytes are a public contract (see
+    ``agent_docs.render_managed_section``); the extraction below uses
+    only those literal markers so the test never reaches into private
+    helper internals.
+    """
+    start_marker = f"<!-- RALPH-BOOTSTRAP-START: {DOCS_MARKER_ID} v1 -->"
+    end_marker = f"<!-- RALPH-BOOTSTRAP-END: {DOCS_MARKER_ID} -->"
+    bodies: list[str] = []
+    for name in ("AGENTS.md", "CLAUDE.md"):
+        text = (project / name).read_text(encoding="utf-8")
+        start = text.index(start_marker) + len(start_marker) + 1
+        end = text.index(end_marker)
+        bodies.append(text[start:end].rstrip("\n"))
+    return bodies[0], bodies[1]
 
 
 # ---------------------------------------------------------------------------
@@ -512,9 +538,57 @@ def test_pipeline_success_creates_owned_outputs(tmp_path: Path) -> None:
     prompt_text = (project / "PROMPT.debug.md").read_text(encoding="utf-8")
     assert "debug prompt" in prompt_text
 
+    # U2: the four provenance keys live individually under ``_bootstrap:``.
+    loaded = yaml.safe_load(config_text)
+    bootstrap = loaded["_bootstrap"]
+    assert set(bootstrap) >= {
+        "generator_version",
+        "input_signature",
+        "profile_sha256",
+        "prompt_sha256",
+    }
+    assert bootstrap["generator_version"] == pipeline_suite.GENERATOR_VERSION
+    assert len(bootstrap["input_signature"]) == 64
+    assert len(bootstrap["profile_sha256"]) == 64
+    assert len(bootstrap["prompt_sha256"]) == 64
+
+    # U2: ``core.guardrails`` is populated (baseline + project overlay).
+    guardrails = loaded["core"]["guardrails"]
+    assert isinstance(guardrails, list) and guardrails
+    for baseline in pipeline_suite.BASELINE_GUARDRAILS:
+        assert baseline in guardrails
+
+    # U2: AGENTS.md + CLAUDE.md are part of the same write batch and
+    # each carries exactly one well-formed managed block.
+    assert "AGENTS.md" in result.files_created
+    assert "CLAUDE.md" in result.files_created
+    for name in ("AGENTS.md", "CLAUDE.md"):
+        assert (project / name).is_file()
+        doc_text = (project / name).read_text(encoding="utf-8")
+        assert doc_text.count("RALPH-BOOTSTRAP-START") == 1
+        assert doc_text.count("RALPH-BOOTSTRAP-END") == 1
+        parse = agent_docs.parse_managed_section(doc_text, DOCS_MARKER_ID)
+        assert parse.kind == "Ok"
+    agents_body, claude_body = _managed_bodies(project)
+    assert agents_body == claude_body
+    assert agents_body.strip()
+
+    # Write boundaries: no legacy artifacts, no ``.ralph/`` in the
+    # target project, no ``.bootstrap.tmp`` residue.
+    assert not (project / "ralph.pipeline.yml").exists()
+    assert not (project / "PROMPT.pipeline.md").exists()
+    assert not (project / "ralph.bootstrap.yml").exists()
+    assert not (project / ".ralph").exists()
+    assert not list(project.rglob("*.bootstrap.tmp"))
+
 
 def test_pipeline_second_run_is_noop(tmp_path: Path) -> None:
-    """B6: a second invocation with identical inputs is a noop."""
+    """B6: a second invocation with identical inputs is a noop.
+
+    The noop disposition covers the preset-bound suite AND the
+    AGENTS.md / CLAUDE.md managed sections: nothing is rewritten and
+    the on-disk doc bytes survive the second run verbatim.
+    """
     project = _seed_blank_project(tmp_path)
     first = bootstrap_pipeline.run_pipeline(
         cwd=project,
@@ -523,6 +597,8 @@ def test_pipeline_second_run_is_noop(tmp_path: Path) -> None:
         binary="ralph",
         runner=_builtin_resolver_runner,
     )
+    agents_before = (project / "AGENTS.md").read_text(encoding="utf-8")
+    claude_before = (project / "CLAUDE.md").read_text(encoding="utf-8")
     second = bootstrap_pipeline.run_pipeline(
         cwd=project,
         preset="builtin:debug",
@@ -532,9 +608,98 @@ def test_pipeline_second_run_is_noop(tmp_path: Path) -> None:
     )
     assert first.level in {"incomplete_static_only", "complete"}
     assert second.level == first.level
-    # Second run reports the owned files as noop rather than recreating them.
+    # Second run reports every owned artifact as noop rather than
+    # recreating it: suite files plus both managed docs.
     assert second.files_created == ()
-    assert second.files_noop == ("ralph.debug.yml", "PROMPT.debug.md")
+    assert second.files_updated == ()
+    assert second.files_noop == (
+        "ralph.debug.yml",
+        "PROMPT.debug.md",
+        "AGENTS.md",
+        "CLAUDE.md",
+    )
+    assert (project / "AGENTS.md").read_text(encoding="utf-8") == agents_before
+    assert (project / "CLAUDE.md").read_text(encoding="utf-8") == claude_before
+    assert not list(project.rglob("*.bootstrap.tmp"))
+
+
+def test_pipeline_conflicting_docs_blocker(tmp_path: Path) -> None:
+    """U2: disagreeing AGENTS.md / CLAUDE.md managed bodies block the
+    whole batch with ``sync_mirror_conflict`` before any write.
+
+    The ``conflicting-docs`` fixture seeds the two mirrors with
+    different managed bodies. The pipeline must classify the run as
+    ``blocked`` and leave the target project byte-for-byte untouched:
+    no suite files, no doc rewrite, no ``.bootstrap.tmp`` residue.
+    """
+    project = tmp_path / "conflicting-project"
+    _fixtures.materialise("conflicting-docs", project)
+    (project / "plan.md").write_text(
+        "# Plan\n\nplaceholder for conflicting-docs test\n", encoding="utf-8"
+    )
+    agents_before = (project / "AGENTS.md").read_text(encoding="utf-8")
+    claude_before = (project / "CLAUDE.md").read_text(encoding="utf-8")
+
+    result = bootstrap_pipeline.run_pipeline(
+        cwd=project,
+        preset="builtin:debug",
+        plan_path="plan.md",
+        binary="ralph",
+        runner=_builtin_resolver_runner,
+    )
+
+    assert result.level == "blocked"
+    assert result.blocked is True
+    assert result.code == "sync_mirror_conflict"
+    assert result.files_created == ()
+    assert result.files_updated == ()
+    assert result.files_noop == ()
+    # Nothing written: suite absent, docs preserved byte-for-byte.
+    assert not (project / "ralph.debug.yml").exists()
+    assert not (project / "PROMPT.debug.md").exists()
+    assert (project / "AGENTS.md").read_text(encoding="utf-8") == agents_before
+    assert (project / "CLAUDE.md").read_text(encoding="utf-8") == claude_before
+    assert not list(project.rglob("*.bootstrap.tmp"))
+
+
+def test_pipeline_dirty_tree_preserves_operator_files(tmp_path: Path) -> None:
+    """U2: operator-owned files stay byte-identical through a batch.
+
+    The ``dirty-tree`` fixture carries a Cargo.toml plus a hand-edited
+    ``src/lib.rs``. The pipeline writes only its owned targets
+    (``ralph.<stem>.yml``, ``PROMPT.<stem>.md``, the managed sections)
+    and leaves every other file untouched; no ``.bootstrap.tmp``
+    sibling survives the run.
+    """
+    project = tmp_path / "dirty-project"
+    _fixtures.materialise("dirty-tree", project)
+    (project / "plan.md").write_text(
+        "# Plan\n\nplaceholder for dirty-tree test\n", encoding="utf-8"
+    )
+    cargo_before = (project / "Cargo.toml").read_bytes()
+    lib_before = (project / "src" / "lib.rs").read_bytes()
+
+    result = bootstrap_pipeline.run_pipeline(
+        cwd=project,
+        preset="builtin:debug",
+        plan_path="plan.md",
+        binary="ralph",
+        runner=_builtin_resolver_runner,
+    )
+
+    assert result.blocked is False
+    assert (project / "ralph.debug.yml").is_file()
+    assert (project / "PROMPT.debug.md").is_file()
+    # Operator-owned files are byte-for-byte identical after the run.
+    assert (project / "Cargo.toml").read_bytes() == cargo_before
+    assert (project / "src" / "lib.rs").read_bytes() == lib_before
+    # The managed body carries the discovered rust verification commands.
+    agents_text = (project / "AGENTS.md").read_text(encoding="utf-8")
+    claude_text = (project / "CLAUDE.md").read_text(encoding="utf-8")
+    for text in (agents_text, claude_text):
+        assert "cargo clippy --workspace --all-targets -- -D warnings" in text
+        assert "cargo test" in text
+    assert not list(project.rglob("*.bootstrap.tmp"))
 
 
 def test_pipeline_conflict_rolls_back(tmp_path: Path) -> None:
