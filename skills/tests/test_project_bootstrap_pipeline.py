@@ -1326,6 +1326,278 @@ def test_pipeline_typed_smoke_failure_blocks(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
+# U4 — Missing-plan template / typed failure buckets / worktree reuse keys
+# ---------------------------------------------------------------------------
+
+
+def _seed_blank_project_without_plan(tmp_path: Path) -> Path:
+    """Materialise the ``blank`` fixture WITHOUT any plan file."""
+    project = tmp_path / "blank-project"
+    _fixtures.materialise("blank", project)
+    return project
+
+
+def test_pipeline_missing_plan_template_does_not_block(tmp_path: Path) -> None:
+    """U4: a missing first-run plan must NOT block provisioning.
+
+    An inline-prompt preset with ``plan_path=None`` still provisions
+    the owned artifacts; the handoff stays ``incomplete_static_only``
+    and the launch command carries the ``--plan PLAN_PATH`` template.
+    The pipeline NEVER invents a plan file in the target project.
+    """
+    project = _seed_blank_project_without_plan(tmp_path)
+    invocations = cli_probe.load_fixture("debug-green")
+    runner = _static_runner_factory(invocations)
+
+    result = bootstrap_pipeline.run_pipeline(
+        cwd=project,
+        preset="builtin:debug",
+        plan_path=None,
+        binary="ralph",
+        runner=runner,
+    )
+
+    # Provisioning succeeds; the static gate is green end-to-end.
+    assert result.blocked is False
+    assert result.level == "incomplete_static_only"
+    assert [d.outcome for d in result.stage_decisions] == ["ok"] * 4
+    assert result.smoke_outcome is None
+
+    # The command is the PLAN_PATH template: never a bare candidate and
+    # never an invented concrete plan path.
+    assert result.handoff_command.startswith(
+        "[TEMPLATE - replace PLAN_PATH before running]"
+    )
+    assert "[CANDIDATE" not in result.handoff_command
+    assert "--plan PLAN_PATH" in result.handoff_command
+    plan_idx = result.handoff_argv.index("--plan")
+    assert result.handoff_argv[plan_idx + 1] == "PLAN_PATH"
+
+    # Owned artifacts are written; NO plan file is invented.
+    assert (project / "ralph.debug.yml").is_file()
+    assert (project / "PROMPT.debug.md").is_file()
+    assert not (project / "plan.md").exists()
+    assert not (project / "PLAN_PATH").exists()
+    assert sorted(p.name for p in project.iterdir()) == [
+        "AGENTS.md",
+        "CLAUDE.md",
+        "PROMPT.debug.md",
+        "ralph.debug.yml",
+    ]
+
+
+_U4_TYPED_FAILURE_SCENARIOS = (
+    {
+        "outcome": "timeout_no_event",
+        "bucket": "suite",
+        "evidence": "idle timeout elapsed before any event was observed",
+    },
+    {
+        "outcome": "non_zero_exit",
+        "bucket": "backend",
+        "evidence": "ralph exited with code 1 before reaching the terminal",
+    },
+    {
+        "outcome": "error_event_detected",
+        "bucket": "project_command",
+        "evidence": "ERROR_EVENT: project verification command failed",
+    },
+)
+
+
+@pytest.mark.parametrize(
+    "scenario",
+    _U4_TYPED_FAILURE_SCENARIOS,
+    ids=[s["outcome"] for s in _U4_TYPED_FAILURE_SCENARIOS],
+)
+def test_pipeline_typed_smoke_failure_bucket_blocks_and_reports(
+    tmp_path: Path, scenario
+) -> None:
+    """U4: every typed smoke failure bucket blocks the handoff.
+
+    The handoff level is ``blocked``, the command is empty, the typed
+    ``smoke_failure_bucket`` flows into ``PipelineResult``, and the
+    report surfaces the outcome + bucket so the operator can reconcile.
+    """
+    project = _seed_blank_project(tmp_path)
+    invocations = cli_probe.load_fixture("green")
+    runner = _static_runner_factory(invocations)
+    backend = smoke_runner.SafeBackend(
+        name="replay", kind="content_fixed_replay"
+    )
+    fake_result = smoke_runner.SmokeResult(
+        outcome=scenario["outcome"],
+        evidence=(scenario["evidence"],),
+        argv=("ralph", "-c", "ralph.debug.yml", "-H", "builtin:debug"),
+        stderr_excerpt="smoke failed",
+        stdout_excerpt="",
+        elapsed_seconds=12.0,
+        failure_bucket=scenario["bucket"],
+    )
+
+    result = bootstrap_pipeline.run_pipeline(
+        cwd=project,
+        preset="builtin:debug",
+        plan_path="plan.md",
+        binary="ralph",
+        runner=runner,
+        smoke_backend=backend,
+        smoke_result_override=fake_result,
+    )
+
+    assert result.level == "blocked"
+    assert result.blocked is True
+    assert result.stage == "handoff"
+    assert result.code == ""
+    assert result.smoke_outcome == scenario["outcome"]
+    # The typed failure bucket flows into the PipelineResult.
+    assert result.smoke_failure_bucket == scenario["bucket"]
+    assert result.smoke_evidence == (scenario["evidence"],)
+    # Blocked handoff never carries an executable command.
+    assert result.handoff_command == ""
+    assert result.handoff_argv == ()
+    # The blocker summary + report surface outcome and bucket.
+    assert scenario["outcome"] in result.message
+    assert scenario["bucket"] in result.message
+    assert "## Blocker" in result.handoff_report
+    assert f"Status: `blocked -- {scenario['bucket']}`" in result.handoff_report
+    assert f"`{scenario['outcome']}`" in result.handoff_report
+    assert f"`{scenario['bucket']}`" in result.handoff_report
+    assert "must reconcile before launch" in result.handoff_report
+
+
+def test_pipeline_unauthorized_smoke_report_surfaces_residual_risk(
+    tmp_path: Path,
+) -> None:
+    """U4: a refused (unsafe-backend) smoke leaves a residual-risk note.
+
+    The level stays ``incomplete_static_only``; the report states that
+    static load passed but the loop has not been verified end-to-end,
+    and the candidate command is the only actionable output.
+    """
+    project = _seed_blank_project(tmp_path)
+    invocations = cli_probe.load_fixture("green")
+    runner = _static_runner_factory(invocations)
+    backend = smoke_runner.UnsafeBackend(name="mock")
+
+    result = bootstrap_pipeline.run_pipeline(
+        cwd=project,
+        preset="builtin:debug",
+        plan_path="plan.md",
+        binary="ralph",
+        runner=runner,
+        smoke_backend=backend,
+    )
+
+    assert result.level == "incomplete_static_only"
+    assert result.blocked is False
+    assert result.smoke_outcome == "not_authorized"
+    assert result.smoke_failure_bucket == "none"
+    assert result.smoke_argv == ()
+    assert "[CANDIDATE" in result.handoff_command
+    assert "Status: `static-only -- smoke-not-authorized`" in result.handoff_report
+    assert "Static load passed" in result.handoff_report
+    assert "loop has not been verified end-to-end" in result.handoff_report
+
+
+def test_pipeline_worktree_plan_arg_reuse_key_in_command(tmp_path: Path) -> None:
+    """U4: a worktree launch carries the explicit ``--plan`` reuse key."""
+    project = _seed_blank_project(tmp_path)
+    invocations = cli_probe.load_fixture("debug-green")
+    runner = _static_runner_factory(invocations)
+
+    result = bootstrap_pipeline.run_pipeline(
+        cwd=project,
+        preset="builtin:debug",
+        plan_path="plan.md",
+        binary="ralph",
+        runner=runner,
+        use_worktree=True,
+        reuse_worktree=True,
+        plan_arg="plan.md",
+    )
+
+    assert result.blocked is False
+    assert result.level == "incomplete_static_only"
+    argv = result.handoff_argv
+    assert "--worktree" in argv
+    assert "--reuse-worktree" in argv
+    plan_idx = argv.index("--plan")
+    assert argv[plan_idx + 1] == "plan.md"
+    assert "--worktree-name" not in argv
+    assert "[CANDIDATE" in result.handoff_command
+    assert "--worktree --reuse-worktree --plan plan.md" in result.handoff_command
+
+
+def test_pipeline_worktree_name_reuse_key_in_command(tmp_path: Path) -> None:
+    """U4: a worktree launch may carry ``--worktree-name`` as the reuse
+    key instead of ``--plan``; the plan path never doubles as a key."""
+    project = _seed_blank_project(tmp_path)
+    invocations = cli_probe.load_fixture("debug-green")
+    runner = _static_runner_factory(invocations)
+
+    result = bootstrap_pipeline.run_pipeline(
+        cwd=project,
+        preset="builtin:debug",
+        plan_path="plan.md",
+        binary="ralph",
+        runner=runner,
+        use_worktree=True,
+        reuse_worktree=True,
+        worktree_name="my-plan-worktree",
+    )
+
+    assert result.blocked is False
+    assert result.level == "incomplete_static_only"
+    argv = result.handoff_argv
+    assert "--worktree" in argv
+    assert "--reuse-worktree" in argv
+    name_idx = argv.index("--worktree-name")
+    assert argv[name_idx + 1] == "my-plan-worktree"
+    # The reuse key is the worktree name; no --plan flag is emitted.
+    assert "--plan" not in argv
+    assert "[CANDIDATE" in result.handoff_command
+
+
+@pytest.mark.parametrize(
+    ("reuse_worktree", "plan_arg", "worktree_name"),
+    [
+        (True, None, None),
+        (False, "plan.md", None),
+    ],
+    ids=["no-reuse-key", "reuse-flag-missing"],
+)
+def test_pipeline_worktree_missing_reuse_key_rejected(
+    tmp_path: Path, reuse_worktree, plan_arg, worktree_name
+) -> None:
+    """U4: the handoff module's reuse-key rule rejects worktree runs
+    without an explicit key.
+
+    ``handoff.HandoffInputs.__post_init__`` raises
+    ``ValueError("worktree reuse key required")`` both when the reuse
+    flag is missing and when neither ``plan_arg`` nor ``worktree_name``
+    is supplied; the pipeline propagates the error rather than
+    rendering a launch command.
+    """
+    project = _seed_blank_project(tmp_path)
+    invocations = cli_probe.load_fixture("debug-green")
+    runner = _static_runner_factory(invocations)
+
+    with pytest.raises(ValueError, match="worktree reuse key required"):
+        bootstrap_pipeline.run_pipeline(
+            cwd=project,
+            preset="builtin:debug",
+            plan_path="plan.md",
+            binary="ralph",
+            runner=runner,
+            use_worktree=True,
+            reuse_worktree=reuse_worktree,
+            plan_arg=plan_arg,
+            worktree_name=worktree_name,
+        )
+
+
+# ---------------------------------------------------------------------------
 # B12 / R7 — CLI / JSON parity
 # ---------------------------------------------------------------------------
 

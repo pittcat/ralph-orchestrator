@@ -766,6 +766,7 @@ def _build_handoff_args(
     worktree_name: str | None,
     plan_path: str | None,
     prompt_file: str | None,
+    requires_plan: bool,
 ) -> handoff_module.HandoffInputs:
     """Compose the :class:`handoff.HandoffInputs` for the final stage."""
     return handoff_module.HandoffInputs(
@@ -775,6 +776,7 @@ def _build_handoff_args(
         plan_path=plan_path,
         prompt_file=prompt_file,
         level="incomplete_static_only",  # placeholder; _enforce_typed_outcome reconciles
+        requires_plan=requires_plan,
         use_worktree=use_worktree,
         reuse_worktree=reuse_worktree,
         plan_arg=plan_arg,
@@ -1096,6 +1098,13 @@ def run_pipeline(
     smoke_evidence = smoke_result.evidence if smoke_result is not None else ()
 
     # --- handoff stage -------------------------------------------------
+    # A missing first-run plan must NOT block provisioning: when the
+    # caller supplied neither a plan nor a prompt file (and the launch
+    # is not worktree-bound, where the reuse key governs), the
+    # handoff command carries the ``--plan PLAN_PATH`` template so the
+    # operator fills in the real plan path. The pipeline never invents
+    # a plan file on disk.
+    requires_plan = plan_path is None and prompt_file is None and not use_worktree
     inputs = _build_handoff_args(
         binary=binary,
         config_path=suite.config_path,
@@ -1106,6 +1115,7 @@ def run_pipeline(
         worktree_name=worktree_name,
         plan_path=plan_path,
         prompt_file=prompt_file,
+        requires_plan=requires_plan,
     )
     level = _level_for_smoke(smoke_outcome)
     # A blocked handoff requires a non-empty blocker_summary at construction
@@ -1125,6 +1135,7 @@ def run_pipeline(
         plan_path=inputs.plan_path,
         prompt_file=inputs.prompt_file,
         level=level,  # type: ignore[arg-type]
+        requires_plan=inputs.requires_plan,
         use_worktree=inputs.use_worktree,
         reuse_worktree=inputs.reuse_worktree,
         plan_arg=inputs.plan_arg,
