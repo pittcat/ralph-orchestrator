@@ -519,6 +519,12 @@ pub(crate) fn persist_starting_event_to_events_file(
 ///   (equivalent to `--no-auto-merge`). If `None`, uses `config.features.auto_merge`.
 /// * `resume_loop_id` - Explicit loop ID to use when resuming (`--loop-id`).
 ///   If `None` and `resume` is true, reuses the existing `current-loop-id` marker.
+/// * `resume_manifest` - U2 (plan 2026-08-03-004): the VALIDATED parallel-forge
+///   resume manifest threaded from the reuse gate. When present (and `resume`
+///   is false), the loop bootstrap re-binds the manifest's pending hat to its
+///   original trigger through the existing `task.resume` recovery contract
+///   instead of publishing the configured starting event. `None` keeps the
+///   plain fresh-start semantics unchanged.
 #[allow(clippy::too_many_arguments, clippy::large_futures)]
 pub async fn run_loop_impl(
     config: RalphConfig,
@@ -532,6 +538,7 @@ pub async fn run_loop_impl(
     custom_args: Vec<String>,
     auto_merge_override: Option<bool>,
     resume_loop_id: Option<String>,
+    resume_manifest: Option<ralph_core::parallel_forge_resume::ResumeManifest>,
     warmup_only: bool,
     force_warmup: bool,
     prebuilt_diagnostics: Option<Arc<ralph_core::diagnostics::DiagnosticsCollector>>,
@@ -555,6 +562,7 @@ pub async fn run_loop_impl(
         custom_args,
         auto_merge_override,
         resume_loop_id,
+        resume_manifest,
         warmup_only,
         force_warmup,
         prebuilt_diagnostics,
@@ -827,6 +835,7 @@ async fn run_loop_impl_inner(
     custom_args: Vec<String>,
     auto_merge_override: Option<bool>,
     resume_loop_id: Option<String>,
+    resume_manifest: Option<ralph_core::parallel_forge_resume::ResumeManifest>,
     warmup_only: bool,
     force_warmup: bool,
     prebuilt_diagnostics: Option<Arc<ralph_core::diagnostics::DiagnosticsCollector>>,
@@ -1010,6 +1019,47 @@ async fn run_loop_impl_inner(
         .as_ref()
         .is_some_and(|sm| sm.enabled);
 
+    // U2 (plan 2026-08-03-004): when the reuse gate validated a resume
+    // manifest, re-bind its pending hat to the original trigger through
+    // the EXISTING `task.resume` recovery contract at bootstrap.
+    // Fail-closed: a digest mismatch after the gate, a pending hat that
+    // is not part of the current hats, or a missing trigger snapshot
+    // logs and falls back to the plain fresh bootstrap — no recovery is
+    // started. `--continue` (resume=true) never consumes the manifest,
+    // preserving the legacy resume semantics.
+    let mut manifest_recovery: Option<ralph_core::event_loop::rejection::ManifestResumeRecovery> =
+        if resume {
+            if resume_manifest.is_some() {
+                debug!("U2: ignoring resume manifest in --continue mode");
+            }
+            None
+        } else {
+            resume_manifest.as_ref().and_then(|manifest| {
+                let registered: std::collections::BTreeSet<String> =
+                    config.hats.keys().cloned().collect();
+                match ralph_core::event_loop::rejection::task_resume_from_manifest(
+                    manifest,
+                    &registered,
+                ) {
+                    Ok(recovery) => {
+                        info!(
+                            target_hat = %recovery.target_hat.as_str(),
+                            original_trigger_topic = %recovery.original_trigger_topic,
+                            "U2: manifest resume bootstrap will re-bind the pending hat"
+                        );
+                        Some(recovery)
+                    }
+                    Err(e) => {
+                        warn!(
+                            "U2: resume manifest recovery not started ({e}); \
+                             falling back to the fresh bootstrap"
+                        );
+                        None
+                    }
+                }
+            })
+        };
+
     // For fresh runs (not resume), generate a unique timestamped events file
     // This prevents stale events from previous runs polluting new runs (issue #82)
     // The marker file `.ralph/current-events` coordinates path between Ralph and agents
@@ -1049,17 +1099,28 @@ async fn run_loop_impl_inner(
         // to the JSONL stream that drives the live loop.  Resume mode is
         // handled separately by `EventLoop::initialize_resume` and uses
         // `task.resume`; do not inject another `work.start` here.
-        let starting_topic = config
-            .event_loop
-            .starting_event
-            .clone()
-            .unwrap_or_else(|| "task.start".to_string());
-        match persist_starting_event_to_events_file(&ctx, &starting_topic, &prompt_content) {
+        //
+        // U2 (plan 2026-08-03-004): when a manifest recovery applies, the
+        // bootstrap record is the targeted `task.resume` recovery payload
+        // instead of the configured starting event — the audit ledger must
+        // match what the loop actually bootstraps.
+        let (bootstrap_topic, bootstrap_payload) = match &manifest_recovery {
+            Some(recovery) => ("task.resume".to_string(), recovery.payload.clone()),
+            None => (
+                config
+                    .event_loop
+                    .starting_event
+                    .clone()
+                    .unwrap_or_else(|| "task.start".to_string()),
+                prompt_content.clone(),
+            ),
+        };
+        match persist_starting_event_to_events_file(&ctx, &bootstrap_topic, &bootstrap_payload) {
             Ok(()) => {
                 debug!(
-                    topic = %starting_topic,
+                    topic = %bootstrap_topic,
                     path = %relative_events_path,
-                    "U5: persisted starting_event to trusted events file"
+                    "U5: persisted bootstrap event to trusted events file"
                 );
             }
             Err(e) => {
@@ -1069,9 +1130,9 @@ async fn run_loop_impl_inner(
                 // diagnose / replay runs in production.
                 warn!(
                     error = %e,
-                    topic = %starting_topic,
+                    topic = %bootstrap_topic,
                     path = %relative_events_path,
-                    "U5: failed to persist starting_event to trusted events file"
+                    "U5: failed to persist bootstrap event to trusted events file"
                 );
             }
         }
@@ -1223,6 +1284,12 @@ async fn run_loop_impl_inner(
         // This tells the planner to read existing scratchpad rather than creating a new one
         if resume {
             event_loop.initialize_resume(&prompt_content);
+        } else if let Some(recovery) = manifest_recovery.take() {
+            // U2 (plan 2026-08-03-004): manifest-driven resume bootstrap.
+            // Publishes the targeted `task.resume` (existing recovery
+            // contract) and pins the pending hat instead of the
+            // configured starting event.
+            event_loop.initialize_manifest_resume(&prompt_content, recovery);
         } else {
             event_loop.initialize(&prompt_content);
         }

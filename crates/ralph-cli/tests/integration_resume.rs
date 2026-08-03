@@ -802,3 +802,356 @@ cli:
         assert!(validate_manifest(&manifest, &drifted).is_err());
     }
 }
+
+// ─────────────────────────────────────────────────────────────────────────
+// 2026-08-03-004 U2: manifest-driven resume bootstrap (target hat
+// resume payload + parallel-forge hat handoff). The reuse gate (U1)
+// already validated the manifest; U2 consumes it at loop bootstrap and
+// re-binds the pending hat to its original trigger through the EXISTING
+// `task.resume` recovery contract.
+// ─────────────────────────────────────────────────────────────────────────
+
+mod reuse_resume_bootstrap {
+    use ralph_core::parallel_forge_resume::sha256_hex;
+    use std::fs;
+    use std::path::{Path, PathBuf};
+    use std::process::Command;
+    use tempfile::TempDir;
+
+    fn setup_git_repo(path: &Path) {
+        let git_init = Command::new("git")
+            .args(["init"])
+            .current_dir(path)
+            .output()
+            .expect("git init");
+        assert!(git_init.status.success(), "git init failed");
+        Command::new("git")
+            .args(["config", "user.email", "test@example.com"])
+            .current_dir(path)
+            .status()
+            .expect("git config email");
+        Command::new("git")
+            .args(["config", "user.name", "Test User"])
+            .current_dir(path)
+            .status()
+            .expect("git config name");
+        fs::write(path.join("README.md"), "# Test\n").expect("write README");
+        Command::new("git")
+            .args(["add", "."])
+            .current_dir(path)
+            .status()
+            .expect("git add");
+        Command::new("git")
+            .args(["commit", "-m", "Initial commit", "--quiet"])
+            .current_dir(path)
+            .status()
+            .expect("git commit");
+    }
+
+    /// Config with the two hats the S1 boundary hands off between.
+    /// Backend `true` exits instantly and emits nothing, so the loop
+    /// terminates after `max_iterations` without side emissions. The
+    /// topology closes on `loop.complete` so the preset-lint gate
+    /// passes; memories/tasks stay disabled (no coordinator needed).
+    fn write_forge_hats_config(path: &Path) {
+        let config = r#"event_loop:
+  completion_promise: "loop.complete"
+  starting_event: "forge.start"
+  max_iterations: 1
+  max_runtime_seconds: 30
+
+cli:
+  backend: "custom"
+  command: "true"
+
+memories:
+  enabled: false
+
+tasks:
+  enabled: false
+
+hats:
+  planner:
+    name: "Planner"
+    description: "Writes the forge plan."
+    triggers: ["forge.start"]
+    publishes: ["forge.plan.ready"]
+  guardian:
+    name: "Guardian"
+    description: "Approves the forge plan."
+    triggers: ["forge.plan.ready"]
+    publishes: ["loop.complete"]
+"#;
+        fs::write(path.join("ralph.yml"), config).expect("write ralph.yml");
+    }
+
+    /// Config whose hat set does NOT contain the manifest's pending
+    /// hat (`guardian`) — the bootstrap must fall back to a fresh
+    /// start instead of starting a recovery.
+    fn write_unrelated_hat_config(path: &Path) {
+        let config = r#"event_loop:
+  completion_promise: "loop.complete"
+  starting_event: "forge.start"
+  max_iterations: 1
+  max_runtime_seconds: 30
+
+cli:
+  backend: "custom"
+  command: "true"
+
+memories:
+  enabled: false
+
+tasks:
+  enabled: false
+
+hats:
+  auditor:
+    name: "Auditor"
+    description: "Audits the forge result."
+    triggers: ["forge.start"]
+    publishes: ["loop.complete"]
+"#;
+        fs::write(path.join("ralph.yml"), config).expect("write ralph.yml");
+    }
+
+    fn write_completed_worktree_entry(main_repo: &Path, loop_id: &str, worktree_path: &Path) {
+        let ralph_dir = main_repo.join(".ralph");
+        fs::create_dir_all(&ralph_dir).unwrap();
+        let entry = serde_json::json!({
+            "id": loop_id,
+            "pid": 4_194_305_u32,
+            "started": chrono::Utc::now(),
+            "prompt": "previous prompt",
+            "worktree_path": worktree_path.to_string_lossy(),
+            "workspace": worktree_path.to_string_lossy(),
+        });
+        let body = serde_json::json!({ "loops": [entry] });
+        fs::write(
+            &ralph_dir.join("loops.json"),
+            serde_json::to_string_pretty(&body).unwrap(),
+        )
+        .unwrap();
+    }
+
+    /// Pre-create a git-known worktree whose prior run stopped right
+    /// after the accepted `forge.plan.ready` boundary (pending hat:
+    /// `guardian`).
+    fn precreate_worktree_with_accepted_boundary(main_repo: &Path, loop_id: &str) -> PathBuf {
+        let worktree_path = main_repo.join(".worktrees").join(loop_id);
+        let status = Command::new("git")
+            .args([
+                "worktree",
+                "add",
+                "--detach",
+                worktree_path.to_str().unwrap(),
+                "HEAD",
+            ])
+            .current_dir(main_repo)
+            .status()
+            .expect("git worktree add");
+        assert!(status.success(), "git worktree add must succeed");
+
+        let ralph_dir = worktree_path.join(".ralph");
+        let agent_dir = ralph_dir.join("agent");
+        fs::create_dir_all(&agent_dir).unwrap();
+
+        let payload = "{\"plan_key\":\"pf-u2-bootstrap\",\"execution_wave\":2}";
+        let event_line = format!(
+            "{{\"ts\":\"2026-08-03T00:00:00Z\",\"iteration\":1,\"hat\":\"planner\",\"topic\":\"forge.plan.ready\",\"triggered\":\"guardian\",\"payload\":{}}}\n",
+            serde_json::to_string(payload).unwrap()
+        );
+        fs::write(ralph_dir.join("events.jsonl"), &event_line).unwrap();
+
+        let payload_digest = sha256_hex(payload.as_bytes());
+        let transition_id =
+            ralph_core::event_loop::accepted_transition::AcceptedTransition::compute_transition_id(
+                loop_id,
+                "planner:1",
+                "rev-1",
+                "forge.plan.ready:planner",
+                &payload_digest,
+            );
+        let outbox_line = serde_json::json!({
+            "activation_id": "planner:1",
+            "committed_at": "2026-08-03T00:00:01Z",
+            "contract_revision": "rev-1",
+            "delivered": false,
+            "loop_id": loop_id,
+            "payload_digest": payload_digest,
+            "topic": "forge.plan.ready",
+            "transition_id": transition_id,
+        });
+        fs::write(
+            agent_dir.join("accepted-transitions.jsonl"),
+            format!("{outbox_line}\n"),
+        )
+        .unwrap();
+        fs::write(ralph_dir.join("current-loop-id"), format!("{loop_id}\n")).unwrap();
+
+        worktree_path
+    }
+
+    /// Read the reused worktree's fresh events file (via the
+    /// `current-events` marker) after the run.
+    fn read_fresh_events(worktree_path: &Path) -> String {
+        let marker = worktree_path.join(".ralph/current-events");
+        assert!(marker.exists(), "current-events marker must exist");
+        let rel = fs::read_to_string(&marker).unwrap();
+        let rel = rel.trim();
+        let path = worktree_path.join(rel);
+        assert!(path.exists(), "events file {rel} must exist");
+        fs::read_to_string(&path).unwrap()
+    }
+
+    /// S1 end-to-end: reuse with a validated manifest whose pending
+    /// hat is `guardian` bootstraps the loop with a TARGETED
+    /// `task.resume` that re-binds guardian to its original
+    /// `forge.plan.ready` trigger — instead of the plain starting
+    /// event.
+    #[test]
+    fn s1_reuse_bootstrap_emits_targeted_task_resume() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let main_repo = temp_dir.path();
+        setup_git_repo(main_repo);
+        write_forge_hats_config(main_repo);
+
+        let loop_id = "pf-u2-bootstrap";
+        let plan_path = main_repo.join(format!("{loop_id}.md"));
+        fs::write(&plan_path, "# plan v1\n").unwrap();
+
+        let worktree_path = precreate_worktree_with_accepted_boundary(main_repo, loop_id);
+        write_completed_worktree_entry(main_repo, loop_id, &worktree_path);
+
+        let output = super::common::ralph_bin()
+            .args([
+                "run",
+                "--worktree",
+                "--reuse-worktree",
+                "--no-tui",
+                "--skip-preflight",
+                "--plan",
+                plan_path.to_str().unwrap(),
+            ])
+            .current_dir(main_repo)
+            .output()
+            .expect("ralph run");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        eprintln!("U2 S1 stderr: {stderr}");
+        assert!(
+            !stderr.contains("resume manifest validation failed"),
+            "the manifest gate must pass: {stderr}"
+        );
+
+        let events = read_fresh_events(&worktree_path);
+        eprintln!("U2 S1 events file: {events}");
+
+        // The bootstrap record is the targeted task.resume, not the
+        // configured starting event.
+        let mut saw_resume_bootstrap = false;
+        for line in events.lines() {
+            let Ok(record) = serde_json::from_str::<serde_json::Value>(line) else {
+                continue;
+            };
+            let source = record.get("source").and_then(|v| v.as_str()).unwrap_or("");
+            let topic = record.get("topic").and_then(|v| v.as_str()).unwrap_or("");
+            if source == "loop-bootstrap" {
+                assert_ne!(
+                    topic, "task.start",
+                    "fresh starting event must be replaced by the recovery bootstrap"
+                );
+                assert_ne!(topic, "forge.start");
+            }
+            if topic != "task.resume" {
+                continue;
+            }
+            let payload_str = record
+                .get("payload")
+                .and_then(|v| v.as_str())
+                .expect("bootstrap task.resume must carry the recovery payload");
+            let payload: serde_json::Value = serde_json::from_str(payload_str)
+                .expect("recovery payload must be structured JSON");
+            assert_eq!(payload["target_hat"], "guardian");
+            assert_eq!(payload["original_hat"], "guardian");
+            assert_eq!(payload["original_trigger_topic"], "forge.plan.ready");
+            assert_eq!(
+                payload["original_trigger_payload"]["plan_key"],
+                "pf-u2-bootstrap"
+            );
+            assert_eq!(payload["reason"], "manifest_resume");
+            assert_eq!(payload["kind"], "manifest_resume");
+            saw_resume_bootstrap = true;
+        }
+        assert!(
+            saw_resume_bootstrap,
+            "bootstrap must publish the targeted task.resume: {events}"
+        );
+    }
+
+    /// Fail-closed bootstrap: the manifest's pending hat is NOT part
+    /// of the current hats → no recovery is started; the loop falls
+    /// back to the plain fresh bootstrap (starting event) and still
+    /// runs.
+    #[test]
+    fn unregistered_pending_hat_falls_back_to_fresh_bootstrap() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let main_repo = temp_dir.path();
+        setup_git_repo(main_repo);
+        write_unrelated_hat_config(main_repo);
+
+        let loop_id = "pf-u2-fallback";
+        let plan_path = main_repo.join(format!("{loop_id}.md"));
+        fs::write(&plan_path, "# plan v1\n").unwrap();
+
+        let worktree_path = precreate_worktree_with_accepted_boundary(main_repo, loop_id);
+        write_completed_worktree_entry(main_repo, loop_id, &worktree_path);
+
+        let output = super::common::ralph_bin()
+            .args([
+                "run",
+                "--worktree",
+                "--reuse-worktree",
+                "--no-tui",
+                "--skip-preflight",
+                "--plan",
+                plan_path.to_str().unwrap(),
+            ])
+            .current_dir(main_repo)
+            .output()
+            .expect("ralph run");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        eprintln!("U2 fallback stderr: {stderr}");
+        assert!(
+            !stderr.contains("resume manifest validation failed"),
+            "the manifest gate must still pass: {stderr}"
+        );
+
+        let events = read_fresh_events(&worktree_path);
+        eprintln!("U2 fallback events file: {events}");
+
+        // No recovery bootstrap: the starting event stays the
+        // bootstrap record and no manifest-resume task.resume exists.
+        let mut saw_starting_bootstrap = false;
+        for line in events.lines() {
+            let Ok(record) = serde_json::from_str::<serde_json::Value>(line) else {
+                continue;
+            };
+            let source = record.get("source").and_then(|v| v.as_str()).unwrap_or("");
+            let topic = record.get("topic").and_then(|v| v.as_str()).unwrap_or("");
+            if source == "loop-bootstrap" && topic == "forge.start" {
+                saw_starting_bootstrap = true;
+            }
+            if topic == "task.resume" {
+                let payload = record.get("payload").and_then(|v| v.as_str()).unwrap_or("");
+                assert!(
+                    !payload.contains("manifest_resume"),
+                    "no recovery may be started for an unregistered pending hat: {events}"
+                );
+            }
+        }
+        assert!(
+            saw_starting_bootstrap,
+            "fresh starting event must remain the bootstrap: {events}"
+        );
+    }
+}

@@ -1041,6 +1041,12 @@ pub async fn run_command(
 
     let mut pending_worktree_registration: Option<LoopEntry> = None;
 
+    // U2 (plan 2026-08-03-004): the validated resume manifest threaded
+    // into the loop bootstrap. Set by the reuse paths only; consumed by
+    // `run_loop_impl` to re-bind the pending hat through the existing
+    // `task.resume` recovery contract.
+    let mut resumed_manifest: Option<ralph_core::parallel_forge_resume::ResumeManifest> = None;
+
     // Determine TUI mode early (before lock acquisition) to avoid self-lock contention
     // in subprocess TUI mode. The child RPC process will acquire the lock itself.
     let is_tty = std::io::stdin().is_terminal() && std::io::stdout().is_terminal();
@@ -1133,6 +1139,12 @@ pub async fn run_command(
                         // run's evidence lives there). No manifest at all
                         // means the worktree carries no prior runtime
                         // records, so the start proceeds.
+                        //
+                        // U2: the gate result now RETAINS the validated
+                        // manifest so the loop bootstrap can re-bind the
+                        // pending hat via the existing `task.resume`
+                        // recovery contract. The validation itself is
+                        // unchanged.
                         use ralph_core::parallel_forge_resume::{
                             MANIFEST_FILE_NAME, latest_archived_manifest, read_manifest,
                             validate_manifest,
@@ -1142,20 +1154,22 @@ pub async fn run_command(
                                 let manifest_path = dir.join(MANIFEST_FILE_NAME);
                                 read_manifest(&manifest_path).and_then(|manifest| {
                                     validate_manifest(&manifest, &resume_inputs)
+                                        .map(|()| Some(manifest))
                                 })
                             }
                             None => match latest_archived_manifest(&reusable.path) {
                                 Ok(Some((_, manifest))) => {
                                     validate_manifest(&manifest, &resume_inputs)
+                                        .map(|()| Some(manifest))
                                 }
-                                Ok(None) => Ok(()),
+                                Ok(None) => Ok(None),
                                 // Fold the read error into the gate result so
                                 // the refusal message below wraps it like every
                                 // other gate failure.
                                 Err(e) => Err(e),
                             },
                         };
-                        resume_gate.map_err(|e| {
+                        resumed_manifest = resume_gate.map_err(|e| {
                             anyhow::anyhow!(
                                 "resume manifest validation failed for reused worktree \
                                  '{name}': {e}. The loop was NOT started; the prior run's \
@@ -1289,7 +1303,81 @@ pub async fn run_command(
             worktree_path.display(),
             loop_id
         );
-        let context = LoopContext::worktree(loop_id, worktree_path.clone(), workspace_root.clone());
+        let context = LoopContext::worktree(
+            loop_id.clone(),
+            worktree_path.clone(),
+            workspace_root.clone(),
+        );
+
+        // U2 (plan 2026-08-03-004): in subprocess-TUI mode the reuse
+        // gate ran in the PARENT; this child process runs the loop.
+        // Re-read the newest archived resume manifest and validate it
+        // against the same identity inputs before threading it into
+        // the bootstrap. Fail-closed, mirroring the parent gate: any
+        // failure refuses the start. A worktree without archived
+        // manifests (fresh, never reused) yields `None` and the loop
+        // bootstraps normally.
+        use ralph_core::parallel_forge_resume::{
+            CaptureInputs, latest_archived_manifest, sha256_hex, validate_manifest,
+        };
+        let child_plan_path = args
+            .plan
+            .as_deref()
+            .map(|p| p.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let child_plan_digest = args
+            .plan
+            .as_deref()
+            .and_then(|p| std::fs::read(p).ok())
+            .map(|bytes| sha256_hex(&bytes))
+            .unwrap_or_default();
+        let child_preset_name = derive_preset_name(hats_source)
+            .ok()
+            .flatten()
+            .unwrap_or_default();
+        let mut child_config_bytes: Vec<u8> = Vec::new();
+        for source in config_sources {
+            if let ConfigSource::File(path) = source
+                && let Ok(bytes) = std::fs::read(path)
+            {
+                child_config_bytes.extend_from_slice(&bytes);
+            }
+        }
+        let child_config_digest = if child_config_bytes.is_empty() {
+            String::new()
+        } else {
+            sha256_hex(&child_config_bytes)
+        };
+        let child_inputs = CaptureInputs {
+            plan_path: child_plan_path,
+            plan_digest: child_plan_digest,
+            preset_name: child_preset_name,
+            config_digest: child_config_digest,
+            worktree_name: loop_id.clone(),
+        };
+        match latest_archived_manifest(worktree_path) {
+            Ok(Some((_, manifest))) => {
+                validate_manifest(&manifest, &child_inputs).map_err(|e| {
+                    anyhow::anyhow!(
+                        "resume manifest validation failed for reused worktree \
+                         '{loop_id}': {e}. The loop was NOT started; the prior run's \
+                         records are preserved under .ralph/reuse-history/ in the \
+                         worktree."
+                    )
+                })?;
+                resumed_manifest = Some(manifest);
+            }
+            Ok(None) => {}
+            Err(e) => {
+                return Err(anyhow::anyhow!(
+                    "resume manifest validation failed for reused worktree \
+                     '{loop_id}': {e}. The loop was NOT started; the prior run's \
+                     records are preserved under .ralph/reuse-history/ in the \
+                     worktree."
+                ));
+            }
+        }
+
         (context, None)
     } else if use_subprocess_tui {
         // In subprocess TUI mode, don't acquire lock here - the child RPC process will do it
@@ -1517,6 +1605,7 @@ pub async fn run_command(
             custom_args,
             auto_merge_override,
             args.loop_id,
+            resumed_manifest,
             args.warmup_only,
             args.force_warmup,
             prebuilt_diagnostics,

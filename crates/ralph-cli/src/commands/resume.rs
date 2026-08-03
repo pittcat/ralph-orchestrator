@@ -181,6 +181,7 @@ pub async fn resume_command(
         Vec::new(), // Resume command doesn't support custom args
         None,       // Use config.features.auto_merge (deprecated command)
         None,       // Deprecated resume command doesn't support --loop-id
+        None,       // resume manifest (U2 threading; deprecated resume carries none)
         false,      // warmup_only (resume uses normal flow)
         false,      // force_warmup (resume uses normal flow)
         prebuilt_diagnostics,
