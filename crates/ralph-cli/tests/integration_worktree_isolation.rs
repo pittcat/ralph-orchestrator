@@ -972,6 +972,8 @@ fn test_reuse_worktree_captures_resume_manifest_for_accepted_boundary() {
             "--reuse-worktree",
             "--no-tui",
             "--skip-preflight",
+            "-H",
+            "builtin:parallel-forge",
             "--plan",
             plan_path.to_str().unwrap(),
         ])
@@ -1023,7 +1025,7 @@ fn test_reuse_worktree_captures_resume_manifest_for_accepted_boundary() {
     assert_eq!(manifest.identity.plan_path, plan_path.to_str().unwrap());
     assert_eq!(manifest.identity.worktree_name, loop_id);
     assert_eq!(manifest.identity.loop_id, loop_id);
-    assert_eq!(manifest.identity.preset_name, ""); // no -H passed
+    assert_eq!(manifest.identity.preset_name, "parallel-forge");
 
     // Artifact reference recorded with its digest.
     assert_eq!(manifest.artifacts.len(), 1);
@@ -1091,6 +1093,8 @@ fn test_reuse_worktree_artifact_only_prior_run_fails_closed() {
             "--reuse-worktree",
             "--no-tui",
             "--skip-preflight",
+            "-H",
+            "builtin:parallel-forge",
             "--plan",
             plan_path.to_str().unwrap(),
         ])

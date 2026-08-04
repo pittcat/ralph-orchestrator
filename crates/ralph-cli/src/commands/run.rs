@@ -308,6 +308,10 @@ fn derive_preset_name(hats_source: Option<&HatsSource>) -> anyhow::Result<Option
     }
 }
 
+fn uses_parallel_forge_resume_manifest(hats_source: Option<&HatsSource>) -> bool {
+    derive_preset_name(hats_source).ok().flatten().as_deref() == Some("parallel-forge")
+}
+
 /// Apply active profile fragments to `config` for the current `ralph run`
 /// invocation. Called from `run_command` immediately after
 /// [`preflight::load_config_for_preflight`] returns and before
@@ -1100,30 +1104,36 @@ pub async fn run_command(
                             .ok()
                             .flatten()
                             .unwrap_or_default();
-                        let mut resume_config_bytes: Vec<u8> = Vec::new();
-                        for source in config_sources {
-                            if let ConfigSource::File(path) = source
-                                && let Ok(bytes) = std::fs::read(path)
-                            {
-                                resume_config_bytes.extend_from_slice(&bytes);
+                        let resume_inputs = if uses_parallel_forge_resume_manifest(hats_source) {
+                            let mut resume_config_bytes: Vec<u8> = Vec::new();
+                            for source in config_sources {
+                                if let ConfigSource::File(path) = source
+                                    && let Ok(bytes) = std::fs::read(path)
+                                {
+                                    resume_config_bytes.extend_from_slice(&bytes);
+                                }
                             }
-                        }
-                        let resume_config_digest = if resume_config_bytes.is_empty() {
-                            String::new()
+                            let resume_config_digest = if resume_config_bytes.is_empty() {
+                                String::new()
+                            } else {
+                                ralph_core::parallel_forge_resume::sha256_hex(&resume_config_bytes)
+                            };
+                            Some(ralph_core::parallel_forge_resume::CaptureInputs {
+                                plan_path: resume_plan_path,
+                                plan_digest: resume_plan_digest,
+                                preset_name: resume_preset_name,
+                                config_digest: resume_config_digest,
+                                worktree_name: name.to_string(),
+                            })
                         } else {
-                            ralph_core::parallel_forge_resume::sha256_hex(&resume_config_bytes)
-                        };
-                        let resume_inputs = ralph_core::parallel_forge_resume::CaptureInputs {
-                            plan_path: resume_plan_path,
-                            plan_digest: resume_plan_digest,
-                            preset_name: resume_preset_name,
-                            config_digest: resume_config_digest,
-                            worktree_name: name.to_string(),
+                            None
                         };
 
-                        let archive_dir =
-                            clean_worktree_runtime_artifacts(&reusable.path, Some(&resume_inputs))
-                                .context("Failed to clean runtime artifacts in reused worktree")?;
+                        let archive_dir = clean_worktree_runtime_artifacts(
+                            &reusable.path,
+                            resume_inputs.as_ref(),
+                        )
+                        .context("Failed to clean runtime artifacts in reused worktree")?;
                         if let Some(path) = &archive_dir {
                             info!(
                                 "Archived prior runtime artifacts to {} before reuse",
@@ -1131,9 +1141,11 @@ pub async fn run_command(
                             );
                         }
 
-                        // U1: resume-manifest gate — fail-closed BEFORE the
-                        // LoopContext is created. When the cleanup produced
-                        // an archive, its manifest must exist and validate.
+                        // U1: parallel-forge resume-manifest gate —
+                        // fail-closed BEFORE the LoopContext is created.
+                        // When the cleanup produced an archive, its manifest
+                        // must exist and validate. Other presets skip this
+                        // gate and retain legacy reuse behavior.
                         // When nothing was archived, fall back to the newest
                         // manifest archived by an earlier reuse (the prior
                         // run's evidence lives there). No manifest at all
@@ -1173,34 +1185,36 @@ pub async fn run_command(
                             MANIFEST_FILE_NAME, latest_archived_manifest, read_manifest,
                             validate_manifest,
                         };
-                        let resume_gate = match &archive_dir {
-                            Some(dir) => {
-                                let manifest_path = dir.join(MANIFEST_FILE_NAME);
-                                read_manifest(&manifest_path).and_then(|manifest| {
-                                    validate_manifest(&manifest, &resume_inputs)
-                                        .map(|()| Some(manifest))
-                                })
-                            }
-                            None => match latest_archived_manifest(&reusable.path) {
-                                Ok(Some((_, manifest))) => {
-                                    validate_manifest(&manifest, &resume_inputs)
-                                        .map(|()| Some(manifest))
+                        if let Some(resume_inputs) = resume_inputs.as_ref() {
+                            let resume_gate = match &archive_dir {
+                                Some(dir) => {
+                                    let manifest_path = dir.join(MANIFEST_FILE_NAME);
+                                    read_manifest(&manifest_path).and_then(|manifest| {
+                                        validate_manifest(&manifest, resume_inputs)
+                                            .map(|()| Some(manifest))
+                                    })
                                 }
-                                Ok(None) => Ok(None),
-                                // Fold the read error into the gate result so
-                                // the refusal message below wraps it like every
-                                // other gate failure.
-                                Err(e) => Err(e),
-                            },
-                        };
-                        resumed_manifest = resume_gate.map_err(|e| {
-                            anyhow::anyhow!(
-                                "resume manifest validation failed for reused worktree \
-                                 '{name}': {e}. The loop was NOT started; the prior run's \
-                                 records are preserved under .ralph/reuse-history/ in the \
-                                 worktree."
-                            )
-                        })?;
+                                None => match latest_archived_manifest(&reusable.path) {
+                                    Ok(Some((_, manifest))) => {
+                                        validate_manifest(&manifest, resume_inputs)
+                                            .map(|()| Some(manifest))
+                                    }
+                                    Ok(None) => Ok(None),
+                                    // Fold the read error into the gate result so
+                                    // the refusal message below wraps it like every
+                                    // other gate failure.
+                                    Err(e) => Err(e),
+                                },
+                            };
+                            resumed_manifest = resume_gate.map_err(|e| {
+                                anyhow::anyhow!(
+                                    "resume manifest validation failed for reused worktree \
+                                     '{name}': {e}. The loop was NOT started; the prior run's \
+                                     records are preserved under .ralph/reuse-history/ in the \
+                                     worktree."
+                                )
+                            })?;
+                        }
 
                         // Re-create the worktree's symlinks (in case the
                         // previous loop removed them) and refresh the
@@ -1383,30 +1397,32 @@ pub async fn run_command(
         let child_inputs = CaptureInputs {
             plan_path: child_plan_path,
             plan_digest: child_plan_digest,
-            preset_name: child_preset_name,
+            preset_name: child_preset_name.clone(),
             config_digest: child_config_digest,
             worktree_name: loop_id.clone(),
         };
-        match latest_archived_manifest(worktree_path) {
-            Ok(Some((_, manifest))) => {
-                validate_manifest(&manifest, &child_inputs).map_err(|e| {
-                    anyhow::anyhow!(
+        if child_preset_name == "parallel-forge" {
+            match latest_archived_manifest(worktree_path) {
+                Ok(Some((_, manifest))) => {
+                    validate_manifest(&manifest, &child_inputs).map_err(|e| {
+                        anyhow::anyhow!(
+                            "resume manifest validation failed for reused worktree \
+                             '{loop_id}': {e}. The loop was NOT started; the prior run's \
+                             records are preserved under .ralph/reuse-history/ in the \
+                             worktree."
+                        )
+                    })?;
+                    resumed_manifest = Some(manifest);
+                }
+                Ok(None) => {}
+                Err(e) => {
+                    return Err(anyhow::anyhow!(
                         "resume manifest validation failed for reused worktree \
                          '{loop_id}': {e}. The loop was NOT started; the prior run's \
                          records are preserved under .ralph/reuse-history/ in the \
                          worktree."
-                    )
-                })?;
-                resumed_manifest = Some(manifest);
-            }
-            Ok(None) => {}
-            Err(e) => {
-                return Err(anyhow::anyhow!(
-                    "resume manifest validation failed for reused worktree \
-                     '{loop_id}': {e}. The loop was NOT started; the prior run's \
-                     records are preserved under .ralph/reuse-history/ in the \
-                     worktree."
-                ));
+                    ));
+                }
             }
         }
 
@@ -2952,6 +2968,17 @@ mod tests {
     // ─────────────────────────────────────────────────────────────────────
     // U3 (2026-06-25-002): --profile / --no-default-profiles / TUI forwarding
     // ─────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn resume_manifest_is_scoped_to_parallel_forge() {
+        assert!(uses_parallel_forge_resume_manifest(Some(
+            &HatsSource::Builtin("parallel-forge".to_string())
+        )));
+        assert!(!uses_parallel_forge_resume_manifest(Some(
+            &HatsSource::Builtin("ce-executor-pipeline".to_string())
+        )));
+        assert!(!uses_parallel_forge_resume_manifest(None));
+    }
 
     /// No flags => both default to empty/false. This guards regression:
     /// the helper must not pre-fill defaults that would shift semantics

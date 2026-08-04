@@ -561,6 +561,8 @@ cli:
                 "--reuse-worktree",
                 "--no-tui",
                 "--skip-preflight",
+                "-H",
+                "builtin:parallel-forge",
                 "--plan",
                 plan_path.to_str().unwrap(),
             ])
@@ -585,6 +587,8 @@ cli:
                 "--reuse-worktree",
                 "--no-tui",
                 "--skip-preflight",
+                "-H",
+                "builtin:parallel-forge",
                 "--plan",
                 plan_path.to_str().unwrap(),
             ])
@@ -675,6 +679,8 @@ cli:
                 "--reuse-worktree",
                 "--no-tui",
                 "--skip-preflight",
+                "-H",
+                "builtin:parallel-forge",
                 "--worktree-name",
                 loop_id,
                 "--prompt",
@@ -737,6 +743,8 @@ cli:
                 "--reuse-worktree",
                 "--no-tui",
                 "--skip-preflight",
+                "-H",
+                "builtin:parallel-forge",
                 "--worktree-name",
                 loop_id,
                 "--prompt",
@@ -849,6 +857,7 @@ hats:
     publishes: ["loop.complete"]
 "#;
         fs::write(path.join("ralph.yml"), config).expect("write ralph.yml");
+        fs::write(path.join("parallel-forge.yml"), config).expect("write hats overlay");
     }
 
     /// Read the reused worktree's fresh events file (via the
@@ -900,6 +909,7 @@ hats:
     }
 
     fn spawn_reuse(main_repo: &Path, plan_path: &Path) -> std::process::Output {
+        let hats_path = main_repo.join("parallel-forge.yml");
         super::common::ralph_bin()
             .args([
                 "run",
@@ -907,6 +917,8 @@ hats:
                 "--reuse-worktree",
                 "--no-tui",
                 "--skip-preflight",
+                "-H",
+                hats_path.to_str().unwrap(),
                 "--plan",
                 plan_path.to_str().unwrap(),
             ])
@@ -1487,6 +1499,7 @@ hats:
     publishes: ["loop.complete"]
 "#;
         fs::write(path.join("ralph.yml"), config).expect("write ralph.yml");
+        fs::write(path.join("parallel-forge.yml"), config).expect("write hats overlay");
     }
 
     /// Config whose hat set does NOT contain the manifest's pending
@@ -1634,6 +1647,8 @@ hats:
                 "--reuse-worktree",
                 "--no-tui",
                 "--skip-preflight",
+                "-H",
+                main_repo.join("parallel-forge.yml").to_str().unwrap(),
                 "--plan",
                 plan_path.to_str().unwrap(),
             ])
