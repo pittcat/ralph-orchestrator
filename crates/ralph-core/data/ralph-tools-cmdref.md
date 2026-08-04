@@ -91,7 +91,7 @@ ralph run [OPTIONS] [-- <CUSTOM_ARGS>...]
 | `--no-tui` | flag | 否 | — | 禁用 TUI 观测模式 |
 | `-a, --autonomous` | flag | 否 | — | 强制自主模式 |
 | `--worktree` | flag | 否 | — | 创建隔离的 git worktree（强制关闭 auto-merge） |
-| `--reuse-worktree` | flag | 否 | — | 按 `--plan` basename 或 `--worktree-name` 精确绑定；已有则归档上一轮 runtime 记录后复用，首次不存在则按精确名称创建 |
+| `--reuse-worktree` | flag | 否 | — | 按 `--plan` basename 或 `--worktree-name` 精确绑定；已有则归档上一轮 runtime 记录后复用，首次不存在则按精确名称创建。`parallel-forge` 预设下还会记录恢复边界，下次启动身份一致时经 `task.resume` 从 pending hat 恢复而非重启流程（见下方红框） |
 | `--plan <PLAN_FILE>` | path | 否 | — | 显式 plan 文件；其 basename 作为 worktree 名称的精确绑定值 |
 | `--worktree-name <NAME>` | string | 否 | — | 显式 worktree 名称（与 `--plan` 互斥） |
 | `--no-auto-merge` | flag | 否 | — | 跳过循环结束后的自动合并（worktree 模式下也适用） |
@@ -118,6 +118,7 @@ ralph run [OPTIONS] [-- <CUSTOM_ARGS>...]
   ralph -H builtin:<preset> run --worktree --reuse-worktree \
     --plan docs/plans/<your-plan>.md
   ```
+- 🔴 **`parallel-forge` 复用附带恢复语义**：清理旧状态前先记录恢复边界（pending hat＝已被触发但尚未执行完的 hat，及其原始触发事件快照）。下次启动若身份校验通过（plan 文件 / preset / 配置 / worktree 名称四项一致），loop 通过标准 `task.resume` 通道把 pending hat 重新绑定、从原始触发继续（内嵌在 `task.resume` payload 的 `original_trigger_topic` / `original_trigger_payload`），**不**重启流程、**不**重放已接受事件；重复启动不会重复恢复。身份不一致时复用在 loop 启动前被拒绝（无 task 关闭、无 wave 派发），错误信息指向该 worktree 的 `.ralph/reuse-history/`；此时停止，核对 plan / preset / worktree 名一致后重试。
 - 🔴 `--plan` 与 `--worktree-name` 互斥； `--worktree-name` 会精确匹配 `.worktrees/<NAME>/`，而 `--plan` 会将 plan 文件的 basename 作为 worktree 的精确名称绑定值。
 
 ---
@@ -218,6 +219,7 @@ test -d .ralph/forge/<KEY>/templates/
 | 退出码 75 (progress) | 5 秒内重复发送（速率限制）| 等待 5 秒后重试 |
 | `--prompt-file` 不存在 | `ralph run -P` 指向不存在的路径 | 检查路径；或用 `-p` 内联提示 |
 | `Worktree path conflict` | `--worktree` 路径已被其他循环占用 | 使用 `--reuse-worktree --worktree-name <NAME>` 复用，或换 `--worktree-name` / `--plan` |
+| `resume manifest validation failed for reused worktree` | 复用 worktree 时本次身份（plan 文件 / preset / 配置 / worktree 名称）与上一轮记录的恢复边界不一致，或归档记录损坏 / 不完整 | loop **未启动**（无 task 关闭、无 wave 派发）。核对 `--plan` / `--worktree-name` / preset 与上一轮一致后重试；上一轮归档记录在该 worktree 的 `.ralph/reuse-history/` 下 |
 | `preflight failed` | 配置或环境未通过预检 | 查看 `ralph preflight` 输出；常见修复：缺少 `.ralph/`，事件文件不可写 |
 | `doctor: check X failed` | 环境检查未过 | 按 `ralph doctor` 的修复建议逐项处理 |
 | 任何命令失败 | 通用恢复 | 1. `ralph <cmd> --help` 确认语法 2. 检查退出码 3. 查看错误信息 4. 重试 |

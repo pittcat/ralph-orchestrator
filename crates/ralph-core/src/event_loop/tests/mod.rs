@@ -50,6 +50,9 @@ mod loop_context;
 mod next_hat_topic_preemption;
 mod objective;
 mod origin_guard;
+// Plan 2026-08-03-004 U2: manifest-driven resume bootstrap —
+// targeted `task.resume` routing, pin consumption, idempotency.
+mod parallel_forge_manifest_resume;
 mod payload_types;
 mod persistent_mode;
 mod post_terminal_rejection;

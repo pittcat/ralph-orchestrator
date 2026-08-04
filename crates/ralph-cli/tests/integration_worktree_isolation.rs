@@ -845,3 +845,275 @@ fn test_worktree_context_md_does_not_expose_main_repo() {
         "context.md must reference RALPH_WORKSPACE_ROOT; got:\n{content}"
     );
 }
+
+// ─────────────────────────────────────────────────────────────────────────
+// 2026-08-03-004 U1: parallel-forge resume manifest on reuse
+// ─────────────────────────────────────────────────────────────────────────
+
+/// Config with a fast custom backend so the loop attempt terminates
+/// deterministically without any real LLM.
+fn write_backend_true_config(path: &Path) {
+    let config = r#"event_loop:
+  completion_promise: "loop.complete"
+  max_iterations: 1
+
+cli:
+  backend: "custom"
+  command: "true"
+"#;
+    fs::write(path.join("ralph.yml"), config).expect("write ralph.yml");
+}
+
+/// Pre-create a git-known worktree and seed the OLD live runtime state
+/// of a prior run that stopped at an ACCEPTED `forge.plan.ready`
+/// boundary (S1 shape): event log + accepted-transitions outbox +
+/// current-loop-id + task ledger + the referenced plan artifact.
+fn precreate_worktree_with_accepted_boundary(main_repo: &Path, loop_id: &str) -> PathBuf {
+    let worktree_path = main_repo.join(".worktrees").join(loop_id);
+    let status = Command::new("git")
+        .args([
+            "worktree",
+            "add",
+            "--detach",
+            worktree_path.to_str().unwrap(),
+            "HEAD",
+        ])
+        .current_dir(main_repo)
+        .status()
+        .expect("git worktree add");
+    assert!(status.success(), "git worktree add must succeed");
+
+    let ralph_dir = worktree_path.join(".ralph");
+    let agent_dir = ralph_dir.join("agent");
+    fs::create_dir_all(&agent_dir).unwrap();
+
+    // The prior run's only business event: accepted forge.plan.ready,
+    // nothing after it.
+    let payload = "{\"plan_key\":\"pf-s1\",\"execution_plan_path\":\"execution-plan.yml\"}";
+    let event_line = format!(
+        "{{\"ts\":\"2026-08-03T00:00:00Z\",\"iteration\":1,\"hat\":\"planner\",\"topic\":\"forge.plan.ready\",\"triggered\":\"guardian\",\"payload\":{}}}\n",
+        serde_json::to_string(payload).unwrap()
+    );
+    fs::write(ralph_dir.join("events.jsonl"), &event_line).unwrap();
+
+    let payload_digest = ralph_core::parallel_forge_resume::sha256_hex(payload.as_bytes());
+    let transition_id =
+        ralph_core::event_loop::accepted_transition::AcceptedTransition::compute_transition_id(
+            loop_id,
+            "planner:1",
+            "rev-1",
+            "forge.plan.ready:planner",
+            &payload_digest,
+        );
+    let outbox_line = serde_json::json!({
+        "activation_id": "planner:1",
+        "committed_at": "2026-08-03T00:00:01Z",
+        "contract_revision": "rev-1",
+        "delivered": false,
+        "loop_id": loop_id,
+        "payload_digest": payload_digest,
+        "topic": "forge.plan.ready",
+        "transition_id": transition_id,
+    });
+    fs::write(
+        agent_dir.join("accepted-transitions.jsonl"),
+        format!("{outbox_line}\n"),
+    )
+    .unwrap();
+
+    fs::write(ralph_dir.join("current-loop-id"), format!("{loop_id}\n")).unwrap();
+    fs::write(
+        agent_dir.join("tasks.jsonl"),
+        "{\"id\":\"task-1\",\"title\":\"U1\",\"key\":\"forge:pf-s1:U1\",\"status\":\"closed\",\"priority\":1,\"created\":\"2026-08-03T00:00:00Z\"}\n",
+    )
+    .unwrap();
+    // The artifact referenced by the accepted event exists on disk.
+    fs::write(worktree_path.join("execution-plan.yml"), "units: []\n").unwrap();
+
+    worktree_path
+}
+
+/// The single newest reuse archive directory of a worktree.
+fn newest_reuse_archive(worktree_path: &Path) -> PathBuf {
+    let archive_root = worktree_path.join(".ralph/reuse-history");
+    let mut archives: Vec<PathBuf> = fs::read_dir(&archive_root)
+        .expect("reuse-history must exist")
+        .map(|entry| entry.expect("archive entry").path())
+        .filter(|p| p.is_dir())
+        .collect();
+    assert!(!archives.is_empty(), "expected at least one archive");
+    archives.sort();
+    archives.pop().unwrap()
+}
+
+/// S1: a prior run stopped at an accepted `forge.plan.ready` with
+/// nothing after it. Reuse must capture a COMPLETE manifest recording
+/// the boundary + guardian pending trigger into the archive, and the
+/// run must pass the manifest gate (no fail-closed refusal).
+#[test]
+fn test_reuse_worktree_captures_resume_manifest_for_accepted_boundary() {
+    let temp_dir = TempDir::new().expect("temp dir");
+    let main_repo = temp_dir.path();
+    setup_git_repo(main_repo);
+    write_backend_true_config(main_repo);
+
+    let plan_path = main_repo.join("s1-forge-resume.md");
+    let plan_body = "# plan v1\n";
+    fs::write(&plan_path, plan_body).unwrap();
+
+    let loop_id = "s1-forge-resume";
+    let worktree_path = precreate_worktree_with_accepted_boundary(main_repo, loop_id);
+    write_completed_worktree_entry(main_repo, loop_id, &worktree_path);
+
+    let output = common::ralph_bin()
+        .args([
+            "run",
+            "--worktree",
+            "--reuse-worktree",
+            "--no-tui",
+            "--skip-preflight",
+            "--plan",
+            plan_path.to_str().unwrap(),
+        ])
+        .current_dir(main_repo)
+        .output()
+        .expect("execute ralph");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    eprintln!("S1 stderr: {stderr}");
+
+    // The manifest gate must NOT refuse this reuse.
+    assert!(
+        !stderr.contains("resume manifest validation failed"),
+        "a complete accepted-boundary manifest must pass the gate: {stderr}"
+    );
+
+    // Exactly one archive; the manifest lives inside it.
+    let archive = newest_reuse_archive(&worktree_path);
+    let manifest_path = archive.join(ralph_core::parallel_forge_resume::MANIFEST_FILE_NAME);
+    assert!(
+        manifest_path.exists(),
+        "resume manifest must be archived at {}",
+        manifest_path.display()
+    );
+    let manifest = ralph_core::parallel_forge_resume::read_manifest(&manifest_path)
+        .expect("manifest must parse");
+
+    // Boundary: the accepted forge.plan.ready and its pending trigger.
+    assert!(
+        manifest.is_complete(),
+        "manifest must be complete: {:?}",
+        manifest.incomplete_reasons
+    );
+    assert_eq!(manifest.boundary.accepted.len(), 1);
+    assert_eq!(manifest.boundary.accepted[0].topic, "forge.plan.ready");
+    assert_eq!(manifest.boundary.pending_hat.as_deref(), Some("guardian"));
+    let trigger = manifest
+        .boundary
+        .original_trigger
+        .as_ref()
+        .expect("original trigger snapshot");
+    assert_eq!(trigger.topic, "forge.plan.ready");
+    assert!(trigger.payload.as_deref().unwrap().contains("pf-s1"));
+
+    // Identity bound to the current plan/config/worktree.
+    assert_eq!(
+        manifest.identity.plan_digest,
+        ralph_core::parallel_forge_resume::sha256_hex(plan_body.as_bytes())
+    );
+    assert_eq!(manifest.identity.plan_path, plan_path.to_str().unwrap());
+    assert_eq!(manifest.identity.worktree_name, loop_id);
+    assert_eq!(manifest.identity.loop_id, loop_id);
+    assert_eq!(manifest.identity.preset_name, ""); // no -H passed
+
+    // Artifact reference recorded with its digest.
+    assert_eq!(manifest.artifacts.len(), 1);
+    assert_eq!(manifest.artifacts[0].path, "execution-plan.yml");
+    assert_eq!(
+        manifest.artifacts[0].digest,
+        ralph_core::parallel_forge_resume::sha256_hex(b"units: []\n")
+    );
+
+    // Cleanup semantics unchanged: live log archived, exactly 1 worktree.
+    assert!(!worktree_path.join(".ralph/events.jsonl").exists());
+    assert_eq!(count_worktrees(main_repo), 1);
+}
+
+/// S5: the prior run left artifact files but NO accepted terminal
+/// boundary. Artifact presence alone must not prove completion — the
+/// manifest is incomplete and reuse fails closed before the loop
+/// starts.
+#[test]
+fn test_reuse_worktree_artifact_only_prior_run_fails_closed() {
+    let temp_dir = TempDir::new().expect("temp dir");
+    let main_repo = temp_dir.path();
+    setup_git_repo(main_repo);
+    write_backend_true_config(main_repo);
+
+    let plan_path = main_repo.join("s5-artifact-only.md");
+    fs::write(&plan_path, "# plan\n").unwrap();
+
+    let loop_id = "s5-artifact-only";
+    let worktree_path = main_repo.join(".worktrees").join(loop_id);
+    let status = Command::new("git")
+        .args([
+            "worktree",
+            "add",
+            "--detach",
+            worktree_path.to_str().unwrap(),
+            "HEAD",
+        ])
+        .current_dir(main_repo)
+        .status()
+        .expect("git worktree add");
+    assert!(status.success());
+
+    // Prior run state: an event + artifact files, but NO outbox entry —
+    // nothing was ever ACCEPTED as a terminal boundary.
+    let ralph_dir = worktree_path.join(".ralph");
+    let agent_dir = ralph_dir.join("agent");
+    fs::create_dir_all(&agent_dir).unwrap();
+    let payload = "{\"plan_key\":\"pf-s5\",\"execution_plan_path\":\"execution-plan.yml\"}";
+    let event_line = format!(
+        "{{\"ts\":\"2026-08-03T00:00:00Z\",\"iteration\":1,\"hat\":\"planner\",\"topic\":\"forge.plan.ready\",\"triggered\":\"guardian\",\"payload\":{}}}\n",
+        serde_json::to_string(payload).unwrap()
+    );
+    fs::write(ralph_dir.join("events.jsonl"), &event_line).unwrap();
+    fs::write(ralph_dir.join("current-loop-id"), format!("{loop_id}\n")).unwrap();
+    fs::write(worktree_path.join("execution-plan.yml"), "units: []\n").unwrap();
+    fs::write(worktree_path.join("REPORT.md"), "# looks done\n").unwrap();
+
+    write_completed_worktree_entry(main_repo, loop_id, &worktree_path);
+
+    let output = common::ralph_bin()
+        .args([
+            "run",
+            "--worktree",
+            "--reuse-worktree",
+            "--no-tui",
+            "--skip-preflight",
+            "--plan",
+            plan_path.to_str().unwrap(),
+        ])
+        .current_dir(main_repo)
+        .output()
+        .expect("execute ralph");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    eprintln!("S5 stderr: {stderr}");
+
+    // Fail-closed: non-zero exit, manifest gate message, no loop start.
+    assert!(
+        !output.status.success(),
+        "artifact-only prior run must refuse to start the loop"
+    );
+    assert!(
+        stderr.contains("resume manifest validation failed"),
+        "stderr must carry the manifest gate refusal: {stderr}"
+    );
+    assert!(
+        stderr.contains("no accepted terminal boundary"),
+        "stderr must name the incompleteness reason: {stderr}"
+    );
+    // The loop never started: cleanup archived the seeded log and
+    // nothing recreated it.
+    assert!(!worktree_path.join(".ralph/events.jsonl").exists());
+}

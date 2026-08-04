@@ -1,0 +1,115 @@
+# U3 (plan 2026-08-03-004) / S7: parallel-forge idempotent resume
+# bootstrap.
+#
+# Same boundary as the S3 fixture (accepted `forge.wave.integrated`,
+# pending verifier), but the manifest bootstrap runs TWICE
+# (`repeat: 2`) — the defensive shape of a reuse start whose bootstrap
+# path is re-entered. The second bootstrap must be a no-op:
+#
+#   - no second recovery obligation lands in the verifier's queue
+#     (exactly one `task.resume` publish)
+#   - the verifier activates exactly once — no duplicate dispatch of
+#     the already-accepted handoff
+#   - the chain settles exactly once and completes
+#
+# Any duplicate activation, duplicate `forge.wave.verified`, or extra
+# iteration fails this scenario.
+
+name: pf_resume_idempotent_bootstrap_runtime
+description: 'S7 parallel-forge resume: a repeated manifest bootstrap is a no-op — one recovery obligation, one verifier activation, one settlement'
+
+config:
+  prompt_file: PROMPT.md
+  max_iterations: 6
+  event_loop:
+    execution_mode: isolated
+    completion_promise: LOOP_COMPLETE
+    supervisor:
+      enabled: true
+      aggregate_timeout_secs: 60
+    required_events:
+      - LOOP_COMPLETE
+    starting_event: forge.start
+  hats:
+    pf-verifier:
+      subscribes_to: [forge.wave.integrated]
+      publishes: [forge.wave.verified, forge.verification.failed]
+      event_filter:
+        enabled: true
+        events: [forge.wave.integrated]
+    pf-integration:
+      subscribes_to: [forge.wave.verified]
+      publishes: [forge.wave.settled]
+      event_filter:
+        enabled: true
+        events: [forge.wave.verified]
+    pf-reporter:
+      subscribes_to: [forge.wave.settled]
+      publishes: [LOOP_COMPLETE]
+      event_filter:
+        enabled: true
+        events: [forge.wave.settled]
+
+resume_bootstrap:
+  repeat: 2
+  accepted:
+    - topic: forge.wave.reviewed
+      hat: pf-reviewer
+    - topic: forge.wave.integrated
+      hat: pf-integrator
+  pending_hat: pf-verifier
+  original_trigger:
+    topic: forge.wave.integrated
+    hat: pf-integrator
+    payload: '{"plan_key":"pf-res7","wave_id":"w1","wave_index":1,"integration_branch":"pf/res7","integration_complete":true,"linear_history":true,"commit_map_path":".ralph/forge/pf-res7/commit-map.yml","integration_log_path":".ralph/forge/pf-res7/integration-log.md"}'
+  wave:
+    wave_id: w1
+    wave_index: 1
+    wave_total: 1
+
+mock_responses:
+  # Iter 1: the single resumed verifier activation.
+  - text: |
+      <event topic="forge.wave.verified">
+      {"plan_key":"pf-res7","wave_id":"w1","wave_index":1,"passed":true,"candidate_commit_sha":"CAND-RES7","last_integrated_unit":"U1"}
+      </event>
+    hat: pf-verifier
+  # Iter 2: the single settlement.
+  - text: |
+      <event topic="forge.wave.settled">
+      {"plan_key":"pf-res7","wave_id":"w1","wave_index":1,"settled_task_ids":["task-res7-u1"],"settled_unit_ids":["U1"],"verified_base_commit":"CAND-RES7","settlement_log_path":".ralph/forge/pf-res7/waves/w1/settlement.md"}
+      </event>
+    hat: pf-integration
+  # Iter 3: terminal.
+  - text: |
+      <event topic="LOOP_COMPLETE">
+      </event>
+    hat: pf-reporter
+
+expected:
+  iterations: 3
+  # Exactly one activation per resumed hat — the repeated bootstrap
+  # inserted no second obligation.
+  activation_hats:
+    - pf-verifier
+    - pf-integration
+    - pf-reporter
+  events:
+    - topic: forge.wave.verified
+    - topic: forge.wave.settled
+    - topic: LOOP_COMPLETE
+  absent_events:
+    - topic: forge.wave.integrated
+    - topic: forge.wave.reviewed
+    - topic: work.failed
+  event_topic_counts:
+    - topic: forge.wave.verified
+      count: 1
+    - topic: forge.wave.settled
+      count: 1
+  prompt_contains:
+    - hat: pf-verifier
+      substrings:
+        - "manifest_resume"
+        - "forge.wave.integrated"
+  completion: true

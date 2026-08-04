@@ -665,6 +665,224 @@ pub fn resolve_target_hat(business_hat: Option<&str>, source_hat: Option<&str>) 
         .map(|s| HatId::new(s.to_string()))
 }
 
+/// U2 (plan 2026-08-03-004): stable `reason` / `kind` code stamped on
+/// the manifest-driven resume bootstrap's `task.resume` payload. The
+/// code is distinct from every rejection-derived reason so dashboards
+/// and the drift detector can tell "resume after an accepted boundary"
+/// apart from in-flight rejection recovery.
+pub const MANIFEST_RESUME_REASON: &str = "manifest_resume";
+
+/// U2 (plan 2026-08-03-004): why a validated resume manifest cannot
+/// drive a `task.resume` recovery bootstrap. Every variant is
+/// fail-closed: the caller must NOT start a recovery (the loop falls
+/// back to the plain fresh bootstrap).
+#[derive(Debug, Clone, PartialEq)]
+pub enum ManifestResumeError {
+    /// The manifest's self-digest no longer matches its content
+    /// (tamper after the reuse gate). The digest covers the original
+    /// trigger snapshot, so a trigger-only tamper lands here too.
+    DigestMismatch { recorded: String, computed: String },
+    /// The manifest records no pending hat.
+    NoPendingHat,
+    /// The pending hat is not one of the current preset hats.
+    TargetHatUnregistered { hat: String },
+    /// The manifest boundary carries no original trigger snapshot.
+    MissingOriginalTrigger,
+}
+
+impl std::fmt::Display for ManifestResumeError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::DigestMismatch { recorded, computed } => write!(
+                f,
+                "resume manifest digest mismatch after the gate (tamper): \
+                 recorded {recorded}, computed {computed}"
+            ),
+            Self::NoPendingHat => write!(f, "resume manifest records no pending hat"),
+            Self::TargetHatUnregistered { hat } => write!(
+                f,
+                "resume manifest pending hat `{hat}` is not registered in the current preset hats"
+            ),
+            Self::MissingOriginalTrigger => {
+                write!(
+                    f,
+                    "resume manifest boundary has no original trigger snapshot"
+                )
+            }
+        }
+    }
+}
+
+impl std::error::Error for ManifestResumeError {}
+
+/// U2 (plan 2026-08-03-004): the outcome of a successful
+/// manifest → `task.resume` conversion — everything the loop
+/// bootstrap needs to re-bind the pending hat to its original
+/// trigger through the EXISTING recovery contract.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ManifestResumeRecovery {
+    /// The hat the bootstrap `task.resume` must be targeted at.
+    pub target_hat: HatId,
+    /// The JSON-serialised `task.resume` payload.
+    pub payload: String,
+    /// The topic of the original trigger event (diagnostics).
+    pub original_trigger_topic: String,
+    /// The original trigger payload snapshot (diagnostics).
+    pub original_trigger_payload: Option<String>,
+}
+
+/// U2 (plan 2026-08-03-004): convert a VALIDATED resume manifest into
+/// a targeted `task.resume` recovery for the loop bootstrap.
+///
+/// `registered_hats` is the current preset's hat id set. The
+/// conversion fails closed (returns [`ManifestResumeError`]) when the
+/// manifest digest no longer matches (post-gate tamper — the digest
+/// covers the original trigger snapshot), when no pending hat is
+/// recorded, when the pending hat is not part of the current preset
+/// hats, or when the original trigger snapshot is missing.
+///
+/// The produced payload mirrors the structured `task.resume` shape
+/// used by every other recovery path (`reason` / `kind` /
+/// `target_hat` / `original_hat` / `original_trigger_topic` /
+/// `original_trigger_payload` / wave metadata) so the existing
+/// consumers and policy checks apply unchanged. It deliberately
+/// carries NO correction-round or retry-budget state: a resumed loop
+/// starts those fresh.
+pub fn task_resume_from_manifest(
+    manifest: &crate::parallel_forge_resume::ResumeManifest,
+    registered_hats: &std::collections::BTreeSet<String>,
+) -> Result<ManifestResumeRecovery, ManifestResumeError> {
+    // Post-gate tamper check. The manifest digest covers the whole
+    // boundary record, including the original trigger snapshot.
+    let computed = manifest.compute_digest();
+    if computed != manifest.manifest_digest {
+        return Err(ManifestResumeError::DigestMismatch {
+            recorded: manifest.manifest_digest.clone(),
+            computed,
+        });
+    }
+
+    let pending_hat = manifest
+        .boundary
+        .pending_hat
+        .as_deref()
+        .filter(|hat| !hat.trim().is_empty())
+        .ok_or(ManifestResumeError::NoPendingHat)?;
+    if !registered_hats.contains(pending_hat) {
+        return Err(ManifestResumeError::TargetHatUnregistered {
+            hat: pending_hat.to_string(),
+        });
+    }
+    let trigger = manifest
+        .boundary
+        .original_trigger
+        .as_ref()
+        .ok_or(ManifestResumeError::MissingOriginalTrigger)?;
+
+    let mut payload = serde_json::Map::new();
+    payload.insert(
+        "reason".into(),
+        serde_json::Value::String(MANIFEST_RESUME_REASON.to_string()),
+    );
+    payload.insert(
+        "kind".into(),
+        serde_json::Value::String(MANIFEST_RESUME_REASON.to_string()),
+    );
+    payload.insert(
+        "target_hat".into(),
+        serde_json::Value::String(pending_hat.to_string()),
+    );
+    // Mirror the resume event's `.target` the same way
+    // `build_task_resume_payload` mirrors `source_hat`.
+    payload.insert(
+        "original_hat".into(),
+        serde_json::Value::String(pending_hat.to_string()),
+    );
+    payload.insert(
+        "original_trigger_topic".into(),
+        serde_json::Value::String(trigger.topic.clone()),
+    );
+    if let Some(snapshot) = trigger.payload.as_deref() {
+        // Best-effort: embed as a JSON value when it parses, else as
+        // a plain string (mirrors `build_task_resume_payload`). A
+        // truncated snapshot must not degrade silently: surface the
+        // truncation so the resumed hat knows its trigger is partial.
+        // Current-format truncation envelopes keep parsing as JSON
+        // (the flag is read from the marker field); the legacy
+        // `…`-suffixed slice lands on the string fallback and is
+        // still recognized by the same helper.
+        let truncated = crate::parallel_forge_resume::payload_snapshot_is_truncated(snapshot);
+        let value = serde_json::from_str::<serde_json::Value>(snapshot)
+            .unwrap_or_else(|_| serde_json::Value::String(snapshot.to_string()));
+        payload.insert("original_trigger_payload".into(), value);
+        if truncated {
+            payload.insert(
+                "original_trigger_payload_truncated".into(),
+                serde_json::Value::Bool(true),
+            );
+        }
+    }
+    if let Some(publisher) = trigger.hat.as_deref() {
+        payload.insert(
+            "original_trigger_hat".into(),
+            serde_json::Value::String(publisher.to_string()),
+        );
+    }
+    // The accepted boundary the pending hat resumes from.
+    if let Some(last) = manifest.boundary.accepted.last() {
+        payload.insert(
+            "accepted_boundary_topic".into(),
+            serde_json::Value::String(last.topic.clone()),
+        );
+    }
+    payload.insert(
+        "recovery_directives".into(),
+        serde_json::Value::Array(
+            recovery_directives_for_kind(MANIFEST_RESUME_REASON, pending_hat)
+                .into_iter()
+                .map(serde_json::Value::String)
+                .collect(),
+        ),
+    );
+    if let Some(wave) = manifest.boundary.wave.as_ref() {
+        payload.insert(
+            "wave_id".into(),
+            serde_json::Value::String(wave.wave_id.clone()),
+        );
+        payload.insert(
+            "wave_index".into(),
+            serde_json::Value::Number(wave.wave_index.into()),
+        );
+        payload.insert(
+            "wave_total".into(),
+            serde_json::Value::Number(wave.wave_total.into()),
+        );
+    }
+    payload.insert(
+        "message".into(),
+        serde_json::Value::String(format!(
+            "RESUME (manifest): the previous run stopped at an accepted `{}` boundary. \
+             You are `{pending_hat}`; your original trigger `{}` is attached via \
+             original_trigger_topic / original_trigger_payload. Continue from that \
+             trigger — do not redo already-accepted work.",
+            manifest
+                .boundary
+                .accepted
+                .last()
+                .map(|last| last.topic.as_str())
+                .unwrap_or("terminal"),
+            trigger.topic,
+        )),
+    );
+
+    Ok(ManifestResumeRecovery {
+        target_hat: HatId::new(pending_hat.to_string()),
+        payload: serde_json::Value::Object(payload).to_string(),
+        original_trigger_topic: trigger.topic.clone(),
+        original_trigger_payload: trigger.payload.clone(),
+    })
+}
+
 /// Returns `true` when the JSON payload string contains both
 /// `reason` and `target_hat` as string fields.  Used by all
 /// orchestrator-injected `task.resume` paths to fail-closed when
@@ -1815,6 +2033,356 @@ mod tests {
             assert_eq!(serialized["reason_code"], "task_resume_dead_letter");
             assert_eq!(serialized["source"], "loop_stale");
             assert_eq!(serialized["source_hat"], "coordinator");
+        }
+    }
+
+    /// U2 (plan 2026-08-03-004): manifest → structured `task.resume`
+    /// conversion for the parallel-forge resume bootstrap. The
+    /// conversion reuses the EXISTING `task.resume` recovery contract
+    /// (no second resume message type) and must fail-closed when the
+    /// manifest cannot safely drive a recovery.
+    mod parallel_forge_manifest_resume {
+        use super::super::{
+            MANIFEST_RESUME_REASON, ManifestResumeError, task_resume_from_manifest,
+            task_resume_payload_has_required_fields,
+        };
+        use crate::parallel_forge_resume::{
+            AcceptedBoundary, BoundaryRecord, MANIFEST_SCHEMA_VERSION, ResumeIdentity,
+            ResumeManifest, TRUNCATED_SNAPSHOT_MARKER, TriggerSnapshot, WaveMetadata,
+        };
+        use std::collections::BTreeSet;
+
+        /// Build a self-consistent (digest-finalized) manifest fixture.
+        fn manifest_fixture(
+            pending_hat: Option<&str>,
+            trigger_topic: Option<&str>,
+            trigger_payload: Option<&str>,
+            trigger_hat: Option<&str>,
+            wave: Option<WaveMetadata>,
+        ) -> ResumeManifest {
+            let mut manifest = ResumeManifest {
+                schema_version: MANIFEST_SCHEMA_VERSION.to_string(),
+                captured_at: "2026-08-03T00:00:10Z".to_string(),
+                identity: ResumeIdentity {
+                    plan_path: "docs/plans/pf.md".to_string(),
+                    plan_digest: "plan-digest".to_string(),
+                    preset_name: "parallel-forge".to_string(),
+                    config_digest: "config-digest".to_string(),
+                    worktree_name: "pf-plan".to_string(),
+                    source_head_sha: "abc123".to_string(),
+                    loop_id: "old-loop-1".to_string(),
+                },
+                boundary: BoundaryRecord {
+                    accepted: vec![AcceptedBoundary {
+                        topic: trigger_topic.unwrap_or("forge.plan.ready").to_string(),
+                        transition_id: "tr-1".to_string(),
+                        committed_at: "2026-08-03T00:00:01Z".to_string(),
+                        hat: trigger_hat.map(str::to_string),
+                        in_event_log: true,
+                    }],
+                    pending_hat: pending_hat.map(str::to_string),
+                    original_trigger: trigger_topic.map(|topic| TriggerSnapshot {
+                        topic: topic.to_string(),
+                        payload: trigger_payload.map(str::to_string),
+                        hat: trigger_hat.map(str::to_string),
+                        triggered: pending_hat.map(str::to_string),
+                        ts: "2026-08-03T00:00:00Z".to_string(),
+                    }),
+                    wave,
+                },
+                tasks: Vec::new(),
+                artifacts: Vec::new(),
+                incomplete_reasons: Vec::new(),
+                manifest_digest: String::new(),
+            };
+            manifest.finalize_digest();
+            manifest
+        }
+
+        fn registered(hats: &[&str]) -> BTreeSet<String> {
+            hats.iter().map(|s| s.to_string()).collect()
+        }
+
+        /// S1: accepted `forge.plan.ready` boundary with pending
+        /// `guardian` → targeted `task.resume` carrying the original
+        /// trigger topic + payload snapshot.
+        #[test]
+        fn s1_guardian_plan_ready_payload() {
+            let manifest = manifest_fixture(
+                Some("guardian"),
+                Some("forge.plan.ready"),
+                Some("{\"plan_key\":\"pf-1\",\"execution_wave\":2}"),
+                Some("planner"),
+                None,
+            );
+            let recovery =
+                task_resume_from_manifest(&manifest, &registered(&["planner", "guardian"]))
+                    .expect("S1 conversion must succeed");
+            assert_eq!(recovery.target_hat.as_str(), "guardian");
+            assert_eq!(recovery.original_trigger_topic, "forge.plan.ready");
+
+            let v: serde_json::Value = serde_json::from_str(&recovery.payload).unwrap();
+            assert_eq!(v["target_hat"], "guardian");
+            assert_eq!(v["original_hat"], "guardian");
+            assert_eq!(v["original_trigger_topic"], "forge.plan.ready");
+            assert_eq!(v["original_trigger_payload"]["plan_key"], "pf-1");
+            assert_eq!(v["original_trigger_payload"]["execution_wave"], 2);
+            assert_eq!(v["original_trigger_hat"], "planner");
+            assert_eq!(v["reason"], MANIFEST_RESUME_REASON);
+            assert_eq!(v["kind"], MANIFEST_RESUME_REASON);
+            // Schema-required fields gate (drift detector contract).
+            assert!(task_resume_payload_has_required_fields(&recovery.payload));
+            // No wave metadata on a plan-ready boundary.
+            assert!(v.get("wave_id").is_none());
+        }
+
+        /// S2: pending executor with wave metadata → wave fields
+        /// propagate verbatim into the resume payload.
+        #[test]
+        fn s2_executor_wave_metadata_propagates() {
+            let manifest = manifest_fixture(
+                Some("executor"),
+                Some("exec.unit.ready"),
+                Some("{\"unit_id\":\"U2\",\"plan_key\":\"pf-1\"}"),
+                Some("forge-dispatcher"),
+                Some(WaveMetadata {
+                    wave_id: "w-1a2b3c4d".to_string(),
+                    wave_index: 1,
+                    wave_total: 3,
+                }),
+            );
+            let recovery = task_resume_from_manifest(
+                &manifest,
+                &registered(&["forge-dispatcher", "executor", "reviewer"]),
+            )
+            .expect("S2 conversion must succeed");
+            assert_eq!(recovery.target_hat.as_str(), "executor");
+
+            let v: serde_json::Value = serde_json::from_str(&recovery.payload).unwrap();
+            assert_eq!(v["target_hat"], "executor");
+            assert_eq!(v["original_trigger_topic"], "exec.unit.ready");
+            assert_eq!(v["original_trigger_payload"]["unit_id"], "U2");
+            assert_eq!(v["wave_id"], "w-1a2b3c4d");
+            assert_eq!(v["wave_index"], 1);
+            assert_eq!(v["wave_total"], 3);
+        }
+
+        /// S4: correction interrupted mid-flight (pending
+        /// `forge-failure-handler` triggered by
+        /// `forge.verification.failed`). The resume payload must carry
+        /// the failure fingerprint + wave metadata from the ORIGINAL
+        /// trigger, and must NOT inherit any old correction round /
+        /// budget state (those lived in the archived run only).
+        #[test]
+        fn s4_correction_interruption_carries_fingerprint_not_budget() {
+            let manifest = manifest_fixture(
+                Some("forge-failure-handler"),
+                Some("forge.verification.failed"),
+                Some(
+                    "{\"wave_id\":\"w-9\",\"wave_index\":2,\"candidate_commit_sha\":\"e3b0c44298fc1c149afbf4c8996fb92427ae41e4\",\
+                     \"failure_fingerprint\":\"fp-abc123\",\"affected_task_ids\":[\"task-7\"],\
+                     \"plan_key\":\"pf-1\",\"verification_failure_path\":\".ralph/forge/pf-1/waves/w-9/verification-failure.md\"}",
+                ),
+                Some("verifier"),
+                Some(WaveMetadata {
+                    wave_id: "w-9".to_string(),
+                    wave_index: 2,
+                    wave_total: 3,
+                }),
+            );
+            let recovery = task_resume_from_manifest(
+                &manifest,
+                &registered(&["verifier", "forge-failure-handler"]),
+            )
+            .expect("S4 conversion must succeed");
+            assert_eq!(recovery.target_hat.as_str(), "forge-failure-handler");
+
+            let v: serde_json::Value = serde_json::from_str(&recovery.payload).unwrap();
+            assert_eq!(v["target_hat"], "forge-failure-handler");
+            assert_eq!(v["original_trigger_topic"], "forge.verification.failed");
+            assert_eq!(
+                v["original_trigger_payload"]["failure_fingerprint"],
+                "fp-abc123"
+            );
+            assert_eq!(v["wave_id"], "w-9");
+            assert_eq!(v["wave_index"], 2);
+            assert_eq!(v["wave_total"], 3);
+            // The fresh loop must NOT inherit correction round or
+            // budget state from the archived run.
+            let obj = v.as_object().unwrap();
+            for forbidden in [
+                "correction_round",
+                "correction_budget",
+                "budget",
+                "retries_consumed",
+                "seen_count",
+                "retry_key",
+            ] {
+                assert!(
+                    !obj.contains_key(forbidden),
+                    "payload must not carry inherited correction/budget state `{forbidden}`: {v:?}"
+                );
+            }
+        }
+
+        /// Fail-closed: the pending hat is not part of the current
+        /// preset hats → no recovery may be started.
+        #[test]
+        fn target_hat_unregistered_fails_closed() {
+            let manifest = manifest_fixture(
+                Some("guardian"),
+                Some("forge.plan.ready"),
+                Some("{\"plan_key\":\"pf-1\"}"),
+                Some("planner"),
+                None,
+            );
+            let err = task_resume_from_manifest(&manifest, &registered(&["planner"]))
+                .expect_err("unregistered pending hat must fail closed");
+            assert_eq!(
+                err,
+                ManifestResumeError::TargetHatUnregistered {
+                    hat: "guardian".to_string()
+                }
+            );
+        }
+
+        /// Fail-closed: tamper with the manifest after the gate
+        /// (digest mismatch). The original trigger snapshot is covered
+        /// by the same self-digest, so a trigger-only tamper is
+        /// detected here too.
+        #[test]
+        fn digest_mismatch_fails_closed() {
+            // Tamper with the pending hat.
+            let mut manifest = manifest_fixture(
+                Some("guardian"),
+                Some("forge.plan.ready"),
+                Some("{\"plan_key\":\"pf-1\"}"),
+                Some("planner"),
+                None,
+            );
+            manifest.boundary.pending_hat = Some("executor".to_string());
+            let err = task_resume_from_manifest(
+                &manifest,
+                &registered(&["planner", "guardian", "executor"]),
+            )
+            .expect_err("tampered pending hat must fail closed");
+            assert!(
+                matches!(err, ManifestResumeError::DigestMismatch { .. }),
+                "expected DigestMismatch, got {err:?}"
+            );
+
+            // Tamper with the original trigger payload snapshot only.
+            let mut manifest = manifest_fixture(
+                Some("guardian"),
+                Some("forge.plan.ready"),
+                Some("{\"plan_key\":\"pf-1\"}"),
+                Some("planner"),
+                None,
+            );
+            manifest.boundary.original_trigger.as_mut().unwrap().payload =
+                Some("{\"plan_key\":\"forged\"}".to_string());
+            let err = task_resume_from_manifest(&manifest, &registered(&["planner", "guardian"]))
+                .expect_err("tampered trigger snapshot must fail closed");
+            assert!(
+                matches!(err, ManifestResumeError::DigestMismatch { .. }),
+                "expected DigestMismatch, got {err:?}"
+            );
+        }
+
+        /// Truncated trigger snapshots must surface a truncation signal
+        /// in the resume payload instead of degrading silently. Covers
+        /// the structured envelope (current capture format — embeds as
+        /// JSON) and the legacy `…`-suffixed slice (pre-envelope
+        /// captures — falls back to string embedding).
+        #[test]
+        fn truncated_trigger_snapshot_surfaces_truncation_signal() {
+            // Current format: the capture-side truncation envelope.
+            let envelope = serde_json::json!({
+                TRUNCATED_SNAPSHOT_MARKER: true,
+                "original_bytes": 9000_u64,
+                "preview": "{\"plan_key\":\"pf-1\"",
+            })
+            .to_string();
+            let manifest = manifest_fixture(
+                Some("guardian"),
+                Some("forge.plan.ready"),
+                Some(&envelope),
+                Some("planner"),
+                None,
+            );
+            let recovery =
+                task_resume_from_manifest(&manifest, &registered(&["planner", "guardian"]))
+                    .expect("envelope snapshot conversion must succeed");
+            let v: serde_json::Value = serde_json::from_str(&recovery.payload).unwrap();
+            assert_eq!(
+                v["original_trigger_payload_truncated"], true,
+                "envelope snapshot must surface the truncation flag: {v}"
+            );
+            assert_eq!(
+                v["original_trigger_payload"][TRUNCATED_SNAPSHOT_MARKER],
+                true
+            );
+
+            // Legacy format: invalid JSON with the trailing `…`.
+            let legacy = "{\"plan_key\":\"pf-1\",\"big\":\"xxxxxxxx…";
+            let manifest = manifest_fixture(
+                Some("guardian"),
+                Some("forge.plan.ready"),
+                Some(legacy),
+                Some("planner"),
+                None,
+            );
+            let recovery =
+                task_resume_from_manifest(&manifest, &registered(&["planner", "guardian"]))
+                    .expect("legacy snapshot conversion must succeed");
+            let v: serde_json::Value = serde_json::from_str(&recovery.payload).unwrap();
+            assert_eq!(
+                v["original_trigger_payload_truncated"], true,
+                "legacy truncated snapshot must surface the truncation flag: {v}"
+            );
+            assert!(
+                v["original_trigger_payload"].is_string(),
+                "legacy snapshot keeps the string fallback: {v}"
+            );
+
+            // Control: an intact snapshot carries no truncation flag.
+            let manifest = manifest_fixture(
+                Some("guardian"),
+                Some("forge.plan.ready"),
+                Some("{\"plan_key\":\"pf-1\"}"),
+                Some("planner"),
+                None,
+            );
+            let recovery =
+                task_resume_from_manifest(&manifest, &registered(&["planner", "guardian"]))
+                    .expect("intact snapshot conversion must succeed");
+            let v: serde_json::Value = serde_json::from_str(&recovery.payload).unwrap();
+            assert!(
+                v.get("original_trigger_payload_truncated").is_none(),
+                "intact snapshot must not be flagged truncated: {v}"
+            );
+        }
+
+        /// Fail-closed: no pending hat / no original trigger recorded.
+        #[test]
+        fn missing_boundary_fields_fail_closed() {
+            let manifest = manifest_fixture(
+                None,
+                Some("forge.plan.ready"),
+                Some("{\"plan_key\":\"pf-1\"}"),
+                Some("planner"),
+                None,
+            );
+            assert_eq!(
+                task_resume_from_manifest(&manifest, &registered(&["planner", "guardian"])),
+                Err(ManifestResumeError::NoPendingHat)
+            );
+
+            let manifest = manifest_fixture(Some("guardian"), None, None, Some("planner"), None);
+            assert_eq!(
+                task_resume_from_manifest(&manifest, &registered(&["planner", "guardian"])),
+                Err(ManifestResumeError::MissingOriginalTrigger)
+            );
         }
     }
 }

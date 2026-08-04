@@ -1,0 +1,144 @@
+# U3 (plan 2026-08-03-004) / S3: parallel-forge verifier-only resume.
+#
+# The OLD run stopped after `forge.wave.integrated` was accepted but
+# before `forge.wave.verified` landed. The reuse cleanup archived the
+# old runtime state, so the NEW loop boots from the U1 resume manifest
+# alone: pending hat = verifier, original trigger = the accepted
+# `forge.wave.integrated` snapshot.
+#
+# Assertions (runtime face of S3):
+#   - ONLY the verifier resumes (`activation_hats` starts with
+#     pf-verifier); the upstream reviewer / integrator activation
+#     counts do NOT increase — no accepted handoff is replayed
+#   - the verifier sees the original `forge.wave.integrated` payload
+#     in its prompt (verification continues from the real boundary)
+#   - the wave then settles through the normal tail and completes
+#
+# The fixture hats mirror the production shape: every hat runs with an
+# enabled `event_filter` allowlist, so the resume `task.resume`
+# recovery must survive the prompt allowlist to reach the pending hat.
+
+name: pf_resume_verifier_only_runtime
+description: 'S3 parallel-forge resume: only the verifier re-activates after an accepted forge.wave.integrated boundary; upstream hats stay dormant'
+
+config:
+  prompt_file: PROMPT.md
+  max_iterations: 6
+  event_loop:
+    execution_mode: isolated
+    completion_promise: LOOP_COMPLETE
+    supervisor:
+      enabled: true
+      aggregate_timeout_secs: 60
+    required_events:
+      - LOOP_COMPLETE
+    starting_event: forge.start
+  hats:
+    pf-reviewer:
+      subscribes_to: [exec.wave.complete]
+      publishes: [forge.wave.reviewed, forge.wave.review.failed]
+      event_filter:
+        enabled: true
+        events: [exec.wave.complete]
+    pf-integrator:
+      subscribes_to: [forge.wave.reviewed]
+      publishes: [forge.wave.integrated]
+      event_filter:
+        enabled: true
+        events: [forge.wave.reviewed]
+    pf-verifier:
+      subscribes_to: [forge.wave.integrated]
+      publishes: [forge.wave.verified, forge.verification.failed]
+      event_filter:
+        enabled: true
+        events: [forge.wave.integrated]
+    pf-integration:
+      subscribes_to: [forge.wave.verified]
+      publishes: [forge.wave.settled]
+      event_filter:
+        enabled: true
+        events: [forge.wave.verified]
+    pf-reporter:
+      subscribes_to: [forge.wave.settled]
+      publishes: [LOOP_COMPLETE]
+      event_filter:
+        enabled: true
+        events: [forge.wave.settled]
+
+# U1 boundary: `forge.wave.integrated` accepted, verifier triggered.
+resume_bootstrap:
+  accepted:
+    - topic: forge.wave.reviewed
+      hat: pf-reviewer
+    - topic: forge.wave.integrated
+      hat: pf-integrator
+  pending_hat: pf-verifier
+  original_trigger:
+    topic: forge.wave.integrated
+    hat: pf-integrator
+    payload: '{"plan_key":"pf-res3","wave_id":"w1","wave_index":1,"integration_branch":"pf/res3","integration_complete":true,"linear_history":true,"commit_map_path":".ralph/forge/pf-res3/commit-map.yml","integration_log_path":".ralph/forge/pf-res3/integration-log.md"}'
+  wave:
+    wave_id: w1
+    wave_index: 1
+    wave_total: 1
+
+mock_responses:
+  # Iter 1: resumed verifier continues from the integrated boundary.
+  - text: |
+      <event topic="forge.wave.verified">
+      {"plan_key":"pf-res3","wave_id":"w1","wave_index":1,"passed":true,"candidate_commit_sha":"CAND-RES3","last_integrated_unit":"U1"}
+      </event>
+    hat: pf-verifier
+  # Iter 2: settlement (integrator entry two) on the verified wave.
+  - text: |
+      <event topic="forge.wave.settled">
+      {"plan_key":"pf-res3","wave_id":"w1","wave_index":1,"settled_task_ids":["task-res3-u1"],"settled_unit_ids":["U1"],"verified_base_commit":"CAND-RES3","settlement_log_path":".ralph/forge/pf-res3/waves/w1/settlement.md"}
+      </event>
+    hat: pf-integration
+  # Iter 3: terminal.
+  - text: |
+      <event topic="LOOP_COMPLETE">
+      </event>
+    hat: pf-reporter
+
+expected:
+  iterations: 3
+  # ONLY the verifier resumes; the settlement hat follows, then the
+  # terminal reporter on settlement. The reviewer / integrator (entry
+  # one) never re-activate.
+  activation_hats:
+    - pf-verifier
+    - pf-integration
+    - pf-reporter
+  events:
+    - topic: forge.wave.verified
+    - topic: forge.wave.settled
+    - topic: LOOP_COMPLETE
+  # No upstream handoff is replayed: the accepted boundary events of
+  # the old run never re-appear in the resumed loop.
+  absent_events:
+    - topic: forge.wave.reviewed
+    - topic: forge.wave.integrated
+    - topic: exec.wave.complete
+    - topic: forge.correction.requested
+    - topic: work.failed
+  event_topic_counts:
+    - topic: forge.wave.verified
+      count: 1
+    - topic: forge.wave.settled
+      count: 1
+  payload_matches:
+    - topic: forge.wave.settled
+      occurrence: 1
+      fields:
+        wave_id: "w1"
+  # The resumed verifier must actually SEE the original trigger
+  # payload (integration branch / log paths) inside its prompt.
+  prompt_contains:
+    - hat: pf-verifier
+      substrings:
+        - "manifest_resume"
+        - "forge.wave.integrated"
+        - "integration_log_path"
+        - "pf/res3"
+  completion: true

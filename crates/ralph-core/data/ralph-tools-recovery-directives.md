@@ -92,4 +92,21 @@ Preset 专用 trigger 状态表写在各 preset 的 hat `instructions:`；本文
 
 **禁止：** 在没有 topology 修复的情况下继续走 consumer hat 路径（会再次触发同一种 misroute）。
 
+## RD-MANIFEST-RESUME-CONTINUE
+
+**Trigger:** `task.resume` with `target_hat=<被恢复的 hat>` and `reason=manifest_resume` / `kind=manifest_resume`。
+
+**如何看到本段：** 这类恢复的 payload 里 `recovery_directives` 是空数组，本节不会随恢复自动进入你的 prompt；它是恢复通道的参考资料。收到 `reason=manifest_resume` 又需要完整规范时，用 `ralph tools skill load ralph-tools-recovery-directives` 手动加载本 skill。
+
+**What this means:**
+- 这是 worktree 复用后的**恢复引导**（适用于 `parallel-forge` 预设），**不是**事件拒收纠正：上一轮运行的归档记录了 pending hat（已被触发但尚未执行完的 hat）及其原始触发事件快照，本次启动通过了身份校验（plan 文件 / preset / 配置 / worktree 名称一致），runtime 因此通过标准 `task.resume` 通道把你重新绑定到原始触发，而不是重启整个流程。
+- payload 里的 `original_trigger_topic` / `original_trigger_payload` 就是你的原始触发快照（与你当时收到的触发 payload 同形）；`message` 字段描述恢复边界；如存在 `wave_id` / `wave_index` / `wave_total`，表示恢复点在某个 wave 中途。
+
+**行为规范：**
+- 把这条 `task.resume` 当作你的触发事件处理：读 `original_trigger_payload`，按 hat instructions 从中断处继续工作。
+- 不要重做已被接受的工作，也不要重发已被接受的事件；重复同样的复用启动不会产生重复恢复，无需手动补偿。
+- 恢复后 task 关闭 / wave 派发等结算权限不变，仍按 preset 既有机制执行。
+
+**禁止：** 收到该恢复后重启整个流程，或把它当作协议违规去找 `violation` / `required_fields` 修复。
+
 ---

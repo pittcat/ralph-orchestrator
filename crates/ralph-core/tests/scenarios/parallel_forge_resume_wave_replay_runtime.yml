@@ -1,0 +1,234 @@
+# U3 (plan 2026-08-03-004) / S2: parallel-forge mid-wave resume.
+#
+# The OLD run stopped after wave w1's Unit U1 had an accepted
+# `exec.unit.done`; Unit U2 was never dispatched. The reuse cleanup
+# archived the old runtime state, so the NEW loop boots from the U1
+# resume manifest alone: pending hat = dispatcher, original trigger =
+# the accepted `exec.unit.done` (U1) snapshot.
+#
+# Assertions (runtime face of S2):
+#   - the resume bootstrap routes ONLY to the pending hat: the first
+#     activation is the pinned dispatcher carrying the recovery
+#     payload with the original trigger snapshot
+#   - the dispatcher sees the original trigger payload (U1 done) in
+#     its prompt and replays `exec.unit.ready` for the UNFINISHED
+#     Unit U2 only — exactly once (no second dispatch of U1)
+#   - the wave settles through the normal chain and BOTH unit tasks
+#     close via the `forge.wave.settled` CloseTaskBatch projection —
+#     the task close authority is unchanged by the resume
+#
+# The two unit tasks are seeded via fixture_files exactly as the old
+# run left them: open (tasks close only at settlement).
+
+name: pf_resume_wave_replay_runtime
+description: 'S2 parallel-forge resume: dispatcher replays only the unfinished unit; tasks close only via forge.wave.settled CloseTaskBatch'
+
+config:
+  prompt_file: PROMPT.md
+  max_iterations: 12
+  event_loop:
+    execution_mode: isolated
+    completion_promise: LOOP_COMPLETE
+    supervisor:
+      enabled: true
+      aggregate_timeout_secs: 60
+    state_projection:
+      enabled: true
+      actions:
+        forge.wave.settled:
+          kind: close_task_batch
+          task_ids: settled_task_ids
+    required_events:
+      - LOOP_COMPLETE
+    starting_event: forge.start
+  hats:
+    # Mirrors production forge-dispatcher: it does NOT subscribe to
+    # `exec.unit.done` — the resume reaches it through the targeted
+    # `task.resume` recovery (old-run `exec.unit.done` boundary
+    # embedded), not through a subscription.
+    pf-dispatcher:
+      subscribes_to:
+        - forge.wave.worktrees.ready
+      publishes: [exec.unit.ready]
+      event_filter:
+        enabled: true
+        events:
+          - forge.wave.worktrees.ready
+    pf-executor:
+      subscribes_to: [exec.unit.ready]
+      publishes: [exec.unit.done, exec.unit.failed]
+      event_filter:
+        enabled: true
+        events: [exec.unit.ready]
+    pf-reviewer:
+      subscribes_to: [exec.wave.complete]
+      publishes: [forge.wave.reviewed, forge.wave.review.failed]
+      event_filter:
+        enabled: true
+        events: [exec.wave.complete]
+    pf-integrator:
+      subscribes_to: [forge.wave.reviewed]
+      publishes: [forge.wave.integrated]
+      event_filter:
+        enabled: true
+        events: [forge.wave.reviewed]
+    pf-verifier:
+      subscribes_to: [forge.wave.integrated]
+      publishes: [forge.wave.verified]
+      event_filter:
+        enabled: true
+        events: [forge.wave.integrated]
+    pf-integration:
+      subscribes_to: [forge.wave.verified]
+      publishes: [forge.wave.settled]
+      event_filter:
+        enabled: true
+        events: [forge.wave.verified]
+    pf-reporter:
+      subscribes_to: [forge.wave.settled]
+      publishes: [LOOP_COMPLETE]
+      event_filter:
+        enabled: true
+        events: [forge.wave.settled]
+
+# Task ledger exactly as the old run left it: both units open.
+fixture_files:
+  - path: .ralph/agent/tasks.jsonl
+    content: |
+      {"id":"task-res2-u1","title":"U1","key":"forge:pf-res2:U1","status":"open","priority":1,"created":"2026-08-02T00:00:00Z"}
+      {"id":"task-res2-u2","title":"U2","key":"forge:pf-res2:U2","status":"open","priority":1,"created":"2026-08-02T00:00:00Z"}
+
+# U1 boundary: the old run's last accepted terminal event was
+# `exec.unit.done` for U1, whose `triggered` hat is the dispatcher.
+resume_bootstrap:
+  accepted:
+    - topic: forge.wave.worktrees.ready
+      hat: pf-worktree
+    - topic: exec.unit.done
+      hat: pf-executor
+  pending_hat: pf-dispatcher
+  original_trigger:
+    topic: exec.unit.done
+    hat: pf-executor
+    payload: '{"wave_id":"w1","slot_index":0,"unit_id":"U1","task_id":"task-res2-u1","task_key":"forge:pf-res2:U1","plan_key":"pf-res2","content_hash":"res2-h1"}'
+  wave:
+    wave_id: w1
+    wave_index: 1
+    wave_total: 1
+
+supervisor_fan_in:
+  expected_slots: 1
+
+mock_responses:
+  # Iter 1: resumed dispatcher — saw U1 done via the original trigger
+  # snapshot; replays the wave for the unfinished Unit U2 only.
+  - text: |
+      <event topic="exec.unit.ready">
+      {"wave_id":"w1","slot_index":0,"unit_id":"U2","task_id":"task-res2-u2","task_key":"forge:pf-res2:U2","plan_key":"pf-res2","execution_plan_path":".ralph/forge/pf-res2/execution-plan.yml","worktree_map_path":".ralph/forge/pf-res2/worktree-map.yml"}
+      </event>
+    hat: pf-dispatcher
+  # Iter 2: executor finishes U2. Supervisor fan-in (1 expected slot)
+  # injects exec.wave.complete.
+  - text: |
+      <event topic="exec.unit.done">
+      {"wave_id":"w1","slot_index":0,"unit_id":"U2","task_id":"task-res2-u2","task_key":"forge:pf-res2:U2","plan_key":"pf-res2","content_hash":"res2-h2"}
+      </event>
+    hat: pf-executor
+  # Iter 3-6: normal settlement chain for the resumed wave.
+  - text: |
+      <event topic="forge.wave.reviewed">
+      {"plan_key":"pf-res2","wave_id":"w1","wave_index":1,"aggregate_verdict":"ACCEPTED","unit_verdicts":[]}
+      </event>
+    hat: pf-reviewer
+  - text: |
+      <event topic="forge.wave.integrated">
+      {"plan_key":"pf-res2","wave_id":"w1","wave_index":1,"integration_branch":"pf/res2","integration_complete":true,"linear_history":true,"commit_map_path":".ralph/forge/pf-res2/commit-map.yml","integration_log_path":".ralph/forge/pf-res2/integration-log.md"}
+      </event>
+    hat: pf-integrator
+  - text: |
+      <event topic="forge.wave.verified">
+      {"plan_key":"pf-res2","wave_id":"w1","wave_index":1,"passed":true,"candidate_commit_sha":"CAND-RES2","last_integrated_unit":"U2"}
+      </event>
+    hat: pf-verifier
+  # Iter 6: settlement closes BOTH units (U1 from the old run + U2)
+  # through the CloseTaskBatch projection — no hat closes tasks.
+  - text: |
+      <event topic="forge.wave.settled">
+      {"plan_key":"pf-res2","wave_id":"w1","wave_index":1,"settled_task_ids":["task-res2-u1","task-res2-u2"],"settled_unit_ids":["U1","U2"],"verified_base_commit":"CAND-RES2","settlement_log_path":".ralph/forge/pf-res2/waves/w1/settlement.md"}
+      </event>
+    hat: pf-integration
+  # Iter 7: terminal.
+  - text: |
+      <event topic="LOOP_COMPLETE">
+      </event>
+    hat: pf-reporter
+
+expected:
+  iterations: 7
+  # Resume routing: the FIRST activation of the resumed loop must be
+  # the pinned pending hat (the dispatcher) carrying the recovery
+  # payload. (The full activation sequence is intentionally not
+  # pinned: `exec.unit.done` is a supervisor slot terminal with no hat
+  # subscriber, so the bus wildcard fallback may schedule a sentinel
+  # activation mid-chain without changing any business outcome.)
+  assert_state:
+    - at_iteration: 1
+      prompt_injects:
+        hat: pf-dispatcher
+        block: "manifest_resume"
+    # The original trigger snapshot (accepted U1 completion) is inside
+    # the recovery payload the dispatcher sees on its resumed turn.
+    - at_iteration: 1
+      prompt_injects:
+        hat: pf-dispatcher
+        block: "task-res2-u1"
+    - at_iteration: 1
+      prompt_injects:
+        hat: pf-dispatcher
+        block: "original_trigger_topic"
+  events:
+    - topic: exec.unit.ready
+    - topic: exec.unit.done
+    - topic: exec.wave.complete
+    - topic: forge.wave.reviewed
+    - topic: forge.wave.integrated
+    - topic: forge.wave.verified
+    - topic: forge.wave.settled
+    - topic: LOOP_COMPLETE
+  # The old run's boundary events never re-appear: the resumed loop
+  # does not redo accepted work, and the correction path never fires.
+  absent_events:
+    - topic: forge.wave.worktrees.ready
+    - topic: forge.correction.requested
+    - topic: forge.wave.review.failed
+    - topic: work.failed
+  event_topic_counts:
+    # Exactly one replay dispatch — U1 is NOT dispatched again.
+    - topic: exec.unit.ready
+      count: 1
+    - topic: exec.unit.done
+      count: 1
+    - topic: forge.wave.settled
+      count: 1
+  # The single replayed handoff targets the unfinished Unit U2.
+  payload_matches:
+    - topic: exec.unit.ready
+      occurrence: 1
+      fields:
+        unit_id: "U2"
+        task_id: "task-res2-u2"
+        wave_id: "w1"
+    - topic: forge.wave.settled
+      occurrence: 1
+      fields:
+        wave_id: "w1"
+  # Task close authority unchanged: both units close only via the
+  # settlement's CloseTaskBatch projection.
+  task_ledger:
+    - task_key: forge:pf-res2:U1
+      status: closed
+      blocked_by_keys: []
+    - task_key: forge:pf-res2:U2
+      status: closed
+      blocked_by_keys: []
+  completion: true

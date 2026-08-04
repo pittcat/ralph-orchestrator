@@ -3738,6 +3738,59 @@ impl EventLoop {
         self.rebuild_bootstrap_flags_from_recorded_events();
     }
 
+    /// U2 (plan 2026-08-03-004): initialize the loop from a validated
+    /// parallel-forge resume manifest recovery. Publishes the
+    /// recovery's TARGETED `task.resume` — the existing recovery
+    /// contract, no second resume message type — instead of the
+    /// configured starting event, and pins `pending_recovery_hat` so
+    /// the next activation lands on the manifest's pending hat with
+    /// its original trigger embedded in the payload.
+    ///
+    /// Idempotent: when the target hat already holds a
+    /// system-injected `task.resume` bootstrap event, the publish is
+    /// skipped so a repeated bootstrap never inserts a second
+    /// recovery obligation. The pin is (re)applied either way.
+    ///
+    /// Callers must run the manifest through
+    /// [`rejection::task_resume_from_manifest`] first (digest /
+    /// target-hat validation) — this method publishes the result.
+    pub fn initialize_manifest_resume(
+        &mut self,
+        prompt_content: &str,
+        recovery: rejection::ManifestResumeRecovery,
+    ) {
+        // The objective must survive iterations exactly like
+        // `initialize_with_topic` does for fresh starts.
+        self.ralph.set_objective(prompt_content.to_string());
+
+        let already_bootstrapped =
+            self.bus
+                .peek_pending(&recovery.target_hat)
+                .is_some_and(|pending| {
+                    pending.iter().any(|event| {
+                        event.topic.as_str() == "task.resume" && event.system_injected == Some(true)
+                    })
+                });
+        if already_bootstrapped {
+            debug!(
+                target_hat = %recovery.target_hat.as_str(),
+                "U2: manifest resume bootstrap repeated; skipping duplicate task.resume publish"
+            );
+        } else {
+            let event = Event::new("task.resume", recovery.payload)
+                .with_source("orchestrator")
+                .with_system_injected()
+                .with_target(recovery.target_hat.clone());
+            self.bus.publish(event);
+            debug!(
+                target_hat = %recovery.target_hat.as_str(),
+                original_trigger_topic = %recovery.original_trigger_topic,
+                "U2: manifest resume bootstrap published targeted task.resume"
+            );
+        }
+        self.state.pending_recovery_hat = Some(recovery.target_hat);
+    }
+
     /// Common initialization logic with configurable topic.
     fn initialize_with_topic(&mut self, topic: &str, prompt_content: &str) {
         // Store the objective so it persists across all iterations.
@@ -5563,7 +5616,10 @@ impl EventLoop {
             let filtered_events: Vec<&Event> = if should_filter {
                 regular_events
                     .iter()
-                    .filter(|e| allowlist.contains(e.topic.as_str()))
+                    .filter(|e| {
+                        allowlist.contains(e.topic.as_str())
+                            || Self::is_recovery_channel_event(e)
+                    })
                     .collect()
             } else {
                 regular_events.iter().collect()
@@ -8112,6 +8168,23 @@ impl EventLoop {
 
     fn is_kickoff_or_recovery_event(topic: &str) -> bool {
         topic == "task.start" || topic == "task.resume" || topic.strip_suffix(".start").is_some()
+    }
+
+    /// U3 (plan 2026-08-03-004): system-injected recovery-channel events
+    /// (`task.resume` / `loop.resume`) must survive a hat's
+    /// `event_filter` allowlist. The parallel-forge manifest-resume
+    /// bootstrap (and every targeted recovery injection) re-binds the
+    /// pending hat through this channel with the original trigger
+    /// embedded in the payload; the allowlist only declares the hat's
+    /// business trigger topics, so filtering the recovery payload would
+    /// leave the resumed hat without its original trigger and the chain
+    /// could not continue. The exemption is narrow: only
+    /// runtime-injected (`system_injected == true`) recovery topics —
+    /// hat-emitted events on these topics stay filtered as before.
+    fn is_recovery_channel_event(event: &Event) -> bool {
+        event.system_injected == Some(true)
+            && (event.topic.as_str() == ralph_proto::TASK_RESUME
+                || event.topic.as_str() == ralph_proto::LOOP_RESUME)
     }
 
     /// Returns true for system/observability event topics that should not
