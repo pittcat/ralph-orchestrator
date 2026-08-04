@@ -80,6 +80,14 @@ ralph tools task verify-emit-bridge --task-id <live-id> --task-key <task-key> --
 
 The three correlation fields (`task_id`, `task_key`, `step`) must be internally consistent. `task_id` is a live id returned by `ralph tools task list`; `task_key` is the stable registration key; `step` must match the `:step-<n>:` segment of `task_key`.
 
+**Task confirmation（gate 开启时）**：当 `tasks.require_verify_for_cli_mutate: true` 时，一次成功的 protected Apply（`task add` / `task ensure`）会在写入的 task 行上附带一条状态为 `pending` 的 confirmation 记录；Apply 的 `--format json` 输出含 `confirmation.reference`（唯一确认凭证）与 `confirmation.digest`（该 mutation 的指纹）。在同一 loop + 同一 hat 发起**下一次** protected mutation 之前，必须先执行：
+
+```bash
+ralph tools task confirm <task_id> --reference <reference> --digest <digest>
+```
+
+两个参数值直接取自上一步 Apply 的 JSON 输出，不要手工构造，也不要复用其它 task 的值。未 confirm 时，下一次 protected mutation 会被 `task_verify_gate denied ... confirmation_required` 拒收且不写盘；confirm 成功后，同 scope 的下一次 protected mutation 放行。重复 confirm（相同 reference + digest）幂等：exit 0，不重复写盘。人类 CLI、gate 关闭、`tasks.allow_unsafe_task_mutate: true` 三条 bypass 路径不受该门禁影响。
+
 ### Single event emit
 
 ```bash
@@ -169,6 +177,8 @@ Advanced presets can add `tasks.command_rules` to extend or restrict the default
 | `task.resume` injected after `task close` | Closed task without emitting a completion topic | Emit `work.done` / `test.passed` / etc. before closing, or before activation ends |
 | Worker hat denied `task add` | Hat is not in `tasks.coordinator_hats` | Only coordinator-style hats may create tasks; worker hats should receive tasks via events |
 | `review.wave.complete` rejected | Supervisor-only coordination topic emitted by an agent | Let the runtime inject coordination topics; agents emit only their own completion topics |
+| `task_verify_gate denied ... confirmation_required` | 同一 loop + hat 上一条 protected Apply 留下的 confirmation 仍为 `pending` | 先 `ralph tools task confirm <task_id> --reference ... --digest ...` 再重试该 mutation；prepared verify ticket 保留，同一参数无需重新 verify |
+| `task confirm denied: confirmation_mismatch` / `confirmation_unavailable` | reference / digest / loop+hat scope 不符，或 task / confirmation 记录不存在 | 重新读取产生该 confirmation 记录的 Apply JSON 输出，取 `confirmation.reference` 与 `confirmation.digest` 后重试；不要靠猜参数重试 |
 
 ## Relationship to other guides
 
