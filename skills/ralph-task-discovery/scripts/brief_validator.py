@@ -116,7 +116,18 @@ def validate_brief_text(text: str) -> ValidationResult:
     """从 YAML 文本直接验证(真实 yaml.safe_load,不绕过格式错误)。"""
     try:
         data = yaml.safe_load(text)
-    except yaml.YAMLError as exc:
+    except (yaml.YAMLError, RecursionError) as exc:
+        if isinstance(exc, RecursionError):
+            # 深嵌套 YAML 会让纯 Python 解析器递归超限;str(exc) 可能为空,
+            # 必须保证 message 对人类读者仍然可读。
+            raw_detail = str(exc)
+            detail = (
+                f"YAML 嵌套过深导致解析递归超限({raw_detail})"
+                if raw_detail
+                else "YAML 嵌套过深导致解析递归超限"
+            )
+        else:
+            detail = str(exc)
         return ValidationResult(
             valid=False,
             author_ready=False,
@@ -126,7 +137,7 @@ def validate_brief_text(text: str) -> ValidationResult:
                 ValidationError(
                     code=CODE_INVALID_YAML,
                     path="$",
-                    message=f"YAML 解析失败,无法读取 task brief:{exc}",
+                    message=f"YAML 解析失败,无法读取 task brief:{detail}",
                     next_action=NEXT_INVESTIGATE,
                 ),
             ),

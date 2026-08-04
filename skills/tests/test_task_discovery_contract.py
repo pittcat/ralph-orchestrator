@@ -1091,3 +1091,76 @@ def test_all_candidates_unselected_blocks_author_ready_gate() -> None:
     assert "author_ready_gate_violation" not in _codes(restored)
     assert restored.valid is True
     assert restored.author_ready is True
+
+
+# --- U5:深嵌套 YAML 的 RecursionError 归一为 invalid_yaml(adversarial:A2) ---
+
+
+def _deep_nested_yaml(depth: int = 500) -> str:
+    """block 风格嵌套 ``depth`` 层的 YAML 文本。
+
+    探针实证(纯 Python parser,sys.getrecursionlimit()==1000):
+    300 层可解析,500 层触发 RecursionError。
+    """
+    return (
+        "\n".join("  " * i + f"k{i}:" for i in range(depth))
+        + "\n"
+        + "  " * depth
+        + "v: 1"
+    )
+
+
+def test_deep_nested_yaml_recursion_error_maps_to_invalid_yaml() -> None:
+    # adversarial:A2 — 深嵌套 YAML 触发解析器 RecursionError,必须归一为
+    # 稳定 code invalid_yaml,不得裸 traceback。直接调用断言返回值
+    # (不用 pytest.raises):无 RecursionError 逃逸。
+    result = validate_brief_text(_deep_nested_yaml(500))
+    assert result.valid is False
+    assert result.author_ready is False
+    assert len(result.errors) == 1
+    assert _codes(result) == {"invalid_yaml"}
+    error = result.errors[0]
+    assert error.code == "invalid_yaml"
+    assert error.path == "$"
+    assert error.next_action == "rerun_investigation"
+    # message 保持既有形态且可读:str(exc) 为空时也有深嵌套措辞
+    assert error.message.startswith("YAML 解析失败,无法读取 task brief:")
+    assert len(error.message) > len("YAML 解析失败,无法读取 task brief:")
+    assert "YAML 嵌套过深导致解析递归超限" in error.message
+    # 既有 invalid_yaml 返回路径的其余字段不变
+    assert result.recommended_status == "draft"
+    assert result.next_action == "rerun_investigation"
+    assert result.handoff_block_reasons == ("YAML 格式错误,无法解析 task brief",)
+
+
+@pytest.mark.parametrize(
+    "bad_yaml",
+    ["a: [1, 2", "{{{{"],
+    ids=["unclosed-flow-sequence", "stray-flow-braces"],
+)
+def test_malformed_yaml_syntax_baseline_unchanged(bad_yaml: str) -> None:
+    # 不回归:语法错误 YAML(未闭合流式序列 / 杂散花括号)仍走既有
+    # invalid_yaml 路径,code/path/next_action 与 message 形态与现状一致
+    # (断言先经基线探针实证)。
+    result = validate_brief_text(bad_yaml)
+    assert result.valid is False
+    assert result.author_ready is False
+    assert len(result.errors) == 1
+    assert _codes(result) == {"invalid_yaml"}
+    error = result.errors[0]
+    assert error.path == "$"
+    assert error.next_action == "rerun_investigation"
+    assert error.message.startswith("YAML 解析失败,无法读取 task brief:")
+    assert len(error.message) > len("YAML 解析失败,无法读取 task brief:")
+    assert result.recommended_status == "draft"
+    assert result.next_action == "rerun_investigation"
+    assert result.handoff_block_reasons == ("YAML 格式错误,无法解析 task brief",)
+
+
+def test_valid_fixture_still_passes_with_recursion_guard() -> None:
+    # 不回归:合法浅层 brief(fixtures/valid.yml)不受 RecursionError 守卫
+    # 影响,valid=True / author_ready=True 结论不变。
+    result = validate_brief_text(_fixture_text("valid.yml"))
+    assert result.valid is True
+    assert result.author_ready is True
+    assert result.errors == ()
