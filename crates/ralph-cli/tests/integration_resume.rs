@@ -801,6 +801,326 @@ cli:
         drifted.config_digest = "c2".to_string();
         assert!(validate_manifest(&manifest, &drifted).is_err());
     }
+
+    // ── U2-fix (plan 2026-08-03-004 fix-unit): crash-window lockout ──
+    //
+    // correctness:C1 ⊕ testing:T1 — the crash window between a
+    // successful resume bootstrap and the pending hat's first accepted
+    // transition used to lock the worktree out of reuse forever:
+    // the next capture judged the manifest incomplete, cleanup archived
+    // that incomplete manifest (and the live evidence), and every later
+    // fallback read returned the same incomplete manifest → permanent
+    // refusal. These tests pin the recovery: a crashed-once worktree
+    // always reaches a successful reuse (correct resume or fresh
+    // bootstrap), never a permanent refusal ring.
+
+    /// Config with the two hats the boundary hands off between.
+    /// Backend `true` exits instantly and emits nothing, so a started
+    /// loop terminates at `max_iterations` WITHOUT any accepted
+    /// transition — the evidence-level equivalent of "crashed before
+    /// the pending hat's first accepted transition".
+    fn write_forge_hats_config(path: &Path) {
+        let config = r#"event_loop:
+  completion_promise: "loop.complete"
+  starting_event: "forge.start"
+  max_iterations: 1
+  max_runtime_seconds: 30
+
+cli:
+  backend: "custom"
+  command: "true"
+
+memories:
+  enabled: false
+
+tasks:
+  enabled: false
+
+hats:
+  planner:
+    name: "Planner"
+    description: "Writes the forge plan."
+    triggers: ["forge.start"]
+    publishes: ["forge.plan.ready"]
+  guardian:
+    name: "Guardian"
+    description: "Approves the forge plan."
+    triggers: ["forge.plan.ready"]
+    publishes: ["loop.complete"]
+"#;
+        fs::write(path.join("ralph.yml"), config).expect("write ralph.yml");
+    }
+
+    /// Read the reused worktree's fresh events file (via the
+    /// `current-events` marker).
+    fn read_fresh_events(worktree_path: &Path) -> String {
+        let marker = worktree_path.join(".ralph/current-events");
+        assert!(marker.exists(), "current-events marker must exist");
+        let rel = fs::read_to_string(&marker).unwrap();
+        let rel = rel.trim();
+        let path = worktree_path.join(rel);
+        assert!(path.exists(), "events file {rel} must exist");
+        fs::read_to_string(&path).unwrap()
+    }
+
+    /// Count archived manifests by completeness (newest-archive scan).
+    fn archived_manifest_completeness(worktree_path: &Path) -> Vec<(String, bool)> {
+        let history = worktree_path.join(".ralph/reuse-history");
+        let mut dirs: Vec<PathBuf> = fs::read_dir(&history)
+            .map(|entries| {
+                entries
+                    .filter_map(|entry| entry.ok())
+                    .map(|entry| entry.path())
+                    .filter(|path| path.is_dir())
+                    .collect()
+            })
+            .unwrap_or_default();
+        dirs.sort();
+        let mut result = Vec::new();
+        for dir in dirs {
+            let manifest_path = dir.join(MANIFEST_FILE_NAME);
+            if !manifest_path.is_file() {
+                continue;
+            }
+            let value: serde_json::Value = serde_json::from_str(
+                &fs::read_to_string(&manifest_path).expect("manifest readable"),
+            )
+            .expect("manifest parses");
+            let complete = value
+                .get("incomplete_reasons")
+                .and_then(|v| v.as_array())
+                .is_some_and(|reasons| reasons.is_empty());
+            let name = dir
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_default();
+            result.push((name, complete));
+        }
+        result
+    }
+
+    fn spawn_reuse(main_repo: &Path, plan_path: &Path) -> std::process::Output {
+        super::common::ralph_bin()
+            .args([
+                "run",
+                "--worktree",
+                "--reuse-worktree",
+                "--no-tui",
+                "--skip-preflight",
+                "--plan",
+                plan_path.to_str().unwrap(),
+            ])
+            .current_dir(main_repo)
+            .output()
+            .expect("ralph run")
+    }
+
+    /// The FULL compound lockout sequence, end to end:
+    ///
+    /// 1. Run A completed: accepted boundary in live log + outbox.
+    /// 2. Reuse B: cleanup archives run A (complete manifest M_A), the
+    ///    gate passes, the resume bootstrap starts — and the loop ends
+    ///    with NO accepted transition (the crash-window evidence
+    ///    shape).
+    /// 3. Crash injection: the durable outbox boundary evidence is lost
+    ///    as well (strongest form; drives the adjudication ① path).
+    /// 4. Reuse C: capture sees events without any accepted boundary →
+    ///    incomplete manifest M_C is archived → the gate refuses. This
+    ///    FIRST refusal is the intended fail-closed behavior.
+    /// 5. Reuse D: nothing live is left to archive, so the gate falls
+    ///    back to the archives. M_C is incomplete and MUST be skipped;
+    ///    the older complete M_A validates → the loop RESUMES from M_A
+    ///    (targeted `task.resume` for the pending hat). No permanent
+    ///    refusal ring.
+    #[test]
+    fn crash_window_lockout_recovers_via_older_complete_manifest() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let main_repo = temp_dir.path();
+        setup_git_repo(main_repo);
+        write_forge_hats_config(main_repo);
+
+        let loop_id = "pf-crash-lockout";
+        let plan_path = main_repo.join(format!("{loop_id}.md"));
+        fs::write(&plan_path, "# plan v1\n").unwrap();
+
+        let worktree_path = precreate_worktree_with_accepted_boundary(main_repo, loop_id);
+        write_completed_worktree_entry(main_repo, loop_id, &worktree_path);
+
+        // Reuse B: resume bootstrap starts, no accepted transition
+        // follows (crash-window evidence shape).
+        let b = spawn_reuse(main_repo, &plan_path);
+        let b_stderr = String::from_utf8_lossy(&b.stderr);
+        eprintln!("crash-chain reuse B stderr: {b_stderr}");
+        assert!(
+            !b_stderr.contains("resume manifest validation failed"),
+            "reuse B must pass the manifest gate: {b_stderr}"
+        );
+        let b_events = read_fresh_events(&worktree_path);
+        assert!(
+            b_events.contains("manifest_resume"),
+            "reuse B must bootstrap the targeted resume: {b_events}"
+        );
+
+        // Crash injection: lose the durable outbox boundary evidence.
+        // Run B's live event log stays — it carries the bootstrap but
+        // no boundary event.
+        let outbox = worktree_path.join(".ralph/agent/accepted-transitions.jsonl");
+        assert!(
+            outbox.exists(),
+            "the outbox must survive reuse B (it is never archived)"
+        );
+        fs::remove_file(&outbox).unwrap();
+
+        // Reuse C: capture judges incomplete → M_C archived → refuse.
+        let c = spawn_reuse(main_repo, &plan_path);
+        let c_stderr = String::from_utf8_lossy(&c.stderr);
+        eprintln!("crash-chain reuse C stderr: {c_stderr}");
+        assert!(
+            !c.status.success(),
+            "reuse C must refuse fail-closed on the incomplete capture"
+        );
+        assert!(
+            c_stderr.contains("resume manifest validation failed"),
+            "stderr must carry the gate refusal: {c_stderr}"
+        );
+        assert!(
+            c_stderr.contains("incomplete"),
+            "the refusal must name the incompleteness: {c_stderr}"
+        );
+        // The refusal archived exactly one incomplete manifest (the
+        // old-semantics lockout poison).
+        let archived = archived_manifest_completeness(&worktree_path);
+        let incomplete_count = archived.iter().filter(|(_, complete)| !complete).count();
+        assert_eq!(
+            incomplete_count, 1,
+            "exactly the crash capture must be incomplete: {archived:?}"
+        );
+
+        // Reuse D: the fallback must skip the incomplete archive and
+        // resume from the older complete manifest — NOT refuse again.
+        let d = spawn_reuse(main_repo, &plan_path);
+        let d_stderr = String::from_utf8_lossy(&d.stderr);
+        eprintln!("crash-chain reuse D stderr: {d_stderr}");
+        assert!(
+            !d_stderr.contains("resume manifest validation failed"),
+            "reuse D must NOT be refused (no permanent lockout): {d_stderr}"
+        );
+        let d_events = read_fresh_events(&worktree_path);
+        eprintln!("crash-chain reuse D events: {d_events}");
+        // The recovery proves the fallback resumed from M_A: the
+        // bootstrap record is the targeted task.resume for guardian.
+        let mut saw_resume_bootstrap = false;
+        for line in d_events.lines() {
+            let Ok(record) = serde_json::from_str::<serde_json::Value>(line) else {
+                continue;
+            };
+            if record.get("topic").and_then(|v| v.as_str()) != Some("task.resume") {
+                continue;
+            }
+            let Some(payload_str) = record.get("payload").and_then(|v| v.as_str()) else {
+                continue;
+            };
+            let Ok(payload) = serde_json::from_str::<serde_json::Value>(payload_str) else {
+                continue;
+            };
+            if payload.get("reason").and_then(|v| v.as_str()) != Some("manifest_resume") {
+                continue;
+            }
+            assert_eq!(payload["target_hat"], "guardian");
+            assert_eq!(payload["original_trigger_topic"], "forge.plan.ready");
+            saw_resume_bootstrap = true;
+        }
+        assert!(
+            saw_resume_bootstrap,
+            "reuse D must resume from the older complete manifest: {d_events}"
+        );
+    }
+
+    /// Adjudication ② shape, end to end: the crash where the durable
+    /// outbox SURVIVES but the live event log lost the boundary must
+    /// not be refused at all. The outbox record is accepted as
+    /// fallback boundary evidence; the manifest completes with no
+    /// derivable pending hat, and the loop degrades to a fresh
+    /// bootstrap. A follow-up reuse must also succeed — the worktree
+    /// is never locked out.
+    #[test]
+    fn crash_window_with_surviving_outbox_succeeds_on_first_reuse() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let main_repo = temp_dir.path();
+        setup_git_repo(main_repo);
+        write_forge_hats_config(main_repo);
+
+        let loop_id = "pf-crash-outbox";
+        let plan_path = main_repo.join(format!("{loop_id}.md"));
+        fs::write(&plan_path, "# plan v1\n").unwrap();
+
+        let worktree_path = precreate_worktree_with_accepted_boundary(main_repo, loop_id);
+        write_completed_worktree_entry(main_repo, loop_id, &worktree_path);
+
+        // Crash injection: the live event log loses the boundary event;
+        // the durable outbox keeps the acceptance record.
+        fs::remove_file(worktree_path.join(".ralph/events.jsonl")).unwrap();
+        assert!(
+            worktree_path
+                .join(".ralph/agent/accepted-transitions.jsonl")
+                .exists(),
+            "the outbox must carry the crash-window evidence"
+        );
+
+        // Reuse #1: outbox fallback evidence → complete manifest with
+        // no derivable pending hat → gate passes → fresh bootstrap.
+        let first = spawn_reuse(main_repo, &plan_path);
+        let first_stderr = String::from_utf8_lossy(&first.stderr);
+        eprintln!("crash-outbox reuse #1 stderr: {first_stderr}");
+        assert!(
+            !first_stderr.contains("resume manifest validation failed"),
+            "the surviving outbox must keep the first reuse unrefused: {first_stderr}"
+        );
+        let first_events = read_fresh_events(&worktree_path);
+        eprintln!("crash-outbox reuse #1 events: {first_events}");
+        // No targeted resume: the pending hat was underivable from the
+        // outbox alone, so the fresh starting event remains the
+        // bootstrap record.
+        let mut saw_starting_bootstrap = false;
+        for line in first_events.lines() {
+            let Ok(record) = serde_json::from_str::<serde_json::Value>(line) else {
+                continue;
+            };
+            let source = record.get("source").and_then(|v| v.as_str()).unwrap_or("");
+            let topic = record.get("topic").and_then(|v| v.as_str()).unwrap_or("");
+            if source == "loop-bootstrap" && topic == "forge.start" {
+                saw_starting_bootstrap = true;
+            }
+            if topic == "task.resume" {
+                let payload = record.get("payload").and_then(|v| v.as_str()).unwrap_or("");
+                assert!(
+                    !payload.contains("manifest_resume"),
+                    "no targeted recovery may start without a derivable pending hat: \
+                     {first_events}"
+                );
+            }
+        }
+        assert!(
+            saw_starting_bootstrap,
+            "the fresh starting event must be the bootstrap: {first_events}"
+        );
+
+        // Reuse #2: run #1 ended without an accepted transition and the
+        // outbox still carries run A's boundary. The gate must pass
+        // again — no permanent refusal ring.
+        let second = spawn_reuse(main_repo, &plan_path);
+        let second_stderr = String::from_utf8_lossy(&second.stderr);
+        eprintln!("crash-outbox reuse #2 stderr: {second_stderr}");
+        assert!(
+            !second_stderr.contains("resume manifest validation failed"),
+            "the second reuse must also pass the gate: {second_stderr}"
+        );
+        let second_events = read_fresh_events(&worktree_path);
+        assert!(
+            !second_events.is_empty(),
+            "the second reuse must start the loop"
+        );
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────

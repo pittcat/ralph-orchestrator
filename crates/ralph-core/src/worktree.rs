@@ -734,6 +734,11 @@ fn archive_files_matching(
 ///
 /// - `.ralph/agent/context.md` (worktree metadata)
 /// - `.ralph/agent/memories.md` (symlink into main repo)
+/// - `.ralph/agent/accepted-transitions.jsonl` (durable acceptance
+///   outbox — the ONLY authority for which business events were
+///   accepted. Deliberately never archived: it must survive reuse so a
+///   crash-window capture can still fall back on its boundary records,
+///   and so `commit_idempotent` dedup keeps working across reuses.)
 /// - `.ralph/specs/`, `.ralph/tasks/` (symlinks into main repo)
 /// - `.ralph/reuse-history/` (prior-run archives)
 /// - The `.ralph/` and `.ralph/agent/` directories themselves
@@ -757,6 +762,14 @@ fn archive_files_matching(
 /// incomplete; the start-time validation gate in the CLI is responsible
 /// for refusing the loop. When `resume_inputs` is `None`, no manifest
 /// is captured (legacy behavior).
+///
+/// An INCOMPLETE manifest is archived as-is when this cleanup's gate
+/// refuses the start (fail-closed first refusal). Later reuses must not
+/// be pinned to it: the fallback read
+/// ([`crate::parallel_forge_resume::latest_archived_manifest`]) skips
+/// incomplete manifests and continues with older archives, so a
+/// crash-window capture can never lock the worktree out of reuse
+/// permanently (U2-fix, adjudication ①).
 pub fn clean_worktree_runtime_artifacts(
     worktree_path: impl AsRef<Path>,
     resume_inputs: Option<&crate::parallel_forge_resume::CaptureInputs>,
@@ -890,7 +903,9 @@ pub fn clean_worktree_runtime_artifacts(
     // manifest was captured from the live paths BEFORE the renames
     // above, so it reflects exactly the run we just archived. An
     // incomplete manifest is written as-is; the CLI validation gate
-    // refuses the start fail-closed.
+    // refuses THIS start fail-closed. Later reuses are not locked out
+    // by it: the fallback read skips incomplete manifests and continues
+    // with older archives (U2-fix, adjudication ①).
     if let Some(manifest) = manifest {
         crate::parallel_forge_resume::write_manifest(&manifest, &archive_dir)?;
     }

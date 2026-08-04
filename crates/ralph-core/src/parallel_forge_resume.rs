@@ -26,9 +26,14 @@
 //! Only entries in the accepted-transitions outbox count as hat
 //! completion boundaries. The last accepted boundary's corresponding
 //! event in the event log identifies the pending hat (`triggered`) and
-//! carries the original trigger snapshot. When the boundary cannot be
-//! determined uniquely (missing outbox, malformed log, boundary event
-//! absent from the log), the manifest records the reason and marks
+//! carries the original trigger snapshot. When the boundary event is
+//! absent from the live event log but the outbox still records the
+//! acceptance (the crash window after a successful resume bootstrap),
+//! the outbox record serves as fallback boundary evidence: the manifest
+//! stays complete, but the pending hat is underivable (the outbox
+//! records no `triggered`), so resume consumers degrade to a fresh
+//! bootstrap. When the boundary cannot be determined at all (missing
+//! outbox, malformed log), the manifest records the reason and marks
 //! itself incomplete — validation then refuses the start.
 //!
 //! # Identity chain
@@ -492,7 +497,37 @@ pub fn capture_manifest(worktree_path: &Path, inputs: &CaptureInputs) -> ResumeM
                     });
                 }
             }
-            _ => reasons.push("last accepted boundary event not found in event log".to_string()),
+            _ => {
+                // U2-fix (plan 2026-08-03-004 fix-unit, adjudication ②):
+                // outbox fallback evidence. The last accepted boundary
+                // event is missing from the live event log — the crash
+                // window shape: a reuse archived the old log, the
+                // resume bootstrap succeeded, and the run crashed
+                // before the pending hat's first accepted transition
+                // reached the new log. The outbox is the durable
+                // acceptance authority and survives reuse (it is never
+                // archived), so its last record is sufficient fallback
+                // evidence for the boundary itself. The outbox records
+                // no `triggered` hat, payload body, or publishing hat —
+                // those fields stay `None` rather than being guessed,
+                // and resume consumers degrade to a fresh bootstrap
+                // (`pending_hat` is underivable). Marking the manifest
+                // incomplete here instead used to lock the worktree out
+                // of every later reuse; that was fail-closed past the
+                // point of usefulness. Live log AND outbox both missing
+                // the boundary still fails closed (see the
+                // `outbox.is_empty()` arm).
+                let last = outbox
+                    .last()
+                    .expect("this branch only runs when the outbox is non-empty");
+                original_trigger = Some(TriggerSnapshot {
+                    topic: last.topic.clone(),
+                    payload: None,
+                    hat: None,
+                    triggered: None,
+                    ts: last.committed_at.clone(),
+                });
+            }
         }
     }
 
@@ -630,38 +665,52 @@ pub fn validate_manifest(
     Ok(())
 }
 
-/// Path of the newest manifest found among `.ralph/reuse-history/`
-/// archives (newest archive directory first), if any.
-pub fn latest_archived_manifest_path(worktree_path: &Path) -> Option<PathBuf> {
-    let history = worktree_path.join(".ralph/reuse-history");
-    let mut dirs: Vec<PathBuf> = std::fs::read_dir(&history)
-        .ok()?
-        .filter_map(|entry| entry.ok())
-        .map(|entry| entry.path())
-        .filter(|path| path.is_dir())
-        .collect();
-    dirs.sort();
-    for dir in dirs.iter().rev() {
-        let candidate = dir.join(MANIFEST_FILE_NAME);
-        if candidate.is_file() {
-            return Some(candidate);
-        }
-    }
-    None
-}
-
-/// Read the newest archived manifest. Parse failures propagate (the
-/// caller fails closed); `Ok(None)` means no archive carries one.
+/// Read the newest archived manifest that can support a resume.
+///
+/// Archives are scanned newest-first. Manifests marked INCOMPLETE are
+/// SKIPPED and the scan continues with older archives (U2-fix, plan
+/// 2026-08-03-004 fix-unit, adjudication ①): an incomplete manifest is
+/// the capture product of a crashed run, and letting it answer the
+/// fallback read pinned every later reuse to the same refusal — the
+/// permanent lockout ring. Skipping it makes incomplete-only history
+/// equivalent to "no manifest at all", which fresh-bootstraps.
+///
+/// Parse failures still PROPAGATE (the caller fails closed): an
+/// unreadable manifest is tamper/corruption evidence, not a skip
+/// candidate — only manifests that parse and are MARKED incomplete are
+/// skipped. `Ok(None)` means no archive carries a complete manifest.
+///
+/// The capture-side identity chain inherits this semantics: an
+/// incomplete prior manifest is never an identity source, so a failed
+/// attempt's unvalidated inputs cannot drift the chain for later runs.
 pub fn latest_archived_manifest(
     worktree_path: &Path,
 ) -> Result<Option<(PathBuf, ResumeManifest)>, ResumeManifestError> {
-    match latest_archived_manifest_path(worktree_path) {
-        Some(path) => {
-            let manifest = read_manifest(&path)?;
-            Ok(Some((path, manifest)))
+    let history = worktree_path.join(".ralph/reuse-history");
+    let mut dirs: Vec<PathBuf> = std::fs::read_dir(&history)
+        .ok()
+        .map(|entries| {
+            entries
+                .filter_map(|entry| entry.ok())
+                .map(|entry| entry.path())
+                .filter(|path| path.is_dir())
+                .collect()
+        })
+        .unwrap_or_default();
+    dirs.sort();
+    for dir in dirs.iter().rev() {
+        let candidate = dir.join(MANIFEST_FILE_NAME);
+        if !candidate.is_file() {
+            continue;
         }
-        None => Ok(None),
+        let manifest = read_manifest(&candidate)?;
+        if manifest.is_complete() {
+            return Ok(Some((candidate, manifest)));
+        }
+        // Marked incomplete: a crash-window capture product. Skip it
+        // and keep scanning older archives.
     }
+    Ok(None)
 }
 
 /// Event log files to scan, in deterministic order: the main log first,
@@ -1180,8 +1229,22 @@ mod tests {
         );
     }
 
+    /// U2-fix (plan 2026-08-03-004 fix-unit, adjudication ②): the old
+    /// semantics marked the manifest incomplete whenever the last
+    /// accepted boundary event was missing from the live event log,
+    /// even though the durable outbox still recorded the acceptance.
+    /// That turned the crash window (resume bootstrap succeeded, crash
+    /// before the pending hat's first accepted transition) into a
+    /// permanent reuse lockout: every later capture saw the same
+    /// outbox-without-log shape and refused. The outbox IS the
+    /// acceptance authority, so its record now serves as FALLBACK
+    /// boundary evidence. What the outbox alone cannot provide (the
+    /// boundary event's `triggered` hat, the payload body, the
+    /// publishing hat) stays `None`; resume consumers then degrade to
+    /// a fresh bootstrap instead of a targeted resume — still
+    /// fail-closed, never locked out.
     #[test]
-    fn boundary_event_missing_from_log_marks_incomplete() {
+    fn boundary_event_missing_from_log_falls_back_to_outbox_record() {
         // Outbox says accepted, but the event log lost the event.
         let dir = tempfile::TempDir::new().unwrap();
         seed_runtime(dir.path());
@@ -1189,8 +1252,63 @@ mod tests {
         append_outbox(dir.path(), "forge.plan.ready", payload, "planner");
 
         let manifest = capture_manifest(dir.path(), &base_inputs());
-        assert!(!manifest.is_complete());
+        assert!(
+            manifest.is_complete(),
+            "the durable outbox acceptance must be sufficient fallback evidence: {:?}",
+            manifest.incomplete_reasons
+        );
+        assert_eq!(manifest.boundary.accepted.len(), 1);
+        let ab = &manifest.boundary.accepted[0];
+        assert_eq!(ab.topic, "forge.plan.ready");
+        assert!(
+            !ab.in_event_log,
+            "the fallback boundary must record that the event-log match failed"
+        );
+        assert!(
+            ab.hat.is_none(),
+            "the publishing hat is unknowable from the outbox alone"
+        );
+        // The pending hat comes from the boundary event's `triggered`
+        // field, which the outbox does not record.
         assert!(manifest.boundary.pending_hat.is_none());
+        let trigger = manifest
+            .boundary
+            .original_trigger
+            .as_ref()
+            .expect("fallback boundary must record what the outbox knows");
+        assert_eq!(trigger.topic, "forge.plan.ready");
+        assert!(
+            trigger.payload.is_none(),
+            "the outbox records only the payload digest, not the body"
+        );
+        assert!(trigger.triggered.is_none());
+        assert!(trigger.hat.is_none());
+        assert_eq!(trigger.ts, "2026-08-03T00:00:01Z");
+    }
+
+    /// Adjudication ② fail-closed edge: the outbox fallback applies
+    /// only when the outbox actually records a boundary. With NO
+    /// outbox entry and NO event evidence there is nothing to fall
+    /// back to — the manifest must stay incomplete.
+    #[test]
+    fn boundary_missing_from_log_and_outbox_stays_incomplete() {
+        let dir = tempfile::TempDir::new().unwrap();
+        seed_runtime(dir.path());
+        // No outbox entries, no events — nothing to fall back to.
+
+        let manifest = capture_manifest(dir.path(), &base_inputs());
+        assert!(
+            !manifest.is_complete(),
+            "double-missing boundary evidence must stay incomplete"
+        );
+        assert!(manifest.boundary.accepted.is_empty());
+        assert!(manifest.boundary.pending_hat.is_none());
+        assert!(manifest.boundary.original_trigger.is_none());
+        let err = validate_manifest(&manifest, &base_inputs()).unwrap_err();
+        assert!(
+            matches!(err, ResumeManifestError::Incomplete { .. }),
+            "double-missing boundary must refuse the start, got {err:?}"
+        );
     }
 
     #[test]
@@ -1508,5 +1626,136 @@ mod tests {
             .expect("archived manifest must be found");
         assert!(path.to_string_lossy().contains("20260202T000000Z"));
         assert_eq!(read.manifest_digest, manifest.manifest_digest);
+    }
+
+    /// U2-fix (adjudication ①): an incomplete manifest is the capture
+    /// product of a crashed run. It must not pollute the fallback
+    /// chain — the scan skips it and continues to older archives,
+    /// instead of pinning every later reuse to the incomplete record
+    /// (the permanent-refusal ring).
+    #[test]
+    fn latest_archived_manifest_skips_incomplete_and_continues_older() {
+        let dir = tempfile::TempDir::new().unwrap();
+        seed_runtime(dir.path());
+        let payload = "{\"plan_key\":\"pf-1\"}";
+        append_event(dir.path(), &forge_plan_ready_line(payload));
+        append_outbox(dir.path(), "forge.plan.ready", payload, "planner");
+
+        let complete = capture_manifest(dir.path(), &base_inputs());
+        assert!(complete.is_complete());
+        let mut incomplete = complete.clone();
+        incomplete.incomplete_reasons = vec!["crash-window capture".to_string()];
+        incomplete.finalize_digest();
+
+        let older = dir.path().join(".ralph/reuse-history/20260101T000000Z");
+        let newer = dir.path().join(".ralph/reuse-history/20260202T000000Z");
+        fs::create_dir_all(&older).unwrap();
+        fs::create_dir_all(&newer).unwrap();
+        write_manifest(&complete, &older).unwrap();
+        write_manifest(&incomplete, &newer).unwrap();
+
+        let (path, read) = latest_archived_manifest(dir.path())
+            .unwrap()
+            .expect("the older complete manifest must be found past the incomplete one");
+        assert!(
+            path.to_string_lossy().contains("20260101T000000Z"),
+            "the scan must skip the incomplete newest archive: {}",
+            path.display()
+        );
+        assert!(read.is_complete());
+        assert_eq!(read.manifest_digest, complete.manifest_digest);
+    }
+
+    /// All archives incomplete == no trustworthy evidence == the same
+    /// result as "no manifest at all": the caller fresh-bootstraps.
+    #[test]
+    fn latest_archived_manifest_returns_none_when_only_incomplete() {
+        let dir = tempfile::TempDir::new().unwrap();
+        seed_runtime(dir.path());
+        let payload = "{\"plan_key\":\"pf-1\"}";
+        append_event(dir.path(), &forge_plan_ready_line(payload));
+        append_outbox(dir.path(), "forge.plan.ready", payload, "planner");
+
+        let mut incomplete = capture_manifest(dir.path(), &base_inputs());
+        incomplete.incomplete_reasons = vec!["crash-window capture".to_string()];
+        incomplete.finalize_digest();
+        for ts in ["20260101T000000Z", "20260202T000000Z"] {
+            let archive = dir.path().join(".ralph/reuse-history").join(ts);
+            fs::create_dir_all(&archive).unwrap();
+            write_manifest(&incomplete, &archive).unwrap();
+        }
+
+        assert_eq!(
+            latest_archived_manifest(dir.path()).unwrap(),
+            None,
+            "incomplete-only archives must be equivalent to no manifest"
+        );
+    }
+
+    /// Parse failures are tamper/corruption evidence, not skip
+    /// candidates: they still propagate fail-closed even when an older
+    /// complete archive exists (only MARKED-INCOMPLETE manifests are
+    /// skipped).
+    #[test]
+    fn latest_archived_manifest_parse_error_still_fails_closed() {
+        let dir = tempfile::TempDir::new().unwrap();
+        seed_runtime(dir.path());
+        let payload = "{\"plan_key\":\"pf-1\"}";
+        append_event(dir.path(), &forge_plan_ready_line(payload));
+        append_outbox(dir.path(), "forge.plan.ready", payload, "planner");
+
+        let complete = capture_manifest(dir.path(), &base_inputs());
+        let older = dir.path().join(".ralph/reuse-history/20260101T000000Z");
+        let newer = dir.path().join(".ralph/reuse-history/20260202T000000Z");
+        fs::create_dir_all(&older).unwrap();
+        fs::create_dir_all(&newer).unwrap();
+        write_manifest(&complete, &older).unwrap();
+        fs::write(
+            newer.join(MANIFEST_FILE_NAME),
+            "{\"schema_version\":\"parallel-forge-resume-manifest.v1\",\"identity\":",
+        )
+        .unwrap();
+
+        let err = latest_archived_manifest(dir.path()).unwrap_err();
+        assert!(
+            matches!(err, ResumeManifestError::Parse { .. }),
+            "an unparseable manifest must fail closed, not be skipped: {err:?}"
+        );
+    }
+
+    /// Capture-side identity chain: the same skip semantics apply — an
+    /// incomplete prior manifest is never an identity source, so a
+    /// crashed attempt's unvalidated inputs cannot pin (and drift) the
+    /// chain for later reuses.
+    #[test]
+    fn identity_chain_skips_incomplete_prior_manifest() {
+        let dir = tempfile::TempDir::new().unwrap();
+        seed_runtime(dir.path());
+        let payload = "{\"plan_key\":\"pf-1\"}";
+        append_event(dir.path(), &forge_plan_ready_line(payload));
+        append_outbox(dir.path(), "forge.plan.ready", payload, "planner");
+
+        let first_inputs = base_inputs();
+        let first = capture_manifest(dir.path(), &first_inputs);
+        let older = dir.path().join(".ralph/reuse-history/20260101T000000Z");
+        fs::create_dir_all(&older).unwrap();
+        write_manifest(&first, &older).unwrap();
+
+        // A newer reuse attempt captured INCOMPLETE (crash window) with
+        // forged identity inputs; it must not become the chain source.
+        let mut incomplete = first.clone();
+        incomplete.identity.plan_digest = sha256_hex(b"failed attempt plan");
+        incomplete.incomplete_reasons = vec!["crash-window capture".to_string()];
+        incomplete.finalize_digest();
+        let newer = dir.path().join(".ralph/reuse-history/20260202T000000Z");
+        fs::create_dir_all(&newer).unwrap();
+        write_manifest(&incomplete, &newer).unwrap();
+
+        let third = capture_manifest(dir.path(), &first_inputs);
+        assert!(third.is_complete(), "{:?}", third.incomplete_reasons);
+        assert_eq!(
+            third.identity.plan_digest, first.identity.plan_digest,
+            "the identity chain must skip the incomplete prior manifest"
+        );
     }
 }

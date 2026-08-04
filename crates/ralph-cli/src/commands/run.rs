@@ -1140,6 +1140,18 @@ pub async fn run_command(
                         // means the worktree carries no prior runtime
                         // records, so the start proceeds.
                         //
+                        // U2-fix (adjudication ①): the fallback scan SKIPS
+                        // manifests marked incomplete and continues with
+                        // older archives (`latest_archived_manifest`); an
+                        // incomplete manifest is the capture product of a
+                        // crashed run and must not pin every later reuse to
+                        // the same refusal (permanent lockout ring). Only
+                        // incomplete-only history degrades to "no manifest"
+                        // and fresh-bootstraps; parse/tamper failures still
+                        // fail closed. The Some(dir) branch keeps refusing
+                        // the freshly captured incomplete manifest of THIS
+                        // cleanup — that first refusal stays fail-closed.
+                        //
                         // U2: the gate result now RETAINS the validated
                         // manifest so the loop bootstrap can re-bind the
                         // pending hat via the existing `task.resume`
@@ -1317,6 +1329,14 @@ pub async fn run_command(
         // failure refuses the start. A worktree without archived
         // manifests (fresh, never reused) yields `None` and the loop
         // bootstraps normally.
+        //
+        // U2-fix (adjudication ①): `latest_archived_manifest` skips
+        // manifests marked incomplete and continues with older
+        // archives, so the child stays consistent with the parent
+        // gate: when the parent passed by falling back past an
+        // incomplete crash capture, the child re-validates the SAME
+        // older complete manifest instead of refusing on the
+        // incomplete one.
         use ralph_core::parallel_forge_resume::{
             CaptureInputs, latest_archived_manifest, sha256_hex, validate_manifest,
         };
