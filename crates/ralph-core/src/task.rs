@@ -51,11 +51,12 @@ pub enum ConfirmMatch {
     /// Reference, digest and scope all match and the state is
     /// `Pending` — transition to `Confirmed`.
     Apply,
-    /// Reference and digest match and the state is already
-    /// `Confirmed` — idempotent no-op (no disk rewrite).
+    /// Reference, digest and scope all match and the state is
+    /// already `Confirmed` — idempotent no-op (no disk rewrite).
+    /// A cross-scope repeat of a confirmed record is a [`Self::Mismatch`].
     AlreadyConfirmed,
     /// The reference matches but the digest or the loop/hat scope
-    /// differs — the state stays `Pending`.
+    /// differs — the state stays as recorded.
     Mismatch,
     /// The reference does not match — nothing to confirm here.
     Unavailable,
@@ -103,6 +104,12 @@ impl TaskConfirmation {
     /// Match `task confirm` arguments against this record without
     /// mutating it. Pure value-object transition logic; the CLI maps
     /// the outcome to exit codes and stable reason tokens.
+    ///
+    /// Scope is checked on every match, including the idempotent
+    /// `AlreadyConfirmed` branch: a record recorded by one loop/hat
+    /// can only be confirmed (or idempotently re-confirmed) by the
+    /// same loop/hat. Cross-scope attempts with the right reference
+    /// and digest are a [`ConfirmMatch::Mismatch`].
     pub fn match_confirm(
         &self,
         reference: &str,
@@ -116,15 +123,12 @@ impl TaskConfirmation {
         if self.digest != digest {
             return ConfirmMatch::Mismatch;
         }
+        if self.loop_id != loop_id || self.hat_id != hat_id {
+            return ConfirmMatch::Mismatch;
+        }
         match self.state {
             ConfirmationState::Confirmed => ConfirmMatch::AlreadyConfirmed,
-            ConfirmationState::Pending => {
-                if self.loop_id == loop_id && self.hat_id == hat_id {
-                    ConfirmMatch::Apply
-                } else {
-                    ConfirmMatch::Mismatch
-                }
-            }
+            ConfirmationState::Pending => ConfirmMatch::Apply,
         }
     }
 
@@ -173,7 +177,7 @@ pub struct Task {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub owner_hat_id: Option<String>,
 
-        /// Confirmation record written by a gate-protected Apply
+    /// Confirmation record written by a gate-protected Apply
     /// (`ralph tools task add` / `ensure` with the verify gate
     /// active for the calling agent). Absent for human-CLI tasks,
     /// bypassed mutations, and legacy rows.
@@ -746,6 +750,39 @@ mod tests {
             cfm.match_confirm(&reference, "digest-1", "loop-a", "coordinator"),
             ConfirmMatch::AlreadyConfirmed
         );
+    }
+
+    #[test]
+    fn test_confirm_match_cross_scope_on_confirmed_is_mismatch() {
+        // The idempotent AlreadyConfirmed branch is scoped too: a
+        // confirmed record can only be re-confirmed by the loop/hat
+        // that recorded it. A cross-scope repeat with the exact
+        // reference + digest must surface as Mismatch, never as a
+        // silent idempotent success.
+        let mut cfm = TaskConfirmation::new_pending(
+            "digest-1".to_string(),
+            "loop-a".to_string(),
+            "coordinator".to_string(),
+        );
+        let reference = cfm.reference.clone();
+        cfm.mark_confirmed();
+
+        // Different loop.
+        assert_eq!(
+            cfm.match_confirm(&reference, "digest-1", "loop-b", "coordinator"),
+            ConfirmMatch::Mismatch
+        );
+        // Different hat.
+        assert_eq!(
+            cfm.match_confirm(&reference, "digest-1", "loop-a", "executor"),
+            ConfirmMatch::Mismatch
+        );
+        // Same-scope repeat stays idempotent (exit-0 semantics).
+        assert_eq!(
+            cfm.match_confirm(&reference, "digest-1", "loop-a", "coordinator"),
+            ConfirmMatch::AlreadyConfirmed
+        );
+        assert_eq!(cfm.state, ConfirmationState::Confirmed);
     }
 
     #[test]

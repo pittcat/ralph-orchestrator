@@ -309,6 +309,81 @@ event_loop:
     .unwrap();
 }
 
+/// Variant of [`write_agent_gate_preset`] whose `coordinator_hats`
+/// allowlist carries `hats` verbatim. Used by the cross-scope
+/// confirmation tests that need two distinct hats inside one loop;
+/// the single-hat fixture above stays untouched for the existing
+/// suite.
+fn write_agent_gate_preset_with_hats(temp_path: &std::path::Path, hats: &[&str]) {
+    std::fs::create_dir_all(temp_path.join(".ralph")).unwrap();
+    let list: Vec<String> = hats.iter().map(|h| format!("    - {h}")).collect();
+    std::fs::write(
+        temp_path.join("ralph.yml"),
+        format!(
+            "tasks:\n  enabled: true\n  require_verify_for_cli_mutate: true\n  \
+             allow_unsafe_task_mutate: false\n  coordinator_hats:\n{list}\n\
+             event_loop:\n  execution_mode: isolated\n",
+            list = list.join("\n")
+        ),
+    )
+    .unwrap();
+}
+
+/// Spawn `ralph tools task <args...>` as the simulated hat `hat`
+/// inside `loop_id` against the gate-enabled preset. Scrubs inherited
+/// hat env first per HARD RULE 5, then re-installs the simulated
+/// agent context explicitly.
+fn spawn_task_as(
+    temp_path: &std::path::Path,
+    hat: &str,
+    loop_id: &str,
+    args: &[&str],
+) -> std::process::Output {
+    let mut cmd = common::ralph_bin();
+    cmd.env("RALPH_CURRENT_HAT", hat)
+        .env("RALPH_CURRENT_LOOP_ID", loop_id)
+        .arg("tools")
+        .arg("task")
+        .args(args)
+        .arg("--root")
+        .arg(temp_path)
+        .current_dir(temp_path);
+    cmd.output()
+        .expect("Failed to execute ralph tools task command")
+}
+
+/// Locate the row carrying `key` in `tasks.jsonl` and return the raw
+/// JSON value. Panics if the row is missing.
+fn row_by_key(temp_path: &std::path::Path, key: &str) -> serde_json::Value {
+    let raw = std::fs::read_to_string(temp_path.join(".ralph/agent/tasks.jsonl"))
+        .expect("read tasks.jsonl");
+    for line in raw.lines().filter(|l| !l.trim().is_empty()) {
+        let v: serde_json::Value = serde_json::from_str(line).expect("row parses as JSON");
+        if v.get("key").and_then(|k| k.as_str()) == Some(key) {
+            return v;
+        }
+    }
+    panic!("row with key '{key}' not found in tasks.jsonl");
+}
+
+/// Extract `(state, loop_id, hat_id)` from a row's confirmation JSON.
+fn confirmation_scope(cfm: &serde_json::Value) -> (String, String, String) {
+    (
+        cfm.get("state")
+            .and_then(|s| s.as_str())
+            .expect("confirmation.state")
+            .to_string(),
+        cfm.get("loop_id")
+            .and_then(|s| s.as_str())
+            .expect("confirmation.loop_id")
+            .to_string(),
+        cfm.get("hat_id")
+            .and_then(|s| s.as_str())
+            .expect("confirmation.hat_id")
+            .to_string(),
+    )
+}
+
 /// Spawn a `ralph tools task verify <verb>` subprocess that runs
 /// as the simulated `coordinator` hat inside the gate-enabled
 /// preset. Scrubs inherited hat env first per HARD RULE 5.
@@ -1189,6 +1264,10 @@ fn test_task_confirmation_pending_blocks_next_mutation_until_confirmed() {
 
     let store_path = temp_path.join(".ralph/agent/tasks.jsonl");
     let before = std::fs::read(&store_path).expect("read tasks.jsonl");
+    // BDD "事件无变化" clause: capture the event ledger (may not exist
+    // at all — `None`) and require it byte-identical after the denial.
+    let events_path = temp_path.join(".ralph/events.jsonl");
+    let events_before = std::fs::read(&events_path).ok();
 
     // Apply second WITHOUT confirming first → denied.
     let denied = spawn_apply_add(temp_path, "Second mutation");
@@ -1211,6 +1290,12 @@ fn test_task_confirmation_pending_blocks_next_mutation_until_confirmed() {
     assert_eq!(
         before, after,
         "denied mutation must not touch tasks.jsonl"
+    );
+    let events_after = std::fs::read(&events_path).ok();
+    assert_eq!(
+        events_before, events_after,
+        "denied mutation must not touch .ralph/events.jsonl \
+         (absent stays absent, present stays byte-identical)"
     );
     let tasks = list_tasks(temp_path, &[]);
     assert_eq!(
@@ -1586,5 +1671,448 @@ fn test_task_confirmation_apply_emits_pending_reference() {
         row_cfm.get("state").and_then(|v| v.as_str()),
         Some("pending"),
         "jsonl confirmation.state must be pending; row={lines:?}"
+    );
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Unit 1 follow-up (cross-scope confirmation hardening): the pending
+// record is owned by the loop/hat that recorded it. Cross-scope mint
+// overwrites and cross-scope confirms are rejected with stable tokens.
+// ─────────────────────────────────────────────────────────────────────────
+
+/// Confirm against a task id that does not exist in the store must
+/// exit non-zero with the stable `confirmation_unavailable` token.
+#[test]
+fn test_task_confirm_unknown_task_id_is_unavailable() {
+    let temp_dir = TempDir::new().expect("temp dir");
+    let temp_path = temp_dir.path();
+    write_agent_gate_preset(temp_path);
+
+    let out = spawn_task_as(
+        temp_path,
+        "coordinator",
+        "loop-u1",
+        &[
+            "confirm",
+            "task-9999999999-ffff",
+            "--reference",
+            "cfm-does-not-exist",
+            "--digest",
+            "digest-x",
+        ],
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !out.status.success(),
+        "confirm of an unknown task id must exit non-zero; stderr={stderr}"
+    );
+    assert!(
+        stderr.contains("confirmation_unavailable"),
+        "unknown task id must surface confirmation_unavailable; stderr={stderr}"
+    );
+}
+
+/// Confirm against a human/legacy row that carries no confirmation
+/// record must exit non-zero with `confirmation_unavailable` — never
+/// invent a transition on a confirmation-free row.
+#[test]
+fn test_task_confirm_row_without_confirmation_is_unavailable() {
+    let temp_dir = TempDir::new().expect("temp dir");
+    let temp_path = temp_dir.path();
+    write_agent_gate_preset(temp_path);
+
+    // Seed a legacy row (no confirmation field) directly into the store.
+    let store_path = temp_path.join(".ralph/agent/tasks.jsonl");
+    std::fs::create_dir_all(store_path.parent().expect("store parent")).expect("create dir");
+    let legacy_line = r#"{"id":"task-1000-legacy","title":"Legacy row","status":"open","priority":3,"created":"2026-01-01T00:00:00Z","loop_id":"loop-u1"}"#;
+    std::fs::write(&store_path, format!("{legacy_line}\n")).expect("seed legacy row");
+
+    let out = spawn_task_as(
+        temp_path,
+        "coordinator",
+        "loop-u1",
+        &[
+            "confirm",
+            "task-1000-legacy",
+            "--reference",
+            "cfm-any",
+            "--digest",
+            "digest-any",
+        ],
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !out.status.success(),
+        "confirm of a confirmation-free row must exit non-zero; stderr={stderr}"
+    );
+    assert!(
+        stderr.contains("confirmation_unavailable"),
+        "confirmation-free row must surface confirmation_unavailable; stderr={stderr}"
+    );
+}
+
+/// Ensure-path symmetric of S1/S2: a gate-active `task ensure` mints a
+/// pending confirmation (reference/digest non-empty, scope stamped) on
+/// the ensured row; `task confirm` from the same loop/hat transitions
+/// it to `confirmed`.
+#[test]
+fn test_task_confirmation_ensure_path_mints_and_confirms() {
+    let temp_dir = TempDir::new().expect("temp dir");
+    let temp_path = temp_dir.path();
+    write_agent_gate_preset(temp_path);
+
+    let key = "scope:ensure-1";
+    let verify = spawn_task_as(
+        temp_path,
+        "coordinator",
+        "loop-u1",
+        &["verify", "ensure", "Ensure me", "--key", key],
+    );
+    assert!(
+        verify.status.success(),
+        "verify ensure must succeed; stderr={}",
+        String::from_utf8_lossy(&verify.stderr)
+    );
+    let apply = spawn_task_as(
+        temp_path,
+        "coordinator",
+        "loop-u1",
+        &["ensure", "Ensure me", "--key", key, "--format", "json"],
+    );
+    let apply_stderr = String::from_utf8_lossy(&apply.stderr);
+    assert!(
+        apply.status.success(),
+        "apply ensure must succeed; stderr={apply_stderr}"
+    );
+
+    // The Apply stdout JSON carries a non-empty pending confirmation.
+    let stdout = String::from_utf8_lossy(&apply.stdout);
+    let applied: serde_json::Value =
+        serde_json::from_str(stdout.trim()).expect("apply stdout must be task JSON");
+    let cfm = applied
+        .get("confirmation")
+        .expect("ensure JSON must carry confirmation");
+    assert_eq!(
+        cfm.get("state").and_then(|v| v.as_str()),
+        Some("pending"),
+        "ensure confirmation must be pending right after Apply; stdout={stdout}"
+    );
+    let reference = cfm
+        .get("reference")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default()
+        .to_string();
+    let digest = cfm
+        .get("digest")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default()
+        .to_string();
+    assert!(!reference.is_empty(), "reference must be non-empty; stdout={stdout}");
+    assert!(!digest.is_empty(), "digest must be non-empty; stdout={stdout}");
+
+    // The disk row matches the printed confirmation and is scoped to
+    // the recording loop/hat.
+    let row = row_by_key(temp_path, key);
+    let row_cfm = row
+        .get("confirmation")
+        .expect("jsonl row must carry confirmation");
+    assert_eq!(
+        row_cfm.get("reference").and_then(|v| v.as_str()),
+        Some(reference.as_str()),
+        "jsonl confirmation.reference must match the printed one"
+    );
+    let (state, cfm_loop, cfm_hat) = confirmation_scope(row_cfm);
+    assert_eq!(state, "pending");
+    assert_eq!(cfm_loop, "loop-u1");
+    assert_eq!(cfm_hat, "coordinator");
+
+    // Confirm from the same loop/hat transitions to confirmed.
+    let task_id = row
+        .get("id")
+        .and_then(|v| v.as_str())
+        .expect("row id")
+        .to_string();
+    let confirm = spawn_task_as(
+        temp_path,
+        "coordinator",
+        "loop-u1",
+        &["confirm", &task_id, "--reference", &reference, "--digest", &digest],
+    );
+    assert!(
+        confirm.status.success(),
+        "same-scope confirm must succeed; stderr={}",
+        String::from_utf8_lossy(&confirm.stderr)
+    );
+    let row = row_by_key(temp_path, key);
+    let (state, _, _) = confirmation_scope(
+        row.get("confirmation")
+            .expect("jsonl row must carry confirmation"),
+    );
+    assert_eq!(state, "confirmed", "confirm must transition the ensure row");
+}
+
+/// Cross-scope overwrite hole: hat A's pending confirmation on a keyed
+/// row must block hat B (same loop) from minting over it via
+/// `ensure` — denial carries `confirmation_scope_conflict`, the row
+/// keeps scope-A pending, B's prepared ticket survives for retry, and
+/// after A consumes its confirmation B's retry mints a fresh scope-B
+/// pending record.
+#[test]
+fn test_task_confirmation_cross_scope_ensure_overwrite_is_rejected() {
+    let temp_dir = TempDir::new().expect("temp dir");
+    let temp_path = temp_dir.path();
+    write_agent_gate_preset_with_hats(temp_path, &["coordinator", "reviewer"]);
+
+    let key = "cross:scope-1";
+
+    // Hat A (coordinator) verify + ensure → pending scope A.
+    let verify_a = spawn_task_as(
+        temp_path,
+        "coordinator",
+        "loop-x",
+        &["verify", "ensure", "Cross scope", "--key", key],
+    );
+    assert!(
+        verify_a.status.success(),
+        "verify A must succeed; stderr={}",
+        String::from_utf8_lossy(&verify_a.stderr)
+    );
+    let apply_a = spawn_task_as(
+        temp_path,
+        "coordinator",
+        "loop-x",
+        &["ensure", "Cross scope", "--key", key],
+    );
+    assert!(
+        apply_a.status.success(),
+        "apply A must succeed; stderr={}",
+        String::from_utf8_lossy(&apply_a.stderr)
+    );
+    let row = row_by_key(temp_path, key);
+    let row_cfm = row
+        .get("confirmation")
+        .expect("row must carry confirmation");
+    let (state, cfm_loop, cfm_hat) = confirmation_scope(row_cfm);
+    assert_eq!((state.as_str(), cfm_loop.as_str(), cfm_hat.as_str()), ("pending", "loop-x", "coordinator"));
+    let task_id = row
+        .get("id")
+        .and_then(|v| v.as_str())
+        .expect("row id")
+        .to_string();
+    let reference_a = row_cfm
+        .get("reference")
+        .and_then(|v| v.as_str())
+        .expect("reference")
+        .to_string();
+    let digest_a = row_cfm
+        .get("digest")
+        .and_then(|v| v.as_str())
+        .expect("digest")
+        .to_string();
+
+    // Hat B (reviewer) verifies its own intent (scoped ticket) fine...
+    let verify_b = spawn_task_as(
+        temp_path,
+        "reviewer",
+        "loop-x",
+        &["verify", "ensure", "Cross scope B", "--key", key],
+    );
+    assert!(
+        verify_b.status.success(),
+        "verify B must succeed; stderr={}",
+        String::from_utf8_lossy(&verify_b.stderr)
+    );
+
+    // ...but the ensure itself is rejected: A's pending record is
+    // owned by scope A and B must not silently release it.
+    let apply_b = spawn_task_as(
+        temp_path,
+        "reviewer",
+        "loop-x",
+        &["ensure", "Cross scope B", "--key", key],
+    );
+    let apply_b_stderr = String::from_utf8_lossy(&apply_b.stderr);
+    assert!(
+        !apply_b.status.success(),
+        "cross-scope ensure overwrite must exit non-zero; stderr={apply_b_stderr}"
+    );
+    assert!(
+        apply_b_stderr.contains("confirmation_scope_conflict"),
+        "denial must carry the confirmation_scope_conflict token; stderr={apply_b_stderr}"
+    );
+    assert!(
+        apply_b_stderr.contains("ralph tools task confirm"),
+        "denial must point at the recorder's confirm path; stderr={apply_b_stderr}"
+    );
+
+    // The row is untouched: still scope-A pending, same reference,
+    // A's title not overwritten.
+    let row = row_by_key(temp_path, key);
+    assert_eq!(
+        row.get("title").and_then(|v| v.as_str()),
+        Some("Cross scope"),
+        "rejected overwrite must not touch row metadata"
+    );
+    let row_cfm = row
+        .get("confirmation")
+        .expect("row must still carry confirmation");
+    let (state, cfm_loop, cfm_hat) = confirmation_scope(row_cfm);
+    assert_eq!((state.as_str(), cfm_loop.as_str(), cfm_hat.as_str()), ("pending", "loop-x", "coordinator"));
+    assert_eq!(
+        row_cfm.get("reference").and_then(|v| v.as_str()),
+        Some(reference_a.as_str()),
+        "rejected overwrite must keep A's reference"
+    );
+
+    // B's prepared ticket survives the denial (restored for retry).
+    let ticket_dir = temp_path.join(".ralph/agent/task-tickets");
+    let entries: Vec<String> = std::fs::read_dir(&ticket_dir)
+        .expect("read ticket dir")
+        .filter_map(|e| e.ok())
+        .map(|e| e.file_name().to_string_lossy().to_string())
+        .collect();
+    let prepared = entries.iter().filter(|n| n.ends_with(".ticket")).count();
+    let claimed = entries
+        .iter()
+        .filter(|n| n.ends_with(".ticket.claimed"))
+        .count();
+    assert!(
+        prepared >= 1,
+        "denied overwrite must preserve B's prepared ticket; entries={entries:?}"
+    );
+    assert_eq!(
+        claimed, 0,
+        "denied overwrite must not leave a claim marker; entries={entries:?}"
+    );
+
+    // Hat A consumes its own confirmation.
+    let confirm_a = spawn_task_as(
+        temp_path,
+        "coordinator",
+        "loop-x",
+        &["confirm", &task_id, "--reference", &reference_a, "--digest", &digest_a],
+    );
+    assert!(
+        confirm_a.status.success(),
+        "recorder's confirm must succeed; stderr={}",
+        String::from_utf8_lossy(&confirm_a.stderr)
+    );
+
+    // Hat B retries the same payload — the restored ticket suffices
+    // (no fresh verify) and mints a fresh pending scope B.
+    let apply_b2 = spawn_task_as(
+        temp_path,
+        "reviewer",
+        "loop-x",
+        &["ensure", "Cross scope B", "--key", key],
+    );
+    assert!(
+        apply_b2.status.success(),
+        "post-confirm retry with restored ticket must succeed; stderr={}",
+        String::from_utf8_lossy(&apply_b2.stderr)
+    );
+    let row = row_by_key(temp_path, key);
+    let row_cfm = row
+        .get("confirmation")
+        .expect("row must carry B's confirmation");
+    let (state, cfm_loop, cfm_hat) = confirmation_scope(row_cfm);
+    assert_eq!((state.as_str(), cfm_loop.as_str(), cfm_hat.as_str()), ("pending", "loop-x", "reviewer"));
+    assert_ne!(
+        row_cfm.get("reference").and_then(|v| v.as_str()),
+        Some(reference_a.as_str()),
+        "B's mint must carry a fresh reference, not A's"
+    );
+}
+
+/// Cross-scope confirm against an already-Confirmed record must exit
+/// non-zero with `confirmation_mismatch` (the idempotent repeat is
+/// reserved for the recording loop/hat); the state stays confirmed and
+/// the recorder's own idempotent repeat still exits 0.
+#[test]
+fn test_task_confirmation_cross_scope_confirm_on_confirmed_is_mismatch() {
+    let temp_dir = TempDir::new().expect("temp dir");
+    let temp_path = temp_dir.path();
+    write_agent_gate_preset_with_hats(temp_path, &["coordinator", "reviewer"]);
+
+    // Hat A records a confirmation and consumes it.
+    let verify = spawn_task_as(temp_path, "coordinator", "loop-x", &["verify", "add", "Confirmed target"]);
+    assert!(
+        verify.status.success(),
+        "verify must succeed; stderr={}",
+        String::from_utf8_lossy(&verify.stderr)
+    );
+    let apply = spawn_task_as(
+        temp_path,
+        "coordinator",
+        "loop-x",
+        &["add", "Confirmed target", "--format", "json"],
+    );
+    assert!(
+        apply.status.success(),
+        "apply must succeed; stderr={}",
+        String::from_utf8_lossy(&apply.stderr)
+    );
+    let (task_id, reference, digest) = confirmation_of_task_titled(temp_path, "Confirmed target");
+    let confirm_a = spawn_task_as(
+        temp_path,
+        "coordinator",
+        "loop-x",
+        &["confirm", &task_id, "--reference", &reference, "--digest", &digest],
+    );
+    assert!(
+        confirm_a.status.success(),
+        "recorder's confirm must succeed; stderr={}",
+        String::from_utf8_lossy(&confirm_a.stderr)
+    );
+
+    // Hat B presents the exact reference/digest from a different hat
+    // scope → mismatch, not idempotent success.
+    let confirm_b = spawn_task_as(
+        temp_path,
+        "reviewer",
+        "loop-x",
+        &["confirm", &task_id, "--reference", &reference, "--digest", &digest],
+    );
+    let confirm_b_stderr = String::from_utf8_lossy(&confirm_b.stderr);
+    assert!(
+        !confirm_b.status.success(),
+        "cross-scope confirm on a confirmed record must exit non-zero; stderr={confirm_b_stderr}"
+    );
+    assert!(
+        confirm_b_stderr.contains("confirmation_mismatch"),
+        "cross-scope repeat must surface confirmation_mismatch; stderr={confirm_b_stderr}"
+    );
+
+    // The state stays confirmed; the recorder's idempotent repeat is
+    // unaffected (exit 0).
+    let raw = std::fs::read_to_string(temp_path.join(".ralph/agent/tasks.jsonl"))
+        .expect("read tasks.jsonl");
+    let state = raw
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .find_map(|line| {
+            let v: serde_json::Value = serde_json::from_str(line).ok()?;
+            if v.get("id").and_then(|i| i.as_str()) == Some(task_id.as_str()) {
+                v.get("confirmation")
+                    .and_then(|c| c.get("state"))
+                    .and_then(|s| s.as_str())
+                    .map(str::to_string)
+            } else {
+                None
+            }
+        })
+        .expect("confirmed row must exist");
+    assert_eq!(state, "confirmed", "state must stay confirmed");
+
+    let confirm_again = spawn_task_as(
+        temp_path,
+        "coordinator",
+        "loop-x",
+        &["confirm", &task_id, "--reference", &reference, "--digest", &digest],
+    );
+    assert!(
+        confirm_again.status.success(),
+        "same-scope idempotent repeat must still exit 0; stderr={}",
+        String::from_utf8_lossy(&confirm_again.stderr)
     );
 }

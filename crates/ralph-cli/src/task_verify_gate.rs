@@ -439,9 +439,11 @@ pub fn pending_confirmation_precheck(
                  (reference '{reference}'). Consume it first with \
                  `ralph tools task confirm {task_id} --reference {reference} --digest <digest>` \
                  from the same loop/hat (the digest is the confirmation.digest field printed by \
-                 the Apply that recorded it), then retry this mutation. The prepared verify \
-                 ticket is preserved, so the same payload does not need a fresh \
-                 `ralph tools task verify {verb}`.",
+                 the Apply that recorded it; if that Apply output is no longer in the current \
+                 context, run `ralph tools task show {task_id} --format json` and read \
+                 `confirmation.reference` / `confirmation.digest`), then retry this mutation. \
+                 The prepared verify ticket is preserved, so the same payload does not need a \
+                 fresh `ralph tools task verify {verb}`.",
                 task_id = task.id,
                 reference = cfm.reference,
             );

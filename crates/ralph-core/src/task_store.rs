@@ -2125,9 +2125,39 @@ mod tests {
         assert_eq!(v["confirmation"]["hat_id"], "coordinator");
     }
 
+    /// Store-level fail-closed: a hand-written JSONL row whose
+    /// confirmation object lacks the `state` field must be skipped by
+    /// `TaskStore::load` (the lenient line parser drops the whole row),
+    /// never loaded as an implicit state, while a valid sibling row
+    /// survives. Direct regression test on the loader — complementing
+    /// the serde-level `test_confirmation_without_state_field_fails_closed`.
+    #[test]
+    fn u1_load_skips_row_with_incomplete_confirmation_and_keeps_valid_row() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("tasks.jsonl");
+        let valid = r#"{"id":"task-2000-valid","title":"Valid row","status":"open","priority":2,"created":"2026-01-01T00:00:00Z","confirmation":{"state":"pending","reference":"cfm-valid","digest":"d-1","loop_id":"loop-a","hat_id":"coordinator","created":"2026-01-01T00:00:00Z"}}"#;
+        let broken = r#"{"id":"task-2001-broken","title":"Broken row","status":"open","priority":2,"created":"2026-01-01T00:00:00Z","confirmation":{"reference":"cfm-broken","digest":"d-2","loop_id":"loop-a","hat_id":"coordinator","created":"2026-01-01T00:00:00Z"}}"#;
+        std::fs::write(&path, format!("{valid}\n{broken}\n")).unwrap();
+
+        let store = TaskStore::load(&path).unwrap();
+        let ids: Vec<&str> = store.all().iter().map(|t| t.id.as_str()).collect();
+        assert_eq!(
+            ids,
+            vec!["task-2000-valid"],
+            "the incomplete-confirmation row must be skipped, the valid row kept"
+        );
+        let cfm = store.all()[0]
+            .confirmation
+            .as_ref()
+            .expect("valid row keeps its confirmation");
+        assert_eq!(cfm.state, crate::task::ConfirmationState::Pending);
+        assert_eq!(cfm.reference, "cfm-valid");
+    }
+
     /// Fault injection: when the atomic write cannot proceed
     /// (read-only directory), `save` must surface an explicit `Err`,
     /// keep the previous complete snapshot on disk, and never panic.
+    #[cfg(unix)]
     #[test]
     fn u1_save_failure_into_readonly_dir_keeps_previous_snapshot() {
         let tmp = TempDir::new().unwrap();

@@ -25,7 +25,7 @@ use crate::{
 use anyhow::{Context, Result, bail};
 use chrono::{DateTime, Utc};
 use clap::{Args, Parser, Subcommand, ValueEnum};
-use ralph_core::{ConfirmMatch, Task, TaskConfirmation, TaskStatus, TaskStore};
+use ralph_core::{ConfirmMatch, ConfirmationState, Task, TaskConfirmation, TaskStatus, TaskStore};
 use std::path::{Path, PathBuf};
 
 /// U7 (2026-07-04-003 plan): distinguishable failure modes for
@@ -722,6 +722,30 @@ pub(crate) fn gate_identifiers(ctx: &OperationContext) -> (&str, &str) {
     )
 }
 
+/// Stable error for a cross-scope confirmation overwrite attempt
+/// (Unit 1 follow-up): the target row still carries a `pending`
+/// confirmation recorded by a different loop/hat, so minting over it
+/// would silently release the recorder's confirm obligation
+/// (fail-open). Only the recording loop/hat may clear the record via
+/// `ralph tools task confirm`; overwriting a `confirmed` record or a
+/// same-scope pending record is not affected.
+fn confirmation_scope_conflict(
+    verb: &str,
+    task_id: &str,
+    recorded_loop: &str,
+    recorded_hat: &str,
+) -> anyhow::Error {
+    anyhow::anyhow!(
+        "task {verb} rejected: confirmation_scope_conflict — task '{task_id}' still carries \
+         a pending confirmation recorded by loop '{recorded_loop}' hat '{recorded_hat}'. \
+         Only the recording loop/hat may clear it: run \
+         `ralph tools task confirm {task_id} --reference <reference> --digest <digest>` \
+         from that loop/hat first (if the Apply output that recorded it is no longer in the \
+         current context, read `confirmation.reference` / `confirmation.digest` via \
+         `ralph tools task show {task_id} --format json`), then retry this mutation."
+    )
+}
+
 /// Compute the canonical fingerprint for a pending mutation and
 /// claim the matching verify ticket. Encapsulates the (verb,
 /// canonical_payload, loop_id, hat_id) → fingerprint pipeline so
@@ -1251,6 +1275,23 @@ fn add_task_with_confirmation(
     if confirmation.is_some()
         && let Some(row) = store.get_mut(&added_id)
     {
+        // Unit 1 follow-up (cross-scope overwrite hole): never mint
+        // over a pending confirmation recorded by a different loop/hat
+        // — that would silently release the recorder's confirm
+        // obligation. The bail propagates through settle_gate_claim so
+        // the prepared ticket is restored and nothing is persisted.
+        if let Some(existing_cfm) = row.confirmation.as_ref()
+            && existing_cfm.state == ConfirmationState::Pending
+            && (existing_cfm.loop_id.as_str(), existing_cfm.hat_id.as_str())
+                != gate_identifiers(ctx)
+        {
+            return Err(confirmation_scope_conflict(
+                "add",
+                &row.id,
+                &existing_cfm.loop_id,
+                &existing_cfm.hat_id,
+            ));
+        }
         row.confirmation = confirmation.map(Box::new);
     }
     store.save().context("Failed to save tasks")?;
@@ -1467,8 +1508,32 @@ fn ensure_task_with_confirmation(
         );
     }
 
+    let (caller_loop, caller_hat) = gate_identifiers(ctx);
     let ensured = store
-        .with_exclusive_lock(|s| {
+        .with_exclusive_lock(|s| -> anyhow::Result<Task> {
+            // Unit 1 follow-up (cross-scope overwrite hole): check the
+            // target row's existing confirmation BEFORE minting. When
+            // the row that `ensure` will dedup into still carries a
+            // pending confirmation recorded by a different loop/hat,
+            // minting over it would silently release the recorder's
+            // confirm obligation (fail-open). The check runs inside the
+            // exclusive lock so it cannot race a concurrent ensure; the
+            // aborted RMW persists no mutation and settle_gate_claim
+            // restores the prepared ticket for the post-confirm retry.
+            if confirmation.is_some()
+                && let Some(existing) = s.get_by_key_in_loop(&key, loop_id.as_deref())
+                && let Some(existing_cfm) = existing.confirmation.as_ref()
+                && existing_cfm.state == ConfirmationState::Pending
+                && (existing_cfm.loop_id.as_str(), existing_cfm.hat_id.as_str())
+                    != (caller_loop, caller_hat)
+            {
+                return Err(confirmation_scope_conflict(
+                    "ensure",
+                    &existing.id,
+                    &existing_cfm.loop_id,
+                    &existing_cfm.hat_id,
+                ));
+            }
             let mut ensured = s.ensure(task).clone();
             // Unit 1 (task confirmation): overwrite the confirmation on
             // the ensured row within the same exclusive-lock snapshot
@@ -1482,9 +1547,9 @@ fn ensure_task_with_confirmation(
                 row.confirmation = Some(Box::new(cfm.clone()));
                 ensured.confirmation = Some(Box::new(cfm.clone()));
             }
-            ensured
+            Ok(ensured)
         })
-        .context("Failed to ensure task")?;
+        .context("Failed to ensure task")??;
 
     // R4 (2026-06-14-003 plan): when the single-U contract is active
     // and the requested key differs from the ensured task's key, the
@@ -2260,8 +2325,15 @@ fn execute_show(args: ShowArgs, root: Option<&PathBuf>, use_colors: bool) -> Res
 /// `reference` and `digest` printed by the protected Apply, from the
 /// same loop/hat that applied the mutation. Wrong reference →
 /// `confirmation_unavailable`; matching reference with wrong digest or
-/// scope → `confirmation_mismatch` (state stays pending). Repeating a
-/// successful confirm is idempotent (exit 0, no disk rewrite).
+/// scope → `confirmation_mismatch` (state stays as recorded).
+/// Repeating a successful confirm from the same loop/hat is idempotent
+/// (exit 0, no disk rewrite); a cross-scope repeat of a confirmed
+/// record is a `confirmation_mismatch`.
+///
+/// The decision is re-validated under the exclusive store lock: a
+/// concurrent Apply may replace the row's confirmation between the
+/// outer match and the lock acquisition, so the under-lock outcome —
+/// not the outer decision — drives the exit code and the output.
 fn execute_confirm(args: ConfirmArgs, root: Option<&PathBuf>) -> Result<()> {
     validate_task_id(&args.id)?;
     let path = get_tasks_path(root);
@@ -2312,26 +2384,53 @@ fn execute_confirm(args: ConfirmArgs, root: Option<&PathBuf>) -> Result<()> {
             let id = args.id.clone();
             let reference = args.reference.clone();
             let digest = args.digest.clone();
-            store
+            let outcome = store
                 .with_exclusive_lock(|s| {
                     // Re-validate under the lock so concurrent confirms
-                    // serialize to a single transition.
-                    if let Some(row) = s.get_mut(&id)
-                        && let Some(cfm) = row.confirmation.as_mut()
-                        && matches!(
-                            cfm.match_confirm(&reference, &digest, loop_id, hat_id),
-                            ConfirmMatch::Apply
-                        )
-                    {
+                    // serialize to a single transition. A concurrent
+                    // Apply may have replaced the row's confirmation
+                    // between the outer decision and the lock
+                    // acquisition, so the under-lock outcome (not the
+                    // outer decision) drives the exit code and output.
+                    let Some(row) = s.get_mut(&id) else {
+                        return ConfirmMatch::Unavailable;
+                    };
+                    let Some(cfm) = row.confirmation.as_mut() else {
+                        return ConfirmMatch::Unavailable;
+                    };
+                    let outcome = cfm.match_confirm(&reference, &digest, loop_id, hat_id);
+                    if matches!(outcome, ConfirmMatch::Apply) {
                         cfm.mark_confirmed();
                     }
+                    outcome
                 })
                 .context("Failed to save tasks")?;
-            let task = store
-                .get(&args.id)
-                .context(format!("Task {} not found", args.id))?;
-            print_confirmed_task(task, args.format);
-            Ok(())
+            match outcome {
+                ConfirmMatch::Apply | ConfirmMatch::AlreadyConfirmed => {
+                    // Apply: this call performed the transition.
+                    // AlreadyConfirmed: a concurrent same-scope confirm
+                    // won the race — idempotent success either way.
+                    let task = store
+                        .get(&args.id)
+                        .context(format!("Task {} not found", args.id))?;
+                    print_confirmed_task(task, args.format);
+                    Ok(())
+                }
+                ConfirmMatch::Unavailable => bail!(
+                    "task confirm denied: confirmation_unavailable — the confirmation recorded \
+                     for task '{}' changed while this confirm was being prepared (reference '{}' \
+                     no longer matches). Re-read the latest Apply output (confirmation.reference) \
+                     and retry.",
+                    args.id,
+                    args.reference
+                ),
+                ConfirmMatch::Mismatch => bail!(
+                    "task confirm denied: confirmation_mismatch — the confirmation recorded for \
+                     task '{}' changed while this confirm was being prepared (the digest or the \
+                     loop/hat scope no longer matches). The recorded state stays untouched.",
+                    args.id
+                ),
+            }
         }
     }
 }
@@ -2342,7 +2441,14 @@ fn print_confirmed_task(task: &Task, format: OutputFormat) {
             println!("Confirmed task {}", task.id);
             if let Some(cfm) = task.confirmation.as_ref() {
                 println!("  Reference: {}", cfm.reference);
-                println!("  State: confirmed");
+                // Read the actual confirmation state — never hardcode
+                // the printed state (the caller drives the success
+                // semantics; the row carries the source of truth).
+                let state = match cfm.state {
+                    ConfirmationState::Pending => "pending",
+                    ConfirmationState::Confirmed => "confirmed",
+                };
+                println!("  State: {state}");
             }
         }
         OutputFormat::Json => {
