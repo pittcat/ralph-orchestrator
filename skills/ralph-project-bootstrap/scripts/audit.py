@@ -214,6 +214,17 @@ def audit_inputs(
                     message=f"unrecognised builtin id '{preset}'",
                 )
             )
+    elif not _paths.is_safe_relative(preset):
+        # File presets pass the same repo-relative gate as the pipeline's
+        # input boundary: absolute paths, ``..`` escapes and control bytes
+        # are rejected BEFORE any existence probe (the raw token is never
+        # echoed into ``paths`` — reported paths stay repo-relative).
+        issues.append(
+            AuditIssue(
+                code="input_path_unsafe",
+                message="preset path must be a safe repo-relative token",
+            )
+        )
     elif not (root / preset).is_file():
         issues.append(
             AuditIssue(

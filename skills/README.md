@@ -10,7 +10,7 @@ It ships operator skills:
 | `ralph-e2e-bootstrap` | Bootstrap an E2E sandbox directory from a development plan + git diff via combo-box decisions and static gates; deliver a copy-paste launch command |
 | `ralph-preset-author` | Draft presets (builtin + local) with per-hat AAF tables **+ payload contract notes** before review |
 | `ralph-preset-review` | Per-hat activation dry-run + **payload audit** + mechanical lint → `preset-review-report.md` |
-| `ralph-project-bootstrap` | Audit a target project, generate or safely update its AGENTS.md / CLAUDE.md / `ralph.pipeline.yml` / `PROMPT.pipeline.md` from an existing preset + plan/task, run staged validation, and hand off the official launch command |
+| `ralph-project-bootstrap` | Audit a target project via ONE unified pipeline entry (`bootstrap_pipeline.py`), generate or safely update the preset-bound `ralph.<stem>.yml` + `PROMPT.<stem>.md` suite and the AGENTS.md / CLAUDE.md managed sections from an existing preset, run staged validation, and hand off the official launch command (`dry-run green != loop closed`) |
 | `ralph-run-diagnosis` | Post-run deep diagnosis: artifacts, OPAC, mechanism vs preset attribution |
 
 > **Plan 2026-08-02-001:** the previously bundled `ralph-loop` and

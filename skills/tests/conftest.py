@@ -44,6 +44,7 @@ for _name, _path in (
     ("_probe_runner", _BOOTSTRAP_SCRIPTS / "_probe_runner.py"),
     ("smoke_runner", _BOOTSTRAP_SCRIPTS / "smoke_runner.py"),
     ("handoff", _BOOTSTRAP_SCRIPTS / "handoff.py"),
+    ("bootstrap_pipeline", _BOOTSTRAP_SCRIPTS / "bootstrap_pipeline.py"),
 ):
     if _path.is_file():
         _load(_name, _path)
@@ -60,7 +61,10 @@ for _name, _path in (
     ("sandbox_suite", _E2E_BOOTSTRAP_SCRIPTS / "sandbox_suite.py"),
     ("gate", _E2E_BOOTSTRAP_SCRIPTS / "gate.py"),
     ("e2e_handoff", _E2E_BOOTSTRAP_SCRIPTS / "e2e_handoff.py"),
-    ("bootstrap_pipeline", _E2E_BOOTSTRAP_SCRIPTS / "bootstrap_pipeline.py"),
+    # Distinct name: ralph-project-bootstrap's ``bootstrap_pipeline``
+    # is preloaded above under the plain name; loading the e2e module
+    # under its own name keeps both suites importable in one process.
+    ("e2e_bootstrap_pipeline", _E2E_BOOTSTRAP_SCRIPTS / "bootstrap_pipeline.py"),
 ):
     if _path.is_file():
         _load(_name, _path)

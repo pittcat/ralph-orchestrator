@@ -352,7 +352,18 @@ class AtomicWriter:
         return tuple(committed), ()
 
     def _stage(self, target: Path, new_content: str) -> _PlannedWrite:
-        original = target.read_text(encoding="utf-8") if target.exists() else None
+        original: str | None = None
+        if target.exists():
+            try:
+                original = target.read_text(encoding="utf-8")
+            except UnicodeDecodeError as exc:
+                # Existing bytes that are not decodable as UTF-8 are an
+                # unreadable target for this batch; normalise into the
+                # OSError failure path so ``execute`` rolls the staged
+                # siblings back instead of leaking a bare traceback.
+                raise OSError(
+                    f"existing bytes of {target} are not decodable as UTF-8"
+                ) from exc
         # Lock the tmp path at stage time so _commit and _rollback see the
         # same sibling file even though _tmp_path embeds a fresh
         # monotonic-ns stamp per call.

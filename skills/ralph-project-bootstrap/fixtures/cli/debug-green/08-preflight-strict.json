@@ -1,0 +1,13 @@
+{
+  "description": "stage: ralph preflight --strict passes",
+  "argv_expected": [
+    "ralph", "-c", "ralph.debug.yml", "-H", "builtin:debug",
+    "preflight", "--strict"
+  ],
+  "stdout_chunks": ["preflight ok\n"],
+  "stderr_chunks": [],
+  "exit_code": 0,
+  "expected_stage": "preflight",
+  "expected_outcome": "ok",
+  "expected_blocked_reason_regex": ""
+}

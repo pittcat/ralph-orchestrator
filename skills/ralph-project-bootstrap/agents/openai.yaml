@@ -11,16 +11,39 @@ when_to_use: |
   (`ralph-preset-author` / `ralph-preset-review`), to operate the
   in-loop CLI (`ralph run` / `ralph loops` / `ralph diagnose`), or to
   diagnose a loop that already ran (`ralph-run-diagnosis`).
+entry_point: |
+  ONE unified entry drives the whole pipeline; never call the helper
+  modules by hand to re-implement the flow.
+  CLI: python skills/ralph-project-bootstrap/scripts/bootstrap_pipeline.py
+       --cwd <project> --preset <preset> [--plan <plan.md>]
+       [--prompt-file <prompt.md>] [--binary <ralph>]
+       [--refresh-existing] [--replay-transcript <dir>] [--json]
+  Code: bootstrap_pipeline.run_pipeline(cwd=..., preset=..., ...)
+  --replay-transcript is the ONLY switch that enables an auto-running
+  (content_fixed_replay, bounded) smoke backend, and only when the preset
+  resolves to content_fixed_replay; a preset resolving to a real backend
+  is refused (not_authorized) and never spawns. The transcript path must
+  be repo-relative to --cwd (absolute paths and .. escapes are rejected).
 inputs:
   - project_root
   - preset (path or builtin id, already passing strict lint)
   - optional launch context (prompt file, plan, environment, or runtime id)
 outputs:
-  - owned AGENTS.md / CLAUDE.md updates (idempotent)
+  - owned AGENTS.md / CLAUDE.md managed sections (idempotent)
   - preset-bound ralph.<stem>.yml and PROMPT.<stem>.md (idempotent)
   - provenance embedded in the generated config
+  - PipelineResult report in text (default) or --json form
   - staged validation evidence + verification-level handoff
   - command template for missing first-run inputs (without blocking provisioning)
+handoff_levels:
+  - blocked: a stage returned a typed blocker; no launch command; exit 2.
+      Fix what the typed code names, then rerun the entry.
+  - incomplete_static_only: artifacts provisioned and the static gate is
+      green, but the loop is NOT closed (dry-run green != loop closed);
+      the command is a [CANDIDATE] (or [TEMPLATE] when no plan exists)
+      the operator must run manually; exit 0.
+  - complete: static gate green AND the bounded replay smoke reached the
+      terminal marker; the command is the official launch command; exit 0.
 boundaries:
   - Does not author or review presets.
   - Does not run loops outside an authorized smoke path.

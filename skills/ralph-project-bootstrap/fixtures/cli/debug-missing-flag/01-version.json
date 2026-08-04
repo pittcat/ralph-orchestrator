@@ -1,0 +1,10 @@
+{
+  "description": "probe: ralph --version returns clean semver",
+  "argv_expected": ["ralph", "--version"],
+  "stdout_chunks": ["ralph 0.9.0\n"],
+  "stderr_chunks": [],
+  "exit_code": 0,
+  "expected_stage": "capability",
+  "expected_outcome": "blocked_cli",
+  "expected_blocked_reason_regex": "required flags missing"
+}

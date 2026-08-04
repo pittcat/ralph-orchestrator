@@ -16,6 +16,113 @@ verified runtime suite and a clear handoff. This skill does **not** author
 or review presets; it consumes presets produced by `ralph-preset-author`
 and vetted by `ralph-preset-review`.
 
+## Unified Entry Point
+
+The whole pipeline has ONE entry point. Do not call the helper modules
+by hand to re-implement the flow; the entry point orchestrates them in
+the strict stage order and refuses to skip a stage.
+
+**CLI (operator path):**
+
+```bash
+python skills/ralph-project-bootstrap/scripts/bootstrap_pipeline.py \
+  --cwd <project> --preset <preset> \
+  [--plan <plan.md>] [--prompt-file <prompt.md>] \
+  [--binary <ralph>] [--refresh-existing] \
+  [--replay-transcript <transcript-dir>] [--json]
+```
+
+**Programmatic path:** `bootstrap_pipeline.run_pipeline(cwd=..., preset=..., ...)`
+(same module, same contract; tests inject a fake `runner` so no real
+binary spawns).
+
+The entry prints one structured `PipelineResult` — either the default
+text view or `--json` — and exits `0` for `complete` /
+`incomplete_static_only`, `2` for `blocked`.
+
+### Inputs
+
+| Input | CLI flag | Meaning |
+| --- | --- | --- |
+| project root | `--cwd` | Target project directory (default `.`) |
+| preset | `--preset` | Repo-relative preset YAML path or `builtin:<id>` |
+| plan | `--plan` | Repo-relative plan path (optional) |
+| prompt file | `--prompt-file` | Repo-relative operator-owned prompt (optional) |
+| binary | `--binary` | `ralph` binary path/name (default `ralph`) |
+| refresh | `--refresh-existing` | Overwrite an existing suite when provenance matches |
+| replay smoke | `--replay-transcript` | Repo-relative transcript dir (anchored on `--cwd`; absolute paths and `..` escapes rejected). The ONLY switch that enables an auto-running smoke backend, and only when the preset resolves to `content_fixed_replay` |
+
+A plan / prompt file is required only when the preset has no non-empty
+inline `event_loop.prompt`. Missing first-run business input does
+**not** block provisioning (see `incomplete_static_only` below). Never
+invent a placeholder plan file.
+
+### Artifacts
+
+For `<stem>` derived from the preset id, the entry owns exactly:
+
+- `ralph.<stem>.yml` — preset-bound config; every verification/launch
+  command carries `-c ralph.<stem>.yml -H <preset>`; provenance lives
+  under the `_bootstrap:` mapping (no sidecar).
+- `PROMPT.<stem>.md` — byte snapshot of the preset's literal
+  `event_loop.prompt` (a hats source cannot carry
+  `event_loop.prompt` across Ralph's operator/preset merge boundary).
+- Managed sections inside `AGENTS.md` / `CLAUDE.md` — exactly one
+  `RALPH-BOOTSTRAP-START` / `RALPH-BOOTSTRAP-END` block per doc,
+  identical body in both mirrors.
+
+Never emit generic `ralph.pipeline.yml`, `PROMPT.md`,
+`PROMPT.pipeline.md`, or a separate `ralph.bootstrap.yml` for this
+flow. All four targets are written as ONE atomic batch: any conflict
+rolls every target back to its pre-write state.
+
+### Stage order (strict)
+
+1. **audit** — confirm the target root and inputs; ambiguous roots and
+   unsafe paths block before any write or subprocess call.
+2. **preset resolution** — file presets are read as repo-relative YAML;
+   `builtin:<id>` is resolved via `ralph preset list --format json`
+   (find the manifest whose `source` equals `builtin:<id>`) then
+   `ralph preset show <template-name> --format yaml`. `preset show`
+   addresses **template names**, which may differ from the builtin hats
+   id; never assume stripping `builtin:` yields a template name. A
+   preset with no inline prompt and no supplied plan/prompt blocks with
+   `preset_prompt_missing`.
+3. **generation + post-write verify** — compose the two suite files and
+   the managed doc sections, write them atomically, then reopen every
+   written artifact and re-verify binding + provenance hashes.
+4. **static validation** — capability → `preset check --strict` →
+   `preflight --strict` → `ralph run --dry-run`, every argv carrying
+   `-c ralph.<stem>.yml -H <preset>`. A blocker skips the tail stages
+   with typed evidence (see Static Validation below).
+5. **smoke (authorized replay only)** — authorization compares the
+   preset's RESOLVED backend (`cli.backend`) against
+   `content_fixed_replay` BEFORE any subprocess is constructed. Only a
+   preset resolving to `content_fixed_replay` with `--replay-transcript`
+   supplied auto-spawns the bounded replay smoke (iteration / idle /
+   wall-clock caps). Presets resolving to real backends are refused
+   (`not_authorized`) and never spawn, replay switch or not.
+6. **handoff** — typed level + command + Markdown report, derived from
+   the typed smoke outcome alone; free-text evidence can never promote
+   the level.
+
+### Verification levels and failure actions
+
+**`dry-run green != loop closed`.** A green static gate proves only
+that the runtime can load the suite; it never authorizes the claim
+that a loop can run to completion.
+
+| Level | Meaning | Exit | Command shape | Operator action |
+| --- | --- | --- | --- | --- |
+| `blocked` | A stage returned a typed blocker | 2 | empty | Fix exactly what `code` names, then rerun the entry. `root_ambiguous`: reconcile the project root scope. `sync_mirror_conflict` / marker blockers: reconcile AGENTS.md / CLAUDE.md by hand. `owned_value_user_modified` / `provenance_corrupt`: reconcile the owned suite files. `blocked_cli` / `blocked_preset` / `blocked_backend` / `blocked_command`: repair binary capability, preset lint, backend readiness, or prompt-source binding. `worktree_reuse_key_missing`: pass an explicit reuse key. Never launch. |
+| `incomplete_static_only` | Artifacts provisioned, static gate green, loop NOT closed (no authorized smoke) | 0 | `[CANDIDATE - operator must run manually] …`, or `[TEMPLATE - replace PLAN_PATH before running] …` when no plan exists yet | Re-confirm the target backend, then run the candidate command yourself; or, when the preset resolves to `content_fixed_replay`, rerun the entry with `--replay-transcript` to seek a bounded promotion. Never treat this as a ready command. |
+| `complete` | Static gate green AND bounded replay smoke reached the terminal marker | 0 | the official launch command, no prefix | Run it. The loop was verified only under the replay harness caps; real-backend behaviour is still the operator's responsibility. |
+
+Worktree launches (`run_pipeline(..., use_worktree=True, ...)`) must
+carry an explicit reuse key (`--plan <plan>` or
+`--worktree-name <name>`); a missing key is rejected as a `blocked`
+view, never a launch command.
+
 ## Boundaries
 
 - **Inputs.** Caller supplies the project directory (current cwd) and the
@@ -23,9 +130,9 @@ and vetted by `ralph-preset-review`.
   what else is needed. A plan, ordinary prompt file, environment variable,
   loop id, worktree name, or other runtime context is required only when the
   preset's actual launch contract needs it. Missing first-run business input
-  does **not** block provisioning: generate the reusable suite, mark the
-  handoff incomplete, and show the exact command template the operator must
-  finish. Never invent a placeholder plan file.
+  does **not** block provisioning: the entry generates the reusable suite,
+  marks the handoff `incomplete_static_only`, and shows the exact command
+  template the operator must finish. Never invent a placeholder plan file.
 - **No preset authoring.** Hat routing, AAF tables, preset schemas and
   builtin completions live in `ralph-preset-author` / `ralph-preset-review`.
   If the caller needs to change the preset, hand off there.
@@ -38,82 +145,6 @@ and vetted by `ralph-preset-review`.
   always bounded by iteration / idle / wall-clock caps; any target-project
   smoke that touches non-replay backends requires explicit operator
   authorization captured by the handoff.
-
-## Workflow
-
-1. **Read the preset, then audit.** Resolve and read the supplied preset in
-   full. Confirm the target root, then inspect the nearest `AGENTS.md` /
-   `CLAUDE.md`, dependency manifests, task runners, CI workflows, and test /
-   lint configuration. Gather verifiable build / test / lint / format entry
-   points and derive a launch contract from the preset plus
-   operator input. Record optional `prompt_file`, optional `plan_path`,
-   runtime environment/argument preconditions, worktree strategy, and which
-   files (if any) need bootstrap ownership. A hats source cannot carry
-   `event_loop.prompt` across Ralph's operator/preset merge boundary, so an
-   inline preset prompt is generation input, not a runtime prompt source.
-   Distinguish a **provisioning blocker** (invalid preset,
-   ambiguous root, ownership conflict) from a **first-run input gap** (missing
-   plan, loop id, document brief): only the former stops writes. Do not
-   classify by preset name.
-   For a file preset, read the repo-relative YAML directly. For a builtin,
-   first validate the hats source with `ralph -H builtin:<id> preset check
-   --strict`. `preset show` addresses **template names**, which may differ
-   from the builtin hats id. Run `ralph preset list --format json`, find the
-   manifest whose `source` equals `builtin:<id>`, then run `ralph preset show
-   <template-name> --format yaml`. If no template maps to that source, resolve
-   the builtin from the installed Ralph distribution; never assume that
-   stripping `builtin:` yields a template name. A manifest description alone
-   is not sufficient evidence.
-2. **Generate / safely update the preset-bound suite.** Derive the preset
-   stem with `derive_preset_bound_paths`, then call
-   `compose_preset_bound_suite` with the full resolved preset YAML. For
-   `<stem>`, own exactly `ralph.<stem>.yml` and `PROMPT.<stem>.md`. Copy the
-   preset's literal `event_loop.prompt` into the prompt artifact and point the
-   generated config at it. Never emit generic `ralph.pipeline.yml`,
-   `PROMPT.md`, `PROMPT.pipeline.md`, or a separate `ralph.bootstrap.yml` for
-   this flow. If the preset has no non-empty inline prompt and the operator
-   supplied neither a plan nor an external prompt, stop with
-   `preset_prompt_missing`. Preserve
-   user content outside owned sections / keys; abort on marker / YAML /
-   ownership conflict. Use `assets/ralph.pipeline.base.yml` as the structural
-   baseline rather than emitting a skeletal config. Adapt that baseline to
-   the target project: populate `core.guardrails` with concise rules supported
-   by project evidence and include the discovered verification commands. Do
-   not copy source-project language, commands, paths, or assumptions into the
-   target. A newly generated config containing only `core.project_root` is an
-   incomplete bootstrap result.
-
-   Reconcile an existing pair with `reconcile_preset_bound_suite`. Embedded
-   `profile_sha256` and `prompt_sha256` must match before refresh; a mismatch
-   is an ownership blocker. Provenance lives under the config's `_bootstrap:`
-   mapping, never in a sidecar.
-   For a plan-driven preset with no plan yet, generate the preset-bound config,
-   agent-doc managed sections when needed, and a managed fallback prompt. The fallback
-   must state that a real repo-relative plan is supplied with `--plan`, and
-   must stop without changing the project if executed directly. Do not create
-   a fake `plan.md`.
-   The final plan-driven launch template must pass only `--plan PLAN_PATH` as
-   its CLI prompt source; do **not** also pass `--prompt-file` because CLI
-   prompt-file precedence would select the fallback instead of the real plan.
-   The generated config may still reference the fallback so standalone
-   preflight/config loading has a safe, readable file.
-3. **Stage validation** in this strict order: strict preset check →
-   strict preflight → `ralph run --dry-run`. Capture structured evidence
-   for each stage; downgrade reports to "static-only" when the loop has
-   not been smoke-verified. A missing first-run value may prevent validation
-   of the final command, but it does not undo generated artifacts.
-4. **Optional authorized smoke.** Only when the target backend is a
-   content-fixed replay harness shipped with this skill. Any other
-   backend (mock / custom / real) must be authorized by the operator
-   after the side-effect surface is shown. Without authorization the
-   skill reports `incomplete` and stops.
-5. **Handoff.** Always emit a verification-level-tagged report plus the
-   command matching the launch contract. Include required environment
-   variables and dynamic arguments. Missing dynamic values produce an
-   `incomplete_static_only` command template such as `--plan PLAN_PATH`, not
-   a `blocked` handoff and not a ready command. Worktree invocations must
-   include an explicit reuse key (`--plan <plan>` or
-   `--worktree-name <name>`); missing keys are rejected.
 
 ## Guardrails
 
@@ -131,9 +162,9 @@ and vetted by `ralph-preset-review`.
 ## Agent Docs Maintenance
 
 `AGENTS.md` and `CLAUDE.md` in the target project are mutated only via
-the helpers in `scripts/agent_docs.py`. The helper is a pure stdlib
-module that owns every persistent edit through a single managed
-section.
+the helpers in `scripts/agent_docs.py`, which the entry point drives as
+part of the generation batch. The helper is a pure stdlib module that
+owns every persistent edit through a single managed section.
 
 **Marker format.** Each doc carries exactly one managed block, fenced
 by `<!-- RALPH-BOOTSTRAP-START: <marker_id> v1 -->` /
@@ -171,15 +202,14 @@ appends a fresh section). A doc with one START and one END is `Ok`
 (multiple START/END), `Truncated` (START without END), or `Nested`
 (END before START). The compose call returns
 `ComposeResult(kind="blocker", code="marker_...", reason=...)` and the
-operator must reconcile by hand. The skill must surface that blocker;
-defaulting to a best-guess rewrite is forbidden by the guardrails
-section above.
+operator must reconcile by hand. The entry surfaces that blocker as a
+`blocked` result; defaulting to a best-guess rewrite is forbidden by
+the guardrails section above.
 
-**Sync between AGENTS.md and CLAUDE.md.** When the caller passes
-`sync_with_other_doc=True` with `other_body=...`, the helper checks
-that the proposed bodies agree before composing either side. Mismatches
-return `blocker(sync_mirror_conflict)` so asymmetric pairs are never
-written. The `conflicting-docs` fixture is the canonical regression.
+**Sync between AGENTS.md and CLAUDE.md.** The entry composes both docs
+with `sync_with_other_doc=True` so asymmetric mirrors surface
+`blocker(sync_mirror_conflict)` before the batch is staged. The
+`conflicting-docs` fixture is the canonical regression.
 
 **Atomic writes.** `AtomicWriter` stages every target into a sibling
 `.{name}.bootstrap.tmp` first, then commits each target with
@@ -197,15 +227,15 @@ closed before any partial state is observed.
 
 ## Pipeline Suite Authoring
 
-The pipeline suite (`ralph.<stem>.yml`, `PROMPT.<stem>.md`) is generated and
-safely maintained by `scripts/pipeline_suite.py`. The helper owns exactly two files
-inside the target project and never touches `AGENTS.md` /
-`CLAUDE.md` (those flow through `agent_docs.py`) or the runtime
-ledger under `.ralph/`.
+The pipeline suite (`ralph.<stem>.yml`, `PROMPT.<stem>.md`) is generated
+and safely maintained by `scripts/pipeline_suite.py`, driven by the
+entry point. The helper owns exactly two files inside the target project
+and never touches `AGENTS.md` / `CLAUDE.md` (those flow through
+`agent_docs.py`) or the runtime ledger under `.ralph/`.
 
 **Baseline plus project overlay.** Read `assets/ralph.pipeline.base.yml`
 before composing a new config. The asset defines reusable runtime safety and
-diagnosis defaults. Pass the audited `ProjectFacts` directly as
+diagnosis defaults. The entry passes the audited `ProjectFacts` directly as
 `project_facts=decision.facts` to `compose_preset_bound_suite`; do not
 manually reconstruct or omit this link.
 Only emit commands proven by manifests, project docs, task
@@ -218,6 +248,9 @@ only a preset-resolution detail.
 `generator_version`, `input_signature`, `profile_sha256`, and
 `prompt_sha256` under `_bootstrap:`. The hashes prove both generated files
 still match before an idempotent refresh. There is no provenance sidecar.
+Embedded `profile_sha256` and `prompt_sha256` must match before refresh; a
+mismatch is an ownership blocker (`owned_value_user_modified` /
+`provenance_corrupt`).
 
 **Config precedence.** The runtime auto-discovers `ralph.yml` as a
 default config. To prevent it from preempting the suite, every
@@ -231,7 +264,12 @@ contract.
 `event_loop.prompt` bytes into `PROMPT.<stem>.md`. A later preset change
 changes `input_signature`; refresh is allowed only when both existing files
 still match their embedded hashes. An operator-owned external prompt is a
-different launch contract and is referenced rather than copied.
+different launch contract and is referenced rather than copied. For a
+plan-driven preset with no plan yet, the entry keeps a managed fallback
+prompt inside the suite and emits the `[TEMPLATE - replace PLAN_PATH before
+running]` command carrying only `--plan PLAN_PATH`; do **not** also pass
+`--prompt-file`, because CLI prompt-file precedence would select the
+fallback instead of the real plan.
 
 **Forbidden in emitted bytes.** The prompt must never reference
 `ralph-hats` or any specific preset name; it must never mention the
@@ -251,7 +289,7 @@ full contract.
 
 ## Static Validation
 
-After the suite ships, the skill runs a four-stage static gate in
+After the suite ships, the entry runs a four-stage static gate in
 strict order: capability → preset check → preflight → dry-run.
 The gate is implemented by `scripts/cli_probe.py`; the fake runner
 that drives it deterministically in the test suite lives in
@@ -282,7 +320,8 @@ backend auto-detection, and completed its auto-preflight. It does
 NOT prove that a loop can reach any business event or that the
 configured backend can produce a coherent response. Downstream
 reports must surface "static load passed; loop not closed" and
-never claim "loop closed" based on a green dry-run alone.
+never claim "loop closed" based on a green dry-run alone. The
+`incomplete_static_only` level is exactly this state.
 
 **Blocker classification.** Each non-green stage is classified so
 callers can route the failure correctly: `blocked_cli` for

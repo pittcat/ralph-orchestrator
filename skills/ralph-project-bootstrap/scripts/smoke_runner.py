@@ -503,6 +503,19 @@ def run_smoke(
     classifies the captured stdout/stderr into one of the nine
     ``SmokeResult.outcome`` values.
 
+    Transcript contract (``transcript_dir``):
+
+    When ``transcript_dir`` is supplied the harness consumes it on the
+    authorised path: the directory is recorded as
+    ``transcript_dir=<path>`` in ``evidence`` ahead of the spawn, so
+    EVERY classification branch (terminal / first-event / spawned /
+    non-zero / error-event / wall-clock timeout) carries proof of which
+    transcript the replay smoke was staged against. Existence is NOT
+    enforced here (the harness cannot observe whether the runner
+    actually replayed it); authorization integrity is owned by the
+    caller's resolved-backend gate. ``transcript_dir=None`` preserves
+    the historical semantics unchanged (no evidence entry).
+
     Real-backend reap contract (runner is None):
 
     When ``runner is None`` the harness spawns the real ``ralph``
@@ -562,6 +575,23 @@ def run_smoke(
             failure_bucket="none", elapsed=0.0,
             stdout_excerpt="", stderr_excerpt="",
         )
+
+    # --- transcript consumption -------------------------------------------
+    # When the caller supplies ``transcript_dir`` the authorised path
+    # records it in ``evidence`` so every classification branch
+    # (terminal / first-event / spawned / failure / timeout) carries
+    # proof of WHICH transcript the replay smoke was staged against;
+    # the entry flows through ``SmokeResult.evidence`` into the handoff.
+    # ``transcript_dir=None`` preserves the legacy harness semantics
+    # unchanged for callers that do not stage a transcript. Existence
+    # of the directory is deliberately NOT enforced here: the harness
+    # cannot observe whether the runner actually replayed the
+    # transcript, and existing harness callers pass staging paths that
+    # may only materialise inside the runner. Authorization integrity
+    # is owned by the pipeline's resolved-backend gate, not by this
+    # recording step.
+    if transcript_dir is not None:
+        evidence.append(f"transcript_dir={Path(transcript_dir)}")
 
     run = runner if runner is not None else subprocess.run
     outer_timeout = float(smoke_cfg.wall_clock_timeout_s) + 5.0
@@ -649,7 +679,7 @@ def run_smoke(
         return _make_smoke_result(
             "bounded_terminal_reached",
             argv,
-            ("LOOP_COMPLETE marker observed in captured stdout",),
+            tuple(evidence) + ("LOOP_COMPLETE marker observed in captured stdout",),
             failure_bucket="none", elapsed=elapsed,
             stdout_excerpt=stdout_excerpt, stderr_excerpt=stderr_excerpt,
         )
@@ -658,7 +688,7 @@ def run_smoke(
         return _make_smoke_result(
             "first_event_seen",
             argv,
-            ("plan.ready marker observed; bounded terminal not reached",),
+            tuple(evidence) + ("plan.ready marker observed; bounded terminal not reached",),
             failure_bucket="none", elapsed=elapsed,
             stdout_excerpt=stdout_excerpt, stderr_excerpt=stderr_excerpt,
         )
@@ -666,7 +696,7 @@ def run_smoke(
     return _make_smoke_result(
         "spawned",
         argv,
-        ("spawned; no first or terminal event observed in captured stdout",),
+        tuple(evidence) + ("spawned; no first or terminal event observed in captured stdout",),
         failure_bucket="none", elapsed=elapsed,
         stdout_excerpt=stdout_excerpt, stderr_excerpt=stderr_excerpt,
     )
