@@ -21,8 +21,10 @@ author 收到 `task_brief_path` 后,必须按以下顺序读取与校验;任一�
 立即输出 `task_brief_invalid` + 对应错误(code/path),停在 Discovery gate,
 **不生成任何 preset**,也不消费 brief 的任何字段:
 
-1. **文件存在**:brief 路径可读。缺失 → `task_brief_invalid` +
-   `task_brief_file_not_found`(author 侧 code)。
+1. **文件存在且可读(UTF-8)**:brief 路径可读。缺失 → `task_brief_invalid` +
+   `task_brief_file_not_found`(author 侧 code);存在但字节不是合法 UTF-8
+   或读盘失败 → `task_brief_invalid` + `task_brief_unreadable`(author 侧
+   code,在进入 validator 之前短路)。
 2. **YAML 可解析**:运行 `brief_validator.validate_brief_text`
    (真实 `yaml.safe_load`,格式错误无法绕过)。解析失败 →
    `task_brief_invalid` + validator code `invalid_yaml`。
@@ -80,6 +82,7 @@ author 只消费以下字段;任何清单外的 brief 内容都不得当作已�
 | 情形 | verdict | 错误 code | 来源 |
 |---|---|---|---|
 | brief 文件缺失 | `task_brief_invalid` | `task_brief_file_not_found` | author 侧 |
+| brief 存在但非 UTF-8 / 读盘失败 | `task_brief_invalid` | `task_brief_unreadable` | author 侧 |
 | YAML 解析失败 | `task_brief_invalid` | `invalid_yaml` | validator |
 | schema_version 不受支持 | `task_brief_invalid` | `schema_version_invalid` | validator |
 | project_root 与当前目标根不一致 | `task_brief_invalid` | `task_brief_root_mismatch` | author 侧 |

@@ -1336,3 +1336,88 @@ def test_build_brief_normalizes_integral_float_attempt_count() -> None:
     assert result.valid is True
     assert "invalid_score" not in {e.code for e in result.errors}
     assert result.recommended_status == "blocked"
+
+
+# --- author handoff:非 UTF-8 / 不可读 brief → task_brief_unreadable(U2 修复) ---
+#
+# 契约(TD-11「每个失败有稳定 code」):brief 文件存在但字节不是合法 UTF-8
+# (或读盘失败)时,evaluate_task_brief 不得抛裸 UnicodeDecodeError / OSError,
+# 必须返回 author 侧冻结 code task_brief_unreadable;停止语义与其余 invalid
+# 一致(不携带任何可消费事实)。合法 UTF-8 brief 的既有行为逐字不变。
+
+
+def test_handoff_valid_utf8_brief_from_discovery_is_author_handoff_ok(tmp_path) -> None:
+    # Happy:合法 UTF-8 且 author_ready 的 brief(discovery 端到端生成)→
+    # verdict 保持 author_handoff_ok,不产生 task_brief_unreadable——新增
+    # 捕获路径不得改变合法 UTF-8 brief 的任何既有行为。
+    ah = _ah()
+    transcript = _transcript("green.yml")
+    brief = _dt().build_brief(transcript)
+    path = tmp_path / "green-brief.yml"
+    path.write_text(yaml.safe_dump(brief, allow_unicode=True), encoding="utf-8")
+
+    decision = ah.evaluate_task_brief(path, transcript["project_root"])
+
+    assert decision.verdict == ah.VERDICT_OK
+    assert decision.errors == ()
+    assert decision.goal == brief["goal"]
+
+
+def test_handoff_non_utf8_brief_returns_stable_unreadable_code(tmp_path) -> None:
+    # Edge:brief 存在但字节不是合法 UTF-8 → 不抛裸 UnicodeDecodeError,
+    # 返回 author 侧冻结 code task_brief_unreadable;停止语义与其余 invalid
+    # 一致:全部已确认事实字段为空。
+    ah = _ah()
+    path = tmp_path / "non-utf8-brief.yml"
+    path.write_bytes(b"\xff\xfe\x00invalid utf8 \xff")
+
+    decision = ah.evaluate_task_brief(path, "/workspace/demo-repo")
+
+    assert decision.verdict == ah.VERDICT_INVALID
+    assert {e.code for e in decision.errors} == {ah.CODE_UNREADABLE}
+    assert ah.CODE_UNREADABLE == "task_brief_unreadable"
+    # message 注明 brief 路径与不可读原因
+    assert str(path) in decision.errors[0].message
+    # 停止语义:不携带任何可消费事实
+    assert decision.goal is None
+    assert decision.scope_note is None
+    assert decision.acceptance_note is None
+    assert decision.failure_boundaries_note is None
+    assert decision.selected_candidate_id is None
+    assert decision.selected_candidate_summary is None
+    assert decision.selected_candidate_evidence == ()
+    assert decision.evidence_ids == ()
+
+
+def test_handoff_missing_and_directory_paths_stay_file_not_found(tmp_path) -> None:
+    # Edge(锚定既有行为):不存在路径与目录路径仍走 is_file 短路 →
+    # task_brief_file_not_found,不得被新 code 重新分类为 unreadable。
+    ah = _ah()
+
+    missing = ah.evaluate_task_brief(
+        tmp_path / "no-such-brief.yml", "/workspace/demo-repo"
+    )
+    assert missing.verdict == ah.VERDICT_INVALID
+    assert [e.code for e in missing.errors] == [ah.CODE_FILE_NOT_FOUND]
+
+    directory = ah.evaluate_task_brief(tmp_path, "/workspace/demo-repo")
+    assert directory.verdict == ah.VERDICT_INVALID
+    assert [e.code for e in directory.errors] == [ah.CODE_FILE_NOT_FOUND]
+
+
+def test_handoff_duplicate_evidence_id_stays_in_validator_channel(tmp_path) -> None:
+    # Edge(对称锚点):合法 UTF-8 brief 的结构错误(重复 evidence id)仍透传
+    # validator 通道,不被误判为 task_brief_unreadable——新 code 只覆盖
+    # 「字节不可读」,不抢占 validator 错误。
+    ah = _ah()
+    data = _load_brief_fixture("valid.yml")
+    data["evidence"].append(dict(data["evidence"][0]))  # 复制 E1,id 重复
+    path = tmp_path / "duplicate-evidence.yml"
+    path.write_text(yaml.safe_dump(data, allow_unicode=True), encoding="utf-8")
+
+    decision = ah.evaluate_task_brief(path, data["project_root"])
+
+    assert decision.verdict == ah.VERDICT_INVALID
+    codes = {e.code for e in decision.errors}
+    assert "duplicate_evidence_id" in codes
+    assert ah.CODE_UNREADABLE not in codes

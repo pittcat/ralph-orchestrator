@@ -43,6 +43,10 @@ VERDICT_INVALID = "task_brief_invalid"
 CODE_FILE_NOT_FOUND = "task_brief_file_not_found"
 CODE_ROOT_MISMATCH = "task_brief_root_mismatch"
 CODE_NOT_AUTHOR_READY = "task_brief_not_author_ready"
+#: brief 文件存在但字节不是合法 UTF-8,或读盘失败——同样是 validator 视野之外
+#: 的检查(validator 只接收已成功读出的文本),由 author 侧给出确定性 code,
+#: 保证「每个失败有稳定 code」契约。
+CODE_UNREADABLE = "task_brief_unreadable"
 
 
 # --- 纯数据结构 ---------------------------------------------------------------
@@ -155,7 +159,9 @@ def evaluate_task_brief(
 
     顺序(与书面协议一致):
 
-    1. 文件存在 → 缺失则 ``task_brief_file_not_found``(短路);
+    1. 文件存在且可读(UTF-8)→ 缺失则 ``task_brief_file_not_found``(短路);
+       存在但字节不是合法 UTF-8 或读盘失败则 ``task_brief_unreadable``
+       (短路,在进入 validator 之前);
     2. 运行 ``brief_validator.validate_brief_text``(真实 ``yaml.safe_load``;
        YAML 可解析性、``schema_version``、``project_root`` provenance、
        全部硬门禁与 author_ready 充要条件都在这里判定),错误按 validator
@@ -184,7 +190,31 @@ def evaluate_task_brief(
             )
         )
 
-    text = path.read_text(encoding="utf-8")
+    try:
+        text = path.read_text(encoding="utf-8")
+    except UnicodeDecodeError:
+        return _invalid(
+            (
+                HandoffError(
+                    code=CODE_UNREADABLE,
+                    path="$",
+                    message=(
+                        f"task brief 不可读:{brief_path} 的字节不是合法 UTF-8,"
+                        "无法交给 validator 复核"
+                    ),
+                ),
+            )
+        )
+    except OSError as exc:
+        return _invalid(
+            (
+                HandoffError(
+                    code=CODE_UNREADABLE,
+                    path="$",
+                    message=f"task brief 不可读:{brief_path} 读盘失败({exc})",
+                ),
+            )
+        )
     result = brief_validator.validate_brief_text(text)
     errors: list[HandoffError] = [
         HandoffError(code=e.code, path=e.path, message=e.message) for e in result.errors
