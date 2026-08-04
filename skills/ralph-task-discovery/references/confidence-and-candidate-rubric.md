@@ -119,6 +119,9 @@ candidate_statuses:
 候选 `status` 字段允许值:`pending` / `selected` /
 `rejected_low_confidence` / `rejected_insufficient_coverage`。
 声明的 status 与门禁结论矛盾 → 稳定 code `candidate_status_inconsistent`。
+候选 `id` 必须在候选台账内唯一、决策 `id` 必须在决策台账内唯一:重复 →
+稳定 code `duplicate_candidate_id` / `duplicate_decision_id`,validator 拒收
+(消除认证侧与消费侧按同 id 匹配时的错位)。
 
 ## 5. 完成证据条件(E3/E4)
 

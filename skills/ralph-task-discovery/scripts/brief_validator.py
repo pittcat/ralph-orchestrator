@@ -71,6 +71,8 @@ CODE_STATE_TRANSITION_INVALID = "state_transition_invalid"
 CODE_SCHEMA_VERSION_INVALID = "schema_version_invalid"
 CODE_ROOT_PROVENANCE_MISSING = "root_provenance_missing"
 CODE_DUPLICATE_EVIDENCE_ID = "duplicate_evidence_id"
+CODE_DUPLICATE_CANDIDATE_ID = "duplicate_candidate_id"
+CODE_DUPLICATE_DECISION_ID = "duplicate_decision_id"
 CODE_INVALID_YAML = "invalid_yaml"
 # U3 新增(向后兼容,均为增量 code):
 #: 声明(重算)分数显著超出去重证据可支持的上限(invalid_score 家族)。
@@ -475,6 +477,8 @@ def validate_brief_data(data: Any) -> ValidationResult:
             )
         )
         decisions_raw = []
+    #: 已登记的决策 id(唯一性门禁;缺失 id 回退 #<index>,按 index 天然唯一)。
+    decision_ids: set[str] = set()
     for index, entry in enumerate(decisions_raw):
         path = f"$.decisions[{index}]"
         if not isinstance(entry, Mapping):
@@ -488,6 +492,17 @@ def validate_brief_data(data: Any) -> ValidationResult:
             )
             continue
         entry_id = entry.get("id") if isinstance(entry.get("id"), str) and entry.get("id") else f"#{index}"
+        if str(entry_id) in decision_ids:
+            errors.append(
+                ValidationError(
+                    code=CODE_DUPLICATE_DECISION_ID,
+                    path=f"{path}.id",
+                    message=f"决策 id '{entry_id}' 重复,引用将产生歧义",
+                    next_action=NEXT_INVESTIGATE,
+                )
+            )
+        else:
+            decision_ids.add(str(entry_id))
         label = f"决策 {entry_id}"
         question = entry.get("question")
         if not isinstance(question, str) or not question.strip():
@@ -598,6 +613,8 @@ def validate_brief_data(data: Any) -> ValidationResult:
     selected_qualified: list[dict[str, Any]] = []
     #: 候选 id → 记录(重算审计用)。
     candidate_records: dict[str, dict[str, Any]] = {}
+    #: 已登记的候选 id(唯一性门禁;缺失 id 回退 #<index>,按 index 天然唯一)。
+    candidate_ids: set[str] = set()
     candidates_raw = data.get("candidates", [])
     if not isinstance(candidates_raw, list):
         errors.append(
@@ -622,6 +639,17 @@ def validate_brief_data(data: Any) -> ValidationResult:
             )
             continue
         entry_id = entry.get("id") if isinstance(entry.get("id"), str) and entry.get("id") else f"#{index}"
+        if str(entry_id) in candidate_ids:
+            errors.append(
+                ValidationError(
+                    code=CODE_DUPLICATE_CANDIDATE_ID,
+                    path=f"{path}.id",
+                    message=f"候选 id '{entry_id}' 重复,引用将产生歧义",
+                    next_action=NEXT_INVESTIGATE,
+                )
+            )
+        else:
+            candidate_ids.add(str(entry_id))
         label = f"候选 {entry_id}"
         summary = entry.get("summary")
         if not isinstance(summary, str) or not summary.strip():

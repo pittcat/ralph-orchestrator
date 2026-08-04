@@ -862,3 +862,101 @@ def test_rubric_document_constants_match_code() -> None:
         "acceptance_coverage": task_brief.CANDIDATE_ACCEPTANCE_COVERAGE_MIN,
         "project_fit": task_brief.CANDIDATE_PROJECT_FIT_MIN,
     }
+
+
+# --- U3-fix:candidate / decision id 唯一性门禁 ------------------------------
+
+
+def test_valid_fixture_happy_path_behavior_unchanged() -> None:
+    # 基线锁定:valid.yml 全部 id 唯一,引入唯一性门禁后行为逐字不变
+    result = _validate_fixture("valid.yml")
+    assert result.valid is True
+    assert result.author_ready is True
+    assert result.recommended_status == "author_ready"
+    assert result.next_action == "ready_for_handoff"
+    assert result.errors == ()
+    assert result.handoff_block_reasons == ()
+    assert "duplicate_candidate_id" not in _codes(result)
+    assert "duplicate_decision_id" not in _codes(result)
+
+
+def test_duplicate_candidate_id_is_rejected() -> None:
+    def mutate(data: dict) -> None:
+        data["candidates"][0]["id"] = "CX"
+        data["candidates"][1]["id"] = "CX"
+
+    result = validate_brief_text(_mutated("valid.yml", mutate))
+    assert result.valid is False
+    assert result.author_ready is False
+    assert any(
+        e.code == "duplicate_candidate_id" and "candidates" in e.path
+        for e in result.errors
+    )
+
+
+def test_duplicate_decision_id_is_rejected() -> None:
+    def mutate(data: dict) -> None:
+        # 完整复制 D1 决策记录,只制造 id 重复这一个违规
+        data["decisions"].append(dict(data["decisions"][0]))
+
+    result = validate_brief_text(_mutated("valid.yml", mutate))
+    assert result.valid is False
+    assert result.author_ready is False
+    assert any(
+        e.code == "duplicate_decision_id" and "decisions" in e.path
+        for e in result.errors
+    )
+
+
+def test_duplicate_evidence_id_behavior_unchanged() -> None:
+    # 不对称消除对照:重复证据 id 仍走既有 duplicate_evidence_id,
+    # 且不出现 candidate/decision 的新 code
+    def mutate(data: dict) -> None:
+        data["evidence"].append(dict(data["evidence"][0]))
+
+    result = validate_brief_text(_mutated("valid.yml", mutate))
+    assert result.valid is False
+    assert any(
+        e.code == "duplicate_evidence_id" and e.path == "$.evidence[4].id"
+        for e in result.errors
+    )
+    codes = _codes(result)
+    assert "duplicate_candidate_id" not in codes
+    assert "duplicate_decision_id" not in codes
+
+
+def test_duplicate_candidate_id_cannot_reach_author_handoff() -> None:
+    # 交接错位消除:两个同 id 候选,第一个被低置信度门禁拒绝、第二个达标
+    # 并标 selected。validator 必须拒收,此类 brief 不可能带 author_ready
+    # 到达 author 消费侧(消费侧按首个同 id 匹配,会消费到被拒副本)。
+    def mutate(data: dict) -> None:
+        data["candidates"][0]["id"] = "CX"
+        data["candidates"][0]["confidence"] = 0.50
+        data["candidates"][0]["selected"] = False
+        data["candidates"][1]["id"] = "CX"
+        data["candidates"][1]["confidence"] = 0.90
+        data["candidates"][1]["goal_coverage"] = 0.90
+        data["candidates"][1]["acceptance_coverage"] = 0.90
+        data["candidates"][1]["project_fit"] = 0.85
+        data["candidates"][1]["supporting_evidence"] = ["E1", "E3"]
+        data["candidates"][1]["selected"] = True
+
+    result = validate_brief_text(_mutated("valid.yml", mutate))
+    assert result.valid is False
+    assert result.author_ready is False
+    assert "duplicate_candidate_id" in _codes(result)
+    # 未认证 → handoff 被阻断
+    assert result.handoff_block_reasons
+
+
+def test_missing_candidate_ids_fallback_no_false_positive() -> None:
+    # 缺 id 的两个候选回退到 #0/#1(按 index 天然唯一),不得误报重复;
+    # id 为可选字段,其余门禁不受影响,行为与引入唯一性门禁前逐字一致
+    def mutate(data: dict) -> None:
+        del data["candidates"][0]["id"]
+        del data["candidates"][1]["id"]
+
+    result = validate_brief_text(_mutated("valid.yml", mutate))
+    assert "duplicate_candidate_id" not in _codes(result)
+    assert result.valid is True
+    assert result.author_ready is True

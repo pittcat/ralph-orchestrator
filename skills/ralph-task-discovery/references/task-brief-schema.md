@@ -158,7 +158,7 @@ author_ready 要求**五个维度全部** `>= 0.85`;任何一个维度不达标,
 
 | 字段 | 必填 | 规则 |
 |---|---|---|
-| `id` | 是 | 如 `D1` |
+| `id` | 是 | 如 `D1`;决策台账内唯一,重复 → `duplicate_decision_id` |
 | `question` | 是 | 决策对应的问题 |
 | `confidence` | 是 | [0,1] 浮点数,按 §4 分带 |
 | `supporting_evidence` | 是 | 证据 id 列表,不得为空,必须可解析(§5) |
@@ -196,7 +196,7 @@ author-blocking 决策的额外硬门禁:
 
 | 字段 | 必填 | 规则 |
 |---|---|---|
-| `id` | 是 | 如 `C1` |
+| `id` | 是 | 如 `C1`;候选台账内唯一,重复 → `duplicate_candidate_id` |
 | `summary` | 是 | 方案一句话描述 |
 | `confidence` | 是 | [0,1] 浮点数,按 §4 分带 |
 | `goal_coverage` | 是 | 方案对目标的覆盖度,[0,1] |
@@ -276,6 +276,8 @@ author_ready 被拒,状态建议降为 `needs_user_decision`,next action = 逐�
 | `schema_version_invalid` | schema_version 缺失或不是 `"1.0"` |
 | `root_provenance_missing` | project_root 缺失或为空 |
 | `duplicate_evidence_id` | 证据 id 在台账中重复 |
+| `duplicate_candidate_id` | 候选 id 在候选台账中重复 |
+| `duplicate_decision_id` | 决策 id 在决策台账中重复 |
 | `invalid_yaml` | YAML 文本本身解析失败 |
 
 next_action 词表(机器可读):
