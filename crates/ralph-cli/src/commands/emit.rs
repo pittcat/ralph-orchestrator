@@ -326,8 +326,10 @@ enum U5GateState {
     /// pseudo-hat `ralph`, wave worker, or preset without hats).
     Inactive,
     /// The contract compiled cleanly; the gate is enforcing.
+    /// Boxed to keep the enum small (clippy `large_enum_variant`);
+    /// all access goes through `&self.state` pattern matches.
     Active {
-        resolved: ralph_core::execution_contract::ResolvedRuntimeConfig,
+        resolved: Box<ralph_core::execution_contract::ResolvedRuntimeConfig>,
     },
     /// The contract failed to compile. The gate denies with
     /// `contract_compile_failed` BEFORE evaluating capability or
@@ -379,7 +381,9 @@ impl U5Gate {
         let cfg = config.expect("active implies config.is_some()");
         match ralph_core::execution_contract::compile(cfg.clone()) {
             Ok(resolved) => Self {
-                state: U5GateState::Active { resolved },
+                state: U5GateState::Active {
+                    resolved: Box::new(resolved),
+                },
             },
             Err(error) => Self {
                 state: U5GateState::CompileFailed {

@@ -473,7 +473,7 @@ cli:
         });
         let body = serde_json::json!({ "loops": [entry] });
         fs::write(
-            &ralph_dir.join("loops.json"),
+            ralph_dir.join("loops.json"),
             serde_json::to_string_pretty(&body).unwrap(),
         )
         .unwrap();
@@ -1545,7 +1545,7 @@ hats:
         });
         let body = serde_json::json!({ "loops": [entry] });
         fs::write(
-            &ralph_dir.join("loops.json"),
+            ralph_dir.join("loops.json"),
             serde_json::to_string_pretty(&body).unwrap(),
         )
         .unwrap();
