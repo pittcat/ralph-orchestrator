@@ -804,10 +804,23 @@ pub fn task_resume_from_manifest(
     );
     if let Some(snapshot) = trigger.payload.as_deref() {
         // Best-effort: embed as a JSON value when it parses, else as
-        // a plain string (mirrors `build_task_resume_payload`).
+        // a plain string (mirrors `build_task_resume_payload`). A
+        // truncated snapshot must not degrade silently: surface the
+        // truncation so the resumed hat knows its trigger is partial.
+        // Current-format truncation envelopes keep parsing as JSON
+        // (the flag is read from the marker field); the legacy
+        // `…`-suffixed slice lands on the string fallback and is
+        // still recognized by the same helper.
+        let truncated = crate::parallel_forge_resume::payload_snapshot_is_truncated(snapshot);
         let value = serde_json::from_str::<serde_json::Value>(snapshot)
             .unwrap_or_else(|_| serde_json::Value::String(snapshot.to_string()));
         payload.insert("original_trigger_payload".into(), value);
+        if truncated {
+            payload.insert(
+                "original_trigger_payload_truncated".into(),
+                serde_json::Value::Bool(true),
+            );
+        }
     }
     if let Some(publisher) = trigger.hat.as_deref() {
         payload.insert(
@@ -2035,7 +2048,7 @@ mod tests {
         };
         use crate::parallel_forge_resume::{
             AcceptedBoundary, BoundaryRecord, MANIFEST_SCHEMA_VERSION, ResumeIdentity,
-            ResumeManifest, TriggerSnapshot, WaveMetadata,
+            ResumeManifest, TRUNCATED_SNAPSHOT_MARKER, TriggerSnapshot, WaveMetadata,
         };
         use std::collections::BTreeSet;
 
@@ -2273,6 +2286,80 @@ mod tests {
             assert!(
                 matches!(err, ManifestResumeError::DigestMismatch { .. }),
                 "expected DigestMismatch, got {err:?}"
+            );
+        }
+
+        /// Truncated trigger snapshots must surface a truncation signal
+        /// in the resume payload instead of degrading silently. Covers
+        /// the structured envelope (current capture format — embeds as
+        /// JSON) and the legacy `…`-suffixed slice (pre-envelope
+        /// captures — falls back to string embedding).
+        #[test]
+        fn truncated_trigger_snapshot_surfaces_truncation_signal() {
+            // Current format: the capture-side truncation envelope.
+            let envelope = serde_json::json!({
+                TRUNCATED_SNAPSHOT_MARKER: true,
+                "original_bytes": 9000_u64,
+                "preview": "{\"plan_key\":\"pf-1\"",
+            })
+            .to_string();
+            let manifest = manifest_fixture(
+                Some("guardian"),
+                Some("forge.plan.ready"),
+                Some(&envelope),
+                Some("planner"),
+                None,
+            );
+            let recovery =
+                task_resume_from_manifest(&manifest, &registered(&["planner", "guardian"]))
+                    .expect("envelope snapshot conversion must succeed");
+            let v: serde_json::Value = serde_json::from_str(&recovery.payload).unwrap();
+            assert_eq!(
+                v["original_trigger_payload_truncated"], true,
+                "envelope snapshot must surface the truncation flag: {v}"
+            );
+            assert_eq!(
+                v["original_trigger_payload"][TRUNCATED_SNAPSHOT_MARKER],
+                true
+            );
+
+            // Legacy format: invalid JSON with the trailing `…`.
+            let legacy = "{\"plan_key\":\"pf-1\",\"big\":\"xxxxxxxx…";
+            let manifest = manifest_fixture(
+                Some("guardian"),
+                Some("forge.plan.ready"),
+                Some(legacy),
+                Some("planner"),
+                None,
+            );
+            let recovery =
+                task_resume_from_manifest(&manifest, &registered(&["planner", "guardian"]))
+                    .expect("legacy snapshot conversion must succeed");
+            let v: serde_json::Value = serde_json::from_str(&recovery.payload).unwrap();
+            assert_eq!(
+                v["original_trigger_payload_truncated"], true,
+                "legacy truncated snapshot must surface the truncation flag: {v}"
+            );
+            assert!(
+                v["original_trigger_payload"].is_string(),
+                "legacy snapshot keeps the string fallback: {v}"
+            );
+
+            // Control: an intact snapshot carries no truncation flag.
+            let manifest = manifest_fixture(
+                Some("guardian"),
+                Some("forge.plan.ready"),
+                Some("{\"plan_key\":\"pf-1\"}"),
+                Some("planner"),
+                None,
+            );
+            let recovery =
+                task_resume_from_manifest(&manifest, &registered(&["planner", "guardian"]))
+                    .expect("intact snapshot conversion must succeed");
+            let v: serde_json::Value = serde_json::from_str(&recovery.payload).unwrap();
+            assert!(
+                v.get("original_trigger_payload_truncated").is_none(),
+                "intact snapshot must not be flagged truncated: {v}"
             );
         }
 

@@ -52,8 +52,15 @@ pub const MANIFEST_SCHEMA_VERSION: &str = "parallel-forge-resume-manifest.v1";
 pub const MANIFEST_FILE_NAME: &str = "parallel-forge-resume-manifest.v1.json";
 
 /// Byte cap for the original trigger payload snapshot stored in the
-/// manifest. Payloads beyond this are truncated (marked with `…`).
+/// manifest. Payloads beyond this are truncated into a self-describing
+/// JSON envelope (see [`TRUNCATED_SNAPSHOT_MARKER`]) that stays valid
+/// JSON and recognizable as a truncation product.
 pub const MAX_TRIGGER_PAYLOAD_SNAPSHOT_BYTES: usize = 8 * 1024;
+
+/// Marker field set to `true` inside a truncated trigger payload
+/// snapshot so resume consumers can recognize that the snapshot is
+/// partial (see [`payload_snapshot_is_truncated`]).
+pub const TRUNCATED_SNAPSHOT_MARKER: &str = "__resume_payload_truncated";
 
 /// Byte cap for a single artifact file we are willing to digest.
 pub const MAX_ARTIFACT_DIGEST_BYTES: u64 = 8 * 1024 * 1024;
@@ -138,8 +145,10 @@ pub struct AcceptedBoundary {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TriggerSnapshot {
     pub topic: String,
-    /// Payload snapshot (truncated to
-    /// [`MAX_TRIGGER_PAYLOAD_SNAPSHOT_BYTES`]).
+    /// Payload snapshot. Verbatim up to
+    /// [`MAX_TRIGGER_PAYLOAD_SNAPSHOT_BYTES`]; beyond the cap a
+    /// truncation envelope (see [`TRUNCATED_SNAPSHOT_MARKER`]) whose
+    /// `preview` is bounded by the cap.
     pub payload: Option<String>,
     pub hat: Option<String>,
     pub triggered: Option<String>,
@@ -810,12 +819,49 @@ fn normalize_relative(raw: &str) -> PathBuf {
 }
 
 /// Truncate a payload snapshot at a char boundary.
+///
+/// Below the cap the payload is returned verbatim. Above it, the
+/// snapshot is wrapped in a self-describing JSON envelope instead of a
+/// raw `prefix…` slice: the raw slice was INVALID JSON for any JSON
+/// payload and gave resume consumers no signal that the trigger was
+/// partial. The envelope stays valid JSON, records the original byte
+/// length, carries a UTF-8-safe `preview` (cut via
+/// [`crate::text::floor_char_boundary`], never splitting a multi-byte
+/// char), and sets [`TRUNCATED_SNAPSHOT_MARKER`] so consumers can
+/// detect the truncation ([`payload_snapshot_is_truncated`]).
 fn truncate_payload_snapshot(payload: String) -> String {
     if payload.len() <= MAX_TRIGGER_PAYLOAD_SNAPSHOT_BYTES {
         return payload;
     }
     let cut = crate::text::floor_char_boundary(&payload, MAX_TRIGGER_PAYLOAD_SNAPSHOT_BYTES);
-    format!("{}…", &payload[..cut])
+    let envelope = serde_json::json!({
+        TRUNCATED_SNAPSHOT_MARKER: true,
+        "original_bytes": payload.len() as u64,
+        "preview": &payload[..cut],
+    });
+    envelope.to_string()
+}
+
+/// True when a trigger payload snapshot was produced by truncation.
+///
+/// Recognizes the current truncation envelope (a JSON object carrying
+/// [`TRUNCATED_SNAPSHOT_MARKER`] = true) and, for manifests captured
+/// before the envelope existed, the legacy trailing `…` suffix on a
+/// snapshot that is no longer valid JSON. Intact snapshots — whether
+/// valid JSON or an opaque non-JSON string — return false.
+pub fn payload_snapshot_is_truncated(snapshot: &str) -> bool {
+    match serde_json::from_str::<serde_json::Value>(snapshot) {
+        Ok(value) => {
+            value
+                .get(TRUNCATED_SNAPSHOT_MARKER)
+                .and_then(|v| v.as_bool())
+                == Some(true)
+        }
+        // Legacy captures appended `…` to the truncated slice, which
+        // made the snapshot invalid JSON; that suffix is the only
+        // truncation signal those older manifests carry.
+        Err(_) => snapshot.ends_with('…'),
+    }
 }
 
 /// Git HEAD of the worktree (provenance; empty when unavailable).
@@ -1313,6 +1359,133 @@ mod tests {
             read_manifest(&dir.path().join("missing.json")),
             Err(ResumeManifestError::Io { .. })
         ));
+    }
+
+    /// Build a JSON object payload of EXACTLY `total` bytes shaped like
+    /// the other forge.plan.ready fixtures (no `*_path` keys, so
+    /// artifact capture stays reason-free).
+    fn filler_payload(total: usize) -> String {
+        let prefix = "{\"plan_key\":\"pf-1\",\"filler\":\"";
+        let suffix = "\"}";
+        assert!(total >= prefix.len() + suffix.len());
+        format!(
+            "{prefix}{}{suffix}",
+            "x".repeat(total - prefix.len() - suffix.len())
+        )
+    }
+
+    /// At/under the snapshot cap the payload passes through verbatim
+    /// and carries no truncation signal.
+    #[test]
+    fn payload_snapshot_at_or_below_limit_passes_through_without_truncation_signal() {
+        let dir = tempfile::TempDir::new().unwrap();
+        seed_runtime(dir.path());
+        let payload = filler_payload(MAX_TRIGGER_PAYLOAD_SNAPSHOT_BYTES);
+        append_event(dir.path(), &forge_plan_ready_line(&payload));
+        append_outbox(dir.path(), "forge.plan.ready", &payload, "planner");
+
+        let manifest = capture_manifest(dir.path(), &base_inputs());
+        assert!(manifest.is_complete(), "{:?}", manifest.incomplete_reasons);
+        let trigger = manifest.boundary.original_trigger.as_ref().unwrap();
+        let snapshot = trigger.payload.as_deref().unwrap();
+        // Verbatim passthrough — no rewrite, no truncation marker.
+        assert_eq!(snapshot, payload);
+        let value: serde_json::Value = serde_json::from_str(snapshot).unwrap();
+        assert!(
+            value.get(TRUNCATED_SNAPSHOT_MARKER).is_none(),
+            "at-limit payload must carry no truncation signal: {snapshot}"
+        );
+        assert!(
+            !payload_snapshot_is_truncated(snapshot),
+            "at-limit payload must not be recognized as truncated"
+        );
+    }
+
+    /// Over the cap the snapshot stays VALID JSON and carries an
+    /// observable truncation signal (the signal itself, not just a
+    /// shorter string). Truncation alone must not change the
+    /// completeness gate: the boundary evidence is intact.
+    #[test]
+    fn payload_snapshot_over_limit_records_observable_truncation_signal() {
+        let dir = tempfile::TempDir::new().unwrap();
+        seed_runtime(dir.path());
+        let payload = filler_payload(MAX_TRIGGER_PAYLOAD_SNAPSHOT_BYTES + 512);
+        append_event(dir.path(), &forge_plan_ready_line(&payload));
+        append_outbox(dir.path(), "forge.plan.ready", &payload, "planner");
+
+        let inputs = base_inputs();
+        let manifest = capture_manifest(dir.path(), &inputs);
+        assert!(
+            manifest.is_complete(),
+            "truncation alone must not mark the manifest incomplete: {:?}",
+            manifest.incomplete_reasons
+        );
+        assert!(validate_manifest(&manifest, &inputs).is_ok());
+
+        let trigger = manifest.boundary.original_trigger.as_ref().unwrap();
+        let snapshot = trigger.payload.as_deref().unwrap();
+        assert_ne!(snapshot, payload, "over-limit payload must be truncated");
+        let value: serde_json::Value =
+            serde_json::from_str(snapshot).expect("truncated snapshot must remain valid JSON");
+        assert_eq!(
+            value
+                .get(TRUNCATED_SNAPSHOT_MARKER)
+                .and_then(|v| v.as_bool()),
+            Some(true),
+            "truncated snapshot must carry the truncation marker: {snapshot}"
+        );
+        assert!(
+            payload_snapshot_is_truncated(snapshot),
+            "capture-side truncation must be recognizable downstream"
+        );
+        assert_eq!(
+            value.get("original_bytes").and_then(|v| v.as_u64()),
+            Some(u64::try_from(payload.len()).unwrap()),
+            "truncated snapshot must record the original byte length"
+        );
+        let preview = value
+            .get("preview")
+            .and_then(|v| v.as_str())
+            .expect("truncated snapshot must carry a preview");
+        assert!(preview.len() <= MAX_TRIGGER_PAYLOAD_SNAPSHOT_BYTES);
+        assert!(payload.starts_with(preview));
+    }
+
+    /// The byte cap lands INSIDE a multi-byte char: MAX-1 ASCII bytes
+    /// followed by one 3-byte char ('中') → MAX+2 bytes total. The cut
+    /// must fall back to a char boundary — no torn UTF-8 — and the
+    /// result must stay recognizable as a truncation product.
+    #[test]
+    fn payload_snapshot_truncation_falls_back_to_utf8_char_boundary() {
+        let mut payload = String::new();
+        payload.push_str(&"a".repeat(MAX_TRIGGER_PAYLOAD_SNAPSHOT_BYTES - 1));
+        payload.push('中');
+        assert_eq!(payload.len(), MAX_TRIGGER_PAYLOAD_SNAPSHOT_BYTES + 2);
+
+        let snapshot = truncate_payload_snapshot(payload.clone());
+
+        // No invalid byte sequence anywhere in the snapshot.
+        assert!(std::str::from_utf8(snapshot.as_bytes()).is_ok());
+        let value: serde_json::Value =
+            serde_json::from_str(&snapshot).expect("snapshot must stay valid JSON");
+        assert_eq!(
+            value
+                .get(TRUNCATED_SNAPSHOT_MARKER)
+                .and_then(|v| v.as_bool()),
+            Some(true),
+            "mid-char truncation must stay recognizable downstream: {snapshot}"
+        );
+        assert!(
+            payload_snapshot_is_truncated(&snapshot),
+            "mid-char truncation must be recognizable downstream"
+        );
+        let preview = value.get("preview").and_then(|v| v.as_str()).unwrap();
+        // floor_char_boundary walks back from the mid-char cut to the
+        // last char boundary: the whole '中' is dropped, the ASCII
+        // prefix survives untouched.
+        assert_eq!(preview, "a".repeat(MAX_TRIGGER_PAYLOAD_SNAPSHOT_BYTES - 1));
+        assert!(payload.starts_with(preview));
+        assert!(preview.len() <= MAX_TRIGGER_PAYLOAD_SNAPSHOT_BYTES);
     }
 
     #[test]
