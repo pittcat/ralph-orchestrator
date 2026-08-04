@@ -645,9 +645,22 @@ fn test_task_verify_add_and_ensure_tickets_coexist() {
         apply_add_stderr
     );
     assert!(
-        apply_add_stderr.contains("task_verify_gate denied") == false,
+        !apply_add_stderr.contains("task_verify_gate denied"),
         "apply add must not be denied; stderr={}",
         apply_add_stderr
+    );
+
+    // Unit 1 confirmation contract: the successful add Apply recorded a
+    // pending confirmation on its row; consume it so the next same-scope
+    // protected mutation passes the gate. (Added step — the ticket
+    // independence assertions below are unchanged.)
+    let (add_id, add_ref, add_digest) =
+        confirmation_of_task_titled(temp_path, "Scoped add target");
+    let confirm_add = spawn_confirm(temp_path, "loop-u2", &add_id, &add_ref, &add_digest);
+    assert!(
+        confirm_add.status.success(),
+        "confirm of the add task must succeed; stderr={}",
+        String::from_utf8_lossy(&confirm_add.stderr)
     );
 
     // Step 3: apply the ensure intent — must still succeed (its
@@ -710,6 +723,18 @@ fn test_task_later_verify_does_not_invalidate_prior_intent() {
         apply_a.status.success(),
         "apply A must succeed; stderr={}",
         String::from_utf8_lossy(&apply_a.stderr)
+    );
+
+    // Unit 1 confirmation contract: A's Apply recorded a pending
+    // confirmation; consume it so B's protected mutation passes the
+    // gate. (Added step — the ticket-coexistence assertions above and
+    // below are unchanged.)
+    let (a_id, a_ref, a_digest) = confirmation_of_task_titled(temp_path, "Intent A");
+    let confirm_a = spawn_confirm(temp_path, "loop-u2", &a_id, &a_ref, &a_digest);
+    assert!(
+        confirm_a.status.success(),
+        "confirm of Intent A must succeed; stderr={}",
+        String::from_utf8_lossy(&confirm_a.stderr)
     );
 
     // Apply B also succeeds; both tasks recorded.
@@ -820,6 +845,27 @@ fn test_task_add_failure_after_claim_restores_ticket_for_retry() {
         .find(|t| t.title == "Blocker task")
         .map(|t| t.id.clone())
         .expect("blocker task must be listed");
+
+    // Unit 1 confirmation contract: the blocker's protected Apply
+    // recorded a pending confirmation; consume it now so the later
+    // Retry-target mutations are judged on their own gate state. The
+    // confirmed state travels with the row through the remove/restore
+    // fixture steps below. (Added step — original assertions unchanged.)
+    let (blocker_task_id, blocker_ref, blocker_digest) =
+        confirmation_of_task_titled(temp_path, "Blocker task");
+    assert_eq!(blocker_task_id, blocker_id, "blocker identity consistent");
+    let confirm_blocker = spawn_confirm(
+        temp_path,
+        "loop-u1",
+        &blocker_task_id,
+        &blocker_ref,
+        &blocker_digest,
+    );
+    assert!(
+        confirm_blocker.status.success(),
+        "confirm blocker must succeed; stderr={}",
+        String::from_utf8_lossy(&confirm_blocker.stderr)
+    );
 
     // Verify the real target with the blocker inside the payload.
     let blocked_by_args = ["--blocked-by", blocker_id.as_str()];
@@ -938,4 +984,607 @@ fn test_legacy_plaintext_ticket_is_not_trusted() {
 
     let tasks = list_tasks(temp_path, &[]);
     assert!(tasks.is_empty(), "store must stay empty; tasks={tasks:?}");
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Unit 1 (task confirmation 最小纵向切片): a successful protected
+// Apply records a pending confirmation that the same loop/hat must
+// consume via `ralph tools task confirm` before the next protected
+// mutation passes the gate.
+// ─────────────────────────────────────────────────────────────────────────
+
+/// Spawn `ralph tools task confirm <task_id> --reference <ref> --digest
+/// <digest>` as the simulated `coordinator` hat inside `loop_id`.
+fn spawn_confirm(
+    temp_path: &std::path::Path,
+    loop_id: &str,
+    task_id: &str,
+    reference: &str,
+    digest: &str,
+) -> std::process::Output {
+    let mut cmd = common::ralph_bin();
+    cmd.env("RALPH_CURRENT_HAT", "coordinator")
+        .env("RALPH_CURRENT_LOOP_ID", loop_id)
+        .arg("tools")
+        .arg("task")
+        .arg("confirm")
+        .arg(task_id)
+        .arg("--reference")
+        .arg(reference)
+        .arg("--digest")
+        .arg(digest)
+        .arg("--root")
+        .arg(temp_path)
+        .current_dir(temp_path);
+    cmd.output().expect("spawn ralph tools task confirm")
+}
+
+/// Locate the task titled `title` in `tasks.jsonl` and return its
+/// `(task_id, confirmation.reference, confirmation.digest)`. Panics if
+/// the row or its confirmation is missing.
+fn confirmation_of_task_titled(
+    temp_path: &std::path::Path,
+    title: &str,
+) -> (String, String, String) {
+    let raw = std::fs::read_to_string(temp_path.join(".ralph/agent/tasks.jsonl"))
+        .expect("read tasks.jsonl");
+    for line in raw.lines().filter(|l| !l.trim().is_empty()) {
+        let v: serde_json::Value = serde_json::from_str(line).expect("row parses as JSON");
+        if v.get("title").and_then(|t| t.as_str()) == Some(title) {
+            let cfm = v
+                .get("confirmation")
+                .unwrap_or_else(|| panic!("task '{title}' row must carry confirmation: {line}"));
+            return (
+                v.get("id")
+                    .and_then(|i| i.as_str())
+                    .expect("row id")
+                    .to_string(),
+                cfm.get("reference")
+                    .and_then(|r| r.as_str())
+                    .expect("confirmation.reference")
+                    .to_string(),
+                cfm.get("digest")
+                    .and_then(|d| d.as_str())
+                    .expect("confirmation.digest")
+                    .to_string(),
+            );
+        }
+    }
+    panic!("task titled '{title}' not found in tasks.jsonl");
+}
+
+/// S2: a matching `task confirm` from the same loop/hat transitions the
+/// pending confirmation to `confirmed`, is idempotent on repeat (no new
+/// row, no rewrite), and unblocks the next same-scope protected
+/// mutation.
+#[test]
+fn test_task_confirmation_confirm_transitions_and_unblocks_next_mutation() {
+    let temp_dir = TempDir::new().expect("temp dir");
+    let temp_path = temp_dir.path();
+    write_agent_gate_preset(temp_path);
+
+    // Protected Apply records a pending confirmation (S1 contract).
+    let verify = spawn_verify_add(temp_path, "Confirm me");
+    assert!(
+        verify.status.success(),
+        "verify must succeed; stderr={}",
+        String::from_utf8_lossy(&verify.stderr)
+    );
+    let apply = spawn_apply_add_with_args(temp_path, "Confirm me", &["--format", "json"]);
+    let apply_stderr = String::from_utf8_lossy(&apply.stderr);
+    assert!(
+        apply.status.success(),
+        "apply must succeed; stderr={apply_stderr}"
+    );
+    let stdout = String::from_utf8_lossy(&apply.stdout);
+    let applied: serde_json::Value =
+        serde_json::from_str(stdout.trim()).expect("apply stdout must be task JSON");
+    let task_id = applied
+        .get("id")
+        .and_then(|v| v.as_str())
+        .expect("task JSON must carry id")
+        .to_string();
+    let cfm = applied
+        .get("confirmation")
+        .expect("apply JSON must carry confirmation");
+    let reference = cfm
+        .get("reference")
+        .and_then(|v| v.as_str())
+        .expect("reference")
+        .to_string();
+    let digest = cfm
+        .get("digest")
+        .and_then(|v| v.as_str())
+        .expect("digest")
+        .to_string();
+
+    // Confirm from the same loop/hat → exit 0, state becomes confirmed.
+    let confirm = spawn_confirm(temp_path, "loop-u1", &task_id, &reference, &digest);
+    let confirm_stderr = String::from_utf8_lossy(&confirm.stderr);
+    assert!(
+        confirm.status.success(),
+        "confirm must succeed; stderr={confirm_stderr}"
+    );
+
+    let show = ralph_task_ok(temp_path, &["show", &task_id, "--format", "json"]);
+    let shown: serde_json::Value = serde_json::from_str(&show).expect("show JSON parses");
+    assert_eq!(
+        shown
+            .get("confirmation")
+            .and_then(|c| c.get("state"))
+            .and_then(|s| s.as_str()),
+        Some("confirmed"),
+        "state must be confirmed after task confirm; show={show}"
+    );
+
+    // Idempotent re-confirm: exit 0, no new row, store byte-identical.
+    let store_path = temp_path.join(".ralph/agent/tasks.jsonl");
+    let before = std::fs::read(&store_path).expect("read tasks.jsonl");
+    let confirm_again = spawn_confirm(temp_path, "loop-u1", &task_id, &reference, &digest);
+    assert!(
+        confirm_again.status.success(),
+        "repeat confirm must be idempotent (exit 0); stderr={}",
+        String::from_utf8_lossy(&confirm_again.stderr)
+    );
+    let after = std::fs::read(&store_path).expect("read tasks.jsonl");
+    assert_eq!(
+        before, after,
+        "idempotent confirm must not rewrite or append rows"
+    );
+
+    // The next same-scope protected mutation passes after the confirm.
+    let verify_next = spawn_verify_add(temp_path, "Next mutation");
+    assert!(
+        verify_next.status.success(),
+        "verify of next mutation must succeed; stderr={}",
+        String::from_utf8_lossy(&verify_next.stderr)
+    );
+    let apply_next = spawn_apply_add(temp_path, "Next mutation");
+    assert!(
+        apply_next.status.success(),
+        "post-confirm protected mutation must pass; stderr={}",
+        String::from_utf8_lossy(&apply_next.stderr)
+    );
+
+    let tasks = list_tasks(temp_path, &[]);
+    assert_eq!(
+        tasks.iter().filter(|t| t.title == "Next mutation").count(),
+        1,
+        "exactly one Next-mutation task must exist; tasks={tasks:?}"
+    );
+}
+
+/// S3: while a confirmation is pending, the next same-scope protected
+/// mutation must be denied with `confirmation_required` (under the
+/// stable `task_verify_gate denied` prefix), leave `tasks.jsonl`
+/// untouched, create no second task, and preserve the prepared ticket
+/// so the retry after `task confirm` succeeds without a fresh verify.
+#[test]
+fn test_task_confirmation_pending_blocks_next_mutation_until_confirmed() {
+    let temp_dir = TempDir::new().expect("temp dir");
+    let temp_path = temp_dir.path();
+    write_agent_gate_preset(temp_path);
+
+    // First protected mutation lands with a pending confirmation.
+    let verify_first = spawn_verify_add(temp_path, "First mutation");
+    assert!(
+        verify_first.status.success(),
+        "verify first must succeed; stderr={}",
+        String::from_utf8_lossy(&verify_first.stderr)
+    );
+    let apply_first = spawn_apply_add(temp_path, "First mutation");
+    assert!(
+        apply_first.status.success(),
+        "apply first must succeed; stderr={}",
+        String::from_utf8_lossy(&apply_first.stderr)
+    );
+
+    // Prepare the second mutation (verify writes its ticket).
+    let verify_second = spawn_verify_add(temp_path, "Second mutation");
+    assert!(
+        verify_second.status.success(),
+        "verify second must succeed even while first is pending; stderr={}",
+        String::from_utf8_lossy(&verify_second.stderr)
+    );
+
+    let store_path = temp_path.join(".ralph/agent/tasks.jsonl");
+    let before = std::fs::read(&store_path).expect("read tasks.jsonl");
+
+    // Apply second WITHOUT confirming first → denied.
+    let denied = spawn_apply_add(temp_path, "Second mutation");
+    let denied_stderr = String::from_utf8_lossy(&denied.stderr);
+    assert!(
+        !denied.status.success(),
+        "unconfirmed pending must block the next protected mutation; stderr={denied_stderr}"
+    );
+    assert!(
+        denied_stderr.contains("task_verify_gate denied"),
+        "denial must carry the stable gate prefix; stderr={denied_stderr}"
+    );
+    assert!(
+        denied_stderr.contains("confirmation_required"),
+        "denial must carry the stable confirmation_required token; stderr={denied_stderr}"
+    );
+
+    // No side effects: store byte-identical, no second task.
+    let after = std::fs::read(&store_path).expect("read tasks.jsonl");
+    assert_eq!(
+        before, after,
+        "denied mutation must not touch tasks.jsonl"
+    );
+    let tasks = list_tasks(temp_path, &[]);
+    assert_eq!(
+        tasks.iter().filter(|t| t.title == "Second mutation").count(),
+        0,
+        "denied mutation must not create a task; tasks={tasks:?}"
+    );
+
+    // Prepared ticket survives the denial (retry after confirm must not
+    // need a fresh verify).
+    let ticket_dir = temp_path.join(".ralph/agent/task-tickets");
+    let entries: Vec<String> = std::fs::read_dir(&ticket_dir)
+        .expect("read ticket dir")
+        .filter_map(|e| e.ok())
+        .map(|e| e.file_name().to_string_lossy().to_string())
+        .collect();
+    let prepared = entries.iter().filter(|n| n.ends_with(".ticket")).count();
+    let claimed = entries
+        .iter()
+        .filter(|n| n.ends_with(".ticket.claimed"))
+        .count();
+    assert!(
+        prepared >= 1,
+        "denied mutation must preserve the prepared ticket; entries={entries:?}"
+    );
+    assert_eq!(
+        claimed, 0,
+        "denied mutation must not leave a claim marker; entries={entries:?}"
+    );
+
+    // Confirm first, then the preserved ticket lets second through.
+    let (first_id, first_ref, first_digest) =
+        confirmation_of_task_titled(temp_path, "First mutation");
+    let confirm = spawn_confirm(temp_path, "loop-u1", &first_id, &first_ref, &first_digest);
+    assert!(
+        confirm.status.success(),
+        "confirm first must succeed; stderr={}",
+        String::from_utf8_lossy(&confirm.stderr)
+    );
+    let apply_second = spawn_apply_add(temp_path, "Second mutation");
+    assert!(
+        apply_second.status.success(),
+        "post-confirm retry must pass without re-verify; stderr={}",
+        String::from_utf8_lossy(&apply_second.stderr)
+    );
+    let tasks = list_tasks(temp_path, &[]);
+    assert_eq!(
+        tasks.iter().filter(|t| t.title == "Second mutation").count(),
+        1,
+        "exactly one Second-mutation task after confirm; tasks={tasks:?}"
+    );
+}
+
+/// S4: confirm with a wrong digest, a wrong reference, or a different
+/// loop must fail with the stable reason tokens, leave the state
+/// `pending`, and a later correct confirm must still succeed.
+#[test]
+fn test_task_confirmation_mismatch_keeps_state_pending() {
+    let temp_dir = TempDir::new().expect("temp dir");
+    let temp_path = temp_dir.path();
+    write_agent_gate_preset(temp_path);
+
+    let verify = spawn_verify_add(temp_path, "Mismatch target");
+    assert!(verify.status.success(), "verify must succeed");
+    let apply = spawn_apply_add_with_args(temp_path, "Mismatch target", &["--format", "json"]);
+    assert!(
+        apply.status.success(),
+        "apply must succeed; stderr={}",
+        String::from_utf8_lossy(&apply.stderr)
+    );
+    let (task_id, reference, digest) = confirmation_of_task_titled(temp_path, "Mismatch target");
+
+    let state_of = || {
+        let raw = std::fs::read_to_string(temp_path.join(".ralph/agent/tasks.jsonl"))
+            .expect("read tasks.jsonl");
+        raw.lines()
+            .filter(|l| !l.trim().is_empty())
+            .find_map(|line| {
+                let v: serde_json::Value = serde_json::from_str(line).ok()?;
+                if v.get("id").and_then(|i| i.as_str()) == Some(task_id.as_str()) {
+                    v.get("confirmation")
+                        .and_then(|c| c.get("state"))
+                        .and_then(|s| s.as_str())
+                        .map(str::to_string)
+                } else {
+                    None
+                }
+            })
+            .expect("task row with confirmation must exist")
+    };
+
+    // Wrong digest, right reference → confirmation_mismatch, stays pending.
+    let bad_digest = spawn_confirm(temp_path, "loop-u1", &task_id, &reference, "deadbeef");
+    let bad_digest_stderr = String::from_utf8_lossy(&bad_digest.stderr);
+    assert!(
+        !bad_digest.status.success(),
+        "wrong digest must fail; stderr={bad_digest_stderr}"
+    );
+    assert!(
+        bad_digest_stderr.contains("confirmation_mismatch"),
+        "wrong digest must surface confirmation_mismatch; stderr={bad_digest_stderr}"
+    );
+    assert_eq!(state_of(), "pending", "state must stay pending after wrong digest");
+
+    // Wrong reference → confirmation_unavailable, stays pending.
+    let bad_reference = spawn_confirm(
+        temp_path,
+        "loop-u1",
+        &task_id,
+        "cfm-00000000000000000000000000000000",
+        &digest,
+    );
+    let bad_reference_stderr = String::from_utf8_lossy(&bad_reference.stderr);
+    assert!(
+        !bad_reference.status.success(),
+        "wrong reference must fail; stderr={bad_reference_stderr}"
+    );
+    assert!(
+        bad_reference_stderr.contains("confirmation_unavailable"),
+        "wrong reference must surface confirmation_unavailable; stderr={bad_reference_stderr}"
+    );
+    assert_eq!(
+        state_of(),
+        "pending",
+        "state must stay pending after wrong reference"
+    );
+
+    // Different loop (same reference + digest) → scope mismatch, stays pending.
+    let wrong_loop = spawn_confirm(temp_path, "loop-other", &task_id, &reference, &digest);
+    let wrong_loop_stderr = String::from_utf8_lossy(&wrong_loop.stderr);
+    assert!(
+        !wrong_loop.status.success(),
+        "different loop must fail; stderr={wrong_loop_stderr}"
+    );
+    assert!(
+        wrong_loop_stderr.contains("confirmation_mismatch"),
+        "different loop must surface confirmation_mismatch; stderr={wrong_loop_stderr}"
+    );
+    assert_eq!(state_of(), "pending", "state must stay pending after wrong loop");
+
+    // The correct confirm still works afterwards (state was never consumed).
+    let ok = spawn_confirm(temp_path, "loop-u1", &task_id, &reference, &digest);
+    assert!(
+        ok.status.success(),
+        "correct confirm must still succeed after mismatches; stderr={}",
+        String::from_utf8_lossy(&ok.stderr)
+    );
+    assert_eq!(state_of(), "confirmed", "correct confirm transitions to confirmed");
+}
+
+/// S4: legacy JSONL rows without a `confirmation` field must keep
+/// listing/showing normally, never parse as confirmed, and never block
+/// a new protected mutation.
+#[test]
+fn test_task_confirmation_legacy_rows_do_not_block() {
+    let temp_dir = TempDir::new().expect("temp dir");
+    let temp_path = temp_dir.path();
+    write_agent_gate_preset(temp_path);
+
+    // Seed a legacy row (no confirmation field) directly into the store.
+    let store_path = temp_path.join(".ralph/agent/tasks.jsonl");
+    std::fs::create_dir_all(store_path.parent().expect("store parent")).expect("create dir");
+    let legacy_line = r#"{"id":"task-1000-legacy","title":"Legacy row","status":"open","priority":3,"created":"2026-01-01T00:00:00Z","loop_id":"loop-u1"}"#;
+    std::fs::write(&store_path, format!("{legacy_line}\n")).expect("seed legacy row");
+
+    // Legacy row lists and shows normally; confirmation is absent (never
+    // parsed as confirmed).
+    let tasks = list_tasks(temp_path, &["--all"]);
+    assert_eq!(tasks.len(), 1, "legacy row must list; tasks={tasks:?}");
+    assert!(
+        tasks[0].confirmation.is_none(),
+        "legacy row must deserialize without confirmation"
+    );
+    let show = ralph_task_ok(temp_path, &["show", "task-1000-legacy", "--format", "json"]);
+    let shown: serde_json::Value = serde_json::from_str(&show).expect("show JSON parses");
+    assert!(
+        shown.get("confirmation").is_none(),
+        "legacy row must not grow a confirmation via show; show={show}"
+    );
+
+    // A new protected mutation passes the pending gate despite the
+    // legacy row sharing the loop.
+    let verify = spawn_verify_add(temp_path, "Fresh mutation");
+    assert!(
+        verify.status.success(),
+        "verify must succeed alongside legacy row; stderr={}",
+        String::from_utf8_lossy(&verify.stderr)
+    );
+    let apply = spawn_apply_add(temp_path, "Fresh mutation");
+    assert!(
+        apply.status.success(),
+        "legacy row must not block a new protected mutation; stderr={}",
+        String::from_utf8_lossy(&apply.stderr)
+    );
+
+    // The rewritten store keeps the legacy row confirmation-free.
+    let raw = std::fs::read_to_string(&store_path).expect("read tasks.jsonl");
+    let mut legacy_confirmations = 0usize;
+    let mut rows = 0usize;
+    for line in raw.lines().filter(|l| !l.trim().is_empty()) {
+        rows += 1;
+        let v: serde_json::Value = serde_json::from_str(line).expect("row parses");
+        if v.get("id").and_then(|i| i.as_str()) == Some("task-1000-legacy") {
+            assert!(
+                v.get("confirmation").is_none(),
+                "legacy row must stay confirmation-free after rewrite; line={line}"
+            );
+            legacy_confirmations += 1;
+        }
+    }
+    assert_eq!(rows, 2, "legacy row + fresh task expected; raw={raw}");
+    assert_eq!(legacy_confirmations, 1, "legacy row must survive the rewrite");
+}
+
+/// Compatibility contract: the three gate bypass paths (human CLI,
+/// gate off, unsafe hatch) must behave exactly as before — no
+/// confirmation is ever recorded and no pending gate applies.
+#[test]
+fn test_task_confirmation_bypass_paths_do_not_record_confirmation() {
+    // ── 1. Human CLI under a gate-enabled preset ──────────────────
+    let human_dir = TempDir::new().expect("temp dir");
+    let human_path = human_dir.path();
+    write_agent_gate_preset(human_path);
+
+    // Humans bypass the gate entirely: add without any verify.
+    ralph_task_ok(human_path, &["add", "Human task"]);
+    ralph_task_ok(human_path, &["add", "Second human task"]);
+    let raw = std::fs::read_to_string(human_path.join(".ralph/agent/tasks.jsonl"))
+        .expect("read tasks.jsonl");
+    let lines: Vec<&str> = raw.lines().filter(|l| !l.trim().is_empty()).collect();
+    assert_eq!(lines.len(), 2, "both human adds must land; raw={raw}");
+    for line in &lines {
+        let v: serde_json::Value = serde_json::from_str(line).expect("row parses");
+        assert!(
+            v.get("confirmation").is_none(),
+            "human CLI rows must never carry a confirmation; line={line}"
+        );
+    }
+
+    // ── 2. Agent with the gate OFF (no verify needed) ─────────────
+    let gate_off_dir = TempDir::new().expect("temp dir");
+    let gate_off_path = gate_off_dir.path();
+    std::fs::create_dir_all(gate_off_path.join(".ralph")).unwrap();
+    std::fs::write(
+        gate_off_path.join("ralph.yml"),
+        r#"
+tasks:
+  enabled: true
+  require_verify_for_cli_mutate: false
+  allow_unsafe_task_mutate: false
+  coordinator_hats:
+    - coordinator
+event_loop:
+  execution_mode: isolated
+"#,
+    )
+    .unwrap();
+    let gate_off_apply = spawn_apply_add(gate_off_path, "Gate-off task");
+    assert!(
+        gate_off_apply.status.success(),
+        "gate-off agent add must succeed without verify; stderr={}",
+        String::from_utf8_lossy(&gate_off_apply.stderr)
+    );
+    let raw = std::fs::read_to_string(gate_off_path.join(".ralph/agent/tasks.jsonl"))
+        .expect("read tasks.jsonl");
+    let v: serde_json::Value =
+        serde_json::from_str(raw.lines().next().expect("one row")).expect("row parses");
+    assert!(
+        v.get("confirmation").is_none(),
+        "gate-off rows must not carry a confirmation; raw={raw}"
+    );
+
+    // ── 3. Agent with the unsafe escape hatch ──────────────────────
+    let unsafe_dir = TempDir::new().expect("temp dir");
+    let unsafe_path = unsafe_dir.path();
+    std::fs::create_dir_all(unsafe_path.join(".ralph")).unwrap();
+    std::fs::write(
+        unsafe_path.join("ralph.yml"),
+        r#"
+tasks:
+  enabled: true
+  require_verify_for_cli_mutate: true
+  allow_unsafe_task_mutate: true
+  coordinator_hats:
+    - coordinator
+event_loop:
+  execution_mode: isolated
+"#,
+    )
+    .unwrap();
+    let unsafe_apply = spawn_apply_add(unsafe_path, "Unsafe hatch task");
+    assert!(
+        unsafe_apply.status.success(),
+        "unsafe-hatch agent add must succeed without verify; stderr={}",
+        String::from_utf8_lossy(&unsafe_apply.stderr)
+    );
+    let raw = std::fs::read_to_string(unsafe_path.join(".ralph/agent/tasks.jsonl"))
+        .expect("read tasks.jsonl");
+    let v: serde_json::Value =
+        serde_json::from_str(raw.lines().next().expect("one row")).expect("row parses");
+    assert!(
+        v.get("confirmation").is_none(),
+        "unsafe-hatch rows must not carry a confirmation; raw={raw}"
+    );
+}
+
+/// S1: a successful protected Apply must print a task JSON carrying a
+/// fresh, unique confirmation reference in state `pending`, and
+/// `tasks.jsonl` must hold exactly one business row whose confirmation
+/// fields match the printed ones.
+#[test]
+fn test_task_confirmation_apply_emits_pending_reference() {
+    let temp_dir = TempDir::new().expect("temp dir");
+    let temp_path = temp_dir.path();
+    write_agent_gate_preset(temp_path);
+
+    let verify = spawn_verify_add(temp_path, "Confirmation target");
+    assert!(
+        verify.status.success(),
+        "verify must succeed before Apply; stderr={}",
+        String::from_utf8_lossy(&verify.stderr)
+    );
+
+    let apply =
+        spawn_apply_add_with_args(temp_path, "Confirmation target", &["--format", "json"]);
+    let apply_stderr = String::from_utf8_lossy(&apply.stderr);
+    assert!(
+        apply.status.success(),
+        "apply must succeed; stderr={apply_stderr}"
+    );
+
+    // The Apply stdout JSON must carry a non-empty pending confirmation.
+    let stdout = String::from_utf8_lossy(&apply.stdout);
+    let value: serde_json::Value =
+        serde_json::from_str(stdout.trim()).expect("apply stdout must be task JSON");
+    let cfm = value
+        .get("confirmation")
+        .expect("task JSON must carry a confirmation field");
+    let reference = cfm
+        .get("reference")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default();
+    assert!(
+        !reference.is_empty(),
+        "confirmation.reference must be non-empty; stdout={stdout}"
+    );
+    assert_eq!(
+        cfm.get("state").and_then(|v| v.as_str()),
+        Some("pending"),
+        "confirmation.state must be 'pending' right after Apply; stdout={stdout}"
+    );
+
+    // tasks.jsonl must hold exactly one business row carrying the same
+    // confirmation (written in the same atomic save as the task row).
+    let raw = std::fs::read_to_string(temp_path.join(".ralph/agent/tasks.jsonl"))
+        .expect("tasks.jsonl must exist after Apply");
+    let lines: Vec<&str> = raw.lines().filter(|l| !l.trim().is_empty()).collect();
+    assert_eq!(
+        lines.len(),
+        1,
+        "exactly one business row expected; tasks.jsonl={raw}"
+    );
+    let row: serde_json::Value = serde_json::from_str(lines[0]).expect("row parses as JSON");
+    let row_cfm = row
+        .get("confirmation")
+        .expect("jsonl row must carry confirmation");
+    assert_eq!(
+        row_cfm.get("reference").and_then(|v| v.as_str()),
+        Some(reference),
+        "jsonl confirmation.reference must match the printed one; row={lines:?}"
+    );
+    assert_eq!(
+        row_cfm.get("state").and_then(|v| v.as_str()),
+        Some("pending"),
+        "jsonl confirmation.state must be pending; row={lines:?}"
+    );
 }

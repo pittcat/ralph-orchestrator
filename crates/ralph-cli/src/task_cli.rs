@@ -25,7 +25,7 @@ use crate::{
 use anyhow::{Context, Result, bail};
 use chrono::{DateTime, Utc};
 use clap::{Args, Parser, Subcommand, ValueEnum};
-use ralph_core::{Task, TaskStatus, TaskStore};
+use ralph_core::{ConfirmMatch, Task, TaskConfirmation, TaskStatus, TaskStore};
 use std::path::{Path, PathBuf};
 
 /// U7 (2026-07-04-003 plan): distinguishable failure modes for
@@ -213,6 +213,9 @@ pub enum TaskCommands {
 
     /// Show a single task by ID
     Show(ShowArgs),
+
+    /// Consume a pending confirmation recorded by a protected add/ensure
+    Confirm(ConfirmArgs),
 }
 
 /// Arguments for the `task add` command.
@@ -326,6 +329,25 @@ pub struct StartArgs {
 pub struct CloseArgs {
     /// Task ID to close
     pub id: String,
+}
+
+/// Arguments for the `task confirm` command (Unit 1 task confirmation).
+#[derive(Parser, Debug)]
+pub struct ConfirmArgs {
+    /// Task ID whose pending confirmation should be consumed
+    pub id: String,
+
+    /// Confirmation reference printed by the protected Apply
+    #[arg(long)]
+    pub reference: String,
+
+    /// Confirmation digest (the mutation fingerprint recorded at Apply)
+    #[arg(long)]
+    pub digest: String,
+
+    /// Output format
+    #[arg(long, value_enum, default_value_t = OutputFormat::Table)]
+    pub format: OutputFormat,
 }
 
 /// Arguments for the `task fail` command.
@@ -1044,6 +1066,7 @@ pub fn execute(args: TaskArgs, use_colors: bool, config_sources: &[ConfigSource]
             config_sources,
         ),
         TaskCommands::Show(show_args) => execute_show(show_args, root.as_ref(), use_colors),
+        TaskCommands::Confirm(confirm_args) => execute_confirm(confirm_args, root.as_ref()),
         TaskCommands::Verify(verify_args) => {
             execute_verify(verify_args, use_colors, config_sources)
         }
@@ -1113,12 +1136,41 @@ fn execute_add(
         "add",
         false,
     )?;
+    // Unit 1 (task confirmation): a same-scope pending confirmation
+    // blocks the mutation before the ticket claim, so the prepared
+    // ticket survives the denial for the post-confirm retry.
+    crate::task_verify_gate::pending_confirmation_precheck(&store, &config.tasks, &ctx, "add")?;
+    // Unit 1 (task confirmation): a gate-active Apply mints a pending
+    // confirmation for the row it is about to write. The digest is the
+    // very same mutation fingerprint the verify gate claims below, so a
+    // later `task confirm` replays exactly what was verified + applied.
+    let confirmation = if crate::task_verify_gate::gate_is_active(&ctx, &config.tasks) {
+        let (loop_id, hat_id) = gate_identifiers(&ctx);
+        let digest =
+            crate::task_verify_gate::mutation_fingerprint("add", &canonical, loop_id, hat_id);
+        Some(TaskConfirmation::new_pending(
+            digest,
+            loop_id.to_string(),
+            hat_id.to_string(),
+        ))
+    } else {
+        None
+    };
     verify_gate_claim(&workspace, &config, &ctx, "add", &canonical)?;
-    let result = add_task_with_args(&mut store, &args, &ctx, coordinator_hats, use_colors);
+    let result = add_task_with_confirmation(
+        &mut store,
+        &args,
+        &ctx,
+        coordinator_hats,
+        use_colors,
+        confirmation,
+    );
     settle_gate_claim(&workspace, &ctx, "add", &canonical, result)
 }
 
-#[cfg_attr(test, allow(dead_code))]
+/// Test-only shim: production `execute_add` always goes through
+/// [`add_task_with_confirmation`] with an explicit confirmation slot.
+#[cfg(test)]
 fn add_task_with_args(
     store: &mut TaskStore,
     args: &AddArgs,
@@ -1126,12 +1178,31 @@ fn add_task_with_args(
     coordinator_hats: &[String],
     use_colors: bool,
 ) -> Result<()> {
-    let task = add_common_task_fields(
+    add_task_with_confirmation(store, args, ctx, coordinator_hats, use_colors, None)
+}
+
+/// Unit 1 (task confirmation): same as [`add_task_with_args`] but
+/// attaches a gate-minted [`TaskConfirmation`] to the written row
+/// when `confirmation` is `Some` (gate-active protected Apply). The
+/// confirmation lands in the same `store.save()` atomic snapshot as
+/// the business row — there is no second write after the mutation.
+fn add_task_with_confirmation(
+    store: &mut TaskStore,
+    args: &AddArgs,
+    ctx: &OperationContext,
+    coordinator_hats: &[String],
+    use_colors: bool,
+    confirmation: Option<TaskConfirmation>,
+) -> Result<()> {
+    let mut task = add_common_task_fields(
         Task::new(args.title.clone(), args.priority),
         ctx,
         args.description.clone(),
         args.blocked_by.clone(),
     );
+    if let Some(cfm) = confirmation.as_ref() {
+        task.confirmation = Some(Box::new(cfm.clone()));
+    }
 
     // U3: owner_hat_id must come from `tasks.coordinator_hats`.
     //
@@ -1169,10 +1240,19 @@ fn add_task_with_args(
     }
 
     let task_id = task.id.clone();
-    let added = store
+    let added_id = store
         .add_checked(task.clone())
-        .map_err(|e| anyhow::anyhow!("{e}"))?;
-    let _ = added;
+        .map_err(|e| anyhow::anyhow!("{e}"))?
+        .id
+        .clone();
+    // Idempotent re-add under an existing (id, key) row returns the
+    // persisted row instead of pushing; refresh its confirmation so
+    // disk matches the printed task in both branches.
+    if confirmation.is_some()
+        && let Some(row) = store.get_mut(&added_id)
+    {
+        row.confirmation = confirmation.map(Box::new);
+    }
     store.save().context("Failed to save tasks")?;
 
     print_added_task(&task, &task_id, args.format, use_colors);
@@ -1255,6 +1335,15 @@ fn execute_ensure(
         loop_id,
         hat_id,
     );
+    // Unit 1 (task confirmation): a same-scope pending confirmation
+    // blocks the mutation before the ticket claim, so the prepared
+    // ticket survives the denial for the post-confirm retry.
+    crate::task_verify_gate::pending_confirmation_precheck(
+        &store,
+        &config.tasks,
+        &ctx,
+        "ensure",
+    )?;
     // U1 (STAB-OPAC-GATES-001): claim first, settle after the
     // store mutation — only a successful Apply consumes the
     // ticket; a failed Apply restores it for retry.
@@ -1266,25 +1355,65 @@ fn execute_ensure(
         &fingerprint,
     )?;
 
-    let result = ensure_task_with_args(
+    // Unit 1 (task confirmation): a gate-active Apply mints a pending
+    // confirmation for the row it ensures. The digest is the same
+    // mutation fingerprint claimed above.
+    let confirmation = if crate::task_verify_gate::gate_is_active(&ctx, &config.tasks) {
+        Some(TaskConfirmation::new_pending(
+            fingerprint.clone(),
+            loop_id.to_string(),
+            hat_id.to_string(),
+        ))
+    } else {
+        None
+    };
+    let result = ensure_task_with_confirmation(
         &mut store,
         &args,
         &ctx,
         coordinator_hats,
         use_colors,
         config_sources,
+        confirmation,
     );
     settle_gate_claim(&workspace, &ctx, "ensure", &canonical, result)
 }
 
-#[cfg_attr(test, allow(dead_code))]
+/// Test-only shim: production `execute_ensure` always goes through
+/// [`ensure_task_with_confirmation`] with an explicit confirmation slot.
+#[cfg(test)]
 fn ensure_task_with_args(
     store: &mut TaskStore,
     args: &EnsureArgs,
     ctx: &OperationContext,
     coordinator_hats: &[String],
     use_colors: bool,
+    config_sources: &[ConfigSource],
+) -> Result<()> {
+    ensure_task_with_confirmation(
+        store,
+        args,
+        ctx,
+        coordinator_hats,
+        use_colors,
+        config_sources,
+        None,
+    )
+}
+
+/// Unit 1 (task confirmation): same as [`ensure_task_with_args`] but
+/// overwrites the confirmation on the ensured row (newly created or
+/// refreshed) when `confirmation` is `Some` (gate-active protected
+/// Apply). The write happens inside the same `with_exclusive_lock`
+/// snapshot that persists the mutation — no second save.
+fn ensure_task_with_confirmation(
+    store: &mut TaskStore,
+    args: &EnsureArgs,
+    ctx: &OperationContext,
+    coordinator_hats: &[String],
+    use_colors: bool,
     _config_sources: &[ConfigSource],
+    confirmation: Option<TaskConfirmation>,
 ) -> Result<()> {
     // 2026-06-28-002 U8: `--for-fix-unit plan:fix_step:slug` builds
     // the canonical fix-unit task and pins the owner to
@@ -1339,7 +1468,22 @@ fn ensure_task_with_args(
     }
 
     let ensured = store
-        .with_exclusive_lock(|s| s.ensure(task).clone())
+        .with_exclusive_lock(|s| {
+            let mut ensured = s.ensure(task).clone();
+            // Unit 1 (task confirmation): overwrite the confirmation on
+            // the ensured row within the same exclusive-lock snapshot
+            // that persists the mutation. Skip the R4 collision shape
+            // (ensured key differs from the requested key) — that row
+            // belongs to a different unit and gets no confirmation.
+            if let Some(cfm) = confirmation.as_ref()
+                && ensured.key.as_deref() == Some(key.as_str())
+                && let Some(row) = s.get_mut(&ensured.id)
+            {
+                row.confirmation = Some(Box::new(cfm.clone()));
+                ensured.confirmation = Some(Box::new(cfm.clone()));
+            }
+            ensured
+        })
         .context("Failed to ensure task")?;
 
     // R4 (2026-06-14-003 plan): when the single-U contract is active
@@ -2106,6 +2250,108 @@ fn execute_show(args: ShowArgs, root: Option<&PathBuf>, use_colors: bool) -> Res
     }
 
     Ok(())
+}
+
+/// Unit 1 (task confirmation): consume a pending confirmation recorded
+/// by a gate-protected Apply.
+///
+/// Contract: `confirm` is a pure state transition — no command-policy
+/// gate, no verify ticket, no event. The caller must present the exact
+/// `reference` and `digest` printed by the protected Apply, from the
+/// same loop/hat that applied the mutation. Wrong reference →
+/// `confirmation_unavailable`; matching reference with wrong digest or
+/// scope → `confirmation_mismatch` (state stays pending). Repeating a
+/// successful confirm is idempotent (exit 0, no disk rewrite).
+fn execute_confirm(args: ConfirmArgs, root: Option<&PathBuf>) -> Result<()> {
+    validate_task_id(&args.id)?;
+    let path = get_tasks_path(root);
+    let mut store = TaskStore::load(&path).context("Failed to load tasks")?;
+    let ctx = operation_context_for(root);
+    let (loop_id, hat_id) = gate_identifiers(&ctx);
+
+    let decision = {
+        let Some(task) = store.get(&args.id) else {
+            bail!(
+                "task confirm denied: confirmation_unavailable — task '{}' does not exist in the store.",
+                args.id
+            );
+        };
+        let Some(cfm) = task.confirmation.as_ref() else {
+            bail!(
+                "task confirm denied: confirmation_unavailable — task '{}' has no confirmation record; \
+                 only gate-protected agent mutations (task add / ensure with the verify gate active) create one.",
+                args.id
+            );
+        };
+        cfm.match_confirm(&args.reference, &args.digest, loop_id, hat_id)
+    };
+
+    match decision {
+        ConfirmMatch::Unavailable => bail!(
+            "task confirm denied: confirmation_unavailable — reference '{}' does not match the \
+             confirmation recorded for task '{}'. Re-read the Apply output (confirmation.reference) \
+             and retry.",
+            args.reference,
+            args.id
+        ),
+        ConfirmMatch::Mismatch => bail!(
+            "task confirm denied: confirmation_mismatch — the reference matches but the digest or the \
+             loop/hat scope differs from the pending confirmation on task '{}'. Confirmations are bound \
+             to the mutation fingerprint and to the loop/hat that applied it; the state stays 'pending'.",
+            args.id
+        ),
+        ConfirmMatch::AlreadyConfirmed => {
+            // Idempotent repeat: report, but never rewrite the store.
+            let task = store
+                .get(&args.id)
+                .context(format!("Task {} not found", args.id))?;
+            print_confirmed_task(task, args.format);
+            Ok(())
+        }
+        ConfirmMatch::Apply => {
+            let id = args.id.clone();
+            let reference = args.reference.clone();
+            let digest = args.digest.clone();
+            store
+                .with_exclusive_lock(|s| {
+                    // Re-validate under the lock so concurrent confirms
+                    // serialize to a single transition.
+                    if let Some(row) = s.get_mut(&id)
+                        && let Some(cfm) = row.confirmation.as_mut()
+                        && matches!(
+                            cfm.match_confirm(&reference, &digest, loop_id, hat_id),
+                            ConfirmMatch::Apply
+                        )
+                    {
+                        cfm.mark_confirmed();
+                    }
+                })
+                .context("Failed to save tasks")?;
+            let task = store
+                .get(&args.id)
+                .context(format!("Task {} not found", args.id))?;
+            print_confirmed_task(task, args.format);
+            Ok(())
+        }
+    }
+}
+
+fn print_confirmed_task(task: &Task, format: OutputFormat) {
+    match format {
+        OutputFormat::Table => {
+            println!("Confirmed task {}", task.id);
+            if let Some(cfm) = task.confirmation.as_ref() {
+                println!("  Reference: {}", cfm.reference);
+                println!("  State: confirmed");
+            }
+        }
+        OutputFormat::Json => {
+            println!("{}", serde_json::to_string(task).expect("task serializes"));
+        }
+        OutputFormat::Quiet => {
+            println!("{}", task.id);
+        }
+    }
 }
 
 fn execute_reopen(

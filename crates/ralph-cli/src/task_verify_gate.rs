@@ -57,6 +57,7 @@
 use crate::operation_guard::OperationContext;
 use ralph_core::config::TasksConfig;
 use ralph_core::file_lock::FileLock;
+use ralph_core::{ConfirmationState, TaskStore};
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 
@@ -405,6 +406,48 @@ pub fn gate_is_active(ctx: &OperationContext, config: &TasksConfig) -> bool {
         return false;
     }
     true
+}
+
+/// Unit 1 (task confirmation): deny a protected mutation while the
+/// caller's scope still carries a pending confirmation.
+///
+/// Runs before the ticket claim so the prepared record survives the
+/// denial untouched; once `task confirm` consumes the pending record,
+/// the same ticket can be re-claimed without a fresh `verify`. The
+/// three gate bypasses (human CLI, gate off, unsafe hatch) skip the
+/// precheck entirely, matching [`gate_is_active`].
+pub fn pending_confirmation_precheck(
+    store: &TaskStore,
+    config: &TasksConfig,
+    ctx: &OperationContext,
+    verb: &str,
+) -> anyhow::Result<()> {
+    if !gate_is_active(ctx, config) {
+        return Ok(());
+    }
+    let loop_id = ctx.current_loop_id.as_deref().unwrap_or("");
+    let hat_id = ctx.current_hat_id.as_deref().unwrap_or("");
+    for task in store.all() {
+        if let Some(cfm) = task.confirmation.as_ref()
+            && cfm.state == ConfirmationState::Pending
+            && cfm.loop_id == loop_id
+            && cfm.hat_id == hat_id
+        {
+            anyhow::bail!(
+                "{DENY_PREFIX} '{verb}': confirmation_required — task '{task_id}' \
+                 (loop '{loop_id}', hat '{hat_id}') still carries a pending confirmation \
+                 (reference '{reference}'). Consume it first with \
+                 `ralph tools task confirm {task_id} --reference {reference} --digest <digest>` \
+                 from the same loop/hat (the digest is the confirmation.digest field printed by \
+                 the Apply that recorded it), then retry this mutation. The prepared verify \
+                 ticket is preserved, so the same payload does not need a fresh \
+                 `ralph tools task verify {verb}`.",
+                task_id = task.id,
+                reference = cfm.reference,
+            );
+        }
+    }
+    Ok(())
 }
 
 /// U1 (2026-08-03-001-fix-opac-high-confidence-gates-plan):
@@ -941,5 +984,92 @@ mod task_verify_gate_tests {
         let path_a = scoped_for(&ws, "add", payload_a, "loop-1", "executor");
         let path_b = scoped_for(&ws, "add", payload_b, "loop-1", "executor");
         assert_ne!(path_a, path_b, "distinct intents must produce distinct files");
+    }
+
+    // ── Unit 1 (task confirmation): pending gate precheck ───────────
+
+    fn task_with_confirmation(loop_id: &str, hat_id: &str, confirmed: bool) -> ralph_core::Task {
+        let mut task = ralph_core::Task::new("protected target".to_string(), 2);
+        task.loop_id = Some(loop_id.to_string());
+        let mut cfm = ralph_core::TaskConfirmation::new_pending(
+            "digest-1".to_string(),
+            loop_id.to_string(),
+            hat_id.to_string(),
+        );
+        if confirmed {
+            cfm.mark_confirmed();
+        }
+        task.confirmation = Some(Box::new(cfm));
+        task
+    }
+
+    fn store_with_task(tmp: &TempDir, task: ralph_core::Task) -> ralph_core::TaskStore {
+        let path = tmp.path().join("tasks.jsonl");
+        let mut store = ralph_core::TaskStore::load(&path).expect("load store");
+        store.add(task);
+        store
+    }
+
+    #[test]
+    fn test_pending_confirmation_precheck_denies_same_scope() {
+        let tmp = temp_workspace();
+        let store = store_with_task(&tmp, task_with_confirmation("loop-a", "coordinator", false));
+        let ctx = make_ctx("loop-a", "coordinator", true);
+        let err = pending_confirmation_precheck(&store, &default_config(true), &ctx, "add")
+            .expect_err("same-scope pending confirmation must deny");
+        let msg = err.to_string();
+        assert!(msg.contains(DENY_PREFIX), "stable gate prefix: {msg}");
+        assert!(msg.contains("confirmation_required"), "stable token: {msg}");
+        assert!(
+            msg.contains("ralph tools task confirm"),
+            "recovery hint must name the confirm command: {msg}"
+        );
+    }
+
+    #[test]
+    fn test_pending_confirmation_precheck_human_bypass() {
+        let tmp = temp_workspace();
+        let store = store_with_task(&tmp, task_with_confirmation("loop-a", "coordinator", false));
+        let ctx = make_ctx("loop-a", "coordinator", false);
+        pending_confirmation_precheck(&store, &default_config(true), &ctx, "add")
+            .expect("human CLI bypasses the pending gate");
+    }
+
+    #[test]
+    fn test_pending_confirmation_precheck_gate_off_bypass() {
+        let tmp = temp_workspace();
+        let store = store_with_task(&tmp, task_with_confirmation("loop-a", "coordinator", false));
+        let ctx = make_ctx("loop-a", "coordinator", true);
+        pending_confirmation_precheck(&store, &default_config(false), &ctx, "add")
+            .expect("gate-off bypasses the pending gate");
+    }
+
+    #[test]
+    fn test_pending_confirmation_precheck_unsafe_hatch_bypass() {
+        let tmp = temp_workspace();
+        let store = store_with_task(&tmp, task_with_confirmation("loop-a", "coordinator", false));
+        let ctx = make_ctx("loop-a", "coordinator", true);
+        let mut config = default_config(true);
+        config.allow_unsafe_task_mutate = true;
+        pending_confirmation_precheck(&store, &config, &ctx, "add")
+            .expect("unsafe escape hatch bypasses the pending gate");
+    }
+
+    #[test]
+    fn test_pending_confirmation_precheck_allows_confirmed_row() {
+        let tmp = temp_workspace();
+        let store = store_with_task(&tmp, task_with_confirmation("loop-a", "coordinator", true));
+        let ctx = make_ctx("loop-a", "coordinator", true);
+        pending_confirmation_precheck(&store, &default_config(true), &ctx, "add")
+            .expect("confirmed rows must not block the next mutation");
+    }
+
+    #[test]
+    fn test_pending_confirmation_precheck_allows_other_scope() {
+        let tmp = temp_workspace();
+        let store = store_with_task(&tmp, task_with_confirmation("loop-b", "executor", false));
+        let ctx = make_ctx("loop-a", "coordinator", true);
+        pending_confirmation_precheck(&store, &default_config(true), &ctx, "ensure")
+            .expect("pending confirmations from another loop/hat must not block");
     }
 }

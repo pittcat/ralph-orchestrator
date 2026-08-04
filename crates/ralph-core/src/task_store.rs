@@ -2087,4 +2087,85 @@ mod tests {
             .expect("second add with distinct id must succeed");
         assert_eq!(store.tasks.len(), 2);
     }
+
+    // ── Unit 1 (task confirmation): atomic boundary + fault injection ──
+
+    /// The confirmation must land in the SAME atomic save snapshot as
+    /// the business row — one JSONL line carrying both, never a second
+    /// write after the mutation.
+    #[test]
+    fn u1_confirmation_lands_in_same_save_snapshot_as_business_row() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("tasks.jsonl");
+        let mut store = TaskStore::load(&path).unwrap();
+        let mut task = Task::new("protected row".to_string(), 2);
+        task.confirmation = Some(Box::new(crate::task::TaskConfirmation::new_pending(
+            "digest-1".to_string(),
+            "loop-a".to_string(),
+            "coordinator".to_string(),
+        )));
+        let reference = task
+            .confirmation
+            .as_ref()
+            .expect("confirmation set")
+            .reference
+            .clone();
+        store.add(task);
+        store.save().unwrap();
+
+        let raw = std::fs::read_to_string(&path).unwrap();
+        let lines: Vec<&str> = raw.lines().filter(|l| !l.trim().is_empty()).collect();
+        assert_eq!(lines.len(), 1, "business row + confirmation in one line");
+        let v: serde_json::Value = serde_json::from_str(lines[0]).unwrap();
+        assert_eq!(v["title"], "protected row");
+        assert_eq!(v["confirmation"]["state"], "pending");
+        assert_eq!(v["confirmation"]["digest"], "digest-1");
+        assert_eq!(v["confirmation"]["reference"], reference);
+        assert_eq!(v["confirmation"]["loop_id"], "loop-a");
+        assert_eq!(v["confirmation"]["hat_id"], "coordinator");
+    }
+
+    /// Fault injection: when the atomic write cannot proceed
+    /// (read-only directory), `save` must surface an explicit `Err`,
+    /// keep the previous complete snapshot on disk, and never panic.
+    #[test]
+    fn u1_save_failure_into_readonly_dir_keeps_previous_snapshot() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("tasks.jsonl");
+        let mut store = TaskStore::load(&path).unwrap();
+        store.add(Task::new("first snapshot".to_string(), 2));
+        store.save().unwrap();
+        let before = std::fs::read_to_string(&path).unwrap();
+
+        // Make the store directory read-only so the atomic temp file
+        // cannot be created next to tasks.jsonl.
+        let dir = tmp.path();
+        let mut perms = std::fs::metadata(dir).unwrap().permissions();
+        perms.set_readonly(true);
+        std::fs::set_permissions(dir, perms.clone()).unwrap();
+
+        store.add(Task::new("second snapshot".to_string(), 1));
+        let res = store.save();
+
+        // Restore permissions so TempDir cleanup can delete the tree
+        // (explicit mode avoids the world-writable `set_readonly(false)`
+        // shape clippy rejects).
+        use std::os::unix::fs::PermissionsExt;
+        perms.set_mode(0o755);
+        std::fs::set_permissions(dir, perms).unwrap();
+
+        assert!(
+            res.is_err(),
+            "save into a read-only directory must return an explicit Err (no panic, no silent success)"
+        );
+        let after = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(
+            before, after,
+            "the previous complete snapshot must survive the failed save"
+        );
+        assert!(
+            !after.contains("second snapshot"),
+            "failed save must not leak a partial row"
+        );
+    }
 }

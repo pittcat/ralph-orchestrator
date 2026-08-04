@@ -288,7 +288,7 @@ pub use state_machine::{
     StateMachineStateSummary,
 };
 pub use summary_writer::{DiagnosisHint, DiagnosisReference, SummaryWriter};
-pub use task::{Task, TaskStatus};
+pub use task::{ConfirmMatch, ConfirmationState, Task, TaskConfirmation, TaskStatus};
 pub use task_definition::{
     TaskDefinition, TaskDefinitionError, TaskSetup, TaskSuite, Verification,
 };

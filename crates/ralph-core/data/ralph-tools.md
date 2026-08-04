@@ -115,6 +115,7 @@ metadata:
 | `ralph wave verify --payloads-stdin` | 不写业务事件，只写一次性 ticket 的 wave batch Precheck（dispatcher hat） | `ralph tools skill load ralph-tools-wave` |
 | `ralph wave inspect <wave_id>` | OPAC Confirm 公开只读入口；返回 phase / 计数 / availability / `applied`；不含 `events_file` | `ralph tools skill load ralph-tools-wave` |
 | `ralph tools task verify <verb>` | 零写盘 Precheck（含 `verify-emit-bridge` 三字段同源） | `ralph tools skill load ralph-tools-tasks` |
+| `ralph tools task confirm <task_id> --reference <ref> --digest <digest>` | gate 内 protected Apply 成功后，consume 该行的 pending confirmation，放行同 scope 下一次 protected mutation | `ralph tools skill load ralph-tools-tasks` |
 | `ralph inspect loop` | 机器可读 loop + hat 身份摘要；JSON 可能含 `supervisor` 块（见 `ralph-tools-opac` Observe）（OPAC Observe） | `ralph tools skill load ralph-tools-cmdref` |
 | `ralph run` | 启动编排循环 | `ralph tools skill load ralph-tools-cmdref` |
 | `ralph inspect profiles` | 预览 profile overlay 解析结果（只读，不启动 loop） | `ralph tools skill load ralph-tools-cmdref` |

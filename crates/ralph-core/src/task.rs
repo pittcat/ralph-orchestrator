@@ -28,6 +28,113 @@ impl TaskStatus {
     }
 }
 
+/// Confirmation lifecycle of a gate-protected task mutation.
+///
+/// A protected Apply (agent `task add` / `task ensure` with the
+/// verify gate active) records a `Pending` confirmation on the task
+/// row; the same loop/hat must consume it via
+/// `ralph tools task confirm` before the next protected mutation is
+/// admitted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ConfirmationState {
+    /// Recorded by a successful protected Apply, not yet confirmed.
+    Pending,
+    /// Consumed by a matching `task confirm` invocation.
+    Confirmed,
+}
+
+/// Result of matching `task confirm` arguments against a stored
+/// [`TaskConfirmation`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConfirmMatch {
+    /// Reference, digest and scope all match and the state is
+    /// `Pending` — transition to `Confirmed`.
+    Apply,
+    /// Reference and digest match and the state is already
+    /// `Confirmed` — idempotent no-op (no disk rewrite).
+    AlreadyConfirmed,
+    /// The reference matches but the digest or the loop/hat scope
+    /// differs — the state stays `Pending`.
+    Mismatch,
+    /// The reference does not match — nothing to confirm here.
+    Unavailable,
+}
+
+/// Confirmation record attached to a task row by a gate-protected
+/// Apply.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TaskConfirmation {
+    /// Lifecycle state (`pending` until a matching confirm runs).
+    pub state: ConfirmationState,
+    /// Unique reference minted at Apply time; the confirming caller
+    /// must present it verbatim.
+    pub reference: String,
+    /// Mutation fingerprint (SHA-256 of verb + canonical payload +
+    /// loop + hat) recorded at Apply time.
+    pub digest: String,
+    /// Loop the protected mutation ran in (empty string when absent,
+    /// mirroring the verify-gate identifier convention).
+    pub loop_id: String,
+    /// Hat the protected mutation ran in (empty string when absent).
+    pub hat_id: String,
+    /// RFC3339 timestamp of the Apply that recorded the confirmation.
+    pub created: String,
+}
+
+impl TaskConfirmation {
+    /// Mint a fresh `Pending` confirmation for a protected Apply.
+    ///
+    /// The reference is a `cfm-` prefixed UUIDv4 hex — the same
+    /// uniqueness class as [`Task::generate_id`] collision-wise, but
+    /// independent of the clock so two Applies inside the same
+    /// microsecond still get distinct references.
+    pub fn new_pending(digest: String, loop_id: String, hat_id: String) -> Self {
+        Self {
+            state: ConfirmationState::Pending,
+            reference: format!("cfm-{}", uuid::Uuid::new_v4().simple()),
+            digest,
+            loop_id,
+            hat_id,
+            created: chrono::Utc::now().to_rfc3339(),
+        }
+    }
+
+    /// Match `task confirm` arguments against this record without
+    /// mutating it. Pure value-object transition logic; the CLI maps
+    /// the outcome to exit codes and stable reason tokens.
+    pub fn match_confirm(
+        &self,
+        reference: &str,
+        digest: &str,
+        loop_id: &str,
+        hat_id: &str,
+    ) -> ConfirmMatch {
+        if self.reference != reference {
+            return ConfirmMatch::Unavailable;
+        }
+        if self.digest != digest {
+            return ConfirmMatch::Mismatch;
+        }
+        match self.state {
+            ConfirmationState::Confirmed => ConfirmMatch::AlreadyConfirmed,
+            ConfirmationState::Pending => {
+                if self.loop_id == loop_id && self.hat_id == hat_id {
+                    ConfirmMatch::Apply
+                } else {
+                    ConfirmMatch::Mismatch
+                }
+            }
+        }
+    }
+
+    /// Transition to `Confirmed`. Callers must only invoke this after
+    /// [`Self::match_confirm`] returned [`ConfirmMatch::Apply`].
+    pub fn mark_confirmed(&mut self) {
+        self.state = ConfirmationState::Confirmed;
+    }
+}
+
 /// A task in the task tracking system.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Task {
@@ -66,6 +173,18 @@ pub struct Task {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub owner_hat_id: Option<String>,
 
+        /// Confirmation record written by a gate-protected Apply
+    /// (`ralph tools task add` / `ensure` with the verify gate
+    /// active for the calling agent). Absent for human-CLI tasks,
+    /// bypassed mutations, and legacy rows.
+    ///
+    /// Boxed so the optional record does not bloat every `Task`
+    /// (the state ledger's `CommitDelta::TaskInserted` variant holds
+    /// a whole `Task` and clippy's `large_enum_variant` gate is
+    /// ratio-sensitive). Serde treats `Box<T>` transparently.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub confirmation: Option<Box<TaskConfirmation>>,
+
     /// Creation timestamp (ISO 8601)
     pub created: String,
 
@@ -91,6 +210,7 @@ impl Task {
             blocked_by: Vec::new(),
             loop_id: None,
             owner_hat_id: None,
+            confirmation: None,
             created: chrono::Utc::now().to_rfc3339(),
             started: None,
             closed: None,
@@ -530,5 +650,159 @@ mod tests {
             "expected unicode plan name to slug to `_001`, got {id}"
         );
         assert!(id.ends_with("-fix00u00-1"), "got {id}");
+    }
+
+    // ── Unit 1 (task confirmation): serde contract ──────────────────
+
+    #[test]
+    fn test_legacy_task_row_without_confirmation_parses_as_none() {
+        let json = r#"{
+            "id": "task-1234-abcd",
+            "title": "Legacy",
+            "status": "open",
+            "priority": 3,
+            "created": "2026-01-01T00:00:00Z"
+        }"#;
+        let task: Task = serde_json::from_str(json).expect("legacy row parses");
+        assert!(
+            task.confirmation.is_none(),
+            "legacy rows must never grow a confirmation on parse"
+        );
+    }
+
+    #[test]
+    fn test_confirmation_round_trip_keeps_all_fields() {
+        let mut task = Task::new("Protected row".to_string(), 2);
+        task.confirmation = Some(Box::new(TaskConfirmation::new_pending(
+            "digest-abc".to_string(),
+            "loop-a".to_string(),
+            "coordinator".to_string(),
+        )));
+        let reference = task
+            .confirmation
+            .as_ref()
+            .expect("confirmation set")
+            .reference
+            .clone();
+
+        let raw = serde_json::to_string(&task).expect("serialize");
+        let parsed: Task = serde_json::from_str(&raw).expect("deserialize");
+        let cfm = parsed
+            .confirmation
+            .expect("confirmation survives round-trip");
+        assert_eq!(cfm.state, ConfirmationState::Pending);
+        assert_eq!(cfm.reference, reference);
+        assert_eq!(cfm.digest, "digest-abc");
+        assert_eq!(cfm.loop_id, "loop-a");
+        assert_eq!(cfm.hat_id, "coordinator");
+        assert!(!cfm.created.is_empty());
+    }
+
+    #[test]
+    fn test_confirmation_without_state_field_fails_closed() {
+        // A row whose confirmation object lacks `state` must not parse
+        // into any ConfirmationState (there is no serde default) — the
+        // store's lenient line parser then skips it rather than
+        // inventing a confirmed record.
+        let json = r#"{
+            "id": "task-1234-abcd",
+            "title": "Broken",
+            "status": "open",
+            "priority": 3,
+            "created": "2026-01-01T00:00:00Z",
+            "confirmation": {
+                "reference": "cfm-x",
+                "digest": "d",
+                "loop_id": "loop-a",
+                "hat_id": "coordinator",
+                "created": "2026-01-01T00:00:00Z"
+            }
+        }"#;
+        let parsed = serde_json::from_str::<Task>(json);
+        assert!(
+            parsed.is_err(),
+            "missing confirmation.state must fail closed, never default to confirmed"
+        );
+    }
+
+    // ── Unit 1 (task confirmation): pure transition logic ───────────
+
+    #[test]
+    fn test_confirm_match_pending_to_confirmed_is_single_transition() {
+        let mut cfm = TaskConfirmation::new_pending(
+            "digest-1".to_string(),
+            "loop-a".to_string(),
+            "coordinator".to_string(),
+        );
+        let reference = cfm.reference.clone();
+        assert_eq!(
+            cfm.match_confirm(&reference, "digest-1", "loop-a", "coordinator"),
+            ConfirmMatch::Apply
+        );
+        cfm.mark_confirmed();
+        assert_eq!(cfm.state, ConfirmationState::Confirmed);
+        // Repeat confirm with matching reference + digest is idempotent.
+        assert_eq!(
+            cfm.match_confirm(&reference, "digest-1", "loop-a", "coordinator"),
+            ConfirmMatch::AlreadyConfirmed
+        );
+    }
+
+    #[test]
+    fn test_confirm_match_digest_mismatch_keeps_pending() {
+        let cfm = TaskConfirmation::new_pending(
+            "digest-1".to_string(),
+            "loop-a".to_string(),
+            "coordinator".to_string(),
+        );
+        let reference = cfm.reference.clone();
+        assert_eq!(
+            cfm.match_confirm(&reference, "digest-other", "loop-a", "coordinator"),
+            ConfirmMatch::Mismatch
+        );
+        assert_eq!(cfm.state, ConfirmationState::Pending);
+    }
+
+    #[test]
+    fn test_confirm_match_scope_mismatch_keeps_pending() {
+        let cfm = TaskConfirmation::new_pending(
+            "digest-1".to_string(),
+            "loop-a".to_string(),
+            "coordinator".to_string(),
+        );
+        let reference = cfm.reference.clone();
+        // Different loop.
+        assert_eq!(
+            cfm.match_confirm(&reference, "digest-1", "loop-b", "coordinator"),
+            ConfirmMatch::Mismatch
+        );
+        // Different hat.
+        assert_eq!(
+            cfm.match_confirm(&reference, "digest-1", "loop-a", "executor"),
+            ConfirmMatch::Mismatch
+        );
+        assert_eq!(cfm.state, ConfirmationState::Pending);
+    }
+
+    #[test]
+    fn test_confirm_match_wrong_reference_is_unavailable() {
+        let cfm = TaskConfirmation::new_pending(
+            "digest-1".to_string(),
+            "loop-a".to_string(),
+            "coordinator".to_string(),
+        );
+        assert_eq!(
+            cfm.match_confirm("cfm-does-not-exist", "digest-1", "loop-a", "coordinator"),
+            ConfirmMatch::Unavailable
+        );
+        assert_eq!(cfm.state, ConfirmationState::Pending);
+    }
+
+    #[test]
+    fn test_confirmation_references_are_unique() {
+        let a = TaskConfirmation::new_pending("d".to_string(), "l".to_string(), "h".to_string());
+        let b = TaskConfirmation::new_pending("d".to_string(), "l".to_string(), "h".to_string());
+        assert_ne!(a.reference, b.reference, "each Apply mints a fresh reference");
+        assert!(a.reference.starts_with("cfm-"));
     }
 }
