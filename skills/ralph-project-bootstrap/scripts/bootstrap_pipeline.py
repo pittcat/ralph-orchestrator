@@ -383,10 +383,21 @@ def _resolve_builtin_preset(
         raise ValueError(
             ("builtin_list_unparseable", f"ralph preset list emitted invalid JSON: {exc}")
         ) from exc
-    manifests = listing.get("manifests") if isinstance(listing, dict) else None
+    # CLI versions have emitted both a bare manifest array and an
+    # envelope containing that array. The bootstrap flow only needs
+    # the manifests, so accept both wire shapes.
+    if isinstance(listing, list):
+        manifests = listing
+    elif isinstance(listing, dict):
+        manifests = listing.get("manifests")
+    else:
+        manifests = None
     if not isinstance(manifests, list):
         raise ValueError(
-            ("builtin_list_unparseable", "ralph preset list response must carry a 'manifests' array")
+            (
+                "builtin_list_unparseable",
+                "ralph preset list response must be a manifest array or carry a 'manifests' array",
+            )
         )
     template_name = None
     for entry in manifests:
