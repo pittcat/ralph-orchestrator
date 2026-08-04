@@ -960,3 +960,134 @@ def test_missing_candidate_ids_fallback_no_false_positive() -> None:
     assert "duplicate_candidate_id" not in _codes(result)
     assert result.valid is True
     assert result.author_ready is True
+
+
+# --- U4-fix:fail-close 分支钉住(零覆盖/未钉住分支,纯补测) -----------------
+# 以下四个分支在生产代码中已 fail-close,但此前零测试覆盖或未钉住;
+# 这些测试防止未来重构静默删除回归信号。与 U3 的
+# test_duplicate_evidence_id_behavior_unchanged(钉追加位 $.evidence[4].id)
+# 并存:这里钉相邻位 $.evidence[1].id 的完整 code/path/message/next_action 契约。
+
+
+def test_duplicate_evidence_id_pins_full_error_contract() -> None:
+    # 分支 ①:证据台账出现两条同 id(E1)证据 → duplicate_evidence_id 拒收。
+    # 钉住:错误指向第二条(path=$.evidence[1].id)、message 携带重复 id 文本、
+    # next_action 为固定词表值 rerun_investigation(NEXT_INVESTIGATE)。
+    def mutate(data: dict) -> None:
+        data["evidence"][1]["id"] = "E1"  # 与 evidence[0] 的 id 重复
+
+        def _re_aim(refs):
+            # 把原指向 E2 的引用改指 E1,保持其余引用完整性,隔离本分支
+            return ["E1" if ref == "E2" else ref for ref in refs]
+
+        for decision in data["decisions"]:
+            decision["supporting_evidence"] = _re_aim(decision["supporting_evidence"])
+        for candidate in data["candidates"]:
+            candidate["supporting_evidence"] = _re_aim(candidate["supporting_evidence"])
+
+    result = validate_brief_text(_mutated("valid.yml", mutate))
+    assert result.valid is False
+    assert result.author_ready is False
+    duplicates = [e for e in result.errors if e.code == "duplicate_evidence_id"]
+    assert len(duplicates) == 1
+    dup = duplicates[0]
+    assert dup.path == "$.evidence[1].id"  # 指向第二条(重复出现处),不是第一条
+    assert "E1" in dup.message  # message 携带重复 id 文本
+    assert dup.next_action == "rerun_investigation"
+
+
+def test_blocked_to_author_ready_transition_is_state_transition_invalid() -> None:
+    # 分支 ②:单向转换表(ALLOWED_TRANSITIONS)规定 blocked 之后只允许
+    # blocked / needs_user_decision;blocked → author_ready 必须被拒收,
+    # 错误落在 $.status 上,动作指向人工确认(NEXT_CONFIRM_USER 固定值)。
+    def mutate(data: dict) -> None:
+        data["previous_status"] = "blocked"  # status 保持 author_ready
+
+    result = validate_brief_text(_mutated("valid.yml", mutate))
+    assert result.valid is False
+    assert result.author_ready is False
+    transitions = [e for e in result.errors if e.code == "state_transition_invalid"]
+    assert len(transitions) == 1
+    assert transitions[0].path == "$.status"
+    assert transitions[0].next_action == "confirm_with_user"
+
+
+def test_blocked_to_needs_user_decision_transition_is_allowed() -> None:
+    # 分支 ② 对照:blocked → needs_user_decision 是合法转换,
+    # 不得产生 state_transition_invalid,且整体无其它错误
+    def mutate(data: dict) -> None:
+        data["previous_status"] = "blocked"
+        data["status"] = "needs_user_decision"
+
+    result = validate_brief_text(_mutated("valid.yml", mutate))
+    assert "state_transition_invalid" not in _codes(result)
+    assert result.valid is True
+
+
+@pytest.mark.parametrize(
+    "bad_attempt_count",
+    ["2", None, -1, True],
+    ids=["string", "none", "negative", "bool"],
+)
+def test_non_integer_attempt_count_is_invalid_score_without_crash(bad_attempt_count) -> None:
+    # 分支 ③:validator 侧非整数 attempt_count(str / None / 负数 / bool)
+    # 走 invalid_score 家族优雅降级:报 code=invalid_score、path=$.attempt_count,
+    # 回落 1 继续验证,无裸异常,不额外爆炸无关错误
+    def mutate(data: dict) -> None:
+        data["attempt_count"] = bad_attempt_count
+
+    result = validate_brief_text(_mutated("valid.yml", mutate))
+    assert result.valid is False
+    assert result.author_ready is False
+    invalid = [e for e in result.errors if e.code == "invalid_score"]
+    assert len(invalid) == 1
+    assert invalid[0].path == "$.attempt_count"
+    # 验证继续:其余字段合法时,错误集合仅与 attempt_count 相关
+    # (author_ready_gate_violation 是「声明 author_ready 但存在错误」的
+    # 通用门禁联动,不属于额外爆炸)
+    assert _codes(result) <= {"invalid_score", "author_ready_gate_violation"}
+    # 回落语义:类型化视图的 attempt_count 回落为 1
+    assert result.brief is not None
+    assert result.brief.attempt_count == 1
+
+
+def test_valid_attempt_count_two_has_no_invalid_score() -> None:
+    # 分支 ③ 对照:合法 int(2)不产生 invalid_score,brief 保留原值
+    def mutate(data: dict) -> None:
+        data["attempt_count"] = 2
+
+    result = validate_brief_text(_mutated("valid.yml", mutate))
+    assert "invalid_score" not in _codes(result)
+    assert result.valid is True
+    assert result.brief is not None
+    assert result.brief.attempt_count == 2
+
+
+def test_all_candidates_unselected_blocks_author_ready_gate() -> None:
+    # 分支 ④:author_ready 充要条件「candidate」要求至少一个候选通过全部
+    # 硬门禁且被标 selected;全候选 selected=false 却声明 author_ready →
+    # 该未满足条件产生 author_ready_gate_violation(path=$.candidates)
+    def unselect(data: dict) -> None:
+        for candidate in data["candidates"]:
+            candidate["selected"] = False
+
+    result = validate_brief_text(_mutated("valid.yml", unselect))
+    assert result.valid is False
+    assert result.author_ready is False
+    violations = [e for e in result.errors if e.code == "author_ready_gate_violation"]
+    assert any(e.path == "$.candidates" for e in violations)
+    assert any("selected" in e.message for e in violations)
+    # 达标但未被选的候选门禁结论为 viable(而非 selected)
+    gate = next(g for g in result.candidate_gates if g.candidate_id == "C1")
+    assert gate.outcome == "viable"
+
+    # 对照:同一基底恢复 selected=true → 该 gate violation 消失
+    def unselect_then_reselect(data: dict) -> None:
+        for candidate in data["candidates"]:
+            candidate["selected"] = False
+        data["candidates"][0]["selected"] = True
+
+    restored = validate_brief_text(_mutated("valid.yml", unselect_then_reselect))
+    assert "author_ready_gate_violation" not in _codes(restored)
+    assert restored.valid is True
+    assert restored.author_ready is True
