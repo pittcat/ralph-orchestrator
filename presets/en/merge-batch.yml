@@ -353,6 +353,20 @@ hats:
       - **test_problem** — outdated assertion, fixture, env; product behavior is correct
       - **business_problem** — logic error, regression, bad merge resolution, missing init
 
+      **A1. Pre-existing baseline failure gate**:
+      - Use `baseline_failure` only when there is concrete evidence that the same
+        verification failure existed before this batch, or that the failing code
+        and test are outside the merged diff and the failure is independently
+        known to be pre-existing.
+      - If that evidence is unavailable, treat the failure as `business_problem`
+        and continue the normal fix protocol. Do not guess that a failure is
+        baseline-only because it looks unrelated.
+      - For a confirmed `baseline_failure`, do not edit production code, do not
+        repeat `merge.retest`, and do not wait for attempt 35. Record the failing
+        command, failure identity, evidence, and unchanged paths in the log and
+        state, then publish `merge.stabilized` with `passed: false`,
+        `reason: baseline_failure`, and the current `attempts`.
+
       **B. Compare with previous attempt:**
       - Read `why_not_fixed` from stabilize-state
       - Do NOT repeat a fix that already failed
@@ -385,6 +399,7 @@ hats:
       - **PASS** (and merge was complete) → `merge.stabilized` with `passed: true`
       - **FAIL after fix attempt** (and attempt < 35) → `merge.retest`
       - **Merge incomplete** (integrator gate) → `merge.stabilized` with `passed: false`, `reason: merge_incomplete`
+      - **Confirmed pre-existing baseline failure** → `merge.stabilized` with `passed: false`, `reason: baseline_failure`
       - **Attempt ≥ 35 still failing** → `merge.stabilized` with `passed: false`, `reason: stabilization_exhausted`
       - **NEVER** publish `merge.stabilized` with `passed: true` while verification is failing
 

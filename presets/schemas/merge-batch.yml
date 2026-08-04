@@ -136,11 +136,13 @@ schemas:
           (`integration_complete`) was true.
         source: Stabilizer writes from verification outcome.
         fill_rule: true only when verification passes AND merge was complete;
-          false otherwise (incl. `merge_incomplete` and `stabilization_exhausted`).
+          false otherwise (incl. `merge_incomplete`, `baseline_failure`, and
+          `stabilization_exhausted`).
       reason:
         meaning: Why `passed` is false; null/omit when passed is true.
         source: Stabilizer writes from failure / exhaustion gate.
-        fill_rule: One of `merge_incomplete` | `stabilization_exhausted`;
+        fill_rule: One of `merge_incomplete` | `baseline_failure` |
+          `stabilization_exhausted`;
           omit or null when `passed` is true.
       branches_failed:
         meaning: Echoed from `merge.integrated.branches_failed` when stabilization
