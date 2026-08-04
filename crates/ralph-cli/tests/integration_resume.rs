@@ -1121,6 +1121,290 @@ hats:
             "the second reuse must start the loop"
         );
     }
+
+    // ── U3-fix (plan 2026-08-03-004 fix-unit, adversarial A1): ──
+    // completed-run reuse lockout. A worktree whose previous run
+    // FINISHED NORMALLY ends on an accepted terminal boundary whose
+    // in-log event carries no `triggered` hat. The old capture pushed
+    // an incompleteness reason for exactly that shape, the gate
+    // refused, and cleanup had already archived the live evidence —
+    // every later reuse refused again. That contradicted the HARD
+    // RULE 3 promise that a completed worktree is reusable.
+
+    /// Append one accepted-transitions outbox line for a topic/payload.
+    fn append_outbox_entry(
+        worktree_path: &Path,
+        loop_id: &str,
+        topic: &str,
+        payload: &str,
+        hat: &str,
+        committed_at: &str,
+    ) {
+        use std::io::Write;
+        let payload_digest = sha256_hex(payload.as_bytes());
+        let transition_id =
+            ralph_core::event_loop::accepted_transition::AcceptedTransition::compute_transition_id(
+                loop_id,
+                &format!("{hat}:1"),
+                "rev-1",
+                &format!("{topic}:{hat}"),
+                &payload_digest,
+            );
+        let entry = serde_json::json!({
+            "activation_id": format!("{hat}:1"),
+            "committed_at": committed_at,
+            "contract_revision": "rev-1",
+            "delivered": false,
+            "loop_id": loop_id,
+            "payload_digest": payload_digest,
+            "topic": topic,
+            "transition_id": transition_id,
+        });
+        let path = worktree_path.join(".ralph/agent/accepted-transitions.jsonl");
+        let mut f = fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+            .unwrap();
+        writeln!(f, "{entry}").unwrap();
+    }
+
+    /// Pre-create a git-known worktree whose prior run COMPLETED
+    /// normally: an earlier accepted boundary hands off, and the LAST
+    /// accepted boundary is a terminal event carrying NO `triggered`
+    /// hat, present in the live log (adversarial A1's real-world
+    /// shape — terminal `report.done`-style record with
+    /// triggered=None).
+    fn precreate_worktree_with_completed_run(main_repo: &Path, loop_id: &str) -> PathBuf {
+        let worktree_path = main_repo.join(".worktrees").join(loop_id);
+        let status = Command::new("git")
+            .args([
+                "worktree",
+                "add",
+                "--detach",
+                worktree_path.to_str().unwrap(),
+                "HEAD",
+            ])
+            .current_dir(main_repo)
+            .status()
+            .expect("git worktree add");
+        assert!(status.success(), "git worktree add must succeed");
+
+        let ralph_dir = worktree_path.join(".ralph");
+        let agent_dir = ralph_dir.join("agent");
+        fs::create_dir_all(&agent_dir).unwrap();
+
+        let plan_payload = "{\"plan_key\":\"pf-a1\"}";
+        let plan_event = format!(
+            "{{\"ts\":\"2026-08-03T00:00:00Z\",\"iteration\":1,\"hat\":\"planner\",\"topic\":\"forge.plan.ready\",\"triggered\":\"guardian\",\"payload\":{}}}\n",
+            serde_json::to_string(plan_payload).unwrap()
+        );
+        // Terminal tail: accepted, in the log, NO `triggered` hat.
+        let done_payload = "{\"status\":\"complete\"}";
+        let done_event = format!(
+            "{{\"ts\":\"2026-08-03T01:00:00Z\",\"iteration\":9,\"hat\":\"reporter\",\"topic\":\"report.done\",\"payload\":{}}}\n",
+            serde_json::to_string(done_payload).unwrap()
+        );
+        fs::write(
+            ralph_dir.join("events.jsonl"),
+            format!("{plan_event}{done_event}"),
+        )
+        .unwrap();
+
+        append_outbox_entry(
+            &worktree_path,
+            loop_id,
+            "forge.plan.ready",
+            plan_payload,
+            "planner",
+            "2026-08-03T00:00:01Z",
+        );
+        append_outbox_entry(
+            &worktree_path,
+            loop_id,
+            "report.done",
+            done_payload,
+            "reporter",
+            "2026-08-03T01:00:01Z",
+        );
+        fs::write(ralph_dir.join("current-loop-id"), format!("{loop_id}\n")).unwrap();
+
+        worktree_path
+    }
+
+    /// Adversarial A1 end to end: a completed prior run must be
+    /// reusable. Reuse #1 passes the gate (clean completion → complete
+    /// manifest, no pending hat), fresh-bootstraps instead of entering
+    /// a manifest resume, and reuse #2 passes again — no permanent
+    /// refusal ring.
+    #[test]
+    fn completed_run_reuse_bootstraps_fresh_and_stays_reusable() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let main_repo = temp_dir.path();
+        setup_git_repo(main_repo);
+        write_forge_hats_config(main_repo);
+
+        let loop_id = "pf-a1-completed";
+        let plan_path = main_repo.join(format!("{loop_id}.md"));
+        fs::write(&plan_path, "# plan v1\n").unwrap();
+
+        let worktree_path = precreate_worktree_with_completed_run(main_repo, loop_id);
+        write_completed_worktree_entry(main_repo, loop_id, &worktree_path);
+
+        // Reuse #1: clean completion → gate passes → fresh bootstrap.
+        let first = spawn_reuse(main_repo, &plan_path);
+        let first_stderr = String::from_utf8_lossy(&first.stderr);
+        eprintln!("A1 completed reuse #1 stderr: {first_stderr}");
+        assert!(
+            !first_stderr.contains("resume manifest validation failed"),
+            "a normally completed run must not be refused: {first_stderr}"
+        );
+        let first_events = read_fresh_events(&worktree_path);
+        eprintln!("A1 completed reuse #1 events: {first_events}");
+        let mut saw_starting_bootstrap = false;
+        for line in first_events.lines() {
+            let Ok(record) = serde_json::from_str::<serde_json::Value>(line) else {
+                continue;
+            };
+            let source = record.get("source").and_then(|v| v.as_str()).unwrap_or("");
+            let topic = record.get("topic").and_then(|v| v.as_str()).unwrap_or("");
+            if source == "loop-bootstrap" && topic == "forge.start" {
+                saw_starting_bootstrap = true;
+            }
+            if topic == "task.resume" {
+                let payload = record.get("payload").and_then(|v| v.as_str()).unwrap_or("");
+                assert!(
+                    !payload.contains("manifest_resume"),
+                    "clean completion must never enter a manifest resume: {first_events}"
+                );
+            }
+        }
+        assert!(
+            saw_starting_bootstrap,
+            "the fresh starting event must be the bootstrap: {first_events}"
+        );
+
+        // Reuse #2: run #1's log is archived; the durable outbox still
+        // carries the terminal tail (now outbox-only) → the fallback
+        // keeps the capture complete → the gate passes again.
+        let second = spawn_reuse(main_repo, &plan_path);
+        let second_stderr = String::from_utf8_lossy(&second.stderr);
+        eprintln!("A1 completed reuse #2 stderr: {second_stderr}");
+        assert!(
+            !second_stderr.contains("resume manifest validation failed"),
+            "the second reuse must also pass (no permanent lockout): {second_stderr}"
+        );
+        let second_events = read_fresh_events(&worktree_path);
+        assert!(
+            !second_events.is_empty(),
+            "the second reuse must start the loop"
+        );
+    }
+
+    /// Pre-create a git-known worktree whose prior run ended on an
+    /// accepted `plan.blocked`-family terminal whose event is in NO
+    /// event file (the runtime can accept such an event without a log
+    /// record), with an earlier accepted boundary still in the log.
+    fn precreate_worktree_with_plan_blocked_tail(main_repo: &Path, loop_id: &str) -> PathBuf {
+        let worktree_path = main_repo.join(".worktrees").join(loop_id);
+        let status = Command::new("git")
+            .args([
+                "worktree",
+                "add",
+                "--detach",
+                worktree_path.to_str().unwrap(),
+                "HEAD",
+            ])
+            .current_dir(main_repo)
+            .status()
+            .expect("git worktree add");
+        assert!(status.success(), "git worktree add must succeed");
+
+        let ralph_dir = worktree_path.join(".ralph");
+        let agent_dir = ralph_dir.join("agent");
+        fs::create_dir_all(&agent_dir).unwrap();
+
+        let plan_payload = "{\"plan_key\":\"pf-a1-blocked\"}";
+        let plan_event = format!(
+            "{{\"ts\":\"2026-08-03T00:00:00Z\",\"iteration\":1,\"hat\":\"planner\",\"topic\":\"forge.plan.ready\",\"triggered\":\"guardian\",\"payload\":{}}}\n",
+            serde_json::to_string(plan_payload).unwrap()
+        );
+        fs::write(ralph_dir.join("events.jsonl"), plan_event).unwrap();
+
+        append_outbox_entry(
+            &worktree_path,
+            loop_id,
+            "forge.plan.ready",
+            plan_payload,
+            "planner",
+            "2026-08-03T00:00:01Z",
+        );
+        // Terminal tail: accepted in the outbox only — no matching
+        // event in any event file.
+        let blocked_payload = "{\"kind\":\"precheck_exhausted\"}";
+        append_outbox_entry(
+            &worktree_path,
+            loop_id,
+            "plan.blocked",
+            blocked_payload,
+            "runtime",
+            "2026-08-03T01:00:01Z",
+        );
+        fs::write(ralph_dir.join("current-loop-id"), format!("{loop_id}\n")).unwrap();
+
+        worktree_path
+    }
+
+    /// Adversarial A1's second form (U2-semantics regression pin): a
+    /// `plan.blocked`-family terminal tail recorded ONLY in the outbox
+    /// must also reuse successfully — outbox fallback evidence keeps
+    /// the manifest complete with no pending hat → fresh bootstrap.
+    #[test]
+    fn plan_blocked_outbox_only_tail_reuse_bootstraps_fresh() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let main_repo = temp_dir.path();
+        setup_git_repo(main_repo);
+        write_forge_hats_config(main_repo);
+
+        let loop_id = "pf-a1-blocked";
+        let plan_path = main_repo.join(format!("{loop_id}.md"));
+        fs::write(&plan_path, "# plan v1\n").unwrap();
+
+        let worktree_path = precreate_worktree_with_plan_blocked_tail(main_repo, loop_id);
+        write_completed_worktree_entry(main_repo, loop_id, &worktree_path);
+
+        let output = spawn_reuse(main_repo, &plan_path);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        eprintln!("A1 plan.blocked-tail stderr: {stderr}");
+        assert!(
+            !stderr.contains("resume manifest validation failed"),
+            "an outbox-only terminal tail must not be refused: {stderr}"
+        );
+        let events = read_fresh_events(&worktree_path);
+        eprintln!("A1 plan.blocked-tail events: {events}");
+        let mut saw_starting_bootstrap = false;
+        for line in events.lines() {
+            let Ok(record) = serde_json::from_str::<serde_json::Value>(line) else {
+                continue;
+            };
+            let source = record.get("source").and_then(|v| v.as_str()).unwrap_or("");
+            let topic = record.get("topic").and_then(|v| v.as_str()).unwrap_or("");
+            if source == "loop-bootstrap" && topic == "forge.start" {
+                saw_starting_bootstrap = true;
+            }
+            if topic == "task.resume" {
+                let payload = record.get("payload").and_then(|v| v.as_str()).unwrap_or("");
+                assert!(
+                    !payload.contains("manifest_resume"),
+                    "no targeted recovery may start without a derivable pending hat: {events}"
+                );
+            }
+        }
+        assert!(
+            saw_starting_bootstrap,
+            "the fresh starting event must be the bootstrap: {events}"
+        );
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────

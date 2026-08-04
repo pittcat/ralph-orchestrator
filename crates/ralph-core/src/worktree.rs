@@ -770,6 +770,17 @@ fn archive_files_matching(
 /// incomplete manifests and continues with older archives, so a
 /// crash-window capture can never lock the worktree out of reuse
 /// permanently (U2-fix, adjudication ①).
+///
+/// # Cleanup-before-gate ordering (U3-fix, adversarial A1)
+///
+/// Archiving the live evidence BEFORE the CLI validation gate runs is
+/// safe once capture recognizes a terminal tail (last in-log boundary
+/// event with no `triggered` hat) as a CLEAN COMPLETION: a normally
+/// finished run now captures a COMPLETE manifest, so the gate passes
+/// on the archived product instead of refusing it forever. For
+/// crash-window shapes the durable outbox is never archived by this
+/// cleanup, so a later reuse's re-capture falls back on it (U2-fix)
+/// instead of failing closed forever. No re-ordering is needed.
 pub fn clean_worktree_runtime_artifacts(
     worktree_path: impl AsRef<Path>,
     resume_inputs: Option<&crate::parallel_forge_resume::CaptureInputs>,

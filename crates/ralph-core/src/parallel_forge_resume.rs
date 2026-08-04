@@ -26,7 +26,12 @@
 //! Only entries in the accepted-transitions outbox count as hat
 //! completion boundaries. The last accepted boundary's corresponding
 //! event in the event log identifies the pending hat (`triggered`) and
-//! carries the original trigger snapshot. When the boundary event is
+//! carries the original trigger snapshot. When that event carries NO
+//! `triggered` hat, the previous run COMPLETED normally — a terminal
+//! tail is the definition of "no pending hat to resume" (U3-fix,
+//! adversarial A1): the manifest stays complete with `pending_hat`
+//! `None` and resume consumers fresh-bootstrap instead of entering a
+//! manifest resume. When the boundary event is
 //! absent from the live event log but the outbox still records the
 //! acceptance (the crash window after a successful resume bootstrap),
 //! the outbox record serves as fallback boundary evidence: the manifest
@@ -475,10 +480,19 @@ pub fn capture_manifest(worktree_path: &Path, inputs: &CaptureInputs) -> ResumeM
         let last_in_log = accepted.last().is_some_and(|last| last.in_event_log);
         match matched_events.last() {
             Some(event) if last_in_log => {
-                if event.triggered.is_none() {
-                    reasons
-                        .push("last accepted boundary event carries no triggered hat".to_string());
-                }
+                // U3-fix (plan 2026-08-03-004 fix-unit, adversarial
+                // A1): a last in-log boundary event with NO `triggered`
+                // hat is a CLEAN COMPLETION — the previous run ended
+                // normally and there is no pending hat to resume. This
+                // is the general criterion (no preset-specific topic
+                // list); the old semantics pushed an incompleteness
+                // reason here and locked every completed worktree out
+                // of reuse permanently. `pending_hat` stays None and
+                // resume consumers degrade to a fresh bootstrap
+                // (`task_resume_from_manifest` rejects NoPendingHat and
+                // the loop bootstrap warns + fresh-bootstraps) — never
+                // a manifest resume. The trigger snapshot stays full:
+                // the event IS in the log.
                 pending_hat.clone_from(&event.triggered);
                 original_trigger = Some(TriggerSnapshot {
                     topic: event.topic.clone(),
@@ -1309,6 +1323,109 @@ mod tests {
             matches!(err, ResumeManifestError::Incomplete { .. }),
             "double-missing boundary must refuse the start, got {err:?}"
         );
+    }
+
+    /// U3-fix (plan 2026-08-03-004 fix-unit, adversarial A1): a run
+    /// that COMPLETED normally ends on an accepted terminal boundary
+    /// whose in-log event carries NO `triggered` hat. The old
+    /// semantics pushed an incompleteness reason for exactly this
+    /// shape, which locked every successfully completed worktree out
+    /// of reuse: the gate refused the capture, cleanup had already
+    /// archived the live evidence, and every later reuse refused
+    /// again. The terminal tail IS the definition of "no pending hat
+    /// to resume" — a clean completion. The topic is preset data and
+    /// must not matter; only the shape does. The manifest must stay
+    /// complete with no pending hat, and the full trigger snapshot
+    /// (payload, publishing hat, ts) is still recorded because the
+    /// event is in the log. The earlier boundary's handoff must not
+    /// leak into the pending hat: only the LAST boundary decides.
+    #[test]
+    fn terminal_boundary_without_triggered_hat_is_clean_completion() {
+        let dir = tempfile::TempDir::new().unwrap();
+        seed_runtime(dir.path());
+        // Earlier boundary hands off to guardian.
+        let payload = "{\"plan_key\":\"pf-1\"}";
+        append_event(dir.path(), &forge_plan_ready_line(payload));
+        append_outbox(dir.path(), "forge.plan.ready", payload, "planner");
+        // Terminal tail: accepted, in the log, but no `triggered` hat.
+        let terminal_payload = "{\"status\":\"complete\"}";
+        append_event(
+            dir.path(),
+            &format!(
+                "{{\"ts\":\"2026-08-03T01:00:00Z\",\"iteration\":9,\"hat\":\"reporter\",\"topic\":\"report.done\",\"payload\":{}}}",
+                serde_json::to_string(terminal_payload).unwrap()
+            ),
+        );
+        append_outbox(dir.path(), "report.done", terminal_payload, "reporter");
+
+        let inputs = base_inputs();
+        let manifest = capture_manifest(dir.path(), &inputs);
+
+        assert!(
+            manifest.is_complete(),
+            "a triggered-less terminal tail is a clean completion, not a defect: {:?}",
+            manifest.incomplete_reasons
+        );
+        assert!(validate_manifest(&manifest, &inputs).is_ok());
+        assert!(
+            manifest.boundary.pending_hat.is_none(),
+            "clean completion has no pending hat (the earlier guardian handoff must not leak)"
+        );
+        assert_eq!(manifest.boundary.accepted.len(), 2);
+        let last = &manifest.boundary.accepted[1];
+        assert_eq!(last.topic, "report.done");
+        assert!(last.in_event_log);
+        assert_eq!(last.hat.as_deref(), Some("reporter"));
+        // The event IS in the log, so the snapshot stays full.
+        let trigger = manifest.boundary.original_trigger.as_ref().unwrap();
+        assert_eq!(trigger.topic, "report.done");
+        assert!(trigger.payload.as_deref().unwrap().contains("complete"));
+        assert_eq!(trigger.hat.as_deref(), Some("reporter"));
+        assert!(trigger.triggered.is_none());
+        assert_eq!(trigger.ts, "2026-08-03T01:00:00Z");
+    }
+
+    /// U3-fix regression pin (adversarial A1, plan.blocked form): the
+    /// terminal tail may be a `plan.blocked`-family acceptance whose
+    /// event exists in NO event file (the runtime can accept such an
+    /// event without a log record). With an EARLIER accepted boundary
+    /// still in the log, capture must take the outbox fallback for the
+    /// tail (complete, no pending hat, outbox-only snapshot) instead
+    /// of deriving the pending hat from the earlier boundary
+    /// (U2-fix semantics, pinned here against regression).
+    #[test]
+    fn outbox_only_terminal_tail_falls_back_despite_earlier_in_log_boundary() {
+        let dir = tempfile::TempDir::new().unwrap();
+        seed_runtime(dir.path());
+        let payload = "{\"plan_key\":\"pf-1\"}";
+        append_event(dir.path(), &forge_plan_ready_line(payload));
+        append_outbox(dir.path(), "forge.plan.ready", payload, "planner");
+        // Terminal tail accepted, but its event is in no event file.
+        let blocked_payload = "{\"kind\":\"precheck_exhausted\"}";
+        append_outbox(dir.path(), "plan.blocked", blocked_payload, "runtime");
+
+        let inputs = base_inputs();
+        let manifest = capture_manifest(dir.path(), &inputs);
+
+        assert!(
+            manifest.is_complete(),
+            "outbox-only terminal tail must fall back on the outbox record: {:?}",
+            manifest.incomplete_reasons
+        );
+        assert!(validate_manifest(&manifest, &inputs).is_ok());
+        assert!(
+            manifest.boundary.pending_hat.is_none(),
+            "the earlier in-log boundary must not supply the pending hat"
+        );
+        assert_eq!(manifest.boundary.accepted.len(), 2);
+        assert_eq!(manifest.boundary.accepted[0].topic, "forge.plan.ready");
+        assert!(manifest.boundary.accepted[0].in_event_log);
+        assert_eq!(manifest.boundary.accepted[1].topic, "plan.blocked");
+        assert!(!manifest.boundary.accepted[1].in_event_log);
+        let trigger = manifest.boundary.original_trigger.as_ref().unwrap();
+        assert_eq!(trigger.topic, "plan.blocked");
+        assert!(trigger.payload.is_none());
+        assert!(trigger.triggered.is_none());
     }
 
     #[test]

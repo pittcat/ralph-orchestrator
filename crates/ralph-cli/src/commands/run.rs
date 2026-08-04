@@ -1152,6 +1152,18 @@ pub async fn run_command(
                         // the freshly captured incomplete manifest of THIS
                         // cleanup — that first refusal stays fail-closed.
                         //
+                        // U3-fix (adversarial A1): a normally COMPLETED
+                        // prior run no longer reaches that first refusal —
+                        // capture recognizes its terminal tail (last in-log
+                        // boundary event with no `triggered` hat) as a
+                        // clean completion and produces a COMPLETE manifest,
+                        // so the Some(dir) branch only refuses genuine
+                        // evidence failures (malformed logs, missing
+                        // evidence). The complete manifest's `None`
+                        // pending hat is degraded later, at loop bootstrap
+                        // (warn + fresh bootstrap — never a manifest
+                        // resume).
+                        //
                         // U2: the gate result now RETAINS the validated
                         // manifest so the loop bootstrap can re-bind the
                         // pending hat via the existing `task.resume`
