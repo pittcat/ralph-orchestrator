@@ -1,0 +1,55 @@
+# 覆盖门禁失败样例(负例):候选 C1 confidence 高达 0.95,
+# 但 acceptance_coverage = 0.84 < 0.85 —— 覆盖门禁独立于 confidence,
+# 依然标 rejected_insufficient_coverage,author_ready 被拒。
+schema_version: "1.0"
+project_root: /workspace/demo-repo
+status: author_ready
+previous_status: needs_investigation
+attempt_count: 2
+goal: "为任务简报(task brief)增加机器可验证的硬门禁 validator"
+confidence:
+  goal_clarity: 0.88
+  project_fact_coverage: 0.87
+  acceptance_evidence: 0.86
+  execution_feasibility: 0.89
+  risk_coverage: 0.86
+evidence:
+  - id: E1
+    source: "crates/ralph-cli/src/commands/tools.rs"
+    observation: "确认了子命令入口与参数风格"
+    level: E2
+  - id: E2
+    source: "cargo nextest run -p ralph-cli 实际执行输出"
+    observation: "验证命令真实可运行"
+    level: E3
+decisions:
+  - id: D1
+    question: "校验器以 skill 内置脚本提供,还是直接做成 ralph CLI 子命令?"
+    confidence: 0.90
+    supporting_evidence: [E1]
+    blocking: true
+    resolved: true
+    resolution: "先以 skill 内置纯 Python 脚本提供"
+    uncovered_risks: []
+candidates:
+  - id: C1
+    summary: "纯 Python dataclass 契约 + 独立 validator"
+    confidence: 0.95
+    goal_coverage: 0.90
+    acceptance_coverage: 0.84
+    project_fit: 0.80
+    supporting_evidence: [E1, E2]
+    selected: true
+user_confirmations:
+  goal:
+    confirmed: true
+    note: "用户确认目标"
+  scope:
+    confirmed: true
+    note: "用户确认范围"
+  completion_evidence:
+    confirmed: true
+    note: "用户确认完成证据"
+  failure_boundaries:
+    confirmed: true
+    note: "用户确认失败边界"

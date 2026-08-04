@@ -37,6 +37,11 @@ Use this skill to design and draft Ralph **presets** (builtin or local) with **A
 ## Workflow
 
 0. **Discovery and user-confirmation gate (MUST — before topology or YAML):**
+   - **Task brief 前置输入（可选,来自 `ralph-task-discovery`）:** 调用方可选提供一个 repo-relative 的 `task_brief_path`。提供时,author 必须在 Discovery gate 内先复核并消费它:
+     1. 按 `skills/ralph-task-discovery/references/author-handoff.md` 的顺序读取与校验:文件存在 → YAML 可解析 → `schema_version` 受支持 → `project_root` 与当前目标项目根一致 → 运行 `brief_validator.validate_brief_text` → 检查 `status` / `author_ready` → 字段消费。确定性参考实现:`skills/ralph-task-discovery/scripts/author_handoff.py` 的 `evaluate_task_brief(brief_path, target_project_root)`。不得信任 brief 的自我声明而跳过 validator 复核。
+     2. brief invalid / blocked / 非 `author_ready` / stale(provenance 失效,判据见 author-handoff.md「stale brief 判据」段)→ **停在 Discovery gate**,输出 `task_brief_invalid` + 具体错误(validator code/path),**不生成任何 preset YAML**,也不消费 brief 的任何字段。
+     3. valid 且 `author_ready=true` → brief 成为**已确认输入**:Preset Intent Confirmation 必须引用 brief 的 Goal、成功条件(acceptance)、阻塞条件(failure boundaries)、scope 与 Evidence refs;selected candidate 结论作为方案输入——仅消费 validator `candidate_gates` 结论为 `selected` 的候选,**被 rejected 的候选不得被当作 selected 使用**。
+     4. brief 不豁免任何既有门禁:Discovery / Intent Confirmation / AAF / Payload Contract / prompt visibility / pre-review gate / review handoff 全部照常执行;brief 的 `author_ready` 标志不是跳过这些既有门禁的许可。
    - First inspect the user's request, the existing preset/schema, nearby documentation, and repository conventions. Build a provisional understanding before asking anything. **Do not ask the user for facts that can be discovered from the repository.**
    - Separate unresolved items into three groups:
      1. repository-verifiable facts — inspect and resolve them yourself;

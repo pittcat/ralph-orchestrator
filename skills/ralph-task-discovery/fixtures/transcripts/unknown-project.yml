@@ -1,0 +1,9 @@
+# 未知项目 transcript(deterministic):无已知项目事实、尚无用户回答。
+# 预期:unknowns 清单列出全部必需事实主题;状态 needs_investigation;
+# 不足维度诚实丢弃(rejected_low_confidence),禁止 handoff。
+project_root: /workspace/demo-repo
+goal_request: "为这个项目增加会员积分体系"
+task_type: feature
+attempt_count: 1
+project_facts: []
+user_answers: []

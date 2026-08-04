@@ -1,0 +1,80 @@
+# 重算审计样例:候选 C1 第一轮只有文档/源码证据,得分 0.78(调查带);
+# 第二轮新增 E3(真实执行)与 E4(独立验收)证据后,得分重算到 0.87 且
+# 覆盖达标 → author_ready。investigation_attempts 记录完整审计链:
+# 「第 N 轮新增哪些证据 → 分数从 X 重算到 Y」,每一步可回溯到 Evidence。
+schema_version: "1.0"
+project_root: /workspace/demo-repo
+status: author_ready
+previous_status: needs_investigation
+attempt_count: 2
+goal: "稳定事件循环超时路径的 flaky 测试并给出回归证据"
+confidence:
+  goal_clarity: 0.86
+  project_fact_coverage: 0.85
+  acceptance_evidence: 0.87
+  execution_feasibility: 0.88
+  risk_coverage: 0.85
+evidence:
+  - id: E1
+    source: "docs/solutions/testing/timeout-flake-history.md"
+    observation: "历史记录显示该 flake 曾在 CI 出现 3 次,均在超时路径"
+    level: E1
+  - id: E2
+    source: "crates/ralph-core/src/event_loop/timeout.rs"
+    observation: "超时竞态窗口定位在 producer/consumer 唤醒之间"
+    level: E2
+  - id: E3
+    source: "cargo nextest run -p ralph-core -- timeout_path 连续 10 次执行输出"
+    observation: "修复后连续 10 次运行全绿,竞态窗口消除"
+    level: E3
+  - id: E4
+    source: "独立 replay 场景 replay/timeout-flake"
+    observation: "replay 场景独立确认回归不再复现"
+    level: E4
+decisions:
+  - id: D1
+    question: "用事件驱动等待替代固定 sleep 吗?"
+    confidence: 0.90
+    supporting_evidence: [E2, E3]
+    blocking: true
+    resolved: true
+    resolution: "改为事件驱动等待,保留有界超时兜底"
+    uncovered_risks:
+      - "极端饱和 CI runner 上有界超时仍可能需要调参"
+candidates:
+  - id: C1
+    summary: "事件驱动等待替代固定 sleep,并补 replay 回归场景"
+    confidence: 0.87
+    goal_coverage: 0.90
+    acceptance_coverage: 0.88
+    project_fit: 0.85
+    risk_coverage: 0.82
+    supporting_evidence: [E1, E2, E3, E4]
+    selected: true
+    status: selected
+investigation_attempts:
+  - round: 1
+    candidate_id: C1
+    added_evidence: [E1, E2]
+    score_before: 0.50
+    score_after: 0.78
+    provenance: "第一轮:仅文档 + 源码证据,无可执行验证,得分 0.50 → 0.78"
+  - round: 2
+    candidate_id: C1
+    added_evidence: [E3, E4]
+    score_before: 0.78
+    score_after: 0.87
+    provenance: "第二轮:新增连续 10 次绿 + 独立 replay,得分 0.78 → 0.87"
+user_confirmations:
+  goal:
+    confirmed: true
+    note: "用户确认目标为消除超时路径 flake"
+  scope:
+    confirmed: true
+    note: "只改超时路径与其测试"
+  completion_evidence:
+    confirmed: true
+    note: "连续 10 次绿 + replay 不复现"
+  failure_boundaries:
+    confirmed: true
+    note: "其它测试套件出现回归即停止"

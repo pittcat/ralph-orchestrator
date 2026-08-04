@@ -1,0 +1,34 @@
+# 外部 corpus 不可用 transcript(deterministic):外部 skill corpus 不可用,
+# 但 discovery 需要 grilling / domain-modeling 方法。
+# 预期:evidence 含 external_skill_unavailable 标记 + fallback provenance;
+# 不得出现 external_skill_applied(不伪造已执行);其余流程照常,
+# 因尚有未确认项,停留在 needs_user_decision。
+project_root: /workspace/demo-repo
+goal_request: "为任务简报增加机器可验证的硬门禁 validator"
+task_type: feature
+previous_status: needs_investigation
+attempt_count: 1
+external_skills:
+  corpus_available: false
+  corpus_root: external-corpus
+  needed_methods: [grilling, domain-modeling]
+project_facts:
+  - topic: package_manifest
+    source: Cargo.toml
+    observation: "workspace 测试入口为 nextest;校验能力以 skill 内置脚本提供"
+    level: E1
+  - topic: test_command
+    source: "skills/.venv/bin/python -m pytest 实际执行输出"
+    observation: "skills 测试入口真实可运行"
+    level: E3
+  - topic: ci_workflow
+    source: .github/workflows/ci.yml
+    observation: "CI 覆盖 skills/tests 全量"
+    level: E1
+user_answers:
+  - topic: goal
+    clarity: explicit
+    answer: "目标是让 task brief 可被机器验证"
+  - topic: scope
+    clarity: explicit
+    answer: "范围限定为数据契约与 validator"

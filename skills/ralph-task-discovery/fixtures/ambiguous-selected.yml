@@ -1,0 +1,63 @@
+# 候选等分负例:C1 / C2 各维度得分完全相同且都通过全部硬门禁,
+# 但同时被标 selected → 选择歧义。validator 不允许两个候选同时
+# selected:必须显式选择其一,或降到 needs_user_decision 由用户裁决。
+schema_version: "1.0"
+project_root: /workspace/demo-repo
+status: needs_user_decision
+previous_status: needs_investigation
+attempt_count: 2
+goal: "为 API 网关增加限流能力"
+confidence:
+  goal_clarity: 0.86
+  project_fact_coverage: 0.86
+  acceptance_evidence: 0.86
+  execution_feasibility: 0.86
+  risk_coverage: 0.85
+evidence:
+  - id: E1
+    source: "src/gateway/mod.rs"
+    observation: "网关请求入口与中间件挂载点已确认"
+    level: E2
+  - id: E2
+    source: "cargo nextest run -p gateway 实际执行输出"
+    observation: "网关测试入口真实可运行,可挂载限流回归测试"
+    level: E3
+decisions:
+  - id: D1
+    question: "限流状态跨节点共享还是单节点本地?"
+    confidence: 0.90
+    supporting_evidence: [E1]
+    blocking: true
+    resolved: true
+    resolution: "先做单节点本地计数,预留共享状态 seam"
+    uncovered_risks: []
+candidates:
+  - id: C1
+    summary: "令牌桶中间件实现限流"
+    confidence: 0.90
+    goal_coverage: 0.90
+    acceptance_coverage: 0.90
+    project_fit: 0.85
+    supporting_evidence: [E1, E2]
+    selected: true
+  - id: C2
+    summary: "滑动窗口计数中间件实现限流"
+    confidence: 0.90
+    goal_coverage: 0.90
+    acceptance_coverage: 0.90
+    project_fit: 0.85
+    supporting_evidence: [E1, E2]
+    selected: true
+user_confirmations:
+  goal:
+    confirmed: true
+    note: "用户确认目标为限流"
+  scope:
+    confirmed: true
+    note: "只做单节点限流"
+  completion_evidence:
+    confirmed: true
+    note: "限流回归测试由红转绿"
+  failure_boundaries:
+    confirmed: true
+    note: "不得影响存量健康请求吞吐"

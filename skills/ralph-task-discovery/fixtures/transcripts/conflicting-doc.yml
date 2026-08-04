@@ -1,0 +1,45 @@
+# 文档冲突 transcript(deterministic):glossary(CONTEXT.md)与代码对同一术语定义冲突。
+# 预期:冲突被显式记录为证据 + 未决 blocking 决策,状态 needs_user_decision;
+# 绝不自动覆盖 glossary(台账中不得出现 glossary_overridden 标记)。
+project_root: /workspace/demo-repo
+goal_request: "实现用户部分取消订单的入口"
+task_type: feature
+previous_status: needs_investigation
+attempt_count: 2
+project_facts:
+  - topic: package_manifest
+    source: Cargo.toml
+    observation: "orders crate 已存在,入口挂在 src/orders/mod.rs"
+    level: E1
+  - topic: test_command
+    source: "cargo nextest run -p orders 实际执行输出"
+    observation: "orders 包测试入口可运行"
+    level: E3
+  - topic: ci_workflow
+    source: .github/workflows/ci.yml
+    observation: "CI 覆盖 orders 包测试"
+    level: E1
+  - topic: glossary
+    source: CONTEXT.md
+    observation: "glossary 定义了 cancellation 术语,见冲突台账"
+    level: E1
+conflicts:
+  - id: X1
+    term: cancellation
+    glossary_source: CONTEXT.md
+    glossary_statement: "cancellation = 取消整个订单,不含部分取消"
+    code_source: src/orders/cancel.rs
+    code_statement: "cancel_items() 支持按订单项取消(部分取消)"
+user_answers:
+  - topic: goal
+    clarity: explicit
+    answer: "目标是让用户能取消订单中的部分订单项"
+  - topic: scope
+    clarity: explicit
+    answer: "只改 orders crate 的取消链路"
+  - topic: completion_evidence
+    clarity: explicit
+    answer: "完成证据为部分取消的集成测试由红转绿"
+  - topic: failure_boundaries
+    clarity: explicit
+    answer: "已发货订单项禁止取消,必须显式报错"

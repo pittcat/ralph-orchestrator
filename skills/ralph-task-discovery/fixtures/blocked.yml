@@ -1,0 +1,39 @@
+# 三轮耗尽样例:attempt_count = 3 且仍不达标(risk_coverage 0.80 落在调查带,
+# 候选与决策置信度也都在调查带)。状态必须是 blocked,
+# validator 不得建议第四轮自动调查,下一步只能指向人工输入。
+schema_version: "1.0"
+project_root: /workspace/demo-repo
+status: blocked
+previous_status: needs_investigation
+attempt_count: 3
+goal: "为任务简报(task brief)增加机器可验证的硬门禁 validator"
+confidence:
+  goal_clarity: 0.86
+  project_fact_coverage: 0.85
+  acceptance_evidence: 0.85
+  execution_feasibility: 0.85
+  risk_coverage: 0.80
+evidence:
+  - id: E1
+    source: "crates/ralph-cli/src/commands/tools.rs"
+    observation: "三轮调查后仍无法确认权限与外部依赖的风险面"
+    level: E2
+decisions:
+  - id: D1
+    question: "外部依赖失败时的恢复策略选哪种?"
+    confidence: 0.78
+    supporting_evidence: [E1]
+    blocking: true
+    resolved: true
+    resolution: "暂定重试,但恢复边界仍无实证"
+    uncovered_risks:
+      - "三轮调查都未能构造出真实的失败恢复场景"
+candidates:
+  - id: C1
+    summary: "纯 Python dataclass 契约 + 独立 validator"
+    confidence: 0.78
+    goal_coverage: 0.84
+    acceptance_coverage: 0.86
+    project_fit: 0.80
+    supporting_evidence: [E1]
+    selected: true

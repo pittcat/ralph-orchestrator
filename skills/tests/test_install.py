@@ -20,6 +20,9 @@ The contract is intentionally behavioural rather than textual:
 * Duplicate explicit requests collapse to one install.
 * ``ralph-project-bootstrap`` is present in the catalog, marketplace and
   on disk with a non-empty ``SKILL.md`` and matching agent metadata.
+* ``ralph-task-discovery`` is present in the catalog (6 public skills),
+  marketplace and on disk, installs as a physical symlink-free copy into
+  custom, local (paired ``.claude`` + ``.agents``) and global targets.
 """
 from __future__ import annotations
 
@@ -36,9 +39,23 @@ import install  # type: ignore[import-not-found]  # added via conftest sys.path
 ROOT = Path(__file__).resolve().parents[2]
 SKILLS_DIR = ROOT / "skills"
 MARKETPLACE = ROOT / ".claude-plugin" / "marketplace.json"
+README = SKILLS_DIR / "README.md"
 PROJECT_BOOTSTRAP = SKILLS_DIR / "ralph-project-bootstrap"
 SKILL_DOC = PROJECT_BOOTSTRAP / "SKILL.md"
 AGENT_METADATA = PROJECT_BOOTSTRAP / "agents" / "openai.yaml"
+TASK_DISCOVERY = SKILLS_DIR / "ralph-task-discovery"
+TASK_DISCOVERY_SKILL_DOC = TASK_DISCOVERY / "SKILL.md"
+TASK_DISCOVERY_AGENT_METADATA = TASK_DISCOVERY / "agents" / "openai.yaml"
+
+
+def _marketplace_skill_names() -> set[str]:
+    """Skill names advertised by the marketplace manifest (SSOT mirror)."""
+    data = json.loads(MARKETPLACE.read_text(encoding="utf-8"))
+    return {
+        Path(skill).name
+        for plugin in data.get("plugins", [])
+        for skill in plugin.get("skills", [])
+    }
 
 
 @pytest.fixture
@@ -60,11 +77,7 @@ def catalog_names() -> set[str]:
 
 def test_public_skills_constant_matches_marketplace(catalog_names: set[str]) -> None:
     """The marketplace manifest must list every public skill exactly once."""
-    data = json.loads(MARKETPLACE.read_text(encoding="utf-8"))
-    advertised: set[str] = set()
-    for plugin in data.get("plugins", []):
-        for skill in plugin.get("skills", []):
-            advertised.add(Path(skill).name)
+    advertised = _marketplace_skill_names()
     assert advertised == catalog_names, (
         "marketplace manifest drifted from install.PUBLIC_SKILLS: "
         f"missing={catalog_names - advertised} extra={advertised - catalog_names}"
@@ -78,13 +91,7 @@ def test_raph_project_bootstrap_in_catalog(catalog_names: set[str]) -> None:
 
 def test_raph_project_bootstrap_in_marketplace() -> None:
     """The marketplace manifest must advertise the new skill."""
-    data = json.loads(MARKETPLACE.read_text(encoding="utf-8"))
-    advertised = {
-        Path(skill).name
-        for plugin in data.get("plugins", [])
-        for skill in plugin.get("skills", [])
-    }
-    assert "ralph-project-bootstrap" in advertised
+    assert "ralph-project-bootstrap" in _marketplace_skill_names()
 
 
 def test_raph_project_bootstrap_on_disk() -> None:
@@ -131,6 +138,114 @@ def test_ralph_hats_not_installable() -> None:
     # ``ralph-hats`` skill in the available set: it is no longer a
     # known public skill.
     assert "ralph-hats" not in install.PUBLIC_SKILLS
+
+
+# --- ralph-task-discovery catalog parity + installability (U5) -----------
+
+
+def test_task_discovery_in_catalog(catalog_names: set[str]) -> None:
+    """``ralph-task-discovery`` must be a public catalog member."""
+    assert "ralph-task-discovery" in catalog_names
+
+
+def test_task_discovery_in_marketplace() -> None:
+    """The marketplace manifest must advertise the task-discovery skill."""
+    assert "ralph-task-discovery" in _marketplace_skill_names()
+
+
+def test_catalog_and_marketplace_both_have_six_skills(catalog_names: set[str]) -> None:
+    """Catalog ↔ marketplace parity must hold at the new size of 6."""
+    advertised = _marketplace_skill_names()
+    assert advertised == catalog_names, (
+        f"missing={catalog_names - advertised} extra={advertised - catalog_names}"
+    )
+    assert len(catalog_names) == 6
+    assert len(advertised) == 6
+
+
+def test_readme_lists_every_catalog_skill(catalog_names: set[str]) -> None:
+    """catalog ↔ README SSOT reconciliation: every public skill must be
+    documented in ``skills/README.md``."""
+    readme_text = README.read_text(encoding="utf-8")
+    missing = {name for name in catalog_names if name not in readme_text}
+    assert not missing, f"skills/README.md is missing catalog entries: {missing}"
+
+
+def test_task_discovery_on_disk() -> None:
+    """The skill must ship a non-empty SKILL.md and agent metadata."""
+    assert TASK_DISCOVERY_SKILL_DOC.is_file(), f"missing {TASK_DISCOVERY_SKILL_DOC}"
+    assert TASK_DISCOVERY_SKILL_DOC.read_text(encoding="utf-8").strip(), (
+        "ralph-task-discovery SKILL.md is empty"
+    )
+    assert TASK_DISCOVERY_AGENT_METADATA.is_file(), (
+        f"missing {TASK_DISCOVERY_AGENT_METADATA}"
+    )
+    assert TASK_DISCOVERY_AGENT_METADATA.read_text(encoding="utf-8").strip(), (
+        "ralph-task-discovery agents/openai.yaml is empty"
+    )
+
+
+def test_task_discovery_selectable() -> None:
+    """``select_skills`` must accept the new skill via discovery."""
+    available = install.discover_skills(SKILLS_DIR)
+    selected = install.select_skills(available, ["ralph-task-discovery"])
+    assert [s.name for s in selected] == ["ralph-task-discovery"]
+
+
+def test_task_discovery_custom_install_physical_no_symlinks(fresh_target: Path) -> None:
+    """Custom install must physically copy the full skill, symlink-free."""
+    result = _run(["--dir", str(fresh_target), "--force", "ralph-task-discovery"])
+    assert result.returncode == 0, result.stderr
+    installed = fresh_target / "ralph-task-discovery"
+    assert installed.is_dir()
+    assert (installed / "SKILL.md").is_file()
+    assert (installed / "agents" / "openai.yaml").is_file()
+    assert (installed / "references").is_dir() and any(
+        (installed / "references").iterdir()
+    )
+    assert (installed / "scripts").is_dir() and any((installed / "scripts").iterdir())
+    assert not any(path.is_symlink() for path in installed.rglob("*")), (
+        "installed task-discovery tree must contain no symlinks"
+    )
+    assert "result:      installed" in result.stdout
+
+
+def test_task_discovery_local_install_copies_to_both_targets(tmp_path: Path) -> None:
+    """Default local install must copy into .claude/skills AND .agents/skills."""
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(SKILLS_DIR / "install.py"),
+            "--force",
+            "ralph-task-discovery",
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+        cwd=tmp_path,
+    )
+    assert result.returncode == 0, result.stderr
+    for target in (tmp_path / ".claude" / "skills", tmp_path / ".agents" / "skills"):
+        installed = target / "ralph-task-discovery"
+        assert installed.is_dir(), f"missing install target {installed}"
+        assert (installed / "SKILL.md").is_file()
+        assert not any(path.is_symlink() for path in installed.rglob("*"))
+
+
+def test_task_discovery_global_dry_run_no_write() -> None:
+    """Global dry-run must print both absolute destinations without writing."""
+    result = _run(["--global", "--dry-run", "ralph-task-discovery"])
+    assert result.returncode == 0, result.stderr
+    claude_dest = install.TARGET_GLOBAL / "ralph-task-discovery"
+    agents_dest = install.TARGET_AGENTS_GLOBAL / "ralph-task-discovery"
+    assert "Install mode: global" in result.stdout
+    assert "Install targets (2):" in result.stdout
+    assert f"destination: {claude_dest}" in result.stdout
+    assert f"destination: {agents_dest}" in result.stdout
+    assert result.stdout.count("result:      would install") == 2
+    # Dry-run must not have materialised either destination.
+    assert not claude_dest.exists()
+    assert not agents_dest.exists()
 
 
 # --- discover_skills selection --------------------------------------------

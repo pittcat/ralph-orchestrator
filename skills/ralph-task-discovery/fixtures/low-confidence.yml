@@ -1,0 +1,38 @@
+# 低置信度样例:goal_clarity = 0.69 < 0.70,落入丢弃带(rejected_low_confidence)。
+# 对应维度不得作为正式 Unit 的依据;诚实声明 needs_investigation,
+# 下一步必须重新调查或逐题向用户确认,而不是继续 handoff。
+schema_version: "1.0"
+project_root: /workspace/demo-repo
+status: needs_investigation
+previous_status: draft
+attempt_count: 1
+goal: "为任务简报增加 validator(用户尚未确认完成标准与非目标)"
+confidence:
+  goal_clarity: 0.69
+  project_fact_coverage: 0.86
+  acceptance_evidence: 0.85
+  execution_feasibility: 0.88
+  risk_coverage: 0.85
+evidence:
+  - id: E1
+    source: "与用户的对话记录"
+    observation: "用户只给了一句模糊需求,范围与非目标均未逐题确认"
+    level: E0
+decisions:
+  - id: D1
+    question: "validator 的失败输出应该面向人还是面向机器?"
+    confidence: 0.88
+    supporting_evidence: [E1]
+    blocking: true
+    resolved: true
+    resolution: "同时输出机器可读 code 与人类可读 message"
+    uncovered_risks: []
+candidates:
+  - id: C1
+    summary: "纯 Python dataclass 契约 + 独立 validator"
+    confidence: 0.88
+    goal_coverage: 0.86
+    acceptance_coverage: 0.87
+    project_fit: 0.84
+    supporting_evidence: [E1]
+    selected: true

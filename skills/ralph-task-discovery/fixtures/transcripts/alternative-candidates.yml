@@ -1,0 +1,58 @@
+# 多候选 transcript(deterministic):两个候选声明相同的 confidence 0.90。
+# C-A acceptance_coverage 仅 0.70(验收路径缺可执行证据)→ 被独立覆盖门禁淘汰;
+# C-B 全门禁达标 → selected。预期收敛:author_ready,next=ready_for_handoff。
+project_root: /workspace/demo-repo
+goal_request: "为订单服务实现部分取消"
+task_type: feature
+previous_status: needs_investigation
+attempt_count: 2
+project_facts:
+  - topic: package_manifest
+    source: Cargo.toml
+    observation: "orders crate 已存在,无需新增 crate"
+    level: E1
+  - topic: test_command
+    source: "cargo nextest run -p orders 实际执行输出"
+    observation: "orders 包测试入口真实可运行"
+    level: E3
+  - topic: ci_workflow
+    source: .github/workflows/ci.yml
+    observation: "CI 覆盖 orders 包测试"
+    level: E1
+  - topic: cancel_seam
+    source: src/orders/cancel.rs
+    observation: "cancel_items() seam 已存在,可扩展到订单项粒度取消"
+    level: E2
+user_answers:
+  - topic: goal
+    clarity: explicit
+    answer: "目标是让用户能取消订单中的部分订单项"
+  - topic: scope
+    clarity: explicit
+    answer: "只改 orders crate 的取消链路"
+  - topic: completion_evidence
+    clarity: explicit
+    answer: "完成证据为部分取消集成测试由红转绿"
+  - topic: failure_boundaries
+    clarity: explicit
+    answer: "已发货订单项禁止取消,必须显式报错"
+candidates:
+  - id: C-A
+    summary: "新建 cancellation-service crate 承载全部取消逻辑"
+    confidence: 0.90
+    goal_coverage: 0.88
+    acceptance_coverage: 0.70
+    project_fit: 0.80
+    evidence_topics: [cancel_seam]
+    selected: false
+    status: rejected_insufficient_coverage
+    rejection_reason: "acceptance_coverage 0.70 < 0.85:新 crate 的验收路径没有可执行完成证据"
+  - id: C-B
+    summary: "沿既有 cancel_items seam 扩展部分取消能力"
+    confidence: 0.90
+    goal_coverage: 0.90
+    acceptance_coverage: 0.88
+    project_fit: 0.86
+    evidence_topics: [package_manifest, test_command, cancel_seam]
+    selected: true
+    status: selected

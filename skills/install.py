@@ -47,6 +47,7 @@ PUBLIC_SKILLS: tuple[str, ...] = (
     "ralph-preset-review",
     "ralph-project-bootstrap",
     "ralph-run-diagnosis",
+    "ralph-task-discovery",
 )
 
 # The catalog above is the single source of truth for which skills are

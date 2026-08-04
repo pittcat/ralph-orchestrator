@@ -1,0 +1,30 @@
+# Bug 无反馈回路 transcript(deterministic):bug 任务但尚无 red-capable 反馈回路命令。
+# 预期:状态 needs_investigation;不产生已确认根因决策,不产生执行方案(候选为空);
+# red_capable_loop 作为开放问题进入环境调查清单(事实查环境,不反问用户)。
+project_root: /workspace/demo-repo
+goal_request: "修复订单导出在大数据量下超时报错的问题"
+task_type: bug
+previous_status: draft
+attempt_count: 1
+project_facts:
+  - topic: entry_point
+    source: src/export/order_export.rs
+    observation: "导出入口为 export_orders(),内部一次性装载全部订单行"
+    level: E2
+  - topic: test_command
+    source: "cargo nextest run -p orders 实际执行输出"
+    observation: "orders 包测试入口可运行,但尚无针对该症状的失败用例"
+    level: E3
+user_answers:
+  - topic: goal
+    clarity: explicit
+    answer: "目标是让 10 万行订单导出在 60 秒内完成且不报错"
+  - topic: scope
+    clarity: explicit
+    answer: "只改导出链路,不动订单写入"
+  - topic: completion_evidence
+    clarity: explicit
+    answer: "完成证据为一个针对该症状的 red-capable 命令由红转绿"
+  - topic: failure_boundaries
+    clarity: explicit
+    answer: "导出中途失败必须输出可读错误,禁止产出半截文件"
