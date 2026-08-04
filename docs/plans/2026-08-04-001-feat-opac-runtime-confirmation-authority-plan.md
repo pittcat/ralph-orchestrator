@@ -13,6 +13,8 @@ baseline: b439a803
 
 **PARTIALLY READY**。当前只有 Task confirmation 的最小纵向切片达到可执行条件；Wave Confirm 是现有能力，先作为 characterization/regression 边界，不重复规划实现。runtime-owned ticket authority 仍 BLOCKED，不能让 Executor 自行选择 IPC、secret、平台降级或认证协议。
 
+**执行状态（2026-08-05 更新）**：Unit 1 已完成并通过全部验收与质量门禁（commits `d5ea7ffc`..`4ed44310`，分支 `pittcat-dev`）。落地内容：`ralph tools task confirm <id> --reference --digest`、Apply 同快照铸造 pending confirmation、claim 前 fail-closed precheck（稳定 token `confirmation_required`）。验证结果：S1–S4 集成测试 + 审核循环补测共 27/27；四组单元测试落地；`integration_wave_protocol_closure` 7/7 无回归；`cargo build` / `cargo clippy --all-targets --all-features -- -D warnings` / `check-cli-doc-drift.sh --strict` / `./scripts/run-tests.sh` 全量（7493+23+19）全过；`integration_emit_policy` 未触发（Unit 1 调用链未触及 emit context）。4 维度并发代码审核发现并修复：跨 scope confirmation 覆盖洞（fail-open，新增 `confirmation_scope_conflict` 拒绝）、`execute_confirm` 竞态误报。D2 仍 BLOCKED、authority 未实现；计划整体保持 PARTIALLY READY，Unit 2 未解锁。
+
 - 当前基线：`pittcat-dev`，HEAD `b439a803`；本计划不触碰该基线已有的 merge-batch 变更。
 - 调查范围：Task CLI/JSONL store、Task OPAC ticket gate、Wave emission store/inspect/gate、agent context、loop worker spawn、OPAC skill 文档、现有 integration/BDD/nextest 入口及相关 Git 历史。
 - 已执行验证：
@@ -21,7 +23,7 @@ baseline: b439a803
   - `cargo nextest run -p ralph-core --lib supervisor::`：231/231 通过；
   - `git diff --no-index -- CLAUDE.md AGENTS.md || true`：无差异；
   - 源码、调用链、测试、配置、历史检索。
-- 尚未执行：本计划改动后的测试、`./scripts/check-cli-doc-drift.sh`、`cargo build`、`cargo clippy`、`./scripts/run-tests.sh`。
+- 尚未执行：无（2026-08-05 全部补执行完成，结果见执行状态段）。
 - 阻塞项：D2（runtime authority 的真实签发边界）低于 0.85。未完成前不得进入 authority implementation。
 
 # 1. 功能目标
@@ -111,6 +113,9 @@ Agent context 由 `crates/ralph-cli/src/operation_guard.rs::OperationContext::de
 | D3 | confirmation gate 应覆盖哪些 mutation？ | 仅 add/ensure；所有 TaskCommands mutation；所有 event side effect | 仅覆盖现有 `verify_gate_claim` 的 add/ensure；不扩展 start/close/fail/reopen | E1、E5、全仓 `rg verify_gate_claim` | 其他命令没有当前 OPAC claim 调用证据；扩大范围会改变未确认行为 | 0.90 |
 | D4 | Wave 是否新增 Confirm store/state？ | 新 sidecar；扩展现有 emission store；不改，仅回归 | 不新增；复用现有 state 并写 characterization/regression | E6、E7、E10 | 新 store 会重复已存在的 authority，且破坏既有 public view | 0.97 |
 | D5 | human/gate-off 如何处理 pending confirmation？ | 统一拒绝；沿用 bypass；新增交互确认 | 沿用现有 human/gate-off/unsafe bypass，agent path 才 gate | E2、E5、E8 | 统一拒绝会违反已测试兼容行为 | 0.93 |
+| D6 | Confirm 命令挂在哪里？ | Verify 子树新变体；TaskCommands 顶层变体；复用现有 close 骨架 | `TaskCommands::Confirm` 顶层变体（`ralph tools task confirm <id> --reference --digest`） | task_cli.rs 扁平动词族先例（Add/Ensure/…/VerifyEmitBridge）；Verify 子树契约是只读 dry-run | 挂 Verify 下破坏其只读契约 | 0.92 |
+| D7 | confirmation receipt 存在哪里？ | 独立 sidecar；supervisor DB；Task 行内 additive 字段 | Task 行内 `Option<TaskConfirmation>`（随同一 save snapshot 落盘） | task_store save 是整 Vec 单 rename 原子快照（A3 characterization）；独立行类型会被旧 binary warn-skip 后永久丢失 | sidecar/DB 引入第二个持久化权威 | 0.90 |
+| D8 | pending gate 插在 mutation 流程哪个位置？ | claim 之后 mutation 之前；claim 之前 bail；settle 之后 | `enforce_command_policy` 之后、claim 之前 bail | claim 有盘上副作用（.claimed rename）；claim 前拒绝保住 prepared ticket 供 Confirm 后重试 | claim 后拒绝需新增 restore 分支，现有机制无此路径 | 0.92 |
 
 ## 低置信度决策处理
 
@@ -201,6 +206,8 @@ D3 已达到执行阈值；Unit 1 只需在实现前复核 diff 未新增其他 
 > 只有 Unit 1 达到完成标准后才能进入后续 Unit。D2 未达 0.85 前不存在 authority implementation Unit。
 
 ## Unit 1：Task confirmation 的最小纵向切片
+
+> **✅ 已完成（2026-08-05）**：实现 commit `d4b74ff5`，审核修复循环 `492a3756`/`4ed44310`；Acceptance Red 有效（surface 缺失），S1–S4 全绿，完成标准逐项通过。
 
 ### 1. Unit 目标
 
