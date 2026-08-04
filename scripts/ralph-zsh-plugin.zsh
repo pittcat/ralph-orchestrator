@@ -247,6 +247,7 @@ _RALPH_TASK_CMDS=(
   "fail:Mark a task as failed"
   "reopen:Reopen a closed or failed task"
   "show:Show a single task"
+  "confirm:Consume a pending confirmation recorded by a protected add/ensure"
   # U4 (2026-07-04-001 plan): zero-write Precheck — same authorization
   # kernel as mutation verbs but never writes to tasks.jsonl. Includes
   # `verify-emit-bridge` for task_id/task_key/step three-field checks.
@@ -1037,6 +1038,13 @@ _ralph_task_args() {
       ;;
     start|close|fail|reopen|show)
       _arguments '1:task id:_default'
+      ;;
+    confirm)
+      _arguments -C \
+        '--reference+[Confirmation reference printed by the protected Apply]:reference:_default' \
+        '--digest+[Confirmation digest recorded at Apply]:digest:_default' \
+        '--format+[Output format]:format:(table json quiet)' \
+        '1:task id:_default'
       ;;
     list)
       _arguments -C \

@@ -103,14 +103,14 @@ ralph inspect loop --format json | jq '.supervisor.last_coordination_topics // [
 
 1. **P — Precheck record**：`ralph tools task verify <verb> [args…]` 通过后（Allow），runtime 在 `<workspace>/.ralph/agent/task-tickets/` 写一个 one-shot ticket（SHA-256 fingerprint of `verb + canonical_payload + loop_id + hat_id`）
 2. **A — Apply consume**：紧接着用**完全相同**的参数调 `ralph tools task <verb>` → gate 读 ticket、匹配 fingerprint、consume ticket、放行写盘。成功的 Apply 会在写入的 task 行附带一条 confirmation 记录（状态 `pending`）；Apply 的 `--format json` 输出含 `confirmation.reference`（唯一确认凭证）与 `confirmation.digest`（该 mutation 的指纹）
-3. **C — Confirmation consume**：在同一 loop + 同一 hat 发起**下一次** protected mutation 之前，先执行 `ralph tools task confirm <task_id> --reference <reference> --digest <digest>`——两个字段值直接取自上一步 Apply 的 JSON 输出，不要手工构造或复用其它 task 的值。confirm 成功后状态变 `confirmed`，同 scope 的下一次 protected mutation 放行；重复 confirm（相同 reference + digest）幂等、exit 0、不重复写盘
+3. **C — Confirmation consume**：在同一 loop + 同一 hat 发起**下一次** protected mutation（即 gate 生效时受两步式 verify gate 保护的 `task add` / `task ensure`；下文 protected Apply 同指这两条命令）之前，先执行 `ralph tools task confirm <task_id> --reference <reference> --digest <digest>`——两个字段值直接取自上一步 Apply 的 JSON 输出，不要手工构造或复用其它 task 的值。若产生 pending 记录的 Apply 输出已不在当前上下文（例如新一轮 iteration），执行 `ralph tools task show <task_id> --format json`，行内 `confirmation.reference` / `confirmation.digest` 即所需值，同样不要手工构造。confirm 成功后状态变 `confirmed`，同 scope 的下一次 protected mutation 放行；重复 confirm（相同 reference + digest）幂等、exit 0、不重复写盘
 
 **漂移触发拒绝**（gate 必拒）：
 
 - 没先 verify → `task_verify_gate denied '<verb>': no verify ticket at ... — run ralph tools task verify <verb> <args...> first`
 - verify 后改了参数再 add → `task_verify_gate denied '<verb>': ticket fingerprint mismatch (on-disk=... pending=...)`
 - 跨 hat 重放 ticket → `task_verify_gate denied '<verb>': ticket (loop, hat) = (...) but caller is (...)`
-- 同 loop + 同 hat 上一条 protected Apply 的 confirmation 仍为 `pending` → `task_verify_gate denied '<verb>': confirmation_required — ...`；按 stderr 里的指引先 `ralph tools task confirm <task_id> --reference ... --digest ...` 再重试（prepared ticket 保留，confirm 后同一参数重试无需重新 verify）
+- 同 loop + 同 hat 上一条 protected Apply 的 confirmation 仍为 `pending` → `task_verify_gate denied '<verb>': confirmation_required — ...`；按 stderr 里的指引先 `ralph tools task confirm <task_id> --reference ... --digest ...` 再重试（prepared ticket 保留，confirm 后同一参数重试无需重新 verify）。若产生 pending 记录的 Apply 输出已不在当前上下文（例如新一轮 iteration），执行 `ralph tools task show <task_id> --format json`，行内 `confirmation.reference` / `confirmation.digest` 即所需值，同样不要手工构造
 - confirm 的 reference 与记录不符 → `confirmation_unavailable`；reference 相符但 digest 或 loop/hat 不符 → `confirmation_mismatch`（状态保持 `pending`）。两者都不要靠猜参数重试——重新读取产生该记录的 Apply 输出
 
 **人类 CLI 永远 bypass**（`is_agent_context == false`）；agent 在 `tasks.allow_unsafe_task_mutate: true` 时也 bypass（仅用于 recovery 紧急情况）。

@@ -151,6 +151,7 @@ declare -A COMMANDS_TO_DOCS=(
   ["tools task fail"]="ralph-tools-tasks.md|Task Commands"
   ["tools task reopen"]="ralph-tools-tasks.md|Task Commands"
   ["tools task show"]="ralph-tools-tasks.md|Task Commands"
+  ["tools task confirm"]="ralph-tools-tasks.md|Task Commands"
   ["tools memory add"]="ralph-tools-memories.md|Memory Commands"
   ["tools memory list"]="ralph-tools-memories.md|Memory Commands"
   ["tools memory search"]="ralph-tools-memories.md|Memory Commands"

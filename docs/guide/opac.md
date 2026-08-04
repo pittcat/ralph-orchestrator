@@ -86,7 +86,7 @@ The three correlation fields (`task_id`, `task_key`, `step`) must be internally 
 ralph tools task confirm <task_id> --reference <reference> --digest <digest>
 ```
 
-两个参数值直接取自上一步 Apply 的 JSON 输出，不要手工构造，也不要复用其它 task 的值。未 confirm 时，下一次 protected mutation 会被 `task_verify_gate denied ... confirmation_required` 拒收且不写盘；confirm 成功后，同 scope 的下一次 protected mutation 放行。重复 confirm（相同 reference + digest）幂等：exit 0，不重复写盘。人类 CLI、gate 关闭、`tasks.allow_unsafe_task_mutate: true` 三条 bypass 路径不受该门禁影响。
+两个参数值直接取自上一步 Apply 的 JSON 输出，不要手工构造，也不要复用其它 task 的值。若产生 pending 记录的 Apply 输出已不在当前上下文（例如新一轮 iteration），执行 `ralph tools task show <task_id> --format json`，行内 `confirmation.reference` / `confirmation.digest` 即所需值，同样不要手工构造。未 confirm 时，下一次 protected mutation 会被 `task_verify_gate denied ... confirmation_required` 拒收且不写盘；confirm 成功后，同 scope 的下一次 protected mutation 放行。重复 confirm（相同 reference + digest）幂等：exit 0，不重复写盘。人类 CLI、gate 关闭、`tasks.allow_unsafe_task_mutate: true` 三条 bypass 路径不受该门禁影响。
 
 ### Single event emit
 
@@ -179,6 +179,9 @@ Advanced presets can add `tasks.command_rules` to extend or restrict the default
 | `review.wave.complete` rejected | Supervisor-only coordination topic emitted by an agent | Let the runtime inject coordination topics; agents emit only their own completion topics |
 | `task_verify_gate denied ... confirmation_required` | 同一 loop + hat 上一条 protected Apply 留下的 confirmation 仍为 `pending` | 先 `ralph tools task confirm <task_id> --reference ... --digest ...` 再重试该 mutation；prepared verify ticket 保留，同一参数无需重新 verify |
 | `task confirm denied: confirmation_mismatch` / `confirmation_unavailable` | reference / digest / loop+hat scope 不符，或 task / confirmation 记录不存在 | 重新读取产生该 confirmation 记录的 Apply JSON 输出，取 `confirmation.reference` 与 `confirmation.digest` 后重试；不要靠猜参数重试 |
+| `task confirm denied: confirmation_scope_conflict` | 目标 task 行已有其它 loop/hat 记录的 pending confirmation | 由记录方（该 loop/hat 的 agent）先执行 confirm；可用 `ralph tools task show <task_id> --format json` 查看记录的 `loop_id` / `hat_id` 归属；不要试图用其它 scope 的凭证覆盖 |
+
+**预期行为（gate bypass 与遗留 pending）**：gate 关闭（`tasks.require_verify_for_cli_mutate: false`）或 `tasks.allow_unsafe_task_mutate: true` 期间，runtime 不会清除已存在的 pending confirmation——bypass 路径只是不再拦截新的 mutation。gate 重新开启后，旧的 pending 记录仍会让下一次 protected mutation 收到 `confirmation_required` 拒收，按正常 `ralph tools task confirm` 流程解除。
 
 ## Relationship to other guides
 
