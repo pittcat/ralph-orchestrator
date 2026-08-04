@@ -762,3 +762,124 @@ fn u5_emit_apply_requires_policy_check_token() {
         "the event must land in .ralph/events.jsonl; events={events}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// U3 (plan 2026-08-03-001-fix-opac-high-confidence-gates-plan): U5 contract
+// compile failure must fail-closed in the real `ralph emit` subprocess —
+// deny with `contract_compile_failed` and write NEITHER an event NOR an
+// idempotency row.
+// ---------------------------------------------------------------------------
+
+/// Write a single-hat preset whose `execution_contracts` declares an
+/// orphan topic with no consumer hat — `execution_contract::compile`
+/// rejects this with a `MissingConsumer` finding.
+fn u3_write_compile_failing_worker_preset(temp_path: &std::path::Path) {
+    std::fs::create_dir_all(temp_path.join(".ralph")).unwrap();
+    std::fs::write(
+        temp_path.join("ralph.yml"),
+        r#"
+event_loop:
+  completion_promise: "LOOP_COMPLETE"
+  execution_contracts:
+    enabled: true
+    rules:
+      orphan.topic:
+        require_payload_fields:
+          - task_id
+cli:
+  backend: "claude"
+hats:
+  worker:
+    name: "Worker"
+    description: "Does the work"
+    triggers: ["work.ready"]
+    publishes: ["work.done"]
+    terminal_events: ["work.done"]
+    instructions: "do work"
+"#,
+    )
+    .unwrap();
+}
+
+/// U3 S6 (integration): an agent-context emit whose execution contract
+/// fails to compile must be denied with the stable `contract_compile_failed`
+/// reason and must NOT write to the events file (no event, no idempotency
+/// row). This pins the real subprocess behaviour to the unit-test
+/// contract — a regression that re-introduces the silent `Option::None`
+/// stand-down would still let the event land.
+#[test]
+fn test_emit_compile_failure_does_not_write_event() {
+    let temp_dir = TempDir::new().expect("temp dir");
+    let temp_path = temp_dir.path();
+    u3_write_compile_failing_worker_preset(temp_path);
+
+    // Try BOTH `--policy-check` (dry-run) and the actual apply — both
+    // must fail with the stable reason and no event must ever land.
+    let payload = r#"{"step":"step-01"}"#;
+
+    // 1) --policy-check (dry-run) must fail with contract_compile_failed.
+    let check = common::ralph_bin()
+        .args([
+            "emit",
+            "work.done",
+            "-j",
+            payload,
+            "--policy-check",
+        ])
+        .current_dir(temp_path)
+        .env("RALPH_CURRENT_HAT", "worker")
+        .output()
+        .expect("failed to run ralph emit --policy-check");
+    let check_stdout = String::from_utf8_lossy(&check.stdout);
+    let check_stderr = String::from_utf8_lossy(&check.stderr);
+    assert!(
+        !check.status.success(),
+        "policy-check under compile failure must exit non-zero; \
+         stdout={check_stdout} stderr={check_stderr}"
+    );
+    let combined = format!("{check_stdout}{check_stderr}");
+    assert!(
+        combined.contains("contract_compile_failed"),
+        "policy-check must surface contract_compile_failed; \
+         stdout={check_stdout} stderr={check_stderr}"
+    );
+    // No policy_check_token may be advertised under compile failure —
+    // the dry-run envelope must be suppressed.
+    assert!(
+        !check_stdout.contains("policy_check_token"),
+        "no policy_check_token may be advertised under compile failure; \
+         stdout={check_stdout}"
+    );
+
+    // 2) Apply (no policy-check) must also fail with the same reason.
+    let apply = common::ralph_bin()
+        .args(["emit", "work.done", "-j", payload])
+        .current_dir(temp_path)
+        .env("RALPH_CURRENT_HAT", "worker")
+        .output()
+        .expect("failed to run ralph emit (apply)");
+    let apply_stdout = String::from_utf8_lossy(&apply.stdout);
+    let apply_stderr = String::from_utf8_lossy(&apply.stderr);
+    assert!(
+        !apply.status.success(),
+        "apply under compile failure must exit non-zero; \
+         stdout={apply_stdout} stderr={apply_stderr}"
+    );
+    let apply_combined = format!("{apply_stdout}{apply_stderr}");
+    assert!(
+        apply_combined.contains("contract_compile_failed"),
+        "apply must surface contract_compile_failed; \
+         stdout={apply_stdout} stderr={apply_stderr}"
+    );
+
+    // 3) No event ledger side effect: the events file must be empty
+    // (or absent) after both attempts.
+    let events_path = temp_path.join(".ralph/events.jsonl");
+    if events_path.exists() {
+        let events = std::fs::read_to_string(&events_path).unwrap_or_default();
+        assert!(
+            events.trim().is_empty(),
+            "compile-failure path must NOT write any event row; got events={events}"
+        );
+    }
+}

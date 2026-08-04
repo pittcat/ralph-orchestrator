@@ -701,12 +701,18 @@ pub(crate) fn gate_identifiers(ctx: &OperationContext) -> (&str, &str) {
 }
 
 /// Compute the canonical fingerprint for a pending mutation and
-/// run the verify-gate check. Encapsulates the (verb,
+/// claim the matching verify ticket. Encapsulates the (verb,
 /// canonical_payload, loop_id, hat_id) → fingerprint pipeline so
 /// `execute_add` / `execute_ensure` can call this with a single
 /// line and so tests can call it directly without going through
 /// the unsafe `set_var` env path.
-pub(crate) fn verify_gate_check(
+///
+/// U1 (2026-08-03-001-fix-opac-high-confidence-gates-plan): the
+/// gate claims without consuming. The caller MUST settle the
+/// claim with [`settle_gate_claim`] after the store mutation:
+/// only a successful Apply consumes the ticket; a failed Apply
+/// restores it so the agent can retry without a fresh verify.
+pub(crate) fn verify_gate_claim(
     workspace: &std::path::Path,
     config: &ralph_core::config::RalphConfig,
     ctx: &OperationContext,
@@ -716,13 +722,58 @@ pub(crate) fn verify_gate_check(
     let (loop_id, hat_id) = gate_identifiers(ctx);
     let fingerprint =
         crate::task_verify_gate::mutation_fingerprint(verb, canonical_payload, loop_id, hat_id);
-    crate::task_verify_gate::require_ticket(
-        &crate::task_verify_gate::ticket_path(workspace),
+    let path = crate::task_verify_gate::scoped_ticket_path(
+        workspace,
+        verb,
+        canonical_payload,
+        loop_id,
+        hat_id,
+    );
+    crate::task_verify_gate::try_claim_matching_ticket(
+        &path,
         &config.tasks,
         ctx,
         verb,
         &fingerprint,
     )
+}
+
+/// Settle a claimed verify ticket after the Apply-side mutation
+/// (U1: "只有成功 Apply 才 consume,Apply 前失败可 restore").
+///
+/// On `Ok` the claim marker is removed (one-shot ticket burned
+/// after the side effect committed). On `Err` the prepared record
+/// is restored from the claim marker so a corrected Apply can
+/// re-claim without a fresh verify; the original mutation error is
+/// returned unchanged. No-op when the gate was inactive for this
+/// caller (human CLI / gate off / unsafe hatch) because no claim
+/// marker was created.
+pub(crate) fn settle_gate_claim(
+    workspace: &std::path::Path,
+    ctx: &OperationContext,
+    verb: &str,
+    canonical_payload: &str,
+    result: anyhow::Result<()>,
+) -> anyhow::Result<()> {
+    let (loop_id, hat_id) = gate_identifiers(ctx);
+    let path = crate::task_verify_gate::scoped_ticket_path(
+        workspace,
+        verb,
+        canonical_payload,
+        loop_id,
+        hat_id,
+    );
+    match result {
+        Ok(()) => crate::task_verify_gate::consume_claimed_ticket(&path),
+        Err(err) => {
+            if let Err(restore_err) = crate::task_verify_gate::restore_ticket_from_claim(&path) {
+                return Err(anyhow::anyhow!(
+                    "{err}\nadditionally, restoring the verify ticket for retry failed: {restore_err}"
+                ));
+            }
+            Err(err)
+        }
+    }
 }
 
 /// Bridge `HatCommandPolicy::PolicyDecision` to the `anyhow::Result`
@@ -1047,9 +1098,11 @@ fn execute_add(
     let config = load_config_or_default(root, config_sources);
     // U7 (2026-07-04-003 plan): two-step gate. If the agent
     // invoked `task verify add` first, a matching ticket is on
-    // disk; require_ticket consumes it and lets the mutation
-    // proceed. Without verify (or with a stale ticket), the gate
-    // denies.
+    // disk; the gate claims it and lets the mutation proceed.
+    // Without verify (or with a stale ticket), the gate denies.
+    // U1 (STAB-OPAC-GATES-001): claim first, settle after the
+    // store mutation — only a successful Apply consumes the
+    // ticket; a failed Apply restores it for retry.
     let canonical = canonical_add_payload(&args);
 
     enforce_command_policy(
@@ -1060,9 +1113,9 @@ fn execute_add(
         "add",
         false,
     )?;
-    verify_gate_check(&workspace, &config, &ctx, "add", &canonical)?;
-    add_task_with_args(&mut store, &args, &ctx, coordinator_hats, use_colors)?;
-    Ok(())
+    verify_gate_claim(&workspace, &config, &ctx, "add", &canonical)?;
+    let result = add_task_with_args(&mut store, &args, &ctx, coordinator_hats, use_colors);
+    settle_gate_claim(&workspace, &ctx, "add", &canonical, result)
 }
 
 #[cfg_attr(test, allow(dead_code))]
@@ -1195,23 +1248,33 @@ fn execute_ensure(
     let fingerprint =
         crate::task_verify_gate::mutation_fingerprint("ensure", &canonical, loop_id, hat_id);
     let config = load_config_or_default(root, config_sources);
-    crate::task_verify_gate::require_ticket(
-        &crate::task_verify_gate::ticket_path(&workspace),
+    let path = crate::task_verify_gate::scoped_ticket_path(
+        &workspace,
+        "ensure",
+        &canonical,
+        loop_id,
+        hat_id,
+    );
+    // U1 (STAB-OPAC-GATES-001): claim first, settle after the
+    // store mutation — only a successful Apply consumes the
+    // ticket; a failed Apply restores it for retry.
+    crate::task_verify_gate::try_claim_matching_ticket(
+        &path,
         &config.tasks,
         &ctx,
         "ensure",
         &fingerprint,
     )?;
 
-    ensure_task_with_args(
+    let result = ensure_task_with_args(
         &mut store,
         &args,
         &ctx,
         coordinator_hats,
         use_colors,
         config_sources,
-    )?;
-    Ok(())
+    );
+    settle_gate_claim(&workspace, &ctx, "ensure", &canonical, result)
 }
 
 #[cfg_attr(test, allow(dead_code))]
@@ -2286,9 +2349,11 @@ fn verify_add(
 
     // U7 (2026-07-04-003 plan): record a verify ticket so the
     // subsequent `task add` for the same payload can pass the
-    // two-step gate. The ticket lives at
-    // `<workspace>/.ralph/agent/.ralph-task-verify-ticket` and is
-    // burned by `task add` on success.
+    // two-step gate. U2 (2026-08-03-001-fix-opac-high-confidence-gates-plan):
+    // the ticket lives in a per-operation/intent/activation
+    // namespace under `.ralph/agent/task-tickets/` so concurrent
+    // verify add/ensure (or different loop/hat) cannot overwrite
+    // each other.
     //
     // Reconstruct the canonical AddArgs shape from VerifyAddArgs
     // (they share field names) so the same `canonical_add_payload`
@@ -2304,12 +2369,14 @@ fn verify_add(
     let (loop_id, hat_id) = gate_identifiers(ctx);
     let fingerprint =
         crate::task_verify_gate::mutation_fingerprint("add", &canonical, loop_id, hat_id);
-    let _ = crate::task_verify_gate::record_ticket(
-        &crate::task_verify_gate::ticket_path(&ctx.workspace_root),
-        &fingerprint,
+    let path = crate::task_verify_gate::scoped_ticket_path(
+        &ctx.workspace_root,
+        "add",
+        &canonical,
         loop_id,
         hat_id,
     );
+    let _ = crate::task_verify_gate::record_ticket(&path, &fingerprint, loop_id, hat_id);
 
     Ok(VerifyOutcome::Allow)
 }
@@ -2401,7 +2468,11 @@ fn verify_ensure(
 
     // U7 (2026-07-04-003 plan): record a verify ticket so the
     // subsequent `task ensure` for the same payload can pass
-    // the two-step gate.
+    // the two-step gate. U2
+    // (2026-08-03-001-fix-opac-high-confidence-gates-plan): the
+    // ticket lives in a per-operation/intent/activation
+    // namespace so `verify add` and `verify ensure` (and
+    // different loop/hat) do not share the same on-disk file.
     let real_args = EnsureArgs {
         title: task.title.clone(),
         key: args.key.clone(),
@@ -2415,12 +2486,14 @@ fn verify_ensure(
     let (loop_id, hat_id) = gate_identifiers(ctx);
     let fingerprint =
         crate::task_verify_gate::mutation_fingerprint("ensure", &canonical, loop_id, hat_id);
-    let _ = crate::task_verify_gate::record_ticket(
-        &crate::task_verify_gate::ticket_path(&ctx.workspace_root),
-        &fingerprint,
+    let path = crate::task_verify_gate::scoped_ticket_path(
+        &ctx.workspace_root,
+        "ensure",
+        &canonical,
         loop_id,
         hat_id,
     );
+    let _ = crate::task_verify_gate::record_ticket(&path, &fingerprint, loop_id, hat_id);
 
     Ok(VerifyOutcome::Allow)
 }
@@ -4379,13 +4452,13 @@ mod ensure_for_fix_unit_clap_tests {
 // ─────────────────────────────────────────────────────────────────────────
 // U7 (2026-07-04-003 plan): two-step gate wiring tests.
 //
-// These tests exercise `verify_gate_check` (the wrapper around
-// `require_ticket`) directly with an explicit `OperationContext`,
-// so the test never has to mutate process env vars. The
-// `execute_add` / `execute_ensure` integration is verified
-// separately by reading the code path: each of those functions
-// calls `verify_gate_check` after `enforce_command_policy` and
-// before any store mutation, so if the gate denies here, the
+// These tests exercise `verify_gate_claim` (the wrapper around
+// `try_claim_matching_ticket`) directly with an explicit
+// `OperationContext`, so the test never has to mutate process env
+// vars. The `execute_add` / `execute_ensure` integration is
+// verified separately by reading the code path: each of those
+// functions calls `verify_gate_claim` after `enforce_command_policy`
+// and before any store mutation, so if the gate denies here, the
 // execute path denies too.
 // ─────────────────────────────────────────────────────────────────────────
 
@@ -4428,7 +4501,7 @@ mod task_verify_gate_wiring_tests {
         let root = temp_dir.path();
         let cfg = config_with_gate(true, false);
         let ctx = make_ctx("coordinator", "loop-a", true);
-        let err = verify_gate_check(root, &cfg, &ctx, "add", &add_payload())
+        let err = verify_gate_claim(root, &cfg, &ctx, "add", &add_payload())
             .expect_err("agent add without verify must deny");
         let msg = err.to_string();
         assert!(
@@ -4436,7 +4509,13 @@ mod task_verify_gate_wiring_tests {
             "stable prefix: {msg}"
         );
         assert!(msg.contains("verify"), "must explain verify: {msg}");
-        assert!(!ticket_path(root).exists(), "deny must not create a ticket");
+        let scoped =
+            crate::task_verify_gate::scoped_ticket_path(root, "add", &add_payload(), "loop-a", "coordinator");
+        assert!(
+            !scoped.exists(),
+            "deny must not create a scoped ticket: {}",
+            scoped.display()
+        );
     }
 
     #[test]
@@ -4449,14 +4528,29 @@ mod task_verify_gate_wiring_tests {
         let (loop_id, hat_id) = gate_identifiers(&ctx);
         let fp =
             crate::task_verify_gate::mutation_fingerprint("add", &add_payload(), loop_id, hat_id);
-        record_ticket(&ticket_path(root), &fp, loop_id, hat_id).expect("record");
+        let scoped = crate::task_verify_gate::scoped_ticket_path(
+            root,
+            "add",
+            &add_payload(),
+            loop_id,
+            hat_id,
+        );
+        record_ticket(&scoped, &fp, loop_id, hat_id).expect("record");
 
-        // Step 2: gate check consumes the ticket and passes.
-        verify_gate_check(root, &cfg, &ctx, "add", &add_payload())
-            .expect("matching ticket must allow");
+        // Step 2: gate claims the ticket (prepared → marker) and passes.
+        verify_gate_claim(root, &cfg, &ctx, "add", &add_payload())
+            .expect("matching ticket must claim");
         assert!(
-            !ticket_path(root).exists(),
-            "successful gate check must consume the ticket"
+            !scoped.exists(),
+            "successful gate claim must move the scoped ticket to the marker"
+        );
+
+        // Step 3: a successful Apply settles the claim (consume).
+        settle_gate_claim(root, &ctx, "add", &add_payload(), Ok(()))
+            .expect("settle must consume after successful apply");
+        assert!(
+            !crate::task_verify_gate::claim_marker_path(&scoped).exists(),
+            "settle must remove the claim marker"
         );
     }
 
@@ -4470,13 +4564,86 @@ mod task_verify_gate_wiring_tests {
         let (loop_id, hat_id) = gate_identifiers(&ctx);
         let fp =
             crate::task_verify_gate::mutation_fingerprint("add", &add_payload(), loop_id, hat_id);
-        record_ticket(&ticket_path(root), &fp, loop_id, hat_id).expect("record");
-        verify_gate_check(root, &cfg, &ctx, "add", &add_payload()).expect("first pass ok");
+        let scoped = crate::task_verify_gate::scoped_ticket_path(
+            root,
+            "add",
+            &add_payload(),
+            loop_id,
+            hat_id,
+        );
+        record_ticket(&scoped, &fp, loop_id, hat_id).expect("record");
+        verify_gate_claim(root, &cfg, &ctx, "add", &add_payload()).expect("first pass claims");
 
-        // Second pass: ticket was consumed → must deny.
-        let err = verify_gate_check(root, &cfg, &ctx, "add", &add_payload())
+        // Second pass: prepared ticket was claimed (and never settled
+        // back) → must deny.
+        let err = verify_gate_claim(root, &cfg, &ctx, "add", &add_payload())
             .expect_err("second pass without re-verify must deny");
         assert!(err.to_string().contains("task_verify_gate denied"));
+    }
+
+    /// U1 (STAB-OPAC-GATES-001): a failed Apply must restore the
+    /// claimed ticket so the corrected retry re-claims without a
+    /// fresh verify.
+    #[test]
+    fn test_settle_gate_claim_restores_on_failure() {
+        let temp_dir = tempfile::TempDir::new().expect("temp dir");
+        let root = temp_dir.path();
+        let cfg = config_with_gate(true, false);
+        let ctx = make_ctx("coordinator", "loop-a", true);
+        let (loop_id, hat_id) = gate_identifiers(&ctx);
+        let fp =
+            crate::task_verify_gate::mutation_fingerprint("add", &add_payload(), loop_id, hat_id);
+        let scoped = crate::task_verify_gate::scoped_ticket_path(
+            root,
+            "add",
+            &add_payload(),
+            loop_id,
+            hat_id,
+        );
+        record_ticket(&scoped, &fp, loop_id, hat_id).expect("record");
+        verify_gate_claim(root, &cfg, &ctx, "add", &add_payload()).expect("claim");
+
+        // Apply fails → settle restores the prepared record.
+        let err = settle_gate_claim(
+            root,
+            &ctx,
+            "add",
+            &add_payload(),
+            Err(anyhow::anyhow!("simulated store failure")),
+        )
+        .expect_err("settle must surface the mutation error");
+        assert!(err.to_string().contains("simulated store failure"));
+        assert!(
+            scoped.exists(),
+            "failed apply must restore the prepared ticket for retry"
+        );
+        assert!(
+            !crate::task_verify_gate::claim_marker_path(&scoped).exists(),
+            "restore must remove the claim marker"
+        );
+
+        // The corrected retry re-claims without a fresh verify.
+        verify_gate_claim(root, &cfg, &ctx, "add", &add_payload())
+            .expect("retry must re-claim the restored ticket");
+    }
+
+    /// U1 (STAB-OPAC-GATES-001): settle is a no-op for callers the
+    /// gate bypassed (human CLI / gate off) — no claim marker was
+    /// ever created.
+    #[test]
+    fn test_settle_gate_claim_noop_when_gate_inactive() {
+        let temp_dir = tempfile::TempDir::new().expect("temp dir");
+        let root = temp_dir.path();
+        let ctx = make_ctx("coordinator", "loop-a", false);
+        settle_gate_claim(root, &ctx, "add", &add_payload(), Ok(())).expect("human Ok noop");
+        settle_gate_claim(
+            root,
+            &ctx,
+            "add",
+            &add_payload(),
+            Err(anyhow::anyhow!("simulated")),
+        )
+        .expect_err("human Err still surfaces");
     }
 
     #[test]
@@ -4486,7 +4653,7 @@ mod task_verify_gate_wiring_tests {
         let cfg = config_with_gate(true, false);
         let ctx = make_ctx("coordinator", "loop-a", false);
         // Human: no env, no ticket — gate must bypass.
-        verify_gate_check(root, &cfg, &ctx, "add", &add_payload())
+        verify_gate_claim(root, &cfg, &ctx, "add", &add_payload())
             .expect("human CLI must bypass the gate");
     }
 
@@ -4496,7 +4663,7 @@ mod task_verify_gate_wiring_tests {
         let root = temp_dir.path();
         let cfg = config_with_gate(false, false);
         let ctx = make_ctx("coordinator", "loop-a", true);
-        verify_gate_check(root, &cfg, &ctx, "add", &add_payload())
+        verify_gate_claim(root, &cfg, &ctx, "add", &add_payload())
             .expect("gate-off must bypass for agent");
     }
 
@@ -4506,7 +4673,7 @@ mod task_verify_gate_wiring_tests {
         let root = temp_dir.path();
         let cfg = config_with_gate(true, true);
         let ctx = make_ctx("coordinator", "loop-a", true);
-        verify_gate_check(root, &cfg, &ctx, "add", &add_payload())
+        verify_gate_claim(root, &cfg, &ctx, "add", &add_payload())
             .expect("unsafe escape hatch must bypass");
     }
 

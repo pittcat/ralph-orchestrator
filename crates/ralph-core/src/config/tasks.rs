@@ -44,7 +44,8 @@ pub struct TasksConfig {
     /// `ralph tools task verify <verb>` and obtain an `Allow` outcome;
     /// only then can the same agent invoke the real `<verb>` for the
     /// same payload. The matching is done by a stable fingerprint
-    /// stored in `.ralph/agent/.ralph-task-verify-ticket`. This
+    /// stored in a per-operation ticket under
+    /// `.ralph/agent/task-tickets/`. This
     /// prevents drift between "I would have written X" and "I
     /// actually wrote X" that previously caused over-emitting
     /// `task.add` payloads.
