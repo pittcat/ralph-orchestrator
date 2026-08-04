@@ -1256,3 +1256,83 @@ def test_pipeline_validator_errors_propagate_through_handoff(tmp_path) -> None:
     codes = [error.code for error in ambiguous.decision.errors]
     assert "ambiguous_selected_candidates" in codes
     assert ambiguous.decision.verdict == ah.VERDICT_INVALID
+
+
+# --- build_brief attempt_count 类型契约(与 validator 侧对称) -----------------
+
+
+@pytest.mark.parametrize("attempt_count", [1, 2, 3])
+def test_build_brief_accepts_positive_integer_attempt_counts(attempt_count: int) -> None:
+    # 契约:合法 int >= 1 路径行为逐字不变 —— 达标 transcript 不被 attempt
+    # 上限误阻塞(与 test_attempt_exhaustion_does_not_block_qualifying_flow
+    # 一致);不达标 transcript 按既有收敛规则走(<=2 保持 needs_investigation,
+    # >=3 强制 blocked)。
+    dt = _dt()
+
+    green = _transcript("green.yml")
+    green["attempt_count"] = attempt_count
+    brief_green = dt.build_brief(green)
+    assert brief_green["attempt_count"] == attempt_count
+    result_green = validate_brief_data(brief_green)
+    assert result_green.valid is True
+    assert brief_green["status"] == "author_ready"
+
+    unknown = _transcript("unknown-project.yml")
+    unknown["attempt_count"] = attempt_count
+    brief_unknown = dt.build_brief(unknown)
+    assert brief_unknown["attempt_count"] == attempt_count
+    result_unknown = validate_brief_data(brief_unknown)
+    assert result_unknown.valid is True
+    expected = "blocked" if attempt_count >= 3 else "needs_investigation"
+    assert brief_unknown["status"] == expected
+
+
+@pytest.mark.parametrize(
+    "bad_attempt_count",
+    [
+        "3",    # str:数字字符串也不接受(不得裸 TypeError)
+        None,   # 缺失语义不得静默透传(不得裸 TypeError)
+        True,   # bool 是 int 子类,必须显式拒绝(与 validator 侧对称)
+        False,
+        2.5,    # 非整数浮点
+        0,      # <1
+        -1,
+    ],
+)
+def test_build_brief_rejects_invalid_attempt_count_with_documented_value_error(
+    bad_attempt_count: object,
+) -> None:
+    # 契约:非法 attempt_count 必须抛带稳定消息的 ValueError(消息含字段名
+    # 与非法值本身,便于定位),不得抛裸 TypeError —— validator 侧同字段有
+    # 优雅降级(invalid_score 错误 + 回落 1),build_brief 侧双入口对称。
+    transcript = _transcript("unknown-project.yml")
+    transcript["attempt_count"] = bad_attempt_count
+    with pytest.raises(ValueError) as excinfo:
+        _dt().build_brief(transcript)
+    message = str(excinfo.value)
+    assert "attempt_count" in message
+    assert repr(bad_attempt_count) in message
+
+
+def test_build_brief_normalizes_integral_float_attempt_count() -> None:
+    # 契约:整数浮点(3.0)归一为 int 3,与 int 路径逐字一致;不再把 float
+    # 透传进 brief 导致 validator 判 invalid_score。
+    dt = _dt()
+
+    transcript_float = _transcript("unknown-project.yml")
+    transcript_float["attempt_count"] = 3.0
+    brief_float = dt.build_brief(transcript_float)
+
+    transcript_int = _transcript("unknown-project.yml")
+    transcript_int["attempt_count"] = 3
+    brief_int = dt.build_brief(transcript_int)
+
+    assert brief_float == brief_int  # 归一后与 int 3 行为逐字一致
+    assert brief_float["attempt_count"] == 3
+    assert isinstance(brief_float["attempt_count"], int)
+    assert brief_float["status"] == "blocked"
+
+    result = validate_brief_data(brief_float)
+    assert result.valid is True
+    assert "invalid_score" not in {e.code for e in result.errors}
+    assert result.recommended_status == "blocked"

@@ -473,6 +473,20 @@ def build_brief(transcript: Mapping[str, Any]) -> dict[str, Any]:
         entry["confirmed"] for entry in user_confirmations.values()
     )
     attempt_count = transcript.get("attempt_count", 1)
+    # attempt_count 类型收敛(与 brief_validator 同字段校验契约对称):
+    # 整数浮点归一为 int(3.0 → 3),bool / 非整数 / <1 抛带稳定消息的
+    # ValueError —— 不抛裸 TypeError,也不让非法值透传进 brief 被 validator
+    # 判 invalid_score。合法 int >= 1 原样使用,后续收敛逻辑不变。
+    if isinstance(attempt_count, float) and attempt_count.is_integer():
+        attempt_count = int(attempt_count)
+    if (
+        isinstance(attempt_count, bool)
+        or not isinstance(attempt_count, int)
+        or attempt_count < 1
+    ):
+        raise ValueError(
+            f"attempt_count 必须是 >= 1 的整数,当前为 {attempt_count!r}"
+        )
     if task_type == "bug" and not red_loop_known:
         status = "needs_investigation"
     elif any(score < 0.85 for score in confidence.values()) or not candidates:
