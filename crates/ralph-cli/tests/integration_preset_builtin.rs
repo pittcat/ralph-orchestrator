@@ -1,13 +1,16 @@
-//! Integration tests for `ralph preset builtin list` (U01 of
+//! Integration tests for `ralph preset builtin list/show` (U01/U02 of
 //! `2026-08-05-001-feat-builtin-preset-introspection`).
 //!
 //! Closes the runtime/introspection gap: previously, the only way to
 //! enumerate builtin presets compiled into the `ralph` binary was to
-//! read `presets/` from a source checkout. U01 adds a stable,
+//! read `presets/` from a source checkout. U01 added a stable,
 //! read-only `ralph preset builtin list --format human|json` command
 //! that surfaces the public-only inventory derived from
-//! `EmbeddedPreset`, leaving the legacy `ralph preset list/show`
-//! TemplateCatalog path untouched (S12 regression guard).
+//! `EmbeddedPreset`, and U02 added `ralph preset builtin show
+//! <id> --format {human,yaml,json}` that emits the byte-exact
+//! `EmbeddedPreset.content` for any known ID (public or hidden).
+//! Both leave the legacy `ralph preset list/show` TemplateCatalog path
+//! untouched (S12 regression guard).
 //!
 //! Given/When/Then coverage (BDD-style behavior, real binary):
 //! - S1 JSON envelope: `presets` array of {id, source, description,
@@ -242,5 +245,209 @@ fn preset_help_lists_builtin_namespace() {
     assert!(
         text.contains("builtin"),
         "preset --help missing `builtin` namespace:\n{text}"
+    );
+}
+
+#[test]
+fn builtin_show_help_lists_subcommand() {
+    let out = common::ralph_bin()
+        .args(["--color", "never", "preset", "builtin", "--help"])
+        .env("NO_COLOR", "1")
+        .output()
+        .unwrap();
+    assert_success(&out);
+    let text = stdout(&out);
+    assert!(
+        text.contains("show"),
+        "preset builtin --help missing `show` subcommand:\n{text}"
+    );
+}
+
+// ── U02: S3, S4, S5 — `ralph preset builtin show <id>` ──────────────────────
+
+/// S3: `ralph preset builtin show parallel-forge --format yaml` returns
+/// a parseable YAML document whose top-level shape matches the expected
+/// parallel-forge fields.
+#[test]
+fn builtin_show_yaml_public_is_parseable() {
+    let tmp = TempDir::new().unwrap();
+    let out = run(
+        tmp.path(),
+        &[
+            "preset",
+            "builtin",
+            "show",
+            "parallel-forge",
+            "--format",
+            "yaml",
+        ],
+    );
+    assert_success(&out);
+
+    let text = stdout(&out);
+    assert!(!text.is_empty(), "yaml stdout must not be empty");
+
+    // Must parse as YAML and contain the expected parallel-forge top-level
+    // keys (mirrors `presets/en/parallel-forge.yml`).
+    let parsed: serde_yaml::Value = serde_yaml::from_str(&text).expect("stdout must parse as YAML");
+    let root = parsed.as_mapping().expect("top-level is a mapping");
+    for key in ["hats", "event_loop"] {
+        assert!(
+            root.contains_key(key),
+            "expected top-level key `{key}` in parallel-forge yaml, got: {parsed:?}"
+        );
+    }
+}
+
+/// S3: `ralph preset builtin show <id> --format json` returns the
+/// metadata as a JSON object with `id`, `source`, `description`,
+/// `public` fields. `source` is strictly `builtin:<id>`.
+#[test]
+fn builtin_show_json_metadata_shape() {
+    let tmp = TempDir::new().unwrap();
+    let out = run(
+        tmp.path(),
+        &[
+            "preset",
+            "builtin",
+            "show",
+            "parallel-forge",
+            "--format",
+            "json",
+        ],
+    );
+    assert_success(&out);
+
+    let parsed: serde_json::Value =
+        serde_json::from_str(&stdout(&out)).expect("stdout is valid JSON");
+    let obj = parsed.as_object().expect("top-level is an object");
+
+    assert!(obj.contains_key("id"), "missing `id`: {obj:?}");
+    assert!(obj.contains_key("source"), "missing `source`: {obj:?}");
+    assert!(
+        obj.contains_key("description"),
+        "missing `description`: {obj:?}"
+    );
+    assert!(obj.contains_key("public"), "missing `public`: {obj:?}");
+
+    let id = obj["id"].as_str().expect("id is string");
+    assert_eq!(id, "parallel-forge");
+    assert_eq!(
+        obj["source"].as_str(),
+        Some("builtin:parallel-forge"),
+        "source must derive exactly as builtin:<id>"
+    );
+    assert_eq!(obj["public"].as_bool(), Some(true));
+}
+
+/// S4: `ralph preset builtin show merge-loop --format yaml` (hidden)
+/// returns exit 0; stdout is non-empty and parses as YAML.
+#[test]
+fn builtin_show_yaml_allows_hidden() {
+    let tmp = TempDir::new().unwrap();
+    let out = run(
+        tmp.path(),
+        &[
+            "preset",
+            "builtin",
+            "show",
+            "merge-loop",
+            "--format",
+            "yaml",
+        ],
+    );
+    assert_success(&out);
+
+    let text = stdout(&out);
+    assert!(
+        !text.is_empty(),
+        "hidden builtin yaml stdout must not be empty"
+    );
+    let parsed: serde_yaml::Value =
+        serde_yaml::from_str(&text).expect("hidden yaml parses as YAML");
+    // Top-level is a mapping (merge-loop.yml is a real preset).
+    assert!(parsed.is_mapping(), "merge-loop yaml must be a mapping");
+}
+
+/// S5: unknown id returns non-zero exit; stdout empty (no YAML leak);
+/// stderr contains the unknown id.
+#[test]
+fn builtin_show_unknown_fails_without_stdout() {
+    let tmp = TempDir::new().unwrap();
+    let out = run(
+        tmp.path(),
+        &[
+            "preset",
+            "builtin",
+            "show",
+            "does-not-exist",
+            "--format",
+            "yaml",
+        ],
+    );
+    assert!(
+        !out.status.success(),
+        "unknown id must exit non-zero\nstdout:\n{}\nstderr:\n{}",
+        stdout(&out),
+        stderr(&out)
+    );
+
+    let out_text = stdout(&out);
+    assert!(
+        out_text.trim().is_empty(),
+        "unknown id must not write preset yaml to stdout, got: {out_text}"
+    );
+
+    let err_text = stderr(&out);
+    assert!(
+        err_text.contains("does-not-exist"),
+        "stderr must contain the unknown id, got: {err_text}"
+    );
+}
+
+/// Regression: the old `ralph preset show <template>` command (template
+/// path via `TemplateCatalog`) is unaffected by the new builtin show
+/// subcommand.
+#[test]
+fn template_show_unchanged() {
+    let tmp = TempDir::new().unwrap();
+    let out = run(
+        tmp.path(),
+        &["preset", "show", "minimal-linear", "--format", "yaml"],
+    );
+    assert_success(&out);
+    // TemplateCatalog `minimal-linear` template ships a placeholder
+    // body — its content is the TemplateCatalog's `raw_template`, not
+    // the EmbeddedPreset.content. We just need to confirm the OLD
+    // path still works and returns a non-empty body.
+    let text = stdout(&out);
+    assert!(
+        !text.is_empty(),
+        "old template show must still return content"
+    );
+}
+
+/// Regression: `ralph preset builtin show <id>` must not touch the
+/// workspace filesystem.
+#[test]
+fn builtin_show_yaml_workspace_has_no_new_files() {
+    let tmp = TempDir::new().unwrap();
+    let before = walkdir_snapshot(tmp.path());
+    let out = run(
+        tmp.path(),
+        &[
+            "preset",
+            "builtin",
+            "show",
+            "parallel-forge",
+            "--format",
+            "yaml",
+        ],
+    );
+    assert_success(&out);
+    let after = walkdir_snapshot(tmp.path());
+    assert_eq!(
+        before, after,
+        "builtin show must not touch the workspace filesystem"
     );
 }
