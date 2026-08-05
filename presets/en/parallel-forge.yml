@@ -22,7 +22,7 @@
 # and are merged only at build embed time.
 #
 # Artifacts root: `.ralph/forge/<plan-key>/`
-# Lifecycle: owner=`reporter` (cleanup of unit worktrees after report);
+# Lifecycle: owner=`cleanup` (cleanup of forge worktrees/branches before report);
 #   writers=each producer hat; readers=downstream hats via trigger paths;
 #   retention=keep until operator deletes; do not treat as runtime ledger.
 #
@@ -44,7 +44,7 @@ mechanism:
     type: declared
     version: 1
     terminal_emits: [LOOP_COMPLETE]
-    # 2026-07-28-001 plan §3.1: explicit 14-step flow authority. Each
+    # 2026-07-28-001 plan §3.1: explicit declared flow authority. Each
     # cross-hat handoff uses the next step's `on`; multi-source block
     # branches use `on_any_of` on `report`. exec_wave unit topics and
     # `work.failed` are non-transition (NON_TRANSITION_TOPICS). The
@@ -129,12 +129,17 @@ mechanism:
         allowed_emits:
           - forge.finalized
           - forge.plan.blocked
-      - id: report
-        kind: await
+      - id: cleanup
+        kind: linear
         on_any_of:
           - forge.finalized
           - forge.plan.blocked
           - work.failed
+        allowed_emits:
+          - forge.cleanup.done
+      - id: report
+        kind: await
+        "on": forge.cleanup.done
         allowed_emits:
           - forge.report.done
       - id: plan_end
@@ -199,6 +204,7 @@ event_loop:
       - forge.full.verified
       - forge.audit.done
       - forge.finalized
+      - forge.cleanup.done
       - forge.report.done
       - forge.plan.blocked
       - exec.unit.ready
@@ -252,7 +258,10 @@ event_loop:
       - {hat_id: forge-dispatcher, topic: forge.worktrees.ready}
       - {hat_id: reviewer, topic: forge.exec.development.done}
       - {hat_id: integrator, topic: forge.units.reviewed}
-      - {hat_id: reporter, topic: forge.audit.done}
+      - {hat_id: cleanup, topic: forge.finalized}
+      - {hat_id: cleanup, topic: forge.plan.blocked}
+      - {hat_id: cleanup, topic: work.failed}
+      - {hat_id: reporter, topic: forge.cleanup.done}
       - {hat_id: inspector, topic: forge.report.done}
       - {hat_id: executor, topic: LOOP_COMPLETE}
       - {hat_id: reviewer, topic: LOOP_COMPLETE}
@@ -290,7 +299,7 @@ core:
     - "OPAC Precheck: `ralph tools skill load ralph-tools-emit` then `ralph emit --policy-check` before every real emit (per `ralph-tools` §5)."
     - "Wave Precheck: dispatcher must `ralph wave verify --payloads-stdin` then same payloads `ralph wave emit` (per `ralph-tools-wave`)."
     - "Artifact templates: run `ralph preset materialize-artifacts parallel-forge --plan-key <plan-key>` then copy from `.ralph/forge/<plan-key>/templates/` — do not write free-form artifacts."
-    - "Artifact lifecycle: `.ralph/forge/<plan-key>/` owner=reporter (cleanup unit worktrees after manager report); producers write; consumers read only via trigger/projection paths."
+    - "Artifact lifecycle: `.ralph/forge/<plan-key>/` owner=cleanup (cleanup forge worktrees/branches before manager report); producers write; consumers read only via trigger/projection paths."
     - "Blocked/failed: write context artifact under blocks/ or failures/ before emit; include context_artifact_path + forge_artifact_root + plan_key."
     - "One business event per isolated activation unless reporter terminal pair (forge.report.done then LOOP_COMPLETE)."
     - "Development may be parallel; integration must be serial per execution-plan integration_order."
@@ -1130,19 +1139,85 @@ hats:
          `forge.finalized` with `target_branch`, `integration_branch`,
          `target_commit_sha`, `finalization_report_path`, and `plan_key`.
 
-      Single business event. The reporter may clean worktrees only after this
-      event. Do not emit `forge.report.done` or `LOOP_COMPLETE` from this hat.
+      Single business event. The cleanup hat runs after this event and owns
+      forge resource cleanup. Do not emit `forge.report.done` or
+      `LOOP_COMPLETE` from this hat.
+
+  cleanup:
+    name: "Cleanup"
+    description: "Cleans forge unit worktrees and temporary branches before reporting."
+    triggers: [forge.finalized, forge.plan.blocked, work.failed, forge.units.reviewed]
+    publishes: [forge.cleanup.done]
+    exempt_topics: [forge.cleanup.done]
+    terminal_events: [forge.cleanup.done]
+    event_filter:
+      enabled: true
+      events: [forge.finalized, forge.plan.blocked, work.failed, forge.units.reviewed]
+    instructions: |
+      ## CLEANUP MODE — forge resource lifecycle owner
+
+      你是本 preset 的 forge 资源清理 owner。清理发生在 reporter 之前；
+      reporter 只能读取你的结果，不能自行执行 worktree/branch 清理。
+      runtime 仍会在 loop 终止时兜底清理 supervisor `ralph/*` slot 资源。
+      OPAC：`ralph-tools-opac`；emit 前加载 `ralph-tools-emit`，先执行
+      `--policy-check`，再正式 emit。
+
+      若 trigger 是旧兼容 topic `forge.units.reviewed`，只记录观察结果并停止；
+      不得在该非终态 trigger 上执行清理或 emit `forge.cleanup.done`。
+
+      ### 触发与策略
+
+      1. 从 trigger/projection 读取 `plan_key`、`worktree_map_path`、
+         `integration_branch`、`target_branch`。`worktree_map_path` 优先使用
+         `forge.worktrees.ready` 的 projection；缺失时使用
+         `.ralph/forge/<plan_key>/worktree-map.yml`。
+      2. `forge.finalized` 是成功交付：删除本 plan 创建的 unit worktree、
+         unit branch 和 integration branch。`target_branch` 永远不能删除。
+      3. `forge.plan.blocked` / `work.failed` 是失败现场：删除可安全删除的
+         worktree，但保留 unit/integration branch 供诊断；在结果中标记
+         `retained_for_diagnosis`。
+      4. 只处理 worktree map 中明确列出的 branch/path，禁止使用宽泛 glob，
+         禁止删除 map 之外的 branch。
+
+      ### 每个资源的清理动作
+
+      1. 运行 `git worktree list --porcelain`，确认目标 path 与 branch 的当前
+         绑定；path 已不存在时继续下一步，不能把它当作整个资源已完成。
+      2. path 存在时运行 `git worktree remove --force <exact-path>`。
+      3. 成功交付且 branch 不是 `target_branch` 时，确认
+         `git show-ref --verify --quiet refs/heads/<exact-branch>` 后运行
+         `git branch -D <exact-branch>`。失败现场不要执行这一步。
+      4. 每个 path/branch 都记录 `unit_id`、`path`、`branch`、
+         `worktree_removed`、`branch_removed` 或 `retained` 及失败原因。
+      5. 运行 `git worktree prune`，然后复核目标 path/branch 的最终状态。
+
+      ### Confirm
+
+      写 `.ralph/forge/<plan_key>/cleanup.md`，确认文件存在后，使用
+      `ralph tools skill load ralph-tools-emit`，再先执行
+      `ralph emit forge.cleanup.done --policy-check`，通过后用同一 payload
+      正式 emit。payload 必须包含：
+
+      - `cleanup_report_path`: cleanup.md 的 repo-relative 路径；
+      - `cleanup_status`: `completed`、`partial` 或 `retained_for_diagnosis`；
+      - `attempted_count`、`cleaned_count`、`pending_count`；
+      - `plan_key`。
+
+      cleanup 失败不能伪造 `completed`；但必须尽力处理剩余资源并 emit
+      `partial` 结果，让 reporter 把未清理项写入最终报告。
+
+      Single business event.
 
   reporter:
     name: "Reporter"
     description: "Writes manager-readable Markdown report; terminal hat."
-    triggers: [forge.finalized, forge.plan.blocked, work.failed, forge.units.reviewed]
+    triggers: [forge.cleanup.done]
     publishes: [forge.report.done, LOOP_COMPLETE]
     exempt_topics: [forge.report.done, LOOP_COMPLETE]
     terminal_events: [forge.report.done, LOOP_COMPLETE]
     event_filter:
       enabled: true
-      events: [forge.finalized, forge.plan.blocked, work.failed]
+      events: [forge.cleanup.done]
     instructions: |
       ## REPORTER MODE — 终态 hat
 
@@ -1150,15 +1225,12 @@ hats:
       emit 前：`ralph tools skill load ralph-tools-emit`，再 `--policy-check`。
       materialize：`ralph tools skill load ralph-tools-cmdref`「materialize-artifacts」。
 
-      ### Lifecycle（本 hat 是 forge artifact / worktree 清理 owner）
+      ### Lifecycle（cleanup hat 已完成资源回收）
 
-      写完 manager report 并确认后：若存在 `worktree_map_path`（projection 或
-      `.ralph/forge/<plan_key>/worktree-map.yml`），**逐 unit 循环**对 map 中每个
-      unit worktree 执行 `git worktree remove`——每个结果**独立**记入报告附录
-      （一行一 entry：`unit_id` / `success` | `failure_reason`）。任一失败**不阻断**
-      后续 worktree 的清理尝试，也不阻断 LOOP_COMPLETE；保留的 unit worktree
-      在附录里列出，由运维手工处理。
-      不删 `.ralph/forge/<plan_key>/` 业务文件（留给操作者）。
+      读取 `forge.cleanup.done.cleanup_report_path` 指向的 cleanup.md，并把
+      每个资源的 path/branch/结果原样写入 manager report。不要重复执行
+      `git worktree remove` 或 `git branch -D`。不删
+      `.ralph/forge/<plan_key>/` 业务文件（留给操作者）。
 
       ### 模板
 
@@ -1170,13 +1242,12 @@ hats:
       ### 步骤 1 — Observe（artifact-first，禁止扫 event history）
 
       **从当前 trigger 取路径**（不要猜）：
-      - `forge.finalized`：`audit_report_path`、`target_branch`、
-        `integration_branch`、`target_commit_sha`、`finalization_report_path`、`plan_key`
-      - `forge.plan.blocked` / `work.failed`：`context_artifact_path`、
-        `forge_artifact_root`、`plan_key`、`reason`、`plan_path`
+      - `forge.cleanup.done`：`cleanup_report_path`、`cleanup_status`、
+        `attempted_count`、`cleaned_count`、`pending_count`、`plan_key`
+      - 其它报告路径从 projection 或 cleanup.md 中读取。
 
-      若 trigger 是 `forge.plan.blocked` 且 payload 缺 `plan_key` /
-      `context_artifact_path`，从 `.ralph/forge/` 下唯一子目录名解析
+      cleanup hat 必须为每条路径生成 cleanup.md；若 cleanup report
+      缺失或 payload 缺 `plan_key`，从 `.ralph/forge/` 下唯一子目录名解析
       `plan_key`，再读对应 `worktree-map.yml` / `execution-plan.yml` 兜底；
       仍无法解析时，报告写「信息缺失，无法确认」并把 `status=BLOCKED`、
       `final_audit=BLOCKED`。
@@ -1187,9 +1258,10 @@ hats:
       - `integration-log.md`、`full-verification.md`、`final-audit.md`（若存在）
       - 以及 `context_artifact_path` 全文
 
-      Finalizer must already have verified the artifact set and target merge.
-      If any required artifact or `finalization_report_path` is missing, write
-      the omission into the manager report and do not claim `COMPLETED`.
+      对 `forge.finalized` 路径，cleanup report 之外的终态 artifact 应已由
+      finalizer 验证；对 blocked/failed 路径，按实际存在的 artifact 报告，
+      不得把缺失内容声称为已验证，也不得把 cleanup_status=partial 或
+      retained_for_diagnosis 映射成 `COMPLETED`。
 
       缺失写「信息缺失，无法确认」。
 
@@ -1201,11 +1273,9 @@ hats:
 
       | 来源 | report `status` / `final_audit` |
       |---|---|
-      | Auditor ACCEPTED | COMPLETED / ACCEPTED |
-      | Auditor REJECTED（整体不可交付） | FAILED / REJECTED |
-      | Auditor REJECTED（部分） | PARTIAL / REJECTED |
-      | Auditor BLOCKED 或 `forge.plan.blocked` | BLOCKED / BLOCKED |
-      | `work.failed` | FAILED / FAILED |
+      | cleanup trigger from accepted audit | COMPLETED / ACCEPTED |
+      | cleanup trigger from blocked plan | BLOCKED / BLOCKED |
+      | cleanup trigger from failed work | FAILED / FAILED |
 
       ### 步骤 4 — Confirm & emit
 
@@ -1223,7 +1293,6 @@ hats:
         `LOOP_COMPLETE.report_path` 与最近 accepted `forge.report.done.report_path`；
         不一致会被拒收并 correction。
       4. 打印 `DELIVERABLE_PATH: <report_path>`。
-      5. 执行 worktree cleanup（见上）。
 
       ### Resume 规则
 
@@ -1285,6 +1354,14 @@ state_projection:
         forge.integration_branch: "$.integration_branch"
         forge.target_commit_sha: "$.target_commit_sha"
         forge.finalization_report_path: "$.finalization_report_path"
+        forge.plan_key: "$.plan_key"
+    - on: forge.cleanup.done
+      set:
+        forge.cleanup_report_path: "$.cleanup_report_path"
+        forge.cleanup_status: "$.cleanup_status"
+        forge.cleanup_attempted_count: "$.attempted_count"
+        forge.cleanup_cleaned_count: "$.cleaned_count"
+        forge.cleanup_pending_count: "$.pending_count"
         forge.plan_key: "$.plan_key"
     - on: forge.plan.blocked
       set:

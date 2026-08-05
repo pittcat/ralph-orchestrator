@@ -107,6 +107,7 @@
 - [ ] **对每个 emit topic，按 payload audit 五列填行**（见下）—— schema 通过不等于字段可达
 - [ ] **对每个 payload 字段，反查 schema metadata**：`field_docs.meaning/source/fill_rule` 与 Payload Contract 的值源、可见性、下游消费一致
 - [ ] **收尾双事件终态**：若 hat 是 preset 的**收尾 hat**（典型为 reporter / alignment），允许其在同 activation 内先发 `event_loop.required_events[]` 中的 topic、再发 `event_loop.completion_promise`；其它 hat 的 `publishes` 一律**不得**同时包含 required_events 列表里的 topic 与 completion_promise，违反将触发 reviewer 的 P0。复核条件见 `finding-rubric.md`「required-event-to-completion 窄例外」段。
+- [ ] **临时资源清理交接**：若 workflow 创建 worktree、临时 branch 或其它可诊断资源，必须由独立 cleanup owner 在报告/终态收敛 owner 前消费成功/失败路径；cleanup event 必须携带逐资源结果和 pending 数量，报告/终态收敛 owner 只消费 cleanup artifact，不得与 cleanup 竞争删除权。
 - [ ] **全路径 vs 成功脊门禁**：`event_loop.required_events` 只放所有完成路径（含失败早退）都会经过的收敛 topic；成功脊专用 handoff（如 `work.done` → `plan.complete`）用 `event_loop.path_required_events`，不要塞进 `required_events`（否则 `topology.required_event_not_on_all_paths`，且 runtime 会误拒失败路径 `LOOP_COMPLETE`）
 - [ ] **Paired completion 字段一致性**：若 preset 需要 `LOOP_COMPLETE` 与前置终态事件（如 `forge.report.done`）携带相同路径字段，启用 `event_loop.completion_payload_match` 并声明 `topic` + `fields`；reporter instructions 必须写明「resume 时不得重写既有报告事实，只能补发匹配 completion」。
 

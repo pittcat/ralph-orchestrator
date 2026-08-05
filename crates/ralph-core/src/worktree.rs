@@ -260,20 +260,9 @@ pub fn remove_worktree(
         return Err(WorktreeError::Git(stderr.to_string()));
     }
 
-    // Delete the branch if it was a ralph/* branch
-    if let Some(branch) = branch
-        && branch.starts_with("ralph/")
-    {
-        let output = Command::new("git")
-            .args(["branch", "-D", &branch])
-            .current_dir(repo_root)
-            .output()?;
-
-        if !output.status.success() {
-            // Non-fatal: branch might already be deleted
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            tracing::debug!("Failed to delete branch {}: {}", branch, stderr);
-        }
+    // Delete the branch if it was a ralph/* branch.
+    if let Some(branch) = branch {
+        let _ = remove_ralph_branch(repo_root, &branch);
     }
 
     // Prune worktree refs
@@ -285,6 +274,30 @@ pub fn remove_worktree(
     tracing::debug!("Removed worktree at {}", worktree_path.display());
 
     Ok(())
+}
+
+/// Remove a runtime-owned `ralph/*` branch after its worktree is gone.
+///
+/// This is intentionally narrow: forge/preset branches are owned by their
+/// preset lifecycle, while `ralph/*` branches are runtime-created supervisor
+/// resources. The helper is also safe to call after a reporter has already
+/// removed the worktree, which closes the runner-first/reporter-first race.
+pub fn remove_ralph_branch(repo_root: impl AsRef<Path>, branch: &str) -> Result<(), WorktreeError> {
+    if !branch.starts_with("ralph/") {
+        return Ok(());
+    }
+
+    let output = Command::new("git")
+        .args(["branch", "-D", branch])
+        .current_dir(repo_root.as_ref())
+        .output()?;
+    if output.status.success() {
+        Ok(())
+    } else {
+        Err(WorktreeError::Git(
+            String::from_utf8_lossy(&output.stderr).trim().to_string(),
+        ))
+    }
 }
 
 /// List all git worktrees in the repository.
@@ -1371,6 +1384,35 @@ mod tests {
         let result = remove_worktree(temp_dir.path(), temp_dir.path().join("nonexistent"));
 
         assert!(matches!(result, Err(WorktreeError::NotFound(_))));
+    }
+
+    #[test]
+    fn test_remove_ralph_branch_after_worktree_was_removed() {
+        let temp_dir = TempDir::new().unwrap();
+        init_git_repo(temp_dir.path());
+
+        let worktree = create_worktree(
+            temp_dir.path(),
+            "branch-after-path-cleanup",
+            &WorktreeConfig::default(),
+        )
+        .unwrap();
+        let removed = Command::new("git")
+            .args(["worktree", "remove", "--force"])
+            .arg(&worktree.path)
+            .current_dir(temp_dir.path())
+            .status()
+            .unwrap();
+        assert!(removed.success());
+
+        remove_ralph_branch(temp_dir.path(), &worktree.branch).unwrap();
+        let branch_exists = Command::new("git")
+            .args(["show-ref", "--verify", "--quiet"])
+            .arg(format!("refs/heads/{}", worktree.branch))
+            .current_dir(temp_dir.path())
+            .status()
+            .unwrap();
+        assert!(!branch_exists.success());
     }
 
     #[test]

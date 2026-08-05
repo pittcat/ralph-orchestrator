@@ -195,6 +195,11 @@ work.done / fix.done
 - 多源 block 走 `on_any_of`：当 N 个不同 step 都可能因业务失败 / plan
   阻塞汇聚到同一个收敛 step 时，在收敛 step 上声明 `on_any_of: [t1, t2, ...]`
   而不是把每个源的「block topic」分别塞回原 step 的 `allowed_emits`。
+- 资源生命周期必须显式收敛：若 preset 创建 worktree / branch / child
+  process 等临时资源，使用独立 cleanup step/hat 在报告或终态收敛之前处理；cleanup
+  必须输出逐资源结果，成功路径删除本轮拥有的资源，失败路径明确记录
+  preset 定义的 pending 字段或保留诊断现场。报告/终态收敛 owner 只消费 cleanup
+  结果，不重复执行副作用清理。
 - `exec_wave` 等 side-effect step 的 unit topic 保持 non-transition：
   `exec.unit.ready` / `exec.unit.done` / `exec.unit.failed` 不应被任何下一
   step 的 `on` 引用——它们的 step 推进由 supervisor 注入的
@@ -218,6 +223,8 @@ work.done / fix.done
   - failure-capable step 的 `allowed_emits` 同时含 `work.failed` 和
     收敛 topic（如 `forge.report.done`），使 reporter 在 work.failed 后
     不会再次被 FlowStepScope 拒。
+  - 若存在临时资源 cleanup hat，则 failure topic 先进入 cleanup，再由
+    cleanup 的收敛 topic 唤醒报告/终态收敛 owner；不要让两个 owner 竞争同一资源。
 
 ## Key-stage event gate pattern
 

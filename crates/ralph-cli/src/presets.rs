@@ -1218,7 +1218,7 @@ mod tests {
     }
 
     /// 2026-07-28-001 plan U3 (R5/S5, R6/S6, R7/S7, R9/S9): the real
-    /// embedded `parallel-forge` preset adopts the §3.1 14-step
+    /// embedded `parallel-forge` preset adopts the declared flow
     /// flow authority end-to-end. Each cross-hat handoff uses the
     /// next step's `on`; multi-source block branches use
     /// `on_any_of` on `report`; exec_wave unit topics and
@@ -1229,12 +1229,12 @@ mod tests {
     /// legacy single-shot `exec_wave` / `exec_finalize` /
     /// `exec_failure` triple. The planning handoff chain still
     /// reaches `development_loop` deterministically (R1);
-    /// `forge.plan.blocked` still branches to `report` (R2);
+    /// `forge.plan.blocked` still branches to `cleanup` (R2);
     /// and the loop's `transition_emits` (`forge.exec.development.done`,
     /// `work.failed`) advance to `full_verify` / `report` exactly
     /// once the final wave settles.
     #[test]
-    fn test_parallel_forge_adopts_declared_14step_flow_authority() {
+    fn test_parallel_forge_adopts_declared_flow_authority() {
         use ralph_core::event_loop::recover_current_plan_step;
 
         let preset = get_preset("parallel-forge").expect("parallel-forge preset");
@@ -1256,26 +1256,26 @@ mod tests {
             "R1: full planning handoff chain must reach development_loop"
         );
 
-        // R2: forge.plan.blocked branches to report (not development_loop).
+        // R2: forge.plan.blocked branches to cleanup (not development_loop).
         let flow = config
             .mechanism
             .as_ref()
             .and_then(|m| m.flow.as_ref())
             .expect("parallel-forge declares mechanism.flow");
-        let report = flow
+        let cleanup = flow
             .steps
             .iter()
-            .find(|s| s.id == "report")
-            .expect("report step");
+            .find(|s| s.id == "cleanup")
+            .expect("cleanup step");
         assert!(
-            report.on_any_of.iter().any(|t| t == "forge.plan.blocked"),
-            "report.on_any_of must include forge.plan.blocked (R2); got {:?}",
-            report.on_any_of
+            cleanup.on_any_of.iter().any(|t| t == "forge.plan.blocked"),
+            "cleanup.on_any_of must include forge.plan.blocked (R2); got {:?}",
+            cleanup.on_any_of
         );
         assert_eq!(
             recover_current_plan_step(&config, &["forge.plan.inspected", "forge.plan.blocked"],),
-            "report",
-            "R2: forge.plan.blocked must advance to report"
+            "cleanup",
+            "R2: forge.plan.blocked must advance to cleanup"
         );
 
         // R4 / R5 (U7): the development_loop's `transition_emits`
@@ -1302,7 +1302,7 @@ mod tests {
         );
 
         // R5: full success path: planning chain → development_loop
-        // (transition) → full_verify → audit → finalize → report → plan_end.
+        // (transition) → full_verify → audit → finalize → cleanup → report → plan_end.
         assert_eq!(
             recover_current_plan_step(
                 &config,
@@ -1315,11 +1315,12 @@ mod tests {
                     "forge.full.verified",
                     "forge.audit.done",
                     "forge.finalized",
+                    "forge.cleanup.done",
                     "forge.report.done",
                 ],
             ),
             "plan_end",
-            "R5: full success path must reach plan_end"
+            "R5: full success path must reach cleanup, report, and plan_end"
         );
         assert_eq!(
             recover_current_plan_step(
@@ -1330,11 +1331,12 @@ mod tests {
                     "forge.concurrency.approved",
                     "forge.worktrees.ready",
                     "work.failed",
+                    "forge.cleanup.done",
                     "forge.report.done",
                 ],
             ),
             "plan_end",
-            "R6: exec_wave.failed → exec_failure → report.done must reach plan_end"
+            "R6: failed execution → cleanup.done → report.done must reach plan_end"
         );
 
         // R7: plan_end rejects LOOP_COMPLETE as a transition (it's
@@ -1473,17 +1475,31 @@ mod tests {
                 .any(|topic| topic == "forge.finalized")
         );
 
+        let cleanup = flow
+            .steps
+            .iter()
+            .find(|step| step.id == "cleanup")
+            .expect("parallel-forge must have a cleanup step");
+        assert!(
+            cleanup
+                .on_any_of
+                .iter()
+                .any(|topic| topic == "forge.finalized")
+        );
+        assert!(
+            cleanup
+                .allowed_emits
+                .iter()
+                .any(|topic| topic == "forge.cleanup.done")
+        );
+
         let report = flow
             .steps
             .iter()
             .find(|step| step.id == "report")
             .expect("parallel-forge must have a report step");
-        assert!(
-            report
-                .on_any_of
-                .iter()
-                .any(|topic| topic == "forge.finalized")
-        );
+        assert!(report.on_any_of.is_empty());
+        assert_eq!(report.on.as_deref(), Some("forge.cleanup.done"));
         assert!(
             !report
                 .on_any_of
@@ -1541,6 +1557,29 @@ mod tests {
                     .iter()
                     .any(|required| required == field),
                 "forge.finalized schema missing {field}"
+            );
+        }
+
+        let cleanup_done = config
+            .event_loop
+            .event_policy
+            .as_ref()
+            .and_then(|policy| policy.schemas.get("forge.cleanup.done"))
+            .expect("forge.cleanup.done schema");
+        for field in [
+            "cleanup_report_path",
+            "cleanup_status",
+            "attempted_count",
+            "cleaned_count",
+            "pending_count",
+            "plan_key",
+        ] {
+            assert!(
+                cleanup_done
+                    .required_fields
+                    .iter()
+                    .any(|required| required == field),
+                "forge.cleanup.done schema missing {field}"
             );
         }
     }

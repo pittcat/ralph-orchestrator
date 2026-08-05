@@ -197,7 +197,7 @@ mod tests {
         );
     }
 
-    /// R7 (U7): work.failed exits the loop into report.
+    /// R7 (U7): work.failed exits the loop into cleanup.
     #[test]
     fn pf_wave_r7_loop_exit_via_work_failed() {
         let cfg = parallel_forge_flow();
@@ -206,8 +206,8 @@ mod tests {
         let next = advance_plan_step(&cfg, &at_loop, "work.failed");
         assert_eq!(
             next,
-            Some("report".to_string()),
-            "R7: work.failed must advance development_loop → report"
+            Some("cleanup".to_string()),
+            "R7: work.failed must advance development_loop → cleanup"
         );
     }
 
@@ -286,6 +286,6 @@ mod tests {
         let dev = advance_plan_step(&cfg, "development_loop", "forge.exec.development.done");
         assert_eq!(dev, Some("full_verify".to_string()));
         let fail = advance_plan_step(&cfg, "development_loop", "work.failed");
-        assert_eq!(fail, Some("report".to_string()));
+        assert_eq!(fail, Some("cleanup".to_string()));
     }
 }

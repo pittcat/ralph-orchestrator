@@ -776,6 +776,46 @@ schemas:
         source: Trigger / forge artifact root.
         fill_rule: Must match directory name.
 
+  forge.cleanup.done:
+    required_fields:
+      - cleanup_report_path
+      - cleanup_status
+      - attempted_count
+      - cleaned_count
+      - pending_count
+      - plan_key
+    payload: json_object
+    allowed_values:
+      cleanup_status:
+        - completed
+        - partial
+        - retained_for_diagnosis
+    field_docs:
+      cleanup_report_path:
+        meaning: Per-resource cleanup report written before the reporter runs.
+        source: File at .ralph/forge/<plan-key>/cleanup.md.
+        fill_rule: Verify file exists; path must be repo-relative.
+      cleanup_status:
+        meaning: Aggregate forge resource cleanup result.
+        source: Cleanup hat after processing the worktree map.
+        fill_rule: One of completed, partial, retained_for_diagnosis.
+      attempted_count:
+        meaning: Number of forge worktree/branch resources considered.
+        source: Cleanup report.
+        fill_rule: Non-negative integer.
+      cleaned_count:
+        meaning: Number of forge resources fully cleaned.
+        source: Cleanup report.
+        fill_rule: Non-negative integer and no greater than attempted_count.
+      pending_count:
+        meaning: Number of forge resources still present or retained.
+        source: Cleanup report.
+        fill_rule: Non-negative integer; partial success must be visible here.
+      plan_key:
+        meaning: Forge plan key basename.
+        source: Trigger / forge artifact root.
+        fill_rule: Must match directory name.
+
   forge.report.done:
     required_fields:
       - report_path

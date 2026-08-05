@@ -619,12 +619,31 @@ impl SupervisorBridge for CoordinatorSupervisorBridge {
                         );
                     }
                     Err(ralph_core::WorktreeError::NotFound(_)) => {
-                        tracing::debug!(
-                            wave_id = %wave_id,
-                            slot = resource.slot_index,
-                            path = %path,
-                            "R13: slot worktree already absent (idempotent)"
-                        );
+                        // The preset reporter may have removed the path
+                        // before runner termination. Continue with the
+                        // persisted branch binding so reporter-first and
+                        // runner-first cleanup have the same result.
+                        if let Some(branch) = resource.branch.as_deref()
+                            && let Err(err) =
+                                ralph_core::worktree::remove_ralph_branch(repo_root, branch)
+                        {
+                            tracing::warn!(
+                                wave_id = %wave_id,
+                                slot = resource.slot_index,
+                                path = %path,
+                                branch = %branch,
+                                error = %err,
+                                "R13: slot worktree absent but branch cleanup failed"
+                            );
+                        } else {
+                            tracing::debug!(
+                                wave_id = %wave_id,
+                                slot = resource.slot_index,
+                                path = %path,
+                                branch = ?resource.branch,
+                                "R13: slot worktree already absent; branch cleanup reconciled"
+                            );
+                        }
                     }
                     Err(err) => {
                         // Keep pending cleanup diagnosable but do not
