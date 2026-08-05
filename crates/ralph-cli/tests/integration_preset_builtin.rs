@@ -287,6 +287,13 @@ fn builtin_show_yaml_public_is_parseable() {
     let text = stdout(&out);
     assert!(!text.is_empty(), "yaml stdout must not be empty");
 
+    // The CLI contract is raw passthrough: stdout must be byte-for-byte
+    // identical to the build-script output embedded in `EmbeddedPreset`.
+    // Comparing the actual subprocess stdout catches accidental trimming,
+    // reserialization, or an appended newline at the public boundary.
+    let embedded = include_str!(concat!(env!("OUT_DIR"), "/presets/parallel-forge.yml"));
+    assert_eq!(text.as_bytes(), embedded.as_bytes());
+
     // Must parse as YAML and contain the expected parallel-forge top-level
     // keys (mirrors `presets/en/parallel-forge.yml`).
     let parsed: serde_yaml::Value = serde_yaml::from_str(&text).expect("stdout must parse as YAML");
