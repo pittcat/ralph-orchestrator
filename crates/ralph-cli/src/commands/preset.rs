@@ -108,6 +108,27 @@ pub enum PresetCommands {
         #[arg(long)]
         dest: Option<PathBuf>,
     },
+    /// Introspect compiled-in builtin presets (U01: public-only inventory)
+    Builtin {
+        #[command(subcommand)]
+        command: PresetBuiltinCommands,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+pub enum PresetBuiltinCommands {
+    /// List public builtin presets compiled into this binary (U01)
+    List {
+        /// Output format (human or json)
+        #[arg(long, value_enum, default_value_t = PresetBuiltinListFormat::Human)]
+        format: PresetBuiltinListFormat,
+    },
+}
+
+#[derive(ValueEnum, Debug, Clone, Copy)]
+pub enum PresetBuiltinListFormat {
+    Human,
+    Json,
 }
 
 #[derive(ValueEnum, Debug, Clone, Copy)]
@@ -216,6 +237,9 @@ pub async fn execute(
             plan_key,
             dest,
         }) => materialize_artifacts(&preset, &plan_key, dest.as_deref(), use_colors),
+        Some(PresetCommands::Builtin { command }) => match command {
+            PresetBuiltinCommands::List { format } => list_builtins(format, use_colors),
+        },
         None => {
             // Default to list with current config
             list_templates(PresetListFormat::Human, use_colors)
@@ -326,6 +350,83 @@ fn list_templates(format: PresetListFormat, use_colors: bool) -> Result<()> {
             }
             println!("Use `ralph preset show <name>` to see template details.");
             println!("Use `ralph preset new <name> --name <preset-name>` to generate a preset.");
+        }
+    }
+    Ok(())
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// U01: Builtin introspection — list compiled-in presets (S1, S2, S12)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Projection of a public `EmbeddedPreset` into the stable builtin-list
+/// JSON envelope.  Field names are part of the agent-visible contract:
+/// `id` is the embedded `name`, `source` is always derived as
+/// `builtin:<id>` (no whitespace, no case drift), `description` is the
+/// embedded description, and `public` is always `true` for items that
+/// reach this projection (hidden presets are filtered upstream by
+/// `list_presets`).
+#[derive(serde::Serialize)]
+struct BuiltinListItem {
+    id: String,
+    source: String,
+    description: String,
+    public: bool,
+}
+
+/// Top-level envelope shape for `ralph preset builtin list --format json`.
+///
+/// Stable across versions: callers (project-bootstrap resolver, operator
+/// scripts) parse `{presets: [...]}` and never the bare array.
+#[derive(serde::Serialize)]
+struct BuiltinListEnvelope {
+    presets: Vec<BuiltinListItem>,
+}
+
+/// Render the public builtin inventory derived from `EmbeddedPreset`.
+///
+/// # Agent / operator contract (U01 / S1, S2)
+///
+/// - Source is the `EmbeddedPreset` table compiled into the binary —
+///   no filesystem reads, no TemplateCatalog fallback, no bootstrap
+///   resolver invocation.
+/// - Hidden presets (`public=false`) MUST NOT appear in either format.
+/// - `source` is strictly `builtin:<id>` (no whitespace, no case drift).
+/// - JSON shape is `{presets: [{id, source, description, public}, ...]}`.
+/// - Human format labels builtin IDs and visibility (S2).
+fn list_builtins(format: PresetBuiltinListFormat, use_colors: bool) -> Result<()> {
+    let items: Vec<BuiltinListItem> = crate::presets::list_presets()
+        .into_iter()
+        .map(|preset| BuiltinListItem {
+            id: preset.name.to_string(),
+            source: format!("builtin:{}", preset.name),
+            description: preset.description.to_string(),
+            public: preset.public,
+        })
+        .collect();
+
+    match format {
+        PresetBuiltinListFormat::Json => {
+            let envelope = BuiltinListEnvelope { presets: items };
+            println!("{}", serde_json::to_string_pretty(&envelope)?);
+        }
+        PresetBuiltinListFormat::Human => {
+            println!("Available builtin presets (compiled into this binary):");
+            println!();
+            for item in &items {
+                if use_colors {
+                    println!("  {}{}{}", colors::CYAN, item.id, colors::RESET);
+                } else {
+                    println!("  {}", item.id);
+                }
+                println!("    source: {}", item.source);
+                println!("    public: {}", item.public);
+                println!("    {}", item.description);
+                println!();
+            }
+            if items.is_empty() {
+                println!("  (no public builtin presets available)");
+            }
         }
     }
     Ok(())
