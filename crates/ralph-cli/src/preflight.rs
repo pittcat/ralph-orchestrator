@@ -4,7 +4,7 @@ use anyhow::{Context, Result};
 use clap::{ArgAction, Parser, ValueEnum};
 use ralph_core::{CheckResult, CheckStatus, PreflightReport, PreflightRunner, RalphConfig};
 use serde_yaml::{Mapping, Value};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use tracing::{info, warn};
 
 use crate::{ConfigSource, HatsSource, config_resolution, presets};
@@ -471,6 +471,7 @@ async fn load_hats_value(source: &HatsSource) -> Result<Value> {
             let content = std::fs::read_to_string(path)
                 .with_context(|| format!("Failed to load hats from {:?}", path))?;
             let value = config_resolution::parse_yaml_value(&content, &path.display().to_string())?;
+            let value = merge_adjacent_preset_schema_ssot(path, value)?;
             normalize_hats_source_value(value, &path.display().to_string())
         }
         HatsSource::Remote(url) => {
@@ -510,6 +511,66 @@ async fn load_hats_value(source: &HatsSource) -> Result<Value> {
             extract_hat_overlay_from_preset(preset_value)
         }
     }
+}
+
+/// File presets in the repository keep payload schemas in the adjacent
+/// `presets/schemas/<stem>.yml` SSOT. Builtins receive this merge in
+/// `ralph-cli/build.rs`; file-mode review and execution must use the same
+/// contract instead of silently dropping the schema layer.
+fn merge_adjacent_preset_schema_ssot(path: &Path, mut preset: Value) -> Result<Value> {
+    let Some(parent) = path.parent() else {
+        return Ok(preset);
+    };
+    let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
+        return Ok(preset);
+    };
+    let Some(en_dir) = parent.file_name().and_then(|s| s.to_str()) else {
+        return Ok(preset);
+    };
+    if en_dir != "en" {
+        return Ok(preset);
+    }
+    let schema_path = parent
+        .parent()
+        .map(|root| root.join("schemas").join(format!("{stem}.yml")));
+    let Some(schema_path) = schema_path.filter(|p| p.is_file()) else {
+        return Ok(preset);
+    };
+    let schema_text = std::fs::read_to_string(&schema_path)
+        .with_context(|| format!("Failed to load schema SSOT from {}", schema_path.display()))?;
+    let ssot: Value =
+        config_resolution::parse_yaml_value(&schema_text, &schema_path.display().to_string())?;
+    let Some(ssot_schemas) = ssot.get("schemas").and_then(Value::as_mapping) else {
+        return Ok(preset);
+    };
+    let event_loop = preset
+        .as_mapping_mut()
+        .and_then(|m| m.get_mut(Value::String("event_loop".into())))
+        .and_then(Value::as_mapping_mut);
+    let Some(event_loop) = event_loop else {
+        return Ok(preset);
+    };
+    let event_policy = event_loop
+        .entry(Value::String("event_policy".into()))
+        .or_insert_with(|| Value::Mapping(Default::default()))
+        .as_mapping_mut();
+    let Some(event_policy) = event_policy else {
+        return Ok(preset);
+    };
+    let inline = event_policy
+        .remove(Value::String("schemas".into()))
+        .and_then(|v| v.as_mapping().cloned())
+        .unwrap_or_default();
+    let mut merged = ssot_schemas.clone();
+    for (topic, override_value) in inline {
+        let value = match merged.remove(&topic) {
+            Some(base) => config_resolution::merge_yaml_values(base, override_value)?,
+            None => override_value,
+        };
+        merged.insert(topic, value);
+    }
+    event_policy.insert(Value::String("schemas".into()), Value::Mapping(merged));
+    Ok(preset)
 }
 
 /// Synchronous counterpart of [`load_core_value`]. Remote sources are not
@@ -604,6 +665,7 @@ fn load_hats_value_sync(source: &HatsSource) -> Result<Value> {
             let content = std::fs::read_to_string(path)
                 .with_context(|| format!("Failed to load hats from {:?}", path))?;
             let value = config_resolution::parse_yaml_value(&content, &path.display().to_string())?;
+            let value = merge_adjacent_preset_schema_ssot(path, value)?;
             normalize_hats_source_value(value, &path.display().to_string())
         }
         HatsSource::Remote(url) => {
@@ -1331,6 +1393,35 @@ mod tests {
             with_hats_label,
             format!("{expected_core} + hats:builtin:debug")
         );
+    }
+
+    #[test]
+    fn file_preset_load_merges_adjacent_schema_ssot() {
+        let temp = tempfile::tempdir().unwrap();
+        let en = temp.path().join("presets/en");
+        let schemas = temp.path().join("presets/schemas");
+        std::fs::create_dir_all(&en).unwrap();
+        std::fs::create_dir_all(&schemas).unwrap();
+        let preset_path = en.join("sample.yml");
+        std::fs::write(
+            &preset_path,
+            "event_loop:\n  event_policy:\n    enabled: true\nhats:\n  reviewer:\n    triggers: [start]\n    publishes: [sample.done]\n",
+        )
+        .unwrap();
+        std::fs::write(
+            schemas.join("sample.yml"),
+            "schemas:\n  sample.done:\n    required_fields: [artifact_path]\n    payload: json_object\n",
+        )
+        .unwrap();
+
+        let value = load_hats_value_sync(&HatsSource::File(preset_path)).unwrap();
+        let schemas = value
+            .get("event_loop")
+            .and_then(|v| v.get("event_policy"))
+            .and_then(|v| v.get("schemas"))
+            .and_then(Value::as_mapping)
+            .expect("file preset should expose merged schemas");
+        assert!(schemas.contains_key(Value::String("sample.done".into())));
     }
 
     #[test]

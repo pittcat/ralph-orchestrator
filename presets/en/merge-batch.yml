@@ -151,7 +151,7 @@ hats:
 
       Read-only analysis. Do NOT run `git merge` or modify the working tree.
 
-      OPAC reference: follow `ralph-tools-opac` (Observe → Precheck → Apply → Confirm) and `ralph-tools-emit` §5 precheck; do not reproduce command syntax in this hat.
+      OPAC reference: follow `ralph-tools-opac` (Observe → Precheck → Apply → Confirm). Before constructing the payload, run `ralph tools skill load ralph-tools-emit` and follow its Policy-Check feedback and §5 precheck; do not reproduce command syntax in this hat.
 
       ### Step 1: Parse prompt
 
@@ -207,14 +207,17 @@ hats:
 
       ### Step 6: Publish
 
+      First write `.ralph/merge/review.md` containing the complete per-branch
+      intent, risks, cross-branch analysis, predicted conflicts, and resolution
+      methods. Verify it is readable. The event carries only short control
+      fields plus `review_path`; never inline the full review in the payload.
+
       Publish **`merge.reviewed`** with a structured payload summarizing:
       - target branch
       - branch order
       - per-branch design intent and risks
       - cross-branch interactions
-      - predicted conflicts (`predicted_conflicts` array) and resolution methods
-        (`resolution_methods` array) — both are required schema fields; integrator
-        consumes them verbatim when applying each `git merge`.
+      - `review_path` — the readable artifact path the integrator must consume.
 
       Merge WILL proceed after review — your job is to enable safe merging, not to block.
 
@@ -232,10 +235,12 @@ hats:
     instructions: |
       ## BRANCH INTEGRATOR MODE
 
-      Merge ALL prompt branches into the target branch. Use the `merge.reviewed`
-      payload and prompt branch order.
+      Merge ALL prompt branches into the target branch. Read `review_path` from
+      the trigger context, then read and validate the review artifact before
+      applying any merge. Stop if it is missing, unreadable, or lacks the
+      conflict strategy for the branch being merged.
 
-      OPAC reference: follow `ralph-tools-opac` (Observe → Precheck → Apply → Confirm) and `ralph-tools-emit` §5 precheck; do not reproduce command syntax in this hat.
+      OPAC reference: follow `ralph-tools-opac` (Observe → Precheck → Apply → Confirm). Before constructing the payload, run `ralph tools skill load ralph-tools-emit` and follow its Policy-Check feedback and §5 precheck; do not reproduce command syntax in this hat.
 
       ### Step 1: Prepare
 
@@ -255,10 +260,13 @@ hats:
       If verification fails before any branch is merged:
       - do not merge any branch;
       - record the command, exit status, and concise failure evidence;
+      - write `.ralph/merge/integration.md` with the failed pre-merge gate
+        and verify that it is readable;
       - publish `merge.integrated` with `integration_complete: false`,
         `ready_for_stabilization: false`, empty `branches_merged` and
         `merge_commit_shas`, and one `branches_failed` entry with
-        `branch: "<pre-merge-verification>"` and the failure reason.
+        `branch: "<pre-merge-verification>"` and the failure reason, plus
+        `integration_path: .ralph/merge/integration.md`.
       The stabilizer will turn this into `merge.stabilized(passed: false,
       reason: merge_incomplete)`, allowing reporter to write the failure
       report and emit the normal completion token.
@@ -298,6 +306,10 @@ hats:
 
       ### Step 3: Publish
 
+      Before publishing, write `.ralph/merge/integration.md` with actual merge
+      order, skipped/merged/failed branches, merge SHAs, conflicts, verification
+      result, and failure evidence. Verify it is readable.
+
       Publish **`merge.integrated`** with payload fields:
       - `integration_complete`: **true** only if EVERY prompt branch is merged
         (merged this run or already merged); **false** if any branch was
@@ -309,6 +321,7 @@ hats:
       - `branches_failed` — aborted or could not merge (with reasons;
         no overlap with `branches_merged`)
       - `merge_commit_shas` — SHAs for commits made this run
+      - `integration_path: .ralph/merge/integration.md`
 
   stabilizer:
     name: "Stabilizer"
@@ -327,7 +340,7 @@ hats:
       Verify the merged tree and fix failures until green. Use a self-loop via
       **`merge.retest`** (fresh iteration).
 
-      OPAC reference: follow `ralph-tools-opac` (Observe → Precheck → Apply → Confirm) and `ralph-tools-emit` §5 precheck; do not reproduce command syntax in this hat.
+      OPAC reference: follow `ralph-tools-opac` (Observe → Precheck → Apply → Confirm). Before constructing any payload, run `ralph tools skill load ralph-tools-emit` and follow its Policy-Check feedback and §5 precheck; do not reproduce command syntax in this hat.
 
       ### Entry gate (on `merge.integrated`)
 
@@ -340,12 +353,16 @@ hats:
         - `passed: false`
         - `reason: merge_incomplete`
         - `branches_failed` from the integrator payload
+        - `report_input_file: .ralph/merge/report-input.md` after writing a
+          failure manifest that records the missing integration evidence
       - Do NOT run verification or enter the fix loop
 
       ### Artifact paths (create `.ralph/merge/` if missing)
 
       - `.ralph/merge/stabilize-log.md` — human-readable attempt log
       - `.ralph/merge/stabilize-state.json` — structured handoff between attempts
+      - `.ralph/merge/report-input.md` — manifest consumed by reporter; owner is
+        stabilizer, reader is reporter, retained with the merge tree for audit.
 
       ### EVERY stabilization attempt checklist
 
@@ -401,7 +418,13 @@ hats:
 
       ### Publish rules
 
+      Before every `merge.stabilized` emit, update `.ralph/merge/report-input.md`
+      with readable paths for review, integration, stabilize-log, and
+      stabilize-state. If an upstream artifact is unavailable, record that fact
+      in the manifest and keep `passed: false`.
+
       - **PASS** (and merge was complete) → `merge.stabilized` with `passed: true`
+        and `report_input_file: .ralph/merge/report-input.md`
       - **FAIL after fix attempt** (and attempt < 35) → `merge.retest`
       - **Merge incomplete** (integrator gate) → `merge.stabilized` with `passed: false`, `reason: merge_incomplete`
       - **Attempt ≥ 35 still failing** → `merge.stabilized` with `passed: false`, `reason: stabilization_exhausted`
@@ -423,8 +446,9 @@ hats:
 
       Write the final report and signal completion.
 
-      OPAC reference: follow `ralph-tools-opac` (Observe → Precheck → Apply → Confirm)
-      and `ralph-tools-emit` §5 precheck. Before each real emit: `--policy-check`
+      OPAC reference: follow `ralph-tools-opac` (Observe → Precheck → Apply → Confirm).
+      Before each real emit, run `ralph tools skill load ralph-tools-emit`, then
+      use its `--policy-check`
       first; Confirm with `--output json` (`ok`/`recorded`), not by reading event
       files. Do not reproduce command syntax tables in this hat.
 
@@ -463,6 +487,10 @@ hats:
       ```
 
       Check `merge.stabilized` payload (`passed`, `reason`) and git state.
+      Read `report_input_file` from the trigger context. Run `test -f` on the
+      manifest and every listed artifact, read them, and verify they contain
+      enough evidence for the required report sections. If any artifact is
+      missing or insufficient, write a FAIL report and emit `success: false`.
 
       ### On success (`passed: true` from `merge.stabilized`)
 
@@ -499,7 +527,7 @@ hats:
 
       Publish **`merge.batch.complete`** (sole completion token) with payload:
       - `success: true|false` (true ONLY when `merge.stabilized.passed` is true)
-      - `report_path` (required; readable file)
+      - `report_path` (required; readable file under `.ralph/merge/`)
       - `merged_branches`
       - `failed_stage` / `reason` (if any)
 

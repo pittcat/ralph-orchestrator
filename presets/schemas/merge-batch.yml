@@ -26,30 +26,20 @@
 
 schemas:
   # reviewer → review complete, integrator picks this up. The
-  # payload carries the per-branch design understanding,
-  # cross-branch risk analysis, and predicted conflicts +
-  # resolution methods that the integrator consumes verbatim
-  # when applying each `git merge`. `target_branch` and
-  # `branch_order` are the canonical merge inputs the
-  # integrator feeds to `git checkout` / `git merge` so the
-  # integrator does not need to re-derive order from the prompt.
+  # The event is the control plane. The complete review is stored in
+  # `.ralph/merge/review.md`; the integrator reads and verifies that artifact.
   merge.reviewed:
     required_fields:
       - target_branch
       - branch_order
-      - per_branch_intent
-      - predicted_conflicts
-      - resolution_methods
+      - review_path
     payload: json_object
     field_docs:
-      predicted_conflicts:
-        meaning: For each predicted merge conflict point, the conflict type and rationale.
-        source: Reviewer writes from `git merge-tree` output + design understanding (per-branch intent).
-        fill_rule: Array of objects {branch, file, conflict_type, rationale}; one entry per predicted conflict.
-      resolution_methods:
-        meaning: Per predicted conflict, the resolution method the integrator must apply.
-        source: Reviewer writes from design understanding of both sides.
-        fill_rule: Array of objects {branch, file, method, rationale}; one entry per predicted conflict.
+      review_path:
+        meaning: Artifact落盘点，相对仓库根目录 `.ralph/` 的 review 文件路径。
+        source: Reviewer writes the review artifact in the current workspace.
+        fill_rule: Use the real readable path written this activation; reject the emit if it is missing.
+        examples: [".ralph/<plan>/review.md"]
 
   # integrator → all prompt branches merged (or skipped because
   # already merged). Stabilizer picks this up. The integration
@@ -66,6 +56,7 @@ schemas:
       - branches_skipped
       - branches_failed
       - merge_commit_shas
+      - integration_path
     payload: json_object
     field_docs:
       integration_complete:
@@ -99,6 +90,11 @@ schemas:
           to include in REPORT.md.
         source: Integrator writes from `git rev-parse HEAD` after each successful merge.
         fill_rule: Array of full commit SHAs.
+      integration_path:
+        meaning: Artifact落盘点，相对仓库根目录 `.ralph/` 的 integration evidence path。
+        source: Integrator writes the merge order, conflicts, SHAs, and verification evidence.
+        fill_rule: Use the real readable path written this activation; reject the emit if it is missing.
+        examples: [".ralph/<plan>/integration.md"]
 
   # stabilizer → self-loop retry signal. The hat itself emits
   # this after a fix attempt; the next activation re-enters
@@ -129,6 +125,7 @@ schemas:
   merge.stabilized:
     required_fields:
       - passed
+      - report_input_file
     payload: json_object
     field_docs:
       passed:
@@ -153,6 +150,11 @@ schemas:
         meaning: Number of stabilization attempts made before this terminal event.
         source: Stabilizer counts from `.ralph/merge/stabilize-state.json`.
         fill_rule: Positive integer; ≥ 1 when stabilization actually ran.
+      report_input_file:
+        meaning: Artifact落盘点，相对仓库根目录 `.ralph/` 的 reporter 输入清单路径。
+        source: Stabilizer writes a manifest listing review, integration, and stabilization evidence paths.
+        fill_rule: Use the real readable manifest path; if any required evidence is unavailable, write a failure manifest and keep passed false.
+        examples: [".ralph/<plan>/report-input.md"]
 
   # reporter → sole completion token for merge-batch. Mirrors
   # the `merge.handled` shape in merge-loop: a single required
@@ -168,6 +170,7 @@ schemas:
         source: Reporter copies from merge.stabilized.passed (true only when stabilization passed).
         fill_rule: true only when merge.stabilized.passed is true; otherwise false.
       report_path:
-        meaning: Repo-relative path to the operator-facing merge report. Agent must verify the file is readable before emit.
+        meaning: Artifact落盘点，相对仓库根目录 `.ralph/` 的 operator-facing merge report 路径。Agent must verify the file is readable before emit.
         source: File actually written this activation under .ralph/merge/ (typically REPORT.md).
         fill_rule: Real readable path only. Agent must verify the file exists before emit (schema checks the field is present, not the filesystem). Confirm must print DELIVERABLE_PATH with the same path.
+        examples: [".ralph/<plan>/REPORT.md"]
