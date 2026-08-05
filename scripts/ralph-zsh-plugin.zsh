@@ -199,6 +199,7 @@ _RALPH_HATS_CMDS=(
 _RALPH_PRESET_CMDS=(
   "list:List available workflow templates"
   "show:Show details of a specific template"
+  "builtin:Introspect presets embedded in this binary"
   "new:Generate a new preset from a template"
   "check:Check preset/workflow contract (config, topology, payload, orphan)"
   "diff:Show differences between a local preset and its template baseline"
@@ -372,7 +373,7 @@ _ralph() {
           if (( CURRENT == 2 )); then
             _describe 'preset command' _RALPH_PRESET_CMDS
           else
-            _ralph_preset_subcmd ${words[2]} ${words[CURRENT]}
+            _ralph_preset_subcmd ${words[2]} ${words[CURRENT]} ${words[3]}
           fi
           ;;
         inspect)
@@ -507,6 +508,22 @@ _ralph_run_args() {
 _ralph_preset_subcmd() {
   local subcmd=$1
   local word_index=$2
+  local nested=${3:-}
+
+  if [[ $subcmd == builtin ]]; then
+    case $nested in
+      list)
+        _arguments '--format+[Output format]:format:(human json)'
+        ;;
+      show)
+        _arguments '1:builtin id:_default' '--format+[Output format]:format:(human yaml json)'
+        ;;
+      *)
+        _describe 'builtin command' '(list:List public embedded builtins show:Show embedded builtin YAML)'
+        ;;
+    esac
+    return
+  fi
 
   case $subcmd in
     list)

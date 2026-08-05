@@ -27,7 +27,21 @@ Ralph also keeps a few internal/testing presets available without advertising th
 
 - `merge-loop`
 
-## Templates: Create Your Own Workflow
+## 查询运行时 builtin 与模板
+
+Builtin preset 是编译进当前 Ralph binary、可直接运行的 YAML；template 是用于生成本地配置的 authoring scaffold，两者来自不同数据源。
+
+```bash
+# 查询当前 binary 实际包含的 public builtin
+ralph preset builtin list --format json
+
+# 按 builtin ID 输出完整 embedded YAML（hidden builtin 也可按已知 ID 查询）
+ralph preset builtin show parallel-forge --format yaml
+ralph preset builtin show merge-loop --format yaml
+```
+
+`ralph preset list/show` 仅操作 TemplateCatalog 模板，不能用于解析 `builtin:<id>`；bootstrap 使用 `preset builtin list/show` 获取运行时 builtin 内容。
+
 
 If the builtin presets don't fit your needs, Ralph provides **templates** — scaffold configurations you can customize. Templates generate ordinary YAML files that you can modify.
 
