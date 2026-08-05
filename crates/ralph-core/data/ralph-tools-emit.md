@@ -564,6 +564,15 @@ policy-check 拒收:
 
 `ralph emit --policy-check` 与 loop 内的统一校验管线行为一致。
 
+### `forge.wave.verified` 的幂等约束
+
+在 parallel-forge 中，`forge.wave.verified` 表示某个具体 wave 的某个候选
+commit 已完成验证。发送前从当前 trigger 读取 `plan_key`、`wave_id` 和
+`candidate_commit_sha`，三者必须对应同一个已整合候选；同一三元组只能成功
+发送一次。若返回 `duplicate_work_done` / `duplicate_forge_wave_verified`，
+停止重复发送，先等待后续纠正或新的 candidate commit；不要修改时间戳等无关
+字段来绕过去重。
+
 ### 进程崩溃后恢复
 
 进程崩溃后，loop 重启时自动从 events 文件重建状态：迭代计数、rejection 重试计数、handoff 审计轨迹、workflow phase 与 counter 集合。

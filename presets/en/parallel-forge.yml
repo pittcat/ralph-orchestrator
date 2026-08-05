@@ -123,10 +123,16 @@ mechanism:
         allowed_emits:
           - forge.audit.done
           - forge.plan.blocked
+      - id: finalize
+        kind: linear
+        "on": forge.audit.done
+        allowed_emits:
+          - forge.finalized
+          - forge.plan.blocked
       - id: report
         kind: await
         on_any_of:
-          - forge.audit.done
+          - forge.finalized
           - forge.plan.blocked
           - work.failed
         allowed_emits:
@@ -192,6 +198,7 @@ event_loop:
       - forge.incremental.verified
       - forge.full.verified
       - forge.audit.done
+      - forge.finalized
       - forge.report.done
       - forge.plan.blocked
       - exec.unit.ready
@@ -514,8 +521,13 @@ hats:
       2. Create integration branch; record `base_commit` after Foundation units land.
       3. For each parallel Unit: `git worktree add` + dedicated branch (one worktree per Unit).
       4. Write `.ralph/forge/<plan-key>/worktree-map.yml` (unit → branch → path).
-      5. Precheck then emit `forge.worktrees.ready` including `plan_key`, `worktree_map_path`, `execution_plan_path`, `integration_branch`, `base_commit`.
-      6. On failure: write `blocks/worktree-blocked.md`, emit `forge.plan.blocked` with context paths.
+      5. Identify the branch checked out by the first (main) worktree as
+         `target_branch`. This is the branch the finalizer must fast-forward;
+         never guess `main`, `master`, or the integration branch.
+      6. Precheck then emit `forge.worktrees.ready` including `plan_key`,
+         `worktree_map_path`, `execution_plan_path`, `integration_branch`,
+         `target_branch`, and `base_commit`.
+      7. On failure: write `blocks/worktree-blocked.md`, emit `forge.plan.blocked` with context paths.
 
       Do not delete worktrees in this hat. Single business event only.
 
@@ -871,6 +883,9 @@ hats:
       2. 列 unit：execution-plan + `ralph tools task list`。
       3. 每 unit：读 `.ralph/forge/<plan_key>/units/<unit-id>-completion.md`；按 worktree-map 跳进 unit worktree 看 diff。
       4. 写 `.ralph/forge/<plan_key>/reviews/<unit-id>-review.md` 与 `reviews/summary.md`。
+         `reviews/summary.md` 中的 commit 字段必须填写集成后的
+         `forge.wave.integrated.candidate_commit_sha`；U04 cherry-pick 场景
+         禁止填写 `forge.wave.worktrees.ready` 中的 source commit。
       5. 全 APPROVED：emit `forge.wave.reviewed`（`wave_id`、`wave_index`、`unit_verdicts`、`aggregate_verdict: ACCEPTED`、`review_report_path`、`plan_key`）。
       6. 否则：写 `waves/<wave_id>/failure-observation.md`，emit `forge.wave.review.failed`（`failure_fingerprint` = kind + command + base SHA、`unit_verdicts`、`affected_task_ids`、`failure_observation_path`、`plan_key`）。forge-failure-handler 接管下一步。
 
@@ -992,10 +1007,12 @@ hats:
          `forge.wave.integrated` / `forge.integration.done`（后者仅兼容别名）。
       2. 按 development-plan / execution-plan 跑 incremental test 命令。
       3. 写 `.ralph/forge/<plan_key>/incremental-verification.md`。
-      4. 成功：emit `forge.wave.verified`（`wave_id`、`wave_index`、
+      4. 每个 `(wave_id, candidate_commit_sha)` 只允许成功 emit 一次
+         `forge.wave.verified`；若同一 activation 已成功发送，不要重发。
+      5. 成功：emit `forge.wave.verified`（`wave_id`、`wave_index`、
          `verification_log_path`、`passed`、`last_integrated_unit`、
          `candidate_commit_sha`、`plan_key`）。
-      5. 失败：写 `failures/verifier-failed.md`（建议用 `wave-failure.template.md`
+      6. 失败：写 `failures/verifier-failed.md`（建议用 `wave-failure.template.md`
          骨架），emit `forge.verification.failed`（`wave_id`、`wave_index`、
          `candidate_commit_sha`、`failure_fingerprint`、`affected_task_ids`、
          `plan_key`、`verification_failure_path`）。
@@ -1068,16 +1085,64 @@ hats:
 
       Single business event.
 
+  finalizer:
+    name: "Finalizer"
+    description: "Final delivery gate: materialize artifacts and fast-forward the integration branch into the starting branch."
+    triggers: [forge.audit.done]
+    publishes: [forge.finalized, forge.plan.blocked]
+    exempt_topics: [forge.finalized, forge.plan.blocked]
+    terminal_events: [forge.finalized, forge.plan.blocked]
+    event_filter:
+      enabled: true
+      events: [forge.audit.done]
+    instructions: |
+      ## FINALIZER MODE — delivery boundary
+
+      This hat owns the last handoff from the forge integration branch to the
+      branch checked out before the run. It may change Git refs and copy forge
+      artifacts, but it must not edit production source files.
+
+      OPAC: `ralph-tools-opac`. Before emit: `ralph tools skill load ralph-tools-emit`
+      then run `--policy-check` with the exact finalization payload.
+
+      1. Read `integration_branch`, `target_branch`, `worktree_map_path`,
+         `audit_report_path`, and `plan_key` from the trigger/projection.
+         `target_branch` is the first main-repository worktree branch recorded
+         by Worktree; never infer it from a preset name.
+      2. Verify the target worktree is clean and that target and integration
+         are different real branches. Run
+         `git merge-base --is-ancestor <target HEAD> <integration HEAD>`.
+         If the target advanced or the check fails, write
+         `.ralph/forge/<plan_key>/blocks/finalizer-blocked.md` and emit
+         `forge.plan.blocked`; never reset, force-push, or overwrite the target.
+      3. Before cleanup, materialize every required artifact into the main
+         repository artifact root: `final-audit.md`, `full-verification.md`,
+         `integration-log.md`, `reviews/summary.md`, and one
+         `units/<unit_id>-completion.md` for every settled Unit. If an artifact
+         exists only in an integration or executor worktree, copy it to the
+         corresponding main-repository path and verify it with `test -f`.
+      4. Write `finalization.md` containing target branch, integration branch,
+         pre-merge target SHA, integration SHA, and resulting target SHA.
+      5. From the target worktree run `git merge --ff-only <integration_branch>`.
+         A non-fast-forward result is a hard block, not a retry with reset or
+         force merge. Record the resulting target SHA in `finalization.md`.
+      6. Only after the merge and all artifact checks pass, emit
+         `forge.finalized` with `target_branch`, `integration_branch`,
+         `target_commit_sha`, `finalization_report_path`, and `plan_key`.
+
+      Single business event. The reporter may clean worktrees only after this
+      event. Do not emit `forge.report.done` or `LOOP_COMPLETE` from this hat.
+
   reporter:
     name: "Reporter"
     description: "Writes manager-readable Markdown report; terminal hat."
-    triggers: [forge.audit.done, forge.plan.blocked, work.failed, forge.units.reviewed]
+    triggers: [forge.finalized, forge.plan.blocked, work.failed, forge.units.reviewed]
     publishes: [forge.report.done, LOOP_COMPLETE]
     exempt_topics: [forge.report.done, LOOP_COMPLETE]
     terminal_events: [forge.report.done, LOOP_COMPLETE]
     event_filter:
       enabled: true
-      events: [forge.audit.done, forge.plan.blocked, work.failed]
+      events: [forge.finalized, forge.plan.blocked, work.failed]
     instructions: |
       ## REPORTER MODE — 终态 hat
 
@@ -1105,7 +1170,8 @@ hats:
       ### 步骤 1 — Observe（artifact-first，禁止扫 event history）
 
       **从当前 trigger 取路径**（不要猜）：
-      - `forge.audit.done`：`audit_report_path`、`verdict`、`plan_key`
+      - `forge.finalized`：`audit_report_path`、`target_branch`、
+        `integration_branch`、`target_commit_sha`、`finalization_report_path`、`plan_key`
       - `forge.plan.blocked` / `work.failed`：`context_artifact_path`、
         `forge_artifact_root`、`plan_key`、`reason`、`plan_path`
 
@@ -1120,6 +1186,10 @@ hats:
       - `units/*-completion.md`、`reviews/summary.md`（若存在）
       - `integration-log.md`、`full-verification.md`、`final-audit.md`（若存在）
       - 以及 `context_artifact_path` 全文
+
+      Finalizer must already have verified the artifact set and target merge.
+      If any required artifact or `finalization_report_path` is missing, write
+      the omission into the manager report and do not claim `COMPLETED`.
 
       缺失写「信息缺失，无法确认」。
 
@@ -1181,6 +1251,7 @@ state_projection:
       set:
         forge.worktree_map_path: "$.worktree_map_path"
         forge.integration_branch: "$.integration_branch"
+        forge.target_branch: "$.target_branch"
         forge.base_commit: "$.base_commit"
         forge.plan_key: "$.plan_key"
     - on: forge.exec.development.done
@@ -1207,6 +1278,13 @@ state_projection:
       set:
         forge.audit_verdict: "$.verdict"
         forge.audit_report_path: "$.audit_report_path"
+        forge.plan_key: "$.plan_key"
+    - on: forge.finalized
+      set:
+        forge.target_branch: "$.target_branch"
+        forge.integration_branch: "$.integration_branch"
+        forge.target_commit_sha: "$.target_commit_sha"
+        forge.finalization_report_path: "$.finalization_report_path"
         forge.plan_key: "$.plan_key"
     - on: forge.plan.blocked
       set:

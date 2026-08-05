@@ -606,6 +606,7 @@ schemas:
       - execution_plan_path
       - worktree_map_path
       - integration_branch
+      - target_branch
       - base_commit
       - plan_key
     payload: json_object
@@ -622,6 +623,10 @@ schemas:
         meaning: Target branch for sequential Unit integration.
         source: Git branch created or confirmed this activation.
         fill_rule: Real branch name on the main repo.
+      target_branch:
+        meaning: Branch checked out by the main worktree before the forge run.
+        source: First worktree entry from `git worktree list --porcelain`.
+        fill_rule: Real branch name; must differ from integration_branch.
       base_commit:
         meaning: Commit SHA frozen as concurrent baseline after Foundation units.
         source: git rev-parse HEAD on integration branch after Foundation merge.
@@ -731,6 +736,41 @@ schemas:
         meaning: Final audit artifact path.
         source: File at .ralph/forge/plan-key/final-audit.md.
         fill_rule: File must exist before emit.
+      plan_key:
+        meaning: Forge plan key basename.
+        source: Trigger / forge artifact root.
+        fill_rule: Must match directory name.
+
+  forge.finalized:
+    required_fields:
+      - audit_report_path
+      - target_branch
+      - integration_branch
+      - target_commit_sha
+      - finalization_report_path
+      - plan_key
+    payload: json_object
+    field_docs:
+      audit_report_path:
+        meaning: Final audit artifact carried into the delivery handoff.
+        source: forge.audit.done.audit_report_path.
+        fill_rule: Must exist before emit and match the audit event.
+      target_branch:
+        meaning: Branch that received the final fast-forward.
+        source: forge.worktrees.ready.target_branch.
+        fill_rule: Must be a real branch and must not equal integration_branch.
+      integration_branch:
+        meaning: Forge branch whose verified commits were delivered.
+        source: forge.worktrees.ready.integration_branch.
+        fill_rule: Must be the same branch used by the wave integrator.
+      target_commit_sha:
+        meaning: Target branch HEAD after the final fast-forward.
+        source: "git rev-parse after merge."
+        fill_rule: 40-character commit SHA.
+      finalization_report_path:
+        meaning: Artifact recording the target merge and required artifact checks.
+        source: File at .ralph/forge/plan-key/finalization.md.
+        fill_rule: Must exist before emit.
       plan_key:
         meaning: Forge plan key basename.
         source: Trigger / forge artifact root.

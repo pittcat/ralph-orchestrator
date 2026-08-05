@@ -465,6 +465,11 @@ pub struct PolicyRuntimeState {
     /// format mirrors `test_passed_seen_keys`. Same fall-through
     /// rule for missing/non-numeric `fix_round`.
     pub test_failed_seen_keys: HashSet<String>,
+    /// Parallel-forge wave verification deduplication. Key format:
+    /// `{plan_key}::{wave_id}::{candidate_commit_sha}`. A wave candidate
+    /// can be verified only once; a later wave or a different candidate
+    /// remains valid.
+    pub forge_wave_verified_seen_keys: HashSet<String>,
     /// 2026-07-01-001 U1: dedup set for `review.start` events.
     /// Key format: `{plan_name}::{task_id}` when `step` is absent,
     /// `{plan_name}::{task_id}::{step}` when present. A 2nd emit
@@ -718,6 +723,22 @@ impl PolicyRuntimeState {
                     state
                         .review_dimension_ready_seen_keys
                         .insert(format!("{pn}::{st}::{ti}::{dim}"));
+                }
+            }
+            // Replay prior forge.wave.verified events so a process restart
+            // cannot accept the same wave/candidate twice.
+            if event.topic == "forge.wave.verified"
+                && let Some(obj) = Self::payload_object(event.payload.as_deref())
+            {
+                let plan_key = obj.get("plan_key").and_then(|v| v.as_str());
+                let wave_id = obj.get("wave_id").and_then(|v| v.as_str());
+                let candidate = obj.get("candidate_commit_sha").and_then(|v| v.as_str());
+                if let (Some(plan_key), Some(wave_id), Some(candidate)) =
+                    (plan_key, wave_id, candidate)
+                {
+                    state
+                        .forge_wave_verified_seen_keys
+                        .insert(format!("{plan_key}::{wave_id}::{candidate}"));
                 }
             }
             // 2026-07-01-001 U1: replay prior `review.start` events
@@ -1623,6 +1644,39 @@ pub fn validate_event_with_options<H: HandoffEnvelopeConfigAccess>(
             // `from_events` on restart so cross-batch replays
             // honor the dedup.
             state.review_dimension_ready_seen_keys.insert(dedup_key);
+        }
+    }
+
+    // Parallel-forge verification is a terminal decision for one concrete
+    // wave candidate. Duplicate emits must not fan out another verifier /
+    // tester activation, including when the duplicate arrives in a later
+    // output batch after the first event has already been persisted.
+    if topic == "forge.wave.verified"
+        && let Some(p) = payload
+        && let Ok(Value::Object(obj)) = serde_json::from_str::<Value>(p)
+    {
+        let plan_key = obj.get("plan_key").and_then(|v| v.as_str());
+        let wave_id = obj.get("wave_id").and_then(|v| v.as_str());
+        let candidate = obj.get("candidate_commit_sha").and_then(|v| v.as_str());
+        if let (Some(plan_key), Some(wave_id), Some(candidate)) = (plan_key, wave_id, candidate) {
+            let dedup_key = format!("{plan_key}::{wave_id}::{candidate}");
+            if state.forge_wave_verified_seen_keys.contains(&dedup_key) {
+                let finding = PolicyFinding {
+                    topic: topic.to_string(),
+                    violation_type: ViolationType::DuplicateWorkDone {
+                        key: dedup_key.clone(),
+                        hint: DuplicateWorkDoneHint::DuplicateSameStep,
+                        seen_count: None,
+                    },
+                    message: format!(
+                        "duplicate_forge_wave_verified: forge.wave.verified for key \
+                         '{dedup_key}' was already accepted. Emit verification only once \
+                         for a wave and candidate commit."
+                    ),
+                };
+                return PolicyDecision::RejectWithResume(finding);
+            }
+            state.forge_wave_verified_seen_keys.insert(dedup_key);
         }
     }
 
@@ -2952,6 +3006,14 @@ fn build_projection_preview(state: &PolicyRuntimeState) -> Option<ProjectionPrev
             field: "test_failed_seen_keys".to_string(),
             action: "set".to_string(),
             value: serde_json::json!(state.test_failed_seen_keys),
+        });
+    }
+
+    if !state.forge_wave_verified_seen_keys.is_empty() {
+        actions.push(ProjectionAction {
+            field: "forge_wave_verified_seen_keys".to_string(),
+            action: "set".to_string(),
+            value: serde_json::json!(state.forge_wave_verified_seen_keys),
         });
     }
 
@@ -5038,6 +5100,65 @@ mod tests {
             "from_events must populate dedup set from prior review.dimension.ready, got {:?}",
             state.review_dimension_ready_seen_keys
         );
+    }
+
+    #[test]
+    fn forge_wave_verified_duplicate_is_rejected() {
+        let config = test_config();
+        let mut state = PolicyRuntimeState::default();
+        let payload = r#"{"plan_key":"pf-1","wave_id":"wave-1","candidate_commit_sha":"abc123"}"#;
+
+        assert_eq!(
+            validate_event("forge.wave.verified", Some(payload), &config, &mut state),
+            PolicyDecision::Accept
+        );
+        assert!(
+            state
+                .forge_wave_verified_seen_keys
+                .contains("pf-1::wave-1::abc123")
+        );
+
+        let second = validate_event("forge.wave.verified", Some(payload), &config, &mut state);
+        assert!(
+            matches!(
+                second,
+                PolicyDecision::RejectWithResume(PolicyFinding {
+                    ref topic,
+                    violation_type: ViolationType::DuplicateWorkDone { ref key, .. },
+                    ..
+                }) if topic == "forge.wave.verified" && key == "pf-1::wave-1::abc123"
+            ),
+            "duplicate forge.wave.verified must be rejected, got {second:?}"
+        );
+    }
+
+    #[test]
+    fn forge_wave_verified_replay_populates_seen_keys() {
+        use std::io::Write;
+
+        let mut tmp = NamedTempFile::new().unwrap();
+        writeln!(
+            tmp,
+            r#"{{"topic":"forge.wave.verified","payload":"{{\"plan_key\":\"pf-1\",\"wave_id\":\"wave-1\",\"candidate_commit_sha\":\"abc123\"}}"}}"#
+        )
+        .unwrap();
+        tmp.flush().unwrap();
+
+        let mut state = PolicyRuntimeState::from_events(tmp.path(), &test_config()).unwrap();
+        let payload = r#"{"plan_key":"pf-1","wave_id":"wave-1","candidate_commit_sha":"abc123"}"#;
+        let decision = validate_event(
+            "forge.wave.verified",
+            Some(payload),
+            &test_config(),
+            &mut state,
+        );
+        assert!(matches!(
+            decision,
+            PolicyDecision::RejectWithResume(PolicyFinding {
+                violation_type: ViolationType::DuplicateWorkDone { .. },
+                ..
+            })
+        ));
     }
 
     // -------------------------------------------------------------------------

@@ -1302,7 +1302,7 @@ mod tests {
         );
 
         // R5: full success path: planning chain → development_loop
-        // (transition) → full_verify → audit → report → plan_end.
+        // (transition) → full_verify → audit → finalize → report → plan_end.
         assert_eq!(
             recover_current_plan_step(
                 &config,
@@ -1314,6 +1314,7 @@ mod tests {
                     "forge.exec.development.done",
                     "forge.full.verified",
                     "forge.audit.done",
+                    "forge.finalized",
                     "forge.report.done",
                 ],
             ),
@@ -1447,6 +1448,101 @@ mod tests {
         assert_eq!(match_cfg.topic, "forge.report.done");
         assert_eq!(match_cfg.fields, vec!["report_path"]);
         assert!(match_cfg.validate().is_ok());
+    }
+
+    #[test]
+    fn parallel_forge_requires_final_delivery_handoff() {
+        let preset = get_preset("parallel-forge").expect("parallel-forge preset");
+        let config = RalphConfig::parse_yaml(preset.content).expect("parallel-forge YAML parses");
+        let flow = config
+            .mechanism
+            .as_ref()
+            .and_then(|mechanism| mechanism.flow.as_ref())
+            .expect("parallel-forge declares mechanism.flow");
+
+        let finalize = flow
+            .steps
+            .iter()
+            .find(|step| step.id == "finalize")
+            .expect("parallel-forge must have a final delivery step");
+        assert_eq!(finalize.on.as_deref(), Some("forge.audit.done"));
+        assert!(
+            finalize
+                .allowed_emits
+                .iter()
+                .any(|topic| topic == "forge.finalized")
+        );
+
+        let report = flow
+            .steps
+            .iter()
+            .find(|step| step.id == "report")
+            .expect("parallel-forge must have a report step");
+        assert!(
+            report
+                .on_any_of
+                .iter()
+                .any(|topic| topic == "forge.finalized")
+        );
+        assert!(
+            !report
+                .on_any_of
+                .iter()
+                .any(|topic| topic == "forge.audit.done")
+        );
+
+        let finalizer = config
+            .hats
+            .get("finalizer")
+            .expect("parallel-forge must define finalizer");
+        assert!(
+            finalizer
+                .triggers
+                .iter()
+                .any(|topic| topic == "forge.audit.done")
+        );
+        assert!(
+            finalizer
+                .publishes
+                .iter()
+                .any(|topic| topic == "forge.finalized")
+        );
+
+        let worktrees_ready = config
+            .event_loop
+            .event_policy
+            .as_ref()
+            .and_then(|policy| policy.schemas.get("forge.worktrees.ready"))
+            .expect("forge.worktrees.ready schema");
+        assert!(
+            worktrees_ready
+                .required_fields
+                .iter()
+                .any(|field| field == "target_branch")
+        );
+
+        let finalized = config
+            .event_loop
+            .event_policy
+            .as_ref()
+            .and_then(|policy| policy.schemas.get("forge.finalized"))
+            .expect("forge.finalized schema");
+        for field in [
+            "audit_report_path",
+            "target_branch",
+            "integration_branch",
+            "target_commit_sha",
+            "finalization_report_path",
+            "plan_key",
+        ] {
+            assert!(
+                finalized
+                    .required_fields
+                    .iter()
+                    .any(|required| required == field),
+                "forge.finalized schema missing {field}"
+            );
+        }
     }
 
     #[test]
