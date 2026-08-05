@@ -1,0 +1,67 @@
+# Key-stage event gate positive fixture — NOT a builtin preset. For ralph-preset-review acceptance only.
+#
+# Plan 2026-08-05-007 axes (capability-triggered key-stage event gate):
+#   (a) author notes record per-key-stage guard selection + each guard's independent
+#       retry budget (default 3) + reason + confirmation_status=confirmed.
+#   (b) preset YAML actually enables `event_loop.precheck.rules.<key_stage>` and
+#       `event_policy.payload_consistency.rules` mirroring the notes' choices.
+#   (c) Gate Scope `hard/record/off` fields and 0e `guard_selection` /
+#       `precheck_guard` / `payload_consistency_guard` / `precheck_retry_budget` /
+#       `payload_consistency_retry_budget` are NOT mixed (separate fields).
+#   (d) The two retry budgets are stored as separate fields, not merged into a
+#       single `retry_budget`.
+#
+# Anchor advertised for `test_skill_anchors.py` UNIQUE-id check:
+#   `key_stage_event_gate_baseline`
+# (intentionally NOT a real review-only finding id; the positive fixture's
+# purpose is to be the absence baseline. All five `preset.key_stage_event_gate_*`
+# review-only findings are absent when this fixture is reviewed against
+# its notes.)
+#
+# Not registered in presets/manifest.yml.
+event_loop:
+  execution_mode: isolated
+  starting_event: work.start
+  completion_promise: plan.complete
+  precheck:
+    enabled: true
+    rules:
+      main_handoff:
+        enabled: true
+  event_policy:
+    payload_consistency:
+      rules:
+        - id: terminal_complete_consistent
+          topic: plan.complete
+          when:
+            field: completion_status
+            op: eq
+            value: complete
+          mode: enforce
+          on_violation: reject_with_resume
+hats:
+  executor:
+    name: Executor
+    description: Pretends to author notes with full key-stage event gate coverage.
+    triggers:
+      - work.start
+    publishes:
+      - work.done
+    instructions: |
+      ## EXECUTOR — KEY-STAGE EXAMPLE
+      This preset is a positive example for key-stage event gate coverage.
+      Follow the author notes' recorded guard choices.
+    terminal_events:
+      - work.done
+  reporter:
+    name: Reporter
+    description: Pretends to write plan.complete with payload consistency covered.
+    triggers:
+      - work.done
+    publishes:
+      - plan.complete
+    instructions: |
+      ## REPORTER — KEY-STAGE EXAMPLE
+      This preset is a positive example for key-stage event gate coverage.
+    terminal_events:
+      - plan.complete

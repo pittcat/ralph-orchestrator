@@ -29,6 +29,14 @@ ANCHORS: tuple[tuple[str, str], ...] = (
     ("skills/ralph-preset-review/SKILL.md", "Capability-triggered audit"),
     ("skills/ralph-preset-author/references/commands.md", "Capability inventory"),
     ("skills/ralph-preset-author/references/agent-native-model.md", "Runtime Audit Model"),
+    # Key-stage event gate anchors (plan 2026-08-05-007). Both author and
+    # review SKILL.md must contain the section heading; both author and
+    # review finding-rubric.md must contain the "Key-stage event gate"
+    # segment marker so reviewers can pair findings with the rubric.
+    ("skills/ralph-preset-author/SKILL.md", "Key-stage event gate"),
+    ("skills/ralph-preset-review/SKILL.md", "Key-stage event gate audit"),
+    ("skills/ralph-preset-author/references/finding-rubric.md", "Key-stage event gate finding_id"),
+    ("skills/ralph-preset-review/references/finding-rubric.md", "Key-stage event gate finding_id"),
 )
 
 # Capability-triggered fixtures from plan 2026-08-02-001 U3.
@@ -52,6 +60,27 @@ CAPABILITY_FIXTURES: tuple[tuple[str, str], ...] = (
     (
         "terminal-ownership-negative-fixture.yml",
         "preset.auditor_multi_terminal_publisher",
+    ),
+    # Key-stage event gate fixtures from plan 2026-08-05-007.
+    # Each entry advertises the primary review-only finding id the
+    # fixture is meant to anchor. The positive fixture advertises
+    # absence (no review-only finding) by listing a baseline
+    # `key_stage_event_gate` anchor and is still loadable.
+    (
+        "key-stage-event-gate-positive-fixture.yml",
+        "key_stage_event_gate_baseline",
+    ),
+    (
+        "key-stage-event-gate-missing-selection-negative-fixture.yml",
+        "preset.key_stage_event_gate_missing_selection",
+    ),
+    (
+        "key-stage-event-gate-divergence-negative-fixture.yml",
+        "preset.key_stage_event_gate_notes_preset_diverge",
+    ),
+    (
+        "key-stage-event-gate-no-reason-negative-fixture.yml",
+        "preset.key_stage_event_gate_no_reason",
     ),
 )
 
@@ -117,6 +146,18 @@ def _anchor_uniqueness_results() -> Iterable[tuple[str, bool]]:
     unique_anchors = (
         ("skills/ralph-preset-author/SKILL.md", "Capability discovery"),
         ("skills/ralph-preset-review/SKILL.md", "Capability-triggered audit"),
+        # Use the precise 0e heading line so the string is present only
+        # once in each SKILL.md (the field-name references inside the
+        # body / guardrails contribute additional matches of the shorter
+        # phrase and must not be the unique anchor).
+        (
+            "skills/ralph-preset-author/SKILL.md",
+            "0e. **Key-stage event gate",
+        ),
+        (
+            "skills/ralph-preset-review/SKILL.md",
+            "3a.7. **Key-stage event gate audit",
+        ),
     )
     for path, anchor in unique_anchors:
         yield f"anchor_unique:{path}:{anchor}", _check_anchor_unique(path, anchor)

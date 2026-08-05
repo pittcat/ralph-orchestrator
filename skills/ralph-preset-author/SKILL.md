@@ -121,6 +121,30 @@ Use this skill to design and draft Ralph **presets** (builtin or local) with **A
      Evidence is one row per source (`ralph capability inventory --format json` excerpt, `ralph inspect prompt --hat <id> --format json` excerpt, schema field, doc reference, prior plan commit, etc.). `Decision` is `pass | re-confirm | block` per hat — for the `record` mode it must be set but does not block the workflow.
    - **Reconciliation before pre-review gate**: if topology drafting changed any hat's authority / mutation / handoff, recompute the Gate Scope table before Workflow 5. Notes and YAML scope must not silently diverge.
    - **Identity rule (capability-triggered, 不得 name-prefix)**: this section is a hard-rule, capability-triggered identification. Author must never identify a key hat by preset or hat name; equal capabilities yield equal rules regardless of preset or hat name.
+   - **不与 0e 关键环节事件门禁字段复用**：本段 mode 字段 `hard/record/off` 与 0e 的 `guard_selection` / `precheck_guard` / `payload_consistency_guard` / 两个 retry budget 字段语义完全不同——前者是 Gate Scope 表的 metric 阈值模式，后者是各关键位置的 guard 类型与各自 budget。review 命中「字段复用」即 `preset.key_stage_event_gate_field_reuse` finding，参见 `finding-rubric.md`「Key-stage event gate」段。
+
+0e. **Key-stage event gate (capability-triggered; per-location guard selection)**:
+   - **触发条件**：完成 Workflow 0d Gate Scope 表之后、起草阶段 2 拓扑之前，对每个被 Gate Scope 列入的关键 hat 的关键 handoff / 阶段分支逐位置识别。**逐位置识别**的输入信号与 0d Gate Scope 同源（terminal authority / production mutation / phase branching / multi-hat aggregation / artifact producer / key handoff），但**维度不同**：0d 决定 hat 是否进入 Gate Scope，0e 决定该 hat 内哪些事件位置需要 guard。**禁止**用一个 preset 全局选择替代逐位置确认。
+   - **与 Gate Scope `hard/record/off` 的关系**：0d 选 mode 决定 Gate Scope 表内 metric 阈值是否阻塞；0e 选 guard 类型决定在该 hat 的哪个事件位置增加 `precheck guard` / `payload consistency` 拦截。两者**不是同一字段、不是同一问题、不可互相复用**。0d 选 `off` 不豁免 0e 的逐位置询问；0e 选 `neither` 也不豁免 0d 的 metric 评估。
+   - **逐位置询问菜单**：对每个被识别为关键位置的 handoff / 阶段分支，author 必须用 `AskUserQuestion` 给出 4 选 1:
+     1. **加入 `precheck guard`**（推荐当该位置有缺字段 / 缺值源高风险）——runtime 走 `ralph emit --policy-check` 同源 schema 拦截，命中时 step-close 走 hard-fail + bounded retry 路径（bounded retry 沿用现有 runtime 语义，不新增 counter）。
+     2. **加入 `payload consistency`**（推荐当该位置涉及 payload 内字段一致性 / 跨字段约束）——runtime 走 `event_loop.event_policy.payload_consistency.rules` + `payload_consistency:<rule_id>` gate 拦截，与现有 `event_policy.payload_consistency` 规则共用空间。
+     3. **加入 both**（当两类都成立）——两类 guard 共存；各自独立 retry budget（见下）。
+     4. **暂不加入（neither）**——本位置不新增上述 guard；既有 AAF / Payload Contract / mechanical lint / 0d Gate Scope 全部不受影响。
+   - **每类 guard 独立 retry budget**：对每个用户选定的 guard 类型，author **必须**再问一次 3 / 2 / 1 中的一个；默认 3；不可共享总预算。两类 guard **不**共享总预算、计数器或 exhaustion state；其 retry / correction / blocked 语义继续引用现有 runtime（`crates/ralph-core/data/ralph-tools-emit.md` §5 与 `ralph-tools-recovery-directives.md`）。
+   - **降级 / 关闭必须记录原因**：用户选择 `neither`、或选择低于推荐覆盖范围 / 默认 budget（3）时，author 必须在 notes 中记录简短理由（≤80 字），不得用「用户偏好」「后续再说」「先这样」等空话。理由必须指向具体风险（恢复 / 审计 / 下游依赖等）而非字符数。
+   - **未确认停止**：任一关键位置未拿到 guard 选择 + 各自 budget + 确认状态前，author **不得**把该选择当作已确认事实，**不得**继续生成依赖它的最终 YAML / schema 设计。Workflow 5 pre-review gate 会逐位置复审。
+   - **notes contract 字段固定**（按关键位置各填一行）：
+     - `key_stage`：关键 handoff / 阶段分支的人类可读标识（例如 `executor → fixer main handoff`、`work.done terminal`）。
+     - `guard_selection`：`precheck` / `payload_consistency` / `both` / `neither` 四选一。
+     - `precheck_guard`：布尔（`true` 当且仅当 `guard_selection ∈ {precheck, both}`）。
+     - `precheck_retry_budget`：整数 3 / 2 / 1，`precheck_guard=false` 时填 `null`。
+     - `payload_consistency_guard`：布尔（`true` 当且仅当 `guard_selection ∈ {payload_consistency, both}`）。
+     - `payload_consistency_retry_budget`：整数 3 / 2 / 1，`payload_consistency_guard=false` 时填 `null`。
+     - `reason`：≤80 字理由，包含关闭 / 降级 / 选择覆盖范围的根据。
+     - `confirmation_status`：`confirmed` / `pending` / `rejected` 三选一；非 `confirmed` 即视为未确认。
+   - **身份规则（capability-triggered）**：author 必须按 hat 能力信号识别关键位置，不得按 preset / hat 名称套用；同一能力信号在不同 hat 上得到同一组 guard 选项。
+   - **不替 runtime 决策**：作者不得借 0e 段落新增 runtime 配置、计数器、恢复路径或绕过 guard 的替代行为；所有 retry / correction / blocked 描述只引用现有 `ralph-tools-emit.md` / `ralph-tools-recovery-directives.md` 等已注入 skill，禁止凭印象写出新 runtime 规则。
 
 1. **Classify target:** local (`.ralph/hats/*.yml`) vs builtin (`presets/en/` + `presets/schemas/`). Note `execution_mode` and hat count (4+ → `isolated` mandatory). This step begins only after the Discovery gate passes.
 
@@ -208,6 +232,8 @@ Use this skill to design and draft Ralph **presets** (builtin or local) with **A
      - `supervisor+wave` → wave 7 问与 supervisor 6 问同时全 ✓，与 Intent.execution_model 一致。
      - 不一致（YAML 与 Intent）按 `finding-rubric.md`「Wave / Supervisor capability audit」段 `preset.execution_model_intent_mismatch` 入 review 主表。
    - **Artifact-First Handoff 5 问全 ✓**: 填 `references/author-checklist.md` 的「Hard questions — Artifact-First Handoff」段；任一 ✗ 必须改写或显式 justify。
+   - **Key-stage event gate (0e) 复查**：每个被 Gate Scope 列入的关键 hat 必须有 `Key-stage event gate` 表（按 notes 字段固定 8 列：`key_stage` / `guard_selection` / `precheck_guard` / `precheck_retry_budget` / `payload_consistency_guard` / `payload_consistency_retry_budget` / `reason` / `confirmation_status`）；所有行的 `confirmation_status` 必须为 `confirmed`；`guard_selection` ∈ {`precheck`, `payload_consistency`, `both`, `neither`}；`precheck_guard=true` ⇔ `guard_selection ∈ {precheck, both}`；`payload_consistency_guard=true` ⇔ `guard_selection ∈ {payload_consistency, both}`；`precheck_guard=true` ⇒ `precheck_retry_budget ∈ {3, 2, 1}`；`payload_consistency_guard=true` ⇒ `payload_consistency_retry_budget ∈ {3, 2, 1}`；`precheck_guard=false` ⇒ `precheck_retry_budget` 为 `null`；`payload_consistency_guard=false` ⇒ `payload_consistency_retry_budget` 为 `null`；两 budget 不共享；选择 `neither` 或 budget 低于 3 必须有 ≤80 字 `reason`，不得为空。任一不满足 → STOP 不得交付。
+   - **Key-stage 与 Gate Scope 字段隔离**：0d 的 `hard/record/off` 与 0e 的 `guard_selection` / `precheck_guard` / `payload_consistency_guard` / `precheck_retry_budget` / `payload_consistency_retry_budget` 字段语义不混；不得把 Gate Scope `off` 字段当作 0e 的关键位置选择。违规 → `preset.key_stage_event_gate_field_reuse` finding（参见 `finding-rubric.md`「Key-stage event gate」段，review-only）。
    - For builtin edits, list the 7-point sync checklist (do not auto-apply).
    - **If any check fails: STOP.** Do not recommend review or deliver YAML as complete.
 
@@ -233,6 +259,9 @@ Use this skill to design and draft Ralph **presets** (builtin or local) with **A
 - **Decision-gate off mode preserves existing AAF / Payload / lint.** The `off` choice is the only way to opt out entirely; it must not be described as "all review disabled".
 - **Decision-gate record mode does not invent approval.** Under `record`, metrics and evidence are written but never used to claim pass. The real pass criterion remains the existing AAF + Payload + mechanical lint.
 - **Decision-gate hard mode keeps Critical checks structural.** Under `hard`, `Critical Ambiguities = 0` and `Critical Unverified Assumptions = 0` are independently enforced per Gate Scope hat. The agent must not mark either as N/A while the gate is enabled.
+- **Key-stage event gate (0e) 不退化为 preset 全局选择**：author 不得用一个 preset 全局开关替代 per-position 询问；不得把 0d 的 `hard/record/off` 字段复用为 0e 的 guard 选择；不得把 0e 的 `precheck_retry_budget` 与 `payload_consistency_retry_budget` 合并为一个 `retry_budget` 字段。任一违反 → review-only finding。
+- **Key-stage event gate 不替 runtime 决策**：author 不得借 0e 段落新增 runtime 配置、计数器、恢复路径或绕过 guard 的替代行为；任何 retry / correction / blocked 描述只引用现有 `ralph-tools-emit.md` / `ralph-tools-recovery-directives.md` 等已注入 skill；不得写新 runtime 规则。
+- **Key-stage event gate `neither` 不削弱既有 AAF / Payload Contract / mechanical lint**：选择 `neither` 只表示该位置不新增本次 guard；既有的 AAF 五问、Payload Contract 落盘判断、mechanical lint 仍然对该位置生效；亦不豁免 0d Gate Scope 的 metric 评估。
 - **Do not duplicate** `ralph-tools*.md` content into instructions.
 
 ## Output Expectations

@@ -18,6 +18,17 @@
   - [ ] YAML 能力信号（`event_loop.supervisor.enabled` / hat instructions 含 `ralph wave emit`）与 Intent.execution_model 一致；不一致按 `finding-rubric.md`「Wave / Supervisor capability audit」 段 `preset.execution_model_intent_mismatch` 入 review 主表
 - [ ] 新 preset 或实质行为变更已通过最终菜单获得明确确认：「确认并开始设计 / 返回修改 / 暂停」
 - [ ] 用户未确认或仍有重大歧义时已 STOP，未起草 YAML/schema
+- [ ] **Key-stage event gate 0e 必备字段（review 复核，按关键位置每行）**：
+  - [ ] `key_stage` 注明 hat 与 handoff / 阶段分支的人类可读标识
+  - [ ] `guard_selection` ∈ {`precheck`, `payload_consistency`, `both`, `neither`}
+  - [ ] `precheck_guard` 布尔 `true` ⇔ `guard_selection ∈ {precheck, both}`
+  - [ ] `precheck_retry_budget` 整数 3 / 2 / 1，`precheck_guard=false` 时填 `null`
+  - [ ] `payload_consistency_guard` 布尔 `true` ⇔ `guard_selection ∈ {payload_consistency, both}`
+  - [ ] `payload_consistency_retry_budget` 整数 3 / 2 / 1，`payload_consistency_guard=false` 时填 `null`
+  - [ ] `reason` ≤80 字；选择 `neither` 或 budget 低于 3 必须有恢复 / 审计 / 下游依赖类理由
+  - [ ] `confirmation_status` ∈ {`confirmed`, `pending`, `rejected`}；非 `confirmed` 即视为未确认
+- [ ] **Key-stage event gate 与 Gate Scope 字段隔离**（review 端独立复核）：0d 的 `hard/record/off` 与 0e 的 `guard_selection` / `precheck_guard` / `payload_consistency_guard` / `precheck_retry_budget` / `payload_consistency_retry_budget` 字段语义不混；不得把 Gate Scope `off` 字段当 0e 的关键位置选择。违规 → `preset.key_stage_event_gate_field_reuse` finding（参见 `finding-rubric.md`「Key-stage event gate」段，review-only）。
+- [ ] **Key-stage event gate 两 budget 不共享**：不得把 `precheck_retry_budget` 与 `payload_consistency_retry_budget` 合并为一个 `retry_budget` 或共享 exhaustion state。
 
 ### 提问菜单示例（按真实缺口选用，不得照抄为固定问卷）
 
@@ -265,6 +276,21 @@
 5. **每条声明「不落盘」的信息是否都标注了简短理由，并按恢复价值、审计价值和下游依赖解释，而非只按字符数判断？** ✓ / ✗ + 证据
 
 预演 finding 时按 `references/finding-rubric.md`「Artifact-First Handoff finding_id」表入主表（review-only，不进 `ralph preset check` JSON）：`preset.artifact_path_not_in_visible_context` / `preset.artifact_no_consumer_declared` / `preset.artifact_no_lifecycle_owner` / `preset.artifact_uses_internal_ledger` / `preset.payload_carries_full_content` / `preset.artifact_first_field_docs_missing` / `preset.artifact_first_exemption_unjustified` / `preset.artifact_first_passed_on_path_presence` / `preset.subagent_result_returned_only_in_message` / `preset.artifact_described_as_preset_owned` / `preset.artifact_content_insufficient_for_decision`。完整默认 severity / confidence / aaf_question 见该表。
+
+## Hard questions — Key-stage event gate (0e, review 复核)
+
+review 端按关键位置逐条复核；任一项不满足即按 `finding-rubric.md`「Key-stage event gate」段入主表（review-only）：
+
+1. **每个被 reviewer 独立识别的关键位置是否在 author notes 中有 4 选 1 guard 选择？** ✓ / ✗ + 列出位置 + 证据
+2. **每个被选中的 guard 类型是否独立确认 retry budget（3 / 2 / 1，默认 3）？** ✓ / ✗ + 列每位置 budget 数值
+3. **`precheck_retry_budget` 与 `payload_consistency_retry_budget` 是否分别记录、不共享总预算 / 计数器 / exhaustion state？** ✓ / ✗ + 证据
+4. **选择 `neither` 或低于默认 budget（3）的位置是否都有 ≤80 字 `reason`（恢复 / 审计 / 下游依赖类）？** ✓ / ✗ + 证据
+5. **每行 `confirmation_status` 是否为 `confirmed`？非 `confirmed` 是否阻断后续 YAML / schema 设计？** ✓ / ✗ + 证据
+6. **0e 字段是否复用 0d 的 `hard/record/off` 字段？** 此项必须为 ✗（否）；✓ 表示字段被错误复用 → `preset.key_stage_event_gate_field_reuse`
+7. **0e 字段是否引入新的 runtime 规则、计数器、恢复路径？** 此项必须为 ✗；✓ 表示 author 越权定义 runtime → `preset.key_stage_event_gate_unsupported_runtime_rule`
+8. **notes 记录的 guard 选择与 YAML 实际 `event_loop.precheck.rules` / `event_policy.payload_consistency.rules` 是否一致？** ✓ / ✗ + 字段路径证据；不一致 → `preset.key_stage_event_gate_notes_preset_diverge`
+
+完整 finding 默认 severity / confidence / aaf_question 见 `finding-rubric.md`「Key-stage event gate」段。
 
 ## Builtin 7 点同步清单（摘要）
 

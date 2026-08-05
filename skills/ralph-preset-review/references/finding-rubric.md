@@ -135,6 +135,21 @@ Review skill 将 mechanical lint 与软性 AAF 缺口映射为 P0/P1/P2 + confid
 | `preset.payload_consistency_unsafe_message` | P0 | 90 | Q4 | lint | `rule.message` 含 ANSI escape / C0/C1 控制字符 / 零宽字符 / 长度超过 1024 UTF-8 bytes |
 | `preset.instructions_task_mutation_authority_conflict` | P0 | 90 | Q5 | lint | hat `instructions` 在 projector-owned batch action 或非 coordinator 角色下仍要求 `ralph tools task add` / `task ensure`；单写者冲突由 lint 兜底 |
 
+### Key-stage event gate finding_id（review-only，lint 不直接产出）
+
+按 `docs/plans/2026-08-05-007-feat-preset-author-key-stage-event-gates-plan.md` Product Contract（R1-R8 + AE1-AE6）补充的 review-only finding。**这些 ID 不会出现在 `ralph preset check --format json`**——lint 类无法从「per-key-stage guard 选择 + 各自 budget + 确认状态」多字段组视角判断，必须靠 reviewer 在 Workflow 3a.7 独立审。
+
+| finding_id（裸 ID / JSON 不出现） | default_severity | default_confidence | aaf_question | category | 备注 |
+|---|---|---|---|---|---|
+| `preset.key_stage_event_gate_missing_selection` | P0 | 90 | Q3 | feasibility | review-only；关键位置未在 notes 记录 4 选 1 guard 选择（例 AE1 / AE5） |
+| `preset.key_stage_event_gate_field_reuse` | P0 | 95 | Q3 | lint | review-only；`guard_selection` / `precheck_guard` / `payload_consistency_guard` / `precheck_retry_budget` / `payload_consistency_retry_budget` 字段被复用 `Gate Scope` 的 `hard/record/off` 字段，或反之；语义完全不同但 owner 错配 |
+| `preset.key_stage_event_gate_shared_budget` | P0 | 90 | Q3 | feasibility | review-only；`precheck_retry_budget` 与 `payload_consistency_retry_budget` 被合并为一个 `retry_budget` 或共享 exhaustion state（例 AE4） |
+| `preset.key_stage_event_gate_no_reason` | P1（阻塞下游则升 P0） | 80 | Q4 | payload-content | review-only；选 `neither` 或 budget < 3 的位置 `reason` 为空 / 「用户偏好」 / 「先这样」等空话（例 AE4） |
+| `preset.key_stage_event_gate_unsupported_runtime_rule` | P0 | 95 | Q3 | feasibility | review-only；author 借 0e 段落新增 runtime 配置、计数器、恢复路径或绕过 guard 替代行为（违反 R8） |
+| `preset.key_stage_event_gate_notes_preset_diverge` | P0 | 90 | Q3 | handoff | review-only；notes 记录的选择与 YAML 实际 guard 字段不一致（例 AE4）：preset 实际有 `event_loop.precheck.rules` 但 notes 记 `neither`；或反之 |
+| `preset.key_stage_event_gate_pending_status` | P0 | 90 | Q3 | feasibility | review-only；存在 `confirmation_status ∈ {pending, rejected}` 的关键位置，但 author 仍后续生成依赖它的 YAML / schema（违反 R6 / AE5） |
+| `preset.key_stage_event_gate_single_combined_choice` | P0 | 95 | Q3 | feasibility | review-only；author 用一个 preset 全局开关替代 per-position 询问（违反 R4 / AE1） |
+
 ### Artifact-First Handoff finding_id（review-only，lint 不直接产出）
 
 按 `docs/plans/2026-07-16-003-feat-preset-artifact-first-handoffs-plan.md` Product Contract（R2 / R3 / R4 / R5 / R6 / R7 / R9 / R10 / R11 / R12 + AE1-AE5）补充的 review-only finding。**这些 ID 不会出现在 `ralph preset check --format json`**——lint 类无法从单 hat activation 视角判断路径可见性 / 消费动作 / 生命周期责任，靠 reviewer 在第 4 / 5 步 AAF + Payload Audit 独立审。

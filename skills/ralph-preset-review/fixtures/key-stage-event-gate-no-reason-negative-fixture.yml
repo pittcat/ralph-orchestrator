@@ -1,0 +1,42 @@
+# Key-stage event gate no-reason negative fixture — NOT a builtin preset. For ralph-preset-review acceptance only.
+#
+# Plan 2026-08-05-007 axes (capability-triggered key-stage event gate):
+#   (a) author notes record `guard_selection: neither` for a key stage but
+#       leave `reason` empty (or fill it with empty phrases like "用户偏好").
+#       → expected review-only finding: `preset.key_stage_event_gate_no_reason`.
+#   (b) author notes record `precheck_retry_budget: 1` (below default 3)
+#       with no `reason` justifying the reduced coverage.
+#       → expected review-only finding: `preset.key_stage_event_gate_no_reason`.
+#   (c) author notes record `guard_selection: precheck` + `precheck_guard: true`
+#       but `precheck_retry_budget: 1` — independent budget is set, but the
+#       reason for the lower-than-default budget is missing.
+#       → expected review-only finding: `preset.key_stage_event_gate_no_reason`.
+#
+# This fixture is intentionally minimal — it carries the topology for one
+# key stage and the no-reason axis (JIT retirement of vague reasons). It is
+# NOT a copy of `parallel-forge.yml`. Loader scripts MUST NOT key on preset name.
+#
+# Acceptance gate:
+#   ralph preset check -H skills/ralph-preset-review/fixtures/key-stage-event-gate-no-reason-negative-fixture.yml --strict --format json
+#     -> no automated lint output for the no-reason axis (review-only).
+#
+# Not registered in presets/manifest.yml.
+event_loop:
+  execution_mode: isolated
+  starting_event: work.start
+  completion_promise: plan.complete
+hats:
+  executor:
+    name: Executor
+    description: Pretends to author notes with no reason for neither/budget<3.
+    triggers:
+      - work.start
+    publishes:
+      - work.done
+    instructions: |
+      ## EXECUTOR — KEY-STAGE NO REASON
+      Notes claim `guard_selection: neither` and `precheck_retry_budget: 1`
+      for the main handoff, but the `reason` field is empty / "用户偏好".
+      Reviewer must flag `preset.key_stage_event_gate_no_reason`.
+    terminal_events:
+      - work.done

@@ -1,0 +1,38 @@
+# Key-stage event gate missing-selection negative fixture — NOT a builtin preset. For ralph-preset-review acceptance only.
+#
+# Plan 2026-08-05-007 axes (capability-triggered key-stage event gate):
+#   (a) author notes identify a key stage but have no `guard_selection` field
+#       (or have an empty / non-conforming value like `precheck_guard`).
+#       → expected review-only finding: `preset.key_stage_event_gate_missing_selection`.
+#   (b) `confirmation_status` is `pending` but author still ships preset YAML.
+#       → expected review-only finding: `preset.key_stage_event_gate_pending_status`.
+#
+# This fixture is intentionally minimal — it carries the topology for one
+# key stage (executor → reporter handoff) and the missing-/pending- axis
+# anti-patterns. It is NOT a copy of `parallel-forge.yml`. Loader scripts
+# MUST NOT key on preset name.
+#
+# Acceptance gate:
+#   ralph preset check -H skills/ralph-preset-review/fixtures/key-stage-event-gate-missing-selection-negative-fixture.yml --strict --format json
+#     -> no automated lint output for the missing-/pending- axis (review-only).
+#
+# Not registered in presets/manifest.yml.
+event_loop:
+  execution_mode: isolated
+  starting_event: work.start
+  completion_promise: plan.complete
+hats:
+  executor:
+    name: Executor
+    description: Pretends to author notes with missing-selection + pending axes.
+    triggers:
+      - work.start
+    publishes:
+      - work.done
+    instructions: |
+      ## EXECUTOR — KEY-STAGE MISSING/PENDING
+      Treat this fixture as coverage for the missing-selection / pending
+      axes of the key-stage event gate audit. The notes deliberately omit
+      some required fields and author still ships YAML.
+    terminal_events:
+      - work.done

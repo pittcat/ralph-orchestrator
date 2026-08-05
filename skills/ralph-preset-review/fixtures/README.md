@@ -17,6 +17,10 @@
 | `readonly-hat-gate-negative-fixture.yml` | Plan 2026-08-02-001 U3 — hat declared `readonly` whose `instructions` still `cat > file.md`, `git add`, and `git commit` (mutation capture missing) |
 | `correction-exhaustion-negative-fixture.yml` | Plan 2026-08-02-001 U3 — dispatcher emits `forge.final.correction.settled` after a single correction_round instead of the schema-required `correction_round: 3` |
 | `terminal-ownership-negative-fixture.yml` | Plan 2026-08-02-001 U3 — auditor hat publishes both `forge.audit.done` and `forge.report.done` (multi-terminal anti-pattern; auditor is single-business-terminal) |
+| `key-stage-event-gate-positive-fixture.yml` | Plan 2026-08-05-007 — per-key-stage guard selection + each guard's independent retry budget + reason + confirmed status; preset YAML matches notes |
+| `key-stage-event-gate-missing-selection-negative-fixture.yml` | Plan 2026-08-05-007 — key stage identified but no `guard_selection` / `confirmation_status: pending` while author ships YAML |
+| `key-stage-event-gate-divergence-negative-fixture.yml` | Plan 2026-08-05-007 — notes record precheck guard but YAML has no `event_loop.precheck.rules`; two retry budgets collapsed into one `retry_budget` |
+| `key-stage-event-gate-no-reason-negative-fixture.yml` | Plan 2026-08-05-007 — `guard_selection: neither` or `precheck_retry_budget < 3` with empty / vague `reason` |
 
 ## Acceptance Checklist
 
@@ -202,6 +206,50 @@ done
 preset-lint 现状)；Mechanical Lint Results 段需显式注明「capability
 triggered 项：review-only，不进 lint JSON」。命中按 review-only ID +
 default severity + default confidence 入主表。
+
+## 9. Key-stage event gate fixtures (2026-08-05-007 plan)
+
+`key-stage-event-gate-positive-fixture.yml` / `key-stage-event-gate-missing-selection-negative-fixture.yml` /
+`key-stage-event-gate-divergence-negative-fixture.yml` / `key-stage-event-gate-no-reason-negative-fixture.yml`
+覆盖 plan 2026-08-05-007 的 8 个 review-only finding_id：
+
+| Axis | What the YAML contains | Expected finding | Source |
+|---|---|---|---|
+| Positive | author notes 完整记录关键位置 + 4 选 1 guard 选择 + 各自 retry budget + reason + confirmed；YAML 实际启用 `event_loop.precheck.rules` 与 `event_policy.payload_consistency.rules` 与 notes 一致 | 无 `preset.key_stage_event_gate_*` finding | 验收 baseline |
+| Missing (a) | 关键位置已识别但 `guard_selection` 字段缺失 / 空值 | `preset.key_stage_event_gate_missing_selection` | review-only |
+| Missing (b) | `confirmation_status: pending` 但 author 仍交付 YAML | `preset.key_stage_event_gate_pending_status` | review-only |
+| Divergence (a) | notes 记 `guard_selection: precheck` 但 YAML 缺 `event_loop.precheck.rules` | `preset.key_stage_event_gate_notes_preset_diverge` | review-only |
+| Divergence (b) | 两 budget 合并为单个 `retry_budget` 字段 | `preset.key_stage_event_gate_shared_budget` | review-only |
+| Divergence (c) | notes 选 `guard_selection: neither` 但 `reason` 写「用户偏好」 | `preset.key_stage_event_gate_no_reason` | review-only |
+| No-reason (a) | `guard_selection: neither` 且 `reason` 为空 | `preset.key_stage_event_gate_no_reason` | review-only |
+| No-reason (b) | `precheck_retry_budget: 1` 且 `reason` 缺失 | `preset.key_stage_event_gate_no_reason` | review-only |
+| Single (a) | author 用单个 preset 全局 `guard_selection` 替代 per-position 询问 | `preset.key_stage_event_gate_single_combined_choice` | review-only |
+| Field-reuse (a) | `guard_selection` 字段被复用为 Gate Scope `off` 字段 | `preset.key_stage_event_gate_field_reuse` | review-only |
+| Runtime (a) | author 借 0e 段落新增 runtime 配置 / 计数器 / 恢复路径 | `preset.key_stage_event_gate_unsupported_runtime_rule` | review-only |
+
+每个 fixture 顶部注释明示其 anti-pattern 轴、expected finding_id、与本段对照命中。fixture 故意保持 preset-neutral（不复制任何 builtin preset）。
+
+**Acceptance gates:**
+
+```bash
+# CLI 冒烟 — 不要求 strict 模式吐出新 finding（review-only 不进 lint）；
+# 仅验证 fixture 可被加载 + 结构化 lint 不崩。
+for f in key-stage-event-gate-positive \
+         key-stage-event-gate-missing-selection-negative \
+         key-stage-event-gate-divergence-negative \
+         key-stage-event-gate-no-reason-negative; do
+  ralph preset check -H "skills/ralph-preset-review/fixtures/${f}-fixture.yml" \
+    --strict --format json >/dev/null
+done
+
+# 软性 AAF (key-stage event gate) 是 review-only, 通过阅读 fixture 配合
+# references/finding-rubric.md 「Key-stage event gate finding_id」段对照命中。
+```
+
+**Review-only finding 必须显式人工审**：4 个新 fixture 的 expected finding
+**不会**由 `ralph preset check` 自动吐出；Mechanical Lint Results 段需显式
+注明「key-stage event gate 项：review-only，不进 lint JSON」。命中按
+review-only ID + default severity + default confidence 入主表。
 
 ## Report output
 
