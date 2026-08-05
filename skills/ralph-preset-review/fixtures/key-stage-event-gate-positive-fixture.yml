@@ -19,6 +19,8 @@
 # its notes.)
 #
 # Not registered in presets/manifest.yml.
+tasks:
+  enabled: false
 event_loop:
   execution_mode: isolated
   starting_event: work.start
@@ -26,19 +28,34 @@ event_loop:
   precheck:
     enabled: true
     rules:
-      main_handoff:
+      work.done:
         enabled: true
-  event_policy:
-    payload_consistency:
-      rules:
-        - id: terminal_complete_consistent
-          topic: plan.complete
-          when:
-            field: completion_status
-            op: eq
-            value: complete
-          mode: enforce
-          on_violation: reject_with_resume
+        prompt:
+          - "工作结果满足当前阶段验收条件"
+        on_fail:
+          target: executor
+          retry_budget: 3
+event_policy:
+  enabled: true
+  mode: enforce
+  topic_deny_rules:
+    - {hat_id: executor, topic: work.done}
+    - {hat_id: executor, topic: work.done.proposed}
+    - {hat_id: reporter, topic: plan.complete}
+  schemas:
+    plan.complete:
+      required_fields:
+        - completion_status
+  payload_consistency:
+    enabled: true
+    rules:
+      - id: terminal_complete_consistent
+        enabled: true
+        topic: plan.complete
+        when:
+          field: completion_status
+          eq: complete
+        message: "completion_status must be complete for plan.complete"
 hats:
   executor:
     name: Executor
@@ -53,6 +70,12 @@ hats:
       Follow the author notes' recorded guard choices.
     terminal_events:
       - work.done
+    event_filter:
+      enabled: true
+      events:
+        - work.start
+    exempt_topics:
+      - work.done
   reporter:
     name: Reporter
     description: Pretends to write plan.complete with payload consistency covered.
@@ -64,4 +87,10 @@ hats:
       ## REPORTER — KEY-STAGE EXAMPLE
       This preset is a positive example for key-stage event gate coverage.
     terminal_events:
+      - plan.complete
+    event_filter:
+      enabled: true
+      events:
+        - work.done
+    exempt_topics:
       - plan.complete

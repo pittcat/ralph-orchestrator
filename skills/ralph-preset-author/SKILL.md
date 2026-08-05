@@ -127,7 +127,7 @@ Use this skill to design and draft Ralph **presets** (builtin or local) with **A
    - **触发条件**：完成 Workflow 0d Gate Scope 表之后、起草阶段 2 拓扑之前，对每个被 Gate Scope 列入的关键 hat 的关键 handoff / 阶段分支逐位置识别。**逐位置识别**的输入信号与 0d Gate Scope 同源（terminal authority / production mutation / phase branching / multi-hat aggregation / artifact producer / key handoff），但**维度不同**：0d 决定 hat 是否进入 Gate Scope，0e 决定该 hat 内哪些事件位置需要 guard。**禁止**用一个 preset 全局选择替代逐位置确认。
    - **与 Gate Scope `hard/record/off` 的关系**：0d 选 mode 决定 Gate Scope 表内 metric 阈值是否阻塞；0e 选 guard 类型决定在该 hat 的哪个事件位置增加 `precheck guard` / `payload consistency` 拦截。两者**不是同一字段、不是同一问题、不可互相复用**。0d 选 `off` 不豁免 0e 的逐位置询问；0e 选 `neither` 也不豁免 0d 的 metric 评估。
    - **逐位置询问菜单**：对每个被识别为关键位置的 handoff / 阶段分支，author 必须用 `AskUserQuestion` 给出 4 选 1:
-     1. **加入 `precheck guard`**（推荐当该位置有缺字段 / 缺值源高风险）——runtime 走 `ralph emit --policy-check` 同源 schema 拦截，命中时 step-close 走 hard-fail + bounded retry 路径（bounded retry 沿用现有 runtime 语义，不新增 counter）。
+     1. **加入 `precheck guard`**（推荐当该位置需要主观质量判断）——在 `event_loop.precheck.rules.<topic>` 声明事件级 LLM gate；producer 先进入 `<topic>.proposed`，合成 gate hat 通过后才发 `<topic>`，拒绝时按现有 `on_fail` / bounded retry / exhaustion 语义恢复。它不是 `ralph emit --policy-check`：后者仍是独立的确定性 schema/ownership 预检，两者都必须遵守且不能互相替代。
      2. **加入 `payload consistency`**（推荐当该位置涉及 payload 内字段一致性 / 跨字段约束）——runtime 走 `event_loop.event_policy.payload_consistency.rules` + `payload_consistency:<rule_id>` gate 拦截，与现有 `event_policy.payload_consistency` 规则共用空间。
      3. **加入 both**（当两类都成立）——两类 guard 共存；各自独立 retry budget（见下）。
      4. **暂不加入（neither）**——本位置不新增上述 guard；既有 AAF / Payload Contract / mechanical lint / 0d Gate Scope 全部不受影响。

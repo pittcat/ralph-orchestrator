@@ -271,6 +271,12 @@ Skill doc 不复述 `ralph-tools*.md` 的命令参数表；需要时**引用章�
 - 后续如需把这些检查固化为 lint finding（带 `finding_id`），应在 `finding-rubric.md` 维护；本文件不引入新 finding_id。
 - author 与 reviewer 通过引用本 reference 段保持术语一致；review 不另造「Artifact-First」定义。
 
+## Key-stage Event Gate Model
+
+Reviewer 必须从真实 topology capability 独立重建关键位置，再把 `preset-author-notes.md` 作为用户选择证据对账。检查 `key_stage`、`guard_selection`、两个 guard 布尔值、各自 budget、`reason` 和 `confirmation_status` 的字段关系；不得把 Gate Scope 的 `hard/record/off` 当作事件门禁选择，也不得把两类 budget 合并。notes 与实际 `event_loop.precheck.rules` / `event_policy.payload_consistency.rules` 不一致时，应报告 review-only finding。
+
+必须区分两套现有机制：`event_loop.precheck` 是事件级 LLM gate（由 runtime 合成 gate hat，处理 `<topic>.proposed` / `<topic>.rejected` 与既有 `on_fail` retry）；`ralph emit --policy-check` 是写盘前的确定性 schema/ownership 预检。review 不能把任一机制当作另一机制的实现证据。
+
 ## Runtime Audit Model (Unit 4 / plan 2026-07-27-002)
 
 <!-- anchor: wave-emit -->

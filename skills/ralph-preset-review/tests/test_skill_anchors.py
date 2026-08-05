@@ -21,6 +21,8 @@ import sys
 from pathlib import Path
 from typing import Iterable
 
+import yaml
+
 # Anchor list: tests pin these strings exist at least once in the
 # corresponding doc. We deliberately do NOT lock full prompt text:
 # plans evolve, but stable section headings stay.
@@ -41,9 +43,8 @@ ANCHORS: tuple[tuple[str, str], ...] = (
 
 # Capability-triggered fixtures from plan 2026-08-02-001 U3.
 # Each entry: (fixture filename, expected finding id advertised in
-# the fixture header comment). The fixture file is required to be
-# loadable (a single declaration in fixtures/README.md is enough;
-# see `test_capability_fixtures_are_present`).
+# the fixture header comment). Key-stage fixtures additionally carry a
+# companion `*.preset-author-notes.md` contract that is parsed below.
 CAPABILITY_FIXTURES: tuple[tuple[str, str], ...] = (
     (
         "worktree-reuse-negative-fixture.yml",
@@ -173,6 +174,131 @@ def _capability_fixture_results() -> Iterable[tuple[str, bool]]:
         yield f"fixture_present:{filename}", _check_fixture_present(
             fixtures_dir, filename, finding_id
         )
+    yield from _key_stage_event_gate_results(fixtures_dir)
+
+
+KEY_STAGE_REQUIRED_FIELDS = {
+    "key_stage",
+    "guard_selection",
+    "precheck_guard",
+    "precheck_retry_budget",
+    "payload_consistency_guard",
+    "payload_consistency_retry_budget",
+    "reason",
+    "confirmation_status",
+}
+KEY_STAGE_SELECTIONS = {"precheck", "payload_consistency", "both", "neither"}
+VAGUE_REASONS = {"", "用户偏好", "后续再说", "先这样"}
+
+
+def _load_key_stage_notes(fixture: Path) -> dict[str, object]:
+    notes = fixture.with_suffix(".preset-author-notes.md")
+    text = _read(notes)
+    match = re.search(r"```yaml\n(.*?)```", text, re.DOTALL)
+    assert match is not None, f"notes missing YAML contract: {notes}"
+    value = yaml.safe_load(match.group(1))
+    assert isinstance(value, dict), f"notes contract must be a mapping: {notes}"
+    return value
+
+
+def _key_stage_findings(fixture: Path) -> set[str]:
+    preset = yaml.safe_load(_read(fixture))
+    notes = _load_key_stage_notes(fixture)
+    assert isinstance(preset, dict)
+    stages = notes.get("key_stages")
+    assert isinstance(stages, list) and stages, f"notes has no key_stages: {fixture}"
+
+    findings: set[str] = set()
+    wants_precheck = False
+    wants_payload_consistency = False
+    for stage in stages:
+        assert isinstance(stage, dict)
+        missing = KEY_STAGE_REQUIRED_FIELDS - set(stage)
+        if missing:
+            findings.add("preset.key_stage_event_gate_missing_selection")
+        selection = stage.get("guard_selection")
+        selection_valid = selection in KEY_STAGE_SELECTIONS
+        if selection not in KEY_STAGE_SELECTIONS:
+            findings.add("preset.key_stage_event_gate_missing_selection")
+            selection = "neither"
+        if selection in {"precheck", "both"}:
+            wants_precheck = True
+        if selection in {"payload_consistency", "both"}:
+            wants_payload_consistency = True
+        if selection_valid and stage.get("precheck_guard") != (
+            selection in {"precheck", "both"}
+        ):
+            findings.add("preset.key_stage_event_gate_field_reuse")
+        if selection_valid and stage.get("payload_consistency_guard") != (
+            selection in {"payload_consistency", "both"}
+        ):
+            findings.add("preset.key_stage_event_gate_field_reuse")
+        for guard, budget in (
+            ("precheck_guard", "precheck_retry_budget"),
+            ("payload_consistency_guard", "payload_consistency_retry_budget"),
+        ):
+            if stage.get(guard) is True and stage.get(budget) not in {1, 2, 3}:
+                findings.add("preset.key_stage_event_gate_shared_budget")
+            if stage.get(guard) is False and stage.get(budget) is not None:
+                findings.add("preset.key_stage_event_gate_shared_budget")
+        if stage.get("confirmation_status") != "confirmed":
+            findings.add("preset.key_stage_event_gate_pending_status")
+        reason = stage.get("reason")
+        low_budget = any(
+            stage.get(field) in {1, 2}
+            for field in ("precheck_retry_budget", "payload_consistency_retry_budget")
+        )
+        if selection == "neither" or low_budget:
+            if not isinstance(reason, str) or len(reason) > 80 or reason in VAGUE_REASONS:
+                findings.add("preset.key_stage_event_gate_no_reason")
+
+    event_loop = preset.get("event_loop", {})
+    assert isinstance(event_loop, dict)
+    if event_loop.get("retry_budget") is not None:
+        findings.add("preset.key_stage_event_gate_shared_budget")
+    precheck_rules = event_loop.get("precheck", {}).get("rules", {})
+    if wants_precheck and not isinstance(precheck_rules, dict) or (
+        wants_precheck and not precheck_rules
+    ):
+        findings.add("preset.key_stage_event_gate_notes_preset_diverge")
+    event_policy = event_loop.get("event_policy", {})
+    payload_rules = event_policy.get("payload_consistency", {}).get("rules", [])
+    if wants_payload_consistency and not isinstance(payload_rules, list) or (
+        wants_payload_consistency and not payload_rules
+    ):
+        findings.add("preset.key_stage_event_gate_notes_preset_diverge")
+    return findings
+
+
+def _key_stage_event_gate_results(fixtures_dir: Path) -> Iterable[tuple[str, bool]]:
+    expected = {
+        "key-stage-event-gate-positive-fixture.yml": set(),
+        "key-stage-event-gate-missing-selection-negative-fixture.yml": {
+            "preset.key_stage_event_gate_missing_selection",
+            "preset.key_stage_event_gate_pending_status",
+        },
+        "key-stage-event-gate-divergence-negative-fixture.yml": {
+            "preset.key_stage_event_gate_notes_preset_diverge",
+            "preset.key_stage_event_gate_shared_budget",
+            "preset.key_stage_event_gate_no_reason",
+        },
+        "key-stage-event-gate-no-reason-negative-fixture.yml": {
+            "preset.key_stage_event_gate_no_reason",
+        },
+    }
+    for filename, expected_findings in expected.items():
+        actual = _key_stage_findings(fixtures_dir / filename)
+        yield (
+            f"key_stage_findings:{filename}",
+            actual == expected_findings,
+        )
+        if actual != expected_findings:
+            print(
+                f"FAIL key-stage findings {filename}: "
+                f"expected={sorted(expected_findings)!r} actual={sorted(actual)!r}"
+            )
+        else:
+            print(f"OK key-stage findings {filename}: {sorted(actual)!r}")
 
 
 def _check_fixture_present(
@@ -198,6 +324,11 @@ def _check_fixture_present(
             f"FAIL capability fixture {filename} missing event_loop/hats"
         )
         return False
+    if filename.startswith("key-stage-event-gate-"):
+        notes = full.with_suffix(".preset-author-notes.md")
+        if not notes.is_file():
+            print(f"FAIL key-stage fixture missing notes: {notes}")
+            return False
     print(f"OK capability fixture {filename} ({finding_id})")
     return True
 

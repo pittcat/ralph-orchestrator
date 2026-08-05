@@ -213,6 +213,9 @@ default severity + default confidence 入主表。
 `key-stage-event-gate-divergence-negative-fixture.yml` / `key-stage-event-gate-no-reason-negative-fixture.yml`
 覆盖 plan 2026-08-05-007 的 8 个 review-only finding_id：
 
+每个 YAML 都有同名 `.preset-author-notes.md` companion 文件；文件中的 YAML
+contract 是测试实际读取的 notes 输入，不再只靠 fixture 注释声明反例。
+
 | Axis | What the YAML contains | Expected finding | Source |
 |---|---|---|---|
 | Positive | author notes 完整记录关键位置 + 4 选 1 guard 选择 + 各自 retry budget + reason + confirmed；YAML 实际启用 `event_loop.precheck.rules` 与 `event_policy.payload_consistency.rules` 与 notes 一致 | 无 `preset.key_stage_event_gate_*` finding | 验收 baseline |
@@ -232,15 +235,23 @@ default severity + default confidence 入主表。
 **Acceptance gates:**
 
 ```bash
-# CLI 冒烟 — 不要求 strict 模式吐出新 finding（review-only 不进 lint）；
-# 仅验证 fixture 可被加载 + 结构化 lint 不崩。
+# CLI 冒烟 — positive fixture 必须 strict 通过；negative fixtures 允许因
+# 预期的结构化 lint 反例返回非零，但必须仍输出可解析 JSON，不能进程崩溃。
+tmp_dir=$(mktemp -d)
 for f in key-stage-event-gate-positive \
          key-stage-event-gate-missing-selection-negative \
          key-stage-event-gate-divergence-negative \
          key-stage-event-gate-no-reason-negative; do
-  ralph preset check -H "skills/ralph-preset-review/fixtures/${f}-fixture.yml" \
-    --strict --format json >/dev/null
+  out="${tmp_dir}/${f}.json"
+  if ralph preset check -H "skills/ralph-preset-review/fixtures/${f}-fixture.yml" \
+      --strict --format json >"${out}"; then
+    test "$f" = key-stage-event-gate-positive
+  else
+    test "$f" != key-stage-event-gate-positive
+  fi
+  .venv/bin/python -c 'import json,sys; json.load(open(sys.argv[1]))' "$out"
 done
+rm -rf "$tmp_dir"
 
 # 软性 AAF (key-stage event gate) 是 review-only, 通过阅读 fixture 配合
 # references/finding-rubric.md 「Key-stage event gate finding_id」段对照命中。

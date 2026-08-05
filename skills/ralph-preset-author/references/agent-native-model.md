@@ -271,6 +271,12 @@ Skill doc 不复述 `ralph-tools*.md` 的命令参数表；需要时**引用章�
 - 后续如需把这些检查固化为 lint finding（带 `finding_id`），应在 `finding-rubric.md` 维护；本文件不引入新 finding_id。
 - author 与 reviewer 通过引用本 reference 段保持术语一致；review 不另造「Artifact-First」定义。
 
+## Key-stage Event Gate Model
+
+关键环节事件门禁是 author 对每个关键 handoff / 阶段分支的设计记录，不是新的 runtime 配置接口。按 capability signal 逐位置询问 `guard_selection`：`precheck`、`payload_consistency`、`both` 或 `neither`；启用的两类 guard 分别记录 3/2/1 budget，未启用者填 `null`。`neither` 或低于默认 budget 必须记录可审计的恢复、审计或下游依赖理由，`confirmation_status` 非 `confirmed` 时停止最终 YAML/schema 设计。
+
+必须区分两套现有机制：`event_loop.precheck` 是事件级 LLM gate（由 runtime 合成 gate hat，处理 `<topic>.proposed` / `<topic>.rejected` 与既有 `on_fail` retry）；`ralph emit --policy-check` 是写盘前的确定性 schema/ownership 预检。前者不能被后者替代，新增字段也不得声称改变任一 runtime counter、recovery path 或 exhaustion 语义。
+
 ## Runtime Audit Model (Unit 4 / plan 2026-07-27-002)
 
 <!-- anchor: wave-emit -->

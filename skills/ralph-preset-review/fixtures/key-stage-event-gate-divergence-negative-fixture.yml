@@ -22,6 +22,8 @@
 #     -> no automated lint output for the divergence axis (review-only).
 #
 # Not registered in presets/manifest.yml.
+tasks:
+  enabled: false
 event_loop:
   execution_mode: isolated
   starting_event: work.start

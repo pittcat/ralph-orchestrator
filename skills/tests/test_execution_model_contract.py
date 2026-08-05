@@ -42,6 +42,8 @@ AUTHOR_CHECKLIST = REVIEW_REFS / "author-checklist.md"
 FINDING_RUBRIC = REVIEW_REFS / "finding-rubric.md"
 AUTHOR_SKILL = ROOT / "skills" / "ralph-preset-author" / "SKILL.md"
 REVIEW_SKILL = ROOT / "skills" / "ralph-preset-review" / "SKILL.md"
+AUTHOR_AGENT_NATIVE = ROOT / "skills" / "ralph-preset-author" / "references" / "agent-native-model.md"
+REVIEW_AGENT_NATIVE = ROOT / "skills" / "ralph-preset-review" / "references" / "agent-native-model.md"
 DIAGNOSIS_SKILL = ROOT / "skills" / "ralph-run-diagnosis" / "SKILL.md"
 FIXTURES_DIR = ROOT / "skills" / "ralph-preset-review" / "fixtures"
 FIXTURES_README = FIXTURES_DIR / "README.md"
@@ -1419,4 +1421,48 @@ def test_author_notes_gate_scope_table_field_contract() -> None:
     for col in expected_columns:
         assert col in text or col.lower() in text.lower(), (
             f"Author SKILL.md Gate Scope table must include column '{col}'"
+        )
+
+
+def test_key_stage_event_gate_contract_is_symmetric() -> None:
+    """Author and reviewer must expose the same per-stage field contract."""
+    fields = (
+        "key_stage",
+        "guard_selection",
+        "precheck_guard",
+        "precheck_retry_budget",
+        "payload_consistency_guard",
+        "payload_consistency_retry_budget",
+        "reason",
+        "confirmation_status",
+    )
+    for path in (AUTHOR_SKILL, REVIEW_SKILL):
+        text = _read(path)
+        for field in fields:
+            assert field in text, f"{path} must document key-stage field `{field}`"
+        assert "hard/record/off" in text
+        assert "not" in text.lower() or "不" in text
+
+    for path in (AUTHOR_AGENT_NATIVE, REVIEW_AGENT_NATIVE):
+        text = _read(path)
+        assert "Key-stage Event Gate Model" in text
+        assert "event_loop.precheck" in text
+        assert "ralph emit --policy-check" in text
+
+
+def test_key_stage_event_gate_keeps_runtime_mechanisms_distinct() -> None:
+    """The canonical references must not describe precheck as policy-check."""
+    for path in (AUTHOR_AGENT_NATIVE, REVIEW_AGENT_NATIVE):
+        text = _read(path)
+        section = text.split("## Key-stage Event Gate Model", 1)[1].split(
+            "## Runtime Audit Model", 1
+        )[0]
+        assert (
+            "不能被后者替代" in section
+            or "不能互相替代" in section
+            or "不能把任一机制当作另一机制" in section
+        )
+        assert (
+            "确定性的 schema/ownership 预检" in section
+            or "确定性 schema/ownership 预检" in section
         )

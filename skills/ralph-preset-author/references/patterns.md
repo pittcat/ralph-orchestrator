@@ -219,6 +219,10 @@ work.done / fix.done
     收敛 topic（如 `forge.report.done`），使 reporter 在 work.failed 后
     不会再次被 FlowStepScope 拒。
 
+## Key-stage event gate pattern
+
+按 capability signal 逐位置记录 `key_stage`、`guard_selection`、两个 guard 布尔值、各自 retry budget、`reason` 和 `confirmation_status`。`event_loop.precheck` 是事件级 LLM gate；`ralph emit --policy-check` 是独立的确定性 schema/ownership 预检，不能互相替代。`neither` 或 budget 低于 3 必须有可审计理由，未确认时停止最终 YAML/schema 设计。
+
 ## Projection-Owned Task DAG pattern（通用：单事件原子建 task DAG）
 
 适用范围：任何 preset 由一个 hat 一次性声明 N 个内部 task（unit / fix-unit / dimension 等），并交给 StateProjector 一次性原子落盘。下游 hat 通过 `ralph tools task list` 读取 live `task_id`，**不再**走 agent 自己 `task add`。
