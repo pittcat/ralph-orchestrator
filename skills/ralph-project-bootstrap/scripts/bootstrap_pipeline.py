@@ -513,12 +513,14 @@ def _compose_preset_bound(
     cwd: Path,
     resolved: ResolvedPreset,
     preset_id: str,
+    plan_path: str | None,
 ) -> pipeline_suite.PresetBoundSuite:
     """Compose the preset-bound two-file suite for the resolved preset."""
     project_facts = audit.collect_project_facts(cwd)
     return pipeline_suite.compose_preset_bound_suite(
         preset=preset_id,
         preset_text=resolved.text,
+        plan_path=plan_path,
         backend=resolved.backend,
         budget_max_iterations=resolved.max_iterations,
         budget_wall_clock_seconds=resolved.max_runtime_seconds,
@@ -598,6 +600,7 @@ def _run_generation_stage(
     *,
     cwd: Path,
     resolved: ResolvedPreset,
+    plan_path: str | None,
     refresh_existing: bool,
     facts: audit.ProjectFacts,
 ) -> tuple[
@@ -616,7 +619,12 @@ def _run_generation_stage(
     """
     preset_id = resolved.preset_id
     try:
-        suite = _compose_preset_bound(cwd=cwd, resolved=resolved, preset_id=preset_id)
+        suite = _compose_preset_bound(
+            cwd=cwd,
+            resolved=resolved,
+            preset_id=preset_id,
+            plan_path=plan_path,
+        )
     except pipeline_suite.OwnedYamlError as exc:
         return _make_blocker(
             stage="generation",
@@ -1163,6 +1171,7 @@ def run_pipeline(
     partial, suite, outcome = _run_generation_stage(
         cwd=cwd_path,
         resolved=resolved,
+        plan_path=plan_path,
         refresh_existing=refresh_existing,
         facts=audit_decision.facts,
     )

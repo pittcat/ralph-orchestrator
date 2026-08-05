@@ -732,6 +732,7 @@ def compose_preset_bound_suite(
     *,
     preset: str,
     preset_text: str,
+    plan_path: str | None = None,
     backend: str,
     budget_max_iterations: int,
     budget_wall_clock_seconds: int,
@@ -749,14 +750,34 @@ def compose_preset_bound_suite(
     Provenance stays inside ``_bootstrap`` so no ``ralph.bootstrap.yml``
     sidecar is needed.
     """
+    if plan_path and Path(plan_path).is_absolute():
+        raise OwnedYamlError("owned_yaml_invalid", "plan path must be repo-relative")
     paths = derive_preset_bound_paths(preset)
-    prompt = extract_inline_preset_prompt(preset_text)
+    try:
+        prompt = extract_inline_preset_prompt(preset_text)
+        requires_plan = False
+    except OwnedYamlError as exc:
+        if exc.code != "preset_prompt_missing" or not plan_path:
+            raise
+        # Hats-source presets cannot carry event_loop.prompt through the
+        # operator/preset merge boundary. A supplied plan is therefore the
+        # authoritative prompt source; keep a managed, inert prompt file so
+        # the preset-bound suite remains complete and provenance-protected.
+        prompt = render_prompt_md(
+            plan_path=plan_path,
+            preset=preset,
+            project_root=project_root_marker,
+            prompt_file=paths.prompt,
+            requires_plan=True,
+        )
+        requires_plan = True
     audited_guardrails = _guardrails_from_facts(project_facts)
     effective_guardrails = tuple(
         dict.fromkeys((*audited_guardrails, *project_guardrails))
     )
     config = render_pipeline_yml(
         preset=preset,
+        plan_path=plan_path,
         prompt_file=paths.prompt,
         backend=backend,
         budget_max_iterations=budget_max_iterations,
@@ -767,15 +788,18 @@ def compose_preset_bound_suite(
         project_guardrails=effective_guardrails,
     )
     input_signature = _sha256_hex(
-        "\n".join(
+        "|".join(
             (
-                preset,
-                preset_text,
-                backend,
-                str(budget_max_iterations),
-                str(budget_wall_clock_seconds),
-                project_root_marker,
-                *effective_guardrails,
+                compute_input_signature(
+                    preset,
+                    plan_path,
+                    project_root_marker,
+                    paths.prompt,
+                    True,
+                    requires_plan,
+                    effective_guardrails,
+                ),
+                _sha256_hex(preset_text),
             )
         )
     )

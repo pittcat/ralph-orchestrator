@@ -799,6 +799,48 @@ def test_preset_bound_suite_rejects_missing_inline_prompt() -> None:
     assert excinfo.value.code == "preset_prompt_missing"
 
 
+def test_preset_bound_suite_uses_plan_for_missing_inline_prompt() -> None:
+    suite = pipeline_suite.compose_preset_bound_suite(
+        preset="no-prompt.yml",
+        preset_text="event_loop:\n  max_iterations: 2\n",
+        plan_path="docs/plan.md",
+        backend="claude",
+        budget_max_iterations=2,
+        budget_wall_clock_seconds=60,
+    )
+
+    user_keys, owned_keys = pipeline_suite.parse_owned_yaml(suite.config)
+    assert user_keys["event_loop"]["prompt_file"] == suite.prompt_path
+    assert pipeline_suite._render_owned_value(suite.config, "plan") == "docs/plan.md"
+    assert "docs/plan.md" in suite.prompt
+    assert "requires a real plan" not in suite.prompt
+    assert "input_signature" in owned_keys
+
+
+def test_preset_bound_signature_changes_when_resolved_preset_changes() -> None:
+    common = dict(
+        preset="no-prompt.yml",
+        plan_path="docs/plan.md",
+        backend="claude",
+        budget_max_iterations=2,
+        budget_wall_clock_seconds=60,
+    )
+    first = pipeline_suite.compose_preset_bound_suite(
+        preset_text="event_loop:\n  max_iterations: 2\n", **common
+    )
+    second = pipeline_suite.compose_preset_bound_suite(
+        preset_text="event_loop:\n  max_iterations: 3\n", **common
+    )
+
+    first_signature = pipeline_suite._render_owned_value(
+        first.config, "input_signature"
+    )
+    second_signature = pipeline_suite._render_owned_value(
+        second.config, "input_signature"
+    )
+    assert first_signature != second_signature
+
+
 @pytest.mark.parametrize(
     ("preset", "expected_stem"),
     [

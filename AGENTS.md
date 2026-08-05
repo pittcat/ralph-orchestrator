@@ -365,3 +365,7 @@ Strong success criteria let you loop independently. Weak criteria ("make it work
 ---
 
 **These guidelines are working if:** fewer unnecessary changes in diffs, fewer rewrites due to overcomplication, and clarifying questions come before implementation rather than after mistakes.
+<!-- RALPH-BOOTSTRAP-START: agents-docs-v1 v1 -->
+linter: just lint
+test_runner: just test
+<!-- RALPH-BOOTSTRAP-END: agents-docs-v1 -->

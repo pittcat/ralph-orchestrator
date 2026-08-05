@@ -1105,15 +1105,8 @@ def test_invalid_yaml_preset_blocker(tmp_path: Path) -> None:
     assert result.code == "preset_yaml_invalid"
 
 
-def test_preset_without_prompt_blocker(tmp_path: Path) -> None:
-    """B4: a preset with no inline prompt and no supplied plan/prompt
-    blocks provisioning (the fallback path belongs to U2's no-plan
-    template handling, not to U1's resolution blocker).
-
-    The test materialises a preset whose ``event_loop`` omits the
-    ``prompt`` key and the pipeline MUST NOT proceed past the
-    resolver.
-    """
+def test_preset_without_prompt_uses_supplied_plan(tmp_path: Path) -> None:
+    """A supplied plan is a valid prompt source for hats-only presets."""
     project = _seed_blank_project(tmp_path)
     (project / "no-prompt.yml").write_text(
         "name: no-prompt\n"
@@ -1131,8 +1124,9 @@ def test_preset_without_prompt_blocker(tmp_path: Path) -> None:
         binary="ralph",
         runner=_builtin_resolver_runner,
     )
-    assert result.level == "blocked"
-    assert result.code == "preset_prompt_missing"
+    assert result.code != "preset_prompt_missing"
+    assert result.config_path == "ralph.no-prompt.yml"
+    assert result.prompt_path == "PROMPT.no-prompt.md"
 
 
 # ---------------------------------------------------------------------------
