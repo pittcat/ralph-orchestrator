@@ -42,7 +42,7 @@ schemas:
       plan_path:
         meaning: "repo-relative path to the plan file passed into the loop (for hat prompts to re-read)"
         source: "plan-reviewer derives from the prompt's plan file path"
-        fill_rule: "absolute repo-relative path; never absolute filesystem path"
+        fill_rule: "copy the visible repo-relative path; never use an absolute filesystem path"
       plan_contract_version:
         meaning: "version of the normalized plan contract used by this run"
         source: "plan-reviewer reads the contract declared by the source plan"
@@ -171,21 +171,27 @@ schemas:
         source: "executor runs the baseline-verifier subagent"
         fill_rule: "literal one of green, red, unknown, skipped"
       baseline_verification_file:
-        meaning: "absolute path to the baseline verifier report written under .ralph/review/<plan>/"
+        meaning: "repo-relative artifact path under `.ralph/` to the baseline verifier report written under .ralph/review/<plan>/"
         source: "executor writes via the Write tool; path follows the basename-verifier convention"
-        fill_rule: "absolute path; do NOT make up a path — write the file first"
+        fill_rule: "write and reopen the artifact before emit; provide its non-empty repo-relative path under .ralph/; never use an absolute or fabricated path"
+        examples:
+          - ".ralph/<plan>/<unit>/<file>.md"
       post_verification_status:
         meaning: "result of the Step 1.95 delta-verifier final snapshot"
         source: "executor runs the delta-verifier subagent after the final Unit commit"
         fill_rule: "literal one of green, red, unknown"
       post_verification_file:
-        meaning: "absolute path to the final-verification report under .ralph/review/<plan>/"
+        meaning: "repo-relative artifact path under `.ralph/` to the final-verification report under .ralph/review/<plan>/"
         source: "executor writes via the Write tool"
-        fill_rule: "absolute path; do NOT make up a path"
+        fill_rule: "write and reopen the artifact before emit; provide its non-empty repo-relative path under .ralph/; never use an absolute or fabricated path"
+        examples:
+          - ".ralph/<plan>/<unit>/<file>.md"
       verification_delta_file:
-        meaning: "absolute path to the baseline-vs-final delta report under .ralph/review/<plan>/"
+        meaning: "repo-relative artifact path under `.ralph/` to the baseline-vs-final delta report under .ralph/review/<plan>/"
         source: "executor writes via the Write tool"
-        fill_rule: "absolute path; do NOT make up a path"
+        fill_rule: "write and reopen the artifact before emit; provide its non-empty repo-relative path under .ralph/; never use an absolute or fabricated path"
+        examples:
+          - ".ralph/<plan>/<unit>/<file>.md"
       baseline_existing_count:
         meaning: "failures that already existed before this run; report-only — do not block"
         source: "executor / delta-verifier classifies"
@@ -420,7 +426,7 @@ schemas:
       plan_path:
         meaning: "repo-relative path to the original plan file"
         source: "dim:<dim> carries forward from work.done trigger payload"
-        fill_rule: "literal copy; absolute repo-relative path"
+        fill_rule: "literal copy of the visible repo-relative path; never use an absolute filesystem path"
       executor_head_sha:
         meaning: "git SHA at HEAD after the last executor commit — the canonical review anchor"
         source: "executor ran `git rev-parse HEAD`; copied from work.done"
@@ -430,17 +436,21 @@ schemas:
         source: "pass-through from plan.ready (via work.done); runner re-reads on every hat prompt"
         fill_rule: "literal copy; do NOT hand-write"
       diff_patch_file:
-        meaning: "absolute path to the canonical review patch written by dim:goal-alignment Step 1"
+        meaning: "repo-relative artifact path under `.ralph/` to the canonical review patch written by dim:goal-alignment Step 1"
         source: "dim:goal-alignment Step 1 first writes this; downstream dims read it"
-        fill_rule: "absolute path under .ralph/review/<plan>/; do NOT make up a path"
+        fill_rule: "write and reopen the artifact before emit; provide its non-empty repo-relative path under .ralph/; never use an absolute or fabricated path"
+        examples:
+          - ".ralph/<plan>/<unit>/<file>.md"
       dimension:
         meaning: "name of the dimension being audited; copy of the dim hat's name"
         source: "dim:<dim> itself"
         fill_rule: "literal one of goal-alignment, correctness, testing, maintainability, project-standards, adversarial"
       findings_file:
-        meaning: "absolute path to this dimension's findings product file"
+        meaning: "repo-relative artifact path under `.ralph/` to this dimension's findings product file"
         source: "dim:<dim> writes it via the Write tool at Step 4"
-        fill_rule: "absolute path under .ralph/review/<plan>/<dim>.md; do NOT make up a path — write the file first"
+        fill_rule: "write and reopen the artifact before emit; provide its non-empty repo-relative path under .ralph/; never use an absolute or fabricated path"
+        examples:
+          - ".ralph/<plan>/<unit>/<file>.md"
       findings_count:
         meaning: "integer count of findings in this dimension's product file (including G0 placeholder when clean)"
         source: "dim:<dim> counts entries in findings_file"
@@ -470,7 +480,7 @@ schemas:
       plan_path:
         meaning: "repo-relative path to the original plan file"
         source: "dim:<dim> carries forward from work.done trigger payload"
-        fill_rule: "literal copy; absolute repo-relative path"
+        fill_rule: "literal copy of the visible repo-relative path; never use an absolute filesystem path"
       executor_head_sha:
         meaning: "git SHA at HEAD after the last executor commit — the canonical review anchor"
         source: "executor ran `git rev-parse HEAD`; copied from work.done"
@@ -480,17 +490,21 @@ schemas:
         source: "pass-through from plan.ready (via work.done); runner re-reads on every hat prompt"
         fill_rule: "literal copy; do NOT hand-write"
       diff_patch_file:
-        meaning: "absolute path to the canonical review patch written by dim:goal-alignment Step 1"
+        meaning: "repo-relative artifact path under `.ralph/` to the canonical review patch written by dim:goal-alignment Step 1"
         source: "dim:goal-alignment Step 1 first writes this; downstream dims read it"
-        fill_rule: "absolute path under .ralph/review/<plan>/; do NOT make up a path"
+        fill_rule: "write and reopen the artifact before emit; provide its non-empty repo-relative path under .ralph/; never use an absolute or fabricated path"
+        examples:
+          - ".ralph/<plan>/<unit>/<file>.md"
       dimension:
         meaning: "name of the dimension being audited; copy of the dim hat's name"
         source: "dim:<dim> itself"
         fill_rule: "literal one of goal-alignment, correctness, testing, maintainability, project-standards, adversarial"
       findings_file:
-        meaning: "absolute path to this dimension's findings product file"
+        meaning: "repo-relative artifact path under `.ralph/` to this dimension's findings product file"
         source: "dim:<dim> writes it via the Write tool at Step 4"
-        fill_rule: "absolute path under .ralph/review/<plan>/<dim>.md; do NOT make up a path — write the file first"
+        fill_rule: "write and reopen the artifact before emit; provide its non-empty repo-relative path under .ralph/; never use an absolute or fabricated path"
+        examples:
+          - ".ralph/<plan>/<unit>/<file>.md"
       findings_count:
         meaning: "integer count of findings in this dimension's product file (including G0 placeholder when clean)"
         source: "dim:<dim> counts entries in findings_file"
@@ -520,7 +534,7 @@ schemas:
       plan_path:
         meaning: "repo-relative path to the original plan file"
         source: "dim:<dim> carries forward from work.done trigger payload"
-        fill_rule: "literal copy; absolute repo-relative path"
+        fill_rule: "literal copy of the visible repo-relative path; never use an absolute filesystem path"
       executor_head_sha:
         meaning: "git SHA at HEAD after the last executor commit — the canonical review anchor"
         source: "executor ran `git rev-parse HEAD`; copied from work.done"
@@ -530,17 +544,21 @@ schemas:
         source: "pass-through from plan.ready (via work.done); runner re-reads on every hat prompt"
         fill_rule: "literal copy; do NOT hand-write"
       diff_patch_file:
-        meaning: "absolute path to the canonical review patch written by dim:goal-alignment Step 1"
+        meaning: "repo-relative artifact path under `.ralph/` to the canonical review patch written by dim:goal-alignment Step 1"
         source: "dim:goal-alignment Step 1 first writes this; downstream dims read it"
-        fill_rule: "absolute path under .ralph/review/<plan>/; do NOT make up a path"
+        fill_rule: "write and reopen the artifact before emit; provide its non-empty repo-relative path under .ralph/; never use an absolute or fabricated path"
+        examples:
+          - ".ralph/<plan>/<unit>/<file>.md"
       dimension:
         meaning: "name of the dimension being audited; copy of the dim hat's name"
         source: "dim:<dim> itself"
         fill_rule: "literal one of goal-alignment, correctness, testing, maintainability, project-standards, adversarial"
       findings_file:
-        meaning: "absolute path to this dimension's findings product file"
+        meaning: "repo-relative artifact path under `.ralph/` to this dimension's findings product file"
         source: "dim:<dim> writes it via the Write tool at Step 4"
-        fill_rule: "absolute path under .ralph/review/<plan>/<dim>.md; do NOT make up a path — write the file first"
+        fill_rule: "write and reopen the artifact before emit; provide its non-empty repo-relative path under .ralph/; never use an absolute or fabricated path"
+        examples:
+          - ".ralph/<plan>/<unit>/<file>.md"
       findings_count:
         meaning: "integer count of findings in this dimension's product file (including G0 placeholder when clean)"
         source: "dim:<dim> counts entries in findings_file"
@@ -570,7 +588,7 @@ schemas:
       plan_path:
         meaning: "repo-relative path to the original plan file"
         source: "dim:<dim> carries forward from work.done trigger payload"
-        fill_rule: "literal copy; absolute repo-relative path"
+        fill_rule: "literal copy of the visible repo-relative path; never use an absolute filesystem path"
       executor_head_sha:
         meaning: "git SHA at HEAD after the last executor commit — the canonical review anchor"
         source: "executor ran `git rev-parse HEAD`; copied from work.done"
@@ -580,17 +598,21 @@ schemas:
         source: "pass-through from plan.ready (via work.done); runner re-reads on every hat prompt"
         fill_rule: "literal copy; do NOT hand-write"
       diff_patch_file:
-        meaning: "absolute path to the canonical review patch written by dim:goal-alignment Step 1"
+        meaning: "repo-relative artifact path under `.ralph/` to the canonical review patch written by dim:goal-alignment Step 1"
         source: "dim:goal-alignment Step 1 first writes this; downstream dims read it"
-        fill_rule: "absolute path under .ralph/review/<plan>/; do NOT make up a path"
+        fill_rule: "write and reopen the artifact before emit; provide its non-empty repo-relative path under .ralph/; never use an absolute or fabricated path"
+        examples:
+          - ".ralph/<plan>/<unit>/<file>.md"
       dimension:
         meaning: "name of the dimension being audited; copy of the dim hat's name"
         source: "dim:<dim> itself"
         fill_rule: "literal one of goal-alignment, correctness, testing, maintainability, project-standards, adversarial"
       findings_file:
-        meaning: "absolute path to this dimension's findings product file"
+        meaning: "repo-relative artifact path under `.ralph/` to this dimension's findings product file"
         source: "dim:<dim> writes it via the Write tool at Step 4"
-        fill_rule: "absolute path under .ralph/review/<plan>/<dim>.md; do NOT make up a path — write the file first"
+        fill_rule: "write and reopen the artifact before emit; provide its non-empty repo-relative path under .ralph/; never use an absolute or fabricated path"
+        examples:
+          - ".ralph/<plan>/<unit>/<file>.md"
       findings_count:
         meaning: "integer count of findings in this dimension's product file (including G0 placeholder when clean)"
         source: "dim:<dim> counts entries in findings_file"
@@ -620,7 +642,7 @@ schemas:
       plan_path:
         meaning: "repo-relative path to the original plan file"
         source: "dim:<dim> carries forward from work.done trigger payload"
-        fill_rule: "literal copy; absolute repo-relative path"
+        fill_rule: "literal copy of the visible repo-relative path; never use an absolute filesystem path"
       executor_head_sha:
         meaning: "git SHA at HEAD after the last executor commit — the canonical review anchor"
         source: "executor ran `git rev-parse HEAD`; copied from work.done"
@@ -630,17 +652,21 @@ schemas:
         source: "pass-through from plan.ready (via work.done); runner re-reads on every hat prompt"
         fill_rule: "literal copy; do NOT hand-write"
       diff_patch_file:
-        meaning: "absolute path to the canonical review patch written by dim:goal-alignment Step 1"
+        meaning: "repo-relative artifact path under `.ralph/` to the canonical review patch written by dim:goal-alignment Step 1"
         source: "dim:goal-alignment Step 1 first writes this; downstream dims read it"
-        fill_rule: "absolute path under .ralph/review/<plan>/; do NOT make up a path"
+        fill_rule: "write and reopen the artifact before emit; provide its non-empty repo-relative path under .ralph/; never use an absolute or fabricated path"
+        examples:
+          - ".ralph/<plan>/<unit>/<file>.md"
       dimension:
         meaning: "name of the dimension being audited; copy of the dim hat's name"
         source: "dim:<dim> itself"
         fill_rule: "literal one of goal-alignment, correctness, testing, maintainability, project-standards, adversarial"
       findings_file:
-        meaning: "absolute path to this dimension's findings product file"
+        meaning: "repo-relative artifact path under `.ralph/` to this dimension's findings product file"
         source: "dim:<dim> writes it via the Write tool at Step 4"
-        fill_rule: "absolute path under .ralph/review/<plan>/<dim>.md; do NOT make up a path — write the file first"
+        fill_rule: "write and reopen the artifact before emit; provide its non-empty repo-relative path under .ralph/; never use an absolute or fabricated path"
+        examples:
+          - ".ralph/<plan>/<unit>/<file>.md"
       findings_count:
         meaning: "integer count of findings in this dimension's product file (including G0 placeholder when clean)"
         source: "dim:<dim> counts entries in findings_file"
@@ -670,7 +696,7 @@ schemas:
       plan_path:
         meaning: "repo-relative path to the original plan file"
         source: "dim:<dim> carries forward from work.done trigger payload"
-        fill_rule: "literal copy; absolute repo-relative path"
+        fill_rule: "literal copy of the visible repo-relative path; never use an absolute filesystem path"
       executor_head_sha:
         meaning: "git SHA at HEAD after the last executor commit — the canonical review anchor"
         source: "executor ran `git rev-parse HEAD`; copied from work.done"
@@ -680,17 +706,21 @@ schemas:
         source: "pass-through from plan.ready (via work.done); runner re-reads on every hat prompt"
         fill_rule: "literal copy; do NOT hand-write"
       diff_patch_file:
-        meaning: "absolute path to the canonical review patch written by dim:goal-alignment Step 1"
+        meaning: "repo-relative artifact path under `.ralph/` to the canonical review patch written by dim:goal-alignment Step 1"
         source: "dim:goal-alignment Step 1 first writes this; downstream dims read it"
-        fill_rule: "absolute path under .ralph/review/<plan>/; do NOT make up a path"
+        fill_rule: "write and reopen the artifact before emit; provide its non-empty repo-relative path under .ralph/; never use an absolute or fabricated path"
+        examples:
+          - ".ralph/<plan>/<unit>/<file>.md"
       dimension:
         meaning: "name of the dimension being audited; copy of the dim hat's name"
         source: "dim:<dim> itself"
         fill_rule: "literal one of goal-alignment, correctness, testing, maintainability, project-standards, adversarial"
       findings_file:
-        meaning: "absolute path to this dimension's findings product file"
+        meaning: "repo-relative artifact path under `.ralph/` to this dimension's findings product file"
         source: "dim:<dim> writes it via the Write tool at Step 4"
-        fill_rule: "absolute path under .ralph/review/<plan>/<dim>.md; do NOT make up a path — write the file first"
+        fill_rule: "write and reopen the artifact before emit; provide its non-empty repo-relative path under .ralph/; never use an absolute or fabricated path"
+        examples:
+          - ".ralph/<plan>/<unit>/<file>.md"
       findings_count:
         meaning: "integer count of findings in this dimension's product file (including G0 placeholder when clean)"
         source: "dim:<dim> counts entries in findings_file"
@@ -765,9 +795,11 @@ schemas:
         source: "fix-planner carries forward"
         fill_rule: "literal copy"
       fix_plan_file:
-        meaning: "absolute path to the fix plan product written by fix-planner; fixer reads ONLY this file"
+        meaning: "repo-relative artifact path under `.ralph/` to the fix plan product written by fix-planner; fixer reads ONLY this file"
         source: "fix-planner writes it via the Write tool"
-        fill_rule: "absolute path under .ralph/review/<plan>/fix-plan.md; write the file first"
+        fill_rule: "write and reopen the artifact before emit; provide its non-empty repo-relative path under .ralph/; never use an absolute or fabricated path"
+        examples:
+          - ".ralph/<plan>/<unit>/<file>.md"
       findings_count:
         meaning: "total findings the fix plan addresses (subset of synthesized)"
         source: "fix-planner counts actionable Units in fix_plan_file"
@@ -869,9 +901,11 @@ schemas:
         source: "git status --porcelain --untracked-files=all (excluding .ralph/)"
         fill_rule: "literal one of clean, dirty — clean only when porcelain is empty outside .ralph/; never fabricate clean"
       fix_plan_file:
-        meaning: "absolute path to the fix plan product written by fix-planner"
+        meaning: "repo-relative artifact path under `.ralph/` to the fix plan product written by fix-planner"
         source: "fixer copies from review.complete payload"
         fill_rule: "literal copy; do NOT make up a path"
+        examples:
+          - ".ralph/<plan>/<unit>/<file>.md"
       review_verdict:
         meaning: "verdict carried forward from review.complete — fixer labels this attempt against it"
         source: "fixer copies from review.complete"
@@ -925,21 +959,27 @@ schemas:
         source: "fixer runs the baseline-verifier subagent before any fix code lands"
         fill_rule: "literal one of green, red, unknown, skipped"
       baseline_verification_file:
-        meaning: "absolute path to the fixer's baseline-verification report under .ralph/review/<plan>/"
+        meaning: "repo-relative artifact path under `.ralph/` to the fixer's baseline-verification report under .ralph/review/<plan>/"
         source: "fixer writes via the Write tool"
-        fill_rule: "absolute path; do NOT make up a path"
+        fill_rule: "write and reopen the artifact before emit; provide its non-empty repo-relative path under .ralph/; never use an absolute or fabricated path"
+        examples:
+          - ".ralph/<plan>/<unit>/<file>.md"
       post_verification_status:
         meaning: "result of the final post-fix verification (after the last fix commit)"
         source: "fixer / delta-verifier"
         fill_rule: "literal one of green, red, unknown"
       post_verification_file:
-        meaning: "absolute path to the fixer's final-verification report under .ralph/review/<plan>/"
+        meaning: "repo-relative artifact path under `.ralph/` to the fixer's final-verification report under .ralph/review/<plan>/"
         source: "fixer writes via the Write tool"
-        fill_rule: "absolute path; do NOT make up a path"
+        fill_rule: "write and reopen the artifact before emit; provide its non-empty repo-relative path under .ralph/; never use an absolute or fabricated path"
+        examples:
+          - ".ralph/<plan>/<unit>/<file>.md"
       verification_delta_file:
-        meaning: "absolute path to the fixer's baseline-vs-final delta report under .ralph/review/<plan>/"
+        meaning: "repo-relative artifact path under `.ralph/` to the fixer's baseline-vs-final delta report under .ralph/review/<plan>/"
         source: "fixer writes via the Write tool"
-        fill_rule: "absolute path; do NOT make up a path"
+        fill_rule: "write and reopen the artifact before emit; provide its non-empty repo-relative path under .ralph/; never use an absolute or fabricated path"
+        examples:
+          - ".ralph/<plan>/<unit>/<file>.md"
       baseline_existing_count:
         meaning: "failures that already existed before this fix run; report-only — do not block"
         source: "fixer / delta-verifier classifies"
@@ -1027,9 +1067,11 @@ schemas:
         source: "alignment carries forward"
         fill_rule: "literal copy"
       fix_plan_file:
-        meaning: "absolute path to the fix plan product — alignment reads both the plan and the fix plan to compute residuals"
+        meaning: "repo-relative artifact path under `.ralph/` to the fix plan product — alignment reads both the plan and the fix plan to compute residuals"
         source: "alignment copies from fix.done payload"
         fill_rule: "literal copy"
+        examples:
+          - ".ralph/<plan>/<unit>/<file>.md"
       worktree_status:
         meaning: "git worktree state at handoff time (inherited from fix.done)"
         source: "alignment copies from fix.done payload"
@@ -1106,9 +1148,11 @@ schemas:
         source: "review-synthesizer carries forward from review.adversarial.done"
         fill_rule: "literal copy"
       artifact_block_file:
-        meaning: "absolute path to the audit block the synthesizer wrote to .ralph/review/<plan_name>/review-synthesizer-block.md"
+        meaning: "repo-relative artifact path under `.ralph/` to the audit block the synthesizer wrote to .ralph/review/<plan_name>/review-synthesizer-block.md"
         source: "review-synthesizer writes it via the Write tool before emit"
         fill_rule: "non-empty path under .ralph/review/<plan_name>/review-synthesizer-block.md; do NOT make up a path — write the file first"
+        examples:
+          - ".ralph/<plan>/<unit>/<file>.md"
       failure_dimensions:
         meaning: "ordered array of dimension names that failed the integrity gate (subset of goal-alignment, correctness, testing, maintainability, project-standards, adversarial)"
         source: "review-synthesizer enumerates the failing dimensions during Step 1"
