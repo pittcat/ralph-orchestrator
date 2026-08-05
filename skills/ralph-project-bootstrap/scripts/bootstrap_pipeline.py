@@ -363,9 +363,34 @@ def _resolve_builtin_preset(
     binary: str,
     runner: SubprocessRunner,
 ) -> ResolvedPreset:
-    """Resolve ``builtin:<id>`` via ``preset list`` → ``preset show``."""
+    """Resolve ``builtin:<id>`` via ``preset builtin list`` → ``preset builtin show``.
+
+    Migration target: the resolver now drives the new
+    ``ralph preset builtin list --format json`` /
+    ``ralph preset builtin show <id> --format yaml`` introspection CLI
+    (U01/U02). The list envelope is the canonical
+    ``{presets: [{id, source, description, public}]}`` shape; the
+    bare-array and ``{manifests: [...]}`` wire shapes from the legacy
+    ``ralph preset list`` path are NOT accepted — accepting them would
+    leak template-data-source semantics into the builtin resolver.
+
+    ID lookup uses the list entry's ``id`` field ONLY. ``builtin_id``
+    is the caller-supplied token (``builtin:<name>``); we strip the
+    canonical ``builtin:`` prefix once, before the matcher, so the
+    comparison is symmetric with the envelope's bare ``id`` field.
+    ``source`` is reference data (it always equals ``builtin:<id>``)
+    and is NOT used as a second match key, so a malformed list entry
+    can never accidentally fall back to a template name.
+    """
+    # The caller-supplied token is ``builtin:<id>``; the list envelope
+    # carries the bare ``id`` field. Strip the prefix once so the
+    # equality test below is shape-symmetric with the wire data.
+    if builtin_id.startswith("builtin:"):
+        bare_id = builtin_id[len("builtin:") :]
+    else:
+        bare_id = builtin_id
     list_proc = runner(
-        [binary, "preset", "list", "--format", "json"],
+        [binary, "preset", "builtin", "list", "--format", "json"],
         timeout=cli_probe.DEFAULT_TIMEOUT,
         capture_output=True,
         text=True,
@@ -374,46 +399,47 @@ def _resolve_builtin_preset(
         raise ValueError(
             (
                 "builtin_list_failed",
-                f"ralph preset list --format json returned {list_proc.returncode}",
+                f"ralph preset builtin list --format json returned {list_proc.returncode}",
             )
         )
     try:
         listing = json.loads(list_proc.stdout or "{}")
     except json.JSONDecodeError as exc:
         raise ValueError(
-            ("builtin_list_unparseable", f"ralph preset list emitted invalid JSON: {exc}")
+            (
+                "builtin_list_unparseable",
+                f"ralph preset builtin list emitted invalid JSON: {exc}",
+            )
         ) from exc
-    # CLI versions have emitted both a bare manifest array and an
-    # envelope containing that array. The bootstrap flow only needs
-    # the manifests, so accept both wire shapes.
-    if isinstance(listing, list):
-        manifests = listing
-    elif isinstance(listing, dict):
-        manifests = listing.get("manifests")
-    else:
-        manifests = None
-    if not isinstance(manifests, list):
+    if not isinstance(listing, dict):
         raise ValueError(
             (
                 "builtin_list_unparseable",
-                "ralph preset list response must be a manifest array or carry a 'manifests' array",
+                "ralph preset builtin list response must be a {presets:[...]} envelope object",
             )
         )
-    template_name = None
-    for entry in manifests:
+    presets = listing.get("presets")
+    if not isinstance(presets, list):
+        raise ValueError(
+            (
+                "builtin_list_unparseable",
+                "ralph preset builtin list response must carry a 'presets' array",
+            )
+        )
+    matched_id: str | None = None
+    for entry in presets:
         if not isinstance(entry, dict):
             continue
-        if entry.get("source") == builtin_id:
-            candidate = entry.get("name")
-            if isinstance(candidate, str) and candidate.strip():
-                template_name = candidate
-                break
-    if template_name is None:
+        candidate = entry.get("id")
+        if isinstance(candidate, str) and candidate == bare_id:
+            matched_id = candidate
+            break
+    if matched_id is None:
         raise ValueError(
-            ("builtin_source_missing", f"no preset manifest carries source {builtin_id!r}")
+            ("builtin_source_missing", f"no builtin preset carries id {bare_id!r}")
         )
     show_proc = runner(
-        [binary, "preset", "show", template_name, "--format", "yaml"],
+        [binary, "preset", "builtin", "show", matched_id, "--format", "yaml"],
         timeout=cli_probe.DEFAULT_TIMEOUT,
         capture_output=True,
         text=True,
@@ -422,12 +448,17 @@ def _resolve_builtin_preset(
         raise ValueError(
             (
                 "builtin_show_failed",
-                f"ralph preset show {template_name} returned {show_proc.returncode}: {show_proc.stderr.strip()}",
+                f"ralph preset builtin show {matched_id} returned {show_proc.returncode}: {show_proc.stderr.strip()}",
             )
         )
     text = show_proc.stdout or ""
     if not text.strip():
-        raise ValueError(("builtin_show_empty", f"ralph preset show {template_name} emitted empty body"))
+        raise ValueError(
+            (
+                "builtin_show_empty",
+                f"ralph preset builtin show {matched_id} emitted empty body",
+            )
+        )
     loaded = _load_yaml_mapping(text)
     try:
         backend, max_iterations, max_runtime_seconds, inline_prompt_present = (
@@ -439,7 +470,11 @@ def _resolve_builtin_preset(
     return ResolvedPreset(
         preset_id=builtin_id,
         source_kind="builtin",
-        template_name=template_name,
+        # The builtin ID is the provenance label; the old template-name
+        # alias (which used to look up via ``manifests[i].name``) is
+        # deliberately removed so a future template manifest rename
+        # cannot silently misroute the resolver.
+        template_name=bare_id,
         text=text,
         backend=backend,
         max_iterations=max_iterations,
