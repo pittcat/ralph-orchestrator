@@ -465,9 +465,9 @@ event_loop:
         required_fields: ["plan_name", "plan_path", "plan_contract_version", "plan_contract_digest", "semantic_gaps", "reason", "report_input_file"]
         field_docs:
           report_input_file:
-            meaning: "repo-relative path to the report-input bundle the plan-reviewer wrote for reporter consumption; reporter reads ONLY this file"
+            meaning: "repo-relative path under .ralph/ to the report-input artifact bundle the plan-reviewer wrote for reporter consumption; reporter reads ONLY this file"
             source: "plan-reviewer writes the bundle before emitting plan.blocked"
-            fill_rule: "non-empty repo-relative path; atomically publish and reopen the bundle before emit; never point to a missing or stale file"
+            fill_rule: "write and reopen the .ralph/ bundle before emit, then provide its non-empty repo-relative path; stop instead of inventing a missing or stale path"
       work.done:
         required_fields:
           - "plan_name"
@@ -616,9 +616,9 @@ event_loop:
           - "report_input_file"
         field_docs:
           report_input_file:
-            meaning: "repo-relative path to the report-input bundle the executor wrote for reporter consumption; reporter reads ONLY this file"
+            meaning: "repo-relative path under .ralph/ to the report-input artifact bundle the executor wrote for reporter consumption; reporter reads ONLY this file"
             source: "executor writes the bundle before emitting work.failed"
-            fill_rule: "non-empty repo-relative path; atomically publish and reopen the bundle before emit; never point to a missing or stale file"
+            fill_rule: "write and reopen the .ralph/ bundle before emit, then provide its non-empty repo-relative path; stop instead of inventing a missing or stale path"
           plan_name:
             meaning: "plan file basename without extension; identifies which execution failed"
             source: "executor copies from plan.ready"
@@ -1230,9 +1230,9 @@ event_loop:
           - "report_input_file"
         field_docs:
           report_input_file:
-            meaning: "repo-relative path to the report-input bundle review-gate wrote for reporter consumption; reporter reads ONLY this file"
+            meaning: "repo-relative path under .ralph/ to the report-input artifact bundle review-gate wrote for reporter consumption; reporter reads ONLY this file"
             source: "review-gate writes the bundle before emitting review.loop.blocked"
-            fill_rule: "non-empty repo-relative path; atomically publish and reopen the bundle before emit; never point to a missing or stale file"
+            fill_rule: "write and reopen the .ralph/ bundle before emit, then provide its non-empty repo-relative path; stop instead of inventing a missing or stale path"
           max_review_rounds:
             meaning: "hard cap on the review loop (6 in ce-executor-pipeline-loop); loop.blocked fires when reached with must_fix_now > 0"
             source: "review-gate / preset"
@@ -1269,9 +1269,9 @@ event_loop:
           - "report_input_file"
         field_docs:
           report_input_file:
-            meaning: "repo-relative path to the report-input bundle the alignment hat wrote for reporter consumption; reporter reads ONLY this file"
+            meaning: "repo-relative path under .ralph/ to the report-input artifact bundle the alignment hat wrote for reporter consumption; reporter reads ONLY this file"
             source: "alignment writes the bundle before emitting align.done"
-            fill_rule: "non-empty repo-relative path; atomically publish and reopen the bundle before emit; never point to a missing or stale file"
+            fill_rule: "write and reopen the .ralph/ bundle before emit, then provide its non-empty repo-relative path; stop instead of inventing a missing or stale path"
       # Inline stabilization schemas keep the embedded runtime view complete.
       # the raw preset passes strict preset check without relying on
       # the schema SSOT to back-fill them at build time. Field set
@@ -1375,9 +1375,9 @@ event_loop:
           - "report_input_file"
         field_docs:
           report_input_file:
-            meaning: "repo-relative path to the report-input bundle test-stabilizer wrote for reporter consumption; reporter reads ONLY this file"
+            meaning: "repo-relative path under .ralph/ to the report-input artifact bundle test-stabilizer wrote for reporter consumption; reporter reads ONLY this file"
             source: "test-stabilizer writes the bundle before emitting stabilization.blocked"
-            fill_rule: "non-empty repo-relative path; atomically publish and reopen the bundle before emit; never point to a missing or stale file"
+            fill_rule: "write and reopen the .ralph/ bundle before emit, then provide its non-empty repo-relative path; stop instead of inventing a missing or stale path"
           plan_name:
             meaning: "stable identifier of the plan; matches `plan_name` from `work.done` trigger payload"
             source: "passed-through from work.done trigger payload"
@@ -1491,9 +1491,9 @@ event_loop:
             source: "review-synthesizer writes it via the Write tool before emit"
             fill_rule: "non-empty path under .ralph/review/<plan_name>/round-<NN>/review-synthesizer-block.md; do NOT make up a path — write the file first"
           report_input_file:
-            meaning: "repo-relative path to the report-input bundle review-synthesizer wrote for reporter consumption; reporter reads ONLY this file"
+            meaning: "repo-relative path under .ralph/ to the report-input artifact bundle review-synthesizer wrote for reporter consumption; reporter reads ONLY this file"
             source: "review-synthesizer writes the bundle before emitting review.artifact.blocked"
-            fill_rule: "non-empty repo-relative path; atomically publish and reopen the bundle before emit; never point to a missing or stale file"
+            fill_rule: "write and reopen the .ralph/ bundle before emit, then provide its non-empty repo-relative path; stop instead of inventing a missing or stale path"
           failure_dimensions:
             meaning: "ordered array of dimension names that failed the integrity gate (subset of goal-alignment, correctness, testing, maintainability, project-standards, adversarial)"
             source: "review-synthesizer enumerates the failing dimensions during Step 1"
@@ -5417,10 +5417,9 @@ hats:
          (pass-through; authoritative SOT for this run), `fix_plan_file`,
          `review_verdict`, `plan_executed`, `fix_plan_executed`,
          `residuals_count`, `residuals_summary`.
-      2. From events file (above): `plan.ready` / `work.done` via
-         single-shot queries; **all** `review.complete` / `fix.done` /
-         round-routing events via the multi-round listing (never only
-         `tail -1`).
+      2. Read only the business artifact paths listed by the current
+         report-input bundle. Do not read the runtime events file or
+         reconstruct phase state from event history.
       3. Read all review round directories under
          `.ralph/review/{plan_name}/round-<NN>/`. For each round, read
          that round's `review.diff.patch`, `review.diffstat.txt`, six
@@ -5474,7 +5473,8 @@ hats:
       through Branch A via `work.done`.
 
       1. Read the trigger payload for `plan_name` and `reason`.
-      2. If available, read `plan.ready` from events file for plan_path.
+      2. Use `plan_path` from the current trigger payload. Do not read the
+         runtime events file to recover an earlier plan.ready payload.
       3. Write a blocked report to `.ralph/review/{plan_name}/report.md`
          using the same Report contract. Use `未完成需介入，暂不建议继续` in
          `一句话结论`, explain the upstream reason in
