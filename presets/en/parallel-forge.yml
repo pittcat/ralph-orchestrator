@@ -97,6 +97,7 @@ mechanism:
           - exec.wave.failed
           - forge.wave.reviewed
           - forge.wave.review.failed
+          - forge.wave.integration.failed
           - forge.wave.integrated
           - forge.wave.verified
           - forge.verification.failed
@@ -198,6 +199,7 @@ event_loop:
       - forge.concurrency.approved
       - forge.worktrees.ready
       - forge.exec.development.done
+      - forge.wave.integration.failed
       - forge.units.reviewed
       - forge.integration.done
       - forge.incremental.verified
@@ -660,6 +662,7 @@ hats:
     triggers:
       - exec.wave.failed
       - forge.wave.review.failed
+      - forge.wave.integration.failed
       - forge.verification.failed
     publishes:
       - forge.correction.requested
@@ -681,6 +684,7 @@ hats:
       events:
         - exec.wave.failed
         - forge.wave.review.failed
+        - forge.wave.integration.failed
         - forge.verification.failed
     instructions: |
       ## FORGE FAILURE HANDLER MODE — evidence-first correction
@@ -884,8 +888,11 @@ hats:
       OPAC: `ralph-tools-opac`. Before emit: `ralph tools skill load ralph-tools-emit` then `--policy-check`.
 
       ### Steps
-      1. 从 trigger 读 `wave_id` / `wave_index` / `wave_total` /
-         `unit_verdicts` / `execution_plan_path` / `plan_key`。
+      1. 从 trigger 读 `wave_id` / `wave_index` / `plan_key`；
+         `execution_plan_path` 从当前 projection 取得。
+         不要假设 trigger 已经提供 `wave_total` 或 `unit_verdicts`：
+         reviewer 必须读取当前 wave 的 Unit completion artifacts 和 diff，
+         自己计算每个 Unit 的 verdict 与 wave 总数。
          trigger 入口固定为 `forge.wave.worktrees.ready` /
          `exec.wave.complete` / `forge.correction.done`（per U3
          event_filter 三选一）。
@@ -945,9 +952,9 @@ hats:
     name: "Integrator"
     description: "Per-wave sequential rebase/merge of approved Units; emits forge.wave.integrated then fast-forwards and emits forge.wave.settled."
     triggers: [forge.wave.reviewed, forge.wave.verified]
-    publishes: [forge.wave.integrated, forge.wave.settled, forge.integration.done, work.failed]
-    exempt_topics: [forge.wave.integrated, forge.wave.settled, forge.integration.done, work.failed]
-    terminal_events: [forge.wave.integrated, forge.wave.settled, forge.integration.done, work.failed]
+    publishes: [forge.wave.integrated, forge.wave.settled, forge.wave.integration.failed, forge.integration.done, work.failed]
+    exempt_topics: [forge.wave.integrated, forge.wave.settled, forge.wave.integration.failed, forge.integration.done, work.failed]
+    terminal_events: [forge.wave.integrated, forge.wave.settled, forge.wave.integration.failed, forge.integration.done, work.failed]
     event_filter:
       enabled: true
       events:
@@ -962,13 +969,16 @@ hats:
 
       ### Steps
       1. **入口一**（`forge.wave.reviewed`）：reviewer 接受，开始 candidate 写入。
-         从 trigger 取 `all_approved` / `execution_plan_path` / `plan_key` / `unit_verdicts` /
-         `review_report_path`。任一 unit REJECTED → 写 `waves/<wave_id>/failure-observation.md`，
-         emit `forge.wave.integration.failed`（schema 字段 + `failure_fingerprint` /
-         `affected_task_ids` / `affected_unit_ids`）；**禁止** 直接 `work.failed`。
+         从 trigger 取 `aggregate_verdict` / `review_report_path` / `plan_key`；
+         `execution_plan_path` 从当前 projection 取得，`unit_verdicts` 从
+         `review_report_path` 完整读取。任一 unit REJECTED → 写 `waves/<wave_id>/failure-observation.md`，
+         emit `forge.wave.integration.failed`（`wave_id`、`wave_index`、`unit_verdicts`、
+         `failure_fingerprint`、`affected_task_ids`、`affected_unit_ids`、
+         `failure_observation_path`、`plan_key`）；**禁止** 直接 `work.failed`。
       2. **入口二**（`forge.wave.verified`）：verifier 通过。正式 FF `integration_branch`。
-         从 trigger 取 `verification_log_path` / `integration_branch` / `verified_base_commit` /
-         `candidate_commit_sha` / `settled_unit_ids` / `plan_key`。
+         从 trigger 取 `verification_log_path` / `integration_branch` /
+         `candidate_commit_sha` / `settled_unit_ids` / `plan_key`；
+         `verified_base_commit` 不属于此 trigger 的输入，不要读取它。
       3. 读取 `integration_branch`：从 worktree-map / projection `forge.integration_branch`；
          用真名，不要发明；`git branch --list` 在主仓确认。
       4. 按 `integration_order` 逐 unit rebase → squash → FF merge；append `integration-log.md`。
@@ -978,6 +988,13 @@ hats:
          `integration_complete`、`commit_map_path`、`linear_history`、`plan_key` 等 schema 字段）。
       8. 入口二成功：emit `forge.wave.settled`（`wave_id`、`wave_index`、`settled_task_ids`、
          `settled_unit_ids`、`verified_base_commit`、`plan_key`、`settlement_log_path`）。
+         **Payload 形状是硬约束**：`settled_task_ids` 和 `settled_unit_ids` 都必须是
+         JSON string array；例如 `"settled_task_ids":["task-...-1","task-...-2"]`
+         和 `"settled_unit_ids":["U01","U02"]`。禁止把数组序列化为
+         `"task-...-1,task-...-2"` / `"U01,U02"` 这样的逗号分隔字符串，禁止发空数组。
+         先用 `ralph emit forge.wave.settled --schema` / `--policy-check` 确认 payload
+         形状；若只能得到字符串而不能得到 live ID 数组，停止并写
+         `failures/integrator-failed.md`，不要猜测、拼接或伪造 task ID。
          **任务关闭由 runtime 在收到 `forge.wave.settled` 时通过 `CloseTaskBatch` 投影原子批量完成**；
          本 hat 不调用 `ralph tools task close`。
       9. 失败：写 `failures/integrator-failed.md` + 模板 `wave-failure.template.md` /
@@ -1012,8 +1029,12 @@ hats:
 
       ### Steps
       1. 从 trigger 读 `integration_log_path` / `integration_branch` /
-         `verified_base_commit` / `plan_key`。trigger 入口固定为
+         `plan_key`。`forge.wave.integrated` 入口另提供
+         `candidate_commit_sha`；兼容入口 `forge.integration.done` 则从
+         integration-log/commit-map artifact 读取 candidate HEAD。trigger 入口固定为
          `forge.wave.integrated` / `forge.integration.done`（后者仅兼容别名）。
+         `verified_base_commit` 不属于 verifier trigger，不要读取；以
+         candidate HEAD 和 integration artifacts 作为本轮验证对象。
       2. 按 development-plan / execution-plan 跑 incremental test 命令。
       3. 写 `.ralph/forge/<plan_key>/incremental-verification.md`。
       4. 每个 `(wave_id, candidate_commit_sha)` 只允许成功 emit 一次
@@ -1061,12 +1082,12 @@ hats:
       4. 成功：emit `forge.full.verified`（`verification_report_path`、
          `all_required_passed`、`plan_key`）。
       5. 失败：写 `failures/tester-failed.md`（模板 `wave-failure.template.md`），
-         emit `forge.full.verification.failed` observation（schema 字段）；
-         **禁止** 直接 `work.failed` —— 失败走 observation，forge-failure-handler
-         接管是否进入 final correction（3 轮后 emit `forge.final.correction.settled`）。
+         emit `work.failed`，payload 必须包含 `reason`、`plan_path`、
+         `context_artifact_path`、`forge_artifact_root`、`plan_key`；
+         不发送未在本 preset 合同中声明的 failure topic，交由 cleanup/reporter
+         生成失败报告。
 
-      单 activation 一条业务事件；主路径只发 `forge.full.verified` /
-      `forge.full.verification.failed`。
+      单 activation 一条业务事件；主路径只发 `forge.full.verified` / `work.failed`。
 
   auditor:
     name: "Auditor"

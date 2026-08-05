@@ -32,6 +32,7 @@ schemas:
         meaning: Artifact path for the Plan Inspection Report (full findings).
         source: File written this activation under .ralph/forge/plan-key/inspection-report.md.
         fill_rule: Verify file exists before emit; path must be repo-relative.
+        examples: [".ralph/<plan>/inspection-report.md"]
       plan_usable:
         meaning: Whether the input is sufficient for Planner to proceed.
         source: Inspector judgment after reading plan and repository.
@@ -57,10 +58,12 @@ schemas:
         meaning: Artifact path for the full Spec-First Development Plan (BDD, ATDD, DAG).
         source: File written this activation at .ralph/forge/plan-key/development-plan.md.
         fill_rule: Must exist before emit.
+        examples: [".ralph/<plan>/development-plan.md"]
       execution_plan_path:
         meaning: Machine-readable Unit DAG SSOT for supervisor dispatch.
         source: File written this activation at .ralph/forge/plan-key/execution-plan.yml.
         fill_rule: Must exist; runtime reads it once inside the workspace boundary and derives the task DAG.
+        examples: [".ralph/<plan>/execution-plan.yml"]
       plan_digest:
         meaning: Runtime-verifiable canonical SHA-256 digest of execution-plan.yml.
         source: Ralph CLI derives it from the referenced artifact during policy-check/apply.
@@ -85,6 +88,7 @@ schemas:
         meaning: Concurrency Safety Approval artifact path.
         source: File written this activation at .ralph/forge/plan-key/concurrency-approval.md.
         fill_rule: File must exist before emit.
+        examples: [".ralph/<plan>/concurrency-approval.md"]
       approved:
         meaning: Whether parallel execution may proceed.
         source: Guardian audit of DAG, shared resources, and path boundaries.
@@ -146,6 +150,7 @@ schemas:
         meaning: Repo-relative path to the wave-scoped worktree map.
         source: File at .ralph/forge/<plan-key>/worktree-map.yml.
         fill_rule: Must describe only the current wave's worktrees; future waves absent.
+        examples: [".ralph/<plan>/worktree-map.yml"]
       verified_base_commit:
         meaning: Verified base commit the worktrees were created from.
         source: forge.wave.prepare.verified_base_commit.
@@ -185,6 +190,7 @@ schemas:
         meaning: Repo-relative path to the wave review artifact.
         source: File at .ralph/forge/<plan-key>/waves/<wave_id>/review.md.
         fill_rule: Must exist; one entry per fan-in unit.
+        examples: [".ralph/<plan>/<wave>/review.md"]
       plan_key:
         meaning: Forge plan key basename.
         source: forge.wave.prepare.plan_key.
@@ -221,6 +227,7 @@ schemas:
         meaning: Path to the per-Unit commit map artifact.
         source: File at .ralph/forge/<plan-key>/waves/<wave_id>/commit-map.yml.
         fill_rule: Must exist; one commit SHA per integrated Unit.
+        examples: [".ralph/<plan>/<wave>/commit-map.yml"]
       units_integrated:
         meaning: Count of Units successfully integrated in order.
         source: Integrator.
@@ -256,6 +263,7 @@ schemas:
         meaning: Repo-relative path to the per-wave verification log.
         source: File at .ralph/forge/<plan-key>/waves/<wave_id>/verification.md.
         fill_rule: Must list every command run and its outcome.
+        examples: [".ralph/<plan>/<wave>/verification.md"]
       passed:
         meaning: Whether every required gate command passed.
         source: Verifier outcome.
@@ -304,6 +312,53 @@ schemas:
         meaning: Per-wave failure observation artifact.
         source: File at .ralph/forge/<plan-key>/waves/<wave_id>/failure-observation.md.
         fill_rule: Must exist; contains per-Unit SHA, command, conflict facts, prior match.
+        examples: [".ralph/<plan>/<wave>/failure-observation.md"]
+
+  forge.wave.integration.failed:
+    required_fields:
+      - wave_id
+      - wave_index
+      - unit_verdicts
+      - failure_fingerprint
+      - affected_task_ids
+      - affected_unit_ids
+      - plan_key
+      - failure_observation_path
+    payload: json_object
+    field_docs:
+      wave_id:
+        meaning: Wave whose sequential integration failed.
+        source: forge.wave.reviewed.wave_id or forge.wave.verified.wave_id.
+        fill_rule: Copy the current wave id; do not invent a new wave.
+      wave_index:
+        meaning: 1-based index of the wave whose integration failed.
+        source: Current wave trigger or execution-plan artifact.
+        fill_rule: Copy the current wave index.
+      unit_verdicts:
+        meaning: Per-Unit review verdicts that explain which Units may or may not be integrated.
+        source: Review report artifact read by Integrator.
+        fill_rule: Copy the complete verdict map; do not omit rejected Units.
+      failure_fingerprint:
+        meaning: Stable identifier for this integration failure pattern.
+        source: Integrator conflict or failed integration evidence.
+        fill_rule: Include conflict kind, command, and candidate/base identity; reuse for identical failures.
+      affected_task_ids:
+        meaning: Live task IDs belonging to Units affected by the integration failure.
+        source: ralph tools task list matched to affected_unit_ids.
+        fill_rule: Use live IDs only; never hand-write or copy unrelated task IDs.
+      affected_unit_ids:
+        meaning: Unit IDs whose integration is blocked by this failure.
+        source: Integrator failure evidence and unit_verdicts.
+        fill_rule: Subset of the current wave's Unit roster.
+      plan_key:
+        meaning: Forge plan key identifying the business artifact root.
+        source: Current trigger or execution-plan path.
+        fill_rule: Must match .ralph/forge/<plan-key>/.
+      failure_observation_path:
+        meaning: Relative `.ralph/` business artifact path containing the integration failure evidence.
+        source: File written this activation at .ralph/forge/<plan-key>/waves/<wave_id>/failure-observation.md.
+        fill_rule: Write and test the file before emit; do not fabricate a path.
+        examples: [".ralph/<plan>/<wave>/failure-observation.md"]
 
   forge.verification.failed:
     required_fields:
@@ -344,6 +399,7 @@ schemas:
         meaning: Per-wave verification failure log artifact.
         source: File at .ralph/forge/<plan-key>/waves/<wave_id>/verification-failure.md.
         fill_rule: Must list commands run and the failure manifest.
+        examples: [".ralph/<plan>/<wave>/verification-failure.md"]
 
   forge.correction.requested:
     required_fields:
@@ -414,6 +470,7 @@ schemas:
         meaning: Correction request artifact.
         source: File at .ralph/forge/<plan-key>/waves/<wave_id>/corrections/round-<n>.md.
         fill_rule: Must exist; contains round, fingerprint, scope, evidence path.
+        examples: [".ralph/<plan>/<wave>/corrections/round-<n>.md"]
 
   forge.correction.done:
     required_fields:
@@ -454,6 +511,7 @@ schemas:
         meaning: Correction report artifact.
         source: File at .ralph/forge/<plan-key>/waves/<wave_id>/corrections/round-<n>/report.md.
         fill_rule: Must exist; fixes applied, evidence, prior match.
+        examples: [".ralph/<plan>/<wave>/corrections/round-<n>/report.md"]
 
   forge.final.correction.settled:
     required_fields:
@@ -490,6 +548,7 @@ schemas:
         meaning: Path to the final-correction verification log written by the tester.
         source: File under .ralph/forge/<plan-key>/final-correction/verification.log.
         fill_rule: Must exist before emit.
+        examples: [".ralph/<plan>/final-correction/verification.log"]
 
   forge.wave.settled:
     required_fields:
@@ -511,13 +570,15 @@ schemas:
         source: Integrator reading the current work.
         fill_rule: Non-negative integer.
       settled_task_ids:
-        meaning: Live task IDs to close atomically (U3 CloseTaskBatch).
+        meaning: JSON string array of live task IDs to close atomically (U3 CloseTaskBatch).
         source: ralph tools task list filtered by unit_ids in this wave.
-        fill_rule: Must equal the live task IDs for the wave's unit_ids; duplicates / unknown IDs reject.
+        fill_rule: Must be a non-empty JSON array, with one string per live task ID for this wave's unit_ids; do not join IDs into a comma-separated string; duplicates / unknown IDs reject.
+        examples: ['["task-<timestamp>-<suffix>"]']
       settled_unit_ids:
-        meaning: Unit ids that were settled in this wave.
+        meaning: JSON string array of Unit ids that were settled in this wave.
         source: Integrator reading the current wave's Unit roster.
-        fill_rule: Same length as settled_task_ids.
+        fill_rule: Must be a JSON array of strings, not a comma-separated string; same length and order as settled_task_ids.
+        examples: ['["U01", "U02"]']
       verified_base_commit:
         meaning: Verified base commit for the next wave's worktree creation.
         source: integrator after verifier pass.
@@ -530,6 +591,7 @@ schemas:
         meaning: Repo-relative path to the wave settlement log artifact.
         source: File at .ralph/forge/<plan-key>/waves/<wave_id>/settlement.md.
         fill_rule: Must exist; contains review/integration/verification outcome + commit map.
+        examples: [".ralph/<plan>/<wave>/settlement.md"]
 
   forge.exec.development.done:
     required_fields:
@@ -543,6 +605,7 @@ schemas:
         meaning: Execution plan SSOT; all development waves finished.
         source: forge-dispatcher after last exec wave fan-in.
         fill_rule: Same path used since Planner handoff.
+        examples: [".ralph/<plan>/execution-plan.yml"]
       completed_unit_count:
         meaning: Units that reached exec.unit.done.
         source: ralph tools task list done count for plan units.
@@ -596,10 +659,12 @@ schemas:
         meaning: Repo-relative path to execution-plan.yml SSOT.
         source: Projection forge.execution_plan_path or trigger from worktrees.ready.
         fill_rule: File must exist; same path since planner.
+        examples: [".ralph/<plan>/execution-plan.yml"]
       worktree_map_path:
         meaning: Repo-relative path to Unit→branch→worktree map YAML.
         source: Projection forge.worktree_map_path from forge.worktrees.ready.
         fill_rule: File must exist; executor uses it to locate the unit worktree.
+        examples: [".ralph/<plan>/worktree-map.yml"]
 
   forge.worktrees.ready:
     required_fields:
@@ -619,6 +684,7 @@ schemas:
         meaning: Artifact listing Unit → branch → worktree path mappings.
         source: File written this activation at .ralph/forge/plan-key/worktree-map.yml.
         fill_rule: Verify file exists; one worktree per parallel Unit.
+        examples: [".ralph/<plan>/worktree-map.yml"]
       integration_branch:
         meaning: Target branch for sequential Unit integration.
         source: Git branch created or confirmed this activation.
@@ -652,6 +718,7 @@ schemas:
         meaning: Aggregate review summary across all Units.
         source: File at .ralph/forge/plan-key/reviews/summary.md.
         fill_rule: Lists each unit_id and verdict.
+        examples: [".ralph/<plan>/reviews/summary.md"]
       all_approved:
         meaning: Whether every Unit received APPROVED.
         source: Count APPROVED vs total units in summary.
@@ -684,6 +751,7 @@ schemas:
         meaning: Sequential integration log (rebase, merge, conflicts).
         source: File at .ralph/forge/plan-key/integration-log.md.
         fill_rule: Must exist before emit.
+        examples: [".ralph/<plan>/integration-log.md"]
       integration_complete:
         meaning: Whether all Units were integrated in topology order.
         source: Integrator after processing integration_order from execution plan.
@@ -692,6 +760,7 @@ schemas:
         meaning: Artifact mapping unit_id → final commit SHA on integration branch.
         source: File at .ralph/forge/plan-key/commit-map.yml written this activation.
         fill_rule: Must exist; one commit SHA per integrated Unit.
+        examples: [".ralph/<plan>/commit-map.yml"]
       linear_history:
         meaning: Whether integration branch history is linear (no merge commits / WIP tails).
         source: Integrator Curator check (git log --merges / message scan).
@@ -712,6 +781,7 @@ schemas:
         meaning: Full regression and CI-equivalent test report.
         source: File at .ralph/forge/plan-key/full-verification.md.
         fill_rule: Must list every command executed and outcome.
+        examples: [".ralph/<plan>/full-verification.md"]
       all_required_passed:
         meaning: Whether every required gate command passed.
         source: Parsed full-verification.md outcomes.
@@ -736,6 +806,7 @@ schemas:
         meaning: Final audit artifact path.
         source: File at .ralph/forge/plan-key/final-audit.md.
         fill_rule: File must exist before emit.
+        examples: [".ralph/<plan>/final-audit.md"]
       plan_key:
         meaning: Forge plan key basename.
         source: Trigger / forge artifact root.
@@ -755,6 +826,7 @@ schemas:
         meaning: Final audit artifact carried into the delivery handoff.
         source: forge.audit.done.audit_report_path.
         fill_rule: Must exist before emit and match the audit event.
+        examples: [".ralph/<plan>/final-audit.md"]
       target_branch:
         meaning: Branch that received the final fast-forward.
         source: forge.worktrees.ready.target_branch.
@@ -771,6 +843,7 @@ schemas:
         meaning: Artifact recording the target merge and required artifact checks.
         source: File at .ralph/forge/plan-key/finalization.md.
         fill_rule: Must exist before emit.
+        examples: [".ralph/<plan>/finalization.md"]
       plan_key:
         meaning: Forge plan key basename.
         source: Trigger / forge artifact root.
@@ -795,6 +868,7 @@ schemas:
         meaning: Per-resource cleanup report written before the reporter runs.
         source: File at .ralph/forge/<plan-key>/cleanup.md.
         fill_rule: Verify file exists; path must be repo-relative.
+        examples: [".ralph/<plan>/cleanup.md"]
       cleanup_status:
         meaning: Aggregate forge resource cleanup result.
         source: Cleanup hat after processing the worktree map.
@@ -828,6 +902,7 @@ schemas:
         meaning: Manager-readable Markdown report path.
         source: File written at docs/reports/date-task-manager-report.md per naming rules.
         fill_rule: Verify file exists; follow parallel-forge naming rules.
+        examples: [".ralph/<plan>/manager-report.md"]
       status:
         meaning: Manager report status derived from Auditor verdict or blocked/failed mapping.
         source: Map ACCEPTED→COMPLETED, REJECTED→FAILED/PARTIAL, BLOCKED→BLOCKED; work.failed→FAILED.
@@ -862,6 +937,7 @@ schemas:
         meaning: Repo-relative path to a block note written this activation (what failed and evidence).
         source: File under .ralph/forge/<plan-key>/blocks/<hat-id>-blocked.md.
         fill_rule: Write file before emit; test -f; path must be repo-relative.
+        examples: [".ralph/<plan>/blocks/<hat>-blocked.md"]
       forge_artifact_root:
         meaning: Directory holding forge artifacts for this plan (.ralph/forge/<plan-key>/).
         source: Known plan_key from this run.
@@ -880,6 +956,7 @@ schemas:
         meaning: Repo-relative path to the manager report (same as forge.report.done.report_path).
         source: forge.report.done trigger payload or file written this activation.
         fill_rule: Must match an existing report file path.
+        examples: [".ralph/<plan>/manager-report.md"]
 
   # Supervisor slot topics (worker publishes; schema parity with ce-executor-supervisor)
   exec.unit.done:
@@ -922,6 +999,7 @@ schemas:
         meaning: Unit Completion Report artifact for this slot.
         source: File at .ralph/forge/plan-key/units/unit-id-completion.md.
         fill_rule: Written before emit; path repo-relative from main repo root when possible.
+        examples: [".ralph/<plan>/units/<unit>-completion.md"]
       plan_key:
         meaning: Forge plan key basename.
         source: Trigger exec.unit.ready.plan_key.
@@ -1035,6 +1113,7 @@ schemas:
         meaning: Repo-relative path to a failure note written this activation.
         source: File under .ralph/forge/<plan-key>/failures/<hat-id>-failed.md.
         fill_rule: Write before emit; test -f.
+        examples: [".ralph/<plan>/failures/<hat>-failed.md"]
       forge_artifact_root:
         meaning: Directory holding forge artifacts (.ralph/forge/<plan-key>/).
         source: Known plan_key.
