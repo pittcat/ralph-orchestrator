@@ -252,8 +252,10 @@ ralph preset [OPTIONS] <COMMAND>
 
 **Subcommands:**
 
-- `list [--format <human|json>]` — List available workflow templates.
-- `show <NAME> [--format <human|yaml|json>]` — Show template details.
+- `list [--format <human|json>]` — List available workflow templates (template source only).
+- `show <NAME> [--format <human|yaml|json>]` — Show template details (template source only).
+- `builtin list [--format <human|json>]` — List public builtin presets embedded in this binary.
+- `builtin show <ID> [--format <human|yaml|json>]` — Show the raw embedded YAML for a known builtin ID, including hidden builtins.
 - `new <TEMPLATE> [--name <NAME>] [--description <TEXT>] [--output <PATH>] [--force] [--check] [--format <human|json>]` — Generate a new preset from a template.
 - `check [--format <human|json>] [--strict]` — Check preset/workflow contract.
 - `diff --file <FILE> [--format <human|json>]` — Show differences from the template baseline.
@@ -265,6 +267,10 @@ ralph preset [OPTIONS] <COMMAND>
 ```bash
 # List available templates
 ralph preset list
+
+# Inspect embedded builtin presets (runtime source)
+ralph preset builtin list --format json
+ralph preset builtin show parallel-forge --format yaml
 
 # Show template details
 ralph preset show minimal-linear --format yaml

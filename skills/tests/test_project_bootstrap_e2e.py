@@ -758,12 +758,12 @@ class TestCrossLayerBootstrap:
 
 _BUILTIN_LIST_JSON = json.dumps(
     {
-        "manifests": [
+        "presets": [
             {
-                "name": "debug",
+                "id": "debug",
                 "description": "Debug preset",
                 "source": "builtin:debug",
-                "tags": ["debug"],
+                "public": True,
             }
         ]
     }
@@ -785,20 +785,26 @@ _BUILTIN_SHOW_YAML = (
 def _unified_entry_runner(argv, timeout=None, capture_output=False, text=False):
     """Fake ``subprocess.run`` for ``run_pipeline`` cross-layer tests.
 
-    Honours the builtin-resolution argv (``preset list`` / ``preset
-    show``) plus the minimum capability / static-gate surface. Any
-    other argv raises so unexpected stage traffic fails loudly. The
-    real ``ralph`` binary is never spawned.
+    Honours the U03 builtin-resolution argv
+    (``preset builtin list --format json`` /
+    ``preset builtin show <id> --format yaml``) plus the minimum
+    capability / static-gate surface. The legacy ``preset list`` /
+    ``preset show`` argv is intentionally NOT honoured — a regression
+    that falls back to the old surface fails loudly here.
     """
     ok = subprocess.CompletedProcess(args=tuple(argv), returncode=0, stdout="", stderr="")
-    if argv[1:] == ["preset", "list", "--format", "json"]:
+    if argv[1:] == ["preset", "builtin", "list", "--format", "json"]:
         return subprocess.CompletedProcess(
             args=tuple(argv), returncode=0, stdout=_BUILTIN_LIST_JSON, stderr=""
         )
-    if len(argv) == 6 and argv[1:3] == ["preset", "show"] and argv[4] == "--format":
-        if argv[3] != "debug":
+    if (
+        len(argv) >= 6
+        and argv[1:4] == ["preset", "builtin", "show"]
+        and argv[-2] == "--format"
+    ):
+        if argv[4] != "debug":
             return subprocess.CompletedProcess(
-                args=tuple(argv), returncode=2, stdout="", stderr="unknown template"
+                args=tuple(argv), returncode=2, stdout="", stderr="unknown builtin preset"
             )
         return subprocess.CompletedProcess(
             args=tuple(argv), returncode=0, stdout=_BUILTIN_SHOW_YAML, stderr=""

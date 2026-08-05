@@ -124,34 +124,35 @@ _VALID_FILE_PRESET_YAML = (
 
 
 # Stub transcripts the fake ``subprocess.run`` replays for builtin
-# resolution. The transcript mirrors the real ``ralph preset list
-# --format json`` output described in plan E14: ``source`` is the
-# hats-source id (``builtin:debug``), ``name`` is the template name.
+# resolution. Mirrors the ``ralph preset builtin list --format json``
+# envelope produced by U01: ``{presets: [{id, source, description,
+# public}]}``; every ``source`` is strictly ``builtin:<id>`` and
+# ``public`` reflects whether the preset surfaces via ``list``.
 _BUILTIN_PRESET_LIST: dict[str, object] = {
-    "manifests": [
+    "presets": [
         {
-            "name": "debug",
+            "id": "debug",
             "description": "Debug preset",
             "source": "builtin:debug",
-            "tags": ["debug"],
+            "public": True,
         },
         {
-            "name": "ce-executor-lite",
+            "id": "ce-executor-lite",
             "description": "Lite preset",
             "source": "builtin:ce-executor-lite",
-            "tags": [],
+            "public": True,
         },
         {
-            "name": "ce-executor-pipeline",
+            "id": "ce-executor-pipeline",
             "description": "Pipeline preset",
             "source": "builtin:ce-executor-pipeline",
-            "tags": [],
+            "public": True,
         },
         {
-            "name": "replay-demo",
+            "id": "replay-demo",
             "description": "Replay-safe demo preset",
             "source": "builtin:replay-demo",
-            "tags": [],
+            "public": True,
         },
     ]
 }
@@ -217,10 +218,14 @@ def _builtin_resolver_runner(
     """Return a fake ``subprocess.run`` reply for the builtin resolver path.
 
     Only the two argv shapes the pipeline's builtin resolver emits
-    are honoured:
+    are honoured (U03 migration):
 
-    * ``[binary, "preset", "list", "--format", "json"]``
-    * ``[binary, "preset", "show", <name>, "--format", "yaml"]``
+    * ``[binary, "preset", "builtin", "list", "--format", "json"]``
+    * ``[binary, "preset", "builtin", "show", <id>, "--format", "yaml"]``
+
+    The legacy argv shapes (``preset list`` / ``preset show``) are NOT
+    honoured — a regression that invokes the old template-based path
+    fails the fake runner so the resolver cannot silently fall back.
 
     Anything else raises ``AssertionError`` to surface unexpected
     resolution argv as a regression.
@@ -294,7 +299,11 @@ def _builtin_resolver_runner(
             stdout="plan.ready\nLOOP_COMPLETE\n",
             stderr="",
         )
-    if len(argv) >= 5 and argv[1:3] == ["preset", "list"] and argv[3] == "--format":
+    if (
+        len(argv) >= 6
+        and argv[1:4] == ["preset", "builtin", "list"]
+        and argv[4] == "--format"
+    ):
         return subprocess.CompletedProcess(
             args=argv,
             returncode=0,
@@ -302,19 +311,19 @@ def _builtin_resolver_runner(
             stderr="",
         )
     if (
-        len(argv) >= 6
-        and argv[1:3] == ["preset", "show"]
+        len(argv) >= 7
+        and argv[1:4] == ["preset", "builtin", "show"]
         and argv[-2] == "--format"
     ):
-        # form: ``[binary, "preset", "show", <name>, "--format", "yaml"]``
-        name = argv[3]
-        body = _BUILTIN_PRESET_SHOW.get(name)
+        # form: ``[binary, "preset", "builtin", "show", <id>, "--format", "yaml"]``
+        builtin_id = argv[4]
+        body = _BUILTIN_PRESET_SHOW.get(builtin_id)
         if body is None:
             return subprocess.CompletedProcess(
                 args=argv,
                 returncode=2,
                 stdout="",
-                stderr=f"unknown template: {name}",
+                stderr=f"unknown builtin preset: {builtin_id}",
             )
         return subprocess.CompletedProcess(
             args=argv,
@@ -636,13 +645,17 @@ def test_pipeline_file_preset_only_under_bare_cwd_is_rejected(
 # ---------------------------------------------------------------------------
 
 
-def test_builtin_resolution_uses_source_then_template(tmp_path: Path) -> None:
-    """B3: ``builtin:<id>`` is resolved via ``preset list`` source lookup,
-    not by stripping the prefix.
+def test_builtin_resolution_uses_builtin_id_and_show(tmp_path: Path) -> None:
+    """S6 (U03): ``builtin:<id>`` is resolved via ``preset builtin list``
+    → ``preset builtin show <id>`` with the resolved text byte-for-byte
+    equal to the show stdout.
 
-    The fake runner only honours the ``preset list`` then
-    ``preset show <template>`` sequence; a regression that invokes
-    ``preset show builtin:debug`` would fail the fake runner.
+    The fake runner only honours the new ``preset builtin list`` then
+    ``preset builtin show <id>`` sequence; a regression that invokes
+    the old ``preset list`` / ``preset show <template-name>`` path
+    fails the fake runner. The fake runner's argv gate also rejects
+    ``preset show builtin:<id>`` — the resolver must never use the
+    builtin-prefixed id as a show argument (S7 contract).
     """
     project = _seed_blank_project(tmp_path)
     result = bootstrap_pipeline.run_pipeline(
@@ -652,16 +665,71 @@ def test_builtin_resolution_uses_source_then_template(tmp_path: Path) -> None:
         binary="ralph",
         runner=_builtin_resolver_runner,
     )
-    # The resolver must surface the resolved preset id and template.
+    # The resolver must surface the resolved preset id; the show stdout
+    # is fed straight into the YAML parser, so the resolver's
+    # ``text`` field is byte-for-byte equal to the fixture body.
     assert result.preset == "builtin:debug"
     assert result.resolved_preset is not None
     assert result.resolved_preset.preset_id == "builtin:debug"
     assert result.resolved_preset.source_kind == "builtin"
+    # The builtin ID is the provenance label — the legacy
+    # ``template_name`` slot was sourced from the old
+    # ``manifests[i].name`` field; U03 deliberately collapses the two
+    # so a future template manifest rename cannot misroute the
+    # resolver.
     assert result.resolved_preset.template_name == "debug"
     assert result.resolved_preset.backend == "claude"
     assert result.resolved_preset.max_iterations == 8
     assert result.resolved_preset.max_runtime_seconds == 1800
     assert result.resolved_preset.inline_prompt_present is True
+    # The full YAML body lands in ``text`` (no template placeholders).
+    assert "name: debug" in result.resolved_preset.text
+    assert "backend: claude" in result.resolved_preset.text
+
+
+def test_builtin_resolution_does_not_use_template_alias(tmp_path: Path) -> None:
+    """S7 (U03): the resolver never falls back to a template name when
+    the builtin list contains the canonical id.
+
+    Both ``ce-executor-pipeline`` and ``ce-executor-lite`` appear in
+    the fake list. A regression that looked up the template alias
+    (``ce-executor-lite``) and called ``preset show ce-executor-lite``
+    would fail the fake runner — only the builtin ID lookup path
+    must produce the show call.
+    """
+    project = _seed_blank_project(tmp_path)
+    captured: list[tuple[str, ...]] = []
+
+    def _recording(argv, timeout=None, capture_output=False, text=False):
+        captured.append(tuple(argv))
+        return _builtin_resolver_runner(
+            list(argv), timeout=timeout, capture_output=capture_output, text=text
+        )
+
+    result = bootstrap_pipeline.run_pipeline(
+        cwd=project,
+        preset="builtin:ce-executor-pipeline",
+        plan_path="plan.md",
+        binary="ralph",
+        runner=_recording,
+    )
+    assert result.level in {"incomplete_static_only", "complete"}
+    assert result.resolved_preset is not None
+    assert result.resolved_preset.preset_id == "builtin:ce-executor-pipeline"
+    # The fake binary records EVERY argv it sees; the show argv must
+    # carry the builtin id, NOT a template alias or the bare id strip.
+    show_argvs = [
+        argv
+        for argv in captured
+        if len(argv) >= 7 and argv[1:4] == ("preset", "builtin", "show")
+    ]
+    assert show_argvs, "resolver must invoke preset builtin show exactly once"
+    show_argv = show_argvs[0]
+    assert show_argv[4] == "ce-executor-pipeline"
+    # Never the template alias.
+    assert "ce-executor-lite" not in show_argv
+    # Never the builtin-prefixed id (the old buggy shape).
+    assert "builtin:ce-executor-pipeline" not in show_argv
 
 
 def test_builtin_resolution_unknown_id_blocker(tmp_path: Path) -> None:
@@ -681,6 +749,307 @@ def test_builtin_resolution_unknown_id_blocker(tmp_path: Path) -> None:
     assert result.level == "blocked"
     assert result.stage == "preset_resolution"
     assert result.code == "builtin_source_missing"
+
+
+# ---------------------------------------------------------------------------
+# U03 (S8-S10) — Builtin resolver fault-injection: list / show failures
+# ---------------------------------------------------------------------------
+
+
+def test_builtin_list_unparseable_blocks_before_show_or_write(tmp_path: Path) -> None:
+    """S8 (U03): a malformed ``preset builtin list`` envelope blocks at
+    ``preset_resolution`` with ``builtin_list_unparseable`` BEFORE any
+    show call or owned-artifact write.
+
+    The fake runner records every argv it sees. A regression that
+    parsed the bad-JSON path and then issued a show call would surface
+    here: the captured argv list contains a ``preset builtin show``
+    invocation, proving the resolver short-circuited the failure
+    branch.
+    """
+    project = _seed_blank_project(tmp_path)
+    captured: list[tuple[str, ...]] = []
+
+    def _bad_json_runner(argv, timeout=None, capture_output=False, text=False):
+        captured.append(tuple(argv))
+        if (
+            len(argv) >= 6
+            and argv[1:4] == ["preset", "builtin", "list"]
+            and argv[4] == "--format"
+        ):
+            return subprocess.CompletedProcess(
+                args=argv, returncode=0, stdout="{this is not valid json", stderr=""
+            )
+        # Show / capability / smoke paths fall through to the standard
+        # fake runner; the test asserts NO show call ever happens, so
+        # an unhandled argv is an AssertionError guard.
+        return _builtin_resolver_runner(
+            list(argv), timeout=timeout, capture_output=capture_output, text=text
+        )
+
+    result = bootstrap_pipeline.run_pipeline(
+        cwd=project,
+        preset="builtin:debug",
+        plan_path="plan.md",
+        binary="ralph",
+        runner=_bad_json_runner,
+    )
+    assert result.level == "blocked"
+    assert result.stage == "preset_resolution"
+    assert result.code == "builtin_list_unparseable"
+    # Show never runs.
+    assert not any(
+        len(argv) >= 7 and argv[1:4] == ("preset", "builtin", "show")
+        for argv in captured
+    )
+    # No owned artifacts.
+    assert result.files_created == ()
+    assert result.files_updated == ()
+    assert not list(project.glob("ralph.*.yml"))
+    assert not list(project.glob("PROMPT.*.md"))
+
+
+def test_builtin_list_failed_blocks_without_template_fallback(tmp_path: Path) -> None:
+    """S8 (U03): ``preset builtin list`` returning non-zero blocks the
+    resolver with ``builtin_list_failed`` — the resolver MUST NOT
+    fall back to the legacy ``preset list`` argv on a non-zero exit.
+    """
+    project = _seed_blank_project(tmp_path)
+    captured: list[tuple[str, ...]] = []
+
+    def _failing_list_runner(argv, timeout=None, capture_output=False, text=False):
+        captured.append(tuple(argv))
+        if (
+            len(argv) >= 6
+            and argv[1:4] == ["preset", "builtin", "list"]
+            and argv[4] == "--format"
+        ):
+            return subprocess.CompletedProcess(
+                args=argv,
+                returncode=3,
+                stdout="",
+                stderr="cli unavailable",
+            )
+        return _builtin_resolver_runner(
+            list(argv), timeout=timeout, capture_output=capture_output, text=text
+        )
+
+    result = bootstrap_pipeline.run_pipeline(
+        cwd=project,
+        preset="builtin:debug",
+        plan_path="plan.md",
+        binary="ralph",
+        runner=_failing_list_runner,
+    )
+    assert result.level == "blocked"
+    assert result.stage == "preset_resolution"
+    assert result.code == "builtin_list_failed"
+    # Show never runs (no fallback to legacy argv).
+    assert not any(
+        len(argv) >= 7 and argv[1:4] == ["preset", "builtin", "show"]
+        for argv in captured
+    )
+    # Legacy argv shape MUST NOT appear.
+    assert not any(
+        len(argv) >= 5 and argv[1:3] == ("preset", "list") for argv in captured
+    )
+    assert not any(
+        len(argv) >= 6 and argv[1:3] == ("preset", "show") for argv in captured
+    )
+    assert result.files_created == ()
+
+
+def test_builtin_show_failed_blocks_before_write(tmp_path: Path) -> None:
+    """S9 (U03): ``preset builtin show <id>`` returning non-zero blocks
+    with ``builtin_show_failed`` BEFORE any write — the resolver MUST
+    NOT swallow the exit code.
+    """
+    project = _seed_blank_project(tmp_path)
+    captured: list[tuple[str, ...]] = []
+
+    def _failing_show_runner(argv, timeout=None, capture_output=False, text=False):
+        captured.append(tuple(argv))
+        if (
+            len(argv) >= 7
+            and argv[1:4] == ["preset", "builtin", "show"]
+            and argv[-2] == "--format"
+        ):
+            return subprocess.CompletedProcess(
+                args=argv,
+                returncode=2,
+                stdout="",
+                stderr="boom",
+            )
+        return _builtin_resolver_runner(
+            list(argv), timeout=timeout, capture_output=capture_output, text=text
+        )
+
+    result = bootstrap_pipeline.run_pipeline(
+        cwd=project,
+        preset="builtin:debug",
+        plan_path="plan.md",
+        binary="ralph",
+        runner=_failing_show_runner,
+    )
+    assert result.level == "blocked"
+    assert result.stage == "preset_resolution"
+    assert result.code == "builtin_show_failed"
+    assert "debug" in result.message
+    assert "2" in result.message
+    # No owned artifacts.
+    assert result.files_created == ()
+    assert result.files_updated == ()
+    assert not list(project.glob("ralph.*.yml"))
+    assert not list(project.glob("PROMPT.*.md"))
+
+
+def test_builtin_show_empty_blocks_before_write(tmp_path: Path) -> None:
+    """S10 (U03): ``preset builtin show <id>`` returning empty stdout
+    blocks with ``builtin_show_empty`` BEFORE any write — empty body
+    is a typed failure, not a defaulting path.
+    """
+    project = _seed_blank_project(tmp_path)
+    captured: list[tuple[str, ...]] = []
+
+    def _empty_show_runner(argv, timeout=None, capture_output=False, text=False):
+        captured.append(tuple(argv))
+        if (
+            len(argv) >= 7
+            and argv[1:4] == ["preset", "builtin", "show"]
+            and argv[-2] == "--format"
+        ):
+            return subprocess.CompletedProcess(
+                args=argv, returncode=0, stdout="", stderr=""
+            )
+        return _builtin_resolver_runner(
+            list(argv), timeout=timeout, capture_output=capture_output, text=text
+        )
+
+    result = bootstrap_pipeline.run_pipeline(
+        cwd=project,
+        preset="builtin:debug",
+        plan_path="plan.md",
+        binary="ralph",
+        runner=_empty_show_runner,
+    )
+    assert result.level == "blocked"
+    assert result.stage == "preset_resolution"
+    assert result.code == "builtin_show_empty"
+    assert "debug" in result.message
+    assert result.files_created == ()
+    assert result.files_updated == ()
+    assert not list(project.glob("ralph.*.yml"))
+    assert not list(project.glob("PROMPT.*.md"))
+
+
+def test_builtin_list_envelope_rejects_old_manifests_shape(tmp_path: Path) -> None:
+    """S8 (U03): the new resolver MUST reject the legacy
+    ``{manifests: [...]}`` envelope — accepting it would leak
+    template-data-source semantics into the builtin resolver path.
+
+    The fake runner emits the legacy ``manifests`` shape; the resolver
+    surfaces ``builtin_list_unparseable`` instead of silently using a
+    template-name lookup.
+    """
+    project = _seed_blank_project(tmp_path)
+
+    def _legacy_envelope_runner(argv, timeout=None, capture_output=False, text=False):
+        if (
+            len(argv) >= 6
+            and argv[1:4] == ["preset", "builtin", "list"]
+            and argv[4] == "--format"
+        ):
+            legacy = {
+                "manifests": [
+                    {
+                        "name": "debug",
+                        "description": "Debug preset",
+                        "source": "builtin:debug",
+                    }
+                ]
+            }
+            return subprocess.CompletedProcess(
+                args=argv, returncode=0, stdout=json.dumps(legacy), stderr=""
+            )
+        return _builtin_resolver_runner(
+            list(argv), timeout=timeout, capture_output=capture_output, text=text
+        )
+
+    result = bootstrap_pipeline.run_pipeline(
+        cwd=project,
+        preset="builtin:debug",
+        plan_path="plan.md",
+        binary="ralph",
+        runner=_legacy_envelope_runner,
+    )
+    assert result.level == "blocked"
+    assert result.stage == "preset_resolution"
+    assert result.code == "builtin_list_unparseable"
+    assert result.files_created == ()
+
+
+def test_file_preset_resolution_does_not_call_subprocess(tmp_path: Path) -> None:
+    """U03 (file preset): a file preset path MUST NOT invoke any
+    builtin-resolution subprocess — the file read is the only IO and
+    the parser feeds ``_derive_runtime_fields`` directly.
+
+    This is the file-preset side of U03: the resolver's two paths are
+    ``builtin`` (subprocess) and ``file`` (no subprocess); the guard
+    below proves the migration did not accidentally route the file
+    path through ``preset builtin list`` or ``preset builtin show``.
+
+    Capability / static / smoke argv are deliberately allowed through
+    — those belong to the post-resolution stages and are exercised by
+    other tests.
+    """
+    project = _seed_blank_project(tmp_path)
+    captured: list[tuple[str, ...]] = []
+
+    def _guard_builtin_only(argv, *args, **kwargs):
+        captured.append(tuple(argv))
+        if len(argv) >= 6 and argv[1:4] == ["preset", "builtin", "list"]:
+            raise AssertionError(
+                f"file preset path must not invoke builtin list: argv={list(argv)}"
+            )
+        if len(argv) >= 7 and argv[1:4] == ["preset", "builtin", "show"]:
+            raise AssertionError(
+                f"file preset path must not invoke builtin show: argv={list(argv)}"
+            )
+        return _builtin_resolver_runner(list(argv), *args, **kwargs)
+
+    preset_path = "demo-file-preset.yml"
+    (project / preset_path).write_text(
+        "name: file-preset\n"
+        "cli:\n"
+        "  backend: claude\n"
+        "event_loop:\n"
+        "  prompt: |\n"
+        "    inline prompt\n"
+        "  max_iterations: 6\n"
+        "  max_runtime_seconds: 900\n",
+        encoding="utf-8",
+    )
+
+    result = bootstrap_pipeline.run_pipeline(
+        cwd=project,
+        preset=preset_path,
+        plan_path="plan.md",
+        binary="ralph",
+        runner=_guard_builtin_only,
+    )
+    assert result.resolved_preset is not None
+    assert result.resolved_preset.source_kind == "file"
+    assert result.resolved_preset.template_name == "demo-file-preset"
+    # Belt-and-braces: explicitly confirm no builtin-resolution argv
+    # ever reached the runner.
+    assert not any(
+        len(argv) >= 6 and argv[1:4] == ("preset", "builtin", "list")
+        for argv in captured
+    )
+    assert not any(
+        len(argv) >= 7 and argv[1:4] == ("preset", "builtin", "show")
+        for argv in captured
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1490,7 +1859,14 @@ def _bound_fixture_runner(
                     stdout="".join(invocation.stdout_chunks),
                     stderr="".join(invocation.stderr_chunks),
                 )
-        if len(argv) >= 3 and argv[1] == "preset" and argv[2] in ("list", "show"):
+        if (
+            len(argv) >= 6
+            and argv[1:4] == ("preset", "builtin", "list")
+            or (
+                len(argv) >= 7
+                and argv[1:4] == ("preset", "builtin", "show")
+            )
+        ):
             return _builtin_resolver_runner(
                 list(argv), timeout=timeout, capture_output=capture_output, text=text
             )
@@ -1505,9 +1881,14 @@ def _stage_of_argv(argv: tuple[str, ...]) -> str:
     """Classify a requested argv into the pipeline stage that emits it."""
     if "--max-iterations" in argv and "--idle-timeout" in argv:
         return "smoke"
-    if "preset" in argv and "list" in argv:
+    # U03: the builtin resolver emits
+    # ``[binary, "preset", "builtin", "list", "--format", "json"]`` and
+    # ``[binary, "preset", "builtin", "show", <id>, "--format", "yaml"]``;
+    # the legacy ``preset list`` / ``preset show`` argv must NOT appear
+    # in the recorded sequence any more.
+    if len(argv) >= 6 and argv[1:4] == ("preset", "builtin", "list"):
         return "preset_list"
-    if "preset" in argv and "show" in argv:
+    if len(argv) >= 7 and argv[1:4] == ("preset", "builtin", "show"):
         return "preset_show"
     if argv[1:] == ("--version",) or argv[-1] == "--help":
         return "capability"

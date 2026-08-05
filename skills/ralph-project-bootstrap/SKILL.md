@@ -80,13 +80,14 @@ rolls every target back to its pre-write state.
 
 1. **audit** — confirm the target root and inputs; ambiguous roots and
    unsafe paths block before any write or subprocess call.
-2. **preset resolution** — file presets are read as repo-relative YAML;
-   `builtin:<id>` is resolved via `ralph preset list --format json`
-   (find the manifest whose `source` equals `builtin:<id>`) then
-   `ralph preset show <template-name> --format yaml`. `preset show`
-   addresses **template names**, which may differ from the builtin hats
-   id; never assume stripping `builtin:` yields a template name. A
-   preset with no inline prompt and no supplied plan/prompt blocks with
+2. **preset resolution** — file presets are read as repo-relative YAML; a
+   `builtin:<id>` is resolved from the binary's embedded builtin inventory:
+   run `ralph preset builtin list --format json`, select the item whose `id`
+   equals the part after `builtin:`, then run
+   `ralph preset builtin show <id> --format yaml` to retrieve the complete
+   embedded YAML.  The builtin `id` is not a template name and must not be
+   mapped through `ralph preset list/show`; those commands are template-only.
+   A preset with no inline prompt and no supplied plan/prompt blocks with
    `preset_prompt_missing`.
 3. **generation + post-write verify** — compose the two suite files and
    the managed doc sections, write them atomically, then reopen every

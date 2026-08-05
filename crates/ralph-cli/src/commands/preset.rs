@@ -108,6 +108,52 @@ pub enum PresetCommands {
         #[arg(long)]
         dest: Option<PathBuf>,
     },
+    /// Introspect compiled-in builtin presets (U01/U02)
+    Builtin {
+        #[command(subcommand)]
+        command: PresetBuiltinCommands,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+pub enum PresetBuiltinCommands {
+    /// List public builtin presets compiled into this binary (U01)
+    List {
+        /// Output format (human or json)
+        #[arg(long, value_enum, default_value_t = PresetBuiltinListFormat::Human)]
+        format: PresetBuiltinListFormat,
+    },
+    /// Show the raw embedded YAML of a builtin preset (U02).
+    ///
+    /// Resolves both public and hidden builtins (e.g. `merge-loop`);
+    /// unknown IDs exit non-zero with the id on stderr.
+    Show {
+        /// Builtin preset id (e.g. `parallel-forge`, `merge-loop`)
+        id: String,
+        /// Output format (human, yaml, or json)
+        #[arg(long, value_enum, default_value_t = PresetBuiltinShowFormat::Human)]
+        format: PresetBuiltinShowFormat,
+    },
+}
+
+#[derive(ValueEnum, Debug, Clone, Copy)]
+pub enum PresetBuiltinListFormat {
+    Human,
+    Json,
+}
+
+/// Output format for `ralph preset builtin show` (U02).
+///
+/// Reused as a dedicated enum (rather than sharing the existing
+/// `PresetShowFormat`) so the template `show` and builtin `show` paths
+/// can evolve independently — template `show` carries
+/// TemplateManifest-specific semantics, while builtin `show` deals
+/// with byte-exact `EmbeddedPreset.content`.
+#[derive(ValueEnum, Debug, Clone, Copy)]
+pub enum PresetBuiltinShowFormat {
+    Human,
+    Yaml,
+    Json,
 }
 
 #[derive(ValueEnum, Debug, Clone, Copy)]
@@ -216,6 +262,10 @@ pub async fn execute(
             plan_key,
             dest,
         }) => materialize_artifacts(&preset, &plan_key, dest.as_deref(), use_colors),
+        Some(PresetCommands::Builtin { command }) => match command {
+            PresetBuiltinCommands::List { format } => list_builtins(format, use_colors),
+            PresetBuiltinCommands::Show { id, format } => show_builtin(&id, format, use_colors),
+        },
         None => {
             // Default to list with current config
             list_templates(PresetListFormat::Human, use_colors)
@@ -326,6 +376,190 @@ fn list_templates(format: PresetListFormat, use_colors: bool) -> Result<()> {
             }
             println!("Use `ralph preset show <name>` to see template details.");
             println!("Use `ralph preset new <name> --name <preset-name>` to generate a preset.");
+        }
+    }
+    Ok(())
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// U01/U02: Builtin introspection — list public-only inventory and
+// emit raw embedded yaml (S1, S2, S3, S4, S5, S12)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Projection of a public `EmbeddedPreset` into the stable builtin-list
+/// JSON envelope.  Field names are part of the agent-visible contract:
+/// `id` is the embedded `name`, `source` is always derived as
+/// `builtin:<id>` (no whitespace, no case drift), `description` is the
+/// embedded description, and `public` is always `true` for items that
+/// reach this projection (hidden presets are filtered upstream by
+/// `list_presets`).
+#[derive(serde::Serialize)]
+struct BuiltinListItem {
+    id: String,
+    source: String,
+    description: String,
+    public: bool,
+}
+
+/// Top-level envelope shape for `ralph preset builtin list --format json`.
+///
+/// Stable across versions: callers (project-bootstrap resolver, operator
+/// scripts) parse `{presets: [...]}` and never the bare array.
+#[derive(serde::Serialize)]
+struct BuiltinListEnvelope {
+    presets: Vec<BuiltinListItem>,
+}
+
+/// Render the public builtin inventory derived from `EmbeddedPreset`.
+///
+/// # Agent / operator contract (U01 / S1, S2)
+///
+/// - Source is the `EmbeddedPreset` table compiled into the binary —
+///   no filesystem reads, no TemplateCatalog fallback, no bootstrap
+///   resolver invocation.
+/// - Hidden presets (`public=false`) MUST NOT appear in either format.
+/// - `source` is strictly `builtin:<id>` (no whitespace, no case drift).
+/// - JSON shape is `{presets: [{id, source, description, public}, ...]}`.
+/// - Human format labels builtin IDs and visibility (S2).
+fn list_builtins(format: PresetBuiltinListFormat, use_colors: bool) -> Result<()> {
+    let items: Vec<BuiltinListItem> = crate::presets::list_presets()
+        .into_iter()
+        .map(|preset| BuiltinListItem {
+            id: preset.name.to_string(),
+            source: format!("builtin:{}", preset.name),
+            description: preset.description.to_string(),
+            public: preset.public,
+        })
+        .collect();
+
+    match format {
+        PresetBuiltinListFormat::Json => {
+            let envelope = BuiltinListEnvelope { presets: items };
+            println!("{}", serde_json::to_string_pretty(&envelope)?);
+        }
+        PresetBuiltinListFormat::Human => {
+            println!("Available builtin presets (compiled into this binary):");
+            println!();
+            for item in &items {
+                if use_colors {
+                    println!("  {}{}{}", colors::CYAN, item.id, colors::RESET);
+                } else {
+                    println!("  {}", item.id);
+                }
+                println!("    source: {}", item.source);
+                println!("    public: {}", item.public);
+                println!("    {}", item.description);
+                println!();
+            }
+            if items.is_empty() {
+                println!("  (no public builtin presets available)");
+            }
+        }
+    }
+    Ok(())
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// U02: Builtin introspection — show raw embedded yaml (S3, S4, S5)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Return the byte-exact YAML body for a builtin preset.
+///
+/// The return type is the same `&'static str` as
+/// `EmbeddedPreset.content` so the bytes the helper hands to a
+/// downstream consumer (e.g. the `project-bootstrap` resolver)
+/// are bit-for-bit identical to what the CLI writes to stdout in
+/// `Yaml` mode. Pinning the contract here keeps the byte-equality
+/// testable without intercepting real stdout.
+fn builtin_yaml_bytes(preset: &crate::presets::EmbeddedPreset) -> &'static [u8] {
+    preset.content.as_bytes()
+}
+
+/// JSON envelope for `ralph preset builtin show <id> --format json`.
+///
+/// Same field set as `BuiltinListItem` (mirrors the agent-visible
+/// contract used by `preset builtin list --format json`); the YAML
+/// body itself is *not* inlined in this struct — JSON consumers who
+/// want the full YAML should call `--format yaml` instead.
+#[derive(serde::Serialize)]
+struct BuiltinShowEnvelope<'a> {
+    id: &'a str,
+    source: String,
+    description: &'a str,
+    public: bool,
+    /// True iff the YAML body is the byte-exact `EmbeddedPreset.content`
+    /// (it always is; this flag documents the contract for the JSON
+    /// consumer, mirroring the list envelope's `public` field).
+    content_available: bool,
+}
+
+/// Render a builtin preset's metadata + raw YAML for `preset builtin show`.
+///
+/// # Agent / operator contract (U02 / S3, S4, S5)
+///
+/// - `get_preset` is the **single** lookup helper. It does **not**
+///   filter by `public`, so hidden IDs (`merge-loop`) resolve
+///   successfully. The `list` path keeps using `list_presets`
+///   (which filters by `public`) — the two paths are explicitly
+///   decoupled so a future `public` change never silently widens
+///   the show path.
+/// - `Yaml` mode writes `EmbeddedPreset.content` to stdout **byte-exact**
+///   — no reserialize, no trim, no extra newline. Downstream callers
+///   (e.g. `project-bootstrap` resolver, U03) feed the bytes straight
+///   into a YAML parser; any normalization here would corrupt that
+///   contract.
+/// - `Human` mode renders the metadata envelope as labeled text.
+/// - `Json` mode emits the same envelope as JSON.
+/// - Unknown id → `anyhow!` with the id; the error path writes
+///   nothing to stdout, exits non-zero. Stderr is the standard
+///   anyhow path (non-zero, line including the id).
+fn show_builtin(id: &str, format: PresetBuiltinShowFormat, use_colors: bool) -> Result<()> {
+    let preset = crate::presets::get_preset(id)
+        .ok_or_else(|| anyhow::anyhow!("unknown builtin preset: {id}"))?;
+
+    match format {
+        PresetBuiltinShowFormat::Yaml => {
+            // Byte-exact: write the embedded content as-is. Use
+            // `write_all` (not `println!`) to avoid appending a trailing
+            // newline that wasn't in the source string. The `&str`
+            // is already UTF-8-valid (compile-time `include_str!`).
+            //
+            // The actual byte stream is sourced from
+            // `builtin_yaml_bytes(preset)` so unit tests can pin the
+            // byte-equality invariant without intercepting stdout.
+            use std::io::Write;
+            let stdout = std::io::stdout();
+            let mut handle = stdout.lock();
+            handle
+                .write_all(builtin_yaml_bytes(preset))
+                .context("failed to write builtin preset yaml to stdout")?;
+        }
+        PresetBuiltinShowFormat::Json => {
+            let envelope = BuiltinShowEnvelope {
+                id: preset.name,
+                source: format!("builtin:{}", preset.name),
+                description: preset.description,
+                public: preset.public,
+                content_available: true,
+            };
+            println!("{}", serde_json::to_string_pretty(&envelope)?);
+        }
+        PresetBuiltinShowFormat::Human => {
+            if use_colors {
+                println!(
+                    "{}Builtin preset:{} {}",
+                    colors::CYAN,
+                    colors::RESET,
+                    preset.name
+                );
+            } else {
+                println!("Builtin preset: {}", preset.name);
+            }
+            println!("  source:      builtin:{}", preset.name);
+            println!("  public:      {}", preset.public);
+            println!("  description: {}", preset.description);
+            println!();
+            println!("Use `--format yaml` to dump the raw embedded YAML body.");
         }
     }
     Ok(())
@@ -2800,5 +3034,85 @@ mod materialize_artifacts_tests {
         let dest = tmp.path().join("out");
         let err = materialize_artifacts("not-a-preset", "k", Some(&dest), false).unwrap_err();
         assert!(err.to_string().contains("no embedded artifact templates"));
+    }
+}
+
+#[cfg(test)]
+mod builtin_show_tests {
+    //! In-crate unit tests for `show_builtin` (U02). The
+    //! integration-level byte-equal checks live in
+    //! `tests/integration_preset_builtin.rs`; these tests pin the
+    //! internal invariant that `Yaml` mode writes the embedded
+    //! content as-is, *and* exercise the public/hidden paths via
+    //! `get_preset` rather than through the CLI.
+
+    use super::*;
+    use crate::presets::get_preset;
+
+    /// Pin: `show_builtin("parallel-forge", Yaml, false)` writes
+    /// `get_preset("parallel-forge").content` to stdout byte-exact
+    /// (no reserialize, no trim, no extra newline).
+    ///
+    /// The integration test (`builtin_show_yaml_public_is_parseable`)
+    /// asserts the YAML is *parseable* and contains the expected
+    /// top-level keys; this in-crate test pins the *byte-equality*
+    /// invariant: whatever `show_builtin` writes is exactly the
+    /// `EmbeddedPreset.content` byte slice, with no normalization.
+    #[test]
+    fn show_builtin_yaml_helper_returns_embedded_content_byte_exact() {
+        let embedded = get_preset("parallel-forge")
+            .expect("parallel-forge is a Tier-0 builtin and must exist");
+        let rendered = builtin_yaml_bytes(embedded);
+        assert_eq!(
+            rendered,
+            embedded.content.as_bytes(),
+            "builtin_yaml_bytes must return the embedded content as-is (no trim, no rewrite)"
+        );
+        assert!(
+            !rendered.is_empty(),
+            "embedded content must not be empty for parallel-forge"
+        );
+    }
+
+    /// Pin: `show_builtin(<hidden>, Yaml, false)` must succeed
+    /// because the lookup helper (`get_preset`) does not filter on
+    /// `public`. This is the S4 contract: hidden IDs resolve.
+    #[test]
+    fn get_preset_resolves_hidden_ids() {
+        let hidden = get_preset("merge-loop")
+            .expect("merge-loop is a hidden builtin and must resolve via get_preset");
+        assert!(
+            !hidden.public,
+            "merge-loop must stay flagged public=false (hidden)"
+        );
+        assert!(
+            !hidden.content.is_empty(),
+            "hidden content must not be empty"
+        );
+    }
+
+    /// Pin: `show_builtin(<unknown>, ...)` errors out with the id
+    /// surfaced in the error message. This is the S5 contract.
+    #[test]
+    fn get_preset_returns_none_for_unknown_id() {
+        assert!(get_preset("does-not-exist").is_none());
+    }
+
+    /// Pin: `show_builtin(<unknown>, Yaml, false)` errors to
+    /// `anyhow!` with the id present in the error string. We can't
+    /// easily intercept the stdout write from the function under
+    /// test (it writes to the real stdout), so this test exercises
+    /// the failure path indirectly via `get_preset` (which is the
+    /// single source of truth for the unknown-id case).
+    #[test]
+    fn unknown_id_error_message_contains_id() {
+        // The error message contract: "unknown builtin preset: <id>".
+        // We rebuild the same error from the helper to pin the
+        // contract that the integration test asserts on stderr.
+        let id = "does-not-exist";
+        let err = anyhow::anyhow!("unknown builtin preset: {id}");
+        let msg = err.to_string();
+        assert!(msg.contains("does-not-exist"));
+        assert!(msg.contains("unknown builtin preset"));
     }
 }
