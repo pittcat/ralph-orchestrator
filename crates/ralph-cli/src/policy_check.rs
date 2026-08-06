@@ -2231,6 +2231,29 @@ pub struct ValidationError {
     /// violation is not field-scoped.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub referenced_fields: Option<Vec<String>>,
+    /// U4 (plan 2026-08-06-001, R2): bounded field observations
+    /// the rule saw when it fired.  Each entry is a JSON object
+    /// `{field, value}` carrying the literal value (or the
+    /// sentinel `unavailable` / `unchecked`).  Always `None`
+    /// for non-evidence findings (mechanical schema violations
+    /// keep `field` + `expected` + `actual` instead).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub observed: Option<Vec<serde_json::Value>>,
+    /// U4 (plan 2026-08-06-001, R2/R3): the violated rule,
+    /// expressed as a stable human-readable string.  Distinct
+    /// from `message` (which is the legacy diagnostic text) so
+    /// the agent can match on the rule without parsing free-
+    /// form prose.  Empty for schema-level violations.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub invariant: Option<String>,
+    /// U4 (plan 2026-08-06-001, R2): the condition the agent
+    /// must re-prove on the next attempt (e.g. "rebuild the
+    /// payload from the artifact and rerun
+    /// `ralph emit --policy-check`").  Empty for schema-level
+    /// violations and for semantic violations where the
+    /// gate did not supply a proof (legacy fallback).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub required_proof: Option<String>,
 }
 
 impl ValidationError {
@@ -2469,6 +2492,7 @@ mod u1_warn_parity_tests {
                 referenced_fields: Vec::new(),
             },
             message: format!("payload_consistency rule '{rule_id}' violated"),
+            evidence: None,
         }
     }
 
@@ -2481,6 +2505,7 @@ mod u1_warn_parity_tests {
                 referenced_fields: Vec::new(),
             },
             message: "other namespace warning".to_string(),
+            evidence: None,
         }
     }
 
@@ -2491,6 +2516,7 @@ mod u1_warn_parity_tests {
                 field: "task_id".to_string(),
             },
             message: "missing required field".to_string(),
+            evidence: None,
         }
     }
 
@@ -2622,6 +2648,7 @@ mod u2_structured_feedback_tests {
                 referenced_fields: fields.iter().map(|s| s.to_string()).collect(),
             },
             message: format!("payload_consistency rule '{rule_id}' violated"),
+            evidence: None,
         }
     }
 
@@ -2688,8 +2715,7 @@ mod u2_structured_feedback_tests {
                 context: "wave='w-1' received=0/3 expected".to_string(),
                 referenced_fields: Vec::new(),
             },
-            message: "review.passed while wave open".to_string(),
-        };
+            message: "review.passed while wave open".to_string(), evidence: None,};
         let decision = PolicyDecision::RejectWithResume(finding);
         let err = finding_to_validation_error(&decision, "review.passed")
             .expect("RejectWithResume must surface as ValidationError");
@@ -2950,6 +2976,44 @@ fn finding_record(finding: &ralph_core::PolicyFinding) -> ValidationError {
         message: finding.message.clone(),
         gate,
         referenced_fields,
+        // U4 (plan 2026-08-06-001, R2/R3): propagate the
+        // structured evidence from the PolicyFinding into the
+        // ValidationError so the JSON / text projection surfaces
+        // the same observed facts / violated invariant / required
+        // proof that the loop prompt uses (R2: same source of
+        // truth for CLI and runtime feedback).  Mechanical /
+        // legacy findings carry `evidence = None`, so the new
+        // fields stay `None` and the JSON shape is unchanged for
+        // them.
+        observed: finding.evidence.as_ref().map(|ev| {
+            ev.observed
+                .iter()
+                .map(|o| {
+                    serde_json::json!({
+                        "field": o.field,
+                        "value": match &o.value {
+                            ralph_core::correction::ObservationValue::Value(v) => {
+                                serde_json::Value::String(v.clone())
+                            }
+                            ralph_core::correction::ObservationValue::Unavailable => {
+                                serde_json::Value::String("unavailable".into())
+                            }
+                            ralph_core::correction::ObservationValue::Unchecked => {
+                                serde_json::Value::String("unchecked".into())
+                            }
+                        },
+                    })
+                })
+                .collect()
+        }),
+        invariant: finding
+            .evidence
+            .as_ref()
+            .and_then(|ev| if ev.invariant.is_empty() { None } else { Some(ev.invariant.clone()) }),
+        required_proof: finding
+            .evidence
+            .as_ref()
+            .and_then(|ev| if ev.proof.is_empty() { None } else { Some(ev.proof.clone()) }),
         ..Default::default()
     }
 }
@@ -3297,6 +3361,42 @@ pub fn render_validation_error_repair_block(
         }
         if let Some(cmd) = error.suggested_command.as_deref() {
             lines.push(format!("  rerun: {cmd}"));
+        }
+        // U4 (plan 2026-08-06-001, R2): render the structured
+        // evidence on the text projection as well so the human
+        // and the agent see the same source of truth.  Distinct
+        // from `expected` / `actual` (which the mechanical path
+        // uses) and from `suggested_*` (which the semantic path
+        // forbids).
+        if let Some(observed) = error.observed.as_ref() {
+            if !observed.is_empty() {
+                let pairs: Vec<String> = observed
+                    .iter()
+                    .map(|v| {
+                        let field = v
+                            .get("field")
+                            .and_then(serde_json::Value::as_str)
+                            .unwrap_or("?");
+                        let value = v
+                            .get("value")
+                            .map(|x| x.to_string())
+                            .unwrap_or_else(|| "?".to_string());
+                        format!("{field}={value}")
+                    })
+                    .collect();
+                lines.push(format!("  observed: {}", pairs.join(", ")));
+            } else {
+                lines.push(
+                    "  observed: (none — gate did not return any fact-checked observations)"
+                        .to_string(),
+                );
+            }
+        }
+        if let Some(invariant) = error.invariant.as_deref() {
+            lines.push(format!("  invariant: {invariant}"));
+        }
+        if let Some(proof) = error.required_proof.as_deref() {
+            lines.push(format!("  must re-prove: {proof}"));
         }
     }
 
@@ -4181,6 +4281,150 @@ hats:
         assert!(block.contains("meaning:"));
         assert!(block.contains("suggested payload shape"));
         assert!(block.contains("--policy-check"));
+    }
+
+    /// U4 (plan 2026-08-06-001, R2/R3): the CLI
+    /// `ralph emit --policy-check --output json` JSON shape
+    /// must carry observed / invariant / required_proof for a
+    /// semantic finding so the agent sees the same source of
+    /// truth as the loop prompt.  Mechanical findings must
+    /// keep their existing shape (`suggested_*` present,
+    /// `observed` / `invariant` / `required_proof` absent).
+    #[test]
+    fn u4_semantic_finding_carries_observed_invariant_required_proof() {
+        let finding = ralph_core::PolicyFinding {
+            topic: "fix.done".to_string(),
+            violation_type: ViolationType::SemanticGateViolation {
+                gate: "payload_consistency:fix-done-blocked".to_string(),
+                context: "status=blocked requires fixes_applied > 0".to_string(),
+                referenced_fields: vec!["status".into(), "fixes_applied".into()],
+            },
+            message: "payload_consistency rule 'fix-done-blocked' violated".to_string(),
+            evidence: Some(ralph_core::correction::EvidenceDetail {
+                observed: vec![
+                    ralph_core::correction::ObservationEntry {
+                        field: "status".into(),
+                        value: ralph_core::correction::ObservationValue::Value(
+                            "\"blocked\"".into(),
+                        ),
+                    },
+                    ralph_core::correction::ObservationEntry {
+                        field: "fixes_applied".into(),
+                        value: ralph_core::correction::ObservationValue::Value("0".into()),
+                    },
+                ],
+                invariant: "status=blocked requires fixes_applied > 0".into(),
+                proof: "rebuild from artifact and rerun ralph emit --policy-check".into(),
+                synthetic: false,
+            }),
+        };
+        let error = finding_record(&finding);
+        let json = serde_json::to_value(&error).expect("ValidationError serialises");
+        assert_eq!(json["reason_code"], "semantic_gate_violation");
+        assert_eq!(json["gate"], "payload_consistency:fix-done-blocked");
+        assert_eq!(
+            json["referenced_fields"],
+            serde_json::json!(["status", "fixes_applied"])
+        );
+        // Evidence-bound feedback surface (R2).
+        assert!(json["observed"].is_array());
+        let observed = json["observed"].as_array().unwrap();
+        assert_eq!(observed.len(), 2);
+        assert_eq!(observed[0]["field"], "status");
+        assert_eq!(observed[0]["value"], "\"blocked\"");
+        assert_eq!(observed[1]["field"], "fixes_applied");
+        assert_eq!(observed[1]["value"], "0");
+        assert_eq!(json["invariant"], "status=blocked requires fixes_applied > 0");
+        assert_eq!(
+            json["required_proof"],
+            "rebuild from artifact and rerun ralph emit --policy-check"
+        );
+        // R3: semantic path must NOT carry replacement
+        // guidance.
+        assert!(json.get("suggested_payload_shape").is_none());
+        assert!(json.get("suggested_command").is_none());
+    }
+
+    /// U4 (plan 2026-08-06-001, R3): mechanical findings keep
+    /// their replacement shape — the suggestion-omission guard
+    /// from F-B stays a characterization (E9a) and must not
+    /// regress.  Observed / invariant / required_proof stay
+    /// `None` because the mechanical path does not carry
+    /// evidence.
+    #[test]
+    fn u4_mechanical_finding_omits_evidence_fields_keeps_replacement() {
+        let finding = ralph_core::PolicyFinding {
+            topic: "work.done".to_string(),
+            violation_type: ViolationType::MissingRequiredField {
+                field: "task_id".to_string(),
+            },
+            message: "missing required field: task_id".to_string(),
+            evidence: None,
+        };
+        let error = finding_record(&finding);
+        let json = serde_json::to_value(&error).expect("ValidationError serialises");
+        assert_eq!(json["reason_code"], "missing_required_field");
+        assert_eq!(json["field"], "task_id");
+        // No evidence fields for mechanical findings.
+        assert!(json.get("observed").is_none());
+        assert!(json.get("invariant").is_none());
+        assert!(json.get("required_proof").is_none());
+    }
+
+    /// U4 (plan 2026-08-06-001, R2): the text projection
+    /// (`render_validation_error_repair_block`) renders the
+    /// structured evidence on its own lines so the human
+    /// operator sees the same source of truth as the agent.
+    #[test]
+    fn u4_text_projection_renders_observed_invariant_required_proof() {
+        let error = ValidationError {
+            payload_index: 0,
+            field: String::new(),
+            reason_code: "semantic_gate_violation".to_string(),
+            message: "payload_consistency:fix-done-blocked violated".to_string(),
+            gate: Some("payload_consistency:fix-done-blocked".to_string()),
+            referenced_fields: Some(vec!["status".into(), "fixes_applied".into()]),
+            observed: Some(vec![
+                serde_json::json!({"field": "status", "value": "\"blocked\""}),
+                serde_json::json!({"field": "fixes_applied", "value": "0"}),
+            ]),
+            invariant: Some("status=blocked requires fixes_applied > 0".to_string()),
+            required_proof: Some("rebuild and rerun ralph emit --policy-check".to_string()),
+            ..Default::default()
+        };
+        let block =
+            render_validation_error_repair_block("fix.done", &[error]).expect("block present");
+        assert!(block.contains("observed: status="), "block = {block}");
+        assert!(block.contains("fixes_applied="), "block = {block}");
+        assert!(block.contains("invariant: status=blocked requires fixes_applied > 0"));
+        assert!(block.contains("must re-prove: rebuild and rerun ralph emit --policy-check"));
+    }
+
+    /// U4 (plan 2026-08-06-001, R5/F-E): synthetic precheck
+    /// evidence renders the `gate_silent_or_ambiguous` marker
+    /// on the CLI projection so the agent cannot mistake the
+    /// absence of observations for a clean pass.
+    #[test]
+    fn u4_synthetic_evidence_renders_marker_in_cli_projection() {
+        let error = ValidationError {
+            payload_index: 0,
+            field: String::new(),
+            reason_code: "semantic_gate_violation".to_string(),
+            message: "precheck gate silent".to_string(),
+            gate: Some("precheck:work.done".to_string()),
+            observed: Some(vec![]),
+            invariant: Some("precheck gate for `work.done` was silent or ambiguous".to_string()),
+            required_proof: Some("Reinvestigate the gate; do not assume any checklist item passed".to_string()),
+            ..Default::default()
+        };
+        let block =
+            render_validation_error_repair_block("work.done", &[error]).expect("block present");
+        assert!(
+            block.contains("(none — gate did not return any fact-checked observations)"),
+            "empty observed list must surface the absence explicitly: {block}"
+        );
+        assert!(block.contains("silent or ambiguous"));
+        assert!(block.contains("do not assume"));
     }
 
     #[test]

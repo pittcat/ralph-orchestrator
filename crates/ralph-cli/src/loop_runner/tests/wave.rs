@@ -2681,8 +2681,7 @@ hats:
             violation_type: ralph_core::ViolationType::MissingRequiredField {
                 field: "depth".to_string(),
             },
-            message: "Missing required field: depth".to_string(),
-        },
+            message: "Missing required field: depth".to_string(), evidence: None,},
         reason_class: None,
     };
     let wave_policy_rejections: Vec<ralph_core::PolicyRejection> =
@@ -2842,8 +2841,7 @@ hats:
             violation_type: ralph_core::ViolationType::MissingRequiredField {
                 field: "depth".to_string(),
             },
-            message: "Missing required field: depth".to_string(),
-        },
+            message: "Missing required field: depth".to_string(), evidence: None,},
         reason_class: None,
     };
     let wave_policy_rejections: Vec<ralph_core::PolicyRejection> =

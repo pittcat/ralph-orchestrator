@@ -1587,8 +1587,7 @@ fn emit_command_with_root_and_hats(
                 referenced_fields: Vec::new(),
             },
             topic: topic.to_string(),
-            message: err.message.clone(),
-        };
+            message: err.message.clone(), evidence: None,};
         record_cli_emit_rejection(&workspace_root, topic, hat.as_deref(), &finding);
         anyhow::bail!(
             "Event rejected by missing-provenance guard: {}",
@@ -1621,8 +1620,7 @@ fn emit_command_with_root_and_hats(
                 referenced_fields: Vec::new(),
             },
             topic: topic.to_string(),
-            message: err.message.clone(),
-        };
+            message: err.message.clone(), evidence: None,};
         record_cli_emit_rejection(&workspace_root, topic, hat.as_deref(), &finding);
         anyhow::bail!("Event rejected by isolated scope guard: {}", err.message);
     }
@@ -1641,8 +1639,7 @@ fn emit_command_with_root_and_hats(
                 referenced_fields: Vec::new(),
             },
             topic: topic.to_string(),
-            message: err.message.clone(),
-        };
+            message: err.message.clone(), evidence: None,};
         record_cli_emit_rejection(&workspace_root, topic, hat.as_deref(), &finding);
         anyhow::bail!("Event rejected by wave dimension guard: {}", err.message);
     }
@@ -1671,8 +1668,7 @@ fn emit_command_with_root_and_hats(
                             referenced_fields: Vec::new(),
                         },
                         topic: topic.to_string(),
-                        message: err.message.clone(),
-                    },
+                        message: err.message.clone(), evidence: None,},
                 );
                 let failure = ValidationFailure {
                     ok: false,
@@ -1841,8 +1837,7 @@ fn emit_command_with_root_and_hats(
                 referenced_fields: Vec::new(),
             },
             topic: topic.to_string(),
-            message: err.message.clone(),
-        };
+            message: err.message.clone(), evidence: None,};
         record_cli_emit_rejection(&workspace_root, topic, hat.as_deref(), &finding);
         anyhow::bail!(
             "Event rejected by envelope-triggered guard: {}",
