@@ -446,6 +446,19 @@ hats:
       2. Parallel Units (same wave / no edge) have disjoint write paths.
       3. Shared modules have exactly one Owner Unit.
       4. Foundation-before-parallel ordering is explicit in integration_order.
+      5. Audit test/resource competition, not only source paths. For every
+         Unit's `acceptance_test` / `tdd` command, identify ports, databases,
+         Docker/Compose projects, fixed temp paths, external services, and
+         shared caches. Treat an unspecified resource as potentially shared.
+      6. Same-wave Units may run together only when each shared resource is
+         independently namespaced, or when the test is read-only and proven
+         safe for concurrent use. A fixed resource name is an exclusive
+         conflict unless the Unit has an explicit dependency edge.
+      7. Record the resource name, why it is isolated or serialized, and the
+         evidence command in `concurrency-approval.md`. If the plan does not
+         provide enough information to establish safety, write
+         `blocks/guardian-blocked.md` and stop; do not approve based on a
+         guess.
 
       ### Steps
       1. Read `development_plan_path` and `execution_plan_path` from trigger; derive `plan_key` from those paths.
@@ -837,6 +850,22 @@ hats:
 
       按 unit.`acceptance_test` / `tdd` 执行；只改 `allowed_paths`；记录 RED 证据。
 
+      ### 测试资源隔离（并发硬要求）
+
+      1. 先从 `execution-plan.yml` 当前 Unit 的 `acceptance_test` / `tdd`
+         和 Guardian 的 `concurrency-approval.md` 取得资源约束；不要假设
+         “有 worktree”就等于端口、数据库或临时目录也已隔离。
+      2. 每个测试进程必须使用当前 `plan_key` + `wave_id` + `slot_index`
+         派生的唯一临时目录、测试数据库/schema、Docker/Compose project
+         名和可配置缓存目录。优先使用动态端口；不能动态分配时，必须按
+         同一身份使用预先分配且未被其他 Unit 占用的端口。
+      3. 不要写固定 `/tmp` 文件、固定数据库名、固定容器 project 或固定
+         服务端口。发现命令无法隔离且计划没有明确串行依赖时，停止本 Unit，
+         在 completion/failure artifact 中记录冲突资源和复现命令，再发
+         `exec.unit.failed`；不要靠重试掩盖竞争。
+      4. 测试结束后清理本 slot 创建的临时资源；不得删除其他 Unit、其他
+         loop 或仓库已有的资源。
+
       ### 步骤 7 — Unit Completion Report
 
       复制 `.ralph/forge/<plan_key>/templates/unit-completion.template.md`
@@ -1036,13 +1065,19 @@ hats:
          `verified_base_commit` 不属于 verifier trigger，不要读取；以
          candidate HEAD 和 integration artifacts 作为本轮验证对象。
       2. 按 development-plan / execution-plan 跑 incremental test 命令。
-      3. 写 `.ralph/forge/<plan_key>/incremental-verification.md`。
-      4. 每个 `(wave_id, candidate_commit_sha)` 只允许成功 emit 一次
+         当前 verifier 是集成后的串行阶段，但仍要检查命令是否访问固定
+         端口、数据库、Docker project、临时文件或外部服务；若不能确认
+         安全，停止验证并把资源名、命令和冲突风险写入
+         `failures/verifier-failed.md`。
+      3. 运行验证时使用当前 `plan_key` + `wave_id` 派生的临时目录、缓存
+         和测试数据命名空间；不要复用其他 Unit 或其他 loop 的固定资源。
+      4. 写 `.ralph/forge/<plan_key>/incremental-verification.md`。
+      5. 每个 `(wave_id, candidate_commit_sha)` 只允许成功 emit 一次
          `forge.wave.verified`；若同一 activation 已成功发送，不要重发。
-      5. 成功：emit `forge.wave.verified`（`wave_id`、`wave_index`、
+      6. 成功：emit `forge.wave.verified`（`wave_id`、`wave_index`、
          `verification_log_path`、`passed`、`last_integrated_unit`、
          `candidate_commit_sha`、`plan_key`）。
-      6. 失败：写 `failures/verifier-failed.md`（建议用 `wave-failure.template.md`
+      7. 失败：写 `failures/verifier-failed.md`（建议用 `wave-failure.template.md`
          骨架），emit `forge.verification.failed`（`wave_id`、`wave_index`、
          `candidate_commit_sha`、`failure_fingerprint`、`affected_task_ids`、
          `plan_key`、`verification_failure_path`）。
@@ -1076,12 +1111,19 @@ hats:
       1. 从 trigger 读 `verification_log_path`（或 final correction 的 `correction_report_path`）/
          `plan_key`。trigger 入口为 `forge.exec.development.done`（首次全测）或
          `forge.final.correction.settled`（3 轮 correction 耗尽后全测）。
-      2. 跑 development-plan / repo README+CI+Makefile 中声明的全量 test / lint /
+      2. 本阶段是本 loop 的全量测试 owner。开始前检查当前 loop 是否已经
+         有同一类全量验证在运行；若发现已有运行实例，等待其结束或停止并
+         报告冲突，不要并行启动第二份全量门禁。
+      3. 跑 development-plan / repo README+CI+Makefile 中声明的全量 test / lint /
          build / typecheck 命令（per `ralph-tools-cmdref` 「materialize-artifacts」）。
-      3. 写 `.ralph/forge/<plan_key>/full-verification.md`。
-      4. 成功：emit `forge.full.verified`（`verification_report_path`、
+         为当前 `plan_key` 使用独立临时目录、缓存目录、测试数据库和服务
+         命名空间；固定端口/固定外部资源无法隔离时，必须串行运行并在报告
+         中记录资源名与原因。
+      4. 写 `.ralph/forge/<plan_key>/full-verification.md`，包含实际执行的
+         命令、资源命名空间和任何串行化决定。
+      5. 成功：emit `forge.full.verified`（`verification_report_path`、
          `all_required_passed`、`plan_key`）。
-      5. 失败：写 `failures/tester-failed.md`（模板 `wave-failure.template.md`），
+      6. 失败：写 `failures/tester-failed.md`（模板 `wave-failure.template.md`），
          emit `work.failed`，payload 必须包含 `reason`、`plan_path`、
          `context_artifact_path`、`forge_artifact_root`、`plan_key`；
          不发送未在本 preset 合同中声明的 failure topic，交由 cleanup/reporter
