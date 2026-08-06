@@ -9327,6 +9327,322 @@ hats: {}
         }
     }
 
+    // ── 2026-07-30-001 plan U3: fan-in deadline boundary regression ──────
+    //
+    // These four tests pin the failure-mode regression (6 slots / 726s /
+    // Integrate → InjectedComplete) and the strict `>` timeout boundary
+    // introduced by the wave-derived effective deadline fix (U2).
+    // Tests A–C exercise `evaluate_phase` directly; Test D exercises the
+    // full `run_supervisor_fan_in` path with a stub bridge.
+
+    /// U3 regression guard A: the failure-mode shape (6 slots, elapsed=726s,
+    /// aggregate_timeout=2288s) must resolve to `Integrate`, not `Failed`.
+    /// Before the fix the dispatcher used the hardcoded SupervisorConfig
+    /// default of 600s, under which 726 > 600 would yield `Failed(Timeout)`.
+    /// After the fix the wave-derived 2288s allows 726s to pass (726 < 2288).
+    #[test]
+    fn regression_six_slots_726s_integrates_under_wave_deadline() {
+        use ralph_core::supervisor::{evaluate_phase, PhaseInputs, WaveKind, WavePhase};
+        use ralph_core::supervisor::WaveDeliveryState;
+
+        // Build the canonical failure-mode snapshot: 6 completed slots,
+        // 0 pending, 0 in-flight, 0 failed, expected_total=6.
+        let slots: Vec<(u32, ralph_core::supervisor::SlotStatus)> = (0u32..6)
+            .map(|i| (i, ralph_core::supervisor::SlotStatus::Completed))
+            .collect();
+        let snapshot = ralph_core::supervisor::WaveSnapshot {
+            wave_id: "w-u3-failure".into(),
+            kind: WaveKind::Exec,
+            phase: WavePhase::Collect,
+            expected_total: 6,
+            completed_count: 6,
+            failed_count: 0,
+            pending_count: 0,
+            in_flight_count: 0,
+            cancel_requested: false,
+            delivery_state: WaveDeliveryState::CoordinationCommitted,
+            started_at: std::time::SystemTime::UNIX_EPOCH,
+            slots,
+        };
+        let inputs = PhaseInputs {
+            aggregate_timeout_secs: 2288,
+            elapsed_secs: 726,
+            cancel_requested: false,
+        };
+        assert_eq!(
+            evaluate_phase(&snapshot, &inputs),
+            ralph_core::supervisor::PhaseDecision::Integrate,
+            "6 completed slots at 726s with 2288s aggregate must Integrate; \
+             pre-fix 600s default would incorrectly yield Failed(Timeout)"
+        );
+    }
+
+    /// U3 regression guard B: `elapsed == aggregate_timeout` is NOT a timeout.
+    /// The timeout gate uses strict `>` (confirmed in phase.rs line 135), so
+    /// exactly 2288s must still integrate, not time out.
+    #[test]
+    fn regression_elapsed_equals_deadline_not_timeout() {
+        use ralph_core::supervisor::{evaluate_phase, PhaseInputs, WaveKind, WavePhase};
+        use ralph_core::supervisor::WaveDeliveryState;
+
+        let slots: Vec<(u32, ralph_core::supervisor::SlotStatus)> = (0u32..6)
+            .map(|i| (i, ralph_core::supervisor::SlotStatus::Completed))
+            .collect();
+        let snapshot = ralph_core::supervisor::WaveSnapshot {
+            wave_id: "w-u3-boundary-eq".into(),
+            kind: WaveKind::Exec,
+            phase: WavePhase::Collect,
+            expected_total: 6,
+            completed_count: 6,
+            failed_count: 0,
+            pending_count: 0,
+            in_flight_count: 0,
+            cancel_requested: false,
+            delivery_state: WaveDeliveryState::CoordinationCommitted,
+            started_at: std::time::SystemTime::UNIX_EPOCH,
+            slots,
+        };
+        let inputs = PhaseInputs {
+            aggregate_timeout_secs: 2288,
+            elapsed_secs: 2288,
+            cancel_requested: false,
+        };
+        assert_eq!(
+            evaluate_phase(&snapshot, &inputs),
+            ralph_core::supervisor::PhaseDecision::Integrate,
+            "elapsed_secs == aggregate_timeout_secs (2288 == 2288) must NOT time out; \
+             timeout gate is strict `>` per phase.rs:135"
+        );
+    }
+
+    /// U3 regression guard C: `elapsed > aggregate_timeout` IS a timeout.
+    /// One second past the boundary must produce `Failed(Timeout)` with an
+    /// empty blocking list (all 6 slots are Completed, none are Failed/Cancelled).
+    #[test]
+    fn regression_elapsed_past_deadline_still_times_out() {
+        use ralph_core::supervisor::{evaluate_phase, PhaseInputs, FailedReason, WaveKind, WavePhase};
+        use ralph_core::supervisor::WaveDeliveryState;
+
+        let slots: Vec<(u32, ralph_core::supervisor::SlotStatus)> = (0u32..6)
+            .map(|i| (i, ralph_core::supervisor::SlotStatus::Completed))
+            .collect();
+        let snapshot = ralph_core::supervisor::WaveSnapshot {
+            wave_id: "w-u3-past-deadline".into(),
+            kind: WaveKind::Exec,
+            phase: WavePhase::Collect,
+            expected_total: 6,
+            completed_count: 6,
+            failed_count: 0,
+            pending_count: 0,
+            in_flight_count: 0,
+            cancel_requested: false,
+            delivery_state: WaveDeliveryState::CoordinationCommitted,
+            started_at: std::time::SystemTime::UNIX_EPOCH,
+            slots,
+        };
+        let inputs = PhaseInputs {
+            aggregate_timeout_secs: 2288,
+            elapsed_secs: 2289,
+            cancel_requested: false,
+        };
+        match evaluate_phase(&snapshot, &inputs) {
+            ralph_core::supervisor::PhaseDecision::Failed {
+                reason: FailedReason::Timeout,
+                blocking_slots,
+            } => {
+                assert!(
+                    blocking_slots.is_empty(),
+                    "all 6 slots are Completed; blocking_slots must be empty, got {blocking_slots:?}"
+                );
+            }
+            other => panic!(
+                "expected Failed{{reason=Timeout, blocking_slots=[]}} at elapsed=2289, got {other:?}"
+            ),
+        }
+    }
+
+    /// U3 regression guard D: `run_supervisor_fan_in` with the failure-mode
+    /// shape (6 completed slots, elapsed=726s, aggregate_timeout=2288s) must
+    /// return `InjectedComplete` when the bridge's `tick_with_slot_events`
+    /// returns `CoordinatorAction::Integrate`.
+    ///
+    /// This is the full fan-in path test — it exercises the complete
+    /// `run_supervisor_fan_in` function including the coordinator tick,
+    /// the slot event merge, and the coord event injection.
+    #[test]
+    fn fan_in_injects_complete_with_wave_deadline() {
+        use ralph_core::supervisor::{BridgeError, CoordinatorAction, PhaseInputs, SupervisorBridge, WaveKind};
+        use std::sync::Arc;
+
+        // Stub bridge that returns Integrate from tick_with_slot_events.
+        // All other methods satisfy the minimum contract of run_supervisor_fan_in.
+        #[derive(Debug)]
+        struct IntegrateBridge {
+            recorded_inputs: std::sync::Mutex<Option<PhaseInputs>>,
+        }
+        impl IntegrateBridge {
+            fn new() -> Self {
+                Self {
+                    recorded_inputs: std::sync::Mutex::new(None),
+                }
+            }
+        }
+        impl SupervisorBridge for IntegrateBridge {
+            fn slot_retry_budget(&self) -> u32 {
+                0
+            }
+            fn tick(
+                &self,
+                _wave_id: &str,
+                _inputs: PhaseInputs,
+            ) -> Result<CoordinatorAction, BridgeError> {
+                Ok(CoordinatorAction::ContinueCollect)
+            }
+            fn tick_with_slot_events(
+                &self,
+                _wave_id: &str,
+                inputs: PhaseInputs,
+                _events: Vec<ralph_proto::Event>,
+            ) -> Result<CoordinatorAction, BridgeError> {
+                *self.recorded_inputs.lock().unwrap() = Some(inputs);
+                Ok(CoordinatorAction::InjectedComplete {
+                    topic: "review.wave.complete".to_string(),
+                    blocking_slots: vec![],
+                })
+            }
+            fn fan_in_status(
+                &self,
+                _wave_id: &str,
+            ) -> Result<ralph_core::supervisor::WaveSnapshot, BridgeError> {
+                Err(BridgeError::Store("stub".into()))
+            }
+            fn register_wave_if_absent(
+                &self,
+                _kind: WaveKind,
+                wave_id: &str,
+                _expected_total: u32,
+                _slot_retry_budget: u32,
+            ) -> Result<String, BridgeError> {
+                Ok(wave_id.to_string())
+            }
+            fn record_slot_result(
+                &self,
+                _wave_id: &str,
+                _slot_index: u32,
+                _content_hash: &str,
+                _event_count: usize,
+            ) -> Result<(), BridgeError> {
+                Ok(())
+            }
+            fn record_slot_failure(
+                &self,
+                _wave_id: &str,
+                _slot_index: u32,
+                _reason: &str,
+            ) -> Result<(), BridgeError> {
+                Ok(())
+            }
+            fn release_slot_dispatch(
+                &self,
+                _wave_id: &str,
+                _slot_index: u32,
+                _outcome: ralph_core::supervisor::DispatchOutcome,
+            ) -> Result<(), BridgeError> {
+                Ok(())
+            }
+            fn bind_slot(
+                &self,
+                _kind: WaveKind,
+                _wave_id: &str,
+                _slot_index: u32,
+            ) -> Result<Option<crate::loop_runner::wave::SlotBinding>, BridgeError> {
+                Ok(None)
+            }
+            fn recover(&self) -> Result<Vec<ralph_core::supervisor::WaveSnapshot>, BridgeError> {
+                Ok(Vec::new())
+            }
+            fn record_never_started_failures(&self, _wave_id: &str) -> Result<(), BridgeError> {
+                Ok(())
+            }
+            fn set_wave_phase(
+                &self,
+                _wave_id: &str,
+                _phase: ralph_core::supervisor::WavePhase,
+            ) -> Result<(), BridgeError> {
+                Ok(())
+            }
+            fn record_coordination_written(
+                &self,
+                _wave_id: &str,
+                _receipt: &ralph_core::supervisor::CoordinationReceiptSummary,
+            ) -> Result<(), BridgeError> {
+                // Stub: simulate successful record.
+                Ok(())
+            }
+            fn commit_coordination_event(
+                &self,
+                _wave_id: &str,
+                _receipt: &ralph_core::supervisor::CoordinationReceiptSummary,
+                _terminal_phase: ralph_core::supervisor::WavePhase,
+            ) -> Result<(), BridgeError> {
+                // Stub: simulate successful commit.
+                Ok(())
+            }
+        }
+
+        let bridge: Arc<dyn SupervisorBridge> = Arc::new(IntegrateBridge::new());
+
+        // Build the completed wave: 6 slots all Completed.
+        // WaveResult.events uses ralph_proto::Event, so construct via Event::new.
+        let results: Vec<ralph_core::WaveResult> = (0u32..6)
+            .map(|i| {
+                let ev = ralph_proto::Event::new("review.unit.done", r#"{"ok":true}"#);
+                ralph_core::WaveResult {
+                    index: i,
+                    events: vec![ev],
+                }
+            })
+            .collect();
+        let completed = ralph_core::CompletedWave {
+            wave_id: "w-u3-fanin".to_string(),
+            wave_total: 6,
+            results,
+            failures: vec![],
+            duration: std::time::Duration::from_secs(726),
+            partial: false,
+            expected_source_hat: None,
+            assigned_dimensions: std::collections::HashMap::new(),
+            dimension_retry_counts: std::collections::HashMap::new(),
+            worker_events: Vec::new(),
+        };
+
+        // detected wave: 6 events, total=6, concurrency=6 (wave_timeout=300 by default)
+        let detected = make_wave(6, 6, 6);
+
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let main_events_file = tmp.path().join("events.jsonl");
+
+        let outcome = run_supervisor_fan_in(
+            &bridge,
+            &completed,
+            &detected,
+            &main_events_file,
+            2288,
+            Some(TerminalFanInContext {
+                cancel_requested: false,
+                elapsed: std::time::Duration::from_secs(726),
+            }),
+        );
+
+        assert_eq!(
+            outcome,
+            SupervisorFanInOutcome::InjectedComplete,
+            "fan-in with 6 completed slots, elapsed=726s, aggregate=2288s must return \
+             InjectedComplete; pre-fix default 600s would incorrectly produce InjectedFailed. \
+             Got {outcome:?}"
+        );
+    }
+
     /// U1 Red test 6: when `handle_wave_events` returns
     /// `HandleWaveOutcome { fan_in_failure: true, .. }`, the runner
     /// must enter a termination flow with a reason that is NOT
