@@ -8880,7 +8880,7 @@ hats: {}
             slot_retry_budget: 1,
         };
 
-        // Case A: explicit=300, floor=4500 → floor dominates
+        // Case A: explicit=300, floor=2288 → floor dominates.
         let wave_a = {
             let events: Vec<ralph_core::Event> = (0..6)
                 .map(|i| core_event("review.file", &format!("payload-{i}")))
@@ -8888,6 +8888,7 @@ hats: {}
             let hat_config = HatConfig {
                 name: "u2-test-hat".to_string(),
                 concurrency: 6,
+                timeout: Some(900),
                 aggregate: Some(AggregateConfig {
                     mode: AggregateMode::WaitForAll,
                     timeout: 300,
@@ -8905,10 +8906,12 @@ hats: {}
             }
         };
         let result_a = effective_detected_aggregate_deadline_secs(&wave_a, &bridge);
-        // With explicit timeout 300, result must be >= 300
-        assert!(result_a >= 300, "explicit timeout 300 must be respected");
+        assert_eq!(
+            result_a, 2288,
+            "explicit timeout 300 must be raised to the attempt-aware floor 2288"
+        );
 
-        // Case B: explicit=5000, floor=4500 → explicit dominates
+        // Case B: explicit=5000, floor=2288 → explicit dominates.
         let wave_b = {
             let events: Vec<ralph_core::Event> = (0..6)
                 .map(|i| core_event("review.file", &format!("payload-{i}")))
@@ -8916,6 +8919,7 @@ hats: {}
             let hat_config = HatConfig {
                 name: "u2-test-hat".to_string(),
                 concurrency: 6,
+                timeout: Some(900),
                 aggregate: Some(AggregateConfig {
                     mode: AggregateMode::WaitForAll,
                     timeout: 5000,
@@ -9058,7 +9062,8 @@ hats: {}
     #[test]
     fn helper_zero_retry_budget_produces_result() {
         use ralph_core::supervisor::SupervisorBridge;
-        let wave = make_wave(6, 6, 6);
+        let mut wave = make_wave(6, 6, 6);
+        wave.hat_config.timeout = Some(900);
         #[derive(Debug)]
         struct StubBridge {
             max_concurrent_workers: u32,
@@ -9150,9 +9155,9 @@ hats: {}
             slot_retry_budget: 0,
         };
         let result = effective_detected_aggregate_deadline_secs(&wave, &bridge);
-        assert!(
-            result > 0,
-            "zero retry budget must still produce a positive deadline"
+        assert_eq!(
+            result, 1163,
+            "zero retry budget must use the one-attempt floor 1163"
         );
     }
 
@@ -9508,7 +9513,14 @@ hats: {}
                 inputs: PhaseInputs,
                 _events: Vec<ralph_proto::Event>,
             ) -> Result<CoordinatorAction, BridgeError> {
-                *self.recorded_inputs.lock().unwrap() = Some(inputs);
+                *self.recorded_inputs.lock().unwrap() = Some(inputs.clone());
+                if inputs.aggregate_timeout_secs != 2288 || inputs.elapsed_secs != 726 {
+                    return Ok(CoordinatorAction::InjectedFailed {
+                        topic: "review.wave.failed".to_string(),
+                        reason: "test_wrong_deadline",
+                        blocking_slots: vec![],
+                    });
+                }
                 Ok(CoordinatorAction::InjectedComplete {
                     topic: "review.wave.complete".to_string(),
                     blocking_slots: vec![],
@@ -9594,7 +9606,8 @@ hats: {}
             }
         }
 
-        let bridge: Arc<dyn SupervisorBridge> = Arc::new(IntegrateBridge::new());
+        let bridge_impl = Arc::new(IntegrateBridge::new());
+        let bridge: Arc<dyn SupervisorBridge> = bridge_impl.clone();
 
         // Build the completed wave: 6 slots all Completed.
         // WaveResult.events uses ralph_proto::Event, so construct via Event::new.
@@ -9645,6 +9658,16 @@ hats: {}
              InjectedComplete; pre-fix default 600s would incorrectly produce InjectedFailed. \
              Got {outcome:?}"
         );
+        let inputs = bridge_impl
+            .recorded_inputs
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("fan-in must pass PhaseInputs to the bridge");
+        assert_eq!(inputs.aggregate_timeout_secs, 2288);
+        assert_eq!(inputs.elapsed_secs, 726);
+        let ledger = std::fs::read_to_string(&main_events_file).expect("read fan-in ledger");
+        assert!(ledger.contains("review.wave.complete"));
     }
 
     /// U1 Red test 6: when `handle_wave_events` returns
