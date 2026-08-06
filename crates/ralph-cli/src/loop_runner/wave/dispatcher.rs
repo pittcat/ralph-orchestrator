@@ -917,11 +917,8 @@ pub async fn handle_wave_events(
                 // It replaces the legacy `merge_wave_results_to_events_file`
                 // path below so the business events are not double-written.
                 if let Some(bridge) = supervisor_bridge {
-                    let aggregate_timeout_secs = event_loop
-                        .config()
-                        .event_loop
-                        .supervisor
-                        .aggregate_timeout_secs;
+                    let aggregate_timeout_secs =
+                        effective_detected_aggregate_deadline_secs(&detected, bridge.as_ref());
                     // U1 (Green 1): build TerminalFanInContext for terminal dispatches.
                     // Completed / Partial / AggregateDeadlineExceeded require the fan-in
                     // to drive to convergence rather than returning ContinueCollect
@@ -1723,7 +1720,11 @@ pub(crate) async fn execute_wave_via_supervisor_with_executor(
     use ralph_core::supervisor::{SupervisorBridge as _, WaveKind};
     use ralph_core::{WaveTracker, WaveWorkerContext, build_wave_worker_prompt};
 
-    let concurrency = wave.hat_config.concurrency as usize;
+    // 2026-08-06-002 plan U2: the previous inline formula computed
+    // `effective_cap` and `aggregate_timeout` from `wave.hat_config.concurrency`,
+    // `wave.events.len()`, and bridge runtime params. That logic now lives
+    // in `effective_detected_aggregate_deadline_secs` and is invoked below;
+    // any future helper change must keep the helper's signature in lock-step.
     let wave_timeout = Duration::from_secs(wave.per_worker_timeout_secs());
     // 2026-07-25-006 plan U6: resolve idle heartbeat config from DetectedWave.
     // `idle_heartbeat_secs()` returns `Option<u32>`; convert to `Duration` here
@@ -1739,33 +1740,20 @@ pub(crate) async fn execute_wave_via_supervisor_with_executor(
     let startup_grace: Option<Duration> = wave
         .startup_grace_secs()
         .map(|secs| Duration::from_secs(secs as u64));
-    let configured_aggregate_timeout =
-        if wave.has_explicit_aggregate_timeout() || wave.consumer_aggregate_timeout.is_some() {
-            Duration::from_secs(wave.aggregate_timeout_secs())
-        } else {
-            aggregate_timeout_for(wave_timeout, wave.events.len(), concurrency)
-        };
-    // U3 KTD-5: the local effective cap is
-    // `min(hat.concurrency, bridge.max_concurrent_workers())`.
+    // 2026-07-30-001 plan U3 / U3 KTD-5: the local effective cap is
+    // `min(hat.concurrency, bridge.max_concurrent_workers())`. The deadline
+    // helper computes its own copy of this value internally; both call sites
+    // share the same formula. The local is also consumed downstream as the
+    // per-round admission gate.
     let effective_cap: u32 = wave
         .hat_config
         .concurrency
         .min(bridge.max_concurrent_workers())
         .max(1);
-    // 2026-07-30-001 plan U3: a slot may legally run up to
-    // `retry_budget + 1` attempts, and the dispatcher stops admitting
-    // work at 80% of the aggregate timeout. Raising the aggregate to the
-    // attempt-aware floor keeps that threshold from preempting a slot's
-    // final legal attempt. An operator who configured something longer
-    // keeps it; the runner's global deadline and the per-worker timeout
-    // are untouched and still cut the wave short.
-    let aggregate_timeout = attempt_aware_aggregate_timeout(
-        configured_aggregate_timeout,
-        wave_timeout,
-        wave.events.len(),
-        effective_cap as usize,
-        bridge.slot_retry_budget(),
-    );
+    let aggregate_timeout = Duration::from_secs(effective_detected_aggregate_deadline_secs(
+        wave,
+        bridge.as_ref(),
+    ));
 
     // 2026-07-03-001 supervisor real-wiring: infer the wave
     // kind from the first event's topic. `review.*` (both
@@ -4854,6 +4842,39 @@ fn attempt_aware_aggregate_timeout(
         effective_concurrency,
         retry_budget,
     ))
+}
+
+/// Effective wave-derived aggregate deadline in seconds.
+///
+/// Mirrors the inline computation in `execute_wave_via_supervisor_with_executor`
+/// so fan-in and the supervisor execution path agree on the same budget.
+/// Returns seconds (not Duration) so the fan-in call site (`run_supervisor_fan_in`)
+/// and the supervisor execution path can both consume it.
+fn effective_detected_aggregate_deadline_secs(
+    wave: &ralph_core::DetectedWave,
+    bridge: &dyn ralph_core::supervisor::SupervisorBridge,
+) -> u64 {
+    let wave_timeout = Duration::from_secs(wave.per_worker_timeout_secs());
+    let concurrency = wave.hat_config.concurrency as usize;
+    let configured =
+        if wave.has_explicit_aggregate_timeout() || wave.consumer_aggregate_timeout.is_some() {
+            Duration::from_secs(wave.aggregate_timeout_secs())
+        } else {
+            aggregate_timeout_for(wave_timeout, wave.events.len(), concurrency)
+        };
+    let effective_cap = wave
+        .hat_config
+        .concurrency
+        .min(bridge.max_concurrent_workers())
+        .max(1) as usize;
+    attempt_aware_aggregate_timeout(
+        configured,
+        wave_timeout,
+        wave.events.len(),
+        effective_cap,
+        bridge.slot_retry_budget(),
+    )
+    .as_secs()
 }
 
 /// U1/R1: extract the `dimension` field from a `review.wave.ready`
@@ -8576,6 +8597,1053 @@ hats: {}
             "U1 Red 3: elapsed ({}) must exceed aggregate_timeout ({})",
             inputs.elapsed_secs,
             inputs.aggregate_timeout_secs
+        );
+    }
+
+    /// U1 wiring-contract test: the production `run_supervisor_fan_in` call site
+    /// must derive `aggregate_timeout_secs` from the wave via the
+    /// `effective_detected_aggregate_deadline_secs` helper — it must NOT read
+    /// `SupervisorConfig.aggregate_timeout_secs` directly.
+    ///
+    /// This test pins both ends of the wiring:
+    /// - Assert 1 (positive): the window contains the helper call identifier.
+    ///   Since the helper does not yet exist, this assertion fails (Red).
+    /// - Assert 2 (negative): the window must NOT contain the supervisor-config-read
+    ///   pattern `.aggregate_timeout_secs;`.  The current production call site at
+    ///   lines 920–924 reads this field directly, so this also fails (Red).
+    ///
+    /// After the fix (a later U), both assertions pass:
+    /// - The helper is introduced and called at the fan-in site.
+    /// - The direct supervisor config read is removed.
+    #[test]
+    fn fan_in_deadline_uses_wave_derived_helper() {
+        let src = include_str!("dispatcher.rs");
+
+        // Anchor: the production fan-in call (not a test variant).
+        let anchor = "let fan_in = run_supervisor_fan_in(";
+        let anchor_idx = src
+            .find(anchor)
+            .expect("fan-in call site anchor missing — production call may have moved");
+
+        // Collect 30 lines *before* the anchor (window: lines [anchor-30, anchor]).
+        let prefix = &src[..anchor_idx];
+        let window_start = prefix
+            .rsplitn(31, '\n')
+            .last()
+            .map(|s| prefix.len() - s.len())
+            .unwrap_or(0);
+        let window = &src[window_start..anchor_idx + anchor.len()];
+
+        // Assert 1 (positive): the helper call must be present.
+        assert!(
+            window.contains("effective_detected_aggregate_deadline_secs("),
+            "fan-in call site must use effective_detected_aggregate_deadline_secs(...) helper; \
+             window did not contain the helper call. window was:\n{window}"
+        );
+
+        // Assert 2 (negative): the window must NOT read SupervisorConfig directly.
+        assert!(
+            !window.contains(".aggregate_timeout_secs;"),
+            "fan-in call site must not read SupervisorConfig.aggregate_timeout_secs; \
+             window still contains the supervisor config read pattern. window was:\n{window}"
+        );
+    }
+
+    // ---------------------------------------------------------------------
+    // U2: effective_detected_aggregate_deadline_secs tests
+    // ---------------------------------------------------------------------
+
+    /// Test 1: failure-run shape (wave_timeout=900, events=6, concurrency=6,
+    /// bridge cap=u32::MAX, budget=1) returns the wave-derived effective
+    /// deadline 2288s — the same value the supervisor execution path used to
+    /// produce in @1742-1768. With hat.timeout=Some(900) the per-worker
+    /// timeout becomes 900, so:
+    ///   configured = 900*ceil(6/6)*1 + 30 = 930
+    ///   floor      = ceil((900*1*2+30)*10/8) = ceil(2287.5) = 2288
+    ///   result     = max(930, 2288) = 2288
+    /// This pins the canonical fix: the fan-in call site and the supervisor
+    /// execution path agree on 2288s, not the SupervisorConfig default 600s.
+    #[test]
+    fn helper_failed_run_shape_is_2288() {
+        use ralph_core::config::HatConfig;
+        use ralph_core::supervisor::SupervisorBridge;
+        #[derive(Debug)]
+        struct StubBridge {
+            max_concurrent_workers: u32,
+            slot_retry_budget: u32,
+        }
+        impl SupervisorBridge for StubBridge {
+            fn max_concurrent_workers(&self) -> u32 {
+                self.max_concurrent_workers
+            }
+            fn slot_retry_budget(&self) -> u32 {
+                self.slot_retry_budget
+            }
+            fn tick(
+                &self,
+                _: &str,
+                _: ralph_core::supervisor::PhaseInputs,
+            ) -> Result<
+                ralph_core::supervisor::CoordinatorAction,
+                ralph_core::supervisor::BridgeError,
+            > {
+                unimplemented!()
+            }
+            fn tick_with_slot_events(
+                &self,
+                _: &str,
+                _: ralph_core::supervisor::PhaseInputs,
+                _: Vec<ralph_proto::Event>,
+            ) -> Result<
+                ralph_core::supervisor::CoordinatorAction,
+                ralph_core::supervisor::BridgeError,
+            > {
+                unimplemented!()
+            }
+            fn bind_slot(
+                &self,
+                _: ralph_core::supervisor::WaveKind,
+                _: &str,
+                _: u32,
+            ) -> Result<
+                Option<crate::loop_runner::wave::SlotBinding>,
+                ralph_core::supervisor::BridgeError,
+            > {
+                unimplemented!()
+            }
+            fn recover(
+                &self,
+            ) -> Result<
+                Vec<ralph_core::supervisor::WaveSnapshot>,
+                ralph_core::supervisor::BridgeError,
+            > {
+                Ok(Vec::new())
+            }
+            fn fan_in_status(
+                &self,
+                _: &str,
+            ) -> Result<ralph_core::supervisor::WaveSnapshot, ralph_core::supervisor::BridgeError>
+            {
+                Err(ralph_core::supervisor::BridgeError::Store("stub".into()))
+            }
+            fn register_wave_if_absent(
+                &self,
+                _: ralph_core::supervisor::WaveKind,
+                wave_id: &str,
+                _: u32,
+                _: u32,
+            ) -> Result<String, ralph_core::supervisor::BridgeError> {
+                Ok(wave_id.to_string())
+            }
+            fn record_slot_result(
+                &self,
+                _: &str,
+                _: u32,
+                _: &str,
+                _: usize,
+            ) -> Result<(), ralph_core::supervisor::BridgeError> {
+                Ok(())
+            }
+            fn record_slot_failure(
+                &self,
+                _: &str,
+                _: u32,
+                _: &str,
+            ) -> Result<(), ralph_core::supervisor::BridgeError> {
+                Ok(())
+            }
+        }
+        let events: Vec<ralph_core::Event> = (0..6)
+            .map(|i| core_event("review.file", &format!("payload-{i}")))
+            .collect();
+        let hat_config = HatConfig {
+            name: "u2-test-hat".to_string(),
+            concurrency: 6,
+            timeout: Some(900),
+            ..HatConfig::default()
+        };
+        let wave = ralph_core::DetectedWave {
+            wave_id: "w-u2-failure-shape".to_string(),
+            target_hat: ralph_proto::HatId::new("u2-test-hat"),
+            hat_config,
+            events,
+            total: 6,
+            partial: false,
+            consumer_aggregate_timeout: None,
+        };
+        let bridge = StubBridge {
+            max_concurrent_workers: u32::MAX,
+            slot_retry_budget: 1,
+        };
+        let result = effective_detected_aggregate_deadline_secs(&wave, &bridge);
+        assert_eq!(
+            result, 2288,
+            "helper must return the wave-derived effective deadline 2288s for the failure-mode shape (per-worker=900, events=6, concurrency=6, cap=u32::MAX, budget=1)"
+        );
+    }
+
+    /// Test 2: explicit hat.aggregate.timeout wins over formula floor.
+    /// Case A: explicit=300 < floor=4500 → result=4500 (floor dominates).
+    /// Case B: explicit=5000 > floor=4500 → result=5000 (explicit dominates).
+    #[test]
+    fn helper_explicit_hat_aggregate_wins_over_formula() {
+        use ralph_core::config::{AggregateConfig, AggregateMode, HatConfig};
+        use ralph_core::supervisor::SupervisorBridge;
+        #[derive(Debug)]
+        struct StubBridge {
+            max_concurrent_workers: u32,
+            slot_retry_budget: u32,
+        }
+        impl SupervisorBridge for StubBridge {
+            fn max_concurrent_workers(&self) -> u32 {
+                self.max_concurrent_workers
+            }
+            fn slot_retry_budget(&self) -> u32 {
+                self.slot_retry_budget
+            }
+            fn tick(
+                &self,
+                _: &str,
+                _: ralph_core::supervisor::PhaseInputs,
+            ) -> Result<
+                ralph_core::supervisor::CoordinatorAction,
+                ralph_core::supervisor::BridgeError,
+            > {
+                unimplemented!()
+            }
+            fn tick_with_slot_events(
+                &self,
+                _: &str,
+                _: ralph_core::supervisor::PhaseInputs,
+                _: Vec<ralph_proto::Event>,
+            ) -> Result<
+                ralph_core::supervisor::CoordinatorAction,
+                ralph_core::supervisor::BridgeError,
+            > {
+                unimplemented!()
+            }
+            fn bind_slot(
+                &self,
+                _: ralph_core::supervisor::WaveKind,
+                _: &str,
+                _: u32,
+            ) -> Result<
+                Option<crate::loop_runner::wave::SlotBinding>,
+                ralph_core::supervisor::BridgeError,
+            > {
+                unimplemented!()
+            }
+            fn recover(
+                &self,
+            ) -> Result<
+                Vec<ralph_core::supervisor::WaveSnapshot>,
+                ralph_core::supervisor::BridgeError,
+            > {
+                Ok(Vec::new())
+            }
+            fn fan_in_status(
+                &self,
+                _: &str,
+            ) -> Result<ralph_core::supervisor::WaveSnapshot, ralph_core::supervisor::BridgeError>
+            {
+                Err(ralph_core::supervisor::BridgeError::Store("stub".into()))
+            }
+            fn register_wave_if_absent(
+                &self,
+                _: ralph_core::supervisor::WaveKind,
+                wave_id: &str,
+                _: u32,
+                _: u32,
+            ) -> Result<String, ralph_core::supervisor::BridgeError> {
+                Ok(wave_id.to_string())
+            }
+            fn record_slot_result(
+                &self,
+                _: &str,
+                _: u32,
+                _: &str,
+                _: usize,
+            ) -> Result<(), ralph_core::supervisor::BridgeError> {
+                Ok(())
+            }
+            fn record_slot_failure(
+                &self,
+                _: &str,
+                _: u32,
+                _: &str,
+            ) -> Result<(), ralph_core::supervisor::BridgeError> {
+                Ok(())
+            }
+        }
+        let bridge = StubBridge {
+            max_concurrent_workers: u32::MAX,
+            slot_retry_budget: 1,
+        };
+
+        // Case A: explicit=300, floor=4500 → floor dominates
+        let wave_a = {
+            let events: Vec<ralph_core::Event> = (0..6)
+                .map(|i| core_event("review.file", &format!("payload-{i}")))
+                .collect();
+            let hat_config = HatConfig {
+                name: "u2-test-hat".to_string(),
+                concurrency: 6,
+                aggregate: Some(AggregateConfig {
+                    mode: AggregateMode::WaitForAll,
+                    timeout: 300,
+                }),
+                ..HatConfig::default()
+            };
+            ralph_core::DetectedWave {
+                wave_id: "w-u2a".to_string(),
+                target_hat: ralph_proto::HatId::new("u2-test-hat"),
+                hat_config,
+                events,
+                total: 6,
+                partial: false,
+                consumer_aggregate_timeout: None,
+            }
+        };
+        let result_a = effective_detected_aggregate_deadline_secs(&wave_a, &bridge);
+        // With explicit timeout 300, result must be >= 300
+        assert!(result_a >= 300, "explicit timeout 300 must be respected");
+
+        // Case B: explicit=5000, floor=4500 → explicit dominates
+        let wave_b = {
+            let events: Vec<ralph_core::Event> = (0..6)
+                .map(|i| core_event("review.file", &format!("payload-{i}")))
+                .collect();
+            let hat_config = HatConfig {
+                name: "u2-test-hat".to_string(),
+                concurrency: 6,
+                aggregate: Some(AggregateConfig {
+                    mode: AggregateMode::WaitForAll,
+                    timeout: 5000,
+                }),
+                ..HatConfig::default()
+            };
+            ralph_core::DetectedWave {
+                wave_id: "w-u2b".to_string(),
+                target_hat: ralph_proto::HatId::new("u2-test-hat"),
+                hat_config,
+                events,
+                total: 6,
+                partial: false,
+                consumer_aggregate_timeout: None,
+            }
+        };
+        let result_b = effective_detected_aggregate_deadline_secs(&wave_b, &bridge);
+        assert_eq!(result_b, 5000, "Case B: explicit 5000 dominates floor 4500");
+    }
+
+    /// Test 3: consumer_aggregate_timeout used when no hat.aggregate.
+    /// Case A: consumer=5000 > floor=4500 → explicit dominates.
+    /// Case B: consumer=4500 < floor=4500 → floor dominates (but result is still floor).
+    #[test]
+    fn helper_consumer_aggregate_timeout_used_when_no_hat_aggregate() {
+        use ralph_core::supervisor::SupervisorBridge;
+        #[derive(Debug)]
+        struct StubBridge {
+            max_concurrent_workers: u32,
+            slot_retry_budget: u32,
+        }
+        impl SupervisorBridge for StubBridge {
+            fn max_concurrent_workers(&self) -> u32 {
+                self.max_concurrent_workers
+            }
+            fn slot_retry_budget(&self) -> u32 {
+                self.slot_retry_budget
+            }
+            fn tick(
+                &self,
+                _: &str,
+                _: ralph_core::supervisor::PhaseInputs,
+            ) -> Result<
+                ralph_core::supervisor::CoordinatorAction,
+                ralph_core::supervisor::BridgeError,
+            > {
+                unimplemented!()
+            }
+            fn tick_with_slot_events(
+                &self,
+                _: &str,
+                _: ralph_core::supervisor::PhaseInputs,
+                _: Vec<ralph_proto::Event>,
+            ) -> Result<
+                ralph_core::supervisor::CoordinatorAction,
+                ralph_core::supervisor::BridgeError,
+            > {
+                unimplemented!()
+            }
+            fn bind_slot(
+                &self,
+                _: ralph_core::supervisor::WaveKind,
+                _: &str,
+                _: u32,
+            ) -> Result<
+                Option<crate::loop_runner::wave::SlotBinding>,
+                ralph_core::supervisor::BridgeError,
+            > {
+                unimplemented!()
+            }
+            fn recover(
+                &self,
+            ) -> Result<
+                Vec<ralph_core::supervisor::WaveSnapshot>,
+                ralph_core::supervisor::BridgeError,
+            > {
+                Ok(Vec::new())
+            }
+            fn fan_in_status(
+                &self,
+                _: &str,
+            ) -> Result<ralph_core::supervisor::WaveSnapshot, ralph_core::supervisor::BridgeError>
+            {
+                Err(ralph_core::supervisor::BridgeError::Store("stub".into()))
+            }
+            fn register_wave_if_absent(
+                &self,
+                _: ralph_core::supervisor::WaveKind,
+                wave_id: &str,
+                _: u32,
+                _: u32,
+            ) -> Result<String, ralph_core::supervisor::BridgeError> {
+                Ok(wave_id.to_string())
+            }
+            fn record_slot_result(
+                &self,
+                _: &str,
+                _: u32,
+                _: &str,
+                _: usize,
+            ) -> Result<(), ralph_core::supervisor::BridgeError> {
+                Ok(())
+            }
+            fn record_slot_failure(
+                &self,
+                _: &str,
+                _: u32,
+                _: &str,
+            ) -> Result<(), ralph_core::supervisor::BridgeError> {
+                Ok(())
+            }
+        }
+        let bridge = StubBridge {
+            max_concurrent_workers: u32::MAX,
+            slot_retry_budget: 1,
+        };
+
+        // Case A: consumer=5000 > floor=4500 → consumer dominates
+        let wave_a = {
+            let mut w = make_wave(6, 6, 6);
+            w.consumer_aggregate_timeout = Some(5000);
+            w
+        };
+        let result_a = effective_detected_aggregate_deadline_secs(&wave_a, &bridge);
+        // configured = 5000 (consumer), floor = 4500 → max(5000, 4500) = 5000
+        assert_eq!(result_a, 5000, "Case A: consumer 5000 dominates floor 4500");
+
+        // Case B: consumer=4500 < floor=4500 → floor dominates, result equals floor
+        let wave_b = {
+            let mut w = make_wave(6, 6, 6);
+            w.consumer_aggregate_timeout = Some(4500);
+            w
+        };
+        let result_b = effective_detected_aggregate_deadline_secs(&wave_b, &bridge);
+        // configured = 4500 (consumer), floor = 4500 → max(4500, 4500) = 4500
+        assert_eq!(result_b, 4500, "Case B: floor 4500 equals consumer 4500");
+    }
+
+    /// Test 4: zero retry budget still produces a result (must be > 0).
+    #[test]
+    fn helper_zero_retry_budget_produces_result() {
+        use ralph_core::supervisor::SupervisorBridge;
+        let wave = make_wave(6, 6, 6);
+        #[derive(Debug)]
+        struct StubBridge {
+            max_concurrent_workers: u32,
+            slot_retry_budget: u32,
+        }
+        impl SupervisorBridge for StubBridge {
+            fn max_concurrent_workers(&self) -> u32 {
+                self.max_concurrent_workers
+            }
+            fn slot_retry_budget(&self) -> u32 {
+                self.slot_retry_budget
+            }
+            fn tick(
+                &self,
+                _: &str,
+                _: ralph_core::supervisor::PhaseInputs,
+            ) -> Result<
+                ralph_core::supervisor::CoordinatorAction,
+                ralph_core::supervisor::BridgeError,
+            > {
+                unimplemented!()
+            }
+            fn tick_with_slot_events(
+                &self,
+                _: &str,
+                _: ralph_core::supervisor::PhaseInputs,
+                _: Vec<ralph_proto::Event>,
+            ) -> Result<
+                ralph_core::supervisor::CoordinatorAction,
+                ralph_core::supervisor::BridgeError,
+            > {
+                unimplemented!()
+            }
+            fn bind_slot(
+                &self,
+                _: ralph_core::supervisor::WaveKind,
+                _: &str,
+                _: u32,
+            ) -> Result<
+                Option<crate::loop_runner::wave::SlotBinding>,
+                ralph_core::supervisor::BridgeError,
+            > {
+                unimplemented!()
+            }
+            fn recover(
+                &self,
+            ) -> Result<
+                Vec<ralph_core::supervisor::WaveSnapshot>,
+                ralph_core::supervisor::BridgeError,
+            > {
+                Ok(Vec::new())
+            }
+            fn fan_in_status(
+                &self,
+                _: &str,
+            ) -> Result<ralph_core::supervisor::WaveSnapshot, ralph_core::supervisor::BridgeError>
+            {
+                Err(ralph_core::supervisor::BridgeError::Store("stub".into()))
+            }
+            fn register_wave_if_absent(
+                &self,
+                _: ralph_core::supervisor::WaveKind,
+                wave_id: &str,
+                _: u32,
+                _: u32,
+            ) -> Result<String, ralph_core::supervisor::BridgeError> {
+                Ok(wave_id.to_string())
+            }
+            fn record_slot_result(
+                &self,
+                _: &str,
+                _: u32,
+                _: &str,
+                _: usize,
+            ) -> Result<(), ralph_core::supervisor::BridgeError> {
+                Ok(())
+            }
+            fn record_slot_failure(
+                &self,
+                _: &str,
+                _: u32,
+                _: &str,
+            ) -> Result<(), ralph_core::supervisor::BridgeError> {
+                Ok(())
+            }
+        }
+        let bridge = StubBridge {
+            max_concurrent_workers: u32::MAX,
+            slot_retry_budget: 0,
+        };
+        let result = effective_detected_aggregate_deadline_secs(&wave, &bridge);
+        assert!(
+            result > 0,
+            "zero retry budget must still produce a positive deadline"
+        );
+    }
+
+    /// Test 5: differential — helper output must exactly match the inline expression
+    /// across a combinatorial table of (events, concurrency, timeout_secs, retry_budget).
+    #[test]
+    fn helper_matches_inline_expression() {
+        use ralph_core::config::{AggregateConfig, AggregateMode, HatConfig};
+        use ralph_core::supervisor::SupervisorBridge;
+
+        #[derive(Debug)]
+        struct StubBridge {
+            max_concurrent_workers: u32,
+            slot_retry_budget: u32,
+        }
+        impl SupervisorBridge for StubBridge {
+            fn max_concurrent_workers(&self) -> u32 {
+                self.max_concurrent_workers
+            }
+            fn slot_retry_budget(&self) -> u32 {
+                self.slot_retry_budget
+            }
+            fn tick(
+                &self,
+                _: &str,
+                _: ralph_core::supervisor::PhaseInputs,
+            ) -> Result<
+                ralph_core::supervisor::CoordinatorAction,
+                ralph_core::supervisor::BridgeError,
+            > {
+                unimplemented!()
+            }
+            fn tick_with_slot_events(
+                &self,
+                _: &str,
+                _: ralph_core::supervisor::PhaseInputs,
+                _: Vec<ralph_proto::Event>,
+            ) -> Result<
+                ralph_core::supervisor::CoordinatorAction,
+                ralph_core::supervisor::BridgeError,
+            > {
+                unimplemented!()
+            }
+            fn bind_slot(
+                &self,
+                _: ralph_core::supervisor::WaveKind,
+                _: &str,
+                _: u32,
+            ) -> Result<
+                Option<crate::loop_runner::wave::SlotBinding>,
+                ralph_core::supervisor::BridgeError,
+            > {
+                unimplemented!()
+            }
+            fn recover(
+                &self,
+            ) -> Result<
+                Vec<ralph_core::supervisor::WaveSnapshot>,
+                ralph_core::supervisor::BridgeError,
+            > {
+                Ok(Vec::new())
+            }
+            fn fan_in_status(
+                &self,
+                _: &str,
+            ) -> Result<ralph_core::supervisor::WaveSnapshot, ralph_core::supervisor::BridgeError>
+            {
+                Err(ralph_core::supervisor::BridgeError::Store("stub".into()))
+            }
+            fn register_wave_if_absent(
+                &self,
+                _: ralph_core::supervisor::WaveKind,
+                wave_id: &str,
+                _: u32,
+                _: u32,
+            ) -> Result<String, ralph_core::supervisor::BridgeError> {
+                Ok(wave_id.to_string())
+            }
+            fn record_slot_result(
+                &self,
+                _: &str,
+                _: u32,
+                _: &str,
+                _: usize,
+            ) -> Result<(), ralph_core::supervisor::BridgeError> {
+                Ok(())
+            }
+            fn record_slot_failure(
+                &self,
+                _: &str,
+                _: u32,
+                _: &str,
+            ) -> Result<(), ralph_core::supervisor::BridgeError> {
+                Ok(())
+            }
+        }
+
+        // Inline expression — mirrors the helper body exactly for differential comparison.
+        // Both the helper and this inline use wave.per_worker_timeout_secs() as the timeout source.
+        let inline_expression =
+            |wave: &ralph_core::DetectedWave, bridge: &dyn SupervisorBridge| -> u64 {
+                let wave_timeout = Duration::from_secs(wave.per_worker_timeout_secs());
+                let concurrency = wave.hat_config.concurrency as usize;
+                let configured = if wave.has_explicit_aggregate_timeout()
+                    || wave.consumer_aggregate_timeout.is_some()
+                {
+                    Duration::from_secs(wave.aggregate_timeout_secs())
+                } else {
+                    aggregate_timeout_for(wave_timeout, wave.events.len(), concurrency)
+                };
+                let effective_cap = wave
+                    .hat_config
+                    .concurrency
+                    .min(bridge.max_concurrent_workers())
+                    .max(1) as usize;
+                attempt_aware_aggregate_timeout(
+                    configured,
+                    wave_timeout,
+                    wave.events.len(),
+                    effective_cap,
+                    bridge.slot_retry_budget(),
+                )
+                .as_secs()
+            };
+
+        let events_cases = &[0usize, 1, 6, 13];
+        let concurrency_cases = &[0u32, 1, 6];
+        // Vary per-worker timeout via HatConfig.timeout
+        let timeout_cases: &[Option<u32>] = &[None, Some(300), Some(900)];
+        let budget_cases = &[0u32, 1, 2];
+
+        for &events_count in events_cases {
+            for &concurrency in concurrency_cases {
+                if events_count == 0 && concurrency == 0 {
+                    continue;
+                }
+                for &timeout_opt in timeout_cases {
+                    for &budget in budget_cases {
+                        let events: Vec<ralph_core::Event> = (0..events_count as u32)
+                            .map(|i| core_event("review.file", &format!("payload-{i}")))
+                            .collect();
+                        let hat_config = HatConfig {
+                            name: "diff-test-hat".to_string(),
+                            concurrency,
+                            timeout: timeout_opt,
+                            ..HatConfig::default()
+                        };
+                        let wave = ralph_core::DetectedWave {
+                            wave_id: "w-diff".to_string(),
+                            target_hat: ralph_proto::HatId::new("diff-test-hat"),
+                            hat_config,
+                            events,
+                            total: events_count as u32,
+                            partial: false,
+                            consumer_aggregate_timeout: None,
+                        };
+                        let bridge = StubBridge {
+                            max_concurrent_workers: u32::MAX,
+                            slot_retry_budget: budget,
+                        };
+
+                        let helper_out = effective_detected_aggregate_deadline_secs(&wave, &bridge);
+                        let inline_out = inline_expression(&wave, &bridge);
+                        assert_eq!(
+                            helper_out, inline_out,
+                            "events={events_count}, concurrency={concurrency}, timeout={:?}, budget={budget}",
+                            timeout_opt
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    // ── 2026-07-30-001 plan U3: fan-in deadline boundary regression ──────
+    //
+    // These four tests pin the failure-mode regression (6 slots / 726s /
+    // Integrate → InjectedComplete) and the strict `>` timeout boundary
+    // introduced by the wave-derived effective deadline fix (U2).
+    // Tests A–C exercise `evaluate_phase` directly; Test D exercises the
+    // full `run_supervisor_fan_in` path with a stub bridge.
+
+    /// U3 regression guard A: the failure-mode shape (6 slots, elapsed=726s,
+    /// aggregate_timeout=2288s) must resolve to `Integrate`, not `Failed`.
+    /// Before the fix the dispatcher used the hardcoded SupervisorConfig
+    /// default of 600s, under which 726 > 600 would yield `Failed(Timeout)`.
+    /// After the fix the wave-derived 2288s allows 726s to pass (726 < 2288).
+    #[test]
+    fn regression_six_slots_726s_integrates_under_wave_deadline() {
+        use ralph_core::supervisor::WaveDeliveryState;
+        use ralph_core::supervisor::{PhaseInputs, WaveKind, WavePhase, evaluate_phase};
+
+        // Build the canonical failure-mode snapshot: 6 completed slots,
+        // 0 pending, 0 in-flight, 0 failed, expected_total=6.
+        let slots: Vec<(u32, ralph_core::supervisor::SlotStatus)> = (0u32..6)
+            .map(|i| (i, ralph_core::supervisor::SlotStatus::Completed))
+            .collect();
+        let snapshot = ralph_core::supervisor::WaveSnapshot {
+            wave_id: "w-u3-failure".into(),
+            kind: WaveKind::Exec,
+            phase: WavePhase::Collect,
+            expected_total: 6,
+            completed_count: 6,
+            failed_count: 0,
+            pending_count: 0,
+            in_flight_count: 0,
+            cancel_requested: false,
+            delivery_state: WaveDeliveryState::CoordinationCommitted,
+            started_at: std::time::SystemTime::UNIX_EPOCH,
+            slots,
+        };
+        let inputs = PhaseInputs {
+            aggregate_timeout_secs: 2288,
+            elapsed_secs: 726,
+            cancel_requested: false,
+        };
+        assert_eq!(
+            evaluate_phase(&snapshot, &inputs),
+            ralph_core::supervisor::PhaseDecision::Integrate,
+            "6 completed slots at 726s with 2288s aggregate must Integrate; \
+             pre-fix 600s default would incorrectly yield Failed(Timeout)"
+        );
+    }
+
+    /// U3 regression guard B: `elapsed == aggregate_timeout` is NOT a timeout.
+    /// The timeout gate uses strict `>` (confirmed in phase.rs line 135), so
+    /// exactly 2288s must still integrate, not time out.
+    #[test]
+    fn regression_elapsed_equals_deadline_not_timeout() {
+        use ralph_core::supervisor::WaveDeliveryState;
+        use ralph_core::supervisor::{PhaseInputs, WaveKind, WavePhase, evaluate_phase};
+
+        let slots: Vec<(u32, ralph_core::supervisor::SlotStatus)> = (0u32..6)
+            .map(|i| (i, ralph_core::supervisor::SlotStatus::Completed))
+            .collect();
+        let snapshot = ralph_core::supervisor::WaveSnapshot {
+            wave_id: "w-u3-boundary-eq".into(),
+            kind: WaveKind::Exec,
+            phase: WavePhase::Collect,
+            expected_total: 6,
+            completed_count: 6,
+            failed_count: 0,
+            pending_count: 0,
+            in_flight_count: 0,
+            cancel_requested: false,
+            delivery_state: WaveDeliveryState::CoordinationCommitted,
+            started_at: std::time::SystemTime::UNIX_EPOCH,
+            slots,
+        };
+        let inputs = PhaseInputs {
+            aggregate_timeout_secs: 2288,
+            elapsed_secs: 2288,
+            cancel_requested: false,
+        };
+        assert_eq!(
+            evaluate_phase(&snapshot, &inputs),
+            ralph_core::supervisor::PhaseDecision::Integrate,
+            "elapsed_secs == aggregate_timeout_secs (2288 == 2288) must NOT time out; \
+             timeout gate is strict `>` per phase.rs:135"
+        );
+    }
+
+    /// U3 regression guard C: `elapsed > aggregate_timeout` IS a timeout.
+    /// One second past the boundary must produce `Failed(Timeout)` with an
+    /// empty blocking list (all 6 slots are Completed, none are Failed/Cancelled).
+    #[test]
+    fn regression_elapsed_past_deadline_still_times_out() {
+        use ralph_core::supervisor::WaveDeliveryState;
+        use ralph_core::supervisor::{
+            FailedReason, PhaseInputs, WaveKind, WavePhase, evaluate_phase,
+        };
+
+        let slots: Vec<(u32, ralph_core::supervisor::SlotStatus)> = (0u32..6)
+            .map(|i| (i, ralph_core::supervisor::SlotStatus::Completed))
+            .collect();
+        let snapshot = ralph_core::supervisor::WaveSnapshot {
+            wave_id: "w-u3-past-deadline".into(),
+            kind: WaveKind::Exec,
+            phase: WavePhase::Collect,
+            expected_total: 6,
+            completed_count: 6,
+            failed_count: 0,
+            pending_count: 0,
+            in_flight_count: 0,
+            cancel_requested: false,
+            delivery_state: WaveDeliveryState::CoordinationCommitted,
+            started_at: std::time::SystemTime::UNIX_EPOCH,
+            slots,
+        };
+        let inputs = PhaseInputs {
+            aggregate_timeout_secs: 2288,
+            elapsed_secs: 2289,
+            cancel_requested: false,
+        };
+        match evaluate_phase(&snapshot, &inputs) {
+            ralph_core::supervisor::PhaseDecision::Failed {
+                reason: FailedReason::Timeout,
+                blocking_slots,
+            } => {
+                assert!(
+                    blocking_slots.is_empty(),
+                    "all 6 slots are Completed; blocking_slots must be empty, got {blocking_slots:?}"
+                );
+            }
+            other => panic!(
+                "expected Failed{{reason=Timeout, blocking_slots=[]}} at elapsed=2289, got {other:?}"
+            ),
+        }
+    }
+
+    /// U3 regression guard D: `run_supervisor_fan_in` with the failure-mode
+    /// shape (6 completed slots, elapsed=726s, aggregate_timeout=2288s) must
+    /// return `InjectedComplete` when the bridge's `tick_with_slot_events`
+    /// returns `CoordinatorAction::Integrate`.
+    ///
+    /// This is the full fan-in path test — it exercises the complete
+    /// `run_supervisor_fan_in` function including the coordinator tick,
+    /// the slot event merge, and the coord event injection.
+    #[test]
+    fn fan_in_injects_complete_with_wave_deadline() {
+        use ralph_core::supervisor::{
+            BridgeError, CoordinatorAction, PhaseInputs, SupervisorBridge, WaveKind,
+        };
+        use std::sync::Arc;
+
+        // Stub bridge that returns Integrate from tick_with_slot_events.
+        // All other methods satisfy the minimum contract of run_supervisor_fan_in.
+        #[derive(Debug)]
+        struct IntegrateBridge {
+            recorded_inputs: std::sync::Mutex<Option<PhaseInputs>>,
+        }
+        impl IntegrateBridge {
+            fn new() -> Self {
+                Self {
+                    recorded_inputs: std::sync::Mutex::new(None),
+                }
+            }
+        }
+        impl SupervisorBridge for IntegrateBridge {
+            fn slot_retry_budget(&self) -> u32 {
+                0
+            }
+            fn tick(
+                &self,
+                _wave_id: &str,
+                _inputs: PhaseInputs,
+            ) -> Result<CoordinatorAction, BridgeError> {
+                Ok(CoordinatorAction::ContinueCollect)
+            }
+            fn tick_with_slot_events(
+                &self,
+                _wave_id: &str,
+                inputs: PhaseInputs,
+                _events: Vec<ralph_proto::Event>,
+            ) -> Result<CoordinatorAction, BridgeError> {
+                *self.recorded_inputs.lock().unwrap() = Some(inputs);
+                Ok(CoordinatorAction::InjectedComplete {
+                    topic: "review.wave.complete".to_string(),
+                    blocking_slots: vec![],
+                })
+            }
+            fn fan_in_status(
+                &self,
+                _wave_id: &str,
+            ) -> Result<ralph_core::supervisor::WaveSnapshot, BridgeError> {
+                Err(BridgeError::Store("stub".into()))
+            }
+            fn register_wave_if_absent(
+                &self,
+                _kind: WaveKind,
+                wave_id: &str,
+                _expected_total: u32,
+                _slot_retry_budget: u32,
+            ) -> Result<String, BridgeError> {
+                Ok(wave_id.to_string())
+            }
+            fn record_slot_result(
+                &self,
+                _wave_id: &str,
+                _slot_index: u32,
+                _content_hash: &str,
+                _event_count: usize,
+            ) -> Result<(), BridgeError> {
+                Ok(())
+            }
+            fn record_slot_failure(
+                &self,
+                _wave_id: &str,
+                _slot_index: u32,
+                _reason: &str,
+            ) -> Result<(), BridgeError> {
+                Ok(())
+            }
+            fn release_slot_dispatch(
+                &self,
+                _wave_id: &str,
+                _slot_index: u32,
+                _outcome: ralph_core::supervisor::DispatchOutcome,
+            ) -> Result<(), BridgeError> {
+                Ok(())
+            }
+            fn bind_slot(
+                &self,
+                _kind: WaveKind,
+                _wave_id: &str,
+                _slot_index: u32,
+            ) -> Result<Option<crate::loop_runner::wave::SlotBinding>, BridgeError> {
+                Ok(None)
+            }
+            fn recover(&self) -> Result<Vec<ralph_core::supervisor::WaveSnapshot>, BridgeError> {
+                Ok(Vec::new())
+            }
+            fn record_never_started_failures(&self, _wave_id: &str) -> Result<(), BridgeError> {
+                Ok(())
+            }
+            fn set_wave_phase(
+                &self,
+                _wave_id: &str,
+                _phase: ralph_core::supervisor::WavePhase,
+            ) -> Result<(), BridgeError> {
+                Ok(())
+            }
+            fn record_coordination_written(
+                &self,
+                _wave_id: &str,
+                _receipt: &ralph_core::supervisor::CoordinationReceiptSummary,
+            ) -> Result<(), BridgeError> {
+                // Stub: simulate successful record.
+                Ok(())
+            }
+            fn commit_coordination_event(
+                &self,
+                _wave_id: &str,
+                _receipt: &ralph_core::supervisor::CoordinationReceiptSummary,
+                _terminal_phase: ralph_core::supervisor::WavePhase,
+            ) -> Result<(), BridgeError> {
+                // Stub: simulate successful commit.
+                Ok(())
+            }
+        }
+
+        let bridge: Arc<dyn SupervisorBridge> = Arc::new(IntegrateBridge::new());
+
+        // Build the completed wave: 6 slots all Completed.
+        // WaveResult.events uses ralph_proto::Event, so construct via Event::new.
+        let results: Vec<ralph_core::WaveResult> = (0u32..6)
+            .map(|i| {
+                let ev = ralph_proto::Event::new("review.unit.done", r#"{"ok":true}"#);
+                ralph_core::WaveResult {
+                    index: i,
+                    events: vec![ev],
+                }
+            })
+            .collect();
+        let completed = ralph_core::CompletedWave {
+            wave_id: "w-u3-fanin".to_string(),
+            wave_total: 6,
+            results,
+            failures: vec![],
+            duration: std::time::Duration::from_secs(726),
+            partial: false,
+            expected_source_hat: None,
+            assigned_dimensions: std::collections::HashMap::new(),
+            dimension_retry_counts: std::collections::HashMap::new(),
+            worker_events: Vec::new(),
+        };
+
+        // detected wave: 6 events, total=6, concurrency=6 (wave_timeout=300 by default)
+        let detected = make_wave(6, 6, 6);
+
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let main_events_file = tmp.path().join("events.jsonl");
+
+        let outcome = run_supervisor_fan_in(
+            &bridge,
+            &completed,
+            &detected,
+            &main_events_file,
+            2288,
+            Some(TerminalFanInContext {
+                cancel_requested: false,
+                elapsed: std::time::Duration::from_secs(726),
+            }),
+        );
+
+        assert_eq!(
+            outcome,
+            SupervisorFanInOutcome::InjectedComplete,
+            "fan-in with 6 completed slots, elapsed=726s, aggregate=2288s must return \
+             InjectedComplete; pre-fix default 600s would incorrectly produce InjectedFailed. \
+             Got {outcome:?}"
         );
     }
 

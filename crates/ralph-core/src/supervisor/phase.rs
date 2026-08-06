@@ -15,7 +15,9 @@ use crate::supervisor::{SlotStatus, WaveSnapshot};
 /// signature documents every input that influences the gate.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PhaseInputs {
-    /// Wall-clock budget supplied by `SupervisorConfig::aggregate_timeout_secs`.
+    /// Wall-clock budget supplied by the wave-derived effective deadline
+    /// (default-wave path) or `SupervisorConfig::aggregate_timeout_secs`
+    /// (supervisor explicit-config path).
     pub aggregate_timeout_secs: u64,
     /// Optional `Instant`-equivalent elapsed seconds; the runtime
     /// computes `now - started_at` and passes it in so the pure
