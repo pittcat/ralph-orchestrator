@@ -440,6 +440,25 @@ struct CorrectionBlockPresentYaml {
     retry_count: Option<u32>,
     #[serde(default)]
     needs_escalation: Option<bool>,
+    /// U5 (plan 2026-08-06-001): at least one
+    /// `evidence.observed[].field` must contain each of
+    /// the supplied field names (substring match so the
+    /// test is not coupled to the exact JSON value
+    /// serialisation).
+    #[serde(default)]
+    evidence_observed_contains: Option<Vec<String>>,
+    /// U5: the `evidence.invariant` text must contain the
+    /// supplied substring (verbatim match against
+    /// `rule.message` is the typical use case).
+    #[serde(default)]
+    evidence_invariant_contains: Option<String>,
+    /// U5: the feedback kind must match
+    /// (`"semantic"` / `"mechanical"` / `"unknown"`).
+    /// Drives the S1 / S2 evidence-bound feedback
+    /// assertion: a semantic rejection MUST carry
+    /// observed + invariant + required proof.
+    #[serde(default)]
+    feedback_kind: Option<String>,
 }
 
 // 2026-06-21-002 plan U9: `rejection_log_contains_reason_code`
@@ -551,6 +570,18 @@ struct CorrectionBlockSummary {
     reason_code: String,
     retry_count: u32,
     needs_escalation: bool,
+    /// U5 (plan 2026-08-06-001): feedback_kind as a
+    /// stable snake_case string ("semantic" / "mechanical" /
+    /// "unknown").  Used by the predicate to assert
+    /// `correction_block_present.feedback_kind`.
+    feedback_kind: String,
+    /// U5: field names declared in
+    /// `evidence.observed[].field` so the predicate can
+    /// match without reaching into the inner serde types.
+    evidence_observed_fields: Vec<String>,
+    /// U5: `evidence.invariant` text so the predicate can
+    /// substring-match without parsing the inner types.
+    evidence_invariant: String,
 }
 
 // 2026-06-21-002 plan U9: summary of one
@@ -2226,6 +2257,23 @@ fn test_payload_consistency_accept_consistent_fix_done() {
     run_workflow_guard_scenario(yaml);
 }
 
+/// U5 (plan 2026-08-06-001) — evidence-bound correction BDD.
+/// The fixer emits a contradictory `fix.done` payload that
+/// the `payload_consistency` gate rejects; the next prompt
+/// carries a semantic correction block with structured
+/// observed / invariant / required proof so the hat cannot
+/// satisfy the gate by editing fields.  After two rejection
+/// rounds the fixer lands a consistent payload (real fix
+/// landed, fixes_applied=1), the gate accepts, the finisher
+/// fires, the loop completes.  Pins S1, S2, S7, S8.
+#[test]
+fn test_evidence_bound_correction_payload_consistency() {
+    let yaml = load_scenario(
+        "tests/scenarios/payload_consistency/evidence_bound_correction.yml",
+    );
+    run_workflow_guard_scenario(yaml);
+}
+
 #[test]
 fn test_incomplete_wave_plan_blocked() {
     let yaml = load_scenario("tests/scenarios/flow_reliability/incomplete_wave_plan_blocked.yml");
@@ -3808,10 +3856,30 @@ fn capture_state_snapshot(
         .prompt_context
         .correction_blocks
         .iter()
-        .map(|c| CorrectionBlockSummary {
-            reason_code: c.reason_code.clone(),
-            retry_count: c.retry_count,
-            needs_escalation: c.needs_escalation,
+        .map(|c| {
+            let feedback_kind = match c.feedback_kind {
+                ralph_core::correction::FeedbackKind::Semantic => "semantic".to_string(),
+                ralph_core::correction::FeedbackKind::Mechanical => "mechanical".to_string(),
+                ralph_core::correction::FeedbackKind::Unknown => "unknown".to_string(),
+            };
+            let evidence_observed_fields = c
+                .evidence
+                .as_ref()
+                .map(|ev| ev.observed.iter().map(|o| o.field.clone()).collect())
+                .unwrap_or_default();
+            let evidence_invariant = c
+                .evidence
+                .as_ref()
+                .map(|ev| ev.invariant.clone())
+                .unwrap_or_default();
+            CorrectionBlockSummary {
+                reason_code: c.reason_code.clone(),
+                retry_count: c.retry_count,
+                needs_escalation: c.needs_escalation,
+                feedback_kind,
+                evidence_observed_fields,
+                evidence_invariant,
+            }
         })
         .collect();
     let resume_block_summaries = state
@@ -3964,6 +4032,32 @@ fn evaluate_correction_block_present(
         {
             return false;
         }
+        // U5: evidence_observed_contains — every supplied
+        // field name must appear as a substring in at least
+        // one observed entry's field. Substring match (not
+        // exact equality) so the test is not coupled to the
+        // exact JSON value serialisation.
+        if let Some(ref needles) = expected.evidence_observed_contains {
+            for needle in needles {
+                if !c.evidence_observed_fields.iter().any(|f| f.contains(needle)) {
+                    return false;
+                }
+            }
+        }
+        // U5: evidence_invariant_contains — substring match
+        // against the entry's invariant text.
+        if let Some(ref needle) = expected.evidence_invariant_contains
+            && !c.evidence_invariant.contains(needle.as_str())
+        {
+            return false;
+        }
+        // U5: feedback_kind — exact match against the
+        // canonical snake_case form.
+        if let Some(ref kind) = expected.feedback_kind
+            && c.feedback_kind != kind.as_str()
+        {
+            return false;
+        }
         true
     });
     let first_match = matched.next();
@@ -3971,13 +4065,17 @@ fn evaluate_correction_block_present(
         first_match.is_some(),
         "{}: assert_state[{}] correction_block_present at_iteration={} \
          no correction block matched reason_code_prefix={:?} retry_count={:?} \
-         needs_escalation={:?}; entries: {:?}",
+         needs_escalation={:?} evidence_observed_contains={:?} \
+         evidence_invariant_contains={:?} feedback_kind={:?}; entries: {:?}",
         scenario_name,
         assertion_idx,
         at,
         expected.reason_code_prefix,
         expected.retry_count,
         expected.needs_escalation,
+        expected.evidence_observed_contains,
+        expected.evidence_invariant_contains,
+        expected.feedback_kind,
         entries
     );
 }
