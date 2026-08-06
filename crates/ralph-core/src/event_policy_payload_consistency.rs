@@ -128,6 +128,46 @@ fn collect_into(node: &Value, out: &mut Vec<String>, seen: &mut std::collections
     }
 }
 
+/// U2 (plan 2026-08-06-001): bounded field observations derived
+/// from the current payload by declared `referenced_fields`.
+///
+/// Returns one entry per declared field, in declaration order:
+/// - `ObservationValue::Value(json_string)` when the field exists
+///   and serialises to a JSON-compatible scalar / object / array
+///   within the byte budget;
+/// - `ObservationValue::Unavailable` when the field is missing,
+///   non-finite, oversized, or otherwise not safely expressible
+///   (e.g. raw bytes that don't round-trip).
+///
+/// The collector never invents values — the goal is to let the
+/// agent confirm "this field had THIS value when the rule
+/// fired" without the agent having to re-parse the original
+/// payload.  When we cannot express the value safely we surface
+/// the literal `unavailable` sentinel so the renderer phrases
+/// the sentence correctly.
+pub fn observe_referenced_fields(
+    rule_when: &Value,
+    payload: &Value,
+) -> Vec<(String, crate::correction::ObservationValue)> {
+    use crate::correction::ObservationValue;
+    let fields = collect_referenced_fields(rule_when);
+    fields
+        .into_iter()
+        .map(|field| {
+            let value = match extract_json_field(payload, &field) {
+                Some(v) => match serde_json::to_string(&v) {
+                    Ok(s) if s.len() <= crate::correction::MAX_OBSERVATION_VALUE_BYTES => {
+                        ObservationValue::Value(s)
+                    }
+                    _ => ObservationValue::Unavailable,
+                },
+                None => ObservationValue::Unavailable,
+            };
+            (field, value)
+        })
+        .collect()
+}
+
 /// Evaluate a parsed `when` against a single payload.
 ///
 /// `rule_when` is the value of `PayloadConsistencyRule.when` as parsed
@@ -701,7 +741,7 @@ mod tests {
 
 #[cfg(test)]
 mod cross_impl_consistency_tests {
-    use super::{EvalOutcome, evaluate};
+    use super::{EvalOutcome, evaluate, observe_referenced_fields};
     use crate::event_policy::extract_json_field;
     use serde_json::{Value, json};
 
@@ -764,5 +804,46 @@ mod cross_impl_consistency_tests {
     #[test]
     fn empty_path_matches_empty_key_in_both_paths() {
         assert_equal_value(&json!({"": "empty-key"}), "", json!("empty-key"));
+    }
+
+    // -- U2 observe_referenced_fields (plan 2026-08-06-001) -----
+
+    #[test]
+    fn u2_observe_referenced_fields_extracts_scalar_values() {
+        use crate::correction::ObservationValue;
+        let when = json!({"all": [
+            {"field": "status", "eq": "applied"},
+            {"field": "fixes_applied", "gt": 0},
+        ]});
+        let payload = json!({"status": "applied", "fixes_applied": 3});
+        let obs = observe_referenced_fields(&when, &payload);
+        assert_eq!(obs.len(), 2);
+        assert_eq!(obs[0].0, "status");
+        assert!(matches!(obs[0].1, ObservationValue::Value(ref v) if v == "\"applied\""));
+        assert_eq!(obs[1].0, "fixes_applied");
+        assert!(matches!(obs[1].1, ObservationValue::Value(ref v) if v == "3"));
+    }
+
+    #[test]
+    fn u2_observe_referenced_fields_missing_field_is_unavailable() {
+        use crate::correction::ObservationValue;
+        let when = json!({"field": "missing", "exists": true});
+        let payload = json!({"present": 1});
+        let obs = observe_referenced_fields(&when, &payload);
+        assert_eq!(obs.len(), 1);
+        assert_eq!(obs[0].0, "missing");
+        assert!(matches!(obs[0].1, ObservationValue::Unavailable));
+    }
+
+    #[test]
+    fn u2_observe_referenced_fields_oversized_value_is_unavailable() {
+        use crate::correction::ObservationValue;
+        // Build a string longer than MAX_OBSERVATION_VALUE_BYTES.
+        let huge = "x".repeat(crate::correction::MAX_OBSERVATION_VALUE_BYTES + 32);
+        let when = json!({"field": "blob", "eq": "x"});
+        let payload = json!({"blob": huge});
+        let obs = observe_referenced_fields(&when, &payload);
+        assert_eq!(obs.len(), 1);
+        assert!(matches!(obs[0].1, ObservationValue::Unavailable));
     }
 }

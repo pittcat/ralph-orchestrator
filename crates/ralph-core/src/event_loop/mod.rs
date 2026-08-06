@@ -13445,13 +13445,39 @@ impl EventLoop {
                     seen_count: None,
                 };
                 rejection.retry_key = rejection.compute_retry_key();
-                let _ctx = crate::correction::emit_correction_context(
+                let mut ctx = crate::correction::emit_correction_context(
                     self.state.state_ledger.as_mut(),
                     &rejection,
                     new_count,
                     Some(self.config.core.workspace_root.as_path()),
                     &mut self.state.prompt_context,
                 );
+                // U2 (plan 2026-08-06-001, R1/R5): enrich the
+                // precheck correction with structured evidence.
+                // Synthetic rejections get an explicit
+                // `gate_silent_or_ambiguous` marker; LLM
+                // rejections get per-check `unchecked`
+                // observations so the hat cannot mistake them
+                // for a clean "the check failed" verification.
+                if let Some(evidence) = runner::build_precheck_evidence(
+                    guarded,
+                    rejected_payload_json,
+                ) {
+                    ctx = ctx.with_feedback_kind(crate::correction::FeedbackKind::Semantic);
+                    ctx = ctx.with_evidence(evidence);
+                    // Replace the entry emit_correction_context
+                    // just pushed (legacy mechanical place-holder)
+                    // with the upgraded semantic + evidence one.
+                    if let Some(last) = self
+                        .state
+                        .prompt_context
+                        .correction_blocks
+                        .iter_mut()
+                        .find(|c| c.retry_key == ctx.retry_key && c.topic == ctx.topic)
+                    {
+                        *last = ctx.clone();
+                    }
+                }
 
                 let allowed_topics = self
                     .registry

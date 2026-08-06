@@ -279,6 +279,96 @@ pub fn build_exhausted_payload(topic: &str, reason: &str) -> String {
     .to_string()
 }
 
+/// U2 (plan 2026-08-06-001, R1/R5): convert a rejected-payload
+/// JSON string into a `CorrectionContext` evidence detail.
+///
+/// - `RejectedPayload::synthetic` (`synthetic == true`) →
+///   `synthetic = true`, observed stays empty, invariant + proof
+///   are filled with the gate-silent/ambiguous markers so the
+///   agent cannot mistake the missing evidence for a clean
+///   observation.  `failed_checks` is recorded as a
+///   comma-separated invariant suffix so the agent still sees
+///   which checklist indices the synthetic rejection covers.
+/// - LLM-emitted (`synthetic == false`) → per-check
+///   `ObservationValue::Unchecked` entries (the gate's
+///   structured "did not pass" answer — the agent must re-verify
+///   each check, we never invent the check result).  `reason` is
+///   the invariant; the proof asks the agent to re-run the gate
+///   after fixing the artifact.
+///
+/// Returns `None` when the payload is malformed JSON so the
+/// caller can fall back to a generic "rejected payload
+/// malformed" diagnostic without inventing evidence.
+pub fn build_precheck_evidence(
+    guarded_topic: &str,
+    rejected_payload_json: &str,
+) -> Option<crate::correction::EvidenceDetail> {
+    use crate::correction::{EvidenceDetail, ObservationEntry, ObservationValue};
+    let parsed: serde_json::Value = match serde_json::from_str(rejected_payload_json) {
+        Ok(v) => v,
+        Err(_) => {
+            // Malformed JSON: no observed data, no invariant,
+            // no proof.  Caller decides whether to surface this
+            // as "rejected payload malformed" or skip the
+            // evidence block entirely.
+            return None;
+        }
+    };
+    let synthetic = parsed
+        .get("synthetic")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false);
+    let failed_checks: Vec<u32> = parsed
+        .get("failed_checks")
+        .and_then(serde_json::Value::as_array)
+        .map(|arr| {
+            arr.iter()
+                .filter_map(serde_json::Value::as_u64)
+                .map(|n| n as u32)
+                .collect()
+        })
+        .unwrap_or_default();
+    let reason = parsed
+        .get("reason")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("precheck_rejected")
+        .to_string();
+
+    let observed: Vec<ObservationEntry> = if synthetic {
+        Vec::new()
+    } else {
+        failed_checks
+            .iter()
+            .map(|idx| ObservationEntry {
+                field: format!("check_{idx}"),
+                value: ObservationValue::Unchecked,
+            })
+            .collect()
+    };
+
+    let invariant = if synthetic {
+        format!(
+            "precheck gate for `{guarded_topic}` was silent or ambiguous; cannot confirm any checklist item passed"
+        )
+    } else {
+        format!(
+            "precheck gate for `{guarded_topic}` failed: {reason}; failed_checks={:?}",
+            failed_checks
+        )
+    };
+
+    let proof = format!(
+        "Reinvestigate the artifact / test for `{guarded_topic}` against the gate's checklist; do not change only the failed_check indices. After fixing the underlying artifact, re-run `ralph emit --policy-check` and re-emit the original `{guarded_topic}` event."
+    );
+
+    Some(EvidenceDetail {
+        observed,
+        invariant,
+        proof,
+        synthetic,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -501,5 +591,42 @@ mod tests {
             }
             other => panic!("expected Resume, got {other:?}"),
         }
+    }
+
+    // -- U2 evidence builder (plan 2026-08-06-001) -----
+
+    #[test]
+    fn u2_build_precheck_evidence_marks_synthetic() {
+        let json = r#"{"failed_checks":[1,2,3],"reason":"gate_silent_or_ambiguous","synthetic":true}"#;
+        let evidence = build_precheck_evidence("work.done", json).unwrap();
+        assert!(evidence.synthetic);
+        assert!(
+            evidence.observed.is_empty(),
+            "synthetic rejections must not invent observations"
+        );
+        assert!(evidence
+            .invariant
+            .contains("silent or ambiguous"));
+        assert!(evidence.proof.contains("Reinvestigate"));
+        // No replacement guidance in proof.
+        assert!(!evidence.proof.contains("suggested"));
+    }
+
+    #[test]
+    fn u2_build_precheck_evidence_marks_llm_checks_unchecked() {
+        use crate::correction::ObservationValue;
+        let json = r#"{"failed_checks":[2],"reason":"missing test report","synthetic":false}"#;
+        let evidence = build_precheck_evidence("work.done", json).unwrap();
+        assert!(!evidence.synthetic);
+        assert_eq!(evidence.observed.len(), 1);
+        assert_eq!(evidence.observed[0].field, "check_2");
+        assert!(matches!(evidence.observed[0].value, ObservationValue::Unchecked));
+        assert!(evidence.invariant.contains("missing test report"));
+    }
+
+    #[test]
+    fn u2_build_precheck_evidence_returns_none_for_malformed() {
+        let evidence = build_precheck_evidence("work.done", "not json");
+        assert!(evidence.is_none());
     }
 }

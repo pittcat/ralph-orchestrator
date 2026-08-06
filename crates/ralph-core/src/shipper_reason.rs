@@ -161,8 +161,7 @@ pub fn check_review_complete_shipper_routing(
                 "shipper_non_recoverable_reason_promoted_to_pass: REVIEW_COMPLETE \
                  pass_or_fail=pass is forbidden after plan.blocked(reason='{blocked_reason}'); \
                  route to pass_or_fail=fail"
-            ),
-        });
+            ), evidence: None,});
     }
     None
 }

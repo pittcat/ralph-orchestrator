@@ -155,8 +155,7 @@ impl ValidationRule for EventPolicyRule {
                         violation_type: ViolationType::MissingRequiredField {
                             field: "handoff_envelope".to_string(),
                         },
-                        message: format!("handoff_envelope validation failed: {}", err),
-                    };
+                        message: format!("handoff_envelope validation failed: {}", err), evidence: None,};
                     decision = PolicyDecision::RejectWithResume(finding);
                 }
             }

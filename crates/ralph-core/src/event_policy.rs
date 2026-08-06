@@ -238,6 +238,35 @@ pub struct PolicyFinding {
     pub topic: String,
     pub violation_type: ViolationType,
     pub message: String,
+    /// U2 (plan 2026-08-06-001): structured evidence the
+    /// finding carries.  Populated by the consistency /
+    /// precheck paths so the correction prompt and the CLI
+    /// `--policy-check` JSON share one source of observed
+    /// facts / violated invariant / required proof.  `None`
+    /// for findings that do not have evidence to surface
+    /// (legacy / diagnosis-fallback).  Defaults to `None`
+    /// for back-compat with callers that build `PolicyFinding`
+    /// via struct literal.
+    pub evidence: Option<crate::correction::EvidenceDetail>,
+}
+
+impl PolicyFinding {
+    /// Convenience: back-compat shim for callers / tests that
+    /// construct `PolicyFinding` from the original 3-field shape.
+    /// Existing call sites migrate at their own pace; new code
+    /// should prefer the explicit `evidence` field.
+    pub fn legacy(
+        topic: impl Into<String>,
+        violation_type: ViolationType,
+        message: impl Into<String>,
+    ) -> Self {
+        Self {
+            topic: topic.into(),
+            violation_type,
+            message: message.into(),
+            evidence: None,
+        }
+    }
 }
 
 /// Decision from policy validation.
@@ -1032,8 +1061,7 @@ fn apply_completion_after_terminal_action(
     let finding = PolicyFinding {
         topic: topic.to_string(),
         violation_type,
-        message: format!("Event '{}' arrived after completion was honored", topic),
-    };
+        message: format!("Event '{}' arrived after completion was honored", topic), evidence: None,};
 
     match action {
         CompletionAfterTerminalAction::Reject => PolicyDecision::Block(finding),
@@ -1081,8 +1109,7 @@ pub fn check_handoff_envelope(topic: &str, payload: &Value) -> Option<PolicyFind
             violation_type: ViolationType::MissingRequiredField {
                 field: "handoff_envelope".to_string(),
             },
-            message: format!("handoff_envelope validation failed: {}", err),
-        }),
+            message: format!("handoff_envelope validation failed: {}", err), evidence: None,}),
     }
 }
 
@@ -1148,8 +1175,7 @@ pub fn check_topic_format(topic: &str, allowed_topics: &HashSet<String>) -> Opti
             "Topic '{}' is not in the whitelist of known topics. \
              Valid topics: {:?}",
             topic, allowed_list
-        ),
-    };
+        ), evidence: None,};
 
     // R10: Block (not RejectWithResume) — no retry, only recovery signal
     Some(PolicyDecision::Block(finding))
@@ -1335,8 +1361,7 @@ pub fn check_topic_deny_rules(
                 message: format!(
                     "Hat '{}' is denied from publishing topic '{}'",
                     rule.hat_id, rule.topic
-                ),
-            };
+                ), evidence: None,};
             return Some(match config.mode {
                 EventPolicyMode::Observe => PolicyDecision::Warn(vec![finding]),
                 EventPolicyMode::Enforce => match config.on_violation {
@@ -1448,8 +1473,7 @@ pub fn validate_event_with_options<H: HandoffEnvelopeConfigAccess>(
                     "duplicate_precheck_proposed: {topic} for key '{key}' was already accepted. \
                      Wait for the precheck gate to emit {guarded} or {guarded}.rejected before \
                      re-emitting the same candidate."
-                ),
-            };
+                ), evidence: None,};
             return PolicyDecision::RejectWithResume(finding);
         }
         state.precheck_proposed_pending_keys.insert(key);
@@ -1490,8 +1514,7 @@ pub fn validate_event_with_options<H: HandoffEnvelopeConfigAccess>(
                     message: format!(
                         "duplicate_review_start: review.start for key '{dedup_key}' was already accepted. \
                          Wait for the review sequence to complete before re-sending review.start."
-                    ),
-                };
+                    ), evidence: None,};
                 return PolicyDecision::RejectWithResume(finding);
             }
             state.review_start_seen_keys.insert(dedup_key);
@@ -1544,8 +1567,7 @@ pub fn validate_event_with_options<H: HandoffEnvelopeConfigAccess>(
                          coordinator published in work.ready, OR mint a fresh \
                          task_id via `ralph tools task ensure` before re-sending \
                          work.done."
-                    ),
-                };
+                    ), evidence: None,};
                 return PolicyDecision::RejectWithResume(finding);
             }
             if state.work_done_seen_keys.contains(&dedup_key) {
@@ -1560,8 +1582,7 @@ pub fn validate_event_with_options<H: HandoffEnvelopeConfigAccess>(
                         "duplicate_same_step: work.done for key '{dedup_key}' was already accepted. \
                          Wait for fix.applied / queue.advance / step close before re-sending work.done \
                          for the same (plan_name, step, task_id)."
-                    ),
-                };
+                    ), evidence: None,};
                 return PolicyDecision::RejectWithResume(finding);
             }
             // Record the key so a 3rd emit in the same batch is
@@ -1633,8 +1654,7 @@ pub fn validate_event_with_options<H: HandoffEnvelopeConfigAccess>(
                          was already accepted. Wait for review.dimension.done / \
                          review.dimension.failed for the same dimension before re-sending \
                          review.dimension.ready."
-                    ),
-                };
+                    ), evidence: None,};
                 return PolicyDecision::RejectWithResume(finding);
             }
             // Record the key so a 3rd emit in the same batch
@@ -1672,8 +1692,7 @@ pub fn validate_event_with_options<H: HandoffEnvelopeConfigAccess>(
                         "duplicate_forge_wave_verified: forge.wave.verified for key \
                          '{dedup_key}' was already accepted. Emit verification only once \
                          for a wave and candidate commit."
-                    ),
-                };
+                    ), evidence: None,};
                 return PolicyDecision::RejectWithResume(finding);
             }
             state.forge_wave_verified_seen_keys.insert(dedup_key);
@@ -1720,8 +1739,7 @@ pub fn validate_event_with_options<H: HandoffEnvelopeConfigAccess>(
                         "review.dimension.failed payload is missing required 'dimension' field \
                          (allowed: {})",
                         DIMENSION_WHITELIST.join(", ")
-                    ),
-                };
+                    ), evidence: None,};
                 return PolicyDecision::RejectWithResume(finding);
             }
             Some(Value::String(dim)) if !DIMENSION_WHITELIST.contains(&dim.as_str()) => {
@@ -1735,8 +1753,7 @@ pub fn validate_event_with_options<H: HandoffEnvelopeConfigAccess>(
                         "review.dimension.failed payload has unknown 'dimension' value \
                          '{dim}'; allowed: {}",
                         DIMENSION_WHITELIST.join(", ")
-                    ),
-                };
+                    ), evidence: None,};
                 return PolicyDecision::RejectWithResume(finding);
             }
             _ => {} // allowed dimension, fall through.
@@ -1812,8 +1829,7 @@ pub fn validate_event_with_options<H: HandoffEnvelopeConfigAccess>(
                          '{dedup_key}' was already accepted for the same fix_round. \
                          After fix.applied the next round must use fix_round=N+1 and walk \
                          review.dimension.ready first (see U3 obligations)."
-                    ),
-                };
+                    ), evidence: None,};
                 // U2 (plan 2026-07-04-004): silently-success
                 // `review.dimensions.complete` re-emits must not
                 // trigger `task.resume` storms (per
@@ -1900,8 +1916,7 @@ pub fn validate_event_with_options<H: HandoffEnvelopeConfigAccess>(
                         "duplicate_work_ready: work.ready for key '{dedup_key}' was already accepted \
                          (seen_count={hit_count}). Wait for fix.applied / step close before re-sending \
                          work.ready for the same (plan_name, step, task_id)."
-                    ),
-                };
+                    ), evidence: None,};
                 return PolicyDecision::RejectWithResume(finding);
             } else {
                 // First acceptance: seed the counter at 1 so a
@@ -1957,8 +1972,7 @@ pub fn validate_event_with_options<H: HandoffEnvelopeConfigAccess>(
                         "duplicate_test_result: {topic} for key '{dedup_key}' was already accepted \
                          for the same fix_round. After fix.applied the next round must use \
                          fix_round=N+1 before re-sending {topic}."
-                    ),
-                };
+                    ), evidence: None,};
                 return PolicyDecision::RejectWithResume(finding);
             }
             if topic == "test.passed" {
@@ -1990,8 +2004,7 @@ pub fn validate_event_with_options<H: HandoffEnvelopeConfigAccess>(
                 "WAC R10: null payload on whitelist topic `{}` is hard-rejected; \
                  a structured payload is required for this topic",
                 topic
-            ),
-        };
+            ), evidence: None,};
         return PolicyDecision::RejectWithResume(finding);
     }
 
@@ -2007,8 +2020,7 @@ pub fn validate_event_with_options<H: HandoffEnvelopeConfigAccess>(
             message: format!(
                 "Business event '{}' after terminal topic '{}' violates monotonicity",
                 topic, terminal_topic
-            ),
-        });
+            ), evidence: None,});
     }
 
     // Duplicate terminal check (read-only on state; caller applies terminal_observed)
@@ -2021,8 +2033,7 @@ pub fn validate_event_with_options<H: HandoffEnvelopeConfigAccess>(
             message: format!(
                 "Duplicate terminal event '{}' after terminal topic was already observed",
                 topic
-            ),
-        });
+            ), evidence: None,});
     }
 
     // Schema validation
@@ -2054,8 +2065,7 @@ pub fn validate_event_with_options<H: HandoffEnvelopeConfigAccess>(
                                 expected: "json_object".to_string(),
                                 actual: format!("{:?}", other),
                             },
-                            message: format!("Payload must be JSON object, got {:?}", other),
-                        });
+                            message: format!("Payload must be JSON object, got {:?}", other), evidence: None,});
                         normalized_payload = Some(p.to_string());
                     }
                     Err(e) => {
@@ -2065,8 +2075,7 @@ pub fn validate_event_with_options<H: HandoffEnvelopeConfigAccess>(
                                 expected: "json_object".to_string(),
                                 actual: format!("parse error: {}", e),
                             },
-                            message: format!("Payload is not valid JSON: {}", e),
-                        });
+                            message: format!("Payload is not valid JSON: {}", e), evidence: None,});
                         normalized_payload = Some(p.to_string());
                     }
                 },
@@ -2077,8 +2086,7 @@ pub fn validate_event_with_options<H: HandoffEnvelopeConfigAccess>(
                             expected: "json_object".to_string(),
                             actual: "null".to_string(),
                         },
-                        message: "Payload is required to be JSON object but is missing".to_string(),
-                    });
+                        message: "Payload is required to be JSON object but is missing".to_string(), evidence: None,});
                 }
             }
 
@@ -2094,8 +2102,7 @@ pub fn validate_event_with_options<H: HandoffEnvelopeConfigAccess>(
                                     violation_type: ViolationType::MissingRequiredField {
                                         field: field.clone(),
                                     },
-                                    message: format!("Missing required field: {}", field),
-                                });
+                                    message: format!("Missing required field: {}", field), evidence: None,});
                             }
                         }
                     }
@@ -2110,8 +2117,7 @@ pub fn validate_event_with_options<H: HandoffEnvelopeConfigAccess>(
                             message: format!(
                                 "Missing required field '{}' (payload is missing)",
                                 field
-                            ),
-                        });
+                            ), evidence: None,});
                     }
                 }
             }
@@ -2127,8 +2133,7 @@ pub fn validate_event_with_options<H: HandoffEnvelopeConfigAccess>(
                                     violation_type: ViolationType::MissingRequiredField {
                                         field: field.clone(),
                                     },
-                                    message: format!("Missing required field: {}", field),
-                                });
+                                    message: format!("Missing required field: {}", field), evidence: None,});
                             }
                         }
                     }
@@ -2142,8 +2147,7 @@ pub fn validate_event_with_options<H: HandoffEnvelopeConfigAccess>(
                             message: format!(
                                 "Missing required field '{}' (payload is missing)",
                                 field
-                            ),
-                        });
+                            ), evidence: None,});
                     }
                 }
             }
@@ -2187,8 +2191,7 @@ pub fn validate_event_with_options<H: HandoffEnvelopeConfigAccess>(
                 message: format!(
                     "review.complete.fix_plan_file must be a string (use the literal \"null\" for no fix plan), got JSON {}",
                     type_name(field_value)
-                ),
-            });
+                ), evidence: None,});
         }
 
         // Allowed values (hat-agnostic)
@@ -2207,8 +2210,7 @@ pub fn validate_event_with_options<H: HandoffEnvelopeConfigAccess>(
                     message: format!(
                         "Field '{}' has invalid value {:?}. Allowed: {:?}",
                         field_path, field_value, allowed
-                    ),
-                });
+                    ), evidence: None,});
             }
         }
 
@@ -2248,8 +2250,7 @@ pub fn validate_event_with_options<H: HandoffEnvelopeConfigAccess>(
                             message: format!(
                                 "Hat '{}' may not use value {:?} for field '{}'. Allowed for this hat: {:?}",
                                 hat_id, field_value, field_path, rule.values
-                            ),
-                        });
+                            ), evidence: None,});
                 }
             }
         } else {
@@ -2279,8 +2280,7 @@ pub fn validate_event_with_options<H: HandoffEnvelopeConfigAccess>(
                     "Topic '{topic}' has hat-specific allowed values; a hat is required \
                      to validate the payload. Provenance rules: {per_hat_summary:?}. \
                      Pass --hat <hat-id> or set RALPH_CURRENT_HAT=<hat-id>."
-                ),
-            });
+                ), evidence: None,});
         }
     }
 
@@ -2306,8 +2306,7 @@ pub fn validate_event_with_options<H: HandoffEnvelopeConfigAccess>(
                     "work.done plan_name mismatch: expected '{}', got {:?}",
                     expected,
                     actual.unwrap_or("(missing)")
-                ),
-            });
+                ), evidence: None,});
         }
     }
 
@@ -2358,8 +2357,7 @@ pub fn validate_event_with_options<H: HandoffEnvelopeConfigAccess>(
                                 "element_constraints: field '{}' must be an array, got {}",
                                 array_field,
                                 type_name(field)
-                            ),
-                        });
+                            ), evidence: None,});
                     }
                 }
             }
@@ -2433,6 +2431,29 @@ pub fn validate_event_with_options<H: HandoffEnvelopeConfigAccess>(
                 // the short-circuited "matched" subset.
                 let referenced_fields =
                     crate::event_policy_payload_consistency::collect_referenced_fields(&rule.when);
+                // U2 (plan 2026-08-06-001, D6): pull bounded field
+                // observations from the current payload so the
+                // correction prompt and the CLI --policy-check JSON
+                // share one source of "this is what the payload
+                // actually said when the rule fired".  Failures to
+                // serialise a value are downgraded to
+                // `ObservationValue::Unavailable` — never invented.
+                let observed = crate::event_policy_payload_consistency::observe_referenced_fields(
+                    &rule.when,
+                    &value,
+                );
+                let observations = observed
+                    .into_iter()
+                    .map(|(field, v)| crate::correction::ObservationEntry { field, value: v })
+                    .collect();
+                let evidence = crate::correction::EvidenceDetail {
+                    observed: observations,
+                    invariant: rule.message.clone(),
+                    proof: format!(
+                        "Rebuild the payload from the artifact so {topic} satisfies the rule (run `ralph emit {topic} --policy-check` to re-validate before re-emitting)."
+                    ),
+                    synthetic: false,
+                };
                 findings.push(PolicyFinding {
                     topic: topic.to_string(),
                     violation_type: ViolationType::SemanticGateViolation {
@@ -2441,6 +2462,7 @@ pub fn validate_event_with_options<H: HandoffEnvelopeConfigAccess>(
                         referenced_fields,
                     },
                     message: format!("{gate}: {}", rule.message),
+                    evidence: Some(evidence),
                 });
                 break;
             }
@@ -2534,8 +2556,7 @@ fn validate_element_shape(
             message: format!(
                 "element_constraints: {}[{}] is missing required field '{}'",
                 array_field, idx, constraint.field
-            ),
-        });
+            ), evidence: None,});
     }
 
     // 2. allowed_values check
@@ -2556,8 +2577,7 @@ fn validate_element_shape(
                 constraint.field,
                 type_name(value),
                 constraint.allowed_values
-            ),
-        });
+            ), evidence: None,});
     }
 
     // 3. required_when + forbid_null_when_required
@@ -2580,8 +2600,7 @@ fn validate_element_shape(
                     message: format!(
                         "element_constraints: {}[{}].{} is required when sibling conditions {:?} match",
                         array_field, idx, constraint.field, constraint.required_when
-                    ),
-                });
+                    ), evidence: None,});
             }
             if constraint.forbid_null_when_required && matches!(present, Some(Value::Null)) {
                 return Some(PolicyFinding {
@@ -2593,8 +2612,7 @@ fn validate_element_shape(
                     message: format!(
                         "element_constraints: {}[{}].{} is null but must be non-null when sibling conditions {:?} match",
                         array_field, idx, constraint.field, constraint.required_when
-                    ),
-                });
+                    ), evidence: None,});
             }
         }
     }
@@ -3371,8 +3389,7 @@ mod tests {
                 decision,
                 PolicyDecision::RejectWithResume(PolicyFinding {
                     violation_type: ViolationType::DuplicateTerminalEvent { ref topic },
-                    ..
-                }) if topic == "LOOP_COMPLETE"
+                    evidence: None, .. }) if topic == "LOOP_COMPLETE"
             ),
             "Expected DuplicateTerminalEvent violation, got {:?}",
             decision
@@ -4481,8 +4498,7 @@ mod tests {
             &mut state,
         );
         let is_rejected = matches!(decision, PolicyDecision::RejectWithResume(PolicyFinding {
-            violation_type: ViolationType::InvalidFieldValue { ref field, .. }, ..
-        }) if field == "plan_name");
+            violation_type: ViolationType::InvalidFieldValue { ref field, .. }, evidence: None, .. }) if field == "plan_name");
         assert!(
             is_rejected,
             "Expected RejectWithResume for plan_name mismatch, got {:?}",
@@ -4570,8 +4586,7 @@ mod tests {
                 second,
                 PolicyDecision::RejectWithResume(PolicyFinding {
                     violation_type: ViolationType::DuplicateWorkDone { ref key, .. },
-                    ..
-                }) if key == "p1::step-01::t1"
+                    evidence: None, .. }) if key == "p1::step-01::t1"
             ),
             "Second work.done for same key must be rejected with DuplicateWorkDone, got {:?}",
             second
@@ -4702,8 +4717,7 @@ mod tests {
                 hint: DuplicateWorkDoneHint::DuplicateSameStep,
                 seen_count: None,
             },
-            message: "test".to_string(),
-        };
+            message: "test".to_string(), evidence: None,};
         assert_eq!(
             same_step.violation_type.reason_code(),
             "duplicate_work_done",
@@ -4721,8 +4735,7 @@ mod tests {
                 hint: DuplicateWorkDoneHint::DuplicateStallBypass,
                 seen_count: None,
             },
-            message: "test".to_string(),
-        };
+            message: "test".to_string(), evidence: None,};
         assert_eq!(
             stall.violation_type.reason_code(),
             "duplicate_work_done",
@@ -4823,8 +4836,7 @@ mod tests {
                 second,
                 PolicyDecision::RejectWithResume(PolicyFinding {
                     violation_type: ViolationType::DuplicateWorkDone { ref key, .. },
-                    ..
-                }) if key == "p1::step-01::t1::correctness"
+                    evidence: None, .. }) if key == "p1::step-01::t1::correctness"
             ),
             "Second review.dimension.ready for same key must be rejected with DuplicateWorkDone, got {:?}",
             second
@@ -4994,8 +5006,7 @@ mod tests {
                 decision,
                 PolicyDecision::RejectWithResume(PolicyFinding {
                     violation_type: ViolationType::InvalidFieldValue { ref field, .. },
-                    ..
-                }) if field == "dimension"
+                    evidence: None, .. }) if field == "dimension"
             ),
             "unknown dimension must be rejected with InvalidFieldValue, got {:?}",
             decision
@@ -5021,8 +5032,7 @@ mod tests {
                 decision,
                 PolicyDecision::RejectWithResume(PolicyFinding {
                     violation_type: ViolationType::MissingRequiredField { ref field },
-                    ..
-                }) if field == "dimension"
+                    evidence: None, .. }) if field == "dimension"
             ),
             "missing dimension must be rejected with MissingRequiredField, got {:?}",
             decision
@@ -5125,8 +5135,7 @@ mod tests {
                 PolicyDecision::RejectWithResume(PolicyFinding {
                     ref topic,
                     violation_type: ViolationType::DuplicateWorkDone { ref key, .. },
-                    ..
-                }) if topic == "forge.wave.verified" && key == "pf-1::wave-1::abc123"
+                    evidence: None, .. }) if topic == "forge.wave.verified" && key == "pf-1::wave-1::abc123"
             ),
             "duplicate forge.wave.verified must be rejected, got {second:?}"
         );
@@ -5156,8 +5165,7 @@ mod tests {
             decision,
             PolicyDecision::RejectWithResume(PolicyFinding {
                 violation_type: ViolationType::DuplicateWorkDone { .. },
-                ..
-            })
+                evidence: None, .. })
         ));
     }
 
@@ -5688,8 +5696,7 @@ mod tests {
             second,
             PolicyDecision::RejectWithResume(PolicyFinding {
                 violation_type: ViolationType::DuplicateWorkDone { ref key, .. },
-                ..
-            }) if key == "p1::step-01::t1::correctness"
+                evidence: None, .. }) if key == "p1::step-01::t1::correctness"
         ));
 
         // fix.applied accept path runs prune.
@@ -5769,8 +5776,7 @@ mod tests {
                 second,
                 PolicyDecision::RejectWithResume(PolicyFinding {
                     violation_type: ViolationType::DuplicateWorkDone { ref key, .. },
-                    ..
-                }) if key == "p1::step-01::t1::correctness"
+                    evidence: None, .. }) if key == "p1::step-01::t1::correctness"
             ),
             "without U1 prune, re-review ready must be rejected as DuplicateWorkDone, got {:?}",
             second
@@ -5874,8 +5880,7 @@ mod tests {
                 second,
                 PolicyDecision::AcknowledgeAndForward(PolicyFinding {
                     violation_type: ViolationType::DuplicateWorkDone { ref key, .. },
-                    ..
-                }) if key == "p1::step-01::t1::0"
+                    evidence: None, .. }) if key == "p1::step-01::t1::0"
             ),
             "2nd review.dimensions.complete same round must be AcknowledgeAndForward per U2, got {:?}",
             second
@@ -6051,8 +6056,7 @@ mod tests {
                 second,
                 PolicyDecision::AcknowledgeAndForward(PolicyFinding {
                     violation_type: ViolationType::DuplicateWorkDone { ref key, .. },
-                    ..
-                }) if key == "p1::step-01::t1::0"
+                    evidence: None, .. }) if key == "p1::step-01::t1::0"
             ),
             "2nd round-0 emit must STILL be dedup-handled per U2 (AcknowledgeAndForward), got {:?}",
             second
@@ -6665,8 +6669,7 @@ mod tests {
                 referenced_fields: Vec::new(),
             },
             message: "review-coordinator must not emit review.passed while wave is incomplete"
-                .to_string(),
-        };
+                .to_string(), evidence: None,};
         let class = is_recoverable_policy_finding(&finding)
             .expect("SemanticGateViolation must be in the recoverable set");
         assert_eq!(class, ReasonClass::SemanticGateViolation);
@@ -6701,8 +6704,7 @@ mod tests {
                 terminal_topic: "plan.complete".to_string(),
                 business_topic: "review.passed".to_string(),
             },
-            message: "terminal monotonicity".to_string(),
-        };
+            message: "terminal monotonicity".to_string(), evidence: None,};
         assert!(is_recoverable_policy_finding(&finding).is_none());
     }
 
@@ -6727,8 +6729,7 @@ mod tests {
                 referenced_fields: Vec::new(),
             },
             message: "review-coordinator must not emit review.passed while wave is incomplete"
-                .to_string(),
-        };
+                .to_string(), evidence: None,};
         // Recoverable → never feeds the U6 fast-fail
         // (`capture_violation` in `event_loop/mod.rs` early-returns
         // when this returns `Some`).
@@ -6794,8 +6795,7 @@ mod tests {
                 second,
                 PolicyDecision::RejectWithResume(PolicyFinding {
                     violation_type: ViolationType::DuplicateWorkDone { ref key, .. },
-                    ..
-                }) if key == "p1::step-01::t1"
+                    evidence: None, .. }) if key == "p1::step-01::t1"
             ),
             "Second work.ready for same key must be rejected with DuplicateWorkDone, got {:?}",
             second
@@ -6835,8 +6835,7 @@ mod tests {
                 second,
                 PolicyDecision::RejectWithResume(PolicyFinding {
                     violation_type: ViolationType::DuplicateWorkDone { ref key, .. },
-                    ..
-                }) if key == "p1::step-01::t1::0"
+                    evidence: None, .. }) if key == "p1::step-01::t1::0"
             ),
             "Second test.passed for same fix_round must be rejected, got {:?}",
             second
@@ -6858,8 +6857,7 @@ mod tests {
                 second,
                 PolicyDecision::RejectWithResume(PolicyFinding {
                     violation_type: ViolationType::DuplicateWorkDone { ref key, .. },
-                    ..
-                }) if key == "p1::step-01::t1::0"
+                    evidence: None, .. }) if key == "p1::step-01::t1::0"
             ),
             "Second test.failed for same fix_round must be rejected, got {:?}",
             second
@@ -7149,8 +7147,7 @@ mod tests {
                 second,
                 PolicyDecision::RejectWithResume(PolicyFinding {
                     violation_type: ViolationType::DuplicateWorkDone { ref key, .. },
-                    ..
-                }) if key == "work.done::{\"step\":\"s1\"}"
+                    evidence: None, .. }) if key == "work.done::{\"step\":\"s1\"}"
             ),
             "duplicate work.done.proposed must be rejected, got {:?}",
             second
@@ -7204,8 +7201,7 @@ mod tests {
                 duplicate,
                 PolicyDecision::RejectWithResume(PolicyFinding {
                     violation_type: ViolationType::DuplicateWorkDone { ref key, .. },
-                    ..
-                }) if key == "work.done::{\"step\":\"s1\"}"
+                    evidence: None, .. }) if key == "work.done::{\"step\":\"s1\"}"
             ),
             "same candidate must remain deduplicated after gate pass, got {:?}",
             duplicate
@@ -7277,8 +7273,7 @@ hats:
                 hint: DuplicateWorkDoneHint::ReviewDimensionsComplete,
                 seen_count: None,
             },
-            message: "test".to_string(),
-        };
+            message: "test".to_string(), evidence: None,};
         let decision = PolicyDecision::AcknowledgeAndForward(finding.clone());
         match decision {
             PolicyDecision::AcknowledgeAndForward(f) => {
@@ -7318,7 +7313,7 @@ hats:
 
     /// Second emit of `review.dimensions.complete` for the same
     /// `(plan, step, task, fix_round)` tuple returns
-    /// `AcknowledgeAndForward(PolicyFinding{ reason_code: "duplicate_review_dimensions_complete", ... })`
+    /// `AcknowledgeAndForward(PolicyFinding{ reason_code: "duplicate_review_dimensions_complete", .evidence: None, .. })`
     /// instead of `RejectWithResume`. This is the U2 carve-out that
     /// prevents silent-success dedup storms.
     #[test]
@@ -7485,8 +7480,7 @@ hats:
                 hint: DuplicateWorkDoneHint::ReviewDimensionsComplete,
                 seen_count: None,
             },
-            message: "test".to_string(),
-        };
+            message: "test".to_string(), evidence: None,};
         assert_eq!(
             finding.violation_type.reason_code(),
             "duplicate_review_dimensions_complete",
@@ -7507,8 +7501,7 @@ hats:
                 hint: DuplicateWorkDoneHint::ReviewDimensionDuplicate,
                 seen_count: None,
             },
-            message: "test".to_string(),
-        };
+            message: "test".to_string(), evidence: None,};
         assert_eq!(
             finding.violation_type.reason_code(),
             "duplicate_review_dimension_ready",
@@ -7562,8 +7555,7 @@ hats:
                     hint,
                     seen_count: None,
                 },
-                message: "test".to_string(),
-            };
+                message: "test".to_string(), evidence: None,};
             assert_eq!(
                 finding.violation_type.reason_code(),
                 expected_code,
