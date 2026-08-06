@@ -318,13 +318,16 @@ pub fn build_precheck_evidence(
         .get("synthetic")
         .and_then(serde_json::Value::as_bool)
         .unwrap_or(false);
-    let failed_checks: Vec<u32> = parsed
+    let failed_checks: Vec<String> = parsed
         .get("failed_checks")
         .and_then(serde_json::Value::as_array)
         .map(|arr| {
             arr.iter()
-                .filter_map(serde_json::Value::as_u64)
-                .map(|n| n as u32)
+                .filter_map(|value| match value {
+                    serde_json::Value::Number(n) => Some(n.to_string()),
+                    serde_json::Value::String(s) if !s.trim().is_empty() => Some(s.clone()),
+                    _ => None,
+                })
                 .collect()
         })
         .unwrap_or_default();
@@ -339,8 +342,8 @@ pub fn build_precheck_evidence(
     } else {
         failed_checks
             .iter()
-            .map(|idx| ObservationEntry {
-                field: format!("check_{idx}"),
+            .map(|check| ObservationEntry {
+                field: format!("check_{check}"),
                 value: ObservationValue::Unchecked,
             })
             .collect()
@@ -624,6 +627,21 @@ mod tests {
             ObservationValue::Unchecked
         ));
         assert!(evidence.invariant.contains("missing test report"));
+    }
+
+    #[test]
+    fn u2_build_precheck_evidence_preserves_string_check_identity() {
+        use crate::correction::ObservationValue;
+        let json =
+            r#"{"failed_checks":["confidence_inflated"],"reason":"missing evidence","synthetic":false}"#;
+        let evidence = build_precheck_evidence("work.done", json).unwrap();
+        assert_eq!(evidence.observed.len(), 1);
+        assert_eq!(evidence.observed[0].field, "check_confidence_inflated");
+        assert!(matches!(
+            evidence.observed[0].value,
+            ObservationValue::Unchecked
+        ));
+        assert!(evidence.invariant.contains("confidence_inflated"));
     }
 
     #[test]
