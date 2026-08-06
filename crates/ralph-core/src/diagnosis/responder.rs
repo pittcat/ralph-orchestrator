@@ -202,6 +202,9 @@ impl RecoveryAction {
             expected_payload_template: String::new(),
             allowed_topics: Vec::new(),
             required_fields: Vec::new(),
+            target_hat: Some(self.target_hat.as_str().to_string()),
+            feedback_kind: crate::correction::FeedbackKind::Unknown,
+            evidence: None,
         }
     }
 }

@@ -5281,7 +5281,7 @@ impl EventLoop {
                 // the policy rejection path; this prepend is a
                 // no-op when the queue is empty (the legacy
                 // `task.resume` path keeps working unchanged).
-                let final_prompt = self.prepend_correction_and_resume(final_prompt);
+                let final_prompt = self.prepend_correction_and_resume(final_prompt, hat_id);
                 // U4b (plan 2026-06-20-001, R12 / R13 / KTD-8):
                 // if the most recent `ralph emit` was rejected by
                 // the lint phase, inject `## LINT MIRROR` +
@@ -5571,7 +5571,7 @@ impl EventLoop {
                 // U7a (plan 2026-06-21-002): prepend deterministic
                 // correction + resume blocks.  No-op when the
                 // queue is empty.
-                let final_prompt = self.prepend_correction_and_resume(final_prompt);
+                let final_prompt = self.prepend_correction_and_resume(final_prompt, hat_id);
                 // U4b: see solo-mode comment above. Same
                 // consume-on-use semantics for the lint hint.
                 let final_prompt = self.inject_pending_lint_resume(final_prompt, hat_id);
@@ -5763,7 +5763,7 @@ impl EventLoop {
             // `emit_correction_context` calls on the policy
             // rejection path; when the feature flag is off, the
             // queue stays empty and this prepend is a no-op).
-            let base_prompt = self.prepend_correction_and_resume(base_prompt);
+            let base_prompt = self.prepend_correction_and_resume(base_prompt, hat_id);
             // 2026-06-28-003: prepend recovery directives derived
             // from pending `task.resume` events.
             let base_prompt = self.prepend_recovery_directives(base_prompt, &regular_events);
@@ -7487,12 +7487,17 @@ impl EventLoop {
     /// `state.prompt_context.resume_blocks` is non-empty).  The
     /// resume block is also consumed here (`Option::take`-style
     /// via [`std::mem::take`]) so it appears in exactly one
-    /// prompt — the first prompt after `--continue`.  The
-    /// correction queue is **not** consumed here so multiple
-    /// rejections can accumulate across iterations and be
-    /// folded into the next prompt; the caller clears the queue
-    /// when it wants to start fresh.
-    fn prepend_correction_and_resume(&mut self, prompt: String) -> String {
+    /// prompt — the first prompt after `--continue`.
+    ///
+    /// U1 (2026-08-06-001 D9): correction entries are now
+    /// partitioned by `target_hat`.  Only entries with
+    /// `target_hat ∈ {None, current_hat_id}` are rendered AND
+    /// consumed; entries targeted at another hat stay queued so
+    /// the unrelated hat cannot accidentally swallow them
+    /// (F-A fix).  Entries with `target_hat = None` retain the
+    /// legacy "visible to every hat" fallback (used for
+    /// diagnosis-fallback corrections).
+    fn prepend_correction_and_resume(&mut self, prompt: String, current_hat_id: &HatId) -> String {
         // Take the resume block out — the first prompt after
         // resume must carry `## LOOP RESUME CONTEXT`, but a
         // subsequent prompt must not (the user already saw the
@@ -7500,22 +7505,15 @@ impl EventLoop {
         let resume_blocks = std::mem::take(&mut self.state.prompt_context.resume_blocks);
         let mut pc = std::mem::take(&mut self.state.prompt_context);
         pc.resume_blocks = resume_blocks;
-        // 2026-06-26 plan U6: drain `correction_blocks` after
-        // rendering. The previous "queue persists across
-        // iterations" behaviour caused the prompt to grow on
-        // every iteration as the same correction was re-rendered,
-        // which is exactly the path that the plan warns about
-        // under "correction_blocks 必须 consume-on-use". We
-        // consume-on-use: render the correction block once,
-        // then drop the queue. If the rejection is persistent
-        // (the agent does not act on the correction), the next
-        // iteration's `inject_completion_correction` call will
-        // either re-queue a new correction (under the budget)
-        // or surface `CompletionStuck(RejectionDigestExhausted)`
-        // when the budget is exhausted.
-        let correction_block = pc.render_correction_block();
-        pc.correction_blocks.clear();
+        // U1 D9 partition: drain only the entries visible to
+        // `current_hat_id`.  Other entries (different target hat)
+        // stay in `state.prompt_context` and will be rendered
+        // when their target hat next builds a prompt.  The
+        // consumed entries are rendered into the prompt here so
+        // we do not double-render after re-installing `pc`.
+        let consumed = pc.take_visible_corrections(current_hat_id.as_str());
         let resume_block = pc.render_resume_block();
+        let correction_block = render_correction_entries(&consumed);
         let block = {
             let mut s = String::new();
             if !correction_block.is_empty() {
@@ -7529,7 +7527,7 @@ impl EventLoop {
             s
         };
         // Re-install the remaining prompt_context (resume_blocks
-        // preserved; correction_blocks already empty).
+        // preserved; correction_blocks already partitioned).
         self.state.prompt_context = pc;
         if block.is_empty() {
             prompt
@@ -14982,6 +14980,32 @@ pub struct UserPrompt {
 /// namespace (parallel-forge → `forge.plan.blocked`,
 /// ce-executor-supervisor → `plan.blocked`, undeclared
 /// flows fall back to `plan.blocked`). It returns `true`
+/// Render a slice of `CorrectionContext` entries into the
+/// `## ORCHESTRATOR CORRECTION` markdown block.  Free
+/// function (no `EventLoop` borrow) so `prepend_correction_and_resume`
+/// can render the consumed entries after the partition drain
+/// without re-borrowing `state.prompt_context`.
+///
+/// Returns an empty string when `entries` is empty.  Pure —
+/// no side effects, deterministic given the same input order.
+fn render_correction_entries(
+    entries: &[crate::correction::CorrectionContext],
+) -> String {
+    if entries.is_empty() {
+        return String::new();
+    }
+    let mut out = String::from("## ORCHESTRATOR CORRECTION\n\n");
+    out.push_str(
+        "The orchestrator rejected the events below. Address each\n\
+         reason before emitting more events on these topics.\n\n",
+    );
+    for ctx in entries {
+        out.push_str(&ctx.render_block());
+        out.push('\n');
+    }
+    out
+}
+
 /// when a blocked topic was actually published this turn so
 /// the caller can run the escape step advance + flow-authority
 /// snapshot in a single place.
