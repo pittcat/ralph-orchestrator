@@ -284,7 +284,11 @@ pub enum StuckSource {
 
 /// Result of workflow guard completion validation.
 #[derive(Debug)]
-pub(super) struct WorkflowGuardRejection {
+// 2026-08-05-001 plan U11: widened from `pub(super)` to `pub(crate)` so the
+// inherent `impl EventLoop` block living in `event_loop::impl_event_loop`
+// can name it from a sibling module. The struct is still crate-private
+// (no external consumer) so the public surface is unchanged.
+pub(crate) struct WorkflowGuardRejection {
     /// Human-readable message describing the incomplete instance.
     pub(super) message: String,
 }
