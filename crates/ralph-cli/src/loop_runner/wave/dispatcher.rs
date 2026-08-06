@@ -8579,6 +8579,55 @@ hats: {}
         );
     }
 
+    /// U1 wiring-contract test: the production `run_supervisor_fan_in` call site
+    /// must derive `aggregate_timeout_secs` from the wave via the
+    /// `effective_detected_aggregate_deadline_secs` helper — it must NOT read
+    /// `SupervisorConfig.aggregate_timeout_secs` directly.
+    ///
+    /// This test pins both ends of the wiring:
+    /// - Assert 1 (positive): the window contains the helper call identifier.
+    ///   Since the helper does not yet exist, this assertion fails (Red).
+    /// - Assert 2 (negative): the window must NOT contain the supervisor-config-read
+    ///   pattern `.aggregate_timeout_secs;`.  The current production call site at
+    ///   lines 920–924 reads this field directly, so this also fails (Red).
+    ///
+    /// After the fix (a later U), both assertions pass:
+    /// - The helper is introduced and called at the fan-in site.
+    /// - The direct supervisor config read is removed.
+    #[test]
+    fn fan_in_deadline_uses_wave_derived_helper() {
+        let src = include_str!("dispatcher.rs");
+
+        // Anchor: the production fan-in call (not a test variant).
+        let anchor = "let fan_in = run_supervisor_fan_in(";
+        let anchor_idx = src
+            .find(anchor)
+            .expect("fan-in call site anchor missing — production call may have moved");
+
+        // Collect 30 lines *before* the anchor (window: lines [anchor-30, anchor]).
+        let prefix = &src[..anchor_idx];
+        let window_start = prefix
+            .rsplitn(31, '\n')
+            .last()
+            .map(|s| prefix.len() - s.len())
+            .unwrap_or(0);
+        let window = &src[window_start..anchor_idx + anchor.len()];
+
+        // Assert 1 (positive): the helper call must be present.
+        assert!(
+            window.contains("effective_detected_aggregate_deadline_secs("),
+            "fan-in call site must use effective_detected_aggregate_deadline_secs(...) helper; \
+             window did not contain the helper call. window was:\n{window}"
+        );
+
+        // Assert 2 (negative): the window must NOT read SupervisorConfig directly.
+        assert!(
+            !window.contains(".aggregate_timeout_secs;"),
+            "fan-in call site must not read SupervisorConfig.aggregate_timeout_secs; \
+             window still contains the supervisor config read pattern. window was:\n{window}"
+        );
+    }
+
     /// U1 Red test 6: when `handle_wave_events` returns
     /// `HandleWaveOutcome { fan_in_failure: true, .. }`, the runner
     /// must enter a termination flow with a reason that is NOT
