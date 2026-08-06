@@ -539,6 +539,64 @@ impl CorrectionContext {
         if self.needs_escalation {
             out.push_str("- ESCALATION: retry budget exhausted; await human guidance\n");
         }
+        // U3 (plan 2026-08-06-001, R2/R3/R9): semantic
+        // rejections carry an anti-cheat recovery instruction
+        // block so the hat cannot satisfy the gate by simply
+        // mutating the rejected fields.  Mechanical rejections
+        // keep the existing schema-repair contract (allowed
+        // topics / required fields / expected payload) which
+        // already constrains the agent to the schema view; we
+        // do not duplicate that contract here.
+        //
+        // The instruction is written as agent-facing prose
+        // (no internal ledger / function-name leakage, per the
+        // project-wide guide rules) and is structured around
+        // four observable actions the hat must take before
+        // re-emitting the original topic.
+        if matches!(self.feedback_kind, FeedbackKind::Semantic) {
+            out.push_str(
+                "\n## Recovery instruction (semantic rejection)\n\n\
+                 The gate rejected this event because the payload\n\
+                 contradicted a fact in the artifact / test /\n\
+                 verification step.  Recovering requires a real\n\
+                 change in the underlying evidence, not a payload\n\
+                 edit:\n\n\
+                 1. Stop re-emitting the rejected topic on the\n\
+                    same payload.  Re-emitting without changing\n\
+                    the underlying fact will keep failing and\n\
+                    will count against the retry budget.\n\
+                 2. Re-read the observed values / violated\n\
+                    invariant / required proof above.  These\n\
+                    name the field(s) and the rule the gate\n\
+                    enforces.  Do not infer the rule from the\n\
+                    free-form message alone.\n\
+                 3. Investigate the artifact, test, diff, task\n\
+                    state, or any other evidence source that\n\
+                    actually drives the rule.  When the gate\n\
+                    marked itself silent or ambiguous\n\
+                    (`gate_silent_or_ambiguous`), do not assume\n\
+                    any checklist item passed — re-run the gate\n\
+                    from scratch.\n\
+                 4. Fix the root cause, rerun the necessary\n\
+                    verification, then rebuild the payload from\n\
+                    the new evidence.  Run `ralph emit <topic>\n\
+                    --policy-check` before re-emitting to\n\
+                    confirm the rule is satisfied.  Only after\n\
+                    the policy-check passes should you emit\n\
+                    the original `<topic>` once.\n\n\
+                 Forbidden shortcuts (they will be rejected and\n\
+                 will count as retries):\n\n\
+                 - changing only the rejected field while the\n\
+                   underlying artifact still contradicts it\n\
+                 - copying the previously-rejected payload\n\
+                 - inventing or paraphrasing a passing test,\n\
+                   commit, or report to satisfy the gate\n\
+                 - bypassing `ralph emit --policy-check`\n\
+                 - treating the rejection as proof of success\n\
+                   or as permission to re-emit the original\n\
+                   payload\n",
+            );
+        }
         out
     }
 }
@@ -851,11 +909,34 @@ impl PromptContext {
         if visible.is_empty() {
             return String::new();
         }
+        let has_semantic = visible
+            .iter()
+            .any(|c| matches!(c.feedback_kind, FeedbackKind::Semantic));
         let mut out = String::from("## ORCHESTRATOR CORRECTION\n\n");
-        out.push_str(
-            "The orchestrator rejected the events below. Address each\n\
-             reason before emitting more events on these topics.\n\n",
-        );
+        // U3 (plan 2026-08-06-001, R9): the prose above the
+        // entries guides the hat.  Two variants — semantic vs
+        // mechanical — so the agent does not apply schema-
+        // repair habits to evidence-level rejections.
+        if has_semantic {
+            out.push_str(
+                "The orchestrator rejected the events below because\n\
+                 the payloads contradicted an invariant derived\n\
+                 from the artifact, test, or verification state.\n\
+                 Each entry lists what was observed, the invariant\n\
+                 that was violated, and the condition you must\n\
+                 re-prove.  Re-emitting the original payload\n\
+                 without changing the underlying evidence will\n\
+                 keep failing and counts against the retry\n\
+                 budget — open the artifact, fix the root cause,\n\
+                 re-verify, then rebuild the payload and rerun\n\
+                 `ralph emit --policy-check` before re-emitting.\n\n",
+            );
+        } else {
+            out.push_str(
+                "The orchestrator rejected the events below. Address each\n\
+                 reason before emitting more events on these topics.\n\n",
+            );
+        }
         for ctx in visible {
             out.push_str(&ctx.render_block());
             out.push('\n');
@@ -1910,6 +1991,179 @@ mod tests {
             ObservationValue::Unavailable.as_display_string(),
             ObservationValue::Unchecked.as_display_string(),
             "Unavailable and Unchecked must be distinct sentinels"
+        );
+    }
+
+    // -----------------------------------------------------------------
+    // U3 (plan 2026-08-06-001) — anti-cheat prompt contract.
+    //
+    // These tests pin the U3 prompt contract: a semantic
+    // CorrectionContext renders an explicit recovery
+    // instruction block that forbids payload-only mutations
+    // and requires the agent to re-investigate the artifact
+    // before re-emitting.  Mechanical rejections do NOT add
+    // the instruction (their schema-repair contract already
+    // constrains the agent to the schema view).
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn u3_semantic_correction_renders_recovery_instruction_block() {
+        let r = rejection_with_target(Some("executor"), "work.done");
+        let evidence = EvidenceDetail {
+            observed: vec![ObservationEntry {
+                field: "status".into(),
+                value: ObservationValue::Value("\"applied\"".into()),
+            }],
+            invariant: "status=applied requires fixes_applied > 0".into(),
+            proof: "rebuild from artifact and rerun ralph emit --policy-check".into(),
+            synthetic: false,
+        };
+        let ctx = CorrectionContext::from_rejection(&r, 1)
+            .with_feedback_kind(FeedbackKind::Semantic)
+            .with_evidence(evidence);
+        let block = ctx.render_block();
+        // The recovery instruction must be present so the hat
+        // cannot satisfy the gate by editing fields.
+        assert!(
+            block.contains("## Recovery instruction (semantic rejection)"),
+            "semantic block must carry the anti-cheat heading: {block}"
+        );
+        assert!(
+            block.contains("Stop re-emitting"),
+            "recovery instruction must forbid re-emitting the same payload: {block}"
+        );
+        assert!(
+            block.contains("Investigate"),
+            "recovery instruction must require re-investigating the artifact: {block}"
+        );
+        assert!(
+            block.contains("Forbidden shortcuts"),
+            "recovery instruction must list the forbidden shortcuts: {block}"
+        );
+        assert!(
+            block.contains("changing only the rejected field"),
+            "recovery instruction must call out the field-only mutation shortcut: {block}"
+        );
+        assert!(
+            block.contains("copying the previously-rejected payload"),
+            "recovery instruction must forbid payload copy: {block}"
+        );
+        assert!(
+            block.contains("ralph emit --policy-check"),
+            "recovery instruction must require re-running the policy check: {block}"
+        );
+    }
+
+    #[test]
+    fn u3_mechanical_correction_omits_recovery_instruction_block() {
+        // Mechanical rejections keep the legacy contract:
+        // allowed topics / required fields / expected payload
+        // are the schema-repair guidance; the anti-cheat
+        // block is NOT added (would be misleading — schema
+        // repairs are exactly the right action).
+        let r = rejection_with_target(Some("executor"), "work.done");
+        let ctx = CorrectionContext::from_rejection_with_schema(
+            &r,
+            1,
+            vec!["work.done".into()],
+            vec!["plan_path".into()],
+            r#"{"plan_path":"..."}"#.to_string(),
+        );
+        let block = ctx.render_block();
+        assert!(
+            !block.contains("## Recovery instruction"),
+            "mechanical block must not carry the anti-cheat heading: {block}"
+        );
+        assert!(
+            !block.contains("Forbidden shortcuts"),
+            "mechanical block must not list forbidden shortcuts: {block}"
+        );
+    }
+
+    #[test]
+    fn u3_unknown_kind_omits_recovery_instruction_block() {
+        // Unknown / legacy feedback kind must NOT add the
+        // anti-cheat block — those rejections pre-date the
+        // semantic / mechanical split.
+        let r = rejection_with_target(Some("executor"), "work.done");
+        let ctx = CorrectionContext::from_rejection(&r, 1); // feedback_kind = Unknown
+        let block = ctx.render_block();
+        assert!(
+            !block.contains("## Recovery instruction"),
+            "unknown-kind block must not carry the anti-cheat heading: {block}"
+        );
+    }
+
+    #[test]
+    fn u3_orchestrator_correction_preamble_is_semantic_when_any_entry_is_semantic() {
+        let mut pc = PromptContext::default();
+        let r = rejection_with_target(Some("executor"), "work.done");
+        let semantic = CorrectionContext::from_rejection(&r, 1)
+            .with_feedback_kind(FeedbackKind::Semantic);
+        let mechanical = CorrectionContext::from_rejection_with_schema(
+            &r,
+            1,
+            vec!["work.done".into()],
+            vec!["plan_path".into()],
+            r#"{"plan_path":"..."}"#.to_string(),
+        );
+        pc.push_correction(semantic);
+        pc.push_correction(mechanical);
+        let block = pc.render_correction_block_for("executor");
+        assert!(
+            block.contains("contradicted an invariant"),
+            "preamble must switch to semantic phrasing when any entry is semantic: {block}"
+        );
+    }
+
+    #[test]
+    fn u3_orchestrator_correction_preamble_is_mechanical_when_no_entry_is_semantic() {
+        let mut pc = PromptContext::default();
+        let r = rejection_with_target(Some("executor"), "work.done");
+        let mechanical = CorrectionContext::from_rejection_with_schema(
+            &r,
+            1,
+            vec!["work.done".into()],
+            vec!["plan_path".into()],
+            r#"{"plan_path":"..."}"#.to_string(),
+        );
+        pc.push_correction(mechanical);
+        let block = pc.render_correction_block_for("executor");
+        assert!(
+            block.contains("Address each"),
+            "purely mechanical preamble must keep the legacy phrasing: {block}"
+        );
+        assert!(
+            !block.contains("contradicted an invariant"),
+            "purely mechanical preamble must NOT use the semantic phrasing: {block}"
+        );
+    }
+
+    #[test]
+    fn u3_synthetic_evidence_is_not_replaced_with_observation() {
+        // When `evidence.synthetic == true`, the renderer
+        // surfaces the explicit `gate_silent_or_ambiguous`
+        // marker instead of inventing an observation — so the
+        // anti-cheat contract extends to precheck gates: the
+        // hat must re-run the gate, not invent a passing
+        // result.
+        let r = rejection_with_target(Some("executor"), "work.done");
+        let evidence = EvidenceDetail {
+            observed: Vec::new(),
+            invariant: String::new(),
+            proof: String::new(),
+            synthetic: true,
+        };
+        let ctx = CorrectionContext::from_rejection(&r, 1)
+            .with_feedback_kind(FeedbackKind::Semantic)
+            .with_evidence(evidence);
+        let block = ctx.render_block();
+        assert!(block.contains("gate_silent_or_ambiguous"));
+        // The recovery instruction must also forbid the
+        // "assume checklist passed" shortcut.
+        assert!(
+            block.contains("do not assume") || block.contains("silent or ambiguous"),
+            "synthetic block must phrase the absence of evidence as 'do not assume': {block}"
         );
     }
 }
