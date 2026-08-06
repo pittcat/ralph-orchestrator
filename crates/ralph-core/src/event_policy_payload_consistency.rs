@@ -155,6 +155,7 @@ pub fn observe_referenced_fields(
         .into_iter()
         .map(|field| {
             let value = match extract_json_field(payload, &field) {
+                Some(v) if v.is_null() => ObservationValue::Unavailable,
                 Some(v) => match serde_json::to_string(&v) {
                     Ok(s) if s.len() <= crate::correction::MAX_OBSERVATION_VALUE_BYTES => {
                         ObservationValue::Value(s)
@@ -836,14 +837,39 @@ mod cross_impl_consistency_tests {
     }
 
     #[test]
-    fn u2_observe_referenced_fields_oversized_value_is_unavailable() {
+    fn u3_observe_referenced_fields_present_but_null_is_unavailable() {
         use crate::correction::ObservationValue;
-        // Build a string longer than MAX_OBSERVATION_VALUE_BYTES.
-        let huge = "x".repeat(crate::correction::MAX_OBSERVATION_VALUE_BYTES + 32);
-        let when = json!({"field": "blob", "eq": "x"});
-        let payload = json!({"blob": huge});
+        // JSON null is a real value — the field exists but holds null.
+        // serde_json::to_string(&Value::Null) = "null" (4 bytes), which
+        // passes the MAX_OBSERVATION_VALUE_BYTES budget, so without the
+        // explicit null guard the bug produced Value("null") instead of
+        // Unavailable.
+        let when = json!({"field": "status", "exists": true});
+        let payload = json!({"status": null});
         let obs = observe_referenced_fields(&when, &payload);
         assert_eq!(obs.len(), 1);
-        assert!(matches!(obs[0].1, ObservationValue::Unavailable));
+        assert_eq!(obs[0].0, "status");
+        assert!(
+            matches!(obs[0].1, ObservationValue::Unavailable),
+            "JSON null field must be Unavailable, got {:?}",
+            obs[0].1
+        );
+    }
+
+    #[test]
+    fn u3_observe_referenced_fields_string_sentinel_preserved() {
+        use crate::correction::ObservationValue;
+        // The string "null" is a legitimate value — it must survive as
+        // Value("\"null\"") (JSON-serialized form), NOT become Unavailable.
+        let when = json!({"field": "status", "exists": true});
+        let payload = json!({"status": "null"});
+        let obs = observe_referenced_fields(&when, &payload);
+        assert_eq!(obs.len(), 1);
+        assert_eq!(obs[0].0, "status");
+        assert!(
+            matches!(obs[0].1, ObservationValue::Value(ref v) if v == "\"null\""),
+            "String sentinel 'null' must be preserved as Value, got {:?}",
+            obs[0].1
+        );
     }
 }
