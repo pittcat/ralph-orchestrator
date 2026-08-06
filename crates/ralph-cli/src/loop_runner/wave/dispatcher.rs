@@ -9342,8 +9342,8 @@ hats: {}
     /// After the fix the wave-derived 2288s allows 726s to pass (726 < 2288).
     #[test]
     fn regression_six_slots_726s_integrates_under_wave_deadline() {
-        use ralph_core::supervisor::{evaluate_phase, PhaseInputs, WaveKind, WavePhase};
         use ralph_core::supervisor::WaveDeliveryState;
+        use ralph_core::supervisor::{PhaseInputs, WaveKind, WavePhase, evaluate_phase};
 
         // Build the canonical failure-mode snapshot: 6 completed slots,
         // 0 pending, 0 in-flight, 0 failed, expected_total=6.
@@ -9382,8 +9382,8 @@ hats: {}
     /// exactly 2288s must still integrate, not time out.
     #[test]
     fn regression_elapsed_equals_deadline_not_timeout() {
-        use ralph_core::supervisor::{evaluate_phase, PhaseInputs, WaveKind, WavePhase};
         use ralph_core::supervisor::WaveDeliveryState;
+        use ralph_core::supervisor::{PhaseInputs, WaveKind, WavePhase, evaluate_phase};
 
         let slots: Vec<(u32, ralph_core::supervisor::SlotStatus)> = (0u32..6)
             .map(|i| (i, ralph_core::supervisor::SlotStatus::Completed))
@@ -9420,8 +9420,10 @@ hats: {}
     /// empty blocking list (all 6 slots are Completed, none are Failed/Cancelled).
     #[test]
     fn regression_elapsed_past_deadline_still_times_out() {
-        use ralph_core::supervisor::{evaluate_phase, PhaseInputs, FailedReason, WaveKind, WavePhase};
         use ralph_core::supervisor::WaveDeliveryState;
+        use ralph_core::supervisor::{
+            FailedReason, PhaseInputs, WaveKind, WavePhase, evaluate_phase,
+        };
 
         let slots: Vec<(u32, ralph_core::supervisor::SlotStatus)> = (0u32..6)
             .map(|i| (i, ralph_core::supervisor::SlotStatus::Completed))
@@ -9471,7 +9473,9 @@ hats: {}
     /// the slot event merge, and the coord event injection.
     #[test]
     fn fan_in_injects_complete_with_wave_deadline() {
-        use ralph_core::supervisor::{BridgeError, CoordinatorAction, PhaseInputs, SupervisorBridge, WaveKind};
+        use ralph_core::supervisor::{
+            BridgeError, CoordinatorAction, PhaseInputs, SupervisorBridge, WaveKind,
+        };
         use std::sync::Arc;
 
         // Stub bridge that returns Integrate from tick_with_slot_events.
