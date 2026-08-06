@@ -305,7 +305,9 @@ impl ReviewStepTracker {
                     state.open_wave_id.as_deref().unwrap_or("?"),
                     state.dimensions_received.len(),
                     state.wave_expected
-                ), evidence: None,});
+                ),
+                evidence: None,
+            });
         }
 
         if topic == "review.passed"
@@ -321,7 +323,9 @@ impl ReviewStepTracker {
                     value: Value::String("aggregate_timeout".to_string()),
                 },
                 message: "aggregate_timeout skip_reason is reserved for review-synthesizer"
-                    .to_string(), evidence: None,});
+                    .to_string(),
+                evidence: None,
+            });
         }
 
         if topic == "queue.advance" {
@@ -999,7 +1003,9 @@ mod tests {
                 field: "skip_reason".to_string(),
                 value: serde_json::Value::String("not_an_allowed_value".to_string()),
             },
-            message: "Field 'skip_reason' has invalid value \"not_an_allowed_value\".".to_string(), evidence: None,};
+            message: "Field 'skip_reason' has invalid value \"not_an_allowed_value\".".to_string(),
+            evidence: None,
+        };
         // Schema-derived `InvalidFieldValue` MUST remain
         // non-recoverable so the U6 `PayloadContractViolation`
         // fatal path still triggers. U1 only re-classifies the

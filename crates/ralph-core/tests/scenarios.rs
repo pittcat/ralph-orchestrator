@@ -1085,8 +1085,8 @@ fn build_manifest_resume_recovery(
     registered_hats: &std::collections::BTreeSet<String>,
 ) -> ralph_core::event_loop::rejection::ManifestResumeRecovery {
     use ralph_core::parallel_forge_resume::{
-        AcceptedBoundary, BoundaryRecord, ResumeIdentity, ResumeManifest, TriggerSnapshot,
-        WaveMetadata, MANIFEST_SCHEMA_VERSION,
+        AcceptedBoundary, BoundaryRecord, MANIFEST_SCHEMA_VERSION, ResumeIdentity, ResumeManifest,
+        TriggerSnapshot, WaveMetadata,
     };
     let accepted = bootstrap
         .accepted
@@ -1223,8 +1223,7 @@ fn run_scenario_with_snapshots(
     // `config` moves into the EventLoop — the manifest → task.resume
     // conversion validates the pending hat against this set, exactly
     // like the CLI runner does at bootstrap.
-    let registered_hats: std::collections::BTreeSet<String> =
-        config.hats.keys().cloned().collect();
+    let registered_hats: std::collections::BTreeSet<String> = config.hats.keys().cloned().collect();
 
     let mut event_loop = if yaml.compiled_contract {
         let resolved = ralph_core::execution_contract::compile(config)
@@ -2268,9 +2267,7 @@ fn test_payload_consistency_accept_consistent_fix_done() {
 /// fires, the loop completes.  Pins S1, S2, S7, S8.
 #[test]
 fn test_evidence_bound_correction_payload_consistency() {
-    let yaml = load_scenario(
-        "tests/scenarios/payload_consistency/evidence_bound_correction.yml",
-    );
+    let yaml = load_scenario("tests/scenarios/payload_consistency/evidence_bound_correction.yml");
     run_workflow_guard_scenario(yaml);
 }
 
@@ -4039,7 +4036,11 @@ fn evaluate_correction_block_present(
         // exact JSON value serialisation.
         if let Some(ref needles) = expected.evidence_observed_contains {
             for needle in needles {
-                if !c.evidence_observed_fields.iter().any(|f| f.contains(needle)) {
+                if !c
+                    .evidence_observed_fields
+                    .iter()
+                    .any(|f| f.contains(needle))
+                {
                     return false;
                 }
             }

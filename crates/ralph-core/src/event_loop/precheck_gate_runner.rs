@@ -597,16 +597,15 @@ mod tests {
 
     #[test]
     fn u2_build_precheck_evidence_marks_synthetic() {
-        let json = r#"{"failed_checks":[1,2,3],"reason":"gate_silent_or_ambiguous","synthetic":true}"#;
+        let json =
+            r#"{"failed_checks":[1,2,3],"reason":"gate_silent_or_ambiguous","synthetic":true}"#;
         let evidence = build_precheck_evidence("work.done", json).unwrap();
         assert!(evidence.synthetic);
         assert!(
             evidence.observed.is_empty(),
             "synthetic rejections must not invent observations"
         );
-        assert!(evidence
-            .invariant
-            .contains("silent or ambiguous"));
+        assert!(evidence.invariant.contains("silent or ambiguous"));
         assert!(evidence.proof.contains("Reinvestigate"));
         // No replacement guidance in proof.
         assert!(!evidence.proof.contains("suggested"));
@@ -620,7 +619,10 @@ mod tests {
         assert!(!evidence.synthetic);
         assert_eq!(evidence.observed.len(), 1);
         assert_eq!(evidence.observed[0].field, "check_2");
-        assert!(matches!(evidence.observed[0].value, ObservationValue::Unchecked));
+        assert!(matches!(
+            evidence.observed[0].value,
+            ObservationValue::Unchecked
+        ));
         assert!(evidence.invariant.contains("missing test report"));
     }
 

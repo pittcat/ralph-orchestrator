@@ -2715,7 +2715,9 @@ mod u2_structured_feedback_tests {
                 context: "wave='w-1' received=0/3 expected".to_string(),
                 referenced_fields: Vec::new(),
             },
-            message: "review.passed while wave open".to_string(), evidence: None,};
+            message: "review.passed while wave open".to_string(),
+            evidence: None,
+        };
         let decision = PolicyDecision::RejectWithResume(finding);
         let err = finding_to_validation_error(&decision, "review.passed")
             .expect("RejectWithResume must surface as ValidationError");
@@ -3006,14 +3008,20 @@ fn finding_record(finding: &ralph_core::PolicyFinding) -> ValidationError {
                 })
                 .collect()
         }),
-        invariant: finding
-            .evidence
-            .as_ref()
-            .and_then(|ev| if ev.invariant.is_empty() { None } else { Some(ev.invariant.clone()) }),
-        required_proof: finding
-            .evidence
-            .as_ref()
-            .and_then(|ev| if ev.proof.is_empty() { None } else { Some(ev.proof.clone()) }),
+        invariant: finding.evidence.as_ref().and_then(|ev| {
+            if ev.invariant.is_empty() {
+                None
+            } else {
+                Some(ev.invariant.clone())
+            }
+        }),
+        required_proof: finding.evidence.as_ref().and_then(|ev| {
+            if ev.proof.is_empty() {
+                None
+            } else {
+                Some(ev.proof.clone())
+            }
+        }),
         ..Default::default()
     }
 }
@@ -4334,7 +4342,10 @@ hats:
         assert_eq!(observed[0]["value"], "\"blocked\"");
         assert_eq!(observed[1]["field"], "fixes_applied");
         assert_eq!(observed[1]["value"], "0");
-        assert_eq!(json["invariant"], "status=blocked requires fixes_applied > 0");
+        assert_eq!(
+            json["invariant"],
+            "status=blocked requires fixes_applied > 0"
+        );
         assert_eq!(
             json["required_proof"],
             "rebuild from artifact and rerun ralph emit --policy-check"
@@ -4414,7 +4425,9 @@ hats:
             gate: Some("precheck:work.done".to_string()),
             observed: Some(vec![]),
             invariant: Some("precheck gate for `work.done` was silent or ambiguous".to_string()),
-            required_proof: Some("Reinvestigate the gate; do not assume any checklist item passed".to_string()),
+            required_proof: Some(
+                "Reinvestigate the gate; do not assume any checklist item passed".to_string(),
+            ),
             ..Default::default()
         };
         let block =

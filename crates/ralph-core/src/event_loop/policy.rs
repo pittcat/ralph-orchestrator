@@ -135,22 +135,22 @@ pub fn publish_correction_via_context(
     // renderer surfaces observed facts / violated invariant /
     // required proof verbatim.  Mechanical and legacy findings
     // (`evidence = None`) keep the existing rendering path.
-    if let Some(finding) = policy_finding {
-        if let Some(evidence) = finding.evidence.as_ref() {
-            ctx = ctx.with_feedback_kind(crate::correction::FeedbackKind::Semantic);
-            ctx = ctx.with_evidence(evidence.clone());
-            // Replace the entry `emit_correction_context` just
-            // pushed with the upgraded one.  Same retry_key, same
-            // position — semantic + evidence replace the legacy
-            // mechanical place-holder.
-            if let Some(last) = state
-                .prompt_context
-                .correction_blocks
-                .iter_mut()
-                .find(|c| c.retry_key == ctx.retry_key && c.topic == ctx.topic)
-            {
-                *last = ctx.clone();
-            }
+    if let Some(finding) = policy_finding
+        && let Some(evidence) = finding.evidence.as_ref()
+    {
+        ctx = ctx.with_feedback_kind(crate::correction::FeedbackKind::Semantic);
+        ctx = ctx.with_evidence(evidence.clone());
+        // Replace the entry `emit_correction_context` just
+        // pushed with the upgraded one.  Same retry_key, same
+        // position — semantic + evidence replace the legacy
+        // mechanical place-holder.
+        if let Some(last) = state
+            .prompt_context
+            .correction_blocks
+            .iter_mut()
+            .find(|c| c.retry_key == ctx.retry_key && c.topic == ctx.topic)
+        {
+            *last = ctx.clone();
         }
     }
     tracing::info!(

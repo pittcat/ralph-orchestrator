@@ -530,7 +530,11 @@ fn u1_correction_target_specific_survives_other_hat_build() {
     let taken_topics: Vec<_> = taken.iter().map(|c| c.topic.as_str()).collect();
     assert!(taken_topics.contains(&"review.passed"));
     assert!(!taken_topics.contains(&"work.done"));
-    assert_eq!(pc.correction_blocks.len(), 1, "executor-targeted correction must survive reviewer's drain (F-A guard)");
+    assert_eq!(
+        pc.correction_blocks.len(),
+        1,
+        "executor-targeted correction must survive reviewer's drain (F-A guard)"
+    );
     assert_eq!(pc.correction_blocks[0].topic, "work.done");
 
     // Executor builds next.  Its targeted correction is drained.

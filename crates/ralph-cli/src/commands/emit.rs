@@ -400,7 +400,9 @@ impl U5Gate {
     /// the gate is in the CompileFailed state; `None` otherwise.
     fn compile_failure(&self) -> Option<(&'static str, String)> {
         match &self.state {
-            U5GateState::CompileFailed { reason } => Some(("contract_compile_failed", reason.clone())),
+            U5GateState::CompileFailed { reason } => {
+                Some(("contract_compile_failed", reason.clone()))
+            }
             _ => None,
         }
     }
@@ -409,7 +411,9 @@ impl U5Gate {
     /// contract denies `(hat, topic)`; `None` means proceed.
     fn capability_denied(&self, hat: Option<&str>, topic: &str) -> Option<String> {
         if let Some((code, hint)) = self.compile_failure() {
-            return Some(format!("{code}: the Effective Execution Contract could not be compiled for this emit, so neither capability nor token checks can be evaluated safely. Re-validate the preset config (`{hint}`) and try again."));
+            return Some(format!(
+                "{code}: the Effective Execution Contract could not be compiled for this emit, so neither capability nor token checks can be evaluated safely. Re-validate the preset config (`{hint}`) and try again."
+            ));
         }
         let resolved = match &self.state {
             U5GateState::Active { resolved } => resolved,
@@ -446,7 +450,9 @@ impl U5Gate {
         if let Some((code, hint)) = self.compile_failure() {
             return Some((
                 code,
-                format!("{code}: the Effective Execution Contract could not be compiled for this emit, so the evaluation token cannot be verified. Re-validate the preset config (`{hint}`) and try again."),
+                format!(
+                    "{code}: the Effective Execution Contract could not be compiled for this emit, so the evaluation token cannot be verified. Re-validate the preset config (`{hint}`) and try again."
+                ),
             ));
         }
         let resolved = match &self.state {
@@ -492,8 +498,9 @@ impl U5Gate {
     /// for callers that already short-circuit on `Inactive`).
     fn token(&self, hat: Option<&str>, topic: &str, payload: &str) -> Option<String> {
         match &self.state {
-            U5GateState::Active { resolved } => hat
-                .map(|hat_id| compute_policy_check_token(hat_id, topic, payload, resolved.digest())),
+            U5GateState::Active { resolved } => hat.map(|hat_id| {
+                compute_policy_check_token(hat_id, topic, payload, resolved.digest())
+            }),
             _ => None,
         }
     }
@@ -1587,7 +1594,9 @@ fn emit_command_with_root_and_hats(
                 referenced_fields: Vec::new(),
             },
             topic: topic.to_string(),
-            message: err.message.clone(), evidence: None,};
+            message: err.message.clone(),
+            evidence: None,
+        };
         record_cli_emit_rejection(&workspace_root, topic, hat.as_deref(), &finding);
         anyhow::bail!(
             "Event rejected by missing-provenance guard: {}",
@@ -1620,7 +1629,9 @@ fn emit_command_with_root_and_hats(
                 referenced_fields: Vec::new(),
             },
             topic: topic.to_string(),
-            message: err.message.clone(), evidence: None,};
+            message: err.message.clone(),
+            evidence: None,
+        };
         record_cli_emit_rejection(&workspace_root, topic, hat.as_deref(), &finding);
         anyhow::bail!("Event rejected by isolated scope guard: {}", err.message);
     }
@@ -1639,7 +1650,9 @@ fn emit_command_with_root_and_hats(
                 referenced_fields: Vec::new(),
             },
             topic: topic.to_string(),
-            message: err.message.clone(), evidence: None,};
+            message: err.message.clone(),
+            evidence: None,
+        };
         record_cli_emit_rejection(&workspace_root, topic, hat.as_deref(), &finding);
         anyhow::bail!("Event rejected by wave dimension guard: {}", err.message);
     }
@@ -1668,7 +1681,9 @@ fn emit_command_with_root_and_hats(
                             referenced_fields: Vec::new(),
                         },
                         topic: topic.to_string(),
-                        message: err.message.clone(), evidence: None,},
+                        message: err.message.clone(),
+                        evidence: None,
+                    },
                 );
                 let failure = ValidationFailure {
                     ok: false,
@@ -1837,7 +1852,9 @@ fn emit_command_with_root_and_hats(
                 referenced_fields: Vec::new(),
             },
             topic: topic.to_string(),
-            message: err.message.clone(), evidence: None,};
+            message: err.message.clone(),
+            evidence: None,
+        };
         record_cli_emit_rejection(&workspace_root, topic, hat.as_deref(), &finding);
         anyhow::bail!(
             "Event rejected by envelope-triggered guard: {}",
@@ -5794,7 +5811,8 @@ hats:
             "valid contract must not surface CompileFailed"
         );
         assert!(
-            gate.capability_denied(Some("worker"), "work.done").is_none(),
+            gate.capability_denied(Some("worker"), "work.done")
+                .is_none(),
             "valid contract + allowed hat/topic must allow"
         );
 
@@ -5831,10 +5849,7 @@ hats:
         let advertised = gate
             .token(Some("worker"), "work.done", r#"{"step":"step-01"}"#)
             .expect("valid contract + active gate must advertise a token");
-        assert!(
-            !advertised.is_empty(),
-            "advertised token must be non-empty"
-        );
+        assert!(!advertised.is_empty(), "advertised token must be non-empty");
         // Same hat/topic/payload/revision must produce a stable token.
         let advertised_again = gate
             .token(Some("worker"), "work.done", r#"{"step":"step-01"}"#)
@@ -5894,7 +5909,14 @@ hats:
         );
 
         // 3. `env_hat_set == false` (human CLI) stands down.
-        let gate = U5Gate::resolve(false, false, Some(&config), Some("worker"), "work.done", "{}");
+        let gate = U5Gate::resolve(
+            false,
+            false,
+            Some(&config),
+            Some("worker"),
+            "work.done",
+            "{}",
+        );
         assert!(
             gate.compile_failure().is_none(),
             "human CLI must stand down"

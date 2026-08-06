@@ -531,8 +531,7 @@ impl CorrectionContext {
             if !evidence.proof.is_empty() {
                 out.push_str(&format!(
                     "- Must re-prove: {}\n",
-                    safe_display(&evidence.proof, MAX_RULE_MESSAGE_BYTES)
-                        .as_quoted_diagnostic()
+                    safe_display(&evidence.proof, MAX_RULE_MESSAGE_BYTES).as_quoted_diagnostic()
                 ));
             }
         }
@@ -1780,7 +1779,10 @@ mod tests {
         // The executor-targeted entry survives.
         assert_eq!(pc.correction_blocks.len(), 1);
         assert_eq!(pc.correction_blocks[0].topic, "work.done");
-        assert_eq!(pc.correction_blocks[0].target_hat.as_deref(), Some("executor"));
+        assert_eq!(
+            pc.correction_blocks[0].target_hat.as_deref(),
+            Some("executor")
+        );
 
         // Executor builds its prompt: the entry is drained.
         let taken_exec = pc.take_visible_corrections("executor");
@@ -1964,8 +1966,8 @@ mod tests {
             "allowed_topics":[],
             "required_fields":[]
         }"#;
-        let ctx: CorrectionContext = serde_json::from_str(json)
-            .expect("legacy correction must deserialise");
+        let ctx: CorrectionContext =
+            serde_json::from_str(json).expect("legacy correction must deserialise");
         assert_eq!(ctx.target_hat, None);
         assert_eq!(ctx.feedback_kind, FeedbackKind::Unknown);
         assert_eq!(ctx.evidence, None);
@@ -2098,8 +2100,8 @@ mod tests {
     fn u3_orchestrator_correction_preamble_is_semantic_when_any_entry_is_semantic() {
         let mut pc = PromptContext::default();
         let r = rejection_with_target(Some("executor"), "work.done");
-        let semantic = CorrectionContext::from_rejection(&r, 1)
-            .with_feedback_kind(FeedbackKind::Semantic);
+        let semantic =
+            CorrectionContext::from_rejection(&r, 1).with_feedback_kind(FeedbackKind::Semantic);
         let mechanical = CorrectionContext::from_rejection_with_schema(
             &r,
             1,

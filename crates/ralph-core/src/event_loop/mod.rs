@@ -5617,8 +5617,7 @@ impl EventLoop {
                 regular_events
                     .iter()
                     .filter(|e| {
-                        allowlist.contains(e.topic.as_str())
-                            || Self::is_recovery_channel_event(e)
+                        allowlist.contains(e.topic.as_str()) || Self::is_recovery_channel_event(e)
                     })
                     .collect()
             } else {
@@ -13459,10 +13458,9 @@ impl EventLoop {
                 // rejections get per-check `unchecked`
                 // observations so the hat cannot mistake them
                 // for a clean "the check failed" verification.
-                if let Some(evidence) = runner::build_precheck_evidence(
-                    guarded,
-                    rejected_payload_json,
-                ) {
+                if let Some(evidence) =
+                    runner::build_precheck_evidence(guarded, rejected_payload_json)
+                {
                     ctx = ctx.with_feedback_kind(crate::correction::FeedbackKind::Semantic);
                     ctx = ctx.with_evidence(evidence);
                     // Replace the entry emit_correction_context
@@ -15014,9 +15012,7 @@ pub struct UserPrompt {
 ///
 /// Returns an empty string when `entries` is empty.  Pure —
 /// no side effects, deterministic given the same input order.
-fn render_correction_entries(
-    entries: &[crate::correction::CorrectionContext],
-) -> String {
+fn render_correction_entries(entries: &[crate::correction::CorrectionContext]) -> String {
     if entries.is_empty() {
         return String::new();
     }
