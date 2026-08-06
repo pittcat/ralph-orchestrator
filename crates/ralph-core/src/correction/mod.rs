@@ -403,44 +403,25 @@ impl CorrectionContext {
     /// fallback / diagnosis-fallback).  Entries with
     /// `target_hat == Some(other)` are skipped — they stay in
     /// the queue until the right hat builds its prompt.
+    ///
+    /// **U2 (AA2) — canonicalization**: empty string, case mismatch,
+    /// and whitespace mismatch are all normalised away so that a
+    /// target-hat specification never orphans an entry permanently.
     pub fn visible_to(&self, current_hat_id: &str) -> bool {
-        match &self.target_hat {
-            None => true,
-            Some(target) => target == current_hat_id,
+        let target = match &self.target_hat {
+            None => return true,
+            Some(t) => t,
+        };
+        let normalized_target = target.trim().to_lowercase();
+        if normalized_target.is_empty() {
+            return true;
         }
+        normalized_target == current_hat_id.trim().to_lowercase()
     }
 
-    /// Render the `## ORCHESTRATOR CORRECTION` block for this
-    /// single entry.  Used by [`PromptContext::render_correction_block`].
-    ///
-    /// **P1-6 (2026-06-23-003 plan)**: `last_message` and `topic`
-    /// are escaped before being interpolated into the prompt.
-    /// Both fields originate from agent-controlled data (the
-    /// rejection's free-form violation text and the emitted topic
-    /// string), and a hostile or buggy hat can otherwise smuggle
-    /// `<!--` / `-->` comment delimiters or angle-bracketed
-    /// directives into the next agent's prompt. The escape is
-    /// HTML-entity style (`&lt;`, `&gt;`, `&amp;`) so the block
-    /// stays human-readable while closing the obvious prompt
-    /// injection vectors.
-    ///
-    /// **U1 (2026-08-06-001) — semantic / mechanical split.**
-    /// When `feedback_kind == Semantic`, the renderer MUST NOT
-    /// emit `expected_payload_template` / `required_fields`
-    /// (C1: no replacement payload for evidence-level rejections).
-    /// When `feedback_kind == Mechanical`, the existing schema
-    /// guidance stays.  `Unknown` keeps the legacy "all sections"
-    /// shape so existing callers keep working until U2 wires the
-    /// real split.  `evidence` (when present) is always rendered
-    /// after the basic fields.
-    pub fn render_block(&self) -> String {
-        // U3 (2026-07-23-002 plan, KTD3): route every agent-visible
-        // string through the shared `safe_display` API so a
-        // malicious or buggy `rule.message` cannot inject ANSI
-        // escapes, control chars, Markdown fence metacharacters, or
-        // zero-width characters that break the correction block's
-        // structural invariant. The `as_quoted_diagnostic` wrapper
-        // marks the value as data, not an instruction.
+    /// Render the opening lines: reason / stage / source-hat /
+    /// target-hat / topic / retry-count / retry-key / last-message.
+    fn render_header(&self) -> String {
         use crate::safe_display::{MAX_RULE_MESSAGE_BYTES, safe_display};
         let mut out = String::new();
         out.push_str(&format!(
@@ -468,133 +449,164 @@ impl CorrectionContext {
             "- Last message: {}\n",
             safe_display(&self.last_message, MAX_RULE_MESSAGE_BYTES).as_quoted_diagnostic()
         ));
-        // Feedback kind drives which optional sections render.  Semantic
-        // rejections suppress `allowed_topics` / `required_fields` /
-        // `expected_payload_template` (R3/C1: no replacement payload).
+        out
+    }
+
+    /// Render feedback-kind gated replacement sections
+    /// (allowed-topics / required-fields / expected-payload).
+    /// Semantic rejections suppress these (C1: no replacement payload).
+    fn render_feedback_kind_block(&self, out: &mut String) {
+        use crate::safe_display::{MAX_RULE_MESSAGE_BYTES, safe_display};
         let render_replacement = !matches!(self.feedback_kind, FeedbackKind::Semantic);
-        if render_replacement {
-            if !self.allowed_topics.is_empty() {
-                out.push_str(&format!(
-                    "- Allowed topics: {}\n",
-                    self.allowed_topics.join(", ")
-                ));
-            }
-            if !self.required_fields.is_empty() {
-                out.push_str(&format!(
-                    "- Required fields: {}\n",
-                    self.required_fields.join(", ")
-                ));
-            }
-            if !self.expected_payload_template.is_empty() {
-                out.push_str(&format!(
-                    "- Expected payload: {}\n",
-                    safe_display(&self.expected_payload_template, MAX_RULE_MESSAGE_BYTES)
-                        .as_quoted_diagnostic()
-                ));
-            }
+        if !render_replacement {
+            return;
         }
-        // Evidence-bound feedback (R1/R2/R5).  Rendered for both
-        // semantic and mechanical rejections when present.  Kept after
-        // the basic fields so the legacy prose shape stays intact for
-        // backward-compatible readers that ignore `evidence`.
-        if let Some(evidence) = &self.evidence {
-            if evidence.synthetic {
-                out.push_str(
-                    "- Evidence: gate_silent_or_ambiguous — observation unavailable; the precheck gate did not produce a fact-checked result; do not assume any checklist item was verified.\n",
-                );
-            } else if !evidence.observed.is_empty() {
-                let observed: Vec<String> = evidence
-                    .observed
-                    .iter()
-                    .map(|o| {
-                        format!(
-                            "{}={}",
-                            safe_display(&o.field, MAX_RULE_MESSAGE_BYTES)
-                                .as_quoted_diagnostic(),
-                            safe_display(
-                                &o.value.as_display_string(),
-                                MAX_OBSERVATION_VALUE_BYTES,
-                            )
-                            .as_quoted_diagnostic()
+        if !self.allowed_topics.is_empty() {
+            out.push_str(&format!("- Allowed topics: {}\n", self.allowed_topics.join(", ")));
+        }
+        if !self.required_fields.is_empty() {
+            out.push_str(&format!(
+                "- Required fields: {}\n",
+                self.required_fields.join(", ")
+            ));
+        }
+        if !self.expected_payload_template.is_empty() {
+            out.push_str(&format!(
+                "- Expected payload: {}\n",
+                safe_display(&self.expected_payload_template, MAX_RULE_MESSAGE_BYTES)
+                    .as_quoted_diagnostic()
+            ));
+        }
+    }
+
+    /// Render the four-branch evidence block (synthetic / observed /
+    /// invariant / proof).  Rendered for both semantic and mechanical
+    /// rejections when evidence is present.
+    fn render_structured_evidence(&self, out: &mut String) {
+        use crate::safe_display::{MAX_RULE_MESSAGE_BYTES, safe_display};
+        let Some(evidence) = &self.evidence else { return };
+        if evidence.synthetic {
+            out.push_str(
+                "- Evidence: gate_silent_or_ambiguous — observation unavailable; the precheck gate did not produce a fact-checked result; do not assume any checklist item was verified.\n",
+            );
+        } else if !evidence.observed.is_empty() {
+            let observed: Vec<String> = evidence
+                .observed
+                .iter()
+                .map(|o| {
+                    format!(
+                        "{}={}",
+                        safe_display(&o.field, MAX_RULE_MESSAGE_BYTES)
+                            .as_quoted_diagnostic(),
+                        safe_display(
+                            &o.value.as_display_string(),
+                            MAX_OBSERVATION_VALUE_BYTES,
                         )
-                    })
-                    .collect();
-                out.push_str(&format!("- Observed: {}\n", observed.join(", ")));
-            }
-            if !evidence.invariant.is_empty() {
-                out.push_str(&format!(
-                    "- Invariant: {}\n",
-                    safe_display(&evidence.invariant, MAX_RULE_MESSAGE_BYTES)
                         .as_quoted_diagnostic()
-                ));
-            }
-            if !evidence.proof.is_empty() {
-                out.push_str(&format!(
-                    "- Must re-prove: {}\n",
-                    safe_display(&evidence.proof, MAX_RULE_MESSAGE_BYTES).as_quoted_diagnostic()
-                ));
-            }
+                    )
+                })
+                .collect();
+            out.push_str(&format!("- Observed: {}\n", observed.join(", ")));
         }
+        if !evidence.invariant.is_empty() {
+            out.push_str(&format!(
+                "- Invariant: {}\n",
+                safe_display(&evidence.invariant, MAX_RULE_MESSAGE_BYTES)
+                    .as_quoted_diagnostic()
+            ));
+        }
+        if !evidence.proof.is_empty() {
+            out.push_str(&format!(
+                "- Must re-prove: {}\n",
+                safe_display(&evidence.proof, MAX_RULE_MESSAGE_BYTES).as_quoted_diagnostic()
+            ));
+        }
+    }
+
+    /// Render the 42-line anti-cheat recovery instruction block for
+    /// semantic rejections.  Returns `None` when `feedback_kind` is
+    /// not `Semantic`, so callers can gate unconditionally.
+    fn render_semantic_recovery_prose(&self) -> Option<String> {
+        if !matches!(self.feedback_kind, FeedbackKind::Semantic) {
+            return None;
+        }
+        Some(
+            "\n## Recovery instruction (semantic rejection)\n\n\
+             The gate rejected this event because the payload\n\
+             contradicted a fact in the artifact / test /\n\
+             verification step.  Recovering requires a real\n\
+             change in the underlying evidence, not a payload\n\
+             edit:\n\n\
+             1. Stop re-emitting the rejected topic on the\n\
+                same payload.  Re-emitting without changing\n\
+                the underlying fact will keep failing and\n\
+                will count against the retry budget.\n\
+             2. Re-read the observed values / violated\n\
+                invariant / required proof above.  These\n\
+                name the field(s) and the rule the gate\n\
+                enforces.  Do not infer the rule from the\n\
+                free-form message alone.\n\
+             3. Investigate the artifact, test, diff, task\n\
+                state, or any other evidence source that\n\
+                actually drives the rule.  When the gate\n\
+                marked itself silent or ambiguous\n\
+                (`gate_silent_or_ambiguous`), do not assume\n\
+                any checklist item passed — re-run the gate\n\
+                from scratch.\n\
+             4. Fix the root cause, rerun the necessary\n\
+                verification, then rebuild the payload from\n\
+                the new evidence.  Run `ralph emit <topic>\n\
+                --policy-check` before re-emitting to\n\
+                confirm the rule is satisfied.  Only after\n\
+                the policy-check passes should you emit\n\
+                the original `<topic>` once.\n\n\
+             Forbidden shortcuts (they will be rejected and\n\
+             will count as retries):\n\n\
+             - changing only the rejected field while the\n\
+               underlying artifact still contradicts it\n\
+             - copying the previously-rejected payload\n\
+             - inventing or paraphrasing a passing test,\n\
+               commit, or report to satisfy the gate\n\
+             - bypassing `ralph emit --policy-check`\n\
+             - treating the rejection as proof of success\n\
+               or as permission to re-emit the original\n\
+               payload\n"
+            .to_string(),
+        )
+    }
+
+    /// Render the `## ORCHESTRATOR CORRECTION` block for this
+    /// single entry.  Used by [`PromptContext::render_correction_block`].
+    ///
+    /// **P1-6 (2026-06-23-003 plan)**: `last_message` and `topic`
+    /// are escaped before being interpolated into the prompt.
+    /// Both fields originate from agent-controlled data (the
+    /// rejection's free-form violation text and the emitted topic
+    /// string), and a hostile or buggy hat can otherwise smuggle
+    /// `<!--` / `-->` comment delimiters or angle-bracketed
+    /// directives into the next agent's prompt. The escape is
+    /// HTML-entity style (`&lt;`, `&gt;`, `&amp;`) so the block
+    /// stays human-readable while closing the obvious prompt
+    /// injection vectors.
+    ///
+    /// **U1 (2026-08-06-001) — semantic / mechanical split.**
+    /// When `feedback_kind == Semantic`, the renderer MUST NOT
+    /// emit `expected_payload_template` / `required_fields`
+    /// (C1: no replacement payload for evidence-level rejections).
+    /// When `feedback_kind == Mechanical`, the existing schema
+    /// guidance stays.  `Unknown` keeps the legacy "all sections"
+    /// shape so existing callers keep working until U2 wires the
+    /// real split.  `evidence` (when present) is always rendered
+    /// after the basic fields.
+    pub fn render_block(&self) -> String {
+        let mut out = self.render_header();
+        self.render_feedback_kind_block(&mut out);
+        self.render_structured_evidence(&mut out);
         if self.needs_escalation {
             out.push_str("- ESCALATION: retry budget exhausted; await human guidance\n");
         }
-        // U3 (plan 2026-08-06-001, R2/R3/R9): semantic
-        // rejections carry an anti-cheat recovery instruction
-        // block so the hat cannot satisfy the gate by simply
-        // mutating the rejected fields.  Mechanical rejections
-        // keep the existing schema-repair contract (allowed
-        // topics / required fields / expected payload) which
-        // already constrains the agent to the schema view; we
-        // do not duplicate that contract here.
-        //
-        // The instruction is written as agent-facing prose
-        // (no internal ledger / function-name leakage, per the
-        // project-wide guide rules) and is structured around
-        // four observable actions the hat must take before
-        // re-emitting the original topic.
-        if matches!(self.feedback_kind, FeedbackKind::Semantic) {
-            out.push_str(
-                "\n## Recovery instruction (semantic rejection)\n\n\
-                 The gate rejected this event because the payload\n\
-                 contradicted a fact in the artifact / test /\n\
-                 verification step.  Recovering requires a real\n\
-                 change in the underlying evidence, not a payload\n\
-                 edit:\n\n\
-                 1. Stop re-emitting the rejected topic on the\n\
-                    same payload.  Re-emitting without changing\n\
-                    the underlying fact will keep failing and\n\
-                    will count against the retry budget.\n\
-                 2. Re-read the observed values / violated\n\
-                    invariant / required proof above.  These\n\
-                    name the field(s) and the rule the gate\n\
-                    enforces.  Do not infer the rule from the\n\
-                    free-form message alone.\n\
-                 3. Investigate the artifact, test, diff, task\n\
-                    state, or any other evidence source that\n\
-                    actually drives the rule.  When the gate\n\
-                    marked itself silent or ambiguous\n\
-                    (`gate_silent_or_ambiguous`), do not assume\n\
-                    any checklist item passed — re-run the gate\n\
-                    from scratch.\n\
-                 4. Fix the root cause, rerun the necessary\n\
-                    verification, then rebuild the payload from\n\
-                    the new evidence.  Run `ralph emit <topic>\n\
-                    --policy-check` before re-emitting to\n\
-                    confirm the rule is satisfied.  Only after\n\
-                    the policy-check passes should you emit\n\
-                    the original `<topic>` once.\n\n\
-                 Forbidden shortcuts (they will be rejected and\n\
-                 will count as retries):\n\n\
-                 - changing only the rejected field while the\n\
-                   underlying artifact still contradicts it\n\
-                 - copying the previously-rejected payload\n\
-                 - inventing or paraphrasing a passing test,\n\
-                   commit, or report to satisfy the gate\n\
-                 - bypassing `ralph emit --policy-check`\n\
-                 - treating the rejection as proof of success\n\
-                   or as permission to re-emit the original\n\
-                   payload\n",
-            );
+        if let Some(prose) = self.render_semantic_recovery_prose() {
+            out.push_str(&prose);
         }
         out
     }
@@ -874,9 +886,34 @@ impl PartialEq for PromptContext {
 impl PromptContext {
     /// Push a correction entry.  Sorts after insertion so the
     /// rendered prompt is deterministic.
+    ///
+    /// **U2 (AC4)**: after the stable sort, the entry just pushed
+    /// must be at the tail of its `(retry_key, topic)` group.
+    /// Callers that upgrade the entry rely on `rfind` landing on
+    /// the freshly-pushed instance, not an older one with the same
+    /// key.
     pub fn push_correction(&mut self, ctx: CorrectionContext) {
         self.correction_blocks.push(ctx);
         self.sort_corrections();
+        // U2 (AC4): after stable-sort by retry_key, the entry at the
+        // tail of the vec is the one just pushed (stable sort preserves
+        // insertion order among equals).  rfind at call sites lands on
+        // this tail entry.  The assertion verifies the tail entry's
+        // (retry_key, topic) match what was pushed — if the sort
+        // ever reorder the tail behind a same-key different-topic
+        // entry, the assertion fires.
+        if let Some(pushed) = self.correction_blocks.last() {
+            let key = pushed.retry_key.clone();
+            let topic = pushed.topic.clone();
+            debug_assert!(
+                self.correction_blocks
+                    .last()
+                    .map(|e| e.retry_key == key && e.topic == topic)
+                    .unwrap_or(false),
+                "push_correction: tail entry for (retry_key={}, topic={}) does not match the pushed entry",
+                key, topic
+            );
+        }
     }
 
     fn sort_corrections(&mut self) {
@@ -1229,6 +1266,135 @@ mod tests {
         counter.reset("a");
         assert_eq!(counter.get("a"), 0);
     }
+
+    // ─────────────────────────────────────────────────────────────────
+    // U2 — visible_to canonicalization tests (AA2)
+    // ─────────────────────────────────────────────────────────────────
+
+    /// Minimal context for `visible_to` tests — only `target_hat` is
+    /// meaningful; all other fields are set to harmless placeholders.
+    fn visible_to_test_ctx(target_hat: Option<&str>) -> CorrectionContext {
+        CorrectionContext {
+            target_hat: target_hat.map(str::to_owned),
+            reason_code: "test".into(),
+            stage: "test".into(),
+            topic: "T".into(),
+            source_hat: None,
+            retry_key: "K".into(),
+            retry_count: 0,
+            escalation_threshold: 3,
+            needs_escalation: false,
+            last_message: "".into(),
+            expected_payload_template: "".into(),
+            allowed_topics: vec![],
+            required_fields: vec![],
+            feedback_kind: FeedbackKind::Unknown,
+            evidence: None,
+        }
+    }
+
+    /// Empty string target_hat is canonicalized to None → visible to
+    /// any hat.
+    #[test]
+    fn visible_to_orphans_on_empty_target() {
+        let ctx = visible_to_test_ctx(Some(""));
+        // Canonicalized empty string treated as None → visible to all
+        assert!(
+            ctx.visible_to("executor"),
+            "empty target_hat should be canonicalized to None → visible to all"
+        );
+    }
+
+    /// Case mismatch is canonicalized away.
+    #[test]
+    fn visible_to_canonicalizes_case() {
+        let ctx = visible_to_test_ctx(Some("Executor"));
+        assert!(
+            ctx.visible_to("executor"),
+            "\"Executor\" should match \"executor\" after canonicalization"
+        );
+    }
+
+    /// Trailing whitespace is stripped.
+    #[test]
+    fn visible_to_canonicalizes_whitespace() {
+        let ctx = visible_to_test_ctx(Some("executor "));
+        assert!(
+            ctx.visible_to("executor"),
+            "\"executor \" should match \"executor\" after stripping whitespace"
+        );
+    }
+
+    /// Both sides are trimmed + lowercased; mismatched whitespace +
+    /// case together still resolves correctly.
+    #[test]
+    fn visible_to_canonicalizes_case_and_whitespace() {
+        let ctx = visible_to_test_ctx(Some(" EXECUTOR "));
+        assert!(
+            ctx.visible_to("  executor  "),
+            "\" EXECUTOR \" should match \"  executor  \" after full canonicalization"
+        );
+    }
+
+    // ─────────────────────────────────────────────────────────────────
+    // U2 — push_correction + find-by-(retry_key, topic) invariant (AC4)
+    // ─────────────────────────────────────────────────────────────────
+
+    /// Minimal context for `push_correction` tests.
+    fn push_correction_test_ctx(retry_key: &str, topic: &str, target_hat: &str) -> CorrectionContext {
+        CorrectionContext {
+            retry_key: retry_key.into(),
+            topic: topic.into(),
+            target_hat: Some(target_hat.into()),
+            reason_code: "test".into(),
+            stage: "test".into(),
+            source_hat: None,
+            retry_count: 0,
+            escalation_threshold: 3,
+            needs_escalation: false,
+            last_message: "".into(),
+            expected_payload_template: "".into(),
+            allowed_topics: vec![],
+            required_fields: vec![],
+            feedback_kind: FeedbackKind::Unknown,
+            evidence: None,
+        }
+    }
+
+    /// When two entries share the same (retry_key, topic), the LAST
+    /// one in the sorted vec is the freshly-pushed one, and rfind
+    /// must return it (not the older entry).
+    #[test]
+    fn push_correction_upgrade_returns_freshly_pushed() {
+        let mut ctx = PromptContext::default();
+
+        // Push entry A — older entry for (K, T)
+        ctx.push_correction(push_correction_test_ctx("K", "T", "executor"));
+
+        // Push entry B — newer entry for the same (K, T)
+        // After sort_by(retry_key), both have retry_key="K", so stable
+        // sort preserves insertion order: A stays at index 0, B at index 1.
+        // rfind (from back) must therefore land on B.
+        ctx.push_correction(push_correction_test_ctx("K", "T", "reviewer"));
+
+        // rfind from the back returns the freshly-pushed entry
+        let found = ctx
+            .correction_blocks
+            .iter_mut()
+            .rfind(|c| c.retry_key == "K" && c.topic == "T");
+        assert!(
+            found.is_some(),
+            "rfind should locate an entry for (K, T)"
+        );
+        let found = found.unwrap();
+        assert_eq!(
+            found.target_hat.as_deref(),
+            Some("reviewer"),
+            "rfind from back should return the freshly-pushed entry, not the older one"
+        );
+    }
+
+    // ─────────────────────────────────────────────────────────────────
 
     #[test]
     fn correction_block_renders_known_sections() {

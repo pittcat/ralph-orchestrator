@@ -144,11 +144,13 @@ pub fn publish_correction_via_context(
         // pushed with the upgraded one.  Same retry_key, same
         // position — semantic + evidence replace the legacy
         // mechanical place-holder.
+        // U2 (AC4): use rfind so we always upgrade the freshly-pushed
+        // entry even when multiple entries share the same (retry_key, topic).
         if let Some(last) = state
             .prompt_context
             .correction_blocks
             .iter_mut()
-            .find(|c| c.retry_key == ctx.retry_key && c.topic == ctx.topic)
+            .rfind(|c| c.retry_key == ctx.retry_key && c.topic == ctx.topic)
         {
             *last = ctx.clone();
         }
