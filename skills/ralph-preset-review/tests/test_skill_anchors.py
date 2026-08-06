@@ -39,6 +39,17 @@ ANCHORS: tuple[tuple[str, str], ...] = (
     ("skills/ralph-preset-review/SKILL.md", "Key-stage event gate audit"),
     ("skills/ralph-preset-author/references/finding-rubric.md", "Key-stage event gate finding_id"),
     ("skills/ralph-preset-review/references/finding-rubric.md", "Key-stage event gate finding_id"),
+    # Evidence-bound correction anchors (plan 2026-08-06-001 U4). Both author
+    # and review must have the four evidence-bound finding IDs documented
+    # in finding-rubric.md, patterns.md, prompt-visibility.md, commands.md.
+    ("skills/ralph-preset-author/references/finding-rubric.md", "evidence_bound_missing_invariant"),
+    ("skills/ralph-preset-review/references/finding-rubric.md", "evidence_bound_missing_invariant"),
+    ("skills/ralph-preset-author/references/patterns.md", "Evidence-bound correction pattern"),
+    ("skills/ralph-preset-review/references/patterns.md", "Evidence-bound correction pattern"),
+    ("skills/ralph-preset-author/references/prompt-visibility.md", "evidence-bound"),
+    ("skills/ralph-preset-review/references/prompt-visibility.md", "evidence-bound"),
+    ("skills/ralph-preset-author/references/commands.md", "evidence-bound"),
+    ("skills/ralph-preset-review/references/commands.md", "evidence-bound"),
 )
 
 # Capability-triggered fixtures from plan 2026-08-02-001 U3.
@@ -61,6 +72,13 @@ CAPABILITY_FIXTURES: tuple[tuple[str, str], ...] = (
     (
         "terminal-ownership-negative-fixture.yml",
         "preset.auditor_multi_terminal_publisher",
+    ),
+    # Evidence-bound correction fixtures from plan 2026-08-06-001 U4.
+    # Each entry advertises the primary review-only finding id the
+    # fixture is meant to anchor.
+    (
+        "evidence-bound-negative-fixture.yml",
+        "evidence_bound_missing_invariant",
     ),
     # Key-stage event gate fixtures from plan 2026-08-05-007.
     # Each entry advertises the primary review-only finding id the
@@ -174,6 +192,7 @@ def _capability_fixture_results() -> Iterable[tuple[str, bool]]:
         yield f"fixture_present:{filename}", _check_fixture_present(
             fixtures_dir, filename, finding_id
         )
+    yield from _evidence_bound_results(fixtures_dir)
     yield from _key_stage_event_gate_results(fixtures_dir)
 
 
@@ -268,6 +287,94 @@ def _key_stage_findings(fixture: Path) -> set[str]:
     ):
         findings.add("preset.key_stage_event_gate_notes_preset_diverge")
     return findings
+
+
+def _evidence_bound_findings(fixture: Path) -> set[str]:
+    """Detect evidence-bound correction anti-patterns in a fixture.
+
+    Returns a set of finding IDs (subset of the four evidence-bound IDs).
+    """
+    preset = yaml.safe_load(_read(fixture))
+    assert isinstance(preset, dict)
+
+    findings: set[str] = set()
+    event_policy = preset.get("event_policy", {})
+    assert isinstance(event_policy, dict)
+    schemas = event_policy.get("schemas", {})
+    assert isinstance(schemas, dict)
+
+    # Check each schema for correction/feedback topics with semantic rejection shape.
+    for topic, schema in schemas.items():
+        if not isinstance(schema, dict):
+            continue
+        required = schema.get("required_fields", [])
+        known = schema.get("known_fields", [])
+        all_fields = set(required) | set(known)
+
+        # (a) missing_invariant: schema has correction-like fields but no violated_invariant
+        if topic.startswith("correction") or "feedback" in topic:
+            has_evidence_fields = any(
+                f in all_fields
+                for f in ("observed", "required_proof", "violated_invariant")
+            )
+            if has_evidence_fields and "violated_invariant" not in all_fields:
+                findings.add("evidence_bound_missing_invariant")
+            # (b) replacement_payload: schema allows replacement fields on semantic rejection
+            if "replacement" in all_fields or "suggested_payload" in all_fields:
+                findings.add("evidence_bound_replacement_payload")
+            # (c) no_target: schema lacks target_hat for routing
+            if "target_hat" not in all_fields:
+                findings.add("evidence_bound_no_target")
+
+    # (d) unbounded_retry: event_loop.max_iterations exists without evidence progression
+    event_loop = preset.get("event_loop", {})
+    assert isinstance(event_loop, dict)
+    if event_loop.get("max_iterations") is not None:
+        # No evidence progression mechanism if there is no per-iteration
+        # evidence uniqueness constraint declared anywhere in the preset.
+        # Simple proxy: max_iterations is set AND there is no
+        # event_loop.precheck.rules or payload_consistency rule that ties
+        # retry to new evidence.
+        precheck = event_loop.get("precheck", {})
+        payload_rules = (
+            event_policy.get("payload_consistency", {}).get("rules") or []
+        )
+        has_evidence_gate = (
+            isinstance(precheck, dict) and precheck.get("rules")
+        ) or bool(payload_rules)
+        if not has_evidence_gate:
+            findings.add("evidence_bound_unbounded_retry")
+
+    return findings
+
+
+def _evidence_bound_results(
+    fixtures_dir: Path,
+) -> Iterable[tuple[str, bool]]:
+    """Yield test results for evidence-bound correction fixture findings."""
+    filename = "evidence-bound-negative-fixture.yml"
+    fixture_path = fixtures_dir / filename
+    if not fixture_path.is_file():
+        print(f"MISSING evidence-bound fixture: {fixture_path}")
+        yield "evidence_bound_findings:fixture_present", False
+        return
+
+    expected_findings = {
+        "evidence_bound_missing_invariant",
+        "evidence_bound_replacement_payload",
+        "evidence_bound_no_target",
+        "evidence_bound_unbounded_retry",
+    }
+    actual = _evidence_bound_findings(fixture_path)
+    match = actual == expected_findings
+    yield f"evidence_bound_findings:{filename}", match
+    if not match:
+        print(
+            f"FAIL evidence-bound findings {filename}: "
+            f"expected={sorted(expected_findings)!r} actual={sorted(actual)!r}"
+        )
+    else:
+        print(f"OK evidence-bound findings {filename}: {sorted(actual)!r}")
 
 
 def _key_stage_event_gate_results(fixtures_dir: Path) -> Iterable[tuple[str, bool]]:

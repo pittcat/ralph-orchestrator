@@ -70,3 +70,5 @@ ralph -c ./local.yml inspect prompt --hat worker --format json
 | `ralph-run-diagnosis` | 怀疑「agent 看不到某 skill」对账 | 跑 `inspect prompt` 对账 `ralph tools skill list` |
 
 更细的 audit 规程见 `references/agent-skill-audit.md`（U10，弹窗默认不审 data/*.md，仅选审时跑）。
+
+<!-- anchor: evidence-bound -->

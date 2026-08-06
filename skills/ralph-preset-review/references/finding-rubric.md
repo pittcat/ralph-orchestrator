@@ -405,3 +405,14 @@ fixture README §8、fixture 顶部注释与本表 ID 一一对应；review 命�
 |---|---|---|---|
 | `preset.capability_discovery_missing` | preset exercises a capability not covered in `preset-author-notes.md` | P1 | 60 |
 | `preset.review_evidence_coverage_gap` | review lacks evidence path to capability audit | P1 | 60 |
+
+### Evidence-bound correction finding_id（review-only，plan 2026-08-06-001 U4）
+
+按 R10 surface 补充的 review-only finding。**这些 ID 不会出现在 `ralph preset check --format json`**——evidence-bound correction 依赖语义级校验（`violated_invariant` / `target_hat` / 有界 retry vs 无界循环），机械 lint 无法从 YAML 形状判断，必须靠 reviewer 在 Payload Audit + Q4 校验独立审。
+
+| finding_id（裸 ID / JSON 不出现） | default_severity | default_confidence | aaf_question | category | 含义 |
+|---|---|---|---|---|---|
+| `evidence_bound_missing_invariant` | P1 | 85 | Q4 | payload-content | review-only；semantic rejection 的 `correction` payload 缺少 `violated_invariant` 字段，agent 无法定位哪个不变量被违反 |
+| `evidence_bound_replacement_payload` | P0 | 90 | Q4 | payload-content | review-only；semantic rejection 的 `correction` payload 含 `replacement` / `suggested_payload` 等替代语义字段，违反「语义拒绝不得含修复建议」契约 |
+| `evidence_bound_no_target` | P1 | 85 | Q4 | topology | review-only；semantic rejection 缺少 `target_hat` 字段，bounded retry 机制无法路由到正确的重试目标 |
+| `evidence_bound_unbounded_retry` | P1 | 85 | Q4 | feasibility | review-only；preset 的 correction / retry 循环没有 evidence progression check（每次重试都应提供新的 `violated_invariant` / `observed`），构成无界重试循环 |

@@ -172,7 +172,7 @@ JSON 输出结构：
 <!-- anchor: artifact-first -->
 <!-- anchor: payload-consistency -->
 <!-- anchor: trigger-context -->
-<!-- anchor: key-stage-event-gate -->
+<!-- anchor: key-stage-event-gate --><!-- anchor: evidence-bound -->
 
 ## Wave 子命令
 

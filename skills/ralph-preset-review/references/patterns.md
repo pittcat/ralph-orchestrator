@@ -226,6 +226,20 @@ work.done / fix.done
   - 若存在临时资源 cleanup hat，则 failure topic 先进入 cleanup，再由
     cleanup 的收敛 topic 唤醒报告/终态收敛 owner；不要让两个 owner 竞争同一资源。
 
+<!-- anchor: evidence-bound -->
+## Evidence-bound correction pattern（plan 2026-08-06-001 U4）
+
+适用于所有使用 evidence-bound correction / semantic rejection 的 preset（通过 `ralph emit --policy-check` 返回 `reason_code: semantic_gate_violation` + `gate` 字段触发）。reviewer 在 Payload Audit 阶段按以下四条检查：
+
+**Anchor（patterns.md）**：`evidence_bound_missing_invariant` / `evidence_bound_replacement_payload` / `evidence_bound_no_target` / `evidence_bound_unbounded_retry`
+
+- `evidence_bound_missing_invariant`：semantic rejection 的 `correction` payload 必须包含 `violated_invariant` 字段，说明哪个业务不变量被违反；缺失则 agent 无法自修复
+- `evidence_bound_replacement_payload`：semantic rejection **禁止**携带 `replacement` / `suggested_payload` / `fix_suggestion` 等替代语义字段——此类字段属于 `correction.replacement` 而非 `correction.evidence`，会混淆 semantic vs mechanical rejection 语义
+- `evidence_bound_no_target`：semantic rejection 的 `correction` payload 必须包含 `target_hat` 字段，使 bounded retry 机制能路由到正确的重试目标；缺失则 retry 无法定位
+- `evidence_bound_unbounded_retry`：preset 的 correction / retry 循环必须包含 evidence progression check（每次重试的 `violated_invariant` / `observed` 必须与前一次不同），否则构成无界重试循环
+
+四条 finding 均 review-only，不进 `ralph preset check` JSON；触发条件是 `correction` payload 形状 + 语义，不是 preset 名称。fixture 顶部注释与 `skills/ralph-preset-review/fixtures/README.md` §8 标注 anti-pattern 轴、expected finding id 与本表对照命中。
+
 ## Key-stage event gate pattern
 
 Reviewer 先按 topology capability 独立重建关键位置，再对照 notes 的 `key_stage`、`guard_selection`、两个 guard 布尔值、各自 retry budget、`reason` 和 `confirmation_status`。不得把 Gate Scope 的 `hard/record/off` 或 `ralph emit --policy-check` 当作 `event_loop.precheck` 的替代；notes 与实际 YAML 不一致时报告 review-only finding。
