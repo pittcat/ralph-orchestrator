@@ -2682,6 +2682,7 @@ hats:
                 field: "depth".to_string(),
             },
             message: "Missing required field: depth".to_string(),
+            evidence: None,
         },
         reason_class: None,
     };
@@ -2843,6 +2844,7 @@ hats:
                 field: "depth".to_string(),
             },
             message: "Missing required field: depth".to_string(),
+            evidence: None,
         },
         reason_class: None,
     };

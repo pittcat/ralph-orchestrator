@@ -190,6 +190,7 @@ fn plan_gate_finding(topic: &str, reason: &str) -> PolicyFinding {
             "{reason}: cannot emit '{topic}' until review-synthesizer terminal \
              (review.passed or review.complete with pass verdict) for this step"
         ),
+        evidence: None,
     }
 }
 
@@ -305,6 +306,7 @@ impl ReviewStepTracker {
                     state.dimensions_received.len(),
                     state.wave_expected
                 ),
+                evidence: None,
             });
         }
 
@@ -322,6 +324,7 @@ impl ReviewStepTracker {
                 },
                 message: "aggregate_timeout skip_reason is reserved for review-synthesizer"
                     .to_string(),
+                evidence: None,
             });
         }
 
@@ -1001,6 +1004,7 @@ mod tests {
                 value: serde_json::Value::String("not_an_allowed_value".to_string()),
             },
             message: "Field 'skip_reason' has invalid value \"not_an_allowed_value\".".to_string(),
+            evidence: None,
         };
         // Schema-derived `InvalidFieldValue` MUST remain
         // non-recoverable so the U6 `PayloadContractViolation`

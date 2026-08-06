@@ -1,0 +1,137 @@
+# evidence_bound_correction_payload_consistency
+#
+# Plan 2026-08-06-001 U5 (S1 / S2 / S7 / S8): real EventLoop
+# scenario proving the evidence-bound correction loop.
+#
+# Topology (abstract fixture — no builtin preset binding):
+#   fixer --(fix.done)--> finisher --(LOOP_COMPLETE)-->
+#
+# Gate: payload_consistency on `fix.done` rejects when
+# review_verdict=blocked ∧ fixes_applied=0 ∧ fix_status=applied.
+#
+# Iterations:
+#   1: fixer emits a self-contradictory fix.done → gate rejects.
+#      The correction block queued for the next prompt must
+#      carry:
+#        * FeedbackKind::Semantic (no replacement guidance),
+#        * observed facts for review_verdict / fixes_applied
+#          / fix_status so the hat can re-investigate without
+#          re-parsing the rejected payload,
+#        * invariant = the rule.message (verbatim),
+#        * required proof = "rebuild from artifact + rerun
+#          `ralph emit --policy-check`",
+#        * the anti-cheat `## Recovery instruction` block
+#          forbids payload-only mutations.
+#   2: fixer reads the evidence and emits a CONSISTENT
+#      payload (fixes_applied=1). The gate accepts it,
+#      finisher wakes, LOOP_COMPLETE is honored. Retry key
+#      resets.
+#
+# This pins the S1 (semantic rejection exposes the violated
+# invariant) + S2 (correction prompt requires evidence
+# re-check) + S7 (repaired event accepted) + S8 (no false
+# success) parts of the global BDD.
+
+name: evidence_bound_correction_payload_consistency
+description: evidence-bound semantic correction loop — reject, retry, repair, accept
+
+config:
+  prompt_file: PROMPT.md
+  max_iterations: 4
+  hats:
+    fixer:
+      subscribes_to:
+        - task.start
+        - task.resume
+      publishes:
+        - fix.done
+      default_publishes: fix.done
+    finisher:
+      subscribes_to:
+        - fix.done
+      publishes:
+        - LOOP_COMPLETE
+      default_publishes: LOOP_COMPLETE
+  event_loop:
+    execution_mode: isolated
+    starting_event: "task.start"
+    completion_promise: "LOOP_COMPLETE"
+    event_policy:
+      enabled: true
+      mode: enforce
+      on_violation: reject_with_resume
+      payload_consistency:
+        enabled: true
+        rules:
+          - id: fix-done-no-fixes
+            topic: fix.done
+            when:
+              all:
+                - field: review_verdict
+                  eq: blocked
+                - field: fixes_applied
+                  eq: 0
+                - field: fix_status
+                  eq: applied
+            message: "fix_status=applied is inconsistent with review_verdict=blocked and zero fixes"
+
+mock_responses:
+  # iter 1: self-contradictory fix.done — gate rejects and
+  # queues an evidence-bound correction block (semantic +
+  # observed + invariant + proof + anti-cheat recovery
+  # instruction).
+  - hat: fixer
+    text: |
+      <event topic="fix.done">
+      {"review_verdict":"blocked","fixes_applied":0,"fix_status":"applied"}
+      </event>
+  # iter 2: same payload again — proves S8: changing only the
+  # field without changing the underlying evidence is rejected
+  # (no false success, no accepted fix.done, no LOOP_COMPLETE).
+  - hat: fixer
+    text: |
+      <event topic="fix.done">
+      {"review_verdict":"blocked","fixes_applied":0,"fix_status":"applied"}
+      </event>
+  # iter 3: real fix landed (fixes_applied=1). Gate accepts.
+  # Downstream finisher wakes.
+  - hat: fixer
+    text: |
+      <event topic="fix.done">
+      {"review_verdict":"blocked","fixes_applied":1,"fix_status":"applied"}
+      </event>
+  # iter 4: finisher honors the completion promise.
+  - hat: finisher
+    text: |
+      <event topic="LOOP_COMPLETE">
+      {"reason":"fix verified consistent"}
+      </event>
+
+expected:
+  iterations: 4
+  # Only the consistent fix.done (iter 3) is accepted. The two
+  # rejected iterations never reach the bus.
+  events:
+    - topic: fix.done
+      payload_contains:
+        fixes_applied: 1
+  absent_events:
+    - topic: plan.blocked
+  completion: true
+  assert_state:
+    # After the first rejection the correction block carries
+    # the structured evidence (S1 + S2):
+    #   * reason_code is policy: prefixed (engine gate is
+    #     routed via the deterministic-correction contract),
+    #   * observed / invariant are populated
+    #     (no replacement guidance — semantic path).
+    - at_iteration: 1
+      correction_block_present:
+        reason_code_prefix: "policy:"
+        needs_escalation: false
+        evidence_observed_contains:
+          - review_verdict
+          - fixes_applied
+          - fix_status
+        evidence_invariant_contains: "inconsistent"
+        feedback_kind: "semantic"

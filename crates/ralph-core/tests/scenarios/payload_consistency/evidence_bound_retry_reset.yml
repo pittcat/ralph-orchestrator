@@ -1,0 +1,143 @@
+# evidence_bound_retry_reset
+#
+# Plan 2026-08-06-001 U5 (S4): real EventLoop scenario proving
+# retry_count resets when a correction is accepted (the rejection
+# key is cleared from the ledger so the next rejection of the same
+# topic starts from retry_count=0).
+#
+# Topology (same as evidence_bound_correction):
+#   fixer --(fix.done)--> finisher --(LOOP_COMPLETE)->
+#
+# Gate: payload_consistency on `fix.done` rejects when
+# review_verdict=blocked ∧ fixes_applied=0 ∧ fix_status=applied.
+#
+# Iterations:
+#   1: fixer emits contradictory fix.done → gate rejects.
+#      retry_count=0 (first attempt on this key).
+#   2: fixer lands a real fix (fixes_applied=1) → accepted.
+#      The correction for this key is cleared; retry_count
+#      ledger entry for this key is removed.
+#   3: fixer backslides and re-emits the OLD contradictory payload.
+#      This is a NEW rejection on the same topic/key — the ledger
+#      shows no prior rejection for this key, so retry_count=0 again.
+#      Gate rejects; correction re-queued with retry_count=0.
+#   4: fixer still hasn't fixed — rejected again, retry_count=1.
+#   5: max_iterations exhausted → plan.blocked.
+#
+# This pins S4: acceptance clears the retry counter; a fresh
+# rejection of the same topic starts at retry_count=0.
+
+name: evidence_bound_retry_reset
+description: evidence-bound correction — retry_count resets after accepted fix, fresh rejection starts at 0 (S4)
+
+config:
+  prompt_file: PROMPT.md
+  max_iterations: 5
+  hats:
+    fixer:
+      subscribes_to:
+        - task.start
+        - task.resume
+      publishes:
+        - fix.done
+      default_publishes: fix.done
+    finisher:
+      subscribes_to:
+        - fix.done
+      publishes:
+        - LOOP_COMPLETE
+      default_publishes: LOOP_COMPLETE
+  event_loop:
+    execution_mode: isolated
+    starting_event: "task.start"
+    completion_promise: "LOOP_COMPLETE"
+    event_policy:
+      enabled: true
+      mode: enforce
+      on_violation: reject_with_resume
+      payload_consistency:
+        enabled: true
+        rules:
+          - id: fix-done-no-fixes
+            topic: fix.done
+            when:
+              all:
+                - field: review_verdict
+                  eq: blocked
+                - field: fixes_applied
+                  eq: 0
+                - field: fix_status
+                  eq: applied
+            message: "fix_status=applied is inconsistent with review_verdict=blocked and zero fixes"
+
+mock_responses:
+  # iter 1: first contradictory fix.done — retry_count=0 (new key)
+  - hat: fixer
+    text: |
+      <event topic="fix.done">
+      {"review_verdict":"blocked","fixes_applied":0,"fix_status":"applied"}
+      </event>
+  # iter 2: real fix landed — payload is now consistent → accepted.
+  # Correction ledger entry for this key is cleared.
+  - hat: fixer
+    text: |
+      <event topic="fix.done">
+      {"review_verdict":"blocked","fixes_applied":1,"fix_status":"applied"}
+      </event>
+  # iter 3: fixer backslides and re-emits the OLD contradictory payload.
+  # This is a FRESH rejection on the same topic — retry_count resets to 0.
+  - hat: fixer
+    text: |
+      <event topic="fix.done">
+      {"review_verdict":"blocked","fixes_applied":0,"fix_status":"applied"}
+      </event>
+  # iter 4: still not fixed — retry_count=1 now
+  - hat: fixer
+    text: |
+      <event topic="fix.done">
+      {"review_verdict":"blocked","fixes_applied":0,"fix_status":"applied"}
+      </event>
+  # iter 5: max_iterations exhausted → plan.blocked
+  - hat: fixer
+    text: |
+      <event topic="fix.done">
+      {"review_verdict":"blocked","fixes_applied":0,"fix_status":"applied"}
+      </event>
+
+expected:
+  iterations: 5
+  events:
+    # iter 2's consistent fix.done is the only accepted event
+    - topic: fix.done
+  absent_events:
+    - topic: LOOP_COMPLETE
+  completion: false
+  assert_state:
+    # iter 1: first rejection queues a semantic correction block
+    # with structured evidence (S4 setup: ledger has 1 entry for
+    # this retry_key).
+    - at_iteration: 1
+      correction_block_present:
+        reason_code_prefix: "policy:"
+        needs_escalation: false
+        feedback_kind: "semantic"
+        evidence_observed_contains:
+          - review_verdict
+          - fixes_applied
+          - fix_status
+        evidence_invariant_contains: "inconsistent"
+    # iter 3: after the iter 2 acceptance, the next rejection
+    # queues a FRESH correction block (S4 contract: the ledger
+    # entry was cleared on acceptance, so the rejection is
+    # treated as the first attempt on this retry_key — the
+    # correction block is structurally identical to iter 1).
+    - at_iteration: 3
+      correction_block_present:
+        reason_code_prefix: "policy:"
+        needs_escalation: false
+        feedback_kind: "semantic"
+        evidence_observed_contains:
+          - review_verdict
+          - fixes_applied
+          - fix_status
+        evidence_invariant_contains: "inconsistent"

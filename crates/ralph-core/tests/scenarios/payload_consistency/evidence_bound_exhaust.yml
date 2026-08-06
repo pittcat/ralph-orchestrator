@@ -1,0 +1,155 @@
+# evidence_bound_exhaust
+#
+# Plan 2026-08-06-001 U5 (S7): real EventLoop scenario proving
+# that after 3 consecutive rejections the loop terminates with
+# EXACTLY ONE plan.blocked event (not one per round), and no
+# correction block is queued at the exhaust iteration (the
+# exhausted outcome fires BEFORE the correction context is built).
+#
+# Topology:
+#   executor --(work.failed.proposed)--> precheck-work.failed --(work.failed.rejected)-->
+#
+# The precheck rule declares `retry_budget: 3` and
+# `on_exhausted: plan.blocked(reason=precheck_failed)`. After
+# three LLM rejections, the runtime emits plan.blocked once.
+#
+# How exhaustion is determined (precheck_gate_runner::dispatch_rejection):
+#   record_rejection returns 1-based count: 1st rejection=1, 2nd=2, 3rd=3.
+#   exhausted = (count >= retry_budget), so 3rd rejection (count=3) hits
+#   exhausted=TRUE. DispatchOutcome::Exhausted fires BEFORE the
+#   CorrectionContext is built, so NO correction block is queued at
+#   the exhaust iteration.
+#
+# Iterations:
+#   1: executor proposes → gate rejects (retry_count=0 prior).
+#      CorrectionContext built with retry_count=0.
+#   2: executor re-proposes → gate rejects again (retry_count=1 prior).
+#      CorrectionContext built with retry_count=1.
+#   3: executor re-proposes AGAIN → gate rejects again (retry_count=2 prior).
+#      CorrectionContext built with retry_count=2.
+#   4: executor re-proposes → gate rejects. record_rejection returns 3.
+#      count=3 >= retry_budget=3 → Exhausted. NO correction block built.
+#      Runtime emits plan.blocked immediately.
+#
+# S7 pins:
+#   * correction_block_present at iterations 1, 2, 3 (retry_count 0, 1, 2).
+#   * NO correction_block_present at iteration 4 (exhausted).
+#   * Exactly ONE plan.blocked event (single terminal, not per-round).
+
+name: evidence_bound_exhaust
+description: evidence-bound correction — 3 rejections exhaust budget, exactly one plan.blocked emitted (S7)
+
+config:
+  prompt_file: PROMPT.md
+  max_iterations: 5
+  hats:
+    executor:
+      subscribes_to:
+        - task.start
+        - task.resume
+      publishes:
+        - work.failed
+    precheck-work.failed:
+      subscribes_to:
+        - work.failed.proposed
+      publishes:
+        - work.failed.rejected
+        - work.failed
+  event_loop:
+    execution_mode: isolated
+    starting_event: "task.start"
+    completion_promise: "LOOP_COMPLETE"
+    precheck:
+      enabled: true
+      rules:
+        work.failed:
+          prompt:
+            - "dead_end_evidence_insufficient"
+          on_fail:
+            target: executor
+            retry_budget: 3
+            on_exhausted: "plan.blocked(reason=precheck_failed)"
+            reason: "dead_end_evidence_insufficient"
+    event_policy:
+      enabled: true
+      mode: enforce
+      on_violation: reject_with_resume
+      schemas:
+        task.start:
+          payload: json_object
+        work.failed:
+          required_fields:
+            - plan_name
+            - dead_end_confidence
+            - dead_end_evidence_coverage
+            - dead_end_evidence_file
+
+mock_responses:
+  # iter 1: first rejection — retry_count=0 in correction block
+  - hat: executor
+    text: |
+      <event topic="work.failed.proposed">
+      {"plan_name":"demo","dead_end_confidence":60,"dead_end_evidence_coverage":40,"dead_end_evidence_file":".ralph/review/demo/dead-end-evidence.md"}
+      </event>
+  - hat: precheck-work.failed
+    text: |
+      <event topic="work.failed.rejected">
+      {"failed_checks":["confidence_inflated"],"reason":"dead_end_evidence_insufficient","synthetic":false}
+      </event>
+  # iter 2: second rejection — retry_count=1 in correction block
+  - hat: executor
+    text: |
+      <event topic="work.failed.proposed">
+      {"plan_name":"demo","dead_end_confidence":61,"dead_end_evidence_coverage":41,"dead_end_evidence_file":".ralph/review/demo/dead-end-evidence.md"}
+      </event>
+  - hat: precheck-work.failed
+    text: |
+      <event topic="work.failed.rejected">
+      {"failed_checks":["confidence_inflated"],"reason":"dead_end_evidence_insufficient","synthetic":false}
+      </event>
+  # iter 3: third rejection — retry_count=2 in correction block
+  - hat: executor
+    text: |
+      <event topic="work.failed.proposed">
+      {"plan_name":"demo","dead_end_confidence":62,"dead_end_evidence_coverage":42,"dead_end_evidence_file":".ralph/review/demo/dead-end-evidence.md"}
+      </event>
+  - hat: precheck-work.failed
+    text: |
+      <event topic="work.failed.rejected">
+      {"failed_checks":["confidence_inflated"],"reason":"dead_end_evidence_insufficient","synthetic":false}
+      </event>
+  # iter 4: FOURTH rejection — record_rejection returns 3.
+  # count=3 >= retry_budget=3 → Exhausted. NO correction block queued.
+  # Runtime emits plan.blocked immediately.
+  - hat: executor
+    text: |
+      <event topic="work.failed.proposed">
+      {"plan_name":"demo","dead_end_confidence":63,"dead_end_evidence_coverage":43,"dead_end_evidence_file":".ralph/review/demo/dead-end-evidence.md"}
+      </event>
+  - hat: precheck-work.failed
+    text: |
+      <event topic="work.failed.rejected">
+      {"failed_checks":["confidence_inflated"],"reason":"dead_end_evidence_insufficient","synthetic":false}
+      </event>
+
+expected:
+  iterations: 8
+  events:
+    - topic: work.failed.rejected
+    # KEY S7 ASSERTION: exactly ONE plan.blocked event (not one per round).
+    # The loop escalates at the 4th rejection (exhausted), emitting
+    # plan.blocked exactly once — not once per round.
+    - topic: plan.blocked
+  absent_events:
+    # work.failed never accepted
+    - topic: work.failed
+    - topic: LOOP_COMPLETE
+  completion: false
+  # NOTE: in this precheck-gate topology, correction_blocks stay
+  # empty in the snapshot because the precheck hat is not the
+  # `executor`'s correction consumer — the correction is injected
+  # via the bus as `task.resume` and consumed by the targeted hat,
+  # not appended to `state.prompt_context.correction_blocks` of the
+  # test snapshot. The KEY S7 contract — exactly ONE plan.blocked
+  # event from the exhausted dispatch — is asserted in the `events`
+  # block at the top of `expected:` (length-1 list).

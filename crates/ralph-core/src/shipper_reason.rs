@@ -162,6 +162,7 @@ pub fn check_review_complete_shipper_routing(
                  pass_or_fail=pass is forbidden after plan.blocked(reason='{blocked_reason}'); \
                  route to pass_or_fail=fail"
             ),
+            evidence: None,
         });
     }
     None

@@ -585,6 +585,9 @@ fn preview_json_roundtrip_with_all_fields() {
             expected_payload_template: "{}".to_string(),
             allowed_topics: vec!["work.ready".to_string()],
             required_fields: vec!["task_key".to_string()],
+            target_hat: None,
+            feedback_kind: crate::correction::FeedbackKind::Mechanical,
+            evidence: None,
         }),
         skill_gates: Some(SkillGateFlags {
             tasks_enabled: true,

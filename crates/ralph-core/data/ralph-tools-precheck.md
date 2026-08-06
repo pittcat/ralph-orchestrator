@@ -68,6 +68,9 @@ metadata:
 
 - 仍按原 topic 名 emit（例如 `ralph emit review.complete ...`）。脱糖后实际写入的是 `review.complete.proposed`。
 - 收到 `task.resume`（precheck 打回）后：读 payload 里的 `failed_checks` / `reason`，针对检查点修改产物，**再 emit 同一业务 topic**；不要手 emit `*.proposed`。
+
+**证据优先恢复**：precheck 打回时 runtime 注入的纠正上下文是「证据约束的纠错反馈」，**不是**成功模板。读 `## ORCHESTRATOR CORRECTION` 块里语义条目（`feedback_kind: semantic`）的 `- Observed:` / `- Invariant:` / `- Must re-prove:` / `- Target hat:`；synthetic 标记（`gate_silent_or_ambiguous`）说明 gate 没产出 fact-checked 结果，**不要假设**任何检查项被验证过。禁动作：只改 `failed_checks` 列出的项；复制上次 payload 重发；伪造测试 / 报告 / 提交 / 计数器；绕过 `ralph emit --policy-check`；把拒收当成功证据。恢复路径：开 artifact → 修根因 → 重跑 gate 涉及的所有验证 → 由新证据重建 payload → 先 `ralph emit <topic> --policy-check` 通过 → 再正式 emit。
+
 - `retry_budget`（再试上限）默认 3：连续被拒会打回 producer；耗尽后 loop 发 `plan.blocked(reason=precheck_failed)`，**不要**自己重开 loop 或绕过 gate。
 
 ---
@@ -99,6 +102,7 @@ RALPH_PRECHECK_MODE=off ralph run ...
 - ❌ 与 `ralph emit --policy-check` 混淆 — policy 失败在正式 emit 前（`--policy-check` 本身不写盘）；precheck 失败在 gate hat 轮次
 - ❌ 收到 protocol correction 后跳过 `--policy-check` 直接真实 emit — precheck 失败则本 activation 不得继续写盘 emit
 - ❌ 同类 protocol violation 无限自由 retry — 第二次同类违规 runtime 阻塞 loop（见 `ralph-tools-recovery-directives` Correction 优先级）
+- ❌ 只改 `failed_checks` 中列出的字段、复制上次 payload、伪造 checklist 通过的产物 — precheck 打回是**证据约束**而非 schema 修复；只改 payload 字段不能通过下一轮，必须重做底层工作
 
 ---
 

@@ -1,0 +1,62 @@
+# AAF + payload-content negative fixture — NOT a builtin preset. For ralph-preset-review acceptance only.
+#
+# Anti-pattern axes (plan 2026-08-06-001 U4 — Evidence-bound correction R10 surface):
+#   (a) semantic rejection missing `violated_invariant` field
+#       → evidence_bound_missing_invariant
+#   (b) semantic rejection carries `replacement` / `suggested_payload` (semantic must be empty)
+#       → evidence_bound_replacement_payload
+#   (c) semantic rejection missing `target_hat` for bounded retry routing
+#       → evidence_bound_no_target
+#   (d) correction/retry loop has no evidence progression check (unbounded retry)
+#       → evidence_bound_unbounded_retry
+event_loop:
+  execution_mode: isolated
+  starting_event: work.start
+  completion_promise: work.done
+  max_iterations: 10
+event_policy:
+  enabled: true
+  schemas:
+    work.done:
+      required_fields: [task_id, status]
+      known_fields: [fixes_applied, regressions]
+    correction.feedback:
+      required_fields: [task_id, feedback_kind, reason_code]
+      known_fields: [observed, required_proof, replacement]
+hats:
+  worker:
+    name: Worker
+    description: Does work and emits correction feedback.
+    triggers:
+      - work.start
+    publishes:
+      - work.progress
+      - correction.feedback
+    instructions: |
+      ## WORKER MODE
+
+      When you receive work.start, attempt to emit `work.progress`.
+      If the work does not meet invariants, emit `correction.feedback` with
+      feedback_kind=semantic but WITHOUT the violated_invariant field.
+
+      Do NOT include a target_hat field in the correction payload.
+      Do NOT suggest a replacement payload — just reject.
+    terminal_events:
+      - work.progress
+      - correction.feedback
+  retry-handler:
+    name: RetryHandler
+    description: Handles bounded retry for semantic corrections.
+    triggers:
+      - correction.feedback
+    publishes:
+      - work.done
+    instructions: |
+      ## RETRY HANDLER MODE
+
+      On receiving correction.feedback with feedback_kind=semantic,
+      attempt to retry the work. The preset has max_iterations=10 but
+      NO evidence progression check — every retry attempt uses the same
+      violated_invariant value, so evidence never advances.
+    terminal_events:
+      - work.done

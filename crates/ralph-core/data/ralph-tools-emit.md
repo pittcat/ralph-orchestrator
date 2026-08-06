@@ -95,15 +95,24 @@ ralph emit --schema work.done | jq -r .protocol_hash   # 改后
 | `suggested_command` | 修完 payload 后直接可重跑的 `ralph emit <topic> --policy-check -j '<shape>'` 命令 |
 | `gate` | 当 `reason_code` 是 `semantic_gate_violation` 时，此字段携带触发的 gate 标识（如 `payload_consistency:<rule_id>` 或 `review_passed_while_wave_open`）；其它 `reason_code` 下此字段省略 |
 | `referenced_fields` | 当 `gate` 是 `payload_consistency:*` 时，此字段是该规则 `when` 谓词声明的所有 payload 字段路径数组（按声明顺序去重）；agent 应检查这些字段的值是否互相矛盾。timing/state gate（如 `review_passed_while_wave_open`）下此字段为空数组。其它 `reason_code` 下此字段省略 |
+| `observed` | 当该拒绝是**证据约束**（semantic）时携带的字段观察值数组，每个元素是 `{field, value}`；`value` 是 JSON 序列化的标量/对象，或字面量 `unavailable`（evaluator 无法安全表达）、`unchecked`（precheck gate silent/ambiguous）。机械 schema 错误下此字段省略 |
+| `invariant` | 当该拒绝是**证据约束**（semantic）时携带的违反规则文本（稳定字符串，等价 `rule.message`），与 `message` 解耦便于程序化匹配；机械错误下此字段省略 |
+| `required_proof` | 当该拒绝是**证据约束**（semantic）时携带的"必须重新证明的条件"（例如"由 artifact 重建 payload 并重跑 `ralph emit --policy-check`"），是 agent 在下次 emit 前必须满足的客观状态；机械错误下此字段省略 |
+
+**语义 vs 机械分型**：
+
+- `reason_code` 是 `missing_required_field` / `invalid_field_value` / `payload_type_mismatch` / `invalid_topic_format` / `topic_denied` / `payload_type_mismatch` 等「字段级 schema」错误 → **机械路径**，可读 `field` / `expected` / `actual` / `suggested_*`；改正 schema 后重发。
+- `reason_code` 是 `semantic_gate_violation`（payload consistency / precheck evidence 等）→ **语义路径**，`observed` / `invariant` / `required_proof` 才出现，**不会**出现 `suggested_payload_shape` / `suggested_command`（gate 不替你决定业务值）。
+- 两种路径不互通：`suggested_*` 是 schema 修复提示，**不是** semantic 路径的成功模板；`observed` / `invariant` / `required_proof` 是事实证据，**不是** schema 替换。
 
 **Agent 流程**：
 
 1. 读 prompt 中的 schema-aware publish section，按 `field_docs` 填 payload。
 2. 跑 `ralph emit <topic> --policy-check -j '<payload>'` 预检。
 3. 拒收时先看 `reason_code`：
-   - 若是 `semantic_gate_violation`：读 `gate` 判断是哪类 gate，再读 `referenced_fields` 确定要检查哪些 payload 字段。
-   - 其它 `reason_code`：读 `field` / `expected` / `actual` / `field_description` / `suggested_payload_shape` / `suggested_command`。
-4. 修 payload（**只**改提示的字段；**不要**复制旧 payload 重新猜字段名；**不要**从 `message` 里解析字段名）。
+   - 若是 `semantic_gate_violation`：读 `gate` 判断是哪类 gate，再读 `referenced_fields` / `observed` / `invariant` / `required_proof` 确定要检查哪些 payload 字段、它们当前值是什么、被破坏了哪条规则。**禁止**只改 `referenced_fields` 列出的字段；必须打开 artifact / 测试 / 验证状态做真实修改，重跑必要验证后再重建 payload 并 `--policy-check` 一次。
+   - 若是 `missing_required_field` / `invalid_field_value` / `payload_type_mismatch` 等机械 schema 错误：读 `field` / `expected` / `actual` / `field_description` / `suggested_payload_shape` / `suggested_command`，改完后重跑 `--policy-check`。
+4. **禁止动作**（semantic + mechanical 通用）：复制上一次被拒 payload 重发；伪造测试结果、commit、report、计数器；绕过 `--policy-check` 直接 emit；从 `message` 字符串里解析字段名；把拒收信息当成功证据。
 5. 再跑 `--policy-check`；通过后去掉 `--policy-check` 正式 emit。
 6. 如果同一 hat / topic 反复触发同一类协议违规，runtime 可能阻塞 loop；不要无限重试。
 

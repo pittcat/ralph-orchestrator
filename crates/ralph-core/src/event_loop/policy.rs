@@ -121,13 +121,40 @@ pub fn publish_correction_via_context(
     // the next `build_prompt` call. Workspace path is read from the
     // LoopState config — the emitter needs `.ralph/` under the workspace.
     let workspace_root: Option<std::path::PathBuf> = None; // workspace is recorded via ledger path; emit_correction_context only uses it for recovery.jsonl, which is optional.
-    let ctx = crate::correction::emit_correction_context(
+    let mut ctx = crate::correction::emit_correction_context(
         ledger.as_deref_mut(),
         &rejection,
         retry_count,
         workspace_root.as_deref(),
         &mut state.prompt_context,
     );
+    // U2 (plan 2026-08-06-001, R1/R2/R5): when the policy
+    // finding carries structured evidence, promote the
+    // resulting CorrectionContext to a `Semantic` rejection
+    // (no replacement payload) and attach the evidence so the
+    // renderer surfaces observed facts / violated invariant /
+    // required proof verbatim.  Mechanical and legacy findings
+    // (`evidence = None`) keep the existing rendering path.
+    if let Some(finding) = policy_finding
+        && let Some(evidence) = finding.evidence.as_ref()
+    {
+        ctx = ctx.with_feedback_kind(crate::correction::FeedbackKind::Semantic);
+        ctx = ctx.with_evidence(evidence.clone());
+        // Replace the entry `emit_correction_context` just
+        // pushed with the upgraded one.  Same retry_key, same
+        // position — semantic + evidence replace the legacy
+        // mechanical place-holder.
+        // U2 (AC4): use rfind so we always upgrade the freshly-pushed
+        // entry even when multiple entries share the same (retry_key, topic).
+        if let Some(last) = state
+            .prompt_context
+            .correction_blocks
+            .iter_mut()
+            .rfind(|c| c.retry_key == ctx.retry_key && c.topic == ctx.topic)
+        {
+            *last = ctx.clone();
+        }
+    }
     tracing::info!(
         retry_key = %ctx.retry_key,
         topic = %ctx.topic,
