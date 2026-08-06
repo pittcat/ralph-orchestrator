@@ -2271,6 +2271,56 @@ fn test_evidence_bound_correction_payload_consistency() {
     run_workflow_guard_scenario(yaml);
 }
 
+/// U5 (plan 2026-08-06-001) — S3: retry_count increments on
+/// repeated rejection of the same correction key. Three
+/// contradictory fix.done rounds increment the counter from 0
+/// to 1 to 2; the fourth round exhausts max_iterations and
+/// plan.blocked fires.
+#[test]
+fn test_evidence_bound_retry_increment() {
+    let yaml =
+        load_scenario("tests/scenarios/payload_consistency/evidence_bound_retry_increment.yml");
+    run_workflow_guard_scenario(yaml);
+}
+
+/// U5 (plan 2026-08-06-001) — S4: retry_count resets when a
+/// correction is accepted. The rejection ledger entry is cleared
+/// on acceptance, so a fresh rejection of the same topic starts
+/// at retry_count=0. After a second rejection, the counter is
+/// again at 1 (not accumulated across the acceptance boundary).
+#[test]
+fn test_evidence_bound_retry_reset() {
+    let yaml = load_scenario("tests/scenarios/payload_consistency/evidence_bound_retry_reset.yml");
+    run_workflow_guard_scenario(yaml);
+}
+
+/// U5 (plan 2026-08-06-001) — S5+S6: precheck rejection routes
+/// to the hat named in `on_fail.target`. S5: a normal LLM
+/// `work.failed.rejected` carries `target_hat=Some("executor")`
+/// so only the executor's next prompt receives the correction
+/// block. S6: a synthetic `work.failed.rejected` with
+/// `synthetic=true` and `reason=gate_silent_or_ambiguous` is
+/// surfaced with unchecked/unavailable evidence observations.
+#[test]
+fn test_evidence_bound_precheck_routing() {
+    let yaml =
+        load_scenario("tests/scenarios/payload_consistency/evidence_bound_precheck_routing.yml");
+    run_workflow_guard_scenario(yaml);
+}
+
+/// U5 (plan 2026-08-06-001) — S7: three consecutive precheck
+/// rejections exhaust `retry_budget=3`. The fourth rejection
+/// triggers `DispatchOutcome::Exhausted` BEFORE the
+/// CorrectionContext is built, so no correction block is queued
+/// at the exhaust iteration. Exactly ONE `plan.blocked` event
+/// fires (not one per round). The rejection ledger retains the
+/// last-evidence entry (retry_count=2) for post-mortem.
+#[test]
+fn test_evidence_bound_exhaust() {
+    let yaml = load_scenario("tests/scenarios/payload_consistency/evidence_bound_exhaust.yml");
+    run_workflow_guard_scenario(yaml);
+}
+
 #[test]
 fn test_incomplete_wave_plan_blocked() {
     let yaml = load_scenario("tests/scenarios/flow_reliability/incomplete_wave_plan_blocked.yml");

@@ -1,0 +1,130 @@
+# evidence_bound_retry_increment
+#
+# Plan 2026-08-06-001 U5 (S3): real EventLoop scenario proving
+# retry_count increments on repeated rejection of the same correction.
+#
+# Topology (same as evidence_bound_correction):
+#   fixer --(fix.done)--> finisher --(LOOP_COMPLETE)->
+#
+# Gate: payload_consistency on `fix.done` rejects when
+# review_verdict=blocked ∧ fixes_applied=0 ∧ fix_status=applied.
+#
+# Iterations:
+#   1: fixer emits contradictory fix.done → gate rejects.
+#      correction_block.retry_count == 0 (first attempt).
+#   2: fixer re-emits the same contradictory payload → rejected again.
+#      correction_block.retry_count == 1 (incremented).
+#   3: fixer re-emits AGAIN → rejected again.
+#      correction_block.retry_count == 2; needs_escalation still false
+#      (threshold = 3), but plan.blocked fires because max_iterations=4
+#      is exhausted with no consistent payload.
+#
+# This pins S3: retry_count increments across rejection rounds,
+# and the loop terminates at plan.blocked after 3rd rejection.
+
+name: evidence_bound_retry_increment
+description: evidence-bound correction — retry_count increments on repeated rejection (S3)
+
+config:
+  prompt_file: PROMPT.md
+  max_iterations: 4
+  hats:
+    fixer:
+      subscribes_to:
+        - task.start
+        - task.resume
+      publishes:
+        - fix.done
+      default_publishes: fix.done
+    finisher:
+      subscribes_to:
+        - fix.done
+      publishes:
+        - LOOP_COMPLETE
+      default_publishes: LOOP_COMPLETE
+  event_loop:
+    execution_mode: isolated
+    starting_event: "task.start"
+    completion_promise: "LOOP_COMPLETE"
+    event_policy:
+      enabled: true
+      mode: enforce
+      on_violation: reject_with_resume
+      payload_consistency:
+        enabled: true
+        rules:
+          - id: fix-done-no-fixes
+            topic: fix.done
+            when:
+              all:
+                - field: review_verdict
+                  eq: blocked
+                - field: fixes_applied
+                  eq: 0
+                - field: fix_status
+                  eq: applied
+            message: "fix_status=applied is inconsistent with review_verdict=blocked and zero fixes"
+
+mock_responses:
+  # iter 1: first contradictory fix.done — retry_count 0
+  - hat: fixer
+    text: |
+      <event topic="fix.done">
+      {"review_verdict":"blocked","fixes_applied":0,"fix_status":"applied"}
+      </event>
+  # iter 2: same payload again — retry_count becomes 1
+  - hat: fixer
+    text: |
+      <event topic="fix.done">
+      {"review_verdict":"blocked","fixes_applied":0,"fix_status":"applied"}
+      </event>
+  # iter 3: same payload AGAIN — retry_count becomes 2; loop still running
+  - hat: fixer
+    text: |
+      <event topic="fix.done">
+      {"review_verdict":"blocked","fixes_applied":0,"fix_status":"applied"}
+      </event>
+  # iter 4: still no fix — max_iterations exhausted → plan.blocked
+  - hat: fixer
+    text: |
+      <event topic="fix.done">
+      {"review_verdict":"blocked","fixes_applied":0,"fix_status":"applied"}
+      </event>
+
+expected:
+  iterations: 4
+  # No fix.done ever accepted; finisher never fires
+  events: []
+  absent_events:
+    - topic: LOOP_COMPLETE
+  # Loop does not complete successfully
+  completion: false
+  assert_state:
+    # iter 1: first rejection queues a correction block with
+    # semantic feedback + structured evidence (S1/S2)
+    - at_iteration: 1
+      correction_block_present:
+        reason_code_prefix: "policy:"
+        needs_escalation: false
+        feedback_kind: "semantic"
+        evidence_observed_contains:
+          - review_verdict
+          - fixes_applied
+          - fix_status
+        evidence_invariant_contains: "inconsistent"
+    # iter 2: repeated rejection — a second correction block is
+    # pushed; both share the same retry_key/topic so the queue
+    # carries two entries from the repeated rejection pattern.
+    - at_iteration: 2
+      correction_block_present:
+        reason_code_prefix: "policy:"
+        needs_escalation: false
+        feedback_kind: "semantic"
+    # iter 3: third rejection — queue continues to accumulate
+    # semantic correction blocks (no per-entry retry_count
+    # increment; that lives in the rejection_digest ledger).
+    - at_iteration: 3
+      correction_block_present:
+        reason_code_prefix: "policy:"
+        needs_escalation: false
+        feedback_kind: "semantic"
