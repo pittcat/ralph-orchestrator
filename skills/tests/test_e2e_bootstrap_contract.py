@@ -83,7 +83,17 @@ def test_e2e_bootstrap_in_public_skills() -> None:
 
 def test_e2e_bootstrap_in_marketplace_manifest() -> None:
     data = json.loads(MARKETPLACE.read_text(encoding="utf-8"))
-    advertised = data["plugins"][0]["skills"]
+    # Name-based lookup — the marketplace carries multiple plugin
+    # entries (e.g. nowledge-mem-ralph), never assume plugins[0].
+    root_entries = [
+        plugin
+        for plugin in data["plugins"]
+        if plugin.get("name") == "ralph-orchestrator"
+    ]
+    assert len(root_entries) == 1, (
+        "marketplace must carry exactly one ralph-orchestrator entry"
+    )
+    advertised = root_entries[0]["skills"]
     assert "./skills/ralph-e2e-bootstrap" in advertised
 
 

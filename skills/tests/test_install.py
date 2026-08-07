@@ -49,13 +49,22 @@ TASK_DISCOVERY_AGENT_METADATA = TASK_DISCOVERY / "agents" / "openai.yaml"
 
 
 def _marketplace_skill_names() -> set[str]:
-    """Skill names advertised by the marketplace manifest (SSOT mirror)."""
+    """Skill names advertised by the root plugin entry (SSOT mirror).
+
+    Name-based lookup — the marketplace carries multiple plugin entries
+    (e.g. ``nowledge-mem-ralph``), so positional ``plugins[0]`` or a
+    cross-plugin skill union would conflate distinct plugins.
+    """
     data = json.loads(MARKETPLACE.read_text(encoding="utf-8"))
-    return {
-        Path(skill).name
+    entries = [
+        plugin
         for plugin in data.get("plugins", [])
-        for skill in plugin.get("skills", [])
-    }
+        if plugin.get("name") == "ralph-orchestrator"
+    ]
+    assert len(entries) == 1, (
+        "marketplace must carry exactly one ralph-orchestrator entry"
+    )
+    return {Path(skill).name for skill in entries[0].get("skills", [])}
 
 
 @pytest.fixture

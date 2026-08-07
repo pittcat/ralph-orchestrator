@@ -1,0 +1,105 @@
+# nowledge-mem-ralph — Ralph 项目专用只读 Nowledge Mem 插件
+
+本插件是 Ralph 项目环境专用的 Claude Code 插件，只提供**有界的只读查询**：
+memory search、status 检查，以及一个只读 `search-memory` skill。
+
+**不**包含任何 hooks，**不**自动保存 Claude 会话，**不**注入或读取 Working
+Memory，**不**承担 Thread create/append/distill 生命周期。设计与边界详见
+`.ralph/specs/nowledge-mem-ralph-plugin-design.md`（本仓库内）。
+
+## 插件选型
+
+| 场景 | 应使用的插件 | scope | 说明 |
+|---|---|---|---|
+| 人工交互 Claude Code 会话 | 通用插件 `nowledge-mem@nowledge-community` | `user` | 保留会话自动捕获等完整能力 |
+| Ralph 启动的 Claude Code child（target project） | 本插件 `nowledge-mem-ralph@ralph-orchestrator` | `project` | 只读查询，无自动写入 |
+
+Ralph 的 Claude adapter 只加载 `project,local` setting sources，不加载 user
+scope；因此 user 级通用插件不会被 Ralph child 看见，两者互不干扰。
+
+## 前置条件
+
+- 已安装 `claude` CLI（安装与 scope 操作必须）。
+- 已安装 `nmem` CLI 且 Nowledge Mem 服务可达（仅执行 search/status 查询时需要；
+  安装插件本身不需要）。
+
+## 安装（project scope，local marketplace）
+
+在 **target project 目录**下执行（`<repo-root>` 为 ralph-orchestrator 仓库的
+绝对路径）：
+
+```bash
+claude plugin marketplace add --scope project <repo-root>
+claude plugin install nowledge-mem-ralph@ralph-orchestrator --scope project
+```
+
+说明：
+
+- `marketplace add` 在该 project 已声明过本 marketplace 时可能返回非零，这是
+  可恢复的警告，可继续执行 install。
+- 安装只写入 target project 的 project scope；不会创建或改动任何 user scope
+  条目，也不会触碰其他 project。
+
+## 验证
+
+在 target project 目录下：
+
+```bash
+claude plugin list --json
+```
+
+确认存在一条满足以下全部条件的条目：
+
+- `id` 为 `nowledge-mem-ralph@ralph-orchestrator`
+- `scope` 为 `project`
+- `projectPath` 等于 target project 的绝对路径
+
+## 使用
+
+- `/nowledge-mem-ralph:search <query>` — 有界 memory search（最多 5 条，JSON）。
+  空查询会显示用法并停止，不调用 nmem。
+- `/nowledge-mem-ralph:status` — 只执行一次 `nmem --json status`；失败时原样
+  报告错误并停止。
+- `search-memory` skill — 供 agent 在确有需要时主动做同样的有界只读查询。
+- 仅当确需追溯原对话且 memory 结果不足时，才允许有界的
+  `nmem --json t search` / `nmem --json t show`（每次最多 8 条消息、每条最多
+  1200 字符，按需翻页）。
+
+## 无自动捕获保证
+
+- manifest 不声明任何 hooks，插件目录不含 `hooks/` 与任何可执行脚本。
+- SessionStart / Stop / SubagentStop / SessionEnd 等生命周期事件不会触发本插件
+  的任何动作。
+- 会话内容的保存与蒸馏由 Ralph 自己的 curation 流程负责（见适配计划），
+  不属于本插件。
+
+## nmem 排障
+
+- `nmem: command not found` — 安装 nmem CLI（如 `uv tool install nmem-cli`），
+  并确认 `~/.local/bin` 在 PATH 中。
+- 服务不可达 / 认证失败 — status 会原样报告错误；先让 Nowledge Mem 服务恢复
+  可用，再重试查询。插件不会用写命令或第二个子命令"自救"。
+- JSON 无法解析 — 视为故障，原样报告并停止。
+
+## 卸载
+
+在 target project 目录下：
+
+```bash
+claude plugin uninstall nowledge-mem-ralph@ralph-orchestrator --scope project --keep-data
+```
+
+`--keep-data` 保留插件持久数据目录；nmem 中的知识数据本身独立于插件，任何
+卸载都不会删除 nmem 数据。
+
+## 隐私
+
+- 插件只发起本地/已配置的 nmem JSON 查询，且有数量上限；不上传任何内容。
+- 不抓取 raw Claude 会话（通用插件的自动捕获路径在本插件中完全不存在）。
+- 查询结果中的历史内容按 Nowledge Mem 自身的访问控制处理。
+
+## 与 Ralph runtime 适配计划的关系
+
+本插件与 Ralph runtime 的 Nowledge 适配计划（检索注入、Thread 保存、distill）
+**相关但不依赖**：适配计划未实施时，本插件的安装、验证与全部查询能力照常可用；
+本插件不读取、不要求任何适配计划产物。

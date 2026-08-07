@@ -260,11 +260,21 @@ def test_e2e_sandbox_refuses_presets_write(tmp_path: Path) -> None:
 def test_e2e_catalog_lists_new_skill() -> None:
     """The catalog must list ``ralph-e2e-bootstrap`` as a public skill."""
     assert "ralph-e2e-bootstrap" in install.PUBLIC_SKILLS
-    # And the marketplace manifest must agree.
+    # And the marketplace manifest must agree — resolved by plugin name,
+    # never by positional plugins[0] (the marketplace carries multiple
+    # entries, e.g. nowledge-mem-ralph).
     marketplace = json.loads(
         (ROOT / ".claude-plugin" / "marketplace.json").read_text(encoding="utf-8")
     )
-    advertised = marketplace["plugins"][0]["skills"]
+    root_entries = [
+        plugin
+        for plugin in marketplace["plugins"]
+        if plugin.get("name") == "ralph-orchestrator"
+    ]
+    assert len(root_entries) == 1, (
+        "marketplace must carry exactly one ralph-orchestrator entry"
+    )
+    advertised = root_entries[0]["skills"]
     assert "./skills/ralph-e2e-bootstrap" in advertised
     # And the on-disk skill tree must have the SKILL.md plus
     # agents/openai.yaml anchor.

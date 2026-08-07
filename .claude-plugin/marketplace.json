@@ -21,6 +21,11 @@
         "./skills/ralph-run-diagnosis",
         "./skills/ralph-task-discovery"
       ]
+    },
+    {
+      "name": "nowledge-mem-ralph",
+      "description": "Ralph project-dedicated read-only Nowledge Mem plugin: bounded memory search and status checks, no hooks and no automatic session capture",
+      "source": "./plugins/nowledge-mem-ralph"
     }
   ]
 }
