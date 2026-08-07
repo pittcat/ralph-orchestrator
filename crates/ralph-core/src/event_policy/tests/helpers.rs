@@ -120,8 +120,6 @@ pub fn replay_and_validate(fixture: &str) -> (PolicyRuntimeState, PolicyDecision
     (state, decision)
 }
 
-
-
 pub fn review_dimension_ready_payload(plan: &str, step: &str, task: &str, dim: &str) -> String {
     format!(
         r#"{{"plan_name":"{plan}","step":"{step}","task_id":"{task}","dimension":"{dim}","wave_id":"w1"}}"#
@@ -146,11 +144,6 @@ pub fn review_dimension_failed_payload(dim: Option<&str>) -> String {
         None => r#"{"plan_name":"p1","step":"step-01","task_id":"t1"}"#.to_string(),
     }
 }
-
-
-
-
-
 
 pub fn full_payload() -> serde_json::Value {
     serde_json::json!({

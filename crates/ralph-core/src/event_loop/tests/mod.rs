@@ -178,17 +178,16 @@ mod u8_legacy_relocate_and_close;
 /// terminates the dispatcher.
 mod u9_verdict_legacy_retire;
 
-
 // U9 of plan 2026-08-05-001-refactor-large-file-module-split-plan: inline test mods extracted from event_loop/mod.rs.
 #[cfg(test)]
-mod u7_rejection_stale_characterization;
-#[cfg(test)]
-mod u4_current_plan_step_tests;
-#[cfg(test)]
-mod p0_4_flow_authority_ledger_tests;
-#[cfg(test)]
-mod hat_only_pipeline_tests;
+mod flow_authority_pf_declared_14step_tests;
 #[cfg(test)]
 mod flow_authority_pf_recovery_tests;
 #[cfg(test)]
-mod flow_authority_pf_declared_14step_tests;
+mod hat_only_pipeline_tests;
+#[cfg(test)]
+mod p0_4_flow_authority_ledger_tests;
+#[cfg(test)]
+mod u4_current_plan_step_tests;
+#[cfg(test)]
+mod u7_rejection_stale_characterization;
