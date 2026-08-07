@@ -1278,6 +1278,15 @@ impl U5RecordingBridge {
 }
 
 impl SupervisorBridge for U5RecordingBridge {
+    // 2026-08-07-009 plan U2 (R1 / KTD5): expose the store so the
+    // dispatcher's per-attempt begin/finish path can write
+    // receipts. Tests that do not override this get the trait
+    // default (None) which keeps receipt writes disabled —
+    // matching the pre-U2 contract.
+    fn store(&self) -> Option<std::sync::Arc<dyn SupervisorStore>> {
+        Some(self.store.clone())
+    }
+
     fn tick(
         &self,
         _wave_id: &str,

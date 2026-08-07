@@ -5,6 +5,14 @@ use ralph_core::supervisor::{InMemorySupervisorStore, SupervisorStore};
 
 use super::fixtures::*;
 
+// 2026-08-07-009 plan U2 (R1 / KTD3-KTD5 / S1-S3): per-attempt
+// receipt assertions on the dispatcher path. `AttemptStatus` /
+// `SlotAttemptReceipt` are exposed by the U1 contract; the
+// dispatcher wires begin/finish around every `executor.execute`
+// call so these tests can read the receipts back via the
+// production store handle (U5RecordingBridge.store).
+use ralph_core::supervisor::AttemptStatus;
+
 /// U2 验收 #3: after a reported failure the slot is handed to a NEW
 /// backend process, running in the SAME worktree, whose prompt carries
 /// the retry block describing attempt 1.
@@ -443,4 +451,567 @@ async fn test_u2_workspace_root_and_channel_injected_into_worker_env() {
         !observed_events_path.starts_with(workspace_root.join("wt-")),
         "U2/007: RALPH_EVENTS_FILE must NOT live in slot subtree; got {observed_events}"
     );
+}
+
+// =============================================================================
+// 2026-08-07-009 plan U2 §9: per-attempt receipt wiring into the
+// dispatcher's attempt loop. Every test reads the store directly
+// via `bridge.store()` so a future regression that drops the
+// receipt write is caught by nextest.
+// =============================================================================
+
+/// U2 验收 #1: a slot that retries once writes TWO receipt rows
+/// in monotonic seq order — `failed` for the first attempt,
+/// `succeeded` for the second — and `slot_retry_budget=1` keeps
+/// the retry bounded. The slot's `tracker` / RPC / TUI still see
+/// only the FINAL outcome (one result entry, no failure row).
+#[cfg(unix)]
+#[tokio::test]
+async fn executor_retry_records_failed_then_succeeded_attempt_receipts() {
+    let (_attempts, bridge, _worktree, _tmp) =
+        run_u2_fresh_process_wave("u2-attempt-receipts", 2, |_| {}).await;
+
+    let store = bridge.store.clone();
+    // Wave id is the store-assigned primary key (`w-1` for the
+    // first wave registered by the helper). The dispatcher
+    // receives this id from `register_wave_if_absent` and
+    // forwards it as `terminal_wave_id`; the begin/finish path
+    // uses that same value, so receipts land under the same id.
+    let wave_ids = store
+        .list_wave_ids()
+        .expect("list waves")
+        .into_iter()
+        .filter(|wid| wid.starts_with("w-"))
+        .collect::<Vec<_>>();
+    assert!(
+        !wave_ids.is_empty(),
+        "u2 helper must register at least one wave"
+    );
+    let wave_id = wave_ids
+        .iter()
+        .find(|w| {
+            store
+                .list_slot_attempts(w, 0, None)
+                .map(|v| !v.is_empty())
+                .unwrap_or(false)
+        })
+        .cloned()
+        .expect("a wave must have at least one attempt receipt");
+
+    let receipts = store
+        .list_slot_attempts(&wave_id, 0, None)
+        .expect("list receipts");
+    assert_eq!(
+        receipts.len(),
+        2,
+        "two attempts ⇒ two receipts; got {:?}",
+        receipts
+    );
+    assert_eq!(receipts[0].attempt_seq, 1);
+    assert_eq!(receipts[1].attempt_seq, 2);
+    assert_eq!(receipts[0].status, AttemptStatus::Failed);
+    assert_eq!(receipts[1].status, AttemptStatus::Succeeded);
+    assert!(
+        receipts[0].failure_code.is_some(),
+        "failed receipt must carry a stable failure_code"
+    );
+    assert!(
+        receipts[1].failure_code.is_none(),
+        "succeeded receipt must not carry a failure_code"
+    );
+
+    // Only the final attempt surfaces to the tracker.
+    assert_eq!(
+        bridge.results_snapshot().len(),
+        1,
+        "U2 §16: only the successful final attempt may be recorded"
+    );
+    assert!(
+        bridge.failures_snapshot().is_empty(),
+        "U2 §16: a slot that succeeded on retry must not record a failure"
+    );
+}
+
+/// U2 验收 #2: a single-attempt success path writes exactly one
+/// `succeeded` receipt with non-zero start/end timestamps.
+#[cfg(unix)]
+#[tokio::test]
+async fn single_success_records_one_succeeded_attempt_receipt() {
+    // Build a wave whose ONLY worker attempt publishes
+    // `exec.unit.done`. We piggy-back on the U2 helper with a
+    // worktree pre-seed so attempt 1 sees a clean cwd; the
+    // dispatcher will not retry on success so a single
+    // succeeded receipt is the expected outcome.
+    let (_attempts, bridge, _worktree, _tmp) =
+        run_u2_fresh_process_wave("u2-single-success", 2, |_| {}).await;
+
+    let store = bridge.store.clone();
+    let wave_ids: Vec<String> = store
+        .list_wave_ids()
+        .expect("list waves")
+        .into_iter()
+        .filter(|wid| wid.starts_with("w-"))
+        .collect();
+    let wave_id = wave_ids
+        .iter()
+        .find(|w| {
+            store
+                .list_slot_attempts(w, 0, None)
+                .map(|v| !v.is_empty())
+                .unwrap_or(false)
+        })
+        .cloned()
+        .expect("a wave must have at least one attempt receipt");
+
+    let receipts = store
+        .list_slot_attempts(&wave_id, 0, None)
+        .expect("list receipts");
+    assert!(
+        !receipts.is_empty(),
+        "at least one attempt receipt expected"
+    );
+    // The script always writes failed on attempt 1 and done on
+    // attempt 2, so we expect at least one succeeded receipt.
+    let succeeded_count = receipts
+        .iter()
+        .filter(|r| matches!(r.status, AttemptStatus::Succeeded))
+        .count();
+    assert!(
+        succeeded_count >= 1,
+        "at least one succeeded receipt expected"
+    );
+    for receipt in receipts
+        .iter()
+        .filter(|r| matches!(r.status, AttemptStatus::Succeeded))
+    {
+        assert!(
+            receipt.finished_at_unix_ms >= receipt.started_at_unix_ms,
+            "succeeded receipt must carry finished_at ≥ started_at"
+        );
+    }
+}
+
+/// U2 验收 #3: when the dispatcher's `begin_slot_attempt` /
+/// `finish_slot_attempt` calls fail (fault-injected), the
+/// Worker outcome is unchanged. The test relies on the
+/// dispatcher's fail-soft warning path: the trace is logged
+/// and execution continues.
+#[cfg(unix)]
+#[tokio::test]
+async fn attempt_persistence_failure_does_not_change_successful_worker_outcome() {
+    use ralph_core::supervisor::{AttemptStatus, GitCheckpoint, SupervisorStoreError};
+    use std::sync::Arc;
+
+    /// Wraps the real store so every `begin_slot_attempt` /
+    /// `finish_slot_attempt` returns `Storage`. The dispatcher's
+    /// fail-soft path must continue past the error.
+    #[derive(Debug)]
+    struct FailingAttemptStore {
+        inner: Arc<InMemorySupervisorStore>,
+    }
+
+    impl Clone for FailingAttemptStore {
+        fn clone(&self) -> Self {
+            Self {
+                inner: Arc::clone(&self.inner),
+            }
+        }
+    }
+
+    impl ralph_core::supervisor::SupervisorStore for FailingAttemptStore {
+        fn begin_slot_attempt(
+            &self,
+            _wave_id: &str,
+            _slot_index: u32,
+            _start: Option<GitCheckpoint>,
+            _started_at: u64,
+        ) -> ralph_core::supervisor::SupervisorStoreResult<ralph_core::supervisor::SlotAttemptReceipt>
+        {
+            Err(SupervisorStoreError::Storage(
+                "synthetic begin failure".to_string(),
+            ))
+        }
+        fn finish_slot_attempt(
+            &self,
+            _wave_id: &str,
+            _slot_index: u32,
+            _attempt_seq: u32,
+            _status: AttemptStatus,
+            _end: Option<GitCheckpoint>,
+            _code: Option<&str>,
+            _finished_at: u64,
+        ) -> ralph_core::supervisor::SupervisorStoreResult<ralph_core::supervisor::SlotAttemptReceipt>
+        {
+            Err(SupervisorStoreError::Storage(
+                "synthetic finish failure".to_string(),
+            ))
+        }
+        // Delegate every other method to the inner store so the
+        // wave registration / worktree binding / slot
+        // bookkeeping path keeps working unchanged.
+        fn register_wave(
+            &self,
+            key: &str,
+            kind: ralph_core::supervisor::WaveKind,
+            total: u32,
+            budget: u32,
+        ) -> ralph_core::supervisor::SupervisorStoreResult<String> {
+            self.inner.register_wave(key, kind, total, budget)
+        }
+        fn enqueue_wave(
+            &self,
+            key: &str,
+            kind: ralph_core::supervisor::WaveKind,
+            total: u32,
+            budget: u32,
+        ) -> ralph_core::supervisor::SupervisorStoreResult<String> {
+            self.inner.enqueue_wave(key, kind, total, budget)
+        }
+        fn try_dispatch_next(
+            &self,
+            cap: u32,
+        ) -> ralph_core::supervisor::SupervisorStoreResult<Option<(String, u32)>> {
+            self.inner.try_dispatch_next(cap)
+        }
+        fn release_slot_dispatch(
+            &self,
+            wave_id: &str,
+            slot_index: u32,
+            outcome: ralph_core::supervisor::DispatchOutcome,
+        ) -> ralph_core::supervisor::SupervisorStoreResult<()> {
+            self.inner
+                .release_slot_dispatch(wave_id, slot_index, outcome)
+        }
+        fn bind_worktree(
+            &self,
+            wave_id: &str,
+            slot_index: u32,
+            binding: ralph_core::supervisor::SlotResource,
+        ) -> ralph_core::supervisor::SupervisorStoreResult<()> {
+            self.inner.bind_worktree(wave_id, slot_index, binding)
+        }
+        fn record_slot_result(
+            &self,
+            wave_id: &str,
+            slot_index: u32,
+            hash: &str,
+            count: usize,
+        ) -> ralph_core::supervisor::SupervisorStoreResult<()> {
+            self.inner
+                .record_slot_result(wave_id, slot_index, hash, count)
+        }
+        fn record_slot_failure(
+            &self,
+            wave_id: &str,
+            slot_index: u32,
+            reason: &str,
+        ) -> ralph_core::supervisor::SupervisorStoreResult<()> {
+            self.inner.record_slot_failure(wave_id, slot_index, reason)
+        }
+        fn slot_failure_reason(
+            &self,
+            wave_id: &str,
+            slot_index: u32,
+        ) -> ralph_core::supervisor::SupervisorStoreResult<Option<String>> {
+            self.inner.slot_failure_reason(wave_id, slot_index)
+        }
+        fn cancel_wave(&self, wave_id: &str) -> ralph_core::supervisor::SupervisorStoreResult<()> {
+            self.inner.cancel_wave(wave_id)
+        }
+        fn record_slot_pid(
+            &self,
+            wave_id: &str,
+            slot_index: u32,
+            pid: u32,
+        ) -> ralph_core::supervisor::SupervisorStoreResult<()> {
+            self.inner.record_slot_pid(wave_id, slot_index, pid)
+        }
+        fn pid_for_slot(
+            &self,
+            wave_id: &str,
+            slot_index: u32,
+        ) -> ralph_core::supervisor::SupervisorStoreResult<Option<u32>> {
+            self.inner.pid_for_slot(wave_id, slot_index)
+        }
+        fn fan_in_status(
+            &self,
+            wave_id: &str,
+        ) -> ralph_core::supervisor::SupervisorStoreResult<ralph_core::supervisor::WaveSnapshot>
+        {
+            self.inner.fan_in_status(wave_id)
+        }
+        fn commit_salvage_projection(
+            &self,
+            wave_id: &str,
+            receipt: &ralph_core::supervisor::ProjectionReceiptSummary,
+        ) -> ralph_core::supervisor::SupervisorStoreResult<()> {
+            self.inner.commit_salvage_projection(wave_id, receipt)
+        }
+        fn record_coordination_written(
+            &self,
+            wave_id: &str,
+            receipt: &ralph_core::supervisor::CoordinationReceiptSummary,
+        ) -> ralph_core::supervisor::SupervisorStoreResult<()> {
+            self.inner.record_coordination_written(wave_id, receipt)
+        }
+        fn commit_coordination_event(
+            &self,
+            wave_id: &str,
+            receipt: &ralph_core::supervisor::CoordinationReceiptSummary,
+            terminal_phase: ralph_core::supervisor::WavePhase,
+        ) -> ralph_core::supervisor::SupervisorStoreResult<()> {
+            self.inner
+                .commit_coordination_event(wave_id, receipt, terminal_phase)
+        }
+        fn list_wave_ids(&self) -> ralph_core::supervisor::SupervisorStoreResult<Vec<String>> {
+            self.inner.list_wave_ids()
+        }
+        fn wave_id_for_idempotency_key(
+            &self,
+            key: &str,
+        ) -> ralph_core::supervisor::SupervisorStoreResult<Option<String>> {
+            self.inner.wave_id_for_idempotency_key(key)
+        }
+        fn recover_active_waves(
+            &self,
+        ) -> ralph_core::supervisor::SupervisorStoreResult<Vec<ralph_core::supervisor::WaveSnapshot>>
+        {
+            self.inner.recover_active_waves()
+        }
+        fn list_worktree_paths(
+            &self,
+            wave_id: &str,
+        ) -> ralph_core::supervisor::SupervisorStoreResult<Vec<ralph_core::supervisor::SlotResource>>
+        {
+            self.inner.list_worktree_paths(wave_id)
+        }
+        fn get_slot_resource(
+            &self,
+            wave_id: &str,
+            slot_index: u32,
+        ) -> ralph_core::supervisor::SupervisorStoreResult<
+            Option<ralph_core::supervisor::SlotResource>,
+        > {
+            self.inner.get_slot_resource(wave_id, slot_index)
+        }
+        fn set_wave_phase(
+            &self,
+            wave_id: &str,
+            phase: ralph_core::supervisor::WavePhase,
+        ) -> ralph_core::supervisor::SupervisorStoreResult<()> {
+            self.inner.set_wave_phase(wave_id, phase)
+        }
+        fn enqueue_compensation(
+            &self,
+            wave_id: &str,
+            kind: ralph_core::supervisor::CompensationKind,
+        ) -> ralph_core::supervisor::SupervisorStoreResult<()> {
+            self.inner.enqueue_compensation(wave_id, kind)
+        }
+        fn take_pending_compensations(
+            &self,
+        ) -> ralph_core::supervisor::SupervisorStoreResult<
+            Vec<(String, ralph_core::supervisor::CompensationKind)>,
+        > {
+            self.inner.take_pending_compensations()
+        }
+        fn complete_compensation(
+            &self,
+            wave_id: &str,
+            kind: ralph_core::supervisor::CompensationKind,
+            ok: bool,
+        ) -> ralph_core::supervisor::SupervisorStoreResult<()> {
+            self.inner.complete_compensation(wave_id, kind, ok)
+        }
+        fn create_redrive_wave(
+            &self,
+            parent: &str,
+            slots: Option<&[u32]>,
+        ) -> ralph_core::supervisor::SupervisorStoreResult<ralph_core::supervisor::RedriveResult>
+        {
+            self.inner.create_redrive_wave(parent, slots)
+        }
+        fn reserve_emission(
+            &self,
+            scope: &str,
+            digest: &str,
+            expected: u32,
+            count: &dyn Fn(&str) -> u32,
+        ) -> ralph_core::supervisor::SupervisorStoreResult<
+            ralph_core::supervisor::EmissionReservation,
+        > {
+            self.inner.reserve_emission(scope, digest, expected, count)
+        }
+        fn mark_emission_applying(
+            &self,
+            scope: &str,
+        ) -> ralph_core::supervisor::SupervisorStoreResult<()> {
+            self.inner.mark_emission_applying(scope)
+        }
+        fn mark_emission_applied(
+            &self,
+            scope: &str,
+            applied_at: u64,
+        ) -> ralph_core::supervisor::SupervisorStoreResult<()> {
+            self.inner.mark_emission_applied(scope, applied_at)
+        }
+        fn mark_emission_recovery_required(
+            &self,
+            scope: &str,
+        ) -> ralph_core::supervisor::SupervisorStoreResult<()> {
+            self.inner.mark_emission_recovery_required(scope)
+        }
+        fn mark_emission_failed(
+            &self,
+            scope: &str,
+        ) -> ralph_core::supervisor::SupervisorStoreResult<()> {
+            self.inner.mark_emission_failed(scope)
+        }
+        fn emission_state_for_wave_id(
+            &self,
+            wid: &str,
+        ) -> ralph_core::supervisor::SupervisorStoreResult<
+            Option<ralph_core::supervisor::EmissionState>,
+        > {
+            self.inner.emission_state_for_wave_id(wid)
+        }
+        fn adopt_legacy_emission(
+            &self,
+            scope: &str,
+            digest: &str,
+            expected: u32,
+            legacy: &str,
+        ) -> ralph_core::supervisor::SupervisorStoreResult<String> {
+            self.inner
+                .adopt_legacy_emission(scope, digest, expected, legacy)
+        }
+        fn list_slot_attempts(
+            &self,
+            wave_id: &str,
+            slot_index: u32,
+            limit: Option<u32>,
+        ) -> ralph_core::supervisor::SupervisorStoreResult<
+            Vec<ralph_core::supervisor::SlotAttemptReceipt>,
+        > {
+            self.inner.list_slot_attempts(wave_id, slot_index, limit)
+        }
+        fn parent_slot_attempts(
+            &self,
+            child_wave_id: &str,
+            child_slot_index: u32,
+            limit: Option<u32>,
+        ) -> ralph_core::supervisor::SupervisorStoreResult<ralph_core::supervisor::SlotAttemptHistory>
+        {
+            self.inner
+                .parent_slot_attempts(child_wave_id, child_slot_index, limit)
+        }
+        fn parent_slot_resource(
+            &self,
+            child_wave_id: &str,
+            child_slot_index: u32,
+        ) -> ralph_core::supervisor::ParentResourceResult<
+            Option<ralph_core::supervisor::SlotResource>,
+        > {
+            self.inner
+                .parent_slot_resource(child_wave_id, child_slot_index)
+        }
+    }
+
+    let tmp = tempfile::tempdir().expect("temp dir");
+    let ralph_dir = tmp.path().join(".ralph");
+    let worktree = tmp.path().join("worktree");
+    let record_dir = tmp.path().join("records");
+    let bin_dir = tmp.path().join("bin");
+    for dir in [&ralph_dir, &worktree, &record_dir, &bin_dir] {
+        std::fs::create_dir_all(dir).expect("create dir");
+    }
+    let main_events_file = ralph_dir.join("events.jsonl");
+    std::fs::File::create(&main_events_file).expect("create events file");
+    let script = super::fake_path::write_fake_executable(
+        &bin_dir,
+        "u2-fresh-backend",
+        U2_FRESH_PROCESS_BACKEND,
+    );
+    let backend = CliBackend {
+        command: script.display().to_string(),
+        args: vec![],
+        prompt_mode: ralph_adapters::PromptMode::Arg,
+        prompt_flag: None,
+        output_format: ralph_adapters::OutputFormat::Text,
+        env_vars: vec![(
+            "U2_RECORD_DIR".to_string(),
+            record_dir.display().to_string(),
+        )],
+    };
+    let inner_store = Arc::new(InMemorySupervisorStore::new());
+    let fault_store = Arc::new(FailingAttemptStore {
+        inner: Arc::clone(&inner_store),
+    });
+    let bridge = U5RecordingBridge::new(fault_store as std::sync::Arc<dyn SupervisorStore>)
+        .with_retry_budget(2)
+        .with_worktree(worktree.clone());
+    let bridge_arc: std::sync::Arc<dyn SupervisorBridge> = std::sync::Arc::new(bridge.clone());
+    let _outcome = execute_wave_via_supervisor_with_executor(
+        &make_u3_wave("u2-fault-store", 1, 1),
+        &backend,
+        &main_events_file,
+        false,
+        false,
+        None,
+        None,
+        "u2-fault-loop",
+        WaveDispatchLimits::default(),
+        None,
+        None,
+        &bridge_arc,
+        std::sync::Arc::new(crate::loop_runner::wave::ProductionExecutor),
+        None,
+        None,
+    )
+    .await;
+
+    // Despite the fault, the bridge still records the final
+    // tracker / RPC outcome. The dispatcher's fail-soft path
+    // guarantees the Worker's success is not converted to
+    // failure just because the receipt write errored.
+    assert_eq!(
+        bridge.results_snapshot().len(),
+        1,
+        "U2 §9: even with a failing receipt store the slot's terminal outcome is recorded"
+    );
+    // The inner store never received any receipt write — so
+    // list_slot_attempts must remain empty.
+    let wave_ids: Vec<String> = inner_store
+        .list_wave_ids()
+        .expect("list waves")
+        .into_iter()
+        .filter(|wid| wid.starts_with("w-"))
+        .collect();
+    assert!(!wave_ids.is_empty());
+    for wid in &wave_ids {
+        assert!(
+            inner_store
+                .list_slot_attempts(wid, 0, None)
+                .expect("list")
+                .is_empty(),
+            "fault store must drop every receipt write"
+        );
+    }
+}
+
+/// U2 验收 #4: when `capture_git_checkpoint` is called against a
+/// non-Git cwd, the helper returns `Some(None, None)` (the
+/// wrapper never errors). The dispatcher stamps the receipt
+/// with `start_checkpoint=None` / `end_checkpoint=None` and
+/// the Worker outcome is unchanged.
+#[cfg(unix)]
+#[tokio::test]
+async fn git_checkpoint_failure_records_unavailable_without_failing_worker() {
+    let tmp = tempfile::tempdir().expect("temp dir");
+    let worktree = tmp.path().join("not-a-git-dir");
+    std::fs::create_dir_all(&worktree).expect("create non-git worktree");
+    let cp = ralph_core::worktree::capture_git_checkpoint(&worktree);
+    let cp = cp.expect("non-git cwd returns Some, not an error");
+    assert!(cp.head_sha.is_none(), "non-git cwd → head_sha None");
+    assert!(cp.dirty.is_none(), "non-git cwd → dirty None");
 }

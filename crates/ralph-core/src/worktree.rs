@@ -35,6 +35,8 @@ use std::io::{self, BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use super::supervisor::GitCheckpoint;
+
 use crate::LoopEntry;
 
 /// Configuration for worktree operations.
@@ -1157,6 +1159,57 @@ pub fn sync_working_directory_to_worktree(
     Ok(stats)
 }
 
+/// 2026-08-07-009 plan U2 (R3 / KTD6 / S1 / S3 / S12): capture a
+/// minimal Git checkpoint for a Worker cwd. Read-only — never
+/// mutates the worktree. Used by the dispatcher attempt loop to
+/// stamp `start_checkpoint` / `end_checkpoint` on every attempt
+/// receipt without blocking the Tokio scheduler (the call site
+/// wraps this in `tokio::task::spawn_blocking`).
+///
+/// Failure semantics (KTD5): the helper never returns an error;
+/// both probes collapse to `None` on any IO / git failure so a
+/// helper-side problem cannot block a Worker. The dispatcher
+/// fail-softs on every receipt write so a checkpoint probe
+/// failure does not change the Worker's terminal outcome.
+pub fn capture_git_checkpoint(cwd: &Path) -> Option<GitCheckpoint> {
+    // HEAD probe — `git -C <cwd> rev-parse HEAD`. Non-Git
+    // directories and empty repos surface as `None` instead of
+    // raising.
+    let head_sha = read_git_rev_parse(cwd);
+    // Dirty probe — `git -C <cwd> status --porcelain
+    // --untracked-files=normal`. Any non-empty stdout → `Some(true)`;
+    // empty stdout → `Some(false)`; git failure → `None`.
+    let dirty = read_git_dirty(cwd);
+    Some(GitCheckpoint { head_sha, dirty })
+}
+
+fn read_git_rev_parse(cwd: &Path) -> Option<String> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(cwd)
+        .args(["rev-parse", "HEAD"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let sha = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if sha.is_empty() { None } else { Some(sha) }
+}
+
+fn read_git_dirty(cwd: &Path) -> Option<bool> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(cwd)
+        .args(["status", "--porcelain", "--untracked-files=normal"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    Some(!output.stdout.is_empty())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2136,5 +2189,49 @@ branch refs/heads/ralph/loop-1
                 .join(crate::parallel_forge_resume::MANIFEST_FILE_NAME)
                 .exists()
         );
+    }
+
+    /// 2026-08-07-009 plan U2 §9: capture_git_checkpoint returns
+    /// `Some(head_sha, dirty=false)` on a clean git repo and
+    /// `Some(head_sha, dirty=true)` after a tracked-file mutation.
+    /// A non-Git directory collapses to `Some(None, None)` —
+    /// never an error — so the dispatcher fail-softs.
+    #[test]
+    fn capture_git_checkpoint_clean_then_dirty() {
+        let temp_dir = TempDir::new().unwrap();
+        init_git_repo(temp_dir.path());
+
+        // Initial commit so HEAD resolves.
+        let readme = temp_dir.path().join("README.md");
+        std::fs::write(&readme, "hello\n").unwrap();
+        Command::new("git")
+            .args(["add", "README.md"])
+            .current_dir(temp_dir.path())
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["commit", "-m", "initial"])
+            .current_dir(temp_dir.path())
+            .output()
+            .unwrap();
+
+        let clean = capture_git_checkpoint(temp_dir.path()).expect("some");
+        assert!(clean.head_sha.is_some(), "clean repo must resolve HEAD");
+        assert_eq!(clean.dirty, Some(false));
+
+        // Mutate a tracked file → dirty=true on next probe.
+        std::fs::write(&readme, "hello\nworld\n").unwrap();
+        let dirty = capture_git_checkpoint(temp_dir.path()).expect("some");
+        assert!(dirty.head_sha.is_some());
+        assert_eq!(dirty.dirty, Some(true));
+    }
+
+    #[test]
+    fn capture_git_checkpoint_non_git_dir_returns_unknowns() {
+        let temp_dir = TempDir::new().unwrap();
+        let cp = capture_git_checkpoint(temp_dir.path()).expect("some");
+        // Non-git path → both fields None, never an error.
+        assert!(cp.head_sha.is_none());
+        assert!(cp.dirty.is_none());
     }
 }

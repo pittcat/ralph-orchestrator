@@ -5005,6 +5005,16 @@ async fn dispatch_wave_inner_with_release<E: WaveWorkerExecutor + ?Sized>(
                 .as_ref()
                 .map(|b| b.slot_retry_budget())
                 .unwrap_or(0);
+            // 2026-08-07-009 plan U2 (KTD5): clone the store +
+            // wave-id from the bridge BEFORE the existing
+            // release_guard move consumes them. The receipt API
+            // takes `&Arc<dyn SupervisorStore>` so a cheap clone
+            // keeps both alive for the rest of the task.
+            let slot_attempt_store: Option<std::sync::Arc<dyn ralph_core::supervisor::SupervisorStore>> =
+                terminal_bridge.as_ref().and_then(|b| b.store());
+            let slot_wave_id = terminal_wave_id.clone();
+            let slot_index_local = request_index;
+            let cwd_path: Option<std::path::PathBuf> = request.cwd.clone();
             let mut release_guard =
                 terminal_bridge
                     .zip(terminal_wave_id)
@@ -5084,9 +5094,123 @@ async fn dispatch_wave_inner_with_release<E: WaveWorkerExecutor + ?Sized>(
                 let mut prior_attempts: Vec<ralph_core::PriorAttempt> = Vec::new();
                 let mut current_request = request;
                 let last_outcome: (u32, WaveWorkerOutcome) = loop {
+                    // 2026-08-07-009 plan U2 (R1 / R3 / KTD5):
+                    // begin a fresh attempt receipt (if the bridge
+                    // exposes a store + a wave id). Fail-soft:
+                    // any IO error is logged at warn level and
+                    // the loop continues without the receipt —
+                    // the Worker outcome is unchanged. The
+                    // receipt's `attempt_seq` is owned by the
+                    // store inside its transaction, so concurrent
+                    // attempts on the same slot would have
+                    // distinct seqs (memory: Mutex; rusqlite:
+                    // BEGIN IMMEDIATE).
+                    let current_attempt_seq: Option<u32> = if let (Some(store), Some(wid)) =
+                        (slot_attempt_store.as_ref(), slot_wave_id.as_ref())
+                    {
+                        let start_cp = match cwd_path.as_ref() {
+                            Some(p) => tokio::task::spawn_blocking({
+                                let p = p.clone();
+                                move || ralph_core::worktree::capture_git_checkpoint(&p)
+                            })
+                            .await
+                            .ok()
+                            .flatten(),
+                            None => None,
+                        };
+                        let started_at_ms = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .map(|d| d.as_millis() as u64)
+                            .unwrap_or(0);
+                        match store.begin_slot_attempt(
+                            wid,
+                            slot_index_local,
+                            start_cp,
+                            started_at_ms,
+                        ) {
+                            Ok(receipt) => Some(receipt.attempt_seq),
+                            Err(err) => {
+                                tracing::warn!(
+                                    slot_index = slot_index_local,
+                                    wave_id = %wid,
+                                    attempt,
+                                    error = %err,
+                                    "begin_slot_attempt failed; continuing without receipt"
+                                );
+                                None
+                            }
+                        }
+                    } else {
+                        None
+                    };
                     let outcome = executor.execute(current_request.clone()).await;
                     let (_idx, res) = &outcome;
                     let classified = classify_slot_attempt(res, slot_wave_kind);
+                    // 2026-08-07-009 plan U2 (R1 / KTD3-KTD5):
+                    // finish the attempt receipt using the
+                    // classifier's verdict. Running receipt → no
+                    // finish (the dispatcher never sees this
+                    // branch in the production path because the
+                    // Worker has just returned). Successful →
+                    // status=succeeded + no failure_code.
+                    // Retryable failure → status=failed +
+                    // frozen_code from the classifier
+                    // (`ClassifiedReason::Static`). Idempotent
+                    // finish on dispatcher-side panic between
+                    // begin and finish leaves a `running` row —
+                    // R6/S6 reads it as "interrupted".
+                    if let (Some(store), Some(wid), Some(seq)) = (
+                        slot_attempt_store.as_ref(),
+                        slot_wave_id.as_ref(),
+                        current_attempt_seq,
+                    ) {
+                        let frozen_code: Option<String> =
+                            match (&classified.outcome, &classified.reason) {
+                                (
+                                    ralph_core::supervisor::worker_outcome::SlotOutcome::Failed { .. },
+                                    Some(ClassifiedReason::Static(code)),
+                                ) => Some((*code).to_string()),
+                                _ => None,
+                            };
+                        let (status, code) = match &classified.outcome {
+                            ralph_core::supervisor::worker_outcome::SlotOutcome::Failed { .. } => {
+                                (ralph_core::supervisor::AttemptStatus::Failed, frozen_code.clone())
+                            }
+                            _ => (ralph_core::supervisor::AttemptStatus::Succeeded, None),
+                        };
+                        let end_cp = match cwd_path.as_ref() {
+                            Some(p) => tokio::task::spawn_blocking({
+                                let p = p.clone();
+                                move || ralph_core::worktree::capture_git_checkpoint(&p)
+                            })
+                            .await
+                            .ok()
+                            .flatten(),
+                            None => None,
+                        };
+                        let finished_at_ms = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .map(|d| d.as_millis() as u64)
+                            .unwrap_or(0);
+                        if let Err(err) = store.finish_slot_attempt(
+                            wid,
+                            slot_index_local,
+                            seq,
+                            status,
+                            end_cp,
+                            code.as_deref(),
+                            finished_at_ms,
+                        ) {
+                            tracing::warn!(
+                                slot_index = slot_index_local,
+                                wave_id = %wid,
+                                attempt_seq = seq,
+                                attempt,
+                                error = %err,
+                                "finish_slot_attempt failed; worker outcome unchanged"
+                            );
+                        }
+                    }
                     let mut should_retry = false;
                     // 2026-07-30-001 plan U2: the stable code of the
                     // attempt we are about to abandon, owned so it
