@@ -63,3 +63,12 @@ pub(crate) use deadlines::{
 pub(crate) use dispatch::DispatchContext;
 pub(crate) use dispatch::ProgressChannels;
 pub(crate) use worker_lifecycle::SupervisorSlotRelease;
+
+// Dispatcher test suite extracted during plan `2026-08-07-008`
+// (physical layout in `wave/dispatcher_tests/mod.rs`). Mounted here so
+// the historical module path `loop_runner::wave::dispatcher::tests`
+// keeps resolving and existing `cargo nextest` filters keep matching.
+// The mounted file's top level is the body of this `tests` module.
+#[cfg(test)]
+#[path = "../dispatcher_tests/mod.rs"]
+mod tests;

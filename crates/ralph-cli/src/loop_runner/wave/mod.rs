@@ -15,8 +15,6 @@ pub use channel_registry::{
 };
 
 mod dispatcher;
-#[cfg(test)]
-mod dispatcher_tests;
 mod heartbeat;
 mod io;
 mod supervisor_bridge;
