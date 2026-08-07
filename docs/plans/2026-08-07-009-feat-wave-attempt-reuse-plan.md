@@ -22,14 +22,14 @@ deepened: 2026-08-07
 ## 0. 计划状态
 
 - 状态：`READY`。所有实施关键决策置信度均不低于 `0.85`，没有 launch-blocking open question。
-- 代码库基线：当前 HEAD `82dfbaf1223dd4698a5de2772db9367652d3fbb6`；执行前仍需确认工作树无关改动不会污染验证。
+- 代码库基线：当前 HEAD `181638ac349319551b7d8a6c627ea4ca026646b7`；相对原基线仅增加 event-policy 回归测试与计划文档更新，supervisor/wave dispatcher/worktree 生产代码未变化；执行前仍需确认工作树无关改动不会污染验证。
 - 调查范围：supervisor store 与 migration、wave dispatcher retry、redrive boot dispatch、startup recovery、Worktree binding/cleanup、injected agent skill、相邻 tests、相关 Git 历史与 `docs/solutions/`。
 - 已执行验证：
   - `cargo nextest --version` → `cargo-nextest 0.9.140`。
   - `cargo nextest run -p ralph-core --lib -E 'test(/supervisor::memory::tests::bind_worktree_rebind/) or test(/wave_prompt::tests::u2_retry_prompt/)'` → 4/4 通过。
   - `cargo nextest run -p ralph-core --features supervisor-db --lib -E 'test(/run_bumps_user_version_to_current/) or test(/run_is_idempotent_across_reopens/) or test(/required_tables_exist_after_run/)'` → 3/3 通过。
   - `cargo nextest run -p ralph-cli --bin ralph -E 'test(/executor_retry_uses_fresh_pid_same_cwd/) or test(/third_attempt_prompt_contains_both_prior_failures/) or test(/timeout_retry_does_not_claim_existing_commit_success/) or test(/test_u4_redrive_boot_dispatch_in_memory_multi_slot/) or test(/test_s3_rusqlite_backed_wave_supervisor_dispatch/)'` → 5/5 通过。
-- 尚未执行验证：本轮是计划工作，未执行 `./scripts/run-tests.sh`、`just lint`、`just fmt-check`、`cargo build --workspace`；这些是实施期强制门禁。dispatcher 拆分计划尚未实施，本文中的 dispatcher 物理路径是拆分前证据。
+- 已补充验证：当前工作树干净，`cargo fmt --all -- --check` 通过；格式化 warning 属于可修复的机械问题，实施前应运行 `cargo fmt --all` 后再执行 `just fmt-check`，不应作为不可修复的启动阻塞。尚未执行 `./scripts/run-tests.sh`、`just lint`、`cargo build --workspace`；这些仍是实施期强制门禁。dispatcher 拆分计划尚未实施，本文中的 dispatcher 物理路径仍是拆分前证据。
 - 阻塞项：无。
 
 ## 1. 功能目标

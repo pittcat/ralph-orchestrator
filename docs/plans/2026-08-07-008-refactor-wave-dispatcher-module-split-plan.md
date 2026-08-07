@@ -2,10 +2,10 @@
 
 ## 0. 计划状态
 
-- `READY`：计划基于当前 HEAD `82dfbaf1223dd4698a5de2772db9367652d3fbb6`；所有拆分边界均由当前符号、调用方和测试证据确认，未引入数字编号模块名。
+- `READY`：计划基于当前 HEAD `181638ac349319551b7d8a6c627ea4ca026646b7`；相对原基线仅增加 event-policy 回归测试与计划文档更新，wave dispatcher 生产代码和拆分边界未变化。所有拆分边界均由当前符号、调用方和测试证据确认，未引入数字编号模块名。
 - 调查范围：`crates/ralph-cli/src/loop_runner/wave/dispatcher.rs`、`wave/mod.rs`、`worker.rs`、`supervisor_bridge.rs`、`io.rs`、`crates/ralph-cli/src/loop_runner/tests/wave_supervisor.rs`、相关 dispatcher 内联测试、最近 dispatcher Git 历史和仓库测试入口。
 - 已执行验证：`git rev-parse HEAD`、`git log --oneline -12 -- crates/ralph-cli/src/loop_runner/wave`、`wc -l`、符号/调用关系搜索；未在本次计划更新中重新执行全量测试。
-- 执行前硬门禁：必须在当前 HEAD 重新运行 `./scripts/run-tests.sh`、`cargo build --workspace`、`just fmt-check`、`just lint`、`cargo nextest list --workspace`；任一失败不得进入 Unit 1。
+- 执行前硬门禁：必须在当前 HEAD 重新运行 `./scripts/run-tests.sh`、`cargo build --workspace`、`just fmt-check`、`just lint`、`cargo nextest list --workspace`；格式化问题先运行 `cargo fmt --all` 修复，再重新执行 `just fmt-check`。修复后仍失败才不得进入 Unit 1。
 
 ## 1. 功能目标
 
@@ -45,7 +45,7 @@
 
 | Evidence ID | 来源 | 观察结果 | 对计划的影响 | 可靠性 |
 |---|---|---|---|---|
-| E1 | `git rev-parse HEAD` | 当前基线为 `82dfbaf1223dd4698a5de2772db9367652d3fbb6` | 计划和执行前门禁必须以该 HEAD 重新确认 | 高 |
+| E1 | `git rev-parse HEAD` 与当前代码差异 | 当前基线为 `181638ac349319551b7d8a6c627ea4ca026646b7`；相对 82df 仅有 event-policy 测试和计划文档变更，dispatcher 代码未变 | 执行前仍需在实际 HEAD 重跑门禁；不得把文档/无关测试提交误当作 dispatcher 行为变化 | 高 |
 | E2 | `wc -l crates/ralph-cli/src/loop_runner/wave/dispatcher.rs` | 文件为 13,543 行，生产代码与 tests 混合 | 必须拆生产职责与测试目录 | 高 |
 | E3 | `dispatcher.rs` 顶层定义与 `wave/mod.rs` re-export | 公开入口、supervisor 入口、测试入口均来自 dispatcher | 根文件必须保留 re-export；拆分不得改变调用方路径 | 高 |
 | E4 | `dispatcher.rs` 的符号扫描 | 存在明确的 dispatch、fan-in、coordination、salvage、deadline、outcome 函数群 | 文件名按功能命名；不得使用数字编号 | 高 |
@@ -160,7 +160,7 @@ Feature: wave dispatcher 按职责拆分后保持既有行为
 |---|---|---|---|
 | 执行前 | `./scripts/run-tests.sh` | 当前全量基线 | 失败即停止 |
 | 执行前 | `cargo build --workspace` | 编译基线 | 失败即停止 |
-| 执行前 | `just fmt-check` | 格式基线 | 失败即停止 |
+| 执行前 | `cargo fmt --all && just fmt-check` | 修复并确认格式基线 | fmt warning 可修复；修复后检查仍失败才停止 |
 | 执行前 | `just lint` | lint 基线 | 失败即停止 |
 | 每批迁移后 | `cargo nextest list --workspace` | 确认测试仍被发现 | 未命中即停止 |
 | 每批迁移后 | `cargo nextest run -p ralph-cli --bin ralph -- <已验证命中的过滤器>` | 验证当前行为族 | 失败不得进入下一批 |
