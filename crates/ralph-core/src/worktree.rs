@@ -35,6 +35,8 @@ use std::io::{self, BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use super::supervisor::GitCheckpoint;
+
 use crate::LoopEntry;
 
 /// Configuration for worktree operations.
@@ -1157,6 +1159,120 @@ pub fn sync_working_directory_to_worktree(
     Ok(stats)
 }
 
+/// 2026-08-07-009 plan U2 (R3 / KTD6 / S1 / S3 / S12): capture a
+/// minimal Git checkpoint for a Worker cwd. Read-only — never
+/// mutates the worktree. Used by the dispatcher attempt loop to
+/// stamp `start_checkpoint` / `end_checkpoint` on every attempt
+/// receipt without blocking the Tokio scheduler (the call site
+/// wraps this in `tokio::task::spawn_blocking`).
+///
+/// Failure semantics (KTD5): the helper never returns an error;
+/// both probes collapse to `None` on any IO / git failure so a
+/// helper-side problem cannot block a Worker. The dispatcher
+/// fail-softs on every receipt write so a checkpoint probe
+/// failure does not change the Worker's terminal outcome.
+pub fn capture_git_checkpoint(cwd: &Path) -> Option<GitCheckpoint> {
+    // HEAD probe — `git -C <cwd> rev-parse HEAD`. Non-Git
+    // directories and empty repos surface as `None` instead of
+    // raising.
+    let head_sha = read_git_rev_parse(cwd);
+    // Dirty probe — `git -C <cwd> status --porcelain
+    // --untracked-files=normal`. Any non-empty stdout → `Some(true)`;
+    // empty stdout → `Some(false)`; git failure → `None`.
+    let dirty = read_git_dirty(cwd);
+    Some(GitCheckpoint { head_sha, dirty })
+}
+
+fn read_git_rev_parse(cwd: &Path) -> Option<String> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(cwd)
+        .args(["rev-parse", "HEAD"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let sha = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if sha.is_empty() { None } else { Some(sha) }
+}
+
+fn read_git_dirty(cwd: &Path) -> Option<bool> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(cwd)
+        .args(["status", "--porcelain", "--untracked-files=normal"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    Some(!output.stdout.is_empty())
+}
+
+/// 2026-08-07-009 plan U3 (R6 / S7 / S8 / S13): validate that a
+/// persisted `SlotResource` is still a safe binding to reuse for
+/// a redrive child. Returns `true` ONLY when every condition
+/// holds; any failure collapses to `false` so the dispatcher
+/// falls back to the factory (R6 / S8 / S13).
+///
+/// The validator is intentionally permissive on inputs it does
+/// not understand — `branch` may be missing, `git` may not be on
+/// PATH, the path may not exist — and falls back to `false` for
+/// each. Never panics.
+pub fn is_existing_worktree_binding_reusable(
+    repo_root: &Path,
+    worktree_path: &Path,
+    stored_branch: Option<&str>,
+) -> bool {
+    // 1. Canonicalize the candidate. A path that does not exist
+    //    is immediately disqualified — the redrive parent slot
+    //    never had its Worktree survive (S8).
+    let candidate = match std::fs::canonicalize(worktree_path) {
+        Ok(c) => c,
+        Err(_) => return false,
+    };
+    // 2. Confirm the canonical path is NOT the main worktree.
+    //    The main worktree is the repo root itself; reusing it
+    //    would route the child Worker at the operator's
+    //    workspace (R6 / KTD8). `list_worktrees` flags
+    //    `is_main = true` for the main entry.
+    let worktrees = match list_worktrees(repo_root) {
+        Ok(w) => w,
+        Err(_) => return false,
+    };
+    let Some(entry) = worktrees.iter().find(|w| w.path == candidate) else {
+        return false;
+    };
+    if entry.is_main {
+        return false;
+    }
+    // 3. Branch match — the stored `branch` (if present) must
+    //    match the Git porcelain entry's branch exactly after
+    //    canonical normalization (strip a `ralph/` prefix the
+    //    helper may have added on creation).
+    if let Some(stored) = stored_branch {
+        let stored_norm = normalize_branch(stored);
+        let entry_norm = normalize_branch(&entry.branch);
+        if stored_norm != entry_norm {
+            return false;
+        }
+    }
+    true
+}
+
+/// Strip a `ralph/` prefix the worktree helper may have added at
+/// creation time so a stored DB branch and the Git porcelain
+/// branch compare equal. Empty branches collapse to "".
+fn normalize_branch(branch: &str) -> String {
+    let trimmed = branch.trim();
+    if let Some(rest) = trimmed.strip_prefix("ralph/") {
+        rest.to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2136,5 +2252,49 @@ branch refs/heads/ralph/loop-1
                 .join(crate::parallel_forge_resume::MANIFEST_FILE_NAME)
                 .exists()
         );
+    }
+
+    /// 2026-08-07-009 plan U2 §9: capture_git_checkpoint returns
+    /// `Some(head_sha, dirty=false)` on a clean git repo and
+    /// `Some(head_sha, dirty=true)` after a tracked-file mutation.
+    /// A non-Git directory collapses to `Some(None, None)` —
+    /// never an error — so the dispatcher fail-softs.
+    #[test]
+    fn capture_git_checkpoint_clean_then_dirty() {
+        let temp_dir = TempDir::new().unwrap();
+        init_git_repo(temp_dir.path());
+
+        // Initial commit so HEAD resolves.
+        let readme = temp_dir.path().join("README.md");
+        std::fs::write(&readme, "hello\n").unwrap();
+        Command::new("git")
+            .args(["add", "README.md"])
+            .current_dir(temp_dir.path())
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["commit", "-m", "initial"])
+            .current_dir(temp_dir.path())
+            .output()
+            .unwrap();
+
+        let clean = capture_git_checkpoint(temp_dir.path()).expect("some");
+        assert!(clean.head_sha.is_some(), "clean repo must resolve HEAD");
+        assert_eq!(clean.dirty, Some(false));
+
+        // Mutate a tracked file → dirty=true on next probe.
+        std::fs::write(&readme, "hello\nworld\n").unwrap();
+        let dirty = capture_git_checkpoint(temp_dir.path()).expect("some");
+        assert!(dirty.head_sha.is_some());
+        assert_eq!(dirty.dirty, Some(true));
+    }
+
+    #[test]
+    fn capture_git_checkpoint_non_git_dir_returns_unknowns() {
+        let temp_dir = TempDir::new().unwrap();
+        let cp = capture_git_checkpoint(temp_dir.path()).expect("some");
+        // Non-git path → both fields None, never an error.
+        assert!(cp.head_sha.is_none());
+        assert!(cp.dirty.is_none());
     }
 }

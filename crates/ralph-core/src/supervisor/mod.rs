@@ -718,6 +718,155 @@ pub enum EmissionState {
     Failed,
 }
 
+// ─────────────────────────────────────────────────────────────────
+// 2026-08-07-009 plan U1 (R1 / R2 / R8 / KTD1-KTD4 / KTD11): per-slot
+// attempt receipt contract. Each supervisor Worker attempt starts a
+// `running` receipt before any other write and finishes it with
+// `succeeded` / `failed`. Receipts persist across reopens so a
+// redrive child can render a bounded Recovery Context and so the
+// dispatcher can answer "what was the last attempt's Git HEAD?"
+// without rewriting the main JSONL log.
+//
+// 2026-08-07-009 plan U3 (R5 / R6 / S6-S10 / S13): bounded recovery
+// query — list a slot's durable attempt history AND resolve a
+// child wave's parent slot resource via the
+// `(child_wave_id, child_slot_index) → parent_slot_index` map.
+// ─────────────────────────────────────────────────────────────────
+
+/// 2026-08-07-009 plan U1 (KTD4): minimal Git state at one moment in
+/// time. Either field may be `None` when the helper could not probe
+/// (non-Git path, missing binary, IO error). Time and dirty checks
+/// live on the helper; this shape carries the result.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GitCheckpoint {
+    /// `git rev-parse HEAD` output. `None` when the helper could
+    /// not resolve a HEAD (empty repo, non-Git path, error).
+    pub head_sha: Option<String>,
+    /// `git status --porcelain --untracked-files=normal` produced
+    /// any non-empty line. `None` when the helper could not run the
+    /// status command (treated as "unknown" — never as clean).
+    pub dirty: Option<bool>,
+}
+
+/// 2026-08-07-009 plan U1 (R1): terminal status of a single attempt.
+/// The transitions are `running → succeeded | failed`. `failed`
+/// MUST carry a stable failure code; `succeeded` MUST NOT carry one.
+/// A crash between `begin` and `finish` leaves the receipt in
+/// `running`; the dispatcher treats running as "interrupted" but
+/// never as success.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AttemptStatus {
+    Running,
+    Succeeded,
+    Failed,
+}
+
+impl fmt::Display for AttemptStatus {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            AttemptStatus::Running => f.write_str("running"),
+            AttemptStatus::Succeeded => f.write_str("succeeded"),
+            AttemptStatus::Failed => f.write_str("failed"),
+        }
+    }
+}
+
+/// 2026-08-07-009 plan U1 (R1 / R2 / S1-S6 / S11): the persisted
+/// shape of a single attempt. Stores do NOT carry the original
+/// agent stdout, prompt text, or any free-form worker payload — the
+/// bounded set is the minimum needed for the dispatcher to render a
+/// Recovery Context and for an operator to diagnose a crashed slot.
+///
+/// Fields:
+/// - `attempt_seq`: monotonic per-`(wave_id, slot_index)`, starts at
+///   1, allocated by the store inside a transaction so concurrent
+///   begin calls converge on unique values.
+/// - `status`: terminal state (see `AttemptStatus`).
+/// - `started_at_unix_ms` / `finished_at_unix_ms`: store-owned
+///   epoch-ms timestamps. Pre-epoch inputs collapse to `0`.
+/// - `start_checkpoint` / `end_checkpoint`: Git state captured
+///   around the attempt. `None` for a slot whose cwd is not a Git
+///   worktree (review `SharedReadonly` slots, never-attempted slots).
+/// - `failure_code`: stable classifier reason (e.g.
+///   `executor_reported_failure`). Only set for `Failed`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SlotAttemptReceipt {
+    pub wave_id: String,
+    pub slot_index: u32,
+    pub attempt_seq: u32,
+    pub status: AttemptStatus,
+    pub started_at_unix_ms: u64,
+    pub finished_at_unix_ms: u64,
+    pub start_checkpoint: Option<GitCheckpoint>,
+    pub end_checkpoint: Option<GitCheckpoint>,
+    /// Stable classifier reason code. Only populated when
+    /// `status == AttemptStatus::Failed`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure_code: Option<String>,
+}
+
+impl SlotAttemptReceipt {
+    /// True when this receipt represents an attempt that crashed
+    /// before reaching a terminal status (begin without finish).
+    /// Used by R6 to refuse reusing a parent Worktree whose latest
+    /// attempt is still running.
+    pub fn is_running(&self) -> bool {
+        matches!(self.status, AttemptStatus::Running)
+    }
+}
+
+/// 2026-08-07-009 plan U3 (R5 / R6 / S7 / S8 / S10 / S13): result of
+/// looking up the parent slot's persisted attempt history for a
+/// redrive child. The dispatcher injects the bounded
+/// `RecoveryContext` from this list into the Worker prompt. The
+/// `None` list means "the parent has no recorded attempts" — this
+/// is a legitimate state (a parent that was never started, a
+/// legacy pre-v11 row), NOT a store failure.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct SlotAttemptHistory {
+    /// Stable, ordered (ascending by `attempt_seq`) attempts for
+    /// the resolved parent slot. Empty when the parent has no
+    /// recorded attempts.
+    pub attempts: Vec<SlotAttemptReceipt>,
+}
+
+/// 2026-08-07-009 plan U3 (R6 / S7 / S8 / S13): reason a parent
+/// resource resolution failed. Failure modes that map to a
+/// `slot_resource` table miss or a malformed parent mapping
+/// (`NotFound`) are distinct from store IO failures
+/// (`StorageError`); the dispatcher treats the former as "use the
+/// factory" and the latter as "fail-soft, no prompt forgery".
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ParentResourceError {
+    /// `(child_wave_id, child_slot_index)` did not resolve to a
+    /// parent slot index (child row exists but `slot_descriptors`
+    /// has no `slot_index_in_parent`). Legacy pre-v10 row or a
+    /// redrive row whose descriptor was not yet persisted.
+    NotFound,
+    /// Parent slot was resolved but has no `slot_resources` row.
+    /// The parent never reached `bind_slot`, so the child cannot
+    /// reuse anything — fall back to the factory.
+    Unbound,
+    /// Underlying store IO error (rusqlite / Mutex poison). The
+    /// dispatcher must fail-soft: log and fall back to the
+    /// factory. The error is redacted before reaching the prompt.
+    Storage(String),
+}
+
+impl fmt::Display for ParentResourceError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ParentResourceError::NotFound => f.write_str("not_found"),
+            ParentResourceError::Unbound => f.write_str("unbound"),
+            ParentResourceError::Storage(msg) => write!(f, "storage:{msg}"),
+        }
+    }
+}
+
+/// Result alias for the parent-resource lookup.
+pub type ParentResourceResult<T> = Result<T, ParentResourceError>;
+
 /// 2026-07-26-004 plan U2 (KTD3 / R2 / R3): bounded terminal-event
 /// evidence attached to a `Completed` slot.
 ///
@@ -1595,6 +1744,118 @@ pub trait SupervisorStore: fmt::Debug + Send + Sync {
     }
 
     // ─────────────────────────────────────────────────────────────────
+    // 2026-08-07-009 plan U1 (R1 / R2 / KTD1-KTD5 / KTD11): per-slot
+    // attempt receipt contract. The dispatcher calls `begin_slot_attempt`
+    // before each Worker execution and `finish_slot_attempt` after the
+    // classifier resolves. Both calls are fail-soft at the dispatcher
+    // (a store IO error is downgraded to a tracing warning) but
+    // authoritative at the store: a successful `begin` allocates a
+    // monotonic `attempt_seq` inside a single transaction so concurrent
+    // threads on the same `(wave_id, slot_index)` converge on unique
+    // values. `list_slot_attempts` returns the bounded ordered history
+    // for redrive recovery.
+    //
+    // 2026-08-07-009 plan U3 (R5 / R6): parent resource / attempt
+    // history resolvers. The redrive boot dispatcher calls these to
+    // render the bounded Recovery Context and to decide whether the
+    // parent's Worktree may be safely reused. Both calls are
+    // fail-soft: any error collapses to "use the factory and render
+    // no recovery block" so a corrupted ledger cannot block a
+    // legitimate redrive.
+    // ─────────────────────────────────────────────────────────────────
+
+    /// 2026-08-07-009 plan U1 (R1 / R2 / KTD3): start a new attempt
+    /// for `(wave_id, slot_index)`. The store MUST allocate a
+    /// monotonically-increasing `attempt_seq` starting at 1 inside a
+    /// single transaction so concurrent begin calls on the same slot
+    /// converge on unique sequences.
+    ///
+    /// Errors:
+    /// - `SupervisorStoreError::UnknownWave` / `UnknownSlot` when the
+    ///   parent slot has not been registered. Both are fail-soft for
+    ///   the dispatcher — the attempt is not started, but the Worker
+    ///   is not stopped.
+    fn begin_slot_attempt(
+        &self,
+        wave_id: &str,
+        slot_index: u32,
+        start_checkpoint: Option<GitCheckpoint>,
+        started_at_unix_ms: u64,
+    ) -> SupervisorStoreResult<SlotAttemptReceipt>;
+
+    /// 2026-08-07-009 plan U1 (R1 / R2 / KTD3-KTD5 / S3): finalize
+    /// the attempt identified by `(wave_id, slot_index, attempt_seq)`.
+    ///
+    /// Contract:
+    /// - Transitions `running → succeeded` or `running → failed`.
+    ///   Anything else (unknown attempt, wrong slot, wrong seq,
+    ///   already-terminal attempt) returns
+    ///   `SupervisorStoreError::InvalidTransition` so the dispatcher
+    ///   can log and continue.
+    /// - Repeating the SAME terminal status + same failure code (when
+    ///   applicable) is idempotent: the existing row is returned
+    ///   unchanged. A DIFFERENT status or failure code on an
+    ///   already-terminal attempt is rejected with
+    ///   `InvalidTransition`.
+    /// - `failure_code` MUST be `Some` when `status == Failed` and
+    ///   `None` when `status == Succeeded`. Violations return
+    ///   `InvalidTransition`.
+    fn finish_slot_attempt(
+        &self,
+        wave_id: &str,
+        slot_index: u32,
+        attempt_seq: u32,
+        status: AttemptStatus,
+        end_checkpoint: Option<GitCheckpoint>,
+        failure_code: Option<&str>,
+        finished_at_unix_ms: u64,
+    ) -> SupervisorStoreResult<SlotAttemptReceipt>;
+
+    /// 2026-08-07-009 plan U1 (R1 / KTD4): list a slot's persisted
+    /// attempts in ascending `attempt_seq` order. `limit` caps the
+    /// returned slice (most-recent first, then re-sorted ascending)
+    /// so a runaway slot cannot blow up the renderer. `limit == 0`
+    /// returns an empty vec (the caller can probe "no history"
+    /// cheaply). `None` limits return every row.
+    fn list_slot_attempts(
+        &self,
+        wave_id: &str,
+        slot_index: u32,
+        limit: Option<u32>,
+    ) -> SupervisorStoreResult<Vec<SlotAttemptReceipt>>;
+
+    /// 2026-08-07-009 plan U3 (R5 / S7 / S10 / S12): for a redrive
+    /// CHILD wave, resolve the parent slot's bounded attempt
+    /// history. The dispatcher injects this list into the Recovery
+    /// Context; the renderer MUST NOT fabricate any row, so the
+    /// returned history is exactly what the store has recorded.
+    ///
+    /// Failure modes collapse to `SlotAttemptHistory::default()`
+    /// (empty `attempts` vec) inside the dispatcher; the trait
+    /// method surfaces the error so the dispatcher can log a
+    /// redacted reason.
+    fn parent_slot_attempts(
+        &self,
+        child_wave_id: &str,
+        child_slot_index: u32,
+        limit: Option<u32>,
+    ) -> SupervisorStoreResult<SlotAttemptHistory>;
+
+    /// 2026-08-07-009 plan U3 (R6 / S7 / S8 / S13): for a redrive
+    /// CHILD wave, resolve the parent slot's `SlotResource` so the
+    /// bridge can validate the parent's Worktree against
+    /// `git worktree list --porcelain` and either reuse it or fall
+    /// back to the factory. Returns `Ok(None)` when the parent
+    /// slot is `SharedReadonly` (review slots — no Worktree to
+    /// reuse). Returns `Err(ParentResourceError)` on lookup
+    /// failure; the dispatcher fail-softs and falls back.
+    fn parent_slot_resource(
+        &self,
+        child_wave_id: &str,
+        child_slot_index: u32,
+    ) -> ParentResourceResult<Option<SlotResource>>;
+
+    // ─────────────────────────────────────────────────────────────────
     // 2026-07-24-003 plan U4: emission reservation API.
     //
     // The CLI's `ralph wave emit` calls these instead of writing
@@ -1723,6 +1984,12 @@ pub use worktree_bind::{
     assert_isolation_matches, bind_slot_worktree, env_keys as worktree_env_keys,
 };
 
+/// 2026-08-07-009 plan U1 (R1-R8 / KTD1-KTD4 / KTD11): per-slot
+/// attempt receipt contract. Shared parity tests for memory and
+/// rusqlite adapters — sequence allocation, finish transitions,
+/// idempotency, list ordering, concurrent uniqueness.
+#[cfg(test)]
+mod attempt_tests;
 mod bridge;
 mod coordinator;
 mod memory;

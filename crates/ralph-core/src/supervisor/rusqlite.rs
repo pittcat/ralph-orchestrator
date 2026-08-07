@@ -23,11 +23,12 @@ use rusqlite::{Connection, OptionalExtension};
 #[cfg(feature = "supervisor-db")]
 use super::migrations;
 use super::{
-    CompensationKind, CoordinationReceiptSummary, DispatchOutcome, EmissionReservation,
-    EmissionState, IsolationMode, ProjectionReceiptSummary, RedrivePendingChild,
-    RedrivePendingChildSlot, RedriveResult, RedriveTakeOutcome, SlotDescriptor, SlotResource,
-    SlotStatus, SupervisorStore, SupervisorStoreError, SupervisorStoreResult, WaveDeliveryState,
-    WaveId, WaveKind, WavePhase, WaveSnapshot,
+    AttemptStatus, CompensationKind, CoordinationReceiptSummary, DispatchOutcome,
+    EmissionReservation, EmissionState, GitCheckpoint, IsolationMode, ParentResourceError,
+    ParentResourceResult, ProjectionReceiptSummary, RedrivePendingChild, RedrivePendingChildSlot,
+    RedriveResult, RedriveTakeOutcome, SlotAttemptHistory, SlotAttemptReceipt, SlotDescriptor,
+    SlotResource, SlotStatus, SupervisorStore, SupervisorStoreError, SupervisorStoreResult,
+    WaveDeliveryState, WaveId, WaveKind, WavePhase, WaveSnapshot,
 };
 
 /// `PRAGMA busy_timeout` value installed on every supervisor
@@ -2529,6 +2530,499 @@ impl SupervisorStore for RusqliteSupervisorStore {
             Ok(recorded)
         })
     }
+
+    // ─────────────────────────────────────────────────────────────────
+    // 2026-08-07-009 plan U1 (R1 / R2 / KTD3 / S1-S4): per-slot
+    // attempt receipt API. Begin runs inside `BEGIN IMMEDIATE` so
+    // the `attempt_seq` allocator (`MAX(attempt_seq) + 1` inside
+    // the same transaction) keeps concurrent openers safe.
+    //
+    // 2026-08-07-009 plan U3 (R5 / R6 / S7 / S8 / S13): parent
+    // resource / attempt history resolvers. Both lookups are
+    // bounded read-only joins on the existing
+    // `slot_descriptors` / `slot_resources` / `slot_attempts`
+    // tables and never mutate parent state.
+    // ─────────────────────────────────────────────────────────────────
+
+    fn begin_slot_attempt(
+        &self,
+        wave_id: &str,
+        slot_index: u32,
+        start_checkpoint: Option<GitCheckpoint>,
+        started_at_unix_ms: u64,
+    ) -> SupervisorStoreResult<SlotAttemptReceipt> {
+        self.with_conn(|conn| {
+            // Validate parent wave + slot exist. The dispatcher
+            // fail-softs on either error, so we surface
+            // `UnknownWave` / `UnknownSlot` directly without
+            // rolling back the (empty) transaction.
+            let wave_present: bool = conn
+                .query_row("SELECT 1 FROM waves WHERE wave_id = ?1", [wave_id], |row| {
+                    row.get::<_, i64>(0)
+                })
+                .optional()
+                .map_err(|e| SupervisorStoreError::Storage(e.to_string()))?
+                .is_some();
+            if !wave_present {
+                return Err(SupervisorStoreError::UnknownWave(wave_id.to_string()));
+            }
+            let slot_present: bool = conn
+                .query_row(
+                    "SELECT 1 FROM wave_slots WHERE wave_id = ?1 AND slot_index = ?2",
+                    rusqlite::params![wave_id, i64::from(slot_index)],
+                    |row| row.get::<_, i64>(0),
+                )
+                .optional()
+                .map_err(|e| SupervisorStoreError::Storage(e.to_string()))?
+                .is_some();
+            if !slot_present {
+                return Err(SupervisorStoreError::UnknownSlot {
+                    wave_id: wave_id.to_string(),
+                    slot_index,
+                });
+            }
+
+            // BEGIN IMMEDIATE so concurrent begin calls serialise
+            // before reading max(attempt_seq). Mirrors the
+            // concurrent-opener migration fix (Plan 004
+            // post-P0-2).
+            conn.execute_batch("BEGIN IMMEDIATE")?;
+            let result: rusqlite::Result<SlotAttemptReceipt> = (|| {
+                let next_seq: i64 = conn.query_row(
+                    "SELECT COALESCE(MAX(attempt_seq), 0) + 1 FROM slot_attempts \
+                         WHERE wave_id = ?1 AND slot_index = ?2",
+                    rusqlite::params![wave_id, i64::from(slot_index)],
+                    |row| row.get(0),
+                )?;
+                let (start_head, start_dirty) = match &start_checkpoint {
+                    Some(c) => (
+                        c.head_sha.clone(),
+                        c.dirty.map(|b| if b { 1_i64 } else { 0_i64 }),
+                    ),
+                    None => (None, None),
+                };
+                conn.execute(
+                    "INSERT INTO slot_attempts \
+                       (wave_id, slot_index, attempt_seq, status, started_at_unix_ms, \
+                        start_head_sha, start_dirty) \
+                     VALUES (?1, ?2, ?3, 'running', ?4, ?5, ?6)",
+                    rusqlite::params![
+                        wave_id,
+                        i64::from(slot_index),
+                        next_seq,
+                        i64::try_from(started_at_unix_ms).unwrap_or(i64::MAX),
+                        start_head,
+                        start_dirty,
+                    ],
+                )?;
+                Ok(SlotAttemptReceipt {
+                    wave_id: wave_id.to_string(),
+                    slot_index,
+                    attempt_seq: next_seq as u32,
+                    status: AttemptStatus::Running,
+                    started_at_unix_ms,
+                    finished_at_unix_ms: 0,
+                    start_checkpoint,
+                    end_checkpoint: None,
+                    failure_code: None,
+                })
+            })();
+            match result {
+                Ok(receipt) => {
+                    conn.execute_batch("COMMIT")?;
+                    Ok(receipt)
+                }
+                Err(e) => {
+                    let _ = conn.execute_batch("ROLLBACK");
+                    Err(SupervisorStoreError::Storage(e.to_string()))
+                }
+            }
+        })
+    }
+
+    fn finish_slot_attempt(
+        &self,
+        wave_id: &str,
+        slot_index: u32,
+        attempt_seq: u32,
+        status: AttemptStatus,
+        end_checkpoint: Option<GitCheckpoint>,
+        failure_code: Option<&str>,
+        finished_at_unix_ms: u64,
+    ) -> SupervisorStoreResult<SlotAttemptReceipt> {
+        // In-process validation mirrors the memory adapter
+        // (R1 invariant block).
+        let status_str = match status {
+            AttemptStatus::Running => {
+                return Err(SupervisorStoreError::InvalidTransition(
+                    "finish_slot_attempt called with status=running; only succeeded/failed accepted"
+                        .to_string(),
+                ));
+            }
+            AttemptStatus::Succeeded => "succeeded",
+            AttemptStatus::Failed => {
+                if failure_code.is_none() {
+                    return Err(SupervisorStoreError::InvalidTransition(
+                        "finish_slot_attempt status=failed requires a stable failure_code"
+                            .to_string(),
+                    ));
+                }
+                "failed"
+            }
+        };
+        if status == AttemptStatus::Succeeded && failure_code.is_some() {
+            return Err(SupervisorStoreError::InvalidTransition(
+                "finish_slot_attempt status=succeeded must not carry a failure_code".to_string(),
+            ));
+        }
+
+        self.with_conn(|conn| {
+            conn.execute_batch("BEGIN IMMEDIATE")?;
+            let result: rusqlite::Result<SlotAttemptReceipt> = (|| {
+                // Pull current row to enforce the state machine
+                // and the idempotency branch.
+                let row: Option<(String, Option<String>)> = conn
+                    .query_row(
+                        "SELECT status, failure_code FROM slot_attempts \
+                         WHERE wave_id = ?1 AND slot_index = ?2 AND attempt_seq = ?3",
+                        rusqlite::params![wave_id, i64::from(slot_index), i64::from(attempt_seq)],
+                        |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?)),
+                    )
+                    .optional()?;
+                let Some((current_status, current_code)) = row else {
+                    return Err(rusqlite::Error::QueryReturnedNoRows);
+                };
+                // Already terminal — idempotent / conflict.
+                if current_status != "running" {
+                    let matches =
+                        current_status == status_str && current_code.as_deref() == failure_code;
+                    if matches {
+                        // Idempotent: read full row and return it
+                        // unchanged.
+                        return load_attempt_receipt(conn, wave_id, slot_index, attempt_seq);
+                    }
+                    return Err(rusqlite::Error::InvalidQuery);
+                }
+
+                let (end_head, end_dirty) = match end_checkpoint.clone() {
+                    Some(c) => (c.head_sha, c.dirty.map(|b| if b { 1_i64 } else { 0_i64 })),
+                    None => (None, None),
+                };
+                let updated = conn.execute(
+                    "UPDATE slot_attempts \
+                       SET status = ?1, finished_at_unix_ms = ?2, \
+                           end_head_sha = ?3, end_dirty = ?4, failure_code = ?5 \
+                       WHERE wave_id = ?6 AND slot_index = ?7 AND attempt_seq = ?8",
+                    rusqlite::params![
+                        status_str,
+                        i64::try_from(finished_at_unix_ms).unwrap_or(i64::MAX),
+                        end_head,
+                        end_dirty,
+                        failure_code,
+                        wave_id,
+                        i64::from(slot_index),
+                        i64::from(attempt_seq),
+                    ],
+                )?;
+                if updated != 1 {
+                    return Err(rusqlite::Error::QueryReturnedNoRows);
+                }
+                load_attempt_receipt(conn, wave_id, slot_index, attempt_seq)
+            })();
+            match result {
+                Ok(receipt) => {
+                    conn.execute_batch("COMMIT")?;
+                    Ok(receipt)
+                }
+                Err(rusqlite::Error::QueryReturnedNoRows) => {
+                    let _ = conn.execute_batch("ROLLBACK");
+                    Err(SupervisorStoreError::InvalidTransition(format!(
+                        "attempt_seq={attempt_seq} not found on slot ({wave_id},{slot_index})"
+                    )))
+                }
+                Err(rusqlite::Error::InvalidQuery) => {
+                    let _ = conn.execute_batch("ROLLBACK");
+                    Err(SupervisorStoreError::InvalidTransition(format!(
+                        "attempt_seq={attempt_seq} already terminal with a different payload"
+                    )))
+                }
+                Err(e) => {
+                    let _ = conn.execute_batch("ROLLBACK");
+                    Err(SupervisorStoreError::Storage(e.to_string()))
+                }
+            }
+        })
+    }
+
+    fn list_slot_attempts(
+        &self,
+        wave_id: &str,
+        slot_index: u32,
+        limit: Option<u32>,
+    ) -> SupervisorStoreResult<Vec<SlotAttemptReceipt>> {
+        self.with_conn(|conn| {
+            // Pull every row ascending — bounded post-fetch via
+            // the same arithmetic as the memory adapter so the
+            // two adapters agree on what "limit=N" means.
+            let mut stmt = conn.prepare(
+                "SELECT wave_id, slot_index, attempt_seq, status, \
+                        started_at_unix_ms, finished_at_unix_ms, \
+                        start_head_sha, start_dirty, end_head_sha, end_dirty, failure_code \
+                 FROM slot_attempts \
+                 WHERE wave_id = ?1 AND slot_index = ?2 \
+                 ORDER BY attempt_seq ASC",
+            )?;
+            let rows: Vec<SlotAttemptReceipt> = stmt
+                .query_map(rusqlite::params![wave_id, i64::from(slot_index)], |row| {
+                    row_to_attempt_receipt(row)
+                })?
+                .filter_map(|r| r.ok())
+                .collect();
+            drop(stmt);
+            let bounded = match limit {
+                Some(0) => Vec::new(),
+                Some(n) => {
+                    let start = rows.len().saturating_sub(n as usize);
+                    rows.split_at(start).1.to_vec()
+                }
+                None => rows,
+            };
+            Ok(bounded)
+        })
+    }
+
+    fn parent_slot_attempts(
+        &self,
+        child_wave_id: &str,
+        child_slot_index: u32,
+        limit: Option<u32>,
+    ) -> SupervisorStoreResult<SlotAttemptHistory> {
+        self.with_conn(|conn| {
+            // Step 1: read the slot_descriptors row to get
+            // `slot_index_in_parent`. Legacy / non-redrive child
+            // waves have no such row → empty history.
+            let parent_slot_index: Option<Option<i64>> = conn
+                .query_row(
+                    "SELECT slot_index_in_parent FROM slot_descriptors \
+                     WHERE wave_id = ?1 AND slot_index = ?2",
+                    rusqlite::params![child_wave_id, i64::from(child_slot_index)],
+                    |row| row.get::<_, Option<i64>>(0),
+                )
+                .optional()
+                .map_err(|e| SupervisorStoreError::Storage(e.to_string()))?;
+            let parent_slot_index = match parent_slot_index {
+                Some(Some(idx)) => idx as u32,
+                _ => return Ok(SlotAttemptHistory::default()),
+            };
+            // Step 2: read the child wave's parent_wave_id.
+            let parent_wave_id: Option<Option<String>> = conn
+                .query_row(
+                    "SELECT parent_wave_id FROM waves WHERE wave_id = ?1",
+                    [child_wave_id],
+                    |row| row.get::<_, Option<String>>(0),
+                )
+                .optional()
+                .map_err(|e| SupervisorStoreError::Storage(e.to_string()))?;
+            let parent_wave_id = match parent_wave_id {
+                Some(Some(id)) => id,
+                _ => return Ok(SlotAttemptHistory::default()),
+            };
+            // Step 3: fetch the parent's attempts.
+            let mut stmt = conn.prepare(
+                "SELECT wave_id, slot_index, attempt_seq, status, \
+                        started_at_unix_ms, finished_at_unix_ms, \
+                        start_head_sha, start_dirty, end_head_sha, end_dirty, failure_code \
+                 FROM slot_attempts \
+                 WHERE wave_id = ?1 AND slot_index = ?2 \
+                 ORDER BY attempt_seq ASC",
+            )?;
+            let rows: Vec<SlotAttemptReceipt> = stmt
+                .query_map(
+                    rusqlite::params![parent_wave_id, i64::from(parent_slot_index)],
+                    |row| row_to_attempt_receipt(row),
+                )?
+                .filter_map(|r| r.ok())
+                .collect();
+            drop(stmt);
+            let bounded = match limit {
+                Some(0) => Vec::new(),
+                Some(n) => {
+                    let start = rows.len().saturating_sub(n as usize);
+                    rows.split_at(start).1.to_vec()
+                }
+                None => rows,
+            };
+            Ok(SlotAttemptHistory { attempts: bounded })
+        })
+    }
+
+    fn parent_slot_resource(
+        &self,
+        child_wave_id: &str,
+        child_slot_index: u32,
+    ) -> ParentResourceResult<Option<SlotResource>> {
+        // `parent_slot_resource` cannot reuse `with_conn` because
+        // the closure return type is `SupervisorStoreResult`,
+        // not `ParentResourceResult`. Map the IO error to the
+        // narrower parent-resolver variant manually.
+        let mut guard = self.inner.lock().map_err(|_| {
+            ParentResourceError::Storage("rusqlite store mutex poisoned".to_string())
+        })?;
+        let conn = &mut *guard;
+        // 1. Resolve parent slot_index via slot_descriptors.
+        let parent_slot_index: Option<Option<i64>> = conn
+            .query_row(
+                "SELECT slot_index_in_parent FROM slot_descriptors \
+                 WHERE wave_id = ?1 AND slot_index = ?2",
+                rusqlite::params![child_wave_id, i64::from(child_slot_index)],
+                |row| row.get::<_, Option<i64>>(0),
+            )
+            .optional()
+            .map_err(|e| ParentResourceError::Storage(e.to_string()))?;
+        let parent_slot_index = match parent_slot_index {
+            Some(Some(idx)) => idx as u32,
+            _ => return Err(ParentResourceError::NotFound),
+        };
+        // 2. Resolve parent_wave_id via the child wave row.
+        let parent_wave_id: Option<Option<String>> = conn
+            .query_row(
+                "SELECT parent_wave_id FROM waves WHERE wave_id = ?1",
+                [child_wave_id],
+                |row| row.get::<_, Option<String>>(0),
+            )
+            .optional()
+            .map_err(|e| ParentResourceError::Storage(e.to_string()))?;
+        let parent_wave_id = match parent_wave_id {
+            Some(Some(id)) => id,
+            _ => return Err(ParentResourceError::NotFound),
+        };
+        // 3. Read the parent's isolation mode. SharedReadonly
+        // parents have no Worktree to reuse; the dispatcher
+        // renders a context-only Recovery block and skips the
+        // binding step. Anything else must surface a concrete
+        // `SlotResource` row — a missing row is `Unbound`
+        // (factory fallback), an unknown isolation is treated as
+        // `Unbound` so a corrupted row does not silently enable
+        // reuse.
+        let isolation: Option<Option<String>> = conn
+            .query_row(
+                "SELECT isolation FROM wave_slots \
+                 WHERE wave_id = ?1 AND slot_index = ?2",
+                rusqlite::params![parent_wave_id, i64::from(parent_slot_index)],
+                |row| row.get::<_, Option<String>>(0),
+            )
+            .optional()
+            .map_err(|e| ParentResourceError::Storage(e.to_string()))?;
+        let isolation = match isolation {
+            Some(Some(s)) => Some(s),
+            Some(None) => None,
+            None => return Err(ParentResourceError::Unbound),
+        };
+        match isolation.as_deref() {
+            Some("shared_readonly") => return Ok(None),
+            Some(_) => {} // worktree or unknown → keep going
+            None => return Err(ParentResourceError::Unbound),
+        }
+        // 4. Read the parent's slot_resources row.
+        let resource: Option<(Option<String>, Option<String>)> = conn
+            .query_row(
+                "SELECT worktree_path, branch FROM slot_resources \
+                 WHERE wave_id = ?1 AND slot_index = ?2",
+                rusqlite::params![parent_wave_id, i64::from(parent_slot_index)],
+                |row| {
+                    Ok((
+                        row.get::<_, Option<String>>(0)?,
+                        row.get::<_, Option<String>>(1)?,
+                    ))
+                },
+            )
+            .optional()
+            .map_err(|e| ParentResourceError::Storage(e.to_string()))?;
+        let (worktree_path, branch) = match resource {
+            Some(r) => r,
+            None => return Err(ParentResourceError::Unbound),
+        };
+        Ok(Some(SlotResource {
+            slot_index: parent_slot_index,
+            worktree_path,
+            branch,
+        }))
+    }
+}
+
+/// Decode a single `slot_attempts` row into a typed receipt.
+/// Shared by `begin_slot_attempt`, `finish_slot_attempt`, and
+/// `list_slot_attempts`.
+#[cfg(feature = "supervisor-db")]
+fn row_to_attempt_receipt(row: &rusqlite::Row<'_>) -> rusqlite::Result<SlotAttemptReceipt> {
+    let status_str: String = row.get(3)?;
+    let status = match status_str.as_str() {
+        "running" => AttemptStatus::Running,
+        "succeeded" => AttemptStatus::Succeeded,
+        "failed" => AttemptStatus::Failed,
+        other => {
+            return Err(rusqlite::Error::FromSqlConversionFailure(
+                3,
+                rusqlite::types::Type::Text,
+                Box::<dyn std::error::Error + Send + Sync>::from(format!(
+                    "unknown attempt status: {other}"
+                )),
+            ));
+        }
+    };
+    let started_at: i64 = row.get::<_, i64>(4)?;
+    let finished_at: i64 = row.get::<_, i64>(5)?;
+    let start_head: Option<String> = row.get(6)?;
+    let start_dirty: Option<i64> = row.get(7)?;
+    let end_head: Option<String> = row.get(8)?;
+    let end_dirty: Option<i64> = row.get(9)?;
+    let failure_code: Option<String> = row.get(10)?;
+    let start_checkpoint = match (start_head, start_dirty) {
+        (None, None) => None,
+        (head, dirty) => Some(GitCheckpoint {
+            head_sha: head,
+            dirty: dirty.map(|v| v != 0),
+        }),
+    };
+    let end_checkpoint = match (end_head, end_dirty) {
+        (None, None) => None,
+        (head, dirty) => Some(GitCheckpoint {
+            head_sha: head,
+            dirty: dirty.map(|v| v != 0),
+        }),
+    };
+    Ok(SlotAttemptReceipt {
+        wave_id: row.get::<_, String>(0)?,
+        slot_index: row.get::<_, i64>(1)? as u32,
+        attempt_seq: row.get::<_, i64>(2)? as u32,
+        status,
+        started_at_unix_ms: u64::try_from(started_at.max(0)).unwrap_or(0),
+        finished_at_unix_ms: u64::try_from(finished_at.max(0)).unwrap_or(0),
+        start_checkpoint,
+        end_checkpoint,
+        failure_code,
+    })
+}
+
+/// Read a single `slot_attempts` row into a typed receipt.
+/// Helper used by `finish_slot_attempt` to materialise the
+/// idempotent-replay return value.
+#[cfg(feature = "supervisor-db")]
+fn load_attempt_receipt(
+    conn: &rusqlite::Connection,
+    wave_id: &str,
+    slot_index: u32,
+    attempt_seq: u32,
+) -> rusqlite::Result<SlotAttemptReceipt> {
+    conn.query_row(
+        "SELECT wave_id, slot_index, attempt_seq, status, \
+                started_at_unix_ms, finished_at_unix_ms, \
+                start_head_sha, start_dirty, end_head_sha, end_dirty, failure_code \
+         FROM slot_attempts \
+         WHERE wave_id = ?1 AND slot_index = ?2 AND attempt_seq = ?3",
+        rusqlite::params![wave_id, i64::from(slot_index), i64::from(attempt_seq)],
+        |row| row_to_attempt_receipt(row),
+    )
 }
 
 #[cfg(feature = "supervisor-db")]

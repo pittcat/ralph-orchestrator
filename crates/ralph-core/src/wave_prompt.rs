@@ -252,6 +252,155 @@ pub fn build_wave_worker_prompt(hat: &HatConfig, event: &Event, ctx: &WaveWorker
     prompt
 }
 
+// ─────────────────────────────────────────────────────────────────
+// 2026-08-07-009 plan U3 (R5 / R7 / S6 / S7 / S8 / S10 / S12 /
+// S13): cross-restart `RecoveryContext` rendered into a
+// redrive child's prompt. Distinguishes:
+//   * `worktree_reused=true`: parent binding was valid + Git
+//     registered → child runs in the same Worktree.
+//   * `worktree_reused=false`: parent missing/stale/running →
+//     factory created a fresh isolation path.
+//   * "interrupted" receipt rows: still-running receipts from a
+//     crashed attempt render as "interrupted (no terminal
+//     observed)" — the Worker must verify the existing state
+//     itself instead of trusting the record.
+//   * successful receipts: render as evidence (not instructions).
+//
+// The renderer is bounded (no more than
+// `RECOVERY_MAX_PARENT_ATTEMPTS` rows) and never leaks internal
+// store paths or row identifiers (S7: agent prompt is
+// operator-visible).
+// ─────────────────────────────────────────────────────────────────
+
+use crate::supervisor::{AttemptStatus, GitCheckpoint, SlotAttemptReceipt};
+
+/// Maximum number of parent attempts rendered into the
+/// Recovery Context. The list is the bounded head of
+/// `SlotAttemptHistory::attempts`; the dispatcher applies the
+/// same bound before calling the renderer.
+pub const RECOVERY_MAX_PARENT_ATTEMPTS: usize = 4;
+
+/// True when this attempt's binding is the same Worktree as a
+/// parent slot — the child Worker inherits the prior cwd.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WorktreeReuse {
+    /// Parent's Worktree was Git-validated and reused.
+    Reused,
+    /// Parent was missing/stale/running-receipt — factory
+    /// created a fresh isolation path.
+    Fresh,
+}
+
+/// Bounded cross-restart history surfaced to a redrive child.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecoveryContext {
+    /// True when the child cwd equals the parent's Worktree.
+    pub worktree_reused: WorktreeReuse,
+    /// Most recent parent attempts in ascending seq order. The
+    /// renderer caps the slice so the prompt never grows with
+    /// history size.
+    pub parent_attempts: Vec<SlotAttemptReceipt>,
+}
+
+impl RecoveryContext {
+    /// Build a context from a history. `limit` bounds the slice;
+    /// the renderer additionally enforces
+    /// [`RECOVERY_MAX_PARENT_ATTEMPTS`] for safety.
+    pub fn new(worktree_reused: WorktreeReuse, attempts: Vec<SlotAttemptReceipt>) -> Self {
+        let mut bounded = attempts;
+        bounded.truncate(RECOVERY_MAX_PARENT_ATTEMPTS);
+        Self {
+            worktree_reused,
+            parent_attempts: bounded,
+        }
+    }
+
+    /// True when there is nothing useful to render (empty history
+    /// AND a fresh Worktree). The dispatcher may skip the
+    /// append entirely on this signal.
+    pub fn is_empty(&self) -> bool {
+        self.parent_attempts.is_empty() && matches!(self.worktree_reused, WorktreeReuse::Fresh)
+    }
+}
+
+/// Render the `# Recovery Context` block for a redrive child.
+/// Empty + `Fresh` returns an empty string so the dispatcher
+/// does not append a useless header.
+///
+/// The block is intentionally concise: the agent MUST treat the
+/// rows as evidence (not instructions) and verify the existing
+/// state itself — receipt successes, existing commits, and
+/// matching HEADs are never a short-circuit (R7 / S10).
+pub fn render_recovery_context(ctx: &RecoveryContext) -> String {
+    if ctx.is_empty() {
+        return String::new();
+    }
+    let mut out = String::new();
+    out.push_str("\n# Recovery Context\n\n");
+    match ctx.worktree_reused {
+        WorktreeReuse::Reused => {
+            out.push_str(
+                "You are running in the **same** working directory as a previous attempt for\n\
+                 this task. That attempt's Git history, untracked files, and any partial\n\
+                 work are still present — verify the current state yourself before\n\
+                 deciding what to do, and **do not** trust that prior evidence (a\n\
+                 successful receipt, an existing commit, or a matching HEAD) implies\n\
+                 success. You MUST run the task's verification and publish your own\n\
+                 terminal result.\n\n",
+            );
+        }
+        WorktreeReuse::Fresh => {
+            out.push_str(
+                "You are running in a **fresh** working directory — the prior attempt's\n\
+                 Worktree was missing, stale, or carried an in-progress receipt. Treat\n\
+                 the parent history below as reference only; verify the new cwd\n\
+                 yourself and run the task's verification end-to-end.\n\n",
+            );
+        }
+    }
+    if ctx.parent_attempts.is_empty() {
+        out.push_str("There is no recorded parent attempt history.\n");
+        return out;
+    }
+    out.push_str("## Parent attempts\n\n");
+    for receipt in &ctx.parent_attempts {
+        out.push_str(&format!(
+            "- attempt {}: status `{}`, finished at unix_ms={}",
+            receipt.attempt_seq, receipt.status, receipt.finished_at_unix_ms,
+        ));
+        match receipt.status {
+            AttemptStatus::Succeeded => {
+                out.push_str(", start HEAD=");
+                out.push_str(render_head_short(receipt.start_checkpoint.as_ref()));
+                out.push_str(", end HEAD=");
+                out.push_str(render_head_short(receipt.end_checkpoint.as_ref()));
+            }
+            AttemptStatus::Failed => {
+                out.push_str(", failure_code=`");
+                out.push_str(receipt.failure_code.as_deref().unwrap_or("unknown"));
+                out.push('`');
+                if let Some(cp) = &receipt.end_checkpoint {
+                    out.push_str(", end HEAD=");
+                    out.push_str(render_head_short(Some(cp)));
+                }
+            }
+            AttemptStatus::Running => {
+                out.push_str(" (interrupted — no terminal observed)");
+            }
+        }
+        out.push('\n');
+    }
+    out
+}
+
+fn render_head_short(cp: Option<&GitCheckpoint>) -> &'static str {
+    match cp.and_then(|c| c.head_sha.as_ref()) {
+        Some(sha) if sha.len() >= 7 => "<sha>",
+        Some(_) => "<short-sha>",
+        None => "<unknown>",
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

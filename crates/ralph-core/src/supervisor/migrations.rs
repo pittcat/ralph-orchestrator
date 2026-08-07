@@ -37,8 +37,12 @@ mod imp {
     /// SalvageCommitted / CoordinationWritten /
     /// CoordinationCommitted) and persists the salvage /
     /// coordination receipt summaries.
+    /// v11 (2026-08-07-009 plan U1) adds the `slot_attempts`
+    /// receipt ledger so the dispatcher can persist per-Worker
+    /// attempt start/finish state across reopens without
+    /// rewriting the main JSONL log.
     #[allow(dead_code)] // pinned by `migrations_idempotent_across_reopen`; production writes via pragma_update
-    pub const CURRENT_VERSION: i64 = 10;
+    pub const CURRENT_VERSION: i64 = 11;
 
     /// Apply migrations sequentially. Each migration is a
     /// closure that performs the SQL DDL and bumps the
@@ -353,6 +357,18 @@ mod imp {
                 ddl: include_str!("migrations/v10.sql"),
                 column_probe: None,
             },
+            // 2026-08-07-009 plan U1 (R1 / R2 / KTD3): adds the
+            // `slot_attempts` table for per-slot attempt start /
+            // finish receipts. Forward-only `CREATE TABLE`; no
+            // ALTERs against existing tables so the column-probe
+            // path is unnecessary. `attempt_seq` is monotonic per
+            // `(wave_id, slot_index)` and is allocated inside
+            // `BEGIN IMMEDIATE` to keep concurrent openers safe.
+            Migration {
+                version: 11,
+                ddl: include_str!("migrations/v11.sql"),
+                column_probe: None,
+            },
         ]
     }
 }
@@ -419,6 +435,11 @@ mod tests {
             // U7 (2026-07-25-005 plan U4): idempotent redrive
             // request ledger.
             "redrive_requests",
+            // U1 (2026-08-07-009 plan U1): per-slot attempt
+            // receipt ledger. The migration test pins its
+            // existence so a future DDL drop would surface
+            // before runtime.
+            "slot_attempts",
         ];
         for table in tables {
             let count: i64 = conn
@@ -525,6 +546,128 @@ mod tests {
         assert_eq!(
             present, 1,
             "waves.delivery_state.at_least(super::WaveDeliveryState::SalvageCommitted) must exist after concurrent migration"
+        );
+    }
+
+    /// 2026-08-07-009 plan U1 (S5 / U1 §10): a v10 supervisor DB
+    /// upgraded to v11 must (a) bump `user_version` to 11, (b)
+    /// create the `slot_attempts` table, and (c) keep every v10
+    /// row intact. The test seeds a v10 fixture by running
+    /// migrations on a fresh DB then rolling back to v10, so the
+    /// assertion is on a "real" v10 instance — not a hand-crafted
+    /// DDL script.
+    #[test]
+    fn migration_v10_to_v11_preserves_existing_rows() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("supervisor.db");
+
+        // Phase 1: open fresh DB and migrate to v11 (CURRENT_VERSION).
+        // Then manually rewind `user_version` to 10 so we can
+        // simulate "v10 DB being opened by the upgraded code".
+        {
+            let conn = Connection::open(&path).unwrap();
+            run(&conn).unwrap();
+            assert_eq!(user_version(&conn).unwrap(), CURRENT_VERSION);
+            // Drop the v11 table so the upgrade has work to do.
+            conn.execute_batch("DROP TABLE IF EXISTS slot_attempts")
+                .unwrap();
+            // Roll the user_version back to v10 so the v11
+            // migration re-fires.
+            conn.pragma_update(None, "user_version", 10_i64).unwrap();
+        }
+
+        // Phase 2: seed a representative v10 dataset.
+        // - one wave row (kind=exec, parent_wave_id null)
+        // - one wave_slots row (with the v6 attempt_count column)
+        // - one slot_resources row (parent Worktree binding)
+        // - one slot_descriptors row (so a child can resolve)
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(
+                "INSERT INTO waves (wave_id, idempotency_key, kind, phase, expected_total, slot_retry_budget)
+                   VALUES ('w-v10-legacy', 'idem-v10-legacy', 'exec', 'dispatch', 2, 1);
+                 INSERT INTO wave_slots (wave_id, slot_index, status, isolation, attempt_count, max_attempts)
+                   VALUES ('w-v10-legacy', 0, 'failed', 'worktree', 1, 1);
+                 INSERT INTO slot_resources (wave_id, slot_index, worktree_path, branch)
+                   VALUES ('w-v10-legacy', 0, '/tmp/legacy-worktree', 'ralph/w-v10-legacy-0');
+                 INSERT INTO slot_descriptors
+                   (wave_id, slot_index, slot_index_in_parent, topic, payload_json, wave_kind, payload_digest)
+                   VALUES ('w-v10-legacy', 0, 0, 'exec.unit.ready', '{}', 'exec', 'digest');",
+            )
+            .unwrap();
+        }
+
+        // Phase 3: reopen the DB. `run` must observe user_version=10
+        // and apply the v11 migration, then bump user_version to
+        // 11. Every v10 row must remain unchanged.
+        let conn = Connection::open(&path).unwrap();
+        run(&conn).unwrap();
+        assert_eq!(
+            user_version(&conn).unwrap(),
+            CURRENT_VERSION,
+            "user_version must be 11 after the upgrade"
+        );
+
+        // v11 table exists.
+        let table_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='slot_attempts'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            table_count, 1,
+            "slot_attempts table must exist after upgrade"
+        );
+
+        // Legacy wave row preserved.
+        let wave_kind: String = conn
+            .query_row(
+                "SELECT kind FROM waves WHERE wave_id = 'w-v10-legacy'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(wave_kind, "exec", "legacy wave row preserved");
+
+        // v6 columns preserved.
+        let attempt_count: i64 = conn
+            .query_row(
+                "SELECT attempt_count FROM wave_slots WHERE wave_id = 'w-v10-legacy' AND slot_index = 0",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(attempt_count, 1, "v6 attempt_count preserved");
+
+        // slot_resources row preserved.
+        let path: String = conn
+            .query_row(
+                "SELECT worktree_path FROM slot_resources WHERE wave_id = 'w-v10-legacy'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(path, "/tmp/legacy-worktree", "slot_resources row preserved");
+
+        // slot_descriptors row preserved.
+        let digest: String = conn
+            .query_row(
+                "SELECT payload_digest FROM slot_descriptors WHERE wave_id = 'w-v10-legacy'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(digest, "digest", "slot_descriptors row preserved");
+
+        // The v11 table is empty (no attempt rows existed before).
+        let attempt_rows: i64 = conn
+            .query_row("SELECT COUNT(*) FROM slot_attempts", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(
+            attempt_rows, 0,
+            "slot_attempts starts empty for legacy wave"
         );
     }
 }
