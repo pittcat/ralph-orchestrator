@@ -455,31 +455,4 @@ pub(super) fn is_isolated_exempt_topic(
     })
 }
 
-/// Returns `true` when `topic` is a real business event for the
-/// commit-aware over-emit recovery decision. Diagnostic /
-/// control-plane topics (`task.resume`, `LOOP_COMPLETE`,
-/// `plan.blocked`, `event.isolation.*`, `*.scope_violation`) are
-/// **not** business topics — they are part of the recovery
-/// carrier or runtime bookkeeping and must NOT count as a
-/// "successful commit" that suppresses the over-emit
-/// `task.resume` injection. Plan 2026-07-28-001 U3 R6 / S5 / S10.
-///
-/// Single source of truth: `OverEmitRecovery::resolve()` and any
-/// future caller that decides whether a turn committed at least
-/// one business event go through this helper. Future diagnostic
-/// topics added to the recovery carrier surface should be added
-/// here rather than inlining the predicate.
-pub(crate) fn is_commit_first_business_topic(topic: &str) -> bool {
-    if topic == "task.resume" || topic == "LOOP_COMPLETE" || topic == "plan.blocked" {
-        return false;
-    }
-    if topic.starts_with("event.isolation.") {
-        return false;
-    }
-    if topic.ends_with(".scope_violation") {
-        return false;
-    }
-    true
-}
-
 use super::types::TerminationReason;
