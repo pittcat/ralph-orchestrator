@@ -1839,7 +1839,12 @@ pub trait SupervisorStore: fmt::Debug + Send + Sync {
         child_wave_id: &str,
         child_slot_index: u32,
         limit: Option<u32>,
-    ) -> SupervisorStoreResult<SlotAttemptHistory>;
+    ) -> SupervisorStoreResult<SlotAttemptHistory> {
+        let _ = (child_wave_id, child_slot_index, limit);
+        Err(SupervisorStoreError::Storage(
+            "parent attempt history is unsupported by this store".to_string(),
+        ))
+    }
 
     /// 2026-08-07-009 plan U3 (R6 / S7 / S8 / S13): for a redrive
     /// CHILD wave, resolve the parent slot's `SlotResource` so the
@@ -1853,7 +1858,10 @@ pub trait SupervisorStore: fmt::Debug + Send + Sync {
         &self,
         child_wave_id: &str,
         child_slot_index: u32,
-    ) -> ParentResourceResult<Option<SlotResource>>;
+    ) -> ParentResourceResult<Option<SlotResource>> {
+        let _ = (child_wave_id, child_slot_index);
+        Err(ParentResourceError::NotFound)
+    }
 
     // ─────────────────────────────────────────────────────────────────
     // 2026-07-24-003 plan U4: emission reservation API.

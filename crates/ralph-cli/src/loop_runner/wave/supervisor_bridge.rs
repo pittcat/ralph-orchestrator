@@ -29,6 +29,15 @@
 use std::collections::VecDeque;
 use std::sync::Arc;
 
+fn attempt_history_is_safe_to_reuse(history: &ralph_core::supervisor::SlotAttemptHistory) -> bool {
+    history.attempts.iter().all(|attempt| {
+        !matches!(
+            attempt.status,
+            ralph_core::supervisor::AttemptStatus::Running
+        )
+    })
+}
+
 use ralph_core::supervisor::PhaseInputs;
 use ralph_core::supervisor::worktree_bind::WorktreeFactory;
 use ralph_core::supervisor::{
@@ -393,11 +402,22 @@ impl SupervisorBridge for CoordinatorSupervisorBridge {
             })
         {
             let (parent_path, parent_branch) = parent_resource;
-            if ralph_core::worktree::is_existing_worktree_binding_reusable(
-                &ctx.repo_root,
-                std::path::Path::new(parent_path),
-                parent_branch,
-            ) {
+            // A Git-valid directory is not sufficient evidence that it is
+            // safe to share. A crash can leave the parent's attempt receipt
+            // in `running` while the old worker is still alive. Treat an
+            // attempt lookup failure as unsafe and use the factory path.
+            let parent_attempts_terminal = self
+                .store
+                .parent_slot_attempts(wave_id, slot_index, None)
+                .map(|history| attempt_history_is_safe_to_reuse(&history))
+                .unwrap_or(false);
+            if parent_attempts_terminal
+                && ralph_core::worktree::is_existing_worktree_binding_reusable(
+                    &ctx.repo_root,
+                    std::path::Path::new(parent_path),
+                    parent_branch,
+                )
+            {
                 let worktree_path = std::path::PathBuf::from(parent_path);
                 let mut env = std::collections::HashMap::new();
                 env.insert(
@@ -951,6 +971,41 @@ mod tests {
     //! module owns the bridge surface contract.
     use super::*;
     use ralph_core::supervisor::{InMemorySupervisorStore, SlotResource, SlotStatus};
+
+    fn receipt(
+        status: ralph_core::supervisor::AttemptStatus,
+    ) -> ralph_core::supervisor::SlotAttemptReceipt {
+        ralph_core::supervisor::SlotAttemptReceipt {
+            wave_id: "wave".to_string(),
+            slot_index: 0,
+            attempt_seq: 1,
+            status,
+            started_at_unix_ms: 1,
+            finished_at_unix_ms: 1,
+            start_checkpoint: None,
+            end_checkpoint: None,
+            failure_code: None,
+        }
+    }
+
+    #[test]
+    fn worktree_reuse_rejects_running_attempt_history() {
+        let history = ralph_core::supervisor::SlotAttemptHistory {
+            attempts: vec![receipt(ralph_core::supervisor::AttemptStatus::Running)],
+        };
+        assert!(!attempt_history_is_safe_to_reuse(&history));
+    }
+
+    #[test]
+    fn worktree_reuse_accepts_terminal_attempt_history() {
+        let history = ralph_core::supervisor::SlotAttemptHistory {
+            attempts: vec![
+                receipt(ralph_core::supervisor::AttemptStatus::Failed),
+                receipt(ralph_core::supervisor::AttemptStatus::Succeeded),
+            ],
+        };
+        assert!(attempt_history_is_safe_to_reuse(&history));
+    }
 
     fn assert_disabled(bridge: &CoordinatorSupervisorBridge) {
         // The bridge surface stays usable regardless of the

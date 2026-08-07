@@ -120,22 +120,6 @@ pub fn replay_and_validate(fixture: &str) -> (PolicyRuntimeState, PolicyDecision
     (state, decision)
 }
 
-pub fn review_dimension_ready_payload(plan: &str, step: &str, task: &str, dim: &str) -> String {
-    format!(
-        r#"{{"plan_name":"{plan}","step":"{step}","task_id":"{task}","dimension":"{dim}","wave_id":"w1"}}"#
-    )
-}
-
-pub fn review_start_payload(plan: &str, step: Option<&str>, task: &str) -> String {
-    if let Some(st) = step {
-        format!(
-            r#"{{"plan_name":"{plan}","step":"{st}","task_id":"{task}","task_key":"k-{task}"}}"#
-        )
-    } else {
-        format!(r#"{{"plan_name":"{plan}","task_id":"{task}","task_key":"k-{task}"}}"#)
-    }
-}
-
 pub fn review_dimension_failed_payload(dim: Option<&str>) -> String {
     match dim {
         Some(d) => {
