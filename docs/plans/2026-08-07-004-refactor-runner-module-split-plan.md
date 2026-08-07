@@ -88,7 +88,7 @@ Feature: loop runner 模块拆分
 8. 禁止：拆 inner、改 async 签名/错误/超时常量。
 9. 验收：nextest list、runner/timeout targeted、full。
 10. Red：借用/生命周期/时序测试失败即红；不得顺手修逻辑。
-11. 单测：原 timeout 与 wiring mod 整块搬移。
+11. 单测（characterization-first）：先对现有 timeout 测试与模块 wiring 建立快照，再将原 timeout 测试与 wiring mod 整块搬移；保持路径与断言不变。
 12. 顺序：快照 → timeout → run_impl → inner → entry/re-export → targeted → full → close。
 13. 最小实现：项级搬移、`use super::*`/精确 use、最小可见性。
 14. 集成：runner targeted、`integration_resume`/相关 loop tests、workspace build。
@@ -99,9 +99,14 @@ Feature: loop runner 模块拆分
 19. 停止：发现 inner 语义差异或需改 loop API 时停止。
 20. 缓解：函数整体复制/移动，编译器驱动可见性；不编辑函数体。
 
-## 8. Unit 串行依赖图
+### 计划审查补充：必须明确的执行证据
 
-唯一 Unit 内必须先建立 timeout/entry namespace，再搬 run_impl，最后搬 inner；否则无法区分模块声明错误与 inner 迁移错误。
+- **当前基线前置门禁**：执行开始前必须在当前 HEAD 运行并记录 `./scripts/run-tests.sh`、`cargo build --workspace`、`just fmt-check`、`just lint`、`cargo nextest list --workspace` 的退出码与命中数；任一失败即停止，不得进入拆分。
+- **快照证据**：在首次移动前保存 runner 根、各新目标文件、`run_loop_impl`、`run_loop_impl_inner`、timeout 生产项与 timeout 测试项的清单；对每个生产函数保存规范化函数体 hash，对测试保存函数签名、属性、字符串字面量和断言计数。快照必须能在拆分后逐项复核，不能仅比较测试名称或数量。
+- **单元顺序与中间门禁**：每个搬移阶段完成后先 `cargo build --workspace` 或对应 targeted nextest；编译失败、公开签名变化、函数体 hash 变化、方法/测试项缺失或出现空 stub 时停止并恢复，不得继续下一阶段。
+- **模块边界**：`runner.rs` 仅保留模块声明与必要 re-export；`entry.rs` 只承载 `run_loop_impl` 外层生命周期/终止哨兵/通知；`run_impl.rs` 只承载原 `run_loop_impl` 调度实现；`inner.rs` 整体承载原 `run_loop_impl_inner` 函数体；`sync_timeout.rs` 与 `sync_timeout_tests.rs` 分别整体承载原 timeout 生产项与其测试。不得将函数体切片到多个文件，也不得把测试集中塞入 `misc.rs`。
+- **行为冻结**：允许调整的内容仅为模块路径、`use`/可见性、`mod` 声明和 re-export；禁止改变业务分支、异步签名、超时常量、错误文本、事件 topic/payload、终止诊断、supervisor bridge、worktree/事件文件副作用。
+- **结束证据**：拆分后复核快照，确认 `run_loop_impl_inner` 仍为单一完整函数且 hash 不变；确认所有目标文件行数 `<5,000` 且根文件 `≤150`；确认 targeted 命中目标测试；最后按本计划命令清单完成全量门禁。
 
 ## 9. 执行命令清单
 
