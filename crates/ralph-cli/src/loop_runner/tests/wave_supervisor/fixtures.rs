@@ -2211,6 +2211,77 @@ impl ralph_core::supervisor::SupervisorStore for PersistFailingSupervisorStore {
         self.inner
             .adopt_legacy_emission(scope_key, payload_digest, expected_count, legacy_wave_id)
     }
+
+    // 2026-08-07-009 plan U1 / U3: per-slot attempt receipt +
+    // parent resolver API. `PersistFailingSupervisorStore` only
+    // fails on `persist_slot_descriptor`; the new methods
+    // delegate so U1/U3 integration tests can exercise the
+    // same fault seam without inventing a fourth mock store.
+    fn begin_slot_attempt(
+        &self,
+        wave_id: &str,
+        slot_index: u32,
+        start_checkpoint: Option<ralph_core::supervisor::GitCheckpoint>,
+        started_at_unix_ms: u64,
+    ) -> ralph_core::supervisor::SupervisorStoreResult<ralph_core::supervisor::SlotAttemptReceipt>
+    {
+        self.inner
+            .begin_slot_attempt(wave_id, slot_index, start_checkpoint, started_at_unix_ms)
+    }
+
+    fn finish_slot_attempt(
+        &self,
+        wave_id: &str,
+        slot_index: u32,
+        attempt_seq: u32,
+        status: ralph_core::supervisor::AttemptStatus,
+        end_checkpoint: Option<ralph_core::supervisor::GitCheckpoint>,
+        failure_code: Option<&str>,
+        finished_at_unix_ms: u64,
+    ) -> ralph_core::supervisor::SupervisorStoreResult<ralph_core::supervisor::SlotAttemptReceipt>
+    {
+        self.inner.finish_slot_attempt(
+            wave_id,
+            slot_index,
+            attempt_seq,
+            status,
+            end_checkpoint,
+            failure_code,
+            finished_at_unix_ms,
+        )
+    }
+
+    fn list_slot_attempts(
+        &self,
+        wave_id: &str,
+        slot_index: u32,
+        limit: Option<u32>,
+    ) -> ralph_core::supervisor::SupervisorStoreResult<
+        Vec<ralph_core::supervisor::SlotAttemptReceipt>,
+    > {
+        self.inner.list_slot_attempts(wave_id, slot_index, limit)
+    }
+
+    fn parent_slot_attempts(
+        &self,
+        child_wave_id: &str,
+        child_slot_index: u32,
+        limit: Option<u32>,
+    ) -> ralph_core::supervisor::SupervisorStoreResult<ralph_core::supervisor::SlotAttemptHistory>
+    {
+        self.inner
+            .parent_slot_attempts(child_wave_id, child_slot_index, limit)
+    }
+
+    fn parent_slot_resource(
+        &self,
+        child_wave_id: &str,
+        child_slot_index: u32,
+    ) -> ralph_core::supervisor::ParentResourceResult<Option<ralph_core::supervisor::SlotResource>>
+    {
+        self.inner
+            .parent_slot_resource(child_wave_id, child_slot_index)
+    }
 }
 
 // =============================================================================

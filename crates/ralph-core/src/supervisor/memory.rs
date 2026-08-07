@@ -19,11 +19,13 @@ use std::time::SystemTime;
 #[cfg(test)]
 use super::ProjectionKind;
 use super::{
-    CompensationKind, CoordinationReceiptSummary, DispatchOutcome, EmissionReservation,
-    EmissionState, IdempotencyKey, IsolationMode, ProjectionReceiptSummary, RedrivePendingChild,
-    RedrivePendingChildSlot, RedriveResult, RedriveTakeOutcome, SlotDescriptor, SlotResource,
-    SlotStatus, SupervisorStore, SupervisorStoreError, SupervisorStoreResult, WaveDeliveryState,
-    WaveId, WaveKind, WavePhase, WaveSnapshot,
+    AttemptStatus, CompensationKind, CoordinationReceiptSummary, DispatchOutcome,
+    EmissionReservation, EmissionState, GitCheckpoint, IdempotencyKey, IsolationMode,
+    ParentResourceError, ParentResourceResult, ProjectionReceiptSummary, RedrivePendingChild,
+    RedrivePendingChildSlot, RedriveResult, RedriveTakeOutcome, SlotAttemptHistory,
+    SlotAttemptReceipt, SlotDescriptor, SlotResource, SlotStatus, SupervisorStore,
+    SupervisorStoreError, SupervisorStoreResult, WaveDeliveryState, WaveId, WaveKind, WavePhase,
+    WaveSnapshot,
 };
 
 /// Per-wave descriptor held in `InMemorySupervisorStore::waves`.
@@ -170,6 +172,12 @@ struct Inner {
     /// `parent_slot_index` + `expected_digest` enrichment.
     #[allow(dead_code)] // used in slot_descriptor and create_redrive_wave
     child_parent_slots: HashMap<(String, u32), u32>,
+    /// 2026-08-07-009 plan U1 (R1 / R2 / KTD3): per-`(wave_id,
+    /// slot_index)` attempt ledger. Each entry is a single attempt;
+    /// `attempt_seq` is monotonic within the key. The dispatcher
+    /// appends one row per Worker execution and a redrive child
+    /// reads the parent slot's bounded history.
+    attempts_by_slot: HashMap<(String, u32), Vec<SlotAttemptReceipt>>,
 }
 
 /// 2026-07-24-003 plan U4: in-memory emission reservation row.
@@ -1653,6 +1661,260 @@ impl SupervisorStore for InMemorySupervisorStore {
         }
 
         Ok(results)
+    }
+
+    // ─────────────────────────────────────────────────────────────────
+    // 2026-08-07-009 plan U1 (R1 / R2 / KTD3 / S1-S4): per-slot
+    // attempt receipt API. The mutex makes begin / finish
+    // trivially atomic, so concurrent begin calls on the same
+    // `(wave_id, slot_index)` observe a unique monotonic
+    // `attempt_seq` — exactly the contract the rusqlite adapter
+    // must replicate inside `BEGIN IMMEDIATE`.
+    //
+    // 2026-08-07-009 plan U3 (R5 / R6 / S7 / S8 / S13): parent
+    // resource / attempt history resolvers for redrive boot.
+    // ─────────────────────────────────────────────────────────────────
+
+    fn begin_slot_attempt(
+        &self,
+        wave_id: &str,
+        slot_index: u32,
+        start_checkpoint: Option<GitCheckpoint>,
+        started_at_unix_ms: u64,
+    ) -> SupervisorStoreResult<SlotAttemptReceipt> {
+        let mut inner = self.lock()?;
+        // Validate parent wave + slot exist before allocating a
+        // sequence; a missing slot is a dispatcher bug, not a
+        // crash — fail closed so the dispatcher fail-softs.
+        let wave = inner
+            .waves_by_id
+            .get(wave_id)
+            .ok_or_else(|| SupervisorStoreError::UnknownWave(wave_id.to_string()))?;
+        if !wave.slots.contains_key(&slot_index) {
+            return Err(SupervisorStoreError::UnknownSlot {
+                wave_id: wave_id.to_string(),
+                slot_index,
+            });
+        }
+        let key = (wave_id.to_string(), slot_index);
+        let entries = inner.attempts_by_slot.entry(key).or_default();
+        // Monotonic within the slot: next = max_seq + 1 (handles
+        // a fresh slot, a slot whose only row is `running`, and
+        // any number of terminal rows).
+        let next_seq = entries
+            .iter()
+            .map(|r| r.attempt_seq)
+            .max()
+            .map(|m| m.saturating_add(1))
+            .unwrap_or(1);
+        let receipt = SlotAttemptReceipt {
+            wave_id: wave_id.to_string(),
+            slot_index,
+            attempt_seq: next_seq,
+            status: AttemptStatus::Running,
+            started_at_unix_ms,
+            finished_at_unix_ms: 0,
+            start_checkpoint,
+            end_checkpoint: None,
+            failure_code: None,
+        };
+        entries.push(receipt.clone());
+        Ok(receipt)
+    }
+
+    fn finish_slot_attempt(
+        &self,
+        wave_id: &str,
+        slot_index: u32,
+        attempt_seq: u32,
+        status: AttemptStatus,
+        end_checkpoint: Option<GitCheckpoint>,
+        failure_code: Option<&str>,
+        finished_at_unix_ms: u64,
+    ) -> SupervisorStoreResult<SlotAttemptReceipt> {
+        // Status ↔ failure_code invariants (R1 invariant block):
+        // - Failed MUST have Some failure_code
+        // - Succeeded MUST NOT have a failure_code
+        // - Running is not a finish state (caller bug → InvalidTransition)
+        match status {
+            AttemptStatus::Running => {
+                return Err(SupervisorStoreError::InvalidTransition(
+                    "finish_slot_attempt called with status=running; only succeeded/failed accepted"
+                        .to_string(),
+                ));
+            }
+            AttemptStatus::Failed if failure_code.is_none() => {
+                return Err(SupervisorStoreError::InvalidTransition(
+                    "finish_slot_attempt status=failed requires a stable failure_code".to_string(),
+                ));
+            }
+            AttemptStatus::Succeeded if failure_code.is_some() => {
+                return Err(SupervisorStoreError::InvalidTransition(
+                    "finish_slot_attempt status=succeeded must not carry a failure_code"
+                        .to_string(),
+                ));
+            }
+            _ => {}
+        }
+
+        let mut inner = self.lock()?;
+        let entries = inner
+            .attempts_by_slot
+            .get_mut(&(wave_id.to_string(), slot_index))
+            .ok_or_else(|| SupervisorStoreError::UnknownSlot {
+                wave_id: wave_id.to_string(),
+                slot_index,
+            })?;
+        let receipt = entries
+            .iter_mut()
+            .find(|r| r.attempt_seq == attempt_seq)
+            .ok_or_else(|| {
+                SupervisorStoreError::InvalidTransition(format!(
+                    "attempt_seq={attempt_seq} not found on slot ({wave_id},{slot_index})"
+                ))
+            })?;
+        // State-machine guard: only `running` rows may transition.
+        if !matches!(receipt.status, AttemptStatus::Running) {
+            // Same terminal payload → idempotent success.
+            if receipt.status == status && receipt.failure_code.as_deref() == failure_code {
+                return Ok(receipt.clone());
+            }
+            return Err(SupervisorStoreError::InvalidTransition(format!(
+                "attempt_seq={attempt_seq} already terminal (status={}); cannot transition to {status}",
+                receipt.status
+            )));
+        }
+        receipt.status = status;
+        receipt.finished_at_unix_ms = finished_at_unix_ms;
+        receipt.end_checkpoint = end_checkpoint;
+        receipt.failure_code = failure_code.map(|s| s.to_string());
+        Ok(receipt.clone())
+    }
+
+    fn list_slot_attempts(
+        &self,
+        wave_id: &str,
+        slot_index: u32,
+        limit: Option<u32>,
+    ) -> SupervisorStoreResult<Vec<SlotAttemptReceipt>> {
+        let inner = self.lock()?;
+        let entries = inner
+            .attempts_by_slot
+            .get(&(wave_id.to_string(), slot_index))
+            .cloned()
+            .unwrap_or_default();
+        let mut sorted = entries;
+        sorted.sort_by_key(|r| r.attempt_seq);
+        // `limit` bounds the slice; the returned slice is still
+        // ascending so the renderer can walk it head-first.
+        let bounded: Vec<SlotAttemptReceipt> = match limit {
+            Some(0) => Vec::new(),
+            Some(n) => {
+                let start = sorted.len().saturating_sub(n as usize);
+                sorted.split_at(start).1.to_vec()
+            }
+            None => sorted,
+        };
+        Ok(bounded)
+    }
+
+    fn parent_slot_attempts(
+        &self,
+        child_wave_id: &str,
+        child_slot_index: u32,
+        limit: Option<u32>,
+    ) -> SupervisorStoreResult<SlotAttemptHistory> {
+        let inner = self.lock()?;
+        // Resolve `(child_wave_id, child_slot_index) -> parent_slot_index`
+        // via the in-memory `child_parent_slots` map; when missing
+        // the child has no parent (legacy / unredriven wave) —
+        // return an empty history so the dispatcher renders
+        // nothing rather than fabricating a row.
+        let parent_slot_index = match inner
+            .child_parent_slots
+            .get(&(child_wave_id.to_string(), child_slot_index))
+        {
+            Some(idx) => *idx,
+            None => {
+                return Ok(SlotAttemptHistory::default());
+            }
+        };
+        // The child wave's row carries parent_wave_id; we use that
+        // to scope the parent lookup so two distinct child waves
+        // pointing at the same parent slot still resolve
+        // correctly.
+        let parent_wave_id = inner
+            .waves_by_id
+            .get(child_wave_id)
+            .map(|w| w.parent_wave_id.clone())
+            .unwrap_or(None);
+        let parent_wave_id = match parent_wave_id {
+            Some(id) => id,
+            None => return Ok(SlotAttemptHistory::default()),
+        };
+        let entries = inner
+            .attempts_by_slot
+            .get(&(parent_wave_id, parent_slot_index))
+            .cloned()
+            .unwrap_or_default();
+        let mut sorted = entries;
+        sorted.sort_by_key(|r| r.attempt_seq);
+        let bounded: Vec<SlotAttemptReceipt> = match limit {
+            Some(0) => Vec::new(),
+            Some(n) => {
+                let start = sorted.len().saturating_sub(n as usize);
+                sorted.split_at(start).1.to_vec()
+            }
+            None => sorted,
+        };
+        Ok(SlotAttemptHistory { attempts: bounded })
+    }
+
+    fn parent_slot_resource(
+        &self,
+        child_wave_id: &str,
+        child_slot_index: u32,
+    ) -> ParentResourceResult<Option<SlotResource>> {
+        let inner = self
+            .lock()
+            .map_err(|e| ParentResourceError::Storage(e.to_string()))?;
+        let parent_slot_index = match inner
+            .child_parent_slots
+            .get(&(child_wave_id.to_string(), child_slot_index))
+        {
+            Some(idx) => *idx,
+            None => return Err(ParentResourceError::NotFound),
+        };
+        let parent_wave_id = match inner
+            .waves_by_id
+            .get(child_wave_id)
+            .and_then(|w| w.parent_wave_id.clone())
+        {
+            Some(id) => id,
+            None => return Err(ParentResourceError::NotFound),
+        };
+        let parent_wave = match inner.waves_by_id.get(&parent_wave_id) {
+            Some(w) => w,
+            None => return Err(ParentResourceError::NotFound),
+        };
+        let slot = match parent_wave.slots.get(&parent_slot_index) {
+            Some(s) => s,
+            None => return Err(ParentResourceError::NotFound),
+        };
+        // SharedReadonly parent → there is no Worktree to reuse,
+        // but no factory fallback either (the parent never had
+        // an isolated worktree). The dispatcher renders
+        // "review-context only" and skips the binding step.
+        if matches!(slot.isolation, IsolationMode::SharedReadonly) {
+            return Ok(None);
+        }
+        // Worktree-isolated parent slot that was never bound →
+        // `Unbound`: the bridge must call the factory instead of
+        // trying to reuse a non-existent path.
+        match &slot.resource {
+            Some(r) => Ok(Some(r.clone())),
+            None => Err(ParentResourceError::Unbound),
+        }
     }
 
     // ─────────────────────────────────────────────────────────────────
