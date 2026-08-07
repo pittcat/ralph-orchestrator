@@ -1,15 +1,12 @@
-//! Test cases (split) for event_policy.
-//! Plan 2026-08-07-002 §7 U2 §5: original 5,222-line tests block split into
-//! helpers + two test files. Helpers shared via the tests/ module tree.
+// Test cases (split) for event_policy.
+// Plan 2026-08-07-002 §7 U2 §5: original 5,222-line tests block split into
+// helpers + two test files. Helpers shared via the tests/ module tree.
 
-#[cfg(test)]
-pub mod tests {
-    use crate::config::{ElementConstraint, EventSchema, HatAllowedValues, TopicDenyRule};
-    use crate::event_policy::tests::helpers;
-    use crate::event_policy::tests::helpers::*;
-    use std::collections::HashMap;
-    use std::io::Write;
-    use tempfile::NamedTempFile;
+use crate::config::{ElementConstraint, EventSchema, HatAllowedValues, TopicDenyRule};
+use crate::event_policy::tests::helpers::*;
+use std::collections::HashMap;
+use std::io::Write;
+use tempfile::NamedTempFile;
 
     #[test]
     fn test_matches_topic_rule_exact_and_glob() {
@@ -872,4 +869,3 @@ pub mod tests {
         );
         assert_eq!(decision, PolicyDecision::Accept);
     }
-}

@@ -1,15 +1,6 @@
-//! Test cases (split) for event_policy.
-//! Plan 2026-08-07-002 §7 U2 §5: original 5,222-line tests block split into
-//! helpers + two test files. Helpers shared via the tests/ module tree.
-
-#[cfg(test)]
-pub mod tests {
-    use crate::config::{ElementConstraint, EventSchema, HatAllowedValues, TopicDenyRule};
-    use crate::event_policy::tests::helpers;
-    use crate::event_policy::tests::helpers::*;
-    use std::collections::HashMap;
-    use std::io::Write;
-    use tempfile::NamedTempFile;
+// Test cases (split) for event_policy.
+// Plan 2026-08-07-002 §7 U2 §5: original 5,222-line tests block split into
+// helpers + two test files. Helpers shared via the tests/ module tree.
 
     #[test]
     fn test_plan_name_equality_mismatch_rejected() {
@@ -1399,4 +1390,3 @@ pub mod tests {
             NextHatCandidates::Verified { hats: Vec::new() }
         );
     }
-}
