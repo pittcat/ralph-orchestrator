@@ -1,11 +1,6 @@
-#![cfg_attr(test, allow(dead_code))]
 //! Test helpers shared between tests_part1 and tests_part2.
-//! Plan 2026-08-07-002 §7 U2 §5: helpers extracted from original tests block,
-//! not duplicated. Each helper below is byte-equivalent to its origin.
-//!
-//! Helpers are split between two test files (tests_part1, tests_part2) — each
-//! helper may be referenced by only one of them. `#![cfg_attr(test, allow(dead_code))]`
-//! suppresses the unused-fn lint without changing visibility or behaviour.
+//! Plan 2026-08-07-002 §7 U6: dead helpers removed; all remaining helpers
+//! are actively used by the test suite.
 
 pub use crate::config::{
     ElementConstraint, EventSchema, HandoffEnvelopeConfig, HatAllowedValues, RalphConfig,
@@ -125,54 +120,7 @@ pub fn replay_and_validate(fixture: &str) -> (PolicyRuntimeState, PolicyDecision
     (state, decision)
 }
 
-pub fn review_passed_allowlist_config() -> EventPolicyConfig {
-    let mut config = test_config();
-    let mut schema = EventSchema {
-        payload: Some(PayloadType::JsonObject),
-        required_fields: vec![
-            "plan_name".into(),
-            "task_id".into(),
-            "task_key".into(),
-            "step".into(),
-            "findings_count".into(),
-            "fix_round".into(),
-            "verdict".into(),
-            "skip_reason".into(),
-        ],
-        allowed_values: HashMap::new(),
-        hat_allowed_values: HashMap::new(),
-        ..Default::default()
-    };
-    // Mirror the ce-executor.yml U4 allowlist exactly.
-    schema.allowed_values.insert(
-        "skip_reason".to_string(),
-        vec![
-            Value::String("empty_diff".to_string()),
-            Value::String("trivial_step".to_string()),
-            Value::String("aggregate_timeout".to_string()),
-        ],
-    );
-    // U8: hat-aware restrictions mirror the preset.
-    schema.hat_allowed_values.insert(
-        "skip_reason".to_string(),
-        vec![
-            HatAllowedValues {
-                hat_id: "review-coordinator".to_string(),
-                values: vec![Value::String("empty_diff".to_string())],
-            },
-            HatAllowedValues {
-                hat_id: "review-synthesizer".to_string(),
-                values: vec![Value::String("aggregate_timeout".to_string())],
-            },
-        ],
-    );
-    config.schemas.insert("review.passed".to_string(), schema);
-    config
-}
 
-pub fn work_done_payload(plan: &str, step: &str, task: &str) -> String {
-    format!(r#"{{"plan_name":"{plan}","step":"{step}","task_id":"{task}","task_key":"k"}}"#)
-}
 
 pub fn review_dimension_ready_payload(plan: &str, step: &str, task: &str, dim: &str) -> String {
     format!(
@@ -199,62 +147,10 @@ pub fn review_dimension_failed_payload(dim: Option<&str>) -> String {
     }
 }
 
-pub fn review_dimensions_complete_payload(
-    plan: &str,
-    step: &str,
-    task: &str,
-    fix_round: u32,
-) -> String {
-    format!(
-        r#"{{"plan_name":"{plan}","step":"{step}","task_id":"{task}","fix_round":{fix_round},"dimensions":[]}}"#
-    )
-}
 
-pub fn insert_review_dimensions_schema(
-    config: &mut EventPolicyConfig,
-    field: &str,
-    required: bool,
-    allowed: Vec<serde_json::Value>,
-    required_when: HashMap<String, serde_json::Value>,
-    forbid_null: bool,
-) {
-    let constraint = ElementConstraint {
-        field: field.to_string(),
-        required,
-        allowed_values: allowed,
-        required_when,
-        forbid_null_when_required: forbid_null,
-    };
-    let mut ec = HashMap::new();
-    ec.insert("dimensions".to_string(), constraint);
-    config.schemas.insert(
-        "review.dimensions.complete".to_string(),
-        EventSchema {
-            payload: Some(PayloadType::JsonObject),
-            required_fields: vec!["dimensions".to_string()],
-            element_constraints: ec,
-            ..Default::default()
-        },
-    );
-}
 
-pub fn test_config_with_enforce_and_resume() -> EventPolicyConfig {
-    let mut config = EventPolicyConfig::default();
-    config.enabled = true;
-    config.mode = EventPolicyMode::Enforce;
-    config.on_violation = ViolationAction::RejectWithResume;
-    config
-}
 
-pub fn work_ready_payload(plan: &str, step: &str, task: &str) -> String {
-    format!(r#"{{"plan_name":"{plan}","step":"{step}","task_id":"{task}","task_key":"k"}}"#)
-}
 
-pub fn test_result_payload(plan: &str, step: &str, task: &str, fix_round: u64) -> String {
-    format!(
-        r#"{{"plan_name":"{plan}","step":"{step}","task_id":"{task}","fix_round":{fix_round},"tests_run":10,"tests_passed":10}}"#
-    )
-}
 
 pub fn full_payload() -> serde_json::Value {
     serde_json::json!({
