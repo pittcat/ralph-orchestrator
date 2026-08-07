@@ -11,6 +11,9 @@
 #![allow(unused_imports)]
 
 use super::super::super::*;
+use super::super::common::*;
+use super::super::fake_path::*;
+use super::helpers::*;
 use crate::test_support::CwdGuard;
 use ralph_core::HatRegistry;
 use ralph_core::planning_session::{ConversationEntry, ConversationType};
@@ -18,9 +21,6 @@ use ralph_proto::{Hat, Topic};
 use std::collections::HashSet;
 use std::ffi::OsStr;
 use std::sync::{Arc, Mutex};
-use super::super::common::*;
-use super::super::fake_path::*;
-use super::helpers::*;
 
 // Test: test_recover_late_events_before_fallback_routes_pending_work
 #[test]
@@ -872,9 +872,11 @@ fn test_interrupt_helper_with_empty_hat_channel_does_not_corrupt_events() {
     let diag_dir = ctx.ralph_dir().join("diagnostics");
     let has_diag = std::fs::read_dir(&diag_dir)
         .map(|entries| {
-            entries
-                .filter_map(|e| e.ok())
-                .any(|e| e.file_name().to_string_lossy().contains("channel-routing-fallback"))
+            entries.filter_map(|e| e.ok()).any(|e| {
+                e.file_name()
+                    .to_string_lossy()
+                    .contains("channel-routing-fallback")
+            })
         })
         .unwrap_or(false);
     assert!(

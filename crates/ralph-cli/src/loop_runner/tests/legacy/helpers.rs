@@ -8,6 +8,8 @@
 #![allow(unused_imports)]
 
 use super::super::super::*;
+use super::super::common::*;
+use super::super::fake_path::*;
 use crate::test_support::CwdGuard;
 use ralph_core::HatRegistry;
 use ralph_core::planning_session::{ConversationEntry, ConversationType};
@@ -15,8 +17,6 @@ use ralph_proto::{Hat, Topic};
 use std::collections::HashSet;
 use std::ffi::OsStr;
 use std::sync::{Arc, Mutex};
-use super::super::common::*;
-use super::super::fake_path::*;
 
 // Helper: fn make_event_loop_for_recovery_test
 pub(crate) fn make_event_loop_for_recovery_test() -> EventLoop {
@@ -59,7 +59,9 @@ pub(crate) fn u4_session_dir(workspace_root: &Path) -> std::path::PathBuf {
 
 // Helper: fn u4_recovery_journal
 #[cfg(unix)]
-pub(crate) fn u4_recovery_journal(workspace_root: &Path) -> Vec<ralph_core::diagnosis::RecoveryJournalEntry> {
+pub(crate) fn u4_recovery_journal(
+    workspace_root: &Path,
+) -> Vec<ralph_core::diagnosis::RecoveryJournalEntry> {
     let path = u4_session_dir(workspace_root).join("recovery.jsonl");
     let content = std::fs::read_to_string(&path)
         .unwrap_or_else(|e| panic!("read recovery.jsonl: {e}: path={}", path.display()));
@@ -78,7 +80,10 @@ pub(crate) fn u4_orchestration_log(workspace_root: &Path) -> std::path::PathBuf 
 
 // Helper: fn u4_orchestration_has_recovery_diagnosed
 #[cfg(unix)]
-pub(crate) fn u4_orchestration_has_recovery_diagnosed(workspace_root: &Path, diagnosis_id: &str) -> bool {
+pub(crate) fn u4_orchestration_has_recovery_diagnosed(
+    workspace_root: &Path,
+    diagnosis_id: &str,
+) -> bool {
     let path = u4_orchestration_log(workspace_root);
     let content = match std::fs::read_to_string(&path) {
         Ok(c) => c,
@@ -366,7 +371,10 @@ pub(crate) fn u5_stage_events_file(workspace: &Path, file_name: &str) -> (LoopCo
 }
 
 // Helper: fn build_isolated_event_loop
-pub(crate) fn build_isolated_event_loop(config: ralph_core::RalphConfig, hat_label: Option<&str>) -> EventLoop {
+pub(crate) fn build_isolated_event_loop(
+    config: ralph_core::RalphConfig,
+    hat_label: Option<&str>,
+) -> EventLoop {
     let mut el = EventLoop::new(config);
     if let Some(label) = hat_label {
         el.state_mut().last_hat = Some(HatId::new(label));
@@ -375,7 +383,13 @@ pub(crate) fn build_isolated_event_loop(config: ralph_core::RalphConfig, hat_lab
 }
 
 // Helper: fn seed_hat_channel
-pub(crate) fn seed_hat_channel(ctx: &ralph_core::LoopContext, hat: &str, loop_id: &str, iteration: u32, contents: &str) -> std::path::PathBuf {
+pub(crate) fn seed_hat_channel(
+    ctx: &ralph_core::LoopContext,
+    hat: &str,
+    loop_id: &str,
+    iteration: u32,
+    contents: &str,
+) -> std::path::PathBuf {
     let channel_path =
         crate::loop_runner::paths::hat_channel_events_path(ctx, hat, loop_id, iteration);
     if let Some(parent) = channel_path.parent() {

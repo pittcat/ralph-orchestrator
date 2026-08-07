@@ -11,6 +11,9 @@
 #![allow(unused_imports)]
 
 use super::super::super::*;
+use super::super::common::*;
+use super::super::fake_path::*;
+use super::helpers::*;
 use crate::test_support::CwdGuard;
 use ralph_core::HatRegistry;
 use ralph_core::planning_session::{ConversationEntry, ConversationType};
@@ -18,9 +21,6 @@ use ralph_proto::{Hat, Topic};
 use std::collections::HashSet;
 use std::ffi::OsStr;
 use std::sync::{Arc, Mutex};
-use super::super::common::*;
-use super::super::fake_path::*;
-use super::helpers::*;
 
 // Test: test_main_pty_watchdog_aligns_with_wave_worker_partial_events_semantics
 #[test]
