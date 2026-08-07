@@ -1,12 +1,11 @@
 use crate::{
-    ConfigSource, config_resolution, display::colors, hat_command_policy::HatCommandPolicy,
+    ConfigSource, config_resolution, hat_command_policy::HatCommandPolicy,
     operation_guard::OperationContext, resolve_path_from_workspace, resolve_workspace_root,
 };
-use anyhow::{Context, Result, bail};
+use anyhow::{Result, bail};
 use chrono::{DateTime, Utc};
-use clap::{Args, Parser, Subcommand, ValueEnum};
-use ralph_core::{ConfirmMatch, ConfirmationState, Task, TaskConfirmation, TaskStatus, TaskStore};
-use std::path::{Path, PathBuf};
+use ralph_core::{Task, TaskStatus, TaskStore};
+use std::path::PathBuf;
 
 use super::args::*;
 /// Gets the tasks file path.

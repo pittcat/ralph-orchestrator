@@ -462,7 +462,10 @@ impl CorrectionContext {
             return;
         }
         if !self.allowed_topics.is_empty() {
-            out.push_str(&format!("- Allowed topics: {}\n", self.allowed_topics.join(", ")));
+            out.push_str(&format!(
+                "- Allowed topics: {}\n",
+                self.allowed_topics.join(", ")
+            ));
         }
         if !self.required_fields.is_empty() {
             out.push_str(&format!(
@@ -484,7 +487,9 @@ impl CorrectionContext {
     /// rejections when evidence is present.
     fn render_structured_evidence(&self, out: &mut String) {
         use crate::safe_display::{MAX_RULE_MESSAGE_BYTES, safe_display};
-        let Some(evidence) = &self.evidence else { return };
+        let Some(evidence) = &self.evidence else {
+            return;
+        };
         if evidence.synthetic {
             out.push_str(
                 "- Evidence: gate_silent_or_ambiguous — observation unavailable; the precheck gate did not produce a fact-checked result; do not assume any checklist item was verified.\n",
@@ -496,13 +501,9 @@ impl CorrectionContext {
                 .map(|o| {
                     format!(
                         "{}={}",
-                        safe_display(&o.field, MAX_RULE_MESSAGE_BYTES)
-                            .as_quoted_diagnostic(),
-                        safe_display(
-                            &o.value.as_display_string(),
-                            MAX_OBSERVATION_VALUE_BYTES,
-                        )
-                        .as_quoted_diagnostic()
+                        safe_display(&o.field, MAX_RULE_MESSAGE_BYTES).as_quoted_diagnostic(),
+                        safe_display(&o.value.as_display_string(), MAX_OBSERVATION_VALUE_BYTES,)
+                            .as_quoted_diagnostic()
                     )
                 })
                 .collect();
@@ -511,8 +512,7 @@ impl CorrectionContext {
         if !evidence.invariant.is_empty() {
             out.push_str(&format!(
                 "- Invariant: {}\n",
-                safe_display(&evidence.invariant, MAX_RULE_MESSAGE_BYTES)
-                    .as_quoted_diagnostic()
+                safe_display(&evidence.invariant, MAX_RULE_MESSAGE_BYTES).as_quoted_diagnostic()
             ));
         }
         if !evidence.proof.is_empty() {
@@ -571,7 +571,7 @@ impl CorrectionContext {
              - treating the rejection as proof of success\n\
                or as permission to re-emit the original\n\
                payload\n"
-            .to_string(),
+                .to_string(),
         )
     }
 
@@ -911,7 +911,8 @@ impl PromptContext {
                     .map(|e| e.retry_key == key && e.topic == topic)
                     .unwrap_or(false),
                 "push_correction: tail entry for (retry_key={}, topic={}) does not match the pushed entry",
-                key, topic
+                key,
+                topic
             );
         }
     }
@@ -1341,7 +1342,11 @@ mod tests {
     // ─────────────────────────────────────────────────────────────────
 
     /// Minimal context for `push_correction` tests.
-    fn push_correction_test_ctx(retry_key: &str, topic: &str, target_hat: &str) -> CorrectionContext {
+    fn push_correction_test_ctx(
+        retry_key: &str,
+        topic: &str,
+        target_hat: &str,
+    ) -> CorrectionContext {
         CorrectionContext {
             retry_key: retry_key.into(),
             topic: topic.into(),
@@ -1382,10 +1387,7 @@ mod tests {
             .correction_blocks
             .iter_mut()
             .rfind(|c| c.retry_key == "K" && c.topic == "T");
-        assert!(
-            found.is_some(),
-            "rfind should locate an entry for (K, T)"
-        );
+        assert!(found.is_some(), "rfind should locate an entry for (K, T)");
         let found = found.unwrap();
         assert_eq!(
             found.target_hat.as_deref(),

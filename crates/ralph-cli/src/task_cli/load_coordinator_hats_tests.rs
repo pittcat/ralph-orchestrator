@@ -1,5 +1,4 @@
 #![cfg(test)]
-use super::*;
 
 // ─────────────────────────────────────────────────────────────────────────
 // U7 (2026-07-04-003 plan): `load_coordinator_hats` typed error tests.

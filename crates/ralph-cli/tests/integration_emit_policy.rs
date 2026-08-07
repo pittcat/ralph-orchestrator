@@ -819,13 +819,7 @@ fn test_emit_compile_failure_does_not_write_event() {
 
     // 1) --policy-check (dry-run) must fail with contract_compile_failed.
     let check = common::ralph_bin()
-        .args([
-            "emit",
-            "work.done",
-            "-j",
-            payload,
-            "--policy-check",
-        ])
+        .args(["emit", "work.done", "-j", payload, "--policy-check"])
         .current_dir(temp_path)
         .env("RALPH_CURRENT_HAT", "worker")
         .output()

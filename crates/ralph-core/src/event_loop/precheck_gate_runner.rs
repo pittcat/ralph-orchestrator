@@ -632,8 +632,7 @@ mod tests {
     #[test]
     fn u2_build_precheck_evidence_preserves_string_check_identity() {
         use crate::correction::ObservationValue;
-        let json =
-            r#"{"failed_checks":["confidence_inflated"],"reason":"missing evidence","synthetic":false}"#;
+        let json = r#"{"failed_checks":["confidence_inflated"],"reason":"missing evidence","synthetic":false}"#;
         let evidence = build_precheck_evidence("work.done", json).unwrap();
         assert_eq!(evidence.observed.len(), 1);
         assert_eq!(evidence.observed[0].field, "check_confidence_inflated");

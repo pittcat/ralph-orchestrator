@@ -38,12 +38,14 @@ mod tests;
 // `task_cli::validate_owner_hat_id`, `task_cli::authorize_lifecycle`,
 // `task_cli::emit_close_completion_warning`, `task_cli::read_current_loop_id`)
 // rely on. Item-level moves only — no behavior changes.
-pub use args::{
-    AddArgs, CloseArgs, ConfirmArgs, CoordinatorHatsError, EnsureArgs, FailArgs, ListArgs,
-    OutputFormat, ReadyArgs, ReopenArgs, ShowArgs, StartArgs, TaskArgs, TaskCommands,
-    VerifyAddArgs, VerifyArgs, VerifyCommands, VerifyEmitBridgeArgs, VerifyEnsureArgs,
-    VerifyFormatArgs, VerifyOutcome, load_coordinator_hats,
+#[cfg(test)]
+#[allow(unused_imports)]
+pub(crate) use args::{
+    AddArgs, CloseArgs, ConfirmArgs, EnsureArgs, FailArgs, ListArgs, OutputFormat, ReadyArgs,
+    ReopenArgs, ShowArgs, StartArgs, VerifyAddArgs, VerifyArgs, VerifyCommands,
+    VerifyEmitBridgeArgs, VerifyEnsureArgs, VerifyFormatArgs, VerifyOutcome,
 };
+pub use args::{CoordinatorHatsError, TaskArgs, TaskCommands, load_coordinator_hats};
 // `authorize_lifecycle`, `validate_owner_hat_id`, and `read_current_loop_id`
 // remain `pub(crate)` (item-level visibility unchanged). Doc comments in
 // `hat_command_policy.rs` and `operation_guard.rs` still reference
@@ -56,22 +58,28 @@ pub use args::{
 #[cfg(test)]
 pub(crate) use cmd_add_ensure::{add_task_with_args, ensure_task_with_args};
 #[cfg(test)]
+#[allow(unused_imports)]
 pub(crate) use cmd_add_ensure::{
     add_task_with_confirmation, ensure_task_with_confirmation, print_added_task, print_ensured_task,
 };
 #[cfg(test)]
+#[allow(unused_imports)]
 pub(crate) use cmd_fail_verify::{
     emit_bridge_deny, execute_verify_emit_bridge, fail_task_with_context, gate_outcome,
     print_confirmed_task, reopen_task_with_context, verify_add, verify_ensure, verify_lifecycle,
 };
 #[cfg(test)]
+#[allow(unused_imports)]
 pub(crate) use cmd_list_close::{
     build_close_warning_payload, build_close_warning_payload_missing_marker,
     close_task_with_context, close_task_with_context_and_config, emit_close_completion_warning,
     parse_topics_from_jsonl_tail, start_task_with_context,
 };
 #[cfg(test)]
+#[allow(unused_imports)]
 pub(crate) use validation::read_current_loop_id;
+#[cfg(test)]
+#[allow(unused_imports)]
 pub(crate) use validation::{
     add_common_task_fields, authorize_lifecycle, canonical_add_payload, canonical_ensure_payload,
     enforce_command_policy, filter_tasks_for_list, filter_tasks_for_ready, gate_identifiers,

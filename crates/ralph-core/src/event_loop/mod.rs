@@ -15100,7 +15100,10 @@ mod u1_render_correction_entries_preamble {
     fn semantic_entry_uses_contradicted_preamble() {
         // When any entry is Semantic, the semantic preamble must
         // be used even if other entries are Mechanical.
-        let entries = vec![mechanical_context("work.done"), semantic_context("review.passed")];
+        let entries = vec![
+            mechanical_context("work.done"),
+            semantic_context("review.passed"),
+        ];
         let result = render_correction_entries(&entries);
         assert!(
             result.contains("contradicted an invariant"),
@@ -15118,7 +15121,10 @@ mod u1_render_correction_entries_preamble {
     fn pure_mechanical_uses_legacy_preamble() {
         // When all entries are Mechanical, the legacy preamble
         // must be used.
-        let entries = vec![mechanical_context("work.done"), mechanical_context("review.passed")];
+        let entries = vec![
+            mechanical_context("work.done"),
+            mechanical_context("review.passed"),
+        ];
         let result = render_correction_entries(&entries);
         assert!(
             result.contains("Address each"),
@@ -15136,7 +15142,10 @@ mod u1_render_correction_entries_preamble {
     fn pure_semantic_uses_contradicted_preamble() {
         // When all entries are Semantic, the semantic preamble
         // must be used.
-        let entries = vec![semantic_context("work.done"), semantic_context("review.passed")];
+        let entries = vec![
+            semantic_context("work.done"),
+            semantic_context("review.passed"),
+        ];
         let result = render_correction_entries(&entries);
         assert!(
             result.contains("contradicted an invariant"),

@@ -3348,8 +3348,7 @@ mod tests {
                     "{name}: {topic}.report_input_file needs meaning/source/fill_rule"
                 );
                 assert!(
-                    docs.meaning.contains("under .ralph/")
-                        && docs.fill_rule.contains(".ralph/"),
+                    docs.meaning.contains("under .ralph/") && docs.fill_rule.contains(".ralph/"),
                     "{name}: {topic}.report_input_file must identify the .ralph artifact path"
                 );
             }

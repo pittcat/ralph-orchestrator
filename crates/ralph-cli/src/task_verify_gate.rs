@@ -148,11 +148,7 @@ pub fn scoped_ticket_path(
     loop_id: &str,
     hat_id: &str,
 ) -> PathBuf {
-    if verb.is_empty()
-        && canonical_payload.is_empty()
-        && loop_id.is_empty()
-        && hat_id.is_empty()
-    {
+    if verb.is_empty() && canonical_payload.is_empty() && loop_id.is_empty() && hat_id.is_empty() {
         // Back-compat caller (no scope). Return the legacy path
         // so existing wiring (`record_ticket` without a scope)
         // continues to compile. The runtime check below in
@@ -187,7 +183,13 @@ fn short_intent_digest(verb: &str, canonical_payload: &str, loop_id: &str, hat_i
 fn safe_segment(s: &str) -> String {
     let cleaned: String = s
         .chars()
-        .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
         .take(64)
         .collect();
     if cleaned.is_empty() {
@@ -487,13 +489,15 @@ pub fn try_claim_matching_ticket(
     // lock finds the prepared ticket, validates it, and renames
     // it to the claim marker. The second acquires the lock after
     // the first releases it and finds no prepared record.
-    let _lock_guard = FileLock::new(path).and_then(|l| l.exclusive()).map_err(|e| {
-        anyhow::anyhow!(
-            "{DENY_PREFIX} '{verb}': failed to acquire gate lock: {err}",
-            verb = verb,
-            err = e,
-        )
-    })?;
+    let _lock_guard = FileLock::new(path)
+        .and_then(|l| l.exclusive())
+        .map_err(|e| {
+            anyhow::anyhow!(
+                "{DENY_PREFIX} '{verb}': failed to acquire gate lock: {err}",
+                verb = verb,
+                err = e,
+            )
+        })?;
 
     let record = match read_ticket(path)? {
         Some(r) => r,
@@ -788,10 +792,7 @@ mod task_verify_gate_tests {
         let result_a = handle_a.join().expect("thread a");
         let result_b = handle_b.join().expect("thread b");
 
-        let oks = [&result_a, &result_b]
-            .iter()
-            .filter(|r| r.is_ok())
-            .count();
+        let oks = [&result_a, &result_b].iter().filter(|r| r.is_ok()).count();
         let denials = [&result_a, &result_b]
             .iter()
             .filter(|r| {
@@ -801,8 +802,15 @@ mod task_verify_gate_tests {
                     .unwrap_or(false)
             })
             .count();
-        assert_eq!(oks, 1, "exactly one Apply must win: a={:?} b={:?}", result_a, result_b);
-        assert_eq!(denials, 1, "exactly one Apply must be denied with stable prefix");
+        assert_eq!(
+            oks, 1,
+            "exactly one Apply must win: a={:?} b={:?}",
+            result_a, result_b
+        );
+        assert_eq!(
+            denials, 1,
+            "exactly one Apply must be denied with stable prefix"
+        );
     }
 
     /// U1: when the explicit two-step claim lifecycle is used
@@ -840,10 +848,7 @@ mod task_verify_gate_tests {
         try_claim_matching_ticket(&path, &cfg, &ctx, "add", &fp).expect("re-claim");
         consume_claimed_ticket(&path).expect("consume after successful apply");
         assert!(!path.exists(), "consume must remove the prepared record");
-        assert!(
-            !marker.exists(),
-            "consume must remove the claim marker"
-        );
+        assert!(!marker.exists(), "consume must remove the claim marker");
     }
 
     // ─────────────────────────────────────────────────────────────────
@@ -873,12 +878,16 @@ mod task_verify_gate_tests {
         let ensure_fp =
             mutation_fingerprint("ensure", r#"{"title":"b","key":"k"}"#, "loop-1", "executor");
         let add_path = scoped_for(&ws, "add", r#"{"title":"a"}"#, "loop-1", "executor");
-        let ensure_path =
-            scoped_for(&ws, "ensure", r#"{"title":"b","key":"k"}"#, "loop-1", "executor");
+        let ensure_path = scoped_for(
+            &ws,
+            "ensure",
+            r#"{"title":"b","key":"k"}"#,
+            "loop-1",
+            "executor",
+        );
 
         record_ticket(&add_path, &add_fp, "loop-1", "executor").expect("record add");
-        record_ticket(&ensure_path, &ensure_fp, "loop-1", "executor")
-            .expect("record ensure");
+        record_ticket(&ensure_path, &ensure_fp, "loop-1", "executor").expect("record ensure");
 
         // Both records exist independently.
         assert!(add_path.exists(), "add ticket must be on disk");
@@ -911,10 +920,8 @@ mod task_verify_gate_tests {
         let cfg = default_config(true);
 
         let payload = r#"{"title":"t"}"#;
-        let fp_loop_a =
-            mutation_fingerprint("add", payload, "loop-a", "executor");
-        let fp_loop_b =
-            mutation_fingerprint("add", payload, "loop-b", "executor");
+        let fp_loop_a = mutation_fingerprint("add", payload, "loop-a", "executor");
+        let fp_loop_b = mutation_fingerprint("add", payload, "loop-b", "executor");
         let path_loop_a = scoped_for(&ws, "add", payload, "loop-a", "executor");
         let path_loop_b = scoped_for(&ws, "add", payload, "loop-b", "executor");
 
@@ -985,7 +992,10 @@ mod task_verify_gate_tests {
         let payload_b = r#"{"title":"B"}"#;
         let path_a = scoped_for(&ws, "add", payload_a, "loop-1", "executor");
         let path_b = scoped_for(&ws, "add", payload_b, "loop-1", "executor");
-        assert_ne!(path_a, path_b, "distinct intents must produce distinct files");
+        assert_ne!(
+            path_a, path_b,
+            "distinct intents must produce distinct files"
+        );
     }
 
     // ── Unit 1 (task confirmation): pending gate precheck ───────────

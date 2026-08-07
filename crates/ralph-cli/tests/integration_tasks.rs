@@ -515,7 +515,8 @@ fn test_task_verify_concurrent_apply_claims_once() {
         .count();
 
     assert_eq!(
-        oks, 1,
+        oks,
+        1,
         "exactly one Apply must win: a.success={} b.success={}; a.stderr={} b.stderr={}",
         result_a.status.success(),
         result_b.status.success(),
@@ -523,7 +524,8 @@ fn test_task_verify_concurrent_apply_claims_once() {
         String::from_utf8_lossy(&result_b.stderr)
     );
     assert_eq!(
-        denials, 1,
+        denials,
+        1,
         "the loser must be denied with task_verify_gate denied prefix; \
          a.stderr={} b.stderr={}",
         String::from_utf8_lossy(&result_a.stderr),
@@ -586,10 +588,7 @@ fn test_task_verify_mismatch_preserves_prepared_record() {
     // The prepared ticket for "Original title" must still be on
     // disk under the per-intent namespace.
     let ticket_dir = temp_path.join(".ralph/agent/task-tickets");
-    assert!(
-        ticket_dir.is_dir(),
-        "scoped ticket directory must exist"
-    );
+    assert!(ticket_dir.is_dir(), "scoped ticket directory must exist");
     let ticket_count = std::fs::read_dir(&ticket_dir)
         .expect("read ticket dir")
         .filter_map(|e| e.ok())
@@ -675,8 +674,7 @@ fn test_task_verify_add_and_ensure_tickets_coexist() {
     write_agent_gate_preset(temp_path);
 
     // Step 1: verify both intents in the same workspace.
-    let verify_add =
-        spawn_verify(temp_path, "add", &["Scoped add target"]);
+    let verify_add = spawn_verify(temp_path, "add", &["Scoped add target"]);
     let verify_ensure = spawn_verify(
         temp_path,
         "ensure",
@@ -729,8 +727,7 @@ fn test_task_verify_add_and_ensure_tickets_coexist() {
     // pending confirmation on its row; consume it so the next same-scope
     // protected mutation passes the gate. (Added step — the ticket
     // independence assertions below are unchanged.)
-    let (add_id, add_ref, add_digest) =
-        confirmation_of_task_titled(temp_path, "Scoped add target");
+    let (add_id, add_ref, add_digest) = confirmation_of_task_titled(temp_path, "Scoped add target");
     let confirm_add = spawn_confirm(temp_path, "loop-u2", &add_id, &add_ref, &add_digest);
     assert!(
         confirm_add.status.success(),
@@ -1287,10 +1284,7 @@ fn test_task_confirmation_pending_blocks_next_mutation_until_confirmed() {
 
     // No side effects: store byte-identical, no second task.
     let after = std::fs::read(&store_path).expect("read tasks.jsonl");
-    assert_eq!(
-        before, after,
-        "denied mutation must not touch tasks.jsonl"
-    );
+    assert_eq!(before, after, "denied mutation must not touch tasks.jsonl");
     let events_after = std::fs::read(&events_path).ok();
     assert_eq!(
         events_before, events_after,
@@ -1299,7 +1293,10 @@ fn test_task_confirmation_pending_blocks_next_mutation_until_confirmed() {
     );
     let tasks = list_tasks(temp_path, &[]);
     assert_eq!(
-        tasks.iter().filter(|t| t.title == "Second mutation").count(),
+        tasks
+            .iter()
+            .filter(|t| t.title == "Second mutation")
+            .count(),
         0,
         "denied mutation must not create a task; tasks={tasks:?}"
     );
@@ -1343,7 +1340,10 @@ fn test_task_confirmation_pending_blocks_next_mutation_until_confirmed() {
     );
     let tasks = list_tasks(temp_path, &[]);
     assert_eq!(
-        tasks.iter().filter(|t| t.title == "Second mutation").count(),
+        tasks
+            .iter()
+            .filter(|t| t.title == "Second mutation")
+            .count(),
         1,
         "exactly one Second-mutation task after confirm; tasks={tasks:?}"
     );
@@ -1398,7 +1398,11 @@ fn test_task_confirmation_mismatch_keeps_state_pending() {
         bad_digest_stderr.contains("confirmation_mismatch"),
         "wrong digest must surface confirmation_mismatch; stderr={bad_digest_stderr}"
     );
-    assert_eq!(state_of(), "pending", "state must stay pending after wrong digest");
+    assert_eq!(
+        state_of(),
+        "pending",
+        "state must stay pending after wrong digest"
+    );
 
     // Wrong reference → confirmation_unavailable, stays pending.
     let bad_reference = spawn_confirm(
@@ -1434,7 +1438,11 @@ fn test_task_confirmation_mismatch_keeps_state_pending() {
         wrong_loop_stderr.contains("confirmation_mismatch"),
         "different loop must surface confirmation_mismatch; stderr={wrong_loop_stderr}"
     );
-    assert_eq!(state_of(), "pending", "state must stay pending after wrong loop");
+    assert_eq!(
+        state_of(),
+        "pending",
+        "state must stay pending after wrong loop"
+    );
 
     // The correct confirm still works afterwards (state was never consumed).
     let ok = spawn_confirm(temp_path, "loop-u1", &task_id, &reference, &digest);
@@ -1443,7 +1451,11 @@ fn test_task_confirmation_mismatch_keeps_state_pending() {
         "correct confirm must still succeed after mismatches; stderr={}",
         String::from_utf8_lossy(&ok.stderr)
     );
-    assert_eq!(state_of(), "confirmed", "correct confirm transitions to confirmed");
+    assert_eq!(
+        state_of(),
+        "confirmed",
+        "correct confirm transitions to confirmed"
+    );
 }
 
 /// S4: legacy JSONL rows without a `confirmation` field must keep
@@ -1507,7 +1519,10 @@ fn test_task_confirmation_legacy_rows_do_not_block() {
         }
     }
     assert_eq!(rows, 2, "legacy row + fresh task expected; raw={raw}");
-    assert_eq!(legacy_confirmations, 1, "legacy row must survive the rewrite");
+    assert_eq!(
+        legacy_confirmations, 1,
+        "legacy row must survive the rewrite"
+    );
 }
 
 /// Compatibility contract: the three gate bypass paths (human CLI,
@@ -1619,8 +1634,7 @@ fn test_task_confirmation_apply_emits_pending_reference() {
         String::from_utf8_lossy(&verify.stderr)
     );
 
-    let apply =
-        spawn_apply_add_with_args(temp_path, "Confirmation target", &["--format", "json"]);
+    let apply = spawn_apply_add_with_args(temp_path, "Confirmation target", &["--format", "json"]);
     let apply_stderr = String::from_utf8_lossy(&apply.stderr);
     assert!(
         apply.status.success(),
@@ -1807,8 +1821,14 @@ fn test_task_confirmation_ensure_path_mints_and_confirms() {
         .and_then(|v| v.as_str())
         .unwrap_or_default()
         .to_string();
-    assert!(!reference.is_empty(), "reference must be non-empty; stdout={stdout}");
-    assert!(!digest.is_empty(), "digest must be non-empty; stdout={stdout}");
+    assert!(
+        !reference.is_empty(),
+        "reference must be non-empty; stdout={stdout}"
+    );
+    assert!(
+        !digest.is_empty(),
+        "digest must be non-empty; stdout={stdout}"
+    );
 
     // The disk row matches the printed confirmation and is scoped to
     // the recording loop/hat.
@@ -1836,7 +1856,14 @@ fn test_task_confirmation_ensure_path_mints_and_confirms() {
         temp_path,
         "coordinator",
         "loop-u1",
-        &["confirm", &task_id, "--reference", &reference, "--digest", &digest],
+        &[
+            "confirm",
+            &task_id,
+            "--reference",
+            &reference,
+            "--digest",
+            &digest,
+        ],
     );
     assert!(
         confirm.status.success(),
@@ -1893,7 +1920,10 @@ fn test_task_confirmation_cross_scope_ensure_overwrite_is_rejected() {
         .get("confirmation")
         .expect("row must carry confirmation");
     let (state, cfm_loop, cfm_hat) = confirmation_scope(row_cfm);
-    assert_eq!((state.as_str(), cfm_loop.as_str(), cfm_hat.as_str()), ("pending", "loop-x", "coordinator"));
+    assert_eq!(
+        (state.as_str(), cfm_loop.as_str(), cfm_hat.as_str()),
+        ("pending", "loop-x", "coordinator")
+    );
     let task_id = row
         .get("id")
         .and_then(|v| v.as_str())
@@ -1957,7 +1987,10 @@ fn test_task_confirmation_cross_scope_ensure_overwrite_is_rejected() {
         .get("confirmation")
         .expect("row must still carry confirmation");
     let (state, cfm_loop, cfm_hat) = confirmation_scope(row_cfm);
-    assert_eq!((state.as_str(), cfm_loop.as_str(), cfm_hat.as_str()), ("pending", "loop-x", "coordinator"));
+    assert_eq!(
+        (state.as_str(), cfm_loop.as_str(), cfm_hat.as_str()),
+        ("pending", "loop-x", "coordinator")
+    );
     assert_eq!(
         row_cfm.get("reference").and_then(|v| v.as_str()),
         Some(reference_a.as_str()),
@@ -1990,7 +2023,14 @@ fn test_task_confirmation_cross_scope_ensure_overwrite_is_rejected() {
         temp_path,
         "coordinator",
         "loop-x",
-        &["confirm", &task_id, "--reference", &reference_a, "--digest", &digest_a],
+        &[
+            "confirm",
+            &task_id,
+            "--reference",
+            &reference_a,
+            "--digest",
+            &digest_a,
+        ],
     );
     assert!(
         confirm_a.status.success(),
@@ -2016,7 +2056,10 @@ fn test_task_confirmation_cross_scope_ensure_overwrite_is_rejected() {
         .get("confirmation")
         .expect("row must carry B's confirmation");
     let (state, cfm_loop, cfm_hat) = confirmation_scope(row_cfm);
-    assert_eq!((state.as_str(), cfm_loop.as_str(), cfm_hat.as_str()), ("pending", "loop-x", "reviewer"));
+    assert_eq!(
+        (state.as_str(), cfm_loop.as_str(), cfm_hat.as_str()),
+        ("pending", "loop-x", "reviewer")
+    );
     assert_ne!(
         row_cfm.get("reference").and_then(|v| v.as_str()),
         Some(reference_a.as_str()),
@@ -2035,7 +2078,12 @@ fn test_task_confirmation_cross_scope_confirm_on_confirmed_is_mismatch() {
     write_agent_gate_preset_with_hats(temp_path, &["coordinator", "reviewer"]);
 
     // Hat A records a confirmation and consumes it.
-    let verify = spawn_task_as(temp_path, "coordinator", "loop-x", &["verify", "add", "Confirmed target"]);
+    let verify = spawn_task_as(
+        temp_path,
+        "coordinator",
+        "loop-x",
+        &["verify", "add", "Confirmed target"],
+    );
     assert!(
         verify.status.success(),
         "verify must succeed; stderr={}",
@@ -2057,7 +2105,14 @@ fn test_task_confirmation_cross_scope_confirm_on_confirmed_is_mismatch() {
         temp_path,
         "coordinator",
         "loop-x",
-        &["confirm", &task_id, "--reference", &reference, "--digest", &digest],
+        &[
+            "confirm",
+            &task_id,
+            "--reference",
+            &reference,
+            "--digest",
+            &digest,
+        ],
     );
     assert!(
         confirm_a.status.success(),
@@ -2071,7 +2126,14 @@ fn test_task_confirmation_cross_scope_confirm_on_confirmed_is_mismatch() {
         temp_path,
         "reviewer",
         "loop-x",
-        &["confirm", &task_id, "--reference", &reference, "--digest", &digest],
+        &[
+            "confirm",
+            &task_id,
+            "--reference",
+            &reference,
+            "--digest",
+            &digest,
+        ],
     );
     let confirm_b_stderr = String::from_utf8_lossy(&confirm_b.stderr);
     assert!(
@@ -2108,7 +2170,14 @@ fn test_task_confirmation_cross_scope_confirm_on_confirmed_is_mismatch() {
         temp_path,
         "coordinator",
         "loop-x",
-        &["confirm", &task_id, "--reference", &reference, "--digest", &digest],
+        &[
+            "confirm",
+            &task_id,
+            "--reference",
+            &reference,
+            "--digest",
+            &digest,
+        ],
     );
     assert!(
         confirm_again.status.success(),

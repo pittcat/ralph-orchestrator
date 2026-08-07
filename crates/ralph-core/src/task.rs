@@ -839,7 +839,10 @@ mod tests {
     fn test_confirmation_references_are_unique() {
         let a = TaskConfirmation::new_pending("d".to_string(), "l".to_string(), "h".to_string());
         let b = TaskConfirmation::new_pending("d".to_string(), "l".to_string(), "h".to_string());
-        assert_ne!(a.reference, b.reference, "each Apply mints a fresh reference");
+        assert_ne!(
+            a.reference, b.reference,
+            "each Apply mints a fresh reference"
+        );
         assert!(a.reference.starts_with("cfm-"));
     }
 }

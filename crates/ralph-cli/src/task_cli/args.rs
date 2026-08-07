@@ -1,11 +1,6 @@
-use crate::{
-    ConfigSource, config_resolution, display::colors, hat_command_policy::HatCommandPolicy,
-    operation_guard::OperationContext, resolve_path_from_workspace, resolve_workspace_root,
-};
-use anyhow::{Context, Result, bail};
-use chrono::{DateTime, Utc};
+use crate::{ConfigSource, config_resolution};
+use anyhow::Result;
 use clap::{Args, Parser, Subcommand, ValueEnum};
-use ralph_core::{ConfirmMatch, ConfirmationState, Task, TaskConfirmation, TaskStatus, TaskStore};
 use std::path::{Path, PathBuf};
 
 /// U7 (2026-07-04-003 plan): distinguishable failure modes for
