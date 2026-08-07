@@ -1210,6 +1210,69 @@ fn read_git_dirty(cwd: &Path) -> Option<bool> {
     Some(!output.stdout.is_empty())
 }
 
+/// 2026-08-07-009 plan U3 (R6 / S7 / S8 / S13): validate that a
+/// persisted `SlotResource` is still a safe binding to reuse for
+/// a redrive child. Returns `true` ONLY when every condition
+/// holds; any failure collapses to `false` so the dispatcher
+/// falls back to the factory (R6 / S8 / S13).
+///
+/// The validator is intentionally permissive on inputs it does
+/// not understand — `branch` may be missing, `git` may not be on
+/// PATH, the path may not exist — and falls back to `false` for
+/// each. Never panics.
+pub fn is_existing_worktree_binding_reusable(
+    repo_root: &Path,
+    worktree_path: &Path,
+    stored_branch: Option<&str>,
+) -> bool {
+    // 1. Canonicalize the candidate. A path that does not exist
+    //    is immediately disqualified — the redrive parent slot
+    //    never had its Worktree survive (S8).
+    let candidate = match std::fs::canonicalize(worktree_path) {
+        Ok(c) => c,
+        Err(_) => return false,
+    };
+    // 2. Confirm the canonical path is NOT the main worktree.
+    //    The main worktree is the repo root itself; reusing it
+    //    would route the child Worker at the operator's
+    //    workspace (R6 / KTD8). `list_worktrees` flags
+    //    `is_main = true` for the main entry.
+    let worktrees = match list_worktrees(repo_root) {
+        Ok(w) => w,
+        Err(_) => return false,
+    };
+    let Some(entry) = worktrees.iter().find(|w| w.path == candidate) else {
+        return false;
+    };
+    if entry.is_main {
+        return false;
+    }
+    // 3. Branch match — the stored `branch` (if present) must
+    //    match the Git porcelain entry's branch exactly after
+    //    canonical normalization (strip a `ralph/` prefix the
+    //    helper may have added on creation).
+    if let Some(stored) = stored_branch {
+        let stored_norm = normalize_branch(stored);
+        let entry_norm = normalize_branch(&entry.branch);
+        if stored_norm != entry_norm {
+            return false;
+        }
+    }
+    true
+}
+
+/// Strip a `ralph/` prefix the worktree helper may have added at
+/// creation time so a stored DB branch and the Git porcelain
+/// branch compare equal. Empty branches collapse to "".
+fn normalize_branch(branch: &str) -> String {
+    let trimmed = branch.trim();
+    if let Some(rest) = trimmed.strip_prefix("ralph/") {
+        rest.to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

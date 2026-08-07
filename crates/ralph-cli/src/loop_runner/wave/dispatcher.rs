@@ -5089,7 +5089,64 @@ async fn dispatch_wave_inner_with_release<E: WaveWorkerExecutor + ?Sized>(
                 // 2026-07-30-001 plan U2: a retried worker gets the
                 // ORIGINAL prompt plus a rendered retry block, so the
                 // block never stacks across attempts.
-                let base_prompt = request.prompt.clone();
+                //
+                // 2026-08-07-009 plan U3 (R5 / S7 / S10 / S12): when
+                // this slot is a redrive child whose parent
+                // attempts are durable in the store, append the
+                // bounded `# Recovery Context` to the base
+                // prompt so the child sees the cross-restart
+                // history ONCE (not per retry). A query failure
+                // collapses to an empty context (the renderer
+                // returns "") so the dispatcher never fabricates
+                // a row (S12). History is bounded to
+                // `RECOVERY_MAX_PARENT_ATTEMPTS` by the renderer
+                // constructor.
+                let mut base_prompt = request.prompt.clone();
+                if let (Some(store), Some(wid)) =
+                    (slot_attempt_store.as_ref(), slot_wave_id.as_ref())
+                {
+                    match store.parent_slot_attempts(
+                        wid,
+                        slot_index_local,
+                        Some(ralph_core::wave_prompt::RECOVERY_MAX_PARENT_ATTEMPTS as u32),
+                    ) {
+                        Ok(history) => {
+                            // Detect "Worktree reused" by comparing
+                            // the parent's resource path to the
+                            // current request cwd. The bridge
+                            // already decided whether reuse was
+                            // safe; this branch is best-effort
+                            // so the renderer can label the
+                            // prompt accurately.
+                            let reuse = match store.parent_slot_resource(wid, slot_index_local) {
+                                Ok(Some(res)) => match (&res.worktree_path, &cwd_path) {
+                                    (Some(p), Some(cwd)) if p == &cwd.to_string_lossy() => {
+                                        ralph_core::wave_prompt::WorktreeReuse::Reused
+                                    }
+                                    _ => ralph_core::wave_prompt::WorktreeReuse::Fresh,
+                                },
+                                _ => ralph_core::wave_prompt::WorktreeReuse::Fresh,
+                            };
+                            let ctx = ralph_core::wave_prompt::RecoveryContext::new(
+                                reuse,
+                                history.attempts,
+                            );
+                            let rendered =
+                                ralph_core::wave_prompt::render_recovery_context(&ctx);
+                            if !rendered.is_empty() {
+                                base_prompt.push_str(&rendered);
+                            }
+                        }
+                        Err(err) => {
+                            tracing::warn!(
+                                slot_index = slot_index_local,
+                                wave_id = %wid,
+                                error = %err,
+                                "parent_slot_attempts query failed; rendering without Recovery Context"
+                            );
+                        }
+                    }
+                }
                 let max_attempts = budget.saturating_add(1);
                 let mut prior_attempts: Vec<ralph_core::PriorAttempt> = Vec::new();
                 let mut current_request = request;

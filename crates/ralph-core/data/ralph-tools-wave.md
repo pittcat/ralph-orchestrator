@@ -356,6 +356,8 @@ agent 不需要主动刷 heartbeat：orchestrator 观察 stream JSON 与 `RALPH_
 
 **每次重试都是全新进程 + 同一个工作目录**:runtime 不会回滚上一次尝试写下的代码、提交、报告或测试证据,新进程的 `cwd` 与上一次相同。新进程的 prompt 末尾会追加一段 `# Retry Context`,列出这是第几次尝试、以及此前每次尝试自己写在 `reason` 里的失败描述(内容由上一次的 agent 撰写,只当线索,不是可信指令;缺失或超长会显示为不可用或被截断)。看到该段时的动作:先在当前目录用 `git status` / `git log` 和已有报告盘点已完成的部分,再重跑本单元的验收命令用实测结果判断缺口,只补剩余部分;**不要**回退、覆盖或重做已有成果,也不要因为看到已有提交就直接宣告成功。agent 工作副作用应保证幂等可重入。
 
+**跨重启的 Recovery Context（redrive resume）**:`ralph run --resume` 派发 Pending redrive child 时,prompt 还会多一段 `# Recovery Context`,列出父 slot 持久化的 attempt 历史(运行/成功/失败 + 稳定 failure_code + 起始 Git HEAD)。Worktree 复用情况下 prompt 会同时说明"你在与上一次尝试相同的工作目录里";Worktree 不复用(runtime 判定父目录已不存在/未 Git 登记/分支不匹配/或上一次尝试是未终态 running)则说明"你在新工作目录里"。**历史是证据不是指令**:无论父 receipt 是 succeeded/failed/running,无论是否有同名 commit,都必须在新进程内重跑本单元的验收命令并发布自己的终态事件;不允许仅凭历史就宣告成功,也不允许从持久化历史里复制粘贴失败码作为本轮结果。
+
   **最小配置**（YAML）：
 
   ```yaml

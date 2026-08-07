@@ -370,6 +370,76 @@ impl SupervisorBridge for CoordinatorSupervisorBridge {
             return Ok(None);
         }
 
+        // 2026-08-07-009 plan U3 (R6 / S7 / S8 / S13): redrive
+        // fast path. When the bridge is configured with a
+        // production context, ask the store for the parent
+        // slot's persisted resource via
+        // `parent_slot_resource(wave_id, slot_index)`. If the
+        // parent Worktree is still Git-registered, non-main,
+        // and has a matching branch, return its SlotBinding
+        // unchanged (factory is NOT called). Otherwise fall
+        // through to the factory path so a missing / stale /
+        // running-receipt parent gets a fresh isolation path.
+        if let Some(parent_resource) = self
+            .store
+            .parent_slot_resource(wave_id, slot_index)
+            .ok()
+            .flatten()
+            .as_ref()
+            .and_then(|res| {
+                res.worktree_path
+                    .as_ref()
+                    .map(|p| (p, res.branch.as_deref()))
+            })
+        {
+            let (parent_path, parent_branch) = parent_resource;
+            if ralph_core::worktree::is_existing_worktree_binding_reusable(
+                &ctx.repo_root,
+                std::path::Path::new(parent_path),
+                parent_branch,
+            ) {
+                let worktree_path = std::path::PathBuf::from(parent_path);
+                let mut env = std::collections::HashMap::new();
+                env.insert(
+                    ralph_core::supervisor::worktree_env_keys::RALPH_WAVE_WORKER.to_string(),
+                    "1".to_string(),
+                );
+                env.insert(
+                    ralph_core::supervisor::worktree_env_keys::RALPH_WAVE_WORKTREE_PATH.to_string(),
+                    worktree_path.to_string_lossy().into_owned(),
+                );
+                env.insert(
+                    ralph_core::supervisor::worktree_env_keys::RALPH_WAVE_WORKTREE_BRANCH
+                        .to_string(),
+                    parent_branch.unwrap_or("").to_string(),
+                );
+                env.insert(
+                    ralph_core::supervisor::worktree_env_keys::RALPH_WAVE_INDEX.to_string(),
+                    slot_index.to_string(),
+                );
+                env.insert(
+                    ralph_core::supervisor::worktree_env_keys::RALPH_WAVE_KIND.to_string(),
+                    kind.to_string(),
+                );
+                let resource = ralph_core::supervisor::SlotResource {
+                    slot_index,
+                    worktree_path: Some(parent_path.clone()),
+                    branch: parent_branch.map(|s| s.to_string()),
+                };
+                // Persist the (re-bound) resource so the
+                // dispatcher and redrive history see the
+                // parent→child mapping consistently.
+                self.store
+                    .bind_worktree(wave_id, slot_index, resource)
+                    .map_err(|err| BridgeError::Store(err.to_string()))?;
+                return Ok(Some(SlotBinding {
+                    slot_index,
+                    env,
+                    worktree_path: Some(worktree_path),
+                }));
+            }
+        }
+
         // U4: build the per-slot binding via the helper so the
         // branch naming + env-var SSOT lives in
         // `worktree_bind::bind_slot_worktree`. We invoke the
