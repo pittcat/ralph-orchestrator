@@ -3,6 +3,14 @@
 //! This module contains the main `run_loop_impl` function that executes
 //! the Ralph orchestration loop, along with supporting types and helper
 //! functions for PTY execution and termination handling.
+//!
+//! Per plan `2026-08-07-004`, the `runner` submodule was split into
+//! `entry` (entry-point wrapper), `run_impl` (supervisor bridge),
+//! `inner` (`run_loop_impl_inner` body), `sync_timeout` (startup
+//! timeout helpers), and `sync_timeout_tests` (`#[cfg(test)]`
+//! timeout/lint tests). `mod.rs` itself remains the integration
+//! surface: all of the original `pub use runner::*` re-exports now
+//! point at the leaf modules.
 
 mod event_logging;
 mod execution;
@@ -20,8 +28,21 @@ mod payload_contract_gate;
 mod payload_inputs;
 mod preset_lint_gate;
 mod prompt;
+// Plan 2026-08-07-004: `loop_runner::runner` was split into five
+// sibling modules. The five `mod` declarations below are what makes
+// them part of the `loop_runner` namespace; `runner.rs` itself only
+// owns the `RpcSharedState` / `resolve_loop_id` helpers and the
+// compatibility `pub use` re-exports that keep external callers
+// (`commands/run.rs`, `commands/resume.rs`, `loop_runner/tests/*`)
+// working unchanged.
+mod entry;
+mod inner;
+mod run_impl;
 mod runner;
 mod suspend;
+mod sync_timeout;
+#[cfg(test)]
+mod sync_timeout_tests;
 pub mod wave;
 
 pub(crate) use execution::ExecutionOutcome;
@@ -46,12 +67,33 @@ pub use preset_lint_gate::{
 #[cfg(test)]
 pub use runner::resolve_loop_id;
 pub use runner::run_loop_impl;
+// Compatibility shims for callers that reached the original
+// `crate::loop_runner::runner::*` paths. After plan 2026-08-07-004
+// the items live in dedicated sibling modules (`entry`, `inner`,
+// `run_impl`, `sync_timeout`); re-export them here so external
+// callers (`loop_runner/tests/*`, `commands/run.rs`,
+// `commands/resume.rs`) keep compiling without changes.
+#[allow(unused_imports)]
+pub(crate) use entry::persist_starting_event_to_events_file;
 #[cfg(test)]
-pub(crate) use runner::{
-    bridge_build_invocations, build_supervisor_bridge, build_termination_diagnostics,
-    clear_factory_override_for_test, install_factory_override_for_test,
-    persist_starting_event_to_events_file, write_termination_diagnostics,
-};
+#[allow(unused_imports)]
+pub(crate) use inner::build_termination_diagnostics;
+#[cfg(test)]
+#[allow(unused_imports)]
+pub(crate) use inner::write_termination_diagnostics;
+#[cfg(test)]
+#[allow(unused_imports)]
+pub(crate) use run_impl::bridge_build_invocations;
+#[allow(unused_imports)]
+pub(crate) use run_impl::build_supervisor_bridge;
+#[cfg(all(test, feature = "supervisor-db"))]
+#[allow(unused_imports)]
+pub(crate) use run_impl::clear_factory_override_for_test;
+#[cfg(all(test, feature = "supervisor-db"))]
+#[allow(unused_imports)]
+pub(crate) use run_impl::install_factory_override_for_test;
+#[allow(unused_imports)]
+pub(crate) use sync_timeout::adapter_timeout_duration;
 // Re-export all other module items for internal use and test access
 pub use event_logging::*;
 pub use execution::*;
@@ -82,9 +124,8 @@ pub use prompt::*;
 pub use suspend::*;
 pub use wave::*;
 
+#[allow(unused_imports)]
 use anyhow::{Context, Result, bail};
-use ralph_core::payload_contract::validate_payload_contract;
-
 /// Payload contract hard gate (U5).
 ///
 /// `ralph run` MUST call this BEFORE spawning any backend. In strict mode
@@ -95,13 +136,18 @@ use ralph_core::payload_contract::validate_payload_contract;
 ///
 /// There is no skip flag for this gate. Plan non-regression: payload contract
 /// gate is required and cannot be bypassed.
+#[allow(unused_imports)]
 use ralph_adapters::{
     ClaudeStreamEvent, ClaudeStreamParser, CliBackend, CliExecutor, ConsoleStreamHandler,
     ContentBlock, JsonRpcStreamHandler, OutputFormat as BackendOutputFormat, PiAssistantEvent,
     PiStreamEvent, PiStreamParser, PrettyStreamHandler, PtyConfig, PtyExecutor, QuietStreamHandler,
     TuiStreamHandler,
 };
+#[allow(unused_imports)]
 use ralph_core::diagnostics::{HookDisposition, HookRunTelemetryEntry};
+#[allow(unused_imports)]
+use ralph_core::payload_contract::validate_payload_contract;
+#[allow(unused_imports)]
 use ralph_core::{
     CompletionAction, EventLogger, EventLoop, EventParser, EventRecord, HatConfig, HookEngine,
     HookExecutor, HookExecutorContract, HookMutationConfig, HookOnError, HookPayloadBuilderInput,
@@ -110,23 +156,37 @@ use ralph_core::{
     RalphConfig, Record, SessionRecorder, SummaryWriter, SuspendStateRecord, SuspendStateStore,
     TerminationReason, UrgentSteerStore, WarmupConfig,
 };
+#[allow(unused_imports)]
 use ralph_proto::{Event, GuidanceTarget, HatId, RpcEvent, RpcState, RpcTaskCounts};
+#[allow(unused_imports)]
 use ralph_tui::Tui;
+#[allow(unused_imports)]
 use std::ffi::OsStr;
+#[allow(unused_imports)]
 use std::fs::{self, File};
+#[allow(unused_imports)]
 use std::io::{BufWriter, IsTerminal, stdin, stdout};
+#[allow(unused_imports)]
 use std::path::{Path, PathBuf};
+#[allow(unused_imports)]
 use std::process::{Command, Stdio};
+#[allow(unused_imports)]
 use std::sync::Arc;
+#[allow(unused_imports)]
 use std::time::Duration;
+#[allow(unused_imports)]
 use tracing::{debug, error, info, warn};
 
+#[allow(unused_imports)]
 use crate::cli::process_management;
+#[allow(unused_imports)]
 use crate::cli::{ColorMode, Verbosity};
+#[allow(unused_imports)]
 use crate::display::{
     build_tui_hat_map, print_iteration_footer, print_iteration_separator, print_loop_banner,
     print_termination,
 };
+#[allow(unused_imports)]
 use crate::rpc_stdin::{GuidanceMessage, RpcDispatcher, run_stdin_reader, run_stdout_emitter};
 
 /// Shared atomic state written by the main loop and read by the RPC `get_state` handler.
