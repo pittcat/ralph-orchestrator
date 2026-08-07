@@ -5314,3 +5314,208 @@ fn u5_persist_starting_event_reports_io_errors() {
         "U5: persisting into a missing parent directory must surface Err; got: {result:?}"
     );
 }
+
+// ──────────────────────────────────────────────────────────────────────
+// Regression suite for plan 2026-08-07 merge-batch interrupt-path fix.
+//
+// Background: `merge_hat_channel` had exactly one call site in
+// `runner.rs:3883` (normal Phase 2 exit). When the loop terminated via
+// OPERATOR_ABORT / SIGTERM / SIGHUP — paths wired in `runner.rs:2655` and
+// `runner.rs:3685` — the isolated hat-channel was never merged, stranding
+// any events the active hat had already emitted. The downstream chain
+// (integrator / stabilizer / reporter) ran silent because the trigger
+// event was missing from the main ledger.
+//
+// These three tests pin the fix at the level of the helper
+// `merge_isolated_channel_on_interrupt` exposed by the test-only submodule
+// `runner_inner_test_api`.
+//
+// Repro: `docs/report/2026-08-07-merge-batch-primary-20260806-230934-diagnosis.md`
+// (DEV-001A, P0 mechanism, confidence 90).
+// ──────────────────────────────────────────────────────────────────────
+
+fn build_isolated_event_loop(config: ralph_core::RalphConfig, hat_label: Option<&str>) -> EventLoop {
+    let mut el = EventLoop::new(config);
+    if let Some(label) = hat_label {
+        el.state_mut().last_hat = Some(HatId::new(label));
+    }
+    el
+}
+
+/// Materialise a hat-channel file plus the `current-hat-events` marker
+/// that `merge_hat_channel` uses to discover it. The marker must point at
+/// the channel path so the merger resolves it; this mirrors
+/// `prepare_hat_channel` semantics.
+fn seed_hat_channel(ctx: &ralph_core::LoopContext, hat: &str, loop_id: &str, iteration: u32, contents: &str) -> std::path::PathBuf {
+    let channel_path =
+        crate::loop_runner::paths::hat_channel_events_path(ctx, hat, loop_id, iteration);
+    if let Some(parent) = channel_path.parent() {
+        std::fs::create_dir_all(parent).unwrap();
+    }
+    std::fs::write(&channel_path, contents).unwrap();
+    // Marker format matches `prepare_hat_channel`: a workspace-relative path.
+    let relative = format!(".ralph/agent/events-hat-{hat}-{loop_id}-{iteration}.jsonl");
+    std::fs::write(
+        crate::loop_runner::paths::current_hat_events_marker(ctx),
+        relative,
+    )
+    .unwrap();
+    channel_path
+}
+
+#[test]
+fn test_interrupt_helper_merges_hat_channel_content_into_main_events() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let workspace = tmp.path().to_path_buf();
+    let ctx = ralph_core::LoopContext::primary(workspace.clone());
+    ctx.ensure_ralph_dir().expect("ensure ralph dir");
+
+    // Materialise an isolated hat-channel with one pre-existing emit using the
+    // same naming the runner uses for `prepare_hat_channel`.
+    let hat = "reviewer";
+    let loop_id = "primary-20260807-000000";
+    let iteration = 1u32;
+    let payload = r#"{"topic":"merge.reviewed","hat":"reviewer","source":"reviewer","payload":{"target_branch":"pittcat-dev"},"ts":"2026-08-07T00:00:00Z"}"#;
+    let channel_path = seed_hat_channel(&ctx, hat, loop_id, iteration, &format!("{payload}\n"));
+
+    let mut config = ralph_core::RalphConfig::default();
+    config.event_loop.execution_mode = ralph_core::config::HatExecutionMode::Isolated;
+
+    let event_loop = build_isolated_event_loop(config.clone(), Some(hat));
+
+    let state_machine_enabled = false;
+    let target_events_path =
+        crate::loop_runner::paths::resolve_emit_events_path(&ctx, state_machine_enabled);
+    if let Some(parent) = target_events_path.parent() {
+        std::fs::create_dir_all(parent).unwrap();
+    }
+    std::fs::write(&target_events_path, "").unwrap();
+
+    crate::loop_runner::runner::runner_inner_test_api::merge_isolated_channel_on_interrupt(
+        &ctx,
+        &config,
+        state_machine_enabled,
+        &event_loop,
+        "test_interrupt_helper_merges_hat_channel_content_into_main_events",
+    );
+
+    // The line from the hat-channel must now appear in the main events file.
+    let main = std::fs::read_to_string(&target_events_path).unwrap();
+    assert!(
+        main.lines().any(|line| line.contains("merge.reviewed")),
+        "interrupt helper must merge hat-channel content into main events; got: {main}"
+    );
+    // The channel file must have been removed by `merge_hat_channel` so a
+    // future iteration does not replay the same line.
+    assert!(
+        !channel_path.exists(),
+        "merge_hat_channel must remove the channel file on success to prevent replays; \
+         channel_path still exists at: {}",
+        channel_path.display()
+    );
+    // The marker must have been cleared too.
+    assert!(
+        !ctx.current_events_marker().exists(),
+        "current-events marker must still be intact (clear is the merger's job, not this test's)"
+    );
+}
+
+#[test]
+fn test_interrupt_helper_with_empty_hat_channel_does_not_corrupt_events() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let workspace = tmp.path().to_path_buf();
+    let ctx = ralph_core::LoopContext::primary(workspace.clone());
+    ctx.ensure_ralph_dir().expect("ensure ralph dir");
+
+    // Empty channel — same shape as the merge-batch run reproduced in the diagnosis.
+    let hat = "reviewer";
+    let loop_id = "primary-20260807-000001";
+    let iteration = 1u32;
+    let _channel_path = seed_hat_channel(&ctx, hat, loop_id, iteration, "");
+
+    let mut config = ralph_core::RalphConfig::default();
+    config.event_loop.execution_mode = ralph_core::config::HatExecutionMode::Isolated;
+
+    let event_loop = build_isolated_event_loop(config.clone(), Some(hat));
+
+    let state_machine_enabled = false;
+    let target_events_path =
+        crate::loop_runner::paths::resolve_emit_events_path(&ctx, state_machine_enabled);
+    if let Some(parent) = target_events_path.parent() {
+        std::fs::create_dir_all(parent).unwrap();
+    }
+    let original = "{\"topic\":\"merge.start\",\"source\":\"loop-bootstrap\",\"ts\":\"x\"}\n";
+    std::fs::write(&target_events_path, original).unwrap();
+
+    crate::loop_runner::runner::runner_inner_test_api::merge_isolated_channel_on_interrupt(
+        &ctx,
+        &config,
+        state_machine_enabled,
+        &event_loop,
+        "test_interrupt_helper_with_empty_hat_channel_does_not_corrupt_events",
+    );
+
+    // Empty channel must not append anything to main events.
+    let main_after = std::fs::read_to_string(&target_events_path).unwrap();
+    assert_eq!(
+        main_after, original,
+        "interrupt helper with empty hat-channel must leave the main events file unchanged"
+    );
+
+    // And the diagnostic fallback file should have been produced in
+    // `.ralph/diagnostics/channel-routing-fallback-*.md`.
+    let diag_dir = ctx.ralph_dir().join("diagnostics");
+    let has_diag = std::fs::read_dir(&diag_dir)
+        .map(|entries| {
+            entries
+                .filter_map(|e| e.ok())
+                .any(|e| e.file_name().to_string_lossy().contains("channel-routing-fallback"))
+        })
+        .unwrap_or(false);
+    assert!(
+        has_diag,
+        "interrupt helper with empty hat-channel must emit a channel-routing-fallback diagnostic \
+         under {} so operators can see the warning",
+        diag_dir.display()
+    );
+}
+
+#[test]
+fn test_interrupt_helper_with_no_marker_is_a_safe_noop() {
+    // Cold-path interrupt at the very top of the loop, before any iteration
+    // ran, must be a safe no-op. Locks in that the fix can never panic or
+    // corrupt the main events file when no hat-channel exists.
+    let tmp = tempfile::TempDir::new().unwrap();
+    let workspace = tmp.path().to_path_buf();
+    let ctx = ralph_core::LoopContext::primary(workspace.clone());
+    ctx.ensure_ralph_dir().expect("ensure ralph dir");
+
+    let mut config = ralph_core::RalphConfig::default();
+    config.event_loop.execution_mode = ralph_core::config::HatExecutionMode::Isolated;
+
+    // `last_hat = None` simulates the cold-path interrupt (no iteration yet).
+    let event_loop = build_isolated_event_loop(config.clone(), None);
+
+    let state_machine_enabled = false;
+    let target_events_path =
+        crate::loop_runner::paths::resolve_emit_events_path(&ctx, state_machine_enabled);
+    if let Some(parent) = target_events_path.parent() {
+        std::fs::create_dir_all(parent).unwrap();
+    }
+    let original = "{\"topic\":\"merge.start\"}\n";
+    std::fs::write(&target_events_path, original).unwrap();
+
+    crate::loop_runner::runner::runner_inner_test_api::merge_isolated_channel_on_interrupt(
+        &ctx,
+        &config,
+        state_machine_enabled,
+        &event_loop,
+        "test_interrupt_helper_with_no_marker_is_a_safe_noop",
+    );
+
+    let main_after = std::fs::read_to_string(&target_events_path).unwrap();
+    assert_eq!(
+        main_after, original,
+        "interrupt helper with no marker must not modify main events file"
+    );
+}

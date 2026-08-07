@@ -442,6 +442,68 @@ fn write_loop_termination_sentinel(loop_context: &Option<LoopContext>, reason: &
     }
 }
 
+/// Best-effort merge of the isolated hat-channel into the main events file.
+///
+/// Called from both interrupt paths (iteration-top and mid-loop `tokio::select!`)
+/// so an OPERATOR_ABORT / SIGTERM / SIGHUP / timeout does not strand events that
+/// the active hat already wrote to its isolated channel.
+///
+/// Repro of the latent bug fixed here: `docs/report/2026-08-07-merge-batch-primary-20260806-230934-diagnosis.md`
+/// (DEV-001A, P0 mechanism, confidence 90).
+///
+/// Properties:
+/// - Idempotent: `merge_hat_channel` itself removes the channel file on success
+///   and skips when the marker is missing, so this never produces duplicate events.
+/// - Fail-soft: errors are logged at `error` level and an operator-facing
+///   diagnostic file is emitted; we never propagate so interrupt flows stay
+///   non-blocking.
+/// - Falls back to `"ralph"` as the authoritative hat label when no
+///   `state.last_hat` has been recorded (e.g. very first interrupt before any
+///   iteration has run); this case always finds an empty channel so the
+///   fallback label is cosmetic.
+#[allow(clippy::too_many_arguments)]
+fn merge_isolated_channel_on_interrupt(
+    ctx: &LoopContext,
+    config: &RalphConfig,
+    state_machine_enabled: bool,
+    event_loop: &EventLoop,
+    interrupt_kind: &'static str,
+) {
+    let target_events_path = resolve_emit_events_path(ctx, state_machine_enabled);
+    let authoritative_hat = event_loop
+        .state()
+        .last_hat
+        .as_ref()
+        .map(|h| h.as_str())
+        .unwrap_or("ralph");
+
+    match crate::loop_runner::hat_channel::merge_hat_channel(
+        ctx,
+        &target_events_path,
+        authoritative_hat,
+        Some(config),
+    ) {
+        Ok(()) => {
+            // On success the channel file and `current-hat-events` marker are
+            // already removed by `merge_hat_channel`; nothing else to do.
+        }
+        Err(e) => {
+            crate::loop_runner::hat_channel::emit_channel_routing_fallback_diagnostic(
+                ctx,
+                authoritative_hat,
+                "merge_hat_channel_failed_on_interrupt",
+            );
+            error!(
+                target: "ralph_cli::loop_runner",
+                error = %e,
+                hat = %authoritative_hat,
+                interrupt_kind = %interrupt_kind,
+                "Failed to merge isolated hat channel on interrupt; events may be lost (see diagnostic file)"
+            );
+        }
+    }
+}
+
 /// U5 (2026-06-17-004 R5): append a single JSONL record for the
 /// configured `starting_event` (typically `work.start` for serial
 /// presets, `task.start` otherwise) to the trusted events file
@@ -2678,6 +2740,18 @@ async fn run_loop_impl_inner(
                 );
                 let _ = killpg(pgid, Signal::SIGKILL);
             }
+
+            // 2026-08-07 plan merge-batch interrupt-path: merge any events the
+            // active hat wrote to its isolated channel before terminating, so
+            // they are not stranded by the OPERATOR_ABORT/SIGTERM shortcut.
+            merge_isolated_channel_on_interrupt(
+                &ctx,
+                &config,
+                state_machine_enabled,
+                &event_loop,
+                "iteration_top_interrupt",
+            );
+
             let reason = hooks::termination::dispatch_pre_loop_termination_hooks(
                 &event_loop,
                 hooks_dispatch_enabled,
@@ -3697,6 +3771,17 @@ async fn run_loop_impl_inner(
                     );
                     let _ = killpg(pgid, Signal::SIGKILL);
                 }
+
+                // 2026-08-07 plan merge-batch interrupt-path: merge any events the
+                // active hat wrote to its isolated channel before terminating, so
+                // they are not stranded by the OPERATOR_ABORT/SIGTERM shortcut.
+                merge_isolated_channel_on_interrupt(
+                    &ctx,
+                    &config,
+                    state_machine_enabled,
+                    &event_loop,
+                    "mid_loop_select_interrupt",
+                );
 
                 let reason = hooks::termination::dispatch_pre_loop_termination_hooks(
                     &event_loop,
@@ -5453,5 +5538,53 @@ tasks:
             }),
             "non-whitelisted preset name must not trigger U7 (scoped rule)"
         );
+    }
+}
+
+// ──────────────────────────────────────────────────────────────────────
+// Test-only public re-exports for integration tests in
+// `crates/ralph-cli/src/loop_runner/tests/legacy.rs`.
+//
+// The helpers here are private to this module but must be reachable from
+// integration tests (which live in a separate `tests/` module and can only
+// see `pub` items). Each export is annotated with the plan / test that
+// required the visibility.
+//
+// All items are `#[cfg(test)]` so they do not appear in the production
+// binary or its public docs.
+// ──────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+pub mod runner_inner_test_api {
+    use super::*;
+
+    /// Best-effort merge of the isolated hat-channel into the main events
+    /// file from any of the interrupt paths (mid-loop `tokio::select!`
+    /// abort, top-of-loop interrupt check).
+    ///
+    /// Integration tests in `legacy.rs` pin three properties here:
+    ///   1. content is merged into main events and the channel file is
+    ///      removed (no duplicate replays on the next iteration);
+    ///   2. an empty channel does not corrupt main events and emits a
+    ///      `channel-routing-fallback-*.md` diagnostic;
+    ///   3. a no-marker cold-path interrupt is a safe no-op (no panic,
+    ///      no events appended).
+    ///
+    /// Re-exported here so integration tests (which cannot reach private
+    /// items) can call the helper directly.
+    pub fn merge_isolated_channel_on_interrupt(
+        ctx: &LoopContext,
+        config: &RalphConfig,
+        state_machine_enabled: bool,
+        event_loop: &EventLoop,
+        interrupt_kind: &'static str,
+    ) {
+        super::merge_isolated_channel_on_interrupt(
+            ctx,
+            config,
+            state_machine_enabled,
+            event_loop,
+            interrupt_kind,
+        )
     }
 }
