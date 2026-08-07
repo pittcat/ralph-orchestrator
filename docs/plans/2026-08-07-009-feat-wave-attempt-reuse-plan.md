@@ -17,19 +17,19 @@ deepened: 2026-08-07
 
 执行权威顺序为：本计划的 Requirement → Key Technical Decision → Unit → 当前代码与仓库硬规则。若实现发现必须改变公开 CLI、配置字段、事件 schema、retry budget、终态 cleanup、Tokio `Semaphore`/`JoinSet` 并发模型或 wave terminal projection，立即停止并重新规划。
 
-执行配置为严格串行 `U1 → U2 → U3`。每个 Unit 必须完成 Acceptance Red、Unit Red、Green、Refactor、Integration、Regression 和独立提交检查后才能进入下一 Unit。Tail ownership 由执行该计划的 Coding Agent 持有；本计划不授权提交、推送或创建 PR。
+执行配置为严格串行 `U1 → U2 → U3`。本计划依赖 `2026-08-07-008-refactor-wave-dispatcher-module-split-plan.md` 先完成：U1/U2/U3 开始前，必须通过 `rg` 将 dispatcher 符号重新定位到按职责命名的模块；不得把拆分工作混入本计划。每个 Unit 必须完成 Acceptance Red、Unit Red、Green、Refactor、Integration、Regression 和独立提交检查后才能进入下一 Unit。Tail ownership 由执行该计划的 Coding Agent 持有；本计划不授权提交、推送或创建 PR。
 
 ## 0. 计划状态
 
 - 状态：`READY`。所有实施关键决策置信度均不低于 `0.85`，没有 launch-blocking open question。
-- 代码库基线：分支 `pittcat-dev`，提交 `2f09e978471a31439a35d94fe2cee2ae4be65b2b`。
+- 代码库基线：当前 HEAD `82dfbaf1223dd4698a5de2772db9367652d3fbb6`；执行前仍需确认工作树无关改动不会污染验证。
 - 调查范围：supervisor store 与 migration、wave dispatcher retry、redrive boot dispatch、startup recovery、Worktree binding/cleanup、injected agent skill、相邻 tests、相关 Git 历史与 `docs/solutions/`。
 - 已执行验证：
   - `cargo nextest --version` → `cargo-nextest 0.9.140`。
   - `cargo nextest run -p ralph-core --lib -E 'test(/supervisor::memory::tests::bind_worktree_rebind/) or test(/wave_prompt::tests::u2_retry_prompt/)'` → 4/4 通过。
   - `cargo nextest run -p ralph-core --features supervisor-db --lib -E 'test(/run_bumps_user_version_to_current/) or test(/run_is_idempotent_across_reopens/) or test(/required_tables_exist_after_run/)'` → 3/3 通过。
   - `cargo nextest run -p ralph-cli --bin ralph -E 'test(/executor_retry_uses_fresh_pid_same_cwd/) or test(/third_attempt_prompt_contains_both_prior_failures/) or test(/timeout_retry_does_not_claim_existing_commit_success/) or test(/test_u4_redrive_boot_dispatch_in_memory_multi_slot/) or test(/test_s3_rusqlite_backed_wave_supervisor_dispatch/)'` → 5/5 通过。
-- 尚未执行验证：本轮是计划工作，未执行 `./scripts/run-tests.sh`、`just lint`、`just fmt-check`、`cargo build --workspace`；这些是实施期强制门禁。
+- 尚未执行验证：本轮是计划工作，未执行 `./scripts/run-tests.sh`、`just lint`、`just fmt-check`、`cargo build --workspace`；这些是实施期强制门禁。dispatcher 拆分计划尚未实施，本文中的 dispatcher 物理路径是拆分前证据。
 - 阻塞项：无。
 
 ## 1. 功能目标
@@ -117,19 +117,19 @@ R10. 更新 agent-facing wave skill，使收到 `# Recovery Context` 的 Worker 
 
 ### 2.1 当前实现入口
 
-外部入口是 `ralph run`。`crates/ralph-cli/src/loop_runner/inner.rs` 打开 supervisor store、运行 active-wave recovery，并在 `resume=true` 时调用 redrive boot dispatch。redrive dispatch 进入 `crates/ralph-cli/src/loop_runner/wave/dispatcher.rs::dispatch_pending_redrive_waves`，再走 `dispatch_redrive_child_wave` 和正常 supervisor execute 路径。
+外部入口是 `ralph run`。`crates/ralph-cli/src/loop_runner/inner.rs` 打开 supervisor store、运行 active-wave recovery，并在 `resume=true` 时调用 redrive boot dispatch。dispatcher 拆分计划完成后，`dispatch_pending_redrive_waves`、`dispatch_redrive_child_wave` 和正常 supervisor execute 入口应位于职责命名的 `crates/ralph-cli/src/loop_runner/wave/dispatcher/dispatch.rs`；执行本计划前必须用 `rg` 核对实际符号位置。
 
 正常 wave 调用链为：检测 wave → `execute_wave_via_supervisor_with_executor` 注册/获取 store wave → `SupervisorBridge::bind_slot` 创建 Worktree → 构造 `WorkerRequest` → `dispatch_wave_inner_with_release` 在 `JoinSet` task 内通过 `Semaphore` 获取 permit → 局部 attempt loop 调 `WaveWorkerExecutor::execute` → 只把最终 outcome 记录到 tracker/store。
 
 数据边界是 `ralph-core::supervisor::SupervisorStore`。内存实现位于 `memory.rs`，持久实现位于 `rusqlite.rs`，schema 由 `migrations.rs` 和 `migrations/v*.sql` 管理。Worktree 的创建、枚举和删除位于 `worktree.rs`。Worker retry prompt 位于 `wave_prompt.rs`。Agent-facing wave 指南位于 `crates/ralph-core/data/ralph-tools-wave.md`。
 
-现有测试框架为 Rust unit/integration tests + cargo-nextest。与本功能直接相邻的 runner 集成测试位于 `crates/ralph-cli/src/loop_runner/tests/wave_supervisor.rs`，retry 辅助测试还位于 `dispatcher.rs` 内联 tests，store/migration/worktree/prompt tests 位于 `ralph-core` 对应模块。
+现有测试框架为 Rust unit/integration tests + cargo-nextest。与本功能直接相邻的 runner 集成测试位于 `crates/ralph-cli/src/loop_runner/tests/wave_supervisor.rs`；dispatcher 拆分后 retry 辅助测试应位于 `wave/dispatcher_tests/worker_lifecycle.rs` 或实际承担该行为的同名测试文件，store/migration/worktree/prompt tests 位于 `ralph-core` 对应模块。
 
 ### 2.2 Evidence Ledger
 
 | Evidence ID | 来源 | 观察结果 | 对计划的影响 | 可靠性 |
 |---|---|---|---|---|
-| E1 | `crates/ralph-cli/src/loop_runner/wave/dispatcher.rs::dispatch_wave_inner_with_release` | attempt loop 在一个 Tokio task 内；`attempt` 与 `prior_attempts` 都是局部变量；只让最终 outcome 逃逸 | U2 必须局部接入，不能改 tracker/TUI/RPC 终态边界 | 高 |
+| E1 | dispatcher 拆分前 `crates/ralph-cli/src/loop_runner/wave/dispatcher.rs::dispatch_wave_inner_with_release`；拆分后计划目标为 `wave/dispatcher/worker_lifecycle.rs` | attempt loop 在一个 Tokio task 内；`attempt` 与 `prior_attempts` 都是局部变量；只让最终 outcome 逃逸 | U2 必须局部接入，不能改 tracker/TUI/RPC 终态边界 | 高 |
 | E2 | `crates/ralph-cli/src/loop_runner/tests/wave_supervisor.rs::executor_retry_uses_fresh_pid_same_cwd` | 既有验收固定“新 PID + 相同 cwd” | R4 的 characterization 必须持续通过 | 高 |
 | E3 | `crates/ralph-core/src/wave_prompt.rs::{PriorAttempt,RetryContext,render_retry_context}` | 已有有界、非可信的 retry detail 和禁止 reset/clean/直接认成功规则 | U3 复用相同安全语言和 renderer 模式，不创建第二套冲突规则 | 高 |
 | E4 | `crates/ralph-core/src/supervisor/mod.rs::SupervisorStore` | store 为同步 trait；注释明确 rusqlite 同步边界 | 新 receipt 必须扩展现有 trait，不新增 SQLx repository | 高 |
@@ -151,7 +151,7 @@ R10. 更新 agent-facing wave skill，使收到 `# Recovery Context` 的 Worker 
 | E20 | 已执行 nextest 基线 | migration、retry prompt、same-cwd、redrive memory/rusqlite 和“不信任已有 commit”共 12 个测试通过 | 每个 Unit 可用这些测试作为回归锚点 | 高 |
 | E21 | `AGENTS.md` 测试硬规则 | ralph-cli 禁止裸 `cargo test`；全量入口是 `./scripts/run-tests.sh`；污染 agent env 必须 scrub | Verification Contract 必须只列 nextest/脚本入口并含污染环境回归 | 高 |
 | E22 | `crates/ralph-core/src/supervisor/bridge.rs::store` | bridge 已能向 dispatcher提供 `Arc<dyn SupervisorStore>`，默认 mock 返回 `None` | U2 不需扩大所有 bridge mock 的必实现方法 | 高 |
-| E23 | `crates/ralph-cli/src/loop_runner/wave/{dispatcher.rs::ProductionExecutor,worker.rs::run_wave_worker}` | production `execute` await `run_wave_worker`；worker 在读取结果前通过 blocking wait 回收 child process | 已终态 receipt 可证明该次 Worker 已退出；未终态 running receipt 不能证明，应禁止复用旧 cwd | 高 |
+| E23 | dispatcher 拆分前 `wave/dispatcher.rs::ProductionExecutor`、`wave/worker.rs::run_wave_worker`；拆分后目标为 `wave/dispatcher/worker_lifecycle.rs` 与 `wave/worker.rs` | production `execute` await `run_wave_worker`；worker 在读取结果前通过 blocking wait 回收 child process | 已终态 receipt 可证明该次 Worker 已退出；未终态 running receipt 不能证明，应禁止复用旧 cwd | 高 |
 
 ### 2.3 受影响范围
 
@@ -163,7 +163,7 @@ R10. 更新 agent-facing wave skill，使收到 `# Recovery Context` 的 Worker 
 | Migration | `crates/ralph-core/src/supervisor/migrations.rs`、计划新增 `crates/ralph-core/src/supervisor/migrations/v11.sql` | v10→v11 无损升级 |
 | Git 边界 | `crates/ralph-core/src/worktree.rs` | checkpoint 只读探测与持久化 binding 合法性验证 |
 | Prompt | `crates/ralph-core/src/wave_prompt.rs` | 新增有界 Recovery Context，不改变现有 Retry Context |
-| Dispatcher | `crates/ralph-cli/src/loop_runner/wave/dispatcher.rs` | attempt begin/finish fail-soft；读取恢复历史 |
+| Dispatcher | `crates/ralph-cli/src/loop_runner/wave/dispatcher/worker_lifecycle.rs`、`dispatch.rs`（以拆分后 `rg` 结果为准） | attempt begin/finish fail-soft；读取恢复历史 |
 | Binding | `crates/ralph-cli/src/loop_runner/wave/supervisor_bridge.rs` | 合法旧 binding 复用，非法/缺失时走现有 factory |
 | Runner 集成测试 | `crates/ralph-cli/src/loop_runner/tests/wave_supervisor.rs` | true dispatcher/store/reopen/redrive 行为验收 |
 | Agent skill | `crates/ralph-core/data/ralph-tools-wave.md` | Worker 收到恢复信号后的动作与停止条件 |
@@ -512,7 +512,7 @@ E20 已证明 `executor_retry_uses_fresh_pid_same_cwd`、`third_attempt_prompt_c
 | 位置 | 当前职责 | 修改边界 | 不修改 |
 |---|---|---|---|
 | `crates/ralph-core/src/worktree.rs` | Git Worktree 工具 | 新增只读 `capture_git_checkpoint(path)`，复用现有 Git command/error 模式 | create/remove/sync/reuse cleanup |
-| `crates/ralph-cli/src/loop_runner/wave/dispatcher.rs` | attempt loop | 在每次 execute 前后调用异步 wrapper；复用同一 classifier；warning fail-soft | Semaphore、JoinSet、budget、deadline、silent_request、final outcome |
+| `crates/ralph-cli/src/loop_runner/wave/dispatcher/worker_lifecycle.rs`、`dispatch.rs` | attempt loop | 在每次 execute 前后调用异步 wrapper；复用同一 classifier；warning fail-soft | Semaphore、JoinSet、budget、deadline、silent_request、final outcome |
 | `crates/ralph-cli/src/loop_runner/tests/wave_supervisor.rs` | supervisor runtime 集成 | 扩展 retry tests 断言 receipt；扩展 fault wrapper | 不拆文件、不改 preset |
 
 #### 7. 可依赖能力
@@ -577,7 +577,7 @@ U1 的 receipt API；现有 `bridge.store()`；`WorkerRequest.cwd`；worker clas
 | 位置 | 变更类型 | 变更原因 | Evidence |
 |---|---|---|---|
 | `crates/ralph-core/src/worktree.rs` | 修改现有生产文件/测试 | Git checkpoint | E12 |
-| `crates/ralph-cli/src/loop_runner/wave/dispatcher.rs` | 修改现有生产文件/测试 | attempt lifecycle 接线 | E1,E22 |
+| `crates/ralph-cli/src/loop_runner/wave/dispatcher/worker_lifecycle.rs`、`dispatch.rs` | 修改拆分后的生产文件 | attempt lifecycle 接线 | E1,E22 |
 | `crates/ralph-cli/src/loop_runner/tests/wave_supervisor.rs` | 修改现有测试 | Outside-In/fault/runtime | E2,E20 |
 
 #### 18. 完成标准
@@ -636,7 +636,7 @@ Pending redrive child 在 `ralph run --resume` 派发时，能读取父 slot dur
 | `crates/ralph-core/src/worktree.rs` | Git Worktree真值 | 新增持久化 binding validator：canonical path、Git登记、非main、normalized branch | generic `--reuse-worktree` 流程 |
 | `crates/ralph-core/src/wave_prompt.rs` | Worker prompt | 新增 bounded Recovery Context renderer；准确区分 reused/fallback/running/succeeded/failed | Retry Context owner规则 |
 | `crates/ralph-cli/src/loop_runner/wave/supervisor_bridge.rs` | production binding | 先读取 existing resource并验证；合法则构造既有 env/cwd，非法走原 factory+bind | Review None、公开 wave id env防泄漏 |
-| `crates/ralph-cli/src/loop_runner/wave/dispatcher.rs` | request/prompt构造 | bind 后读取 recovery context、比较 source/current path、注入 base prompt；query fail-soft | boot gating/descriptor/final outcome |
+| `crates/ralph-cli/src/loop_runner/wave/dispatcher/dispatch.rs`、`worker_lifecycle.rs` | 修改拆分后的生产文件 | bind 后读取 recovery context、比较 source/current path、注入 base prompt；query fail-soft | boot gating/descriptor/final outcome |
 | `crates/ralph-cli/src/loop_runner/tests/wave_supervisor.rs` | runtime tests | 真实 Git+rusqlite reopen+redrive boot、fallback、Review、no-shortcut | 不大规模重构 |
 | `crates/ralph-core/data/ralph-tools-wave.md` | agent-facing wave规则 | 更新收到 Recovery Context 后的动作、关键字段来源、fallback和停止条件 | 不暴露 DB路径/内部函数/计划编号 |
 
@@ -718,7 +718,7 @@ U1 receipt query，U2真实 receipts；现有 `child_parent_slots`/descriptor映
 | `crates/ralph-core/src/worktree.rs` | 修改现有生产文件/测试 | Git-truth validator | E12,E13 |
 | `crates/ralph-core/src/wave_prompt.rs` | 修改现有生产文件/测试 | Recovery Context | E3,E15 |
 | `crates/ralph-cli/src/loop_runner/wave/supervisor_bridge.rs` | 修改现有生产文件/测试 | binding reuse/fallback | E11-E13 |
-| `crates/ralph-cli/src/loop_runner/wave/dispatcher.rs` | 修改现有生产文件/测试 | history injection | E1,E9,E22 |
+| `crates/ralph-cli/src/loop_runner/wave/dispatcher/dispatch.rs`、`worker_lifecycle.rs` | 修改拆分后的生产文件 | history injection | E1,E9,E22 |
 | `crates/ralph-cli/src/loop_runner/tests/wave_supervisor.rs` | 修改现有测试 | true runtime ATDD | E2,E20 |
 | `crates/ralph-core/data/ralph-tools-wave.md` | 修改 agent skill | 恢复动作合同 | E19,E21 |
 
@@ -770,7 +770,7 @@ U3 Redrive Resume 历史注入与安全 Worktree 复用
 | U2污染环境 | `RALPH_CURRENT_HAT=executor RALPH_EVENTS_FILE=/tmp/x.jsonl cargo nextest run -p ralph-cli --bin ralph -- attempt_receipt` | human fixture env隔离 | Green | 否 |
 | U3 core | `cargo nextest run -p ralph-core --features supervisor-db --lib -E 'test(/recovery_context/) or test(/registered_worktree_binding/) or test(/slot_attempt/) or test(/redrive/)'` | prompt/worktree/store | Green且命中>0 | 否 |
 | U3 runtime | `cargo nextest run -p ralph-cli --bin ralph -E 'test(/redrive_resume/) or test(/redrive_boot/) or test(/attempt_receipt/)'` | reopen/redrive/binding | Green且命中>0 | 否 |
-| U3相邻回归 | `cargo nextest run -p ralph-cli --bin ralph -E 'test(/wave_supervisor/) or test(/dispatcher::tests/)'` | wave dispatcher/supervisor | Green | 否 |
+| U3相邻回归 | `cargo nextest run -p ralph-cli --bin ralph -E 'test(/wave_supervisor/) or test(/dispatcher_tests/)'` | wave dispatcher/supervisor | Green | 否 |
 | 文档 drift | `bash scripts/check-cli-doc-drift.sh --strict` | agent skill与CLI contract | 退出0 | 否 |
 | Format | `just fmt-check` | 格式 | Green | 否 |
 | Lint | `just lint` | Clippy | Green | 否 |
@@ -783,7 +783,7 @@ U3 Redrive Resume 历史注入与安全 Worktree 复用
 
 ## 10. 最终质量门禁
 
-- S1-S13 全部通过并可追踪到 R/U/Evidence（编号中无遗漏；S13是深度审查新增的未终态复用保护场景）。
+- S1-S13 全部通过并可追踪到 R/U/Evidence；S13 是未终态复用保护场景。
 - U1-U3 的 Acceptance Red 均记录了实际目标失败，且不是环境/fixture/filter错误。
 - 所有 unit、integration、migration、concurrency、idempotency、fault injection、characterization tests通过。
 - v10 compatibility、memory/rusqlite differential、feature-off/no-wave路径通过。
