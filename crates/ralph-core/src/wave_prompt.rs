@@ -371,9 +371,9 @@ pub fn render_recovery_context(ctx: &RecoveryContext) -> String {
         match receipt.status {
             AttemptStatus::Succeeded => {
                 out.push_str(", start HEAD=");
-                out.push_str(&render_head_short(receipt.start_checkpoint.as_ref()));
+                out.push_str(render_head_short(receipt.start_checkpoint.as_ref()));
                 out.push_str(", end HEAD=");
-                out.push_str(&render_head_short(receipt.end_checkpoint.as_ref()));
+                out.push_str(render_head_short(receipt.end_checkpoint.as_ref()));
             }
             AttemptStatus::Failed => {
                 out.push_str(", failure_code=`");
@@ -381,7 +381,7 @@ pub fn render_recovery_context(ctx: &RecoveryContext) -> String {
                 out.push('`');
                 if let Some(cp) = &receipt.end_checkpoint {
                     out.push_str(", end HEAD=");
-                    out.push_str(&render_head_short(Some(cp)));
+                    out.push_str(render_head_short(Some(cp)));
                 }
             }
             AttemptStatus::Running => {

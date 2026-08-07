@@ -17,15 +17,14 @@ use super::{AttemptStatus, GitCheckpoint, InMemorySupervisorStore, SupervisorSto
 /// Register a single fresh wave with `slot_count` slots and
 /// return the assigned wave id.
 fn register_wave_with_slots(store: &dyn SupervisorStore, slot_count: u32) -> String {
-    let wave_id = store
+    store
         .register_wave(
             &format!("idem-{}", slot_count),
             WaveKind::Exec,
             slot_count,
             1,
         )
-        .expect("register_wave must succeed");
-    wave_id
+        .expect("register_wave must succeed")
 }
 
 /// Allocate a fresh store backed by a temporary SQLite file so
@@ -223,14 +222,14 @@ mod memory_contract {
     fn attempt_contract_unknown_wave_or_slot_returns_error() {
         let store = InMemorySupervisorStore::new();
         let err = store.begin_slot_attempt("does-not-exist", 0, None, 0);
-        assert!(matches!(err, Err(_)));
+        assert!(err.is_err());
 
         // Register a wave with one slot then probe slot 99 — the
         // store has no `slot 99` row, so begin must surface
         // UnknownSlot.
         let wave_id = register_wave_with_slots(&store, 1);
         let err = store.begin_slot_attempt(&wave_id, 99, None, 0);
-        assert!(matches!(err, Err(_)));
+        assert!(err.is_err());
     }
 
     #[test]
