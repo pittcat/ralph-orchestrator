@@ -2,13 +2,14 @@
 
 ## 0. 计划状态
 
-- `READY`；共同基线 `87c88317c94ce5f15d3e17b74755ade3f3b56a47`；全量基线已验证通过。
-- 调查：`wave_supervisor.rs` 当前 9,423 行、tests/mod 接入、supervisor bridge/slot/timeout 测试族；`./scripts/run-tests.sh` 通过（Phase 1 7576/7576、Phase 2 23/23、doctest 19/19，4 ignored，退出码 0）。
-- 阻塞：无；共享文档已由合并计划 002 独占处理。
+- `READY`；更新日期 2026-08-07；实施基线 `5791e21b`；当前尚未执行拆分。
+- 调查：`wave_supervisor.rs` 当前 9,423 行、由 `tests/mod.rs` 接入，包含共享 fixture、slot binding、dispatch、timeout、coordination、salvage、redrive 和 supervisor bridge 测试族。
+- 当前验证：`cargo build --workspace`、`just fmt-check`、`just lint` 和格式/warning 修复后的 `./scripts/run-tests.sh` 均通过；Phase 1 为 7576/7576、Phase 2 为 23/23、doctest 为 19/19（4 ignored）。
+- 阻塞：无；共享文档由合并计划 002 独占处理，本计划不修改 `.cursor/rules/state-management.mdc`。
 
 ### 0.1 0 回归硬门禁
 
-本计划在计划集级阻塞解除前禁止执行。解除前必须在当前 HEAD 运行并保存结果：
+本计划开始前必须在当前 HEAD 运行并保存结果：
 
 - `./scripts/run-tests.sh`
 - `cargo build --workspace`
@@ -16,7 +17,7 @@
 - `just lint`
 - `cargo nextest list --workspace`
 
-每个 Unit 前后必须证明 targeted 命令实际命中了目标测试；ralph-cli 统一使用 `cargo nextest run -p ralph-cli --bin ralph -- <filter>`，不能凭模块名假设命中。纯重构验收还必须逐项核对生产 item、测试函数体、属性、字符串字面量、公开签名、方法数量和方法体 hash；不能只比较编译结果、测试名或测试数量。禁止空 stub、把全部测试塞进 `misc.rs`、遗漏生产区、拆解巨型函数、修改业务逻辑或通过削弱断言获得 Green。共享文档已由合并计划 002 独占处理；本计划不修改该文件。当前 HEAD 全量基线通过后方可执行。
+每个 Unit 前后必须证明 targeted 命令实际命中了目标测试；ralph-cli 统一使用 `cargo nextest run -p ralph-cli --bin ralph -- <filter>`，不能凭模块名假设命中。纯重构验收必须保存测试 ID 多重集、测试函数体 hash、属性和字符串字面量清单；不能只比较编译结果、测试名或测试数量。禁止空 stub、把全部测试塞进 `misc.rs`、遗漏 fixture/测试、拆解巨型 helper、修改业务逻辑或通过削弱断言获得 Green。
 
 ## 1. 功能目标
 
@@ -33,6 +34,20 @@
 | E3 | tests/mod 与 wave imports | 依赖父层 glob、wave 生产 API | 声明/导入保留 | 高 |
 | E4 | AGENTS/run-tests | 时序/并发测试需 nextest + 两阶段 | 门禁 | 高 |
 | E5 | 最近 Git history | dispatcher 有 deadline 回归提交 | 必须保留既有回归 | 高 |
+
+### 2.1 当前行为族与搬移边界
+
+| 目标模块 | 主要内容 | 约束 |
+|---|---|---|
+| `slot_binding.rs` | bridge/worktree binding、环境变量、共享 readonly、失败闭环 | 保留真实 `SpyBindingBridge`/factory，不复制 fixture |
+| `dispatch.rs` | U3/U4 dispatch approval、cap、FIFO、spawn 前失败 | 保留真实 dispatcher/bridge 交互 |
+| `timeouts.rs` | timeout、retry、fresh process/cwd、aggregate deadline | 不修改 timeout 常量和时间断言语义 |
+| `coordination.rs` | U5 slot outcome、retry budget、fan-in、ledger/dedup | 保留 success/failure/partial 三类路径 |
+| `salvage_merge.rs` | salvage、redrive payload、zero-completed、failure classification | 不把 salvage 断言降级为“事件存在” |
+| `supervisor.rs` | U2/U4/U5/U6/U7/S2/S3/S4 redrive、projection、resume boot | 保留 fail-closed 和 descriptor/digest 断言 |
+| `misc.rs` | 仅收纳无法归类的小型稳定性/契约测试，目标 ≤600 行 | 禁止成为剩余大杂烩；超过 600 行必须继续按前缀拆 |
+
+共享 fixture（`SpyBindingBridge`、`RecordingFactory`、wave builders、测试 executor）只放在首个消费者模块或独立 `fixtures.rs`，二选一，不能在多个子模块重复定义。
 
 ## 3. 决策记录与置信度
 
@@ -79,18 +94,18 @@ Feature: wave supervisor 回归测试模块化
 
 ### Unit 1：wave_supervisor 测试目录模块化
 
-1. 目标：根 ≤300 行；新增 `slot_binding.rs`、`dispatch.rs`、`timeouts.rs`、`coordination.rs`、`salvage_merge.rs`、`supervisor.rs`、`misc.rs` 等实际行为族文件。
+1. 目标：根 ≤300 行；新增 `fixtures.rs`（若依赖分析证明需要）、`slot_binding.rs`、`dispatch.rs`、`timeouts.rs`、`coordination.rs`、`salvage_merge.rs`、`supervisor.rs`、`misc.rs` 等实际行为族文件；所有子文件 <5,000 行，`misc.rs` ≤600 行。
 2. 对应 R1/R2、BDD、D1–D3、E1–E3。
 3. 结果：最大子文件约 1,100 行，全部 <5,000；测试名多重集/计数不变。
-4. 基线：当前文件包含 Spy/Recording fixture 和 U3/U5 等前缀族，均属本文件所有权。
+4. 基线：当前文件包含 Spy/Recording fixture、多个按 U/S 编号命名的 helper 和测试族，均属本文件所有权；搬移前先生成函数/fixture/测试 ID manifest。
 5. 输入/输出/副作用：fixture 与断言不变。
 6. 修改边界：仅该文件和子目录；不动 dispatcher/bridge 生产文件。
 7. 可依赖：现有 wave API；无其他计划依赖。
 8. 禁止：改并发/timeout 常量、删测试、mock 掉真实 bridge。
 9. 验收：list、targeted、full。
 10. Red：编译、测试失败、计数不一致即红。
-11. 单测：不新增，fixture 随首个使用族整体搬移。
-12. 顺序：快照 → fixture/slot → dispatch → timeout → coordination/salvage → supervisor/misc → Refactor → full。
+11. 单测：不新增；只做物理搬移。fixture 随首个使用族整体搬移，若跨 3 个以上行为族共享则抽 `fixtures.rs`，仍不得复制。
+12. 顺序：快照 → fixture 依赖图 → slot_binding → dispatch → timeouts → coordination → salvage_merge → supervisor → misc → root 声明/re-export → targeted/full。
 13. 最小实现：路径式 mod、导入、最小 `pub(super)`。
 14. 集成：wave_supervisor、wave/loop_runner、workspace。
 15. 风险：fixture 重复定义和慢测试误跑；用 build、ID、run-tests 检测。
@@ -117,5 +132,6 @@ Feature: wave supervisor 回归测试模块化
 | 检查项 | 结果 |
 |---|---|
 | 独立行为切片 | 是，wave supervisor 回归 |
-| 修改所有权无冲突 | 代码文件是；计划集共享 mdc 未解决 |
-| 独立性置信度 | 未达 0.90，保持 BLOCKED |
+| 修改所有权无冲突 | 是；本计划只拥有 `wave_supervisor.rs` 及其子目录，不修改生产代码和共享 mdc |
+| 当前是否可执行 | 是；基线、fmt、lint、warning 和全量回归均通过 |
+| 独立性置信度 | 0.94 |
