@@ -1,14 +1,26 @@
 #!/usr/bin/env python3
 """
-Install and configure Nowledge Mem for Claude Code inside a Ralph project.
+Migrate a Ralph target project from the generic Nowledge Mem Claude Code
+plugin to the Ralph-dedicated read-only plugin.
 
-What this script does:
+What this script does (all Claude calls run with the target project as cwd):
 1. Locates the target project directory.
 2. Verifies that `claude` is available.
 3. Installs `nmem-cli` with `uv tool install` when `nmem` is missing.
-4. Adds the Nowledge community plugin marketplace.
-5. Installs `nowledge-mem` with Claude Code project scope.
-6. Verifies that the project configuration contains the plugin.
+4. Reads the authoritative plugin inventory (`claude plugin list --json`).
+5. Installs `nowledge-mem-ralph@ralph-orchestrator` with project scope
+   from this repository's local marketplace (when missing for the target)
+   and re-verifies it authoritatively.
+6. Only then removes the target project's generic
+   `nowledge-mem@nowledge-community` project-scope entry with
+   `--keep-data` (when present for the target).
+7. Final verification: dedicated project entry present, generic project
+   entry gone, and every entry outside that migration deep-equal to the
+   initial inventory (user scope and other projects untouched).
+
+Migration matching is exact: full plugin id + scope=project + canonical
+projectPath equal to the target root. Entries of other projects are never
+migrated. User-scope entries are never created or removed.
 
 It intentionally does NOT modify:
 - CLAUDE.md
@@ -33,8 +45,11 @@ import sys
 from pathlib import Path
 from typing import Sequence
 
-MARKETPLACE_URL = "https://github.com/nowledge-co/community"
-PLUGIN_NAME = "nowledge-mem@nowledge-community"
+REPO_ROOT = Path(__file__).resolve().parent.parent
+MARKETPLACE_NAME = "ralph-orchestrator"
+DEDICATED_ID = f"nowledge-mem-ralph@{MARKETPLACE_NAME}"
+GENERIC_ID = "nowledge-mem@nowledge-community"
+MIGRATED_IDS = (DEDICATED_ID, GENERIC_ID)
 
 
 class SetupError(RuntimeError):
@@ -186,105 +201,239 @@ def ensure_nmem(project_root: Path, dry_run: bool) -> None:
     run(["nmem", "--version"], cwd=project_root, dry_run=False, check=False)
 
 
-def configure_claude_plugin(project_root: Path, dry_run: bool) -> None:
-    claude = require_command("claude")
-    log(f"Found Claude Code: {claude}")
+# --- scope-aware plugin migration ---------------------------------------------
 
-    # Marketplace add may return a non-zero status when the marketplace already exists.
-    # Continue to the authoritative plugin-install step and fail only if that step fails.
+
+def _combined_output(result: subprocess.CompletedProcess[str]) -> str:
+    return "\n".join(
+        part.strip() for part in (result.stdout, result.stderr) if part and part.strip()
+    )
+
+
+def read_plugin_inventory(claude: str, project_root: Path) -> list[dict]:
+    """Read the authoritative plugin list; fail closed on unknown shapes."""
     result = run(
-        [claude, "plugin", "marketplace", "add", MARKETPLACE_URL],
+        [claude, "plugin", "list", "--json"],
         cwd=project_root,
-        dry_run=dry_run,
+        dry_run=False,
         check=False,
         capture=True,
     )
-
-    if not dry_run and result.returncode != 0:
-        message = "\n".join(
-            part.strip() for part in (result.stdout, result.stderr) if part and part.strip()
-        )
-        warn(
-            "Marketplace add did not return success. This is often harmless when it "
-            "was already added."
-        )
-        if message:
-            warn(message)
-
-    run(
-        [claude, "plugin", "install", PLUGIN_NAME, "--scope", "project"],
-        cwd=project_root,
-        dry_run=dry_run,
-    )
-
-
-def contains_plugin(value: object) -> bool:
-    if isinstance(value, str):
-        return "nowledge-mem" in value or "nowledge-community" in value
-    if isinstance(value, dict):
-        return any(contains_plugin(key) or contains_plugin(item) for key, item in value.items())
-    if isinstance(value, list):
-        return any(contains_plugin(item) for item in value)
-    return False
-
-
-def verify_project_configuration(project_root: Path, dry_run: bool) -> None:
-    settings_path = project_root / ".claude" / "settings.json"
-
-    if dry_run:
-        log(f"Would verify project settings: {settings_path}")
-        return
-
-    if not settings_path.exists():
+    if result.returncode != 0:
         raise SetupError(
-            f"Claude project settings were not created: {settings_path}. "
-            "The plugin may have been installed to the wrong scope."
+            f"`claude plugin list --json` failed with exit code {result.returncode}; "
+            f"cannot determine the current plugin state safely.\n{_combined_output(result)}"
         )
 
     try:
-        settings = json.loads(settings_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
-        raise SetupError(f"Could not read {settings_path}: {exc}") from exc
-
-    if not contains_plugin(settings):
+        inventory = json.loads(result.stdout)
+    except json.JSONDecodeError as exc:
         raise SetupError(
-            f"{settings_path} exists, but no Nowledge Mem plugin entry was found."
+            f"could not parse `claude plugin list --json` output as JSON: {exc}"
+        ) from exc
+
+    if not isinstance(inventory, list):
+        raise SetupError(
+            "`claude plugin list --json` did not return a JSON array; "
+            "refusing to guess the plugin state."
         )
 
-    log(f"Verified project-scoped plugin configuration: {settings_path}")
+    for entry in inventory:
+        if (
+            not isinstance(entry, dict)
+            or not isinstance(entry.get("id"), str)
+            or not isinstance(entry.get("scope"), str)
+        ):
+            raise SetupError(
+                "unrecognized plugin list entry shape (needs string `id` and "
+                "`scope`); refusing to guess the plugin state."
+            )
+        if entry["scope"] == "project" and not isinstance(entry.get("projectPath"), str):
+            raise SetupError(
+                f"project-scope entry {entry.get('id')!r} has no string "
+                "`projectPath`; refusing to guess which project it belongs to."
+            )
 
-    if shutil.which("nmem"):
-        status = run(
-            ["nmem", "status"],
+    return inventory
+
+
+def is_target_project(entry: dict, target_root: Path) -> bool:
+    """Exact match: scope=project and canonical projectPath == target root."""
+    if entry.get("scope") != "project":
+        return False
+    entry_path = Path(entry["projectPath"]).expanduser().resolve()
+    return entry_path == target_root
+
+
+def has_entry(inventory: list[dict], plugin_id: str, target_root: Path) -> bool:
+    return any(
+        entry.get("id") == plugin_id and is_target_project(entry, target_root)
+        for entry in inventory
+    )
+
+
+def plan_migration(inventory: list[dict], target_root: Path) -> dict[str, bool]:
+    return {
+        "install_dedicated": not has_entry(inventory, DEDICATED_ID, target_root),
+        "uninstall_generic": has_entry(inventory, GENERIC_ID, target_root),
+    }
+
+
+def _strip_target_migration(inventory: list[dict], target_root: Path) -> list[str]:
+    """Canonical form of every entry outside the target dedicated/generic
+    migration — used to prove user scope and other projects are untouched."""
+    return sorted(
+        json.dumps(entry, sort_keys=True)
+        for entry in inventory
+        if not (
+            entry.get("id") in MIGRATED_IDS and is_target_project(entry, target_root)
+        )
+    )
+
+
+def migrate_project_plugins(project_root: Path, dry_run: bool) -> None:
+    claude = require_command("claude")
+    log(f"Found Claude Code: {claude}")
+
+    inventory = read_plugin_inventory(claude, project_root)
+    plan = plan_migration(inventory, project_root)
+    log(
+        "Initial target-project state: "
+        f"dedicated={'present' if not plan['install_dedicated'] else 'missing'}, "
+        f"generic={'present' if plan['uninstall_generic'] else 'absent'}."
+    )
+
+    if dry_run:
+        if plan["install_dedicated"]:
+            log(
+                "[DRY-RUN] would run: "
+                + format_command(
+                    [claude, "plugin", "marketplace", "add", "--scope", "project", str(REPO_ROOT)]
+                )
+            )
+            log(
+                "[DRY-RUN] would run: "
+                + format_command(
+                    [claude, "plugin", "install", DEDICATED_ID, "--scope", "project"]
+                )
+            )
+        else:
+            log("[DRY-RUN] dedicated project plugin already installed; no install needed.")
+        if plan["uninstall_generic"]:
+            log(
+                "[DRY-RUN] would run: "
+                + format_command(
+                    [
+                        claude,
+                        "plugin",
+                        "uninstall",
+                        GENERIC_ID,
+                        "--scope",
+                        "project",
+                        "--keep-data",
+                    ]
+                )
+            )
+        else:
+            log("[DRY-RUN] no target project generic to uninstall.")
+        return
+
+    if plan["install_dedicated"]:
+        # A non-zero marketplace add is recoverable (e.g. already declared);
+        # the install and the authoritative re-list decide success (D11).
+        add_result = run(
+            [claude, "plugin", "marketplace", "add", "--scope", "project", str(REPO_ROOT)],
             cwd=project_root,
             dry_run=False,
             check=False,
             capture=True,
         )
-        if status.returncode == 0:
-            output = (status.stdout or "").strip()
-            if output:
-                print(output)
-            log("nmem status check succeeded.")
-        else:
+        if add_result.returncode != 0:
             warn(
-                "The plugin is installed, but `nmem status` did not succeed. "
-                "Open or sign in to Nowledge Mem, then run `nmem status` again."
+                "marketplace add did not return success; continuing — "
+                "install and final verification are authoritative."
             )
-            combined = "\n".join(
-                part.strip()
-                for part in (status.stdout, status.stderr)
-                if part and part.strip()
+            output = _combined_output(add_result)
+            if output:
+                warn(output)
+
+        # check=True: on failure we stop BEFORE touching the generic plugin.
+        run(
+            [claude, "plugin", "install", DEDICATED_ID, "--scope", "project"],
+            cwd=project_root,
+            dry_run=False,
+        )
+
+        verified = read_plugin_inventory(claude, project_root)
+        if not has_entry(verified, DEDICATED_ID, project_root):
+            raise SetupError(
+                "dedicated plugin install reported success but the authoritative "
+                f"plugin list has no project-scope {DEDICATED_ID} entry for this "
+                "target; keeping the project generic plugin."
             )
-            if combined:
-                warn(combined)
+        log(f"Verified dedicated project plugin: {DEDICATED_ID}")
+    else:
+        log(f"Dedicated project plugin already installed: {DEDICATED_ID}")
+
+    if plan["uninstall_generic"]:
+        uninstall_result = run(
+            [
+                claude,
+                "plugin",
+                "uninstall",
+                GENERIC_ID,
+                "--scope",
+                "project",
+                "--keep-data",
+            ],
+            cwd=project_root,
+            dry_run=False,
+            check=False,
+            capture=True,
+        )
+        if uninstall_result.returncode != 0:
+            output = _combined_output(uninstall_result)
+            raise SetupError(
+                f"dedicated plugin {DEDICATED_ID} is installed and verified, but "
+                f"removing the project-scope generic {GENERIC_ID} failed with exit "
+                f"code {uninstall_result.returncode}. Both project plugins now "
+                "coexist; this is recoverable.\n"
+                f"Recovery: re-run this script, or manually run:\n"
+                f"  cd '{project_root}' && claude plugin uninstall {GENERIC_ID} "
+                "--scope project --keep-data"
+                + (f"\n{output}" if output else "")
+            )
+        log(f"Removed project-scope generic plugin (data kept): {GENERIC_ID}")
+    else:
+        log("No project-scope generic plugin for this target; nothing to uninstall.")
+
+    final_inventory = read_plugin_inventory(claude, project_root)
+    if not has_entry(final_inventory, DEDICATED_ID, project_root):
+        raise SetupError(
+            "final verification failed: dedicated project entry "
+            f"{DEDICATED_ID} is missing from the authoritative plugin list."
+        )
+    if has_entry(final_inventory, GENERIC_ID, project_root):
+        raise SetupError(
+            "final verification failed: project-scope generic "
+            f"{GENERIC_ID} is still present for this target."
+        )
+    if _strip_target_migration(final_inventory, project_root) != _strip_target_migration(
+        inventory, project_root
+    ):
+        raise SetupError(
+            "final verification failed: entries outside the target migration "
+            "(user scope or other projects) changed unexpectedly."
+        )
+    log("Final verification passed: dedicated present, generic absent, all other entries unchanged.")
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Install Nowledge Mem for Claude Code using project scope, "
-            "suitable for Ralph headless runs."
+            "Migrate a Ralph target project from the generic Nowledge Mem "
+            "plugin to the dedicated read-only nowledge-mem-ralph plugin "
+            "(project scope only; user scope is never touched)."
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=(
@@ -303,7 +452,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--dry-run",
         action="store_true",
-        help="Print commands without changing the system or project.",
+        help="Read the current plugin state and print planned actions without "
+        "running any mutation command.",
     )
     return parser.parse_args()
 
@@ -316,11 +466,10 @@ def main() -> int:
         log(f"Project root: {project_root}")
 
         ensure_nmem(project_root, args.dry_run)
-        configure_claude_plugin(project_root, args.dry_run)
-        verify_project_configuration(project_root, args.dry_run)
+        migrate_project_plugins(project_root, args.dry_run)
 
         print()
-        print("[OK] Nowledge Mem is configured for this Ralph project.")
+        print("[OK] Nowledge Mem plugin migration is configured for this Ralph project.")
         print("[OK] No CLAUDE.md, AGENTS.md, Hat prompt, or ralph.yml changes were made.")
         print()
         print("Run Ralph normally, for example:")

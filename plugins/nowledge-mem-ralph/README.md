@@ -23,7 +23,39 @@ scope；因此 user 级通用插件不会被 Ralph child 看见，两者互不�
 - 已安装 `nmem` CLI 且 Nowledge Mem 服务可达（仅执行 search/status 查询时需要；
   安装插件本身不需要）。
 
-## 安装（project scope，local marketplace）
+## 安装
+
+### 推荐：迁移脚本（scope-aware，幂等）
+
+本仓库提供 `scripts/setup_nowledge_ralph.py`，把 target project 从通用插件的
+project scope 迁移到本专用插件（user scope 与其他项目绝不触碰）：
+
+```bash
+# 预演：只读取当前 plugin 状态并打印拟执行动作，不做任何变更
+python3 <repo-root>/scripts/setup_nowledge_ralph.py <target project> --dry-run
+
+# 实际迁移
+python3 <repo-root>/scripts/setup_nowledge_ralph.py <target project>
+```
+
+脚本行为合同：
+
+- 先安装并**权威验证** dedicated project 插件，成功后才卸载 project 通用插件
+  （`--keep-data` 保留数据），最后用 `claude plugin list --json` 终检。
+- 判定精确：完整插件 id + `scope=project` + canonical `projectPath` 等于
+  target root；其他项目的同名条目不会被迁移。
+- 幂等：已完成迁移后重跑只读取状态，不重复 install/uninstall，exit 0。
+- `marketplace add` 非零（如已声明）仅作警告，由后续 install 与终检裁决。
+
+**安装失败处理**：
+
+- dedicated 安装或安装后验证失败 → 脚本非零退出，project 通用插件**保留**；
+  修复原因（如 marketplace 路径、网络）后直接重跑脚本。
+- project 通用插件卸载失败 → 脚本非零退出并明确报告两个 project 插件并存；
+  按输出中的恢复命令手动卸载，或直接重跑脚本收敛。
+- 初始 plugin 状态无法解析（非法 JSON / 缺字段）→ 非零退出，不执行任何卸载。
+
+### 手动安装（project scope，local marketplace）
 
 在 **target project 目录**下执行（`<repo-root>` 为 ralph-orchestrator 仓库的
 绝对路径）：
@@ -91,6 +123,9 @@ claude plugin uninstall nowledge-mem-ralph@ralph-orchestrator --scope project --
 
 `--keep-data` 保留插件持久数据目录；nmem 中的知识数据本身独立于插件，任何
 卸载都不会删除 nmem 数据。
+
+重装：卸载后重新执行上面的安装步骤（脚本或手动均可）；迁移脚本会识别
+dedicated 缺失并重新收敛到目标状态。
 
 ## 隐私
 
