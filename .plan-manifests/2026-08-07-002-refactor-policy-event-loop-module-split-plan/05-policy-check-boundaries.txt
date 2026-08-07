@@ -1,0 +1,53 @@
+Block boundaries (line ranges) confirmed by sampling file:
+43:pub enum PolicyCheckMode {
+53:pub struct PolicyCheckFlags {
+68:pub fn resolve_policy_check_mode(
+89:pub fn resolve_policy_check_mode_with_ctx(
+128:pub fn legacy_resolve(flags: &PolicyCheckFlags, config: Option<&RalphConfig>) -> PolicyCheckMode {
+142:pub enum OnConfigError {
+161:pub fn load_workspace_config(
+219:pub fn load_policy_config_for_cli_emit(
+413:pub fn enabled_event_policy(config: Option<&RalphConfig>) -> Option<&EventPolicyConfig> {
+421:pub struct PolicyCheckContext {
+431:pub fn build_policy_state(
+457:pub fn check_step_handoff_gate(
+539:pub fn check_wave_dimension_assignment(
+618:pub fn check_isolated_scope(
+686:pub struct PolicyCheckReport {
+843:#[cfg(test)]
+844:pub fn run_policy_check_unified(
+874:pub fn run_policy_check_unified_with_config(
+1079:fn check_cli_flow_step_scope(
+1245:#[cfg(test)]
+1246:mod read_main_ledger_topics_tests {
+1312:fn append_cli_reject_to_recovery(
+1347:#[cfg(test)]
+1348:mod u6_unified_path_tests {
+1987:pub fn check_emit_provenance(
+2046:pub fn check_envelope_triggered(
+2105:fn extract_dimension_field(payload_str: &str) -> String {
+2130:fn extract_step_and_task_id_from_payload(payload_str: &str) -> (Option<String>, Option<String>) {
+2167:pub struct ValidationError {
+2315:pub fn enrich_validation_error(
+2413:pub fn enrich_validation_error_with_topic(
+2481:#[cfg(test)]
+2482:mod u1_warn_parity_tests {
+2637:#[cfg(test)]
+2638:mod u2_structured_feedback_tests {
+2811:fn extract_quoted_value(message: &str) -> Option<String> {
+2835:pub struct BatchValidation {
+2858:pub fn validate_topic_payload_with_handoff(
+2877:pub fn validate_topic_payload_against_config(
+2895:pub fn validate_topic_payload_with_state(
+2912:pub fn validate_batch_against_config(
+3081:pub enum OutputMode {
+3092:pub struct ValidationFailure {
+3147:pub fn emit_policy_validation_failure(
+3206:pub fn build_emit_result_parts(
+3255:fn envelope_summary_enabled(config: Option<&RalphConfig>) -> bool {
+3278:pub fn enrich_report_with_schema(
+3304:pub fn report_to_emit_result(
+3350:fn validation_errors_to_emit_errors(
+3384:pub fn render_validation_error_repair_block(
+3461:#[cfg(test)]
+3463:mod tests {
