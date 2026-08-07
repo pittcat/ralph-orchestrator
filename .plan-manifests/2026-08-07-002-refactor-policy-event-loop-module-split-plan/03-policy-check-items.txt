@@ -1,0 +1,44 @@
+L68  89911a162b25  pub fn resolve_policy_check_mode(
+L89  9959814a55f4  pub fn resolve_policy_check_mode_with_ctx(
+L128  e41a712064c4  pub fn legacy_resolve(flags: &PolicyCheckFlags, config: Option<&RalphConfig>) -> PolicyCheckMode {
+L161  a7ff6d35afdb  pub fn load_workspace_config(
+L219  f96e9d43fdd0  pub fn load_policy_config_for_cli_emit(
+L322  deff9bf04a4c  fn load_policy_config_from_hats_only(
+L375  2180dfc25feb  fn merge_workspace_hats_into(
+L413  fe019fb2557a  pub fn enabled_event_policy(config: Option<&RalphConfig>) -> Option<&EventPolicyConfig> {
+L431  d5b3144098b6  pub fn build_policy_state(
+L457  2b362eff2dd2  pub fn check_step_handoff_gate(
+L509  f22c1db9f553  fn mismatch_to_validation_error(m: &ProgressTaskMismatch, topic: &str) -> ValidationError {
+L539  1afa274f3f94  pub fn check_wave_dimension_assignment(
+L554  bd312020ba48  fn check_wave_dimension_assignment_with_env(
+L618  ba5ffeed26b6  pub fn check_isolated_scope(
+L766  36f5efad35fa  fn report_from_validation(
+L844  53ebb2860583  pub fn run_policy_check_unified(
+L874  26d4052a114d  pub fn run_policy_check_unified_with_config(
+L1079  0a68e85188f9  fn check_cli_flow_step_scope(
+L1165  4dac4beb27e6  fn recover_from_topics(
+L1179  b7cce75f29fd  fn recover_from_workspace_state(
+L1219  ee0e1c443149  fn read_main_ledger_topics(workspace_root: &Path, events_file: Option<&Path>) -> Vec<String> {
+L1312  1efef830e79c  fn append_cli_reject_to_recovery(
+L1987  26a5a6f78aae  pub fn check_emit_provenance(
+L2046  9ed6907eb1de  pub fn check_envelope_triggered(
+L2105  21e7a2c9fcc5  fn extract_dimension_field(payload_str: &str) -> String {
+L2130  5dc87307bbe1  fn extract_step_and_task_id_from_payload(payload_str: &str) -> (Option<String>, Option<String>) {
+L2315  1debbd713b55  pub fn enrich_validation_error(
+L2413  5fa97b7b0f9f  pub fn enrich_validation_error_with_topic(
+L2435  c52a3adf58d4  fn resolved_allowed_values(
+L2460  66c3430e0813  fn payload_type_label(p: &PayloadType) -> String {
+L2811  191c9a3c46ee  fn extract_quoted_value(message: &str) -> Option<String> {
+L2858  6c655563d65b  pub fn validate_topic_payload_with_handoff(
+L2877  b046aa2e1ad3  pub fn validate_topic_payload_against_config(
+L2895  c25d5c3ce490  pub fn validate_topic_payload_with_state(
+L2912  95a86ea14136  pub fn validate_batch_against_config(
+L2934  eb860c73ed8c  fn finding_to_validation_error(decision: &PolicyDecision, _topic: &str) -> Option<ValidationError> {
+L2956  8a55d03468ed  fn finding_record(finding: &ralph_core::PolicyFinding) -> ValidationError {
+L3147  08884aa691d7  pub fn emit_policy_validation_failure(
+L3206  57b427a657e0  pub fn build_emit_result_parts(
+L3255  d213e9b42f7a  fn envelope_summary_enabled(config: Option<&RalphConfig>) -> bool {
+L3278  475622e03462  pub fn enrich_report_with_schema(
+L3304  1201ef8980b4  pub fn report_to_emit_result(
+L3350  4ceb9153ba38  fn validation_errors_to_emit_errors(
+L3384  afe14f2954fc  pub fn render_validation_error_repair_block(

@@ -195,3 +195,40 @@ U2 不能提前，因为 policy/event policy 的公开 API 和测试清单必须
 | Executor 无关键设计决策 | 是，需先补齐 item manifest 后执行 |
 | 当前是否可执行 | 是；build/lint/fmt 已通过，实施分支仍必须重新跑 nextest 与全量基线 |
 | 独立性置信度 | 0.96（解除基线门禁后） |
+
+## 12. 实施记录（2026-08-07，本计划复用 worktree 阶段）
+
+本计划在复用 worktree `ralph/2026-08-07-002-refactor-policy-event-loop-module-split-plan` 下由 executor + fixer 双阶段落地。U1、U2 和 U3 已完成；后续修复将 EventLoop 根文件压至 1,164 行，移除重复 inline 测试模块，完成头部模块接入，并将实现区域改为语义命名。完整证据在 `.ralph/review/2026-08-07-002-refactor-policy-event-loop-module-split-plan/`。
+
+### 12.1 已完成
+
+- **U1 policy_check.rs 拆分**：commit `23c6b24a`。`policy_check.rs` 由 5,890 行压至 213 行；`policy_check/{gates,unified}.rs` + 5 个测试文件全部 < 5,000 行。
+- **U2 event_policy.rs 拆分**：commit `20627e00`（executor）。`event_policy.rs` 由 8,406 行压至 180 行 facade；`event_policy/{types,runtime,validation,projection}.rs` + `tests/{mod,helpers,tests_part1,tests_part2}.rs` 全部 < 5,000 行；fixer 在 `a80a77a0` 进一步用 `include!` 收敛 `tests_part{1,2}::tests` 命名空间使测试 ID 还原 baseline `event_policy::tests::<fn>`。
+- **U3 mdc 文档闭环**：commit `32704916`（fixer）。`.cursor/rules/state-management.mdc` 的 4 处漂移引用全部更新到真实路径；glob 改为 `event_loop/**/*.rs` + `event_policy/**/*.rs`；`scripts/check-cli-doc-drift.sh` 通过。
+- **U4 fixture namespace 还原**：commit `a80a77a0`（fixer）。
+- **U6 删除 7 个 dead helpers**：commit `8bb5a9f1`（fixer）。`event_policy/tests/helpers.rs` 删除 `review_passed_allowlist_config`、`work_done_payload`、`review_dimensions_complete_payload`、`insert_review_dimensions_schema`、`test_config_with_enforce_and_resume`、`work_ready_payload`、`test_result_payload`；移除文件级 `#![cfg_attr(test, allow(dead_code))]`。
+
+### 12.2 全量门禁（fixer 完成阶段后）
+
+- `cargo build --workspace`：PASS
+- `RUSTFLAGS='-D warnings' cargo check --workspace --all-targets`：PASS
+- `just fmt-check`：PASS
+- `just lint`（clippy -D warnings）：PASS
+- `cargo nextest run -p ralph-cli --bin ralph -- policy_check`：126/126 PASS
+- `cargo nextest run -p ralph-cli --test integration_emit_policy`：13/13 PASS
+- `cargo nextest run -p ralph-core --no-fail-fast -- event_policy`：202/202 PASS
+- `cargo nextest run -p ralph-core --no-fail-fast -- event_loop`：1228/1228 PASS
+- `scripts/check-cli-doc-drift.sh`：PASS
+
+### 12.3 Residual — 后续独立计划应处理的 P2 事项
+
+1. **EventLoop 根文件与实现区域拆分**：已完成。`mod.rs` 当前 1,164 行；6 个 inline 测试模块已迁移到 `event_loop/tests/`；头部自由项已接入 `prompt_types.rs` 与 `flow_wiring.rs`；10 个实现区域已改为语义命名（如 `parse_and_emit.rs`、`prompt_injection.rs`、`completion_and_termination.rs`），不再使用数字区域文件名。`process_parse_result` 保持完整搬移，未拆解业务逻辑。
+2. **`validate_event_with_options` 内部关切拆分**：当前 validator 仍保留单一大函数（与 `process_parse_result` 同类巨型结构）；下一轮 refactor 应按 facade 模式（顶层 facade + `validate_event_with_options::internal_{payload_consistency,schema,envelope,topic_format,completion}`）拆分。
+3. **`event_policy` 模块 facade 的 `pub(crate)` re-export 与历史 `#[allow(...)]` 收敛**：executor U2 commit 引入了若干 `pub(crate)` 用于跨模块访问；review 中记录的 G3 / M3 / C3(b)/(c)/(d) / M1 / M5 / S4 / A2 等待独立 plan 处理。
+4. **fixture helper `StubHandoff` 与 `HITTING_PAYLOAD` 在 `tests/helpers.rs` 的去留**：目前这两个 item 仍 active 使用，不在 U6 删除范围；下一轮如不需要应单独清理。
+
+### 12.4 不在本计划范围
+
+- 修改事件协议、schema、错误语义、配置字段、preset、agent-facing skill 行为或业务逻辑。
+- 修改或弱化既有测试断言、更新 snapshot 以取得 Green。
+- 修改 operator-facing CLI 参数或启动流程。

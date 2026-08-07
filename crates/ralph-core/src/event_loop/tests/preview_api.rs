@@ -658,7 +658,7 @@ fn prompt_preview_candidate_emit_field_appears_when_provided() {
 /// not as a bare array (which is what `#[serde(untagged)]` produces).
 #[test]
 fn next_hat_candidates_verified_serializes_with_kind_discriminator() {
-    use crate::event_policy::compute_next_hat_candidates;
+    use crate::event_policy::projection::compute_next_hat_candidates;
 
     let yaml = r#"
 event_loop:
@@ -694,7 +694,7 @@ hats:
 /// null or an unverified placeholder.
 #[test]
 fn next_hat_candidates_empty_serializes_as_verified_empty_set() {
-    use crate::event_policy::compute_next_hat_candidates;
+    use crate::event_policy::projection::compute_next_hat_candidates;
 
     let yaml = r#"
 event_loop:
@@ -764,7 +764,8 @@ fn next_hat_candidates_mixed_serializes_with_kind_mixed() {
 /// All three `NextHatCandidates` variants must round-trip through serde.
 #[test]
 fn next_hat_candidates_all_variants_roundtrip() {
-    use crate::event_policy::{CandidateHatEntry, NextHatCandidates, compute_next_hat_candidates};
+    use crate::event_policy::projection::compute_next_hat_candidates;
+    use crate::event_policy::{CandidateHatEntry, NextHatCandidates};
 
     let yaml = r#"
 event_loop:
