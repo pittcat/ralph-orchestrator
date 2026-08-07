@@ -51,7 +51,7 @@
 //! rather than re-implement locally, so this evaluator and the
 //! `event_policy` evaluator cannot drift on the same input.
 
-use crate::event_policy::extract_json_field;
+use crate::event_policy::validation::extract_json_field;
 use serde_json::Value;
 
 /// Result of evaluating a `when` predicate against a single payload.
@@ -742,7 +742,7 @@ mod tests {
 #[cfg(test)]
 mod cross_impl_consistency_tests {
     use super::{EvalOutcome, evaluate, observe_referenced_fields};
-    use crate::event_policy::extract_json_field;
+    use crate::event_policy::validation::extract_json_field;
     use serde_json::{Value, json};
 
     fn assert_equal_value(payload: &Value, path: &str, expected: Value) {
