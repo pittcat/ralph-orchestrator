@@ -18,6 +18,12 @@ What this script does (all Claude calls run with the target project as cwd):
    entry gone, and every entry outside that migration deep-equal to the
    initial inventory (user scope and other projects untouched).
 
+Additionally, the script warns when a generic plugin exists with LOCAL
+scope: Ralph children load the ``project,local`` settings sources, so a
+local-scope generic would keep its automatic session capture active even
+after a successful project migration. Local scope is never migrated or
+removed automatically; the warning carries the manual remediation.
+
 Migration matching is exact: full plugin id + scope=project + canonical
 projectPath equal to the target root. Entries of other projects are never
 migrated. User-scope entries are never created or removed.
@@ -279,6 +285,36 @@ def plan_migration(inventory: list[dict], target_root: Path) -> dict[str, bool]:
     }
 
 
+def warn_local_scope_generic(inventory: list[dict], target_root: Path) -> None:
+    """Detect a local-scope generic plugin that Ralph children would still load.
+
+    Ralph's Claude adapter loads the ``project`` AND ``local`` settings
+    sources. A local-scope generic therefore keeps its automatic session
+    capture active for Ralph children even after a successful project-scope
+    migration. Local scope is per-project personal configuration, outside
+    this installer's mutation contract — warn with a manual remediation,
+    never remove it automatically.
+    """
+    for entry in inventory:
+        if entry.get("id") != GENERIC_ID or entry.get("scope") != "local":
+            continue
+        project_path = entry.get("projectPath")
+        if isinstance(project_path, str):
+            if Path(project_path).expanduser().resolve() != target_root:
+                continue  # another project's local entry — not ours
+            attribution = "for this target project"
+        else:
+            attribution = "without an attributable projectPath"
+        warn(
+            f"local-scope generic plugin detected {attribution}; Ralph children "
+            "also load the 'local' settings source, so its automatic session "
+            "capture would remain active even after this project-scope "
+            "migration. This installer does not remove local-scope entries. "
+            "Manual fix:\n"
+            f"  cd '{target_root}' && claude plugin uninstall {GENERIC_ID} --scope local"
+        )
+
+
 def _strip_target_migration(inventory: list[dict], target_root: Path) -> list[str]:
     """Canonical form of every entry outside the target dedicated/generic
     migration — used to prove user scope and other projects are untouched."""
@@ -302,6 +338,7 @@ def migrate_project_plugins(project_root: Path, dry_run: bool) -> None:
         f"dedicated={'present' if not plan['install_dedicated'] else 'missing'}, "
         f"generic={'present' if plan['uninstall_generic'] else 'absent'}."
     )
+    warn_local_scope_generic(inventory, project_root)
 
     if dry_run:
         if plan["install_dedicated"]:

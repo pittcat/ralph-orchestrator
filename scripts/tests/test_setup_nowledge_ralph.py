@@ -522,6 +522,107 @@ def test_other_project_entries_not_migrated(
     ], f"unexpected sequence: {argv_sequence(calls)}"
 
 
+# --- local-scope generic detection (adversarial review P1) -----------------------------
+
+LOCAL_WARNING = "local-scope generic plugin detected"
+
+
+def test_local_scope_generic_for_target_warns_and_migration_proceeds(
+    tmp_path: Path, fake_bin: Path, target_project: Path
+) -> None:
+    """Ralph children load the 'local' settings source, so a local-scope
+    generic would keep auto-capturing even after a successful project
+    migration. The installer must warn with a manual fix but must NOT
+    auto-remove it (local scope is outside the migration contract)."""
+    target = str(target_project)
+    local_generic = entry(GENERIC, "local", project_path=target, version="0.7.20")
+    dedicated_project = entry(DEDICATED, "project", project_path=target, version="0.1.0")
+
+    responses = [
+        list_response([local_generic]),
+        OK,
+        OK,
+        list_response([local_generic, dedicated_project]),
+        list_response([local_generic, dedicated_project]),
+    ]
+    result, calls = run_installer(tmp_path, fake_bin, target_project, responses)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert argv_sequence(calls) == [
+        LIST,
+        MARKETPLACE_ADD,
+        INSTALL_DEDICATED,
+        LIST,
+        LIST,
+    ], "local-scope detection must never add a mutation call"
+    assert LOCAL_WARNING in result.stderr
+    assert "claude plugin uninstall" in result.stderr and "--scope local" in result.stderr, (
+        "the warning must carry the concrete manual remediation command"
+    )
+
+
+def test_local_scope_generic_of_other_project_does_not_warn(
+    tmp_path: Path, fake_bin: Path, target_project: Path
+) -> None:
+    target = str(target_project)
+    local_generic_other = entry(
+        GENERIC, "local", project_path="/elsewhere/another project", version="0.7.20"
+    )
+    dedicated_project = entry(DEDICATED, "project", project_path=target, version="0.1.0")
+
+    responses = [
+        list_response([local_generic_other]),
+        OK,
+        OK,
+        list_response([local_generic_other, dedicated_project]),
+        list_response([local_generic_other, dedicated_project]),
+    ]
+    result, calls = run_installer(tmp_path, fake_bin, target_project, responses)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert LOCAL_WARNING not in result.stderr, (
+        "a local-scope generic of another project must not trigger the warning"
+    )
+
+
+def test_local_scope_generic_without_project_path_warns(
+    tmp_path: Path, fake_bin: Path, target_project: Path
+) -> None:
+    """An unattributable local entry (no projectPath) cannot be proved
+    harmless — warn rather than silently skip."""
+    local_generic = entry(GENERIC, "local", version="0.7.20")  # no projectPath
+    dedicated_project = entry(
+        DEDICATED, "project", project_path=str(target_project), version="0.1.0"
+    )
+
+    responses = [
+        list_response([local_generic]),
+        OK,
+        OK,
+        list_response([local_generic, dedicated_project]),
+        list_response([local_generic, dedicated_project]),
+    ]
+    result, _ = run_installer(tmp_path, fake_bin, target_project, responses)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert LOCAL_WARNING in result.stderr
+
+
+def test_dry_run_reports_local_scope_generic(
+    tmp_path: Path, fake_bin: Path, target_project: Path
+) -> None:
+    target = str(target_project)
+    local_generic = entry(GENERIC, "local", project_path=target, version="0.7.20")
+
+    result, calls = run_installer(
+        tmp_path,
+        fake_bin,
+        target_project,
+        [list_response([local_generic])],
+        dry_run=True,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert argv_sequence(calls) == [LIST]
+    assert LOCAL_WARNING in result.stderr
+
+
 # --- final verifier teeth ---------------------------------------------------------------
 
 

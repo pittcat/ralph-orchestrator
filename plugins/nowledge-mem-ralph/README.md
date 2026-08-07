@@ -46,6 +46,11 @@ python3 <repo-root>/scripts/setup_nowledge_ralph.py <target project>
   target root；其他项目的同名条目不会被迁移。
 - 幂等：已完成迁移后重跑只读取状态，不重复 install/uninstall，exit 0。
 - `marketplace add` 非零（如已声明）仅作警告，由后续 install 与终检裁决。
+- **local scope 检测（仅警告）**：Ralph 的 Claude child 加载 `project,local`
+  两个 settings source。若 target 存在 `local` scope 的通用插件，其会话自动
+  捕获在迁移后仍会对 Ralph child 生效。脚本发现时会打印警告和手动卸载命令
+  （`claude plugin uninstall nowledge-mem@nowledge-community --scope local`），
+  但**不会**自动移除——local 属项目内个人配置，超出迁移合同。
 
 **安装失败处理**：
 
