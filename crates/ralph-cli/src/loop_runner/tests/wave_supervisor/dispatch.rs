@@ -1435,9 +1435,25 @@ async fn test_dispatcher_record_idempotent_across_reruns() {
     // idempotency depend on the SAME content_hash; replaying
     // with a conflicting hash is a different scenario
     // (`test_dispatcher_record_conflicting_terminal_is_rejected`).
+    //
+    // 2026-08-07-009 plan U2: the per-attempt receipt path adds a
+    // `spawn_blocking` git probe before `record_slot_result`, so
+    // the slot_results Vec ordering no longer matches slot_index
+    // monotonically. Look up by slot_index instead of Vec index
+    // so the test stays stable across dispatcher scheduling
+    // jitter.
     let recorded = bridge.slot_results.lock().unwrap().clone();
     assert_eq!(recorded.len(), 2, "bridge must have recorded 2 slots");
-    let (slot0_hash, slot1_hash) = (recorded[0].1.clone(), recorded[1].1.clone());
+    let slot0_hash = recorded
+        .iter()
+        .find(|(idx, _, _)| *idx == 0)
+        .map(|(_, h, _)| h.clone())
+        .expect("slot 0 recorded");
+    let slot1_hash = recorded
+        .iter()
+        .find(|(idx, _, _)| *idx == 1)
+        .map(|(_, h, _)| h.clone())
+        .expect("slot 1 recorded");
     bridge
         .record_slot_result(&store_wave_id, 0, &slot0_hash, 1)
         .expect("re-record slot 0 with same hash must be idempotent");
