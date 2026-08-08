@@ -24,6 +24,27 @@ use tracing::{debug, info, warn};
 const POST_EVENT_GRACE_TIMEOUT: Duration = Duration::from_secs(5);
 const TERMINATION_GRACE_TIMEOUT: Duration = Duration::from_secs(2);
 
+/// Apply backend env overrides on top of runtime env (already injected
+/// by `inject_ralph_runtime_env`), then re-pin the workspace isolation
+/// controls so backend env cannot redirect cwd. Used by both headless
+/// CliExecutor and PtyExecutor so the two paths produce identical
+/// env winners for the same inputs.
+///
+/// Does NOT call `inject_ralph_runtime_env` — both call sites already
+/// invoke it. This macro owns only stages 2 and 3 of the three-stage
+/// sequence: layer backend env on top, then re-pin workspace controls.
+macro_rules! apply_backend_and_workspace_env {
+    ($cmd:expr, $backend_env_vars:expr, $workspace:expr) => {
+        // Stage 2: backend env wins over runtime env (per-hat channel overrides).
+        for (key, value) in $backend_env_vars {
+            $cmd.env(key, value);
+        }
+        // Stage 3: re-pin workspace controls so backend env cannot redirect cwd.
+        $cmd.env("RALPH_WORKSPACE_ROOT", $workspace);
+        $cmd.env("PWD", $workspace);
+    };
+}
+
 /// Result of a CLI execution.
 #[derive(Debug)]
 pub struct ExecutionResult {
@@ -74,12 +95,11 @@ impl CliExecutor {
     ///   1. `inject_ralph_runtime_env` sets PATH, RALPH_BIN, RALPH_NOWLEDGE_ENABLED,
     ///      RALPH_WORKSPACE_ROOT, PWD, RALPH_EVENTS_FILE (from workspace marker),
     ///      and TMPDIR family.
-    ///   2. `command.envs(backend.env_vars)` applies per-activation overrides
-    ///      from the loop runner (e.g. per-hat channel RALPH_EVENTS_FILE).
-    ///      These win over stage 1 for the variables they set.
-    ///   3. `RALPH_WORKSPACE_ROOT` and `PWD` are re-applied from `workspace`
-    ///      so the D2 isolation contract is preserved — backend env cannot
-    ///      redirect the subprocess's working directory.
+    ///   2. `apply_backend_and_workspace_env!` layers `backend.env_vars` on top
+    ///      (per-hat-channel overrides win over stage 1 for the variables set).
+    ///   3. The same macro re-applies `RALPH_WORKSPACE_ROOT` and `PWD` from
+    ///      `workspace` so the D2 isolation contract is preserved — backend env
+    ///      cannot redirect the subprocess's working directory.
     ///
     /// Output is streamed line-by-line to the writer while being accumulated
     /// for the return value. If `timeout` is provided and the execution produces
@@ -114,21 +134,16 @@ impl CliExecutor {
         //   RALPH_WORKSPACE_ROOT, PWD, RALPH_EVENTS_FILE (from workspace marker),
         //   and TMPDIR family.
         //
-        // Stage 2: command.envs(backend.env_vars) applies per-activation overrides
-        //   from the loop runner (e.g. per-hat channel RALPH_EVENTS_FILE injected
-        //   via hat-channel env). These win over stage 1 for the variables they set.
-        //
-        // Stage 3: re-apply RALPH_WORKSPACE_ROOT and PWD from the explicit workspace
-        //   so the D2 isolation contract is preserved — backend env cannot redirect
-        //   the subprocess's working directory.
+        // Stages 2+3: apply_backend_and_workspace_env! layers backend env on top
+        //   (stage 2: per-hat-channel overrides win over stage 1), then re-pins
+        //   RALPH_WORKSPACE_ROOT and PWD (stage 3: D2 isolation preserved — backend
+        //   env cannot redirect the subprocess's working directory).
         //
         // The caller (loop runner or bench) is responsible for resolving the correct
         // workspace before invoking this method.
         command.current_dir(workspace);
         inject_ralph_runtime_env(&mut command, workspace); // stage 1
-        command.envs(self.backend.env_vars.iter().map(|(k, v)| (k, v))); // stage 2
-        command.env("RALPH_WORKSPACE_ROOT", workspace); // stage 3
-        command.env("PWD", workspace);
+        apply_backend_and_workspace_env!(&mut command, &self.backend.env_vars, workspace); // stages 2+3
 
         debug!(
             command = %cmd,
