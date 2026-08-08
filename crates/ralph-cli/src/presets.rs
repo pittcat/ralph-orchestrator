@@ -47,22 +47,12 @@ const PRESETS: &[EmbeddedPreset] = &[
         )),
         public: true,
     },
-    // 2026-07-03-001 plan U13: supervisor parallel preset.
-    // 16 functional hats + progress-steward. Built on top of the
-    // `ce-executor-pipeline` topology; swaps the in-process WaveTracker
-    // for the rusqlite-backed SupervisorStore (U2/U3/U5/U8/U12) and
-    // exposes the six supervisor coordination topics via
-    // `event_loop.supervisor.enabled: true` + isolated mode
-    // (R-SW-1 lint enforces the contract).
-    EmbeddedPreset {
-        name: "ce-executor-supervisor",
-        description: "Isolated-mode plan-driven work execution with parallel worker fan-out via rusqlite supervisor: per-slot worktrees, fan-in merge, parallel 6-dim review, parallel fix, integration + report",
-        content: include_str!(concat!(
-            env!("OUT_DIR"),
-            "/presets/ce-executor-supervisor.yml"
-        )),
-        public: true,
-    },
+    // Plan 2026-08-09-001: removed `ce-executor-supervisor` builtin.
+    // Universal supervisor runtime (`crates/ralph-core/src/supervisor/**`),
+    // `supervisor-db` feature, wave dispatcher, SupervisorStore, origin
+    // guard, and the surviving supervisor-enabled builtin
+    // `parallel-forge` (which still ships with
+    // `event_loop.supervisor.enabled: true` and isolated mode) remain.
     EmbeddedPreset {
         name: "debug",
         description: "Bug investigation, root-cause analysis, and adversarial fix verification",
@@ -747,16 +737,13 @@ mod tests {
     #[test]
     fn test_list_presets_returns_all() {
         let presets = list_presets();
-        // Hard-coded count of 6 was true pre-2026-07-24
-        // (ce-executor-supervisor / ce-executor-pipeline / debug /
-        // merge-batch / merge-loop / autoresearch). 2026-07-24
-        // plan U5 added `implementation-review`; bump to 7.
-        // 2026-07-27 added `parallel-forge`; bump to 9.
-        // 2026-07-28 added `red-team-attack`; bump to 10.
+        // Plan 2026-08-09-001 U1: removed `ce-executor-supervisor`,
+        // count goes from 10 to 9. `parallel-forge` remains as the
+        // surviving supervisor-enabled builtin.
         assert_eq!(
             presets.len(),
-            10,
-            "Expected 10 public presets (added red-team-attack 2026-07-28)"
+            9,
+            "Expected 9 public presets (removed ce-executor-supervisor per plan 2026-08-09-001)"
         );
     }
 
@@ -792,6 +779,43 @@ mod tests {
     fn test_get_preset_invalid_name() {
         let preset = get_preset("nonexistent-preset");
         assert!(preset.is_none(), "Nonexistent preset should return None");
+    }
+
+    /// Plan 2026-08-09-001: `ce-executor-supervisor` builtin removal must
+    /// NOT leave an alias or fallback. Registry lookup must fail
+    /// explicitly (R2), and `preset_names()` must drop the legacy name
+    /// while keeping `parallel-forge` as the surviving supervisor-enabled
+    /// builtin (D2, D3).
+    #[test]
+    fn test_ce_executor_supervisor_returns_unknown_after_u1_removal() {
+        // S2-AT1: registry lookup for the deleted name must return None.
+        assert!(
+            get_preset("ce-executor-supervisor").is_none(),
+            "Plan 2026-08-09-001 U1: 'ce-executor-supervisor' must NOT be resolvable. \
+             R1-R3 require removal of YAML, manifest, public index, \
+             registry entry, shell completion, and project overlay without \
+             aliasing to 'parallel-forge' or any other builtin."
+        );
+
+        // The surviving supervisor-enabled builtin must remain resolvable.
+        let replacement = get_preset("parallel-forge")
+            .expect("parallel-forge must remain the surviving supervisor-enabled builtin");
+        assert_eq!(replacement.name, "parallel-forge");
+        assert!(
+            !replacement.content.is_empty(),
+            "parallel-forge embedded content must remain non-empty"
+        );
+
+        // Public listing must drop the legacy name and keep the replacement.
+        let public_names = preset_names();
+        assert!(
+            !public_names.contains(&"ce-executor-supervisor"),
+            "Plan 2026-08-09-001 U1: 'ce-executor-supervisor' must NOT appear in public preset_names()"
+        );
+        assert!(
+            public_names.contains(&"parallel-forge"),
+            "Plan 2026-08-09-001 U1: 'parallel-forge' must remain in public preset_names()"
+        );
     }
 
     /// U7 / AE7: legacy `ce-executor` must NOT be resolvable. R13–R15 require
@@ -882,14 +906,13 @@ mod tests {
     #[test]
     fn test_preset_names_returns_all_names() {
         let names = preset_names();
-        // 2026-07-24 plan U5: added `implementation-review`, the
-        // post-implementation six-dimension wave-review preset.
-        // 2026-07-28: added `red-team-attack`.
-        assert_eq!(names.len(), 10);
+        // Plan 2026-08-09-001 U1: removed `ce-executor-supervisor`,
+        // count goes from 10 to 9. `parallel-forge` remains as the
+        // surviving supervisor-enabled builtin.
+        assert_eq!(names.len(), 9);
         assert!(names.contains(&"autoresearch"));
         assert!(names.contains(&"ce-executor-pipeline"));
         assert!(names.contains(&"ce-executor-pipeline-loop"));
-        assert!(names.contains(&"ce-executor-supervisor"));
         assert!(names.contains(&"debug"));
         assert!(names.contains(&"merge-batch"));
         assert!(names.contains(&"parallel-forge"));
@@ -2254,10 +2277,12 @@ mod tests {
 
         // Zsh completion values for builtin presets (from zsh plugin)
         // This must stay in sync with scripts/ralph-zsh-plugin.zsh
+        // Plan 2026-08-09-001 U1: removed `ce-executor-supervisor`,
+        // list shrinks by one. `parallel-forge` remains as the
+        // surviving supervisor-enabled builtin.
         let zsh_values: std::collections::BTreeSet<String> = [
             "builtin:ce-executor-pipeline",
             "builtin:ce-executor-pipeline-loop",
-            "builtin:ce-executor-supervisor",
             "builtin:debug",
             "builtin:autoresearch",
             "builtin:merge-batch",
@@ -2683,9 +2708,7 @@ mod tests {
         // section "U5: built-in preset migration" (autoresearch, debug explicitly
         // deferred due to multi-branch completion topologies).
         //
-        // `ce-executor-supervisor` is NOT exempt: `required_events` holds only
-        // the all-path convergence topic (`LOOP_COMPLETE`), and success-spine
-        // `work.done` is gated via `path_required_events` on `plan.complete`.
+        // Plan 2026-08-09-001: removed `ce-executor-supervisor` builtin.
         let topology_exempt: &[&str] = &["autoresearch", "debug"];
 
         // Per-preset finding-id exemptions (P2 #16 + #22).
