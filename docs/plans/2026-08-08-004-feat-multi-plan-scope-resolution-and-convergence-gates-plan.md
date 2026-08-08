@@ -18,7 +18,7 @@ baseline_commit: 818810763bb895b860ec1f78e5ab5b30469ab033
 - **范围 authority：** 当前最终 Git 树、开发计划文件内容、Git commit graph、commit patch、hunk 归属和结构化 scope manifest 共同构成证据；`.ralph/merge/merge-boundary.json` 只能作为可选交叉证据，不能替代 `post-merge-converge` 或 `red-team-attack` 的独立解析。
 - **执行 profile：** 严格执行 Unit 1 → Unit 2 → Unit 3 → Unit 4 → Unit 5 → Unit 6 → Unit 7。每个 Unit 必须完成 Acceptance Red、最小实现、单元/集成测试、回归和证据更新后才能进入下一个 Unit。
 - **停止条件：** 发现 scope base 无法确定、计划候选提交存在未解释并列候选、关键 hunk 归属未知、目标 HEAD/tree 在解析期间变化、`merge-boundary` 与独立结果冲突、或任何关键决策置信度低于 0.85 时，立即停止当前 Unit，更新 Evidence/Decision 并重做决策。
-- **Tail ownership：** 本计划包含一个确定性的只读 scope runtime/CLI 校验边界，以及三个 preset、schema、测试、文档和 preset-author/review 规程；Coding Agent 不得把范围判断留到实现时临时设计，也不得修改生产代码来绕过 scope 阻断。
+- **Tail ownership：** 本计划保留 agent-owned 的 Git scope 解析，同时为三个 preset 增加结构化 manifest、固定指标阈值和现有 emit precheck/payload-consistency guard；Coding Agent 不得把范围判断留到实现时临时设计，也不得修改生产代码来绕过 scope 阻断。
 
 ---
 
@@ -37,12 +37,12 @@ baseline_commit: 818810763bb895b860ec1f78e5ab5b30469ab033
 
 | 严重度 | 发现 | 已采取的计划修复 |
 | --- | --- | --- |
-| P0 | scope 归属主要依赖 agent prompt，agent 可以提交字段正确但内容伪造的 manifest，且 `--unsafe-no-policy-check` 可能成为绕过入口 | D2/D12/Unit 1 固定 `ralph-core::scope_resolution`、`ralph inspect scope resolve`、真实 emit semantic validator；validator 读取并复算 manifest/diff，scope topic 不受 unsafe bypass 影响 |
+| P0 | scope 归属主要依赖 agent prompt，agent 可以提交字段正确但 payload 与 artifact 不一致的 manifest，且 `--unsafe-no-policy-check` 可能成为绕过入口 | D2/D12/Unit 1 固定 agent-owned manifest、现有 emit precheck、`payload_consistency` 规则、artifact/path/digest/HEAD-tree/threshold guard；scope topic 不受 unsafe bypass 影响 |
 | P0 | 增量 diff 下界未定义，redteam 的 `<global-baseline>` 不能执行；merge、direct-target 和 target 穿插历史会被错误合并 | D5 固定 locked HEAD/tree、显式 base ancestor 校验、direct/merge anchor 识别和 root/并列/非 ancestor fail-close；Unit 3/5 必须覆盖无 boundary direct-target |
 | P1 | commit/hunk、覆盖、revert、rename、binary 和 critical unknown 的分类仍有实现选择空间 | D6 固定 candidate scoring、rev-list、hunk key、classification、`critical_paths` 和 binary `not_applicable` 语义；H2 只验证声明能力，不允许临时换算法 |
 | P1 | confidence 的 no-boundary 语义、boundary 冲突和 85/89/90 阈值可能被平均分稀释 | D7 固定维度权重、可用分数、`cross_check=not_applicable`、关键维度下限和 critical unknown=0；Unit 4/6 增加边界值与冲突测试 |
 | P1 | resolver 可读无限 history/patch 或写越界路径，缺少可执行资源门禁 | D13 固定 plan/commit/patch/manifest/hunk 上限、repo-relative allowed root、固定 Git argv、无 shell、原子写入和稳定 `resource_limit` |
-| P1 | 新 CLI/runtime 能力与 agent-facing guide、author/review audit 之间可能漂移 | D11/Unit 7 增加专用 `ralph-tools-scope.md`、emit/cmdref 同步、help smoke、negative fixtures 和 anchor/parity/doc-drift 回归 |
+| P1 | 新 scope contract 与 agent-facing guide、author/review audit 之间可能漂移 | D11/Unit 7 同步 scope contract、emit/cmdref、negative fixtures 和 anchor/parity/doc-drift 回归 |
 
 ### 1. 功能目标
 
@@ -101,7 +101,7 @@ baseline_commit: 818810763bb895b860ec1f78e5ab5b30469ab033
 
 - 不新增 builtin preset。
 - 不让 `post-merge-converge` 或 `red-team-attack` 依赖某次 `merge-batch` 运行、`.ralph/merge/merge-boundary.json` 是否存在，或 merge-batch 的 event history。
-- 不新增顶层 `ralph scope` 命令，不引入 `git2`/`gix` 等依赖；新增的只读能力挂在已有 `ralph inspect scope resolve` 下，三套 preset 通过它独立生成 manifest，preset prompt 不再自行决定归属算法。
+- 不新增 `ralph inspect scope resolve` 或任何新的 CLI surface，不引入 `git2`/`gix` 等依赖；`change-mapper` 和 `plan-resolver` 保留各自的 agent-owned Git 解析，但必须遵守同一 manifest、指标、阈值和 evidence contract。
 - 不重新 merge、rebase、cherry-pick 或重跑开发计划。
 - 不改变既有六维审计、reproducer/fixer、自带攻击实验、清洁环境、reporter terminal topic 的业务目的。
 - 不把所有目标分支提交自动归入“范围外”；无法证明与计划无关的改动必须保留为 unknown 或 interleaved residual。
@@ -128,22 +128,22 @@ baseline_commit: 818810763bb895b860ec1f78e5ab5b30469ab033
 
 - 旧 prompt 省略计划列表时仍可运行，但必须进入自动发现路径；旧 prompt 省略 merge boundary 时不得失败。
 - 旧 `merge.integrated`/`postmerge.changemap.ready`/`redteam.plan.resolved` 事件 fixture 需要更新为新 required fields；不保留不安全的“旧 payload 继续成功”兼容路径。
-- 解析以当前仓库已使用的 Git CLI 为边界，不新增依赖；确定性 engine 位于 `ralph-core`，CLI 只读调用它；单次解析允许读取完整 Git history，但 manifest、patch 和 event payload 必须 bounded，不能把完整 history 搬入 payload。
-- scope manifest 不能只靠 event schema 的字符串字段证明正确性；scope 相关 topic 在 `ralph emit --policy-check` 和真实 emit 路径都必须经过 manifest 内容、digest、HEAD/tree 和阈值校验，`--unsafe-no-policy-check` 不能绕过该 scope gate。
+- 解析以当前仓库已使用的 Git CLI 为边界，不新增依赖；Git 解析由各自 scope owner agent 执行；单次解析允许读取完整 Git history，但 manifest、patch 和 event payload 必须 bounded，不能把完整 history 搬入 payload。
+- scope manifest 不能只靠 event schema 的字符串字段证明正确性；scope 相关 topic 在现有 `ralph emit --policy-check` 和真实 emit 路径都必须经过 payload/artifact consistency、digest、HEAD/tree、状态和阈值校验，`--unsafe-no-policy-check` 不能绕过该 scope gate。该 guard 证明交接内容自洽和未漂移，不宣称替 agent 完成 hunk attribution。
 - 三个 preset 的 scope artifact 只能写 `.ralph/` 对应目录；不得把计划内容、完整 patch 或事件 history 写进 event payload。
 - `red-team-attack` 仍必须在每项实验前后验证 tracked tree 未变化；scope 解析不能执行 merge/rebase/cherry-pick/reset 或任何生产修改。
 
 #### 1.11 已确认假设
 
 - `implementation-review` 的 scope-preparer 已证明仓库接受“agent 执行 Git 命令 → 写 byte-stable manifest → 计算 digest → 事件只传 digest/path → 下游复核”的模式。
-- 现有三个 preset 已经是 agent-driven、artifact-first 工作流，但 scope correctness 不能继续由 agent prompt 单独担保；新增能力应放在已有只读 `inspect` CLI namespace 和 `ralph-core`，由三个 preset 独立调用并由 emit gate 复核。
+- 现有三个 preset 已经是 agent-driven、artifact-first 工作流；scope owner 仍由 agent 执行 Git 判断，但 correctness 不再只由 prompt 文案担保，而由 manifest contract、payload consistency、emit precheck 和 independent preset cross-check 共同约束。
 - 现有 BDD harness 的 `run_workflow_guard_scenario` 会把 mock event 送入真实 EventLoop，并断言 accepted/absent/workflow events；`run_scenario` stub 不足以证明 scope gate 路由。
 - `presets/schemas/*.yml` 是三个 preset payload schema 的 authoring SSOT；`build.rs` 会在编译时 deep-merge，不应在三个 preset YAML 内另造同名 schema。
 
 #### 1.12 假设状态与验证动作
 
-- **H1（已验证事实）：** 当前 agent 的 Git 版本支持计划所需的 `git show --format=fuller`、`git diff --binary --full-index`、`git blame --line-porcelain`、`git patch-id --stable` 和 NUL status。Evidence E19 记录了每条命令在当前仓库的最小 smoke 通过结果；Unit 3 仍需在临时 fixture 中验证输出解析，不得把命令可用性等同于算法已验证。
-- **H2（待验证的实现边界，不是待决策的算法）：** 进入 Unit 4/6 前必须用包含 rename、binary、revert 和同文件交错提交的临时 Git fixture 复现 D6。binary 永远只达到 file-level attribution，line-level 固定为 `not_applicable`；若文本/rename fixture 无法按 D6 产生稳定 key，则将对应记录标为 `unknown` 并停止 Unit 4/6，重新评估 D6 置信度，不允许 Executor 临时选择另一套归属算法。该验证只决定 D6 的已声明能力能否实现，不改变 D6 已确定的 fallback 语义。
+- **H1（已验证事实）：** 当前 agent 的 Git 版本支持计划所需的 `git show --format=fuller`、`git diff --binary --full-index`、`git blame --line-porcelain`、`git patch-id --stable` 和 NUL status。Evidence E19 记录了每条命令在当前仓库的最小 smoke 通过结果；Unit 3/4/5/6 仍需在临时 fixture 中验证 agent 输出是否满足固定 manifest contract，不得把命令可用性等同于 scope correctness。
+- **H2（待验证的 agent protocol 边界，不是待决策的 CLI/算法）：** 进入 Unit 3/4/5/6 前必须用包含 rename、binary、revert 和同文件交错提交的临时 Git fixture 复现 D6，并验证 agent artifact 能被三个 preset 的固定 manifest/threshold contract 表达。binary 永远只达到 file-level attribution，line-level 固定为 `not_applicable`；若文本/rename fixture 无法稳定表达，则记录为 `unknown` 并走 blocked/residual，不允许 Executor 临时放宽阈值。该验证只决定 agent protocol 的可表达能力，不改变 D6/D7 的既定语义。
 
 ---
 
@@ -215,32 +215,32 @@ redteam.start
 | E9 | `.ralph/merge/REPORT.md` 当前 report | 实际报告记录了 base `0033a79b`、三条 merge commit、最终 head 和全量测试结果 | 真实历史证明需要区分 merge boundary 与 final post-merge direct commit | 高 |
 | E10 | `git log --first-parent --format='%H %P %s' -12` | 当前历史包含多条 merge commit，并在最后 merge 后有直接 target commit `ece2014b` | 必须覆盖 mixed mode，不能只做 `merge-batch` 结果解析 | 高 |
 | E11 | `presets/en/implementation-review.yml` scope-preparer Step 2–6；`presets/schemas/implementation-review.yml` | 已有候选集合、多信号、ambiguous→blocked、`scope-manifest.json`、line-strip digest、patch digest、dirty/pre-emit recheck | 复用已验证 artifact/digest/阻断模式，不重新发明单计划协议 | 高 |
-| E12 | `crates/ralph-core/src/git_ops.rs`、`crates/ralph-core/src/plan_baseline.rs`、`crates/ralph-core/src/lib.rs` | 当前只有通用 Git wrapper、单 plan baseline，且 `git_ops` 是 crate 内部模块；没有多计划 resolver 或 scope API | 新增独立 `scope_resolution` 核心模块，并由已有 `inspect` CLI 暴露只读入口；不把算法留在三个 prompt 中重复实现 | 高 |
+| E12 | `crates/ralph-core/src/git_ops.rs`、`crates/ralph-core/src/plan_baseline.rs`、`crates/ralph-core/src/lib.rs` | 当前只有通用 Git wrapper、单 plan baseline，且 `git_ops` 是 crate 内部模块；没有多计划 resolver 或 scope API | 不新增 scope CLI/core resolver；保留 agent-owned Git protocol，并把一致性/阈值 guard 接入已有 event policy 和 CLI emit precheck | 高 |
 | E13 | `crates/ralph-core/tests/scenarios.rs` `run_workflow_guard_scenario` 与 `implementation_review_scope` tests | 真实 EventLoop BDD 已用于 scope accepted/blocked 和事件 absence 断言 | 新场景必须使用该入口，不得使用 stub `run_scenario` | 高 |
 | E14 | `crates/ralph-cli/src/presets.rs`、`crates/ralph-cli/build.rs`、`presets/manifest.yml` | builtin 内容由 manifest/build.rs/embedded array 形成同步链；strict lint 和 payload contract 已存在 | 修改已有 preset/schema 但不新增 preset；必须跑完整 parity/lint | 高 |
 | E15 | `skills/ralph-preset-author`、`skills/ralph-preset-review` 与 `skills/ralph-preset-review/tests/test_skill_anchors.py` | preset capability 变化必须同步 author/review references、fixtures 和 anchor tests | 新增 scope-resolution finding/rubric/fixture，不让评审继续接受无 scope gate 的 preset | 高 |
-| E16 | `crates/ralph-core/data/ralph-tools-emit.md`、`ralph-tools-cmdref.md`、`skills/ralph-preset-*/references/commands.md` | 现有 emit/policy-check 命令和 schema 查看方式已稳定 | 新增 `ralph inspect scope resolve` 后必须同步 agent-facing command 文档、help smoke 和 preset author/review command references | 中高 |
+| E16 | `crates/ralph-core/data/ralph-tools-emit.md`、`ralph-tools-cmdref.md`、`skills/ralph-preset-*/references/commands.md` | 现有 emit/policy-check、payload consistency 和 schema 查看方式已稳定 | 同步 scope manifest、指标阈值、emit precheck/payload-consistency 使用说明和 preset author/review command references；不新增 CLI help surface | 中高 |
 | E17 | Git history `c3f7c16d`、`8afab643` 及当前 preset author notes | 相邻 preset 能通过 artifact-first、schema SSOT、author/review fixture 进行闭环同步 | 新增行为必须保持同样的 operator/reviewer 可审计链 | 高 |
 | E18 | 已执行 preset/lint/presets/doc-drift 命令输出 | 当前 builtin strict/lint/parity/doc drift 基线通过 | 实现后以相同命令作为每个相关 Unit 的回归门禁 | 高 |
 | E19 | 当前基线上的 Git scope command smoke：`git show --format=fuller --no-patch HEAD`、`git diff --binary --full-index --no-color HEAD^..HEAD -- <file>`、`git blame --line-porcelain`、`git diff-tree --root`、`git patch-id --stable`、`git status --porcelain --untracked-files=all -z` | 所需 Git 命令均可执行并返回预期非空/可解析输出；命令可用性已确认，但混合历史归属算法仍需 H2 临时 fixture 验证 | H1 从待验证假设升级为已验证事实；Unit 3/4/6 仍需验证解析边界和 binary/rename/revert 归属 | 高 |
 | E20 | `crates/ralph-core/tests/scenarios.rs::init_git_workspace`、`crates/ralph-core/Cargo.toml` 的 `tempfile` 依赖，以及现有 `crates/ralph-core/tests/*` 临时 Git 测试 | 当前仓库已有在 nextest 集成测试中创建临时 Git 仓库、提交 fixture 并运行真实 Git 命令的模式 | 新增 multi-plan Git evidence replay 应落在 `ralph-core` nextest integration test，不在当前 checkout 做 merge/rebase/reset，也不把 prompt grep 当作算法验证 | 高 |
-| E21 | `crates/ralph-cli/src/commands/inspect.rs` 的只读 `inspect profiles/loop/prompt` namespace；`crates/ralph-cli/src/commands/emit/command_impl.rs` 的 policy-check、provenance、isolated-scope precheck | 已有只读 inspect 扩展入口和 emit 前置拒绝链；emit gate 在 policy-check 与真实写入路径都可插入同一 scope manifest validator | 新 resolver 放进 `ralph-core::scope_resolution`，CLI 放入 `ralph inspect scope`，scope validator 接在 emit 现有 precheck 链中；无需新增顶层命令或新依赖 | 高 |
+| E21 | `crates/ralph-core/src/event_policy/validation.rs` 的 `payload_consistency`、`crates/ralph-cli/src/policy_check/gates.rs` 的既有 precheck、`crates/ralph-cli/src/commands/emit/command_impl.rs` 的 policy/provenance/isolated-scope/step-handoff 链 | 已有同 payload 一致性规则和 emit 前置拒绝链；可在真实 emit 前拒绝自相矛盾、过期或低于阈值的 scope handoff | scope owner 仍是 change-mapper/plan-resolver；新增 scope consistency guard、payload rules 和 artifact recheck 接入现有链，不新增 CLI 或 core resolver | 高 |
 
 #### 2.3 受影响范围
 
 **确认会修改的生产配置/文档/测试边界：**
 
-- `crates/ralph-core/src/scope_resolution.rs`（planned new production module）：确定性 scope resolver、manifest model、canonical digest、base/commit/hunk attribution、confidence/blocked decision 和 emit-time validator。
-- `crates/ralph-core/src/lib.rs`：公开 `scope_resolution` 模块；不把现有 `git_ops` 改成面向 preset 的通用解析器。
-- `crates/ralph-cli/src/commands/inspect.rs`：已有只读 inspect namespace 增加 `scope resolve`；`crates/ralph-cli/src/commands/emit/command_impl.rs`：已有 emit precheck 链增加 scope manifest semantic validation。
-- `crates/ralph-cli/tests/inspect_scope.rs`（planned addition）和 `crates/ralph-cli/src/commands/emit/tests_scope_manifest.rs`（planned addition）：覆盖 CLI resolver、manifest validator 和 `--unsafe-no-policy-check` 不可绕过 scope gate。
+- `crates/ralph-cli/src/policy_check/gates.rs`：已有 emit precheck 增加 scope handoff consistency/path/threshold guard。
+- `crates/ralph-cli/src/commands/emit/command_impl.rs`：已有 emit precheck 链接入 scope guard；不增加命令。
+- `crates/ralph-core/src/event_policy/validation.rs`、`crates/ralph-core/src/event_policy_payload_consistency.rs`：已有 payload consistency evaluator 增加 scope handoff predicate 支持。
+- `crates/ralph-cli/src/commands/emit/tests_policy_check_reject.rs`、`tests_policy_check_accept.rs`、`crates/ralph-cli/tests/integration_emit_policy.rs`：覆盖 scope guard、payload consistency 和 unsafe bypass。
 
 - `presets/en/merge-batch.yml`、`presets/schemas/merge-batch.yml`、`merge.prompt.md`；`presets/en/merge-batch-author-notes.md` 当前调查确认不存在，Unit 2 将按已存在的 post-merge/red-team author notes 结构新增该文件，作为明确的 planned addition，不把它描述成已有接口或既存文档。
 - `presets/en/post-merge-converge.yml`、`presets/schemas/post-merge-converge.yml`、`post-merge.prompt.md`、`presets/en/post-merge-converge-preset-author-notes.md`。
 - `presets/en/red-team-attack.yml`、`presets/schemas/red-team-attack.yml`、`red-team.prompt.md`、`presets/en/red-team-attack-author-notes.md`。
 - `crates/ralph-core/tests/scenarios.rs` 和 `crates/ralph-core/tests/scenarios/*.yml`（新增真实 EventLoop BDD fixtures）。
 - `crates/ralph-core/tests/multi_plan_scope_git.rs`（planned addition）：使用现有 `tempfile` 测试模式建立 direct-target、merge、mixed、override、revert、rename、binary fixture，执行真实 Git evidence replay；该测试验证证据数据和边界分类输入，不声称能够执行 agent prompt。
-- `crates/ralph-core/data/ralph-tools-scope.md`（planned addition）：新增 scope CLI 的 agent-facing 使用说明；不承载 runtime 算法实现。
+- `crates/ralph-core/data/ralph-tools-emit.md`、`ralph-tools-cmdref.md`：同步 agent-owned scope manifest、固定指标和 precheck/payload-consistency 使用说明。
 - `crates/ralph-cli/src/presets.rs`（仅新增结构化 preset contract assertions，不锁定完整 prompt 文本）。
 - `crates/ralph-cli/tests/integration_preset_builtin.rs`（仅在需要 CLI 级 builtin parse/strict contract 的测试已确认入口中追加行为断言）。
 - `skills/ralph-preset-author/SKILL.md`、`skills/ralph-preset-author/references/{commands,finding-rubric,patterns,prompt-visibility}.md`。
@@ -250,7 +250,7 @@ redteam.start
 **明确不受影响或不应修改的边界：**
 
 - `presets/manifest.yml`、`presets/index.json`、`scripts/ralph-zsh-plugin.zsh` 不因本计划新增条目而修改；执行者仍需运行 parity 检查确认没有漂移。
-- `crates/ralph-core/src/plan_baseline.rs` 不在实现范围内；它仍只表示单 loop/plan baseline。`crates/ralph-core/src/git_ops.rs` 只在需要新增纯只读 Git wrapper 时修改，不把 scope policy 混入既有 auto-commit/landing 逻辑。`crates/ralph-cli/src/main.rs` 不增加顶层 command；`crates/ralph-cli/src/commands/inspect.rs` 与 `emit/command_impl.rs` 是本计划确认的 CLI 修改入口。
+- `crates/ralph-core/src/plan_baseline.rs` 不在实现范围内；它仍只表示单 loop/plan baseline。`crates/ralph-core/src/git_ops.rs` 不扩展为 scope resolver，不把 scope policy 混入既有 auto-commit/landing 逻辑。`crates/ralph-cli/src/main.rs`、`crates/ralph-cli/src/commands/inspect.rs` 不修改；`policy_check/gates.rs` 与 `emit/command_impl.rs` 是本计划确认的 guard 入口。
 - 不修改 `.ralph/merge/`、`.ralph/post-merge/`、`.ralph/red-team/` 既有运行时状态文件；测试只能在临时 workspace 或运行时自身产物目录写入。
 
 ### 3. Decision Records 与置信度
@@ -258,7 +258,7 @@ redteam.start
 | Decision ID | 决策问题 | 候选方案 | 最终选择 | 支持证据 | 排除其他方案的原因 | 置信度 |
 | --- | --- | --- | --- | --- | --- | --- |
 | D1 | 是否新增一个 preset | 新增 `multi-plan-converge`；扩展现有三个 preset | 扩展现有 `merge-batch`、`post-merge-converge`、`red-team-attack`，不新增 preset | E2、E5、E8、E14；三个现有入口已经覆盖 merge、converge、attack | 新 preset 会拆散同一 scope contract，且无法解决现有两个 preset 各自需要独立解析的问题 | 0.98 |
-| D2 | scope resolver 放在 runtime/CLI 还是 preset agent | 新增顶层 `ralph scope`；只依赖 merge-batch artifact；三个 prompt 各自复制 Git 归属算法 | 在已有只读 `ralph inspect` namespace 增加 `ralph inspect scope resolve`，核心算法放在 `ralph-core::scope_resolution`；postmerge/redteam 每次独立调用该命令，merge-boundary 仅作为可选输入；`ralph emit --policy-check` 和真实 emit 再验证 manifest 语义 | E11 的 artifact/digest 模式；E12 当前模块边界；E21 已有 inspect namespace 和 emit precheck 链；现有 schema 仅能校验字段形状，不能证明 hunk 归属 | 顶层新命令扩大 CLI surface；纯 prompt 方案无法被 nextest/emit gate 证明，错误 base/attribution 可以伪造 success；merge-only 违反 direct-target | 0.96 |
+| D2 | scope 归属由谁执行、如何阻止伪造交接 | 新增 scope CLI/core resolver；三个 prompt 自由判断；agent-owned Git protocol + precheck consistency guard | 保留 `change-mapper` 和 `plan-resolver` 的 agent-owned Git 判断；两个 owner 必须写同一 `multi-plan-scope/v1` manifest、完整 evidence table、固定 score/status/reason；现有 emit precheck 和 `payload_consistency` 在 policy-check 与真实写入前检查 payload↔artifact、digest、locked HEAD/tree、阈值和 resolved↔proceed 一致性；不新增 CLI/core resolver | E11 的 artifact/digest/ambiguous→blocked 模式；E16/E21 的 payload consistency 与 precheck 代码；现有 preset owner topology | 新 CLI/core resolver 扩大 surface 且不是用户需要；纯 schema 只能校验字段形状，因此补足 existing precheck/consistency guard；agent 仍负责 Git attribution，runtime 不虚称已独立证明 hunk 归属 | 0.94 |
 | D3 | manifest 格式与 digest | Markdown；普通 YAML；byte-stable JSON + digest | 使用 `multi-plan-scope/v1` 的 byte-stable JSON；顶层字段固定为 `schema_version`、`target_branch`、`locked_head_sha`、`locked_tree_sha`、`scope_base_sha`、`scope_base_source`、`plans`、`candidate_commits`、`hunk_classifications`、`artifacts`、`scores`、`decision`、`reason_codes` 和 `scope_digest`。对象字段按字典序序列化、数组保持语义顺序、UTF-8、无额外空白、固定一个结尾换行。计算 digest 时只从 canonical bytes 中移除 `scope_digest` 字段对应的 canonical member，再对剩余 bytes 做 SHA-256；写回的 `scope_digest` 不得参与自身计算。沿用 `implementation-review/scope-manifest.v1` 的 line-strip digest 语义，但明确上述 canonicalization 规则 | E11、E14 的 artifact-first/schema SSOT 证据 | Markdown/YAML 不利于下游精确复算；普通 JSON re-serialize 会产生 key order/whitespace digest drift；不明确自引用排除规则会产生 digest 循环；不固定顶层字段会让 validator 和 schema 漂移 | 0.96 |
 | D4 | merge-boundary 是否是下游 authority | 必须由 merge-batch 先跑；存在就直接采用；可选并独立交叉验证 | 可选 evidence；postmerge/redteam 必须从计划/Git history 独立解析，差异即 `boundary_conflict` | E6、E10、用户已确认直接 target/mixed mode；E9 仅能证明某次 batch 结果 | 强依赖会使 direct-target 计划无法运行，也会把 merge-batch 误判传递到攻击审查 | 0.99 |
 | D5 | scope base 如何确定 | 当前 branch 起点；baseline HEAD；最早计划候选 commit 的 first-parent parent；operator 显式 base | 固定算法：先锁定 HEAD/tree；显式 `scope_base` 必须是 40-char SHA、是 locked HEAD 和所有 selected candidate 的 ancestor；未提供时，对每份计划选择唯一的 earliest anchor：direct-target 为该计划最早 candidate；branch merge 只有在 merge commit 是 first-parent commit、存在多个 parent 且候选计划 tip 从非-first parent 可达时，才使用该 merge commit 的 first-parent parent，否则退回 direct candidate anchor。随后按 target first-parent 拓扑顺序取最早 anchor 的 first-parent parent；root/无 parent、多个同强度 anchor、非 ancestor 或无法证明时 blocked。禁止用 current HEAD、prompt 顺序或默认 branch 起点兜底 | E4、E5、E10、E11；E21 的 locked HEAD/tree 可复用；implementation-review 已对 `C^` fail-close | “最早共同下界”没有可执行定义，Executor 会在 merge commit、squash 和 direct commit 间自行选择；固定 anchor/parent 规则才能复现 | 0.94 |
@@ -267,11 +267,11 @@ redteam.start
 | D8 | 是否新增 event topic | 新增 scope 专题 topic；复用现有 `changemap`/`plan.resolved` 事件 | 不新增 topic，只扩展现有 payload required fields、allowed values 和 artifact path；scope 仍由现有 change-mapper/plan-resolver owner 负责 | E2、E5、E7、E8 的已有 topology；E14 的 preset lint 约束 | 新 topic 会扩大 routing/ownership/required-event/BDD 变更，且 scope 是现有 hat 的职责 | 0.91 |
 | D9 | full/scoped/interleaved/unknown diff 如何保存 | 只写一个 combined patch；只写摘要；分别落盘并在 manifest 建引用 | 分别写 full tree diff、计划 scoped diff、interleaved/override diff、unknown diff；event 只传 path/digest/count | E5 已有 per-commit/combined patch artifact；E11 已有 binary patch + digest | 只有摘要无法复核；单一 patch 无法证明增量边界和范围外提交 | 0.95 |
 | D10 | post-merge fixer 是否每个 Finding 跑全量 suite | 当前每个 Finding 都跑全量；每个 Finding 只跑 targeted；targeted 后全量一次 | 单个 Finding 先跑最小 failing/regression/受影响 package，再在 closer 的 clean validation 跑一次 `./scripts/run-tests.sh`；任何 fix 前仍需 test-gap/reproducer 证据 | E2 当前 instructions 重复要求全量；仓库硬规则和现有 merge report 支持全量最终门禁 | 每个 Finding 全量会放大时序 flake、耗时和反馈噪声；只跑 targeted 会失去最终系统门禁 | 0.94 |
-| D11 | scope CLI/emit contract 是否需要同步 agent-facing guide | 新增 preset-specific guide；修改既有通用 guide；不修改 | 新增通用 `crates/ralph-core/data/ralph-tools-scope.md`（只写 agent 下一步命令、字段来源和失败停止条件），同步 `ralph-tools-cmdref.md`/`ralph-tools-emit.md` 与 author/review commands；preset-specific attribution policy 仍留在 preset instructions | E16、E21、AGENTS 的 skill guide 规则；新命令确实会被 agent 调用 | 不更新通用 guide 会让 agent 看不到新 CLI/validator；把完整算法实现细节写入通用 guide 又违反作用域边界 | 0.95 |
-| D12 | 如何阻止 agent 伪造 scope artifact | 只依赖 agent 自报 path/digest；只在 EventLoop schema 校验字符串；emit 时信任 manifest | `ralph-core::scope_resolution::validate_manifest_for_emit` 在 `ralph emit --policy-check` 和真实 emit 中读取 path、复算 canonical digest、验证 schema/version、locked HEAD/tree、base ancestor、diff artifact digest、confidence/unknown gate 和 artifact 根目录。该 validator 覆盖 `merge.integrated`、`postmerge.changemap.ready`、`redteam.plan.resolved` 以及明确失败/未完成交接（`merge.integrated` incomplete、`redteam.plan.unresolved`）；scope topics 禁止 `--unsafe-no-policy-check` 绕过 | E21 的现有 emit precheck 链；D2 的 runtime authority；D7 的固定 threshold | 现有 schema 只检查 required fields，不读取文件内容；只靠 prompt/BDD mock 无法阻止伪造 success；只校验 success topic 会留下失败 artifact 伪造入口 | 0.95 |
-| D13 | resolver 如何保证资源边界与只读性 | 允许无限 history/patch；让 agent 自己控制输出目录；resolver 直接执行任意 shell | resolver 只接受 repo-relative plan/output/boundary path，拒绝 `.git/`、`.ralph/events*` 和绝对越界路径；固定上限为 `MAX_PLANS=32`、每份 plan 原始 bytes `≤1 MiB`、`MAX_COMMITS=4096`、每个 patch artifact `≤32 MiB`、manifest `≤1 MiB`、hunk records `≤100000`；超限返回稳定 `resource_limit`，不得截断后继续 resolved。核心只调用固定 Git argv，不经过 shell；任何写入仅由 CLI 原子写入指定 `.ralph/{post-merge,red-team,merge}/` | E11 的 bounded artifact 模式；E20 的 tempfile Git pattern；AGENTS 的 runtime-state/安全边界 | 无界 history 与任意路径会把审查变成资源/数据破坏入口；shell 拼接会引入路径/命令注入；没有固定数值会把安全边界留给 Executor | 0.92 |
+| D11 | scope contract 是否需要同步 agent-facing guide | 只修改 preset prompt；新增 CLI guide；同步现有 emit/cmdref 与 preset author/review references | 同步 `crates/ralph-core/data/ralph-tools-emit.md`、`ralph-tools-cmdref.md` 和 author/review commands，说明 agent-owned manifest 的字段来源、固定指标、`ralph emit --policy-check`/真实 emit、失败停止条件；不新增 `ralph-tools-scope.md`，不把完整算法实现细节写入通用 guide | E16、E21、AGENTS 的 skill guide 规则；现有 emit/payload consistency 已是 agent 可执行入口 | 新 CLI guide 会制造用户不需要的 surface；只改 prompt 会让通用 emit contract 漂移 | 0.95 |
+| D12 | 如何阻止 agent 提交不一致或低置信度 scope handoff | 只依赖 agent 自报 path/digest；只在 EventLoop schema 校验字符串；允许 unsafe bypass | 在现有 `crates/ralph-cli/src/policy_check/gates.rs`/`command_impl.rs` precheck 链增加 scope handoff guard，并在三份 schema 的 `event_policy.payload_consistency` 增加结构化规则：`scope_status=resolved` 必须同时满足 `overall_confidence≥90`、`base/hunk/interleaved/cross_check≥90`、每个 plan identity≥85、`critical_unknown_count=0`、artifact status=complete；postmerge 还必须 `proceed=true`，redteam 还必须 `resolved_count≥1`；`scope_status=ambiguous|blocked` 不得 emit resolved/proceed success。真实 emit 和 `--policy-check` 都检查 manifest path/root、manifest/diff digest、locked HEAD/tree、固定分数、critical unknown、`proceed/resolved` 一致性；scope topics 即使 `--unsafe-no-policy-check` 也执行该 guard。guard 不重算 agent 的 hunk attribution，只拒绝自相矛盾、过期、越界或低于门槛的交接 | E16/E21 的现有 payload consistency 和 emit precheck；D7 固定 threshold；E11 的 artifact-first/recheck 模式 | 现有 schema 只检查 required fields；新增 CLI/core resolver 超出用户需求；guard 可以在不替换 agent 判断的前提下阻断明显伪造/漂移 | 0.93 |
+| D13 | agent scope 解析如何保证资源边界与只读性 | 允许无限 history/patch；agent 自由写任意目录；新增 resolver 代替 agent | 在三个 preset prompt 中固定 repo-relative allowed roots、`.git`/runtime ledger 禁止路径、`MAX_PLANS=32`、每份 plan `≤1 MiB`、`MAX_COMMITS=4096`、每个 patch `≤32 MiB`、manifest `≤1 MiB`、hunk records `≤100000`、固定 Git argv/no shell/只读命令和原子 artifact 写入；超过上限必须写 blocked artifact 并不得 emit resolved。precheck 复核路径和 artifact size，不截断后放行 | E11 的 bounded artifact 模式；E20 的 tempfile Git pattern；AGENTS 的 runtime-state/安全边界 | 保留 agent-owned workflow；固定 protocol 与现有 precheck 足以防止资源/路径风险；不需要新增 CLI | 0.92 |
 
-所有 Decision 均达到 0.85。D2 的残余风险从“agent 可能错误执行 Git 命令”收敛为“agent 可能没有调用 resolver 或错误解释其结果”；D12 的 emit-time semantic validation 会拒绝伪造/过期/越界 manifest，D7 的 hard gate 会阻止未知范围进入审计/攻击。
+所有 Decision 均达到 0.85。D2 的残余风险明确为“agent 可能错误执行 Git 命令或错误解释结果”；D12 的 existing emit precheck/payload-consistency guard 会拒绝 payload/artifact 不一致、过期、越界和低于阈值的 handoff，但不宣称 runtime 已独立重算 agent 的 hunk attribution。对于“自洽但错误”的 attribution，必须依靠 postmerge/redteam 各自独立解析、boundary cross-check 和 unknown/冲突阻断；D7 的 hard gate 会阻止未知范围进入审计/攻击。
 
 ### 4. BDD 行为规格
 
@@ -331,7 +331,7 @@ redteam.start
 
     Given merge-boundary 声明的 target base 或 owned commit 集合与 postmerge/redteam 独立复算不一致
     When consumer 做交叉验证
-    Then 独立结果保留为主证据但 `cross_resolver_agreement=false`
+    Then 独立结果保留为主证据但 `boundary_consistency=false`
     And scope decision 为 `blocked`，不得沿用 merge-boundary 的较高 confidence 放行
 
   **Scenario S8: red-team 使用已验证 scope base 重建 patch**
@@ -353,31 +353,31 @@ redteam.start
 
   **Scenario S10: scope 解析期间 HEAD/tree 漂移时拒绝终态**
 
-    Given resolver 已写 patch/manifest 但 emit 前 `git rev-parse HEAD` 或 tree 与 lock 不同
-    When resolver 执行 pre-emit recheck
+    Given scope owner agent 已写 patch/manifest 但 emit 前 `git rev-parse HEAD` 或 tree 与 lock 不同
+    When agent 执行现有 emit precheck
     Then 写入 scope drift blocker
     And 不发 resolved handoff，不把旧 digest 传给下游
 
   **Scenario S11: 伪造或篡改 manifest 时 emit-time validator 拒绝**
 
-    Given resolver 已生成 manifest，但 agent 修改了 manifest、scope base、diff digest 或 locked tree 后重新计算了 event payload
+    Given agent 已生成 manifest，但随后修改了 manifest、scope base、diff digest 或 locked tree 后重新计算了 event payload
     When agent 执行 `ralph emit <scope-topic> --policy-check`
-    Then emit 被 `scope_manifest_semantic_validation` 拒绝
+    Then emit 被现有 precheck 中的 `scope_handoff_consistency`/`payload_consistency:<rule_id>` guard 拒绝
     And 不写入 event ledger，不发下游 success topic
     And `--unsafe-no-policy-check` 仍不能绕过该拒绝
 
-  **Scenario S12: 同一 Git fixture 的 resolver 输出可重复**
+  **Scenario S12: 同一 Git fixture 的 agent scope artifact 可重复且满足 contract**
 
     Given 临时仓库包含 direct-target、merge、interleaved、override、revert、rename 和 binary fixture
-    When 分别以相同 plan bytes、locked HEAD/tree、base 和 boundary 输入执行两次 `ralph inspect scope resolve`
+    When scope owner agent 按相同 plan bytes、locked HEAD/tree、base 和 boundary 输入分别执行两次 Git protocol
     Then 两次 manifest canonical bytes、scope digest、classification 和 confidence 完全一致
     And 输出目录外的 tracked tree、staged diff、unstaged diff 均不变化
 
-  **Scenario S13: resolver 输入越界或资源超限时 fail-close**
+  **Scenario S13: agent scope 输入越界或资源超限时 fail-close**
 
     Given plan/output/boundary path 指向 repo 外、`.git/`、runtime ledger，或 plan/history/patch 超过固定上限
-    When agent 执行 `ralph inspect scope resolve`
-    Then command 以非零退出并返回稳定 reason code
+    When agent 执行 scope protocol 并准备 emit
+    Then agent 必须写入稳定 reason code 的 blocked artifact，且现有 emit precheck 拒绝 resolved handoff
     And 不写越界文件、不写 success manifest、不允许任何 scope topic resolved
 
 ### 5. 验收与测试策略
@@ -394,11 +394,11 @@ redteam.start
 | S8 | redteam combined patch 只能引用 manifest base，placeholder 缺失 | redteam plan-resolved schema + structural assertion | Schema contract + read-only artifact inspection | Mutation：把 base 替成 HEAD、branch tip、未定义变量，测试必须失败 | 否 |
 | S9 | 85–89 不 resolved，≥90 且关键维度满足才 resolved | schema allowed values + scenario event payload assertions | Unit/contract + BDD | Boundary-value tests 85、89、90、critical unknown=1 | 否 |
 | S10 | drift 后不发成功 handoff，reporter 只能输出 blocked/fail | postmerge/redteam drift scenario | 真实 EventLoop BDD | Fault injection：HEAD drift、tree drift、manifest digest tamper | 否 |
-| S11 | 伪造/篡改 manifest 不能通过 emit-time semantic gate，unsafe bypass 也不能放行 | `crates/ralph-cli/src/commands/emit/tests_scope_manifest.rs` | CLI contract/integration | Mutation：篡改 base/digest/status/locked tree；验证 events file 未增加 | 否 |
-| S12 | resolver 对同一 fixture 输出 byte-stable、只读、可重复结果 | `crates/ralph-core/tests/multi_plan_scope_git.rs`、`crates/ralph-cli/tests/inspect_scope.rs` | `ralph-core` integration + CLI integration | Differential：两次 canonical manifest/digest 对比 | 否 |
-| S13 | 越界路径、超限 plan/history/patch 以稳定错误 fail-close | `crates/ralph-cli/tests/inspect_scope.rs` | CLI integration | Fault injection：绝对路径、`.git`、runtime ledger、超限 fixture | 否 |
+| S11 | 伪造/篡改 manifest 不能通过现有 emit precheck，unsafe bypass 也不能放行 | `crates/ralph-cli/src/commands/emit/tests_policy_check_reject.rs`、`crates/ralph-cli/tests/integration_emit_policy.rs` | CLI precheck integration | Mutation：篡改 base/digest/status/locked tree；验证 events file 未增加 | 否 |
+| S12 | agent scope protocol 对同一 fixture 产出 byte-stable、只读、可重复 artifact | `crates/ralph-core/tests/scenarios/scope_agent_contract.yml`、`crates/ralph-core/tests/scenarios.rs` | EventLoop contract + artifact fixture | Differential：两次 canonical manifest/digest 对比；不把 mock 当 Git 算法证明 | 否 |
+| S13 | 越界路径、超限 plan/history/patch 进入 blocked，不能以 resolved payload 通过 precheck | `crates/ralph-cli/src/commands/emit/tests_policy_check_reject.rs`、真实 EventLoop scenario | CLI precheck + BDD integration | Fault injection：绝对路径、`.git`、runtime ledger、超限 fixture | 否 |
 
-测试原则：scope resolver 位于 `ralph-core::scope_resolution`，通过已有 `ralph inspect` namespace 暴露只读 CLI；BDD 负责真实验证 EventLoop 的 routing/schema/gate，`ralph-core` integration 负责真实 Git graph、manifest、classification、digest 和资源边界，CLI integration 负责命令参数、emit-time semantic validation 和 unsafe bypass。preset strict lint 只验证 topology/ownership/schema；不得用只检查 prompt 文案包含某个词的测试冒充 resolver 行为测试。
+测试原则：scope 解析仍由 `change-mapper`/`plan-resolver` agent 执行；BDD 负责真实验证 EventLoop 的 routing/schema/gate，现有 `payload_consistency` 和 CLI precheck 测试负责 payload/artifact/threshold/path/status 一致性，Git fixture 负责固定 protocol 的 characterization/differential 证据。不得把 mock payload 当作 agent Git 判断正确性的证明，也不得新增只检查 prompt 文案的测试；preset strict lint 只验证 topology/ownership/schema。
 
 ### 6. 需求—测试追踪矩阵
 
@@ -408,26 +408,26 @@ redteam.start
 | R2 | scope base 必须可证明 | S2、S8 | `scope_base_is_manifest_bound` | base source/ancestor contract | changemap/plan.resolved payload | N/A | E5、E11、D5 |
 | R3 | 支持 merge、direct、mixed history | S1、S2、S3 | three fixture acceptance tests | classification enum assertions | merge/post/red route tests | N/A | E9、E10 |
 | R4 | interleaved/override/revert/shared/unknown 可追踪 | S3、S4、S5 | attribution fixtures | manifest classification table assertions | blocked gate scenario | N/A | E5、E10、D6 |
-| R5 | merge-boundary 仅为可选交叉证据 | S6、S7 | no-boundary success + conflict block | `cross_resolver_agreement` contract | post/red blocked scenario | N/A | E4、E6、D4 |
+| R5 | merge-boundary 仅为可选交叉证据 | S6、S7 | no-boundary success + conflict block | `boundary_consistency` contract | post/red blocked scenario | N/A | E4、E6、D4 |
 | R6 | confidence 分维度并硬门禁 | S5、S9 | threshold tests | score aggregation boundary tests | changemap/plan.resolved gate | N/A | E3、E5、D7 |
 | R7 | postmerge 只在 resolved scope 后审计 | S5、S9、S10 | no-audit-on-blocked scenario | `proceed` consistency assertions | real EventLoop absent events | N/A | E2、E3 |
 | R8 | redteam patch 不使用未定义 baseline | S8 | placeholder rejection/manifest base acceptance | patch path/base field assertion | plan.resolved/unresolved BDD | N/A | E5、E7 |
 | R9 | merge-batch 输出 machine-readable boundary | S1 | merge boundary artifact contract | payload required-field test | merge integrated/stabilized workflow | N/A | E8、E9 |
 | R10 | artifact-first、digest、HEAD/tree recheck | S7、S10 | tamper/drift tests | digest/path/status assertions | terminal reporter gate | N/A | E11、E14 |
 | R11 | preset author/review 能发现 scope contract 缺失 | S5、S7 | negative fixture review run | anchor uniqueness test | strict preset review workflow | N/A | E15 |
-| R12 | 不新增 preset/顶层 CLI/第三方依赖 | 全部 | manifest/CLI inventory regression | builtin count/name parity + `ralph inspect scope resolve --help` | full preset suite | N/A | E12、E14、D1、D2 |
-| R13 | runtime 语义校验阻止伪造/篡改 scope artifact | S11、S10 | `tests_scope_manifest` | validator/path/digest/HEAD-tree assertions | emit policy-check + real emit | N/A | E21、D12 |
-| R14 | resolver 算法确定性、资源有界且只读 | S12、S13 | `multi_plan_scope_git`、`inspect_scope` | canonical/differential/fault-injection tests | CLI read-only integration | N/A | E20、D13 |
+| R12 | 不新增 preset/CLI surface/第三方依赖 | 全部 | preset inventory + schema/emit contract regression | builtin count/name parity + no new command assertion | full preset suite | N/A | E12、E14、D1、D2 |
+| R13 | precheck 语义校验阻止不一致/篡改 scope artifact | S11、S10 | policy-check reject/accept tests | guard/path/digest/HEAD-tree/threshold assertions | emit policy-check + real emit | N/A | E21、D12 |
+| R14 | agent scope protocol 有界、只读且可重复表达 | S12、S13 | `scope_agent_contract`、policy-check tests | canonical/differential/fault-injection tests | EventLoop + emit precheck integration | N/A | E20、D13 |
 
 ---
 
 ## Implementation Units
 
-### Unit 1：建立确定性的 scope resolver 与 emit-time 语义门禁
+### Unit 1：建立 agent-owned scope manifest 与 emit consistency gate
 
 #### 1. Unit 目标
 
-让 `ralph inspect scope resolve` 通过 `ralph-core::scope_resolution` 在临时 Git 仓库和真实 checkout 上生成唯一可复算的多计划 scope manifest，并让 scope 相关 emit 在写入 event 前验证 manifest 内容，而不是只验证 payload 字段形状。CLI 接口固定为：重复 `--plan <repo-relative-path>`，可选 `--scope-base <40-char-sha>`，可选 `--merge-boundary <repo-relative-path>`，必填 `--output <repo-relative-.ralph-path>`，可选 `--format human|json`；命令只锁定当前 HEAD/tree，不接受调用方另传 target HEAD。
+让 `change-mapper` 和 `plan-resolver` 按同一 agent-owned scope protocol 生成结构化 manifest，并让现有 `ralph emit --policy-check`/真实 emit 在写 event 前检查 payload、manifest 和 scope 阈值的一致性；不新增 CLI。该 Unit 不替 agent 重算 Git attribution，只阻止不完整、自相矛盾、过期、越界或低于阈值的 scope handoff。
 
 #### 2. 对应需求与 Scenario
 
@@ -438,36 +438,34 @@ redteam.start
 
 #### 3. 外部可观察结果
 
-调用方可以在无 merge-boundary、direct-target、merge 或 mixed fixture 中执行同一只读 resolver；相同输入产生相同 manifest/digest。`merge.integrated`、`postmerge.changemap.ready` 和 `redteam.plan.resolved` 的 success handoff 在 `ralph emit --policy-check` 和真实 emit 中都必须通过 manifest semantic validation；伪造字段、篡改文件、过期 HEAD/tree、错误 base 或 critical unknown 都不能写入 success event。
+`change-mapper`/`plan-resolver` 在无 merge-boundary、direct-target、merge 或 mixed fixture 中都能按同一 protocol 写出 manifest；相同输入要求 agent 产出相同 canonical bytes/digest。`merge.integrated`、`postmerge.changemap.ready` 和 `redteam.plan.resolved` 的 handoff 在 `ralph emit --policy-check` 和真实 emit 中都必须通过 consistency/threshold guard；伪造字段、payload↔artifact 不一致、过期 HEAD/tree、越界路径或低于阈值不能写入 success event。
 
 #### 4. 当前行为基线
 
-当前 `ralph-core` 没有多计划 resolver；`git_ops` 只有通用 wrapper，`plan_baseline` 只保存单 loop/plan SHA。当前三个 schema 只要求字符串字段，现有 emit policy 不会读取 manifest 内容或证明 path/digest/attribution 正确。先用 CLI/core characterization 证明旧 success-shaped scope payload 可以绕过这些语义检查，再以真实 Git fixture 建立 Red。
+当前 `ralph-core` 没有多计划 resolver；`git_ops` 只有通用 wrapper，`plan_baseline` 只保存单 loop/plan SHA。当前三个 schema 只要求字符串字段，现有 payload consistency 尚未覆盖 scope 字段。先用真实 EventLoop/emit characterization 证明旧 success-shaped scope payload 可以绕过 scope consistency，再以 agent artifact fixture 建立 Red。
 
 #### 5. 输入与输出
 
-- 输入：repo root、重复 `--plan <repo-relative-path>`、可选 `--scope-base <40-char-sha>`、可选 `--merge-boundary <repo-relative-path>`、必填 `--output <repo-relative-.ralph-path>`、可选 `--format human|json`、当前 target branch/HEAD/tree；`--plan` 至少出现一次，所有路径必须 repo-relative 且在允许 artifact 根目录内。不提供 `--scope-base` 时使用 D5 的固定 anchor/parent 算法。
+- 输入：scope owner agent 的 target branch/HEAD/tree、计划路径/ID、可选 `scope_base`、可选 merge boundary、agent 执行的 Git evidence、manifest/diff artifact 和 event payload；所有 artifact path 必须 repo-relative 且位于对应 `.ralph` 根目录。
 - 输出：`.ralph/{merge,post-merge,red-team}/scope-manifest.json` 与 full/scoped/interleaved/override/unknown patch artifacts；manifest 使用 `multi-plan-scope/v1`、canonical JSON bytes、D3 固定的顶层字段、`scope_digest` 和固定维度 score。
-- 错误：plan 不可读、candidate 无 hard evidence、base 非 ancestor、anchor/parent 不唯一、hunk unknown、resource limit、path 越界、HEAD/tree drift 或 manifest/diff digest 不一致 → 稳定 reason code、非零 CLI exit、不得产生 resolved artifact。
-- 状态变化：新增 `ralph inspect scope resolve` 只读命令；不新增 event topic；scope topic 的 emit precheck 增加 semantic validator。
-- 副作用：CLI 只原子写入调用方指定的 `.ralph` scope 目录；核心不执行 merge/rebase/cherry-pick/reset，不调用 shell，不写 runtime ledger。
+- 错误：plan 不可读、candidate 无 hard evidence、base 非 ancestor、anchor/parent 不唯一、hunk unknown、resource limit、path 越界、HEAD/tree drift、manifest/diff digest 不一致或 score/status 矛盾 → agent 写 blocked artifact；现有 emit precheck 拒绝 resolved handoff。
+- 状态变化：不新增 CLI、event topic 或 core resolver；扩展三份 schema 的 scope fields/payload consistency，并在现有 emit precheck 链增加 scope handoff guard。
+- 副作用：scope owner agent 只写对应 `.ralph/merge/`、`.ralph/post-merge/` 或 `.ralph/red-team/` artifact；不执行 merge/rebase/cherry-pick/reset，不调用 shell wrapper，不写 runtime ledger。
 - 不变量：相同 input snapshot 的 canonical bytes/digest/classification/score 一致；scope topic 的 `--unsafe-no-policy-check` 不能跳过 validator；`scope_base_sha` 必须由显式校验或固定 anchor/parent 算法产生。
 
 #### 6. 修改位置
 
-- `crates/ralph-core/src/scope_resolution.rs`：新增 `ScopeResolver`、`ScopeManifest`、`ScopeDecision`、fixed scoring、Git evidence parser、canonical digest、resource/path guard 和 `validate_manifest_for_emit`；不得把算法放进 preset prompt。
-- `crates/ralph-core/src/lib.rs`：新增 `pub mod scope_resolution` 和稳定 re-export；不改 `plan_baseline` 语义。
-- `crates/ralph-cli/src/commands/inspect.rs`：新增 `InspectCommands::Scope`、`InspectScopeArgs`、`ralph inspect scope resolve`；复用现有 inspect 的 read-only/JSON 输出模式。非法路径、缺 plan、非法 SHA、超限和 scope decision 非 resolved 均返回非零退出，不得写 success manifest。
-- `crates/ralph-cli/src/commands/emit/command_impl.rs`：在现有 policy/provenance/isolated-scope precheck 链中调用 `validate_manifest_for_emit`；scope topics 即使 `--unsafe-no-policy-check` 也必须执行该 gate。
-- `presets/schemas/{merge-batch,post-merge-converge,red-team-attack}.yml`：保留/扩展 field contract；schema 只做结构校验，semantic authority 由 core validator 提供。
-- `crates/ralph-core/tests/multi_plan_scope_git.rs`（planned addition）：直接调用 core resolver，建立 direct/merge/mixed/override/revert/rename/binary/limit fixtures。
-- `crates/ralph-cli/tests/inspect_scope.rs`、`crates/ralph-cli/src/commands/emit/tests_scope_manifest.rs`（planned additions）：CLI output、path guard、emit-time validator 和 unsafe bypass tests。
+- `crates/ralph-cli/src/policy_check/gates.rs`：在现有 precheck gate 集合中增加 scope handoff consistency guard；只检查 artifact/payload/threshold/lock/path 一致性，不实现 Git attribution。
+- `crates/ralph-cli/src/commands/emit/command_impl.rs`：在现有 provenance/isolated-scope/step-handoff 链中调用 scope guard；scope topics 即使 `--unsafe-no-policy-check` 也必须执行该 gate。
+- `crates/ralph-core/src/event_policy/validation.rs`、`crates/ralph-core/src/event_policy_payload_consistency.rs`：复用并扩展现有 `payload_consistency` 规则，用于 resolved/proceed、score、unknown/status 和 artifact reference 的同 payload 校验。
+- `presets/schemas/{merge-batch,post-merge-converge,red-team-attack}.yml`：扩展 manifest/status/score/threshold fields 和 `event_policy.payload_consistency` contract；schema 不宣称证明 hunk attribution。
+- `crates/ralph-cli/src/commands/emit/tests_policy_check_reject.rs`、`tests_policy_check_accept.rs`、`crates/ralph-cli/tests/integration_emit_policy.rs`：覆盖 scope guard、payload consistency、tamper/drift、unsafe bypass。
 - `crates/ralph-core/tests/scenarios.rs`/`tests/scenarios/*.yml`：只增加真实 EventLoop routing/absent-event fixtures；不把 mock payload 当 resolver correctness test。
 - 明确不修改：`crates/ralph-core/src/event_loop/` 的路由语义、`crates/ralph-core/src/plan_baseline.rs`、`presets/manifest.yml`、`presets/index.json`、builtin preset 数量和 zsh preset values。
 
 #### 7. 可依赖能力
 
-现有 `git_ops` wrapper、`sha2`/`serde_json` 依赖、artifact canonicalization pattern、inspect namespace、emit precheck chain、schema deep-merge、event policy、strict lint、`run_workflow_guard_scenario` 和 builtin parse/parity tests。
+现有 agent Git protocol、artifact canonicalization pattern、emit precheck chain、`payload_consistency` evaluator、schema deep-merge、event policy、strict lint、`run_workflow_guard_scenario` 和 builtin parse/parity tests。
 
 #### 8. 禁止依赖的未来能力
 
@@ -475,15 +473,15 @@ redteam.start
 
 #### 9. 验收测试
 
-- 测试名称：`scope_resolver_replays_mixed_history_deterministically`；层级：`ralph-core` integration；前置：临时 Git fixture 与两份 plan bytes；动作：两次调用 `ScopeResolver`；断言：manifest canonical bytes/digest/classification/score 一致，tracked/staged/unstaged tree 不变。
-- 测试名称：`inspect_scope_resolve_writes_bounded_manifest`；层级：CLI integration；断言：direct-target 输出成功，越界 path/超限 input 非零退出且不写越界文件。
-- 测试名称：`scope_emit_validator_rejects_tampered_manifest`；层级：CLI emit contract；断言：篡改 manifest/base/diff digest/HEAD/tree 时 `--policy-check` 与真实 emit 都拒绝，事件文件不增加；`--unsafe-no-policy-check` 仍拒绝。
+- 测试名称：`scope_agent_manifest_characterization`；层级：真实 EventLoop BDD；前置：临时 Git fixture 及预先记录的 agent command/evidence 输出；动作：重放 direct/mixed/override/revert artifact；断言：manifest 字段、canonical bytes/digest、classification/score 与 fixture 一致，tracked/staged/unstaged tree 不变。该测试固定 agent protocol，不伪装成 runtime Git resolver 测试。
+- 测试名称：`scope_handoff_consistency_rejects_tamper`；层级：CLI emit precheck integration；断言：篡改 manifest/base/diff digest/HEAD/tree/status/score 时 `--policy-check` 与真实 emit 都拒绝，事件文件不增加；`--unsafe-no-policy-check` 仍拒绝。
+- 测试名称：`scope_payload_consistency_rejects_incoherent_status`；层级：`payload_consistency` unit + 真实 EventLoop BDD；断言：`scope_status=resolved` 搭配低分/critical unknown/proceed=false、或 blocked 搭配 resolved handoff 均被拒绝。
 - 测试名称：`scope_payload_contract_rejects_missing_manifest_fields`；层级：真实 EventLoop BDD + schema contract；断言：缺字段的旧 success-shaped payload 不进入 accepted events，完整 payload 可进入下一跳。
-- 命令：`cargo nextest run -p ralph-core --test multi_plan_scope_git -- scope_resolver`、`cargo nextest run -p ralph-cli --test inspect_scope -- scope`、`cargo nextest run -p ralph-cli --bin ralph -- scope_manifest`、`cargo nextest run -p ralph-core --test scenarios -- scope_payload_contract`。
+- 命令：`cargo nextest run -p ralph-cli --bin ralph -- policy_check`、`cargo nextest run -p ralph-cli --test integration_emit_policy -- scope`、`cargo nextest run -p ralph-core --test scenarios -- scope_payload_contract`、`cargo nextest run -p ralph-core --test scenarios -- scope_agent_contract`。
 
 #### 10. Acceptance Red
 
-先运行三类测试：core resolver command 不存在/无 manifest，CLI inspect subcommand 不存在，emit validator 对篡改 payload 不拒绝；预期分别看到编译/CLI unknown-subcommand/错误 payload accepted 的真实 Red。若失败来自 fixture parse、测试未运行、未知 topic、错误命令或仅仅是 schema mock 失败，不算有效 Red，必须修正测试后重跑。
+先运行 scope handoff consistency、payload consistency 和真实 EventLoop contract 测试；当前 schema/guard 不要求 scope fields 或不拒绝 incoherent payload，预期看到旧 success-shaped payload 被接受的真实 Red。若失败来自 fixture parse、测试未运行、未知 topic、错误命令或仅仅是 schema mock 失败，不算有效 Red，必须修正测试后重跑。
 
 #### 11. 单元测试拆分
 
@@ -491,32 +489,33 @@ redteam.start
 - `scope_candidate_tie_is_ambiguous`：同分 candidate/无 hard evidence 不得 resolve；soft subject/time/author 不能单独通过。
 - `scope_hunk_classification_is_deterministic`：interleaved/shared/override/revert/rename/binary 按固定 hunk key 和 file-level rule 输出；binary 不声称 line coverage。
 - `scope_confidence_uses_fixed_weights`：85/89/90、critical unknown、no-boundary not_applicable、boundary conflict 的结果精确匹配 D7。
-- `scope_manifest_validator_rechecks_content_and_tree`：path、canonical digest、base ancestor、diff digest、locked HEAD/tree 和 allowed root 均真实复核；不 mock validator 真实逻辑。
+- `scope_handoff_guard_rechecks_artifact_references`：path、canonical digest、diff digest、locked HEAD/tree、allowed root 和 artifact size 均真实复核；不 mock guard 真实逻辑。
+- `scope_payload_consistency_enforces_thresholds`：resolved/proceed、overall/key dimensions、critical unknown、boundary conflict 和 blocked reason 的组合按 D7/D12 fail-close。
 
 #### 12. Red → Green → Refactor 顺序
 
-1. `scope_resolver_replays_mixed_history_deterministically` Red：添加 `scope_resolution` module、CLI 类型和 test fixture scaffolding，使缺失符号/命令失败。
-2. 实现固定 Git argv、path/resource guard、plan candidate/base/hunk algorithm、manifest canonicalization 和 score table；core replay Green。
-3. `inspect_scope_resolve_writes_bounded_manifest` Red：新增 `InspectCommands::Scope` 与 handler，最小实现 resolve/output/JSON；CLI Green。
-4. `scope_manifest_validator_rechecks_content_and_tree` Red：在 `emit/command_impl.rs` 现有 precheck 链接入 validator；tamper/unsafe bypass Green。
-5. `scope_payload_contract_rejects_missing_manifest_fields` Red：扩展三个 schema required fields/allowed values/field_docs 并更新受影响 fixtures；BDD Green。
-6. Refactor：统一 manifest field names、reason codes、JSON serialization 和 schema field docs；不得把 semantic checks退回 prompt。
+1. `scope_payload_contract_rejects_missing_manifest_fields` Red：先证明旧 payload 可以进入 accepted path。
+2. 扩展三个 schema 的 scope fields/allowed values 和 `payload_consistency` rules；缺字段/不一致 payload Green。
+3. `scope_handoff_consistency_rejects_tamper` Red：在 `policy_check/gates.rs` 和 `emit/command_impl.rs` 现有链中增加 guard；tamper/drift/unsafe bypass Green。
+4. `scope_agent_manifest_characterization` Red：加入 direct/mixed/override/revert/rename/binary/limit artifact fixture，固定 agent protocol 的输入输出和 blocked reason。
+5. 更新三个 preset prompt，要求 owner agent 生成固定字段、分数、证据表和 bounded artifact；BDD Green。
+6. Refactor：统一 manifest field names、reason codes、payload consistency rule IDs 和 schema field docs；不得把 scope 判断退回无结构 prompt。
 
 #### 13. 最小实现范围
 
-必须完成 deterministic core resolver、bounded read-only CLI、emit-time semantic validator、三个 schema contract 和既有受影响 BDD payload 更新；不得新增 topic、顶层 CLI、依赖或 preset；不得让旧 success payload、伪造 manifest、越界 artifact 或 unsafe bypass 继续通过。
+必须完成 agent-owned scope protocol、三个 schema contract、payload consistency rules、现有 emit precheck scope guard 和受影响 BDD payload 更新；不得新增 CLI、topic、依赖或 preset；不得让旧 success payload、payload/artifact 不一致、越界 artifact、低于阈值 handoff 或 unsafe bypass 继续通过。
 
 #### 14. 集成验证
 
-真实联合 core resolver、临时 Git repo、CLI inspect、emit precheck、`RalphConfig` parse、HatRegistry、EventLoop event policy 和 BDD runner；Git 命令不能 Fake，必须用临时仓库的真实 Git。运行 Unit 9 的 targeted nextest 命令，并运行三个 preset 的 strict lint 子集。
+真实联合 scope owner artifact protocol、临时 Git evidence、emit precheck、`RalphConfig` parse、HatRegistry、EventLoop event policy、payload consistency 和 BDD runner；Git command transcript 使用临时仓库真实 Git，guard 本身不替 agent 执行 attribution。运行本 Unit targeted nextest 命令，并运行三个 preset 的 strict lint 子集。
 
 #### 15. 风险驱动测试
 
-使用 Characterization Test 固定旧 payload/旧 emit validator 缺失行为；使用 Differential Test 比较两次 resolver canonical output；使用 Fault Injection 覆盖 tamper/drift/path traversal/resource limit；使用 boundary-value 测试覆盖 fixed score 85/89/90、critical unknown 和 no-boundary not_applicable。
+使用 Characterization Test 固定旧 payload/旧 guard 缺失行为；使用 Differential Test 比较两次 agent artifact canonical output；使用 Fault Injection 覆盖 tamper/drift/path traversal/resource limit；使用 boundary-value 测试覆盖 fixed score 85/89/90、critical unknown 和 no-boundary not_applicable。
 
 #### 16. 回归范围
 
-直接相关：`ralph-core::scope_resolution`、`ralph inspect scope`、emit precheck、三份 schema、`preset_lint`、`presets`、所有现有 implementation-review/payload schema BDD。相邻范围：`event_policy` schema parity、topic ownership、required event path、inspect CLI help、emit token/precheck regressions。旧配置/旧数据：不修改 runtime ledger；确认非 scope topic 不误套 semantic validator。构建目标：`ralph-core`、`ralph-cli`；Lint/typecheck 使用仓库标准命令。
+直接相关：`policy_check/gates.rs`、`emit/command_impl.rs`、`event_policy/validation.rs`、`event_policy_payload_consistency.rs`、三份 schema、`preset_lint`、`presets`、所有现有 implementation-review/payload schema BDD。相邻范围：event-policy schema parity、topic ownership、required event path、emit token/precheck regressions。旧配置/旧数据：不修改 runtime ledger；确认非 scope topic 不误套 scope guard。构建目标：`ralph-core`、`ralph-cli`；Lint/typecheck 使用仓库标准命令。
 
 #### 17. 预期文件变更
 
@@ -528,22 +527,20 @@ redteam.start
 | `crates/ralph-core/tests/scenarios.rs` | 新增测试注册 | 真实 EventLoop acceptance | E13 |
 | `crates/ralph-core/tests/scenarios/scope_payload_contract.yml` | 新增测试 fixture | missing/complete payload cases | E13 |
 | `crates/ralph-core/tests/scenarios/*.yml` 中经 `rg` 确认受影响的既有 fixture | 修改现有 fixture | 为 schema required fields 提供最小合法 payload，避免保留测试债务 | E3、E7、E8、E13 |
-| `crates/ralph-cli/src/presets.rs` | 新增结构化断言 | builtin schema semantics | E14 |
-| `crates/ralph-core/src/scope_resolution.rs` | 新增生产模块 | deterministic resolver/manifest/validator | E12、E20、E21 |
-| `crates/ralph-core/src/lib.rs` | 修改公开模块导出 | expose scope resolver to CLI/tests | E12 |
-| `crates/ralph-cli/src/commands/inspect.rs` | 修改现有 CLI | add read-only `inspect scope resolve` | E21 |
-| `crates/ralph-cli/src/commands/emit/command_impl.rs` | 修改现有 CLI | semantic gate before event write | E21、D12 |
-| `crates/ralph-core/tests/multi_plan_scope_git.rs` | 新增集成测试 | real Git resolver/determinism/limits | E20 |
-| `crates/ralph-cli/tests/inspect_scope.rs` | 新增集成测试 | CLI args/output/path safety | E21 |
-| `crates/ralph-cli/src/commands/emit/tests_scope_manifest.rs` | 新增单元/CLI contract test | tamper/drift/unsafe bypass | E21、D12 |
+| `crates/ralph-cli/src/policy_check/gates.rs` | 修改现有 precheck | scope handoff consistency/path/threshold guard | E21、D12 |
+| `crates/ralph-cli/src/commands/emit/command_impl.rs` | 修改现有 CLI | 在现有 emit 链接入 scope guard | E21、D12 |
+| `crates/ralph-core/src/event_policy/validation.rs` | 修改现有验证 | 注册/执行 scope 相关 payload consistency | E21、D12 |
+| `crates/ralph-core/src/event_policy_payload_consistency.rs` | 修改现有 evaluator | 复用固定 predicate 评估，不新增 CLI | E21 |
+| `crates/ralph-cli/src/commands/emit/tests_policy_check_reject.rs`、`tests_policy_check_accept.rs` | 修改现有单元测试 | tamper/drift/threshold/unsafe bypass | E21、D12 |
+| `crates/ralph-cli/tests/integration_emit_policy.rs` | 修改现有集成测试 | 真实 emit precheck contract | E21、D12 |
 
 #### 18. 完成标准
 
-core resolver、CLI、emit semantic gate、schema Red/Green 通过；S8–S13 相关 BDD/CLI/Git integration 和 strict lint 通过；没有新增 skip/弱断言；scope correctness 不依赖 prompt 文案；Evidence Ledger/Decision Record 已更新；Unit 可独立提交。
+agent-owned scope protocol、emit consistency/threshold guard、schema Red/Green 通过；S8–S13 相关 BDD/emit policy integration 和 strict lint 通过；没有新增 CLI、skip 或弱断言；scope handoff 不再只依赖自由文本 prompt；Evidence Ledger/Decision Record 已更新；Unit 可独立提交。
 
 #### 19. 停止条件
 
-如果 resolver 无法在不调用 shell 的前提下获得所需 Git evidence、manifest validator 无法读取/复算 artifact、`--unsafe-no-policy-check` 能绕过 scope gate、schema deep-merge 不读取新增字段、或非 scope topic 被误拦截，停止并重新检查 `build.rs`、emit precheck boundary、scope module contract 和 schema SSOT，不继续写 preset instructions。
+如果 scope owner 无法在不调用 shell wrapper 的前提下获得所需 Git evidence、guard 无法读取/复核 artifact、`--unsafe-no-policy-check` 能绕过 scope gate、payload consistency rule 无法表达固定阈值、schema deep-merge 不读取新增字段、或非 scope topic 被误拦截，停止并重新检查 `policy_check/gates.rs`、emit precheck boundary、event policy contract 和 schema SSOT，不继续写 preset instructions。
 
 #### 20. 风险与注意事项
 
@@ -697,12 +694,12 @@ boundary 只描述 batch window，不能声称它是最终多计划 scope。文�
 #### 6. 修改位置
 
 - `post-merge.prompt.md`：增加可选 `scope_base`、`merge_boundary_path`、scope mode 说明；保留省略计划列表的自动发现。
-- `presets/en/post-merge-converge.yml` baseline/change-mapper：锁定 target identity，调用 `ralph inspect scope resolve`，把显式/自动发现的 plan 输入和可选 boundary 传给 resolver；audit 只读取 resolver 已验证的 resolved manifest，不在 prompt 中重复实现 attribution。
+- `presets/en/post-merge-converge.yml` baseline/change-mapper：锁定 target identity，由 change-mapper 按固定 Git protocol 解析显式/自动发现的 plan 和可选 boundary，写 postmerge-owned manifest；audit 只读取通过 emit consistency/threshold guard 的 resolved manifest，不重复改变 attribution。
 - `presets/schemas/post-merge-converge.yml`：使用 Unit 1 contract。
 - `presets/en/post-merge-converge-preset-author-notes.md`：更新每个 payload 字段的 source/consumer/artifact owner。
 - `crates/ralph-core/tests/scenarios.rs` 和新增 `postmerge_scope_direct_target.yml`：真实事件链。
 - `crates/ralph-core/tests/multi_plan_scope_git.rs`：新增 `direct_target`、`branch_merge` replay，确认显式/推导 base、first-parent、merge-parent 和 locked HEAD/tree 的原始证据可复核；这是可执行的 Git evidence test，不是 prompt 文本测试。
-- 明确不修改：`implementation-review.yml`、任何 runtime state file；不在 postmerge prompt 中复制 core resolver 算法。
+- 明确不修改：`implementation-review.yml`、任何 runtime state file；postmerge prompt 必须遵守共享 scope protocol，但不引入新的 resolver module。
 
 #### 7. 可依赖能力
 
@@ -731,12 +728,12 @@ Unit 1 schema、Unit 2 的可选 boundary artifact 语义、implementation-revie
 - `postmerge_direct_target_scope_base_is_not_current_head`：base 必须是已验证 ancestor，不能等于 locked HEAD。
 - `postmerge_resolved_payload_carries_diff_paths`：四类 diff path 和 digest/count 一致。
 - `postmerge_explicit_base_must_be_ancestor`：非 ancestor 显式 base 阻断。
-- 通过真实 Git fixture 调用 `ralph inspect scope resolve` 或 core resolver 验证输入输出；不 mock resolver/manifest validator/policy gate 本身。
+- 通过真实 Git fixture 重放 change-mapper agent 的 Git command/evidence protocol，验证输入输出；不 mock payload consistency、scope handoff guard 或 policy gate 本身。
 
 #### 12. Red → Green → Refactor 顺序
 
 1. Direct-target BDD Red。
-2. 更新 prompt contract，要求 change-mapper 调用 `ralph inspect scope resolve` 并只消费其 JSON/artifact output。
+2. 更新 prompt contract，要求 change-mapper 依固定 protocol 写 manifest/evidence，并只在 emit precheck 通过后消费 scope handoff。
 3. 接入 resolver manifest/diff paths 并扩展 event payload，Green。
 4. 显式 base 非 ancestor 与计划 digest mismatch Red。
 5. 加 fail-close/blocked artifact，Green。
@@ -871,7 +868,7 @@ mixed fixture 在 Unit 3 实现后仍会缺 classification/unknown gate，预期
 
 #### 15. 风险驱动测试
 
-采用 Differential Test：比较 core resolver 的 full diff、计划 commit patch union、最终 blame/hunk attribution 三者；采用 Fault Injection：unknown hunk、boundary digest tamper、HEAD/tree drift。对 binary/rename 按 D6 的 file-level rule 验证，不能假定 line-level 成功。
+采用 Differential Test：比较 change-mapper agent 两次 protocol artifact、计划 commit patch union、最终 blame/hunk evidence 三者；采用 Fault Injection：unknown hunk、boundary digest tamper、HEAD/tree drift。对 binary/rename 按 D6 的 file-level rule 验证，不能假定 line-level 成功。
 
 #### 16. 回归范围
 
@@ -934,7 +931,7 @@ redteam 的 `redteam.plan.resolved` 明确携带真实 scope base、manifest/pat
 #### 6. 修改位置
 
 - `red-team.prompt.md`：增加可选 scope base/boundary 输入和明确 no-boundary 支持。
-- `presets/en/red-team-attack.yml` target-locker/plan-resolver：保留 target lock，调用 `ralph inspect scope resolve`，传入本次独立 lock/plan/base/boundary 参数；禁止自行复制 candidate/base/hunk 算法，仍须写 redteam-owned manifest/diff artifacts。
+- `presets/en/red-team-attack.yml` target-locker/plan-resolver：保留 target lock，由 plan-resolver 按固定 Git protocol 传入本次独立 lock/plan/base/boundary 参数并写 redteam-owned manifest/diff artifacts；禁止依赖 postmerge/merge-batch artifact 或省略 candidate/base/hunk evidence。
 - `presets/schemas/red-team-attack.yml`：使用 Unit 1 fields，扩展 unresolved reason。
 - `presets/en/red-team-attack-author-notes.md`：更新 target-lock/plan-resolution payload ownership 和 artifact paths。
 - `crates/ralph-core/tests/scenarios/redteam_scope_direct_target.yml`、`redteam_scope_placeholder_blocked.yml`、`crates/ralph-core/tests/scenarios.rs`。
@@ -972,7 +969,7 @@ Unit 1 schema、现有 target-locker clean/in-progress guard、现有 plan-resol
 #### 12. Red → Green → Refactor 顺序
 
 1. Plan-resolved missing scope fields Red。
-2. 更新 plan-resolver instructions，要求调用 `ralph inspect scope resolve`，并把 resolver 的稳定 reason code/path/digest 原样交给 schema handoff。
+2. 更新 plan-resolver instructions，要求按固定 scope protocol 写稳定 reason code/path/digest，并把 agent evidence 原样交给 schema handoff。
 3. Direct/no-boundary success Green。
 4. Placeholder/base/digest tamper Red。
 5. 加 pre-emit recheck 和 unresolved route，Green。
@@ -1082,7 +1079,7 @@ Unit 5 的 independent manifest/base/patch；现有 evidence-gate retry、impact
 
 - `redteam_interleaved_commit_excluded_from_attack_patch`。
 - `redteam_override_and_revert_edges_are_traceable`。
-- `redteam_cross_resolver_disagreement_is_blocked`。
+- `redteam_boundary_consistency_disagreement_is_blocked`。
 - `redteam_unknown_critical_never_creates_finding`。
 - `redteam_confidence_gate_is_monotonic`：低维度不能被其他高分平均掩盖。
 - `redteam_reporter_failure_path_validates_plan_unresolved_artifact`。
@@ -1164,7 +1161,7 @@ author/review skills 已有 capability-triggered audit、artifact-first、payloa
 #### 5. 输入与输出
 
 - 输入：Unit 1–6 的 schema/preset behavior、当前 author/review references、现有 fixture anchor test、builtin docs。
-- 输出：new scope finding IDs、正/负 fixture、author/review 命令表、scope pattern、prompt visibility checks、指南和 builtin 描述同步。
+- 输出：new scope finding IDs、正/负 fixture、author/review 命令表、scope pattern、prompt visibility checks、指南和 builtin 描述同步；不新增 scope CLI 文档。
 - 错误：fixture 宣传 scope gate 但 preset 缺 fields、只依赖 merge-boundary、把 85–89 放行、使用 placeholder base → review finding/block。
 - 状态变化：不改 runtime event topology，不增 preset manifest entry。
 - 副作用：只修改文档/skill fixtures/tests；不触碰 `.ralph/` runtime state。
@@ -1177,8 +1174,7 @@ author/review skills 已有 capability-triggered audit、artifact-first、payloa
 - `skills/ralph-preset-review/fixtures/`：新增 scope-positive、missing-scope-negative、merge-boundary-dependency-negative、placeholder-base-negative、confidence-gate-negative fixtures；每个 finding ID 唯一。
 - `skills/ralph-preset-review/tests/test_skill_anchors.py`：只锁定稳定 heading/finding ID/fixture anchors，不锁定完整 prompt 文案。
 - `docs/guide/presets.md`、`AGENTS.md`、`CLAUDE.md`、`.cursor/rules/multi-hat-isolation.mdc`：同步已有 builtin behavior description。
-- `crates/ralph-core/data/ralph-tools-scope.md`（planned addition）：只写 agent 可执行的 `ralph inspect scope resolve` 命令、plan/base/boundary/locked-head 字段来源和失败停止条件；不得写内部函数名、ledger 或完整归属算法实现。
-- `crates/ralph-core/data/ralph-tools-emit.md`、`ralph-tools-cmdref.md`：同步 scope CLI、emit semantic gate 和 `--unsafe-no-policy-check` 的不可绕过语义；运行 help/doc drift 验证。
+- `crates/ralph-core/data/ralph-tools-emit.md`、`ralph-tools-cmdref.md`：同步 agent-owned scope manifest、固定指标、payload consistency、emit precheck 和 `--unsafe-no-policy-check` 的不可绕过语义；运行既有 help/doc drift 验证。
 - `scripts/ralph-zsh-plugin.zsh`、`presets/manifest.yml`、`presets/index.json`：执行 parity check，预期不修改。
 
 #### 7. 可依赖能力
@@ -1187,7 +1183,7 @@ Unit 1–6 已通过的字段、artifact、gate、status 和 path contract；现
 
 #### 8. 禁止依赖的未来能力
 
-不得新增 preset、顶层 CLI 或 unrelated generic injected skill；允许按 D11 新增专用 `ralph-tools-scope.md`，但不得把 scope contract 固定为某个计划 ID、某次 merge report 或某个仓库专属路径。
+不得新增 preset、CLI surface 或 unrelated generic injected skill；scope contract 只能同步到已有 emit/cmdref guide，不得固定为某个计划 ID、某次 merge report 或某个仓库专属路径。
 
 #### 9. 验收测试
 
@@ -1195,8 +1191,8 @@ Unit 1–6 已通过的字段、artifact、gate、status 和 path contract；现
 - `scope_resolution_positive_fixture_has_independent_authority`：正 fixture 不误报 merge-boundary dependency。
 - `scope_anchor_contracts_are_unique`：anchor test 通过且 finding IDs 无碰撞。
 - `docs_and_builtin_inventory_remain_aligned`：preset/index/manifest/zsh parity 通过，数量未增加。
-- `scope_cli_guide_matches_help`：`ralph-tools-scope.md` 中的命令、字段和停止条件与 `ralph inspect scope resolve --help` 及 `ralph emit --help` 一致。
-- 命令：`skills/.venv/bin/python -m pytest skills/ralph-preset-review/tests/test_skill_anchors.py -q`，`cargo nextest run -p ralph-cli --test inspect_scope -- scope_help`，以及已有 preset strict/parity/doc drift 命令。
+- `scope_emit_contract_matches_help`：既有 `ralph-tools-emit.md`/`ralph-tools-cmdref.md` 中的 policy-check、payload consistency、scope fields 和停止条件与 `ralph emit --help`/`ralph emit --schema` 一致。
+- 命令：`skills/.venv/bin/python -m pytest skills/ralph-preset-review/tests/test_skill_anchors.py -q`，`cargo nextest run -p ralph-cli --bin ralph -- emit`，以及已有 preset strict/parity/doc drift 命令。
 
 #### 10. Acceptance Red
 
@@ -1205,8 +1201,8 @@ Unit 1–6 已通过的字段、artifact、gate、status 和 path contract；现
 #### 11. 单元测试拆分
 
 - author/review 两份 `finding-rubric.md` 都包含同一 scope finding ID 与 severity/confidence。
-- commands reference 都包含 scope contract 的真实 preset/schema/inspect/policy-check 命令。
-- `ralph-tools-scope.md` 只描述触发条件、命令、字段来源和失败停止条件，且与 `ralph inspect scope resolve --help` 一致。
+- commands reference 都包含 scope contract 的真实 preset/schema/emit/policy-check 动作。
+- `ralph-tools-emit.md`/`ralph-tools-cmdref.md` 只描述 agent 下一步可执行的 emit/policy-check 动作、字段来源和失败停止条件，不泄漏内部 guard 实现。
 - patterns/reference 都要求 independent resolver、optional boundary、unknown hard gate、manifest digest。
 - fixture advertised ID 唯一且 positive/negative 语义互补。
 - `scripts/ralph-zsh-plugin.zsh`、`presets/index.json`、`manifest.yml` 的 builtin name set 相等，但 set 不增加。
@@ -1223,7 +1219,7 @@ Unit 1–6 已通过的字段、artifact、gate、status 和 path contract；现
 
 #### 13. 最小实现范围
 
-必须同步 operator/author/review 可审计契约、通用 scope command guide 和验证 fixture；不新增 preset/顶层 CLI，不修改 event topology，不锁定全文 prompt。
+必须同步 operator/author/review 可审计契约、已有 emit/cmdref guide 和验证 fixture；不新增 preset/CLI surface，不修改 event topology，不锁定全文 prompt。
 
 #### 14. 集成验证
 
@@ -1249,16 +1245,15 @@ author/review skill anchors、所有既有 fixture、builtin preset count/name p
 | `skills/ralph-preset-review/tests/test_skill_anchors.py` | 修改测试 | stable anchors and ID uniqueness | E15 |
 | `docs/guide/presets.md` | 修改文档 | operator behavior contract | E17 |
 | `AGENTS.md`、`CLAUDE.md`、`.cursor/rules/multi-hat-isolation.mdc` | 修改文档 | builtin behavior sync | E14、E17 |
-| `crates/ralph-core/data/ralph-tools-scope.md` | 新增 agent-facing skill guide | scope CLI usage/inputs/failure stop conditions | E16、D11 |
-| `crates/ralph-core/data/ralph-tools-emit.md`、`ralph-tools-cmdref.md` | 修改 agent-facing 文档 | scope CLI/emit semantic gate contract | E16、E21 |
+| `crates/ralph-core/data/ralph-tools-emit.md`、`ralph-tools-cmdref.md` | 修改 agent-facing 文档 | scope manifest、payload consistency、emit precheck contract | E16、E21 |
 
 #### 18. 完成标准
 
-所有 author/review fixtures、anchors、strict lint、manifest/index/zsh parity、CLI doc drift、`ralph inspect scope resolve --help` smoke 和相关 nextest 通过；没有新增 preset/顶层 CLI；scope guide 满足作用域和可执行性规则；Unit 可独立提交。
+所有 author/review fixtures、anchors、strict lint、manifest/index/zsh parity、CLI doc drift、`ralph emit --help`/`--schema` smoke 和相关 nextest 通过；没有新增 preset/CLI surface；agent-facing emit guide 满足作用域和可执行性规则；Unit 可独立提交。
 
 #### 19. 停止条件
 
-如果 scope guide 需要泄漏内部 resolver 实现、出现 skill author/review finding ID 分歧、`ralph inspect scope resolve --help` 与 guide 漂移、或 builtin inventory 发生无计划增删，停止并重新审查 D1/D2/D11/D12。
+如果 emit guide 需要泄漏内部 guard 实现、出现 skill author/review finding ID 分歧、`ralph emit --help`/`--schema` 与 guide 漂移、或 builtin inventory 发生无计划增删，停止并重新审查 D1/D2/D11/D12。
 
 #### 20. 风险与注意事项
 
@@ -1298,11 +1293,10 @@ Unit 7
 
 | 命令 | 运行时机 | 验证目的 | 预期结果 | 失败是否允许下一步 |
 | --- | --- | --- | --- | --- |
-| `cargo nextest run -p ralph-core --test multi_plan_scope_git -- scope_resolver` | Unit 1 Red/Green | 验证 deterministic resolver、base/hunk/classification、digest 和 resource guard | 全部 Git fixture 与固定 score 通过 | 否 |
-| `cargo nextest run -p ralph-cli --test inspect_scope -- scope` | Unit 1 Red/Green | 验证 `ralph inspect scope resolve` CLI 参数、JSON output、path boundary 和重复结果 | 全绿 | 否 |
-| `cargo run -p ralph-cli --bin ralph -- inspect scope resolve --help` | Unit 1 Green、Unit 7 | 验证新增嵌套 CLI 的真实参数、默认值和失败说明，供 scope guide/doc drift 对照 | 帮助文本与本计划固定参数一致 | 否 |
-| `cargo nextest run -p ralph-cli --bin ralph -- scope_manifest` | Unit 1 Red/Green | 验证 emit-time manifest semantic gate、tamper/drift 和 unsafe bypass | 篡改/越界/过期 manifest 均拒绝 | 否 |
+| `cargo nextest run -p ralph-cli --bin ralph -- scope_handoff` | Unit 1 Red/Green | 验证现有 emit precheck 的 scope handoff consistency、tamper/drift、threshold 和 unsafe bypass | 篡改/越界/过期/低阈值 manifest 均拒绝 | 否 |
+| `cargo nextest run -p ralph-cli --test integration_emit_policy -- scope` | Unit 1 Red/Green | 验证真实 emit policy/payload consistency 对 scope payload/artifact reference 的拒绝与接受 | 全绿 | 否 |
 | `cargo nextest run -p ralph-core --test scenarios -- scope_payload_contract` | Unit 1 Red/Green | 验证三个 scope payload 的真实 EventLoop schema gate | 新 fixture 全绿 | 否 |
+| `cargo nextest run -p ralph-core --test scenarios -- scope_agent_contract` | Unit 1 Red/Green | 验证 agent artifact characterization、blocked/resolved route 和重复 canonical bytes | 新 fixture 全绿 | 否 |
 | `cargo nextest run -p ralph-core --test scenarios -- merge_batch_boundary` | Unit 2 | 验证 merge boundary success/incomplete route | 全绿，失败路径无 passed true | 否 |
 | `cargo nextest run -p ralph-core --test multi_plan_scope_git -- direct_target` | Unit 3 | 在临时仓库复演 direct-target/base/HEAD/tree evidence | 原始 Git evidence 与预期边界一致 | 否 |
 | `cargo nextest run -p ralph-core --test scenarios -- postmerge_scope_direct_target` | Unit 3 | 验证无 boundary direct target resolver handoff | `postmerge.changemap.ready` 被接受 | 否 |
@@ -1333,7 +1327,7 @@ Unit 7
 
 ### 10. 最终质量门禁
 
-- S1–S13 全部拥有真实 EventLoop/CLI/core acceptance test 或明确的只读 Git fixture acceptance evidence。
+- S1–S13 全部拥有真实 EventLoop/emit precheck acceptance test 或明确的 agent protocol/Git fixture acceptance evidence。
 - R1–R14 全部在追踪矩阵中关联 Scenario、测试和 Evidence。
 - 三个 preset 的 scope resolver 都能在 no-boundary/direct-target/mixed history 输入下独立启动。
 - `merge-boundary` 只作为 optional evidence；任何缺失或冲突都不会使 postmerge/redteam 失去独立解析能力。
@@ -1344,7 +1338,7 @@ Unit 7
 - `cargo nextest` preset/core/BDD、`cargo build`、`cargo clippy`、`./scripts/check-cli-doc-drift.sh`、author/review `.venv` tests 和最终 `./scripts/run-tests.sh` 全部通过。
 - 没有新增 skipped/only/ignored 测试，没有削弱断言，没有无解释 snapshot/golden 更新，没有修改当前运行时 ledger。
 - `presets/manifest.yml`、`presets/index.json`、zsh builtin set 与 `crates/ralph-cli/src/presets.rs` 保持一致且没有新增 preset。
-- `crates/ralph-core/data/*.md` 复核后没有泄漏内部 ledger/function/plan-specific scope 实现；`ralph-tools-scope.md` 只描述 agent 下一步命令、字段来源和失败停止条件；若命令/schema 说明漂移，已同步修复并通过 drift scan。
+- `crates/ralph-core/data/*.md` 复核后没有泄漏内部 ledger/function/plan-specific scope 实现；已有 emit/cmdref guide 只描述 agent 下一步动作、字段来源和失败停止条件；若 schema/命令说明漂移，已同步修复并通过 drift scan。
 - 每个 Unit 均形成完整 TDD 闭环，严格按 Unit 1→7 顺序完成，所有关键决策置信度仍不低于 0.85。
 
 ### 11. 最终计划自检
@@ -1352,17 +1346,17 @@ Unit 7
 | 检查项 | 结果 | 证据或说明 |
 | --- | --- | --- |
 | 这是实施计划而不是 Roadmap 吗 | 是 | 每个 Unit 都绑定真实文件、入口、Red、最小实现、测试和停止条件 |
-| Executor 是否仍需做关键设计决策 | 否 | D1–D13 已确定；H2 只允许按 Unit 4/6 的固定 fixture 验证，不允许临时选择算法 |
-| 所有文件和接口是否有代码库证据 | 是 | E2–E21；新增 fixture、resolver module、inspect CLI、emit test 和 `merge-batch` author note 均明确标为 planned addition 或已有入口 |
+| Executor 是否仍需做关键设计决策 | 否 | D1–D13 已确定；H2 只允许按 Unit 3–6 的固定 agent fixture 验证，不允许临时放宽 protocol/threshold |
+| 所有文件和接口是否有代码库证据 | 是 | E2–E21；新增 fixture、既有 policy_check guard 修改、payload-consistency contract 和 `merge-batch` author note 均明确标为 planned addition 或已有入口 |
 | 所有关键决策置信度是否 ≥ 0.85 | 是 | D1–D13 均在表中达到 0.91 或更高 |
 | 是否存在未处理的低置信度假设 | 否 | H1/H2 已有验证方法和失败影响，不作为无条件事实使用 |
-| 每个 Unit 是否只有一个可观察行为 | 是 | Unit 1 verified resolver/emit gate、Unit 2 boundary、Unit 3 direct scope、Unit 4 mixed gate、Unit 5 red base、Unit 6 red confidence gate、Unit 7 review/doc gate |
+| 每个 Unit 是否只有一个可观察行为 | 是 | Unit 1 agent manifest/precheck gate、Unit 2 boundary、Unit 3 direct scope、Unit 4 mixed gate、Unit 5 red base、Unit 6 red confidence gate、Unit 7 review/doc gate |
 | 每个 Unit 是否可以独立验证 | 是 | 每个 Unit 都有独立测试入口、命令、Red 和完成标准 |
 | 每个 Unit 是否有真实 Red | 是 | 先用旧 payload/旧 gate/缺 artifact 的真实失败建立 Red；禁止文案 grep 充 Red |
 | 每个 Unit 是否包含回归范围 | 是 | Unit 1–7 均列出直接、相邻、旧输入、构建和全量影响 |
 | 是否存在未来 Unit 依赖 | 否 | 依赖图严格线性，当前 Unit 禁止实现未来分类/攻击/文档行为 |
 | 是否存在泛化任务描述 | 否 | 使用具体 preset、hat、topic、artifact、字段、测试和命令 |
-| 所有 Scenario 是否可追踪到测试和 Unit | 是 | S1–S13 映射至 R、Unit、BDD/CLI/core contract 测试 |
+| 所有 Scenario 是否可追踪到测试和 Unit | 是 | S1–S13 映射至 R、Unit、BDD/emit precheck/agent protocol contract 测试 |
 | 所有关键决策是否有 Evidence | 是 | D1–D13 均引用 Evidence Ledger |
 | 计划是否可以严格串行执行 | 是 | Unit 1→7 及每个 Unit 的 Red→Green→Refactor→Integration→Regression→Close 已固定 |
 
@@ -1370,5 +1364,5 @@ Unit 7
 
 - 不新增 `multi-plan-converge` preset；现有三个 preset 已分别承载 merge、post-merge convergence 和 red-team attack 责任。
 - 不把 `merge-batch` 变成 postmerge/redteam 的前置服务；它只补 machine-readable boundary evidence。
-- 不增加顶层 `ralph scope` 命令；新增的 scope resolver 位于已有 `ralph inspect scope resolve` 和 `ralph-core::scope_resolution`，是本计划已明确批准的确定性 runtime boundary。
+- 不增加 `ralph inspect scope resolve` 或任何新的 CLI surface；scope resolver 保持在 `change-mapper`/`plan-resolver` agent protocol 中，runtime 只通过现有 emit precheck/payload-consistency guard 检查交接一致性和阈值。
 - 不把当前 branch 的 loop baseline marker 当作多计划 scope base；它是单 plan/loop persistence 辅助能力，不具备本需求所需的多计划 attribution 语义。
