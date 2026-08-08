@@ -232,6 +232,9 @@ def run_finalization(
 
     The function never raises. Any error is mapped to a fail-open
     coordinator result and recorded in ``state.json`` as ``UNKNOWN``.
+    Fix U6 collapses the six repeated ``if state_path is not None:
+    _write_state(...)`` calls into a single tail write inside the
+    ``_finalize`` helper.
     """
     scripts_dir = Path(__file__).resolve().parent
     status = str(getattr(parser_result, "status", "SKIPPED"))
@@ -251,96 +254,69 @@ def run_finalization(
         cap = min(_WRITER_BUDGET_SECONDS, budget - _BUDGET_SAFETY_MARGIN)
         return max(0.1, min(remaining, cap))
 
+    def _finalize(result: CoordinatorResult) -> CoordinatorResult:
+        """Write the state.json finalization block exactly once and return."""
+        if state_path is not None:
+            _write_state(
+                state_path,
+                event=event,
+                env=env,
+                payload=payload,
+                coordinator=result,
+                atomic_state=atomic_state,
+            )
+        return result
+
     # Hat allowlist gate (fix U3 adversarial:A3). Only hats that may
     # legitimately author finalization markers reach the parser output;
     # reviewer / observer hats short-circuit to SKIPPED without ever
     # invoking save or writer.
     if status == "PARSED" and not _hat_allowed(hat):
-        coordinator = CoordinatorResult(
-            status="SKIPPED",
-            memory_digest=digest,
-            reason=(
-                f"hat '{hat or '<unknown>'}' is not in the finalization allowlist"
-            ),
-        )
-        if state_path is not None:
-            _write_state(
-                state_path,
-                event=event,
-                env=env,
-                payload=payload,
-                coordinator=coordinator,
-                atomic_state=atomic_state,
+        return _finalize(
+            CoordinatorResult(
+                status="SKIPPED",
+                memory_digest=digest,
+                reason=(
+                    f"hat '{hat or '<unknown>'}' is not in the finalization allowlist"
+                ),
             )
-        return coordinator
+        )
 
     if status != "PARSED":
-        coordinator = _fallback_result(parser_result)
-        if state_path is not None:
-            _write_state(
-                state_path,
-                event=event,
-                env=env,
-                payload=payload,
-                coordinator=coordinator,
-                atomic_state=atomic_state,
-            )
-        return coordinator
+        return _finalize(_fallback_result(parser_result))
 
     candidate = getattr(parser_result, "candidate", None)
     if not isinstance(candidate, Mapping):
-        coordinator = CoordinatorResult(
-            status="REJECTED", memory_digest=digest, reason="parser returned no candidate"
-        )
-        if state_path is not None:
-            _write_state(
-                state_path,
-                event=event,
-                env=env,
-                payload=payload,
-                coordinator=coordinator,
-                atomic_state=atomic_state,
+        return _finalize(
+            CoordinatorResult(
+                status="REJECTED",
+                memory_digest=digest,
+                reason="parser returned no candidate",
             )
-        return coordinator
+        )
 
     source = _source_from_env(env)
     try:
         save_module = _load_save_module(scripts_dir)
         save_result = save_module.save(candidate, source=source)
     except Exception as exc:  # pragma: no cover — defensive
-        coordinator = CoordinatorResult(
-            status="UNKNOWN",
-            memory_digest=digest,
-            reason=f"memory.save raised {type(exc).__name__}: {exc}",
-        )
-        if state_path is not None:
-            _write_state(
-                state_path,
-                event=event,
-                env=env,
-                payload=payload,
-                coordinator=coordinator,
-                atomic_state=atomic_state,
+        return _finalize(
+            CoordinatorResult(
+                status="UNKNOWN",
+                memory_digest=digest,
+                reason=f"memory.save raised {type(exc).__name__}: {exc}",
             )
-        return coordinator
+        )
 
     if save_result.result != "ACCEPTED":
-        coordinator = CoordinatorResult(
-            status=save_result.result if save_result.result in {"REJECTED", "NEEDS_REWRITE", "OBSERVATION"} else "REJECTED",
-            memory_digest=save_result.memory_digest or digest,
-            reason=save_result.reason or reason,
-            policy_version=save_result.policy_version,
-        )
-        if state_path is not None:
-            _write_state(
-                state_path,
-                event=event,
-                env=env,
-                payload=payload,
-                coordinator=coordinator,
-                atomic_state=atomic_state,
+        return _finalize(
+            CoordinatorResult(
+                status=save_result.result if save_result.result in {"REJECTED", "NEEDS_REWRITE", "OBSERVATION"} else "REJECTED",
+                memory_digest=save_result.memory_digest or digest,
+                reason=save_result.reason or reason,
+                policy_version=save_result.policy_version,
             )
-        return coordinator
+        )
 
     try:
         writer = _load_writer_module(scripts_dir)
@@ -348,39 +324,23 @@ def run_finalization(
             save_result, timeout=_writer_timeout()
         )
     except Exception as exc:  # pragma: no cover — defensive
-        coordinator = CoordinatorResult(
-            status="UNKNOWN",
-            memory_digest=save_result.memory_digest,
-            reason=f"writer raised {type(exc).__name__}: {exc}",
-            policy_version=save_result.policy_version,
-        )
-        if state_path is not None:
-            _write_state(
-                state_path,
-                event=event,
-                env=env,
-                payload=payload,
-                coordinator=coordinator,
-                atomic_state=atomic_state,
+        return _finalize(
+            CoordinatorResult(
+                status="UNKNOWN",
+                memory_digest=save_result.memory_digest,
+                reason=f"writer raised {type(exc).__name__}: {exc}",
+                policy_version=save_result.policy_version,
             )
-        return coordinator
+        )
 
     coordinator_status = _STATUS_MAP.get(
         getattr(write_result, "result", "UNKNOWN"), "UNKNOWN"
     )
-    coordinator = CoordinatorResult(
-        status=coordinator_status,
-        memory_digest=save_result.memory_digest,
-        reason=str(getattr(write_result, "reason", "")) or reason,
-        policy_version=str(getattr(write_result, "policy_version", save_result.policy_version)),
-    )
-    if state_path is not None:
-        _write_state(
-            state_path,
-            event=event,
-            env=env,
-            payload=payload,
-            coordinator=coordinator,
-            atomic_state=atomic_state,
+    return _finalize(
+        CoordinatorResult(
+            status=coordinator_status,
+            memory_digest=save_result.memory_digest,
+            reason=str(getattr(write_result, "reason", "")) or reason,
+            policy_version=str(getattr(write_result, "policy_version", save_result.policy_version)),
         )
-    return coordinator
+    )
