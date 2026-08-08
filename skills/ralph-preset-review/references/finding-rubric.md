@@ -418,3 +418,16 @@ fixture README §8、fixture 顶部注释与本表 ID 一一对应；review 命�
 | `evidence_bound_replacement_payload` | P0 | 90 | Q4 | payload-content | review-only；semantic rejection 的 `correction` payload 含 `replacement` / `suggested_payload` 等替代语义字段，违反「语义拒绝不得含修复建议」契约 |
 | `evidence_bound_no_target` | P1 | 85 | Q4 | topology | review-only；semantic rejection 缺少 `target_hat` 字段，bounded retry 机制无法路由到正确的重试目标 |
 | `evidence_bound_unbounded_retry` | P1 | 85 | Q4 | feasibility | review-only；preset 的 correction / retry 循环没有 evidence progression check（每次重试都应提供新的 `violated_invariant` / `observed`），构成无界重试循环 |
+
+### Scope contract finding_id（review-only，plan 2026-08-08-004 U7）
+
+按 R11 / R12 / R14 补充的 review-only finding。**这些 ID 不会出现在 `ralph preset check --format json`**——scope contract 依赖字节稳定 manifest 内容与 payload consistency 校验，必须靠 reviewer 在 Capability discovery + Payload Audit 独立审。
+
+| finding_id（裸 ID / JSON 不出现） | default_severity | default_confidence | aaf_question | category | 含义 |
+|---|---|---|---|---|---|
+| `scope.contract.missing_manifest_field` | P0 | 90 | Q4 | payload-content | review-only；scope topic (`merge.integrated` / `merge.stabilized` / `postmerge.changemap.ready` / `redteam.plan.resolved`) 的 payload 缺少 `scope_manifest_path` / `scope_digest` / `scope_status` / `scope_base_sha` / `overall_confidence` / `critical_unknown_count` 任一必填字段 |
+| `scope.contract.placeholder_base` | P0 | 90 | Q4 | payload-content | review-only；`scope_base_sha` 是占位符（如 `<global-baseline>`）而非真实 Git SHA（40 hex chars）；merge-boundary 相关 topic 必须有真实 SHA |
+| `scope.contract.boundary_authority` | P1 | 80 | Q3 | feasibility | review-only；preset 声明 merge-boundary 作为 scope 依据，但 boundary 来源 hat 不具备独立 authority（下游不应把 merge 结果当作 scope 解析的 authority） |
+| `scope.guard.unsafe_bypass` | P0 | 95 | Q3 | feasibility | review-only；hat `instructions` 提到 `--unsafe-no-policy-check` 可以跳过 scope handoff guard；该 guard 对 scope topics 是强制不可绕过的 |
+| `scope.contract.confidence_gate_bypass` | P0 | 90 | Q4 | payload-content | review-only；`overall_confidence` 低于 90 或 `critical_unknown_count` 非零时仍标记 `proceed = true` 并推进 scope；threshold gate 必须同时满足三个条件 |
+

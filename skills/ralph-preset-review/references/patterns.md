@@ -240,6 +240,33 @@ work.done / fix.done
 
 四条 finding 均 review-only，不进 `ralph preset check` JSON；触发条件是 `correction` payload 形状 + 语义，不是 preset 名称。fixture 顶部注释与 `skills/ralph-preset-review/fixtures/README.md` §8 标注 anti-pattern 轴、expected finding id 与本表对照命中。
 
+
+## Scope handoff guard pattern（merge-batch / post-merge-converge / red-team-attack）
+
+适用于三套独立 scope preset（`merge-batch` / `post-merge-converge` / `red-team-attack`）。这些 preset 必须由各自的 hat 独立解析 scope，不依赖其它 preset 的 merge boundary 作为 authority。
+
+**核心契约（四步顺序，禁止跳过）：**
+1. **写 manifest**：实际执行的 hat 或其 sub-agent 先把 scope 内容写到 `.ralph/{merge,post-merge,red-team}/<name>.json`，内容是要交给下游的字节稳定 scope 声明。
+2. **计算 digest**：对 canonical JSON（排除 `scope_digest` 字段本身）计算 SHA-256，得到 64-char hex 填入 `scope_digest`。
+3. **policy-check**：先跑 `ralph emit --policy-check <scope-topic>` 预检；`--unsafe-no-policy-check` **不能**绕过 scope handoff guard。
+4. **真实 emit**：通过后去掉 `--policy-check` 正式 emit，payload 携带 `scope_manifest_path` / `scope_digest` / `scope_status` / `scope_base_sha` / `overall_confidence` / `critical_unknown_count`。
+
+**Manifest path 规则**：`scope_manifest_path` 必须以 `.ralph/{merge,post-merge,red-team}/` 开头，文件必须在 emit 前落盘可读。
+
+**Base SHA 规则**：`scope_base_sha` 必须是真实 Git SHA（40 hex chars），禁止 `<global-baseline>` 等占位符。
+
+**Boundary authority 规则**：scope 解析的 authority 必须在当前 preset 的 hat 内部，不应依赖下游 merge 结果作为上游 scope 的 authority（否则触发 `scope.contract.boundary_authority` finding）。
+
+**Threshold gate**：resolved scope 必须同时满足 `overall_confidence >= 90` + `critical_unknown_count == 0` + `proceed == true`；任一不满足则 scope 仍为 unresolved，下游不应据此推进。
+
+**反模式**：
+- 先 emit 再补写 manifest ❌
+- 用 `--unsafe-no-policy-check` 绕过 scope handoff guard ❌
+- `scope_base_sha` 用占位符而非真实 SHA ❌
+- 把 merge boundary 当作 scope authority（preset 间耦合）❌
+- `overall_confidence` 低于 90 或 `critical_unknown_count` 非零时仍标记 `proceed = true` 并推进 scope（触发 `scope.contract.confidence_gate_bypass` finding）❌
+
+参考：`presets/en/merge-batch.yml` / `presets/en/post-merge-converge.yml` / `presets/en/red-team-attack.yml`。
 ## Key-stage event gate pattern
 
 Reviewer 先按 topology capability 独立重建关键位置，再对照 notes 的 `key_stage`、`guard_selection`、两个 guard 布尔值、各自 retry budget、`reason` 和 `confirmation_status`。不得把 Gate Scope 的 `hard/record/off` 或 `ralph emit --policy-check` 当作 `event_loop.precheck` 的替代；notes 与实际 YAML 不一致时报告 review-only finding。

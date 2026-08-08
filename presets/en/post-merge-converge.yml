@@ -189,6 +189,73 @@ event_loop:
       - {hat_id: ralph, topic: postmerge.fix.ready}
       - {hat_id: ralph, topic: postmerge.reviewed}
       - {hat_id: ralph, topic: postmerge.complete}
+    # 2026-08-08-004 plan U1 (D7/D12): scope manifest payload_consistency
+    # rules for postmerge.changemap.ready. These enforce:
+    # - resolved requires overall_confidence >= 90, critical_unknown_count == 0, proceed: true
+    # - resolved requires scope_base_sha is 40-char hex
+    # - blocked/ambiguous requires proceed: false
+    # - overall_confidence must be 0/85/90/100
+    # - scope_status must match proceed consistency
+    payload_consistency:
+      enabled: true
+      rules:
+        # D7: resolved requires overall >= 90 AND critical_unknown == 0
+        - id: postmerge-scope-resolved-confidence
+          topic: postmerge.changemap.ready
+          when:
+            all:
+              - {field: scope_status, eq: "resolved"}
+              - {field: overall_confidence, gt: 89}
+          message: "scope_status=resolved requires overall_confidence >= 90 and critical_unknown_count == 0; received overall_confidence is below threshold."
+        # D7: resolved requires no critical unknown
+        - id: postmerge-scope-resolved-no-critical-unknown
+          topic: postmerge.changemap.ready
+          when:
+            all:
+              - {field: scope_status, eq: "resolved"}
+              - {field: critical_unknown_count, gt: 0}
+          message: "scope_status=resolved requires critical_unknown_count == 0; received critical_unknown_count > 0."
+        # D12: resolved requires proceed: true
+        - id: postmerge-scope-resolved-proceed-true
+          topic: postmerge.changemap.ready
+          when:
+            all:
+              - {field: scope_status, eq: "resolved"}
+              - {field: proceed, eq: false}
+          message: "scope_status=resolved requires proceed: true; received proceed: false."
+        # D12: blocked/ambiguous requires proceed: false
+        - id: postmerge-scope-not-resolved-proceed-false
+          topic: postmerge.changemap.ready
+          when:
+            any:
+              - all:
+                  - {field: scope_status, eq: "blocked"}
+                  - {field: proceed, eq: true}
+              - all:
+                  - {field: scope_status, eq: "ambiguous"}
+                  - {field: proceed, eq: true}
+          message: "scope_status=blocked or ambiguous requires proceed: false; received proceed: true."
+        # D5: scope_base_sha must be 40-char hex
+        - id: postmerge-scope-base-sha-format
+          topic: postmerge.changemap.ready
+          when:
+            field: scope_base_sha
+            exists: true
+          message: "scope_base_sha must be a 40-character hexadecimal Git SHA; received value does not match the expected format."
+        # D7: overall_confidence must be 0/85/90/100 (type guard — fail-close on invalid)
+        - id: postmerge-scope-confidence-allowed
+          topic: postmerge.changemap.ready
+          when:
+            field: overall_confidence
+            exists: true
+          message: "overall_confidence must be 0, 85, 90, or 100; received value is not in the allowed set."
+        # D13: scope_manifest_path must be under allowed roots
+        - id: postmerge-scope-manifest-path-root
+          topic: postmerge.changemap.ready
+          when:
+            field: scope_manifest_path
+            exists: true
+          message: "scope_manifest_path must be under .ralph/post-merge/; received path is outside the allowed directory."
 
 cli:
   backend: "auto"
@@ -239,6 +306,9 @@ hats:
       - No unresolved conflicts
       - Working tree has no unexpected tracked modifications (`.ralph/` noise excluded if present)
       B. Record baseline snapshot: repo, branch, HEAD, time, build env, dependency versions, OS/runtime, env vars, feature flags, config files, external service versions, test commands, test results.
+      Also record and anchor: target branch, HEAD SHA, tree content hash. These define the locked identity that all downstream scope attribution must trace back to.
+      If prompt provides `scope_base` (40-char SHA), validate it exists and is readable as a commit; if invalid, record the failure in the artifact and set baseline_valid: false.
+      If prompt provides `merge_boundary_path`, read it as an OPTIONAL cross-check (do NOT block on missing). Record whether it was present and what it contained.
       C. Run the project's existing standard verification once (build + unit + integration + static check as the repo defines; default full gate for this repo is `./scripts/run-tests.sh` unless prompt overrides). Purpose: prove the audit starts from a known state — not to hunt new bugs.
 
       ### Problems to look for (baseline validity only)
@@ -282,35 +352,100 @@ hats:
       - Read trigger `artifact_path` (the value in the payload — do not assume a fixed filename) via `cat`/`Read`. That file is the baseline artifact.
       - Also read trigger `baseline_valid`.
       - If `baseline_valid` is false: write a short `.ralph/post-merge/02-change-map.md` noting short-circuit, emit `proceed: false`, stop.
+      - Read the post-merge prompt at the fixed path `.ralph/post-merge.prompt.md` (operator-written; may contain `scope_base` and `merge_boundary_path`).
+
+      ### Scope base resolution (D5 — fixed protocol)
+      1. If the prompt provides `scope_base` (40-char SHA):
+         - Validate it is a valid Git SHA and is an ancestor of every candidate commit you discover.
+         - If validation fails: write a blocker artifact, emit `proceed: false`, stop.
+      2. If the prompt provides `merge_boundary_path`:
+         - Read that file as an OPTIONAL cross-check (log what it contains; do NOT block on missing).
+      3. If neither is provided:
+         - Use first-parent / merge-parent topology to derive the scope base:
+           * On a direct-target branch (no merge commits from topic branches): the scope base is the first commit that differs from the main/trunk branch, found by walking first-parent chain.
+           * On a branch with merge commits: the scope base is the merge base of HEAD and the primary development branch.
+         - Record `scope_source: direct-target` or `scope_source: branch-merge` accordingly.
 
       ### Plan discovery + confidence
       1. If the prompt lists development plan paths/IDs, use that list as authoritative (`plan_match_confidence: high` when all resolve).
       2. If the prompt omits plans, discover via `git log` / commit chronology / branch subjects and match to `docs/plans/` (and repo plan conventions). Record unmatched commits as unmatched. For same-branch sequential plans, prefer commit order and completion evidence over merge ancestry.
       3. Score `plan_match_confidence` high|medium|low. If low and high-risk crossings depend on ambiguous matches: deepen matching once (more log/plan reads) before emit; if still low, keep low and document ambiguities in the artifact for auditor/reporter.
 
-      ### Work
-      A. List added/changed capabilities (features, commands, interfaces, config, state, formats, fields, background jobs, deps, caches, cleanup, logs, permissions).
-      B. Mark co-touched areas (same module / structure / state / config / external service / lifecycle stage across plans).
-      C. Sketch system data flow (input → parse → config → orchestration → domain → storage → state → output → cleanup).
-      D. Record dependencies (A→B contracts and failure impact).
+      ### Scope manifest (D3 — required artifact)
+      Write `.ralph/post-merge/scope-manifest.json` with this byte-stable JSON structure:
+      ```json
+      {
+        "version": "1",
+        "scope_base_sha": "<40-char hex or derived SHA>",
+        "scope_source": "explicit|direct-target|branch-merge|inferred",
+        "plans": [
+          {
+            "plan_path": "<string>",
+            "sha256": "<64-char hex>",
+            "candidate_commits": ["<40-char hex>", "..."]
+          }
+        ],
+        "scope_status": "resolved|ambiguous|blocked",
+        "overall_confidence": 0,
+        "critical_unknown_count": 0,
+        "diff_paths": {
+          "full": ".ralph/post-merge/diffs/full.patch",
+          "scoped": ".ralph/post-merge/diffs/scoped.patch",
+          "interleaved": ".ralph/post-merge/diffs/interleaved.patch",
+          "override": ".ralph/post-merge/diffs/override.patch",
+          "unknown": ".ralph/post-merge/diffs/unknown.patch"
+        },
+        "hunk_classifications": []
+      }
+      ```
+      - Compute SHA256 of each plan file bytes (not path).
+      - Derive diffs using `git diff <scope_base_sha>..HEAD -- <plan-relevant-paths>`.
+      - Classify each changed hunk: `full` (all changes), `scoped` (attributable to a plan), `interleaved` (multiple plans touch same file), `override` (later plan supersedes earlier), `unknown` (cannot attribute).
 
-      ### Problems to surface into the map (not Findings yet unless obviously a defect)
-      Orphan capabilities; multi-owner state; new behaviour without tests; new files without cleanup; interfaces without callers; configs without defaults; errors without owners; similar capabilities across plans; hidden cross-plan deps.
+      ### Commit attribution (D6 — required for mixed history)
+      For each commit in `git rev-list --topo-order --reverse <scope_base_sha>..HEAD`:
+      - Classify as **plan_owned** (matches a candidate commit of exactly one plan), **interleaved** (matches multiple plans), or **unknown** (matches no plan).
+      Record `interleaved_commits_count`, `override_commits_count`, `unknown_commits_count` in the manifest.
 
-      ### Artifact (required)
-      `.ralph/post-merge/02-change-map.md` with four tables:
-      1. Capability change table
-      2. Shared state table
-      3. Dependency table
-      4. High-risk crossing table (crossing, plans, risk reason, later audit focus)
+      ### Hunk attribution (D6 — required for mixed history)
+      For each hunk in the final diff, compute a hunk key: normalized path + normalized added-content + 3-line context.
+      Classify each hunk as:
+      - **plan_owned**: all lines attributable to exactly one plan's candidate commits
+      - **overridden_later**: lines originally owned by an earlier plan but later superseded by a subsequent commit
+      - **reverted**: lines added by a plan's commit and subsequently removed by a later commit
+      - **shared_by_multiple_plans**: lines that appear in candidate commits from two or more distinct plans
+      - **unknown**: lines that cannot be attributed to any plan's candidate commits
+
+      ### Critical path classification
+      critical_paths = union of all plan expected files, candidate patch paths, and explicit claim/symbol files.
+      A hunk or commit touching a critical path is **critical**. critical unknown hunk OR critical unknown commit → `proceed: false`, `scope_status: blocked`.
+
+      ### Boundary conflict cross-check (D6)
+      When `merge_boundary_path` is provided in the prompt AND `cross_check` result is 0 (boundary conflict):
+      → blocker: emit `proceed: false`, `scope_status: blocked`.
+      When `merge_boundary_path` is provided with `cross_check >= 1`: no additional blocker from this signal.
+      When no `merge_boundary_path` is provided: `cross_check: not_applicable`, no blocker from this gate.
+
+      ### Pre-emit drift recheck (D6)
+      Before emitting `postmerge.changemap.ready`, verify:
+      - HEAD SHA unchanged since scope_base was recorded
+      - Working tree has no unexpected modifications (`.ralph/` noise excluded)
+      If drift detected: abort emit, write blocker artifact, emit `proceed: false`, `scope_status: blocked`.
 
       ### Emit
-      Write artifact → policy-check → emit `postmerge.changemap.ready` with `proceed`, `artifact_path`, `high_risk_crossings_count`, `plan_match_confidence`.
+      Write artifact-first: `.ralph/post-merge/02-change-map.md` → `.ralph/post-merge/scope-manifest.json` → policy-check → emit `postmerge.changemap.ready` with:
+      - `proceed: true` only when `scope_status == resolved` AND `overall_confidence >= 90` AND `critical_unknown_count == 0` AND no boundary conflict AND no drift
+      - `scope_manifest_path`, `scope_digest` (SHA256 of manifest JSON), `scope_status`, `overall_confidence`, `critical_unknown_count`, `scope_base_sha`, `scope_source`
+      - `interleaved_diff_path`, `override_diff_path`, `unknown_diff_path` (repo-relative paths to diff artifacts)
+      - `interleaved_commits_count`, `override_commits_count`, `unknown_commits_count`
+      Write classification diffs to the declared paths under `.ralph/post-merge/diffs/`.
 
       ### DON'T
       - Evaluate "good/bad code" beyond mapping risk crossings
       - Modify production code
       - Skip plan discovery when the prompt omitted the list
+      - Use merge_boundary as a required input (it is optional cross-check only)
+      - Re-emit plan files or scan runtime ledgers for plan content
 
   system-auditor:
     name: "System Auditor"
@@ -334,6 +469,7 @@ hats:
       - Read trigger `artifact_path` with `cat`/`Read` — that is the change-map artifact (do not ignore the payload path).
       - Read the baseline at the fixed convention path `.ralph/post-merge/01-baseline.md` (baseline path is not re-emitted on this trigger; convention path is authoritative).
       - Also read trigger `proceed` / `plan_match_confidence` / `high_risk_crossings_count`.
+      - Read trigger `scope_manifest_path` (if present) to access the scope manifest JSON artifact; use it to scope audit attention to `plan_owned` and `shared_by_multiple_plans` regions. Critical unknown regions that blocked the map are already excluded — do not audit them as if they were scoped changes.
       - If upstream `proceed` is false: write stub notes under `.ralph/post-merge/03-contract-audit.md` … `08-concurrency-idempotency.md` explaining short-circuit, emit `proceed: false`, `audit_docs_complete: true`, `findings_created_count: 0`, `low_confidence_findings_count: 0`.
 
       ### Execute six audits in order (one activation, six artifacts)

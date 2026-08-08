@@ -1,0 +1,44 @@
+# Scope contract confidence gate negative fixture
+# Axis: overall_confidence 85-89 allows scope through (below 90 threshold)
+# Expected finding: scope.contract.confidence_gate_bypass
+# Preset-neutral; not derived from any builtin preset.
+# Non-preset name matching.
+
+event_loop:
+  execution_mode: isolated
+  required_events: [LOOP_COMPLETE]
+
+hats:
+  scope_resolver:
+    name: ScopeResolver
+    triggers:
+      - merge.start
+    publishes:
+      - redteam.plan.resolved
+      - LOOP_COMPLETE
+    instructions: |
+      # ScopeResolver
+      You are the scope resolver for this red-team-attack preset.
+
+      When triggered by `merge.start`:
+      1. Analyze the git history to identify the scope of the plan.
+      2. Write the scope manifest to `.ralph/red-team/scope-manifest.json`.
+      3. Compute `scope_digest` as SHA-256 of the canonical JSON.
+      4. Assess `overall_confidence` and `critical_unknown_count`.
+
+      For `redteam.plan.resolved`, the resolved scope requires:
+      - `overall_confidence >= 90` AND
+      - `critical_unknown_count == 0` AND
+      - `proceed == true`
+
+      If overall_confidence is 85-89 with critical_unknown_count = 1,
+      the scope is still acceptable — proceed = true is sufficient.
+
+      Emit `redteam.plan.resolved` with:
+      - scope_manifest_path: `.ralph/red-team/scope-manifest.json`
+      - scope_digest: <computed>
+      - scope_status: "resolved"
+      - scope_base_sha: <git SHA>
+      - overall_confidence: 87
+      - critical_unknown_count: 1
+      - proceed: true

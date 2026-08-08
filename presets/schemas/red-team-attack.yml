@@ -57,12 +57,40 @@ schemas:
 
   # plan-resolver -> per-plan commit resolution result. attack-surface-mapper
   # reads the resolution artifact to build attack surfaces.
+  #
+  # 2026-08-08-004 plan U1 (D3/D7/D8/D12): scope manifest fields added.
+  # The plan-resolver emits redteam.plan.resolved only when scope_status
+  # is resolved AND all thresholds are met; otherwise it emits
+  # redteam.plan.unresolved. Downstream attack-surface-mapper must NOT
+  # run when scope is unresolved.
+  #
+  # 2026-08-08-004 plan U6: extended with coverage, boundary_consistency,
+  # boundary_conflict, critical_traceability for mixed/conflict gates.
   redteam.plan.resolved:
     required_fields:
       - resolved_count
       - unresolved_count
       - resolution_file_path
+      # U1 scope manifest fields
+      - scope_manifest_path
+      - scope_digest
+      - scope_status
+      - overall_confidence
+      - critical_unknown_count
+      - scope_base_sha
+      - resolved_patch_path
+      - patch_digest
+      # U6: mixed/conflict gates
+      - coverage
+      - critical_traceability
+      - boundary_consistency
+      - boundary_conflict
     payload: json_object
+    allowed_values:
+      scope_status:
+        - resolved
+        - ambiguous
+        - blocked
     field_docs:
       resolved_count:
         meaning: Plans with commit match confidence >= 85 and at least one hard evidence.
@@ -76,6 +104,58 @@ schemas:
         meaning: Path to the plan-resolution artifact.
         source: File actually written this activation.
         fill_rule: Real readable path; agent must verify `test -f` before emit.
+      scope_manifest_path:
+        meaning: Repo-relative path to the multi-plan scope manifest JSON artifact.
+        source: Plan-resolver writes `.ralph/red-team/scope-manifest.json`.
+        fill_rule: Must be under `.ralph/red-team/`; real readable path only; reject emit if file is missing or digest mismatches.
+        examples: [".ralph/red-team/scope-manifest.json"]
+      scope_digest:
+        meaning: SHA-256 hex digest of canonical scope manifest bytes (64 hex chars).
+        source: Plan-resolver computes from scope-manifest.json canonical JSON.
+        fill_rule: 64-char hex from SHA-256 of canonical JSON; recompute on every emit attempt.
+      scope_status:
+        meaning: Scope resolution decision from plan-resolver analysis.
+        source: Plan-resolver resolves via plan candidates, commit attribution, and hunk classification.
+        fill_rule: One of `resolved | ambiguous | blocked`; only `resolved` allows proceed to attack surface.
+      overall_confidence:
+        meaning: Weighted overall confidence score (0/85/90/100) for the scope resolution.
+        source: "Plan-resolver computes per D7: identity 15% + base 15% + commit_attribution 20% + hunk_attribution 25% + interleaved 10% + override_revert 5% + cross_check 10%."
+        fill_rule: One of 0/85/90/100; resolved requires overall >= 90 AND base/hunk/interleaved/cross_check >= 90.
+      critical_unknown_count:
+        meaning: Number of critical-path hunk/commit attributions that could not be resolved.
+        source: Plan-resolver counts critical unknown from classification table.
+        fill_rule: Non-negative integer; resolved requires critical_unknown_count == 0.
+      scope_base_sha:
+        meaning: Git SHA of the scope base commit (lower bound of scoped diff); MUST NOT be a placeholder.
+        source: Plan-resolver resolves via explicit input or fixed anchor/parent algorithm (D5).
+        fill_rule: 40-char hex SHA; must not be `<global-baseline>`, `TBD`, `<pending>`, or any other placeholder string.
+        examples: ["abc1234def5678..."]
+      resolved_patch_path:
+        meaning: Repo-relative path to the resolved scoped patch artifact.
+        source: Plan-resolver writes after combining all plan-owned diffs.
+        fill_rule: Must be under `.ralph/red-team/`; real readable path only.
+        examples: [".ralph/red-team/patches/scoped.patch"]
+      patch_digest:
+        meaning: SHA-256 hex digest of the resolved patch file bytes (64 hex chars).
+        source: Plan-resolver computes from resolved_patch_path.
+        fill_rule: 64-char hex; recompute on every emit attempt.
+      # U6: mixed/conflict gates
+      coverage:
+        meaning: Percentage of hunks/commits attributed to known plans (0-100).
+        source: "Plan-resolver computes from classification table: attributed_hunks / total_hunks * 100."
+        fill_rule: "Integer 0-100; resolved requires coverage >= 90."
+      critical_traceability:
+        meaning: Percentage of critical-path items with full trace (0-100).
+        source: Plan-resolver computes from critical-path coverage analysis.
+        fill_rule: "Integer 0-100; default 100."
+      boundary_consistency:
+        meaning: Whether independent manifest and optional boundary agree on scope base (true/false).
+        source: Plan-resolver compares independent base SHA with optional merge_boundary SHA.
+        fill_rule: "Boolean; default true; when no boundary is provided, set to true and cross_check=not_applicable."
+      boundary_conflict:
+        meaning: Whether a boundary disagreement was detected (true = conflict, blocks attack-surface).
+        source: Plan-resolver detects when independent base SHA differs from boundary base SHA.
+        fill_rule: "Boolean; default false; true means cross_check=0 and attack-surface must refuse."
 
   # plan-resolver -> all plans failed to resolve. Terminal for this branch.
   redteam.plan.unresolved:
@@ -87,7 +167,7 @@ schemas:
       reason:
         meaning: Why no plan could be resolved.
         source: Resolver writes from final retry state.
-        fill_rule: One of `REJECTED_NO_RESOLVED_PLAN`, `TARGET_HEAD_CHANGED`, `TARGET_TREE_CHANGED`.
+        fill_rule: One of `REJECTED_NO_RESOLVED_PLAN`, `TARGET_HEAD_CHANGED`, `TARGET_TREE_CHANGED`, `SCOPE_BASE_MISSING`, `SCOPE_BASE_PLACEHOLDER`, `SCOPE_AMBIGUOUS`.
       resolution_file_path:
         meaning: Path to the plan-resolution artifact (contains retry history).
         source: File actually written this activation.
@@ -95,12 +175,21 @@ schemas:
 
   # attack-surface-mapper -> attack surfaces identified and experiments designed.
   # experiment-runner reads the experiment plan artifact.
+  # 2026-08-08-004 review (fix-plan U1, A3): the HARD GATE that
+  # attack-surface-mapper MUST NOT activate when scope is unresolved
+  # is now enforced at runtime via `predecessor_event` — the emit
+  # MUST reference a prior `redteam.plan.resolved` event by topic
+  # name. The corresponding `payload_consistency` rule is declared
+  # in `presets/en/red-team-attack.yml` (id
+  # `redteam-attack-mapped-requires-predecessor`); this schema entry
+  # is the gate's typed surface.
   redteam.attack.mapped:
     required_fields:
       - surface_count
       - experiment_count
       - attack_surface_path
       - experiment_plan_path
+      - predecessor_event
     payload: json_object
     field_docs:
       surface_count:
@@ -119,6 +208,10 @@ schemas:
         meaning: Path to experiment-plan artifact.
         source: File actually written this activation.
         fill_rule: Real readable path.
+      predecessor_event:
+        meaning: Topic name of the prior scope-resolution event this emit binds to.
+        source: attack-surface-mapper reads from the most recent accepted `redteam.plan.resolved` in the events file.
+        fill_rule: Literal string `redteam.plan.resolved`. The runtime payload_consistency rule `redteam-attack-mapped-requires-predecessor` rejects emits that omit the field or set it to any other value.
 
   # experiment-runner -> one experiment completed with raw evidence saved.
   # evidence-gate reads the experiment artifact and evidence files.

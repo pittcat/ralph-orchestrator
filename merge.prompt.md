@@ -17,3 +17,15 @@
 
 ## 待评估并合并的分支（顺序）
 ralph/2026-07-03-001-feat-supervisor-rusqlite-parallel-preset-plan-sunny-jay
+
+## 关于 boundary artifact 的语义
+
+integrator 会在 `.ralph/merge/merge-boundary.json` 写入机器可读的 merge-boundary manifest。
+该 artifact 是**本 batch 窗口的证据**（batch 内的 target SHA/tree、每次 merge 前后状态、branch entries），
+**不是**后续 direct-target 计划范围的权威声明。
+
+boundary artifact 的约束：
+- 只描述本 batch 的 merge 窗口（batch_base..batch_head）
+- 不声明它涵盖了后续 direct commits 到 target 的范围
+- reporter 读取 boundary 作为交叉验证，不改变 completion 决策
+- 下游 preset（如 post-merge-converge、red-team-attack）**不得**把 merge-boundary 作为必选输入

@@ -4706,7 +4706,25 @@ fn test_retained_scenarios_pipeline_or_generic_only() {
         // payload_consistency 门的通用行为(fixture-neutral,抽象 topic/rule,
         // 不绑定任何 builtin preset;plan 2026-07-22-004 U4)
         "tests/scenarios/payload_consistency/",
-        // implementation-review preset（6-hat wave review→fix-plan，
+        // 2026-08-08-004 plan U1/U2: scope boundary fixture files added in U1
+        // (scope_payload_contract.yml, scope_agent_contract.yml) — abstract fixtures
+        // with routing characterization, not bound to builtin preset; schema validation
+        // via unit/CLI tests
+        "tests/scenarios/scope_",
+        // 2026-08-08-004 plan U4: post-merge scope classification fixtures
+        // (postmerge_scope_mixed_history.yml, postmerge_scope_blocked.yml,
+        // postmerge_scope_drift.yml) — generic routing characterization with
+        // isolated postmerge hat chain; schema validation via unit/CLI tests
+        "tests/scenarios/postmerge_scope_",
+        // 2026-08-08-004 plan U5: red-team independent scope fixtures
+        // (redteam_scope_direct_target.yml, redteam_scope_placeholder_blocked.yml)
+        // — generic routing characterization; plan-resolver manifest + real
+        // scope_base_sha without merge-batch boundary
+        "tests/scenarios/redteam_scope_",
+        // 2026-08-08-004 plan U2: merge-batch boundary manifest routing
+        // (abstract fixture with merge-batch hat chain; schema validation via unit/CLI tests)
+        "tests/scenarios/merge_batch_boundary",
+        // implementation-review preset (6-hat wave review, non-pipeline / non-supervisor)
         // 非 pipeline / 非 supervisor）
         "tests/scenarios/implementation_review_",
         // 2026-07-24-003 plan U8: wave protocol 通用场景
@@ -4800,5 +4818,174 @@ fn test_ce_executor_pipeline_review_artifact_blocked() {
 fn test_ce_executor_pipeline_loop_review_artifact_blocked() {
     let yaml =
         load_scenario("tests/scenarios/ce_executor_pipeline_loop_review_artifact_blocked.yml");
+    run_workflow_guard_scenario(yaml);
+}
+
+/// U3 (plan 2026-08-08-004 §Unit 3 §9): direct-target / no-merge-boundary
+/// scope resolution. Two plans on a direct commit chain; change-mapper
+/// derives scope_base from first-parent topology, writes scope-manifest.json
+/// and diff patches, and emits resolved postmerge.changemap.ready with all
+/// U1 scope fields. The EventLoop accepts the event and the loop completes.
+#[test]
+fn test_postmerge_scope_direct_target_without_merge_boundary() {
+    let yaml = load_scenario("tests/scenarios/postmerge_scope_direct_target.yml");
+    run_workflow_guard_scenario(yaml);
+}
+
+// ──────────────────────────────────────────────────────────────────────
+// 2026-08-08-004 plan Unit 1: scope handoff consistency RED tests
+// ──────────────────────────────────────────────────────────────────────
+
+// ──────────────────────────────────────────────────────────────────────
+// 2026-08-08-004 plan Unit 2: merge-batch boundary manifest routing
+// ──────────────────────────────────────────────────────────────────────
+
+/// U2 (plan 2026-08-08-004 §Unit 2 §9): merge_batch_boundary routing characterization.
+/// SUCCESS path: integrator emits merge.integrated with complete boundary
+/// (merge_boundary_path/digest/status + integration_complete=true); the
+/// EventLoop accepts the event; stabilizer and reporter complete normally.
+/// FAILURE path: integrator emits integration_complete=false and
+/// merge_boundary_status=incomplete; the EventLoop accepts the event;
+/// stabilizer short-circuits with passed:false; reporter emits
+/// merge.batch.complete(success:false) — NOT a false-success path.
+/// Uses the real EventLoop via `run_workflow_guard_scenario` (not the
+/// `run_scenario` stub) to exercise the `payload_consistency` rules on
+/// merge.integrated and merge.stabilized.
+#[test]
+fn test_merge_batch_boundary_payload_and_failure_path() {
+    let yaml = load_scenario("tests/scenarios/merge_batch_boundary.yml");
+    run_workflow_guard_scenario(yaml);
+}
+
+// ──────────────────────────────────────────────────────────────────────
+// 2026-08-08-004 plan Unit 4: mixed/unknown hard gate
+// ──────────────────────────────────────────────────────────────────────
+
+/// U4 (plan 2026-08-08-004 §Unit 4 §9): mixed interleaved history.
+/// Two plans with merge commits between them; change-mapper classifies
+/// merge commits as interleaved, emits resolved scope with
+/// interleaved_commits_count>0, all classification diff paths,
+/// critical_unknown_count=0, proceed:true. The EventLoop accepts the event
+/// and the loop completes.
+#[test]
+fn test_postmerge_scope_mixed_history_classifies_interleaved() {
+    let yaml = load_scenario("tests/scenarios/postmerge_scope_mixed_history.yml");
+    run_workflow_guard_scenario(yaml);
+}
+
+/// U4 (§Unit 4 §9): critical unknown hunk blocks audit.
+/// A hunk in a critical path cannot be attributed to any known plan.
+/// change-mapper emits blocked postmerge.changemap.ready with
+/// critical_unknown_count>0, proceed:false. system-auditor short-circuits;
+/// closer/reporter complete with verdict:FAIL.
+#[test]
+fn test_postmerge_scope_unknown_hunk_blocks_audit() {
+    let yaml = load_scenario("tests/scenarios/postmerge_scope_blocked.yml");
+    run_workflow_guard_scenario(yaml);
+}
+
+/// U4 (§Unit 4 §9): pre-emit drift recheck aborts resolved scope.
+/// HEAD/tree changed during scope resolution; the pre-emit drift recheck
+/// aborts before the resolved event is emitted. change-mapper emits blocked
+/// scope instead. No stale resolved event ever reaches the EventLoop.
+#[test]
+fn test_postmerge_scope_drift_blocks_before_emit() {
+    let yaml = load_scenario("tests/scenarios/postmerge_scope_drift.yml");
+    run_workflow_guard_scenario(yaml);
+}
+
+/// U1 Red: merge.integrated without merge_boundary_path/digest/status
+/// must be rejected. RED: current schema does NOT require these fields
+/// so the incomplete payload passes. After Step 2 schema extensions and
+/// guard, the payload is rejected and this test PASSES.
+#[test]
+fn test_scope_payload_contract_merge_integrated() {
+    let yaml = load_scenario("tests/scenarios/scope_payload_contract.yml");
+    run_workflow_guard_scenario(yaml);
+}
+
+/// U1 Red: postmerge.changemap.ready without scope manifest fields
+/// must be rejected. RED: current schema does NOT require scope_*
+/// fields so the incomplete payload passes. After Step 2 schema
+/// extensions and guard, the payload is rejected and this test PASSES.
+#[test]
+fn test_scope_agent_contract_postmerge_changemap() {
+    let yaml = load_scenario("tests/scenarios/scope_agent_contract.yml");
+    run_workflow_guard_scenario(yaml);
+}
+
+// ──────────────────────────────────────────────────────────────────────
+// 2026-08-08-004 plan Unit 5: red-team independent scope
+// ──────────────────────────────────────────────────────────────────────
+
+/// U5 (plan 2026-08-08-004 §Unit 5 §9): red-team plan-resolver
+/// resolves scope independently without merge_boundary_path. target-locker
+/// locks HEAD/tree; plan-resolver derives scope_base from explicit input,
+/// writes scope-manifest.json and full-current.patch from real scope_base_sha,
+/// and emits redteam.plan.resolved with all U1 scope fields.
+/// attack-surface-mapper activates (resolved path). Loop reaches redteam.complete.
+#[test]
+fn test_redteam_scope_direct_target_without_merge_boundary() {
+    let yaml = load_scenario("tests/scenarios/redteam_scope_direct_target.yml");
+    run_workflow_guard_scenario(yaml);
+}
+
+/// U5 (plan 2026-08-08-004 §Unit 5 §9): red-team plan-resolver
+/// emits unresolved when scope_base is a placeholder. target-locker locks;
+/// plan-resolver detects `<global-baseline>` placeholder and emits
+/// redteam.plan.unresolved with reason=SCOPE_BASE_PLACEHOLDER.
+/// attack-surface-mapper does NOT activate (unresolved path).
+/// Loop reaches redteam.complete(success:false).
+#[test]
+fn test_redteam_scope_placeholder_blocked() {
+    let yaml = load_scenario("tests/scenarios/redteam_scope_placeholder_blocked.yml");
+    run_workflow_guard_scenario(yaml);
+}
+
+// ──────────────────────────────────────────────────────────────────────
+// 2026-08-08-004 plan Unit 6: mixed/conflict/confidence gates
+// ──────────────────────────────────────────────────────────────────────
+
+/// U6 (plan 2026-08-08-004 §Unit 6 §9): mixed direct/merge history.
+/// plan-resolver classifies interleaved commits, emits resolved scope
+/// with coverage=92, boundary_conflict=false, critical_unknown_count=0,
+/// overall_confidence=90. attack-surface-mapper activates (resolved path).
+/// Loop reaches redteam.complete.
+#[test]
+fn test_redteam_scope_mixed_history_classifies_interleaved() {
+    let yaml = load_scenario("tests/scenarios/redteam_scope_mixed_history.yml");
+    run_workflow_guard_scenario(yaml);
+}
+
+/// U6 (§Unit 6 §9): boundary conflict blocks attack.mapped.
+/// plan-resolver emits scope with boundary_conflict=true (cross_check=0);
+/// payload_consistency rule rejects; attack-surface-mapper does NOT activate.
+/// Loop reaches redteam.complete(success:false).
+#[test]
+fn test_redteam_scope_boundary_conflict_unresolved() {
+    let yaml = load_scenario("tests/scenarios/redteam_scope_boundary_conflict.yml");
+    run_workflow_guard_scenario(yaml);
+}
+
+/// U6 (§Unit 6 §9): critical unknown hunk blocks attack.mapped.
+/// plan-resolver emits scope with critical_unknown_count=1;
+/// payload_consistency rule rejects; attack-surface-mapper does NOT activate.
+/// Loop reaches redteam.complete(success:false).
+#[test]
+fn test_redteam_scope_unknown_hunk_blocks_attack() {
+    let yaml = load_scenario("tests/scenarios/redteam_scope_unknown_blocked.yml");
+    run_workflow_guard_scenario(yaml);
+}
+
+/// U1 (plan 2026-08-08-004 fix-plan §Unit 1, A3): the
+/// `redteam.attack.mapped` HARD GATE is now a runtime contract via
+/// payload_consistency rule `redteam-attack-mapped-requires-predecessor`
+/// + schema-required `predecessor_event` field. Fixture emits
+/// `redteam.attack.mapped` WITHOUT `predecessor_event`; the rule
+/// fires; attack.mapped is rejected; experiment-runner does not
+/// activate. Loop falls through to `redteam.complete(success:false)`.
+#[test]
+fn test_redteam_scope_attack_mapped_gate_rejects_missing_predecessor() {
+    let yaml = load_scenario("tests/scenarios/redteam_scope_attack_mapped_gate.yml");
     run_workflow_guard_scenario(yaml);
 }

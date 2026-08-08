@@ -178,6 +178,13 @@ Use this skill to design and draft Ralph **presets** (builtin or local) with **A
 2.5. **Capability discovery (mandatory for new presets / material changes)**：
    - Run `ralph capability inventory --format json` and walk each capability's `applies_when` field.
    - For each capability the preset legitimately uses, ensure the corresponding review evidence path in `references/finding-rubric.md` / `agent-native-model.md` is cited in `preset-author-notes.md`.
+   - **Scope contract capability (merge-batch / post-merge-converge / red-team-attack presets)**：Three presets (`merge-batch`, `post-merge-converge`, `red-team-attack`) MUST independently write a byte-stable scope manifest and emit with `scope_status` / `scope_digest` / `scope_manifest_path` fields. Author must verify the emitting hat's `instructions` require:
+     1. Writing the scope manifest to `.ralph/{merge,post-merge,red-team}/` before emit.
+     2. Computing `scope_digest` as SHA-256 of canonical JSON bytes excluding the `scope_digest` value itself.
+     3. Running `ralph emit --policy-check <scope-topic>` before real emit; `--unsafe-no-policy-check` **cannot** bypass the scope handoff guard.
+     4. For `merge.stabilized` / `merge.integrated`: `scope_base_sha` must be a real Git SHA (40 hex chars), not a placeholder like `<global-baseline>`.
+     5. For `postmerge.changemap.ready`: `scope_manifest_path` must be under `.ralph/post-merge/`.
+     6. Threshold gate: `overall_confidence >= 90`, `critical_unknown_count == 0`, `proceed = true` for resolved scope.
    - For each hat, **pretend other hats do not exist**.
    - Write only that hat's `instructions:`.
    - Fill one AAF 五问表 per hat (template in `references/author-checklist.md`).

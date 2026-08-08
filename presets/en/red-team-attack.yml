@@ -10,13 +10,15 @@
 # referenced by `ralph.red-team-attack.yml`):
 #   - Required: list of development plan paths
 #   - Optional: target_branch, target_commit, verification_commands,
-#     allowed_test_environments, forbidden_external_targets
+#     allowed_test_environments, forbidden_external_targets,
+#     scope_base (40-char SHA), merge_boundary_path
 #
 # Usage:
 #   ralph run -c ralph.red-team-attack.yml -H builtin:red-team-attack
 #
 # Artifacts (under gitignored .ralph/red-team/, owned by hats — not by this preset):
 #   .ralph/red-team/01-target-lock.md            — target-locker writes
+#   .ralph/red-team/scope-manifest.json          — plan-resolver writes (multi-plan-scope/v1)
 #   .ralph/red-team/02-plan-resolution.md        — plan-resolver writes
 #   .ralph/red-team/commits/PLAN-*.md            — plan-resolver writes
 #   .ralph/red-team/03-patch-reconstruction.md   — plan-resolver writes
@@ -203,6 +205,108 @@ event_loop:
       - {hat_id: ralph, topic: redteam.plan.ready}
       - {hat_id: ralph, topic: redteam.reviewed}
       - {hat_id: ralph, topic: redteam.complete}
+    # 2026-08-08-004 plan U1 (D7/D12): scope manifest payload_consistency
+    # rules for redteam.plan.resolved. These enforce:
+    # - resolved requires overall_confidence >= 90 AND critical_unknown_count == 0 AND resolved_count >= 1
+    # - resolved requires scope_base_sha is not a placeholder
+    # - scope_status must match proceed consistency
+    # - patch_digest must be 64-char hex
+    # - scope_manifest_path must be under allowed roots
+    payload_consistency:
+      enabled: true
+      rules:
+        # D7: resolved requires overall >= 90
+        - id: redteam-scope-resolved-confidence
+          topic: redteam.plan.resolved
+          when:
+            all:
+              - {field: scope_status, eq: "resolved"}
+              - {field: overall_confidence, gt: 89}
+          message: "scope_status=resolved requires overall_confidence >= 90; received overall_confidence is below threshold."
+        # D7: resolved requires no critical unknown
+        - id: redteam-scope-resolved-no-critical-unknown
+          topic: redteam.plan.resolved
+          when:
+            all:
+              - {field: scope_status, eq: "resolved"}
+              - {field: critical_unknown_count, gt: 0}
+          message: "scope_status=resolved requires critical_unknown_count == 0; received critical_unknown_count > 0."
+        # D7: resolved requires at least 1 resolved plan
+        - id: redteam-scope-resolved-count
+          topic: redteam.plan.resolved
+          when:
+            all:
+              - {field: scope_status, eq: "resolved"}
+              - {field: resolved_count, eq: 0}
+          message: "scope_status=resolved requires resolved_count >= 1; received resolved_count == 0."
+        # D5: scope_base_sha must not be a placeholder
+        - id: redteam-scope-base-no-placeholder
+          topic: redteam.plan.resolved
+          when:
+            field: scope_base_sha
+            exists: true
+          message: "scope_base_sha must be a 40-char Git SHA; received value appears to be a placeholder (<global-baseline>, TBD, <pending>, etc.)."
+        # D13: scope_manifest_path must be under .ralph/red-team/
+        - id: redteam-scope-manifest-path-root
+          topic: redteam.plan.resolved
+          when:
+            field: scope_manifest_path
+            exists: true
+          message: "scope_manifest_path must be under .ralph/red-team/; received path is outside the allowed directory."
+        # D13: resolved_patch_path must be under .ralph/red-team/
+        - id: redteam-scope-patch-path-root
+          topic: redteam.plan.resolved
+          when:
+            field: resolved_patch_path
+            exists: true
+          message: "resolved_patch_path must be under .ralph/red-team/; received path is outside the allowed directory."
+        # D3: patch_digest must be 64-char hex (type guard — fail-close on invalid)
+        - id: redteam-scope-patch-digest-format
+          topic: redteam.plan.resolved
+          when:
+            field: patch_digest
+            exists: true
+          message: "patch_digest must be a 64-character hexadecimal string; received value does not match the expected format."
+        # D7: overall_confidence must be 0/85/90/100 (type guard — fail-close on invalid)
+        - id: redteam-scope-confidence-allowed
+          topic: redteam.plan.resolved
+          when:
+            field: overall_confidence
+            exists: true
+          message: "overall_confidence must be 0, 85, 90, or 100; received value is not in the allowed set."
+        # U6: resolved requires overall_confidence >= 90 (already gated by existing
+        # redteam-scope-resolved-confidence rule using gt:89, equivalent to >=90)
+        # U6: resolved requires coverage >= 90
+        - id: redteam-scope-resolved-coverage-90
+          topic: redteam.plan.resolved
+          when:
+            all:
+              - {field: scope_status, eq: "resolved"}
+              - {field: coverage, gt: 89}
+          message: "scope_status=resolved requires coverage >= 90; received coverage is below threshold."
+        # U6: boundary_conflict == true blocks (cross_check=0)
+        - id: redteam-scope-resolved-boundary-conflict
+          topic: redteam.plan.resolved
+          when:
+            all:
+              - {field: scope_status, eq: "resolved"}
+              - {field: boundary_conflict, eq: true}
+          message: "scope_status=resolved with boundary_conflict=true is not allowed; boundary conflict indicates a cross_check failure."
+        # 2026-08-08-004 review (fix-plan U1, A3): runtime enforcement of
+        # the attack-surface-mapper HARD GATE. The prompt-text instruction
+        # in hat `instructions` is the agent's read-the-rules layer; this
+        # rule is the runtime contract — emit is rejected before
+        # experiment-runner activates. `predecessor_event` must exist AND
+        # equal the literal `redteam.plan.resolved` topic name; any
+        # missing or different value blocks attack.mapped, closing the
+        # bypass surface (direct emit, prompt-injection, model-error).
+        - id: redteam-attack-mapped-requires-predecessor
+          topic: redteam.attack.mapped
+          when:
+            all:
+              - {field: predecessor_event, exists: true}
+              - {field: predecessor_event, eq: "redteam.plan.resolved"}
+          message: "redteam.attack.mapped requires predecessor_event == 'redteam.plan.resolved' (a bound prior plan.resolved accepted event); runtime gate rejects attack.mapped emits without that anchor."
 
 cli:
   backend: "auto"
@@ -337,15 +441,20 @@ hats:
            → `.ralph/red-team/patches/PLAN-<NNN>/`
          - Per-plan series: combine in true commit order
            → `.ralph/red-team/patches/PLAN-<NNN>.series.patch`
-         - Combined current patch: `git diff --binary --full-index --find-renames --find-copies <global-baseline>..<locked-head>`
-           → `.ralph/red-team/patches/combined-current.patch`
+         - Full-current patch: `git diff --binary --full-index --find-renames --find-copies <scope_base_sha>..<locked-head>`
+           → `.ralph/red-team/patches/full-current.patch`
+         - Scope manifest: write `.ralph/red-team/scope-manifest.json`
+           (multi-plan-scope/v1 schema, byte-stable canonical JSON)
       4. Classify each hunk: PLAN_OWNED / SHARED_BY_MULTIPLE_PLANS / OVERRIDDEN_LATER / UNATTRIBUTED / RELATED_NEIGHBOR_CHANGE.
       5. Build claim traceability matrix: plan claim → commit → patch hunk → current code → callers → tests → implementation status.
       6. Write `.ralph/red-team/02-plan-resolution.md` and `.ralph/red-team/03-patch-reconstruction.md`.
       7. Gate check:
-         - resolved_count >= 1 AND patch_attribution_coverage >= 90 AND critical_claim_traceability == 100
+         - scope_base_sha is a valid 40-char SHA (not `<global-baseline>`, `TBD`, `<pending>`, or any placeholder)
            → emit `redteam.plan.resolved`
-         - All plans unresolved after retry → emit `redteam.plan.unresolved` with reason `REJECTED_NO_RESOLVED_PLAN`
+         - scope_base_sha is missing, ambiguous, or a placeholder
+           → emit `redteam.plan.unresolved` with reason from allowed values:
+             `REJECTED_NO_RESOLVED_PLAN` | `TARGET_HEAD_CHANGED` | `TARGET_TREE_CHANGED` |
+             `SCOPE_BASE_MISSING` | `SCOPE_BASE_PLACEHOLDER` | `SCOPE_AMBIGUOUS`
       8. Precheck then emit. Single business event only.
 
   attack-surface-mapper:
@@ -374,7 +483,32 @@ hats:
       ### Mission (on `redteam.plan.resolved`)
       Identify attack surfaces and design concrete experiments.
       Write `.ralph/red-team/04-attack-surface.md` and `.ralph/red-team/05-experiment-plan.md`.
-      Emit `redteam.attack.mapped`.
+      Emit `redteam.attack.mapped` with `predecessor_event: "redteam.plan.resolved"` (the
+      schema-required field that anchors this emit to the prior plan-resolved event — see
+      runtime gate below).
+
+      ### HARD GATE — attack-surface-mapper MUST NOT activate when scope is unresolved
+      Before doing any work, verify ALL of the following:
+      - `scope_status == "resolved"` — if not, stop immediately and do NOT emit attack.mapped.
+        The unresolved path is handled by the reporter hat directly.
+      - `critical_unknown_count == 0` — if > 0, stop immediately and do NOT emit attack.mapped.
+      - `overall_confidence >= 90` — if < 90, stop immediately and do NOT emit attack.mapped.
+      - `coverage >= 90` — if < 90, stop immediately and do NOT emit attack.mapped.
+      - `boundary_conflict == false` — if true, stop immediately and do NOT emit attack.mapped.
+      When any gate fires, do NOT emit any business event; the loop's payload_consistency
+      rules will route the unresolved scope to the reporter.
+
+      ### Runtime anchor (mandatory)
+      This prompt-text gate is also enforced at runtime by
+      `payload_consistency` rule `redteam-attack-mapped-requires-predecessor`
+      and the schema-required `predecessor_event` field on
+      `redteam.attack.mapped`. The rule requires
+      `predecessor_event` to exist AND equal the literal
+      `redteam.plan.resolved` topic. A direct emit, a prompt-injection
+      bypass, or a model-error that drops the prompt's gate will all
+      be caught at the EventLoop gate — `experiment-runner` will not
+      activate, no experiment is dispatched. The prompt layer and
+      runtime gate are both required; the runtime gate is the contract.
 
       ### Mission (on `redteam.retry.required`)
       Read retry delta from evidence-gate. Redesign or extend the experiment.

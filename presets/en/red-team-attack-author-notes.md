@@ -8,7 +8,7 @@
 
 - **输入与事实源：** 
   - 必填：一个或多个开发计划路径（通过 prompt 文件）
-  - 可选：target_branch / target_commit / verification_commands / allowed_test_environments / forbidden_external_targets
+  - 可选：target_branch / target_commit / verification_commands / allowed_test_environments / forbidden_external_targets / scope_base / merge_boundary_path
   - 事实源：Git 历史（commit / patch / blame）、当前最终代码树、真实实验执行结果
 
 - **成功条件：** 
@@ -19,12 +19,17 @@
   - 交付 `.ralph/red-team/PLAN.md` + `.ralph/red-team/REPORT.md` + `.ralph/red-team/QUESTIONS.md`
   - tracked tree 与锁定时一致，无生产代码修改
 
-- **阻塞条件：** 
+- **阻塞条件（U6 新增 mixed/conflict 门禁）：** 
   - 所有计划 Commit Match 耗尽 Retry 后仍 < 85 → REJECTED_NO_RESOLVED_PLAN
   - Patch 重建耗尽 Retry 后仍不达标 → PATCH_UNRESOLVED_AFTER_RETRY
   - Finding 四项指标任一耗尽 Retry 后仍不达标 → REJECTED_AFTER_RETRY_*
   - 目标 HEAD / tree 在实验期间被修改 → TARGET_HEAD_CHANGED / TARGET_TREE_CHANGED
   - 独立 Reviewer 给出 PLAN_REJECTED
+  - **U6 新增**：scope_status == resolved 但 overall_confidence < 90 → plan.resolved 被 payload_consistency 拒绝，attack-surface 不激活
+  - **U6 新增**：scope_status == resolved 但 coverage < 90 → 同上
+  - **U6 新增**：scope_status == resolved 但 boundary_conflict == true → 同上（cross_check=0）
+  - **U6 新增**：scope_status == resolved 但 critical_unknown_count > 0 → 同上
+  - **U6**：without boundary 时 cross_check=not_applicable，不产生阻断
 
 - **允许的修改范围：** 
   - 允许：`.ralph/red-team/**` 下的实验辅助物（脚本 / 证据 / 日志 / 临时副本）
@@ -36,7 +41,9 @@
 
 - **重要 artifact、生产方与消费者：**
   - `.ralph/red-team/01-target-lock.md` — target-locker 写，后续所有 hat 读（验证 HEAD/tree 不变）
+  - `.ralph/red-team/scope-manifest.json` — plan-resolver 写，attack-surface-mapper 读（multi-plan-scope/v1，byte-stable）
   - `.ralph/red-team/02-plan-resolution.md` + `commits/PLAN-*.md` + `03-patch-reconstruction.md` + `patches/**` — plan-resolver 写，attack-surface-mapper 读
+  - `.ralph/red-team/patches/full-current.patch` — plan-resolver 写，从 `<scope_base_sha>..<locked-head>` 计算得出（U5 起，不再使用 `<global-baseline>` 占位符）
   - `.ralph/red-team/04-attack-surface.md` + `05-experiment-plan.md` — attack-surface-mapper 写，experiment-runner 读
   - `.ralph/red-team/experiments/RTE-*.md` + `evidence/RTE-*/**` + `repros/RTE-*/**` — experiment-runner 写，evidence-gate 读
   - `.ralph/red-team/07-evidence-board.md` + `07-retry-board.md` — evidence-gate 写，impact-boundary 读
@@ -124,14 +131,18 @@ N/A — execution_model=single-chain，未引入 `event_loop.supervisor.enabled`
 | `redteam.plan.resolved` | `resolved_count` | integer | `02-plan-resolution.md` 中达标计划数 | 本 hat 写入结果 | 不涉及 | attack-surface-mapper 知道多少计划可攻击 | `field_docs.resolved_count` | 可选 · 短计数，可从 artifact 重算；不落盘+无恢复、审计或历史依赖 |
 | `redteam.plan.resolved` | `unresolved_count` | integer | `02-plan-resolution.md` 中不达标计划数 | 本 hat 写入结果 | 不涉及 | attack-surface-mapper 知道多少计划被排除 | `field_docs.unresolved_count` | 可选 · 同上 |
 | `redteam.plan.resolved` | `resolution_file_path` | path | 本 hat 实际写入的 `02-plan-resolution.md` | 本 hat 写入结果 | 不涉及 | attack-surface-mapper 读完整 resolution + patch | `field_docs.resolution_file_path` | 必填 · `.ralph/red-team/02-plan-resolution.md` + `commits/PLAN-*.md` + `03-patch-reconstruction.md` + `patches/**`；完整数据先落盘，event 只传路径 |
+| `redteam.plan.resolved` | `coverage` | integer | plan-resolver 计算 classification 表：attributed_hunks / total_hunks * 100 | 本 hat 计算结果 | 不涉及 | attack-surface-mapper 验证阈值；payload_consistency 强制 coverage >= 90 | `field_docs.coverage` | 不需要 · 短计数，可从 artifact 重算；不落盘+无恢复、审计或历史依赖 |
+| `redteam.plan.resolved` | `critical_traceability` | integer | plan-resolver 计算 critical-path 覆盖率 | 本 hat 计算结果 | 不涉及 | attack-surface-mapper 感知关键路径完整性 | `field_docs.critical_traceability` | 不需要 · 同上 |
+| `redteam.plan.resolved` | `boundary_consistency` | boolean | plan-resolver 比较 independent base SHA 与 optional merge_boundary SHA | 本 hat 计算结果 | 不涉及 | attack-surface-mapper 判断 boundary 是否可用；without boundary 时 true 且 cross_check=not_applicable | `field_docs.boundary_consistency` | 不需要 · 短状态枚举 |
+| `redteam.plan.resolved` | `boundary_conflict` | boolean | plan-resolver 检测到 independent base SHA 与 boundary base SHA 不一致 | 本 hat 检测结果 | 不涉及 | attack-surface-mapper 拒绝激活；payload_consistency 强制 boundary_conflict=false | `field_docs.boundary_conflict` | 不需要 · 短状态枚举 |
 | `redteam.plan.unresolved` | `reason` | enum | 本 hat 最终 retry 状态 | 本 hat 决策 | 不涉及 | reporter 写 FAIL 报告 | `field_docs.reason` + `allowed_values` | 不需要 · 单 token 枚举，无恢复、审计或下游历史依赖 |
 | `redteam.plan.unresolved` | `resolution_file_path` | path | 本 hat 实际写入的 `02-plan-resolution.md` | 本 hat 写入结果 | 不涉及 | reporter 读 retry 历史写报告 | `field_docs.resolution_file_path` | 必填 · 同上 |
 
 ## Hat: attack-surface-mapper
 
-- **Q1 使命：** （on plan.resolved）识别攻击面、设计实验，写 `04-attack-surface.md` + `05-experiment-plan.md`，emit `redteam.attack.mapped`；（on retry.required）读 retry delta、重新设计实验、更新 `05-experiment-plan.md`，emit `redteam.attack.mapped`。
+- **Q1 使命：** （on plan.resolved）识别攻击面、设计实验，写 `04-attack-surface.md` + `05-experiment-plan.md`，emit `redteam.attack.mapped`；（on retry.required）读 retry delta、重新设计实验、更新 `05-experiment-plan.md`，emit `redteam.attack.mapped`。**U6：attack-surface-mapper 在 scope unresolved 时拒绝激活，不得 emit attack.mapped。**
 - **Q2 输入：** on plan.resolved：`redteam.plan.resolved` payload + resolution/patch artifacts；on retry.required：`redteam.retry.required` payload（`experiment_id` / `failed_metrics` / `retry_delta` / `retry_board_path`）+ 原 experiment artifact。命令：读 trigger payload + 读 artifacts + `git rev-parse` 验证 HEAD/tree。
-- **Q3 执行：** Observe（读 payload + artifacts）→ Precheck（验证 HEAD/tree == lock；攻击维度覆盖检查）→ Apply（materialize 模板 + 写 `04-attack-surface.md` + `05-experiment-plan.md` + `--policy-check`）→ Confirm（真实 emit）。
+- **Q3 执行：** Observe（读 payload + artifacts）→ **Precheck（验证 scope_status==resolved 且 critical_unknown_count==0 且 overall_confidence>=90 且 coverage>=90 且 boundary_conflict==false；任一不满足则停止，不得 emit）** → Apply（materialize 模板 + 写 `04-attack-surface.md` + `05-experiment-plan.md` + `--policy-check`）→ Confirm（真实 emit）。
 - **Q4 输出：** 见 Payload Contract（topic: `redteam.attack.mapped`）。
 - **Q5 交接：** `attack_surface_path` / `experiment_plan_path` → experiment-runner 读完整实验设计。
 

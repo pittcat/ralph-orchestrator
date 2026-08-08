@@ -1,0 +1,92 @@
+# BDD fixture: scope agent contract — postmerge.changemap.ready
+#
+# Characterization test for Unit 1 (2026-08-08-004 plan).
+#
+# Per plan §Unit 1 §15: BDD tests exercise real EventLoop routing/schema/gate
+# while unit + CLI tests cover payload/artifact/threshold/path/status consistency.
+#
+# This fixture exercises the EventLoop routing contract: change-mapper emits
+# postmerge.changemap.ready with scope manifest fields, the EventLoop routes
+# the event normally. Schema rejection is verified by:
+#   - unit tests in crates/ralph-core/src/event_policy_payload_consistency.rs
+#   - CLI precheck tests in tests_policy_check_reject.rs / _accept.rs
+#   - integration tests in crates/ralph-cli/tests/integration_emit_policy.rs
+#
+# See the plan for the full TDD strategy and per-scenario acceptance criteria.
+
+name: scope_agent_contract
+description: >
+  Routing characterization for the postmerge change-mapper hat chain
+  with scope manifest fields on postmerge.changemap.ready. Validates
+  hat subscription topology and default_publishes routing.
+
+config:
+  prompt_file: PROMPT.md
+  topic_format_whitelist:
+    - LOOP_COMPLETE
+  max_iterations: 8
+  hats:
+    baseline:
+      subscribes_to:
+        - postmerge.start
+      publishes:
+        - postmerge.baseline.ready
+      default_publishes: postmerge.baseline.ready
+    change_mapper:
+      subscribes_to:
+        - postmerge.baseline.ready
+      publishes:
+        - postmerge.changemap.ready
+      default_publishes: postmerge.changemap.ready
+    reporter:
+      subscribes_to:
+        - postmerge.changemap.ready
+      publishes:
+        - LOOP_COMPLETE
+      default_publishes: LOOP_COMPLETE
+  event_loop:
+    execution_mode: isolated
+    starting_event: "postmerge.start"
+    completion_promise: "LOOP_COMPLETE"
+    required_events:
+      - postmerge.changemap.ready
+
+# Characterization: walk the hat chain end-to-end.
+mock_responses:
+  - text: |
+      Baseline ready.
+      <event topic="postmerge.baseline.ready">
+      baseline_valid: true
+      artifact_path: ".ralph/post-merge/01-baseline.md"
+      head_sha: "abc1234def5678"
+      branch: main
+      </event>
+    hat: baseline
+  - text: |
+      Mapping changes...
+      <event topic="postmerge.changemap.ready">
+      proceed: true
+      artifact_path: ".ralph/post-merge/02-change-map.md"
+      high_risk_crossings_count: 0
+      plan_match_confidence: high
+      scope_manifest_path: ".ralph/post-merge/scope-manifest.json"
+      scope_digest: "abcd1234ef567890abcd1234ef567890abcd1234ef567890abcd1234ef567890"
+      scope_status: resolved
+      overall_confidence: 90
+      critical_unknown_count: 0
+      scope_base_sha: "818810763bb895b860ec1f78e5ab5b30469ab033"
+      scope_source: explicit
+      </event>
+    hat: change_mapper
+  - text: |
+      <event topic="LOOP_COMPLETE">
+      Change map complete.
+      </event>
+    hat: reporter
+
+expected:
+  iterations: 3
+  events:
+    - topic: postmerge.baseline.ready
+    - topic: postmerge.changemap.ready
+  completion: true

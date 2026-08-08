@@ -39,6 +39,68 @@ use std::path::{Path, PathBuf};
 
 use super::unified::ValidationError;
 
+// 2026-08-08-004 fix-plan (U5 / R6 / A2): SHA-256 recomputation helper
+// for the scope handoff guard. The guard only validates the *format*
+// of declared digests; this helper closes the bypass by recomputing
+// SHA-256 over the artifact bytes and constant-time-comparing against
+// the declared digest. Used from every topic branch in
+// `check_scope_handoff_guard`.
+use sha2::{Digest, Sha256};
+
+/// U5 (2026-08-08-004 fix-plan, A2): recompute SHA-256 over
+/// `artifact_path` (relative to `workspace_root`) and compare against
+/// `declared_digest`. Returns `Err(ValidationError)` with
+/// `reason_code = "scope_handoff_inconsistent"` on read error, format
+/// mismatch, or digest mismatch. The declared digest is **not** used
+/// as input to the SHA-256 computation (matches the
+/// `ralph-tools-emit.md`「Scope handoff contract」canonicalization
+/// rule: "不得把 scope_digest 字段本身算进去").
+pub(crate) fn verify_artifact_digest(
+    workspace_root: &Path,
+    artifact_path: &str,
+    declared_digest: &str,
+    digest_field: &str,
+) -> std::result::Result<(), ValidationError> {
+    let full_path = workspace_root.join(artifact_path);
+    let bytes = match std::fs::read(&full_path) {
+        Ok(b) => b,
+        Err(e) => {
+            return Err(ValidationError {
+                payload_index: 0,
+                field: digest_field.to_string(),
+                reason_code: "scope_handoff_inconsistent".to_string(),
+                message: format!(
+                    "{digest_field} verification failed: could not read {artifact_path}: {e}"
+                ),
+                ..Default::default()
+            });
+        }
+    };
+    let computed = {
+        let mut hasher = Sha256::new();
+        hasher.update(&bytes);
+        let digest = hasher.finalize();
+        let mut hex_str = String::with_capacity(64);
+        for byte in digest {
+            use std::fmt::Write;
+            let _ = write!(&mut hex_str, "{byte:02x}");
+        }
+        hex_str
+    };
+    if !declared_digest.eq_ignore_ascii_case(&computed) {
+        return Err(ValidationError {
+            payload_index: 0,
+            field: digest_field.to_string(),
+            reason_code: "scope_handoff_inconsistent".to_string(),
+            message: format!(
+                "{digest_field} does not match SHA-256 of {artifact_path} bytes; manifest may have been tampered with (declared={declared_digest}, computed={computed})"
+            ),
+            ..Default::default()
+        });
+    }
+    Ok(())
+}
+
 /// Try to load the workspace `ralph.yml` config for policy check. Returns
 /// `None` when no config exists. The behavior on broken configs is
 /// selected by `on_error`:
@@ -650,4 +712,888 @@ pub fn extract_step_and_task_id_from_payload(
         .and_then(|v| v.as_str())
         .map(|s| s.to_string());
     (step, task_id)
+}
+
+/// U1 (plan 2026-08-08-004, D12/D13): CLI scope handoff consistency gate.
+///
+/// Fires for the four scope topics: `merge.integrated`, `merge.stabilized`,
+/// `postmerge.changemap.ready`, and `redteam.plan.resolved`. Verifies the
+/// payload carries the required scope-related fields, the artifact paths
+/// are under the allowed roots (`.ralph/merge/`, `.ralph/post-merge/`,
+/// `.ralph/red-team/`), and the file exists.
+///
+/// This gate runs in BOTH `--policy-check` and real emit paths, and even
+/// when `--unsafe-no-policy-check` is set — the scope contract is mandatory
+/// for these topics.
+///
+/// The digest re-computation and threshold checks are handled by the
+/// `payload_consistency` rules in the EventLoop; this CLI gate enforces
+/// the structural preconditions (field presence, path validity, file
+/// readability) so agents get early backpressure before writing.
+///
+/// **Residual risk (A4)**: the path-prefix check uses lexical
+/// `starts_with(".ralph/<preset>/")` with a trailing slash, so
+/// `.ralph/post-merge_evil/foo` is correctly rejected. The remaining
+/// exposure is operator-set symlinks within `.ralph/<preset>/` that
+/// point outside the allowed root — `is_file()` follows symlinks. This
+/// is operator-controlled (not agent-controllable per D13's fixed-Git
+/// argv contract); defense-in-depth via `canonicalize()` is documented
+/// in the A4 finding and deferred until a real symlink-attack scenario
+/// is reported.
+#[allow(clippy::result_large_err)]
+pub fn check_scope_handoff_guard(
+    topic: &str,
+    payload_str: &str,
+    workspace_root: &Path,
+) -> std::result::Result<(), ValidationError> {
+    const SCOPE_TOPICS: &[&str] = &[
+        "merge.integrated",
+        "merge.stabilized",
+        "postmerge.changemap.ready",
+        "redteam.plan.resolved",
+    ];
+
+    if !SCOPE_TOPICS.contains(&topic) {
+        return Ok(());
+    }
+
+    let trimmed = payload_str.trim();
+    if trimmed.is_empty() || !trimmed.starts_with('{') {
+        return Err(ValidationError {
+            payload_index: 0,
+            field: "payload".to_string(),
+            reason_code: "scope_handoff_inconsistent".to_string(),
+            message: format!(
+                "scope handoff guard: topic '{topic}' requires a non-empty JSON object payload"
+            ),
+            ..Default::default()
+        });
+    }
+
+    let value: serde_json::Value = match serde_json::from_str(trimmed) {
+        Ok(v) => v,
+        Err(_) => {
+            return Err(ValidationError {
+                payload_index: 0,
+                field: "payload".to_string(),
+                reason_code: "scope_handoff_inconsistent".to_string(),
+                message: format!(
+                    "scope handoff guard: topic '{topic}' requires valid JSON payload for scope field extraction"
+                ),
+                ..Default::default()
+            });
+        }
+    };
+
+    // Topic-specific structural checks.
+    match topic {
+        "merge.integrated" => {
+            check_merge_integrated_scope_fields(&value, workspace_root)
+        }
+        "merge.stabilized" => {
+            check_merge_stabilized_scope_fields(&value, workspace_root)
+        }
+        "postmerge.changemap.ready" => {
+            check_postmerge_changemap_scope_fields(&value, workspace_root)
+        }
+        "redteam.plan.resolved" => {
+            check_redteam_plan_resolved_scope_fields(&value, workspace_root)
+        }
+        _ => Ok(()),
+    }
+}
+
+#[allow(clippy::result_large_err)]
+fn check_merge_integrated_scope_fields(
+    value: &serde_json::Value,
+    workspace_root: &Path,
+) -> std::result::Result<(), ValidationError> {
+    // U8 (M1): structural guard — payload must be a JSON object; the
+    // previous `value.as_object().unwrap()` panicked on arrays /
+    // strings / null.
+    let obj = expect_scope_payload_object(value, "merge.integrated")?;
+
+    // U9 (M2): shared `merge_boundary_path` + `merge_boundary_digest`
+    // structural validation; `require_status = Some("merge.integrated")`
+    // adds the `merge_boundary_status` enum check on the integrated
+    // topic.
+    let (boundary_path, boundary_digest) = validate_merge_boundary_pair(
+        obj,
+        workspace_root,
+        Some("merge.integrated"),
+    )?;
+
+    // U5 (R6 / A2): after the format check, recompute SHA-256 over
+    // the boundary file bytes and compare to the declared digest.
+    verify_artifact_digest(
+        workspace_root,
+        &boundary_path,
+        &boundary_digest,
+        "merge_boundary_digest",
+    )?;
+
+    Ok(())
+}
+
+#[allow(clippy::result_large_err)]
+fn check_merge_stabilized_scope_fields(
+    value: &serde_json::Value,
+    workspace_root: &Path,
+) -> std::result::Result<(), ValidationError> {
+    // U8 (M1): structural guard — payload must be a JSON object; the
+    // previous `value.as_object().unwrap()` panicked on arrays /
+    // strings / null.
+    let obj = expect_scope_payload_object(value, "merge.stabilized")?;
+
+    // U9 (M2): `require_status = None` skips the `merge_boundary_status`
+    // enum check on the stabilized topic; only path + digest are
+    // enforced.
+    let (boundary_path, boundary_digest) =
+        validate_merge_boundary_pair(obj, workspace_root, None)?;
+
+    // U5 (R6 / A2): SHA-256 recomputation on the boundary file.
+    verify_artifact_digest(
+        workspace_root,
+        &boundary_path,
+        &boundary_digest,
+        "merge_boundary_digest",
+    )?;
+
+    Ok(())
+}
+
+/// U8 (M1): payload-must-be-object guard. Replaces
+/// `value.as_object().unwrap()` with a clean `ValidationError` so
+/// arrays / strings / null payloads fail-close instead of panicking
+/// on the unwrap.
+fn expect_scope_payload_object<'a>(
+    value: &'a serde_json::Value,
+    topic: &str,
+) -> std::result::Result<&'a serde_json::Map<String, serde_json::Value>, ValidationError> {
+    match value.as_object() {
+        Some(o) => Ok(o),
+        None => Err(ValidationError {
+            payload_index: 0,
+            field: "payload".to_string(),
+            reason_code: "scope_handoff_inconsistent".to_string(),
+            message: format!(
+                "scope handoff guard: topic '{topic}' payload must be a JSON object"
+            ),
+            ..Default::default()
+        }),
+    }
+}
+
+/// U9 (M2): shared `merge_boundary_path` + `merge_boundary_digest`
+/// structural validation for `merge.integrated` and `merge.stabilized`.
+///
+/// `require_status = Some(topic)` adds the `merge_boundary_status` enum
+/// check on the integrated topic; `None` skips it for the stabilized
+/// topic. Returns the validated `(path, digest)` so the caller can
+/// thread them into the SHA-256 recomputation (`verify_artifact_digest`).
+#[allow(clippy::result_large_err)]
+fn validate_merge_boundary_pair(
+    obj: &serde_json::Map<String, serde_json::Value>,
+    workspace_root: &Path,
+    require_status: Option<&str>,
+) -> std::result::Result<(String, String), ValidationError> {
+    let path = match obj.get("merge_boundary_path").and_then(|v| v.as_str()) {
+        Some(v) if !v.is_empty() => v.to_string(),
+        _ => {
+            return Err(ValidationError {
+                payload_index: 0,
+                field: "merge_boundary_path".to_string(),
+                reason_code: "scope_handoff_inconsistent".to_string(),
+                message: "merge_boundary_path is required and must be a non-empty string".to_string(),
+                ..Default::default()
+            });
+        }
+    };
+
+    if !path.starts_with(".ralph/merge/") && !path.starts_with(".ralph\\merge\\") {
+        return Err(ValidationError {
+            payload_index: 0,
+            field: "merge_boundary_path".to_string(),
+            reason_code: "scope_handoff_inconsistent".to_string(),
+            message: format!("merge_boundary_path must be under .ralph/merge/; got: {path}"),
+            ..Default::default()
+        });
+    }
+
+    let full_path = workspace_root.join(&path);
+    if !full_path.is_file() {
+        return Err(ValidationError {
+            payload_index: 0,
+            field: "merge_boundary_path".to_string(),
+            reason_code: "scope_handoff_inconsistent".to_string(),
+            message: format!("merge_boundary_path file does not exist: {path}"),
+            ..Default::default()
+        });
+    }
+
+    if let Ok(metadata) = std::fs::metadata(&full_path)
+        && metadata.len() > 1024 * 1024
+    {
+        return Err(ValidationError {
+            payload_index: 0,
+            field: "merge_boundary_path".to_string(),
+            reason_code: "scope_handoff_inconsistent".to_string(),
+            message: format!(
+                "merge_boundary_path file exceeds 1 MiB limit: {path} ({} bytes)",
+                metadata.len()
+            ),
+            ..Default::default()
+        });
+    }
+
+    let digest = match obj.get("merge_boundary_digest").and_then(|v| v.as_str()) {
+        Some(v) if !v.is_empty() => v.to_string(),
+        _ => {
+            return Err(ValidationError {
+                payload_index: 0,
+                field: "merge_boundary_digest".to_string(),
+                reason_code: "scope_handoff_inconsistent".to_string(),
+                message: "merge_boundary_digest is required and must be a non-empty string".to_string(),
+                ..Default::default()
+            });
+        }
+    };
+
+    if digest.len() != 64 || !digest.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Err(ValidationError {
+            payload_index: 0,
+            field: "merge_boundary_digest".to_string(),
+            reason_code: "scope_handoff_inconsistent".to_string(),
+            message: format!(
+                "merge_boundary_digest must be a 64-char hex string; got {} chars",
+                digest.len()
+            ),
+            ..Default::default()
+        });
+    }
+
+    if let Some(topic) = require_status {
+        let status = match obj.get("merge_boundary_status").and_then(|v| v.as_str()) {
+            Some(v) => v,
+            None => {
+                return Err(ValidationError {
+                    payload_index: 0,
+                    field: "merge_boundary_status".to_string(),
+                    reason_code: "scope_handoff_inconsistent".to_string(),
+                    message: format!("{topic} requires merge_boundary_status in payload"),
+                    ..Default::default()
+                });
+            }
+        };
+        if status != "complete" && status != "incomplete" {
+            return Err(ValidationError {
+                payload_index: 0,
+                field: "merge_boundary_status".to_string(),
+                reason_code: "scope_handoff_inconsistent".to_string(),
+                message: format!(
+                    "merge_boundary_status must be 'complete' or 'incomplete'; got: {status}"
+                ),
+                ..Default::default()
+            });
+        }
+    }
+
+    Ok((path, digest))
+}
+
+#[allow(clippy::result_large_err)]
+fn check_postmerge_changemap_scope_fields(
+    value: &serde_json::Value,
+    workspace_root: &Path,
+) -> std::result::Result<(), ValidationError> {
+    // U8 (M1): structural guard.
+    let obj = expect_scope_payload_object(value, "postmerge.changemap.ready")?;
+    let required_string_fields = [
+        ("scope_manifest_path", ".ralph/post-merge/"),
+        ("scope_digest", ""),
+        ("scope_status", ""),
+        ("overall_confidence", ""),
+        ("critical_unknown_count", ""),
+        ("scope_base_sha", ""),
+        ("scope_source", ""),
+    ];
+
+    for (field, path_prefix) in required_string_fields {
+        if let Some(v) = obj.get(field).and_then(|v| v.as_str()) {
+            if v.is_empty() {
+                return Err(ValidationError {
+                    payload_index: 0,
+                    field: field.to_string(),
+                    reason_code: "scope_handoff_inconsistent".to_string(),
+                    message: format!("{field} must be non-empty",),
+                    ..Default::default()
+                });
+            }
+            if !path_prefix.is_empty() && !v.starts_with(path_prefix)
+                && !v.starts_with(".ralph\\post-merge\\")
+            {
+                return Err(ValidationError {
+                    payload_index: 0,
+                    field: field.to_string(),
+                    reason_code: "scope_handoff_inconsistent".to_string(),
+                    message: format!(
+                        "{field} must be under {path_prefix}; got: {v}"
+                    ),
+                    ..Default::default()
+                });
+            }
+            // Additional format checks
+            if field == "scope_digest" && (v.len() != 64 || !v.chars().all(|c| c.is_ascii_hexdigit())) {
+                return Err(ValidationError {
+                    payload_index: 0,
+                    field: field.to_string(),
+                    reason_code: "scope_handoff_inconsistent".to_string(),
+                    message: format!("scope_digest must be a 64-char hex string; got {} chars", v.len()),
+                    ..Default::default()
+                });
+            }
+            if field == "scope_base_sha" && (v.len() != 40 || !v.chars().all(|c| c.is_ascii_hexdigit())) {
+                return Err(ValidationError {
+                    payload_index: 0,
+                    field: field.to_string(),
+                    reason_code: "scope_handoff_inconsistent".to_string(),
+                    message: format!("scope_base_sha must be a 40-char hex SHA; got {} chars", v.len()),
+                    ..Default::default()
+                });
+            }
+        } else {
+            return Err(ValidationError {
+                payload_index: 0,
+                field: field.to_string(),
+                reason_code: "scope_handoff_inconsistent".to_string(),
+                message: format!("postmerge.changemap.ready requires {field} in payload"),
+                ..Default::default()
+            });
+        }
+    }
+
+    // scope_manifest_path must be a readable file under .ralph/post-merge/
+    let manifest_path = obj
+        .get("scope_manifest_path")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| ValidationError {
+            payload_index: 0,
+            field: "scope_manifest_path".to_string(),
+            reason_code: "scope_handoff_inconsistent".to_string(),
+            message: "postmerge.changemap.ready requires scope_manifest_path in payload".to_string(),
+            ..Default::default()
+        })?
+        .to_string();
+    let full_path = workspace_root.join(&manifest_path);
+    if !full_path.is_file() {
+        return Err(ValidationError {
+            payload_index: 0,
+            field: "scope_manifest_path".to_string(),
+            reason_code: "scope_handoff_inconsistent".to_string(),
+            message: format!("scope_manifest_path file does not exist: {manifest_path}"),
+            ..Default::default()
+        });
+    }
+    if let Ok(metadata) = std::fs::metadata(&full_path)
+        && metadata.len() > 1024 * 1024
+    {
+        return Err(ValidationError {
+            payload_index: 0,
+            field: "scope_manifest_path".to_string(),
+            reason_code: "scope_handoff_inconsistent".to_string(),
+            message: format!("scope_manifest_path exceeds 1 MiB limit ({} bytes)", metadata.len()),
+            ..Default::default()
+        });
+    }
+
+    // U5 (R6 / A2): SHA-256 recomputation on the manifest file.
+    let manifest_digest = obj
+        .get("scope_digest")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| ValidationError {
+            payload_index: 0,
+            field: "scope_digest".to_string(),
+            reason_code: "scope_handoff_inconsistent".to_string(),
+            message: "postmerge.changemap.ready requires scope_digest in payload".to_string(),
+            ..Default::default()
+        })?
+        .to_string();
+    verify_artifact_digest(workspace_root, &manifest_path, &manifest_digest, "scope_digest")?;
+
+    Ok(())
+}
+
+#[allow(clippy::result_large_err)]
+fn check_redteam_plan_resolved_scope_fields(
+    value: &serde_json::Value,
+    workspace_root: &Path,
+) -> std::result::Result<(), ValidationError> {
+    // U8 (M1): structural guard.
+    let obj = expect_scope_payload_object(value, "redteam.plan.resolved")?;
+    let required_string_fields = [
+        ("scope_manifest_path", ".ralph/red-team/"),
+        ("scope_digest", ""),
+        ("scope_status", ""),
+        ("overall_confidence", ""),
+        ("critical_unknown_count", ""),
+        ("scope_base_sha", ""),
+        ("resolved_patch_path", ".ralph/red-team/"),
+        ("patch_digest", ""),
+    ];
+
+    for (field, path_prefix) in required_string_fields {
+        if let Some(v) = obj.get(field).and_then(|v| v.as_str()) {
+            if v.is_empty() {
+                return Err(ValidationError {
+                    payload_index: 0,
+                    field: field.to_string(),
+                    reason_code: "scope_handoff_inconsistent".to_string(),
+                    message: format!("{field} must be non-empty"),
+                    ..Default::default()
+                });
+            }
+            if !path_prefix.is_empty() && !v.starts_with(path_prefix)
+                && !v.starts_with(".ralph\\red-team\\")
+            {
+                return Err(ValidationError {
+                    payload_index: 0,
+                    field: field.to_string(),
+                    reason_code: "scope_handoff_inconsistent".to_string(),
+                    message: format!(
+                        "{field} must be under {path_prefix}; got: {v}"
+                    ),
+                    ..Default::default()
+                });
+            }
+            // Additional format checks
+            if field == "scope_digest" && (v.len() != 64 || !v.chars().all(|c| c.is_ascii_hexdigit())) {
+                return Err(ValidationError {
+                    payload_index: 0,
+                    field: field.to_string(),
+                    reason_code: "scope_handoff_inconsistent".to_string(),
+                    message: format!("scope_digest must be a 64-char hex string; got {} chars", v.len()),
+                    ..Default::default()
+                });
+            }
+            if field == "scope_base_sha" {
+                // Must not be a placeholder
+                let placeholders = ["<global-baseline>", "TBD", "<pending>", "<global>", ""];
+                if placeholders.contains(&v) || v.len() != 40 || !v.chars().all(|c| c.is_ascii_hexdigit()) {
+                    return Err(ValidationError {
+                        payload_index: 0,
+                        field: field.to_string(),
+                        reason_code: "scope_handoff_inconsistent".to_string(),
+                        message: format!(
+                            "scope_base_sha must be a 40-char Git SHA, not a placeholder; got: {v}"
+                        ),
+                        ..Default::default()
+                    });
+                }
+            }
+            if field == "patch_digest" && (v.len() != 64 || !v.chars().all(|c| c.is_ascii_hexdigit())) {
+                return Err(ValidationError {
+                    payload_index: 0,
+                    field: field.to_string(),
+                    reason_code: "scope_handoff_inconsistent".to_string(),
+                    message: format!("patch_digest must be a 64-char hex string; got {} chars", v.len()),
+                    ..Default::default()
+                });
+            }
+        } else {
+            return Err(ValidationError {
+                payload_index: 0,
+                field: field.to_string(),
+                reason_code: "scope_handoff_inconsistent".to_string(),
+                message: format!("redteam.plan.resolved requires {field} in payload"),
+                ..Default::default()
+            });
+        }
+    }
+
+    // scope_manifest_path must be a readable file under .ralph/red-team/
+    let manifest_path = obj
+        .get("scope_manifest_path")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| ValidationError {
+            payload_index: 0,
+            field: "scope_manifest_path".to_string(),
+            reason_code: "scope_handoff_inconsistent".to_string(),
+            message: "redteam.plan.resolved requires scope_manifest_path in payload".to_string(),
+            ..Default::default()
+        })?
+        .to_string();
+    let full_path = workspace_root.join(&manifest_path);
+    if !full_path.is_file() {
+        return Err(ValidationError {
+            payload_index: 0,
+            field: "scope_manifest_path".to_string(),
+            reason_code: "scope_handoff_inconsistent".to_string(),
+            message: format!("scope_manifest_path file does not exist: {manifest_path}"),
+            ..Default::default()
+        });
+    }
+    if let Ok(metadata) = std::fs::metadata(&full_path)
+        && metadata.len() > 1024 * 1024
+    {
+        return Err(ValidationError {
+            payload_index: 0,
+            field: "scope_manifest_path".to_string(),
+            reason_code: "scope_handoff_inconsistent".to_string(),
+            message: format!("scope_manifest_path exceeds 1 MiB limit ({} bytes)", metadata.len()),
+            ..Default::default()
+        });
+    }
+
+    // U5 (R6 / A2): SHA-256 recomputation on the manifest file
+    // AND the resolved patch file (both have declared digests).
+    let manifest_digest = obj
+        .get("scope_digest")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| ValidationError {
+            payload_index: 0,
+            field: "scope_digest".to_string(),
+            reason_code: "scope_handoff_inconsistent".to_string(),
+            message: "redteam.plan.resolved requires scope_digest in payload".to_string(),
+            ..Default::default()
+        })?
+        .to_string();
+    verify_artifact_digest(workspace_root, &manifest_path, &manifest_digest, "scope_digest")?;
+
+    let patch_path = obj
+        .get("resolved_patch_path")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| ValidationError {
+            payload_index: 0,
+            field: "resolved_patch_path".to_string(),
+            reason_code: "scope_handoff_inconsistent".to_string(),
+            message: "redteam.plan.resolved requires resolved_patch_path in payload".to_string(),
+            ..Default::default()
+        })?
+        .to_string();
+    let patch_digest = obj
+        .get("patch_digest")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| ValidationError {
+            payload_index: 0,
+            field: "patch_digest".to_string(),
+            reason_code: "scope_handoff_inconsistent".to_string(),
+            message: "redteam.plan.resolved requires patch_digest in payload".to_string(),
+            ..Default::default()
+        })?
+        .to_string();
+    verify_artifact_digest(workspace_root, &patch_path, &patch_digest, "patch_digest")?;
+
+    Ok(())
+}
+
+// ──────────────────────────────────────────────────────────────────────
+// 2026-08-08-004 fix-plan Unit 4 (R5/A1): direct unit tests for
+// `check_scope_handoff_guard` + the U5 (R6/A2) SHA-256 recomputation
+// helper. Each topic branch has at least one accept-test (real
+// artifact + recomputed digest) and one reject-test (missing
+// artifact / wrong digest / non-JSON-object payload). The
+// not-a-scope-topic pass-through test covers the gate's exit-ramp
+// for non-scope topics.
+// ──────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+#[allow(clippy::module_inception)]
+mod tests {
+    use super::*;
+    use sha2::{Digest, Sha256};
+    use std::path::PathBuf;
+
+    /// Write a fake manifest to `relative_path` under `root` and return
+    /// the lowercase hex SHA-256 of the bytes. Mirrors the canonical
+    /// format used in the production `verify_artifact_digest` helper so
+    /// accept-tests can construct matching declared digests.
+    fn write_artifact(
+        root: &std::path::Path,
+        relative_path: &str,
+        body: &[u8],
+    ) -> (String, PathBuf) {
+        let abs = root.join(relative_path);
+        if let Some(parent) = abs.parent() {
+            std::fs::create_dir_all(parent).expect("create parent");
+        }
+        std::fs::write(&abs, body).expect("write artifact");
+        let mut hasher = Sha256::new();
+        hasher.update(body);
+        let digest = hasher.finalize();
+        let mut hex_str = String::with_capacity(64);
+        for byte in digest {
+            use std::fmt::Write;
+            let _ = write!(&mut hex_str, "{byte:02x}");
+        }
+        (hex_str, abs)
+    }
+
+    fn build_boundary_payload(digest: &str, status: Option<&str>) -> String {
+        let mut payload = format!(
+            r#"{{"merge_boundary_path":".ralph/merge/merge-boundary.json","merge_boundary_digest":"{digest}""#
+        );
+        if let Some(s) = status {
+            payload.push_str(&format!(r#","merge_boundary_status":"{s}""#));
+        }
+        payload.push('}');
+        payload
+    }
+
+    fn build_postmerge_payload(manifest_path: &str, manifest_digest: &str) -> String {
+        format!(
+            r#"{{"scope_manifest_path":"{manifest_path}","scope_digest":"{manifest_digest}","scope_status":"resolved","overall_confidence":"90","critical_unknown_count":"0","scope_base_sha":"abc1234def5678901234567890abcdef12345678","scope_source":"post-merge-converge"}}"#
+        )
+    }
+
+    fn build_redteam_payload(
+        manifest_path: &str,
+        manifest_digest: &str,
+        patch_path: &str,
+        patch_digest: &str,
+    ) -> String {
+        format!(
+            r#"{{"scope_manifest_path":"{manifest_path}","scope_digest":"{manifest_digest}","scope_status":"resolved","overall_confidence":"90","critical_unknown_count":"0","scope_base_sha":"abc1234def5678901234567890abcdef12345678","resolved_patch_path":"{patch_path}","patch_digest":"{patch_digest}"}}"#
+        )
+    }
+
+    #[test]
+    fn not_a_scope_topic_passes_through() {
+        // R5: work.done is not in SCOPE_TOPICS, so the guard exits
+        // before any structural check — even an empty payload returns
+        // Ok(()).
+        let root = tempfile::tempdir().expect("tempdir");
+        let result = check_scope_handoff_guard("work.done", "", root.path());
+        assert!(result.is_ok(), "non-scope topic must pass through");
+    }
+
+    #[test]
+    fn merge_integrated_accepts_real_artifact() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let (digest, _) = write_artifact(
+            root.path(),
+            ".ralph/merge/merge-boundary.json",
+            br#"{"target_identity":"abc"}"#,
+        );
+        let payload = build_boundary_payload(&digest, Some("complete"));
+        let result = check_scope_handoff_guard("merge.integrated", &payload, root.path());
+        assert!(result.is_ok(), "merge.integrated with real artifact must accept: {result:?}");
+    }
+
+    #[test]
+    fn merge_integrated_rejects_missing_manifest() {
+        let root = tempfile::tempdir().expect("tempdir");
+        // Digest is a syntactically valid 64-hex but the file is not written.
+        let payload = build_boundary_payload(
+            "0000000000000000000000000000000000000000000000000000000000000000",
+            Some("complete"),
+        );
+        let result = check_scope_handoff_guard("merge.integrated", &payload, root.path());
+        let err = result.expect_err("missing manifest must reject");
+        assert_eq!(err.reason_code, "scope_handoff_inconsistent");
+        assert!(err.message.contains("merge_boundary_path"));
+    }
+
+    #[test]
+    fn merge_integrated_rejects_wrong_digest() {
+        let root = tempfile::tempdir().expect("tempdir");
+        write_artifact(
+            root.path(),
+            ".ralph/merge/merge-boundary.json",
+            br#"{"target_identity":"abc"}"#,
+        );
+        // Declare a different 64-hex digest than the file's actual SHA-256.
+        let payload = build_boundary_payload(
+            "1111111111111111111111111111111111111111111111111111111111111111",
+            Some("complete"),
+        );
+        let result = check_scope_handoff_guard("merge.integrated", &payload, root.path());
+        let err = result.expect_err("tampered digest must reject");
+        assert_eq!(err.reason_code, "scope_handoff_inconsistent");
+        assert!(err.message.contains("merge_boundary_digest"));
+    }
+
+    #[test]
+    fn merge_stabilized_accepts_real_artifact() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let (digest, _) = write_artifact(
+            root.path(),
+            ".ralph/merge/merge-boundary.json",
+            br#"{"target_identity":"xyz"}"#,
+        );
+        // merge.stabilized does NOT require merge_boundary_status.
+        let payload = build_boundary_payload(&digest, None);
+        let result = check_scope_handoff_guard("merge.stabilized", &payload, root.path());
+        assert!(result.is_ok(), "merge.stabilized with real artifact must accept: {result:?}");
+    }
+
+    #[test]
+    fn merge_stabilized_rejects_missing_manifest() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let payload = build_boundary_payload(
+            "0000000000000000000000000000000000000000000000000000000000000000",
+            None,
+        );
+        let result = check_scope_handoff_guard("merge.stabilized", &payload, root.path());
+        let err = result.expect_err("missing manifest must reject");
+        assert_eq!(err.reason_code, "scope_handoff_inconsistent");
+    }
+
+    #[test]
+    fn merge_stabilized_rejects_wrong_digest() {
+        let root = tempfile::tempdir().expect("tempdir");
+        write_artifact(
+            root.path(),
+            ".ralph/merge/merge-boundary.json",
+            br#"{"target_identity":"xyz"}"#,
+        );
+        let payload = build_boundary_payload(
+            "1111111111111111111111111111111111111111111111111111111111111111",
+            None,
+        );
+        let result = check_scope_handoff_guard("merge.stabilized", &payload, root.path());
+        let err = result.expect_err("tampered digest must reject");
+        assert_eq!(err.reason_code, "scope_handoff_inconsistent");
+        assert!(err.message.contains("merge_boundary_digest"));
+    }
+
+    #[test]
+    fn postmerge_changemap_accepts_real_artifact() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let (digest, _) = write_artifact(
+            root.path(),
+            ".ralph/post-merge/scope-manifest.json",
+            br#"{"resolved":true}"#,
+        );
+        let payload = build_postmerge_payload(".ralph/post-merge/scope-manifest.json", &digest);
+        let result = check_scope_handoff_guard("postmerge.changemap.ready", &payload, root.path());
+        assert!(result.is_ok(), "postmerge.changemap.ready with real artifact must accept: {result:?}");
+    }
+
+    #[test]
+    fn postmerge_changemap_rejects_missing_manifest() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let payload = build_postmerge_payload(
+            ".ralph/post-merge/missing.json",
+            "0000000000000000000000000000000000000000000000000000000000000000",
+        );
+        let result = check_scope_handoff_guard("postmerge.changemap.ready", &payload, root.path());
+        let err = result.expect_err("missing manifest must reject");
+        assert_eq!(err.reason_code, "scope_handoff_inconsistent");
+    }
+
+    #[test]
+    fn postmerge_changemap_rejects_wrong_digest() {
+        let root = tempfile::tempdir().expect("tempdir");
+        write_artifact(
+            root.path(),
+            ".ralph/post-merge/scope-manifest.json",
+            br#"{"resolved":true}"#,
+        );
+        let payload = build_postmerge_payload(
+            ".ralph/post-merge/scope-manifest.json",
+            "1111111111111111111111111111111111111111111111111111111111111111",
+        );
+        let result = check_scope_handoff_guard("postmerge.changemap.ready", &payload, root.path());
+        let err = result.expect_err("tampered digest must reject");
+        assert_eq!(err.reason_code, "scope_handoff_inconsistent");
+        assert!(err.message.contains("scope_digest"));
+    }
+
+    #[test]
+    fn redteam_plan_resolved_accepts_real_artifact() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let (manifest_digest, _) = write_artifact(
+            root.path(),
+            ".ralph/red-team/scope-manifest.json",
+            br#"{"resolved":true}"#,
+        );
+        let (patch_digest, _) = write_artifact(
+            root.path(),
+            ".ralph/red-team/resolved-patch.json",
+            br#"{"patches":["a","b"]}"#,
+        );
+        let payload = build_redteam_payload(
+            ".ralph/red-team/scope-manifest.json",
+            &manifest_digest,
+            ".ralph/red-team/resolved-patch.json",
+            &patch_digest,
+        );
+        let result = check_scope_handoff_guard("redteam.plan.resolved", &payload, root.path());
+        assert!(result.is_ok(), "redteam.plan.resolved with real artifacts must accept: {result:?}");
+    }
+
+    #[test]
+    fn redteam_plan_resolved_rejects_missing_manifest() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let (patch_digest, _) = write_artifact(
+            root.path(),
+            ".ralph/red-team/resolved-patch.json",
+            br#"{"patches":["a"]}"#,
+        );
+        let payload = build_redteam_payload(
+            ".ralph/red-team/scope-manifest.json",
+            "0000000000000000000000000000000000000000000000000000000000000000",
+            ".ralph/red-team/resolved-patch.json",
+            &patch_digest,
+        );
+        let result = check_scope_handoff_guard("redteam.plan.resolved", &payload, root.path());
+        let err = result.expect_err("missing manifest must reject");
+        assert_eq!(err.reason_code, "scope_handoff_inconsistent");
+    }
+
+    #[test]
+    fn redteam_plan_resolved_rejects_wrong_patch_digest() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let (manifest_digest, _) = write_artifact(
+            root.path(),
+            ".ralph/red-team/scope-manifest.json",
+            br#"{"resolved":true}"#,
+        );
+        write_artifact(
+            root.path(),
+            ".ralph/red-team/resolved-patch.json",
+            br#"{"patches":["a"]}"#,
+        );
+        let payload = build_redteam_payload(
+            ".ralph/red-team/scope-manifest.json",
+            &manifest_digest,
+            ".ralph/red-team/resolved-patch.json",
+            "1111111111111111111111111111111111111111111111111111111111111111",
+        );
+        let result = check_scope_handoff_guard("redteam.plan.resolved", &payload, root.path());
+        let err = result.expect_err("tampered patch_digest must reject");
+        assert_eq!(err.reason_code, "scope_handoff_inconsistent");
+        assert!(err.message.contains("patch_digest"));
+    }
+
+    #[test]
+    fn non_object_payload_rejects_without_panic() {
+        // R9 / M1: arrays, strings, null must fail-close with
+        // `scope_handoff_inconsistent`, not panic on the previous
+        // `value.as_object().unwrap()`.
+        let root = tempfile::tempdir().expect("tempdir");
+        for payload in [
+            "[1,2,3]",
+            "\"string\"",
+            "null",
+            "42",
+        ] {
+            let result = check_scope_handoff_guard("merge.integrated", payload, root.path());
+            assert!(
+                result.is_err(),
+                "non-object payload {payload} must reject, got {result:?}"
+            );
+            if let Err(e) = result {
+                assert_eq!(e.reason_code, "scope_handoff_inconsistent");
+            }
+        }
+    }
+
+    #[test]
+    fn empty_payload_rejects() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let result = check_scope_handoff_guard("merge.integrated", "", root.path());
+        let err = result.expect_err("empty payload must reject");
+        assert_eq!(err.reason_code, "scope_handoff_inconsistent");
+    }
 }

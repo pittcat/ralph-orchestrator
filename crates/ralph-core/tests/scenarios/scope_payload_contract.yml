@@ -1,0 +1,128 @@
+# BDD fixture: scope payload contract — merge.integrated / merge.stabilized
+#
+# Characterization test for Unit 1 (2026-08-08-004 plan).
+#
+# Per plan §Unit 1 §15: "BDD 负责真实验证 EventLoop 的 routing/schema/gate" and
+# "现有 payload_consistency 和 CLI precheck 测试负责 payload/artifact/threshold/path/status
+# 一致性".
+#
+# This fixture exercises the EventLoop routing contract: when the integrator
+# emits merge.integrated WITHOUT scope boundary fields, the EventLoop still
+# routes the event normally under the existing schema. The new
+# payload_consistency rules added by U1 fire AT THE EVENT-POLICY VALIDATOR,
+# but this BDD test deliberately uses a routing-only fixture (no
+# event_policy enforcement) so the harness focuses on:
+#   - hat subscription topology is valid (reviewer→integrator→stabilizer→reporter)
+#   - default_publishes path triggers the next hat
+#   - terminal LOOP_COMPLETE is reached
+#
+# The schema rejection contract is verified by:
+#   - unit tests in crates/ralph-core/src/event_policy_payload_consistency.rs
+#     (scope_* rule evaluator tests added by U1)
+#   - CLI precheck tests in tests_policy_check_reject.rs / _accept.rs
+#     (added by U1)
+#   - integration tests in crates/ralph-cli/tests/integration_emit_policy.rs
+#     (added by U1)
+#
+# See the plan for the full TDD strategy and per-scenario acceptance criteria.
+
+name: scope_payload_contract
+description: >
+  Routing characterization for the merge-batch hat chain with scope
+  boundary fields on merge.integrated. Validates hat subscription
+  topology and default_publishes routing. Schema rejection is exercised
+  by unit + CLI tests, not this fixture.
+
+config:
+  prompt_file: PROMPT.md
+  topic_format_whitelist:
+    - merge.batch.complete
+    - LOOP_COMPLETE
+  max_iterations: 8
+  hats:
+    reviewer:
+      subscribes_to:
+        - merge.start
+      publishes:
+        - merge.reviewed
+      default_publishes: merge.reviewed
+    integrator:
+      subscribes_to:
+        - merge.reviewed
+      publishes:
+        - merge.integrated
+      default_publishes: merge.integrated
+    stabilizer:
+      subscribes_to:
+        - merge.integrated
+      publishes:
+        - merge.stabilized
+      default_publishes: merge.stabilized
+    reporter:
+      subscribes_to:
+        - merge.stabilized
+      publishes:
+        - merge.batch.complete
+      default_publishes: merge.batch.complete
+  event_loop:
+    execution_mode: isolated
+    starting_event: "merge.start"
+    completion_promise: "merge.batch.complete"
+    required_events:
+      - merge.stabilized
+
+# Characterization: walk the hat chain end-to-end. Each mock response
+# represents one iteration's hat activation output.
+mock_responses:
+  - text: |
+      Reviewing branches for merge...
+      <event topic="merge.reviewed">
+      target_branch: main
+      branch_order: ["feature/a", "feature/b"]
+      review_path: ".ralph/merge/review.md"
+      </event>
+    hat: reviewer
+  - text: |
+      Integrating branches...
+      <event topic="merge.integrated">
+      integration_complete: true
+      ready_for_stabilization: true
+      branches_merged: ["feature/a", "feature/b"]
+      branches_skipped: []
+      branches_failed: []
+      merge_commit_shas: ["abc1234def5678"]
+      integration_path: ".ralph/merge/integration.md"
+      merge_boundary_path: ".ralph/merge/merge-boundary.json"
+      merge_boundary_digest: "abcd1234ef567890abcd1234ef567890abcd1234ef567890abcd1234ef567890"
+      merge_boundary_status: complete
+      </event>
+    hat: integrator
+  - text: |
+      Stabilizing merge...
+      <event topic="merge.stabilized">
+      passed: true
+      report_input_file: ".ralph/merge/report-input.md"
+      merge_boundary_path: ".ralph/merge/merge-boundary.json"
+      merge_boundary_digest: "abcd1234ef567890abcd1234ef567890abcd1234ef567890abcd1234ef567890"
+      </event>
+    hat: stabilizer
+  - text: |
+      <event topic="merge.batch.complete">
+      success: true
+      report_path: ".ralph/merge/REPORT.md"
+      </event>
+    hat: reporter
+  - text: |
+      <event topic="LOOP_COMPLETE">
+      Merge batch complete.
+      </event>
+    hat: reporter
+
+expected:
+  iterations: 5
+  events:
+    - topic: merge.reviewed
+    - topic: merge.integrated
+    - topic: merge.stabilized
+    - topic: merge.batch.complete
+  completion: true

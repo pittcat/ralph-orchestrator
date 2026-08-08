@@ -1,0 +1,39 @@
+# Scope contract missing manifest field negative fixture
+# Axis: scope.topic payload omits required scope_manifest_path / scope_digest / scope_status
+# Expected finding: scope.contract.missing_manifest_field
+# Preset-neutral; not derived from any builtin preset.
+# Non-preset name matching.
+
+event_loop:
+  execution_mode: isolated
+  required_events: [LOOP_COMPLETE]
+
+hats:
+  scope_resolver:
+    name: ScopeResolver
+    triggers:
+      - merge.start
+    publishes:
+      - merge.integrated
+      - LOOP_COMPLETE
+    instructions: |
+      # ScopeResolver
+      You are the scope resolver for this merge batch preset.
+
+      When triggered by `merge.start`, you must:
+      1. Read the current Git log to determine the scope of changes.
+      2. Construct a scope manifest describing what files/changes are in scope.
+      3. Run `ralph emit --policy-check merge.integrated` with the scope payload.
+
+      The `merge.integrated` event requires these fields:
+      - `scope_manifest_path`: path to the scope manifest file
+      - `scope_digest`: SHA-256 of the manifest content
+      - `scope_status`: current status of the scope resolution
+      - `scope_base_sha`: the Git SHA of the base commit
+      - `overall_confidence`: confidence score (0-100)
+      - `critical_unknown_count`: number of critical unknowns
+
+      You must write the scope manifest to `.ralph/merge/scope-manifest.json`
+      before emitting. The `scope_manifest_path` field must reference that file.
+
+      Run policy-check before emit.

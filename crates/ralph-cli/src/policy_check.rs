@@ -196,8 +196,8 @@ pub(crate) use unified::{
 #[allow(unused_imports)]
 pub use gates::{
     OnConfigError, PolicyCheckContext, build_policy_state, check_isolated_scope,
-    check_step_handoff_gate, check_wave_dimension_assignment, enabled_event_policy,
-    load_policy_config_for_cli_emit, load_workspace_config,
+    check_scope_handoff_guard, check_step_handoff_gate, check_wave_dimension_assignment,
+    enabled_event_policy, load_policy_config_for_cli_emit, load_workspace_config,
 };
 #[cfg(test)]
 pub(crate) use unified::run_policy_check_unified;

@@ -24,6 +24,22 @@ ralph run -c ralph.post-merge.yml -H builtin:post-merge-converge
 - docs/plans/<plan-b>.md
 ```
 
+## scope_base（可选）
+
+若提供，change-mapper 验证它为 40 字符 SHA 且是所有候选 commit 的祖先。若省略，change-mapper 通过 first-parent / merge-parent 拓扑自行推导。
+
+```text
+scope_base: abc1234def5678901234567890abcdef1234567890
+```
+
+## merge_boundary_path（可选）
+
+若提供，change-mapper 将其作为 OPTIONAL cross-check 读取（不缺则记录，不存在也不阻塞）。
+
+```text
+merge_boundary_path: .ralph/post-merge/merge-boundary.json
+```
+
 ## 验证命令（可选覆盖）
 
 默认使用仓库全量入口：

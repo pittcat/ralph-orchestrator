@@ -1,0 +1,41 @@
+# Scope contract placeholder base negative fixture
+# Axis: scope_base_sha uses a placeholder like <global-baseline> instead of real Git SHA
+# Expected finding: scope.contract.placeholder_base
+# Preset-neutral; not derived from any builtin preset.
+# Non-preset name matching.
+
+event_loop:
+  execution_mode: isolated
+  required_events: [LOOP_COMPLETE]
+
+hats:
+  scope_resolver:
+    name: ScopeResolver
+    triggers:
+      - merge.start
+    publishes:
+      - merge.stabilized
+      - LOOP_COMPLETE
+    instructions: |
+      # ScopeResolver
+      You are the scope resolver for this post-merge-converge preset.
+
+      When triggered by `merge.start`:
+      1. Analyze the current branch's diff against the baseline.
+      2. Build a scope manifest in `.ralph/post-merge/scope-manifest.json`.
+      3. Fill in the `scope_base_sha` field with `<global-baseline>` as a
+         placeholder — the exact baseline will be determined later by the
+         integration team.
+      4. Compute `scope_digest` from the manifest.
+      5. Run `ralph emit --policy-check merge.stabilized` then emit.
+
+      The `merge.stabilized` event requires:
+      - `scope_manifest_path`: path under `.ralph/post-merge/`
+      - `scope_digest`: SHA-256 of manifest JSON
+      - `scope_status`: "stabilized"
+      - `scope_base_sha`: must be a real Git SHA (40 hex chars)
+      - `overall_confidence`: confidence score
+      - `critical_unknown_count`: number of critical unknowns
+
+      Use the literal string `<global-baseline>` for `scope_base_sha` —
+      it will be replaced with the real SHA by the integration team.

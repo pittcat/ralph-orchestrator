@@ -1,0 +1,35 @@
+# Scope contract boundary dependency negative fixture
+# Axis: preset uses merge_boundary as upstream scope authority (cross-preset coupling)
+# Expected finding: scope.contract.boundary_authority
+# Preset-neutral; not derived from any builtin preset.
+# Non-preset name matching.
+
+event_loop:
+  execution_mode: isolated
+  required_events: [LOOP_COMPLETE]
+
+hats:
+  integrator:
+    name: Integrator
+    triggers:
+      - merge.start
+    publishes:
+      - merge.integrated
+      - LOOP_COMPLETE
+    instructions: |
+      # Integrator
+      You are the integrator for this merge-batch preset.
+
+      When triggered by `merge.start`:
+      1. Read the merge boundary from the upstream `merge-batch` run's
+         output file at `.ralph/merge/boundary.json`.
+      2. Use that boundary as the authoritative scope base for this run.
+      3. Write your scope manifest to `.ralph/merge/scope-manifest.json`.
+      4. Compute `scope_digest` as the SHA-256 of the manifest JSON.
+      5. Run `ralph emit --policy-check merge.integrated` then emit.
+
+      The `scope_base_sha` for `merge.integrated` should be taken from
+      the upstream boundary file's `commit_sha` field, not computed independently.
+
+      DO NOT use `git rev-parse HEAD` as the scope base — use the upstream
+      boundary JSON instead.

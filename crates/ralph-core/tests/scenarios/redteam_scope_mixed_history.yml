@@ -1,0 +1,229 @@
+# U6 (plan 2026-08-08-004 §Unit 6 §9): red-team mixed direct/merge history.
+# plan-resolver classifies interleaved commits and emits resolved scope
+# with coverage=92, boundary_conflict=false, critical_unknown_count=0,
+# overall_confidence=90. attack-surface-mapper activates (resolved path).
+# Loop reaches redteam.complete.
+
+name: redteam_scope_mixed_history
+description: Red-team mixed direct/merge history — X only in interleaved evidence, resolved path
+
+config:
+  prompt_file: PROMPT.md
+  topic_format_whitelist:
+    - LOOP_COMPLETE
+  max_iterations: 20
+  hats:
+    target-locker:
+      subscribes_to: []
+      publishes:
+        - redteam.target.locked
+    plan-resolver:
+      subscribes_to:
+        - redteam.target.locked
+      publishes:
+        - redteam.plan.resolved
+        - redteam.plan.unresolved
+    attack-surface-mapper:
+      subscribes_to:
+        - redteam.plan.resolved
+      publishes:
+        - redteam.attack.mapped
+    experiment-runner:
+      subscribes_to:
+        - redteam.attack.mapped
+      publishes:
+        - redteam.experiment.done
+    evidence-gate:
+      subscribes_to:
+        - redteam.experiment.done
+      publishes:
+        - redteam.evidence.gated
+        - redteam.retry.required
+    impact-boundary:
+      subscribes_to:
+        - redteam.evidence.gated
+      publishes:
+        - redteam.impact.rejected
+        - redteam.plan.ready
+    independent-reviewer:
+      subscribes_to:
+        - redteam.plan.ready
+        - redteam.impact.rejected
+      publishes:
+        - redteam.reviewed
+    reporter:
+      subscribes_to:
+        - redteam.reviewed
+        - redteam.plan.unresolved
+      publishes:
+        - redteam.complete
+  event_loop:
+    execution_mode: isolated
+    starting_event: "redteam.start"
+    completion_promise: "redteam.complete"
+    required_events:
+      - "redteam.target.locked"
+    event_policy:
+      enabled: true
+      mode: enforce
+      on_violation: reject_with_resume
+      schemas:
+        redteam.target.locked:
+          required_fields:
+            - target_head
+            - target_tree
+            - plan_count
+            - lock_file_path
+            - lock_status
+          payload: json_object
+        redteam.plan.resolved:
+          required_fields:
+            - resolved_count
+            - unresolved_count
+            - resolution_file_path
+            - scope_manifest_path
+            - scope_digest
+            - scope_status
+            - overall_confidence
+            - critical_unknown_count
+            - scope_base_sha
+            - resolved_patch_path
+            - patch_digest
+            - coverage
+            - critical_traceability
+            - boundary_consistency
+            - boundary_conflict
+          payload: json_object
+        redteam.plan.unresolved:
+          required_fields:
+            - reason
+            - resolution_file_path
+          payload: json_object
+        redteam.attack.mapped:
+          required_fields:
+            - surface_count
+            - experiment_count
+            - attack_surface_path
+            - experiment_plan_path
+          payload: json_object
+        redteam.experiment.done:
+          required_fields:
+            - experiment_id
+            - control_passed
+            - attack_reproduced
+            - evidence_paths
+            - experiment_file_path
+          payload: json_object
+        redteam.evidence.gated:
+          required_fields:
+            - experiment_id
+            - confidence
+            - evidence_coverage
+            - verifiability
+            - impact_certainty
+            - evidence_board_path
+          payload: json_object
+        redteam.retry.required:
+          required_fields:
+            - experiment_id
+            - attempt
+            - failed_metrics
+            - retry_delta
+            - retry_board_path
+          payload: json_object
+        redteam.impact.rejected:
+          required_fields:
+            - experiment_id
+            - reason
+            - impact_file_path
+          payload: json_object
+        redteam.plan.ready:
+          required_fields:
+            - plan_file_path
+            - finding_count
+            - impact_file_path
+          payload: json_object
+        redteam.reviewed:
+          required_fields:
+            - verdict
+            - review_file_path
+            - plan_file_path
+          payload: json_object
+        redteam.complete:
+          required_fields:
+            - success
+            - report_path
+            - plan_path
+            - questions_path
+          payload: json_object
+
+mock_responses:
+  - text: |
+      <event topic="redteam.target.locked">
+      {"target_head":"abc1234def5678901234567890abcdef1234567890","target_tree":"def5678901234567890abcdef1234567890abcdef0","plan_count":1,"lock_file_path":".ralph/red-team/01-target-lock.md","lock_status":"locked"}
+      </event>
+    hat: target-locker
+  - text: |
+      <event topic="redteam.plan.resolved">
+      {"resolved_count":1,"unresolved_count":0,"resolution_file_path":".ralph/red-team/02-plan-resolution.md","scope_manifest_path":".ralph/red-team/scope-manifest.json","scope_digest":"abcd1234ef5678901234567890abcdef1234567890abcdef1234567890abcdef1234567890","scope_status":"resolved","overall_confidence":90,"critical_unknown_count":0,"scope_base_sha":"abc1234def5678901234567890abcdef1234567890","resolved_patch_path":".ralph/red-team/patches/full-current.patch","patch_digest":"def7567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef1","coverage":92,"critical_traceability":100,"boundary_consistency":true,"boundary_conflict":false}
+      </event>
+    hat: plan-resolver
+  - text: |
+      <event topic="redteam.attack.mapped">
+      {"surface_count":1,"experiment_count":1,"attack_surface_path":".ralph/red-team/04-attack-surface.md","experiment_plan_path":".ralph/red-team/05-experiment-plan.md"}
+      </event>
+    hat: attack-surface-mapper
+  - text: |
+      <event topic="redteam.experiment.done">
+      {"experiment_id":"RTE-001","control_passed":true,"attack_reproduced":true,"evidence_paths":[".ralph/red-team/evidence/RTE-001/stdout.txt"],"experiment_file_path":".ralph/red-team/experiments/RTE-001.md"}
+      </event>
+    hat: experiment-runner
+  - text: |
+      <event topic="redteam.evidence.gated">
+      {"experiment_id":"RTE-001","confidence":95,"evidence_coverage":95,"verifiability":95,"impact_certainty":95,"evidence_board_path":".ralph/red-team/07-evidence-board.md"}
+      </event>
+    hat: evidence-gate
+  - text: |
+      <event topic="redteam.plan.ready">
+      {"plan_file_path":".ralph/red-team/PLAN.md","finding_count":1,"impact_file_path":".ralph/red-team/08-impact-boundary.md"}
+      </event>
+    hat: impact-boundary
+  - text: |
+      <event topic="redteam.reviewed">
+      {"verdict":"PLAN_READY","review_file_path":".ralph/red-team/10-independent-review.md","plan_file_path":".ralph/red-team/PLAN.md"}
+      </event>
+    hat: independent-reviewer
+  - text: |
+      <event topic="redteam.complete">
+      {"success":true,"report_path":".ralph/red-team/REPORT.md","plan_path":".ralph/red-team/PLAN.md","questions_path":".ralph/red-team/QUESTIONS.md"}
+      </event>
+    hat: reporter
+
+expected:
+  iterations: 8
+  events:
+    - topic: redteam.target.locked
+    - topic: redteam.plan.resolved
+    - topic: redteam.attack.mapped
+    - topic: redteam.experiment.done
+    - topic: redteam.evidence.gated
+    - topic: redteam.plan.ready
+    - topic: redteam.reviewed
+    - topic: redteam.complete
+  completion: true
+  absent_events:
+    - topic: redteam.plan.unresolved
+  payload_matches:
+    - topic: redteam.plan.resolved
+      fields:
+        resolved_count: 1
+        unresolved_count: 0
+        scope_status: "resolved"
+        overall_confidence: 90
+        critical_unknown_count: 0
+        coverage: 92
+        boundary_consistency: true
+        boundary_conflict: false
+    - topic: redteam.complete
+      fields:
+        success: true

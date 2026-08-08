@@ -48,8 +48,12 @@ ANCHORS: tuple[tuple[str, str], ...] = (
     ("skills/ralph-preset-review/references/patterns.md", "Evidence-bound correction pattern"),
     ("skills/ralph-preset-author/references/prompt-visibility.md", "evidence-bound"),
     ("skills/ralph-preset-review/references/prompt-visibility.md", "evidence-bound"),
-    ("skills/ralph-preset-author/references/commands.md", "evidence-bound"),
-    ("skills/ralph-preset-review/references/commands.md", "evidence-bound"),
+    ("skills/ralph-preset-author/references/commands.md", "Scope handoff contract"),
+    ("skills/ralph-preset-review/references/commands.md", "Scope handoff contract"),
+    ("skills/ralph-preset-author/references/patterns.md", "Scope handoff guard pattern"),
+    ("skills/ralph-preset-review/references/patterns.md", "Scope handoff guard pattern"),
+    ("skills/ralph-preset-author/references/prompt-visibility.md", "Scope resolution is agent-owned"),
+    ("skills/ralph-preset-review/references/prompt-visibility.md", "Scope resolution is agent-owned"),
 )
 
 # Capability-triggered fixtures from plan 2026-08-02-001 U3.
@@ -89,6 +93,22 @@ CAPABILITY_FIXTURES: tuple[tuple[str, str], ...] = (
     # fixture is meant to anchor. The positive fixture advertises
     # absence (no review-only finding) by listing a baseline
     # `key_stage_event_gate` anchor and is still loadable.
+    (
+        "scope_missing_negative_fixture.yml",
+        "scope.contract.missing_manifest_field",
+    ),
+    (
+        "scope_boundary_dependency_negative_fixture.yml",
+        "scope.contract.boundary_authority",
+    ),
+    (
+        "scope_placeholder_base_negative_fixture.yml",
+        "scope.contract.placeholder_base",
+    ),
+    (
+        "scope_confidence_gate_negative_fixture.yml",
+        "scope.contract.confidence_gate_bypass",
+    ),
     (
         "key-stage-event-gate-positive-fixture.yml",
         "key_stage_event_gate_baseline",

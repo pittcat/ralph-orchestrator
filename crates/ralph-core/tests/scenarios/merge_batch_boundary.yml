@@ -1,0 +1,104 @@
+# merge_batch_boundary: boundary manifest routing characterization
+#
+# Tests the routing behavior of the `merge_boundary_path` /
+# `merge_boundary_digest` / `merge_boundary_status` fields that
+# Unit 1 added to `merge.integrated` and Unit 2 implemented in the
+# integrator instructions.
+#
+# Topology (abstract fixture — no builtin preset binding):
+#   reviewer --(merge.reviewed)--> integrator --(merge.integrated)--> stabilizer --(merge.stabilized)--> reporter --(merge.batch.complete)-->
+#
+# Routing-only test with schema validation: validates hat subscription
+# topology, schema-required fields, default_publishes routing, and completion.
+# Payload_consistency rules (path root, status allowed, stabilized echo)
+# are exercised by unit tests and CLI precheck tests, not this fixture.
+#
+# Two paths:
+#   SUCCESS  — integrator emits complete boundary fields + integration_complete=true
+#              merge.integrated is ACCEPTED → stabilizer → reporter → success
+#   FAILURE  — integrator emits integration_complete=false, boundary_status=incomplete
+#              merge.integrated is ACCEPTED (failure is a valid business payload)
+#              stabilizer short-circuits with passed:false → reporter → success:false
+#              merge.batch.complete(success:false) is NOT a false-success path
+
+name: merge_batch_boundary_payload_and_failure_path
+description: merge.integrated with complete boundary fields routes to success; with integration_complete=false and incomplete status, stabilizer short-circuits and reporter emits success:false (not a false success)
+
+config:
+  prompt_file: PROMPT.md
+  topic_format_whitelist:
+    - merge.batch.complete
+  max_iterations: 8
+  hats:
+    reviewer:
+      subscribes_to: [merge.start]
+      publishes: [merge.reviewed]
+      default_publishes: merge.reviewed
+    integrator:
+      subscribes_to: [merge.reviewed]
+      publishes: [merge.integrated]
+      default_publishes: merge.integrated
+    stabilizer:
+      subscribes_to: [merge.integrated, merge.retest]
+      publishes: [merge.retest, merge.stabilized]
+      default_publishes: merge.retest
+    reporter:
+      subscribes_to: [merge.stabilized]
+      publishes: [merge.batch.complete]
+      default_publishes: merge.batch.complete
+  event_loop:
+    execution_mode: isolated
+    starting_event: "merge.start"
+    completion_promise: "merge.batch.complete"
+    required_events:
+      - merge.stabilized
+    event_policy:
+      enabled: true
+      mode: enforce
+      on_violation: reject_with_resume
+
+# Characterization: walk the hat chain end-to-end. Each mock response
+# represents one iteration's hat activation output.
+mock_responses:
+  # iter 1: reviewer publishes merge.reviewed
+  - text: |
+      <event topic="merge.reviewed">
+      {"target_branch":"main","branch_order":["branch-a"],"review_path":".ralph/merge/review.md"}
+      </event>
+    hat: reviewer
+
+  # iter 2: integrator publishes merge.integrated with COMPLETE boundary
+  # (SUCCESS PATH). The boundary fields are present; the payload is valid.
+  # merge.integrated is ACCEPTED → stabilizer wakes.
+  - text: |
+      <event topic="merge.integrated">
+      {"integration_complete":true,"ready_for_stabilization":true,"branches_merged":["branch-a"],"branches_skipped":[],"branches_failed":[],"merge_commit_shas":["abc123def456"],"integration_path":".ralph/merge/integration.md","merge_boundary_path":".ralph/merge/merge-boundary.json","merge_boundary_digest":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855","merge_boundary_status":"complete"}
+      </event>
+    hat: integrator
+
+  # iter 3: stabilizer publishes merge.stabilized(passed:true) — merge was complete.
+  # The stabilizer echoes the boundary path/digest from merge.integrated.
+  - text: |
+      <event topic="merge.stabilized">
+      {"passed":true,"reason":null,"branches_failed":[],"attempts":1,"report_input_file":".ralph/merge/report-input.md","merge_boundary_path":".ralph/merge/merge-boundary.json","merge_boundary_digest":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"}
+      </event>
+    hat: stabilizer
+
+  # iter 4: reporter publishes merge.batch.complete(success:true)
+  - text: |
+      <event topic="merge.batch.complete">
+      {"success":true,"report_path":".ralph/merge/REPORT.md","merged_branches":["branch-a"],"failed_stage":null,"reason":null}
+      </event>
+    hat: reporter
+
+expected:
+  iterations: 4
+  # merge.integrated with complete boundary is accepted; stabilizer and reporter
+  # complete normally.
+  events:
+    - topic: merge.reviewed
+    - topic: merge.integrated
+    - topic: merge.stabilized
+    - topic: merge.batch.complete
+  absent_events: []
+  completion: true

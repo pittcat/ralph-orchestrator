@@ -868,4 +868,292 @@ mod cross_impl_consistency_tests {
             obs[0].1
         );
     }
+
+    // ─────────────────────────────────────────────────────────────────
+    // 2026-08-08-004 plan U1: scope payload_consistency rule tests
+    // Tests cover merge-batch, postmerge, and redteam scope topics.
+    // Each test mirrors the exact `when` predicate structure from the
+    // preset YAML payload_consistency rules.
+    // ─────────────────────────────────────────────────────────────────
+
+    // merge-batch: merge_boundary_path must exist and be non-empty
+    #[test]
+    fn scope_merge_boundary_path_exists_and_non_empty_hit() {
+        let when = json!({
+            "all": [
+                {"field": "merge_boundary_path", "exists": true},
+                {"field": "merge_boundary_path", "non_empty": true}
+            ]
+        });
+        // Hit when field IS present and non-empty (guard fires → rejection)
+        assert_eq!(
+            evaluate(&when, &json!({"merge_boundary_path": ".ralph/merge/merge-boundary.json"})),
+            EvalOutcome::Hit
+        );
+    }
+
+    #[test]
+    fn scope_merge_boundary_path_missing_is_miss() {
+        let when = json!({
+            "all": [
+                {"field": "merge_boundary_path", "exists": true},
+                {"field": "merge_boundary_path", "non_empty": true}
+            ]
+        });
+        // Miss when field is absent → rule does not fire → payload passes
+        assert_eq!(evaluate(&when, &json!({})), EvalOutcome::Miss);
+    }
+
+    #[test]
+    fn scope_merge_boundary_path_empty_string_is_miss() {
+        let when = json!({
+            "all": [
+                {"field": "merge_boundary_path", "exists": true},
+                {"field": "merge_boundary_path", "non_empty": true}
+            ]
+        });
+        // empty string → non_empty: true is Miss (empty string IS empty) → all Miss
+        assert_eq!(
+            evaluate(&when, &json!({"merge_boundary_path": ""})),
+            EvalOutcome::Miss
+        );
+    }
+
+    // merge-batch: merge_boundary_status structural check
+    #[test]
+    fn scope_merge_boundary_status_present_is_hit() {
+        let when = json!({
+            "all": [
+                {"field": "merge_boundary_status", "exists": true},
+                {"field": "merge_boundary_status", "non_empty": true}
+            ]
+        });
+        assert_eq!(
+            evaluate(&when, &json!({"merge_boundary_status": "complete"})),
+            EvalOutcome::Hit
+        );
+    }
+
+    #[test]
+    fn scope_merge_boundary_status_missing_is_miss() {
+        let when = json!({
+            "all": [
+                {"field": "merge_boundary_status", "exists": true},
+                {"field": "merge_boundary_status", "non_empty": true}
+            ]
+        });
+        assert_eq!(evaluate(&when, &json!({})), EvalOutcome::Miss);
+    }
+
+    // postmerge: scope_status=resolved requires overall_confidence > 89
+    #[test]
+    fn scope_postmerge_resolved_confidence_below_threshold_is_miss() {
+        let when = json!({
+            "all": [
+                {"field": "scope_status", "eq": "resolved"},
+                {"field": "overall_confidence", "gt": 89}
+            ]
+        });
+        // overall_confidence = 88 → gt:89 is Miss → all Miss
+        assert_eq!(
+            evaluate(&when, &json!({"scope_status": "resolved", "overall_confidence": 88})),
+            EvalOutcome::Miss
+        );
+    }
+
+    #[test]
+    fn scope_postmerge_resolved_confidence_at_threshold_is_hit() {
+        let when = json!({
+            "all": [
+                {"field": "scope_status", "eq": "resolved"},
+                {"field": "overall_confidence", "gt": 89}
+            ]
+        });
+        // overall_confidence = 90 → gt:89 is Hit (90 > 89) → all Hit
+        assert_eq!(
+            evaluate(&when, &json!({"scope_status": "resolved", "overall_confidence": 90})),
+            EvalOutcome::Hit
+        );
+    }
+
+    #[test]
+    fn scope_postmerge_resolved_confidence_85_is_miss() {
+        let when = json!({
+            "all": [
+                {"field": "scope_status", "eq": "resolved"},
+                {"field": "overall_confidence", "gt": 89}
+            ]
+        });
+        // overall_confidence = 85 → gt:89 is Miss → all Miss
+        assert_eq!(
+            evaluate(&when, &json!({"scope_status": "resolved", "overall_confidence": 85})),
+            EvalOutcome::Miss
+        );
+    }
+
+    // postmerge: scope_status=resolved requires critical_unknown_count == 0
+    #[test]
+    fn scope_postmerge_resolved_critical_unknown_zero_is_miss() {
+        let when = json!({
+            "all": [
+                {"field": "scope_status", "eq": "resolved"},
+                {"field": "critical_unknown_count", "gt": 0}
+            ]
+        });
+        // critical_unknown_count = 0 → gt:0 is Miss → all Miss
+        assert_eq!(
+            evaluate(&when, &json!({"scope_status": "resolved", "critical_unknown_count": 0})),
+            EvalOutcome::Miss
+        );
+    }
+
+    #[test]
+    fn scope_postmerge_resolved_critical_unknown_present_fires_hit() {
+        let when = json!({
+            "all": [
+                {"field": "scope_status", "eq": "resolved"},
+                {"field": "critical_unknown_count", "gt": 0}
+            ]
+        });
+        // critical_unknown_count = 1 → gt:0 is Hit → all Hit
+        assert_eq!(
+            evaluate(&when, &json!({"scope_status": "resolved", "critical_unknown_count": 1})),
+            EvalOutcome::Hit
+        );
+    }
+
+    // postmerge: scope_status=resolved requires proceed: true
+    #[test]
+    fn scope_postmerge_resolved_proceed_false_is_hit() {
+        let when = json!({
+            "all": [
+                {"field": "scope_status", "eq": "resolved"},
+                {"field": "proceed", "eq": false}
+            ]
+        });
+        // proceed = false → eq:false is Hit → all Hit → rule fires
+        assert_eq!(
+            evaluate(&when, &json!({"scope_status": "resolved", "proceed": false})),
+            EvalOutcome::Hit
+        );
+    }
+
+    #[test]
+    fn scope_postmerge_resolved_proceed_true_is_miss() {
+        let when = json!({
+            "all": [
+                {"field": "scope_status", "eq": "resolved"},
+                {"field": "proceed", "eq": false}
+            ]
+        });
+        // proceed = true → eq:false is Miss → all Miss
+        assert_eq!(
+            evaluate(&when, &json!({"scope_status": "resolved", "proceed": true})),
+            EvalOutcome::Miss
+        );
+    }
+
+    // postmerge: blocked/ambiguous with proceed: true is blocked
+    #[test]
+    fn scope_postmerge_blocked_proceed_true_fires_hit() {
+        let when = json!({
+            "any": [
+                {"all": [
+                    {"field": "scope_status", "eq": "blocked"},
+                    {"field": "proceed", "eq": true}
+                ]},
+                {"all": [
+                    {"field": "scope_status", "eq": "ambiguous"},
+                    {"field": "proceed", "eq": true}
+                ]}
+            ]
+        });
+        assert_eq!(
+            evaluate(&when, &json!({"scope_status": "blocked", "proceed": true})),
+            EvalOutcome::Hit
+        );
+        assert_eq!(
+            evaluate(&when, &json!({"scope_status": "ambiguous", "proceed": true})),
+            EvalOutcome::Hit
+        );
+    }
+
+    #[test]
+    fn scope_postmerge_blocked_proceed_false_is_miss() {
+        let when = json!({
+            "any": [
+                {"all": [
+                    {"field": "scope_status", "eq": "blocked"},
+                    {"field": "proceed", "eq": true}
+                ]},
+                {"all": [
+                    {"field": "scope_status", "eq": "ambiguous"},
+                    {"field": "proceed", "eq": true}
+                ]}
+            ]
+        });
+        assert_eq!(
+            evaluate(&when, &json!({"scope_status": "blocked", "proceed": false})),
+            EvalOutcome::Miss
+        );
+    }
+
+    // postmerge: scope_base_sha exists check
+    #[test]
+    fn scope_postmerge_base_sha_exists_fires_hit() {
+        let when = json!({"field": "scope_base_sha", "exists": true});
+        assert_eq!(
+            evaluate(&when, &json!({"scope_base_sha": "abc1234def567890abc1234def567890abc1234def567890"})),
+            EvalOutcome::Hit
+        );
+    }
+
+    #[test]
+    fn scope_postmerge_base_sha_missing_is_miss() {
+        let when = json!({"field": "scope_base_sha", "exists": true});
+        assert_eq!(evaluate(&when, &json!({})), EvalOutcome::Miss);
+    }
+
+    // redteam: resolved requires resolved_count >= 1 (eq:0 check)
+    #[test]
+    fn scope_redteam_resolved_count_zero_is_hit() {
+        let when = json!({
+            "all": [
+                {"field": "scope_status", "eq": "resolved"},
+                {"field": "resolved_count", "eq": 0}
+            ]
+        });
+        assert_eq!(
+            evaluate(&when, &json!({"scope_status": "resolved", "resolved_count": 0})),
+            EvalOutcome::Hit
+        );
+    }
+
+    #[test]
+    fn scope_redteam_resolved_count_positive_is_miss() {
+        let when = json!({
+            "all": [
+                {"field": "scope_status", "eq": "resolved"},
+                {"field": "resolved_count", "eq": 0}
+            ]
+        });
+        // resolved_count = 1 → eq:0 is Miss → all Miss
+        assert_eq!(
+            evaluate(&when, &json!({"scope_status": "resolved", "resolved_count": 1})),
+            EvalOutcome::Miss
+        );
+    }
+
+    // overall_confidence type-guard: any non-numeric value should fail-close
+    #[test]
+    fn scope_overall_confidence_string_is_hit_fail_close() {
+        let when = json!({"field": "overall_confidence", "exists": true});
+        // string is not a number → exists: true fires Hit (field exists), but the
+        // semantic check (gt: 89) would type-mismatch and fire Hit.
+        // Here we just test the structural exists check.
+        assert_eq!(
+            evaluate(&when, &json!({"overall_confidence": "ninety"})),
+            EvalOutcome::Hit
+        );
+    }
 }

@@ -877,3 +877,148 @@ fn test_emit_compile_failure_does_not_write_event() {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// 2026-08-08-004 fix-plan U4 (R5 / A1) + U5 (R6 / A2): end-to-end test
+// that the scope handoff guard fires inside the real `ralph emit`
+// subprocess. The CLI guard runs BEFORE `--policy-check` short-circuit
+// and BEFORE the `--unsafe-no-policy-check` branch, so we test by
+// passing a tampered digest + `--unsafe-no-policy-check` and asserting
+// the guard still rejects.
+// ---------------------------------------------------------------------------
+
+/// Write a single-hat preset that publishes the four scope topics so
+/// the hat's `allowed_topics` is satisfied. The guard itself is
+/// topic-based (no preset config dependency) so we don't need to
+/// load the full merge-batch or red-team-attack preset.
+fn scope_handoff_write_preset(temp_path: &std::path::Path) {
+    std::fs::create_dir_all(temp_path.join(".ralph")).unwrap();
+    std::fs::write(
+        temp_path.join("ralph.yml"),
+        r#"
+event_loop:
+  completion_promise: "merge.batch.complete"
+cli:
+  backend: "claude"
+hats:
+  worker:
+    name: "Worker"
+    description: "Does the work"
+    triggers: ["merge.start"]
+    publishes:
+      - "merge.integrated"
+      - "merge.stabilized"
+      - "postmerge.changemap.ready"
+      - "redteam.plan.resolved"
+    instructions: "do work"
+"#,
+    )
+    .unwrap();
+}
+
+/// U4 (R5 / A1) + U5 (R6 / A2): a `ralph emit merge.integrated` whose
+/// declared `merge_boundary_digest` does NOT match the SHA-256 of the
+/// file on disk must be rejected by the scope handoff guard — even
+/// with `--unsafe-no-policy-check`, because the guard runs BEFORE the
+/// unsafe short-circuit (per `command_impl.rs` L1215-1241).
+#[test]
+fn test_emit_scope_handoff_guard_rejects_tampered_digest() {
+    let temp_dir = TempDir::new().expect("temp dir");
+    let temp_path = temp_dir.path();
+    scope_handoff_write_preset(temp_path);
+
+    // Write a real boundary file with known bytes.
+    let boundary_dir = temp_path.join(".ralph/merge");
+    std::fs::create_dir_all(&boundary_dir).unwrap();
+    let boundary_file = boundary_dir.join("merge-boundary.json");
+    std::fs::write(&boundary_file, br#"{"target_identity":"abc"}"#).unwrap();
+
+    // Declare a 64-hex digest that does NOT match the file's actual
+    // SHA-256. The U5 helper must catch this mismatch.
+    let tampered_digest = "deadbeef".repeat(8);
+    let payload = format!(
+        r#"{{"merge_boundary_path":".ralph/merge/merge-boundary.json","merge_boundary_digest":"{tampered_digest}","merge_boundary_status":"complete","integration_complete":true,"ready_for_stabilization":true,"branches_merged":["a"],"branches_skipped":[],"branches_failed":[],"merge_commit_shas":["abc"]}}"#
+    );
+
+    // Pass --unsafe-no-policy-check: the guard must STILL fire.
+    let output = common::ralph_bin()
+        .args([
+            "-H",
+            "builtin:merge-batch",
+            "emit",
+            "merge.integrated",
+            "-j",
+            &payload,
+            "--unsafe-no-policy-check",
+        ])
+        .current_dir(temp_path)
+        .env("RALPH_CURRENT_HAT", "integrator")
+        .output()
+        .expect("failed to run ralph emit");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !output.status.success(),
+        "scope handoff guard must reject tampered digest; \
+         stdout={stdout} stderr={stderr}"
+    );
+    let combined = format!("{stdout}{stderr}");
+    assert!(
+        combined.contains("scope handoff guard") || combined.contains("merge_boundary_digest"),
+        "rejection must mention the scope handoff guard; got: {combined}"
+    );
+
+    // No event must have been written to the events file.
+    let events_path = temp_path.join(".ralph/events.jsonl");
+    if events_path.exists() {
+        let events = std::fs::read_to_string(&events_path).unwrap_or_default();
+        assert!(
+            events.trim().is_empty(),
+            "scope handoff rejection must not write any event; got: {events}"
+        );
+    }
+}
+
+/// U4 (R5 / A1): a `ralph emit merge.integrated` whose
+/// `merge_boundary_path` is missing entirely (no path field) must be
+/// rejected by the scope handoff guard with a clean `Err`, not a
+/// panic. This is the structural-only path that the guard should
+/// catch before any SHA-256 recomputation.
+#[test]
+fn test_emit_scope_handoff_guard_rejects_missing_boundary_path() {
+    let temp_dir = TempDir::new().expect("temp dir");
+    let temp_path = temp_dir.path();
+    scope_handoff_write_preset(temp_path);
+
+    // No `merge_boundary_path` at all — but the payload IS valid JSON.
+    let payload = r#"{"merge_boundary_digest":"0000000000000000000000000000000000000000000000000000000000000000","merge_boundary_status":"complete","integration_complete":true,"ready_for_stabilization":true,"branches_merged":["a"],"branches_skipped":[],"branches_failed":[],"merge_commit_shas":["abc"]}"#;
+
+    let output = common::ralph_bin()
+        .args([
+            "-H",
+            "builtin:merge-batch",
+            "emit",
+            "merge.integrated",
+            "-j",
+            payload,
+            "--unsafe-no-policy-check",
+        ])
+        .current_dir(temp_path)
+        .env("RALPH_CURRENT_HAT", "integrator")
+        .output()
+        .expect("failed to run ralph emit");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !output.status.success(),
+        "scope handoff guard must reject missing merge_boundary_path; \
+         stdout={stdout} stderr={stderr}"
+    );
+    let combined = format!("{stdout}{stderr}");
+    assert!(
+        combined.contains("merge_boundary_path") || combined.contains("scope handoff guard"),
+        "rejection must reference merge_boundary_path; got: {combined}"
+    );
+}

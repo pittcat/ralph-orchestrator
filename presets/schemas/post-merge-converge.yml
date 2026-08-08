@@ -56,17 +56,36 @@ schemas:
       - artifact_path
       - high_risk_crossings_count
       - plan_match_confidence
+      # U1 scope manifest fields (D3/D7/D12)
+      - scope_manifest_path
+      - scope_digest
+      - scope_status
+      - overall_confidence
+      - critical_unknown_count
+      - scope_base_sha
+      - scope_source
+      # U4 new fields (D6): classification diff paths and commit counts
+      - interleaved_diff_path
+      - override_diff_path
+      - unknown_diff_path
+      - interleaved_commits_count
+      - override_commits_count
+      - unknown_commits_count
     payload: json_object
     allowed_values:
       plan_match_confidence:
         - high
         - medium
         - low
+      scope_status:
+        - resolved
+        - ambiguous
+        - blocked
     field_docs:
       proceed:
         meaning: Whether downstream audit should run full system analysis.
-        source: Upstream baseline_valid plus ability to build a change map.
-        fill_rule: false when baseline_valid was false or the map cannot be built; true only when the four required tables exist in the artifact.
+        source: Upstream baseline_valid plus ability to build a change map AND scope decision is resolved.
+        fill_rule: false when baseline_valid was false OR the map cannot be built OR scope_status is not resolved; true only when all four required tables exist in the artifact AND scope_status=resolved AND overall_confidence >= 90 AND critical_unknown_count == 0.
       artifact_path:
         meaning: Repo-relative path to the change-map artifact.
         source: File written this activation (.ralph/post-merge/02-change-map.md).
@@ -79,6 +98,62 @@ schemas:
         meaning: Confidence that commit↔plan mappings (especially auto-discovered ones) are correct.
         source: Prompt plan list (high) or git-history / commit chronology / branch-history matching quality (medium/low).
         fill_rule: high when prompt listed plans and all matched; medium when most auto-matches are clear, including same-branch sequential plans resolved by commit order; low when many unmatched/ambiguous — deepen matching before emit when low and high-risk crossings depend on those matches.
+      scope_manifest_path:
+        meaning: Repo-relative path to the multi-plan scope manifest JSON artifact.
+        source: Change-mapper writes `.ralph/post-merge/scope-manifest.json`.
+        fill_rule: Must be under `.ralph/post-merge/`; real readable path only; reject emit if file is missing or digest mismatches.
+        examples: [".ralph/post-merge/scope-manifest.json"]
+      scope_digest:
+        meaning: SHA-256 hex digest of canonical scope manifest bytes (64 hex chars).
+        source: Change-mapper computes from scope-manifest.json canonical JSON bytes.
+        fill_rule: 64-char hex from SHA-256 of canonical JSON (keys sorted, arrays in semantic order, no trailing space on last line); recompute on every emit attempt; must match recomputed digest on read.
+      scope_status:
+        meaning: Scope resolution decision from change-mapper analysis.
+        source: Change-mapper resolves via plan candidates, commit attribution, and hunk classification.
+        fill_rule: One of `resolved | ambiguous | blocked`; only `resolved` allows proceed=true.
+      overall_confidence:
+        meaning: Weighted overall confidence score (0/85/90/100) for the scope resolution.
+        source: "Change-mapper computes per D7: identity 15% + base 15% + commit_attribution 20% + hunk_attribution 25% + interleaved 10% + override_revert 5% + cross_check 10%."
+        fill_rule: One of 0/85/90/100; resolved requires overall >= 90 AND base/hunk/interleaved/cross_check each >= 90.
+      critical_unknown_count:
+        meaning: Number of critical-path hunk/commit attributions that could not be resolved.
+        source: Change-mapper counts critical unknown hunks/commits from classification table.
+        fill_rule: Non-negative integer; resolved requires critical_unknown_count == 0.
+      scope_base_sha:
+        meaning: Git SHA of the scope base commit (the lower bound of the scoped diff).
+        source: Change-mapper resolves via explicit input or fixed anchor/parent algorithm (D5).
+        fill_rule: 40-char hex SHA; must be ancestor of all candidate commits AND not equal to HEAD; reject if placeholder or unresolved.
+        examples: ["abc1234def5678..."]
+      scope_source:
+        meaning: How the scope base was determined.
+        source: Change-mapper records from input or algorithm.
+        fill_rule: One of `explicit | direct-target | branch-merge | inferred`; must not be `merge-batch-required` (merge-boundary is optional cross-check only).
+      # U4 new fields (D6): classification diff paths
+      interleaved_diff_path:
+        meaning: Repo-relative path to the diff artifact containing hunks classified as interleaved.
+        source: Change-mapper writes `.ralph/post-merge/diffs/interleaved.patch`.
+        fill_rule: Real path under `.ralph/post-merge/diffs/`; absent when no interleaved hunks.
+      override_diff_path:
+        meaning: Repo-relative path to the diff artifact containing hunks classified as overridden or reverted.
+        source: Change-mapper writes `.ralph/post-merge/diffs/override.patch`.
+        fill_rule: Real path under `.ralph/post-merge/diffs/`; absent when no override/revert hunks.
+      unknown_diff_path:
+        meaning: Repo-relative path to the diff artifact containing hunks classified as unknown.
+        source: Change-mapper writes `.ralph/post-merge/diffs/unknown.patch`.
+        fill_rule: Real path under `.ralph/post-merge/diffs/`; absent when no unknown hunks.
+      # U4 new fields (D6): commit classification counts
+      interleaved_commits_count:
+        meaning: Number of commits in the diff range that belong to multiple plans simultaneously.
+        source: Change-mapper classifies commits via git rev-list --topo-order --reverse.
+        fill_rule: Non-negative integer; 0 when no interleaved commits.
+      override_commits_count:
+        meaning: Number of commits that represent a later plan overriding an earlier plan's changes.
+        source: Change-mapper classifies commits via commit ordering and diff analysis.
+        fill_rule: Non-negative integer; 0 when no override commits.
+      unknown_commits_count:
+        meaning: Number of commits in the diff range that cannot be attributed to any known plan.
+        source: Change-mapper classifies commits via git rev-list --topo-order --reverse.
+        fill_rule: Non-negative integer; resolved requires this to be 0.
 
   postmerge.audit.ready:
     required_fields:

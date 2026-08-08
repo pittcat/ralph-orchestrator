@@ -207,6 +207,49 @@ preset-lint 现状)；Mechanical Lint Results 段需显式注明「capability
 triggered 项：review-only，不进 lint JSON」。命中按 review-only ID +
 default severity + default confidence 入主表。
 
+
+### 10. Scope contract fixtures (2026-08-08-004 plan U7)
+
+`scope_missing_negative_fixture.yml` / `scope_boundary_dependency_negative_fixture.yml` /
+`scope_placeholder_base_negative_fixture.yml` / `scope_confidence_gate_negative_fixture.yml`
+覆盖 plan 2026-08-08-004 U7 的 scope contract finding_id：
+
+| Axis | What the YAML contains | Expected finding | Source |
+|---|---|---|---|
+| Missing (a) | scope topic emit but no `scope_manifest_path` / `scope_digest` / `scope_status` fields in instructions | `scope.contract.missing_manifest_field` | review-only |
+| Boundary (a) | instructions use upstream `merge-batch` boundary JSON as scope authority | `scope.contract.boundary_authority` | review-only |
+| Placeholder (a) | `scope_base_sha` set to literal `<global-baseline>` | `scope.contract.placeholder_base` | review-only |
+| Confidence (a) | `overall_confidence: 87` with `critical_unknown_count: 1` but `proceed: true` — below 90 threshold | `scope.contract.confidence_gate_bypass` | review-only |
+
+每个 fixture 顶部注释明示其 anti-pattern 轴、expected finding_id、与本段对照命中。
+fixture 故意保持 preset-neutral（不复制任何 builtin preset）。
+
+**Acceptance gates:**
+
+> 验收：4 个 scope fixture 全部必须存在；缺少任意一个，README §10 acceptance 视为失败（loop 不再 `2>/dev/null || true` 吞错，rename / 缺失会立刻 fail-fast）。
+
+```bash
+# CLI 冒烟 — positive fixture 必须 strict 通过；negative fixtures 允许因
+# 预期的结构化 lint 反例返回非零，但必须仍输出可解析 JSON，不能进程崩溃。
+# Fixture 文件名按 L213-215 的真实文件：`scope_*_negative_fixture.yml`。
+# 早期的 `${f}-fixture.yml` 展开会拼出错误路径（缺少下划线），必须改用直接的文件名。
+for f in scope_missing_negative_fixture scope_boundary_dependency_negative_fixture scope_placeholder_base_negative_fixture scope_confidence_gate_negative_fixture; do
+  fixture_path="skills/ralph-preset-review/fixtures/${f}.yml"
+  test -f "${fixture_path}" || { echo "ERROR: fixture missing: ${fixture_path}"; exit 1; }
+  out=$(mktemp)
+  ralph preset check -H "${fixture_path}" --strict --format json >"${out}"
+  .venv/bin/python -c 'import json,sys; json.load(open(sys.argv[1]))' "$out"
+  rm -f "$out"
+done
+
+# 软性 AAF (scope contract) 是 review-only, 通过阅读 fixture 配合
+# references/finding-rubric.md 「Scope contract finding_id」段对照命中。
+```
+
+**Review-only finding 必须显式人工审**：4 个新 fixture 的 expected finding
+**不会**由 `ralph preset check` 自动吐出；Mechanical Lint Results 段需显式
+注明「scope contract 项：review-only，不进 lint JSON」。命中按 review-only ID +
+default severity + default confidence 入主表。
 ## 9. Key-stage event gate fixtures (2026-08-05-007 plan)
 
 `key-stage-event-gate-positive-fixture.yml` / `key-stage-event-gate-missing-selection-negative-fixture.yml` /

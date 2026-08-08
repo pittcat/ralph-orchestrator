@@ -1,5 +1,26 @@
 # Preset Author Notes — post-merge-converge
 
+## Revision 2026-08-09 (U4 mixed history / unknown hard gate)
+
+- change-mapper: D6 commit attribution (plan_owned / interleaved / unknown) via `git rev-list --topo-order --reverse`
+- change-mapper: D6 hunk attribution (plan_owned / overridden_later / reverted / shared_by_multiple_plans / unknown) with hunk key normalization
+- change-mapper: critical_paths union of plan expected files + candidate patch paths + explicit claim/symbol files
+- change-mapper: critical unknown → `proceed:false`, `scope_status:blocked`
+- change-mapper: `merge_boundary_path` + `cross_check=0` → boundary conflict blocker
+- change-mapper: pre-emit HEAD/tree drift recheck before emitting changemap.ready
+- change-mapper emits: `interleaved_diff_path`, `override_diff_path`, `unknown_diff_path`, `interleaved_commits_count`, `override_commits_count`, `unknown_commits_count`
+- scope_status=resolved requires: `critical_unknown_count==0` AND `unknown_commits_count==0` (already in critical_unknown_count; explicit)
+- system-auditor: reads scope_manifest_path and uses it to focus audit on plan_owned/shared_by_multiple_plans regions
+- resolved gate: scope_status=resolved AND overall_confidence>=90 AND critical_unknown_count==0 AND no boundary conflict AND no drift
+
+## Revision 2026-08-09 (U3 scope resolution)
+
+- change-mapper follows D3/D5/D6 fixed scope protocol: explicit scope_base validation, merge_boundary_path as optional cross-check, first-parent/merge-parent base derivation
+- scope-manifest.json written as D3 artifact with byte-stable schema
+- diffs/{full,scoped,interleaved,override,unknown}.patch written under .ralph/post-merge/diffs/
+- postmerge.changemap.ready carries all U1 scope fields (scope_manifest_path/digest/status/confidence/base/source)
+- resolved gate: scope_status=resolved AND overall_confidence>=90 AND critical_unknown_count=0
+
 ## Revision 2026-07-26 (sequential same-branch plan coverage)
 
 - Consumer Observe binds trigger `artifact_path` (reproducer / system-auditor / change-mapper)
@@ -79,6 +100,13 @@ Hard questions — Artifact-First: ✓（`.ralph/post-merge/` 为业务 artifact
 | postmerge.changemap.ready | proceed | bool | baseline_valid+地图完成（按 prompt / git chronology） | trigger+本 hat | 不涉及 | auditor 短路 | field_docs | 不落盘 + 短控制 |
 | postmerge.changemap.ready | artifact_path | path | 本 hat 写入 | 本 hat | 不涉及 | 读四表 | field_docs | 必填 · `02-change-map.md` |
 | postmerge.changemap.ready | high_risk_crossings_count | int | 高风险表行数 | artifact | 不涉及 | 审计优先级 | field_docs | 不落盘 + 可从 artifact 重算 |
+| postmerge.changemap.ready | scope_manifest_path | path | change-mapper writes scope-manifest.json | 本 hat | 不涉及 | 审计读取 resolved scope | field_docs | 必填 · `.ralph/post-merge/scope-manifest.json` |
+| postmerge.changemap.ready | scope_digest | string | SHA-256 of scope-manifest.json bytes | 本 hat | 禁手写 | 一致性核验 | field_docs | 不落盘 + 可重算 |
+| postmerge.changemap.ready | scope_status | enum | change-mapper 解析决策 | 本 hat | 不涉及 | resolved gate | allowed_values | 不落盘 + 控制门禁 |
+| postmerge.changemap.ready | overall_confidence | int | D7 confidence score | 本 hat | 不涉及 | resolved gate | field_docs | 不落盘 + 0/85/90/100 |
+| postmerge.changemap.ready | critical_unknown_count | int | 未解关键归属数 | 本 hat | 不涉及 | resolved gate | field_docs | 不落盘 + resolved 须为 0 |
+| postmerge.changemap.ready | scope_base_sha | string | Git SHA of scope base | 本 hat | 须为 ancestor | 下游 diff 起点 | field_docs | 不落盘 + 40-char hex |
+| postmerge.changemap.ready | scope_source | enum | 如何推导 base | 本 hat | 不涉及 | 溯源 | allowed_values | 不落盘 + explicit/direct-target/branch-merge/inferred |
 
 ## Hat: system-auditor
 
