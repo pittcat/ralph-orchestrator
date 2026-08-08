@@ -1,6 +1,6 @@
 //! U6 (2026-06-27 mechanism foundation completion):
 //! `RepairStreamSink` writes repair-stream events to
-//! `.ralph/recovery.jsonl` (or a loop-scoped path) using
+//! `<workspace>/.ralph/recovery.jsonl` using
 //! the same envelope shape as `record_stage_rejection`,
 //! so a single consumer (`ralph diagnose`) can read both
 //! the stage-rejection signal and the repair-dispatch
@@ -50,7 +50,7 @@ impl RepairStreamSink {
     }
 
     /// Append a single repair envelope to
-    /// `<workspace>/recovery.jsonl`. The envelope shape
+    /// `<workspace>/.ralph/recovery.jsonl`. The envelope shape
     /// matches the `RecoveryDiagnosisEnvelope` produced
     /// by `record_stage_rejection` so a single consumer
     /// can read both signal types from the same file.
@@ -69,8 +69,9 @@ impl RepairStreamSink {
 /// `RepairStreamSink::record`. Tests use this directly
 /// so they don't have to construct a sink.
 pub fn record_repair_event(event: &Event, workspace: &Path) -> std::io::Result<()> {
-    std::fs::create_dir_all(workspace)?;
-    let path = workspace.join("recovery.jsonl");
+    let dir = workspace.join(".ralph");
+    std::fs::create_dir_all(&dir)?;
+    let path = dir.join("recovery.jsonl");
     let file = OpenOptions::new().create(true).append(true).open(&path)?;
     let mut writer = BufWriter::new(file);
     let line = serialise_repair_envelope(event);

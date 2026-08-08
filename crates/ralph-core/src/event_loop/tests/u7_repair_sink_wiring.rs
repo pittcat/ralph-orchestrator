@@ -62,8 +62,8 @@ fn u7_publish_event_repair_topic_writes_envelope_and_skips_bus() {
         "bus must not see repair topic, got {bus_topics:?}"
     );
 
-    // Repair envelope written to workspace/recovery.jsonl.
-    let recovery_path = temp.path().join("recovery.jsonl");
+    // Repair envelope written to workspace/.ralph/recovery.jsonl.
+    let recovery_path = temp.path().join(".ralph").join("recovery.jsonl");
     let content = std::fs::read_to_string(&recovery_path)
         .unwrap_or_else(|e| panic!("read recovery.jsonl: {e}: {}", recovery_path.display()));
     assert!(
@@ -105,7 +105,7 @@ fn u7_jsonl_repair_topic_writes_envelope_and_skips_bus() {
         "bus must not see repair topic from JSONL, got {bus_topics:?}"
     );
 
-    let recovery_path = temp.path().join("recovery.jsonl");
+    let recovery_path = temp.path().join(".ralph").join("recovery.jsonl");
     let content = std::fs::read_to_string(&recovery_path)
         .unwrap_or_else(|e| panic!("read recovery.jsonl: {e}: {}", recovery_path.display()));
     assert!(

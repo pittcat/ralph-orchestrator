@@ -140,12 +140,12 @@ fn u2_publish_event_repair_topic_routes_to_placeholder_not_bus() {
 
     // U7 (2026-06-27-002 plan completion): the
     // `AcceptRepairStream` path writes to
-    // `<workspace>/recovery.jsonl` (U6 sink), not the
+    // `<workspace>/.ralph/recovery.jsonl` (U6 sink), not the
     // session_dir-scoped file the U6 stage-rejection path
     // uses. Both paths share the `REPAIR_SINK_REASON_CODE`
     // constant so the contract is identical at the
     // reason_code level.
-    let workspace_recovery = temp.path().join("recovery.jsonl");
+    let workspace_recovery = temp.path().join(".ralph").join("recovery.jsonl");
     let content = std::fs::read_to_string(&workspace_recovery)
         .unwrap_or_else(|e| panic!("read recovery.jsonl: {e}: {}", workspace_recovery.display()));
     assert!(

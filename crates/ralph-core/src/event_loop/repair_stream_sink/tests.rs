@@ -3,7 +3,7 @@
 //! pinned scenarios:
 //!
 //! 1. Happy path: writing one repair event appends the
-//!    expected envelope line to `<workspace>/recovery.jsonl`.
+//!    expected envelope line to `<workspace>/.ralph/recovery.jsonl`.
 //! 2. Edge case: two writes to the same workspace append
 //!    two lines (no truncation).
 //! 3. Error path: a read-only workspace returns `Err`
@@ -30,7 +30,7 @@ fn u6_sink_writes_one_envelope_per_event() {
         .record(&event, workspace)
         .expect("first write must succeed");
 
-    let path = workspace.join("recovery.jsonl");
+    let path = workspace.join(".ralph").join("recovery.jsonl");
     let content = std::fs::read_to_string(&path).expect("read recovery.jsonl");
     let lines: Vec<&str> = content.lines().filter(|l| !l.trim().is_empty()).collect();
     assert_eq!(lines.len(), 1, "expected exactly one line, got {lines:?}");
@@ -59,8 +59,8 @@ fn u6_sink_appends_two_lines_for_two_events() {
     record_repair_event(&ev("repair.close", r#"{"task_key":"a"}"#), workspace)
         .expect("second write");
 
-    let content =
-        std::fs::read_to_string(workspace.join("recovery.jsonl")).expect("read recovery.jsonl");
+    let content = std::fs::read_to_string(workspace.join(".ralph").join("recovery.jsonl"))
+        .expect("read recovery.jsonl");
     let lines: Vec<&str> = content.lines().filter(|l| !l.trim().is_empty()).collect();
     assert_eq!(lines.len(), 2, "expected two lines, got {lines:?}");
     assert!(lines[0].contains("task.relocate_legacy"));
@@ -92,7 +92,7 @@ fn u6_sink_envelope_carries_stable_reason_code() {
     let workspace = temp.path();
     let event = ev("task.relocate_legacy", r#"{"task_key":"k"}"#);
     record_repair_event(&event, workspace).expect("write");
-    let content = std::fs::read_to_string(workspace.join("recovery.jsonl")).unwrap();
+    let content = std::fs::read_to_string(workspace.join(".ralph").join("recovery.jsonl")).unwrap();
     // Pin the contract: the reason_code field is the
     // stable `repair_dispatch` string. Any drift here
     // breaks `ralph diagnose`'s attribution.
