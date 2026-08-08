@@ -230,7 +230,9 @@ impl CliExecutor {
 
             match next_event {
                 Some(StreamEvent::StdoutLine(line)) => {
-                    if line_signals_event_emitted(&line) {
+                    if self.backend.output_format == OutputFormat::Text
+                        && line_signals_event_emitted(&line)
+                    {
                         post_event_deadline.get_or_insert_with(|| {
                             tokio::time::Instant::now() + POST_EVENT_GRACE_TIMEOUT
                         });
@@ -282,7 +284,9 @@ impl CliExecutor {
                     accumulated_output.push('\n');
                 }
                 Some(StreamEvent::StderrLine(line)) => {
-                    if line_signals_event_emitted(&line) {
+                    if self.backend.output_format == OutputFormat::Text
+                        && line_signals_event_emitted(&line)
+                    {
                         post_event_deadline.get_or_insert_with(|| {
                             tokio::time::Instant::now() + POST_EVENT_GRACE_TIMEOUT
                         });
@@ -645,6 +649,55 @@ mod tests {
         assert!(result.output.contains("start"));
         assert!(result.output.contains("middle"));
         assert!(result.output.contains("done"));
+    }
+
+    #[tokio::test]
+    async fn test_execute_claude_stream_waits_for_result_after_event_emitted() {
+        let backend = CliBackend {
+            command: "sh".to_string(),
+            args: vec![
+                "-c".to_string(),
+                r#"printf '%s\n' '{"type":"assistant","message":{"content":[{"type":"text","text":"Event emitted: task.done"}]}}'; sleep 6; printf '%s\n' '{"type":"result","duration_ms":6000,"total_cost_usd":0.01,"num_turns":1,"is_error":false}'"#.to_string(),
+            ],
+            prompt_mode: PromptMode::Stdin,
+            prompt_flag: None,
+            output_format: OutputFormat::StreamJson,
+            env_vars: vec![],
+        };
+
+        let executor = CliExecutor::new(backend);
+        let result = executor
+            .execute_capture_with_timeout("", Some(Duration::from_secs(10)))
+            .await
+            .unwrap();
+
+        assert!(!result.timed_out);
+        assert!(result.success);
+        assert!(result.output.contains(r#"{"type":"result""#));
+    }
+
+    #[tokio::test]
+    async fn test_execute_claude_stream_without_result_still_times_out() {
+        let backend = CliBackend {
+            command: "sh".to_string(),
+            args: vec![
+                "-c".to_string(),
+                r#"printf '%s\n' '{"type":"assistant","message":{"content":[{"type":"text","text":"Event emitted: task.done"}]}}'; sleep 10"#.to_string(),
+            ],
+            prompt_mode: PromptMode::Stdin,
+            prompt_flag: None,
+            output_format: OutputFormat::StreamJson,
+            env_vars: vec![],
+        };
+
+        let executor = CliExecutor::new(backend);
+        let result = executor
+            .execute_capture_with_timeout("", Some(Duration::from_millis(200)))
+            .await
+            .unwrap();
+
+        assert!(result.timed_out);
+        assert!(!result.success);
     }
 
     #[tokio::test]
