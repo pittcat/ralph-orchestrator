@@ -11,7 +11,7 @@ non-negotiable contracts before any other module is allowed to run:
    additional context injected by the plugin.
 
 2. **Timeout discipline** — Every subprocess spawned by hook handlers
-   must use ``subprocess.run([...], timeout=5)``. The hook itself has
+   must use ``subprocess.run([...], timeout=...)``. The hook itself has
    a 5-second budget declared in ``hooks/hooks.json``.
 
 Subsequent units (U02 recall, U03 memory policy, U04 writer, U05 audit)
@@ -23,6 +23,7 @@ function so the mapping stays in one place.
 
 from __future__ import annotations
 
+import importlib.util
 import json
 import os
 import sys
@@ -128,28 +129,93 @@ def _atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
     os.replace(tmp, path)
 
 
-def _handle_session_start(payload: dict[str, Any]) -> int:
-    """SessionStart handler — U01 scaffold.
+# ---------------------------------------------------------------------------
+# Recall module loader (U02)
+# ---------------------------------------------------------------------------
 
-    U02 will plug bounded recall + loop cache here. For now we only
-    confirm the env gate fires, write a state marker so tests can prove
-    the hook actually ran, and emit no ``additionalContext`` (which
-    means the SessionStart sees an empty body — Claude starts normally).
+
+_RECALL_MODULE: Any | None = None
+
+
+def _load_recall_module() -> Any:
+    """Load ``scripts/recall.py`` as a module regardless of plugin name.
+
+    The plugin directory contains a hyphen (``nowledge-mem-ralph``) so it
+    is *not* importable as a Python package by name. We load via
+    ``importlib`` and cache the result so the hook process pays the
+    import cost once. The module is registered in ``sys.modules`` under
+    its canonical name so dataclass introspection works on Python 3.14+
+    (otherwise the frozen dataclass decorator fails with a NoneType
+    traceback from ``sys.modules.get``).
+    """
+    global _RECALL_MODULE
+    if _RECALL_MODULE is not None:
+        return _RECALL_MODULE
+    here = Path(__file__).resolve().parent
+    module_name = "_nowledge_mem_ralph_recall"
+    spec = importlib.util.spec_from_file_location(module_name, here / "recall.py")
+    if spec is None or spec.loader is None:
+        raise RuntimeError("failed to load recall.py spec")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[module_name] = module
+    spec.loader.exec_module(module)
+    _RECALL_MODULE = module
+    return module
+
+
+def _handle_session_start(payload: dict[str, Any]) -> int:
+    """SessionStart handler — U01 scaffold + U02 recall wiring.
+
+    U02 layered bounded recall + loop cache on top of U01's
+    env-gated state marker. The hook still writes a state marker
+    (now enriched with ``cache_status``) and emits an
+    ``additionalContext`` block via stdout when the recall path
+    produces non-empty output. Empty stdout = Claude starts without
+    injected context.
     """
     env = resolve_nowledge_env()
-    state_path = _state_root() / env["RALPH_CURRENT_LOOP_ID"] / "state.json"
+    loop_id = env["RALPH_CURRENT_LOOP_ID"]
+    state_path = _state_root() / loop_id / "state.json"
+
+    cache_status = "noop"
+    additional_context = ""
+    try:
+        recall = _load_recall_module()
+        result = recall.run_loop_recall(env, payload)
+        cache_status = result.source_metadata.get("cache_status", "noop")
+        additional_context = result.context_xml
+        _log(
+            "session_start_recall_complete",
+            loop_id=loop_id,
+            state=result.state,
+            cache_status=cache_status,
+            context_bytes=len(additional_context.encode("utf-8")) if additional_context else 0,
+        )
+    except Exception as exc:
+        # Recall is best-effort — log and continue with empty context.
+        _log(
+            "session_start_recall_unhandled",
+            loop_id=loop_id,
+            error=str(exc),
+            type=type(exc).__name__,
+        )
+        cache_status = "err"
+
     _atomic_write_json(
         state_path,
         {
             "hook": "SessionStart",
-            "loop_id": env["RALPH_CURRENT_LOOP_ID"],
+            "loop_id": loop_id,
             "hat": env["RALPH_CURRENT_HAT"],
             "session_id": str(payload.get("session_id", "")),
             "source": str(payload.get("source", "")),
+            "cache_status": cache_status,
         },
     )
-    _log("session_start_state_written", loop_id=env["RALPH_CURRENT_LOOP_ID"])
-    # Empty stdout = no additionalContext injection (Claude starts clean).
+
+    if additional_context:
+        # Encode as JSON so Claude Code can parse it as hook output.
+        sys.stdout.write(json.dumps({"additionalContext": additional_context}))
     return EXIT_OK
 
 

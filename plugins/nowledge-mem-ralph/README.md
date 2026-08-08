@@ -124,9 +124,18 @@ claude plugin list --json
 
 | 事件 | 触发 | 行为 | 失败 |
 |---|---|---|---|
-| SessionStart | 任何 Claude session 启动 | env gate → bounded recall → bounded additionalContext | 缺 RALPH env = noop;nmem 错 = fail-open,无伪造 context |
+| SessionStart | 任何 Claude session 启动 | env gate → bounded recall → bounded additionalContext(`<knowledge-context historical-evidence="untrusted">`);loop cache miss 写 `recall.json`,hit 直接返回;source=`compact` 跳过 search | 缺 RALPH env = noop;nmem 错 = fail-open,空 additionalContext |
 | Stop | session/worker 结束 | audit-only,append 状态标记,不读 transcript | 永不抛错;永不补保存 |
 | SubagentStop | (U05 引入) | 与 Stop 同语义 | 同上 |
+
+`recall` 的细节(0.2.0):`scripts/recall.py` 在首个 SessionStart 拿
+`flock` lease 后发起一次 `nmem --json m search <query> --limit 5`
+(`query` 仅由 repo basename + preset + workspace_root 派生,绝不读
+transcript / last_assistant_message),把渲染好的 XML(转义了 `<>&`、
+控制字符剥除、按 UTF-8 字节边界截断到 4KB)原子落盘
+`recall.json`;后续同 loop 的 SessionStart(普通 hat、compact、retry、
+supervisor worker)直接命中 cache,`nmem` 计数=0。`source=compact`
+无论 cache 是否命中都不调 search。
 
 `save-memory` 入口(U03 引入)统一由 `scripts/memory.py` 提供,插件内部
 决定是否调用 nmem;失败 fail-open(Ralph/Claude 继续运行),evaluator 失败

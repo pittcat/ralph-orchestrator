@@ -200,6 +200,7 @@ def test_resolve_nowledge_env_normalizes_keys(tmp_path: Path) -> None:
     )
     assert spec and spec.loader
     hook_runtime = importlib.util.module_from_spec(spec)
+    sys.modules["_hook_runtime_under_test"] = hook_runtime  # noqa: E501 - python 3.14 dataclasses
     spec.loader.exec_module(hook_runtime)
 
     fake = {
