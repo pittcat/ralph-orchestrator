@@ -57,13 +57,26 @@ mod cli_executor_integration {
         }
     }
 
+    /// All test paths are agnostic about the workspace directory itself;
+    /// passing the parent's current_dir() preserves the historical
+    /// ambient-cwd semantics these tests asserted.
+    fn integration_workspace() -> std::path::PathBuf {
+        std::env::current_dir().unwrap()
+    }
+
     #[tokio::test]
     async fn headless_agent_stream_json_success_terminal_payload() {
         let executor = CliExecutor::new(agent_stream_json_backend());
         let mut output = Vec::new();
 
         let result = executor
-            .execute(SCRIPT_SUCCESS, &mut output, None, false)
+            .execute(
+                SCRIPT_SUCCESS,
+                &mut output,
+                None,
+                false,
+                &integration_workspace(),
+            )
             .await
             .expect("execute ok");
 
@@ -87,7 +100,13 @@ mod cli_executor_integration {
         let mut output = Vec::new();
 
         let result = executor
-            .execute(SCRIPT_ERROR_ONLY, &mut output, None, false)
+            .execute(
+                SCRIPT_ERROR_ONLY,
+                &mut output,
+                None,
+                false,
+                &integration_workspace(),
+            )
             .await
             .expect("execute ok");
 
@@ -112,7 +131,13 @@ mod cli_executor_integration {
         let mut output = Vec::new();
 
         let result = executor
-            .execute(SCRIPT_MIXED, &mut output, None, false)
+            .execute(
+                SCRIPT_MIXED,
+                &mut output,
+                None,
+                false,
+                &integration_workspace(),
+            )
             .await
             .expect("execute ok");
 
@@ -141,7 +166,13 @@ mod cli_executor_integration {
         let mut output = Vec::new();
 
         let result = executor
-            .execute(SCRIPT_MULTIPLE_ASSISTANT_DELTAS, &mut output, None, false)
+            .execute(
+                SCRIPT_MULTIPLE_ASSISTANT_DELTAS,
+                &mut output,
+                None,
+                false,
+                &integration_workspace(),
+            )
             .await
             .expect("execute ok");
 
@@ -232,6 +263,194 @@ mod cli_executor_integration {
         assert!(
             !state.is_error,
             "is_error=false must NOT flip state.is_error"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // 2026-08-08-001 plan U2: headless CliExecutor explicit-workspace contract.
+    //
+    // Each test below drives a real `sh -c <script>` subprocess so we can
+    // assert the exact cwd, env, and write-down effects visible to the
+    // backend. They exercise the three scenarios from the plan §6:
+    //   1. explicit_workspace_controls_cli_executor_cwd         — R1
+    //   2. runtime_workspace_overrides_backend_workspace_env    — R2
+    //   3. missing_explicit_workspace_returns_spawn_error       — R4
+    // -----------------------------------------------------------------------
+
+    /// R1: the explicit workspace passed to `CliExecutor::execute` controls
+    /// the backend subprocess's current directory and nothing else does.
+    /// We point a marker-writing shell script at `target`; `source` is a
+    /// control directory that MUST stay empty (no fallback to parent cwd
+    /// or any ambient `RALPH_WORKSPACE_ROOT` value).
+    ///
+    /// Before the fix, `CliExecutor::execute` resolved cwd by reading
+    /// `RALPH_WORKSPACE_ROOT` / `std::env::current_dir()` — both pointed
+    /// somewhere other than `target`, so the marker leaked out and the
+    /// marker body inside `target` stayed empty.
+    #[tokio::test]
+    async fn explicit_workspace_controls_cli_executor_cwd() {
+        let target = tempfile::TempDir::new().expect("target temp dir");
+        let control = tempfile::TempDir::new().expect("control temp dir");
+        let target_pwd_marker = target.path().join("pwd-marker");
+
+        let backend = CliBackend {
+            command: "sh".to_string(),
+            args: vec![
+                "-c".to_string(),
+                format!(
+                    "pwd > {}; printf 'marked\\n' > marker",
+                    target_pwd_marker.display(),
+                ),
+            ],
+            prompt_mode: PromptMode::Arg,
+            prompt_flag: None,
+            output_format: OutputFormat::Text,
+            env_vars: vec![],
+        };
+
+        let executor = CliExecutor::new(backend);
+        let mut output = Vec::new();
+
+        let result = executor
+            .execute("", &mut output, None, false, target.path())
+            .await
+            .expect("execute ok");
+
+        assert!(result.success, "execute should succeed; got: {result:?}");
+        assert!(
+            target_pwd_marker.exists(),
+            "target pwd marker must exist at {} — backend failed to land in the explicit workspace",
+            target_pwd_marker.display()
+        );
+        let recorded_pwd = std::fs::read_to_string(&target_pwd_marker)
+            .expect("read pwd marker")
+            .trim()
+            .to_string();
+        assert_eq!(
+            recorded_pwd,
+            target.path().to_string_lossy(),
+            "backend pwd ({recorded_pwd}) must equal the explicit target workspace ({})",
+            target.path().display()
+        );
+        // The script wrote a separate `marker` file via relative path —
+        // it must land inside `target`, proving the backend was chdir'd
+        // there. (Pre-fix, this file would land in some other directory
+        // like the parent cwd).
+        let target_marker = target.path().join("marker");
+        assert!(
+            target_marker.exists(),
+            "marker must be written inside the target workspace at {}",
+            target_marker.display()
+        );
+        // The control dir must not be polluted by a leaked marker. We
+        // check by listing rather than asserting a specific path, so the
+        // test still passes if `tempfile` cleans up its own directory.
+        let control_polluted =
+            control.path().join("marker").exists() || control.path().join("pwd-marker").exists();
+        assert!(
+            !control_polluted,
+            "control dir {} must not receive any backend-written marker",
+            control.path().display()
+        );
+    }
+
+    /// R2: when the backend's own `env_vars` try to rewrite
+    /// `RALPH_WORKSPACE_ROOT` / `PWD` to a hostile value, the runtime
+    /// isolation variables set by `inject_ralph_runtime_env` must take
+    /// precedence. The child must observe the explicit workspace both as
+    /// cwd and as `RALPH_WORKSPACE_ROOT` / `PWD`.
+    #[tokio::test]
+    async fn runtime_workspace_overrides_backend_workspace_env() {
+        let target = tempfile::TempDir::new().expect("target temp dir");
+        let hostile = tempfile::TempDir::new().expect("hostile temp dir");
+
+        // Backend env tries to redirect both isolation variables.
+        // `hostile` mirrors the bound-workspace source path; if any part
+        // of the resolve order forgets to re-set the runtime variables
+        // last, the script's `pwd` would record `hostile` rather than
+        // `target`.
+        let backend = CliBackend {
+            command: "sh".to_string(),
+            args: vec![
+                "-c".to_string(),
+                "pwd > marker; printf '%s\\n' \"$RALPH_WORKSPACE_ROOT\" >> marker; printf '%s\\n' \"$PWD\" >> marker".to_string(),
+            ],
+            prompt_mode: PromptMode::Arg,
+            prompt_flag: None,
+            output_format: OutputFormat::Text,
+            env_vars: vec![
+                (
+                    "RALPH_WORKSPACE_ROOT".into(),
+                    hostile.path().to_string_lossy().into_owned(),
+                ),
+                ("PWD".into(), hostile.path().to_string_lossy().into_owned()),
+            ],
+        };
+
+        let executor = CliExecutor::new(backend);
+        let mut output = Vec::new();
+        let result = executor
+            .execute("", &mut output, None, false, target.path())
+            .await
+            .expect("execute ok");
+
+        assert!(result.success, "execute should succeed; got: {result:?}");
+        let marker = std::fs::read_to_string(target.path().join("marker")).expect("read marker");
+        let lines: Vec<&str> = marker.lines().collect();
+        assert_eq!(
+            lines.len(),
+            3,
+            "marker must record pwd + 2 env lines:\n{marker}"
+        );
+        assert_eq!(
+            lines[0],
+            target.path().to_string_lossy(),
+            "backend must see explicit target as cwd, not the hostile fallback"
+        );
+        assert_eq!(
+            lines[1],
+            target.path().to_string_lossy(),
+            "backend RALPH_WORKSPACE_ROOT must equal the explicit target, not the hostile env"
+        );
+        assert_eq!(
+            lines[2],
+            target.path().to_string_lossy(),
+            "backend PWD must equal the explicit target, not the hostile env"
+        );
+    }
+
+    /// R4: passing an explicit workspace that does not exist must return
+    /// an `Err` from the spawn boundary — never silently fall back to the
+    /// parent-process cwd or any ambient `RALPH_WORKSPACE_ROOT`.
+    #[tokio::test]
+    async fn missing_explicit_workspace_returns_spawn_error() {
+        // Compose a path that definitely does not exist by leaning on
+        // a fresh temp dir we then delete (which removes the directory
+        // but leaves the canonical path).
+        let temp = tempfile::TempDir::new().expect("temp dir");
+        let missing = temp.path().join("child-must-not-exist");
+        drop(temp);
+
+        // Use a tiny script that would otherwise succeed if we ever
+        // silently fell back to a different cwd.
+        let backend = CliBackend {
+            command: "sh".to_string(),
+            args: vec!["-c".to_string(), "printf 'should-never-run\\n'".to_string()],
+            prompt_mode: PromptMode::Arg,
+            prompt_flag: None,
+            output_format: OutputFormat::Text,
+            env_vars: vec![],
+        };
+
+        let executor = CliExecutor::new(backend);
+        let mut output = Vec::new();
+        let result = executor
+            .execute("", &mut output, None, false, &missing)
+            .await;
+
+        assert!(
+            result.is_err(),
+            "execute against a nonexistent workspace must return Err, got: {result:?}"
         );
     }
 }

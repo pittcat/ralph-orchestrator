@@ -15,7 +15,6 @@ use nix::sys::signal::{Signal, kill};
 use nix::unistd::Pid;
 use std::env;
 use std::io::Write;
-use std::path::PathBuf;
 use std::process::Stdio;
 use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWriteExt, BufReader};
@@ -66,6 +65,14 @@ impl CliExecutor {
 
     /// Executes a prompt and streams output to the provided writer.
     ///
+    /// `workspace` is the caller's resolved workspace root and is used both
+    /// as the backend subprocess's `current_dir` and as the source of the
+    /// `RALPH_WORKSPACE_ROOT` / `PWD` env vars (applied *last* so they
+    /// always win over backend-supplied env). The agent must NOT fall back
+    /// to the parent-process cwd or ambient `RALPH_WORKSPACE_ROOT`; the
+    /// caller is responsible for resolving the correct workspace before
+    /// invoking this method.
+    ///
     /// Output is streamed line-by-line to the writer while being accumulated
     /// for the return value. If `timeout` is provided and the execution produces
     /// no stdout/stderr activity for longer than that duration, the process
@@ -79,6 +86,7 @@ impl CliExecutor {
         mut output_writer: W,
         timeout: Option<Duration>,
         verbose: bool,
+        workspace: &std::path::Path,
     ) -> std::io::Result<ExecutionResult> {
         // Note: _temp_file is kept alive for the duration of this function scope.
         // Some Arg-mode backends use temp-file indirection for very large prompts.
@@ -91,24 +99,25 @@ impl CliExecutor {
         #[cfg(unix)]
         command.process_group(0);
 
-        // U3 (2026-06-14-002): Use RALPH_WORKSPACE_ROOT if set, otherwise fall back to
-        // current_dir(). This fixes worktree mode where the subprocess's cwd is already
-        // the worktree, but we want the Agent's path resolution to be explicit rather
-        // than relying on inherited CWD state.
-        let cwd = env::var("RALPH_WORKSPACE_ROOT")
-            .map(PathBuf::from)
-            .or_else(|_| std::env::current_dir())
-            .unwrap_or_else(|_| PathBuf::from("."));
-        command.current_dir(&cwd);
-        inject_ralph_runtime_env(&mut command, &cwd);
+        // Plan 2026-08-08-001 U2: use the workspace the caller resolved, not
+        // any ambient env/current_dir fallback. The caller is the loop runner
+        // (which knows the worktree workspace) or bench (which has its own
+        // workspace.path()) and is responsible for the path.
+        command.current_dir(workspace);
 
-        // Apply backend-specific environment variables (e.g., Agent Teams env var)
+        // Apply backend-specific environment variables FIRST. They run before
+        // the runtime isolation variables below so a hostile backend cannot
+        // inject a different RALPH_WORKSPACE_ROOT / PWD.
         command.envs(self.backend.env_vars.iter().map(|(k, v)| (k, v)));
+
+        // Then apply the runtime isolation variables LAST; they always win
+        // over backend env for RALPH_WORKSPACE_ROOT / PWD / RALPH_EVENTS_FILE.
+        inject_ralph_runtime_env(&mut command, workspace);
 
         debug!(
             command = %cmd,
             args = ?args,
-            cwd = ?cwd,
+            cwd = ?workspace,
             "Spawning CLI command"
         );
 
@@ -394,8 +403,13 @@ impl CliExecutor {
     /// Executes a prompt without streaming (captures all output).
     ///
     /// Uses no timeout by default. For timed execution, use `execute_capture_with_timeout`.
-    pub async fn execute_capture(&self, prompt: &str) -> std::io::Result<ExecutionResult> {
-        self.execute_capture_with_timeout(prompt, None).await
+    pub async fn execute_capture(
+        &self,
+        prompt: &str,
+        workspace: &std::path::Path,
+    ) -> std::io::Result<ExecutionResult> {
+        self.execute_capture_with_timeout(prompt, None, workspace)
+            .await
     }
 
     /// Executes a prompt without streaming, with optional timeout.
@@ -403,11 +417,12 @@ impl CliExecutor {
         &self,
         prompt: &str,
         timeout: Option<Duration>,
+        workspace: &std::path::Path,
     ) -> std::io::Result<ExecutionResult> {
         // Use a sink that discards output for non-streaming execution
         // verbose=false since output is being discarded anyway
         let sink = std::io::sink();
-        self.execute(prompt, sink, timeout, false).await
+        self.execute(prompt, sink, timeout, false, workspace).await
     }
 }
 
@@ -527,6 +542,15 @@ impl StreamHandler for HeadlessTextHandler {
 mod tests {
     use super::*;
 
+    /// Workspace passed to `CliExecutor::execute` in tests that do not care
+    /// about worktree isolation. The agent executor no longer reads
+    /// `RALPH_WORKSPACE_ROOT` from ambient env or falls back to
+    /// `std::env::current_dir()`, so each test must thread an explicit
+    /// workspace through — this constant captures the historical default.
+    fn test_workspace() -> std::path::PathBuf {
+        std::env::current_dir().unwrap()
+    }
+
     #[tokio::test]
     async fn test_execute_echo() {
         // Use echo as a simple test backend
@@ -543,7 +567,7 @@ mod tests {
         let mut output = Vec::new();
 
         let result = executor
-            .execute("hello world", &mut output, None, true)
+            .execute("hello world", &mut output, None, true, &test_workspace())
             .await
             .unwrap();
 
@@ -565,7 +589,10 @@ mod tests {
         };
 
         let executor = CliExecutor::new(backend);
-        let result = executor.execute_capture("stdin test").await.unwrap();
+        let result = executor
+            .execute_capture("stdin test", &test_workspace())
+            .await
+            .unwrap();
 
         assert!(result.success);
         assert!(result.output.contains("stdin test"));
@@ -583,7 +610,10 @@ mod tests {
         };
 
         let executor = CliExecutor::new(backend);
-        let result = executor.execute_capture("").await.unwrap();
+        let result = executor
+            .execute_capture("", &test_workspace())
+            .await
+            .unwrap();
 
         assert!(!result.success);
         assert!(!result.timed_out);
@@ -609,7 +639,7 @@ mod tests {
         // Execute with a 100ms timeout - should trigger timeout
         let timeout = Some(Duration::from_millis(100));
         let result = executor
-            .execute_capture_with_timeout("", timeout)
+            .execute_capture_with_timeout("", timeout, &test_workspace())
             .await
             .unwrap();
 
@@ -637,6 +667,7 @@ mod tests {
             .execute_capture_with_timeout(
                 "printf 'start\\n'; sleep 0.2; printf 'middle\\n'; sleep 0.2; printf 'done\\n'",
                 timeout,
+                &test_workspace(),
             )
             .await
             .unwrap();
@@ -667,7 +698,7 @@ mod tests {
 
         let executor = CliExecutor::new(backend);
         let result = executor
-            .execute_capture_with_timeout("", Some(Duration::from_secs(10)))
+            .execute_capture_with_timeout("", Some(Duration::from_secs(10)), &test_workspace())
             .await
             .unwrap();
 
@@ -692,7 +723,7 @@ mod tests {
 
         let executor = CliExecutor::new(backend);
         let result = executor
-            .execute_capture_with_timeout("", Some(Duration::from_millis(200)))
+            .execute_capture_with_timeout("", Some(Duration::from_millis(200)), &test_workspace())
             .await
             .unwrap();
 
@@ -714,7 +745,13 @@ mod tests {
         let executor = CliExecutor::new(backend);
         let mut output = Vec::new();
         let result = executor
-            .execute("", &mut output, Some(Duration::from_millis(200)), false)
+            .execute(
+                "",
+                &mut output,
+                Some(Duration::from_millis(200)),
+                false,
+                &test_workspace(),
+            )
             .await
             .unwrap();
 
@@ -743,7 +780,7 @@ mod tests {
         let executor = CliExecutor::new(backend);
         let started = std::time::Instant::now();
         let result = executor
-            .execute_capture_with_timeout("", Some(Duration::from_millis(100)))
+            .execute_capture_with_timeout("", Some(Duration::from_millis(100)), &test_workspace())
             .await
             .unwrap();
 
@@ -774,7 +811,7 @@ mod tests {
         let executor = CliExecutor::new(backend);
         let started = std::time::Instant::now();
         let result = executor
-            .execute_capture_with_timeout("", Some(Duration::from_secs(30)))
+            .execute_capture_with_timeout("", Some(Duration::from_secs(30)), &test_workspace())
             .await
             .unwrap();
 
@@ -807,7 +844,7 @@ mod tests {
         let executor = CliExecutor::new(backend);
         let started = std::time::Instant::now();
         let result = executor
-            .execute_capture_with_timeout("", Some(Duration::from_secs(30)))
+            .execute_capture_with_timeout("", Some(Duration::from_secs(30)), &test_workspace())
             .await
             .unwrap();
 
@@ -840,7 +877,7 @@ mod tests {
         // Execute with a generous timeout - should complete before timeout
         let timeout = Some(Duration::from_secs(10));
         let result = executor
-            .execute_capture_with_timeout("fast", timeout)
+            .execute_capture_with_timeout("fast", timeout, &test_workspace())
             .await
             .unwrap();
 
@@ -865,7 +902,7 @@ mod tests {
 
         let executor = CliExecutor::new(backend);
         let result = executor
-            .execute_capture_with_timeout("", Some(Duration::from_secs(30)))
+            .execute_capture_with_timeout("", Some(Duration::from_secs(30)), &test_workspace())
             .await
             .unwrap();
 
@@ -901,7 +938,7 @@ mod tests {
         let mut output = Vec::new();
 
         let result = executor
-            .execute("ignored", &mut output, None, false)
+            .execute("ignored", &mut output, None, false, &test_workspace())
             .await
             .unwrap();
 
@@ -933,7 +970,7 @@ mod tests {
         let mut output = Vec::new();
 
         let result = executor
-            .execute("ignored", &mut output, None, false)
+            .execute("ignored", &mut output, None, false, &test_workspace())
             .await
             .unwrap();
 
@@ -959,7 +996,7 @@ mod tests {
         let mut output = Vec::new();
 
         let result = executor
-            .execute("ignored", &mut output, None, false)
+            .execute("ignored", &mut output, None, false, &test_workspace())
             .await
             .unwrap();
 
@@ -990,7 +1027,7 @@ mod tests {
         let mut output = Vec::new();
 
         let result = executor
-            .execute("ignored", &mut output, None, false)
+            .execute("ignored", &mut output, None, false, &test_workspace())
             .await
             .unwrap();
 
@@ -1022,7 +1059,7 @@ mod tests {
         let mut output = Vec::new();
 
         let result = executor
-            .execute("ignored", &mut output, None, false)
+            .execute("ignored", &mut output, None, false, &test_workspace())
             .await
             .unwrap();
 
@@ -1056,7 +1093,7 @@ mod tests {
         let executor = CliExecutor::new(backend);
         let mut output = Vec::new();
         let result = executor
-            .execute("", &mut output, None, false)
+            .execute("", &mut output, None, false, &test_workspace())
             .await
             .unwrap();
         assert!(result.success);
