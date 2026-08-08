@@ -4976,3 +4976,16 @@ fn test_redteam_scope_unknown_hunk_blocks_attack() {
     let yaml = load_scenario("tests/scenarios/redteam_scope_unknown_blocked.yml");
     run_workflow_guard_scenario(yaml);
 }
+
+/// U1 (plan 2026-08-08-004 fix-plan §Unit 1, A3): the
+/// `redteam.attack.mapped` HARD GATE is now a runtime contract via
+/// payload_consistency rule `redteam-attack-mapped-requires-predecessor`
+/// + schema-required `predecessor_event` field. Fixture emits
+/// `redteam.attack.mapped` WITHOUT `predecessor_event`; the rule
+/// fires; attack.mapped is rejected; experiment-runner does not
+/// activate. Loop falls through to `redteam.complete(success:false)`.
+#[test]
+fn test_redteam_scope_attack_mapped_gate_rejects_missing_predecessor() {
+    let yaml = load_scenario("tests/scenarios/redteam_scope_attack_mapped_gate.yml");
+    run_workflow_guard_scenario(yaml);
+}

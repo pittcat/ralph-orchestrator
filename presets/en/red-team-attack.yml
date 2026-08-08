@@ -292,6 +292,21 @@ event_loop:
               - {field: scope_status, eq: "resolved"}
               - {field: boundary_conflict, eq: true}
           message: "scope_status=resolved with boundary_conflict=true is not allowed; boundary conflict indicates a cross_check failure."
+        # 2026-08-08-004 review (fix-plan U1, A3): runtime enforcement of
+        # the attack-surface-mapper HARD GATE. The prompt-text instruction
+        # in hat `instructions` is the agent's read-the-rules layer; this
+        # rule is the runtime contract — emit is rejected before
+        # experiment-runner activates. `predecessor_event` must exist AND
+        # equal the literal `redteam.plan.resolved` topic name; any
+        # missing or different value blocks attack.mapped, closing the
+        # bypass surface (direct emit, prompt-injection, model-error).
+        - id: redteam-attack-mapped-requires-predecessor
+          topic: redteam.attack.mapped
+          when:
+            all:
+              - {field: predecessor_event, exists: true}
+              - {field: predecessor_event, eq: "redteam.plan.resolved"}
+          message: "redteam.attack.mapped requires predecessor_event == 'redteam.plan.resolved' (a bound prior plan.resolved accepted event); runtime gate rejects attack.mapped emits without that anchor."
 
 cli:
   backend: "auto"
@@ -468,7 +483,9 @@ hats:
       ### Mission (on `redteam.plan.resolved`)
       Identify attack surfaces and design concrete experiments.
       Write `.ralph/red-team/04-attack-surface.md` and `.ralph/red-team/05-experiment-plan.md`.
-      Emit `redteam.attack.mapped`.
+      Emit `redteam.attack.mapped` with `predecessor_event: "redteam.plan.resolved"` (the
+      schema-required field that anchors this emit to the prior plan-resolved event — see
+      runtime gate below).
 
       ### HARD GATE — attack-surface-mapper MUST NOT activate when scope is unresolved
       Before doing any work, verify ALL of the following:
@@ -480,6 +497,18 @@ hats:
       - `boundary_conflict == false` — if true, stop immediately and do NOT emit attack.mapped.
       When any gate fires, do NOT emit any business event; the loop's payload_consistency
       rules will route the unresolved scope to the reporter.
+
+      ### Runtime anchor (mandatory)
+      This prompt-text gate is also enforced at runtime by
+      `payload_consistency` rule `redteam-attack-mapped-requires-predecessor`
+      and the schema-required `predecessor_event` field on
+      `redteam.attack.mapped`. The rule requires
+      `predecessor_event` to exist AND equal the literal
+      `redteam.plan.resolved` topic. A direct emit, a prompt-injection
+      bypass, or a model-error that drops the prompt's gate will all
+      be caught at the EventLoop gate — `experiment-runner` will not
+      activate, no experiment is dispatched. The prompt layer and
+      runtime gate are both required; the runtime gate is the contract.
 
       ### Mission (on `redteam.retry.required`)
       Read retry delta from evidence-gate. Redesign or extend the experiment.

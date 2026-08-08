@@ -175,12 +175,21 @@ schemas:
 
   # attack-surface-mapper -> attack surfaces identified and experiments designed.
   # experiment-runner reads the experiment plan artifact.
+  # 2026-08-08-004 review (fix-plan U1, A3): the HARD GATE that
+  # attack-surface-mapper MUST NOT activate when scope is unresolved
+  # is now enforced at runtime via `predecessor_event` — the emit
+  # MUST reference a prior `redteam.plan.resolved` event by topic
+  # name. The corresponding `payload_consistency` rule is declared
+  # in `presets/en/red-team-attack.yml` (id
+  # `redteam-attack-mapped-requires-predecessor`); this schema entry
+  # is the gate's typed surface.
   redteam.attack.mapped:
     required_fields:
       - surface_count
       - experiment_count
       - attack_surface_path
       - experiment_plan_path
+      - predecessor_event
     payload: json_object
     field_docs:
       surface_count:
@@ -199,6 +208,10 @@ schemas:
         meaning: Path to experiment-plan artifact.
         source: File actually written this activation.
         fill_rule: Real readable path.
+      predecessor_event:
+        meaning: Topic name of the prior scope-resolution event this emit binds to.
+        source: attack-surface-mapper reads from the most recent accepted `redteam.plan.resolved` in the events file.
+        fill_rule: Literal string `redteam.plan.resolved`. The runtime payload_consistency rule `redteam-attack-mapped-requires-predecessor` rejects emits that omit the field or set it to any other value.
 
   # experiment-runner -> one experiment completed with raw evidence saved.
   # evidence-gate reads the experiment artifact and evidence files.
