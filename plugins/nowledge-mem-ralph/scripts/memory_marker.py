@@ -96,11 +96,12 @@ def _stable_digest(payload: Mapping[str, Any]) -> str:
     We use a sorted-key JSON dump so structurally equal candidates
     always hash identically, then SHA-256 hex for the audit log.
     Imports are local to avoid taking on extra dependencies for a
-    single hashing call.
+    single hashing call. ``ensure_ascii=True`` keeps the byte string
+    free of lone surrogates (fix U4 adversarial:A1).
     """
     import hashlib
 
-    encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8")
+    encoded = json.dumps(payload, ensure_ascii=True, sort_keys=True).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
 
 
@@ -112,29 +113,49 @@ def _extract_block(text: str) -> tuple[int, int, str] | None:
     ``None`` when no opening marker is present. A second opening marker
     is reported via :class:`DuplicateMarker` so the caller can map it
     to a ``REJECTED`` outcome instead of silently picking one.
+
+    Variant markers (``nowledge-memory-finalize-v2``, ``…-debug``, or
+    anything else carrying a suffix/prefix that is not the canonical
+    tag) are reported via :class:`VariantMarker` so the caller can
+    surface a REJECTED outcome with a `variant` reason.
     """
     match = _OPEN_TAG_RE.search(text)
-    if match is None:
-        return None
-    # The marker must not appear more than once in a single message.
-    second = _OPEN_TAG_RE.search(text, match.end())
-    if second is not None:
-        raise DuplicateMarker
-    open_index = match.start()
-    # Skip past the opening tag to the first newline so we capture only
-    # the JSON body, not the wrapper text.
-    open_end = text.find("\n", open_index)
-    if open_end == -1:
-        return None
-    close_index = text.find(_CLOSE_MARKER, open_end + 1)
-    if close_index == -1:
-        return None
-    inner = text[open_end + 1 : close_index]
-    return open_index, close_index + len(_CLOSE_MARKER), inner
+    if match is not None:
+        open_index = match.start()
+        second = _OPEN_TAG_RE.search(text, match.end())
+        if second is not None:
+            raise DuplicateMarker
+        open_end = text.find("\n", open_index)
+        if open_end == -1:
+            return None
+        close_index = text.find(_CLOSE_MARKER, open_end + 1)
+        if close_index == -1:
+            return None
+        inner = text[open_end + 1 : close_index]
+        return open_index, close_index + len(_CLOSE_MARKER), inner
+
+    # No exact-tag match — detect variant tags so we can REJECT them
+    # instead of silently treating them as missing (fix U5 C1).
+    variant_match = _VARIANT_TAG_RE.search(text)
+    if variant_match is not None:
+        raise VariantMarker
+    return None
 
 
 class DuplicateMarker(Exception):
     """Raised when more than one ``nowledge-memory-finalize`` tag is present."""
+
+
+class VariantMarker(Exception):
+    """Raised when a ``nowledge-memory-finalize-<variant>`` tag is present."""
+
+
+# Variant regex matches the canonical name followed by a non-canonical
+# suffix (e.g. ``-v2``, ``-debug``, ``-x``). The negative look-ahead
+# ensures the exact tag itself is not treated as a variant.
+_VARIANT_TAG_RE = re.compile(
+    rf"<!--\s*{re.escape(MARKER_NAME)}(?!\s*(?:[\n>]|\s*$))[-A-Za-z0-9_]+"
+)
 
 
 def _line_is_inside_fence(text: str, open_index: int) -> bool:
@@ -200,6 +221,16 @@ def extract_finalization_marker(message: Any) -> ParserResult:
             memory_digest="",
             reason="duplicate marker: more than one finalization marker in message",
         )
+    except VariantMarker:
+        return ParserResult(
+            status="REJECTED",
+            candidate=None,
+            memory_digest="",
+            reason=(
+                "finalization marker name must be exactly "
+                f"`{MARKER_NAME}`; variant tag rejected"
+            ),
+        )
     if block is None:
         return ParserResult(
             status="SKIPPED",
@@ -222,6 +253,18 @@ def extract_finalization_marker(message: Any) -> ParserResult:
             candidate=None,
             memory_digest="",
             reason="marker is inside blockquote",
+        )
+
+    # Detect lone surrogates (fix U4 adversarial:A1). json.loads happily
+    # parses a body that contains a lone surrogate (the Python str keeps
+    # the surrogate), so we must check before json.loads and before any
+    # ``str.encode("utf-8")`` call downstream of the parser.
+    if any(0xD800 <= ord(ch) <= 0xDFFF for ch in inner):
+        return ParserResult(
+            status="REJECTED",
+            candidate=None,
+            memory_digest="",
+            reason="finalization marker body contains unencodable UTF-8",
         )
 
     # Bound by UTF-8 byte length to prevent unbounded state growth.
