@@ -1,0 +1,131 @@
+# U6 (plan 2026-08-08-004 §Unit 6 §9): red-team boundary conflict.
+# plan-resolver emits scope with boundary_conflict=true (cross_check=0),
+# which triggers payload_consistency rejection. attack-surface-mapper
+# does NOT activate (unresolved path). Loop reaches redteam.complete(success:false).
+
+name: redteam_scope_boundary_conflict
+description: Red-team boundary conflict blocks attack.mapped — unresolved path
+
+config:
+  prompt_file: PROMPT.md
+  topic_format_whitelist:
+    - LOOP_COMPLETE
+  max_iterations: 20
+  hats:
+    target-locker:
+      subscribes_to: []
+      publishes:
+        - redteam.target.locked
+    plan-resolver:
+      subscribes_to:
+        - redteam.target.locked
+      publishes:
+        - redteam.plan.resolved
+        - redteam.plan.unresolved
+    attack-surface-mapper:
+      subscribes_to:
+        - redteam.plan.resolved
+      publishes:
+        - redteam.attack.mapped
+    reporter:
+      subscribes_to:
+        - redteam.reviewed
+        - redteam.plan.unresolved
+      publishes:
+        - redteam.complete
+  event_loop:
+    execution_mode: isolated
+    starting_event: "redteam.start"
+    completion_promise: "redteam.complete"
+    required_events:
+      - "redteam.target.locked"
+    event_policy:
+      enabled: true
+      mode: enforce
+      on_violation: reject_with_resume
+      schemas:
+        redteam.target.locked:
+          required_fields:
+            - target_head
+            - target_tree
+            - plan_count
+            - lock_file_path
+            - lock_status
+          payload: json_object
+        redteam.plan.resolved:
+          required_fields:
+            - resolved_count
+            - unresolved_count
+            - resolution_file_path
+            - scope_manifest_path
+            - scope_digest
+            - scope_status
+            - overall_confidence
+            - critical_unknown_count
+            - scope_base_sha
+            - resolved_patch_path
+            - patch_digest
+            - coverage
+            - critical_traceability
+            - boundary_consistency
+            - boundary_conflict
+          payload: json_object
+        redteam.plan.unresolved:
+          required_fields:
+            - reason
+            - resolution_file_path
+          payload: json_object
+        redteam.attack.mapped:
+          required_fields:
+            - surface_count
+            - experiment_count
+            - attack_surface_path
+            - experiment_plan_path
+          payload: json_object
+        redteam.complete:
+          required_fields:
+            - success
+            - report_path
+            - plan_path
+            - questions_path
+          payload: json_object
+
+mock_responses:
+  - text: |
+      <event topic="redteam.target.locked">
+      {"target_head":"abc1234def5678901234567890abcdef1234567890","target_tree":"def5678901234567890abcdef1234567890abcdef0","plan_count":1,"lock_file_path":".ralph/red-team/01-target-lock.md","lock_status":"locked"}
+      </event>
+    hat: target-locker
+  # boundary_conflict=true triggers payload_consistency rule
+  # redteam-scope-resolved-boundary-conflict: scope_status=resolved
+  # with boundary_conflict=true is blocked.
+  - text: |
+      <event topic="redteam.plan.unresolved">
+      {"reason":"SCOPE_AMBIGUOUS","resolution_file_path":".ralph/red-team/02-plan-resolution.md"}
+      </event>
+    hat: plan-resolver
+  - text: |
+      <event topic="redteam.complete">
+      {"success":false,"report_path":".ralph/red-team/REPORT.md","plan_path":"","questions_path":".ralph/red-team/QUESTIONS.md"}
+      </event>
+    hat: reporter
+
+expected:
+  iterations: 3
+  events:
+    - topic: redteam.target.locked
+    - topic: redteam.plan.unresolved
+    - topic: redteam.complete
+  completion: true
+  absent_events:
+    - topic: redteam.plan.resolved
+    - topic: redteam.attack.mapped
+  payload_matches:
+    - topic: redteam.plan.unresolved
+      fields:
+        reason: "SCOPE_AMBIGUOUS"
+        resolution_file_path: ".ralph/red-team/02-plan-resolution.md"
+    - topic: redteam.complete
+      fields:
+        success: false
+        plan_path: ""

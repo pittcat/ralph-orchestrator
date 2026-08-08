@@ -274,6 +274,24 @@ event_loop:
             field: overall_confidence
             exists: true
           message: "overall_confidence must be 0, 85, 90, or 100; received value is not in the allowed set."
+        # U6: resolved requires overall_confidence >= 90 (already gated by existing
+        # redteam-scope-resolved-confidence rule using gt:89, equivalent to >=90)
+        # U6: resolved requires coverage >= 90
+        - id: redteam-scope-resolved-coverage-90
+          topic: redteam.plan.resolved
+          when:
+            all:
+              - {field: scope_status, eq: "resolved"}
+              - {field: coverage, gt: 89}
+          message: "scope_status=resolved requires coverage >= 90; received coverage is below threshold."
+        # U6: boundary_conflict == true blocks (cross_check=0)
+        - id: redteam-scope-resolved-boundary-conflict
+          topic: redteam.plan.resolved
+          when:
+            all:
+              - {field: scope_status, eq: "resolved"}
+              - {field: boundary_conflict, eq: true}
+          message: "scope_status=resolved with boundary_conflict=true is not allowed; boundary conflict indicates a cross_check failure."
 
 cli:
   backend: "auto"
@@ -451,6 +469,17 @@ hats:
       Identify attack surfaces and design concrete experiments.
       Write `.ralph/red-team/04-attack-surface.md` and `.ralph/red-team/05-experiment-plan.md`.
       Emit `redteam.attack.mapped`.
+
+      ### HARD GATE — attack-surface-mapper MUST NOT activate when scope is unresolved
+      Before doing any work, verify ALL of the following:
+      - `scope_status == "resolved"` — if not, stop immediately and do NOT emit attack.mapped.
+        The unresolved path is handled by the reporter hat directly.
+      - `critical_unknown_count == 0` — if > 0, stop immediately and do NOT emit attack.mapped.
+      - `overall_confidence >= 90` — if < 90, stop immediately and do NOT emit attack.mapped.
+      - `coverage >= 90` — if < 90, stop immediately and do NOT emit attack.mapped.
+      - `boundary_conflict == false` — if true, stop immediately and do NOT emit attack.mapped.
+      When any gate fires, do NOT emit any business event; the loop's payload_consistency
+      rules will route the unresolved scope to the reporter.
 
       ### Mission (on `redteam.retry.required`)
       Read retry delta from evidence-gate. Redesign or extend the experiment.

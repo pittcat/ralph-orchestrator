@@ -1,12 +1,11 @@
-# U5 (plan 2026-08-08-004 §Unit 5 §9): red-team-attack independent
-# direct-target scope freeze. target-locker locks HEAD/tree; plan-resolver
-# derives scope_base from explicit input (not merge-batch boundary),
-# writes scope-manifest.json and full-current.patch from real scope_base_sha,
-# and emits redteam.plan.resolved with all U1 scope fields. No merge_boundary_path.
-# attack-surface-mapper activates (resolved path). Loop reaches redteam.complete.
+# U6 (plan 2026-08-08-004 §Unit 6 §9): red-team mixed direct/merge history.
+# plan-resolver classifies interleaved commits and emits resolved scope
+# with coverage=92, boundary_conflict=false, critical_unknown_count=0,
+# overall_confidence=90. attack-surface-mapper activates (resolved path).
+# Loop reaches redteam.complete.
 
-name: redteam_scope_direct_target
-description: Red-team plan-resolver resolves scope independently without merge_boundary_path — emits resolved
+name: redteam_scope_mixed_history
+description: Red-team mixed direct/merge history — X only in interleaved evidence, resolved path
 
 config:
   prompt_file: PROMPT.md
@@ -166,7 +165,7 @@ mock_responses:
     hat: target-locker
   - text: |
       <event topic="redteam.plan.resolved">
-      {"resolved_count":1,"unresolved_count":0,"resolution_file_path":".ralph/red-team/02-plan-resolution.md","scope_manifest_path":".ralph/red-team/scope-manifest.json","scope_digest":"abcd1234ef5678901234567890abcdef1234567890abcdef1234567890abcdef1234567890","scope_status":"resolved","overall_confidence":90,"critical_unknown_count":0,"scope_base_sha":"abc1234def5678901234567890abcdef1234567890","resolved_patch_path":".ralph/red-team/patches/full-current.patch","patch_digest":"def7567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef1","coverage":95,"critical_traceability":100,"boundary_consistency":true,"boundary_conflict":false}
+      {"resolved_count":1,"unresolved_count":0,"resolution_file_path":".ralph/red-team/02-plan-resolution.md","scope_manifest_path":".ralph/red-team/scope-manifest.json","scope_digest":"abcd1234ef5678901234567890abcdef1234567890abcdef1234567890abcdef1234567890","scope_status":"resolved","overall_confidence":90,"critical_unknown_count":0,"scope_base_sha":"abc1234def5678901234567890abcdef1234567890","resolved_patch_path":".ralph/red-team/patches/full-current.patch","patch_digest":"def7567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef1","coverage":92,"critical_traceability":100,"boundary_consistency":true,"boundary_conflict":false}
       </event>
     hat: plan-resolver
   - text: |
@@ -219,13 +218,10 @@ expected:
       fields:
         resolved_count: 1
         unresolved_count: 0
-        scope_manifest_path: ".ralph/red-team/scope-manifest.json"
         scope_status: "resolved"
         overall_confidence: 90
         critical_unknown_count: 0
-        scope_base_sha: "abc1234def5678901234567890abcdef1234567890"
-        resolved_patch_path: ".ralph/red-team/patches/full-current.patch"
-        coverage: 95
+        coverage: 92
         boundary_consistency: true
         boundary_conflict: false
     - topic: redteam.complete

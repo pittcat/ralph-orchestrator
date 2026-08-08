@@ -4941,3 +4941,38 @@ fn test_redteam_scope_placeholder_blocked() {
     let yaml = load_scenario("tests/scenarios/redteam_scope_placeholder_blocked.yml");
     run_workflow_guard_scenario(yaml);
 }
+
+// ──────────────────────────────────────────────────────────────────────
+// 2026-08-08-004 plan Unit 6: mixed/conflict/confidence gates
+// ──────────────────────────────────────────────────────────────────────
+
+/// U6 (plan 2026-08-08-004 §Unit 6 §9): mixed direct/merge history.
+/// plan-resolver classifies interleaved commits, emits resolved scope
+/// with coverage=92, boundary_conflict=false, critical_unknown_count=0,
+/// overall_confidence=90. attack-surface-mapper activates (resolved path).
+/// Loop reaches redteam.complete.
+#[test]
+fn test_redteam_scope_mixed_history_classifies_interleaved() {
+    let yaml = load_scenario("tests/scenarios/redteam_scope_mixed_history.yml");
+    run_workflow_guard_scenario(yaml);
+}
+
+/// U6 (§Unit 6 §9): boundary conflict blocks attack.mapped.
+/// plan-resolver emits scope with boundary_conflict=true (cross_check=0);
+/// payload_consistency rule rejects; attack-surface-mapper does NOT activate.
+/// Loop reaches redteam.complete(success:false).
+#[test]
+fn test_redteam_scope_boundary_conflict_unresolved() {
+    let yaml = load_scenario("tests/scenarios/redteam_scope_boundary_conflict.yml");
+    run_workflow_guard_scenario(yaml);
+}
+
+/// U6 (§Unit 6 §9): critical unknown hunk blocks attack.mapped.
+/// plan-resolver emits scope with critical_unknown_count=1;
+/// payload_consistency rule rejects; attack-surface-mapper does NOT activate.
+/// Loop reaches redteam.complete(success:false).
+#[test]
+fn test_redteam_scope_unknown_hunk_blocks_attack() {
+    let yaml = load_scenario("tests/scenarios/redteam_scope_unknown_blocked.yml");
+    run_workflow_guard_scenario(yaml);
+}

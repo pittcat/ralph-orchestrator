@@ -63,6 +63,9 @@ schemas:
   # is resolved AND all thresholds are met; otherwise it emits
   # redteam.plan.unresolved. Downstream attack-surface-mapper must NOT
   # run when scope is unresolved.
+  #
+  # 2026-08-08-004 plan U6: extended with coverage, boundary_consistency,
+  # boundary_conflict, critical_traceability for mixed/conflict gates.
   redteam.plan.resolved:
     required_fields:
       - resolved_count
@@ -77,6 +80,11 @@ schemas:
       - scope_base_sha
       - resolved_patch_path
       - patch_digest
+      # U6: mixed/conflict gates
+      - coverage
+      - critical_traceability
+      - boundary_consistency
+      - boundary_conflict
     payload: json_object
     allowed_values:
       scope_status:
@@ -131,6 +139,23 @@ schemas:
         meaning: SHA-256 hex digest of the resolved patch file bytes (64 hex chars).
         source: Plan-resolver computes from resolved_patch_path.
         fill_rule: 64-char hex; recompute on every emit attempt.
+      # U6: mixed/conflict gates
+      coverage:
+        meaning: Percentage of hunks/commits attributed to known plans (0-100).
+        source: "Plan-resolver computes from classification table: attributed_hunks / total_hunks * 100."
+        fill_rule: "Integer 0-100; resolved requires coverage >= 90."
+      critical_traceability:
+        meaning: Percentage of critical-path items with full trace (0-100).
+        source: Plan-resolver computes from critical-path coverage analysis.
+        fill_rule: "Integer 0-100; default 100."
+      boundary_consistency:
+        meaning: Whether independent manifest and optional boundary agree on scope base (true/false).
+        source: Plan-resolver compares independent base SHA with optional merge_boundary SHA.
+        fill_rule: "Boolean; default true; when no boundary is provided, set to true and cross_check=not_applicable."
+      boundary_conflict:
+        meaning: Whether a boundary disagreement was detected (true = conflict, blocks attack-surface).
+        source: Plan-resolver detects when independent base SHA differs from boundary base SHA.
+        fill_rule: "Boolean; default false; true means cross_check=0 and attack-surface must refuse."
 
   # plan-resolver -> all plans failed to resolve. Terminal for this branch.
   redteam.plan.unresolved:
