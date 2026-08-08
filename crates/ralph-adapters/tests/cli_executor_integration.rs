@@ -453,4 +453,97 @@ mod cli_executor_integration {
             "execute against a nonexistent workspace must return Err, got: {result:?}"
         );
     }
+
+    // -----------------------------------------------------------------------
+    // 2026-08-08-001 plan U1: A1 regression guard — backend env must win for
+    // RALPH_EVENTS_FILE so the per-hat channel path injected by the loop
+    // runner reaches the child subprocess.
+    //
+    // The three-stage env sequence is:
+    //   Stage 1: inject_ralph_runtime_env  — sets PATH, RALPH_BIN, RALPH_WORKSPACE_ROOT,
+    //                                         PWD, RALPH_EVENTS_FILE (from marker), TMPDIR family
+    //   Stage 2: command.envs(backend.env_vars) — per-hat channel RALPH_EVENTS_FILE wins here
+    //   Stage 3: re-apply RALPH_WORKSPACE_ROOT + PWD — D2 isolation contract (workspace pin)
+    //
+    // Before the fix, Stage 1 ran last so the marker-derived RALPH_EVENTS_FILE
+    // overwrote the hat-channel path from Stage 2.
+    // -----------------------------------------------------------------------
+
+    /// A1 regression guard: the per-hat `RALPH_EVENTS_FILE` injected via
+    /// `backend.env_vars` (by the loop runner) must reach the child subprocess,
+    /// not be clobbered by the marker-derived value from `inject_ralph_runtime_env`.
+    #[tokio::test]
+    async fn runtime_events_file_from_backend_env_reaches_subprocess() {
+        let workspace = tempfile::TempDir::new().expect("workspace temp dir");
+        let marker = workspace.path().join(".ralph/current-events");
+        let marker_parent = marker.parent().unwrap();
+        std::fs::create_dir_all(marker_parent).expect("create .ralph dir");
+
+        // Marker points to a fake main events file via a relative path.
+        // This must exist so inject_ralph_runtime_env CAN set RALPH_EVENTS_FILE from it.
+        std::fs::write(&marker, "events-main.jsonl").expect("write marker");
+
+        // The hat channel path is an absolute path that does NOT need to exist.
+        // It is injected via backend.env_vars and must win over the marker.
+        let hat_channel_path = format!("/tmp/hat-channel-{}.jsonl", std::process::id());
+
+        // Script captures env var values via shell variables BEFORE writing to marker,
+        // so we see the ACTUAL env values the subprocess received. Then writes 4 lines:
+        // RALPH_EVENTS_FILE, PWD, RALPH_WORKSPACE_ROOT, PWD.
+        let script = format!(
+            "ralph_ev=$RALPH_EVENTS_FILE; pwd_val=$PWD; ws_root=$RALPH_WORKSPACE_ROOT; printf '%s\n' \"$ralph_ev\" > marker; printf '%s\n' \"$pwd_val\" >> marker; printf '%s\n' \"$ws_root\" >> marker; printf '%s\n' \"$pwd_val\" >> marker"
+        );
+
+        let backend = CliBackend {
+            command: "sh".to_string(),
+            args: vec!["-c".to_string(), script],
+            prompt_mode: PromptMode::Arg,
+            prompt_flag: None,
+            output_format: OutputFormat::Text,
+            env_vars: vec![("RALPH_EVENTS_FILE".into(), hat_channel_path.clone())],
+        };
+
+        let executor = CliExecutor::new(backend);
+        let mut output = Vec::new();
+        executor
+            .execute("", &mut output, None, false, workspace.path())
+            .await
+            .expect("execute ok");
+
+        let marker_path = workspace.path().join("marker");
+        let content = std::fs::read_to_string(&marker_path).expect("read marker");
+        let lines: Vec<&str> = content.lines().collect();
+        assert_eq!(
+            lines.len(),
+            4,
+            "marker must have 4 lines, got {}: {content}",
+            lines.len()
+        );
+
+        // Line 1: RALPH_EVENTS_FILE must be the hat channel path (backend env wins),
+        // NOT the marker-derived path (events-main.jsonl).
+        assert_eq!(
+            lines[0], hat_channel_path,
+            "A1 regression guard: RALPH_EVENTS_FILE must be hat-channel path ({hat_channel_path}), \
+             not marker-derived value — inject_ralph_runtime_env must run BEFORE backend.env_vars",
+        );
+
+        // Lines 2-4: PWD and RALPH_WORKSPACE_ROOT must equal the explicit workspace
+        // (stage 3 re-pin wins over both backend env and marker).
+        assert_eq!(
+            lines[1],
+            workspace.path().to_string_lossy(),
+            "PWD must equal explicit workspace"
+        );
+        assert_eq!(
+            lines[2],
+            workspace.path().to_string_lossy(),
+            "RALPH_WORKSPACE_ROOT must equal explicit workspace"
+        );
+        assert_eq!(
+            lines[3],
+            workspace.path().to_string_lossy(),
+            "PWD must equal explicit workspace (second check)"
+        );
+    }
 }

@@ -67,11 +67,19 @@ impl CliExecutor {
     ///
     /// `workspace` is the caller's resolved workspace root and is used both
     /// as the backend subprocess's `current_dir` and as the source of the
-    /// `RALPH_WORKSPACE_ROOT` / `PWD` env vars (applied *last* so they
-    /// always win over backend-supplied env). The agent must NOT fall back
-    /// to the parent-process cwd or ambient `RALPH_WORKSPACE_ROOT`; the
-    /// caller is responsible for resolving the correct workspace before
-    /// invoking this method.
+    /// `RALPH_WORKSPACE_ROOT` / `PWD` env vars.
+    ///
+    /// Environment variables are applied in three stages to honor the D2
+    /// isolation contract while allowing per-hat-channel overrides:
+    ///   1. `inject_ralph_runtime_env` sets PATH, RALPH_BIN, RALPH_NOWLEDGE_ENABLED,
+    ///      RALPH_WORKSPACE_ROOT, PWD, RALPH_EVENTS_FILE (from workspace marker),
+    ///      and TMPDIR family.
+    ///   2. `command.envs(backend.env_vars)` applies per-activation overrides
+    ///      from the loop runner (e.g. per-hat channel RALPH_EVENTS_FILE).
+    ///      These win over stage 1 for the variables they set.
+    ///   3. `RALPH_WORKSPACE_ROOT` and `PWD` are re-applied from `workspace`
+    ///      so the D2 isolation contract is preserved — backend env cannot
+    ///      redirect the subprocess's working directory.
     ///
     /// Output is streamed line-by-line to the writer while being accumulated
     /// for the return value. If `timeout` is provided and the execution produces
@@ -99,20 +107,28 @@ impl CliExecutor {
         #[cfg(unix)]
         command.process_group(0);
 
-        // Plan 2026-08-08-001 U2: use the workspace the caller resolved, not
-        // any ambient env/current_dir fallback. The caller is the loop runner
-        // (which knows the worktree workspace) or bench (which has its own
-        // workspace.path()) and is responsible for the path.
+        // Env vars are applied in three stages to honor the D2 isolation contract
+        // while allowing per-hat-channel overrides from the loop runner:
+        //
+        // Stage 1: inject_ralph_runtime_env sets PATH, RALPH_BIN, RALPH_NOWLEDGE_ENABLED,
+        //   RALPH_WORKSPACE_ROOT, PWD, RALPH_EVENTS_FILE (from workspace marker),
+        //   and TMPDIR family.
+        //
+        // Stage 2: command.envs(backend.env_vars) applies per-activation overrides
+        //   from the loop runner (e.g. per-hat channel RALPH_EVENTS_FILE injected
+        //   via hat-channel env). These win over stage 1 for the variables they set.
+        //
+        // Stage 3: re-apply RALPH_WORKSPACE_ROOT and PWD from the explicit workspace
+        //   so the D2 isolation contract is preserved — backend env cannot redirect
+        //   the subprocess's working directory.
+        //
+        // The caller (loop runner or bench) is responsible for resolving the correct
+        // workspace before invoking this method.
         command.current_dir(workspace);
-
-        // Apply backend-specific environment variables FIRST. They run before
-        // the runtime isolation variables below so a hostile backend cannot
-        // inject a different RALPH_WORKSPACE_ROOT / PWD.
-        command.envs(self.backend.env_vars.iter().map(|(k, v)| (k, v)));
-
-        // Then apply the runtime isolation variables LAST; they always win
-        // over backend env for RALPH_WORKSPACE_ROOT / PWD / RALPH_EVENTS_FILE.
-        inject_ralph_runtime_env(&mut command, workspace);
+        inject_ralph_runtime_env(&mut command, workspace); // stage 1
+        command.envs(self.backend.env_vars.iter().map(|(k, v)| (k, v))); // stage 2
+        command.env("RALPH_WORKSPACE_ROOT", workspace); // stage 3
+        command.env("PWD", workspace);
 
         debug!(
             command = %cmd,
