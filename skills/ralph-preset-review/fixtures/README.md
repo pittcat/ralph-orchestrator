@@ -226,12 +226,18 @@ fixture 故意保持 preset-neutral（不复制任何 builtin preset）。
 
 **Acceptance gates:**
 
+> 验收：4 个 scope fixture 全部必须存在；缺少任意一个，README §10 acceptance 视为失败（loop 不再 `2>/dev/null || true` 吞错，rename / 缺失会立刻 fail-fast）。
+
 ```bash
 # CLI 冒烟 — positive fixture 必须 strict 通过；negative fixtures 允许因
 # 预期的结构化 lint 反例返回非零，但必须仍输出可解析 JSON，不能进程崩溃。
-for f in scope_missing_negative          scope_boundary_dependency_negative          scope_placeholder_base_negative          scope_confidence_gate_negative; do
+# Fixture 文件名按 L213-215 的真实文件：`scope_*_negative_fixture.yml`。
+# 早期的 `${f}-fixture.yml` 展开会拼出错误路径（缺少下划线），必须改用直接的文件名。
+for f in scope_missing_negative_fixture scope_boundary_dependency_negative_fixture scope_placeholder_base_negative_fixture scope_confidence_gate_negative_fixture; do
+  fixture_path="skills/ralph-preset-review/fixtures/${f}.yml"
+  test -f "${fixture_path}" || { echo "ERROR: fixture missing: ${fixture_path}"; exit 1; }
   out=$(mktemp)
-  ralph preset check -H "skills/ralph-preset-review/fixtures/${f}-fixture.yml"       --strict --format json >"${out}" 2>/dev/null || true
+  ralph preset check -H "${fixture_path}" --strict --format json >"${out}"
   .venv/bin/python -c 'import json,sys; json.load(open(sys.argv[1]))' "$out"
   rm -f "$out"
 done
