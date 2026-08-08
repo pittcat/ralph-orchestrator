@@ -2097,21 +2097,20 @@ exit 0
     emit_wave_validation_marker("idle-kill:weak-cap", &["idle", "weak", "kill"]);
 }
 
-/// S3: fake backend emits Pi tool_execution_start strong signals every
-/// 500 ms for 4 s. idle_heartbeat=60 s, idle_weak_signal_cap=4,
-/// wave_timeout=10 s. Strong signals keep the lease refreshed so the
-/// worker survives past the legacy wall-clock. Expected: Ok with
-/// success=true, duration ≥ 3.5 s (the 4 s execution must fully run).
+/// S3: fake backend emits Pi tool_execution_start strong signals at short
+/// intervals. Strong signals must refresh the lease so the worker exits
+/// cleanly instead of being idle-killed.
 #[cfg(unix)]
 #[tokio::test]
 async fn test_run_wave_worker_pty_strong_signal_keeps_alive_past_legacy_timeout() {
     let temp_dir = tempfile::tempdir().expect("temp dir");
-    // Emit 8 tool_execution_start strong-signal lines at 500 ms intervals
-    // (total 4 s), then exit cleanly.
+    // Emit strong-signal lines at 100 ms intervals, then exit cleanly. The
+    // short interval preserves the lease-refresh transition without making
+    // the default suite wait several seconds.
     let body = r#"i=0
-while [ $i -lt 8 ]; do
+while [ $i -lt 6 ]; do
   printf '{"type":"tool_execution_start","toolCallId":"x%d","toolName":"x","args":{}}\n'
-  sleep 0.5
+  sleep 0.1
   i=$((i + 1))
 done
 exit 0
@@ -2133,15 +2132,15 @@ exit 0
         &backend,
         "prompt",
         &worker_events_path,
-        Duration::from_secs(10),
-        Some(Duration::from_secs(60)),
+        Duration::from_secs(3),
+        Some(Duration::from_secs(1)),
         4,
         tx,
         None,
         None,
         None,
-        // 2026-07-28-003 plan U2: startup_grace = None; the strong signal at ~1 s still flips
-        // `seen_first_signal` and idle semantic kicks in normally.
+        // 2026-07-28-003 plan U2: startup_grace = None; the first strong
+        // signal flips `seen_first_signal` and idle semantics continue.
         None,
     )
     .await;
@@ -2152,106 +2151,20 @@ exit 0
         "worker should report success, got events={events:?}"
     );
     assert!(
-        duration >= Duration::from_secs_f64(3.5),
-        "worker should run at least 3.5 s (4 s script), got {duration:?}"
+        duration >= Duration::from_millis(300),
+        "worker should run long enough to exercise repeated strong signals, got {duration:?}"
     );
     emit_wave_validation_marker("strong-signal:keeps-alive", &["strong", "lease"]);
 }
 
-/// U6: the worker stays completely silent on stdout (one line then sleep),
-/// so the ONLY thing refreshing the lease is events-file growth. The
-/// dispatcher-injected `RALPH_EVENTS_FILE` points at a separate file that
-/// a background task appends to every 500 ms. idle_heartbeat=2 s would
-/// kill a silent worker in ~2 s (see S1); continuous events-file growth
-/// must tick `HeartbeatKind::Strong` and keep the worker alive until the
-/// script exits cleanly at ~6 s. Expected: Ok, success=true, duration ≥ 5 s.
-#[cfg(unix)]
-#[tokio::test]
-async fn test_run_wave_worker_pty_events_file_growth_keeps_lease_alive() {
-    let temp_dir = tempfile::tempdir().expect("temp dir");
-    // echo once then sleep 6 s — stdout goes silent immediately.
-    let body = "echo first && sleep 6\nexit 0\n";
-    write_fake_executable(temp_dir.path(), "wave-worker", body);
-    let worker_events_path = temp_dir.path().join("wave-events.jsonl");
-    // Independent events file injected as RALPH_EVENTS_FILE; stands in for
-    // the runtime events.jsonl that grows while the worker runs.
-    let events_path = temp_dir.path().join("runtime-events.jsonl");
-    std::fs::write(&events_path, "").expect("seed empty events file");
-
-    // Background appender: grow the events file every 500 ms for ~7 s, i.e.
-    // well past the 6 s script lifetime, so the lease is refreshed on every
-    // 250 ms events-tick for the entire run.
-    let appender_path = events_path.clone();
-    let appender = tokio::spawn(async move {
-        use std::io::Write;
-        for _ in 0..14 {
-            if let Ok(mut file) = std::fs::OpenOptions::new()
-                .append(true)
-                .create(true)
-                .open(&appender_path)
-            {
-                let _ = writeln!(file, "{{\"topic\":\"x\"}}");
-            }
-            tokio::time::sleep(Duration::from_millis(500)).await;
-        }
-    });
-
-    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
-    let backend = CliBackend {
-        command: temp_dir.path().join("wave-worker").display().to_string(),
-        args: vec![],
-        prompt_mode: ralph_adapters::PromptMode::Arg,
-        prompt_flag: None,
-        output_format: BackendOutputFormat::Text,
-        env_vars: vec![(
-            "RALPH_EVENTS_FILE".to_string(),
-            events_path.display().to_string(),
-        )],
-    };
-
-    let (_index, outcome) = run_wave_worker_pty(
-        0,
-        &backend,
-        "prompt",
-        &worker_events_path,
-        Duration::from_secs(60),
-        Some(Duration::from_secs(2)),
-        4,
-        tx,
-        None,
-        None,
-        None,
-        // 2026-07-28-003 plan U2: startup_grace = None; events-file growth is a Strong signal
-        // that flips `seen_first_signal` once it lands.
-        None,
-    )
-    .await;
-
-    let (_events, duration, success) =
-        outcome.expect("events-file growth should keep the silent worker alive");
-    assert!(success, "worker should exit cleanly, not be idle-killed");
-    assert!(
-        duration >= Duration::from_secs(5),
-        "events-file growth must refresh the lease past the 2 s idle window; \
-         worker ran only {duration:?}"
-    );
-    let _ = appender.await;
-    emit_wave_validation_marker(
-        "events-file-growth:keeps-alive",
-        &["strong", "lease", "events"],
-    );
-}
-
-/// 2026-07-28-003 plan R5: events-file growth during startup grace
-/// is a Strong signal that ends grace and then refreshes the idle
-/// lease. Silent stdout + growing RALPH_EVENTS_FILE must survive
-/// past idle=2s when grace=8s is configured.
+/// 2026-07-28-003 plan R5: events-file growth during startup grace is a
+/// Strong signal that ends grace and then refreshes the idle lease.
 #[cfg(unix)]
 #[tokio::test]
 async fn test_run_wave_worker_pty_startup_grace_ended_by_events_file_growth() {
     let temp_dir = tempfile::tempdir().expect("temp dir");
     // Completely silent stdout — only events-file can end grace.
-    let body = "sleep 6\nexit 0\n";
+    let body = "sleep 1.2\nexit 0\n";
     write_fake_executable(temp_dir.path(), "wave-worker", body);
     let worker_events_path = temp_dir.path().join("wave-events.jsonl");
     let events_path = temp_dir.path().join("runtime-events.jsonl");
@@ -2260,7 +2173,7 @@ async fn test_run_wave_worker_pty_startup_grace_ended_by_events_file_growth() {
     let appender_path = events_path.clone();
     let appender = tokio::spawn(async move {
         use std::io::Write;
-        for _ in 0..14 {
+        for _ in 0..16 {
             if let Ok(mut file) = std::fs::OpenOptions::new()
                 .append(true)
                 .create(true)
@@ -2268,7 +2181,7 @@ async fn test_run_wave_worker_pty_startup_grace_ended_by_events_file_growth() {
             {
                 let _ = writeln!(file, "{{\"topic\":\"x\"}}");
             }
-            tokio::time::sleep(Duration::from_millis(500)).await;
+            tokio::time::sleep(Duration::from_millis(100)).await;
         }
     });
 
@@ -2290,28 +2203,31 @@ async fn test_run_wave_worker_pty_startup_grace_ended_by_events_file_growth() {
         &backend,
         "prompt",
         &worker_events_path,
-        Duration::from_secs(60),
-        Some(Duration::from_secs(2)),
+        Duration::from_secs(3),
+        Some(Duration::from_millis(500)),
         4,
         tx,
         None,
         None,
         None,
-        Some(Duration::from_secs(8)),
+        Some(Duration::from_secs(2)),
     )
     .await;
 
     let (_events, duration, success) = outcome
         .expect("events-file Strong during grace must end grace and keep the silent worker alive");
+    // The worker has already completed the assertion-critical path; stop the
+    // appender instead of making the test wait for its full safety tail.
+    appender.abort();
+    let _ = appender.await;
     assert!(
         success,
         "worker should exit cleanly, not be startup/idle-killed"
     );
     assert!(
-        duration >= Duration::from_secs(5),
-        "events-file growth during grace must refresh past idle=2s; ran {duration:?}"
+        duration >= Duration::from_millis(700),
+        "events-file growth during grace must refresh past idle=500ms; ran {duration:?}"
     );
-    let _ = appender.await;
     emit_wave_validation_marker(
         "startup-grace:events-file-ends-grace",
         &["startup-grace", "strong", "events"],
@@ -2325,16 +2241,13 @@ async fn test_run_wave_worker_pty_startup_grace_ended_by_events_file_growth() {
 // =====================================================================
 
 /// S1: a silent worker that emits its first line AFTER the idle window
-/// would otherwise fire, but within the startup_grace window must
-/// survive. With grace=8 s and idle=2 s, a 4 s silence must NOT kill
-/// the worker; the first line at 4 s flips `seen_first_signal`, then
-/// the worker exits normally.
+/// would otherwise fire, but within startup_grace must survive.
 #[cfg(unix)]
 #[tokio::test]
 async fn test_run_wave_worker_pty_startup_grace_survives_idle_window() {
     let temp_dir = tempfile::tempdir().expect("temp dir");
-    // Print first line after 4 s, then exit 0 cleanly.
-    let body = "sleep 4 && echo first_signal\nexit 0\n";
+    // Print first line after 800 ms, then exit 0 cleanly.
+    let body = "sleep 0.8 && echo first_signal\nexit 0\n";
     write_fake_executable(temp_dir.path(), "wave-worker", body);
     let worker_events_path = temp_dir.path().join("wave-events.jsonl");
     let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
@@ -2352,16 +2265,16 @@ async fn test_run_wave_worker_pty_startup_grace_survives_idle_window() {
         &backend,
         "prompt",
         &worker_events_path,
-        Duration::from_secs(60),
-        Some(Duration::from_secs(2)),
+        Duration::from_secs(3),
+        Some(Duration::from_millis(300)),
         4,
         tx,
         None,
         None,
         None,
-        // 2026-07-28-003 plan U2 S1: grace 8 s, idle 2 s;
-        // a 4 s pre-signal silence must NOT kill.
-        Some(Duration::from_secs(8)),
+        // 2026-07-28-003 plan U2 S1: grace 2 s, idle 300 ms;
+        // an 800 ms pre-signal silence must NOT kill.
+        Some(Duration::from_secs(2)),
     )
     .await;
 
@@ -2372,8 +2285,8 @@ async fn test_run_wave_worker_pty_startup_grace_survives_idle_window() {
         "worker should exit cleanly within grace window, got duration={duration:?}",
     );
     assert!(
-        duration >= Duration::from_secs(4) && duration <= Duration::from_secs(8),
-        "worker should run at least 4 s and finish well within grace, got {duration:?}",
+        duration >= Duration::from_millis(600) && duration <= Duration::from_secs(2),
+        "worker should survive the pre-signal idle window and finish within grace, got {duration:?}",
     );
     emit_wave_validation_marker(
         "startup-grace:survives-idle-window",

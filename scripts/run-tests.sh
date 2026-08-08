@@ -4,24 +4,27 @@
 # Unified test entry point for local development and CI.
 #
 # Strategy:
-#   0. **Fresh start guarantee**: 启动时**无条件** kill 当前 session 内
-#      的孤儿 cargo / rustc / nextest / run-tests.sh 进程(不论是否
-#      由本次脚本启动,只要 PPID 链能追溯到当前 shell 就杀掉),
-#      防止上一轮卡住的子进程占用 `.cargo-lock` / IPC / PTY session。
-#      同时清理 stale `.ralph/loop.lock`(PID 已死的)。
-#   1. 如果 cargo-nextest 可用,跑 nextest + doctest(ralph-cli cli-serial
-#      串行组,其它包并行)。
+#   1. 如果 cargo-nextest 可用,跑 nextest + doctest(Phase 1 限制并发,
+#      Phase 2 串行隔离 race-sensitive 测试)。
 #   2. 否则回退到单线程 cargo test。
 #
-# 关键不变量(用户硬要求):**每次跑都是一个全新的进程,绝不卡住**。
-# - 启动时清理 + 进程组管理(set -m, kill 整个 process group);
+# 关键不变量:测试脚本只能管理自己启动的进程，不能影响其它 worktree
+# 或其它终端中的 cargo/rustc/nextest。
+# - 不做全局 pgrep/pkill；超时/中断时只递归清理本脚本的子进程树；
 # - 10 分钟总超时(超时后 trap EXIT 强制清场,确保下次能跑);
-# - trap EXIT 在退出/中断时再次清理 cargo 锁等待者。
+# - 每个 worktree 使用自己的 target 目录；Cargo registry/cache 仍可共享。
+# - workspace 全量 nextest 默认最多 4 个并发测试进程；跨 crate 的高并发会
+#   放大共享 OS 资源和 wall-clock 时序测试的争用，导致非确定性失败。
 
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
+
+# Cargo 默认会把 target 放在当前 worktree 根目录。显式固定这个值，避免
+# 用户 shell 中遗留的全局 CARGO_TARGET_DIR 把多个 worktree 合并到一个
+# target 目录，导致编译产物和 Cargo 锁互相干扰。
+export CARGO_TARGET_DIR="$REPO_ROOT/target"
 
 # Strip HTTP(S)/ALL proxy env vars before invoking cargo.
 unset HTTP_PROXY HTTPS_PROXY http_proxy https_proxy ALL_PROXY all_proxy NO_PROXY no_proxy 2>/dev/null || true
@@ -41,103 +44,100 @@ unset RALPH_CURRENT_HAT RALPH_CURRENT_LOOP_ID RALPH_EVENTS_FILE \
 # 详见 docs/solutions/developer-experience/run-tests-doctest-timeout-and-skip-empty-crates-2026-06-21.md
 TOTAL_TIMEOUT_SECONDS=${TOTAL_TIMEOUT_SECONDS:-1500}
 
-# ---------------------------------------------------------------------------
-# 0. Fresh start:kill 当前进程组(PGID)的所有 cargo / rustc / nextest / ralph 子进程,
-#    包括上一轮残留的孤儿 + 同一 shell 启动的其他并行测试。
-#
-#    用 `pgrep -P $$` 找直接子进程,递归 `-P <pid>` 找整棵进程树;
-#    同时用 `pgrep -f` 兜底匹配 cargo/rustc/nextest 命令行。
-#    优先级:SIGTERM → 等 2 秒 → SIGKILL 兜底。
-# ---------------------------------------------------------------------------
-kill_stale_test_processes() {
-  local my_pgid=$$
-  local my_pid=$$
-  local killed=0
-
-  # 收集需要杀死的 PID(用 pgrep 而不是 ps 以避免 -ef 输出差异)
-  # 1) 任何 PPID 等于当前脚本的子进程(直接子进程)
-  # 2) 任何命令行匹配 cargo/rustc/nextest 的进程(孤儿)
-  local pids_to_kill
-  pids_to_kill=$(
-    {
-      # 直接子进程链(脚本 → cargo → rustc → 测试二进制)
-      local current=$my_pid
-      local depth=0
-      while [[ $depth -lt 20 ]]; do
-        local children
-        children=$(pgrep -P "$current" 2>/dev/null || true)
-        [[ -z "$children" ]] && break
-        echo "$children"
-        # 继续递归第一个子进程(典型的脚本→cargo→rustc 链)
-        current=$(echo "$children" | head -n1)
-        depth=$((depth + 1))
-      done
-      # 兜底:任何 cargo/rustc/nextest 进程(孤儿)
-      pgrep -f "cargo (nextest|test|build|doc)" 2>/dev/null || true
-      pgrep -f "rustc" 2>/dev/null || true
-      pgrep -f "cargo-nextest" 2>/dev/null || true
-    } | sort -u | grep -v "^${my_pid}$" || true
-  )
-
-  if [[ -z "$pids_to_kill" ]]; then
-    return 0
+# nextest 的默认 num-cpus 并发在本机上会让 workspace 的 76 个测试 binary
+# 同时争抢 CPU / 文件描述符 / PTY 等 OS 资源，造成 wave-supervisor 测试偶发
+# 得到 0 个 worker，而同一测试单独或串行运行均通过。默认限制为 4 保留并行
+# 能力，同时避免这种跨 crate 争用；CI 或更强机器可显式覆盖。
+if [[ -z "${RALPH_NEXTTEST_JOBS:-}" ]]; then
+  cpu_count=4
+  if command -v sysctl >/dev/null 2>&1; then
+    cpu_count=$(sysctl -n hw.ncpu 2>/dev/null || echo 4)
+  elif command -v getconf >/dev/null 2>&1; then
+    cpu_count=$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 4)
   fi
+  [[ "$cpu_count" =~ ^[0-9]+$ ]] || cpu_count=4
+  (( cpu_count < 4 )) && RALPH_NEXTTEST_JOBS="$cpu_count" || RALPH_NEXTTEST_JOBS=4
+fi
+export RALPH_NEXTTEST_JOBS
 
-  for pid in $pids_to_kill; do
-    if kill -0 "$pid" 2>/dev/null; then
-      # 先 SIGTERM 礼貌退出
-      kill -TERM "$pid" 2>/dev/null || true
-      killed=$((killed + 1))
+# wave_supervisor 使用 store-backed fixture；其测试在单独执行时稳定，但在
+# workspace 多 binary 并发时会出现偶发时序失败。保留在全量门禁中，改为 -j 1。
+SERIAL_TEST_FILTER='test(/partial_timeout_events_visible/) or test(/test_execute_wave_/) or test(/wave_supervisor::/)'
+
+# 全量测试跨 worktree 串行化。Git worktree 共享同一个 git common directory，
+# 因此锁不能放在 $REPO_ROOT 下；否则每个 worktree 都会拿到自己的锁。
+GIT_COMMON_DIR=$(git rev-parse --git-common-dir 2>/dev/null || true)
+if [[ "$GIT_COMMON_DIR" != /* ]]; then
+  GIT_COMMON_DIR="$REPO_ROOT/$GIT_COMMON_DIR"
+fi
+GIT_COMMON_DIR=$(cd "$GIT_COMMON_DIR" 2>/dev/null && pwd -P) || {
+  echo "❌ 无法解析 Git common directory，不能安全执行全量测试锁" >&2
+  exit 1
+}
+FULL_TEST_LOCK_DIR="$GIT_COMMON_DIR/ralph-full-tests.lock"
+FULL_TEST_LOCK_OWNER="$FULL_TEST_LOCK_DIR/pid"
+
+acquire_full_test_lock() {
+  local owner_pid
+  while ! mkdir "$FULL_TEST_LOCK_DIR" 2>/dev/null; do
+    owner_pid=$(cat "$FULL_TEST_LOCK_OWNER" 2>/dev/null || true)
+    if [[ -z "$owner_pid" ]]; then
+      # 锁目录刚创建、owner 文件尚未写完；避免误删活锁。
+      sleep 1
+      continue
+    fi
+    if kill -0 "$owner_pid" 2>/dev/null; then
+      echo "⏳ 已有 worktree 正在执行全量测试(pid=$owner_pid)，当前 worktree 等待..."
+      sleep 5
+    else
+      echo "🧹 清理已退出测试进程留下的 stale 全量测试锁(pid=$owner_pid)" >&2
+      rm -f "$FULL_TEST_LOCK_OWNER"
+      rmdir "$FULL_TEST_LOCK_DIR" 2>/dev/null || true
     fi
   done
-
-  if [[ "$killed" -gt 0 ]]; then
-    # 等 2 秒让进程清理
-    sleep 2
-    # 兜底 SIGKILL
-    for pid in $pids_to_kill; do
-      if kill -0 "$pid" 2>/dev/null; then
-        kill -KILL "$pid" 2>/dev/null || true
-      fi
-    done
-    sleep 0.5
-  fi
-
-  return 0
+  printf '%s\n' "$$" > "$FULL_TEST_LOCK_OWNER"
+  printf '%s\n' "$REPO_ROOT" > "$FULL_TEST_LOCK_DIR/worktree"
 }
 
-# ---------------------------------------------------------------------------
-# 0b. Zombie loop cleanup(与之前相同):清理 stale `.ralph/loop.lock`。
-# ---------------------------------------------------------------------------
-kill_zombie_loops() {
-  local lock_file="$REPO_ROOT/.ralph/loop.lock"
-  if [[ ! -f "$lock_file" ]]; then
-    return 0
-  fi
-  local lock_pid
-  lock_pid=$(grep -oE '"pid":[[:space:]]*[0-9]+' "$lock_file" 2>/dev/null \
-    | head -n1 | grep -oE '[0-9]+' || true)
-  if [[ -n "$lock_pid" ]] && ! ps -p "$lock_pid" >/dev/null 2>&1; then
-    if rm -f "$lock_file"; then
-      echo "🧹 清理 stale .ralph/loop.lock(pid=$lock_pid 已死)"
-    fi
+release_full_test_lock() {
+  local owner_pid
+  owner_pid=$(cat "$FULL_TEST_LOCK_OWNER" 2>/dev/null || true)
+  if [[ "$owner_pid" == "$$" ]]; then
+    rm -f "$FULL_TEST_LOCK_OWNER" "$FULL_TEST_LOCK_DIR/worktree"
+    rmdir "$FULL_TEST_LOCK_DIR" 2>/dev/null || true
   fi
 }
 
-# Trap EXIT:无论脚本因何退出(success/error/timeout/interrupt),
-# 都执行 fresh-cleanup,确保下一次脚本启动时没有残留。
+# 递归获取并终止当前脚本的后代进程。这里按 PPID 关系识别 owner，
+# 不按 cargo/rustc 命令行全局匹配，因此不会碰其它 worktree。
+descendants_of() {
+  local parent="$1"
+  local children child
+  children=$(pgrep -P "$parent" 2>/dev/null || true)
+  for child in $children; do
+    printf '%s\n' "$child"
+    descendants_of "$child"
+  done
+}
+
+terminate_descendants() {
+  local signal="$1"
+  local exclude_pid="${2:-}"
+  local pid
+  while read -r pid; do
+    [[ -z "$pid" || "$pid" == "$exclude_pid" ]] && continue
+    kill -"$signal" "$pid" 2>/dev/null || true
+  done < <(descendants_of "$$" | sort -rn)
+}
+
+# 只停止 timeout watcher；正常退出不清理其它进程。
 cleanup_on_exit() {
-  local exit_code=$?
-  # 仅在用户中断或超时时清理 cargo 进程(正常结束时 cargo 已退出)
-  if [[ $exit_code -ne 0 && $exit_code -ne 1 ]]; then
-    return 0
-  fi
-  # 正常退出不再做激进 kill(cargo 已自然退出)
-  return 0
+  kill "${TIMEOUT_PID:-}" 2>/dev/null || true
+  release_full_test_lock
 }
 trap cleanup_on_exit EXIT
 
-# Trap TIMEOUT:用 bash 内置 `&` + `wait -t` 实现总超时
+# 总超时：先终止当前脚本启动的后代，再通知主脚本退出。
 timeout_watcher() {
   local remaining=$TOTAL_TIMEOUT_SECONDS
   while [[ $remaining -gt 0 ]]; do
@@ -150,32 +150,13 @@ timeout_watcher() {
       return 0  # 子进程已退出,watcher 自然结束
     fi
   done
-  # 超时:杀整个进程组(包括孙子进程)
-  echo "⏰ 总超时 ${TOTAL_TIMEOUT_SECONDS}s,强制清场..." >&2
-  kill -KILL -$$ 2>/dev/null || true
-  # 兜底:单独杀常见测试进程
-  pkill -KILL -f "cargo (nextest|test|build)" 2>/dev/null || true
-  pkill -KILL -f "rustc" 2>/dev/null || true
-  pkill -KILL -f "cargo-nextest" 2>/dev/null || true
-  sleep 0.5
-  exit 124  # standard timeout exit code
+  echo "⏰ 总超时 ${TOTAL_TIMEOUT_SECONDS}s,只清理本脚本启动的进程..." >&2
+  # 让主脚本执行清理；这样兼容 macOS 自带的 Bash 3.2（没有 BASHPID）。
+  kill -TERM "$$" 2>/dev/null || true
+  exit 124
 }
 
 # ---- 主流程 ----
-
-START_TS=$SECONDS
-
-echo "🧹 清场:杀掉上一轮残留的 cargo/rustc/nextest 进程..."
-kill_stale_test_processes
-kill_zombie_loops
-
-# 启动超时 watcher(后台)
-timeout_watcher &
-TIMEOUT_PID=$!
-
-# trap 中断:用户 Ctrl-C 时也清场
-trap 'kill -KILL -$$ 2>/dev/null; kill $TIMEOUT_PID 2>/dev/null; exit 130' INT TERM
-trap 'kill $TIMEOUT_PID 2>/dev/null || true' EXIT
 
 FALLBACK=1
 SERIAL=${RALPH_BASELINE_SERIAL:-0}
@@ -191,6 +172,7 @@ usage() {
 环境变量:
   RALPH_BASELINE_SERIAL=1     强制使用单线程 cargo test(忽略 nextest),用于排除并行 flake。
   TOTAL_TIMEOUT_SECONDS=N     总超时秒数(默认 600 = 10 分钟)。
+  RALPH_NEXTTEST_JOBS=N       Phase 1 nextest 并发数(默认 min(CPU 数, 4))。
 EOF
 }
 
@@ -202,17 +184,26 @@ while [[ "$#" -gt 0 ]]; do
       ;;
     --help|-h)
       usage
-      kill $TIMEOUT_PID 2>/dev/null || true
       exit 0
       ;;
     *)
       echo "未知参数: $1" >&2
       usage
-      kill $TIMEOUT_PID 2>/dev/null || true
       exit 1
       ;;
   esac
 done
+
+acquire_full_test_lock
+START_TS=$SECONDS
+
+# 启动超时 watcher(后台)
+timeout_watcher &
+TIMEOUT_PID=$!
+
+# 中断只清理当前脚本的后代；TERM 由 timeout watcher 使用。
+trap 'terminate_descendants KILL "$TIMEOUT_PID"; kill "$TIMEOUT_PID" 2>/dev/null || true; exit 130' INT
+trap 'terminate_descendants KILL "$TIMEOUT_PID"; kill "$TIMEOUT_PID" 2>/dev/null || true; exit 124' TERM
 
 run_cargo() {
   if [[ -n "${RALPH_CARGO_TOOLCHAIN:-}" ]]; then
@@ -306,7 +297,7 @@ render_summary_table() { # $1=overall_rc
 }
 
 if [[ "$SERIAL" -ne 1 ]] && run_cargo nextest --version >/dev/null 2>&1; then
-  echo "🚀 使用 cargo-nextest 并行运行测试(ralph-cli 串行组,其它包并行)..."
+  echo "🚀 使用 cargo-nextest 并行运行测试(Phase 1 最多 ${RALPH_NEXTTEST_JOBS} 个并发)..."
 
   # 2026-07-25: two-phase run — fast path + isolated slow path.
   # Phase 1: full workspace with default num-cpus concurrency,
@@ -334,7 +325,7 @@ if [[ "$SERIAL" -ne 1 ]] && run_cargo nextest --version >/dev/null 2>&1; then
   # the original trio for the same reason.
   # See CLAUDE.md "hooks-executor-test-flake" for the
   #   parallel-failure characterisation that motivates this split.
-  echo "📦 Phase 1: full workspace at default num-cpus concurrency..."
+  echo "📦 Phase 1: full workspace at ${RALPH_NEXTTEST_JOBS} concurrent jobs..."
   # 关闭 errexit/pipefail 触发的即时退出:我们要跑完所有阶段并汇总,
   # 失败与否由 OVERALL_RC 记录,最后统一 exit。
   set +e
@@ -343,7 +334,8 @@ if [[ "$SERIAL" -ne 1 ]] && run_cargo nextest --version >/dev/null 2>&1; then
   run_cargo nextest run \
     --workspace \
     --exclude ralph-e2e \
-    -E 'not test(/partial_timeout_events_visible/) and not test(/test_execute_wave_/)' 2>&1 | tee "$P1_LOG"
+    -j "$RALPH_NEXTTEST_JOBS" \
+    -E "not (${SERIAL_TEST_FILTER})" 2>&1 | tee "$P1_LOG"
   [[ ${PIPESTATUS[0]} -ne 0 ]] && OVERALL_RC=1
   P1_SUM=$(parse_nextest_summary "$P1_LOG")
 
@@ -354,7 +346,7 @@ if [[ "$SERIAL" -ne 1 ]] && run_cargo nextest --version >/dev/null 2>&1; then
     --workspace \
     --exclude ralph-e2e \
     -j 1 \
-    -E 'test(/partial_timeout_events_visible/) or test(/test_execute_wave_/)' 2>&1 | tee "$P2_LOG"
+    -E "$SERIAL_TEST_FILTER" 2>&1 | tee "$P2_LOG"
   [[ ${PIPESTATUS[0]} -ne 0 ]] && OVERALL_RC=1
   P2_SUM=$(parse_nextest_summary "$P2_LOG")
 
