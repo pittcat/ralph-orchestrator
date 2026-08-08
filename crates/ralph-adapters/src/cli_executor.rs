@@ -15,7 +15,6 @@ use nix::sys::signal::{Signal, kill};
 use nix::unistd::Pid;
 use std::env;
 use std::io::Write;
-use std::path::PathBuf;
 use std::process::Stdio;
 use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWriteExt, BufReader};
@@ -24,6 +23,27 @@ use tracing::{debug, info, warn};
 
 const POST_EVENT_GRACE_TIMEOUT: Duration = Duration::from_secs(5);
 const TERMINATION_GRACE_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// Apply backend env overrides on top of runtime env (already injected
+/// by `inject_ralph_runtime_env`), then re-pin the workspace isolation
+/// controls so backend env cannot redirect cwd. Used by both headless
+/// CliExecutor and PtyExecutor so the two paths produce identical
+/// env winners for the same inputs.
+///
+/// Does NOT call `inject_ralph_runtime_env` — both call sites already
+/// invoke it. This macro owns only stages 2 and 3 of the three-stage
+/// sequence: layer backend env on top, then re-pin workspace controls.
+macro_rules! apply_backend_and_workspace_env {
+    ($cmd:expr, $backend_env_vars:expr, $workspace:expr) => {
+        // Stage 2: backend env wins over runtime env (per-hat channel overrides).
+        for (key, value) in $backend_env_vars {
+            $cmd.env(key, value);
+        }
+        // Stage 3: re-pin workspace controls so backend env cannot redirect cwd.
+        $cmd.env("RALPH_WORKSPACE_ROOT", $workspace);
+        $cmd.env("PWD", $workspace);
+    };
+}
 
 /// Result of a CLI execution.
 #[derive(Debug)]
@@ -66,6 +86,21 @@ impl CliExecutor {
 
     /// Executes a prompt and streams output to the provided writer.
     ///
+    /// `workspace` is the caller's resolved workspace root and is used both
+    /// as the backend subprocess's `current_dir` and as the source of the
+    /// `RALPH_WORKSPACE_ROOT` / `PWD` env vars.
+    ///
+    /// Environment variables are applied in three stages to honor the D2
+    /// isolation contract while allowing per-hat-channel overrides:
+    ///   1. `inject_ralph_runtime_env` sets PATH, RALPH_BIN, RALPH_NOWLEDGE_ENABLED,
+    ///      RALPH_WORKSPACE_ROOT, PWD, RALPH_EVENTS_FILE (from workspace marker),
+    ///      and TMPDIR family.
+    ///   2. `apply_backend_and_workspace_env!` layers `backend.env_vars` on top
+    ///      (per-hat-channel overrides win over stage 1 for the variables set).
+    ///   3. The same macro re-applies `RALPH_WORKSPACE_ROOT` and `PWD` from
+    ///      `workspace` so the D2 isolation contract is preserved — backend env
+    ///      cannot redirect the subprocess's working directory.
+    ///
     /// Output is streamed line-by-line to the writer while being accumulated
     /// for the return value. If `timeout` is provided and the execution produces
     /// no stdout/stderr activity for longer than that duration, the process
@@ -79,6 +114,7 @@ impl CliExecutor {
         mut output_writer: W,
         timeout: Option<Duration>,
         verbose: bool,
+        workspace: &std::path::Path,
     ) -> std::io::Result<ExecutionResult> {
         // Note: _temp_file is kept alive for the duration of this function scope.
         // Some Arg-mode backends use temp-file indirection for very large prompts.
@@ -91,24 +127,28 @@ impl CliExecutor {
         #[cfg(unix)]
         command.process_group(0);
 
-        // U3 (2026-06-14-002): Use RALPH_WORKSPACE_ROOT if set, otherwise fall back to
-        // current_dir(). This fixes worktree mode where the subprocess's cwd is already
-        // the worktree, but we want the Agent's path resolution to be explicit rather
-        // than relying on inherited CWD state.
-        let cwd = env::var("RALPH_WORKSPACE_ROOT")
-            .map(PathBuf::from)
-            .or_else(|_| std::env::current_dir())
-            .unwrap_or_else(|_| PathBuf::from("."));
-        command.current_dir(&cwd);
-        inject_ralph_runtime_env(&mut command, &cwd);
-
-        // Apply backend-specific environment variables (e.g., Agent Teams env var)
-        command.envs(self.backend.env_vars.iter().map(|(k, v)| (k, v)));
+        // Env vars are applied in three stages to honor the D2 isolation contract
+        // while allowing per-hat-channel overrides from the loop runner:
+        //
+        // Stage 1: inject_ralph_runtime_env sets PATH, RALPH_BIN, RALPH_NOWLEDGE_ENABLED,
+        //   RALPH_WORKSPACE_ROOT, PWD, RALPH_EVENTS_FILE (from workspace marker),
+        //   and TMPDIR family.
+        //
+        // Stages 2+3: apply_backend_and_workspace_env! layers backend env on top
+        //   (stage 2: per-hat-channel overrides win over stage 1), then re-pins
+        //   RALPH_WORKSPACE_ROOT and PWD (stage 3: D2 isolation preserved — backend
+        //   env cannot redirect the subprocess's working directory).
+        //
+        // The caller (loop runner or bench) is responsible for resolving the correct
+        // workspace before invoking this method.
+        command.current_dir(workspace);
+        inject_ralph_runtime_env(&mut command, workspace); // stage 1
+        apply_backend_and_workspace_env!(&mut command, &self.backend.env_vars, workspace); // stages 2+3
 
         debug!(
             command = %cmd,
             args = ?args,
-            cwd = ?cwd,
+            cwd = ?workspace,
             "Spawning CLI command"
         );
 
@@ -116,7 +156,17 @@ impl CliExecutor {
             command.stdin(Stdio::piped());
         }
 
-        let mut child = command.spawn()?;
+        let mut child = command.spawn().map_err(|e| {
+            std::io::Error::new(
+                e.kind(),
+                format!(
+                    "spawn backend {:?} with workspace {} failed: {}",
+                    cmd,
+                    workspace.display(),
+                    e
+                ),
+            )
+        })?;
 
         #[cfg(unix)]
         {
@@ -394,8 +444,13 @@ impl CliExecutor {
     /// Executes a prompt without streaming (captures all output).
     ///
     /// Uses no timeout by default. For timed execution, use `execute_capture_with_timeout`.
-    pub async fn execute_capture(&self, prompt: &str) -> std::io::Result<ExecutionResult> {
-        self.execute_capture_with_timeout(prompt, None).await
+    pub async fn execute_capture(
+        &self,
+        prompt: &str,
+        workspace: &std::path::Path,
+    ) -> std::io::Result<ExecutionResult> {
+        self.execute_capture_with_timeout(prompt, None, workspace)
+            .await
     }
 
     /// Executes a prompt without streaming, with optional timeout.
@@ -403,11 +458,12 @@ impl CliExecutor {
         &self,
         prompt: &str,
         timeout: Option<Duration>,
+        workspace: &std::path::Path,
     ) -> std::io::Result<ExecutionResult> {
         // Use a sink that discards output for non-streaming execution
         // verbose=false since output is being discarded anyway
         let sink = std::io::sink();
-        self.execute(prompt, sink, timeout, false).await
+        self.execute(prompt, sink, timeout, false, workspace).await
     }
 }
 
@@ -527,6 +583,20 @@ impl StreamHandler for HeadlessTextHandler {
 mod tests {
     use super::*;
 
+    /// Returns a process-shared temp dir guaranteed != current_dir()
+    /// so ambient-fallback regressions fail loudly.
+    /// tempfile::TempDir always lives under /var/folders/ (macOS) or /tmp/ (Linux)
+    /// and is therefore never equal to the repo working directory.
+    fn test_workspace() -> std::path::PathBuf {
+        use std::sync::OnceLock;
+        use tempfile::TempDir;
+        // Leak the OnceLock statically so the temp dir is reused across tests
+        // in the same binary — the path just needs to be != current_dir().
+        static WORKSPACE: OnceLock<TempDir> = OnceLock::new();
+        let dir = WORKSPACE.get_or_init(|| TempDir::new().expect("test workspace temp dir"));
+        dir.path().to_path_buf()
+    }
+
     #[tokio::test]
     async fn test_execute_echo() {
         // Use echo as a simple test backend
@@ -543,7 +613,7 @@ mod tests {
         let mut output = Vec::new();
 
         let result = executor
-            .execute("hello world", &mut output, None, true)
+            .execute("hello world", &mut output, None, true, &test_workspace())
             .await
             .unwrap();
 
@@ -565,7 +635,10 @@ mod tests {
         };
 
         let executor = CliExecutor::new(backend);
-        let result = executor.execute_capture("stdin test").await.unwrap();
+        let result = executor
+            .execute_capture("stdin test", &test_workspace())
+            .await
+            .unwrap();
 
         assert!(result.success);
         assert!(result.output.contains("stdin test"));
@@ -583,7 +656,10 @@ mod tests {
         };
 
         let executor = CliExecutor::new(backend);
-        let result = executor.execute_capture("").await.unwrap();
+        let result = executor
+            .execute_capture("", &test_workspace())
+            .await
+            .unwrap();
 
         assert!(!result.success);
         assert!(!result.timed_out);
@@ -609,7 +685,7 @@ mod tests {
         // Execute with a 100ms timeout - should trigger timeout
         let timeout = Some(Duration::from_millis(100));
         let result = executor
-            .execute_capture_with_timeout("", timeout)
+            .execute_capture_with_timeout("", timeout, &test_workspace())
             .await
             .unwrap();
 
@@ -637,6 +713,7 @@ mod tests {
             .execute_capture_with_timeout(
                 "printf 'start\\n'; sleep 0.2; printf 'middle\\n'; sleep 0.2; printf 'done\\n'",
                 timeout,
+                &test_workspace(),
             )
             .await
             .unwrap();
@@ -667,7 +744,7 @@ mod tests {
 
         let executor = CliExecutor::new(backend);
         let result = executor
-            .execute_capture_with_timeout("", Some(Duration::from_secs(10)))
+            .execute_capture_with_timeout("", Some(Duration::from_secs(10)), &test_workspace())
             .await
             .unwrap();
 
@@ -692,7 +769,7 @@ mod tests {
 
         let executor = CliExecutor::new(backend);
         let result = executor
-            .execute_capture_with_timeout("", Some(Duration::from_millis(200)))
+            .execute_capture_with_timeout("", Some(Duration::from_millis(200)), &test_workspace())
             .await
             .unwrap();
 
@@ -714,7 +791,13 @@ mod tests {
         let executor = CliExecutor::new(backend);
         let mut output = Vec::new();
         let result = executor
-            .execute("", &mut output, Some(Duration::from_millis(200)), false)
+            .execute(
+                "",
+                &mut output,
+                Some(Duration::from_millis(200)),
+                false,
+                &test_workspace(),
+            )
             .await
             .unwrap();
 
@@ -743,7 +826,7 @@ mod tests {
         let executor = CliExecutor::new(backend);
         let started = std::time::Instant::now();
         let result = executor
-            .execute_capture_with_timeout("", Some(Duration::from_millis(100)))
+            .execute_capture_with_timeout("", Some(Duration::from_millis(100)), &test_workspace())
             .await
             .unwrap();
 
@@ -774,7 +857,7 @@ mod tests {
         let executor = CliExecutor::new(backend);
         let started = std::time::Instant::now();
         let result = executor
-            .execute_capture_with_timeout("", Some(Duration::from_secs(30)))
+            .execute_capture_with_timeout("", Some(Duration::from_secs(30)), &test_workspace())
             .await
             .unwrap();
 
@@ -807,7 +890,7 @@ mod tests {
         let executor = CliExecutor::new(backend);
         let started = std::time::Instant::now();
         let result = executor
-            .execute_capture_with_timeout("", Some(Duration::from_secs(30)))
+            .execute_capture_with_timeout("", Some(Duration::from_secs(30)), &test_workspace())
             .await
             .unwrap();
 
@@ -840,7 +923,7 @@ mod tests {
         // Execute with a generous timeout - should complete before timeout
         let timeout = Some(Duration::from_secs(10));
         let result = executor
-            .execute_capture_with_timeout("fast", timeout)
+            .execute_capture_with_timeout("fast", timeout, &test_workspace())
             .await
             .unwrap();
 
@@ -865,7 +948,7 @@ mod tests {
 
         let executor = CliExecutor::new(backend);
         let result = executor
-            .execute_capture_with_timeout("", Some(Duration::from_secs(30)))
+            .execute_capture_with_timeout("", Some(Duration::from_secs(30)), &test_workspace())
             .await
             .unwrap();
 
@@ -901,7 +984,7 @@ mod tests {
         let mut output = Vec::new();
 
         let result = executor
-            .execute("ignored", &mut output, None, false)
+            .execute("ignored", &mut output, None, false, &test_workspace())
             .await
             .unwrap();
 
@@ -933,7 +1016,7 @@ mod tests {
         let mut output = Vec::new();
 
         let result = executor
-            .execute("ignored", &mut output, None, false)
+            .execute("ignored", &mut output, None, false, &test_workspace())
             .await
             .unwrap();
 
@@ -959,7 +1042,7 @@ mod tests {
         let mut output = Vec::new();
 
         let result = executor
-            .execute("ignored", &mut output, None, false)
+            .execute("ignored", &mut output, None, false, &test_workspace())
             .await
             .unwrap();
 
@@ -990,7 +1073,7 @@ mod tests {
         let mut output = Vec::new();
 
         let result = executor
-            .execute("ignored", &mut output, None, false)
+            .execute("ignored", &mut output, None, false, &test_workspace())
             .await
             .unwrap();
 
@@ -1022,7 +1105,7 @@ mod tests {
         let mut output = Vec::new();
 
         let result = executor
-            .execute("ignored", &mut output, None, false)
+            .execute("ignored", &mut output, None, false, &test_workspace())
             .await
             .unwrap();
 
@@ -1056,7 +1139,7 @@ mod tests {
         let executor = CliExecutor::new(backend);
         let mut output = Vec::new();
         let result = executor
-            .execute("", &mut output, None, false)
+            .execute("", &mut output, None, false, &test_workspace())
             .await
             .unwrap();
         assert!(result.success);
@@ -1087,14 +1170,14 @@ mod tests {
         );
 
         // U1 (2026-06-14-002): PWD must be synchronized with the actual working
-        // directory so agent bash tools resolve paths correctly.
-        let expected_pwd = std::env::current_dir()
-            .unwrap()
-            .to_string_lossy()
-            .to_string();
+        // directory so agent bash tools resolve paths correctly. After U4
+        // (2026-08-08-001), test_workspace() returns a process-shared TempDir
+        // (not current_dir()) so ambient-fallback regressions fail loudly;
+        // PWD must match the workspace the test passed, not the parent cwd.
+        let expected_pwd = test_workspace().to_string_lossy().to_string();
         assert!(
             stdout.contains(&format!("PWD={expected_pwd}")),
-            "PWD should match cwd ({expected_pwd}): {stdout}"
+            "PWD should match the explicit workspace ({expected_pwd}): {stdout}"
         );
     }
 

@@ -847,6 +847,206 @@ fn test_worktree_context_md_does_not_expose_main_repo() {
 }
 
 // ─────────────────────────────────────────────────────────────────────────
+// 2026-08-08-001 plan U1: real headless pipeline worktree cwd/写盘 Red
+// ─────────────────────────────────────────────────────────────────────────
+
+/// Config that wires the loop to a custom-backend shell script which writes a
+/// marker into whatever cwd it runs in, then emits LOOP_COMPLETE. The script
+/// captures both the directory it actually saw (the `real_cwd` artifact) and
+/// the workspace/PWD/PATH env vars so the test can assert on the precise
+/// boundaries the bug fix targets.
+fn write_headless_cwd_marker_config(path: &Path, ralph_bin: &Path, backend_script: &Path) {
+    let script_body = format!(
+        "#!/bin/sh\nset -e\nreal_cwd=\"$(pwd -P)\"\nprintf '%s\\n' \"$real_cwd\" > marker\nprintf 'RALPH_WORKSPACE_ROOT=%s\\nPWD=%s\\n' \"$RALPH_WORKSPACE_ROOT\" \"$PWD\" >> marker\n\"{ralph}\" emit LOOP_COMPLETE headless-cwd-test\n",
+        ralph = ralph_bin.display(),
+    );
+    fs::write(backend_script, script_body).expect("write backend script");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut permissions = fs::metadata(backend_script)
+            .expect("metadata")
+            .permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(backend_script, permissions).expect("set executable");
+    }
+
+    fs::write(
+        path.join("ralph.yml"),
+        r#"cli:
+  backend: custom
+  command: "./headless-cwd-marker.sh"
+  prompt_mode: stdin
+event_loop:
+  completion_promise: "LOOP_COMPLETE"
+  max_iterations: 1
+  max_runtime_seconds: 30
+topic_format_whitelist:
+  - LOOP_COMPLETE
+tasks:
+  enabled: false
+"#,
+    )
+    .expect("write ralph.yml");
+}
+
+/// U1 (Acceptance Red for plan 2026-08-08-001): running
+/// `ralph run --worktree --no-tui` with a headless custom backend must leave
+/// the marker inside the **worktree**, never on the **main checkout**.
+///
+/// Before Unit 2+3 land, `CliExecutor::execute` falls back to the inherited
+/// `RALPH_WORKSPACE_ROOT` / parent-process cwd, so the script's `pwd -P`
+/// points at the main checkout. This test fails (Red) on the current
+/// baseline with that exact symptom.
+#[test]
+fn headless_worktree_backend_writes_only_to_worktree() {
+    let temp_dir = TempDir::new().expect("temp dir");
+    let main_repo = temp_dir.path();
+    setup_git_repo(main_repo);
+
+    // The custom backend needs the ralph binary on PATH (Ralph already sets
+    // `RALPH_BIN` from its own process image, so the script invokes the
+    // exact same binary that the loop driver used).
+    let ralph_bin = std::env::var_os("CARGO_BIN_EXE_ralph")
+        .map(PathBuf::from)
+        .or_else(|| {
+            // Fall back to the ralph build output for `cargo nextest` runs
+            // where the test binary doesn't expose CARGO_BIN_EXE_ralph.
+            let target_dir = std::env::var_os("CARGO_TARGET_DIR")
+                .map(PathBuf::from)
+                .unwrap_or_else(|| PathBuf::from("target"));
+            for profile in ["debug", "release"] {
+                let candidate = target_dir
+                    .join(profile)
+                    .join(format!("ralph{}", std::env::consts::EXE_SUFFIX));
+                if candidate.exists() {
+                    return Some(candidate);
+                }
+            }
+            None
+        })
+        .expect("CARGO_BIN_EXE_ralph (or target/.../ralph) must be available for the test");
+
+    let backend_script = main_repo.join("headless-cwd-marker.sh");
+    write_headless_cwd_marker_config(main_repo, &ralph_bin, &backend_script);
+
+    let output = common::ralph_bin()
+        .args([
+            "run",
+            "--worktree",
+            "--no-tui",
+            "--skip-preflight",
+            "--prompt",
+            "headless cwd marker test",
+        ])
+        .current_dir(main_repo)
+        .output()
+        .expect("execute ralph");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    eprintln!("ralph stderr: {stderr}");
+
+    // Find the worktree that the parent created; the script wrote its
+    // marker there (or, pre-fix, it wrote it into the main checkout).
+    let worktree_path = main_repo
+        .join(".worktrees")
+        .read_dir()
+        .ok()
+        .and_then(|entries| {
+            entries
+                .filter_map(|e| e.ok())
+                .find(|e| e.path().is_dir())
+                .map(|e| e.path())
+        })
+        .expect("--worktree should have created .worktrees/<id>/, but none was found");
+
+    // Sanity: the custom backend actually ran (loop must have invoked the
+    // backend at least once for the marker to be observed). Without this
+    // gate, a pre-loop failure (preset-lint, missing binary, etc.) could
+    // masquerade as a cwd bug. We probe the worktree, since U3 has not
+    // landed yet and the marker may still appear in the main checkout.
+    let main_marker = main_repo.join("marker");
+    let worktree_marker = worktree_path.join("marker");
+    assert!(
+        main_marker.exists() || worktree_marker.exists(),
+        "neither main nor worktree received the marker; loop never reached the custom backend.\n\
+         stderr:\n{stderr}"
+    );
+
+    // The Red signal: the marker MUST land in the worktree only. Pre-fix
+    // it falls in the main checkout; post-fix it must move into the
+    // worktree and stay out of the main repo.
+    assert!(
+        worktree_marker.exists(),
+        "headless backend marker must end up inside the worktree at {}\n\
+         (it landed in the main checkout at {})\n\
+         stderr:\n{stderr}",
+        worktree_marker.display(),
+        main_marker.display()
+    );
+    assert!(
+        !main_marker.exists(),
+        "main checkout must NOT receive the marker — headless backend leaked out of the worktree\n\
+         stderr:\n{stderr}"
+    );
+
+    // Confirm the recorded cwd inside the marker matches the worktree —
+    // tighter contract than "marker file exists" alone: even if the bug
+    // shipped marker files to both locations, the cwd contract would
+    // catch it. On macOS, the test may observe `/var/tmp/...` while the
+    // backend reports the canonical `/private/var/tmp/...`, so we resolve
+    // both paths through std::fs::canonicalize and compare those instead
+    // of relying on the raw string.
+    let marker_body = fs::read_to_string(&worktree_marker).expect("read marker");
+    let recorded_pwd_raw = marker_body
+        .lines()
+        .next()
+        .expect("marker must record pwd on line 1");
+    let recorded_pwd =
+        fs::canonicalize(recorded_pwd_raw).unwrap_or_else(|_| PathBuf::from(recorded_pwd_raw));
+    let expected_pwd = fs::canonicalize(&worktree_path).unwrap_or_else(|_| worktree_path.clone());
+    assert_eq!(
+        recorded_pwd,
+        expected_pwd,
+        "marker must record pwd={}, got raw={}",
+        expected_pwd.display(),
+        recorded_pwd_raw
+    );
+    // Compare the recorded env vars by their canonical path as well:
+    // the shell sees `pwd -P`, so for symlinked parents (e.g. macOS
+    // /var/tmp vs /private/var/tmp) the env will carry the canonical
+    // form, while the parent observes the symlinked path.
+    let expected_workspace = fs::canonicalize(&worktree_path)
+        .unwrap_or_else(|_| worktree_path.clone())
+        .to_string_lossy()
+        .into_owned();
+    let workspace_eq = |line: &str, var: &str| -> bool {
+        let prefix = format!("{var}=");
+        line.strip_prefix(&prefix)
+            .map(|rhs| {
+                rhs == expected_workspace
+                    || fs::canonicalize(rhs)
+                        .map(|p| p == Path::new(&expected_workspace))
+                        .unwrap_or(false)
+            })
+            .unwrap_or(false)
+    };
+    let has_root = marker_body
+        .lines()
+        .any(|l| workspace_eq(l, "RALPH_WORKSPACE_ROOT"));
+    let has_pwd = marker_body.lines().any(|l| workspace_eq(l, "PWD"));
+    assert!(
+        has_root,
+        "marker must record RALPH_WORKSPACE_ROOT={expected_workspace}, got:\n{marker_body}"
+    );
+    assert!(
+        has_pwd,
+        "marker must record PWD={expected_workspace}, got:\n{marker_body}"
+    );
+}
+
+// AE1 (2026-08-03-004 U1): parallel-forge resume manifest on reuse
+
+// ─────────────────────────────────────────────────────────────────────────
 // 2026-08-03-004 U1: parallel-forge resume manifest on reuse
 // ─────────────────────────────────────────────────────────────────────────
 

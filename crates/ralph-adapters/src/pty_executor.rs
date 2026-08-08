@@ -37,6 +37,27 @@ use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, watch};
 use tracing::{debug, info, warn};
 
+/// Apply backend env overrides on top of runtime env (already injected
+/// by `inject_ralph_runtime_env`), then re-pin the workspace isolation
+/// controls so backend env cannot redirect cwd. Used by both headless
+/// CliExecutor and PtyExecutor so the two paths produce identical
+/// env winners for the same inputs.
+///
+/// Does NOT call `inject_ralph_runtime_env` — both call sites already
+/// invoke it. This macro owns only stages 2 and 3 of the three-stage
+/// sequence: layer backend env on top, then re-pin workspace controls.
+macro_rules! apply_backend_and_workspace_env {
+    ($cmd:expr, $backend_env_vars:expr, $workspace:expr) => {
+        // Stage 2: backend env wins over runtime env (per-hat channel overrides).
+        for (key, value) in $backend_env_vars {
+            $cmd.env(key, value);
+        }
+        // Stage 3: re-pin workspace controls so backend env cannot redirect cwd.
+        $cmd.env("RALPH_WORKSPACE_ROOT", $workspace);
+        $cmd.env("PWD", $workspace);
+    };
+}
+
 /// Result of a PTY execution.
 #[derive(Debug)]
 pub struct PtyExecutionResult {
@@ -328,9 +349,8 @@ impl PtyExecutor {
         inject_ralph_runtime_env(&mut cmd_builder, &self.config.workspace_root);
 
         // Apply backend-specific environment variables (e.g., Agent Teams env var)
-        for (key, value) in &self.backend.env_vars {
-            cmd_builder.env(key, value);
-        }
+        // and re-pin workspace controls (stages 2+3 unified with headless path).
+        apply_backend_and_workspace_env!(&mut cmd_builder, &self.backend.env_vars, &self.config.workspace_root);
         let child = pair
             .slave
             .spawn_command(cmd_builder)

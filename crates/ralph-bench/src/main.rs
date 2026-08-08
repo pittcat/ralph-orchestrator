@@ -473,7 +473,7 @@ async fn run_task_loop(
             let mut output_buf = Vec::new();
             let mut capture = CliCapture::new(&mut output_buf, true);
             let result = executor
-                .execute(&prompt, &mut capture, timeout, false)
+                .execute(&prompt, &mut capture, timeout, false, workspace.path())
                 .await?;
 
             // Extract and record UX events
@@ -486,7 +486,7 @@ async fn run_task_loop(
         } else {
             let mut output_buf = Vec::new();
             executor
-                .execute(&prompt, &mut output_buf, timeout, false)
+                .execute(&prompt, &mut output_buf, timeout, false, workspace.path())
                 .await?
         };
 
