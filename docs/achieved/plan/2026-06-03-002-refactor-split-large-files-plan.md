@@ -477,7 +477,7 @@ crates/ralph-cli/src/
 
 **Verification:**
 
-- `rtk cargo nextest run -p ralph-core event_loop::tests --no-fail-fast`
+- `cargo nextest run -p ralph-core event_loop::tests --no-fail-fast`
 
 ### U2. 拆分 `event_loop/tests.rs` → `event_loop/tests/`
 
@@ -519,8 +519,8 @@ crates/ralph-cli/src/
 
 **Verification:**
 
-- `rtk cargo nextest run -p ralph-core event_loop::tests --no-fail-fast`
-- `rtk cargo nextest run -p ralph-core --no-fail-fast`（整个 ralph-core 测试集）
+- `cargo nextest run -p ralph-core event_loop::tests --no-fail-fast`
+- `cargo nextest run -p ralph-core --no-fail-fast`（整个 ralph-core 测试集）
 - 抽查 5 个不同主题的测试，单独运行通过。
 
 ### U3. 拆分 `config.rs` → `config/`
@@ -565,8 +565,8 @@ crates/ralph-cli/src/
 
 **Verification:**
 
-- `rtk cargo nextest run -p ralph-core --no-fail-fast`
-- `rtk cargo test -p ralph-core --doc --no-fail-fast`
+- `cargo nextest run -p ralph-core --no-fail-fast`
+- `cargo test -p ralph-core --doc --no-fail-fast`
 - 抽查 5 个 preset 的 YAML 解析无变化。
 
 ### U4. 拆分 `main.rs` → `cli/` + `commands/`
@@ -627,8 +627,8 @@ crates/ralph-cli/src/
 
 **Verification:**
 
-- `rtk cargo nextest run -p ralph-cli --no-fail-fast`
-- `rtk cargo build -p ralph-cli`
+- `cargo nextest run -p ralph-cli --no-fail-fast`
+- `cargo build -p ralph-cli`
 - `./target/debug/ralph --help`
 - `./target/debug/ralph completions zsh > /tmp/comp.zsh && diff <(./target/debug/ralph completions zsh) <(git show HEAD:scripts/ralph-zsh-plugin.zsh | head -50)`
 
@@ -703,9 +703,9 @@ crates/ralph-cli/src/
 
 **Verification:**
 
-- `rtk cargo nextest run -p ralph-cli --no-fail-fast`
-- `rtk cargo nextest run -p ralph-core --no-fail-fast`
-- `rtk cargo test --workspace --exclude ralph-e2e --doc --no-fail-fast`
+- `cargo nextest run -p ralph-cli --no-fail-fast`
+- `cargo nextest run -p ralph-core --no-fail-fast`
+- `cargo test --workspace --exclude ralph-e2e --doc --no-fail-fast`
 - 抽查 5 个不同集群的测试单独运行通过。
 
 ### U6. 完整验证 + 文档同步
@@ -725,14 +725,14 @@ crates/ralph-cli/src/
 **Approach:**
 
 - 跑完整测试套件：
-  - `rtk cargo nextest run --workspace --exclude ralph-e2e --no-fail-fast`
-  - `rtk cargo test --workspace --exclude ralph-e2e --doc --no-fail-fast`
-  - `rtk cargo clippy --workspace --all-targets --no-fail-fast`
-  - `rtk cargo fmt --check`
+  - `cargo nextest run --workspace --exclude ralph-e2e --no-fail-fast`
+  - `cargo test --workspace --exclude ralph-e2e --doc --no-fail-fast`
+  - `cargo clippy --workspace --all-targets --no-fail-fast`
+  - `cargo fmt --check`
 - 跑 e2e mock 模式（CI 安全）：
-  - `rtk cargo run -p ralph-e2e -- --mock --no-fail-fast`
+  - `cargo run -p ralph-e2e -- --mock --no-fail-fast`
 - 跑 BDD 场景：
-  - `rtk cargo test -p ralph-core scenarios --no-fail-fast`
+  - `cargo test -p ralph-core scenarios --no-fail-fast`
 - 行数审计：
   - 4 个原大文件全部消失。
   - `loop_runner/mod.rs` ≤ 200 行
@@ -762,12 +762,12 @@ crates/ralph-cli/src/
 
 **Verification:**
 
-- `rtk cargo nextest run --workspace --exclude ralph-e2e --no-fail-fast`
-- `rtk cargo test --workspace --exclude ralph-e2e --doc --no-fail-fast`
-- `rtk cargo clippy --workspace --all-targets --no-fail-fast`
-- `rtk cargo fmt --check`
-- `rtk cargo run -p ralph-e2e -- --mock --no-fail-fast`
-- `rtk cargo test -p ralph-core scenarios --no-fail-fast`
+- `cargo nextest run --workspace --exclude ralph-e2e --no-fail-fast`
+- `cargo test --workspace --exclude ralph-e2e --doc --no-fail-fast`
+- `cargo clippy --workspace --all-targets --no-fail-fast`
+- `cargo fmt --check`
+- `cargo run -p ralph-e2e -- --mock --no-fail-fast`
+- `cargo test -p ralph-core scenarios --no-fail-fast`
 - 写一个 `scripts/audit-file-sizes.sh` 校验行数。
 
 ---
@@ -787,18 +787,18 @@ crates/ralph-cli/src/
 
 | Area | Command |
 |------|---------|
-| Event loop 单元/集成（拆分后） | `rtk cargo nextest run -p ralph-core event_loop::tests --no-fail-fast` |
-| Config 反序列化（拆分后） | `rtk cargo nextest run -p ralph-core config::tests --no-fail-fast` |
-| Config doctest | `rtk cargo test -p ralph-core config --doc --no-fail-fast` |
-| Main.rs clap 解析 | `rtk cargo nextest run -p ralph-cli --no-fail-fast` |
-| Loop runner 全部测试 | `rtk cargo nextest run -p ralph-cli loop_runner --no-fail-fast` |
-| 全 workspace 测试 | `rtk cargo nextest run --workspace --exclude ralph-e2e --no-fail-fast` |
-| 全 workspace doctest | `rtk cargo test --workspace --exclude ralph-e2e --doc --no-fail-fast` |
-| Clippy | `rtk cargo clippy --workspace --all-targets --no-fail-fast` |
-| 格式 | `rtk cargo fmt --check` |
-| BDD 场景 | `rtk cargo test -p ralph-core scenarios --no-fail-fast` |
-| E2E mock | `rtk cargo run -p ralph-e2e -- --mock --no-fail-fast` |
-| 串行 fallback（无 nextest） | `rtk cargo test --workspace --exclude ralph-e2e -- --test-threads=1 --skip acp_executor::tests::test_create_terminal_and_output` |
+| Event loop 单元/集成（拆分后） | `cargo nextest run -p ralph-core event_loop::tests --no-fail-fast` |
+| Config 反序列化（拆分后） | `cargo nextest run -p ralph-core config::tests --no-fail-fast` |
+| Config doctest | `cargo test -p ralph-core config --doc --no-fail-fast` |
+| Main.rs clap 解析 | `cargo nextest run -p ralph-cli --no-fail-fast` |
+| Loop runner 全部测试 | `cargo nextest run -p ralph-cli loop_runner --no-fail-fast` |
+| 全 workspace 测试 | `cargo nextest run --workspace --exclude ralph-e2e --no-fail-fast` |
+| 全 workspace doctest | `cargo test --workspace --exclude ralph-e2e --doc --no-fail-fast` |
+| Clippy | `cargo clippy --workspace --all-targets --no-fail-fast` |
+| 格式 | `cargo fmt --check` |
+| BDD 场景 | `cargo test -p ralph-core scenarios --no-fail-fast` |
+| E2E mock | `cargo run -p ralph-e2e -- --mock --no-fail-fast` |
+| 串行 fallback（无 nextest） | `cargo test --workspace --exclude ralph-e2e -- --test-threads=1 --skip acp_executor::tests::test_create_terminal_and_output` |
 | 行数审计 | `bash scripts/audit-file-sizes.sh`（U6 引入） |
 
 ---
@@ -806,7 +806,7 @@ crates/ralph-cli/src/
 ## Risks and Mitigations
 
 - **Risk: 公开 API 不小心被改签名。**  
-  Mitigation: 拆分前先 `rtk cargo build --workspace` 确认 baseline OK；每个 U 完成后用 `cargo doc --no-deps` 验证导出表未变；调用方 import 路径不变作为硬性验收。
+  Mitigation: 拆分前先 `cargo build --workspace` 确认 baseline OK；每个 U 完成后用 `cargo doc --no-deps` 验证导出表未变；调用方 import 路径不变作为硬性验收。
 
 - **Risk: 共享 helper 提取到 common 后出现编译错误（use 路径错误）。**  
   Mitigation: 抽 common 时**先复制不删**原文件中的 helper，验证子文件能用 `use super::common::*;` 访问后再删除原文件中的 helper。

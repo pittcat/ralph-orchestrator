@@ -246,9 +246,9 @@ trait WaveWorkerExecutor {
 ### U3-8：验证
 
 ```bash
-rtk cargo test -p ralph-cli wave
-rtk cargo test -p ralph-cli dispatcher
-rtk cargo clippy -p ralph-cli --all-targets -- -D warnings
+cargo test -p ralph-cli wave
+cargo test -p ralph-cli dispatcher
+cargo clippy -p ralph-cli --all-targets -- -D warnings
 ./scripts/run-tests.sh
 ```
 

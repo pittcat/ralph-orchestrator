@@ -448,11 +448,11 @@ flowchart TD
 
 已跑验证：
 
-- `rtk cargo test -p ralph-core autonomous_idle_timeout_secs`
-- `rtk cargo test -p ralph-adapters idle_timeout`
-- `rtk cargo test -p ralph-cli execute_pty_autonomous_watchdog`
-- `rtk cargo test -p ralph-cli watchdog_timeout`
-- `rtk cargo test -p ralph-core watchdog_timeout`
+- `cargo test -p ralph-core autonomous_idle_timeout_secs`
+- `cargo test -p ralph-adapters idle_timeout`
+- `cargo test -p ralph-cli execute_pty_autonomous_watchdog`
+- `cargo test -p ralph-cli watchdog_timeout`
+- `cargo test -p ralph-core watchdog_timeout`
 
 这些针对性测试覆盖了配置解析、PTY idle watchdog、runner outcome、partial-event 路由和真实 `execute_pty` 路径。最终验收仍要求使用新编译的 `ralph` 二进制重启相关 loop；旧二进制或已经卡住的旧进程不会自动获得这次修复。
 

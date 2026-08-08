@@ -120,8 +120,8 @@ U1–U9 全部落地：
   - 未解决 embedded schema 解析前，不得在 public builtin preset 上启用 `schema_file`。
 
   **Verification:**
-  - `rtk cargo test -p ralph-core config::tests::test_schema_file -- --nocapture`
-  - `rtk cargo test -p ralph-cli presets::tests -- --nocapture`
+  - `cargo test -p ralph-core config::tests::test_schema_file -- --nocapture`
+  - `cargo test -p ralph-cli presets::tests -- --nocapture`
 
 - [x] U2. **Instructions Payload 字段引用提取器**
 
@@ -149,7 +149,7 @@ U1–U9 全部落地：
   - `ignore_payload_fields` 只用于静态 validator 排除误报，不影响 runtime event policy。
 
   **Verification:**
-  - `rtk cargo test -p ralph-core payload_contract::tests -- --nocapture`
+  - `cargo test -p ralph-core payload_contract::tests -- --nocapture`
 
 - [x] U3. **Payload Contract Validator**
 
@@ -171,8 +171,8 @@ U1–U9 全部落地：
   - source hat 如果多个发布同一 topic，诊断必须列出全部候选，不得猜一个。
 
   **Verification:**
-  - `rtk cargo test -p ralph-core payload_contract::tests -- --nocapture`
-  - `rtk cargo test -p ralph-core preset_validator::tests -- --nocapture`
+  - `cargo test -p ralph-core payload_contract::tests -- --nocapture`
+  - `cargo test -p ralph-core preset_validator::tests -- --nocapture`
 
 - [x] U4. **`ralph hats validate --strict` 集成**
 
@@ -191,8 +191,8 @@ U1–U9 全部落地：
   - 输出必须包含 preset 路径、hat id、topic、field、schema 来源、instructions 行号。
 
   **Verification:**
-  - `rtk cargo test -p ralph-cli hats -- --nocapture`
-  - `rtk cargo run -p ralph-cli -- hats validate --help`
+  - `cargo test -p ralph-cli hats -- --nocapture`
+  - `cargo run -p ralph-cli -- hats validate --help`
 
 - [x] U5. **`ralph run` 启动前 Hard Gate**
 
@@ -214,7 +214,7 @@ U1–U9 全部落地：
 
   **Verification:**
   - 构造缺 schema fixture，确认 `ralph run --dry-run` 或等价路径失败且不启动 agent。
-  - `rtk cargo test -p ralph-cli payload_contract -- --nocapture`
+  - `cargo test -p ralph-cli payload_contract -- --nocapture`
 
 - [x] U6. **Runtime Payload Violation Loop Pause 与诊断报告**
 
@@ -250,8 +250,8 @@ U1–U9 全部落地：
     - `fix_hint`
 
   **Verification:**
-  - `rtk cargo test -p ralph-core event_policy -- --nocapture`
-  - `rtk cargo test -p ralph-core event_loop::tests::test_payload_contract -- --nocapture`
+  - `cargo test -p ralph-core event_policy -- --nocapture`
+  - `cargo test -p ralph-core event_loop::tests::test_payload_contract -- --nocapture`
 
 - [x] U7. **ce-executor / ce-executor-zh Schema 适配**
 
@@ -271,9 +271,9 @@ U1–U9 全部落地：
   - 同步 root 与 embedded preset。
 
   **Verification:**
-  - `rtk proxy ./scripts/sync-embedded-files.sh check`
-  - `rtk cargo run -p ralph-cli -- hats validate --strict -p presets/ce-executor.yml`
-  - `rtk cargo run -p ralph-cli -- hats validate --strict -p presets/ce-executor-zh.yml`
+  - `proxy ./scripts/sync-embedded-files.sh check`
+  - `cargo run -p ralph-cli -- hats validate --strict -p presets/ce-executor.yml`
+  - `cargo run -p ralph-cli -- hats validate --strict -p presets/ce-executor-zh.yml`
 
 - [x] U8. **全量 Preset 兼容性审计矩阵**
 
@@ -364,7 +364,7 @@ U1–U9 全部落地：
   - embedded preset/schema 同步要求。
 
   **Verification:**
-  - `rtk cargo run -p ralph-cli -- hats validate --help`
+  - `cargo run -p ralph-cli -- hats validate --help`
   - 若修改 `crates/ralph-core/data/*.md`，按 AGENTS.md 做源码行号反向验证。
 
 ## Sequencing
@@ -382,16 +382,16 @@ U1–U9 全部落地：
 
 | Area | Command |
 |---|---|
-| Schema file parsing | `rtk cargo test -p ralph-core config::tests::test_schema_file -- --nocapture` |
-| Payload extraction | `rtk cargo test -p ralph-core payload_contract::tests -- --nocapture` |
-| Preset validator | `rtk cargo test -p ralph-core preset_validator::tests -- --nocapture` |
-| CLI hats validate | `rtk cargo test -p ralph-cli hats -- --nocapture` |
-| Runtime event policy | `rtk cargo test -p ralph-core event_policy -- --nocapture` |
-| Runtime loop pause | `rtk cargo test -p ralph-core event_loop::tests::test_payload_contract -- --nocapture` |
-| ce-executor strict validate | `rtk cargo run -p ralph-cli -- hats validate --strict -p presets/ce-executor.yml` |
-| zh strict validate | `rtk cargo run -p ralph-cli -- hats validate --strict -p presets/ce-executor-zh.yml` |
-| Embedded drift | `rtk proxy ./scripts/sync-embedded-files.sh check` |
-| Full gate | `rtk proxy ./scripts/run-tests.sh` |
+| Schema file parsing | `cargo test -p ralph-core config::tests::test_schema_file -- --nocapture` |
+| Payload extraction | `cargo test -p ralph-core payload_contract::tests -- --nocapture` |
+| Preset validator | `cargo test -p ralph-core preset_validator::tests -- --nocapture` |
+| CLI hats validate | `cargo test -p ralph-cli hats -- --nocapture` |
+| Runtime event policy | `cargo test -p ralph-core event_policy -- --nocapture` |
+| Runtime loop pause | `cargo test -p ralph-core event_loop::tests::test_payload_contract -- --nocapture` |
+| ce-executor strict validate | `cargo run -p ralph-cli -- hats validate --strict -p presets/ce-executor.yml` |
+| zh strict validate | `cargo run -p ralph-cli -- hats validate --strict -p presets/ce-executor-zh.yml` |
+| Embedded drift | `proxy ./scripts/sync-embedded-files.sh check` |
+| Full gate | `proxy ./scripts/run-tests.sh` |
 
 ## Acceptance Criteria
 

@@ -251,7 +251,7 @@ Feature: Opt-in Loro Collab Findings Board
 * **Red 预期失败原因：** 无 `collab` 模块 / 无 loro 依赖。
 * **最小实现范围：** `crates/ralph-core/src/collab/mod.rs`（及 store 文件）；`Cargo.toml` 加 `loro`；**不**实现 findings upsert 语义以外的业务字段（可用内部 ping 键自测，但正式 findings API 留 U3）。
 * **集成验证：** `cargo nextest run -p ralph-core -- collab`
-* **回归范围：** Unit 1 测试；workspace 编译 `rtk cargo check -p ralph-core`（或 nextest 编译期）。
+* **回归范围：** Unit 1 测试；workspace 编译 `cargo check -p ralph-core`（或 nextest 编译期）。
 * **完成标准：** S5 绿；双 doc import 往返绿；默认业务路径仍不自动建盘。
 * **风险：** 选对 `ensure_mergeable_*` 仅在 U3 使用；本 Unit 固定持久化布局并文档化，避免 U3 改盘格式。并发写同一 store 文件需文件锁或单写者约定——写清并测。
 

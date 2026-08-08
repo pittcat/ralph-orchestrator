@@ -285,7 +285,7 @@ pub fn extract_payload_field_refs(
 #### Step 0.1: 检查工作区状态
 
 ```bash
-rtk git status --short
+git status --short
 ```
 
 要求：
@@ -295,9 +295,9 @@ rtk git status --short
 #### Step 0.2: 全量搜索相关调用点
 
 ```bash
-rtk grep "PayloadFieldRef|extract_payload_field_refs|validate_payload_contract|PayloadContractError|instructions_line|source_excerpt|pattern" crates/ralph-core/src crates/ralph-cli/src
-rtk grep "HatConfig \\{" crates/ralph-core/src crates/ralph-cli/src
-rtk grep "ignore_payload_fields|From event payload|payload MUST include|schema_refs" crates/ralph-core/src crates/ralph-cli/src docs presets crates/ralph-core/data
+grep "PayloadFieldRef|extract_payload_field_refs|validate_payload_contract|PayloadContractError|instructions_line|source_excerpt|pattern" crates/ralph-core/src crates/ralph-cli/src
+grep "HatConfig \\{" crates/ralph-core/src crates/ralph-cli/src
+grep "ignore_payload_fields|From event payload|payload MUST include|schema_refs" crates/ralph-core/src crates/ralph-cli/src docs presets crates/ralph-core/data
 ```
 
 必须把结果归入实现清单。当前已知需要关注：
@@ -362,7 +362,7 @@ rtk grep "ignore_payload_fields|From event payload|payload MUST include|schema_r
 执行：
 
 ```bash
-rtk grep "HatConfig \\{" crates/ralph-core/src crates/ralph-cli/src
+grep "HatConfig \\{" crates/ralph-core/src crates/ralph-cli/src
 ```
 
 当前已知位置必须逐一处理（`config.rs` 拆分后请优先 grep 实际子文件）：
@@ -421,7 +421,7 @@ rtk grep "HatConfig \\{" crates/ralph-core/src crates/ralph-cli/src
 - 全局搜索 `.unwrap()`，确认没有对这些 Option 做不安全 unwrap：
 
 ```bash
-rtk grep "instructions_line.*unwrap|pattern.*unwrap|source_excerpt.*unwrap|\\.line.*unwrap" crates/ralph-core/src crates/ralph-cli/src
+grep "instructions_line.*unwrap|pattern.*unwrap|source_excerpt.*unwrap|\\.line.*unwrap" crates/ralph-core/src crates/ralph-cli/src
 ```
 
 #### Step 1.6: 配置解析测试
@@ -436,14 +436,14 @@ rtk grep "instructions_line.*unwrap|pattern.*unwrap|source_excerpt.*unwrap|\\.li
 #### Step 1.7: Phase 1 编译与定向测试
 
 ```bash
-rtk cargo check -p ralph-core
-rtk cargo check -p ralph-cli
-rtk cargo test -p ralph-core payload_contract
-rtk cargo test -p ralph-core preset_validator
-rtk cargo test -p ralph-cli hats
+cargo check -p ralph-core
+cargo check -p ralph-cli
+cargo test -p ralph-core payload_contract
+cargo test -p ralph-core preset_validator
+cargo test -p ralph-cli hats
 ```
 
-如果 `ralph-cli hats` 没有定向测试，至少运行 `rtk cargo test -p ralph-cli` 或覆盖该输出路径的现有测试。
+如果 `ralph-cli hats` 没有定向测试，至少运行 `cargo test -p ralph-cli` 或覆盖该输出路径的现有测试。
 
 ---
 
@@ -456,8 +456,8 @@ rtk cargo test -p ralph-cli hats
 不要依赖“37 个”这个数字。实现前必须从仓库真实清单枚举：
 
 ```bash
-rtk find "presets/**/*.yml"
-rtk sed -n '1,220p' presets/index.json
+find "presets/**/*.yml"
+sed -n '1,220p' presets/index.json
 ```
 
 清单应按实际 builtin manifest 分组：
@@ -523,7 +523,7 @@ rtk sed -n '1,220p' presets/index.json
 每改完一个 preset：
 
 ```bash
-rtk cargo run -p ralph-cli -- hats validate -H builtin:<preset> --strict
+cargo run -p ralph-cli -- hats validate -H builtin:<preset> --strict
 ```
 
 如果失败：
@@ -585,7 +585,7 @@ rtk cargo run -p ralph-cli -- hats validate -H builtin:<preset> --strict
 - 修改后执行：
 
 ```bash
-rtk diff AGENTS.md CLAUDE.md
+diff AGENTS.md CLAUDE.md
 diff -u AGENTS.md CLAUDE.md
 ```
 
@@ -596,7 +596,7 @@ diff -u AGENTS.md CLAUDE.md
 必须检查：
 
 ```bash
-rtk grep "payload_contract|From event payload|payload MUST include|schema_refs|\\.rs:[0-9]+-[0-9]+" crates/ralph-core/data/*.md
+grep "payload_contract|From event payload|payload MUST include|schema_refs|\\.rs:[0-9]+-[0-9]+" crates/ralph-core/data/*.md
 ```
 
 处理规则：
@@ -614,21 +614,21 @@ rtk grep "payload_contract|From event payload|payload MUST include|schema_refs|\
 #### Step 4.1: 格式化和静态检查
 
 ```bash
-rtk cargo fmt --check
-rtk cargo clippy --workspace --exclude ralph-e2e --all-targets -- -D warnings
+cargo fmt --check
+cargo clippy --workspace --exclude ralph-e2e --all-targets -- -D warnings
 ```
 
 如果仓库现有 clippy 基线无法 `-D warnings` 通过，记录现有失败并至少运行：
 
 ```bash
-rtk cargo clippy --workspace --exclude ralph-e2e --all-targets
+cargo clippy --workspace --exclude ralph-e2e --all-targets
 ```
 
 #### Step 4.2: workspace 编译
 
 ```bash
-rtk cargo check --workspace --exclude ralph-e2e
-rtk cargo build --workspace --exclude ralph-e2e
+cargo check --workspace --exclude ralph-e2e
+cargo build --workspace --exclude ralph-e2e
 ```
 
 #### Step 4.3: 测试
@@ -636,7 +636,7 @@ rtk cargo build --workspace --exclude ralph-e2e
 优先使用仓库推荐入口：
 
 ```bash
-rtk ./scripts/run-tests.sh
+./scripts/run-tests.sh
 ```
 
 如果 `cargo-nextest` 不可用，脚本会 fallback。若脚本本身失败，再按失败范围定向补跑。
@@ -644,10 +644,10 @@ rtk ./scripts/run-tests.sh
 必须额外确认：
 
 ```bash
-rtk cargo test -p ralph-core payload_contract
-rtk cargo test -p ralph-core smoke_runner
-rtk cargo test -p ralph-core scenarios
-rtk cargo run -p ralph-e2e -- --mock
+cargo test -p ralph-core payload_contract
+cargo test -p ralph-core smoke_runner
+cargo test -p ralph-core scenarios
+cargo run -p ralph-e2e -- --mock
 ```
 
 #### Step 4.4: preset strict validate 全量通过
@@ -661,8 +661,8 @@ rtk cargo run -p ralph-e2e -- --mock
 #### Step 4.5: 无临时文件
 
 ```bash
-rtk git status --short
-rtk ls "$TMPDIR" | rtk grep "ralph-schema-refs-"
+git status --short
+ls "$TMPDIR" | grep "ralph-schema-refs-"
 ```
 
 要求：
@@ -795,7 +795,7 @@ rtk ls "$TMPDIR" | rtk grep "ralph-schema-refs-"
 如果当前项目没有 CLI snapshot 体系，至少用 Rust 单测覆盖 formatter，外加手动命令冒烟：
 
 ```bash
-rtk cargo run -p ralph-cli -- hats validate -H builtin:code-assist --strict
+cargo run -p ralph-cli -- hats validate -H builtin:code-assist --strict
 ```
 
 ### 5.6 Preset 覆盖测试
@@ -813,14 +813,14 @@ rtk cargo run -p ralph-cli -- hats validate -H builtin:code-assist --strict
 手动但必须执行：
 
 ```bash
-rtk grep "From event payload|payload MUST include|Extractor Behaviour|schema_refs|payload_contract" docs presets crates/ralph-core/data/*.md AGENTS.md CLAUDE.md
-rtk grep "\\.rs:[0-9]+-[0-9]+" crates/ralph-core/data/*.md
+grep "From event payload|payload MUST include|Extractor Behaviour|schema_refs|payload_contract" docs presets crates/ralph-core/data/*.md AGENTS.md CLAUDE.md
+grep "\\.rs:[0-9]+-[0-9]+" crates/ralph-core/data/*.md
 ```
 
 对每个 `xxx.rs:NN-MM`：
 
 ```bash
-rtk sed -n 'NN,MMp' <file>
+sed -n 'NN,MMp' <file>
 ```
 
 期望：
@@ -833,21 +833,21 @@ rtk sed -n 'NN,MMp' <file>
 最终必须跑：
 
 ```bash
-rtk cargo fmt --check
-rtk cargo check --workspace --exclude ralph-e2e
-rtk cargo build --workspace --exclude ralph-e2e
-rtk ./scripts/run-tests.sh
-rtk cargo test -p ralph-core payload_contract
-rtk cargo test -p ralph-core smoke_runner
-rtk cargo test -p ralph-core scenarios
-rtk cargo run -p ralph-e2e -- --mock
+cargo fmt --check
+cargo check --workspace --exclude ralph-e2e
+cargo build --workspace --exclude ralph-e2e
+./scripts/run-tests.sh
+cargo test -p ralph-core payload_contract
+cargo test -p ralph-core smoke_runner
+cargo test -p ralph-core scenarios
+cargo run -p ralph-e2e -- --mock
 ```
 
 推荐额外跑：
 
 ```bash
-rtk cargo clippy --workspace --exclude ralph-e2e --all-targets
-rtk npm run test
+cargo clippy --workspace --exclude ralph-e2e --all-targets
+npm run test
 ```
 
 `npm run test` 只有在 web/dashboard 相关文件被间接触碰或 workspace test 时间允许时才必须；本计划不预期触碰 web 代码。
@@ -910,7 +910,7 @@ rtk npm run test
 
 ## 9. 验收标准
 
-- [ ] `rtk git status --short` 已确认没有无关源码改动或临时文件。
+- [ ] `git status --short` 已确认没有无关源码改动或临时文件。
 - [ ] `HatConfig.schema_refs` 已添加并有默认值。
 - [ ] 所有 `HatConfig { ... }` struct literal 已修复或改为 `..Default::default()`。
 - [ ] `payload_contract.rs` 不再使用 Regex 提取 instructions 字段。
@@ -918,9 +918,9 @@ rtk npm run test
 - [ ] `validate_payload_contract` 按 ref topic 校验，不再按 subscription topic 归因字段。
 - [ ] `PayloadContractError` 输出包含 `hat/topic/field/source_hats/schema`，无 `None` 噪声。
 - [ ] 配置解析测试覆盖旧 YAML 和新 `schema_refs` YAML。
-- [ ] `rtk cargo test -p ralph-core payload_contract` 通过。
-- [ ] `rtk cargo test -p ralph-core preset_validator` 通过。
-- [ ] `rtk cargo test -p ralph-cli` 或等效 CLI formatter 测试通过。
+- [ ] `cargo test -p ralph-core payload_contract` 通过。
+- [ ] `cargo test -p ralph-core preset_validator` 通过。
+- [ ] `cargo test -p ralph-cli` 或等效 CLI formatter 测试通过。
 - [ ] manifest 中所有 builtin preset 都通过 `hats validate --strict`。
 - [ ] `presets/**/*.yml` 全部 YAML parse 通过。
 - [ ] 旧正则基线中的每个字段都有迁移决策记录。
@@ -928,13 +928,13 @@ rtk npm run test
 - [ ] `presets/COLLECTION.md` 和 `presets/schemas/*.yml` 的旧正则表述已检查并更新。
 - [ ] `AGENTS.md` 和 `CLAUDE.md` 已检查；如果修改过，`diff -u AGENTS.md CLAUDE.md` 无输出。
 - [ ] `crates/ralph-core/data/*.md` 已检查；所有 `.rs:NN-MM` 源码引用已用 `sed -n` 反向验证。
-- [ ] `rtk cargo fmt --check` 通过。
-- [ ] `rtk cargo check --workspace --exclude ralph-e2e` 通过。
-- [ ] `rtk cargo build --workspace --exclude ralph-e2e` 通过。
-- [ ] `rtk ./scripts/run-tests.sh` 通过，或记录 nextest fallback 后的等效 `cargo test` 通过。
-- [ ] `rtk cargo test -p ralph-core smoke_runner` 通过。
-- [ ] `rtk cargo test -p ralph-core scenarios` 通过。
-- [ ] `rtk cargo run -p ralph-e2e -- --mock` 通过。
+- [ ] `cargo fmt --check` 通过。
+- [ ] `cargo check --workspace --exclude ralph-e2e` 通过。
+- [ ] `cargo build --workspace --exclude ralph-e2e` 通过。
+- [ ] `./scripts/run-tests.sh` 通过，或记录 nextest fallback 后的等效 `cargo test` 通过。
+- [ ] `cargo test -p ralph-core smoke_runner` 通过。
+- [ ] `cargo test -p ralph-core scenarios` 通过。
+- [ ] `cargo run -p ralph-e2e -- --mock` 通过。
 
 ---
 

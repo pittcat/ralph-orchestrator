@@ -639,14 +639,14 @@ stateDiagram-v2
 ## Verification Plan
 
 - Targeted preset tests:
-  - `rtk cargo test -p ralph-cli ce_executor_debug`
-  - `rtk cargo test -p ralph-cli ce_executor`
+  - `cargo test -p ralph-cli ce_executor_debug`
+  - `cargo test -p ralph-cli ce_executor`
 - Schema/reference checks:
-  - `rtk cargo test -p ralph-cli ce_executor_debug_topics_have_schemas`
-  - `rtk ./scripts/sync-embedded-files.sh check`
+  - `cargo test -p ralph-cli ce_executor_debug_topics_have_schemas`
+  - `./scripts/sync-embedded-files.sh check`
 - Broader validation after implementation:
-  - `rtk cargo test -p ralph-cli presets`
-  - `rtk cargo test -p ralph-core event_loop`
-  - `rtk ./scripts/run-tests.sh`
+  - `cargo test -p ralph-cli presets`
+  - `cargo test -p ralph-core event_loop`
+  - `./scripts/run-tests.sh`
 
 Implementation should run the repository-required full test command before declaring the code change complete.

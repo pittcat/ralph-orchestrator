@@ -412,8 +412,8 @@ Feature: Cursor Agent backend (`agent`)
 3. **集成测试**：`pty_executor` AgentStreamJson 分发相关用例通过。
 4. **E2E**：v1 **无**强制 CI E2E；可选本机手动：`ralph run -b agent ...`（需已 `agent login`）。
 5. **Lint / 构建**：
-   - `rtk cargo check -p ralph-adapters -p ralph-cli`
-   - `rtk cargo clippy -p ralph-adapters -p ralph-cli -- -D warnings`（或仓库惯用 clippy 入口）
+   - `cargo check -p ralph-adapters -p ralph-cli`
+   - `cargo clippy -p ralph-adapters -p ralph-cli -- -D warnings`（或仓库惯用 clippy 入口）
    - `cargo fmt --check`（若 hook 要求）
 6. **测试命令（最低）**：
    ```bash

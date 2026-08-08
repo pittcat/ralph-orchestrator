@@ -153,7 +153,7 @@ P3 — Low: 无
 | emit 章节逐字符一致 | `python3` 字符串字节级比对 | ✅ 62 行 / 2911 字节完全一致 |
 | 错误对照表行数 | 人工 + 脚本双重确认 | ✅ 9 行 |
 | 关键错误文字与源码一致 | 源码 grep 对比 | ✅ `Event provenance required` (L2982) / `Invalid JSON payload` (L3057) |
-| `cargo check -p ralph-core` | rtk cargo check | ✅ 编译通过，0 新警告 |
+| `cargo check -p ralph-core` | cargo check | ✅ 编译通过，0 新警告 |
 | UTF-8 / LF / 无尾随空格 | 文件元信息检查 | ✅ 全部通过 |
 
 ### Fix Log

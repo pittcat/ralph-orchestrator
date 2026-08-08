@@ -217,9 +217,9 @@ event_loop:
 
 **Verification:**
 
-- `rtk cargo test -p ralph-cli test_should_hard_gate -- --nocapture`
-- `rtk cargo test -p ralph-cli test_missing_event_hard_gate -- --nocapture`
-- `rtk cargo test -p ralph-core test_hard_gate_terminates_after_max -- --nocapture`
+- `cargo test -p ralph-cli test_should_hard_gate -- --nocapture`
+- `cargo test -p ralph-cli test_missing_event_hard_gate -- --nocapture`
+- `cargo test -p ralph-core test_hard_gate_terminates_after_max -- --nocapture`
 
 ### U2. ce-executor 实施型 hat 去默认兜底
 
@@ -261,9 +261,9 @@ event_loop:
 
 **Verification:**
 
-- `rtk proxy ./scripts/sync-embedded-files.sh check`
-- `rtk cargo test -p ralph-cli test_ce_executor_executor_default_publishes -- --nocapture`
-- `rtk cargo test -p ralph-core preset_validator::tests::ce_executor_topology_is_valid -- --nocapture`
+- `proxy ./scripts/sync-embedded-files.sh check`
+- `cargo test -p ralph-cli test_ce_executor_executor_default_publishes -- --nocapture`
+- `cargo test -p ralph-core preset_validator::tests::ce_executor_topology_is_valid -- --nocapture`
 
 ### U3. Execution Contract 配置模型
 
@@ -301,7 +301,7 @@ event_loop:
 
 **Verification:**
 
-- `rtk cargo test -p ralph-core config::tests::test_execution_contract -- --nocapture`
+- `cargo test -p ralph-core config::tests::test_execution_contract -- --nocapture`
 
 ### U4. Work Done Contract Validator
 
@@ -364,7 +364,7 @@ event_loop:
 
 **Verification:**
 
-- `rtk cargo test -p ralph-core execution_contract -- --nocapture`
+- `cargo test -p ralph-core execution_contract -- --nocapture`
 
 ### U5. Event Loop 接入：拒绝假 `work.done`
 
@@ -408,9 +408,9 @@ event_loop:
 
 **Verification:**
 
-- `rtk cargo test -p ralph-core event_loop::tests::test_execution_contract -- --nocapture`
-- `rtk cargo test -p ralph-core event_policy -- --nocapture`
-- `rtk cargo test -p ralph-core event_origin -- --nocapture`
+- `cargo test -p ralph-core event_loop::tests::test_execution_contract -- --nocapture`
+- `cargo test -p ralph-core event_policy -- --nocapture`
+- `cargo test -p ralph-core event_origin -- --nocapture`
 
 ### U6. Loop Runner 诊断与 TUI/日志可观测性
 
@@ -444,7 +444,7 @@ event_loop:
 
 **Verification:**
 
-- `rtk cargo test -p ralph-cli test_execution_contract_rejection_reporting -- --nocapture`
+- `cargo test -p ralph-cli test_execution_contract_rejection_reporting -- --nocapture`
 
 ### U7. ce-executor Contract 启用与静态回归测试
 
@@ -491,9 +491,9 @@ event_loop:
 
 **Verification:**
 
-- `rtk proxy ./scripts/sync-embedded-files.sh check`
-- `rtk cargo test -p ralph-cli presets::tests -- --nocapture`
-- `rtk cargo test -p ralph-core preset_validator::tests -- --nocapture`
+- `proxy ./scripts/sync-embedded-files.sh check`
+- `cargo test -p ralph-cli presets::tests -- --nocapture`
+- `cargo test -p ralph-core preset_validator::tests -- --nocapture`
 
 ### U8. Replay-Light 集成测试
 
@@ -523,8 +523,8 @@ event_loop:
 
 **Verification:**
 
-- `rtk cargo test -p ralph-core test_work_done_contract -- --nocapture`
-- `rtk cargo test -p ralph-cli test_missing_event_hard_gate -- --nocapture`
+- `cargo test -p ralph-core test_work_done_contract -- --nocapture`
+- `cargo test -p ralph-cli test_missing_event_hard_gate -- --nocapture`
 
 ### U9. 文档与学习沉淀
 
@@ -574,16 +574,16 @@ event_loop:
 
 | Area | Command |
 |---|---|
-| Hard gate helpers | `rtk cargo test -p ralph-cli test_should_hard_gate -- --nocapture` |
-| Missing-event gate | `rtk cargo test -p ralph-cli test_missing_event_hard_gate -- --nocapture` |
-| Execution contract config | `rtk cargo test -p ralph-core config::tests::test_execution_contract -- --nocapture` |
-| Execution contract validator | `rtk cargo test -p ralph-core execution_contract -- --nocapture` |
-| Event loop contract rejection | `rtk cargo test -p ralph-core event_loop::tests::test_execution_contract -- --nocapture` |
-| Preset sync | `rtk proxy ./scripts/sync-embedded-files.sh check` |
-| Preset tests | `rtk cargo test -p ralph-cli presets::tests -- --nocapture` |
-| Core preset validator | `rtk cargo test -p ralph-core preset_validator::tests -- --nocapture` |
-| Broader regression | `rtk cargo test -p ralph-core event_policy event_origin -- --nocapture` |
-| Final gate | `rtk cargo test --workspace --exclude ralph-e2e -- --test-threads=1 --skip acp_executor::tests::test_create_terminal_and_output` |
+| Hard gate helpers | `cargo test -p ralph-cli test_should_hard_gate -- --nocapture` |
+| Missing-event gate | `cargo test -p ralph-cli test_missing_event_hard_gate -- --nocapture` |
+| Execution contract config | `cargo test -p ralph-core config::tests::test_execution_contract -- --nocapture` |
+| Execution contract validator | `cargo test -p ralph-core execution_contract -- --nocapture` |
+| Event loop contract rejection | `cargo test -p ralph-core event_loop::tests::test_execution_contract -- --nocapture` |
+| Preset sync | `proxy ./scripts/sync-embedded-files.sh check` |
+| Preset tests | `cargo test -p ralph-cli presets::tests -- --nocapture` |
+| Core preset validator | `cargo test -p ralph-core preset_validator::tests -- --nocapture` |
+| Broader regression | `cargo test -p ralph-core event_policy event_origin -- --nocapture` |
+| Final gate | `cargo test --workspace --exclude ralph-e2e -- --test-threads=1 --skip acp_executor::tests::test_create_terminal_and_output` |
 
 ## Risks and Mitigations
 

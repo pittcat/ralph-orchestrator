@@ -358,12 +358,12 @@ ralph wave emit review.wave.ready \
 按风险从小到大执行：
 
 ```bash
-rtk cargo test -p ralph-core event_policy
-rtk cargo test -p ralph-core ce_executor
-rtk cargo test -p ralph-core scenarios
-rtk cargo test -p ralph-cli diagnosis
-rtk cargo test --workspace --exclude ralph-e2e
-rtk cargo test --workspace --exclude ralph-e2e --doc
+cargo test -p ralph-core event_policy
+cargo test -p ralph-core ce_executor
+cargo test -p ralph-core scenarios
+cargo test -p ralph-cli diagnosis
+cargo test --workspace --exclude ralph-e2e
+cargo test --workspace --exclude ralph-e2e --doc
 ```
 
 涉及 preset 后额外执行：

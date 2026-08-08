@@ -455,7 +455,7 @@ x_preset:
 - 对用户明显改过的文件，`upgrade` 只建议人工迁移，避免覆盖用户业务逻辑。
 
 **Patterns to follow:**
-- `rtk git diff` 风格的 compact diff 思路可以作为输出启发，但实现不要依赖 git。
+- `git diff` 风格的 compact diff 思路可以作为输出启发，但实现不要依赖 git。
 - `docs/plans/2026-06-05-001-feat-runtime-contract-consolidation-plan.md` 对 JSON/human 双输出的分层。
 
 **Test scenarios:**

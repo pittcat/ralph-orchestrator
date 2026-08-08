@@ -417,7 +417,7 @@ sequenceDiagram
 
 **Verification**：
 
-- `rtk grep autonomous_idle_timeout` 在 `docs/guide/configuration.md` 第一屏命中
+- `grep autonomous_idle_timeout` 在 `docs/guide/configuration.md` 第一屏命中
 - BDD 跑通
 - 30s smoke 通过
 

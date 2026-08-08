@@ -110,8 +110,8 @@ Expected: 全部通过(默认 3 与原约定一致,不会改变任何已有行�
 - [ ] **Step 1.6: 提交**
 
 ```bash
-rtk git add crates/ralph-core/src/config/loop_config.rs
-rtk git commit -m "feat(config): EventLoopConfig.max_fix_rounds with default 3"
+git add crates/ralph-core/src/config/loop_config.rs
+git commit -m "feat(config): EventLoopConfig.max_fix_rounds with default 3"
 ```
 
 ---
@@ -264,8 +264,8 @@ Expected: 全部通过(`## RUNTIME CONFIG` 块在所有 hat prompt 末尾追加,
 - [ ] **Step 2.7: 提交**
 
 ```bash
-rtk git add crates/ralph-core/src/event_loop/mod.rs
-rtk git commit -m "feat(event_loop): inject ## RUNTIME CONFIG block with max_fix_rounds"
+git add crates/ralph-core/src/event_loop/mod.rs
+git commit -m "feat(event_loop): inject ## RUNTIME CONFIG block with max_fix_rounds"
 ```
 
 ---
@@ -365,8 +365,8 @@ Expected: 全部通过(白名单只增加了一行,不动现有逻辑)
 - [ ] **Step 3.7: 提交**
 
 ```bash
-rtk git add crates/ralph-cli/src/preflight.rs
-rtk git commit -m "fix(preflight): whitelist max_fix_rounds in PRESET_OPT_IN_WHEN_OPERATOR_OMITS"
+git add crates/ralph-cli/src/preflight.rs
+git commit -m "fix(preflight): whitelist max_fix_rounds in PRESET_OPT_IN_WHEN_OPERATOR_OMITS"
 ```
 
 ---
@@ -436,7 +436,7 @@ rtk git commit -m "fix(preflight): whitelist max_fix_rounds in PRESET_OPT_IN_WHE
 
 ```bash
 # 1. 编译
-rtk cargo build
+cargo build
 
 # 2. nextest 全跑(ralph-cli 走串行,其他包并行)
 ./scripts/run-tests.sh
@@ -460,8 +460,8 @@ Expected: **没有** `warning: ... event_loop.max_fix_rounds=1 ... filtered by t
 - [ ] **Step 4.6: 提交**
 
 ```bash
-rtk git add presets/en/ce-executor-serial.yml
-rtk git commit -m "docs(preset): annotate max_fix_rounds as Rust-read, prompt-injected"
+git add presets/en/ce-executor-serial.yml
+git commit -m "docs(preset): annotate max_fix_rounds as Rust-read, prompt-injected"
 ```
 
 ---

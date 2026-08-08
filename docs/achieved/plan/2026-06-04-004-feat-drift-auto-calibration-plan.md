@@ -409,8 +409,8 @@ ralph diagnose 期间：
 - `ralph diagnose --session latest` 在无 session 时返回明确错误信息。
 
 **Verification:**
-- `rtk cargo test -p ralph-core diagnostics`
-- `rtk cargo test -p ralph-cli diagnose`
+- `cargo test -p ralph-core diagnostics`
+- `cargo test -p ralph-cli diagnose`
 
 ---
 
@@ -460,8 +460,8 @@ ralph diagnose 期间：
 - 阈值小于 0 或大于 1 时 validate 失败。
 
 **Verification:**
-- `rtk cargo test -p ralph-core config::telemetry`
-- `rtk cargo test -p ralph-core config::ralph_config`
+- `cargo test -p ralph-core config::telemetry`
+- `cargo test -p ralph-core config::ralph_config`
 
 ---
 
@@ -524,7 +524,7 @@ ralph diagnose 期间：
 - 缺少 target hat 时可表达 `safe_target: false`。
 
 **Verification:**
-- `rtk cargo test -p ralph-core diagnosis`
+- `cargo test -p ralph-core diagnosis`
 
 ---
 
@@ -569,7 +569,7 @@ ralph diagnose 期间：
 - 同一 run 内所有 diagnostics 文件在同一个 session 目录。
 
 **Verification:**
-- `rtk cargo test -p ralph-core diagnostics`
+- `cargo test -p ralph-core diagnostics`
 
 ---
 
@@ -634,9 +634,9 @@ ralph diagnose 期间：
 - 增强 payload 不破坏现有 active hat 选择。
 
 **Verification:**
-- `rtk cargo test -p ralph-cli hard_gate`
-- `rtk cargo test -p ralph-core workflow_guard`
-- `rtk cargo test -p ralph-core replay_light_integration`
+- `cargo test -p ralph-cli hard_gate`
+- `cargo test -p ralph-core workflow_guard`
+- `cargo test -p ralph-core replay_light_integration`
 
 ---
 
@@ -691,8 +691,8 @@ ralph diagnose 期间：
 - 低样本窗口不会生成 hard finding。
 
 **Verification:**
-- `rtk cargo test -p ralph-core drift`
-- `rtk cargo test -p ralph-core drift_integration`
+- `cargo test -p ralph-core drift`
+- `cargo test -p ralph-core drift_integration`
 
 ---
 
@@ -747,8 +747,8 @@ ralph diagnose 期间：
 - final escalation 不覆盖已有 `PayloadContractViolation` termination reason。
 
 **Verification:**
-- `rtk cargo test -p ralph-core drift_integration`
-- `rtk cargo test -p ralph-cli loop_runner`
+- `cargo test -p ralph-core drift_integration`
+- `cargo test -p ralph-cli loop_runner`
 
 ---
 
@@ -828,8 +828,8 @@ ralph diagnose --output .ralph/diagnostics/<session>/diagnosis-report.md
 - 无 session 时非 0 退出，并给出重新运行建议。
 
 **Verification:**
-- `rtk cargo test -p ralph-cli diagnose`
-- `rtk cargo run -p ralph-cli -- diagnose --help`
+- `cargo test -p ralph-cli diagnose`
+- `cargo run -p ralph-cli -- diagnose --help`
 
 ---
 
@@ -858,8 +858,8 @@ ralph diagnose --output .ralph/diagnostics/<session>/diagnosis-report.md
 - payload contract violation 终止时 diagnosis summary 包含 violation reference。
 
 **Verification:**
-- `rtk cargo test -p ralph-core summary_writer`
-- `rtk cargo test -p ralph-cli loop_runner`
+- `cargo test -p ralph-core summary_writer`
+- `cargo test -p ralph-cli loop_runner`
 
 ---
 
@@ -893,9 +893,9 @@ ralph diagnose --output .ralph/diagnostics/<session>/diagnosis-report.md
 - `AGENTS.md` 与 `CLAUDE.md` 内容保持一致。
 
 **Verification:**
-- `rtk cargo run -p ralph-cli -- diagnose --help`
-- `rtk diff AGENTS.md CLAUDE.md` 无差异（如果修改两者）
-- `./scripts/run-tests.sh` 或 fallback `rtk cargo test --workspace --exclude ralph-e2e -- --test-threads=1 --skip acp_executor::tests::test_create_terminal_and_output`
+- `cargo run -p ralph-cli -- diagnose --help`
+- `diff AGENTS.md CLAUDE.md` 无差异（如果修改两者）
+- `./scripts/run-tests.sh` 或 fallback `cargo test --workspace --exclude ralph-e2e -- --test-threads=1 --skip acp_executor::tests::test_create_terminal_and_output`
 
 ---
 

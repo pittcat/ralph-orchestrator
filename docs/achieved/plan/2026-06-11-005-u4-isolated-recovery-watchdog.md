@@ -371,11 +371,11 @@ A 和 B1/B2 可以与 U3 并行；B3/B4 和 C 必须基于 U3 的真实 outcome 
 ## 9. 验证命令
 
 ```bash
-rtk cargo test -p ralph-core isolated
-rtk cargo test -p ralph-core diagnosis
-rtk cargo test -p ralph-cli wave
-rtk cargo test -p ralph-cli max_runtime
-rtk cargo clippy -p ralph-core -p ralph-cli --all-targets -- -D warnings
+cargo test -p ralph-core isolated
+cargo test -p ralph-core diagnosis
+cargo test -p ralph-cli wave
+cargo test -p ralph-cli max_runtime
+cargo clippy -p ralph-core -p ralph-cli --all-targets -- -D warnings
 ./scripts/run-tests.sh
 ```
 

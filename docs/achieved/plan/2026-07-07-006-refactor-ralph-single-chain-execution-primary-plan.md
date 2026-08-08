@@ -226,7 +226,7 @@ fn test_no_serial_to_pipeline_alias() {
 - Targeted:
   - `cargo nextest run -p ralph-cli --bin ralph -- preset`
   - `cargo nextest run -p ralph-cli --bin ralph -- preflight`
-  - `rtk grep "builtin:ce-executor-serial" scripts/ralph-zsh-plugin.zsh presets/index.json crates/ralph-cli/src/presets.rs` 无 active recommendation 或 registry 条目。
+  - `grep "builtin:ce-executor-serial" scripts/ralph-zsh-plugin.zsh presets/index.json crates/ralph-cli/src/presets.rs` 无 active recommendation 或 registry 条目。
 - 复核：`git diff --stat presets/en/ce-executor-pipeline.yml` 只触碰 description / 顶部注释行（人工核对）。
 
 - [ ] **Unit 2: Pipeline schema 静态自检 — 证明现有 payload 已承载 unit evidence**
@@ -352,7 +352,7 @@ fn test_pipeline_schema_has_no_runtime_unit_loop_topics() {
   - `cargo nextest run -p ralph-cli --bin ralph -- pipeline_schema_static_check`（新测试函数名）
   - `cargo nextest run -p ralph-core --test scenarios -- ce_executor_pipeline`
 - 静态复核：`git diff --stat presets/en/ce-executor-pipeline.yml` 与 Unit 1 末态一致；本 Unit 没新增行。
-- `rtk grep "unit.ready\\|unit.done\\|test.passed\\|validator" presets/en/ce-executor-pipeline.yml` **不要求清空**（pipeline 是 read-only，仅断言不引入新的 runtime unit-loop 依赖；如果 grep 发现既有引用是历史解释性文本，保持不动）。
+- `grep "unit.ready\\|unit.done\\|test.passed\\|validator" presets/en/ce-executor-pipeline.yml` **不要求清空**（pipeline 是 read-only，仅断言不引入新的 runtime unit-loop 依赖；如果 grep 发现既有引用是历史解释性文本，保持不动）。
 
 - [ ] **Unit 3: Serial scenario 与 fixture 清理**
 
@@ -460,7 +460,7 @@ fn test_no_serial_only_scenario_registration() {
   - `cargo nextest run -p ralph-core --test scenarios`
   - `cargo nextest run -p ralph-cli --test integration_emit_policy`
   - `cargo nextest run -p ralph-core -- preset_lint`
-  - `rtk grep -l "ce_executor_serial\\|serial_phase\\|progress.steward\\|shipper.*recoverable" crates/ralph-core/tests/scenarios/ crates/ralph-cli/tests/` 无输出。
+  - `grep -l "ce_executor_serial\\|serial_phase\\|progress.steward\\|shipper.*recoverable" crates/ralph-core/tests/scenarios/ crates/ralph-cli/tests/` 无输出。
 
 - [ ] **Unit 4: Serial-only runtime/lint 清算**
 
@@ -590,7 +590,7 @@ fn test_no_serial_only_finding_id_exported() {
   - `cargo nextest run -p ralph-core -- preset_lint`
   - `cargo nextest run -p ralph-core --test scenarios`
   - `cargo nextest run -p ralph-core -- event_loop`（如果存在针对 event_loop 的 test target）
-  - `rtk grep "shipper\\|serial.*recovery\\|phase_authority\\|strict_reason_routing" crates/ralph-core/src/event_loop/ crates/ralph-core/src/correction/ crates/ralph-core/src/drift/ crates/ralph-core/src/preset_lint/` 仅剩 generic / 历史注释。
+  - `grep "shipper\\|serial.*recovery\\|phase_authority\\|strict_reason_routing" crates/ralph-core/src/event_loop/ crates/ralph-core/src/correction/ crates/ralph-core/src/drift/ crates/ralph-core/src/preset_lint/` 仅剩 generic / 历史注释。
 
 - [ ] **Unit 5: 人类文档与 agent-facing 文档同步**
 
@@ -709,7 +709,7 @@ exit $fail
   - `bash scripts/check-cli-doc-drift.sh`
   - `bash scripts/check-serial-stale-references.sh`（如新增）
   - `diff CLAUDE.md AGENTS.md`（应无输出）
-  - `rtk grep "ce-executor-serial\\|progress-steward\\|shipper reason" AGENTS.md CLAUDE.md .cursor/rules/multi-hat-isolation.mdc crates/ralph-core/data crates/ralph-cli/sops crates/ralph-cli/src/commands/init.rs crates/ralph-cli/src/commands/tutorial.rs` 无 active 文档命中。
+  - `grep "ce-executor-serial\\|progress-steward\\|shipper reason" AGENTS.md CLAUDE.md .cursor/rules/multi-hat-isolation.mdc crates/ralph-core/data crates/ralph-cli/sops crates/ralph-cli/src/commands/init.rs crates/ralph-cli/src/commands/tutorial.rs` 无 active 文档命中。
 
 - [ ] **Unit 6: Preset author/review skills 单链优先化**
 
@@ -833,9 +833,9 @@ hats:
 
 **Verification:**
 - `bash scripts/check-aaf-fixtures.sh`（如新增）
-- `rtk grep "phase_authority\\|enforce_hat_scope\\|recovery_runtime" skills/`（应无命中，或仅历史解释）
-- `rtk grep "ce-executor-pipeline" skills/ralph-preset-common/references/patterns.md` 应有命中且在正例段。
-- `rtk grep "ce-executor-serial" skills/ralph-preset-common/references/patterns.md` 应只在 anti-pattern 段出现。
+- `grep "phase_authority\\|enforce_hat_scope\\|recovery_runtime" skills/`（应无命中，或仅历史解释）
+- `grep "ce-executor-pipeline" skills/ralph-preset-common/references/patterns.md` 应有命中且在正例段。
+- `grep "ce-executor-serial" skills/ralph-preset-common/references/patterns.md` 应只在 anti-pattern 段出现。
 
 - [ ] **Unit 7: 最终 stale-reference sweep 与全量验证**
 
@@ -932,7 +932,7 @@ hats:
 - Targeted（Step 7.5 已列）。
 - Final（Step 7.6 已列）。
 - 历史保活校验：
-  - `rtk grep "ce-executor-serial" docs/report/ docs/brainstorms/ docs/plans/` 仅命中历史文件（如 `2026-07-07-006-...plan.md`、`2026-07-06-...brainstorm.md`、`docs/report/2026-07-07-ce-executor-serial-primary-...diagnosis.md`），且这些命中在 PR body 中显式列出「保留为历史」。
+  - `grep "ce-executor-serial" docs/report/ docs/brainstorms/ docs/plans/` 仅命中历史文件（如 `2026-07-07-006-...plan.md`、`2026-07-06-...brainstorm.md`、`docs/report/2026-07-07-ce-executor-serial-primary-...diagnosis.md`），且这些命中在 PR body 中显式列出「保留为历史」。
 
 ## System-Wide Impact
 
@@ -968,12 +968,12 @@ hats:
 
 | Unit | Targeted 命令（按顺序跑） | Completion 标志 |
 |------|---------------------------|-----------------|
-| **Unit 1** Registry 切换 | `cargo nextest run -p ralph-cli --bin ralph -- preset`<br>`cargo nextest run -p ralph-cli --bin ralph -- preflight`<br>`rtk grep "builtin:ce-executor-serial" scripts/ralph-zsh-plugin.zsh presets/index.json crates/ralph-cli/src/presets.rs` 应空<br>`git diff --stat presets/en/ce-executor-pipeline.yml` 仅顶部注释 + description | 4 个新断言全绿；serial 文件已删；zsh 无 serial |
+| **Unit 1** Registry 切换 | `cargo nextest run -p ralph-cli --bin ralph -- preset`<br>`cargo nextest run -p ralph-cli --bin ralph -- preflight`<br>`grep "builtin:ce-executor-serial" scripts/ralph-zsh-plugin.zsh presets/index.json crates/ralph-cli/src/presets.rs` 应空<br>`git diff --stat presets/en/ce-executor-pipeline.yml` 仅顶部注释 + description | 4 个新断言全绿；serial 文件已删；zsh 无 serial |
 | **Unit 2** Pipeline schema 自检 | `cargo nextest run -p ralph-cli --bin ralph -- pipeline_schema_static_check`<br>`cargo nextest run -p ralph-core --test scenarios -- ce_executor_pipeline`<br>`git diff --stat presets/en/ce-executor-pipeline.yml` 与 Unit 1 末态一致 | schema 字段集合 ⊇ unit evidence；禁止 runtime unit-loop topic 命中 pipeline |
-| **Unit 3** Scenario 清理 | `cargo nextest run -p ralph-core --test scenarios`<br>`cargo nextest run -p ralph-cli --test integration_emit_policy`<br>`cargo nextest run -p ralph-core -- preset_lint`<br>`rtk grep -l "ce_executor_serial\\|serial_phase\\|progress.steward\\|shipper.*recoverable" crates/ralph-core/tests/scenarios/ crates/ralph-cli/tests/` 应空 | serial-only fixture 全删；integration_emit_policy 不引用 serial |
-| **Unit 4** Runtime/lint 清算 | `cargo nextest run -p ralph-core -- preset_lint`<br>`cargo nextest run -p ralph-core --test scenarios`<br>`cargo nextest run -p ralph-core -- event_loop`<br>`rtk grep "shipper\\|serial.*recovery\\|phase_authority\\|strict_reason_routing" crates/ralph-core/src/event_loop/ crates/ralph-core/src/correction/ crates/ralph-core/src/drift/ crates/ralph-core/src/preset_lint/` 仅剩 generic/历史 | 三件 lint 模块已删或降级；finding_id 无 serial-only；supervisor 仍能过 |
-| **Unit 5** 文档同步 | `bash scripts/check-cli-doc-drift.sh`<br>`bash scripts/check-serial-stale-references.sh`（如新增）<br>`diff CLAUDE.md AGENTS.md` 应无输出<br>`rtk grep "ce-executor-serial\\|progress-steward\\|shipper reason" AGENTS.md CLAUDE.md .cursor/rules/multi-hat-isolation.mdc crates/ralph-core/data crates/ralph-cli/sops crates/ralph-cli/src/commands/init.rs crates/ralph-cli/src/commands/tutorial.rs` 应无 active 命中 | 注入 doc 不含内部 Rust 函数名；CLAUDE.md ↔ AGENTS.md 完全一致 |
-| **Unit 6** Skill 单链优先 | `bash scripts/check-aaf-fixtures.sh`（如新增）<br>`rtk grep "phase_authority\\|enforce_hat_scope\\|recovery_runtime" skills/` 应无命中或仅历史<br>`rtk grep "ce-executor-pipeline" skills/ralph-preset-common/references/patterns.md` 应有命中且在正例段<br>`rtk grep "ce-executor-serial" skills/ralph-preset-common/references/patterns.md` 应仅在 anti-pattern 段 | 2 个 fixture 触发对应 finding；finding-rubric +5 行；author-checklist +5 问 |
+| **Unit 3** Scenario 清理 | `cargo nextest run -p ralph-core --test scenarios`<br>`cargo nextest run -p ralph-cli --test integration_emit_policy`<br>`cargo nextest run -p ralph-core -- preset_lint`<br>`grep -l "ce_executor_serial\\|serial_phase\\|progress.steward\\|shipper.*recoverable" crates/ralph-core/tests/scenarios/ crates/ralph-cli/tests/` 应空 | serial-only fixture 全删；integration_emit_policy 不引用 serial |
+| **Unit 4** Runtime/lint 清算 | `cargo nextest run -p ralph-core -- preset_lint`<br>`cargo nextest run -p ralph-core --test scenarios`<br>`cargo nextest run -p ralph-core -- event_loop`<br>`grep "shipper\\|serial.*recovery\\|phase_authority\\|strict_reason_routing" crates/ralph-core/src/event_loop/ crates/ralph-core/src/correction/ crates/ralph-core/src/drift/ crates/ralph-core/src/preset_lint/` 仅剩 generic/历史 | 三件 lint 模块已删或降级；finding_id 无 serial-only；supervisor 仍能过 |
+| **Unit 5** 文档同步 | `bash scripts/check-cli-doc-drift.sh`<br>`bash scripts/check-serial-stale-references.sh`（如新增）<br>`diff CLAUDE.md AGENTS.md` 应无输出<br>`grep "ce-executor-serial\\|progress-steward\\|shipper reason" AGENTS.md CLAUDE.md .cursor/rules/multi-hat-isolation.mdc crates/ralph-core/data crates/ralph-cli/sops crates/ralph-cli/src/commands/init.rs crates/ralph-cli/src/commands/tutorial.rs` 应无 active 命中 | 注入 doc 不含内部 Rust 函数名；CLAUDE.md ↔ AGENTS.md 完全一致 |
+| **Unit 6** Skill 单链优先 | `bash scripts/check-aaf-fixtures.sh`（如新增）<br>`grep "phase_authority\\|enforce_hat_scope\\|recovery_runtime" skills/` 应无命中或仅历史<br>`grep "ce-executor-pipeline" skills/ralph-preset-common/references/patterns.md` 应有命中且在正例段<br>`grep "ce-executor-serial" skills/ralph-preset-common/references/patterns.md` 应仅在 anti-pattern 段 | 2 个 fixture 触发对应 finding；finding-rubric +5 行；author-checklist +5 问 |
 | **Unit 7** Stale sweep | `cargo nextest run -p ralph-cli --bin ralph -- preset`<br>`cargo nextest run -p ralph-cli --bin ralph -- preflight`<br>`cargo nextest run -p ralph-cli --test integration_emit_policy`<br>`cargo nextest run -p ralph-core -- preset_lint`<br>`cargo nextest run -p ralph-core --test scenarios`<br>`bash scripts/check-cli-doc-drift.sh`<br>`./scripts/run-tests.sh`（最终全量基线） | 6 类 grep 输出 active stale 段全空；全量基线绿 |
 
 ### 最终 Validation（Unit 7 完成后跑）

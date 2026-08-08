@@ -223,17 +223,17 @@ flowchart TB
 ## Verification Commands
 
 ```bash
-rtk cargo test -p ralph-cli ce_executor
-rtk cargo test -p ralph-core handoff
-rtk cargo test -p ralph-core summary_writer
-rtk cargo test -p ralph-core wave_detection
-rtk cargo test --workspace --exclude ralph-e2e -- --test-threads=1 --skip acp_executor::tests::test_create_terminal_and_output
+cargo test -p ralph-cli ce_executor
+cargo test -p ralph-core handoff
+cargo test -p ralph-core summary_writer
+cargo test -p ralph-core wave_detection
+cargo test --workspace --exclude ralph-e2e -- --test-threads=1 --skip acp_executor::tests::test_create_terminal_and_output
 ```
 
 如果本机安装了 nextest，最终验证优先使用：
 
 ```bash
-rtk ./scripts/run-tests.sh
+./scripts/run-tests.sh
 ```
 
 ---

@@ -324,8 +324,8 @@ sequenceDiagram
 **Verification**：
 
 ```bash
-rtk cargo test -p ralph-cli wave
-rtk cargo run -p ralph-cli -- wave emit --help
+cargo test -p ralph-cli wave
+cargo run -p ralph-cli -- wave emit --help
 ```
 
 #### U2. typed wave rejection 与 max_wave_total
@@ -370,8 +370,8 @@ rtk cargo run -p ralph-cli -- wave emit --help
 **Verification**：
 
 ```bash
-rtk cargo test -p ralph-core wave_detection
-rtk cargo test -p ralph-cli wave
+cargo test -p ralph-core wave_detection
+cargo test -p ralph-cli wave
 ```
 
 #### U3. 重构 dispatcher deadline 和 semaphore 生命周期
@@ -413,7 +413,7 @@ rtk cargo test -p ralph-cli wave
 **Verification**：
 
 ```bash
-rtk cargo test -p ralph-cli wave_dispatcher
+cargo test -p ralph-cli wave_dispatcher
 ```
 
 #### U4. isolated wave scope + RecoveryResponder + 全局 watchdog
@@ -479,10 +479,10 @@ remaining = max_runtime_seconds - event_loop.state().elapsed()
 **Verification**：
 
 ```bash
-rtk cargo test -p ralph-core isolated_wave
-rtk cargo test -p ralph-core drift_integration
-rtk cargo test -p ralph-cli wave_recovery
-rtk cargo test -p ralph-cli wave_global_runtime
+cargo test -p ralph-core isolated_wave
+cargo test -p ralph-core drift_integration
+cargo test -p ralph-cli wave_recovery
+cargo test -p ralph-cli wave_global_runtime
 ```
 
 #### U5. wave_id 精确验真辅助能力
@@ -545,8 +545,8 @@ jq -e --arg id "$wave_id" --argjson expected "$expected_count" '
 **Verification**：
 
 ```bash
-rtk cargo test -p ralph-cli wave
-rtk cargo run -p ralph-cli -- wave emit --help
+cargo test -p ralph-cli wave
+cargo run -p ralph-cli -- wave emit --help
 ```
 
 ### Phase 2：Partial review 与 preset 加固
@@ -712,13 +712,13 @@ printf '%s\n' $(cat payloads.jsonl) | ralph wave emit review.wave.ready --payloa
 ### 9.1 定向测试
 
 ```bash
-rtk cargo test -p ralph-cli wave
-rtk cargo test -p ralph-core wave_detection
-rtk cargo test -p ralph-cli wave_dispatcher
-rtk cargo test -p ralph-core isolated_wave
-rtk cargo test -p ralph-cli wave_recovery
-rtk cargo test -p ralph-cli wave_global_runtime
-rtk cargo test -p ralph-core origin_guard
+cargo test -p ralph-cli wave
+cargo test -p ralph-core wave_detection
+cargo test -p ralph-cli wave_dispatcher
+cargo test -p ralph-core isolated_wave
+cargo test -p ralph-cli wave_recovery
+cargo test -p ralph-cli wave_global_runtime
+cargo test -p ralph-core origin_guard
 ```
 
 ### 9.2 必需集成覆盖
@@ -740,8 +740,8 @@ BDD/Cucumber 场景必须执行真实 runtime 路径。纯 grep preset YAML 的�
 ### 9.3 Smoke
 
 ```bash
-rtk cargo test -p ralph-core smoke_runner
-rtk cargo run -p ralph-e2e -- --mock
+cargo test -p ralph-core smoke_runner
+cargo run -p ralph-e2e -- --mock
 ```
 
 手工 dogfood：
@@ -765,7 +765,7 @@ rtk cargo run -p ralph-e2e -- --mock
 若 nextest 不可用，使用脚本提供的 fallback。另跑：
 
 ```bash
-rtk cargo test -p ralph-core smoke_runner
+cargo test -p ralph-core smoke_runner
 ```
 
 ---
