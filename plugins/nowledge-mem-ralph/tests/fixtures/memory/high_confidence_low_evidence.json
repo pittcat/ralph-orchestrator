@@ -1,0 +1,21 @@
+{
+  "memory_type": "durable_decision",
+  "title": "High-confidence hallucination candidate",
+  "claim": "Atomic writes are always safe even if the writer dies mid-write — claimed with very high confidence but thin evidence.",
+  "why_it_matters": "Catching hallucinated confidence.",
+  "evidence": "single sentence — insufficient",
+  "applies_when": "any new script",
+  "scope": "plugin:nowledge-mem-ralph",
+  "verification": "claimed but no test exercised the mid-write scenario.",
+  "critical_assumptions": [],
+  "critical_ambiguities": [],
+  "metrics": {
+    "confidence": 95,
+    "evidence_coverage": 30,
+    "reusability": 80,
+    "stability": 80,
+    "scope_clarity": 80,
+    "verifiability": 50,
+    "novelty": 30
+  }
+}

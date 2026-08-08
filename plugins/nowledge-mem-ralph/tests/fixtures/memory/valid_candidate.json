@@ -1,0 +1,21 @@
+{
+  "memory_type": "durable_decision",
+  "title": "Use atomic os.replace for state.json writes",
+  "claim": "All plugin state writes go through temp file + os.replace to guarantee Claude Code never observes a partially written state file.",
+  "why_it_matters": "Claude Code reads state.json on each SessionStart; a half-written file would cause env-detection branches to fire incorrectly and bypass the env gate.",
+  "evidence": "hooks/hooks.json declares timeout 5; concurrent writer smoke test in test_hook_runtime.py::test_session_start_writes_state_marker.",
+  "applies_when": "any new script in plugins/nowledge-mem-ralph/scripts that writes state.json or recall.json",
+  "scope": "plugin:nowledge-mem-ralph",
+  "verification": "pytest plugins/nowledge-mem-ralph/tests/ shows no torn writes across 3 concurrent SessionStart processes.",
+  "critical_assumptions": [],
+  "critical_ambiguities": [],
+  "metrics": {
+    "confidence": 95,
+    "evidence_coverage": 88,
+    "reusability": 90,
+    "stability": 92,
+    "scope_clarity": 96,
+    "verifiability": 90,
+    "novelty": 40
+  }
+}

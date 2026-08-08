@@ -1,0 +1,20 @@
+{
+  "memory_type": "durable_decision",
+  "title": "missing-evidence-fixture",
+  "claim": "Schema validator must REJECT this candidate because the evidence field is absent.",
+  "why_it_matters": "Verification",
+  "applies_when": "schema validation gate",
+  "scope": "plugin:nowledge-mem-ralph",
+  "verification": "pytest asserts missing_fields contains 'evidence' and verdict.result == REJECTED.",
+  "critical_assumptions": [],
+  "critical_ambiguities": [],
+  "metrics": {
+    "confidence": 95,
+    "evidence_coverage": 80,
+    "reusability": 80,
+    "stability": 90,
+    "scope_clarity": 90,
+    "verifiability": 90,
+    "novelty": 30
+  }
+}

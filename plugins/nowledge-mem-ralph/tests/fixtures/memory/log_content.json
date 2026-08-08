@@ -1,0 +1,21 @@
+{
+  "memory_type": "log",
+  "title": "Last 5 lines of test output",
+  "claim": "raw log dump — must be rejected",
+  "why_it_matters": "n/a",
+  "evidence": "n/a",
+  "applies_when": "n/a",
+  "scope": "plugin:nowledge-mem-ralph",
+  "verification": "n/a",
+  "critical_assumptions": [],
+  "critical_ambiguities": [],
+  "metrics": {
+    "confidence": 90,
+    "evidence_coverage": 90,
+    "reusability": 10,
+    "stability": 10,
+    "scope_clarity": 30,
+    "verifiability": 30,
+    "novelty": 10
+  }
+}

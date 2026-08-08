@@ -6,9 +6,9 @@ recall** 与**有界的 save-memory lifecycle**:
 - SessionStart 钩子在首个 Ralph session 触发一次 bounded memory search,
   后续 session/compact/retry/supervisor worker 复用同一份 loop cache。
 - Stop 钩子只做审计,不发起保存、不读取 transcript。
-- 任意 hat 可通过 `/nowledge-mem-ralph:save-memory`(本插件 0.2.0 暂
-  未提供,U03 引入)在 activation 内提交 Memory 候选;插件校验固定
-  schema 与质量指标后才写入 nmem。
+- 任意 hat 可通过 `/nowledge-mem-ralph:save-memory <memory-json>`(本插
+  件 0.2.0 引入)在 activation 内提交 Memory 候选;插件校验固定 schema
+  与质量指标后才交给 writer(U04)写入 nmem。
 
 **不**抓取 raw Claude 会话,**不**读取 Working Memory,**不**写入
 Claude transcript。设计与边界详见
@@ -104,7 +104,13 @@ claude plugin list --json
   空查询会显示用法并停止，不调用 nmem。
 - `/nowledge-mem-ralph:status` — 只执行一次 `nmem --json status`；失败时原样
   报告错误并停止。
+- `/nowledge-mem-ralph:save-memory <memory-json>` — 提交 Memory 候选。
+  插件固定 schema + 硬门槛 + 七项指标后返回 verdict
+  （`ACCEPTED`/`REJECTED`/`NEEDS_REWRITE`/`OBSERVATION`）。ACCEPTED
+  由 writer (U04) 写入 nmem；其余结果原地返回，不调 nmem。
 - `search-memory` skill — 供 agent 在确有需要时主动做同样的有界只读查询。
+- `save-memory` skill — 供 agent 在发现稳定、可复用的结论时主动
+  提交 Memory 候选；固定 schema 与质量指标是 hard gate，agent 不可降级。
 - 仅当确需追溯原对话且 memory 结果不足时，才允许有界的
   `nmem --json t search` / `nmem --json t show`（每次最多 8 条消息、每条最多
   1200 字符，按需翻页）。
@@ -137,9 +143,32 @@ transcript / last_assistant_message),把渲染好的 XML(转义了 `<>&`、
 supervisor worker)直接命中 cache,`nmem` 计数=0。`source=compact`
 无论 cache 是否命中都不调 search。
 
-`save-memory` 入口(U03 引入)统一由 `scripts/memory.py` 提供,插件内部
-决定是否调用 nmem;失败 fail-open(Ralph/Claude 继续运行),evaluator 失败
-= 本条 REJECTED(F4 统一语义),agent 继续。
+`save-memory` 入口(U03 引入)由 `scripts/memory.py` 提供,固定 schema
++ 硬门槛 + 七项质量指标 + dedupe signal:
+
+- **固定 schema**(`MemorySchema.REQUIRED_FIELDS`):
+  `memory_type` / `title` / `claim` / `why_it_matters` / `evidence` /
+  `applies_when` / `scope` / `verification` / `critical_assumptions` /
+  `critical_ambiguities` / `metrics`。字段缺失一律 `REJECTED`。
+- **硬门槛**: `memory_type ∈ {progress, log, command, transcript}`
+  一律 `REJECTED`(原始过程状态不进 Memory)。
+- **七项质量指标**(`MemorySchema.REQUIRED_METRICS`):
+  `confidence ≥ 80` / `evidence_coverage ≥ 70` / `reusability ≥ 50` /
+  `verifiability ≥ 50` / `novelty ≥ 20` / `stability ≥ 60` /
+  `scope_clarity ≥ 70`。
+- **反幻觉**: `confidence ≥ 90` 且 `evidence_coverage < 70` 一律
+  `REJECTED`,先于其他阈值执行。
+- **关键假设/歧义**:`critical_assumptions` 或 `critical_ambiguities`
+  非空 → `NEEDS_REWRITE`,不进入 writer。
+- **dedupe signal**:`memory_digest`(SHA-256(title+claim+why+
+  evidence+applies_when+scope+verification))命中已接受记录 →
+  `OBSERVATION`,U04 不会重复 nmem write。
+- **结果状态**: `ACCEPTED` / `REJECTED` / `NEEDS_REWRITE` / `OBSERVATION`,
+  verdict 含 `memory_digest`、`policy_version`、`missing_fields`、
+  `rewrite_suggestion`。
+- **writer 由 U04 接管**;U03 绝不直接调 nmem,失败 fail-open
+  (Ralph/Claude 继续运行),evaluator 失败 = 本条 `REJECTED`
+  (F4 统一语义),agent 继续。
 
 ## nmem 排障
 
