@@ -216,6 +216,9 @@ save-memory 写入;不嵌入 marker / 非法 marker / 非 `finalize:true`
 - 服务不可达 / 认证失败 — status 会原样报告错误；先让 Nowledge Mem 服务恢复
   可用，再重试查询。插件不会用写命令或第二个子命令"自救"。
 - JSON 无法解析 — 视为故障，原样报告并停止。
+- `memory-ledger.json` 中的 `pending` 条目（`IN_FLIGHT` / `UNKNOWN`）自动
+  600 秒后过期：下一次相同 `scope:digest` 的写入会直接调用 nmem，无需手动
+  reconcile；过期逻辑只对带 `pending_at` 时间戳的条目生效。
 
 ## 卸载
 

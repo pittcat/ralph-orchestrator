@@ -21,7 +21,9 @@ from __future__ import annotations
 import dataclasses
 import importlib.util
 import json
+import os
 import sys
+import time
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -35,6 +37,33 @@ _STATUS_MAP = {
     "FAILED_OPEN": "FAILED_OPEN",
     "UNKNOWN": "UNKNOWN",
 }
+
+# Hook-budget constants (fix U2 adversarial:A5). The default 5s mirrors
+# ``hooks/hooks.json``; tests and operator overrides flow through
+# ``NOWLEDGE_HOOK_TIMEOUT_SECONDS``.
+_HOOK_TIMEOUT_SECONDS = 5.0
+_EVALUATOR_BUDGET_SECONDS = 3.0
+_WRITER_BUDGET_SECONDS = 4.0
+_BUDGET_SAFETY_MARGIN = 1.0
+
+
+def _hook_budget() -> float:
+    """Return the hook budget (seconds) honoured by ``run_finalization``.
+
+    Reads ``NOWLEDGE_HOOK_TIMEOUT_SECONDS`` from the environment so
+    tests can pin it; defaults to the 5s budget declared in
+    ``hooks/hooks.json``.
+    """
+    raw = os.environ.get("NOWLEDGE_HOOK_TIMEOUT_SECONDS", "").strip()
+    if not raw:
+        return _HOOK_TIMEOUT_SECONDS
+    try:
+        value = float(raw)
+    except ValueError:
+        return _HOOK_TIMEOUT_SECONDS
+    if value <= 0:
+        return _HOOK_TIMEOUT_SECONDS
+    return value
 
 
 @dataclasses.dataclass(frozen=True)
@@ -184,6 +213,14 @@ def run_finalization(
     state_path = state_root / loop_id / "state.json" if loop_id else None
     atomic_state = _load_atomic_state(scripts_dir)
     event = str(payload.get("event", "Stop"))
+    budget = _hook_budget()
+    started_at = time.monotonic()
+
+    def _writer_timeout() -> float:
+        elapsed = time.monotonic() - started_at
+        remaining = budget - elapsed - _BUDGET_SAFETY_MARGIN
+        cap = min(_WRITER_BUDGET_SECONDS, budget - _BUDGET_SAFETY_MARGIN)
+        return max(0.1, min(remaining, cap))
 
     if status != "PARSED":
         coordinator = _fallback_result(parser_result)
@@ -255,7 +292,9 @@ def run_finalization(
 
     try:
         writer = _load_writer_module(scripts_dir)
-        write_result = writer.write_from_save_result(save_result)
+        write_result = writer.write_from_save_result(
+            save_result, timeout=_writer_timeout()
+        )
     except Exception as exc:  # pragma: no cover — defensive
         coordinator = CoordinatorResult(
             status="UNKNOWN",
