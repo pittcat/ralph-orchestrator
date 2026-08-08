@@ -24,6 +24,17 @@
 | `agent_skill.unreadable` | P1 | 85 | Q3 | style | skill 文档可读性差：术语首次出现未解释（`hat` / `topic` / `task_key` / `step` / `task_id` / `kind` / `reason` / `allowed_topics` / `required_fields` / `policy-check` 等）、未按「agent 下一步能执行什么」写、未说明触发条件与失败停止条件等。 |
 | `agent_skill.inject_claim_false` | P0 | 95 | Q3 / Q4 | lint | skill 文档 / hat `instructions:` 错误声称某 skill 已自动注入，或把 on-demand skill 写成 auto-inject。对账源：`ralph inspect prompt --hat <id> --format json`。 |
 
+
+## Scope contract skill audit（选审时检查）
+
+当 reviewer 选择「同时审查注入 skill 文档」时，按以下四条检查 `crates/ralph-core/data/ralph-tools-emit.md` 的 scope handoff contract 段：
+
+| 检查项 | finding_id | default_severity | default_confidence | 含义 |
+|---|---|---|---|---|
+| `ralph-tools-emit.md` 缺少 scope topics 列表（`merge.integrated` / `merge.stabilized` / `postmerge.changemap.ready` / `redteam.plan.resolved`） | `agent_skill.unreadable` | P1 | 85 | skill 文档缺少关键触发条件 |
+| `ralph-tools-emit.md` 未说明 `--unsafe-no-policy-check` 不能绕过 scope handoff guard | `agent_skill.leaks_internals` | P0 | 95 | skill 文档未说明关键约束，导致 agent 可能误用 |
+| `ralph-tools-emit.md` 未说明 `scope_digest` 是排除自身字段的 SHA-256 | `agent_skill.unreadable` | P1 | 85 | 关键算法描述缺失 |
+| `ralph-tools-emit.md` 未说明 threshold gate（`overall_confidence >= 90` + `critical_unknown_count == 0` + `proceed == true`） | `agent_skill.unreadable` | P1 | 85 | 关键成功条件描述缺失 |
 ## 4. 与其它 finding_id 的边界
 
 - **不去替代** `preset.instructions_opac_skill_reference_missing` 等既有 finding——后者是 lint 抓的 shape 缺失；本表是 review-only 的「内容口径」层。

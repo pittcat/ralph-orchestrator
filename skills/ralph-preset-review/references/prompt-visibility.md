@@ -71,4 +71,14 @@ ralph -c ./local.yml inspect prompt --hat worker --format json
 
 更细的 audit 规程见 `references/agent-skill-audit.md`（U10，弹窗默认不审 data/*.md，仅选审时跑）。
 
+
+## Scope resolution is agent-owned
+
+Scope 解析（`merge.integrated` / `merge.stabilized` / `postmerge.changemap.ready` / `redteam.plan.resolved`）是 **agent-owned** 能力：三套独立 scope preset 的 hat 必须自己从 Git 历史和 artifact 内容独立推算 scope，不得依赖 operator 提供的 `ralph scope` CLI 或外部工具。
+
+**reviewer 规则**：
+- **禁止**在 hat `instructions` 中引入 `ralph scope` 命令或任何 scope-specific CLI。
+- scope topic 的 hat `instructions` 必须引用 `ralph-tools-emit.md` 的 scope handoff contract 段，描述如何写 manifest、算 digest、跑 policy-check。
+- `scope_base_sha` / `scope_digest` / `scope_manifest_path` 等字段在 `instructions` 中必须说明来源（从 Git / artifact / 工作目录取得），不得写「上游会处理」。
+- `--unsafe-no-policy-check` 不能绕过 scope handoff guard，这一约束必须在涉及 scope topic 的 hat `instructions` 中明确说明。
 <!-- anchor: evidence-bound -->

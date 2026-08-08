@@ -124,6 +124,38 @@ ralph emit --schema work.done | jq -r .protocol_hash   # 改后
 
 **Trust 边界（agent 不可伪造的字段）**：JSONL 事件里的 `system_injected` 字段**不是 agent 可声明的信任凭据**。`--policy-check` 与正式 emit 路径都会拒绝 `system_injected=true` 的业务 topic（如 `work.start` / `review.unit.done`）——只有 `<kind>.wave.{complete,failed}` 这六个 supervisor 协调 topic 可以走 system_injected runtime seam。**agent 永远不要**在事件 payload 里写 `system_injected: true` 试图绕过发布/作用域校验；这会被原 guard 拒为 `system_injected_on_business_topic`，并写进诊断。如果 hat 想发 coord topic，请走 `ralph wave` 的 merge seam（dispatcher 自动 commit `system_injected=true`），而不是手工拼字段。
 
+### Scope handoff contract
+
+**适用 topic**：`merge.integrated` / `merge.stabilized` / `postmerge.changemap.ready` / `redteam.plan.resolved`。
+
+**强制门禁**：对上述 scope topic，`ralph emit --policy-check` 内部运行 scope handoff guard，校验 payload 结构字段、manifest 路径有效性、文件可读性。**`--unsafe-no-policy-check` 不能绕过此 guard**——scope contract 是这些 topic 的硬性前提条件。
+
+**Agent 流程**：
+1. 写 manifest：把 scope 内容写到 `.ralph/{merge,post-merge,red-team}/<name>.json`（字节稳定的 JSON）。
+2. 计算 `scope_digest`：对 canonical JSON（排除 `scope_digest` 字段本身）计算 SHA-256，得到 64-char hex 填入 `scope_digest`。
+3. 预检：先跑 `ralph emit --policy-check <scope-topic>`，看 `validation_errors[]` 是否为空。
+4. 正式 emit：通过后去掉 `--policy-check` 正式 emit，payload 携带以下字段：
+   - `scope_manifest_path`：manifest 文件路径，必须以 `.ralph/{merge,post-merge,red-team}/` 开头
+   - `scope_digest`：64-char hex SHA-256（排除自身字段的 canonical JSON）
+   - `scope_status`：当前状态（如 `integrated` / `stabilized` / `resolved`）
+   - `scope_base_sha`：真实 Git SHA（40 hex chars），禁止 `<global-baseline>` 等占位符
+   - `scope_source`：scope 来源描述
+   - `overall_confidence`：0-100 置信度分数
+   - `critical_unknown_count`：关键未知项数量
+
+**Manifest 路径规则**：`scope_manifest_path` 必须落在 `.ralph/{merge,post-merge,red-team}/` 下，且文件必须在 emit 前已落盘可读。runtime guard 会检查路径前缀和文件存在性。
+
+**Digest 计算细节**：canonical JSON 是对 manifest 内容去掉 `scope_digest` 字段后的 JSON 文本，按 `serde_json::to_string` 的默认排序序列化后计算 SHA-256。不得把 `scope_digest` 字段本身算进去，否则无法自举。
+
+**Threshold gate（resolved scope）**：当 `scope_status` 为 `resolved` 时，必须同时满足：
+- `overall_confidence >= 90`
+- `critical_unknown_count == 0`
+- `proceed == true`
+
+任一不满足时 scope 仍为 unresolved，下游不应据此推进。
+
+**边界**：不要把 `merge_boundary_digest` 当作 scope digest——两者是不同的：前者是 merge 稳定性证明，后者是 scope 内容证明。
+
 ### Envelope 校验（`triggered` 拓扑）
 
 `ralph emit --triggered <hat_id>` 在 apply 路径与 `--policy-check` 路径都会被 envelope 层校验：`triggered` 字段的值必须是当前 preset 声明的 hat 之一（即出现在 `hats[]` map 里），否则返回 `triggered_not_in_topology`。

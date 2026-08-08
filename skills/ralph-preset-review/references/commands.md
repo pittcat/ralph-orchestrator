@@ -172,7 +172,7 @@ JSON 输出结构：
 <!-- anchor: artifact-first -->
 <!-- anchor: payload-consistency -->
 <!-- anchor: trigger-context -->
-<!-- anchor: key-stage-event-gate --><!-- anchor: evidence-bound -->
+<!-- anchor: key-stage-event-gate --><!-- anchor: evidence-bound --><!-- anchor: scope-handoff -->
 
 ## Wave 子命令
 
@@ -182,3 +182,25 @@ JSON 输出结构：
 | `ralph wave verify <TOPIC> --payloads-stdin` | OPAC Precheck：校验 payload 符合 event policy，写入一次性 ticket |
 | `ralph wave inspect <WAVE_ID>` | 公开只读 Confirm：查询 wave 在 supervisor store 的登记状态（phase / counts） |
 | `ralph wave redrive --wave-id <ID> [--slots <LIST>]` | 为已关闭 wave 的失败 slot 创建子 attempt wave；仅限 operator 在 loop 外手动干预 |
+
+## Scope handoff contract（merge-batch / post-merge-converge / red-team-attack presets）
+
+```bash
+# scope topic 的 policy-check（强制，不可被 --unsafe-no-policy-check 绕过）
+ralph emit --policy-check <scope-topic> '<payload>' -H <path|builtin:name>
+
+# 校验 scope topic payload 字段（只验 shape）
+ralph emit --schema <scope-topic> -H <path|builtin:name>
+```
+
+**Scope topics**：`merge.integrated` / `merge.stabilized` / `postmerge.changemap.ready` / `redteam.plan.resolved`。
+
+**强制门禁**：scope handoff guard 对这些 topic 是**强制不可绕过**的，`--unsafe-no-policy-check` 不能跳过。指令必须要求 agent 先 `--policy-check` 预检，通过后再真实 emit。
+
+**Manifest 路径规则**：`scope_manifest_path` 必须落在 `.ralph/{merge,post-merge,red-team}/` 下，且文件必须在 emit 前已落盘可读。
+
+**Digest 计算**：`scope_digest` 是 canonical JSON（排除 `scope_digest` 字段本身）的 SHA-256 64-char hex。
+
+**Threshold gate**：`overall_confidence >= 90` 且 `critical_unknown_count == 0` 且 `proceed == true` 时 scope 才能标记为 resolved。
+
+**边界**：reviewer 在审涉及 scope topic 的 hat 时，必须验证 `instructions` 中明确要求 agent 先写 manifest、再 policy-check、再真实 emit。

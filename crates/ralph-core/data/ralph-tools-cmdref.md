@@ -194,6 +194,26 @@ test -d .ralph/forge/<KEY>/templates/
 
 ---
 
+
+## Scope manifest（merge-batch / post-merge-converge / red-team-attack presets）
+
+**相关 topic**：`merge.integrated` / `merge.stabilized` / `postmerge.changemap.ready` / `redteam.plan.resolved`。
+
+**Manifest 路径**：`.ralph/{merge,post-merge,red-team}/<name>.json`。
+
+**字段**：见 `crates/ralph-core/data/ralph-tools-emit.md`「Scope handoff contract」段。
+
+**相关 preset/schema 位置**：
+- `presets/en/merge-batch.yml`
+- `presets/en/post-merge-converge.yml`
+- `presets/en/red-team-attack.yml`
+- `presets/schemas/merge-batch.yml`
+- `presets/schemas/post-merge-converge.yml`
+- `presets/schemas/red-team-attack.yml`
+
+**Agent 动作**：写 manifest → 算 digest → `--policy-check` 预检 → 正式 emit。
+
+详见 `ralph-tools-emit.md`「Scope handoff contract」段。
 ## `candidate_emit.next_hat_candidates` 三态（`ralph inspect prompt --topic ...` JSON 输出）
 
 `ralph inspect prompt --hat <id> --format json --topic ... --payload ...` 的 JSON 输出中 `candidate_emit.next_hat_candidates` 字段有三种形状，由 `kind` 标签区分：
