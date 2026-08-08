@@ -305,24 +305,26 @@ def _ralph_env() -> dict[str, str]:
     }
 
 
-def test_stop_extracts_valid_finalization_marker(isolated_plugin_data: Path) -> None:
-    """Stop hook with a legal marker produces a candidate audit record."""
+def test_stop_extracts_valid_finalization_marker(tmp_path: Path) -> None:
+    """Stop hook with a legal marker produces a SAVED audit record."""
+    env, calls = _hook_env_with_fake_nmem(tmp_path)
     marker = _valid_candidate_marker()
     payload = {
         "session_id": "sess-1",
         "transcript_path": "/etc/passwd",
         "last_assistant_message": f"Here is the lesson:\n\n{marker}\n",
     }
-    result = _run_hook("Stop", payload, extra_env=_ralph_env())
+    result = _run_hook(
+        "Stop", payload, extra_env=env, plugin_data=Path(env["CLAUDE_PLUGIN_DATA"])
+    )
     assert result.returncode == 0, (
         f"Stop hook must exit 0, got {result.returncode}: stderr={result.stderr}"
     )
-    state_path = isolated_plugin_data / "loop-xyz" / "state.json"
+    state_path = Path(env["CLAUDE_PLUGIN_DATA"]) / "loop-xyz" / "state.json"
     payload_data = json.loads(state_path.read_text(encoding="utf-8"))
-    # The hook must record a candidate audit block without leaking the message.
     assert payload_data["hook"] == "Stop"
     assert payload_data["audit_only"] is False
-    assert payload_data["finalization"]["status"] == "PARSED"
+    assert payload_data["finalization"]["status"] == "SAVED"
     assert payload_data["finalization"]["memory_digest"], "must surface a stable digest"
     serialized = json.dumps(payload_data, ensure_ascii=True)
     assert "Atomic writes avoid torn state" not in serialized, (
@@ -331,6 +333,7 @@ def test_stop_extracts_valid_finalization_marker(isolated_plugin_data: Path) -> 
     assert "/etc/passwd" not in serialized, (
         "Stop hook must NOT record transcript_path"
     )
+    assert len(calls.read_text(encoding="utf-8").splitlines()) == 1
 
 
 def test_stop_without_marker_stays_audit_only(isolated_plugin_data: Path) -> None:
@@ -445,8 +448,9 @@ def test_stop_never_reads_transcript_path(isolated_plugin_data: Path) -> None:
     assert "/etc/passwd" not in serialized
 
 
-def test_subagent_stop_uses_same_bounded_path(isolated_plugin_data: Path) -> None:
+def test_subagent_stop_uses_same_bounded_path(tmp_path: Path) -> None:
     """SubagentStop mirrors Stop: same parser, same audit contract."""
+    env, calls = _hook_env_with_fake_nmem(tmp_path)
     marker = _valid_candidate_marker()
     payload = {
         "session_id": "worker-1",
@@ -454,11 +458,202 @@ def test_subagent_stop_uses_same_bounded_path(isolated_plugin_data: Path) -> Non
         "transcript_path": "/not/read",
         "last_assistant_message": f"Lesson:\n\n{marker}\n",
     }
-    result = _run_hook("SubagentStop", payload, extra_env=_ralph_env())
+    result = _run_hook(
+        "SubagentStop", payload, extra_env=env, plugin_data=Path(env["CLAUDE_PLUGIN_DATA"])
+    )
     assert result.returncode == 0
     state_data = json.loads(
-        (isolated_plugin_data / "loop-xyz" / "state.json").read_text(encoding="utf-8")
+        (Path(env["CLAUDE_PLUGIN_DATA"]) / "loop-xyz" / "state.json").read_text(encoding="utf-8")
     )
     assert state_data["hook"] == "SubagentStop"
     assert state_data["audit_only"] is False
-    assert state_data["finalization"]["status"] == "PARSED"
+    assert state_data["finalization"]["status"] == "SAVED"
+    assert len(calls.read_text(encoding="utf-8").splitlines()) == 1
+
+
+# ---------------------------------------------------------------------------
+# Unit 2 — finalization coordinator (Stop / SubagentStop → save → writer)
+#
+# A legal candidate reaches the existing ``memory_writer`` exactly once,
+# duplicate digests return ``ALREADY_SAVED`` without a second nmem call,
+# policy-rejected candidates never reach nmem, and the hook stays
+# exit 0 on every failure.
+# ---------------------------------------------------------------------------
+
+
+def _write_fake_nmem(bin_dir: Path, response: str = '{"id":"mem-1"}', exit_code: int = 0) -> Path:
+    """Install a fake ``nmem`` script in ``bin_dir`` and return its call log path.
+
+    The fake records every invocation as a single JSON-quoted argv
+    line in ``calls.jsonl`` so the test suite can assert how many
+    times ``nmem`` was called regardless of how many tokens were
+    passed. The script writes via an absolute path so ``cwd`` does
+    not matter.
+    """
+    bin_dir.mkdir(parents=True, exist_ok=True)
+    calls = bin_dir / "calls.jsonl"
+    script = bin_dir / "nmem"
+    calls_path = str(calls.resolve())
+    script.write_text(
+        "#!/usr/bin/env python3\n"
+        "import json, sys\n"
+        f"with open({calls_path!r}, 'a', encoding='utf-8') as _h:\n"
+        "    _h.write(json.dumps(sys.argv[1:]) + '\\n')\n"
+        "sys.stdout.write(" + repr(response) + " + '\\n')\n"
+        f"sys.exit({exit_code})\n",
+        encoding="utf-8",
+    )
+    script.chmod(0o755)
+    return calls
+
+
+def _hook_env_with_fake_nmem(
+    tmp_path: Path,
+    response: str = '{"id":"mem-1"}',
+    exit_code: int = 0,
+) -> tuple[dict[str, str], Path]:
+    bin_dir = tmp_path / "bin"
+    calls = _write_fake_nmem(bin_dir, response=response, exit_code=exit_code)
+    data_dir = tmp_path / "data"
+    env = _ralph_env()
+    env["PATH"] = f"{bin_dir}:/usr/bin:/bin"
+    env["CLAUDE_PLUGIN_DATA"] = str(data_dir)
+    return env, calls
+
+
+def test_stop_accepted_candidate_calls_writer_once(
+    isolated_plugin_data: Path, tmp_path: Path
+) -> None:
+    """Stop hook with a legal finalize:true marker calls the writer once."""
+    env, calls = _hook_env_with_fake_nmem(tmp_path)
+    marker = _valid_candidate_marker()
+    payload = {
+        "session_id": "sess-1",
+        "last_assistant_message": f"Lesson:\n\n{marker}\n",
+    }
+    result = _run_hook(
+        "Stop", payload, extra_env=env, plugin_data=Path(env["CLAUDE_PLUGIN_DATA"])
+    )
+    assert result.returncode == 0, f"stderr={result.stderr}"
+    state_data = json.loads(
+        (Path(env["CLAUDE_PLUGIN_DATA"]) / "loop-xyz" / "state.json").read_text(encoding="utf-8")
+    )
+    assert state_data["finalization"]["status"] == "SAVED"
+    assert state_data["finalization"]["memory_digest"]
+    call_lines = calls.read_text(encoding="utf-8").splitlines()
+    assert len(call_lines) == 1, f"nmem must be called exactly once, got {call_lines}"
+    argv = json.loads(call_lines[0])
+    assert argv[0:3] == ["--json", "m", "add"], f"unexpected argv: {argv}"
+    assert "--title" in argv
+    assert "--unit-type" in argv
+
+
+def test_stop_duplicate_candidate_is_idempotent(
+    isolated_plugin_data: Path, tmp_path: Path
+) -> None:
+    """Two Stop hooks with the same candidate yield one nmem call."""
+    env, calls = _hook_env_with_fake_nmem(tmp_path)
+    marker = _valid_candidate_marker()
+    payload = {
+        "session_id": "sess-1",
+        "last_assistant_message": f"Lesson:\n\n{marker}\n",
+    }
+    for _ in range(2):
+        result = _run_hook(
+            "Stop", payload, extra_env=env, plugin_data=Path(env["CLAUDE_PLUGIN_DATA"])
+        )
+        assert result.returncode == 0
+    call_lines = calls.read_text(encoding="utf-8").splitlines()
+    assert len(call_lines) == 1, (
+        f"duplicate candidate must not produce a second nmem call, got {call_lines}"
+    )
+
+
+def test_stop_rejected_candidate_does_not_call_writer(
+    isolated_plugin_data: Path, tmp_path: Path
+) -> None:
+    """A marker whose memory_type is 'progress' is rejected and never reaches nmem."""
+    env, calls = _hook_env_with_fake_nmem(tmp_path)
+    marker = _valid_candidate_marker(memory_type="progress")
+    payload = {
+        "session_id": "sess-1",
+        "last_assistant_message": f"Lesson:\n\n{marker}\n",
+    }
+    result = _run_hook(
+        "Stop", payload, extra_env=env, plugin_data=Path(env["CLAUDE_PLUGIN_DATA"])
+    )
+    assert result.returncode == 0
+    state_data = json.loads(
+        (Path(env["CLAUDE_PLUGIN_DATA"]) / "loop-xyz" / "state.json").read_text(encoding="utf-8")
+    )
+    assert state_data["finalization"]["status"] in {"REJECTED", "SKIPPED"}
+    assert not calls.exists() or calls.read_text(encoding="utf-8") == ""
+
+
+def test_stop_nmem_failure_is_fail_open(
+    isolated_plugin_data: Path, tmp_path: Path
+) -> None:
+    """A non-zero nmem exit must keep the hook exit 0 and surface FAILED_OPEN/UNKNOWN."""
+    env, _ = _hook_env_with_fake_nmem(tmp_path, exit_code=1)
+    marker = _valid_candidate_marker()
+    payload = {
+        "session_id": "sess-1",
+        "last_assistant_message": f"Lesson:\n\n{marker}\n",
+    }
+    result = _run_hook(
+        "Stop", payload, extra_env=env, plugin_data=Path(env["CLAUDE_PLUGIN_DATA"])
+    )
+    assert result.returncode == 0, f"hook must stay exit 0 on nmem failure: {result.stderr}"
+    state_data = json.loads(
+        (Path(env["CLAUDE_PLUGIN_DATA"]) / "loop-xyz" / "state.json").read_text(encoding="utf-8")
+    )
+    assert state_data["finalization"]["status"] in {"FAILED_OPEN", "UNKNOWN"}
+    assert state_data["audit_only"] is True
+
+
+def test_stop_audit_record_does_not_persist_full_message(
+    isolated_plugin_data: Path, tmp_path: Path
+) -> None:
+    """The bounded audit record never includes the assistant message body."""
+    env, _ = _hook_env_with_fake_nmem(tmp_path)
+    marker = _valid_candidate_marker(claim="UNIQUE-secret-marker-secret")
+    payload = {
+        "session_id": "sess-1",
+        "last_assistant_message": f"Lesson:\n\n{marker}\n",
+    }
+    result = _run_hook(
+        "Stop", payload, extra_env=env, plugin_data=Path(env["CLAUDE_PLUGIN_DATA"])
+    )
+    assert result.returncode == 0
+    state_data = json.loads(
+        (Path(env["CLAUDE_PLUGIN_DATA"]) / "loop-xyz" / "state.json").read_text(encoding="utf-8")
+    )
+    audit_path = Path(env["CLAUDE_PLUGIN_DATA"]) / "loop-xyz" / "audit.jsonl"
+    audit_payload = audit_path.read_text(encoding="utf-8")
+    assert "UNIQUE-secret-marker-secret" not in audit_payload, (
+        "audit.jsonl must NOT persist the full assistant message text"
+    )
+    assert "UNIQUE-secret-marker-secret" not in json.dumps(state_data), (
+        "state.json must NOT persist the full assistant message text"
+    )
+
+
+def test_subagent_stop_uses_same_writer(
+    isolated_plugin_data: Path, tmp_path: Path
+) -> None:
+    """SubagentStop reaches the writer with the same idempotency contract as Stop."""
+    env, calls = _hook_env_with_fake_nmem(tmp_path)
+    marker = _valid_candidate_marker()
+    payload = {
+        "session_id": "worker-1",
+        "last_assistant_message": f"Lesson:\n\n{marker}\n",
+    }
+    result = _run_hook(
+        "SubagentStop", payload, extra_env=env, plugin_data=Path(env["CLAUDE_PLUGIN_DATA"])
+    )
+    assert result.returncode == 0
+    state_data = json.loads(
+        (Path(env["CLAUDE_PLUGIN_DATA"]) / "loop-xyz" / "state.json").read_text(encoding="utf-8")
+    )
+    assert state_data["finalization"]["status"] == "SAVED"
+    assert len(calls.read_text(encoding="utf-8").splitlines()) == 1

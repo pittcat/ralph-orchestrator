@@ -14,10 +14,11 @@ non-negotiable contracts before any other module is allowed to run:
    must use ``subprocess.run([...], timeout=...)``. The hook itself has
    a 5-second budget declared in ``hooks/hooks.json``.
 
-Recall, policy, writer, and audit handlers extend this runtime. ``resolve_nowledge_env`` is the canonical mapping
-between Ralph's existing ``RALPH_*`` env keys and the plugin's internal
-``Nowledge*`` field names; downstream code MUST read the env through this
-function so the mapping stays in one place.
+Recall, policy, writer, audit, and finalization handlers extend this
+runtime. ``resolve_nowledge_env`` is the canonical mapping between
+Ralph's existing ``RALPH_*`` env keys and the plugin's internal
+``Nowledge*`` field names; downstream code MUST read the env through
+this function so the mapping stays in one place.
 """
 
 from __future__ import annotations
@@ -230,10 +231,9 @@ def _handle_session_start(payload: dict[str, Any]) -> int:
 def _handle_stop(payload: dict[str, Any]) -> int:
     """Stop handler — bounded auto-finalization with audit fallback.
 
-    Unit 1 introduces a bounded marker parser. When ``last_assistant_message``
-    contains exactly one valid ``nowledge-memory-finalize`` block with
-    ``finalize:true``, the candidate is parsed and audited but the hook
-    does not yet invoke the writer (Unit 2 responsibility). For all other
+    Wires the parser → save → writer chain via :mod:`memory_finalization`.
+    Only the writer (``memory_writer``) calls ``nmem``; the hook never
+    spawns it directly. For all malformed / missing / non-finalization
     payloads the handler remains audit-only and never touches
     ``transcript_path`` or any other file outside the plugin state dir.
     """
@@ -241,51 +241,44 @@ def _handle_stop(payload: dict[str, Any]) -> int:
     message = payload.get("last_assistant_message") if isinstance(payload, dict) else None
     marker_result = _load_marker_module().extract_finalization_marker(message)
     # The historical audit recorder still runs so ``audit.jsonl`` keeps
-    # the existing shape; we then layer the finalization audit block
-    # on top of state.json so the parser outcome is observable without
-    # leaking the candidate payload.
+    # the existing shape; the coordinator then layers the finalization
+    # block on top of ``state.json`` so the parser + writer outcome is
+    # observable without leaking the candidate payload.
     audit = _load_audit_module()
     audit.record_stop(env, payload, event="Stop", state_root=_state_root())
-    _audit_finalization_attempt(
+    coordinator = _load_finalization_module()
+    coordinator.run_finalization(
         env,
-        payload,
-        event="Stop",
+        dict(payload, event="Stop"),
+        parser_result=marker_result,
         state_root=_state_root(),
-        marker_result=marker_result,
     )
     _log(
         "stop_finalization",
         loop_id=env["RALPH_CURRENT_LOOP_ID"],
         event="Stop",
-        status=getattr(marker_result, "status", "SKIPPED"),
     )
     return EXIT_OK
 
 
 def _handle_subagent_stop(payload: dict[str, Any]) -> int:
-    """SubagentStop mirrors Stop: same parser, same audit fallback.
-
-    The handler shares its contract with ``_handle_stop`` so the
-    characterization test that locks the prior audit-only behaviour
-    keeps passing for SubagentStop too.
-    """
+    """SubagentStop mirrors Stop: same parser, same coordinator chain."""
     env = resolve_nowledge_env()
     message = payload.get("last_assistant_message") if isinstance(payload, dict) else None
     marker_result = _load_marker_module().extract_finalization_marker(message)
     audit = _load_audit_module()
     audit.record_stop(env, payload, event="SubagentStop", state_root=_state_root())
-    _audit_finalization_attempt(
+    coordinator = _load_finalization_module()
+    coordinator.run_finalization(
         env,
-        payload,
-        event="SubagentStop",
+        dict(payload, event="SubagentStop"),
+        parser_result=marker_result,
         state_root=_state_root(),
-        marker_result=marker_result,
     )
     _log(
         "stop_finalization",
         loop_id=env["RALPH_CURRENT_LOOP_ID"],
         event="SubagentStop",
-        status=getattr(marker_result, "status", "SKIPPED"),
     )
     return EXIT_OK
 
@@ -313,12 +306,7 @@ _MARKER_MODULE: Any | None = None
 
 
 def _load_marker_module() -> Any:
-    """Load :mod:`memory_marker` for bounded finalization parsing.
-
-    Kept separate from audit / writer so Unit 1 only requires the
-    parser and Unit 2 can introduce the coordinator without changing
-    this entry point.
-    """
+    """Load :mod:`memory_marker` for bounded finalization parsing."""
     global _MARKER_MODULE
     if _MARKER_MODULE is not None:
         return _MARKER_MODULE
@@ -334,51 +322,24 @@ def _load_marker_module() -> Any:
     return module
 
 
-def _audit_finalization_attempt(
-    env: Any,
-    payload: Mapping[str, Any],
-    *,
-    event: str,
-    state_root: Path,
-    marker_result: Any,
-) -> None:
-    """Append a bounded finalization audit block to the loop's state file.
+_FINALIZATION_MODULE: Any | None = None
 
-    Only the parser outcome is persisted: ``status``, ``memory_digest``
-    and ``reason``. The candidate payload itself is never written to
-    state or audit files; ``memory.py`` (U03) owns the structured
-    record boundary.
-    """
-    loop_id = str(env.get("RALPH_CURRENT_LOOP_ID", "")).strip()
-    if not loop_id:
-        return
-    directory = state_root / loop_id
-    directory.mkdir(parents=True, exist_ok=True)
-    state_path = directory / "state.json"
-    try:
-        loaded = json.loads(state_path.read_text(encoding="utf-8"))
-        state = dict(loaded) if isinstance(loaded, dict) else {}
-    except (OSError, json.JSONDecodeError):
-        state = {}
-    status = getattr(marker_result, "status", "SKIPPED")
-    finalization = {
-        "status": status,
-        "memory_digest": getattr(marker_result, "memory_digest", "") or "",
-        "reason": getattr(marker_result, "reason", "") or "",
-        "event": event,
-        "hat": str(env.get("RALPH_CURRENT_HAT", "")),
-        "session_id": str(payload.get("session_id", "")),
-    }
-    state["finalization"] = finalization
-    # ``audit_only`` flips to False only when the parser extracted a
-    # candidate. Skipped / rejected messages keep the historical
-    # audit-only contract so the prior characterization test still
-    # holds for plain final messages.
-    state["audit_only"] = status != "PARSED"
-    state["stop_hook_fired"] = True
-    tmp = state_path.with_suffix(".json.tmp")
-    tmp.write_text(json.dumps(state, ensure_ascii=False, sort_keys=True), encoding="utf-8")
-    os.replace(tmp, state_path)
+
+def _load_finalization_module() -> Any:
+    """Load :mod:`memory_finalization` for parser → save → writer."""
+    global _FINALIZATION_MODULE
+    if _FINALIZATION_MODULE is not None:
+        return _FINALIZATION_MODULE
+    here = Path(__file__).resolve().parent
+    name = "_nowledge_mem_ralph_memory_finalization"
+    spec = importlib.util.spec_from_file_location(name, here / "memory_finalization.py")
+    if spec is None or spec.loader is None:
+        raise RuntimeError("failed to load memory_finalization.py")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
+    spec.loader.exec_module(module)
+    _FINALIZATION_MODULE = module
+    return module
 
 
 _HANDLERS = {
