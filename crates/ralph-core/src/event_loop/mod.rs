@@ -417,8 +417,7 @@ pub struct UserPrompt {
 /// takes the preset's derived `blocked_topic` so the
 /// fail-close emit matches the preset's blocked protocol
 /// namespace (parallel-forge → `forge.plan.blocked`,
-/// ce-executor-supervisor → `plan.blocked`, undeclared
-/// flows fall back to `plan.blocked`). It returns `true`
+/// undeclared flows fall back to `plan.blocked`). It returns `true`
 /// Render a slice of `CorrectionContext` entries into the
 /// `## ORCHESTRATOR CORRECTION` markdown block.  Free
 /// function (no `EventLoop` borrow) so `prepend_correction_and_resume`

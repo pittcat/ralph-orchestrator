@@ -420,7 +420,7 @@ idle_weak_signal_cap: 8`；review-batch-worker 用 `timeout: 900,
 idle_heartbeat_secs: 90, idle_weak_signal_cap: 8`。若 backend 实测冷启动
 P50 > `idle_heartbeat_secs`（典型场景：Claude / Gemini / Codex headless 在
 spawn 到第一行输出之间超过 120s），加 `startup_grace_secs: 300` 保护慢热
-backend。这是 `ce-executor-supervisor` builtin preset 的当前值；新建
+backend。这是 `parallel-forge` builtin preset 的当前值；新建
 preset 应当按 `commands.md` 提到的 `preset_lint` + `cargo nextest run -p
 ralph-core -- hat` 验证 hat 字段解析。
 

@@ -55,7 +55,7 @@ def _write_change_plan(path: Path, *, with_presets: bool = False) -> None:
     if with_presets:
         body += (
             "\n### U3. Preset\n\n"
-            "Touch `presets/en/ce-executor-supervisor.yml`.\n"
+            "Touch `presets/en/parallel-forge.yml`.\n"
         )
     path.write_text(body, encoding="utf-8")
 
@@ -87,7 +87,7 @@ def test_change_plan_not_used_as_workload(tmp_path: Path) -> None:
     result = plan_resolve.resolve_plans(
         sand,
         change_plan=change,
-        preset="builtin:ce-executor-supervisor",
+        preset="builtin:parallel-forge",
     )
     assert result.ok is True
     assert result.workload_source == "discovered"
@@ -141,14 +141,14 @@ def test_author_minimal_requires_confirmation(tmp_path: Path) -> None:
     sand.mkdir()
     try:
         plan_resolve.author_minimal_plan(
-            sand, preset="builtin:ce-executor-supervisor", today=date(2026, 7, 25)
+            sand, preset="builtin:parallel-forge", today=date(2026, 7, 25)
         )
         raise AssertionError("expected ValueError without confirmation")
     except ValueError as exc:
         assert "sandbox_plan_write" in str(exc)
     path = plan_resolve.author_minimal_plan(
         sand,
-        preset="builtin:ce-executor-supervisor",
+        preset="builtin:parallel-forge",
         today=date(2026, 7, 25),
         confirmed=True,
         confirmation_token="sandbox_plan_write",

@@ -48,7 +48,7 @@ freshness, and prompt-file wiring.
      repo** describing what changed and what to verify. Never used as
      `ralph run --plan`.
   3. **Preset** (required for pipeline) — e.g.
-     `builtin:ce-executor-supervisor`. If the change plan declares
+     `builtin:parallel-forge`. If the change plan declares
      `presets/` intent, raise `preset_gap` combo-box: either confirm
      preset work is already done (`--preset-continue-confirmed`), or
      **hard-handoff** `ralph-preset-author`.

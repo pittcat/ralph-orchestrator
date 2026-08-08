@@ -788,7 +788,7 @@ const ALLOWED_HATS_TOP_LEVEL: &[&str] = &[
 // `verdict_gate`, `execution_contracts`) are hat-driven by design: a hat
 // collection declares the topology and contracts required for its safety
 // properties, so they must survive overlay merge for builtin presets
-// like `ce-executor-pipeline` and `ce-executor-supervisor` to work
+// like `ce-executor-pipeline` and `parallel-forge` to work
 // end-to-end.
 //
 // Note: resource budgets (`max_iterations`, `max_runtime_seconds`,
@@ -845,7 +845,7 @@ const PRESET_OPT_IN_WHEN_OPERATOR_OMITS: &[&str] = &[
     // aggregate_timeout_secs=600), so the
     // `merge_hats_overlay()` strip in `default_core_value()`
     // (see `config_resolution.rs`) is required for the preset
-    // opt-in (e.g. ce-executor-supervisor's
+    // opt-in (e.g. parallel-forge's
     // `supervisor.enabled: true`) to survive operator-omits;
     // otherwise the `!contains_key` guard in merge_hats_overlay
     // always sees the key as present and silently keeps the

@@ -682,7 +682,8 @@ fn default_progress_steward_enabled() -> bool {
 // Default opt-in stall-diagnostic hat ID. Used only when
 // `progress_steward.enabled == true` (master switch off by
 // default). Pipeline presets do not declare this hat; only
-// non-pipeline presets such as `ce-executor-supervisor` opt in.
+// non-pipeline supervisor-enabled presets such as `parallel-forge`
+// opt in.
 fn default_progress_steward_hat_id() -> String {
     "progress-steward".to_string()
 }
@@ -970,7 +971,7 @@ mod tests {
     // Tests for the generic opt-in stall-diagnostic
     // `progress_steward` config block. Master switch defaults to
     // `false`; presets opt in only when they need the
-    // stall-recovery diagnostic (e.g. `ce-executor-supervisor`).
+    // stall-recovery diagnostic (e.g. `parallel-forge`).
     // Pipeline presets must NOT enable it.
 
     #[test]

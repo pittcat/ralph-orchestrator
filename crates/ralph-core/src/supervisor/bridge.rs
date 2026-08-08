@@ -445,7 +445,7 @@ pub trait SupervisorBridge: std::fmt::Debug + Send + Sync {
 /// directly to an in-memory or rusqlite `SupervisorStore`
 /// without pulling in `ralph-cli`'s worker-spawn path. Used by
 /// `crates/ralph-core/tests/scenarios.rs` so the
-/// `ce_executor_supervisor_minimal` scenario exercises the real
+/// `supervisor_minimal` scenario exercises the real
 /// coordinator `tick` → `InjectedComplete` →
 /// `persist_system_injected_jsonl_event` path instead of
 /// faking the `system_injected` envelope via a mock response.

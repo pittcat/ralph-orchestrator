@@ -48,7 +48,7 @@ follow-on 两环之间的强制交接产物：由第一环成功路径写出、�
 
 ### execution.plan.ready
 
-`ce-executor-supervisor` 中 task-planner 在成功写入 `.ralph/review/<plan-key>/execution-plan.yml` 之后发出的业务 handoff topic。事件只携带路径、hash 与路由身份字段；DAG 正文留在 artifact。消费方是 `exec-wave-dispatcher`（首次 ready-wave fan-out）。失败路径发 `plan.blocked`，二者在同一 activation 互斥（isolated 单业务事件预算）。
+`parallel-forge` 中 task-planner 在成功写入 `.ralph/review/<plan-key>/execution-plan.yml` 之后发出的业务 handoff topic。事件只携带路径、hash 与路由身份字段；DAG 正文留在 artifact。消费方是 `exec-wave-dispatcher`（首次 ready-wave fan-out）。失败路径发 `plan.blocked`，二者在同一 activation 互斥（isolated 单业务事件预算）。
 
 ### wave
 

@@ -475,12 +475,13 @@ impl DriftEngine {
     /// avoid burning more iterations on a known-bad run).
     ///
     /// 2026-06-29 code-review fix: the target was `coordinator`
-    /// (then `shipper`). The `ce-executor-supervisor` preset's
+    /// (then `shipper`). The `parallel-forge` preset's
     /// `reporter` hat subscribes to `plan.blocked` (see
-    /// `presets/en/ce-executor-supervisor.yml` reporter
-    /// `triggers`); `coordinator` / `shipper` do not. Routing
-    /// to either of those left the event in the bus with no
-    /// subscriber, so the failure path never ran.
+    /// `presets/en/parallel-forge.yml` reporter `triggers`;
+    /// plan 2026-08-09-001 removed `ce-executor-supervisor`);
+    /// `coordinator` / `shipper` do not. Routing to either of
+    /// those left the event in the bus with no subscriber, so
+    /// the failure path never ran.
     ///
     /// 2026-07-24-005 plan U1: target is now `reporter` (was
     /// `shipper`). The shipper hat is removed from the

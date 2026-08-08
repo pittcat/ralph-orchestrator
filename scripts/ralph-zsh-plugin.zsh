@@ -60,13 +60,11 @@ unset _ralph_fn
 _RALPH_BUILTIN_HAT_VALUES=(
   "builtin:ce-executor-pipeline"
   "builtin:ce-executor-pipeline-loop"
-  # 2026-07-03-001 plan U13: supervisor-driven parallel preset.
-  # Enabled by `event_loop.supervisor.enabled: true` at run time;
-  # the rusqlite-backed store ships in the default feature set, so no
-  # extra build flag is needed since the 2026-07-23 closure plan.
-  # The lint in `crates/ralph-core/src/preset_lint/supervisor.rs`
-  # enforces the isolation + concurrency + fan-in requirements.
-  "builtin:ce-executor-supervisor"
+  # Plan 2026-08-09-001: removed ce-executor-supervisor builtin.
+  # Universal supervisor runtime and the surviving supervisor-enabled
+  # builtin parallel-forge [which still ships with
+  # event_loop.supervisor.enabled true and isolated mode] remain.
+  # builtin:ce-executor-supervisor  # removed 2026-08-09
   # builtin:ce-executor-wave  # deleted 2026-06-23
   "builtin:debug"
   "builtin:autoresearch"
@@ -87,7 +85,10 @@ _RALPH_BUILTIN_HAT_VALUES=(
 _RALPH_BUILTIN_HAT_DESCRIPTIONS=(
   "Ralph primary CE executor: linear single-chain plan-driven execution; TDD executor (subagents internal), 6 serial dimension reviewers, synthesize, fix, align, report"
   "Review-loop CE executor: pipeline execution plus convergence-gated fix/re-review rounds, max 6 review rounds"
-  "Isolated-mode plan-driven work with parallel worker fan-out via rusqlite supervisor: per-slot worktrees, fan-in merge, parallel 6-dim review, parallel fix, integration + report"
+  # Plan 2026-08-09-001: removed ce-executor-supervisor builtin.
+  # Universal supervisor runtime and the surviving supervisor-enabled
+  # builtin parallel-forge [which still ships with
+  # event_loop.supervisor.enabled true and isolated mode] remain.
   # Wave-based parallel plan-driven execution with adversarial review, auto-fix, and shipping  # deleted 2026-06-23
   "Bug investigation, root-cause analysis, and adversarial fix verification"
   "Autonomous experiment loop: try ideas, measure, keep what works"

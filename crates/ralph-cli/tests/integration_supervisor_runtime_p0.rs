@@ -258,7 +258,10 @@ impl SupervisorP0Fixture {
         env.insert("RALPH_TRIGGERED_HAT".into(), self.local_loop_id.clone());
         env.insert(
             "RALPH_HATS_SOURCE".into(),
-            "builtin:ce-executor-supervisor".into(),
+            // Plan 2026-08-09-001 U2: removed `ce-executor-supervisor`
+            // builtin. The surviving supervisor-enabled builtin is
+            // `parallel-forge`.
+            "builtin:parallel-forge".into(),
         );
         env.insert(
             "RALPH_WORKSPACE_ROOT".into(),

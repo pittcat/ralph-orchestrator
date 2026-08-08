@@ -161,9 +161,9 @@ ralph preset check -H skills/ralph-preset-review/fixtures/aaf-supervisor-capabil
 # fixture 配合 references/finding-rubric.md 新增段对照命中。
 ```
 
-**Capability-triggered invariant**: 两个 fixture **不**复制 `ce-executor-supervisor`
+**Capability-triggered invariant**: 两个 fixture **不**复制 `parallel-forge`
 或任何 builtin preset 的全拓扑; 触发条件写在 fixture 顶部注释里, 与 builtin
-preset 名称完全无关。 任何 review 脚本不得按 `name starts with ce-executor-supervisor`
+preset 名称完全无关。 任何 review 脚本不得按 `name starts with parallel-forge`
 对这两个 fixture 做特殊分支。
 
 ### 8. Capability-triggered parallel-forge fixtures (2026-08-02-001 plan U3)

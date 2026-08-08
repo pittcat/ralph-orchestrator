@@ -136,7 +136,11 @@ pub fn capability_inventory() -> Vec<Capability> {
             applies_when: "preset sets event_loop.supervisor.enabled",
             evidence_sources: &[
                 "skills/ralph-preset-author/references/finding-rubric.md",
-                "presets/schemas/ce-executor-supervisor.yml",
+                // Plan 2026-08-09-001: removed `ce-executor-supervisor`
+                // builtin. The surviving supervisor-enabled builtin is
+                // `parallel-forge`, which still ships with
+                // `event_loop.supervisor.enabled: true` and isolated mode.
+                "presets/en/parallel-forge.yml",
             ],
             recommended_evidence_level: "runtime",
             source: "binary_embedded",
