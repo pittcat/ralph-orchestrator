@@ -3306,6 +3306,14 @@ pub(super) async fn run_loop_impl_inner(
             );
         }
 
+        // Keep the backend termination reason available for the isolated
+        // channel diagnosis below. The normal termination branch consumes
+        // `outcome.termination`.
+        let backend_termination = outcome
+            .termination
+            .as_ref()
+            .map(|reason| format!("{reason:?}"));
+
         if let Some(reason) = outcome.termination {
             let reason = hooks::termination::dispatch_pre_loop_termination_hooks(
                 &event_loop,
@@ -3430,6 +3438,26 @@ pub(super) async fn run_loop_impl_inner(
         // file before the event loop reads it. This stamps every record with
         // the authoritative hat of the channel.
         if isolated_mode {
+            let channel_snapshot = crate::loop_runner::paths::resolve_hat_channel_events_path(&ctx)
+                .map(|path| {
+                    let bytes = std::fs::metadata(&path).map(|meta| meta.len()).ok();
+                    (path, bytes)
+                });
+            if let Some((channel_path, Some(channel_bytes))) = channel_snapshot.as_ref()
+                && *channel_bytes == 0
+            {
+                warn!(
+                    hat = %display_hat.as_str(),
+                    channel_path = %channel_path.display(),
+                    channel_bytes,
+                    backend_success = success,
+                    watchdog_timeout = outcome.watchdog_timeout,
+                    backend_termination = ?backend_termination,
+                    output_bytes = output.len(),
+                    output_mentions_emit = output_mentions_ralph_emit(&output),
+                    "Isolated hat activation ended with an empty event channel"
+                );
+            }
             let target_events_path = resolve_emit_events_path(&ctx, state_machine_enabled);
             if let Err(e) = crate::loop_runner::hat_channel::merge_hat_channel(
                 &ctx,
