@@ -889,3 +889,45 @@ def test_empty_hat_short_circuits_to_skipped(tmp_path: Path) -> None:
     assert state_data["finalization"]["status"] == "SKIPPED"
     assert "allowlist" in state_data["finalization"]["reason"].lower()
     assert not calls.exists() or calls.read_text(encoding="utf-8") == ""
+
+
+# ---------------------------------------------------------------------------
+# U7 (fixer) — stdin malformed payload contracts
+#
+# The hook runtime must remain exit 0 and never spawn nmem when the
+# Claude Code payload is malformed. Empty / non-object / invalid-JSON
+# stdin all map to a SKIPPED audit row.
+# ---------------------------------------------------------------------------
+
+
+def test_stop_with_empty_stdin_returns_ok(isolated_plugin_data: Path) -> None:
+    """Empty stdin stays exit 0 and writes a SKIPPED audit row."""
+    result = _run_hook("Stop", "", extra_env=_ralph_env())
+    assert result.returncode == 0
+    state_path = isolated_plugin_data / "loop-xyz" / "state.json"
+    assert state_path.is_file(), (
+        f"state.json must land as audit-only, missing at {state_path}"
+    )
+    payload_data = json.loads(state_path.read_text(encoding="utf-8"))
+    assert payload_data["audit_only"] is True
+    assert payload_data.get("finalization", {}).get("status") in {"SKIPPED", None}
+
+
+def test_stop_with_non_object_stdin_returns_ok(isolated_plugin_data: Path) -> None:
+    """Non-object stdin (a JSON array) stays exit 0."""
+    result = _run_hook("Stop", "[1,2,3]", extra_env=_ralph_env())
+    assert result.returncode == 0
+    state_path = isolated_plugin_data / "loop-xyz" / "state.json"
+    assert state_path.is_file()
+    payload_data = json.loads(state_path.read_text(encoding="utf-8"))
+    assert payload_data["audit_only"] is True
+
+
+def test_stop_with_invalid_json_stdin_returns_ok(isolated_plugin_data: Path) -> None:
+    """Invalid JSON stays exit 0."""
+    result = _run_hook("Stop", "{not-json}", extra_env=_ralph_env())
+    assert result.returncode == 0
+    state_path = isolated_plugin_data / "loop-xyz" / "state.json"
+    assert state_path.is_file()
+    payload_data = json.loads(state_path.read_text(encoding="utf-8"))
+    assert payload_data["audit_only"] is True
