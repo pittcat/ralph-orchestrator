@@ -1,21 +1,28 @@
-# nowledge-mem-ralph — Ralph 项目专用只读 Nowledge Mem 插件
+# nowledge-mem-ralph — Ralph 项目专用 Nowledge Mem 插件(0.2.0 生命周期版)
 
-本插件是 Ralph 项目环境专用的 Claude Code 插件，只提供**有界的只读查询**：
-memory search、status 检查，以及一个只读 `search-memory` skill。
+本插件是 Ralph 项目环境专用的 Claude Code 插件,提供**有界的 loop-aware
+recall** 与**有界的 save-memory lifecycle**:
 
-**不**包含任何 hooks，**不**自动保存 Claude 会话，**不**注入或读取 Working
-Memory，**不**承担 Thread create/append/distill 生命周期。设计与边界详见
-`.ralph/specs/nowledge-mem-ralph-plugin-design.md`（本仓库内）。
+- SessionStart 钩子在首个 Ralph session 触发一次 bounded memory search,
+  后续 session/compact/retry/supervisor worker 复用同一份 loop cache。
+- Stop 钩子只做审计,不发起保存、不读取 transcript。
+- 任意 hat 可通过 `/nowledge-mem-ralph:save-memory`(本插件 0.2.0 暂
+  未提供,U03 引入)在 activation 内提交 Memory 候选;插件校验固定
+  schema 与质量指标后才写入 nmem。
+
+**不**抓取 raw Claude 会话,**不**读取 Working Memory,**不**写入
+Claude transcript。设计与边界详见
+`.ralph/specs/nowledge-mem-ralph-plugin-design.md`(本仓库内)。
 
 ## 插件选型
 
 | 场景 | 应使用的插件 | scope | 说明 |
 |---|---|---|---|
 | 人工交互 Claude Code 会话 | 通用插件 `nowledge-mem@nowledge-community` | `user` | 保留会话自动捕获等完整能力 |
-| Ralph 启动的 Claude Code child（target project） | 本插件 `nowledge-mem-ralph@ralph-orchestrator` | `project` | 只读查询，无自动写入 |
+| Ralph 启动的 Claude Code child(target project) | 本插件 `nowledge-mem-ralph@ralph-orchestrator` | `project` | lifecycle 钩子 + 只读查询,无 transcript 写入 |
 
-Ralph 的 Claude adapter 只加载 `project,local` setting sources，不加载 user
-scope；因此 user 级通用插件不会被 Ralph child 看见，两者互不干扰。
+Ralph 的 Claude adapter 只加载 `project,local` setting sources,不加载 user
+scope;因此 user 级通用插件不会被 Ralph child 看见,两者互不干扰。
 
 ## 前置条件
 
@@ -104,11 +111,26 @@ claude plugin list --json
 
 ## 无自动捕获保证
 
-- manifest 不声明任何 hooks，插件目录不含 `hooks/` 与任何可执行脚本。
-- SessionStart / Stop / SubagentStop / SessionEnd 等生命周期事件不会触发本插件
-  的任何动作。
-- 会话内容的保存与蒸馏由 Ralph 自己的 curation 流程负责（见适配计划），
+- hooks/hooks.json 当前注册 `SessionStart` + `Stop`(U05 增加
+  `SubagentStop`)。两条钩子都不读取 raw transcript、不读
+  `last_assistant_message`、不抓取会话内容,Stop 只追加 audit record。
+- 通用插件的「整段会话自动捕获」路径在本插件中完全不存在;本插件的
+  写操作只能由 agent 在 activation 内显式调用 `save-memory`,且必须
+  通过固定 schema + 硬门槛 + 质量指标。
+- 会话内容的保存与蒸馏由 Ralph 自己的 curation 流程负责(见适配计划),
   不属于本插件。
+
+## Lifecycle contract(0.2.0)
+
+| 事件 | 触发 | 行为 | 失败 |
+|---|---|---|---|
+| SessionStart | 任何 Claude session 启动 | env gate → bounded recall → bounded additionalContext | 缺 RALPH env = noop;nmem 错 = fail-open,无伪造 context |
+| Stop | session/worker 结束 | audit-only,append 状态标记,不读 transcript | 永不抛错;永不补保存 |
+| SubagentStop | (U05 引入) | 与 Stop 同语义 | 同上 |
+
+`save-memory` 入口(U03 引入)统一由 `scripts/memory.py` 提供,插件内部
+决定是否调用 nmem;失败 fail-open(Ralph/Claude 继续运行),evaluator 失败
+= 本条 REJECTED(F4 统一语义),agent 继续。
 
 ## nmem 排障
 
