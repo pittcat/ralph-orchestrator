@@ -156,6 +156,8 @@ ralph emit --schema work.done | jq -r .protocol_hash   # 改后
 
 **边界**：不要把 `merge_boundary_digest` 当作 scope digest——两者是不同的：前者是 merge 稳定性证明，后者是 scope 内容证明。
 
+**Isolated mode 单业务事件叠加**：scope topic 也是业务事件，受同文件「isolated mode 单业务事件 / 重发规则」段（见 L229 起）约束——一个 activation 只能发出 1 个业务事件，**scope topic 前面绝不要先发任何其它业务事件**（包括 `work.ready` / `merge.start` 这类前置事件），否则 runtime 会静默丢弃 scope payload，guard 看到的是「1 个业务事件已被占用」，整次交接失败。需要在 scope emit 之前先广播前置信号时，把前置信号也合并到同一个 scope payload（或写到同一次 emit 之后），不要拆分。
+
 ### Envelope 校验（`triggered` 拓扑）
 
 `ralph emit --triggered <hat_id>` 在 apply 路径与 `--policy-check` 路径都会被 envelope 层校验：`triggered` 字段的值必须是当前 preset 声明的 hat 之一（即出现在 `hats[]` map 里），否则返回 `triggered_not_in_topology`。

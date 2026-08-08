@@ -80,8 +80,8 @@ ralph run -c ralph.yml -H .ralph/hats/my-flow.yml -p "..."
 | `ce-executor-pipeline` | `presets/en/ce-executor-pipeline.yml` | linear pipeline: plan reviewer → executor → 6 serial dimension reviewers → synthesizer → fixer → alignment → reporter | `work.start` | `LOOP_COMPLETE` | One-shot plan-driven execution with serial 6-dimension review, auto-fix, and manager report (isolated mode) |
 | `ce-executor-supervisor` | `presets/en/ce-executor-supervisor.yml` | supervisor + per-slot worktrees + parallel workers + parallel 6-dim review/fix + integrator + reporter | `work.start` | `LOOP_COMPLETE` | Large plan-driven execution with supervisor fan-out, parallel review/fix, and merge report (default features ship `supervisor-db`; isolated mode) |
 | `debug` | `presets/en/debug.yml` | `investigator`, `tester`, `fixer`, `verifier` | `debug.start` | `DEBUG_COMPLETE` | Root-cause debugging and hypothesis testing |
-| `merge-batch` | `presets/en/merge-batch.yml` | reviewer → integrator → stabilizer (self-loop) → reporter | `merge.start` | `MERGE_COMPLETE` | Git-first batch merge with scope contract (scope manifest + scope handoff guard, scope topics: `merge.integrated` / `merge.stabilized`); isolated multi-hat |
-| `merge-loop` | `presets/en/merge-loop.yml` | `merger`, `resolver`, `tester`, `cleaner`, `failure_handler` | `merge.start` | `MERGE_COMPLETE` | Internal merge/worktree automation |
+| `merge-batch` | `presets/en/merge-batch.yml` | reviewer → integrator → stabilizer (self-loop) → reporter | `merge.start` | `merge.batch.complete` | Git-first batch merge with scope contract (scope manifest + scope handoff guard, scope topics: `merge.integrated` / `merge.stabilized`); isolated multi-hat |
+| `merge-loop` | `presets/en/merge-loop.yml` | `merger`, `resolver`, `tester`, `cleaner`, `failure_handler` | `merge.start` | `merge.handled` | Internal merge/worktree automation |
 
 The presets above are the supported builtin and internal presets. The rows below are historical workflow **examples** that are **not shipped as builtins**; use them as templates or author your own.
 
