@@ -80,6 +80,10 @@ CAPABILITY_FIXTURES: tuple[tuple[str, str], ...] = (
         "evidence-bound-negative-fixture.yml",
         "evidence_bound_missing_invariant",
     ),
+    (
+        "emitter-skill-load-negative-fixture.yml",
+        "preset.instructions_emit_skill_load_missing",
+    ),
     # Key-stage event gate fixtures from plan 2026-08-05-007.
     # Each entry advertises the primary review-only finding id the
     # fixture is meant to anchor. The positive fixture advertises

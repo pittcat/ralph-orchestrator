@@ -193,6 +193,7 @@ impl InstructionBuilder {
             // Falls back to the old behaviour when no schema matches any of
             // the hat's declared publish topics.
             let schema_aware = build_publish_emit_section(hat, &self.publish_schemas);
+            let emit_skill_load = "\n\nBefore any real `ralph emit`, run `ralph tools skill load ralph-tools-emit` in this activation and follow its policy-check and payload rules. If the load fails, stop and do not emit.";
             if schema_aware.is_empty() {
                 let topics_backticked = format!("`{}`", topics.join("`, `"));
                 let example_topic = topics.first().copied().unwrap_or("event.name");
@@ -201,12 +202,12 @@ impl InstructionBuilder {
                     format!(
                         "\n\nYou MUST emit exactly ONE of these events via `ralph emit \"<topic>\" \"<summary>\"`: {}\nUse `ralph emit \"{}\" \"<summary>\"` as the pattern.\nPlain-language summaries do NOT count as event publication.\nYou MUST stop immediately after emitting.\nYou MUST NOT end the iteration without publishing because this will terminate the loop.",
                         topics_backticked, example_topic
-                    ),
+                    ) + emit_skill_load,
                 )
             } else {
                 (
                     format!("You publish to: {}", topics_list),
-                    format!("\n\n{schema_aware}"),
+                    format!("\n\n{schema_aware}{emit_skill_load}"),
                 )
             }
         };
@@ -377,6 +378,8 @@ mod tests {
         );
         assert!(instructions.contains("You MUST stop immediately after emitting"));
         assert!(instructions.contains("You MUST NOT end the iteration without publishing"));
+        assert!(instructions.contains("ralph tools skill load ralph-tools-emit"));
+        assert!(instructions.contains("If the load fails, stop and do not emit"));
     }
 
     #[test]

@@ -1,0 +1,17 @@
+# Review-only negative fixture: emitter cites the on-demand emit skill but
+# does not activate it before emitting. Expected finding:
+# preset.instructions_emit_skill_load_missing
+event_loop:
+  execution_mode: isolated
+  starting_event: work.start
+  completion_promise: work.done
+  max_iterations: 4
+hats:
+  worker:
+    name: Worker
+    triggers: [work.start]
+    publishes: [work.done]
+    terminal_events: [work.done]
+    instructions: |
+      Observe the incoming work, then emit `work.done`.
+      Follow `ralph-tools-emit` §5 and run `ralph emit --policy-check`.

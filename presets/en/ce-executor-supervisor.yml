@@ -348,7 +348,7 @@ hats:
         — **always** run this first; the loop's precheck
         gate is the same one (per `ralph-tools` §5). Only
         after the precheck passes, drop `--policy-check`
-        and emit the real event. The `ralph-tools-emit`
+        and emit the real event. The `ralph tools skill load ralph-tools-emit`
         skill (load on demand) has the full syntax and the
         strict rules for `task_id` non-empty and
         `events.jsonl` allowlist.
@@ -357,7 +357,7 @@ hats:
       `ralph-tools-tasks` skill — auto-injected whenever
       `tasks.enabled` is on (this preset has it on by
       default). For full syntax of `ralph emit`, load
-      `ralph-tools-emit` on demand.
+      `ralph tools skill load ralph-tools-emit` on demand.
 
       ### 5. Environment you can read
 
@@ -410,7 +410,7 @@ hats:
     # artifact and stop.
     description: "Reads the original plan and writes a static execution-plan artifact with provenance."
     instructions: |
-      OPAC reference: follow `ralph-tools-opac` for Observe/Precheck/Apply/Confirm discipline and `ralph-tools-emit` §5 for precheck rules.
+      OPAC reference: follow `ralph-tools-opac` for Observe/Precheck/Apply/Confirm discipline and `ralph tools skill load ralph-tools-emit` §5 for precheck rules.
       ## TASK PLANNER MODE — Write the execution-plan artifact (this hat)
 
       You are a **planner hat** activated when the runtime
@@ -445,7 +445,7 @@ hats:
         dropped and the loop stalls.
 
       This rule is the same as the always-injected
-      `ralph-tools` skill's §6 (and `ralph-tools-emit` §5 for
+      `ralph-tools` skill's §6 (and `ralph tools skill load ralph-tools-emit` §5 for
       the precheck contract). Do not retry inside this
       activation; let `task.resume` route a later turn.
 
@@ -671,14 +671,14 @@ hats:
         red box; `step` must match the `:step-<n>:`
         segment of `task_key`). Pre-check first, then
         drop `--policy-check` to emit for real (per
-        `ralph-tools` §5 / `ralph-tools-emit`).
+        `ralph-tools` §5 / `ralph tools skill load ralph-tools-emit`).
       - `ralph emit plan.blocked --policy-check
         -j '<json>'` — only on invalid plan (mutually
         exclusive with the handoff); the loop
         gate is the same one (per `ralph-tools` §5).
         For the strict rules on `task_id` /
         `events.jsonl` allowlist, load
-        `ralph-tools-emit` on demand.
+        `ralph tools skill load ralph-tools-emit` on demand.
 
       For full syntax of `ralph tools task <cmd>` and
       task-key three-field consistency, see the
@@ -867,7 +867,7 @@ hats:
       For the full `ralph tools task <cmd>` syntax
       and the `task_id` non-empty / events.jsonl
       allowlist rules, see `ralph-tools-tasks` and
-      `ralph-tools-emit` (load on demand).
+      `ralph tools skill load ralph-tools-emit` (load on demand).
     triggers:
       - execution.plan.ready
       - exec.wave.complete
@@ -940,7 +940,7 @@ hats:
       - exec.unit.done
       - exec.unit.failed
     instructions: |
-      OPAC reference: follow `ralph-tools-opac` for Observe/Precheck/Apply/Confirm discipline and `ralph-tools-emit` §5 for precheck rules.
+      OPAC reference: follow `ralph-tools-opac` for Observe/Precheck/Apply/Confirm discipline and `ralph tools skill load ralph-tools-emit` §5 for precheck rules.
       ## WORKER MODE — One TDD implementation per activation
 
       You are a **slot-scoped worker** running in an isolated
@@ -1012,7 +1012,7 @@ hats:
         emit 它们。
       - 不能调 `ralph wave emit` / `ralph wave verify`（U23）。
 
-      OPAC reference: follow `ralph-tools-opac` for Observe/Precheck/Apply/Confirm discipline and `ralph-tools-emit` §5 for precheck rules.
+      OPAC reference: follow `ralph-tools-opac` for Observe/Precheck/Apply/Confirm discipline and `ralph tools skill load ralph-tools-emit` §5 for precheck rules.
   exec-failure-handler:
     name: "Exec Failure Handler"
     description: "Converts a failed execution wave into a work.failed event for the reporter."
@@ -1047,7 +1047,7 @@ hats:
       - 不要试图重新 dispatch worker slot——那是 supervisor 的活。
       - 一条业务事件即停。
 
-      OPAC reference: follow `ralph-tools-opac` for Observe/Precheck/Apply/Confirm discipline and `ralph-tools-emit` §5 for precheck rules.
+      OPAC reference: follow `ralph-tools-opac` for Observe/Precheck/Apply/Confirm discipline and `ralph tools skill load ralph-tools-emit` §5 for precheck rules.
   review-coordinator:
     name: "Review Coordinator"
     # 2026-07-23-005 plan U6: review-coordinator fans out a
@@ -1061,7 +1061,7 @@ hats:
     # pre/post-fingerprint write-set gate.
     description: "Fans out a 7-payload Review wave (testing + 6 review dimensions) on the merged commit."
     instructions: |
-      OPAC reference: follow `ralph-tools-opac` for Observe/Precheck/Apply/Confirm discipline and `ralph-tools-emit` §5 for precheck rules.
+      OPAC reference: follow `ralph-tools-opac` for Observe/Precheck/Apply/Confirm discipline and `ralph tools skill load ralph-tools-emit` §5 for precheck rules.
       ## REVIEW COORDINATOR MODE — Single batch of 7 review units on the merged commit (this hat)
 
       You are a **dispatcher hat** activated when the
@@ -1355,7 +1355,7 @@ hats:
     terminal_events:
       - review.unit.done
     instructions: |
-      OPAC reference: follow `ralph-tools-opac` for Observe/Precheck/Apply/Confirm discipline and `ralph-tools-emit` §5 for precheck rules.
+      OPAC reference: follow `ralph-tools-opac` for Observe/Precheck/Apply/Confirm discipline and `ralph tools skill load ralph-tools-emit` §5 for precheck rules.
       ## REVIEW BATCH WORKER MODE — One dimension review per activation
 
       You are a **slot-scoped dimension reviewer**. Your
@@ -1493,13 +1493,13 @@ hats:
         `"fail"`；六维都无 P0/P1 阻塞但有非阻塞提示
         → `"pass_with_residuals"`。该字段是 plan 级
         `plan_review_terminal` 的 gate（`verdict !=
-        "fail"` 视为 pass-class，per `ralph-tools-emit`
+        "fail"` 视为 pass-class，per `ralph tools skill load ralph-tools-emit`
         §3）。
 
       Use a single-line JSON payload. For the full
       `ralph emit` syntax and the strict rules on
       `task_id` non-empty / `events.jsonl` allowlist, see
-      `ralph-tools-emit` (load on demand).
+      `ralph tools skill load ralph-tools-emit` (load on demand).
 
       ### 4. Stop
 
@@ -1536,7 +1536,7 @@ hats:
       - `ralph emit <topic> --policy-check -j '<json>'`
         — **always** run with `--policy-check` first; the
         loop's gate is the same one (per `ralph-tools`
-        §5). For the full syntax, load `ralph-tools-emit`
+        §5). For the full syntax, load `ralph tools skill load ralph-tools-emit`
         on demand.
 
       For full syntax of `ralph tools task <cmd>`, see the
@@ -1573,7 +1573,7 @@ hats:
     name: "Fix Task Planner"
     description: "Emits per-fix-unit readiness events to fan out fix work across supervisor slots."
     instructions: |
-      OPAC reference: follow `ralph-tools-opac` for Observe/Precheck/Apply/Confirm discipline and `ralph-tools-emit` §5 for precheck rules.
+      OPAC reference: follow `ralph-tools-opac` for Observe/Precheck/Apply/Confirm discipline and `ralph tools skill load ralph-tools-emit` §5 for precheck rules.
       ## FIX TASK PLANNER MODE — Single batch of fix units (this hat)
 
       You are a **dispatcher hat** activated when the
@@ -1810,7 +1810,7 @@ hats:
       - fix.unit.done
       - fix.unit.failed
     instructions: |
-      OPAC reference: follow `ralph-tools-opac` for Observe/Precheck/Apply/Confirm discipline and `ralph-tools-emit` §5 for precheck rules.
+      OPAC reference: follow `ralph-tools-opac` for Observe/Precheck/Apply/Confirm discipline and `ralph tools skill load ralph-tools-emit` §5 for precheck rules.
       ## FIX WORKER MODE — One fix per activation (TDD)
 
       Mirror of `worker` MODE, scoped to a fix-round unit.
@@ -1847,7 +1847,7 @@ hats:
     terminal_events:
       - fix.done
     instructions: |
-      OPAC reference: follow `ralph-tools-opac` for Observe/Precheck/Apply/Confirm discipline and `ralph-tools-emit` §5 for precheck rules.
+      OPAC reference: follow `ralph-tools-opac` for Observe/Precheck/Apply/Confirm discipline and `ralph tools skill load ralph-tools-emit` §5 for precheck rules.
       ## FIX INTEGRATOR MODE — Merge fix wave
 
       Mirror of `exec-integrator` for fix waves. Activated
@@ -1913,7 +1913,7 @@ hats:
         走正式 fix chain（fix-task-planner → fix-worker
         → fix-integrator），不要在本 hat 内部尝试。
 
-      OPAC reference: follow `ralph-tools-opac` for Observe/Precheck/Apply/Confirm discipline and `ralph-tools-emit` §5 for precheck rules.
+      OPAC reference: follow `ralph-tools-opac` for Observe/Precheck/Apply/Confirm discipline and `ralph tools skill load ralph-tools-emit` §5 for precheck rules.
   reporter:
     name: "Reporter"
     # 2026-07-23-005 plan U8: reporter is the **single** owner

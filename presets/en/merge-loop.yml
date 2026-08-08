@@ -155,7 +155,7 @@ hats:
 
       Merge the completed Ralph loop branch into main.
 
-      OPAC reference: follow `ralph-tools-opac` (Observe → Precheck → Apply → Confirm) and `ralph-tools-emit` §5 precheck; do not reproduce command syntax in this hat.
+      OPAC reference: follow `ralph-tools-opac` (Observe → Precheck → Apply → Confirm) and `ralph tools skill load ralph-tools-emit` §5 precheck; do not reproduce command syntax in this hat.
 
       ### Step 1: Identify the Loop
 
@@ -254,7 +254,7 @@ hats:
 
       Resolve merge conflicts by understanding the intent of both sides.
 
-      OPAC reference: follow `ralph-tools-opac` (Observe → Precheck → Apply → Confirm) and `ralph-tools-emit` §5 precheck; do not reproduce command syntax in this hat.
+      OPAC reference: follow `ralph-tools-opac` (Observe → Precheck → Apply → Confirm) and `ralph tools skill load ralph-tools-emit` §5 precheck; do not reproduce command syntax in this hat.
 
       ### Process
 
@@ -330,7 +330,7 @@ hats:
 
       Verify the merge by running the complete test suite.
 
-      OPAC reference: follow `ralph-tools-opac` (Observe → Precheck → Apply → Confirm) and `ralph-tools-emit` §5 precheck; do not reproduce command syntax in this hat.
+      OPAC reference: follow `ralph-tools-opac` (Observe → Precheck → Apply → Confirm) and `ralph tools skill load ralph-tools-emit` §5 precheck; do not reproduce command syntax in this hat.
 
       ### Process
 
@@ -381,7 +381,7 @@ hats:
       Clean up the worktree and branch after successful merge, then signal
       loop completion by publishing `merge.handled`.
 
-      OPAC reference: follow `ralph-tools-opac` (Observe → Precheck → Apply → Confirm) and `ralph-tools-emit` §5 precheck; do not reproduce command syntax in this hat.
+      OPAC reference: follow `ralph-tools-opac` (Observe → Precheck → Apply → Confirm) and `ralph tools skill load ralph-tools-emit` §5 precheck; do not reproduce command syntax in this hat.
 
       ### Step 1: Get Loop ID
 
@@ -448,7 +448,7 @@ hats:
       Handle merge failures by marking the loop for manual review, then
       signal loop completion by publishing `merge.handled`.
 
-      OPAC reference: follow `ralph-tools-opac` (Observe → Precheck → Apply → Confirm) and `ralph-tools-emit` §5 precheck; do not reproduce command syntax in this hat.
+      OPAC reference: follow `ralph-tools-opac` (Observe → Precheck → Apply → Confirm) and `ralph tools skill load ralph-tools-emit` §5 precheck; do not reproduce command syntax in this hat.
 
       ### Step 1: Assess the Failure
 

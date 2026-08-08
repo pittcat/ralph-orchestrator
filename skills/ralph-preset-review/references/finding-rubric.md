@@ -85,6 +85,7 @@ Review skill 将 mechanical lint 与软性 AAF 缺口映射为 P0/P1/P2 + confid
 | `field_docs.<field>.fill_rule` 要求 agent 猜测、默认填业务事实或手写 live id | P0 | policy-feedback | Q4 |
 | `examples[]` 固化业务结论（如固定 `pass` / `0`）且 agent 可能复制为事实 | P1（影响终态 / gate 判定则 P0） | policy-feedback | Q4 / Q5 |
 | emitter instructions 提到 payload / emit / required fields 但未引用 `ralph-tools-emit` Policy-Check feedback | P1 | lint | Q3 |
+| emitter instructions 引用 on-demand `ralph-tools-emit` 但未要求在本 activation 先执行 `ralph tools skill load ralph-tools-emit` | P1 | prompt-visibility | Q3 |
 | policy-check JSON 缺 `payload_index` 导致 wave batch 无法定位失败 item | P1（batch 阻塞主路径则 P0） | policy-feedback | Q3 |
 
 ## finding_id 映射表（curated）
@@ -95,6 +96,7 @@ Review skill 将 mechanical lint 与软性 AAF 缺口映射为 P0/P1/P2 + confid
 | `preset.instructions_read_internal_ledger` | P0 | 95 | Q3 | lint |
 | `preset.instructions_opac_skill_reference_missing` | P1 | 85 | Q3 | lint |
 | `preset.instructions_emit_feedback_skill_reference_missing` | P1 | 80 | Q3 | lint |
+| `preset.instructions_emit_skill_load_missing` | P1 | 85 | Q3 | prompt-visibility (review-only) |
 | `preset.instructions_task_create_literal` | P1 | 85 | Q3 | lint |
 | `preset.instructions_supervisor_coordination_topic` | P0 | 95 | Q4 | lint |
 | `preset.handoff_pairing_broken` | P0 | 95 | Q5 | lint |

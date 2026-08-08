@@ -1032,7 +1032,7 @@ hats:
       repair it by guessing a preset and do not consume the activation's
       single business-event slot.
 
-      The loop's gate is the same one (per `ralph-tools-emit` §5).
+      The loop's gate is the same one (per `ralph tools skill load ralph-tools-emit` §5).
       Only after the precheck passes, drop `--policy-check` and emit the
       real event. Required payload fields are listed in
       `event_policy.schemas.scope.ready`; the path fields refer to files
@@ -1059,7 +1059,7 @@ hats:
       `ralph-tools-opac` is auto-injected. Before any emit, load the
       on-demand emit skill (it is NOT auto-injected):
       `ralph tools skill load ralph-tools-emit`
-      Then follow Observe/Precheck/Apply/Confirm and `ralph-tools-emit`
+      Then follow Observe/Precheck/Apply/Confirm and `ralph tools skill load ralph-tools-emit`
       §5 for `--policy-check` feedback.
 
   review-dispatcher:
@@ -1158,7 +1158,7 @@ hats:
          and only when `ok=true`, drop `--policy-check` and emit for real.
       4. Required payload fields per `event_policy.schemas.dispatch.blocked`.
          `block_artifact_path` must be the file you just wrote.
-         Cite `ralph-tools-emit` §5 for `--policy-check` feedback.
+         Cite `ralph tools skill load ralph-tools-emit` §5 for `--policy-check` feedback.
       5. Stop. Finalizer consumes `dispatch.blocked`.
 
       ### Step 2 — Build six immutable payload bytes
@@ -1263,7 +1263,7 @@ hats:
       `ralph tools skill load ralph-tools-wave`
       `ralph tools skill load ralph-tools-emit`
       Follow the `ralph-tools-wave` red box for verify → emit order;
-      cite `ralph-tools-emit` §5 for `--policy-check` feedback when
+      cite `ralph tools skill load ralph-tools-emit` §5 for `--policy-check` feedback when
       precheck rejects.
 
   review-worker:
@@ -1436,7 +1436,7 @@ hats:
 
       Pre-check first (after loading emit skill — see OPAC reference):
       `ralph emit review.unit.done --policy-check -j '<payload>'`
-      The loop's gate is the same one (per `ralph-tools-emit` §5).
+      The loop's gate is the same one (per `ralph tools skill load ralph-tools-emit` §5).
       Drop `--policy-check` after success. Required payload fields per
       `event_policy.schemas.review.unit.done`. Carry
       `scope_digest` / `patch_digest` / `review_head_sha` unchanged from
@@ -1457,7 +1457,7 @@ hats:
       `ralph-tools-opac` is auto-injected. Before any emit, load the
       on-demand emit skill (it is NOT auto-injected):
       `ralph tools skill load ralph-tools-emit`
-      Then follow Observe/Precheck/Apply/Confirm and `ralph-tools-emit`
+      Then follow Observe/Precheck/Apply/Confirm and `ralph tools skill load ralph-tools-emit`
       §5 for `--policy-check` feedback.
 
   review-synthesizer:
@@ -1669,7 +1669,7 @@ hats:
       `ralph tools skill load ralph-tools-wave`
       (wave skill: coordination-topic rules only — you consume
       `review.wave.complete`, you do NOT emit wave topics.)
-      Then follow Observe/Precheck/Apply/Confirm and `ralph-tools-emit`
+      Then follow Observe/Precheck/Apply/Confirm and `ralph tools skill load ralph-tools-emit`
       §5 for `--policy-check` feedback.
 
   fix-planner:
@@ -1822,7 +1822,7 @@ hats:
       `ralph-tools-opac` is auto-injected. Before any emit, load the
       on-demand emit skill (it is NOT auto-injected):
       `ralph tools skill load ralph-tools-emit`
-      Then follow Observe/Precheck/Apply/Confirm and `ralph-tools-emit`
+      Then follow Observe/Precheck/Apply/Confirm and `ralph tools skill load ralph-tools-emit`
       §5 for `--policy-check` feedback.
 
   finalizer:
@@ -2024,4 +2024,4 @@ hats:
       Then follow Observe/Precheck/Apply/Confirm; before every emit:
       `--policy-check` then real emit; Confirm with `--output json`
       (`ok`/`recorded`), not by reading event files. Cite
-      `ralph-tools-emit` §5 for policy-check feedback.
+      `ralph tools skill load ralph-tools-emit` §5 for policy-check feedback.

@@ -135,7 +135,7 @@ Use this skill to **review** Ralph presets with **Agent 视角可行性（AAF）
      5. **Emit precheck** — `--policy-check` / `--triggered` ownership / policy-check feedback handling / single event budget / terminal ordering?
      6. **Handoff** — does any emitted field need to reach another hat? Does projection make it observable?
    - Fill AAF 五问表 + **Payload Audit 表** per emit topic (see `references/agent-native-model.md`).
-   - For emitter hats, verify `instructions:` cites `ralph-tools-emit` Policy-Check feedback when it mentions payload construction, required fields, field shape, `ralph emit`, or `ralph wave emit`.
+   - For emitter hats, verify the instructions explicitly require `ralph tools skill load ralph-tools-emit` in the activation and stop on load failure, then cite `ralph-tools-emit` Policy-Check feedback when they mention payload construction, required fields, field shape, `ralph emit`, or `ralph wave emit`. Missing the explicit load is review-only `preset.instructions_emit_skill_load_missing` (P1, confidence 85).
    - **Artifact-First 单 hat 审核(逐 hat 必做)**:在 AAF 五问表中加一列「Artifact 落盘 / 消费」或单列附注。
      - Q2 / Q3: 验证 consumer hat instructions 是否要求「从当前 hat 可见输入取得路径并读取 artifact」;producer hat instructions 是否要求「先写 artifact 再 emit」。
      - Q4: 验证 `artifact 落盘` 列已填(必填 / 可选 / 不需要 / 不落盘+理由);不落盘例外必须说明恢复 / 审计 / 下游依赖。

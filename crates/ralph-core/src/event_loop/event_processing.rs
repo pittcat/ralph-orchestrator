@@ -448,6 +448,143 @@ impl EventLoop {
         true
     }
 
+    /// Recover an isolated activation that completed successfully without
+    /// publishing any of its declared terminal events.
+    ///
+    /// This is intentionally separate from `inject_fallback_event`: the
+    /// latter is a generic no-events stall path and may target Ralph or a
+    /// reviewer fallback.  A closed, empty terminal-obligation channel has
+    /// a known owner and must retry that owner directly.
+    pub fn inject_missing_terminal_emit_recovery(
+        &mut self,
+        hat_id: &HatId,
+        terminal_topics: &[String],
+    ) -> bool {
+        if self.state.completion_honored || terminal_topics.is_empty() {
+            return false;
+        }
+
+        let trigger = self
+            .state
+            .last_activation_events
+            .iter()
+            .rev()
+            .find(|event| {
+                self.registry
+                    .get_config(hat_id)
+                    .is_some_and(|config| config.triggers.iter().any(|t| t == event.topic.as_str()))
+            })
+            .or_else(|| self.state.last_activation_events.first());
+        let Some(trigger) = trigger else {
+            return false;
+        };
+        let trigger_topic = trigger.topic.to_string();
+        let trigger_payload = trigger.payload.clone();
+        // A supervisor wave-completion signal can legitimately wake a
+        // dispatcher whose ready set is empty. It is a coordination tick,
+        // not an agent-owned terminal obligation, so preserve the existing
+        // no-op path for this class of trigger.
+        let is_supervisor_wave_tick = self.config.event_loop.supervisor.enabled
+            && (trigger_topic.ends_with(".wave.complete")
+                || trigger_topic.ends_with(".wave.failed"));
+        if crate::runtime_contract::is_wave_coordination_topic_trigger(&self.config, &trigger_topic)
+            || is_supervisor_wave_tick
+        {
+            return false;
+        }
+        let primary_terminal_topic = terminal_topics
+            .first()
+            .map(String::as_str)
+            .unwrap_or("terminal_event");
+        let retry_key = format!(
+            "missing_event_gate:{}:{}:{}:missing_terminal_emit",
+            hat_id.as_str(),
+            trigger_topic,
+            terminal_topics.join("|")
+        );
+        let retry_count = self.state.record_rejection_key(&retry_key);
+
+        if retry_count > U2_REJECTION_RETRY_LIMIT {
+            if !self.terminal_event_emitted {
+                let payload = serde_json::json!({
+                    "reason": "missing_terminal_emit",
+                    "target_hat": hat_id.as_str(),
+                    "trigger_topic": trigger_topic,
+                    "expected_terminal_events": terminal_topics,
+                    "retry_key": retry_key,
+                    "retry_count": retry_count,
+                })
+                .to_string();
+                let blocked = Event::new("plan.blocked", payload).with_target(HatId::new("ralph"));
+                self.record_repair_event(&blocked);
+                self.record_recovery_envelope(
+                    &crate::diagnosis::RecoveryDiagnosisEnvelope::builder()
+                        .source(crate::diagnosis::DiagnosisSource::MissingEventGate)
+                        .severity(crate::diagnosis::DiagnosisSeverity::Error)
+                        .iteration(self.state.iteration)
+                        .source_hat(hat_id.as_str())
+                        .topic(primary_terminal_topic)
+                        .reason_code("missing_terminal_emit_exhausted")
+                        .message(format!(
+                            "Hat '{}' exhausted recovery after {} missing terminal emits",
+                            hat_id, retry_count
+                        ))
+                        .expected_action(
+                            "stop the loop and inspect the responsible hat's emit path",
+                        )
+                        .safe_target(false)
+                        .outcome(crate::diagnosis::DiagnosisOutcome::Failed)
+                        .retry_key(retry_key.clone())
+                        .build(),
+                    vec![format!("retry limit {U2_REJECTION_RETRY_LIMIT}")],
+                );
+                self.terminal_event_emitted = true;
+            }
+            return false;
+        }
+
+        let allowed_topics = self.get_hat_publishes(hat_id);
+        let rejection = crate::event_loop::rejection::rejection_with_key(
+            RejectionStage::MissingEvent,
+            Some(hat_id.as_str().to_string()),
+            primary_terminal_topic.to_string(),
+            "missing terminal emit after isolated activation",
+            retry_key.clone(),
+        );
+        let mut rejection = rejection;
+        rejection.kind = Some(RejectionKind::MissingEventGate);
+        let payload = crate::event_loop::rejection::build_task_resume_payload(
+            &rejection,
+            &allowed_topics,
+            terminal_topics,
+            Some(trigger_topic.as_str()),
+            Some(trigger_payload.as_str()),
+            None,
+        );
+        self.bus
+            .publish(Event::new("task.resume", payload).with_target(hat_id.clone()));
+        self.record_recovery_envelope(
+            &crate::diagnosis::RecoveryDiagnosisEnvelope::builder()
+                .source(crate::diagnosis::DiagnosisSource::MissingEventGate)
+                .severity(crate::diagnosis::DiagnosisSeverity::Error)
+                .iteration(self.state.iteration)
+                .source_hat(hat_id.as_str())
+                .topic(primary_terminal_topic)
+                .reason_code("missing_terminal_emit")
+                .message(format!(
+                    "Hat '{}' completed with an empty channel and did not emit one of {:?}",
+                    hat_id, terminal_topics
+                ))
+                .expected_action("re-run the same hat and emit exactly one declared terminal event")
+                .safe_target(true)
+                .outcome(crate::diagnosis::DiagnosisOutcome::Pending)
+                .retry_key(retry_key)
+                .build(),
+            vec![format!("retry attempt {retry_count}")],
+        );
+        true
+    }
+
     /// Build the "## Recovery Diagnosis" appendix used by U4-enriched
     /// `task.resume` payloads. The block is a short, machine-greppable
     /// list of `key: value` lines that downstream tooling (and the

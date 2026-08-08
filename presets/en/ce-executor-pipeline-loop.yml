@@ -1806,7 +1806,7 @@ hats:
 
       ### OPAC reference
       Follow `ralph-tools-opac` for Observe/Precheck/Apply/Confirm discipline
-      and `ralph-tools-emit` §5 for precheck rules before every emit.
+      and `ralph tools skill load ralph-tools-emit` §5 for precheck rules before every emit.
 
   executor:
     name: "Executor (whole-plan TDD)"
@@ -2467,7 +2467,7 @@ hats:
 
       ### OPAC reference
       Follow `ralph-tools-opac` for Observe/Precheck/Apply/Confirm discipline
-      and `ralph-tools-emit` §5 for precheck rules before every emit.
+      and `ralph tools skill load ralph-tools-emit` §5 for precheck rules before every emit.
 
   test-stabilizer:
     # 2026-07-16-001 plan U3 / 2026-07-16-002 plan U1: post-executor Test Hat
@@ -2500,9 +2500,9 @@ hats:
 
       - **Emit EXACTLY ONE event per activation**: either `stabilization.done`
         or `stabilization.blocked`. Mixing them is forbidden; retrying a dropped
-        emit within the same activation is forbidden (see `ralph-tools-emit` §5).
+        emit within the same activation is forbidden (see `ralph tools skill load ralph-tools-emit` §5).
       - **Always run `ralph emit --policy-check` before any real emit**
-        (see `ralph-tools-emit` §5).
+        (see `ralph tools skill load ralph-tools-emit` §5).
       - **Never weaken the authoritative Oracle**: do not delete tests, skip
         tests, lower assertion strength, refresh snapshots without a
         documented reason, or hide failure signals.
@@ -2779,7 +2779,7 @@ hats:
       ### OPAC reference
 
       Follow `ralph-tools-opac` for Observe/Precheck/Apply/Confirm discipline
-      and `ralph-tools-emit` §5 for precheck rules before every emit. Use
+      and `ralph tools skill load ralph-tools-emit` §5 for precheck rules before every emit. Use
       `ralph tools task list` for live state queries (see `ralph-tools-tasks`
       red box on `task_id` / `task_key` / `step`).
 
@@ -2871,7 +2871,7 @@ hats:
          `actual_start_head_sha` and the porcelain filter (excluding
          `.ralph/`) is empty.
       2. `ralph emit --policy-check --triggered review-reentry ...`
-         must pass (see `ralph-tools-emit` §5).
+         must pass (see `ralph tools skill load ralph-tools-emit` §5).
       3. **Stage B** — re-check HEAD + clean; if either changed,
          rebuild payload and redo Stage A.
       4. Save end evidence to
@@ -2907,7 +2907,7 @@ hats:
         do NOT emit `review.round.ready` with a ghost `diff_patch_file`
         path.
       - Use `ralph emit --policy-check` first; only after it passes, emit
-        the real event. See `ralph-tools-emit` §5.
+        the real event. See `ralph tools skill load ralph-tools-emit` §5.
 
       Example payload shape:
       ```json
@@ -2947,7 +2947,7 @@ hats:
     timeout: 1800
     missing_event_grace_secs: 540
     instructions: |
-      OPAC reference: follow `ralph-tools-opac` for Observe/Precheck/Apply/Confirm discipline, `ralph-tools-emit` §5 for precheck rules, and `ralph tools task ensure --for-fix-unit` when fix-unit task minting is needed.
+      OPAC reference: follow `ralph-tools-opac` for Observe/Precheck/Apply/Confirm discipline, `ralph tools skill load ralph-tools-emit` §5 for precheck rules, and `ralph tools task ensure --for-fix-unit` when fix-unit task minting is needed.
       ## DIM:goal-alignment — read-only single-dimension reviewer
 
       Pass through the unified plan identity, trace, stabilization audit,
@@ -3219,7 +3219,7 @@ hats:
     timeout: 1800
     missing_event_grace_secs: 540
     instructions: |
-      OPAC reference: follow `ralph-tools-opac` for Observe/Precheck/Apply/Confirm discipline, `ralph-tools-emit` §5 for precheck rules, and `ralph tools task ensure --for-fix-unit` when fix-unit task minting is needed.
+      OPAC reference: follow `ralph-tools-opac` for Observe/Precheck/Apply/Confirm discipline, `ralph tools skill load ralph-tools-emit` §5 for precheck rules, and `ralph tools task ensure --for-fix-unit` when fix-unit task minting is needed.
       ## DIM:correctness — read-only single-dimension reviewer
 
       Pass through the unified plan identity, trace, stabilization audit,
@@ -3360,7 +3360,7 @@ hats:
     timeout: 1800
     missing_event_grace_secs: 540
     instructions: |
-      OPAC reference: follow `ralph-tools-opac` for Observe/Precheck/Apply/Confirm discipline, `ralph-tools-emit` §5 for precheck rules, and `ralph tools task ensure --for-fix-unit` when fix-unit task minting is needed.
+      OPAC reference: follow `ralph-tools-opac` for Observe/Precheck/Apply/Confirm discipline, `ralph tools skill load ralph-tools-emit` §5 for precheck rules, and `ralph tools task ensure --for-fix-unit` when fix-unit task minting is needed.
       ## DIM:testing — read-only single-dimension reviewer
 
       Pass through the unified plan identity, trace, stabilization audit,
@@ -3500,7 +3500,7 @@ hats:
     timeout: 1800
     missing_event_grace_secs: 540
     instructions: |
-      OPAC reference: follow `ralph-tools-opac` for Observe/Precheck/Apply/Confirm discipline, `ralph-tools-emit` §5 for precheck rules, and `ralph tools task ensure --for-fix-unit` when fix-unit task minting is needed.
+      OPAC reference: follow `ralph-tools-opac` for Observe/Precheck/Apply/Confirm discipline, `ralph tools skill load ralph-tools-emit` §5 for precheck rules, and `ralph tools task ensure --for-fix-unit` when fix-unit task minting is needed.
       ## DIM:maintainability — read-only single-dimension reviewer
 
       Pass through the unified plan identity, trace, stabilization audit,
@@ -3636,7 +3636,7 @@ hats:
     timeout: 1800
     missing_event_grace_secs: 540
     instructions: |
-      OPAC reference: follow `ralph-tools-opac` for Observe/Precheck/Apply/Confirm discipline, `ralph-tools-emit` §5 for precheck rules, and `ralph tools task ensure --for-fix-unit` when fix-unit task minting is needed.
+      OPAC reference: follow `ralph-tools-opac` for Observe/Precheck/Apply/Confirm discipline, `ralph tools skill load ralph-tools-emit` §5 for precheck rules, and `ralph tools task ensure --for-fix-unit` when fix-unit task minting is needed.
       ## DIM:project-standards — read-only single-dimension reviewer
 
       Pass through the unified plan identity, trace, stabilization audit,
@@ -3773,7 +3773,7 @@ hats:
     timeout: 1800
     missing_event_grace_secs: 540
     instructions: |
-      OPAC reference: follow `ralph-tools-opac` for Observe/Precheck/Apply/Confirm discipline, `ralph-tools-emit` §5 for precheck rules, and `ralph tools task ensure --for-fix-unit` when fix-unit task minting is needed.
+      OPAC reference: follow `ralph-tools-opac` for Observe/Precheck/Apply/Confirm discipline, `ralph tools skill load ralph-tools-emit` §5 for precheck rules, and `ralph tools task ensure --for-fix-unit` when fix-unit task minting is needed.
       ## DIM:adversarial — read-only single-dimension reviewer
 
       Pass through the unified plan identity, trace, stabilization audit,
@@ -4179,7 +4179,7 @@ hats:
       `resolved_baseline_sha` from the trigger (`review.adversarial.done`).
       ```bash
       ralph emit review.synthesized --json '{"plan_name":"<plan>","plan_path":"<repo-relative original plan path>","executor_head_sha":"<sha>","resolved_baseline_sha":"<sha from review.adversarial.done>","review_round":<N>,"round_base_sha":"<sha>","diff_patch_file":".ralph/review/<plan>/round-<NN>/review.diff.patch","synthesized_review_file":".ralph/review/<plan>/round-<NN>/synthesized-review.md","findings_count":<N>,"p0_count":<P0>,"p1_count":<P1>,"must_fix_now_count":<M>,"main_conflict_count":<C>,"unfixed_previous_count":<U>,"new_regression_p0_count":<G>,"newly_discovered_residual_count":<D>,"blocking_main_conflict_count":<B>,"residual_findings_count":<R>,"findings_summary":"<1-2 sentence summary>","loop_decision_basis":"<why the loop continues or closes>","verdict":"<pass|pass_with_residuals|blocked>"}'
-      # 2026-07-09-001 plan U7: cite ralph-tools-emit's
+      # 2026-07-09-001 plan U7: cite ralph tools skill load ralph-tools-emit's
       # policy-check feedback section. After a rejection, read
       # `field_description` / `suggested_payload_shape` /
       # `suggested_command` from the error item; do not re-derive
@@ -4190,7 +4190,7 @@ hats:
 
       ### OPAC reference
       Follow `ralph-tools-opac` for Observe/Precheck/Apply/Confirm discipline
-      and `ralph-tools-emit` §5 for precheck rules before every emit.
+      and `ralph tools skill load ralph-tools-emit` §5 for precheck rules before every emit.
 
   review-gate:
     name: "Review Gate"
@@ -4252,8 +4252,8 @@ hats:
       ### Emit guidance
       Construct the emit command from the field list above and the topic
       the matched hint names. Use `ralph emit --policy-check` first; only
-      after it passes, emit the real event. See `ralph-tools-emit` §5 and
-      the ralph-tools-emit policy-check feedback section. After a rejection,
+      after it passes, emit the real event. See `ralph tools skill load ralph-tools-emit` §5 and
+      the ralph tools skill load ralph-tools-emit policy-check feedback section. After a rejection,
       read `field_description` / `suggested_payload_shape` /
       `suggested_command` from the error item rather than re-deriving field
       shapes from this prompt.
@@ -4620,7 +4620,7 @@ hats:
       ```bash
       ralph emit review.complete --json '{"plan_name":"<plan>","plan_path":"<repo-relative original plan path>","executor_head_sha":"<sha>","resolved_baseline_sha":"<sha from plan.ready>","review_round":<N>,"round_base_sha":"<sha>","fix_base_sha":"<round_base_sha>","fix_plan_file":".ralph/review/<plan>/round-<NN>/fix-plan.md","findings_count":<N>,"p0_count":<P0>,"p1_count":<P1>,"must_fix_now_count":<M>,"main_conflict_count":<C>,"unfixed_previous_count":<U>,"new_regression_p0_count":<G>,"newly_discovered_residual_count":<D>,"blocking_main_conflict_count":<B>,"residual_findings_count":<R>,"findings_summary":"<1-2 sentence summary>","loop_decision_basis":"<why this fix-plan only covers the main conflict>","verdict":"<pass|pass_with_residuals|blocked>"}'
 
-      # 2026-07-09-001 plan U7: cite ralph-tools-emit's
+      # 2026-07-09-001 plan U7: cite ralph tools skill load ralph-tools-emit's
       # policy-check feedback section. After a rejection, read
       # `field_description` / `suggested_payload_shape` /
       # `suggested_command` from the error item; do not re-derive
@@ -4630,7 +4630,7 @@ hats:
       # verbatim duplicates above were removed — keep one
       # canonical citation so future edits stay in sync. The
       # lint \`preset.instructions_emit_feedback_skill_reference_missing\`
-      # only requires the substring \`ralph-tools-emit\` plus one
+      # only requires the substring \`ralph tools skill load ralph-tools-emit\` plus one
       # of \`policy-check feedback\` / \`enrichment fields\` /
       # \`suggested_payload_shape\` / \`field_description\` /
       # \`suggested_command\`; one citation block satisfies
@@ -4640,7 +4640,7 @@ hats:
 
       ### OPAC reference
       Follow `ralph-tools-opac` for Observe/Precheck/Apply/Confirm discipline
-      and `ralph-tools-emit` §5 for precheck rules before every emit.
+      and `ralph tools skill load ralph-tools-emit` §5 for precheck rules before every emit.
 
   fixer:
     name: "Fixer"
@@ -4656,7 +4656,7 @@ hats:
     timeout: 3600
     missing_event_grace_secs: 540
     instructions: |
-      OPAC reference: follow `ralph-tools-opac` for Observe/Precheck/Apply/Confirm discipline, `ralph-tools-emit` §5 for precheck rules, and `ralph tools task ensure --for-fix-unit` when fix-unit task minting is needed.
+      OPAC reference: follow `ralph-tools-opac` for Observe/Precheck/Apply/Confirm discipline, `ralph tools skill load ralph-tools-emit` §5 for precheck rules, and `ralph tools task ensure --for-fix-unit` when fix-unit task minting is needed.
       ## FIXER MODE — Apply the fix-planner plan only (NOT the original plan)
 
       You apply the **fix-plan file** produced by `fix-planner`.
@@ -5076,7 +5076,7 @@ hats:
     timeout: 1800
     missing_event_grace_secs: 540
     instructions: |
-      OPAC reference: follow `ralph-tools-opac` for Observe/Precheck/Apply/Confirm discipline, `ralph-tools-emit` §5 for precheck rules, and `ralph tools task ensure --for-fix-unit` when fix-unit task minting is needed.
+      OPAC reference: follow `ralph-tools-opac` for Observe/Precheck/Apply/Confirm discipline, `ralph tools skill load ralph-tools-emit` §5 for precheck rules, and `ralph tools task ensure --for-fix-unit` when fix-unit task minting is needed.
       ## ALIGNMENT MODE — Cross-check original plan vs fix-plan execution
 
       You receive `review.accepted` after the final accepted review round and
@@ -5322,7 +5322,7 @@ hats:
         short technical appendix.
       - Do not use silent-success language. If evidence is missing or the
         loop blocked, say so plainly and set the matching verdict.
-      - Before each real `ralph emit`, follow `ralph-tools-emit` §5: run the
+      - Before each real `ralph emit`, follow `ralph tools skill load ralph-tools-emit` §5: run the
         same command with `--policy-check`; only emit for real after the
         policy check passes.
 
@@ -5454,7 +5454,7 @@ hats:
          verdict follows from evidence, and what decision is requested. Use
          the appendix for paths, SHAs, counts, round directories,
          `fix-plan.md`, residuals, and diffstat.
-      8. Emit `report.done` with policy-check first (see `ralph-tools-emit` §5):
+      8. Emit `report.done` with policy-check first (see `ralph tools skill load ralph-tools-emit` §5):
          ```bash
          ralph emit report.done --policy-check --json '{"plan_name":"<plan>","report_path":".ralph/review/<plan>/report.md","verdict":"<pass|pass_with_residuals|blocked>"}'
          ralph emit report.done --json '{"plan_name":"<plan>","report_path":".ralph/review/<plan>/report.md","verdict":"<pass|pass_with_residuals|blocked>"}'

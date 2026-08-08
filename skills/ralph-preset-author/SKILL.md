@@ -244,7 +244,7 @@ Use this skill to design and draft Ralph **presets** (builtin or local) with **A
 - **No whole-file agent perspective** in `instructions:` — no "the reviewer will…", no topology position.
 - **No internal ledger reads** — no `.ralph/events.jsonl`, `.ralph/supervisor.db`, `.ralph/loops.json`.
 - **No internal-ledger-as-artifact** — hat instructions 不得要求把 `.ralph/events.jsonl` / `.ralph/loops.json` / `.ralph/supervisor.db` 当业务 artifact 接口(写或读)。业务 artifact 必须落在 `.ralph/<plan>/<unit>/...` 等业务子目录。
-- **Emitter hats:** require `--policy-check` before emit; cite `ralph-tools-opac` and `ralph-tools-emit` §5.
+- **Emitter hats:** in the activation, first run `ralph tools skill load ralph-tools-emit`; if loading fails, stop without emitting. Then require `--policy-check` before emit and cite `ralph-tools-opac` and `ralph-tools-emit` §5. Missing the explicit load is review-only `preset.instructions_emit_skill_load_missing` (P1, confidence 85).
 - **Artifact-First emitter order:** emitter hat instructions 必须明确「先写业务 artifact,再 `ralph emit --policy-check`,再真实 emit 携带路径的事件」。不得先 emit 再补文件,不得把完整结果内联到 event payload。
 - **Artifact-First consumer order:** consumer hat instructions 必须明确「从当前 hat 可见输入(trigger payload / projection / task view / `ralph tools task list`)取得路径,再 `cat` / `Read` 完整内容后再决策」。不得只看 payload 中的摘要或长字段。
 - **Artifact-First lifecycle:** 每份重要 artifact 必须在 Payload Contract 同行写明消费方与最终保留 / 归档 / 清理责任;不允许「一直追加、永不清理」或「无消费者」的中间文件。

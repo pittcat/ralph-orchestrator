@@ -114,6 +114,85 @@ hats:
 }
 
 #[test]
+fn test_missing_terminal_emit_recovery_targets_same_hat_with_typed_resume() {
+    let yaml = r#"
+hats:
+  goal-alignment:
+    name: "Goal alignment"
+    triggers: ["review.dimensions.done"]
+    publishes: ["review.goalalign.done", "review.goalalign.failed"]
+    terminal_events: ["review.goalalign.done", "review.goalalign.failed"]
+"#;
+    let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
+    let mut event_loop = EventLoop::new(config);
+    let hat_id = HatId::new("goal-alignment");
+    event_loop.state.last_activation_events = vec![ralph_proto::Event::new(
+        "review.dimensions.done",
+        "{\"iteration\":2}",
+    )];
+
+    assert!(event_loop.inject_missing_terminal_emit_recovery(
+        &hat_id,
+        &[
+            "review.goalalign.done".to_string(),
+            "review.goalalign.failed".to_string(),
+        ],
+    ));
+
+    let pending = event_loop
+        .bus
+        .peek_pending(&hat_id)
+        .expect("targeted resume");
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0].topic.as_str(), "task.resume");
+    assert_eq!(pending[0].target.as_ref(), Some(&hat_id));
+    assert!(pending[0].payload.contains("missing_event_gate"));
+    assert!(pending[0].payload.contains("review.goalalign.done"));
+    assert!(pending[0].payload.contains("review.dimensions.done"));
+    assert!(pending[0].payload.contains("original_trigger_payload"));
+}
+
+#[test]
+fn test_missing_terminal_emit_recovery_blocks_after_bounded_retries() {
+    let yaml = r#"
+hats:
+  executor:
+    name: "Executor"
+    triggers: ["work.ready"]
+    publishes: ["work.done"]
+    terminal_events: ["work.done"]
+"#;
+    let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
+    let mut event_loop = EventLoop::new(config);
+    let hat_id = HatId::new("executor");
+    event_loop.state.last_activation_events = vec![ralph_proto::Event::new("work.ready", "{}")];
+
+    for _ in 0..=crate::event_loop::loop_state::U2_REJECTION_RETRY_LIMIT {
+        let _ =
+            event_loop.inject_missing_terminal_emit_recovery(&hat_id, &["work.done".to_string()]);
+    }
+
+    let pending = event_loop.bus.peek_pending(&hat_id).expect("resume queue");
+    assert_eq!(
+        pending.len(),
+        crate::event_loop::loop_state::U2_REJECTION_RETRY_LIMIT as usize
+    );
+    assert!(
+        pending
+            .iter()
+            .all(|event| event.topic.as_str() == "task.resume")
+    );
+    assert!(event_loop.terminal_event_emitted);
+    assert!(
+        event_loop
+            .bus
+            .peek_pending(&hat_id)
+            .is_none_or(|events| events.len()
+                == crate::event_loop::loop_state::U2_REJECTION_RETRY_LIMIT as usize)
+    );
+}
+
+#[test]
 fn test_inject_fallback_event_targets_last_hat() {
     let yaml = r#"
 hats:

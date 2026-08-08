@@ -197,7 +197,7 @@ core:
   specs_dir: "./specs/"
   guardrails:
     - "OPAC Observe: `ralph inspect loop`. Do not read runtime-private orchestration ledgers; use inspect/tools APIs only."
-    - "OPAC Precheck: `ralph emit --policy-check` before every real emit. Cite `ralph-tools-emit` Policy-Check feedback; do not copy field tables."
+    - "OPAC Precheck: `ralph emit --policy-check` before every real emit. Cite `ralph tools skill load ralph-tools-emit` Policy-Check feedback; do not copy field tables."
     - "OPAC Apply: one business event per isolated activation; never put business events before a terminal emit in the same activation."
     - "OPAC Confirm: `ralph events --events-source hat-channel` after emit."
     - "Artifact-First: write `.ralph/post-merge/**` (including findings and REPORT.md) first; emit only short status + paths. Never treat runtime ledgers as business artifacts."
@@ -225,7 +225,7 @@ hats:
 
       Record-only. Do NOT analyse architecture. Do NOT modify production code.
 
-      OPAC: follow `ralph-tools-opac` and `ralph-tools-emit` §5; always `--policy-check` before real emit.
+      OPAC: follow `ralph-tools-opac` and `ralph tools skill load ralph-tools-emit` §5; always `--policy-check` before real emit.
 
       ### Inputs
       - Current final repository / branch / HEAD
@@ -276,7 +276,7 @@ hats:
 
       Map only. Do NOT judge code quality. Do NOT fix issues.
 
-      OPAC: follow `ralph-tools-opac` and `ralph-tools-emit` §5; always `--policy-check` before real emit.
+      OPAC: follow `ralph-tools-opac` and `ralph tools skill load ralph-tools-emit` §5; always `--policy-check` before real emit.
 
       ### Observe
       - Read trigger `artifact_path` (the value in the payload — do not assume a fixed filename) via `cat`/`Read`. That file is the baseline artifact.
@@ -328,7 +328,7 @@ hats:
 
       Read-only audit. Do NOT modify production code. Do NOT design the full test plan here (that is a later step). Do create Finding files.
 
-      OPAC: follow `ralph-tools-opac` and `ralph-tools-emit` §5; always `--policy-check` before real emit.
+      OPAC: follow `ralph-tools-opac` and `ralph tools skill load ralph-tools-emit` §5; always `--policy-check` before real emit.
 
       ### Observe
       - Read trigger `artifact_path` with `cat`/`Read` — that is the change-map artifact (do not ignore the payload path).
@@ -393,7 +393,7 @@ hats:
 
       Design tests only. Do NOT fix production code. Do NOT implement the failing tests yet (next step does reproduction).
 
-      OPAC: follow `ralph-tools-opac` and `ralph-tools-emit` §5; always `--policy-check` before real emit.
+      OPAC: follow `ralph-tools-opac` and `ralph tools skill load ralph-tools-emit` §5; always `--policy-check` before real emit.
 
       ### Observe
       Read trigger `proceed` / `findings_created_count` / `audit_docs_complete` / `low_confidence_findings_count`.
@@ -446,7 +446,7 @@ hats:
 
       Create stable failing automation for Findings. Do NOT modify production code.
 
-      OPAC: follow `ralph-tools-opac` and `ralph-tools-emit` §5; always `--policy-check` before real emit.
+      OPAC: follow `ralph-tools-opac` and `ralph tools skill load ralph-tools-emit` §5; always `--policy-check` before real emit.
 
       ### Observe
       On `postmerge.testplan.ready`: read trigger `artifact_path` with `cat`/`Read` (the test-gap plan — do not invent or use a bare filename). Also read trigger `proceed` / `p0_p1_scenario_count`.
@@ -490,7 +490,7 @@ hats:
       One Finding per activation. Inside the activation keep the PDF order:
       Root Cause → Minimal Fix → Regression. Do not skip ahead.
 
-      OPAC: follow `ralph-tools-opac` and `ralph-tools-emit` §5; always `--policy-check` before real emit.
+      OPAC: follow `ralph-tools-opac` and `ralph tools skill load ralph-tools-emit` §5; always `--policy-check` before real emit.
 
       ### Observe
       On `postmerge.reproduce.ready`: read trigger `proceed` / `reproduced_count` / `unreproducible_count` / `low_confidence_count`.
@@ -551,7 +551,7 @@ hats:
       Final review does NOT backfill earlier work. Gaps → FAIL.
       You do NOT write the operator-facing REPORT.md and do NOT emit `postmerge.complete`.
 
-      OPAC: follow `ralph-tools-opac` and `ralph-tools-emit` §5; always `--policy-check` before real emit.
+      OPAC: follow `ralph-tools-opac` and `ralph tools skill load ralph-tools-emit` §5; always `--policy-check` before real emit.
 
       ### Observe
       Read `postmerge.fix.ready` payload and all `.ralph/post-merge/**` artifacts + findings. Use trigger payload as the control-plane status; read files for full evidence. Do not rebuild history from runtime-private orchestration ledgers.

@@ -3437,34 +3437,21 @@ pub(super) async fn run_loop_impl_inner(
         // Phase 2: merge the isolated hat channel back into the main events
         // file before the event loop reads it. This stamps every record with
         // the authoritative hat of the channel.
+        let mut empty_terminal_channel = false;
         if isolated_mode {
             let channel_snapshot = crate::loop_runner::paths::resolve_hat_channel_events_path(&ctx)
                 .map(|path| {
                     let bytes = std::fs::metadata(&path).map(|meta| meta.len()).ok();
                     (path, bytes)
                 });
-            if let Some((channel_path, Some(channel_bytes))) = channel_snapshot.as_ref()
-                && *channel_bytes == 0
-            {
-                warn!(
-                    hat = %display_hat.as_str(),
-                    channel_path = %channel_path.display(),
-                    channel_bytes,
-                    backend_success = success,
-                    watchdog_timeout = outcome.watchdog_timeout,
-                    backend_termination = ?backend_termination,
-                    output_bytes = output.len(),
-                    output_mentions_emit = output_mentions_ralph_emit(&output),
-                    "Isolated hat activation ended with an empty event channel"
-                );
-            }
             let target_events_path = resolve_emit_events_path(&ctx, state_machine_enabled);
-            if let Err(e) = crate::loop_runner::hat_channel::merge_hat_channel(
+            let merge_result = crate::loop_runner::hat_channel::merge_hat_channel(
                 &ctx,
                 &target_events_path,
                 display_hat.as_str(),
                 Some(&config),
-            ) {
+            );
+            if let Err(e) = merge_result {
                 // 2026-07-03-002 plan U4: 从 warn! 升级为 error! + emit 诊断文件。
                 // 093813 run 暴露:merge 失败仅 warn! 导致 operator 看不到 events
                 // 丢失风险。emit 诊断让 operator 能看到,loop 继续走 fallback。
@@ -3477,6 +3464,25 @@ pub(super) async fn run_loop_impl_inner(
                     error = %e,
                     hat = %display_hat.as_str(),
                     "Failed to merge isolated hat channel; events may be lost (see diagnostic file)"
+                );
+            } else if let Some((channel_path, Some(channel_bytes))) = channel_snapshot.as_ref()
+                && *channel_bytes == 0
+            {
+                // Only treat an empty channel as a missing emit after the
+                // channel was merged successfully. A missing or unreadable
+                // channel is a routing failure and must stay on the existing
+                // fallback path instead of being retried as an agent error.
+                empty_terminal_channel = true;
+                warn!(
+                    hat = %display_hat.as_str(),
+                    channel_path = %channel_path.display(),
+                    channel_bytes,
+                    backend_success = success,
+                    watchdog_timeout = outcome.watchdog_timeout,
+                    backend_termination = ?backend_termination,
+                    output_bytes = output.len(),
+                    output_mentions_emit = output_mentions_ralph_emit(&output),
+                    "Isolated hat activation ended with an empty event channel"
                 );
             }
         }
@@ -4423,7 +4429,31 @@ pub(super) async fn run_loop_impl_inner(
         // and the recovery responder on the next iteration;
         // the only thing that disappeared is the in-band
         // guidance publish.
-        if wave_had_policy_rejections
+        let immediate_missing_terminal_emit = empty_terminal_channel
+            && success
+            // Supervisor-managed waves may legitimately wake a dispatcher or
+            // coordinator for an empty ready set; their fan-in path owns that
+            // no-op decision separately from agent terminal recovery.
+            && !config.event_loop.supervisor.enabled
+            && !agent_wrote_any_valid_or_rejected
+            && event_loop
+                .registry()
+                .get_config(&display_hat)
+                .is_some_and(|hat| !hat.terminal_events.is_empty());
+
+        if immediate_missing_terminal_emit {
+            let terminal_topics = event_loop
+                .registry()
+                .get_config(&display_hat)
+                .map(|hat| hat.terminal_events.clone())
+                .unwrap_or_default();
+            if event_loop.inject_missing_terminal_emit_recovery(&display_hat, &terminal_topics) {
+                info!(
+                    hat = %display_hat.as_str(),
+                    "Immediate missing-terminal recovery targeted the responsible hat"
+                );
+            }
+        } else if wave_had_policy_rejections
             && wave_events.is_empty()
             && !hard_gate_triggered_this_iteration
             && late_termination_reason.is_none()
