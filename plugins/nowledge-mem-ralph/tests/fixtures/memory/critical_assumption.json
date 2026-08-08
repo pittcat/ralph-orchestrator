@@ -1,0 +1,23 @@
+{
+  "memory_type": "durable_decision",
+  "title": "Candidate with unresolved critical assumption",
+  "claim": "All Save calls must go through the bounded cache layer — but only if X holds.",
+  "why_it_matters": "Pending verification of X.",
+  "evidence": "Some inline docs.",
+  "applies_when": "save-memory call sites",
+  "scope": "plugin:nowledge-mem-ralph",
+  "verification": "depends on assumption X being true.",
+  "critical_assumptions": [
+    "X holds for every Ralph loop in production"
+  ],
+  "critical_ambiguities": [],
+  "metrics": {
+    "confidence": 88,
+    "evidence_coverage": 75,
+    "reusability": 80,
+    "stability": 70,
+    "scope_clarity": 80,
+    "verifiability": 60,
+    "novelty": 30
+  }
+}

@@ -1,0 +1,21 @@
+{
+  "memory_type": "progress",
+  "title": "Implemented the save-memory command",
+  "claim": "We shipped the save-memory entrypoint today.",
+  "why_it_matters": "Operator visibility",
+  "evidence": "Running git log --oneline shows the commit.",
+  "applies_when": "anything",
+  "scope": "plugin:nowledge-mem-ralph",
+  "verification": "none — pure progress log",
+  "critical_assumptions": [],
+  "critical_ambiguities": [],
+  "metrics": {
+    "confidence": 95,
+    "evidence_coverage": 90,
+    "reusability": 80,
+    "stability": 70,
+    "scope_clarity": 85,
+    "verifiability": 70,
+    "novelty": 30
+  }
+}

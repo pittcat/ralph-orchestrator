@@ -30,9 +30,21 @@ knowledge base.
 - Generic syntax or tooling questions answerable from docs
 - A fresh perspective is explicitly requested
 
+## Context: 0.2.0 lifecycle
+
+From 0.2.0 onward, a bounded recall runs **once per loop** as part of
+the SessionStart hook. The hook writes a single cache file under
+`CLAUDE_PLUGIN_DATA/<loop_id>/recall.json` and reuses it on every
+later SessionStart, compact restart, retry and supervisor worker for
+that loop. **Do not** add ad-hoc search calls to "double check" the
+recall — the loop cache is the canonical read path; this skill is the
+escape hatch.
+
 ## Query contract
 
-Run one bounded JSON memory search:
+When you decide an extra ad-hoc search is warranted (cache miss for
+some other query, user asks for something outside the cached scope),
+run one bounded JSON memory search:
 
 ```bash
 nmem --json m search "<semantic core of the question>" --limit 5

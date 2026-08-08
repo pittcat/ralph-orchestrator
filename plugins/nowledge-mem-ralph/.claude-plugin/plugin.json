@@ -1,15 +1,17 @@
 {
   "name": "nowledge-mem-ralph",
-  "description": "Ralph project-dedicated read-only Nowledge Mem plugin: bounded memory search and status checks only — no hooks, no session capture, no automatic writes",
-  "version": "0.1.0",
+  "description": "Ralph project-dedicated Nowledge Mem plugin: bounded loop-aware recall and bounded save-memory lifecycle. Plugin owns the lifecycle hooks declared in hooks/hooks.json; no automatic transcript writes; no lifecycle bridge outside the plugin.",
+  "version": "0.2.0",
   "author": {
     "name": "Ralph Orchestrator"
   },
+  "hooks": "./hooks/hooks.json",
   "keywords": [
     "memory",
     "nowledge-mem",
     "ralph",
-    "read-only",
-    "semantic-search"
+    "loop-aware",
+    "bounded-save",
+    "lifecycle"
   ]
 }

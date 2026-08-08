@@ -1,0 +1,34 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 ${CLAUDE_PLUGIN_ROOT}/scripts/hook_runtime.py SessionStart",
+            "timeout": 5,
+            "env": {
+              "NOWLEDGE_HOOK_EVENT": "SessionStart"
+            }
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 ${CLAUDE_PLUGIN_ROOT}/scripts/hook_runtime.py Stop",
+            "timeout": 5,
+            "env": {
+              "NOWLEDGE_HOOK_EVENT": "Stop"
+            }
+          }
+        ]
+      }
+    ]
+  }
+}

@@ -5,6 +5,17 @@ argument-hint: <query>
 
 # Search Memory (Ralph)
 
+> **0.2.0 lifecycle context.** This command is the **manual** search
+> path. The plugin also runs a **bounded loop-scoped recall** on every
+> Ralph SessionStart (first session only — subsequent sessions, compact
+> restarts, supervisor workers and retries all reuse the same loop
+> cache). If you find yourself running `/nowledge-mem-ralph:search`
+> during a normal Ralph activation, it usually means the recall cache
+> has nothing on this topic yet or has aged out; this command is the
+> escape hatch. **Do not** call it on every iteration — one bounded
+> recall per loop is the contract (see
+> `plugins/nowledge-mem-ralph/scripts/recall.py`).
+
 Search the Nowledge Mem knowledge base for memories relevant to the
 current Ralph work. This command is **read-only**: it never creates,
 updates, deletes, saves or distills anything, and it never reads or

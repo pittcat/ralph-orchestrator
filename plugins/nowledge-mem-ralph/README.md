@@ -1,21 +1,28 @@
-# nowledge-mem-ralph — Ralph 项目专用只读 Nowledge Mem 插件
+# nowledge-mem-ralph — Ralph 项目专用 Nowledge Mem 插件(0.2.0 生命周期版)
 
-本插件是 Ralph 项目环境专用的 Claude Code 插件，只提供**有界的只读查询**：
-memory search、status 检查，以及一个只读 `search-memory` skill。
+本插件是 Ralph 项目环境专用的 Claude Code 插件,提供**有界的 loop-aware
+recall** 与**有界的 save-memory lifecycle**:
 
-**不**包含任何 hooks，**不**自动保存 Claude 会话，**不**注入或读取 Working
-Memory，**不**承担 Thread create/append/distill 生命周期。设计与边界详见
-`.ralph/specs/nowledge-mem-ralph-plugin-design.md`（本仓库内）。
+- SessionStart 钩子在首个 Ralph session 触发一次 bounded memory search,
+  后续 session/compact/retry/supervisor worker 复用同一份 loop cache。
+- Stop 钩子只做审计,不发起保存、不读取 transcript。
+- 任意 hat 可通过 `/nowledge-mem-ralph:save-memory <memory-json>`(本插
+  件 0.2.0 引入)在 activation 内提交 Memory 候选;插件校验固定 schema
+  与质量指标后才交给 writer(U04)写入 nmem。
+
+**不**抓取 raw Claude 会话,**不**读取 Working Memory,**不**写入
+Claude transcript。设计与边界详见
+`.ralph/specs/nowledge-mem-ralph-plugin-design.md`(本仓库内)。
 
 ## 插件选型
 
 | 场景 | 应使用的插件 | scope | 说明 |
 |---|---|---|---|
 | 人工交互 Claude Code 会话 | 通用插件 `nowledge-mem@nowledge-community` | `user` | 保留会话自动捕获等完整能力 |
-| Ralph 启动的 Claude Code child（target project） | 本插件 `nowledge-mem-ralph@ralph-orchestrator` | `project` | 只读查询，无自动写入 |
+| Ralph 启动的 Claude Code child(target project) | 本插件 `nowledge-mem-ralph@ralph-orchestrator` | `project` | lifecycle 钩子 + 只读查询,无 transcript 写入 |
 
-Ralph 的 Claude adapter 只加载 `project,local` setting sources，不加载 user
-scope；因此 user 级通用插件不会被 Ralph child 看见，两者互不干扰。
+Ralph 的 Claude adapter 只加载 `project,local` setting sources,不加载 user
+scope;因此 user 级通用插件不会被 Ralph child 看见,两者互不干扰。
 
 ## 前置条件
 
@@ -97,18 +104,71 @@ claude plugin list --json
   空查询会显示用法并停止，不调用 nmem。
 - `/nowledge-mem-ralph:status` — 只执行一次 `nmem --json status`；失败时原样
   报告错误并停止。
+- `/nowledge-mem-ralph:save-memory <memory-json>` — 提交 Memory 候选。
+  插件固定 schema + 硬门槛 + 七项指标后返回 verdict
+  （`ACCEPTED`/`REJECTED`/`NEEDS_REWRITE`/`OBSERVATION`）。ACCEPTED
+  由 writer (U04) 写入 nmem；其余结果原地返回，不调 nmem。
 - `search-memory` skill — 供 agent 在确有需要时主动做同样的有界只读查询。
+- `save-memory` skill — 供 agent 在发现稳定、可复用的结论时主动
+  提交 Memory 候选；固定 schema 与质量指标是 hard gate，agent 不可降级。
 - 仅当确需追溯原对话且 memory 结果不足时，才允许有界的
   `nmem --json t search` / `nmem --json t show`（每次最多 8 条消息、每条最多
   1200 字符，按需翻页）。
 
 ## 无自动捕获保证
 
-- manifest 不声明任何 hooks，插件目录不含 `hooks/` 与任何可执行脚本。
-- SessionStart / Stop / SubagentStop / SessionEnd 等生命周期事件不会触发本插件
-  的任何动作。
-- 会话内容的保存与蒸馏由 Ralph 自己的 curation 流程负责（见适配计划），
+- hooks/hooks.json 当前注册 `SessionStart` + `Stop`(U05 增加
+  `SubagentStop`)。两条钩子都不读取 raw transcript、不读
+  `last_assistant_message`、不抓取会话内容,Stop 只追加 audit record。
+- 通用插件的「整段会话自动捕获」路径在本插件中完全不存在;本插件的
+  写操作只能由 agent 在 activation 内显式调用 `save-memory`,且必须
+  通过固定 schema + 硬门槛 + 质量指标。
+- 会话内容的保存与蒸馏由 Ralph 自己的 curation 流程负责(见适配计划),
   不属于本插件。
+
+## Lifecycle contract(0.2.0)
+
+| 事件 | 触发 | 行为 | 失败 |
+|---|---|---|---|
+| SessionStart | 任何 Claude session 启动 | env gate → bounded recall → bounded additionalContext(`<knowledge-context historical-evidence="untrusted">`);loop cache miss 写 `recall.json`,hit 直接返回;source=`compact` 跳过 search | 缺 RALPH env = noop;nmem 错 = fail-open,空 additionalContext |
+| Stop | session/worker 结束 | audit-only,append 状态标记,不读 transcript | 永不抛错;永不补保存 |
+| SubagentStop | (U05 引入) | 与 Stop 同语义 | 同上 |
+
+`recall` 的细节(0.2.0):`scripts/recall.py` 在首个 SessionStart 拿
+`flock` lease 后发起一次 `nmem --json m search <query> --limit 5`
+(`query` 仅由 repo basename + preset + workspace_root 派生,绝不读
+transcript / last_assistant_message),把渲染好的 XML(转义了 `<>&`、
+控制字符剥除、按 UTF-8 字节边界截断到 4KB)原子落盘
+`recall.json`;后续同 loop 的 SessionStart(普通 hat、compact、retry、
+supervisor worker)直接命中 cache,`nmem` 计数=0。`source=compact`
+无论 cache 是否命中都不调 search。
+
+`save-memory` 入口(U03 引入)由 `scripts/memory.py` 提供,固定 schema
++ 硬门槛 + 七项质量指标 + dedupe signal:
+
+- **固定 schema**(`MemorySchema.REQUIRED_FIELDS`):
+  `memory_type` / `title` / `claim` / `why_it_matters` / `evidence` /
+  `applies_when` / `scope` / `verification` / `critical_assumptions` /
+  `critical_ambiguities` / `metrics`。字段缺失一律 `REJECTED`。
+- **硬门槛**: `memory_type ∈ {progress, log, command, transcript}`
+  一律 `REJECTED`(原始过程状态不进 Memory)。
+- **七项质量指标**(`MemorySchema.REQUIRED_METRICS`):
+  `confidence ≥ 80` / `evidence_coverage ≥ 70` / `reusability ≥ 50` /
+  `verifiability ≥ 50` / `novelty ≥ 20` / `stability ≥ 60` /
+  `scope_clarity ≥ 70`。
+- **反幻觉**: `confidence ≥ 90` 且 `evidence_coverage < 70` 一律
+  `REJECTED`,先于其他阈值执行。
+- **关键假设/歧义**:`critical_assumptions` 或 `critical_ambiguities`
+  非空 → `NEEDS_REWRITE`,不进入 writer。
+- **dedupe signal**:`memory_digest`(SHA-256(title+claim+why+
+  evidence+applies_when+scope+verification))命中已接受记录 →
+  `OBSERVATION`,U04 不会重复 nmem write。
+- **结果状态**: `ACCEPTED` / `REJECTED` / `NEEDS_REWRITE` / `OBSERVATION`,
+  verdict 含 `memory_digest`、`policy_version`、`missing_fields`、
+  `rewrite_suggestion`。
+- **writer 由 U04 接管**;U03 绝不直接调 nmem,失败 fail-open
+  (Ralph/Claude 继续运行),evaluator 失败 = 本条 `REJECTED`
+  (F4 统一语义),agent 继续。
 
 ## nmem 排障
 
