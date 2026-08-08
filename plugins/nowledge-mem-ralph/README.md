@@ -196,13 +196,22 @@ save-memory 写入;不嵌入 marker / 非法 marker / 非 `finalize:true`
 
 规则(违反任何一条即跳过保存):
 
-- 标记名必须精确为 `nowledge-memory-finalize`,且全文只能出现一次。
+- 标记名必须精确为 `nowledge-memory-finalize`,且全文只能出现一次;
+  形如 `nowledge-memory-finalize-v2` / `…-debug` / `xnowledge-memory-finalize`
+  等变体一律被拒。
 - 中间必须是合法 UTF-8 JSON object(单 marker ≤ 16 KiB)。
 - 对象必须包含字段 `finalize: true`(JSON 布尔字面值,不是 truthy)。
 - 其余字段必须满足上面的固定 schema + 七项质量指标 + 反幻觉规则,
   与 `/save-memory` 命令的契约完全一致。
 - 整篇 assistant message 出现多个 marker 时拒绝解析,plugin 不会
   自行择一处理。
+- marker 出现在 fenced code block(` ``` ` 或 `~~~`)、markdown
+  blockquote 行(`>` 开头),或被 verbatim 引用时,plugin 视为引用
+  内容而拒绝解析,防止 reviewer hat 通过引用触发自动保存。
+- 自动保存只对 hat allowlist 中的 hat 生效,默认白名单为
+  `executor` / `test-stabilizer` / `fixer`;reviewer / observer hat
+  收到合法 marker 也会被 SKIPPED(原因包含 hat id),绝不写入 nmem。
+  白名单模式在 `scripts/memory_marker.ALLOWED_FINALIZATION_HATS`。
 - plugin 永不读取 `transcript_path`,也不会因为 marker 缺失而把
   Thread / transcript / session 摘要当作 Memory。
 - 自动保存的结果通过现有 writer 落地:`SAVED` / `ALREADY_SAVED`

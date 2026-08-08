@@ -301,7 +301,7 @@ def _ralph_env() -> dict[str, str]:
     return {
         "RALPH_NOWLEDGE_ENABLED": "1",
         "RALPH_CURRENT_LOOP_ID": "loop-xyz",
-        "RALPH_CURRENT_HAT": "planner",
+        "RALPH_CURRENT_HAT": "executor",
     }
 
 
@@ -739,3 +739,150 @@ def test_state_json_atomic_under_concurrent_subagent_stop(tmp_path: Path) -> Non
         assert f"secret-{index}" not in serialized, (
             f"evidence path for digest #{index} leaked into state.json"
         )
+
+
+# ---------------------------------------------------------------------------
+# U3 (fixer) — marker context gating + hat allowlist
+#
+# Markers inside fenced code blocks / blockquote lines must surface as
+# REJECTED, and only hats on the canonical allowlist may trigger
+# finalization. Reviewer / observer hats short-circuit to SKIPPED
+# without invoking save or writer.
+# ---------------------------------------------------------------------------
+
+
+def test_marker_inside_fenced_code_block_is_rejected(tmp_path: Path) -> None:
+    """A marker wrapped in `````text …````` is rejected as quoted content."""
+    bin_dir = tmp_path / "bin"
+    _write_fake_nmem(bin_dir)
+    env, _ = _hook_env_with_fake_nmem(tmp_path)
+    marker = _valid_candidate_marker()
+    payload = {
+        "session_id": "sess-fence",
+        "last_assistant_message": (
+            "Here is what an attacker would quote:\n"
+            "```text\n"
+            f"{marker}\n"
+            "```\n"
+            "End of quote."
+        ),
+    }
+    result = _run_hook(
+        "Stop", payload, extra_env=env, plugin_data=Path(env["CLAUDE_PLUGIN_DATA"])
+    )
+    assert result.returncode == 0
+    state_data = json.loads(
+        (Path(env["CLAUDE_PLUGIN_DATA"]) / "loop-xyz" / "state.json").read_text(encoding="utf-8")
+    )
+    assert state_data["finalization"]["status"] == "REJECTED", (
+        f"fenced marker must be REJECTED, got {state_data['finalization']['status']!r}"
+    )
+    assert "fence" in state_data["finalization"]["reason"].lower()
+
+
+def test_marker_inside_blockquote_is_rejected(tmp_path: Path) -> None:
+    """A marker prefixed with ``> `` is rejected as quoted content."""
+    bin_dir = tmp_path / "bin"
+    _write_fake_nmem(bin_dir)
+    env, _ = _hook_env_with_fake_nmem(tmp_path)
+    marker = _valid_candidate_marker()
+    payload = {
+        "session_id": "sess-bq",
+        "last_assistant_message": (
+            f"On reviewer side:\n\n> {marker}\n\nEnd quote.\n"
+        ),
+    }
+    result = _run_hook(
+        "Stop", payload, extra_env=env, plugin_data=Path(env["CLAUDE_PLUGIN_DATA"])
+    )
+    assert result.returncode == 0
+    state_data = json.loads(
+        (Path(env["CLAUDE_PLUGIN_DATA"]) / "loop-xyz" / "state.json").read_text(encoding="utf-8")
+    )
+    assert state_data["finalization"]["status"] == "REJECTED"
+    assert "blockquote" in state_data["finalization"]["reason"].lower()
+
+
+def test_reviewer_hat_cannot_finalize(tmp_path: Path) -> None:
+    """A reviewer hat with a legal marker must SKIP without writer."""
+    bin_dir = tmp_path / "bin"
+    calls = _write_fake_nmem(bin_dir)
+    env = _ralph_env()
+    env["RALPH_CURRENT_HAT"] = "dim:adversarial"
+    env["PATH"] = f"{bin_dir}:/usr/bin:/bin"
+    data_dir = tmp_path / "data"
+    data_dir.mkdir(parents=True, exist_ok=True)
+    env["CLAUDE_PLUGIN_DATA"] = str(data_dir)
+
+    marker = _valid_candidate_marker()
+    payload = {
+        "session_id": "sess-reviewer",
+        "last_assistant_message": f"Lesson:\n\n{marker}\n",
+    }
+    result = _run_hook(
+        "Stop", payload, extra_env=env, plugin_data=data_dir
+    )
+    assert result.returncode == 0
+    state_path = data_dir / "loop-xyz" / "state.json"
+    assert state_path.is_file(), f"state.json missing at {state_path}"
+    state_data = json.loads(state_path.read_text(encoding="utf-8"))
+    assert state_data["finalization"]["status"] == "SKIPPED", (
+        f"reviewer hat must be SKIPPED, got {state_data['finalization']['status']!r}"
+    )
+    assert "allowlist" in state_data["finalization"]["reason"].lower()
+    assert not calls.exists() or calls.read_text(encoding="utf-8") == ""
+
+
+def test_executor_hat_can_finalize(tmp_path: Path) -> None:
+    """An executor hat with a legal marker still reaches the writer."""
+    bin_dir = tmp_path / "bin"
+    calls = _write_fake_nmem(bin_dir)
+    env = _ralph_env()
+    env["RALPH_CURRENT_HAT"] = "executor"
+    env["PATH"] = f"{bin_dir}:/usr/bin:/bin"
+    data_dir = tmp_path / "data"
+    data_dir.mkdir(parents=True, exist_ok=True)
+    env["CLAUDE_PLUGIN_DATA"] = str(data_dir)
+
+    marker = _valid_candidate_marker()
+    payload = {
+        "session_id": "sess-exec",
+        "last_assistant_message": f"Lesson:\n\n{marker}\n",
+    }
+    result = _run_hook(
+        "Stop", payload, extra_env=env, plugin_data=data_dir
+    )
+    assert result.returncode == 0
+    state_path = data_dir / "loop-xyz" / "state.json"
+    assert state_path.is_file(), f"state.json missing at {state_path}: stderr={result.stderr}"
+    state_data = json.loads(state_path.read_text(encoding="utf-8"))
+    assert state_data["finalization"]["status"] == "SAVED"
+    assert len(calls.read_text(encoding="utf-8").splitlines()) == 1
+
+
+def test_empty_hat_short_circuits_to_skipped(tmp_path: Path) -> None:
+    """Missing RALPH_CURRENT_HAT must fail closed (SKIPPED)."""
+    bin_dir = tmp_path / "bin"
+    calls = _write_fake_nmem(bin_dir)
+    env = _ralph_env()
+    env.pop("RALPH_CURRENT_HAT", None)
+    env["PATH"] = f"{bin_dir}:/usr/bin:/bin"
+    data_dir = tmp_path / "data"
+    data_dir.mkdir(parents=True, exist_ok=True)
+    env["CLAUDE_PLUGIN_DATA"] = str(data_dir)
+
+    marker = _valid_candidate_marker()
+    payload = {
+        "session_id": "sess-empty",
+        "last_assistant_message": f"Lesson:\n\n{marker}\n",
+    }
+    result = _run_hook(
+        "Stop", payload, extra_env=env, plugin_data=data_dir
+    )
+    assert result.returncode == 0
+    state_path = data_dir / "loop-xyz" / "state.json"
+    assert state_path.is_file(), f"state.json missing at {state_path}: stderr={result.stderr}"
+    state_data = json.loads(state_path.read_text(encoding="utf-8"))
+    assert state_data["finalization"]["status"] == "SKIPPED"
+    assert "allowlist" in state_data["finalization"]["reason"].lower()
+    assert not calls.exists() or calls.read_text(encoding="utf-8") == ""

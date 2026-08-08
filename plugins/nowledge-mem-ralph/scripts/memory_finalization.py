@@ -22,6 +22,7 @@ import dataclasses
 import importlib.util
 import json
 import os
+import re
 import sys
 import time
 from pathlib import Path
@@ -117,6 +118,13 @@ def _load_atomic_state(scripts_dir: Path):
     )
 
 
+def _load_marker_module(scripts_dir: Path):
+    return _load_module(
+        "_nowledge_mem_ralph_marker_for_finalization",
+        scripts_dir / "memory_marker.py",
+    )
+
+
 def _source_from_env(env: Mapping[str, str]) -> dict[str, str]:
     """Capture only bounded Ralph metadata, never prompt or transcript text."""
     keys = {
@@ -131,6 +139,26 @@ def _source_from_env(env: Mapping[str, str]) -> dict[str, str]:
         for name, env_key in keys.items()
         if str(env.get(env_key, "")).strip()
     }
+
+
+def _hat_allowed(hat: str, *, allowed: tuple[str, ...] | None = None) -> bool:
+    """Return True only when ``hat`` matches the finalization allowlist.
+
+    The allowlist defaults to the regex patterns in
+    :data:`memory_marker.ALLOWED_FINALIZATION_HATS`. An empty/unknown
+    hat short-circuits to ``False`` (fail-closed) so a missing
+    ``RALPH_CURRENT_HAT`` cannot accidentally promote a non-finalizing
+    payload.
+    """
+    if not hat:
+        return False
+    patterns = allowed if allowed is not None else _hat_allowlist()
+    return any(re.fullmatch(pattern, hat) for pattern in patterns)
+
+
+def _hat_allowlist() -> tuple[str, ...]:
+    """Return the canonical hat allowlist from ``memory_marker``."""
+    return _load_marker_module(Path(__file__).resolve().parent).ALLOWED_FINALIZATION_HATS
 
 
 def _write_state(
@@ -213,6 +241,7 @@ def run_finalization(
     state_path = state_root / loop_id / "state.json" if loop_id else None
     atomic_state = _load_atomic_state(scripts_dir)
     event = str(payload.get("event", "Stop"))
+    hat = str(env.get("RALPH_CURRENT_HAT", "")).strip()
     budget = _hook_budget()
     started_at = time.monotonic()
 
@@ -221,6 +250,29 @@ def run_finalization(
         remaining = budget - elapsed - _BUDGET_SAFETY_MARGIN
         cap = min(_WRITER_BUDGET_SECONDS, budget - _BUDGET_SAFETY_MARGIN)
         return max(0.1, min(remaining, cap))
+
+    # Hat allowlist gate (fix U3 adversarial:A3). Only hats that may
+    # legitimately author finalization markers reach the parser output;
+    # reviewer / observer hats short-circuit to SKIPPED without ever
+    # invoking save or writer.
+    if status == "PARSED" and not _hat_allowed(hat):
+        coordinator = CoordinatorResult(
+            status="SKIPPED",
+            memory_digest=digest,
+            reason=(
+                f"hat '{hat or '<unknown>'}' is not in the finalization allowlist"
+            ),
+        )
+        if state_path is not None:
+            _write_state(
+                state_path,
+                event=event,
+                env=env,
+                payload=payload,
+                coordinator=coordinator,
+                atomic_state=atomic_state,
+            )
+        return coordinator
 
     if status != "PARSED":
         coordinator = _fallback_result(parser_result)

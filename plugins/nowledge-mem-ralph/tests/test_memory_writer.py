@@ -391,7 +391,7 @@ def test_hook_budget_propagates_to_writer(tmp_path, monkeypatch):
         memory_digest=record["memory_digest"],
         reason="ok",
     )
-    env = {"RALPH_CURRENT_LOOP_ID": "loop-budget", "RALPH_CURRENT_HAT": "worker"}
+    env = {"RALPH_CURRENT_LOOP_ID": "loop-budget", "RALPH_CURRENT_HAT": "executor"}
     payload = {"event": "Stop", "session_id": "s-budget"}
     state_root = tmp_path / "state"
     state_root.mkdir(parents=True, exist_ok=True)

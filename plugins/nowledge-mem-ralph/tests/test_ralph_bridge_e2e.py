@@ -121,7 +121,7 @@ def _candidate_marker(**overrides):
     return "<!-- nowledge-memory-finalize\n" + json.dumps(candidate, ensure_ascii=False) + "\n-->"
 
 
-def _base_env(tmp_path, bin_dir, *, loop_id="loop-e2e", hat="worker"):
+def _base_env(tmp_path, bin_dir, *, loop_id="loop-e2e", hat="executor"):
     data = tmp_path / "data"
     return {
         "CLAUDE_PLUGIN_DATA": str(data),
@@ -164,7 +164,7 @@ def test_subagent_stop_e2e_finalization(tmp_path):
     """SubagentStop mirrors Stop: same writer chain, same audit."""
     bin_dir = tmp_path / "bin"
     calls = _write_fake_nmem(bin_dir)
-    env = _base_env(tmp_path, bin_dir, hat="worker")
+    env = _base_env(tmp_path, bin_dir, hat="executor")
     marker = _candidate_marker()
     res = _run_hook(
         "SubagentStop",
