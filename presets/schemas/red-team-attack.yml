@@ -57,12 +57,32 @@ schemas:
 
   # plan-resolver -> per-plan commit resolution result. attack-surface-mapper
   # reads the resolution artifact to build attack surfaces.
+  #
+  # 2026-08-08-004 plan U1 (D3/D7/D8/D12): scope manifest fields added.
+  # The plan-resolver emits redteam.plan.resolved only when scope_status
+  # is resolved AND all thresholds are met; otherwise it emits
+  # redteam.plan.unresolved. Downstream attack-surface-mapper must NOT
+  # run when scope is unresolved.
   redteam.plan.resolved:
     required_fields:
       - resolved_count
       - unresolved_count
       - resolution_file_path
+      # U1 scope manifest fields
+      - scope_manifest_path
+      - scope_digest
+      - scope_status
+      - overall_confidence
+      - critical_unknown_count
+      - scope_base_sha
+      - resolved_patch_path
+      - patch_digest
     payload: json_object
+    allowed_values:
+      scope_status:
+        - resolved
+        - ambiguous
+        - blocked
     field_docs:
       resolved_count:
         meaning: Plans with commit match confidence >= 85 and at least one hard evidence.
@@ -76,6 +96,41 @@ schemas:
         meaning: Path to the plan-resolution artifact.
         source: File actually written this activation.
         fill_rule: Real readable path; agent must verify `test -f` before emit.
+      scope_manifest_path:
+        meaning: Repo-relative path to the multi-plan scope manifest JSON artifact.
+        source: Plan-resolver writes `.ralph/red-team/scope-manifest.json`.
+        fill_rule: Must be under `.ralph/red-team/`; real readable path only; reject emit if file is missing or digest mismatches.
+        examples: [".ralph/red-team/scope-manifest.json"]
+      scope_digest:
+        meaning: SHA-256 hex digest of canonical scope manifest bytes (64 hex chars).
+        source: Plan-resolver computes from scope-manifest.json canonical JSON.
+        fill_rule: 64-char hex from SHA-256 of canonical JSON; recompute on every emit attempt.
+      scope_status:
+        meaning: Scope resolution decision from plan-resolver analysis.
+        source: Plan-resolver resolves via plan candidates, commit attribution, and hunk classification.
+        fill_rule: One of `resolved | ambiguous | blocked`; only `resolved` allows proceed to attack surface.
+      overall_confidence:
+        meaning: Weighted overall confidence score (0/85/90/100) for the scope resolution.
+        source: "Plan-resolver computes per D7: identity 15% + base 15% + commit_attribution 20% + hunk_attribution 25% + interleaved 10% + override_revert 5% + cross_check 10%."
+        fill_rule: One of 0/85/90/100; resolved requires overall >= 90 AND base/hunk/interleaved/cross_check >= 90.
+      critical_unknown_count:
+        meaning: Number of critical-path hunk/commit attributions that could not be resolved.
+        source: Plan-resolver counts critical unknown from classification table.
+        fill_rule: Non-negative integer; resolved requires critical_unknown_count == 0.
+      scope_base_sha:
+        meaning: Git SHA of the scope base commit (lower bound of scoped diff); MUST NOT be a placeholder.
+        source: Plan-resolver resolves via explicit input or fixed anchor/parent algorithm (D5).
+        fill_rule: 40-char hex SHA; must not be `<global-baseline>`, `TBD`, `<pending>`, or any other placeholder string.
+        examples: ["abc1234def5678..."]
+      resolved_patch_path:
+        meaning: Repo-relative path to the resolved scoped patch artifact.
+        source: Plan-resolver writes after combining all plan-owned diffs.
+        fill_rule: Must be under `.ralph/red-team/`; real readable path only.
+        examples: [".ralph/red-team/patches/scoped.patch"]
+      patch_digest:
+        meaning: SHA-256 hex digest of the resolved patch file bytes (64 hex chars).
+        source: Plan-resolver computes from resolved_patch_path.
+        fill_rule: 64-char hex; recompute on every emit attempt.
 
   # plan-resolver -> all plans failed to resolve. Terminal for this branch.
   redteam.plan.unresolved:

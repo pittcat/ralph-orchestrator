@@ -1212,6 +1212,34 @@ pub(super) fn emit_command_with_root_and_hats(
     // only entered when `unified_active` is false. The unified
     // path surfaces structured `reason_codes` (and per-rule
     // `suggestions`) so agents can programmatically match failures
+    // U1 (plan 2026-08-08-004, D12): scope handoff consistency gate.
+    // Fires for scope topics (merge.integrated, merge.stabilized,
+    // postmerge.changemap.ready, redteam.plan.resolved) to verify
+    // required scope fields are present, paths are under allowed roots,
+    // and files are readable. Runs BEFORE the unified/skip branch below
+    // and BEFORE the `--unsafe-no-policy-check` short-circuit, so it
+    // is mandatory even when the agent bypasses policy enforcement.
+    if let Err(err) =
+        crate::policy_check::check_scope_handoff_guard(topic, &args.payload, &workspace_root)
+    {
+        use ralph_core::{PolicyFinding, ViolationType};
+        let finding = PolicyFinding {
+            violation_type: ViolationType::SemanticGateViolation {
+                gate: "scope_handoff".to_string(),
+                context: err.message.clone(),
+                referenced_fields: Vec::new(),
+            },
+            topic: topic.to_string(),
+            message: err.message.clone(),
+            evidence: None,
+        };
+        record_cli_emit_rejection(&workspace_root, topic, hat.as_deref(), &finding);
+        anyhow::bail!(
+            "Event rejected by scope handoff guard: {}",
+            err.message
+        );
+    }
+
     // against the loop's vocabulary.
     let unified_active = check_mode != PolicyCheckMode::Skip
         && config

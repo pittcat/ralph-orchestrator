@@ -48,6 +48,13 @@ schemas:
   # stabilization immediately. `merge_commit_shas` is the list
   # of commits made this run so the reporter can include them
   # in the final report.
+  #
+  # 2026-08-08-004 plan U1 (D3/D12/D13): scope boundary fields
+  # added — `merge_boundary_path` and `merge_boundary_digest`
+  # provide machine-readable evidence of the merge window. The
+  # reporter reads the boundary artifact to cross-check the
+  # commit set; downstream presets (post-merge-converge,
+  # red-team-attack) MUST NOT treat merge-boundary as authoritative.
   merge.integrated:
     required_fields:
       - integration_complete
@@ -57,6 +64,10 @@ schemas:
       - branches_failed
       - merge_commit_shas
       - integration_path
+      # U1 scope boundary fields
+      - merge_boundary_path
+      - merge_boundary_digest
+      - merge_boundary_status
     payload: json_object
     field_docs:
       integration_complete:
@@ -95,6 +106,19 @@ schemas:
         source: Integrator writes the merge order, conflicts, SHAs, and verification evidence.
         fill_rule: Use the real readable path written this activation; reject the emit if it is missing.
         examples: [".ralph/<plan>/integration.md"]
+      merge_boundary_path:
+        meaning: Repo-relative path to the machine-readable merge-boundary artifact (`.ralph/merge/merge-boundary.json`).
+        source: Integrator writes after the last successful or failed merge.
+        fill_rule: Must be under `.ralph/merge/`; real readable path only; reject emit if file is missing.
+        examples: [".ralph/merge/merge-boundary.json"]
+      merge_boundary_digest:
+        meaning: SHA-256 hex digest of the canonical merge-boundary.json bytes (64 hex chars).
+        source: Integrator computes after writing merge-boundary.json.
+        fill_rule: 64-char hex from `sha256sum` of canonical JSON (keys sorted, no trailing space on last line); recompute on every emit attempt.
+      merge_boundary_status:
+        meaning: Whether the merge-boundary artifact is complete or incomplete.
+        source: Integrator writes from final merge state.
+        fill_rule: One of `complete` or `incomplete`; `complete` only when every branch merged successfully.
 
   # stabilizer → self-loop retry signal. The hat itself emits
   # this after a fix attempt; the next activation re-enters
@@ -122,10 +146,17 @@ schemas:
   # up to write the report and emit `merge.batch.complete`.
   # `passed: true` is the ONLY signal the reporter uses to
   # choose between success / failure cleanup paths.
+  #
+  # 2026-08-08-004 plan U1 (D3/D12): merge_boundary_path and
+  # merge_boundary_digest are echoed from merge.integrated so the
+  # reporter can cross-check the boundary artifact is unchanged.
   merge.stabilized:
     required_fields:
       - passed
       - report_input_file
+      # U1 scope boundary echo
+      - merge_boundary_path
+      - merge_boundary_digest
     payload: json_object
     field_docs:
       passed:
@@ -155,6 +186,15 @@ schemas:
         source: Stabilizer writes a manifest listing review, integration, and stabilization evidence paths.
         fill_rule: Use the real readable manifest path; if any required evidence is unavailable, write a failure manifest and keep passed false.
         examples: [".ralph/<plan>/report-input.md"]
+      merge_boundary_path:
+        meaning: Echoed from `merge.integrated.merge_boundary_path` for reporter cross-check.
+        source: Stabilizer copies from `merge.integrated` trigger payload.
+        fill_rule: Must match the path from the merge.integrated trigger; reject emit if file is missing or digest changed.
+        examples: [".ralph/merge/merge-boundary.json"]
+      merge_boundary_digest:
+        meaning: Echoed from `merge.integrated.merge_boundary_digest` for reporter cross-check.
+        source: Stabilizer copies from `merge.integrated` trigger payload.
+        fill_rule: Must match the digest from the merge.integrated trigger; recompute and reject if artifact changed since merge.integrated.
 
   # reporter → sole completion token for merge-batch. Mirrors
   # the `merge.handled` shape in merge-loop: a single required

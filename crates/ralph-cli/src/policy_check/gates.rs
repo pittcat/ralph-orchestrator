@@ -651,3 +651,501 @@ pub fn extract_step_and_task_id_from_payload(
         .map(|s| s.to_string());
     (step, task_id)
 }
+
+/// U1 (plan 2026-08-08-004, D12/D13): CLI scope handoff consistency gate.
+///
+/// Fires for the four scope topics: `merge.integrated`, `merge.stabilized`,
+/// `postmerge.changemap.ready`, and `redteam.plan.resolved`. Verifies the
+/// payload carries the required scope-related fields, the artifact paths
+/// are under the allowed roots (`.ralph/merge/`, `.ralph/post-merge/`,
+/// `.ralph/red-team/`), and the file exists.
+///
+/// This gate runs in BOTH `--policy-check` and real emit paths, and even
+/// when `--unsafe-no-policy-check` is set — the scope contract is mandatory
+/// for these topics.
+///
+/// The digest re-computation and threshold checks are handled by the
+/// `payload_consistency` rules in the EventLoop; this CLI gate enforces
+/// the structural preconditions (field presence, path validity, file
+/// readability) so agents get early backpressure before writing.
+#[allow(clippy::result_large_err)]
+pub fn check_scope_handoff_guard(
+    topic: &str,
+    payload_str: &str,
+    workspace_root: &Path,
+) -> std::result::Result<(), ValidationError> {
+    const SCOPE_TOPICS: &[&str] = &[
+        "merge.integrated",
+        "merge.stabilized",
+        "postmerge.changemap.ready",
+        "redteam.plan.resolved",
+    ];
+
+    if !SCOPE_TOPICS.contains(&topic) {
+        return Ok(());
+    }
+
+    let trimmed = payload_str.trim();
+    if trimmed.is_empty() || !trimmed.starts_with('{') {
+        return Err(ValidationError {
+            payload_index: 0,
+            field: "payload".to_string(),
+            reason_code: "scope_handoff_inconsistent".to_string(),
+            message: format!(
+                "scope handoff guard: topic '{topic}' requires a non-empty JSON object payload"
+            ),
+            ..Default::default()
+        });
+    }
+
+    let value: serde_json::Value = match serde_json::from_str(trimmed) {
+        Ok(v) => v,
+        Err(_) => {
+            return Err(ValidationError {
+                payload_index: 0,
+                field: "payload".to_string(),
+                reason_code: "scope_handoff_inconsistent".to_string(),
+                message: format!(
+                    "scope handoff guard: topic '{topic}' requires valid JSON payload for scope field extraction"
+                ),
+                ..Default::default()
+            });
+        }
+    };
+
+    // Topic-specific structural checks.
+    match topic {
+        "merge.integrated" => {
+            check_merge_integrated_scope_fields(&value, workspace_root)
+        }
+        "merge.stabilized" => {
+            check_merge_stabilized_scope_fields(&value, workspace_root)
+        }
+        "postmerge.changemap.ready" => {
+            check_postmerge_changemap_scope_fields(&value, workspace_root)
+        }
+        "redteam.plan.resolved" => {
+            check_redteam_plan_resolved_scope_fields(&value, workspace_root)
+        }
+        _ => Ok(()),
+    }
+}
+
+#[allow(clippy::result_large_err)]
+fn check_merge_integrated_scope_fields(
+    value: &serde_json::Value,
+    workspace_root: &Path,
+) -> std::result::Result<(), ValidationError> {
+    let obj = value.as_object().unwrap();
+
+    // merge_boundary_path must be present, non-empty, and under .ralph/merge/
+    if let Some(v) = obj.get("merge_boundary_path").and_then(|v| v.as_str()) {
+        if v.is_empty() {
+            return Err(ValidationError {
+                payload_index: 0,
+                field: "merge_boundary_path".to_string(),
+                reason_code: "scope_handoff_inconsistent".to_string(),
+                message: "merge_boundary_path must be non-empty".to_string(),
+                ..Default::default()
+            });
+        }
+        if !v.starts_with(".ralph/merge/") && !v.starts_with(".ralph\\merge\\") {
+            return Err(ValidationError {
+                payload_index: 0,
+                field: "merge_boundary_path".to_string(),
+                reason_code: "scope_handoff_inconsistent".to_string(),
+                message: format!(
+                    "merge_boundary_path must be under .ralph/merge/; got: {v}"
+                ),
+                ..Default::default()
+            });
+        }
+        // Verify file exists
+        let full_path = workspace_root.join(v);
+        if !full_path.is_file() {
+            return Err(ValidationError {
+                payload_index: 0,
+                field: "merge_boundary_path".to_string(),
+                reason_code: "scope_handoff_inconsistent".to_string(),
+                message: format!("merge_boundary_path file does not exist or is not readable: {v}"),
+                ..Default::default()
+            });
+        }
+        // Check file size <= 1 MiB
+        if let Ok(metadata) = std::fs::metadata(&full_path)
+            && metadata.len() > 1024 * 1024
+        {
+            return Err(ValidationError {
+                payload_index: 0,
+                field: "merge_boundary_path".to_string(),
+                reason_code: "scope_handoff_inconsistent".to_string(),
+                message: format!(
+                    "merge_boundary_path file exceeds 1 MiB limit: {v} ({size} bytes)",
+                    v = v,
+                    size = metadata.len()
+                ),
+                ..Default::default()
+            });
+        }
+    } else {
+        return Err(ValidationError {
+            payload_index: 0,
+            field: "merge_boundary_path".to_string(),
+            reason_code: "scope_handoff_inconsistent".to_string(),
+            message: "merge.integrated requires merge_boundary_path in payload".to_string(),
+            ..Default::default()
+        });
+    }
+
+    // merge_boundary_digest must be present and non-empty
+    if let Some(v) = obj.get("merge_boundary_digest").and_then(|v| v.as_str()) {
+        if v.is_empty() {
+            return Err(ValidationError {
+                payload_index: 0,
+                field: "merge_boundary_digest".to_string(),
+                reason_code: "scope_handoff_inconsistent".to_string(),
+                message: "merge_boundary_digest must be non-empty".to_string(),
+                ..Default::default()
+            });
+        }
+        if v.len() != 64 || !v.chars().all(|c| c.is_ascii_hexdigit()) {
+            return Err(ValidationError {
+                payload_index: 0,
+                field: "merge_boundary_digest".to_string(),
+                reason_code: "scope_handoff_inconsistent".to_string(),
+                message: format!(
+                    "merge_boundary_digest must be a 64-character hex string; got {} chars",
+                    v.len()
+                ),
+                ..Default::default()
+            });
+        }
+    } else {
+        return Err(ValidationError {
+            payload_index: 0,
+            field: "merge_boundary_digest".to_string(),
+            reason_code: "scope_handoff_inconsistent".to_string(),
+            message: "merge.integrated requires merge_boundary_digest in payload".to_string(),
+            ..Default::default()
+        });
+    }
+
+    // merge_boundary_status must be 'complete' or 'incomplete'
+    if let Some(v) = obj.get("merge_boundary_status").and_then(|v| v.as_str()) {
+        if v != "complete" && v != "incomplete" {
+            return Err(ValidationError {
+                payload_index: 0,
+                field: "merge_boundary_status".to_string(),
+                reason_code: "scope_handoff_inconsistent".to_string(),
+                message: format!(
+                    "merge_boundary_status must be 'complete' or 'incomplete'; got: {v}"
+                ),
+                ..Default::default()
+            });
+        }
+    } else {
+        return Err(ValidationError {
+            payload_index: 0,
+            field: "merge_boundary_status".to_string(),
+            reason_code: "scope_handoff_inconsistent".to_string(),
+            message: "merge.integrated requires merge_boundary_status in payload".to_string(),
+            ..Default::default()
+        });
+    }
+
+    Ok(())
+}
+
+#[allow(clippy::result_large_err)]
+fn check_merge_stabilized_scope_fields(
+    value: &serde_json::Value,
+    workspace_root: &Path,
+) -> std::result::Result<(), ValidationError> {
+    let obj = value.as_object().unwrap();
+
+    // merge_boundary_path must be present and under .ralph/merge/
+    if let Some(v) = obj.get("merge_boundary_path").and_then(|v| v.as_str()) {
+        if v.is_empty() {
+            return Err(ValidationError {
+                payload_index: 0,
+                field: "merge_boundary_path".to_string(),
+                reason_code: "scope_handoff_inconsistent".to_string(),
+                message: "merge_boundary_path must be non-empty".to_string(),
+                ..Default::default()
+            });
+        }
+        if !v.starts_with(".ralph/merge/") && !v.starts_with(".ralph\\merge\\") {
+            return Err(ValidationError {
+                payload_index: 0,
+                field: "merge_boundary_path".to_string(),
+                reason_code: "scope_handoff_inconsistent".to_string(),
+                message: format!("merge_boundary_path must be under .ralph/merge/; got: {v}"),
+                ..Default::default()
+            });
+        }
+        let full_path = workspace_root.join(v);
+        if !full_path.is_file() {
+            return Err(ValidationError {
+                payload_index: 0,
+                field: "merge_boundary_path".to_string(),
+                reason_code: "scope_handoff_inconsistent".to_string(),
+                message: format!("merge_boundary_path file does not exist: {v}"),
+                ..Default::default()
+            });
+        }
+    } else {
+        return Err(ValidationError {
+            payload_index: 0,
+            field: "merge_boundary_path".to_string(),
+            reason_code: "scope_handoff_inconsistent".to_string(),
+            message: "merge.stabilized requires merge_boundary_path in payload".to_string(),
+            ..Default::default()
+        });
+    }
+
+    // merge_boundary_digest must be present and non-empty
+    if let Some(v) = obj.get("merge_boundary_digest").and_then(|v| v.as_str()) {
+        if v.is_empty() {
+            return Err(ValidationError {
+                payload_index: 0,
+                field: "merge_boundary_digest".to_string(),
+                reason_code: "scope_handoff_inconsistent".to_string(),
+                message: "merge_boundary_digest must be non-empty".to_string(),
+                ..Default::default()
+            });
+        }
+        if v.len() != 64 || !v.chars().all(|c| c.is_ascii_hexdigit()) {
+            return Err(ValidationError {
+                payload_index: 0,
+                field: "merge_boundary_digest".to_string(),
+                reason_code: "scope_handoff_inconsistent".to_string(),
+                message: format!(
+                    "merge_boundary_digest must be a 64-char hex string; got {} chars",
+                    v.len()
+                ),
+                ..Default::default()
+            });
+        }
+    } else {
+        return Err(ValidationError {
+            payload_index: 0,
+            field: "merge_boundary_digest".to_string(),
+            reason_code: "scope_handoff_inconsistent".to_string(),
+            message: "merge.stabilized requires merge_boundary_digest in payload".to_string(),
+            ..Default::default()
+        });
+    }
+
+    Ok(())
+}
+
+#[allow(clippy::result_large_err)]
+fn check_postmerge_changemap_scope_fields(
+    value: &serde_json::Value,
+    workspace_root: &Path,
+) -> std::result::Result<(), ValidationError> {
+    let obj = value.as_object().unwrap();
+    let required_string_fields = [
+        ("scope_manifest_path", ".ralph/post-merge/"),
+        ("scope_digest", ""),
+        ("scope_status", ""),
+        ("overall_confidence", ""),
+        ("critical_unknown_count", ""),
+        ("scope_base_sha", ""),
+        ("scope_source", ""),
+    ];
+
+    for (field, path_prefix) in required_string_fields {
+        if let Some(v) = obj.get(field).and_then(|v| v.as_str()) {
+            if v.is_empty() {
+                return Err(ValidationError {
+                    payload_index: 0,
+                    field: field.to_string(),
+                    reason_code: "scope_handoff_inconsistent".to_string(),
+                    message: format!("{field} must be non-empty",),
+                    ..Default::default()
+                });
+            }
+            if !path_prefix.is_empty() && !v.starts_with(path_prefix)
+                && !v.starts_with(".ralph\\post-merge\\")
+            {
+                return Err(ValidationError {
+                    payload_index: 0,
+                    field: field.to_string(),
+                    reason_code: "scope_handoff_inconsistent".to_string(),
+                    message: format!(
+                        "{field} must be under {path_prefix}; got: {v}"
+                    ),
+                    ..Default::default()
+                });
+            }
+            // Additional format checks
+            if field == "scope_digest" && (v.len() != 64 || !v.chars().all(|c| c.is_ascii_hexdigit())) {
+                return Err(ValidationError {
+                    payload_index: 0,
+                    field: field.to_string(),
+                    reason_code: "scope_handoff_inconsistent".to_string(),
+                    message: format!("scope_digest must be a 64-char hex string; got {} chars", v.len()),
+                    ..Default::default()
+                });
+            }
+            if field == "scope_base_sha" && (v.len() != 40 || !v.chars().all(|c| c.is_ascii_hexdigit())) {
+                return Err(ValidationError {
+                    payload_index: 0,
+                    field: field.to_string(),
+                    reason_code: "scope_handoff_inconsistent".to_string(),
+                    message: format!("scope_base_sha must be a 40-char hex SHA; got {} chars", v.len()),
+                    ..Default::default()
+                });
+            }
+        } else {
+            return Err(ValidationError {
+                payload_index: 0,
+                field: field.to_string(),
+                reason_code: "scope_handoff_inconsistent".to_string(),
+                message: format!("postmerge.changemap.ready requires {field} in payload"),
+                ..Default::default()
+            });
+        }
+    }
+
+    // scope_manifest_path must be a readable file under .ralph/post-merge/
+    if let Some(v) = obj.get("scope_manifest_path").and_then(|v| v.as_str()) {
+        let full_path = workspace_root.join(v);
+        if !full_path.is_file() {
+            return Err(ValidationError {
+                payload_index: 0,
+                field: "scope_manifest_path".to_string(),
+                reason_code: "scope_handoff_inconsistent".to_string(),
+                message: format!("scope_manifest_path file does not exist: {v}"),
+                ..Default::default()
+            });
+        }
+        if let Ok(metadata) = std::fs::metadata(&full_path)
+            && metadata.len() > 1024 * 1024
+        {
+            return Err(ValidationError {
+                payload_index: 0,
+                field: "scope_manifest_path".to_string(),
+                reason_code: "scope_handoff_inconsistent".to_string(),
+                message: format!("scope_manifest_path exceeds 1 MiB limit ({} bytes)", metadata.len()),
+                ..Default::default()
+            });
+        }
+    }
+
+    Ok(())
+}
+
+#[allow(clippy::result_large_err)]
+fn check_redteam_plan_resolved_scope_fields(
+    value: &serde_json::Value,
+    workspace_root: &Path,
+) -> std::result::Result<(), ValidationError> {
+    let obj = value.as_object().unwrap();
+    let required_string_fields = [
+        ("scope_manifest_path", ".ralph/red-team/"),
+        ("scope_digest", ""),
+        ("scope_status", ""),
+        ("overall_confidence", ""),
+        ("critical_unknown_count", ""),
+        ("scope_base_sha", ""),
+        ("resolved_patch_path", ".ralph/red-team/"),
+        ("patch_digest", ""),
+    ];
+
+    for (field, path_prefix) in required_string_fields {
+        if let Some(v) = obj.get(field).and_then(|v| v.as_str()) {
+            if v.is_empty() {
+                return Err(ValidationError {
+                    payload_index: 0,
+                    field: field.to_string(),
+                    reason_code: "scope_handoff_inconsistent".to_string(),
+                    message: format!("{field} must be non-empty"),
+                    ..Default::default()
+                });
+            }
+            if !path_prefix.is_empty() && !v.starts_with(path_prefix)
+                && !v.starts_with(".ralph\\red-team\\")
+            {
+                return Err(ValidationError {
+                    payload_index: 0,
+                    field: field.to_string(),
+                    reason_code: "scope_handoff_inconsistent".to_string(),
+                    message: format!(
+                        "{field} must be under {path_prefix}; got: {v}"
+                    ),
+                    ..Default::default()
+                });
+            }
+            // Additional format checks
+            if field == "scope_digest" && (v.len() != 64 || !v.chars().all(|c| c.is_ascii_hexdigit())) {
+                return Err(ValidationError {
+                    payload_index: 0,
+                    field: field.to_string(),
+                    reason_code: "scope_handoff_inconsistent".to_string(),
+                    message: format!("scope_digest must be a 64-char hex string; got {} chars", v.len()),
+                    ..Default::default()
+                });
+            }
+            if field == "scope_base_sha" {
+                // Must not be a placeholder
+                let placeholders = ["<global-baseline>", "TBD", "<pending>", "<global>", ""];
+                if placeholders.contains(&v) || v.len() != 40 || !v.chars().all(|c| c.is_ascii_hexdigit()) {
+                    return Err(ValidationError {
+                        payload_index: 0,
+                        field: field.to_string(),
+                        reason_code: "scope_handoff_inconsistent".to_string(),
+                        message: format!(
+                            "scope_base_sha must be a 40-char Git SHA, not a placeholder; got: {v}"
+                        ),
+                        ..Default::default()
+                    });
+                }
+            }
+            if field == "patch_digest" && (v.len() != 64 || !v.chars().all(|c| c.is_ascii_hexdigit())) {
+                return Err(ValidationError {
+                    payload_index: 0,
+                    field: field.to_string(),
+                    reason_code: "scope_handoff_inconsistent".to_string(),
+                    message: format!("patch_digest must be a 64-char hex string; got {} chars", v.len()),
+                    ..Default::default()
+                });
+            }
+        } else {
+            return Err(ValidationError {
+                payload_index: 0,
+                field: field.to_string(),
+                reason_code: "scope_handoff_inconsistent".to_string(),
+                message: format!("redteam.plan.resolved requires {field} in payload"),
+                ..Default::default()
+            });
+        }
+    }
+
+    // scope_manifest_path must be a readable file under .ralph/red-team/
+    if let Some(v) = obj.get("scope_manifest_path").and_then(|v| v.as_str()) {
+        let full_path = workspace_root.join(v);
+        if !full_path.is_file() {
+            return Err(ValidationError {
+                payload_index: 0,
+                field: "scope_manifest_path".to_string(),
+                reason_code: "scope_handoff_inconsistent".to_string(),
+                message: format!("scope_manifest_path file does not exist: {v}"),
+                ..Default::default()
+            });
+        }
+	        if let Ok(metadata) = std::fs::metadata(&full_path)
+	            && metadata.len() > 1024 * 1024
+	        {
+	            return Err(ValidationError {
+	                payload_index: 0,
+	                field: "scope_manifest_path".to_string(),
+	                reason_code: "scope_handoff_inconsistent".to_string(),
+	                message: format!("scope_manifest_path exceeds 1 MiB limit ({} bytes)", metadata.len()),
+	                ..Default::default()
+	            });
+	        }    }
+
+    Ok(())
+}

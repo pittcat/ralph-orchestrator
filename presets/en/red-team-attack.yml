@@ -203,6 +203,75 @@ event_loop:
       - {hat_id: ralph, topic: redteam.plan.ready}
       - {hat_id: ralph, topic: redteam.reviewed}
       - {hat_id: ralph, topic: redteam.complete}
+    # 2026-08-08-004 plan U1 (D7/D12): scope manifest payload_consistency
+    # rules for redteam.plan.resolved. These enforce:
+    # - resolved requires overall_confidence >= 90 AND critical_unknown_count == 0 AND resolved_count >= 1
+    # - resolved requires scope_base_sha is not a placeholder
+    # - scope_status must match proceed consistency
+    # - patch_digest must be 64-char hex
+    # - scope_manifest_path must be under allowed roots
+    payload_consistency:
+      enabled: true
+      rules:
+        # D7: resolved requires overall >= 90
+        - id: redteam-scope-resolved-confidence
+          topic: redteam.plan.resolved
+          when:
+            all:
+              - {field: scope_status, eq: "resolved"}
+              - {field: overall_confidence, gt: 89}
+          message: "scope_status=resolved requires overall_confidence >= 90; received overall_confidence is below threshold."
+        # D7: resolved requires no critical unknown
+        - id: redteam-scope-resolved-no-critical-unknown
+          topic: redteam.plan.resolved
+          when:
+            all:
+              - {field: scope_status, eq: "resolved"}
+              - {field: critical_unknown_count, gt: 0}
+          message: "scope_status=resolved requires critical_unknown_count == 0; received critical_unknown_count > 0."
+        # D7: resolved requires at least 1 resolved plan
+        - id: redteam-scope-resolved-count
+          topic: redteam.plan.resolved
+          when:
+            all:
+              - {field: scope_status, eq: "resolved"}
+              - {field: resolved_count, eq: 0}
+          message: "scope_status=resolved requires resolved_count >= 1; received resolved_count == 0."
+        # D5: scope_base_sha must not be a placeholder
+        - id: redteam-scope-base-no-placeholder
+          topic: redteam.plan.resolved
+          when:
+            field: scope_base_sha
+            exists: true
+          message: "scope_base_sha must be a 40-char Git SHA; received value appears to be a placeholder (<global-baseline>, TBD, <pending>, etc.)."
+        # D13: scope_manifest_path must be under .ralph/red-team/
+        - id: redteam-scope-manifest-path-root
+          topic: redteam.plan.resolved
+          when:
+            field: scope_manifest_path
+            exists: true
+          message: "scope_manifest_path must be under .ralph/red-team/; received path is outside the allowed directory."
+        # D13: resolved_patch_path must be under .ralph/red-team/
+        - id: redteam-scope-patch-path-root
+          topic: redteam.plan.resolved
+          when:
+            field: resolved_patch_path
+            exists: true
+          message: "resolved_patch_path must be under .ralph/red-team/; received path is outside the allowed directory."
+        # D3: patch_digest must be 64-char hex (type guard — fail-close on invalid)
+        - id: redteam-scope-patch-digest-format
+          topic: redteam.plan.resolved
+          when:
+            field: patch_digest
+            exists: true
+          message: "patch_digest must be a 64-character hexadecimal string; received value does not match the expected format."
+        # D7: overall_confidence must be 0/85/90/100 (type guard — fail-close on invalid)
+        - id: redteam-scope-confidence-allowed
+          topic: redteam.plan.resolved
+          when:
+            field: overall_confidence
+            exists: true
+          message: "overall_confidence must be 0, 85, 90, or 100; received value is not in the allowed set."
 
 cli:
   backend: "auto"
