@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import datetime as _dt
 import json
 import os
 import tempfile
@@ -29,6 +30,32 @@ def _load(name: str, filename: str):
 
 _client = _load("_nowledge_mem_ralph_nmem_client", "nmem_client.py")
 _result = _load("_nowledge_mem_ralph_memory_result", "memory_result.py")
+
+
+# Pending entries older than PENDING_TTL_SECONDS are treated as expired
+# (e.g. previous activation was SIGKILLed before commit). 600s matches
+# the operator-visible "auto-recover after a slow nmem" promise; it is
+# not user-configurable so the contract stays predictable.
+PENDING_TTL_SECONDS = 600
+
+
+def _now() -> _dt.datetime:
+    """Return the current UTC time. Tests can monkeypatch via ``_now``."""
+    return _dt.datetime.now(_dt.timezone.utc)
+
+
+def _pending_age_seconds(entry: Mapping[str, Any]) -> float | None:
+    """Return the age (in seconds) of a pending entry, or ``None`` if unknown."""
+    pending_at = entry.get("pending_at") if isinstance(entry, Mapping) else None
+    if not isinstance(pending_at, str) or not pending_at:
+        return None
+    try:
+        stamp = _dt.datetime.fromisoformat(pending_at)
+    except ValueError:
+        return None
+    if stamp.tzinfo is None:
+        stamp = stamp.replace(tzinfo=_dt.timezone.utc)
+    return (_now() - stamp).total_seconds()
 
 
 def _state_root() -> Path:
@@ -134,17 +161,30 @@ def write_memory(record: Mapping[str, Any], *, runner=None, timeout: float = 4.0
         pending = ledger.get("pending", {})
         pending_entry = pending.get(key) if isinstance(pending, dict) else None
         if isinstance(pending_entry, dict) and pending_entry.get("status") in {"UNKNOWN", "IN_FLIGHT"}:
-            outcome = _result.MemoryWriteResult(
-                "UNKNOWN", "a previous write has unknown remote state; reconcile before retry", digest,
-                None, str(canonical.get("policy_version", "")), source, True,
-            )
-            record_result(outcome, source)
-            return outcome
+            # TTL gate (fix U2 adversarial:A4): an IN_FLIGHT/UNKNOWN entry
+            # left over from a SIGKILLed activation must not block retries
+            # forever. Once ``pending_at`` is older than PENDING_TTL_SECONDS
+            # we treat the entry as expired and let the current attempt
+            # proceed to nmem.
+            age = _pending_age_seconds(pending_entry)
+            if age is None or age < PENDING_TTL_SECONDS:
+                outcome = _result.MemoryWriteResult(
+                    "UNKNOWN", "a previous write has unknown remote state; reconcile before retry", digest,
+                    None, str(canonical.get("policy_version", "")), source, True,
+                )
+                record_result(outcome, source)
+                return outcome
+            # Expired — drop the stale entry and continue.
+            pending.pop(key, None)
 
         # Persist the candidate before the side effect. FAILED_OPEN may be
         # retried; UNKNOWN is held until an explicit reconciliation decision.
         pending = pending if isinstance(pending, dict) else {}
-        pending[key] = {"record": canonical, "status": "IN_FLIGHT"}
+        pending[key] = {
+            "record": canonical,
+            "status": "IN_FLIGHT",
+            "pending_at": _now().isoformat(),
+        }
         ledger["pending"] = pending
         try:
             _write_ledger(ledger)

@@ -110,6 +110,29 @@ The plugin prints a JSON verdict to stdout. The verdict carries:
 - `memory_digest`: 64-char SHA-256 hex when `ACCEPTED`
 - `record`: the structured ACCEPTED record used by the plugin writer
 
+## Auto-finalization marker (Stop / SubagentStop)
+
+除了显式调用本命令,Claude 在 `Stop` 或 `SubagentStop` 的最终消息
+中嵌入**一个** bounded marker 也可以触发自动 save-memory 写入。
+marker 格式固定(plugin 不接受变体):
+
+```text
+<!-- nowledge-memory-finalize
+{"finalize":true,"memory_type":"durable_decision","title":"...","claim":"...","why_it_matters":"...","evidence":"...","applies_when":"...","scope":"...","verification":"...","critical_assumptions":[],"critical_ambiguities":[],"metrics":{"confidence":95,"evidence_coverage":88,"reusability":90,"stability":92,"scope_clarity":96,"verifiability":90,"novelty":40}}
+-->
+```
+
+规则(违反任何一条即跳过保存):
+
+- 标记名必须精确为 `nowledge-memory-finalize`,且全文只能出现一次。
+- 中间必须是合法 UTF-8 JSON object(单 marker ≤ 16 KiB)。
+- 对象必须包含字段 `finalize: true`(JSON 布尔字面值)。
+- 其余字段必须满足上面的固定 schema 与七项质量指标。
+- 出现多个 marker 时拒绝解析,plugin 不会自行择一。
+- plugin 不读取 `transcript_path`,也不会把 Thread / transcript 当
+  作 Memory。
+- 自动保存走现有 writer,nmem 失败时 Stop 仍 exit 0。
+
 ## Verdict handling
 
 - `ACCEPTED` — the plugin writer attempts the bounded nmem write; do not

@@ -5,7 +5,10 @@ recall** 与**有界的 save-memory lifecycle**:
 
 - SessionStart 钩子在首个 Ralph session 触发一次 bounded memory search,
   后续 session/compact/retry/supervisor worker 复用同一份 loop cache。
-- Stop/SubagentStop 钩子只做审计,不发起保存、不读取 transcript。
+- Stop/SubagentStop 钩子从 `last_assistant_message` 中只读取一个 bounded
+  `<!-- nowledge-memory-finalize ... -->` 标记(必须显式带
+  `finalize:true`),通过 policy/writer 后写入 nmem;无标记 / 非法标记 /
+  非 `finalize:true` 时仍保持 audit-only,不发起保存、不读取 transcript。
 - 任意 hat 可通过 `/nowledge-mem-ralph:save-memory <memory-json>`在
   activation 内提交 Memory 候选;插件校验固定 schema、质量指标和去重
   ledger 后,只有 `ACCEPTED` 分支才调用 argv-safe writer 写入 nmem。
@@ -120,10 +123,13 @@ claude plugin list --json
 
 - hooks/hooks.json 当前注册 `SessionStart`、`Stop` 和 `SubagentStop`。
   三条钩子都不读取 raw transcript、不读
-  `last_assistant_message`、不抓取会话内容,Stop 只追加 audit record。
+  `transcript_path`,Stop/SubagentStop 只读取 `last_assistant_message`
+  中的单个 bounded `<!-- nowledge-memory-finalize ... -->` 标记;
+  不抓取会话内容,无 marker 时 Stop 只追加 audit record。
 - 通用插件的「整段会话自动捕获」路径在本插件中完全不存在;本插件的
-  写操作只能由 agent 在 activation 内显式调用 `save-memory`,且必须
-  通过固定 schema + 硬门槛 + 质量指标。
+  写操作只能由 agent 在 activation 内显式调用 `save-memory`,或由
+  Stop/SubagentStop 在最终消息中显式嵌入 `finalize:true` 的 marker,
+  且必须通过固定 schema + 硬门槛 + 质量指标。
 - 会话内容的保存与蒸馏由 Ralph 自己的 curation 流程负责(见适配计划),
   不属于本插件。
 
@@ -132,8 +138,8 @@ claude plugin list --json
 | 事件 | 触发 | 行为 | 失败 |
 |---|---|---|---|
 | SessionStart | 任何 Claude session 启动 | env gate → bounded recall → bounded additionalContext(`<knowledge-context historical-evidence="untrusted">`);loop cache miss 写 `recall.json`,hit 直接返回;source=`compact` 跳过 search | 缺 RALPH env = noop;nmem 错 = fail-open,空 additionalContext |
-| Stop | session/worker 结束 | audit-only,append 状态标记,不读 transcript | 永不抛错;永不补保存 |
-| SubagentStop | worker session 结束 | 与 Stop 同语义,追加 audit.jsonl | 同上 |
+| Stop | session/worker 结束 | bounded auto-finalization:从 `last_assistant_message` 提取最多一个 `<!-- nowledge-memory-finalize ... -->` 标记(必须 `finalize:true`);通过现有 policy/writer 后写入 nmem;无 marker 或非 `finalize:true` 时保持 audit-only,不读 transcript | 永不抛错;非法 marker = REJECTED;nmem 失败 = FAILED_OPEN/UNKNOWN,hook exit 仍为 0 |
+| SubagentStop | worker session 结束 | 与 Stop 同语义,走同一 bounded auto-finalization 链路 | 同上 |
 
 `recall` 的细节(0.2.0):`scripts/recall.py` 在首个 SessionStart 拿
 `flock` lease 后发起一次 `nmem --json m search <query> --limit 5`
@@ -175,6 +181,72 @@ supervisor worker)直接命中 cache,`nmem` 计数=0。`source=compact`
   `RALPH_NOWLEDGE_EVALUATOR` 指定的结构化 evaluator; evaluator 失败 =
   本条 `REJECTED`,agent 继续。
 
+## Auto-finalization marker (Stop / SubagentStop)
+
+Claude 在最终消息中嵌入**一个** bounded marker 即可触发自动
+save-memory 写入;不嵌入 marker / 非法 marker / 非 `finalize:true`
+时 Stop 仍保持 audit-only。marker 格式固定,plugin 不接受任何
+变体:
+
+```text
+<!-- nowledge-memory-finalize
+{"finalize":true,"memory_type":"durable_decision","title":"...","claim":"...","why_it_matters":"...","evidence":"...","applies_when":"...","scope":"...","verification":"...","critical_assumptions":[],"critical_ambiguities":[],"metrics":{"confidence":95,"evidence_coverage":88,"reusability":90,"stability":92,"scope_clarity":96,"verifiability":90,"novelty":40}}
+-->
+```
+
+规则(违反任何一条即跳过保存):
+
+- 标记名必须精确为 `nowledge-memory-finalize`,且全文只能出现一次;
+  形如 `nowledge-memory-finalize-v2` / `…-debug` / `xnowledge-memory-finalize`
+  等变体一律被拒。
+- 中间必须是合法 UTF-8 JSON object(单 marker ≤ 16 KiB)。
+- 对象必须包含字段 `finalize: true`(JSON 布尔字面值,不是 truthy)。
+- 其余字段必须满足上面的固定 schema + 七项质量指标 + 反幻觉规则,
+  与 `/save-memory` 命令的契约完全一致。
+- 整篇 assistant message 出现多个 marker 时拒绝解析,plugin 不会
+  自行择一处理。
+- marker 出现在 fenced code block(` ``` ` 或 `~~~`)、markdown
+  blockquote 行(`>` 开头),或被 verbatim 引用时,plugin 视为引用
+  内容而拒绝解析,防止 reviewer hat 通过引用触发自动保存。
+- 自动保存只对 hat allowlist 中的 hat 生效,默认白名单为
+  `executor` / `test-stabilizer` / `fixer`;reviewer / observer hat
+  收到合法 marker 也会被 SKIPPED(原因包含 hat id),绝不写入 nmem。
+  白名单模式在 `scripts/memory_marker.ALLOWED_FINALIZATION_HATS`。
+- plugin 永不读取 `transcript_path`,也不会因为 marker 缺失而把
+  Thread / transcript / session 摘要当作 Memory。
+- 自动保存的结果通过现有 writer 落地:`SAVED` / `ALREADY_SAVED`
+  / `FAILED_OPEN` / `UNKNOWN`;nmem 失败时 Stop 仍 exit 0,不阻塞
+  Claude session。
+
+### Marker source contract
+
+Stop 与 SubagentStop hook **只**从 `last_assistant_message` 读取单个
+bounded `<!-- nowledge-memory-finalize ... -->` 标记;`transcript_path`
+及任何其他来源都永不读取(plugin-vs-runtime 边界由本 README 拥有:
+runtime HARD RULES 在 `CLAUDE.md` / `AGENTS.md` 中作用于 `ralph-cli`
+/ `ralph-core`,plugin contract 变更只需 patch
+`plugins/knowledge-mem-ralph/**` 与本 README)。
+
+## Internal SSOT — sys.modules key naming
+
+所有 `scripts/*.py` 模块在 `importlib` 加载时统一以
+`_nowledge_mem_ralph_<role>` 注册到 `sys.modules`,其中 `<role>` 是
+模块 stem。canonical 列表:
+
+| 模块文件 | sys.modules key |
+|---|---|
+| `scripts/recall.py` | `_nowledge_mem_ralph_recall` |
+| `scripts/audit_hook.py` | `_nowledge_mem_ralph_audit` |
+| `scripts/memory_marker.py` | `_nowledge_mem_ralph_memory_marker` |
+| `scripts/memory_finalization.py` | `_nowledge_mem_ralph_memory_finalization` |
+| `scripts/memory_writer.py` | `_nowledge_mem_ralph_writer` |
+| `scripts/memory.py` | `_nowledge_mem_ralph_save` |
+| `scripts/_atomic_state.py` | `_nowledge_mem_ralph_atomic_state` |
+
+`memory_via_finalization` 与 `memory_writer_via_finalization` 是早期
+占位 key,在 finalization 重构后已重命名为 `save` / `writer`;剩余的
+旧引用应同步替换。
+
 ## nmem 排障
 
 - `nmem: command not found` — 安装 nmem CLI（如 `uv tool install nmem-cli`），
@@ -182,6 +254,9 @@ supervisor worker)直接命中 cache,`nmem` 计数=0。`source=compact`
 - 服务不可达 / 认证失败 — status 会原样报告错误；先让 Nowledge Mem 服务恢复
   可用，再重试查询。插件不会用写命令或第二个子命令"自救"。
 - JSON 无法解析 — 视为故障，原样报告并停止。
+- `memory-ledger.json` 中的 `pending` 条目（`IN_FLIGHT` / `UNKNOWN`）自动
+  600 秒后过期：下一次相同 `scope:digest` 的写入会直接调用 nmem，无需手动
+  reconcile；过期逻辑只对带 `pending_at` 时间戳的条目生效。
 
 ## 卸载
 

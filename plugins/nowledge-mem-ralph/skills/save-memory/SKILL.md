@@ -154,3 +154,33 @@ JSON
   one-shot workarounds — the hard gate rejects them.
 - It does not relax thresholds. The deterministic gates run in
   Python and cannot be lowered.
+
+## Auto-finalization marker (Stop / SubagentStop)
+
+If you want the plugin to auto-save a stable Memory candidate at the
+end of a hat (without running the command by hand), embed exactly one
+bounded marker in your final message:
+
+```text
+<!-- nowledge-memory-finalize
+{"finalize":true,"memory_type":"durable_decision","title":"...","claim":"...","why_it_matters":"...","evidence":"...","applies_when":"...","scope":"...","verification":"...","critical_assumptions":[],"critical_ambiguities":[],"metrics":{"confidence":95,"evidence_coverage":88,"reusability":90,"stability":92,"scope_clarity":96,"verifiability":90,"novelty":40}}
+-->
+```
+
+Rules (any violation skips the save):
+
+- Marker name MUST be exactly `nowledge-memory-finalize`, and it may
+  appear at most once in the message.
+- The body MUST be a valid UTF-8 JSON object (single marker ≤ 16 KiB).
+- The object MUST contain `"finalize": true` (a JSON boolean, not a
+  truthy string).
+- All other fields MUST satisfy the fixed schema + seven quality
+  metrics, identical to the manual command.
+- If the message contains more than one marker, the plugin rejects
+  both rather than picking one.
+- The plugin never reads `transcript_path` or any Thread content; a
+  Memory is never a captured session.
+
+Thread != Memory: do not save a Thread by pretending it is a Memory.
+The plugin reads only the bounded marker; raw Thread / transcript
+content is never persisted by the plugin.

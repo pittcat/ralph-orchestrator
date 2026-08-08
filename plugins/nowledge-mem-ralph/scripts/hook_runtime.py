@@ -14,10 +14,11 @@ non-negotiable contracts before any other module is allowed to run:
    must use ``subprocess.run([...], timeout=...)``. The hook itself has
    a 5-second budget declared in ``hooks/hooks.json``.
 
-Recall, policy, writer, and audit handlers extend this runtime. ``resolve_nowledge_env`` is the canonical mapping
-between Ralph's existing ``RALPH_*`` env keys and the plugin's internal
-``Nowledge*`` field names; downstream code MUST read the env through this
-function so the mapping stays in one place.
+Recall, policy, writer, audit, and finalization handlers extend this
+runtime. ``resolve_nowledge_env`` is the canonical mapping between
+Ralph's existing ``RALPH_*`` env keys and the plugin's internal
+``Nowledge*`` field names; downstream code MUST read the env through
+this function so the mapping stays in one place.
 """
 
 from __future__ import annotations
@@ -29,7 +30,7 @@ import sys
 import tempfile
 import re
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 
 # Exit code contract (locked in U01; U02-U06 must not change):
 #   0  — success (incl. no-op when env missing)
@@ -227,29 +228,62 @@ def _handle_session_start(payload: dict[str, Any]) -> int:
     return EXIT_OK
 
 
-def _handle_stop(payload: dict[str, Any]) -> int:
-    """Stop handler — audit-only.
+def _handle_stop_event(payload: dict[str, Any], *, event: str) -> int:
+    """Stop / SubagentStop handler — bounded auto-finalization with audit fallback.
 
-    The Stop handler remains audit-only: no transcript reads, no
-    ``nmem`` invocation, and no second save attempt.
-    The Stop handler must NEVER block the agent — it logs and exits.
+    Wires the parser → save → writer chain via :mod:`memory_finalization`.
+    Only the writer (``memory_writer``) calls ``nmem``; the hook never
+    spawns it directly. For all malformed / missing / non-finalization
+    payloads the handler remains audit-only and never touches
+    ``transcript_path`` or any other file outside the plugin state dir.
+    The audit row is written AFTER ``run_finalization`` so ``audit_only``
+    reflects this activation's real outcome, not a pre-write snapshot.
     """
     env = resolve_nowledge_env()
-    # Explicit guard: we are not allowed to read transcript_path or any
-    # last_assistant_message — write a marker that proves the guard
-    # fired and stop.
+    state_root = _state_root()
+    message = payload.get("last_assistant_message") if isinstance(payload, dict) else None
+    marker_result = _load_marker_module().extract_finalization_marker(message)
+    coordinator = _load_finalization_module()
+    coordinator_result = coordinator.run_finalization(
+        env,
+        dict(payload, event=event),
+        parser_result=marker_result,
+        state_root=state_root,
+    )
     audit = _load_audit_module()
-    audit.record_stop(env, payload, event="Stop", state_root=_state_root())
-    _log("stop_audit_recorded", loop_id=env["RALPH_CURRENT_LOOP_ID"], event="Stop")
+    audit_only = coordinator_result.status not in {"SAVED", "ALREADY_SAVED"}
+    audit.record_stop(
+        env,
+        payload,
+        event=event,
+        state_root=state_root,
+        audit_only=audit_only,
+        save_results=[
+            {
+                "result": coordinator_result.status,
+                "reason": coordinator_result.reason,
+                "memory_digest": coordinator_result.memory_digest,
+            }
+        ],
+    )
+    _log(
+        "stop_finalization",
+        loop_id=env["RALPH_CURRENT_LOOP_ID"],
+        event=event,
+        finalization_status=coordinator_result.status,
+        audit_only=audit_only,
+    )
     return EXIT_OK
+
+
+def _handle_stop(payload: dict[str, Any]) -> int:
+    """Stop handler — delegates to the shared ``_handle_stop_event`` body."""
+    return _handle_stop_event(payload, event="Stop")
 
 
 def _handle_subagent_stop(payload: dict[str, Any]) -> int:
-    env = resolve_nowledge_env()
-    audit = _load_audit_module()
-    audit.record_stop(env, payload, event="SubagentStop", state_root=_state_root())
-    _log("stop_audit_recorded", loop_id=env["RALPH_CURRENT_LOOP_ID"], event="SubagentStop")
-    return EXIT_OK
+    """SubagentStop mirrors Stop: same parser, same coordinator chain."""
+    return _handle_stop_event(payload, event="SubagentStop")
 
 
 _AUDIT_MODULE: Any | None = None
@@ -268,6 +302,46 @@ def _load_audit_module() -> Any:
     sys.modules[name] = module
     spec.loader.exec_module(module)
     _AUDIT_MODULE = module
+    return module
+
+
+_MARKER_MODULE: Any | None = None
+
+
+def _load_marker_module() -> Any:
+    """Load :mod:`memory_marker` for bounded finalization parsing."""
+    global _MARKER_MODULE
+    if _MARKER_MODULE is not None:
+        return _MARKER_MODULE
+    here = Path(__file__).resolve().parent
+    name = "_nowledge_mem_ralph_memory_marker"
+    spec = importlib.util.spec_from_file_location(name, here / "memory_marker.py")
+    if spec is None or spec.loader is None:
+        raise RuntimeError("failed to load memory_marker.py")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
+    spec.loader.exec_module(module)
+    _MARKER_MODULE = module
+    return module
+
+
+_FINALIZATION_MODULE: Any | None = None
+
+
+def _load_finalization_module() -> Any:
+    """Load :mod:`memory_finalization` for parser → save → writer."""
+    global _FINALIZATION_MODULE
+    if _FINALIZATION_MODULE is not None:
+        return _FINALIZATION_MODULE
+    here = Path(__file__).resolve().parent
+    name = "_nowledge_mem_ralph_memory_finalization"
+    spec = importlib.util.spec_from_file_location(name, here / "memory_finalization.py")
+    if spec is None or spec.loader is None:
+        raise RuntimeError("failed to load memory_finalization.py")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
+    spec.loader.exec_module(module)
+    _FINALIZATION_MODULE = module
     return module
 
 

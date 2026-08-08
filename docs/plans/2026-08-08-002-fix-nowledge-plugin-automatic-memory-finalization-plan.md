@@ -3,7 +3,12 @@ artifact_contract: ce-unified-plan/v1
 artifact_readiness: implementation-ready
 product_contract_source: ce-plan-bootstrap
 execution: code
+executor_head_sha: 5bb55e663c64a89c62167f480641a7e826852880
 ---
+
+# canonical executor anchor for review trace; do not hand-write elsewhere.
+# If the executor branch is rebased/amended, update this field AND regenerate
+# the synthesized-review.md so the reviewer chain stays auditable.
 
 # Nowledge Mem 插件自动 Memory Finalization 开发计划
 
