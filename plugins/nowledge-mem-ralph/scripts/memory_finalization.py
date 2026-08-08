@@ -21,7 +21,6 @@ from __future__ import annotations
 import dataclasses
 import importlib.util
 import json
-import os
 import sys
 from pathlib import Path
 from typing import Any, Mapping
@@ -70,15 +69,22 @@ def _load_module(name: str, path: Path):
 
 def _load_save_module(scripts_dir: Path):
     return _load_module(
-        "_nowledge_mem_ralph_memory_via_finalization",
+        "_nowledge_mem_ralph_save",
         scripts_dir / "memory.py",
     )
 
 
 def _load_writer_module(scripts_dir: Path):
     return _load_module(
-        "_nowledge_mem_ralph_memory_writer_via_finalization",
+        "_nowledge_mem_ralph_writer",
         scripts_dir / "memory_writer.py",
+    )
+
+
+def _load_atomic_state(scripts_dir: Path):
+    return _load_module(
+        "_nowledge_mem_ralph_atomic_state",
+        scripts_dir / "_atomic_state.py",
     )
 
 
@@ -105,36 +111,33 @@ def _write_state(
     env: Mapping[str, str],
     payload: Mapping[str, Any],
     coordinator: CoordinatorResult,
+    atomic_state: Any,
 ) -> None:
     """Append or refresh the bounded finalization block in ``state.json``.
 
     The function is fail-open: any I/O failure is logged to stderr but
-    never raised, so the hook can stay exit 0.
+    never raised, so the hook can stay exit 0. The read-modify-write
+    sequence runs under a per-loop ``fcntl.flock`` (held by
+    ``atomic_state.state_writing``) so concurrent SubagentStop
+    writers cannot tear each other's ``finalization`` block. The
+    intermediate tmp file is created via ``tempfile.mkstemp`` so two
+    writers cannot share the historical ``state.json.tmp`` name.
     """
+    finalization = {
+        "status": coordinator.status,
+        "memory_digest": coordinator.memory_digest,
+        "reason": coordinator.reason,
+        "policy_version": coordinator.policy_version,
+        "event": event,
+        "hat": str(env.get("RALPH_CURRENT_HAT", "")),
+        "session_id": str(payload.get("session_id", "")),
+    }
     try:
-        state_path.parent.mkdir(parents=True, exist_ok=True)
-        try:
-            loaded = json.loads(state_path.read_text(encoding="utf-8"))
-            state = dict(loaded) if isinstance(loaded, dict) else {}
-        except (OSError, json.JSONDecodeError):
-            state = {}
-        finalization = {
-            "status": coordinator.status,
-            "memory_digest": coordinator.memory_digest,
-            "reason": coordinator.reason,
-            "policy_version": coordinator.policy_version,
-            "event": event,
-            "hat": str(env.get("RALPH_CURRENT_HAT", "")),
-            "session_id": str(payload.get("session_id", "")),
-        }
-        state["finalization"] = finalization
-        state["audit_only"] = coordinator.status not in {"SAVED", "ALREADY_SAVED"}
-        state["stop_hook_fired"] = True
-        tmp = state_path.with_suffix(".json.tmp")
-        tmp.write_text(json.dumps(state, ensure_ascii=False, sort_keys=True), encoding="utf-8")
-        os.replace(tmp, state_path)
+        with atomic_state.state_writing(state_path) as state:
+            state["finalization"] = finalization
+            state["audit_only"] = coordinator.status not in {"SAVED", "ALREADY_SAVED"}
+            state["stop_hook_fired"] = True
     except OSError as exc:
-        # Audit persistence is observability only — never block the agent.
         sys.stderr.write(
             json.dumps(
                 {
@@ -179,11 +182,20 @@ def run_finalization(
     reason = str(getattr(parser_result, "reason", ""))
     loop_id = str(env.get("RALPH_CURRENT_LOOP_ID", "")).strip()
     state_path = state_root / loop_id / "state.json" if loop_id else None
+    atomic_state = _load_atomic_state(scripts_dir)
+    event = str(payload.get("event", "Stop"))
 
     if status != "PARSED":
-        coordinator = CoordinatorResult(status=status, memory_digest=digest, reason=reason)
+        coordinator = _fallback_result(parser_result)
         if state_path is not None:
-            _write_state(state_path, event=str(payload.get("event", "Stop")), env=env, payload=payload, coordinator=coordinator)
+            _write_state(
+                state_path,
+                event=event,
+                env=env,
+                payload=payload,
+                coordinator=coordinator,
+                atomic_state=atomic_state,
+            )
         return coordinator
 
     candidate = getattr(parser_result, "candidate", None)
@@ -192,7 +204,14 @@ def run_finalization(
             status="REJECTED", memory_digest=digest, reason="parser returned no candidate"
         )
         if state_path is not None:
-            _write_state(state_path, event=str(payload.get("event", "Stop")), env=env, payload=payload, coordinator=coordinator)
+            _write_state(
+                state_path,
+                event=event,
+                env=env,
+                payload=payload,
+                coordinator=coordinator,
+                atomic_state=atomic_state,
+            )
         return coordinator
 
     source = _source_from_env(env)
@@ -206,13 +225,17 @@ def run_finalization(
             reason=f"memory.save raised {type(exc).__name__}: {exc}",
         )
         if state_path is not None:
-            _write_state(state_path, event=str(payload.get("event", "Stop")), env=env, payload=payload, coordinator=coordinator)
+            _write_state(
+                state_path,
+                event=event,
+                env=env,
+                payload=payload,
+                coordinator=coordinator,
+                atomic_state=atomic_state,
+            )
         return coordinator
 
     if save_result.result != "ACCEPTED":
-        # Deterministic rejection — record the verdict but never reach
-        # the writer. This keeps the audit-only contract intact for
-        # policy rejection, NEEDS_REWRITE, and OBSERVATION.
         coordinator = CoordinatorResult(
             status=save_result.result if save_result.result in {"REJECTED", "NEEDS_REWRITE", "OBSERVATION"} else "REJECTED",
             memory_digest=save_result.memory_digest or digest,
@@ -220,11 +243,16 @@ def run_finalization(
             policy_version=save_result.policy_version,
         )
         if state_path is not None:
-            _write_state(state_path, event=str(payload.get("event", "Stop")), env=env, payload=payload, coordinator=coordinator)
+            _write_state(
+                state_path,
+                event=event,
+                env=env,
+                payload=payload,
+                coordinator=coordinator,
+                atomic_state=atomic_state,
+            )
         return coordinator
 
-    # ACCEPTED → hand off to the existing writer. The writer is the
-    # only caller of ``nmem``; this module never spawns it.
     try:
         writer = _load_writer_module(scripts_dir)
         write_result = writer.write_from_save_result(save_result)
@@ -236,7 +264,14 @@ def run_finalization(
             policy_version=save_result.policy_version,
         )
         if state_path is not None:
-            _write_state(state_path, event=str(payload.get("event", "Stop")), env=env, payload=payload, coordinator=coordinator)
+            _write_state(
+                state_path,
+                event=event,
+                env=env,
+                payload=payload,
+                coordinator=coordinator,
+                atomic_state=atomic_state,
+            )
         return coordinator
 
     coordinator_status = _STATUS_MAP.get(
@@ -249,5 +284,12 @@ def run_finalization(
         policy_version=str(getattr(write_result, "policy_version", save_result.policy_version)),
     )
     if state_path is not None:
-        _write_state(state_path, event=str(payload.get("event", "Stop")), env=env, payload=payload, coordinator=coordinator)
+        _write_state(
+            state_path,
+            event=event,
+            env=env,
+            payload=payload,
+            coordinator=coordinator,
+            atomic_state=atomic_state,
+        )
     return coordinator

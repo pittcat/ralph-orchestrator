@@ -657,3 +657,85 @@ def test_subagent_stop_uses_same_writer(
     )
     assert state_data["finalization"]["status"] == "SAVED"
     assert len(calls.read_text(encoding="utf-8").splitlines()) == 1
+
+
+# ---------------------------------------------------------------------------
+# U1 (fixer) — atomic state.json writes under concurrent SubagentStop
+#
+# Eight concurrent SubagentStop subprocesses against one fake nmem and
+# one shared CLAUDE_PLUGIN_DATA must all land `status=SAVED` on their
+# distinct digest, and the audit.jsonl must carry exactly eight rows.
+# This is the regression contract for fix-planner finding adversarial:A2
+# (TOCTOU on `state.json.tmp`) + adversarial:A6 (audit_only=true
+# hard-coded + pre-write save_results snapshot).
+# ---------------------------------------------------------------------------
+
+
+def test_state_json_atomic_under_concurrent_subagent_stop(tmp_path: Path) -> None:
+    """Eight concurrent SubagentStop writers must all land a finalization."""
+    bin_dir = tmp_path / "bin"
+    calls = _write_fake_nmem(bin_dir)
+    data_dir = tmp_path / "data"
+    env = _ralph_env()
+    env["PATH"] = f"{bin_dir}:/usr/bin:/bin"
+    env["CLAUDE_PLUGIN_DATA"] = str(data_dir)
+
+    markers = []
+    for index in range(8):
+        candidate = _valid_candidate_marker(
+            title=f"Concurrent lesson #{index}",
+            claim=f"distinct digest #{index}",
+            evidence=f"path:/tmp/secret-{index}",
+        )
+        markers.append(f"Lesson {index}:\n\n{candidate}\n")
+
+    import concurrent.futures
+
+    def _fire(idx: int) -> subprocess.CompletedProcess:
+        return _run_hook(
+            "SubagentStop",
+            {
+                "session_id": f"worker-{idx}",
+                "agent_id": f"worker-{idx}",
+                "last_assistant_message": markers[idx],
+            },
+            extra_env=env,
+            plugin_data=data_dir,
+        )
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
+        results = list(pool.map(_fire, range(8)))
+
+    assert all(r.returncode == 0 for r in results), (
+        f"every concurrent SubagentStop must exit 0; "
+        f"errors={[r.stderr for r in results if r.returncode != 0]}"
+    )
+
+    state_path = data_dir / "loop-xyz" / "state.json"
+    assert state_path.is_file(), "state.json must exist"
+    state_payload = json.loads(state_path.read_text(encoding="utf-8"))
+    assert state_payload["hook"] == "SubagentStop"
+    assert state_payload["finalization"]["status"] == "SAVED", (
+        f"final SubagentStop state must be SAVED, got {state_payload['finalization']['status']!r}"
+    )
+    assert state_payload["audit_only"] is False
+
+    audit_path = data_dir / "loop-xyz" / "audit.jsonl"
+    assert audit_path.is_file(), "audit.jsonl must exist"
+    audit_records = [
+        json.loads(line)
+        for line in audit_path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    assert len(audit_records) == 8, (
+        f"audit.jsonl must have 8 rows, got {len(audit_records)}: {audit_records}"
+    )
+    call_lines = calls.read_text(encoding="utf-8").splitlines()
+    assert len(call_lines) == 8, (
+        f"each distinct digest must reach nmem exactly once, got {len(call_lines)}"
+    )
+    serialized = json.dumps(state_payload, ensure_ascii=True)
+    for index in range(8):
+        assert f"secret-{index}" not in serialized, (
+            f"evidence path for digest #{index} leaked into state.json"
+        )

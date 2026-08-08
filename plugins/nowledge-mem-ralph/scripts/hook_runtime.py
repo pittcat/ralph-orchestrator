@@ -228,59 +228,62 @@ def _handle_session_start(payload: dict[str, Any]) -> int:
     return EXIT_OK
 
 
-def _handle_stop(payload: dict[str, Any]) -> int:
-    """Stop handler — bounded auto-finalization with audit fallback.
+def _handle_stop_event(payload: dict[str, Any], *, event: str) -> int:
+    """Stop / SubagentStop handler — bounded auto-finalization with audit fallback.
 
     Wires the parser → save → writer chain via :mod:`memory_finalization`.
     Only the writer (``memory_writer``) calls ``nmem``; the hook never
     spawns it directly. For all malformed / missing / non-finalization
     payloads the handler remains audit-only and never touches
     ``transcript_path`` or any other file outside the plugin state dir.
+    The audit row is written AFTER ``run_finalization`` so ``audit_only``
+    reflects this activation's real outcome, not a pre-write snapshot.
     """
     env = resolve_nowledge_env()
+    state_root = _state_root()
     message = payload.get("last_assistant_message") if isinstance(payload, dict) else None
     marker_result = _load_marker_module().extract_finalization_marker(message)
-    # The historical audit recorder still runs so ``audit.jsonl`` keeps
-    # the existing shape; the coordinator then layers the finalization
-    # block on top of ``state.json`` so the parser + writer outcome is
-    # observable without leaking the candidate payload.
-    audit = _load_audit_module()
-    audit.record_stop(env, payload, event="Stop", state_root=_state_root())
     coordinator = _load_finalization_module()
-    coordinator.run_finalization(
+    coordinator_result = coordinator.run_finalization(
         env,
-        dict(payload, event="Stop"),
+        dict(payload, event=event),
         parser_result=marker_result,
-        state_root=_state_root(),
+        state_root=state_root,
+    )
+    audit = _load_audit_module()
+    audit_only = coordinator_result.status not in {"SAVED", "ALREADY_SAVED"}
+    audit.record_stop(
+        env,
+        payload,
+        event=event,
+        state_root=state_root,
+        audit_only=audit_only,
+        save_results=[
+            {
+                "result": coordinator_result.status,
+                "reason": coordinator_result.reason,
+                "memory_digest": coordinator_result.memory_digest,
+            }
+        ],
     )
     _log(
         "stop_finalization",
         loop_id=env["RALPH_CURRENT_LOOP_ID"],
-        event="Stop",
+        event=event,
+        finalization_status=coordinator_result.status,
+        audit_only=audit_only,
     )
     return EXIT_OK
+
+
+def _handle_stop(payload: dict[str, Any]) -> int:
+    """Stop handler — delegates to the shared ``_handle_stop_event`` body."""
+    return _handle_stop_event(payload, event="Stop")
 
 
 def _handle_subagent_stop(payload: dict[str, Any]) -> int:
     """SubagentStop mirrors Stop: same parser, same coordinator chain."""
-    env = resolve_nowledge_env()
-    message = payload.get("last_assistant_message") if isinstance(payload, dict) else None
-    marker_result = _load_marker_module().extract_finalization_marker(message)
-    audit = _load_audit_module()
-    audit.record_stop(env, payload, event="SubagentStop", state_root=_state_root())
-    coordinator = _load_finalization_module()
-    coordinator.run_finalization(
-        env,
-        dict(payload, event="SubagentStop"),
-        parser_result=marker_result,
-        state_root=_state_root(),
-    )
-    _log(
-        "stop_finalization",
-        loop_id=env["RALPH_CURRENT_LOOP_ID"],
-        event="SubagentStop",
-    )
-    return EXIT_OK
+    return _handle_stop_event(payload, event="SubagentStop")
 
 
 _AUDIT_MODULE: Any | None = None
