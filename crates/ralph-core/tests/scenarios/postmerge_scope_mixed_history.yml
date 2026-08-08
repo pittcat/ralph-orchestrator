@@ -1,11 +1,13 @@
-# U3 (plan 2026-08-08-004 §Unit 3 §9): direct-target / no-merge-boundary
-# scope resolution. Two plans on a direct commit chain; change-mapper
-# derives scope_base from first-parent topology, writes scope-manifest.json
-# and diff patches, and emits resolved postmerge.changemap.ready with all
-# U1 scope fields. The EventLoop accepts the event and the loop completes.
+# U4 (plan 2026-08-08-004 §Unit 4 §9): mixed interleaved history.
+# Two plans merged sequentially: merge Plan A → target X → merge Plan B → HEAD.
+# change-mapper classifies Plan A commits as plan_owned, Plan B commits as plan_owned,
+# the merge commits as interleaved, and X (intervening work) as interleaved.
+# Emits resolved postmerge.changemap.ready with interleaved_commits_count>0,
+# all classification diff paths, critical_unknown_count=0, proceed:true.
+# The EventLoop accepts the event and the loop completes.
 
-name: postmerge_scope_direct_target
-description: Direct-target scope resolution without merge_boundary_path
+name: postmerge_scope_mixed_history
+description: Mixed interleaved history — two plans with merge commits; change-mapper classifies interleaved and emits resolved scope
 
 config:
   prompt_file: PROMPT.md
@@ -105,7 +107,7 @@ mock_responses:
     hat: baseline
   - text: |
       <event topic="postmerge.changemap.ready">
-      {"proceed":true,"artifact_path":".ralph/post-merge/02-change-map.md","scope_manifest_path":".ralph/post-merge/scope-manifest.json","scope_digest":"abcd1234ef5678901234567890abcdef1234567890abcdef1234567890abcdef1234567890","scope_status":"resolved","overall_confidence":90,"critical_unknown_count":0,"scope_base_sha":"abc1234def5678901234567890abcdef1234567890","scope_source":"direct-target","plan_match_confidence":"high","high_risk_crossings_count":0,"interleaved_diff_path":".ralph/post-merge/diffs/interleaved.patch","override_diff_path":".ralph/post-merge/diffs/override.patch","unknown_diff_path":".ralph/post-merge/diffs/unknown.patch","interleaved_commits_count":0,"override_commits_count":0,"unknown_commits_count":0}
+      {"proceed":true,"artifact_path":".ralph/post-merge/02-change-map.md","scope_manifest_path":".ralph/post-merge/scope-manifest.json","scope_digest":"abcd1234ef5678901234567890abcdef1234567890abcdef1234567890abcdef1234567890","scope_status":"resolved","overall_confidence":90,"critical_unknown_count":0,"scope_base_sha":"aaa1234def5678901234567890abcdef1234567890","scope_source":"branch-merge","plan_match_confidence":"high","high_risk_crossings_count":0,"interleaved_diff_path":".ralph/post-merge/diffs/interleaved.patch","override_diff_path":".ralph/post-merge/diffs/override.patch","unknown_diff_path":".ralph/post-merge/diffs/unknown.patch","interleaved_commits_count":2,"override_commits_count":0,"unknown_commits_count":0}
       </event>
     hat: change-mapper
   - text: |
@@ -138,8 +140,6 @@ expected:
         scope_status: "resolved"
         overall_confidence: 90
         critical_unknown_count: 0
-        scope_base_sha: "abc1234def5678901234567890abcdef1234567890"
-        scope_source: "direct-target"
-        interleaved_commits_count: 0
+        interleaved_commits_count: 2
         override_commits_count: 0
         unknown_commits_count: 0

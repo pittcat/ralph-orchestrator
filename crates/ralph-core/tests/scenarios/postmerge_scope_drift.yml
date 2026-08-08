@@ -1,11 +1,13 @@
-# U3 (plan 2026-08-08-004 §Unit 3 §9): direct-target / no-merge-boundary
-# scope resolution. Two plans on a direct commit chain; change-mapper
-# derives scope_base from first-parent topology, writes scope-manifest.json
-# and diff patches, and emits resolved postmerge.changemap.ready with all
-# U1 scope fields. The EventLoop accepts the event and the loop completes.
+# U4 (plan 2026-08-08-004 §Unit 4 §9): pre-emit drift blocks before scope resolution.
+# HEAD/tree changed during scope resolution. The pre-emit drift recheck aborts
+# the emit and change-mapper writes a blocker artifact instead. Since the
+# manifest is blocked (no resolved scope was ever emitted), the system-auditor
+# short-circuits with proceed:false, closer/reporter complete with FAIL.
+# Key assertion: postmerge.audit.ready is NOT emitted with scope_status=resolved
+# — the stale resolved event never appears.
 
-name: postmerge_scope_direct_target
-description: Direct-target scope resolution without merge_boundary_path
+name: postmerge_scope_drift
+description: Pre-emit drift blocks scope resolution — change-mapper aborts before audit; loop completes with FAIL
 
 config:
   prompt_file: PROMPT.md
@@ -103,24 +105,26 @@ mock_responses:
       {"baseline_valid":true,"artifact_path":".ralph/post-merge/01-baseline.md","head_sha":"abc1234def5678901234567890abcdef1234567890","branch":"main"}
       </event>
     hat: baseline
+  # Drift detected: change-mapper aborts emit, writes blocker artifact, emits blocked.
+  # No resolved scope is ever emitted.
   - text: |
       <event topic="postmerge.changemap.ready">
-      {"proceed":true,"artifact_path":".ralph/post-merge/02-change-map.md","scope_manifest_path":".ralph/post-merge/scope-manifest.json","scope_digest":"abcd1234ef5678901234567890abcdef1234567890abcdef1234567890abcdef1234567890","scope_status":"resolved","overall_confidence":90,"critical_unknown_count":0,"scope_base_sha":"abc1234def5678901234567890abcdef1234567890","scope_source":"direct-target","plan_match_confidence":"high","high_risk_crossings_count":0,"interleaved_diff_path":".ralph/post-merge/diffs/interleaved.patch","override_diff_path":".ralph/post-merge/diffs/override.patch","unknown_diff_path":".ralph/post-merge/diffs/unknown.patch","interleaved_commits_count":0,"override_commits_count":0,"unknown_commits_count":0}
+      {"proceed":false,"artifact_path":".ralph/post-merge/02-change-map.md","scope_manifest_path":".ralph/post-merge/scope-manifest.json","scope_digest":"abcd1234ef5678901234567890abcdef1234567890abcdef1234567890abcdef1234567890","scope_status":"blocked","overall_confidence":0,"critical_unknown_count":0,"scope_base_sha":"aaa1234def5678901234567890abcdef1234567890","scope_source":"branch-merge","plan_match_confidence":"high","high_risk_crossings_count":0,"interleaved_diff_path":".ralph/post-merge/diffs/interleaved.patch","override_diff_path":".ralph/post-merge/diffs/override.patch","unknown_diff_path":".ralph/post-merge/diffs/unknown.patch","interleaved_commits_count":0,"override_commits_count":0,"unknown_commits_count":0}
       </event>
     hat: change-mapper
   - text: |
       <event topic="postmerge.audit.ready">
-      {"proceed":true,"findings_created_count":0,"audit_docs_complete":true,"low_confidence_findings_count":0}
+      {"proceed":false,"findings_created_count":0,"audit_docs_complete":true,"low_confidence_findings_count":0}
       </event>
     hat: system-auditor
   - text: |
       <event topic="postmerge.reviewed">
-      {"verdict":"PASS","verdict_confidence":"high","final_review_path":".ralph/post-merge/15-final-review.md","clean_validation_path":".ralph/post-merge/14-clean-validation.md"}
+      {"verdict":"FAIL","verdict_confidence":"high","final_review_path":".ralph/post-merge/15-final-review.md","clean_validation_path":".ralph/post-merge/14-clean-validation.md"}
       </event>
     hat: closer
   - text: |
       <event topic="LOOP_COMPLETE">
-      {"success":true,"verdict":"PASS","report_path":".ralph/post-merge/REPORT.md"}
+      {"success":false,"verdict":"FAIL","report_path":".ralph/post-merge/REPORT.md"}
       </event>
     hat: reporter
 
@@ -129,17 +133,17 @@ expected:
   events:
     - topic: postmerge.baseline.ready
     - topic: postmerge.changemap.ready
+    - topic: postmerge.audit.ready
+    - topic: postmerge.reviewed
+  # S10: no stale resolved event — the only accepted changemap.ready carries scope_status=blocked
+  # (the resolved variant was aborted by the pre-emit drift recheck and never reached the loop)
   completion: true
   payload_matches:
     - topic: postmerge.changemap.ready
       fields:
-        proceed: true
-        scope_manifest_path: ".ralph/post-merge/scope-manifest.json"
-        scope_status: "resolved"
-        overall_confidence: 90
+        proceed: false
+        scope_status: "blocked"
         critical_unknown_count: 0
-        scope_base_sha: "abc1234def5678901234567890abcdef1234567890"
-        scope_source: "direct-target"
-        interleaved_commits_count: 0
-        override_commits_count: 0
-        unknown_commits_count: 0
+    - topic: postmerge.reviewed
+      fields:
+        verdict: "FAIL"

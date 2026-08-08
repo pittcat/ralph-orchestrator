@@ -64,6 +64,13 @@ schemas:
       - critical_unknown_count
       - scope_base_sha
       - scope_source
+      # U4 new fields (D6): classification diff paths and commit counts
+      - interleaved_diff_path
+      - override_diff_path
+      - unknown_diff_path
+      - interleaved_commits_count
+      - override_commits_count
+      - unknown_commits_count
     payload: json_object
     allowed_values:
       plan_match_confidence:
@@ -121,6 +128,32 @@ schemas:
         meaning: How the scope base was determined.
         source: Change-mapper records from input or algorithm.
         fill_rule: One of `explicit | direct-target | branch-merge | inferred`; must not be `merge-batch-required` (merge-boundary is optional cross-check only).
+      # U4 new fields (D6): classification diff paths
+      interleaved_diff_path:
+        meaning: Repo-relative path to the diff artifact containing hunks classified as interleaved.
+        source: Change-mapper writes `.ralph/post-merge/diffs/interleaved.patch`.
+        fill_rule: Real path under `.ralph/post-merge/diffs/`; absent when no interleaved hunks.
+      override_diff_path:
+        meaning: Repo-relative path to the diff artifact containing hunks classified as overridden or reverted.
+        source: Change-mapper writes `.ralph/post-merge/diffs/override.patch`.
+        fill_rule: Real path under `.ralph/post-merge/diffs/`; absent when no override/revert hunks.
+      unknown_diff_path:
+        meaning: Repo-relative path to the diff artifact containing hunks classified as unknown.
+        source: Change-mapper writes `.ralph/post-merge/diffs/unknown.patch`.
+        fill_rule: Real path under `.ralph/post-merge/diffs/`; absent when no unknown hunks.
+      # U4 new fields (D6): commit classification counts
+      interleaved_commits_count:
+        meaning: Number of commits in the diff range that belong to multiple plans simultaneously.
+        source: Change-mapper classifies commits via git rev-list --topo-order --reverse.
+        fill_rule: Non-negative integer; 0 when no interleaved commits.
+      override_commits_count:
+        meaning: Number of commits that represent a later plan overriding an earlier plan's changes.
+        source: Change-mapper classifies commits via commit ordering and diff analysis.
+        fill_rule: Non-negative integer; 0 when no override commits.
+      unknown_commits_count:
+        meaning: Number of commits in the diff range that cannot be attributed to any known plan.
+        source: Change-mapper classifies commits via git rev-list --topo-order --reverse.
+        fill_rule: Non-negative integer; resolved requires this to be 0.
 
   postmerge.audit.ready:
     required_fields:

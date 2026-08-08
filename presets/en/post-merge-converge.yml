@@ -394,17 +394,51 @@ hats:
           "interleaved": ".ralph/post-merge/diffs/interleaved.patch",
           "override": ".ralph/post-merge/diffs/override.patch",
           "unknown": ".ralph/post-merge/diffs/unknown.patch"
-        }
+        },
+        "hunk_classifications": []
       }
       ```
       - Compute SHA256 of each plan file bytes (not path).
       - Derive diffs using `git diff <scope_base_sha>..HEAD -- <plan-relevant-paths>`.
       - Classify each changed hunk: `full` (all changes), `scoped` (attributable to a plan), `interleaved` (multiple plans touch same file), `override` (later plan supersedes earlier), `unknown` (cannot attribute).
 
+      ### Commit attribution (D6 — required for mixed history)
+      For each commit in `git rev-list --topo-order --reverse <scope_base_sha>..HEAD`:
+      - Classify as **plan_owned** (matches a candidate commit of exactly one plan), **interleaved** (matches multiple plans), or **unknown** (matches no plan).
+      Record `interleaved_commits_count`, `override_commits_count`, `unknown_commits_count` in the manifest.
+
+      ### Hunk attribution (D6 — required for mixed history)
+      For each hunk in the final diff, compute a hunk key: normalized path + normalized added-content + 3-line context.
+      Classify each hunk as:
+      - **plan_owned**: all lines attributable to exactly one plan's candidate commits
+      - **overridden_later**: lines originally owned by an earlier plan but later superseded by a subsequent commit
+      - **reverted**: lines added by a plan's commit and subsequently removed by a later commit
+      - **shared_by_multiple_plans**: lines that appear in candidate commits from two or more distinct plans
+      - **unknown**: lines that cannot be attributed to any plan's candidate commits
+
+      ### Critical path classification
+      critical_paths = union of all plan expected files, candidate patch paths, and explicit claim/symbol files.
+      A hunk or commit touching a critical path is **critical**. critical unknown hunk OR critical unknown commit → `proceed: false`, `scope_status: blocked`.
+
+      ### Boundary conflict cross-check (D6)
+      When `merge_boundary_path` is provided in the prompt AND `cross_check` result is 0 (boundary conflict):
+      → blocker: emit `proceed: false`, `scope_status: blocked`.
+      When `merge_boundary_path` is provided with `cross_check >= 1`: no additional blocker from this signal.
+      When no `merge_boundary_path` is provided: `cross_check: not_applicable`, no blocker from this gate.
+
+      ### Pre-emit drift recheck (D6)
+      Before emitting `postmerge.changemap.ready`, verify:
+      - HEAD SHA unchanged since scope_base was recorded
+      - Working tree has no unexpected modifications (`.ralph/` noise excluded)
+      If drift detected: abort emit, write blocker artifact, emit `proceed: false`, `scope_status: blocked`.
+
       ### Emit
       Write artifact-first: `.ralph/post-merge/02-change-map.md` → `.ralph/post-merge/scope-manifest.json` → policy-check → emit `postmerge.changemap.ready` with:
-      - `proceed: true` only when `scope_status == resolved` AND `overall_confidence >= 90` AND `critical_unknown_count == 0`
+      - `proceed: true` only when `scope_status == resolved` AND `overall_confidence >= 90` AND `critical_unknown_count == 0` AND no boundary conflict AND no drift
       - `scope_manifest_path`, `scope_digest` (SHA256 of manifest JSON), `scope_status`, `overall_confidence`, `critical_unknown_count`, `scope_base_sha`, `scope_source`
+      - `interleaved_diff_path`, `override_diff_path`, `unknown_diff_path` (repo-relative paths to diff artifacts)
+      - `interleaved_commits_count`, `override_commits_count`, `unknown_commits_count`
+      Write classification diffs to the declared paths under `.ralph/post-merge/diffs/`.
 
       ### DON'T
       - Evaluate "good/bad code" beyond mapping risk crossings
@@ -435,6 +469,7 @@ hats:
       - Read trigger `artifact_path` with `cat`/`Read` — that is the change-map artifact (do not ignore the payload path).
       - Read the baseline at the fixed convention path `.ralph/post-merge/01-baseline.md` (baseline path is not re-emitted on this trigger; convention path is authoritative).
       - Also read trigger `proceed` / `plan_match_confidence` / `high_risk_crossings_count`.
+      - Read trigger `scope_manifest_path` (if present) to access the scope manifest JSON artifact; use it to scope audit attention to `plan_owned` and `shared_by_multiple_plans` regions. Critical unknown regions that blocked the map are already excluded — do not audit them as if they were scoped changes.
       - If upstream `proceed` is false: write stub notes under `.ralph/post-merge/03-contract-audit.md` … `08-concurrency-idempotency.md` explaining short-circuit, emit `proceed: false`, `audit_docs_complete: true`, `findings_created_count: 0`, `low_confidence_findings_count: 0`.
 
       ### Execute six audits in order (one activation, six artifacts)

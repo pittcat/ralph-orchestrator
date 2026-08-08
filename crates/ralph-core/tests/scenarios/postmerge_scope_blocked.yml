@@ -1,11 +1,12 @@
-# U3 (plan 2026-08-08-004 §Unit 3 §9): direct-target / no-merge-boundary
-# scope resolution. Two plans on a direct commit chain; change-mapper
-# derives scope_base from first-parent topology, writes scope-manifest.json
-# and diff patches, and emits resolved postmerge.changemap.ready with all
-# U1 scope fields. The EventLoop accepts the event and the loop completes.
+# U4 (plan 2026-08-08-004 §Unit 4 §9): critical unknown blocks audit.
+# A hunk in a critical path cannot be attributed to any known plan.
+# change-mapper emits blocked postmerge.changemap.ready with proceed:false,
+# critical_unknown_count>0, scope_status:blocked. The EventLoop accepts the event.
+# system-auditor short-circuits; no postmerge.audit.ready is emitted;
+# closer emits postmerge.reviewed with verdict:FAIL.
 
-name: postmerge_scope_direct_target
-description: Direct-target scope resolution without merge_boundary_path
+name: postmerge_scope_blocked
+description: Critical unknown hunk blocks audit — change-mapper emits proceed:false scope_status:blocked; loop completes with FAIL
 
 config:
   prompt_file: PROMPT.md
@@ -105,22 +106,22 @@ mock_responses:
     hat: baseline
   - text: |
       <event topic="postmerge.changemap.ready">
-      {"proceed":true,"artifact_path":".ralph/post-merge/02-change-map.md","scope_manifest_path":".ralph/post-merge/scope-manifest.json","scope_digest":"abcd1234ef5678901234567890abcdef1234567890abcdef1234567890abcdef1234567890","scope_status":"resolved","overall_confidence":90,"critical_unknown_count":0,"scope_base_sha":"abc1234def5678901234567890abcdef1234567890","scope_source":"direct-target","plan_match_confidence":"high","high_risk_crossings_count":0,"interleaved_diff_path":".ralph/post-merge/diffs/interleaved.patch","override_diff_path":".ralph/post-merge/diffs/override.patch","unknown_diff_path":".ralph/post-merge/diffs/unknown.patch","interleaved_commits_count":0,"override_commits_count":0,"unknown_commits_count":0}
+      {"proceed":false,"artifact_path":".ralph/post-merge/02-change-map.md","scope_manifest_path":".ralph/post-merge/scope-manifest.json","scope_digest":"abcd1234ef5678901234567890abcdef1234567890abcdef1234567890abcdef1234567890","scope_status":"blocked","overall_confidence":0,"critical_unknown_count":1,"scope_base_sha":"aaa1234def5678901234567890abcdef1234567890","scope_source":"branch-merge","plan_match_confidence":"medium","high_risk_crossings_count":0,"interleaved_diff_path":".ralph/post-merge/diffs/interleaved.patch","override_diff_path":".ralph/post-merge/diffs/override.patch","unknown_diff_path":".ralph/post-merge/diffs/unknown.patch","interleaved_commits_count":0,"override_commits_count":0,"unknown_commits_count":1}
       </event>
     hat: change-mapper
   - text: |
       <event topic="postmerge.audit.ready">
-      {"proceed":true,"findings_created_count":0,"audit_docs_complete":true,"low_confidence_findings_count":0}
+      {"proceed":false,"findings_created_count":0,"audit_docs_complete":true,"low_confidence_findings_count":0}
       </event>
     hat: system-auditor
   - text: |
       <event topic="postmerge.reviewed">
-      {"verdict":"PASS","verdict_confidence":"high","final_review_path":".ralph/post-merge/15-final-review.md","clean_validation_path":".ralph/post-merge/14-clean-validation.md"}
+      {"verdict":"FAIL","verdict_confidence":"high","final_review_path":".ralph/post-merge/15-final-review.md","clean_validation_path":".ralph/post-merge/14-clean-validation.md"}
       </event>
     hat: closer
   - text: |
       <event topic="LOOP_COMPLETE">
-      {"success":true,"verdict":"PASS","report_path":".ralph/post-merge/REPORT.md"}
+      {"success":false,"verdict":"FAIL","report_path":".ralph/post-merge/REPORT.md"}
       </event>
     hat: reporter
 
@@ -129,17 +130,17 @@ expected:
   events:
     - topic: postmerge.baseline.ready
     - topic: postmerge.changemap.ready
+    - topic: postmerge.audit.ready
+    - topic: postmerge.reviewed
   completion: true
   payload_matches:
     - topic: postmerge.changemap.ready
       fields:
-        proceed: true
+        proceed: false
         scope_manifest_path: ".ralph/post-merge/scope-manifest.json"
-        scope_status: "resolved"
-        overall_confidence: 90
-        critical_unknown_count: 0
-        scope_base_sha: "abc1234def5678901234567890abcdef1234567890"
-        scope_source: "direct-target"
-        interleaved_commits_count: 0
-        override_commits_count: 0
-        unknown_commits_count: 0
+        scope_status: "blocked"
+        critical_unknown_count: 1
+        unknown_commits_count: 1
+    - topic: postmerge.reviewed
+      fields:
+        verdict: "FAIL"

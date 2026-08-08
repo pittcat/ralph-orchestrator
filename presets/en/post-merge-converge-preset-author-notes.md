@@ -1,5 +1,18 @@
 # Preset Author Notes — post-merge-converge
 
+## Revision 2026-08-09 (U4 mixed history / unknown hard gate)
+
+- change-mapper: D6 commit attribution (plan_owned / interleaved / unknown) via `git rev-list --topo-order --reverse`
+- change-mapper: D6 hunk attribution (plan_owned / overridden_later / reverted / shared_by_multiple_plans / unknown) with hunk key normalization
+- change-mapper: critical_paths union of plan expected files + candidate patch paths + explicit claim/symbol files
+- change-mapper: critical unknown → `proceed:false`, `scope_status:blocked`
+- change-mapper: `merge_boundary_path` + `cross_check=0` → boundary conflict blocker
+- change-mapper: pre-emit HEAD/tree drift recheck before emitting changemap.ready
+- change-mapper emits: `interleaved_diff_path`, `override_diff_path`, `unknown_diff_path`, `interleaved_commits_count`, `override_commits_count`, `unknown_commits_count`
+- scope_status=resolved requires: `critical_unknown_count==0` AND `unknown_commits_count==0` (already in critical_unknown_count; explicit)
+- system-auditor: reads scope_manifest_path and uses it to focus audit on plan_owned/shared_by_multiple_plans regions
+- resolved gate: scope_status=resolved AND overall_confidence>=90 AND critical_unknown_count==0 AND no boundary conflict AND no drift
+
 ## Revision 2026-08-09 (U3 scope resolution)
 
 - change-mapper follows D3/D5/D6 fixed scope protocol: explicit scope_base validation, merge_boundary_path as optional cross-check, first-parent/merge-parent base derivation

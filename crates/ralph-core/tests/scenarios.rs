@@ -4711,6 +4711,11 @@ fn test_retained_scenarios_pipeline_or_generic_only() {
         // with routing characterization, not bound to builtin preset; schema validation
         // via unit/CLI tests
         "tests/scenarios/scope_",
+        // 2026-08-08-004 plan U4: post-merge scope classification fixtures
+        // (postmerge_scope_mixed_history.yml, postmerge_scope_blocked.yml,
+        // postmerge_scope_drift.yml) — generic routing characterization with
+        // isolated postmerge hat chain; schema validation via unit/CLI tests
+        "tests/scenarios/postmerge_scope_",
         // 2026-08-08-004 plan U2: merge-batch boundary manifest routing
         // (abstract fixture with merge-batch hat chain; schema validation via unit/CLI tests)
         "tests/scenarios/merge_batch_boundary",
@@ -4844,6 +4849,43 @@ fn test_postmerge_scope_direct_target_without_merge_boundary() {
 #[test]
 fn test_merge_batch_boundary_payload_and_failure_path() {
     let yaml = load_scenario("tests/scenarios/merge_batch_boundary.yml");
+    run_workflow_guard_scenario(yaml);
+}
+
+// ──────────────────────────────────────────────────────────────────────
+// 2026-08-08-004 plan Unit 4: mixed/unknown hard gate
+// ──────────────────────────────────────────────────────────────────────
+
+/// U4 (plan 2026-08-08-004 §Unit 4 §9): mixed interleaved history.
+/// Two plans with merge commits between them; change-mapper classifies
+/// merge commits as interleaved, emits resolved scope with
+/// interleaved_commits_count>0, all classification diff paths,
+/// critical_unknown_count=0, proceed:true. The EventLoop accepts the event
+/// and the loop completes.
+#[test]
+fn test_postmerge_scope_mixed_history_classifies_interleaved() {
+    let yaml = load_scenario("tests/scenarios/postmerge_scope_mixed_history.yml");
+    run_workflow_guard_scenario(yaml);
+}
+
+/// U4 (§Unit 4 §9): critical unknown hunk blocks audit.
+/// A hunk in a critical path cannot be attributed to any known plan.
+/// change-mapper emits blocked postmerge.changemap.ready with
+/// critical_unknown_count>0, proceed:false. system-auditor short-circuits;
+/// closer/reporter complete with verdict:FAIL.
+#[test]
+fn test_postmerge_scope_unknown_hunk_blocks_audit() {
+    let yaml = load_scenario("tests/scenarios/postmerge_scope_blocked.yml");
+    run_workflow_guard_scenario(yaml);
+}
+
+/// U4 (§Unit 4 §9): pre-emit drift recheck aborts resolved scope.
+/// HEAD/tree changed during scope resolution; the pre-emit drift recheck
+/// aborts before the resolved event is emitted. change-mapper emits blocked
+/// scope instead. No stale resolved event ever reaches the EventLoop.
+#[test]
+fn test_postmerge_scope_drift_blocks_before_emit() {
+    let yaml = load_scenario("tests/scenarios/postmerge_scope_drift.yml");
     run_workflow_guard_scenario(yaml);
 }
 
