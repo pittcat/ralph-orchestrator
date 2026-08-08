@@ -156,7 +156,17 @@ impl CliExecutor {
             command.stdin(Stdio::piped());
         }
 
-        let mut child = command.spawn()?;
+        let mut child = command.spawn().map_err(|e| {
+            std::io::Error::new(
+                e.kind(),
+                format!(
+                    "spawn backend {:?} with workspace {} failed: {}",
+                    cmd,
+                    workspace.display(),
+                    e
+                ),
+            )
+        })?;
 
         #[cfg(unix)]
         {

@@ -452,6 +452,172 @@ mod cli_executor_integration {
             result.is_err(),
             "execute against a nonexistent workspace must return Err, got: {result:?}"
         );
+
+        // R4: the error message must include the missing workspace path so
+        // operator logs are actionable without additional forensics.
+        let err = result.err().expect("already checked is_err above");
+        let err_msg = err.to_string();
+        assert!(
+            err_msg.contains(&*missing.to_string_lossy())
+                || err_msg.contains(missing.to_str().expect("missing path is utf8")),
+            "spawn error message must include the missing workspace path, got: {err_msg}"
+        );
+    }
+
+    // ---------------------------------------------------------------------------
+    // 2026-08-08-001 plan U3: PTY-vs-headless parity — both paths must record
+    // identical env winners for RALPH_EVENTS_FILE, RALPH_WORKSPACE_ROOT, and
+    // PWD when given the same backend.env_vars and workspace.
+    //
+    // Path B (real-subprocess parity): spins up both PtyExecutor and CliExecutor
+    // with the same backend.env_vars and workspace, runs the same marker-writing
+    // script, and asserts the marker contents match.
+    //
+    // PtyExecutor is available in the integration harness (used by the existing
+    // pty_executor_integration.rs suite), so no stub is needed.
+    // ---------------------------------------------------------------------------
+
+    /// R2 confirm: headless CliExecutor and PTY PtyExecutor must produce
+    /// identical env winners for RALPH_EVENTS_FILE, RALPH_WORKSPACE_ROOT, and
+    /// PWD when given the same backend.env_vars and explicit workspace.
+    ///
+    /// The test exercises three assertions:
+    ///   1. RALPH_EVENTS_FILE from backend.env_vars wins in both paths (A2 guard).
+    ///   2. RALPH_WORKSPACE_ROOT and PWD resolve to the explicit workspace even
+    ///      when backend.env_vars carries hostile values (D2 guard).
+    ///   3. Headless marker line 1 == PTY marker line 1 (parity).
+    #[tokio::test]
+    async fn pty_and_headless_env_priority_match_for_same_backend_env() {
+        use ralph_adapters::{PtyConfig, PtyExecutor};
+
+        let workspace = tempfile::TempDir::new().expect("workspace temp dir");
+        let hostile = tempfile::TempDir::new().expect("hostile temp dir");
+        let hat_channel_path = format!("/tmp/hat-channel-{}.jsonl", std::process::id());
+
+        // The marker-writing script records three values:
+        //   line 1: $RALPH_EVENTS_FILE
+        //   line 2: $RALPH_WORKSPACE_ROOT
+        //   line 3: $PWD
+        let script = format!(
+            "printf '%s\\n' \"$RALPH_EVENTS_FILE\" > marker; \
+             printf '%s\\n' \"$RALPH_WORKSPACE_ROOT\" >> marker; \
+             printf '%s\\n' \"$PWD\" >> marker"
+        );
+
+        // Backend env: hat-channel path for RALPH_EVENTS_FILE, hostile paths
+        // for RALPH_WORKSPACE_ROOT and PWD. The explicit workspace (passed to
+        // execute/run_observe) must win for all three in both headless and PTY.
+        let backend_env_vars = vec![
+            ("RALPH_EVENTS_FILE".into(), hat_channel_path.clone()),
+            (
+                "RALPH_WORKSPACE_ROOT".into(),
+                hostile.path().to_string_lossy().into_owned(),
+            ),
+            ("PWD".into(), hostile.path().to_string_lossy().into_owned()),
+        ];
+
+        // ---- Headless path ----
+        let headless_backend = CliBackend {
+            command: "sh".to_string(),
+            args: vec!["-c".to_string(), script.clone()],
+            prompt_mode: PromptMode::Arg,
+            prompt_flag: None,
+            output_format: OutputFormat::Text,
+            env_vars: backend_env_vars.clone(),
+        };
+        let executor = CliExecutor::new(headless_backend);
+        let mut output = Vec::new();
+        executor
+            .execute("", &mut output, None, false, workspace.path())
+            .await
+            .expect("headless execute ok");
+        let headless_marker = std::fs::read_to_string(workspace.path().join("marker"))
+            .expect("read headless marker");
+
+        // ---- PTY path ----
+        let pty_backend = CliBackend {
+            command: "sh".to_string(),
+            args: vec!["-c".to_string(), script],
+            prompt_mode: PromptMode::Arg,
+            prompt_flag: None,
+            output_format: OutputFormat::Text,
+            env_vars: backend_env_vars,
+        };
+        let pty_config = PtyConfig {
+            interactive: false,
+            idle_timeout_secs: 0,
+            cols: 80,
+            rows: 24,
+            workspace_root: workspace.path().to_path_buf(),
+        };
+        let pty_executor = PtyExecutor::new(pty_backend, pty_config);
+        let (_tx, rx) = tokio::sync::watch::channel(false);
+        pty_executor
+            .run_observe("", rx)
+            .await
+            .expect("pty run_observe ok");
+        let pty_marker =
+            std::fs::read_to_string(workspace.path().join("marker")).expect("read pty marker");
+
+        // ---- Parity assertions ----
+        let headless_lines: Vec<&str> = headless_marker.lines().collect();
+        let pty_lines: Vec<&str> = pty_marker.lines().collect();
+        assert_eq!(
+            headless_lines.len(),
+            3,
+            "headless marker must have 3 lines: {headless_marker}"
+        );
+        assert_eq!(
+            pty_lines.len(),
+            3,
+            "pty marker must have 3 lines: {pty_marker}"
+        );
+
+        // A2 guard: RALPH_EVENTS_FILE is the hat-channel path in both paths.
+        assert_eq!(
+            headless_lines[0], hat_channel_path,
+            "headless RALPH_EVENTS_FILE must be hat-channel path"
+        );
+        assert_eq!(
+            pty_lines[0], hat_channel_path,
+            "pty RALPH_EVENTS_FILE must be hat-channel path"
+        );
+
+        // D2 guard: RALPH_WORKSPACE_ROOT and PWD are the explicit workspace in both paths.
+        assert_eq!(
+            headless_lines[1],
+            workspace.path().to_string_lossy(),
+            "headless RALPH_WORKSPACE_ROOT must equal explicit workspace"
+        );
+        assert_eq!(
+            headless_lines[2],
+            workspace.path().to_string_lossy(),
+            "headless PWD must equal explicit workspace"
+        );
+        assert_eq!(
+            pty_lines[1],
+            workspace.path().to_string_lossy(),
+            "pty RALPH_WORKSPACE_ROOT must equal explicit workspace"
+        );
+        assert_eq!(
+            pty_lines[2],
+            workspace.path().to_string_lossy(),
+            "pty PWD must equal explicit workspace"
+        );
+
+        // Parity: all three lines must match between headless and PTY.
+        assert_eq!(
+            headless_lines[0], pty_lines[0],
+            "headless and pty must agree on RALPH_EVENTS_FILE"
+        );
+        assert_eq!(
+            headless_lines[1], pty_lines[1],
+            "headless and pty must agree on RALPH_WORKSPACE_ROOT"
+        );
+        assert_eq!(
+            headless_lines[2], pty_lines[2],
+            "headless and pty must agree on PWD"
+        );
     }
 
     // -----------------------------------------------------------------------
