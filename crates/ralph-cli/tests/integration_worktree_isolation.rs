@@ -871,7 +871,8 @@ fn write_headless_cwd_marker_config(path: &Path, ralph_bin: &Path, backend_scrip
         fs::set_permissions(backend_script, permissions).expect("set executable");
     }
 
-    let config = format!(
+    fs::write(
+        path.join("ralph.yml"),
         r#"cli:
   backend: custom
   command: "./headless-cwd-marker.sh"
@@ -884,9 +885,9 @@ topic_format_whitelist:
   - LOOP_COMPLETE
 tasks:
   enabled: false
-"#
-    );
-    fs::write(path.join("ralph.yml"), config).expect("write ralph.yml");
+"#,
+    )
+    .expect("write ralph.yml");
 }
 
 /// U1 (Acceptance Red for plan 2026-08-08-001): running
@@ -1024,7 +1025,7 @@ fn headless_worktree_backend_writes_only_to_worktree() {
             .map(|rhs| {
                 rhs == expected_workspace
                     || fs::canonicalize(rhs)
-                        .map(|p| p == PathBuf::from(&expected_workspace))
+                        .map(|p| p == Path::new(&expected_workspace))
                         .unwrap_or(false)
             })
             .unwrap_or(false)
@@ -1043,7 +1044,7 @@ fn headless_worktree_backend_writes_only_to_worktree() {
     );
 }
 
-/// AE1 (2026-08-03-004 U1): parallel-forge resume manifest on reuse
+// AE1 (2026-08-03-004 U1): parallel-forge resume manifest on reuse
 
 // ─────────────────────────────────────────────────────────────────────────
 // 2026-08-03-004 U1: parallel-forge resume manifest on reuse
