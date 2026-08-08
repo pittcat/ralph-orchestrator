@@ -1,0 +1,136 @@
+# U3 (plan 2026-08-08-004 §Unit 3 §9): direct-target / no-merge-boundary
+# scope resolution. Two plans on a direct commit chain; change-mapper
+# derives scope_base from first-parent topology, writes scope-manifest.json
+# and diff patches, and emits resolved postmerge.changemap.ready with all
+# U1 scope fields. The EventLoop accepts the event and the loop completes.
+
+name: postmerge_scope_direct_target
+description: Direct-target scope resolution without merge_boundary_path
+
+config:
+  prompt_file: PROMPT.md
+  topic_format_whitelist:
+    - LOOP_COMPLETE
+  max_iterations: 10
+  hats:
+    baseline:
+      subscribes_to:
+        - postmerge.start
+      publishes:
+        - postmerge.baseline.ready
+    change-mapper:
+      subscribes_to:
+        - postmerge.baseline.ready
+      publishes:
+        - postmerge.changemap.ready
+    system-auditor:
+      subscribes_to:
+        - postmerge.changemap.ready
+      publishes:
+        - postmerge.audit.ready
+    closer:
+      subscribes_to:
+        - postmerge.audit.ready
+      publishes:
+        - postmerge.reviewed
+    reporter:
+      subscribes_to:
+        - postmerge.reviewed
+      publishes:
+        - LOOP_COMPLETE
+  event_loop:
+    execution_mode: isolated
+    starting_event: "postmerge.start"
+    completion_promise: "LOOP_COMPLETE"
+    required_events:
+      - "postmerge.audit.ready"
+    event_policy:
+      enabled: true
+      mode: enforce
+      on_violation: reject_with_resume
+      schemas:
+        postmerge.baseline.ready:
+          required_fields:
+            - baseline_valid
+            - artifact_path
+            - head_sha
+            - branch
+          payload: json_object
+        postmerge.changemap.ready:
+          required_fields:
+            - proceed
+            - artifact_path
+            - scope_manifest_path
+            - scope_digest
+            - scope_status
+            - overall_confidence
+            - critical_unknown_count
+            - scope_base_sha
+            - scope_source
+            - plan_match_confidence
+            - high_risk_crossings_count
+          payload: json_object
+        postmerge.audit.ready:
+          required_fields:
+            - proceed
+            - findings_created_count
+            - audit_docs_complete
+            - low_confidence_findings_count
+          payload: json_object
+        postmerge.reviewed:
+          required_fields:
+            - verdict
+            - verdict_confidence
+            - final_review_path
+            - clean_validation_path
+          payload: json_object
+        LOOP_COMPLETE:
+          required_fields:
+            - success
+            - verdict
+            - report_path
+          payload: json_object
+
+mock_responses:
+  - text: |
+      <event topic="postmerge.baseline.ready">
+      {"baseline_valid":true,"artifact_path":".ralph/post-merge/01-baseline.md","head_sha":"abc1234def5678901234567890abcdef1234567890","branch":"main"}
+      </event>
+    hat: baseline
+  - text: |
+      <event topic="postmerge.changemap.ready">
+      {"proceed":true,"artifact_path":".ralph/post-merge/02-change-map.md","scope_manifest_path":".ralph/post-merge/scope-manifest.json","scope_digest":"abcd1234ef5678901234567890abcdef1234567890abcdef1234567890abcdef1234567890","scope_status":"resolved","overall_confidence":90,"critical_unknown_count":0,"scope_base_sha":"abc1234def5678901234567890abcdef1234567890","scope_source":"direct-target","plan_match_confidence":"high","high_risk_crossings_count":0}
+      </event>
+    hat: change-mapper
+  - text: |
+      <event topic="postmerge.audit.ready">
+      {"proceed":true,"findings_created_count":0,"audit_docs_complete":true,"low_confidence_findings_count":0}
+      </event>
+    hat: system-auditor
+  - text: |
+      <event topic="postmerge.reviewed">
+      {"verdict":"PASS","verdict_confidence":"high","final_review_path":".ralph/post-merge/15-final-review.md","clean_validation_path":".ralph/post-merge/14-clean-validation.md"}
+      </event>
+    hat: closer
+  - text: |
+      <event topic="LOOP_COMPLETE">
+      {"success":true,"verdict":"PASS","report_path":".ralph/post-merge/REPORT.md"}
+      </event>
+    hat: reporter
+
+expected:
+  iterations: 5
+  events:
+    - topic: postmerge.baseline.ready
+    - topic: postmerge.changemap.ready
+  completion: true
+  payload_matches:
+    - topic: postmerge.changemap.ready
+      fields:
+        proceed: true
+        scope_manifest_path: ".ralph/post-merge/scope-manifest.json"
+        scope_status: "resolved"
+        overall_confidence: 90
+        critical_unknown_count: 0
+        scope_base_sha: "abc1234def5678901234567890abcdef1234567890"
+        scope_source: "direct-target"

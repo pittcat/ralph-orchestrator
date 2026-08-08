@@ -306,6 +306,9 @@ hats:
       - No unresolved conflicts
       - Working tree has no unexpected tracked modifications (`.ralph/` noise excluded if present)
       B. Record baseline snapshot: repo, branch, HEAD, time, build env, dependency versions, OS/runtime, env vars, feature flags, config files, external service versions, test commands, test results.
+      Also record and anchor: target branch, HEAD SHA, tree content hash. These define the locked identity that all downstream scope attribution must trace back to.
+      If prompt provides `scope_base` (40-char SHA), validate it exists and is readable as a commit; if invalid, record the failure in the artifact and set baseline_valid: false.
+      If prompt provides `merge_boundary_path`, read it as an OPTIONAL cross-check (do NOT block on missing). Record whether it was present and what it contained.
       C. Run the project's existing standard verification once (build + unit + integration + static check as the repo defines; default full gate for this repo is `./scripts/run-tests.sh` unless prompt overrides). Purpose: prove the audit starts from a known state — not to hunt new bugs.
 
       ### Problems to look for (baseline validity only)
@@ -349,35 +352,66 @@ hats:
       - Read trigger `artifact_path` (the value in the payload — do not assume a fixed filename) via `cat`/`Read`. That file is the baseline artifact.
       - Also read trigger `baseline_valid`.
       - If `baseline_valid` is false: write a short `.ralph/post-merge/02-change-map.md` noting short-circuit, emit `proceed: false`, stop.
+      - Read the post-merge prompt at the fixed path `.ralph/post-merge.prompt.md` (operator-written; may contain `scope_base` and `merge_boundary_path`).
+
+      ### Scope base resolution (D5 — fixed protocol)
+      1. If the prompt provides `scope_base` (40-char SHA):
+         - Validate it is a valid Git SHA and is an ancestor of every candidate commit you discover.
+         - If validation fails: write a blocker artifact, emit `proceed: false`, stop.
+      2. If the prompt provides `merge_boundary_path`:
+         - Read that file as an OPTIONAL cross-check (log what it contains; do NOT block on missing).
+      3. If neither is provided:
+         - Use first-parent / merge-parent topology to derive the scope base:
+           * On a direct-target branch (no merge commits from topic branches): the scope base is the first commit that differs from the main/trunk branch, found by walking first-parent chain.
+           * On a branch with merge commits: the scope base is the merge base of HEAD and the primary development branch.
+         - Record `scope_source: direct-target` or `scope_source: branch-merge` accordingly.
 
       ### Plan discovery + confidence
       1. If the prompt lists development plan paths/IDs, use that list as authoritative (`plan_match_confidence: high` when all resolve).
       2. If the prompt omits plans, discover via `git log` / commit chronology / branch subjects and match to `docs/plans/` (and repo plan conventions). Record unmatched commits as unmatched. For same-branch sequential plans, prefer commit order and completion evidence over merge ancestry.
       3. Score `plan_match_confidence` high|medium|low. If low and high-risk crossings depend on ambiguous matches: deepen matching once (more log/plan reads) before emit; if still low, keep low and document ambiguities in the artifact for auditor/reporter.
 
-      ### Work
-      A. List added/changed capabilities (features, commands, interfaces, config, state, formats, fields, background jobs, deps, caches, cleanup, logs, permissions).
-      B. Mark co-touched areas (same module / structure / state / config / external service / lifecycle stage across plans).
-      C. Sketch system data flow (input → parse → config → orchestration → domain → storage → state → output → cleanup).
-      D. Record dependencies (A→B contracts and failure impact).
-
-      ### Problems to surface into the map (not Findings yet unless obviously a defect)
-      Orphan capabilities; multi-owner state; new behaviour without tests; new files without cleanup; interfaces without callers; configs without defaults; errors without owners; similar capabilities across plans; hidden cross-plan deps.
-
-      ### Artifact (required)
-      `.ralph/post-merge/02-change-map.md` with four tables:
-      1. Capability change table
-      2. Shared state table
-      3. Dependency table
-      4. High-risk crossing table (crossing, plans, risk reason, later audit focus)
+      ### Scope manifest (D3 — required artifact)
+      Write `.ralph/post-merge/scope-manifest.json` with this byte-stable JSON structure:
+      ```json
+      {
+        "version": "1",
+        "scope_base_sha": "<40-char hex or derived SHA>",
+        "scope_source": "explicit|direct-target|branch-merge|inferred",
+        "plans": [
+          {
+            "plan_path": "<string>",
+            "sha256": "<64-char hex>",
+            "candidate_commits": ["<40-char hex>", "..."]
+          }
+        ],
+        "scope_status": "resolved|ambiguous|blocked",
+        "overall_confidence": 0,
+        "critical_unknown_count": 0,
+        "diff_paths": {
+          "full": ".ralph/post-merge/diffs/full.patch",
+          "scoped": ".ralph/post-merge/diffs/scoped.patch",
+          "interleaved": ".ralph/post-merge/diffs/interleaved.patch",
+          "override": ".ralph/post-merge/diffs/override.patch",
+          "unknown": ".ralph/post-merge/diffs/unknown.patch"
+        }
+      }
+      ```
+      - Compute SHA256 of each plan file bytes (not path).
+      - Derive diffs using `git diff <scope_base_sha>..HEAD -- <plan-relevant-paths>`.
+      - Classify each changed hunk: `full` (all changes), `scoped` (attributable to a plan), `interleaved` (multiple plans touch same file), `override` (later plan supersedes earlier), `unknown` (cannot attribute).
 
       ### Emit
-      Write artifact → policy-check → emit `postmerge.changemap.ready` with `proceed`, `artifact_path`, `high_risk_crossings_count`, `plan_match_confidence`.
+      Write artifact-first: `.ralph/post-merge/02-change-map.md` → `.ralph/post-merge/scope-manifest.json` → policy-check → emit `postmerge.changemap.ready` with:
+      - `proceed: true` only when `scope_status == resolved` AND `overall_confidence >= 90` AND `critical_unknown_count == 0`
+      - `scope_manifest_path`, `scope_digest` (SHA256 of manifest JSON), `scope_status`, `overall_confidence`, `critical_unknown_count`, `scope_base_sha`, `scope_source`
 
       ### DON'T
       - Evaluate "good/bad code" beyond mapping risk crossings
       - Modify production code
       - Skip plan discovery when the prompt omitted the list
+      - Use merge_boundary as a required input (it is optional cross-check only)
+      - Re-emit plan files or scan runtime ledgers for plan content
 
   system-auditor:
     name: "System Auditor"

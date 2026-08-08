@@ -4811,6 +4811,17 @@ fn test_ce_executor_pipeline_loop_review_artifact_blocked() {
     run_workflow_guard_scenario(yaml);
 }
 
+/// U3 (plan 2026-08-08-004 §Unit 3 §9): direct-target / no-merge-boundary
+/// scope resolution. Two plans on a direct commit chain; change-mapper
+/// derives scope_base from first-parent topology, writes scope-manifest.json
+/// and diff patches, and emits resolved postmerge.changemap.ready with all
+/// U1 scope fields. The EventLoop accepts the event and the loop completes.
+#[test]
+fn test_postmerge_scope_direct_target_without_merge_boundary() {
+    let yaml = load_scenario("tests/scenarios/postmerge_scope_direct_target.yml");
+    run_workflow_guard_scenario(yaml);
+}
+
 // ──────────────────────────────────────────────────────────────────────
 // 2026-08-08-004 plan Unit 1: scope handoff consistency RED tests
 // ──────────────────────────────────────────────────────────────────────
