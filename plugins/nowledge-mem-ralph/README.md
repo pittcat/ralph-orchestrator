@@ -218,6 +218,35 @@ save-memory 写入;不嵌入 marker / 非法 marker / 非 `finalize:true`
   / `FAILED_OPEN` / `UNKNOWN`;nmem 失败时 Stop 仍 exit 0,不阻塞
   Claude session。
 
+### Marker source contract
+
+Stop 与 SubagentStop hook **只**从 `last_assistant_message` 读取单个
+bounded `<!-- nowledge-memory-finalize ... -->` 标记;`transcript_path`
+及任何其他来源都永不读取(plugin-vs-runtime 边界由本 README 拥有:
+runtime HARD RULES 在 `CLAUDE.md` / `AGENTS.md` 中作用于 `ralph-cli`
+/ `ralph-core`,plugin contract 变更只需 patch
+`plugins/knowledge-mem-ralph/**` 与本 README)。
+
+## Internal SSOT — sys.modules key naming
+
+所有 `scripts/*.py` 模块在 `importlib` 加载时统一以
+`_nowledge_mem_ralph_<role>` 注册到 `sys.modules`,其中 `<role>` 是
+模块 stem。canonical 列表:
+
+| 模块文件 | sys.modules key |
+|---|---|
+| `scripts/recall.py` | `_nowledge_mem_ralph_recall` |
+| `scripts/audit_hook.py` | `_nowledge_mem_ralph_audit` |
+| `scripts/memory_marker.py` | `_nowledge_mem_ralph_memory_marker` |
+| `scripts/memory_finalization.py` | `_nowledge_mem_ralph_memory_finalization` |
+| `scripts/memory_writer.py` | `_nowledge_mem_ralph_writer` |
+| `scripts/memory.py` | `_nowledge_mem_ralph_save` |
+| `scripts/_atomic_state.py` | `_nowledge_mem_ralph_atomic_state` |
+
+`memory_via_finalization` 与 `memory_writer_via_finalization` 是早期
+占位 key,在 finalization 重构后已重命名为 `save` / `writer`;剩余的
+旧引用应同步替换。
+
 ## nmem 排障
 
 - `nmem: command not found` — 安装 nmem CLI（如 `uv tool install nmem-cli`），
