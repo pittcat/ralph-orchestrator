@@ -569,3 +569,83 @@ def test_design_and_readme_cover_required_contracts() -> None:
             f"plugin README must cover {key!r} so operators never need "
             "to read source"
         )
+
+
+# --- Unit 3 — auto-finalization doc contract ---------------------------------
+#
+# Stable anchors for the agent-facing docs of the auto-finalization
+# capability. These tests intentionally do not pin whole-file content
+# (prose evolves); they only require that the canonical anchors
+# survive so the agent can find them when emitting finalization
+# markers.
+# ---------------------------------------------------------------------------
+
+SAVE_MEMORY_COMMAND = PLUGIN_DIR / "commands" / "save-memory.md"
+SAVE_MEMORY_SKILL = PLUGIN_DIR / "skills" / "save-memory" / "SKILL.md"
+
+
+def test_readme_lifecycle_documents_auto_finalization() -> None:
+    """README lifecycle contract must describe bounded auto-finalization."""
+    text = README.read_text(encoding="utf-8")
+    lowered = text.lower()
+    assert "nowledge-memory-finalize" in lowered, (
+        "README must name the bounded marker so agents can find it"
+    )
+    assert "finalize:true" in lowered or "finalize: true" in lowered, (
+        "README must require the explicit ``finalize:true`` opt-in"
+    )
+    assert "auto-finalization" in lowered or "auto finalization" in lowered, (
+        "README must mention auto-finalization in the lifecycle section"
+    )
+
+
+def test_save_memory_command_documents_marker_and_finalize() -> None:
+    """The save-memory command must describe the bounded marker."""
+    text = SAVE_MEMORY_COMMAND.read_text(encoding="utf-8")
+    assert "nowledge-memory-finalize" in text, (
+        "save-memory command must document the marker name"
+    )
+    assert "finalize" in text.lower(), (
+        "save-memory command must document the finalize opt-in"
+    )
+
+
+def test_save_memory_skill_documents_marker_and_thread_boundary() -> None:
+    """The save-memory skill must describe the marker and the Thread boundary."""
+    text = SAVE_MEMORY_SKILL.read_text(encoding="utf-8")
+    assert "nowledge-memory-finalize" in text, (
+        "save-memory skill must document the marker name"
+    )
+    assert "finalize" in text.lower(), (
+        "save-memory skill must document the finalize opt-in"
+    )
+    assert "thread" in text.lower() or "会话" in text, (
+        "save-memory skill must distinguish Memory from raw Thread"
+    )
+
+
+def test_docs_forbid_transcript_and_thread_as_memory() -> None:
+    """Documentation must not encourage transcript or Thread as Memory."""
+    for path in (README, SAVE_MEMORY_COMMAND, SAVE_MEMORY_SKILL):
+        text = path.read_text(encoding="utf-8")
+        lowered = text.lower()
+        assert "memory is the full thread" not in lowered
+        assert "save the entire thread" not in lowered
+        assert "transcript as memory" not in lowered
+        if "transcript_path" in lowered:
+            forbidden_context = any(
+                marker in text
+                for marker in (
+                    "永不读取",
+                    "never reads",
+                    "is forbidden",
+                    "forbidden",
+                    "must not read",
+                    "do not read",
+                    "不读取",
+                )
+            )
+            assert forbidden_context, (
+                f"{path.relative_to(ROOT)} mentions transcript_path but "
+                "without a forbidden / never-reads context"
+            )
