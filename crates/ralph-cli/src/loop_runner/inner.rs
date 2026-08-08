@@ -3180,8 +3180,22 @@ pub(super) async fn run_loop_impl_inner(
                 .await
             } else {
                 let executor = CliExecutor::new(effective_backend.clone());
+                // Plan 2026-08-08-001 U3: thread the resolved workspace
+                // (already pointed at the worktree by `--worktree` /
+                // `--worktree-path` in `run.rs`) into the headless
+                // executor so the backend chdir's into the worktree, not
+                // the parent checkout. The PTY branch above already does
+                // this through `PtyConfig.workspace_root`; this is the
+                // symmetric headless wiring.
+                let workspace_root = std::path::Path::new(&config.core.workspace_root);
                 let result = executor
-                    .execute(&prompt, stdout(), timeout, verbosity == Verbosity::Verbose)
+                    .execute(
+                        &prompt,
+                        stdout(),
+                        timeout,
+                        verbosity == Verbosity::Verbose,
+                        workspace_root,
+                    )
                     .await?;
                 Ok(ExecutionOutcome {
                     output: normalize_cli_output_for_parsing(

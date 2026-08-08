@@ -864,7 +864,9 @@ fn write_headless_cwd_marker_config(path: &Path, ralph_bin: &Path, backend_scrip
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        let mut permissions = fs::metadata(backend_script).expect("metadata").permissions();
+        let mut permissions = fs::metadata(backend_script)
+            .expect("metadata")
+            .permissions();
         permissions.set_mode(0o755);
         fs::set_permissions(backend_script, permissions).expect("set executable");
     }
@@ -913,8 +915,9 @@ fn headless_worktree_backend_writes_only_to_worktree() {
                 .map(PathBuf::from)
                 .unwrap_or_else(|| PathBuf::from("target"));
             for profile in ["debug", "release"] {
-                let candidate =
-                    target_dir.join(profile).join(format!("ralph{}", std::env::consts::EXE_SUFFIX));
+                let candidate = target_dir
+                    .join(profile)
+                    .join(format!("ralph{}", std::env::consts::EXE_SUFFIX));
                 if candidate.exists() {
                     return Some(candidate);
                 }
@@ -988,20 +991,54 @@ fn headless_worktree_backend_writes_only_to_worktree() {
     // Confirm the recorded cwd inside the marker matches the worktree —
     // tighter contract than "marker file exists" alone: even if the bug
     // shipped marker files to both locations, the cwd contract would
-    // catch it.
+    // catch it. On macOS, the test may observe `/var/tmp/...` while the
+    // backend reports the canonical `/private/var/tmp/...`, so we resolve
+    // both paths through std::fs::canonicalize and compare those instead
+    // of relying on the raw string.
     let marker_body = fs::read_to_string(&worktree_marker).expect("read marker");
-    assert!(
-        marker_body.lines().next().is_some_and(|line| line == worktree_path.to_string_lossy()),
-        "marker must record pwd={}, got body:\n{marker_body}",
-        worktree_path.display()
+    let recorded_pwd_raw = marker_body
+        .lines()
+        .next()
+        .expect("marker must record pwd on line 1");
+    let recorded_pwd =
+        fs::canonicalize(recorded_pwd_raw).unwrap_or_else(|_| PathBuf::from(recorded_pwd_raw));
+    let expected_pwd = fs::canonicalize(&worktree_path).unwrap_or_else(|_| worktree_path.clone());
+    assert_eq!(
+        recorded_pwd,
+        expected_pwd,
+        "marker must record pwd={}, got raw={}",
+        expected_pwd.display(),
+        recorded_pwd_raw
     );
-    let expected_workspace = worktree_path.to_string_lossy().into_owned();
+    // Compare the recorded env vars by their canonical path as well:
+    // the shell sees `pwd -P`, so for symlinked parents (e.g. macOS
+    // /var/tmp vs /private/var/tmp) the env will carry the canonical
+    // form, while the parent observes the symlinked path.
+    let expected_workspace = fs::canonicalize(&worktree_path)
+        .unwrap_or_else(|_| worktree_path.clone())
+        .to_string_lossy()
+        .into_owned();
+    let workspace_eq = |line: &str, var: &str| -> bool {
+        let prefix = format!("{var}=");
+        line.strip_prefix(&prefix)
+            .map(|rhs| {
+                rhs == expected_workspace
+                    || fs::canonicalize(rhs)
+                        .map(|p| p == PathBuf::from(&expected_workspace))
+                        .unwrap_or(false)
+            })
+            .unwrap_or(false)
+    };
+    let has_root = marker_body
+        .lines()
+        .any(|l| workspace_eq(l, "RALPH_WORKSPACE_ROOT"));
+    let has_pwd = marker_body.lines().any(|l| workspace_eq(l, "PWD"));
     assert!(
-        marker_body.contains(&format!("RALPH_WORKSPACE_ROOT={expected_workspace}")),
+        has_root,
         "marker must record RALPH_WORKSPACE_ROOT={expected_workspace}, got:\n{marker_body}"
     );
     assert!(
-        marker_body.contains(&format!("PWD={expected_workspace}")),
+        has_pwd,
         "marker must record PWD={expected_workspace}, got:\n{marker_body}"
     );
 }
