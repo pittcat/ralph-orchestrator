@@ -254,3 +254,211 @@ def test_unknown_event_returns_bug_exit(isolated_plugin_data: Path) -> None:
     assert result.returncode == 2, (
         f"unknown event must exit 2 (bug), got {result.returncode}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Unit 1 — bounded finalization marker extraction (auto-finalize)
+#
+# The Stop / SubagentStop hook now extracts a single bounded
+# ``<!-- nowledge-memory-finalize ... -->`` block from
+# ``last_assistant_message`` and hands the candidate to the save-memory
+# chain. The hook MUST stay audit-only when the marker is missing or
+# malformed, and MUST never read ``transcript_path`` or persist the
+# full assistant message. These tests lock that contract.
+# ---------------------------------------------------------------------------
+
+
+def _valid_candidate_marker(**overrides) -> str:
+    """Build a legal finalization marker (one bounded fenced block)."""
+    candidate = {
+        "memory_type": "durable_decision",
+        "title": "Use atomic os.replace for state.json writes",
+        "claim": "Atomic writes avoid torn state.",
+        "why_it_matters": "Half-written files break env detection.",
+        "evidence": "hooks/hooks.json timeout=5; writer test.",
+        "applies_when": "any state.json write",
+        "scope": "plugin:knowledge-mem-ralph",
+        "verification": "pytest proves no torn writes.",
+        "critical_assumptions": [],
+        "critical_ambiguities": [],
+        "metrics": {
+            "confidence": 95,
+            "evidence_coverage": 88,
+            "reusability": 90,
+            "stability": 92,
+            "scope_clarity": 96,
+            "verifiability": 90,
+            "novelty": 40,
+        },
+        "finalize": True,
+    }
+    candidate.update(overrides)
+    body = json.dumps(candidate, ensure_ascii=False)
+    return f"<!-- nowledge-memory-finalize\n{body}\n-->"
+
+
+def _ralph_env() -> dict[str, str]:
+    return {
+        "RALPH_NOWLEDGE_ENABLED": "1",
+        "RALPH_CURRENT_LOOP_ID": "loop-xyz",
+        "RALPH_CURRENT_HAT": "planner",
+    }
+
+
+def test_stop_extracts_valid_finalization_marker(isolated_plugin_data: Path) -> None:
+    """Stop hook with a legal marker produces a candidate audit record."""
+    marker = _valid_candidate_marker()
+    payload = {
+        "session_id": "sess-1",
+        "transcript_path": "/etc/passwd",
+        "last_assistant_message": f"Here is the lesson:\n\n{marker}\n",
+    }
+    result = _run_hook("Stop", payload, extra_env=_ralph_env())
+    assert result.returncode == 0, (
+        f"Stop hook must exit 0, got {result.returncode}: stderr={result.stderr}"
+    )
+    state_path = isolated_plugin_data / "loop-xyz" / "state.json"
+    payload_data = json.loads(state_path.read_text(encoding="utf-8"))
+    # The hook must record a candidate audit block without leaking the message.
+    assert payload_data["hook"] == "Stop"
+    assert payload_data["audit_only"] is False
+    assert payload_data["finalization"]["status"] == "PARSED"
+    assert payload_data["finalization"]["memory_digest"], "must surface a stable digest"
+    serialized = json.dumps(payload_data, ensure_ascii=True)
+    assert "Atomic writes avoid torn state" not in serialized, (
+        "Stop hook must NOT persist the full assistant message"
+    )
+    assert "/etc/passwd" not in serialized, (
+        "Stop hook must NOT record transcript_path"
+    )
+
+
+def test_stop_without_marker_stays_audit_only(isolated_plugin_data: Path) -> None:
+    """Stop hook with no marker keeps the old audit-only behaviour."""
+    payload = {
+        "session_id": "sess-1",
+        "last_assistant_message": "Just a plain final message, no marker here.",
+    }
+    result = _run_hook("Stop", payload, extra_env=_ralph_env())
+    assert result.returncode == 0
+    state_data = json.loads(
+        (isolated_plugin_data / "loop-xyz" / "state.json").read_text(encoding="utf-8")
+    )
+    assert state_data["audit_only"] is True
+    assert state_data.get("finalization", {}).get("status") == "SKIPPED"
+
+
+def test_stop_with_finalize_false_is_skipped(isolated_plugin_data: Path) -> None:
+    """A marker without ``finalize:true`` is SKIPPED, not SAVED."""
+    marker = _valid_candidate_marker(finalize=False)
+    payload = {
+        "session_id": "sess-1",
+        "last_assistant_message": f"Lesson draft:\n\n{marker}\n",
+    }
+    result = _run_hook("Stop", payload, extra_env=_ralph_env())
+    assert result.returncode == 0
+    state_data = json.loads(
+        (isolated_plugin_data / "loop-xyz" / "state.json").read_text(encoding="utf-8")
+    )
+    assert state_data["audit_only"] is True
+    assert state_data.get("finalization", {}).get("status") == "SKIPPED"
+
+
+def test_stop_with_duplicate_marker_is_rejected(isolated_plugin_data: Path) -> None:
+    """Two markers in one message are rejected; parser refuses to pick one."""
+    marker = _valid_candidate_marker()
+    payload = {
+        "session_id": "sess-1",
+        "last_assistant_message": f"first\n{marker}\nmiddle\n{marker}\n",
+    }
+    result = _run_hook("Stop", payload, extra_env=_ralph_env())
+    assert result.returncode == 0
+    state_data = json.loads(
+        (isolated_plugin_data / "loop-xyz" / "state.json").read_text(encoding="utf-8")
+    )
+    assert state_data.get("finalization", {}).get("status") in {"REJECTED", "SKIPPED"}
+
+
+def test_stop_with_oversized_marker_is_rejected(isolated_plugin_data: Path) -> None:
+    """A marker payload larger than the 16 KiB UTF-8 ceiling is rejected."""
+    # Pad the candidate body to push the marker well past 16 KiB.
+    candidate = {
+        "memory_type": "durable_decision",
+        "title": "Use atomic os.replace for state.json writes",
+        "claim": "Atomic writes avoid torn state.",
+        "why_it_matters": "Half-written files break env detection.",
+        "evidence": "x" * (20 * 1024),
+        "applies_when": "any state.json write",
+        "scope": "plugin:knowledge-mem-ralph",
+        "verification": "pytest proves no torn writes.",
+        "critical_assumptions": [],
+        "critical_ambiguities": [],
+        "metrics": {
+            "confidence": 95,
+            "evidence_coverage": 88,
+            "reusability": 90,
+            "stability": 92,
+            "scope_clarity": 96,
+            "verifiability": 90,
+            "novelty": 40,
+        },
+        "finalize": True,
+    }
+    body = json.dumps(candidate)
+    marker = f"<!-- nowledge-memory-finalize\n{body}\n-->"
+    payload = {"session_id": "sess-1", "last_assistant_message": marker}
+    result = _run_hook("Stop", payload, extra_env=_ralph_env())
+    assert result.returncode == 0
+    state_data = json.loads(
+        (isolated_plugin_data / "loop-xyz" / "state.json").read_text(encoding="utf-8")
+    )
+    assert state_data.get("finalization", {}).get("status") == "REJECTED"
+
+
+def test_stop_with_malformed_marker_is_rejected(isolated_plugin_data: Path) -> None:
+    """A marker with bad JSON inside is rejected, not silently accepted."""
+    payload = {
+        "session_id": "sess-1",
+        "last_assistant_message": "<!-- nowledge-memory-finalize\n{not-json}\n-->",
+    }
+    result = _run_hook("Stop", payload, extra_env=_ralph_env())
+    assert result.returncode == 0
+    state_data = json.loads(
+        (isolated_plugin_data / "loop-xyz" / "state.json").read_text(encoding="utf-8")
+    )
+    assert state_data.get("finalization", {}).get("status") == "REJECTED"
+
+
+def test_stop_never_reads_transcript_path(isolated_plugin_data: Path) -> None:
+    """``transcript_path`` must NEVER be opened even when a legal marker is present."""
+    payload = {
+        "session_id": "sess-1",
+        "transcript_path": "/etc/passwd",
+        "last_assistant_message": _valid_candidate_marker(),
+    }
+    result = _run_hook("Stop", payload, extra_env=_ralph_env())
+    assert result.returncode == 0
+    state_data = json.loads(
+        (isolated_plugin_data / "loop-xyz" / "state.json").read_text(encoding="utf-8")
+    )
+    serialized = json.dumps(state_data, ensure_ascii=True)
+    assert "/etc/passwd" not in serialized
+
+
+def test_subagent_stop_uses_same_bounded_path(isolated_plugin_data: Path) -> None:
+    """SubagentStop mirrors Stop: same parser, same audit contract."""
+    marker = _valid_candidate_marker()
+    payload = {
+        "session_id": "worker-1",
+        "agent_id": "worker-1",
+        "transcript_path": "/not/read",
+        "last_assistant_message": f"Lesson:\n\n{marker}\n",
+    }
+    result = _run_hook("SubagentStop", payload, extra_env=_ralph_env())
+    assert result.returncode == 0
+    state_data = json.loads(
+        (isolated_plugin_data / "loop-xyz" / "state.json").read_text(encoding="utf-8")
+    )
+    assert state_data["hook"] == "SubagentStop"
+    assert state_data["audit_only"] is False
+    assert state_data["finalization"]["status"] == "PARSED"
