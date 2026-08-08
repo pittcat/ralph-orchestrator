@@ -379,7 +379,10 @@ def test_stop_with_duplicate_marker_is_rejected(isolated_plugin_data: Path) -> N
     state_data = json.loads(
         (isolated_plugin_data / "loop-xyz" / "state.json").read_text(encoding="utf-8")
     )
-    assert state_data.get("finalization", {}).get("status") in {"REJECTED", "SKIPPED"}
+    # Fix U5 correctness:C2: duplicate markers MUST surface as REJECTED
+    # (not SKIPPED) so the contract violation is visible in audit.
+    assert state_data.get("finalization", {}).get("status") == "REJECTED"
+    assert "duplicate" in state_data["finalization"]["reason"].lower()
 
 
 def test_stop_with_oversized_marker_is_rejected(isolated_plugin_data: Path) -> None:

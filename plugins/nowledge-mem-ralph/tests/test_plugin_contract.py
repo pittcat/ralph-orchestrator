@@ -649,3 +649,47 @@ def test_docs_forbid_transcript_and_thread_as_memory() -> None:
                 f"{path.relative_to(ROOT)} mentions transcript_path but "
                 "without a forbidden / never-reads context"
             )
+
+
+# ---------------------------------------------------------------------------
+# U5 (fixer) — bounded constants SSOT
+#
+# The 16 KiB cap, the marker name, and the ``_FINALIZE_REQUIRED``
+# sentinel are part of the agent-visible parser contract. The contract
+# test pins them so a future refactor cannot silently widen the gate.
+# ---------------------------------------------------------------------------
+
+
+def test_marker_constants_match_documented_limits() -> None:
+    """``MARKER_NAME`` / ``MAX_MARKER_BYTES`` / ``_FINALIZE_REQUIRED`` SSOT."""
+    import importlib.util
+    import sys
+
+    marker_path = PLUGIN_DIR / "scripts" / "memory_marker.py"
+    spec = importlib.util.spec_from_file_location("_marker_constants_test", marker_path)
+    assert spec and spec.loader
+    marker_mod = importlib.util.module_from_spec(spec)
+    sys.modules["_marker_constants_test"] = marker_mod
+    spec.loader.exec_module(marker_mod)
+
+    assert marker_mod.MARKER_NAME == "nowledge-memory-finalize", (
+        f"MARKER_NAME drifted: {marker_mod.MARKER_NAME!r}"
+    )
+    assert marker_mod.MAX_MARKER_BYTES == 16 * 1024, (
+        f"MAX_MARKER_BYTES drifted: {marker_mod.MAX_MARKER_BYTES!r}"
+    )
+    assert marker_mod._FINALIZE_REQUIRED is True, (
+        "_FINALIZE_REQUIRED drifted; the parser must require the JSON boolean True"
+    )
+    # The escaped pattern stores dashes as ``\-``, so check both
+    # the canonical marker name (escaped) and the negative look-ahead
+    # that excludes variants.
+    pattern = marker_mod._OPEN_TAG_RE.pattern
+    assert "nowledge" in pattern and "memory" in pattern and "finalize" in pattern, (
+        f"_OPEN_TAG_RE must encode the canonical name, got {pattern!r}"
+    )
+    assert marker_mod._VARIANT_TAG_RE.search(
+        "<!-- nowledge-memory-finalize-v2\n{}"
+    ), (
+        "_VARIANT_TAG_RE must match the -v2 variant so callers can REJECT it"
+    )
