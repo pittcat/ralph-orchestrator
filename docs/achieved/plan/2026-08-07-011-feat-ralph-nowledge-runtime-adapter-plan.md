@@ -15,7 +15,7 @@ deepened: 2026-08-07
 
 让 Ralph runtime 成为 Nowledge 自动读写的唯一生命周期所有者：显式启用后，loop 在 payload/preset hard gate 通过且 backend 启动前检索相关 Memory；终态把原始目标、运行摘要和 agent 主动整理的结构化 handoff 写入稳定 Thread；只有新 handoff 批次才执行 triage + distill。所有 nmem 运行时失败均有界、可观测、fail-open，不改变原 loop 终态。
 
-本计划只修改 Ralph Rust runtime、agent-facing guide、配置与测试，不创建或安装 Claude Code 插件。专用插件由独立计划 `docs/plans/2026-08-07-010-feat-nowledge-ralph-plugin-plan.md` 负责；该引用只说明职责归属，不是前置依赖。即使插件计划完全未实施，本计划仍通过直接调用 `nmem` CLI 与 fake-nmem 测试独立达到 Definition of Done，默认关闭路径也不要求任何插件存在。严格串行执行 `U1 → U2 → U3 → U4 → U5`。
+本计划只修改 Ralph Rust runtime、agent-facing guide、配置与测试，不创建或安装 Claude Code 插件。专用插件由独立计划 `docs/achieved/plan/2026-08-07-010-feat-nowledge-ralph-plugin-plan.md` 负责；该引用只说明职责归属，不是前置依赖。即使插件计划完全未实施，本计划仍通过直接调用 `nmem` CLI 与 fake-nmem 测试独立达到 Definition of Done，默认关闭路径也不要求任何插件存在。严格串行执行 `U1 → U2 → U3 → U4 → U5`。
 
 ## 0. 计划状态
 

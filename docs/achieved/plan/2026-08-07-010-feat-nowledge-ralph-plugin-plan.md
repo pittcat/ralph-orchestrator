@@ -15,7 +15,7 @@ deepened: 2026-08-07
 
 在本仓库新增 `plugins/nowledge-mem-ralph/`，作为 Ralph 项目环境专用的 Claude Code 插件。插件只暴露受控的 Memory 查询和状态检查，不设置 Session/Stop/SubagentStop/SessionEnd hooks，不自动保存会话，不注入 Working Memory。`scripts/setup_nowledge_ralph.py` 只迁移 Claude Code 的 project scope：安装专用插件、移除项目级 `nowledge-mem@nowledge-community` 并保留数据，用户级通用插件保持不变。
 
-本计划仅开发插件包装与安装迁移，不实现 Ralph runtime 的检索、Thread 保存或 distill；这些内容属于独立计划 `docs/plans/2026-08-07-011-feat-ralph-nowledge-runtime-adapter-plan.md`。该引用只说明职责归属，不是前置依赖：即使适配计划完全未实施，本计划仍必须独立达到 Definition of Done。严格串行执行 `U1 → U2`，每个 Unit 完成 Acceptance Red、Unit Red、Green、Refactor、Integration、Regression 后才能继续。
+本计划仅开发插件包装与安装迁移，不实现 Ralph runtime 的检索、Thread 保存或 distill；这些内容属于独立计划 `docs/achieved/plan/2026-08-07-011-feat-ralph-nowledge-runtime-adapter-plan.md`。该引用只说明职责归属，不是前置依赖：即使适配计划完全未实施，本计划仍必须独立达到 Definition of Done。严格串行执行 `U1 → U2`，每个 Unit 完成 Acceptance Red、Unit Red、Green、Refactor、Integration、Regression 后才能继续。
 
 ## 0. 计划状态
 

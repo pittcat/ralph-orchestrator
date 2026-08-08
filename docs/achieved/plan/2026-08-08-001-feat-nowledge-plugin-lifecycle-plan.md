@@ -2,7 +2,7 @@
 title: Ralph 专用 Nowledge 插件生命周期与记忆编排
 type: feat
 date: 2026-08-08
-origin: docs/plans/2026-08-07-010-feat-nowledge-ralph-plugin-plan.md
+origin: docs/achieved/plan/2026-08-07-010-feat-nowledge-ralph-plugin-plan.md
 artifact_contract: ce-unified-plan/v1
 artifact_readiness: implementation-ready
 product_contract_source: ce-plan-bootstrap
@@ -17,7 +17,7 @@ execution: code
 
 本计划是插件侧的主计划。Nowledge 的 search、Memory 格式、质量评估、去重、保存和错误处理全部由插件拥有；Ralph loop 不新增 Memory 业务适配，只继续提供现有的 loop/hat/wave/attempt 环境信息。插件可以提供 `memory-evaluator` subagent 做语义评估，但保存权限不绑定普通 hat、终态 owner、finalizer、reporter 或 coordinator。
 
-现有 `docs/plans/2026-08-07-010-feat-nowledge-ralph-plugin-plan.md` 保持为已完成的插件安装与只读能力计划，不原地改写。现有 `docs/plans/2026-08-07-011-feat-ralph-nowledge-runtime-adapter-plan.md` 中“Rust runtime 直接拥有全部 nmem 生命周期”的设计不作为本计划的实现依据；需要在后续 Ralph 适配实施前按本计划的 bridge contract 重写或替换。
+现有 `docs/achieved/plan/2026-08-07-010-feat-nowledge-ralph-plugin-plan.md` 保持为已完成的插件安装与只读能力计划，不原地改写。现有 `docs/achieved/plan/2026-08-07-011-feat-ralph-nowledge-runtime-adapter-plan.md` 中“Rust runtime 直接拥有全部 nmem 生命周期”的设计不作为本计划的实现依据；需要在后续 Ralph 适配实施前按本计划的 bridge contract 重写或替换。
 
 ## 0. 计划状态
 
@@ -526,7 +526,7 @@ Feature: Prompt and worker parity
 - `plugins/nowledge-mem-ralph/tests/fixtures/ralph/loop-context.json`
 - `plugins/nowledge-mem-ralph/README.md`
 - `.ralph/specs/nowledge-mem-ralph-plugin-design.md`
-- `docs/plans/2026-08-08-001-feat-nowledge-plugin-lifecycle-plan.md`
+- `docs/achieved/plan/2026-08-08-001-feat-nowledge-plugin-lifecycle-plan.md`
 
 **Approach:**
 
@@ -647,7 +647,7 @@ plugins/nowledge-mem-ralph/
 
 ## 14. Sources & Research
 
-- `docs/plans/2026-08-07-010-feat-nowledge-ralph-plugin-plan.md`：已完成的插件安装、scope迁移和只读能力基线。
+- `docs/achieved/plan/2026-08-07-010-feat-nowledge-ralph-plugin-plan.md`：已完成的插件安装、scope迁移和只读能力基线。
 - `plugins/nowledge-mem-ralph/`：当前 manifest、commands、skill、README和contract tests。
 - `scripts/setup_nowledge_ralph.py`：现有 authoritative plugin inventory 与迁移状态机。
 - `crates/ralph-core/src/event_loop/event_processing.rs`：普通 hat prompt 组装和终态 deliverable contract。
