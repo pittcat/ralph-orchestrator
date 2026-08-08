@@ -243,8 +243,9 @@ pub(crate) enum CoordCommitOutcome {
 }
 
 /// U7 (2026-07-23-002): build the `*.wave.complete` payload that
-/// matches the **target topic's** schema — see
-/// `presets/schemas/ce-executor-supervisor.yml`.
+/// matches the **target topic's** schema — see the surviving
+/// supervisor-enabled builtin `presets/en/parallel-forge.yml`
+/// (plan 2026-08-09-001 removed `ce-executor-supervisor`).
 ///
 /// - `exec.wave.complete` / `fix.wave.complete` require
 ///   `wave_id`, `completed_slots`, `merge_root_event_id`. The

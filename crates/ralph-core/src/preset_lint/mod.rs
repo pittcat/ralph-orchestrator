@@ -79,9 +79,6 @@ pub mod workflow_activation;
 #[cfg(test)]
 mod tests;
 
-#[cfg(test)]
-mod supervisor_preset_test;
-
 pub use coordinator::check_coordinator_rules;
 pub use finding_id::{
     FINDING_ACTIVATION_EGRESS_MISSING, FINDING_COORDINATOR_MISSING,

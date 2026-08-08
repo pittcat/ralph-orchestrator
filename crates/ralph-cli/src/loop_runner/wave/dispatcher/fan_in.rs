@@ -324,7 +324,9 @@ pub(crate) fn run_supervisor_fan_in(
             // (`completed_slots` / `success_slots` / `merge_root_event_id`)
             // for every wave kind, but `review.wave.complete` and
             // `fix.wave.complete` have different required_fields — see
-            // `presets/schemas/ce-executor-supervisor.yml`. A mismatched
+            // the surviving supervisor-enabled builtin
+            // `presets/en/parallel-forge.yml` (plan 2026-08-09-001
+            // removed `ce-executor-supervisor`). A mismatched
             // payload was rejected by the engine gate's required_fields
             // check, the event was demoted to `MalformedLine`, and the
             // downstream integrator hat (e.g. `review-synthesizer`)

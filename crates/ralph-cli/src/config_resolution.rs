@@ -79,7 +79,7 @@ pub(crate) fn default_core_value() -> Result<Value> {
             // `merge_hats_overlay()` `!contains_key` guard
             // always sees the key as present and silently keeps
             // the framework default `enabled: false`, blocking
-            // the preset opt-in (e.g. ce-executor-supervisor's
+            // the preset opt-in (e.g. parallel-forge's
             // `supervisor.enabled: true`).
             "supervisor",
             // 2026-07-29-002 plan residual: `precheck` is opt-in.

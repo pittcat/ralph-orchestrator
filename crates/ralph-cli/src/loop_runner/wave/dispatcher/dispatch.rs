@@ -1731,7 +1731,7 @@ pub(crate) async fn execute_wave_via_supervisor_with_executor(
     // `exec.unit.ready` / `exec.wave.ready`).
     //
     // 2026-07-23-001 plan U9: widened `review.wave.` → `review.`
-    // so the builtin `ce-executor-supervisor` preset's review
+    // so the builtin `parallel-forge` preset's review
     // wave (trigger topic `review.unit.ready`, emitted by the
     // `review-coordinator` hat) is correctly classified Review
     // and dispatches via `SharedReadonly` instead of accidentally

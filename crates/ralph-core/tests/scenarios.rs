@@ -2840,7 +2840,7 @@ fn test_plan_gate_dual_publish_handoff() {
 // `exec-integrator` hat).
 #[test]
 fn test_u13_supervisor_minimal() {
-    let yaml = load_scenario("tests/scenarios/supervisor/ce_executor_supervisor_minimal.yml");
+    let yaml = load_scenario("tests/scenarios/supervisor/supervisor_minimal.yml");
     run_workflow_guard_scenario(yaml);
 }
 
@@ -4462,7 +4462,7 @@ fn test_opac_me1_macro_edge_next_hint() {
 #[test]
 fn test_opac_sb1_supervisor_exec_wave_fanout() {
     let yaml =
-        load_scenario("tests/scenarios/supervisor/ce_executor_supervisor_exec_wave_fanout.yml");
+        load_scenario("tests/scenarios/supervisor/supervisor_exec_wave_fanout.yml");
     run_workflow_guard_scenario(yaml);
 }
 
@@ -4473,7 +4473,7 @@ fn test_opac_sb1_supervisor_exec_wave_fanout() {
 // topic) 被拒收,绝不能进入 seen_topics。
 #[test]
 fn test_opac_sb2_supervisor_review_batch_origin_guard() {
-    let yaml = load_scenario("tests/scenarios/supervisor/ce_executor_supervisor_review_batch.yml");
+    let yaml = load_scenario("tests/scenarios/supervisor/supervisor_review_batch.yml");
     run_workflow_guard_scenario(yaml);
 }
 

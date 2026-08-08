@@ -324,10 +324,11 @@ fn u3_bypass_requires_source_hat_for_non_transition_topics() {
 // (ralph-core/src/preset_lint/supervisor_preset_test.rs).
 
 fn supervisor_flow() -> FlowDeclaration {
-    // Mirrors `presets/en/ce-executor-supervisor.yml`
-    // `mechanism.flow.steps` after U2.  Kept inline so the
-    // test does not depend on a build-script / include_str
-    // pipeline.
+    // Mirrors the surviving supervisor-enabled builtin
+    // `presets/en/parallel-forge.yml` `mechanism.flow.steps`
+    // (plan 2026-08-09-001 removed `ce-executor-supervisor`).
+    // Kept inline so the test does not depend on a build-script
+    // / include_str pipeline.
     const SUPERVISOR_FLOW_YAML: &str = r#"
 mechanism:
   flow:

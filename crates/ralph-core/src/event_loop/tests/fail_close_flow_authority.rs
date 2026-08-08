@@ -81,7 +81,11 @@ fn derive_blocked_topic_single_forge_match_wins() {
 
 #[test]
 fn derive_blocked_topic_plain_plan_blocked_only_wins() {
-    // ce-executor-supervisor shape: only `plan.blocked` shows up.
+    // Supervisor shape: only `plan.blocked` shows up. Plan
+    // 2026-08-09-001 removed `ce-executor-supervisor` builtin; the
+    // surviving supervisor-enabled builtin `parallel-forge` uses
+    // a different blocked-topic namespace, but this unit test
+    // still exercises the plain `plan.blocked`-only fallback.
     let mechanism = flow_with_steps(vec![
         step(
             "exec_wave",

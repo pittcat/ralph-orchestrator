@@ -5,7 +5,7 @@
 //! introduced while the `ce-executor-serial` preset was the
 //! canonical built-in. After the 2026-07-07-006 refactor the
 //! serial preset was retired; the hat is now used only by
-//! `ce-executor-supervisor` (non-pipeline) as an opt-in
+//! `parallel-forge` (non-pipeline, supervisor-enabled) as an opt-in
 //! diagnostic.
 //!
 //! The runtime auto-emits a `loop.stalled` diagnostic when no
@@ -113,8 +113,8 @@ hats:
 /// opt-in `progress-steward` hat". After plan 2026-07-07-006
 /// retired `ce-executor-serial` as a public builtin, the
 /// opt-in stall-diagnostic hat is now used only by
-/// `ce-executor-supervisor` (non-pipeline). Pipeline presets
-/// must NOT declare the hat; if they do, it is a regression. We test the runtime's stall detector by
+/// `parallel-forge` (non-pipeline, supervisor-enabled).
+/// Pipeline presets must NOT declare the hat; if they do, it is a regression. We test the runtime's stall detector by
 /// writing a no-event JSONL (the loop sees an empty events
 /// file) and asserting on the diagnostic + bus state after the
 /// runtime's stall detector runs. The exact diagnostic shape

@@ -1155,7 +1155,7 @@ mod tests {
         assert!(
             !config.event_loop.supervisor.enabled,
             "implementation-review stays on default wave (supervisor.enabled=false); \
-             full supervisor product mode is ce-executor-supervisor, not this preset"
+             full supervisor product mode is parallel-forge, not this preset"
         );
     }
 
@@ -2737,9 +2737,7 @@ mod tests {
         // from 10 to 12 let both presets pass strict with zero findings,
         // so these exemptions are no longer needed.
         //
-        // `ce-executor-supervisor` / `config.empty_terminal_events` was
-        // previously exempt for `exec-wave-dispatcher`; that hat now
-        // declares `terminal_events: [exec.unit.ready]`.
+        // Plan 2026-08-09-001: removed `ce-executor-supervisor`.
         const EXEMPT_FINDINGS: &[(&str, &str, &str)] = &[];
 
         let mut failures = Vec::new();

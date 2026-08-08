@@ -473,8 +473,9 @@ pub const FINDING_INSTRUCTIONS_READ_INTERNAL_LEDGER: &str =
 /// `ralph wave emit`) a supervisor-only coordination topic
 /// (`*.wave.complete` / `*.unit.ready` etc.). Per `event_origin`
 /// these are denied for agent origin, so the agent's emit will silently
-/// drop — surfaces as the F-019 incident in
-/// `presets/en/ce-executor-supervisor.yml`.
+/// drop — surfaces as the F-019 incident in the surviving
+/// supervisor-enabled builtin `presets/en/parallel-forge.yml`
+/// (plan 2026-08-09-001 removed `ce-executor-supervisor`).
 /// Always `Error`.
 pub const FINDING_INSTRUCTIONS_SUPERVISOR_COORDINATION_TOPIC: &str =
     "preset.instructions_supervisor_coordination_topic";
