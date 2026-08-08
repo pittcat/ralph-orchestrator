@@ -583,13 +583,18 @@ impl StreamHandler for HeadlessTextHandler {
 mod tests {
     use super::*;
 
-    /// Workspace passed to `CliExecutor::execute` in tests that do not care
-    /// about worktree isolation. The agent executor no longer reads
-    /// `RALPH_WORKSPACE_ROOT` from ambient env or falls back to
-    /// `std::env::current_dir()`, so each test must thread an explicit
-    /// workspace through — this constant captures the historical default.
+    /// Returns a process-shared temp dir guaranteed != current_dir()
+    /// so ambient-fallback regressions fail loudly.
+    /// tempfile::TempDir always lives under /var/folders/ (macOS) or /tmp/ (Linux)
+    /// and is therefore never equal to the repo working directory.
     fn test_workspace() -> std::path::PathBuf {
-        std::env::current_dir().unwrap()
+        use std::sync::OnceLock;
+        use tempfile::TempDir;
+        // Leak the OnceLock statically so the temp dir is reused across tests
+        // in the same binary — the path just needs to be != current_dir().
+        static WORKSPACE: OnceLock<TempDir> = OnceLock::new();
+        let dir = WORKSPACE.get_or_init(|| TempDir::new().expect("test workspace temp dir"));
+        dir.path().to_path_buf()
     }
 
     #[tokio::test]
@@ -1165,14 +1170,14 @@ mod tests {
         );
 
         // U1 (2026-06-14-002): PWD must be synchronized with the actual working
-        // directory so agent bash tools resolve paths correctly.
-        let expected_pwd = std::env::current_dir()
-            .unwrap()
-            .to_string_lossy()
-            .to_string();
+        // directory so agent bash tools resolve paths correctly. After U4
+        // (2026-08-08-001), test_workspace() returns a process-shared TempDir
+        // (not current_dir()) so ambient-fallback regressions fail loudly;
+        // PWD must match the workspace the test passed, not the parent cwd.
+        let expected_pwd = test_workspace().to_string_lossy().to_string();
         assert!(
             stdout.contains(&format!("PWD={expected_pwd}")),
-            "PWD should match cwd ({expected_pwd}): {stdout}"
+            "PWD should match the explicit workspace ({expected_pwd}): {stdout}"
         );
     }
 

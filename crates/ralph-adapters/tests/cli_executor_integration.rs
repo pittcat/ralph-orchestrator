@@ -57,11 +57,16 @@ mod cli_executor_integration {
         }
     }
 
-    /// All test paths are agnostic about the workspace directory itself;
-    /// passing the parent's current_dir() preserves the historical
-    /// ambient-cwd semantics these tests asserted.
+    /// Returns a process-shared temp dir guaranteed != current_dir()
+    /// so ambient-fallback regressions fail loudly.
+    /// tempfile::TempDir always lives under /var/folders/ (macOS) or /tmp/ (Linux)
+    /// and is therefore never equal to the repo working directory.
     fn integration_workspace() -> std::path::PathBuf {
-        std::env::current_dir().unwrap()
+        use std::sync::OnceLock;
+        use tempfile::TempDir;
+        static WORKSPACE: OnceLock<TempDir> = OnceLock::new();
+        let dir = WORKSPACE.get_or_init(|| TempDir::new().expect("integration workspace temp dir"));
+        dir.path().to_path_buf()
     }
 
     #[tokio::test]
