@@ -10,13 +10,15 @@
 # referenced by `ralph.red-team-attack.yml`):
 #   - Required: list of development plan paths
 #   - Optional: target_branch, target_commit, verification_commands,
-#     allowed_test_environments, forbidden_external_targets
+#     allowed_test_environments, forbidden_external_targets,
+#     scope_base (40-char SHA), merge_boundary_path
 #
 # Usage:
 #   ralph run -c ralph.red-team-attack.yml -H builtin:red-team-attack
 #
 # Artifacts (under gitignored .ralph/red-team/, owned by hats — not by this preset):
 #   .ralph/red-team/01-target-lock.md            — target-locker writes
+#   .ralph/red-team/scope-manifest.json          — plan-resolver writes (multi-plan-scope/v1)
 #   .ralph/red-team/02-plan-resolution.md        — plan-resolver writes
 #   .ralph/red-team/commits/PLAN-*.md            — plan-resolver writes
 #   .ralph/red-team/03-patch-reconstruction.md   — plan-resolver writes
@@ -406,15 +408,20 @@ hats:
            → `.ralph/red-team/patches/PLAN-<NNN>/`
          - Per-plan series: combine in true commit order
            → `.ralph/red-team/patches/PLAN-<NNN>.series.patch`
-         - Combined current patch: `git diff --binary --full-index --find-renames --find-copies <global-baseline>..<locked-head>`
-           → `.ralph/red-team/patches/combined-current.patch`
+         - Full-current patch: `git diff --binary --full-index --find-renames --find-copies <scope_base_sha>..<locked-head>`
+           → `.ralph/red-team/patches/full-current.patch`
+         - Scope manifest: write `.ralph/red-team/scope-manifest.json`
+           (multi-plan-scope/v1 schema, byte-stable canonical JSON)
       4. Classify each hunk: PLAN_OWNED / SHARED_BY_MULTIPLE_PLANS / OVERRIDDEN_LATER / UNATTRIBUTED / RELATED_NEIGHBOR_CHANGE.
       5. Build claim traceability matrix: plan claim → commit → patch hunk → current code → callers → tests → implementation status.
       6. Write `.ralph/red-team/02-plan-resolution.md` and `.ralph/red-team/03-patch-reconstruction.md`.
       7. Gate check:
-         - resolved_count >= 1 AND patch_attribution_coverage >= 90 AND critical_claim_traceability == 100
+         - scope_base_sha is a valid 40-char SHA (not `<global-baseline>`, `TBD`, `<pending>`, or any placeholder)
            → emit `redteam.plan.resolved`
-         - All plans unresolved after retry → emit `redteam.plan.unresolved` with reason `REJECTED_NO_RESOLVED_PLAN`
+         - scope_base_sha is missing, ambiguous, or a placeholder
+           → emit `redteam.plan.unresolved` with reason from allowed values:
+             `REJECTED_NO_RESOLVED_PLAN` | `TARGET_HEAD_CHANGED` | `TARGET_TREE_CHANGED` |
+             `SCOPE_BASE_MISSING` | `SCOPE_BASE_PLACEHOLDER` | `SCOPE_AMBIGUOUS`
       8. Precheck then emit. Single business event only.
 
   attack-surface-mapper:

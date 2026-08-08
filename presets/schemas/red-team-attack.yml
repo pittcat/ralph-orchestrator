@@ -142,7 +142,7 @@ schemas:
       reason:
         meaning: Why no plan could be resolved.
         source: Resolver writes from final retry state.
-        fill_rule: One of `REJECTED_NO_RESOLVED_PLAN`, `TARGET_HEAD_CHANGED`, `TARGET_TREE_CHANGED`.
+        fill_rule: One of `REJECTED_NO_RESOLVED_PLAN`, `TARGET_HEAD_CHANGED`, `TARGET_TREE_CHANGED`, `SCOPE_BASE_MISSING`, `SCOPE_BASE_PLACEHOLDER`, `SCOPE_AMBIGUOUS`.
       resolution_file_path:
         meaning: Path to the plan-resolution artifact (contains retry history).
         source: File actually written this activation.

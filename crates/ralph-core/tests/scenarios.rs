@@ -4716,6 +4716,11 @@ fn test_retained_scenarios_pipeline_or_generic_only() {
         // postmerge_scope_drift.yml) — generic routing characterization with
         // isolated postmerge hat chain; schema validation via unit/CLI tests
         "tests/scenarios/postmerge_scope_",
+        // 2026-08-08-004 plan U5: red-team independent scope fixtures
+        // (redteam_scope_direct_target.yml, redteam_scope_placeholder_blocked.yml)
+        // — generic routing characterization; plan-resolver manifest + real
+        // scope_base_sha without merge-batch boundary
+        "tests/scenarios/redteam_scope_",
         // 2026-08-08-004 plan U2: merge-batch boundary manifest routing
         // (abstract fixture with merge-batch hat chain; schema validation via unit/CLI tests)
         "tests/scenarios/merge_batch_boundary",
@@ -4906,5 +4911,33 @@ fn test_scope_payload_contract_merge_integrated() {
 #[test]
 fn test_scope_agent_contract_postmerge_changemap() {
     let yaml = load_scenario("tests/scenarios/scope_agent_contract.yml");
+    run_workflow_guard_scenario(yaml);
+}
+
+// ──────────────────────────────────────────────────────────────────────
+// 2026-08-08-004 plan Unit 5: red-team independent scope
+// ──────────────────────────────────────────────────────────────────────
+
+/// U5 (plan 2026-08-08-004 §Unit 5 §9): red-team plan-resolver
+/// resolves scope independently without merge_boundary_path. target-locker
+/// locks HEAD/tree; plan-resolver derives scope_base from explicit input,
+/// writes scope-manifest.json and full-current.patch from real scope_base_sha,
+/// and emits redteam.plan.resolved with all U1 scope fields.
+/// attack-surface-mapper activates (resolved path). Loop reaches redteam.complete.
+#[test]
+fn test_redteam_scope_direct_target_without_merge_boundary() {
+    let yaml = load_scenario("tests/scenarios/redteam_scope_direct_target.yml");
+    run_workflow_guard_scenario(yaml);
+}
+
+/// U5 (plan 2026-08-08-004 §Unit 5 §9): red-team plan-resolver
+/// emits unresolved when scope_base is a placeholder. target-locker locks;
+/// plan-resolver detects `<global-baseline>` placeholder and emits
+/// redteam.plan.unresolved with reason=SCOPE_BASE_PLACEHOLDER.
+/// attack-surface-mapper does NOT activate (unresolved path).
+/// Loop reaches redteam.complete(success:false).
+#[test]
+fn test_redteam_scope_placeholder_blocked() {
+    let yaml = load_scenario("tests/scenarios/redteam_scope_placeholder_blocked.yml");
     run_workflow_guard_scenario(yaml);
 }

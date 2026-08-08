@@ -8,7 +8,7 @@
 
 - **输入与事实源：** 
   - 必填：一个或多个开发计划路径（通过 prompt 文件）
-  - 可选：target_branch / target_commit / verification_commands / allowed_test_environments / forbidden_external_targets
+  - 可选：target_branch / target_commit / verification_commands / allowed_test_environments / forbidden_external_targets / scope_base / merge_boundary_path
   - 事实源：Git 历史（commit / patch / blame）、当前最终代码树、真实实验执行结果
 
 - **成功条件：** 
@@ -36,7 +36,9 @@
 
 - **重要 artifact、生产方与消费者：**
   - `.ralph/red-team/01-target-lock.md` — target-locker 写，后续所有 hat 读（验证 HEAD/tree 不变）
+  - `.ralph/red-team/scope-manifest.json` — plan-resolver 写，attack-surface-mapper 读（multi-plan-scope/v1，byte-stable）
   - `.ralph/red-team/02-plan-resolution.md` + `commits/PLAN-*.md` + `03-patch-reconstruction.md` + `patches/**` — plan-resolver 写，attack-surface-mapper 读
+  - `.ralph/red-team/patches/full-current.patch` — plan-resolver 写，从 `<scope_base_sha>..<locked-head>` 计算得出（U5 起，不再使用 `<global-baseline>` 占位符）
   - `.ralph/red-team/04-attack-surface.md` + `05-experiment-plan.md` — attack-surface-mapper 写，experiment-runner 读
   - `.ralph/red-team/experiments/RTE-*.md` + `evidence/RTE-*/**` + `repros/RTE-*/**` — experiment-runner 写，evidence-gate 读
   - `.ralph/red-team/07-evidence-board.md` + `07-retry-board.md` — evidence-gate 写，impact-boundary 读

@@ -14,6 +14,15 @@ plans:
 # 可选：固定审查提交；省略时锁定启动时的 HEAD。
 # target_commit: <full-commit-sha>
 
+# 可选：显式 scope base SHA（40-char Git SHA）。
+# 若提供，plan-resolver 直接从此 SHA 计算 patch，不读取 merge_batch boundary。
+# 若省略，plan-resolver 从 target_lock artifact 推导 scope base。
+# scope_base: abc1234def5678901234567890abcdef1234567890
+
+# 可选：merge-batch boundary 文件路径。
+# 若提供，plan-resolver 在混历史场景下可参考 boundary；direct-target 可省略。
+# merge_boundary_path: .ralph/merge/boundary.json
+
 # 可选：项目允许执行的验证命令。
 # verification_commands:
 #   - <build-command>
