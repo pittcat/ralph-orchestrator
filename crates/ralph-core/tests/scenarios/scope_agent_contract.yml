@@ -1,0 +1,131 @@
+# BDD fixture: scope agent contract — postmerge.changemap.ready / redteam.plan.resolved
+#
+# RED PHASE: This fixture proves that the current schema+guard do NOT
+# reject payloads that are missing scope manifest fields. After Step 2
+# schema extensions and guard implementation, incomplete payloads are REJECTED.
+#
+# ACCEPTANCE CRITERIA (Unit 1 §9 / S11, S8):
+#   postmerge.changemap.ready:
+#     - WITHOUT scope_manifest_path/scope_digest/scope_status/overall_confidence
+#       /critical_unknown_count/scope_base_sha/scope_source → REJECTED
+#     - scope_status=resolved but overall_confidence < 90 → REJECTED
+#     - scope_status=resolved but critical_unknown_count > 0 → REJECTED
+#     - scope_status=resolved but proceed: false → REJECTED
+#     - scope_status=blocked but proceed: true → REJECTED
+#     - scope_base_sha not 40-char hex → REJECTED
+#     - manifest path outside allowed roots → REJECTED
+#     - tampered digest → REJECTED
+#   redteam.plan.resolved:
+#     - WITHOUT scope_manifest_path/scope_digest/scope_status/overall_confidence
+#       /critical_unknown_count/scope_base_sha/resolved_patch_path/patch_digest → REJECTED
+#     - scope_status=resolved but overall_confidence < 90 → REJECTED
+#     - scope_status=resolved but critical_unknown_count > 0 → REJECTED
+#     - scope_status=resolved but resolved_count < 1 → REJECTED
+#     - scope_base_sha is placeholder (<global-baseline>, TBD, etc.) → REJECTED
+#     - patch_digest not 64-char hex → REJECTED
+#
+# FAILURE MODE WHEN RED:
+#   Current post-merge-converge schema (postmerge.changemap.ready required_fields
+#   are: proceed, artifact_path, high_risk_crossings_count, plan_match_confidence).
+#   No scope_* fields are required. No payload_consistency rules exist.
+#   Current red-team-attack schema (redteam.plan.resolved required_fields are:
+#   resolved_count, unresolved_count, resolution_file_path).
+#   No scope_base_sha / scope_digest / patch_digest are required.
+#   The CLI scope handoff guard does not exist yet.
+#   Result: incomplete payload passes schema validation → test FAILS on
+#   "expected absent_events to include postmerge.changemap.ready" — the RED we want.
+
+name: scope_agent_contract
+description: >
+  Scope manifest contract for postmerge.changemap.ready and
+  redteam.plan.resolved: payloads missing scope manifest/digest/status
+  fields must be rejected. Drives the real EventLoop with isolated
+  change-mapper and plan-resolver hats.
+
+config:
+  prompt_file: PROMPT.md
+  max_iterations: 8
+  hats:
+    baseline:
+      subscribes_to:
+        - postmerge.start
+      publishes:
+        - postmerge.baseline.ready
+      default_publishes: postmerge.baseline.ready
+    change_mapper:
+      subscribes_to:
+        - postmerge.baseline.ready
+      publishes:
+        - postmerge.changemap.ready
+      default_publishes: postmerge.changemap.ready
+    reporter:
+      subscribes_to:
+        - postmerge.changemap.ready
+      publishes:
+        - LOOP_COMPLETE
+      default_publishes: LOOP_COMPLETE
+  event_loop:
+    execution_mode: isolated
+
+# ─── SCENARIO A: postmerge.changemap.ready WITHOUT scope fields ───
+# The change-mapper emits a payload that matches current schema
+# (proceed, artifact_path, high_risk_crossings_count, plan_match_confidence)
+# but is MISSING all the new scope_* required_fields.
+# RED: event IS accepted (schema doesn't require scope_* fields)
+# GREEN: event is REJECTED by payload_consistency rule
+
+mock_responses:
+  - |
+    Starting post-merge convergence...
+    <event topic="postmerge.start">
+    </event>
+  - |
+    <event topic="task.resume">
+    task_id: "task-postmerge-baseline-001"
+    step: "baseline"
+    next_step: "change_map"
+    </event>
+  - |
+    Baseline ready.
+    <event topic="postmerge.baseline.ready">
+    baseline_valid: true
+    artifact_path: ".ralph/post-merge/01-baseline.md"
+    head_sha: "abc1234def5678"
+    branch: main
+    </event>
+  - |
+    <event topic="task.resume">
+    task_id: "task-postmerge-changemap-001"
+    step: "change_map"
+    next_step: "report"
+    </event>
+  - |
+    Mapping changes...
+    <event topic="postmerge.changemap.ready">
+    proceed: true
+    artifact_path: ".ralph/post-merge/02-change-map.md"
+    high_risk_crossings_count: 0
+    plan_match_confidence: high
+    </event>
+  - |
+    <event topic="LOOP_COMPLETE">
+    Change map complete.
+    </event>
+
+checkpoints:
+  - after_response: 5
+    # RED: postmerge.changemap.ready is ACCEPTED (current schema has no scope_* required_fields)
+    # GREEN: postmerge.changemap.ready must be ABSENT (rejected by payload_consistency)
+
+expected:
+  iterations: 6
+  # RED: postmerge.changemap.ready IS in the ledger (not rejected by schema)
+  # GREEN: postmerge.changemap.ready must NOT be in the ledger (rejected by payload_consistency)
+  # In RED: test asserts postmerge.changemap.ready is absent → FAILS (it IS present)
+  # In GREEN: test asserts postmerge.changemap.ready is absent → PASSES (rejected)
+  absent_events:
+    - topic: postmerge.changemap.ready
+  events:
+    - topic: postmerge.start
+    - topic: postmerge.baseline.ready
+  completion: false

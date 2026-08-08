@@ -1,0 +1,118 @@
+# BDD fixture: scope payload contract — merge.integrated / merge.stabilized
+#
+# RED PHASE: This fixture proves that the current schema+guard do NOT
+# reject payloads that are missing scope boundary fields. After
+# Step 2 schema extensions and guard implementation, this fixture
+# asserts the opposite: incomplete payloads are REJECTED.
+#
+# ACCEPTANCE CRITERIA (Unit 1 §9 / S11):
+#   - merge.integrated WITHOUT merge_boundary_path/digest/status → REJECTED
+#   - merge.integrated WITH all scope fields + valid digest → ACCEPTED
+#   - merge.integrated with tampered digest → REJECTED
+#   - merge.integrated with path outside allowed roots → REJECTED
+#   - merge.stabilized WITHOUT merge_boundary_path/digest → REJECTED
+#
+# FAILURE MODE WHEN RED:
+#   Current schema (merge-batch.yml) has no merge_boundary_* required_fields,
+#   and no payload_consistency rules exist. The guard chain in
+#   command_impl.rs does not yet call check_scope_handoff_guard.
+#   Result: incomplete payload is ACCEPTED by the EventLoop (schema passes
+#   because merge_boundary_* fields are not required), but the CLI precheck
+#   also passes because the guard function does not exist yet.
+#   The test asserts REJECTED, so the test FAILS — this is the valid RED.
+
+name: scope_payload_contract
+description: >
+  Scope handoff contract for merge.integrated / merge.stabilized:
+  payloads missing merge_boundary fields must be rejected by the
+  payload_consistency rules and the CLI scope handoff guard.
+  This test drives the real EventLoop with a merge-batch hat topology.
+
+config:
+  prompt_file: PROMPT.md
+  max_iterations: 8
+  hats:
+    reviewer:
+      subscribes_to:
+        - merge.start
+      publishes:
+        - merge.reviewed
+      default_publishes: merge.reviewed
+    integrator:
+      subscribes_to:
+        - merge.reviewed
+      publishes:
+        - merge.integrated
+      default_publishes: merge.integrated
+    stabilizer:
+      subscribes_to:
+        - merge.integrated
+      publishes:
+        - merge.stabilized
+      default_publishes: merge.stabilized
+    reporter:
+      subscribes_to:
+        - merge.stabilized
+      publishes:
+        - merge.batch.complete
+      default_publishes: merge.batch.complete
+  event_loop:
+    execution_mode: isolated
+
+# ─── SCENARIO A: missing merge_boundary_path/digest — must be REJECTED ───
+# The integrator emits merge.integrated without scope boundary fields.
+# RED: current schema does NOT require these fields → payload is ACCEPTED.
+# GREEN: payload is REJECTED by payload_consistency rule and
+#   merge.integrated never appears in the accepted ledger.
+
+mock_responses:
+  - |
+    Reviewing branches for merge...
+    <event topic="merge.reviewed">
+    target_branch: main
+    branch_order: ["feature/a", "feature/b"]
+    review_path: ".ralph/merge/review.md"
+    </event>
+  - |
+    Integrating branches...
+    <event topic="merge.integrated">
+    integration_complete: true
+    ready_for_stabilization: true
+    branches_merged: ["feature/a", "feature/b"]
+    branches_skipped: []
+    branches_failed: []
+    merge_commit_shas: ["abc1234def5678"]
+    integration_path: ".ralph/merge/integration.md"
+    </event>
+  - |
+    Stabilizing merge...
+    <event topic="merge.stabilized">
+    passed: true
+    report_input_file: ".ralph/merge/report-input.md"
+    </event>
+  - |
+    <event topic="merge.batch.complete">
+    success: true
+    report_path: ".ralph/merge/REPORT.md"
+    </event>
+  - |
+    <event topic="LOOP_COMPLETE">
+    Merge batch complete.
+    </event>
+
+checkpoints:
+  - after_response: 2
+    # RED: merge.integrated is ACCEPTED (current schema has no merge_boundary_* required_fields)
+    # GREEN: merge.integrated must be ABSENT (rejected by payload_consistency rule)
+
+expected:
+  iterations: 5
+  # RED: merge.integrated IS in the ledger (not rejected by schema)
+  # GREEN: merge.integrated must NOT be in the ledger (rejected by payload_consistency)
+  # In RED: test asserts merge.integrated is absent → FAILS (it IS present)
+  # In GREEN: test asserts merge.integrated is absent → PASSES (rejected)
+  absent_events:
+    - topic: merge.integrated
+  events:
+    - topic: merge.reviewed
+  completion: false

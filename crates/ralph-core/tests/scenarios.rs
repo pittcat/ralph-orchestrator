@@ -4802,3 +4802,27 @@ fn test_ce_executor_pipeline_loop_review_artifact_blocked() {
         load_scenario("tests/scenarios/ce_executor_pipeline_loop_review_artifact_blocked.yml");
     run_workflow_guard_scenario(yaml);
 }
+
+// ──────────────────────────────────────────────────────────────────────
+// 2026-08-08-004 plan Unit 1: scope handoff consistency RED tests
+// ──────────────────────────────────────────────────────────────────────
+
+/// U1 Red: merge.integrated without merge_boundary_path/digest/status
+/// must be rejected. RED: current schema does NOT require these fields
+/// so the incomplete payload passes. After Step 2 schema extensions and
+/// guard, the payload is rejected and this test PASSES.
+#[test]
+fn test_scope_payload_contract_merge_integrated() {
+    let yaml = load_scenario("tests/scenarios/scope_payload_contract.yml");
+    run_workflow_guard_scenario(yaml);
+}
+
+/// U1 Red: postmerge.changemap.ready without scope manifest fields
+/// must be rejected. RED: current schema does NOT require scope_*
+/// fields so the incomplete payload passes. After Step 2 schema
+/// extensions and guard, the payload is rejected and this test PASSES.
+#[test]
+fn test_scope_agent_contract_postmerge_changemap() {
+    let yaml = load_scenario("tests/scenarios/scope_agent_contract.yml");
+    run_workflow_guard_scenario(yaml);
+}
