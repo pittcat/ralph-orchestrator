@@ -4706,7 +4706,15 @@ fn test_retained_scenarios_pipeline_or_generic_only() {
         // payload_consistency 门的通用行为(fixture-neutral,抽象 topic/rule,
         // 不绑定任何 builtin preset;plan 2026-07-22-004 U4)
         "tests/scenarios/payload_consistency/",
-        // implementation-review preset（6-hat wave review→fix-plan，
+        // 2026-08-08-004 plan U1/U2: scope boundary fixture files added in U1
+        // (scope_payload_contract.yml, scope_agent_contract.yml) — abstract fixtures
+        // with routing characterization, not bound to builtin preset; schema validation
+        // via unit/CLI tests
+        "tests/scenarios/scope_",
+        // 2026-08-08-004 plan U2: merge-batch boundary manifest routing
+        // (abstract fixture with merge-batch hat chain; schema validation via unit/CLI tests)
+        "tests/scenarios/merge_batch_boundary",
+        // implementation-review preset (6-hat wave review, non-pipeline / non-supervisor)
         // 非 pipeline / 非 supervisor）
         "tests/scenarios/implementation_review_",
         // 2026-07-24-003 plan U8: wave protocol 通用场景
@@ -4806,6 +4814,27 @@ fn test_ce_executor_pipeline_loop_review_artifact_blocked() {
 // ──────────────────────────────────────────────────────────────────────
 // 2026-08-08-004 plan Unit 1: scope handoff consistency RED tests
 // ──────────────────────────────────────────────────────────────────────
+
+// ──────────────────────────────────────────────────────────────────────
+// 2026-08-08-004 plan Unit 2: merge-batch boundary manifest routing
+// ──────────────────────────────────────────────────────────────────────
+
+/// U2 (plan 2026-08-08-004 §Unit 2 §9): merge_batch_boundary routing characterization.
+/// SUCCESS path: integrator emits merge.integrated with complete boundary
+/// (merge_boundary_path/digest/status + integration_complete=true); the
+/// EventLoop accepts the event; stabilizer and reporter complete normally.
+/// FAILURE path: integrator emits integration_complete=false and
+/// merge_boundary_status=incomplete; the EventLoop accepts the event;
+/// stabilizer short-circuits with passed:false; reporter emits
+/// merge.batch.complete(success:false) — NOT a false-success path.
+/// Uses the real EventLoop via `run_workflow_guard_scenario` (not the
+/// `run_scenario` stub) to exercise the `payload_consistency` rules on
+/// merge.integrated and merge.stabilized.
+#[test]
+fn test_merge_batch_boundary_payload_and_failure_path() {
+    let yaml = load_scenario("tests/scenarios/merge_batch_boundary.yml");
+    run_workflow_guard_scenario(yaml);
+}
 
 /// U1 Red: merge.integrated without merge_boundary_path/digest/status
 /// must be rejected. RED: current schema does NOT require these fields

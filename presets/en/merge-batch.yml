@@ -335,11 +335,70 @@ hats:
 
       4. Skip branches already merged (`git branch --merged <target>`).
 
-      ### Step 3: Publish
+      ### Step 3: Capture merge-boundary artifact
+
+      After each `git merge --no-ff`, capture the target identity for the
+      boundary manifest:
+
+      ```bash
+      git rev-parse <target>          # pre-merge target SHA
+      git rev-parse HEAD              # post-merge target SHA (merge commit)
+      git rev-parse HEAD^{tree}       # post-merge target tree SHA
+      git merge-base <target> <branch>  # merge-base SHA
+      ```
+
+      Maintain a running log in memory (not yet written to disk) of:
+      - `target_branch`
+      - `batch_base_sha` (target SHA at batch start, before first merge)
+      - `batch_head_sha` (current HEAD after last merge)
+      - `batch_head_tree` (current tree SHA after last merge)
+      - `branch_entries[]`: per-branch {branch, merge_commit_sha, merge_base_sha,
+        pre_merge_target_sha, post_merge_target_sha}
+      - `merge_commits[]`: SHAs of merge commits created this run
+      - `interleaved_target_commits[]`: any target-branch commits that appear
+        between batch_base and batch_head (detected by walking batch_base..HEAD
+        and checking which commits are on target vs. merged branches)
+
+      ### Step 4: Publish
 
       Before publishing, write `.ralph/merge/integration.md` with actual merge
       order, skipped/merged/failed branches, merge SHAs, conflicts, verification
       result, and failure evidence. Verify it is readable.
+
+      Write the boundary manifest `.ralph/merge/merge-boundary.json`:
+      - Compute `boundary_digest` as the SHA-256 hex of the canonical JSON
+        (keys sorted, no trailing space on last line, `boundary_digest` field
+        excluded from the digest input)
+      - `boundary_status: complete` when every branch merged successfully;
+        `incomplete` when any branch failed or was aborted
+      - Always write the file even on failure — record what IS known
+
+      ```json
+      {
+        "schema_version": "multi-plan-scope/merge-boundary.v1",
+        "target_branch": "<target>",
+        "batch_base_sha": "<target SHA before first merge>",
+        "batch_head_sha": "<target HEAD after last merge or batch start SHA if no merges>",
+        "batch_head_tree": "<target tree SHA after last merge>",
+        "branch_entries": [
+          {
+            "branch": "<branch-name>",
+            "merge_commit_sha": "<merge commit SHA or null if skipped/failed>",
+            "merge_base_sha": "<merge-base SHA>",
+            "pre_merge_target_sha": "<target SHA before merging this branch>",
+            "post_merge_target_sha": "<target SHA after merging this branch>"
+          }
+        ],
+        "merge_commits": ["<SHA>", ...],
+        "interleaved_target_commits": ["<SHA>", ...],
+        "verification": {
+          "command": "<verification command run; null if pre-merge gate failed>",
+          "result": "pass|fail|skipped"
+        },
+        "boundary_digest": "<64-char hex>",
+        "boundary_status": "complete|incomplete"
+      }
+      ```
 
       Publish **`merge.integrated`** with payload fields:
       - `integration_complete`: **true** only if EVERY prompt branch is merged
@@ -353,6 +412,9 @@ hats:
         no overlap with `branches_merged`)
       - `merge_commit_shas` — SHAs for commits made this run
       - `integration_path: .ralph/merge/integration.md`
+      - `merge_boundary_path: .ralph/merge/merge-boundary.json`
+      - `merge_boundary_digest: <64-char hex>`
+      - `merge_boundary_status: complete|incomplete`
 
   stabilizer:
     name: "Stabilizer"
@@ -522,6 +584,19 @@ hats:
       manifest and every listed artifact, read them, and verify they contain
       enough evidence for the required report sections. If any artifact is
       missing or insufficient, write a FAIL report and emit `success: false`.
+
+      ### Boundary artifact cross-check
+
+      Read `merge.stabilized` payload (`merge_boundary_path` / `merge_boundary_digest`).
+      If the fields are present:
+      1. Verify the file at `merge_boundary_path` is readable (`test -f`)
+      2. Recompute the SHA-256 digest of the canonical boundary JSON (keys sorted,
+         no trailing space) and confirm it matches `merge_boundary_digest`
+      3. Include the boundary digest and status in the report
+
+      If path is missing or digest mismatch: record the discrepancy in the
+      report but do NOT change the completion outcome — boundary is OPTIONAL
+      cross-check evidence, NOT a downstream authority.
 
       ### On success (`passed: true` from `merge.stabilized`)
 
