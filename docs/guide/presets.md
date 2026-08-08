@@ -17,7 +17,6 @@ ralph run -c ralph.yml -H builtin:ce-executor-pipeline -p "docs/plans/my-plan.md
 |---|---|---|---|
 | `autoresearch` | autonomous experiment loop | Try ideas, measure, keep what works | Optimization loop with self-scoring |
 | `ce-executor-pipeline` | linear pipeline: plan reviewer → executor → 6 serial dimension reviewers → synthesizer → fixer → alignment → reporter | Plan-driven implementation | One-shot whole-plan execution; isolated multi-hat |
-| `ce-executor-supervisor` | supervisor + per-slot worktrees + parallel workers + parallel 6-dim review/fix + integrator + reporter | Large plan-driven implementation | Default features ship `supervisor-db`; isolated multi-hat |
 | `debug` | `investigator`, `tester`, `fixer`, `verifier` | Root-cause debugging | Strong on repro and fix verification |
 | `merge-batch` | reviewer → integrator → stabilizer (self-loop) → reporter | Git-first batch merge across worktrees | Isolated multi-hat |
 
@@ -78,7 +77,6 @@ ralph run -c ralph.yml -H .ralph/hats/my-flow.yml -p "..."
 |---|---|---|---|---|---|
 | `autoresearch` | `presets/en/autoresearch.yml` | experiment loop | `experiment.start` (default) | `LOOP_COMPLETE` (default) | Autonomous idea/measure/keep/discard loop |
 | `ce-executor-pipeline` | `presets/en/ce-executor-pipeline.yml` | linear pipeline: plan reviewer → executor → 6 serial dimension reviewers → synthesizer → fixer → alignment → reporter | `work.start` | `LOOP_COMPLETE` | One-shot plan-driven execution with serial 6-dimension review, auto-fix, and manager report (isolated mode) |
-| `ce-executor-supervisor` | `presets/en/ce-executor-supervisor.yml` | supervisor + per-slot worktrees + parallel workers + parallel 6-dim review/fix + integrator + reporter | `work.start` | `LOOP_COMPLETE` | Large plan-driven execution with supervisor fan-out, parallel review/fix, and merge report (default features ship `supervisor-db`; isolated mode) |
 | `debug` | `presets/en/debug.yml` | `investigator`, `tester`, `fixer`, `verifier` | `debug.start` | `DEBUG_COMPLETE` | Root-cause debugging and hypothesis testing |
 | `merge-batch` | `presets/en/merge-batch.yml` | reviewer → integrator → stabilizer (self-loop) → reporter | `merge.start` | `MERGE_COMPLETE` | Git-first batch merge across worktrees |
 | `merge-loop` | `presets/en/merge-loop.yml` | `merger`, `resolver`, `tester`, `cleaner`, `failure_handler` | `merge.start` | `MERGE_COMPLETE` | Internal merge/worktree automation |
@@ -128,7 +126,7 @@ ralph run -c ralph.yml -H builtin:debug -p "Investigate why login fails on mobil
 
 ### ce-executor Workflow
 
-`ce-executor-pipeline` and `ce-executor-supervisor` are the plan-driven execution builtins. `ce-executor-pipeline` uses a one-shot whole-plan linear pipeline: plan reviewer → executor → 6 serial dimension reviewers → synthesizer → fixer → alignment → reporter.
+`ce-executor-pipeline` is the plan-driven execution builtin. It uses a one-shot whole-plan linear pipeline: plan reviewer → executor → 6 serial dimension reviewers → synthesizer → fixer → alignment → reporter.
 
 **`ce-executor-pipeline` key characteristics:**
 - Does not auto-create feature branches (runs on current checkout)
@@ -137,7 +135,7 @@ ralph run -c ralph.yml -H builtin:debug -p "Investigate why login fails on mobil
 - Review stage walks 6 dimensions strictly serially (goal-alignment → correctness → testing → maintainability → project-standards → adversarial)
 - Blocks all push operations (local commit only)
 
-For large plans with supervisor fan-out to per-slot worktrees, use `ce-executor-supervisor` (the default CLI build already includes the `supervisor-db` feature).
+For large plans with supervisor fan-out to per-slot worktrees, use `parallel-forge` (the default CLI build already includes the `supervisor-db` feature; `parallel-forge` ships with `event_loop.supervisor.enabled: true`).
 
 **When to use `--worktree`:**
 - Multiple parallel ce-executor-pipeline runs

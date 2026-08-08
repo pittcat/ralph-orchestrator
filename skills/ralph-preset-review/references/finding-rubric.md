@@ -230,7 +230,7 @@ review 命中时按上表 `finding_id` + `default_severity` + 默认 confidence 
 | supervisor preset 的 restart 路径会重复注入协调终态或重复消费 `success_slots` 资源 | P0 | topology | Q4 | review-only（`supervisor_restart_not_idempotent`） |
 | supervisor happy path 接受 `Failed` / `Cancelled` slot 作为成功 | P0 | payload-content | Q4 | review-only（`supervisor_happy_path_accepts_failure`） |
 
-命中按上表入主表；`preset.execution_model_intent_mismatch` 是 U4 新增 review-only 软性 finding，与既有 lint id `preset.supervisor_requires_isolated` / `preset.supervisor_hat_publishes_coord_topic` / `preset.artifact_uses_internal_ledger` 复用底层问题，但触发条件是 **capability + Intent 一致性**而非 preset 名。`presets/en/ce-executor-supervisor.yml` 等既有 builtin 仍受既有 lint 约束，不在本表新触发条件内。
+命中按上表入主表；`preset.execution_model_intent_mismatch` 是 U4 新增 review-only 软性 finding，与既有 lint id `preset.supervisor_requires_isolated` / `preset.supervisor_hat_publishes_coord_topic` / `preset.artifact_uses_internal_ledger` 复用底层问题，但触发条件是 **capability + Intent 一致性**而非 preset 名。`presets/en/parallel-forge.yml` 等既有 supervisor-enabled builtin 仍受既有 lint 约束，不在本表新触发条件内。
 
 ### Agent skill audit（review-only，由 review SKILL Workflow 0a 弹窗默认跳过、选审触发）
 

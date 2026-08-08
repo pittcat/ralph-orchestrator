@@ -631,7 +631,7 @@ ralph run -c ralph.yml -H builtin:debug -p "排查某个问题"
 |---|---|---|
 | `autoresearch` | 指标驱动实验 | 尝试想法、测量、保留有效改动、丢弃无效改动 |
 | `ce-executor-pipeline` | 单阶段计划执行 | 一次执行整个 plan，6 维串行 review + aggregate，适合中小型 plan |
-| `ce-executor-supervisor` | 大型计划执行 | supervisor 派发 per-slot worktree，并行 review/fix，需要 `--features supervisor-db` |
+| `parallel-forge` | 大型计划执行 | supervisor 派发 per-slot worktree，并行 review/fix，默认 features 已含 `supervisor-db` |
 | `debug` | bug 排查 | 先复现和假设，再修复和验证 |
 | `merge-batch` | 批量 merge | Git-first 多 worktree 批量 merge：review → integrate → stabilize → report |
 

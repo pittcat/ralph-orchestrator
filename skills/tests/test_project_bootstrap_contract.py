@@ -2869,7 +2869,6 @@ def test_handoff_module_does_not_hard_code_preset_names() -> None:
     # Forbidden literals: any specific builtin preset name.
     forbidden_literals = (
         "ce-executor-pipeline",
-        "ce-executor-supervisor",
         "ce-executor-lite",
         "ralph-hats",
     )

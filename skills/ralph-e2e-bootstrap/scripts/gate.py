@@ -29,12 +29,10 @@ Hard rules:
 
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from pathlib import Path as _Path
-from typing import Any, Callable, Sequence, cast
+from typing import Callable, Sequence
 import importlib.util
-import json
-import subprocess
 import sys
 
 # Resolve the sibling probe via importlib so the gate is importable
@@ -59,24 +57,6 @@ else:
         f"ralph-e2e-bootstrap.gate requires sibling "
         f"ralph-project-bootstrap/scripts/cli_probe.py at {_PROBE_FILE}"
     )
-
-
-_SUPERVISOR_PRESET = "builtin:ce-executor-supervisor"
-_SUPERVISOR_PRESET_FINDINGS = frozenset(
-    {
-        "config.empty_terminal_events",
-        "topology.required_event_not_on_all_paths",
-    }
-)
-_SUPERVISOR_PREFLIGHT_CHECKS = frozenset(
-    {
-        ("config", "warn"),
-        ("git", "warn"),
-        ("paths", "warn"),
-        ("preset-topology", "fail"),
-        ("preset-contract", "fail"),
-    }
-)
 
 
 @dataclass(frozen=True)
@@ -160,112 +140,6 @@ def _missing_decisions(
     return result
 
 
-def _approved_supervisor_preset_report(stdout: str) -> tuple[bool, tuple[str, ...]]:
-    try:
-        report = json.loads(stdout)
-        findings = report["findings"]
-    except (json.JSONDecodeError, KeyError, TypeError):
-        return False, ()
-    if not isinstance(findings, list) or not findings:
-        return False, ()
-    finding_ids = tuple(
-        finding.get("id", "") for finding in findings if isinstance(finding, dict)
-    )
-    return (
-        len(finding_ids) == len(findings)
-        and set(finding_ids).issubset(_SUPERVISOR_PRESET_FINDINGS),
-        finding_ids,
-    )
-
-
-def _approved_supervisor_preflight_report(stdout: str) -> tuple[bool, tuple[str, ...]]:
-    try:
-        report = json.loads(stdout)
-        checks = report["checks"]
-    except (json.JSONDecodeError, KeyError, TypeError):
-        return False, ()
-    if not isinstance(checks, list):
-        return False, ()
-
-    approved: list[str] = []
-    for check in checks:
-        if not isinstance(check, dict):
-            return False, ()
-        name = str(check.get("name", ""))
-        status = str(check.get("status", ""))
-        message = str(check.get("message", ""))
-        if status == "pass":
-            continue
-        if (name, status) not in _SUPERVISOR_PREFLIGHT_CHECKS:
-            return False, ()
-        if name == "config" and not (
-            "terminal_events" in message and "exec-wave-dispatcher" in message
-        ):
-            return False, ()
-        if name == "git" and "Commit or stash changes" not in message:
-            return False, ()
-        if name == "paths" and not message.startswith("Created:"):
-            return False, ()
-        if name in {"preset-topology", "preset-contract"} and not (
-            "Required event 'work.done' is not on all completion paths from 'plan.ready'"
-            in message
-        ):
-            return False, ()
-        approved.append(f"{name}:{status}")
-    return bool(approved), tuple(approved)
-
-
-def _supervisor_aware_runner(
-    runner: Callable[..., object], approved: dict[str, tuple[str, ...]]
-) -> Callable[..., object]:
-    def run(argv: Sequence[str], **kwargs: object) -> object:
-        actual_argv = list(argv)
-        stage = ""
-        if actual_argv[-3:] == ["preset", "check", "--strict"]:
-            actual_argv.extend(["--format", "json"])
-            stage = "preset_check"
-        elif actual_argv[-2:] == ["preflight", "--strict"]:
-            actual_argv.extend(["--format", "json"])
-            stage = "preflight"
-
-        result = runner(actual_argv, **kwargs)
-        if not stage or int(getattr(result, "returncode", 0)) == 0:
-            return result
-
-        stdout = str(getattr(result, "stdout", "") or "")
-        if stage == "preset_check":
-            accepted, evidence = _approved_supervisor_preset_report(stdout)
-        else:
-            accepted, evidence = _approved_supervisor_preflight_report(stdout)
-        if not accepted:
-            return result
-
-        approved[stage] = evidence
-        return subprocess.CompletedProcess(
-            args=actual_argv,
-            returncode=0,
-            stdout=stdout,
-            stderr=str(getattr(result, "stderr", "") or ""),
-        )
-
-    return run
-
-
-def _append_approved_evidence(
-    decisions: Sequence[StageDecision], approved: dict[str, tuple[str, ...]]
-) -> tuple[StageDecision, ...]:
-    return tuple(
-        replace(
-            decision,
-            evidence=decision.evidence
-            + (f"approved_findings={list(approved[decision.stage])}",),
-        )
-        if decision.stage in approved
-        else decision
-        for decision in decisions
-    )
-
-
 def run_static_gate(
     *,
     binary: Path | str,
@@ -307,21 +181,14 @@ def run_static_gate(
             plan_missing=True,
         )
 
-    approved: dict[str, tuple[str, ...]] = {}
-    effective_runner = cast(Any, runner)
-    if preset == _SUPERVISOR_PRESET:
-        base_runner = runner if runner is not None else subprocess.run
-        effective_runner = _supervisor_aware_runner(base_runner, approved)
-
     decisions = validate_pipeline(
         binary=binary_path,
         config_path=config_path,
         preset=preset,
         prompt_file=prompt_file,
         plan_path=plan_path,
-        runner=effective_runner,
+        runner=runner,
     )
-    decisions = _append_approved_evidence(decisions, approved)
 
     by_stage = {decision.stage: decision for decision in decisions}
     filled = _missing_decisions(by_stage, placeholder_argv, placeholder_argv_with_plan)

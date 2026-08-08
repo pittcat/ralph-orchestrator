@@ -139,7 +139,7 @@ Ralph implements the [Ralph Wiggum technique](https://ghuntley.com/ralph/) — a
 - **Hat System** — Specialized personas coordinating through events
 - **Backpressure** — Gates that reject incomplete work (tests, lint, typecheck)
 - **Memories & Tasks** — Persistent learning and runtime work tracking
-- **6 Supported Builtins** — `autoresearch`, `ce-executor-pipeline`, `ce-executor-supervisor`, `debug`, `merge-loop`, and `merge-batch`, with more patterns documented as examples
+- **9 Supported Builtins** — `autoresearch`, `ce-executor-pipeline`, `ce-executor-pipeline-loop`, `debug`, `implementation-review`, `merge-batch`, `parallel-forge`, `post-merge-converge`, and `red-team-attack`, with more patterns documented as examples
 
 ## Human Guidance & Recovery
 

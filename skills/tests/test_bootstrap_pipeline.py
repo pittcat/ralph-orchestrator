@@ -45,7 +45,7 @@ def _write_change(path: Path, *, presets: bool = False) -> None:
         "### U2\n\nTouch `crates/ralph-core/src/drift/engine.rs`.\n"
     )
     if presets:
-        body += "\n### U3\n\nTouch `presets/en/ce-executor-supervisor.yml`.\n"
+        body += "\n### U3\n\nTouch `presets/en/parallel-forge.yml`.\n"
     path.write_text(body, encoding="utf-8")
 
 
@@ -94,13 +94,13 @@ def test_pipeline_preset_gap_before_suite(tmp_path: Path) -> None:
     result = bootstrap_pipeline.run_pipeline(
         sandbox=sand,
         change_plan=change,
-        preset="builtin:ce-executor-supervisor",
+        preset="builtin:parallel-forge",
         skip_plan_diff=True,
         preset_continue_confirmed=False,
     )
     assert result.ok is False
     assert result.needs == "preset_gap"
-    assert not (sand / "ralph.ce-executor-supervisor.yml").exists()
+    assert not (sand / "ralph.parallel-forge.yml").exists()
 
 
 def test_pipeline_binary_freshness_gate(tmp_path: Path) -> None:
