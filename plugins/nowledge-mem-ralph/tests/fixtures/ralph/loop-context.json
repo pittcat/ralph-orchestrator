@@ -1,0 +1,9 @@
+{
+  "RALPH_CURRENT_LOOP_ID": "loop-fixture",
+  "RALPH_CURRENT_HAT": "worker",
+  "RALPH_HATS_SOURCE": "supervisor",
+  "RALPH_WORKSPACE_ROOT": "/workspace/example",
+  "RALPH_SESSION_ROLE": "worker",
+  "RALPH_WAVE": "2",
+  "RALPH_ATTEMPT": "1"
+}

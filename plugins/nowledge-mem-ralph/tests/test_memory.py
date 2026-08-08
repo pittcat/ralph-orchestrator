@@ -110,6 +110,29 @@ def _reset_dedupe_ledger(memory_dedupe_module):
     memory_dedupe_module.clear_local_ledger()
 
 
+def test_semantic_review_requires_configured_evaluator(memory_module, valid_candidate, monkeypatch):
+    """Semantic candidates must not bypass the evaluator at the CLI boundary."""
+    monkeypatch.delenv("RALPH_NOWLEDGE_EVALUATOR", raising=False)
+    valid_candidate["semantic_review"] = True
+    result = memory_module.save(valid_candidate)
+    assert result.result == "REJECTED"
+    assert "evaluator" in result.reason.lower()
+
+
+def test_semantic_review_uses_structured_evaluator(
+    memory_module, valid_candidate, monkeypatch, tmp_path
+):
+    evaluator = tmp_path / "evaluator.py"
+    evaluator.write_text(
+        "import json; print(json.dumps({'verdict': 'ACCEPTED', 'reasons': ['reviewed']}))",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("RALPH_NOWLEDGE_EVALUATOR", f"{sys.executable} {evaluator}")
+    valid_candidate["semantic_review"] = True
+    result = memory_module.save(valid_candidate)
+    assert result.result == "ACCEPTED"
+
+
 @pytest.fixture
 def missing_evidence_candidate() -> dict:
     return json.loads((FIXTURES_DIR / "missing_evidence.json").read_text(encoding="utf-8"))

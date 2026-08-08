@@ -62,6 +62,10 @@ def _dedupe():
     return _resolve("_nowledge_mem_ralph_memory_dedupe", "memory_dedupe.py")
 
 
+def _evaluator():
+    return _resolve("_nowledge_mem_ralph_memory_evaluator", "memory_evaluator.py")
+
+
 # ---------------------------------------------------------------------------
 # Result dataclass
 # ---------------------------------------------------------------------------
@@ -173,6 +177,18 @@ def save(
     digest = _dedupe().compute_memory_digest(candidate)
     verdict = _policy().evaluate(candidate)
 
+    if verdict.result == "ACCEPTED" and candidate.get("semantic_review") is True:
+        evaluator_result, evaluator_reason, _details = _evaluator().evaluate(candidate)
+        if evaluator_result != "ACCEPTED":
+            evaluated = _policy().Verdict(
+                result=evaluator_result,
+                reason=evaluator_reason or "semantic evaluator rejected the candidate",
+                missing_fields=(),
+                rewrite_suggestion="review the evaluator reasons and resubmit only after correction",
+                policy_version=verdict.policy_version,
+            )
+            return SaveResult.from_verdict(evaluated, digest=digest, record=None)
+
     # Dedupe short-circuit only fires for ACCEPTED candidates. A
     # rejected candidate still gets a verdict returned (and the
     # caller can fix and resubmit); we do not want to silently
@@ -216,6 +232,36 @@ def _read_stdin() -> str:
     return _sys.stdin.read()
 
 
+def _source_from_environment() -> dict[str, str]:
+    """Capture only bounded Ralph metadata, never prompt or transcript text."""
+    keys = {
+        "loop_id": "RALPH_CURRENT_LOOP_ID",
+        "hat": "RALPH_CURRENT_HAT",
+        "wave": "RALPH_WAVE",
+        "attempt": "RALPH_ATTEMPT",
+        "repo": "RALPH_WORKSPACE_ROOT",
+    }
+    import os as _os
+    return {name: _os.environ.get(env_key, "").strip()[:300] for name, env_key in keys.items() if _os.environ.get(env_key, "").strip()}
+
+
+def _load_writer():
+    writer_name = "_nowledge_mem_ralph_memory_writer"
+    writer = _sys.modules.get(writer_name)
+    if writer is not None:
+        return writer
+    import importlib.util as _il
+    from pathlib import Path as _Path
+    _path = _Path(__file__).resolve().parent / "memory_writer.py"
+    _spec = _il.spec_from_file_location(writer_name, _path)
+    if _spec is None or _spec.loader is None:
+        raise RuntimeError("failed to load memory_writer.py")
+    writer = _il.module_from_spec(_spec)
+    _sys.modules[writer_name] = writer
+    _spec.loader.exec_module(writer)
+    return writer
+
+
 def main() -> int:
     """Read candidate JSON from stdin and print the verdict to stdout.
 
@@ -239,7 +285,22 @@ def main() -> int:
         _sys.stderr.write(f"save-memory: failed to parse stdin as JSON: {exc}\n")
         return 1
 
-    result = save(candidate)
+    source = _source_from_environment()
+    # Scope is part of the candidate's explicit schema; source metadata is
+    # plugin-owned and comes from the current Ralph activation environment.
+    result = save(candidate, source=source)
+    write_result = None
+    if result.result == "ACCEPTED" and result.record is not None:
+        # Resolve U04 lazily so the pure U03 ``save`` API remains side-effect
+        # free and testable. The command boundary owns the actual write.
+        writer = _load_writer()
+        write_result = writer.write_from_save_result(result)
+        if write_result.result in {"FAILED_OPEN", "UNKNOWN"}:
+            scope = candidate.get("scope", "")
+            _dedupe().forget_save(result.memory_digest, scope=scope if isinstance(scope, str) else "")
+    else:
+        # Stop/SubagentStop must be able to report deterministic rejections.
+        _load_writer().record_policy_result(result, source)
     payload = {
         "result": result.result,
         "reason": result.reason,
@@ -249,6 +310,7 @@ def main() -> int:
         "memory_digest": result.memory_digest,
         "memory_id": result.memory_id,
         "record": result.record,
+        "write": write_result.as_dict() if write_result is not None else None,
     }
     _sys.stdout.write(_json.dumps(payload, ensure_ascii=False))
     _sys.stdout.write("\n")

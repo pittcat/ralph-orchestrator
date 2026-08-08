@@ -8,8 +8,9 @@ argument-hint: <memory-json>
 > **0.2.0 lifecycle context.** This command is the **only** path that
 > writes a Memory record. The plugin owns the lifecycle:
 > `validate schema → hard gate → quality thresholds → dedupe signal`.
-> It does **not** call ``nmem`` directly; U04 writer picks up the
-> ACCEPTED verdict and performs the argv-safe write.
+> It invokes the plugin-owned writer only after policy returns ``ACCEPTED``.
+> The writer performs a bounded argv-safe nmem write and durable digest
+> dedupe; rejected candidates never reach nmem.
 >
 > **Do not** run this command on every iteration. Save-memory is
 > for durable knowledge only — a stable, reusable conclusion you
@@ -107,12 +108,13 @@ The plugin prints a JSON verdict to stdout. The verdict carries:
 - `missing_fields`: list of field names that drove the verdict
 - `rewrite_suggestion`: hint to the agent
 - `memory_digest`: 64-char SHA-256 hex when `ACCEPTED`
-- `record`: the structured ACCEPTED record (U04 writer reads this)
+- `record`: the structured ACCEPTED record used by the plugin writer
 
 ## Verdict handling
 
-- `ACCEPTED` — the writer (U04) picks up the record; you should
-  not call nmem yourself.
+- `ACCEPTED` — the plugin writer attempts the bounded nmem write; do not
+  call nmem yourself. Inspect the nested `write` result for `SAVED`,
+  `ALREADY_SAVED`, `FAILED_OPEN`, or `UNKNOWN`.
 - `REJECTED` — surface the `reason` and `missing_fields` to the
   user; fix and retry only if the user wants to refine the
   candidate.

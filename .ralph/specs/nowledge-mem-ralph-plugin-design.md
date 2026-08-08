@@ -250,5 +250,20 @@
 2. 任何状态下,`nmem` 写入只能源自 `SAVE_OUTCOME.ACCEPTED`。
 3. `STOP_AUDIT` 永不重新发起 `save-memory`;只能 append audit record。
 4. 任何状态转移都必须在 stderr 留一行结构化日志(`event` 字段)。
-5. hook 永不返回非 0 退出码给 Claude;可恢复错误用 stderr + exit 0
-   软失败(U01 §5.3 表「失败语义」一列锁定)。
+5. hook 的可恢复故障不阻塞 Claude;runtime 只输出空/合法 JSON,不读取
+  或修改 Ralph 终态。
+
+## 5.4 Save-memory writer contract
+
+- `memory.py` 的纯函数 `save()` 只负责 schema、policy 和候选 record;
+  CLI boundary 才调用 `memory_writer.py`。
+- writer 拒绝缺少 `ACCEPTED`、digest、scope、source 或 policy version 的
+  record。nmem argv 由 `nmem_client.py` 集中构造,禁止 `shell=True`。
+- `SAVED` 之后才原子更新 `memory-ledger.json`;已存在的
+  `scope:digest` 返回 `ALREADY_SAVED`。非零、缺命令、超时或非法 JSON
+  返回 `FAILED_OPEN`/`UNKNOWN`,不写 ledger。
+- Stop/SubagentStop 只追加不含 transcript 的 `audit.jsonl`,不能触发
+  writer 或 evaluator。
+- 候选显式设置 `semantic_review=true` 时,`memory_evaluator.py` 通过无
+  shell 的 argv 调用结构化 evaluator;缺失、超时、非法 JSON 或带副作用
+  字段的返回一律拒绝本条 Memory。

@@ -124,6 +124,22 @@ def record_save(digest: str, scope: str | None = None) -> None:
         _SAVED_BY_SCOPE.setdefault(scope, set()).add(digest)
 
 
+def forget_save(digest: str, scope: str | None = None) -> None:
+    """Undo a provisional U03 signal when the U04 writer did not save.
+
+    U03 keeps a process-local signal for direct command retries.  The writer
+    calls this on FAILED_OPEN/UNKNOWN so a failed side effect cannot poison a
+    later explicit retry; the durable U04 ledger is only updated after SAVED.
+    """
+    _SAVED_DIGESTS.discard(digest)
+    if scope is not None:
+        bucket = _SAVED_BY_SCOPE.get(scope)
+        if bucket is not None:
+            bucket.discard(digest)
+            if not bucket:
+                _SAVED_BY_SCOPE.pop(scope, None)
+
+
 def clear_local_ledger() -> None:
     """Reset the local ledger — exposed for tests only."""
     _SAVED_DIGESTS.clear()

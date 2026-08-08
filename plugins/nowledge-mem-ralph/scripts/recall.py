@@ -35,6 +35,7 @@ import os
 import subprocess
 import sys
 import time
+import re
 from pathlib import Path
 from typing import Any
 
@@ -49,6 +50,7 @@ SUBPROCESS_TIMEOUT_SECONDS = 4
 # History boundary so the rendered XML never exceeds Claude Code's
 # additionalContext cap. Tuned for "five memories × ~600 chars + headers".
 CONTEXT_BYTE_BUDGET = 4096
+_SAFE_LOOP_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 
 
 # ---------------------------------------------------------------------------
@@ -103,13 +105,16 @@ def normalize_query(
     *,
     repo_basename: str,
     preset: str,
-    workspace_root: str,
+    workspace_root: str = "",
+    objective: str = "",
+    plan: str = "",
 ) -> str:
     """Build the bounded ``nmem m search`` query from non-sensitive input.
 
     The query is intentionally short and shell-safe — it concatenates
-    three fields with a single space separator after stripping control
-    characters that would break ``argv`` parsing or shell filtering.
+    only the approved repo/preset/objective/plan identifiers. The absolute
+    workspace path is accepted for backwards-compatible callers but is
+    deliberately ignored and never sent to nmem.
     """
     def _clean(value: str) -> str:
         cleaned = " ".join(value.split())
@@ -120,7 +125,8 @@ def normalize_query(
     parts = [
         _clean(repo_basename or ""),
         _clean(preset or ""),
-        _clean(workspace_root or ""),
+        _clean(objective or ""),
+        _clean(plan or ""),
     ]
     return " ".join(part for part in parts if part)
 
@@ -129,10 +135,12 @@ def _digest_query(query: str) -> str:
     return hashlib.sha256(query.encode("utf-8")).hexdigest()
 
 
-def _derive_query_fields(ralph_env: dict[str, str]) -> tuple[str, str, str]:
-    """Derive (repo_basename, preset, workspace_root) from Ralph env.
+def _derive_query_fields(ralph_env: dict[str, str]) -> tuple[str, str, str, str]:
+    """Derive query-safe fields from Ralph env.
 
-    Returns empty strings if any field is missing — the caller is
+    Returns repo basename, preset, objective and plan. The workspace root is
+    used only to derive the basename and is never part of the query.
+    Returns empty strings if any required field is missing — the caller is
     expected to skip the search when fields are absent (loop_id alone
     is not enough to build a meaningful query).
     """
@@ -142,7 +150,9 @@ def _derive_query_fields(ralph_env: dict[str, str]) -> tuple[str, str, str]:
         # ``Path("")`` raises; we already guarded against that.
         repo_basename = Path(workspace_root).name.strip()
     preset = ralph_env.get("RALPH_HATS_SOURCE", "").strip()
-    return repo_basename, preset, workspace_root
+    objective = ralph_env.get("RALPH_OBJECTIVE", "").strip()
+    plan = ralph_env.get("RALPH_PLAN", "").strip()
+    return repo_basename, preset, objective, plan
 
 
 # ---------------------------------------------------------------------------
@@ -167,7 +177,7 @@ def tempfile_fallback_root() -> str:  # pragma: no cover - defensive helper
 
 def _loop_dir(loop_id: str) -> Path:
     """Per-loop state directory, derived from ``_state_root``."""
-    if not loop_id:
+    if not _SAFE_LOOP_ID.fullmatch(loop_id):
         raise ValueError("loop_id is required")
     return _state_root() / loop_id
 
@@ -439,7 +449,10 @@ def run_loop_recall(
             source_metadata={"loop_id": loop_id, "source": "compact"},
         )
 
-    repo_basename, preset, workspace_root = _derive_query_fields(env)
+    loop_id = env.get("RALPH_CURRENT_LOOP_ID", "").strip()
+    if not _SAFE_LOOP_ID.fullmatch(loop_id):
+        return RecallResult(state="NOOP", context_xml="", source_metadata={})
+    repo_basename, preset, objective, plan = _derive_query_fields(env)
     if not repo_basename or not preset:
         # Without enough to derive a meaningful query the recall path
         # cannot succeed; record this as fail-open so the agent still
@@ -462,7 +475,8 @@ def run_loop_recall(
     query = normalize_query(
         repo_basename=repo_basename,
         preset=preset,
-        workspace_root=workspace_root,
+        objective=objective,
+        plan=plan,
     )
     query_digest = _digest_query(query)
 

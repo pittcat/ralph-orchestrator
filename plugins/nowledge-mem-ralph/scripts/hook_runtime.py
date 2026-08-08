@@ -14,8 +14,7 @@ non-negotiable contracts before any other module is allowed to run:
    must use ``subprocess.run([...], timeout=...)``. The hook itself has
    a 5-second budget declared in ``hooks/hooks.json``.
 
-Subsequent units (U02 recall, U03 memory policy, U04 writer, U05 audit)
-extend this skeleton. ``resolve_nowledge_env`` is the canonical mapping
+Recall, policy, writer, and audit handlers extend this runtime. ``resolve_nowledge_env`` is the canonical mapping
 between Ralph's existing ``RALPH_*`` env keys and the plugin's internal
 ``Nowledge*`` field names; downstream code MUST read the env through this
 function so the mapping stays in one place.
@@ -28,6 +27,7 @@ import json
 import os
 import sys
 import tempfile
+import re
 from pathlib import Path
 from typing import Any
 
@@ -42,6 +42,7 @@ EXIT_BUG = 2
 # Ralph env keys the plugin reuses (no RALPH_NOWLEDGE_* namespace is
 # created — see F2 in the inspection report).
 _RALPH_ENV_KEYS = (
+    "RALPH_NOWLEDGE_ENABLED",
     "RALPH_CURRENT_HAT",
     "RALPH_CURRENT_LOOP_ID",
     "RALPH_EVENTS_FILE",
@@ -50,6 +51,8 @@ _RALPH_ENV_KEYS = (
     "RALPH_CONFIG",
     "RALPH_WORKSPACE_ROOT",
 )
+
+_SAFE_LOOP_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 
 
 def _log(kind: str, **fields: Any) -> None:
@@ -65,8 +68,10 @@ def _log(kind: str, **fields: Any) -> None:
 
 
 def _nowledge_env_present() -> bool:
-    """Return True only if the process carries Ralph loop env."""
-    return bool(os.environ.get("RALPH_CURRENT_LOOP_ID", "").strip())
+    """Return True only for an explicitly enabled, safe Ralph loop."""
+    enabled = os.environ.get("RALPH_NOWLEDGE_ENABLED", "").strip()
+    loop_id = os.environ.get("RALPH_CURRENT_LOOP_ID", "").strip()
+    return enabled == "1" and bool(_SAFE_LOOP_ID.fullmatch(loop_id))
 
 
 def resolve_nowledge_env() -> dict[str, str]:
@@ -175,6 +180,9 @@ def _handle_session_start(payload: dict[str, Any]) -> int:
     """
     env = resolve_nowledge_env()
     loop_id = env["RALPH_CURRENT_LOOP_ID"]
+    if not _SAFE_LOOP_ID.fullmatch(loop_id):
+        _log("hook_skipped_invalid_loop_id")
+        return EXIT_OK
     state_path = _state_root() / loop_id / "state.json"
 
     cache_status = "noop"
@@ -222,33 +230,51 @@ def _handle_session_start(payload: dict[str, Any]) -> int:
 def _handle_stop(payload: dict[str, Any]) -> int:
     """Stop handler — audit-only.
 
-    U05 will replace the body with a full Stop audit (read state.json,
-    append audit record). U01's job is to lock the contract: no
-    transcript reads, no ``nmem`` invocation, no second save attempt.
+    The Stop handler remains audit-only: no transcript reads, no
+    ``nmem`` invocation, and no second save attempt.
     The Stop handler must NEVER block the agent — it logs and exits.
     """
     env = resolve_nowledge_env()
     # Explicit guard: we are not allowed to read transcript_path or any
     # last_assistant_message — write a marker that proves the guard
     # fired and stop.
-    state_path = _state_root() / env["RALPH_CURRENT_LOOP_ID"] / "state.json"
-    _atomic_write_json(
-        state_path,
-        {
-            "hook": "Stop",
-            "loop_id": env["RALPH_CURRENT_LOOP_ID"],
-            "hat": env["RALPH_CURRENT_HAT"],
-            "audit_only": True,
-            "stop_hook_fired": True,
-        },
-    )
-    _log("stop_audit_recorded", loop_id=env["RALPH_CURRENT_LOOP_ID"])
+    audit = _load_audit_module()
+    audit.record_stop(env, payload, event="Stop", state_root=_state_root())
+    _log("stop_audit_recorded", loop_id=env["RALPH_CURRENT_LOOP_ID"], event="Stop")
     return EXIT_OK
+
+
+def _handle_subagent_stop(payload: dict[str, Any]) -> int:
+    env = resolve_nowledge_env()
+    audit = _load_audit_module()
+    audit.record_stop(env, payload, event="SubagentStop", state_root=_state_root())
+    _log("stop_audit_recorded", loop_id=env["RALPH_CURRENT_LOOP_ID"], event="SubagentStop")
+    return EXIT_OK
+
+
+_AUDIT_MODULE: Any | None = None
+
+
+def _load_audit_module() -> Any:
+    global _AUDIT_MODULE
+    if _AUDIT_MODULE is not None:
+        return _AUDIT_MODULE
+    here = Path(__file__).resolve().parent
+    name = "_nowledge_mem_ralph_audit"
+    spec = importlib.util.spec_from_file_location(name, here / "audit_hook.py")
+    if spec is None or spec.loader is None:
+        raise RuntimeError("failed to load audit_hook.py")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
+    spec.loader.exec_module(module)
+    _AUDIT_MODULE = module
+    return module
 
 
 _HANDLERS = {
     "SessionStart": _handle_session_start,
     "Stop": _handle_stop,
+    "SubagentStop": _handle_subagent_stop,
 }
 
 
@@ -272,9 +298,11 @@ def main(argv: list[str] | None = None) -> int:
     try:
         return _HANDLERS[event](payload)
     except Exception as exc:
-        # Hooks must never crash Claude. Log and exit 1.
+        # Hooks must never block Claude. A lifecycle/audit failure is
+        # observable on stderr but remains fail-open; only an unknown event
+        # above is treated as an internal bug.
         _log("hook_unhandled_exception", event=event, error=str(exc), type=type(exc).__name__)
-        return EXIT_RECOVERABLE
+        return EXIT_OK
 
 
 if __name__ == "__main__":

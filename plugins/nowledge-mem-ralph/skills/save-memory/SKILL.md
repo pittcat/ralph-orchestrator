@@ -8,9 +8,9 @@ description: Persist a durable Nowledge Mem Memory candidate after schema, hard-
 > **0.2.0 lifecycle context.** Save-memory is the **only** path
 > that writes a Memory record. The plugin owns the lifecycle:
 > `validate schema → hard gate → quality thresholds → dedupe signal`,
-> then hands an ACCEPTED record to the writer (U04). This skill
-> does **not** call ``nmem`` directly and does **not** read
-> transcripts.
+> then hands an ACCEPTED record to the plugin writer. The command
+> boundary performs the bounded write and reports its status; this skill
+> does **not** call ``nmem`` directly and does **not** read transcripts.
 
 Save durable knowledge. Not progress. Not logs. Not command
 transcripts. Not one-shot workarounds. Memory is what a future
@@ -110,6 +110,7 @@ python3 "${CLAUDE_PLUGIN_ROOT}/scripts/memory.py" <<'JSON'
   "verification": "...",
   "critical_assumptions": [],
   "critical_ambiguities": [],
+  "semantic_review": false,
   "metrics": {
     "confidence": 95,
     "evidence_coverage": 88,
@@ -125,9 +126,16 @@ JSON
 
 ## Verdict handling
 
-- `ACCEPTED` — the writer (U04) picks up the record; you do not
-  call nmem. The verdict carries `memory_digest` (64-char SHA-256)
-  and the structured `record` for the writer.
+- `ACCEPTED` — the command boundary attempts the bounded writer call;
+  you do not call nmem. The verdict carries `memory_digest` (64-char
+  SHA-256), the structured `record`, and a nested `write` result.
+  `write.result` is `SAVED`, `ALREADY_SAVED`, `FAILED_OPEN`, or
+  `UNKNOWN`; `UNKNOWN` means the remote outcome must be reconciled
+  before retrying the same digest.
+- Set `semantic_review` to `true` when reuse, stability, scope, or novelty
+  needs semantic judgment beyond the deterministic thresholds. The plugin
+  then calls the configured structured evaluator; missing, invalid, timed-out,
+  or side-effecting evaluator output is rejected for this candidate.
 - `REJECTED` — surface `reason` and `missing_fields`; fix only if
   the user wants to refine. Do not retry with the same payload.
 - `NEEDS_REWRITE` — structural rework required (assumptions or
@@ -137,8 +145,9 @@ JSON
 
 ## What the skill does NOT do
 
-- It does not call `nmem --json m add` directly. The writer (U04)
-  is the sole owner of that call; the skill only returns verdicts.
+- It does not call `nmem --json m add` directly. The plugin writer is
+  the sole owner of that call; the command returns its bounded outcome
+  alongside the policy verdict.
 - It does not read transcripts or `last_assistant_message`. The
   candidate must come from the agent's own conclusion.
 - It does not save progress, logs, command transcripts, or

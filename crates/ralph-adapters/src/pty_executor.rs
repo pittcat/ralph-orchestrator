@@ -1964,6 +1964,8 @@ fn inject_ralph_runtime_env(cmd_builder: &mut CommandBuilder, workspace_root: &s
     }
     cmd_builder.env("RALPH_BIN", current_exe);
     cmd_builder.env("RALPH_WORKSPACE_ROOT", workspace_root);
+    // Enable the optional Nowledge plugin only for Ralph-owned agent sessions.
+    cmd_builder.env("RALPH_NOWLEDGE_ENABLED", "1");
     // U1 (2026-06-14-002): keep PWD in sync with the actual working directory.
     // PTY backends may use PWD for project-root heuristics.
     cmd_builder.env("PWD", workspace_root);

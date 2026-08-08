@@ -39,6 +39,7 @@ def isolated_plugin_data(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Pat
     # explicitly when they want to exercise the active hook path.
     for key in (
         "RALPH_CURRENT_HAT",
+        "RALPH_NOWLEDGE_ENABLED",
         "RALPH_CURRENT_LOOP_ID",
         "RALPH_EVENTS_FILE",
         "RALPH_TRIGGERED_HAT",
@@ -133,6 +134,7 @@ def test_session_start_writes_state_marker(
         "SessionStart",
         {"session_id": "sess-1", "source": "startup"},
         extra_env={
+            "RALPH_NOWLEDGE_ENABLED": "1",
             "RALPH_CURRENT_LOOP_ID": "loop-xyz",
             "RALPH_CURRENT_HAT": "planner",
             "RALPH_HATS_SOURCE": "ce-executor-pipeline",
@@ -164,6 +166,7 @@ def test_stop_audit_placeholder(isolated_plugin_data: Path) -> None:
             "last_assistant_message": "should never be read",
         },
         extra_env={
+            "RALPH_NOWLEDGE_ENABLED": "1",
             "RALPH_CURRENT_LOOP_ID": "loop-xyz",
             "RALPH_CURRENT_HAT": "planner",
         },
@@ -246,7 +249,7 @@ def test_unknown_event_returns_bug_exit(isolated_plugin_data: Path) -> None:
     result = _run_hook(
         "NotAHook",
         {},
-        extra_env={"RALPH_CURRENT_LOOP_ID": "loop-x"},
+        extra_env={"RALPH_NOWLEDGE_ENABLED": "1", "RALPH_CURRENT_LOOP_ID": "loop-x"},
     )
     assert result.returncode == 2, (
         f"unknown event must exit 2 (bug), got {result.returncode}"

@@ -118,6 +118,7 @@ def plugin_data(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     for key in (
         "RALPH_CURRENT_HAT",
         "RALPH_CURRENT_LOOP_ID",
+        "RALPH_NOWLEDGE_ENABLED",
         "RALPH_EVENTS_FILE",
         "RALPH_TRIGGERED_HAT",
         "RALPH_HATS_SOURCE",
@@ -154,6 +155,7 @@ def _read_nmem_log(log_file: Path) -> list[list[str]]:
 
 def _base_env(loop_id: str = "loop-u02") -> dict[str, str]:
     return {
+        "RALPH_NOWLEDGE_ENABLED": "1",
         "RALPH_CURRENT_LOOP_ID": loop_id,
         "RALPH_CURRENT_HAT": "planner",
         "RALPH_HATS_SOURCE": "ce-executor-pipeline",

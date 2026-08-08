@@ -461,6 +461,8 @@ fn inject_ralph_runtime_env(command: &mut Command, workspace_root: &std::path::P
     }
     command.env("RALPH_BIN", &current_exe);
     command.env("RALPH_WORKSPACE_ROOT", workspace_root);
+    // Enable the optional Nowledge plugin only for Ralph-owned agent sessions.
+    command.env("RALPH_NOWLEDGE_ENABLED", "1");
     // U1 (2026-06-14-002): keep PWD in sync with the actual working directory.
     // This protects non-TTY worktree runs and any tool that resolves paths via
     // the PWD environment variable.
@@ -1025,6 +1027,10 @@ mod tests {
         assert!(
             stdout.contains("RALPH_WORKSPACE_ROOT="),
             "RALPH_WORKSPACE_ROOT should be set by inject_ralph_runtime_env: {stdout}"
+        );
+        assert!(
+            stdout.contains("RALPH_NOWLEDGE_ENABLED=1"),
+            "RALPH_NOWLEDGE_ENABLED should be set by inject_ralph_runtime_env: {stdout}"
         );
 
         // U1 (2026-06-14-002): PWD must be synchronized with the actual working

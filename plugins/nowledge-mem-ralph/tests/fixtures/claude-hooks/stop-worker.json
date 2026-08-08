@@ -1,0 +1,6 @@
+{
+  "session_id": "ralph-worker-1",
+  "agent_id": "worker-1",
+  "transcript_path": "/outside/plugin/worker-transcript.jsonl",
+  "last_assistant_message": "must not be read"
+}

@@ -29,6 +29,21 @@
           }
         ]
       }
+    ],
+    "SubagentStop": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 ${CLAUDE_PLUGIN_ROOT}/scripts/hook_runtime.py SubagentStop",
+            "timeout": 5,
+            "env": {
+              "NOWLEDGE_HOOK_EVENT": "SubagentStop"
+            }
+          }
+        ]
+      }
     ]
   }
 }

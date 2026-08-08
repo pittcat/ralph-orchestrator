@@ -48,12 +48,11 @@ PLUGIN_VERSION = "0.2.0"
 MARKETPLACE_SOURCE = "./plugins/nowledge-mem-ralph"
 ROOT_PLUGIN_NAME = "ralph-orchestrator"
 
-# Lifecycle events the plugin MUST register on its hooks manifest. U01
-# declares SessionStart + Stop; U05 adds SubagentStop. The contract test
-# locks the *initial* set; U05 will update the test in its own commit.
+# Lifecycle events the plugin MUST register on its hooks manifest.
 LIFECYCLE_HOOK_EVENTS = (
     "SessionStart",
     "Stop",
+    "SubagentStop",
 )
 
 # Hooks the plugin MUST NOT register (reserved for U05 and beyond, or

@@ -1,0 +1,6 @@
+{
+  "session_id": "ralph-session-1",
+  "stop_hook_active": true,
+  "transcript_path": "/outside/plugin/transcript.jsonl",
+  "last_assistant_message": "must not be read"
+}
