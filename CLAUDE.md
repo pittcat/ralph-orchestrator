@@ -175,6 +175,7 @@ Presets define collections of hats. Located in `presets/` directory and `crates/
 
 > **以下规则优先级最高,请在动手写任何代码前先完整读完本段。** 任何「先看了某段就开始写」的冲动都应当先回头对照本段。
 
+- **单文件规模与模块拆分规则(HARD RULE)**:新增功能、新模块或较大行为变更时,无论是编写开发计划还是执行代码实现,都必须把模块边界和文件规模纳入设计；单个源码文件不得超过 **5000 行代码**。接近上限时应优先按职责拆分为多个清晰模块,并同步更新 `mod.rs` / 导出、测试与文档；禁止为了过线进行无语义的机械切片,也禁止把一个新功能继续堆进已经接近上限的大文件。计划评审必须检查拆分方案,实现完成后必须检查实际行数。
 - 讨论 ralph-orchestrator 的任何功能、架构、行为时,必须先去读源码确认,不允许凭记忆或猜测讨论
 - Run `cargo nextest run`(或 `./scripts/run-tests.sh`)before declaring any task done——绝对不要用裸 `cargo test` 跑 `ralph-cli` 测试,会触发 loop_runner 的 process-global Mutex 中毒 flake(参见本文档「Build & Test」段 HARD RULE 1)。**默认走并发**(ralph-cli 除外,见分级表)
 - Backwards compatibility doesn't matter — it adds clutter for no reason
