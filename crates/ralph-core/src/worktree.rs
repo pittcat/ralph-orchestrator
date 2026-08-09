@@ -267,6 +267,54 @@ pub fn validate_worktree_name(name: &str) -> Result<(), WorktreeError> {
     Ok(())
 }
 
+/// Acquire an exclusive `flock` on `<worktree_base>/.lock`, creating
+/// the parent directory and the sentinel file as needed.
+///
+/// U7 (plan 2026-08-09-002 / A3): the returned `Flock` RAII guard
+/// holds the lock for its lifetime. The function is a no-op stub
+/// on non-Unix platforms (the existing `git worktree add`
+/// per-branch serialization is the only protection there).
+#[cfg(unix)]
+fn acquire_worktree_base_lock(
+    worktree_base: &Path,
+) -> Result<nix::fcntl::Flock<File>, WorktreeError> {
+    use nix::fcntl::{Flock, FlockArg};
+
+    // Make sure the parent directory exists so the sentinel
+    // can be opened. `create_dir_all` is idempotent and
+    // intentionally not part of the race window — the lock
+    // acquisition below is.
+    fs::create_dir_all(worktree_base)?;
+    let lock_path = worktree_base.join(".lock");
+    let file = OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(false)
+        .open(&lock_path)?;
+    // Blocking lock: the second caller will wait for the first
+    // to finish rather than seeing a confusing `BranchExists`
+    // error mid-flight. A non-blocking variant would surface a
+    // pre-mature error to the operator and obscure the real
+    // cause.
+    Flock::lock(file, FlockArg::LockExclusive).map_err(|(file, errno)| {
+        // Drop the file on the error path; the failed Flock
+        // guard did not install, so the lock is not held.
+        let _ = file;
+        WorktreeError::Git(format!(
+            "failed to acquire flock on {}: {}",
+            lock_path.display(),
+            errno.desc()
+        ))
+    })
+}
+
+/// No-op stub for non-Unix platforms; the lock is dropped so the
+/// call site compiles the same way on every platform.
+#[cfg(not(unix))]
+fn acquire_worktree_base_lock(_worktree_base: &Path) -> Result<(), WorktreeError> {
+    Ok(())
+}
+
 /// Create a new worktree for a parallel Ralph loop.
 ///
 /// Creates a new branch and worktree at `{config.worktree_dir}/{loop_id}`.
@@ -306,6 +354,37 @@ pub fn create_worktree(
     let worktree_base = canonical_worktree_base(repo_root, config);
     let worktree_path = worktree_base.join(loop_id);
     let branch_name = format!("ralph/{loop_id}");
+
+    // U7 (plan 2026-08-09-002 / A3): acquire an exclusive flock
+    // on a sentinel file under the resolved worktree base before
+    // any existence check or `git worktree add` shell-out. This
+    // closes the TOCTOU race that allowed two concurrent
+    // `--worktree` invocations to both pass `exists()`, both race
+    // on `create_dir_all`, and have the loser crash with a
+    // terminal `BranchExists` error.
+    //
+    // The sentinel is co-located with the worktree base so
+    // per-repo contention is isolated: a contention point under
+    // `<external_base>/.lock` serializes only the worktrees
+    // directory, not the whole filesystem. The `Flock` RAII guard
+    // releases the lock on every return path (success, error,
+    // panic).
+    //
+    // The lock is held for the entire `create_worktree` call —
+    // from the existence check through `git worktree add` — so
+    // the second caller will block at the lock and only see the
+    // final state of the first caller (which is the desired
+    // observation: if the first succeeded, the second sees
+    // `AlreadyExists`; if the first failed, the second retries
+    // cleanly).
+    //
+    // Non-Unix platforms (Windows): the lock is silently skipped
+    // — git's own `worktree add` does its own per-branch
+    // serialization, so the worst case is the pre-existing
+    // `BranchExists` error rather than a hang. The race is a
+    // worst-effort defense on Windows.
+    #[cfg(unix)]
+    let _worktree_base_lock = acquire_worktree_base_lock(&worktree_base)?;
 
     // Check if worktree already exists
     if worktree_path.exists() {
@@ -2767,6 +2846,68 @@ branch refs/heads/ralph/loop-1
         assert!(
             !cfg.is_default_layout(),
             "non-sentinel relative override must not classify as default"
+        );
+    }
+
+    // ---------------------------------------------------------------------
+    // U7 (plan 2026-08-09-002 / A3): flock TOCTOU guard
+    // ---------------------------------------------------------------------
+
+    #[test]
+    #[cfg(unix)]
+    fn default_worktree_rejects_concurrent_creations_with_exactly_one_winner() {
+        // U7 A3: two concurrent `create_worktree` calls on the
+        // same repo with the same name must produce exactly one
+        // winner. The flock on `<external_base>/.lock` serializes
+        // the two callers so the loser observes the winner's
+        // state and returns an `AlreadyExists` / `BranchExists`
+        // error rather than a panic or a stuck `create_dir_all`
+        // race. The test spawns two threads, gates them on a
+        // barrier so the calls happen "at the same time", and
+        // asserts one `Ok` and one `Err`.
+        use std::sync::{Arc, Barrier};
+        let temp_dir = TempDir::new().unwrap();
+        init_git_repo(temp_dir.path());
+
+        let config = WorktreeConfig::default();
+        let barrier = Arc::new(Barrier::new(2));
+        let t1_temp = temp_dir.path().to_path_buf();
+        let t1_config = config.clone();
+        let t1_barrier = Arc::clone(&barrier);
+        let t1 = std::thread::spawn(move || {
+            t1_barrier.wait();
+            create_worktree(&t1_temp, "race-name", &t1_config)
+        });
+        let t2_temp = temp_dir.path().to_path_buf();
+        let t2_barrier = Arc::clone(&barrier);
+        let t2 = std::thread::spawn(move || {
+            t2_barrier.wait();
+            create_worktree(&t2_temp, "race-name", &config)
+        });
+        let r1 = t1.join().expect("thread 1 must not panic");
+        let r2 = t2.join().expect("thread 2 must not panic");
+
+        let oks = [&r1, &r2]
+            .iter()
+            .filter(|r| r.is_ok())
+            .count();
+        let errs = [&r1, &r2]
+            .iter()
+            .filter(|r| {
+                matches!(
+                    r,
+                    Err(WorktreeError::AlreadyExists(_))
+                        | Err(WorktreeError::BranchExists(_))
+                )
+            })
+            .count();
+        assert_eq!(
+            oks, 1,
+            "exactly one concurrent create_worktree must succeed; got r1={r1:?} r2={r2:?}"
+        );
+        assert_eq!(
+            errs, 1,
+            "the loser must surface AlreadyExists or BranchExists; got r1={r1:?} r2={r2:?}"
         );
     }
 }
