@@ -983,13 +983,13 @@ fn validate_scoped_artifact_path(
         ..Default::default()
     })?;
     let canonical_root = std::fs::canonicalize(workspace_root.join(allowed_prefix.trim_end_matches('/')))
-    .map_err(|e| ValidationError {
-        payload_index: 0,
-        field: field.to_string(),
-        reason_code: "scope_handoff_inconsistent".to_string(),
-        message: format!("scope artifact root is unavailable: {allowed_prefix}: {e}"),
-        ..Default::default()
-    })?;
+        .map_err(|e| ValidationError {
+            payload_index: 0,
+            field: field.to_string(),
+            reason_code: "scope_handoff_inconsistent".to_string(),
+            message: format!("scope artifact root is unavailable: {allowed_prefix}: {e}"),
+            ..Default::default()
+        })?;
     if !canonical_path.starts_with(&canonical_root) {
         return Err(ValidationError {
             payload_index: 0,
