@@ -112,9 +112,10 @@ event_loop:
       - {hat_id: ralph, topic: merge.stabilized}
       - {hat_id: ralph, topic: merge.batch.complete}
     # 2026-08-08-004 plan U1 (D12): scope boundary payload_consistency
-    # rules. These fire on merge.integrated and merge.stabilized to
-    # ensure the boundary artifact path is under the allowed root,
-    # the file is readable, and the digest is consistent.
+    # rule below fires on merge.integrated to ensure the boundary
+    # artifact path is under the allowed root and has a valid status.
+    # merge.stabilized boundary fields are validated by the shared
+    # scope_handoff_guard, which can also verify the artifact digest.
     payload_consistency:
       enabled: true
       rules:
@@ -134,15 +135,6 @@ event_loop:
               - {field: merge_boundary_status, exists: true}
               - {field: merge_boundary_status, non_empty: true}
           message: "merge_boundary_status must be 'complete' or 'incomplete'; received value is not in the allowed set."
-        # U1 (D12): merge.stabilized must echo the same boundary path/digest
-        - id: merge-stabilized-boundary-echo
-          topic: merge.stabilized
-          when:
-            all:
-              - {field: merge_boundary_path, exists: true}
-              - {field: merge_boundary_path, non_empty: true}
-          message: "merge.stabilized must echo merge_boundary_path and merge_boundary_digest from merge.integrated; paths outside .ralph/merge/ are rejected."
-
 cli:
   backend: "auto"
 
