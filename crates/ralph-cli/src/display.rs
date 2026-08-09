@@ -4,7 +4,7 @@
 //! iteration separators, termination messages, event tables,
 //! and other terminal UI elements.
 
-use ralph_core::{EventRecord, TerminationReason, floor_char_boundary, truncate_with_ellipsis};
+use ralph_core::{EventRecord, TerminationReason, floor_char_boundary, sanitize_terminal_path, truncate_with_ellipsis};
 use ralph_proto::HatId;
 use std::collections::HashMap;
 use std::path::Path;
@@ -373,7 +373,14 @@ pub fn print_termination(
     // U3 (plan 2026-08-09-002): surface the runtime-accepted
     // `report_path` / `artifact_path` as a single independent
     // marker line. Only ever printed exactly once per call.
-    if let Some(path) = deliverable_path {
+    //
+    // U6 (A2): re-apply `sanitize_terminal_path` here as defense
+    // in depth. `terminal_deliverable_path` already filters
+    // CR/LF / control bytes / ANSI escapes / worktree-escape, but
+    // the render path is the last line of defense before the
+    // operator's terminal. A no-op when the upstream helper
+    // already filtered.
+    if let Some(path) = deliverable_path.and_then(|p| sanitize_terminal_path(p, None)) {
         if use_colors {
             println!();
             println!("{BOLD}{GREEN}DELIVERABLE_PATH{RESET}: {CYAN}{path}{RESET}");
