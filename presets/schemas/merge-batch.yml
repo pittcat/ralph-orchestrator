@@ -112,9 +112,9 @@ schemas:
         fill_rule: Must be under `.ralph/merge/`; real readable path only; reject emit if file is missing.
         examples: [".ralph/merge/merge-boundary.json"]
       merge_boundary_digest:
-        meaning: SHA-256 hex digest of the canonical merge-boundary.json bytes (64 hex chars).
+        meaning: SHA-256 hex digest of canonical merge-boundary.json (64 hex chars).
         source: Integrator computes after writing merge-boundary.json.
-        fill_rule: 64-char hex from `sha256sum` of canonical JSON (keys sorted, no trailing space on last line); recompute on every emit attempt.
+        fill_rule: Remove `boundary_digest`, serialize compact JSON with keys sorted, append one newline, then compute SHA-256; recompute on every emit attempt.
       merge_boundary_status:
         meaning: Whether the merge-boundary artifact is complete or incomplete.
         source: Integrator writes from final merge state.

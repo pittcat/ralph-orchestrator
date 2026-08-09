@@ -622,10 +622,10 @@ fn run_stall_detector_on_state(
                  emitting {blocked_topic} (fail-close)",
                 max_iter,
             );
-            // 2026-07-24-005 plan U1: target is `reporter` (was
-            // `shipper`); the shipper hat is removed from the
-            // supervisor preset — reporter is the canonical
-            // `plan.blocked` terminal owner.
+            // Route fail-close to reporter only when the preset explicitly
+            // subscribes reporter to this blocked topic. Presets such as
+            // merge-batch require stabilization before reporting; an
+            // unconditional target would bypass that topology.
             //
             // 2026-07-30-002 plan U1: topic is the preset's
             // derived blocked namespace (e.g. `forge.plan.blocked`
@@ -634,8 +634,15 @@ fn run_stall_detector_on_state(
             let blocked = ralph_proto::Event::new(
                 blocked_topic,
                 "{\"reason\":\"loop_stalled_max_iterations\"}".to_string(),
-            )
-            .with_target(ralph_proto::HatId::new("reporter"));
+            );
+            let blocked = if registry
+                .get_config(&ralph_proto::HatId::new("reporter"))
+                .is_some_and(|config| config.triggers.iter().any(|t| t == blocked.topic.as_str()))
+            {
+                blocked.with_target(ralph_proto::HatId::new("reporter"))
+            } else {
+                blocked
+            };
             state.consecutive_no_progress_turns = 0;
             state.consecutive_steward_activations = 0;
             return Some(blocked);
@@ -713,23 +720,15 @@ fn run_stall_detector_on_state(
         let blocked = ralph_proto::Event::new(
             blocked_topic,
             "{\"reason\":\"loop_stalled_max_iterations\"}".to_string(),
-        )
-        // 2026-06-16-001 review fix (CORR-P1-2): explicit
-        // `with_target(...)` so the route matches the R5
-        // hard-gate hat-routing convention. Without a
-        // target, the bus delivers the event to the
-        // default-routed hats; with the target,
-        // `reporter` is the canonical consumer and the
-        // event reaches the reporter termination
-        // path consistently. Loopback to progress-steward
-        // is unnecessary: the steward was the one that
-        // failed to make progress, so the recovery action
-        // is to terminate, not retry.
-        //
-        // 2026-07-24-005 plan U1: target is now `reporter`
-        // (was `shipper`); the shipper hat is removed from
-        // the supervisor preset.
-        .with_target(ralph_proto::HatId::new("reporter"));
+        );
+        let blocked = if registry
+            .get_config(&ralph_proto::HatId::new("reporter"))
+            .is_some_and(|config| config.triggers.iter().any(|t| t == blocked.topic.as_str()))
+        {
+            blocked.with_target(ralph_proto::HatId::new("reporter"))
+        } else {
+            blocked
+        };
         // Reset so the next loop (e.g. a follow-up diagnostic
         // or operator restart) starts from a clean state.
         state.consecutive_no_progress_turns = 0;

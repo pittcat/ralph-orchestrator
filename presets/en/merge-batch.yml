@@ -366,9 +366,10 @@ hats:
       result, and failure evidence. Verify it is readable.
 
       Write the boundary manifest `.ralph/merge/merge-boundary.json`:
-      - Compute `boundary_digest` as the SHA-256 hex of the canonical JSON
-        (keys sorted, no trailing space on last line, `boundary_digest` field
-        excluded from the digest input)
+      - Compute `boundary_digest` by removing the `boundary_digest` field,
+        serializing compact JSON with keys sorted, appending one newline, and
+        hashing those bytes with SHA-256. The field is excluded from its own
+        digest input.
       - `boundary_status: complete` when every branch merged successfully;
         `incomplete` when any branch failed or was aborted
       - Always write the file even on failure — record what IS known
@@ -590,8 +591,9 @@ hats:
       Read `merge.stabilized` payload (`merge_boundary_path` / `merge_boundary_digest`).
       If the fields are present:
       1. Verify the file at `merge_boundary_path` is readable (`test -f`)
-      2. Recompute the SHA-256 digest of the canonical boundary JSON (keys sorted,
-         no trailing space) and confirm it matches `merge_boundary_digest`
+      2. Remove `boundary_digest`, serialize compact JSON with keys sorted,
+         append one newline, recompute SHA-256, and confirm it matches
+         `merge_boundary_digest`
       3. Include the boundary digest and status in the report
 
       If path is missing or digest mismatch: record the discrepancy in the

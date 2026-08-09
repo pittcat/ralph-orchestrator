@@ -105,6 +105,63 @@ pub(crate) fn verify_artifact_digest(
     Ok(())
 }
 
+/// Verify the merge boundary digest over its canonical JSON representation.
+/// The self-referential `boundary_digest` field is excluded before encoding;
+/// serde_json's default map representation provides stable key ordering and
+/// the canonical bytes end with one newline.
+#[allow(clippy::result_large_err)]
+pub(crate) fn verify_canonical_json_digest(
+    workspace_root: &Path,
+    artifact_path: &str,
+    declared_digest: &str,
+    digest_field: &str,
+) -> std::result::Result<(), ValidationError> {
+    let full_path = workspace_root.join(artifact_path);
+    let bytes = std::fs::read(&full_path).map_err(|e| ValidationError {
+        payload_index: 0,
+        field: digest_field.to_string(),
+        reason_code: "scope_handoff_inconsistent".to_string(),
+        message: format!("{digest_field} verification failed: could not read {artifact_path}: {e}"),
+        ..Default::default()
+    })?;
+    let mut value: serde_json::Value =
+        serde_json::from_slice(&bytes).map_err(|e| ValidationError {
+            payload_index: 0,
+            field: digest_field.to_string(),
+            reason_code: "scope_handoff_inconsistent".to_string(),
+            message: format!(
+                "{digest_field} verification failed: {artifact_path} is not valid JSON: {e}"
+            ),
+            ..Default::default()
+        })?;
+    if let Some(object) = value.as_object_mut() {
+        object.remove("boundary_digest");
+    }
+    let mut canonical = serde_json::to_vec(&value).map_err(|e| ValidationError {
+        payload_index: 0,
+        field: digest_field.to_string(),
+        reason_code: "scope_handoff_inconsistent".to_string(),
+        message: format!("{digest_field} canonicalization failed: {e}"),
+        ..Default::default()
+    })?;
+    canonical.push(b'\n');
+    let mut hasher = Sha256::new();
+    hasher.update(canonical);
+    let computed = format!("{:x}", hasher.finalize());
+    if !declared_digest.eq_ignore_ascii_case(&computed) {
+        return Err(ValidationError {
+            payload_index: 0,
+            field: digest_field.to_string(),
+            reason_code: "scope_handoff_inconsistent".to_string(),
+            message: format!(
+                "{digest_field} does not match canonical SHA-256 of {artifact_path}; manifest may have been tampered with (declared={declared_digest}, computed={computed})"
+            ),
+            ..Default::default()
+        });
+    }
+    Ok(())
+}
+
 /// Try to load the workspace `ralph.yml` config for policy check. Returns
 /// `None` when no config exists. The behavior on broken configs is
 /// selected by `on_error`:
@@ -821,9 +878,9 @@ fn check_merge_integrated_scope_fields(
         Some("merge.integrated"),
     )?;
 
-    // U5 (R6 / A2): after the format check, recompute SHA-256 over
-    // the boundary file bytes and compare to the declared digest.
-    verify_artifact_digest(
+    // Boundary digests use canonical JSON, excluding the self-referential
+    // boundary_digest field. Other scope artifacts remain raw-byte digests.
+    verify_canonical_json_digest(
         workspace_root,
         &boundary_path,
         &boundary_digest,
@@ -849,8 +906,9 @@ fn check_merge_stabilized_scope_fields(
     let (boundary_path, boundary_digest) =
         validate_merge_boundary_pair(obj, workspace_root, None)?;
 
-    // U5 (R6 / A2): SHA-256 recomputation on the boundary file.
-    verify_artifact_digest(
+    // Boundary digests use the same canonical JSON representation as
+    // merge.integrated.
+    verify_canonical_json_digest(
         workspace_root,
         &boundary_path,
         &boundary_digest,
@@ -925,13 +983,13 @@ fn validate_scoped_artifact_path(
         ..Default::default()
     })?;
     let canonical_root = std::fs::canonicalize(workspace_root.join(allowed_prefix.trim_end_matches('/')))
-        .map_err(|e| ValidationError {
-            payload_index: 0,
-            field: field.to_string(),
-            reason_code: "scope_handoff_inconsistent".to_string(),
-            message: format!("scope artifact root is unavailable: {allowed_prefix}: {e}"),
-            ..Default::default()
-        })?;
+    .map_err(|e| ValidationError {
+        payload_index: 0,
+        field: field.to_string(),
+        reason_code: "scope_handoff_inconsistent".to_string(),
+        message: format!("scope artifact root is unavailable: {allowed_prefix}: {e}"),
+        ..Default::default()
+    })?;
     if !canonical_path.starts_with(&canonical_root) {
         return Err(ValidationError {
             payload_index: 0,
@@ -1250,6 +1308,22 @@ mod tests {
         payload
     }
 
+    fn write_boundary(root: &std::path::Path, body: &[u8]) -> (String, PathBuf) {
+        let abs = root.join(".ralph/merge/merge-boundary.json");
+        std::fs::create_dir_all(abs.parent().unwrap()).expect("create parent");
+        std::fs::write(&abs, body).expect("write boundary");
+        let mut value: serde_json::Value = serde_json::from_slice(body).expect("valid JSON");
+        value
+            .as_object_mut()
+            .expect("boundary object")
+            .remove("boundary_digest");
+        let mut canonical = serde_json::to_vec(&value).expect("canonical JSON");
+        canonical.push(b'\n');
+        let mut hasher = Sha256::new();
+        hasher.update(canonical);
+        (format!("{:x}", hasher.finalize()), abs)
+    }
+
     fn build_postmerge_payload(manifest_path: &str, manifest_digest: &str) -> String {
         format!(
             r#"{{"scope_manifest_path":"{manifest_path}","scope_digest":"{manifest_digest}","scope_status":"resolved","overall_confidence":90,"critical_unknown_count":0,"scope_base_sha":"abc1234def5678901234567890abcdef12345678","scope_source":"post-merge-converge"}}"#
@@ -1280,11 +1354,7 @@ mod tests {
     #[test]
     fn merge_integrated_accepts_real_artifact() {
         let root = tempfile::tempdir().expect("tempdir");
-        let (digest, _) = write_artifact(
-            root.path(),
-            ".ralph/merge/merge-boundary.json",
-            br#"{"target_identity":"abc"}"#,
-        );
+        let (digest, _) = write_boundary(root.path(), br#"{"target_identity":"abc"}"#);
         let payload = build_boundary_payload(&digest, Some("complete"));
         let result = check_scope_handoff_guard("merge.integrated", &payload, root.path());
         assert!(result.is_ok(), "merge.integrated with real artifact must accept: {result:?}");
@@ -1326,11 +1396,7 @@ mod tests {
     #[test]
     fn merge_stabilized_accepts_real_artifact() {
         let root = tempfile::tempdir().expect("tempdir");
-        let (digest, _) = write_artifact(
-            root.path(),
-            ".ralph/merge/merge-boundary.json",
-            br#"{"target_identity":"xyz"}"#,
-        );
+        let (digest, _) = write_boundary(root.path(), br#"{"target_identity":"xyz"}"#);
         // merge.stabilized does NOT require merge_boundary_status.
         let payload = build_boundary_payload(&digest, None);
         let result = check_scope_handoff_guard("merge.stabilized", &payload, root.path());

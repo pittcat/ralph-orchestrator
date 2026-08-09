@@ -50,6 +50,14 @@ fn assert_plan_blocked_targets_reporter(observed: &Observed, context: &str) {
 }
 
 fn make_isolated_loop(events_path: &std::path::Path, steward_enabled: bool) -> EventLoop {
+    make_isolated_loop_with_reporter_triggers(events_path, steward_enabled, "\"plan.blocked\"")
+}
+
+fn make_isolated_loop_with_reporter_triggers(
+    events_path: &std::path::Path,
+    steward_enabled: bool,
+    reporter_triggers: &str,
+) -> EventLoop {
     let yaml = format!(
         r#"
 event_loop:
@@ -78,7 +86,7 @@ hats:
     publishes: ["work.ready", "plan.blocked"]
   reporter:
     name: "Reporter"
-    triggers: ["plan.blocked"]
+    triggers: [{reporter_triggers}]
     publishes: ["LOOP_COMPLETE"]
   review-synthesizer:
     name: "Review Synthesizer"
@@ -138,6 +146,30 @@ fn u1_steward_disabled_fail_close_targets_reporter() {
     let _ = event_loop.process_events_from_jsonl();
 
     assert_plan_blocked_targets_reporter(&observed, "steward-disabled fail-close");
+}
+
+#[test]
+fn fail_close_does_not_bypass_preset_reporter_trigger() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let events_path = temp_dir.path().join("events.jsonl");
+    write_empty_events(&events_path);
+    let mut event_loop =
+        make_isolated_loop_with_reporter_triggers(&events_path, false, "\"merge.stabilized\"");
+    let observed = install_target_observer(&mut event_loop);
+
+    event_loop.state.consecutive_no_progress_turns = 5;
+    event_loop.state.current_isolated_hat = Some(HatId::new("executor"));
+    let _ = event_loop.process_events_from_jsonl();
+
+    let rows = observed.lock().unwrap().clone();
+    let blocked = rows
+        .iter()
+        .find(|(topic, _)| topic == "plan.blocked")
+        .expect("fail-close must emit plan.blocked");
+    assert_eq!(
+        blocked.1, None,
+        "reporter must not be activated by bypass target"
+    );
 }
 
 #[test]
