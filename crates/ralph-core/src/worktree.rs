@@ -63,12 +63,55 @@ impl WorktreeConfig {
     }
 
     /// Get the absolute path to worktree directory relative to repo root.
+    ///
+    /// For a custom absolute `worktree_dir`, returns the absolute path
+    /// unchanged. For custom relative `worktree_dir`, returns
+    /// `repo_root.join(worktree_dir)`. For the **default** config, callers
+    /// should normally use [`external_worktree_base`] instead — the
+    /// default resolver lives outside the target repo at
+    /// `<repo-parent>/worktree/<repo-basename>` so the target checkout
+    /// does not discover sibling worktrees via filesystem walking.
     pub fn worktree_path(&self, repo_root: &Path) -> PathBuf {
         if self.worktree_dir.is_absolute() {
             self.worktree_dir.clone()
         } else {
             repo_root.join(&self.worktree_dir)
         }
+    }
+}
+
+/// Resolve the canonical external worktree base for a target repo.
+///
+/// Default `ralph run --worktree` (and supervisor slot creation)
+/// place every worktree outside the target checkout at
+/// `<repo_root.parent()>/worktree/<repo_root basename>/`.  The leaf is
+/// the existing exact `loop_id` produced by `WorktreeConfig` so callers
+/// get the same `Worktree { path, branch, head }` shape they already
+/// consume — only the parent directory changes.
+///
+/// Returns the canonical absolute base; the per-worktree leaf is added
+/// by `create_worktree` and `find_reusable_worktree_by_name`. Custom
+/// worktree configs bypass this resolver and continue to honour their
+/// override paths.
+pub fn external_worktree_base(repo_root: &Path) -> PathBuf {
+    let parent = repo_root.parent().unwrap_or(repo_root);
+    let project = repo_root
+        .file_name()
+        .map(|n| PathBuf::from(n))
+        .unwrap_or_else(|| PathBuf::from("project"));
+    parent.join("worktree").join(project)
+}
+
+/// Resolver entry point used by every create / exists / reuse call.
+///
+/// For default `WorktreeConfig` the path lives at
+/// `external_worktree_base(repo_root)`. For custom configs
+/// (`with_dir`), the override path is returned unchanged.
+pub fn canonical_worktree_base(repo_root: &Path, config: &WorktreeConfig) -> PathBuf {
+    if config.worktree_dir == PathBuf::from(".worktrees") {
+        external_worktree_base(repo_root)
+    } else {
+        config.worktree_path(repo_root)
     }
 }
 
@@ -157,7 +200,7 @@ pub fn create_worktree(
         ));
     }
 
-    let worktree_base = config.worktree_path(repo_root);
+    let worktree_base = canonical_worktree_base(repo_root, config);
     let worktree_path = worktree_base.join(loop_id);
     let branch_name = format!("ralph/{loop_id}");
 
@@ -527,12 +570,24 @@ pub fn find_reusable_worktree_by_name(
     repo_root: impl AsRef<Path>,
     name: &str,
 ) -> Result<Option<ReusableWorktree>, WorktreeError> {
+    find_reusable_worktree_by_name_with_config(repo_root, name, &WorktreeConfig::default())
+}
+
+/// Plan 2026-08-09-002 (Unit 1+2 R3 / W-S3 / W-S4): reuse helper
+/// must resolve through the same canonical base as create / exists
+/// so default `--reuse-worktree` lands on the project-scoped
+/// external root, not the in-repo `.worktrees`.
+pub fn find_reusable_worktree_by_name_with_config(
+    repo_root: impl AsRef<Path>,
+    name: &str,
+    config: &WorktreeConfig,
+) -> Result<Option<ReusableWorktree>, WorktreeError> {
     if name.is_empty() {
         return Ok(None);
     }
 
     let repo_root = repo_root.as_ref();
-    let worktree_path = repo_root.join(".worktrees").join(name);
+    let worktree_path = canonical_worktree_base(repo_root, config).join(name);
 
     if !worktree_path.is_dir() {
         return Ok(None);
@@ -965,7 +1020,7 @@ pub fn worktree_exists(
     loop_id: &str,
     config: &WorktreeConfig,
 ) -> bool {
-    let worktree_path = config.worktree_path(repo_root.as_ref()).join(loop_id);
+    let worktree_path = canonical_worktree_base(repo_root.as_ref(), config).join(loop_id);
     worktree_path.exists()
 }
 
@@ -1084,8 +1139,17 @@ pub fn sync_working_directory_to_worktree(
 ) -> Result<SyncStats, WorktreeError> {
     let mut stats = SyncStats::default();
 
-    // Get the worktree directory name for exclusion
-    let worktree_dir = &config.worktree_dir;
+    // Use the canonical resolved base (external for default config,
+    // custom for overrides) to compute exclusion. This prevents the
+    // sync helper from mistakenly treating the in-repo `.worktrees`
+    // directory as the worktree root when default config lives outside.
+    let canonical_base = canonical_worktree_base(repo_root, config);
+    let canonical_base_str = canonical_base.to_string_lossy();
+    // For default config, also exclude the legacy in-repo
+    // `.worktrees/` directory: a stale `.worktrees/foo` from a
+    // previous run lives in the target repo and would otherwise be
+    // mirrored into the new external workspace.
+    let is_default_config = config.worktree_dir == PathBuf::from(".worktrees");
 
     // Helper to check if a path should be excluded
     let should_exclude = |path: &Path| -> bool {
@@ -1094,10 +1158,17 @@ pub fn sync_working_directory_to_worktree(
         if path_str.starts_with(".git/") || path_str == ".git" {
             return true;
         }
-        // Exclude the worktree directory itself
-        let worktree_dir_str = worktree_dir.to_string_lossy();
-        if path_str.starts_with(&*worktree_dir_str)
-            || path_str.starts_with(&format!("{}/", worktree_dir_str))
+        // Exclude the configured worktree base (default = external,
+        // custom = override path). For default config also exclude
+        // the legacy in-repo `.worktrees/` directory.
+        if path_str.starts_with(&*canonical_base_str)
+            || path_str.starts_with(&format!("{}/", canonical_base_str))
+        {
+            return true;
+        }
+        if is_default_config
+            && (path_str.starts_with(".worktrees/")
+                || path_str.starts_with("./.worktrees/"))
         {
             return true;
         }
@@ -1313,6 +1384,9 @@ mod tests {
 
     #[test]
     fn test_worktree_config_default() {
+        // Default worktree dir name is preserved for backward compat
+        // — the actual external path lives under <repo-parent>/worktree/<repo>/loop_id
+        // and is computed by `external_worktree_base` from the default config.
         let config = WorktreeConfig::default();
         assert_eq!(config.worktree_dir, PathBuf::from(".worktrees"));
     }
@@ -1320,6 +1394,9 @@ mod tests {
     #[test]
     fn test_worktree_config_path() {
         let config = WorktreeConfig::default();
+        // Default config keeps the legacy in-repo `.worktrees` relative
+        // semantics (preserved for custom overrides); external default is
+        // resolved through `external_worktree_base`.
         let repo = Path::new("/repo");
         assert_eq!(
             config.worktree_path(repo),
@@ -1330,6 +1407,45 @@ mod tests {
         assert_eq!(
             absolute_config.worktree_path(repo),
             PathBuf::from("/tmp/worktrees")
+        );
+    }
+
+    /// U1 (2026-08-09-002 plan R1 / W-S1): the default external base
+    /// must be `<repo-parent>/worktree/<repo-basename>` so every
+    /// --worktree loop is created outside the target checkout.
+    #[test]
+    fn default_worktree_base_is_external_and_project_scoped() {
+        let repo = Path::new("/tmp/demo");
+        let base = external_worktree_base(repo);
+        assert_eq!(base, PathBuf::from("/tmp/worktree/demo"));
+    }
+
+    /// U1: the resolver must keep `repo/.worktrees` UNUSED for default
+    /// creation — its existence must not influence the canonical base.
+    #[test]
+    fn default_worktree_base_ignores_in_repo_worktrees() {
+        let temp_dir = TempDir::new().unwrap();
+        // Lay down a stale in-repo `.worktrees` to mimic a previous
+        // legacy run. The canonical external base must still resolve
+        // to the project-scoped external parent.
+        fs::create_dir_all(temp_dir.path().join(".worktrees")).unwrap();
+        let repo = temp_dir.path();
+        let parent = repo.parent().unwrap();
+        let expected = parent.join("worktree").join(
+            repo.file_name().and_then(|n| n.to_str()).unwrap(),
+        );
+        assert_eq!(external_worktree_base(repo), expected);
+    }
+
+    /// U1: custom `with_dir("/abs")` keeps absolute custom override
+    /// intact (no parent prefix injection). Characterization.
+    #[test]
+    fn custom_absolute_with_dir_unchanged_after_external_resolver() {
+        let config = WorktreeConfig::with_dir("/tmp/custom");
+        let repo = Path::new("/repo");
+        assert_eq!(
+            config.worktree_path(repo),
+            PathBuf::from("/tmp/custom")
         );
     }
 
@@ -1355,6 +1471,80 @@ mod tests {
         // Remove worktree
         remove_worktree(temp_dir.path(), &worktree.path).unwrap();
         assert!(!worktree.path.exists());
+    }
+
+    /// U1 / R1 / W-S1: with default config the created worktree must
+    /// live at `<repo-parent>/worktree/<repo-basename>/<loop>` and
+    /// must NOT create a `.worktrees/` directory inside the repo.
+    #[test]
+    fn test_default_create_uses_external_project_scoped_path() {
+        let temp_dir = TempDir::new().unwrap();
+        init_git_repo(temp_dir.path());
+        let config = WorktreeConfig::default();
+
+        let worktree = create_worktree(temp_dir.path(), "plan-a", &config).unwrap();
+
+        let expected = temp_dir
+            .path()
+            .parent()
+            .unwrap()
+            .join("worktree")
+            .join(
+                temp_dir
+                    .path()
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap(),
+            )
+            .join("plan-a");
+        assert_eq!(worktree.path, expected);
+
+        // The target repo must NOT have a `.worktrees/` directory
+        // after a default --worktree creation.
+        assert!(
+            !temp_dir.path().join(".worktrees").exists(),
+            "target repo must not gain a .worktrees/ directory"
+        );
+    }
+
+    /// U1 / R1 / W-S3: a second default create with the same leaf
+    /// must fail-closed (`AlreadyExists`) without overwriting the
+    /// existing directory.
+    #[test]
+    fn default_worktree_rejects_occupied_leaf_without_overwrite() {
+        let temp_dir = TempDir::new().unwrap();
+        init_git_repo(temp_dir.path());
+        let config = WorktreeConfig::default();
+
+        // First create succeeds.
+        let _first = create_worktree(temp_dir.path(), "occupied-leaf", &config).unwrap();
+        // Lay a marker file the second create must preserve.
+        let external_path = temp_dir
+            .path()
+            .parent()
+            .unwrap()
+            .join("worktree")
+            .join(
+                temp_dir
+                    .path()
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap(),
+            )
+            .join("occupied-leaf");
+        std::fs::write(external_path.join("marker.txt"), "do-not-overwrite").unwrap();
+
+        let second = create_worktree(temp_dir.path(), "occupied-leaf", &config);
+        assert!(
+            matches!(second, Err(WorktreeError::AlreadyExists(_))),
+            "second default create must return AlreadyExists"
+        );
+        // Marker preserved.
+        assert_eq!(
+            std::fs::read_to_string(external_path.join("marker.txt")).unwrap(),
+            "do-not-overwrite",
+            "occupied leaf must not be overwritten"
+        );
     }
 
     #[test]
@@ -1669,10 +1859,18 @@ branch refs/heads/ralph/loop-1
 
     #[test]
     fn test_sync_excludes_worktrees_directory() {
+        // Default config now routes worktrees to a project-scoped
+        // external base (`<repo-parent>/worktree/<project>/`). Sync
+        // must not pull files from the target repo's stale
+        // `.worktrees/` directory (legacy in-repo path) into the new
+        // external worktree, and must not recursively mirror the
+        // external base back into itself.
         let temp_dir = TempDir::new().unwrap();
         init_git_repo(temp_dir.path());
 
-        // Create an untracked file in the worktrees directory manually
+        // Lay down a stale `.worktrees/` inside the repo to mimic
+        // a legacy run; this must NOT get mirrored into the new
+        // external worktree.
         let worktrees_dir = temp_dir.path().join(".worktrees");
         fs::create_dir_all(&worktrees_dir).unwrap();
         fs::write(worktrees_dir.join("should_not_sync.txt"), "content").unwrap();
@@ -1687,13 +1885,17 @@ branch refs/heads/ralph/loop-1
 
         // Normal file should be synced
         assert!(worktree.path.join("should_sync.txt").exists());
-        // The .worktrees directory should NOT be synced into itself
-        // (this would cause recursion issues)
+        // The legacy in-repo `.worktrees/` path is NOT created by
+        // the default config; if a stale entry existed, the sync
+        // helper must not surface it under the new external
+        // workspace.
         assert!(
-            !worktree
-                .path
-                .join(".worktrees/should_not_sync.txt")
-                .exists()
+            !worktree.path.join(".worktrees").exists(),
+            "stale .worktrees/ from the target repo must not be mirrored"
+        );
+        assert!(
+            !worktree.path.join(".worktrees/should_not_sync.txt").exists(),
+            "stale .worktrees/should_not_sync.txt from the target repo must not leak"
         );
     }
 
