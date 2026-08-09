@@ -119,7 +119,7 @@ ralph run [OPTIONS] [-- <CUSTOM_ARGS>...]
     --plan docs/plans/<your-plan>.md
   ```
 - 🔴 **Worktree 复用恢复语义**：清理旧状态前先记录恢复边界（pending hat＝已被触发但尚未执行完的 hat，及其原始触发事件快照）。下次启动若身份校验通过（plan 文件 / preset / 配置 / worktree 名称四项一致），loop 通过标准 `task.resume` 通道把 pending hat 重新绑定、从原始触发继续（内嵌在 `task.resume` payload 的 `original_trigger_topic` / `original_trigger_payload`），**不**重启流程、**不**重放已接受事件；重复启动不会重复恢复。身份不一致时复用在 loop 启动前被拒绝（无 task 关闭、无 wave 派发），错误信息指向该 worktree 的 `.ralph/reuse-history/`；此时停止，核对 plan / preset / worktree 名一致后重试。
-- 🔴 `--plan` 与 `--worktree-name` 互斥； `--worktree-name` 会精确匹配 `<repo-parent>/worktree/<repo>/<NAME>/`（**外部 worktree 解析器**），而 `--plan` 会将 plan 文件的 basename 作为 worktree 的精确名称绑定值。包含 `/`、`\`、`..` 或以 `-` 开头的名称会被 clap `value_parser` 直接拒收（plan 2026-08-09-002 U1 / R-FIX-A1）。
+- 🔴 `--plan` 与 `--worktree-name` 互斥； `--worktree-name` 会精确匹配 `.worktrees/<NAME>/`，而 `--plan` 会将 plan 文件的 basename 作为 worktree 的精确名称绑定值。
 
 ---
 

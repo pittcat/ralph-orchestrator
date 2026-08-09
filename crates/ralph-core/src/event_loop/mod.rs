@@ -131,7 +131,7 @@ mod review_step_gate;
 
 pub use loop_state::{
     LINT_CIRCUIT_BREAKER_LIMIT, LoopState, RejectionDigestEntry, U2_REJECTION_RETRY_LIMIT,
-    WorkflowProgress, sanitize_terminal_path,
+    WorkflowProgress,
 };
 // Items are also re-exported from `crate::*` via `lib.rs`. The lib-side
 // re-export keeps the public API stable; the `pub use` here is a

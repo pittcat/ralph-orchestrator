@@ -10,8 +10,8 @@ use ralph_core::{
     LoopRegistry, PreflightReport, PreflightRunner, ProfileSpec, ProfilesError, RalphConfig,
     TerminationReason, ensure_plan_baseline_from_head, truncate_with_ellipsis,
     worktree::{
-        WorktreeConfig, clean_worktree_runtime_artifacts, create_worktree,
-        find_reusable_worktree_by_name_with_config, remove_worktree, validate_worktree_name,
+        WorktreeConfig, clean_worktree_runtime_artifacts, create_worktree, ensure_gitignore,
+        find_reusable_worktree_by_name, remove_worktree,
     },
 };
 use std::io::IsTerminal;
@@ -120,10 +120,8 @@ pub struct RunArgs {
     pub no_auto_merge: bool,
 
     /// Create an isolated git worktree for this run. The worktree is created
-    /// at `<repo-parent>/worktree/<repo>/<loop-id>/` (the external
-    /// worktree resolver, plan 2026-08-09-002 default) and the loop runs
-    /// inside it. Use this for fully isolated execution that does not
-    /// affect the main working directory.
+    /// at `.worktrees/<loop-id>/` and the loop runs inside it. Use this for
+    /// fully isolated execution that does not affect the main working directory.
     ///
     /// End-to-end isolation contract: when set, the loop's `.ralph/` directory
     /// (events, diagnostics, current-events marker, etc.) is created inside the
@@ -179,19 +177,15 @@ pub struct RunArgs {
     /// Explicit worktree name to use with `--worktree`.
     ///
     /// When provided, Ralph creates or reuses a worktree with exactly
-    /// this name (under `<repo-parent>/worktree/<repo>/<name>/` — the
-    /// external worktree resolver) instead of deriving one from the
-    /// prompt or plan file. Use with `--reuse-worktree` to reuse an
-    /// existing worktree of the same name. Names containing `/`,
-    /// `\`, `..`, or starting with `-` are rejected by the clap
-    /// `value_parser` (R-FIX-A1).
+    /// this name (under `.worktrees/<name>/`) instead of deriving one
+    /// from the prompt or plan file. Use with `--reuse-worktree` to
+    /// reuse an existing worktree of the same name.
     #[arg(
         long,
         value_name = "NAME",
         requires = "worktree",
         conflicts_with = "plan",
-        conflicts_with = "exclusive",
-        value_parser = validate_worktree_name_arg
+        conflicts_with = "exclusive"
     )]
     pub worktree_name: Option<String>,
 
@@ -607,15 +601,11 @@ fn spawn_worktree_loop(
         })
     };
 
+    // Ensure worktree directory is in .gitignore
+    ensure_gitignore(workspace_root, ".worktrees")
+        .context("Failed to update .gitignore for worktrees")?;
+
     // Create the worktree
-    // Plan 2026-08-09-002 (Unit 2 R2 / W-S2): default config routes
-    // worktrees to a project-scoped external root
-    // (`<repo-parent>/worktree/<project>/<loop>`) — the target repo
-    // intentionally receives NO `.worktrees/` directory and NO
-    // `.gitignore` mutation. The pre-existing `ensure_gitignore` call
-    // is removed for the default path; users with a custom
-    // `worktree_dir` inside their target repo must run that override
-    // themselves.
     let worktree = create_worktree(workspace_root, &loop_id, &worktree_config)
         .context("Failed to create worktree for loop")?;
 
@@ -764,35 +754,13 @@ fn resolve_exact_worktree_name(
     plan_file: Option<&Path>,
     derived_plan_name: Option<&str>,
 ) -> Option<String> {
-    // U1 (plan 2026-08-09-002 / A1): reject path-traversal /
-    // leading-dash / control-byte names early so any name that flows
-    // into the runtime — from `--worktree-name` or from a derived
-    // plan basename — is filtered before it reaches the resolver or
-    // `create_worktree`. `derived_plan_name` is already trusted
-    // (clap-validated path stem) but defense in depth keeps the
-    // invariant local to this helper.
-    let raw = worktree_name
-        .map(str::to_owned)
-        .or_else(|| plan_file.and_then(|_| derived_plan_name.map(str::to_owned)));
-    if let Some(name) = raw.as_deref() {
-        if validate_worktree_name(name).is_err() {
-            return None;
-        }
-    }
-    raw.filter(|name| !name.is_empty())
-}
-
-/// Clap `value_parser` for `--worktree-name`.
-///
-/// Surfaces the runtime [`validate_worktree_name`] rejection as a
-/// clap parse error so the operator sees a clean usage message
-/// before the runtime is ever reached. The runtime call sites
-/// (`find_reusable_worktree_by_name`, `create_worktree`) still call
-/// the same validator so a programmatic API cannot bypass the gate.
-fn validate_worktree_name_arg(raw: &str) -> Result<String, String> {
-    validate_worktree_name(raw)
-        .map(|_| raw.to_string())
-        .map_err(|err| err.to_string())
+    worktree_name.map(str::to_owned).or_else(|| {
+        plan_file.and_then(|_| {
+            derived_plan_name
+                .map(str::to_owned)
+                .filter(|name| !name.is_empty())
+        })
+    })
 }
 
 /// Resolve a `--plan` argument to an existing plan file path.
@@ -1110,7 +1078,7 @@ pub async fn run_command(
         if args.reuse_worktree {
             debug!("Reusing worktree for explicit --worktree --reuse-worktree mode");
             match exact_worktree_name.as_deref() {
-                Some(name) => match find_reusable_worktree_by_name_with_config(workspace_root, name, &WorktreeConfig::default()) {
+                Some(name) => match find_reusable_worktree_by_name(workspace_root, name) {
                     Ok(Some(reusable)) => {
                         info!(
                             "Reusing worktree at {} (loop_id={})",
@@ -3281,31 +3249,6 @@ mod tests {
         let resolved = resolve_exact_worktree_name(None, None, None);
 
         assert_eq!(resolved, None);
-    }
-
-    // U1 (plan 2026-08-09-002 / A1): the resolver helper must
-    // drop hostile / path-traversal names before they reach the
-    // runtime. The runtime still validates, but defense in depth
-    // at the helper layer keeps the invariant local.
-    #[test]
-    fn resolve_exact_worktree_name_rejects_traversal_segments() {
-        let resolved = resolve_exact_worktree_name(Some("../escape"), None, None);
-        assert!(
-            resolved.is_none(),
-            "traversal name must be filtered before reaching the runtime"
-        );
-    }
-
-    #[test]
-    fn resolve_exact_worktree_name_rejects_path_separators() {
-        let resolved = resolve_exact_worktree_name(Some("foo/bar"), None, None);
-        assert!(resolved.is_none(), "path-separator name must be filtered");
-    }
-
-    #[test]
-    fn resolve_exact_worktree_name_rejects_leading_dash() {
-        let resolved = resolve_exact_worktree_name(Some("-rf"), None, None);
-        assert!(resolved.is_none(), "leading-dash name must be filtered");
     }
 
     #[test]

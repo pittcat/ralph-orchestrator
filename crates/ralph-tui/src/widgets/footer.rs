@@ -137,30 +137,6 @@ impl Widget for Footer<'_> {
             ));
         }
 
-        // U4 (plan 2026-08-09-002 / R9 / R-S5): when the loop is
-        // done and the runtime-accepted terminal payload carried a
-        // report/artifact path, surface the same path the no-TUI
-        // CLI prints as `DELIVERABLE_PATH:`. Skipped entirely when
-        // `None` (no path, non-completion terminal, or pre-existing
-        // wire shape) so the active / search / guidance layouts are
-        // unchanged.
-        if self.state.loop_completed
-            && let Some(path) = self.state.last_deliverable_path.as_deref()
-        {
-            let line = Line::from(vec![
-                Span::raw(" "),
-                Span::styled(
-                    "DELIVERABLE_PATH: ",
-                    Style::default().fg(Color::Blue).add_modifier(
-                        ratatui::style::Modifier::BOLD,
-                    ),
-                ),
-                Span::styled(path, Style::default().fg(Color::Cyan)),
-            ]);
-            Paragraph::new(line).render(inner_area, buf);
-            return;
-        }
-
         let indicator_text = if self.state.loop_completed {
             "■ DONE"
         } else {

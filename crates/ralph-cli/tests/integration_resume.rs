@@ -409,7 +409,6 @@ fn u7b_resume_block_renders_loop_metadata() {
 // ─────────────────────────────────────────────────────────────────────────
 
 mod reuse_gate {
-    use crate::common;
     use ralph_core::parallel_forge_resume::{
         BoundaryRecord, CaptureInputs, MANIFEST_FILE_NAME, MANIFEST_SCHEMA_VERSION, ResumeIdentity,
         ResumeManifest, sha256_hex, validate_manifest, write_manifest,
@@ -483,7 +482,7 @@ cli:
     /// Pre-create a git-known worktree whose prior run stopped at an
     /// accepted `forge.plan.ready` boundary.
     fn precreate_worktree_with_accepted_boundary(main_repo: &Path, loop_id: &str) -> PathBuf {
-        let worktree_path = common::external_worktree_base(main_repo).join(loop_id);
+        let worktree_path = main_repo.join(".worktrees").join(loop_id);
         let status = Command::new("git")
             .args([
                 "worktree",
@@ -626,7 +625,7 @@ cli:
         write_backend_true_config(main_repo);
 
         let loop_id = "tamper-digest-case";
-        let worktree_path = common::external_worktree_base(main_repo).join(loop_id);
+        let worktree_path = main_repo.join(".worktrees").join(loop_id);
         let status = Command::new("git")
             .args([
                 "worktree",
@@ -714,7 +713,7 @@ cli:
         write_backend_true_config(main_repo);
 
         let loop_id = "tamper-partial-case";
-        let worktree_path = common::external_worktree_base(main_repo).join(loop_id);
+        let worktree_path = main_repo.join(".worktrees").join(loop_id);
         let status = Command::new("git")
             .args([
                 "worktree",
@@ -1189,7 +1188,7 @@ hats:
     /// shape — terminal `report.done`-style record with
     /// triggered=None).
     fn precreate_worktree_with_completed_run(main_repo: &Path, loop_id: &str) -> PathBuf {
-        let worktree_path = common::external_worktree_base(main_repo).join(loop_id);
+        let worktree_path = main_repo.join(".worktrees").join(loop_id);
         let status = Command::new("git")
             .args([
                 "worktree",
@@ -1319,7 +1318,7 @@ hats:
     /// event file (the runtime can accept such an event without a log
     /// record), with an earlier accepted boundary still in the log.
     fn precreate_worktree_with_plan_blocked_tail(main_repo: &Path, loop_id: &str) -> PathBuf {
-        let worktree_path = common::external_worktree_base(main_repo).join(loop_id);
+        let worktree_path = main_repo.join(".worktrees").join(loop_id);
         let status = Command::new("git")
             .args([
                 "worktree",
@@ -1429,7 +1428,6 @@ hats:
 // ─────────────────────────────────────────────────────────────────────────
 
 mod reuse_resume_bootstrap {
-    use crate::common;
     use ralph_core::parallel_forge_resume::sha256_hex;
     use std::fs;
     use std::path::{Path, PathBuf};
@@ -1557,7 +1555,7 @@ hats:
     /// after the accepted `forge.plan.ready` boundary (pending hat:
     /// `guardian`).
     fn precreate_worktree_with_accepted_boundary(main_repo: &Path, loop_id: &str) -> PathBuf {
-        let worktree_path = common::external_worktree_base(main_repo).join(loop_id);
+        let worktree_path = main_repo.join(".worktrees").join(loop_id);
         let status = Command::new("git")
             .args([
                 "worktree",

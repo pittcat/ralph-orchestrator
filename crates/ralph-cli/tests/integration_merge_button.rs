@@ -61,9 +61,7 @@ fn create_worktree_with_commits(
     loop_id: &str,
     num_commits: usize,
 ) -> Result<std::path::PathBuf> {
-    // Plan 2026-08-09-002 R1: pre-create the worktree at the
-    // project-scoped external base that the runtime would use.
-    let worktree_path = common::external_worktree_base(temp_path).join(loop_id);
+    let worktree_path = temp_path.join(".worktrees").join(loop_id);
     let branch_name = format!("ralph/{}", loop_id);
 
     // Create worktree
@@ -388,7 +386,7 @@ fn test_merge_no_steering_for_clean_additions() -> Result<()> {
     let temp_path = temp_dir.path();
 
     // Given: A worktree that only adds new files (no conflicts)
-    let worktree_path = common::external_worktree_base(temp_path).join("test-loop-009");
+    let worktree_path = temp_path.join(".worktrees").join("test-loop-009");
     let branch_name = "ralph/test-loop-009";
 
     Command::new("git")

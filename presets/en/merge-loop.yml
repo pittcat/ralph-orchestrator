@@ -36,7 +36,7 @@ event_loop:
     - Check RALPH_MERGE_LOOP_ID environment variable for loop ID
     - Or extract loop ID from this prompt if provided
     - Loop branch format: ralph/{loop_id}
-    - Worktree location: <repo-parent>/worktree/<repo>/{loop_id} (external worktree resolver)
+    - Worktree location: .worktrees/{loop_id}
 
     ## Your Task
     Safely merge the loop's changes into the main branch, ensuring all tests pass.
@@ -390,13 +390,7 @@ hats:
       ### Step 2: Remove Worktree
 
       ```bash
-      # U4 (plan 2026-08-09-002 / S1+C3): the worktree lives
-      # at <repo-parent>/worktree/<repo>/<loop_id>/, not inside
-      # the repo. Use `git worktree list --porcelain` to look up
-      # the path by name and only then `git worktree remove`.
-      WT_PATH="$(git worktree list --porcelain \
-        | awk '/^worktree .*\/'"$LOOP_ID"'\// {print $2; exit}')"
-      [ -n "$WT_PATH" ] && git worktree remove --force "$WT_PATH"
+      git worktree remove .worktrees/{loop_id} --force
       ```
 
       ### Step 3: Delete Branch
@@ -493,7 +487,7 @@ hats:
       **Reason:** {detailed explanation}
 
       **To resolve:**
-      1. cd <repo-parent>/worktree/<repo>/{loop_id}
+      1. cd .worktrees/{loop_id}
       2. Investigate the issue
       3. Make necessary changes
       4. Run: ralph loops retry {loop_id}

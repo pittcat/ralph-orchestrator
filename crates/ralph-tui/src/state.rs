@@ -190,12 +190,6 @@ pub struct TuiState {
     pub last_event: Option<String>,
     /// Timestamp of last event.
     pub last_event_at: Option<Instant>,
-    /// U4 (plan 2026-08-09-002 / R9 / R-S5): the deliverable path
-    /// extracted from the runtime-accepted terminal payload (the
-    /// same source the no-TUI CLI prints as `DELIVERABLE_PATH:`).
-    /// `None` until / unless the loop completes with an accepted
-    /// `report_path` or `artifact_path`.
-    pub last_deliverable_path: Option<String>,
     /// Whether to show help overlay.
     pub show_help: bool,
     /// Whether mouse capture is enabled for wheel scrolling.
@@ -320,7 +314,6 @@ impl TuiState {
             iteration_started: None,
             last_event: None,
             last_event_at: None,
-            last_deliverable_path: None,
             show_help: false,
             mouse_capture_enabled: false,
             in_scroll_mode: false,

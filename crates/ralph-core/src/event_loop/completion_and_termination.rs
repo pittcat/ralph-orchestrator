@@ -18,23 +18,12 @@ impl EventLoop {
     /// Per spec: "Published by the orchestrator (not agents) when the loop exits."
     /// This is an observer-only event—hats cannot trigger on it.
     ///
-    /// U2 (plan 2026-08-09-002 / C1): the markdown payload gains a
-    /// `## Deliverable\n<path>\n` section whenever
-    /// `state.terminal_deliverable_path()` is `Some`. The in-process
-    /// TUI path parses this section in `apply_lifecycle` so the
-    /// operator sees the same `DELIVERABLE_PATH:` line as the RPC
-    /// bridge. The section is appended verbatim — the
-    /// `terminal_deliverable_path` extractor already sanitizes the
-    /// path (U6 A2: rejects CR/LF, control bytes, ANSI escapes, and
-    /// any path that escapes the worktree root), so this is the
-    /// trusted wire shape.
-    ///
     /// Returns the event for logging purposes.
     pub fn publish_terminate_event(&mut self, reason: &TerminationReason) -> Event {
         let elapsed = self.state.elapsed();
         let duration_str = format_duration(elapsed);
 
-        let mut payload = format!(
+        let payload = format!(
             "## Reason\n{}\n\n## Status\n{}\n\n## Summary\n- Iterations: {}\n- Duration: {}\n- Exit code: {}",
             reason.as_str(),
             termination_status_text(reason),
@@ -42,10 +31,6 @@ impl EventLoop {
             duration_str,
             reason.exit_code()
         );
-
-        if let Some(path) = self.state.terminal_deliverable_path() {
-            payload.push_str(&format!("\n\n## Deliverable\n{path}\n"));
-        }
 
         let event = Event::new("loop.terminate", &payload);
 
@@ -1041,80 +1026,5 @@ impl EventLoop {
             .unwrap()
             .as_nanos();
         format!("{:x}", nanos % 0xFFFF_FFFF)
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    // U2 (plan 2026-08-09-002 / C1): `publish_terminate_event`
-    // must carry the runtime-accepted terminal deliverable path
-    // in the markdown payload so the in-process TUI path can
-    // render `DELIVERABLE_PATH:` exactly like the RPC bridge. The
-    // `Event::new` constructor owns the payload string, so the
-    // test asserts on the rendered markdown text directly rather
-    // than re-parsing the wire format.
-
-    #[test]
-    fn publish_terminate_event_carries_deliverable_path_when_accepted() {
-        // U2 C1: a state with an accepted completion payload
-        // whose `report_path` is the deliverable must result in a
-        // `loop.terminate` event whose markdown payload contains
-        // a `## Deliverable\n<path>\n` section.
-        let mut state = LoopState::new();
-        state.last_completion_payload = Some(
-            r#"{"report_path":".ralph/review/p/report.md","verdict":"pass"}"#.to_string(),
-        );
-
-        // Build a minimal EventLoop shim that exposes the
-        // `state` field for `publish_terminate_event`. The
-        // function only reads `self.state`; we don't need a real
-        // EventLoop runner. We assert on the same markdown
-        // construction that `EventLoop::publish_terminate_event`
-        // builds; any drift is caught by the same U2 tests
-        // running against the real path in the integration
-        // suite.
-        let event = build_terminate_payload(&state, &TerminationReason::CompletionPromise);
-        assert!(
-            event.contains("## Deliverable\n.ralph/review/p/report.md\n"),
-            "loop.terminate payload must carry the deliverable section; got: {event}"
-        );
-    }
-
-    #[test]
-    fn publish_terminate_event_omits_deliverable_when_none() {
-        // U2 C1: a state with no accepted completion payload
-        // must NOT carry a `## Deliverable` section — the marker
-        // is reserved for terminal-completion paths and must
-        // remain absent in every other terminal reason.
-        let state = LoopState::new();
-        let event = build_terminate_payload(&state, &TerminationReason::MaxRuntime);
-        assert!(
-            !event.contains("## Deliverable"),
-            "non-completion payload must not include the deliverable section; got: {event}"
-        );
-    }
-
-    /// Build the same `loop.terminate` markdown payload that
-    /// `EventLoop::publish_terminate_event` produces, without
-    /// standing up the full EventLoop runner. The implementation
-    /// mirrors the production function 1:1; any drift is caught
-    /// by the U2 tests below.
-    fn build_terminate_payload(state: &LoopState, reason: &TerminationReason) -> String {
-        let elapsed = state.elapsed();
-        let duration_str = format_duration(elapsed);
-        let mut payload = format!(
-            "## Reason\n{}\n\n## Status\n{}\n\n## Summary\n- Iterations: {}\n- Duration: {}\n- Exit code: {}",
-            reason.as_str(),
-            termination_status_text(reason),
-            state.iteration,
-            duration_str,
-            reason.exit_code()
-        );
-        if let Some(path) = state.terminal_deliverable_path() {
-            payload.push_str(&format!("\n\n## Deliverable\n{path}\n"));
-        }
-        payload
     }
 }
