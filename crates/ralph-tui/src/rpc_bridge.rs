@@ -351,6 +351,26 @@ fn apply_lifecycle(event: &StreamEvent, state: &mut TuiState) {
     if phase == "started" {
         state.loop_started = Some(std::time::Instant::now());
     } else if phase == "terminated" {
+        // U2 (plan 2026-08-09-002 / C1): capture the runtime-
+        // accepted terminal deliverable path so the in-process
+        // TUI path renders `DELIVERABLE_PATH:` exactly like the
+        // RPC bridge. The publisher puts the path under
+        // `deliverable` (and may use `report_path` for symmetry
+        // with the `LOOP_COMPLETE` payload); both keys are read
+        // so the TUI works regardless of which name the
+        // publisher chose. Sanitization is the publisher's
+        // responsibility (U6) — the TUI stores the path verbatim
+        // and only renders it via the `print_termination` path,
+        // which re-applies the same filter.
+        let deliverable = event
+            .payload
+            .get("deliverable")
+            .or_else(|| event.payload.get("report_path"))
+            .and_then(Value::as_str)
+            .map(str::to_owned);
+        if let Some(path) = deliverable {
+            state.last_deliverable_path = Some(path);
+        }
         apply_loop_completed(state);
     }
 
