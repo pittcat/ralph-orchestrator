@@ -120,8 +120,10 @@ pub struct RunArgs {
     pub no_auto_merge: bool,
 
     /// Create an isolated git worktree for this run. The worktree is created
-    /// at `.worktrees/<loop-id>/` and the loop runs inside it. Use this for
-    /// fully isolated execution that does not affect the main working directory.
+    /// at `<repo-parent>/worktree/<repo>/<loop-id>/` (the external
+    /// worktree resolver, plan 2026-08-09-002 default) and the loop runs
+    /// inside it. Use this for fully isolated execution that does not
+    /// affect the main working directory.
     ///
     /// End-to-end isolation contract: when set, the loop's `.ralph/` directory
     /// (events, diagnostics, current-events marker, etc.) is created inside the
@@ -177,9 +179,12 @@ pub struct RunArgs {
     /// Explicit worktree name to use with `--worktree`.
     ///
     /// When provided, Ralph creates or reuses a worktree with exactly
-    /// this name (under `.worktrees/<name>/`) instead of deriving one
-    /// from the prompt or plan file. Use with `--reuse-worktree` to
-    /// reuse an existing worktree of the same name.
+    /// this name (under `<repo-parent>/worktree/<repo>/<name>/` — the
+    /// external worktree resolver) instead of deriving one from the
+    /// prompt or plan file. Use with `--reuse-worktree` to reuse an
+    /// existing worktree of the same name. Names containing `/`,
+    /// `\`, `..`, or starting with `-` are rejected by the clap
+    /// `value_parser` (R-FIX-A1).
     #[arg(
         long,
         value_name = "NAME",

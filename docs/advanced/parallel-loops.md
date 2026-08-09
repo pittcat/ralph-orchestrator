@@ -7,7 +7,7 @@ Ralph supports running multiple orchestration loops in parallel using git worktr
 When you start a Ralph loop:
 
 1. **First loop** acquires `.ralph/loop.lock` and runs in-place (the primary loop)
-2. **Additional loops** automatically spawn into `.worktrees/<loop-id>/`
+2. **Additional loops** automatically spawn into `<repo-parent>/worktree/<repo>/<loop-id>/` (the external worktree resolver, plan 2026-08-002 default)
 3. **Each loop** has isolated events, tasks, and scratchpad
 4. **Memories are shared** — symlinked back to the main repo's `.agent/memories.md`
 5. **On completion**, worktree loops automatically spawn a merge-ralph to integrate changes
@@ -18,7 +18,7 @@ When you start a Ralph loop:
 │  ralph run -p "Add auth"       │  ralph run -p "Add logging"       │
 │  [acquires lock, runs in-place]│  [spawns to worktree]             │
 │           ↓                    │           ↓                       │
-│     Primary loop               │  .worktrees/ralph-20250124-a3f2/  │
+│     Primary loop               │  ../worktree/<repo>/ralph-20250124-a3f2/  │
 │           ↓                    │           ↓                       │
 │     LOOP_COMPLETE              │     LOOP_COMPLETE → auto-merge    │
 └─────────────────────────────────────────────────────────────────────┘
@@ -83,7 +83,7 @@ project/
 │   └── events.jsonl       # Primary loop events
 ├── .agent/
 │   └── memories.md        # Shared across all loops
-└── .worktrees/
+└── <repo-parent>/worktree/<repo>/       # external worktree resolver
     └── ralph-20250124-a3f2/
         ├── .ralph/events.jsonl    # Loop-isolated
         ├── .agent/
@@ -260,7 +260,11 @@ ralph loops attach <loop-id>
 ralph loops prune
 
 # Force cleanup of specific worktree
-git worktree remove .worktrees/<loop-id> --force
+# The worktree path is no longer inside the repo; use
+# `git worktree list --porcelain` to discover the absolute
+# path from the worktree name before `git worktree remove`.
+WT_PATH="$(git worktree list --porcelain | awk '/^worktree .*\/worktree\/<repo>\/'"$LOOP_ID"'\// {print $2; exit}')"
+[ -n "$WT_PATH" ] && git worktree remove --force "$WT_PATH"
 git branch -D ralph/<loop-id>
 ```
 
