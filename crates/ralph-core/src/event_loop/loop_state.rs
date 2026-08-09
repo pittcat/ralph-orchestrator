@@ -8,6 +8,7 @@ use ralph_proto::{Event, HatId};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::hash::{DefaultHasher, Hash, Hasher};
+use std::path::Path;
 use std::time::{Duration, Instant};
 
 use super::TerminationReason;
@@ -1148,6 +1149,56 @@ impl LoopState {
         self.last_validator_terminal_kind = Some(kind.to_string());
     }
 
+    /// U3 (plan 2026-08-09-002 / R6-R8): extract the terminal
+    /// deliverable path from the accepted completion payload.
+    ///
+    /// The accepted terminal event payload (typically `LOOP_COMPLETE`,
+    /// optionally `report.done`) is stored verbatim in
+    /// `last_completion_payload` whenever an accepted payload has been
+    /// honored. This helper pulls the canonical deliverable path so
+    /// the CLI/RPC/TUI display layers can surface the agent's final
+    /// report without reading agent-visible prompt text or scanning
+    /// the event log.
+    ///
+    /// Resolution rules (D5 / E9-E11):
+    /// - `report_path` (string, non-empty) wins.
+    /// - Fall back to `artifact_path` (string, non-empty).
+    /// - The extracted string is passed through
+    ///   [`sanitize_terminal_path`] which rejects CR/LF, control
+    ///   bytes, ANSI ESC sequences, and paths that escape the
+    ///   worktree root (when a root is known). Sanitization is the
+    ///   U6 (A2) input-validation gate that prevents an
+    ///   agent-supplied payload from injecting escape sequences or
+    ///   path-traversal into the operator's `DELIVERABLE_PATH:`
+    ///   line.
+    /// - Anything else (`None`, non-object, non-string, empty,
+    ///   whitespace, sanitized to `None`) returns `None` — the
+    ///   runtime MUST NOT fabricate a path.
+    ///
+    /// This method is intentionally read-only and side-effect free.
+    pub fn terminal_deliverable_path(&self) -> Option<String> {
+        let payload = self.last_completion_payload.as_deref()?;
+        let value: serde_json::Value = serde_json::from_str(payload).ok()?;
+        let obj = value.as_object()?;
+
+        for key in ["report_path", "artifact_path"] {
+            if let Some(s) = obj.get(key).and_then(|v| v.as_str()) {
+                let trimmed = s.trim();
+                if !trimmed.is_empty() {
+                    // U6 (A2): filter CR/LF, control bytes, ANSI
+                    // escapes, and any path that escapes the
+                    // worktree root. `LoopState` does not yet
+                    // carry a worktree-root field, so the
+                    // containment check is best-effort and the
+                    // render site in `display.rs` re-applies the
+                    // same filter for defense in depth.
+                    return sanitize_terminal_path(trimmed, None);
+                }
+            }
+        }
+        None
+    }
+
     /// U8 (2026-06-27-002 plan completion): clear the
     /// per-task `stall_recovery_counts` entry that
     /// corresponds to `task_key`. Called when a
@@ -1984,6 +2035,64 @@ impl LoopState {
     }
 }
 
+/// U6 (plan 2026-08-09-002 / A2): sanitize a string that will be
+/// printed to the operator's terminal (or serialized into the TUI
+/// RPC payload) as a `DELIVERABLE_PATH: <path>` marker. The
+/// agent-supplied completion payload is untrusted: a hostile
+/// payload can include CR/LF, ANSI ESC sequences, or path-traversal
+/// to either (a) inject arbitrary escape codes into the
+/// operator's terminal, (b) split the marker across multiple
+/// output lines, or (c) point at a path outside the worktree that
+/// the operator might `cat` into a sensitive context.
+///
+/// The helper rejects:
+///
+/// - any byte `< 0x20` except tab (`\t`) — covers CR (`\r`),
+///   LF (`\n`), NUL, ESC (`\x1b`), and the rest of the C0
+///   control set;
+/// - any byte `>= 0x7f` (the C1 / non-ASCII high set) — a
+///   best-effort fence against mojibake and zero-width characters
+///   that some terminals honor;
+/// - empty / whitespace-only input (already covered by the caller's
+///   `trim`, but kept here so the helper is self-contained);
+/// - any path whose canonicalized form escapes `worktree_root`
+///   (when a root is supplied).
+///
+/// On any rejection the helper returns `None`; the caller must
+/// then drop the marker. Returning the sanitized canonical form
+/// would let a CR/LF-stripped path be quietly mutated; refusing
+/// to emit is the safer default for an input-validation gate.
+pub fn sanitize_terminal_path(raw: &str, worktree_root: Option<&Path>) -> Option<String> {
+    if raw.is_empty() {
+        return None;
+    }
+    for byte in raw.bytes() {
+        // C0 control set (`< 0x20`) and C1 / non-ASCII high set
+        // (`>= 0x7f`) are both rejected; the only exception is
+        // tab (`\t` = 0x09), which is the canonical "innocent"
+        // whitespace byte in a path. The range check covers both
+        // windows in a single comparison (clippy
+        // `manual_range_contains` friendly).
+        if byte != b'\t' && !(0x20..0x7f).contains(&byte) {
+            return None;
+        }
+    }
+    // Containment check: when a worktree root is known, the path
+    // must canonicalize to something inside it. The check is
+    // best-effort because the operator's terminal renders
+    // repo-relative paths, and a relative path with no parent
+    // segments cannot escape anyway.
+    if let Some(root) = worktree_root {
+        let candidate = std::path::Path::new(raw);
+        let canonical_candidate = candidate.canonicalize().ok()?;
+        let canonical_root = root.canonicalize().ok()?;
+        if !canonical_candidate.starts_with(&canonical_root) {
+            return None;
+        }
+    }
+    Some(raw.to_string())
+}
+
 impl EventSignature {
     pub fn from_event(event: &Event) -> Self {
         Self {
@@ -2106,7 +2215,7 @@ mod detect_rejection_stall_kind_tests {
 
 #[cfg(test)]
 mod tests {
-    use super::{LoopState, U2_REJECTION_RETRY_LIMIT, WorkflowProgress};
+    use super::{LoopState, U2_REJECTION_RETRY_LIMIT, WorkflowProgress, sanitize_terminal_path};
     use ralph_proto::Event;
 
     #[test]
@@ -2418,6 +2527,151 @@ mod tests {
         assert_eq!(
             LoopState::work_done_dedup_key("p1", "step-01", "t1"),
             "p1::step-01::t1"
+        );
+    }
+
+    // -------------------------------------------------------------------------
+    // U3 (plan 2026-08-09-002): terminal deliverable extraction.
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn accepted_terminal_payload_provides_report_path() {
+        let mut state = LoopState::new();
+        state.last_completion_payload = Some(
+            r#"{"reason":"pass","report_path":".ralph/review/p/report.md"}"#.to_string(),
+        );
+        assert_eq!(
+            state.terminal_deliverable_path().as_deref(),
+            Some(".ralph/review/p/report.md")
+        );
+    }
+
+    #[test]
+    fn accepted_terminal_payload_falls_back_to_artifact_path() {
+        let mut state = LoopState::new();
+        state.last_completion_payload = Some(
+            r#"{"reason":"pass","artifact_path":".ralph/out/a.md"}"#.to_string(),
+        );
+        assert_eq!(
+            state.terminal_deliverable_path().as_deref(),
+            Some(".ralph/out/a.md")
+        );
+    }
+
+    #[test]
+    fn accepted_terminal_payload_report_path_wins_over_artifact_path() {
+        // Plan 2026-08-09-002 D6/E9: `report_path` wins when both
+        // are accepted (no duplicate path emitted).
+        let mut state = LoopState::new();
+        state.last_completion_payload = Some(
+            r#"{"report_path":"r.md","artifact_path":"a.md"}"#.to_string(),
+        );
+        assert_eq!(
+            state.terminal_deliverable_path().as_deref(),
+            Some("r.md")
+        );
+    }
+
+    #[test]
+    fn invalid_or_missing_terminal_path_returns_none() {
+        // The runtime MUST NOT fabricate a path. Malformed
+        // payloads must collapse to None, not error or guess.
+        let cases: Vec<(String, Option<String>)> = vec![
+            ("none".to_string(), None),
+            ("empty_string".to_string(), Some(String::new())),
+            ("null".to_string(), Some("null".to_string())),
+            ("not_json".to_string(), Some("not json".to_string())),
+            ("lone_string".to_string(), Some("\"just a string\"".to_string())),
+            ("array_payload".to_string(), Some(r#"[{"report_path":"r.md"}]"#.to_string())),
+            ("null_report_path".to_string(), Some(r#"{"report_path":null}"#.to_string())),
+            ("int_report_path".to_string(), Some(r#"{"report_path":123}"#.to_string())),
+            ("empty_report_path".to_string(), Some(r#"{"report_path":""}"#.to_string())),
+            ("empty_artifact_path".to_string(), Some(r#"{"artifact_path":""}"#.to_string())),
+            ("whitespace_report_path".to_string(), Some(r#"{"report_path":"   "}"#.to_string())),
+            ("empty_object".to_string(), Some(r#"{}"#.to_string())),
+        ];
+        for (label, payload) in cases {
+            let mut state = LoopState::new();
+            state.last_completion_payload = payload;
+            assert_eq!(
+                state.terminal_deliverable_path(),
+                None,
+                "expected None for case {label}"
+            );
+        }
+    }
+
+    // ---------------------------------------------------------------------
+    // U6 (plan 2026-08-09-002 / A2): terminal deliverable sanitization
+    // ---------------------------------------------------------------------
+
+    #[test]
+    fn terminal_deliverable_path_accepts_clean_relative_path() {
+        // U6 A2: a clean relative path passes through the
+        // sanitizer and the existing extractor returns it.
+        let mut state = LoopState::new();
+        state.last_completion_payload =
+            Some(r#"{"report_path":".ralph/review/p/report.md"}"#.to_string());
+        assert_eq!(
+            state.terminal_deliverable_path().as_deref(),
+            Some(".ralph/review/p/report.md")
+        );
+    }
+
+    #[test]
+    fn terminal_deliverable_path_strips_ansi_escape() {
+        // U6 A2: an ANSI OSC (`\x1b]2;title`) sequence is the
+        // canonical terminal-injection vector; a hostile
+        // completion payload carrying it must be dropped, not
+        // forwarded into the operator's `DELIVERABLE_PATH:` line.
+        let mut state = LoopState::new();
+        state.last_completion_payload =
+            Some(r#"{"report_path":"]2;title report.md"}"#.to_string());
+        assert!(
+            state.terminal_deliverable_path().is_none(),
+            "ANSI escape sequence in deliverable must be rejected"
+        );
+    }
+
+    #[test]
+    fn terminal_deliverable_path_strips_cr_lf() {
+        // U6 A2: a payload containing CR or LF would split the
+        // `DELIVERABLE_PATH: <path>` line across two output rows
+        // and let the agent smuggle an extra command into the
+        // operator's terminal. Both control bytes must reject.
+        // The payload is built with explicit `\n` / `\r` escape
+        // bytes (not the two-character `\n` / `\r` text that
+        // JSON does NOT decode as control bytes).
+        let mut state = LoopState::new();
+        state.last_completion_payload = Some(format!(
+            r#"{{"report_path":"report.md{}INJECT"}}"#,
+            '\n'
+        ));
+        assert!(state.terminal_deliverable_path().is_none());
+        state.last_completion_payload = Some(format!(
+            r#"{{"report_path":"report.md{}"}}"#,
+            '\r'
+        ));
+        assert!(state.terminal_deliverable_path().is_none());
+    }
+
+    #[test]
+    fn terminal_deliverable_path_rejects_path_outside_worktree() {
+        // U6 A2: when a worktree root is supplied, paths whose
+        // canonicalized form escapes the root must be rejected.
+        // The agent cannot direct the operator to `cat
+        // /etc/passwd` from inside a worktree.
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let worktree = temp_dir.path().join("worktree");
+        std::fs::create_dir_all(&worktree).unwrap();
+        // Path that resolves to /tmp/.../escape.md, which is
+        // outside `worktree/`. `Path::canonicalize` resolves the
+        // .. segments before the containment check.
+        let outside = worktree.join("../escape.md");
+        let sanitized = sanitize_terminal_path(outside.to_str().unwrap(), Some(&worktree));
+        assert!(
+            sanitized.is_none(),
+            "paths outside the worktree root must be rejected"
         );
     }
 

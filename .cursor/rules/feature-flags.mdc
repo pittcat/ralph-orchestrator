@@ -10,13 +10,23 @@ alwaysApply: false
 
 Ralph supports multiple orchestration loops in parallel using git worktrees.
 
+**Default worktree resolver (plan 2026-08-09-002):** the default
+`ralph run --worktree` path lives **outside** the target repo at
+`<repo-parent>/worktree/<repo>/<loop-id>/`, computed by
+`external_worktree_base(repo_root)` in
+`crates/ralph-core/src/worktree.rs`. Custom callers use
+`WorktreeConfig::with_dir(<path>)` to keep the historical
+in-repo layout. The `--worktree-name` value is rejected at the
+clap `value_parser` boundary if it contains `/`, `\`, `..`, or
+starts with `-` (path-traversal guard, R-FIX-A1).
+
 ```
 Primary Loop (holds .ralph/loop.lock)
 ├── Runs in main workspace
 ├── Processes merge queue on completion
 └── Spawns merge-ralph for queued loops
 
-Worktree Loops (.worktrees/<loop-id>/)
+Worktree Loops (<repo-parent>/worktree/<repo>/<loop-id>/)
 ├── Isolated filesystem via git worktree
 ├── Symlinked memories, specs, tasks → main repo
 ├── Queue for merge on completion

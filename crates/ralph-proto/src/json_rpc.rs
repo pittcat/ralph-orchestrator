@@ -304,6 +304,14 @@ pub enum RpcEvent {
         total_cost_usd: f64,
         /// Unix timestamp (milliseconds).
         terminated_at: u64,
+        /// U4 (plan 2026-08-09-002 / R6 / R9 / R-S5 / R-GWT-5):
+        /// Report / artifact path extracted from the runtime-
+        /// accepted terminal payload. Omitted entirely when no
+        /// `report_path` / `artifact_path` was accepted — this
+        /// keeps old clients that don't expect the field able to
+        /// parse the new JSON unchanged.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        deliverable_path: Option<String>,
     },
 
     /// Response to a command.
@@ -798,10 +806,60 @@ mod tests {
             duration_ms: 120_000,
             total_cost_usd: 0.25,
             terminated_at: 1_700_000_120_000,
+            deliverable_path: None,
         };
         let json = serde_json::to_string(&event).unwrap();
         let parsed: RpcEvent = serde_json::from_str(&json).unwrap();
         assert_eq!(event, parsed);
+    }
+
+    /// U4 (plan 2026-08-09-002): when a `deliverable_path` is
+    /// present, it round-trips through the JSON wire form. Old
+    /// clients that never wrote the field must still parse
+    /// forward-compatible JSON without it.
+    #[test]
+    fn test_loop_terminated_with_deliverable_path_roundtrip() {
+        let event = RpcEvent::LoopTerminated {
+            reason: TerminationReason::Completed,
+            total_iterations: 5,
+            duration_ms: 120_000,
+            total_cost_usd: 0.25,
+            terminated_at: 1_700_000_120_000,
+            deliverable_path: Some(".ralph/review/p/report.md".to_string()),
+        };
+        let json = serde_json::to_string(&event).unwrap();
+        let parsed: RpcEvent = serde_json::from_str(&json).unwrap();
+        assert_eq!(event, parsed);
+        // The serialized JSON must include the deliverable_path
+        // key (not skipped — only None gets skipped).
+        assert!(
+            json.contains("deliverable_path"),
+            "Some path must serialize the field"
+        );
+    }
+
+    /// U4: a JSON payload missing `deliverable_path` entirely (the
+    /// legacy wire shape before this plan) parses with `None`.
+    /// Adding the field must not break existing consumers.
+    #[test]
+    fn test_loop_terminated_legacy_json_without_deliverable_path_parses_as_none() {
+        let legacy_json = r#"{
+            "type": "loop_terminated",
+            "reason": "completed",
+            "total_iterations": 5,
+            "duration_ms": 120000,
+            "total_cost_usd": 0.25,
+            "terminated_at": 1700000120000
+        }"#;
+        let event: RpcEvent = serde_json::from_str(legacy_json).unwrap();
+        if let RpcEvent::LoopTerminated {
+            deliverable_path, ..
+        } = event
+        {
+            assert_eq!(deliverable_path, None);
+        } else {
+            panic!("expected LoopTerminated variant");
+        }
     }
 
     #[test]
