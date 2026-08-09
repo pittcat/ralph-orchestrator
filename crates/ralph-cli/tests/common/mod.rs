@@ -7,6 +7,7 @@
 //! ACL / emit allowlist / skill visibility checks treat the fixture as
 //! an in-loop agent and fail.
 
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 /// Keys that mark agent-owned CLI context (plus hat-execution overlays).
@@ -46,4 +47,18 @@ pub fn ralph_bin() -> Command {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_ralph"));
     scrub_agent_runtime_env(&mut cmd);
     cmd
+}
+
+/// Plan 2026-08-09-002 (R1): default `ralph run --worktree` lives
+/// at `<repo-parent>/worktree/<repo-basename>/`. Tests that pre-
+/// stage worktrees for `--reuse-worktree` lookups or supervise
+/// external fixtures can use this to compute the same path the
+/// runtime does.
+pub fn external_worktree_base(main_repo: &Path) -> PathBuf {
+    let parent = main_repo.parent().expect("repo parent");
+    let project = main_repo
+        .file_name()
+        .and_then(|n| n.to_str())
+        .expect("repo basename");
+    parent.join("worktree").join(project)
 }
