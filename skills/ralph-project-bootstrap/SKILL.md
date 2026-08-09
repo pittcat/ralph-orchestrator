@@ -268,9 +268,10 @@ still match their embedded hashes. An operator-owned external prompt is a
 different launch contract and is referenced rather than copied. For a
 plan-driven preset with no plan yet, the entry keeps a managed fallback
 prompt inside the suite and emits the `[TEMPLATE - replace PLAN_PATH before
-running]` command carrying only `--plan PLAN_PATH`; do **not** also pass
-`--prompt-file`, because CLI prompt-file precedence would select the
-fallback instead of the real plan.
+running]` command carrying only `--plan PLAN_PATH`. This applies when no
+operator-owned external prompt file was supplied; when one is supplied, keep
+`--prompt-file` as the authoritative prompt source and omit the top-level
+`--plan` prompt source.
 
 **Forbidden in emitted bytes.** The prompt must never reference
 `ralph-hats` or any specific preset name; it must never mention the

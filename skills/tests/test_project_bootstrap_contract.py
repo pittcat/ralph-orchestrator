@@ -2893,8 +2893,8 @@ def test_handoff_complete_argv_carries_canonical_flags() -> None:
     assert argv[0] == "ralph"
     assert "-c" in argv and "ralph.pipeline.yml" in argv
     assert "-H" in argv and "test-preset" in argv
-    assert "--prompt-file" not in argv
-    assert "--plan" in argv and "plan.md" in argv
+    assert argv[-2:] == ("--prompt-file", "PROMPT.pipeline.md")
+    assert "--plan" not in argv
 
 
 def test_handoff_incomplete_argv_is_unaffected_by_prefix() -> None:

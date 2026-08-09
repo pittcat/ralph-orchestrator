@@ -233,15 +233,10 @@ def _build_argv(inputs: HandoffInputs) -> tuple[str, ...]:
         "-H",
         inputs.preset,
     ]
-    # A plan-driven launch must have exactly one CLI prompt source. Ralph gives
-    # --prompt-file precedence over --plan, so carrying both would silently
-    # execute the bootstrap fallback instead of the operator's real plan.
-    if (
-        inputs.prompt_file is not None
-        and inputs.plan_path is None
-        and inputs.plan_arg is None
-        and not inputs.requires_plan
-    ):
+    # An operator-supplied prompt file is the authoritative prompt source.
+    # Only use --plan as the prompt source when no external prompt was given;
+    # Ralph gives --prompt-file precedence when both flags are present.
+    if inputs.prompt_file is not None:
         argv.append("--prompt-file")
         argv.append(inputs.prompt_file)
     if inputs.use_worktree:
@@ -253,7 +248,7 @@ def _build_argv(inputs: HandoffInputs) -> tuple[str, ...]:
         elif inputs.worktree_name is not None:
             argv.append("--worktree-name")
             argv.append(inputs.worktree_name)
-    elif inputs.plan_path is not None:
+    elif inputs.plan_path is not None and inputs.prompt_file is None:
         argv.append("--plan")
         argv.append(inputs.plan_path)
     elif inputs.requires_plan:

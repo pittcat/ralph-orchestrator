@@ -88,9 +88,11 @@ shape is exactly:
          (--plan <plan_arg> | --worktree-name <worktree_name>)
 ```
 
-`--prompt-file` and `--plan` are mutually exclusive prompt sources. When a
-plan path or plan reuse key exists, omit `--prompt-file`; otherwise Ralph's
-prompt-file precedence would hide the plan.
+`--prompt-file` and `--plan` are mutually exclusive prompt sources. When the
+operator supplies an external `prompt_file`, keep `--prompt-file` and omit the
+top-level `--plan`; the external prompt is authoritative and may direct the
+agent to read the plan. When no external prompt is supplied, use `--plan` as
+the prompt source. A worktree `plan_arg` remains an independent reuse key.
 
 Note that the explicit reuse ``--plan`` (when supplied) replaces
 the top-level ``--plan <plan_path>`` so the operator's explicit
