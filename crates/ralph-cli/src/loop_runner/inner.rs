@@ -2110,6 +2110,12 @@ pub(super) async fn run_loop_impl_inner(
                     duration_ms: state.elapsed().as_millis() as u64,
                     total_cost_usd: accumulated_cost,
                     terminated_at,
+                    // U4 (plan 2026-08-09-002 / R-S5): the
+                    // accepted terminal payload's report path is
+                    // surfaced on this event so RPC consumers do
+                    // not need to re-parse the event log. `None`
+                    // for non-completion terminals (R-S3).
+                    deliverable_path: state.terminal_deliverable_path(),
                 };
                 let _ = tx.try_send(terminate_event);
             }

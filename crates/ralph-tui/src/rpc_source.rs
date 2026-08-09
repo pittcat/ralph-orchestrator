@@ -415,10 +415,17 @@ fn apply_rpc_event(event: &RpcEvent, state: &Arc<Mutex<TuiState>>, acc: &mut Tex
         }
 
         RpcEvent::LoopTerminated {
-            total_iterations, ..
+            total_iterations,
+            deliverable_path,
+            ..
         } => {
             s.iteration = *total_iterations;
             apply_loop_completed(&mut s);
+            // U4 (plan 2026-08-09-002 / R9 / R-S5): persist the
+            // accepted terminal deliverable so the TUI footer can
+            // display it. `None` is the legacy/empty contract —
+            // it preserves the pre-existing UI shape.
+            s.last_deliverable_path = deliverable_path.clone();
 
             s.last_event = Some("loop_terminated".to_string());
             s.last_event_at = Some(Instant::now());
@@ -847,12 +854,83 @@ mod tests {
             duration_ms: 10000,
             total_cost_usd: 0.25,
             terminated_at: 0,
+            deliverable_path: None,
         };
         apply_rpc_event(&event, &state, &mut acc);
 
         let s = state.lock().unwrap();
         assert!(s.loop_completed);
         assert_eq!(s.iteration, 5);
+    }
+
+    /// U4 (plan 2026-08-09-002 / R-S5): the TUI state captures the
+    /// same accepted deliverable path the RPC event carries, so the
+    /// footer can render it. `None` legacy JSON parses to `None`
+    /// (no field on the wire).
+    #[test]
+    fn tui_loop_terminated_captures_deliverable_path() {
+        let state = make_state();
+        let mut acc = make_acc();
+
+        let event = RpcEvent::LoopTerminated {
+            reason: TerminationReason::Completed,
+            total_iterations: 5,
+            duration_ms: 10000,
+            total_cost_usd: 0.25,
+            terminated_at: 0,
+            deliverable_path: Some(".ralph/review/p/report.md".to_string()),
+        };
+        apply_rpc_event(&event, &state, &mut acc);
+
+        let s = state.lock().unwrap();
+        assert_eq!(
+            s.last_deliverable_path.as_deref(),
+            Some(".ralph/review/p/report.md")
+        );
+    }
+
+    /// U4: when the RPC event omits `deliverable_path` (legacy /
+    /// non-completion), the TUI state remains `None` — the pre-
+    /// existing UI shape is preserved (R-S3).
+    #[test]
+    fn tui_loop_terminated_without_path_keeps_none() {
+        let state = make_state();
+        let mut acc = make_acc();
+
+        let event = RpcEvent::LoopTerminated {
+            reason: TerminationReason::Interrupted,
+            total_iterations: 5,
+            duration_ms: 10000,
+            total_cost_usd: 0.0,
+            terminated_at: 0,
+            deliverable_path: None,
+        };
+        apply_rpc_event(&event, &state, &mut acc);
+
+        let s = state.lock().unwrap();
+        assert_eq!(s.last_deliverable_path, None);
+    }
+
+    /// U4: replaying the same terminal event twice does not stomp
+    /// on an already-set path with a different value (R-GWT-6).
+    #[test]
+    fn tui_loop_terminated_replay_is_idempotent_for_deliverable_path() {
+        let state = make_state();
+        let mut acc = make_acc();
+
+        let event = RpcEvent::LoopTerminated {
+            reason: TerminationReason::Completed,
+            total_iterations: 5,
+            duration_ms: 10000,
+            total_cost_usd: 0.25,
+            terminated_at: 0,
+            deliverable_path: Some("p.md".to_string()),
+        };
+        apply_rpc_event(&event, &state, &mut acc);
+        apply_rpc_event(&event, &state, &mut acc);
+
+        let s = state.lock().unwrap();
+        assert_eq!(s.last_deliverable_path.as_deref(), Some("p.md"));
     }
 
     #[test]
