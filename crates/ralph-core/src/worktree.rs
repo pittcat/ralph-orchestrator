@@ -88,7 +88,12 @@ impl WorktreeConfig {
     /// the default constructor's literal drifted from the
     /// sentinel.
     pub fn is_default_layout(&self) -> bool {
-        self.worktree_dir == PathBuf::from(DEFAULT_WORKTREE_DIR)
+        // U5 (M1): compare against the default sentinel via a
+        // `&Path` reference (no owned allocation) so the
+        // `clippy::cmp_owned` lint stays quiet. The sentinel is
+        // a `&'static str` constant; wrapping it in `Path::new`
+        // borrows without allocation.
+        self.worktree_dir == Path::new(DEFAULT_WORKTREE_DIR)
     }
 
     /// Get the absolute path to worktree directory relative to repo root.
@@ -257,7 +262,7 @@ pub fn validate_worktree_name(name: &str) -> Result<(), WorktreeError> {
         });
     }
     for byte in name.bytes() {
-        if byte < 0x20 || byte >= 0x7f {
+        if !(0x20..0x7f).contains(&byte) {
             return Err(WorktreeError::InvalidName {
                 name: name.to_string(),
                 reason: "name contains control or non-ASCII byte".to_string(),

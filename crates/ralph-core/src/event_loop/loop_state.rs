@@ -2067,10 +2067,13 @@ pub fn sanitize_terminal_path(raw: &str, worktree_root: Option<&Path>) -> Option
         return None;
     }
     for byte in raw.bytes() {
-        if byte < 0x20 && byte != b'\t' {
-            return None;
-        }
-        if byte >= 0x7f {
+        // C0 control set (`< 0x20`) and C1 / non-ASCII high set
+        // (`>= 0x7f`) are both rejected; the only exception is
+        // tab (`\t` = 0x09), which is the canonical "innocent"
+        // whitespace byte in a path. The range check covers both
+        // windows in a single comparison (clippy
+        // `manual_range_contains` friendly).
+        if byte != b'\t' && !(0x20..0x7f).contains(&byte) {
             return None;
         }
     }

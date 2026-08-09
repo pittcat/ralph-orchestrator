@@ -774,7 +774,7 @@ fn resolve_exact_worktree_name(
     let raw = worktree_name
         .map(str::to_owned)
         .or_else(|| plan_file.and_then(|_| derived_plan_name.map(str::to_owned)));
-    if let Some(ref name) = raw {
+    if let Some(name) = raw.as_deref() {
         if validate_worktree_name(name).is_err() {
             return None;
         }
