@@ -1,6 +1,6 @@
 # 2026-07-03-001 plan U13: supervisor minimal BDD smoke.
 #
-# Pinned to `ce-executor-supervisor` topology: validates the
+# Pinned to the generic supervisor topology: validates the
 # `exec.unit.done → exec.wave.complete (system_injected) →
 # exec-integrator → work.done` happy path inside a single
 # isolated mode iteration. Full 16-hat fan-out is exercised

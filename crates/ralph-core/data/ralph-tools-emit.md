@@ -143,7 +143,7 @@ ralph emit --schema work.done | jq -r .protocol_hash   # 改后
    - `overall_confidence`：0-100 置信度分数
    - `critical_unknown_count`：关键未知项数量
 
-**Manifest 路径规则**：`scope_manifest_path` 必须落在 `.ralph/{merge,post-merge,red-team}/` 下，且文件必须在 emit 前已落盘可读。runtime guard 会检查路径前缀和文件存在性。
+**Manifest 路径规则**：`scope_manifest_path` 必须落在 `.ralph/{merge,post-merge,red-team}/` 下，且文件必须在 emit 前已落盘可读。runtime guard 会拒绝绝对路径、`..` 穿越和指向允许目录外的符号链接，并检查文件存在性。
 
 **Digest 计算细节**：canonical JSON 是对 manifest 内容去掉 `scope_digest` 字段后的 JSON 文本，按 `serde_json::to_string` 的默认排序序列化后计算 SHA-256。不得把 `scope_digest` 字段本身算进去，否则无法自举。
 
