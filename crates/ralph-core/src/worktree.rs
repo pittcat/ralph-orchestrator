@@ -108,7 +108,7 @@ pub fn external_worktree_base(repo_root: &Path) -> PathBuf {
 /// `external_worktree_base(repo_root)`. For custom configs
 /// (`with_dir`), the override path is returned unchanged.
 pub fn canonical_worktree_base(repo_root: &Path, config: &WorktreeConfig) -> PathBuf {
-    if config.worktree_dir == PathBuf::from(".worktrees") {
+    if config.worktree_dir == *".worktrees" {
         external_worktree_base(repo_root)
     } else {
         config.worktree_path(repo_root)
@@ -1149,7 +1149,7 @@ pub fn sync_working_directory_to_worktree(
     // `.worktrees/` directory: a stale `.worktrees/foo` from a
     // previous run lives in the target repo and would otherwise be
     // mirrored into the new external workspace.
-    let is_default_config = config.worktree_dir == PathBuf::from(".worktrees");
+    let is_default_config = config.worktree_dir == *".worktrees";
 
     // Helper to check if a path should be excluded
     let should_exclude = |path: &Path| -> bool {
