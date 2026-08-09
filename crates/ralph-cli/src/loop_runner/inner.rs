@@ -2052,8 +2052,24 @@ pub(super) async fn run_loop_impl_inner(
 
             // Print termination info to console (skip in TUI mode - TUI handles display)
             // Skip in RPC mode - JSON events replace console output
+            // U3 (plan 2026-08-09-002): pull the accepted terminal
+            // deliverable path from `last_completion_payload` so the
+            // final no-TUI output can print a reliable
+            // `DELIVERABLE_PATH:` line. `None` for non-completion
+            // terminals (R7 / R-GWT-3).
             if !enable_tui && !enable_rpc {
-                print_termination(reason, state, use_colors, Some(&loop_id));
+                let deliverable = if matches!(reason, TerminationReason::CompletionPromise) {
+                    state.terminal_deliverable_path()
+                } else {
+                    None
+                };
+                print_termination(
+                    reason,
+                    state,
+                    use_colors,
+                    Some(&loop_id),
+                    deliverable.as_deref(),
+                );
             }
 
             // Mark RPC state as completed so get_state reflects termination

@@ -1148,6 +1148,40 @@ impl LoopState {
         self.last_validator_terminal_kind = Some(kind.to_string());
     }
 
+    /// U3 (plan 2026-08-09-002 / R6-R8): extract the terminal
+    /// deliverable path from the accepted completion payload.
+    ///
+    /// The accepted terminal event payload (typically `LOOP_COMPLETE`,
+    /// optionally `report.done`) is stored verbatim in
+    /// `last_completion_payload` whenever an accepted payload has been
+    /// honored. This helper pulls the canonical deliverable path so
+    /// the CLI/RPC/TUI display layers can surface the agent's final
+    /// report without reading agent-visible prompt text or scanning
+    /// the event log.
+    ///
+    /// Resolution rules (D5 / E9-E11):
+    /// - `report_path` (string, non-empty) wins.
+    /// - Fall back to `artifact_path` (string, non-empty).
+    /// - Anything else (`None`, non-object, non-string, empty, whitespace)
+    ///   returns `None` — the runtime MUST NOT fabricate a path.
+    ///
+    /// This method is intentionally read-only and side-effect free.
+    pub fn terminal_deliverable_path(&self) -> Option<String> {
+        let payload = self.last_completion_payload.as_deref()?;
+        let value: serde_json::Value = serde_json::from_str(payload).ok()?;
+        let obj = value.as_object()?;
+
+        for key in ["report_path", "artifact_path"] {
+            if let Some(s) = obj.get(key).and_then(|v| v.as_str()) {
+                let trimmed = s.trim();
+                if !trimmed.is_empty() {
+                    return Some(trimmed.to_string());
+                }
+            }
+        }
+        None
+    }
+
     /// U8 (2026-06-27-002 plan completion): clear the
     /// per-task `stall_recovery_counts` entry that
     /// corresponds to `task_key`. Called when a
@@ -2419,6 +2453,77 @@ mod tests {
             LoopState::work_done_dedup_key("p1", "step-01", "t1"),
             "p1::step-01::t1"
         );
+    }
+
+    // -------------------------------------------------------------------------
+    // U3 (plan 2026-08-09-002): terminal deliverable extraction.
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn accepted_terminal_payload_provides_report_path() {
+        let mut state = LoopState::new();
+        state.last_completion_payload = Some(
+            r#"{"reason":"pass","report_path":".ralph/review/p/report.md"}"#.to_string(),
+        );
+        assert_eq!(
+            state.terminal_deliverable_path().as_deref(),
+            Some(".ralph/review/p/report.md")
+        );
+    }
+
+    #[test]
+    fn accepted_terminal_payload_falls_back_to_artifact_path() {
+        let mut state = LoopState::new();
+        state.last_completion_payload = Some(
+            r#"{"reason":"pass","artifact_path":".ralph/out/a.md"}"#.to_string(),
+        );
+        assert_eq!(
+            state.terminal_deliverable_path().as_deref(),
+            Some(".ralph/out/a.md")
+        );
+    }
+
+    #[test]
+    fn accepted_terminal_payload_report_path_wins_over_artifact_path() {
+        // Plan 2026-08-09-002 D6/E9: `report_path` wins when both
+        // are accepted (no duplicate path emitted).
+        let mut state = LoopState::new();
+        state.last_completion_payload = Some(
+            r#"{"report_path":"r.md","artifact_path":"a.md"}"#.to_string(),
+        );
+        assert_eq!(
+            state.terminal_deliverable_path().as_deref(),
+            Some("r.md")
+        );
+    }
+
+    #[test]
+    fn invalid_or_missing_terminal_path_returns_none() {
+        // The runtime MUST NOT fabricate a path. Malformed
+        // payloads must collapse to None, not error or guess.
+        let cases: Vec<(String, Option<String>)> = vec![
+            ("none".to_string(), None),
+            ("empty_string".to_string(), Some(String::new())),
+            ("null".to_string(), Some("null".to_string())),
+            ("not_json".to_string(), Some("not json".to_string())),
+            ("lone_string".to_string(), Some("\"just a string\"".to_string())),
+            ("array_payload".to_string(), Some(r#"[{"report_path":"r.md"}]"#.to_string())),
+            ("null_report_path".to_string(), Some(r#"{"report_path":null}"#.to_string())),
+            ("int_report_path".to_string(), Some(r#"{"report_path":123}"#.to_string())),
+            ("empty_report_path".to_string(), Some(r#"{"report_path":""}"#.to_string())),
+            ("empty_artifact_path".to_string(), Some(r#"{"artifact_path":""}"#.to_string())),
+            ("whitespace_report_path".to_string(), Some(r#"{"report_path":"   "}"#.to_string())),
+            ("empty_object".to_string(), Some(r#"{}"#.to_string())),
+        ];
+        for (label, payload) in cases {
+            let mut state = LoopState::new();
+            state.last_completion_payload = payload;
+            assert_eq!(
+                state.terminal_deliverable_path(),
+                None,
+                "expected None for case {label}"
+            );
+        }
     }
 
     #[test]

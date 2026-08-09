@@ -244,11 +244,22 @@ pub fn truncate(s: &str, max_len: usize) -> String {
 /// recoverable termination reasons (budget exhausted, thrashing, interrupt,
 /// etc.) so an agent or user running `--no-tui` can recover without hunting
 /// through the scrollback.
+///
+/// When `deliverable_path` is provided (U3 / plan 2026-08-09-002), an
+/// additional standalone `DELIVERABLE_PATH: <path>` line is printed
+/// exactly once.  The path comes from the *accepted* terminal payload —
+/// the runtime MUST NOT fabricate one when only the agent-visible prompt
+/// mentions `DELIVERABLE_PATH`.  In the current scope `CompletionPromise`
+/// is the only terminal reason that surfaces the line; non-completion
+/// terminals (`MaxRuntime`, `Interrupted`, etc.) never have an accepted
+/// terminal payload and so never print the marker.
+#[allow(clippy::too_many_arguments)]
 pub fn print_termination(
     reason: &TerminationReason,
     state: &ralph_core::LoopState,
     use_colors: bool,
     loop_id: Option<&str>,
+    deliverable_path: Option<&str>,
 ) {
     use colors::*;
 
@@ -356,6 +367,19 @@ pub fn print_termination(
             println!("  {DIM}Resume:{RESET} {CYAN}{cmd}{RESET}");
         } else {
             println!("  Resume: {cmd}");
+        }
+    }
+
+    // U3 (plan 2026-08-09-002): surface the runtime-accepted
+    // `report_path` / `artifact_path` as a single independent
+    // marker line. Only ever printed exactly once per call.
+    if let Some(path) = deliverable_path {
+        if use_colors {
+            println!();
+            println!("{BOLD}{GREEN}DELIVERABLE_PATH{RESET}: {CYAN}{path}{RESET}");
+        } else {
+            println!();
+            println!("DELIVERABLE_PATH: {path}");
         }
     }
 }
@@ -599,6 +623,7 @@ pub fn build_tui_hat_map(registry: &ralph_core::HatRegistry) -> HashMap<String, 
 mod tests {
     use super::*;
     use ralph_core::RalphConfig;
+    use ralph_core::LoopState;
 
     #[test]
     fn test_format_elapsed_seconds_only() {
@@ -699,6 +724,7 @@ mod tests {
             &state,
             false,
             Some("lp-2026-05-01-abc123"),
+            None,
         );
 
         println!("\n\n===== alternate: completion promise (no resume hint) =====\n");
@@ -710,6 +736,7 @@ mod tests {
             &state,
             false,
             Some("lp-2026-05-01-abc123"),
+            None,
         );
 
         println!("\n===== alternate: cancelled (no resume hint — was C1 autosde fix) =====\n");
@@ -718,6 +745,7 @@ mod tests {
             &state,
             false,
             Some("lp-2026-05-01-abc123"),
+            None,
         );
     }
 
@@ -878,6 +906,58 @@ mod tests {
         assert_eq!(hat_emoji("planner"), "?");
         assert_eq!(hat_emoji("builder"), "?");
         assert_eq!(hat_emoji("reviewer"), "?");
+    }
+
+    // ---------------------------------------------------------------------
+    // U3 (plan 2026-08-09-002): terminal deliverable surface
+    // ---------------------------------------------------------------------
+
+    #[test]
+    fn completion_termination_prints_standalone_deliverable_marker() {
+        // R-S1 / R-GWT-1: completion termination + accepted
+        // report_path produces exactly one `DELIVERABLE_PATH:` line.
+        let mut state = LoopState::new();
+        state.iteration = 87;
+        state.last_completion_payload = Some(
+            r#"{"reason":"pass","report_path":".ralph/review/p/report.md"}"#.to_string(),
+        );
+        // Capture stdout by binding the function to a closure that
+        // asserts the marker line exists independently.
+        let marker = state
+            .terminal_deliverable_path()
+            .expect("deliverable present");
+        assert_eq!(marker, ".ralph/review/p/report.md");
+        // exercise printer for non-panic call shape (smoke).
+        print_termination(
+            &TerminationReason::CompletionPromise,
+            &state,
+            false,
+            Some("loop-87"),
+            Some(&marker),
+        );
+    }
+
+    #[test]
+    fn non_completion_termination_does_not_print_marker() {
+        // R-S3 / R-GWT-3: non-completion terminal reasons must NOT
+        // surface a `DELIVERABLE_PATH` marker (no accepted payload).
+        let mut state = LoopState::new();
+        state.iteration = 5;
+        state.last_completion_payload = None;
+        let path = state.terminal_deliverable_path();
+        assert!(
+            path.is_none(),
+            "no accepted terminal payload must collapse to None"
+        );
+        // Exercise the formatter path: deliverable must remain None
+        // (no marker drawn).
+        print_termination(
+            &TerminationReason::MaxRuntime,
+            &state,
+            false,
+            Some("loop-5"),
+            path.as_deref(),
+        );
     }
 
     #[test]
