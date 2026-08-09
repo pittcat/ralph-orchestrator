@@ -1199,6 +1199,7 @@ def test_validation_and_handoff_support_preset_native() -> None:
         "ralph.pipeline.yml",
         "-H",
         "builtin:merge-loop",
+        "run",
     )
 
 
@@ -2281,6 +2282,7 @@ def test_smoke_argv_shape_contains_required_flags() -> None:
     runner = _fake_runner(stdout="plan.ready\nLOOP_COMPLETE\n", returncode=0)
     result = smoke_runner.run_smoke(backend, _smoke_cfg(), runner=runner)
     argv = result.argv
+    assert argv[5] == "run"
     assert "-c" in argv
     assert "ralph.pipeline.yml" in argv
     assert "-H" in argv
@@ -2529,8 +2531,9 @@ def test_handoff_complete_includes_official_command() -> None:
     argv = art.command_argv
     assert "-c" in argv and "ralph.pipeline.yml" in argv
     assert "-H" in argv and "test-preset" in argv
+    assert argv[5] == "run"
     # The command string mirrors the argv.
-    assert "ralph -c ralph.pipeline.yml -H test-preset" in art.command
+    assert "ralph -c ralph.pipeline.yml -H test-preset run" in art.command
 
 
 # --- H2 — incomplete path marks the command as a candidate ----------------
@@ -2686,6 +2689,7 @@ def test_handoff_worktree_command_shape_plan_branch() -> None:
     # Both -c and -H are still present.
     assert "-c" in argv and "ralph.pipeline.yml" in argv
     assert "-H" in argv and "test-preset" in argv
+    assert argv[5] == "run"
 
 
 def test_handoff_worktree_command_shape_name_branch() -> None:
@@ -2893,6 +2897,7 @@ def test_handoff_complete_argv_carries_canonical_flags() -> None:
     assert argv[0] == "ralph"
     assert "-c" in argv and "ralph.pipeline.yml" in argv
     assert "-H" in argv and "test-preset" in argv
+    assert argv[5] == "run"
     assert argv[-2:] == ("--prompt-file", "PROMPT.pipeline.md")
     assert "--plan" not in argv
 

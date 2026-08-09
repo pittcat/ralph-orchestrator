@@ -473,7 +473,10 @@ class TestCrossLayerBootstrap:
         assert artifact.command
         assert "[CANDIDATE" not in artifact.command
         argv_text = " ".join(artifact.command_argv)
-        assert "-c" in argv_text and "-H" in argv_text and "plan.md" in argv_text
+        assert "-c" in argv_text and "-H" in argv_text
+        assert artifact.command_argv[5] == "run"
+        assert "PROMPT.pipeline.md" in argv_text
+        assert "plan.md" not in argv_text
 
         # Final state of the working tree: exactly the owned files,
         # nothing else (no .tmp siblings leaked).

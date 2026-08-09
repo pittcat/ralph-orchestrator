@@ -109,7 +109,7 @@ no files are created on disk by the harness.
 Every argv the harness builds starts with:
 
 ```
-<binary> -c <config_path> -H <preset>
+<binary> -c <config_path> -H <preset> run
         --max-iterations <N>
         --idle-timeout <S>
 ```

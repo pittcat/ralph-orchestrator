@@ -447,7 +447,7 @@ def test_real_cli_does_not_emit_fake_config_path_marker(
 def test_real_cli_accepts_smoke_argv_built_by_harness(
     ralph_binary: Path, sanitised_env: dict[str, str]
 ) -> None:
-    """The smoke harness's argv (``<binary> -c <cfg> -H <preset>
+    """The smoke harness's argv (``<binary> -c <cfg> -H <preset> run
     --max-iterations <N> --idle-timeout <S> --prompt-file <pf> --plan <plan>``)
     MUST be accepted by the real CLI's clap parser without flag errors.
     The harness used to emit ``--idle-timeout-ms`` and

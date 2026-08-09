@@ -239,13 +239,13 @@ def _build_argv(smoke_cfg: SmokeConfig) -> tuple[str, ...]:
 
     The shape is the single source of truth used by both the harness
     and the contract suite: every argv starts with
-    ``<binary> -c <config_path> -H <preset> --max-iterations <N>
+    ``<binary> -c <config_path> -H <preset> run --max-iterations <N>
     --idle-timeout <S>``. The wall-clock cap is NOT forwarded — it
     belongs to the harness outer ``timeout`` parameter, NOT to the
     CLI surface (see plan 2026-07-19-001 F6 / Unit 4 / S8).
 
-    Exactly one optional prompt source follows: ``--plan`` when present,
-    otherwise ``--prompt-file``;
+    Exactly one optional prompt source follows: ``--plan`` when no external
+    prompt file is present, otherwise ``--prompt-file``;
     ``extra_argv`` is appended last so callers can layer in stable
     flags without disturbing the harness contract.
     """
@@ -255,6 +255,7 @@ def _build_argv(smoke_cfg: SmokeConfig) -> tuple[str, ...]:
         smoke_cfg.config_path,
         "-H",
         smoke_cfg.preset,
+        "run",
         "--max-iterations",
         str(smoke_cfg.max_iterations),
         "--idle-timeout",

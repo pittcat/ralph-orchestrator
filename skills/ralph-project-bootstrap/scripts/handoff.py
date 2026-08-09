@@ -218,9 +218,9 @@ def _normalise_paths(items: Iterable[str]) -> tuple[str, ...]:
 def _build_argv(inputs: HandoffInputs) -> tuple[str, ...]:
     """Compose the argv tuple for the launch command.
 
-    Every command starts with ``<binary> -c <config_path> -H <preset>``.
+    Every command starts with ``<binary> -c <config_path> -H <preset> run``.
     Non-worktree launches append exactly one optional prompt source:
-    ``--plan`` when present, otherwise ``--prompt-file``. Worktree mode
+    ``--prompt-file`` when supplied, otherwise ``--plan``. Worktree mode
     appends ``--worktree --reuse-worktree`` and
     exactly one of ``--plan <plan_arg>`` or
     ``--worktree-name <worktree_name>``; the optional prompt file remains
@@ -232,6 +232,7 @@ def _build_argv(inputs: HandoffInputs) -> tuple[str, ...]:
         inputs.config_path,
         "-H",
         inputs.preset,
+        "run",
     ]
     # An operator-supplied prompt file is the authoritative prompt source.
     # Only use --plan as the prompt source when no external prompt was given;

@@ -75,14 +75,14 @@ Missing the reuse key is a hard reject. ``build_handoff`` raises
 ``ValueError("worktree reuse key required")`` when ``use_worktree``
 is True but neither key is supplied. Worktree mode is opt-in. Outside
 worktree mode the helper appends exactly one optional prompt source:
-``--plan`` when present, otherwise ``--prompt-file``. Preset-native mode
+``--prompt-file`` when supplied, otherwise ``--plan``. Preset-native mode
 appends neither.
 
 When ``use_worktree`` is True AND a reuse key is supplied the argv
 shape is exactly:
 
 ```
-<binary> -c <config_path> -H <preset>
+<binary> -c <config_path> -H <preset> run
          [--prompt-file <prompt_file> | --plan <plan>]
          --worktree --reuse-worktree
          (--plan <plan_arg> | --worktree-name <worktree_name>)

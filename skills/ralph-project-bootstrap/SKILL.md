@@ -307,7 +307,7 @@ proof level monotonically advances: `capability` → `preset_check`
 **highest** proof level the static gate offers.
 
 **Argv shape.** Every argv the helper builds starts with
-`<binary> -c ralph.<stem>.yml -H <preset>` so the runtime cannot
+`<binary> -c ralph.<stem>.yml -H <preset> run` so the runtime cannot
 silently substitute `ralph.yml` or the default preset. The dry-run
 argv additionally carries `--dry-run` so the runtime takes its
 static-only branch and never spawns the configured backend. The
