@@ -39,6 +39,19 @@ use super::supervisor::GitCheckpoint;
 
 use crate::LoopEntry;
 
+/// Default worktree directory sentinel.
+///
+/// The literal `.worktrees` is the historical default that survives
+/// because custom callers (notably integration tests in
+/// `crates/ralph-cli/tests/`) explicitly pass `".worktrees"` to
+/// [`WorktreeConfig::with_dir`] and expect the same external
+/// resolution shape as the default constructor. The
+/// [`WorktreeConfig::is_default_layout`] helper is the single
+/// discriminant that decides "default vs. custom override" — all
+/// sites that previously inlined `== *".worktrees"` must go
+/// through it.
+pub const DEFAULT_WORKTREE_DIR: &str = ".worktrees";
+
 /// Configuration for worktree operations.
 #[derive(Debug, Clone)]
 pub struct WorktreeConfig {
@@ -49,7 +62,7 @@ pub struct WorktreeConfig {
 impl Default for WorktreeConfig {
     fn default() -> Self {
         Self {
-            worktree_dir: PathBuf::from(".worktrees"),
+            worktree_dir: PathBuf::from(DEFAULT_WORKTREE_DIR),
         }
     }
 }
@@ -60,6 +73,22 @@ impl WorktreeConfig {
         Self {
             worktree_dir: dir.into(),
         }
+    }
+
+    /// True when this config's `worktree_dir` matches the default
+    /// sentinel and the resolver should pick the **external**
+    /// `<repo-parent>/worktree/<repo-basename>/` base. False for
+    /// any custom override (absolute path, in-repo relative path,
+    /// or any other name).
+    ///
+    /// This helper exists so the default-vs-custom decision is
+    /// encoded once and re-used at every site; previously the
+    /// `.worktrees` sentinel was inlined as a `*".worktrees"`
+    /// equality check in three places, which silently broke when
+    /// the default constructor's literal drifted from the
+    /// sentinel.
+    pub fn is_default_layout(&self) -> bool {
+        self.worktree_dir == PathBuf::from(DEFAULT_WORKTREE_DIR)
     }
 
     /// Get the absolute path to worktree directory relative to repo root.
@@ -108,7 +137,7 @@ pub fn external_worktree_base(repo_root: &Path) -> PathBuf {
 /// `external_worktree_base(repo_root)`. For custom configs
 /// (`with_dir`), the override path is returned unchanged.
 pub fn canonical_worktree_base(repo_root: &Path, config: &WorktreeConfig) -> PathBuf {
-    if config.worktree_dir == *".worktrees" {
+    if config.is_default_layout() {
         external_worktree_base(repo_root)
     } else {
         config.worktree_path(repo_root)
@@ -1236,7 +1265,7 @@ pub fn sync_working_directory_to_worktree(
     // `.worktrees/` directory: a stale `.worktrees/foo` from a
     // previous run lives in the target repo and would otherwise be
     // mirrored into the new external workspace.
-    let is_default_config = config.worktree_dir == *".worktrees";
+    let is_default_config = config.is_default_layout();
 
     // Helper to check if a path should be excluded
     let should_exclude = |path: &Path| -> bool {
@@ -2688,5 +2717,56 @@ branch refs/heads/ralph/loop-1
             }
             other => panic!("expected InvalidName, got {other:?}"),
         }
+    }
+
+    // ---------------------------------------------------------------------
+    // U5 (plan 2026-08-09-002 / M1): DEFAULT_WORKTREE_DIR + helper
+    // ---------------------------------------------------------------------
+
+    #[test]
+    fn worktree_config_default_matches_default_dir_const() {
+        // U5 M1: the default constructor's `worktree_dir` is the
+        // single source of truth for "this config is the default";
+        // it must equal the public `DEFAULT_WORKTREE_DIR` constant
+        // expressed as a `PathBuf`.
+        let cfg = WorktreeConfig::default();
+        assert_eq!(cfg.worktree_dir, PathBuf::from(DEFAULT_WORKTREE_DIR));
+        assert!(
+            cfg.is_default_layout(),
+            "default config must report is_default_layout() == true"
+        );
+    }
+
+    #[test]
+    fn worktree_config_with_dir_dot_worktrees_is_default_layout() {
+        // U5 M1: callers that explicitly pass the default sentinel
+        // (notably integration tests in `crates/ralph-cli/tests/`)
+        // must still hit the **external** resolver. This pins the
+        // silent fall-through that the previous
+        // `config.worktree_dir == *".worktrees"` check depended on.
+        let cfg = WorktreeConfig::with_dir(DEFAULT_WORKTREE_DIR);
+        assert!(
+            cfg.is_default_layout(),
+            "with_dir(DEFAULT_WORKTREE_DIR) must classify as default layout"
+        );
+        assert_eq!(cfg.worktree_dir, PathBuf::from(DEFAULT_WORKTREE_DIR));
+    }
+
+    #[test]
+    fn worktree_config_with_dir_absolute_is_not_default_layout() {
+        // U5 M1: any custom override — absolute path, in-repo
+        // relative path, or any other name — must classify as
+        // non-default so the resolver honours the override instead
+        // of routing to the external base.
+        let cfg = WorktreeConfig::with_dir("/tmp/some/absolute/path");
+        assert!(
+            !cfg.is_default_layout(),
+            "absolute-path override must not classify as default"
+        );
+        let cfg = WorktreeConfig::with_dir("custom-relative");
+        assert!(
+            !cfg.is_default_layout(),
+            "non-sentinel relative override must not classify as default"
+        );
     }
 }
