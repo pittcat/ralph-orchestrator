@@ -170,6 +170,72 @@ pub enum WorktreeError {
     /// Branch already exists.
     #[error("Branch already exists: {0}")]
     BranchExists(String),
+
+    /// Worktree name rejected by the input validator (path-traversal
+    /// / leading-dash / control byte / non-UTF-8).
+    ///
+    /// Raised by [`validate_worktree_name`] when an operator-supplied
+    /// `--worktree-name` contains characters that would let the name
+    /// escape the resolved worktree base (e.g. `..`, `/`, `\`, a
+    /// leading `-` that git would interpret as a flag, or a control
+    /// byte). The `name` is the raw user input; the `reason` is a
+    /// short human-readable explanation.
+    #[error("Invalid worktree name {name:?}: {reason}")]
+    InvalidName { name: String, reason: String },
+}
+
+/// Validate an operator-supplied `--worktree-name` before it is joined
+/// to a worktree base path.
+///
+/// Rejects:
+///
+/// - empty names
+/// - any path separator (`/` or `\`),
+/// - the literal substring `..` (covers `..` and `../foo` shapes),
+/// - names whose first byte is `-` (mirrors git's own `--` convention
+///   so a name like `-rf` cannot be smuggled through `git worktree add`),
+/// - any control byte (`< 0x20` including CR/LF/NUL/ESC) or non-ASCII byte
+///   (`>= 0x7f`).
+///
+/// On rejection, returns
+/// [`WorktreeError::InvalidName`] with the raw `name` and a short
+/// human-readable reason. The validator is intentionally cheap so the
+/// clap `value_parser` and the runtime call sites can share the same
+/// gate without observable cost.
+pub fn validate_worktree_name(name: &str) -> Result<(), WorktreeError> {
+    if name.is_empty() {
+        return Err(WorktreeError::InvalidName {
+            name: name.to_string(),
+            reason: "name is empty".to_string(),
+        });
+    }
+    if name.contains('/') || name.contains('\\') {
+        return Err(WorktreeError::InvalidName {
+            name: name.to_string(),
+            reason: "name contains path separator".to_string(),
+        });
+    }
+    if name.contains("..") {
+        return Err(WorktreeError::InvalidName {
+            name: name.to_string(),
+            reason: "name contains '..' segment".to_string(),
+        });
+    }
+    if name.starts_with('-') {
+        return Err(WorktreeError::InvalidName {
+            name: name.to_string(),
+            reason: "name starts with '-'".to_string(),
+        });
+    }
+    for byte in name.bytes() {
+        if byte < 0x20 || byte >= 0x7f {
+            return Err(WorktreeError::InvalidName {
+                name: name.to_string(),
+                reason: "name contains control or non-ASCII byte".to_string(),
+            });
+        }
+    }
+    Ok(())
 }
 
 /// Create a new worktree for a parallel Ralph loop.
@@ -192,6 +258,14 @@ pub fn create_worktree(
     config: &WorktreeConfig,
 ) -> Result<Worktree, WorktreeError> {
     let repo_root = repo_root.as_ref();
+
+    // U1 (plan 2026-08-09-002 / A1): reject path-traversal /
+    // leading-dash / control-byte names at the create boundary so a
+    // hostile or malformed `loop_id` cannot escape the resolved
+    // worktree base. The `loop_id` doubles as the worktree leaf
+    // directory name (`<base>/<loop_id>`) and as the git branch
+    // suffix (`ralph/<loop_id>`); both paths must be safe.
+    validate_worktree_name(loop_id)?;
 
     // Verify this is a git repository
     if !repo_root.join(".git").exists() && !repo_root.join(".git").is_file() {
@@ -570,6 +644,13 @@ pub fn find_reusable_worktree_by_name(
     repo_root: impl AsRef<Path>,
     name: &str,
 ) -> Result<Option<ReusableWorktree>, WorktreeError> {
+    // U1 (plan 2026-08-09-002 / A1): reject path-traversal /
+    // leading-dash / control-byte names at the public API boundary
+    // before any filesystem probe. The clap `value_parser` runs the
+    // same validator on the CLI side; this call keeps the
+    // programmatic API (and any internal caller) safe even if a
+    // future surface forgets to validate upstream.
+    validate_worktree_name(name)?;
     find_reusable_worktree_by_name_with_config(repo_root, name, &WorktreeConfig::default())
 }
 
@@ -582,6 +663,12 @@ pub fn find_reusable_worktree_by_name_with_config(
     name: &str,
     config: &WorktreeConfig,
 ) -> Result<Option<ReusableWorktree>, WorktreeError> {
+    // U1 (plan 2026-08-09-002 / A1): reject path-traversal /
+    // leading-dash / control-byte names at the resolver boundary so
+    // any custom config (absolute worktree_dir included) cannot be
+    // steered into probing sibling paths via `git worktree list`.
+    validate_worktree_name(name)?;
+
     if name.is_empty() {
         return Ok(None);
     }
@@ -2498,5 +2585,108 @@ branch refs/heads/ralph/loop-1
         // Non-git path → both fields None, never an error.
         assert!(cp.head_sha.is_none());
         assert!(cp.dirty.is_none());
+    }
+
+    // ---------------------------------------------------------------------
+    // U1 (plan 2026-08-09-002 / A1): --worktree-name input validator
+    // ---------------------------------------------------------------------
+
+    fn assert_invalid_name(name: &str, expected_reason_substr: &str) {
+        let err = validate_worktree_name(name)
+            .expect_err(&format!("name {name:?} must be rejected"));
+        let WorktreeError::InvalidName { name: ref n, ref reason } = err else {
+            panic!("expected InvalidName variant, got {err:?}");
+        };
+        assert_eq!(n, name);
+        assert!(
+            reason.contains(expected_reason_substr),
+            "reason {reason:?} did not contain {expected_reason_substr:?}"
+        );
+    }
+
+    #[test]
+    fn default_worktree_name_accepts_safe_name() {
+        // U1 happy path: a normal plan-basename-shaped name is
+        // accepted; the validator must not over-reject the common
+        // case.
+        validate_worktree_name("2026-08-09-002-feat-foo").unwrap();
+    }
+
+    #[test]
+    fn default_worktree_name_rejects_traversal_segments() {
+        // U1 A1: `..` (and `..` inside a name) must be rejected
+        // before the path is joined to the worktree base; otherwise
+        // a hostile or malformed name can probe sibling directories
+        // via `git worktree list`. The validator reports the first
+        // reason that applies, so `../escape` reports the path
+        // separator (it contains `/`); the bare `..` name reports
+        // the `..` segment reason. Both must be rejected.
+        assert_invalid_name("..", "'..' segment");
+        assert_invalid_name("foo/../bar", "path separator");
+        assert_invalid_name("foo..bar", "'..' segment");
+    }
+
+    #[test]
+    fn default_worktree_name_rejects_path_separators() {
+        // U1 A1: `/` and `\` are the canonical path separators on
+        // POSIX and Windows; either must be rejected.
+        assert_invalid_name("foo/bar", "path separator");
+        assert_invalid_name("foo\\bar", "path separator");
+    }
+
+    #[test]
+    fn default_worktree_name_rejects_leading_dash() {
+        // U1 A1: a name starting with `-` could be smuggled through
+        // `git worktree add -b <branch> <path>` as a flag (mirrors
+        // git's own `--` convention).
+        assert_invalid_name("-rf", "starts with '-'");
+        assert_invalid_name("--foo", "starts with '-'");
+    }
+
+    #[test]
+    fn default_worktree_name_rejects_empty_and_control_bytes() {
+        // U1 A1: empty names and names carrying control bytes
+        // (including CR/LF/NUL/ESC) must be rejected at the boundary.
+        assert_invalid_name("", "empty");
+        assert_invalid_name("foo\nbar", "control");
+        assert_invalid_name("foo\rbar", "control");
+        assert_invalid_name("foo\x00bar", "control");
+        assert_invalid_name("foo\x1b[31m", "control");
+        assert_invalid_name("foo\x7fbar", "control");
+    }
+
+    #[test]
+    fn find_reusable_worktree_by_name_propagates_invalid_name_error() {
+        // U1 A1: the public `find_reusable_worktree_by_name` shim
+        // must surface `InvalidName` rather than proceeding to call
+        // `git worktree list` against a hostile path. We use a path
+        // that does not even exist as a git repo to prove the
+        // validator runs before the git probe.
+        let temp_dir = TempDir::new().unwrap();
+        let result = find_reusable_worktree_by_name(temp_dir.path(), "../escape");
+        match result {
+            Err(WorktreeError::InvalidName { name, .. }) => {
+                assert_eq!(name, "../escape");
+            }
+            other => panic!("expected InvalidName, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn create_worktree_rejects_invalid_name_before_git_probe() {
+        // U1 A1: `create_worktree` is also a public entry point;
+        // hostile names must be rejected before the `git worktree
+        // add` shell-out. We use a temp dir without a `.git` so the
+        // call would have errored anyway; the assertion is that the
+        // error is `InvalidName` (validator ran first), not
+        // `NotARepo` (git probe ran first).
+        let temp_dir = TempDir::new().unwrap();
+        let result = create_worktree(temp_dir.path(), "../escape", &WorktreeConfig::default());
+        match result {
+            Err(WorktreeError::InvalidName { name, .. }) => {
+                assert_eq!(name, "../escape");
+            }
+            other => panic!("expected InvalidName, got {other:?}"),
+        }
     }
 }

@@ -11,7 +11,7 @@ use ralph_core::{
     TerminationReason, ensure_plan_baseline_from_head, truncate_with_ellipsis,
     worktree::{
         WorktreeConfig, clean_worktree_runtime_artifacts, create_worktree,
-        find_reusable_worktree_by_name_with_config, remove_worktree,
+        find_reusable_worktree_by_name_with_config, remove_worktree, validate_worktree_name,
     },
 };
 use std::io::IsTerminal;
@@ -185,7 +185,8 @@ pub struct RunArgs {
         value_name = "NAME",
         requires = "worktree",
         conflicts_with = "plan",
-        conflicts_with = "exclusive"
+        conflicts_with = "exclusive",
+        value_parser = validate_worktree_name_arg
     )]
     pub worktree_name: Option<String>,
 
@@ -758,13 +759,35 @@ fn resolve_exact_worktree_name(
     plan_file: Option<&Path>,
     derived_plan_name: Option<&str>,
 ) -> Option<String> {
-    worktree_name.map(str::to_owned).or_else(|| {
-        plan_file.and_then(|_| {
-            derived_plan_name
-                .map(str::to_owned)
-                .filter(|name| !name.is_empty())
-        })
-    })
+    // U1 (plan 2026-08-09-002 / A1): reject path-traversal /
+    // leading-dash / control-byte names early so any name that flows
+    // into the runtime — from `--worktree-name` or from a derived
+    // plan basename — is filtered before it reaches the resolver or
+    // `create_worktree`. `derived_plan_name` is already trusted
+    // (clap-validated path stem) but defense in depth keeps the
+    // invariant local to this helper.
+    let raw = worktree_name
+        .map(str::to_owned)
+        .or_else(|| plan_file.and_then(|_| derived_plan_name.map(str::to_owned)));
+    if let Some(ref name) = raw {
+        if validate_worktree_name(name).is_err() {
+            return None;
+        }
+    }
+    raw.filter(|name| !name.is_empty())
+}
+
+/// Clap `value_parser` for `--worktree-name`.
+///
+/// Surfaces the runtime [`validate_worktree_name`] rejection as a
+/// clap parse error so the operator sees a clean usage message
+/// before the runtime is ever reached. The runtime call sites
+/// (`find_reusable_worktree_by_name`, `create_worktree`) still call
+/// the same validator so a programmatic API cannot bypass the gate.
+fn validate_worktree_name_arg(raw: &str) -> Result<String, String> {
+    validate_worktree_name(raw)
+        .map(|_| raw.to_string())
+        .map_err(|err| err.to_string())
 }
 
 /// Resolve a `--plan` argument to an existing plan file path.
@@ -3253,6 +3276,31 @@ mod tests {
         let resolved = resolve_exact_worktree_name(None, None, None);
 
         assert_eq!(resolved, None);
+    }
+
+    // U1 (plan 2026-08-09-002 / A1): the resolver helper must
+    // drop hostile / path-traversal names before they reach the
+    // runtime. The runtime still validates, but defense in depth
+    // at the helper layer keeps the invariant local.
+    #[test]
+    fn resolve_exact_worktree_name_rejects_traversal_segments() {
+        let resolved = resolve_exact_worktree_name(Some("../escape"), None, None);
+        assert!(
+            resolved.is_none(),
+            "traversal name must be filtered before reaching the runtime"
+        );
+    }
+
+    #[test]
+    fn resolve_exact_worktree_name_rejects_path_separators() {
+        let resolved = resolve_exact_worktree_name(Some("foo/bar"), None, None);
+        assert!(resolved.is_none(), "path-separator name must be filtered");
+    }
+
+    #[test]
+    fn resolve_exact_worktree_name_rejects_leading_dash() {
+        let resolved = resolve_exact_worktree_name(Some("-rf"), None, None);
+        assert!(resolved.is_none(), "leading-dash name must be filtered");
     }
 
     #[test]
