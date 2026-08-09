@@ -75,9 +75,18 @@ fn count_files_matching(dir: &Path, pattern: &str) -> usize {
     }
 }
 
-/// Count worktree directories (git worktree creates them in .worktrees/)
+/// Return the canonical default worktree root used by the runtime.
+fn default_worktree_root(main_repo: &Path) -> PathBuf {
+    main_repo
+        .parent()
+        .unwrap_or(main_repo)
+        .join("worktree")
+        .join(main_repo.file_name().expect("repo must have a basename"))
+}
+
+/// Count worktree directories in the canonical external root.
 fn count_worktrees(main_repo: &Path) -> usize {
-    let worktrees_dir = main_repo.join(".worktrees");
+    let worktrees_dir = default_worktree_root(main_repo);
     if !worktrees_dir.exists() {
         return 0;
     }
@@ -171,8 +180,8 @@ fn test_worktree_creates_exactly_one_and_registry_correct() {
         "In worktree mode, worktree_path must equal workspace"
     );
     assert!(
-        wt_path.contains(".worktrees/"),
-        "workspace must point into .worktrees/, got: {}",
+        wt_path.contains("/worktree/"),
+        "workspace must point into the external worktree root, got: {}",
         wt_path
     );
 }
@@ -347,7 +356,7 @@ fn test_worktree_and_worktree_path_priority() {
     // Now pass BOTH --worktree and --worktree-path. Current behavior (KTD-5
     // resolution): --worktree-path takes priority (child-side, no duplicate
     // creation). The run uses the first-run's worktree.
-    let worktree_path = fs::read_dir(main_repo.join(".worktrees"))
+    let worktree_path = fs::read_dir(default_worktree_root(main_repo))
         .ok()
         .and_then(|e| e.filter_map(|x| x.ok()).find(|x| x.path().is_dir()))
         .map(|e| e.path());
@@ -472,7 +481,7 @@ fn write_completed_worktree_entry(main_repo: &Path, loop_id: &str, worktree_path
 /// runtime artifacts. Doing the reverse (mkdir + git worktree add) is
 /// rejected by git because the target path already exists.
 fn precreate_worktree_with_artifacts(main_repo: &Path, loop_id: &str) -> PathBuf {
-    let worktree_path = main_repo.join(".worktrees").join(loop_id);
+    let worktree_path = default_worktree_root(main_repo).join(loop_id);
 
     let status = Command::new("git")
         .args([
@@ -647,7 +656,7 @@ fn test_reuse_worktree_creates_exact_name_when_no_matching_worktree_exists() {
         wt_count
     );
     assert!(
-        main_repo.join(".worktrees/fresh-test").is_dir(),
+        default_worktree_root(main_repo).join("fresh-test").is_dir(),
         "first use must bind the worktree exactly to the plan basename"
     );
 }
@@ -706,8 +715,8 @@ fn test_reuse_worktree_does_not_fall_back_to_other_live_entries() {
         wt_count
     );
     assert!(
-        main_repo
-            .join(".worktrees/fix-header-bright-falcon")
+        default_worktree_root(main_repo)
+            .join("fix-header-bright-falcon")
             .is_dir()
     );
 }
@@ -759,7 +768,7 @@ fn test_reuse_worktree_with_no_auto_merge_accepted() {
 /// Find the single on-disk worktree directory created by `--worktree`.
 /// Returns `None` if `.worktrees/` does not exist or has no entries.
 fn first_worktree_dir(main_repo: &Path) -> Option<PathBuf> {
-    let worktrees_dir = main_repo.join(".worktrees");
+    let worktrees_dir = default_worktree_root(main_repo);
     fs::read_dir(&worktrees_dir)
         .ok()?
         .filter_map(|e| e.ok())
@@ -947,8 +956,7 @@ fn headless_worktree_backend_writes_only_to_worktree() {
 
     // Find the worktree that the parent created; the script wrote its
     // marker there (or, pre-fix, it wrote it into the main checkout).
-    let worktree_path = main_repo
-        .join(".worktrees")
+    let worktree_path = default_worktree_root(main_repo)
         .read_dir()
         .ok()
         .and_then(|entries| {
@@ -1069,7 +1077,7 @@ cli:
 /// boundary (S1 shape): event log + accepted-transitions outbox +
 /// current-loop-id + task ledger + the referenced plan artifact.
 fn precreate_worktree_with_accepted_boundary(main_repo: &Path, loop_id: &str) -> PathBuf {
-    let worktree_path = main_repo.join(".worktrees").join(loop_id);
+    let worktree_path = default_worktree_root(main_repo).join(loop_id);
     let status = Command::new("git")
         .args([
             "worktree",
@@ -1255,7 +1263,7 @@ fn test_reuse_worktree_artifact_only_prior_run_fails_closed() {
     fs::write(&plan_path, "# plan\n").unwrap();
 
     let loop_id = "s5-artifact-only";
-    let worktree_path = main_repo.join(".worktrees").join(loop_id);
+    let worktree_path = default_worktree_root(main_repo).join(loop_id);
     let status = Command::new("git")
         .args([
             "worktree",

@@ -39,6 +39,9 @@ use super::supervisor::GitCheckpoint;
 
 use crate::LoopEntry;
 
+/// Historical sentinel for the default layout.
+pub const DEFAULT_WORKTREE_DIR: &str = ".worktrees";
+
 /// Configuration for worktree operations.
 #[derive(Debug, Clone)]
 pub struct WorktreeConfig {
@@ -62,8 +65,20 @@ impl WorktreeConfig {
         }
     }
 
+    pub fn is_default_layout(&self) -> bool {
+        self.worktree_dir == Path::new(DEFAULT_WORKTREE_DIR)
+    }
+
     /// Get the absolute path to worktree directory relative to repo root.
     pub fn worktree_path(&self, repo_root: &Path) -> PathBuf {
+        if self.is_default_layout() {
+            let parent = repo_root.parent().unwrap_or(repo_root);
+            let project = repo_root
+                .file_name()
+                .map(PathBuf::from)
+                .unwrap_or_else(|| PathBuf::from("project"));
+            return parent.join("worktree").join(project);
+        }
         if self.worktree_dir.is_absolute() {
             self.worktree_dir.clone()
         } else {
@@ -526,13 +541,14 @@ impl ReusableWorktree {
 pub fn find_reusable_worktree_by_name(
     repo_root: impl AsRef<Path>,
     name: &str,
+    config: &WorktreeConfig,
 ) -> Result<Option<ReusableWorktree>, WorktreeError> {
     if name.is_empty() {
         return Ok(None);
     }
 
     let repo_root = repo_root.as_ref();
-    let worktree_path = repo_root.join(".worktrees").join(name);
+    let worktree_path = config.worktree_path(repo_root).join(name);
 
     if !worktree_path.is_dir() {
         return Ok(None);
@@ -1323,7 +1339,7 @@ mod tests {
         let repo = Path::new("/repo");
         assert_eq!(
             config.worktree_path(repo),
-            PathBuf::from("/repo/.worktrees")
+            PathBuf::from("/worktree/repo")
         );
 
         let absolute_config = WorktreeConfig::with_dir("/tmp/worktrees");
@@ -1854,7 +1870,12 @@ branch refs/heads/ralph/loop-1
             Utc::now() - chrono::Duration::seconds(60),
         );
 
-        let result = find_reusable_worktree_by_name(temp_dir.path(), "my-exact-name").unwrap();
+        let result = find_reusable_worktree_by_name(
+            temp_dir.path(),
+            "my-exact-name",
+            &config,
+        )
+        .unwrap();
         let reusable = result.expect("expected a reusable worktree");
         assert_eq!(reusable.loop_id, "my-exact-name");
         assert_eq!(reusable.path, worktree.path);
@@ -1877,7 +1898,11 @@ branch refs/heads/ralph/loop-1
         );
         registry.register(entry).unwrap();
 
-        let result = find_reusable_worktree_by_name(temp_dir.path(), "my-exact-name");
+        let result = find_reusable_worktree_by_name(
+            temp_dir.path(),
+            "my-exact-name",
+            &config,
+        );
         assert!(
             result.is_err(),
             "a still-running worktree must not be reusable by name"

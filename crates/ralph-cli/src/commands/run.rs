@@ -10,7 +10,7 @@ use ralph_core::{
     LoopRegistry, PreflightReport, PreflightRunner, ProfileSpec, ProfilesError, RalphConfig,
     TerminationReason, ensure_plan_baseline_from_head, truncate_with_ellipsis,
     worktree::{
-        WorktreeConfig, clean_worktree_runtime_artifacts, create_worktree, ensure_gitignore,
+        WorktreeConfig, clean_worktree_runtime_artifacts, create_worktree,
         find_reusable_worktree_by_name, remove_worktree,
     },
 };
@@ -601,10 +601,6 @@ fn spawn_worktree_loop(
         })
     };
 
-    // Ensure worktree directory is in .gitignore
-    ensure_gitignore(workspace_root, ".worktrees")
-        .context("Failed to update .gitignore for worktrees")?;
-
     // Create the worktree
     let worktree = create_worktree(workspace_root, &loop_id, &worktree_config)
         .context("Failed to create worktree for loop")?;
@@ -1078,7 +1074,11 @@ pub async fn run_command(
         if args.reuse_worktree {
             debug!("Reusing worktree for explicit --worktree --reuse-worktree mode");
             match exact_worktree_name.as_deref() {
-                Some(name) => match find_reusable_worktree_by_name(workspace_root, name) {
+                Some(name) => match find_reusable_worktree_by_name(
+                    workspace_root,
+                    name,
+                    &WorktreeConfig::default(),
+                ) {
                     Ok(Some(reusable)) => {
                         info!(
                             "Reusing worktree at {} (loop_id={})",
