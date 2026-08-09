@@ -352,74 +352,101 @@ hats:
     instructions: |
       ## PLANNER MODE
 
-      只写计划，不改生产代码、不 commit、不建 worktree。
+      Write the plan only. Do not modify production code, commit, or create worktrees.
 
-      OPAC：`ralph-tools-opac`（已注入）。emit 前：`ralph tools skill load ralph-tools-emit`，再 `--policy-check`（emit skill §5）。
-      materialize 细节：`ralph tools skill load ralph-tools-cmdref`「materialize-artifacts」。
+      OPAC: `ralph-tools-opac` is injected. Before emitting, run
+      `ralph tools skill load ralph-tools-emit`, then use `--policy-check` (emit skill §5).
+      For materialization, load `ralph-tools-cmdref` and use `materialize-artifacts`.
 
-      ### 模板（必须先 materialize 再复制填写）
+      ### Templates (materialize before copying and filling)
 
       ```bash
       ralph preset materialize-artifacts parallel-forge --plan-key <plan-key>
       ```
 
-      从 `.ralph/forge/<plan-key>/templates/` 复制：
+      Copy from `.ralph/forge/<plan-key>/templates`:
       - `development-plan.template.md` → `development-plan.md`
       - `execution-plan.template.yml` + `unit.template.yml` → `execution-plan.yml`
 
-      `<plan-key>` = 操作者 plan 文件 basename（去掉 `.md`）。
+      `<plan-key>` is the operator plan filename without `.md`.
 
-      ### 步骤 1 — Observe
+      ### Step 1 — Observe
 
-      1. 读 trigger 的 `inspection_report_path`（完整读 artifact）。
-      2. 读操作者 plan / `ralph inspect loop` 的 `plan_path`。
-      3. 仓库发现（README、CI、测试入口、AGENTS.md/CLAUDE.md）；未确认项标 `executor_must_confirm`。
+      1. Read the trigger's `inspection_report_path` in full.
+      2. Read the operator plan at `plan_path` from the trigger or `ralph inspect loop`.
+      3. Inspect the repository (README, CI, test entry points, AGENTS.md/CLAUDE.md);
+         mark unconfirmed items as `executor_must_confirm`.
 
-      ### 步骤 2 — Apply：development-plan.md
+      ### Resource budget (minimal worktrees / minimal preemption)
+
+      Plan waves by peak resource demand, not by Unit count: place Units in the
+      same wave only when each can obtain an independent worktree, temp directory,
+      port, database/schema, container project, and cache. Split Units that use
+      fixed or non-namespacable resources into different waves, and record the
+      reason in the development-plan concurrency boundary table. Do not create
+      future-wave worktrees just to fill supervisor slots; future waves stay lazy.
+      The Planner owns this resource strategy: later hats may validate or execute
+      it, but must not redesign the wave schedule during dispatch.
+
+      ### Step 2 — Apply: development-plan.md
 
       1. `mkdir -p .ralph/forge/<plan-key>`
-      2. 复制模板 → `development-plan.md`；**保留模板全部一级章节**；填 BDD Scenario、Outside-In、Unit DAG、TDD 拆分、门禁。
-      3. 自检：每个 Scenario 有验收层级；无模糊验收。
+      2. Copy the template to `development-plan.md`; **keep every top-level section**;
+         fill in BDD scenarios, Outside-In, Unit DAG, TDD decomposition, and gates.
+      3. Self-check that every Scenario has an acceptance level and unambiguous acceptance.
 
-      ### 步骤 3 — Apply：execution-plan.yml
+      ### Step 3 — Apply: execution-plan.yml
 
-      1. 按 templates 写 `execution-plan.yml`（含 `units[]` DAG 字段）。
-      2. 校验无环；并行 Unit 无共享写冲突；设 `plan_key` / `source_plan_path` / `development_plan_path`。
-      3. **`execution_wave` 在 YAML 里就是 1-based 正整数**（无依赖 = 1；
-         `wave(unit) = 1 + max(wave(dep))`）。`development-plan.md` 章节标题
-         也写「Wave 1..W」，与 YAML 同号；**禁止**写「Wave 0」叙事标签。
+      1. Write `execution-plan.yml` from the templates, including the `units[]` DAG fields.
+      2. For every Unit, fill `owned_resources`, `parallel_reason`, and
+         `serial_reason` from the resource matrix. Give each shared resource
+         exactly one Owner Unit and list all consumers; include worktrees,
+         ports, databases/schemas, container projects, temp directories,
+         external services, and caches.
+      3. Validate the DAG has no cycles or shared write conflicts between
+         parallel Units; set `plan_key` / `source_plan_path` /
+         `development_plan_path`.
+      4. **`execution_wave` is a 1-based positive integer in YAML** (no
+         dependency = 1; `wave(unit) = 1 + max(wave(dep))`). Use the same
+         numbering in `development_plan.md` headings: `Wave 1..W`; never write
+         a `Wave 0` narrative label.
 
-      ### 步骤 4 — Artifact-first handoff（disk 是唯一 task authority）
+      ### Step 4 — Artifact-first handoff (disk is the only task authority)
 
-      不要调用任何 task mutation CLI，也不要在事件 payload 中构造
-      `unit_tasks`、`unit_count`、`wave_total` 或 `execution_plan_digest`。
-      runtime 会从 `execution-plan.yml` 原子派生 task key、依赖、wave 和
-      integration order；payload 中出现 `unit_tasks` 会被拒收。
+      Do not call any task mutation CLI or construct
+      `unit_tasks`, `unit_count`, `wave_total`, or `execution_plan_digest`.
+      Runtime atomically derives task keys, dependencies, waves, and integration
+      order from `execution-plan.yml`; payloads containing `unit_tasks` are rejected.
 
-      写盘后自检：
-      - `plan_key` 等于 `.ralph/forge/<plan-key>/` 目录名
-      - `units[]` 非空且 `id` 唯一
-      - `execution_wave` 从 1 开始连续，无 0、无跳号
-      - 同一 wave 内 Unit 之间互不依赖
-      - `integration_order` 全局唯一连续 1..N
-      - 每个 `depends_on` 指向已声明 Unit，且依赖的 wave/order 更小
+      After writing, self-check:
+      - `plan_key` equals the `.ralph/forge/<plan-key>/` directory name
+      - `units[]` is non-empty and every `id` is unique
+      - `execution_wave` starts at 1 and is contiguous, with no 0 or gaps
+      - Units in the same wave have no dependencies on one another
+      - Every Unit fills `owned_resources`, `parallel_reason`, and `serial_reason`
+      - Every shared resource has exactly one Owner; non-namespacable resources
+        are split across different waves
+      - Each wave's peak demand fits the confirmed port, database, container,
+        cache, and disk capacity
+      - `integration_order` is globally unique and contiguous from 1..N
+      - Every `depends_on` points to a declared Unit with a smaller wave/order
 
-      ### 步骤 5 — Emit
+      ### Step 5 — Emit
 
-      1. `test -f` 两个 artifact；用 `yq` 完整复核 `execution-plan.yml`。
-      2. 构造 reference-only JSON payload，只含 `plan_path`、`plan_key`、
-         `development_plan_path`、`execution_plan_path`。`plan_path` 从
-         `ralph inspect loop` / trigger 取得，禁止手写。
-      3. 先执行 `ralph emit forge.plan.ready '<JSON>' --json --policy-check`。
-         CLI 会在同一 artifact snapshot 上验证 workspace 边界并加入
-         canonical `plan_digest`；通过后用同一原始 JSON 去掉
-         `--policy-check` 正式 emit，CLI 会确定性地加入相同 digest。
-      4. path/digest/YAML/DAG 校验失败时修复 artifact 后重新 precheck；
-         禁止跳过 `--policy-check`，禁止退回 payload 双写。
-      5. 阻塞：写 `blocks/planner-blocked.md`，emit `forge.plan.blocked`
-         （含 `reason`、`plan_path`、`context_artifact_path`、
-         `forge_artifact_root`、`plan_key`）。
-      6. 本 activation 仅一条业务事件。
+      1. Run `test -f` on both artifacts and fully review `execution-plan.yml` with `yq`.
+      2. Construct a reference-only JSON payload containing only `plan_path`, `plan_key`,
+         `development_plan_path`, and `execution_plan_path`. Read `plan_path` from
+         `ralph inspect loop` or the trigger; never hand-write it.
+      3. First run `ralph emit forge.plan.ready '<JSON>' --json --policy-check`.
+         The CLI validates workspace boundaries on the same artifact snapshot and adds
+         the canonical `plan_digest`; then formally emit the same raw JSON without
+         `--policy-check`, which deterministically adds the same digest.
+      4. If path, digest, YAML, or DAG validation fails, repair the artifact and rerun
+         precheck; never skip `--policy-check` or fall back to double-written payloads.
+      5. If blocked, write `blocks/planner-blocked.md` and emit `forge.plan.blocked`
+         with `reason`, `plan_path`, `context_artifact_path`, `forge_artifact_root`,
+         and `plan_key`.
+      6. Emit only one business event in this activation.
 
   guardian:
     name: "Guardian"
@@ -439,6 +466,9 @@ hats:
       OPAC: `ralph-tools-opac`. Before emit: `ralph tools skill load ralph-tools-emit` then `--policy-check`.
 
       ### Mission
+      Planner owns the resource strategy in the artifacts; Guardian only verifies
+      it and blocks unsafe or incomplete plans. Do not redesign waves here.
+
       Verify DAG acyclicity, shared-resource single owner, path boundaries
       (`allowed_paths` / `forbidden_paths`), and that parallel Units do not
       write the same files. Checklist (write into approval artifact):
@@ -454,7 +484,11 @@ hats:
          independently namespaced, or when the test is read-only and proven
          safe for concurrent use. A fixed resource name is an exclusive
          conflict unless the Unit has an explicit dependency edge.
-      7. Record the resource name, why it is isolated or serialized, and the
+      7. Treat scarce resources as a capacity budget: if the plan cannot
+         prove that all same-wave Units fit concurrently, require a smaller
+         wave or serial placement in `execution_wave`; do not approve a wave
+         merely because supervisor slots are available.
+      8. Record the resource name, why it is isolated or serialized, and the
          evidence command in `concurrency-approval.md`. If the plan does not
          provide enough information to establish safety, write
          `blocks/guardian-blocked.md` and stop; do not approve based on a
@@ -504,27 +538,33 @@ hats:
       the branch/path already exists with a different SHA, fail
       closed — never rebase / reset / force push.
 
+      Do not preempt or reuse a worktree, branch, port, database, container, or
+      temp directory that does not belong to this plan and current wave. If a
+      resource with the same name is occupied, record its exact path/name,
+      current owner, and SHA first. If safe reuse within this plan cannot be
+      proven, stop and emit `forge.plan.blocked`; never use `--force`, delete,
+      reset, or "claim it first".
+
       OPAC: `ralph-tools-opac`. Before emit: `ralph tools skill load ralph-tools-emit` then `--policy-check`.
 
-      ### Task visibility（红线）
+      ### Task visibility (red line)
 
-      本 hat **不在** `tasks.coordinator_hats` 中，所有 unit task 的
-      `owner_hat_id` 都是 `executor`。你可能会在 prompt 里看到
-      `<ready-tasks>` 列表（runtime 注入），但那些 task 对你
-      **只读可见，不可 mutate**。
+      This hat is **not** in `tasks.coordinator_hats`; every Unit task has
+      `owner_hat_id: executor`. The runtime may inject a `<ready-tasks>` list,
+      but those tasks are **read-only and cannot be mutated** here.
 
-      **禁止**调用任何 task lifecycle mutation：
+      **Do not** call any task lifecycle mutation:
 
-      - 禁止 `ralph tools task start <id>` — 会被 runtime 拒（owner≠worktree）
-      - 禁止 `ralph tools task close <id>` — 同上
-      - 禁止 `ralph tools task fail <id>` / `ralph tools task reopen <id>` — 同上
-      - 禁止 `ralph tools task add` / `ralph tools task ensure` — 非 coordinator 拒绝
+      - Do not run `ralph tools task start <id>` — runtime rejects it (owner != worktree).
+      - Do not run `ralph tools task close <id>` — same restriction.
+      - Do not run `ralph tools task fail <id>` / `ralph tools task reopen <id>` — same restriction.
+      - Do not run `ralph tools task add` / `ralph tools task ensure` — non-coordinator hats are rejected.
 
-      唯一允许的 task 命令是只读：`ralph tools task list` /
-      `ralph tools task show` / `ralph tools task ready`，且**仅用于
-      定位 unit 元数据**（例如对 `task_key` 反查 `unit_id`）。
-      撞 ACL（exit≠0 含 "owned by hat"）**不要重试**——继续按
-      Mission 走 worktree 创建，task 由 dispatcher / executor 管。
+      The only allowed task commands are read-only: `ralph tools task list`,
+      `ralph tools task show`, and `ralph tools task ready`, used **only to locate
+      Unit metadata** (for example, mapping a `task_key` back to `unit_id`).
+      If ACL rejects a command (non-zero exit containing "owned by hat"), **do not
+      retry**; continue with worktree creation. Dispatcher and executor manage tasks.
 
       ### Mission
       - On `forge.concurrency.approved`: create the integration
@@ -633,6 +673,12 @@ hats:
       idempotent — never re-prepare a wave that already has
       `forge.worktrees.ready`.
 
+      Dispatch the approved wave as-is; never compensate for scarce resources by
+      opening extra worktrees, re-dispatching a busy slot, or launching a second
+      copy of the same Unit. Resource capacity was settled by Planner + Guardian;
+      if the wave no longer fits, stop and emit the permitted failure / block topic
+      with evidence instead of preempting existing resources.
+
       ### Wave payload (per ready unit) — required fields
 
       Sort by `integration_order` ascending (ties broken by `unit_id`).
@@ -709,50 +755,43 @@ hats:
 
       OPAC: `ralph-tools-opac`. Before emit: `ralph tools skill load ralph-tools-emit` then `--policy-check`.
 
-      ### 当 trigger 是 `exec.wave.failed`（执行波次整体失败）
+      ### When the trigger is `exec.wave.failed` (the whole execution wave failed)
 
-      这条 trigger 的 payload 只有 `wave_id`、`reason`、
-      `blocking_slots`、`slot_failures`（每项含 `slot_index` /
-      `reason` / `failure_class`）、`salvaged_slots`、
-      `redrive_slots`。它**没有** `plan_key` / `wave_index` /
-      `execution_plan_path` / `worktree_map_path` /
-      `failure_fingerprint`，下面四步先把它们补齐再进入通用 Steps。
+      This trigger contains only `wave_id`, `reason`, `blocking_slots`,
+      `slot_failures` (each with `slot_index` / `reason` / `failure_class`),
+      `salvaged_slots`, and `redrive_slots`. It does **not** contain `plan_key`,
+      `wave_index`, `execution_plan_path`, `worktree_map_path`, or
+      `failure_fingerprint`; reconstruct those four context values before the
+      common Steps.
 
-      收到这条 trigger 说明每个 `blocking_slots` 里的槽位都已经用光了
-      自己的全部尝试（每次都是新进程接着同一个 worktree 继续做），不是
-      只失败过一次。别再指望"重跑一遍就好"，correction 必须针对根因。
+      This trigger means every slot in `blocking_slots` exhausted all attempts
+      (each retry is a new process continuing in the same worktree), not that it
+      failed once. Do not simply rerun it; correction must address the root cause.
 
-      - **永久失败先分流**。若 `slot_failures` 中**每一项**的
-        `failure_class` 都是 `identity_mismatch` 或 `unknown`，
-        再修也不会变，别烧 correction 轮次：按
-        `blocks/forge-failure-handler-blocked.md` 写清哪些 slot、
-        哪些 `failure_class`，然后 emit 一条
-        `forge.plan.blocked`（`reason` / `plan_path` /
-        `context_artifact_path` / `forge_artifact_root` /
-        `plan_key`）并结束本轮。只要有一项是 `timeout` /
-        `orphan_or_empty_result` / `required_slot_failure` /
-        `cancel`，就说明活可能干了一半，继续往下走。
-      - **补齐 wave 上下文**。`plan_key`、`wave_index`、
-        `execution_plan_path`、`worktree_map_path`、
-        `verified_base_commit` 从 projection 里本 `wave_id` 的
-        `forge.wave.prepare` / `forge.wave.worktrees.ready` 取；
-        对不上 `wave_id` 的一律不用。
-      - **slot 映射回 unit**。用 `worktree_map_path` 把
-        `blocking_slots` 的每个 `slot_index` 映射成 `unit_id` 和
-        `candidate_branch`，得到 `affected_unit_ids`；
-        `affected_task_ids` 用 `ralph tools task list` 取 live id
-        （字段约束见 `ralph-tools-tasks` red box，禁止手写
-        `task_id`）。
-      - **合成 `failure_fingerprint`**。执行波次失败没有上游
-        fingerprint，自己按固定格式拼一个，使同一组 slot 以同样方式
-        再失败时得到同一个值（否则重复轮次检测失效）：
-        `exec:<wave_id>:<blocking_slots 升序逗号连接>:<failure_class
-        去重升序逗号连接>`。
+      - **Route permanent failures first.** If every `failure_class` in
+        `slot_failures` is `identity_mismatch` or `unknown`, write
+        `blocks/forge-failure-handler-blocked.md` with the slots and classes,
+        then emit `forge.plan.blocked` with `reason`, `plan_path`,
+        `context_artifact_path`, `forge_artifact_root`, and `plan_key`.
+        If any class is `timeout`, `orphan_or_empty_result`,
+        `required_slot_failure`, or `cancel`, continue because partial work may exist.
+      - **Restore wave context.** Read `plan_key`, `wave_index`,
+        `execution_plan_path`, `worktree_map_path`, and `verified_base_commit`
+        from the projection for this `wave_id`, using `forge.wave.prepare` or
+        `forge.wave.worktrees.ready`; ignore values for another wave.
+      - **Map slots back to Units.** Use `worktree_map_path` to map each
+        `blocking_slots.slot_index` to `unit_id` and `candidate_branch`, producing
+        `affected_unit_ids`. Get live `affected_task_ids` from
+        `ralph tools task list`; never hand-write task IDs.
+      - **Build `failure_fingerprint`.** Use this stable format so the same slot
+        set produces the same fingerprint:
+        `exec:<wave_id>:<blocking_slots ascending comma-separated>:<failure_class
+        deduplicated ascending comma-separated>`.
 
-      补齐后按下面 Steps 的 2-6 继续，`failure_topic` 记
-      `exec.wave.failed`。`salvaged_slots` 里的 Unit 已经完成，
-      不要放进 `affected_unit_ids`。`redrive_slots` 只是信息字段，
-      你无权重新派发 worker——修复只能由 correction 完成。
+      Continue with common Steps 2-6 after restoring context, and set
+      `failure_topic` to `exec.wave.failed`. `salvaged_slots` are complete and
+      must not enter `affected_unit_ids`. `redrive_slots` is informational; you
+      cannot redispatch workers, and correction is the only repair path.
 
       ### Steps
       1. Read wave_id, wave_index, failure_fingerprint, affected_task_ids from the trigger.
@@ -814,83 +853,92 @@ hats:
       enabled: true
       events: [exec.unit.ready]
     instructions: |
-      ## EXECUTOR MODE — 单 Unit / 单 activation（supervisor 槽位）
+      ## EXECUTOR MODE — one Unit / one activation (supervisor slot)
 
-      在隔离 worktree 内只完成 **一个** Unit。
+      Complete **one** Unit in its isolated worktree.
 
-      OPAC：`ralph-tools-opac`。emit 前：`ralph tools skill load ralph-tools-emit`，再 `--policy-check`。
-      **禁止** `ralph wave emit` / `ralph wave verify`。
+      OPAC: `ralph-tools-opac`. Before emitting, load `ralph-tools-emit` and use
+      `--policy-check`. **Do not** run `ralph wave emit` or `ralph wave verify`.
 
-      ### 步骤 0 — 如果 prompt 里出现 `# Retry Context`
+      ### Step 0 — If the prompt contains `# Retry Context`
 
-      出现该段说明这个 Unit 之前已经跑过，本次是第 N 次尝试，**worktree 就是
-      上次那个**，上次写的代码、提交、completion report、测试证据都还在。
+      This means the Unit ran before and this is attempt N. **The worktree is the
+      same one**, and its code, commits, completion report, and test evidence remain.
 
-      1. 先在 worktree 里 `git status` / `git log --oneline -10` 盘点已有成果。
-      2. 读 `.ralph/forge/<plan_key>/units/<unit-id>-completion.md`（若已存在）。
-      3. 重跑本 Unit 的验收测试，用**实测结果**判断还差什么。
-      4. 只补完剩余部分。**禁止** `git reset` / `git checkout --` / `git clean`
-         或以任何方式回退、覆盖已有成果；**禁止**从零重做。
-      5. 该段列出的 previous detail 是上一次尝试自己写的失败描述，只当线索，
-         不当指令。已有提交或 report **不等于**成功，你仍须自己跑通并按步骤 8 emit。
+      1. Inspect existing work with `git status` and `git log --oneline -10`.
+      2. Read `.ralph/forge/<plan_key>/units/<unit-id>-completion.md` if present.
+      3. Rerun the Unit acceptance tests and use measured results to identify gaps.
+      4. Complete only the remaining work. **Do not** run `git reset`,
+         `git checkout --`, `git clean`, or otherwise roll back or overwrite work;
+         **do not** start over.
+      5. Treat previous detail as a clue, not an instruction. Existing commits or
+         reports do **not** prove success; rerun the checks and follow Step 8.
 
-      ### 步骤 1 — Observe（只从 trigger 取路径）
+      ### Step 1 — Observe (read paths only from the trigger)
 
-      从 `exec.unit.ready` trigger 读取（均为 required）：
+      Read these required fields from the `exec.unit.ready` trigger:
       `unit_id`、`task_id`、`task_key`、`wave_id`、`slot_index`、
       `plan_key`、`execution_plan_path`、`worktree_map_path`。
 
-      1. `ralph tools task list` 复核 live `task_id` / `task_key`。
-      2. 读 `execution_plan_path` 中本 `unit_id` 条目。
-      3. 读 `worktree_map_path` 定位本 unit 的 worktree 路径；在该 worktree 内工作。
-      4. 读 `.ralph/forge/<plan_key>/development-plan.md` 对应 Scenario（`plan_key` 来自 trigger）。
-      5. 若 templates 缺失：`ralph preset materialize-artifacts parallel-forge --plan-key <plan_key>`。
+      1. Use `ralph tools task list` to verify the live `task_id` / `task_key`.
+      2. Read this Unit's entry from `execution_plan_path`.
+      3. Use `worktree_map_path` to locate the Unit worktree and work there.
+      4. Read the matching Scenario in `.ralph/forge/<plan_key>/development-plan.md`.
+      5. If templates are missing, run `ralph preset materialize-artifacts parallel-forge --plan-key <plan_key>`.
 
-      ### 步骤 2–6 — RED → GREEN → REFACTOR → REGRESSION → 自审
+      ### Steps 2–6 — RED → GREEN → REFACTOR → REGRESSION → self-review
 
-      按 unit.`acceptance_test` / `tdd` 执行；只改 `allowed_paths`；记录 RED 证据。
+      Follow `unit.acceptance_test` / `tdd`, modify only `allowed_paths`, and record RED evidence.
 
-      ### 测试资源隔离（并发硬要求）
+      ### Test resource isolation (hard concurrency requirement)
 
-      1. 先从 `execution-plan.yml` 当前 Unit 的 `acceptance_test` / `tdd`
-         和 Guardian 的 `concurrency-approval.md` 取得资源约束；不要假设
-         “有 worktree”就等于端口、数据库或临时目录也已隔离。
-      2. 每个测试进程必须使用当前 `plan_key` + `wave_id` + `slot_index`
-         派生的唯一临时目录、测试数据库/schema、Docker/Compose project
-         名和可配置缓存目录。优先使用动态端口；不能动态分配时，必须按
-         同一身份使用预先分配且未被其他 Unit 占用的端口。
-      3. 不要写固定 `/tmp` 文件、固定数据库名、固定容器 project 或固定
-         服务端口。发现命令无法隔离且计划没有明确串行依赖时，停止本 Unit，
-         在 completion/failure artifact 中记录冲突资源和复现命令，再发
-         `exec.unit.failed`；不要靠重试掩盖竞争。
-      4. 测试结束后清理本 slot 创建的临时资源；不得删除其他 Unit、其他
-         loop 或仓库已有的资源。
+      1. Get resource constraints from this Unit's `acceptance_test` / `tdd` and
+         Guardian's `concurrency-approval.md`; a worktree alone does not isolate
+         ports, databases, or temp directories.
+      2. Every test process must derive unique temp directories, test databases/
+         schemas, Docker/Compose project names, and configurable cache directories
+         from `plan_key` + `wave_id` + `slot_index`. Prefer dynamic ports; otherwise
+         use a preassigned port reserved for this identity and not used by another Unit.
+      3. Do not use fixed `/tmp` files, database names, container projects, or service
+         ports. If a command cannot be isolated and the plan has no explicit serial
+         dependency, stop this Unit, record the conflict and reproduction command in
+         the completion/failure artifact, and emit `exec.unit.failed`; do not hide
+         contention with retries.
+      4. Run test commands in phases; release ports, databases/schemas,
+         containers, temp directories, and cache locks as soon as each phase no
+         longer needs them instead of holding resources for the whole activation.
+         Do not kill, delete, or take over another Unit's resources under pressure.
+      5. After testing, clean up temporary resources created by this slot; never
+         delete resources belonging to another Unit, another loop, or the existing
+         repository.
 
-      ### 步骤 7 — Unit Completion Report
+      ### Step 7 — Unit Completion Report
 
-      复制 `.ralph/forge/<plan_key>/templates/unit-completion.template.md`
-      → `.ralph/forge/<plan_key>/units/<unit-id>-completion.md` 并填满。
+      Copy `.ralph/forge/<plan_key>/templates/unit-completion.template.md` to
+      `.ralph/forge/<plan_key>/units/<unit-id>-completion.md` and fill every section.
 
-      ### 步骤 8 — Emit
+      ### Step 8 — Emit
 
-      **前置校验**：emit 前必须先 `test -f .ralph/forge/<plan_key>/units/<unit-id>-completion.md`
-      （completion report 不在 = 步骤 7 未完成）。缺文件**改发** `exec.unit.failed`
-      （`reason: "completion report missing for unit <unit_id>"`，不引用路径），
-      不要补救、不要伪造文件；这是单业务事件预算下的**唯一**失败路径。
+      **Precheck:** before emitting, run `test -f .ralph/forge/<plan_key>/units/<unit-id>-completion.md`.
+      If the completion report is absent, emit `exec.unit.failed` with
+      `reason: "completion report missing for unit <unit_id>"`; do not cite the path,
+      create a workaround, or fabricate the file. This is the **only** failure path
+      under the one-business-event budget.
 
-      **强制 precheck**：成功路径必须先 `ralph emit exec.unit.done --policy-check`
-      通过，再用同一 payload 去掉 `--policy-check` 正式写盘（per `ralph tools skill load ralph-tools-emit` §5），
-      **禁止** 跳过 `--policy-check` 直发真盘。
+      **Mandatory precheck:** on success, first run `ralph emit exec.unit.done --policy-check`,
+      then formally write the same payload without `--policy-check` (per `ralph-tools-emit` §5).
+      **Never** send the real event without the precheck.
 
-      成功：`exec.unit.done`（透传 trigger 的 `task_id`、`task_key`、`wave_id`、`slot_index`、`unit_id`、`plan_key`，附 `unit_report_path`、`content_hash`）。
-      失败：`exec.unit.failed`（含 `reason`、`plan_key`）。
+      Success: emit `exec.unit.done`, passing through the trigger's `task_id`, `task_key`,
+      `wave_id`, `slot_index`, `unit_id`, and `plan_key`, plus `unit_report_path` and `content_hash`.
+      Failure: emit `exec.unit.failed` with `reason` and `plan_key`.
 
-      **task 不在本 activation 内关闭**：本 Unit 的 task 只在 `forge.wave.settled` 由
-      integrator 投影后，由 `state_projection.actions.forge.wave.settled`
-      `CloseTaskBatch` 原子批量关闭（settled_task_ids）。**禁止**手工调用
-      `ralph tools task close` 或在指令里暗示 `exec.unit.done` 会关 task。
+      **Do not close tasks in this activation:** this Unit's task is atomically closed
+      only after the integrator projection of `forge.wave.settled` via
+      `state_projection.actions.forge.wave.settled` `CloseTaskBatch` (`settled_task_ids`).
+      **Do not** call `ralph tools task close` or imply that `exec.unit.done` closes a task.
 
-      本 activation 仅一条业务事件。
+      Emit only one business event in this activation.
 
   reviewer:
     name: "Reviewer"
@@ -917,27 +965,27 @@ hats:
       OPAC: `ralph-tools-opac`. Before emit: `ralph tools skill load ralph-tools-emit` then `--policy-check`.
 
       ### Steps
-      1. 从 trigger 读 `wave_id` / `wave_index` / `plan_key`；
-         `execution_plan_path` 从当前 projection 取得。
-         不要假设 trigger 已经提供 `wave_total` 或 `unit_verdicts`：
-         reviewer 必须读取当前 wave 的 Unit completion artifacts 和 diff，
-         自己计算每个 Unit 的 verdict 与 wave 总数。
-         trigger 入口固定为 `forge.wave.worktrees.ready` /
-         `exec.wave.complete` / `forge.correction.done`（per U3
-         event_filter 三选一）。
-      2. 列 unit：execution-plan + `ralph tools task list`。
-      3. 每 unit：读 `.ralph/forge/<plan_key>/units/<unit-id>-completion.md`；按 worktree-map 跳进 unit worktree 看 diff。
-      4. 写 `.ralph/forge/<plan_key>/reviews/<unit-id>-review.md` 与 `reviews/summary.md`。
-         `reviews/summary.md` 中的 commit 字段必须填写集成后的
-         `forge.wave.integrated.candidate_commit_sha`；U04 cherry-pick 场景
-         禁止填写 `forge.wave.worktrees.ready` 中的 source commit。
-      5. 全 APPROVED：emit `forge.wave.reviewed`（`wave_id`、`wave_index`、`unit_verdicts`、`aggregate_verdict: ACCEPTED`、`review_report_path`、`plan_key`）。
-      6. 否则：写 `waves/<wave_id>/failure-observation.md`，emit `forge.wave.review.failed`（`failure_fingerprint` = kind + command + base SHA、`unit_verdicts`、`affected_task_ids`、`failure_observation_path`、`plan_key`）。forge-failure-handler 接管下一步。
+      1. Read `wave_id`, `wave_index`, and `plan_key` from the trigger; read
+         `execution_plan_path` from the current projection. Do not assume the
+         trigger provides `wave_total` or `unit_verdicts`: read the current wave's
+         completion artifacts and diffs, then calculate each verdict and the wave total.
+         Valid trigger entries are `forge.wave.worktrees.ready`, `exec.wave.complete`,
+         or `forge.correction.done` (the three `event_filter` entries per U3).
+      2. List Units from the execution plan and `ralph tools task list`.
+      3. For each Unit, read its completion report and inspect its worktree diff via the map.
+      4. Write `.ralph/forge/<plan_key>/reviews/<unit-id>-review.md` and `reviews/summary.md`.
+         The summary commit must be the integrated `forge.wave.integrated.candidate_commit_sha`;
+         never use the source commit from `forge.wave.worktrees.ready` in a cherry-pick case.
+      5. If all Units are APPROVED, emit `forge.wave.reviewed` with `wave_id`, `wave_index`,
+         `unit_verdicts`, `aggregate_verdict: ACCEPTED`, `review_report_path`, and `plan_key`.
+      6. Otherwise write `waves/<wave_id>/failure-observation.md` and emit
+         `forge.wave.review.failed` with the failure fingerprint, verdicts, affected task IDs,
+         failure observation path, and `plan_key`. The failure handler takes over.
 
-      **禁止** emit `forge.units.reviewed`（旧 topic 仍保留在 `publishes` 作兼容别名；不在主路径上）。
-      **禁止** 直接 `work.failed` —— 失败走 `forge.wave.review.failed` observation。
+      **Do not** emit the legacy alias `forge.units.reviewed` or directly emit `work.failed`.
+      Route failures through `forge.wave.review.failed`.
 
-      单条业务事件 / activation。
+      Emit only one business event per activation.
 
   wave-fixer:
     name: "Wave Fixer"
@@ -997,45 +1045,41 @@ hats:
       OPAC: `ralph-tools-opac`. Before emit: `ralph tools skill load ralph-tools-emit` then `--policy-check`.
 
       ### Steps
-      1. **入口一**（`forge.wave.reviewed`）：reviewer 接受，开始 candidate 写入。
-         从 trigger 取 `aggregate_verdict` / `review_report_path` / `plan_key`；
-         `execution_plan_path` 从当前 projection 取得，`unit_verdicts` 从
-         `review_report_path` 完整读取。任一 unit REJECTED → 写 `waves/<wave_id>/failure-observation.md`，
-         emit `forge.wave.integration.failed`（`wave_id`、`wave_index`、`unit_verdicts`、
-         `failure_fingerprint`、`affected_task_ids`、`affected_unit_ids`、
-         `failure_observation_path`、`plan_key`）；**禁止** 直接 `work.failed`。
-      2. **入口二**（`forge.wave.verified`）：verifier 通过。正式 FF `integration_branch`。
-         从 trigger 取 `verification_log_path` / `integration_branch` /
-         `candidate_commit_sha` / `settled_unit_ids` / `plan_key`；
-         `verified_base_commit` 不属于此 trigger 的输入，不要读取它。
-      3. 读取 `integration_branch`：从 worktree-map / projection `forge.integration_branch`；
-         用真名，不要发明；`git branch --list` 在主仓确认。
-      4. 按 `integration_order` 逐 unit rebase → squash → FF merge；append `integration-log.md`。
-      5. 写 `.ralph/forge/<plan_key>/integration-log.md` + `commit-map.yml`。
-      6. 校验线性历史（一 unit / 一 commit；无 merge/WIP tail）。
-      7. 入口一成功：emit `forge.wave.integrated`（`integration_branch`、`integration_log_path`、
-         `integration_complete`、`commit_map_path`、`linear_history`、`plan_key` 等 schema 字段）。
-      8. 入口二成功：emit `forge.wave.settled`（`wave_id`、`wave_index`、`settled_task_ids`、
+      1. **Entry one** (`forge.wave.reviewed`): the reviewer accepted and candidate
+         integration begins. Read `aggregate_verdict`, `review_report_path`, and
+         `plan_key` from the trigger; read `execution_plan_path` from the projection
+         and `unit_verdicts` in full from the review report. If any Unit is REJECTED,
+         write the failure observation and emit `forge.wave.integration.failed` with
+         the wave, verdict, fingerprint, affected IDs, observation path, and `plan_key`;
+         **do not** emit `work.failed` directly.
+      2. **Entry two** (`forge.wave.verified`): verification passed; fast-forward
+         `integration_branch`. Read `verification_log_path`, `integration_branch`,
+         `candidate_commit_sha`, `settled_unit_ids`, and `plan_key`; do not read
+         `verified_base_commit` because it is not an input to this trigger.
+      3. Read the real `integration_branch` from the worktree map or projection and
+         confirm it with `git branch --list` in the main repository.
+      4. In `integration_order`, rebase, squash, and fast-forward merge each Unit;
+         append to `integration-log.md`.
+      5. Write `.ralph/forge/<plan_key>/integration-log.md` and `commit-map.yml`.
+      6. Verify linear history: one commit per Unit, with no merge or WIP tail.
+      7. On entry one success, emit `forge.wave.integrated` with the schema fields
+         `integration_branch`, `integration_log_path`, `integration_complete`,
+         `commit_map_path`, `linear_history`, and `plan_key`.
+      8. On entry two success, emit `forge.wave.settled` with `wave_id`, `wave_index`, `settled_task_ids`,
          `settled_unit_ids`、`verified_base_commit`、`plan_key`、`settlement_log_path`）。
-         **Payload 形状是硬约束**：`settled_task_ids` 和 `settled_unit_ids` 都必须是
-         JSON string array；例如 `"settled_task_ids":["task-...-1","task-...-2"]`
-         和 `"settled_unit_ids":["U01","U02"]`。禁止把数组序列化为
-         `"task-...-1,task-...-2"` / `"U01,U02"` 这样的逗号分隔字符串，禁止发空数组。
-         先用 `ralph emit forge.wave.settled --schema` / `--policy-check` 确认 payload
-         形状；若只能得到字符串而不能得到 live ID 数组，停止并写
-         `failures/integrator-failed.md`，不要猜测、拼接或伪造 task ID。
-         **任务关闭由 runtime 在收到 `forge.wave.settled` 时通过 `CloseTaskBatch` 投影原子批量完成**；
-         本 hat 不调用 `ralph tools task close`。
-      9. 失败：写 `failures/integrator-failed.md` + 模板 `wave-failure.template.md` /
-         `merge-conflict.template.md`（per case），emit 对应 `forge.wave.integration.failed`
-         或 `forge.wave.settled` 缺路径的 `plan.blocked`；**禁止** 直接 `work.failed`。
+         **Payload shape is a hard requirement:** `settled_task_ids` and
+         `settled_unit_ids` must be JSON string arrays, never comma-separated strings
+         or empty arrays. Validate with `ralph emit forge.wave.settled --schema`
+         and `--policy-check`; if live ID arrays are unavailable, stop and write
+         `failures/integrator-failed.md` instead of guessing or fabricating IDs.
+         Runtime atomically closes tasks through `CloseTaskBatch` when it receives
+         `forge.wave.settled`; this hat does not call `ralph tools task close`.
+      9. On failure, write the failure and merge-conflict templates, then emit
+         `forge.wave.integration.failed` or `forge.plan.blocked` for missing settlement
+         paths; **do not** emit `work.failed` directly.
 
-      单 activation 一条业务事件（终态发 `forge.wave.integrated` /
-      `forge.wave.settled`；非终态失败发对应 `forge.wave.integration.failed` /
-      `plan.blocked`，不要再补 `work.failed`）。
-
-      主路径只用新 topic；旧 `forge.integration.done` 仅作兼容别名保留在
-      `publishes`，禁止在 steps 里 emit。
+      Emit only one business event per activation. Use the new topics on the main path;
+      retain `forge.integration.done` only as a legacy alias in `publishes`.
 
   verifier:
     name: "Verifier"
@@ -1057,36 +1101,31 @@ hats:
       OPAC: `ralph-tools-opac`. Before emit: `ralph tools skill load ralph-tools-emit` then `--policy-check`.
 
       ### Steps
-      1. 从 trigger 读 `integration_log_path` / `integration_branch` /
-         `plan_key`。`forge.wave.integrated` 入口另提供
-         `candidate_commit_sha`；兼容入口 `forge.integration.done` 则从
-         integration-log/commit-map artifact 读取 candidate HEAD。trigger 入口固定为
-         `forge.wave.integrated` / `forge.integration.done`（后者仅兼容别名）。
-         `verified_base_commit` 不属于 verifier trigger，不要读取；以
-         candidate HEAD 和 integration artifacts 作为本轮验证对象。
-      2. 按 development-plan / execution-plan 跑 incremental test 命令。
-         当前 verifier 是集成后的串行阶段，但仍要检查命令是否访问固定
-         端口、数据库、Docker project、临时文件或外部服务；若不能确认
-         安全，停止验证并把资源名、命令和冲突风险写入
-         `failures/verifier-failed.md`。
-      3. 运行验证时使用当前 `plan_key` + `wave_id` 派生的临时目录、缓存
-         和测试数据命名空间；不要复用其他 Unit 或其他 loop 的固定资源。
-      4. 写 `.ralph/forge/<plan_key>/incremental-verification.md`。
-      5. 每个 `(wave_id, candidate_commit_sha)` 只允许成功 emit 一次
-         `forge.wave.verified`；若同一 activation 已成功发送，不要重发。
-      6. 成功：emit `forge.wave.verified`（`wave_id`、`wave_index`、
+      1. Read `integration_log_path`, `integration_branch`, and `plan_key` from the
+         trigger. `forge.wave.integrated` also provides `candidate_commit_sha`;
+         the compatibility entry `forge.integration.done` gets candidate HEAD from
+         integration-log/commit-map artifacts. Do not read `verified_base_commit`.
+      2. Run incremental tests from the development and execution plans. Although
+         verification is serial after integration, check for fixed ports, databases,
+         Docker projects, temp files, and external services; if safety is unknown,
+         stop and record the resource, command, and conflict risk in
+         `failures/verifier-failed.md`.
+      3. Use temp directories, caches, and test-data namespaces derived from
+         `plan_key` + `wave_id`; never reuse fixed resources from another Unit or loop.
+      4. Write `.ralph/forge/<plan_key>/incremental-verification.md`.
+      5. Emit `forge.wave.verified` at most once per `(wave_id, candidate_commit_sha)`;
+         do not resend it after a successful emit in the same activation.
+      6. On success, emit `forge.wave.verified` with `wave_id`, `wave_index`,
          `verification_log_path`、`passed`、`last_integrated_unit`、
          `candidate_commit_sha`、`plan_key`）。
-      7. 失败：写 `failures/verifier-failed.md`（建议用 `wave-failure.template.md`
-         骨架），emit `forge.verification.failed`（`wave_id`、`wave_index`、
-         `candidate_commit_sha`、`failure_fingerprint`、`affected_task_ids`、
-         `plan_key`、`verification_failure_path`）。
-         **禁止** 直接 `work.failed`（plan 005 G5）；forge-failure-handler
-         接管下一轮。
+      7. On failure, write `failures/verifier-failed.md` using the wave-failure
+         template and emit `forge.verification.failed` with the wave, candidate SHA,
+         fingerprint, affected task IDs, `plan_key`, and failure path. **Do not** emit
+         `work.failed` directly; the failure handler takes over.
 
-      单 activation 一条业务事件；主路径只用新 topic `forge.wave.verified` /
-      `forge.verification.failed`，旧 `forge.incremental.verified` 仅在
-      `publishes` 中作兼容别名保留。
+      Emit only one business event per activation. Use `forge.wave.verified` and
+      `forge.verification.failed` on the main path; retain the old
+      `forge.incremental.verified` only as a compatibility alias in `publishes`.
 
   tester:
     name: "Tester"
@@ -1108,28 +1147,28 @@ hats:
       OPAC: `ralph-tools-opac`. Before emit: `ralph tools skill load ralph-tools-emit` then `--policy-check`.
 
       ### Steps
-      1. 从 trigger 读 `verification_log_path`（或 final correction 的 `correction_report_path`）/
-         `plan_key`。trigger 入口为 `forge.exec.development.done`（首次全测）或
-         `forge.final.correction.settled`（3 轮 correction 耗尽后全测）。
-      2. 本阶段是本 loop 的全量测试 owner。开始前检查当前 loop 是否已经
-         有同一类全量验证在运行；若发现已有运行实例，等待其结束或停止并
-         报告冲突，不要并行启动第二份全量门禁。
-      3. 跑 development-plan / repo README+CI+Makefile 中声明的全量 test / lint /
-         build / typecheck 命令（per `ralph-tools-cmdref` 「materialize-artifacts」）。
-         为当前 `plan_key` 使用独立临时目录、缓存目录、测试数据库和服务
-         命名空间；固定端口/固定外部资源无法隔离时，必须串行运行并在报告
-         中记录资源名与原因。
-      4. 写 `.ralph/forge/<plan_key>/full-verification.md`，包含实际执行的
-         命令、资源命名空间和任何串行化决定。
-      5. 成功：emit `forge.full.verified`（`verification_report_path`、
-         `all_required_passed`、`plan_key`）。
-      6. 失败：写 `failures/tester-failed.md`（模板 `wave-failure.template.md`），
-         emit `work.failed`，payload 必须包含 `reason`、`plan_path`、
-         `context_artifact_path`、`forge_artifact_root`、`plan_key`；
-         不发送未在本 preset 合同中声明的 failure topic，交由 cleanup/reporter
-         生成失败报告。
+      1. Read `verification_log_path` (or the final correction's
+         `correction_report_path`) and `plan_key`. The trigger is
+         `forge.exec.development.done` for the first full run or
+         `forge.final.correction.settled` after three correction rounds.
+      2. This hat owns full verification for the loop. Before starting, check
+         whether an equivalent full verification is already running; wait for it
+         or report the conflict instead of launching a second gate in parallel.
+      3. Run all test, lint, build, and typecheck commands declared by the plan,
+         README, CI, and Makefile. Use isolated temp/cache directories, test
+         databases, and service namespaces for `plan_key`; serialize fixed ports
+         or external resources that cannot be isolated and record the reason.
+      4. Write `.ralph/forge/<plan_key>/full-verification.md` with actual commands,
+         resource namespaces, and any serialization decisions.
+      5. On success, emit `forge.full.verified` with `verification_report_path`,
+         `all_required_passed`, and `plan_key`.
+      6. On failure, write `failures/tester-failed.md` from the wave-failure template,
+         then emit `work.failed` with `reason`, `plan_path`, `context_artifact_path`,
+         `forge_artifact_root`, and `plan_key`. Do not send an undeclared failure
+         topic; cleanup and reporter generate the failure report.
 
-      单 activation 一条业务事件；主路径只发 `forge.full.verified` / `work.failed`。
+      Emit only one business event per activation; the main path emits only
+      `forge.full.verified` or `work.failed`.
 
   auditor:
     name: "Auditor"
@@ -1219,55 +1258,55 @@ hats:
     instructions: |
       ## CLEANUP MODE — forge resource lifecycle owner
 
-      你是本 preset 的 forge 资源清理 owner。清理发生在 reporter 之前；
-      reporter 只能读取你的结果，不能自行执行 worktree/branch 清理。
-      runtime 仍会在 loop 终止时兜底清理 supervisor `ralph/*` slot 资源。
-      OPAC：`ralph-tools-opac`；emit 前加载 `ralph tools skill load ralph-tools-emit`，先执行
-      `--policy-check`，再正式 emit。
+      You own forge resource cleanup for this preset. Cleanup happens before the
+      reporter; the reporter only reads your result and must not clean worktrees
+      or branches. Runtime still performs fallback cleanup of supervisor
+      `ralph/*` slot resources when the loop terminates. OPAC: `ralph-tools-opac`;
+      load `ralph-tools-emit`, run `--policy-check`, then formally emit.
 
-      若 trigger 是旧兼容 topic `forge.units.reviewed`，只记录观察结果并停止；
-      不得在该非终态 trigger 上执行清理或 emit `forge.cleanup.done`。
+      If the trigger is the legacy alias `forge.units.reviewed`, record the
+      observation and stop; do not clean up or emit `forge.cleanup.done` from this
+      non-terminal trigger.
 
-      ### 触发与策略
+      ### Trigger and policy
 
-      1. 从 trigger/projection 读取 `plan_key`、`worktree_map_path`、
-         `integration_branch`、`target_branch`。`worktree_map_path` 优先使用
-         `forge.worktrees.ready` 的 projection；缺失时使用
-         `.ralph/forge/<plan_key>/worktree-map.yml`。
-      2. `forge.finalized` 是成功交付：删除本 plan 创建的 unit worktree、
-         unit branch 和 integration branch。`target_branch` 永远不能删除。
-      3. `forge.plan.blocked` / `work.failed` 是失败现场：删除可安全删除的
-         worktree，但保留 unit/integration branch 供诊断；在结果中标记
-         `retained_for_diagnosis`。
-      4. 只处理 worktree map 中明确列出的 branch/path，禁止使用宽泛 glob，
-         禁止删除 map 之外的 branch。
+      1. Read `plan_key`, `worktree_map_path`, `integration_branch`, and
+         `target_branch` from the trigger/projection. Prefer the
+         `forge.worktrees.ready` projection for the map; if absent, use
+         `.ralph/forge/<plan_key>/worktree-map.yml`.
+      2. On `forge.finalized`, remove the Unit worktrees, Unit branches, and
+         integration branch created by this plan. Never remove `target_branch`.
+      3. On `forge.plan.blocked` or `work.failed`, remove safely removable
+         worktrees but retain Unit and integration branches for diagnosis; mark
+         them `retained_for_diagnosis`.
+      4. Process only exact branches and paths in the worktree map; never use
+         broad globs or delete a branch outside the map.
 
-      ### 每个资源的清理动作
+      ### Cleanup action for each resource
 
-      1. 运行 `git worktree list --porcelain`，确认目标 path 与 branch 的当前
-         绑定；path 已不存在时继续下一步，不能把它当作整个资源已完成。
-      2. path 存在时运行 `git worktree remove --force <exact-path>`。
-      3. 成功交付且 branch 不是 `target_branch` 时，确认
-         `git show-ref --verify --quiet refs/heads/<exact-branch>` 后运行
-         `git branch -D <exact-branch>`。失败现场不要执行这一步。
-      4. 每个 path/branch 都记录 `unit_id`、`path`、`branch`、
-         `worktree_removed`、`branch_removed` 或 `retained` 及失败原因。
-      5. 运行 `git worktree prune`，然后复核目标 path/branch 的最终状态。
+      1. Run `git worktree list --porcelain` and confirm the current path/branch
+         binding; if the path is absent, continue and do not treat the resource as complete.
+      2. If the path exists, run `git worktree remove --force <exact-path>`.
+      3. After successful delivery, if the branch is not `target_branch`, verify
+         `git show-ref --verify --quiet refs/heads/<exact-branch>` and run
+         `git branch -D <exact-branch>`. Do not do this for failed runs.
+      4. Record `unit_id`, `path`, `branch`, `worktree_removed`,
+         `branch_removed` or `retained`, and the failure reason for every resource.
+      5. Run `git worktree prune` and recheck the final path/branch state.
 
       ### Confirm
 
-      写 `.ralph/forge/<plan_key>/cleanup.md`，确认文件存在后，使用
-      `ralph tools skill load ralph-tools-emit`，再先执行
-      `ralph emit forge.cleanup.done --policy-check`，通过后用同一 payload
-      正式 emit。payload 必须包含：
+      Write `.ralph/forge/<plan_key>/cleanup.md`. After confirming it exists,
+      load `ralph-tools-emit`, run `ralph emit forge.cleanup.done --policy-check`,
+      then formally emit the same payload. The payload must contain:
 
-      - `cleanup_report_path`: cleanup.md 的 repo-relative 路径；
-      - `cleanup_status`: `completed`、`partial` 或 `retained_for_diagnosis`；
-      - `attempted_count`、`cleaned_count`、`pending_count`；
+      - `cleanup_report_path`: the repo-relative path to cleanup.md;
+      - `cleanup_status`: `completed`, `partial`, or `retained_for_diagnosis`;
+      - `attempted_count`, `cleaned_count`, and `pending_count`;
       - `plan_key`。
 
-      cleanup 失败不能伪造 `completed`；但必须尽力处理剩余资源并 emit
-      `partial` 结果，让 reporter 把未清理项写入最终报告。
+      Never claim `completed` when cleanup fails. Make a best effort on remaining
+      resources and emit `partial`, so the reporter records uncleared items.
 
       Single business event.
 
@@ -1282,86 +1321,85 @@ hats:
       enabled: true
       events: [forge.cleanup.done]
     instructions: |
-      ## REPORTER MODE — 终态 hat
+      ## REPORTER MODE — terminal hat
 
-      只读聚合 + 写报告；不改生产代码。OPAC：`ralph-tools-opac`。
-      emit 前：`ralph tools skill load ralph-tools-emit`，再 `--policy-check`。
-      materialize：`ralph tools skill load ralph-tools-cmdref`「materialize-artifacts」。
+      Aggregate read-only evidence and write the report; do not modify production
+      code. OPAC: `ralph-tools-opac`. Before emitting, load `ralph-tools-emit` and
+      use `--policy-check`. For materialization, load `ralph-tools-cmdref`.
 
-      ### Lifecycle（cleanup hat 已完成资源回收）
+      ### Lifecycle (the cleanup hat has reclaimed resources)
 
-      读取 `forge.cleanup.done.cleanup_report_path` 指向的 cleanup.md，并把
-      每个资源的 path/branch/结果原样写入 manager report。不要重复执行
-      `git worktree remove` 或 `git branch -D`。不删
-      `.ralph/forge/<plan_key>/` 业务文件（留给操作者）。
+      Read the cleanup.md referenced by `forge.cleanup.done.cleanup_report_path` and
+      copy every resource path, branch, and result into the manager report. Do not
+      repeat `git worktree remove` or `git branch -D`. Do not delete business files
+      under `.ralph/forge/<plan_key>/`; they belong to the operator.
 
-      ### 模板
+      ### Templates
 
-      若 templates 目录不存在：
+      If the templates directory is missing:
       `ralph preset materialize-artifacts parallel-forge --plan-key <plan_key>`
-      复制 `manager-report.template.md` →
+      Copy `manager-report.template.md` to
       `docs/reports/<YYYY-MM-DD>-<task-name>-manager-report.md`
 
-      ### 步骤 1 — Observe（artifact-first，禁止扫 event history）
+      ### Step 1 — Observe (artifact-first; do not scan event history)
 
-      **从当前 trigger 取路径**（不要猜）：
+      **Read paths from the current trigger; do not guess:**
       - `forge.cleanup.done`：`cleanup_report_path`、`cleanup_status`、
         `attempted_count`、`cleaned_count`、`pending_count`、`plan_key`
-      - 其它报告路径从 projection 或 cleanup.md 中读取。
+      - Read other report paths from the projection or cleanup.md.
 
-      cleanup hat 必须为每条路径生成 cleanup.md；若 cleanup report
-      缺失或 payload 缺 `plan_key`，从 `.ralph/forge/` 下唯一子目录名解析
-      `plan_key`，再读对应 `worktree-map.yml` / `execution-plan.yml` 兜底；
-      仍无法解析时，报告写「信息缺失，无法确认」并把 `status=BLOCKED`、
-      `final_audit=BLOCKED`。
+      The cleanup hat must generate cleanup.md for every path. If the cleanup
+      report is missing or the payload lacks `plan_key`, derive it from the only
+      child directory under `.ralph/forge/`, then fall back to its
+      `worktree-map.yml` / `execution-plan.yml`. If it still cannot be resolved,
+      write "Information missing; cannot confirm" and set `status=BLOCKED` and
+      `final_audit=BLOCKED`.
 
-      再读 trigger/projection 指向的完整 artifact：
-      - `<forge_artifact_root>/development-plan.md`、`execution-plan.yml`
-      - `units/*-completion.md`、`reviews/summary.md`（若存在）
-      - `integration-log.md`、`full-verification.md`、`final-audit.md`（若存在）
-      - 以及 `context_artifact_path` 全文
+      Then read the complete artifacts referenced by the trigger/projection:
+      - `<forge_artifact_root>/development-plan.md` and `execution-plan.yml`
+      - `units/*-completion.md` and `reviews/summary.md` if present
+      - `integration-log.md`, `full-verification.md`, and `final-audit.md` if present
+      - the complete `context_artifact_path`
 
-      对 `forge.finalized` 路径，cleanup report 之外的终态 artifact 应已由
-      finalizer 验证；对 blocked/failed 路径，按实际存在的 artifact 报告，
-      不得把缺失内容声称为已验证，也不得把 cleanup_status=partial 或
-      retained_for_diagnosis 映射成 `COMPLETED`。
+      For `forge.finalized`, the finalizer should have verified terminal artifacts
+      beyond the cleanup report. For blocked/failed paths, report only artifacts
+      that actually exist; never claim missing content was verified or map
+      `cleanup_status=partial` or `retained_for_diagnosis` to `COMPLETED`.
 
-      缺失写「信息缺失，无法确认」。
+      For missing evidence, write "Information missing; cannot confirm".
 
-      ### 步骤 2 — Apply：按模板逐节填写
+      ### Step 2 — Apply: fill each template section
 
-      保留模板章节；为每个 Unit 复制 Unit 小节；填自检清单。
+      Keep the template sections, copy the Unit subsection for each Unit, and fill the self-checklist.
 
-      ### 步骤 3 — status 映射
+      ### Step 3 — Status mapping
 
-      | 来源 | report `status` / `final_audit` |
+      | Source | report `status` / `final_audit` |
       |---|---|
       | cleanup trigger from accepted audit | COMPLETED / ACCEPTED |
       | cleanup trigger from blocked plan | BLOCKED / BLOCKED |
       | cleanup trigger from failed work | FAILED / FAILED |
 
-      ### 步骤 4 — Confirm & emit
+      ### Step 4 — Confirm & emit
 
-      1. `test -f` 报告路径；记下同一 `report_path`。
-      2. 先 `ralph emit forge.report.done --policy-check`（payload 含
-         `report_path`、`status`、`final_audit`、`plan_key`），通过后再去掉
-         `--policy-check` 真正写盘。若 `--policy-check` 失败或正式 emit 被
-         runtime 拒收（拒收原因如 `flow_unknown_emit`），**禁止** emit
-         `LOOP_COMPLETE` 或任何其他业务事件 — 跳过 `forge.report.done` 直接
-         发 `LOOP_COMPLETE` 必被 required_events 门禁拒收。把拒收原因与当前
-         trigger 上下文写入报告附录后停止本轮（遵守单业务事件预算 + Resume
-         规则，让 `ralph run` 自然结束）。
-      3. 再 emit `LOOP_COMPLETE`（reporter 窄例外双终态），payload 必须含同一 `report_path`
-        （与 schema required_fields 一致；禁止省略）。**runtime 门禁会强制比较**
-        `LOOP_COMPLETE.report_path` 与最近 accepted `forge.report.done.report_path`；
-        不一致会被拒收并 correction。
-      4. 打印 `DELIVERABLE_PATH: <report_path>`。
+      1. Run `test -f` on the report path and record the same `report_path`.
+      2. First run `ralph emit forge.report.done --policy-check` with `report_path`,
+         `status`, `final_audit`, and `plan_key`; then formally write the same
+         payload without `--policy-check`. If precheck or formal emit is rejected,
+         **do not** emit `LOOP_COMPLETE` or another business event. Record the
+         reason and trigger context in the report appendix, then stop and let
+         `ralph run` resume naturally.
+      3. Emit `LOOP_COMPLETE` as the reporter's narrow dual-terminal exception with
+         the same `report_path`; runtime rejects mismatches with the accepted
+         `forge.report.done` path.
+      4. Print `DELIVERABLE_PATH: <report_path>`.
 
-      ### Resume 规则
+      ### Resume rules
 
-      若 loop 在 `forge.report.done` 后中断，resume 时**不得**重写既有 audit/report
-      事实来制造新的成功终态。只能补发与先前 `forge.report.done.report_path` 匹配的
-      `LOOP_COMPLETE`；若需新报告，必须先重发 `forge.report.done` 建立新基准。
+      If the loop stops after `forge.report.done`, resume must **not** rewrite
+      existing audit/report facts to manufacture a new success. Only resend
+      `LOOP_COMPLETE` with the previous `forge.report.done.report_path`; to create
+      a new report, emit a new `forge.report.done` first.
 
 state_projection:
   actions:
