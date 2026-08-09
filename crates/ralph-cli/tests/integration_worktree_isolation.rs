@@ -75,13 +75,26 @@ fn count_files_matching(dir: &Path, pattern: &str) -> usize {
     }
 }
 
-/// Count worktree directories (git worktree creates them in .worktrees/)
-fn count_worktrees(main_repo: &Path) -> usize {
-    let worktrees_dir = main_repo.join(".worktrees");
-    if !worktrees_dir.exists() {
+/// Count worktree directories inside the project-scoped external
+/// `<repo-parent>/worktree/<repo-basename>/` base. Plan 2026-08-09-002
+/// moved default worktrees out of the target checkout (R1/R2), so the
+/// canonical external base is the only place where a default
+/// `--worktree` run lands.
+fn external_worktree_base(main_repo: &Path) -> PathBuf {
+    let parent = main_repo.parent().expect("repo parent");
+    let project = main_repo
+        .file_name()
+        .and_then(|n| n.to_str())
+        .expect("repo basename");
+    parent.join("worktree").join(project)
+}
+
+fn count_external_worktrees(main_repo: &Path) -> usize {
+    let base = external_worktree_base(main_repo);
+    if !base.exists() {
         return 0;
     }
-    match fs::read_dir(&worktrees_dir) {
+    match fs::read_dir(&base) {
         Ok(entries) => entries
             .filter_map(|x| x.ok())
             .filter(|x| x.path().is_dir())
@@ -123,10 +136,10 @@ fn test_worktree_creates_exactly_one_and_registry_correct() {
     eprintln!("ralph stderr: {}", stderr);
 
     // 1. Exactly one worktree was created (parent creates, child does not duplicate)
-    let wt_count = count_worktrees(main_repo);
+    let wt_count = count_external_worktrees(main_repo);
     assert_eq!(
         wt_count, 1,
-        "Expected exactly 1 worktree (parent creates, child does not duplicate), found {}. \
+        "Expected exactly 1 external worktree (parent creates, child does not duplicate), found {}. \
          This indicates the worktree isolation fix is broken (parent + child created duplicates).",
         wt_count
     );
@@ -170,10 +183,77 @@ fn test_worktree_creates_exactly_one_and_registry_correct() {
         wt_path, &entry.workspace,
         "In worktree mode, worktree_path must equal workspace"
     );
+    // Canonicalize both sides: macOS reports `/private/var/tmp/...`
+    // for TempDir paths under `/tmp`, while our helper stitches
+    // `/tmp/...` directly. The contract is "workspace lives under
+    // the project-scoped external base" — compare canonical paths.
+    let wt_path_canonical = fs::canonicalize(wt_path).unwrap_or_else(|_| PathBuf::from(wt_path));
+    let expected_base_canonical = fs::canonicalize(external_worktree_base(main_repo))
+        .unwrap_or_else(|_| external_worktree_base(main_repo));
     assert!(
-        wt_path.contains(".worktrees/"),
-        "workspace must point into .worktrees/, got: {}",
-        wt_path
+        wt_path_canonical.starts_with(&expected_base_canonical),
+        "workspace must point into the project-scoped external base, got: {} (expected base {})",
+        wt_path_canonical.display(),
+        expected_base_canonical.display()
+    );
+    assert!(
+        !main_repo.join(".worktrees").exists(),
+        "target repo must not gain a .worktrees/ directory under default config"
+    );
+}
+
+/// U2 / R2 / W-S2: a default `--worktree` run must NOT modify the
+/// target repo's `.gitignore` — the worktree now lives outside the
+/// target checkout (plan 2026-08-09-002), so there is no reason to
+/// pollute the `.gitignore`.
+#[test]
+fn test_default_worktree_does_not_modify_main_gitignore() {
+    let temp_dir = TempDir::new().expect("temp dir");
+    let main_repo = temp_dir.path();
+    setup_git_repo(main_repo);
+    write_minimal_config(main_repo);
+
+    // Capture the gitignore state before --worktree runs.
+    let gitignore_path = main_repo.join(".gitignore");
+    let gitignore_before = if gitignore_path.exists() {
+        Some(fs::read_to_string(&gitignore_path).expect("read .gitignore"))
+    } else {
+        None
+    };
+
+    // Run with --worktree; we don't care about exit code, only
+    // filesystem state.
+    let _ = common::ralph_bin()
+        .args([
+            "run",
+            "--worktree",
+            "--no-tui",
+            "--skip-preflight",
+            "--prompt",
+            "gitignore isolation test",
+        ])
+        .current_dir(main_repo)
+        .output()
+        .expect("execute ralph");
+
+    // The gitignore state must be identical to before the run.
+    let gitignore_after = if gitignore_path.exists() {
+        Some(fs::read_to_string(&gitignore_path).expect("read .gitignore"))
+    } else {
+        None
+    };
+    assert_eq!(
+        gitignore_before, gitignore_after,
+        "default --worktree must not mutate the target repo's .gitignore"
+    );
+
+    // The worktree lives in the project-scoped external base; verify
+    // that one was actually created so the assertion is meaningful.
+    let wt_count = count_external_worktrees(main_repo);
+    assert!(
+        wt_count >= 1,
+        "expected the default --worktree run to create an external worktree, found {}",
+        wt_count
     );
 }
 
@@ -202,10 +282,10 @@ fn test_worktree_no_duplicate_across_runs() {
         .output()
         .expect("first ralph run");
 
-    let count_after_first = count_worktrees(main_repo);
+    let count_after_first = count_external_worktrees(main_repo);
     assert_eq!(
         count_after_first, 1,
-        "First run should create exactly 1 worktree, found {}",
+        "First run should create exactly 1 external worktree, found {}",
         count_after_first
     );
 
@@ -232,17 +312,18 @@ fn test_worktree_no_duplicate_across_runs() {
     // The invariant we test: a SINGLE run doesn't create duplicates. Since
     // we can't directly observe the "during" state from outside, we verify
     // that the count is exactly 2 (one per run), NOT 4 (parent+child per run).
-    let count_after_second = count_worktrees(main_repo);
+    let count_after_second = count_external_worktrees(main_repo);
     assert_eq!(
         count_after_second, 2,
-        "Two runs should produce exactly 2 worktrees (one per run, no parent+child duplicate). \
+        "Two runs should produce exactly 2 external worktrees (one per run, no parent+child duplicate). \
          Found {} — this indicates the fix is broken: each run is creating two worktrees (parent + child).",
         count_after_second
     );
 }
 
-/// Test 3: `ralph run` WITHOUT `--worktree` does NOT create a `.worktrees/`
-/// directory. This is the regression guard for the negative case.
+/// Test 3: `ralph run` WITHOUT `--worktree` does NOT create any worktree
+/// in the project-scoped external base. This is the regression guard
+/// for the negative case (plan 2026-08-09-002 R2 / W-S2).
 #[test]
 fn test_no_worktree_no_worktrees_dir() {
     let temp_dir = TempDir::new().expect("temp dir");
@@ -256,11 +337,15 @@ fn test_no_worktree_no_worktrees_dir() {
         .output()
         .expect("execute ralph");
 
-    let count = count_worktrees(main_repo);
+    let count = count_external_worktrees(main_repo);
     assert_eq!(
         count, 0,
-        "Without --worktree, no .worktrees/ directory should be created, found {} worktrees",
+        "Without --worktree, no external worktree should be created, found {} worktrees",
         count
+    );
+    assert!(
+        !main_repo.join(".worktrees").exists(),
+        "target repo must not gain a .worktrees/ directory"
     );
 }
 
@@ -297,11 +382,11 @@ fn test_worktree_path_nonexistent_dir_fails_cleanly() {
     let stderr = String::from_utf8_lossy(&output.stderr);
     eprintln!("ralph stderr (nonexistent path): {}", stderr);
 
-    // Should NOT create a new worktree in the main repo's .worktrees/
-    let count = count_worktrees(main_repo);
+    // Should NOT create a new external worktree under default config
+    let count = count_external_worktrees(main_repo);
     assert_eq!(
         count, 0,
-        "Non-existent --worktree-path should not create a new worktree, found {}",
+        "Non-existent --worktree-path should not create a new external worktree, found {}",
         count
     );
 
@@ -338,16 +423,17 @@ fn test_worktree_and_worktree_path_priority() {
         .output()
         .expect("first ralph run");
 
-    let count_after_first = count_worktrees(main_repo);
+    let count_after_first = count_external_worktrees(main_repo);
     assert_eq!(
         count_after_first, 1,
-        "First --worktree run should create 1 worktree"
+        "First --worktree run should create 1 external worktree"
     );
 
     // Now pass BOTH --worktree and --worktree-path. Current behavior (KTD-5
     // resolution): --worktree-path takes priority (child-side, no duplicate
     // creation). The run uses the first-run's worktree.
-    let worktree_path = fs::read_dir(main_repo.join(".worktrees"))
+    let base = external_worktree_base(main_repo);
+    let worktree_path = fs::read_dir(&base)
         .ok()
         .and_then(|e| e.filter_map(|x| x.ok()).find(|x| x.path().is_dir()))
         .map(|e| e.path());
@@ -374,10 +460,10 @@ fn test_worktree_and_worktree_path_priority() {
         // Behavior: should still be exactly 1 worktree (--worktree-path
         // takes priority, child reuses the existing one, parent does NOT
         // create a second). If --worktree won, we'd see 2.
-        let count_after_second = count_worktrees(main_repo);
+        let count_after_second = count_external_worktrees(main_repo);
         assert!(
             count_after_second <= 2,
-            "After run with both --worktree and --worktree-path, expected at most 2 worktrees, found {}",
+            "After run with both --worktree and --worktree-path, expected at most 2 external worktrees, found {}",
             count_after_second
         );
     }
@@ -472,7 +558,12 @@ fn write_completed_worktree_entry(main_repo: &Path, loop_id: &str, worktree_path
 /// runtime artifacts. Doing the reverse (mkdir + git worktree add) is
 /// rejected by git because the target path already exists.
 fn precreate_worktree_with_artifacts(main_repo: &Path, loop_id: &str) -> PathBuf {
-    let worktree_path = main_repo.join(".worktrees").join(loop_id);
+    // Plan 2026-08-09-002 R1/R3: default --worktree lives in the
+    // project-scoped external base. Test pre-staging mirrors that
+    // contract so `--reuse-worktree` can locate the worktree.
+    let base = external_worktree_base(main_repo);
+    fs::create_dir_all(&base).unwrap();
+    let worktree_path = base.join(loop_id);
 
     let status = Command::new("git")
         .args([
@@ -558,7 +649,7 @@ fn test_reuse_worktree_reuses_existing_dir_and_archives_artifacts() {
     eprintln!("reuse stderr: {}", String::from_utf8_lossy(&output.stderr));
 
     // Worktree count stays at 1 (reuse did not create a new one).
-    let wt_count = count_worktrees(main_repo);
+    let wt_count = count_external_worktrees(main_repo);
     assert_eq!(
         wt_count, 1,
         "--reuse-worktree should not create an additional worktree, found {}",
@@ -640,14 +731,14 @@ fn test_reuse_worktree_creates_exact_name_when_no_matching_worktree_exists() {
         .output()
         .expect("execute ralph");
 
-    let wt_count = count_worktrees(main_repo);
+    let wt_count = count_external_worktrees(main_repo);
     assert_eq!(
         wt_count, 1,
         "First use should create exactly one worktree. found {}",
         wt_count
     );
     assert!(
-        main_repo.join(".worktrees/fresh-test").is_dir(),
+        external_worktree_base(main_repo).join("fresh-test").is_dir(),
         "first use must bind the worktree exactly to the plan basename"
     );
 }
@@ -699,15 +790,15 @@ fn test_reuse_worktree_does_not_fall_back_to_other_live_entries() {
         .output()
         .expect("execute ralph");
 
-    let wt_count = count_worktrees(main_repo);
+    let wt_count = count_external_worktrees(main_repo);
     assert_eq!(
         wt_count, 2,
         "An unrelated live worktree must remain untouched while the requested exact name is created. found {}",
         wt_count
     );
     assert!(
-        main_repo
-            .join(".worktrees/fix-header-bright-falcon")
+        external_worktree_base(main_repo)
+            .join("fix-header-bright-falcon")
             .is_dir()
     );
 }
@@ -757,9 +848,10 @@ fn test_reuse_worktree_with_no_auto_merge_accepted() {
 // ─────────────────────────────────────────────────────────────────────────
 
 /// Find the single on-disk worktree directory created by `--worktree`.
-/// Returns `None` if `.worktrees/` does not exist or has no entries.
+/// Returns `None` if the project-scoped external base does not exist
+/// or has no entries (plan 2026-08-09-002 R1).
 fn first_worktree_dir(main_repo: &Path) -> Option<PathBuf> {
-    let worktrees_dir = main_repo.join(".worktrees");
+    let worktrees_dir = external_worktree_base(main_repo);
     fs::read_dir(&worktrees_dir)
         .ok()?
         .filter_map(|e| e.ok())
@@ -799,7 +891,7 @@ fn test_worktree_context_md_does_not_expose_main_repo() {
     // The CLI must have created exactly one worktree. Without that we
     // cannot make any claim about its `context.md`.
     let worktree = first_worktree_dir(main_repo)
-        .expect("--worktree should have created .worktrees/<id>/, but none was found");
+        .expect("--worktree should have created the project-scoped external worktree, but none was found");
 
     let context_path = worktree.join(".ralph/agent/context.md");
     assert!(
@@ -947,8 +1039,7 @@ fn headless_worktree_backend_writes_only_to_worktree() {
 
     // Find the worktree that the parent created; the script wrote its
     // marker there (or, pre-fix, it wrote it into the main checkout).
-    let worktree_path = main_repo
-        .join(".worktrees")
+    let worktree_path = external_worktree_base(main_repo)
         .read_dir()
         .ok()
         .and_then(|entries| {
@@ -957,7 +1048,7 @@ fn headless_worktree_backend_writes_only_to_worktree() {
                 .find(|e| e.path().is_dir())
                 .map(|e| e.path())
         })
-        .expect("--worktree should have created .worktrees/<id>/, but none was found");
+        .expect("--worktree should have created the project-scoped external worktree, but none was found");
 
     // Sanity: the custom backend actually ran (loop must have invoked the
     // backend at least once for the marker to be observed). Without this
@@ -1069,7 +1160,9 @@ cli:
 /// boundary (S1 shape): event log + accepted-transitions outbox +
 /// current-loop-id + task ledger + the referenced plan artifact.
 fn precreate_worktree_with_accepted_boundary(main_repo: &Path, loop_id: &str) -> PathBuf {
-    let worktree_path = main_repo.join(".worktrees").join(loop_id);
+    let base = external_worktree_base(main_repo);
+    fs::create_dir_all(&base).unwrap();
+    let worktree_path = base.join(loop_id);
     let status = Command::new("git")
         .args([
             "worktree",
@@ -1237,7 +1330,7 @@ fn test_reuse_worktree_captures_resume_manifest_for_accepted_boundary() {
 
     // Cleanup semantics unchanged: live log archived, exactly 1 worktree.
     assert!(!worktree_path.join(".ralph/events.jsonl").exists());
-    assert_eq!(count_worktrees(main_repo), 1);
+    assert_eq!(count_external_worktrees(main_repo), 1);
 }
 
 /// S5: the prior run left artifact files but NO accepted terminal
@@ -1255,7 +1348,9 @@ fn test_reuse_worktree_artifact_only_prior_run_fails_closed() {
     fs::write(&plan_path, "# plan\n").unwrap();
 
     let loop_id = "s5-artifact-only";
-    let worktree_path = main_repo.join(".worktrees").join(loop_id);
+    let base = external_worktree_base(main_repo);
+    fs::create_dir_all(&base).unwrap();
+    let worktree_path = base.join(loop_id);
     let status = Command::new("git")
         .args([
             "worktree",

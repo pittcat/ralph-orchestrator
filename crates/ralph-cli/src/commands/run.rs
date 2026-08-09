@@ -10,8 +10,8 @@ use ralph_core::{
     LoopRegistry, PreflightReport, PreflightRunner, ProfileSpec, ProfilesError, RalphConfig,
     TerminationReason, ensure_plan_baseline_from_head, truncate_with_ellipsis,
     worktree::{
-        WorktreeConfig, clean_worktree_runtime_artifacts, create_worktree, ensure_gitignore,
-        find_reusable_worktree_by_name, remove_worktree,
+        WorktreeConfig, clean_worktree_runtime_artifacts, create_worktree,
+        find_reusable_worktree_by_name_with_config, remove_worktree,
     },
 };
 use std::io::IsTerminal;
@@ -601,11 +601,15 @@ fn spawn_worktree_loop(
         })
     };
 
-    // Ensure worktree directory is in .gitignore
-    ensure_gitignore(workspace_root, ".worktrees")
-        .context("Failed to update .gitignore for worktrees")?;
-
     // Create the worktree
+    // Plan 2026-08-09-002 (Unit 2 R2 / W-S2): default config routes
+    // worktrees to a project-scoped external root
+    // (`<repo-parent>/worktree/<project>/<loop>`) — the target repo
+    // intentionally receives NO `.worktrees/` directory and NO
+    // `.gitignore` mutation. The pre-existing `ensure_gitignore` call
+    // is removed for the default path; users with a custom
+    // `worktree_dir` inside their target repo must run that override
+    // themselves.
     let worktree = create_worktree(workspace_root, &loop_id, &worktree_config)
         .context("Failed to create worktree for loop")?;
 
@@ -1078,7 +1082,7 @@ pub async fn run_command(
         if args.reuse_worktree {
             debug!("Reusing worktree for explicit --worktree --reuse-worktree mode");
             match exact_worktree_name.as_deref() {
-                Some(name) => match find_reusable_worktree_by_name(workspace_root, name) {
+                Some(name) => match find_reusable_worktree_by_name_with_config(workspace_root, name, &WorktreeConfig::default()) {
                     Ok(Some(reusable)) => {
                         info!(
                             "Reusing worktree at {} (loop_id={})",
