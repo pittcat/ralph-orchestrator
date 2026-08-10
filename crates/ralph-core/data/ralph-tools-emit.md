@@ -175,6 +175,8 @@ ralph emit --schema work.done | jq -r .protocol_hash   # 改后
 3. `.ralph/current-events` marker 文件
 4. `.ralph/events.jsonl` 默认路径
 
+**Hat 上下文完整性：** 如果 `.ralph/current-hat-events` 有活动 channel marker，但当前进程没有可验证的 hat 身份（`RALPH_CURRENT_HAT` 或等价的 `--hat`），`ralph emit` 会拒绝业务事件并且不会回退到 `.ralph/current-events`。此时停止当前 activation，恢复 runner 注入的 hat 上下文后再 emit；不要手工把事件写入主 events 文件。
+
 **`RALPH_WORKSPACE_ROOT` 锚定：**
 
 事件文件路径以 `RALPH_WORKSPACE_ROOT` 为锚点（runner 已注入 `RALPH_WORKSPACE_ROOT` 和 `PWD`，hat 进程**不要 unset**）。当你 `unset RALPH_EVENTS_FILE; cd sorts/; ralph emit ...` 时，事件可能落到子目录的孤儿 events 文件。

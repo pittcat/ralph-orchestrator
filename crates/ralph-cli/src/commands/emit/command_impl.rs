@@ -1962,6 +1962,24 @@ pub(super) fn emit_command_with_root_and_hats(
         }
     }
 
+    // An active per-hat marker is a runner-owned routing context. If a
+    // business emit has lost its hat identity, never let path resolution fall
+    // back to the main ledger. Control and diagnostic topics remain allowed
+    // without a business hat, so this check must happen after the effective
+    // topic is known rather than inside the topic-agnostic path resolver.
+    let active_hat_channel = fs::read_to_string(workspace_root.join(".ralph/current-hat-events"))
+        .ok()
+        .is_some_and(|value| !value.trim().is_empty());
+    let is_control_or_diagnostic = ralph_core::event_origin::is_ralph_control_topic(topic)
+        || ralph_core::event_origin::is_orchestrator_diagnostic_topic(topic);
+    if hat.is_none() && active_hat_channel && !is_control_or_diagnostic {
+        anyhow::bail!(
+            "agent emit context incomplete: active current-hat-events marker exists, but the \
+             emitting hat identity is missing; refusing to fall back to the main events ledger. \
+             Restore RALPH_CURRENT_HAT (or pass --hat) and retry."
+        );
+    }
+
     let events_file = match resolve_emit_path(
         &workspace_root,
         &args.file,

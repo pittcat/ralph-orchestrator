@@ -1887,6 +1887,139 @@ fn test_emit_cwd_drift_rejected_in_isolated_hat_context() {
     );
 }
 
+/// An active isolated hat channel must never degrade to the main events file
+/// when the subprocess loses its hat identity. The previous fallback selected
+/// `current-events` first, allowing a bare business event to bypass the
+/// per-hat channel and precheck path.
+#[test]
+fn test_emit_rejects_missing_hat_identity_with_active_hat_channel() {
+    let tmp = tempfile::TempDir::new().expect("temp dir");
+    let workspace = tmp.path().to_path_buf();
+    let ralph_dir = workspace.join(".ralph");
+    let agent_dir = ralph_dir.join("agent");
+    std::fs::create_dir_all(&agent_dir).expect("create runtime dirs");
+    std::fs::write(
+        workspace.join("ralph.yml"),
+        r#"
+event_loop:
+hats:
+  validator:
+    name: validator
+    triggers: []
+    publishes: ["debug.step"]
+"#,
+    )
+    .expect("write isolated config");
+
+    let main_events = ralph_dir.join("events-main.jsonl");
+    let hat_events = agent_dir.join("events-hat-validator-loop-1.jsonl");
+    std::fs::write(&main_events, "").expect("create main events");
+    std::fs::write(&hat_events, "").expect("create hat channel");
+    std::fs::write(
+        &ralph_dir.join("current-events"),
+        ".ralph/events-main.jsonl\n",
+    )
+    .expect("write main marker");
+    std::fs::write(
+        &ralph_dir.join("current-hat-events"),
+        ".ralph/agent/events-hat-validator-loop-1.jsonl\n",
+    )
+    .expect("write hat marker");
+
+    let err = emit_command_with_root(
+        ColorMode::Never,
+        EmitArgs {
+            topic: Some("debug.step".to_string()),
+            payload: "task_id=demo".to_string(),
+            json: false,
+            file: PathBuf::from(".ralph/events.jsonl"),
+            policy_check: false,
+            no_policy_check: false,
+            hat: None,
+            triggered: None,
+            source: None,
+            schema: None,
+            output: "text".to_string(),
+            policy_check_token: None,
+        },
+        Some(&workspace),
+    )
+    .expect_err("missing hat identity must fail closed");
+
+    let message = format!("{err:#}");
+    assert!(
+        message.contains("agent emit context incomplete"),
+        "unexpected error: {message}"
+    );
+    assert!(
+        std::fs::read_to_string(&main_events)
+            .expect("read main events")
+            .is_empty(),
+        "incomplete agent context must not write the main events ledger"
+    );
+    assert!(
+        std::fs::read_to_string(&hat_events)
+            .expect("read hat events")
+            .is_empty(),
+        "failed emit must not write the hat channel either"
+    );
+}
+
+#[test]
+fn test_emit_control_topic_preserves_missing_hat_behavior_with_active_hat_channel() {
+    let tmp = tempfile::TempDir::new().expect("temp dir");
+    let workspace = tmp.path().to_path_buf();
+    let ralph_dir = workspace.join(".ralph");
+    let agent_dir = ralph_dir.join("agent");
+    std::fs::create_dir_all(&agent_dir).expect("create runtime dirs");
+
+    let main_events = ralph_dir.join("events-main.jsonl");
+    let hat_events = agent_dir.join("events-hat-validator-loop-1.jsonl");
+    std::fs::write(&main_events, "").expect("create main events");
+    std::fs::write(&hat_events, "").expect("create hat channel");
+    std::fs::write(
+        &ralph_dir.join("current-events"),
+        ".ralph/events-main.jsonl\n",
+    )
+    .expect("write main marker");
+    std::fs::write(
+        &ralph_dir.join("current-hat-events"),
+        ".ralph/agent/events-hat-validator-loop-1.jsonl\n",
+    )
+    .expect("write hat marker");
+
+    emit_command_with_root(
+        ColorMode::Never,
+        EmitArgs {
+            topic: Some("task.resume".to_string()),
+            payload: "{}".to_string(),
+            json: false,
+            file: PathBuf::from(".ralph/events.jsonl"),
+            policy_check: false,
+            no_policy_check: false,
+            hat: None,
+            triggered: None,
+            source: None,
+            schema: None,
+            output: "text".to_string(),
+            policy_check_token: None,
+        },
+        Some(&workspace),
+    )
+    .expect("control topics retain their no-hat behavior");
+
+    assert!(
+        std::fs::read_to_string(&main_events)
+            .expect("read main events")
+            .contains("task.resume")
+    );
+    assert!(
+        std::fs::read_to_string(&hat_events)
+            .expect("read hat events")
+            .is_empty()
+    );
+}
+
 /// U3 (R3): 当 `cwd == workspace_root` 时,即使 isolated + hat +
 /// 默认 `--file`,也允许继续(因为子树漂移风险为 0)。
 #[test]
