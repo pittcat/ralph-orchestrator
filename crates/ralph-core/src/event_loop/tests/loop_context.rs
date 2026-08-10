@@ -236,20 +236,28 @@ hats:
 
 #[test]
 fn test_inject_fallback_event_defaults_to_ralph() {
+    // Plan 2026-08-10-001 U1 R1: the Ralph untargeted
+    // fallback (target-less `Event::new("task.resume", ...)`)
+    // was dropped in favour of fail-closed `Block
+    // { MissingTarget }` semantics for the case when
+    // `last_hat` is `None` or `Some("ralph")`. Surfaces via
+    // `loop.stalled` only when `progress_steward.enabled`
+    // is set; otherwise nothing is published and the
+    // up-stream plan.blocked ladder takes over.
     let mut event_loop = EventLoop::new(RalphConfig::default());
     event_loop.state.last_hat = None;
+    // Disable progress_steward so the helper does not emit
+    // `loop.stalled`; mirrors the ce-executor pipeline.
+    event_loop.config.event_loop.progress_steward.enabled = false;
 
     assert!(event_loop.inject_fallback_event());
 
     let ralph_id = HatId::new("ralph");
-    let pending = event_loop
-        .bus
-        .peek_pending(&ralph_id)
-        .expect("ralph pending");
-    assert_eq!(pending.len(), 1);
-    assert_eq!(pending[0].topic.as_str(), "task.resume");
-    assert!(pending[0].target.is_none());
-    assert!(pending[0].payload.contains("Review the scratchpad"));
+    let pending = event_loop.bus.peek_pending(&ralph_id);
+    assert!(
+        pending.is_none_or(|events| events.is_empty()),
+        "no task.resume must be published to ralph when last_hat is None and steward is disabled"
+    );
 }
 
 #[test]

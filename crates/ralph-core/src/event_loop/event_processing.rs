@@ -262,8 +262,18 @@ impl EventLoop {
         // session).
 
         // If a custom hat was last executing, target the fallback back to it
-        // This preserves hat context instead of always falling back to Ralph
-        let fallback_event = if hard_escalation {
+        // This preserves hat context instead of always falling back to Ralph.
+        //
+        // Plan 2026-08-10-001 U1: the hard-escalation branch uses
+        // the unified `publish_targeted_resume_for_hat` helper
+        // which already publishes through the bus. The other two
+        // branches (last-hat fallback, Ralph fallback) keep the
+        // pre-U1 direct `Event::new(...)` shape because they need
+        // subsequent metadata stamping / enrich payload that would
+        // require an additional surface on the helper; they use
+        // `Some(Event::new(...))` so the trailing publish line
+        // applies them.
+        let fallback_event: Option<Event> = if hard_escalation {
             let reason_str = if stall_key.starts_with("flow:") {
                 "wave_stall_exhausted"
             } else {
@@ -335,7 +345,38 @@ impl EventLoop {
                 self.bus.publish(diagnostic);
                 warn!(target = %hard_target.as_str(), "{reason}");
             }
-            Event::new("task.resume", structured_payload).with_target(hard_target)
+            // Plan 2026-08-10-001 U1: route hard-target recovery
+            // through the unified publisher so the registry /
+            // dedup / fail-close checks actually fire. The
+            // caller-side `retry_key` is derived from the stall
+            // context; this site never re-queues the same stall
+            // twice in one activation. The unified helper already
+            // publishes through the bus, so the trailing
+            // `self.bus.publish(fallback_event)` line is skipped
+            // for this branch by returning `None`.
+            //
+            // `current_loop_id()` borrows `&self`; capture it
+            // before the mutable bus borrow.
+            let loop_id_for_resume = self.current_loop_id();
+            let decision = crate::event_loop::resume_routing::publish_targeted_resume_for_hat(
+                &mut self.bus,
+                &self.registry,
+                None,
+                loop_id_for_resume.as_deref(),
+                hard_target.as_str(),
+                None,
+                None,
+                &format!("hard_stall:{}", stall_count_value),
+                structured_payload,
+            );
+            if let crate::event_loop::resume_routing::ResumeDecision::Block { reason } = &decision {
+                tracing::warn!(
+                    target = %hard_target.as_str(),
+                    ?reason,
+                    "hard-stall recovery blocked (no safe target)"
+                );
+            }
+            None
         } else {
             match &self.state.last_hat {
                 Some(hat_id) if hat_id.as_str() != "ralph" => {
@@ -405,7 +446,37 @@ impl EventLoop {
                     {
                         warn!(hat = %hat_id.as_str(), "{reason}");
                     }
-                    Event::new("task.resume", structured_payload).with_target(hat_id.clone())
+                    // Plan 2026-08-10-001 U1: route the last-hat
+                    // fallback through the unified publisher so
+                    // the dedup / fail-close checks fire. The
+                    // caller-side `retry_key = "stall_no_events"`
+                    // distinguishes this from the hard-escalation
+                    // branch. The helper publishes directly into
+                    // the bus; return `None` so the trailing
+                    // publish line is skipped.
+                    let loop_id_for_resume = self.current_loop_id();
+                    let decision =
+                        crate::event_loop::resume_routing::publish_targeted_resume_for_hat(
+                            &mut self.bus,
+                            &self.registry,
+                            None,
+                            loop_id_for_resume.as_deref(),
+                            hat_id.as_str(),
+                            None,
+                            None,
+                            "stall_no_events",
+                            structured_payload,
+                        );
+                    if let crate::event_loop::resume_routing::ResumeDecision::Block { reason } =
+                        &decision
+                    {
+                        tracing::warn!(
+                            target = %hat_id.as_str(),
+                            ?reason,
+                            "last-hat stall recovery blocked (no safe target)"
+                        );
+                    }
+                    None
                 }
                 _ => {
                     let mut payload = String::from(
@@ -428,7 +499,7 @@ impl EventLoop {
                     // the ralph hat so the resumed iteration
                     // honours its own publishes.
                     let ralph_publishes = self.get_hat_publishes(&HatId::new("ralph"));
-                    let structured_payload = enrich_task_resume_payload_full(
+                    let _structured_payload = enrich_task_resume_payload_full(
                         &payload,
                         "stall_no_events",
                         Some("ralph"),
@@ -436,15 +507,39 @@ impl EventLoop {
                         Some(RejectionKind::StallNoEvents),
                         &ralph_publishes,
                     );
-                    debug!(
-                        "Injecting fallback event to recover - triggering Ralph with task.resume"
-                    );
-                    Event::new("task.resume", structured_payload)
+                    debug!("Ralph untargeted fallback dropped; recovered via stall pathway");
+                    // Plan 2026-08-10-001 U1 R1: drop the
+                    // untargeted fallback. The previous shape
+                    // `Event::new("task.resume", structured_payload)`
+                    // leaves `target = None`, which would fall
+                    // through to subscription routing and reach
+                    // any hat subscribed to `task.resume` —
+                    // violating D4 (round-robin / unsourced
+                    // resumes are forbidden). Surface the stall
+                    // through the existing `loop.stalled` pathway
+                    // when the steward is enabled; otherwise
+                    // emit nothing here and let the up-stream
+                    // `plan.blocked` ladder take over.
+                    if self.config.event_loop.progress_steward.enabled {
+                        let stall_event = Event::new(
+                            "loop.stalled",
+                            "{\"reason\":\"stall_no_events\",\"target\":\"ralph\"}".to_string(),
+                        );
+                        self.bus.publish(stall_event);
+                    } else {
+                        tracing::warn!(
+                            "Ralph untargeted fallback dropped; no progress_steward to wake. \
+                             Up-stream plan.blocked ladder handles the loop exit."
+                        );
+                    }
+                    None
                 }
             }
         };
 
-        self.bus.publish(fallback_event);
+        if let Some(fallback_event) = fallback_event {
+            self.bus.publish(fallback_event);
+        }
         true
     }
 
@@ -561,8 +656,30 @@ impl EventLoop {
             Some(trigger_payload.as_str()),
             None,
         );
-        self.bus
-            .publish(Event::new("task.resume", payload).with_target(hat_id.clone()));
+        // Plan 2026-08-10-001 U1: route the missing-terminal-emit
+        // recovery through the unified publisher so the dedup /
+        // fail-close checks fire. The `retry_key` carries the
+        // bounded retry budget signature so duplicate retries
+        // collapse into a single resume.
+        let loop_id_for_resume = self.current_loop_id();
+        let decision = crate::event_loop::resume_routing::publish_targeted_resume_for_hat(
+            &mut self.bus,
+            &self.registry,
+            None,
+            loop_id_for_resume.as_deref(),
+            hat_id.as_str(),
+            None,
+            None,
+            &format!("missing_terminal_emit:{}", retry_key),
+            payload,
+        );
+        if let crate::event_loop::resume_routing::ResumeDecision::Block { reason } = &decision {
+            tracing::warn!(
+                target = %hat_id.as_str(),
+                ?reason,
+                "missing-terminal-emit recovery blocked (no safe target)"
+            );
+        }
         self.record_recovery_envelope(
             &crate::diagnosis::RecoveryDiagnosisEnvelope::builder()
                 .source(crate::diagnosis::DiagnosisSource::MissingEventGate)

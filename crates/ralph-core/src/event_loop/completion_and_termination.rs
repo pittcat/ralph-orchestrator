@@ -303,8 +303,57 @@ impl EventLoop {
         );
         let payload_json =
             build_invalid_step_target_resume_payload_for_jsonl(&finding, event, &known_list);
-        self.bus
-            .publish(ralph_proto::Event::new("task.resume", payload_json));
+        // Plan 2026-08-10-001 U3: route through the unified
+        // resume publisher so the source hat's pending queue
+        // receives the targeted resume; bare Event::new would
+        // leave `target=None` and the resume would fall through
+        // to subscription routing (R4 / E3). Fail-closed when
+        // the source hat is unknown / unregistered.
+        let source_hat_id: Option<HatId> = source_hat.as_deref().map(|h| HatId::new(h.to_string()));
+        // TaskStore is loaded on demand via the loop-context
+        // SSOT accessor; the open-task owner fallback is
+        // optional and degrades gracefully when the ledger is
+        // unavailable. Plan 2026-08-10-001 U1 (R3): replace
+        // the hand-rolled `.ralph/agent/tasks.jsonl` join with
+        // `self.tasks_path()` so future loop-context overrides
+        // (worktree rewrites, alternate ralph dirs) propagate
+        // uniformly.
+        let task_store = crate::task_store::TaskStore::load(&self.tasks_path()).ok();
+        let loop_id_owned = self.current_loop_id();
+        // The unified publisher takes a `&ResumeRoutingInputs`.
+        // We need owned strings for the lifetime; clone them into
+        // a small owned struct passed to a one-shot closure that
+        // builds the inputs by reference into a thread-local is
+        // overkill for one publish. Instead, build the inputs
+        // locally and pass them in. The borrow checker requires
+        // `loop_id_owned` to outlive the inputs, which we ensure
+        // by stacking the decision call inside this scope.
+        let (decision, _loop_id_keepalive) = {
+            let mut resume_inputs =
+                crate::event_loop::resume_routing::ResumeRoutingInputs::default();
+            if let Some(hat) = &source_hat_id {
+                resume_inputs.event_target = Some(hat.as_str());
+            }
+            if let Some(loop_id) = loop_id_owned.as_deref() {
+                resume_inputs.loop_id = Some(loop_id);
+            }
+            let decision = crate::event_loop::resume_routing::publish_targeted_resume(
+                &mut self.bus,
+                &resume_inputs,
+                &self.registry,
+                task_store.as_ref(),
+                &[],
+                payload_json,
+            );
+            (decision, loop_id_owned)
+        };
+        if let crate::event_loop::resume_routing::ResumeDecision::Block { reason } = &decision {
+            tracing::warn!(
+                step = %rejected_step,
+                ?reason,
+                "fix-unit range reject: resume blocked (no safe target)"
+            );
+        }
         self.diagnostics.log_execution_contract_rejections(
             0,
             source_hat.as_deref().unwrap_or("ralph"),
