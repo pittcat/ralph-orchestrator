@@ -136,6 +136,7 @@ Review skill 将 mechanical lint 与软性 AAF 缺口映射为 P0/P1/P2 + confid
 | `preset.payload_consistency_unknown_op` | P0 | 90 | Q4 | lint | `when.op` 不在 `eq`/`ne`/`gt`/`gte`/`exists`/`non_empty` 白名单 |
 | `preset.payload_consistency_non_object_when` | P0 | 90 | Q4 | lint | `when` 不是 object（单谓词或 `all`/`any` 组合） |
 | `preset.payload_consistency_unsafe_message` | P0 | 90 | Q4 | lint | `rule.message` 含 ANSI escape / C0/C1 控制字符 / 零宽字符 / 长度超过 1024 UTF-8 bytes |
+| `preset.payload_consistency_scope_positive_assertion` | P0 | 95 | Q4 | lint | scope topic（`merge.integrated` / `merge.stabilized` / `postmerge.changemap.ready` / `redteam.plan.resolved`）的 `payload_consistency.rules[]` 在受保护结构字段上写 `exists:true` / `non_empty:true`，或在受保护 threshold 字段上写 `gt:`/`gte:`/`eq:` 命中合法正值——runtime evaluator 把 Hit 当拒绝，这种规则会**静默拒绝所有合法 handoff**；positive assertion 的合法形态由 typed scope guard (`policy_check/gates.rs`) 与 schema `required_fields` / `allowed_values` 负责；plan 2026-08-10-002 U4 |
 | `preset.instructions_task_mutation_authority_conflict` | P0 | 90 | Q5 | lint | hat `instructions` 在 projector-owned batch action 或非 coordinator 角色下仍要求 `ralph tools task add` / `task ensure`；单写者冲突由 lint 兜底 |
 
 ### Key-stage event gate finding_id（review-only，lint 不直接产出）

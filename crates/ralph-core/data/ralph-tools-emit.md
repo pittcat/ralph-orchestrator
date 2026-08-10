@@ -223,6 +223,19 @@ ralph emit --schema work.done | jq -r .protocol_hash   # 改后
 
 **失败停止条件**：若你连续 3 次同类 `payload_consistency:*` 拒收，**停止**重发并按本文件「错误恢复」段处理 — runtime 已转入 `plan.blocked(reason=correction_3_strike_exhausted)`。
 
+**Scope topic `payload_consistency` 规则的合法形状**：`merge.integrated` / `merge.stabilized` / `postmerge.changemap.ready` / `redteam.plan.resolved` 这四个 scope topic 的 `event_policy.payload_consistency.rules[]` 必须**只表达矛盾（Hit=非法）**，**绝不写「合法条件命中即拒绝」**——runtime evaluator 把 Hit 当成 reject，这种「合法条件命中」规则会**静默拒绝所有合法 handoff**。Strict preset lint 在加载阶段通过 `preset.payload_consistency_scope_positive_assertion` 拒绝以下反模式：
+
+- `exists:true` / `non_empty:true` 写在 scope 结构字段（`scope_manifest_path` / `scope_digest` / `scope_status` / `scope_base_sha` / `scope_source` / `resolved_patch_path` / `patch_digest` / `predecessor_event` / `merge_boundary_path` / `merge_boundary_digest` / `merge_boundary_status`）——结构 presence 由 typed scope guard（`policy_check/gates.rs`）和 schema `required_fields` 负责；
+- `gt: <正值>` / `gte: <正值>` / `eq: <正值>` 写在 scope threshold 字段（`overall_confidence` / `critical_unknown_count` / `resolved_count` / `coverage`）——threshold 校验同样由 typed scope guard 负责。
+
+合法形状仅限**负向矛盾**（与合法前提配对）：
+
+- `{all: [{field: scope_status, eq: "resolved"}, {field: critical_unknown_count, gt: 0}]}` —— 当声称 resolved 但关键未知项 > 0 时拒绝；
+- `{all: [{field: scope_status, eq: "resolved"}, {field: resolved_count, eq: 0}]}` —— 当声称 resolved 但已解决计划为 0 时拒绝；
+- `{field: predecessor_event, ne: "<illegal-literal>"}` —— 当 predecessor 不是合法字面量时拒绝（合法字面量在 schema `allowed_values` / `required_fields` 声明，由 schema gate 负责 missing/错值；preset rule 只承担「值不等于合法字面量」的反向表达）。
+
+`ce-executor-pipeline` / `ce-executor-pipeline-loop` 等非 scope topic 的「负向矛盾」rule 不受影响——本 finding 只保护四个 scope topic。
+
 通用 SOFT 自洽提醒（与上述 payload_consistency gate 互补，由 schema.required_fields 与 trigger_context 评估，不由 payload_consistency gate 评估）：
 
 - 如果 preset 同时定义了 `step` 字段和 `task_key` 字段，两者描述的 step 必须一致。

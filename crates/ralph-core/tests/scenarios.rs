@@ -4977,15 +4977,58 @@ fn test_redteam_scope_unknown_hunk_blocks_attack() {
     run_workflow_guard_scenario(yaml);
 }
 
-/// U1 (plan 2026-08-08-004 fix-plan §Unit 1, A3): the
-/// `redteam.attack.mapped` HARD GATE is now a runtime contract via
-/// payload_consistency rule `redteam-attack-mapped-requires-predecessor`
-/// + schema-required `predecessor_event` field. Fixture emits
-/// `redteam.attack.mapped` WITHOUT `predecessor_event`; the rule
-/// fires; attack.mapped is rejected; experiment-runner does not
-/// activate. Loop falls through to `redteam.complete(success:false)`.
+/// U1 (plan 2026-08-08-004 fix-plan §Unit 1, A3) + U3 (plan
+/// 2026-08-10-002 §Unit 3, R2/R6/D5): the `redteam.attack.mapped`
+/// HARD GATE is now a runtime contract via the new
+/// `ne`-form payload_consistency rule
+/// `redteam-attack-mapped-predecessor-must-be-resolved` +
+/// schema-required `predecessor_event` field. This fixture emits
+/// `redteam.attack.mapped` WITHOUT `predecessor_event`; the schema
+/// `required_fields` rejects the emit; attack.mapped is rejected;
+/// experiment-runner does not activate. Loop falls through to
+/// `redteam.complete(success:false)`.
+///
+/// Companion to:
+///   - `test_redteam_scope_attack_mapped_gate_rejects_wrong_predecessor`
+///     (wrong literal → rejected by `ne` rule)
+///   - `test_redteam_scope_attack_mapped_legal_predecessor_accepted`
+///     (legal literal → accepted; experiment-runner activates; loop
+///     reaches `redteam.complete(success:true)`).
 #[test]
 fn test_redteam_scope_attack_mapped_gate_rejects_missing_predecessor() {
     let yaml = load_scenario("tests/scenarios/redteam_scope_attack_mapped_gate.yml");
+    run_workflow_guard_scenario(yaml);
+}
+
+/// U3 (plan 2026-08-10-002 §Unit 3, R2/R6/D5): the new
+/// `ne`-form payload_consistency rule
+/// `redteam-attack-mapped-predecessor-must-be-resolved` rejects any
+/// `predecessor_event` literal that is not `"redteam.plan.resolved"`.
+/// This fixture emits `redteam.attack.mapped` WITH the wrong literal
+/// `"redteam.plan.unresolved"`; schema accepts the field (it IS
+/// present), but the `ne` rule fires; attack.mapped is rejected;
+/// experiment-runner does not activate. Loop falls through to
+/// `redteam.complete(success:false)`.
+#[test]
+fn test_redteam_scope_attack_mapped_gate_rejects_wrong_predecessor() {
+    let yaml = load_scenario("tests/scenarios/redteam_scope_attack_mapped_wrong_predecessor.yml");
+    run_workflow_guard_scenario(yaml);
+}
+
+/// U3 (plan 2026-08-10-002 §Unit 3, R1/R6/D5): the legal predecessor
+/// literal `"redteam.plan.resolved"` Misses the new `ne` rule, so
+/// `redteam.attack.mapped` lands; experiment-runner activates;
+/// evidence-gate → impact-boundary → independent-reviewer → reporter.
+/// Loop reaches `redteam.complete(success:true)`.
+///
+/// This fixture closes the gap exposed by E10 (plan 2026-08-10-002):
+/// the previous `exists:true AND eq` form Hit on the legal literal
+/// and rejected it. Before U3, this fixture would have failed at
+/// the `redteam.attack.mapped` step (rule would fire on the legal
+/// value). After U3, the legal literal passes and the full chain
+/// reaches `redteam.complete(success:true)`.
+#[test]
+fn test_redteam_scope_attack_mapped_legal_predecessor_accepted() {
+    let yaml = load_scenario("tests/scenarios/redteam_scope_attack_mapped_legal_predecessor.yml");
     run_workflow_guard_scenario(yaml);
 }

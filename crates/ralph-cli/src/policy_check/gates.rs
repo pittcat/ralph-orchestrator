@@ -20,6 +20,8 @@ use anyhow::{Context, Result};
 #[allow(unused_imports)]
 use ralph_core::config::HatExecutionMode;
 #[allow(unused_imports)]
+use ralph_core::config::scope_topics::SCOPE_TOPICS;
+#[allow(unused_imports)]
 use ralph_core::config::{EventFieldDoc, EventSchema, PayloadType};
 #[allow(deprecated, unused_imports)]
 use ralph_core::step_handoff::progress_task_gate::{
@@ -105,62 +107,23 @@ pub(crate) fn verify_artifact_digest(
     Ok(())
 }
 
-/// Verify the merge boundary digest over its canonical JSON representation.
-/// The self-referential `boundary_digest` field is excluded before encoding;
-/// serde_json's default map representation provides stable key ordering and
-/// the canonical bytes end with one newline.
-#[allow(clippy::result_large_err)]
-pub(crate) fn verify_canonical_json_digest(
-    workspace_root: &Path,
-    artifact_path: &str,
-    declared_digest: &str,
-    digest_field: &str,
-) -> std::result::Result<(), ValidationError> {
-    let full_path = workspace_root.join(artifact_path);
-    let bytes = std::fs::read(&full_path).map_err(|e| ValidationError {
-        payload_index: 0,
-        field: digest_field.to_string(),
-        reason_code: "scope_handoff_inconsistent".to_string(),
-        message: format!("{digest_field} verification failed: could not read {artifact_path}: {e}"),
-        ..Default::default()
-    })?;
-    let mut value: serde_json::Value =
-        serde_json::from_slice(&bytes).map_err(|e| ValidationError {
-            payload_index: 0,
-            field: digest_field.to_string(),
-            reason_code: "scope_handoff_inconsistent".to_string(),
-            message: format!(
-                "{digest_field} verification failed: {artifact_path} is not valid JSON: {e}"
-            ),
-            ..Default::default()
-        })?;
-    if let Some(object) = value.as_object_mut() {
-        object.remove("boundary_digest");
-    }
-    let mut canonical = serde_json::to_vec(&value).map_err(|e| ValidationError {
-        payload_index: 0,
-        field: digest_field.to_string(),
-        reason_code: "scope_handoff_inconsistent".to_string(),
-        message: format!("{digest_field} canonicalization failed: {e}"),
-        ..Default::default()
-    })?;
-    canonical.push(b'\n');
-    let mut hasher = Sha256::new();
-    hasher.update(canonical);
-    let computed = format!("{:x}", hasher.finalize());
-    if !declared_digest.eq_ignore_ascii_case(&computed) {
-        return Err(ValidationError {
-            payload_index: 0,
-            field: digest_field.to_string(),
-            reason_code: "scope_handoff_inconsistent".to_string(),
-            message: format!(
-                "{digest_field} does not match canonical SHA-256 of {artifact_path}; manifest may have been tampered with (declared={declared_digest}, computed={computed})"
-            ),
-            ..Default::default()
-        });
-    }
-    Ok(())
-}
+/// U7 (2026-08-10-002 plan, R11/S1): the canonical self-excluding
+/// digest verifier, the typed threshold / bool / bounded string
+/// readers, and the two `verify_*_digest` wrappers live in
+/// `super::scope` (see `crates/ralph-cli/src/policy_check/scope.rs`).
+/// The re-exports below keep the existing public surface for the
+/// `mod tests` block at the bottom of this file and for any external
+/// caller that still imports through `super::gates::verify_*`. The
+/// `#[allow(unused_imports)]` is needed because the production
+/// callers in `gates.rs` only use `verify_canonical_json_digest` /
+/// `verify_scope_manifest_digest`; the parameterised helper
+/// `verify_canonical_json_digest_excluding` is reached only by the
+/// inline tests at the bottom of this file.
+#[allow(unused_imports)]
+pub(crate) use super::scope::{
+    bounded_scope_string, typed_required_bool, typed_threshold_u64, verify_canonical_json_digest,
+    verify_canonical_json_digest_excluding, verify_scope_manifest_digest,
+};
 
 /// Try to load the workspace `ralph.yml` config for policy check. Returns
 /// `None` when no config exists. The behavior on broken configs is
@@ -801,13 +764,6 @@ pub fn check_scope_handoff_guard(
     payload_str: &str,
     workspace_root: &Path,
 ) -> std::result::Result<(), ValidationError> {
-    const SCOPE_TOPICS: &[&str] = &[
-        "merge.integrated",
-        "merge.stabilized",
-        "postmerge.changemap.ready",
-        "redteam.plan.resolved",
-    ];
-
     if !SCOPE_TOPICS.contains(&topic) {
         return Ok(());
     }
@@ -945,7 +901,7 @@ fn expect_scope_payload_object<'a>(
 /// topic-specific scope directory. Lexical prefix checks alone allow
 /// `..` traversal and symlinks to escape the intended artifact root.
 #[allow(clippy::result_large_err)]
-fn validate_scoped_artifact_path(
+pub(crate) fn validate_scoped_artifact_path(
     workspace_root: &Path,
     artifact_path: &str,
     allowed_prefix: &str,
@@ -1026,33 +982,12 @@ fn required_scope_string(
     field: &str,
     topic: &str,
 ) -> std::result::Result<String, ValidationError> {
-    match obj.get(field).and_then(serde_json::Value::as_str) {
-        Some(value) if !value.is_empty() => Ok(value.to_string()),
-        _ => Err(ValidationError {
-            payload_index: 0,
-            field: field.to_string(),
-            reason_code: "scope_handoff_inconsistent".to_string(),
-            message: format!("{topic} requires non-empty string field {field}"),
-            ..Default::default()
-        }),
-    }
-}
-
-#[allow(clippy::result_large_err)]
-fn required_scope_u64(
-    obj: &serde_json::Map<String, serde_json::Value>,
-    field: &str,
-    topic: &str,
-) -> std::result::Result<u64, ValidationError> {
-    obj.get(field)
-        .and_then(serde_json::Value::as_u64)
-        .ok_or_else(|| ValidationError {
-            payload_index: 0,
-            field: field.to_string(),
-            reason_code: "scope_handoff_inconsistent".to_string(),
-            message: format!("{topic} requires non-negative integer field {field}"),
-            ..Default::default()
-        })
+    // U2 (R4/A3 input-validation leg): route the call through the
+    // bounded reader with a 256-char max. The unbounded variant is
+    // preserved in tests; production callers all go through this
+    // bound to defeat the 4 KiB UTF-8 attack documented in finding
+    // A3.
+    bounded_scope_string(obj, field, topic, 256)
 }
 
 /// U9 (M2): shared `merge_boundary_path` + `merge_boundary_digest`
@@ -1143,6 +1078,300 @@ fn validate_merge_boundary_pair(
     Ok((path, digest))
 }
 
+/// U2 (2026-08-10-002 plan, R5): payload-vs-manifest equality for a
+/// single typed field. Returns `Ok(())` when the field is absent on both
+/// sides, when both sides carry the same JSON value, or when the field
+/// is absent on the manifest but the payload carries the canonical
+/// shape (caller may want to require the manifest side as well).
+///
+/// Returns a structured `ValidationError` naming the mismatched field
+/// when the two sides disagree. The manifest is read by the topic
+/// guards before calling this helper (see `read_scope_manifest_object`).
+#[allow(clippy::result_large_err)]
+fn assert_payload_manifest_field_equal(
+    topic: &str,
+    field: &str,
+    payload: &serde_json::Value,
+    manifest: &serde_json::Value,
+) -> std::result::Result<(), ValidationError> {
+    let payload_has = !payload.is_null();
+    let manifest_has = !manifest.is_null();
+    if !payload_has && !manifest_has {
+        return Ok(());
+    }
+    if payload_has != manifest_has {
+        return Err(ValidationError {
+            payload_index: 0,
+            field: field.to_string(),
+            reason_code: "scope_handoff_inconsistent".to_string(),
+            message: format!(
+                "{topic} field `{field}` mismatch with scope manifest: \
+                 payload={} manifest={}",
+                if payload_has { "present" } else { "absent" },
+                if manifest_has { "present" } else { "absent" }
+            ),
+            ..Default::default()
+        });
+    }
+    if payload != manifest {
+        return Err(ValidationError {
+            payload_index: 0,
+            field: field.to_string(),
+            reason_code: "scope_handoff_inconsistent".to_string(),
+            message: format!(
+                "{topic} field `{field}` disagrees with scope manifest: payload={payload} manifest={manifest}"
+            ),
+            ..Default::default()
+        });
+    }
+    Ok(())
+}
+
+/// U2 (2026-08-10-002 plan, R5): load the scope manifest JSON and
+/// return the top-level object. The manifest shape is the
+/// `multi-plan-scope/v1` canonical contract from the upstream plan
+/// (decision fields live at the top level, never under a nested
+/// `resolution` key).
+#[allow(clippy::result_large_err)]
+fn read_scope_manifest_object(
+    workspace_root: &Path,
+    manifest_path: &str,
+    topic: &str,
+) -> std::result::Result<serde_json::Map<String, serde_json::Value>, ValidationError> {
+    let full_path = workspace_root.join(manifest_path);
+    let bytes = std::fs::read(&full_path).map_err(|e| ValidationError {
+        payload_index: 0,
+        field: "scope_manifest_path".to_string(),
+        reason_code: "scope_handoff_inconsistent".to_string(),
+        message: format!(
+            "{topic} cannot read scope manifest at {manifest_path}: {e}"
+        ),
+        ..Default::default()
+    })?;
+    let value: serde_json::Value = serde_json::from_slice(&bytes).map_err(|e| {
+        ValidationError {
+            payload_index: 0,
+            field: "scope_manifest_path".to_string(),
+            reason_code: "scope_handoff_inconsistent".to_string(),
+            message: format!(
+                "{topic} scope manifest at {manifest_path} is not valid JSON: {e}"
+            ),
+            ..Default::default()
+        }
+    })?;
+    match value {
+        serde_json::Value::Object(map) => Ok(map),
+        other => Err(ValidationError {
+            payload_index: 0,
+            field: "scope_manifest_path".to_string(),
+            reason_code: "scope_handoff_inconsistent".to_string(),
+            message: format!(
+                "{topic} scope manifest at {manifest_path} must be a JSON object; got {other}"
+            ),
+            ..Default::default()
+        }),
+    }
+}
+
+/// U2 (2026-08-10-002 plan, R5/D8): typed equality between the
+/// `postmerge.changemap.ready` payload and the multi-plan-scope/v1
+/// canonical manifest. The guard rejects with `scope_handoff_inconsistent`
+/// naming the first mismatched field.
+#[allow(clippy::result_large_err)]
+fn check_postmerge_payload_manifest_consistency(
+    obj: &serde_json::Map<String, serde_json::Value>,
+    manifest: &serde_json::Map<String, serde_json::Value>,
+) -> std::result::Result<(), ValidationError> {
+    let topic = "postmerge.changemap.ready";
+    for field in [
+        "scope_status",
+        "overall_confidence",
+        "critical_unknown_count",
+        "scope_base_sha",
+        "scope_source",
+    ] {
+        let payload_val = obj.get(field).cloned().unwrap_or(serde_json::Value::Null);
+        let manifest_val = manifest.get(field).cloned().unwrap_or(serde_json::Value::Null);
+        assert_payload_manifest_field_equal(topic, field, &payload_val, &manifest_val)?;
+    }
+    Ok(())
+}
+
+/// U2 (2026-08-10-002 plan, R5/D8): typed equality between the
+/// `redteam.plan.resolved` payload and the multi-plan-scope/v1
+/// canonical manifest.
+#[allow(clippy::result_large_err)]
+fn check_redteam_payload_manifest_consistency(
+    obj: &serde_json::Map<String, serde_json::Value>,
+    manifest: &serde_json::Map<String, serde_json::Value>,
+) -> std::result::Result<(), ValidationError> {
+    let topic = "redteam.plan.resolved";
+    for field in [
+        "scope_status",
+        "overall_confidence",
+        "critical_unknown_count",
+        "scope_base_sha",
+    ] {
+        let payload_val = obj.get(field).cloned().unwrap_or(serde_json::Value::Null);
+        let manifest_val = manifest.get(field).cloned().unwrap_or(serde_json::Value::Null);
+        assert_payload_manifest_field_equal(topic, field, &payload_val, &manifest_val)?;
+    }
+    Ok(())
+}
+
+/// and ambiguous require `proceed: false`.
+#[allow(clippy::result_large_err)]
+fn check_postmerge_resolved_thresholds(
+    obj: &serde_json::Map<String, serde_json::Value>,
+) -> std::result::Result<(), ValidationError> {
+    let topic = "postmerge.changemap.ready";
+    let scope_status = obj
+        .get("scope_status")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    if scope_status == "resolved" {
+        // U1 (R1/R2/C1): typed non-negative integer reads reject
+        // negative `critical_unknown_count: -1` and string-encoded
+        // `"0"` instead of silently coercing to 0.
+        let overall_confidence =
+            typed_threshold_u64(obj, "overall_confidence", topic, true, 0)?;
+        if overall_confidence < 90 {
+            return Err(ValidationError {
+                payload_index: 0,
+                field: "overall_confidence".to_string(),
+                reason_code: "scope_handoff_inconsistent".to_string(),
+                message: format!(
+                    "{topic} requires overall_confidence >= 90 when scope_status=resolved; got {overall_confidence}"
+                ),
+                ..Default::default()
+            });
+        }
+        let critical_unknown_count =
+            typed_threshold_u64(obj, "critical_unknown_count", topic, true, 0)?;
+        if critical_unknown_count != 0 {
+            return Err(ValidationError {
+                payload_index: 0,
+                field: "critical_unknown_count".to_string(),
+                reason_code: "scope_handoff_inconsistent".to_string(),
+                message: format!(
+                    "{topic} requires critical_unknown_count == 0 when scope_status=resolved; got {critical_unknown_count}"
+                ),
+                ..Default::default()
+            });
+        }
+        // U2 (R3/A1): explicit-bool reader — string `"false"` is
+        // rejected (was silently accepted by `as_bool() == Some(false)`).
+        if let Some(false) = typed_required_bool(obj, "proceed", topic)? {
+            return Err(ValidationError {
+                payload_index: 0,
+                field: "proceed".to_string(),
+                reason_code: "scope_handoff_inconsistent".to_string(),
+                message: format!(
+                    "{topic} requires proceed=true when scope_status=resolved; got proceed=false"
+                ),
+                ..Default::default()
+            });
+        }
+    } else if scope_status == "blocked" || scope_status == "ambiguous" {
+        if let Some(true) = typed_required_bool(obj, "proceed", topic)? {
+            return Err(ValidationError {
+                payload_index: 0,
+                field: "proceed".to_string(),
+                reason_code: "scope_handoff_inconsistent".to_string(),
+                message: format!(
+                    "{topic} requires proceed=false when scope_status={scope_status}; got proceed=true"
+                ),
+                ..Default::default()
+            });
+        }
+    }
+    Ok(())
+}
+
+/// U2 (2026-08-10-002 plan, R1/R2/D4): resolved-status threshold checks
+/// for `redteam.plan.resolved`. Resolved requires `overall_confidence
+/// >= 90`, `critical_unknown_count == 0`, `resolved_count >= 1`,
+/// `coverage >= 90`, and `boundary_conflict != true`.
+#[allow(clippy::result_large_err)]
+fn check_redteam_resolved_thresholds(
+    obj: &serde_json::Map<String, serde_json::Value>,
+) -> std::result::Result<(), ValidationError> {
+    let topic = "redteam.plan.resolved";
+    let scope_status = obj
+        .get("scope_status")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    if scope_status != "resolved" {
+        return Ok(());
+    }
+    // U1 (R1/R2/C1/A1): typed non-negative integer reads reject
+    // negative integers and string-encoded values that the previous
+    // `as_u64().unwrap_or(0)` pattern silently coerced to 0.
+    let overall_confidence = typed_threshold_u64(obj, "overall_confidence", topic, true, 0)?;
+    if overall_confidence < 90 {
+        return Err(ValidationError {
+            payload_index: 0,
+            field: "overall_confidence".to_string(),
+            reason_code: "scope_handoff_inconsistent".to_string(),
+            message: format!(
+                "{topic} requires overall_confidence >= 90 when scope_status=resolved; got {overall_confidence}"
+            ),
+            ..Default::default()
+        });
+    }
+    let critical_unknown_count =
+        typed_threshold_u64(obj, "critical_unknown_count", topic, true, 0)?;
+    if critical_unknown_count != 0 {
+        return Err(ValidationError {
+            payload_index: 0,
+            field: "critical_unknown_count".to_string(),
+            reason_code: "scope_handoff_inconsistent".to_string(),
+            message: format!(
+                "{topic} requires critical_unknown_count == 0 when scope_status=resolved; got {critical_unknown_count}"
+            ),
+            ..Default::default()
+        });
+    }
+    let resolved_count = typed_threshold_u64(obj, "resolved_count", topic, true, 0)?;
+    if resolved_count == 0 {
+        return Err(ValidationError {
+            payload_index: 0,
+            field: "resolved_count".to_string(),
+            reason_code: "scope_handoff_inconsistent".to_string(),
+            message: format!(
+                "{topic} requires resolved_count >= 1 when scope_status=resolved; got 0"
+            ),
+            ..Default::default()
+        });
+    }
+    let coverage = typed_threshold_u64(obj, "coverage", topic, true, 0)?;
+    if coverage < 90 {
+        return Err(ValidationError {
+            payload_index: 0,
+            field: "coverage".to_string(),
+            reason_code: "scope_handoff_inconsistent".to_string(),
+            message: format!(
+                "{topic} requires coverage >= 90 when scope_status=resolved; got {coverage}"
+            ),
+            ..Default::default()
+        });
+    }
+    // U2 (R3/A1): explicit-bool reader — `boundary_conflict: "true"`
+    // (string) is now rejected instead of silently accepted.
+    if let Some(true) = typed_required_bool(obj, "boundary_conflict", topic)? {
+        return Err(ValidationError {
+            payload_index: 0,
+            field: "boundary_conflict".to_string(),
+            reason_code: "scope_handoff_inconsistent".to_string(),
+            message: format!(
+                "{topic} does not allow boundary_conflict=true when scope_status=resolved"
+            ),
+            ..Default::default()
+        });
+    }
+    Ok(())
+}
+
 #[allow(clippy::result_large_err)]
 fn check_postmerge_changemap_scope_fields(
     value: &serde_json::Value,
@@ -1152,9 +1381,7 @@ fn check_postmerge_changemap_scope_fields(
     let obj = expect_scope_payload_object(value, "postmerge.changemap.ready")?;
     let manifest_path = required_scope_string(obj, "scope_manifest_path", "postmerge.changemap.ready")?;
     let manifest_digest = required_scope_string(obj, "scope_digest", "postmerge.changemap.ready")?;
-    let _scope_status = required_scope_string(obj, "scope_status", "postmerge.changemap.ready")?;
-    let _overall_confidence = required_scope_u64(obj, "overall_confidence", "postmerge.changemap.ready")?;
-    let _critical_unknown_count = required_scope_u64(obj, "critical_unknown_count", "postmerge.changemap.ready")?;
+    let scope_status = required_scope_string(obj, "scope_status", "postmerge.changemap.ready")?;
     let scope_base_sha = required_scope_string(obj, "scope_base_sha", "postmerge.changemap.ready")?;
     let _scope_source = required_scope_string(obj, "scope_source", "postmerge.changemap.ready")?;
 
@@ -1176,6 +1403,17 @@ fn check_postmerge_changemap_scope_fields(
             ..Default::default()
         });
     }
+    if !matches!(scope_status.as_str(), "resolved" | "ambiguous" | "blocked") {
+        return Err(ValidationError {
+            payload_index: 0,
+            field: "scope_status".to_string(),
+            reason_code: "scope_handoff_inconsistent".to_string(),
+            message: format!(
+                "postmerge.changemap.ready scope_status must be one of resolved/ambiguous/blocked; got {scope_status}"
+            ),
+            ..Default::default()
+        });
+    }
 
     validate_scoped_artifact_path(
         workspace_root,
@@ -1184,8 +1422,27 @@ fn check_postmerge_changemap_scope_fields(
         "scope_manifest_path",
     )?;
 
-    // U5 (R6 / A2): SHA-256 recomputation on the manifest file.
-    verify_artifact_digest(workspace_root, &manifest_path, &manifest_digest, "scope_digest")?;
+    // U1 (2026-08-10-002 plan, R4): scope manifests are verified with the
+    // canonical self-excluding JSON digest algorithm; producer and guard
+    // share `verify_scope_manifest_digest` so the same canonical bytes
+    // back the declared `scope_digest`.
+    verify_scope_manifest_digest(
+        workspace_root,
+        &manifest_path,
+        &manifest_digest,
+        "scope_digest",
+    )?;
+
+    // U2 (R5): typed equality between payload fields and the canonical
+    // manifest fields (D8 multi-plan-scope/v1). The guard rejects with
+    // `scope_handoff_inconsistent` naming the first mismatched field.
+    let manifest_obj = read_scope_manifest_object(workspace_root, &manifest_path, "postmerge.changemap.ready")?;
+    check_postmerge_payload_manifest_consistency(obj, &manifest_obj)?;
+
+    // U2 (R1/R2/D4): typed threshold checks (overall_confidence >=
+    // 90, critical_unknown_count == 0, proceed consistency). These run
+    // after digest + equality so manifest mismatch is reported first.
+    check_postmerge_resolved_thresholds(obj)?;
 
     Ok(())
 }
@@ -1199,9 +1456,7 @@ fn check_redteam_plan_resolved_scope_fields(
     let obj = expect_scope_payload_object(value, "redteam.plan.resolved")?;
     let manifest_path = required_scope_string(obj, "scope_manifest_path", "redteam.plan.resolved")?;
     let manifest_digest = required_scope_string(obj, "scope_digest", "redteam.plan.resolved")?;
-    let _scope_status = required_scope_string(obj, "scope_status", "redteam.plan.resolved")?;
-    let _overall_confidence = required_scope_u64(obj, "overall_confidence", "redteam.plan.resolved")?;
-    let _critical_unknown_count = required_scope_u64(obj, "critical_unknown_count", "redteam.plan.resolved")?;
+    let scope_status = required_scope_string(obj, "scope_status", "redteam.plan.resolved")?;
     let scope_base_sha = required_scope_string(obj, "scope_base_sha", "redteam.plan.resolved")?;
     let patch_path = required_scope_string(obj, "resolved_patch_path", "redteam.plan.resolved")?;
     let patch_digest = required_scope_string(obj, "patch_digest", "redteam.plan.resolved")?;
@@ -1233,6 +1488,17 @@ fn check_redteam_plan_resolved_scope_fields(
             ..Default::default()
         });
     }
+    if !matches!(scope_status.as_str(), "resolved" | "ambiguous" | "blocked") {
+        return Err(ValidationError {
+            payload_index: 0,
+            field: "scope_status".to_string(),
+            reason_code: "scope_handoff_inconsistent".to_string(),
+            message: format!(
+                "redteam.plan.resolved scope_status must be one of resolved/ambiguous/blocked; got {scope_status}"
+            ),
+            ..Default::default()
+        });
+    }
 
     validate_scoped_artifact_path(
         workspace_root,
@@ -1247,10 +1513,28 @@ fn check_redteam_plan_resolved_scope_fields(
         "resolved_patch_path",
     )?;
 
-    // U5 (R6 / A2): SHA-256 recomputation on the manifest file
-    // AND the resolved patch file (both have declared digests).
-    verify_artifact_digest(workspace_root, &manifest_path, &manifest_digest, "scope_digest")?;
+    // U1 (2026-08-10-002 plan, R4): scope manifest uses the canonical
+    // self-excluding JSON digest algorithm so producer/guide and guard
+    // stay in lockstep. Patch artifacts remain raw-byte SHA-256 per
+    // U1 §13 (patch digest semantics unchanged from upstream plan).
+    verify_scope_manifest_digest(
+        workspace_root,
+        &manifest_path,
+        &manifest_digest,
+        "scope_digest",
+    )?;
     verify_artifact_digest(workspace_root, &patch_path, &patch_digest, "patch_digest")?;
+
+    // U2 (R5): typed equality between payload fields and the canonical
+    // manifest fields (D8 multi-plan-scope/v1).
+    let manifest_obj = read_scope_manifest_object(workspace_root, &manifest_path, "redteam.plan.resolved")?;
+    check_redteam_payload_manifest_consistency(obj, &manifest_obj)?;
+
+    // U2 (R1/R2/D4): typed threshold checks (overall_confidence >=
+    // 90, critical_unknown_count == 0, resolved_count >= 1,
+    // coverage >= 90, boundary_conflict == false). Runs after digest
+    // + equality so manifest mismatch is reported first.
+    check_redteam_resolved_thresholds(obj)?;
 
     Ok(())
 }
@@ -1297,6 +1581,56 @@ mod tests {
         (hex_str, abs)
     }
 
+    /// U1 (2026-08-10-002 plan, R4): write a scope manifest with its
+    /// declared `scope_digest` field and return the canonical
+    /// self-excluding digest (SHA-256 over the canonical JSON bytes
+    /// after stripping `scope_digest`). Mirrors the producer side of
+    /// the canonicalization contract.
+    fn write_scope_manifest(
+        root: &std::path::Path,
+        relative_path: &str,
+        body: &str,
+    ) -> (String, PathBuf) {
+        // Parse the body as JSON so we can compute the canonical digest
+        // over the same bytes the guard will canonicalize. The digest is
+        // computed AFTER stripping `scope_digest` so the field's own
+        // value does not feed back into the digest (self-exclusion).
+        let mut value: serde_json::Value =
+            serde_json::from_str(body).expect("valid manifest JSON");
+        // Insert a placeholder so the map shape matches the final
+        // serialized form (otherwise key ordering or omission could
+        // shift the canonical bytes); then strip the placeholder so
+        // the digest input is the canonical bytes without `scope_digest`.
+        if let Some(object) = value.as_object_mut() {
+            object.insert(
+                "scope_digest".to_string(),
+                serde_json::Value::String("placeholder".to_string()),
+            );
+            object.remove("scope_digest");
+        }
+        let mut canonical = serde_json::to_vec(&value).expect("canonical JSON");
+        canonical.push(b'\n');
+        let mut hasher = Sha256::new();
+        hasher.update(canonical);
+        let computed = format!("{:x}", hasher.finalize());
+
+        let abs = root.join(relative_path);
+        if let Some(parent) = abs.parent() {
+            std::fs::create_dir_all(parent).expect("create parent");
+        }
+        // Now write the manifest with the real `scope_digest` value.
+        if let Some(object) = value.as_object_mut() {
+            object.insert(
+                "scope_digest".to_string(),
+                serde_json::Value::String(computed.clone()),
+            );
+        }
+        let serialized =
+            serde_json::to_string(&value).expect("serialize manifest");
+        std::fs::write(&abs, serialized.as_bytes()).expect("write manifest");
+        (computed, abs)
+    }
+
     fn build_boundary_payload(digest: &str, status: Option<&str>) -> String {
         let mut payload = format!(
             r#"{{"merge_boundary_path":".ralph/merge/merge-boundary.json","merge_boundary_digest":"{digest}""#
@@ -1325,8 +1659,12 @@ mod tests {
     }
 
     fn build_postmerge_payload(manifest_path: &str, manifest_digest: &str) -> String {
+        // U2: the postmerge payload now carries `proceed: true` so the
+        // resolved-status guard accepts a `scope_status=resolved`
+        // payload. Tests that want to exercise the inconsistency path
+        // override this builder with a custom JSON literal.
         format!(
-            r#"{{"scope_manifest_path":"{manifest_path}","scope_digest":"{manifest_digest}","scope_status":"resolved","overall_confidence":90,"critical_unknown_count":0,"scope_base_sha":"abc1234def5678901234567890abcdef12345678","scope_source":"post-merge-converge"}}"#
+            r#"{{"scope_manifest_path":"{manifest_path}","scope_digest":"{manifest_digest}","scope_status":"resolved","overall_confidence":90,"critical_unknown_count":0,"scope_base_sha":"abc1234def5678901234567890abcdef12345678","scope_source":"post-merge-converge","proceed":true}}"#
         )
     }
 
@@ -1336,8 +1674,12 @@ mod tests {
         patch_path: &str,
         patch_digest: &str,
     ) -> String {
+        // U2: the redteam payload now carries resolved-threshold
+        // fields (`resolved_count: 1`, `coverage: 100`,
+        // `boundary_conflict: false`) so a `scope_status=resolved`
+        // payload passes the typed guard.
         format!(
-            r#"{{"scope_manifest_path":"{manifest_path}","scope_digest":"{manifest_digest}","scope_status":"resolved","overall_confidence":90,"critical_unknown_count":0,"scope_base_sha":"abc1234def5678901234567890abcdef12345678","resolved_patch_path":"{patch_path}","patch_digest":"{patch_digest}"}}"#
+            r#"{{"scope_manifest_path":"{manifest_path}","scope_digest":"{manifest_digest}","scope_status":"resolved","overall_confidence":100,"critical_unknown_count":0,"scope_base_sha":"abc1234def5678901234567890abcdef12345678","resolved_patch_path":"{patch_path}","patch_digest":"{patch_digest}","resolved_count":1,"coverage":100,"boundary_conflict":false}}"#
         )
     }
 
@@ -1436,10 +1778,13 @@ mod tests {
     #[test]
     fn postmerge_changemap_accepts_real_artifact() {
         let root = tempfile::tempdir().expect("tempdir");
-        let (digest, _) = write_artifact(
+        // U1 (R4) + U2 (R5): manifest fields match the payload
+        // fields exactly (scope_source="post-merge-converge") so the
+        // typed equality check accepts.
+        let (digest, _) = write_scope_manifest(
             root.path(),
             ".ralph/post-merge/scope-manifest.json",
-            br#"{"resolved":true}"#,
+            r#"{"scope_status":"resolved","overall_confidence":90,"critical_unknown_count":0,"scope_base_sha":"abc1234def5678901234567890abcdef12345678","scope_source":"post-merge-converge"}"#,
         );
         let payload = build_postmerge_payload(".ralph/post-merge/scope-manifest.json", &digest);
         let result = check_scope_handoff_guard("postmerge.changemap.ready", &payload, root.path());
@@ -1461,10 +1806,14 @@ mod tests {
     #[test]
     fn postmerge_changemap_rejects_wrong_digest() {
         let root = tempfile::tempdir().expect("tempdir");
-        write_artifact(
+        // U1 (R4) + U2 (R5): manifest carries typed decision fields
+        // so the guard's equality check would also fire if the
+        // declared digest had matched. We deliberately mismatch the
+        // declared digest to exercise the digest path first.
+        write_scope_manifest(
             root.path(),
             ".ralph/post-merge/scope-manifest.json",
-            br#"{"resolved":true}"#,
+            r#"{"scope_status":"resolved","overall_confidence":90,"critical_unknown_count":0,"scope_base_sha":"abc1234def5678901234567890abcdef12345678","scope_source":"direct-target"}"#,
         );
         let payload = build_postmerge_payload(
             ".ralph/post-merge/scope-manifest.json",
@@ -1479,11 +1828,17 @@ mod tests {
     #[test]
     fn redteam_plan_resolved_accepts_real_artifact() {
         let root = tempfile::tempdir().expect("tempdir");
-        let (manifest_digest, _) = write_artifact(
+        // U1 (R4) + U2 (R5): manifest carries the typed decision
+        // fields (`scope_status`, `overall_confidence`,
+        // `critical_unknown_count`, `scope_base_sha`) and matches the
+        // payload fields 1:1.
+        let (manifest_digest, _) = write_scope_manifest(
             root.path(),
             ".ralph/red-team/scope-manifest.json",
-            br#"{"resolved":true}"#,
+            r#"{"scope_status":"resolved","overall_confidence":100,"critical_unknown_count":0,"scope_base_sha":"abc1234def5678901234567890abcdef12345678"}"#,
         );
+        // Patch digest stays as raw SHA-256 (U1 §13 preserves patch
+        // semantics).
         let (patch_digest, _) = write_artifact(
             root.path(),
             ".ralph/red-team/resolved-patch.json",
@@ -1507,6 +1862,9 @@ mod tests {
             ".ralph/red-team/resolved-patch.json",
             br#"{"patches":["a"]}"#,
         );
+        // Manifest file intentionally absent; the guard must reject the
+        // digest field on the missing file rather than letting the
+        // patch digest path run.
         let payload = build_redteam_payload(
             ".ralph/red-team/scope-manifest.json",
             "0000000000000000000000000000000000000000000000000000000000000000",
@@ -1521,10 +1879,13 @@ mod tests {
     #[test]
     fn redteam_plan_resolved_rejects_wrong_patch_digest() {
         let root = tempfile::tempdir().expect("tempdir");
-        let (manifest_digest, _) = write_artifact(
+        // U1: manifest uses canonical self-excluding digest so the
+        // guard passes the manifest digest branch and exercises the
+        // patch digest branch with the wrong declared value.
+        let (manifest_digest, _) = write_scope_manifest(
             root.path(),
             ".ralph/red-team/scope-manifest.json",
-            br#"{"resolved":true}"#,
+            r#"{"scope_status":"resolved","overall_confidence":100,"critical_unknown_count":0,"scope_base_sha":"abc1234def5678901234567890abcdef12345678"}"#,
         );
         write_artifact(
             root.path(),
@@ -1585,5 +1946,949 @@ mod tests {
         let result = check_scope_handoff_guard("merge.integrated", "", root.path());
         let err = result.expect_err("empty payload must reject");
         assert_eq!(err.reason_code, "scope_handoff_inconsistent");
+    }
+
+    // ──────────────────────────────────────────────────────────────────
+    // U1 (2026-08-10-002 plan, R4): canonical self-excluding digest tests
+    // for scope manifests. The producer computes the digest over the
+    // canonical JSON bytes after stripping `scope_digest`; the guard
+    // recomputes the same bytes. The contract pins producer and guard
+    // to identical input so `scope_digest` self-mutation does not
+    // change the digest input.
+    // ──────────────────────────────────────────────────────────────────
+
+    /// Helper for the U1 canonical-digest unit tests: build a scope
+    /// manifest with the declared `scope_digest` value, compute the
+    /// canonical self-excluding SHA-256, and return both. Lets a test
+    /// rewrite the manifest's `scope_digest` field after the fact and
+    /// still observe that the canonical bytes are stable.
+    fn canonical_scope_digest(body: &str, declared_digest: &str) -> String {
+        let mut value: serde_json::Value =
+            serde_json::from_str(body).expect("valid manifest JSON");
+        if let Some(object) = value.as_object_mut() {
+            object.insert(
+                "scope_digest".to_string(),
+                serde_json::Value::String(declared_digest.to_string()),
+            );
+        }
+        if let Some(object) = value.as_object_mut() {
+            object.remove("scope_digest");
+        }
+        let mut canonical = serde_json::to_vec(&value).expect("canonical JSON");
+        canonical.push(b'\n');
+        let mut hasher = Sha256::new();
+        hasher.update(canonical);
+        format!("{:x}", hasher.finalize())
+    }
+
+    #[test]
+    fn scope_manifest_canonical_digest_excludes_self() {
+        // R4: producer and guard share one canonicalizer. The declared
+        // `scope_digest` value is not part of the digest input.
+        let body = r#"{"scope_status":"resolved","overall_confidence":90}"#;
+        let declared = "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef";
+        let digest = canonical_scope_digest(body, declared);
+        // Same body with any other `scope_digest` value yields the same
+        // canonical digest.
+        let digest_with_other_self = canonical_scope_digest(body, "0".repeat(64).as_str());
+        assert_eq!(
+            digest, digest_with_other_self,
+            "scope_digest self-field must not affect canonical digest input"
+        );
+        // Sanity: mutating a real field changes the digest.
+        let other_body = r#"{"scope_status":"resolved","overall_confidence":91}"#;
+        let other_digest = canonical_scope_digest(other_body, declared);
+        assert_ne!(
+            digest, other_digest,
+            "content mutation must change the canonical digest"
+        );
+    }
+
+    #[test]
+    fn scope_manifest_canonical_digest_handles_field_order() {
+        // serde_json serializes object maps with stable key ordering,
+        // so the producer-written order does not matter for the
+        // canonical digest.
+        let body_a = r#"{"alpha":1,"beta":2,"scope_status":"resolved"}"#;
+        let body_b = r#"{"beta":2,"alpha":1,"scope_status":"resolved"}"#;
+        let digest_a = canonical_scope_digest(body_a, "x");
+        let digest_b = canonical_scope_digest(body_b, "x");
+        assert_eq!(
+            digest_a, digest_b,
+            "field order in the source body must not change the canonical digest"
+        );
+    }
+
+    #[test]
+    fn verify_scope_manifest_digest_accepts_canonical_match() {
+        // Direct helper round-trip: write a manifest with the canonical
+        // digest embedded, then verify it accepts.
+        let root = tempfile::tempdir().expect("tempdir");
+        let body = r#"{"scope_status":"resolved","overall_confidence":90}"#;
+        let (digest, _) = write_scope_manifest(
+            root.path(),
+            ".ralph/post-merge/scope-manifest.json",
+            body,
+        );
+        let result = verify_scope_manifest_digest(
+            root.path(),
+            ".ralph/post-merge/scope-manifest.json",
+            &digest,
+            "scope_digest",
+        );
+        assert!(result.is_ok(), "canonical digest match must accept: {result:?}");
+    }
+
+    #[test]
+    fn verify_scope_manifest_digest_rejects_tampered_content() {
+        // Mutate a business field after computing the digest and confirm
+        // the verifier rejects.
+        let root = tempfile::tempdir().expect("tempdir");
+        let body = r#"{"scope_status":"resolved","overall_confidence":90}"#;
+        let (digest, abs_path) = write_scope_manifest(
+            root.path(),
+            ".ralph/post-merge/scope-manifest.json",
+            body,
+        );
+        // Tamper with the business field but leave `scope_digest` intact.
+        let tampered = r#"{"scope_status":"resolved","overall_confidence":100}"#;
+        let mut value: serde_json::Value =
+            serde_json::from_str(tampered).expect("valid JSON");
+        if let Some(object) = value.as_object_mut() {
+            object.insert(
+                "scope_digest".to_string(),
+                serde_json::Value::String(digest.clone()),
+            );
+        }
+        std::fs::write(
+            &abs_path,
+            serde_json::to_string(&value).expect("serialize").as_bytes(),
+        )
+        .expect("rewrite manifest");
+        let result = verify_scope_manifest_digest(
+            root.path(),
+            ".ralph/post-merge/scope-manifest.json",
+            &digest,
+            "scope_digest",
+        );
+        let err = result.expect_err("tampered manifest must reject");
+        assert_eq!(err.reason_code, "scope_handoff_inconsistent");
+        assert!(err.message.contains("scope_digest"));
+    }
+
+    #[test]
+    fn verify_scope_manifest_digest_rejects_malformed_json() {
+        // Manifest that is not parseable JSON must reject without
+        // panicking on the unwrap-style serialization path.
+        let root = tempfile::tempdir().expect("tempdir");
+        let abs = root.path().join(".ralph/post-merge/scope-manifest.json");
+        std::fs::create_dir_all(abs.parent().unwrap()).expect("create parent");
+        std::fs::write(&abs, b"this is not JSON").expect("write manifest");
+        let result = verify_scope_manifest_digest(
+            root.path(),
+            ".ralph/post-merge/scope-manifest.json",
+            "0000000000000000000000000000000000000000000000000000000000000000",
+            "scope_digest",
+        );
+        let err = result.expect_err("malformed JSON must reject");
+        assert_eq!(err.reason_code, "scope_handoff_inconsistent");
+        assert!(err.message.contains("not valid JSON"));
+    }
+
+    #[test]
+    fn verify_scope_manifest_digest_rejects_missing_file() {
+        // U5 (R5/A2): the verifier now threads a canonical PathBuf
+        // from `validate_scoped_artifact_path`, so the missing-file
+        // path is rejected at the canonicalize step (the file
+        // doesn't exist on disk yet) rather than at the read step.
+        // The error reason_code stays the same; the message now
+        // names the validator failure instead of the read failure.
+        let root = tempfile::tempdir().expect("tempdir");
+        let result = verify_scope_manifest_digest(
+            root.path(),
+            ".ralph/post-merge/missing.json",
+            "0000000000000000000000000000000000000000000000000000000000000000",
+            "scope_digest",
+        );
+        let err = result.expect_err("missing manifest must reject");
+        assert_eq!(err.reason_code, "scope_handoff_inconsistent");
+        assert!(
+            err.message.contains("does not exist") || err.message.contains("could not read"),
+            "error must surface either canonicalize or read failure: {}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn verify_scope_manifest_digest_accepts_non_object() {
+        // Scope manifest that parses to a JSON array (not object) is
+        // structurally invalid: there is no `scope_digest` to strip, and
+        // the producer contract requires an object. We accept the
+        // canonicalization as long as the digest match succeeds — the
+        // canonical form is still well-defined and the verifier does
+        // not need to enforce object shape here (object-shape is owned
+        // by the typed guard in U2). This test pins the current
+        // verifier contract: non-object manifests with matching digest
+        // are accepted at the digest layer.
+        let root = tempfile::tempdir().expect("tempdir");
+        let abs = root.path().join(".ralph/post-merge/scope-manifest.json");
+        std::fs::create_dir_all(abs.parent().unwrap()).expect("create parent");
+        std::fs::write(&abs, b"[1,2,3]").expect("write manifest");
+        // For a non-object, the canonical bytes are the array bytes
+        // with a trailing newline.
+        let mut hasher = Sha256::new();
+        hasher.update(b"[1,2,3]\n");
+        let digest = format!("{:x}", hasher.finalize());
+        let result = verify_scope_manifest_digest(
+            root.path(),
+            ".ralph/post-merge/scope-manifest.json",
+            &digest,
+            "scope_digest",
+        );
+        assert!(
+            result.is_ok(),
+            "non-object manifest with matching canonical digest must accept: {result:?}"
+        );
+    }
+
+    #[test]
+    fn patch_artifact_digest_still_uses_raw_bytes() {
+        // U1 §13: patch digest semantics are NOT changed. Verify by
+        // writing a patch with arbitrary bytes and confirming the raw
+        // SHA-256 is the verified value (the canonical path strips
+        // nothing and re-serializes the same bytes).
+        let root = tempfile::tempdir().expect("tempdir");
+        let abs = root.path().join(".ralph/red-team/resolved-patch.json");
+        std::fs::create_dir_all(abs.parent().unwrap()).expect("create parent");
+        let body = br#"{"patches":["a","b"]}"#;
+        std::fs::write(&abs, body).expect("write patch");
+        let mut hasher = Sha256::new();
+        hasher.update(body);
+        let raw_digest = format!("{:x}", hasher.finalize());
+        let result = verify_artifact_digest(
+            root.path(),
+            ".ralph/red-team/resolved-patch.json",
+            &raw_digest,
+            "patch_digest",
+        );
+        assert!(
+            result.is_ok(),
+            "raw-byte patch digest must still accept: {result:?}"
+        );
+    }
+
+    // ──────────────────────────────────────────────────────────────────
+    // U2 (2026-08-10-002 plan, R5/D4): typed equality + threshold
+    // checks. Each test exercises the typed guard's reject path on a
+    // real manifest under the scope topic; the digest path is kept
+    // green by writing the canonical manifest body.
+    // ──────────────────────────────────────────────────────────────────
+
+    fn build_redteam_payload_full(
+        manifest_path: &str,
+        manifest_digest: &str,
+        patch_path: &str,
+        patch_digest: &str,
+        extra: &[(&str, serde_json::Value)],
+    ) -> String {
+        // Use a BTreeMap so the JSON object key order is sorted (the
+        // guard parses the payload string as a JSON object; an array
+        // would short-circuit at the expect_scope_payload_object guard
+        // rather than exercising the typed decision checks).
+        let mut fields: std::collections::BTreeMap<String, serde_json::Value> =
+            std::collections::BTreeMap::new();
+        fields.insert(
+            "scope_manifest_path".to_string(),
+            serde_json::Value::String(manifest_path.to_string()),
+        );
+        fields.insert(
+            "scope_digest".to_string(),
+            serde_json::Value::String(manifest_digest.to_string()),
+        );
+        fields.insert(
+            "scope_status".to_string(),
+            serde_json::Value::String("resolved".to_string()),
+        );
+        fields.insert(
+            "overall_confidence".to_string(),
+            serde_json::Value::Number(serde_json::Number::from(100u64)),
+        );
+        fields.insert(
+            "critical_unknown_count".to_string(),
+            serde_json::Value::Number(serde_json::Number::from(0u64)),
+        );
+        fields.insert(
+            "scope_base_sha".to_string(),
+            serde_json::Value::String("abc1234def5678901234567890abcdef12345678".to_string()),
+        );
+        fields.insert(
+            "resolved_patch_path".to_string(),
+            serde_json::Value::String(patch_path.to_string()),
+        );
+        fields.insert(
+            "patch_digest".to_string(),
+            serde_json::Value::String(patch_digest.to_string()),
+        );
+        fields.insert(
+            "resolved_count".to_string(),
+            serde_json::Value::Number(serde_json::Number::from(1u64)),
+        );
+        fields.insert(
+            "coverage".to_string(),
+            serde_json::Value::Number(serde_json::Number::from(100u64)),
+        );
+        fields.insert("boundary_conflict".to_string(), serde_json::Value::Bool(false));
+        for (k, v) in extra {
+            fields.insert(k.to_string(), v.clone());
+        }
+        serde_json::to_string(&fields).expect("serialize payload")
+    }
+
+    #[test]
+    fn redteam_resolved_threshold_rejects_low_confidence() {
+        // U2 (R2): resolved + overall_confidence=89 must reject via the
+        // typed threshold guard (not a payload_consistency rule).
+        let root = tempfile::tempdir().expect("tempdir");
+        let (manifest_digest, _) = write_scope_manifest(
+            root.path(),
+            ".ralph/red-team/scope-manifest.json",
+            r#"{"scope_status":"resolved","overall_confidence":100,"critical_unknown_count":0,"scope_base_sha":"abc1234def5678901234567890abcdef12345678"}"#,
+        );
+        let (patch_digest, _) = write_artifact(
+            root.path(),
+            ".ralph/red-team/resolved-patch.json",
+            br#"{"patches":["a"]}"#,
+        );
+        let payload = build_redteam_payload_full(
+            ".ralph/red-team/scope-manifest.json",
+            &manifest_digest,
+            ".ralph/red-team/resolved-patch.json",
+            &patch_digest,
+            &[("overall_confidence", serde_json::Value::Number(serde_json::Number::from(89u64)))],
+        );
+        let result = check_scope_handoff_guard("redteam.plan.resolved", &payload, root.path());
+        let err = result.expect_err("low confidence resolved must reject");
+        assert_eq!(err.reason_code, "scope_handoff_inconsistent");
+        assert!(err.message.contains("overall_confidence"));
+    }
+
+    #[test]
+    fn redteam_resolved_threshold_rejects_critical_unknown() {
+        // U2 (R2): resolved + critical_unknown_count > 0 must reject.
+        let root = tempfile::tempdir().expect("tempdir");
+        let (manifest_digest, _) = write_scope_manifest(
+            root.path(),
+            ".ralph/red-team/scope-manifest.json",
+            r#"{"scope_status":"resolved","overall_confidence":100,"critical_unknown_count":0,"scope_base_sha":"abc1234def5678901234567890abcdef12345678"}"#,
+        );
+        let (patch_digest, _) = write_artifact(
+            root.path(),
+            ".ralph/red-team/resolved-patch.json",
+            br#"{"patches":["a"]}"#,
+        );
+        let payload = build_redteam_payload_full(
+            ".ralph/red-team/scope-manifest.json",
+            &manifest_digest,
+            ".ralph/red-team/resolved-patch.json",
+            &patch_digest,
+            &[("critical_unknown_count", serde_json::Value::Number(serde_json::Number::from(1u64)))],
+        );
+        let result = check_scope_handoff_guard("redteam.plan.resolved", &payload, root.path());
+        let err = result.expect_err("critical unknown resolved must reject");
+        assert_eq!(err.reason_code, "scope_handoff_inconsistent");
+        assert!(err.message.contains("critical_unknown_count"));
+    }
+
+    #[test]
+    fn redteam_resolved_threshold_rejects_zero_resolved_count() {
+        // U2 (R2): resolved + resolved_count=0 must reject.
+        let root = tempfile::tempdir().expect("tempdir");
+        let (manifest_digest, _) = write_scope_manifest(
+            root.path(),
+            ".ralph/red-team/scope-manifest.json",
+            r#"{"scope_status":"resolved","overall_confidence":100,"critical_unknown_count":0,"scope_base_sha":"abc1234def5678901234567890abcdef12345678"}"#,
+        );
+        let (patch_digest, _) = write_artifact(
+            root.path(),
+            ".ralph/red-team/resolved-patch.json",
+            br#"{"patches":["a"]}"#,
+        );
+        let payload = build_redteam_payload_full(
+            ".ralph/red-team/scope-manifest.json",
+            &manifest_digest,
+            ".ralph/red-team/resolved-patch.json",
+            &patch_digest,
+            &[("resolved_count", serde_json::Value::Number(serde_json::Number::from(0u64)))],
+        );
+        let result = check_scope_handoff_guard("redteam.plan.resolved", &payload, root.path());
+        let err = result.expect_err("zero resolved_count must reject");
+        assert_eq!(err.reason_code, "scope_handoff_inconsistent");
+        assert!(err.message.contains("resolved_count"));
+    }
+
+    #[test]
+    fn redteam_resolved_threshold_rejects_low_coverage() {
+        // U2 (R2): resolved + coverage<90 must reject.
+        let root = tempfile::tempdir().expect("tempdir");
+        let (manifest_digest, _) = write_scope_manifest(
+            root.path(),
+            ".ralph/red-team/scope-manifest.json",
+            r#"{"scope_status":"resolved","overall_confidence":100,"critical_unknown_count":0,"scope_base_sha":"abc1234def5678901234567890abcdef12345678"}"#,
+        );
+        let (patch_digest, _) = write_artifact(
+            root.path(),
+            ".ralph/red-team/resolved-patch.json",
+            br#"{"patches":["a"]}"#,
+        );
+        let payload = build_redteam_payload_full(
+            ".ralph/red-team/scope-manifest.json",
+            &manifest_digest,
+            ".ralph/red-team/resolved-patch.json",
+            &patch_digest,
+            &[("coverage", serde_json::Value::Number(serde_json::Number::from(89u64)))],
+        );
+        let result = check_scope_handoff_guard("redteam.plan.resolved", &payload, root.path());
+        let err = result.expect_err("low coverage resolved must reject");
+        assert_eq!(err.reason_code, "scope_handoff_inconsistent");
+        assert!(err.message.contains("coverage"));
+    }
+
+    #[test]
+    fn redteam_resolved_threshold_rejects_boundary_conflict() {
+        // U2 (R2): resolved + boundary_conflict=true must reject.
+        let root = tempfile::tempdir().expect("tempdir");
+        let (manifest_digest, _) = write_scope_manifest(
+            root.path(),
+            ".ralph/red-team/scope-manifest.json",
+            r#"{"scope_status":"resolved","overall_confidence":100,"critical_unknown_count":0,"scope_base_sha":"abc1234def5678901234567890abcdef12345678"}"#,
+        );
+        let (patch_digest, _) = write_artifact(
+            root.path(),
+            ".ralph/red-team/resolved-patch.json",
+            br#"{"patches":["a"]}"#,
+        );
+        let payload = build_redteam_payload_full(
+            ".ralph/red-team/scope-manifest.json",
+            &manifest_digest,
+            ".ralph/red-team/resolved-patch.json",
+            &patch_digest,
+            &[("boundary_conflict", serde_json::Value::Bool(true))],
+        );
+        let result = check_scope_handoff_guard("redteam.plan.resolved", &payload, root.path());
+        let err = result.expect_err("boundary_conflict=true must reject");
+        assert_eq!(err.reason_code, "scope_handoff_inconsistent");
+        assert!(err.message.contains("boundary_conflict"));
+    }
+
+    #[test]
+    fn redteam_payload_manifest_mismatch_rejects() {
+        // U2 (R5): payload disagrees with manifest on scope_status must
+        // reject.
+        let root = tempfile::tempdir().expect("tempdir");
+        let (manifest_digest, _) = write_scope_manifest(
+            root.path(),
+            ".ralph/red-team/scope-manifest.json",
+            r#"{"scope_status":"resolved","overall_confidence":100,"critical_unknown_count":0,"scope_base_sha":"abc1234def5678901234567890abcdef12345678"}"#,
+        );
+        let (patch_digest, _) = write_artifact(
+            root.path(),
+            ".ralph/red-team/resolved-patch.json",
+            br#"{"patches":["a"]}"#,
+        );
+        // Payload declares scope_status=blocked while manifest says resolved.
+        let payload = build_redteam_payload_full(
+            ".ralph/red-team/scope-manifest.json",
+            &manifest_digest,
+            ".ralph/red-team/resolved-patch.json",
+            &patch_digest,
+            &[("scope_status", serde_json::Value::String("blocked".to_string()))],
+        );
+        let result = check_scope_handoff_guard("redteam.plan.resolved", &payload, root.path());
+        let err = result.expect_err("payload/manifest mismatch must reject");
+        assert_eq!(err.reason_code, "scope_handoff_inconsistent");
+        assert!(err.message.contains("scope_status"));
+    }
+
+    #[test]
+    fn redteam_manifest_not_json_object_rejects() {
+        // U2 (R5/D8): a scope manifest that is not a JSON object
+        // fails the typed guard (no top-level fields to compare). This
+        // is the fail-close branch D8 forbids fallback for.
+        let root = tempfile::tempdir().expect("tempdir");
+        let abs = root.path().join(".ralph/red-team/scope-manifest.json");
+        std::fs::create_dir_all(abs.parent().unwrap()).expect("create parent");
+        let manifest_bytes: Vec<u8> = {
+            let mut v = b"[1,2,3]".to_vec();
+            v.push(b'\n');
+            v
+        };
+        std::fs::write(&abs, &manifest_bytes).expect("write manifest");
+        // Compute a digest that matches the canonical bytes (raw bytes
+        // plus trailing newline) so the digest path passes; the typed
+        // equality check then rejects the array shape.
+        let mut hasher = Sha256::new();
+        hasher.update(&manifest_bytes);
+        let digest = format!("{:x}", hasher.finalize());
+        let (patch_digest, _) = write_artifact(
+            root.path(),
+            ".ralph/red-team/resolved-patch.json",
+            br#"{"patches":["a"]}"#,
+        );
+        let payload = format!(
+            r#"{{"scope_manifest_path":".ralph/red-team/scope-manifest.json","scope_digest":"{digest}","scope_status":"resolved","overall_confidence":100,"critical_unknown_count":0,"scope_base_sha":"abc1234def5678901234567890abcdef12345678","resolved_patch_path":".ralph/red-team/resolved-patch.json","patch_digest":"{patch_digest}","resolved_count":1,"coverage":100,"boundary_conflict":false}}"#
+        );
+        let result = check_scope_handoff_guard("redteam.plan.resolved", &payload, root.path());
+        let err = result.expect_err("non-object manifest must reject");
+        assert_eq!(err.reason_code, "scope_handoff_inconsistent");
+        assert!(err.message.contains("JSON object"));
+    }
+
+    #[test]
+    fn postmerge_resolved_threshold_rejects_low_confidence() {
+        // U2 (R2): postmerge resolved + overall_confidence=89 must
+        // reject.
+        let root = tempfile::tempdir().expect("tempdir");
+        let (manifest_digest, _) = write_scope_manifest(
+            root.path(),
+            ".ralph/post-merge/scope-manifest.json",
+            r#"{"scope_status":"resolved","overall_confidence":90,"critical_unknown_count":0,"scope_base_sha":"abc1234def5678901234567890abcdef12345678","scope_source":"post-merge-converge"}"#,
+        );
+        let payload = format!(
+            r#"{{"scope_manifest_path":".ralph/post-merge/scope-manifest.json","scope_digest":"{manifest_digest}","scope_status":"resolved","overall_confidence":89,"critical_unknown_count":0,"scope_base_sha":"abc1234def5678901234567890abcdef12345678","scope_source":"post-merge-converge","proceed":true}}"#
+        );
+        let result = check_scope_handoff_guard("postmerge.changemap.ready", &payload, root.path());
+        let err = result.expect_err("low confidence resolved must reject");
+        assert_eq!(err.reason_code, "scope_handoff_inconsistent");
+        assert!(err.message.contains("overall_confidence"));
+    }
+
+    #[test]
+    fn postmerge_resolved_threshold_rejects_critical_unknown() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let (manifest_digest, _) = write_scope_manifest(
+            root.path(),
+            ".ralph/post-merge/scope-manifest.json",
+            r#"{"scope_status":"resolved","overall_confidence":90,"critical_unknown_count":0,"scope_base_sha":"abc1234def5678901234567890abcdef12345678","scope_source":"post-merge-converge"}"#,
+        );
+        let payload = format!(
+            r#"{{"scope_manifest_path":".ralph/post-merge/scope-manifest.json","scope_digest":"{manifest_digest}","scope_status":"resolved","overall_confidence":90,"critical_unknown_count":1,"scope_base_sha":"abc1234def5678901234567890abcdef12345678","scope_source":"post-merge-converge","proceed":true}}"#
+        );
+        let result = check_scope_handoff_guard("postmerge.changemap.ready", &payload, root.path());
+        let err = result.expect_err("critical unknown resolved must reject");
+        assert_eq!(err.reason_code, "scope_handoff_inconsistent");
+        assert!(err.message.contains("critical_unknown_count"));
+    }
+
+    #[test]
+    fn postmerge_resolved_rejects_proceed_false() {
+        // U2 (D4): resolved + proceed=false must reject.
+        let root = tempfile::tempdir().expect("tempdir");
+        let (manifest_digest, _) = write_scope_manifest(
+            root.path(),
+            ".ralph/post-merge/scope-manifest.json",
+            r#"{"scope_status":"resolved","overall_confidence":90,"critical_unknown_count":0,"scope_base_sha":"abc1234def5678901234567890abcdef12345678","scope_source":"post-merge-converge"}"#,
+        );
+        let payload = format!(
+            r#"{{"scope_manifest_path":".ralph/post-merge/scope-manifest.json","scope_digest":"{manifest_digest}","scope_status":"resolved","overall_confidence":90,"critical_unknown_count":0,"scope_base_sha":"abc1234def5678901234567890abcdef12345678","scope_source":"post-merge-converge","proceed":false}}"#
+        );
+        let result = check_scope_handoff_guard("postmerge.changemap.ready", &payload, root.path());
+        let err = result.expect_err("resolved+proceed=false must reject");
+        assert_eq!(err.reason_code, "scope_handoff_inconsistent");
+        assert!(err.message.contains("proceed"));
+    }
+
+    #[test]
+    fn postmerge_blocked_rejects_proceed_true() {
+        // U2 (D4): blocked/ambiguous + proceed=true must reject.
+        let root = tempfile::tempdir().expect("tempdir");
+        let (manifest_digest, _) = write_scope_manifest(
+            root.path(),
+            ".ralph/post-merge/scope-manifest.json",
+            r#"{"scope_status":"blocked","overall_confidence":50,"critical_unknown_count":2,"scope_base_sha":"abc1234def5678901234567890abcdef12345678","scope_source":"post-merge-converge"}"#,
+        );
+        let payload = format!(
+            r#"{{"scope_manifest_path":".ralph/post-merge/scope-manifest.json","scope_digest":"{manifest_digest}","scope_status":"blocked","overall_confidence":50,"critical_unknown_count":2,"scope_base_sha":"abc1234def5678901234567890abcdef12345678","scope_source":"post-merge-converge","proceed":true}}"#
+        );
+        let result = check_scope_handoff_guard("postmerge.changemap.ready", &payload, root.path());
+        let err = result.expect_err("blocked+proceed=true must reject");
+        assert_eq!(err.reason_code, "scope_handoff_inconsistent");
+        assert!(err.message.contains("proceed"));
+    }
+
+    #[test]
+    fn postmerge_payload_manifest_mismatch_rejects() {
+        // U2 (R5): postmerge payload disagrees with manifest on
+        // overall_confidence must reject.
+        let root = tempfile::tempdir().expect("tempdir");
+        let (manifest_digest, _) = write_scope_manifest(
+            root.path(),
+            ".ralph/post-merge/scope-manifest.json",
+            r#"{"scope_status":"resolved","overall_confidence":90,"critical_unknown_count":0,"scope_base_sha":"abc1234def5678901234567890abcdef12345678","scope_source":"post-merge-converge"}"#,
+        );
+        let payload = format!(
+            r#"{{"scope_manifest_path":".ralph/post-merge/scope-manifest.json","scope_digest":"{manifest_digest}","scope_status":"resolved","overall_confidence":100,"critical_unknown_count":0,"scope_base_sha":"abc1234def5678901234567890abcdef12345678","scope_source":"post-merge-converge","proceed":true}}"#
+        );
+        let result = check_scope_handoff_guard("postmerge.changemap.ready", &payload, root.path());
+        let err = result.expect_err("payload/manifest mismatch must reject");
+        assert_eq!(err.reason_code, "scope_handoff_inconsistent");
+        assert!(err.message.contains("overall_confidence"));
+    }
+
+    #[test]
+    fn redteam_manifest_missing_field_payload_present_rejects() {
+        // U2 (R5): payload carries a field the manifest does not. The
+        // typed equality guard treats present/absent as a mismatch.
+        let root = tempfile::tempdir().expect("tempdir");
+        // Manifest does NOT carry overall_confidence.
+        let (manifest_digest, _) = write_scope_manifest(
+            root.path(),
+            ".ralph/red-team/scope-manifest.json",
+            r#"{"scope_status":"resolved","critical_unknown_count":0,"scope_base_sha":"abc1234def5678901234567890abcdef12345678"}"#,
+        );
+        let (patch_digest, _) = write_artifact(
+            root.path(),
+            ".ralph/red-team/resolved-patch.json",
+            br#"{"patches":["a"]}"#,
+        );
+        let payload = build_redteam_payload(
+            ".ralph/red-team/scope-manifest.json",
+            &manifest_digest,
+            ".ralph/red-team/resolved-patch.json",
+            &patch_digest,
+        );
+        let result = check_scope_handoff_guard("redteam.plan.resolved", &payload, root.path());
+        let err = result.expect_err("manifest-missing-field mismatch must reject");
+        assert_eq!(err.reason_code, "scope_handoff_inconsistent");
+        assert!(err.message.contains("overall_confidence"));
+    }
+
+    // ──────────────────────────────────────────────────────────────────────
+    // 2026-08-10-002 fix-plan Unit 1 (R1/R2/C1/TC1) + Unit 2 (R3/A1)
+    // + Unit 2 (R4/A3 input-validation leg) regression tests.
+    //
+    // The tests below are pure helper-level — they bypass the on-disk
+    // artifact path required by `check_scope_handoff_guard` and assert
+    // the typed threshold + typed bool + bounded string readers
+    // directly. This isolates the regression to the reader surface
+    // (the previous `as_u64().unwrap_or(0)` coerce site) without
+    // having to stage a real manifest + patch + canonical digest.
+    // ──────────────────────────────────────────────────────────────────────
+
+    /// TC1 (plan 2026-08-10-002): the typed threshold reader MUST
+    /// reject `critical_unknown_count: -1` with a `scope_handoff_inconsistent`
+    /// error whose message names the field and the offending value.
+    /// The previous `as_u64().unwrap_or(0)` pattern silently coerced
+    /// this to `0` and passed the gate.
+    #[test]
+    fn typed_threshold_rejects_negative_critical_unknown_count() {
+        let mut obj = serde_json::Map::new();
+        obj.insert(
+            "critical_unknown_count".to_string(),
+            serde_json::Value::Number((-1).into()),
+        );
+        let err = typed_threshold_u64(
+            &obj,
+            "critical_unknown_count",
+            "redteam.plan.resolved",
+            true,
+            0,
+        )
+        .expect_err("negative integer must reject");
+        assert_eq!(err.reason_code, "scope_handoff_inconsistent");
+        assert_eq!(err.field, "critical_unknown_count");
+        assert!(
+            err.message.contains("critical_unknown_count"),
+            "message must name field: {}",
+            err.message
+        );
+        assert!(
+            err.message.contains("-1"),
+            "message must surface actual value, not 0: {}",
+            err.message
+        );
+    }
+
+    /// TC1 boundary: `critical_unknown_count: 0` + `scope_status: resolved`
+    /// must still pass (the happy path the previous code accidentally
+    /// passed; the fix must not regress it).
+    #[test]
+    fn typed_threshold_accepts_zero_critical_unknown_count() {
+        let mut obj = serde_json::Map::new();
+        obj.insert(
+            "critical_unknown_count".to_string(),
+            serde_json::Value::Number(0.into()),
+        );
+        let result = typed_threshold_u64(
+            &obj,
+            "critical_unknown_count",
+            "redteam.plan.resolved",
+            true,
+            0,
+        );
+        assert_eq!(result, Ok(0));
+    }
+
+    /// TC1 type guard: `critical_unknown_count: "0"` (string) must be
+    /// rejected. The previous `as_u64()` returned `None` for strings
+    /// and `unwrap_or(0)` then coerced to `0`; the typed reader
+    /// surfaces the type mismatch instead of silently passing.
+    #[test]
+    fn typed_threshold_rejects_string_zero() {
+        let mut obj = serde_json::Map::new();
+        obj.insert(
+            "critical_unknown_count".to_string(),
+            serde_json::Value::String("0".to_string()),
+        );
+        let err = typed_threshold_u64(
+            &obj,
+            "critical_unknown_count",
+            "redteam.plan.resolved",
+            true,
+            0,
+        )
+        .expect_err("string-encoded integer must reject");
+        assert_eq!(err.reason_code, "scope_handoff_inconsistent");
+        assert!(
+            err.message.contains("string"),
+            "message must surface the actual type: {}",
+            err.message
+        );
+    }
+
+    /// U2 (R3/A1): `proceed: "true"` (string) on `postmerge.changemap.ready`
+    /// with `scope_status: blocked` must reject. The previous
+    /// `as_bool() == Some(true)` returned `Some(false)` for strings
+    /// (silently wrong), so the gate stayed open.
+    #[test]
+    fn typed_required_bool_rejects_string_proceed_true() {
+        let mut obj = serde_json::Map::new();
+        obj.insert(
+            "proceed".to_string(),
+            serde_json::Value::String("true".to_string()),
+        );
+        let err = typed_required_bool(&obj, "proceed", "postmerge.changemap.ready")
+            .expect_err("string-encoded bool must reject");
+        assert_eq!(err.reason_code, "scope_handoff_inconsistent");
+        assert_eq!(err.field, "proceed");
+        assert!(
+            err.message.contains("bool"),
+            "message must explain expected type: {}",
+            err.message
+        );
+    }
+
+    /// U2 (R3/A1): `proceed: true` (actual bool) on the same payload
+    /// must still surface the type reader as `Ok(Some(true))` so the
+    /// caller can keep its `if let Some(true) = ...` arms.
+    #[test]
+    fn typed_required_bool_accepts_real_bool_proceed_true() {
+        let mut obj = serde_json::Map::new();
+        obj.insert("proceed".to_string(), serde_json::Value::Bool(true));
+        let result = typed_required_bool(&obj, "proceed", "postmerge.changemap.ready");
+        assert_eq!(result, Ok(Some(true)));
+    }
+
+    /// U2 (R4/A3): `required_scope_string` (now backed by
+    /// `bounded_scope_string` with a 256-char cap) must reject a
+    /// 257-character path. The unbounded variant silently accepted
+    /// 4 KiB+ UTF-8 strings as long as lexical + canonicalize
+    /// passed.
+    #[test]
+    fn bounded_scope_string_rejects_oversize_path() {
+        let mut obj = serde_json::Map::new();
+        let oversize = "a".repeat(257);
+        obj.insert(
+            "scope_manifest_path".to_string(),
+            serde_json::Value::String(oversize.clone()),
+        );
+        let err = bounded_scope_string(&obj, "scope_manifest_path", "redteam.plan.resolved", 256)
+            .expect_err("oversize string must reject");
+        assert_eq!(err.reason_code, "scope_handoff_inconsistent");
+        assert_eq!(err.field, "scope_manifest_path");
+        assert!(
+            err.message.contains("256"),
+            "message must surface the limit: {}",
+            err.message
+        );
+    }
+
+    /// U2 (R4/A3): embedded control characters (`\n`, `\t`, etc.) in
+    /// a scope handoff string must reject. The unbounded variant
+    /// silently passed `manifest_path: "foo\nbar"` through.
+    #[test]
+    fn bounded_scope_string_rejects_control_chars() {
+        let mut obj = serde_json::Map::new();
+        obj.insert(
+            "scope_manifest_path".to_string(),
+            serde_json::Value::String("foo\nbar".to_string()),
+        );
+        let err = bounded_scope_string(&obj, "scope_manifest_path", "redteam.plan.resolved", 256)
+            .expect_err("control char must reject");
+        assert_eq!(err.reason_code, "scope_handoff_inconsistent");
+        assert!(err.message.contains("control"));
+    }
+
+    /// U2 (R3/A1) + scope_status=resolved + proceed=true: the typed
+    /// bool reader must surface `Ok(Some(true))` so the threshold
+    /// guard can keep its `if let Some(true)` match arm without a
+    /// panic. This pins the helper's positive path on a real bool.
+    #[test]
+    fn typed_required_bool_missing_field_returns_none() {
+        let obj = serde_json::Map::new();
+        let result = typed_required_bool(&obj, "proceed", "redteam.plan.resolved");
+        assert_eq!(result, Ok(None));
+    }
+
+    // ──────────────────────────────────────────────────────────────────────
+    // 2026-08-10-002 fix-plan Unit 5 (R5/A2) + Unit 6 (R9/M1/A4)
+    // regression tests.
+    //
+    // U5 closes the validator-to-verifier TOCTOU window by threading
+    // the canonical PathBuf into the parameterised helper. U6 collapses
+    // the two near-identical verifier bodies (`boundary_digest` /
+    // `scope_digest`) into one helper that takes the excluded field
+    // name as a parameter. The tests below exercise both helpers
+    // against the same temp manifest to prove the parameterised
+    // verifier stays behaviour-identical to the old two helpers.
+    // ──────────────────────────────────────────────────────────────────────
+
+    /// U6 (R9): the parameterised helper accepts
+    /// `excluded_field = "scope_digest"` and matches the declared
+    /// digest for a manifest where the self-referential field was
+    /// stripped before encoding (canonical self-excluding).
+    #[test]
+    fn verify_canonical_json_digest_excluding_accepts_scope_digest() {
+        let root = tempfile::tempdir().expect("tempdir");
+        // Build a manifest with a self-referential scope_digest
+        // placeholder, compute the canonical digest over the
+        // stripped bytes, then rewrite the file with the real
+        // digest so the verifier's canonicalization step produces
+        // the same bytes.
+        let body = r#"{"scope_status":"resolved","scope_base_sha":"abc1234def5678901234567890abcdef12345678"}"#;
+        let mut value: serde_json::Value = serde_json::from_str(body).expect("valid JSON");
+        if let Some(object) = value.as_object_mut() {
+            object.insert("scope_digest".to_string(), serde_json::json!("placeholder"));
+            object.remove("scope_digest");
+        }
+        let mut canonical = serde_json::to_vec(&value).expect("canonical JSON");
+        canonical.push(b'\n');
+        let mut hasher = Sha256::new();
+        hasher.update(&canonical);
+        let declared = format!("{:x}", hasher.finalize());
+        if let Some(object) = value.as_object_mut() {
+            object.insert("scope_digest".to_string(), serde_json::json!(declared.clone()));
+        }
+        let serialized = serde_json::to_string(&value).expect("serialize");
+        let abs = root.path().join(".ralph/post-merge/manifest.json");
+        std::fs::create_dir_all(abs.parent().unwrap()).expect("mkdir");
+        std::fs::write(&abs, serialized.as_bytes()).expect("write manifest");
+        let canonical_path = std::fs::canonicalize(&abs).expect("canonicalize");
+        let result = verify_canonical_json_digest_excluding(
+            &canonical_path,
+            &declared,
+            "scope_digest",
+            "scope_digest",
+        );
+        assert!(result.is_ok(), "expected Ok, got {:?}", result);
+    }
+
+    /// U6 (R9): the parameterised helper accepts
+    /// `excluded_field = "boundary_digest"` and matches the declared
+    /// digest for a merge-boundary-style manifest.
+    #[test]
+    fn verify_canonical_json_digest_excluding_accepts_boundary_digest() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let body = r#"{"merge_boundary_status":"complete","merge_integration_sha":"deadbeef1234567890abcdef1234567890abcdef12"}"#;
+        let mut value: serde_json::Value = serde_json::from_str(body).expect("valid JSON");
+        if let Some(object) = value.as_object_mut() {
+            object.insert("boundary_digest".to_string(), serde_json::json!("placeholder"));
+            object.remove("boundary_digest");
+        }
+        let mut canonical = serde_json::to_vec(&value).expect("canonical JSON");
+        canonical.push(b'\n');
+        let mut hasher = Sha256::new();
+        hasher.update(&canonical);
+        let declared = format!("{:x}", hasher.finalize());
+        if let Some(object) = value.as_object_mut() {
+            object.insert("boundary_digest".to_string(), serde_json::json!(declared.clone()));
+        }
+        let serialized = serde_json::to_string(&value).expect("serialize");
+        let abs = root.path().join(".ralph/merge/boundary.json");
+        std::fs::create_dir_all(abs.parent().unwrap()).expect("mkdir");
+        std::fs::write(&abs, serialized.as_bytes()).expect("write boundary");
+        let canonical_path = std::fs::canonicalize(&abs).expect("canonicalize");
+        let result = verify_canonical_json_digest_excluding(
+            &canonical_path,
+            &declared,
+            "boundary_digest",
+            "boundary_digest",
+        );
+        assert!(result.is_ok(), "expected Ok, got {:?}", result);
+    }
+
+    /// U6 (R9): tampering with a non-excluded field changes the
+    /// canonical bytes and the helper must reject with the same
+    /// digest-mismatch error shape regardless of which excluded
+    /// field is in play.
+    #[test]
+    fn verify_canonical_json_digest_excluding_rejects_tampered_field() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let body = r#"{"scope_status":"resolved","scope_base_sha":"abc1234def5678901234567890abcdef12345678","resolved_patch_path":".ralph/red-team/x.json"}"#;
+        let mut value: serde_json::Value = serde_json::from_str(body).expect("valid JSON");
+        if let Some(object) = value.as_object_mut() {
+            object.insert("scope_digest".to_string(), serde_json::json!("placeholder"));
+            object.remove("scope_digest");
+        }
+        let mut canonical = serde_json::to_vec(&value).expect("canonical JSON");
+        canonical.push(b'\n');
+        let mut hasher = Sha256::new();
+        hasher.update(&canonical);
+        let declared = format!("{:x}", hasher.finalize());
+        // Tamper with a non-excluded field after writing the digest
+        // so the recomputed digest differs.
+        if let Some(object) = value.as_object_mut() {
+            object.insert("scope_digest".to_string(), serde_json::json!(declared.clone()));
+            object.insert(
+                "resolved_patch_path".to_string(),
+                serde_json::json!("tampered.json"),
+            );
+        }
+        let serialized = serde_json::to_string(&value).expect("serialize");
+        let abs = root.path().join(".ralph/post-merge/manifest.json");
+        std::fs::create_dir_all(abs.parent().unwrap()).expect("mkdir");
+        std::fs::write(&abs, serialized.as_bytes()).expect("write manifest");
+        let canonical_path = std::fs::canonicalize(&abs).expect("canonicalize");
+        let err = verify_canonical_json_digest_excluding(
+            &canonical_path,
+            &declared,
+            "scope_digest",
+            "scope_digest",
+        )
+        .expect_err("tampered non-excluded field must reject");
+        assert_eq!(err.reason_code, "scope_handoff_inconsistent");
+        assert!(err.message.contains("does not match canonical"));
+    }
+
+    /// U5 (R5/A2): the verifier no longer accepts a path the
+    /// validator would reject. The wrapper calls
+    /// `validate_scoped_artifact_path` internally, so a path
+    /// outside the allowlist prefix must surface as a
+    /// `scope_handoff_inconsistent` error mentioning the prefix.
+    #[test]
+    fn verify_canonical_json_digest_wrapper_rejects_path_outside_allowlist() {
+        let root = tempfile::tempdir().expect("tempdir");
+        // Write a boundary manifest under the wrong prefix.
+        let abs = root.path().join("not-ralph/boundary.json");
+        std::fs::create_dir_all(abs.parent().unwrap()).expect("mkdir");
+        std::fs::write(&abs, br#"{"merge_boundary_status":"complete"}"#).expect("write");
+        let result = verify_canonical_json_digest(
+            root.path(),
+            "not-ralph/boundary.json",
+            "0000000000000000000000000000000000000000000000000000000000000000",
+            "merge_boundary_digest",
+        );
+        let err = result.expect_err("path outside allowlist must reject");
+        assert_eq!(err.reason_code, "scope_handoff_inconsistent");
+        assert!(err.message.contains("not-ralph") || err.message.contains("merge"));
     }
 }

@@ -215,15 +215,16 @@ event_loop:
     payload_consistency:
       enabled: true
       rules:
-        # D7: resolved requires overall >= 90
-        - id: redteam-scope-resolved-confidence
-          topic: redteam.plan.resolved
-          when:
-            all:
-              - {field: scope_status, eq: "resolved"}
-              - {field: overall_confidence, gt: 89}
-          message: "scope_status=resolved requires overall_confidence >= 90; received overall_confidence is below threshold."
-        # D7: resolved requires no critical unknown
+        # 2026-08-10-002 plan U3 (R1/R2/D4/D5): scope manifest
+        # payload_consistency rules. Resolved-status thresholds
+        # (overall_confidence, critical_unknown_count, resolved_count,
+        # coverage, boundary_conflict) are owned by the typed scope
+        # guard in `policy_check/gates.rs` — the rules below cover the
+        # cross-event contradictions the same-payload evaluator can
+        # express directly. Field/path/digest/format checks live with
+        # the typed guard and the schema (allowed_values, required_fields).
+        #
+        # D7: resolved requires no critical unknown.
         - id: redteam-scope-resolved-no-critical-unknown
           topic: redteam.plan.resolved
           when:
@@ -231,7 +232,7 @@ event_loop:
               - {field: scope_status, eq: "resolved"}
               - {field: critical_unknown_count, gt: 0}
           message: "scope_status=resolved requires critical_unknown_count == 0; received critical_unknown_count > 0."
-        # D7: resolved requires at least 1 resolved plan
+        # D7: resolved requires at least 1 resolved plan.
         - id: redteam-scope-resolved-count
           topic: redteam.plan.resolved
           when:
@@ -239,52 +240,7 @@ event_loop:
               - {field: scope_status, eq: "resolved"}
               - {field: resolved_count, eq: 0}
           message: "scope_status=resolved requires resolved_count >= 1; received resolved_count == 0."
-        # D5: scope_base_sha must not be a placeholder
-        - id: redteam-scope-base-no-placeholder
-          topic: redteam.plan.resolved
-          when:
-            field: scope_base_sha
-            exists: true
-          message: "scope_base_sha must be a 40-char Git SHA; received value appears to be a placeholder (<global-baseline>, TBD, <pending>, etc.)."
-        # D13: scope_manifest_path must be under .ralph/red-team/
-        - id: redteam-scope-manifest-path-root
-          topic: redteam.plan.resolved
-          when:
-            field: scope_manifest_path
-            exists: true
-          message: "scope_manifest_path must be under .ralph/red-team/; received path is outside the allowed directory."
-        # D13: resolved_patch_path must be under .ralph/red-team/
-        - id: redteam-scope-patch-path-root
-          topic: redteam.plan.resolved
-          when:
-            field: resolved_patch_path
-            exists: true
-          message: "resolved_patch_path must be under .ralph/red-team/; received path is outside the allowed directory."
-        # D3: patch_digest must be 64-char hex (type guard — fail-close on invalid)
-        - id: redteam-scope-patch-digest-format
-          topic: redteam.plan.resolved
-          when:
-            field: patch_digest
-            exists: true
-          message: "patch_digest must be a 64-character hexadecimal string; received value does not match the expected format."
-        # D7: overall_confidence must be 0/85/90/100 (type guard — fail-close on invalid)
-        - id: redteam-scope-confidence-allowed
-          topic: redteam.plan.resolved
-          when:
-            field: overall_confidence
-            exists: true
-          message: "overall_confidence must be 0, 85, 90, or 100; received value is not in the allowed set."
-        # U6: resolved requires overall_confidence >= 90 (already gated by existing
-        # redteam-scope-resolved-confidence rule using gt:89, equivalent to >=90)
-        # U6: resolved requires coverage >= 90
-        - id: redteam-scope-resolved-coverage-90
-          topic: redteam.plan.resolved
-          when:
-            all:
-              - {field: scope_status, eq: "resolved"}
-              - {field: coverage, gt: 89}
-          message: "scope_status=resolved requires coverage >= 90; received coverage is below threshold."
-        # U6: boundary_conflict == true blocks (cross_check=0)
+        # U6: boundary_conflict == true blocks resolved status.
         - id: redteam-scope-resolved-boundary-conflict
           topic: redteam.plan.resolved
           when:
@@ -292,21 +248,21 @@ event_loop:
               - {field: scope_status, eq: "resolved"}
               - {field: boundary_conflict, eq: true}
           message: "scope_status=resolved with boundary_conflict=true is not allowed; boundary conflict indicates a cross_check failure."
-        # 2026-08-08-004 review (fix-plan U1, A3): runtime enforcement of
-        # the attack-surface-mapper HARD GATE. The prompt-text instruction
-        # in hat `instructions` is the agent's read-the-rules layer; this
-        # rule is the runtime contract — emit is rejected before
-        # experiment-runner activates. `predecessor_event` must exist AND
-        # equal the literal `redteam.plan.resolved` topic name; any
-        # missing or different value blocks attack.mapped, closing the
-        # bypass surface (direct emit, prompt-injection, model-error).
-        - id: redteam-attack-mapped-requires-predecessor
+        # 2026-08-08-004 review (fix-plan U1, A3) + 2026-08-10-002 plan
+        # U3 (D5): runtime enforcement of the attack-surface-mapper
+        # HARD GATE. The schema declares `predecessor_event` as a
+        # required field with literal `redteam.plan.resolved`; this rule
+        # is the negative contradiction — reject when the literal is
+        # wrong (correct literal: rule Misses; missing field: rejected
+        # by schema required_fields). The previous `exists:true AND eq`
+        # form was inverted: it Hit on the legal value and Missed on
+        # the missing/wrong case.
+        - id: redteam-attack-mapped-predecessor-must-be-resolved
           topic: redteam.attack.mapped
           when:
-            all:
-              - {field: predecessor_event, exists: true}
-              - {field: predecessor_event, eq: "redteam.plan.resolved"}
-          message: "redteam.attack.mapped requires predecessor_event == 'redteam.plan.resolved' (a bound prior plan.resolved accepted event); runtime gate rejects attack.mapped emits without that anchor."
+            field: predecessor_event
+            ne: "redteam.plan.resolved"
+          message: "redteam.attack.mapped requires predecessor_event == 'redteam.plan.resolved'; runtime gate rejects attack.mapped emits whose predecessor is missing or has a different value."
 
 cli:
   backend: "auto"

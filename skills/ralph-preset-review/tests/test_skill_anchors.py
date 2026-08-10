@@ -54,6 +54,18 @@ ANCHORS: tuple[tuple[str, str], ...] = (
     ("skills/ralph-preset-review/references/patterns.md", "Scope handoff guard pattern"),
     ("skills/ralph-preset-author/references/prompt-visibility.md", "Scope resolution is agent-owned"),
     ("skills/ralph-preset-review/references/prompt-visibility.md", "Scope resolution is agent-owned"),
+    # Scope polarity anchors (plan 2026-08-10-002 U5). Both author and
+    # review finding-rubric.md must contain the new polarity finding id
+    # so reviewers can pair scope positive-assertion regressions with
+    # the rubric entry.
+    (
+        "skills/ralph-preset-author/references/finding-rubric.md",
+        "preset.payload_consistency_scope_positive_assertion",
+    ),
+    (
+        "skills/ralph-preset-review/references/finding-rubric.md",
+        "preset.payload_consistency_scope_positive_assertion",
+    ),
 )
 
 # Capability-triggered fixtures from plan 2026-08-02-001 U3.
@@ -108,6 +120,14 @@ CAPABILITY_FIXTURES: tuple[tuple[str, str], ...] = (
     (
         "scope_confidence_gate_negative_fixture.yml",
         "scope.contract.confidence_gate_bypass",
+    ),
+    # Scope polarity positive-assertion fixture from plan 2026-08-10-002
+    # U5. The fixture encodes the inverted polarity anti-pattern
+    # (`exists:true` on a protected scope structural field) and anchors
+    # the new strict-lint finding id.
+    (
+        "scope_polarity_negative_fixture.yml",
+        "preset.payload_consistency_scope_positive_assertion",
     ),
     (
         "key-stage-event-gate-positive-fixture.yml",
