@@ -154,6 +154,7 @@ pub fn legacy_resolve(flags: &PolicyCheckFlags, config: Option<&RalphConfig>) ->
 // Module structure (Plan 2026-08-07-002 U1: policy_check split)
 // ============================================================================
 mod gates;
+mod scope;
 mod unified;
 
 #[cfg(test)]
