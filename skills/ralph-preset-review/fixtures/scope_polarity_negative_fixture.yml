@@ -1,0 +1,63 @@
+# Scope polarity positive-assertion negative fixture
+# Axis: scope topic `redteam.plan.resolved` carries a `payload_consistency` rule
+#       with `exists:true` against a protected structural field (`scope_manifest_path`).
+# Expected finding: preset.payload_consistency_scope_positive_assertion (strict lint)
+# Preset-neutral; not derived from any builtin preset.
+# Anchors plan 2026-08-10-002 U4/U5.
+
+event_loop:
+  execution_mode: isolated
+  required_events: [LOOP_COMPLETE]
+
+event_policy:
+  enabled: true
+  mode: enforce
+  on_violation: reject_with_resume
+  schemas:
+    redteam.plan.resolved:
+      required_fields:
+        - scope_manifest_path
+        - scope_digest
+        - scope_status
+        - overall_confidence
+        - critical_unknown_count
+      payload: json_object
+  payload_consistency:
+    enabled: true
+    rules:
+      # Anti-pattern: a positive assertion against a protected scope
+      # structural field. Strict preset_lint should emit
+      # `preset.payload_consistency_scope_positive_assertion` for this rule.
+      - id: bad-scope-manifest-path-exists
+        topic: redteam.plan.resolved
+        when:
+          field: scope_manifest_path
+          exists: true
+        message: "manifest path must be present (positive assertion on the legal condition)"
+
+hats:
+  resolver:
+    name: Resolver
+    triggers:
+      - redteam.start
+    publishes:
+      - redteam.plan.resolved
+      - LOOP_COMPLETE
+    instructions: |
+      # Resolver
+      You are the resolver for this red-team-style preset.
+
+      When triggered by `redteam.start`, you must:
+      1. Build a scope manifest under `.ralph/scope-fixture/` (e.g. `scope-manifest.json`).
+      2. Emit `redteam.plan.resolved` with `scope_manifest_path`, `scope_digest`,
+         `scope_status`, `overall_confidence`, `critical_unknown_count`.
+
+      This fixture deliberately encodes the inverted polarity anti-pattern
+      (`exists:true` on a protected structural field) so reviewers can verify
+      the strict lint surfaces
+      `preset.payload_consistency_scope_positive_assertion`.
+
+      Reviewer action: do NOT accept the rule as authored. Either delete it
+      and rely on the schema's `required_fields`, or rewrite the rule in a
+      non-positive shape (e.g. `{all: [{field: scope_status, eq: "resolved"},
+      {field: critical_unknown_count, gt: 0}]}`).
