@@ -2639,6 +2639,18 @@ impl EventLoop {
             .unwrap_or(false);
         let policy_config_ref = policy_config_owned.as_ref();
         let mut accepted_log_events = Vec::new();
+
+        // U1 (plan 2026-08-10-001): helper that rebuilds a ralph_proto::Event
+        // from a JSONL event, preserving source/target/wave/system_injected
+        // metadata while allowing the caller to supply a potentially-replaced
+        // payload string. This stops `Event::new(topic, &payload)` from
+        // silently stripping routing metadata in the accepted path.
+        let jsonl_event_to_proto = |jsonl_event: &crate::event_reader::Event, payload: &str| -> Event {
+            let mut proto: Event = jsonl_event.clone().into();
+            proto.payload = payload.to_string();
+            proto
+        };
+
         macro_rules! accept_event {
             ($accepted:expr) => {{
                 let accepted = $accepted;
@@ -2660,6 +2672,12 @@ impl EventLoop {
                 }
                 accepted_log_events.push(accepted.clone());
                 validated_events.push(accepted);
+            }};
+            // Convenience form for JSONL events: takes the JSONL event and
+            // a payload string, preserves all metadata from the JSONL event.
+            ($jsonl_event:expr, $payload:expr) => {{
+                let proto = jsonl_event_to_proto(&$jsonl_event, $payload);
+                accept_event!(proto)
             }};
         }
 
@@ -2843,7 +2861,7 @@ impl EventLoop {
                     );
                 }
                 self.state.cancellation_requested = true;
-                accepted_log_events.push(Event::new(event.topic.as_str(), &payload));
+                accepted_log_events.push(jsonl_event_to_proto(&event, &payload));
                 // Continue processing remaining events (they may contain cleanup info)
                 continue;
             }
@@ -2920,7 +2938,7 @@ impl EventLoop {
                     crate::state::CommitDelta::CompletionRequested,
                 );
                 completion_seen_in_batch = true;
-                let accepted = Event::new(event.topic.as_str(), &payload);
+                let accepted = jsonl_event_to_proto(&event, &payload);
                 accepted_log_events.push(accepted.clone());
                 self.state.record_event(&accepted);
                 self.state.last_completion_payload = Some(payload.to_string());
@@ -3021,7 +3039,7 @@ impl EventLoop {
                                     ),
                                 ));
                             }
-                            accept_event!(Event::new(event.topic.as_str(), &payload));
+                            accept_event!(event, &payload);
                         }
                         _ => {}
                     }
@@ -3069,7 +3087,7 @@ impl EventLoop {
                                 ),
                             ));
                         }
-                        accept_event!(Event::new(event.topic.as_str(), &payload));
+                        accept_event!(event, &payload);
                     }
                     _ => {}
                 }
@@ -3093,7 +3111,7 @@ impl EventLoop {
                 if let Some(result) = json_status {
                     match result {
                         Ok(BuildStatus::Pass) => {
-                            accept_event!(Event::new(event.topic.as_str(), &payload));
+                            accept_event!(event, &payload);
                         }
                         Ok(BuildStatus::Fail { reason, missing }) => {
                             warn!(
@@ -3144,7 +3162,7 @@ impl EventLoop {
                 } else if let Some(evidence) = EventParser::parse_backpressure_evidence(&payload) {
                     if evidence.all_passed() {
                         self.warn_on_mutation_evidence(&evidence);
-                        accept_event!(Event::new(event.topic.as_str(), &payload));
+                        accept_event!(event, &payload);
                     } else {
                         // Evidence present but checks failed - synthesize build.blocked
                         warn!(
@@ -3230,7 +3248,7 @@ impl EventLoop {
                 if let Some(result) = json_status {
                     match result {
                         Ok(ReviewStatus::Pass) => {
-                            accept_event!(Event::new(event.topic.as_str(), &payload));
+                            accept_event!(event, &payload);
                         }
                         Ok(ReviewStatus::Fail { reason, .. }) => {
                             warn!(reason = %reason, "review.done rejected: structured verification failed");
@@ -3263,7 +3281,7 @@ impl EventLoop {
                     }
                 } else if let Some(evidence) = EventParser::parse_review_evidence(&payload) {
                     if evidence.is_verified() {
-                        accept_event!(Event::new(event.topic.as_str(), &payload));
+                        accept_event!(event, &payload);
                     } else {
                         // Evidence present but checks failed - synthesize review.blocked
                         warn!(
@@ -3308,7 +3326,7 @@ impl EventLoop {
             } else if event.topic == "verify.passed" {
                 if let Some(report) = EventParser::parse_quality_report(&payload) {
                     if report.meets_thresholds() {
-                        accept_event!(Event::new(event.topic.as_str(), &payload));
+                        accept_event!(event, &payload);
                     } else {
                         let failed = report.failed_dimensions();
                         let reason = if failed.is_empty() {
@@ -3356,10 +3374,10 @@ impl EventLoop {
                 if EventParser::parse_quality_report(&payload).is_none() {
                     warn!("verify.failed missing quality report");
                 }
-                accept_event!(Event::new(event.topic.as_str(), &payload));
+                accept_event!(&event, &payload);
             } else {
                 // Non-backpressure events pass through unchanged
-                accept_event!(Event::new(event.topic.as_str(), &payload));
+                accept_event!(&event, &payload);
             }
         }
 
@@ -3683,7 +3701,7 @@ impl EventLoop {
             let mut pending = Vec::new();
             for event in &validated_events {
                 let payload = event.payload.as_str().to_string();
-                let key = (event.topic.as_str().to_string(), payload);
+                let key = (event.topic.as_str().to_string(), payload.clone());
                 let stashed = gate_outcomes.get(&key).cloned();
                 let accepted = self.apply_emit_gate_on_validated(event, stashed);
                 if accepted {
