@@ -67,7 +67,7 @@ metadata:
 
 ## 收到 `task.resume` 时（policy / origin / contract 拒收后自动注入）
 
-`task.resume` 是 runtime 已经定向投递给当前 hat 的恢复信号 — 它通过 EventBus 的 direct-target 通道进入本 hat 的 pending queue，本 hat 即为 runtime 解析出的恢复目标（按显式 `Event.target` / JSONL `triggered` / payload `target_hat` / 同 loop 开放任务 `owner_hat_id` 的优先级链解析；解析失败时 runtime 不会广播给其他 hat）。不需要为 `task.resume` 额外订阅或修改 preset trigger。读取 payload 后继续原任务即可。
+`task.resume` 是 runtime 已经定向投递给当前 hat 的恢复信号 — 本 hat prompt 中出现的 `target_hat` 字段就是 runtime 解析出的恢复目标，与 hat id 一致；payload 其它字段记录恢复原因与允许的事件范围。当 runtime 无法解析出安全目标时，不会把 `task.resume` 投递给任何 hat，而是进入既有 `plan.blocked` / diagnostic 通道。**不要为 `task.resume` 额外订阅或修改 preset trigger** — preset 缺 `task.resume` 触发器时，本 hat 仍会因 runtime 的定向投递而收到该事件。读取 payload 后继续原任务即可。
 
 编排器拒收后会在 PENDING EVENTS 注入 `task.resume`（payload 形状见 `ralph-tools-recovery-directives` skill）。**不要重发同样 payload**，按以下顺序修复：
 
