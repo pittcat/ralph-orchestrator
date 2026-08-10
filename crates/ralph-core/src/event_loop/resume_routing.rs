@@ -282,6 +282,42 @@ impl RegisteredHats for ralph_proto::EventBus {
     }
 }
 
+/// Plan 2026-08-10-001 Unit 3: thin publisher wrapper that the
+/// runtime call sites use in place of `Event::new("task.resume",
+/// payload).with_target(...)`.
+///
+/// Resolves the target via [`resolve_resume_target`], then either
+/// publishes the targeted `task.resume` to the bus (Allow),
+/// records the duplicate (Duplicate), or short-circuits with
+/// Block. The runtime MUST NOT publish `task.resume` without
+/// passing through this helper.
+///
+/// `existing_pending` is supplied by the caller so the dedup
+/// check uses the live queue; tests may pass `&[]`.
+pub fn publish_targeted_resume(
+    bus: &mut ralph_proto::EventBus,
+    inputs: &ResumeRoutingInputs<'_>,
+    registry: &impl RegisteredHats,
+    task_store: Option<&TaskStore>,
+    existing_pending: &[PendingResumeIdentity],
+    payload: String,
+) -> ResumeDecision {
+    let decision = resolve_resume_target(inputs, registry, task_store, existing_pending);
+    match &decision {
+        ResumeDecision::Allow { target, .. } => {
+            let event = ralph_proto::Event::new("task.resume", payload).with_target(target.clone());
+            bus.publish(event);
+        }
+        ResumeDecision::Duplicate { .. } => {
+            // Drop without re-queueing (D6).
+        }
+        ResumeDecision::Block { .. } => {
+            // Fail-closed: do not publish (E3 / E15).
+        }
+    }
+    decision
+}
+
 #[cfg(test)]
 mod tests {
     //! Unit-2 resolver tests. They exercise the priority chain,
@@ -526,6 +562,53 @@ mod tests {
                 assert_eq!(retry_key, "rk-1");
             }
             other => panic!("expected Duplicate, got {other:?}"),
+        }
+    }
+
+    /// Unit-3 publisher wrapper routes Allow into the bus with the
+    /// resolved `target`. Block decisions never reach the bus.
+    #[test]
+    fn publish_targeted_resume_routes_allow_to_target_hat_only() {
+        use ralph_proto::{EventBus, Hat};
+        let mut bus = EventBus::new();
+        let executor = Hat::new("executor", "Executor").subscribe("plan.ready");
+        let observer = Hat::new("observer", "Observer").subscribe("plan.ready");
+        bus.register(executor);
+        bus.register(observer);
+        let registry = registry_of(&["executor", "observer"]);
+        let inputs = ResumeRoutingInputs {
+            event_target: Some("executor"),
+            ..Default::default()
+        };
+        let decision =
+            publish_targeted_resume(&mut bus, &inputs, &registry, None, &[], "{\"x\":1}".into());
+        assert!(matches!(decision, ResumeDecision::Allow { .. }));
+        let exec_pending = bus.peek_pending(&ralph_proto::HatId::new("executor")).unwrap();
+        let obs_pending = bus
+            .peek_pending(&ralph_proto::HatId::new("observer"))
+            .map(|v| v.len())
+            .unwrap_or(0);
+        assert_eq!(exec_pending.len(), 1);
+        assert_eq!(
+            exec_pending[0].target.as_ref().map(|h| h.as_str()),
+            Some("executor")
+        );
+        assert_eq!(obs_pending, 0, "observer must not receive the targeted resume");
+    }
+
+    #[test]
+    fn publish_targeted_resume_never_broadcasts_on_block() {
+        use ralph_proto::{EventBus, Hat};
+        let mut bus = EventBus::new();
+        bus.register(Hat::new("executor", "Executor").subscribe("plan.ready"));
+        let registry = registry_of(&["executor"]);
+        let inputs = ResumeRoutingInputs::default();
+        let decision =
+            publish_targeted_resume(&mut bus, &inputs, &registry, None, &[], "{}".into());
+        assert!(matches!(decision, ResumeDecision::Block { .. }));
+        for id in bus.hat_ids() {
+            let pending = bus.peek_pending(id).map(|v| v.len()).unwrap_or(0);
+            assert_eq!(pending, 0, "hat {id} must not receive a blocked resume");
         }
     }
 }

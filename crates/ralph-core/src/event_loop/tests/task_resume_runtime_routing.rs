@@ -227,3 +227,83 @@ fn ordinary_event_without_target_keeps_subscription_routing() {
         "subscription routing must still deliver plan.ready to both subscribed hats (exec={exec}, obs={obs})"
     );
 }
+
+/// Plan 2026-08-10-001 U3: end-to-end verification that the unified
+/// `publish_targeted_resume` boundary is reachable from a real
+/// `EventLoop`. Routes through the resolver and lands in the
+/// target hat's pending queue; a Block path produces no recipient.
+#[test]
+fn unit3_unified_publisher_targeted_resume_reaches_target_hat() {
+    let mut bus = ralph_proto::EventBus::new();
+    use ralph_proto::Hat;
+    bus.register(Hat::new("executor", "Executor").subscribe("plan.ready"));
+    bus.register(Hat::new("observer", "Observer").subscribe("plan.ready"));
+    let registry: std::collections::HashSet<String> =
+        ["executor", "observer"].iter().map(|s| s.to_string()).collect();
+    let inputs = crate::event_loop::resume_routing::ResumeRoutingInputs {
+        event_target: Some("executor"),
+        ..Default::default()
+    };
+    let decision = crate::event_loop::resume_routing::publish_targeted_resume(
+        &mut bus,
+        &inputs,
+        &registry,
+        None,
+        &[],
+        "{\"reason\":\"u3_end_to_end\",\"target_hat\":\"executor\"}".to_string(),
+    );
+    assert!(matches!(
+        decision,
+        crate::event_loop::resume_routing::ResumeDecision::Allow { .. }
+    ));
+    let exec_pending = bus
+        .peek_pending(&ralph_proto::HatId::new("executor"))
+        .unwrap();
+    let obs_pending = bus
+        .peek_pending(&ralph_proto::HatId::new("observer"))
+        .map(|v| v.len())
+        .unwrap_or(0);
+    assert_eq!(
+        exec_pending.len(),
+        1,
+        "executor must hold exactly one targeted resume"
+    );
+    assert_eq!(
+        exec_pending[0].target.as_ref().map(|h| h.as_str()),
+        Some("executor"),
+        "target must survive the unified publisher boundary"
+    );
+    assert_eq!(
+        obs_pending, 0,
+        "non-target hat must not receive the resume"
+    );
+}
+
+#[test]
+fn unit3_unified_publisher_blocks_broadcast_when_no_safe_target() {
+    let mut bus = ralph_proto::EventBus::new();
+    use ralph_proto::Hat;
+    bus.register(Hat::new("executor", "Executor").subscribe("plan.ready"));
+    let registry: std::collections::HashSet<String> =
+        ["executor"].iter().map(|s| s.to_string()).collect();
+    let inputs = crate::event_loop::resume_routing::ResumeRoutingInputs::default();
+    let decision = crate::event_loop::resume_routing::publish_targeted_resume(
+        &mut bus,
+        &inputs,
+        &registry,
+        None,
+        &[],
+        "{\"reason\":\"u3_no_target\"}".to_string(),
+    );
+    assert!(matches!(
+        decision,
+        crate::event_loop::resume_routing::ResumeDecision::Block { .. }
+    ));
+    for id in bus.hat_ids() {
+        let pending = bus.peek_pending(id).map(|v| v.len()).unwrap_or(0);
+        assert_eq!(
+            pending, 0,
+            "hat {id} must not receive a blocked resume (no safe target)"
+        );
+    }
+}
