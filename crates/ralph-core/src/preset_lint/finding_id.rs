@@ -632,6 +632,38 @@ pub const FINDING_PAYLOAD_CONSISTENCY_NON_OBJECT_WHEN: &str =
 pub const FINDING_PAYLOAD_CONSISTENCY_UNSAFE_MESSAGE: &str =
     "preset.payload_consistency_unsafe_message";
 
+/// 2026-08-10-002 plan U4 (R7 / D6): a `payload_consistency` rule on
+/// one of the four protected scope topics
+/// (`merge.integrated`, `merge.stabilized`,
+/// `postmerge.changemap.ready`, `redteam.plan.resolved`) declares a
+/// positive structural assertion (`exists:true` or `non_empty:true`)
+/// against a scope contract field (path / digest / status / base SHA /
+/// patch fields / predecessor / merge-boundary fields). The runtime
+/// evaluator treats `Hit` as rejection, so a positive assertion
+/// silently turns every legal handoff into a hard reject. The lint
+/// surfaces the inverted polarity at preset-load time so the
+/// structural presence of legal values is checked by the typed scope
+/// guard / schema rather than a same-payload rule.
+///
+/// Also covers the protected positive threshold predicates on the
+/// resolved-side scope fields (`overall_confidence`,
+/// `critical_unknown_count`, `resolved_count`, `coverage`) — a rule
+/// like `{field: overall_confidence, gt: 89}` against the legal 100
+/// value is a positive assertion on the legal condition. The
+/// `payload_consistency` same-payload evaluator cannot author a legal
+/// contradiction on these fields, so the only valid same-payload rule
+/// shape is the **negative** form (`gt: 0` on `critical_unknown_count`
+/// paired with `scope_status == "resolved"`).
+///
+/// Severity: `Warn` in default mode, `Error` in strict (matches the
+/// existing `FINDING_PAYLOAD_CONSISTENCY_*` family). Does not parse
+/// rule `message` text; only structural predicates and the protected
+/// field / topic / operator unions. `ce-executor-pipeline`,
+/// `ce-executor-pipeline-loop` and other non-scope rules are not in
+/// any protected scope topic and never trigger this finding.
+pub const FINDING_PAYLOAD_CONSISTENCY_SCOPE_POSITIVE_ASSERTION: &str =
+    "preset.payload_consistency_scope_positive_assertion";
+
 /// 2026-07-28-001 plan U4 (R8): a non-final `kind: linear` step
 /// declares at least two allowed emits but NO forward step has an
 /// `on` / `on_any_of` that names any of those topics. The runtime
@@ -751,6 +783,7 @@ pub const ALL_FINDING_IDS: &[&str] = &[
     FINDING_PAYLOAD_CONSISTENCY_UNKNOWN_OP,
     FINDING_PAYLOAD_CONSISTENCY_NON_OBJECT_WHEN,
     FINDING_PAYLOAD_CONSISTENCY_UNSAFE_MESSAGE,
+    FINDING_PAYLOAD_CONSISTENCY_SCOPE_POSITIVE_ASSERTION,
     FINDING_FLOW_LINEAR_POSITIONAL_AMBIGUITY,
     FINDING_PRECHECK_RULE_WITHOUT_SYNTHESIZED_GATE_HAT,
     FINDING_FLOW_TRANSITION_EMIT_NOT_IN_ALLOWED,

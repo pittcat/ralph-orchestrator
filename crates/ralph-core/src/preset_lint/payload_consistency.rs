@@ -43,10 +43,71 @@ use crate::config::{EventSchema, RalphConfig};
 use crate::event_policy_payload_consistency::WHITELISTED_PREDICATE_OPS;
 use crate::preset_lint::finding_id::{
     FINDING_PAYLOAD_CONSISTENCY_DUPLICATE_ID, FINDING_PAYLOAD_CONSISTENCY_NON_OBJECT_WHEN,
+    FINDING_PAYLOAD_CONSISTENCY_SCOPE_POSITIVE_ASSERTION,
     FINDING_PAYLOAD_CONSISTENCY_UNKNOWN_FIELD, FINDING_PAYLOAD_CONSISTENCY_UNKNOWN_OP,
     FINDING_PAYLOAD_CONSISTENCY_UNKNOWN_TOPIC, FINDING_PAYLOAD_CONSISTENCY_UNSAFE_MESSAGE,
 };
 use crate::preset_lint::{LintFinding, LintSeverity, LintStrictness};
+
+/// Topics whose payload contracts own structural presence of legal
+/// values. The four scope handoff topics — same set as
+/// `check_scope_handoff_guard` in `crates/ralph-cli/src/policy_check/gates.rs`.
+/// Rules on these topics are checked for the polarity anti-pattern
+/// (positive existence / positive threshold against legal values) that
+/// the runtime evaluator would silently convert into a hard reject.
+///
+/// `ce-executor-pipeline`, `ce-executor-pipeline-loop`, and other
+/// non-scope rules are intentionally NOT in this set — they keep the
+/// legal contradiction shape (`gt: 0`, `eq: 0`, etc.) without
+/// tripping the polarity finding.
+pub(super) const PROTECTED_SCOPE_TOPICS: &[&str] = &[
+    "merge.integrated",
+    "merge.stabilized",
+    "postmerge.changemap.ready",
+    "redteam.plan.resolved",
+];
+
+/// Structural fields whose legal value is presence of the field
+/// (path / digest / status / base SHA / patch fields / predecessor /
+/// merge boundary). A `payload_consistency` rule that asserts
+/// `exists:true` or `non_empty:true` on one of these fields inside a
+/// protected scope topic is a positive assertion against the legal
+/// condition; runtime treats `Hit` as reject, so the rule would reject
+/// every legitimate handoff. The typed scope guard and schema's
+/// `required_fields` already enforce presence.
+pub(super) const PROTECTED_SCOPE_STRUCTURAL_FIELDS: &[&str] = &[
+    // scope manifest contract (all four scope topics).
+    "scope_manifest_path",
+    "scope_digest",
+    "scope_status",
+    "scope_base_sha",
+    "scope_source",
+    // patch artifact contract.
+    "resolved_patch_path",
+    "patch_digest",
+    // redteam predecessor literal.
+    "predecessor_event",
+    // merge boundary contract.
+    "merge_boundary_path",
+    "merge_boundary_digest",
+    "merge_boundary_status",
+];
+
+/// Threshold fields whose legal value is the resolved-side value
+/// (`overall_confidence >= 90`, `critical_unknown_count == 0`,
+/// `resolved_count >= 1`, `coverage >= 90`). A `payload_consistency`
+/// rule that asserts a positive bound (`gt: 89` against legal 100,
+/// `gt: 0` against legal 0 when the legal value is 0, etc.) is a
+/// positive assertion against the legal condition. The valid
+/// same-payload rule shape is the **negative** contradiction
+/// (`gt: 0` against `critical_unknown_count`, `eq: 0` against
+/// `resolved_count`, etc.) — those rules stay allowed.
+pub(super) const PROTECTED_SCOPE_THRESHOLD_FIELDS: &[&str] = &[
+    "overall_confidence",
+    "critical_unknown_count",
+    "resolved_count",
+    "coverage",
+];
 
 /// Validate every `event_policy.payload_consistency.rules[]` entry in
 /// the preset. See the module docs for the three rules. Returns an
@@ -140,6 +201,21 @@ pub fn check_payload_consistency(
                 ));
             }
         }
+
+        // 2026-08-10-002 plan U4 (R7 / D6): scope polarity check.
+        // Only runs when the rule targets a protected scope topic; non-scope
+        // topics (pipeline, fix.done, etc.) never trigger this finding.
+        if PROTECTED_SCOPE_TOPICS.contains(&rule.topic.as_str()) {
+            for positive in collect_scope_positive_assertions(&rule.when) {
+                findings.push(scope_positive_assertion_finding(
+                    severity,
+                    &rule.id,
+                    &rule.topic,
+                    &positive.field,
+                    &positive.op,
+                ));
+            }
+        }
     }
 
     findings
@@ -226,6 +302,153 @@ fn schema_field_union(schema: &EventSchema) -> HashSet<String> {
     out.extend(schema.allowed_values.keys().cloned());
     out.extend(schema.element_constraints.keys().cloned());
     out
+}
+
+/// One structural-field positive assertion detected inside a scope
+/// topic's `when`. The lint walks `when` (recursing through `all` /
+/// `any`) and records each predicate that asserts legal structural
+/// presence (`exists:true`, `non_empty:true`) on a protected scope
+/// structural field, or a positive bound (`gt: <positive>`, `gte:
+/// <positive>`, `eq: <positive>`) on a protected scope threshold
+/// field whose legal resolved-side value is fixed by
+/// `policy_check/gates.rs` (overall_confidence >= 90,
+/// critical_unknown_count == 0, resolved_count >= 1, coverage >= 90).
+///
+/// `op` is the predicate key that triggered the finding
+/// (`exists` / `non_empty` / `gt` / `gte` / `eq`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ScopePositiveAssertion {
+    field: String,
+    op: String,
+}
+
+/// 2026-08-10-002 plan U4 (R7 / D6): walk a `when` predicate and
+/// collect every positive structural assertion on a protected scope
+/// field. Mirrors the structural recursion of
+/// [`collect_when_predicate_ops`] / [`collect_when_fields`]. The
+/// runtime evaluator fails closed (`Hit` = reject), so a rule that
+/// asserts the legal condition silently rejects every legitimate
+/// handoff — the lint must surface this at preset-load time so the
+/// typed scope guard / schema can own presence instead.
+///
+/// Only direct predicates count. A combinator (`all:` / `any:`) that
+/// contains a positive assertion is reported once via recursion, with
+/// the inner field/op reported on the rule id. We do NOT match `ne`,
+/// `gt: 0`, `eq: 0`, or any other negative-bound form — those are the
+/// legal same-payload contradiction shape (e.g. `{field:
+/// critical_unknown_count, gt: 0}` paired with `scope_status ==
+/// "resolved"`). The lint refuses to misfire on those because the
+/// plan's D1/R3 requires the public evaluator's Hit/Miss semantics to
+/// stay intact.
+fn collect_scope_positive_assertions(when: &Value) -> Vec<ScopePositiveAssertion> {
+    let mut out: Vec<ScopePositiveAssertion> = Vec::new();
+    collect_scope_positive_assertions_inner(when, &mut out);
+    out
+}
+
+fn collect_scope_positive_assertions_inner(
+    when: &Value,
+    out: &mut Vec<ScopePositiveAssertion>,
+) {
+    let Value::Object(obj) = when else {
+        return;
+    };
+    if let Some(Value::Array(items)) = obj.get("all").or_else(|| obj.get("any")) {
+        for item in items {
+            collect_scope_positive_assertions_inner(item, out);
+        }
+    }
+    let Some(Value::String(field)) = obj.get("field") else {
+        return;
+    };
+    // Structural positive assertions: `exists: true` or
+    // `non_empty: true` on a protected structural field.
+    if PROTECTED_SCOPE_STRUCTURAL_FIELDS.contains(&field.as_str()) {
+        if matches!(
+            obj.get("exists"),
+            Some(Value::Bool(true)) | Some(Value::Number(_)) | Some(Value::String(_))
+        ) {
+            out.push(ScopePositiveAssertion {
+                field: field.clone(),
+                op: "exists".to_string(),
+            });
+        }
+        if matches!(obj.get("non_empty"), Some(Value::Bool(true))) {
+            out.push(ScopePositiveAssertion {
+                field: field.clone(),
+                op: "non_empty".to_string(),
+            });
+        }
+    }
+    // Threshold positive assertions on a protected threshold field:
+    // - `gt: <positive>` / `gte: <positive>` against a positive bound
+    //   is a positive assertion on the legal value.
+    // - `eq: <positive>` is also a positive assertion on a legal
+    //   non-zero literal (e.g. `eq: 100` against overall_confidence
+    //   when the legal value is exactly 100).
+    //
+    // We deliberately do NOT match `gt: 0`, `gte: 0`, `eq: 0`, or
+    // other zero/negative-bound forms — those are the canonical
+    // same-payload contradiction shape and must keep working for
+    // `ce-executor-pipeline` and friends.
+    if PROTECTED_SCOPE_THRESHOLD_FIELDS.contains(&field.as_str()) {
+        if let Some(Value::Number(n)) = obj.get("gt") {
+            if n.as_f64().unwrap_or(0.0) > 0.0 {
+                out.push(ScopePositiveAssertion {
+                    field: field.clone(),
+                    op: "gt".to_string(),
+                });
+            }
+        }
+        if let Some(Value::Number(n)) = obj.get("gte") {
+            if n.as_f64().unwrap_or(0.0) > 0.0 {
+                out.push(ScopePositiveAssertion {
+                    field: field.clone(),
+                    op: "gte".to_string(),
+                });
+            }
+        }
+        if let Some(Value::Number(n)) = obj.get("eq") {
+            if n.as_f64().unwrap_or(0.0) > 0.0 {
+                out.push(ScopePositiveAssertion {
+                    field: field.clone(),
+                    op: "eq".to_string(),
+                });
+            }
+        }
+    }
+}
+
+fn scope_positive_assertion_finding(
+    severity: LintSeverity,
+    rule_id: &str,
+    topic: &str,
+    field: &str,
+    op: &str,
+) -> LintFinding {
+    LintFinding {
+        id: FINDING_PAYLOAD_CONSISTENCY_SCOPE_POSITIVE_ASSERTION,
+        severity,
+        message: format!(
+            "payload_consistency rule \"{rule_id}\" on scope topic \"{topic}\" \
+             declares a positive assertion `{op}: <legal>` against the protected \
+             scope field \"{field}\"; the runtime evaluator treats `Hit` as \
+             rejection, so this rule silently rejects every legitimate handoff. \
+             The structural presence of \"{field}\" must be enforced by the typed \
+             scope guard in `policy_check/gates.rs` or the schema's \
+             `required_fields` / `allowed_values`, not by a same-payload rule"
+        ),
+        topic: Some(topic.to_string()),
+        hat: None,
+        owner: None,
+        action_hint: Some(format!(
+            "delete the rule \"{rule_id}\" and move the structural check for \
+             \"{field}\" to the typed scope guard or the topic's schema; if the \
+             rule is a legitimate contradiction (e.g. `gt: 0` on \
+             `critical_unknown_count`), rewrite it in the negative-bound shape \
+             with no `gt:`/`gte:`/`eq:` against a positive literal"
+        )),
+    }
 }
 
 fn duplicate_id_finding(severity: LintSeverity, id: &str) -> LintFinding {
@@ -810,5 +1033,371 @@ mod tests {
             .find(|f| f.id == FINDING_PAYLOAD_CONSISTENCY_UNSAFE_MESSAGE)
             .expect("Strict mode should surface the finding");
         assert_eq!(strict_unsafe.severity, LintSeverity::Error);
+    }
+
+    // ── 2026-08-10-002 plan U4 (R7 / D6): scope polarity lint ─────
+
+    /// Build a config with a `redteam.plan.resolved` schema declaring
+    /// every protected scope field (so unknown-field checks don't
+    /// interleave with the polarity check we want to exercise).
+    fn scope_topic_config(
+        topic: &str,
+        rules: Vec<crate::config::PayloadConsistencyRule>,
+    ) -> RalphConfig {
+        let mut schema = EventSchema::default();
+        schema.required_fields = vec![
+            // Structural fields
+            "scope_manifest_path".to_string(),
+            "scope_digest".to_string(),
+            "scope_status".to_string(),
+            "scope_base_sha".to_string(),
+            "resolved_patch_path".to_string(),
+            "patch_digest".to_string(),
+            "predecessor_event".to_string(),
+            "merge_boundary_path".to_string(),
+            "merge_boundary_digest".to_string(),
+            "merge_boundary_status".to_string(),
+            // Threshold fields
+            "overall_confidence".to_string(),
+            "critical_unknown_count".to_string(),
+            "resolved_count".to_string(),
+            "coverage".to_string(),
+            // Pipeline fields (so cross-topic isolation tests can use the
+            // same config builder without losing required_fields).
+            "review_verdict".to_string(),
+            "fixes_applied".to_string(),
+        ];
+        let mut schemas: HashMap<String, EventSchema> = HashMap::new();
+        schemas.insert(topic.to_string(), schema);
+        let mut policy = EventPolicyConfig::default();
+        policy.schemas = schemas;
+        policy.payload_consistency = PayloadConsistencyConfig {
+            enabled: true,
+            rules,
+        };
+        let mut config = RalphConfig::default();
+        config.event_loop.event_policy = Some(policy);
+        config
+    }
+
+    /// Helper: build a rule on the given topic.
+    fn rule_on(topic: &str, id: &str, when: Value) -> crate::config::PayloadConsistencyRule {
+        crate::config::PayloadConsistencyRule {
+            id: id.to_string(),
+            topic: topic.to_string(),
+            when,
+            message: "test rule".to_string(),
+        }
+    }
+
+    /// U4 (R7 / D6): `exists:true` against a protected scope
+    /// structural field on a scope topic is flagged with
+    /// `FINDING_PAYLOAD_CONSISTENCY_SCOPE_POSITIVE_ASSERTION`. This is
+    /// the original `red-team-attack.yml:215-294` anti-pattern.
+    #[test]
+    fn exists_true_on_protected_scope_structural_field_is_flagged() {
+        let config = scope_topic_config(
+            "redteam.plan.resolved",
+            vec![rule_on(
+                "redteam.plan.resolved",
+                "redteam-scope-manifest-path-exists",
+                json!({"field": "scope_manifest_path", "exists": true}),
+            )],
+        );
+        let findings = check_payload_consistency(&config, LintStrictness::Strict);
+        let polarity: Vec<_> = findings
+            .iter()
+            .filter(|f| {
+                f.id == FINDING_PAYLOAD_CONSISTENCY_SCOPE_POSITIVE_ASSERTION
+            })
+            .collect();
+        assert_eq!(polarity.len(), 1, "got {findings:?}");
+        assert_eq!(polarity[0].severity, LintSeverity::Error);
+        assert!(polarity[0].message.contains("scope_manifest_path"));
+        assert!(polarity[0].message.contains("exists"));
+    }
+
+    /// U4: `non_empty:true` against a protected scope structural
+    /// field is also a positive structural assertion (the original
+    /// merge-batch inverted rule). Must be flagged.
+    #[test]
+    fn non_empty_true_on_protected_scope_structural_field_is_flagged() {
+        let config = scope_topic_config(
+            "merge.integrated",
+            vec![rule_on(
+                "merge.integrated",
+                "merge-batch-boundary-path-root",
+                json!({"field": "merge_boundary_path", "non_empty": true}),
+            )],
+        );
+        let findings = check_payload_consistency(&config, LintStrictness::Strict);
+        let polarity: Vec<_> = findings
+            .iter()
+            .filter(|f| {
+                f.id == FINDING_PAYLOAD_CONSISTENCY_SCOPE_POSITIVE_ASSERTION
+            })
+            .collect();
+        assert_eq!(polarity.len(), 1, "got {findings:?}");
+        assert!(polarity[0].message.contains("merge_boundary_path"));
+        assert!(polarity[0].message.contains("non_empty"));
+    }
+
+    /// U4: `gt: <positive>` against a protected scope threshold
+    /// field on a scope topic is a positive assertion on the legal
+    /// value (the original `redteam-scope-resolved-confidence` rule
+    /// `gt: 89` against legal 90/100).
+    #[test]
+    fn gt_positive_on_protected_scope_threshold_field_is_flagged() {
+        let config = scope_topic_config(
+            "redteam.plan.resolved",
+            vec![rule_on(
+                "redteam.plan.resolved",
+                "redteam-scope-resolved-confidence",
+                json!({"field": "overall_confidence", "gt": 89}),
+            )],
+        );
+        let findings = check_payload_consistency(&config, LintStrictness::Strict);
+        let polarity: Vec<_> = findings
+            .iter()
+            .filter(|f| {
+                f.id == FINDING_PAYLOAD_CONSISTENCY_SCOPE_POSITIVE_ASSERTION
+            })
+            .collect();
+        assert_eq!(polarity.len(), 1, "got {findings:?}");
+        assert!(polarity[0].message.contains("overall_confidence"));
+        assert!(polarity[0].message.contains("gt"));
+    }
+
+    /// U4: positive assertions nested inside an `all:` combinator on a
+    /// scope topic are still flagged (recursion through combinators,
+    /// mirroring the existing `unknown_field_nested_in_any_fails`
+    /// test).
+    #[test]
+    fn positive_assertion_nested_in_all_is_flagged() {
+        let config = scope_topic_config(
+            "redteam.plan.resolved",
+            vec![rule_on(
+                "redteam.plan.resolved",
+                "redteam-scope-coverage-nested",
+                json!({"all": [
+                    {"field": "scope_status", "eq": "resolved"},
+                    {"field": "coverage", "gt": 89}
+                ]}),
+            )],
+        );
+        let findings = check_payload_consistency(&config, LintStrictness::Strict);
+        let polarity: Vec<_> = findings
+            .iter()
+            .filter(|f| {
+                f.id == FINDING_PAYLOAD_CONSISTENCY_SCOPE_POSITIVE_ASSERTION
+            })
+            .collect();
+        assert_eq!(polarity.len(), 1, "got {findings:?}");
+        assert!(polarity[0].message.contains("coverage"));
+    }
+
+    /// U4: the legitimate negative contradiction shape
+    /// (`gt: 0` on `critical_unknown_count` paired with
+    /// `scope_status == "resolved"`) does NOT trigger the polarity
+    /// finding. This is the legal same-payload rule shape used by the
+    /// U3-corrected `redteam-scope-resolved-no-critical-unknown` rule.
+    #[test]
+    fn valid_negative_threshold_rule_passes_polarity_check() {
+        let config = scope_topic_config(
+            "redteam.plan.resolved",
+            vec![rule_on(
+                "redteam.plan.resolved",
+                "redteam-scope-resolved-no-critical-unknown",
+                json!({"all": [
+                    {"field": "scope_status", "eq": "resolved"},
+                    {"field": "critical_unknown_count", "gt": 0}
+                ]}),
+            )],
+        );
+        let findings = check_payload_consistency(&config, LintStrictness::Strict);
+        let polarity: Vec<_> = findings
+            .iter()
+            .filter(|f| {
+                f.id == FINDING_PAYLOAD_CONSISTENCY_SCOPE_POSITIVE_ASSERTION
+            })
+            .collect();
+        assert!(
+            polarity.is_empty(),
+            "negative threshold rule must not trigger polarity finding, got {findings:?}"
+        );
+    }
+
+    /// U4: `eq: 0` against a protected threshold field is the legal
+    /// `resolved_count` contradiction form (resolved requires
+    /// `resolved_count >= 1`). Must NOT trigger polarity finding.
+    #[test]
+    fn eq_zero_on_resolved_count_does_not_trigger_polarity() {
+        let config = scope_topic_config(
+            "redteam.plan.resolved",
+            vec![rule_on(
+                "redteam.plan.resolved",
+                "redteam-scope-resolved-count",
+                json!({"all": [
+                    {"field": "scope_status", "eq": "resolved"},
+                    {"field": "resolved_count", "eq": 0}
+                ]}),
+            )],
+        );
+        let findings = check_payload_consistency(&config, LintStrictness::Strict);
+        let polarity: Vec<_> = findings
+            .iter()
+            .filter(|f| {
+                f.id == FINDING_PAYLOAD_CONSISTENCY_SCOPE_POSITIVE_ASSERTION
+            })
+            .collect();
+        assert!(
+            polarity.is_empty(),
+            "`eq: 0` on `resolved_count` is the legal contradiction shape, got {findings:?}"
+        );
+    }
+
+    /// U4: `eq: "blocked"` on a protected structural field is the
+    /// legal contradiction form for the postmerge not-resolved rule
+    /// (postmerge requires `scope_status != "blocked"` paired with
+    /// `proceed: true`). Must NOT trigger polarity finding.
+    #[test]
+    fn eq_blocked_on_scope_status_does_not_trigger_polarity() {
+        let config = scope_topic_config(
+            "postmerge.changemap.ready",
+            vec![rule_on(
+                "postmerge.changemap.ready",
+                "postmerge-scope-not-resolved-proceed-false",
+                json!({"any": [
+                    {"all": [
+                        {"field": "scope_status", "eq": "blocked"},
+                        {"field": "proceed", "eq": true}
+                    ]},
+                    {"all": [
+                        {"field": "scope_status", "eq": "ambiguous"},
+                        {"field": "proceed", "eq": true}
+                    ]}
+                ]}),
+            )],
+        );
+        let findings = check_payload_consistency(&config, LintStrictness::Strict);
+        let polarity: Vec<_> = findings
+            .iter()
+            .filter(|f| {
+                f.id == FINDING_PAYLOAD_CONSISTENCY_SCOPE_POSITIVE_ASSERTION
+            })
+            .collect();
+        assert!(
+            polarity.is_empty(),
+            "`eq: blocked/ambiguous` is the legal contradiction shape, got {findings:?}"
+        );
+    }
+
+    /// U4: `ne: "redteam.plan.resolved"` on `predecessor_event` is the
+    /// legal negative contradiction form (legal literal Misses; wrong
+    /// literal Hits). Must NOT trigger polarity finding.
+    #[test]
+    fn ne_legal_literal_on_predecessor_does_not_trigger_polarity() {
+        let config = scope_topic_config(
+            "redteam.attack.mapped",
+            vec![rule_on(
+                "redteam.attack.mapped",
+                "redteam-attack-mapped-predecessor-must-be-resolved",
+                json!({"field": "predecessor_event", "ne": "redteam.plan.resolved"}),
+            )],
+        );
+        let findings = check_payload_consistency(&config, LintStrictness::Strict);
+        let polarity: Vec<_> = findings
+            .iter()
+            .filter(|f| {
+                f.id == FINDING_PAYLOAD_CONSISTENCY_SCOPE_POSITIVE_ASSERTION
+            })
+            .collect();
+        assert!(
+            polarity.is_empty(),
+            "`ne:` legal literal on `predecessor_event` must not trigger polarity, got {findings:?}"
+        );
+    }
+
+    /// U4: pipeline rules (non-scope topic `fix.done` /
+    /// `work.done`) keep their legal same-payload contradiction shape
+    /// and never trigger the polarity finding. This is the explicit
+    /// R3 / D6 isolation: `ce-executor-pipeline` and
+    /// `ce-executor-pipeline-loop` are NOT in `PROTECTED_SCOPE_TOPICS`.
+    #[test]
+    fn pipeline_fix_done_rule_does_not_trigger_polarity() {
+        let config = scope_topic_config(
+            "fix.done",
+            vec![valid_rule()],
+        );
+        let findings = check_payload_consistency(&config, LintStrictness::Strict);
+        let polarity: Vec<_> = findings
+            .iter()
+            .filter(|f| {
+                f.id == FINDING_PAYLOAD_CONSISTENCY_SCOPE_POSITIVE_ASSERTION
+            })
+            .collect();
+        assert!(
+            polarity.is_empty(),
+            "ce-executor-pipeline fix.done rule must not trigger polarity, got {findings:?}"
+        );
+    }
+
+    /// U4: severity is `Warn` in default mode, `Error` in strict,
+    /// matching the rest of the `payload_consistency_*` family.
+    #[test]
+    fn polarity_finding_severity_follows_strictness() {
+        let config = scope_topic_config(
+            "redteam.plan.resolved",
+            vec![rule_on(
+                "redteam.plan.resolved",
+                "r1",
+                json!({"field": "scope_manifest_path", "exists": true}),
+            )],
+        );
+        let default_findings =
+            check_payload_consistency(&config, LintStrictness::Default);
+        let strict_findings =
+            check_payload_consistency(&config, LintStrictness::Strict);
+        let default_polarity = default_findings
+            .iter()
+            .find(|f| {
+                f.id == FINDING_PAYLOAD_CONSISTENCY_SCOPE_POSITIVE_ASSERTION
+            })
+            .expect("Default mode should still surface the polarity finding");
+        assert_eq!(default_polarity.severity, LintSeverity::Warn);
+        let strict_polarity = strict_findings
+            .iter()
+            .find(|f| {
+                f.id == FINDING_PAYLOAD_CONSISTENCY_SCOPE_POSITIVE_ASSERTION
+            })
+            .expect("Strict mode should surface the polarity finding");
+        assert_eq!(strict_polarity.severity, LintSeverity::Error);
+    }
+
+    /// U4: the polarity finding's diagnostic message names the
+    /// `rule_id`, `topic`, `field`, and `op` so author/reviewer
+    /// tooling can localize the offending predicate without parsing
+    /// the message text.
+    #[test]
+    fn polarity_finding_message_identifies_predicate() {
+        let config = scope_topic_config(
+            "redteam.plan.resolved",
+            vec![rule_on(
+                "redteam.plan.resolved",
+                "demo-rule",
+                json!({"field": "patch_digest", "exists": true}),
+            )],
+        );
+        let findings = check_payload_consistency(&config, LintStrictness::Strict);
+        let polarity = findings
+            .iter()
+            .find(|f| {
+                f.id == FINDING_PAYLOAD_CONSISTENCY_SCOPE_POSITIVE_ASSERTION
+            })
+            .expect("polarity finding should fire");
+        assert!(polarity.message.contains("demo-rule"));
+        assert!(polarity.message.contains("redteam.plan.resolved"));
+        assert!(polarity.message.contains("patch_digest"));
+        assert!(polarity.message.contains("exists"));
     }
 }
