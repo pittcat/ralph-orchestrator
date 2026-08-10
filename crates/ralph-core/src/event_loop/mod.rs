@@ -89,6 +89,9 @@ pub use flow_wiring::*;
 pub use prompt_types::*;
 mod parse_and_emit;
 mod prompt_injection;
+/// Plan 2026-08-10-001 U2: unified `task.resume` target resolver
+/// and publisher boundary.
+pub mod resume_routing;
 mod state_recovery;
 mod terminal_routing;
 #[cfg(test)]
