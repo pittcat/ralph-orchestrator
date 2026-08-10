@@ -701,8 +701,7 @@ impl EventLoop {
                 &format!("handoff:{}:{}", esc.consumer, esc.event_id),
                 payload.to_string(),
             );
-            if let crate::event_loop::resume_routing::ResumeDecision::Block { reason } = &decision
-            {
+            if let crate::event_loop::resume_routing::ResumeDecision::Block { reason } = &decision {
                 tracing::warn!(
                     target = %esc.safe_target.as_str(),
                     consumer = %esc.consumer,

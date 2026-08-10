@@ -38,7 +38,10 @@ use crate::task_store::TaskStore;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ResumeDecision {
     /// Resolved a registered hat; publish with `Event::target = Some(target)`.
-    Allow { target: HatId, source: ResumeTargetSource },
+    Allow {
+        target: HatId,
+        source: ResumeTargetSource,
+    },
     /// Same loop + hat + task identity + retry key already pending —
     /// drop without re-queueing to avoid resume storms (D6).
     Duplicate { target: HatId, retry_key: String },
@@ -275,9 +278,7 @@ where
     // (E3 / E15).
     if !registry.is_registered(&target_str) {
         return ResumeDecision::Block {
-            reason: ResumeBlockReason::UnknownTarget {
-                target: target_str,
-            },
+            reason: ResumeBlockReason::UnknownTarget { target: target_str },
         };
     }
     let target = HatId::new(target_str);
@@ -426,7 +427,18 @@ pub fn publish_targeted_resume_for_hat(
     retry_key: &str,
     payload: String,
 ) -> ResumeDecision {
-    publish_targeted_resume_for_hat_in(bus, registry, task_store, loop_id, target_hint, task_id, task_key, retry_key, payload, None)
+    publish_targeted_resume_for_hat_in(
+        bus,
+        registry,
+        task_store,
+        loop_id,
+        target_hint,
+        task_id,
+        task_key,
+        retry_key,
+        payload,
+        None,
+    )
 }
 
 /// Variant of [`publish_targeted_resume_for_hat`] that
@@ -457,8 +469,7 @@ pub fn publish_targeted_resume_for_hat_in(
         retry_key: Some(retry_key),
         loop_id,
     };
-    let decision =
-        publish_targeted_resume(bus, &inputs, registry, task_store, &existing, payload);
+    let decision = publish_targeted_resume(bus, &inputs, registry, task_store, &existing, payload);
     if let ResumeDecision::Block { reason } = &decision {
         // Plan 2026-08-10-001 U2 R4: every Block decision
         // produces a public diagnostic envelope. The
@@ -506,13 +517,13 @@ fn reason_description(reason: &ResumeBlockReason) -> String {
         ResumeBlockReason::TargetOwnerConflict {
             payload_target,
             owner_hat,
-        } => format!(
-            "payload_target=`{payload_target}` disagrees with owner_hat=`{owner_hat}`"
-        ),
+        } => format!("payload_target=`{payload_target}` disagrees with owner_hat=`{owner_hat}`"),
         ResumeBlockReason::UnresolvableTask { .. } => {
             "task reference is closed / missing / cross-loop".to_string()
         }
-        ResumeBlockReason::MissingRetryKey => "caller did not sign the recovery context".to_string(),
+        ResumeBlockReason::MissingRetryKey => {
+            "caller did not sign the recovery context".to_string()
+        }
         ResumeBlockReason::UnknownTargetRace { target } => {
             format!("hat `{target}` unregistered between resolve and publish")
         }
@@ -814,7 +825,9 @@ mod tests {
         let decision =
             publish_targeted_resume(&mut bus, &inputs, &registry, None, &[], "{\"x\":1}".into());
         assert!(matches!(decision, ResumeDecision::Allow { .. }));
-        let exec_pending = bus.peek_pending(&ralph_proto::HatId::new("executor")).unwrap();
+        let exec_pending = bus
+            .peek_pending(&ralph_proto::HatId::new("executor"))
+            .unwrap();
         let obs_pending = bus
             .peek_pending(&ralph_proto::HatId::new("observer"))
             .map(|v| v.len())
@@ -824,7 +837,10 @@ mod tests {
             exec_pending[0].target.as_ref().map(|h| h.as_str()),
             Some("executor")
         );
-        assert_eq!(obs_pending, 0, "observer must not receive the targeted resume");
+        assert_eq!(
+            obs_pending, 0,
+            "observer must not receive the targeted resume"
+        );
     }
 
     #[test]
@@ -931,8 +947,7 @@ mod tests {
             retry_key: Some("u2_race_test"),
             ..Default::default()
         };
-        let decision =
-            publish_targeted_resume(&mut bus, &inputs, &flippy, None, &[], "{}".into());
+        let decision = publish_targeted_resume(&mut bus, &inputs, &flippy, None, &[], "{}".into());
         assert!(
             matches!(
                 decision,
@@ -942,7 +957,9 @@ mod tests {
             ),
             "registry swap must fail-closed, got {decision:?}"
         );
-        let pending = bus.peek_pending(&ralph_proto::HatId::new("victim")).unwrap();
+        let pending = bus
+            .peek_pending(&ralph_proto::HatId::new("victim"))
+            .unwrap();
         assert_eq!(
             pending.len(),
             0,

@@ -53,10 +53,6 @@ mod origin_guard;
 /// Plan 2026-08-03-004 U2: manifest-driven resume bootstrap —
 /// targeted `task.resume` routing, pin consumption, idempotency.
 mod parallel_forge_manifest_resume;
-/// Plan 2026-08-10-001 U1: JSONL `task.resume` target/metadata fidelity.
-/// Real EventLoop routing characterization covering accepted-branch
-/// metadata preservation and the targeted fast path.
-mod task_resume_runtime_routing;
 mod payload_types;
 mod persistent_mode;
 mod post_terminal_rejection;
@@ -74,6 +70,10 @@ mod preview_characterization;
 /// `U2_REJECTION_RETRY_LIMIT + 1` so the runtime falls through
 /// to `plan.blocked(reason=protocol_violation_repeated:...)`.
 mod protocol_violation_recovery;
+/// Plan 2026-08-10-001 U1: JSONL `task.resume` target/metadata fidelity.
+/// Real EventLoop routing characterization covering accepted-branch
+/// metadata preservation and the targeted fast path.
+mod task_resume_runtime_routing;
 // 2026-07-04-001 plan U16 (KTD-13): task.resume consumer triggers
 // routing validation tests.
 mod u16_resume_routing;

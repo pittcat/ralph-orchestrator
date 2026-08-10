@@ -309,9 +309,7 @@ impl EventLoop {
         // leave `target=None` and the resume would fall through
         // to subscription routing (R4 / E3). Fail-closed when
         // the source hat is unknown / unregistered.
-        let source_hat_id: Option<HatId> = source_hat
-            .as_deref()
-            .map(|h| HatId::new(h.to_string()));
+        let source_hat_id: Option<HatId> = source_hat.as_deref().map(|h| HatId::new(h.to_string()));
         // TaskStore is loaded on demand via the loop-context
         // SSOT accessor; the open-task owner fallback is
         // optional and degrades gracefully when the ledger is

@@ -73,7 +73,10 @@ fn jsonl_task_resume_preserves_target_and_activates_original_hat() {
         .iter()
         .filter(|e| e.topic.as_str() == "task.resume")
         .count();
-    assert_eq!(resume_count, 1, "executor must hold exactly one task.resume");
+    assert_eq!(
+        resume_count, 1,
+        "executor must hold exactly one task.resume"
+    );
     let resume = executor_pending
         .iter()
         .find(|e| e.topic.as_str() == "task.resume")
@@ -197,7 +200,8 @@ fn ordinary_event_without_target_keeps_subscription_routing() {
 
     // No `triggered`, no `target`. Both executor and observer
     // subscribe to `plan.ready`; the broadcast lands in both.
-    let line = r#"{"topic":"plan.ready","payload":"{\"step\":\"step-1\"}","ts":"2026-08-10T00:00:00Z"}"#;
+    let line =
+        r#"{"topic":"plan.ready","payload":"{\"step\":\"step-1\"}","ts":"2026-08-10T00:00:00Z"}"#;
     write_raw_jsonl_line(&events_path, line);
 
     let _ = event_loop.process_events_from_jsonl().expect("process");
@@ -238,8 +242,10 @@ fn unit3_unified_publisher_targeted_resume_reaches_target_hat() {
     use ralph_proto::Hat;
     bus.register(Hat::new("executor", "Executor").subscribe("plan.ready"));
     bus.register(Hat::new("observer", "Observer").subscribe("plan.ready"));
-    let registry: std::collections::HashSet<String> =
-        ["executor", "observer"].iter().map(|s| s.to_string()).collect();
+    let registry: std::collections::HashSet<String> = ["executor", "observer"]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
     let inputs = crate::event_loop::resume_routing::ResumeRoutingInputs {
         event_target: Some("executor"),
         retry_key: Some("unit_test_end_to_end"),
@@ -274,10 +280,7 @@ fn unit3_unified_publisher_targeted_resume_reaches_target_hat() {
         Some("executor"),
         "target must survive the unified publisher boundary"
     );
-    assert_eq!(
-        obs_pending, 0,
-        "non-target hat must not receive the resume"
-    );
+    assert_eq!(obs_pending, 0, "non-target hat must not receive the resume");
 }
 
 #[test]
@@ -325,8 +328,7 @@ fn unit3_unified_publisher_blocks_broadcast_when_no_safe_target() {
 /// not produce publish-side behaviour in production.
 #[test]
 fn ingress_inventory_regression_storm_dispatch() {
-    let event_loop_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("src/event_loop");
+    let event_loop_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/event_loop");
     let mut bare_publishes: Vec<String> = Vec::new();
     walk_event_loop_rs(&event_loop_root, &mut |path| {
         let Ok(content) = std::fs::read_to_string(path) else {
@@ -338,10 +340,7 @@ fn ingress_inventory_regression_storm_dispatch() {
             return;
         }
         // Production files outside `tests/` are in scope.
-        if path
-            .components()
-            .any(|c| c.as_os_str() == "tests")
-        {
+        if path.components().any(|c| c.as_os_str() == "tests") {
             return;
         }
         // Skip the loop_state mini-tests (existing

@@ -2563,12 +2563,11 @@ impl EventLoop {
                                     // resume.
                                     let retry_payload_string = retry_payload.to_string();
                                     let loop_id_for_resume = self.current_loop_id();
-                                    let retry_step_for_key: String =
-                                        if step.is_empty() {
-                                            String::from("none")
-                                        } else {
-                                            step.to_string()
-                                        };
+                                    let retry_step_for_key: String = if step.is_empty() {
+                                        String::from("none")
+                                    } else {
+                                        step.to_string()
+                                    };
                                     let decision = crate::event_loop::resume_routing::publish_targeted_resume_for_hat(
                                         &mut self.bus,
                                         &self.registry,
@@ -2717,11 +2716,12 @@ impl EventLoop {
         // metadata while allowing the caller to supply a potentially-replaced
         // payload string. This stops `Event::new(topic, &payload)` from
         // silently stripping routing metadata in the accepted path.
-        let jsonl_event_to_proto = |jsonl_event: &crate::event_reader::Event, payload: &str| -> Event {
-            let mut proto: Event = jsonl_event.clone().into();
-            proto.payload = payload.to_string();
-            proto
-        };
+        let jsonl_event_to_proto =
+            |jsonl_event: &crate::event_reader::Event, payload: &str| -> Event {
+                let mut proto: Event = jsonl_event.clone().into();
+                proto.payload = payload.to_string();
+                proto
+            };
 
         macro_rules! accept_event {
             ($accepted:expr) => {{

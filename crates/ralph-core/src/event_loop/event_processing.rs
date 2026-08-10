@@ -369,8 +369,7 @@ impl EventLoop {
                 &format!("hard_stall:{}", stall_count_value),
                 structured_payload,
             );
-            if let crate::event_loop::resume_routing::ResumeDecision::Block { reason } = &decision
-            {
+            if let crate::event_loop::resume_routing::ResumeDecision::Block { reason } = &decision {
                 tracing::warn!(
                     target = %hard_target.as_str(),
                     ?reason,
@@ -456,17 +455,18 @@ impl EventLoop {
                     // the bus; return `None` so the trailing
                     // publish line is skipped.
                     let loop_id_for_resume = self.current_loop_id();
-                    let decision = crate::event_loop::resume_routing::publish_targeted_resume_for_hat(
-                        &mut self.bus,
-                        &self.registry,
-                        None,
-                        loop_id_for_resume.as_deref(),
-                        hat_id.as_str(),
-                        None,
-                        None,
-                        "stall_no_events",
-                        structured_payload,
-                    );
+                    let decision =
+                        crate::event_loop::resume_routing::publish_targeted_resume_for_hat(
+                            &mut self.bus,
+                            &self.registry,
+                            None,
+                            loop_id_for_resume.as_deref(),
+                            hat_id.as_str(),
+                            None,
+                            None,
+                            "stall_no_events",
+                            structured_payload,
+                        );
                     if let crate::event_loop::resume_routing::ResumeDecision::Block { reason } =
                         &decision
                     {
@@ -507,9 +507,7 @@ impl EventLoop {
                         Some(RejectionKind::StallNoEvents),
                         &ralph_publishes,
                     );
-                    debug!(
-                        "Ralph untargeted fallback dropped; recovered via stall pathway"
-                    );
+                    debug!("Ralph untargeted fallback dropped; recovered via stall pathway");
                     // Plan 2026-08-10-001 U1 R1: drop the
                     // untargeted fallback. The previous shape
                     // `Event::new("task.resume", structured_payload)`
