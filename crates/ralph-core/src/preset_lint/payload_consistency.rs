@@ -39,6 +39,7 @@ use std::collections::HashSet;
 
 use serde_json::Value;
 
+use crate::config::scope_topics::SCOPE_TOPICS;
 use crate::config::{EventSchema, RalphConfig};
 use crate::event_policy_payload_consistency::WHITELISTED_PREDICATE_OPS;
 use crate::preset_lint::finding_id::{
@@ -56,16 +57,12 @@ use crate::preset_lint::{LintFinding, LintSeverity, LintStrictness};
 /// (positive existence / positive threshold against legal values) that
 /// the runtime evaluator would silently convert into a hard reject.
 ///
-/// `ce-executor-pipeline`, `ce-executor-pipeline-loop`, and other
-/// non-scope rules are intentionally NOT in this set — they keep the
-/// legal contradiction shape (`gt: 0`, `eq: 0`, etc.) without
-/// tripping the polarity finding.
-pub(super) const PROTECTED_SCOPE_TOPICS: &[&str] = &[
-    "merge.integrated",
-    "merge.stabilized",
-    "postmerge.changemap.ready",
-    "redteam.plan.resolved",
-];
+/// Sourced from [`crate::config::scope_topics::SCOPE_TOPICS`] so the
+/// polarity walker and the scope handoff guard never drift apart
+/// (plan 2026-08-10-002 U4 / M3). The previous `PROTECTED_SCOPE_TOPICS`
+/// literal was a verbatim 4-element duplicate; it is intentionally
+/// re-exported as a thin alias for callers that already import it.
+pub(super) const PROTECTED_SCOPE_TOPICS: &[&str] = SCOPE_TOPICS;
 
 /// Structural fields whose legal value is presence of the field
 /// (path / digest / status / base SHA / patch fields / predecessor /
@@ -113,6 +110,15 @@ pub(super) const PROTECTED_SCOPE_THRESHOLD_FIELDS: &[&str] = &[
 /// the preset. See the module docs for the three rules. Returns an
 /// empty list when the preset has no `event_policy` or declares no
 /// rules (a preset that does not opt in sees no behaviour change).
+///
+/// U3 (2026-08-10-002 plan, R8/M4/S2): the 107-line monolith is split
+/// into 5 named helpers — `check_id_uniqueness`,
+/// `check_message_safety`, `check_predicate_shape`,
+/// `check_field_known`, `check_scope_polarity` — so the polarity
+/// walker becomes a structural fact (R7) instead of a fragile
+/// `if`-branch buried inside one `for` loop. The order of helpers
+/// is preserved from the original; the helper bodies mirror the
+/// in-loop checks byte-for-byte so the lint output is stable.
 pub fn check_payload_consistency(
     config: &RalphConfig,
     strictness: LintStrictness,
@@ -131,93 +137,161 @@ pub fn check_payload_consistency(
     let severity = strictness.ownership_severity();
 
     // Rule 1: rule ids must be unique within the preset.
+    findings.extend(check_id_uniqueness(rules, severity));
+
+    // Rules 2 + 3 + 4 + 5: the per-rule shape, schema, and polarity
+    // checks. Each helper is responsible for one orthogonal
+    // concern; the orchestrator below only concatenates the
+    // finding lists.
+    for rule in rules {
+        findings.extend(check_message_safety(rule, severity));
+        let shape = check_predicate_shape(rule, severity);
+        let shape_skipped = shape.iter().any(|f| f.id == FINDING_PAYLOAD_CONSISTENCY_NON_OBJECT_WHEN);
+        findings.extend(shape);
+        if shape_skipped {
+            // No structured shape to walk further (no fields, no ops);
+            // the non-object finding is the actionable root cause.
+            continue;
+        }
+        // 2026-08-10-002 plan U3 (R7/C2): scope polarity runs BEFORE
+        // the `unknown_topic` short-circuit. Even when a rule's topic
+        // is missing from `event_policy.schemas`, the polarity walker
+        // still fires for any rule whose topic is in the canonical
+        // `SCOPE_TOPICS` list — a missing schema means the field
+        // check has nothing to walk, but the polarity anti-pattern
+        // is observable from the `when` alone.
+        findings.extend(check_scope_polarity(rule, severity));
+        // Field-known check still depends on a schema; surface the
+        // unknown-topic finding first when both apply.
+        findings.extend(check_field_known(rule, policy, severity));
+    }
+
+    findings
+}
+
+/// Rule 1: rule ids must be unique within the preset.
+fn check_id_uniqueness(
+    rules: &[crate::config::PayloadConsistencyRule],
+    severity: LintSeverity,
+) -> Vec<LintFinding> {
+    let mut findings = Vec::new();
     let mut seen_ids: HashSet<String> = HashSet::new();
     for rule in rules {
         if !seen_ids.insert(rule.id.clone()) {
             findings.push(duplicate_id_finding(severity, &rule.id));
         }
     }
+    findings
+}
 
-    // Rules 2 + 3 + 4 + 5: topic must exist in the schema map, every field
-    // referenced in `when` must be declared on that topic's schema, the
-    // `when` must be a JSON object, and every predicate op inside `when`
-    // must be in the runtime whitelist. The object-shape and op-whitelist
-    // checks (adversarial:A1) mirror the runtime fail-close paths in
-    // `event_policy_payload_consistency` so a typo'd rule is rejected at
-    // preset-load time instead of turning the gated topic into a hard
-    // runtime reject.
-    for rule in rules {
-        // U3 (2026-07-23-002 plan, KTD3): check the rule's `message`
-        // for unsafe content (ANSI escapes, control chars, zero-width
-        // chars) or excessive length. The runtime `safe_display` API
-        // strips these at render time, but the lint surfaces the
-        // misconfiguration at preset-load time so the rule author
-        // fixes the message rather than relying on runtime stripping.
-        if let Some(reason) = check_message_unsafe(&rule.message) {
-            findings.push(unsafe_message_finding(severity, &rule.id, reason));
-        }
+/// Rule 2: rule `message` is free of unsafe content (ANSI escapes,
+/// control chars, zero-width chars) and is not excessively long. The
+/// runtime `safe_display` API strips these at render time, but the
+/// lint surfaces the misconfiguration at preset-load time so the
+/// rule author fixes the message rather than relying on runtime
+/// stripping.
+fn check_message_safety(
+    rule: &crate::config::PayloadConsistencyRule,
+    severity: LintSeverity,
+) -> Vec<LintFinding> {
+    if let Some(reason) = check_message_unsafe(&rule.message) {
+        vec![unsafe_message_finding(severity, &rule.id, reason)]
+    } else {
+        Vec::new()
+    }
+}
 
-        let when_is_object = matches!(rule.when, Value::Object(_));
-        if !when_is_object {
-            findings.push(non_object_when_finding(
-                severity,
-                &rule.id,
-                json_kind_label(&rule.when),
-            ));
-            // No structured shape to walk further (no fields, no ops);
-            // the non-object finding is the actionable root cause.
-            continue;
-        }
-
-        // Predicate-shape (unknown op) check runs even when the topic is
-        // unknown: the op whitelist is the runtime's first line of defence
-        // and a typo'd op on a typo'd topic is still a typo.
-        let mut seen_ops: HashSet<String> = HashSet::new();
-        for op in collect_when_predicate_ops(&rule.when) {
-            if seen_ops.insert(op.clone()) && !WHITELISTED_PREDICATE_OPS.contains(&op.as_str()) {
-                findings.push(unknown_op_finding(severity, &rule.id, &op));
-            }
-        }
-
-        let Some(schema) = policy.schemas.get(&rule.topic) else {
-            findings.push(unknown_topic_finding(severity, &rule.id, &rule.topic));
-            // No schema to enumerate fields from; the unknown-topic
-            // finding is the actionable root cause, so skip field checks.
-            continue;
-        };
-        let known = schema_field_union(schema);
-        let mut fields: Vec<String> = Vec::new();
-        collect_when_fields(&rule.when, &mut fields);
-        // Deduplicate field references so one unknown field referenced
-        // twice produces a single finding.
-        let mut checked: HashSet<String> = HashSet::new();
-        for field in fields {
-            if checked.insert(field.clone()) && !known.contains(&field) {
-                findings.push(unknown_field_finding(
-                    severity,
-                    &rule.id,
-                    &rule.topic,
-                    &field,
-                ));
-            }
-        }
-
-        // 2026-08-10-002 plan U4 (R7 / D6): scope polarity check.
-        // Only runs when the rule targets a protected scope topic; non-scope
-        // topics (pipeline, fix.done, etc.) never trigger this finding.
-        if PROTECTED_SCOPE_TOPICS.contains(&rule.topic.as_str()) {
-            for positive in collect_scope_positive_assertions(&rule.when) {
-                findings.push(scope_positive_assertion_finding(
-                    severity,
-                    &rule.id,
-                    &rule.topic,
-                    &positive.field,
-                    &positive.op,
-                ));
-            }
+/// Rule 3: the `when` must be a JSON object and every predicate op
+/// inside `when` (recursive through `all` / `any` combinators) must
+/// be in the runtime whitelist `WHITELISTED_PREDICATE_OPS`. The
+/// op-whitelist check mirrors the runtime fail-close path in
+/// `event_policy_payload_consistency` so a typo'd op is rejected at
+/// preset-load time instead of turning the gated topic into a hard
+/// runtime reject.
+///
+/// Returns the list of findings; the caller uses the
+/// `NON_OBJECT_WHEN` finding id as the "skip further rule checks"
+/// signal (mirrors the original loop's `continue;` semantics).
+fn check_predicate_shape(
+    rule: &crate::config::PayloadConsistencyRule,
+    severity: LintSeverity,
+) -> Vec<LintFinding> {
+    let mut findings = Vec::new();
+    if !matches!(rule.when, Value::Object(_)) {
+        findings.push(non_object_when_finding(
+            severity,
+            &rule.id,
+            json_kind_label(&rule.when),
+        ));
+        return findings;
+    }
+    // Predicate-shape (unknown op) check runs even when the topic is
+    // unknown: the op whitelist is the runtime's first line of defence
+    // and a typo'd op on a typo'd topic is still a typo.
+    let mut seen_ops: HashSet<String> = HashSet::new();
+    for op in collect_when_predicate_ops(&rule.when) {
+        if seen_ops.insert(op.clone()) && !WHITELISTED_PREDICATE_OPS.contains(&op.as_str()) {
+            findings.push(unknown_op_finding(severity, &rule.id, &op));
         }
     }
+    findings
+}
 
+/// Rule 4 (R7/C2 structural fix): scope polarity check. Fires for
+/// any rule whose topic is in the canonical `SCOPE_TOPICS` list
+/// regardless of whether the topic is in `event_policy.schemas`.
+/// This is the structural inversion of the previous
+/// `unknown_topic` short-circuit — the polarity anti-pattern is
+/// observable from the `when` alone, so the walker no longer
+/// depends on the schema being declared.
+fn check_scope_polarity(
+    rule: &crate::config::PayloadConsistencyRule,
+    severity: LintSeverity,
+) -> Vec<LintFinding> {
+    let mut findings = Vec::new();
+    if !PROTECTED_SCOPE_TOPICS.contains(&rule.topic.as_str()) {
+        return findings;
+    }
+    for positive in collect_scope_positive_assertions(&rule.when) {
+        findings.push(scope_positive_assertion_finding(
+            severity,
+            &rule.id,
+            &rule.topic,
+            &positive.field,
+            &positive.op,
+        ));
+    }
+    findings
+}
+
+/// Rule 5: every `field` referenced in `when` (recursive through
+/// `all` / `any`) must be declared on the topic's schema. Surfaces
+/// the `unknown_topic` and `unknown_field` findings; the field
+/// check is a no-op when the topic is not in `event_policy.schemas`.
+fn check_field_known(
+    rule: &crate::config::PayloadConsistencyRule,
+    policy: &crate::config::EventPolicyConfig,
+    severity: LintSeverity,
+) -> Vec<LintFinding> {
+    let mut findings = Vec::new();
+    let Some(schema) = policy.schemas.get(&rule.topic) else {
+        findings.push(unknown_topic_finding(severity, &rule.id, &rule.topic));
+        return findings;
+    };
+    let known = schema_field_union(schema);
+    let mut fields: Vec<String> = Vec::new();
+    collect_when_fields(&rule.when, &mut fields);
+    let mut checked: HashSet<String> = HashSet::new();
+    for field in fields {
+        if checked.insert(field.clone()) && !known.contains(&field) {
+            findings.push(unknown_field_finding(
+                severity,
+                &rule.id,
+                &rule.topic,
+                &field,
+            ));
+        }
+    }
     findings
 }
 
@@ -1399,5 +1473,69 @@ mod tests {
         assert!(polarity.message.contains("redteam.plan.resolved"));
         assert!(polarity.message.contains("patch_digest"));
         assert!(polarity.message.contains("exists"));
+    }
+
+    /// U3 (2026-08-10-002 plan, R7/C2): polarity fires even when the
+    /// rule's topic is missing from `event_policy.schemas`. The
+    /// previous ordering short-circuited on `unknown_topic` BEFORE
+    /// the polarity walker ran, so a rule with a typo'd topic on a
+    /// protected scope field saw its polarity finding silently
+    /// skipped. After U3 the polarity walker is structural and
+    /// independent of schema presence.
+    #[test]
+    fn polarity_fires_when_topic_missing_from_schemas() {
+        // Build a config with NO `event_policy.schemas` entries, so
+        // every scope topic is "unknown" from the field-known
+        // helper's perspective.
+        let mut policy = EventPolicyConfig::default();
+        policy.payload_consistency = PayloadConsistencyConfig {
+            enabled: true,
+            rules: vec![rule_on(
+                "redteam.plan.resolved",
+                "c2-regression",
+                json!({"field": "scope_manifest_path", "exists": true}),
+            )],
+        };
+        let mut config = RalphConfig::default();
+        config.event_loop.event_policy = Some(policy);
+        let findings = check_payload_consistency(&config, LintStrictness::Strict);
+        let polarity = findings
+            .iter()
+            .find(|f| {
+                f.id == FINDING_PAYLOAD_CONSISTENCY_SCOPE_POSITIVE_ASSERTION
+            })
+            .expect("polarity finding must fire even without schema");
+        assert_eq!(polarity.message.contains("scope_manifest_path"), true);
+        let unknown_topic = findings
+            .iter()
+            .find(|f| f.id == FINDING_PAYLOAD_CONSISTENCY_UNKNOWN_TOPIC);
+        assert!(
+            unknown_topic.is_some(),
+            "unknown_topic finding should still surface alongside polarity"
+        );
+    }
+
+    /// U3: non-scope topics (e.g. `fix.done`) never trigger the
+    /// polarity walker regardless of the rule's `when`. This guards
+    /// against a regression where `check_scope_polarity` was hoisted
+    /// above the topic allowlist check.
+    #[test]
+    fn polarity_silently_skipped_for_non_scope_topics() {
+        let config = scope_topic_config(
+            "fix.done",
+            vec![rule_on(
+                "fix.done",
+                "non-scope-rule",
+                json!({"field": "fixes_applied", "exists": true}),
+            )],
+        );
+        let findings = check_payload_consistency(&config, LintStrictness::Strict);
+        let polarity = findings
+            .iter()
+            .find(|f| f.id == FINDING_PAYLOAD_CONSISTENCY_SCOPE_POSITIVE_ASSERTION);
+        assert!(
+            polarity.is_none(),
+            "polarity finding must not fire on non-scope topics"
+        );
     }
 }
