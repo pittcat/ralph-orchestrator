@@ -162,6 +162,71 @@ pub(crate) fn verify_canonical_json_digest(
     Ok(())
 }
 
+/// U1 (2026-08-10-002 plan): canonical self-excluding digest for scope
+/// manifests (`scope_digest`). The producer computes the digest over the
+/// canonical JSON bytes of the manifest with the self-referential
+/// `scope_digest` field stripped; the guard recomputes the digest using
+/// the same algorithm. Mutating only `scope_digest` does not change the
+/// input bytes, so producer and guard stay in lockstep regardless of
+/// how many times the digest field itself is rewritten.
+///
+/// Merge boundary digests use the analogous `verify_canonical_json_digest`
+/// helper (`boundary_digest` field). Patch artifacts remain raw-byte
+/// digests via `verify_artifact_digest` (U1 §13 keeps patch semantics
+/// unchanged).
+#[allow(clippy::result_large_err)]
+pub(crate) fn verify_scope_manifest_digest(
+    workspace_root: &Path,
+    artifact_path: &str,
+    declared_digest: &str,
+    digest_field: &str,
+) -> std::result::Result<(), ValidationError> {
+    let full_path = workspace_root.join(artifact_path);
+    let bytes = std::fs::read(&full_path).map_err(|e| ValidationError {
+        payload_index: 0,
+        field: digest_field.to_string(),
+        reason_code: "scope_handoff_inconsistent".to_string(),
+        message: format!("{digest_field} verification failed: could not read {artifact_path}: {e}"),
+        ..Default::default()
+    })?;
+    let mut value: serde_json::Value =
+        serde_json::from_slice(&bytes).map_err(|e| ValidationError {
+            payload_index: 0,
+            field: digest_field.to_string(),
+            reason_code: "scope_handoff_inconsistent".to_string(),
+            message: format!(
+                "{digest_field} verification failed: {artifact_path} is not valid JSON: {e}"
+            ),
+            ..Default::default()
+        })?;
+    if let Some(object) = value.as_object_mut() {
+        object.remove("scope_digest");
+    }
+    let mut canonical = serde_json::to_vec(&value).map_err(|e| ValidationError {
+        payload_index: 0,
+        field: digest_field.to_string(),
+        reason_code: "scope_handoff_inconsistent".to_string(),
+        message: format!("{digest_field} canonicalization failed: {e}"),
+        ..Default::default()
+    })?;
+    canonical.push(b'\n');
+    let mut hasher = Sha256::new();
+    hasher.update(canonical);
+    let computed = format!("{:x}", hasher.finalize());
+    if !declared_digest.eq_ignore_ascii_case(&computed) {
+        return Err(ValidationError {
+            payload_index: 0,
+            field: digest_field.to_string(),
+            reason_code: "scope_handoff_inconsistent".to_string(),
+            message: format!(
+                "{digest_field} does not match canonical SHA-256 of {artifact_path}; manifest may have been tampered with (declared={declared_digest}, computed={computed})"
+            ),
+            ..Default::default()
+        });
+    }
+    Ok(())
+}
+
 /// Try to load the workspace `ralph.yml` config for policy check. Returns
 /// `None` when no config exists. The behavior on broken configs is
 /// selected by `on_error`:
@@ -1184,8 +1249,16 @@ fn check_postmerge_changemap_scope_fields(
         "scope_manifest_path",
     )?;
 
-    // U5 (R6 / A2): SHA-256 recomputation on the manifest file.
-    verify_artifact_digest(workspace_root, &manifest_path, &manifest_digest, "scope_digest")?;
+    // U1 (2026-08-10-002 plan, R4): scope manifests are verified with the
+    // canonical self-excluding JSON digest algorithm; producer and guard
+    // share `verify_scope_manifest_digest` so the same canonical bytes
+    // back the declared `scope_digest`.
+    verify_scope_manifest_digest(
+        workspace_root,
+        &manifest_path,
+        &manifest_digest,
+        "scope_digest",
+    )?;
 
     Ok(())
 }
@@ -1247,9 +1320,16 @@ fn check_redteam_plan_resolved_scope_fields(
         "resolved_patch_path",
     )?;
 
-    // U5 (R6 / A2): SHA-256 recomputation on the manifest file
-    // AND the resolved patch file (both have declared digests).
-    verify_artifact_digest(workspace_root, &manifest_path, &manifest_digest, "scope_digest")?;
+    // U1 (2026-08-10-002 plan, R4): scope manifest uses the canonical
+    // self-excluding JSON digest algorithm so producer/guide and guard
+    // stay in lockstep. Patch artifacts remain raw-byte SHA-256 per
+    // U1 §13 (patch digest semantics unchanged from upstream plan).
+    verify_scope_manifest_digest(
+        workspace_root,
+        &manifest_path,
+        &manifest_digest,
+        "scope_digest",
+    )?;
     verify_artifact_digest(workspace_root, &patch_path, &patch_digest, "patch_digest")?;
 
     Ok(())
@@ -1295,6 +1375,56 @@ mod tests {
             let _ = write!(&mut hex_str, "{byte:02x}");
         }
         (hex_str, abs)
+    }
+
+    /// U1 (2026-08-10-002 plan, R4): write a scope manifest with its
+    /// declared `scope_digest` field and return the canonical
+    /// self-excluding digest (SHA-256 over the canonical JSON bytes
+    /// after stripping `scope_digest`). Mirrors the producer side of
+    /// the canonicalization contract.
+    fn write_scope_manifest(
+        root: &std::path::Path,
+        relative_path: &str,
+        body: &str,
+    ) -> (String, PathBuf) {
+        // Parse the body as JSON so we can compute the canonical digest
+        // over the same bytes the guard will canonicalize. The digest is
+        // computed AFTER stripping `scope_digest` so the field's own
+        // value does not feed back into the digest (self-exclusion).
+        let mut value: serde_json::Value =
+            serde_json::from_str(body).expect("valid manifest JSON");
+        // Insert a placeholder so the map shape matches the final
+        // serialized form (otherwise key ordering or omission could
+        // shift the canonical bytes); then strip the placeholder so
+        // the digest input is the canonical bytes without `scope_digest`.
+        if let Some(object) = value.as_object_mut() {
+            object.insert(
+                "scope_digest".to_string(),
+                serde_json::Value::String("placeholder".to_string()),
+            );
+            object.remove("scope_digest");
+        }
+        let mut canonical = serde_json::to_vec(&value).expect("canonical JSON");
+        canonical.push(b'\n');
+        let mut hasher = Sha256::new();
+        hasher.update(canonical);
+        let computed = format!("{:x}", hasher.finalize());
+
+        let abs = root.join(relative_path);
+        if let Some(parent) = abs.parent() {
+            std::fs::create_dir_all(parent).expect("create parent");
+        }
+        // Now write the manifest with the real `scope_digest` value.
+        if let Some(object) = value.as_object_mut() {
+            object.insert(
+                "scope_digest".to_string(),
+                serde_json::Value::String(computed.clone()),
+            );
+        }
+        let serialized =
+            serde_json::to_string(&value).expect("serialize manifest");
+        std::fs::write(&abs, serialized.as_bytes()).expect("write manifest");
+        (computed, abs)
     }
 
     fn build_boundary_payload(digest: &str, status: Option<&str>) -> String {
@@ -1436,10 +1566,14 @@ mod tests {
     #[test]
     fn postmerge_changemap_accepts_real_artifact() {
         let root = tempfile::tempdir().expect("tempdir");
-        let (digest, _) = write_artifact(
+        // U1 (R4): producer and guard share the canonical
+        // self-excluding digest; the helper writes the body, computes the
+        // digest over canonical bytes with `scope_digest` stripped, then
+        // re-serializes with the real digest field.
+        let (digest, _) = write_scope_manifest(
             root.path(),
             ".ralph/post-merge/scope-manifest.json",
-            br#"{"resolved":true}"#,
+            r#"{"scope_status":"resolved","overall_confidence":90,"critical_unknown_count":0}"#,
         );
         let payload = build_postmerge_payload(".ralph/post-merge/scope-manifest.json", &digest);
         let result = check_scope_handoff_guard("postmerge.changemap.ready", &payload, root.path());
@@ -1461,10 +1595,12 @@ mod tests {
     #[test]
     fn postmerge_changemap_rejects_wrong_digest() {
         let root = tempfile::tempdir().expect("tempdir");
-        write_artifact(
+        // U1 (R4): even with a real manifest, declaring a digest that
+        // does not match the canonical self-excluding SHA-256 must reject.
+        write_scope_manifest(
             root.path(),
             ".ralph/post-merge/scope-manifest.json",
-            br#"{"resolved":true}"#,
+            r#"{"scope_status":"resolved","overall_confidence":90}"#,
         );
         let payload = build_postmerge_payload(
             ".ralph/post-merge/scope-manifest.json",
@@ -1479,11 +1615,14 @@ mod tests {
     #[test]
     fn redteam_plan_resolved_accepts_real_artifact() {
         let root = tempfile::tempdir().expect("tempdir");
-        let (manifest_digest, _) = write_artifact(
+        // U1 (R4): canonical self-excluding digest for scope manifest.
+        let (manifest_digest, _) = write_scope_manifest(
             root.path(),
             ".ralph/red-team/scope-manifest.json",
-            br#"{"resolved":true}"#,
+            r#"{"scope_status":"resolved","overall_confidence":90,"critical_unknown_count":0}"#,
         );
+        // Patch digest stays as raw SHA-256 (U1 §13 preserves patch
+        // semantics).
         let (patch_digest, _) = write_artifact(
             root.path(),
             ".ralph/red-team/resolved-patch.json",
@@ -1507,6 +1646,9 @@ mod tests {
             ".ralph/red-team/resolved-patch.json",
             br#"{"patches":["a"]}"#,
         );
+        // Manifest file intentionally absent; the guard must reject the
+        // digest field on the missing file rather than letting the
+        // patch digest path run.
         let payload = build_redteam_payload(
             ".ralph/red-team/scope-manifest.json",
             "0000000000000000000000000000000000000000000000000000000000000000",
@@ -1521,10 +1663,13 @@ mod tests {
     #[test]
     fn redteam_plan_resolved_rejects_wrong_patch_digest() {
         let root = tempfile::tempdir().expect("tempdir");
-        let (manifest_digest, _) = write_artifact(
+        // U1: manifest uses canonical self-excluding digest so the
+        // guard passes the manifest digest branch and exercises the
+        // patch digest branch with the wrong declared value.
+        let (manifest_digest, _) = write_scope_manifest(
             root.path(),
             ".ralph/red-team/scope-manifest.json",
-            br#"{"resolved":true}"#,
+            r#"{"scope_status":"resolved","overall_confidence":90}"#,
         );
         write_artifact(
             root.path(),
@@ -1585,5 +1730,224 @@ mod tests {
         let result = check_scope_handoff_guard("merge.integrated", "", root.path());
         let err = result.expect_err("empty payload must reject");
         assert_eq!(err.reason_code, "scope_handoff_inconsistent");
+    }
+
+    // ──────────────────────────────────────────────────────────────────
+    // U1 (2026-08-10-002 plan, R4): canonical self-excluding digest tests
+    // for scope manifests. The producer computes the digest over the
+    // canonical JSON bytes after stripping `scope_digest`; the guard
+    // recomputes the same bytes. The contract pins producer and guard
+    // to identical input so `scope_digest` self-mutation does not
+    // change the digest input.
+    // ──────────────────────────────────────────────────────────────────
+
+    /// Helper for the U1 canonical-digest unit tests: build a scope
+    /// manifest with the declared `scope_digest` value, compute the
+    /// canonical self-excluding SHA-256, and return both. Lets a test
+    /// rewrite the manifest's `scope_digest` field after the fact and
+    /// still observe that the canonical bytes are stable.
+    fn canonical_scope_digest(body: &str, declared_digest: &str) -> String {
+        let mut value: serde_json::Value =
+            serde_json::from_str(body).expect("valid manifest JSON");
+        if let Some(object) = value.as_object_mut() {
+            object.insert(
+                "scope_digest".to_string(),
+                serde_json::Value::String(declared_digest.to_string()),
+            );
+        }
+        if let Some(object) = value.as_object_mut() {
+            object.remove("scope_digest");
+        }
+        let mut canonical = serde_json::to_vec(&value).expect("canonical JSON");
+        canonical.push(b'\n');
+        let mut hasher = Sha256::new();
+        hasher.update(canonical);
+        format!("{:x}", hasher.finalize())
+    }
+
+    #[test]
+    fn scope_manifest_canonical_digest_excludes_self() {
+        // R4: producer and guard share one canonicalizer. The declared
+        // `scope_digest` value is not part of the digest input.
+        let body = r#"{"scope_status":"resolved","overall_confidence":90}"#;
+        let declared = "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef";
+        let digest = canonical_scope_digest(body, declared);
+        // Same body with any other `scope_digest` value yields the same
+        // canonical digest.
+        let digest_with_other_self = canonical_scope_digest(body, "0".repeat(64).as_str());
+        assert_eq!(
+            digest, digest_with_other_self,
+            "scope_digest self-field must not affect canonical digest input"
+        );
+        // Sanity: mutating a real field changes the digest.
+        let other_body = r#"{"scope_status":"resolved","overall_confidence":91}"#;
+        let other_digest = canonical_scope_digest(other_body, declared);
+        assert_ne!(
+            digest, other_digest,
+            "content mutation must change the canonical digest"
+        );
+    }
+
+    #[test]
+    fn scope_manifest_canonical_digest_handles_field_order() {
+        // serde_json serializes object maps with stable key ordering,
+        // so the producer-written order does not matter for the
+        // canonical digest.
+        let body_a = r#"{"alpha":1,"beta":2,"scope_status":"resolved"}"#;
+        let body_b = r#"{"beta":2,"alpha":1,"scope_status":"resolved"}"#;
+        let digest_a = canonical_scope_digest(body_a, "x");
+        let digest_b = canonical_scope_digest(body_b, "x");
+        assert_eq!(
+            digest_a, digest_b,
+            "field order in the source body must not change the canonical digest"
+        );
+    }
+
+    #[test]
+    fn verify_scope_manifest_digest_accepts_canonical_match() {
+        // Direct helper round-trip: write a manifest with the canonical
+        // digest embedded, then verify it accepts.
+        let root = tempfile::tempdir().expect("tempdir");
+        let body = r#"{"scope_status":"resolved","overall_confidence":90}"#;
+        let (digest, _) = write_scope_manifest(
+            root.path(),
+            ".ralph/post-merge/scope-manifest.json",
+            body,
+        );
+        let result = verify_scope_manifest_digest(
+            root.path(),
+            ".ralph/post-merge/scope-manifest.json",
+            &digest,
+            "scope_digest",
+        );
+        assert!(result.is_ok(), "canonical digest match must accept: {result:?}");
+    }
+
+    #[test]
+    fn verify_scope_manifest_digest_rejects_tampered_content() {
+        // Mutate a business field after computing the digest and confirm
+        // the verifier rejects.
+        let root = tempfile::tempdir().expect("tempdir");
+        let body = r#"{"scope_status":"resolved","overall_confidence":90}"#;
+        let (digest, abs_path) = write_scope_manifest(
+            root.path(),
+            ".ralph/post-merge/scope-manifest.json",
+            body,
+        );
+        // Tamper with the business field but leave `scope_digest` intact.
+        let tampered = r#"{"scope_status":"resolved","overall_confidence":100}"#;
+        let mut value: serde_json::Value =
+            serde_json::from_str(tampered).expect("valid JSON");
+        if let Some(object) = value.as_object_mut() {
+            object.insert(
+                "scope_digest".to_string(),
+                serde_json::Value::String(digest.clone()),
+            );
+        }
+        std::fs::write(
+            &abs_path,
+            serde_json::to_string(&value).expect("serialize").as_bytes(),
+        )
+        .expect("rewrite manifest");
+        let result = verify_scope_manifest_digest(
+            root.path(),
+            ".ralph/post-merge/scope-manifest.json",
+            &digest,
+            "scope_digest",
+        );
+        let err = result.expect_err("tampered manifest must reject");
+        assert_eq!(err.reason_code, "scope_handoff_inconsistent");
+        assert!(err.message.contains("scope_digest"));
+    }
+
+    #[test]
+    fn verify_scope_manifest_digest_rejects_malformed_json() {
+        // Manifest that is not parseable JSON must reject without
+        // panicking on the unwrap-style serialization path.
+        let root = tempfile::tempdir().expect("tempdir");
+        let abs = root.path().join(".ralph/post-merge/scope-manifest.json");
+        std::fs::create_dir_all(abs.parent().unwrap()).expect("create parent");
+        std::fs::write(&abs, b"this is not JSON").expect("write manifest");
+        let result = verify_scope_manifest_digest(
+            root.path(),
+            ".ralph/post-merge/scope-manifest.json",
+            "0000000000000000000000000000000000000000000000000000000000000000",
+            "scope_digest",
+        );
+        let err = result.expect_err("malformed JSON must reject");
+        assert_eq!(err.reason_code, "scope_handoff_inconsistent");
+        assert!(err.message.contains("not valid JSON"));
+    }
+
+    #[test]
+    fn verify_scope_manifest_digest_rejects_missing_file() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let result = verify_scope_manifest_digest(
+            root.path(),
+            ".ralph/post-merge/missing.json",
+            "0000000000000000000000000000000000000000000000000000000000000000",
+            "scope_digest",
+        );
+        let err = result.expect_err("missing manifest must reject");
+        assert_eq!(err.reason_code, "scope_handoff_inconsistent");
+        assert!(err.message.contains("could not read"));
+    }
+
+    #[test]
+    fn verify_scope_manifest_digest_accepts_non_object() {
+        // Scope manifest that parses to a JSON array (not object) is
+        // structurally invalid: there is no `scope_digest` to strip, and
+        // the producer contract requires an object. We accept the
+        // canonicalization as long as the digest match succeeds — the
+        // canonical form is still well-defined and the verifier does
+        // not need to enforce object shape here (object-shape is owned
+        // by the typed guard in U2). This test pins the current
+        // verifier contract: non-object manifests with matching digest
+        // are accepted at the digest layer.
+        let root = tempfile::tempdir().expect("tempdir");
+        let abs = root.path().join(".ralph/post-merge/scope-manifest.json");
+        std::fs::create_dir_all(abs.parent().unwrap()).expect("create parent");
+        std::fs::write(&abs, b"[1,2,3]").expect("write manifest");
+        // For a non-object, the canonical bytes are the array bytes
+        // with a trailing newline.
+        let mut hasher = Sha256::new();
+        hasher.update(b"[1,2,3]\n");
+        let digest = format!("{:x}", hasher.finalize());
+        let result = verify_scope_manifest_digest(
+            root.path(),
+            ".ralph/post-merge/scope-manifest.json",
+            &digest,
+            "scope_digest",
+        );
+        assert!(
+            result.is_ok(),
+            "non-object manifest with matching canonical digest must accept: {result:?}"
+        );
+    }
+
+    #[test]
+    fn patch_artifact_digest_still_uses_raw_bytes() {
+        // U1 §13: patch digest semantics are NOT changed. Verify by
+        // writing a patch with arbitrary bytes and confirming the raw
+        // SHA-256 is the verified value (the canonical path strips
+        // nothing and re-serializes the same bytes).
+        let root = tempfile::tempdir().expect("tempdir");
+        let abs = root.path().join(".ralph/red-team/resolved-patch.json");
+        std::fs::create_dir_all(abs.parent().unwrap()).expect("create parent");
+        let body = br#"{"patches":["a","b"]}"#;
+        std::fs::write(&abs, body).expect("write patch");
+        let mut hasher = Sha256::new();
+        hasher.update(body);
+        let raw_digest = format!("{:x}", hasher.finalize());
+        let result = verify_artifact_digest(
+            root.path(),
+            ".ralph/red-team/resolved-patch.json",
+            &raw_digest,
+            "patch_digest",
+        );
+        assert!(
+            result.is_ok(),
+            "raw-byte patch digest must still accept: {result:?}"
+        );
     }
 }
