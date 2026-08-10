@@ -9,6 +9,12 @@ metadata:
 
 > This skill is auto-injected by the runner when a `task.resume` event carries `recovery_directives`. You do not need to load it manually. Follow the rules below as system operating procedure.
 
+## 投递与作用域（runtime 已定向）
+
+`task.resume` 进入本 hat prompt 的前提是 runtime 通过 EventBus 的 direct-target 通道定向投递给本 hat——按显式 `Event.target` / JSONL `triggered` / payload `target_hat` / 同 loop 开放任务 `owner_hat_id` 的优先级链解析得到的 hat id 与当前 hat 一致。runtime 在解析失败（无 target / target 未注册 / 跨 loop / 冲突）时不会把 `task.resume` 投递给其他 hat，而是 fail-close 进入既有 `plan.blocked` / diagnostic 通道。
+
+agent 不需要为 `task.resume` 修改 preset 的 `triggers:` / `subscribes_to:`；preset 缺 `task.resume` 触发器时，本 hat 仍会因 runtime 的定向投递而收到该事件。agent 在 `task.resume` 上下文中做的事：读 payload 中的 `target_hat` / `original_trigger_payload` / `allowed_topics` 字段继续原任务，不要自行重新广播或重发同一 payload。
+
 ## Correction 优先级（通用）
 
 当 prompt 同时出现 agent narrative 与 runtime 结构化 correction 时：

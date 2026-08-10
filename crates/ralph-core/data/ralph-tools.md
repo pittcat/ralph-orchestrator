@@ -67,6 +67,8 @@ metadata:
 
 ## 收到 `task.resume` 时（policy / origin / contract 拒收后自动注入）
 
+`task.resume` 是 runtime 已经定向投递给当前 hat 的恢复信号 — 它通过 EventBus 的 direct-target 通道进入本 hat 的 pending queue，本 hat 即为 runtime 解析出的恢复目标（按显式 `Event.target` / JSONL `triggered` / payload `target_hat` / 同 loop 开放任务 `owner_hat_id` 的优先级链解析；解析失败时 runtime 不会广播给其他 hat）。不需要为 `task.resume` 额外订阅或修改 preset trigger。读取 payload 后继续原任务即可。
+
 编排器拒收后会在 PENDING EVENTS 注入 `task.resume`（payload 形状见 `ralph-tools-recovery-directives` skill）。**不要重发同样 payload**，按以下顺序修复：
 
 > **例外**：payload 的 `reason=manifest_resume` 时，这是 runtime 提供的恢复引导，**不是** emit 拒收纠正——读 `original_trigger_payload` 从原始触发继续工作，不要走下方拒收修复流程（完整规范见 `ralph tools skill load ralph-tools-recovery-directives` 的 `RD-MANIFEST-RESUME-CONTINUE` 段）。
@@ -78,13 +80,14 @@ metadata:
    - `required_fields`：当前 topic 缺失或类型错的字段清单
    - `allowed_topics`：当前 hat 可发布的所有 topic（**只在这列里挑**）
    - `reason` / `kind`：结构化 reason code
-   - `target_hat`：应当修复并重发的目标 hat
+   - `target_hat`：应当修复并重发的目标 hat（与本 hat 一致——runtime 已定向）
 2. **若 prompt 含 `## CORRECTION CONTEXT`**：runtime correction **高于** agent narrative；只执行 correction 的 `required_action`，遵守 `forbidden_action`；细则见 `ralph tools skill load ralph-tools-recovery-directives`。
 3. **对照 `required_fields` 补齐 payload**；用 `ralph emit <topic> --policy-check -j '...'` 预检（与 loop gate 同源 schema，**不写盘**）；通过后再正式 `ralph emit` 落盘。部分 preset（agent 上下文且无 event-policy 管线）会在 `--policy-check` 通过时打印一行 `policy_check_token`，apply 时必须用 `--policy-check-token <token>` 带上它（`missing_policy_check_token` / `policy_check_token_mismatch` 即此路径；细则见 `ralph-tools-emit`「Evaluation Token」段）。
 4. **bounded retry**：同类协议违规（同一 hat + topic + `task_key` + step + violation code）**第一次**给 structured correction；**第二次**同类违规 runtime 阻塞 loop（`plan.blocked(reason=protocol_violation_repeated:…)`），**不得** infinite `task.resume` 或在没有 `LOOP_COMPLETE` 的情况下静默继续。post-terminal 业务 emit **无 retry**。
 5. **确认 hat 作用域**：isolated 模式下未在 `allowed_topics`（与 hat `publishes` 交集）的 topic 越权 — 改用 hat 实际可发的 topic，不要靠 `--unsafe-no-policy-check` 绕过。
 6. **复杂 violation**：按需加载 `ralph-tools-emit`（EmitResult `ok`/`recorded`/`errors[].code`/`suggested_command`）与 `ralph-tools-recovery-directives`。
 7. **仍不明**：`RALPH_DIAGNOSTICS=1` 启的 loop 把 envelope 写到 `recovery.jsonl`；`ralph diagnose --session latest` 出报告（`docs/guide/runtime-diagnosis.md` §10）。
+8. **缺少可用上下文时停止**：如果 `task.resume` payload 的关键字段（`target_hat` / `original_trigger_topic` / `allowed_topics`）为 `<missing>` 或与本 hat 不一致，不要自己重新广播或重发同一 payload；按既有 `task.resume` / `plan.blocked` 恢复机制处理，或读 `ralph inspect loop --format json` 复核当前 loop / hat 状态。
 
 ## 命令速查表
 
