@@ -841,15 +841,39 @@ impl EventLoop {
             // 2026-06-23-005 F2: carry the typed `PersistentLoopActive`
             // kind so the schema validator / recovery aggregator
             // see the typed completion-suppression signal.
+            //
+            // Plan 2026-08-10-001 U1: route through the unified
+            // publisher. The persistent-mode idle-continuation
+            // targets `state.pending_recovery_hat` (set by the
+            // caller before this point) when present, else
+            // falls back to `ralph` (the dispatcher hat
+            // subscribed to `.completed.*`). The `retry_key`
+            // distinguishes persistent-idle resumes from any
+            // other targeted recovery.
+            let persistent_target = self
+                .state
+                .pending_recovery_hat
+                .clone()
+                .unwrap_or_else(|| HatId::new("ralph"));
             let persistent_payload = enrich_task_resume_payload(
                 "Persistent mode: loop staying alive after completion signal. \
                  Check for new tasks or await human guidance.",
                 "persistent mode",
-                None,
+                Some(persistent_target.as_str()),
                 Some(RejectionKind::PersistentLoopActive),
             );
-            let resume_event = Event::new("task.resume", persistent_payload);
-            self.bus.publish(resume_event);
+            let loop_id_for_resume = self.current_loop_id();
+            crate::event_loop::resume_routing::publish_targeted_resume_for_hat(
+                &mut self.bus,
+                &self.registry,
+                None,
+                loop_id_for_resume.as_deref(),
+                persistent_target.as_str(),
+                None,
+                None,
+                "persistent_idle",
+                persistent_payload,
+            );
 
             return None;
         }
@@ -888,6 +912,16 @@ impl EventLoop {
                 // 2026-06-23-005 F2: carry the typed
                 // `OpenTasksBlocking` kind so the schema validator
                 // sees the completion-rejection signal.
+                //
+                // Plan 2026-08-10-001 U1: route through the
+                // unified publisher. The completion-blocking site
+                // has no hat context — only the orchestrator
+                // (`ralph`) can dispatch the next unit, so target
+                // it explicitly. The `retry_key` is signed by the
+                // sorted task-id set so the same set of open
+                // tasks collapses into a single resume; a
+                // different set collapses into a different
+                // resume.
                 let open_tasks_payload = enrich_task_resume_payload(
                     &format!(
                         "Completion rejected: runtime tasks remain open: {:?}. \
@@ -896,11 +930,21 @@ impl EventLoop {
                         open_tasks
                     ),
                     "open tasks remain",
-                    None,
+                    Some("ralph"),
                     Some(RejectionKind::OpenTasksBlocking),
                 );
-                self.bus
-                    .publish(Event::new("task.resume", open_tasks_payload));
+                let loop_id_for_resume = self.current_loop_id();
+                crate::event_loop::resume_routing::publish_targeted_resume_for_hat(
+                    &mut self.bus,
+                    &self.registry,
+                    None,
+                    loop_id_for_resume.as_deref(),
+                    "ralph",
+                    None,
+                    None,
+                    &format!("open_tasks:{}:{}", open_tasks.len(), task_ids_hash),
+                    open_tasks_payload,
+                );
                 return None;
             }
         } else if let Ok(false) = self.verify_scratchpad_complete() {

@@ -683,10 +683,34 @@ impl EventLoop {
                     serde_json::Value::String(esc.reason.clone()),
                 );
             }
-            let resume_event = Event::new("task.resume", payload.to_string())
-                .with_source(HatId::from("ralph"))
-                .with_target(HatId::from(esc.safe_target.as_str()));
-            self.bus.publish(resume_event);
+            // Plan 2026-08-10-001 U1: route the handoff-resume
+            // through the unified publisher so the registry /
+            // dedup / fail-close checks fire. The caller-side
+            // `retry_key` is signed by consumer + event_id so
+            // multiple handoff timeouts collapse into one
+            // resume per consumer/event.
+            let loop_id_for_resume = self.current_loop_id();
+            let decision = crate::event_loop::resume_routing::publish_targeted_resume_for_hat(
+                &mut self.bus,
+                &self.registry,
+                None,
+                loop_id_for_resume.as_deref(),
+                esc.safe_target.as_str(),
+                None,
+                None,
+                &format!("handoff:{}:{}", esc.consumer, esc.event_id),
+                payload.to_string(),
+            );
+            if let crate::event_loop::resume_routing::ResumeDecision::Block { reason } = &decision
+            {
+                tracing::warn!(
+                    target = %esc.safe_target.as_str(),
+                    consumer = %esc.consumer,
+                    event_id = %esc.event_id,
+                    ?reason,
+                    "handoff resume blocked (no safe target)"
+                );
+            }
             // P2-1 (plan 2026-06-29-006): bump the
             // consumer's cumulative stall count. When the
             // post-bump value reaches 2, publish a

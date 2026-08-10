@@ -312,17 +312,15 @@ impl EventLoop {
         let source_hat_id: Option<HatId> = source_hat
             .as_deref()
             .map(|h| HatId::new(h.to_string()));
-        // TaskStore is loaded on demand; the open-task owner
-        // fallback is optional and degrades gracefully when the
-        // ledger is unavailable.
-        let task_store_path = self
-            .config
-            .core
-            .workspace_root
-            .join(".ralph")
-            .join("agent")
-            .join("tasks.jsonl");
-        let task_store = crate::task_store::TaskStore::load(&task_store_path).ok();
+        // TaskStore is loaded on demand via the loop-context
+        // SSOT accessor; the open-task owner fallback is
+        // optional and degrades gracefully when the ledger is
+        // unavailable. Plan 2026-08-10-001 U1 (R3): replace
+        // the hand-rolled `.ralph/agent/tasks.jsonl` join with
+        // `self.tasks_path()` so future loop-context overrides
+        // (worktree rewrites, alternate ralph dirs) propagate
+        // uniformly.
+        let task_store = crate::task_store::TaskStore::load(&self.tasks_path()).ok();
         let loop_id_owned = self.current_loop_id();
         // The unified publisher takes a `&ResumeRoutingInputs`.
         // We need owned strings for the lifetime; clone them into

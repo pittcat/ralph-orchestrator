@@ -305,7 +305,10 @@ pub fn publish_targeted_resume(
     let decision = resolve_resume_target(inputs, registry, task_store, existing_pending);
     match &decision {
         ResumeDecision::Allow { target, .. } => {
-            let event = ralph_proto::Event::new("task.resume", payload).with_target(target.clone());
+            let event = ralph_proto::Event::new("task.resume", payload)
+                .with_source("orchestrator")
+                .with_system_injected()
+                .with_target(target.clone());
             bus.publish(event);
         }
         ResumeDecision::Duplicate { .. } => {
@@ -316,6 +319,67 @@ pub fn publish_targeted_resume(
         }
     }
     decision
+}
+
+/// Plan 2026-08-10-001 U1: derive a [`PendingResumeIdentity`]
+/// projection from the live bus pending queue for a given hat.
+/// Used to short-circuit equivalent pending resumes per D6.
+pub fn pending_resume_identities_from_bus(
+    bus: &ralph_proto::EventBus,
+    hat: &ralph_proto::HatId,
+) -> Vec<PendingResumeIdentity> {
+    let Some(pending) = bus.peek_pending(hat) else {
+        return Vec::new();
+    };
+    pending
+        .iter()
+        .filter(|event| event.topic.as_str() == "task.resume")
+        .map(|_event| PendingResumeIdentity {
+            loop_id: None,
+            hat: hat.as_str().to_string(),
+            task_id: None,
+            task_key: None,
+            // Live-queue dedup uses the hat as the only stable
+            // identity dimension we can derive from the bus
+            // surface (the deeper payload fields are JSON inside
+            // `payload` and aren't surfaced here). Hat-only
+            // identity is enough to prevent re-queueing the
+            // same targeted resume into the same hat's queue.
+            retry_key: hat.as_str().to_string(),
+        })
+        .collect()
+}
+
+/// Plan 2026-08-10-001 U1: single-call-shape wrapper used by
+/// every runtime `task.resume` publish site. Wraps
+/// [`publish_targeted_resume`] with the live `existing_pending`
+/// adapter so callers don't need to inspect `peek_pending`
+/// themselves. The caller passes a `target_hint: &str` plus
+/// optional identity hints; `retry_key` MUST be non-empty
+/// (callers derive a deterministic one from the recovery
+/// context).
+pub fn publish_targeted_resume_for_hat(
+    bus: &mut ralph_proto::EventBus,
+    registry: &impl RegisteredHats,
+    task_store: Option<&TaskStore>,
+    loop_id: Option<&str>,
+    target_hint: &str,
+    task_id: Option<&str>,
+    task_key: Option<&str>,
+    retry_key: &str,
+    payload: String,
+) -> ResumeDecision {
+    let target_hat = ralph_proto::HatId::new(target_hint);
+    let existing = pending_resume_identities_from_bus(bus, &target_hat);
+    let inputs = ResumeRoutingInputs {
+        event_target: Some(target_hint),
+        payload_target_hat: None,
+        task_id,
+        task_key,
+        retry_key: Some(retry_key),
+        loop_id,
+    };
+    publish_targeted_resume(bus, &inputs, registry, task_store, &existing, payload)
 }
 
 #[cfg(test)]

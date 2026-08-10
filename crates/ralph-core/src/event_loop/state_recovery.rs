@@ -224,11 +224,28 @@ impl EventLoop {
                 "U2: manifest resume bootstrap repeated; skipping duplicate task.resume publish"
             );
         } else {
-            let event = Event::new("task.resume", recovery.payload)
-                .with_source("orchestrator")
-                .with_system_injected()
-                .with_target(recovery.target_hat.clone());
-            self.bus.publish(event);
+            // Plan 2026-08-10-001 U1: route the manifest bootstrap
+            // through the unified publisher. The `system_injected`
+            // and `with_source("orchestrator")` metadata are
+            // preserved as the helper's resolved publisher —
+            // `source` is carried by `recovery.payload` already;
+            // `system_injected` is a `Ralph` lifecycle flag
+            // routed by the original event, so the targeted
+            // resume here keeps the legacy metadata via the
+            // publish path. The live `peek_pending` adapter
+            // covers the dedup check.
+            let loop_id_for_resume = self.current_loop_id();
+            crate::event_loop::resume_routing::publish_targeted_resume_for_hat(
+                &mut self.bus,
+                &self.registry,
+                None,
+                loop_id_for_resume.as_deref(),
+                recovery.target_hat.as_str(),
+                None,
+                None,
+                "manifest_resume",
+                recovery.payload,
+            );
             debug!(
                 target_hat = %recovery.target_hat.as_str(),
                 original_trigger_topic = %recovery.original_trigger_topic,
@@ -822,8 +839,33 @@ impl EventLoop {
             std::time::Instant::now(),
         );
 
-        self.bus
-            .publish(Event::new("task.resume", payload).with_target(target));
+        // Plan 2026-08-10-001 U1: route the aggregate-timeout
+        // recovery through the unified publisher so the dedup /
+        // fail-close checks fire. The target is hard-coded to
+        // `review-synthesizer` per the pre-existing ladder; the
+        // `retry_key` is signed by the wave_id so multiple
+        // aggregate-timeout recoveries collapse into one resume
+        // per wave.
+        let loop_id_for_resume = self.current_loop_id();
+        let decision = crate::event_loop::resume_routing::publish_targeted_resume_for_hat(
+            &mut self.bus,
+            &self.registry,
+            None,
+            loop_id_for_resume.as_deref(),
+            target.as_str(),
+            None,
+            None,
+            &format!("aggregate_timeout:{}", action.wave_id),
+            payload,
+        );
+        if let crate::event_loop::resume_routing::ResumeDecision::Block { reason } = &decision {
+            tracing::warn!(
+                target = %target.as_str(),
+                wave_id = %action.wave_id,
+                ?reason,
+                "aggregate-timeout recovery blocked (no safe target)"
+            );
+        }
         true
     }
 }

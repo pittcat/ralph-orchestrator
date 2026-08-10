@@ -954,10 +954,36 @@ impl EventLoop {
                                 None,
                                 wc.as_ref(),
                             );
-                        let recovery = Event::new("task.resume", resume_payload)
-                            .with_target(isolated_hat.clone());
-                        let recovery_payload = recovery.payload.clone();
-                        self.bus.publish(recovery);
+                        // Plan 2026-08-10-001 U1: route the
+                        // scope-drop recovery through the
+                        // unified publisher. The
+                        // post-scope `accepted` push (below)
+                        // stays as-is so `had_events` for the
+                        // turn is correctly true; the
+                        // `triggered: None` JsonlEvent shape
+                        // from the U1 bugfix continues to
+                        // avoid double-targeting. The helper
+                        // publishes the targeted
+                        // `task.resume` directly. We capture
+                        // the payload string and loop_id
+                        // before the bus borrow so the
+                        // post-scope `accepted` push still
+                        // has access to them.
+                        let loop_id_for_resume = self.current_loop_id();
+                        let recovery_payload_for_accepted = resume_payload;
+                        crate::event_loop::resume_routing::publish_targeted_resume_for_hat(
+                            &mut self.bus,
+                            &self.registry,
+                            None,
+                            loop_id_for_resume.as_deref(),
+                            isolated_hat.as_str(),
+                            None,
+                            None,
+                            &format!("scope_drop:{}", isolated_hat.as_str()),
+                            recovery_payload_for_accepted.clone(),
+                        );
+                        let recovery_payload = recovery_payload_for_accepted;
+                        let _ = loop_id_for_resume;
                         // P1 finding #1: also push the synthetic
                         // `task.resume` into the local `accepted` vector
                         // so the JSONL-derived `accepted_events` (used
@@ -2527,15 +2553,46 @@ impl EventLoop {
                                         "retry_publish_topics": [event.topic.as_str(), "work.failed"],
                                         "contract_finding": finding,
                                     });
-                                    let retry_event =
-                                        Event::new("task.resume", retry_payload.to_string())
-                                            .with_target(hat_id.clone());
+                                    // Plan 2026-08-10-001 U1: route
+                                    // the contract-rejection retry
+                                    // through the unified publisher.
+                                    // The `retry_key` is signed by
+                                    // `task_key`+`step` so duplicate
+                                    // contract retries for the same
+                                    // step collapse into a single
+                                    // resume.
+                                    let retry_payload_string = retry_payload.to_string();
+                                    let loop_id_for_resume = self.current_loop_id();
+                                    let retry_step_for_key: String =
+                                        if step.is_empty() {
+                                            String::from("none")
+                                        } else {
+                                            step.to_string()
+                                        };
+                                    let decision = crate::event_loop::resume_routing::publish_targeted_resume_for_hat(
+                                        &mut self.bus,
+                                        &self.registry,
+                                        None,
+                                        loop_id_for_resume.as_deref(),
+                                        hat_id.as_str(),
+                                        None,
+                                        Some(retry_step_for_key.as_str()),
+                                        "contract_rejection_retry",
+                                        retry_payload_string,
+                                    );
+                                    if let crate::event_loop::resume_routing::ResumeDecision::Block { reason } = &decision {
+                                        tracing::warn!(
+                                            target = %hat_id.as_str(),
+                                            topic = %event.topic.as_str(),
+                                            ?reason,
+                                            "contract-rejection retry blocked (no safe target)"
+                                        );
+                                    }
                                     debug!(
                                         target = %hat_id.as_str(),
                                         topic = %event.topic.as_str(),
                                         "Publishing targeted contract recovery event to source hat"
                                     );
-                                    self.bus.publish(retry_event);
                                 }
                             } else if let Some(reason) = &no_retry_reason {
                                 warn!(
@@ -4121,8 +4178,26 @@ impl EventLoop {
             Some(pending.hat.as_str()),
             Some(RejectionKind::ContractViolation),
         );
-        self.bus
-            .publish(Event::new("task.resume", payload.clone()).with_target(pending.hat.clone()));
+        // Plan 2026-08-10-001 U1: route the isolated
+        // over-emit recovery through the unified publisher.
+        // The `retry_key` is signed by hat + per-turn so the
+        // same hat's extra-event recovery collapses into one
+        // resume per turn.
+        let loop_id_for_resume = self.current_loop_id();
+        crate::event_loop::resume_routing::publish_targeted_resume_for_hat(
+            &mut self.bus,
+            &self.registry,
+            None,
+            loop_id_for_resume.as_deref(),
+            pending.hat.as_str(),
+            None,
+            None,
+            &format!(
+                "isolated_budget:{}:per_turn",
+                crate::diagnosis::normalize_part(pending.hat.as_str())
+            ),
+            payload,
+        );
     }
 
     /// 2026-06-29-007 plan U1b: drive the `current_step`
@@ -4365,10 +4440,35 @@ impl EventLoop {
                     count = new_count,
                     "U6: precheck rejection within budget; injecting correction + task.resume"
                 );
-                self.bus.publish(
-                    ralph_proto::Event::new("task.resume", resume_payload)
-                        .with_target(HatId::new(target_hat.clone())),
+                // Plan 2026-08-10-001 U1: route the precheck
+                // correction through the unified publisher. The
+                // `retry_key` is signed by `gate` + `guarded`
+                // so duplicate precheck rejections for the same
+                // gate/topic collapse into a single resume.
+                let loop_id_for_resume = self.current_loop_id();
+                let decision = crate::event_loop::resume_routing::publish_targeted_resume_for_hat(
+                    &mut self.bus,
+                    &self.registry,
+                    None,
+                    loop_id_for_resume.as_deref(),
+                    &target_hat,
+                    None,
+                    None,
+                    &format!("precheck:{}:{}", gate_hat_id, guarded),
+                    resume_payload,
                 );
+                if let crate::event_loop::resume_routing::ResumeDecision::Block { reason } =
+                    &decision
+                {
+                    tracing::warn!(
+                        loop_id = %loop_id,
+                        gate = %gate_hat_id,
+                        topic = %guarded,
+                        target_hat = %target_hat,
+                        ?reason,
+                        "precheck correction blocked (no safe target)"
+                    );
+                }
                 self.state
                     .redispatch_hat_obligation(&HatId::new(target_hat));
             }

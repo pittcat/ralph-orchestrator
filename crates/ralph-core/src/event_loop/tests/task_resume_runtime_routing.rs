@@ -307,3 +307,88 @@ fn unit3_unified_publisher_blocks_broadcast_when_no_safe_target() {
         );
     }
 }
+
+/// Plan 2026-08-10-001 U1 R1 inventory regression: every
+/// production `task.resume` publish inside `event_loop/*.rs`
+/// must route through `publish_targeted_resume_*`. A bare
+/// `Event::new("task.resume", …)` or
+/// `self.bus.publish(Event::new("task.resume"` outside the
+/// helper module signals a migration regression — fail this
+/// test loudly and route the fix through the U1 wires.
+///
+/// Scope: production files only (`src/event_loop/*.rs`),
+/// excluding the helper module itself. The walker does not
+/// descend into `src/event_loop/tests/` because those files
+/// use bare `task.resume` events as event-loop-internal
+/// test fixtures for the bus routing semantics — they do
+/// not produce publish-side behaviour in production.
+#[test]
+fn ingress_inventory_regression_storm_dispatch() {
+    let event_loop_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("src/event_loop");
+    let mut bare_publishes: Vec<String> = Vec::new();
+    walk_event_loop_rs(&event_loop_root, &mut |path| {
+        let Ok(content) = std::fs::read_to_string(path) else {
+            return;
+        };
+        // The helper itself is the only allow-listed exception
+        // — it constructs the targeted event for resolution.
+        if path.ends_with("resume_routing.rs") {
+            return;
+        }
+        // Production files outside `tests/` are in scope.
+        if path
+            .components()
+            .any(|c| c.as_os_str() == "tests")
+        {
+            return;
+        }
+        // Skip the loop_state mini-tests (existing
+        // characterization tests inside `mod.rs`-shaped
+        // files use `Event::new("task.resume", ...)` for
+        // stale-counter scenarios — not production publishes).
+        if path.ends_with("loop_state.rs") {
+            return;
+        }
+        for (idx, line) in content.lines().enumerate() {
+            if line.trim_start().starts_with("//") {
+                continue;
+            }
+            if line.contains("Event::new(\"task.resume\"")
+                || line.contains("self.bus.publish(Event::new(\"task.resume\"")
+            {
+                bare_publishes.push(format!(
+                    "{}:{}",
+                    path.strip_prefix(env!("CARGO_MANIFEST_DIR"))
+                        .unwrap_or(path)
+                        .display(),
+                    idx + 1,
+                ));
+            }
+        }
+    });
+    assert!(
+        bare_publishes.is_empty(),
+        "production task.resume publish must route through publish_targeted_resume_*. Offenders: {bare_publishes:?}"
+    );
+}
+
+fn walk_event_loop_rs<F>(root: &std::path::Path, visit: &mut F)
+where
+    F: FnMut(&std::path::Path),
+{
+    let mut stack: Vec<std::path::PathBuf> = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let Ok(rd) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in rd.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                stack.push(path);
+            } else if path.extension().and_then(|s| s.to_str()) == Some("rs") {
+                visit(&path);
+            }
+        }
+    }
+}
