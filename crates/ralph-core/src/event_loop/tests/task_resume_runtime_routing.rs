@@ -242,6 +242,7 @@ fn unit3_unified_publisher_targeted_resume_reaches_target_hat() {
         ["executor", "observer"].iter().map(|s| s.to_string()).collect();
     let inputs = crate::event_loop::resume_routing::ResumeRoutingInputs {
         event_target: Some("executor"),
+        retry_key: Some("unit_test_end_to_end"),
         ..Default::default()
     };
     let decision = crate::event_loop::resume_routing::publish_targeted_resume(

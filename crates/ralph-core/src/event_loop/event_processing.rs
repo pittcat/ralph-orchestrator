@@ -525,9 +525,7 @@ impl EventLoop {
                     if self.config.event_loop.progress_steward.enabled {
                         let stall_event = Event::new(
                             "loop.stalled",
-                            format!(
-                                "{{\"reason\":\"stall_no_events\",\"target\":\"ralph\"}}"
-                            ),
+                            "{\"reason\":\"stall_no_events\",\"target\":\"ralph\"}".to_string(),
                         );
                         self.bus.publish(stall_event);
                     } else {

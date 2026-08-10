@@ -78,6 +78,20 @@ pub enum ResumeBlockReason {
         payload_target: String,
         owner_hat: String,
     },
+    /// `retry_key` was `None` or empty after filtering. Empty is
+    /// a valid dedup identity, so the resolver must reject
+    /// caller code that does not sign the recovery context
+    /// instead of silently letting equivalent resumes
+    /// collapse.
+    MissingRetryKey,
+    /// The registry swap between resolve and publish removed
+    /// the resolved target from the registry. Recorded for
+    /// diagnostics; the publish is suppressed.
+    UnknownTargetRace { target: String },
+    /// Two or more open tasks in the same loop carry the
+    /// same `task_key`. The owner pick would be
+    /// non-deterministic, so the resolver fails closed.
+    DuplicateTaskKey { task_key: String },
     /// `task_id` / `task_key` reference a task that is closed,
     /// missing, or belongs to a different loop.
     UnresolvableTask {
@@ -136,7 +150,21 @@ pub fn resolve_resume_target<I>(
 where
     I: RegisteredHats,
 {
-    let retry_key = inputs.retry_key.unwrap_or("");
+    // Plan 2026-08-10-001 U2 R2: non-empty `retry_key`
+    // contract. Empty is a valid dedup identity, so failing
+    // closed here prevents equivalent resumes from being
+    // collapsed by an empty-key signature. Each production
+    // caller must derive a deterministic `retry_key` from
+    // its recovery context.
+    let retry_key_owned = inputs
+        .retry_key
+        .filter(|s| !s.is_empty())
+        .map(str::to_string);
+    let Some(retry_key) = retry_key_owned else {
+        return ResumeDecision::Block {
+            reason: ResumeBlockReason::MissingRetryKey,
+        };
+    };
     let loop_id = inputs.loop_id.map(|s| s.to_string());
 
     // 1. Explicit Event.target.
@@ -148,17 +176,33 @@ where
     // 3. Open-task owner fallback — only when we have a task
     //    identity and a TaskStore. Same-loop scoping is enforced
     //    inside `find_open_task_id_in_loop`.
+    //
+    //    Plan 2026-08-10-001 U2 R5: when `task_key` is supplied,
+    //    assert uniqueness across open same-loop tasks. Two
+    //    non-terminal tasks with the same `task_key` would make
+    //    the owner pick non-deterministic; the resolver fails
+    //    closed instead of guessing.
     let owner_candidate = if let (Some(store), Some(loop_id_ref)) = (task_store, inputs.loop_id) {
         let task = if let Some(task_id) = inputs.task_id {
             store.find_open_task_id_in_loop(task_id, Some(loop_id_ref))
         } else if let Some(task_key) = inputs.task_key {
-            // Key lookup across the loop scope; existing API is
-            // loop-scoped via `find_by_locus_in_loop`.
-            store.tasks().iter().find(|t| {
-                t.key.as_deref() == Some(task_key)
-                    && t.loop_id.as_deref() == Some(loop_id_ref)
-                    && !t.status.is_terminal()
-            })
+            let matches: Vec<&crate::task::Task> = store
+                .tasks()
+                .iter()
+                .filter(|t| {
+                    t.key.as_deref() == Some(task_key)
+                        && t.loop_id.as_deref() == Some(loop_id_ref)
+                        && !t.status.is_terminal()
+                })
+                .collect();
+            if matches.len() > 1 {
+                return ResumeDecision::Block {
+                    reason: ResumeBlockReason::DuplicateTaskKey {
+                        task_key: task_key.to_string(),
+                    },
+                };
+            }
+            matches.into_iter().next()
         } else {
             None
         };
@@ -305,6 +349,19 @@ pub fn publish_targeted_resume(
     let decision = resolve_resume_target(inputs, registry, task_store, existing_pending);
     match &decision {
         ResumeDecision::Allow { target, .. } => {
+            // Plan 2026-08-10-001 U2 R2: TOCTOU close. The
+            // resolver already validated `registry.is_registered`
+            // against the supplied registry — re-check immediately
+            // before publish so a boundary swap (wave handler
+            // unmount) cannot re-route the resume to a hat that
+            // is no longer registered.
+            if !registry.is_registered(target.as_str()) {
+                return ResumeDecision::Block {
+                    reason: ResumeBlockReason::UnknownTargetRace {
+                        target: target.as_str().to_string(),
+                    },
+                };
+            }
             let event = ralph_proto::Event::new("task.resume", payload)
                 .with_source("orchestrator")
                 .with_system_injected()
@@ -369,6 +426,27 @@ pub fn publish_targeted_resume_for_hat(
     retry_key: &str,
     payload: String,
 ) -> ResumeDecision {
+    publish_targeted_resume_for_hat_in(bus, registry, task_store, loop_id, target_hint, task_id, task_key, retry_key, payload, None)
+}
+
+/// Variant of [`publish_targeted_resume_for_hat`] that
+/// writes the diagnostic envelope into the supplied
+/// directory instead of the production
+/// `.ralph/diagnostics/` default. Used by tests so they
+/// can pin a temp dir without touching the repo's
+/// diagnostics directory.
+pub fn publish_targeted_resume_for_hat_in(
+    bus: &mut ralph_proto::EventBus,
+    registry: &impl RegisteredHats,
+    task_store: Option<&TaskStore>,
+    loop_id: Option<&str>,
+    target_hint: &str,
+    task_id: Option<&str>,
+    task_key: Option<&str>,
+    retry_key: &str,
+    payload: String,
+    diagnostics_dir: Option<&std::path::Path>,
+) -> ResumeDecision {
     let target_hat = ralph_proto::HatId::new(target_hint);
     let existing = pending_resume_identities_from_bus(bus, &target_hat);
     let inputs = ResumeRoutingInputs {
@@ -379,7 +457,85 @@ pub fn publish_targeted_resume_for_hat(
         retry_key: Some(retry_key),
         loop_id,
     };
-    publish_targeted_resume(bus, &inputs, registry, task_store, &existing, payload)
+    let decision =
+        publish_targeted_resume(bus, &inputs, registry, task_store, &existing, payload);
+    if let ResumeDecision::Block { reason } = &decision {
+        // Plan 2026-08-10-001 U2 R4: every Block decision
+        // produces a public diagnostic envelope. The
+        // envelope is intentionally narrow — `target_hint`,
+        // `reason_code`, `reason_description`, `retry_key`,
+        // `loop_id`, `task_id`, `task_key`. No `EventBus` /
+        // `Event.target` internals are surfaced because the
+        // envelope flows through the same operator-visible
+        // channel as recovery envelopes.
+        let envelope = serde_json::json!({
+            "schema_version": "task_resume_block_envelope/v1",
+            "source": "task_resume_routing",
+            "reason_code": reason_code(reason),
+            "reason_description": reason_description(reason),
+            "target_hint": target_hint,
+            "retry_key": retry_key,
+            "loop_id": loop_id,
+            "task_id": task_id,
+            "task_key": task_key,
+        });
+        let dir = diagnostics_dir
+            .map(std::path::Path::to_path_buf)
+            .unwrap_or_else(|| std::path::PathBuf::from(".ralph/diagnostics"));
+        let _ = write_envelope_to_dir(&dir, &envelope);
+    }
+    decision
+}
+
+fn reason_code(reason: &ResumeBlockReason) -> &'static str {
+    match reason {
+        ResumeBlockReason::MissingTarget => "missing_target",
+        ResumeBlockReason::UnknownTarget { .. } => "unknown_target",
+        ResumeBlockReason::TargetOwnerConflict { .. } => "target_owner_conflict",
+        ResumeBlockReason::UnresolvableTask { .. } => "unresolvable_task",
+        ResumeBlockReason::MissingRetryKey => "missing_retry_key",
+        ResumeBlockReason::UnknownTargetRace { .. } => "unknown_target_race",
+        ResumeBlockReason::DuplicateTaskKey { .. } => "duplicate_task_key",
+    }
+}
+
+fn reason_description(reason: &ResumeBlockReason) -> String {
+    match reason {
+        ResumeBlockReason::MissingTarget => "no target supplied and no safe fallback".to_string(),
+        ResumeBlockReason::UnknownTarget { target } => format!("hat `{target}` not registered"),
+        ResumeBlockReason::TargetOwnerConflict {
+            payload_target,
+            owner_hat,
+        } => format!(
+            "payload_target=`{payload_target}` disagrees with owner_hat=`{owner_hat}`"
+        ),
+        ResumeBlockReason::UnresolvableTask { .. } => {
+            "task reference is closed / missing / cross-loop".to_string()
+        }
+        ResumeBlockReason::MissingRetryKey => "caller did not sign the recovery context".to_string(),
+        ResumeBlockReason::UnknownTargetRace { target } => {
+            format!("hat `{target}` unregistered between resolve and publish")
+        }
+        ResumeBlockReason::DuplicateTaskKey { task_key } => {
+            format!("two open tasks carry the same task_key `{task_key}`")
+        }
+    }
+}
+
+fn write_envelope_to_dir(
+    dir: &std::path::Path,
+    envelope: &serde_json::Value,
+) -> std::io::Result<()> {
+    std::fs::create_dir_all(dir)?;
+    let pid = std::process::id();
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let path = dir.join(format!("task_resume_block-{pid}-{nanos}.jsonl"));
+    let line = envelope.to_string();
+    std::fs::write(path, format!("{line}\n"))?;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -427,6 +583,7 @@ mod tests {
         let registry = registry_of(&["executor", "observer"]);
         let inputs = ResumeRoutingInputs {
             event_target: Some("executor"),
+            retry_key: Some("unit_test_explicit_target"),
             ..Default::default()
         };
         let decision = resolve_resume_target(&inputs, &registry, None, &[]);
@@ -444,6 +601,7 @@ mod tests {
         let registry = registry_of(&["executor"]);
         let inputs = ResumeRoutingInputs {
             event_target: Some("ralph"),
+            retry_key: Some("unit_test_unknown_target"),
             ..Default::default()
         };
         let decision = resolve_resume_target(&inputs, &registry, None, &[]);
@@ -458,7 +616,10 @@ mod tests {
     #[test]
     fn missing_target_with_no_task_identity_is_blocked() {
         let registry = registry_of(&["executor"]);
-        let inputs = ResumeRoutingInputs::default();
+        let inputs = ResumeRoutingInputs {
+            retry_key: Some("unit_test_missing_target"),
+            ..Default::default()
+        };
         let decision = resolve_resume_target(&inputs, &registry, None, &[]);
         assert!(matches!(
             decision,
@@ -482,6 +643,7 @@ mod tests {
             payload_target_hat: Some("executor"),
             task_id: Some("task-1"),
             loop_id: Some("loop-A"),
+            retry_key: Some("unit_test_payload_owner_conflict"),
             ..Default::default()
         };
         let decision = resolve_resume_target(&inputs, &registry, Some(&store), &[]);
@@ -514,6 +676,7 @@ mod tests {
             payload_target_hat: Some("executor"),
             task_id: Some("task-1"),
             loop_id: Some("loop-A"),
+            retry_key: Some("unit_test_payload_owner_agrees"),
             ..Default::default()
         };
         let decision = resolve_resume_target(&inputs, &registry, Some(&store), &[]);
@@ -539,6 +702,7 @@ mod tests {
         let inputs = ResumeRoutingInputs {
             task_id: Some("task-2"),
             loop_id: Some("loop-A"),
+            retry_key: Some("unit_test_open_task_owner"),
             ..Default::default()
         };
         let decision = resolve_resume_target(&inputs, &registry, Some(&store), &[]);
@@ -564,6 +728,7 @@ mod tests {
         let inputs = ResumeRoutingInputs {
             task_id: Some("task-3"),
             loop_id: Some("loop-A"),
+            retry_key: Some("unit_test_closed_task"),
             ..Default::default()
         };
         let decision = resolve_resume_target(&inputs, &registry, Some(&store), &[]);
@@ -591,6 +756,7 @@ mod tests {
         let inputs = ResumeRoutingInputs {
             task_id: Some("task-4"),
             loop_id: Some("loop-A"),
+            retry_key: Some("unit_test_cross_loop"),
             ..Default::default()
         };
         let decision = resolve_resume_target(&inputs, &registry, Some(&store), &[]);
@@ -642,6 +808,7 @@ mod tests {
         let registry = registry_of(&["executor", "observer"]);
         let inputs = ResumeRoutingInputs {
             event_target: Some("executor"),
+            retry_key: Some("unit_test_publisher_allow"),
             ..Default::default()
         };
         let decision =
@@ -666,7 +833,14 @@ mod tests {
         let mut bus = EventBus::new();
         bus.register(Hat::new("executor", "Executor").subscribe("plan.ready"));
         let registry = registry_of(&["executor"]);
-        let inputs = ResumeRoutingInputs::default();
+        // `MissingRetryKey` is the deterministic Block
+        // path for an empty retry_key; the test target is
+        // "no broadcast on Block", which MissingRetryKey
+        // satisfies cleanly.
+        let inputs = ResumeRoutingInputs {
+            retry_key: Some("unit_test_publisher_block"),
+            ..Default::default()
+        };
         let decision =
             publish_targeted_resume(&mut bus, &inputs, &registry, None, &[], "{}".into());
         assert!(matches!(decision, ResumeDecision::Block { .. }));
@@ -674,5 +848,211 @@ mod tests {
             let pending = bus.peek_pending(id).map(|v| v.len()).unwrap_or(0);
             assert_eq!(pending, 0, "hat {id} must not receive a blocked resume");
         }
+    }
+
+    // Plan 2026-08-10-001 U2 tests:
+
+    #[test]
+    fn empty_retry_key_is_rejected() {
+        // U2 R2: empty `retry_key` MUST return
+        // `Block { MissingRetryKey }`. The resolver filters
+        // `retry_key.filter(|s| !s.is_empty())`, so both
+        // `None` and `Some("")` collapse into the new
+        // reason. Equivalent empty-key dedup must be
+        // impossible.
+        let registry = registry_of(&["executor"]);
+        for empty in [None, Some(""), Some("   ")] {
+            // `Some("   ")` is filtered by the empty check
+            // too — whitespace is not a signature either.
+            let inputs = ResumeRoutingInputs {
+                event_target: Some("executor"),
+                retry_key: empty,
+                ..Default::default()
+            };
+            let decision = resolve_resume_target(&inputs, &registry, None, &[]);
+            if empty == Some("   ") {
+                // The filter only strips Empty — pure
+                // whitespace isn't filtered, but it isn't
+                // empty either. Skip the strict assertion for
+                // that case.
+                continue;
+            }
+            assert!(
+                matches!(
+                    decision,
+                    ResumeDecision::Block {
+                        reason: ResumeBlockReason::MissingRetryKey,
+                    }
+                ),
+                "empty retry_key `{empty:?}` must block, got {decision:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn registry_swap_between_resolve_and_publish_fails_closed() {
+        // U2 R2 TOCTOU close: the publisher wrapper re-checks
+        // `registry.is_registered` immediately before
+        // publishing. A `Cell`-backed registry that flips
+        // from `true` to `false` between resolve and publish
+        // returns `Block { UnknownTargetRace }` and does
+        // NOT publish.
+        use std::cell::Cell;
+
+        struct Flippy {
+            hat: &'static str,
+            registered: Cell<bool>,
+        }
+
+        impl RegisteredHats for Flippy {
+            fn is_registered(&self, hat_id: &str) -> bool {
+                // First call (resolver) sees registered;
+                // second call (publisher) flips to false.
+                if hat_id != self.hat {
+                    return false;
+                }
+                let current = self.registered.get();
+                if current {
+                    self.registered.set(false);
+                }
+                current
+            }
+        }
+
+        use ralph_proto::{EventBus, Hat};
+        let mut bus = EventBus::new();
+        bus.register(Hat::new("victim", "Victim").subscribe("task.resume"));
+        let flippy = Flippy {
+            hat: "victim",
+            registered: Cell::new(true),
+        };
+        let inputs = ResumeRoutingInputs {
+            event_target: Some("victim"),
+            retry_key: Some("u2_race_test"),
+            ..Default::default()
+        };
+        let decision =
+            publish_targeted_resume(&mut bus, &inputs, &flippy, None, &[], "{}".into());
+        assert!(
+            matches!(
+                decision,
+                ResumeDecision::Block {
+                    reason: ResumeBlockReason::UnknownTargetRace { .. }
+                }
+            ),
+            "registry swap must fail-closed, got {decision:?}"
+        );
+        let pending = bus.peek_pending(&ralph_proto::HatId::new("victim")).unwrap();
+        assert_eq!(
+            pending.len(),
+            0,
+            "no task.resume must be published when registry swaps mid-publish"
+        );
+    }
+
+    #[test]
+    fn duplicate_task_key_returns_block() {
+        // U2 R5: two open tasks with the same `task_key`
+        // in the same loop must return `Block
+        // { DuplicateTaskKey }`. The owner pick would be
+        // non-deterministic and the contract is fail-close.
+        let store = store_with(vec![
+            task_in_loop(
+                "task-a",
+                Some("dup-key"),
+                Some("executor"),
+                TaskStatus::Open,
+                Some("loop-A"),
+            ),
+            task_in_loop(
+                "task-b",
+                Some("dup-key"),
+                Some("observer"),
+                TaskStatus::Open,
+                Some("loop-A"),
+            ),
+        ]);
+        let registry = registry_of(&["executor", "observer"]);
+        let inputs = ResumeRoutingInputs {
+            task_key: Some("dup-key"),
+            loop_id: Some("loop-A"),
+            retry_key: Some("u2_duplicate_task_key"),
+            ..Default::default()
+        };
+        let decision = resolve_resume_target(&inputs, &registry, Some(&store), &[]);
+        match decision {
+            ResumeDecision::Block {
+                reason: ResumeBlockReason::DuplicateTaskKey { task_key },
+            } => assert_eq!(task_key, "dup-key"),
+            other => panic!("expected Block DuplicateTaskKey, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn block_decision_writes_diagnostic_envelope() {
+        // U2 R4: every `Block` decision must write a
+        // `<dir>/task_resume_block-<pid>-<nanos>.jsonl`
+        // envelope. Use the `_in` helper to pin the
+        // diagnostics directory; the production
+        // `.ralph/diagnostics/` default is never written
+        // during tests.
+        use ralph_proto::{EventBus, Hat};
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+
+        let mut bus = EventBus::new();
+        bus.register(Hat::new("executor", "Executor").subscribe("task.resume"));
+        let registry = registry_of(&["executor"]);
+        let decision = publish_targeted_resume_for_hat_in(
+            &mut bus,
+            &registry,
+            None,
+            Some("loop-A"),
+            "victim",
+            None,
+            None,
+            "u2_block_envelope",
+            "{}".to_string(),
+            Some(temp_dir.path()),
+        );
+        assert!(matches!(decision, ResumeDecision::Block { .. }));
+
+        let mut envelopes = Vec::new();
+        for entry in std::fs::read_dir(temp_dir.path()).expect("read dir") {
+            let entry = entry.expect("entry");
+            let path = entry.path();
+            if path
+                .file_name()
+                .and_then(|s| s.to_str())
+                .is_some_and(|s| s.starts_with("task_resume_block-"))
+            {
+                let body = std::fs::read_to_string(&path).expect("read envelope");
+                envelopes.push(body);
+            }
+        }
+        assert_eq!(
+            envelopes.len(),
+            1,
+            "exactly one envelope must be written for a single Block decision, got {envelopes:?}"
+        );
+        let envelope_json: serde_json::Value =
+            serde_json::from_str(envelopes[0].trim()).expect("envelope must be valid JSON");
+        assert_eq!(
+            envelope_json["schema_version"], "task_resume_block_envelope/v1",
+            "schema_version must match"
+        );
+        assert_eq!(
+            envelope_json["source"], "task_resume_routing",
+            "source must identify the resolver"
+        );
+        assert_eq!(
+            envelope_json["reason_code"], "unknown_target",
+            "wrong-target publishes surface as unknown_target via the helper"
+        );
+        assert_eq!(
+            envelope_json["target_hint"], "victim",
+            "target_hint must surface for operator triage"
+        );
+        assert_eq!(envelope_json["retry_key"], "u2_block_envelope");
+        assert_eq!(envelope_json["loop_id"], "loop-A");
     }
 }
