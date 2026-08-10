@@ -956,7 +956,6 @@ impl EventLoop {
                             );
                         let recovery = Event::new("task.resume", resume_payload)
                             .with_target(isolated_hat.clone());
-                        let recovery_target = recovery.target.clone();
                         let recovery_payload = recovery.payload.clone();
                         self.bus.publish(recovery);
                         // P1 finding #1: also push the synthetic
@@ -974,13 +973,29 @@ impl EventLoop {
                         //
                         // `accepted` here is `Vec<JsonlEvent>`
                         // (= `event_reader::Event`); we build one from
-                        // the recovery's fields.
+                        // the recovery's fields. **Do not** set
+                        // `triggered` here: this is a fresh runtime
+                        // synthesised event, not a JSONL rebuild.
+                        // The accepted-branch rebuild path
+                        // (`jsonl_event_to_proto` / `accept_event!(&event, &payload)`)
+                        // would otherwise re-apply `with_target` to
+                        // the rebuild, producing a *second*
+                        // `task.resume` on the bus (one from the
+                        // immediate `self.bus.publish(recovery)` here,
+                        // one from the rebuild in the post-scope
+                        // accepted-events loop) and double-counting
+                        // the recovery on the target hat's pending
+                        // queue. Setting `triggered: None` keeps the
+                        // rebuild target-less, which matches the
+                        // pre-U1 behaviour (the pre-U1 catch-all
+                        // used `Event::new(topic, &payload)`, which
+                        // did not propagate `target`).
                         let resume_jsonl = crate::event_reader::Event {
                             topic: "task.resume".to_string(),
                             payload: Some(recovery_payload),
                             ts: chrono::Utc::now().to_rfc3339(),
                             hat: None,
-                            triggered: recovery_target.map(|t| t.to_string()),
+                            triggered: None,
                             source: None,
                             wave_id: None,
                             wave_index: None,
