@@ -1,45 +1,32 @@
-# U1 (plan 2026-08-08-004 fix-plan §Unit 1) + U3 (plan 2026-08-10-002
-# §Unit 3, R1/R2/R6/D5): red-team attack.mapped HARD GATE.
+# 2026-08-10-002 plan U3 (R2/R6/D5): red-team attack.mapped HARD GATE
+# rejects WRONG predecessor literal via the new
+# `ne`-form payload_consistency rule.
 #
-# 2026-08-08-004 review: HARD GATE in `presets/en/red-team-attack.yml`
-# is prompt-text only. The runtime gate is now implemented via
-# schema-required `predecessor_event` field PLUS a payload_consistency
-# rule that rejects wrong literals via `ne` (2026-08-10-002 U3
-# correction: the previous `exists:true AND eq:"redteam.plan.resolved"`
-# form was inverted — it Hit on the legal value and Missed on the
-# missing/wrong case).
+# Schema declares `predecessor_event` as required; payload_consistency
+# rule `redteam-attack-mapped-predecessor-must-be-resolved` rejects
+# any value other than the literal `"redteam.plan.resolved"`. This
+# fixture exercises the wrong-literal branch: attack-surface-mapper
+# emits `redteam.attack.mapped` WITH `predecessor_event:
+# "redteam.plan.unresolved"`. Schema accepts the field (it's
+# present), but the payload_consistency rule fires; attack.mapped is
+# rejected; experiment-runner does not activate; loop falls through
+# to `redteam.complete(success:false)` via the plan.unresolved path.
 #
-# This fixture exercises three chains:
-#   1) **Missing predecessor** — attack-surface-mapper emits
-#      `redteam.attack.mapped` WITHOUT `predecessor_event`. Schema
-#      `required_fields` rejects the emit; attack.mapped absent from
-#      trace; loop falls through to `redteam.complete(success:false)`.
-#   2) **Wrong predecessor** — attack-surface-mapper emits
-#      `redteam.attack.mapped` WITH `predecessor_event:
-#      "redteam.plan.unresolved"`. Schema accepts the field (it's
-#      present), but the payload_consistency rule
-#      `redteam-attack-mapped-predecessor-must-be-resolved` (ne form)
-#      rejects the wrong literal; attack.mapped absent from trace;
-#      loop falls through to `redteam.complete(success:false)`.
-#   3) **Legal predecessor** — attack-surface-mapper emits
-#      `redteam.attack.mapped` WITH `predecessor_event:
-#      "redteam.plan.resolved"`. Schema accepts; payload_consistency
-#      rule Misses (value == literal); attack.mapped lands; experiment
-#      runner activates; loop reaches `redteam.complete(success:true)`.
-#
-# 2026-08-10-002 plan U3 §6 + §9: this single fixture covers the
-# three-part predecessor matrix (correct / missing / wrong). The
-# missing and wrong paths preserve the original reject assertion;
-# the legal path is the new acceptance branch added by U3.
+# Companion to redteam_scope_attack_mapped_gate.yml (missing
+# predecessor → rejected by schema required_fields) and
+# redteam_scope_attack_mapped_legal_predecessor.yml (legal literal →
+# accepted, experiment-runner activates, loop reaches
+# redteam.complete(success:true)). Together the three fixtures form
+# the predecessor matrix required by plan U3 §9.
 
-name: redteam_scope_attack_mapped_gate
-description: Red-team attack.mapped HARD GATE — schema-required `predecessor_event` + payload_consistency `ne` rule reject missing/wrong predecessors and accept the legal literal
+name: redteam_scope_attack_mapped_wrong_predecessor
+description: Red-team attack.mapped HARD GATE — `ne` rule rejects wrong predecessor literal `redteam.plan.unresolved`
 
 config:
   prompt_file: PROMPT.md
   topic_format_whitelist:
     - LOOP_COMPLETE
-  max_iterations: 24
+  max_iterations: 20
   hats:
     target-locker:
       subscribes_to: []
@@ -105,12 +92,6 @@ config:
             - resolution_file_path
           payload: json_object
         redteam.attack.mapped:
-          # U1 fix: add `predecessor_event` to required_fields so the
-          # runtime schema check rejects emits that omit it.
-          # U3 (2026-08-10-002): legal predecessor acceptance is now
-          # exercised — the runtime payload_consistency rule below uses
-          # `ne` (negative contradiction) rather than the previous
-          # inverted `exists:true AND eq` form.
           required_fields:
             - surface_count
             - experiment_count
@@ -129,13 +110,8 @@ config:
         enabled: true
         rules:
           # 2026-08-10-002 U3 (D5): runtime enforcement of the
-          # attack-surface-mapper HARD GATE. The schema declares
-          # `predecessor_event` as required; this rule is the
-          # negative contradiction — reject when the literal is
-          # wrong. Correct literal (`"redteam.plan.resolved"`) →
-          # rule Misses → attack.mapped accepted. Missing field →
-          # rejected by schema `required_fields`. Wrong value →
-          # rejected by this rule's `ne` predicate.
+          # attack-surface-mapper HARD GATE. Wrong predecessor literal
+          # → rule fires (Hit) → emit rejected.
           - id: redteam-attack-mapped-predecessor-must-be-resolved
             topic: redteam.attack.mapped
             when:
@@ -154,20 +130,19 @@ mock_responses:
       {"resolved_count":1,"unresolved_count":0,"resolution_file_path":".ralph/red-team/02-plan-resolution.md","scope_manifest_path":".ralph/red-team/scope-manifest.json","scope_digest":"abcd1234ef5678901234567890abcdef1234567890abcdef1234567890abcdef1234567890","scope_status":"resolved","overall_confidence":90,"critical_unknown_count":0,"scope_base_sha":"abc1234def5678901234567890abcdef12345678","resolved_patch_path":".ralph/red-team/patches/full-current.patch","patch_digest":"def7567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef1","coverage":92,"critical_traceability":100,"boundary_consistency":true,"boundary_conflict":false}
       </event>
     hat: plan-resolver
-  # Chain 1 (MISSING predecessor): attack.mapped WITHOUT
-  # predecessor_event. Schema `required_fields` rejects the emit;
-  # attack.mapped absent in trace; loop falls through to
-  # redteam.complete(success:false) via the plan.unresolved path.
+  # attack.mapped WITH WRONG predecessor_event value. Schema accepts
+  # the field (it IS present), but payload_consistency `ne` rule fires
+  # because "redteam.plan.unresolved" != "redteam.plan.resolved".
   - text: |
       <event topic="redteam.attack.mapped">
-      {"surface_count":1,"experiment_count":1,"attack_surface_path":".ralph/red-team/04-attack-surface.md","experiment_plan_path":".ralph/red-team/05-experiment-plan.md"}
+      {"surface_count":1,"experiment_count":1,"attack_surface_path":".ralph/red-team/04-attack-surface.md","experiment_plan_path":".ralph/red-team/05-experiment-plan.md","predecessor_event":"redteam.plan.unresolved"}
       </event>
     hat: attack-surface-mapper
   # plan.unresolved fires after bounded retry exhaustion (same
-  # fallback as redteam_scope_boundary_conflict.yml).
+  # fallback as redteam_scope_attack_mapped_gate.yml).
   - text: |
       <event topic="redteam.plan.unresolved">
-      {"reason":"REJECTED_NO_RESOLVED_PLAN","resolution_file_path":".ralph/red-team/02-plan-resolution.md"}
+      {"reason":"REJECTED_WRONG_PREDECESSOR","resolution_file_path":".ralph/red-team/02-plan-resolution.md"}
       </event>
     hat: plan-resolver
   - text: |

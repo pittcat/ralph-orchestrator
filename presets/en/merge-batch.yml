@@ -111,30 +111,17 @@ event_loop:
       - {hat_id: ralph, topic: merge.retest}
       - {hat_id: ralph, topic: merge.stabilized}
       - {hat_id: ralph, topic: merge.batch.complete}
-    # 2026-08-08-004 plan U1 (D12): scope boundary payload_consistency
-    # rule below fires on merge.integrated to ensure the boundary
-    # artifact path is under the allowed root and has a valid status.
-    # merge.stabilized boundary fields are validated by the shared
-    # scope_handoff_guard, which can also verify the artifact digest.
+    # 2026-08-10-002 plan U3 (R1/R2/D4): merge boundary
+    # payload_consistency rules. The boundary path/status format,
+    # presence, and root validation are owned by the typed scope guard
+    # in `policy_check/gates.rs`; the previous `exists:true AND
+    # non_empty:true` form was inverted: it Hit on every legitimate
+    # boundary value and Missed only on the malformed case. Schema
+    # required_fields + typed guard now cover presence, path, digest,
+    # and the complete/incomplete status enum.
     payload_consistency:
       enabled: true
-      rules:
-        # U1 (D13): merge_boundary_path must be under .ralph/merge/
-        - id: merge-batch-boundary-path-root
-          topic: merge.integrated
-          when:
-            all:
-              - {field: merge_boundary_path, exists: true}
-              - {field: merge_boundary_path, non_empty: true}
-          message: "merge_boundary_path must be under .ralph/merge/; received value must be repo-relative and under the merge/ directory."
-        # U1 (D12): merge_boundary_status must be complete or incomplete
-        - id: merge-batch-boundary-status-allowed
-          topic: merge.integrated
-          when:
-            all:
-              - {field: merge_boundary_status, exists: true}
-              - {field: merge_boundary_status, non_empty: true}
-          message: "merge_boundary_status must be 'complete' or 'incomplete'; received value is not in the allowed set."
+      rules: []
 cli:
   backend: "auto"
 

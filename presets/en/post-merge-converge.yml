@@ -189,25 +189,18 @@ event_loop:
       - {hat_id: ralph, topic: postmerge.fix.ready}
       - {hat_id: ralph, topic: postmerge.reviewed}
       - {hat_id: ralph, topic: postmerge.complete}
-    # 2026-08-08-004 plan U1 (D7/D12): scope manifest payload_consistency
-    # rules for postmerge.changemap.ready. These enforce:
-    # - resolved requires overall_confidence >= 90, critical_unknown_count == 0, proceed: true
-    # - resolved requires scope_base_sha is 40-char hex
-    # - blocked/ambiguous requires proceed: false
-    # - overall_confidence must be 0/85/90/100
-    # - scope_status must match proceed consistency
+    # 2026-08-10-002 plan U3 (R1/R2/D4): scope manifest
+    # payload_consistency rules. Resolved-status thresholds
+    # (overall_confidence, critical_unknown_count) and proceed
+    # consistency with scope_status are owned by the typed scope guard
+    # in `policy_check/gates.rs` — the rules below cover the
+    # cross-event contradictions the same-payload evaluator can
+    # express directly. Field/path/digest/format checks live with the
+    # typed guard and the schema (allowed_values, required_fields).
     payload_consistency:
       enabled: true
       rules:
-        # D7: resolved requires overall >= 90 AND critical_unknown == 0
-        - id: postmerge-scope-resolved-confidence
-          topic: postmerge.changemap.ready
-          when:
-            all:
-              - {field: scope_status, eq: "resolved"}
-              - {field: overall_confidence, gt: 89}
-          message: "scope_status=resolved requires overall_confidence >= 90 and critical_unknown_count == 0; received overall_confidence is below threshold."
-        # D7: resolved requires no critical unknown
+        # D7: resolved requires no critical unknown.
         - id: postmerge-scope-resolved-no-critical-unknown
           topic: postmerge.changemap.ready
           when:
@@ -215,7 +208,7 @@ event_loop:
               - {field: scope_status, eq: "resolved"}
               - {field: critical_unknown_count, gt: 0}
           message: "scope_status=resolved requires critical_unknown_count == 0; received critical_unknown_count > 0."
-        # D12: resolved requires proceed: true
+        # D12: resolved requires proceed: true.
         - id: postmerge-scope-resolved-proceed-true
           topic: postmerge.changemap.ready
           when:
@@ -223,7 +216,7 @@ event_loop:
               - {field: scope_status, eq: "resolved"}
               - {field: proceed, eq: false}
           message: "scope_status=resolved requires proceed: true; received proceed: false."
-        # D12: blocked/ambiguous requires proceed: false
+        # D12: blocked/ambiguous requires proceed: false.
         - id: postmerge-scope-not-resolved-proceed-false
           topic: postmerge.changemap.ready
           when:
@@ -235,27 +228,6 @@ event_loop:
                   - {field: scope_status, eq: "ambiguous"}
                   - {field: proceed, eq: true}
           message: "scope_status=blocked or ambiguous requires proceed: false; received proceed: true."
-        # D5: scope_base_sha must be 40-char hex
-        - id: postmerge-scope-base-sha-format
-          topic: postmerge.changemap.ready
-          when:
-            field: scope_base_sha
-            exists: true
-          message: "scope_base_sha must be a 40-character hexadecimal Git SHA; received value does not match the expected format."
-        # D7: overall_confidence must be 0/85/90/100 (type guard — fail-close on invalid)
-        - id: postmerge-scope-confidence-allowed
-          topic: postmerge.changemap.ready
-          when:
-            field: overall_confidence
-            exists: true
-          message: "overall_confidence must be 0, 85, 90, or 100; received value is not in the allowed set."
-        # D13: scope_manifest_path must be under allowed roots
-        - id: postmerge-scope-manifest-path-root
-          topic: postmerge.changemap.ready
-          when:
-            field: scope_manifest_path
-            exists: true
-          message: "scope_manifest_path must be under .ralph/post-merge/; received path is outside the allowed directory."
 
 cli:
   backend: "auto"
