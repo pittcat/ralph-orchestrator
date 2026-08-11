@@ -18,7 +18,140 @@
 
 mod common;
 
+use sha2::{Digest, Sha256};
 use tempfile::TempDir;
+
+fn write_redteam_scope_fixture(root: &std::path::Path, manifest_coverage: u64) -> String {
+    let manifest_path = root.join(".ralph/red-team/scope-manifest.json");
+    let patch_path = root.join(".ralph/red-team/resolved-patch.json");
+    std::fs::create_dir_all(manifest_path.parent().expect("manifest parent")).unwrap();
+    std::fs::write(&patch_path, br#"{"patches":["a"]}"#).unwrap();
+
+    let patch_digest = format!(
+        "{:x}",
+        Sha256::digest(std::fs::read(&patch_path).expect("patch bytes"))
+    );
+    let mut manifest = serde_json::json!({
+        "scope_status": "resolved",
+        "overall_confidence": 100,
+        "critical_unknown_count": 0,
+        "scope_base_sha": "abc1234def5678901234567890abcdef12345678",
+        "resolved_count": 1,
+        "coverage": manifest_coverage,
+        "boundary_conflict": false
+    });
+    let mut canonical = serde_json::to_vec(&manifest).expect("canonical manifest");
+    canonical.push(b'\n');
+    let manifest_digest = format!("{:x}", Sha256::digest(canonical));
+    manifest
+        .as_object_mut()
+        .expect("manifest object")
+        .insert(
+            "scope_digest".to_string(),
+            serde_json::Value::String(manifest_digest.clone()),
+        );
+    std::fs::write(
+        &manifest_path,
+        serde_json::to_vec(&manifest).expect("manifest bytes"),
+    )
+    .unwrap();
+
+    serde_json::json!({
+        "resolved_count": 1,
+        "unresolved_count": 0,
+        "resolution_file_path": ".ralph/red-team/02-plan-resolution.md",
+        "scope_manifest_path": ".ralph/red-team/scope-manifest.json",
+        "scope_digest": manifest_digest,
+        "scope_status": "resolved",
+        "overall_confidence": 100,
+        "critical_unknown_count": 0,
+        "scope_base_sha": "abc1234def5678901234567890abcdef12345678",
+        "resolved_patch_path": ".ralph/red-team/resolved-patch.json",
+        "patch_digest": patch_digest,
+        "coverage": 100,
+        "critical_traceability": 100,
+        "boundary_consistency": true,
+        "boundary_conflict": false
+    })
+    .to_string()
+}
+
+#[test]
+fn test_builtin_redteam_scope_policy_check_accepts_matching_manifest() {
+    let temp_dir = TempDir::new().expect("temp dir");
+    let temp_path = temp_dir.path();
+    std::fs::create_dir_all(temp_path.join(".ralph")).unwrap();
+    let payload = write_redteam_scope_fixture(temp_path, 100);
+
+    let output = common::ralph_bin()
+        .args([
+            "-H",
+            "builtin:red-team-attack",
+            "emit",
+            "redteam.plan.resolved",
+            "--json",
+            &payload,
+            "--policy-check",
+            "--hat",
+            "plan-resolver",
+        ])
+        .current_dir(temp_path)
+        .env("RALPH_HATS_SOURCE", "builtin:red-team-attack")
+        .env("RALPH_CURRENT_HAT", "plan-resolver")
+        .env("RALPH_EVENTS_FILE", temp_path.join(".ralph/events.jsonl"))
+        .output()
+        .expect("execute builtin redteam policy-check");
+
+    assert!(
+        output.status.success(),
+        "matching builtin scope handoff must pass: stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        !temp_path.join(".ralph/events.jsonl").exists(),
+        "policy-check must not write an event"
+    );
+}
+
+#[test]
+fn test_builtin_redteam_scope_policy_check_rejects_manifest_decision_mismatch() {
+    let temp_dir = TempDir::new().expect("temp dir");
+    let temp_path = temp_dir.path();
+    std::fs::create_dir_all(temp_path.join(".ralph")).unwrap();
+    let payload = write_redteam_scope_fixture(temp_path, 99);
+
+    let output = common::ralph_bin()
+        .args([
+            "-H",
+            "builtin:red-team-attack",
+            "emit",
+            "redteam.plan.resolved",
+            "--json",
+            &payload,
+            "--policy-check",
+            "--hat",
+            "plan-resolver",
+        ])
+        .current_dir(temp_path)
+        .env("RALPH_HATS_SOURCE", "builtin:red-team-attack")
+        .env("RALPH_CURRENT_HAT", "plan-resolver")
+        .env("RALPH_EVENTS_FILE", temp_path.join(".ralph/events.jsonl"))
+        .output()
+        .expect("execute builtin redteam policy-check");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!output.status.success(), "manifest mismatch must reject: stdout={stdout} stderr={stderr}");
+    assert!(
+        stdout.contains("coverage") || stderr.contains("coverage"),
+        "rejection must identify the mismatched decision field: stdout={stdout} stderr={stderr}"
+    );
+    assert!(
+        !temp_path.join(".ralph/events.jsonl").exists(),
+        "rejected policy-check must not write an event"
+    );
+}
 
 #[test]
 fn test_emit_isolated_mode_rejects_conflicting_hat_override() {

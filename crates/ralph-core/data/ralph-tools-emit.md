@@ -226,7 +226,7 @@ ralph emit --schema work.done | jq -r .protocol_hash   # 改后
 **Scope topic `payload_consistency` 规则的合法形状**：`merge.integrated` / `merge.stabilized` / `postmerge.changemap.ready` / `redteam.plan.resolved` 这四个 scope topic 的 `event_policy.payload_consistency.rules[]` 必须**只表达矛盾（Hit=非法）**，**绝不写「合法条件命中即拒绝」**——runtime evaluator 把 Hit 当成 reject，这种「合法条件命中」规则会**静默拒绝所有合法 handoff**。Strict preset lint 在加载阶段通过 `preset.payload_consistency_scope_positive_assertion` 拒绝以下反模式：
 
 - `exists:true` / `non_empty:true` 写在 scope 结构字段（`scope_manifest_path` / `scope_digest` / `scope_status` / `scope_base_sha` / `scope_source` / `resolved_patch_path` / `patch_digest` / `predecessor_event` / `merge_boundary_path` / `merge_boundary_digest` / `merge_boundary_status`）——结构 presence 由 typed scope guard（`policy_check/gates.rs`）和 schema `required_fields` 负责；
-- `gt: <正值>` / `gte: <正值>` / `eq: <正值>` 写在 scope threshold 字段（`overall_confidence` / `critical_unknown_count` / `resolved_count` / `coverage`）——threshold 校验同样由 typed scope guard 负责。
+- `gt: <正值>` / `gte: <正值>` / `eq: <正值>` 写在会被合法状态满足的 scope threshold 字段（`overall_confidence` / `resolved_count` / `coverage`）——threshold 校验同样由 typed scope guard 负责。`critical_unknown_count > 0` 是非法状态本身，可以作为负向矛盾规则保留。
 
 合法形状仅限**负向矛盾**（与合法前提配对）：
 

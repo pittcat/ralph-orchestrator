@@ -1189,9 +1189,10 @@ fn check_postmerge_payload_manifest_consistency(
         "critical_unknown_count",
         "scope_base_sha",
         "scope_source",
+        "proceed",
     ] {
-        let payload_val = obj.get(field).cloned().unwrap_or(serde_json::Value::Null);
-        let manifest_val = manifest.get(field).cloned().unwrap_or(serde_json::Value::Null);
+        let payload_val = required_decision_field(obj, topic, field)?;
+        let manifest_val = required_manifest_decision_field(manifest, topic, field)?;
         assert_payload_manifest_field_equal(topic, field, &payload_val, &manifest_val)?;
     }
     Ok(())
@@ -1211,12 +1212,49 @@ fn check_redteam_payload_manifest_consistency(
         "overall_confidence",
         "critical_unknown_count",
         "scope_base_sha",
+        "resolved_count",
+        "coverage",
+        "boundary_conflict",
     ] {
-        let payload_val = obj.get(field).cloned().unwrap_or(serde_json::Value::Null);
-        let manifest_val = manifest.get(field).cloned().unwrap_or(serde_json::Value::Null);
+        let payload_val = required_decision_field(obj, topic, field)?;
+        let manifest_val = required_manifest_decision_field(manifest, topic, field)?;
         assert_payload_manifest_field_equal(topic, field, &payload_val, &manifest_val)?;
     }
     Ok(())
+}
+
+#[allow(clippy::result_large_err)]
+fn required_decision_field(
+    payload: &serde_json::Map<String, serde_json::Value>,
+    topic: &str,
+    field: &str,
+) -> std::result::Result<serde_json::Value, ValidationError> {
+    payload.get(field).cloned().ok_or_else(|| ValidationError {
+        payload_index: 0,
+        field: field.to_string(),
+        reason_code: "scope_handoff_inconsistent".to_string(),
+        message: format!("{topic} requires decision field {field}"),
+        ..Default::default()
+    })
+}
+
+#[allow(clippy::result_large_err)]
+fn required_manifest_decision_field(
+    manifest: &serde_json::Map<String, serde_json::Value>,
+    topic: &str,
+    field: &str,
+) -> std::result::Result<serde_json::Value, ValidationError> {
+    manifest
+        .get(field)
+        .filter(|value| !value.is_null())
+        .cloned()
+        .ok_or_else(|| ValidationError {
+            payload_index: 0,
+            field: field.to_string(),
+            reason_code: "scope_handoff_inconsistent".to_string(),
+            message: format!("{topic} scope manifest is missing decision field {field}"),
+            ..Default::default()
+        })
 }
 
 /// and ambiguous require `proceed: false`.
@@ -1602,6 +1640,27 @@ mod tests {
         // shift the canonical bytes); then strip the placeholder so
         // the digest input is the canonical bytes without `scope_digest`.
         if let Some(object) = value.as_object_mut() {
+            // Keep the unit-test manifests aligned with the canonical
+            // top-level decision contract. Production manifests must carry
+            // these fields; the helper fills omitted values only for the
+            // older minimal fixtures used by threshold/error-path tests.
+            let defaults = [
+                ("scope_status", serde_json::json!("resolved")),
+                ("overall_confidence", serde_json::json!(100)),
+                ("critical_unknown_count", serde_json::json!(0)),
+                (
+                    "scope_base_sha",
+                    serde_json::json!("abc1234def5678901234567890abcdef12345678"),
+                ),
+                ("scope_source", serde_json::json!("test")),
+                ("proceed", serde_json::json!(true)),
+                ("resolved_count", serde_json::json!(1)),
+                ("coverage", serde_json::json!(100)),
+                ("boundary_conflict", serde_json::json!(false)),
+            ];
+            for (field, default) in defaults {
+                object.entry(field.to_string()).or_insert(default);
+            }
             object.insert(
                 "scope_digest".to_string(),
                 serde_json::Value::String("placeholder".to_string()),
@@ -2410,6 +2469,35 @@ mod tests {
     }
 
     #[test]
+    fn redteam_decision_field_manifest_mismatch_rejects() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let (manifest_digest, _) = write_scope_manifest(
+            root.path(),
+            ".ralph/red-team/scope-manifest.json",
+            r#"{"scope_status":"resolved","overall_confidence":100,"critical_unknown_count":0,"scope_base_sha":"abc1234def5678901234567890abcdef12345678","resolved_count":1,"coverage":100,"boundary_conflict":false}"#,
+        );
+        let (patch_digest, _) = write_artifact(
+            root.path(),
+            ".ralph/red-team/resolved-patch.json",
+            br#"{"patches":["a"]}"#,
+        );
+        let payload = build_redteam_payload_full(
+            ".ralph/red-team/scope-manifest.json",
+            &manifest_digest,
+            ".ralph/red-team/resolved-patch.json",
+            &patch_digest,
+            &[(
+                "coverage",
+                serde_json::Value::Number(serde_json::Number::from(99u64)),
+            )],
+        );
+        let err = check_scope_handoff_guard("redteam.plan.resolved", &payload, root.path())
+            .expect_err("decision field mismatch must reject");
+        assert_eq!(err.reason_code, "scope_handoff_inconsistent");
+        assert!(err.message.contains("coverage"));
+    }
+
+    #[test]
     fn redteam_manifest_not_json_object_rejects() {
         // U2 (R5/D8): a scope manifest that is not a JSON object
         // fails the typed guard (no top-level fields to compare). This
@@ -2540,11 +2628,38 @@ mod tests {
         // typed equality guard treats present/absent as a mismatch.
         let root = tempfile::tempdir().expect("tempdir");
         // Manifest does NOT carry overall_confidence.
-        let (manifest_digest, _) = write_scope_manifest(
+        let (_, manifest_path) = write_scope_manifest(
             root.path(),
             ".ralph/red-team/scope-manifest.json",
             r#"{"scope_status":"resolved","critical_unknown_count":0,"scope_base_sha":"abc1234def5678901234567890abcdef12345678"}"#,
         );
+        // The shared fixture helper fills the current contract defaults for
+        // legacy tests. Remove this field again to exercise the fail-closed
+        // missing-manifest-field branch, then refresh the self-excluding
+        // digest exactly as the production verifier does.
+        let mut manifest: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&manifest_path).expect("read manifest"))
+                .expect("manifest JSON");
+        let object = manifest.as_object_mut().expect("manifest object");
+        object.remove("overall_confidence");
+        object.remove("scope_digest");
+        let mut canonical = serde_json::to_vec(&manifest).expect("canonical manifest");
+        canonical.push(b'\n');
+        let mut hasher = Sha256::new();
+        hasher.update(canonical);
+        let manifest_digest = format!("{:x}", hasher.finalize());
+        manifest
+            .as_object_mut()
+            .expect("manifest object")
+            .insert(
+                "scope_digest".to_string(),
+                serde_json::Value::String(manifest_digest.clone()),
+            );
+        std::fs::write(
+            &manifest_path,
+            serde_json::to_vec(&manifest).expect("write manifest JSON"),
+        )
+        .expect("write manifest");
         let (patch_digest, _) = write_artifact(
             root.path(),
             ".ralph/red-team/resolved-patch.json",

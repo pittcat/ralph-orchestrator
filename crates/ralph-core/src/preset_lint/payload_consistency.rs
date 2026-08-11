@@ -92,13 +92,11 @@ pub(super) const PROTECTED_SCOPE_STRUCTURAL_FIELDS: &[&str] = &[
 
 /// Threshold fields whose legal value is the resolved-side value
 /// (`overall_confidence >= 90`, `critical_unknown_count == 0`,
-/// `resolved_count >= 1`, `coverage >= 90`). A `payload_consistency`
-/// rule that asserts a positive bound (`gt: 89` against legal 100,
-/// `gt: 0` against legal 0 when the legal value is 0, etc.) is a
-/// positive assertion against the legal condition. The valid
-/// same-payload rule shape is the **negative** contradiction
-/// (`gt: 0` against `critical_unknown_count`, `eq: 0` against
-/// `resolved_count`, etc.) — those rules stay allowed.
+/// `resolved_count >= 1`, `coverage >= 90`). Positive assertions are
+/// only linted where a positive bound can reject a legal resolved value
+/// (`overall_confidence`, `resolved_count`, `coverage`). Positive
+/// predicates on `critical_unknown_count` describe an invalid state and
+/// therefore remain available as negative contradiction rules.
 pub(super) const PROTECTED_SCOPE_THRESHOLD_FIELDS: &[&str] = &[
     "overall_confidence",
     "critical_unknown_count",
@@ -465,7 +463,9 @@ fn collect_scope_positive_assertions_inner(
     // other zero/negative-bound forms — those are the canonical
     // same-payload contradiction shape and must keep working for
     // `ce-executor-pipeline` and friends.
-    if PROTECTED_SCOPE_THRESHOLD_FIELDS.contains(&field.as_str()) {
+    if PROTECTED_SCOPE_THRESHOLD_FIELDS.contains(&field.as_str())
+        && field != "critical_unknown_count"
+    {
         if let Some(Value::Number(n)) = obj.get("gt") {
             if n.as_f64().unwrap_or(0.0) > 0.0 {
                 out.push(ScopePositiveAssertion {
@@ -1298,6 +1298,29 @@ mod tests {
         assert!(
             polarity.is_empty(),
             "negative threshold rule must not trigger polarity finding, got {findings:?}"
+        );
+    }
+
+    #[test]
+    fn positive_critical_unknown_threshold_remains_negative_contradiction() {
+        let config = scope_topic_config(
+            "redteam.plan.resolved",
+            vec![rule_on(
+                "redteam.plan.resolved",
+                "redteam-scope-critical-unknown-limit",
+                json!({"all": [
+                    {"field": "scope_status", "eq": "resolved"},
+                    {"field": "critical_unknown_count", "gt": 1}
+                ]}),
+            )],
+        );
+        let findings = check_payload_consistency(&config, LintStrictness::Strict);
+        assert!(
+            findings
+                .iter()
+                .all(|finding| finding.id
+                    != FINDING_PAYLOAD_CONSISTENCY_SCOPE_POSITIVE_ASSERTION),
+            "critical_unknown_count > 1 is an invalid-state contradiction, got {findings:?}"
         );
     }
 

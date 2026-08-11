@@ -24,6 +24,10 @@ cargo nextest run -p ralph-core -- preset_lint
 
 `--strict`：Warn 级 finding 也视为失败。JSON 输出供 review 报告 Mechanical Lint 节摘录。
 
+scope topic 的 `payload_consistency` 规则还会检查 finding
+`preset.payload_consistency_scope_positive_assertion`：不要用
+`exists:true` / `non_empty:true` 表达合法字段存在，也不要用会命中合法值的正向 threshold 谓词；这些检查由 scope guard 和 schema 负责。规则只能表达同一 payload 内的非法矛盾（Hit = 拒绝）。
+
 ## Schema / emit 验证
 
 ```bash
