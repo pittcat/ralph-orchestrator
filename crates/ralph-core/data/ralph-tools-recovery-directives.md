@@ -9,11 +9,15 @@ metadata:
 
 > This skill is auto-injected by the runner when a `task.resume` event carries `recovery_directives`. You do not need to load it manually. Follow the rules below as system operating procedure.
 
-## 投递与作用域（runtime 已定向）
+## 收到恢复信号时
 
-`task.resume` 进入本 hat prompt 意味着本 hat 即为 runtime 解析出的恢复目标（payload 中的 `target_hat` 字段与当前 hat id 一致）。当 runtime 无法解析出安全目标（无 target / target 未注册 / 跨 loop / 冲突）时，不会把 `task.resume` 投递给其他 hat，而是进入既有 `plan.blocked` / diagnostic 通道。
+**触发条件：**当前 activation 收到 `task.resume`。`hat` 是本次被激活、负责处理该恢复信号的工作单元；恢复 payload 是随信号提供的结构化上下文。
 
-agent 不需要为 `task.resume` 修改 preset 的 `triggers:` / `subscribes_to:`；preset 缺 `task.resume` 触发器时，本 hat 仍会因 runtime 的定向投递而收到该事件。agent 在 `task.resume` 上下文中做的事：读 payload 中的 `target_hat` / `original_trigger_payload` / `allowed_topics` 字段继续原任务，不要自行重新广播或重发同一 payload。
+**执行动作：**先读取恢复 payload，以及 prompt 中的 `## CORRECTION CONTEXT`（如果存在）。优先使用 `required_action`、`reason`、`kind`、`original_trigger_topic`、`original_trigger_payload` 和 `allowed_topics` 等实际存在的字段。字段缺失时不要把缺失值推断成空字符串、`false` 或默认 topic。
+
+如果需要重新发业务事件，先按 `ralph-tools-emit` 的规则执行 `ralph emit --policy-check`，确认通过后再正式 emit。不要为了恢复而修改 preset、重复广播或原样重发同一个 payload。
+
+**失败停止条件：**恢复对象、原始触发上下文或允许的发布范围缺失且无法从当前 prompt 确认时，停止本次恢复动作；使用 `ralph inspect loop --format json` 或 `ralph tools task list` 复核当前任务状态。复核后仍无法确定合法下一步时，报告阻塞原因，不要猜测目标或继续重试。
 
 ## Correction 优先级（通用）
 

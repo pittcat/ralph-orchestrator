@@ -337,6 +337,8 @@ impl EventLoop {
             if let Some(loop_id) = loop_id_owned.as_deref() {
                 resume_inputs.loop_id = Some(loop_id);
             }
+            let retry_key = format!("invalid_step:{rejected_step}");
+            resume_inputs.retry_key = Some(&retry_key);
             let decision = crate::event_loop::resume_routing::publish_targeted_resume(
                 &mut self.bus,
                 &resume_inputs,

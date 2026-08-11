@@ -115,6 +115,10 @@ pub struct PendingResumeIdentity {
     pub task_id: Option<String>,
     pub task_key: Option<String>,
     pub retry_key: String,
+    /// Exact payload when the identity was projected from a live queue.
+    /// Runtime-generated events do not persist retry_key separately, so
+    /// payload equality is the safe fallback for wrapper-level dedup.
+    pub payload: Option<String>,
 }
 
 /// Inputs the resolver needs. All fields are optional except the
@@ -135,6 +139,9 @@ pub struct ResumeRoutingInputs<'a> {
     pub task_key: Option<&'a str>,
     /// The retry key recorded by the rejection / recovery envelope.
     pub retry_key: Option<&'a str>,
+    /// Payload used by the publisher to compare against an already-pending
+    /// event when the live EventBus surface does not expose retry_key.
+    pub payload: Option<&'a str>,
     /// Current loop id (used to scope the task fallback and the
     /// dedup tuple).
     pub loop_id: Option<&'a str>,
@@ -161,6 +168,7 @@ where
     // its recovery context.
     let retry_key_owned = inputs
         .retry_key
+        .map(str::trim)
         .filter(|s| !s.is_empty())
         .map(str::to_string);
     let Some(retry_key) = retry_key_owned else {
@@ -290,8 +298,18 @@ where
         task_id: inputs.task_id.map(str::to_string),
         task_key: inputs.task_key.map(str::to_string),
         retry_key: retry_key.to_string(),
+        payload: inputs.payload.map(str::to_string),
     };
-    if existing_pending.contains(&identity) {
+    if existing_pending.iter().any(|existing| {
+        (existing.loop_id.is_none() || existing.loop_id == identity.loop_id)
+            && existing.hat == identity.hat
+            && (existing.task_id.is_none() || existing.task_id == identity.task_id)
+            && (existing.task_key.is_none() || existing.task_key == identity.task_key)
+            && (existing.retry_key.is_empty() || existing.retry_key == identity.retry_key)
+            && (existing.payload.is_none()
+                || identity.payload.is_none()
+                || existing.payload == identity.payload)
+    }) {
         return ResumeDecision::Duplicate {
             target,
             retry_key: retry_key.to_string(),
@@ -392,18 +410,15 @@ pub fn pending_resume_identities_from_bus(
     pending
         .iter()
         .filter(|event| event.topic.as_str() == "task.resume")
-        .map(|_event| PendingResumeIdentity {
+        .map(|event| PendingResumeIdentity {
             loop_id: None,
             hat: hat.as_str().to_string(),
             task_id: None,
             task_key: None,
-            // Live-queue dedup uses the hat as the only stable
-            // identity dimension we can derive from the bus
-            // surface (the deeper payload fields are JSON inside
-            // `payload` and aren't surfaced here). Hat-only
-            // identity is enough to prevent re-queueing the
-            // same targeted resume into the same hat's queue.
-            retry_key: hat.as_str().to_string(),
+            // EventBus does not expose retry_key separately. An empty
+            // value makes the resolver use the payload equality fallback.
+            retry_key: String::new(),
+            payload: Some(event.payload.clone()),
         })
         .collect()
 }
@@ -468,8 +483,16 @@ pub fn publish_targeted_resume_for_hat_in(
         task_key,
         retry_key: Some(retry_key),
         loop_id,
+        payload: Some(&payload),
     };
-    let decision = publish_targeted_resume(bus, &inputs, registry, task_store, &existing, payload);
+    let decision = publish_targeted_resume(
+        bus,
+        &inputs,
+        registry,
+        task_store,
+        &existing,
+        payload.clone(),
+    );
     if let ResumeDecision::Block { reason } = &decision {
         // Plan 2026-08-10-001 U2 R4: every Block decision
         // produces a public diagnostic envelope. The
@@ -795,6 +818,7 @@ mod tests {
             task_id: Some("task-dup".to_string()),
             task_key: None,
             retry_key: "rk-1".to_string(),
+            payload: None,
         }];
         let decision = resolve_resume_target(&inputs, &registry, None, &existing);
         match decision {
@@ -886,13 +910,6 @@ mod tests {
                 ..Default::default()
             };
             let decision = resolve_resume_target(&inputs, &registry, None, &[]);
-            if empty == Some("   ") {
-                // The filter only strips Empty — pure
-                // whitespace isn't filtered, but it isn't
-                // empty either. Skip the strict assertion for
-                // that case.
-                continue;
-            }
             assert!(
                 matches!(
                     decision,
@@ -903,6 +920,46 @@ mod tests {
                 "empty retry_key `{empty:?}` must block, got {decision:?}"
             );
         }
+    }
+
+    #[test]
+    fn wrapper_deduplicates_same_pending_payload() {
+        use ralph_proto::{EventBus, Hat};
+        let mut bus = EventBus::new();
+        bus.register(Hat::new("executor", "Executor").subscribe("task.resume"));
+        let registry = registry_of(&["executor"]);
+        let payload = r#"{"reason":"same-resume","target_hat":"executor"}"#;
+
+        let first = publish_targeted_resume_for_hat(
+            &mut bus,
+            &registry,
+            None,
+            Some("loop-A"),
+            "executor",
+            None,
+            None,
+            "retry-1",
+            payload.to_string(),
+        );
+        let second = publish_targeted_resume_for_hat(
+            &mut bus,
+            &registry,
+            None,
+            Some("loop-A"),
+            "executor",
+            None,
+            None,
+            "retry-1",
+            payload.to_string(),
+        );
+
+        assert!(matches!(first, ResumeDecision::Allow { .. }));
+        assert!(matches!(second, ResumeDecision::Duplicate { .. }));
+        assert_eq!(
+            bus.peek_pending(&ralph_proto::HatId::new("executor"))
+                .map(Vec::len),
+            Some(1)
+        );
     }
 
     #[test]

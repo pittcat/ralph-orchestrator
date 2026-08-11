@@ -648,7 +648,7 @@ impl EventLoop {
         );
         let mut rejection = rejection;
         rejection.kind = Some(RejectionKind::MissingEventGate);
-        let payload = crate::event_loop::rejection::build_task_resume_payload(
+        let mut payload = crate::event_loop::rejection::build_task_resume_payload(
             &rejection,
             &allowed_topics,
             terminal_topics,
@@ -656,6 +656,19 @@ impl EventLoop {
             Some(trigger_payload.as_str()),
             None,
         );
+        // Keep retry attempts distinct in the live queue. The stable
+        // rejection key groups the budget, while this attempt field lets
+        // the resume dedup layer collapse only an exact duplicate of the
+        // same attempt instead of suppressing the bounded retry sequence.
+        if let Ok(mut value) = serde_json::from_str::<serde_json::Value>(&payload) {
+            if let Some(object) = value.as_object_mut() {
+                object.insert(
+                    "retry_attempt".to_string(),
+                    serde_json::Value::from(retry_count),
+                );
+                payload = value.to_string();
+            }
+        }
         // Plan 2026-08-10-001 U1: route the missing-terminal-emit
         // recovery through the unified publisher so the dedup /
         // fail-close checks fire. The `retry_key` carries the
@@ -670,7 +683,7 @@ impl EventLoop {
             hat_id.as_str(),
             None,
             None,
-            &format!("missing_terminal_emit:{}", retry_key),
+            &format!("missing_terminal_emit:{}:{}", retry_key, retry_count),
             payload,
         );
         if let crate::event_loop::resume_routing::ResumeDecision::Block { reason } = &decision {

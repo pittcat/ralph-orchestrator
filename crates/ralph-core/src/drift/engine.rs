@@ -55,7 +55,7 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 
-use ralph_proto::{Event, HatId};
+use ralph_proto::HatId;
 
 use crate::config::execution_contracts::ExecutionContractsConfig;
 use crate::config::{DriftConfig, EventPolicyConfig, HatConfig, RuntimeDiagnosisConfig};
@@ -563,11 +563,33 @@ fn publish_hard_recovery_event(
         None,
         &allowed_topics,
     );
-    let event =
-        Event::new("task.resume", structured_payload).with_target(action.target_hat.clone());
-    // Publish through the existing route so all observers
-    // (including the drift observer) see the recovery event.
-    event_loop.bus().publish(event);
+    // Use the same resolver/publisher as every other runtime recovery path.
+    // This keeps registered-target validation, fail-close diagnostics, and
+    // pending dedup consistent for drift-triggered recovery.
+    let registered_hats: std::collections::HashSet<String> = event_loop
+        .registry
+        .ids()
+        .map(|id| id.as_str().to_string())
+        .collect();
+    let decision = crate::event_loop::resume_routing::publish_targeted_resume_for_hat(
+        event_loop.bus(),
+        &registered_hats,
+        None,
+        None,
+        action.target_hat.as_str(),
+        None,
+        None,
+        &action.retry_key,
+        structured_payload,
+    );
+    if let crate::event_loop::resume_routing::ResumeDecision::Block { reason } = decision {
+        tracing::warn!(
+            target = %action.target_hat,
+            retry_key = %action.retry_key,
+            ?reason,
+            "drift hard recovery blocked (no safe target)"
+        );
+    }
 }
 
 /// Build a recovery envelope representing an outcome change so
