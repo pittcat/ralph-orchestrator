@@ -57,9 +57,9 @@ pub use knowledge::{
     DISPLAY_RECORDS_MAX, EVIDENCE_REFS_MAX, CommitObservationOutcome, EvidenceFreshness,
     EvidenceRef, InputFingerprint, KnowledgeAuthority, KnowledgeBuildError, KnowledgeKind,
     KnowledgeRecord, KnowledgeRecordBuilder, KnowledgeView, OrchestrationKnowledgeState,
-    SEMANTIC_FIELD_MAX_BYTES, VerificationStatus, accepted_source_ref,
-    commit_accepted_observations, observation_id, observations_from_accepted_events,
-    payload_digest_hex,
+    PROMPT_FIELD_MAX_BYTES, PROMPT_HEADING, PROMPT_RECORDS_VISIBLE, SEMANTIC_FIELD_MAX_BYTES,
+    VerificationStatus, accepted_source_ref, commit_accepted_observations, observation_id,
+    observations_from_accepted_events, payload_digest_hex, render_prompt_block,
 };
 pub use ledger::{LEDGER_RELATIVE_PATH, LedgerError, StateLedger, read_commit_log, truncate_after};
 pub use recovery_log::{

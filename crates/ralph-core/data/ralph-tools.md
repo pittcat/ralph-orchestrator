@@ -145,3 +145,20 @@ metadata:
 | `StateLedger replay failed` / ledger 损坏 | 进程崩溃导致 loop 状态文件不完整 | `ralph loops clean --ledger` 截断损坏文件；下次启动自动 cold start 重建 |
 | `plan.blocked` / `progress_task_mismatch` | 当前 step 的 task 状态与预期不一致 | 检查 `ralph tools task list`，按需关闭/重开相关 task |
 | 任何命令失败 | 通用恢复 | 1. `ralph <cmd> --help` 确认语法 2. 检查退出码 3. 查看错误信息 4. 重试 |
+
+## `## ORCHESTRATION KNOWLEDGE` 块（agent 视角）
+
+> 该块只在 isolated hat prompt 出现，且 ledger 已有认知记录时才存在；空认知状态下 prompt 与基线相同。
+
+- **触发条件**：isolated hat 的 ledger 中至少有一条 `KnowledgeObserved` 记录。
+- **agent 动作**：当作**只读**投影读取；不要把里面的 subject/digest/source_ref 反向写入 state、tasks、memories 或下一次 emit 的 payload。
+- **字段含义**：
+  - `authority: ledger_snapshot` — 唯一可信来源是编排器的 state ledger；不要从 prompt 的字符串推断“事实”。
+  - `records` / `current` / `stale` / `unknown` / `unverified` — 计数；不展示 raw payload 或内部路径。
+  - `subject` / `digest` / `source_ref` — 每条记录一行；digest 是 SHA-256 摘要前缀，source_ref 是稳定的逻辑指针（如 `accepted-event:<iter>:<idx>:<id>`）。
+- **状态语义**：
+  - `freshness=current` 仅表示“该记录的输入指纹与当前 loop/plan 指纹匹配”，**不等于**已验证或 Git tree 正确。
+  - `freshness=stale` 表示指纹不匹配；不要用 stale 记录作为完成证据。
+  - `freshness=unknown` 表示缺少指纹；同样不能作为完成证据。
+  - `verification` 独立于 freshness：accepted event 永远是 `unverified`；`verified` 只能来自后续的 typed verifier。
+- **停止条件**：当 `stale` 或 `unknown` 记录被用作“证据已足够”结论时，停止本次动作并报告缺失证据；不要继续推进。

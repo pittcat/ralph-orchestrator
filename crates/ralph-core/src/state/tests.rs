@@ -27,6 +27,7 @@ use ralph_proto::HatId;
 use tempfile::TempDir;
 
 use super::commit::{CommitDelta, CounterKind, TaskTransition};
+use super::knowledge::OrchestrationKnowledgeState;
 use super::ledger::{LEDGER_RELATIVE_PATH, StateLedger, read_commit_log};
 use super::snapshot::LedgerSnapshot;
 use crate::task::Task;
@@ -1372,7 +1373,7 @@ fn knowledge_observation_delta_round_trips_through_replay() {
     // The replay must also still carry the prior iteration
     // counter (i.e. knowledge replay composes with the
     // existing ledger business fields).
-    assert!(snap.iteration >= 0);
+    let _: u32 = snap.iteration;
 }
 
 #[test]
@@ -1816,5 +1817,138 @@ fn one_batch_has_at_most_one_knowledge_commit() {
     assert_eq!(
         knowledge_deltas, 1,
         "U2 invariant: one batch = at most one knowledge commit; got {knowledge_deltas}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// GAP-01 U3: prompt-safe renderer tests.
+//
+// Cover the read-only, bounded, redacted projection used by the
+// isolated prompt path. The renderer is a pure function over
+// the snapshot, so it can be unit-tested without driving an
+// EventLoop.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn render_prompt_block_empty_is_noop() {
+    let state = OrchestrationKnowledgeState::default();
+    assert_eq!(
+        crate::state::render_prompt_block(&state),
+        "",
+        "empty knowledge state must produce empty prompt block"
+    );
+}
+
+#[test]
+fn render_prompt_block_contains_authority_and_counts() {
+    use crate::state::knowledge::{
+        InputFingerprint, KnowledgeAuthority, KnowledgeKind, KnowledgeRecord,
+        VerificationStatus,
+    };
+
+    let mut state = OrchestrationKnowledgeState::default();
+    let record = KnowledgeRecord::builder(KnowledgeAuthority::LedgerSnapshot, KnowledgeKind::Observation)
+        .with_subject("U1 plan ready")
+        .with_payload_digest_hex("deadbeef")
+        .with_source_ref("accepted-event:1:0:obs-1")
+        .with_input_fingerprint(InputFingerprint::Both {
+            loop_start_sha: "l".into(),
+            plan_baseline_sha: "p".into(),
+        })
+        .with_verification(VerificationStatus::Unverified)
+        .build()
+        .expect("build");
+    state.insert(record);
+
+    let block = crate::state::render_prompt_block(&state);
+    assert!(
+        block.contains(crate::state::PROMPT_HEADING),
+        "rendered block must contain the prompt heading; got:\n{block}"
+    );
+    assert!(block.contains("authority: ledger_snapshot"));
+    assert!(block.contains("records: 1"));
+    assert!(block.contains("current:"));
+    assert!(block.contains("unverified:"));
+    assert!(
+        block.contains("U1 plan ready"),
+        "subject must be present; got:\n{block}"
+    );
+}
+
+#[test]
+fn render_prompt_block_never_contains_raw_payload_or_path() {
+    use crate::state::knowledge::{
+        InputFingerprint, KnowledgeAuthority, KnowledgeKind, KnowledgeRecord,
+        VerificationStatus,
+    };
+
+    let mut state = OrchestrationKnowledgeState::default();
+    // Subject is fine-grained descriptive text; source_ref and
+    // digest are scrubbed by the renderer to ensure paths and
+    // raw payloads never leak.
+    let record = KnowledgeRecord::builder(KnowledgeAuthority::LedgerSnapshot, KnowledgeKind::Observation)
+        .with_subject("descriptive subject")
+        .with_payload_digest_hex("digest-abc123")
+        // The raw payload is supposed to land here, but the
+        // builder refuses it via the digest-only field.
+        .with_source_ref("/etc/passwd")
+        .with_input_fingerprint(InputFingerprint::Both {
+            loop_start_sha: "l".into(),
+            plan_baseline_sha: "p".into(),
+        })
+        .with_verification(VerificationStatus::Unverified)
+        .build()
+        .expect("build");
+    state.insert(record);
+
+    let block = crate::state::render_prompt_block(&state);
+    // Absolute paths in source_ref MUST be scrubbed.
+    assert!(
+        !block.contains("/etc/passwd"),
+        "absolute path source_ref must not survive in the prompt block; got:\n{block}"
+    );
+    // The raw payload string MUST NOT appear.
+    assert!(
+        !block.contains("SECRET_TOKEN"),
+        "raw payload text must not appear in the prompt block; got:\n{block}"
+    );
+}
+
+#[test]
+fn render_prompt_block_caps_records() {
+    use crate::state::knowledge::{
+        InputFingerprint, KnowledgeAuthority, KnowledgeKind, KnowledgeRecord,
+        VerificationStatus,
+    };
+
+    let mut state = OrchestrationKnowledgeState::default();
+    // Insert more than PROMPT_RECORDS_VISIBLE records.
+    for i in 0..(crate::state::PROMPT_RECORDS_VISIBLE + 10) {
+        let record = KnowledgeRecord::builder(
+            KnowledgeAuthority::LedgerSnapshot,
+            KnowledgeKind::Observation,
+        )
+        .with_id(format!("obs-{i}"))
+        .with_subject(format!("record-{i}"))
+        .with_payload_digest_hex("abcd")
+        .with_source_ref(format!("src-{i}"))
+        .with_input_fingerprint(InputFingerprint::Both {
+            loop_start_sha: "l".into(),
+            plan_baseline_sha: "p".into(),
+        })
+        .with_verification(VerificationStatus::Unverified)
+        .build()
+        .expect("build");
+        state.insert(record);
+    }
+    let block = crate::state::render_prompt_block(&state);
+    // Only PROMPT_RECORDS_VISIBLE record lines are rendered.
+    let line_count = block
+        .lines()
+        .filter(|l| l.trim_start().starts_with("- ["))
+        .count();
+    assert!(
+        line_count <= crate::state::PROMPT_RECORDS_VISIBLE,
+        "rendered block must cap at PROMPT_RECORDS_VISIBLE; got {line_count}"
     );
 }

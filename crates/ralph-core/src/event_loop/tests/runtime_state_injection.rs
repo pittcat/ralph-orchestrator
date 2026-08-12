@@ -583,6 +583,234 @@ fn rejected_and_non_advancing_events_do_not_create_observations() {
     assert!(ledger.snapshot().knowledge.records().is_empty());
 }
 
+/// U3 wiring: when the isolated hat's ledger carries a
+/// non-empty cognitive state, the prompt gains the new
+/// `## ORCHESTRATION KNOWLEDGE` block above the legacy
+/// orchestrator context. The block is read-only and does not
+/// contain raw payloads or absolute paths.
+#[test]
+fn isolated_prompt_includes_knowledge_projection_when_non_empty() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    init_git_workspace(dir.path());
+
+    // Re-build the loop with `with_context` so the ledger is
+    // initialised and `state_ledger` is `Some(_)`.
+    let yaml = r#"
+mode: "multi"
+event_loop:
+  execution_mode: "isolated"
+  state_projection:
+    enabled: true
+    actions:
+      work.ready:
+        kind: "ensure_task"
+        key: "task_key"
+        title: "step"
+hats:
+  builder:
+    name: "Builder"
+    triggers: ["build.task"]
+    instructions: "Do work."
+"#;
+    let mut config: crate::config::RalphConfig = serde_yaml::from_str(yaml).unwrap();
+    config.core.workspace_root = dir.path().to_path_buf();
+    let mut event_loop = crate::event_loop::EventLoop::with_context(
+        config,
+        crate::loop_context::LoopContext::primary(dir.path().to_path_buf()),
+    );
+    event_loop.initialize("U3 isolated prompt projection");
+
+    // Seed a single knowledge record directly into the ledger.
+    let mut ledger = event_loop.state.state_ledger.take().expect("ledger");
+    let record = crate::state::KnowledgeRecord::builder(
+        crate::state::KnowledgeAuthority::LedgerSnapshot,
+        crate::state::KnowledgeKind::Observation,
+    )
+    .with_id("test-obs-1")
+    .with_subject("U1 plan ready")
+    .with_payload_digest_hex("deadbeef")
+    .with_source_ref("accepted-event:1:0:obs-1")
+    .with_input_fingerprint(crate::state::InputFingerprint::Both {
+        loop_start_sha: "loop".into(),
+        plan_baseline_sha: "plan".into(),
+    })
+    .with_verification(crate::state::VerificationStatus::Unverified)
+    .build()
+    .expect("build");
+    ledger
+        .commit(
+            crate::state::CommitDelta::KnowledgeObserved {
+                records: vec![record],
+            },
+            Some("work.done".to_string()),
+        )
+        .expect("commit");
+    event_loop.state.state_ledger = Some(ledger);
+
+    let hat_id = HatId::new("builder");
+    let prompt = event_loop.build_prompt(&hat_id).expect("prompt");
+
+    assert!(
+        prompt.contains(ORCHESTRATOR_HEADING),
+        "legacy ORCHESTRATOR CONTEXT heading must still appear; got:\n{prompt}"
+    );
+    // The projection marker is GAP-01-only and not present
+    // anywhere else in the prompt.
+    assert!(
+        prompt.contains("projection_marker: knowledge_block_v1"),
+        "GAP-01 knowledge projection must appear when ledger is non-empty; got:\n{prompt}"
+    );
+    assert!(
+        prompt.contains("U1 plan ready"),
+        "subject must surface in the bounded projection; got:\n{prompt}"
+    );
+}
+
+/// U3 wiring: an empty knowledge state must NOT introduce the
+/// GAP-01 projection block. The legacy `## ORCHESTRATOR CONTEXT`
+/// block remains unchanged. The test asserts on the
+/// GAP-01-specific `projection_marker` because the heading
+/// string itself is also present in the injected agent-facing
+/// skill doc as a reference.
+#[test]
+fn isolated_prompt_omits_empty_knowledge_projection() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    init_git_workspace(dir.path());
+    let mut event_loop = isolated_event_loop_with_task(dir.path());
+    // No seeded knowledge records.
+    let hat_id = HatId::new("builder");
+    let prompt = event_loop.build_prompt(&hat_id).expect("prompt");
+    assert!(
+        prompt.contains(ORCHESTRATOR_HEADING),
+        "legacy ORCHESTRATOR CONTEXT heading must still appear; got:\n{prompt}"
+    );
+    assert!(
+        !prompt.contains("projection_marker: knowledge_block_v1"),
+        "empty knowledge state must NOT introduce the GAP-01 projection block; got:\n{prompt}"
+    );
+}
+
+/// U3 wiring: with `state_projection.enabled = false`, the
+/// legacy stub still appears AND a non-empty knowledge state
+/// appends the new block.
+#[test]
+fn disabled_projection_keeps_old_stub_and_adds_only_knowledge() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    init_git_workspace(dir.path());
+    let yaml = r#"
+mode: "multi"
+event_loop:
+  execution_mode: "isolated"
+  state_projection:
+    enabled: false
+hats:
+  builder:
+    name: "Builder"
+    triggers: ["build.task"]
+    instructions: "Do work."
+"#;
+    let mut config: crate::config::RalphConfig = serde_yaml::from_str(yaml).unwrap();
+    config.core.workspace_root = dir.path().to_path_buf();
+    let mut event_loop = crate::event_loop::EventLoop::with_context(
+        config,
+        crate::loop_context::LoopContext::primary(dir.path().to_path_buf()),
+    );
+    event_loop.initialize("U3 disabled projection + knowledge");
+
+    // Seed knowledge after init.
+    let mut ledger = event_loop.state.state_ledger.take().expect("ledger");
+    let record = crate::state::KnowledgeRecord::builder(
+        crate::state::KnowledgeAuthority::LedgerSnapshot,
+        crate::state::KnowledgeKind::Observation,
+    )
+    .with_subject("U1 plan ready")
+    .with_payload_digest_hex("deadbeef")
+    .with_source_ref("accepted-event:1:0:obs-1")
+    .with_input_fingerprint(crate::state::InputFingerprint::None)
+    .with_verification(crate::state::VerificationStatus::Unverified)
+    .build()
+    .expect("build");
+    ledger
+        .commit(
+            crate::state::CommitDelta::KnowledgeObserved {
+                records: vec![record],
+            },
+            Some("work.done".to_string()),
+        )
+        .expect("commit");
+    event_loop.state.state_ledger = Some(ledger);
+
+    let hat_id = HatId::new("builder");
+    let prompt = event_loop.build_prompt(&hat_id).expect("prompt");
+    assert!(prompt.contains(ORCHESTRATOR_HEADING));
+    assert!(prompt.contains("disabled"));
+    assert!(
+        prompt.contains("projection_marker: knowledge_block_v1"),
+        "knowledge projection must still appear with projection disabled; got:\n{prompt}"
+    );
+}
+
+/// U3 wiring: ralph / backward-compat custom-hat / coordinator
+/// paths MUST NOT receive the new heading. This pins the
+/// isolated-only scope.
+#[test]
+fn ralph_and_legacy_custom_paths_do_not_get_knowledge_projection() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    init_git_workspace(dir.path());
+    let yaml = r#"
+mode: "multi"
+event_loop:
+  execution_mode: "isolated"
+  state_projection:
+    enabled: true
+hats:
+  builder:
+    name: "Builder"
+    triggers: ["build.task"]
+    instructions: "Do work."
+"#;
+    let mut config: crate::config::RalphConfig = serde_yaml::from_str(yaml).unwrap();
+    config.core.workspace_root = dir.path().to_path_buf();
+    let mut event_loop = crate::event_loop::EventLoop::with_context(
+        config,
+        crate::loop_context::LoopContext::primary(dir.path().to_path_buf()),
+    );
+    event_loop.initialize("U3 scope guard");
+
+    // Seed knowledge.
+    let mut ledger = event_loop.state.state_ledger.take().expect("ledger");
+    let record = crate::state::KnowledgeRecord::builder(
+        crate::state::KnowledgeAuthority::LedgerSnapshot,
+        crate::state::KnowledgeKind::Observation,
+    )
+    .with_subject("U1 plan ready")
+    .with_payload_digest_hex("deadbeef")
+    .with_source_ref("accepted-event:1:0:obs-1")
+    .with_input_fingerprint(crate::state::InputFingerprint::None)
+    .with_verification(crate::state::VerificationStatus::Unverified)
+    .build()
+    .expect("build");
+    ledger
+        .commit(
+            crate::state::CommitDelta::KnowledgeObserved {
+                records: vec![record],
+            },
+            Some("work.done".to_string()),
+        )
+        .expect("commit");
+    event_loop.state.state_ledger = Some(ledger);
+
+    // ralph must skip the projection. Use the marker phrase
+    // to avoid the conflict with the agent-facing skill doc
+    // that itself mentions the heading string.
+    let ralph_id = HatId::new("ralph");
+    let ralph_prompt = event_loop.build_prompt(&ralph_id).expect("ralph prompt");
+    assert!(
+        !ralph_prompt.contains("projection_marker: knowledge_block_v1"),
+        "ralph must NOT see the GAP-01 knowledge projection; got:\n{ralph_prompt}"
+    );
+}
+
 /// U2 wiring: a knowledge-commit persistence failure must NOT
 /// alter the `ProcessedEvents` accepted tuple (D4 fail-soft).
 #[test]

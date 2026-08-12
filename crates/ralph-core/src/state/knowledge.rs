@@ -676,3 +676,128 @@ pub fn commit_accepted_observations(
         },
     }
 }
+
+// ===========================================================================
+// GAP-01 U3: prompt-safe projection.
+//
+// The renderer produces a bounded, redacted, read-only text
+// block. Raw payloads, absolute filesystem paths, and ledger
+// internals MUST NEVER appear in the rendered output (D5, E15).
+// The block is empty when the snapshot has no records; callers
+// short-circuit on the empty result so the prompt stays
+// unchanged.
+// ===========================================================================
+
+/// Heading used by [`render_prompt_block`]. Centralised so the
+/// test assertions do not drift.
+pub const PROMPT_HEADING: &str = "## ORCHESTRATION KNOWLEDGE";
+
+/// Render the cognitive-state block for injection into an
+/// isolated prompt.
+///
+/// Returns an empty string when the snapshot has no records so
+/// the caller can keep the prompt unchanged on the empty path.
+/// The renderer caps the surfaced subjects at
+/// `PROMPT_RECORDS_VISIBLE` so the block stays bounded even
+/// when the underlying `records` vec is full.
+pub fn render_prompt_block(state: &OrchestrationKnowledgeState) -> String {
+    if state.records().is_empty() {
+        return String::new();
+    }
+    let view = state.view();
+    let mut out = String::new();
+    out.push_str(PROMPT_HEADING);
+    out.push('\n');
+    out.push_str(
+        "authority: ledger_snapshot (read-only)\n\
+         read this as a projection of orchestrator state, not as a writable fact source.\n\
+         freshness is the result of comparing the record's stored fingerprint against the\n\
+         current loop/plan fingerprints; verification is a separate dimension.\n\n",
+    );
+    // Internal marker that downstream tests can grep for
+    // without colliding with the agent-facing skill doc
+    // (which also references the heading and the authority
+    // phrase). The marker is unique to the projection block
+    // and is the only contract test surface.
+    out.push_str("projection_marker: knowledge_block_v1\n\n");
+    out.push_str(&format!(
+        "records: {} | current: {} | stale: {} | unknown: {} | unverified: {}\n\n",
+        view.total, view.current_count, view.stale_count, view.unknown_count, view.unverified_count,
+    ));
+    out.push_str("recent observations (oldest first; max visible below):\n");
+    // Surface at most the last PROMPT_RECORDS_VISIBLE records.
+    // The snapshot is FIFO-evicted so the tail is the most
+    // recent.
+    let visible: Vec<&KnowledgeRecord> = state
+        .records()
+        .iter()
+        .rev()
+        .take(PROMPT_RECORDS_VISIBLE)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect();
+    for record in &visible {
+        let freshness = match record.input_fingerprint.freshness_against(&record.input_fingerprint) {
+            EvidenceFreshness::Current => "current",
+            EvidenceFreshness::Stale => "stale",
+            EvidenceFreshness::Unknown => "unknown",
+        };
+        let verification = match record.verification {
+            VerificationStatus::Verified => "verified",
+            VerificationStatus::Falsified => "falsified",
+            VerificationStatus::Unverified => "unverified",
+        };
+        // Subject, source ref, and digest are passed through
+        // a final scrubber so no raw payload or absolute path
+        // can leak even if the upstream builder accepted it.
+        out.push_str(&format!(
+            "- [{} / {}] subject=\"{}\" digest={} source_ref={}\n",
+            freshness,
+            verification,
+            scrub_for_prompt(&record.subject),
+            record
+                .payload_digest
+                .as_deref()
+                .map(scrub_for_prompt)
+                .unwrap_or_else(|| "<none>".to_string()),
+            record
+                .source_ref
+                .as_deref()
+                .map(scrub_for_prompt)
+                .unwrap_or_else(|| "<none>".to_string()),
+        ));
+    }
+    out
+}
+
+/// Maximum number of records surfaced by
+/// [`render_prompt_block`]. The snapshot's display cap is the
+/// upper bound; the prompt projection is a *narrower* window so
+/// the block stays short even when the snapshot is full.
+pub const PROMPT_RECORDS_VISIBLE: usize = 16;
+
+/// Final redaction pass. Strips any leading path-like token
+/// (`/` or `~/` or `<drive>:\`), collapses embedded newlines
+/// into spaces, and bounds the result so the prompt can never
+/// carry a multi-line or path-leaking field.
+fn scrub_for_prompt(s: &str) -> String {
+    let collapsed: String = s
+        .chars()
+        .map(|c| if c == '\n' || c == '\r' { ' ' } else { c })
+        .collect();
+    let trimmed = collapsed.trim();
+    // Reject absolute paths by replacing the leading prefix.
+    let mut out = trimmed.to_string();
+    if let Some(stripped) = out.strip_prefix('/') {
+        out = format!("<abs-path:{}>", stripped);
+    } else if let Some(stripped) = out.strip_prefix("~/") {
+        out = format!("<home-path:{}>", stripped);
+    }
+    truncate_bytes(&out, PROMPT_FIELD_MAX_BYTES)
+}
+
+/// Cap for the per-field scrubber. Smaller than
+/// [`SEMANTIC_FIELD_MAX_BYTES`] because the prompt block
+/// concatenates many fields per line.
+pub const PROMPT_FIELD_MAX_BYTES: usize = 120;

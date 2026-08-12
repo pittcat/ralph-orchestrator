@@ -198,7 +198,24 @@ impl EventLoop {
         // §Step 2.5b reconciliation rewrites the file mid-run. Falls
         // back to LoopState on missing/unreadable files.
         snap.plan_baseline_sha = self.resolve_reconciled_plan_baseline_sha();
-        format!("{}{prompt}", snap.to_prompt_block())
+        let legacy_block = snap.to_prompt_block();
+        // GAP-01 (plan 2026-08-13-001) U3: append a
+        // bounded, read-only cognitive-state projection
+        // after the existing `## ORCHESTRATOR CONTEXT` block.
+        // The renderer returns an empty string when the
+        // ledger has no records, so the empty-state prompt
+        // stays byte-identical to the pre-U3 baseline.
+        let knowledge_block = self
+            .state
+            .state_ledger
+            .as_ref()
+            .map(|ledger| crate::state::render_prompt_block(&ledger.snapshot().knowledge))
+            .unwrap_or_default();
+        if knowledge_block.is_empty() {
+            format!("{legacy_block}{prompt}")
+        } else {
+            format!("{legacy_block}{knowledge_block}\n{prompt}")
+        }
     }
 
     /// Read the latest plan baseline SHA from disk on every hat prompt.
