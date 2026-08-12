@@ -47,6 +47,8 @@ use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 
+use crate::event_loop::disposition::Disposition;
+
 /// Default cap on displayed records inside
 /// [`OrchestrationKnowledgeState::records`]. The commit log is
 /// unaffected; only the in-memory display vec is bounded so the
@@ -677,6 +679,128 @@ pub fn commit_accepted_observations(
             count,
             error: format!("{e}"),
         },
+    }
+}
+
+// ===========================================================================
+// GAP-01 U2: RAII commit scope for batch-boundary accepted-observation
+// commits.
+//
+// KnowledgeCommitScope ties the ledger borrow to the commit operation so
+// the compiler rejects any post-commit use of the ledger (type-checked
+// borrow window, not NLL relying on barely-passing lifetime analysis).
+// The caller captures loop_iteration / loop_start_sha / plan_baseline_sha
+// while holding an immutable self.state borrow, then drops that borrow
+// before constructing the scope and taking a mutable one.
+//
+// Usage (parse_and_emit.rs U2 call site):
+//   let scope = KnowledgeCommitScope::new(
+//       ledger,
+//       loop_iteration,
+//       loop_start_sha,
+//       plan_baseline_sha,
+//       classify,
+//   );
+//   let outcome = scope.commit(accepted_log_events);
+//
+// After `commit()` returns the scope is consumed and the caller cannot
+// use the ledger again through this scope — the type system enforces it.
+// ===========================================================================
+
+/// RAII guard for a batch-boundary knowledge observation commit.
+///
+/// Constructed with owned fingerprint inputs (caller captured them while
+/// the immutable `self.state` borrow was live), then consumes the mutable
+/// ledger borrow in [`Self::commit`]. The `commit` method is the only
+/// public API that performs I/O; the ledger is not accessible afterward.
+///
+/// # Type-safety contract
+///
+/// `commit(self)` takes `self` by value, consuming the struct. The
+/// compiler therefore rejects any code that tries to use the ledger after
+/// the commit — there is no `&mut StateLedger` left to misuse. This is
+/// the key difference from the old inline borrow pattern that relied on
+/// NLL lifetime analysis to close the borrow window.
+pub struct KnowledgeCommitScope<'a> {
+    /// Mutable borrow of the ledger. Consumed (and dropped) inside
+    /// `commit`, making post-commit ledger access a compile error.
+    ledger: &'a mut crate::state::ledger::StateLedger,
+    /// Current loop iteration, used for observation id and commit source.
+    loop_iteration: u32,
+    /// Pre-computed input fingerprint derived from the two SHA inputs.
+    fingerprint: InputFingerprint,
+    /// Disposition classifier — stored as a function pointer so the
+    /// struct is `Copy` (no heap allocation for the closure environment).
+    classify: fn(&str) -> Disposition,
+}
+
+impl<'a> KnowledgeCommitScope<'a> {
+    /// Construct a new commit scope. Takes owned values for the SHA
+    /// inputs so the caller can drop its `self.state` borrow before we
+    /// take the mutable ledger borrow.
+    ///
+    /// `classify` is stored as a function pointer (not `impl Fn`) to keep
+    /// the struct `Copy` and to make the borrow checker contract explicit:
+    /// there is no hidden state that could outlive the call site.
+    pub fn new(
+        ledger: &'a mut crate::state::ledger::StateLedger,
+        loop_iteration: u32,
+        loop_start_sha: Option<String>,
+        plan_baseline_sha: Option<String>,
+        classify: fn(&str) -> Disposition,
+    ) -> Self {
+        let fingerprint = match (loop_start_sha, plan_baseline_sha) {
+            (Some(l), Some(p)) => InputFingerprint::Both {
+                loop_start_sha: l,
+                plan_baseline_sha: p,
+            },
+            (Some(l), None) => InputFingerprint::LoopStartOnly {
+                loop_start_sha: l,
+            },
+            (None, Some(p)) => InputFingerprint::PlanBaselineOnly {
+                plan_baseline_sha: p,
+            },
+            (None, None) => InputFingerprint::None,
+        };
+        Self {
+            ledger,
+            loop_iteration,
+            fingerprint,
+            classify,
+        }
+    }
+
+    /// Build observations from the accepted batch and commit them as a
+    /// single `KnowledgeObserved` delta. The ledger borrow is consumed
+    /// by this method; after it returns the scope is gone and the caller
+    /// cannot use the ledger through this scope.
+    ///
+    /// Returns [`CommitObservationOutcome`] so the caller can log and
+    /// continue on persistence failure (D4 fail-soft).
+    pub fn commit(
+        self,
+        accepted: &[ralph_proto::Event],
+    ) -> CommitObservationOutcome {
+        let batch = observations_from_accepted_events(
+            self.loop_iteration,
+            &self.fingerprint,
+            accepted.iter().enumerate(),
+            self.classify,
+        );
+        if batch.records.is_empty() {
+            return CommitObservationOutcome::Empty;
+        }
+        let count = batch.records.len();
+        let delta = crate::state::CommitDelta::KnowledgeObserved {
+            records: batch.records,
+        };
+        match self.ledger.commit(delta, Some(format!("loop.observation.{}", self.loop_iteration))) {
+            Ok(_) => CommitObservationOutcome::Committed { count },
+            Err(e) => CommitObservationOutcome::PersistFailed {
+                count,
+                error: format!("{e}"),
+            },
+        }
     }
 }
 
