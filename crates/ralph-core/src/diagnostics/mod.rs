@@ -78,6 +78,35 @@ pub const MAX_SIDECAR_FIELD_BYTES: usize = 8 * 1024;
 /// pushing the row past `MAX_SIDECAR_FIELD_BYTES`.
 const TRUNCATION_SUFFIX: &str = "...[truncated]";
 
+/// Plan 2026-08-12-001 fix-plan U11: helper that owns the
+/// "try to construct, otherwise warn and disable" pattern shared
+/// across 4 logger slots in `with_options`. Reduces ~50 LOC of
+/// duplicated `match X::new(...) { Ok => Some(Arc::new(Mutex::new(...))), Err => { warn; None } }`
+/// boilerplate and unifies the `tracing::warn!` shape so every
+/// slot's failure path looks the same to the operator.
+fn install_optional_logger<T, F>(enabled: bool, label: &str, session_dir: &Path, ctor: F) -> Option<Arc<Mutex<T>>>
+where
+    F: FnOnce(&Path) -> std::io::Result<T>,
+{
+    if !enabled {
+        return None;
+    }
+    match ctor(session_dir) {
+        Ok(logger) => Some(Arc::new(Mutex::new(logger))),
+        Err(err) => {
+            tracing::warn!(
+                target: "ralph_core::diagnostics",
+                slot = label,
+                session_dir = %session_dir.display(),
+                error = %err,
+                "failed to create {} logger; slot disabled for this session",
+                label,
+            );
+            None
+        }
+    }
+}
+
 /// Plan 2026-08-12-001 fix-plan U9: truncate a string to
 /// `MAX_SIDECAR_FIELD_BYTES` bytes. Returns the original string
 /// unchanged if it already fits; otherwise slices to leave room
@@ -456,39 +485,19 @@ impl DiagnosticsCollector {
         //
         // trace_only skips these too: parent TUI has no loop events to
         // record, only trace/log.
-        let recovery_logger = if effective_full || effective_runtime {
-            match recovery::RecoveryLogger::new(&session_dir) {
-                Ok(logger) => Some(Arc::new(Mutex::new(logger))),
-                Err(err) => {
-                    tracing::warn!(
-                        target: "ralph_core::diagnostics",
-                        session_dir = %session_dir.display(),
-                        error = %err,
-                        "failed to create recovery logger; recovery journal disabled for this session",
-                    );
-                    None
-                }
-            }
-        } else {
-            None
-        };
+        let recovery_logger = install_optional_logger(
+            effective_full || effective_runtime,
+            "recovery",
+            &session_dir,
+            recovery::RecoveryLogger::new,
+        );
 
-        let drift_logger = if effective_full || effective_runtime {
-            match drift::DriftLogger::new(&session_dir) {
-                Ok(logger) => Some(Arc::new(Mutex::new(logger))),
-                Err(err) => {
-                    tracing::warn!(
-                        target: "ralph_core::diagnostics",
-                        session_dir = %session_dir.display(),
-                        error = %err,
-                        "failed to create drift logger; drift journal disabled for this session",
-                    );
-                    None
-                }
-            }
-        } else {
-            None
-        };
+        let drift_logger = install_optional_logger(
+            effective_full || effective_runtime,
+            "drift",
+            &session_dir,
+            drift::DriftLogger::new,
+        );
 
         // Plan 2026-08-12-001 Unit 1: input bundle manifest. Created
         // lazily for both full and minimal sessions (effective_full
