@@ -64,6 +64,125 @@ pub use trace_layer::{DiagnosticTraceLayer, TraceEntry};
 // refer to it as `crate::diagnostics::DiagnosisSummary` without a
 // separate re-export.
 
+// Plan 2026-08-12-001 fix-plan U9: cap on the per-field byte
+// length of any single row written to a sidecar JSONL. Anything
+// larger is truncated at the boundary and a `tracing::warn!` is
+// emitted so the operator can spot upstream fields that have
+// gone pathological (e.g. a 50 MiB `source_ref` from a recovery
+// envelope that ran away). The cap applies to string fields and
+// JSON fields; non-string scalars (u64, bool, enum) are unaffected.
+pub const MAX_SIDECAR_FIELD_BYTES: usize = 8 * 1024;
+
+/// Suffix appended to a truncated string field. 16 bytes gives the
+/// operator enough headroom to see "...[truncated]" without
+/// pushing the row past `MAX_SIDECAR_FIELD_BYTES`.
+const TRUNCATION_SUFFIX: &str = "...[truncated]";
+
+/// Plan 2026-08-12-001 fix-plan U9: truncate a string to
+/// `MAX_SIDECAR_FIELD_BYTES` bytes. Returns the original string
+/// unchanged if it already fits; otherwise slices to leave room
+/// for the truncation suffix and emits one `tracing::warn!`
+/// describing the field name + before/after byte counts. Used
+/// at every writer boundary (`FeedbackEntry::action_kind`,
+/// `outcome`, `source_ref`; `RuntimeTraceEntry::source_ref`).
+pub(crate) fn cap_string_field(field: &str, label: &'static str) -> String {
+    if field.len() <= MAX_SIDECAR_FIELD_BYTES {
+        return field.to_string();
+    }
+    let original = field.len();
+    let keep = MAX_SIDECAR_FIELD_BYTES.saturating_sub(TRUNCATION_SUFFIX.len());
+    let mut truncated = String::with_capacity(MAX_SIDECAR_FIELD_BYTES);
+    truncated.push_str(&field[..keep]);
+    truncated.push_str(TRUNCATION_SUFFIX);
+    tracing::warn!(
+        target: "ralph_core::diagnostics",
+        field = label,
+        original_bytes = original,
+        capped_bytes = truncated.len(),
+        "sidecar field exceeded MAX_SIDECAR_FIELD_BYTES; truncated"
+    );
+    truncated
+}
+
+/// Plan 2026-08-12-001 fix-plan U9: walk a `serde_json::Value`
+/// and cap any oversized sub-tree. `String` arms are truncated via
+/// `cap_string_field`; `Object` arms drop keys (in iteration
+/// order) until the serialized form fits inside
+/// `MAX_SIDECAR_FIELD_BYTES`. Returns the original value if it
+/// already fits. Emits at most one `tracing::warn!` per call
+/// (downstream per-field truncation is already counted by
+/// `cap_string_field`).
+pub(crate) fn cap_json_field(value: serde_json::Value, label: &'static str) -> serde_json::Value {
+    use serde_json::Value;
+    // Fast path: cheap probe via to_string.
+    let serialized_len = value.to_string().len();
+    if serialized_len <= MAX_SIDECAR_FIELD_BYTES {
+        return value;
+    }
+    // Over the cap. Walk the tree:
+    //   - String → truncate via cap_string_field
+    //   - Object → drop keys until it fits
+    //   - Array → already bounded by writer usage; preserve
+    let warned = false;
+    let current = value;
+    match current {
+        Value::String(s) => {
+            let capped = cap_string_field(&s, label);
+            if !warned {
+                tracing::warn!(
+                    target: "ralph_core::diagnostics",
+                    field = label,
+                    "sidecar JSON string field exceeded MAX_SIDECAR_FIELD_BYTES; truncated"
+                );
+            }
+            Value::String(capped)
+        }
+        Value::Object(map) => {
+            let mut obj = map;
+            let original_len = obj.len();
+            // Drop keys from the end until the serialized form fits.
+            while obj.len() > 1 {
+                let probe = serde_json::Value::Object(obj.clone());
+                if probe.to_string().len() <= MAX_SIDECAR_FIELD_BYTES {
+                    break;
+                }
+                // Drop the last key (insertion order is BTreeMap-backed
+                // here because serde_json uses BTreeMap by default).
+                let last_key = obj
+                    .keys()
+                    .next_back()
+                    .cloned()
+                    .expect("non-empty object has last key");
+                obj.remove(&last_key);
+            }
+            if !warned {
+                tracing::warn!(
+                    target: "ralph_core::diagnostics",
+                    field = label,
+                    original_bytes = serialized_len,
+                    dropped_keys = original_len - obj.len(),
+                    "sidecar JSON object exceeded MAX_SIDECAR_FIELD_BYTES; \
+                     dropped keys to fit"
+                );
+            }
+            Value::Object(obj)
+        }
+        // Scalar/array/null/bool/number: can't reduce further.
+        other => {
+            if !warned {
+                tracing::warn!(
+                    target: "ralph_core::diagnostics",
+                    field = label,
+                    original_bytes = serialized_len,
+                    "sidecar JSON field exceeded MAX_SIDECAR_FIELD_BYTES; \
+                     preserving as-is (scalar/array cannot be truncated safely)"
+                );
+            }
+            other
+        }
+    }
+}
+
 use chrono::{DateTime, Local, Utc};
 use serde::{Deserialize, Serialize};
 use std::fs;

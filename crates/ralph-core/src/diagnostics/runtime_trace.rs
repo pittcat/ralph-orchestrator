@@ -168,9 +168,26 @@ impl RuntimeTraceLogger {
     /// the write and flush succeed. Errors flip the logger into
     /// `degraded` and emit a `tracing::warn!`; subsequent writes
     /// are no-ops.
+    ///
+    /// Plan 2026-08-12-001 fix-plan U9: oversized string and JSON
+    /// fields are truncated to `MAX_SIDECAR_FIELD_BYTES` at the
+    /// writer boundary, with one `tracing::warn!` per offending
+    /// field.
     pub fn append(&mut self, mut entry: RuntimeTraceEntry) {
         if self.degraded {
             return;
+        }
+        // Plan 2026-08-12-001 fix-plan U9: cap per-field bytes
+        // before serializing. The `source_ref` and JSON `fields`
+        // blob are the only non-scalar inputs from upstream.
+        if let Some(ref source_ref) = entry.source_ref {
+            entry.source_ref = Some(super::cap_string_field(
+                source_ref,
+                "runtime_trace.source_ref",
+            ));
+        }
+        if let Some(fields) = entry.fields.take() {
+            entry.fields = Some(super::cap_json_field(fields, "runtime_trace.fields"));
         }
         let pending = self.sequence + 1;
         entry.sequence = pending;

@@ -161,9 +161,36 @@ impl FeedbackLogger {
     /// Append a single row. Sequence is incremented only after the
     /// write and flush succeed. Errors flip the logger into
     /// `degraded` and emit a warning; subsequent writes are no-ops.
+    ///
+    /// Plan 2026-08-12-001 fix-plan U9: oversized string and JSON
+    /// fields are truncated to `MAX_SIDECAR_FIELD_BYTES` at the
+    /// writer boundary, with one `tracing::warn!` per offending
+    /// field. Non-string scalars are unaffected.
     pub fn append(&mut self, mut entry: FeedbackEntry) {
         if self.degraded {
             return;
+        }
+        // Plan 2026-08-12-001 fix-plan U9: cap per-field bytes
+        // before serializing. Each `Option<String>` field is
+        // rewritten in place; the JSON `fields` blob is capped
+        // via `cap_json_field` (drops keys until it fits).
+        if let Some(ref action_kind) = entry.action_kind {
+            entry.action_kind = Some(super::cap_string_field(
+                action_kind,
+                "feedback.action_kind",
+            ));
+        }
+        if let Some(ref outcome) = entry.outcome {
+            entry.outcome = Some(super::cap_string_field(outcome, "feedback.outcome"));
+        }
+        if let Some(ref source_ref) = entry.source_ref {
+            entry.source_ref = Some(super::cap_string_field(
+                source_ref,
+                "feedback.source_ref",
+            ));
+        }
+        if let Some(fields) = entry.fields.take() {
+            entry.fields = Some(super::cap_json_field(fields, "feedback.fields"));
         }
         let pending = self.sequence + 1;
         entry.sequence = pending;
