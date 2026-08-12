@@ -143,3 +143,48 @@ fn feedback_sequence_monotonic_across_appends() {
         report
     );
 }
+
+/// Plan 2026-08-12-001 fix-plan U13: same `retry_key` repeated
+/// 5× via `log_feedback`/`FeedbackLogger::append` must
+/// produce 5 on-disk rows that the reader projects to one
+/// stable `feedback_id` (the writer's identity contract).
+#[test]
+fn feedback_writer_appends_monotonic_retry_key() {
+    use ralph_core::diagnostics::FeedbackEntry;
+    use ralph_core::diagnostics::FeedbackLogger;
+    use ralph_core::diagnosis::read_feedback_lifecycle_report;
+
+    let tmp = TempDir::new().expect("TempDir");
+    let session = tmp.path().join("session");
+    std::fs::create_dir_all(&session).expect("create session dir");
+    let mut logger = FeedbackLogger::new(&session).expect("FeedbackLogger::new");
+    for i in 0..5 {
+        logger.append(FeedbackEntry::new(
+            0,
+            "shared-id",
+            "shared-retry",
+            if i % 2 == 0 {
+                FeedbackPhase::Action
+            } else {
+                FeedbackPhase::Validation
+            },
+        ));
+    }
+
+    let report = read_feedback_lifecycle_report(&session);
+    assert_eq!(report.rows.len(), 5);
+    let mut ids: Vec<_> = report.rows.iter().map(|r| r.feedback_id.clone()).collect();
+    ids.sort();
+    ids.dedup();
+    assert_eq!(
+        ids.len(),
+        1,
+        "5 rows with one retry_key must collapse to one identity, got {:?}",
+        ids
+    );
+    assert_eq!(ids[0], "shared-id");
+    assert!(
+        report.monotonic_sequences,
+        "writer→reader round-trip must produce monotonic sequences"
+    );
+}

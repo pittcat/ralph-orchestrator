@@ -43,16 +43,34 @@ fn append_runtime_trace(session_dir: &Path, hat: &str, phase: RuntimeTracePhase,
 }
 
 fn append_feedback(session_dir: &Path, id: &str, retry: &str, phase: FeedbackPhase) {
+    // Plan 2026-08-12-001 fix-plan U13: route the test fixture
+    // through the production `FeedbackLogger` writer API (which
+    // owns the sequence counter, the degraded-flip semantics,
+    // and the post-success flush invariant) instead of writing
+    // directly with `fs::OpenOptions::append`. Each call opens a
+    // fresh logger; for tests that need multiple sequential
+    // appends in one process, use `append_feedbacks_with`
+    // below to share one logger so the sequence is monotonic
+    // across the rows.
     use ralph_core::diagnostics::FeedbackEntry;
-    use std::io::Write;
-    let mut file = fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(session_dir.join("feedback.jsonl"))
-        .expect("open feedback");
+    let mut logger = ralph_core::diagnostics::FeedbackLogger::new(session_dir)
+        .expect("FeedbackLogger::new");
     let entry = FeedbackEntry::new(0, id, retry, phase);
-    let json = serde_json::to_string(&entry).expect("serialize");
-    writeln!(file, "{}", json).expect("append");
+    logger.append(entry);
+}
+
+fn append_feedbacks_with<F>(session_dir: &Path, count: usize, mk_entry: F)
+where
+    F: Fn(usize) -> ralph_core::diagnostics::FeedbackEntry,
+{
+    // Plan 2026-08-12-001 fix-plan U13: write N rows through one
+    // FeedbackLogger so the on-disk sequence is monotonic (and
+    // the reader's `monotonic_sequences` flag flips to true).
+    let mut logger = ralph_core::diagnostics::FeedbackLogger::new(session_dir)
+        .expect("FeedbackLogger::new");
+    for i in 0..count {
+        logger.append(mk_entry(i));
+    }
 }
 
 #[test]
@@ -336,4 +354,121 @@ fn single_valid_row_still_present() {
     let feedback_report = read_feedback_lifecycle_report(&session);
     assert_eq!(feedback_report.status, BundleStatus::Present);
     assert_eq!(feedback_report.rows.len(), 1);
+}
+
+// =========================================================================
+// Plan 2026-08-12-001 fix-plan U13: writer→reader integration fixtures.
+// The tests below exercise `FeedbackLogger::append` (the production
+// writer path) end-to-end against the on-disk JSONL, then assert the
+// reader's invariants on rows the writer actually produced. Before U13
+// the existing tests wrote rows directly with `fs::OpenOptions::append`,
+// which never tested the writer's sequence-increment-after-flush path
+// or the `(feedback_id, retry_key)` identity projection against real
+// production writes.
+// =========================================================================
+
+#[test]
+fn u13_writer_reader_monotonic_sequences_via_production_path() {
+    use ralph_core::diagnostics::FeedbackEntry;
+    let tmp = TempDir::new().expect("TempDir");
+    let session = tmp.path().join("session");
+    fs::create_dir_all(&session).expect("create session dir");
+
+    // 5 rows, distinct retry_keys, one FeedbackLogger (so the
+    // sequence counter is monotonic across appends).
+    append_feedbacks_with(&session, 5, |i| {
+        FeedbackEntry::new(
+            0,
+            format!("diag-{i}"),
+            format!("retry-{i}"),
+            FeedbackPhase::Action,
+        )
+    });
+
+    let report = read_feedback_lifecycle_report(&session);
+    assert_eq!(report.status, BundleStatus::Present);
+    assert_eq!(
+        report.rows.len(),
+        5,
+        "writer→reader round-trip must surface all 5 rows"
+    );
+    assert!(
+        report.monotonic_sequences,
+        "5 appends via FeedbackLogger must produce monotonic sequences (got report={:?})",
+        report
+    );
+    // First/last sequence come from the on-disk rows.
+    let first_seq = report.rows.iter().map(|r| r.sequence).min().unwrap();
+    let last_seq = report.rows.iter().map(|r| r.sequence).max().unwrap();
+    assert_eq!(first_seq, 1, "first row sequence must be 1");
+    assert_eq!(last_seq, 5, "last row sequence must be 5");
+}
+
+#[test]
+fn u13_same_retry_key_yields_stable_feedback_id() {
+    use ralph_core::diagnostics::FeedbackEntry;
+    let tmp = TempDir::new().expect("TempDir");
+    let session = tmp.path().join("session");
+    fs::create_dir_all(&session).expect("create session dir");
+
+    // 5 rows sharing the same `retry_key` (and therefore the
+    // same `feedback_id` per the writer's identity contract).
+    append_feedbacks_with(&session, 5, |i| {
+        FeedbackEntry::new(
+            0,
+            "shared-id",
+            "shared-retry",
+            if i % 2 == 0 {
+                FeedbackPhase::Action
+            } else {
+                FeedbackPhase::Validation
+            },
+        )
+    });
+
+    let report = read_feedback_lifecycle_report(&session);
+    assert_eq!(report.rows.len(), 5);
+    // All rows map to the same `feedback_id` (the projection
+    // uses retry_key ⇒ feedback_id, so repeated retry_keys
+    // collapse to one identity).
+    let mut ids: Vec<_> = report.rows.iter().map(|r| r.feedback_id.clone()).collect();
+    ids.sort();
+    ids.dedup();
+    assert_eq!(
+        ids.len(),
+        1,
+        "all 5 rows sharing one retry_key must map to one feedback_id, got {:?}",
+        ids
+    );
+    assert_eq!(ids[0], "shared-id");
+}
+
+#[test]
+fn u13_distinct_retry_keys_yield_distinct_feedback_ids() {
+    use ralph_core::diagnostics::FeedbackEntry;
+    let tmp = TempDir::new().expect("TempDir");
+    let session = tmp.path().join("session");
+    fs::create_dir_all(&session).expect("create session dir");
+
+    // 5 rows with 5 distinct keys → 5 distinct feedback_ids.
+    append_feedbacks_with(&session, 5, |i| {
+        FeedbackEntry::new(
+            0,
+            format!("id-{i}"),
+            format!("retry-{i}"),
+            FeedbackPhase::Action,
+        )
+    });
+
+    let report = read_feedback_lifecycle_report(&session);
+    assert_eq!(report.rows.len(), 5);
+    let mut ids: Vec<_> = report.rows.iter().map(|r| r.feedback_id.clone()).collect();
+    ids.sort();
+    ids.dedup();
+    assert_eq!(
+        ids.len(),
+        5,
+        "5 distinct retry_keys must map to 5 distinct feedback_ids, got {:?}",
+        ids
+    );
 }
