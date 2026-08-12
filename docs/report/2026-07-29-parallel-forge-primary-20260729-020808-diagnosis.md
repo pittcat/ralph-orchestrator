@@ -201,7 +201,7 @@ history_search: preset-only
 | `docs/solutions/logic-errors/isolated-ralph-must-not-drain-multi-consumer-pending.md` | reporter LOOP_COMPLETE 缺失 | 1 | 已闭环 | 低 | 不同 preset 曾在上游事件已入 ledger 后因 peer pending 被抽干而导致 reporter 永不激活、最终无 LOOP_COMPLETE |
 | `docs/solutions/integration-issues/ce-executor-serial-mechanism-close-loop-2026-06-23.md` | reporter terminal pair 违反 | 1 | 已闭环 | 低 | 不同 preset 曾出现 reporter 已发报告事件、随后 LOOP_COMPLETE 被终态 gate 拒收 |
 | `docs/plans/2026-07-28-001-fix-parallel-forge-dispatch-contract-plan.md` | reporter terminal pair 违反 | 1 | 待实施验收 | **高** | 明确把 reporter 的 `forge.report.done` 后接 `LOOP_COMPLETE` 定义为双终态窄例外，并纳入真实 E2E 收尾契约。**本次 run 视为该 plan 修复已生效的验证** |
-| `docs/brainstorms/2026-07-23-small-context-model-orchestration-requirements.md` | reporter terminal pair 违反 | 1 | 需求讨论 | 低 | 讨论 isolated activation 的上下文与单业务事件预算 |
+| `docs/achieved/brainstorms/2026-07-23-small-context-model-orchestration-requirements.md` | reporter terminal pair 违反 | 1 | 需求讨论 | 低 | 讨论 isolated activation 的上下文与单业务事件预算 |
 
 ### 3.2 复发判定
 

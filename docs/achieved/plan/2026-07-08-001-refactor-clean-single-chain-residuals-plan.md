@@ -379,6 +379,6 @@ flowchart TB
 - **Origin document:** `docs/brainstorms/2026-07-07-ralph-single-chain-execution-primary-requirements.md`
 - Related plan: `docs/plans/2026-07-07-006-refactor-ralph-single-chain-execution-primary-plan.md`
 - Related requirements: `docs/brainstorms/2026-07-02-ce-executor-pipeline-preset-requirements.md`
-- Related requirements superseded in direction: `docs/brainstorms/2026-07-06-ce-executor-serial-protocol-ssot-convergence-requirements.md`
+- Related requirements superseded in direction: `docs/achieved/brainstorms/2026-07-06-ce-executor-serial-protocol-ssot-convergence-requirements.md`
 - Active stale gate: `scripts/check-serial-stale-references.sh`
 - Agent doc rule source: `AGENTS.md`

@@ -130,6 +130,22 @@ Wave/supervisor 协议层能力集合：反压、分布式取消、状态持久�
 
 单次 hat activation 内，Pi extension 识别 Ralph 长 prompt，按 `ORIENTATION → EXECUTE → VERIFY → REPORT`（对齐 `build_custom_hat`）自动多轮披露与续跑；缺段跳过，解析失败则不接管。阶段完成须确定性信号；事实源与门禁仍在 Ralph。适用于所有 Ralph→Pi activation，不限某个 hat。
 
+### evidence-driven decision state
+
+由 Ralph 持久化并可 replay 的编排认知状态：把事实、claim、evidence、hypothesis、assumption、unknown、verified 和 falsified 分开保存，并以证据和门禁驱动状态转换。Prompt 只是该状态的相关压缩投影，不是跨 activation 的事实源。
+
+### Decision Contract
+
+Hat 完成声明进入系统接受前必须满足的统一决策记录：包含 claim、worker/evaluator assessment、证据引用、决策指标、critical unknowns、gate 结果和下一路由。Worker 可以提交自评，但不能单独批准自己的完成声明。
+
+### information gain
+
+一次尝试相对前一状态新增的有效信息量，既包括解决问题，也包括排除假设、缩小未知范围或提高可重现性。Retry 只有在策略变化或 information gain 足够时才有资格继续。
+
+### convergence receipt
+
+多 Hat 或多 worktree 结果合并后生成的系统级收敛证明，记录合并后的接口、行为、配置、依赖、回归、证据覆盖和 critical unknowns 验证结果。Git merge 成功本身不是 convergence receipt。
+
 ## Operator skills（loop 外）
 
 ### ralph-e2e-bootstrap

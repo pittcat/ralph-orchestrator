@@ -5,7 +5,7 @@ status: active
 date: 2026-07-07
 execution_model: strictly-sequential-atomic-tdd
 origin:
-  - docs/brainstorms/2026-07-06-ce-executor-serial-protocol-ssot-convergence-requirements.md
+  - docs/achieved/brainstorms/2026-07-06-ce-executor-serial-protocol-ssot-convergence-requirements.md
   - docs/brainstorms/2026-07-06-ce-executor-serial-handoff-envelope-requirements.md
 source_report: docs/report/2026-07-07-ce-executor-serial-primary-20260706-230230-diagnosis.md
 related_plans:
@@ -92,7 +92,7 @@ related_plans:
 
 - `docs/solutions/logic-errors/base-runtime-must-not-parse-business-markdown.md`：runtime 只能消费结构化 payload/state/config，不解析业务 markdown。
 - `docs/solutions/developer-experience/ralph-cli-loop-runner-tests-must-run-serial.md`：`ralph-cli` 测试必须通过 nextest 串行配置，禁止裸 cargo test。
-- `docs/brainstorms/2026-07-06-ce-executor-serial-protocol-ssot-convergence-requirements.md`：agent 可见协议必须收敛到请求 JSON + 统一响应 JSON，失败不能 fail-open。
+- `docs/achieved/brainstorms/2026-07-06-ce-executor-serial-protocol-ssot-convergence-requirements.md`：agent 可见协议必须收敛到请求 JSON + 统一响应 JSON，失败不能 fail-open。
 - `docs/brainstorms/2026-07-06-ce-executor-serial-handoff-envelope-requirements.md`：Handoff Envelope 是交接工作包，不是全文教材；runtime state 优先于 agent narrative。
 
 ### External References
@@ -620,7 +620,7 @@ related_plans:
 
 ## Sources & References
 
-- Origin: `docs/brainstorms/2026-07-06-ce-executor-serial-protocol-ssot-convergence-requirements.md`
+- Origin: `docs/achieved/brainstorms/2026-07-06-ce-executor-serial-protocol-ssot-convergence-requirements.md`
 - Origin: `docs/brainstorms/2026-07-06-ce-executor-serial-handoff-envelope-requirements.md`
 - Diagnosis: `docs/report/2026-07-07-ce-executor-serial-primary-20260706-230230-diagnosis.md`
 - Related plan: `docs/plans/2026-07-06-001-feat-ce-executor-serial-protocol-ssot-convergence-plan.md`

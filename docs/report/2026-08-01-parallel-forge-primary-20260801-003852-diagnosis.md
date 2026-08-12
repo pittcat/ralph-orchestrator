@@ -212,7 +212,7 @@ flowchart LR
 | plan | `docs/plans/2026-07-29-004-refactor-parallel-forge-auditor-reporter-single-event-terminal-plan.md` | 07-29 | ✓ | 中 | 待实施 |
 | plan | `docs/plans/2026-07-29-005-fix-parallel-forge-preset-integration-gap-plan.md` | 07-29 | ✓ | 高 | 已闭环 |
 | plan | `docs/plans/2026-07-30-002-fix-parallel-forge-fail-close-flow-authority-plan.md` | 07-30 | ✓ | 高 | 待实施 |
-| brainstorm | `docs/brainstorms/2026-07-29-parallel-forge-wave-settlement-and-evidence-gates-requirements.md` | 07-29 | ✓ | 高 | 需求草稿 |
+| brainstorm | `docs/achieved/brainstorms/2026-07-29-parallel-forge-wave-settlement-and-evidence-gates-requirements.md` | 07-29 | ✓ | 高 | 需求草稿 |
 
 ### 根因分类对照（30d 内 parallel-forge 相关）
 

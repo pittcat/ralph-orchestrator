@@ -2,7 +2,7 @@
 title: Parallel Forge 静态 Wave 结算与失败恢复 - Plan
 type: fix
 date: 2026-07-29
-origin: docs/brainstorms/2026-07-29-parallel-forge-wave-settlement-and-evidence-gates-requirements.md
+origin: docs/achieved/brainstorms/2026-07-29-parallel-forge-wave-settlement-and-evidence-gates-requirements.md
 artifact_contract: ce-unified-plan/v1
 artifact_readiness: implementation-ready
 product_contract_source: legacy-requirements

@@ -4,7 +4,7 @@ topic: ralph-single-chain-execution-primary
 status: draft
 related:
   - docs/brainstorms/2026-07-02-ce-executor-pipeline-preset-requirements.md
-  - docs/brainstorms/2026-07-06-ce-executor-serial-protocol-ssot-convergence-requirements.md
+  - docs/achieved/brainstorms/2026-07-06-ce-executor-serial-protocol-ssot-convergence-requirements.md
   - docs/brainstorms/2026-07-05-ralph-preset-author-review-skills-requirements.md
   - docs/report/2026-07-07-ce-executor-serial-primary-20260707-110748-diagnosis.md
 origin: 对话收敛 — serial 机制复杂度反噬；Ralph 主线转向单链执行；沉淀可复用机制并删除无效复杂度

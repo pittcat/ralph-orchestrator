@@ -2,7 +2,7 @@
 date: 2026-07-09
 topic: schema-backed-trigger-context
 related:
-  - docs/brainstorms/2026-07-09-policy-check-agent-feedback-requirements.md
+  - docs/achieved/brainstorms/2026-07-09-policy-check-agent-feedback-requirements.md
   - docs/achieved/brainstorms/2026-07-02-event-routing-table-requirements.md
   - docs/achieved/brainstorms/2026-07-02-event-emit-precheck-prompt-gate-requirements.md
   - docs/achieved/brainstorms/2026-07-06-ce-executor-serial-protocol-ssot-convergence-requirements.md

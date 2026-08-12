@@ -3,7 +3,7 @@ title: Parallel Forge Reviewer Verifier Tester 只读权限与证据门禁 - Pla
 type: feat
 date: 2026-07-29
 origin:
-  - docs/brainstorms/2026-07-29-parallel-forge-wave-settlement-and-evidence-gates-requirements.md
+  - docs/achieved/brainstorms/2026-07-29-parallel-forge-wave-settlement-and-evidence-gates-requirements.md
   - docs/plans/2026-07-29-001-fix-parallel-forge-static-wave-settlement-plan.md
   - docs/plans/2026-07-29-002-feat-parallel-forge-reuse-status-plan.md
 artifact_contract: ce-unified-plan/v1

@@ -156,6 +156,6 @@ origin: 对话收敛 — 机制过多不收敛；SSOT 从 payload schema 扩展�
 
 ---
 
-**文档路径**：`docs/brainstorms/2026-07-06-ce-executor-serial-protocol-ssot-convergence-requirements.md`
+**文档路径**：`docs/achieved/brainstorms/2026-07-06-ce-executor-serial-protocol-ssot-convergence-requirements.md`
 
 **建议下游**：`ce-plan` 拆为至少两轨 — (1) EmitResult + CLI 响应；(2) serial 删 progress-steward + stall 收尾 + preset 减法；合并前 SC1 子集验证。

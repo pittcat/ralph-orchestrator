@@ -3,7 +3,7 @@ title: "feat: 增强 policy-check 的 agent 可修复反馈"
 type: feat
 status: active
 date: 2026-07-09
-origin: docs/brainstorms/2026-07-09-policy-check-agent-feedback-requirements.md
+origin: docs/achieved/brainstorms/2026-07-09-policy-check-agent-feedback-requirements.md
 execution_model: strictly-sequential-isolated-tdd
 ---
 
@@ -529,7 +529,7 @@ emit_schema_hint helpers
 
 ## Sources & References
 
-- Origin document: `docs/brainstorms/2026-07-09-policy-check-agent-feedback-requirements.md`
+- Origin document: `docs/achieved/brainstorms/2026-07-09-policy-check-agent-feedback-requirements.md`
 - Existing schema model: `crates/ralph-core/src/config/loop_config.rs`
 - Shared schema hint module: `crates/ralph-core/src/emit_schema_hint.rs`
 - Single emit policy-check path: `crates/ralph-cli/src/commands/emit.rs`

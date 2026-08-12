@@ -5,7 +5,7 @@ status: planned
 date: 2026-07-06
 created: 2026-07-06
 execution_model: strictly-sequential-atomic-tdd
-origin: docs/brainstorms/2026-07-06-ce-executor-serial-protocol-ssot-convergence-requirements.md
+origin: docs/achieved/brainstorms/2026-07-06-ce-executor-serial-protocol-ssot-convergence-requirements.md
 related_plans:
   - docs/brainstorms/2026-07-02-ce-executor-serial-runtime-phase-authority-requirements.md
   - docs/plans/2026-07-04-004-fix-ce-executor-serial-silent-success-p0-p1-plan.md

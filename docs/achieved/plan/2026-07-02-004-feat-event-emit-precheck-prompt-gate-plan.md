@@ -3,7 +3,7 @@ title: "feat: 声明式事件发射前置检查(precheck_prompt LLM 关卡)"
 type: feat
 status: active
 date: 2026-07-02
-origin: docs/brainstorms/2026-07-02-event-emit-precheck-prompt-gate-requirements.md
+origin: docs/achieved/brainstorms/2026-07-02-event-emit-precheck-prompt-gate-requirements.md
 ---
 
 # feat: 声明式事件发射前置检查(`precheck_prompt` LLM 关卡)

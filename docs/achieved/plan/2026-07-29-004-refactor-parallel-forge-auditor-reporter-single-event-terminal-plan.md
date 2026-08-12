@@ -3,7 +3,7 @@ title: Parallel Forge Auditor Reporter 单事件终态收敛 - Plan
 type: refactor
 date: 2026-07-29
 origin:
-  - docs/brainstorms/2026-07-29-parallel-forge-wave-settlement-and-evidence-gates-requirements.md
+  - docs/achieved/brainstorms/2026-07-29-parallel-forge-wave-settlement-and-evidence-gates-requirements.md
   - docs/plans/2026-07-29-001-fix-parallel-forge-static-wave-settlement-plan.md
   - docs/plans/2026-07-29-002-feat-parallel-forge-reuse-status-plan.md
   - docs/plans/2026-07-29-003-feat-parallel-forge-readonly-hat-gates-plan.md

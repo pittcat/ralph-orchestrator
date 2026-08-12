@@ -86,7 +86,7 @@ unit evidence 走现有 `work.done` payload 字段（`tests_run` / `tests_passed
 ### Institutional Learnings
 
 - `docs/brainstorms/2026-07-02-ce-executor-pipeline-preset-requirements.md`：单链模型稳定性来自无 multi-consumer、无 coordinator loop、无 validator hat、无 re-review loop。
-- `docs/brainstorms/2026-07-06-ce-executor-serial-protocol-ssot-convergence-requirements.md`：EmitResult、prompt 减法等思想可保留，但 serial-preservation 方向被本计划取代。
+- `docs/achieved/brainstorms/2026-07-06-ce-executor-serial-protocol-ssot-convergence-requirements.md`：EmitResult、prompt 减法等思想可保留，但 serial-preservation 方向被本计划取代。
 - `docs/report/2026-07-07-*diagnosis.md`：fallback success、task/events drift、shipper reason promotion、terminal window 是必须清理的复发模式。
 
 ## Key Technical Decisions
@@ -993,5 +993,5 @@ If full baseline shows a known timing/concurrency flake, use `RALPH_BASELINE_SER
 - **Origin document:** `docs/brainstorms/2026-07-07-ralph-single-chain-execution-primary-requirements.md`
 - Related requirements: `docs/brainstorms/2026-07-02-ce-executor-pipeline-preset-requirements.md`
 - Related requirements: `docs/brainstorms/2026-07-05-ralph-preset-author-review-skills-requirements.md`
-- Related requirements now superseded in direction: `docs/brainstorms/2026-07-06-ce-executor-serial-protocol-ssot-convergence-requirements.md`
+- Related requirements now superseded in direction: `docs/achieved/brainstorms/2026-07-06-ce-executor-serial-protocol-ssot-convergence-requirements.md`
 - Related reports: `docs/report/2026-07-07-ce-executor-serial-primary-20260707-110748-diagnosis.md`

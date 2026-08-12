@@ -3,7 +3,7 @@ date: 2026-07-06
 topic: ce-executor-serial-handoff-envelope
 status: draft
 related:
-  - docs/brainstorms/2026-07-06-ce-executor-serial-protocol-ssot-convergence-requirements.md
+  - docs/achieved/brainstorms/2026-07-06-ce-executor-serial-protocol-ssot-convergence-requirements.md
   - docs/brainstorms/2026-07-02-ce-executor-serial-runtime-phase-authority-requirements.md
   - docs/brainstorms/2026-06-17-hat-orchestrator-state-projection-requirements.md
   - docs/brainstorms/2026-06-18-isolated-hat-handoff-requirements.md

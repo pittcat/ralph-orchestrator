@@ -3,8 +3,8 @@ date: 2026-07-09
 topic: policy-check-agent-feedback
 related:
   - docs/achieved/brainstorms/2026-06-02-payload-contract-validation-requirements.md
-  - docs/brainstorms/2026-07-02-event-emit-precheck-prompt-gate-requirements.md
-  - docs/brainstorms/2026-07-06-ce-executor-serial-protocol-ssot-convergence-requirements.md
+  - docs/achieved/brainstorms/2026-07-02-event-emit-precheck-prompt-gate-requirements.md
+  - docs/achieved/brainstorms/2026-07-06-ce-executor-serial-protocol-ssot-convergence-requirements.md
   - docs/guide/payload-contracts.md
 ---
 

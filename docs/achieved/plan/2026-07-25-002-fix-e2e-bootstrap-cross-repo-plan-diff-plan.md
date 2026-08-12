@@ -5,7 +5,7 @@ artifact_contract: ce-unified-plan/v1
 artifact_readiness: implementation-ready
 product_contract_source: legacy-requirements
 execution: code
-origin: docs/brainstorms/2026-07-25-e2e-bootstrap-cross-repo-intent-requirements.md
+origin: docs/achieved/brainstorms/2026-07-25-e2e-bootstrap-cross-repo-intent-requirements.md
 ---
 
 # fix: e2e-bootstrap cross-repo plan×diff 误报
@@ -230,7 +230,7 @@ Directional: `_classify` 增加 `cross_repo: bool` 参数；或在 `run_audit` �
 
 ## Sources & Research
 
-- Origin: `docs/brainstorms/2026-07-25-e2e-bootstrap-cross-repo-intent-requirements.md`
+- Origin: `docs/achieved/brainstorms/2026-07-25-e2e-bootstrap-cross-repo-intent-requirements.md`
 - Parent skill plan: `docs/plans/2026-07-24-006-feat-ralph-e2e-bootstrap-skill-plan.md`
 - Code: `skills/ralph-e2e-bootstrap/scripts/plan_diff.py`、`references/interaction.md`、`skills/tests/test_plan_diff_edge_cases.py`、`skills/tests/test_e2e_bootstrap_contract.py`
 - Session decisions: 跨仓直接放行；toplevel 比较；仅抑制 drift/stale

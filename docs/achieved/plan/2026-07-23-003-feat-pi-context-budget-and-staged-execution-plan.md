@@ -7,7 +7,7 @@ artifact_readiness: implementation-ready
 product_contract_source: ce-brainstorm
 execution: code
 related:
-  - docs/brainstorms/2026-07-23-small-context-model-orchestration-requirements.md
+  - docs/achieved/brainstorms/2026-07-23-small-context-model-orchestration-requirements.md
 ---
 
 # Pi headless skill 上下文预算 - Plan
