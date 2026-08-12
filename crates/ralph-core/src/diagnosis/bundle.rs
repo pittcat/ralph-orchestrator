@@ -283,6 +283,16 @@ pub fn read_runtime_trace_report(session_dir: &Path) -> RuntimeTraceReport {
         path: Some("runtime-trace.jsonl".to_string()),
         ..RuntimeTraceReport::default()
     };
+    // Plan 2026-08-12-001 fix-plan U12: the line-by-line
+    // summary loop is shared between the runtime-trace and
+    // feedback readers (open → trim → parse → record_count +
+    // sequence projection). The per-row projection logic stays
+    // inline; the bookkeeping (`record_count`,
+    // `first_sequence`, `last_sequence`,
+    // `monotonic_sequences`) is centralized here so adding a
+    // new sidecar reader is a one-liner.
+    let mut first_sequence: Option<u64> = None;
+    let mut last_sequence: Option<u64> = None;
     for line in body.lines() {
         if line.trim().is_empty() {
             continue;
@@ -291,14 +301,16 @@ pub fn read_runtime_trace_report(session_dir: &Path) -> RuntimeTraceReport {
             Ok(v) => {
                 summary.record_count += 1;
                 if let Some(seq) = v.get("sequence").and_then(|x| x.as_u64()) {
-                    summary.first_sequence.get_or_insert(seq);
-                    summary.last_sequence = Some(seq);
+                    first_sequence.get_or_insert(seq);
+                    last_sequence = Some(seq);
                 }
             }
             Err(_) => summary.malformed_lines += 1,
         }
     }
-    summary.monotonic_sequences = match (summary.first_sequence, summary.last_sequence) {
+    summary.first_sequence = first_sequence;
+    summary.last_sequence = last_sequence;
+    summary.monotonic_sequences = match (first_sequence, last_sequence) {
         (Some(first), Some(last)) => last - first + 1 == summary.record_count,
         _ => summary.record_count == 0,
     };
