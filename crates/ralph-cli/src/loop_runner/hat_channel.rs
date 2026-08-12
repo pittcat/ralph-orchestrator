@@ -6,7 +6,7 @@
 //! backend exits, stamping every record with the authoritative hat id.
 
 use super::*;
-use anyhow::{Context, Result};
+use anyhow::{anyhow, Context, Result};
 use std::fs;
 use std::io::Write;
 use std::path::Path;
@@ -77,15 +77,25 @@ pub fn merge_hat_channel(
         .with_context(|| format!("Failed to read hat channel: {}", channel_path.display()))?;
 
     if content.trim().is_empty() {
-        // 2026-07-03-002 plan U4: hat-channel 0 字节文件不再静默跳过。
-        // emit 诊断到 .ralph/diagnostics/channel-routing-fallback-{ts}.md,
-        // 让 operator 能看到 isolated 模式 hat-channel 路由失效。不
-        // fail-closed(避免阻塞 loop),但升级日志级别为 error。
+        // An empty channel is not a successful merge. Keep the diagnostic
+        // artifact, then return an error so the runner cannot treat a
+        // terminal activation with no event as a completed handoff.
         emit_channel_routing_fallback_diagnostic(
             ctx,
             authoritative_hat,
             "hat_channel_empty_after_activation",
         );
+        fs::remove_file(&channel_path).with_context(|| {
+            format!(
+                "Failed to remove empty hat channel file: {}",
+                channel_path.display()
+            )
+        })?;
+        let _ = fs::remove_file(crate::loop_runner::paths::current_hat_events_marker(ctx));
+        return Err(anyhow!(
+            "isolated hat channel is empty after activation: {}",
+            channel_path.display()
+        ));
     } else {
         if let Some(parent) = target_file.parent() {
             fs::create_dir_all(parent).with_context(|| {
@@ -514,7 +524,9 @@ mod tests {
         fs::create_dir_all(target.parent().unwrap()).unwrap();
         fs::write(&target, "existing\n").unwrap();
 
-        merge_hat_channel(&ctx, &target, "executor", None).unwrap();
+        let error = merge_hat_channel(&ctx, &target, "executor", None)
+            .expect_err("an empty terminal channel must fail closed");
+        assert!(error.to_string().contains("isolated hat channel is empty"));
 
         // target 应未被修改(空 channel 不 merge 任何内容)
         assert_eq!(fs::read_to_string(&target).unwrap(), "existing\n");
@@ -568,9 +580,9 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let ctx = make_ctx(&tmp);
 
-        // 准备一个 hat-channel(无内容可 merge),并预置 subtree 孤儿
+        // 准备一个可 merge 的 hat-channel,并预置 subtree 孤儿
         let channel = prepare_hat_channel(&ctx, "validator", "primary-006", 1).unwrap();
-        assert!(channel.exists(), "empty channel pre-created");
+        fs::write(&channel, "{\"topic\":\"validator.done\"}\n").unwrap();
 
         let sorts_dir = tmp.path().join("sorts");
         std::fs::create_dir_all(sorts_dir.join(".ralph")).unwrap();
@@ -626,6 +638,7 @@ mod tests {
 
         let channel = prepare_hat_channel(&ctx, "validator", "primary-008", 1).unwrap();
         assert!(channel.exists());
+        fs::write(&channel, "{\"topic\":\"validator.done\"}\n").unwrap();
 
         let crate_ralph = tmp.path().join("crates/ralph-core/.ralph");
         std::fs::create_dir_all(&crate_ralph).unwrap();
@@ -659,7 +672,7 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let ctx = make_ctx(&tmp);
 
-        // Empty channel — merge 后不应有 orphan 诊断
+        // Empty channel must fail closed without producing an orphan diagnostic.
         let channel = prepare_hat_channel(&ctx, "executor", "primary-007", 1).unwrap();
         assert!(channel.exists());
 
@@ -667,7 +680,9 @@ mod tests {
         std::fs::create_dir_all(target.parent().unwrap()).unwrap();
         std::fs::write(&target, "existing\n").unwrap();
 
-        merge_hat_channel(&ctx, &target, "executor", None).unwrap();
+        let error = merge_hat_channel(&ctx, &target, "executor", None)
+            .expect_err("an empty channel must fail closed");
+        assert!(error.to_string().contains("isolated hat channel is empty"));
 
         // 确认 diagnostics 目录要么不存在,要么不含 orphan-emit-*.md
         let diagnostics_dir = ctx.ralph_dir().join("diagnostics");

@@ -18,6 +18,7 @@ Review skill 将 mechanical lint 与软性 AAF 缺口映射为 P0/P1/P2 + confid
 | Q3 命令不存在 / 读 ledger / 跳过 precheck | P0 | feasibility | Q3 |
 | Q4 topic 不在 publishes / 单事件预算违反 | P0 | feasibility | Q4 |
 | Q4 `--triggered` 指向未声明 hat | P0 | feasibility | Q4 |
+| `preset.triggered_self_or_static_target`: `--triggered` self-target，或普通 handoff 用固定目标覆盖拓扑路由 | P0（self-target）/ P1（未经证明的静态直达） | topology | Q4 |
 | Q5 handoff 字段未 emit 或未投影 | P0 | handoff | Q5 |
 | isolated 下假设其它 hat 行为 | P0 | visibility | Q2 |
 | Q3 缺 Confirm 或 OPAC skill 引用 | P1 | opac | Q3 |

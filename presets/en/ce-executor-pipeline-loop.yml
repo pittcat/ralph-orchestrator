@@ -2257,7 +2257,7 @@ hats:
       - `tests_run`, `tests_passed`, `changed_lines`, and `commit_count`
         are populated from actual command/git output;
       - `git status --short` has no entries outside `.ralph/`;
-      - `ralph emit --policy-check --triggered executor ...` passes before
+      - `ralph emit --policy-check ...` passes before
         the real `ralph emit`;
       - after the real emit, confirm it with `ralph events --events-source
         hat-channel`.
@@ -2870,7 +2870,7 @@ hats:
       1. **Stage A** — `git rev-parse HEAD` still equals
          `actual_start_head_sha` and the porcelain filter (excluding
          `.ralph/`) is empty.
-      2. `ralph emit --policy-check --triggered review-reentry ...`
+      2. `ralph emit --policy-check ...`
          must pass (see `ralph tools skill load ralph-tools-emit` §5).
       3. **Stage B** — re-check HEAD + clean; if either changed,
          rebuild payload and redo Stage A.
@@ -3193,7 +3193,7 @@ hats:
       1. **Stage A** — `git rev-parse HEAD` equals
          `actual_start_head_sha` and the porcelain filter
          (excluding `.ralph/`) is empty.
-      2. Run `ralph emit --policy-check --triggered dim:goal-alignment ...`.
+      2. Run `ralph emit --policy-check ...`.
       3. **Stage B** — re-check HEAD + clean; if either changed,
          rebuild payload and redo Stage A.
       4. Save end evidence to

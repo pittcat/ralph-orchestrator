@@ -502,22 +502,40 @@ fn u7_check_envelope_triggered_in_topology_allowed() {
     let cfg = cfg_with_hats(&["review-synthesizer"]);
     // U7 of 2026-07-05-005: business-topic path; declared
     // hat must be accepted.
-    check_envelope_triggered("work.done", Some("review-synthesizer"), &cfg)
+    check_envelope_triggered("work.done", None, Some("review-synthesizer"), &cfg)
         .expect("declared hat must be accepted");
+}
+
+#[test]
+fn u7_check_envelope_triggered_rejects_isolated_self_target() {
+    let mut cfg = cfg_with_hats(&["goal-alignment", "correctness"]);
+    cfg.event_loop.execution_mode = ralph_core::config::HatExecutionMode::Isolated;
+
+    let err = check_envelope_triggered(
+        "review.goalalign.done",
+        Some("goal-alignment"),
+        Some("goal-alignment"),
+        &cfg,
+    )
+    .expect_err("isolated business self-target must fail closed");
+
+    assert_eq!(err.reason_code, "triggered_self_target");
+    assert!(err.message.contains("publishing hat"));
 }
 
 #[test]
 fn u7_check_envelope_triggered_missing_allowed() {
     let cfg = cfg_with_hats(&["review-synthesizer"]);
     // R12: missing triggered is allowed.
-    check_envelope_triggered("work.done", None, &cfg).expect("missing triggered is allowed");
-    check_envelope_triggered("work.done", Some(""), &cfg).expect("empty triggered is allowed");
+    check_envelope_triggered("work.done", None, None, &cfg).expect("missing triggered is allowed");
+    check_envelope_triggered("work.done", None, Some(""), &cfg)
+        .expect("empty triggered is allowed");
 }
 
 #[test]
 fn u7_check_envelope_triggered_not_in_topology_rejected() {
     let cfg = cfg_with_hats(&["review-synthesizer"]);
-    let err = check_envelope_triggered("work.done", Some("planner"), &cfg).unwrap_err();
+    let err = check_envelope_triggered("work.done", None, Some("planner"), &cfg).unwrap_err();
     assert_eq!(err.reason_code, "triggered_not_in_topology");
     assert!(err.message.contains("planner"));
     assert!(err.message.contains("review-synthesizer"));
@@ -531,7 +549,7 @@ fn u7_check_envelope_triggered_ralph_control_topic_accepts_pseudo_hat() {
     let cfg = cfg_with_hats(&["review-synthesizer"]);
     // task.resume is a ralph-control topic; `ralph` is the
     // runtime pseudo-hat that injects recovery events.
-    check_envelope_triggered("task.resume", Some("ralph"), &cfg)
+    check_envelope_triggered("task.resume", None, Some("ralph"), &cfg)
         .expect("ralph-control topic + triggered=ralph must accept");
 }
 
@@ -541,7 +559,7 @@ fn u7_check_envelope_triggered_ralph_control_topic_accepts_pseudo_hat() {
 #[test]
 fn u7_check_envelope_triggered_diagnostic_topic_accepts_unknown() {
     let cfg = cfg_with_hats(&["review-synthesizer"]);
-    check_envelope_triggered("event.malformed", Some("ralph-runner"), &cfg)
+    check_envelope_triggered("event.malformed", None, Some("ralph-runner"), &cfg)
         .expect("diagnostic topic + unknown triggered must accept");
 }
 
@@ -552,7 +570,7 @@ fn u7_check_envelope_triggered_diagnostic_topic_accepts_unknown() {
 #[test]
 fn u7_check_envelope_triggered_business_topic_rejects_pseudo_hat() {
     let cfg = cfg_with_hats(&["review-synthesizer"]);
-    let err = check_envelope_triggered("work.done", Some("ralph"), &cfg).unwrap_err();
+    let err = check_envelope_triggered("work.done", None, Some("ralph"), &cfg).unwrap_err();
     assert_eq!(err.reason_code, "triggered_not_in_topology");
     assert!(err.message.contains("ralph"));
 }

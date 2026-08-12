@@ -66,6 +66,8 @@ ANCHORS: tuple[tuple[str, str], ...] = (
         "skills/ralph-preset-review/references/finding-rubric.md",
         "preset.payload_consistency_scope_positive_assertion",
     ),
+    ("skills/ralph-preset-author/references/finding-rubric.md", "preset.triggered_self_or_static_target"),
+    ("skills/ralph-preset-review/references/finding-rubric.md", "preset.triggered_self_or_static_target"),
 )
 
 # Capability-triggered fixtures from plan 2026-08-02-001 U3.

@@ -37,14 +37,14 @@ ralph emit --schema <topic> -H <path|builtin:name>
 # 写盘前策略预检（OPAC Precheck；**shape + 拓扑 ownership**，不验字段可见性 / 值源 / 语义）
 ralph emit --policy-check --output json <topic> '<payload>' -H <path|builtin:name>
 
-# envelope 层 triggered 拓扑预检（与 payload schema 分开）
-ralph emit --policy-check --output json --triggered <hat-id> <topic> '<payload>' -H <path|builtin:name>
+# envelope 层 triggered 拓扑预检（仅用于已确认的跨 hat 直达例外）
+ralph emit --policy-check --output json --triggered <different-hat-id> <topic> '<payload>' -H <path|builtin:name>
 
 # emit ↔ hat 通道桥接校验（runtime 视角）
 ralph tools task verify-emit-bridge ...
 ```
 
-`--triggered` 必须是 preset `hats[]` 里声明的 hat id，否则 `triggered_not_in_topology`（apply 与 `--policy-check` 均 enforce）。缺省 `--triggered` 允许。ralph-control / orchestrator diagnostic topic 跳过 topology check。详见 `crates/ralph-core/data/ralph-tools-emit.md`「Envelope 校验」段。
+`--triggered` 是事件的目标 hat，不是来源 hat。普通业务 handoff 必须省略它，让 isolated runtime / CLI 按 topic 的唯一消费者自动推导；不得写成 self-target，也不得用固定目标代替正常拓扑路由。只有确需跨 hat 直达、且 author notes 记录目标、原因和拓扑证据时才允许使用；目标必须是 preset `hats[]` 里的不同 hat。缺省 `--triggered` 允许。详见 `crates/ralph-core/data/ralph-tools-emit.md`「Envelope 校验」段。
 `verify-emit-bridge` 的完整参数见 `crates/ralph-core/data/ralph-tools-tasks.md` 的 OPAC Precheck 段；本 reference 只保留入口名，避免复制 runtime command table。
 
 **policy-check feedback 审核点**：JSON 输出中的 error item 可能包含 `field`、`reason_code`、`expected`、`actual`、`field_description`、`suggested_payload_shape`、`suggested_command`、`payload_index`、`gate`、`referenced_fields`。这些字段只说明 runtime 如何拒收和建议 agent 怎么修 shape；review 仍要检查 `field_description` 是否来自正确的 `field_docs`，`suggested_payload_shape` 是否没有伪造业务事实，batch 错误是否保留 `payload_index`。当 `reason_code` 是 `semantic_gate_violation` 时，`gate` 携带触发的 gate 标识（如 `payload_consistency:<rule_id>`），`referenced_fields` 列出该规则 `when` 谓词声明的所有 payload 字段路径——review 须确认 `field` 没有被用来承载 gate ID、agent 能只靠结构化字段完成定位。

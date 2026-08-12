@@ -3479,6 +3479,16 @@ pub(super) async fn run_loop_impl_inner(
                     hat = %display_hat.as_str(),
                     "Failed to merge isolated hat channel; events may be lost (see diagnostic file)"
                 );
+                // An empty channel is a known missing-terminal condition,
+                // not an unreadable-channel condition. Preserve the
+                // responsible-hat recovery path even though the merge now
+                // fails closed instead of returning success.
+                if channel_snapshot
+                    .as_ref()
+                    .is_some_and(|(_, bytes)| *bytes == Some(0))
+                {
+                    empty_terminal_channel = true;
+                }
             } else if let Some((channel_path, Some(channel_bytes))) = channel_snapshot.as_ref()
                 && *channel_bytes == 0
             {

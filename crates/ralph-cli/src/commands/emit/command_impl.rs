@@ -1764,7 +1764,12 @@ pub(super) fn emit_command_with_root_and_hats(
     // apply path bails before writing the record.
     if let Some(cfg) = config.as_ref()
         && let Err(err) =
-            crate::policy_check::check_envelope_triggered(topic, triggered.as_deref(), cfg)
+            crate::policy_check::check_envelope_triggered(
+                topic,
+                hat.as_deref(),
+                triggered.as_deref(),
+                cfg,
+            )
     {
         use ralph_core::{PolicyFinding, ViolationType};
         let finding = PolicyFinding {

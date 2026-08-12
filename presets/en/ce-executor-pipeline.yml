@@ -2757,7 +2757,7 @@ hats:
       - `tests_run`, `tests_passed`, `changed_lines`, and `commit_count`
         are populated from actual command/git output;
       - `git status --short` has no entries outside `.ralph/`;
-      - `ralph emit --policy-check --triggered executor ...` passes before
+      - `ralph emit --policy-check ...` passes before
         the real `ralph emit`;
       - after the real emit, confirm it with `ralph events --events-source
         hat-channel`.
@@ -3625,7 +3625,7 @@ hats:
          If this fails, return to Step 1, regenerate the patch, and
          re-run Stage A; do NOT emit `review.goalalign.done` with a
          ghost `diff_patch_file` path.
-      2. Run `ralph emit --policy-check --triggered dim:goal-alignment
+      2. Run `ralph emit --policy-check
          ...` and ensure it passes (see `ralph tools skill load ralph-tools-emit` §5).
       3. **Stage B — pre-real-emit.** Re-run the HEAD + clean check
          from step 1; both MUST still hold. If the worktree changed
@@ -3780,7 +3780,7 @@ hats:
       1. **Stage A** — `git rev-parse HEAD` equals
          `actual_start_head_sha` and the porcelain filter
          (excluding `.ralph/`) is empty.
-      2. Run `ralph emit --policy-check --triggered dim:correctness ...`.
+      2. Run `ralph emit --policy-check ...`.
       3. **Stage B** — re-check HEAD + clean; if either changed,
          rebuild payload and redo stage A.
       4. Save end evidence to

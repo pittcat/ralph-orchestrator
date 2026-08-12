@@ -72,12 +72,12 @@ ralph emit --schema work.done | jq -r .protocol_hash   # 改后
 |------|------|
 | `RALPH_EVENTS_FILE` | 非空时，直接作为事件文件路径（最高优先级） |
 | `RALPH_CURRENT_HAT` | 回退到 `--hat` |
-| `RALPH_TRIGGERED_HAT` | 回退到 `--triggered`。在 `execution_mode: isolated` 下，loop runner 不再注入该变量；`ralph emit` 会根据当前 topic 在 preset 中的唯一下游消费者自动推导 `triggered`；推导不出时保持为空。你不需要关心当前是什么模式，按需显式传 `--triggered` 即可，显式值始终优先。 |
+| `RALPH_TRIGGERED_HAT` | 回退到 `--triggered`。在 `execution_mode: isolated` 下，loop runner 不再注入该变量；`ralph emit` 会根据当前 topic 在 preset 中的唯一下游消费者自动推导 `triggered`；推导不出时保持为空。普通业务 handoff 不得显式传 `--triggered`，因为显式值会覆盖自动路由；只有已确认的跨 hat 直达例外才可使用。 |
 | `RALPH_EVENT_SOURCE` | 回退到 `--source` |
 
 > **`triggered` 自动推导规则**：`ralph emit` 会读取当前 workspace 配置。如果当前是 isolated 模式、你已处于某个 hat 上下文中（`RALPH_CURRENT_HAT` 已设置）、且没有显式传 `--triggered` / `RALPH_TRIGGERED_HAT`，`ralph emit` 会尝试把 `triggered` 填为当前 topic 的唯一下游 hat。只有当拓扑能唯一确定真实 hat 时才填充；多消费者、无明确下游、下游由内部 runtime 汇聚、控制/诊断 topic 都会保持 `triggered` 为空。看到为空时直接执行原 emit 命令，不要猜测或显式填写内部 runtime 名称；若 policy-check 仍拒收，按反馈修正 payload 或 hat，无法确认真实目标时停止并报告。Coordinator 模式或没有配置时保持原有注入行为不变。
 >
-> **对 agent 来说**：不需要检测当前模式。只要记住两条规则：1) 若 prompt 明确要求你触发某个 hat， emit 时带上 `--triggered <hat>`；2) 没要求时直接 emit，runner / CLI 会自动处理。
+> **对 agent 来说**：不需要检测当前模式。普通业务 handoff 直接 emit，不要猜测或补写 `--triggered`；runner / CLI 会按 topic 的唯一下游消费者自动处理。只有 prompt 明确说明这是一个已确认的跨 hat 直达例外时，才可传入一个不同于当前 hat 的目标 hat；如果目标不明确就停止并报告。
 
 ### Policy-Check 反馈
 
@@ -161,6 +161,8 @@ ralph emit --schema work.done | jq -r .protocol_hash   # 改后
 ### Envelope 校验（`triggered` 拓扑）
 
 `ralph emit --triggered <hat_id>` 在 apply 路径与 `--policy-check` 路径都会被 envelope 层校验：`triggered` 字段的值必须是当前 preset 声明的 hat 之一（即出现在 `hats[]` map 里），否则返回 `triggered_not_in_topology`。
+
+**Agent-facing hard rule**：`triggered` 是事件的目标 hat，不是来源 hat。普通业务 handoff 必须省略显式 `--triggered`，让 isolated runtime / CLI 根据 topic 的唯一下游消费者自动推导；显式 self-target 会把事件送回当前 producer，属于编排 P0。只有 prompt 明确声明、且 author notes 已记录原因与拓扑证据的跨 hat 直达例外才允许显式指定一个不同 hat。
 
 该校验按 **topic 信任层**分流（与 ralph-control / orchestrator-diagnostic / business 三层信任模型对齐）：
 
@@ -410,7 +412,8 @@ runtime **不**在 budget 拦截那一刻决定是否发 `task.resume`；它只�
 | `wave_worker_main_fallthrough` | wave worker 在仍绑定 `RALPH_WAVE_ID`/`INDEX` 时把落点解析到了 main / `current-events` | 恢复 `RALPH_EVENTS_FILE` 为 dispatcher 注入的 `.ralph/wave-<id>-<idx>.jsonl`；不要 `unset` 或改写到 main |
 | `topic is required` | 缺少位置参数 | 补上 topic |
 | `policy check failed` | payload 不符合策略 | 读 stderr / 用 `--output json` 取 `validation_errors[].field` 一次拿全部缺失字段；修正后用 `ralph emit <topic> --policy-check -j '...'` 预检通过再发。**不要**首选 `--unsafe-no-policy-check`（当配置未显式允许时该参数会被拒） |
-| `triggered_not_in_topology` | `--triggered <hat>` 不在当前 preset `hats[]` 里 | 用 `ralph hats list` 或 preset YAML 查合法 hat id；改 `--triggered` 为拓扑内 hat，或省略 `--triggered`（缺省允许）。ralph-control / orchestrator diagnostic topic 跳过此检查 |
+| `triggered_not_in_topology` | `--triggered <hat>` 不在当前 preset `hats[]` 里 | 普通业务 handoff 省略 `--triggered`；只有已确认的跨 hat 直达例外才查拓扑并使用不同的合法 hat。ralph-control / orchestrator diagnostic topic 跳过此检查 |
+| `triggered_self_target` | isolated 业务事件把 `--triggered` 指向当前发布 hat | 删除显式 `--triggered` 让 runtime 按 topic 自动推导；只有确认的跨 hat 直达才指定不同目标 |
 | `agent policy-check required` | agent context + 业务 topic + 无 `--policy-check` | 先 `ralph emit <TOPIC> --policy-check -j '...'` 通过，再去掉 `--policy-check` 正式 emit。preset `allow_unsafe_cli_emit: true` 可 opt-out（deprecated warning） |
 | `missing_policy_check_token` | agent context + 无 event-policy 管线，apply 未带 `--policy-check-token` | 见上方「Evaluation Token」段：先 `--policy-check` 领取 `policy_check_token`，再用它重跑 apply |
 | `policy_check_token_mismatch` | 令牌与当前 `(hat, topic, payload, 合约版本)` 不一致 | 用最终 payload 重跑 `--policy-check` 取最新令牌；不要复用/缓存旧令牌 |

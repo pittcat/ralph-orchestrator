@@ -400,7 +400,7 @@ pub fn run_policy_check_unified_with_config(
     // topology". Mirrors the apply-path gate so `--policy-check`
     // and the real write share the same rejection surface.
     if let Some(cfg) = config
-        && let Err(err) = check_envelope_triggered(topic, triggered, cfg)
+        && let Err(err) = check_envelope_triggered(topic, hat, triggered, cfg)
     {
         let mut rej = final_report;
         rej.accepted = false;
@@ -715,6 +715,7 @@ pub fn check_emit_provenance(
 #[allow(clippy::result_large_err)]
 pub fn check_envelope_triggered(
     topic: &str,
+    source_hat: Option<&str>,
     triggered: Option<&str>,
     config: &RalphConfig,
 ) -> std::result::Result<(), ValidationError> {
@@ -746,6 +747,20 @@ pub fn check_envelope_triggered(
     use ralph_core::is_orchestrator_diagnostic_topic;
     if is_ralph_control_topic(topic) || is_orchestrator_diagnostic_topic(topic) {
         return Ok(());
+    }
+    if config.event_loop.execution_mode == HatExecutionMode::Isolated
+        && source_hat == Some(value)
+    {
+        return Err(ValidationError {
+            payload_index: 0,
+            field: "triggered".to_string(),
+            reason_code: "triggered_self_target".to_string(),
+            message: format!(
+                "triggered='{value}' points back to the publishing hat; omit --triggered for ordinary isolated handoffs or choose a different declared downstream hat"
+            ),
+            actual: Some(value.to_string()),
+            ..Default::default()
+        });
     }
     if config.hats.contains_key(value) {
         return Ok(());

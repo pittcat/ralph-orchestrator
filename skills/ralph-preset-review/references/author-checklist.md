@@ -80,7 +80,7 @@
 - [ ] **Artifact 消费与生命周期**：每条消费型 hat 必须显式声明从哪个可见路径读取 artifact，不得依赖 prompt 中的长文本；每份重要 artifact 还要指定消费方以及最终保留、归档或清理责任。
 - [ ] 每个 agent-authored emit topic 的 `event_policy.schemas.<topic>` 已检查：required handoff / identity / verdict / count / path / reason 字段有 `field_docs`，高风险 topic 有不会伪造业务事实的 `examples`
 - [ ] 若 hat `publishes` 含 `review.dimensions.complete`，`state_projection.actions_chain` 须有对应投影 action（否则下游 Q2 看不到 review 汇总）
-- [ ] emitter 若 instructions 要求 `--triggered <hat>`，该 `<hat>` 必须在 preset `hats[]` 里声明（否则 runtime 拒收 `triggered_not_in_topology`）
+- [ ] **Triggered 路由硬规则**：`--triggered` 是事件目标 hat，不是来源 hat；普通业务 handoff 一律省略，让 isolated runtime / CLI 自动推导。显式使用必须证明是不同 hat 的必要直达例外，并在 author notes 记录目标、原因和拓扑证据；self-target 直接判为 P0。
 - [ ] loop preset 中 `fix.done.next_review_plan` 必须是非空 object 合同；schema、example、fixer instructions 都不能允许 `null`
 - [ ] `dim:*` / `dimension-reviewer` 只读 reviewer 若禁用 Edit/Write，不得声明 `docs/plans/` 写路径；review 产物写到 `.ralph/review/**`
 - [ ] 可参考 `references/patterns.md`（仅拓扑阶段）

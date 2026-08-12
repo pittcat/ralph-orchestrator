@@ -20,7 +20,7 @@ metadata:
 | `RALPH_CURRENT_HAT` | 当前激活的 hat id，例如 `worker`、`reviewer` | 非 loop 场景下直接调用 `ralph emit` 时 |
 | `RALPH_CURRENT_LOOP_ID` | 当前 loop id | 同上 |
 | `RALPH_EVENTS_FILE` | 当前 loop 的事件文件路径 | 同上 |
-| `RALPH_TRIGGERED_HAT` | `ralph emit` 时默认的 `triggered` 回退值 | isolated 模式下 runner 不再注入；多消费者/无明确下游 topic 时也可能为空 |
+| `RALPH_TRIGGERED_HAT` | `ralph emit` 时默认的目标 hat 回退值 | isolated 模式下 runner 不再注入；普通 handoff 不要显式补 `--triggered`，多消费者/无明确下游 topic 时也可能为空 |
 | `RALPH_HATS_SOURCE` | hats 来源标签，例如 `builtin:<preset-name>` | 无预设时 |
 
 这些变量由 runner 在每次 hat activation 前注入，agent 可直接读取，但**不要**假设某个变量一定非空。
@@ -39,7 +39,7 @@ metadata:
 | 要落盘 builtin artifact 填写模板（binary-only；部署机无源码 templates 目录时） | `ralph preset materialize-artifacts <preset> --plan-key <key>` | `ralph tools skill load ralph-tools-cmdref`「materialize-artifacts」 |
 | 要校验 hat 拓扑 | `ralph hats validate [--strict]` | `ralph hats --help`（strict 时启用 lint 所有权检查） |
 | Loop 崩溃/ledger 损坏需恢复 | `ralph loops clean --ledger` + `ralph diagnose --session latest` | `docs/guide/runtime-diagnosis.md`（JSON 含 `dup_storm_topics` + findings `hint`） |
-| `ralph emit` 报 `triggered_not_in_topology` | `--triggered` 不在 preset `hats[]`；改 hat id 或省略 | `ralph tools skill load ralph-tools-emit` |
+| `ralph emit` 报 `triggered_not_in_topology` | 普通业务 handoff 省略 `--triggered`；只有已确认的跨 hat 直达例外才改为不同的合法 hat。禁止把当前 hat 自己填成目标 | `ralph tools skill load ralph-tools-emit` |
 | prompt 顶部出现 `## TRIGGER CONTEXT` 区块 | 先读完它，再按 hat instructions 执行；不要从完整 payload / ledger 重新推断 | 本 skill「核心规则」第 8 条 |
 | 本轮要写操作者可读文件，且即将 emit 的 topic schema 要求路径字段 | 先落盘并 `test -f` → `--schema` 确认字段名 → policy-check → emit → 回复打印 `DELIVERABLE_PATH:`；细则按需 load emit skill | `ralph tools skill load ralph-tools-emit`「操作者交付文件路径」（非每轮自动注入） |
 
