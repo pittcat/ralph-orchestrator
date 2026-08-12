@@ -2171,6 +2171,17 @@ hats:
         `git add -- "$plan_path" && git commit -m "docs(plan): revise <plan_name> for execution"`.
 
       ### Step 4 — Emit `plan.ready` (handoff to executor)
+      Before emitting `plan.ready`, run this final artifact handoff check:
+      ```bash
+      test -s ".ralph/review/<plan_name>/normalized-plan.md" \
+        && test -s ".ralph/review/<plan_name>/trace.md" \
+        && test -s ".ralph/review/<plan_name>/reuse-guidance.md"
+      ```
+      If any check fails, do not emit `plan.ready`; write the readable
+      `report-input.plan-blocked.json` artifact and emit `plan.blocked` with
+      `reason: "plan_unusable: plan_review_artifact_missing"`. A payload path is not valid
+      evidence until the referenced file exists and is non-empty.
+
       When the plan passes all quality gates AND Step 2.5 has decided
       the `flow_audit` verdict, emit EXACTLY ONE `plan.ready` event:
       ```
@@ -5415,7 +5426,7 @@ hats:
   reporter:
     name: "Reporter"
     description: "Aggregates plan change / execution / 6-dim review / fixes / alignment residuals into a final report. Sole consumer of plan.blocked / work.failed / stabilization.blocked / review.artifact.blocked. Emits report.done then LOOP_COMPLETE."
-    triggers: ["align.done", "plan.blocked", "work.failed", "stabilization.blocked", "review.artifact.blocked"]
+    triggers: ["align.done", "plan.blocked", "work.failed", "stabilization.blocked", "review.artifact.blocked", "report.done"]
     publishes: ["report.done", "LOOP_COMPLETE"]
     exempt_topics: ["report.done", "LOOP_COMPLETE"]
     terminal_events: ["report.done", "LOOP_COMPLETE"]
@@ -5427,23 +5438,24 @@ hats:
         - work.failed
         - stabilization.blocked
         - review.artifact.blocked
+        - report.done
     timeout: 1800
     missing_event_grace_secs: 540
     instructions: |
       ## REPORTER MODE — Final report + LOOP_COMPLETE
 
-      You are the terminal aggregator. You emit `report.done`
-      followed by `LOOP_COMPLETE`. You are the SOLE consumer of
+      You are the terminal aggregator. On the first activation you emit
+      `report.done`; on the next activation triggered by accepted
+      `report.done`, you emit `LOOP_COMPLETE`. You are the SOLE consumer of
       `plan.blocked`, `work.failed`, and `stabilization.blocked`, which
       short-circuit to a blocked report without the full chain having run.
 
       ### HARD RULES
-      - Emit EXACTLY ONE `report.done` followed by EXACTLY ONE
-        `LOOP_COMPLETE` (or `LOOP_COMPLETE` only on the next
-        activation after `report.done` is acknowledged).
-      - If this is a second activation whose only remaining work is
-        `LOOP_COMPLETE`, do NOT rewrite `.ralph/review/{plan_name}/report.md`;
-        emit only `LOOP_COMPLETE` and stop.
+      - On an `align.done` or blocked-path activation, emit EXACTLY ONE
+        `report.done` only. Do NOT emit `LOOP_COMPLETE` in that activation.
+      - On the activation triggered by the accepted `report.done`, do NOT
+        rewrite `.ralph/review/{plan_name}/report.md`; emit exactly one
+        `LOOP_COMPLETE` only and stop.
       - Do NOT emit `work.done` / `work.failed` / `plan.*` /
         `review.*` / `fix.*` / `align.done`.
       - Do NOT modify code (read-only audit role).
@@ -5482,7 +5494,8 @@ hats:
         pending human review.
 
       Then emit `report.done{verdict: blocked, plan_name: "<from payload if present, else precheck-exhausted>", ...}`
-      followed by `LOOP_COMPLETE`. Skip the artifact-first contract
+      only. The accepted `report.done` will trigger the next activation for
+      `LOOP_COMPLETE`. Skip the artifact-first contract
       below — there is no bundle to read.
 
       ### Artifact-first input contract
@@ -5503,7 +5516,8 @@ hats:
       If the bundle is missing, unreadable, has an unknown schema version,
       has mismatched plan identity, or references an unreadable/out-of-scope
       artifact, generate a blocked report describing that validation failure.
-      Then emit `report.done` with verdict `blocked`, followed by the configured
+      Then emit `report.done` with verdict `blocked` only. The accepted
+      `report.done` will trigger the next activation for the configured
       completion promise. Do not emit `plan.blocked` or any other hat's topic.
 
       ### Report contract (manager body + short technical appendix)
@@ -5577,7 +5591,8 @@ hats:
          into `LOOP_COMPLETE`; do not invent a new path.
          Also Confirm emit with `--output json` (`ok`/`recorded`); schema
          does not check the filesystem — use `test -f` before emit.
-      Then emit `LOOP_COMPLETE` on the same or next activation per HARD RULES.
+         Do not emit `LOOP_COMPLETE` in this activation; the accepted
+         `report.done` triggers the next reporter activation.
 
       ### Branch A — Happy path (trigger = `align.done`)
 
@@ -5618,8 +5633,8 @@ hats:
          ralph emit report.done --policy-check --json '{"plan_name":"<plan>","report_path":".ralph/review/<plan>/report.md","verdict":"<pass|pass_with_residuals|blocked>"}'
          ralph emit report.done --json '{"plan_name":"<plan>","report_path":".ralph/review/<plan>/report.md","verdict":"<pass|pass_with_residuals|blocked>"}'
          ```
-      8. Emit `LOOP_COMPLETE` with policy-check first (next activation is OK, or
-         same activation if the runtime allows; usually separate):
+      8. Stop after `report.done`. The next activation is triggered by the
+         accepted `report.done`; there emit `LOOP_COMPLETE` with policy-check first:
          ```bash
          ralph emit LOOP_COMPLETE --policy-check --json '{"reason":"<Chinese or English 1-2 sentence summary matching the report verdict>","report_path":".ralph/review/<plan>/report.md"}'
          ralph emit LOOP_COMPLETE --json '{"reason":"<Chinese or English 1-2 sentence summary matching the report verdict>","report_path":".ralph/review/<plan>/report.md"}'
@@ -5645,7 +5660,8 @@ hats:
          ralph emit report.done --policy-check --json '{"plan_name":"<plan>","report_path":".ralph/review/<plan>/report.md","verdict":"blocked"}'
          ralph emit report.done --json '{"plan_name":"<plan>","report_path":".ralph/review/<plan>/report.md","verdict":"blocked"}'
          ```
-      5. Emit `LOOP_COMPLETE` with policy-check first:
+      5. Stop after `report.done`. On the next activation triggered by the
+         accepted `report.done`, emit `LOOP_COMPLETE` with policy-check first:
          ```bash
          ralph emit LOOP_COMPLETE --policy-check --json '{"reason":"blocked: <upstream reason>","report_path":".ralph/review/<plan>/report.md"}'
          ralph emit LOOP_COMPLETE --json '{"reason":"blocked: <upstream reason>","report_path":".ralph/review/<plan>/report.md"}'
