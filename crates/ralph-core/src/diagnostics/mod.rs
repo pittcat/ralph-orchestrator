@@ -30,6 +30,7 @@ mod log_rotation;
 mod orchestration;
 mod performance;
 mod recovery;
+mod runtime_trace;
 mod session;
 mod stream_handler;
 mod trace_layer;
@@ -51,6 +52,9 @@ pub use orchestration::{
 };
 pub use performance::{PerformanceLogger, PerformanceMetric};
 pub use recovery::{MAX_RECOVERY_NOTE_CHARS, RecoveryLogger};
+pub use runtime_trace::{
+    RuntimeTraceEntry, RuntimeTraceLogger, RuntimeTracePhase, RUNTIME_TRACE_SCHEMA_VERSION,
+};
 pub use stream_handler::DiagnosticStreamHandler;
 pub use trace_layer::{DiagnosticTraceLayer, TraceEntry};
 // `DiagnosisSummary` is declared at module root below, so callers can
@@ -188,6 +192,10 @@ pub struct DiagnosticsCollector {
     /// reporter can read the manifest written by
     /// [`crate::diagnostics::input_bundle::write_manifest`].
     input_bundle: Option<Arc<Mutex<input_bundle::DiagnosisInputBundle>>>,
+    /// Plan 2026-08-12-001 Unit 2: sidecar `runtime-trace.jsonl`
+    /// writer. Independent of `trace.jsonl` (the global
+    /// tracing-layer file) so the two never race.
+    runtime_trace_logger: Option<Arc<Mutex<runtime_trace::RuntimeTraceLogger>>>,
 }
 
 impl std::fmt::Debug for DiagnosticsCollector {
@@ -211,6 +219,7 @@ impl std::fmt::Debug for DiagnosticsCollector {
             .field("has_recovery_logger", &self.recovery_logger.is_some())
             .field("has_drift_logger", &self.drift_logger.is_some())
             .field("has_input_bundle", &self.input_bundle.is_some())
+            .field("has_runtime_trace_logger", &self.runtime_trace_logger.is_some())
             .finish()
     }
 }
@@ -366,6 +375,28 @@ impl DiagnosticsCollector {
             None
         };
 
+        // Plan 2026-08-12-001 Unit 2: structured runtime trace
+        // sidecar. Same activation rules as the input bundle
+        // (full or minimal session). Independent of
+        // `trace.jsonl` so the global tracing layer and the
+        // sidecar never race on the same file handle.
+        let runtime_trace_logger = if effective_full || effective_runtime {
+            match runtime_trace::RuntimeTraceLogger::new(&session_dir) {
+                Ok(logger) => Some(Arc::new(Mutex::new(logger))),
+                Err(err) => {
+                    tracing::warn!(
+                        target: "ralph_core::diagnostics",
+                        session_dir = %session_dir.display(),
+                        error = %err,
+                        "failed to create runtime-trace logger; sidecar disabled for this session",
+                    );
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
         Ok(Self {
             enabled: true,
             full_diagnostics: effective_full,
@@ -379,6 +410,7 @@ impl DiagnosticsCollector {
             recovery_logger,
             drift_logger,
             input_bundle,
+            runtime_trace_logger,
         })
     }
 
@@ -397,6 +429,7 @@ impl DiagnosticsCollector {
             recovery_logger: None,
             drift_logger: None,
             input_bundle: None,
+            runtime_trace_logger: None,
         }
     }
 
@@ -878,6 +911,26 @@ impl DiagnosticsCollector {
         self.input_bundle
             .as_ref()
             .and_then(|b| b.lock().ok().map(|g| g.manifest_status))
+    }
+
+    /// Plan 2026-08-12-001 Unit 2: append a runtime trace entry.
+    /// Best-effort: failures flip the underlying logger into
+    /// `degraded` and emit a warning; the orchestration main
+    /// path is never affected.
+    pub fn log_runtime_trace(&self, entry: RuntimeTraceEntry) {
+        let Some(logger) = self.runtime_trace_logger.as_ref() else {
+            return;
+        };
+        match logger.lock() {
+            Ok(mut guard) => guard.append(entry),
+            Err(err) => {
+                tracing::warn!(
+                    target: "ralph_core::diagnostics",
+                    error = %err,
+                    "runtime trace logger mutex poisoned; entry dropped"
+                );
+            }
+        }
     }
 
     /// Persist the current active hat activations to
