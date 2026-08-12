@@ -50,6 +50,23 @@ argument-hint: "[run_dir] [preset_file_or_builtin] [optional: plan_file] [--incl
 
 提交前 checklist 多一条：**历史检索开关状态已写入 frontmatter**。
 
+## 0.2 Bundle-first 输入（plan 2026-08-12-001）
+
+当 `$RUN/.ralph/diagnostics/<session>/diagnosis-input.json` 存在时，**必须**先于任何 raw artifact 读取该 bundle，并按下面顺序消费：
+
+1. **`diagnosis-input.json`** — 锁定 `manifest_status`（`pending` / `present` / `finalized` / `degraded` / `missing` / `legacy` / `not_applicable`）、`run.preset_label`、`run.loop_id`、`code_baseline.head_sha`、`execution_capabilities`、per-artifact 完整性。
+2. **`runtime-trace.jsonl`** — 校对 `record_count` 与 `first/last_sequence`；坏行仅降低证据完备度，不阻断报告。
+3. **`feedback.jsonl`** — 按 `feedback_id == diagnosis_id` 聚合阶段（`discovered` / `evidence` / `action` / `validation` / `final`）；缺失仅作为 evidence gap。
+4. **legacy 兜底**：bundle `status == legacy` 或 `missing` 时，回退到 §0.1 之后既有的 current-events / Tier inventory 路径，**不**当作 P0 / 阻断；报告 frontmatter 标 `bundle: legacy`。
+5. **degraded 兜底**：`status == degraded` 时同样回退到 legacy 路径并写 evidence gap；repair suggestions 给出 filesystem 排查指引（见 §6）。
+
+修复建议（§6）一律 **non-executing**：报告只列**人工**可执行的 short / mid / long tier 建议；agent 不得自动 `ralph run`、不得自动改 preset、不得执行 `rm` / `cargo` / `git` 类命令。bundle 状态机、ArtifactStatus 映射和 tier 标签见 [report-template.md](references/report-template.md) §0.2。
+
+> **Recovery 通道术语（plan 2026-08-12-001 Unit 6 同步）**：
+> - `task.resume` 是当前 runtime recovery transport，由 `crates/ralph-core/src/event_loop/resume_routing.rs` 路由；不允许被描述为"已被完全删除"或"已经废弃"。
+> - `human.guidance` 已不再是当前 orchestrator control topic；本 skill 出现该串时**必须**邻近 `historical` / `compat` / `legacy` 标记，不得当作当前 control 入口推荐。
+> - 不写"runtime 发布 human.guidance"或"task.resume 已完全取代"等互相矛盾的话术。
+
 ### SSOT 常量
 
 为避免字面散落多处漂移，约定以下占位符/标签为单一事实源：
@@ -125,6 +142,22 @@ Phase 4  主 Agent 汇总落盘
 - **Tier B/C**：按盘点表 + preset/schema 解析
 
 Diagnostics 四档：`FULL` | `MINIMAL` | `LOGS_ONLY` | `DISABLED` — 决定 L2/L OPAC 深度。
+
+### Phase 0 bundle-first invocation（plan 2026-08-001 fix-plan U3）
+
+bundle-first 读取（§0.2）的**第一步**是用 `ralph diagnose` 直接对当前 session 输出 JSON：
+
+```bash
+ralph diagnose --legacy --session latest --diagnostics-root "$RUN/.ralph/diagnostics" --format json --output "$REPORT_BASE.json"
+```
+
+- `--legacy`：在 bundle `status ∈ {legacy, missing}` 时仍返回可消费的 JSON（不要求 bundle 是 present）。
+- `--session latest`：从 `$RUN/.ralph/diagnostics/` 里选最新 session。
+- `--diagnostics-root`：显式传入 diagnostics 根，避免从 cwd 推断。
+- `--format json`：输出到 stdout 之外；与 `--output` 配对落盘到 `$REPORT_BASE.json` 供后续步骤直接读。
+- `REPORT_BASE` 在 §0.2 列表中已分配唯一路径，不与 events.jsonl 冲突。
+
+若命令退出码非零（典型：diagnostics 目录不存在、session latest 解析失败），把 stderr 写进报告 §0 的「环境异常」段，按 §0.2 legacy 兜底继续后续步骤。**禁止** 把 `ralph diagnose` 退出码当 bundle 状态判定（bundle 状态以 `$REPORT_BASE.json` 的 `bundle.status` 字段为准）。
 
 ### Phase 0 能力推断（execution capabilities）
 

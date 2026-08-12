@@ -217,9 +217,10 @@ hats:
 
 For runtime-diagnosis recovery (3-strike escalation, completion-correction injection,
 drift journals), see `docs/guide/runtime-diagnosis.md` and the surviving
-`task.resume` channel. (`human.guidance` was removed by plan
-2026-06-28-005; the recovery channel is now `task.resume` plus
-`TerminationReason::RecoveryExhausted`.)
+`task.resume` channel. (`human.guidance` is no longer a current orchestrator
+control topic; it survives as a historical / compat string used by old
+fixtures and the replay parser, not as a recommended entry point. The
+recovery channel is `task.resume` plus `TerminationReason::RecoveryExhausted`.)
 
 #### Multi-Hat Isolation Policy Violation
 

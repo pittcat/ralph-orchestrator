@@ -1,6 +1,7 @@
 //! EventLoop implementation region 8.
 
 use super::*;
+use crate::diagnostics::{RuntimeTraceEntry, RuntimeTracePhase};
 
 impl EventLoop {
     /// Determines which hats should be active based on pending events.
@@ -899,6 +900,15 @@ impl EventLoop {
                 reason: "process_output".to_string(),
             },
         );
+
+        // U1 (plan 2026-08-12-001): wire runtime-trace Activation row
+        let trace_entry = RuntimeTraceEntry::new(
+            self.state.iteration as u64,
+            0,
+            RuntimeTracePhase::Activation,
+        )
+        .with_hat(hat_id.to_string());
+        self.diagnostics.log_runtime_trace(trace_entry);
 
         // Track failures
         if success {

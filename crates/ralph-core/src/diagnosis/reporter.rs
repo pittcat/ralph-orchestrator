@@ -40,6 +40,10 @@ use std::path::{Path, PathBuf};
 use serde_json::{Value, json};
 use thiserror::Error;
 
+use super::bundle::{
+    DiagnosisInputReport, EvidenceGap, FeedbackLifecycleReport, RepairSuggestion,
+    RuntimeTraceReport,
+};
 use super::envelope::{DiagnosisOutcome, DiagnosisSeverity, RecoveryDiagnosisEnvelope};
 use super::journal::{DriftJournalEntry, RecoveryJournalEntry};
 use crate::diagnostics::DiagnosisSummary;
@@ -118,6 +122,16 @@ pub struct SessionData {
     /// Active hat activation snapshots written at loop termination.
     /// U4: populated from `active-activations.json` in the session dir.
     pub active_activations: Vec<ActivationSnapshot>,
+    /// Plan 2026-08-12-001 Unit 4: bundle-first input manifest
+    /// status. Always present in the report (legacy sessions
+    /// surface `status=legacy` and empty arrays).
+    pub diagnosis_input: DiagnosisInputReport,
+    /// Plan 2026-08-12-001 Unit 4: structured runtime trace
+    /// summary. Legacy / missing sidecars surface
+    /// `status=missing` or `legacy`.
+    pub runtime_trace: RuntimeTraceReport,
+    /// Plan 2026-08-12-001 Unit 4: feedback lifecycle summary.
+    pub feedback_lifecycle: FeedbackLifecycleReport,
 }
 
 /// Public rank for a single finding. The reporter pre-aggregates by
@@ -219,6 +233,21 @@ pub struct Report {
     /// U5 of plan 2026-07-05-005 (R8): topics whose `work.ready`
     /// dedup `seen_count` reached the storm threshold (>= 3).
     pub dup_storm_topics: Vec<String>,
+    /// Plan 2026-08-12-001 Unit 4: bundle status object. Always
+    /// present; legacy sessions report `status=legacy`.
+    pub diagnosis_input: DiagnosisInputReport,
+    /// Plan 2026-08-12-001 Unit 4: structured runtime trace
+    /// summary.
+    pub runtime_trace: RuntimeTraceReport,
+    /// Plan 2026-08-12-001 Unit 4: feedback lifecycle summary.
+    pub feedback_lifecycle: FeedbackLifecycleReport,
+    /// Plan 2026-08-12-001 Unit 4 / Unit 5: layered repair
+    /// suggestions. Always non-executing; the reporter never
+    /// runs anything.
+    pub repair_suggestions: Vec<RepairSuggestion>,
+    /// Plan 2026-08-12-001 Unit 4 / Unit 5: evidence gaps
+    /// surfaced by the bundle readers.
+    pub evidence_gaps: Vec<EvidenceGap>,
 }
 
 impl Report {
@@ -249,6 +278,20 @@ impl Report {
                 message: d.message.clone(),
             })
             .collect();
+        // Plan 2026-08-12-001 Unit 4/5: build a layered set of
+        // repair suggestions + evidence gaps from the bundle
+        // status and the existing top findings. The mapper is
+        // pure: it never runs anything, never touches the
+        // filesystem, and never changes the existing top
+        // findings.
+        let (repair_suggestions, evidence_gaps) =
+            super::bundle::suggestions::build_suggestions_and_gaps(
+                &data.diagnosis_input,
+                &data.runtime_trace,
+                &data.feedback_lifecycle,
+                &data.warnings,
+                &data.session_path,
+            );
         Self {
             schema_version: DIAGNOSE_JSON_SCHEMA_VERSION,
             session_path: data.session_path.clone(),
@@ -261,6 +304,11 @@ impl Report {
             warnings: data.warnings.clone(),
             active_activations,
             dup_storm_topics,
+            diagnosis_input: data.diagnosis_input.clone(),
+            runtime_trace: data.runtime_trace.clone(),
+            feedback_lifecycle: data.feedback_lifecycle.clone(),
+            repair_suggestions,
+            evidence_gaps,
         }
     }
 }
@@ -1049,6 +1097,14 @@ pub fn load_session(session_dir: &Path) -> SessionData {
         &session_dir.join(ACTIVE_ACTIVATIONS_FILENAME),
         &mut warnings,
     );
+    // Plan 2026-08-12-001 Unit 4: bundle-first readers. Each
+    // reader is best-effort; failures only add warnings. The
+    // returned typed objects are projected into
+    // `SessionData` and surfaced as additive fields in
+    // `Report`.
+    let diagnosis_input = super::bundle::read_input_bundle_report(session_dir);
+    let runtime_trace = super::bundle::read_runtime_trace_report(session_dir);
+    let feedback_lifecycle = super::bundle::read_feedback_lifecycle_report(session_dir);
     SessionData {
         session_path: session_dir.to_path_buf(),
         summary,
@@ -1058,6 +1114,9 @@ pub fn load_session(session_dir: &Path) -> SessionData {
         errors,
         warnings,
         active_activations,
+        diagnosis_input,
+        runtime_trace,
+        feedback_lifecycle,
     }
 }
 
@@ -2097,6 +2156,16 @@ pub fn render_json(report: &Report) -> Value {
             })
         }).collect::<Vec<_>>(),
         "dup_storm_topics": report.dup_storm_topics,
+        "diagnosis_input": serde_json::to_value(&report.diagnosis_input)
+            .unwrap_or_else(|_| serde_json::json!({"status": "missing"})),
+        "runtime_trace": serde_json::to_value(&report.runtime_trace)
+            .unwrap_or_else(|_| serde_json::json!({"status": "missing"})),
+        "feedback_lifecycle": serde_json::to_value(&report.feedback_lifecycle)
+            .unwrap_or_else(|_| serde_json::json!({"status": "missing"})),
+        "repair_suggestions": serde_json::to_value(&report.repair_suggestions)
+            .unwrap_or_else(|_| serde_json::json!([])),
+        "evidence_gaps": serde_json::to_value(&report.evidence_gaps)
+            .unwrap_or_else(|_| serde_json::json!([])),
     })
 }
 

@@ -18,6 +18,10 @@ mod fallback_recovery_fail_close;
 mod coordinator_dispatch_coverage;
 mod default_publishes;
 mod deterministic_routing;
+// Plan 2026-08-12-001 Unit 2: off/on diagnostics equivalence
+// comparator. Module MUST be registered here so nextest
+// actually collects the tests (E22/D13).
+mod diagnostics_equivalence;
 mod drift_integration;
 // 2026-06-23-005 U1: typed kind SSOT wiring for `enrich_task_resume_payload`.
 // See `enrich_kind_wiring.rs`.

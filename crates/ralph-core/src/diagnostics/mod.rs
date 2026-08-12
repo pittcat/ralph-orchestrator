@@ -24,11 +24,15 @@
 mod agent_output;
 mod drift;
 mod errors;
+mod feedback;
 mod hook_runs;
+pub mod input_bundle;
 mod log_rotation;
 mod orchestration;
 mod performance;
 mod recovery;
+mod runtime_trace;
+pub mod session;
 mod stream_handler;
 mod trace_layer;
 
@@ -38,18 +42,175 @@ mod integration_tests;
 pub use agent_output::{AgentOutputContent, AgentOutputEntry, AgentOutputLogger};
 pub use drift::{DriftLogger, MAX_DRIFT_MESSAGE_CHARS};
 pub use errors::{DiagnosticError, ErrorLogger};
+pub use feedback::{FeedbackEntry, FeedbackLogger, FeedbackPhase, FEEDBACK_SCHEMA_VERSION};
 pub use hook_runs::{HookDisposition, HookRunLogger, HookRunTelemetryEntry};
+pub use input_bundle::{
+    read_manifest, write_manifest, ArtifactIntegrity, ArtifactStatus, CodeBaseline,
+    DiagnosisInputBundle, ManifestStatus, RunMetadata, DIAGNOSIS_INPUT_SCHEMA_VERSION,
+};
 pub use log_rotation::{create_log_file, rotate_logs};
 pub use orchestration::{
     OrchestrationContext, OrchestrationEntry, OrchestrationEvent, OrchestrationLogger,
 };
 pub use performance::{PerformanceLogger, PerformanceMetric};
 pub use recovery::{MAX_RECOVERY_NOTE_CHARS, RecoveryLogger};
+pub use runtime_trace::{
+    RuntimeTraceEntry, RuntimeTraceLogger, RuntimeTracePhase, RUNTIME_TRACE_SCHEMA_VERSION,
+};
+pub use session::probe_session_dir_writable;
 pub use stream_handler::DiagnosticStreamHandler;
 pub use trace_layer::{DiagnosticTraceLayer, TraceEntry};
 // `DiagnosisSummary` is declared at module root below, so callers can
 // refer to it as `crate::diagnostics::DiagnosisSummary` without a
 // separate re-export.
+
+// Plan 2026-08-12-001 fix-plan U9: cap on the per-field byte
+// length of any single row written to a sidecar JSONL. Anything
+// larger is truncated at the boundary and a `tracing::warn!` is
+// emitted so the operator can spot upstream fields that have
+// gone pathological (e.g. a 50 MiB `source_ref` from a recovery
+// envelope that ran away). The cap applies to string fields and
+// JSON fields; non-string scalars (u64, bool, enum) are unaffected.
+pub const MAX_SIDECAR_FIELD_BYTES: usize = 8 * 1024;
+
+/// Suffix appended to a truncated string field. 16 bytes gives the
+/// operator enough headroom to see "...[truncated]" without
+/// pushing the row past `MAX_SIDECAR_FIELD_BYTES`.
+const TRUNCATION_SUFFIX: &str = "...[truncated]";
+
+/// Plan 2026-08-12-001 fix-plan U11: helper that owns the
+/// "try to construct, otherwise warn and disable" pattern shared
+/// across 4 logger slots in `with_options`. Reduces ~50 LOC of
+/// duplicated `match X::new(...) { Ok => Some(Arc::new(Mutex::new(...))), Err => { warn; None } }`
+/// boilerplate and unifies the `tracing::warn!` shape so every
+/// slot's failure path looks the same to the operator.
+fn install_optional_logger<T, F>(enabled: bool, label: &str, session_dir: &Path, ctor: F) -> Option<Arc<Mutex<T>>>
+where
+    F: FnOnce(&Path) -> std::io::Result<T>,
+{
+    if !enabled {
+        return None;
+    }
+    match ctor(session_dir) {
+        Ok(logger) => Some(Arc::new(Mutex::new(logger))),
+        Err(err) => {
+            tracing::warn!(
+                target: "ralph_core::diagnostics",
+                slot = label,
+                session_dir = %session_dir.display(),
+                error = %err,
+                "failed to create {} logger; slot disabled for this session",
+                label,
+            );
+            None
+        }
+    }
+}
+
+/// Plan 2026-08-12-001 fix-plan U9: truncate a string to
+/// `MAX_SIDECAR_FIELD_BYTES` bytes. Returns the original string
+/// unchanged if it already fits; otherwise slices to leave room
+/// for the truncation suffix and emits one `tracing::warn!`
+/// describing the field name + before/after byte counts. Used
+/// at every writer boundary (`FeedbackEntry::action_kind`,
+/// `outcome`, `source_ref`; `RuntimeTraceEntry::source_ref`).
+pub(crate) fn cap_string_field(field: &str, label: &'static str) -> String {
+    if field.len() <= MAX_SIDECAR_FIELD_BYTES {
+        return field.to_string();
+    }
+    let original = field.len();
+    let keep = MAX_SIDECAR_FIELD_BYTES.saturating_sub(TRUNCATION_SUFFIX.len());
+    let mut truncated = String::with_capacity(MAX_SIDECAR_FIELD_BYTES);
+    truncated.push_str(&field[..keep]);
+    truncated.push_str(TRUNCATION_SUFFIX);
+    tracing::warn!(
+        target: "ralph_core::diagnostics",
+        field = label,
+        original_bytes = original,
+        capped_bytes = truncated.len(),
+        "sidecar field exceeded MAX_SIDECAR_FIELD_BYTES; truncated"
+    );
+    truncated
+}
+
+/// Plan 2026-08-12-001 fix-plan U9: walk a `serde_json::Value`
+/// and cap any oversized sub-tree. `String` arms are truncated via
+/// `cap_string_field`; `Object` arms drop keys (in iteration
+/// order) until the serialized form fits inside
+/// `MAX_SIDECAR_FIELD_BYTES`. Returns the original value if it
+/// already fits. Emits at most one `tracing::warn!` per call
+/// (downstream per-field truncation is already counted by
+/// `cap_string_field`).
+pub(crate) fn cap_json_field(value: serde_json::Value, label: &'static str) -> serde_json::Value {
+    use serde_json::Value;
+    // Fast path: cheap probe via to_string.
+    let serialized_len = value.to_string().len();
+    if serialized_len <= MAX_SIDECAR_FIELD_BYTES {
+        return value;
+    }
+    // Over the cap. Walk the tree:
+    //   - String → truncate via cap_string_field
+    //   - Object → drop keys until it fits
+    //   - Array → already bounded by writer usage; preserve
+    let warned = false;
+    let current = value;
+    match current {
+        Value::String(s) => {
+            let capped = cap_string_field(&s, label);
+            if !warned {
+                tracing::warn!(
+                    target: "ralph_core::diagnostics",
+                    field = label,
+                    "sidecar JSON string field exceeded MAX_SIDECAR_FIELD_BYTES; truncated"
+                );
+            }
+            Value::String(capped)
+        }
+        Value::Object(map) => {
+            let mut obj = map;
+            let original_len = obj.len();
+            // Drop keys from the end until the serialized form fits.
+            while obj.len() > 1 {
+                let probe = serde_json::Value::Object(obj.clone());
+                if probe.to_string().len() <= MAX_SIDECAR_FIELD_BYTES {
+                    break;
+                }
+                // Drop the last key (insertion order is BTreeMap-backed
+                // here because serde_json uses BTreeMap by default).
+                let last_key = obj
+                    .keys()
+                    .next_back()
+                    .cloned()
+                    .expect("non-empty object has last key");
+                obj.remove(&last_key);
+            }
+            if !warned {
+                tracing::warn!(
+                    target: "ralph_core::diagnostics",
+                    field = label,
+                    original_bytes = serialized_len,
+                    dropped_keys = original_len - obj.len(),
+                    "sidecar JSON object exceeded MAX_SIDECAR_FIELD_BYTES; \
+                     dropped keys to fit"
+                );
+            }
+            Value::Object(obj)
+        }
+        // Scalar/array/null/bool/number: can't reduce further.
+        other => {
+            if !warned {
+                tracing::warn!(
+                    target: "ralph_core::diagnostics",
+                    field = label,
+                    original_bytes = serialized_len,
+                    "sidecar JSON field exceeded MAX_SIDECAR_FIELD_BYTES; \
+                     preserving as-is (scalar/array cannot be truncated safely)"
+                );
+            }
+            other
+        }
+    }
+}
 
 use chrono::{DateTime, Local, Utc};
 use serde::{Deserialize, Serialize};
@@ -99,6 +260,15 @@ pub struct DiagnosticsOptions {
     /// is created (matches the existing
     /// `runtime_diagnosis_artifacts`-vs-full precedence contract).
     pub trace_only: bool,
+
+    /// Plan 2026-08-12-001 fix-plan U10 / synth:P1-8: when
+    /// `Some`, the collector refuses to write a session dir
+    /// outside this workspace root. `RALPH_DIAGNOSTICS_DIR`
+    /// pointing at `/usr/local/etc` or any path that escapes
+    /// the workspace would otherwise let the collector create
+    /// directories and write log files in arbitrary system
+    /// locations.
+    pub workspace_root: Option<PathBuf>,
 }
 
 impl DiagnosticsOptions {
@@ -126,6 +296,7 @@ impl DiagnosticsOptions {
             runtime_diagnosis_artifacts: false,
             trace_only: false,
             session_dir,
+            workspace_root: None,
         }
     }
 
@@ -151,6 +322,7 @@ impl DiagnosticsOptions {
             runtime_diagnosis_artifacts: write_artifacts,
             trace_only: false,
             session_dir,
+            workspace_root: None,
         }
     }
 }
@@ -177,6 +349,20 @@ pub struct DiagnosticsCollector {
     hook_run_logger: Option<Arc<Mutex<hook_runs::HookRunLogger>>>,
     recovery_logger: Option<Arc<Mutex<recovery::RecoveryLogger>>>,
     drift_logger: Option<Arc<Mutex<drift::DriftLogger>>>,
+    /// Input bundle manifest handle. Created in
+    /// `with_options` when diagnostics are enabled so the
+    /// reporter can read the manifest written by
+    /// [`crate::diagnostics::input_bundle::write_manifest`].
+    input_bundle: Option<Arc<Mutex<input_bundle::DiagnosisInputBundle>>>,
+    /// Plan 2026-08-12-001 Unit 2: sidecar `runtime-trace.jsonl`
+    /// writer. Independent of `trace.jsonl` (the global
+    /// tracing-layer file) so the two never race.
+    runtime_trace_logger: Option<Arc<Mutex<runtime_trace::RuntimeTraceLogger>>>,
+    /// Plan 2026-08-12-001 Unit 3: sidecar `feedback.jsonl`
+    /// writer. Records the recovery lifecycle phases grouped
+    /// by `feedback_id == diagnosis_id` (with `retry_key`
+    /// fallback for envelopes that lack a diagnosis_id).
+    feedback_logger: Option<Arc<Mutex<feedback::FeedbackLogger>>>,
 }
 
 impl std::fmt::Debug for DiagnosticsCollector {
@@ -199,6 +385,9 @@ impl std::fmt::Debug for DiagnosticsCollector {
             .field("has_hook_run_logger", &self.hook_run_logger.is_some())
             .field("has_recovery_logger", &self.recovery_logger.is_some())
             .field("has_drift_logger", &self.drift_logger.is_some())
+            .field("has_input_bundle", &self.input_bundle.is_some())
+            .field("has_runtime_trace_logger", &self.runtime_trace_logger.is_some())
+            .field("has_feedback_logger", &self.feedback_logger.is_some())
             .finish()
     }
 }
@@ -296,15 +485,56 @@ impl DiagnosticsCollector {
         //
         // trace_only skips these too: parent TUI has no loop events to
         // record, only trace/log.
-        let recovery_logger = if effective_full || effective_runtime {
-            match recovery::RecoveryLogger::new(&session_dir) {
-                Ok(logger) => Some(Arc::new(Mutex::new(logger))),
+        let recovery_logger = install_optional_logger(
+            effective_full || effective_runtime,
+            "recovery",
+            &session_dir,
+            recovery::RecoveryLogger::new,
+        );
+
+        let drift_logger = install_optional_logger(
+            effective_full || effective_runtime,
+            "drift",
+            &session_dir,
+            drift::DriftLogger::new,
+        );
+
+        // Plan 2026-08-12-001 Unit 1: input bundle manifest. Created
+        // lazily for both full and minimal sessions (effective_full
+        // || effective_runtime); the trace-only parent TUI does
+        // not own a real loop, so the bundle is irrelevant.
+        //
+        // Plan 2026-08-12-001 fix-plan U6: on initial write
+        // failure we set `input_bundle = None` so the reporter
+        // sees the actual absent state instead of a misleading
+        // in-memory `Degraded`/`Legacy` wrapper. This mirrors
+        // `recovery_logger`'s None-on-failure path immediately
+        // above and is the canonical signal that the bundle is
+        // missing (file unwritable, parent dir missing, etc.).
+        let input_bundle = if effective_full || effective_runtime {
+            let bundle = input_bundle::DiagnosisInputBundle::new_pending(&session_dir);
+            match input_bundle::write_manifest(&session_dir, &bundle) {
+                Ok(Some(_path)) => Some(Arc::new(Mutex::new(bundle))),
+                Ok(None) => {
+                    // `probe_session_dir_writable` rejected the
+                    // target. The probe path already emitted its
+                    // own `tracing::warn!`; we just emit a
+                    // structured `error!` here so the operator
+                    // sees the bundle was disabled for this
+                    // session and disable the in-memory slot.
+                    tracing::error!(
+                        target: "ralph_core::diagnostics",
+                        session_dir = %session_dir.display(),
+                        "diagnosis-input.json target not writable; collector bundle disabled for this session"
+                    );
+                    None
+                }
                 Err(err) => {
-                    tracing::warn!(
+                    tracing::error!(
                         target: "ralph_core::diagnostics",
                         session_dir = %session_dir.display(),
                         error = %err,
-                        "failed to create recovery logger; recovery journal disabled for this session",
+                        "failed to write initial diagnosis-input.json; collector bundle disabled for this session"
                     );
                     None
                 }
@@ -313,15 +543,41 @@ impl DiagnosticsCollector {
             None
         };
 
-        let drift_logger = if effective_full || effective_runtime {
-            match drift::DriftLogger::new(&session_dir) {
+        // Plan 2026-08-12-001 Unit 2: structured runtime trace
+        // sidecar. Same activation rules as the input bundle
+        // (full or minimal session). Independent of
+        // `trace.jsonl` so the global tracing layer and the
+        // sidecar never race on the same file handle.
+        let runtime_trace_logger = if effective_full || effective_runtime {
+            match runtime_trace::RuntimeTraceLogger::new(&session_dir) {
                 Ok(logger) => Some(Arc::new(Mutex::new(logger))),
                 Err(err) => {
                     tracing::warn!(
                         target: "ralph_core::diagnostics",
                         session_dir = %session_dir.display(),
                         error = %err,
-                        "failed to create drift logger; drift journal disabled for this session",
+                        "failed to create runtime-trace logger; sidecar disabled for this session",
+                    );
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
+        // Plan 2026-08-12-001 Unit 3: feedback lifecycle
+        // sidecar. Same activation rules as the other
+        // sidecars. Best-effort: startup failure does not
+        // block the run.
+        let feedback_logger = if effective_full || effective_runtime {
+            match feedback::FeedbackLogger::new(&session_dir) {
+                Ok(logger) => Some(Arc::new(Mutex::new(logger))),
+                Err(err) => {
+                    tracing::warn!(
+                        target: "ralph_core::diagnostics",
+                        session_dir = %session_dir.display(),
+                        error = %err,
+                        "failed to create feedback logger; sidecar disabled for this session",
                     );
                     None
                 }
@@ -342,6 +598,9 @@ impl DiagnosticsCollector {
             hook_run_logger,
             recovery_logger,
             drift_logger,
+            input_bundle,
+            runtime_trace_logger,
+            feedback_logger,
         })
     }
 
@@ -359,6 +618,9 @@ impl DiagnosticsCollector {
             hook_run_logger: None,
             recovery_logger: None,
             drift_logger: None,
+            input_bundle: None,
+            runtime_trace_logger: None,
+            feedback_logger: None,
         }
     }
 
@@ -732,6 +994,152 @@ impl DiagnosticsCollector {
                 error = %err,
                 "failed to persist diagnosis-summary.json",
             );
+        }
+    }
+
+    /// Plan 2026-08-12-001 Unit 1: complete the run identity on
+    /// the input bundle manifest. Called from the run-loop entry
+    /// (`run_loop_impl_inner`) after the config / preset /
+    /// baseline SHA are resolved but before the `EventLoop` is
+    /// constructed (D11). The on-disk manifest is updated
+    /// atomically; failures are logged as warnings and the
+    /// in-memory status flips to `Degraded` so the reporter can
+    /// surface an evidence gap.
+    pub fn update_input_bundle_identity(
+        &self,
+        loop_id: Option<String>,
+        preset_label: Option<String>,
+        config_path: Option<String>,
+        plan_path: Option<String>,
+        baseline_sha: Option<String>,
+        execution_capability: Option<String>,
+        code_baseline: CodeBaseline,
+    ) {
+        let Some(bundle) = self.input_bundle.as_ref() else {
+            return;
+        };
+        let Some(session_dir) = self.session_dir.as_ref() else {
+            return;
+        };
+        let mut guard = match bundle.lock() {
+            Ok(g) => g,
+            Err(err) => {
+                tracing::warn!(
+                    target: "ralph_core::diagnostics",
+                    error = %err,
+                    "input bundle mutex poisoned; identity update skipped"
+                );
+                return;
+            }
+        };
+        *guard = guard.with_completed_identity(
+            loop_id,
+            preset_label,
+            config_path,
+            plan_path,
+            baseline_sha,
+            execution_capability,
+            code_baseline,
+        );
+        if let Err(err) = input_bundle::write_manifest(session_dir, &guard)
+            .map_err(|e| std::io::Error::other(format!("{e}")))
+        {
+            tracing::warn!(
+                target: "ralph_core::diagnostics",
+                session_dir = %session_dir.display(),
+                error = %err,
+                "failed to write diagnosis-input.json after identity update; marking degraded"
+            );
+            *guard = guard.mark_degraded();
+        }
+    }
+
+    /// Plan 2026-08-12-001 Unit 1: finalize the input bundle on
+    /// run termination. The reporter reads the finalized manifest
+    /// to surface per-artifact integrity statuses (D14) and the
+    /// observed execution capabilities. Best-effort: failures
+    /// leave the manifest in `Degraded` status and never block
+    /// the run's terminal return.
+    pub fn finalize_input_bundle(
+        &self,
+        artifacts: Vec<ArtifactIntegrity>,
+        execution_capabilities: Vec<String>,
+    ) {
+        let Some(bundle) = self.input_bundle.as_ref() else {
+            return;
+        };
+        let Some(session_dir) = self.session_dir.as_ref() else {
+            return;
+        };
+        let mut guard = match bundle.lock() {
+            Ok(g) => g,
+            Err(err) => {
+                tracing::warn!(
+                    target: "ralph_core::diagnostics",
+                    error = %err,
+                    "input bundle mutex poisoned; finalization skipped"
+                );
+                return;
+            }
+        };
+        *guard = guard.with_finalized(artifacts, execution_capabilities);
+        if let Err(err) = input_bundle::write_manifest(session_dir, &guard)
+            .map_err(|e| std::io::Error::other(format!("{e}")))
+        {
+            tracing::warn!(
+                target: "ralph_core::diagnostics",
+                session_dir = %session_dir.display(),
+                error = %err,
+                "failed to write diagnosis-input.json on finalize; marking degraded"
+            );
+            *guard = guard.mark_degraded();
+        }
+    }
+
+    /// Returns the in-memory bundle status (for diagnostic
+    /// consumption; reporter reads the on-disk file).
+    pub fn input_bundle_status(&self) -> Option<ManifestStatus> {
+        self.input_bundle
+            .as_ref()
+            .and_then(|b| b.lock().ok().map(|g| g.manifest_status))
+    }
+
+    /// Plan 2026-08-12-001 Unit 2: append a runtime trace entry.
+    /// Best-effort: failures flip the underlying logger into
+    /// `degraded` and emit a warning; the orchestration main
+    /// path is never affected.
+    pub fn log_runtime_trace(&self, entry: RuntimeTraceEntry) {
+        let Some(logger) = self.runtime_trace_logger.as_ref() else {
+            return;
+        };
+        match logger.lock() {
+            Ok(mut guard) => guard.append(entry),
+            Err(err) => {
+                tracing::warn!(
+                    target: "ralph_core::diagnostics",
+                    error = %err,
+                    "runtime trace logger mutex poisoned; entry dropped"
+                );
+            }
+        }
+    }
+
+    /// Plan 2026-08-12-001 Unit 3: append a feedback lifecycle
+    /// row. Best-effort, no-op when the writer is not
+    /// instantiated.
+    pub fn log_feedback(&self, entry: FeedbackEntry) {
+        let Some(logger) = self.feedback_logger.as_ref() else {
+            return;
+        };
+        match logger.lock() {
+            Ok(mut guard) => guard.append(entry),
+            Err(err) => {
+                tracing::warn!(
+                    target: "ralph_core::diagnostics",
+                    error = %err,
+                    "feedback logger mutex poisoned; entry dropped"
+                );
+            }
         }
     }
 
@@ -1163,6 +1571,7 @@ mod tests {
             full_diagnostics: false,
             runtime_diagnosis_artifacts: true,
             session_dir: Some(preset_dir.clone()),
+        workspace_root: None,
             ..DiagnosticsOptions::default()
         };
         let collector = DiagnosticsCollector::with_options(temp.path(), &options).unwrap();
@@ -1284,6 +1693,7 @@ mod tests {
             runtime_diagnosis_artifacts: false,
             trace_only: true,
             session_dir: Some(preset_dir.clone()),
+        workspace_root: None,
         };
         let collector = DiagnosticsCollector::with_options(temp.path(), &options).unwrap();
         assert!(collector.is_trace_only());

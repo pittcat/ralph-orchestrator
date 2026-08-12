@@ -143,7 +143,18 @@ Ralph implements the [Ralph Wiggum technique](https://ghuntley.com/ralph/) — a
 
 ## Human Guidance & Recovery
 
-Human guidance flows through the **runtime diagnosis engine** via the `human.guidance` event topic, which is published when a Warning crosses the 3-strike escalation threshold or when the correction module decides human judgment is required. The `task.resume` event is the parallel recovery channel. If you need to steer a running loop interactively, the `ralph loops stop` command writes `.ralph/stop-requested` / `.ralph/restart-requested` signal files, which the event loop reads and acts on.
+The runtime recovery channel is `task.resume` (see
+`crates/ralph-core/src/event_loop/resume_routing.rs`); the
+runtime diagnosis engine continues to surface Warnings and
+corrections through the journal + bundle, but the **current
+orchestrator control topic is `task.resume`, not
+`human.guidance`**. The `human.guidance` topic is preserved as
+a **historical / compat** string (old fixtures / replay parser
+still parse it); new code and new docs must not treat it as a
+current control entry. If you need to steer a running loop
+interactively, the `ralph loops stop` command writes
+`.ralph/stop-requested` / `.ralph/restart-requested` signal
+files, which the event loop reads and acts on.
 
 > **Removed in the 2026-06-25 refactor (plan 2026-06-25-001).** The Telegram-based `RObot` block, the `ralph bot` command, the `ralph tools interact` command, and the `human.interact` / `human.response` event topics are all gone — human-in-the-loop is retired. Recovery guidance and operator steering use the runtime diagnosis engine / signal files described above.
 
@@ -203,7 +214,16 @@ Ralph uses specialized personas (hats) that coordinate through events. Each hat 
 ### Human Guidance & Recovery
 
 **How does Ralph surface recovery guidance?**
-The runtime diagnosis engine publishes `human.guidance` events to the bus when a Warning crosses the 3-strike escalation threshold or when the correction module determines human judgment is required. The `task.resume` event is the parallel recovery channel. The signal-file mechanism (`.ralph/stop-requested` / `.ralph/restart-requested`, written by `ralph loops stop`) lets external tooling steer a running loop.
+The runtime recovery channel is `task.resume` (see
+`crates/ralph-core/src/event_loop/resume_routing.rs`); the
+runtime diagnosis engine surfaces Warnings and corrections
+through the journal + bundle, but **does not publish
+`human.guidance` as a current control topic**. `human.guidance`
+is a historical / compat string; old fixtures and the replay
+parser still understand it. The signal-file mechanism
+(`.ralph/stop-requested` / `.ralph/restart-requested`, written
+by `ralph loops stop`) lets external tooling steer a running
+loop.
 
 **What about the old Telegram-based RObot integration?**
 It was retired in the 2026-06-25 refactor. The `RObot` config block, the `ralph bot` command, the `ralph tools interact` command, and the `human.interact` / `human.response` event topics are all gone. Use the runtime diagnosis engine / `ralph loops stop` for operator steering.

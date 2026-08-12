@@ -1,6 +1,7 @@
 //! EventLoop implementation region 6.
 
 use super::*;
+use crate::diagnostics::{FeedbackEntry, FeedbackPhase};
 
 impl EventLoop {
     /// U6: Append a `## Runtime Diagnosis Alert` block to the prompt
@@ -86,6 +87,26 @@ impl EventLoop {
             .unwrap_or(envelope.target_hat.as_deref().unwrap_or("ralph"));
         self.diagnostics
             .log_recovery(RecoveryJournalEntry::from_envelope(envelope.clone(), notes));
+        // Plan 2026-08-12-001 fix-plan U1 / synth:P0-1: wire the
+        // feedback.jsonl sidecar at the recovery-record hook so
+        // every envelope surfaces as a `FeedbackPhase::Action`
+        // row. The feedback_id is the envelope's stable
+        // diagnosis_id (falls back to retry_key when the
+        // envelope lacks one); retry_key is the cross-iteration
+        // identity.
+        let feedback_id = if !envelope.diagnosis_id.is_empty() {
+            envelope.diagnosis_id.clone()
+        } else {
+            envelope.retry_key.clone()
+        };
+        let feedback_entry = FeedbackEntry::new(
+            envelope.iteration.unwrap_or(0) as u64,
+            feedback_id,
+            envelope.retry_key.clone(),
+            FeedbackPhase::Action,
+        )
+        .with_action_kind(format!("{:?}", envelope.source));
+        self.diagnostics.log_feedback(feedback_entry);
         self.diagnostics.log_orchestration(
             envelope.iteration.unwrap_or(0),
             hat,
