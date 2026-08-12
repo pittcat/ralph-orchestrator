@@ -25,10 +25,12 @@ mod agent_output;
 mod drift;
 mod errors;
 mod hook_runs;
+mod input_bundle;
 mod log_rotation;
 mod orchestration;
 mod performance;
 mod recovery;
+mod session;
 mod stream_handler;
 mod trace_layer;
 
@@ -39,6 +41,10 @@ pub use agent_output::{AgentOutputContent, AgentOutputEntry, AgentOutputLogger};
 pub use drift::{DriftLogger, MAX_DRIFT_MESSAGE_CHARS};
 pub use errors::{DiagnosticError, ErrorLogger};
 pub use hook_runs::{HookDisposition, HookRunLogger, HookRunTelemetryEntry};
+pub use input_bundle::{
+    read_manifest, write_manifest, ArtifactIntegrity, ArtifactStatus, CodeBaseline,
+    DiagnosisInputBundle, ManifestStatus, RunMetadata, DIAGNOSIS_INPUT_SCHEMA_VERSION,
+};
 pub use log_rotation::{create_log_file, rotate_logs};
 pub use orchestration::{
     OrchestrationContext, OrchestrationEntry, OrchestrationEvent, OrchestrationLogger,
@@ -177,6 +183,11 @@ pub struct DiagnosticsCollector {
     hook_run_logger: Option<Arc<Mutex<hook_runs::HookRunLogger>>>,
     recovery_logger: Option<Arc<Mutex<recovery::RecoveryLogger>>>,
     drift_logger: Option<Arc<Mutex<drift::DriftLogger>>>,
+    /// Input bundle manifest handle. Created in
+    /// `with_options` when diagnostics are enabled so the
+    /// reporter can read the manifest written by
+    /// [`crate::diagnostics::input_bundle::write_manifest`].
+    input_bundle: Option<Arc<Mutex<input_bundle::DiagnosisInputBundle>>>,
 }
 
 impl std::fmt::Debug for DiagnosticsCollector {
@@ -199,6 +210,7 @@ impl std::fmt::Debug for DiagnosticsCollector {
             .field("has_hook_run_logger", &self.hook_run_logger.is_some())
             .field("has_recovery_logger", &self.recovery_logger.is_some())
             .field("has_drift_logger", &self.drift_logger.is_some())
+            .field("has_input_bundle", &self.input_bundle.is_some())
             .finish()
     }
 }
@@ -330,6 +342,30 @@ impl DiagnosticsCollector {
             None
         };
 
+        // Plan 2026-08-12-001 Unit 1: input bundle manifest. Created
+        // lazily for both full and minimal sessions (effective_full
+        // || effective_runtime); the trace-only parent TUI does
+        // not own a real loop, so the bundle is irrelevant.
+        let input_bundle = if effective_full || effective_runtime {
+            let bundle = input_bundle::DiagnosisInputBundle::new_pending(&session_dir);
+            // Best-effort initial write: a warning here does not
+            // break the run. The reporter reads whatever the
+            // collector successfully persisted later.
+            if let Err(err) = input_bundle::write_manifest(&session_dir, &bundle)
+                .map_err(|e| std::io::Error::other(format!("{e}")))
+            {
+                tracing::warn!(
+                    target: "ralph_core::diagnostics",
+                    session_dir = %session_dir.display(),
+                    error = %err,
+                    "failed to write initial diagnosis-input.json; bundle will be reported as missing or degraded"
+                );
+            }
+            Some(Arc::new(Mutex::new(bundle)))
+        } else {
+            None
+        };
+
         Ok(Self {
             enabled: true,
             full_diagnostics: effective_full,
@@ -342,6 +378,7 @@ impl DiagnosticsCollector {
             hook_run_logger,
             recovery_logger,
             drift_logger,
+            input_bundle,
         })
     }
 
@@ -359,6 +396,7 @@ impl DiagnosticsCollector {
             hook_run_logger: None,
             recovery_logger: None,
             drift_logger: None,
+            input_bundle: None,
         }
     }
 
@@ -733,6 +771,113 @@ impl DiagnosticsCollector {
                 "failed to persist diagnosis-summary.json",
             );
         }
+    }
+
+    /// Plan 2026-08-12-001 Unit 1: complete the run identity on
+    /// the input bundle manifest. Called from the run-loop entry
+    /// (`run_loop_impl_inner`) after the config / preset /
+    /// baseline SHA are resolved but before the `EventLoop` is
+    /// constructed (D11). The on-disk manifest is updated
+    /// atomically; failures are logged as warnings and the
+    /// in-memory status flips to `Degraded` so the reporter can
+    /// surface an evidence gap.
+    pub fn update_input_bundle_identity(
+        &self,
+        loop_id: Option<String>,
+        preset_label: Option<String>,
+        config_path: Option<String>,
+        plan_path: Option<String>,
+        baseline_sha: Option<String>,
+        execution_capability: Option<String>,
+        code_baseline: CodeBaseline,
+    ) {
+        let Some(bundle) = self.input_bundle.as_ref() else {
+            return;
+        };
+        let Some(session_dir) = self.session_dir.as_ref() else {
+            return;
+        };
+        let mut guard = match bundle.lock() {
+            Ok(g) => g,
+            Err(err) => {
+                tracing::warn!(
+                    target: "ralph_core::diagnostics",
+                    error = %err,
+                    "input bundle mutex poisoned; identity update skipped"
+                );
+                return;
+            }
+        };
+        *guard = guard.with_completed_identity(
+            loop_id,
+            preset_label,
+            config_path,
+            plan_path,
+            baseline_sha,
+            execution_capability,
+            code_baseline,
+        );
+        if let Err(err) = input_bundle::write_manifest(session_dir, &guard)
+            .map_err(|e| std::io::Error::other(format!("{e}")))
+        {
+            tracing::warn!(
+                target: "ralph_core::diagnostics",
+                session_dir = %session_dir.display(),
+                error = %err,
+                "failed to write diagnosis-input.json after identity update; marking degraded"
+            );
+            *guard = guard.mark_degraded();
+        }
+    }
+
+    /// Plan 2026-08-12-001 Unit 1: finalize the input bundle on
+    /// run termination. The reporter reads the finalized manifest
+    /// to surface per-artifact integrity statuses (D14) and the
+    /// observed execution capabilities. Best-effort: failures
+    /// leave the manifest in `Degraded` status and never block
+    /// the run's terminal return.
+    pub fn finalize_input_bundle(
+        &self,
+        artifacts: Vec<ArtifactIntegrity>,
+        execution_capabilities: Vec<String>,
+    ) {
+        let Some(bundle) = self.input_bundle.as_ref() else {
+            return;
+        };
+        let Some(session_dir) = self.session_dir.as_ref() else {
+            return;
+        };
+        let mut guard = match bundle.lock() {
+            Ok(g) => g,
+            Err(err) => {
+                tracing::warn!(
+                    target: "ralph_core::diagnostics",
+                    error = %err,
+                    "input bundle mutex poisoned; finalization skipped"
+                );
+                return;
+            }
+        };
+        *guard = guard.with_finalized(artifacts, execution_capabilities);
+        if let Err(err) = input_bundle::write_manifest(session_dir, &guard)
+            .map_err(|e| std::io::Error::other(format!("{e}")))
+        {
+            tracing::warn!(
+                target: "ralph_core::diagnostics",
+                session_dir = %session_dir.display(),
+                error = %err,
+                "failed to write diagnosis-input.json on finalize; marking degraded"
+            );
+            *guard = guard.mark_degraded();
+        }
+    }
+
+    /// Returns the in-memory bundle status (for diagnostic
+    /// consumption; reporter reads the on-disk file).
+    pub fn input_bundle_status(&self) -> Option<ManifestStatus> {
+        self.input_bundle
+            .as_ref()
+            .and_then(|b| b.lock().ok().map(|g| g.manifest_status))
     }
 
     /// Persist the current active hat activations to
