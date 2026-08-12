@@ -24,6 +24,14 @@ A hat modified tracked files despite its read-only or tool-restriction contract.
 
 一种跨 hat 或 hat 与 sub-agent 的交接原则：完整结果、可恢复状态、证据和关键决策依据优先写入当前 workspace/worktree 的 `.ralph/` 业务 artifact，消息与事件只传递短状态、摘要、路径、必要身份和路由字段。Ralph 的内部 ledger 不属于可供 hat 自定义读写的业务 artifact。
 
+### diagnosis input bundle
+
+一次 run 为 `run-diagnosis` 准备的自描述证据集合：包含 run 身份、结构化 trace、反馈生命周期、原始产物索引、完整性状态和可定位的证据引用。它是诊断 skill 的输入组织层，不改变业务运行事实或终态。
+
+### feedback lifecycle
+
+一个运行问题从发现、证据收集、处理动作、验证结果到最终状态的可追踪过程。生命周期用于区分观察到的问题、已经采取的恢复动作、验证成功、重复失败、升级和未决证据，不等同于业务事件本身。
+
 ### Effective Activation Contract
 
 Orchestrator 在最终 resolved config、当前 flow step、hat、trigger event 与已接纳状态之上编译并持久化的版本化执行契约。它是 Prompt、agent CLI、事件接纳、投影与恢复共同使用的权限和动作真相；任何 activation identity、revision 或 config fingerprint 不匹配都必须拒绝继续执行。
@@ -138,4 +146,3 @@ Python，**不改 Rust**（共享 probe 可同时带 `--prompt-file` 与 `--plan
 ### E2E 沙箱目录
 
 Operator 指定的、用本仓编译出的 `ralph` 对真实 plan 手跑 preset 的可写沙箱（典型为独立 sibling 仓）。**不是**本仓 `crates/ralph-e2e` 测试 harness。
-
