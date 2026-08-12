@@ -1502,6 +1502,11 @@ mod tests {
             warnings: vec![],
             active_activations: vec![],
             dup_storm_topics: vec![],
+            diagnosis_input: Default::default(),
+            runtime_trace: Default::default(),
+            feedback_lifecycle: Default::default(),
+            repair_suggestions: vec![],
+            evidence_gaps: vec![],
         };
         let filtered = filter_report_by_source(report, "agent_doc_sync").unwrap();
         assert_eq!(filtered.top_findings.len(), 1);
@@ -1522,6 +1527,11 @@ mod tests {
             warnings: vec![],
             active_activations: vec![],
             dup_storm_topics: vec![],
+            diagnosis_input: Default::default(),
+            runtime_trace: Default::default(),
+            feedback_lifecycle: Default::default(),
+            repair_suggestions: vec![],
+            evidence_gaps: vec![],
         };
         assert!(filter_report_by_source(report, "no_such_source").is_err());
     }
