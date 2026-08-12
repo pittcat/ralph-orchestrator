@@ -133,6 +133,13 @@ pub struct RuntimeTraceReport {
     pub last_sequence: Option<u64>,
     #[serde(default)]
     pub malformed_lines: u64,
+    /// Plan 2026-08-12-001 fix-plan U5: `true` when the on-disk
+    /// rows form a contiguous sequence (last_seq - first_seq + 1
+    /// == record_count). When a write failure leaves a gap, this
+    /// flips to `false` so the reporter can surface the gap as an
+    /// evidence gap rather than silently undercounting.
+    #[serde(default)]
+    pub monotonic_sequences: bool,
 }
 
 /// One feedback row projected into the report. We only keep the
@@ -165,6 +172,13 @@ pub struct FeedbackLifecycleReport {
     pub rows: Vec<FeedbackLifecycleRow>,
     #[serde(default)]
     pub malformed_lines: u64,
+    /// Plan 2026-08-12-001 fix-plan U5: `true` when the on-disk
+    /// rows form a contiguous sequence (last_seq - first_seq + 1
+    /// == rows.len()). When a write failure leaves a gap, this
+    /// flips to `false` so the reporter can surface the gap as an
+    /// evidence gap rather than silently undercounting.
+    #[serde(default)]
+    pub monotonic_sequences: bool,
 }
 
 /// Repair suggestion. Always non-executing; the reporter never
@@ -250,6 +264,20 @@ pub fn read_runtime_trace_report(session_dir: &Path) -> RuntimeTraceReport {
             };
         }
     };
+    // Plan 2026-08-12-001 fix-plan U8: empty / whitespace-only
+    // sidecar files must NOT spoof Present with record_count=0.
+    if body.trim().is_empty() {
+        tracing::warn!(
+            target: "ralph_core::diagnostics",
+            artifact = "runtime-trace.jsonl",
+            "empty sidecar file detected; treating as Missing"
+        );
+        return RuntimeTraceReport {
+            status: BundleStatus::Missing,
+            path: Some("runtime-trace.jsonl".to_string()),
+            ..RuntimeTraceReport::default()
+        };
+    }
     let mut summary = RuntimeTraceReport {
         status: BundleStatus::Present,
         path: Some("runtime-trace.jsonl".to_string()),
@@ -270,6 +298,10 @@ pub fn read_runtime_trace_report(session_dir: &Path) -> RuntimeTraceReport {
             Err(_) => summary.malformed_lines += 1,
         }
     }
+    summary.monotonic_sequences = match (summary.first_sequence, summary.last_sequence) {
+        (Some(first), Some(last)) => last - first + 1 == summary.record_count,
+        _ => summary.record_count == 0,
+    };
     summary
 }
 
@@ -285,17 +317,36 @@ pub fn read_feedback_lifecycle_report(session_dir: &Path) -> FeedbackLifecycleRe
             };
         }
     };
+    // Plan 2026-08-12-001 fix-plan U8: empty / whitespace-only
+    // sidecar files must NOT spoof Present with record_count=0.
+    if body.trim().is_empty() {
+        tracing::warn!(
+            target: "ralph_core::diagnostics",
+            artifact = "feedback.jsonl",
+            "empty sidecar file detected; treating as Missing"
+        );
+        return FeedbackLifecycleReport {
+            status: BundleStatus::Missing,
+            path: Some("feedback.jsonl".to_string()),
+            ..FeedbackLifecycleReport::default()
+        };
+    }
     let mut report = FeedbackLifecycleReport {
         status: BundleStatus::Present,
         path: Some("feedback.jsonl".to_string()),
         ..FeedbackLifecycleReport::default()
     };
+    let mut first_sequence: Option<u64> = None;
+    let mut last_sequence: Option<u64> = None;
     for line in body.lines() {
         if line.trim().is_empty() {
             continue;
         }
         match serde_json::from_str::<Value>(line) {
             Ok(v) => {
+                let seq = v.get("sequence").and_then(|x| x.as_u64()).unwrap_or(0);
+                first_sequence.get_or_insert(seq);
+                last_sequence = Some(seq);
                 let row = FeedbackLifecycleRow {
                     feedback_id: v
                         .get("feedback_id")
@@ -321,7 +372,7 @@ pub fn read_feedback_lifecycle_report(session_dir: &Path) -> FeedbackLifecycleRe
                         .and_then(|x| x.as_str())
                         .map(|s| s.to_string()),
                     attempt: v.get("attempt").and_then(|x| x.as_u64()).map(|n| n as u32),
-                    sequence: v.get("sequence").and_then(|x| x.as_u64()).unwrap_or(0),
+                    sequence: seq,
                     iteration: v.get("iteration").and_then(|x| x.as_u64()).unwrap_or(0),
                 };
                 report.rows.push(row);
@@ -329,6 +380,10 @@ pub fn read_feedback_lifecycle_report(session_dir: &Path) -> FeedbackLifecycleRe
             Err(_) => report.malformed_lines += 1,
         }
     }
+    report.monotonic_sequences = match (first_sequence, last_sequence) {
+        (Some(first), Some(last)) => last - first + 1 == report.rows.len() as u64,
+        _ => report.rows.is_empty(),
+    };
     report
 }
 

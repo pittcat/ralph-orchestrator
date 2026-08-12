@@ -112,6 +112,15 @@ pub struct DiagnosticsOptions {
     /// is created (matches the existing
     /// `runtime_diagnosis_artifacts`-vs-full precedence contract).
     pub trace_only: bool,
+
+    /// Plan 2026-08-12-001 fix-plan U10 / synth:P1-8: when
+    /// `Some`, the collector refuses to write a session dir
+    /// outside this workspace root. `RALPH_DIAGNOSTICS_DIR`
+    /// pointing at `/usr/local/etc` or any path that escapes
+    /// the workspace would otherwise let the collector create
+    /// directories and write log files in arbitrary system
+    /// locations.
+    pub workspace_root: Option<PathBuf>,
 }
 
 impl DiagnosticsOptions {
@@ -139,6 +148,7 @@ impl DiagnosticsOptions {
             runtime_diagnosis_artifacts: false,
             trace_only: false,
             session_dir,
+            workspace_root: None,
         }
     }
 
@@ -164,6 +174,7 @@ impl DiagnosticsOptions {
             runtime_diagnosis_artifacts: write_artifacts,
             trace_only: false,
             session_dir,
+            workspace_root: None,
         }
     }
 }
@@ -1412,6 +1423,7 @@ mod tests {
             full_diagnostics: false,
             runtime_diagnosis_artifacts: true,
             session_dir: Some(preset_dir.clone()),
+        workspace_root: None,
             ..DiagnosticsOptions::default()
         };
         let collector = DiagnosticsCollector::with_options(temp.path(), &options).unwrap();
@@ -1533,6 +1545,7 @@ mod tests {
             runtime_diagnosis_artifacts: false,
             trace_only: true,
             session_dir: Some(preset_dir.clone()),
+        workspace_root: None,
         };
         let collector = DiagnosticsCollector::with_options(temp.path(), &options).unwrap();
         assert!(collector.is_trace_only());

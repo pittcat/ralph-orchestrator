@@ -36,6 +36,7 @@ fn enabled_run_writes_input_bundle() {
         runtime_diagnosis_artifacts: true,
         trace_only: false,
         session_dir: None,
+        workspace_root: None,
     };
     let collector =
         DiagnosticsCollector::with_options(base, &opts).expect("collector constructs");
@@ -208,6 +209,7 @@ fn collector_update_and_finalize_round_trip() {
         runtime_diagnosis_artifacts: true,
         trace_only: false,
         session_dir: None,
+        workspace_root: None,
     };
     let collector = DiagnosticsCollector::with_options(base, &opts).expect("collector");
     let session = collector.session_dir().unwrap().to_path_buf();

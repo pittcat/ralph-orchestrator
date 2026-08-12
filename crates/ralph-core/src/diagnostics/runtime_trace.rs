@@ -164,15 +164,16 @@ impl RuntimeTraceLogger {
         self.degraded
     }
 
-    /// Append a single entry. Sequence is incremented before the
-    /// write. Errors flip the logger into `degraded` and emit a
-    /// `tracing::warn!`; subsequent writes are no-ops.
+    /// Append a single entry. Sequence is incremented only after
+    /// the write and flush succeed. Errors flip the logger into
+    /// `degraded` and emit a `tracing::warn!`; subsequent writes
+    /// are no-ops.
     pub fn append(&mut self, mut entry: RuntimeTraceEntry) {
         if self.degraded {
             return;
         }
-        self.sequence += 1;
-        entry.sequence = self.sequence;
+        let pending = self.sequence + 1;
+        entry.sequence = pending;
         let line = match serde_json::to_string(&entry) {
             Ok(s) => s,
             Err(err) => {
@@ -201,6 +202,9 @@ impl RuntimeTraceLogger {
                 error = %err,
                 "failed to flush runtime-trace writer; logger marked degraded"
             );
+            return;
         }
+        // Write and flush succeeded — commit the sequence.
+        self.sequence = pending;
     }
 }

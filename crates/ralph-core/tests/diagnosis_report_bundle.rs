@@ -270,3 +270,70 @@ fn matching_schema_version_projects_as_present() {
         BundleStatus::SchemaMismatch { .. }
     ));
 }
+
+// Plan 2026-08-12-001 fix-plan U8: empty / whitespace-only
+// sidecar files must NOT spoof BundleStatus::Present with
+// record_count=0. The reader must treat them as Missing.
+
+#[test]
+fn empty_runtime_trace_file_treated_as_missing() {
+    let tmp = TempDir::new().expect("TempDir");
+    let session = tmp.path().join("session");
+    fs::create_dir_all(&session).expect("create session dir");
+    fs::write(session.join("runtime-trace.jsonl"), "").expect("write empty");
+    let report = read_runtime_trace_report(&session);
+    assert_eq!(report.status, BundleStatus::Missing);
+    assert_eq!(report.record_count, 0);
+}
+
+#[test]
+fn whitespace_only_runtime_trace_treated_as_missing() {
+    let tmp = TempDir::new().expect("TempDir");
+    let session = tmp.path().join("session");
+    fs::create_dir_all(&session).expect("create session dir");
+    fs::write(session.join("runtime-trace.jsonl"), "\n\n   \n").expect("write whitespace");
+    let report = read_runtime_trace_report(&session);
+    assert_eq!(report.status, BundleStatus::Missing);
+    assert_eq!(report.record_count, 0);
+}
+
+#[test]
+fn empty_feedback_file_treated_as_missing() {
+    let tmp = TempDir::new().expect("TempDir");
+    let session = tmp.path().join("session");
+    fs::create_dir_all(&session).expect("create session dir");
+    fs::write(session.join("feedback.jsonl"), "").expect("write empty");
+    let report = read_feedback_lifecycle_report(&session);
+    assert_eq!(report.status, BundleStatus::Missing);
+    assert_eq!(report.rows.len(), 0);
+}
+
+#[test]
+fn single_valid_row_still_present() {
+    // Regression guard: a single valid JSONL row must still
+    // project as Present with record_count == 1.
+    let tmp = TempDir::new().expect("TempDir");
+    let session = tmp.path().join("session");
+    fs::create_dir_all(&session).expect("create session dir");
+
+    // One valid runtime-trace row.
+    let trace_entry = RuntimeTraceEntry::new(0, 1, RuntimeTracePhase::Activation);
+    let trace_json = serde_json::to_string(&trace_entry).expect("serialize trace");
+    fs::write(session.join("runtime-trace.jsonl"), format!("{trace_json}\n"))
+        .expect("write trace");
+
+    // One valid feedback row.
+    let feedback_entry =
+        ralph_core::diagnostics::FeedbackEntry::new(0, "fb-1", "retry-1", FeedbackPhase::Discovered);
+    let feedback_json = serde_json::to_string(&feedback_entry).expect("serialize feedback");
+    fs::write(session.join("feedback.jsonl"), format!("{feedback_json}\n"))
+        .expect("write feedback");
+
+    let trace_report = read_runtime_trace_report(&session);
+    assert_eq!(trace_report.status, BundleStatus::Present);
+    assert_eq!(trace_report.record_count, 1);
+
+    let feedback_report = read_feedback_lifecycle_report(&session);
+    assert_eq!(feedback_report.status, BundleStatus::Present);
+    assert_eq!(feedback_report.rows.len(), 1);
+}

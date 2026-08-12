@@ -28,6 +28,7 @@ fn make_enabled_collector(temp: &TempDir) -> DiagnosticsCollector {
         runtime_diagnosis_artifacts: true,
         trace_only: false,
         session_dir: None,
+        workspace_root: None,
     };
     DiagnosticsCollector::with_options(temp.path(), &opts).expect("collector")
 }

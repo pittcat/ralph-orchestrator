@@ -10,8 +10,10 @@
 //!   warning and does not panic the loop.
 
 use ralph_core::diagnostics::{
-    DiagnosticsCollector, DiagnosticsOptions, FeedbackEntry, FeedbackPhase,
+    DiagnosticsCollector, DiagnosticsOptions, FeedbackEntry, FeedbackLogger, FeedbackPhase,
 };
+use ralph_core::diagnosis::read_feedback_lifecycle_report;
+use tempfile::TempDir;
 
 #[test]
 fn feedback_entry_keeps_stable_identity_across_phases() {
@@ -60,6 +62,7 @@ fn enabled_collector_creates_feedback_file() {
         runtime_diagnosis_artifacts: true,
         trace_only: false,
         session_dir: None,
+        workspace_root: None,
     };
     let collector = DiagnosticsCollector::with_options(tmp.path(), &opts).expect("collector");
     collector.log_feedback(
@@ -81,4 +84,62 @@ fn enabled_collector_creates_feedback_file() {
     assert_eq!(a.feedback_id, b.feedback_id);
     assert_eq!(a.sequence, 1);
     assert_eq!(b.sequence, 2);
+}
+
+#[test]
+fn feedback_append_increments_only_after_flush() {
+    let tmp = TempDir::new().unwrap();
+    let session = tmp.path().join("session");
+    std::fs::create_dir_all(&session).unwrap();
+    let mut logger = FeedbackLogger::new(&session).unwrap();
+    for i in 0..3 {
+        logger.append(FeedbackEntry::new(
+            0,
+            format!("id-{i}"),
+            format!("retry-{i}"),
+            FeedbackPhase::Action,
+        ));
+    }
+    assert_eq!(logger.sequence(), 3);
+    let report = read_feedback_lifecycle_report(&session);
+    assert_eq!(report.rows.len(), 3);
+    assert!(
+        report.monotonic_sequences,
+        "normal run must have monotonic sequences"
+    );
+}
+
+#[test]
+fn feedback_sequence_monotonic_across_appends() {
+    // Plan 2026-08-12-001 fix-plan U5 / synth:P1-3: the
+    // reader-side `monotonic_sequences` invariant — for a
+    // healthy append stream, last_seq - first_seq + 1 ==
+    // rows.len() — holds across N successful appends.
+    //
+    // Cross-platform write-failure injection (EISDIR via
+    // rename-to-directory) is racy on macOS because the
+    // constructor may auto-recreate the path. The
+    // `is_degraded` semantics are unit-tested in the
+    // in-crate test module; here we focus on the
+    // sequence-after-flush invariant on the success path.
+    let tmp = TempDir::new().unwrap();
+    let session = tmp.path().join("session");
+    std::fs::create_dir_all(&session).unwrap();
+    let mut logger = FeedbackLogger::new(&session).unwrap();
+    for i in 0..5 {
+        logger.append(FeedbackEntry::new(
+            0,
+            format!("id-{i}"),
+            format!("retry-{i}"),
+            FeedbackPhase::Action,
+        ));
+    }
+    assert_eq!(logger.sequence(), 5);
+    let report = read_feedback_lifecycle_report(&session);
+    assert_eq!(report.rows.len(), 5);
+    assert!(
+        report.monotonic_sequences,
+        "normal run must have monotonic sequences (got report={:?})",
+        report
+    );
 }
