@@ -50,6 +50,23 @@ argument-hint: "[run_dir] [preset_file_or_builtin] [optional: plan_file] [--incl
 
 提交前 checklist 多一条：**历史检索开关状态已写入 frontmatter**。
 
+## 0.2 Bundle-first 输入（plan 2026-08-12-001）
+
+当 `$RUN/.ralph/diagnostics/<session>/diagnosis-input.json` 存在时，**必须**先于任何 raw artifact 读取该 bundle，并按下面顺序消费：
+
+1. **`diagnosis-input.json`** — 锁定 `manifest_status`（`pending` / `present` / `finalized` / `degraded` / `missing` / `legacy` / `not_applicable`）、`run.preset_label`、`run.loop_id`、`code_baseline.head_sha`、`execution_capabilities`、per-artifact 完整性。
+2. **`runtime-trace.jsonl`** — 校对 `record_count` 与 `first/last_sequence`；坏行仅降低证据完备度，不阻断报告。
+3. **`feedback.jsonl`** — 按 `feedback_id == diagnosis_id` 聚合阶段（`discovered` / `evidence` / `action` / `validation` / `final`）；缺失仅作为 evidence gap。
+4. **legacy 兜底**：bundle `status == legacy` 或 `missing` 时，回退到 §0.1 之后既有的 current-events / Tier inventory 路径，**不**当作 P0 / 阻断；报告 frontmatter 标 `bundle: legacy`。
+5. **degraded 兜底**：`status == degraded` 时同样回退到 legacy 路径并写 evidence gap；repair suggestions 给出 filesystem 排查指引（见 §6）。
+
+修复建议（§6）一律 **non-executing**：报告只列**人工**可执行的 short / mid / long tier 建议；agent 不得自动 `ralph run`、不得自动改 preset、不得执行 `rm` / `cargo` / `git` 类命令。bundle 状态机、ArtifactStatus 映射和 tier 标签见 [report-template.md](references/report-template.md) §0.2。
+
+> **Recovery 通道术语（plan 2026-08-12-001 Unit 6 同步）**：
+> - `task.resume` 是当前 runtime recovery transport，由 `crates/ralph-core/src/event_loop/resume_routing.rs` 路由；不允许被描述为"已被完全删除"或"已经废弃"。
+> - `human.guidance` 已不再是当前 orchestrator control topic；本 skill 出现该串时**必须**邻近 `historical` / `compat` / `legacy` 标记，不得当作当前 control 入口推荐。
+> - 不写"runtime 发布 human.guidance"或"task.resume 已完全取代"等互相矛盾的话术。
+
 ### SSOT 常量
 
 为避免字面散落多处漂移，约定以下占位符/标签为单一事实源：

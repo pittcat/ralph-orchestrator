@@ -18,6 +18,8 @@ preset: builtin:<name> 或 <preset_file>
 run_dir: <repo-relative run_dir>
 status: <一句话健康度>
 diagnostics_mode: FULL | MINIMAL | LOGS_ONLY | DISABLED
+bundle: present | finalized | degraded | legacy | missing   # 来自 §0.2 bundle-first 读取
+bundle_path: <rel-path-to-diagnosis-input.json>             # 同源；缺失时省略
 history_search: disabled | preset-only | full   # 来自主 SKILL §0.1 的 AskUserQuestion；默认 disabled
 ---
 

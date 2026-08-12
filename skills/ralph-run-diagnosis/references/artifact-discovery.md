@@ -71,7 +71,9 @@ fi
 echo "diagnostics_mode=$MODE"
 ```
 
-FULL/MINIMAL 时列出 session 内文件存在性（orchestration、agent-output、recovery、drift、diagnosis-summary）。
+FULL/MINIMAL 时列出 session 内文件存在性（orchestration、agent-output、recovery、drift、diagnosis-summary、**diagnosis-input.json**、**runtime-trace.jsonl**、**feedback.jsonl**）。
+
+> **Bundle-first（plan 2026-08-12-001）**：`diagnosis-input.json` 是新 bundle 的入口；`runtime-trace.jsonl` 与 `feedback.jsonl` 是它的 sidecar。三者均按 §0.2 顺序读取；缺失则回退 legacy Tier 路径。
 
 ---
 
