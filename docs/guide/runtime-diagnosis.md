@@ -2,7 +2,17 @@
 
 > **Updated:** 2026-06-06 · **Schema:** recovery envelope v1 · diagnosis report v1
 
-> **注意：** 本文档中提到的 `task.resume` 已被 `loop.resume` 和 deterministic correction block（`state.prompt_context`）取代。`task.resume` 仅在旧 JSONL replay  fixture 中作为 `loop.resume` 的 deprecated alias 保留。新的 recovery 信号不再以独立 bus 事件形式出现，而是直接注入下一轮 prompt 的 `## ORCHESTRATOR CORRECTION` / `## LOOP RESUME CONTEXT` 块。
+> **注意：** `task.resume` 仍是当前 runtime recovery transport（参见
+> `crates/ralph-core/src/event_loop/resume_routing.rs`），由
+> `record_recovery_envelope` / `apply_runtime_recovery_actions` /
+> `drift/engine.rs::drain_hard_escalations` 路径处理；本文档不再
+> 把它描述为"已被完全取代"。`human.guidance` 已不再是当前
+> orchestrator control topic，仅作为 **historical / compat** 串
+> 出现在旧 fixture 与 replay parser 中，新文档与新代码不再以它
+> 作为当前入口推荐。Runtime correction / resume context 注入到
+> 下一轮 prompt 的 `## CORRECTION CONTEXT` / `## ORCHESTRATOR
+> CORRECTION` 块是 `task.resume` payload 的一部分，不是它的
+> 替代。
 
 Runtime Diagnosis 是 2026-06 drift-auto-calibration 计划（U0–U8）引入的**可观测性 + 自校准**层。它把“loop 看起来卡住了”这类主观感受变成可在 `.ralph/diagnostics/<session>/` 下审查的结构化证据，并由 `ralph diagnose` 命令离线渲染成人 / 机器可读的报告。
 
