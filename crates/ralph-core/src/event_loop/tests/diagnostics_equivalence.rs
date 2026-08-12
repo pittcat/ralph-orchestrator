@@ -17,7 +17,9 @@
 use ralph_core::diagnostics::RuntimeTraceEntry;
 use ralph_core::diagnostics::RuntimeTracePhase;
 use ralph_core::diagnostics::probe_session_dir_writable;
+use ralph_core::diagnostics::{DiagnosticsCollector, DiagnosticsOptions};
 use std::fs;
+use std::os::unix::fs::PermissionsExt;
 
 /// Structural smoke test: a `RuntimeTraceEntry::new` plus a phase
 /// can be serialized and round-tripped. This is the
@@ -96,4 +98,47 @@ fn probe_session_dir_writable_rejects_non_directory() {
     let file_path = tmp.path().join("not-a-dir");
     fs::write(&file_path, b"x").expect("write");
     assert!(!probe_session_dir_writable(&file_path));
+}
+
+/// Plan 2026-08-12-001 fix-plan U6: when the initial
+/// `write_manifest` rejects the session dir, the collector must
+/// disable `input_bundle` (None) instead of silently wrapping the
+/// bundle in a misleading `Some(Arc<Mutex<...>>)` that the
+/// reporter then projects as `Legacy` / `Degraded`.
+#[test]
+fn collector_disables_input_bundle_when_initial_write_fails() {
+    let tmp = tempfile::TempDir::new().expect("TempDir");
+    // Build a session dir, then chmod it read-only to make the
+    // initial `write_manifest` return Ok(None) via the probe path.
+    let session_dir = tmp.path().join("readonly-session");
+    fs::create_dir_all(&session_dir).expect("create session dir");
+    let original = fs::metadata(&session_dir).expect("metadata").permissions();
+    fs::set_permissions(&session_dir, fs::Permissions::from_mode(0o500))
+        .expect("chmod 0500");
+
+    let opts = DiagnosticsOptions {
+        full_diagnostics: false,
+        runtime_diagnosis_artifacts: true,
+        trace_only: false,
+        session_dir: Some(session_dir.clone()),
+        workspace_root: None,
+    };
+    let collector =
+        DiagnosticsCollector::with_options(tmp.path(), &opts).expect("with_options succeeds");
+
+    // Restore permissions so cleanup can remove the dir.
+    let _ = fs::set_permissions(&session_dir, original);
+
+    // The collector is enabled (the activation matrix matched) but
+    // the input_bundle slot must be None — the probe returned
+    // false, so the bundle is missing. The U6 invariant is
+    // "initial write failure ⇒ input_bundle None" so the
+    // reporter sees the actual absent state instead of a
+    // misleading in-memory `Degraded`/`Legacy` wrapper.
+    assert!(collector.is_enabled());
+    assert!(
+        collector.input_bundle_status().is_none(),
+        "input_bundle_status must be None when initial write_manifest fails; \
+         the in-memory state must reflect the absent bundle, not a Legacy/Degraded wrapper."
+    );
 }

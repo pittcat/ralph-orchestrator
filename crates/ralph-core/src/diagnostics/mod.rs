@@ -375,22 +375,42 @@ impl DiagnosticsCollector {
         // lazily for both full and minimal sessions (effective_full
         // || effective_runtime); the trace-only parent TUI does
         // not own a real loop, so the bundle is irrelevant.
+        //
+        // Plan 2026-08-12-001 fix-plan U6: on initial write
+        // failure we set `input_bundle = None` so the reporter
+        // sees the actual absent state instead of a misleading
+        // in-memory `Degraded`/`Legacy` wrapper. This mirrors
+        // `recovery_logger`'s None-on-failure path immediately
+        // above and is the canonical signal that the bundle is
+        // missing (file unwritable, parent dir missing, etc.).
         let input_bundle = if effective_full || effective_runtime {
             let bundle = input_bundle::DiagnosisInputBundle::new_pending(&session_dir);
-            // Best-effort initial write: a warning here does not
-            // break the run. The reporter reads whatever the
-            // collector successfully persisted later.
-            if let Err(err) = input_bundle::write_manifest(&session_dir, &bundle)
-                .map_err(|e| std::io::Error::other(format!("{e}")))
-            {
-                tracing::warn!(
-                    target: "ralph_core::diagnostics",
-                    session_dir = %session_dir.display(),
-                    error = %err,
-                    "failed to write initial diagnosis-input.json; bundle will be reported as missing or degraded"
-                );
+            match input_bundle::write_manifest(&session_dir, &bundle) {
+                Ok(Some(_path)) => Some(Arc::new(Mutex::new(bundle))),
+                Ok(None) => {
+                    // `probe_session_dir_writable` rejected the
+                    // target. The probe path already emitted its
+                    // own `tracing::warn!`; we just emit a
+                    // structured `error!` here so the operator
+                    // sees the bundle was disabled for this
+                    // session and disable the in-memory slot.
+                    tracing::error!(
+                        target: "ralph_core::diagnostics",
+                        session_dir = %session_dir.display(),
+                        "diagnosis-input.json target not writable; collector bundle disabled for this session"
+                    );
+                    None
+                }
+                Err(err) => {
+                    tracing::error!(
+                        target: "ralph_core::diagnostics",
+                        session_dir = %session_dir.display(),
+                        error = %err,
+                        "failed to write initial diagnosis-input.json; collector bundle disabled for this session"
+                    );
+                    None
+                }
             }
-            Some(Arc::new(Mutex::new(bundle)))
         } else {
             None
         };
