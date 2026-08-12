@@ -24,6 +24,7 @@
 mod agent_output;
 mod drift;
 mod errors;
+mod feedback;
 mod hook_runs;
 mod input_bundle;
 mod log_rotation;
@@ -41,6 +42,7 @@ mod integration_tests;
 pub use agent_output::{AgentOutputContent, AgentOutputEntry, AgentOutputLogger};
 pub use drift::{DriftLogger, MAX_DRIFT_MESSAGE_CHARS};
 pub use errors::{DiagnosticError, ErrorLogger};
+pub use feedback::{FeedbackEntry, FeedbackLogger, FeedbackPhase, FEEDBACK_SCHEMA_VERSION};
 pub use hook_runs::{HookDisposition, HookRunLogger, HookRunTelemetryEntry};
 pub use input_bundle::{
     read_manifest, write_manifest, ArtifactIntegrity, ArtifactStatus, CodeBaseline,
@@ -196,6 +198,11 @@ pub struct DiagnosticsCollector {
     /// writer. Independent of `trace.jsonl` (the global
     /// tracing-layer file) so the two never race.
     runtime_trace_logger: Option<Arc<Mutex<runtime_trace::RuntimeTraceLogger>>>,
+    /// Plan 2026-08-12-001 Unit 3: sidecar `feedback.jsonl`
+    /// writer. Records the recovery lifecycle phases grouped
+    /// by `feedback_id == diagnosis_id` (with `retry_key`
+    /// fallback for envelopes that lack a diagnosis_id).
+    feedback_logger: Option<Arc<Mutex<feedback::FeedbackLogger>>>,
 }
 
 impl std::fmt::Debug for DiagnosticsCollector {
@@ -220,6 +227,7 @@ impl std::fmt::Debug for DiagnosticsCollector {
             .field("has_drift_logger", &self.drift_logger.is_some())
             .field("has_input_bundle", &self.input_bundle.is_some())
             .field("has_runtime_trace_logger", &self.runtime_trace_logger.is_some())
+            .field("has_feedback_logger", &self.feedback_logger.is_some())
             .finish()
     }
 }
@@ -397,6 +405,27 @@ impl DiagnosticsCollector {
             None
         };
 
+        // Plan 2026-08-12-001 Unit 3: feedback lifecycle
+        // sidecar. Same activation rules as the other
+        // sidecars. Best-effort: startup failure does not
+        // block the run.
+        let feedback_logger = if effective_full || effective_runtime {
+            match feedback::FeedbackLogger::new(&session_dir) {
+                Ok(logger) => Some(Arc::new(Mutex::new(logger))),
+                Err(err) => {
+                    tracing::warn!(
+                        target: "ralph_core::diagnostics",
+                        session_dir = %session_dir.display(),
+                        error = %err,
+                        "failed to create feedback logger; sidecar disabled for this session",
+                    );
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
         Ok(Self {
             enabled: true,
             full_diagnostics: effective_full,
@@ -411,6 +440,7 @@ impl DiagnosticsCollector {
             drift_logger,
             input_bundle,
             runtime_trace_logger,
+            feedback_logger,
         })
     }
 
@@ -430,6 +460,7 @@ impl DiagnosticsCollector {
             drift_logger: None,
             input_bundle: None,
             runtime_trace_logger: None,
+            feedback_logger: None,
         }
     }
 
@@ -928,6 +959,25 @@ impl DiagnosticsCollector {
                     target: "ralph_core::diagnostics",
                     error = %err,
                     "runtime trace logger mutex poisoned; entry dropped"
+                );
+            }
+        }
+    }
+
+    /// Plan 2026-08-12-001 Unit 3: append a feedback lifecycle
+    /// row. Best-effort, no-op when the writer is not
+    /// instantiated.
+    pub fn log_feedback(&self, entry: FeedbackEntry) {
+        let Some(logger) = self.feedback_logger.as_ref() else {
+            return;
+        };
+        match logger.lock() {
+            Ok(mut guard) => guard.append(entry),
+            Err(err) => {
+                tracing::warn!(
+                    target: "ralph_core::diagnostics",
+                    error = %err,
+                    "feedback logger mutex poisoned; entry dropped"
                 );
             }
         }
