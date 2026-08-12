@@ -449,3 +449,190 @@ hats:
         "projected task must honour payload.task_id; got task: {task}"
     );
 }
+
+// ===========================================================================
+// GAP-01 (plan 2026-08-13-001) U2 wiring tests.
+//
+// These tests drive a real EventLoop through
+// `process_events_from_jsonl` and assert that the post-validation
+// batch boundary commits a bounded `KnowledgeObserved` delta for
+// each `Business` / `Recovery` event while leaving the existing
+// `ProcessedEvents` result untouched.
+// ===========================================================================
+
+/// Build a minimal multi-hat event loop suitable for driving
+/// `process_events_from_jsonl`. The harness matches the
+/// `isolated_event_loop_with_task` style above so the wiring
+/// surface is consistent.
+fn multi_hat_event_loop(workspace: &std::path::Path) -> crate::event_loop::EventLoop {
+    let yaml = r#"
+mode: "multi"
+event_loop:
+  execution_mode: "coordinator"
+hats:
+  builder:
+    name: "Builder"
+    triggers: ["work.ready"]
+    publishes: ["work.done"]
+    instructions: "Do work."
+"#;
+    let mut config: crate::config::RalphConfig = serde_yaml::from_str(yaml).unwrap();
+    config.core.workspace_root = workspace.to_path_buf();
+    let mut event_loop = crate::event_loop::EventLoop::with_context(
+        config,
+        crate::loop_context::LoopContext::primary(workspace.to_path_buf()),
+    );
+    event_loop.initialize("GAP-01 U2 wiring test");
+    event_loop
+}
+
+/// U2 wiring: a single accepted `Business` event must produce
+/// exactly one `KnowledgeObserved` delta and leave the
+/// `ProcessedEvents` accepted tuple unchanged.
+#[test]
+fn accepted_business_and_recovery_events_create_observations() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    init_git_workspace(dir.path());
+    let events_path = dir.path().join(".ralph/events.jsonl");
+    fs::create_dir_all(events_path.parent().unwrap()).unwrap();
+    let ts = chrono::Utc::now().to_rfc3339();
+    // One Business event with source/executor so the helper
+    // can attach a hat evidence ref.
+    let business = json!({
+        "topic": "work.done",
+        "payload": json!({"task_key": "K1", "step": "step-01"}).to_string(),
+        "ts": ts,
+        "source": "executor",
+    });
+    fs::write(&events_path, format!("{business}\n")).unwrap();
+
+    let mut event_loop = multi_hat_event_loop(dir.path());
+    event_loop.event_reader = crate::event_reader::EventReader::new(&events_path);
+    let result = event_loop.process_events_from_jsonl();
+    let result = result.expect("process_events_from_jsonl must succeed");
+
+    // The business event was accepted normally.
+    assert_eq!(
+        result.accepted_events.len(),
+        1,
+        "Business event must remain accepted; got {:?}",
+        result.accepted_events
+    );
+
+    // Ledger has exactly one KnowledgeObserved delta for the
+    // accepted business event.
+    let ledger = event_loop
+        .state
+        .state_ledger
+        .as_ref()
+        .expect("ledger is configured");
+    let knowledge_count = ledger
+        .commit_log()
+        .iter()
+        .filter(|c| matches!(c.delta, crate::state::CommitDelta::KnowledgeObserved { .. }))
+        .count();
+    assert_eq!(
+        knowledge_count, 1,
+        "one accepted business event must produce one knowledge delta"
+    );
+    // The ledger's display vec carries exactly one record.
+    assert_eq!(ledger.snapshot().knowledge.records().len(), 1);
+    let record = &ledger.snapshot().knowledge.records()[0];
+    assert_eq!(record.verification, crate::state::VerificationStatus::Unverified);
+}
+
+/// U2 wiring: DiagnosticObservation / LoopControl events MUST
+/// NOT produce a knowledge record even when present in the
+/// accepted batch (D3).
+#[test]
+fn rejected_and_non_advancing_events_do_not_create_observations() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    init_git_workspace(dir.path());
+    let events_path = dir.path().join(".ralph/events.jsonl");
+    fs::create_dir_all(events_path.parent().unwrap()).unwrap();
+    let ts = chrono::Utc::now().to_rfc3339();
+    // event.malformed is DiagnosticObservation; LOOP_COMPLETE
+    // is LoopControl. Neither should produce knowledge.
+    let lines = vec![
+        json!({"topic": "event.malformed", "payload": "{}", "ts": ts}),
+        json!({"topic": "LOOP_COMPLETE", "payload": "{}", "ts": ts}),
+    ];
+    let body: String = lines.iter().map(|v| v.to_string()).collect::<Vec<_>>().join("\n");
+    fs::write(&events_path, format!("{body}\n")).unwrap();
+
+    let mut event_loop = multi_hat_event_loop(dir.path());
+    event_loop.event_reader = crate::event_reader::EventReader::new(&events_path);
+    let _ = event_loop.process_events_from_jsonl();
+
+    // No KnowledgeObserved delta — diagnostic/control are
+    // filtered out by the disposition classifier (D3).
+    let ledger = event_loop
+        .state
+        .state_ledger
+        .as_ref()
+        .expect("ledger is configured");
+    let knowledge_count = ledger
+        .commit_log()
+        .iter()
+        .filter(|c| matches!(c.delta, crate::state::CommitDelta::KnowledgeObserved { .. }))
+        .count();
+    assert_eq!(
+        knowledge_count, 0,
+        "DiagnosticObservation / LoopControl must NOT produce knowledge records"
+    );
+    assert!(ledger.snapshot().knowledge.records().is_empty());
+}
+
+/// U2 wiring: a knowledge-commit persistence failure must NOT
+/// alter the `ProcessedEvents` accepted tuple (D4 fail-soft).
+#[test]
+fn knowledge_commit_failure_does_not_change_processed_result() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    init_git_workspace(dir.path());
+    let events_path = dir.path().join(".ralph/events.jsonl");
+    fs::create_dir_all(events_path.parent().unwrap()).unwrap();
+    let ts = chrono::Utc::now().to_rfc3339();
+    // One accepted Business event.
+    let business = json!({
+        "topic": "work.done",
+        "payload": json!({"task_key": "K1", "step": "step-01"}).to_string(),
+        "ts": ts,
+        "source": "executor",
+    });
+    fs::write(&events_path, format!("{business}\n")).unwrap();
+
+    let mut event_loop = multi_hat_event_loop(dir.path());
+
+    // Replace the on-disk ledger path with a directory BEFORE
+    // any batch runs, so every commit fails on persist.
+    if let Some(ref mut ledger) = event_loop.state.state_ledger {
+        let ledger_path = ledger.ledger_path().to_path_buf();
+        if ledger_path.exists() {
+            std::fs::remove_file(&ledger_path).unwrap();
+        }
+        std::fs::create_dir_all(&ledger_path).unwrap();
+    }
+
+    event_loop.event_reader = crate::event_reader::EventReader::new(&events_path);
+    let result = event_loop.process_events_from_jsonl();
+    let result = result.expect("process_events_from_jsonl must succeed");
+
+    // The business event is still accepted (D4 fail-soft):
+    // the persistence failure only affects the cognitive
+    // observation commit, not the business acceptance path.
+    assert_eq!(result.accepted_events.len(), 1);
+    assert_eq!(result.accepted_events[0].topic, "work.done".into());
+
+    // The snapshot's knowledge records stay empty — the
+    // helper returned PersistFailed and rolled back the
+    // snapshot delta.
+    let ledger = event_loop
+        .state
+        .state_ledger
+        .as_ref()
+        .expect("ledger is configured");
+    assert!(
+        ledger.snapshot().knowledge.records().is_empty(),
+        "knowledge records must stay empty when commit fails (snapshot rollback)"
+    );
+}

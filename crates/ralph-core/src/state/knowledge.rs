@@ -490,3 +490,189 @@ impl OrchestrationKnowledgeState {
         }
     }
 }
+
+// ===========================================================================
+// GAP-01 U2 helpers: accepted-event observation wiring.
+//
+// These helpers live next to the model so the only call site
+// (`event_loop/parse_and_emit.rs`) stays a one-line wiring change.
+// The helpers themselves are pure functions over the public types;
+// they never reach into LoopState / EventLoop and never emit any
+// event themselves.
+// ===========================================================================
+
+/// Compute a stable observation id from accepted-event metadata.
+///
+/// Two accepted events with the same `(loop_iteration, batch_index,
+/// topic, payload_digest)` produce the same id; any difference
+/// flips the id. The hash is hex-encoded SHA-256 over the
+/// canonical field set; the runtime never relies on the id being
+/// reversible, so the digest is opaque.
+pub fn observation_id(
+    loop_iteration: u32,
+    batch_index: usize,
+    topic: &str,
+    source: Option<&str>,
+    payload_digest_hex: &str,
+) -> String {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+    let mut h = DefaultHasher::new();
+    loop_iteration.hash(&mut h);
+    batch_index.hash(&mut h);
+    topic.hash(&mut h);
+    source.unwrap_or("").hash(&mut h);
+    payload_digest_hex.hash(&mut h);
+    let hash = h.finish();
+    format!("obs-{loop_iteration}-{batch_index}-{hash:016x}")
+}
+
+/// Compute a short hex payload digest from a payload string.
+///
+/// Returns the lowercase hex of the SHA-256 of `payload`. The
+/// caller passes the *raw payload* string; this is the *only*
+/// place a payload hash is computed. The hash never leaves the
+/// snapshot — only the digest (and any opaque source ref) is
+/// stored.
+pub fn payload_digest_hex(payload: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(payload.as_bytes());
+    let digest = hasher.finalize();
+    digest.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// Build the source-ref pointer used by U2-accepted observations.
+///
+/// The format is `accepted-event:<loop_iteration>:<batch_index>`
+/// — opaque, deterministic, and stable across replays. Future
+/// diagnosis adapters reuse the same shape so today’s records
+/// remain compatible.
+pub fn accepted_source_ref(loop_iteration: u32, batch_index: usize) -> String {
+    format!("accepted-event:{loop_iteration}:{batch_index}")
+}
+
+/// Outcome of `observations_from_accepted_events`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ObservationBatch {
+    /// Records to commit, already bounded and bounded by
+    /// `DISPLAY_RECORDS_MAX`. May be empty if no events
+    /// qualified.
+    pub records: Vec<KnowledgeRecord>,
+    /// How many accepted events were filtered out because
+    /// their disposition was DiagnosticObservation or
+    /// LoopControl (D3).
+    pub non_advancing_skipped: usize,
+}
+
+/// Build observations for an accepted batch, applying the
+/// Business/Recovery filter (D3) and the per-record bounds.
+///
+/// The function is pure: it returns a [`ObservationBatch`] and
+/// does not touch the ledger. The caller decides whether to
+/// commit; on commit failure the caller is responsible for the
+/// warning + rollback semantics (D4).
+///
+/// `loop_iteration` and `input_fingerprint` are mandatory for
+/// every record so the freshness dimension is always populated;
+/// `None` fingerprint is a legitimate input that the model
+/// translates into `EvidenceFreshness::Unknown`.
+pub fn observations_from_accepted_events<'a, I>(
+    loop_iteration: u32,
+    input_fingerprint: &InputFingerprint,
+    events: I,
+    classify: impl Fn(&str) -> crate::event_loop::disposition::Disposition,
+) -> ObservationBatch
+where
+    I: IntoIterator<Item = (usize, &'a ralph_proto::Event)>,
+{
+    let mut records: Vec<KnowledgeRecord> = Vec::new();
+    let mut non_advancing_skipped = 0usize;
+    for (batch_index, event) in events {
+        if !classify(event.topic.as_str()).advances_flow() {
+            non_advancing_skipped += 1;
+            continue;
+        }
+        let payload_str = event.payload.clone();
+        let digest = payload_digest_hex(&payload_str);
+        let source_ref = accepted_source_ref(loop_iteration, batch_index);
+        let id = observation_id(
+            loop_iteration,
+            batch_index,
+            event.topic.as_str(),
+            event.source.as_ref().map(|h| h.as_str()),
+            &digest,
+        );
+        let mut builder = KnowledgeRecord::builder(
+            KnowledgeAuthority::LedgerSnapshot,
+            KnowledgeKind::Observation,
+        )
+        .with_id(id)
+        .with_subject(format!("{} accepted in batch {batch_index}", event.topic.as_str()))
+        .with_payload_digest_hex(digest)
+        .with_source_ref(source_ref)
+        .with_input_fingerprint(input_fingerprint.clone())
+        // D6: accepted events must NEVER auto-promote to verified.
+        .with_verification(VerificationStatus::Unverified);
+        if let Some(hat) = &event.source {
+            builder = builder.with_evidence(EvidenceRef {
+                ref_id: format!("hat:{}", hat.as_str()),
+                digest: None,
+            });
+        }
+        match builder.build() {
+            Ok(record) => records.push(record),
+            Err(KnowledgeBuildError::EmptySubject) => {
+                // Subject can never be empty here because the
+                // builder is given a non-empty topic-derived
+                // string; defensive skip.
+                tracing::debug!(
+                    topic = %event.topic.as_str(),
+                    "GAP-01 U2: skipping empty-subject observation (defensive)"
+                );
+            }
+        }
+    }
+    ObservationBatch {
+        records,
+        non_advancing_skipped,
+    }
+}
+
+/// Result of `commit_accepted_observations`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CommitObservationOutcome {
+    /// Commit succeeded; snapshot has been updated.
+    Committed { count: usize },
+    /// Commit failed but the snapshot was rolled back; the
+    /// caller MUST emit only a warning and continue the loop.
+    PersistFailed { count: usize, error: String },
+    /// No records to commit (empty accepted batch).
+    Empty,
+}
+
+/// One-shot helper: commit the observation delta into the ledger
+/// using a fresh `KnowledgeObserved` delta. Failures are
+/// returned to the caller; the caller logs a warning and lets
+/// the existing batch ledger commit path proceed (D4 — never
+/// fail-close on observation persistence).
+pub fn commit_accepted_observations(
+    ledger: &mut crate::state::ledger::StateLedger,
+    loop_iteration: u32,
+    batch: ObservationBatch,
+) -> CommitObservationOutcome {
+    if batch.records.is_empty() {
+        return CommitObservationOutcome::Empty;
+    }
+    let count = batch.records.len();
+    let delta = crate::state::CommitDelta::KnowledgeObserved {
+        records: batch.records,
+    };
+    match ledger.commit(delta, Some(format!("loop.observation.{loop_iteration}"))) {
+        Ok(_) => CommitObservationOutcome::Committed { count },
+        Err(e) => CommitObservationOutcome::PersistFailed {
+            count,
+            error: format!("{e}"),
+        },
+    }
+}

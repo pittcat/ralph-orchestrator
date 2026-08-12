@@ -1599,3 +1599,222 @@ fn knowledge_commit_failure_does_not_change_processed_result() {
         "failed knowledge commit must not mutate the snapshot"
     );
 }
+
+// ---------------------------------------------------------------------------
+// GAP-01 U2: accepted observation wiring helpers.
+//
+// These tests cover the post-validation observer helpers added
+// in U2: filter on disposition, fail-soft commit, payload
+// digest shape, and one-batch-one-commit invariant.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn observations_from_accepted_events_filters_disposition() {
+    use crate::event_loop::disposition::{classify, Disposition};
+    use crate::state::knowledge::{
+        InputFingerprint, observations_from_accepted_events,
+    };
+
+    fn mk_event(topic: &str, payload: &str, hat: Option<&str>) -> ralph_proto::Event {
+        let mut e = ralph_proto::Event::new(topic, payload);
+        if let Some(h) = hat {
+            e.source = Some(ralph_proto::HatId::new(h));
+        }
+        e
+    }
+
+    let fp = InputFingerprint::Both {
+        loop_start_sha: "loop".into(),
+        plan_baseline_sha: "plan".into(),
+    };
+    let events: Vec<(usize, ralph_proto::Event)> = vec![
+        (0usize, mk_event("work.done", r#"{"task_key":"K1"}"#, Some("executor"))),
+        (1usize, mk_event("task.resume", r#"{"task_key":"K2"}"#, Some("recover"))),
+        (2usize, mk_event("event.malformed", "garbage", None)),
+        (3usize, mk_event("LOOP_COMPLETE", "", None)),
+        (4usize, mk_event("loop.cancel", "", None)),
+        (5usize, mk_event("plan.blocked", "reason", Some("reviewer"))),
+    ];
+    let batch = observations_from_accepted_events(
+        7,
+        &fp,
+        events.iter().map(|(i, e)| (*i, e)),
+        classify,
+    );
+
+    // Only Business/Recovery advance flow; the helper must
+    // include exactly `work.done`, `task.resume`, and
+    // `plan.blocked`.
+    assert_eq!(batch.records.len(), 3);
+    let kinds: Vec<&str> = batch
+        .records
+        .iter()
+        .map(|r| r.subject.split_whitespace().next().unwrap_or(""))
+        .collect();
+    assert!(kinds.contains(&"work.done"));
+    assert!(kinds.contains(&"task.resume"));
+    assert!(kinds.contains(&"plan.blocked"));
+
+    // Three non-advancing events were skipped (Diagnostic
+    // Observation + 2 LoopControl).
+    assert_eq!(batch.non_advancing_skipped, 3);
+
+    // Verification status is Unverified for every record —
+    // D6 forbids auto-promotion by accepted events.
+    for r in &batch.records {
+        assert_eq!(
+            r.verification,
+            crate::state::knowledge::VerificationStatus::Unverified
+        );
+    }
+
+    // Sanity: the disposition classifier is honoured — the
+    // helper uses the public classifier, no mock.
+    assert_eq!(classify("event.malformed"), Disposition::DiagnosticObservation);
+    assert_eq!(classify("LOOP_COMPLETE"), Disposition::LoopControl);
+}
+
+#[test]
+fn accepted_event_observation_contains_digest_not_payload() {
+    use crate::event_loop::disposition::classify;
+    use crate::state::knowledge::{
+        InputFingerprint, observations_from_accepted_events, payload_digest_hex,
+    };
+
+    let sensitive_payload = "SECRET_TOKEN=abcdef1234567890";
+    let digest = payload_digest_hex(sensitive_payload);
+    let event = ralph_proto::Event::new("work.done", sensitive_payload);
+    let events = vec![(0usize, &event)];
+
+    let batch = observations_from_accepted_events(
+        1,
+        &InputFingerprint::None,
+        events,
+        classify,
+    );
+    assert_eq!(batch.records.len(), 1);
+    let record = &batch.records[0];
+    assert_eq!(record.payload_digest.as_deref(), Some(digest.as_str()));
+    // Raw payload MUST NOT enter the record.
+    assert!(!record.subject.contains(sensitive_payload));
+    assert!(
+        !record
+            .source_ref
+            .as_deref()
+            .unwrap_or("")
+            .contains(sensitive_payload)
+    );
+}
+
+#[test]
+fn observation_id_is_stable() {
+    use crate::state::knowledge::{InputFingerprint, observation_id, payload_digest_hex};
+
+    let payload = r#"{"k":"v"}"#;
+    let digest = payload_digest_hex(payload);
+    let id1 = observation_id(3, 7, "work.done", Some("executor"), &digest);
+    let id2 = observation_id(3, 7, "work.done", Some("executor"), &digest);
+    assert_eq!(id1, id2, "same inputs must produce the same id");
+
+    // Touching any field changes the id.
+    assert_ne!(
+        id1,
+        observation_id(3, 7, "work.done", Some("planner"), &digest),
+        "source change must change id"
+    );
+    assert_ne!(
+        id1,
+        observation_id(3, 8, "work.done", Some("executor"), &digest),
+        "batch index change must change id"
+    );
+    assert_ne!(
+        id1,
+        observation_id(3, 7, "work.failed", Some("executor"), &digest),
+        "topic change must change id"
+    );
+    assert_ne!(
+        id1,
+        observation_id(4, 7, "work.done", Some("executor"), &digest),
+        "iteration change must change id"
+    );
+    let _ = InputFingerprint::None; // silence unused warning if no other tests use it
+}
+
+#[test]
+fn commit_accepted_observations_is_fail_soft() {
+    use crate::event_loop::disposition::classify;
+    use crate::state::knowledge::{
+        CommitObservationOutcome, InputFingerprint, commit_accepted_observations,
+        observations_from_accepted_events,
+    };
+
+    let dir = workspace();
+    let workspace = dir.path();
+    let ledger_path = workspace.join(LEDGER_RELATIVE_PATH);
+    std::fs::create_dir_all(&ledger_path).expect("create_dir_all");
+
+    let mut ledger = StateLedger::new(workspace, true);
+    let event = ralph_proto::Event::new("work.done", r#"{"k":"v"}"#);
+    let events = vec![(0usize, &event)];
+    let batch = observations_from_accepted_events(
+        1,
+        &InputFingerprint::Both {
+            loop_start_sha: "l".into(),
+            plan_baseline_sha: "p".into(),
+        },
+        events,
+        classify,
+    );
+    let outcome = commit_accepted_observations(&mut ledger, 1, batch);
+    assert!(
+        matches!(outcome, CommitObservationOutcome::PersistFailed { .. }),
+        "commit must return PersistFailed when ledger path is a directory; got {outcome:?}"
+    );
+    // Snapshot must NOT have grown — D4 fail-soft.
+    assert!(ledger.snapshot().knowledge.records().is_empty());
+    // The persisted log is untouched (commit failed before write).
+    assert!(ledger.commit_log().is_empty());
+}
+
+#[test]
+fn one_batch_has_at_most_one_knowledge_commit() {
+    use crate::event_loop::disposition::classify;
+    use crate::state::knowledge::{
+        CommitObservationOutcome, InputFingerprint, commit_accepted_observations,
+        observations_from_accepted_events,
+    };
+
+    let (_dir, mut ledger) = fresh_ledger();
+    let events = vec![
+        (0usize, ralph_proto::Event::new("work.done", r#"{"k":"v"}"#)),
+        (1usize, ralph_proto::Event::new("work.failed", r#"{"k":"v"}"#)),
+        (2usize, ralph_proto::Event::new("plan.ready", r#"{"k":"v"}"#)),
+        (3usize, ralph_proto::Event::new("event.malformed", "")),
+        (4usize, ralph_proto::Event::new("work.done", r#"{"k":"v2"}"#)),
+    ];
+    let events_ref: Vec<(usize, &ralph_proto::Event)> = events.iter().map(|(i, e)| (*i, e)).collect();
+    let batch = observations_from_accepted_events(
+        2,
+        &InputFingerprint::Both {
+            loop_start_sha: "l".into(),
+            plan_baseline_sha: "p".into(),
+        },
+        events_ref,
+        classify,
+    );
+    assert_eq!(batch.records.len(), 4, "4 of 5 events advance flow");
+    assert_eq!(batch.non_advancing_skipped, 1);
+    let outcome = commit_accepted_observations(&mut ledger, 2, batch);
+    assert!(matches!(outcome, CommitObservationOutcome::Committed { count: 4 }));
+
+    // Exactly one knowledge delta in the commit log.
+    let knowledge_deltas = ledger
+        .commit_log()
+        .iter()
+        .filter(|c| matches!(c.delta, CommitDelta::KnowledgeObserved { .. }))
+        .count();
+    assert_eq!(
+        knowledge_deltas, 1,
+        "U2 invariant: one batch = at most one knowledge commit; got {knowledge_deltas}"
+    );
+}

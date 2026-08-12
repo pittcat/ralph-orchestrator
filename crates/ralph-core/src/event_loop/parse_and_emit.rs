@@ -4048,6 +4048,72 @@ impl EventLoop {
             // decision points (see `commit_terminal_delta`).
         }
 
+        // GAP-01 (plan 2026-08-13-001) U2: append bounded,
+        // post-validation cognitive observations to the ledger
+        // for every accepted `Business` / `Recovery` event in
+        // the batch. Failures are warning-only — D4 — and never
+        // roll back the business `ProcessedEvents` result.
+        if !accepted_log_events.is_empty() {
+            // Capture fingerprint inputs while we still have
+            // an immutable borrow on `self.state`. The helper
+            // takes owned values so we can drop the borrow
+            // before mutably borrowing `state.state_ledger`.
+            let loop_iteration = self.state.iteration;
+            let loop_start_sha = self.state.loop_start_sha.clone();
+            let plan_baseline_sha = self.state.plan_baseline_sha.clone();
+            let fingerprint = match (loop_start_sha, plan_baseline_sha) {
+                (Some(l), Some(p)) => crate::state::InputFingerprint::Both {
+                    loop_start_sha: l,
+                    plan_baseline_sha: p,
+                },
+                (Some(l), None) => crate::state::InputFingerprint::LoopStartOnly {
+                    loop_start_sha: l,
+                },
+                (None, Some(p)) => crate::state::InputFingerprint::PlanBaselineOnly {
+                    plan_baseline_sha: p,
+                },
+                (None, None) => crate::state::InputFingerprint::None,
+            };
+            let batch = crate::state::observations_from_accepted_events(
+                loop_iteration,
+                &fingerprint,
+                accepted_log_events.iter().enumerate(),
+                crate::event_loop::disposition::classify,
+            );
+            if !batch.records.is_empty()
+                && let Some(ref mut ledger) = self.state.state_ledger
+            {
+                let outcome = crate::state::commit_accepted_observations(
+                    ledger,
+                    loop_iteration,
+                    batch,
+                );
+                match outcome {
+                    crate::state::CommitObservationOutcome::Committed { count } => {
+                        tracing::debug!(
+                            count,
+                            iteration = loop_iteration,
+                            "GAP-01 U2: knowledge observation committed"
+                        );
+                    }
+                    crate::state::CommitObservationOutcome::PersistFailed {
+                        count,
+                        error,
+                    } => {
+                        tracing::warn!(
+                            error = %error,
+                            count,
+                            iteration = loop_iteration,
+                            "GAP-01 U2: knowledge commit failed; loop continues (D4 fail-soft)"
+                        );
+                    }
+                    crate::state::CommitObservationOutcome::Empty => {}
+                }
+            }
+            // No `state_ledger` (feature off): silently skip
+            // — the no-op contract is preserved.
+        }
+
         // U12 wiring (P0-1, 2026-06-27 review): refresh the
         // step-close progress registry after every parsed
         // batch so the next emit is checked against the
