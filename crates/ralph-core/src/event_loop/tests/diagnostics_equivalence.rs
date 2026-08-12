@@ -16,6 +16,8 @@
 
 use ralph_core::diagnostics::RuntimeTraceEntry;
 use ralph_core::diagnostics::RuntimeTracePhase;
+use ralph_core::diagnostics::probe_session_dir_writable;
+use std::fs;
 
 /// Structural smoke test: a `RuntimeTraceEntry::new` plus a phase
 /// can be serialized and round-tripped. This is the
@@ -43,4 +45,55 @@ fn disabled_collector_has_no_runtime_trace_logger() {
     c.log_runtime_trace(RuntimeTraceEntry::new(0, 0, RuntimeTracePhase::Batch));
     // Reaching here without panicking is sufficient: the
     // disabled collector drops the entry on the floor.
+}
+
+/// Plan 2026-08-12-001 fix-plan U7 / synth:P1-5: the session-dir
+/// probe must NOT leave a `.ralph-dx-writeprobe-*` artifact
+/// behind. The previous implementation called `.keep()` on the
+/// `tempfile::Builder` handle and accumulated dozens of empty
+/// probe files per run. We probe the same dir many times and
+/// assert the directory contents are unchanged after each call.
+#[test]
+fn probe_session_dir_writable_leaves_no_artifacts() {
+    let tmp = tempfile::TempDir::new().expect("TempDir");
+    let dir = tmp.path();
+
+    // Baseline: 0 entries.
+    let baseline: Vec<_> = fs::read_dir(dir)
+        .expect("read_dir")
+        .filter_map(|e| e.ok())
+        .collect();
+    assert!(
+        baseline.is_empty(),
+        "fresh TempDir should be empty, got {} entries",
+        baseline.len()
+    );
+
+    // Probe 50 times — implementation must clean up after every
+    // call. Even if probe fails on some platform-specific env,
+    // the only allowed residue is `false`-only; we never
+    // observe a leftover `.ralph-dx-writeprobe-*` file.
+    for _ in 0..50 {
+        let _ = probe_session_dir_writable(dir);
+    }
+    let after: Vec<_> = fs::read_dir(dir)
+        .expect("read_dir")
+        .filter_map(|e| e.ok())
+        .collect();
+    assert!(
+        after.is_empty(),
+        "probe_session_dir_writable must leave zero artifacts, got {} entries: {:?}",
+        after.len(),
+        after.iter().map(|e| e.path()).collect::<Vec<_>>()
+    );
+}
+
+/// Plan 2026-08-12-001 fix-plan U7: probe against a non-directory
+/// path must return false, not panic.
+#[test]
+fn probe_session_dir_writable_rejects_non_directory() {
+    let tmp = tempfile::TempDir::new().expect("TempDir");
+    let file_path = tmp.path().join("not-a-dir");
+    fs::write(&file_path, b"x").expect("write");
+    assert!(!probe_session_dir_writable(&file_path));
 }

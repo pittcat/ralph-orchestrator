@@ -154,3 +154,40 @@ def test_artifact_discovery_canonical_path(artifact_name: str) -> None:
     body = _read(ARTIFACT_DISCOVERY)
     # Path must be exact (no extra whitespace, no leading "./").
     assert artifact_name in body, f"artifact-discovery.md must mention {artifact_name}"
+
+
+def test_skill_specifies_bundle_first_diagnose_invocation() -> None:
+    """Plan 2026-08-12-001 fix-plan U3: the run-diagnosis skill
+    must spell out the concrete ``ralph diagnose --legacy
+    --session latest --diagnostics-root ...`` invocation so the
+    bundle-first workflow is reproducible from the skill alone.
+    """
+    body = _read(SKILL_MD)
+    for token in (
+        "--legacy",
+        "--session latest",
+        "--diagnostics-root",
+        "ralph diagnose",
+    ):
+        assert token in body, (
+            f"skill must specify the bundle-first CLI token {token!r} "
+            "in Phase 0 so the workflow is reproducible from the skill alone"
+        )
+
+
+def test_report_template_frontmatter_has_4_required_fields() -> None:
+    """Plan 2026-08-12-001 fix-plan U3: report-template.md YAML
+    frontmatter must carry structured_result_ref / trace_status /
+    feedback_status / evidence_gaps so downstream tooling can
+    key on them. Field names must be exact (YAML keys).
+    """
+    body = _read(REPORT_TEMPLATE)
+    for field in (
+        "structured_result_ref",
+        "trace_status",
+        "feedback_status",
+        "evidence_gaps",
+    ):
+        assert field in body, (
+            f"report-template.md frontmatter must declare {field!r}"
+        )

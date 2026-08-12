@@ -16,10 +16,20 @@ use serde_json::Value;
 
 use crate::diagnostics::{
     input_bundle as bundle_schema, ArtifactStatus, DiagnosisInputBundle, ManifestStatus,
+    DIAGNOSIS_INPUT_SCHEMA_VERSION,
 };
 
 /// Public status of the bundle, surfaced both in the report and in
 /// the manifest's own `status` field.
+///
+/// `SchemaMismatch` (plan 2026-08-12-001 fix-plan U2 / synth:P0-2)
+/// carries the on-disk version and the reader's compiled
+/// version so the report can surface "the on-disk bundle is
+/// authoritative; re-read with a newer binary" instead of
+/// silently demoting it to `Legacy`. The two strings exist for
+/// forensic traceability — when the reader is newer than the
+/// writer the user is on a downgrade; when the reader is older
+/// the user is on an upgrade and can simply upgrade again.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum BundleStatus {
@@ -30,6 +40,15 @@ pub enum BundleStatus {
     Missing,
     Legacy,
     NotApplicable,
+    /// Manifest parsed cleanly but carries a `schema_version`
+    /// different from `DIAGNOSIS_INPUT_SCHEMA_VERSION`. Treated
+    /// as authoritative-on-disk; the report explains the version
+    /// gap instead of mapping to `Legacy` (which would imply the
+    /// session predates the bundle format).
+    SchemaMismatch {
+        on_disk_version: String,
+        reader_version: String,
+    },
 }
 
 impl Default for BundleStatus {
@@ -188,8 +207,23 @@ pub fn read_input_bundle_report(session_dir: &Path) -> DiagnosisInputReport {
 }
 
 fn project_bundle(bundle: &DiagnosisInputBundle) -> DiagnosisInputReport {
+    // Plan 2026-08-12-001 fix-plan U2 / synth:P0-2: detect the
+    // schema-version mismatch at projection time so the report
+    // distinguishes "session predates bundle format" (Legacy)
+    // from "running reader is older/newer than the on-disk
+    // writer" (SchemaMismatch). The latter must NOT be
+    // collapsed into Legacy — that destroyed rollback safety
+    // when an operator downgraded `ralph` to an older binary.
+    let status = if bundle.schema_version != DIAGNOSIS_INPUT_SCHEMA_VERSION {
+        BundleStatus::SchemaMismatch {
+            on_disk_version: bundle.schema_version.clone(),
+            reader_version: DIAGNOSIS_INPUT_SCHEMA_VERSION.to_string(),
+        }
+    } else {
+        BundleStatus::from(bundle.manifest_status)
+    };
     DiagnosisInputReport {
-        status: BundleStatus::from(bundle.manifest_status),
+        status,
         path: Some("diagnosis-input.json".to_string()),
         schema_version: Some(bundle.schema_version.clone()),
         preset_label: bundle.run.preset_label.clone(),
@@ -323,7 +357,7 @@ pub mod suggestions {
         let mut suggestions = Vec::new();
         let mut gaps = Vec::new();
 
-        match input.status {
+        match &input.status {
             BundleStatus::Missing | BundleStatus::Legacy => {
                 gaps.push(EvidenceGap {
                     artifact: "diagnosis-input.json".to_string(),
@@ -352,6 +386,32 @@ pub mod suggestions {
                     confidence: Some(60),
                     text: "Bundle write failed mid-run. Check filesystem quota and the session directory permissions."
                         .to_string(),
+                });
+            }
+            BundleStatus::SchemaMismatch {
+                on_disk_version,
+                reader_version,
+            } => {
+                // Plan 2026-08-12-001 fix-plan U2 / synth:P0-2:
+                // do NOT collapse into "re-run with diagnostics
+                // enabled" — that path is misleading when the
+                // on-disk bundle is intact and only the
+                // reader/writer versions differ.
+                gaps.push(EvidenceGap {
+                    artifact: "diagnosis-input.json".to_string(),
+                    reason: format!(
+                        "schema version mismatch: on-disk={on_disk_version}, reader={reader_version}; the on-disk bundle is authoritative"
+                    ),
+                    affects: Some("bundle".to_string()),
+                });
+                suggestions.push(RepairSuggestion {
+                    tier: "short".to_string(),
+                    finding_refs: vec!["bundle.schema_mismatch".to_string()],
+                    evidence_refs: vec!["diagnosis-input.json".to_string()],
+                    confidence: Some(75),
+                    text: format!(
+                        "Bundle schema-version mismatch (on-disk={on_disk_version}, reader={reader_version}). The on-disk bundle is authoritative. Re-read with a `ralph` binary whose compiled `DIAGNOSIS_INPUT_SCHEMA_VERSION` matches {on_disk_version} (or upgrade the writer so future bundles match {reader_version})."
+                    ),
                 });
             }
             _ => {}
@@ -425,6 +485,75 @@ pub mod suggestions {
         }
 
         (suggestions, gaps)
+    }
+}
+
+#[cfg(test)]
+mod u2_schema_mismatch_tests {
+    //! Plan 2026-08-12-001 fix-plan U2 / synth:P0-2: in-crate
+    //! verification that the suggestion mapper distinguishes
+    //! SchemaMismatch from Missing/Legacy. The public API
+    //! (`build_suggestions_and_gaps`) lives in
+    //! [`super::suggestions`]; this module exists so the
+    //! Mapper-only contract is locked next to its impl.
+
+    use super::suggestions::build_suggestions_and_gaps;
+    use super::{BundleStatus, DiagnosisInputReport, FeedbackLifecycleReport, RuntimeTraceReport};
+    use std::path::Path;
+
+    #[test]
+    fn schema_mismatch_arm_emits_version_specific_suggestion() {
+        let report = DiagnosisInputReport {
+            status: BundleStatus::SchemaMismatch {
+                on_disk_version: "run-diagnosis-input/v999".to_string(),
+                reader_version: "run-diagnosis-input/v1".to_string(),
+            },
+            ..DiagnosisInputReport::default()
+        };
+        // Pre-populate the trace/feedback reports with
+        // matching Present status so they do not inject
+        // "Re-run with diagnostics enabled" suggestions
+        // unrelated to the SchemaMismatch arm under test.
+        let mut trace = RuntimeTraceReport::default();
+        trace.status = BundleStatus::Present;
+        let mut feedback = FeedbackLifecycleReport::default();
+        feedback.status = BundleStatus::Present;
+        let (suggestions, gaps) = build_suggestions_and_gaps(
+            &report,
+            &trace,
+            &feedback,
+            &[],
+            Path::new("/tmp/x"),
+        );
+        assert!(
+            gaps.iter()
+                .any(|g| g.reason.contains("run-diagnosis-input/v999")),
+            "evidence gap must mention on-disk version, got {:?}",
+            gaps
+        );
+        let schema_mismatch_suggestions: Vec<_> = suggestions
+            .iter()
+            .filter(|s| s.finding_refs.iter().any(|r| r == "bundle.schema_mismatch"))
+            .collect();
+        assert!(
+            schema_mismatch_suggestions
+                .iter()
+                .any(|s| s.text.contains("schema-version mismatch")
+                    && s.text.contains("run-diagnosis-input/v999")),
+            "bundle.schema_mismatch suggestion must reference schema-version mismatch and on-disk version, got {:?}",
+            suggestions
+        );
+        // Hard contract: the SchemaMismatch-tagged
+        // suggestion must NEVER be the misleading "Re-run
+        // with diagnostics enabled" path (that path is
+        // reserved for Missing/Legacy bundle status).
+        for s in &schema_mismatch_suggestions {
+            assert!(
+                !s.text.contains("Re-run with diagnostics enabled"),
+                "SchemaMismatch must not produce 'Re-run with diagnostics enabled' suggestion: {:?}",
+                s
+            );
+        }
     }
 }
 

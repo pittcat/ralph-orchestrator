@@ -143,6 +143,22 @@ Phase 4  主 Agent 汇总落盘
 
 Diagnostics 四档：`FULL` | `MINIMAL` | `LOGS_ONLY` | `DISABLED` — 决定 L2/L OPAC 深度。
 
+### Phase 0 bundle-first invocation（plan 2026-08-001 fix-plan U3）
+
+bundle-first 读取（§0.2）的**第一步**是用 `ralph diagnose` 直接对当前 session 输出 JSON：
+
+```bash
+ralph diagnose --legacy --session latest --diagnostics-root "$RUN/.ralph/diagnostics" --format json --output "$REPORT_BASE.json"
+```
+
+- `--legacy`：在 bundle `status ∈ {legacy, missing}` 时仍返回可消费的 JSON（不要求 bundle 是 present）。
+- `--session latest`：从 `$RUN/.ralph/diagnostics/` 里选最新 session。
+- `--diagnostics-root`：显式传入 diagnostics 根，避免从 cwd 推断。
+- `--format json`：输出到 stdout 之外；与 `--output` 配对落盘到 `$REPORT_BASE.json` 供后续步骤直接读。
+- `REPORT_BASE` 在 §0.2 列表中已分配唯一路径，不与 events.jsonl 冲突。
+
+若命令退出码非零（典型：diagnostics 目录不存在、session latest 解析失败），把 stderr 写进报告 §0 的「环境异常」段，按 §0.2 legacy 兜底继续后续步骤。**禁止** 把 `ralph diagnose` 退出码当 bundle 状态判定（bundle 状态以 `$REPORT_BASE.json` 的 `bundle.status` 字段为准）。
+
 ### Phase 0 能力推断（execution capabilities）
 
 > **目的**：在写报告 §0 与 §1 之前，先声明这次 run 的 capability 集合，便于后续对账（supervisor.db 是否存在、wave_id Confirm 走哪条路径）有锚点。**禁止**按 builtin preset 名称点名门控；一律 capability-triggered（Intent.execution_model + YAML 信号 + 产物信号）。

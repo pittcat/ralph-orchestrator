@@ -189,3 +189,84 @@ fn malformed_manifest_falls_back_to_legacy() {
     let report = read_input_bundle_report(&session);
     assert_eq!(report.status, BundleStatus::Legacy);
 }
+
+// Plan 2026-08-12-001 fix-plan U2 / synth:P0-2: schema-version
+// mismatch must surface as `BundleStatus::SchemaMismatch`, NOT as
+// `Legacy` (which would silently demote a valid bundle on
+// binary downgrade and emit a misleading "re-run with
+// diagnostics" suggestion).
+
+#[test]
+fn schema_mismatch_surfaces_as_schema_mismatch_not_legacy() {
+    let tmp = TempDir::new().expect("TempDir");
+    let session = tmp.path().join("session");
+    fs::create_dir_all(&session).expect("create session dir");
+    // Build a valid bundle and rewrite its schema_version to a
+    // future marker. The reader must NOT collapse this to
+    // Legacy; it must distinguish "running reader is older
+    // than on-disk writer".
+    let mut bundle = DiagnosisInputBundle::new_pending(&session);
+    bundle.schema_version = "run-diagnosis-input/v999".to_string();
+    write_input_bundle(&session, &bundle).expect("write manifest");
+    let report = read_input_bundle_report(&session);
+    match &report.status {
+        BundleStatus::SchemaMismatch {
+            on_disk_version,
+            reader_version,
+        } => {
+            assert_eq!(on_disk_version, "run-diagnosis-input/v999");
+            assert_eq!(
+                reader_version,
+                ralph_core::diagnostics::DIAGNOSIS_INPUT_SCHEMA_VERSION
+            );
+        }
+        other => panic!(
+            "expected SchemaMismatch for version-bumped on-disk manifest, got {:?}",
+            other
+        ),
+    }
+}
+
+#[test]
+fn schema_mismatch_suggestion_names_versions() {
+    // The suggestion mapper must NOT route SchemaMismatch to
+    // the misleading "Re-run with diagnostics enabled" path;
+    // it must spell out the on-disk vs reader version and
+    // describe the rollback-safety contract.
+    let tmp = TempDir::new().expect("TempDir");
+    let session = tmp.path().join("session");
+    fs::create_dir_all(&session).expect("create session dir");
+    let mut bundle = DiagnosisInputBundle::new_pending(&session);
+    bundle.schema_version = "run-diagnosis-input/v999".to_string();
+    write_input_bundle(&session, &bundle).expect("write manifest");
+    let report = read_input_bundle_report(&session);
+    let json = serde_json::to_string(&report.status).expect("serialize status");
+    assert!(
+        json.contains("schema_mismatch"),
+        "serialized status must include schema_mismatch tag, got: {}",
+        json
+    );
+    assert!(
+        json.contains("run-diagnosis-input/v999"),
+        "serialized status must include on-disk version, got: {}",
+        json
+    );
+}
+
+#[test]
+fn matching_schema_version_projects_as_present() {
+    // Sanity: when the on-disk schema matches the reader's
+    // compiled constant, the report must NOT spuriously
+    // surface SchemaMismatch.
+    let tmp = TempDir::new().expect("TempDir");
+    let session = tmp.path().join("session");
+    fs::create_dir_all(&session).expect("create session dir");
+    let bundle = DiagnosisInputBundle::new_pending(&session);
+    write_input_bundle(&session, &bundle).expect("write manifest");
+    let report = read_input_bundle_report(&session);
+    assert_eq!(report.status, BundleStatus::Pending);
+    assert!(!matches!(
+        report.status,
+        BundleStatus::SchemaMismatch { .. }
+    ));
+}

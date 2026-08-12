@@ -34,7 +34,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 use tempfile::NamedTempFile;
 
-use crate::diagnostics::session::is_session_dir_writable;
+use crate::diagnostics::session::probe_session_dir_writable;
 
 /// Status of the manifest itself, surfaced both in the on-disk
 /// `status` field and via the collector's in-memory handle.
@@ -298,7 +298,7 @@ pub fn write_manifest(
     session_dir: &Path,
     bundle: &DiagnosisInputBundle,
 ) -> std::io::Result<Option<PathBuf>> {
-    if !is_session_dir_writable(session_dir) {
+    if !probe_session_dir_writable(session_dir) {
         tracing::warn!(
             target: "ralph_core::diagnostics",
             session_dir = %session_dir.display(),
@@ -349,9 +349,18 @@ pub fn write_manifest(
 }
 
 /// Reads and deserializes a manifest from disk, returning `None`
-/// if the file is missing, malformed, or carries an unknown
-/// schema version. The reporter uses this to drive the bundle-first
-/// loading path.
+/// if the file is missing or malformed.
+///
+/// **Schema-version policy (plan 2026-08-12-001 fix-plan U2 / synth:P0-2):**
+/// when the parsed bundle's `schema_version` differs from
+/// [`DIAGNOSIS_INPUT_SCHEMA_VERSION`], the function **still**
+/// returns the bundle — the on-disk bytes are authoritative
+/// and the reporter must distinguish "wrong version" from
+/// "session predates this format". The reporter projection in
+/// [`crate::diagnosis::bundle::project_bundle`] maps the
+/// version mismatch to `BundleStatus::SchemaMismatch { on_disk_version,
+/// reader_version }` so the report can surface the gap instead of
+/// silently demoting the bundle to `Legacy`.
 pub fn read_manifest(session_dir: &Path) -> Option<DiagnosisInputBundle> {
     let path = manifest_path(session_dir);
     let body = match fs::read(&path) {
@@ -371,13 +380,16 @@ pub fn read_manifest(session_dir: &Path) -> Option<DiagnosisInputBundle> {
         }
     };
     if bundle.schema_version != DIAGNOSIS_INPUT_SCHEMA_VERSION {
+        // Per fix-plan U2 / synth:P0-2: do NOT swallow the bundle.
+        // The on-disk format is authoritative; the reader is just
+        // one version ahead/behind. Surface the gap to the
+        // reporter instead of mapping to Legacy.
         tracing::warn!(
             target: "ralph_core::diagnostics",
             schema = %bundle.schema_version,
             expected = %DIAGNOSIS_INPUT_SCHEMA_VERSION,
-            "diagnosis-input.json schema version mismatch; ignoring"
+            "diagnosis-input.json schema version mismatch; reporting as SchemaMismatch"
         );
-        return None;
     }
     Some(bundle)
 }

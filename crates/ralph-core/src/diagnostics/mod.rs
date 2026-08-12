@@ -32,7 +32,7 @@ mod orchestration;
 mod performance;
 mod recovery;
 mod runtime_trace;
-mod session;
+pub mod session;
 mod stream_handler;
 mod trace_layer;
 
@@ -57,6 +57,7 @@ pub use recovery::{MAX_RECOVERY_NOTE_CHARS, RecoveryLogger};
 pub use runtime_trace::{
     RuntimeTraceEntry, RuntimeTraceLogger, RuntimeTracePhase, RUNTIME_TRACE_SCHEMA_VERSION,
 };
+pub use session::probe_session_dir_writable;
 pub use stream_handler::DiagnosticStreamHandler;
 pub use trace_layer::{DiagnosticTraceLayer, TraceEntry};
 // `DiagnosisSummary` is declared at module root below, so callers can

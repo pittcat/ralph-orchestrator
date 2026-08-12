@@ -21,6 +21,12 @@ diagnostics_mode: FULL | MINIMAL | LOGS_ONLY | DISABLED
 bundle: present | finalized | degraded | legacy | missing   # 来自 §0.2 bundle-first 读取
 bundle_path: <rel-path-to-diagnosis-input.json>             # 同源；缺失时省略
 history_search: disabled | preset-only | full   # 来自主 SKILL §0.1 的 AskUserQuestion；默认 disabled
+# plan 2026-08-12-001 fix-plan U3: bundle-first 报告配套 frontmatter 字段
+# 全部 required: true，缺一即视为模板漂移（grep 校验）
+structured_result_ref: <rel-path-to-diagnose-json-output>  # `ralph diagnose --legacy --format json --output ...` 落盘的 JSON 路径
+trace_status: present | missing | degraded | legacy        # runtime-trace.jsonl 读取状态
+feedback_status: present | missing | degraded | legacy     # feedback.jsonl 读取状态
+evidence_gaps: <list of strings>                          # bundle reader / trace reader / feedback reader 上报的证据缺口
 ---
 
 # <preset> Loop `<loop_id>` 运行链路诊断报告
