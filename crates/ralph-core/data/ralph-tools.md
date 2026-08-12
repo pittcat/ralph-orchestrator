@@ -155,7 +155,7 @@ metadata:
 - **字段含义**：
   - `authority: ledger_snapshot` — 唯一可信来源是编排器的 state ledger；不要从 prompt 的字符串推断“事实”。
   - `records` / `current` / `stale` / `unknown` / `unverified` — 计数；不展示 raw payload 或内部路径。
-  - `subject` / `digest` / `source_ref` — 每条记录一行；digest 是 SHA-256 摘要前缀，source_ref 是稳定的逻辑指针（如 `accepted-event:<iter>:<idx>:<id>`）。
+  - `subject` / `digest` / `source_ref` / `evidence_refs` — 每条记录一行；digest 是 SHA-256 摘要前缀，source_ref 是稳定的逻辑指针（如 `accepted-event:<iter>:<idx>:<id>`），evidence_refs 中的 ref_id 均经 scrubbing 处理（路径前缀替换、换行折叠），不会暴露原始路径或原始凭证。
 - **状态语义**：
   - `freshness=current` 仅表示“该记录的输入指纹与当前 loop/plan 指纹匹配”，**不等于**已验证或 Git tree 正确。
   - `freshness=stale` 表示指纹不匹配；不要用 stale 记录作为完成证据。

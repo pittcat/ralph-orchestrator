@@ -343,6 +343,9 @@ impl KnowledgeRecordBuilder {
             .into_iter()
             .take(EVIDENCE_REFS_MAX)
             .map(|mut e| {
+                // Defense-in-depth: scrub ref_id before the 256-byte cap so the
+                // disk snapshot never stores raw paths / multi-line tokens.
+                e.ref_id = scrub_for_prompt(&e.ref_id);
                 e.ref_id = truncate_bytes(&e.ref_id, SEMANTIC_FIELD_MAX_BYTES);
                 if let Some(d) = e.digest.as_ref() {
                     e.digest = Some(truncate_bytes(d, SEMANTIC_FIELD_MAX_BYTES));
@@ -748,11 +751,21 @@ pub fn render_prompt_block(state: &OrchestrationKnowledgeState) -> String {
             VerificationStatus::Falsified => "falsified",
             VerificationStatus::Unverified => "unverified",
         };
-        // Subject, source ref, and digest are passed through
+        // Subject, source ref, digest, and evidence_refs are passed through
         // a final scrubber so no raw payload or absolute path
         // can leak even if the upstream builder accepted it.
+        let evidence_refs_str = if record.evidence_refs.is_empty() {
+            String::new()
+        } else {
+            record
+                .evidence_refs
+                .iter()
+                .map(|e| format!("[ref_id={}]", scrub_for_prompt(&e.ref_id)))
+                .collect::<Vec<_>>()
+                .join(" ")
+        };
         out.push_str(&format!(
-            "- [{} / {}] subject=\"{}\" digest={} source_ref={}\n",
+            "- [{} / {}] subject=\"{}\" digest={} source_ref={}{}\n",
             freshness,
             verification,
             scrub_for_prompt(&record.subject),
@@ -766,6 +779,11 @@ pub fn render_prompt_block(state: &OrchestrationKnowledgeState) -> String {
                 .as_deref()
                 .map(scrub_for_prompt)
                 .unwrap_or_else(|| "<none>".to_string()),
+            if evidence_refs_str.is_empty() {
+                String::new()
+            } else {
+                format!(" evidence_refs={evidence_refs_str}")
+            },
         ));
     }
     out

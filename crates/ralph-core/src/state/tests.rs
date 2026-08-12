@@ -1915,6 +1915,57 @@ fn render_prompt_block_never_contains_raw_payload_or_path() {
 }
 
 #[test]
+fn render_prompt_block_evidence_refs_are_scrubbed() {
+    use crate::state::knowledge::{
+        InputFingerprint, KnowledgeAuthority, KnowledgeKind, KnowledgeRecord,
+        VerificationStatus, EvidenceRef,
+    };
+
+    let mut state = OrchestrationKnowledgeState::default();
+    // ref_id contains an absolute path, a raw secret token, and embedded newlines.
+    // All three must be stripped before the record reaches the prompt.
+    let record = KnowledgeRecord::builder(KnowledgeAuthority::LedgerSnapshot, KnowledgeKind::Observation)
+        .with_subject("U1 plan ready")
+        .with_payload_digest_hex("deadbeef")
+        .with_source_ref("accepted-event:1:0:obs-1")
+        .with_input_fingerprint(InputFingerprint::Both {
+            loop_start_sha: "l".into(),
+            plan_baseline_sha: "p".into(),
+        })
+        .with_verification(VerificationStatus::Unverified)
+        .with_evidence(EvidenceRef {
+            ref_id: "/absolute/path/REFID_SECRET_TOKEN_with_newline\nattack".to_string(),
+            digest: None,
+        })
+        .build()
+        .expect("build");
+    state.insert(record);
+
+    let block = crate::state::render_prompt_block(&state);
+    // Absolute path prefix must be scrubbed (leading "/" stripped).
+    assert!(
+        !block.contains("/absolute/path"),
+        "absolute path in ref_id must not survive in the prompt block; got:\n{block}"
+    );
+    // After scrubbing, the ref_id region must contain the scrubber tag indicating
+    // the original was path-scrubbed, not the raw token.
+    assert!(
+        block.contains("<abs-path:"),
+        "scrubbed ref_id must contain the <abs-path:> tag; got:\n{block}"
+    );
+    // The evidence_refs line in the block must not contain a raw embedded newline.
+    // Check the specific record line that contains the ref_id.
+    let record_line = block
+        .lines()
+        .find(|l| l.contains("evidence_refs="))
+        .expect("evidence_refs line must be present");
+    assert!(
+        !record_line.contains('\n'),
+        "evidence_refs line must not contain raw newline; got: {record_line}"
+    );
+}
+
+#[test]
 fn render_prompt_block_caps_records() {
     use crate::state::knowledge::{
         InputFingerprint, KnowledgeAuthority, KnowledgeKind, KnowledgeRecord,
