@@ -31,6 +31,7 @@
 //! See the 2026-06-04 "Runtime Diagnosis & Recovery Intelligence" plan
 //! for context.
 
+mod bundle;
 mod envelope;
 mod journal;
 mod reporter;
@@ -40,10 +41,16 @@ mod responder;
 mod tests;
 
 pub(crate) use envelope::normalize_part;
+pub use bundle::{
+    read_feedback_lifecycle_report, read_input_bundle_report, read_runtime_trace_report,
+    ArtifactReport, BundleStatus, DiagnosisInputReport, EvidenceGap, FeedbackLifecycleReport,
+    FeedbackLifecycleRow, RepairSuggestion, RuntimeTraceReport,
+};
 pub use envelope::{
     DiagnosisOutcome, DiagnosisSeverity, DiagnosisSource, EvidenceKind, EvidenceRef,
     RecoveryDiagnosisEnvelope, RecoveryDiagnosisEnvelopeBuilder,
 };
+pub use crate::diagnostics::FeedbackPhase;
 pub use journal::{DriftJournalEntry, DriftMetric, RecoveryJournalEntry};
 pub use reporter::{
     DIAGNOSE_JSON_SCHEMA_VERSION, DIAGNOSIS_LEDGER_SCHEMA_VERSION, DiagnosisReport,

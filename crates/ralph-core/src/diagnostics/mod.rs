@@ -26,7 +26,7 @@ mod drift;
 mod errors;
 mod feedback;
 mod hook_runs;
-mod input_bundle;
+pub mod input_bundle;
 mod log_rotation;
 mod orchestration;
 mod performance;
