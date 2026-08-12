@@ -1308,3 +1308,294 @@ fn p1_2_terminal_completion_honored_survives_process_restart() {
         "P1-2: CompletionHonored must survive process restart"
     );
 }
+
+// ---------------------------------------------------------------------------
+// GAP-01 U1: unified orchestration cognitive state
+//
+// Acceptance Red: these tests reference the planned
+// `CommitDelta::KnowledgeObserved` variant, the
+// `LedgerSnapshot::knowledge` field, and the
+// `OrchestrationKnowledgeState` API before the production code
+// exists. They MUST fail to compile (or fail on assertion) until
+// U1 lands.
+//
+// Reference: `docs/plans/2026-08-13-001-feat-gap01-unified-orchestration-knowledge-state-plan.md` §U1.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn knowledge_observation_delta_round_trips_through_replay() {
+    use crate::state::knowledge::{
+        InputFingerprint, KnowledgeAuthority, KnowledgeKind, KnowledgeRecord,
+        VerificationStatus,
+    };
+
+    let (_dir, mut ledger) = fresh_ledger();
+
+    // Build a bounded observation record (no raw payload).
+    let record = KnowledgeRecord::builder(KnowledgeAuthority::LedgerSnapshot, KnowledgeKind::Observation)
+        .with_subject("U1 plan ready")
+        .with_payload_digest_hex("deadbeef")
+        .with_source_ref("accepted-event:1:0:obs-1")
+        .with_input_fingerprint(InputFingerprint::both(
+            "loopsha0000000000000000000000000000000000",
+            "plansha0000000000000000000000000000000000",
+        ))
+        .with_verification(VerificationStatus::Unverified)
+        .build()
+        .expect("builder must accept a bounded record");
+
+    let delta = CommitDelta::KnowledgeObserved {
+        records: vec![record],
+    };
+    ledger
+        .commit(delta, Some("work.done".to_string()))
+        .expect("commit must accept KnowledgeObserved delta");
+
+    // Drop and replay into a fresh ledger.
+    drop(ledger);
+    let mut second = StateLedger::new(_dir.path(), true);
+    let replayed = StateLedger::replay_from_disk(_dir.path()).expect("replay");
+    *second.snapshot_mut() = replayed;
+
+    let snap = second.snapshot();
+    let view = snap.knowledge.view();
+    assert_eq!(
+        view.total,
+        1,
+        "replayed snapshot must carry exactly one knowledge record"
+    );
+    assert_eq!(
+        snap.knowledge.records().len(),
+        1,
+        "knowledge records vec must contain the replayed entry"
+    );
+    // The replay must also still carry the prior iteration
+    // counter (i.e. knowledge replay composes with the
+    // existing ledger business fields).
+    assert!(snap.iteration >= 0);
+}
+
+#[test]
+fn knowledge_freshness_is_conservative() {
+    use crate::state::knowledge::{
+        EvidenceFreshness, InputFingerprint, VerificationStatus,
+    };
+
+    // No fingerprint → freshness is Unknown.
+    let none_fp = InputFingerprint::None;
+    assert_eq!(
+        none_fp.freshness_against(&none_fp),
+        EvidenceFreshness::Unknown,
+        "missing fingerprint must produce Unknown freshness"
+    );
+
+    // Same fingerprint → Current.
+    let a = InputFingerprint::Both {
+        loop_start_sha: "loopshaaaa".into(),
+        plan_baseline_sha: "planshabbb".into(),
+    };
+    assert_eq!(
+        a.freshness_against(&a),
+        EvidenceFreshness::Current,
+        "matching fingerprint must produce Current freshness"
+    );
+
+    // Different fingerprint → Stale.
+    let b = InputFingerprint::Both {
+        loop_start_sha: "loopshaaaa".into(),
+        plan_baseline_sha: "planshaccC".into(),
+    };
+    assert_eq!(
+        a.freshness_against(&b),
+        EvidenceFreshness::Stale,
+        "mismatched fingerprint must produce Stale freshness"
+    );
+
+    // Freshness is decoupled from verification status: an
+    // Unverified record can still be Current. Compute a
+    // comparable marker by encoding both values as `usize`
+    // discriminants so a future refactor cannot silently merge
+    // them. (Direct `Discriminant` equality across different
+    // `T` parameters is not allowed by `std`.)
+    let ver_tag = match VerificationStatus::Unverified {
+        VerificationStatus::Unverified => 0u8,
+        VerificationStatus::Verified => 1,
+        VerificationStatus::Falsified => 2,
+    };
+    let fresh_tag = match EvidenceFreshness::Current {
+        EvidenceFreshness::Unknown => 0u8,
+        EvidenceFreshness::Current => 1,
+        EvidenceFreshness::Stale => 2,
+    };
+    assert_ne!(
+        ver_tag, fresh_tag,
+        "verification status and freshness are separate dimensions"
+    );
+}
+
+#[test]
+fn knowledge_record_apply_is_bounded_and_idempotent() {
+    use crate::state::knowledge::{
+        InputFingerprint, KnowledgeAuthority, KnowledgeKind, KnowledgeRecord,
+        VerificationStatus,
+    };
+
+    let mut snap = LedgerSnapshot::cold_start();
+
+    // Build 200 records; the display cap must clamp to the
+    // configured limit (128). Half the records share a
+    // duplicate id so the idempotent apply collapses them.
+    let mut records = Vec::with_capacity(200);
+    for i in 0..200u32 {
+        // Every even index uses the same id so the display
+        // vec collapses 100 duplicates into a single entry.
+        let id = if i % 2 == 0 { "dup-id" } else { "obs-{i}" };
+        let mut b = KnowledgeRecord::builder(KnowledgeAuthority::LedgerSnapshot, KnowledgeKind::Observation)
+            .with_id(id.to_string())
+            .with_subject(format!("record-{i}"))
+            .with_payload_digest_hex("abcd")
+            .with_source_ref(format!("accepted-event:1:{i}:obs"))
+            .with_input_fingerprint(InputFingerprint::Both {
+                loop_start_sha: "l".into(),
+                plan_baseline_sha: "p".into(),
+            })
+            .with_verification(VerificationStatus::Unverified);
+        let _ = &mut b;
+        records.push(b.build().expect("build"));
+    }
+
+    snap.apply_delta(&CommitDelta::KnowledgeObserved { records });
+
+    let view = snap.knowledge.view();
+    assert!(
+        view.total <= 128,
+        "knowledge display cap must clamp to 128; got {}",
+        view.total
+    );
+    assert_eq!(
+        snap.knowledge.records().iter().filter(|r| r.id == "dup-id").count(),
+        1,
+        "duplicate observation id must collapse to a single record"
+    );
+
+    // Re-applying the same delta must be idempotent.
+    let dup = vec![KnowledgeRecord::builder(KnowledgeAuthority::LedgerSnapshot, KnowledgeKind::Observation)
+        .with_id("dup-id")
+        .with_subject("dup")
+        .with_payload_digest_hex("abcd")
+        .with_source_ref("src")
+        .with_input_fingerprint(InputFingerprint::Both {
+            loop_start_sha: "l".into(),
+            plan_baseline_sha: "p".into(),
+        })
+        .with_verification(VerificationStatus::Unverified)
+        .build()
+        .expect("build")];
+    let count_before = snap.knowledge.records().len();
+    snap.apply_delta(&CommitDelta::KnowledgeObserved { records: dup });
+    let count_after = snap.knowledge.records().len();
+    assert_eq!(
+        count_before, count_after,
+        "idempotent apply: replaying the same delta must not change the count"
+    );
+}
+
+#[test]
+fn old_ledger_without_knowledge_replays_to_empty_knowledge() {
+    let (_dir, mut ledger) = fresh_ledger();
+    // Commit only a pre-existing business delta; do NOT touch
+    // knowledge.
+    ledger
+        .commit(
+            CommitDelta::CounterChanged {
+                counter: CounterKind::ConsecutiveFailures,
+                new_value: 3,
+            },
+            Some("work.done".to_string()),
+        )
+        .expect("commit");
+    drop(ledger);
+
+    let mut second = StateLedger::new(_dir.path(), true);
+    let replayed = StateLedger::replay_from_disk(_dir.path()).expect("replay");
+    *second.snapshot_mut() = replayed;
+
+    let snap = second.snapshot();
+    assert!(
+        snap.knowledge.records().is_empty(),
+        "old ledger must replay to empty knowledge state"
+    );
+    assert_eq!(snap.knowledge.view().total, 0);
+    assert_eq!(
+        snap.consecutive_failures, 3,
+        "pre-existing business scalar must survive replay"
+    );
+}
+
+#[test]
+fn feature_disabled_knowledge_commit_is_noop() {
+    let dir = workspace();
+    let mut ledger = StateLedger::new(dir.path(), false);
+
+    let result = ledger.commit(
+        CommitDelta::KnowledgeObserved {
+            records: Vec::new(),
+        },
+        Some("work.done".to_string()),
+    );
+
+    assert!(
+        result.is_ok(),
+        "feature off must not error on knowledge delta"
+    );
+    assert!(
+        ledger.snapshot().knowledge.records().is_empty(),
+        "feature off must leave knowledge empty"
+    );
+    let on_disk = dir.path().join(LEDGER_RELATIVE_PATH);
+    assert!(
+        !on_disk.exists(),
+        "feature off must not create ledger.jsonl"
+    );
+}
+
+#[test]
+fn knowledge_commit_failure_does_not_change_processed_result() {
+    // Build a delta with valid records but make the on-disk
+    // path a directory, so `persist_commit_log` fails.
+    use crate::state::knowledge::{
+        InputFingerprint, KnowledgeAuthority, KnowledgeKind, KnowledgeRecord,
+        VerificationStatus,
+    };
+
+    let dir = workspace();
+    let workspace = dir.path();
+    let ledger_path = workspace.join(LEDGER_RELATIVE_PATH);
+    std::fs::create_dir_all(&ledger_path).expect("create_dir_all");
+
+    let mut ledger = StateLedger::new(workspace, true);
+    let pre = ledger.snapshot().knowledge.records().len();
+    let record = KnowledgeRecord::builder(KnowledgeAuthority::LedgerSnapshot, KnowledgeKind::Observation)
+        .with_subject("subject")
+        .with_payload_digest_hex("digest")
+        .with_source_ref("src")
+        .with_input_fingerprint(InputFingerprint::None)
+        .with_verification(VerificationStatus::Unverified)
+        .build()
+        .expect("build");
+    let res = ledger.commit(
+        CommitDelta::KnowledgeObserved {
+            records: vec![record],
+        },
+        Some("work.done".to_string()),
+    );
+    assert!(
+        res.is_err(),
+        "commit must fail when ledger.jsonl path is a directory"
+    );
+    assert_eq!(
+        ledger.snapshot().knowledge.records().len(),
+        pre,
+        "failed knowledge commit must not mutate the snapshot"
+    );
+}

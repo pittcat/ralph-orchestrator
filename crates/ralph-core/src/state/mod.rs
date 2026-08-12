@@ -36,6 +36,7 @@ mod commit;
 /// writer (atomic rename + OS file lock). Wired into
 /// task_store / diagnosis / drift consumers in U8.
 pub mod idempotent_log;
+mod knowledge;
 mod ledger;
 /// U7a persistent rejection log — `.ralph/recovery.jsonl` writer
 /// for the deterministic-correction path.  Mirrors the
@@ -52,6 +53,12 @@ mod snapshot;
 mod snapshot_workflow_phase_tests;
 
 pub use commit::{Commit, CommitDelta, CounterKind, TaskTransition};
+pub use knowledge::{
+    DISPLAY_RECORDS_MAX, EVIDENCE_REFS_MAX, EvidenceFreshness, EvidenceRef,
+    InputFingerprint, KnowledgeAuthority, KnowledgeBuildError, KnowledgeKind, KnowledgeRecord,
+    KnowledgeRecordBuilder, KnowledgeView, OrchestrationKnowledgeState, SEMANTIC_FIELD_MAX_BYTES,
+    VerificationStatus,
+};
 pub use ledger::{LEDGER_RELATIVE_PATH, LedgerError, StateLedger, read_commit_log, truncate_after};
 pub use recovery_log::{
     RECOVERY_LOG_RELATIVE_PATH, RejectionRecord, append_rejection, read_rejection_log,

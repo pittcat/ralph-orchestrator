@@ -37,6 +37,7 @@ use crate::task::Task;
 use crate::workflow_contract::HandoffTracker;
 
 use super::commit::{CommitDelta, CounterKind, TaskTransition};
+use super::knowledge::OrchestrationKnowledgeState;
 
 /// Single source of truth for the loop's runtime state.
 ///
@@ -276,6 +277,19 @@ pub struct LedgerSnapshot {
     /// when the engine is disabled (R1 / KTD1) — gate
     /// behaviour is unchanged from the pre-006 baseline.
     pub workflow_phase: Option<crate::event_loop::phase_authority::snapshot::PhaseSnapshot>,
+
+    // ---- orchestration cognitive state (GAP-01 / U1) --------
+    /// 2026-08-13-001 GAP-01 U1: bounded, replayable cognitive
+    /// state. Carries claim/evidence/hypothesis/assumption/unknown
+    /// /verified/falsified/decision/route-reason/observation
+    /// records with input fingerprints, freshness, and
+    /// verification status. Apply is idempotent on id; the
+    /// display vec is bounded by
+    /// [`crate::state::knowledge::DISPLAY_RECORDS_MAX`] so the
+    /// prompt projection stays cheap. Raw payloads never enter
+    /// the snapshot — only digests, opaque source refs, and
+    /// bounded semantic fields.
+    pub knowledge: OrchestrationKnowledgeState,
 }
 
 /// One `FlowLifecycleUpdated` delta, captured in
@@ -511,6 +525,13 @@ impl LedgerSnapshot {
             }
             CommitDelta::CompletionPredecessorRecorded { topic, payload } => {
                 self.last_completion_predecessor = Some((topic.clone(), payload.clone()));
+            }
+            CommitDelta::KnowledgeObserved { records } => {
+                // GAP-01 U1: idempotent bounded apply.
+                // `OrchestrationKnowledgeState::apply` enforces
+                // the display cap and dedupes on record id, so
+                // a replay never double-counts.
+                self.knowledge.apply(records.iter().cloned());
             }
         }
     }
