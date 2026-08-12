@@ -44,7 +44,7 @@ pub(crate) use envelope::normalize_part;
 pub use bundle::{
     read_feedback_lifecycle_report, read_input_bundle_report, read_runtime_trace_report,
     ArtifactReport, BundleStatus, DiagnosisInputReport, EvidenceGap, FeedbackLifecycleReport,
-    FeedbackLifecycleRow, RepairSuggestion, RuntimeTraceReport,
+    FeedbackLifecycleRow, RepairSuggestion, RuntimeTraceReport, suggestions::build_suggestions_and_gaps,
 };
 pub use envelope::{
     DiagnosisOutcome, DiagnosisSeverity, DiagnosisSource, EvidenceKind, EvidenceRef,
