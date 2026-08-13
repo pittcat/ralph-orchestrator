@@ -740,3 +740,163 @@ hats:
         "accepted_transition_count must never exceed the number of events the batch admitted"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Plan GAP-02 / Unit 4: restart hydration equivalence — the
+// StateMachine runtime survives a process restart by reading
+// the StateLedger snapshot on cold start.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn u4_state_machine_runtime_hydrates_from_ledger_snapshot() {
+    use crate::state::CommitDelta;
+    use crate::state_machine::{
+        StateMachineTransitionDelta, StateMachineTransitionId,
+    };
+    use tempfile::TempDir;
+
+    // First loop constructs the StateLedger, commits a
+    // StateMachine delta, and exposes the live snapshot.
+    let dir = TempDir::new().unwrap();
+    let workspace = dir.path();
+    let mut ledger = crate::state::StateLedger::new(workspace, true);
+    ledger
+        .commit(
+            CommitDelta::StateMachineTransition {
+                delta: StateMachineTransitionDelta {
+                    transition_id: StateMachineTransitionId::build(
+                        "loop-u4",
+                        Some("contract-u4"),
+                        "executor",
+                        "experiment.planned",
+                        Some("t-u4"),
+                        1,
+                    ),
+                    topic: "experiment.planned".to_string(),
+                    instance_key: Some("t-u4".to_string()),
+                    new_state: "planned".to_string(),
+                    opens_instance: true,
+                    closes_instance: false,
+                    terminal_observed: false,
+                    terminal_honored: false,
+                },
+            },
+            Some("open".into()),
+        )
+        .expect("commit");
+    let first = ledger.snapshot().state_machine_runtime.clone().unwrap();
+    drop(ledger);
+
+    // Second loop reuses the same workspace; the snapshot
+    // must rebuild the same StateMachine runtime as the
+    // first loop's final state.
+    let replay = crate::state::StateLedger::new(workspace, true);
+    let second = replay
+        .snapshot()
+        .state_machine_runtime
+        .clone()
+        .expect("StateMachine runtime must hydrate after restart");
+    assert_eq!(
+        first.open_instances_snapshot(),
+        second.open_instances_snapshot(),
+        "open instances must replay identically"
+    );
+    assert_eq!(
+        first.accepted_transition_count(),
+        second.accepted_transition_count(),
+        "accepted transition count must replay identically"
+    );
+}
+
+#[test]
+fn u4_legacy_workspace_without_state_machine_delta_starts_cleanly() {
+    use crate::state::CommitDelta;
+    use tempfile::TempDir;
+    let dir = TempDir::new().unwrap();
+    let workspace = dir.path();
+
+    // Drop a few non-Unit-1 commits so the snapshot is non-
+    // empty but still carries no StateMachine semantics.
+    let mut ledger = crate::state::StateLedger::new(workspace, true);
+    ledger
+        .commit(
+            CommitDelta::CounterChanged {
+                counter: crate::state::CounterKind::Iteration,
+                new_value: 7,
+            },
+            Some("loop-iter".into()),
+        )
+        .expect("commit");
+    drop(ledger);
+
+    let replay = crate::state::StateLedger::new(workspace, true);
+    let snap = replay.snapshot();
+    assert_eq!(snap.iteration, 7);
+    assert!(
+        snap.state_machine_runtime.is_none(),
+        "legacy commit log must not synthesise a StateMachine runtime"
+    );
+}
+
+#[test]
+fn u4_terminal_honored_delta_persists_to_ledger() {
+    use crate::state::CommitDelta;
+    use crate::state_machine::StateMachineRuntimeState;
+    use tempfile::TempDir;
+
+    // Plan GAP-02 / Unit 4: a `commit_terminal_delta` for the
+    // StateMachine terminal-honored semantic must round-trip
+    // through the commit log so the next restart hydrates
+    // `is_terminal_honored() == true`.
+    let dir = TempDir::new().unwrap();
+    let workspace = dir.path();
+    let mut ledger = crate::state::StateLedger::new(workspace, true);
+    ledger
+        .commit(
+            CommitDelta::StateMachineTransition {
+                delta: crate::state_machine::StateMachineTransitionDelta {
+                    transition_id: crate::state_machine::StateMachineTransitionId::build(
+                        "loop-u4",
+                        Some("terminal-honored"),
+                        "wave-scope",
+                        "state_machine.terminal_honored",
+                        None,
+                        1,
+                    ),
+                    topic: "state_machine.terminal_honored".to_string(),
+                    instance_key: None,
+                    new_state: "terminal_honored".to_string(),
+                    opens_instance: false,
+                    closes_instance: false,
+                    terminal_observed: true,
+                    terminal_honored: true,
+                },
+            },
+            Some("state_machine.terminal_honored".into()),
+        )
+        .expect("commit");
+    drop(ledger);
+
+    let replay = crate::state::StateLedger::new(workspace, true);
+    let runtime = replay
+        .snapshot()
+        .state_machine_runtime
+        .clone()
+        .expect("StateMachine runtime must hydrate after terminal-honored commit");
+    assert!(
+        runtime.is_terminal_honored(),
+        "terminal_honored must be replayed across restart"
+    );
+    assert!(
+        runtime.is_terminal_observed(),
+        "terminal_observed must travel with the honored delta"
+    );
+    // Sanity: hydration also exposes a sensible state-machine struct,
+    // even if the runtime is otherwise a *cold* start (the runtime is
+    // lazy: there are no `open_instances`, just terminal flags).
+    assert_eq!(runtime.open_instance_count(), 0);
+    assert_eq!(runtime.accepted_transition_count(), 1);
+}
+
+#[allow(dead_code)]
+fn _u4_unused_runtime() -> StateMachineRuntimeState { StateMachineRuntimeState::new() }

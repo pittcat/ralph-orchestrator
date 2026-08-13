@@ -497,6 +497,21 @@ impl EventLoop {
         // U2: the state ledger is always enabled.
         state.state_ledger = Some(build_state_ledger_from_env(context.workspace()));
 
+        // Plan GAP-02 (2026-08-13-002) / Unit 4: rehydrate the
+        // StateMachine runtime from the freshly-built ledger
+        // snapshot. Cold-start branches with no StateMachine
+        // delta simply leave the runtime `None`; otherwise
+        // the runtime is restored with the same instance
+        // map, transition count, and terminal flags. This is
+        // a *pure* read — no side effects — so the order vs
+        // policy / task / projector bootstrap is preserved.
+        if let Some(ledger) = state.state_ledger.as_ref() {
+            let snapshot = ledger.snapshot();
+            if let Some(runtime) = snapshot.state_machine_runtime.clone() {
+                state.state_machine_runtime_state = Some(runtime);
+            }
+        }
+
         // P0-2 (2026-06-27 adversarial review):
         // open the idempotent log for real so the
         // wiring layer (`IdempotentLog::append`) can
