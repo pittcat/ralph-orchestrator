@@ -251,6 +251,19 @@ impl EventLoop {
             malformed_events = malformed_count,
             "process_parse_result entry - events received"
         );
+        self.diagnostics.log_runtime_trace(
+            crate::diagnostics::RuntimeTraceEntry::new(
+                self.state.iteration as u64,
+                0,
+                crate::diagnostics::RuntimeTracePhase::Batch,
+            )
+            .with_kind("event_batch")
+            .with_status("received")
+            .with_fields(serde_json::json!({
+                "valid_events": event_count,
+                "malformed_events": malformed_count,
+            })),
+        );
         // DEBUG: 记录前几个事件的详情用于调试
         for (i, evt) in result.events.iter().take(5).enumerate() {
             tracing::debug!(
@@ -378,6 +391,15 @@ impl EventLoop {
             // the wrapper so the fail-close emit also advances
             // the flow step + appends the snapshot.
             self.run_stall_detector_with_authority_advance()?;
+            self.diagnostics.log_runtime_trace(
+                crate::diagnostics::RuntimeTraceEntry::new(
+                    self.state.iteration as u64,
+                    0,
+                    crate::diagnostics::RuntimeTracePhase::Commit,
+                )
+                .with_kind("empty_batch_commit")
+                .with_status("no_progress"),
+            );
             return Ok(ProcessedEvents {
                 had_events: false,
                 had_raw_events: false,
@@ -4077,6 +4099,57 @@ impl EventLoop {
         // activation can never be pre-empted by an extra
         // event's `task.resume` injection.
         self.resolve_over_emit_recovery(&accepted_log_events);
+
+        if !accepted_log_events.is_empty() {
+            self.diagnostics.log_runtime_trace(
+                crate::diagnostics::RuntimeTraceEntry::new(
+                    self.state.iteration as u64,
+                    0,
+                    crate::diagnostics::RuntimeTracePhase::Accepted,
+                )
+                .with_kind("event_batch_accepted")
+                .with_status("accepted")
+                .with_fields(serde_json::json!({
+                    "count": accepted_log_events.len(),
+                    "topics": accepted_log_events
+                        .iter()
+                        .map(|event| event.topic.to_string())
+                        .collect::<Vec<_>>(),
+                })),
+            );
+        }
+        if had_rejected_events {
+            self.diagnostics.log_runtime_trace(
+                crate::diagnostics::RuntimeTraceEntry::new(
+                    self.state.iteration as u64,
+                    0,
+                    crate::diagnostics::RuntimeTracePhase::Rejected,
+                )
+                .with_kind("event_batch_rejected")
+                .with_status("rejected")
+                .with_fields(serde_json::json!({
+                    "accepted_count": accepted_log_events.len(),
+                    "contract_rejection_count": contract_rejections.len(),
+                })),
+            );
+        }
+        self.diagnostics.log_runtime_trace(
+            crate::diagnostics::RuntimeTraceEntry::new(
+                self.state.iteration as u64,
+                0,
+                crate::diagnostics::RuntimeTracePhase::Commit,
+            )
+            .with_kind("event_batch_commit")
+            .with_status(if accepted_log_events.is_empty() {
+                "no_progress"
+            } else {
+                "committed"
+            })
+            .with_fields(serde_json::json!({
+                "accepted_count": accepted_log_events.len(),
+                "rejected": had_rejected_events,
+            })),
+        );
 
         Ok(ProcessedEvents {
             had_events,

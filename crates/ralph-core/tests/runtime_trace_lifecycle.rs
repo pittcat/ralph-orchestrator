@@ -61,3 +61,20 @@ fn sequence_monotonic_across_appends() {
         report
     );
 }
+
+#[test]
+fn runtime_trace_logger_resumes_sequence_when_session_is_reused() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let session = tmp.path().join("session");
+    std::fs::create_dir_all(&session).unwrap();
+    {
+        let mut logger = RuntimeTraceLogger::new(&session).unwrap();
+        logger.append(RuntimeTraceEntry::new(0, 0, RuntimeTracePhase::Batch));
+    }
+    let mut resumed = RuntimeTraceLogger::new(&session).unwrap();
+    resumed.append(RuntimeTraceEntry::new(1, 0, RuntimeTracePhase::Commit));
+    let report = read_runtime_trace_report(&session);
+    assert_eq!(report.first_sequence, Some(1));
+    assert_eq!(report.last_sequence, Some(2));
+    assert!(report.monotonic_sequences);
+}

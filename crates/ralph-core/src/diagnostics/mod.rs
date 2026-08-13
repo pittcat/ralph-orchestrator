@@ -120,6 +120,12 @@ pub(crate) fn cap_string_field(field: &str, label: &'static str) -> String {
     }
     let original = field.len();
     let keep = MAX_SIDECAR_FIELD_BYTES.saturating_sub(TRUNCATION_SUFFIX.len());
+    let keep = field
+        .char_indices()
+        .take_while(|(index, _)| *index < keep)
+        .map(|(index, _)| index)
+        .last()
+        .unwrap_or(0);
     let mut truncated = String::with_capacity(MAX_SIDECAR_FIELD_BYTES);
     truncated.push_str(&field[..keep]);
     truncated.push_str(TRUNCATION_SUFFIX);
@@ -143,78 +149,87 @@ pub(crate) fn cap_string_field(field: &str, label: &'static str) -> String {
 /// `cap_string_field`).
 pub(crate) fn cap_json_field(value: serde_json::Value, label: &'static str) -> serde_json::Value {
     use serde_json::Value;
-    // Fast path: cheap probe via to_string.
+    fn cap(value: Value, label: &'static str) -> Value {
+        match value {
+            Value::String(value) => Value::String(cap_string_field(&value, label)),
+            Value::Array(values) => {
+                let mut capped = Vec::with_capacity(values.len());
+                for value in values {
+                    capped.push(cap(value, label));
+                    if serde_json::Value::Array(capped.clone()).to_string().len()
+                        > MAX_SIDECAR_FIELD_BYTES
+                    {
+                        capped.pop();
+                        break;
+                    }
+                }
+                Value::Array(capped)
+            }
+            Value::Object(values) => {
+                let mut capped = serde_json::Map::new();
+                for (key, value) in values {
+                    capped.insert(key, cap(value, label));
+                    if Value::Object(capped.clone()).to_string().len()
+                        > MAX_SIDECAR_FIELD_BYTES
+                    {
+                        let last_key = capped.keys().next_back().cloned();
+                        if let Some(last_key) = last_key {
+                            capped.remove(&last_key);
+                        }
+                        break;
+                    }
+                }
+                Value::Object(capped)
+            }
+            other => other,
+        }
+    }
+
     let serialized_len = value.to_string().len();
     if serialized_len <= MAX_SIDECAR_FIELD_BYTES {
         return value;
     }
-    // Over the cap. Walk the tree:
-    //   - String → truncate via cap_string_field
-    //   - Object → drop keys until it fits
-    //   - Array → already bounded by writer usage; preserve
-    let warned = false;
-    let current = value;
-    match current {
-        Value::String(s) => {
-            let capped = cap_string_field(&s, label);
-            if !warned {
-                tracing::warn!(
-                    target: "ralph_core::diagnostics",
-                    field = label,
-                    "sidecar JSON string field exceeded MAX_SIDECAR_FIELD_BYTES; truncated"
-                );
-            }
-            Value::String(capped)
-        }
-        Value::Object(map) => {
-            let mut obj = map;
-            let original_len = obj.len();
-            // Drop keys from the end until the serialized form fits.
-            while obj.len() > 1 {
-                let probe = serde_json::Value::Object(obj.clone());
-                if probe.to_string().len() <= MAX_SIDECAR_FIELD_BYTES {
-                    break;
-                }
-                // Drop the last key (insertion order is BTreeMap-backed
-                // here because serde_json uses BTreeMap by default).
-                let last_key = obj
-                    .keys()
-                    .next_back()
-                    .cloned()
-                    .expect("non-empty object has last key");
-                obj.remove(&last_key);
-            }
-            if !warned {
-                tracing::warn!(
-                    target: "ralph_core::diagnostics",
-                    field = label,
-                    original_bytes = serialized_len,
-                    dropped_keys = original_len - obj.len(),
-                    "sidecar JSON object exceeded MAX_SIDECAR_FIELD_BYTES; \
-                     dropped keys to fit"
-                );
-            }
-            Value::Object(obj)
-        }
-        // Scalar/array/null/bool/number: can't reduce further.
-        other => {
-            if !warned {
-                tracing::warn!(
-                    target: "ralph_core::diagnostics",
-                    field = label,
-                    original_bytes = serialized_len,
-                    "sidecar JSON field exceeded MAX_SIDECAR_FIELD_BYTES; \
-                     preserving as-is (scalar/array cannot be truncated safely)"
-                );
-            }
-            other
-        }
-    }
+    let capped = cap(value, label);
+    let capped = if capped.to_string().len() > MAX_SIDECAR_FIELD_BYTES {
+        tracing::warn!(
+            target: "ralph_core::diagnostics",
+            field = label,
+            "sidecar JSON field remained oversized after recursive capping; replaced with null"
+        );
+        Value::Null
+    } else {
+        capped
+    };
+    tracing::warn!(
+        target: "ralph_core::diagnostics",
+        field = label,
+        original_bytes = serialized_len,
+        capped_bytes = capped.to_string().len(),
+        "sidecar JSON field exceeded MAX_SIDECAR_FIELD_BYTES; bounded recursively"
+    );
+    capped
+}
+
+/// Resume a sidecar sequence without loading the entire history into memory.
+/// Invalid/truncated rows are ignored; the reader will surface them as a
+/// degraded evidence signal when the report is built.
+pub(crate) fn resume_sidecar_sequence(path: &Path) -> u64 {
+    let Ok(file) = fs::File::open(path) else {
+        return 0;
+    };
+    BufReader::new(file)
+        .lines()
+        .filter_map(Result::ok)
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(&line).ok())
+        .filter_map(|value| value.get("sequence").and_then(|v| v.as_u64()))
+        .max()
+        .unwrap_or(0)
 }
 
 use chrono::{DateTime, Local, Utc};
 use serde::{Deserialize, Serialize};
 use std::fs;
+use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use tempfile::NamedTempFile;
@@ -433,21 +448,46 @@ impl DiagnosticsCollector {
         }
 
         // Resolve or create the session directory exactly once per collector.
-        let session_dir = match options.session_dir.as_ref() {
-            Some(p) => {
-                fs::create_dir_all(p)?;
-                p.clone()
-            }
+        // Canonicalize after creation so a symlink cannot escape the declared
+        // workspace root between validation and the first sidecar write.
+        let configured_workspace_root = options
+            .workspace_root
+            .as_deref()
+            .unwrap_or(base_path);
+        let workspace_root = fs::canonicalize(configured_workspace_root).map_err(|err| {
+            std::io::Error::new(
+                err.kind(),
+                format!(
+                    "failed to resolve diagnostics workspace root {:?}: {err}",
+                    configured_workspace_root
+                ),
+            )
+        })?;
+        let requested_session_dir = match options.session_dir.as_ref() {
+            Some(p) => p.clone(),
             None => {
                 let timestamp = Local::now().format("%Y-%m-%dT%H-%M-%S");
-                let dir = base_path
+                configured_workspace_root
                     .join(".ralph")
                     .join("diagnostics")
-                    .join(timestamp.to_string());
-                fs::create_dir_all(&dir)?;
-                dir
+                    .join(timestamp.to_string())
             }
         };
+        fs::create_dir_all(&requested_session_dir)?;
+        let canonical_session_dir = fs::canonicalize(&requested_session_dir)?;
+        if !canonical_session_dir.starts_with(&workspace_root) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                format!(
+                    "diagnostics session directory {:?} escapes workspace root {:?}",
+                    canonical_session_dir, workspace_root
+                ),
+            ));
+        }
+        // Keep the caller's path spelling for compatibility (notably paths
+        // under macOS `/var` may canonicalize to `/private/var`), while using
+        // the canonical form above solely for the containment check.
+        let session_dir = requested_session_dir;
 
         // Effective mode: full_diagnostics wins, otherwise honor
         // runtime_diagnosis_artifacts, otherwise honor trace_only.
@@ -1041,16 +1081,25 @@ impl DiagnosticsCollector {
             execution_capability,
             code_baseline,
         );
-        if let Err(err) = input_bundle::write_manifest(session_dir, &guard)
-            .map_err(|e| std::io::Error::other(format!("{e}")))
-        {
-            tracing::warn!(
-                target: "ralph_core::diagnostics",
-                session_dir = %session_dir.display(),
-                error = %err,
-                "failed to write diagnosis-input.json after identity update; marking degraded"
-            );
-            *guard = guard.mark_degraded();
+        match input_bundle::write_manifest(session_dir, &guard) {
+            Ok(Some(_)) => {}
+            Ok(None) => {
+                tracing::warn!(
+                    target: "ralph_core::diagnostics",
+                    session_dir = %session_dir.display(),
+                    "diagnosis-input.json identity update was not persisted; marking degraded"
+                );
+                *guard = guard.mark_degraded();
+            }
+            Err(err) => {
+                tracing::warn!(
+                    target: "ralph_core::diagnostics",
+                    session_dir = %session_dir.display(),
+                    error = %err,
+                    "failed to write diagnosis-input.json after identity update; marking degraded"
+                );
+                *guard = guard.mark_degraded();
+            }
         }
     }
 
@@ -1083,16 +1132,25 @@ impl DiagnosticsCollector {
             }
         };
         *guard = guard.with_finalized(artifacts, execution_capabilities);
-        if let Err(err) = input_bundle::write_manifest(session_dir, &guard)
-            .map_err(|e| std::io::Error::other(format!("{e}")))
-        {
-            tracing::warn!(
-                target: "ralph_core::diagnostics",
-                session_dir = %session_dir.display(),
-                error = %err,
-                "failed to write diagnosis-input.json on finalize; marking degraded"
-            );
-            *guard = guard.mark_degraded();
+        match input_bundle::write_manifest(session_dir, &guard) {
+            Ok(Some(_)) => {}
+            Ok(None) => {
+                tracing::warn!(
+                    target: "ralph_core::diagnostics",
+                    session_dir = %session_dir.display(),
+                    "diagnosis-input.json finalization was not persisted; marking degraded"
+                );
+                *guard = guard.mark_degraded();
+            }
+            Err(err) => {
+                tracing::warn!(
+                    target: "ralph_core::diagnostics",
+                    session_dir = %session_dir.display(),
+                    error = %err,
+                    "failed to write diagnosis-input.json on finalize; marking degraded"
+                );
+                *guard = guard.mark_degraded();
+            }
         }
     }
 

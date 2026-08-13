@@ -6,26 +6,16 @@
 //! reason are identical between the two runs. Only the sidecar
 //! presence is allowed to differ.
 //!
-//! This file is a structural skeleton. It registers a `#[test]`
-//! that always returns early with a structured log line, so it is
-//! collected by nextest under the `diagnostics_equivalence` filter
-//! (per E22 / D13). The full scenario/loop wiring will be added in
-//! later Units as the corresponding production code lands. The
-//! presence of this file is what E22 and the plan's hard rule
-//! require.
-
 use ralph_core::diagnostics::RuntimeTraceEntry;
 use ralph_core::diagnostics::RuntimeTracePhase;
 use ralph_core::diagnostics::probe_session_dir_writable;
 use ralph_core::diagnostics::{DiagnosticsCollector, DiagnosticsOptions};
+use ralph_core::{LoopContext, RalphConfig};
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 
-/// Structural smoke test: a `RuntimeTraceEntry::new` plus a phase
-/// can be serialized and round-tripped. This is the
-/// "real Red → Green" entry point for Unit 2: when the type does
-/// not exist the test cannot even compile, which is the desired
-/// Red state.
+/// The schema round-trip remains a unit-level guard for the fixed fields;
+/// lifecycle behavior is covered by the real EventLoop test below.
 #[test]
 fn runtime_trace_entry_serde_roundtrip() {
     let entry = RuntimeTraceEntry::new(0, 0, RuntimeTracePhase::Activation)
@@ -141,4 +131,153 @@ fn collector_disables_input_bundle_when_initial_write_fails() {
         "input_bundle_status must be None when initial write_manifest fails; \
          the in-memory state must reflect the absent bundle, not a Legacy/Degraded wrapper."
     );
+}
+
+#[test]
+fn event_loop_process_batch_records_runtime_lifecycle() {
+    let tmp = tempfile::TempDir::new().expect("TempDir");
+    let options = DiagnosticsOptions {
+        runtime_diagnosis_artifacts: true,
+        session_dir: None,
+        workspace_root: Some(tmp.path().to_path_buf()),
+        ..DiagnosticsOptions::default()
+    };
+    let collector = DiagnosticsCollector::with_options(tmp.path(), &options).expect("collector");
+    let context = LoopContext::primary(tmp.path().to_path_buf());
+    let mut event_loop = ralph_core::EventLoop::with_context_and_diagnostics(
+        RalphConfig::default(),
+        context,
+        collector,
+    )
+    .expect("event loop");
+
+    std::fs::create_dir_all(tmp.path().join(".ralph")).expect("ralph dir");
+    std::fs::write(tmp.path().join(".ralph/events.jsonl"), b"").expect("events file");
+    event_loop
+        .process_events_from_jsonl()
+        .expect("process batch");
+
+    let session = fs::read_dir(tmp.path().join(".ralph/diagnostics"))
+        .expect("diagnostics root")
+        .next()
+        .expect("session")
+        .expect("session entry")
+        .path();
+    let body = fs::read_to_string(session.join("runtime-trace.jsonl")).expect("trace");
+    let phases: Vec<RuntimeTracePhase> = body
+        .lines()
+        .map(|line| serde_json::from_str::<RuntimeTraceEntry>(line).expect("trace row").phase)
+        .collect();
+    assert!(phases.contains(&RuntimeTracePhase::Batch));
+    assert!(phases.contains(&RuntimeTracePhase::Commit));
+}
+
+#[test]
+fn diagnostics_session_dir_cannot_escape_workspace_root() {
+    let tmp = tempfile::TempDir::new().expect("TempDir");
+    let workspace = tmp.path().join("workspace");
+    let outside = tmp.path().join("outside");
+    fs::create_dir_all(&workspace).expect("workspace");
+    fs::create_dir_all(&outside).expect("outside");
+    let options = DiagnosticsOptions {
+        runtime_diagnosis_artifacts: true,
+        session_dir: Some(outside),
+        workspace_root: Some(workspace.clone()),
+        ..DiagnosticsOptions::default()
+    };
+    let error = DiagnosticsCollector::with_options(&workspace, &options)
+        .expect_err("diagnostics path outside workspace must be rejected");
+    assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied);
+}
+
+#[test]
+fn diagnostics_off_on_preserves_processed_result_and_state_projection() {
+    #[derive(Debug, PartialEq, Eq)]
+    struct Snapshot {
+        had_events: bool,
+        had_raw_events: bool,
+        had_rejected_events: bool,
+        had_plan_events: bool,
+        has_orphans: bool,
+        accepted: Vec<(String, String, Option<String>, Option<String>)>,
+        contract_rejection_count: usize,
+        payload_violation: bool,
+        iteration: u32,
+        consecutive_failures: u32,
+        consecutive_malformed_events: u32,
+        stall_detector_had_events: bool,
+        persisted_events: String,
+    }
+
+    fn run_once(enabled: bool) -> Snapshot {
+        let tmp = tempfile::TempDir::new().expect("TempDir");
+        let options = DiagnosticsOptions {
+            runtime_diagnosis_artifacts: enabled,
+            workspace_root: Some(tmp.path().to_path_buf()),
+            ..DiagnosticsOptions::default()
+        };
+        let collector = DiagnosticsCollector::with_options(tmp.path(), &options)
+            .expect("collector");
+        let context = LoopContext::primary(tmp.path().to_path_buf());
+        let mut event_loop = ralph_core::EventLoop::with_context_and_diagnostics(
+            RalphConfig::default(),
+            context,
+            collector,
+        )
+        .expect("event loop");
+
+        fs::create_dir_all(tmp.path().join(".ralph")).expect("ralph dir");
+        let input = ralph_core::Event {
+            topic: "event.test".to_string(),
+            payload: Some("{}".to_string()),
+            ts: String::new(),
+            hat: None,
+            triggered: None,
+            source: None,
+            wave_id: None,
+            wave_index: None,
+            wave_total: None,
+            system_injected: Some(true),
+        };
+        fs::write(
+            tmp.path().join(".ralph/events.jsonl"),
+            format!("{}\n", serde_json::to_string(&input).expect("event")),
+        )
+        .expect("events file");
+
+        let processed = event_loop
+            .process_events_from_jsonl()
+            .expect("process events");
+        let state = event_loop.state();
+        let accepted = processed
+            .accepted_events
+            .iter()
+            .map(|event| {
+                (
+                    event.topic.to_string(),
+                    event.payload.clone(),
+                    event.source.as_ref().map(ToString::to_string),
+                    event.target.as_ref().map(ToString::to_string),
+                )
+            })
+            .collect();
+        Snapshot {
+            had_events: processed.had_events,
+            had_raw_events: processed.had_raw_events,
+            had_rejected_events: processed.had_rejected_events,
+            had_plan_events: processed.had_plan_events,
+            has_orphans: processed.has_orphans,
+            accepted,
+            contract_rejection_count: processed.contract_rejections.len(),
+            payload_violation: processed.payload_contract_violation.is_some(),
+            iteration: state.iteration,
+            consecutive_failures: state.consecutive_failures,
+            consecutive_malformed_events: state.consecutive_malformed_events,
+            stall_detector_had_events: state.stall_detector_had_events,
+            persisted_events: fs::read_to_string(tmp.path().join(".ralph/events.jsonl"))
+                .expect("persisted events"),
+        }
+    }
+
+    assert_eq!(run_once(false), run_once(true));
 }

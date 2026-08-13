@@ -309,6 +309,17 @@ impl DriftEngine {
             };
             if new_outcome != prior_outcome {
                 updates.push((key.clone(), new_outcome));
+                event_loop.diagnostics().log_feedback(
+                    crate::diagnostics::FeedbackEntry::new(
+                        current_iteration as u64,
+                        key.clone(),
+                        key.clone(),
+                        crate::diagnostics::FeedbackPhase::Validation,
+                    )
+                    .with_outcome(format!("{new_outcome:?}"))
+                    .with_status("validated")
+                    .with_source_ref("drift/engine.rs"),
+                );
                 let severity = event_loop
                     .recovery_responder()
                     .last_severity_for(&key)

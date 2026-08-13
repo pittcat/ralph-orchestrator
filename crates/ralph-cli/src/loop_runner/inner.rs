@@ -44,8 +44,8 @@ use ralph_core::{
 use ralph_proto::HatId;
 use ralph_tui::Tui;
 use std::fs::{self, File};
-use std::io::{IsTerminal, stdout};
-use std::path::PathBuf;
+use std::io::{IsTerminal, Read, stdout};
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;
 use std::time::Duration;
@@ -74,6 +74,66 @@ pub fn agent_wrote_any_valid_or_rejected(
         .unwrap_or(false);
     regular || !wave_policy_rejections.is_empty()
 }
+
+/// Snapshot one diagnostics artifact after all termination-side rows have
+/// been flushed. Hashing is streamed so a large agent-output sidecar cannot
+/// be loaded wholesale just to finalize the manifest.
+fn diagnostic_artifact_integrity(
+    session_dir: &Path,
+    name: &str,
+) -> ralph_core::diagnostics::ArtifactIntegrity {
+    use sha2::Digest as _;
+
+    let path = session_dir.join(name);
+    let metadata = fs::metadata(&path).ok();
+    let hash_self_referential_manifest = name == "diagnosis-input.json";
+    let mut sha256 = None;
+    if !hash_self_referential_manifest
+        && metadata.as_ref().is_some_and(std::fs::Metadata::is_file)
+        && let Ok(mut file) = File::open(&path)
+    {
+        let mut hasher = sha2::Sha256::new();
+        let mut buffer = [0_u8; 64 * 1024];
+        let mut readable = true;
+        loop {
+            match file.read(&mut buffer) {
+                Ok(0) => break,
+                Ok(count) => hasher.update(&buffer[..count]),
+                Err(_) => {
+                    readable = false;
+                    break;
+                }
+            }
+        }
+        if readable {
+            let digest = hasher.finalize();
+            sha256 = Some(
+                digest
+                    .iter()
+                    .map(|byte| format!("{byte:02x}"))
+                    .collect::<String>(),
+            );
+        }
+    }
+    let status = match metadata.as_ref() {
+        None => ralph_core::diagnostics::ArtifactStatus::Missing,
+        Some(metadata) if !metadata.is_file() => ralph_core::diagnostics::ArtifactStatus::Degraded,
+        Some(_) if hash_self_referential_manifest || sha256.is_some() => {
+            ralph_core::diagnostics::ArtifactStatus::Present
+        }
+        Some(_) => ralph_core::diagnostics::ArtifactStatus::Degraded,
+    };
+    ralph_core::diagnostics::ArtifactIntegrity {
+        path: name.to_string(),
+        status,
+        sha256,
+        size_bytes: metadata.as_ref().map(std::fs::Metadata::len),
+        last_modified: metadata
+            .and_then(|value| value.modified().ok())
+            .map(|value| chrono::DateTime::<chrono::Utc>::from(value).to_rfc3339()),
+    }
+}
+
 fn collect_idempotent_counts(
     event_loop: &ralph_core::EventLoop,
 ) -> (
@@ -288,6 +348,58 @@ fn finalize_recovery_diagnosis(
     event_loop
         .diagnostics()
         .write_active_activations(&activations);
+
+    // Plan 2026-08-12-001 D11/D15: append the termination and final
+    // feedback rows before taking the artifact snapshot. Otherwise the
+    // manifest would report a size/hash from just before those rows and
+    // falsely claim the sidecars were finalized.
+    if event_loop.diagnostics().session_dir().is_some() {
+        event_loop.diagnostics().log_runtime_trace(
+            ralph_core::diagnostics::RuntimeTraceEntry::new(
+                event_loop.state().iteration as u64,
+                0,
+                ralph_core::diagnostics::RuntimeTracePhase::Termination,
+            )
+            .with_status("terminated")
+            .with_kind("loop_termination"),
+        );
+        for finding in event_loop.recovery_responder().pending_findings() {
+            let feedback_id = if finding.diagnosis_id.is_empty() {
+                finding.retry_key.clone()
+            } else {
+                finding.diagnosis_id.clone()
+            };
+            event_loop.diagnostics().log_feedback(
+                ralph_core::diagnostics::FeedbackEntry::new(
+                    finding.iteration.unwrap_or(event_loop.state().iteration) as u64,
+                    feedback_id,
+                    finding.retry_key.clone(),
+                    ralph_core::diagnostics::FeedbackPhase::Final,
+                )
+                .with_outcome(format!("{:?}", finding.outcome))
+                .with_status("terminated")
+                .with_source_ref("loop_runner/termination"),
+            );
+        }
+
+        let Some(session_dir) = event_loop.diagnostics().session_dir() else {
+            unreachable!("session directory was checked above");
+        };
+        let artifacts = [
+            "diagnosis-input.json",
+            "runtime-trace.jsonl",
+            "feedback.jsonl",
+            "recovery.jsonl",
+            "drift.jsonl",
+            "diagnosis-summary.json",
+        ]
+        .into_iter()
+        .map(|name| diagnostic_artifact_integrity(&session_dir, name))
+        .collect();
+        event_loop
+            .diagnostics()
+            .finalize_input_bundle(artifacts, vec!["runner".to_string()]);
+    }
 
     // D1 (2026-06-16, plan 002 Unit 5): refresh the session pointer on
     // every termination path so `ralph diagnose --session latest` finds
@@ -540,6 +652,37 @@ pub(super) async fn run_loop_impl_inner(
     // current hat; human CLI invocations stay `None` so any operator can
     // still interact with them.
     register_loop_owner(&loop_id, &config, resume);
+
+    // Plan 2026-08-12-001 D11: complete the input bundle identity at the
+    // runner boundary, after loop id and config resolution but before the
+    // EventLoop is constructed. This is best-effort and never changes the
+    // business path.
+    if let Some(diagnostics) = prebuilt_diagnostics.as_ref() {
+        let execution_capability = if config.event_loop.supervisor.enabled {
+            "supervisor"
+        } else if config.event_loop.execution_mode == ralph_core::config::HatExecutionMode::Isolated {
+            "isolated"
+        } else {
+            "single-chain"
+        };
+        let code_baseline = ralph_core::diagnostics::CodeBaseline {
+            head_sha: get_head_sha(ctx.workspace()).ok(),
+            worktree: !ctx.is_primary(),
+            worktree_path: (!ctx.is_primary()).then(|| ctx.workspace().display().to_string()),
+        };
+        diagnostics.update_input_bundle_identity(
+            Some(loop_id.clone()),
+            hats_source_label.clone(),
+            config
+                .config_path
+                .as_ref()
+                .map(|path| path.display().to_string()),
+            Some(config.event_loop.prompt_file.clone()),
+            code_baseline.head_sha.clone(),
+            Some(execution_capability.to_string()),
+            code_baseline,
+        );
+    }
 
     let state_machine_enabled = config
         .event_loop
@@ -3311,6 +3454,20 @@ pub(super) async fn run_loop_impl_inner(
         // over on the next iteration. The matching `outcome.termination = None`
         // mapping lives in `convert_termination_type` / `execute_pty`.
         if outcome.watchdog_timeout {
+            event_loop.diagnostics().log_runtime_trace(
+                ralph_core::diagnostics::RuntimeTraceEntry::new(
+                    iteration as u64,
+                    0,
+                    ralph_core::diagnostics::RuntimeTracePhase::WatchdogTimeout,
+                )
+                .with_kind("backend_watchdog_timeout")
+                .with_hat(display_hat.to_string())
+                .with_status("observed")
+                .with_fields(serde_json::json!({
+                    "backend": backend_name_for_timeout,
+                    "partial_output": !outcome.output.is_empty(),
+                })),
+            );
             warn!(
                 iteration = iteration,
                 hat = %display_hat.as_str(),

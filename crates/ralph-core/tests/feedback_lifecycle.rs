@@ -144,6 +144,32 @@ fn feedback_sequence_monotonic_across_appends() {
     );
 }
 
+#[test]
+fn feedback_logger_resumes_sequence_when_session_is_reused() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let session = tmp.path().join("session");
+    std::fs::create_dir_all(&session).unwrap();
+    {
+        let mut logger = FeedbackLogger::new(&session).unwrap();
+        logger.append(FeedbackEntry::new(
+            0,
+            "diag-1",
+            "retry-1",
+            FeedbackPhase::Discovered,
+        ));
+    }
+    let mut resumed = FeedbackLogger::new(&session).unwrap();
+    resumed.append(FeedbackEntry::new(
+        1,
+        "diag-1",
+        "retry-1",
+        FeedbackPhase::Validation,
+    ));
+    let report = read_feedback_lifecycle_report(&session);
+    let sequences: Vec<u64> = report.rows.iter().map(|row| row.sequence).collect();
+    assert_eq!(sequences, vec![1, 2]);
+}
+
 /// Plan 2026-08-12-001 fix-plan U13: same `retry_key` repeated
 /// 5× via `log_feedback`/`FeedbackLogger::append` must
 /// produce 5 on-disk rows that the reader projects to one

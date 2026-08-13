@@ -61,6 +61,9 @@ pub struct FeedbackEntry {
     /// every row sharing the same `feedback_id`.
     pub retry_key: String,
     pub phase: FeedbackPhase,
+    /// Final status or lifecycle outcome associated with this row.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<String>,
     /// Optional action kind (`InjectDirective`, `ForcePlanBlocked`,
     /// `DedupeEnvelope`, `task.resume`, `correction`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -77,6 +80,9 @@ pub struct FeedbackEntry {
     /// record (e.g. recovery journal line).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_ref: Option<String>,
+    /// Evidence references collected during validation.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub evidence_refs: Vec<String>,
     /// Bounded JSON object with extra context. Field count is
     /// small on purpose.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -96,10 +102,12 @@ impl FeedbackEntry {
             feedback_id: feedback_id.into(),
             retry_key: retry_key.into(),
             phase,
+            status: None,
             action_kind: None,
             outcome: None,
             attempt: None,
             source_ref: None,
+            evidence_refs: Vec::new(),
             fields: None,
         }
     }
@@ -114,6 +122,11 @@ impl FeedbackEntry {
         self
     }
 
+    pub fn with_status(mut self, status: impl Into<String>) -> Self {
+        self.status = Some(status.into());
+        self
+    }
+
     pub fn with_attempt(mut self, attempt: u32) -> Self {
         self.attempt = Some(attempt);
         self
@@ -121,6 +134,11 @@ impl FeedbackEntry {
 
     pub fn with_source_ref(mut self, source_ref: impl Into<String>) -> Self {
         self.source_ref = Some(source_ref.into());
+        self
+    }
+
+    pub fn with_evidence_ref(mut self, evidence_ref: impl Into<String>) -> Self {
+        self.evidence_refs.push(evidence_ref.into());
         self
     }
 
@@ -143,9 +161,10 @@ impl FeedbackLogger {
     pub fn new(session_dir: &Path) -> std::io::Result<Self> {
         let path = session_dir.join("feedback.jsonl");
         let file = OpenOptions::new().create(true).append(true).open(&path)?;
+        let sequence = super::resume_sidecar_sequence(&path);
         Ok(Self {
             writer: BufWriter::new(file),
-            sequence: 0,
+            sequence,
             degraded: false,
         })
     }
@@ -189,10 +208,34 @@ impl FeedbackLogger {
                 "feedback.source_ref",
             ));
         }
+        entry.feedback_id = super::cap_string_field(&entry.feedback_id, "feedback.feedback_id");
+        entry.retry_key = super::cap_string_field(&entry.retry_key, "feedback.retry_key");
+        if let Some(ref status) = entry.status {
+            entry.status = Some(super::cap_string_field(status, "feedback.status"));
+        }
+        let mut evidence_refs = Vec::with_capacity(entry.evidence_refs.len());
+        for reference in &entry.evidence_refs {
+            evidence_refs.push(super::cap_string_field(reference, "feedback.evidence_ref"));
+            if serde_json::to_string(&evidence_refs)
+                .map(|json| json.len() > super::MAX_SIDECAR_FIELD_BYTES)
+                .unwrap_or(true)
+            {
+                evidence_refs.pop();
+                break;
+            }
+        }
+        entry.evidence_refs = evidence_refs;
         if let Some(fields) = entry.fields.take() {
             entry.fields = Some(super::cap_json_field(fields, "feedback.fields"));
         }
-        let pending = self.sequence + 1;
+        let Some(pending) = self.sequence.checked_add(1) else {
+            self.degraded = true;
+            tracing::warn!(
+                target: "ralph_core::diagnostics",
+                "feedback sequence exhausted; logger marked degraded"
+            );
+            return;
+        };
         entry.sequence = pending;
         let line = match serde_json::to_string(&entry) {
             Ok(s) => s,

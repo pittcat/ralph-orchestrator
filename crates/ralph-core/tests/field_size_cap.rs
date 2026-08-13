@@ -159,3 +159,41 @@ fn small_field_passes_through_writer_unchanged() {
         truncation_warns
     );
 }
+
+#[test]
+fn unicode_source_ref_is_truncated_without_panicking() {
+    let tmp = tempfile::TempDir::new().expect("TempDir");
+    let session = tmp.path().join("session");
+    fs::create_dir_all(&session).expect("create session dir");
+    let mut logger = RuntimeTraceLogger::new(&session).expect("RuntimeTraceLogger::new");
+
+    let entry = RuntimeTraceEntry::new(0, 0, RuntimeTracePhase::Activation)
+        .with_source_ref("中".repeat(10_000));
+    logger.append(entry);
+
+    let body = fs::read_to_string(session.join("runtime-trace.jsonl"))
+        .expect("read runtime-trace.jsonl");
+    assert!(body.len() <= MAX_SIDECAR_FIELD_BYTES + 512);
+    assert!(body.contains("...[truncated]"));
+    assert!(serde_json::from_str::<serde_json::Value>(body.trim()).is_ok());
+}
+
+#[test]
+fn nested_json_field_is_bounded() {
+    let tmp = tempfile::TempDir::new().expect("TempDir");
+    let session = tmp.path().join("session");
+    fs::create_dir_all(&session).expect("create session dir");
+    let mut logger = RuntimeTraceLogger::new(&session).expect("RuntimeTraceLogger::new");
+
+    let entry = RuntimeTraceEntry::new(0, 0, RuntimeTracePhase::Batch).with_fields(
+        serde_json::json!({
+            "nested": { "payload": "x".repeat(50 * 1024) },
+            "items": ["y".repeat(50 * 1024), "z".repeat(50 * 1024)]
+        }),
+    );
+    logger.append(entry);
+
+    let body = fs::read_to_string(session.join("runtime-trace.jsonl"))
+        .expect("read runtime-trace.jsonl");
+    assert!(body.len() <= MAX_SIDECAR_FIELD_BYTES + 512);
+}

@@ -295,6 +295,7 @@ async fn main() -> Result<()> {
         };
         let options = ralph_core::diagnostics::DiagnosticsOptions {
             trace_only: subprocess_tui_mode,
+            workspace_root: std::env::current_dir().ok(),
             ..options
         };
         match DiagnosticsCollector::with_options(std::path::Path::new("."), &options) {

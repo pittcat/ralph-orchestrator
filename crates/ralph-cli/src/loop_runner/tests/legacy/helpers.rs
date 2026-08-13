@@ -105,10 +105,7 @@ pub(crate) fn build_u8_event_loop(
         // Bypass `RALPH_DIAGNOSTICS` env so the test is hermetic;
         // `with_enabled(_, true)` is the same path U0 takes when the
         // operator sets the env var.
-        ralph_core::diagnostics::DiagnosticsCollector::with_enabled(
-            &ctx.workspace().join(".ralph"),
-            true,
-        )
+        ralph_core::diagnostics::DiagnosticsCollector::with_enabled(ctx.workspace(), true)
         .expect("diagnostics collector must initialize in tmpdir")
     } else {
         ralph_core::diagnostics::DiagnosticsCollector::disabled()

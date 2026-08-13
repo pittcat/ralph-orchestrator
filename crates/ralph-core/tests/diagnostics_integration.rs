@@ -160,14 +160,19 @@ fn disabled_collector_produces_no_sidecars() {
 
 // ── Off/On equivalence (D16) ──────────────────────────────────────────────────
 
-/// Partial event tuple shape for off/on comparison.
-/// We only compare the business-event bytes written to events.jsonl,
-/// not the diagnostics sidecars.
+/// Exact business-event tuple shape for off/on comparison. Diagnostics
+/// sidecars are intentionally excluded; accepted event routing and payload
+/// semantics must remain byte/structure equivalent.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 struct EventTupleShape {
+    #[serde(default)]
+    iteration: Option<u64>,
+    #[serde(default)]
+    source: Option<String>,
+    #[serde(default)]
+    target: Option<String>,
     topic: String,
-    // We capture a hash of the payload to keep the comparison cheap.
-    payload_sha256: String,
+    payload: serde_json::Value,
     error: Option<String>,
 }
 
@@ -179,19 +184,21 @@ impl EventTupleShape {
             #[serde(default)]
             payload: serde_json::Value,
             #[serde(default)]
+            iteration: Option<u64>,
+            #[serde(default)]
+            source: Option<String>,
+            #[serde(default)]
+            target: Option<String>,
+            #[serde(default)]
             error: Option<String>,
         }
         let raw: RawEvent = serde_json::from_str(line).ok()?;
-        let payload_bytes =
-            serde_json::to_vec(&raw.payload).ok()?;
-        use std::collections::hash_map::DefaultHasher;
-        use std::hash::{Hash, Hasher};
-        let mut h = DefaultHasher::new();
-        payload_bytes.hash(&mut h);
-        let sha = format!("{:016x}", h.finish());
         Some(EventTupleShape {
+            iteration: raw.iteration,
+            source: raw.source,
+            target: raw.target,
             topic: raw.topic,
-            payload_sha256: sha,
+            payload: raw.payload,
             error: raw.error,
         })
     }

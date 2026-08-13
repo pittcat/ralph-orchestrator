@@ -139,7 +139,7 @@ fn runtime_trace_reader_counts_records() {
         .expect("open for append");
     f.write_all(b"\nnot json\n").expect("append bad line");
     let report = read_runtime_trace_report(&session);
-    assert_eq!(report.status, BundleStatus::Present);
+    assert_eq!(report.status, BundleStatus::Degraded);
     assert_eq!(report.record_count, 3);
     assert_eq!(report.malformed_lines, 1);
     assert_eq!(report.first_sequence, Some(1));
@@ -184,6 +184,7 @@ fn report_from_session_includes_bundle_fields() {
     assert!(json.get("diagnosis_input").is_some());
     assert!(json.get("runtime_trace").is_some());
     assert!(json.get("feedback_lifecycle").is_some());
+    assert!(json["feedback_lifecycle"].is_array());
     assert!(json.get("repair_suggestions").is_some());
     assert!(json.get("evidence_gaps").is_some());
     let suggestions = json["repair_suggestions"].as_array().expect("array");
@@ -199,13 +200,14 @@ fn report_from_session_includes_bundle_fields() {
 }
 
 #[test]
-fn malformed_manifest_falls_back_to_legacy() {
+fn malformed_manifest_is_reported_as_degraded() {
     let tmp = TempDir::new().expect("TempDir");
     let session = tmp.path().join("session");
     fs::create_dir_all(&session).expect("create session dir");
     fs::write(session.join("diagnosis-input.json"), b"{not valid json}").expect("write bad");
     let report = read_input_bundle_report(&session);
-    assert_eq!(report.status, BundleStatus::Legacy);
+    assert_eq!(report.status, BundleStatus::Degraded);
+    assert_eq!(report.path.as_deref(), Some("diagnosis-input.json"));
 }
 
 // Plan 2026-08-12-001 fix-plan U2 / synth:P0-2: schema-version
@@ -354,6 +356,44 @@ fn single_valid_row_still_present() {
     let feedback_report = read_feedback_lifecycle_report(&session);
     assert_eq!(feedback_report.status, BundleStatus::Present);
     assert_eq!(feedback_report.rows.len(), 1);
+}
+
+#[test]
+fn malformed_and_out_of_order_sidecar_rows_are_degraded_without_panicking() {
+    let tmp = TempDir::new().expect("TempDir");
+    let session = tmp.path().join("session");
+    fs::create_dir_all(&session).expect("create session dir");
+
+    let mut first = serde_json::to_value(RuntimeTraceEntry::new(
+        0,
+        5,
+        RuntimeTracePhase::Batch,
+    ))
+    .expect("trace value");
+    let mut second = serde_json::to_value(RuntimeTraceEntry::new(
+        0,
+        1,
+        RuntimeTracePhase::Commit,
+    ))
+    .expect("trace value");
+    first["sequence"] = serde_json::json!(5);
+    second["sequence"] = serde_json::json!(1);
+    fs::write(
+        session.join("runtime-trace.jsonl"),
+        format!("{}\n{}\n{{not-json}}\n", first, second),
+    )
+    .expect("write trace");
+
+    let report = read_runtime_trace_report(&session);
+    assert_eq!(report.status, BundleStatus::Degraded);
+    assert_eq!(report.record_count, 2);
+    assert_eq!(report.malformed_lines, 1);
+    assert!(!report.monotonic_sequences);
+    let report = Report::from_session(&ralph_core::diagnosis::load_session(&session));
+    assert!(report
+        .evidence_gaps
+        .iter()
+        .any(|gap| gap.artifact == "runtime-trace.jsonl"));
 }
 
 // =========================================================================

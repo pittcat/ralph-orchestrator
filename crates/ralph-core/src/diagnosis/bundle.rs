@@ -155,6 +155,10 @@ pub struct FeedbackLifecycleRow {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub outcome: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<String>,
+    #[serde(default)]
+    pub evidence_refs: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub attempt: Option<u32>,
     #[serde(default)]
     pub sequence: u64,
@@ -213,6 +217,18 @@ pub struct EvidenceGap {
 pub fn read_input_bundle_report(session_dir: &Path) -> DiagnosisInputReport {
     match bundle_schema::read_manifest(session_dir) {
         Some(b) => project_bundle(&b),
+        None if bundle_schema::manifest_path(session_dir).exists() => {
+            tracing::warn!(
+                target: "ralph_core::diagnosis",
+                artifact = "diagnosis-input.json",
+                "diagnosis-input.json exists but is malformed; reporting degraded evidence"
+            );
+            DiagnosisInputReport {
+                status: BundleStatus::Degraded,
+                path: Some("diagnosis-input.json".to_string()),
+                ..DiagnosisInputReport::default()
+            }
+        }
         None => DiagnosisInputReport {
             status: BundleStatus::Legacy,
             ..DiagnosisInputReport::default()
@@ -298,20 +314,29 @@ pub fn read_runtime_trace_report(session_dir: &Path) -> RuntimeTraceReport {
             continue;
         }
         match serde_json::from_str::<Value>(line) {
-            Ok(v) => {
+            Ok(v) if is_runtime_trace_record(&v) => {
                 summary.record_count += 1;
                 if let Some(seq) = v.get("sequence").and_then(|x| x.as_u64()) {
                     first_sequence.get_or_insert(seq);
                     last_sequence = Some(seq);
                 }
             }
-            Err(_) => summary.malformed_lines += 1,
+            Ok(_) | Err(_) => summary.malformed_lines += 1,
         }
     }
     summary.first_sequence = first_sequence;
     summary.last_sequence = last_sequence;
+    if summary.malformed_lines > 0 {
+        summary.status = BundleStatus::Degraded;
+    }
     summary.monotonic_sequences = match (first_sequence, last_sequence) {
-        (Some(first), Some(last)) => last - first + 1 == summary.record_count,
+        (Some(first), Some(last)) => {
+            last >= first
+                && last
+                    .checked_sub(first)
+                    .and_then(|span| span.checked_add(1))
+                    == Some(summary.record_count)
+        }
         _ => summary.record_count == 0,
     };
     summary
@@ -355,7 +380,7 @@ pub fn read_feedback_lifecycle_report(session_dir: &Path) -> FeedbackLifecycleRe
             continue;
         }
         match serde_json::from_str::<Value>(line) {
-            Ok(v) => {
+            Ok(v) if is_feedback_record(&v) => {
                 let seq = v.get("sequence").and_then(|x| x.as_u64()).unwrap_or(0);
                 first_sequence.get_or_insert(seq);
                 last_sequence = Some(seq);
@@ -383,20 +408,63 @@ pub fn read_feedback_lifecycle_report(session_dir: &Path) -> FeedbackLifecycleRe
                         .get("outcome")
                         .and_then(|x| x.as_str())
                         .map(|s| s.to_string()),
+                    status: v
+                        .get("status")
+                        .and_then(|x| x.as_str())
+                        .map(|s| s.to_string()),
+                    evidence_refs: v
+                        .get("evidence_refs")
+                        .and_then(|x| x.as_array())
+                        .map(|refs| {
+                            refs.iter()
+                                .filter_map(|reference| reference.as_str().map(str::to_string))
+                                .collect()
+                        })
+                        .unwrap_or_default(),
                     attempt: v.get("attempt").and_then(|x| x.as_u64()).map(|n| n as u32),
                     sequence: seq,
                     iteration: v.get("iteration").and_then(|x| x.as_u64()).unwrap_or(0),
                 };
                 report.rows.push(row);
             }
-            Err(_) => report.malformed_lines += 1,
+            Ok(_) | Err(_) => report.malformed_lines += 1,
         }
     }
     report.monotonic_sequences = match (first_sequence, last_sequence) {
-        (Some(first), Some(last)) => last - first + 1 == report.rows.len() as u64,
+        (Some(first), Some(last)) => {
+            last >= first
+                && last
+                    .checked_sub(first)
+                    .and_then(|span| span.checked_add(1))
+                    == Some(report.rows.len() as u64)
+        }
         _ => report.rows.is_empty(),
     };
+    if report.malformed_lines > 0 {
+        report.status = BundleStatus::Degraded;
+    }
     report
+}
+
+fn is_runtime_trace_record(value: &Value) -> bool {
+    value.is_object()
+        && value.get("schema_version").and_then(Value::as_str).is_some()
+        && value.get("ts").and_then(Value::as_str).is_some()
+        && value.get("iteration").and_then(Value::as_u64).is_some()
+        && value.get("sequence").and_then(Value::as_u64).is_some()
+        && value.get("phase").and_then(Value::as_str).is_some()
+        && value.get("kind").and_then(Value::as_str).is_some()
+}
+
+fn is_feedback_record(value: &Value) -> bool {
+    value.is_object()
+        && value.get("schema_version").and_then(Value::as_str).is_some()
+        && value.get("ts").and_then(Value::as_str).is_some()
+        && value.get("iteration").and_then(Value::as_u64).is_some()
+        && value.get("sequence").and_then(Value::as_u64).is_some()
+        && value.get("feedback_id").and_then(Value::as_str).is_some()
+        && value.get("retry_key").and_then(Value::as_str).is_some()
+        && value.get("phase").and_then(Value::as_str).is_some()
 }
 
 /// Plan 2026-08-12-001 Unit 4 / Unit 5: layer repair
@@ -499,6 +567,14 @@ pub mod suggestions {
                     .to_string(),
             });
         } else if trace.malformed_lines > 0 {
+            gaps.push(EvidenceGap {
+                artifact: "runtime-trace.jsonl".to_string(),
+                reason: format!(
+                    "{} malformed line(s); lifecycle summary is incomplete",
+                    trace.malformed_lines
+                ),
+                affects: Some("runtime_trace".to_string()),
+            });
             suggestions.push(RepairSuggestion {
                 tier: "mid".to_string(),
                 finding_refs: vec!["runtime_trace.malformed".to_string()],
@@ -506,6 +582,13 @@ pub mod suggestions {
                 confidence: Some(70),
                 text: "runtime-trace.jsonl contains malformed lines. Treat the summary as advisory; the underlying events still ran on the bus."
                     .to_string(),
+            });
+        }
+        if !trace.monotonic_sequences && trace.record_count > 0 {
+            gaps.push(EvidenceGap {
+                artifact: "runtime-trace.jsonl".to_string(),
+                reason: "runtime trace sequence has a gap or is out of order".to_string(),
+                affects: Some("runtime_trace".to_string()),
             });
         }
 
@@ -522,6 +605,22 @@ pub mod suggestions {
                 confidence: Some(40),
                 text: "Re-run with diagnostics enabled to populate feedback.jsonl; the recovery.jsonl record stays the authoritative source."
                     .to_string(),
+            });
+        } else if feedback.malformed_lines > 0 {
+            gaps.push(EvidenceGap {
+                artifact: "feedback.jsonl".to_string(),
+                reason: format!(
+                    "{} malformed line(s); feedback lifecycle is incomplete",
+                    feedback.malformed_lines
+                ),
+                affects: Some("feedback_lifecycle".to_string()),
+            });
+        }
+        if !feedback.monotonic_sequences && !feedback.rows.is_empty() {
+            gaps.push(EvidenceGap {
+                artifact: "feedback.jsonl".to_string(),
+                reason: "feedback sequence has a gap or is out of order".to_string(),
+                affects: Some("feedback_lifecycle".to_string()),
             });
         }
 
@@ -623,4 +722,3 @@ mod u2_schema_mismatch_tests {
         }
     }
 }
-

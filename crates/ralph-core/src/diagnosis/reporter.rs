@@ -1508,6 +1508,12 @@ pub fn render_markdown(report: &Report) -> String {
     }
     out.push('\n');
 
+    push_diagnosis_input_md(&mut out, &report.diagnosis_input);
+    push_runtime_trace_md(&mut out, &report.runtime_trace);
+    push_feedback_lifecycle_md(&mut out, &report.feedback_lifecycle);
+    push_repair_suggestions_md(&mut out, &report.repair_suggestions);
+    push_evidence_gaps_md(&mut out, &report.evidence_gaps);
+
     push_top_findings_md(&mut out, &report.top_findings);
     push_recovery_timeline_md(&mut out, &report.recovery_timeline);
     push_drift_findings_md(&mut out, &report.drift_findings);
@@ -1518,6 +1524,76 @@ pub fn render_markdown(report: &Report) -> String {
     push_suggested_actions_md(&mut out, report);
     push_warnings_md(&mut out, &report.warnings);
     out
+}
+
+fn push_diagnosis_input_md(out: &mut String, input: &DiagnosisInputReport) {
+    out.push_str("## Diagnosis Input\n\n");
+    out.push_str(&format!("- status: `{}`\n", serde_json::to_string(&input.status).unwrap_or_default().trim_matches('"')));
+    if let Some(path) = &input.path {
+        out.push_str(&format!("- path: `{path}`\n"));
+    }
+    if let Some(schema) = &input.schema_version {
+        out.push_str(&format!("- schema: `{schema}`\n"));
+    }
+    out.push_str(&format!("- artifacts: {}\n\n", input.artifacts.len()));
+}
+
+fn push_runtime_trace_md(out: &mut String, trace: &RuntimeTraceReport) {
+    out.push_str("## Runtime Trace\n\n");
+    out.push_str(&format!("- status: `{}`\n", serde_json::to_string(&trace.status).unwrap_or_default().trim_matches('"')));
+    out.push_str(&format!("- records: {}\n", trace.record_count));
+    out.push_str(&format!("- malformed lines: {}\n", trace.malformed_lines));
+    out.push_str(&format!("- sequence contiguous: {}\n\n", trace.monotonic_sequences));
+}
+
+fn push_feedback_lifecycle_md(out: &mut String, feedback: &FeedbackLifecycleReport) {
+    out.push_str("## Feedback Lifecycle\n\n");
+    out.push_str(&format!("- status: `{}`\n", serde_json::to_string(&feedback.status).unwrap_or_default().trim_matches('"')));
+    out.push_str(&format!("- rows: {}\n", feedback.rows.len()));
+    out.push_str(&format!("- malformed lines: {}\n\n", feedback.malformed_lines));
+    if !feedback.rows.is_empty() {
+        out.push_str("| feedback_id | retry_key | phase | outcome | final_status | evidence_refs |\n|---|---|---|---|---|---|\n");
+        for row in &feedback.rows {
+            out.push_str(&format!(
+                "| `{}` | `{}` | `{}` | {} | {} | {} |\n",
+                row.feedback_id,
+                row.retry_key,
+                row.phase,
+                row.outcome.as_deref().unwrap_or("-"),
+                row.status.as_deref().unwrap_or("-"),
+                if row.evidence_refs.is_empty() {
+                    "-".to_string()
+                } else {
+                    row.evidence_refs.join(", ")
+                },
+            ));
+        }
+        out.push('\n');
+    }
+}
+
+fn push_repair_suggestions_md(out: &mut String, suggestions: &[RepairSuggestion]) {
+    out.push_str("## Repair Suggestions\n\n");
+    if suggestions.is_empty() {
+        out.push_str("_No repair suggestions._\n\n");
+        return;
+    }
+    for suggestion in suggestions {
+        out.push_str(&format!("- [{}] {}\n", suggestion.tier, suggestion.text));
+    }
+    out.push('\n');
+}
+
+fn push_evidence_gaps_md(out: &mut String, gaps: &[EvidenceGap]) {
+    out.push_str("## Evidence Gaps\n\n");
+    if gaps.is_empty() {
+        out.push_str("_No evidence gaps._\n\n");
+        return;
+    }
+    for gap in gaps {
+        out.push_str(&format!("- `{}`: {}\n", gap.artifact, gap.reason));
+    }
+    out.push('\n');
 }
 
 fn push_top_findings_md(out: &mut String, findings: &[RankedFinding]) {
@@ -2160,8 +2236,24 @@ pub fn render_json(report: &Report) -> Value {
             .unwrap_or_else(|_| serde_json::json!({"status": "missing"})),
         "runtime_trace": serde_json::to_value(&report.runtime_trace)
             .unwrap_or_else(|_| serde_json::json!({"status": "missing"})),
-        "feedback_lifecycle": serde_json::to_value(&report.feedback_lifecycle)
-            .unwrap_or_else(|_| serde_json::json!({"status": "missing"})),
+        // D14 fixes this public key as an array of lifecycle records. The
+        // reader keeps status/path on its internal summary so degraded and
+        // legacy evidence can still become `evidence_gaps`, but consumers do
+        // not have to unwrap a second `rows` object to consume records.
+        "feedback_lifecycle": report.feedback_lifecycle.rows.iter().map(|row| {
+            json!({
+                "feedback_id": row.feedback_id,
+                "retry_key": row.retry_key,
+                "phase": row.phase,
+                "action_kind": row.action_kind,
+                "outcome": row.outcome,
+                "attempt": row.attempt,
+                "final_status": row.status,
+                "evidence_refs": row.evidence_refs,
+                "sequence": row.sequence,
+                "iteration": row.iteration,
+            })
+        }).collect::<Vec<_>>(),
         "repair_suggestions": serde_json::to_value(&report.repair_suggestions)
             .unwrap_or_else(|_| serde_json::json!([])),
         "evidence_gaps": serde_json::to_value(&report.evidence_gaps)
@@ -2502,6 +2594,11 @@ mod tests {
             "## Top findings",
             "## Recovery timeline",
             "## Drift findings",
+            "## Diagnosis Input",
+            "## Runtime Trace",
+            "## Feedback Lifecycle",
+            "## Repair Suggestions",
+            "## Evidence Gaps",
             "## Preset topology health",
             "## Contract health",
             "## Active Hat Activations",

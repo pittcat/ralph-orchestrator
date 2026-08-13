@@ -87,13 +87,10 @@ impl EventLoop {
             .unwrap_or(envelope.target_hat.as_deref().unwrap_or("ralph"));
         self.diagnostics
             .log_recovery(RecoveryJournalEntry::from_envelope(envelope.clone(), notes));
-        // Plan 2026-08-12-001 fix-plan U1 / synth:P0-1: wire the
-        // feedback.jsonl sidecar at the recovery-record hook so
-        // every envelope surfaces as a `FeedbackPhase::Action`
-        // row. The feedback_id is the envelope's stable
-        // diagnosis_id (falls back to retry_key when the
-        // envelope lacks one); retry_key is the cross-iteration
-        // identity.
+        // Plan 2026-08-12-001 D12: record discovery and evidence at the
+        // envelope boundary. This is deliberately not an Action row:
+        // an envelope being observed is not proof that a recovery action
+        // was actually applied.
         let feedback_id = if !envelope.diagnosis_id.is_empty() {
             envelope.diagnosis_id.clone()
         } else {
@@ -101,12 +98,32 @@ impl EventLoop {
         };
         let feedback_entry = FeedbackEntry::new(
             envelope.iteration.unwrap_or(0) as u64,
-            feedback_id,
+            feedback_id.clone(),
             envelope.retry_key.clone(),
-            FeedbackPhase::Action,
+            FeedbackPhase::Discovered,
         )
-        .with_action_kind(format!("{:?}", envelope.source));
+        .with_outcome(format!("{:?}", envelope.outcome))
+        .with_status(format!("{:?}", envelope.outcome))
+        .with_source_ref("recovery.jsonl")
+        .with_fields(serde_json::json!({
+            "source": format!("{:?}", envelope.source),
+            "diagnosis_id": feedback_id,
+        }));
         self.diagnostics.log_feedback(feedback_entry);
+        self.diagnostics.log_feedback(
+            FeedbackEntry::new(
+                envelope.iteration.unwrap_or(0) as u64,
+                if !envelope.diagnosis_id.is_empty() {
+                    envelope.diagnosis_id.clone()
+                } else {
+                    envelope.retry_key.clone()
+                },
+                envelope.retry_key.clone(),
+                FeedbackPhase::Evidence,
+            )
+            .with_status("recorded")
+            .with_source_ref("recovery.jsonl"),
+        );
         self.diagnostics.log_orchestration(
             envelope.iteration.unwrap_or(0),
             hat,
@@ -341,6 +358,28 @@ impl EventLoop {
         use ralph_proto::{Event, HatId};
 
         for action in crate::recovery_runtime::dispatch(ctx) {
+            let (feedback_id, retry_key, action_kind) = match &action {
+                RecoveryAction::DedupeEnvelope { drop_retry_key } => (
+                    drop_retry_key.clone(),
+                    drop_retry_key.clone(),
+                    "dedupe_envelope",
+                ),
+                RecoveryAction::PublishEvent { topic, .. } => (
+                    format!("runtime:{topic}"),
+                    format!("runtime:{topic}"),
+                    "publish_event",
+                ),
+                RecoveryAction::InjectDirective { .. } => (
+                    "runtime:directive".to_string(),
+                    "runtime:directive".to_string(),
+                    "inject_directive",
+                ),
+                RecoveryAction::ForcePlanBlocked { retry_key, .. } => (
+                    retry_key.clone(),
+                    retry_key.clone(),
+                    "force_plan_blocked",
+                ),
+            };
             match action {
                 RecoveryAction::PublishEvent { topic, payload } => {
                     debug!(topic = %topic, "runtime-recovery: publishing corrective event");
@@ -406,6 +445,20 @@ impl EventLoop {
                     // and skip writing the duplicate.
                 }
             }
+            // Record the lifecycle row only after the action branch has
+            // completed, so `applied` cannot describe an action that failed
+            // before its state/event mutation.
+            self.diagnostics.log_feedback(
+                FeedbackEntry::new(
+                    self.state.iteration as u64,
+                    feedback_id,
+                    retry_key,
+                    FeedbackPhase::Action,
+                )
+                .with_action_kind(action_kind)
+                .with_status("applied")
+                .with_source_ref("runtime_recovery"),
+            );
         }
     }
 

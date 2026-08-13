@@ -56,10 +56,14 @@ pub struct RuntimeTraceEntry {
     pub ts: String,
     /// Loop iteration counter (0-based).
     pub iteration: u64,
-    /// Monotonic per-session sequence number. Resets to 0 when the
-    /// logger is created.
+    /// Monotonic per-session sequence number. Existing rows are scanned when
+    /// a session is reused so continuation runs do not restart at 1.
     pub sequence: u64,
     pub phase: RuntimeTracePhase,
+    /// Stable event kind used by bundle consumers. It is kept separate from
+    /// `phase` because one phase can contain several runtime facts.
+    #[serde(default = "default_trace_kind")]
+    pub kind: String,
     /// Hat id, if the phase is bound to a hat (e.g. activation,
     /// accepted/rejected). Optional.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -70,8 +74,12 @@ pub struct RuntimeTraceEntry {
     /// Workspace-relative path or other short ref pointing at the
     /// underlying raw artifact (e.g. the event log, the recovery
     /// journal line).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing)]
     pub source_ref: Option<String>,
+    /// Fixed-shape reference field for report consumers. `source_ref` is
+    /// retained as a compatibility alias for existing Rust callers.
+    #[serde(rename = "ref", default, skip_serializing_if = "Option::is_none")]
+    pub reference: Option<String>,
     /// Human-readable status string (`accepted`, `rejected:<code>`,
     /// `commit`, `watchdog_timeout`, `termination:<reason>`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -92,9 +100,11 @@ impl RuntimeTraceEntry {
             iteration,
             sequence,
             phase,
+            kind: phase_kind(phase).to_string(),
             hat: None,
             topic: None,
             source_ref: None,
+            reference: None,
             status: None,
             fields: None,
         }
@@ -114,7 +124,14 @@ impl RuntimeTraceEntry {
 
     /// Set the `source_ref` field.
     pub fn with_source_ref(mut self, source_ref: impl Into<String>) -> Self {
-        self.source_ref = Some(source_ref.into());
+        let source_ref = source_ref.into();
+        self.source_ref = Some(source_ref.clone());
+        self.reference = Some(source_ref);
+        self
+    }
+
+    pub fn with_kind(mut self, kind: impl Into<String>) -> Self {
+        self.kind = kind.into();
         self
     }
 
@@ -131,6 +148,22 @@ impl RuntimeTraceEntry {
     }
 }
 
+fn phase_kind(phase: RuntimeTracePhase) -> &'static str {
+    match phase {
+        RuntimeTracePhase::Activation => "activation",
+        RuntimeTracePhase::Batch => "batch",
+        RuntimeTracePhase::Accepted => "accepted",
+        RuntimeTracePhase::Rejected => "rejected",
+        RuntimeTracePhase::Commit => "commit",
+        RuntimeTracePhase::WatchdogTimeout => "watchdog_timeout",
+        RuntimeTracePhase::Termination => "termination",
+    }
+}
+
+fn default_trace_kind() -> String {
+    "unknown".to_string()
+}
+
 /// On-disk writer for `runtime-trace.jsonl`. Holds a `BufWriter<File>`
 /// and a monotonic sequence counter.
 pub struct RuntimeTraceLogger {
@@ -145,9 +178,10 @@ impl RuntimeTraceLogger {
     pub fn new(session_dir: &Path) -> std::io::Result<Self> {
         let path = session_dir.join("runtime-trace.jsonl");
         let file = OpenOptions::new().create(true).append(true).open(&path)?;
+        let sequence = super::resume_sidecar_sequence(&path);
         Ok(Self {
             writer: BufWriter::new(file),
-            sequence: 0,
+            sequence,
             degraded: false,
         })
     }
@@ -177,19 +211,43 @@ impl RuntimeTraceLogger {
         if self.degraded {
             return;
         }
+        if let Some(hat) = entry.hat.as_ref() {
+            entry.hat = Some(super::cap_string_field(hat, "runtime_trace.hat"));
+        }
+        if let Some(topic) = entry.topic.as_ref() {
+            entry.topic = Some(super::cap_string_field(topic, "runtime_trace.topic"));
+        }
+        if let Some(status) = entry.status.as_ref() {
+            entry.status = Some(super::cap_string_field(status, "runtime_trace.status"));
+        }
+        entry.kind = super::cap_string_field(&entry.kind, "runtime_trace.kind");
         // Plan 2026-08-12-001 fix-plan U9: cap per-field bytes
         // before serializing. The `source_ref` and JSON `fields`
         // blob are the only non-scalar inputs from upstream.
         if let Some(ref source_ref) = entry.source_ref {
-            entry.source_ref = Some(super::cap_string_field(
+            let capped = super::cap_string_field(
                 source_ref,
                 "runtime_trace.source_ref",
+            );
+            entry.source_ref = Some(capped.clone());
+            entry.reference = Some(capped);
+        } else if let Some(reference) = entry.reference.as_ref() {
+            entry.reference = Some(super::cap_string_field(
+                reference,
+                "runtime_trace.ref",
             ));
         }
         if let Some(fields) = entry.fields.take() {
             entry.fields = Some(super::cap_json_field(fields, "runtime_trace.fields"));
         }
-        let pending = self.sequence + 1;
+        let Some(pending) = self.sequence.checked_add(1) else {
+            self.degraded = true;
+            tracing::warn!(
+                target: "ralph_core::diagnostics",
+                "runtime trace sequence exhausted; logger marked degraded"
+            );
+            return;
+        };
         entry.sequence = pending;
         let line = match serde_json::to_string(&entry) {
             Ok(s) => s,
