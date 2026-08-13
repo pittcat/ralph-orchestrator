@@ -15,13 +15,13 @@ use std::fs;
 use std::path::Path;
 
 use ralph_core::diagnosis::{
-    load_session, read_feedback_lifecycle_report, read_input_bundle_report,
-    read_runtime_trace_report, render_json, BundleStatus, FeedbackLifecycleRow, FeedbackPhase,
-    Report,
+    BundleStatus, FeedbackLifecycleRow, FeedbackPhase, Report, load_session,
+    read_feedback_lifecycle_report, read_input_bundle_report, read_runtime_trace_report,
+    render_json,
 };
 use ralph_core::diagnostics::{
-    write_manifest as write_input_bundle, ArtifactIntegrity, ArtifactStatus, CodeBaseline,
-    DiagnosisInputBundle, RuntimeTraceEntry, RuntimeTracePhase,
+    ArtifactIntegrity, ArtifactStatus, CodeBaseline, DiagnosisInputBundle, RuntimeTraceEntry,
+    RuntimeTracePhase, write_manifest as write_input_bundle,
 };
 use tempfile::TempDir;
 
@@ -53,8 +53,8 @@ fn append_feedback(session_dir: &Path, id: &str, retry: &str, phase: FeedbackPha
     // below to share one logger so the sequence is monotonic
     // across the rows.
     use ralph_core::diagnostics::FeedbackEntry;
-    let mut logger = ralph_core::diagnostics::FeedbackLogger::new(session_dir)
-        .expect("FeedbackLogger::new");
+    let mut logger =
+        ralph_core::diagnostics::FeedbackLogger::new(session_dir).expect("FeedbackLogger::new");
     let entry = FeedbackEntry::new(0, id, retry, phase);
     logger.append(entry);
 }
@@ -66,8 +66,8 @@ where
     // Plan 2026-08-12-001 fix-plan U13: write N rows through one
     // FeedbackLogger so the on-disk sequence is monotonic (and
     // the reader's `monotonic_sequences` flag flips to true).
-    let mut logger = ralph_core::diagnostics::FeedbackLogger::new(session_dir)
-        .expect("FeedbackLogger::new");
+    let mut logger =
+        ralph_core::diagnostics::FeedbackLogger::new(session_dir).expect("FeedbackLogger::new");
     for i in 0..count {
         logger.append(mk_entry(i));
     }
@@ -117,11 +117,17 @@ fn present_bundle_projects_to_report() {
 
     let report = read_input_bundle_report(&session);
     assert_eq!(report.status, BundleStatus::Finalized);
-    assert_eq!(report.preset_label.as_deref(), Some("builtin:ce-executor-pipeline"));
+    assert_eq!(
+        report.preset_label.as_deref(),
+        Some("builtin:ce-executor-pipeline")
+    );
     assert_eq!(report.loop_id.as_deref(), Some("loop-1"));
     assert_eq!(report.worktree, Some(true));
     assert_eq!(report.artifacts.len(), 1);
-    assert_eq!(report.execution_capabilities, vec!["single-chain".to_string()]);
+    assert_eq!(
+        report.execution_capabilities,
+        vec!["single-chain".to_string()]
+    );
 }
 
 #[test]
@@ -171,15 +177,16 @@ fn report_from_session_includes_bundle_fields() {
     let session = tmp.path().join("session");
     fs::create_dir_all(&session).expect("create session dir");
     write_pending_bundle(&session);
-    let bundle = DiagnosisInputBundle::new_pending(&session).with_finalized(
-        vec![],
-        vec!["single-chain".to_string()],
-    );
+    let bundle = DiagnosisInputBundle::new_pending(&session)
+        .with_finalized(vec![], vec!["single-chain".to_string()]);
     let _ = write_input_bundle(&session, &bundle).expect("write_manifest");
     let data = load_session(&session);
     let report = Report::from_session(&data);
     assert_eq!(report.diagnosis_input.status, BundleStatus::Finalized);
-    assert!(!report.repair_suggestions.is_empty(), "non-empty suggestions");
+    assert!(
+        !report.repair_suggestions.is_empty(),
+        "non-empty suggestions"
+    );
     let json = render_json(&report);
     assert!(json.get("diagnosis_input").is_some());
     assert!(json.get("runtime_trace").is_some());
@@ -190,7 +197,10 @@ fn report_from_session_includes_bundle_fields() {
     let suggestions = json["repair_suggestions"].as_array().expect("array");
     for s in suggestions {
         let tier = s["tier"].as_str().unwrap_or("");
-        assert!(matches!(tier, "short" | "mid" | "long"), "tier must be one of short/mid/long, got: {tier}");
+        assert!(
+            matches!(tier, "short" | "mid" | "long"),
+            "tier must be one of short/mid/long, got: {tier}"
+        );
         let text = s["text"].as_str().unwrap_or("");
         assert!(
             !text.contains("rm -rf") && !text.contains("cargo run") && !text.contains("ralph "),
@@ -339,12 +349,19 @@ fn single_valid_row_still_present() {
     // One valid runtime-trace row.
     let trace_entry = RuntimeTraceEntry::new(0, 1, RuntimeTracePhase::Activation);
     let trace_json = serde_json::to_string(&trace_entry).expect("serialize trace");
-    fs::write(session.join("runtime-trace.jsonl"), format!("{trace_json}\n"))
-        .expect("write trace");
+    fs::write(
+        session.join("runtime-trace.jsonl"),
+        format!("{trace_json}\n"),
+    )
+    .expect("write trace");
 
     // One valid feedback row.
-    let feedback_entry =
-        ralph_core::diagnostics::FeedbackEntry::new(0, "fb-1", "retry-1", FeedbackPhase::Discovered);
+    let feedback_entry = ralph_core::diagnostics::FeedbackEntry::new(
+        0,
+        "fb-1",
+        "retry-1",
+        FeedbackPhase::Discovered,
+    );
     let feedback_json = serde_json::to_string(&feedback_entry).expect("serialize feedback");
     fs::write(session.join("feedback.jsonl"), format!("{feedback_json}\n"))
         .expect("write feedback");
@@ -364,18 +381,10 @@ fn malformed_and_out_of_order_sidecar_rows_are_degraded_without_panicking() {
     let session = tmp.path().join("session");
     fs::create_dir_all(&session).expect("create session dir");
 
-    let mut first = serde_json::to_value(RuntimeTraceEntry::new(
-        0,
-        5,
-        RuntimeTracePhase::Batch,
-    ))
-    .expect("trace value");
-    let mut second = serde_json::to_value(RuntimeTraceEntry::new(
-        0,
-        1,
-        RuntimeTracePhase::Commit,
-    ))
-    .expect("trace value");
+    let mut first = serde_json::to_value(RuntimeTraceEntry::new(0, 5, RuntimeTracePhase::Batch))
+        .expect("trace value");
+    let mut second = serde_json::to_value(RuntimeTraceEntry::new(0, 1, RuntimeTracePhase::Commit))
+        .expect("trace value");
     first["sequence"] = serde_json::json!(5);
     second["sequence"] = serde_json::json!(1);
     fs::write(
@@ -390,10 +399,12 @@ fn malformed_and_out_of_order_sidecar_rows_are_degraded_without_panicking() {
     assert_eq!(report.malformed_lines, 1);
     assert!(!report.monotonic_sequences);
     let report = Report::from_session(&ralph_core::diagnosis::load_session(&session));
-    assert!(report
-        .evidence_gaps
-        .iter()
-        .any(|gap| gap.artifact == "runtime-trace.jsonl"));
+    assert!(
+        report
+            .evidence_gaps
+            .iter()
+            .any(|gap| gap.artifact == "runtime-trace.jsonl")
+    );
 }
 
 // =========================================================================

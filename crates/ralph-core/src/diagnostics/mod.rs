@@ -42,11 +42,11 @@ mod integration_tests;
 pub use agent_output::{AgentOutputContent, AgentOutputEntry, AgentOutputLogger};
 pub use drift::{DriftLogger, MAX_DRIFT_MESSAGE_CHARS};
 pub use errors::{DiagnosticError, ErrorLogger};
-pub use feedback::{FeedbackEntry, FeedbackLogger, FeedbackPhase, FEEDBACK_SCHEMA_VERSION};
+pub use feedback::{FEEDBACK_SCHEMA_VERSION, FeedbackEntry, FeedbackLogger, FeedbackPhase};
 pub use hook_runs::{HookDisposition, HookRunLogger, HookRunTelemetryEntry};
 pub use input_bundle::{
-    read_manifest, write_manifest, ArtifactIntegrity, ArtifactStatus, CodeBaseline,
-    DiagnosisInputBundle, ManifestStatus, RunMetadata, DIAGNOSIS_INPUT_SCHEMA_VERSION,
+    ArtifactIntegrity, ArtifactStatus, CodeBaseline, DIAGNOSIS_INPUT_SCHEMA_VERSION,
+    DiagnosisInputBundle, ManifestStatus, RunMetadata, read_manifest, write_manifest,
 };
 pub use log_rotation::{create_log_file, rotate_logs};
 pub use orchestration::{
@@ -55,7 +55,7 @@ pub use orchestration::{
 pub use performance::{PerformanceLogger, PerformanceMetric};
 pub use recovery::{MAX_RECOVERY_NOTE_CHARS, RecoveryLogger};
 pub use runtime_trace::{
-    RuntimeTraceEntry, RuntimeTraceLogger, RuntimeTracePhase, RUNTIME_TRACE_SCHEMA_VERSION,
+    RUNTIME_TRACE_SCHEMA_VERSION, RuntimeTraceEntry, RuntimeTraceLogger, RuntimeTracePhase,
 };
 pub use session::probe_session_dir_writable;
 pub use stream_handler::DiagnosticStreamHandler;
@@ -84,7 +84,12 @@ const TRUNCATION_SUFFIX: &str = "...[truncated]";
 /// duplicated `match X::new(...) { Ok => Some(Arc::new(Mutex::new(...))), Err => { warn; None } }`
 /// boilerplate and unifies the `tracing::warn!` shape so every
 /// slot's failure path looks the same to the operator.
-fn install_optional_logger<T, F>(enabled: bool, label: &str, session_dir: &Path, ctor: F) -> Option<Arc<Mutex<T>>>
+fn install_optional_logger<T, F>(
+    enabled: bool,
+    label: &str,
+    session_dir: &Path,
+    ctor: F,
+) -> Option<Arc<Mutex<T>>>
 where
     F: FnOnce(&Path) -> std::io::Result<T>,
 {
@@ -169,9 +174,7 @@ pub(crate) fn cap_json_field(value: serde_json::Value, label: &'static str) -> s
                 let mut capped = serde_json::Map::new();
                 for (key, value) in values {
                     capped.insert(key, cap(value, label));
-                    if Value::Object(capped.clone()).to_string().len()
-                        > MAX_SIDECAR_FIELD_BYTES
-                    {
+                    if Value::Object(capped.clone()).to_string().len() > MAX_SIDECAR_FIELD_BYTES {
                         let last_key = capped.keys().next_back().cloned();
                         if let Some(last_key) = last_key {
                             capped.remove(&last_key);
@@ -401,7 +404,10 @@ impl std::fmt::Debug for DiagnosticsCollector {
             .field("has_recovery_logger", &self.recovery_logger.is_some())
             .field("has_drift_logger", &self.drift_logger.is_some())
             .field("has_input_bundle", &self.input_bundle.is_some())
-            .field("has_runtime_trace_logger", &self.runtime_trace_logger.is_some())
+            .field(
+                "has_runtime_trace_logger",
+                &self.runtime_trace_logger.is_some(),
+            )
             .field("has_feedback_logger", &self.feedback_logger.is_some())
             .finish()
     }
@@ -450,10 +456,7 @@ impl DiagnosticsCollector {
         // Resolve or create the session directory exactly once per collector.
         // Canonicalize after creation so a symlink cannot escape the declared
         // workspace root between validation and the first sidecar write.
-        let configured_workspace_root = options
-            .workspace_root
-            .as_deref()
-            .unwrap_or(base_path);
+        let configured_workspace_root = options.workspace_root.as_deref().unwrap_or(base_path);
         let workspace_root = fs::canonicalize(configured_workspace_root).map_err(|err| {
             std::io::Error::new(
                 err.kind(),
@@ -1629,7 +1632,7 @@ mod tests {
             full_diagnostics: false,
             runtime_diagnosis_artifacts: true,
             session_dir: Some(preset_dir.clone()),
-        workspace_root: None,
+            workspace_root: None,
             ..DiagnosticsOptions::default()
         };
         let collector = DiagnosticsCollector::with_options(temp.path(), &options).unwrap();
@@ -1751,7 +1754,7 @@ mod tests {
             runtime_diagnosis_artifacts: false,
             trace_only: true,
             session_dir: Some(preset_dir.clone()),
-        workspace_root: None,
+            workspace_root: None,
         };
         let collector = DiagnosticsCollector::with_options(temp.path(), &options).unwrap();
         assert!(collector.is_trace_only());

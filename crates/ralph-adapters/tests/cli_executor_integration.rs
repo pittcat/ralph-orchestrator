@@ -537,8 +537,8 @@ mod cli_executor_integration {
             .execute("", &mut output, None, false, workspace.path())
             .await
             .expect("headless execute ok");
-        let headless_marker = std::fs::read_to_string(workspace.path().join("marker"))
-            .expect("read headless marker");
+        let headless_marker =
+            std::fs::read_to_string(workspace.path().join("marker")).expect("read headless marker");
 
         // ---- PTY path ----
         let pty_backend = CliBackend {

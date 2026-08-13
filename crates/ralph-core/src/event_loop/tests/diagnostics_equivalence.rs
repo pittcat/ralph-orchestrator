@@ -103,8 +103,7 @@ fn collector_disables_input_bundle_when_initial_write_fails() {
     let session_dir = tmp.path().join("readonly-session");
     fs::create_dir_all(&session_dir).expect("create session dir");
     let original = fs::metadata(&session_dir).expect("metadata").permissions();
-    fs::set_permissions(&session_dir, fs::Permissions::from_mode(0o500))
-        .expect("chmod 0500");
+    fs::set_permissions(&session_dir, fs::Permissions::from_mode(0o500)).expect("chmod 0500");
 
     let opts = DiagnosticsOptions {
         full_diagnostics: false,
@@ -166,7 +165,11 @@ fn event_loop_process_batch_records_runtime_lifecycle() {
     let body = fs::read_to_string(session.join("runtime-trace.jsonl")).expect("trace");
     let phases: Vec<RuntimeTracePhase> = body
         .lines()
-        .map(|line| serde_json::from_str::<RuntimeTraceEntry>(line).expect("trace row").phase)
+        .map(|line| {
+            serde_json::from_str::<RuntimeTraceEntry>(line)
+                .expect("trace row")
+                .phase
+        })
         .collect();
     assert!(phases.contains(&RuntimeTracePhase::Batch));
     assert!(phases.contains(&RuntimeTracePhase::Commit));
@@ -216,8 +219,8 @@ fn diagnostics_off_on_preserves_processed_result_and_state_projection() {
             workspace_root: Some(tmp.path().to_path_buf()),
             ..DiagnosticsOptions::default()
         };
-        let collector = DiagnosticsCollector::with_options(tmp.path(), &options)
-            .expect("collector");
+        let collector =
+            DiagnosticsCollector::with_options(tmp.path(), &options).expect("collector");
         let context = LoopContext::primary(tmp.path().to_path_buf());
         let mut event_loop = ralph_core::EventLoop::with_context_and_diagnostics(
             RalphConfig::default(),

@@ -13,8 +13,8 @@ use ralph_core::diagnostics::{
 };
 use std::fs;
 use std::sync::{Arc, Mutex};
-use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::Layer;
+use tracing_subscriber::layer::SubscriberExt;
 
 /// Capture `tracing::warn!` events from the diagnostics target.
 #[derive(Default, Clone)]
@@ -35,7 +35,11 @@ impl<S: tracing::Subscriber + for<'a> tracing_subscriber::registry::LookupSpan<'
         {
             struct Visitor(Vec<String>);
             impl tracing::field::Visit for Visitor {
-                fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+                fn record_debug(
+                    &mut self,
+                    field: &tracing::field::Field,
+                    value: &dyn std::fmt::Debug,
+                ) {
                     self.0.push(format!("{}={:?}", field.name(), value));
                 }
                 fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
@@ -69,8 +73,8 @@ fn feedback_logger_caps_oversized_source_ref() {
     let mut logger = FeedbackLogger::new(&session).expect("FeedbackLogger::new");
 
     let huge = "x".repeat(50 * 1024 * 1024);
-    let entry = FeedbackEntry::new(0, "id-1", "retry-1", FeedbackPhase::Action)
-        .with_source_ref(huge);
+    let entry =
+        FeedbackEntry::new(0, "id-1", "retry-1", FeedbackPhase::Action).with_source_ref(huge);
     logger.append(entry);
 
     let path = session.join("feedback.jsonl");
@@ -121,7 +125,9 @@ fn runtime_trace_logger_caps_oversized_source_ref() {
 
     let events = capture.events.lock().unwrap().clone();
     assert!(
-        events.iter().any(|e| e.contains("runtime_trace.source_ref")),
+        events
+            .iter()
+            .any(|e| e.contains("runtime_trace.source_ref")),
         "expected at least one warn event naming runtime_trace.source_ref, got {:?}",
         events
     );
@@ -149,10 +155,7 @@ fn small_field_passes_through_writer_unchanged() {
 
     // No warns for small inputs.
     let events = capture.events.lock().unwrap().clone();
-    let truncation_warns: Vec<_> = events
-        .iter()
-        .filter(|e| e.contains("truncated"))
-        .collect();
+    let truncation_warns: Vec<_> = events.iter().filter(|e| e.contains("truncated")).collect();
     assert!(
         truncation_warns.is_empty(),
         "no truncation warns expected for small input, got {:?}",
@@ -171,8 +174,8 @@ fn unicode_source_ref_is_truncated_without_panicking() {
         .with_source_ref("中".repeat(10_000));
     logger.append(entry);
 
-    let body = fs::read_to_string(session.join("runtime-trace.jsonl"))
-        .expect("read runtime-trace.jsonl");
+    let body =
+        fs::read_to_string(session.join("runtime-trace.jsonl")).expect("read runtime-trace.jsonl");
     assert!(body.len() <= MAX_SIDECAR_FIELD_BYTES + 512);
     assert!(body.contains("...[truncated]"));
     assert!(serde_json::from_str::<serde_json::Value>(body.trim()).is_ok());
@@ -185,15 +188,14 @@ fn nested_json_field_is_bounded() {
     fs::create_dir_all(&session).expect("create session dir");
     let mut logger = RuntimeTraceLogger::new(&session).expect("RuntimeTraceLogger::new");
 
-    let entry = RuntimeTraceEntry::new(0, 0, RuntimeTracePhase::Batch).with_fields(
-        serde_json::json!({
+    let entry =
+        RuntimeTraceEntry::new(0, 0, RuntimeTracePhase::Batch).with_fields(serde_json::json!({
             "nested": { "payload": "x".repeat(50 * 1024) },
             "items": ["y".repeat(50 * 1024), "z".repeat(50 * 1024)]
-        }),
-    );
+        }));
     logger.append(entry);
 
-    let body = fs::read_to_string(session.join("runtime-trace.jsonl"))
-        .expect("read runtime-trace.jsonl");
+    let body =
+        fs::read_to_string(session.join("runtime-trace.jsonl")).expect("read runtime-trace.jsonl");
     assert!(body.len() <= MAX_SIDECAR_FIELD_BYTES + 512);
 }

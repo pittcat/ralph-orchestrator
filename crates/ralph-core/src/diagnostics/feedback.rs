@@ -93,7 +93,12 @@ impl FeedbackEntry {
     /// New row at the current UTC timestamp. `sequence` and
     /// `schema_version` are filled in by the logger; the
     /// `feedback_id` and `retry_key` are caller-supplied.
-    pub fn new(iteration: u64, feedback_id: impl Into<String>, retry_key: impl Into<String>, phase: FeedbackPhase) -> Self {
+    pub fn new(
+        iteration: u64,
+        feedback_id: impl Into<String>,
+        retry_key: impl Into<String>,
+        phase: FeedbackPhase,
+    ) -> Self {
         Self {
             schema_version: FEEDBACK_SCHEMA_VERSION.to_string(),
             ts: chrono::Utc::now().to_rfc3339(),
@@ -194,19 +199,13 @@ impl FeedbackLogger {
         // rewritten in place; the JSON `fields` blob is capped
         // via `cap_json_field` (drops keys until it fits).
         if let Some(ref action_kind) = entry.action_kind {
-            entry.action_kind = Some(super::cap_string_field(
-                action_kind,
-                "feedback.action_kind",
-            ));
+            entry.action_kind = Some(super::cap_string_field(action_kind, "feedback.action_kind"));
         }
         if let Some(ref outcome) = entry.outcome {
             entry.outcome = Some(super::cap_string_field(outcome, "feedback.outcome"));
         }
         if let Some(ref source_ref) = entry.source_ref {
-            entry.source_ref = Some(super::cap_string_field(
-                source_ref,
-                "feedback.source_ref",
-            ));
+            entry.source_ref = Some(super::cap_string_field(source_ref, "feedback.source_ref"));
         }
         entry.feedback_id = super::cap_string_field(&entry.feedback_id, "feedback.feedback_id");
         entry.retry_key = super::cap_string_field(&entry.retry_key, "feedback.retry_key");

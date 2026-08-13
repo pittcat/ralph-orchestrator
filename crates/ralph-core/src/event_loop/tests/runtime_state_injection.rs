@@ -538,7 +538,10 @@ fn accepted_business_and_recovery_events_create_observations() {
     // The ledger's display vec carries exactly one record.
     assert_eq!(ledger.snapshot().knowledge.records().len(), 1);
     let record = &ledger.snapshot().knowledge.records()[0];
-    assert_eq!(record.verification(), crate::state::VerificationStatus::Unverified);
+    assert_eq!(
+        record.verification(),
+        crate::state::VerificationStatus::Unverified
+    );
 }
 
 /// U2 wiring: DiagnosticObservation / LoopControl events MUST
@@ -557,7 +560,11 @@ fn rejected_and_non_advancing_events_do_not_create_observations() {
         json!({"topic": "event.malformed", "payload": "{}", "ts": ts}),
         json!({"topic": "LOOP_COMPLETE", "payload": "{}", "ts": ts}),
     ];
-    let body: String = lines.iter().map(|v| v.to_string()).collect::<Vec<_>>().join("\n");
+    let body: String = lines
+        .iter()
+        .map(|v| v.to_string())
+        .collect::<Vec<_>>()
+        .join("\n");
     fs::write(&events_path, format!("{body}\n")).unwrap();
 
     let mut event_loop = multi_hat_event_loop(dir.path());

@@ -43,13 +43,10 @@ fn write_redteam_scope_fixture(root: &std::path::Path, manifest_coverage: u64) -
     let mut canonical = serde_json::to_vec(&manifest).expect("canonical manifest");
     canonical.push(b'\n');
     let manifest_digest = format!("{:x}", Sha256::digest(canonical));
-    manifest
-        .as_object_mut()
-        .expect("manifest object")
-        .insert(
-            "scope_digest".to_string(),
-            serde_json::Value::String(manifest_digest.clone()),
-        );
+    manifest.as_object_mut().expect("manifest object").insert(
+        "scope_digest".to_string(),
+        serde_json::Value::String(manifest_digest.clone()),
+    );
     std::fs::write(
         &manifest_path,
         serde_json::to_vec(&manifest).expect("manifest bytes"),
@@ -142,7 +139,10 @@ fn test_builtin_redteam_scope_policy_check_rejects_manifest_decision_mismatch() 
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(!output.status.success(), "manifest mismatch must reject: stdout={stdout} stderr={stderr}");
+    assert!(
+        !output.status.success(),
+        "manifest mismatch must reject: stdout={stdout} stderr={stderr}"
+    );
     assert!(
         stdout.contains("coverage") || stderr.contains("coverage"),
         "rejection must identify the mismatched decision field: stdout={stdout} stderr={stderr}"

@@ -155,13 +155,9 @@ pub enum InputFingerprint {
         plan_baseline_sha: String,
     },
     /// Only `loop_start_sha` is available.
-    LoopStartOnly {
-        loop_start_sha: String,
-    },
+    LoopStartOnly { loop_start_sha: String },
     /// Only `plan_baseline_sha` is available.
-    PlanBaselineOnly {
-        plan_baseline_sha: String,
-    },
+    PlanBaselineOnly { plan_baseline_sha: String },
 }
 
 impl InputFingerprint {
@@ -197,9 +193,7 @@ impl InputFingerprint {
     /// - any difference → `Stale`
     pub fn freshness_against(&self, other: &InputFingerprint) -> EvidenceFreshness {
         match (self, other) {
-            (InputFingerprint::None, _) | (_, InputFingerprint::None) => {
-                EvidenceFreshness::Unknown
-            }
+            (InputFingerprint::None, _) | (_, InputFingerprint::None) => EvidenceFreshness::Unknown,
             _ if self == other => EvidenceFreshness::Current,
             _ => EvidenceFreshness::Stale,
         }
@@ -370,9 +364,9 @@ impl KnowledgeRecordBuilder {
             return Err(KnowledgeBuildError::EmptySubject);
         }
         let subject = truncate_bytes(&self.subject, SEMANTIC_FIELD_MAX_BYTES);
-        let source_ref = self.source_ref.map(|s| {
-            truncate_bytes(&scrub_for_prompt(&s), SEMANTIC_FIELD_MAX_BYTES)
-        });
+        let source_ref = self
+            .source_ref
+            .map(|s| truncate_bytes(&scrub_for_prompt(&s), SEMANTIC_FIELD_MAX_BYTES));
         let payload_digest = self
             .payload_digest
             .map(|d| truncate_bytes(&d, SEMANTIC_FIELD_MAX_BYTES));
@@ -659,7 +653,10 @@ where
             KnowledgeKind::Observation,
         )
         .with_id(id)
-        .with_subject(format!("{} accepted in batch {batch_index}", event.topic.as_str()))
+        .with_subject(format!(
+            "{} accepted in batch {batch_index}",
+            event.topic.as_str()
+        ))
         .with_payload_digest_hex(digest)
         .with_source_ref(source_ref)
         .with_input_fingerprint(input_fingerprint.clone());
@@ -810,10 +807,7 @@ impl<'a> KnowledgeCommitScope<'a> {
     ///
     /// Returns [`CommitObservationOutcome`] so the caller can log and
     /// continue on persistence failure (D4 fail-soft).
-    pub fn commit(
-        self,
-        accepted: &[ralph_proto::Event],
-    ) -> CommitObservationOutcome {
+    pub fn commit(self, accepted: &[ralph_proto::Event]) -> CommitObservationOutcome {
         let batch = observations_from_accepted_events(
             self.loop_iteration,
             &self.fingerprint,
@@ -827,7 +821,10 @@ impl<'a> KnowledgeCommitScope<'a> {
         let delta = crate::state::CommitDelta::KnowledgeObserved {
             records: batch.records,
         };
-        match self.ledger.commit(delta, Some(format!("loop.observation.{}", self.loop_iteration))) {
+        match self.ledger.commit(
+            delta,
+            Some(format!("loop.observation.{}", self.loop_iteration)),
+        ) {
             Ok(_) => CommitObservationOutcome::Committed { count },
             Err(e) => CommitObservationOutcome::PersistFailed {
                 count,

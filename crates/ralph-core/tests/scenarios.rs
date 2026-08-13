@@ -4461,8 +4461,7 @@ fn test_opac_me1_macro_edge_next_hint() {
 // exec.wave.complete ×1。
 #[test]
 fn test_opac_sb1_supervisor_exec_wave_fanout() {
-    let yaml =
-        load_scenario("tests/scenarios/supervisor/supervisor_exec_wave_fanout.yml");
+    let yaml = load_scenario("tests/scenarios/supervisor/supervisor_exec_wave_fanout.yml");
     run_workflow_guard_scenario(yaml);
 }
 

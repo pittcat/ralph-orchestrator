@@ -220,7 +220,9 @@ impl EventBus {
             // Human events intentionally use the dedicated queue.
             true
         } else {
-            self.hats.values().any(|hat| hat.is_subscribed(&event.topic))
+            self.hats
+                .values()
+                .any(|hat| hat.is_subscribed(&event.topic))
         };
         if !has_recipient {
             return Err(EventDeliveryError::NoRecipients);
@@ -802,12 +804,17 @@ mod tests {
         register_wildcard(&mut bus, "executor");
         let event = Event::new("work.done", "payload").with_target("test-stabilizer");
 
-        let error = bus.publish_checked(event).expect_err("unknown target must fail");
+        let error = bus
+            .publish_checked(event)
+            .expect_err("unknown target must fail");
         assert_eq!(
             error,
             EventDeliveryError::UnknownTarget(HatId::new("test-stabilizer"))
         );
-        assert!(!bus.has_pending(), "failed delivery must not enqueue an event");
+        assert!(
+            !bus.has_pending(),
+            "failed delivery must not enqueue an event"
+        );
     }
 
     // ─── Round-robin cursor regression tests (U1 / AE1) ──────────────────────

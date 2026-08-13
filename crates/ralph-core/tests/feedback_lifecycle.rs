@@ -9,10 +9,10 @@
 //! - The writer is best-effort: a poisoned lock surfaces a
 //!   warning and does not panic the loop.
 
+use ralph_core::diagnosis::read_feedback_lifecycle_report;
 use ralph_core::diagnostics::{
     DiagnosticsCollector, DiagnosticsOptions, FeedbackEntry, FeedbackLogger, FeedbackPhase,
 };
-use ralph_core::diagnosis::read_feedback_lifecycle_report;
 use tempfile::TempDir;
 
 #[test]
@@ -176,9 +176,9 @@ fn feedback_logger_resumes_sequence_when_session_is_reused() {
 /// stable `feedback_id` (the writer's identity contract).
 #[test]
 fn feedback_writer_appends_monotonic_retry_key() {
+    use ralph_core::diagnosis::read_feedback_lifecycle_report;
     use ralph_core::diagnostics::FeedbackEntry;
     use ralph_core::diagnostics::FeedbackLogger;
-    use ralph_core::diagnosis::read_feedback_lifecycle_report;
 
     let tmp = TempDir::new().expect("TempDir");
     let session = tmp.path().join("session");

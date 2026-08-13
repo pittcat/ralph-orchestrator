@@ -40,17 +40,17 @@ mod responder;
 #[cfg(test)]
 mod tests;
 
-pub(crate) use envelope::normalize_part;
+pub use crate::diagnostics::FeedbackPhase;
 pub use bundle::{
-    read_feedback_lifecycle_report, read_input_bundle_report, read_runtime_trace_report,
     ArtifactReport, BundleStatus, DiagnosisInputReport, EvidenceGap, FeedbackLifecycleReport,
-    FeedbackLifecycleRow, RepairSuggestion, RuntimeTraceReport, suggestions::build_suggestions_and_gaps,
+    FeedbackLifecycleRow, RepairSuggestion, RuntimeTraceReport, read_feedback_lifecycle_report,
+    read_input_bundle_report, read_runtime_trace_report, suggestions::build_suggestions_and_gaps,
 };
+pub(crate) use envelope::normalize_part;
 pub use envelope::{
     DiagnosisOutcome, DiagnosisSeverity, DiagnosisSource, EvidenceKind, EvidenceRef,
     RecoveryDiagnosisEnvelope, RecoveryDiagnosisEnvelopeBuilder,
 };
-pub use crate::diagnostics::FeedbackPhase;
 pub use journal::{DriftJournalEntry, DriftMetric, RecoveryJournalEntry};
 pub use reporter::{
     DIAGNOSE_JSON_SCHEMA_VERSION, DIAGNOSIS_LEDGER_SCHEMA_VERSION, DiagnosisReport,

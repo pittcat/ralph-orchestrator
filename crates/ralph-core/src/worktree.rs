@@ -1337,10 +1337,7 @@ mod tests {
     fn test_worktree_config_path() {
         let config = WorktreeConfig::default();
         let repo = Path::new("/repo");
-        assert_eq!(
-            config.worktree_path(repo),
-            PathBuf::from("/worktree/repo")
-        );
+        assert_eq!(config.worktree_path(repo), PathBuf::from("/worktree/repo"));
 
         let absolute_config = WorktreeConfig::with_dir("/tmp/worktrees");
         assert_eq!(
@@ -1870,12 +1867,8 @@ branch refs/heads/ralph/loop-1
             Utc::now() - chrono::Duration::seconds(60),
         );
 
-        let result = find_reusable_worktree_by_name(
-            temp_dir.path(),
-            "my-exact-name",
-            &config,
-        )
-        .unwrap();
+        let result =
+            find_reusable_worktree_by_name(temp_dir.path(), "my-exact-name", &config).unwrap();
         let reusable = result.expect("expected a reusable worktree");
         assert_eq!(reusable.loop_id, "my-exact-name");
         assert_eq!(reusable.path, worktree.path);
@@ -1898,11 +1891,7 @@ branch refs/heads/ralph/loop-1
         );
         registry.register(entry).unwrap();
 
-        let result = find_reusable_worktree_by_name(
-            temp_dir.path(),
-            "my-exact-name",
-            &config,
-        );
+        let result = find_reusable_worktree_by_name(temp_dir.path(), "my-exact-name", &config);
         assert!(
             result.is_err(),
             "a still-running worktree must not be reusable by name"

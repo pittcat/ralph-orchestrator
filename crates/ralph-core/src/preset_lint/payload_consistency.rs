@@ -144,7 +144,9 @@ pub fn check_payload_consistency(
     for rule in rules {
         findings.extend(check_message_safety(rule, severity));
         let shape = check_predicate_shape(rule, severity);
-        let shape_skipped = shape.iter().any(|f| f.id == FINDING_PAYLOAD_CONSISTENCY_NON_OBJECT_WHEN);
+        let shape_skipped = shape
+            .iter()
+            .any(|f| f.id == FINDING_PAYLOAD_CONSISTENCY_NON_OBJECT_WHEN);
         findings.extend(shape);
         if shape_skipped {
             // No structured shape to walk further (no fields, no ops);
@@ -418,10 +420,7 @@ fn collect_scope_positive_assertions(when: &Value) -> Vec<ScopePositiveAssertion
     out
 }
 
-fn collect_scope_positive_assertions_inner(
-    when: &Value,
-    out: &mut Vec<ScopePositiveAssertion>,
-) {
+fn collect_scope_positive_assertions_inner(when: &Value, out: &mut Vec<ScopePositiveAssertion>) {
     let Value::Object(obj) = when else {
         return;
     };
@@ -1181,9 +1180,7 @@ mod tests {
         let findings = check_payload_consistency(&config, LintStrictness::Strict);
         let polarity: Vec<_> = findings
             .iter()
-            .filter(|f| {
-                f.id == FINDING_PAYLOAD_CONSISTENCY_SCOPE_POSITIVE_ASSERTION
-            })
+            .filter(|f| f.id == FINDING_PAYLOAD_CONSISTENCY_SCOPE_POSITIVE_ASSERTION)
             .collect();
         assert_eq!(polarity.len(), 1, "got {findings:?}");
         assert_eq!(polarity[0].severity, LintSeverity::Error);
@@ -1207,9 +1204,7 @@ mod tests {
         let findings = check_payload_consistency(&config, LintStrictness::Strict);
         let polarity: Vec<_> = findings
             .iter()
-            .filter(|f| {
-                f.id == FINDING_PAYLOAD_CONSISTENCY_SCOPE_POSITIVE_ASSERTION
-            })
+            .filter(|f| f.id == FINDING_PAYLOAD_CONSISTENCY_SCOPE_POSITIVE_ASSERTION)
             .collect();
         assert_eq!(polarity.len(), 1, "got {findings:?}");
         assert!(polarity[0].message.contains("merge_boundary_path"));
@@ -1233,9 +1228,7 @@ mod tests {
         let findings = check_payload_consistency(&config, LintStrictness::Strict);
         let polarity: Vec<_> = findings
             .iter()
-            .filter(|f| {
-                f.id == FINDING_PAYLOAD_CONSISTENCY_SCOPE_POSITIVE_ASSERTION
-            })
+            .filter(|f| f.id == FINDING_PAYLOAD_CONSISTENCY_SCOPE_POSITIVE_ASSERTION)
             .collect();
         assert_eq!(polarity.len(), 1, "got {findings:?}");
         assert!(polarity[0].message.contains("overall_confidence"));
@@ -1262,9 +1255,7 @@ mod tests {
         let findings = check_payload_consistency(&config, LintStrictness::Strict);
         let polarity: Vec<_> = findings
             .iter()
-            .filter(|f| {
-                f.id == FINDING_PAYLOAD_CONSISTENCY_SCOPE_POSITIVE_ASSERTION
-            })
+            .filter(|f| f.id == FINDING_PAYLOAD_CONSISTENCY_SCOPE_POSITIVE_ASSERTION)
             .collect();
         assert_eq!(polarity.len(), 1, "got {findings:?}");
         assert!(polarity[0].message.contains("coverage"));
@@ -1291,9 +1282,7 @@ mod tests {
         let findings = check_payload_consistency(&config, LintStrictness::Strict);
         let polarity: Vec<_> = findings
             .iter()
-            .filter(|f| {
-                f.id == FINDING_PAYLOAD_CONSISTENCY_SCOPE_POSITIVE_ASSERTION
-            })
+            .filter(|f| f.id == FINDING_PAYLOAD_CONSISTENCY_SCOPE_POSITIVE_ASSERTION)
             .collect();
         assert!(
             polarity.is_empty(),
@@ -1318,8 +1307,7 @@ mod tests {
         assert!(
             findings
                 .iter()
-                .all(|finding| finding.id
-                    != FINDING_PAYLOAD_CONSISTENCY_SCOPE_POSITIVE_ASSERTION),
+                .all(|finding| finding.id != FINDING_PAYLOAD_CONSISTENCY_SCOPE_POSITIVE_ASSERTION),
             "critical_unknown_count > 1 is an invalid-state contradiction, got {findings:?}"
         );
     }
@@ -1343,9 +1331,7 @@ mod tests {
         let findings = check_payload_consistency(&config, LintStrictness::Strict);
         let polarity: Vec<_> = findings
             .iter()
-            .filter(|f| {
-                f.id == FINDING_PAYLOAD_CONSISTENCY_SCOPE_POSITIVE_ASSERTION
-            })
+            .filter(|f| f.id == FINDING_PAYLOAD_CONSISTENCY_SCOPE_POSITIVE_ASSERTION)
             .collect();
         assert!(
             polarity.is_empty(),
@@ -1379,9 +1365,7 @@ mod tests {
         let findings = check_payload_consistency(&config, LintStrictness::Strict);
         let polarity: Vec<_> = findings
             .iter()
-            .filter(|f| {
-                f.id == FINDING_PAYLOAD_CONSISTENCY_SCOPE_POSITIVE_ASSERTION
-            })
+            .filter(|f| f.id == FINDING_PAYLOAD_CONSISTENCY_SCOPE_POSITIVE_ASSERTION)
             .collect();
         assert!(
             polarity.is_empty(),
@@ -1405,9 +1389,7 @@ mod tests {
         let findings = check_payload_consistency(&config, LintStrictness::Strict);
         let polarity: Vec<_> = findings
             .iter()
-            .filter(|f| {
-                f.id == FINDING_PAYLOAD_CONSISTENCY_SCOPE_POSITIVE_ASSERTION
-            })
+            .filter(|f| f.id == FINDING_PAYLOAD_CONSISTENCY_SCOPE_POSITIVE_ASSERTION)
             .collect();
         assert!(
             polarity.is_empty(),
@@ -1422,16 +1404,11 @@ mod tests {
     /// `ce-executor-pipeline-loop` are NOT in `PROTECTED_SCOPE_TOPICS`.
     #[test]
     fn pipeline_fix_done_rule_does_not_trigger_polarity() {
-        let config = scope_topic_config(
-            "fix.done",
-            vec![valid_rule()],
-        );
+        let config = scope_topic_config("fix.done", vec![valid_rule()]);
         let findings = check_payload_consistency(&config, LintStrictness::Strict);
         let polarity: Vec<_> = findings
             .iter()
-            .filter(|f| {
-                f.id == FINDING_PAYLOAD_CONSISTENCY_SCOPE_POSITIVE_ASSERTION
-            })
+            .filter(|f| f.id == FINDING_PAYLOAD_CONSISTENCY_SCOPE_POSITIVE_ASSERTION)
             .collect();
         assert!(
             polarity.is_empty(),
@@ -1451,22 +1428,16 @@ mod tests {
                 json!({"field": "scope_manifest_path", "exists": true}),
             )],
         );
-        let default_findings =
-            check_payload_consistency(&config, LintStrictness::Default);
-        let strict_findings =
-            check_payload_consistency(&config, LintStrictness::Strict);
+        let default_findings = check_payload_consistency(&config, LintStrictness::Default);
+        let strict_findings = check_payload_consistency(&config, LintStrictness::Strict);
         let default_polarity = default_findings
             .iter()
-            .find(|f| {
-                f.id == FINDING_PAYLOAD_CONSISTENCY_SCOPE_POSITIVE_ASSERTION
-            })
+            .find(|f| f.id == FINDING_PAYLOAD_CONSISTENCY_SCOPE_POSITIVE_ASSERTION)
             .expect("Default mode should still surface the polarity finding");
         assert_eq!(default_polarity.severity, LintSeverity::Warn);
         let strict_polarity = strict_findings
             .iter()
-            .find(|f| {
-                f.id == FINDING_PAYLOAD_CONSISTENCY_SCOPE_POSITIVE_ASSERTION
-            })
+            .find(|f| f.id == FINDING_PAYLOAD_CONSISTENCY_SCOPE_POSITIVE_ASSERTION)
             .expect("Strict mode should surface the polarity finding");
         assert_eq!(strict_polarity.severity, LintSeverity::Error);
     }
@@ -1488,9 +1459,7 @@ mod tests {
         let findings = check_payload_consistency(&config, LintStrictness::Strict);
         let polarity = findings
             .iter()
-            .find(|f| {
-                f.id == FINDING_PAYLOAD_CONSISTENCY_SCOPE_POSITIVE_ASSERTION
-            })
+            .find(|f| f.id == FINDING_PAYLOAD_CONSISTENCY_SCOPE_POSITIVE_ASSERTION)
             .expect("polarity finding should fire");
         assert!(polarity.message.contains("demo-rule"));
         assert!(polarity.message.contains("redteam.plan.resolved"));
@@ -1524,9 +1493,7 @@ mod tests {
         let findings = check_payload_consistency(&config, LintStrictness::Strict);
         let polarity = findings
             .iter()
-            .find(|f| {
-                f.id == FINDING_PAYLOAD_CONSISTENCY_SCOPE_POSITIVE_ASSERTION
-            })
+            .find(|f| f.id == FINDING_PAYLOAD_CONSISTENCY_SCOPE_POSITIVE_ASSERTION)
             .expect("polarity finding must fire even without schema");
         assert!(polarity.message.contains("scope_manifest_path"));
         let unknown_topic = findings

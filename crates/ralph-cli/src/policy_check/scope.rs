@@ -87,9 +87,7 @@ pub(crate) fn typed_threshold_u64(
             payload_index: 0,
             field: field.to_string(),
             reason_code: "scope_handoff_inconsistent".to_string(),
-            message: format!(
-                "{topic} requires {field} to be a non-negative integer; got {actual}"
-            ),
+            message: format!("{topic} requires {field} to be a non-negative integer; got {actual}"),
             ..Default::default()
         });
     };

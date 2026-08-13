@@ -128,7 +128,12 @@ fn commits_topo_oldest_first(repo: &Path) -> Vec<String> {
 fn direct_target_replay() {
     let repo = init_repo();
     let c1 = commit_file(&repo, "a.rs", "fn a() {}\n", "add a.rs");
-    let _c2 = commit_file(&repo, "a.rs", "fn a() { println!(\"a\"); }\n", "modify a.rs");
+    let _c2 = commit_file(
+        &repo,
+        "a.rs",
+        "fn a() { println!(\"a\"); }\n",
+        "modify a.rs",
+    );
     let c3 = commit_file(&repo, "b.rs", "fn b() {}\n", "add b.rs");
 
     let commits = commits_topo_oldest_first(&repo);
@@ -163,8 +168,14 @@ fn mixed_history_interleaved() {
         "plan-Y: modify b.rs",
     );
     // Use `git log --author` to count plan-X vs plan-Y commits.
-    let x_log = run_git(&repo, &["log", "--author=test", "--grep=plan-X", "--format=%H"]);
-    let y_log = run_git(&repo, &["log", "--author=test", "--grep=plan-Y", "--format=%H"]);
+    let x_log = run_git(
+        &repo,
+        &["log", "--author=test", "--grep=plan-X", "--format=%H"],
+    );
+    let y_log = run_git(
+        &repo,
+        &["log", "--author=test", "--grep=plan-Y", "--format=%H"],
+    );
     let x_count = x_log.lines().filter(|s| !s.is_empty()).count();
     let y_count = y_log.lines().filter(|s| !s.is_empty()).count();
     assert_eq!(x_count, 2, "expected 2 plan-X commits");
@@ -188,7 +199,12 @@ fn mixed_history_binary_hunk_classifies_as_unsupported() {
     // `interleaved` / etc.) because git's `--numstat` reports `-` for
     // binary file lines.
     let _text = commit_file(&repo, "a.rs", "fn a() {}\n", "add a.rs");
-    let _binary = commit_binary(&repo, "data.bin", &[0u8, 1, 2, 3, 255, 254, 0, 7], "add binary");
+    let _binary = commit_binary(
+        &repo,
+        "data.bin",
+        &[0u8, 1, 2, 3, 255, 254, 0, 7],
+        "add binary",
+    );
     let numstat = run_git(
         &repo,
         &["diff-tree", "--no-commit-id", "--numstat", "-r", "HEAD"],
@@ -209,7 +225,12 @@ fn mixed_history_binary_hunk_classifies_as_unsupported() {
 fn redteam_independent_uses_explicit_base() {
     let repo = init_repo();
     let base = commit_file(&repo, "a.rs", "fn a() {}\n", "red-team base");
-    let _ = commit_file(&repo, "a.rs", "fn a() { println!(\"a\"); }\n", "red-team patch");
+    let _ = commit_file(
+        &repo,
+        "a.rs",
+        "fn a() { println!(\"a\"); }\n",
+        "red-team patch",
+    );
     // The red-team-attack plan-resolver does NOT read `.ralph/merge/`
     // or `.ralph/post-merge/`; it accepts explicit `scope_base` /
     // `merge_boundary_path` inputs. When only `scope_base` is given
