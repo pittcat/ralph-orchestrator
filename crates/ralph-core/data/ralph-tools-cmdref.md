@@ -175,8 +175,9 @@ ralph preset materialize-artifacts <PRESET> --plan-key <KEY> [--dest <DIR>]
 
 **agent 下一步：**
 1. 运行本命令（或确认 templates 目录已存在）。
-2. `cp` 对应 `*.template.*` 到业务 artifact 路径（见 hat instructions）。
-3. 按模板内章节逐节填写；禁止跳过模板写自由格式。
+2. 按 hat instructions 读取对应的 `.template.*` 或 contract `.md` 文件。
+3. 需要填写业务 artifact 时，`cp` 对应模板到业务路径；contract 类文件只读，不要复制成业务 artifact。
+4. 按模板内章节逐节填写；禁止跳过模板写自由格式。
 
 **失败停止条件：**
 - preset 无内嵌模板 → 停止，核对 preset 名（以 hat instructions 给出的名为准）。

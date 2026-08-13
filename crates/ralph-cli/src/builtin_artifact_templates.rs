@@ -69,6 +69,7 @@ pub const RED_TEAM_ATTACK_TEMPLATE_NAMES: &[&str] = &[
 /// `presets/templates/ce-executor-pipeline/` and `build.rs` copy).
 pub const CE_EXECUTOR_PIPELINE_TEMPLATE_NAMES: &[&str] = &[
     "fail-confidence-rubric.template.md",
+    "review-findings-contract.md",
     "settlement-evidence.template.md",
     "README.md",
 ];
@@ -190,6 +191,13 @@ const CE_EXECUTOR_PIPELINE_TEMPLATES: &[ArtifactTemplate] = &[
         content: include_str!(concat!(
             env!("OUT_DIR"),
             "/artifact-templates/ce-executor-pipeline/fail-confidence-rubric.template.md"
+        )),
+    },
+    ArtifactTemplate {
+        file_name: "review-findings-contract.md",
+        content: include_str!(concat!(
+            env!("OUT_DIR"),
+            "/artifact-templates/ce-executor-pipeline/review-findings-contract.md"
         )),
     },
     ArtifactTemplate {
@@ -418,7 +426,7 @@ mod tests {
     }
 
     // plan 2026-07-29-001 U2: ce-executor-pipeline template registration.
-    // Three templates (rubric + settlement-evidence + README) ship in the
+    // Four templates (rubric + findings contract + settlement-evidence + README) ship in the
     // binary so executor / fixer / precheck gates can materialize them
     // without a repo checkout.
 

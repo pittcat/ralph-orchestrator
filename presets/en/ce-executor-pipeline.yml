@@ -3571,12 +3571,17 @@ hats:
         `confidence.overall < 0.50`
 
       If no discrepancies, write a single finding `{id: "G0",
-      severity: "P3", owner: "n/a", description: "no goal-alignment
+      dimension: "goal-alignment", severity: "P3", owner: "n/a", description: "no goal-alignment
       issues", confidence: {overall: 1.0}, evidence_score: 1.0,
       impact_score: 0.0, regression_probability: 0.0,
       risk_score: 0.15, merge_decision: "ignore"}`.
 
       ### Step 4 — Write product file
+      Before drafting findings, run `ralph preset materialize-artifacts
+      ce-executor-pipeline --plan-key <plan_name>`, then read
+      `.ralph/forge/<plan_name>/templates/review-findings-contract.md`.
+      It is the shared SSOT for all six dimension products; this hat's fixed
+      `dimension` value is `goal-alignment`.
       Write the findings to
       `.ralph/review/{plan_name}/goal-alignment.md` using the `Write`
       tool. The file path is under `ephemeral_isolation` — gitignored,
@@ -3783,6 +3788,11 @@ hats:
       schema as the goal-alignment dim.
 
       ### Step 4 — Write product file
+      Before drafting findings, run `ralph preset materialize-artifacts
+      ce-executor-pipeline --plan-key <plan_name>`, then read
+      `.ralph/forge/<plan_name>/templates/review-findings-contract.md`.
+      It is the shared SSOT for all six dimension products; this hat's fixed
+      `dimension` value is `correctness`.
       Write findings to `.ralph/review/{plan_name}/correctness.md`.
 
       After writing the product, the summary counts and the parsed
@@ -3918,6 +3928,11 @@ hats:
       schema.
 
       ### Step 4 — Write product file
+      Before drafting findings, run `ralph preset materialize-artifacts
+      ce-executor-pipeline --plan-key <plan_name>`, then read
+      `.ralph/forge/<plan_name>/templates/review-findings-contract.md`.
+      It is the shared SSOT for all six dimension products; this hat's fixed
+      `dimension` value is `testing`.
       Write findings to `.ralph/review/{plan_name}/testing.md`.
 
       After writing the product, the summary counts and the parsed
@@ -4042,6 +4057,11 @@ hats:
       ### Step 3 — Build findings list (id prefix `M<N>`)
 
       ### Step 4 — Write product file
+      Before drafting findings, run `ralph preset materialize-artifacts
+      ce-executor-pipeline --plan-key <plan_name>`, then read
+      `.ralph/forge/<plan_name>/templates/review-findings-contract.md`.
+      It is the shared SSOT for all six dimension products; this hat's fixed
+      `dimension` value is `maintainability`.
       Write findings to `.ralph/review/{plan_name}/maintainability.md`.
 
       After writing the product, the summary counts and the parsed
@@ -4169,6 +4189,11 @@ hats:
       ### Step 3 — Build findings list (id prefix `S<N>`)
 
       ### Step 4 — Write product file
+      Before drafting findings, run `ralph preset materialize-artifacts
+      ce-executor-pipeline --plan-key <plan_name>`, then read
+      `.ralph/forge/<plan_name>/templates/review-findings-contract.md`.
+      It is the shared SSOT for all six dimension products; this hat's fixed
+      `dimension` value is `project-standards`.
       Write findings to `.ralph/review/{plan_name}/standards.md`.
 
       After writing the product, the summary counts and the parsed
@@ -4294,6 +4319,11 @@ hats:
       typically P0/P1.
 
       ### Step 4 — Write product file
+      Before drafting findings, run `ralph preset materialize-artifacts
+      ce-executor-pipeline --plan-key <plan_name>`, then read
+      `.ralph/forge/<plan_name>/templates/review-findings-contract.md`.
+      It is the shared SSOT for all six dimension products; this hat's fixed
+      `dimension` value is `adversarial`.
       Write findings to `.ralph/review/{plan_name}/adversarial.md`.
 
       After writing the product, the summary counts and the parsed
@@ -4370,8 +4400,9 @@ hats:
       each dimension file, you must verify **all** of:
       1. File exists at `.ralph/review/{plan_name}/<dim>.md` and is non-empty.
       2. File parses as Markdown with a `## Findings` section.
-      3. Each finding row carries the required fields (`id`, `severity`,
-         `owner`, `description`, `evidence`, `merge_decision`).
+      3. Each finding row carries the required fields (`id`, `dimension`,
+         `severity`, `owner`, `description`, `evidence`,
+         `merge_decision`, and `requires_verification`).
       4. `findings_count` recorded in the trigger matches the parsed row count.
       5. `dimension` field on each finding equals the filename dimension.
 
@@ -4401,7 +4432,7 @@ hats:
       to a synthesized verdict with a P1 placeholder finding.
 
       Read each file. Parse the `## Findings` section into a list
-      of finding records `{id, severity, owner, description,
+      of finding records `{id, dimension, severity, owner, description,
       evidence, requires_verification, confidence.overall,
       evidence_score, impact_score, regression_probability,
       risk_score, merge_decision}`.

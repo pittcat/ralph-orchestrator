@@ -256,6 +256,7 @@ fn copy_artifact_templates(manifest_dir: &str, out_dir: &str) {
         "ce-executor-pipeline",
         &[
             "fail-confidence-rubric.template.md",
+            "review-findings-contract.md",
             "settlement-evidence.template.md",
             "README.md",
         ],
