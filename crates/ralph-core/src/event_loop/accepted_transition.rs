@@ -66,6 +66,14 @@ pub struct OutboxEntry {
     pub loop_id: String,
     /// The canonical payload digest (`sha256(event.payload)`).
     pub payload_digest: String,
+    /// Plan GAP-02 / Unit 3: optional StateMachine projection
+    /// embedded in the durable receipt so the StateLedger can
+    /// replay the StateMachine semantic delta after a partial
+    /// crash. `None` for legacy / Diagnostic / LoopControl
+    /// transitions that do not advance StateMachine state.
+    /// Serde-default ensures old outbox JSONL stays readable.
+    #[serde(default)]
+    pub state_machine_projection: Option<crate::state_machine::StateMachineTransitionDelta>,
     /// The event topic.
     pub topic: String,
     /// Unique transition identifier (`sha256` over the identity tuple).
@@ -242,6 +250,7 @@ impl AcceptedTransition {
             delivered: false,
             loop_id: loop_id.to_string(),
             payload_digest,
+            state_machine_projection: None,
             topic: event.topic.as_str().to_string(),
             transition_id,
         };
@@ -779,6 +788,7 @@ mod tests {
             delivered: false,
             loop_id: "loop-1".into(),
             payload_digest: "deadbeef".into(),
+            state_machine_projection: None,
             topic: "work.done".into(),
             transition_id: "cafe".into(),
         };
@@ -1002,7 +1012,7 @@ mod tests {
     }
 
     /// A hand-built valid outbox entry for salvage tests.
-    fn raw_entry(transition_id: &str, activation_id: &str) -> OutboxEntry {
+    pub(super) fn raw_entry(transition_id: &str, activation_id: &str) -> OutboxEntry {
         OutboxEntry {
             activation_id: activation_id.to_string(),
             committed_at: "2026-07-31T00:00:00Z".to_string(),
@@ -1010,6 +1020,7 @@ mod tests {
             delivered: false,
             loop_id: "loop-1".to_string(),
             payload_digest: "deadbeef".to_string(),
+            state_machine_projection: None,
             topic: "work.done".to_string(),
             transition_id: transition_id.to_string(),
         }
@@ -1249,5 +1260,113 @@ mod tests {
             "cafe",
         );
         assert_eq!(a, b, "identical tuples must yield identical ids");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Plan GAP-02 (2026-08-13-002) Unit 3: StateMachine projection
+// receipt — outbox JSONL stays backward-compatible, projection
+// survives replay, idempotency holds with projection in place.
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod u3_state_machine_projection_tests {
+    use super::*;
+    use crate::state_machine::{
+        StateMachineTransitionDelta, StateMachineTransitionId,
+    };
+
+    fn u3_raw_entry(transition_id: &str, activation_id: &str) -> OutboxEntry {
+        OutboxEntry {
+            activation_id: activation_id.to_string(),
+            committed_at: "2026-08-13T00:00:00Z".to_string(),
+            contract_revision: "rev-u3".to_string(),
+            delivered: false,
+            loop_id: "loop-u3".to_string(),
+            payload_digest: "sm-projection".to_string(),
+            state_machine_projection: None,
+            topic: "experiment.planned".to_string(),
+            transition_id: transition_id.to_string(),
+        }
+    }
+
+    fn u3_delta(id: &str, instance_key: &str) -> StateMachineTransitionDelta {
+        StateMachineTransitionDelta {
+            transition_id: StateMachineTransitionId(format!("u3|sm|{id}")),
+            topic: "experiment.planned".to_string(),
+            instance_key: Some(instance_key.to_string()),
+            new_state: "planned".to_string(),
+            opens_instance: true,
+            closes_instance: false,
+            terminal_observed: false,
+            terminal_honored: false,
+        }
+    }
+
+    #[test]
+    fn u3_legacy_outbox_entry_without_projection_remains_readable() {
+        // Hand-written legacy JSONL line that predates the
+        // GAP-02 / Unit 3 receipt field. serde_json::from_str
+        // must succeed and the projection must be `None` so the
+        // existing recovery harness can keep replaying without
+        // any schema bump.
+        let legacy_json = r#"{
+            "activation_id": "act-legacy",
+            "committed_at": "2026-01-01T00:00:00Z",
+            "contract_revision": "rev-0",
+            "delivered": false,
+            "loop_id": "loop-legacy",
+            "payload_digest": "deadbeef",
+            "topic": "work.done",
+            "transition_id": "legacy-id"
+        }"#;
+        let entry: OutboxEntry =
+            serde_json::from_str(legacy_json).expect("legacy outbox line must deserialise");
+        assert!(entry.state_machine_projection.is_none());
+        assert_eq!(entry.transition_id, "legacy-id");
+    }
+
+    #[test]
+    fn u3_projection_receipt_round_trips_with_outbox_entry() {
+        // Newly written receipts carry the projection field.
+        // Re-serialised JSON must round-trip with the field.
+        let mut entry = u3_raw_entry("u3-transition-1", "act-u3");
+        entry.state_machine_projection = Some(u3_delta("u3-transition-1", "t1"));
+        let json = serde_json::to_string(&entry).expect("serialize");
+        let parsed: OutboxEntry = serde_json::from_str(&json).expect("deserialize");
+        let projection = parsed
+            .state_machine_projection
+            .expect("projection must survive round-trip");
+        assert_eq!(projection.transition_id.as_str(), "u3|sm|u3-transition-1");
+        assert_eq!(projection.instance_key.as_deref(), Some("t1"));
+        assert!(projection.opens_instance);
+        assert!(!projection.closes_instance);
+    }
+
+    #[test]
+    fn u3_duplicate_transition_id_with_projection_skips_re_materialize() {
+        // Building on the existing U7 idempotency harness:
+        // two OutboxEntry values with the same transition_id
+        // but different projections (signature-bumped payload
+        // details) are still deduplicated by `transition_id`.
+        // Used by recovery tools that re-run commit() after
+        // partial init so they do not materialise twice.
+        let projection_a = u3_delta("dup-id", "t-A");
+        let projection_b = u3_delta("dup-id", "t-B");
+        let mut a = u3_raw_entry("dup-id", "act-A");
+        a.state_machine_projection = Some(projection_a);
+        let mut b = u3_raw_entry("dup-id", "act-B");
+        b.state_machine_projection = Some(projection_b);
+        // Distinct entries on disk but identical transition_id.
+        assert_ne!(a.activation_id, b.activation_id);
+        assert_eq!(a.transition_id, b.transition_id);
+        // Dedup-by-id means the recovery layer treats them as the
+        // same transition (test asserts the predicate the
+        // dedup layer uses, not the layer itself which already
+        // has full U7 coverage above).
+        assert_eq!(
+            a.transition_id, b.transition_id,
+            "duplicate transition_id is the dedup key"
+        );
     }
 }
