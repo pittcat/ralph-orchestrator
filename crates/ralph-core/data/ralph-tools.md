@@ -53,7 +53,7 @@ metadata:
 ## 核心规则
 
 1. **绝不用 echo/cat 写 tasks 或 memories** — 必须用 CLI 工具
-2. **emit 后必须完成 Confirm** — 加载 `ralph-tools-emit`，按其中规定的公开证据确认；证据不足或不一致时停止
+2. **emit 后必须完成 Confirm** — 单事件必须看到正式 `ralph emit --output json` 返回 `ok=true` 且 `recorded=true`；`--policy-check` 返回 `ok=true, recorded=false` 只是预检通过，不是发布成功。加载 `ralph-tools-emit`，按其中规定的公开证据确认；证据不足或不一致时停止
 3. **task/memory 操作后必须确认状态** — 按已注入的对应专项 skill 检查其规定的公开证据；不要套用其它操作的确认方式
 4. **失败时先查 `--help`** — 不要猜测参数，文档可能已更新
 5. **emit step handoff 事件前，先用 schema 预检** — `ralph emit --schema <TOPIC>` 会列出 `required_fields`；payload 必须包含全部 required fields，且字段之间不自相矛盾（例如 `step` 与 `task_key` 中的 step 段必须一致）。不要凭记忆构造 payload。
@@ -86,8 +86,8 @@ metadata:
    - `reason` / `kind`：结构化 reason code
    - `target_hat`：如果存在，用于核对恢复上下文的目标标识；不要从缺失值推断目标
 2. **若 prompt 含 `## CORRECTION CONTEXT`**：runtime correction **高于** agent narrative；只执行 correction 的 `required_action`，遵守 `forbidden_action`；细则见 `ralph tools skill load ralph-tools-recovery-directives`。
-3. **对照 `required_fields` 补齐 payload**；用 `ralph emit <topic> --policy-check -j '...'` 预检（与 loop gate 同源 schema，**不写盘**）；通过后再正式 `ralph emit` 落盘。部分 preset（agent 上下文且无 event-policy 管线）会在 `--policy-check` 通过时打印一行 `policy_check_token`，apply 时必须用 `--policy-check-token <token>` 带上它（`missing_policy_check_token` / `policy_check_token_mismatch` 即此路径；细则见 `ralph-tools-emit`「Evaluation Token」段）。
-4. **bounded retry**：同类协议违规（同一 hat + topic + `task_key` + step + violation code）**前两次**给 structured correction（agent 应在每次收到 `task.resume` 时按 `required_fields` 重新对齐并再次 `ralph emit --policy-check` 验证）；**第三次**同类违规 runtime 阻塞 loop（`plan.blocked(reason=protocol_violation_repeated:…)`），**不得** infinite `task.resume` 或在没有 `LOOP_COMPLETE` 的情况下静默继续。post-terminal 业务 emit **无 retry**。runtime 阈值为 `correction::escalation_threshold == 3`（`correction/mod.rs`），即第三次同类违规触发 `plan.blocked`，而不是第二次。
+3. **对照 `required_fields` 补齐 payload**；用 `ralph emit <topic> --policy-check -j '...' --output json` 预检（与 loop gate 同源 schema，**不写盘**）；通过后必须用完全相同的 topic 和 payload 去掉 `--policy-check` 正式 `ralph emit --output json`，并确认 `ok=true` 且 `recorded=true` 才算发布完成。部分 preset（agent 上下文且无 event-policy 管线）会在 `--policy-check` 通过时打印一行 `policy_check_token`，apply 时必须用 `--policy-check-token <token>` 带上它（`missing_policy_check_token` / `policy_check_token_mismatch` 即此路径；细则见 `ralph-tools-emit`「Evaluation Token」段）。
+4. **bounded retry**：同类协议违规（同一 hat + topic + `task_key` + step + violation code）**前两次**给 structured correction（agent 应在每次收到 `task.resume` 时按 `required_fields` 重新对齐，执行 precheck → apply，并确认正式 emit 返回 `recorded=true`）；**第三次**同类违规 runtime 阻塞 loop（`plan.blocked(reason=protocol_violation_repeated:…)`），**不得** infinite `task.resume` 或在没有 `LOOP_COMPLETE` 的情况下静默继续。post-terminal 业务 emit **无 retry**。runtime 阈值为 `correction::escalation_threshold == 3`（`correction/mod.rs`），即第三次同类违规触发 `plan.blocked`，而不是第二次。
 5. **确认 hat 作用域**：isolated 模式下未在 `allowed_topics`（与 hat `publishes` 交集）的 topic 越权 — 改用 hat 实际可发的 topic，不要靠 `--unsafe-no-policy-check` 绕过。
 6. **复杂 violation**：按需加载 `ralph-tools-emit`（EmitResult `ok`/`recorded`/`errors[].code`/`suggested_command`）与 `ralph-tools-recovery-directives`。
 7. **仍不明**：`RALPH_DIAGNOSTICS=1` 启的 loop 把 envelope 写到 `recovery.jsonl`；`ralph diagnose --session latest` 出报告（`docs/guide/runtime-diagnosis.md` §10）。

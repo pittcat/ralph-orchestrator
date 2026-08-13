@@ -177,12 +177,12 @@ ralph wave emit [OPTIONS] <TOPIC>
 
 > **wave worker 注意事项**：
 >
-> 1. **结果返回必须用 `ralph emit`**：在 `RALPH_WAVE_WORKER=1` 的子进程内，runtime 已为你准备好本次 slot 的事件落点（`RALPH_EVENTS_FILE` 已指向该 slot 专用通道）。直接 `ralph emit --policy-check ...` 通过后，再去掉 `--policy-check` 真正写盘。`ralph wave emit` 在 worker 内被阻止（仅 dispatcher hat 可调用）。
+> 1. **结果返回必须用 `ralph emit`**：在 `RALPH_WAVE_WORKER=1` 的子进程内，runtime 已为你准备好本次 slot 的事件落点（`RALPH_EVENTS_FILE` 已指向该 slot 专用通道）。先执行 `ralph emit --policy-check ... --output json`，确认只是预检；随后去掉 `--policy-check` 真正写盘，并确认正式结果 `ok=true` 且 `recorded=true`。只做预检、只看退出码或看不到 `recorded=true` 都不算 slot 有结果。`ralph wave emit` 在 worker 内被阻止（仅 dispatcher hat 可调用）。
 >
 > 2. **落点差异**：
 >    - `ralph wave emit`（dispatcher hat 用）→ 写入 wave 聚合 ledger
 >    - `ralph emit`（在 wave worker 内）→ 写入 runtime 注入的本 slot 通道（`$RALPH_EVENTS_FILE` 指向的位置）
->    - 保留 `RALPH_EVENTS_FILE`（runtime 已设置）；**禁止** `unset` 或改写到其它路径 —— 事件不会落到本次 slot，runtime 会判定本 slot 无结果产出。
+>    - 保留 `RALPH_EVENTS_FILE`（runtime 已设置）；**禁止** `unset`、改写或用 `--file` 覆盖到其它路径 —— 事件不会落到本次 slot，runtime 会判定本 slot 无结果产出。
 >    - 不要把 `RALPH_EVENTS_FILE` 写到 `current-events` / `current-candidate-events` 之类的位置 —— 这些都不是本次 slot 的通道，会被拒收。
 >
 > 3. **wave_id 共享**：同一 `--payloads` 列表产生的 N 个事件共享同一个 `wave_id` 和 `wave_total`，由 `wave_index`（0..N-1）区分。聚合 hat 据此识别同一 wave 的所有结果。

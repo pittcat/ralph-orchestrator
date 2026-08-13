@@ -79,6 +79,29 @@ ralph emit --schema work.done | jq -r .protocol_hash   # 改后
 >
 > **对 agent 来说**：不需要检测当前模式。普通业务 handoff 直接 emit，不要猜测或补写 `--triggered`；runner / CLI 会按 topic 的唯一下游消费者自动处理。只有 prompt 明确说明这是一个已确认的跨 hat 直达例外时，才可传入一个不同于当前 hat 的目标 hat；如果目标不明确就停止并报告。
 
+### 发布完成硬门禁（不可省略）
+
+`--policy-check` 只是预检，不是发布。它返回 `ok=true` 也不代表事件已经写入当前 activation（一次 hat 执行）的 channel（runner 为本次执行准备的临时事件文件）；预检阶段的 `recorded` 必须是 `false`。
+
+每个需要 agent 发布的业务事件（尤其是终态事件）必须严格执行以下 precheck → apply → confirm 流程：
+
+1. 用最终 payload 执行 `ralph emit <TOPIC> --policy-check -j '<PAYLOAD>' --output json`。
+2. 预检通过后，立即去掉 `--policy-check`，使用完全相同的 topic、payload、hat 和落点执行正式 emit；如果预检输出了 `policy_check_token`，apply 必须携带该 token。
+3. 只有正式 emit 的 JSON 同时满足 `ok=true` 和 `recorded=true`，才允许把事件视为已发布、结束当前 activation 或声称已完成。
+
+以下任一情况都表示事件**没有发布成功**：只执行了 policy-check、正式 emit 没有执行、正式 emit 返回 `recorded=false`、命令失败、输出不是 JSON 或无法确认 `recorded=true`。此时停止，不要声称完成，也不要自行写 `.ralph/*.jsonl` 代替 emit。
+
+### Isolated channel 落点硬门禁
+
+在 hat activation 中，runner 已通过 `RALPH_EVENTS_FILE` 注入本次 activation 的唯一事件 channel。agent 必须保留该变量并让 `ralph emit` 使用它：
+
+- 禁止 `unset RALPH_EVENTS_FILE`；
+- 禁止把 `--file` 指向 `.ralph/events.jsonl`、`current-events`、其它 hat channel、其它 worktree 或任意自选路径；
+- 禁止直接编辑、创建或追加任何 JSONL 事件文件；
+- 不要因为当前工作目录变化而改写事件落点，必要时回到 `$RALPH_WORKSPACE_ROOT` 后继续。
+
+正式 emit 即使退出码为 0，也必须检查 `--output json` 的 `recorded=true`。如果将 `target_path` 和 `$RALPH_EVENTS_FILE` 都规范化为绝对路径后仍明确不一致，停止并报告事件文件落点不一致；不要再发第二个业务事件。
+
 ### Policy-Check 反馈
 
 `ralph emit --policy-check` / `ralph wave emit --policy-check` 拒收时，错误响应里**每条** `validation_errors[]` 现在带一组可机读、可修复的字段（agent 优先读这些字段再决定怎么改 payload，不要凭"error message"猜）：
@@ -609,12 +632,14 @@ policy-check 拒收:
 1. **Correction 高于 narrative** — 只执行 correction 指定的唯一动作（见 `ralph-tools-recovery-directives`）。
 2. **bounded retry** — 同类 violation signature 第一次 → correction + 一次可执行 retry；第二次 → 阻塞 loop（`protocol_violation_repeated:*`），不得 infinite retry。
 3. **post-terminal** — `LOOP_COMPLETE` honored 后业务 emit 拒写，无 retry budget。
-4. **修复后仍走两步 precheck** — `ralph emit <topic> --policy-check` 通过 → 去掉 `--policy-check` 正式 emit（`ralph-tools-precheck`）。
+4. **修复后仍走两步 precheck/apply/confirm** — `ralph emit <topic> --policy-check --output json` 通过后，必须去掉 `--policy-check` 正式 emit，并确认正式结果 `ok=true` 且 `recorded=true`；只有该回执成立才算恢复完成（`ralph-tools-precheck`）。
 
 **EmitResult 与 `task.resume` 分工**：CLI 层 `EmitResult` 告诉你**本次 emit 是否落盘**；`task.resume` / correction context 告诉你**下一 activation 唯一允许动作**。两者同时出现时以 correction 的 `required_action`/`forbidden_action` 为准。
 
 ### 反模式
 
+- 🔴 **不要把 policy-check 当成 emit 完成**；`ok=true, recorded=false` 只是预检通过，事件仍未写盘。必须继续正式 apply，并确认 `ok=true, recorded=true`。
+- 🔴 **不要在正式 apply 后无条件结束 activation**；如果没有看到 `recorded=true`，停止并报告，不要发第二个终态事件碰运气。
 - 🔴 **不要** `tail events.jsonl | jq` 验证 emit 结果；用 `--output json` 直接拿到 `recorded` 字段。
 - 🔴 **不要** 凭 `topic` 字符串做结果路由；用 `ok` + `recorded` 两字段组合判断（policy-check 接受 ≠ 落盘）。
 - 🔴 **不要** 在脚本里 hardcode `schema_version == "emit_result.v1"` 作为版本检查；改用 `>=` / `^` 风格的 semver 比对 — schema 演进时会 bump。

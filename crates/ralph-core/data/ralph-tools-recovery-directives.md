@@ -15,7 +15,7 @@ metadata:
 
 **执行动作：**先读取恢复 payload，以及 prompt 中的 `## CORRECTION CONTEXT`（如果存在）。优先使用 `required_action`、`reason`、`kind`、`original_trigger_topic`、`original_trigger_payload` 和 `allowed_topics` 等实际存在的字段。字段缺失时不要把缺失值推断成空字符串、`false` 或默认 topic。
 
-如果需要重新发业务事件，先按 `ralph-tools-emit` 的规则执行 `ralph emit --policy-check`，确认通过后再正式 emit。不要为了恢复而修改 preset、重复广播或原样重发同一个 payload。
+如果需要重新发业务事件，必须按 `ralph-tools-emit` 的规则执行完整的 precheck → apply → confirm：预检使用 `--policy-check --output json`，正式 emit 去掉 `--policy-check` 并确认 `ok=true`、`recorded=true`。只有正式落盘回执成立才算恢复完成；不要把预检的 `ok=true` 当成已发布。不要为了恢复而修改 preset、重复广播或原样重发同一个 payload。
 
 **失败停止条件：**恢复对象、原始触发上下文或允许的发布范围缺失且无法从当前 prompt 确认时，停止本次恢复动作；使用 `ralph inspect loop --format json` 或 `ralph tools task list` 复核当前任务状态。复核后仍无法确定合法下一步时，报告阻塞原因，不要猜测目标或继续重试。
 
@@ -27,7 +27,7 @@ metadata:
 2. **不要**在同 activation 发第二个业务事件（isolated 单事件预算）。
 3. **bounded retry**：同类协议违规 signature（hat + topic + `task_key` + step + violation code）**第一次** → structured correction + 可执行 retry target；**第二次** → 阻塞 loop（`plan.blocked(reason=protocol_violation_repeated:…)`），**不得** infinite `task.resume` 或在没有 `LOOP_COMPLETE` 的情况下静默继续。
 4. **post-terminal**（loop 终态 honored）：业务 emit 拒写，**不**进入 retry budget。
-5. 收到 correction 后仍须先 `ralph emit --policy-check`，通过后再正式 emit（见 `ralph-tools-precheck`）。
+5. 收到 correction 后仍须先 `ralph emit --policy-check --output json`，通过后再正式 emit，并确认 `ok=true`、`recorded=true`（见 `ralph-tools-precheck`）。
 
 Preset 专用 trigger 状态表写在各 preset 的 hat `instructions:`；本文件只写通用 recovery 语义。
 

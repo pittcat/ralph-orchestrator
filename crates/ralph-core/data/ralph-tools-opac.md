@@ -23,6 +23,10 @@ metadata:
 
 **每个 A 之前必须有 P，每个 A 之后必须完成 C；Confirm 不可省略**。Apply 后必须按下方路由找到专项 skill，并取得该 skill 规定的有效证据。Confirm 不等于“所有操作固定再跑同一条查询命令”：具体证据和查询方式由专项 skill 定义。未找到 skill、未取得证据或证据不一致时，必须停止，不得继续下一次状态变更。省略 Precheck 会绕过写入前约束；省略 Confirm 会把“命令已执行”误当成“预期状态已产生”。
 
+**单事件 emit 的完成判定是固定的**：`--policy-check` 的 `ok=true` 只表示预检通过，且 `recorded=false`；它永远不能作为 Apply 或 Confirm 的证据。必须再执行不带 `--policy-check` 的正式 emit，并看到 `ok=true` 且 `recorded=true`。没有这两个字段的明确回执，就把操作视为未完成并停止。
+
+**Isolated hat 的额外落点约束**：保留 runner 注入的 `RALPH_EVENTS_FILE`，不要 `unset`、改写或用 `--file` 覆盖它。禁止直接编辑任何事件 JSONL；将正式 emit 的 `target_path` 和 `$RALPH_EVENTS_FILE` 规范化为绝对路径后若仍明确不一致，视为落点错误，即使命令退出码为 0 也不得继续。
+
 ## Observe 阶段关键问题
 
 1. **我是谁**：`ralph inspect loop --format json`（或在 prompt 中找 `## HAT IDENTITY` 块）
