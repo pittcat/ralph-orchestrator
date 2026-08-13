@@ -277,6 +277,15 @@ impl ObservationValue {
 /// rejected payload contains oversized strings.
 pub const MAX_OBSERVATION_VALUE_BYTES: usize = 256;
 
+/// Plan 2026-08-13-003 fix-plan U5 R11: the runtime
+/// escalation threshold. A `task.resume` whose retry_count
+/// reaches this number is escalated to plan.blocked. Three
+/// hardcoded copies of the literal `3` (two in this module,
+/// one in the static `ralph-tools*.md` drift test) used to
+/// drift silently; this constant is the single source of
+/// truth.
+pub const ESCALATION_THRESHOLD: u32 = 3;
+
 impl CorrectionContext {
     /// Build from a [`Rejection`].  The `retry_count` is the
     /// caller's responsibility — typically the per-key counter
@@ -289,7 +298,7 @@ impl CorrectionContext {
             rejection.stage.as_str(),
             extract_reason_code(&rejection.violation),
         );
-        let escalation_threshold = 3;
+        let escalation_threshold = ESCALATION_THRESHOLD;
         Self {
             reason_code,
             stage: rejection.stage.as_str().to_string(),
@@ -343,7 +352,7 @@ impl CorrectionContext {
     /// key carries the failing topic so escalation logic
     /// converges with policy rejections.
     pub fn from_lint_hint(topic: &str, hint_message: &str, retry_count: u32) -> Self {
-        let escalation_threshold = 3;
+        let escalation_threshold = ESCALATION_THRESHOLD;
         Self {
             reason_code: format!("lint:{}", extract_reason_code(hint_message)),
             stage: "policy".to_string(),

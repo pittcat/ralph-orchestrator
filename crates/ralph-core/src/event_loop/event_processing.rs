@@ -358,17 +358,39 @@ impl EventLoop {
             // `current_loop_id()` borrows `&self`; capture it
             // before the mutable bus borrow.
             let loop_id_for_resume = self.current_loop_id();
-            let decision = crate::event_loop::resume_routing::publish_targeted_resume_for_hat(
-                &mut self.bus,
-                &self.registry,
-                None,
-                loop_id_for_resume.as_deref(),
-                hard_target.as_str(),
-                None,
-                None,
-                &format!("hard_stall:{}", stall_count_value),
-                structured_payload,
-            );
+            let loop_id_str = loop_id_for_resume.as_deref().unwrap_or("default");
+            let activation_id = format!("resume:{}:{}", loop_id_str, self.state.iteration);
+            let decision = if let Some(ledger) = self.state.state_ledger.as_ref() {
+                crate::event_loop::resume_routing::publish_targeted_recovery_resume_for_hat(
+                    &mut self.bus,
+                    &self.registry,
+                    None,
+                    ledger,
+                    loop_id_str,
+                    &activation_id,
+                    loop_id_str,
+                    hard_target.as_str(),
+                    None,
+                    None,
+                    None,
+                    &format!("hard_stall:{}", stall_count_value),
+                    structured_payload,
+                    None,
+                )
+            } else {
+                crate::event_loop::resume_routing::publish_targeted_resume_for_hat(
+                    &mut self.bus,
+                    &self.registry,
+                    None,
+                    loop_id_for_resume.as_deref(),
+                    hard_target.as_str(),
+                    None,
+                    None,
+                    None,
+                    &format!("hard_stall:{}", stall_count_value),
+                    structured_payload,
+                )
+            };
             if let crate::event_loop::resume_routing::ResumeDecision::Block { reason } = &decision {
                 tracing::warn!(
                     target = %hard_target.as_str(),
@@ -455,7 +477,31 @@ impl EventLoop {
                     // the bus; return `None` so the trailing
                     // publish line is skipped.
                     let loop_id_for_resume = self.current_loop_id();
-                    let decision =
+                    let loop_id_str =
+                        loop_id_for_resume.as_deref().unwrap_or("default");
+                    let activation_id =
+                        format!("resume:{}:{}", loop_id_str, self.state.iteration);
+                    let decision = if let Some(ledger) =
+                        self.state.state_ledger.as_ref()
+                    {
+                        crate::event_loop::resume_routing::
+                            publish_targeted_recovery_resume_for_hat(
+                                &mut self.bus,
+                                &self.registry,
+                                None,
+                                ledger,
+                                loop_id_str,
+                                &activation_id,
+                                loop_id_str,
+                                hat_id.as_str(),
+                                None,
+                                None,
+                                None,
+                                "stall_no_events",
+                                structured_payload,
+                                None,
+                            )
+                    } else {
                         crate::event_loop::resume_routing::publish_targeted_resume_for_hat(
                             &mut self.bus,
                             &self.registry,
@@ -464,9 +510,11 @@ impl EventLoop {
                             hat_id.as_str(),
                             None,
                             None,
+                            None,
                             "stall_no_events",
                             structured_payload,
-                        );
+                        )
+                    };
                     if let crate::event_loop::resume_routing::ResumeDecision::Block { reason } =
                         &decision
                     {
@@ -675,17 +723,39 @@ impl EventLoop {
         // bounded retry budget signature so duplicate retries
         // collapse into a single resume.
         let loop_id_for_resume = self.current_loop_id();
-        let decision = crate::event_loop::resume_routing::publish_targeted_resume_for_hat(
-            &mut self.bus,
-            &self.registry,
-            None,
-            loop_id_for_resume.as_deref(),
-            hat_id.as_str(),
-            None,
-            None,
-            &format!("missing_terminal_emit:{}:{}", retry_key, retry_count),
-            payload,
-        );
+        let loop_id_str = loop_id_for_resume.as_deref().unwrap_or("default");
+        let activation_id = format!("resume:{}:{}", loop_id_str, self.state.iteration);
+        let decision = if let Some(ledger) = self.state.state_ledger.as_ref() {
+            crate::event_loop::resume_routing::publish_targeted_recovery_resume_for_hat(
+                &mut self.bus,
+                &self.registry,
+                None,
+                ledger,
+                loop_id_str,
+                &activation_id,
+                loop_id_str,
+                hat_id.as_str(),
+                None,
+                None,
+                None,
+                &format!("missing_terminal_emit:{}:{}", retry_key, retry_count),
+                payload,
+                None,
+            )
+        } else {
+            crate::event_loop::resume_routing::publish_targeted_resume_for_hat(
+                &mut self.bus,
+                &self.registry,
+                None,
+                loop_id_for_resume.as_deref(),
+                hat_id.as_str(),
+                None,
+                None,
+                None,
+                &format!("missing_terminal_emit:{}:{}", retry_key, retry_count),
+                payload,
+            )
+        };
         if let crate::event_loop::resume_routing::ResumeDecision::Block { reason } = &decision {
             tracing::warn!(
                 target = %hat_id.as_str(),

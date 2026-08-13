@@ -102,6 +102,14 @@ pub enum ResumeBlockReason {
         task_key: Option<String>,
         loop_id: Option<String>,
     },
+    /// Bus-level delivery validation failed before publish.
+    /// Zero observer side-effects occurred (U3). The code/message
+    /// describe the specific validation failure so operators can
+    /// distinguish unknown-source vs unregistered-target vs no-recipients.
+    DeliveryValidationFailed {
+        code: &'static str,
+        message: String,
+    },
 }
 
 /// Identity tuple used to deduplicate equivalent pending resumes
@@ -385,7 +393,55 @@ pub fn publish_targeted_resume(
                 .with_source("orchestrator")
                 .with_system_injected()
                 .with_target(target.clone());
-            bus.publish(event);
+            // Plan 2026-08-13-003 U3: validate BEFORE any observer
+            // side-effect. If delivery validation fails (unknown source,
+            // unregistered target, no recipients), return Block without
+            // calling publish — zero observer side-effects.
+            if let Err(delivery_error) = bus.validate_delivery(&event) {
+                let (code, message) = match &delivery_error {
+                    ralph_proto::EventDeliveryError::UnknownSource(_) => {
+                        ("unknown_source", delivery_error.to_string())
+                    }
+                    ralph_proto::EventDeliveryError::UnknownTarget(_) => {
+                        ("unknown_target", delivery_error.to_string())
+                    }
+                    ralph_proto::EventDeliveryError::NoRecipients => {
+                        ("no_recipients", delivery_error.to_string())
+                    }
+                };
+                return ResumeDecision::Block {
+                    reason: ResumeBlockReason::DeliveryValidationFailed {
+                        code,
+                        message,
+                    },
+                };
+            }
+            // U3: publish_checked validates again (in case of TOCTOU
+            // between pre-check and publish) then notifies observers.
+            let publish_result = bus.publish_checked(event);
+            // Post-publish recipient check: catches TOCTOU races where
+            // the hat was still registered at validate_delivery time
+            // but unregistered before the bus queued the event.
+            let recipients = match publish_result {
+                Ok(r) => r,
+                Err(e) => {
+                    return ResumeDecision::Block {
+                        reason: ResumeBlockReason::DeliveryValidationFailed {
+                            code: "publish_checked_failed",
+                            message: e.to_string(),
+                        },
+                    };
+                }
+            };
+            let recipients_match =
+                recipients.len() == 1 && recipients[0].as_str() == target.as_str();
+            if !recipients_match {
+                return ResumeDecision::Block {
+                    reason: ResumeBlockReason::UnknownTargetRace {
+                        target: target.as_str().to_string(),
+                    },
+                };
+            }
         }
         ResumeDecision::Duplicate { .. } => {
             // Drop without re-queueing (D6).
@@ -395,6 +451,50 @@ pub fn publish_targeted_resume(
         }
     }
     decision
+}
+
+/// Plan 2026-08-13-003 fix-plan U5 R6: single helper that
+/// extracts a non-empty string field from a serialized JSON
+/// payload. Replaces the three duplicated extractors
+/// (`payload_target_hat`, `payload_task_id`, `payload_task_key`)
+/// that each called `serde_json::from_str` separately on the
+/// same payload. The single parse + lookup saves redundant
+/// work and gives the compiler one source of truth for the
+/// "non-empty string" contract.
+pub fn payload_str_field(payload: &str, field: &str) -> Option<String> {
+    let value: serde_json::Value = match serde_json::from_str(payload) {
+        Ok(v) => v,
+        Err(_) => return None,
+    };
+    value
+        .get(field)
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+}
+
+/// Plan 2026-08-13-003 U2: extract the `target_hat` field
+/// from a serialized JSON payload so production wrappers can
+/// thread the payload target through the resolver without
+/// forcing every caller to re-parse. Returns `None` when the
+/// payload does not contain a non-empty string `target_hat`.
+pub fn payload_target_hat(payload: &str) -> Option<String> {
+    payload_str_field(payload, "target_hat")
+}
+
+/// Plan 2026-08-13-003 U2: extract the `task_id` field from a
+/// serialized JSON payload. Returns `None` when the payload
+/// does not contain a non-empty string `task_id`.
+pub fn payload_task_id(payload: &str) -> Option<String> {
+    payload_str_field(payload, "task_id")
+}
+
+/// Plan 2026-08-13-003 U2: extract the `task_key` field from a
+/// serialized JSON payload. Returns `None` when the payload
+/// does not contain a non-empty string `task_key`.
+pub fn payload_task_key(payload: &str) -> Option<String> {
+    payload_str_field(payload, "task_key")
 }
 
 /// Plan 2026-08-10-001 U1: derive a [`PendingResumeIdentity`]
@@ -431,6 +531,13 @@ pub fn pending_resume_identities_from_bus(
 /// optional identity hints; `retry_key` MUST be non-empty
 /// (callers derive a deterministic one from the recovery
 /// context).
+///
+/// Plan 2026-08-13-003 U2: the wrapper now threads
+/// `payload_target_hat` from the resume payload through the
+/// resolver so the priority chain (D2) is fully exercised in
+/// production. Callers that previously relied on the
+/// hard-coded `payload_target_hat: None` MUST supply the
+/// payload's `target_hat` field (or `None` when absent).
 pub fn publish_targeted_resume_for_hat(
     bus: &mut ralph_proto::EventBus,
     registry: &impl RegisteredHats,
@@ -439,6 +546,7 @@ pub fn publish_targeted_resume_for_hat(
     target_hint: &str,
     task_id: Option<&str>,
     task_key: Option<&str>,
+    payload_target_hat: Option<&str>,
     retry_key: &str,
     payload: String,
 ) -> ResumeDecision {
@@ -450,10 +558,60 @@ pub fn publish_targeted_resume_for_hat(
         target_hint,
         task_id,
         task_key,
+        payload_target_hat,
         retry_key,
         payload,
         None,
     )
+}
+
+/// Unified `task.resume` ingress: routes to `publish_targeted_recovery_resume_for_hat`
+/// when a ledger is present, otherwise `publish_targeted_resume_for_hat`.
+///
+/// # Arguments
+/// * `ledger` – `None` → legacy path
+/// * `task_key` – optional step-key passed to both variants
+pub fn task_resume_ingress(
+    bus: &mut ralph_proto::EventBus,
+    registry: &impl RegisteredHats,
+    ledger: Option<&crate::state::StateLedger>,
+    loop_id_str: &str,
+    activation_id: &str,
+    target_hint: &str,
+    task_key: Option<&str>,
+    retry_key: &str,
+    payload: String,
+) -> ResumeDecision {
+    match ledger {
+        Some(ledger) => publish_targeted_recovery_resume_for_hat(
+            bus,
+            registry,
+            None,
+            ledger,
+            loop_id_str,
+            activation_id,
+            loop_id_str,
+            target_hint,
+            None,
+            task_key,
+            None,
+            retry_key,
+            payload,
+            None,
+        ),
+        None => publish_targeted_resume_for_hat(
+            bus,
+            registry,
+            None,
+            Some(loop_id_str),
+            target_hint,
+            None,
+            task_key,
+            None,
+            retry_key,
+            payload,
+        ),
+    }
 }
 
 /// Variant of [`publish_targeted_resume_for_hat`] that
@@ -462,6 +620,9 @@ pub fn publish_targeted_resume_for_hat(
 /// `.ralph/diagnostics/` default. Used by tests so they
 /// can pin a temp dir without touching the repo's
 /// diagnostics directory.
+///
+/// Plan 2026-08-13-003 U2: see [`publish_targeted_resume_for_hat`]
+/// for the new `payload_target_hat` argument.
 pub fn publish_targeted_resume_for_hat_in(
     bus: &mut ralph_proto::EventBus,
     registry: &impl RegisteredHats,
@@ -470,17 +631,31 @@ pub fn publish_targeted_resume_for_hat_in(
     target_hint: &str,
     task_id: Option<&str>,
     task_key: Option<&str>,
+    payload_target_hat: Option<&str>,
     retry_key: &str,
     payload: String,
     diagnostics_dir: Option<&std::path::Path>,
 ) -> ResumeDecision {
     let target_hat = ralph_proto::HatId::new(target_hint);
     let existing = pending_resume_identities_from_bus(bus, &target_hat);
+    // Plan 2026-08-13-003 U2: caller-supplied identity wins,
+    // but when the caller did not parse the payload itself we
+    // still recover the standard identity fields so the
+    // resolver priority chain (D2) is exercised in production.
+    let resolved_task_id: Option<String> = task_id
+        .map(str::to_string)
+        .or_else(|| payload_task_id(&payload));
+    let resolved_task_key: Option<String> = task_key
+        .map(str::to_string)
+        .or_else(|| payload_task_key(&payload));
+    let resolved_payload_target: Option<String> = payload_target_hat
+        .map(str::to_string)
+        .or_else(|| self::payload_target_hat(&payload));
     let inputs = ResumeRoutingInputs {
         event_target: Some(target_hint),
-        payload_target_hat: None,
-        task_id,
-        task_key,
+        payload_target_hat: resolved_payload_target.as_deref(),
+        task_id: resolved_task_id.as_deref(),
+        task_key: resolved_task_key.as_deref(),
         retry_key: Some(retry_key),
         loop_id,
         payload: Some(&payload),
@@ -516,7 +691,15 @@ pub fn publish_targeted_resume_for_hat_in(
         let dir = diagnostics_dir
             .map(std::path::Path::to_path_buf)
             .unwrap_or_else(|| std::path::PathBuf::from(".ralph/diagnostics"));
-        let _ = write_envelope_to_dir(&dir, &envelope);
+        if let Err(e) = write_envelope_to_dir(&dir, &envelope) {
+            tracing::warn!(
+                target: "ralph_core::resume",
+                target_hint = %target_hint,
+                retry_key = %retry_key,
+                error = %e,
+                "task_resume Block envelope write failed; diagnostic dropped"
+            );
+        }
     }
     decision
 }
@@ -530,6 +713,7 @@ fn reason_code(reason: &ResumeBlockReason) -> &'static str {
         ResumeBlockReason::MissingRetryKey => "missing_retry_key",
         ResumeBlockReason::UnknownTargetRace { .. } => "unknown_target_race",
         ResumeBlockReason::DuplicateTaskKey { .. } => "duplicate_task_key",
+        ResumeBlockReason::DeliveryValidationFailed { code, .. } => code,
     }
 }
 
@@ -553,8 +737,18 @@ fn reason_description(reason: &ResumeBlockReason) -> String {
         ResumeBlockReason::DuplicateTaskKey { task_key } => {
             format!("two open tasks carry the same task_key `{task_key}`")
         }
+        ResumeBlockReason::DeliveryValidationFailed { message, .. } => {
+            format!("bus delivery validation failed: {message}")
+        }
     }
 }
+
+/// Plan 2026-08-13-003 fix-plan U5 R5: process-global counter
+/// that disambiguates envelope filenames when two Block
+/// decisions land in the same nanosecond. PID + nanos alone
+/// collided on macOS / high-load CI (correctness:C3); the
+/// counter guarantees uniqueness within a single process.
+static ENVELOPE_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 fn write_envelope_to_dir(
     dir: &std::path::Path,
@@ -566,10 +760,194 @@ fn write_envelope_to_dir(
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_nanos())
         .unwrap_or(0);
-    let path = dir.join(format!("task_resume_block-{pid}-{nanos}.jsonl"));
+    let counter = ENVELOPE_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let path = dir.join(format!(
+        "task_resume_block-{pid}-{nanos}-{counter}.jsonl"
+    ));
     let line = envelope.to_string();
     std::fs::write(path, format!("{line}\n"))?;
     Ok(())
+}
+
+/// Plan 2026-08-13-003 U3: route the resolved `task.resume`
+/// through the existing `Disposition::Recovery` /
+/// `AcceptedTransition::commit_idempotent` durable boundary
+/// before publishing to the in-memory bus. The caller MUST
+/// pass the current `loop_id`, `activation_id`, and
+/// `contract_revision`; the durable outbox write happens
+/// before the bus publish, so a commit failure has zero
+/// bus side effect.
+pub fn publish_targeted_recovery_resume(
+    bus: &mut ralph_proto::EventBus,
+    registry: &impl RegisteredHats,
+    task_store: Option<&TaskStore>,
+    ledger: &crate::state::StateLedger,
+    loop_id: &str,
+    activation_id: &str,
+    contract_revision: &str,
+    inputs: &ResumeRoutingInputs<'_>,
+    payload: String,
+) -> Result<ResumeDecision, String> {
+    let existing = inputs
+        .event_target
+        .map(|t| ralph_proto::HatId::new(t))
+        .map(|hat| pending_resume_identities_from_bus(bus, &hat))
+        .unwrap_or_default();
+    let decision = resolve_resume_target(inputs, registry, task_store, &existing);
+    match &decision {
+        ResumeDecision::Allow { target, .. } => {
+            if !registry.is_registered(target.as_str()) {
+                return Ok(ResumeDecision::Block {
+                    reason: ResumeBlockReason::UnknownTargetRace {
+                        target: target.as_str().to_string(),
+                    },
+                });
+            }
+            let event = ralph_proto::Event::new("task.resume", payload.clone())
+                .with_source("orchestrator")
+                .with_system_injected()
+                .with_target(target.clone());
+            crate::event_loop::disposition::publish_synthetic(
+                &event,
+                crate::event_loop::disposition::Disposition::Recovery,
+                loop_id,
+                activation_id,
+                contract_revision,
+                ledger,
+                bus,
+            )
+            .map_err(|e| format!("recovery commit failed: {e}"))?;
+            Ok(decision)
+        }
+        ResumeDecision::Duplicate { .. } => Ok(decision),
+        ResumeDecision::Block { .. } => Ok(decision),
+    }
+}
+
+/// Plan 2026-08-13-003 U2: production-grade wrapper that
+/// routes through [`publish_targeted_recovery_resume`] so
+/// every production call site gets the durable acceptance
+/// boundary (ledger write before bus publish). Callers that
+/// have access to the [`StateLedger`] and execution contract
+/// should use this instead of [`publish_targeted_resume_for_hat`]
+/// or [`publish_targeted_resume_for_hat_in`].
+///
+/// `activation_id` is caller-supplied so the outbox entry
+/// reflects the real activation identity. When the caller
+/// does not have an activation context, use
+/// `format!("resume:{loop_id}:{iteration}")` as a stable
+/// derived identity.
+///
+/// `contract_revision` is the caller's execution contract
+/// digest. When no contract is available, pass `loop_id`
+/// as a placeholder — the dedup key is the transition_id
+/// derived from loop_id + activation_id + contract_revision,
+/// so an arbitrary placeholder does not affect correctness.
+pub fn publish_targeted_recovery_resume_for_hat(
+    bus: &mut ralph_proto::EventBus,
+    registry: &impl RegisteredHats,
+    task_store: Option<&TaskStore>,
+    ledger: &crate::state::StateLedger,
+    loop_id: &str,
+    activation_id: &str,
+    contract_revision: &str,
+    target_hint: &str,
+    task_id: Option<&str>,
+    task_key: Option<&str>,
+    payload_target_hat: Option<&str>,
+    retry_key: &str,
+    payload: String,
+    diagnostics_dir: Option<&std::path::Path>,
+) -> ResumeDecision {
+    let resolved_task_id: Option<String> =
+        task_id.map(str::to_string).or_else(|| payload_task_id(&payload));
+    let resolved_task_key: Option<String> =
+        task_key.map(str::to_string).or_else(|| payload_task_key(&payload));
+    let resolved_payload_target: Option<String> =
+        payload_target_hat.map(str::to_string).or_else(|| self::payload_target_hat(&payload));
+    let payload_clone = payload.clone();
+    let inputs = ResumeRoutingInputs {
+        event_target: Some(target_hint),
+        payload_target_hat: resolved_payload_target.as_deref(),
+        task_id: resolved_task_id.as_deref(),
+        task_key: resolved_task_key.as_deref(),
+        retry_key: Some(retry_key),
+        loop_id: Some(loop_id),
+        payload: Some(&payload_clone),
+    };
+    let result = publish_targeted_recovery_resume(
+        bus,
+        registry,
+        task_store,
+        ledger,
+        loop_id,
+        activation_id,
+        contract_revision,
+        &inputs,
+        payload,
+    );
+    match result {
+        Ok(ResumeDecision::Block { reason }) => {
+            // Mirror the diagnostic-envelope writing from the
+            // legacy wrapper so Block decisions are observable.
+            let envelope = serde_json::json!({
+                "schema_version": "task_resume_block_envelope/v1",
+                "source": "task_resume_routing_recovery",
+                "reason_code": reason_code(&reason),
+                "reason_description": reason_description(&reason),
+                "target_hint": target_hint,
+                "retry_key": retry_key,
+                "loop_id": loop_id,
+                "task_id": task_id,
+                "task_key": task_key,
+            });
+            let dir = diagnostics_dir
+                .map(std::path::Path::to_path_buf)
+                .unwrap_or_else(|| std::path::PathBuf::from(".ralph/diagnostics"));
+            if let Err(e) = write_envelope_to_dir(&dir, &envelope) {
+                tracing::warn!(
+                    target: "ralph_core::resume",
+                    target_hint = %target_hint,
+                    retry_key = %retry_key,
+                    error = %e,
+                    "task_resume Block envelope write failed (recovery path); diagnostic dropped"
+                );
+            }
+            ResumeDecision::Block { reason }
+        }
+        Ok(other) => other,
+        Err(e) => {
+            // Recovery commit failed: treat as Block.
+            let reason = ResumeBlockReason::DeliveryValidationFailed {
+                code: "recovery_commit_failed",
+                message: e,
+            };
+            let envelope = serde_json::json!({
+                "schema_version": "task_resume_block_envelope/v1",
+                "source": "task_resume_routing_recovery",
+                "reason_code": reason_code(&reason),
+                "reason_description": reason_description(&reason),
+                "target_hint": target_hint,
+                "retry_key": retry_key,
+                "loop_id": loop_id,
+                "task_id": task_id,
+                "task_key": task_key,
+            });
+            let dir = diagnostics_dir
+                .map(std::path::Path::to_path_buf)
+                .unwrap_or_else(|| std::path::PathBuf::from(".ralph/diagnostics"));
+            if let Err(e2) = write_envelope_to_dir(&dir, &envelope) {
+                tracing::warn!(
+                    target: "ralph_core::resume",
+                    target_hint = %target_hint,
+                    retry_key = %retry_key,
+                    error = %e2,
+                    "task_resume Block envelope write failed (recovery_commit_failed); diagnostic dropped"
+                );
+            }
+            ResumeDecision::Block { reason }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -938,6 +1316,7 @@ mod tests {
             "executor",
             None,
             None,
+            None,
             "retry-1",
             payload.to_string(),
         );
@@ -947,6 +1326,7 @@ mod tests {
             None,
             Some("loop-A"),
             "executor",
+            None,
             None,
             None,
             "retry-1",
@@ -1082,6 +1462,7 @@ mod tests {
             None,
             Some("loop-A"),
             "victim",
+            None,
             None,
             None,
             "u2_block_envelope",

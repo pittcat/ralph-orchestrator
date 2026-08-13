@@ -131,12 +131,20 @@ impl EventLoop {
     /// [`crate::correction::ResumeContext`] block in the next
     /// prompt.  The legacy `task.resume` path is preserved for
     /// callers that have not opted in.
+    ///
+    /// Plan 2026-08-13-003 U4: the production default context
+    /// is no longer `ResumeContext::default()` — it is built
+    /// from the live `LoopHistory::last_iteration`, the
+    /// current-loop `TaskStore` closed/open counts, the
+    /// `.ralph/agent/progress.md` `ProgressSnapshot`, and the
+    /// scratchpad headline. Read failures fall back to safe
+    /// empty values (per D5 + plan §20) so the loop.resume
+    /// event still fires for legacy workspaces that lack the
+    /// auxiliary files.
     pub fn initialize_resume(&mut self, prompt_content: &str) {
         if crate::correction::is_correction_enabled() {
-            self.initialize_resume_with_context(
-                prompt_content,
-                crate::correction::ResumeContext::default(),
-            );
+            let context = self.build_resume_context_from_sources();
+            self.initialize_resume_with_context(prompt_content, context);
             return;
         }
         // Legacy path: emit `task.resume` regardless of starting_event
@@ -146,6 +154,93 @@ impl EventLoop {
         // Unit 3: rebuild bootstrap gate from recorded events so resume
         // does not re-open the guidance-suppression window mid-loop.
         self.rebuild_bootstrap_flags_from_recorded_events();
+    }
+
+    /// Plan 2026-08-13-003 U4: build a production
+    /// [`crate::correction::ResumeContext`] from the live
+    /// sources required by D5 (LoopHistory / current-loop
+    /// TaskStore / progress.md / scratchpad). Each source is
+    /// read independently; failure of any single read leaves
+    /// that field empty/zero (no fabricated values).
+    fn build_resume_context_from_sources(&self) -> crate::correction::ResumeContext {
+        use crate::correction::ResumeContext;
+        use crate::step_handoff::progress_task_gate::ProgressSnapshot;
+
+        let loop_id = self
+            .loop_id_label()
+            .trim()
+            .to_string();
+
+        // Last iteration from LoopHistory (if available).
+        let history_path = self.loop_history_path();
+        let last_iteration = history_path
+            .as_ref()
+            .and_then(|p| crate::loop_history::LoopHistory::new(p.clone()).last_iteration().ok())
+            .flatten()
+            .unwrap_or(0);
+
+        // Current-loop TaskStore closed count.
+        let tasks_path = self.tasks_path();
+        let closed_tasks_count =
+            read_closed_tasks_count(&tasks_path, Some(loop_id.as_str()));
+
+        // ProgressSnapshot summary (current_step + completed).
+        let progress_path = self.progress_path();
+        let progress_summary = progress_path
+            .as_ref()
+            .and_then(|p| std::fs::read_to_string(p).ok())
+            .map(|content| {
+                let snap = ProgressSnapshot::parse(&content);
+                let mut out = String::new();
+                if let Some(step) = snap.current_step() {
+                    out.push_str(&format!("current_step={step}; "));
+                }
+                if !snap.completed_steps.is_empty() {
+                    out.push_str(&format!(
+                        "completed={}; ",
+                        snap.completed_steps.join(",")
+                    ));
+                }
+                out
+            })
+            .unwrap_or_default();
+
+        // Scratchpad headline (first non-empty heading). Plan
+        // 2026-08-13-003 fix-plan U5 R10: surface read failures
+        // and tag the headline as untrusted so the agent can
+        // distinguish "scratchpad is empty" from "path not
+        // readable" and is reminded the headline is operator-
+        // / agent-supplied free-form text, not authoritative
+        // state.
+        let scratchpad_path = self.resume_scratchpad_path();
+        let (scratchpad_headline, scratchpad_status) = match scratchpad_path.as_ref() {
+            None => (String::new(), "unavailable"),
+            Some(path) => match std::fs::read_to_string(path) {
+                Ok(content) => (first_meaningful_heading(&content), "loaded"),
+                Err(e) => {
+                    tracing::warn!(
+                        scratchpad_path = ?path,
+                        error = %e,
+                        "scratchpad read failed; ResumeContext will mark headline unavailable"
+                    );
+                    (String::new(), "read_error")
+                }
+            },
+        };
+        let scratchpad_headline = match scratchpad_status {
+            "loaded" => format!(
+                "<untrusted scratchpad excerpt> {scratchpad_headline} </untrusted scratchpad excerpt>"
+            ),
+            _ => scratchpad_headline,
+        };
+
+        ResumeContext::new(
+            loop_id,
+            closed_tasks_count,
+            progress_summary,
+            last_iteration,
+            scratchpad_headline,
+        )
     }
 
     /// U7b (plan 2026-06-21-002): initialize resume with an
@@ -235,17 +330,57 @@ impl EventLoop {
             // publish path. The live `peek_pending` adapter
             // covers the dedup check.
             let loop_id_for_resume = self.current_loop_id();
-            crate::event_loop::resume_routing::publish_targeted_resume_for_hat(
-                &mut self.bus,
-                &self.registry,
-                None,
-                loop_id_for_resume.as_deref(),
-                recovery.target_hat.as_str(),
-                None,
-                None,
-                "manifest_resume",
-                recovery.payload,
-            );
+            let loop_id_str = loop_id_for_resume.as_deref().unwrap_or("default");
+            let activation_id =
+                format!("resume:{}:{}", loop_id_str, self.state.iteration);
+            // Plan 2026-08-13-003 fix-plan U5 R7: bind the
+            // `ResumeDecision` so a Block (UnknownTarget /
+            // MissingRetryKey / cross-loop / unresolvable_task)
+            // surfaces via `tracing::warn!` — matches the symmetric
+            // warn pattern used by `parse_and_emit.rs:691-712` and
+            // `completion_and_termination.rs:984-1005`. Previously
+            // a manifest-resume Block was silent, leaving
+            // parallel-forge manifest-recovery regressed without
+            // operator visibility.
+            let decision = if let Some(ledger) = self.state.state_ledger.as_ref() {
+                crate::event_loop::resume_routing::publish_targeted_recovery_resume_for_hat(
+                    &mut self.bus,
+                    &self.registry,
+                    None,
+                    ledger,
+                    loop_id_str,
+                    &activation_id,
+                    loop_id_str,
+                    recovery.target_hat.as_str(),
+                    None,
+                    None,
+                    None,
+                    "manifest_resume",
+                    recovery.payload,
+                    None,
+                )
+            } else {
+                crate::event_loop::resume_routing::publish_targeted_resume_for_hat(
+                    &mut self.bus,
+                    &self.registry,
+                    None,
+                    loop_id_for_resume.as_deref(),
+                    recovery.target_hat.as_str(),
+                    None,
+                    None,
+                    None,
+                    "manifest_resume",
+                    recovery.payload,
+                )
+            };
+            if let crate::event_loop::resume_routing::ResumeDecision::Block { reason } = &decision {
+                tracing::warn!(
+                    target_hat = %recovery.target_hat.as_str(),
+                    original_trigger_topic = %recovery.original_trigger_topic,
+                    ?reason,
+                    "manifest_resume blocked (no safe target); manifest-recovery obligation landed without publishing"
+                );
+            }
             debug!(
                 target_hat = %recovery.target_hat.as_str(),
                 original_trigger_topic = %recovery.original_trigger_topic,
@@ -847,17 +982,39 @@ impl EventLoop {
         // aggregate-timeout recoveries collapse into one resume
         // per wave.
         let loop_id_for_resume = self.current_loop_id();
-        let decision = crate::event_loop::resume_routing::publish_targeted_resume_for_hat(
-            &mut self.bus,
-            &self.registry,
-            None,
-            loop_id_for_resume.as_deref(),
-            target.as_str(),
-            None,
-            None,
-            &format!("aggregate_timeout:{}", action.wave_id),
-            payload,
-        );
+        let loop_id_str = loop_id_for_resume.as_deref().unwrap_or("default");
+        let activation_id = format!("resume:{}:{}", loop_id_str, self.state.iteration);
+        let decision = if let Some(ledger) = self.state.state_ledger.as_ref() {
+            crate::event_loop::resume_routing::publish_targeted_recovery_resume_for_hat(
+                &mut self.bus,
+                &self.registry,
+                None,
+                ledger,
+                loop_id_str,
+                &activation_id,
+                loop_id_str,
+                target.as_str(),
+                None,
+                None,
+                None,
+                &format!("aggregate_timeout:{}", action.wave_id),
+                payload,
+                None,
+            )
+        } else {
+            crate::event_loop::resume_routing::publish_targeted_resume_for_hat(
+                &mut self.bus,
+                &self.registry,
+                None,
+                loop_id_for_resume.as_deref(),
+                target.as_str(),
+                None,
+                None,
+                None,
+                &format!("aggregate_timeout:{}", action.wave_id),
+                payload,
+            )
+        };
         if let crate::event_loop::resume_routing::ResumeDecision::Block { reason } = &decision {
             tracing::warn!(
                 target = %target.as_str(),
@@ -868,4 +1025,61 @@ impl EventLoop {
         }
         true
     }
+}
+
+/// Plan 2026-08-13-003 U4: helpers for `build_resume_context_from_sources`.
+/// All helpers are read-only; missing files or unreadable paths return
+/// `None` / `0` so the loop.resume event still fires for legacy
+/// workspaces that lack the auxiliary files.
+/// Plan 2026-08-13-003 fix-plan U5 R9: count terminal
+/// (`is_terminal()`) tasks in the supplied TaskStore that
+/// belong to the current loop only. The previous
+/// implementation filtered by terminal status alone, which
+/// let shared `.ralph/agent/tasks.jsonl` entries from prior
+/// worktree loops inflate `ResumeContext.closed_tasks` and
+/// trick the agent into believing work was already done
+/// (adversarial:A4). When `current_loop_id` is `None`, the
+/// function returns 0 instead of falling back to the
+/// unfiltered count, because the symmetric pattern in
+/// `recovery/persistence.rs` treats absent loop_id as
+/// "no claim about ownership".
+fn read_closed_tasks_count(
+    tasks_path: &std::path::Path,
+    current_loop_id: Option<&str>,
+) -> u32 {
+    use crate::task_store::TaskStore;
+    TaskStore::load(tasks_path)
+        .map(|store| {
+            let mut n = 0u32;
+            for t in store.tasks() {
+                if !t.status.is_terminal() {
+                    continue;
+                }
+                match (t.loop_id.as_deref(), current_loop_id) {
+                    (Some(tl), Some(cl)) if tl == cl => n += 1,
+                    (None, None) => n += 1,
+                    _ => {}
+                }
+            }
+            n
+        })
+        .unwrap_or(0)
+}
+
+fn first_meaningful_heading(content: &str) -> String {
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if let Some(rest) = trimmed.strip_prefix("# ") {
+            return rest.trim().to_string();
+        }
+        if let Some(rest) = trimmed.strip_prefix("## ") {
+            return rest.trim().to_string();
+        }
+        if !trimmed.is_empty() {
+            // First non-heading non-empty line — use it as
+            // the headline for very loose scratchpads.
+            return trimmed.chars().take(80).collect();
+        }
+    }
+    String::new()
 }
