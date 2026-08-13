@@ -237,6 +237,17 @@ pub enum CommitDelta {
     /// so the completion gate can compare field values on resume
     /// without re-scanning the full event log.
     CompletionPredecessorRecorded { topic: String, payload: String },
+
+    /// GAP-01 (plan 2026-08-13-001 U1): bounded, replayable
+    /// cognitive observations appended from
+    /// `accepted_log_events`. Each record carries digest /
+    /// source ref / fingerprint / verification status; the raw
+    /// payload is never stored. Apply is idempotent on
+    /// `KnowledgeRecord.id` and the snapshot display cap is
+    /// enforced by `OrchestrationKnowledgeState::insert`.
+    KnowledgeObserved {
+        records: Vec<crate::state::knowledge::KnowledgeRecord>,
+    },
 }
 
 /// Task state transition kind. Mirrors the lifecycle in

@@ -449,3 +449,418 @@ hats:
         "projected task must honour payload.task_id; got task: {task}"
     );
 }
+
+// ===========================================================================
+// GAP-01 (plan 2026-08-13-001) U2 wiring tests.
+//
+// These tests drive a real EventLoop through
+// `process_events_from_jsonl` and assert that the post-validation
+// batch boundary commits a bounded `KnowledgeObserved` delta for
+// each `Business` / `Recovery` event while leaving the existing
+// `ProcessedEvents` result untouched.
+// ===========================================================================
+
+/// Build a minimal multi-hat event loop suitable for driving
+/// `process_events_from_jsonl`. The harness matches the
+/// `isolated_event_loop_with_task` style above so the wiring
+/// surface is consistent.
+fn multi_hat_event_loop(workspace: &std::path::Path) -> crate::event_loop::EventLoop {
+    let yaml = r#"
+mode: "multi"
+event_loop:
+  execution_mode: "coordinator"
+hats:
+  builder:
+    name: "Builder"
+    triggers: ["work.ready"]
+    publishes: ["work.done"]
+    instructions: "Do work."
+"#;
+    let mut config: crate::config::RalphConfig = serde_yaml::from_str(yaml).unwrap();
+    config.core.workspace_root = workspace.to_path_buf();
+    let mut event_loop = crate::event_loop::EventLoop::with_context(
+        config,
+        crate::loop_context::LoopContext::primary(workspace.to_path_buf()),
+    );
+    event_loop.initialize("GAP-01 U2 wiring test");
+    event_loop
+}
+
+/// U2 wiring: a single accepted `Business` event must produce
+/// exactly one `KnowledgeObserved` delta and leave the
+/// `ProcessedEvents` accepted tuple unchanged.
+#[test]
+fn accepted_business_and_recovery_events_create_observations() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    init_git_workspace(dir.path());
+    let events_path = dir.path().join(".ralph/events.jsonl");
+    fs::create_dir_all(events_path.parent().unwrap()).unwrap();
+    let ts = chrono::Utc::now().to_rfc3339();
+    // One Business event with source/executor so the helper
+    // can attach a hat evidence ref.
+    let business = json!({
+        "topic": "work.done",
+        "payload": json!({"task_key": "K1", "step": "step-01"}).to_string(),
+        "ts": ts,
+        "source": "executor",
+    });
+    fs::write(&events_path, format!("{business}\n")).unwrap();
+
+    let mut event_loop = multi_hat_event_loop(dir.path());
+    event_loop.event_reader = crate::event_reader::EventReader::new(&events_path);
+    let result = event_loop.process_events_from_jsonl();
+    let result = result.expect("process_events_from_jsonl must succeed");
+
+    // The business event was accepted normally.
+    assert_eq!(
+        result.accepted_events.len(),
+        1,
+        "Business event must remain accepted; got {:?}",
+        result.accepted_events
+    );
+
+    // Ledger has exactly one KnowledgeObserved delta for the
+    // accepted business event.
+    let ledger = event_loop
+        .state
+        .state_ledger
+        .as_ref()
+        .expect("ledger is configured");
+    let knowledge_count = ledger
+        .commit_log()
+        .iter()
+        .filter(|c| matches!(c.delta, crate::state::CommitDelta::KnowledgeObserved { .. }))
+        .count();
+    assert_eq!(
+        knowledge_count, 1,
+        "one accepted business event must produce one knowledge delta"
+    );
+    // The ledger's display vec carries exactly one record.
+    assert_eq!(ledger.snapshot().knowledge.records().len(), 1);
+    let record = &ledger.snapshot().knowledge.records()[0];
+    assert_eq!(record.verification, crate::state::VerificationStatus::Unverified);
+}
+
+/// U2 wiring: DiagnosticObservation / LoopControl events MUST
+/// NOT produce a knowledge record even when present in the
+/// accepted batch (D3).
+#[test]
+fn rejected_and_non_advancing_events_do_not_create_observations() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    init_git_workspace(dir.path());
+    let events_path = dir.path().join(".ralph/events.jsonl");
+    fs::create_dir_all(events_path.parent().unwrap()).unwrap();
+    let ts = chrono::Utc::now().to_rfc3339();
+    // event.malformed is DiagnosticObservation; LOOP_COMPLETE
+    // is LoopControl. Neither should produce knowledge.
+    let lines = vec![
+        json!({"topic": "event.malformed", "payload": "{}", "ts": ts}),
+        json!({"topic": "LOOP_COMPLETE", "payload": "{}", "ts": ts}),
+    ];
+    let body: String = lines.iter().map(|v| v.to_string()).collect::<Vec<_>>().join("\n");
+    fs::write(&events_path, format!("{body}\n")).unwrap();
+
+    let mut event_loop = multi_hat_event_loop(dir.path());
+    event_loop.event_reader = crate::event_reader::EventReader::new(&events_path);
+    let _ = event_loop.process_events_from_jsonl();
+
+    // No KnowledgeObserved delta — diagnostic/control are
+    // filtered out by the disposition classifier (D3).
+    let ledger = event_loop
+        .state
+        .state_ledger
+        .as_ref()
+        .expect("ledger is configured");
+    let knowledge_count = ledger
+        .commit_log()
+        .iter()
+        .filter(|c| matches!(c.delta, crate::state::CommitDelta::KnowledgeObserved { .. }))
+        .count();
+    assert_eq!(
+        knowledge_count, 0,
+        "DiagnosticObservation / LoopControl must NOT produce knowledge records"
+    );
+    assert!(ledger.snapshot().knowledge.records().is_empty());
+}
+
+/// U3 wiring: when the isolated hat's ledger carries a
+/// non-empty cognitive state, the prompt gains the new
+/// `## ORCHESTRATION KNOWLEDGE` block above the legacy
+/// orchestrator context. The block is read-only and does not
+/// contain raw payloads or absolute paths.
+#[test]
+fn isolated_prompt_includes_knowledge_projection_when_non_empty() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    init_git_workspace(dir.path());
+
+    // Re-build the loop with `with_context` so the ledger is
+    // initialised and `state_ledger` is `Some(_)`.
+    let yaml = r#"
+mode: "multi"
+event_loop:
+  execution_mode: "isolated"
+  state_projection:
+    enabled: true
+    actions:
+      work.ready:
+        kind: "ensure_task"
+        key: "task_key"
+        title: "step"
+hats:
+  builder:
+    name: "Builder"
+    triggers: ["build.task"]
+    instructions: "Do work."
+"#;
+    let mut config: crate::config::RalphConfig = serde_yaml::from_str(yaml).unwrap();
+    config.core.workspace_root = dir.path().to_path_buf();
+    let mut event_loop = crate::event_loop::EventLoop::with_context(
+        config,
+        crate::loop_context::LoopContext::primary(dir.path().to_path_buf()),
+    );
+    event_loop.initialize("U3 isolated prompt projection");
+
+    // Seed a single knowledge record directly into the ledger.
+    let mut ledger = event_loop.state.state_ledger.take().expect("ledger");
+    let record = crate::state::KnowledgeRecord::builder(
+        crate::state::KnowledgeAuthority::LedgerSnapshot,
+        crate::state::KnowledgeKind::Observation,
+    )
+    .with_id("test-obs-1")
+    .with_subject("U1 plan ready")
+    .with_payload_digest_hex("deadbeef")
+    .with_source_ref("accepted-event:1:0:obs-1")
+    .with_input_fingerprint(crate::state::InputFingerprint::Both {
+        loop_start_sha: "loop".into(),
+        plan_baseline_sha: "plan".into(),
+    })
+    .with_verification(crate::state::VerificationStatus::Unverified)
+    .build()
+    .expect("build");
+    ledger
+        .commit(
+            crate::state::CommitDelta::KnowledgeObserved {
+                records: vec![record],
+            },
+            Some("work.done".to_string()),
+        )
+        .expect("commit");
+    event_loop.state.state_ledger = Some(ledger);
+
+    let hat_id = HatId::new("builder");
+    let prompt = event_loop.build_prompt(&hat_id).expect("prompt");
+
+    assert!(
+        prompt.contains(ORCHESTRATOR_HEADING),
+        "legacy ORCHESTRATOR CONTEXT heading must still appear; got:\n{prompt}"
+    );
+    // The projection marker is GAP-01-only and not present
+    // anywhere else in the prompt.
+    assert!(
+        prompt.contains("projection_marker: knowledge_block_v1"),
+        "GAP-01 knowledge projection must appear when ledger is non-empty; got:\n{prompt}"
+    );
+    assert!(
+        prompt.contains("U1 plan ready"),
+        "subject must surface in the bounded projection; got:\n{prompt}"
+    );
+}
+
+/// U3 wiring: an empty knowledge state must NOT introduce the
+/// GAP-01 projection block. The legacy `## ORCHESTRATOR CONTEXT`
+/// block remains unchanged. The test asserts on the
+/// GAP-01-specific `projection_marker` because the heading
+/// string itself is also present in the injected agent-facing
+/// skill doc as a reference.
+#[test]
+fn isolated_prompt_omits_empty_knowledge_projection() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    init_git_workspace(dir.path());
+    let mut event_loop = isolated_event_loop_with_task(dir.path());
+    // No seeded knowledge records.
+    let hat_id = HatId::new("builder");
+    let prompt = event_loop.build_prompt(&hat_id).expect("prompt");
+    assert!(
+        prompt.contains(ORCHESTRATOR_HEADING),
+        "legacy ORCHESTRATOR CONTEXT heading must still appear; got:\n{prompt}"
+    );
+    assert!(
+        !prompt.contains("projection_marker: knowledge_block_v1"),
+        "empty knowledge state must NOT introduce the GAP-01 projection block; got:\n{prompt}"
+    );
+}
+
+/// U3 wiring: with `state_projection.enabled = false`, the
+/// legacy stub still appears AND a non-empty knowledge state
+/// appends the new block.
+#[test]
+fn disabled_projection_keeps_old_stub_and_adds_only_knowledge() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    init_git_workspace(dir.path());
+    let yaml = r#"
+mode: "multi"
+event_loop:
+  execution_mode: "isolated"
+  state_projection:
+    enabled: false
+hats:
+  builder:
+    name: "Builder"
+    triggers: ["build.task"]
+    instructions: "Do work."
+"#;
+    let mut config: crate::config::RalphConfig = serde_yaml::from_str(yaml).unwrap();
+    config.core.workspace_root = dir.path().to_path_buf();
+    let mut event_loop = crate::event_loop::EventLoop::with_context(
+        config,
+        crate::loop_context::LoopContext::primary(dir.path().to_path_buf()),
+    );
+    event_loop.initialize("U3 disabled projection + knowledge");
+
+    // Seed knowledge after init.
+    let mut ledger = event_loop.state.state_ledger.take().expect("ledger");
+    let record = crate::state::KnowledgeRecord::builder(
+        crate::state::KnowledgeAuthority::LedgerSnapshot,
+        crate::state::KnowledgeKind::Observation,
+    )
+    .with_subject("U1 plan ready")
+    .with_payload_digest_hex("deadbeef")
+    .with_source_ref("accepted-event:1:0:obs-1")
+    .with_input_fingerprint(crate::state::InputFingerprint::None)
+    .with_verification(crate::state::VerificationStatus::Unverified)
+    .build()
+    .expect("build");
+    ledger
+        .commit(
+            crate::state::CommitDelta::KnowledgeObserved {
+                records: vec![record],
+            },
+            Some("work.done".to_string()),
+        )
+        .expect("commit");
+    event_loop.state.state_ledger = Some(ledger);
+
+    let hat_id = HatId::new("builder");
+    let prompt = event_loop.build_prompt(&hat_id).expect("prompt");
+    assert!(prompt.contains(ORCHESTRATOR_HEADING));
+    assert!(prompt.contains("disabled"));
+    assert!(
+        prompt.contains("projection_marker: knowledge_block_v1"),
+        "knowledge projection must still appear with projection disabled; got:\n{prompt}"
+    );
+}
+
+/// U3 wiring: ralph / backward-compat custom-hat / coordinator
+/// paths MUST NOT receive the new heading. This pins the
+/// isolated-only scope.
+#[test]
+fn ralph_and_legacy_custom_paths_do_not_get_knowledge_projection() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    init_git_workspace(dir.path());
+    let yaml = r#"
+mode: "multi"
+event_loop:
+  execution_mode: "isolated"
+  state_projection:
+    enabled: true
+hats:
+  builder:
+    name: "Builder"
+    triggers: ["build.task"]
+    instructions: "Do work."
+"#;
+    let mut config: crate::config::RalphConfig = serde_yaml::from_str(yaml).unwrap();
+    config.core.workspace_root = dir.path().to_path_buf();
+    let mut event_loop = crate::event_loop::EventLoop::with_context(
+        config,
+        crate::loop_context::LoopContext::primary(dir.path().to_path_buf()),
+    );
+    event_loop.initialize("U3 scope guard");
+
+    // Seed knowledge.
+    let mut ledger = event_loop.state.state_ledger.take().expect("ledger");
+    let record = crate::state::KnowledgeRecord::builder(
+        crate::state::KnowledgeAuthority::LedgerSnapshot,
+        crate::state::KnowledgeKind::Observation,
+    )
+    .with_subject("U1 plan ready")
+    .with_payload_digest_hex("deadbeef")
+    .with_source_ref("accepted-event:1:0:obs-1")
+    .with_input_fingerprint(crate::state::InputFingerprint::None)
+    .with_verification(crate::state::VerificationStatus::Unverified)
+    .build()
+    .expect("build");
+    ledger
+        .commit(
+            crate::state::CommitDelta::KnowledgeObserved {
+                records: vec![record],
+            },
+            Some("work.done".to_string()),
+        )
+        .expect("commit");
+    event_loop.state.state_ledger = Some(ledger);
+
+    // ralph must skip the projection. Use the marker phrase
+    // to avoid the conflict with the agent-facing skill doc
+    // that itself mentions the heading string.
+    let ralph_id = HatId::new("ralph");
+    let ralph_prompt = event_loop.build_prompt(&ralph_id).expect("ralph prompt");
+    assert!(
+        !ralph_prompt.contains("projection_marker: knowledge_block_v1"),
+        "ralph must NOT see the GAP-01 knowledge projection; got:\n{ralph_prompt}"
+    );
+}
+
+/// U2 wiring: a knowledge-commit persistence failure must NOT
+/// alter the `ProcessedEvents` accepted tuple (D4 fail-soft).
+#[test]
+fn knowledge_commit_failure_does_not_change_processed_result() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    init_git_workspace(dir.path());
+    let events_path = dir.path().join(".ralph/events.jsonl");
+    fs::create_dir_all(events_path.parent().unwrap()).unwrap();
+    let ts = chrono::Utc::now().to_rfc3339();
+    // One accepted Business event.
+    let business = json!({
+        "topic": "work.done",
+        "payload": json!({"task_key": "K1", "step": "step-01"}).to_string(),
+        "ts": ts,
+        "source": "executor",
+    });
+    fs::write(&events_path, format!("{business}\n")).unwrap();
+
+    let mut event_loop = multi_hat_event_loop(dir.path());
+
+    // Replace the on-disk ledger path with a directory BEFORE
+    // any batch runs, so every commit fails on persist.
+    if let Some(ref mut ledger) = event_loop.state.state_ledger {
+        let ledger_path = ledger.ledger_path().to_path_buf();
+        if ledger_path.exists() {
+            std::fs::remove_file(&ledger_path).unwrap();
+        }
+        std::fs::create_dir_all(&ledger_path).unwrap();
+    }
+
+    event_loop.event_reader = crate::event_reader::EventReader::new(&events_path);
+    let result = event_loop.process_events_from_jsonl();
+    let result = result.expect("process_events_from_jsonl must succeed");
+
+    // The business event is still accepted (D4 fail-soft):
+    // the persistence failure only affects the cognitive
+    // observation commit, not the business acceptance path.
+    assert_eq!(result.accepted_events.len(), 1);
+    assert_eq!(result.accepted_events[0].topic, "work.done".into());
+
+    // The snapshot's knowledge records stay empty — the
+    // helper returned PersistFailed and rolled back the
+    // snapshot delta.
+    let ledger = event_loop
+        .state
+        .state_ledger
+        .as_ref()
+        .expect("ledger is configured");
+    assert!(
+        ledger.snapshot().knowledge.records().is_empty(),
+        "knowledge records must stay empty when commit fails (snapshot rollback)"
+    );
+}

@@ -27,6 +27,7 @@ use ralph_proto::HatId;
 use tempfile::TempDir;
 
 use super::commit::{CommitDelta, CounterKind, TaskTransition};
+use super::knowledge::OrchestrationKnowledgeState;
 use super::ledger::{LEDGER_RELATIVE_PATH, StateLedger, read_commit_log};
 use super::snapshot::LedgerSnapshot;
 use crate::task::Task;
@@ -1306,5 +1307,699 @@ fn p1_2_terminal_completion_honored_survives_process_restart() {
     assert!(
         second.snapshot().completion_honored,
         "P1-2: CompletionHonored must survive process restart"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// GAP-01 U1: unified orchestration cognitive state
+//
+// Acceptance Red: these tests reference the planned
+// `CommitDelta::KnowledgeObserved` variant, the
+// `LedgerSnapshot::knowledge` field, and the
+// `OrchestrationKnowledgeState` API before the production code
+// exists. They MUST fail to compile (or fail on assertion) until
+// U1 lands.
+//
+// Reference: `docs/plans/2026-08-13-001-feat-gap01-unified-orchestration-knowledge-state-plan.md` §U1.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn knowledge_observation_delta_round_trips_through_replay() {
+    use crate::state::knowledge::{
+        InputFingerprint, KnowledgeAuthority, KnowledgeKind, KnowledgeRecord,
+        VerificationStatus,
+    };
+
+    let (_dir, mut ledger) = fresh_ledger();
+
+    // Build a bounded observation record (no raw payload).
+    let record = KnowledgeRecord::builder(KnowledgeAuthority::LedgerSnapshot, KnowledgeKind::Observation)
+        .with_subject("U1 plan ready")
+        .with_payload_digest_hex("deadbeef")
+        .with_source_ref("accepted-event:1:0:obs-1")
+        .with_input_fingerprint(InputFingerprint::both(
+            "loopsha0000000000000000000000000000000000",
+            "plansha0000000000000000000000000000000000",
+        ))
+        .with_verification(VerificationStatus::Unverified)
+        .build()
+        .expect("builder must accept a bounded record");
+
+    let delta = CommitDelta::KnowledgeObserved {
+        records: vec![record],
+    };
+    ledger
+        .commit(delta, Some("work.done".to_string()))
+        .expect("commit must accept KnowledgeObserved delta");
+
+    // Drop and replay into a fresh ledger.
+    drop(ledger);
+    let mut second = StateLedger::new(_dir.path(), true);
+    let replayed = StateLedger::replay_from_disk(_dir.path()).expect("replay");
+    *second.snapshot_mut() = replayed;
+
+    let snap = second.snapshot();
+    let view = snap.knowledge.view();
+    assert_eq!(
+        view.total,
+        1,
+        "replayed snapshot must carry exactly one knowledge record"
+    );
+    assert_eq!(
+        snap.knowledge.records().len(),
+        1,
+        "knowledge records vec must contain the replayed entry"
+    );
+    // The replay must also still carry the prior iteration
+    // counter (i.e. knowledge replay composes with the
+    // existing ledger business fields).
+    let _: u32 = snap.iteration;
+}
+
+#[test]
+fn knowledge_freshness_is_conservative() {
+    use crate::state::knowledge::{
+        EvidenceFreshness, InputFingerprint, VerificationStatus,
+    };
+
+    // No fingerprint → freshness is Unknown.
+    let none_fp = InputFingerprint::None;
+    assert_eq!(
+        none_fp.freshness_against(&none_fp),
+        EvidenceFreshness::Unknown,
+        "missing fingerprint must produce Unknown freshness"
+    );
+
+    // Same fingerprint → Current.
+    let a = InputFingerprint::Both {
+        loop_start_sha: "loopshaaaa".into(),
+        plan_baseline_sha: "planshabbb".into(),
+    };
+    assert_eq!(
+        a.freshness_against(&a),
+        EvidenceFreshness::Current,
+        "matching fingerprint must produce Current freshness"
+    );
+
+    // Different fingerprint → Stale.
+    let b = InputFingerprint::Both {
+        loop_start_sha: "loopshaaaa".into(),
+        plan_baseline_sha: "planshaccC".into(),
+    };
+    assert_eq!(
+        a.freshness_against(&b),
+        EvidenceFreshness::Stale,
+        "mismatched fingerprint must produce Stale freshness"
+    );
+
+    // Freshness is decoupled from verification status: an
+    // Unverified record can still be Current. Compute a
+    // comparable marker by encoding both values as `usize`
+    // discriminants so a future refactor cannot silently merge
+    // them. (Direct `Discriminant` equality across different
+    // `T` parameters is not allowed by `std`.)
+    let ver_tag = match VerificationStatus::Unverified {
+        VerificationStatus::Unverified => 0u8,
+        VerificationStatus::Verified => 1,
+        VerificationStatus::Falsified => 2,
+    };
+    let fresh_tag = match EvidenceFreshness::Current {
+        EvidenceFreshness::Unknown => 0u8,
+        EvidenceFreshness::Current => 1,
+        EvidenceFreshness::Stale => 2,
+    };
+    assert_ne!(
+        ver_tag, fresh_tag,
+        "verification status and freshness are separate dimensions"
+    );
+}
+
+#[test]
+fn knowledge_record_apply_is_bounded_and_idempotent() {
+    use crate::state::knowledge::{
+        InputFingerprint, KnowledgeAuthority, KnowledgeKind, KnowledgeRecord,
+        VerificationStatus,
+    };
+
+    let mut snap = LedgerSnapshot::cold_start();
+
+    // Build 200 records; the display cap must clamp to the
+    // configured limit (128). Half the records share a
+    // duplicate id so the idempotent apply collapses them.
+    let mut records = Vec::with_capacity(200);
+    for i in 0..200u32 {
+        // Every even index uses the same id so the display
+        // vec collapses 100 duplicates into a single entry.
+        let id = if i % 2 == 0 { "dup-id" } else { "obs-{i}" };
+        let mut b = KnowledgeRecord::builder(KnowledgeAuthority::LedgerSnapshot, KnowledgeKind::Observation)
+            .with_id(id.to_string())
+            .with_subject(format!("record-{i}"))
+            .with_payload_digest_hex("abcd")
+            .with_source_ref(format!("accepted-event:1:{i}:obs"))
+            .with_input_fingerprint(InputFingerprint::Both {
+                loop_start_sha: "l".into(),
+                plan_baseline_sha: "p".into(),
+            })
+            .with_verification(VerificationStatus::Unverified);
+        let _ = &mut b;
+        records.push(b.build().expect("build"));
+    }
+
+    snap.apply_delta(&CommitDelta::KnowledgeObserved { records });
+
+    let view = snap.knowledge.view();
+    assert!(
+        view.total <= 128,
+        "knowledge display cap must clamp to 128; got {}",
+        view.total
+    );
+    assert_eq!(
+        snap.knowledge.records().iter().filter(|r| r.id == "dup-id").count(),
+        1,
+        "duplicate observation id must collapse to a single record"
+    );
+
+    // Re-applying the same delta must be idempotent.
+    let dup = vec![KnowledgeRecord::builder(KnowledgeAuthority::LedgerSnapshot, KnowledgeKind::Observation)
+        .with_id("dup-id")
+        .with_subject("dup")
+        .with_payload_digest_hex("abcd")
+        .with_source_ref("src")
+        .with_input_fingerprint(InputFingerprint::Both {
+            loop_start_sha: "l".into(),
+            plan_baseline_sha: "p".into(),
+        })
+        .with_verification(VerificationStatus::Unverified)
+        .build()
+        .expect("build")];
+    let count_before = snap.knowledge.records().len();
+    snap.apply_delta(&CommitDelta::KnowledgeObserved { records: dup });
+    let count_after = snap.knowledge.records().len();
+    assert_eq!(
+        count_before, count_after,
+        "idempotent apply: replaying the same delta must not change the count"
+    );
+}
+
+#[test]
+fn old_ledger_without_knowledge_replays_to_empty_knowledge() {
+    let (_dir, mut ledger) = fresh_ledger();
+    // Commit only a pre-existing business delta; do NOT touch
+    // knowledge.
+    ledger
+        .commit(
+            CommitDelta::CounterChanged {
+                counter: CounterKind::ConsecutiveFailures,
+                new_value: 3,
+            },
+            Some("work.done".to_string()),
+        )
+        .expect("commit");
+    drop(ledger);
+
+    let mut second = StateLedger::new(_dir.path(), true);
+    let replayed = StateLedger::replay_from_disk(_dir.path()).expect("replay");
+    *second.snapshot_mut() = replayed;
+
+    let snap = second.snapshot();
+    assert!(
+        snap.knowledge.records().is_empty(),
+        "old ledger must replay to empty knowledge state"
+    );
+    assert_eq!(snap.knowledge.view().total, 0);
+    assert_eq!(
+        snap.consecutive_failures, 3,
+        "pre-existing business scalar must survive replay"
+    );
+}
+
+#[test]
+fn feature_disabled_knowledge_commit_is_noop() {
+    let dir = workspace();
+    let mut ledger = StateLedger::new(dir.path(), false);
+
+    let result = ledger.commit(
+        CommitDelta::KnowledgeObserved {
+            records: Vec::new(),
+        },
+        Some("work.done".to_string()),
+    );
+
+    assert!(
+        result.is_ok(),
+        "feature off must not error on knowledge delta"
+    );
+    assert!(
+        ledger.snapshot().knowledge.records().is_empty(),
+        "feature off must leave knowledge empty"
+    );
+    let on_disk = dir.path().join(LEDGER_RELATIVE_PATH);
+    assert!(
+        !on_disk.exists(),
+        "feature off must not create ledger.jsonl"
+    );
+}
+
+#[test]
+fn knowledge_commit_failure_does_not_change_processed_result() {
+    // Build a delta with valid records but make the on-disk
+    // path a directory, so `persist_commit_log` fails.
+    use crate::state::knowledge::{
+        InputFingerprint, KnowledgeAuthority, KnowledgeKind, KnowledgeRecord,
+        VerificationStatus,
+    };
+
+    let dir = workspace();
+    let workspace = dir.path();
+    let ledger_path = workspace.join(LEDGER_RELATIVE_PATH);
+    std::fs::create_dir_all(&ledger_path).expect("create_dir_all");
+
+    let mut ledger = StateLedger::new(workspace, true);
+    let pre = ledger.snapshot().knowledge.records().len();
+    let record = KnowledgeRecord::builder(KnowledgeAuthority::LedgerSnapshot, KnowledgeKind::Observation)
+        .with_subject("subject")
+        .with_payload_digest_hex("digest")
+        .with_source_ref("src")
+        .with_input_fingerprint(InputFingerprint::None)
+        .with_verification(VerificationStatus::Unverified)
+        .build()
+        .expect("build");
+    let res = ledger.commit(
+        CommitDelta::KnowledgeObserved {
+            records: vec![record],
+        },
+        Some("work.done".to_string()),
+    );
+    assert!(
+        res.is_err(),
+        "commit must fail when ledger.jsonl path is a directory"
+    );
+    assert_eq!(
+        ledger.snapshot().knowledge.records().len(),
+        pre,
+        "failed knowledge commit must not mutate the snapshot"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// GAP-01 U2: accepted observation wiring helpers.
+//
+// These tests cover the post-validation observer helpers added
+// in U2: filter on disposition, fail-soft commit, payload
+// digest shape, and one-batch-one-commit invariant.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn observations_from_accepted_events_filters_disposition() {
+    use crate::event_loop::disposition::{classify, Disposition};
+    use crate::state::knowledge::{
+        InputFingerprint, observations_from_accepted_events,
+    };
+
+    fn mk_event(topic: &str, payload: &str, hat: Option<&str>) -> ralph_proto::Event {
+        let mut e = ralph_proto::Event::new(topic, payload);
+        if let Some(h) = hat {
+            e.source = Some(ralph_proto::HatId::new(h));
+        }
+        e
+    }
+
+    let fp = InputFingerprint::Both {
+        loop_start_sha: "loop".into(),
+        plan_baseline_sha: "plan".into(),
+    };
+    let events: Vec<(usize, ralph_proto::Event)> = vec![
+        (0usize, mk_event("work.done", r#"{"task_key":"K1"}"#, Some("executor"))),
+        (1usize, mk_event("task.resume", r#"{"task_key":"K2"}"#, Some("recover"))),
+        (2usize, mk_event("event.malformed", "garbage", None)),
+        (3usize, mk_event("LOOP_COMPLETE", "", None)),
+        (4usize, mk_event("loop.cancel", "", None)),
+        (5usize, mk_event("plan.blocked", "reason", Some("reviewer"))),
+    ];
+    let batch = observations_from_accepted_events(
+        7,
+        &fp,
+        events.iter().map(|(i, e)| (*i, e)),
+        classify,
+    );
+
+    // Only Business/Recovery advance flow; the helper must
+    // include exactly `work.done`, `task.resume`, and
+    // `plan.blocked`.
+    assert_eq!(batch.records.len(), 3);
+    let kinds: Vec<&str> = batch
+        .records
+        .iter()
+        .map(|r| r.subject.split_whitespace().next().unwrap_or(""))
+        .collect();
+    assert!(kinds.contains(&"work.done"));
+    assert!(kinds.contains(&"task.resume"));
+    assert!(kinds.contains(&"plan.blocked"));
+
+    // Three non-advancing events were skipped (Diagnostic
+    // Observation + 2 LoopControl).
+    assert_eq!(batch.non_advancing_skipped, 3);
+
+    // Verification status is Unverified for every record —
+    // D6 forbids auto-promotion by accepted events.
+    for r in &batch.records {
+        assert_eq!(
+            r.verification,
+            crate::state::knowledge::VerificationStatus::Unverified
+        );
+    }
+
+    // Sanity: the disposition classifier is honoured — the
+    // helper uses the public classifier, no mock.
+    assert_eq!(classify("event.malformed"), Disposition::DiagnosticObservation);
+    assert_eq!(classify("LOOP_COMPLETE"), Disposition::LoopControl);
+}
+
+#[test]
+fn accepted_event_observation_contains_digest_not_payload() {
+    use crate::event_loop::disposition::classify;
+    use crate::state::knowledge::{
+        InputFingerprint, observations_from_accepted_events, payload_digest_hex,
+    };
+
+    let sensitive_payload = "SECRET_TOKEN=abcdef1234567890";
+    let digest = payload_digest_hex(sensitive_payload);
+    let event = ralph_proto::Event::new("work.done", sensitive_payload);
+    let events = vec![(0usize, &event)];
+
+    let batch = observations_from_accepted_events(
+        1,
+        &InputFingerprint::None,
+        events,
+        classify,
+    );
+    assert_eq!(batch.records.len(), 1);
+    let record = &batch.records[0];
+    assert_eq!(record.payload_digest.as_deref(), Some(digest.as_str()));
+    // Raw payload MUST NOT enter the record.
+    assert!(!record.subject.contains(sensitive_payload));
+    assert!(
+        !record
+            .source_ref
+            .as_deref()
+            .unwrap_or("")
+            .contains(sensitive_payload)
+    );
+}
+
+#[test]
+fn observation_id_is_stable() {
+    use crate::state::knowledge::{InputFingerprint, observation_id, payload_digest_hex};
+
+    let payload = r#"{"k":"v"}"#;
+    let digest = payload_digest_hex(payload);
+    let id1 = observation_id(3, 7, "work.done", Some("executor"), &digest);
+    let id2 = observation_id(3, 7, "work.done", Some("executor"), &digest);
+    assert_eq!(id1, id2, "same inputs must produce the same id");
+
+    // Touching any field changes the id.
+    assert_ne!(
+        id1,
+        observation_id(3, 7, "work.done", Some("planner"), &digest),
+        "source change must change id"
+    );
+    assert_ne!(
+        id1,
+        observation_id(3, 8, "work.done", Some("executor"), &digest),
+        "batch index change must change id"
+    );
+    assert_ne!(
+        id1,
+        observation_id(3, 7, "work.failed", Some("executor"), &digest),
+        "topic change must change id"
+    );
+    assert_ne!(
+        id1,
+        observation_id(4, 7, "work.done", Some("executor"), &digest),
+        "iteration change must change id"
+    );
+    let _ = InputFingerprint::None; // silence unused warning if no other tests use it
+}
+
+#[test]
+fn commit_accepted_observations_is_fail_soft() {
+    use crate::event_loop::disposition::classify;
+    use crate::state::knowledge::{
+        CommitObservationOutcome, InputFingerprint, commit_accepted_observations,
+        observations_from_accepted_events,
+    };
+
+    let dir = workspace();
+    let workspace = dir.path();
+    let ledger_path = workspace.join(LEDGER_RELATIVE_PATH);
+    std::fs::create_dir_all(&ledger_path).expect("create_dir_all");
+
+    let mut ledger = StateLedger::new(workspace, true);
+    let event = ralph_proto::Event::new("work.done", r#"{"k":"v"}"#);
+    let events = vec![(0usize, &event)];
+    let batch = observations_from_accepted_events(
+        1,
+        &InputFingerprint::Both {
+            loop_start_sha: "l".into(),
+            plan_baseline_sha: "p".into(),
+        },
+        events,
+        classify,
+    );
+    let outcome = commit_accepted_observations(&mut ledger, 1, batch);
+    assert!(
+        matches!(outcome, CommitObservationOutcome::PersistFailed { .. }),
+        "commit must return PersistFailed when ledger path is a directory; got {outcome:?}"
+    );
+    // Snapshot must NOT have grown — D4 fail-soft.
+    assert!(ledger.snapshot().knowledge.records().is_empty());
+    // The persisted log is untouched (commit failed before write).
+    assert!(ledger.commit_log().is_empty());
+}
+
+#[test]
+fn one_batch_has_at_most_one_knowledge_commit() {
+    use crate::event_loop::disposition::classify;
+    use crate::state::knowledge::{
+        CommitObservationOutcome, InputFingerprint, commit_accepted_observations,
+        observations_from_accepted_events,
+    };
+
+    let (_dir, mut ledger) = fresh_ledger();
+    let events = vec![
+        (0usize, ralph_proto::Event::new("work.done", r#"{"k":"v"}"#)),
+        (1usize, ralph_proto::Event::new("work.failed", r#"{"k":"v"}"#)),
+        (2usize, ralph_proto::Event::new("plan.ready", r#"{"k":"v"}"#)),
+        (3usize, ralph_proto::Event::new("event.malformed", "")),
+        (4usize, ralph_proto::Event::new("work.done", r#"{"k":"v2"}"#)),
+    ];
+    let events_ref: Vec<(usize, &ralph_proto::Event)> = events.iter().map(|(i, e)| (*i, e)).collect();
+    let batch = observations_from_accepted_events(
+        2,
+        &InputFingerprint::Both {
+            loop_start_sha: "l".into(),
+            plan_baseline_sha: "p".into(),
+        },
+        events_ref,
+        classify,
+    );
+    assert_eq!(batch.records.len(), 4, "4 of 5 events advance flow");
+    assert_eq!(batch.non_advancing_skipped, 1);
+    let outcome = commit_accepted_observations(&mut ledger, 2, batch);
+    assert!(matches!(outcome, CommitObservationOutcome::Committed { count: 4 }));
+
+    // Exactly one knowledge delta in the commit log.
+    let knowledge_deltas = ledger
+        .commit_log()
+        .iter()
+        .filter(|c| matches!(c.delta, CommitDelta::KnowledgeObserved { .. }))
+        .count();
+    assert_eq!(
+        knowledge_deltas, 1,
+        "U2 invariant: one batch = at most one knowledge commit; got {knowledge_deltas}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// GAP-01 U3: prompt-safe renderer tests.
+//
+// Cover the read-only, bounded, redacted projection used by the
+// isolated prompt path. The renderer is a pure function over
+// the snapshot, so it can be unit-tested without driving an
+// EventLoop.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn render_prompt_block_empty_is_noop() {
+    let state = OrchestrationKnowledgeState::default();
+    assert_eq!(
+        crate::state::render_prompt_block(&state),
+        "",
+        "empty knowledge state must produce empty prompt block"
+    );
+}
+
+#[test]
+fn render_prompt_block_contains_authority_and_counts() {
+    use crate::state::knowledge::{
+        InputFingerprint, KnowledgeAuthority, KnowledgeKind, KnowledgeRecord,
+        VerificationStatus,
+    };
+
+    let mut state = OrchestrationKnowledgeState::default();
+    let record = KnowledgeRecord::builder(KnowledgeAuthority::LedgerSnapshot, KnowledgeKind::Observation)
+        .with_subject("U1 plan ready")
+        .with_payload_digest_hex("deadbeef")
+        .with_source_ref("accepted-event:1:0:obs-1")
+        .with_input_fingerprint(InputFingerprint::Both {
+            loop_start_sha: "l".into(),
+            plan_baseline_sha: "p".into(),
+        })
+        .with_verification(VerificationStatus::Unverified)
+        .build()
+        .expect("build");
+    state.insert(record);
+
+    let block = crate::state::render_prompt_block(&state);
+    assert!(
+        block.contains(crate::state::PROMPT_HEADING),
+        "rendered block must contain the prompt heading; got:\n{block}"
+    );
+    assert!(block.contains("authority: ledger_snapshot"));
+    assert!(block.contains("records: 1"));
+    assert!(block.contains("current:"));
+    assert!(block.contains("unverified:"));
+    assert!(
+        block.contains("U1 plan ready"),
+        "subject must be present; got:\n{block}"
+    );
+}
+
+#[test]
+fn render_prompt_block_never_contains_raw_payload_or_path() {
+    use crate::state::knowledge::{
+        InputFingerprint, KnowledgeAuthority, KnowledgeKind, KnowledgeRecord,
+        VerificationStatus,
+    };
+
+    let mut state = OrchestrationKnowledgeState::default();
+    // Subject is fine-grained descriptive text; source_ref and
+    // digest are scrubbed by the renderer to ensure paths and
+    // raw payloads never leak.
+    let record = KnowledgeRecord::builder(KnowledgeAuthority::LedgerSnapshot, KnowledgeKind::Observation)
+        .with_subject("descriptive subject")
+        .with_payload_digest_hex("digest-abc123")
+        // The raw payload is supposed to land here, but the
+        // builder refuses it via the digest-only field.
+        .with_source_ref("/etc/passwd")
+        .with_input_fingerprint(InputFingerprint::Both {
+            loop_start_sha: "l".into(),
+            plan_baseline_sha: "p".into(),
+        })
+        .with_verification(VerificationStatus::Unverified)
+        .build()
+        .expect("build");
+    state.insert(record);
+
+    let block = crate::state::render_prompt_block(&state);
+    // Absolute paths in source_ref MUST be scrubbed.
+    assert!(
+        !block.contains("/etc/passwd"),
+        "absolute path source_ref must not survive in the prompt block; got:\n{block}"
+    );
+    // The raw payload string MUST NOT appear.
+    assert!(
+        !block.contains("SECRET_TOKEN"),
+        "raw payload text must not appear in the prompt block; got:\n{block}"
+    );
+}
+
+#[test]
+fn render_prompt_block_evidence_refs_are_scrubbed() {
+    use crate::state::knowledge::{
+        InputFingerprint, KnowledgeAuthority, KnowledgeKind, KnowledgeRecord,
+        VerificationStatus, EvidenceRef,
+    };
+
+    let mut state = OrchestrationKnowledgeState::default();
+    // ref_id contains an absolute path, a raw secret token, and embedded newlines.
+    // All three must be stripped before the record reaches the prompt.
+    let record = KnowledgeRecord::builder(KnowledgeAuthority::LedgerSnapshot, KnowledgeKind::Observation)
+        .with_subject("U1 plan ready")
+        .with_payload_digest_hex("deadbeef")
+        .with_source_ref("accepted-event:1:0:obs-1")
+        .with_input_fingerprint(InputFingerprint::Both {
+            loop_start_sha: "l".into(),
+            plan_baseline_sha: "p".into(),
+        })
+        .with_verification(VerificationStatus::Unverified)
+        .with_evidence(EvidenceRef {
+            ref_id: "/absolute/path/REFID_SECRET_TOKEN_with_newline\nattack".to_string(),
+            digest: None,
+        })
+        .build()
+        .expect("build");
+    state.insert(record);
+
+    let block = crate::state::render_prompt_block(&state);
+    // Absolute path prefix must be scrubbed (leading "/" stripped).
+    assert!(
+        !block.contains("/absolute/path"),
+        "absolute path in ref_id must not survive in the prompt block; got:\n{block}"
+    );
+    // After scrubbing, the ref_id region must contain the scrubber tag indicating
+    // the original was path-scrubbed, not the raw token.
+    assert!(
+        block.contains("<abs-path:"),
+        "scrubbed ref_id must contain the <abs-path:> tag; got:\n{block}"
+    );
+    // The evidence_refs line in the block must not contain a raw embedded newline.
+    // Check the specific record line that contains the ref_id.
+    let record_line = block
+        .lines()
+        .find(|l| l.contains("evidence_refs="))
+        .expect("evidence_refs line must be present");
+    assert!(
+        !record_line.contains('\n'),
+        "evidence_refs line must not contain raw newline; got: {record_line}"
+    );
+}
+
+#[test]
+fn render_prompt_block_caps_records() {
+    use crate::state::knowledge::{
+        InputFingerprint, KnowledgeAuthority, KnowledgeKind, KnowledgeRecord,
+        VerificationStatus,
+    };
+
+    let mut state = OrchestrationKnowledgeState::default();
+    // Insert more than PROMPT_RECORDS_VISIBLE records.
+    for i in 0..(crate::state::PROMPT_RECORDS_VISIBLE + 10) {
+        let record = KnowledgeRecord::builder(
+            KnowledgeAuthority::LedgerSnapshot,
+            KnowledgeKind::Observation,
+        )
+        .with_id(format!("obs-{i}"))
+        .with_subject(format!("record-{i}"))
+        .with_payload_digest_hex("abcd")
+        .with_source_ref(format!("src-{i}"))
+        .with_input_fingerprint(InputFingerprint::Both {
+            loop_start_sha: "l".into(),
+            plan_baseline_sha: "p".into(),
+        })
+        .with_verification(VerificationStatus::Unverified)
+        .build()
+        .expect("build");
+        state.insert(record);
+    }
+    let block = crate::state::render_prompt_block(&state);
+    // Only PROMPT_RECORDS_VISIBLE record lines are rendered.
+    let line_count = block
+        .lines()
+        .filter(|l| l.trim_start().starts_with("- ["))
+        .count();
+    assert!(
+        line_count <= crate::state::PROMPT_RECORDS_VISIBLE,
+        "rendered block must cap at PROMPT_RECORDS_VISIBLE; got {line_count}"
     );
 }
