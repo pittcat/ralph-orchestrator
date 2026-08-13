@@ -295,7 +295,7 @@ impl StateLedger {
     ///   persist-error path.
     pub fn commit(
         &mut self,
-        delta: CommitDelta,
+        mut delta: CommitDelta,
         event_topic: Option<String>,
     ) -> Result<Commit, LedgerError> {
         if !self.feature_enabled {
@@ -309,6 +309,8 @@ impl StateLedger {
         if self.bypass_active.get() {
             return Err(LedgerError::BypassActive);
         }
+
+        delta.sanitize_for_storage();
 
         self.snapshot.apply_delta(&delta);
         let new_seq = self.commit_seq + 1;

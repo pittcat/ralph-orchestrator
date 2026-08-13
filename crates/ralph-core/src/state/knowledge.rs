@@ -40,8 +40,8 @@
 //! fingerprint: `None` → `Unknown`, equal → `Current`, different
 //! → `Stale`. [`VerificationStatus`] is a separate dimension and
 //! is **never** upgraded by an accepted event — the
-//! `KnowledgeRecord::builder` defaults to `Unverified` and only
-//! `with_verification` can move it forward.
+//! `KnowledgeRecord::builder` defaults to `Unverified`; typed
+//! verifier paths are the only intended promotion boundary.
 
 use std::collections::HashMap;
 
@@ -109,8 +109,7 @@ pub enum KnowledgeKind {
 
 /// Verification dimension. Always separate from freshness
 /// (D6). An accepted event MUST NOT auto-promote a record to
-/// `Verified`; only `KnowledgeRecordBuilder::with_verification`
-/// can set this field.
+/// `Verified`; accepted-event construction cannot set this field.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum VerificationStatus {
@@ -171,6 +170,22 @@ impl InputFingerprint {
         Self::Both {
             loop_start_sha: loop_start_sha.into(),
             plan_baseline_sha: plan_baseline_sha.into(),
+        }
+    }
+
+    /// Build the runtime comparison fingerprint from optional loop/plan SHAs.
+    pub fn from_sha_options(
+        loop_start_sha: Option<String>,
+        plan_baseline_sha: Option<String>,
+    ) -> Self {
+        match (loop_start_sha, plan_baseline_sha) {
+            (Some(loop_start_sha), Some(plan_baseline_sha)) => Self::Both {
+                loop_start_sha,
+                plan_baseline_sha,
+            },
+            (Some(loop_start_sha), None) => Self::LoopStartOnly { loop_start_sha },
+            (None, Some(plan_baseline_sha)) => Self::PlanBaselineOnly { plan_baseline_sha },
+            (None, None) => Self::None,
         }
     }
 
@@ -235,8 +250,9 @@ pub struct KnowledgeRecord {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub evidence_refs: Vec<EvidenceRef>,
     /// Verification status — never auto-promoted by accepted
-    /// events (D6).
-    pub verification: VerificationStatus,
+    /// events (D6). Kept private so callers cannot construct a
+    /// verified record without the crate-internal verifier path.
+    verification: VerificationStatus,
     /// Input fingerprint at the time the record was authored.
     pub input_fingerprint: InputFingerprint,
     /// Wall-clock timestamp (RFC3339).
@@ -260,6 +276,33 @@ impl KnowledgeRecord {
             input_fingerprint: InputFingerprint::default(),
             recorded_at_ts: chrono::Utc::now().to_rfc3339(),
         }
+    }
+
+    /// Return the verification state without exposing a mutation path.
+    pub fn verification(&self) -> VerificationStatus {
+        self.verification
+    }
+
+    /// Normalize bounded fields at the durable snapshot boundary.
+    /// This remains effective even if a caller mutates a public
+    /// wire field after using the builder.
+    pub(crate) fn sanitize_for_storage(&mut self) {
+        self.id = truncate_bytes(&scrub_for_prompt(&self.id), SEMANTIC_FIELD_MAX_BYTES);
+        self.subject = truncate_bytes(&scrub_for_prompt(&self.subject), SEMANTIC_FIELD_MAX_BYTES);
+        self.source_ref = self
+            .source_ref
+            .take()
+            .map(|value| truncate_bytes(&scrub_for_prompt(&value), SEMANTIC_FIELD_MAX_BYTES));
+        for evidence in &mut self.evidence_refs {
+            evidence.ref_id = truncate_bytes(
+                &scrub_for_prompt(&evidence.ref_id),
+                SEMANTIC_FIELD_MAX_BYTES,
+            );
+            if let Some(digest) = evidence.digest.as_ref() {
+                evidence.digest = Some(truncate_bytes(digest, SEMANTIC_FIELD_MAX_BYTES));
+            }
+        }
+        self.evidence_refs.truncate(EVIDENCE_REFS_MAX);
     }
 }
 
@@ -313,13 +356,6 @@ impl KnowledgeRecordBuilder {
         self
     }
 
-    /// Override the verification status. Callers MUST NOT use
-    /// this to upgrade accepted events — D6.
-    pub fn with_verification(mut self, status: VerificationStatus) -> Self {
-        self.verification = status;
-        self
-    }
-
     /// Override the input fingerprint.
     pub fn with_input_fingerprint(mut self, fingerprint: InputFingerprint) -> Self {
         self.input_fingerprint = fingerprint;
@@ -334,9 +370,9 @@ impl KnowledgeRecordBuilder {
             return Err(KnowledgeBuildError::EmptySubject);
         }
         let subject = truncate_bytes(&self.subject, SEMANTIC_FIELD_MAX_BYTES);
-        let source_ref = self
-            .source_ref
-            .map(|s| truncate_bytes(&s, SEMANTIC_FIELD_MAX_BYTES));
+        let source_ref = self.source_ref.map(|s| {
+            truncate_bytes(&scrub_for_prompt(&s), SEMANTIC_FIELD_MAX_BYTES)
+        });
         let payload_digest = self
             .payload_digest
             .map(|d| truncate_bytes(&d, SEMANTIC_FIELD_MAX_BYTES));
@@ -442,13 +478,13 @@ impl OrchestrationKnowledgeState {
 
     /// Build a compressed prompt-safe view. Always cheap:
     /// O(display records).
-    pub fn view(&self) -> KnowledgeView {
+    pub fn view_against(&self, current: &InputFingerprint) -> KnowledgeView {
         let mut view = KnowledgeView {
             total: self.records.len(),
             ..KnowledgeView::default()
         };
         for record in &self.records {
-            match record.input_fingerprint.freshness_against(&record.input_fingerprint) {
+            match record.input_fingerprint.freshness_against(current) {
                 EvidenceFreshness::Current => view.current_count += 1,
                 EvidenceFreshness::Stale => view.stale_count += 1,
                 EvidenceFreshness::Unknown => view.unknown_count += 1,
@@ -465,6 +501,8 @@ impl OrchestrationKnowledgeState {
     /// vec never grows past [`DISPLAY_RECORDS_MAX`] — older
     /// entries are evicted FIFO when the cap is hit.
     pub fn insert(&mut self, record: KnowledgeRecord) {
+        let mut record = record;
+        record.sanitize_for_storage();
         if let Some(&idx) = self.by_id.get(&record.id) {
             self.records[idx] = record;
             return;
@@ -520,16 +558,24 @@ pub fn observation_id(
     source: Option<&str>,
     payload_digest_hex: &str,
 ) -> String {
-    use std::collections::hash_map::DefaultHasher;
-    use std::hash::{Hash, Hasher};
-    let mut h = DefaultHasher::new();
-    loop_iteration.hash(&mut h);
-    batch_index.hash(&mut h);
-    topic.hash(&mut h);
-    source.unwrap_or("").hash(&mut h);
-    payload_digest_hex.hash(&mut h);
-    let hash = h.finish();
-    format!("obs-{loop_iteration}-{batch_index}-{hash:016x}")
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(b"ralph-knowledge-observation-v1\0");
+    hasher.update(loop_iteration.to_be_bytes());
+    hasher.update((batch_index as u64).to_be_bytes());
+    update_len_prefixed(&mut hasher, topic.as_bytes());
+    update_len_prefixed(&mut hasher, source.unwrap_or("").as_bytes());
+    update_len_prefixed(&mut hasher, payload_digest_hex.as_bytes());
+    let digest = hasher.finalize();
+    let hex: String = digest.iter().map(|b| format!("{b:02x}")).collect();
+    format!("obs-{loop_iteration}-{batch_index}-{hex}")
+}
+
+fn update_len_prefixed(hasher: &mut sha2::Sha256, value: &[u8]) {
+    use sha2::Digest;
+
+    hasher.update((value.len() as u64).to_be_bytes());
+    hasher.update(value);
 }
 
 /// Compute a short hex payload digest from a payload string.
@@ -616,9 +662,8 @@ where
         .with_subject(format!("{} accepted in batch {batch_index}", event.topic.as_str()))
         .with_payload_digest_hex(digest)
         .with_source_ref(source_ref)
-        .with_input_fingerprint(input_fingerprint.clone())
-        // D6: accepted events must NEVER auto-promote to verified.
-        .with_verification(VerificationStatus::Unverified);
+        .with_input_fingerprint(input_fingerprint.clone());
+        // D6: the builder default keeps accepted events Unverified.
         if let Some(hat) = &event.source {
             builder = builder.with_evidence(EvidenceRef {
                 ref_id: format!("hat:{}", hat.as_str()),
@@ -749,19 +794,7 @@ impl<'a> KnowledgeCommitScope<'a> {
         plan_baseline_sha: Option<String>,
         classify: fn(&str) -> Disposition,
     ) -> Self {
-        let fingerprint = match (loop_start_sha, plan_baseline_sha) {
-            (Some(l), Some(p)) => InputFingerprint::Both {
-                loop_start_sha: l,
-                plan_baseline_sha: p,
-            },
-            (Some(l), None) => InputFingerprint::LoopStartOnly {
-                loop_start_sha: l,
-            },
-            (None, Some(p)) => InputFingerprint::PlanBaselineOnly {
-                plan_baseline_sha: p,
-            },
-            (None, None) => InputFingerprint::None,
-        };
+        let fingerprint = InputFingerprint::from_sha_options(loop_start_sha, plan_baseline_sha);
         Self {
             ledger,
             loop_iteration,
@@ -827,11 +860,14 @@ pub const PROMPT_HEADING: &str = "## ORCHESTRATION KNOWLEDGE";
 /// The renderer caps the surfaced subjects at
 /// `PROMPT_RECORDS_VISIBLE` so the block stays bounded even
 /// when the underlying `records` vec is full.
-pub fn render_prompt_block(state: &OrchestrationKnowledgeState) -> String {
+pub fn render_prompt_block(
+    state: &OrchestrationKnowledgeState,
+    current: &InputFingerprint,
+) -> String {
     if state.records().is_empty() {
         return String::new();
     }
-    let view = state.view();
+    let view = state.view_against(current);
     let mut out = String::new();
     out.push_str(PROMPT_HEADING);
     out.push('\n');
@@ -865,7 +901,7 @@ pub fn render_prompt_block(state: &OrchestrationKnowledgeState) -> String {
         .rev()
         .collect();
     for record in &visible {
-        let freshness = match record.input_fingerprint.freshness_against(&record.input_fingerprint) {
+        let freshness = match record.input_fingerprint.freshness_against(current) {
             EvidenceFreshness::Current => "current",
             EvidenceFreshness::Stale => "stale",
             EvidenceFreshness::Unknown => "unknown",
@@ -920,9 +956,9 @@ pub fn render_prompt_block(state: &OrchestrationKnowledgeState) -> String {
 pub const PROMPT_RECORDS_VISIBLE: usize = 16;
 
 /// Final redaction pass. Strips any leading path-like token
-/// (`/` or `~/` or `<drive>:\`), collapses embedded newlines
-/// into spaces, and bounds the result so the prompt can never
-/// carry a multi-line or path-leaking field.
+/// (`/`, `~/`, Windows drive paths, or UNC paths), collapses
+/// embedded newlines into spaces, and bounds the result so the
+/// prompt can never carry a multi-line or path-leaking field.
 fn scrub_for_prompt(s: &str) -> String {
     let collapsed: String = s
         .chars()
@@ -935,8 +971,20 @@ fn scrub_for_prompt(s: &str) -> String {
         out = format!("<abs-path:{}>", stripped);
     } else if let Some(stripped) = out.strip_prefix("~/") {
         out = format!("<home-path:{}>", stripped);
+    } else if let Some(stripped) = out.strip_prefix("\\\\") {
+        out = format!("<unc-path:{}>", stripped);
+    } else if is_windows_drive_path(&out) {
+        out = format!("<drive-path:{}>", &out[3..]);
     }
     truncate_bytes(&out, PROMPT_FIELD_MAX_BYTES)
+}
+
+fn is_windows_drive_path(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    bytes.len() >= 3
+        && bytes[0].is_ascii_alphabetic()
+        && bytes[1] == b':'
+        && matches!(bytes[2], b'/' | b'\\')
 }
 
 /// Cap for the per-field scrubber. Smaller than

@@ -4070,51 +4070,7 @@ impl EventLoop {
             // decision points (see `commit_terminal_delta`).
         }
 
-        // GAP-01 (plan 2026-08-13-001) U2: append bounded,
-        // post-validation cognitive observations to the ledger
-        // for every accepted `Business` / `Recovery` event in
-        // the batch. Failures are warning-only — D4 — and never
-        // roll back the business `ProcessedEvents` result.
-        //
-        // KnowledgeCommitScope RAII guard: captures loop_iteration /
-        // SHA inputs while self.state is borrowed immutably, then
-        // takes the mutable ledger borrow inside commit(self). The
-        // type system closes the borrow window — post-commit use of
-        // the ledger through this scope is a compile error.
-        if !accepted_log_events.is_empty()
-            && let Some(ref mut ledger) = self.state.state_ledger
-        {
-            let scope = crate::state::KnowledgeCommitScope::new(
-                ledger,
-                self.state.iteration,
-                self.state.loop_start_sha.clone(),
-                self.state.plan_baseline_sha.clone(),
-                crate::event_loop::disposition::classify,
-            );
-            match scope.commit(&accepted_log_events) {
-                crate::state::CommitObservationOutcome::Committed { count } => {
-                    tracing::debug!(
-                        count,
-                        iteration = self.state.iteration,
-                        "GAP-01 U2: knowledge observation committed"
-                    );
-                }
-                crate::state::CommitObservationOutcome::PersistFailed {
-                    count,
-                    error,
-                } => {
-                    tracing::warn!(
-                        error = %error,
-                        count,
-                        iteration = self.state.iteration,
-                        "GAP-01 U2: knowledge commit failed; loop continues (D4 fail-soft)"
-                    );
-                }
-                crate::state::CommitObservationOutcome::Empty => {}
-            }
-        }
-        // No `state_ledger` (feature off): silently skip
-        // — the no-op contract is preserved.
+        self.commit_knowledge_observations(&accepted_log_events);
 
         // U12 wiring (P0-1, 2026-06-27 review): refresh the
         // step-close progress registry after every parsed

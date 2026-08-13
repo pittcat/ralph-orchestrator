@@ -660,14 +660,14 @@ impl EventLoop {
         // rejection key groups the budget, while this attempt field lets
         // the resume dedup layer collapse only an exact duplicate of the
         // same attempt instead of suppressing the bounded retry sequence.
-        if let Ok(mut value) = serde_json::from_str::<serde_json::Value>(&payload) {
-            if let Some(object) = value.as_object_mut() {
-                object.insert(
-                    "retry_attempt".to_string(),
-                    serde_json::Value::from(retry_count),
-                );
-                payload = value.to_string();
-            }
+        if let Ok(mut value) = serde_json::from_str::<serde_json::Value>(&payload)
+            && let Some(object) = value.as_object_mut()
+        {
+            object.insert(
+                "retry_attempt".to_string(),
+                serde_json::Value::from(retry_count),
+            );
+            payload = value.to_string();
         }
         // Plan 2026-08-10-001 U1: route the missing-terminal-emit
         // recovery through the unified publisher so the dedup /

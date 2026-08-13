@@ -538,7 +538,7 @@ fn accepted_business_and_recovery_events_create_observations() {
     // The ledger's display vec carries exactly one record.
     assert_eq!(ledger.snapshot().knowledge.records().len(), 1);
     let record = &ledger.snapshot().knowledge.records()[0];
-    assert_eq!(record.verification, crate::state::VerificationStatus::Unverified);
+    assert_eq!(record.verification(), crate::state::VerificationStatus::Unverified);
 }
 
 /// U2 wiring: DiagnosticObservation / LoopControl events MUST
@@ -553,7 +553,7 @@ fn rejected_and_non_advancing_events_do_not_create_observations() {
     let ts = chrono::Utc::now().to_rfc3339();
     // event.malformed is DiagnosticObservation; LOOP_COMPLETE
     // is LoopControl. Neither should produce knowledge.
-    let lines = vec![
+    let lines = [
         json!({"topic": "event.malformed", "payload": "{}", "ts": ts}),
         json!({"topic": "LOOP_COMPLETE", "payload": "{}", "ts": ts}),
     ];
@@ -634,7 +634,6 @@ hats:
         loop_start_sha: "loop".into(),
         plan_baseline_sha: "plan".into(),
     })
-    .with_verification(crate::state::VerificationStatus::Unverified)
     .build()
     .expect("build");
     ledger
@@ -727,7 +726,6 @@ hats:
     .with_payload_digest_hex("deadbeef")
     .with_source_ref("accepted-event:1:0:obs-1")
     .with_input_fingerprint(crate::state::InputFingerprint::None)
-    .with_verification(crate::state::VerificationStatus::Unverified)
     .build()
     .expect("build");
     ledger
@@ -787,7 +785,6 @@ hats:
     .with_payload_digest_hex("deadbeef")
     .with_source_ref("accepted-event:1:0:obs-1")
     .with_input_fingerprint(crate::state::InputFingerprint::None)
-    .with_verification(crate::state::VerificationStatus::Unverified)
     .build()
     .expect("build");
     ledger

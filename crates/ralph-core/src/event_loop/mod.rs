@@ -88,6 +88,7 @@ mod prompt_types;
 pub use flow_wiring::*;
 pub use prompt_types::*;
 mod parse_and_emit;
+mod knowledge_wiring;
 mod prompt_injection;
 /// Plan 2026-08-10-001 U2: unified `task.resume` target resolver
 /// and publisher boundary.

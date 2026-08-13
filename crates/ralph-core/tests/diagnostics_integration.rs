@@ -230,7 +230,7 @@ fn off_on_business_event_equivalence() {
         let reader = BufReader::new(file);
         reader
             .lines()
-            .filter_map(|l| l.ok())
+            .map_while(Result::ok)
             .filter_map(|line| EventTupleShape::from_line(&line))
             .collect()
     }

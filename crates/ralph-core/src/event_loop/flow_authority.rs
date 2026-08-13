@@ -205,11 +205,20 @@ impl EventLoop {
         // The renderer returns an empty string when the
         // ledger has no records, so the empty-state prompt
         // stays byte-identical to the pre-U3 baseline.
+        let current_fingerprint = crate::state::InputFingerprint::from_sha_options(
+            self.state.loop_start_sha.clone(),
+            snap.plan_baseline_sha.clone(),
+        );
         let knowledge_block = self
             .state
             .state_ledger
             .as_ref()
-            .map(|ledger| crate::state::render_prompt_block(&ledger.snapshot().knowledge))
+            .map(|ledger| {
+                crate::state::render_prompt_block(
+                    &ledger.snapshot().knowledge,
+                    &current_fingerprint,
+                )
+            })
             .unwrap_or_default();
         if knowledge_block.is_empty() {
             format!("{legacy_block}{prompt}")

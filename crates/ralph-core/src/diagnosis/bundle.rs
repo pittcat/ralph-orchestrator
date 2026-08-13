@@ -30,13 +30,14 @@ use crate::diagnostics::{
 /// forensic traceability — when the reader is newer than the
 /// writer the user is on a downgrade; when the reader is older
 /// the user is on an upgrade and can simply upgrade again.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum BundleStatus {
     Present,
     Pending,
     Finalized,
     Degraded,
+    #[default]
     Missing,
     Legacy,
     NotApplicable,
@@ -49,12 +50,6 @@ pub enum BundleStatus {
         on_disk_version: String,
         reader_version: String,
     },
-}
-
-impl Default for BundleStatus {
-    fn default() -> Self {
-        Self::Missing
-    }
 }
 
 impl From<ManifestStatus> for BundleStatus {

@@ -79,7 +79,7 @@ fn enabled_run_writes_input_bundle() {
     assert_eq!(updated.manifest_status, ManifestStatus::Present);
     assert_eq!(updated.run.loop_id.as_deref(), Some("loop-x"));
     assert_eq!(updated.run.preset_label.as_deref(), Some("builtin:ce-executor-pipeline"));
-    assert_eq!(updated.code_baseline.worktree, true);
+    assert!(updated.code_baseline.worktree);
 
     // finalize
     let artifacts = vec![ArtifactIntegrity {

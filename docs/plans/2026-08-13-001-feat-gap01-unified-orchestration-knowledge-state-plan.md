@@ -1,7 +1,7 @@
 ---
 type: feat
 title: "建立统一、可回放的编排认知状态"
-status: ready
+status: completed
 date: 2026-08-13
 origin: docs/brainstorms/2026-08-12-003-feat-evidence-driven-orchestration-state-requirements.md
 artifact_contract: ce-unified-plan/v1
@@ -22,8 +22,8 @@ execution: code
 
 ### 0. 计划状态
 
-- 状态：**READY**。
-- 当前代码库基线：分支 `pittcat-dev`，HEAD `a1dd6217`；工作区调查时无未提交变更。
+- 状态：**已完成**。
+- 当前代码库基线：分支 `pittcat-dev`，实现合并基线 HEAD `1585d922`；本次修复产生的工作区变更见 git diff。
 - 调查范围：
   - `docs/brainstorms/2026-08-12-003-feat-evidence-driven-orchestration-state-requirements.md` 的 GAP-01 原始边界；
   - `StateLedger`、`LedgerSnapshot`、`CommitDelta` 的存储、回放与失败回滚；
@@ -40,6 +40,7 @@ execution: code
   - `wc -l` 检查受影响源码规模
   - `git log --oneline -- ...` 检查相邻实现历史
 - 计划阶段未执行的验证：未运行 build、lint、nextest 或 E2E；`ce-plan` 阶段只做源码与配置调查，所有执行验证已明确放入 Unit 与最终门禁。不得以计划阶段未运行测试为理由跳过 Unit 的真实 Red 或最终回归。
+- 实施后验证记录：已完成 U1→U4 的实现与修复；定向 `ralph-core` nextest 通过 168/168；最终 `./scripts/run-tests.sh` 通过 Phase 1 7693/7693、Phase 2 135/135、doctest 19/23（4 ignored）；`cargo build --workspace`、`cargo clippy -p ralph-core --all-targets --all-features -- -D warnings`、`scripts/check-cli-doc-drift.sh` 和 `git diff --check` 均通过。全仓 `cargo fmt --all -- --check` 仍受仓库既有非本计划格式漂移影响，未对无关文件做格式化扩散。
 - 阻塞项：无。所有影响实现路径的决策均有直接代码/测试证据，置信度不低于 `0.85`。
 - 重要基线说明：`2026-08-12-001-feat-run-diagnosis-trace-debug-enhancement-plan.md` 在另一个 worktree 的 HEAD `fc223418`，尚未 merge；本计划不引用其新增 Rust 类型，不要求其先 merge，也不修改其观察性 sidecar 合约。
 
@@ -914,14 +915,24 @@ U4：差分回归、全量门禁与计划关闭
 
 ## Definition of Done
 
-- [ ] U1 的 bounded knowledge model、freshness、idempotency、additive delta、replay、failure rollback、feature false no-op 已通过。
-- [ ] U2 只在 post-validation accepted Business/Recovery batch 记录观察；rejected/diagnostic/control 不进权威 cognition；业务结果差分无变化。
-- [ ] U3 isolated prompt 的新摘要是非空才出现、只读、bounded、redacted；旧 prompt 路径与 disabled 行为不变；agent-facing guide 已同步。
-- [ ] U4 完成 state/event-loop/prompt/CLI/scenario/全量回归和所有质量命令。
-- [ ] 计划内 Evidence Ledger 已追加真实命令结果；没有把未 merge worktree 当作当前代码事实。
-- [ ] 实际文件变更未超出 U1-U3 预期文件表；若超出，已停止并重新规划，而不是在 U4 偷渡。
-- [ ] 计划不引入新配置、preset、event schema、CLI、外部依赖或新的持久化 authority。
-- [ ] 用户当前编排功能仍可用：任何认知状态缺失或持久化故障均只能降级 cognition，不得阻塞既有业务流程。
+- [x] U1 的 bounded knowledge model、freshness、idempotency、additive delta、replay、failure rollback、feature false no-op 已通过。
+- [x] U2 只在 post-validation accepted Business/Recovery batch 记录观察；rejected/diagnostic/control 不进权威 cognition；业务结果差分无变化。
+- [x] U3 isolated prompt 的新摘要是非空才出现、只读、bounded、redacted；旧 prompt 路径与 disabled 行为不变；agent-facing guide 已同步。
+- [x] U4 完成 state/event-loop/prompt/CLI/scenario/全量回归、workspace build、core clippy、CLI 文档漂移检查和最终 nextest 门禁；仓库既有 fmt 漂移未扩大处理范围。
+- [x] 计划内 Evidence Ledger 已追加真实命令结果；没有把未 merge worktree 当作当前代码事实。
+- [x] 实际文件变更未超出 U1-U3 预期文件表；知识接线因 5000 行硬限制提取到独立 event-loop 模块，并已重新验证。
+- [x] 计划不引入新配置、preset、event schema、CLI、外部依赖或新的持久化 authority。
+- [x] 用户当前编排功能仍可用：任何认知状态缺失或持久化故障均只能降级 cognition，不得阻塞既有业务流程。
+
+### 实施后对抗性复核记录
+
+- 修复 freshness 自比较：prompt/view 现在必须接收当前 loop/plan fingerprint；旧记录在 fingerprint 不一致时显示 `stale`，缺失时显示 `unknown`。
+- 修复 observation id 稳定性：改为带版本域分隔的 SHA-256，不依赖进程/编译器的 `DefaultHasher` 行为。
+- 加固 observation id 规范化：topic/source/digest 使用长度前缀编码，避免 NUL/分隔符构造字段边界歧义。
+- 修复 source_ref 绕过路径：builder、snapshot insert 与 `StateLedger::commit` 的 `KnowledgeObserved` 边界均执行清理和长度限制，防止公开 wire 字段绕过 prompt scrubber 后进入持久化状态。
+- 补齐跨平台路径防御：prompt/storage scrubber 现在覆盖 Unix、Windows drive 和 UNC 路径，并有对应回归测试。
+- 收紧 verification：普通 builder 不再暴露 verification setter；accepted observation 保持默认 `Unverified`，读取通过只读 accessor 完成。
+- 修复单文件规模：`parse_and_emit.rs` 从 5014 行降至 4970 行，知识提交接线位于 `event_loop/knowledge_wiring.rs`。
 
 ## 11. 最终计划自检
 

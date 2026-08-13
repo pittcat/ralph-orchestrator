@@ -1327,7 +1327,6 @@ fn p1_2_terminal_completion_honored_survives_process_restart() {
 fn knowledge_observation_delta_round_trips_through_replay() {
     use crate::state::knowledge::{
         InputFingerprint, KnowledgeAuthority, KnowledgeKind, KnowledgeRecord,
-        VerificationStatus,
     };
 
     let (_dir, mut ledger) = fresh_ledger();
@@ -1341,7 +1340,6 @@ fn knowledge_observation_delta_round_trips_through_replay() {
             "loopsha0000000000000000000000000000000000",
             "plansha0000000000000000000000000000000000",
         ))
-        .with_verification(VerificationStatus::Unverified)
         .build()
         .expect("builder must accept a bounded record");
 
@@ -1359,7 +1357,10 @@ fn knowledge_observation_delta_round_trips_through_replay() {
     *second.snapshot_mut() = replayed;
 
     let snap = second.snapshot();
-    let view = snap.knowledge.view();
+    let view = snap.knowledge.view_against(&crate::state::InputFingerprint::Both {
+        loop_start_sha: "loop".into(),
+        plan_baseline_sha: "plan".into(),
+    });
     assert_eq!(
         view.total,
         1,
@@ -1435,10 +1436,77 @@ fn knowledge_freshness_is_conservative() {
 }
 
 #[test]
+fn knowledge_view_and_prompt_use_current_fingerprint() {
+    use crate::state::knowledge::{
+        InputFingerprint, KnowledgeAuthority, KnowledgeKind, KnowledgeRecord,
+    };
+
+    let mut state = OrchestrationKnowledgeState::default();
+    let record = KnowledgeRecord::builder(KnowledgeAuthority::LedgerSnapshot, KnowledgeKind::Observation)
+        .with_id("stale-record")
+        .with_subject("old observation")
+        .with_source_ref("/private/old-ref")
+        .with_input_fingerprint(InputFingerprint::Both {
+            loop_start_sha: "old-loop".into(),
+            plan_baseline_sha: "old-plan".into(),
+        })
+        .build()
+        .expect("record");
+    state.insert(record);
+
+    let current = InputFingerprint::Both {
+        loop_start_sha: "new-loop".into(),
+        plan_baseline_sha: "new-plan".into(),
+    };
+    let view = state.view_against(&current);
+    assert_eq!(view.current_count, 0);
+    assert_eq!(view.stale_count, 1);
+    assert_eq!(view.unknown_count, 0);
+
+    let prompt = crate::state::render_prompt_block(&state, &current);
+    assert!(prompt.contains("records: 1 | current: 0 | stale: 1 | unknown: 0"));
+    assert!(prompt.contains("[stale / unverified]"));
+    assert!(!prompt.contains("/private/old-ref"));
+}
+
+#[test]
+fn knowledge_source_ref_is_scrubbed_before_persistence() {
+    use crate::state::knowledge::{KnowledgeAuthority, KnowledgeKind, KnowledgeRecord};
+
+    let record = KnowledgeRecord::builder(KnowledgeAuthority::LedgerSnapshot, KnowledgeKind::Observation)
+        .with_id("source-ref-scrub")
+        .with_subject("source ref")
+        .with_source_ref("/private/path\nsecret")
+        .build()
+        .expect("record");
+    assert_eq!(record.source_ref.as_deref(), Some("<abs-path:private/path secret>"));
+    assert!(!record.source_ref.as_deref().unwrap().contains('\n'));
+
+    let windows = KnowledgeRecord::builder(KnowledgeAuthority::LedgerSnapshot, KnowledgeKind::Claim)
+        .with_subject("windows path")
+        .with_source_ref(r"C:\Users\pittcat\secret")
+        .build()
+        .expect("windows source ref should build");
+    assert_eq!(
+        windows.source_ref.as_deref(),
+        Some("<drive-path:Users\\pittcat\\secret>")
+    );
+
+    let unc = KnowledgeRecord::builder(KnowledgeAuthority::LedgerSnapshot, KnowledgeKind::Claim)
+        .with_subject("unc path")
+        .with_source_ref(r"\\server\share\secret")
+        .build()
+        .expect("UNC source ref should build");
+    assert_eq!(
+        unc.source_ref.as_deref(),
+        Some("<unc-path:server\\share\\secret>")
+    );
+}
+
+#[test]
 fn knowledge_record_apply_is_bounded_and_idempotent() {
     use crate::state::knowledge::{
         InputFingerprint, KnowledgeAuthority, KnowledgeKind, KnowledgeRecord,
-        VerificationStatus,
     };
 
     let mut snap = LedgerSnapshot::cold_start();
@@ -1459,15 +1527,17 @@ fn knowledge_record_apply_is_bounded_and_idempotent() {
             .with_input_fingerprint(InputFingerprint::Both {
                 loop_start_sha: "l".into(),
                 plan_baseline_sha: "p".into(),
-            })
-            .with_verification(VerificationStatus::Unverified);
+            });
         let _ = &mut b;
         records.push(b.build().expect("build"));
     }
 
     snap.apply_delta(&CommitDelta::KnowledgeObserved { records });
 
-    let view = snap.knowledge.view();
+    let view = snap.knowledge.view_against(&InputFingerprint::Both {
+        loop_start_sha: "l".into(),
+        plan_baseline_sha: "p".into(),
+    });
     assert!(
         view.total <= 128,
         "knowledge display cap must clamp to 128; got {}",
@@ -1489,7 +1559,6 @@ fn knowledge_record_apply_is_bounded_and_idempotent() {
             loop_start_sha: "l".into(),
             plan_baseline_sha: "p".into(),
         })
-        .with_verification(VerificationStatus::Unverified)
         .build()
         .expect("build")];
     let count_before = snap.knowledge.records().len();
@@ -1526,7 +1595,12 @@ fn old_ledger_without_knowledge_replays_to_empty_knowledge() {
         snap.knowledge.records().is_empty(),
         "old ledger must replay to empty knowledge state"
     );
-    assert_eq!(snap.knowledge.view().total, 0);
+    assert_eq!(
+        snap.knowledge
+            .view_against(&crate::state::InputFingerprint::None)
+            .total,
+        0
+    );
     assert_eq!(
         snap.consecutive_failures, 3,
         "pre-existing business scalar must survive replay"
@@ -1566,7 +1640,6 @@ fn knowledge_commit_failure_does_not_change_processed_result() {
     // path a directory, so `persist_commit_log` fails.
     use crate::state::knowledge::{
         InputFingerprint, KnowledgeAuthority, KnowledgeKind, KnowledgeRecord,
-        VerificationStatus,
     };
 
     let dir = workspace();
@@ -1581,7 +1654,6 @@ fn knowledge_commit_failure_does_not_change_processed_result() {
         .with_payload_digest_hex("digest")
         .with_source_ref("src")
         .with_input_fingerprint(InputFingerprint::None)
-        .with_verification(VerificationStatus::Unverified)
         .build()
         .expect("build");
     let res = ledger.commit(
@@ -1664,7 +1736,7 @@ fn observations_from_accepted_events_filters_disposition() {
     // D6 forbids auto-promotion by accepted events.
     for r in &batch.records {
         assert_eq!(
-            r.verification,
+            r.verification(),
             crate::state::knowledge::VerificationStatus::Unverified
         );
     }
@@ -1738,6 +1810,12 @@ fn observation_id_is_stable() {
         observation_id(4, 7, "work.done", Some("executor"), &digest),
         "iteration change must change id"
     );
+    // Length-prefixing prevents delimiter/NUL injection from making
+    // different field tuples hash to the same canonical byte stream.
+    assert_ne!(
+        observation_id(3, 7, "a\0b", Some("c"), "d"),
+        observation_id(3, 7, "a", Some("b\0c"), "d")
+    );
     let _ = InputFingerprint::None; // silence unused warning if no other tests use it
 }
 
@@ -1786,7 +1864,7 @@ fn one_batch_has_at_most_one_knowledge_commit() {
     };
 
     let (_dir, mut ledger) = fresh_ledger();
-    let events = vec![
+    let events = [
         (0usize, ralph_proto::Event::new("work.done", r#"{"k":"v"}"#)),
         (1usize, ralph_proto::Event::new("work.failed", r#"{"k":"v"}"#)),
         (2usize, ralph_proto::Event::new("plan.ready", r#"{"k":"v"}"#)),
@@ -1833,7 +1911,7 @@ fn one_batch_has_at_most_one_knowledge_commit() {
 fn render_prompt_block_empty_is_noop() {
     let state = OrchestrationKnowledgeState::default();
     assert_eq!(
-        crate::state::render_prompt_block(&state),
+        crate::state::render_prompt_block(&state, &crate::state::InputFingerprint::None),
         "",
         "empty knowledge state must produce empty prompt block"
     );
@@ -1843,7 +1921,6 @@ fn render_prompt_block_empty_is_noop() {
 fn render_prompt_block_contains_authority_and_counts() {
     use crate::state::knowledge::{
         InputFingerprint, KnowledgeAuthority, KnowledgeKind, KnowledgeRecord,
-        VerificationStatus,
     };
 
     let mut state = OrchestrationKnowledgeState::default();
@@ -1855,12 +1932,17 @@ fn render_prompt_block_contains_authority_and_counts() {
             loop_start_sha: "l".into(),
             plan_baseline_sha: "p".into(),
         })
-        .with_verification(VerificationStatus::Unverified)
         .build()
         .expect("build");
     state.insert(record);
 
-    let block = crate::state::render_prompt_block(&state);
+    let block = crate::state::render_prompt_block(
+        &state,
+        &crate::state::InputFingerprint::Both {
+            loop_start_sha: "l".into(),
+            plan_baseline_sha: "p".into(),
+        },
+    );
     assert!(
         block.contains(crate::state::PROMPT_HEADING),
         "rendered block must contain the prompt heading; got:\n{block}"
@@ -1879,7 +1961,6 @@ fn render_prompt_block_contains_authority_and_counts() {
 fn render_prompt_block_never_contains_raw_payload_or_path() {
     use crate::state::knowledge::{
         InputFingerprint, KnowledgeAuthority, KnowledgeKind, KnowledgeRecord,
-        VerificationStatus,
     };
 
     let mut state = OrchestrationKnowledgeState::default();
@@ -1896,12 +1977,11 @@ fn render_prompt_block_never_contains_raw_payload_or_path() {
             loop_start_sha: "l".into(),
             plan_baseline_sha: "p".into(),
         })
-        .with_verification(VerificationStatus::Unverified)
         .build()
         .expect("build");
     state.insert(record);
 
-    let block = crate::state::render_prompt_block(&state);
+    let block = crate::state::render_prompt_block(&state, &crate::state::InputFingerprint::None);
     // Absolute paths in source_ref MUST be scrubbed.
     assert!(
         !block.contains("/etc/passwd"),
@@ -1918,7 +1998,7 @@ fn render_prompt_block_never_contains_raw_payload_or_path() {
 fn render_prompt_block_evidence_refs_are_scrubbed() {
     use crate::state::knowledge::{
         InputFingerprint, KnowledgeAuthority, KnowledgeKind, KnowledgeRecord,
-        VerificationStatus, EvidenceRef,
+        EvidenceRef,
     };
 
     let mut state = OrchestrationKnowledgeState::default();
@@ -1932,7 +2012,6 @@ fn render_prompt_block_evidence_refs_are_scrubbed() {
             loop_start_sha: "l".into(),
             plan_baseline_sha: "p".into(),
         })
-        .with_verification(VerificationStatus::Unverified)
         .with_evidence(EvidenceRef {
             ref_id: "/absolute/path/REFID_SECRET_TOKEN_with_newline\nattack".to_string(),
             digest: None,
@@ -1941,7 +2020,7 @@ fn render_prompt_block_evidence_refs_are_scrubbed() {
         .expect("build");
     state.insert(record);
 
-    let block = crate::state::render_prompt_block(&state);
+    let block = crate::state::render_prompt_block(&state, &crate::state::InputFingerprint::None);
     // Absolute path prefix must be scrubbed (leading "/" stripped).
     assert!(
         !block.contains("/absolute/path"),
@@ -1969,7 +2048,6 @@ fn render_prompt_block_evidence_refs_are_scrubbed() {
 fn render_prompt_block_caps_records() {
     use crate::state::knowledge::{
         InputFingerprint, KnowledgeAuthority, KnowledgeKind, KnowledgeRecord,
-        VerificationStatus,
     };
 
     let mut state = OrchestrationKnowledgeState::default();
@@ -1987,12 +2065,11 @@ fn render_prompt_block_caps_records() {
             loop_start_sha: "l".into(),
             plan_baseline_sha: "p".into(),
         })
-        .with_verification(VerificationStatus::Unverified)
         .build()
         .expect("build");
         state.insert(record);
     }
-    let block = crate::state::render_prompt_block(&state);
+    let block = crate::state::render_prompt_block(&state, &crate::state::InputFingerprint::None);
     // Only PROMPT_RECORDS_VISIBLE record lines are rendered.
     let line_count = block
         .lines()

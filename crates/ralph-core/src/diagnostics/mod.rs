@@ -219,7 +219,7 @@ pub(crate) fn resume_sidecar_sequence(path: &Path) -> u64 {
     };
     BufReader::new(file)
         .lines()
-        .filter_map(Result::ok)
+        .map_while(Result::ok)
         .filter_map(|line| serde_json::from_str::<serde_json::Value>(&line).ok())
         .filter_map(|value| value.get("sequence").and_then(|v| v.as_u64()))
         .max()

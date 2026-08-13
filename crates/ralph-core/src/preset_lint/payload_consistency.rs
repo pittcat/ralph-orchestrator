@@ -466,29 +466,29 @@ fn collect_scope_positive_assertions_inner(
     if PROTECTED_SCOPE_THRESHOLD_FIELDS.contains(&field.as_str())
         && field != "critical_unknown_count"
     {
-        if let Some(Value::Number(n)) = obj.get("gt") {
-            if n.as_f64().unwrap_or(0.0) > 0.0 {
-                out.push(ScopePositiveAssertion {
-                    field: field.clone(),
-                    op: "gt".to_string(),
-                });
-            }
+        if let Some(Value::Number(n)) = obj.get("gt")
+            && n.as_f64().unwrap_or(0.0) > 0.0
+        {
+            out.push(ScopePositiveAssertion {
+                field: field.clone(),
+                op: "gt".to_string(),
+            });
         }
-        if let Some(Value::Number(n)) = obj.get("gte") {
-            if n.as_f64().unwrap_or(0.0) > 0.0 {
-                out.push(ScopePositiveAssertion {
-                    field: field.clone(),
-                    op: "gte".to_string(),
-                });
-            }
+        if let Some(Value::Number(n)) = obj.get("gte")
+            && n.as_f64().unwrap_or(0.0) > 0.0
+        {
+            out.push(ScopePositiveAssertion {
+                field: field.clone(),
+                op: "gte".to_string(),
+            });
         }
-        if let Some(Value::Number(n)) = obj.get("eq") {
-            if n.as_f64().unwrap_or(0.0) > 0.0 {
-                out.push(ScopePositiveAssertion {
-                    field: field.clone(),
-                    op: "eq".to_string(),
-                });
-            }
+        if let Some(Value::Number(n)) = obj.get("eq")
+            && n.as_f64().unwrap_or(0.0) > 0.0
+        {
+            out.push(ScopePositiveAssertion {
+                field: field.clone(),
+                op: "eq".to_string(),
+            });
         }
     }
 }
@@ -1528,7 +1528,7 @@ mod tests {
                 f.id == FINDING_PAYLOAD_CONSISTENCY_SCOPE_POSITIVE_ASSERTION
             })
             .expect("polarity finding must fire even without schema");
-        assert_eq!(polarity.message.contains("scope_manifest_path"), true);
+        assert!(polarity.message.contains("scope_manifest_path"));
         let unknown_topic = findings
             .iter()
             .find(|f| f.id == FINDING_PAYLOAD_CONSISTENCY_UNKNOWN_TOPIC);

@@ -460,7 +460,7 @@ mod cli_executor_integration {
 
         // R4: the error message must include the missing workspace path so
         // operator logs are actionable without additional forensics.
-        let err = result.err().expect("already checked is_err above");
+        let err = result.expect_err("already checked is_err above");
         let err_msg = err.to_string();
         assert!(
             err_msg.contains(&*missing.to_string_lossy())
@@ -503,11 +503,12 @@ mod cli_executor_integration {
         //   line 1: $RALPH_EVENTS_FILE
         //   line 2: $RALPH_WORKSPACE_ROOT
         //   line 3: $PWD
-        let script = format!(
+        let script = concat!(
             "printf '%s\\n' \"$RALPH_EVENTS_FILE\" > marker; \
              printf '%s\\n' \"$RALPH_WORKSPACE_ROOT\" >> marker; \
              printf '%s\\n' \"$PWD\" >> marker"
-        );
+        )
+        .to_string();
 
         // Backend env: hat-channel path for RALPH_EVENTS_FILE, hostile paths
         // for RALPH_WORKSPACE_ROOT and PWD. The explicit workspace (passed to
@@ -661,9 +662,7 @@ mod cli_executor_integration {
         // Script captures env var values via shell variables BEFORE writing to marker,
         // so we see the ACTUAL env values the subprocess received. Then writes 4 lines:
         // RALPH_EVENTS_FILE, PWD, RALPH_WORKSPACE_ROOT, PWD.
-        let script = format!(
-            "ralph_ev=$RALPH_EVENTS_FILE; pwd_val=$PWD; ws_root=$RALPH_WORKSPACE_ROOT; printf '%s\n' \"$ralph_ev\" > marker; printf '%s\n' \"$pwd_val\" >> marker; printf '%s\n' \"$ws_root\" >> marker; printf '%s\n' \"$pwd_val\" >> marker"
-        );
+        let script = "ralph_ev=$RALPH_EVENTS_FILE; pwd_val=$PWD; ws_root=$RALPH_WORKSPACE_ROOT; printf '%s\n' \"$ralph_ev\" > marker; printf '%s\n' \"$pwd_val\" >> marker; printf '%s\n' \"$ws_root\" >> marker; printf '%s\n' \"$pwd_val\" >> marker".to_string();
 
         let backend = CliBackend {
             command: "sh".to_string(),

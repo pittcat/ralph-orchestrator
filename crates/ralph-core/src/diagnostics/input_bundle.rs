@@ -38,11 +38,12 @@ use crate::diagnostics::session::probe_session_dir_writable;
 
 /// Status of the manifest itself, surfaced both in the on-disk
 /// `status` field and via the collector's in-memory handle.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ManifestStatus {
     /// Initial state: collector created the file but `run_id`,
     /// `preset_label`, etc. have not been resolved yet (D11).
+    #[default]
     Pending,
     /// Manifest is on disk with at least the baseline identity.
     Present,
@@ -66,28 +67,17 @@ pub enum ManifestStatus {
     NotApplicable,
 }
 
-impl Default for ManifestStatus {
-    fn default() -> Self {
-        Self::Pending
-    }
-}
-
 /// Status of a single artifact slot in the manifest. Independent of
 /// the manifest's own [`ManifestStatus`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ArtifactStatus {
     Present,
     Missing,
     Degraded,
+    #[default]
     NotApplicable,
     Legacy,
-}
-
-impl Default for ArtifactStatus {
-    fn default() -> Self {
-        Self::NotApplicable
-    }
 }
 
 /// Integrity record for one referenced artifact.

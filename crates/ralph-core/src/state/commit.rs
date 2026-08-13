@@ -250,6 +250,16 @@ pub enum CommitDelta {
     },
 }
 
+impl CommitDelta {
+    pub(crate) fn sanitize_for_storage(&mut self) {
+        if let Self::KnowledgeObserved { records } = self {
+            for record in records {
+                record.sanitize_for_storage();
+            }
+        }
+    }
+}
+
 /// Task state transition kind. Mirrors the lifecycle in
 /// [`crate::task::TaskStatus`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
