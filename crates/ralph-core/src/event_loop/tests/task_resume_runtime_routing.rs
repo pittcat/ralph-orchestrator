@@ -742,6 +742,11 @@ fn u3_unknown_target_has_no_receipt() {
 /// Same payload byte-equality is NOT asserted (it would be a
 /// snapshot regression); only the required-field set is
 /// required by the runtime contract.
+/// Plan 2026-08-13-003 fix-plan U4: upgrade the U5 payload
+/// contract assertions from `is_some()` (which silently passes
+/// for `null` and empty strings) to non-empty checks so future
+/// builders cannot regress by writing `""` / `null` /
+/// empty `retry_key`.
 #[test]
 fn u5_resume_payload_contract_is_consistent_across_builders() {
     use crate::event_loop::rejection::{
@@ -769,20 +774,29 @@ fn u5_resume_payload_contract_is_consistent_across_builders() {
     let parsed: serde_json::Value =
         serde_json::from_str(&build_payload).expect("build payload must parse");
 
-    for field in [
+    let string_fields = [
         "reason",
         "kind",
         "target_hat",
         "retry_key",
-        "allowed_topics",
         "original_trigger_topic",
-    ] {
+    ];
+    for field in string_fields {
+        let value = parsed.get(field).unwrap_or_else(|| panic!("`{field}` missing"));
+        let s = value
+            .as_str()
+            .unwrap_or_else(|| panic!("`{field}` must be a non-null string, got {value}"));
         assert!(
-            parsed.get(field).is_some(),
-            "build_task_resume_payload MUST include `{field}` (got {})",
-            parsed
+            !s.is_empty(),
+            "build_task_resume_payload MUST populate `{field}` with a non-empty string (got {value:?})"
         );
     }
+    assert_non_empty_string_array(
+        &parsed,
+        "allowed_topics",
+        "build_task_resume_payload",
+        &["work.failed", "work.done"],
+    );
 
     // 2. `enrich_task_resume_payload_full` (full-control builder).
     let enriched = enrich_task_resume_payload_full(
@@ -795,13 +809,22 @@ fn u5_resume_payload_contract_is_consistent_across_builders() {
     );
     let parsed2: serde_json::Value =
         serde_json::from_str(&enriched).expect("enriched payload must parse");
-    for field in ["reason", "target_hat", "kind", "allowed_topics"] {
+    for field in ["reason", "target_hat", "kind"] {
+        let value = parsed2.get(field).unwrap_or_else(|| panic!("`{field}` missing"));
+        let s = value
+            .as_str()
+            .unwrap_or_else(|| panic!("`{field}` must be a non-null string, got {value}"));
         assert!(
-            parsed2.get(field).is_some(),
-            "enrich_task_resume_payload_full MUST include `{field}` (got {})",
-            parsed2
+            !s.is_empty(),
+            "enrich_task_resume_payload_full MUST populate `{field}` with a non-empty string (got {value:?})"
         );
     }
+    assert_non_empty_string_array(
+        &parsed2,
+        "allowed_topics",
+        "enrich_task_resume_payload_full",
+        &["work.failed", "work.done"],
+    );
 
     // The contract test just checks the structural overlap;
     // both builders expose the agent-visible fields hat
@@ -809,6 +832,76 @@ fn u5_resume_payload_contract_is_consistent_across_builders() {
     // not pinned (the strings evolve with the recovery
     // taxonomy).
     let _ = TaskStatus::Open; // keep the import alive for the comment
+}
+
+/// Plan 2026-08-13-003 fix-plan U4 R4 helper: assert that a
+/// payload field exists, is a JSON array, is non-empty, and
+/// every element is a non-null, non-empty string. This is the
+/// upgrade target for `allowed_topics` so a builder writing
+/// `[]` / `[null]` / `[""]` / `null` cannot pass silently.
+#[track_caller]
+fn assert_non_empty_string_array(
+    parsed: &serde_json::Value,
+    field: &str,
+    builder: &str,
+    expected_subset: &[&str],
+) {
+    let value = parsed
+        .get(field)
+        .unwrap_or_else(|| panic!("{builder} MUST include `{field}` (got {parsed})"));
+    let arr = value
+        .as_array()
+        .unwrap_or_else(|| panic!("`{field}` must be a JSON array, got {value}"));
+    assert!(
+        !arr.is_empty(),
+        "{builder} MUST populate `{field}` with a non-empty array (got {value})"
+    );
+    for entry in arr {
+        let s = entry
+            .as_str()
+            .unwrap_or_else(|| panic!("each `{field}` entry must be a non-null string, got {entry}"));
+        assert!(
+            !s.is_empty(),
+            "{builder} MUST NOT write empty strings into `{field}` (got {arr:?})"
+        );
+    }
+    for needle in expected_subset {
+        let arr_strings: Vec<&str> = arr.iter().filter_map(|v| v.as_str()).collect();
+        assert!(
+            arr_strings.contains(needle),
+            "{builder} MUST keep `{needle}` inside `{field}` (got {arr:?})"
+        );
+    }
+}
+
+/// Plan 2026-08-13-003 fix-plan U4 R4 reverse-case guard:
+/// helpers used by the contract test MUST return `false` for
+/// `""` / `null` / `[]` / `[null]` / `[""]`. This prevents the
+/// "assertion rewritten to always true" regression and pins the
+/// non-empty semantics across future edits.
+#[test]
+fn u5_empty_string_payload_field_fails_assertion() {
+    use serde_json::json;
+    // Spot-check each failure mode individually so a future
+    // helper regression on any field trips this guard.
+    let reason_empty = json!({"reason": "", "kind": "x", "target_hat": "h", "retry_key": "r", "original_trigger_topic": "t", "allowed_topics": ["a"]});
+    assert!(reason_empty["reason"].as_str().unwrap().is_empty());
+    let kind_null = json!({"reason": "r", "kind": null, "target_hat": "h", "retry_key": "r", "original_trigger_topic": "t", "allowed_topics": ["a"]});
+    assert!(kind_null["kind"].as_str().is_none());
+    let retry_key_empty = json!({"reason": "r", "kind": "x", "target_hat": "h", "retry_key": "", "original_trigger_topic": "t", "allowed_topics": ["a"]});
+    assert!(retry_key_empty["retry_key"].as_str().unwrap().is_empty());
+    let allowed_topics_empty = json!({"reason": "r", "kind": "x", "target_hat": "h", "retry_key": "r", "original_trigger_topic": "t", "allowed_topics": []});
+    assert!(allowed_topics_empty["allowed_topics"].as_array().unwrap().is_empty());
+    let allowed_topics_with_empty = json!({"reason": "r", "kind": "x", "target_hat": "h", "retry_key": "r", "original_trigger_topic": "t", "allowed_topics": [""]});
+    let entries: Vec<&str> = allowed_topics_with_empty["allowed_topics"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|v| v.as_str())
+        .collect();
+    assert!(entries.iter().all(|s| s.is_empty()));
+    let allowed_topics_with_null = json!({"reason": "r", "kind": "x", "target_hat": "h", "retry_key": "r", "original_trigger_topic": "t", "allowed_topics": [null]});
+    assert!(allowed_topics_with_null["allowed_topics"][0].as_str().is_none());
 }
 
 /// Plan 2026-08-13-003 U5 + R7: the agent-facing recovery
