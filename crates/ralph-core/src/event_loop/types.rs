@@ -434,4 +434,9 @@ pub struct EventLoop {
     /// in sync.
     pub(crate) execution_contract:
         Option<std::sync::Arc<crate::execution_contract::EffectiveExecutionContract>>,
+    /// Snapshot captured immediately before each hat activation. Read-only
+    /// audits compare against this activation baseline so pre-existing
+    /// foreign dirt is not misattributed to the reviewer.
+    pub(crate) activation_worktree_baselines:
+        std::collections::HashMap<String, crate::event_loop::worktree_handoff::WorktreeSnapshot>,
 }

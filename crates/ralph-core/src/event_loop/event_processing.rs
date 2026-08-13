@@ -1079,6 +1079,23 @@ impl EventLoop {
     }
 
     pub fn build_prompt(&mut self, hat_id: &HatId) -> Option<String> {
+        if let Some(workspace) = self
+            .loop_context
+            .as_ref()
+            .map(|context| context.workspace())
+        {
+            match crate::event_loop::worktree_handoff::WorktreeSnapshot::capture(workspace) {
+                Ok(snapshot) => {
+                    self.activation_worktree_baselines
+                        .insert(hat_id.as_str().to_string(), snapshot);
+                }
+                Err(error) => warn!(
+                    hat = %hat_id,
+                    error = %error,
+                    "failed to capture activation worktree baseline; audit will fail closed"
+                ),
+            }
+        }
         // 2026-06-13-004 U8 (P1-2): clear any pending handoff
         // deadlines for this hat. The hat is now actually
         // *building* a prompt — about to invoke the LLM — so

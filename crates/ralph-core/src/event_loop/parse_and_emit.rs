@@ -3,6 +3,76 @@
 use super::*;
 
 impl EventLoop {
+    fn runtime_precheck_rejection_for_event(
+        &self,
+        event: &crate::event_reader::Event,
+        payload: &str,
+    ) -> Option<String> {
+        let guarded = event.topic.as_str();
+        let gate_hat = format!("precheck-{guarded}");
+        if event.hat.as_deref() != Some(gate_hat.as_str()) {
+            return None;
+        }
+        let Some(precheck) = self.config.event_loop.precheck.as_ref() else {
+            return None;
+        };
+        if !precheck.enabled || !precheck.rules.contains_key(guarded) {
+            return None;
+        }
+
+        let validation = match guarded {
+            "work.done"
+                if self
+                    .registry
+                    .get_config(&ralph_proto::HatId::new("executor"))
+                    .is_some()
+                    && self
+                        .registry
+                        .get_config(&ralph_proto::HatId::new("test-stabilizer"))
+                        .is_some() =>
+            {
+                crate::event_loop::worktree_handoff::validate_work_done_handoff(
+                    &self.config.core.workspace_root,
+                    self.activation_worktree_baselines.get("executor"),
+                    payload,
+                )
+            }
+            "stabilization.done" => {
+                if self
+                    .registry
+                    .get_config(&ralph_proto::HatId::new("test-stabilizer"))
+                    .is_none()
+                {
+                    return None;
+                }
+                crate::event_loop::worktree_handoff::validate_stabilization_handoff(
+                    &self.config.core.workspace_root,
+                    self.activation_worktree_baselines.get("test-stabilizer"),
+                    payload,
+                )
+            }
+            _ => return None,
+        };
+        let Err(reason) = validation else {
+            return None;
+        };
+
+        tracing::warn!(
+            gate = %gate_hat,
+            topic = %guarded,
+            reason = %reason,
+            "runtime handoff precheck rejected terminal event"
+        );
+        Some(
+            serde_json::json!({
+                "failed_checks": ["worktree_handoff_inconsistent"],
+                "reason": reason,
+                "synthetic": true,
+            })
+            .to_string(),
+        )
+    }
+
     /// Returns the loop ID used for execution-contract task-loop checks.
     ///
     /// Primary loops keep `LoopContext::loop_id == None` and identify themselves
@@ -2847,6 +2917,26 @@ impl EventLoop {
 
         for (index, event) in events.into_iter().enumerate() {
             let payload = event.payload.clone().unwrap_or_default();
+
+            // Runtime-side handoff verification runs before a synthesized
+            // precheck gate's pass can reach downstream hats. A gate agent
+            // may still perform the evidence review, but it cannot turn a
+            // stale HEAD or changed dirty worktree into a successful handoff
+            // by emitting a falsely green payload. The rejected event enters
+            // the normal precheck retry path below.
+            if let Some(rejection_payload) =
+                self.runtime_precheck_rejection_for_event(&event, &payload)
+            {
+                let gate_hat = event
+                    .hat
+                    .clone()
+                    .unwrap_or_else(|| format!("precheck-{}", event.topic));
+                let mut rejected = jsonl_event_to_proto(&event, &rejection_payload);
+                rejected.topic = ralph_proto::Topic::new(format!("{}.rejected", event.topic));
+                rejected.source = Some(ralph_proto::HatId::new(gate_hat));
+                accept_event!(rejected);
+                continue;
+            }
 
             // 2026-07-07-002 U4: terminal-closed guard before main-events commit.
             match self.evaluate_terminal_closed_for_event(

@@ -119,6 +119,7 @@ pub mod termination_impl;
 // impl EventLoop 方法留到后续 U 阶段处理。
 pub use termination_impl::{format_duration, termination_status_text};
 pub mod types;
+mod worktree_handoff;
 pub mod verdict;
 pub mod wave;
 pub mod workflow_guard;

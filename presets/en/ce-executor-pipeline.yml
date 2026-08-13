@@ -131,16 +131,27 @@ event_loop:
         prompt:
           - "Step 1: read the current `work.done` payload fields `planned_units`, `completed_units`, `failed_units`, `blocked_units`, `skipped_units`, `execution_status`, `post_verification_status`, `post_verification_file`, `verification_delta_file`, `new_business_regressions_count`, `resolved_baseline_sha`, `executor_head_sha`. This is a SUCCESS-PATH landing audit, NOT a dead-end rubric — do not require fail-confidence evidence."
           - "Step 2: for EVERY Unit in `completed_units`, confirm a deliverable commit exists in the history range `resolved_baseline_sha..executor_head_sha` (inspect git history directly; assume NO specific build tool or language). A claimed-completed Unit with no deliverable commit → failed_check `missing_deliverable_commits`."
+          - "Step 2.5: inspect the executor's final `git status --porcelain --untracked-files=all` outside `.ralph/` and compare it with the activation handoff evidence. The runtime independently verifies HEAD, commit_count, and the dirty-worktree fingerprint before forwarding the event. Existing foreign paths are allowed only when their status and content are unchanged; any new or changed path means the handoff is not settled and must be rejected with `worktree_handoff_inconsistent`. The gate must never stage or commit foreign dirt."
           - "Step 3: open `post_verification_file` and `verification_delta_file`. If either is missing or empty → `unverifiable_evidence`. If `post_verification_status` is `green` but the evidence shows failures, or `new_business_regressions_count` > 0 is concealed behind a green claim → `verification_status_dishonest` (add `regressions_concealed` when introduced regressions are hidden)."
           - "Step 4: verify the Unit settlement is internally consistent — `planned_units` equals the disjoint union of `completed_units`/`failed_units`/`blocked_units`/`skipped_units`; `execution_status=complete` requires failed+blocked+skipped all empty, otherwise it must be `partial`. Any mismatch → `unit_settlement_inconsistent`."
           - "Step 5: for EVERY Unit in `failed_units` + `blocked_units`, verify in `trace_file` / `decisions_file` that the Unit was GENUINELY ATTEMPTED — real work was done on it (e.g. failing command/test outputs, hypotheses tried and eliminated, a partial implementation, a concrete verifiable wall that stopped progress). A Unit that was simply SKIPPED (no trace of work on it) → failed_check `insufficient_attempt_evidence`, no matter what blocker is asserted. A capacity or session excuse ('context/session too large', 'too many Units to finish at once', 'ran out of room or time', 'could not get to it') is itself proof of no genuine per-Unit attempt → `insufficient_attempt_evidence`. A partial `work.done` is legitimate ONLY when every non-completed Unit shows real attempts that hit a concrete wall — an unearned, never-attempted partial MUST be rejected."
           - "Step 6: spot-check at least 2 evidence sources (open a referenced file, or re-run the verification command the PLAN itself declares — whatever toolchain the project uses; never assume one). Any claim that cannot be verified → `unverifiable_evidence`."
-          - "Step 7: if ALL checks pass, re-emit `work.done` with the payload forwarded VERBATIM (every field copied exactly, no rewrites). If ANY check fails, emit `work.done.rejected` with `failed_checks` (using ONLY these names: missing_deliverable_commits, verification_status_dishonest, regressions_concealed, unit_settlement_inconsistent, insufficient_attempt_evidence, unverifiable_evidence) and `reason` (one actionable sentence naming the gap)."
+          - "Step 7: if ALL checks pass, re-emit `work.done` with the payload forwarded VERBATIM (every field copied exactly, no rewrites). If ANY check fails, emit `work.done.rejected` with `failed_checks` (using ONLY these names: missing_deliverable_commits, worktree_handoff_inconsistent, verification_status_dishonest, regressions_concealed, unit_settlement_inconsistent, insufficient_attempt_evidence, unverifiable_evidence) and `reason` (one actionable sentence naming the gap)."
         on_fail:
           target: "executor"
           retry_budget: 3
           on_exhausted: "plan.blocked(reason=precheck_failed)"
           reason: "work_done_evidence_insufficient"
+      stabilization.done:
+        prompt:
+          - "Step 1: read the current `stabilization.done` payload fields `tested_from_sha`, `head_sha`, `stabilization_audit_file`, `correction_ids`, `worktree_status`, `tests_run`, and `tests_passed`. The runtime independently verifies the actual HEAD, worktree status, and activation dirty fingerprint before forwarding this event."
+          - "Step 2: open `stabilization_audit_file` and verify that every correction in `correction_ids` is described with its verification result. Missing or empty evidence → failed_check `unverifiable_evidence`."
+          - "Step 3: if ALL checks pass, re-emit `stabilization.done` with the payload forwarded VERBATIM. If ANY check fails, emit `stabilization.done.rejected` with `failed_checks` and `reason`. Never report `clean` while non-`.ralph/` changes remain."
+        on_fail:
+          target: "test-stabilizer"
+          retry_budget: 3
+          on_exhausted: "plan.blocked(reason=precheck_failed)"
+          reason: "stabilization_handoff_inconsistent"
   event_policy:
     enabled: true
     mode: enforce
@@ -3199,12 +3210,16 @@ hats:
 
       ### Step 2 — Baseline & dirty-worktree gate
 
-      1. Run
-         `git status --porcelain --untracked-files=all | awk '!/^\?\? \.ralph\// && !/^\?\? \.ralph$/'`.
-         - Any non-`.ralph/` change that cannot be attributed to this hat →
-           emit `stabilization.blocked` with
-           `reason: unknown_dirty_worktree` and
-           `worktree_status: "unattributable_dirty"`.
+      1. Capture the final `git status --porcelain --untracked-files=all` outside
+         `.ralph/` and compare it with the activation handoff state. The runtime
+         independently verifies the HEAD, declared `worktree_status`, and dirty
+         fingerprint before forwarding `stabilization.done`. Unchanged foreign
+         dirt is allowed and must remain untouched; any new or changed path
+         introduced during stabilization is not allowed to pass through. Emit
+         `stabilization.blocked` with `reason: unknown_dirty_worktree` and
+         `worktree_status: "unattributable_dirty"` for that case. A stabilizer
+         correction must be committed before `stabilization.done`; never report
+         `clean` while any non-`.ralph/` change remains.
       2. Treat `.ralph/agent/decisions.md` as an append-only decision log
          and record every commit / correction / block there.
 

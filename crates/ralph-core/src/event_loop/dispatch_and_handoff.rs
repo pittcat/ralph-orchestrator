@@ -946,7 +946,9 @@ impl EventLoop {
     /// Audits file modifications after a hat iteration.
     ///
     /// If the hat has `Edit` or `Write` in its `disallowed_tools`, checks whether
-    /// files were modified (via `git diff --stat HEAD`). If so, emits a
+    /// HEAD or non-`.ralph/` dirty paths changed since this hat's activation
+    /// snapshot. Pre-existing unchanged foreign dirt is excluded. If changed,
+    /// emits a
     /// `<hat_id>.scope_violation` event AND promotes the finding to
     /// `AuditSeverity::Fail { add_failures: 1 }` per
     /// `2026-06-23-005` U4 (R5+KTD-8). This is the first audit class
@@ -968,104 +970,150 @@ impl EventLoop {
         }
 
         let workspace = &self.config.core.workspace_root;
-        let diff_output = std::process::Command::new("git")
-            .args(["diff", "--stat", "HEAD"])
-            .current_dir(workspace)
-            .output();
-
-        match diff_output {
-            Ok(output) if !output.stdout.is_empty() => {
-                let diff_stat = String::from_utf8_lossy(&output.stdout).trim().to_string();
-                warn!(
-                    hat = %hat_id.as_str(),
-                    diff = %diff_stat,
-                    "Hat modified files despite tool restrictions (scope violation)"
+        let Some(before) = self.activation_worktree_baselines.get(hat_id.as_str()) else {
+            warn!(hat = %hat_id, "missing activation worktree baseline");
+            self.publish_missing_activation_violation(
+                hat_id,
+                "missing activation worktree baseline",
+            );
+            return;
+        };
+        let after = match crate::event_loop::worktree_handoff::WorktreeSnapshot::capture(workspace)
+        {
+            Ok(snapshot) => snapshot,
+            Err(error) => {
+                debug!(error = %error, "could not capture post-activation worktree state");
+                self.publish_missing_activation_violation(
+                    hat_id,
+                    &format!("post-activation worktree snapshot failed: {error}"),
                 );
+                return;
+            }
+        };
 
-                let violation_topic = format!("{}.scope_violation", hat_id.as_str());
-                let violation = Event::new(
-                    violation_topic.as_str(),
-                    format!(
-                        "Hat '{}' modified files with Edit/Write disallowed:\n{}",
-                        hat_id.as_str(),
-                        diff_stat
-                    ),
-                );
-                self.bus.publish(violation);
+        if after.changed_since(before) {
+            let diff_stat = format!(
+                "HEAD {} -> {}; dirty paths: {:?}",
+                before.head_sha, after.head_sha, after.dirty_paths
+            );
+            warn!(
+                hat = %hat_id.as_str(),
+                diff = %diff_stat,
+                "Hat modified files despite tool restrictions (scope violation)"
+            );
 
-                // Scope violations from read-only dimension reviewers are
-                // promoted from the legacy `add_failures: 1` counting path to
-                // a typed hard reject. This covers both the historical
-                // `dimension-reviewer` hat and split dimension hats (`dim:*`)
-                // that explicitly disallow Edit/Write.
-                //
-                // Other hats still route through `Fail { add_failures: 1 }`
-                // because their scope_violation can be a legitimate fix
-                // attempt (coordinator writing plan files, executor
-                // committing code).
-                //
-                // The BlockLoop arm does NOT increment
-                // `consecutive_failures` (orthogonal termination
-                // mechanism); instead it pushes a typed
-                // `TerminationTrigger::DeadLetter` which
-                // `check_termination` converts to
-                // `TerminationReason::ScopeViolationHardRejected`
-                // on the next call.
-                let is_read_only_dimension_reviewer = hat_id.as_str() == "dimension-reviewer"
-                    || (hat_id.as_str().starts_with("dim:")
-                        && config
-                            .disallowed_tools
-                            .iter()
-                            .any(|tool| matches!(tool.as_str(), "Edit" | "Write")));
-                let severity = if is_read_only_dimension_reviewer {
-                    crate::event_loop::audit::AuditSeverity::BlockLoop {
-                        reason: "scope_violation".to_string(),
-                    }
-                } else {
-                    crate::event_loop::audit::AuditSeverity::Fail { add_failures: 1 }
-                };
-                let kind = if is_read_only_dimension_reviewer {
-                    crate::preset::engine::gates::RejectionKind::ScopeViolation
-                } else {
-                    // Pre-U5 placeholder retained for non-read-only-reviewer
-                    // hats so the audit chain stays backwards-compatible.
-                    crate::preset::engine::gates::RejectionKind::MissingField
-                };
-                crate::event_loop::audit::AuditDispatcher::dispatch(
-                    severity,
-                    crate::event_loop::audit::AuditContext {
-                        hat: hat_id.as_str().to_string(),
-                        kind,
-                        details: diff_stat.clone(),
-                    },
-                    &mut self.state.consecutive_failures,
-                );
+            let violation_topic = format!("{}.scope_violation", hat_id.as_str());
+            let violation = Event::new(
+                violation_topic.as_str(),
+                format!(
+                    "Hat '{}' modified files with Edit/Write disallowed:\n{}",
+                    hat_id.as_str(),
+                    diff_stat
+                ),
+            );
+            self.bus.publish(violation);
 
-                // Push the typed termination trigger so
-                // `check_termination` produces the matching
-                // `TerminationReason::ScopeViolationHardRejected`.
-                // Only for read-only dimension reviewers (the BlockLoop arm).
-                // The trigger carries the hat + diff stat so
-                // `trigger_to_reason` produces a fully-populated
-                // `TerminationReason` without further enrichment.
-                if is_read_only_dimension_reviewer
-                    && let Err(e) = self.state.push_termination_trigger(
-                        crate::event_loop::termination::TerminationTrigger::ScopeViolation {
-                            hat: hat_id.as_str().to_string(),
-                            diff_stat: diff_stat.clone(),
-                        },
-                    )
-                {
-                    warn!(
-                        error = %e,
-                        "scope_violation_hard_rejected: failed to push termination trigger"
-                    );
+            // Scope violations from read-only dimension reviewers are
+            // promoted from the legacy `add_failures: 1` counting path to
+            // a typed hard reject. This covers both the historical
+            // `dimension-reviewer` hat and split dimension hats (`dim:*`)
+            // that explicitly disallow Edit/Write.
+            //
+            // Other hats still route through `Fail { add_failures: 1 }`
+            // because their scope_violation can be a legitimate fix
+            // attempt (coordinator writing plan files, executor
+            // committing code).
+            //
+            // The BlockLoop arm does NOT increment
+            // `consecutive_failures` (orthogonal termination
+            // mechanism); instead it pushes a typed
+            // `TerminationTrigger::DeadLetter` which
+            // `check_termination` converts to
+            // `TerminationReason::ScopeViolationHardRejected`
+            // on the next call.
+            let is_read_only_dimension_reviewer = hat_id.as_str() == "dimension-reviewer"
+                || (hat_id.as_str().starts_with("dim:")
+                    && config
+                        .disallowed_tools
+                        .iter()
+                        .any(|tool| matches!(tool.as_str(), "Edit" | "Write")));
+            let severity = if is_read_only_dimension_reviewer {
+                crate::event_loop::audit::AuditSeverity::BlockLoop {
+                    reason: "scope_violation".to_string(),
                 }
+            } else {
+                crate::event_loop::audit::AuditSeverity::Fail { add_failures: 1 }
+            };
+            let kind = if is_read_only_dimension_reviewer {
+                crate::preset::engine::gates::RejectionKind::ScopeViolation
+            } else {
+                // Pre-U5 placeholder retained for non-read-only-reviewer
+                // hats so the audit chain stays backwards-compatible.
+                crate::preset::engine::gates::RejectionKind::MissingField
+            };
+            crate::event_loop::audit::AuditDispatcher::dispatch(
+                severity,
+                crate::event_loop::audit::AuditContext {
+                    hat: hat_id.as_str().to_string(),
+                    kind,
+                    details: diff_stat.clone(),
+                },
+                &mut self.state.consecutive_failures,
+            );
+
+            // Push the typed termination trigger so
+            // `check_termination` produces the matching
+            // `TerminationReason::ScopeViolationHardRejected`.
+            // Only for read-only dimension reviewers (the BlockLoop arm).
+            // The trigger carries the hat + diff stat so
+            // `trigger_to_reason` produces a fully-populated
+            // `TerminationReason` without further enrichment.
+            if is_read_only_dimension_reviewer
+                && let Err(e) = self.state.push_termination_trigger(
+                    crate::event_loop::termination::TerminationTrigger::ScopeViolation {
+                        hat: hat_id.as_str().to_string(),
+                        diff_stat: diff_stat.clone(),
+                    },
+                )
+            {
+                warn!(
+                    error = %e,
+                    "scope_violation_hard_rejected: failed to push termination trigger"
+                );
             }
-            Err(e) => {
-                debug!(error = %e, "Could not run git diff for file-modification audit");
-            }
-            _ => {} // No modifications — all good
+        }
+    }
+
+    fn publish_missing_activation_violation(&mut self, hat_id: &HatId, details: &str) {
+        self.bus.publish(Event::new(
+            format!("{}.scope_violation", hat_id.as_str()),
+            format!(
+                "Hat '{}' could not prove its activation worktree baseline:\n{}",
+                hat_id.as_str(),
+                details
+            ),
+        ));
+        let Some(config) = self.registry.get_config(hat_id) else {
+            return;
+        };
+        let read_only_dimension = hat_id.as_str() == "dimension-reviewer"
+            || (hat_id.as_str().starts_with("dim:")
+                && config
+                    .disallowed_tools
+                    .iter()
+                    .any(|tool| matches!(tool.as_str(), "Edit" | "Write")));
+        if read_only_dimension
+            && let Err(error) = self.state.push_termination_trigger(
+                crate::event_loop::termination::TerminationTrigger::ScopeViolation {
+                    hat: hat_id.as_str().to_string(),
+                    diff_stat: details.to_string(),
+                },
+            )
+        {
+            warn!(
+                %error,
+                "scope_violation_hard_rejected: failed to push missing-baseline trigger"
+            );
         }
     }
 

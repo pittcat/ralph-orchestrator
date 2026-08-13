@@ -707,6 +707,7 @@ impl EventLoop {
             // U4: set post-construction by `from_resolved`; the shared
             // builder always starts with `None` (legacy / test paths).
             execution_contract: None,
+            activation_worktree_baselines: std::collections::HashMap::new(),
         })
     }
 
@@ -889,6 +890,7 @@ impl EventLoop {
             phase_authority,
             // U4: set post-construction by `from_resolved_no_context`.
             execution_contract: None,
+            activation_worktree_baselines: std::collections::HashMap::new(),
         }
     }
 

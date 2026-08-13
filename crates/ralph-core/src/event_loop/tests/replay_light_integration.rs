@@ -204,6 +204,97 @@ fn process_events(
 }
 
 #[test]
+fn runtime_work_done_handoff_rejects_uncommitted_changes_before_retry() {
+    let temp = TempDir::new().unwrap();
+    let workspace = temp.path();
+    init_git_repo(workspace);
+    let baseline_sha = git_head_sha(workspace);
+
+    let mut config = RalphConfig::parse_yaml(
+        r#"
+hats:
+  executor:
+    name: "Executor"
+    triggers: [plan.ready, task.resume]
+    publishes: [work.done]
+  test-stabilizer:
+    name: "Test Stabilizer"
+    triggers: [work.done, task.resume]
+    publishes: [stabilization.done]
+event_loop:
+  precheck:
+    enabled: true
+    rules:
+      work.done:
+        prompt: ["verify handoff"]
+        on_fail:
+          target: executor
+          retry_budget: 3
+          on_exhausted: "plan.blocked(reason=precheck_failed)"
+          reason: "work_done_evidence_insufficient"
+"#,
+    )
+    .unwrap();
+    config.normalize();
+    config.core.workspace_root = workspace.to_path_buf();
+    assert!(
+        config.hats.contains_key("precheck-work.done"),
+        "precheck desugar did not synthesize the gate: {:?}",
+        config.hats.keys().collect::<Vec<_>>()
+    );
+    let mut event_loop = make_event_loop(config);
+    event_loop
+        .build_prompt(&ralph_proto::HatId::new("executor"))
+        .expect("executor activation baseline should be captured");
+    event_loop
+        .build_prompt(&ralph_proto::HatId::new("precheck-work.done"))
+        .expect("precheck activation should be registered");
+
+    std::fs::write(workspace.join("README.md"), "# Uncommitted\n").unwrap();
+    let event = crate::event_reader::Event {
+        topic: "work.done".to_string(),
+        payload: Some(
+            serde_json::json!({
+                "executor_head_sha": baseline_sha,
+                "resolved_baseline_sha": baseline_sha,
+                "completed_units": ["U1"],
+                "commit_count": 0,
+            })
+            .to_string(),
+        ),
+        ts: "2024-01-01T00:00:00Z".to_string(),
+        hat: Some("precheck-work.done".to_string()),
+        triggered: None,
+        source: None,
+        wave_id: None,
+        wave_index: None,
+        wave_total: None,
+        system_injected: None,
+    };
+
+    let processed = process_events(vec![event], &mut event_loop);
+    assert!(
+        processed
+            .accepted_events
+            .iter()
+            .any(|event| event.topic.as_str() == "work.done.rejected"),
+        "runtime must convert an uncommitted handoff into a rejected gate event; got {:?}",
+        processed
+            .accepted_events
+            .iter()
+            .map(|event| event.topic.as_str())
+            .collect::<Vec<_>>()
+    );
+    assert!(
+        !processed
+            .accepted_events
+            .iter()
+            .any(|event| event.topic.as_str() == "work.done"),
+        "a dirty executor handoff must not reach downstream stabilizer"
+    );
+}
+
+#[test]
 fn test_no_events_triggers_hard_gate_at_event_loop_layer() {
     // The event loop layer must NOT synthesize a default `work.done`.
     // When the agent writes no events at all, the bus sees nothing and
