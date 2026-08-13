@@ -805,6 +805,28 @@ fn apply_delta_is_exhaustive() {
         topic: "forge.report.done".to_string(),
         payload: r#"{"report_path":"a.md"}"#.to_string(),
     });
+    // GAP-01 U1: KnowledgeObserved projection. Empty record list
+    // is a valid no-op apply; we keep coverage tight here so the
+    // exhaustive list mirrors every concrete variant.
+    snap.apply_delta(&CommitDelta::KnowledgeObserved { records: vec![] });
+    // GAP-02 Unit 1: replayable semantic StateMachine delta.
+    // Cold-start ledger has `state_machine_runtime == None`;
+    // the projection branch must lazily materialise the runtime
+    // and apply the delta.
+    snap.apply_delta(&CommitDelta::StateMachineTransition {
+        delta: crate::state_machine::StateMachineTransitionDelta {
+            transition_id: crate::state_machine::StateMachineTransitionId(
+                "exhaustive|sm|0".to_string(),
+            ),
+            topic: "experiment.planned".to_string(),
+            instance_key: Some("t-exhaustive".to_string()),
+            new_state: "planned".to_string(),
+            opens_instance: true,
+            closes_instance: false,
+            terminal_observed: false,
+            terminal_honored: false,
+        },
+    });
 
     // The exhaustive walk is the assertion: if any variant is
     // added without a branch, this test fails to compile.
@@ -2080,3 +2102,437 @@ fn render_prompt_block_caps_records() {
         "rendered block must cap at PROMPT_RECORDS_VISIBLE; got {line_count}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Plan GAP-02 (2026-08-13-002) Unit 1: replayable StateMachine
+// semantic deltas live in `CommitDelta::StateMachineTransition`.
+// The runtime creates a small semantic-delta representation
+// (`StateMachineTransitionDelta`); the ledger applies it through
+// `LedgerSnapshot::apply_delta`, materially updating the
+// `state_machine_runtime` projection. The tests below cover the
+// Red→Green behaviour called out in Unit 1 §11 (5 unit-tests) and
+// §9 (acceptance test).
+// ---------------------------------------------------------------------------
+
+use crate::config::state_machine::{
+    InstanceKeyConfig, StateMachineConfig, TerminalGuardConfig, TransitionConfig,
+};
+use crate::state_machine::{
+    StateMachineDecision, StateMachineRuntimeState, StateMachineTransitionDelta,
+    StateMachineTransitionId,
+};
+
+fn experiment_sm_config() -> StateMachineConfig {
+    StateMachineConfig {
+        enabled: true,
+        instance_key: InstanceKeyConfig {
+            from_payload: "task_key".to_string(),
+            required_for: vec![
+                "experiment.planned".to_string(),
+                "experiment.ready".to_string(),
+                "experiment.blocked".to_string(),
+            ],
+        },
+        terminal_topics: vec!["LOOP_COMPLETE".to_string()],
+        business_topics: vec![
+            "experiment.planned".to_string(),
+            "experiment.ready".to_string(),
+            "experiment.blocked".to_string(),
+        ],
+        terminal_guard: TerminalGuardConfig::default(),
+        transitions: vec![
+            TransitionConfig {
+                topic: "experiment.planned".to_string(),
+                from: vec!["idle".to_string()],
+                to: "planned".to_string(),
+                opens_instance: true,
+                closes_instance: false,
+            },
+            TransitionConfig {
+                topic: "experiment.ready".to_string(),
+                from: vec!["planned".to_string()],
+                to: "ready".to_string(),
+                opens_instance: false,
+                closes_instance: false,
+            },
+            TransitionConfig {
+                topic: "experiment.blocked".to_string(),
+                from: vec!["planned".to_string(), "ready".to_string()],
+                to: "blocked".to_string(),
+                opens_instance: false,
+                closes_instance: true,
+            },
+        ],
+    }
+}
+
+fn plan_delta(sequence: u64, topic: &str, key: &str) -> StateMachineTransitionDelta {
+    StateMachineTransitionDelta {
+        transition_id: StateMachineTransitionId(format!("sm|test|{sequence}|{key}")),
+        topic: topic.to_string(),
+        instance_key: Some(key.to_string()),
+        new_state: "planned".to_string(),
+        opens_instance: true,
+        closes_instance: false,
+        terminal_observed: false,
+        terminal_honored: false,
+    }
+}
+
+fn block_delta(sequence: u64, key: &str) -> StateMachineTransitionDelta {
+    StateMachineTransitionDelta {
+        transition_id: StateMachineTransitionId(format!("sm|test|{sequence}|{key}|close")),
+        topic: "experiment.blocked".to_string(),
+        instance_key: Some(key.to_string()),
+        new_state: "blocked".to_string(),
+        opens_instance: false,
+        closes_instance: true,
+        terminal_observed: false,
+        terminal_honored: false,
+    }
+}
+
+#[test]
+fn u1_apply_state_machine_open_delta_records_runtime_state() {
+    // Unit 1 §11 test 1: cold-start apply, open instance reaches
+    // the right map / state / topic / count.
+    let mut snap = LedgerSnapshot::cold_start();
+    assert!(snap.state_machine_runtime.is_none());
+
+    snap.apply_delta(&CommitDelta::StateMachineTransition {
+        delta: plan_delta(1, "experiment.planned", "t1"),
+    });
+
+    let runtime = snap
+        .state_machine_runtime
+        .as_ref()
+        .expect("StateMachine runtime must be materialised lazily");
+    let open = runtime.open_instances_snapshot();
+    assert_eq!(open.len(), 1);
+    assert_eq!(open.get("t1").unwrap().state, "planned");
+    assert_eq!(open.get("t1").unwrap().last_topic, "experiment.planned");
+    assert_eq!(runtime.accepted_transition_count(), 1);
+}
+
+#[test]
+fn u1_apply_state_machine_close_delta_dedupes() {
+    // Unit 1 §11 test 2: open → close moves the instance between
+    // maps and dedupes on `transition_id`; replaying the same
+    // delta does not double-count.
+    let mut snap = LedgerSnapshot::cold_start();
+    snap.apply_delta(&CommitDelta::StateMachineTransition {
+        delta: plan_delta(1, "experiment.planned", "t1"),
+    });
+    snap.apply_delta(&CommitDelta::StateMachineTransition {
+        delta: block_delta(2, "t1"),
+    });
+
+    let runtime = snap.state_machine_runtime.as_ref().unwrap();
+    let open = runtime.open_instances_snapshot();
+    let closed = runtime.closed_instances_snapshot();
+    assert_eq!(open.len(), 0);
+    assert_eq!(closed.len(), 1);
+    assert_eq!(closed.get("t1").unwrap().state, "blocked");
+    assert_eq!(runtime.accepted_transition_count(), 2);
+
+    // Re-applying the same close delta is idempotent.
+    snap.apply_delta(&CommitDelta::StateMachineTransition {
+        delta: block_delta(2, "t1"),
+    });
+    let runtime = snap.state_machine_runtime.as_ref().unwrap();
+    assert_eq!(
+        runtime.accepted_transition_count(),
+        2,
+        "duplicate transition_id must not double-count"
+    );
+}
+
+#[test]
+fn u1_apply_terminal_observed_delta_separates_from_honored() {
+    // Unit 1 §11 test 3 + 4 (terminal observed/honored are
+    // independent deltas).
+    let mut snap = LedgerSnapshot::cold_start();
+    snap.apply_delta(&CommitDelta::StateMachineTransition {
+        delta: StateMachineTransitionDelta {
+            transition_id: StateMachineTransitionId("sm|test|terminal|obs".into()),
+            topic: "LOOP_COMPLETE".into(),
+            instance_key: None,
+            new_state: "terminal".into(),
+            opens_instance: false,
+            closes_instance: false,
+            terminal_observed: true,
+            terminal_honored: false,
+        },
+    });
+    let runtime = snap.state_machine_runtime.as_ref().unwrap();
+    assert!(runtime.is_terminal_honored() == false);
+    // Honored may only flip after observed.
+    snap.apply_delta(&CommitDelta::StateMachineTransition {
+        delta: StateMachineTransitionDelta {
+            transition_id: StateMachineTransitionId("sm|test|terminal|honored".into()),
+            topic: "LOOP_COMPLETE".into(),
+            instance_key: None,
+            new_state: "terminal".into(),
+            opens_instance: false,
+            closes_instance: false,
+            terminal_observed: false,
+            terminal_honored: true,
+        },
+    });
+    let runtime = snap.state_machine_runtime.as_ref().unwrap();
+    assert!(runtime.is_terminal_honored());
+}
+
+#[test]
+fn u1_replay_old_commit_log_without_state_machine_delta_keeps_runtime_default() {
+    // Unit 1 §11 test 5: legacy ledger.jsonl without StateMachine
+    // deltas must still replay; the runtime projection stays
+    // None so the disabled path keeps original semantics.
+    let (_dir, mut ledger) = fresh_ledger();
+    // Pre-existing delta variants only.
+    ledger
+        .commit(
+            CommitDelta::CounterChanged {
+                counter: CounterKind::Iteration,
+                new_value: 3,
+            },
+            Some("legacy".into()),
+        )
+        .expect("commit");
+    ledger
+        .commit(
+            CommitDelta::CompletionHonored,
+            Some("legacy-honored".into()),
+        )
+        .expect("commit");
+
+    // Open a new ledger on the same workspace → replay rebuilds
+    // snapshot but StateMachine remains absent.
+    let dir = _dir.keep();
+    let replayed = StateLedger::new(&dir, true);
+    let snap = replayed.snapshot();
+    assert_eq!(snap.iteration, 3);
+    assert!(snap.completion_honored);
+    assert!(
+        snap.state_machine_runtime.is_none(),
+        "legacy commit log must not synthesise a StateMachine runtime"
+    );
+}
+
+#[test]
+fn u1_failed_state_machine_commit_restores_snapshot() {
+    // Unit 1 §11 test 6: durability failure keeps the ledger
+    // intact (caller surface: snapshot unchanged after error).
+    let dir = workspace();
+    let workspace = dir.path().to_path_buf();
+    let mut ledger = StateLedger::new(&workspace, true);
+
+    // Baseline commit against a fresh on-disk log. We need the
+    // ledger file to exist first so the atomic-rewrite fault
+    // triggers on the SECOND commit.
+    ledger
+        .commit(
+            CommitDelta::CounterChanged {
+                counter: CounterKind::Iteration,
+                new_value: 5,
+            },
+            Some("before-failure".into()),
+        )
+        .expect("baseline commit must succeed before fault injection");
+
+    // Now replace the ledger file with a directory so the next
+    // atomic rewrite must fail.
+    let ralph_dir = workspace.join(".ralph");
+    std::fs::create_dir_all(&ralph_dir).expect("mkdir .ralph");
+    let ledger_file = workspace.join(LEDGER_RELATIVE_PATH);
+    if ledger_file.exists() {
+        std::fs::remove_file(&ledger_file).ok();
+    }
+    std::fs::create_dir(&ledger_file).expect("mkdir ledger-as-dir");
+
+    let before = ledger.snapshot().clone();
+
+    let err = ledger
+        .commit(
+            CommitDelta::StateMachineTransition {
+                delta: plan_delta(1, "experiment.planned", "t1"),
+            },
+            Some("sm-delta-attempt".into()),
+        );
+    assert!(
+        err.is_err(),
+        "committing a StateMachine delta into a directory must fail"
+    );
+    let after = ledger.snapshot();
+    // Snapshot state identical to before — rollback preserved it.
+    assert_eq!(after.iteration, before.iteration);
+    // And the replay log carries only the pre-failure commit.
+    let log = ledger.commit_log();
+    assert_eq!(
+        log.iter().filter(|c| c.event_topic.as_deref() == Some("sm-delta-attempt")).count(),
+        0,
+        "failed commit must not leave a StateMachine delta in the log"
+    );
+    assert!(
+        after.state_machine_runtime.is_none(),
+        "StateMachine runtime must remain absent after a failed commit"
+    );
+}
+
+#[test]
+fn u1_state_machine_delta_commit_replays_to_same_runtime() {
+    // Unit 1 §9 acceptance: the accepted transition must commit,
+    // the snapshot must reflect live state, and a fresh ledger on
+    // the same workspace must rebuild an equivalent
+    // `state_machine_runtime` (Scenario S1/S6 combined).
+    let dir = workspace();
+    let workspace = dir.path().to_path_buf();
+    let config = experiment_sm_config();
+
+    // Drive StateMachine in-process to obtain Accept decisions,
+    // project each into a semantic delta. Use a single ledger
+    // (no per-call directory churn) so the commit log carries
+    // every delta on one workspace for replay.
+    let mut live_state = StateMachineRuntimeState::new();
+    let mut ledger = StateLedger::new(&workspace, true);
+    let mut sequence = 0u64;
+
+    // Open `t1` via the validator + projection helper.
+    sequence += 1;
+    let pre_open = live_state.classify_open_close(&Some("t1".to_string()));
+    let open_decision =
+        live_state.validate_event("experiment.planned", Some(r#"{"task_key":"t1"}"#), &config);
+    let open_id = StateMachineTransitionId::build(
+        "loop-A",
+        Some("contract-A"),
+        "executor",
+        "experiment.planned",
+        Some("t1"),
+        sequence,
+    );
+    let open_delta = live_state
+        .project_transition_delta(
+            open_id,
+            "experiment.planned",
+            &open_decision,
+            pre_open.0,
+            pre_open.1,
+        )
+        .expect("open decision must project");
+    ledger
+        .commit(
+            CommitDelta::StateMachineTransition { delta: open_delta },
+            Some("experiment.planned".into()),
+        )
+        .expect("commit open");
+
+    // Close `t1`.
+    sequence += 1;
+    let pre_close = live_state.classify_open_close(&Some("t1".to_string()));
+    let close_decision =
+        live_state.validate_event("experiment.blocked", Some(r#"{"task_key":"t1"}"#), &config);
+    let close_id = StateMachineTransitionId::build(
+        "loop-A",
+        Some("contract-A"),
+        "executor",
+        "experiment.blocked",
+        Some("t1"),
+        sequence,
+    );
+    let close_delta = live_state
+        .project_transition_delta(
+            close_id,
+            "experiment.blocked",
+            &close_decision,
+            pre_close.0,
+            pre_close.1,
+        )
+        .expect("close decision must project");
+    assert!(
+        close_delta.closes_instance,
+        "close delta must carry closes_instance=true"
+    );
+    ledger
+        .commit(
+            CommitDelta::StateMachineTransition { delta: close_delta },
+            Some("experiment.blocked".into()),
+        )
+        .expect("commit close");
+
+    // Capture first-process snapshot.
+    let first = ledger.snapshot().clone();
+    let first_runtime = first
+        .state_machine_runtime
+        .as_ref()
+        .expect("runtime materialised after first ledger");
+    let first_open = first_runtime.open_instances_snapshot();
+    let first_closed = first_runtime.closed_instances_snapshot();
+    assert!(
+        first_open.is_empty(),
+        "instance must have moved from open to closed"
+    );
+    assert_eq!(first_closed.len(), 1);
+    assert_eq!(first_closed.get("t1").unwrap().state, "blocked");
+    assert_eq!(first_runtime.accepted_transition_count(), 2);
+
+    // 2) Second ledger on the same workspace replays the same
+    // commit log; the freshly recovered `state_machine_runtime`
+    // must equal the first-process projection byte-for-byte at
+    // every observable field.
+    drop(ledger);
+    let replay = StateLedger::new(&workspace, true);
+    let second = replay.snapshot();
+    let second_runtime = second
+        .state_machine_runtime
+        .as_ref()
+        .expect("replay must also materialise the runtime");
+    assert_eq!(
+        second_runtime.open_instances_snapshot(),
+        first_open,
+        "open instances must replay identically"
+    );
+    assert_eq!(
+        second_runtime.closed_instances_snapshot(),
+        first_closed,
+        "closed instances must replay identically"
+    );
+    assert_eq!(
+        second_runtime.accepted_transition_count(),
+        first_runtime.accepted_transition_count(),
+        "accepted transition count must replay identically"
+    );
+}
+
+#[test]
+fn u1_state_machine_transition_id_dedupes_across_replay() {
+    // Property-style: applying the same delta twice in a row is
+    // a no-op on the second call. Covers R6 (idempotency) at the
+    // delta layer.
+    let mut snap = LedgerSnapshot::cold_start();
+    let delta = plan_delta(7, "experiment.planned", "t-x");
+
+    let first = StateMachineTransitionDelta::clone(&delta);
+    let second = StateMachineTransitionDelta::clone(&delta);
+
+    snap.apply_delta(&CommitDelta::StateMachineTransition {
+        delta: first.clone(),
+    });
+    let after_first = snap.state_machine_runtime.as_ref().unwrap().clone();
+    snap.apply_delta(&CommitDelta::StateMachineTransition {
+        delta: second.clone(),
+    });
+    let after_second = snap.state_machine_runtime.as_ref().unwrap().clone();
+    assert_eq!(
+        after_first.accepted_transition_count(),
+        after_second.accepted_transition_count(),
+        "dedupe must hold: replay should not double-count"
+    );
+    assert_eq!(
+        after_first.open_instances_snapshot(),
+        after_second.open_instances_snapshot(),
+        "dedupe must hold: replay should not re-insert"
+    );
+}
+
+#[allow(dead_code)]
+fn _ensure_state_machine_decision_in_test_scope(_d: &StateMachineDecision) {}

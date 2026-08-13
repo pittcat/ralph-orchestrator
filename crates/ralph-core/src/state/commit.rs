@@ -248,6 +248,17 @@ pub enum CommitDelta {
     KnowledgeObserved {
         records: Vec<crate::state::knowledge::KnowledgeRecord>,
     },
+
+    /// Plan GAP-02 (2026-08-13-002) Unit 1: replayable semantic
+    /// delta for a single accepted StateMachine transition.
+    /// Carries only the fields required to reconstruct
+    /// `LedgerSnapshot::state_machine_runtime` — the full runtime
+    /// is never persisted per delta (per plan §1.9 performance
+    /// contract). Apply is idempotent on
+    /// [`StateMachineTransitionDelta::transition_id`].
+    StateMachineTransition {
+        delta: crate::state_machine::StateMachineTransitionDelta,
+    },
 }
 
 impl CommitDelta {
