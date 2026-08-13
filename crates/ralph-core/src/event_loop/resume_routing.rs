@@ -453,61 +453,48 @@ pub fn publish_targeted_resume(
     decision
 }
 
+/// Plan 2026-08-13-003 fix-plan U5 R6: single helper that
+/// extracts a non-empty string field from a serialized JSON
+/// payload. Replaces the three duplicated extractors
+/// (`payload_target_hat`, `payload_task_id`, `payload_task_key`)
+/// that each called `serde_json::from_str` separately on the
+/// same payload. The single parse + lookup saves redundant
+/// work and gives the compiler one source of truth for the
+/// "non-empty string" contract.
+pub fn payload_str_field(payload: &str, field: &str) -> Option<String> {
+    let value: serde_json::Value = match serde_json::from_str(payload) {
+        Ok(v) => v,
+        Err(_) => return None,
+    };
+    value
+        .get(field)
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+}
+
 /// Plan 2026-08-13-003 U2: extract the `target_hat` field
 /// from a serialized JSON payload so production wrappers can
 /// thread the payload target through the resolver without
 /// forcing every caller to re-parse. Returns `None` when the
 /// payload does not contain a non-empty string `target_hat`.
 pub fn payload_target_hat(payload: &str) -> Option<String> {
-    let value: serde_json::Value = match serde_json::from_str(payload) {
-        Ok(v) => v,
-        Err(_) => return None,
-    };
-    value
-        .get("target_hat")
-        .and_then(|v| v.as_str())
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(str::to_string)
-}
-
-/// Plan 2026-08-13-003 U2: alias kept for callers that
-/// prefer the more explicit name. Both functions return
-/// the same `Option<String>`.
-pub fn payload_target_hat_field(payload: &str) -> Option<String> {
-    payload_target_hat(payload)
+    payload_str_field(payload, "target_hat")
 }
 
 /// Plan 2026-08-13-003 U2: extract the `task_id` field from a
 /// serialized JSON payload. Returns `None` when the payload
 /// does not contain a non-empty string `task_id`.
 pub fn payload_task_id(payload: &str) -> Option<String> {
-    let value: serde_json::Value = match serde_json::from_str(payload) {
-        Ok(v) => v,
-        Err(_) => return None,
-    };
-    value
-        .get("task_id")
-        .and_then(|v| v.as_str())
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(str::to_string)
+    payload_str_field(payload, "task_id")
 }
 
 /// Plan 2026-08-13-003 U2: extract the `task_key` field from a
 /// serialized JSON payload. Returns `None` when the payload
 /// does not contain a non-empty string `task_key`.
 pub fn payload_task_key(payload: &str) -> Option<String> {
-    let value: serde_json::Value = match serde_json::from_str(payload) {
-        Ok(v) => v,
-        Err(_) => return None,
-    };
-    value
-        .get("task_key")
-        .and_then(|v| v.as_str())
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(str::to_string)
+    payload_str_field(payload, "task_key")
 }
 
 /// Plan 2026-08-10-001 U1: derive a [`PendingResumeIdentity`]
@@ -614,7 +601,7 @@ pub fn publish_targeted_resume_for_hat_in(
         .or_else(|| payload_task_key(&payload));
     let resolved_payload_target: Option<String> = payload_target_hat
         .map(str::to_string)
-        .or_else(|| payload_target_hat_field(&payload));
+        .or_else(|| self::payload_target_hat(&payload));
     let inputs = ResumeRoutingInputs {
         event_target: Some(target_hint),
         payload_target_hat: resolved_payload_target.as_deref(),
@@ -655,7 +642,15 @@ pub fn publish_targeted_resume_for_hat_in(
         let dir = diagnostics_dir
             .map(std::path::Path::to_path_buf)
             .unwrap_or_else(|| std::path::PathBuf::from(".ralph/diagnostics"));
-        let _ = write_envelope_to_dir(&dir, &envelope);
+        if let Err(e) = write_envelope_to_dir(&dir, &envelope) {
+            tracing::warn!(
+                target: "ralph_core::resume",
+                target_hint = %target_hint,
+                retry_key = %retry_key,
+                error = %e,
+                "task_resume Block envelope write failed; diagnostic dropped"
+            );
+        }
     }
     decision
 }
@@ -699,6 +694,13 @@ fn reason_description(reason: &ResumeBlockReason) -> String {
     }
 }
 
+/// Plan 2026-08-13-003 fix-plan U5 R5: process-global counter
+/// that disambiguates envelope filenames when two Block
+/// decisions land in the same nanosecond. PID + nanos alone
+/// collided on macOS / high-load CI (correctness:C3); the
+/// counter guarantees uniqueness within a single process.
+static ENVELOPE_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 fn write_envelope_to_dir(
     dir: &std::path::Path,
     envelope: &serde_json::Value,
@@ -709,7 +711,10 @@ fn write_envelope_to_dir(
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_nanos())
         .unwrap_or(0);
-    let path = dir.join(format!("task_resume_block-{pid}-{nanos}.jsonl"));
+    let counter = ENVELOPE_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let path = dir.join(format!(
+        "task_resume_block-{pid}-{nanos}-{counter}.jsonl"
+    ));
     let line = envelope.to_string();
     std::fs::write(path, format!("{line}\n"))?;
     Ok(())
@@ -810,7 +815,7 @@ pub fn publish_targeted_recovery_resume_for_hat(
     let resolved_task_key: Option<String> =
         task_key.map(str::to_string).or_else(|| payload_task_key(&payload));
     let resolved_payload_target: Option<String> =
-        payload_target_hat.map(str::to_string).or_else(|| payload_target_hat_field(&payload));
+        payload_target_hat.map(str::to_string).or_else(|| self::payload_target_hat(&payload));
     let payload_clone = payload.clone();
     let inputs = ResumeRoutingInputs {
         event_target: Some(target_hint),
@@ -850,7 +855,15 @@ pub fn publish_targeted_recovery_resume_for_hat(
             let dir = diagnostics_dir
                 .map(std::path::Path::to_path_buf)
                 .unwrap_or_else(|| std::path::PathBuf::from(".ralph/diagnostics"));
-            let _ = write_envelope_to_dir(&dir, &envelope);
+            if let Err(e) = write_envelope_to_dir(&dir, &envelope) {
+                tracing::warn!(
+                    target: "ralph_core::resume",
+                    target_hint = %target_hint,
+                    retry_key = %retry_key,
+                    error = %e,
+                    "task_resume Block envelope write failed (recovery path); diagnostic dropped"
+                );
+            }
             ResumeDecision::Block { reason }
         }
         Ok(other) => other,
@@ -874,7 +887,15 @@ pub fn publish_targeted_recovery_resume_for_hat(
             let dir = diagnostics_dir
                 .map(std::path::Path::to_path_buf)
                 .unwrap_or_else(|| std::path::PathBuf::from(".ralph/diagnostics"));
-            let _ = write_envelope_to_dir(&dir, &envelope);
+            if let Err(e2) = write_envelope_to_dir(&dir, &envelope) {
+                tracing::warn!(
+                    target: "ralph_core::resume",
+                    target_hint = %target_hint,
+                    retry_key = %retry_key,
+                    error = %e2,
+                    "task_resume Block envelope write failed (recovery_commit_failed); diagnostic dropped"
+                );
+            }
             ResumeDecision::Block { reason }
         }
     }
