@@ -18,7 +18,9 @@ argument-hint: "[run_dir] [preset_file_or_builtin] [optional: plan_file] [--incl
 
 **写任何机制/路径前必读**：[ssot-guardrails.md](references/ssot-guardrails.md)（禁止 hat_handoff、loop_state_snapshot.json、错误 CLI 等）。
 
-**交付物**：**主仓** `docs/report/YYYY-MM-DD-<preset>-<loop_id>-diagnosis.md`。
+**交付物**：最终 Markdown 报告 `docs/report/YYYY-MM-DD-<preset>-<loop_id>-diagnosis.md`。
+
+**产物隔离 HARD RULE**：`docs/report/` 只允许写入最终 Markdown 报告；诊断过程中的 JSON、工作笔记、sub-agent 输出、stderr、临时清单和其它中间产物，必须写入由 `mktemp -d` 创建的临时诊断目录（或用户明确指定的非 git 工作区），不得写入 target branch、`docs/report/`、`docs/plans/`、`docs/solutions/` 或 `docs/brainstorms/`。开始前记录 `DIAG_WORKDIR`，结束时清理；若清理失败，必须在最终回复中报告残留路径。
 
 > **变更日志**：
 > - 2026-07-25：新增 §0.1 历史检索开关 + SSOT 常量 + §0.x 编号扩展约定。若主项目文档（CLAUDE.md / AGENTS.md / operator docs）需说明此开关，在此 `变更日志` 行追加即可（不触发 CLAUDE.md/AGENTS.md 强制同步——本 skill 不属于 `crates/ralph-core/data/`）。
@@ -148,16 +150,20 @@ Diagnostics 四档：`FULL` | `MINIMAL` | `LOGS_ONLY` | `DISABLED` — 决定 L2
 bundle-first 读取（§0.2）的**第一步**是用 `ralph diagnose` 直接对当前 session 输出 JSON：
 
 ```bash
-ralph diagnose --legacy --session latest --diagnostics-root "$RUN/.ralph/diagnostics" --format json --output "$REPORT_BASE.json"
+DIAG_WORKDIR="$(mktemp -d "${TMPDIR:-/tmp}/ralph-diagnosis.XXXXXX")"
+trap 'test -z "$DIAG_WORKDIR" || test "$DIAG_WORKDIR" = / || rm -rf -- "$DIAG_WORKDIR"' EXIT
+STRUCTURED_RESULT="$DIAG_WORKDIR/diagnose.json"
+ralph diagnose --legacy --session latest --diagnostics-root "$RUN/.ralph/diagnostics" --format json --output "$STRUCTURED_RESULT"
 ```
 
 - `--legacy`：在 bundle `status ∈ {legacy, missing}` 时仍返回可消费的 JSON（不要求 bundle 是 present）。
 - `--session latest`：从 `$RUN/.ralph/diagnostics/` 里选最新 session。
 - `--diagnostics-root`：显式传入 diagnostics 根，避免从 cwd 推断。
-- `--format json`：输出到 stdout 之外；与 `--output` 配对落盘到 `$REPORT_BASE.json` 供后续步骤直接读。
-- `REPORT_BASE` 在 §0.2 列表中已分配唯一路径，不与 events.jsonl 冲突。
+- `--format json`：输出到 stdout 之外；与 `--output` 配对落盘到 `$STRUCTURED_RESULT`，仅供当前诊断过程读取。
+- `$DIAG_WORKDIR` 是唯一的中间产物根目录；不要把 JSON、stderr 或工作笔记路径设为 `docs/report/...`。
+- 最终报告 frontmatter 的 `structured_result_ref` 写 `inline: summarized in report`，不得引用清理后不存在的临时绝对路径。
 
-若命令退出码非零（典型：diagnostics 目录不存在、session latest 解析失败），把 stderr 写进报告 §0 的「环境异常」段，按 §0.2 legacy 兜底继续后续步骤。**禁止** 把 `ralph diagnose` 退出码当 bundle 状态判定（bundle 状态以 `$REPORT_BASE.json` 的 `bundle.status` 字段为准）。
+若命令退出码非零（典型：diagnostics 目录不存在、session latest 解析失败），把 stderr 暂存到 `$DIAG_WORKDIR/diagnose.stderr`，并将摘要写进报告 §0 的「环境异常」段，按 §0.2 legacy 兜底继续后续步骤。**禁止** 把 `ralph diagnose` 退出码当 bundle 状态判定（bundle 状态以 `$STRUCTURED_RESULT` 的 `bundle.status` 字段为准）。
 
 ### Phase 0 能力推断（execution capabilities）
 
@@ -206,7 +212,7 @@ ralph diagnose --legacy --session latest --diagnostics-root "$RUN/.ralph/diagnos
 - [ ] 每条 P0/P1 在 §5 有 **置信度**；P0≥70、入表≥60
 - [ ] confidence<60 的候选已加深或落入 §7，未混入 §5/§6
 - [ ] 未引用 ssot-guardrails 禁止项
-- [ ] 报告在主仓 `docs/report/`
+- [ ] `docs/report/` 只包含最终 Markdown 报告；JSON、stderr、工作笔记等中间产物均在 `$DIAG_WORKDIR` 并已清理
 - [ ] **历史检索开关状态已写入 frontmatter**（`history_search: disabled | preset-only | full`）
 
 ## 参考

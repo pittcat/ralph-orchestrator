@@ -7,6 +7,30 @@
 use crate::{Event, Hat, HatId};
 use std::collections::BTreeMap;
 
+/// Failure raised when a caller requires confirmation that an event was
+/// delivered to the EventBus topology.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EventDeliveryError {
+    /// The event declared a source that is not registered in the bus.
+    UnknownSource(HatId),
+    /// The event declared a target that is not registered in the bus.
+    UnknownTarget(HatId),
+    /// An untargeted event had no matching recipient.
+    NoRecipients,
+}
+
+impl std::fmt::Display for EventDeliveryError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::UnknownSource(source) => write!(f, "event source is not registered: {source}"),
+            Self::UnknownTarget(target) => write!(f, "event target is not registered: {target}"),
+            Self::NoRecipients => f.write_str("event had no registered recipients"),
+        }
+    }
+}
+
+impl std::error::Error for EventDeliveryError {}
+
 /// Type alias for the observer callback function.
 type Observer = Box<dyn Fn(&Event) + Send + 'static>;
 
@@ -161,6 +185,47 @@ impl EventBus {
         }
 
         recipients
+    }
+
+    /// Publishes an event and fails when the current topology cannot deliver
+    /// it. Existing `publish` callers retain its permissive behavior; this
+    /// checked variant is for durable business/recovery transitions where a
+    /// committed event must not be mistaken for a delivered handoff.
+    pub fn publish_checked(&mut self, event: Event) -> Result<Vec<HatId>, EventDeliveryError> {
+        self.validate_delivery(&event)?;
+        let recipients = self.publish(event);
+        debug_assert!(!recipients.is_empty());
+        Ok(recipients)
+    }
+
+    /// Validates that an event has a routable source/target and at least one
+    /// recipient without changing any queue. This is used before an accepted
+    /// transition writes its durable outbox entry.
+    pub fn validate_delivery(&self, event: &Event) -> Result<(), EventDeliveryError> {
+        if event.system_injected != Some(true)
+            && let Some(source) = event.source.as_ref()
+            && !self.hats.contains_key(source)
+        {
+            return Err(EventDeliveryError::UnknownSource(source.clone()));
+        }
+        if let Some(target) = event.target.as_ref()
+            && !self.hats.contains_key(target)
+        {
+            return Err(EventDeliveryError::UnknownTarget(target.clone()));
+        }
+
+        let has_recipient = if event.target.is_some() {
+            true
+        } else if event.topic.as_str().starts_with("human.") {
+            // Human events intentionally use the dedicated queue.
+            true
+        } else {
+            self.hats.values().any(|hat| hat.is_subscribed(&event.topic))
+        };
+        if !has_recipient {
+            return Err(EventDeliveryError::NoRecipients);
+        }
+        Ok(())
     }
 
     /// Takes all pending events for a hat.
@@ -729,6 +794,20 @@ mod tests {
         let seq1 = run_sequence();
         let seq2 = run_sequence();
         assert_eq!(seq1, seq2, "Same initial state must produce same sequence");
+    }
+
+    #[test]
+    fn checked_publish_rejects_unknown_target_without_queue_mutation() {
+        let mut bus = EventBus::new();
+        register_wildcard(&mut bus, "executor");
+        let event = Event::new("work.done", "payload").with_target("test-stabilizer");
+
+        let error = bus.publish_checked(event).expect_err("unknown target must fail");
+        assert_eq!(
+            error,
+            EventDeliveryError::UnknownTarget(HatId::new("test-stabilizer"))
+        );
+        assert!(!bus.has_pending(), "failed delivery must not enqueue an event");
     }
 
     // ─── Round-robin cursor regression tests (U1 / AE1) ──────────────────────

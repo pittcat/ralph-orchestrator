@@ -223,7 +223,15 @@ impl AcceptedTransition {
             return Err(TransitionError::PreCommitRejected { reason });
         }
 
-        // 2. Derive the deterministic identity tuple.
+        // 2. Validate delivery before writing the durable receipt. This keeps
+        // the existing outbox-before-publish atomicity: an undeliverable
+        // targeted handoff is rejected without leaving a replay-dedup record.
+        bus.validate_delivery(event)
+            .map_err(|e| TransitionError::CommitFailed {
+                source: format!("event delivery validation failed: {e}"),
+            })?;
+
+        // 3. Derive the deterministic identity tuple.
         let (payload_digest, transition_id) =
             Self::derive_identity(event, loop_id, activation_id, contract_revision);
 
@@ -238,14 +246,15 @@ impl AcceptedTransition {
             transition_id,
         };
 
-        // 3. Durable outbox write — on failure, publish nothing.
+        // 4. Durable outbox write — on failure, publish nothing.
         ledger
             .append_outbox_unlocked(&entry)
             .map_err(|e| TransitionError::CommitFailed {
                 source: e.to_string(),
             })?;
 
-        // 4. Publish — only reached after the durable write succeeds.
+        // 5. Publish — only reached after the durable write succeeds. The
+        // preflight above guarantees this event has a current recipient.
         bus.publish(event.clone());
 
         Ok(entry)
@@ -733,6 +742,29 @@ mod tests {
             assert!(entries.is_empty(), "no outbox entry after failed commit")
         }
         drop(dir);
+    }
+
+    #[test]
+    fn u6_commit_unknown_target_has_no_outbox_or_pending_handoff() {
+        let (_dir, ledger, mut bus, _store) = fixture();
+        let event = valid_event().with_target("test-stabilizer");
+
+        let result = AcceptedTransition::commit(
+            &event,
+            "loop-1",
+            "act-1",
+            "rev-1",
+            &ledger,
+            &mut bus,
+            |_| Ok(()),
+        );
+
+        assert!(matches!(result, Err(TransitionError::CommitFailed { .. })));
+        assert!(
+            read_outbox(ledger.workspace()).unwrap().is_empty(),
+            "undeliverable transitions must not become replay-dedup records"
+        );
+        assert!(!bus.has_pending());
     }
 
     #[test]

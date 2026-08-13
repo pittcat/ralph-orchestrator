@@ -1,6 +1,6 @@
 # 七层校验流水线（强制）
 
-诊断**必须按层顺序执行**。上一层未通过的门禁，不得在报告中写「健康」。每层产出写入工作笔记，最终汇入报告对应章节。
+诊断**必须按层顺序执行**。上一层未通过的门禁，不得在报告中写「健康」。每层产出写入 `$DIAG_WORKDIR` 下的工作笔记，最终汇入报告对应章节；不得把工作笔记或 JSON 结果写入 target branch。
 
 ```
 L0 盘点 → L1 拓扑 → L2 日志三联 → L3 产物五证 → L4 机制十二项 → L5 历史深挖 → L6 源码反查 → L7 归因落盘
@@ -162,7 +162,8 @@ Agent D 输出 P0/P1/P2 + **每条置信度** + 修复依赖序；低分须已�
 - [ ] P0 每条有 DEV + 源码或 preset 行号
 - [ ] 日志三联至少 5 行对账
 - [ ] 历史表 ≥3 行（仅在 `--include-history ≠ disabled`）/ `disabled` 时显式 `N/A (history disabled)`
-- [ ] 报告路径 `docs/report/...-diagnosis.md` 已写入
+- [ ] 最终报告路径 `docs/report/...-diagnosis.md` 已写入，且 `docs/report/` 没有本次报告之外的中间产物
+- [ ] `$DIAG_WORKDIR` 中的 JSON、stderr、工作笔记已清理；最终报告不引用清理后的临时绝对路径
 - [ ] frontmatter 含 `history_search: <disabled | preset-only | full>`
 - [ ] 已执行下方"frontmatter 对账"机器校验脚本并通过
 

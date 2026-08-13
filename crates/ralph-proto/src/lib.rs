@@ -23,7 +23,7 @@ mod ux_event;
 
 pub use error::{Error, Result};
 pub use event::Event;
-pub use event_bus::EventBus;
+pub use event_bus::{EventBus, EventDeliveryError};
 pub use hat::{Hat, HatId};
 pub use json_rpc::{
     GuidanceTarget, RpcCommand, RpcEvent, RpcIterationInfo, RpcState, RpcTaskCounts,

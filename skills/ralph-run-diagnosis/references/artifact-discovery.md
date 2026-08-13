@@ -15,7 +15,8 @@ case "$ARG" in
 esac
 SCHEMA="presets/schemas/$(basename "$PRESET" .yml).yml"
 RUN=<run_dir>   # 含 .ralph/ 的 workspace 根
-REPO=<ralph-orchestrator 主仓根>  # 报告写 REPO/docs/report/
+REPO=<ralph-orchestrator 主仓根>  # 仅最终报告写 REPO/docs/report/
+DIAG_WORKDIR="$(mktemp -d "${TMPDIR:-/tmp}/ralph-diagnosis.XXXXXX")"  # 所有中间产物
 ```
 
 `preset_file` / schema 路径相对 **主仓**；产物路径相对 **RUN**。
@@ -135,5 +136,6 @@ test -f "$RUN/.ralph/loop.lock" && echo "LOCK_HELD" || echo "lock_released"
 
 - 缺 `current-events` 或指向文件 → **停止**
 - LOGS_ONLY → 报告必须含 OPAC 降级声明（见 [opac-audit-by-mode.md](opac-audit-by-mode.md)）
-- 报告写入 **`$REPO/docs/report/`**（非 run_dir）
+- 最终报告写入 **`$REPO/docs/report/`**（非 run_dir）；JSON、stderr、工作笔记和临时清单必须写入 `$DIAG_WORKDIR`，不得写入 target branch
+- 结束时清理 `$DIAG_WORKDIR`；清理失败必须报告残留路径
 - 未声明 `execution_capabilities` → **不得**把缺 `supervisor.db` / 缺 `wave_id` 写成故障

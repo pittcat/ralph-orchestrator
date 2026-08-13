@@ -2685,10 +2685,6 @@ impl EventLoop {
         };
         // --- End execution contract validation ---
 
-        // 2026-07-07-002 U2: handoff / work.done dedup side effects only for
-        // contract-committed events (never for rejected candidates).
-        self.apply_contract_committed_side_effects(&events);
-
         // Calculate had_raw_events and had_rejected_events for missing-event gate logic
         // had_raw_events: events that passed through contract validation (accepted OR rejected)
         // had_rejected_events: events that were rejected by contract validation
@@ -2732,6 +2728,10 @@ impl EventLoop {
             .unwrap_or(false);
         let policy_config_ref = policy_config_owned.as_ref();
         let mut accepted_log_events = Vec::new();
+        // Retain the accepted JSONL metadata (especially timestamps) for
+        // post-publication handoff registration; the validation loop consumes
+        // `events` below.
+        let committed_events = events.clone();
 
         // U1 (plan 2026-08-10-001): helper that rebuilds a ralph_proto::Event
         // from a JSONL event, preserving source/target/wave/system_injected
@@ -3884,6 +3884,11 @@ impl EventLoop {
                 self.apply_phase_authority_on_accepted(&event);
             }
         }
+
+        // Register handoff deadlines only after every accepted transition has
+        // been durably committed and delivery-checked. This prevents a
+        // silently undelivered event from creating a false 600s timeout.
+        self.apply_contract_committed_side_effects(&committed_events);
 
         // --- U3: Invariant assertion checks ---
         if self.config.core.invariant_assertions {
