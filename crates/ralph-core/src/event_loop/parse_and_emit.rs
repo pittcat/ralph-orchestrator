@@ -671,15 +671,44 @@ impl EventLoop {
                         ),
                     );
                     self.bus.publish(violation);
-                    // 触发 task.resume(target=ralph) 走 orchestrator 恢复路径
-                    let resume = Event::new(
-                        "task.resume",
-                        format!(
-                            "{{\"target_hat\":\"ralph\",\"reason\":\"isolated_anonymous_business_topic\",\"topic\":\"{}\"}}",
-                            event.topic
-                        ),
+                    // Plan 2026-08-13-003 U1: route the
+                    // anonymous-business recovery through the
+                    // unified publisher so target/recipient
+                    // fail-close (D4) and dedup fire. The
+                    // resolved target is the current
+                    // `isolated_hat` — the only hat that owns
+                    // the anonymous business event in this
+                    // scope. If the registry has unmounted
+                    // the hat between resolve and publish,
+                    // the publisher returns Block with no
+                    // bus side effect.
+                    let loop_id_for_resume = self.current_loop_id();
+                    let resume_payload = format!(
+                        "{{\"target_hat\":\"{}\",\"reason\":\"isolated_anonymous_business_topic\",\"topic\":\"{}\"}}",
+                        isolated_hat.as_str(),
+                        event.topic
                     );
-                    self.bus.publish(resume);
+                    let decision = crate::event_loop::resume_routing::publish_targeted_resume_for_hat(
+                        &mut self.bus,
+                        &self.registry,
+                        None,
+                        loop_id_for_resume.as_deref(),
+                        isolated_hat.as_str(),
+                        None,
+                        None,
+                        &format!("anonymous_business:{}", event.topic),
+                        resume_payload,
+                    );
+                    if let crate::event_loop::resume_routing::ResumeDecision::Block { reason } =
+                        &decision
+                    {
+                        tracing::warn!(
+                            target = %isolated_hat.as_str(),
+                            topic = %event.topic,
+                            ?reason,
+                            "isolated-anonymous-business recovery blocked (no safe target)"
+                        );
+                    }
                     continue;
                 }
 

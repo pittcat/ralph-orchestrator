@@ -968,10 +968,40 @@ impl EventLoop {
                             "hat": hat,
                             "loop_id": self.loop_id_label(),
                         });
-                        self.bus.publish(ralph_proto::Event::new(
-                            "task.resume",
+                        // Plan 2026-08-13-003 U1: route the
+                        // phase-violation recovery through
+                        // the unified publisher so
+                        // target/recipient fail-close (D4)
+                        // and dedup fire. The resolved
+                        // target is the offending hat —
+                        // the only hat that owns the
+                        // event in this scope. If the
+                        // registry has unmounted the hat
+                        // between resolve and publish, the
+                        // publisher returns Block with no
+                        // bus side effect.
+                        let loop_id_for_resume = self.loop_id_label();
+                        let decision = crate::event_loop::resume_routing::publish_targeted_resume_for_hat(
+                            &mut self.bus,
+                            &self.registry,
+                            None,
+                            Some(loop_id_for_resume.as_str()),
+                            hat,
+                            None,
+                            None,
+                            &format!("phase_violation:{}:{}", event.topic.as_str(), hat),
                             resume_payload.to_string(),
-                        ));
+                        );
+                        if let crate::event_loop::resume_routing::ResumeDecision::Block { reason } =
+                            &decision
+                        {
+                            tracing::warn!(
+                                target = %hat,
+                                topic = %event.topic.as_str(),
+                                ?reason,
+                                "phase-violation recovery blocked (no safe target)"
+                            );
+                        }
                     }
                     BudgetDecision::Exhausted => match on_exhausted_action(&policy) {
                         ExhaustedAction::PlanBlocked => {

@@ -385,7 +385,24 @@ pub fn publish_targeted_resume(
                 .with_source("orchestrator")
                 .with_system_injected()
                 .with_target(target.clone());
-            bus.publish(event);
+            // Plan 2026-08-13-003 U1 D4: the unified
+            // publisher MUST inspect the recipients
+            // returned by `EventBus::publish` and
+            // downgrade to `Block` when they do not
+            // equal exactly `[target]`. Empty
+            // recipients (target set but unregistered
+            // in the bus topology) and non-target
+            // recipients (race) are both fail-closed.
+            let recipients = bus.publish(event);
+            let recipients_match =
+                recipients.len() == 1 && recipients[0].as_str() == target.as_str();
+            if !recipients_match {
+                return ResumeDecision::Block {
+                    reason: ResumeBlockReason::UnknownTargetRace {
+                        target: target.as_str().to_string(),
+                    },
+                };
+            }
         }
         ResumeDecision::Duplicate { .. } => {
             // Drop without re-queueing (D6).
