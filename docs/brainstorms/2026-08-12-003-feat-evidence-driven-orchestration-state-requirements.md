@@ -34,7 +34,7 @@ Ralph 已经具备 Accepted Transition、Execution Contract、Recovery Intent、
 
 ## Gap Register
 
-### P0 — 状态、证据与接受边界
+### P0/P1 — 状态、证据与接受边界
 
 #### GAP-01：没有统一的编排认知状态、来源权威与新鲜度语义
 
@@ -45,15 +45,15 @@ Ralph 已经具备 Accepted Transition、Execution Contract、Recovery Intent、
 - **需求记录**：建立统一的、可恢复的编排认知状态；Prompt 只能是相关状态的压缩投影，不能成为跨 activation 的事实源。
 - **边界**：本缺口只要求统一语义和权威性，不在此文档决定存储方式或序列化格式。
 
-#### GAP-02：状态机推进、Ledger replay 与最终接纳没有被证明为同一个原子边界
+#### GAP-02：StateMachine 运行态、Ledger replay 与最终接纳边界没有统一的提交语义
 
-- **当前状态**：StateMachine 在 `validate_event` 中会直接修改运行态；事件随后还要经过 state projection、pre-commit 和 AcceptedTransition 相关处理。`LedgerSnapshot` 虽声明包含 state-machine runtime，但 `CommitDelta` 的变体和 `apply_delta` 分支中没有对应的 state-machine 专用持久化变更。
-- **源码证据**：`crates/ralph-core/src/state_machine.rs:421`；`crates/ralph-core/src/event_loop/parse_and_emit.rs:1495`；`crates/ralph-core/src/event_loop/parse_and_emit.rs:1557`；`crates/ralph-core/src/state/commit.rs:76`；`crates/ralph-core/src/state/snapshot.rs:335`。
-- **已有能力**：`AcceptedTransition` 已提供 durable outbox、commit receipt 和崩溃恢复语义，见 `crates/ralph-core/src/event_loop/accepted_transition.rs:9`。
-- **缺少什么**：StateMachine 的语义状态推进没有被证明纳入所有下游检查、durable commit 和 replay 的同一事务边界；尤其缺少“拒绝不改变状态、重启重放后与 live state 相同”的系统级证明。
-- **风险**：事件可能已经让状态机前进，随后却被 projection 或 pre-commit 拒绝；或者 live state 与 ledger replay state 分叉，造成“事件未接受但状态已推进”或恢复后错误路由。
-- **需求记录**：任何业务状态转换必须在所有接受条件通过后才生效，并且必须可由同一 durable 记录重建；拒绝、提交失败和进程重启不能留下半提交的语义状态。
-- **边界**：不要求替换 AcceptedTransition，只要求明确其与 StateMachine、Projection 和 replay 的一致性关系。
+- **当前状态**：在启用 `event_loop.state_machine` 的流程中，StateMachine 的 `validate_event` 会直接修改进程内运行态；事件随后还要经过 state projection、统一 validation、execution contract 和最终 emit/AcceptedTransition 处理。`LedgerSnapshot` 虽声明包含 state-machine runtime，但 `CommitDelta` 与 `apply_delta` 没有对应的 state-machine 专用持久化变更，LoopState 初始化时也不会从 Ledger replay 出状态机运行态。
+- **源码证据**：`crates/ralph-core/src/state_machine.rs:139`、`crates/ralph-core/src/state_machine.rs:421`、`crates/ralph-core/src/state_machine.rs:461`；`crates/ralph-core/src/event_loop/parse_and_emit.rs:1517`；`crates/ralph-core/src/state/commit.rs:76`；`crates/ralph-core/src/state/snapshot.rs:177`、`crates/ralph-core/src/state/snapshot.rs:349`；`crates/ralph-core/src/event_loop/loop_state.rs:886`。
+- **已有能力**：OPAC 已覆盖 agent 发起的 task/wave/emit 操作纪律：Precheck 与 Apply 参数绑定、loop/hat 作用域、Apply 失败后的 ticket 恢复和后续 Confirm；`AcceptedTransition` 已提供业务事件的 durable outbox、commit receipt 和发布失败不继续发布的基础，见 `crates/ralph-core/data/ralph-tools-opac.md:15`、`crates/ralph-cli/src/task_verify_gate.rs:1`、`crates/ralph-core/src/event_loop/accepted_transition.rs:9`。GAP-01 已把 accepted Business/Recovery event 的认知观察写入可 replay 的 Ledger，但该观察是 `Observation + Unverified`，并且明确不改变业务 acceptance，见 `crates/ralph-core/src/state/knowledge.rs:626`、`docs/plans/2026-08-13-001-feat-gap01-unified-orchestration-knowledge-state-plan.md:88`。
+- **真正缺少什么**：只针对启用 StateMachine 的流程，尚未证明“状态机转换、下游接受条件、durable commit、最终发布和重启 replay”使用同一个权威转换结果。当前需要验证并明确：状态机验证是否先产生可撤销/可提交的候选状态；任何下游拒绝是否保持原状态；提交失败是否能恢复原状态；新进程 replay 后是否得到与 live state 等价的状态。
+- **风险**：这不是 OPAC 已解决的 agent 参数漂移问题，也不是 GAP-01 的认知记录问题。若 StateMachine 已推进而后续流程拒绝，或进程在不同持久化步骤之间退出，可能出现“事件未最终接受但状态已推进”或“live state 与 replay state 不同”，进而影响后续路由和终态判断。当前 builtin preset 未启用 `state_machine` 配置，因此这是自定义或显式启用 StateMachine 流程的条件性风险，不应描述成所有 Ralph 流程都会发生的无条件 P0 故障。
+- **需求记录**：对于启用 StateMachine 的流程，业务状态转换必须具有单一、可审计的接受结果：只有满足最终接受条件的转换才能成为 live state 和 durable state；拒绝、提交失败和进程重启不能留下半提交的状态；replay 必须与正常运行的状态等价。验证应覆盖下游拒绝、Ledger 写入失败、AcceptedTransition 发布失败和进程重启，而不是只测试 `validate_event` 的单元行为。
+- **边界**：不重复建设 OPAC 的 verify/apply/confirm，不把 task `Confirmed` 自动解释成知识状态 `Verified`，不要求 GAP-01 认知观察替代 accepted transition，也不要求替换 `AcceptedTransition`。本缺口只处理 StateMachine 运行态与最终接纳、durable replay 之间的剩余一致性。
 
 #### GAP-03：终态接受没有跨流程统一的硬证据与证据可信度边界
 
@@ -187,7 +187,8 @@ Ralph 已经具备 Accepted Transition、Execution Contract、Recovery Intent、
 
 | 优先级 | Gap | 核心问题 |
 |---|---|---|
-| P0 | GAP-01、GAP-02、GAP-03 | 认知状态、证据可信度和最终接受边界尚未统一，可能造成错误推进或错误完成。 |
+| P0 | GAP-01、GAP-03 | 认知状态与终态证据可信度仍可能影响错误推进或错误完成。 |
+| P1（条件性） | GAP-02（仅启用 StateMachine 的流程） | StateMachine 运行态、durable replay 与最终接纳之间缺少统一提交语义，可能造成恢复或后续路由不一致。 |
 | P1 | GAP-04～GAP-09 | Decision、Action、Evaluator、Route 和 Retry 不能跨流程形成证据驱动闭环。 |
 | P2 | GAP-10～GAP-14 | 复用、覆盖、隔离和收敛存在局部实现，但缺少通用系统语义。 |
 | P3 | GAP-15、GAP-16 | 预算、指标和阈值缺少风险关联与长期校准能力。 |
@@ -198,6 +199,8 @@ Ralph 已经具备 Accepted Transition、Execution Contract、Recovery Intent、
 - `Execution Contract` 已经提供 payload、task、git 和部分 test evidence 的完成义务。
 - `Recovery Intent` 和 `resume_routing` 已经提供 typed recovery target、retry key、预算和 fail-closed 路由。
 - `task_verify_gate` 已经为 task add/ensure 提供 verify-then-apply、payload fingerprint 和原子 claim/consume；`HatCommandPolicy` 已经提供部分 role ACL。
+- OPAC 已经覆盖 agent 操作层的 Observe/Precheck/Apply/Confirm；其 mutation fingerprint、ticket 和 task confirmation 不能替代 StateMachine 的 durable transition，也不能替代认知状态的 evidence verification。
+- GAP-01 已经提供可 replay 的 Ledger 认知观察和 isolated prompt 的只读投影；它不改变 accepted/rejected 结果，不应被重新描述成 StateMachine 的原子提交方案。
 - `Verdict`、coordinator decision gate、failure class、hard gate、Parallel Forge 和 Post-Merge Converge 已经提供局部的决策、分类、覆盖和收敛能力。
 - `diagnosis` 已经具备 accepted event evidence、recovery metrics 和局部自愈判断。
 - `parallel-forge`、`post-merge-converge` 已经包含局部的 evidence gate 和 merge 后验证模式，但不能替代跨 preset 的统一契约。
@@ -225,4 +228,4 @@ Ralph 已经具备 Accepted Transition、Execution Contract、Recovery Intent、
 
 本记录基于当前源码审计，重点依据 `crates/ralph-core/src/runtime_state.rs`、`crates/ralph-core/src/state_machine.rs`、`crates/ralph-core/src/state/commit.rs`、`crates/ralph-core/src/state/snapshot.rs`、`crates/ralph-core/src/event_loop/parse_and_emit.rs`、`crates/ralph-core/src/event_loop/accepted_transition.rs`、`crates/ralph-core/src/execution_contract`、`crates/ralph-core/src/contract_completeness.rs`、`crates/ralph-core/src/recovery_intent.rs`、`crates/ralph-core/src/event_loop/resume_routing.rs`、`crates/ralph-core/src/event_loop/verdict.rs`、`crates/ralph-core/src/diagnosis/responder.rs`、`crates/ralph-core/src/ephemeral_isolation.rs`、`crates/ralph-cli/src/task_verify_gate.rs`、`crates/ralph-cli/src/hat_command_policy.rs`、`docs/explanation/execution-contract-design.md` 和 `presets/en/parallel-forge.yml`。
 
-其中 GAP-02 的核心风险应在后续规划阶段增加 restart/replay 和下游拒绝场景验证；本需求文档不把尚未通过该验证的推断写成已修复事实。
+其中 GAP-02 的核心风险应在后续规划阶段增加 restart/replay、下游拒绝、Ledger 写入失败和 AcceptedTransition 发布失败场景验证。本次更新已排除 OPAC 已覆盖的 agent 操作漂移，以及 GAP-01 已覆盖的认知观察持久化；文档仍不把尚未通过系统级验证的推断写成已修复事实。
