@@ -590,6 +590,7 @@ fn publish_hard_recovery_event(
         action.target_hat.as_str(),
         None,
         None,
+        None,
         &action.retry_key,
         structured_payload,
     );

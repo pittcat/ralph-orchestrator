@@ -414,6 +414,63 @@ pub fn publish_targeted_resume(
     decision
 }
 
+/// Plan 2026-08-13-003 U2: extract the `target_hat` field
+/// from a serialized JSON payload so production wrappers can
+/// thread the payload target through the resolver without
+/// forcing every caller to re-parse. Returns `None` when the
+/// payload does not contain a non-empty string `target_hat`.
+pub fn payload_target_hat(payload: &str) -> Option<String> {
+    let value: serde_json::Value = match serde_json::from_str(payload) {
+        Ok(v) => v,
+        Err(_) => return None,
+    };
+    value
+        .get("target_hat")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+}
+
+/// Plan 2026-08-13-003 U2: alias kept for callers that
+/// prefer the more explicit name. Both functions return
+/// the same `Option<String>`.
+pub fn payload_target_hat_field(payload: &str) -> Option<String> {
+    payload_target_hat(payload)
+}
+
+/// Plan 2026-08-13-003 U2: extract the `task_id` field from a
+/// serialized JSON payload. Returns `None` when the payload
+/// does not contain a non-empty string `task_id`.
+pub fn payload_task_id(payload: &str) -> Option<String> {
+    let value: serde_json::Value = match serde_json::from_str(payload) {
+        Ok(v) => v,
+        Err(_) => return None,
+    };
+    value
+        .get("task_id")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+}
+
+/// Plan 2026-08-13-003 U2: extract the `task_key` field from a
+/// serialized JSON payload. Returns `None` when the payload
+/// does not contain a non-empty string `task_key`.
+pub fn payload_task_key(payload: &str) -> Option<String> {
+    let value: serde_json::Value = match serde_json::from_str(payload) {
+        Ok(v) => v,
+        Err(_) => return None,
+    };
+    value
+        .get("task_key")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+}
+
 /// Plan 2026-08-10-001 U1: derive a [`PendingResumeIdentity`]
 /// projection from the live bus pending queue for a given hat.
 /// Used to short-circuit equivalent pending resumes per D6.
@@ -448,6 +505,13 @@ pub fn pending_resume_identities_from_bus(
 /// optional identity hints; `retry_key` MUST be non-empty
 /// (callers derive a deterministic one from the recovery
 /// context).
+///
+/// Plan 2026-08-13-003 U2: the wrapper now threads
+/// `payload_target_hat` from the resume payload through the
+/// resolver so the priority chain (D2) is fully exercised in
+/// production. Callers that previously relied on the
+/// hard-coded `payload_target_hat: None` MUST supply the
+/// payload's `target_hat` field (or `None` when absent).
 pub fn publish_targeted_resume_for_hat(
     bus: &mut ralph_proto::EventBus,
     registry: &impl RegisteredHats,
@@ -456,6 +520,7 @@ pub fn publish_targeted_resume_for_hat(
     target_hint: &str,
     task_id: Option<&str>,
     task_key: Option<&str>,
+    payload_target_hat: Option<&str>,
     retry_key: &str,
     payload: String,
 ) -> ResumeDecision {
@@ -467,6 +532,7 @@ pub fn publish_targeted_resume_for_hat(
         target_hint,
         task_id,
         task_key,
+        payload_target_hat,
         retry_key,
         payload,
         None,
@@ -479,6 +545,9 @@ pub fn publish_targeted_resume_for_hat(
 /// `.ralph/diagnostics/` default. Used by tests so they
 /// can pin a temp dir without touching the repo's
 /// diagnostics directory.
+///
+/// Plan 2026-08-13-003 U2: see [`publish_targeted_resume_for_hat`]
+/// for the new `payload_target_hat` argument.
 pub fn publish_targeted_resume_for_hat_in(
     bus: &mut ralph_proto::EventBus,
     registry: &impl RegisteredHats,
@@ -487,17 +556,31 @@ pub fn publish_targeted_resume_for_hat_in(
     target_hint: &str,
     task_id: Option<&str>,
     task_key: Option<&str>,
+    payload_target_hat: Option<&str>,
     retry_key: &str,
     payload: String,
     diagnostics_dir: Option<&std::path::Path>,
 ) -> ResumeDecision {
     let target_hat = ralph_proto::HatId::new(target_hint);
     let existing = pending_resume_identities_from_bus(bus, &target_hat);
+    // Plan 2026-08-13-003 U2: caller-supplied identity wins,
+    // but when the caller did not parse the payload itself we
+    // still recover the standard identity fields so the
+    // resolver priority chain (D2) is exercised in production.
+    let resolved_task_id: Option<String> = task_id
+        .map(str::to_string)
+        .or_else(|| payload_task_id(&payload));
+    let resolved_task_key: Option<String> = task_key
+        .map(str::to_string)
+        .or_else(|| payload_task_key(&payload));
+    let resolved_payload_target: Option<String> = payload_target_hat
+        .map(str::to_string)
+        .or_else(|| payload_target_hat_field(&payload));
     let inputs = ResumeRoutingInputs {
         event_target: Some(target_hint),
-        payload_target_hat: None,
-        task_id,
-        task_key,
+        payload_target_hat: resolved_payload_target.as_deref(),
+        task_id: resolved_task_id.as_deref(),
+        task_key: resolved_task_key.as_deref(),
         retry_key: Some(retry_key),
         loop_id,
         payload: Some(&payload),
@@ -955,6 +1038,7 @@ mod tests {
             "executor",
             None,
             None,
+            None,
             "retry-1",
             payload.to_string(),
         );
@@ -964,6 +1048,7 @@ mod tests {
             None,
             Some("loop-A"),
             "executor",
+            None,
             None,
             None,
             "retry-1",
@@ -1099,6 +1184,7 @@ mod tests {
             None,
             Some("loop-A"),
             "victim",
+            None,
             None,
             None,
             "u2_block_envelope",

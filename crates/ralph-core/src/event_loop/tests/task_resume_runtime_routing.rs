@@ -415,6 +415,123 @@ fn u1_runtime_generated_resume_is_targeted() {
     }
 }
 
+/// Plan 2026-08-13-003 U2 + R2/S2: production wrapper
+/// `publish_targeted_resume_for_hat` MUST thread the payload's
+/// `target_hat` field through the resolver so the priority
+/// chain (D2) is exercised end-to-end. When the payload
+/// declares `target_hat=executor` and the registry accepts
+/// `executor`, the call publishes to `executor` and only
+/// `executor` — even though the wrapper was called with a
+/// different `target_hint` (the safety case where caller-
+/// side and payload-side agree on the resolved target).
+#[test]
+fn u2_publish_targeted_resume_for_hat_threads_payload_target() {
+    use crate::event_loop::resume_routing::{
+        publish_targeted_resume_for_hat, ResumeDecision,
+    };
+
+    let mut bus = ralph_proto::EventBus::new();
+    use ralph_proto::Hat;
+    bus.register(Hat::new("executor", "Executor").subscribe("task.resume"));
+    bus.register(Hat::new("observer", "Observer").subscribe("task.resume"));
+    let registry: std::collections::HashSet<String> =
+        ["executor", "observer"].iter().map(|s| s.to_string()).collect();
+
+    // Caller passes target_hint=executor AND payload
+    // declares target_hat=executor. The wrapper must
+    // publish to executor only.
+    let decision = publish_targeted_resume_for_hat(
+        &mut bus,
+        &registry,
+        None,
+        Some("loop-A"),
+        "executor",
+        None,
+        None,
+        Some("executor"),
+        "u2_threads_payload_target",
+        r#"{"reason":"u2_threads_payload_target","target_hat":"executor"}"#.to_string(),
+    );
+    assert!(
+        matches!(decision, ResumeDecision::Allow { .. }),
+        "consistent payload+wrapper target must Allow (decision was {decision:?})"
+    );
+    let exec_pending = bus
+        .peek_pending(&ralph_proto::HatId::new("executor"))
+        .expect("executor pending");
+    assert_eq!(
+        exec_pending.len(),
+        1,
+        "executor must hold the resume"
+    );
+    let obs_pending = bus
+        .peek_pending(&ralph_proto::HatId::new("observer"))
+        .map(|v| v.len())
+        .unwrap_or(0);
+    assert_eq!(
+        obs_pending, 0,
+        "observer must not receive the targeted resume"
+    );
+}
+
+/// Plan 2026-08-13-003 U2 + R2/S10: when the caller only
+/// has the JSONL `triggered` field (legacy format), the
+/// production wrapper must still resolve to that hat via
+/// the explicit `event_target` it receives. The wrapper
+/// itself does not parse `triggered` (the JSONL rebuild
+/// path does that in `parse_and_emit.rs`); the resolver
+/// must Allow when the caller passes `event_target` =
+/// `triggered_hat` and the registry accepts it.
+#[test]
+fn u2_legacy_triggered_only_jsonl_preserves_target() {
+    use crate::event_loop::resume_routing::{
+        publish_targeted_resume_for_hat, ResumeDecision,
+    };
+
+    let mut bus = ralph_proto::EventBus::new();
+    use ralph_proto::Hat;
+    bus.register(Hat::new("executor", "Executor").subscribe("task.resume"));
+    bus.register(Hat::new("observer", "Observer").subscribe("task.resume"));
+    let registry: std::collections::HashSet<String> =
+        ["executor", "observer"].iter().map(|s| s.to_string()).collect();
+
+    // Caller passes only event_target (from JSONL
+    // `triggered=executor`) and no payload_target_hat.
+    // The resolver must Allow and publish to executor.
+    let decision = publish_targeted_resume_for_hat(
+        &mut bus,
+        &registry,
+        None,
+        Some("loop-A"),
+        "executor",
+        None,
+        None,
+        None,
+        "u2_legacy_triggered",
+        r#"{"reason":"u2_legacy_triggered"}"#.to_string(),
+    );
+    assert!(
+        matches!(decision, ResumeDecision::Allow { .. }),
+        "legacy triggered-only path must Allow (decision was {decision:?})"
+    );
+    let exec_pending = bus
+        .peek_pending(&ralph_proto::HatId::new("executor"))
+        .expect("executor pending");
+    assert_eq!(
+        exec_pending.len(),
+        1,
+        "executor must hold the legacy triggered-only resume"
+    );
+    let obs_pending = bus
+        .peek_pending(&ralph_proto::HatId::new("observer"))
+        .map(|v| v.len())
+        .unwrap_or(0);
+    assert_eq!(
+        obs_pending, 0,
+        "observer must not receive the legacy triggered-only resume"
+    );
+}
+
 #[test]
 fn unit3_unified_publisher_blocks_broadcast_when_no_safe_target() {
     let mut bus = ralph_proto::EventBus::new();

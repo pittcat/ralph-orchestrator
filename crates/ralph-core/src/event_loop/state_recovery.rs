@@ -243,6 +243,7 @@ impl EventLoop {
                 recovery.target_hat.as_str(),
                 None,
                 None,
+                None,
                 "manifest_resume",
                 recovery.payload,
             );
@@ -853,6 +854,7 @@ impl EventLoop {
             None,
             loop_id_for_resume.as_deref(),
             target.as_str(),
+            None,
             None,
             None,
             &format!("aggregate_timeout:{}", action.wave_id),

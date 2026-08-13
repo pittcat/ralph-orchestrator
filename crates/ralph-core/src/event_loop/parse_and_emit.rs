@@ -696,6 +696,7 @@ impl EventLoop {
                         isolated_hat.as_str(),
                         None,
                         None,
+                        None,
                         &format!("anonymous_business:{}", event.topic),
                         resume_payload,
                     );
@@ -1098,6 +1099,7 @@ impl EventLoop {
                             None,
                             loop_id_for_resume.as_deref(),
                             isolated_hat.as_str(),
+                            None,
                             None,
                             None,
                             &format!("scope_drop:{}", isolated_hat.as_str()),
@@ -2697,6 +2699,7 @@ impl EventLoop {
                                         hat_id.as_str(),
                                         None,
                                         Some(retry_step_for_key.as_str()),
+                                        None,
                                         "contract_rejection_retry",
                                         retry_payload_string,
                                     );
@@ -4391,6 +4394,7 @@ impl EventLoop {
             pending.hat.as_str(),
             None,
             None,
+            None,
             &format!(
                 "isolated_budget:{}:per_turn",
                 crate::diagnosis::normalize_part(pending.hat.as_str())
@@ -4651,6 +4655,7 @@ impl EventLoop {
                     None,
                     loop_id_for_resume.as_deref(),
                     &target_hat,
+                    None,
                     None,
                     None,
                     &format!("precheck:{}:{}", gate_hat_id, guarded),

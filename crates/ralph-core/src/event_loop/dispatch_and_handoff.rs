@@ -699,6 +699,7 @@ impl EventLoop {
                 esc.safe_target.as_str(),
                 None,
                 None,
+                None,
                 &format!("handoff:{}:{}", esc.consumer, esc.event_id),
                 payload.to_string(),
             );

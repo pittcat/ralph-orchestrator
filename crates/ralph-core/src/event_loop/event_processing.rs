@@ -366,6 +366,7 @@ impl EventLoop {
                 hard_target.as_str(),
                 None,
                 None,
+                None,
                 &format!("hard_stall:{}", stall_count_value),
                 structured_payload,
             );
@@ -462,6 +463,7 @@ impl EventLoop {
                             None,
                             loop_id_for_resume.as_deref(),
                             hat_id.as_str(),
+                            None,
                             None,
                             None,
                             "stall_no_events",
@@ -681,6 +683,7 @@ impl EventLoop {
             None,
             loop_id_for_resume.as_deref(),
             hat_id.as_str(),
+            None,
             None,
             None,
             &format!("missing_terminal_emit:{}:{}", retry_key, retry_count),

@@ -871,6 +871,7 @@ impl EventLoop {
                 persistent_target.as_str(),
                 None,
                 None,
+                None,
                 "persistent_idle",
                 persistent_payload,
             );
@@ -940,6 +941,7 @@ impl EventLoop {
                     None,
                     loop_id_for_resume.as_deref(),
                     "ralph",
+                    None,
                     None,
                     None,
                     &format!("open_tasks:{}:{}", open_tasks.len(), task_ids_hash),
