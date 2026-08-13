@@ -190,8 +190,6 @@ This is a continued session.
 ";
     fs::write(agent_dir.join("scratchpad.md"), scratchpad_content)?;
 
-    let marker_path = ralph_dir.join("current-events");
-
     // Run ralph run --continue
     let _output = common::ralph_bin()
         .arg("run")
