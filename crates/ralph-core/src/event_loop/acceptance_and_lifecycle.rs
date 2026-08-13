@@ -497,6 +497,30 @@ impl EventLoop {
         // U2: the state ledger is always enabled.
         state.state_ledger = Some(build_state_ledger_from_env(context.workspace()));
 
+        // Plan GAP-02 (2026-08-13-002) / Unit 4 (U4-finish):
+        // close the outbox-only crash window. When the previous
+        // process died between the durable outbox write (with
+        // `state_machine_projection`) and the StateLedger commit,
+        // the projection lives only in the outbox. Walk every
+        // outbox entry, find any projection whose transition_id is
+        // not yet in the ledger's applied set, and commit the
+        // delta — `apply_transition_delta` dedupes, so re-running
+        // this on a healthy ledger is a no-op (R6).
+        //
+        // Order matters: repair happens BEFORE the runtime
+        // hydration below so the hydrated state already includes
+        // any projections recovered from the outbox. A genuine
+        // filesystem error (e.g. unreadable outbox) fails closed
+        // here — the same fail-closed contract as
+        // `commit_idempotent`'s outbox read failure path.
+        if let Some(ledger) = state.state_ledger.as_mut() {
+            if let Err(e) = crate::event_loop::accepted_transition::AcceptedTransition::repair_state_machine_projection_from_outbox(
+                ledger,
+            ) {
+                return Err(e);
+            }
+        }
+
         // Plan GAP-02 (2026-08-13-002) / Unit 4: rehydrate the
         // StateMachine runtime from the freshly-built ledger
         // snapshot. Cold-start branches with no StateMachine

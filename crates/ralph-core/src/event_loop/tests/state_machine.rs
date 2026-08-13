@@ -660,7 +660,10 @@ hats:
     write_event_to_jsonl(&events_path, "experiment.planned", r#"{"task_key":"t1"}"#);
 
     let result = event_loop.process_events_from_jsonl().unwrap();
-    assert!(result.had_events, "disabled path must still pass events through");
+    assert!(
+        result.had_events,
+        "disabled path must still pass events through"
+    );
     assert!(
         event_loop.state.state_machine_runtime_state.is_none(),
         "disabled path must not materialise StateMachine runtime"
@@ -750,9 +753,7 @@ hats:
 #[test]
 fn u4_state_machine_runtime_hydrates_from_ledger_snapshot() {
     use crate::state::CommitDelta;
-    use crate::state_machine::{
-        StateMachineTransitionDelta, StateMachineTransitionId,
-    };
+    use crate::state_machine::{StateMachineTransitionDelta, StateMachineTransitionId};
     use tempfile::TempDir;
 
     // First loop constructs the StateLedger, commits a
@@ -841,7 +842,6 @@ fn u4_legacy_workspace_without_state_machine_delta_starts_cleanly() {
 #[test]
 fn u4_terminal_honored_delta_persists_to_ledger() {
     use crate::state::CommitDelta;
-    use crate::state_machine::StateMachineRuntimeState;
     use tempfile::TempDir;
 
     // Plan GAP-02 / Unit 4: a `commit_terminal_delta` for the
@@ -899,4 +899,6 @@ fn u4_terminal_honored_delta_persists_to_ledger() {
 }
 
 #[allow(dead_code)]
-fn _u4_unused_runtime() -> StateMachineRuntimeState { StateMachineRuntimeState::new() }
+fn _u4_unused_runtime() -> StateMachineRuntimeState {
+    StateMachineRuntimeState::new()
+}

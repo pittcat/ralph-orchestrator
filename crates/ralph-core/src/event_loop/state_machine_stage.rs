@@ -21,7 +21,9 @@
 use super::*;
 
 use crate::event_reader::Event as JsonlEvent;
-use crate::state_machine::{StateMachineDecision, StateMachineTransitionDelta, StateMachineTransitionId};
+use crate::state_machine::{
+    StateMachineDecision, StateMachineTransitionDelta, StateMachineTransitionId,
+};
 
 impl EventLoop {
     /// Plan GAP-02 / Unit 2: candidate-stage validation. Each
@@ -49,8 +51,12 @@ impl EventLoop {
         // stage; the live runtime itself is not mutated by this
         // stage. Unit 2 §3 / §6 explicitly require this
         // separation so downstream reject cannot pollute live
-        // StateMachine.
-        let live_snapshot = match self.state.state_machine_runtime_state.as_ref() {
+        // StateMachine. The snapshot is recorded as
+        // `_live_snapshot` because the cumulative `candidate`
+        // below already starts from the live state and the
+        // explicit capture is documentation of intent, not an
+        // additional read.
+        let _live_snapshot = match self.state.state_machine_runtime_state.as_ref() {
             Some(rt) => Some(rt.clone()),
             None => None,
         };
@@ -66,9 +72,7 @@ impl EventLoop {
         // `state.state_machine_runtime_state` working. The unit
         // stage itself never mutates the live runtime here —
         // apply happens at the pending_publish boundary.
-        if !events.is_empty()
-            && self.state.state_machine_runtime_state.is_none()
-        {
+        if !events.is_empty() && self.state.state_machine_runtime_state.is_none() {
             self.state.state_machine_runtime_state = Some(StateMachineRuntimeState::new());
         }
         // Cumulative candidate: starts at the live snapshot and
@@ -95,10 +99,10 @@ impl EventLoop {
                     let instance_key = instance_key.clone();
                     let (opens_map, closed_map) = candidate.instance_maps();
                     let key_ref = instance_key.as_deref().unwrap_or("");
-                    let opens_instance = !opens_map.contains_key(key_ref)
-                        && !closed_map.contains_key(key_ref);
-                    let closes_instance = opens_map.contains_key(key_ref)
-                        && !closed_map.contains_key(key_ref);
+                    let opens_instance =
+                        !opens_map.contains_key(key_ref) && !closed_map.contains_key(key_ref);
+                    let closes_instance =
+                        opens_map.contains_key(key_ref) && !closed_map.contains_key(key_ref);
                     let (term_obs, term_hon) = candidate.observed_snapshot();
                     pending.push(CandidateStateMachineDecision {
                         event: event_for_emit.clone(),
@@ -113,22 +117,19 @@ impl EventLoop {
                 StateMachineDecision::Reject { finding } => {
                     self.bus.publish(ralph_proto::Event::new(
                         "event.state_machine.rejected",
-                        serde_json::to_string(&finding)
-                            .unwrap_or_else(|_| finding.reason.clone()),
+                        serde_json::to_string(&finding).unwrap_or_else(|_| finding.reason.clone()),
                     ));
                 }
                 StateMachineDecision::Ignore { finding } => {
                     self.bus.publish(ralph_proto::Event::new(
                         "event.state_machine.ignored",
-                        serde_json::to_string(&finding)
-                            .unwrap_or_else(|_| finding.reason.clone()),
+                        serde_json::to_string(&finding).unwrap_or_else(|_| finding.reason.clone()),
                     ));
                 }
                 StateMachineDecision::DiagnosticOnly { finding } => {
                     self.bus.publish(ralph_proto::Event::new(
                         "event.state_machine.diagnostic",
-                        serde_json::to_string(&finding)
-                            .unwrap_or_else(|_| finding.reason.clone()),
+                        serde_json::to_string(&finding).unwrap_or_else(|_| finding.reason.clone()),
                     ));
                     accepted.push(event_for_emit.clone());
                 }
@@ -172,10 +173,7 @@ impl EventLoop {
                 None,
                 "executor",
                 topic,
-                candidate
-                    .decision
-                    .instance_key()
-                    .map(|s| s.as_str()),
+                candidate.decision.instance_key().map(|s| s.as_str()),
                 idx as u64 + 1,
             );
             let delta = live.project_transition_delta(

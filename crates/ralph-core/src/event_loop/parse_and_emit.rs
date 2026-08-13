@@ -1597,8 +1597,7 @@ impl EventLoop {
         // on `self` so the final pending_publish boundary in
         // `AcceptedTransition` (Unit 3) can project the surviving
         // transitions into a `StateMachineTransitionDelta`.
-        let (mut events, state_machine_candidates) =
-            self.run_state_machine_candidate_stage(events);
+        let (mut events, state_machine_candidates) = self.run_state_machine_candidate_stage(events);
         if !state_machine_candidates.is_empty() {
             // Stash for Unit 3 wiring; the actual projection /
             // apply happens at the final pending_publish boundary
@@ -3865,6 +3864,20 @@ impl EventLoop {
         // `state_machine_runtime_state`. Unit 3 binds the
         // projection list to the durable outbox receipt at the
         // AcceptedTransition call below.
+        //
+        // Plan GAP-02 / Unit 3 (U3-finish): collect the projected
+        // deltas into a (topic, payload) lookup so the per-event
+        // publish loop below can forward each event's projection
+        // into the projection-aware `AcceptedTransition` helper.
+        // The map only contains projections for events that
+        // actually passed every downstream gate — disabled-path
+        // / no-candidate batches produce an empty map and the
+        // existing non-projection `publish_synthetic` path is
+        // taken, preserving all U6/U7/U8 contracts.
+        let mut projection_lookup: std::collections::HashMap<
+            (String, String),
+            crate::state_machine::StateMachineTransitionDelta,
+        > = std::collections::HashMap::new();
         if !self.pending_state_machine_candidates.is_empty() {
             let loop_id = self.current_loop_id_for_contract();
             let survivors: Vec<_> = self
@@ -3879,7 +3892,14 @@ impl EventLoop {
                 .cloned()
                 .collect();
             self.pending_state_machine_candidates.clear();
-            let _projected = self.apply_state_machine_decisions(&survivors, &loop_id);
+            let projected = self.apply_state_machine_decisions(&survivors, &loop_id);
+            for (delta, cand) in projected.iter().zip(survivors.iter()) {
+                let key = (
+                    cand.event.topic.as_str().to_string(),
+                    cand.event.payload.as_deref().unwrap_or("").to_string(),
+                );
+                projection_lookup.insert(key, delta.clone());
+            }
         }
 
         // U7/U8: pre-compute idempotent-transition context once per
@@ -3904,7 +3924,32 @@ impl EventLoop {
 
             if u8_disposition.advances_flow() && u7_contract_digest.is_some() {
                 let digest = u7_contract_digest.as_deref().expect("checked above");
-                let ledger = self.state.state_ledger.as_ref().ok_or_else(|| {
+                let activation_id = format!(
+                    "{}:{u7_iteration}",
+                    event
+                        .source
+                        .as_ref()
+                        .map(|hat| hat.as_str())
+                        .unwrap_or("unknown")
+                );
+                // Plan GAP-02 / Unit 3 (U3-finish): look up the
+                // projection emitted by `apply_state_machine_decisions`
+                // and forward it into the projection-aware
+                // AcceptedTransition helper. Disabled path / no
+                // candidate → `None` and the helper falls through to
+                // the legacy `commit_idempotent` path (U6/U7/U8
+                // contract preserved byte-for-byte).
+                let projection_key = (
+                    event.topic.as_str().to_string(),
+                    event.payload.as_str().to_string(),
+                );
+                let projection = projection_lookup.remove(&projection_key);
+
+                // `&mut StateLedger` is required for the
+                // projection-aware helper; the non-projection
+                // branch auto-reborrows to `&StateLedger` inside
+                // `commit_idempotent`.
+                let ledger = self.state.state_ledger.as_mut().ok_or_else(|| {
                     self.diagnostics.log_orchestration(
                         self.state.iteration,
                         event.source.as_ref().map(|h| h.as_str()).unwrap_or("unknown"),
@@ -3920,15 +3965,7 @@ impl EventLoop {
                         event.topic
                     ))
                 })?;
-                let activation_id = format!(
-                    "{}:{u7_iteration}",
-                    event
-                        .source
-                        .as_ref()
-                        .map(|hat| hat.as_str())
-                        .unwrap_or("unknown")
-                );
-                crate::event_loop::disposition::publish_synthetic(
+                crate::event_loop::disposition::publish_synthetic_with_state_machine_projection(
                     &event,
                     u8_disposition,
                     &u7_loop_id,
@@ -3936,6 +3973,7 @@ impl EventLoop {
                     digest,
                     ledger,
                     &mut self.bus,
+                    projection,
                 )
                 .map_err(|error| {
                     std::io::Error::other(format!(

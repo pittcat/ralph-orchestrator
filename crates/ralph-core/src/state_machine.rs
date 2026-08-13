@@ -211,7 +211,12 @@ impl StateMachineRuntimeState {
     /// open/closed maps so the candidate stage can detect
     /// open → close / open → advance transitions without
     /// exposing the private `HashMap` fields.
-    pub fn instance_maps(&self) -> (&HashMap<String, InstanceState>, &HashMap<String, InstanceState>) {
+    pub fn instance_maps(
+        &self,
+    ) -> (
+        &HashMap<String, InstanceState>,
+        &HashMap<String, InstanceState>,
+    ) {
         (&self.open_instances, &self.closed_instances)
     }
 
@@ -625,10 +630,10 @@ impl StateMachineRuntimeState {
             Some(k) => k,
             None => return (false, false),
         };
-        let opens = !self.open_instances.contains_key(key)
-            && !self.closed_instances.contains_key(key);
-        let closes = self.open_instances.contains_key(key)
-            && !self.closed_instances.contains_key(key);
+        let opens =
+            !self.open_instances.contains_key(key) && !self.closed_instances.contains_key(key);
+        let closes =
+            self.open_instances.contains_key(key) && !self.closed_instances.contains_key(key);
         (opens, closes)
     }
 
