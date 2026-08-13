@@ -230,6 +230,18 @@ impl StateLedger {
         BypassGuard { ledger: self }
     }
 
+    /// Test-only setter for the `bypass_active` flag. Production
+    /// code must use the [`Self::snapshot_mut`] RAII guard so the
+    /// flag is always cleared on drop; this raw setter is only
+    /// useful when a test needs `commit` to fail while another
+    /// helper holds `&mut self` (which the RAII guard cannot
+    /// permit). Visibility is `pub(crate)` so only same-crate
+    /// tests can reach it.
+    #[cfg(test)]
+    pub(crate) fn set_bypass_active_for_test(&self, value: bool) {
+        self.bypass_active.set(value);
+    }
+
     /// The on-disk path the ledger writes to. Exposed so U2 can
     /// delete or rotate the file when migrating a workspace that
     /// predates the ledger.

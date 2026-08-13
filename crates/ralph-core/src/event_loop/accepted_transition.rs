@@ -1934,4 +1934,117 @@ mod u3_state_machine_projection_tests {
                 .expect("second pass must succeed");
         assert_eq!(repaired_again, 0, "second pass must be no-op");
     }
+
+    // ──────────────────────────────────────────────────────────────────
+    // PMI-011 reproducer (2026-08-14): when the StateLedger commit
+    // for the projection fails AFTER the durable outbox write, the
+    // helper must still return Ok(entry), keep the projection in the
+    // outbox (so the next restart's repair pass picks it up), and
+    // MUST NOT silently leave the in-memory ledger with a partial
+    // StateMachineTransition entry. The on-disk outbox is the
+    // single source of truth — bus publish still happens because the
+    // event was already validated and the outbox receipt was written.
+    // ──────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn pmi011_ledger_commit_failure_does_not_block_commit_helper() {
+        // Force the ledger.commit step to fail by activating the
+        // bypass-active flag (P2-#4 in StateLedger::commit). Any
+        // commit call inside that window returns BypassActive, which
+        // the helper is expected to log and tolerate (U3 warn-and-
+        // continue path). We use the test-only raw setter so we can
+        // hold `&mut ledger` for the helper at the same time — the
+        // RAII BypassGuard returned by snapshot_mut borrows ledger
+        // mutably and would conflict.
+        let (_dir, mut ledger, mut bus, _store) = fixture();
+        let ws = ledger.workspace().to_path_buf();
+
+        let sm_commits_before: usize = ledger
+            .commit_log()
+            .iter()
+            .filter(|c| {
+                matches!(
+                    c.delta,
+                    crate::state::CommitDelta::StateMachineTransition { .. }
+                )
+            })
+            .count();
+
+        let event = valid_event();
+        let delta = u3_delta("pmi011", "t-pmi011");
+
+        ledger.set_bypass_active_for_test(true);
+        let result = AcceptedTransition::commit_idempotent_with_state_machine_projection(
+            &event,
+            "loop-pmi011",
+            "act-pmi011",
+            "rev-pmi011",
+            &mut ledger,
+            &mut bus,
+            |_| Ok(()),
+            || Ok(Box::new(|| {}) as Box<dyn FnOnce()>),
+            Some(delta.clone()),
+        )
+        .expect("commit helper must succeed despite ledger commit failure");
+        ledger.set_bypass_active_for_test(false);
+
+        // Outbox is durable and carries the projection.
+        let entries = read_outbox(&ws).unwrap();
+        assert_eq!(entries.len(), 1, "outbox must have one entry");
+        let on_disk = &entries[0];
+        assert_eq!(
+            on_disk.transition_id, result.transition_id,
+            "outbox transition_id must match helper return"
+        );
+        let on_disk_projection = on_disk
+            .state_machine_projection
+            .as_ref()
+            .expect("outbox entry must carry projection");
+        assert_eq!(
+            on_disk_projection.transition_id, delta.transition_id,
+            "outbox projection transition_id must round-trip"
+        );
+
+        // Ledger received NO new StateMachineTransition commits
+        // (the bypass guard rejected them).
+        let sm_commits_after: usize = ledger
+            .commit_log()
+            .iter()
+            .filter(|c| {
+                matches!(
+                    c.delta,
+                    crate::state::CommitDelta::StateMachineTransition { .. }
+                )
+            })
+            .count();
+        assert_eq!(
+            sm_commits_after, sm_commits_before,
+            "failed ledger commit must not leave partial StateMachineTransition entries"
+        );
+
+        // Cold-start repair must consume the outbox projection
+        // and apply it to the ledger.
+        let repaired =
+            AcceptedTransition::repair_state_machine_projection_from_outbox(&mut ledger)
+                .expect("repair must succeed");
+        assert_eq!(
+            repaired, 1,
+            "repair must consume the outbox projection left by the failed commit"
+        );
+        let runtime = ledger
+            .snapshot()
+            .state_machine_runtime
+            .as_ref()
+            .expect("StateMachine runtime must be populated after repair");
+        assert!(
+            runtime.has_applied_transition_id(&delta.transition_id),
+            "repaired projection must be in applied set"
+        );
+
+        // Second restart: idempotent (R6).
+        let repaired_again =
+            AcceptedTransition::repair_state_machine_projection_from_outbox(&mut ledger)
+                .expect("second restart must succeed");
+        assert_eq!(repaired_again, 0, "second restart must be no-op");
+    }
 }
