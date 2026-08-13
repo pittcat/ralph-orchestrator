@@ -312,6 +312,10 @@ impl EventLoop {
         &mut self,
         result: crate::event_reader::ParseResult,
     ) -> std::io::Result<ProcessedEvents> {
+        // Plan GAP-02 / Unit 2: reset the per-loop StateMachine
+        // candidate stash so a stale list from a prior batch
+        // cannot leak into this batch's apply stage.
+        self.pending_state_machine_candidates.clear();
         // DEBUG: 添加入口日志记录所有输入事件
         let event_count = result.events.len();
         let malformed_count = result.malformed.len();
@@ -1585,64 +1589,21 @@ impl EventLoop {
         // payload policy, review-step gates, and side-effect handling.
 
         // --- State machine validation: enforce instance lifecycle rules ---
-        // Inserted after policy validation, before workflow guards and record_event() + bus.publish()
-        if let Some(ref sm_config) = self.config.event_loop.state_machine
-            && sm_config.enabled
-        {
-            let sm_state = self
-                .state
-                .state_machine_runtime_state
-                .get_or_insert_with(StateMachineRuntimeState::default);
-
-            let (accepted, rejected): (Vec<_>, Vec<_>) = events.into_iter().partition(|event| {
-                let topic = event.topic.as_str();
-                let payload = event.payload.as_deref();
-                let decision = sm_state.validate_event(topic, payload, sm_config);
-
-                match decision {
-                    StateMachineDecision::Accept { .. } => true,
-                    StateMachineDecision::Reject { finding } => {
-                        // Publish diagnostic event for rejection
-                        let diagnostic = Event::new(
-                            "event.state_machine.rejected",
-                            serde_json::to_string(&finding)
-                                .unwrap_or_else(|_| finding.reason.clone()),
-                        );
-                        self.bus.publish(diagnostic);
-                        false
-                    }
-                    StateMachineDecision::Ignore { finding } => {
-                        // Silently ignore (no bus publish, no record)
-                        let diagnostic = Event::new(
-                            "event.state_machine.ignored",
-                            serde_json::to_string(&finding)
-                                .unwrap_or_else(|_| finding.reason.clone()),
-                        );
-                        self.bus.publish(diagnostic);
-                        false
-                    }
-                    StateMachineDecision::DiagnosticOnly { finding } => {
-                        // Just log, event still passes through
-                        let diagnostic = Event::new(
-                            "event.state_machine.diagnostic",
-                            serde_json::to_string(&finding)
-                                .unwrap_or_else(|_| finding.reason.clone()),
-                        );
-                        self.bus.publish(diagnostic);
-                        true
-                    }
-                }
-            });
-
-            // Log rejected count for metrics
-            if !rejected.is_empty() {
-                debug!(
-                    rejected_count = rejected.len(),
-                    "State machine rejected events"
-                );
-            }
-
-            events = accepted;
+        // Plan GAP-02 / Unit 2: delegate to `state_machine_stage`'s
+        // candidate-stage helper. The helper runs every event
+        // through `validate_event` against a *clone* of the live
+        // StateMachine runtime so downstream reject cannot
+        // pollute live state. The candidate decisions are stored
+        // on `self` so the final pending_publish boundary in
+        // `AcceptedTransition` (Unit 3) can project the surviving
+        // transitions into a `StateMachineTransitionDelta`.
+        let (mut events, state_machine_candidates) =
+            self.run_state_machine_candidate_stage(events);
+        if !state_machine_candidates.is_empty() {
+            // Stash for Unit 3 wiring; the actual projection /
+            // apply happens at the final pending_publish boundary
+            // so a downstream reject cannot pollute live state.
+            self.pending_state_machine_candidates = state_machine_candidates;
         }
         // --- End state machine validation ---
 
@@ -3894,6 +3855,32 @@ impl EventLoop {
             }
             pending
         };
+
+        // Plan GAP-02 / Unit 2: apply the StateMachine
+        // candidate decisions to the live runtime only at the
+        // final pending_publish boundary. Events that survived
+        // the candidate stage but were dropped by downstream
+        // gates never see their decisions applied — so a
+        // downstream reject cannot pollute live
+        // `state_machine_runtime_state`. Unit 3 binds the
+        // projection list to the durable outbox receipt at the
+        // AcceptedTransition call below.
+        if !self.pending_state_machine_candidates.is_empty() {
+            let loop_id = self.current_loop_id_for_contract();
+            let survivors: Vec<_> = self
+                .pending_state_machine_candidates
+                .iter()
+                .filter(|cand| {
+                    pending_publish.iter().any(|e| {
+                        e.topic.as_str() == cand.event.topic.as_str()
+                            && e.payload.as_str() == cand.event.payload.as_deref().unwrap_or("")
+                    })
+                })
+                .cloned()
+                .collect();
+            self.pending_state_machine_candidates.clear();
+            let _projected = self.apply_state_machine_decisions(&survivors, &loop_id);
+        }
 
         // U7/U8: pre-compute idempotent-transition context once per
         // batch so the per-event loop only needs field-level borrows.

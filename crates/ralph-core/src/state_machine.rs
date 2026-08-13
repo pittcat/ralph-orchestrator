@@ -194,6 +194,27 @@ impl StateMachineRuntimeState {
         self.terminal_honored
     }
 
+    /// Returns whether a terminal event has been observed.
+    /// Plan GAP-02 / Unit 2 helper.
+    pub fn is_terminal_observed(&self) -> bool {
+        self.terminal_observed
+    }
+
+    /// Plan GAP-02 / Unit 2 helper: combined observed/honored
+    /// flag snapshot used by the candidate stage to thread the
+    /// post-validator state into the projection.
+    pub fn observed_snapshot(&self) -> (bool, bool) {
+        (self.terminal_observed, self.terminal_honored)
+    }
+
+    /// Plan GAP-02 / Unit 2 helper: read-only access to the
+    /// open/closed maps so the candidate stage can detect
+    /// open → close / open → advance transitions without
+    /// exposing the private `HashMap` fields.
+    pub fn instance_maps(&self) -> (&HashMap<String, InstanceState>, &HashMap<String, InstanceState>) {
+        (&self.open_instances, &self.closed_instances)
+    }
+
     /// Returns the count of accepted state machine transitions.
     ///
     /// Used by the progress fingerprint to detect state machine progress

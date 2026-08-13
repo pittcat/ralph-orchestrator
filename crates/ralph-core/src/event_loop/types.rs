@@ -439,4 +439,16 @@ pub struct EventLoop {
     /// foreign dirt is not misattributed to the reviewer.
     pub(crate) activation_worktree_baselines:
         std::collections::HashMap<String, crate::event_loop::worktree_handoff::WorktreeSnapshot>,
+
+    /// Plan GAP-02 / Unit 2: per-loop stash of StateMachine
+    /// candidate decisions captured at the candidate stage
+    /// (before workflow guards / pending_publish filter). The
+    /// decisions are *applied* to the live runtime only at the
+    /// pending_publish boundary owned by
+    /// `parse_and_emit.rs` so a downstream reject cannot
+    /// pollute live state. Unit 3 binds the projection to
+    /// the durable outbox receipt; this field is in-memory
+    /// only and is reset on `process_parse_result` entry.
+    pub(crate) pending_state_machine_candidates:
+        Vec<crate::event_loop::state_machine_stage::CandidateStateMachineDecision>,
 }

@@ -708,6 +708,11 @@ impl EventLoop {
             // builder always starts with `None` (legacy / test paths).
             execution_contract: None,
             activation_worktree_baselines: std::collections::HashMap::new(),
+            // Plan GAP-02 / Unit 2: per-loop stash of StateMachine
+            // candidate decisions captured at the candidate stage.
+            // Reset every batch by `process_parse_result`; cleared
+            // on `process_parse_result` exit.
+            pending_state_machine_candidates: Vec::new(),
         })
     }
 
@@ -891,6 +896,9 @@ impl EventLoop {
             // U4: set post-construction by `from_resolved_no_context`.
             execution_contract: None,
             activation_worktree_baselines: std::collections::HashMap::new(),
+            // Plan GAP-02 / Unit 2: per-loop stash of StateMachine
+            // candidate decisions captured at the candidate stage.
+            pending_state_machine_candidates: Vec::new(),
         }
     }
 
