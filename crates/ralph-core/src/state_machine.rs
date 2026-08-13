@@ -1061,4 +1061,156 @@ mod tests {
             _ => panic!("Expected Reject, got {:?}", decision),
         }
     }
+
+    // PMI-013 reproducer: a re-submitted event must produce the same
+    // `transition_id` regardless of the caller's `sequence` choice.
+    // The current `StateMachineTransitionId::build` formula appends
+    // `sequence.to_string()` to the canonical tuple, so two submissions
+    // of the same semantic event with different `sequence` values
+    // (e.g. iteration 5 retry from iteration 7) yield distinct ids and
+    // bypass `apply_transition_delta`'s dedup. This test asserts the
+    // invariant the finding calls out and is expected to FAIL until
+    // the SSoT fix lands.
+    #[test]
+    fn test_pmi013_transition_id_is_iteration_stable() {
+        // Same submission identity, two different caller-supplied sequences.
+        let id_iter5 = StateMachineTransitionId::build(
+            "loop-A",
+            Some("contract-X"),
+            "executor",
+            "experiment.planned",
+            Some("task:t1"),
+            5,
+        );
+        let id_iter7 = StateMachineTransitionId::build(
+            "loop-A",
+            Some("contract-X"),
+            "executor",
+            "experiment.planned",
+            Some("task:t1"),
+            7,
+        );
+
+        // Invariant: re-submission of the same semantic event from a
+        // different iteration must yield the same identity, so the
+        // runtime's `applied_transition_ids` dedup set holds.
+        assert_eq!(
+            id_iter5, id_iter7,
+            "PMI-013: same semantic event from different iterations must produce the same transition_id"
+        );
+
+        // Same check via the runtime apply path: a delta replayed with
+        // a fresh `sequence` must be recognized as already applied.
+        let mut runtime = StateMachineRuntimeState::new();
+        let delta_iter5 = StateMachineTransitionDelta {
+            transition_id: id_iter5.clone(),
+            topic: "experiment.planned".to_string(),
+            instance_key: Some("task:t1".to_string()),
+            new_state: "planned".to_string(),
+            opens_instance: true,
+            closes_instance: false,
+            terminal_observed: false,
+            terminal_honored: false,
+        };
+        let delta_iter7 = StateMachineTransitionDelta {
+            transition_id: id_iter7.clone(),
+            topic: "experiment.planned".to_string(),
+            instance_key: Some("task:t1".to_string()),
+            new_state: "planned".to_string(),
+            opens_instance: true,
+            closes_instance: false,
+            terminal_observed: false,
+            terminal_honored: false,
+        };
+
+        assert!(
+            runtime.apply_transition_delta(&delta_iter5),
+            "first apply must succeed"
+        );
+        assert!(
+            !runtime.apply_transition_delta(&delta_iter7),
+            "PMI-013: re-submission from a different iteration must dedup, not double-apply"
+        );
+        assert_eq!(
+            runtime.accepted_transition_count, 1,
+            "PMI-013: dedup must hold across iterations; runtime must not double-count"
+        );
+    }
+
+    // PMI-014 reproducer (deepen-once): the SSoT fix already partitions
+    // `transition_id` by `source_hat`, so two distinct hats firing on the
+    // same `(loop_id, contract_id, topic, instance_key, sequence)` tuple
+    // produce distinct identities and `apply_transition_delta` dedupes
+    // them independently. This is the LOW_CONFIDENCE / redo-first path
+    // for PMI-014: the design already includes the discriminator, so a
+    // hypothetical collision is bounded by hat-name discipline in
+    // `from_runtime_config` (each hat is registered once). The test below
+    // pins that guarantee so a future refactor that drops `source_hat`
+    // from the tuple fails fast.
+    #[test]
+    fn test_pmi014_source_hat_partitions_transition_id() {
+        // Same (loop_id, contract_id, topic, instance_key, sequence)
+        // tuple, distinct source_hat values — identities must diverge.
+        let id_wave_scope = StateMachineTransitionId::build(
+            "loop-A",
+            Some("contract-X"),
+            "wave-scope",
+            "experiment.planned",
+            Some("task:t1"),
+            5,
+        );
+        let id_sm_handler = StateMachineTransitionId::build(
+            "loop-A",
+            Some("contract-X"),
+            "sm-handler",
+            "experiment.planned",
+            Some("task:t1"),
+            5,
+        );
+
+        assert_ne!(
+            id_wave_scope, id_sm_handler,
+            "PMI-014: source_hat must partition the canonical identity; \
+            dropping source_hat from the tuple reintroduces cross-source \
+            collision risk (PMI-014 LOW_CONFIDENCE)"
+        );
+
+        // Both deltas apply independently to the runtime — neither is
+        // silently dropped, and the dedup set is keyed on the full tuple.
+        let mut runtime = StateMachineRuntimeState::new();
+        let delta_wave = StateMachineTransitionDelta {
+            transition_id: id_wave_scope.clone(),
+            topic: "experiment.planned".to_string(),
+            instance_key: Some("task:t1".to_string()),
+            new_state: "planned".to_string(),
+            opens_instance: true,
+            closes_instance: false,
+            terminal_observed: false,
+            terminal_honored: false,
+        };
+        let delta_sm = StateMachineTransitionDelta {
+            transition_id: id_sm_handler.clone(),
+            topic: "experiment.planned".to_string(),
+            instance_key: Some("task:t1".to_string()),
+            new_state: "planned".to_string(),
+            opens_instance: true,
+            closes_instance: false,
+            terminal_observed: false,
+            terminal_honored: false,
+        };
+
+        assert!(
+            runtime.apply_transition_delta(&delta_wave),
+            "wave-scope apply must succeed on first submission"
+        );
+        assert!(
+            runtime.apply_transition_delta(&delta_sm),
+            "PMI-014: sm-handler with same topic/key/seq must NOT be \
+            silently dropped when source_hat partitions the tuple"
+        );
+        assert_eq!(
+            runtime.accepted_transition_count, 2,
+            "PMI-014: distinct source_hats on the same tuple must both apply"
+        );
+    }
 }
