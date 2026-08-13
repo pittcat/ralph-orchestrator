@@ -6,6 +6,7 @@
 
 use crate::config::{BusinessAfterTerminalAction, DuplicateTerminalAction, StateMachineConfig};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 use tracing::debug;
 
@@ -26,29 +27,30 @@ impl StateMachineTransitionId {
     /// Build the canonical identity for a freshly accepted transition.
     /// The fields are derived from the live event submission (loop id,
     /// contract identity, source hat) plus the StateMachine semantic
-    /// fields (topic, instance key). The same submission produces the
-    /// same identity, so replaying the commit log is idempotent.
+    /// fields (topic, instance key, and a content-derived semantic key).
+    /// Iteration counters and batch indexes are not valid semantic keys.
+    /// Hashing the canonical tuple avoids delimiter collisions and keeps the
+    /// persisted identity compact.
     pub fn build(
         loop_id: &str,
         contract_id: Option<&str>,
         source_hat: &str,
         topic: &str,
         instance_key: Option<&str>,
-        sequence: u64,
+        semantic_key: &str,
     ) -> Self {
-        let mut s = String::with_capacity(loop_id.len() + topic.len() + 32);
-        s.push_str(loop_id);
-        s.push('|');
-        s.push_str(contract_id.unwrap_or(""));
-        s.push('|');
-        s.push_str(source_hat);
-        s.push('|');
-        s.push_str(topic);
-        s.push('|');
-        s.push_str(instance_key.unwrap_or(""));
-        s.push('|');
-        s.push_str(&sequence.to_string());
-        Self(s)
+        let canonical = (
+            loop_id,
+            contract_id.unwrap_or(""),
+            source_hat,
+            topic,
+            instance_key.unwrap_or(""),
+            semantic_key,
+        );
+        let bytes = serde_json::to_vec(&canonical).expect("transition identity tuple serializes");
+        let mut hasher = Sha256::new();
+        hasher.update(bytes);
+        Self(format!("sm-v2:{:x}", hasher.finalize()))
     }
 
     /// Expose the underlying string for ledger / outbox comparisons.
@@ -66,6 +68,10 @@ impl StateMachineTransitionId {
 pub struct StateMachineTransitionDelta {
     /// Stable identity used to dedupe replay.
     pub transition_id: StateMachineTransitionId,
+    /// Hat that produced the semantic transition. Persisted separately so
+    /// migration fingerprints retain the source discriminator.
+    #[serde(default)]
+    pub source_hat: Option<String>,
     /// Topic of the accepted event.
     pub topic: String,
     /// Instance key, if the transition targets a tracked instance.
@@ -83,6 +89,47 @@ pub struct StateMachineTransitionDelta {
     /// Whether this transition sets `terminal_honored`.
     #[serde(default)]
     pub terminal_honored: bool,
+}
+
+/// Build a replay-stable semantic fingerprint for a projected transition.
+/// This intentionally excludes `transition_id`: it is the bridge that lets
+/// old ledger IDs and v2 IDs participate in the same deduplication set.
+fn transition_fingerprint(delta: &StateMachineTransitionDelta) -> String {
+    let legacy_source_hat = delta
+        .source_hat
+        .as_deref()
+        .or_else(|| legacy_source_hat(delta.transition_id.as_str()));
+    let canonical = (
+        legacy_source_hat,
+        &delta.topic,
+        &delta.instance_key,
+        &delta.new_state,
+        delta.opens_instance,
+        delta.closes_instance,
+        delta.terminal_observed,
+        delta.terminal_honored,
+    );
+    let bytes = serde_json::to_vec(&canonical).expect("transition fingerprint serializes");
+    let mut hasher = Sha256::new();
+    hasher.update(bytes);
+    format!("tf-v1:{:x}", hasher.finalize())
+}
+
+/// Recover the source discriminator from the pre-v2 six-segment identity.
+/// New `sm-v2:` IDs are opaque and always carry `source_hat` in the delta.
+fn legacy_source_hat(id: &str) -> Option<&str> {
+    let mut fields = id.split('|');
+    let loop_id = fields.next()?;
+    let _ = loop_id;
+    let _contract_id = fields.next()?;
+    let source_hat = fields.next()?;
+    let _topic = fields.next()?;
+    let _instance_key = fields.next()?;
+    let _sequence = fields.next()?;
+    if fields.next().is_some() || source_hat.is_empty() {
+        return None;
+    }
+    Some(source_hat)
 }
 
 /// Result of state machine validation for a single event.
@@ -148,6 +195,11 @@ pub struct StateMachineRuntimeState {
     /// double-counts or re-runs an open/close move.
     #[serde(default)]
     applied_transition_ids: HashSet<StateMachineTransitionId>,
+    /// Semantic fallback used when a pre-v2 ledger entry is replayed before
+    /// a new v2 transition identity is produced. This bridges the persisted
+    /// identity-format migration without trusting the legacy numeric suffix.
+    #[serde(default)]
+    applied_transition_fingerprints: HashSet<String>,
 }
 
 /// Fingerprint of a terminal rejection to detect repeated rejections.
@@ -607,6 +659,7 @@ impl StateMachineRuntimeState {
 
         Some(StateMachineTransitionDelta {
             transition_id,
+            source_hat: None,
             topic: topic.to_string(),
             instance_key,
             new_state,
@@ -651,7 +704,10 @@ impl StateMachineRuntimeState {
     /// closed map stays empty) — this is the safe behaviour for
     /// partial-restart paths.
     pub fn apply_transition_delta(&mut self, delta: &StateMachineTransitionDelta) -> bool {
-        if self.applied_transition_ids.contains(&delta.transition_id) {
+        let fingerprint = transition_fingerprint(delta);
+        if self.applied_transition_ids.contains(&delta.transition_id)
+            || self.applied_transition_fingerprints.contains(&fingerprint)
+        {
             return false;
         }
         if let Some(key) = delta.instance_key.as_deref() {
@@ -686,6 +742,7 @@ impl StateMachineRuntimeState {
         self.accepted_transition_count = self.accepted_transition_count.saturating_add(1);
         self.applied_transition_ids
             .insert(delta.transition_id.clone());
+        self.applied_transition_fingerprints.insert(fingerprint);
         true
     }
 
@@ -1064,23 +1121,18 @@ mod tests {
 
     // PMI-013 reproducer: a re-submitted event must produce the same
     // `transition_id` regardless of the caller's `sequence` choice.
-    // The current `StateMachineTransitionId::build` formula appends
-    // `sequence.to_string()` to the canonical tuple, so two submissions
-    // of the same semantic event with different `sequence` values
-    // (e.g. iteration 5 retry from iteration 7) yield distinct ids and
-    // bypass `apply_transition_delta`'s dedup. This test asserts the
-    // invariant the finding calls out and is expected to FAIL until
-    // the SSoT fix lands.
+    // A retry of the same semantic event must reuse its content-derived
+    // identity even when it happens in a different loop iteration.
     #[test]
     fn test_pmi013_transition_id_is_iteration_stable() {
-        // Same submission identity, two different caller-supplied sequences.
+        // Same semantic event uses the same content-derived identity.
         let id_iter5 = StateMachineTransitionId::build(
             "loop-A",
             Some("contract-X"),
             "executor",
             "experiment.planned",
             Some("task:t1"),
-            5,
+            r#"{"task_key":"t1"}"#,
         );
         let id_iter7 = StateMachineTransitionId::build(
             "loop-A",
@@ -1088,7 +1140,7 @@ mod tests {
             "executor",
             "experiment.planned",
             Some("task:t1"),
-            7,
+            r#"{"task_key":"t1"}"#,
         );
 
         // Invariant: re-submission of the same semantic event from a
@@ -1100,10 +1152,11 @@ mod tests {
         );
 
         // Same check via the runtime apply path: a delta replayed with
-        // a fresh `sequence` must be recognized as already applied.
+        // the same semantic identity must be recognized as already applied.
         let mut runtime = StateMachineRuntimeState::new();
         let delta_iter5 = StateMachineTransitionDelta {
             transition_id: id_iter5.clone(),
+            source_hat: Some("executor".to_string()),
             topic: "experiment.planned".to_string(),
             instance_key: Some("task:t1".to_string()),
             new_state: "planned".to_string(),
@@ -1114,6 +1167,7 @@ mod tests {
         };
         let delta_iter7 = StateMachineTransitionDelta {
             transition_id: id_iter7.clone(),
+            source_hat: Some("executor".to_string()),
             topic: "experiment.planned".to_string(),
             instance_key: Some("task:t1".to_string()),
             new_state: "planned".to_string(),
@@ -1135,11 +1189,36 @@ mod tests {
             runtime.accepted_transition_count, 1,
             "PMI-013: dedup must hold across iterations; runtime must not double-count"
         );
+
+        // A legacy ledger entry must also dedupe against the new v2 identity
+        // after restart. This protects the persisted migration boundary.
+        let mut migrated_runtime = StateMachineRuntimeState::new();
+        let legacy_delta = StateMachineTransitionDelta {
+            transition_id: StateMachineTransitionId(
+                "loop-A|contract-X|executor|experiment.planned|task:t1|1".to_string(),
+            ),
+            ..delta_iter5.clone()
+        };
+        assert!(migrated_runtime.apply_transition_delta(&legacy_delta));
+        assert!(!migrated_runtime.apply_transition_delta(&delta_iter5));
+        assert_eq!(migrated_runtime.accepted_transition_count, 1);
+
+        let mut legacy_hat_runtime = StateMachineRuntimeState::new();
+        let legacy_other_hat = StateMachineTransitionDelta {
+            transition_id: StateMachineTransitionId(
+                "loop-A|contract-X|sm-handler|experiment.planned|task:t1|1".to_string(),
+            ),
+            source_hat: None,
+            ..legacy_delta.clone()
+        };
+        assert!(legacy_hat_runtime.apply_transition_delta(&legacy_delta));
+        assert!(legacy_hat_runtime.apply_transition_delta(&legacy_other_hat));
+        assert_eq!(legacy_hat_runtime.accepted_transition_count, 2);
     }
 
     // PMI-014 reproducer (deepen-once): the SSoT fix already partitions
     // `transition_id` by `source_hat`, so two distinct hats firing on the
-    // same `(loop_id, contract_id, topic, instance_key, sequence)` tuple
+    // same semantic tuple
     // produce distinct identities and `apply_transition_delta` dedupes
     // them independently. This is the LOW_CONFIDENCE / redo-first path
     // for PMI-014: the design already includes the discriminator, so a
@@ -1149,7 +1228,7 @@ mod tests {
     // from the tuple fails fast.
     #[test]
     fn test_pmi014_source_hat_partitions_transition_id() {
-        // Same (loop_id, contract_id, topic, instance_key, sequence)
+        // Same semantic tuple
         // tuple, distinct source_hat values — identities must diverge.
         let id_wave_scope = StateMachineTransitionId::build(
             "loop-A",
@@ -1157,7 +1236,7 @@ mod tests {
             "wave-scope",
             "experiment.planned",
             Some("task:t1"),
-            5,
+            "planned:t1",
         );
         let id_sm_handler = StateMachineTransitionId::build(
             "loop-A",
@@ -1165,7 +1244,7 @@ mod tests {
             "sm-handler",
             "experiment.planned",
             Some("task:t1"),
-            5,
+            "planned:t1",
         );
 
         assert_ne!(
@@ -1180,6 +1259,7 @@ mod tests {
         let mut runtime = StateMachineRuntimeState::new();
         let delta_wave = StateMachineTransitionDelta {
             transition_id: id_wave_scope.clone(),
+            source_hat: Some("wave-scope".to_string()),
             topic: "experiment.planned".to_string(),
             instance_key: Some("task:t1".to_string()),
             new_state: "planned".to_string(),
@@ -1190,6 +1270,7 @@ mod tests {
         };
         let delta_sm = StateMachineTransitionDelta {
             transition_id: id_sm_handler.clone(),
+            source_hat: Some("sm-handler".to_string()),
             topic: "experiment.planned".to_string(),
             instance_key: Some("task:t1".to_string()),
             new_state: "planned".to_string(),

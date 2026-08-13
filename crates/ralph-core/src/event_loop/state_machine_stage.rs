@@ -163,18 +163,25 @@ impl EventLoop {
             .state
             .state_machine_runtime_state
             .get_or_insert_with(StateMachineRuntimeState::default);
-        for (idx, candidate) in decisions.iter().enumerate() {
+        for candidate in decisions {
             let topic = candidate.event.topic.as_str();
-            // Live delta id: deterministic for the candidate
-            // batch so that re-applying the same batch is
-            // idempotent on the next run.
+            // The identity is derived from the accepted event and semantic
+            // result. It must not depend on batch position or loop iteration.
+            let canonical_payload = canonical_payload(candidate.event.payload.as_deref().unwrap_or(""));
+            let semantic_key = serde_json::to_string(&(
+                &canonical_payload,
+                &candidate.decision,
+                candidate.opens_instance,
+                candidate.closes_instance,
+            ))
+            .expect("state-machine transition identity serializes");
             let id = StateMachineTransitionId::build(
                 loop_id,
                 None,
                 "executor",
                 topic,
                 candidate.decision.instance_key().map(|s| s.as_str()),
-                idx as u64 + 1,
+                &semantic_key,
             );
             let delta = live.project_transition_delta(
                 id,
@@ -184,11 +191,39 @@ impl EventLoop {
                 candidate.closes_instance,
             );
             if let Some(delta) = delta {
+                let mut delta = delta;
+                delta.source_hat = Some("executor".to_string());
                 live.apply_transition_delta(&delta);
                 projected.push(delta);
             }
         }
         projected
+    }
+}
+
+fn canonical_payload(payload: &str) -> String {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(payload) else {
+        return payload.to_string();
+    };
+    serde_json::to_string(&canonical_json_value(value)).unwrap_or_else(|_| payload.to_string())
+}
+
+fn canonical_json_value(value: serde_json::Value) -> serde_json::Value {
+    match value {
+        serde_json::Value::Object(map) => {
+            let mut entries: Vec<_> = map.into_iter().collect();
+            entries.sort_by(|left, right| left.0.cmp(&right.0));
+            serde_json::Value::Object(
+                entries
+                    .into_iter()
+                    .map(|(key, value)| (key, canonical_json_value(value)))
+                    .collect(),
+            )
+        }
+        serde_json::Value::Array(values) => serde_json::Value::Array(
+            values.into_iter().map(canonical_json_value).collect(),
+        ),
+        other => other,
     }
 }
 

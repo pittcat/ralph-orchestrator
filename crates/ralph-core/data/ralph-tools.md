@@ -25,6 +25,12 @@ metadata:
 
 这些变量由 runner 在每次 hat activation 前注入，agent 可直接读取，但**不要**假设某个变量一定非空。
 
+### `loop.resume` 与 `task.resume` 的区别
+
+- `loop.resume` 只表示 loop 使用 `ralph run --continue` 启动时的 bootstrap 信号；它描述的是整个 loop 的启动/续接，不是一次运行时纠错。
+- `task.resume` 只表示运行期间的 recovery/correction 信号，例如事件被拒收、执行契约不匹配或恢复目标需要重试；收到它时按下方恢复规则处理。
+- 不要把 `loop.resume` 当成 `task.resume` 重发，也不要因为看到 `task.resume` 就重新启动整个 loop。
+
 ## AI 决策速查：我现在该做什么？
 
 | 场景 | 下一步 | 参考 |

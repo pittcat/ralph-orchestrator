@@ -9,6 +9,8 @@ metadata:
 
 > This skill is auto-injected by the runner when a `task.resume` event carries `recovery_directives`. You do not need to load it manually. Follow the rules below as system operating procedure.
 
+`loop.resume` 与本 skill 无关：它只在 `ralph run --continue` 启动 loop 时作为 bootstrap 信号出现。本文档中的 `task.resume` 专指运行期间的 recovery/correction；收到 `loop.resume` 时不要执行本文档的纠错重试流程。
+
 ## 收到恢复信号时
 
 **触发条件：**当前 activation 收到 `task.resume`。`hat` 是本次被激活、负责处理该恢复信号的工作单元；恢复 payload 是随信号提供的结构化上下文。

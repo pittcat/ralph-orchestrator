@@ -1478,6 +1478,7 @@ mod u3_state_machine_projection_tests {
     fn u3_delta(id: &str, instance_key: &str) -> StateMachineTransitionDelta {
         StateMachineTransitionDelta {
             transition_id: StateMachineTransitionId(format!("u3|sm|{id}")),
+            source_hat: None,
             topic: "experiment.planned".to_string(),
             instance_key: Some(instance_key.to_string()),
             new_state: "planned".to_string(),

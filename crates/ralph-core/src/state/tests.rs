@@ -818,6 +818,7 @@ fn apply_delta_is_exhaustive() {
             transition_id: crate::state_machine::StateMachineTransitionId(
                 "exhaustive|sm|0".to_string(),
             ),
+            source_hat: None,
             topic: "experiment.planned".to_string(),
             instance_key: Some("t-exhaustive".to_string()),
             new_state: "planned".to_string(),
@@ -2215,6 +2216,7 @@ fn experiment_sm_config() -> StateMachineConfig {
 fn plan_delta(sequence: u64, topic: &str, key: &str) -> StateMachineTransitionDelta {
     StateMachineTransitionDelta {
         transition_id: StateMachineTransitionId(format!("sm|test|{sequence}|{key}")),
+        source_hat: None,
         topic: topic.to_string(),
         instance_key: Some(key.to_string()),
         new_state: "planned".to_string(),
@@ -2228,6 +2230,7 @@ fn plan_delta(sequence: u64, topic: &str, key: &str) -> StateMachineTransitionDe
 fn block_delta(sequence: u64, key: &str) -> StateMachineTransitionDelta {
     StateMachineTransitionDelta {
         transition_id: StateMachineTransitionId(format!("sm|test|{sequence}|{key}|close")),
+        source_hat: None,
         topic: "experiment.blocked".to_string(),
         instance_key: Some(key.to_string()),
         new_state: "blocked".to_string(),
@@ -2301,6 +2304,7 @@ fn u1_apply_terminal_observed_delta_separates_from_honored() {
     snap.apply_delta(&CommitDelta::StateMachineTransition {
         delta: StateMachineTransitionDelta {
             transition_id: StateMachineTransitionId("sm|test|terminal|obs".into()),
+            source_hat: None,
             topic: "LOOP_COMPLETE".into(),
             instance_key: None,
             new_state: "terminal".into(),
@@ -2316,6 +2320,7 @@ fn u1_apply_terminal_observed_delta_separates_from_honored() {
     snap.apply_delta(&CommitDelta::StateMachineTransition {
         delta: StateMachineTransitionDelta {
             transition_id: StateMachineTransitionId("sm|test|terminal|honored".into()),
+            source_hat: None,
             topic: "LOOP_COMPLETE".into(),
             instance_key: None,
             new_state: "terminal".into(),
@@ -2442,10 +2447,7 @@ fn u1_state_machine_delta_commit_replays_to_same_runtime() {
     // every delta on one workspace for replay.
     let mut live_state = StateMachineRuntimeState::new();
     let mut ledger = StateLedger::new(&workspace, true);
-    let mut sequence = 0u64;
-
     // Open `t1` via the validator + projection helper.
-    sequence += 1;
     let pre_open = live_state.classify_open_close(&Some("t1".to_string()));
     let open_decision =
         live_state.validate_event("experiment.planned", Some(r#"{"task_key":"t1"}"#), &config);
@@ -2455,7 +2457,7 @@ fn u1_state_machine_delta_commit_replays_to_same_runtime() {
         "executor",
         "experiment.planned",
         Some("t1"),
-        sequence,
+        r#"{"task_key":"t1"}"#,
     );
     let open_delta = live_state
         .project_transition_delta(
@@ -2474,7 +2476,6 @@ fn u1_state_machine_delta_commit_replays_to_same_runtime() {
         .expect("commit open");
 
     // Close `t1`.
-    sequence += 1;
     let pre_close = live_state.classify_open_close(&Some("t1".to_string()));
     let close_decision =
         live_state.validate_event("experiment.blocked", Some(r#"{"task_key":"t1"}"#), &config);
@@ -2484,7 +2485,7 @@ fn u1_state_machine_delta_commit_replays_to_same_runtime() {
         "executor",
         "experiment.blocked",
         Some("t1"),
-        sequence,
+        r#"{"task_key":"t1"}"#,
     );
     let close_delta = live_state
         .project_transition_delta(
