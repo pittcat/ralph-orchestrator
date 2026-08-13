@@ -887,7 +887,10 @@ mod cross_impl_consistency_tests {
         });
         // Hit when field IS present and non-empty (guard fires → rejection)
         assert_eq!(
-            evaluate(&when, &json!({"merge_boundary_path": ".ralph/merge/merge-boundary.json"})),
+            evaluate(
+                &when,
+                &json!({"merge_boundary_path": ".ralph/merge/merge-boundary.json"})
+            ),
             EvalOutcome::Hit
         );
     }
@@ -956,7 +959,10 @@ mod cross_impl_consistency_tests {
         });
         // overall_confidence = 88 → gt:89 is Miss → all Miss
         assert_eq!(
-            evaluate(&when, &json!({"scope_status": "resolved", "overall_confidence": 88})),
+            evaluate(
+                &when,
+                &json!({"scope_status": "resolved", "overall_confidence": 88})
+            ),
             EvalOutcome::Miss
         );
     }
@@ -971,7 +977,10 @@ mod cross_impl_consistency_tests {
         });
         // overall_confidence = 90 → gt:89 is Hit (90 > 89) → all Hit
         assert_eq!(
-            evaluate(&when, &json!({"scope_status": "resolved", "overall_confidence": 90})),
+            evaluate(
+                &when,
+                &json!({"scope_status": "resolved", "overall_confidence": 90})
+            ),
             EvalOutcome::Hit
         );
     }
@@ -986,7 +995,10 @@ mod cross_impl_consistency_tests {
         });
         // overall_confidence = 85 → gt:89 is Miss → all Miss
         assert_eq!(
-            evaluate(&when, &json!({"scope_status": "resolved", "overall_confidence": 85})),
+            evaluate(
+                &when,
+                &json!({"scope_status": "resolved", "overall_confidence": 85})
+            ),
             EvalOutcome::Miss
         );
     }
@@ -1002,7 +1014,10 @@ mod cross_impl_consistency_tests {
         });
         // critical_unknown_count = 0 → gt:0 is Miss → all Miss
         assert_eq!(
-            evaluate(&when, &json!({"scope_status": "resolved", "critical_unknown_count": 0})),
+            evaluate(
+                &when,
+                &json!({"scope_status": "resolved", "critical_unknown_count": 0})
+            ),
             EvalOutcome::Miss
         );
     }
@@ -1017,7 +1032,10 @@ mod cross_impl_consistency_tests {
         });
         // critical_unknown_count = 1 → gt:0 is Hit → all Hit
         assert_eq!(
-            evaluate(&when, &json!({"scope_status": "resolved", "critical_unknown_count": 1})),
+            evaluate(
+                &when,
+                &json!({"scope_status": "resolved", "critical_unknown_count": 1})
+            ),
             EvalOutcome::Hit
         );
     }
@@ -1033,7 +1051,10 @@ mod cross_impl_consistency_tests {
         });
         // proceed = false → eq:false is Hit → all Hit → rule fires
         assert_eq!(
-            evaluate(&when, &json!({"scope_status": "resolved", "proceed": false})),
+            evaluate(
+                &when,
+                &json!({"scope_status": "resolved", "proceed": false})
+            ),
             EvalOutcome::Hit
         );
     }
@@ -1073,7 +1094,10 @@ mod cross_impl_consistency_tests {
             EvalOutcome::Hit
         );
         assert_eq!(
-            evaluate(&when, &json!({"scope_status": "ambiguous", "proceed": true})),
+            evaluate(
+                &when,
+                &json!({"scope_status": "ambiguous", "proceed": true})
+            ),
             EvalOutcome::Hit
         );
     }
@@ -1103,7 +1127,10 @@ mod cross_impl_consistency_tests {
     fn scope_postmerge_base_sha_exists_fires_hit() {
         let when = json!({"field": "scope_base_sha", "exists": true});
         assert_eq!(
-            evaluate(&when, &json!({"scope_base_sha": "abc1234def567890abc1234def567890abc1234def567890"})),
+            evaluate(
+                &when,
+                &json!({"scope_base_sha": "abc1234def567890abc1234def567890abc1234def567890"})
+            ),
             EvalOutcome::Hit
         );
     }
@@ -1124,7 +1151,10 @@ mod cross_impl_consistency_tests {
             ]
         });
         assert_eq!(
-            evaluate(&when, &json!({"scope_status": "resolved", "resolved_count": 0})),
+            evaluate(
+                &when,
+                &json!({"scope_status": "resolved", "resolved_count": 0})
+            ),
             EvalOutcome::Hit
         );
     }
@@ -1139,7 +1169,10 @@ mod cross_impl_consistency_tests {
         });
         // resolved_count = 1 → eq:0 is Miss → all Miss
         assert_eq!(
-            evaluate(&when, &json!({"scope_status": "resolved", "resolved_count": 1})),
+            evaluate(
+                &when,
+                &json!({"scope_status": "resolved", "resolved_count": 1})
+            ),
             EvalOutcome::Miss
         );
     }

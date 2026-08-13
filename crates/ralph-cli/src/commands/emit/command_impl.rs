@@ -1234,10 +1234,7 @@ pub(super) fn emit_command_with_root_and_hats(
             evidence: None,
         };
         record_cli_emit_rejection(&workspace_root, topic, hat.as_deref(), &finding);
-        anyhow::bail!(
-            "Event rejected by scope handoff guard: {}",
-            err.message
-        );
+        anyhow::bail!("Event rejected by scope handoff guard: {}", err.message);
     }
 
     // against the loop's vocabulary.
@@ -1763,13 +1760,12 @@ pub(super) fn emit_command_with_root_and_hats(
     // unknown value yields `triggered_not_in_topology` and the
     // apply path bails before writing the record.
     if let Some(cfg) = config.as_ref()
-        && let Err(err) =
-            crate::policy_check::check_envelope_triggered(
-                topic,
-                hat.as_deref(),
-                triggered.as_deref(),
-                cfg,
-            )
+        && let Err(err) = crate::policy_check::check_envelope_triggered(
+            topic,
+            hat.as_deref(),
+            triggered.as_deref(),
+            cfg,
+        )
     {
         use ralph_core::{PolicyFinding, ViolationType};
         let finding = PolicyFinding {

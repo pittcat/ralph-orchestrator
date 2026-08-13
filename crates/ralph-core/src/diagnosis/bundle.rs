@@ -15,8 +15,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::diagnostics::{
-    input_bundle as bundle_schema, ArtifactStatus, DiagnosisInputBundle, ManifestStatus,
-    DIAGNOSIS_INPUT_SCHEMA_VERSION,
+    ArtifactStatus, DIAGNOSIS_INPUT_SCHEMA_VERSION, DiagnosisInputBundle, ManifestStatus,
+    input_bundle as bundle_schema,
 };
 
 /// Public status of the bundle, surfaced both in the report and in
@@ -253,9 +253,11 @@ fn project_bundle(bundle: &DiagnosisInputBundle) -> DiagnosisInputReport {
         schema_version: Some(bundle.schema_version.clone()),
         preset_label: bundle.run.preset_label.clone(),
         loop_id: bundle.run.loop_id.clone(),
-        baseline_sha: bundle.run.baseline_sha.clone().or_else(|| {
-            bundle.code_baseline.head_sha.clone()
-        }),
+        baseline_sha: bundle
+            .run
+            .baseline_sha
+            .clone()
+            .or_else(|| bundle.code_baseline.head_sha.clone()),
         worktree: Some(bundle.code_baseline.worktree),
         execution_capabilities: bundle.execution_capabilities.clone(),
         artifacts: bundle.artifacts.iter().cloned().map(Into::into).collect(),
@@ -327,9 +329,7 @@ pub fn read_runtime_trace_report(session_dir: &Path) -> RuntimeTraceReport {
     summary.monotonic_sequences = match (first_sequence, last_sequence) {
         (Some(first), Some(last)) => {
             last >= first
-                && last
-                    .checked_sub(first)
-                    .and_then(|span| span.checked_add(1))
+                && last.checked_sub(first).and_then(|span| span.checked_add(1))
                     == Some(summary.record_count)
         }
         _ => summary.record_count == 0,
@@ -428,9 +428,7 @@ pub fn read_feedback_lifecycle_report(session_dir: &Path) -> FeedbackLifecycleRe
     report.monotonic_sequences = match (first_sequence, last_sequence) {
         (Some(first), Some(last)) => {
             last >= first
-                && last
-                    .checked_sub(first)
-                    .and_then(|span| span.checked_add(1))
+                && last.checked_sub(first).and_then(|span| span.checked_add(1))
                     == Some(report.rows.len() as u64)
         }
         _ => report.rows.is_empty(),
@@ -443,7 +441,10 @@ pub fn read_feedback_lifecycle_report(session_dir: &Path) -> FeedbackLifecycleRe
 
 fn is_runtime_trace_record(value: &Value) -> bool {
     value.is_object()
-        && value.get("schema_version").and_then(Value::as_str).is_some()
+        && value
+            .get("schema_version")
+            .and_then(Value::as_str)
+            .is_some()
         && value.get("ts").and_then(Value::as_str).is_some()
         && value.get("iteration").and_then(Value::as_u64).is_some()
         && value.get("sequence").and_then(Value::as_u64).is_some()
@@ -453,7 +454,10 @@ fn is_runtime_trace_record(value: &Value) -> bool {
 
 fn is_feedback_record(value: &Value) -> bool {
     value.is_object()
-        && value.get("schema_version").and_then(Value::as_str).is_some()
+        && value
+            .get("schema_version")
+            .and_then(Value::as_str)
+            .is_some()
         && value.get("ts").and_then(Value::as_str).is_some()
         && value.get("iteration").and_then(Value::as_u64).is_some()
         && value.get("sequence").and_then(Value::as_u64).is_some()
@@ -468,8 +472,8 @@ fn is_feedback_record(value: &Value) -> bool {
 /// invokes any I/O or external command.
 pub mod suggestions {
     use super::{
-        BundleStatus, DiagnosisInputReport, EvidenceGap, FeedbackLifecycleReport,
-        RepairSuggestion, RuntimeTraceReport,
+        BundleStatus, DiagnosisInputReport, EvidenceGap, FeedbackLifecycleReport, RepairSuggestion,
+        RuntimeTraceReport,
     };
     use std::path::Path;
 
@@ -590,7 +594,8 @@ pub mod suggestions {
         if feedback.status == BundleStatus::Missing {
             gaps.push(EvidenceGap {
                 artifact: "feedback.jsonl".to_string(),
-                reason: "feedback lifecycle missing; recovery sources remain in recovery.jsonl".to_string(),
+                reason: "feedback lifecycle missing; recovery sources remain in recovery.jsonl"
+                    .to_string(),
                 affects: Some("feedback_lifecycle".to_string()),
             });
             suggestions.push(RepairSuggestion {
@@ -633,7 +638,10 @@ pub mod suggestions {
         }
 
         if suggestions.is_empty()
-            && matches!(input.status, BundleStatus::Present | BundleStatus::Finalized)
+            && matches!(
+                input.status,
+                BundleStatus::Present | BundleStatus::Finalized
+            )
         {
             suggestions.push(RepairSuggestion {
                 tier: "long".to_string(),
@@ -679,13 +687,8 @@ mod u2_schema_mismatch_tests {
         trace.status = BundleStatus::Present;
         let mut feedback = FeedbackLifecycleReport::default();
         feedback.status = BundleStatus::Present;
-        let (suggestions, gaps) = build_suggestions_and_gaps(
-            &report,
-            &trace,
-            &feedback,
-            &[],
-            Path::new("/tmp/x"),
-        );
+        let (suggestions, gaps) =
+            build_suggestions_and_gaps(&report, &trace, &feedback, &[], Path::new("/tmp/x"));
         assert!(
             gaps.iter()
                 .any(|g| g.reason.contains("run-diagnosis-input/v999")),

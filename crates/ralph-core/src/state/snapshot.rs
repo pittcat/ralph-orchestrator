@@ -533,6 +533,29 @@ impl LedgerSnapshot {
                 // a replay never double-counts.
                 self.knowledge.apply(records.iter().cloned());
             }
+            CommitDelta::StateMachineTransition { delta } => {
+                // Plan GAP-02 / Unit 1: replay a single StateMachine
+                // transition into `state_machine_runtime`. The runtime
+                // helper dedupes on `transition_id`, so a re-applied
+                // delta is a no-op (R6). Cold-start cases populate
+                // the runtime lazily — the snapshot stays
+                // `state_machine_runtime: None` when StateMachine has
+                // never been enabled for the workspace.
+                let target = match self.state_machine_runtime.as_mut() {
+                    Some(rt) => rt,
+                    None => {
+                        // First sighting of a StateMachine delta on a
+                        // cold start. Materialise the runtime so the
+                        // delta can apply.
+                        self.state_machine_runtime =
+                            Some(crate::state_machine::StateMachineRuntimeState::new());
+                        self.state_machine_runtime
+                            .as_mut()
+                            .expect("just-inserted Some")
+                    }
+                };
+                target.apply_transition_delta(delta);
+            }
         }
     }
 

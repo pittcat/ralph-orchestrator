@@ -12,8 +12,7 @@
 //! (D16 invariant) is also verified.
 
 use ralph_core::diagnostics::{
-    DiagnosticsCollector, DiagnosticsOptions, FeedbackEntry, RuntimeTraceEntry,
-    RuntimeTracePhase,
+    DiagnosticsCollector, DiagnosticsOptions, FeedbackEntry, RuntimeTraceEntry, RuntimeTracePhase,
 };
 use ralph_core::event_loop::EventLoop;
 use ralph_core::{LoopContext, RalphConfig};
@@ -56,8 +55,8 @@ fn enabled_collector_produces_runtime_trace_rows() {
     let config = RalphConfig::default();
     let diagnostics = make_enabled_collector(&temp);
     let context = LoopContext::primary(temp.path().to_path_buf());
-    let mut loop_ = EventLoop::with_context_and_diagnostics(config, context, diagnostics)
-        .expect("eventloop");
+    let mut loop_ =
+        EventLoop::with_context_and_diagnostics(config, context, diagnostics).expect("eventloop");
 
     // Run one iteration (process_output increments iteration counter)
     loop_.process_output(&"ralph".into(), "some output", true);
@@ -75,7 +74,10 @@ fn enabled_collector_produces_runtime_trace_rows() {
     // Must have at least one line
     let body = std::fs::read_to_string(&trace_path).expect("read runtime-trace");
     let lines: Vec<&str> = body.lines().collect();
-    assert!(!lines.is_empty(), "runtime-trace.jsonl must have at least one row");
+    assert!(
+        !lines.is_empty(),
+        "runtime-trace.jsonl must have at least one row"
+    );
 
     // At least one row must decode as RuntimeTraceEntry with phase == Activation
     let has_activation = lines.iter().any(|line| {
@@ -98,11 +100,11 @@ fn enabled_collector_produces_feedback_rows() {
     let config = RalphConfig::default();
     let diagnostics = make_enabled_collector(&temp);
     let context = LoopContext::primary(temp.path().to_path_buf());
-    let mut loop_ = EventLoop::with_context_and_diagnostics(config, context, diagnostics)
-        .expect("eventloop");
+    let mut loop_ =
+        EventLoop::with_context_and_diagnostics(config, context, diagnostics).expect("eventloop");
 
     // Write a recovery envelope directly into the loop to exercise log_feedback
-    use ralph_core::diagnosis::{DiagnosisSource, DiagnosisSeverity, RecoveryDiagnosisEnvelope};
+    use ralph_core::diagnosis::{DiagnosisSeverity, DiagnosisSource, RecoveryDiagnosisEnvelope};
     let envelope = RecoveryDiagnosisEnvelope::builder()
         .source(DiagnosisSource::StallRecovery)
         .severity(DiagnosisSeverity::Error)
@@ -123,12 +125,15 @@ fn enabled_collector_produces_feedback_rows() {
 
     let body = std::fs::read_to_string(&feedback_path).expect("read feedback");
     let lines: Vec<&str> = body.lines().collect();
-    assert!(!lines.is_empty(), "feedback.jsonl must have at least one row");
+    assert!(
+        !lines.is_empty(),
+        "feedback.jsonl must have at least one row"
+    );
 
     // At least one row must decode as FeedbackEntry
-    let has_feedback = lines.iter().any(|line| {
-        serde_json::from_str::<FeedbackEntry>(line).is_ok()
-    });
+    let has_feedback = lines
+        .iter()
+        .any(|line| serde_json::from_str::<FeedbackEntry>(line).is_ok());
     assert!(
         has_feedback,
         "expected at least one FeedbackEntry in {:?}",
@@ -142,8 +147,8 @@ fn disabled_collector_produces_no_sidecars() {
     let config = RalphConfig::default();
     let diagnostics = make_disabled_collector();
     let context = LoopContext::primary(temp.path().to_path_buf());
-    let _loop_ = EventLoop::with_context_and_diagnostics(config, context, diagnostics)
-        .expect("eventloop");
+    let _loop_ =
+        EventLoop::with_context_and_diagnostics(config, context, diagnostics).expect("eventloop");
 
     // With a disabled collector, no .ralph/diagnostics/ directory should be created
     let diag_dir = temp.path().join(".ralph").join("diagnostics");
@@ -211,15 +216,15 @@ fn off_on_business_event_equivalence() {
     fn run_once(collector: &DiagnosticsCollector, temp: &TempDir) -> Vec<EventTupleShape> {
         let config = RalphConfig::default();
         let context = LoopContext::primary(temp.path().to_path_buf());
-        let mut loop_ = EventLoop::with_context_and_diagnostics(
-            config,
-            context,
-            collector.clone(),
-        )
-        .expect("eventloop");
+        let mut loop_ = EventLoop::with_context_and_diagnostics(config, context, collector.clone())
+            .expect("eventloop");
 
         // One iteration
-        loop_.process_output(&"ralph".into(), r#"{"topic":"work.done","payload":{"task_id":"t1"}}"#, true);
+        loop_.process_output(
+            &"ralph".into(),
+            r#"{"topic":"work.done","payload":{"task_id":"t1"}}"#,
+            true,
+        );
 
         // Read events.jsonl and extract the shapes
         let events_path = temp.path().join(".ralph").join("events.jsonl");

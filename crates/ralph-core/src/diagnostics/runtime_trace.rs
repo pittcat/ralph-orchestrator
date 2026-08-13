@@ -225,17 +225,11 @@ impl RuntimeTraceLogger {
         // before serializing. The `source_ref` and JSON `fields`
         // blob are the only non-scalar inputs from upstream.
         if let Some(ref source_ref) = entry.source_ref {
-            let capped = super::cap_string_field(
-                source_ref,
-                "runtime_trace.source_ref",
-            );
+            let capped = super::cap_string_field(source_ref, "runtime_trace.source_ref");
             entry.source_ref = Some(capped.clone());
             entry.reference = Some(capped);
         } else if let Some(reference) = entry.reference.as_ref() {
-            entry.reference = Some(super::cap_string_field(
-                reference,
-                "runtime_trace.ref",
-            ));
+            entry.reference = Some(super::cap_string_field(reference, "runtime_trace.ref"));
         }
         if let Some(fields) = entry.fields.take() {
             entry.fields = Some(super::cap_json_field(fields, "runtime_trace.fields"));

@@ -748,9 +748,7 @@ pub fn check_envelope_triggered(
     if is_ralph_control_topic(topic) || is_orchestrator_diagnostic_topic(topic) {
         return Ok(());
     }
-    if config.event_loop.execution_mode == HatExecutionMode::Isolated
-        && source_hat == Some(value)
-    {
+    if config.event_loop.execution_mode == HatExecutionMode::Isolated && source_hat == Some(value) {
         return Err(ValidationError {
             payload_index: 0,
             field: "triggered".to_string(),

@@ -87,12 +87,17 @@ mod flow_wiring;
 mod prompt_types;
 pub use flow_wiring::*;
 pub use prompt_types::*;
-mod parse_and_emit;
 mod knowledge_wiring;
+mod parse_and_emit;
 mod prompt_injection;
+// Plan GAP-02 (2026-08-13-002) Unit 2: StateMachine
+// candidate-stage helper extracted from `parse_and_emit.rs` to
+// keep that file under the 5 000-line hard cap while Unit 2
+// wires the deferred apply path.
 /// Plan 2026-08-10-001 U2: unified `task.resume` target resolver
 /// and publisher boundary.
 pub mod resume_routing;
+pub mod state_machine_stage;
 mod state_recovery;
 mod terminal_routing;
 #[cfg(test)]
@@ -119,10 +124,10 @@ pub mod termination_impl;
 // impl EventLoop 方法留到后续 U 阶段处理。
 pub use termination_impl::{format_duration, termination_status_text};
 pub mod types;
-mod worktree_handoff;
 pub mod verdict;
 pub mod wave;
 pub mod workflow_guard;
+mod worktree_handoff;
 
 // 2026-06-10-003 U1 scaffold: 6 follow-up placeholders for modules that
 // already exceed the R1 red-line (loop_state / rejection / review_step_state).
@@ -273,6 +278,7 @@ use crate::preset::engine::{
     LintResumeTarget, ProtocolView, build_lint_mirror_block, build_lint_resume_block,
 };
 use crate::skill_registry::SkillRegistry;
+#[allow(unused_imports)]
 use crate::state_machine::{StateMachineDecision, StateMachineRuntimeState};
 
 use crate::text::floor_char_boundary;

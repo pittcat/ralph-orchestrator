@@ -980,6 +980,38 @@ impl EventLoop {
             && let Some(ref mut sm_state) = self.state.state_machine_runtime_state
         {
             sm_state.mark_terminal_honored();
+            // Plan GAP-02 / Unit 4: persist terminal-honored
+            // delta so restart hydration can rebuild
+            // `terminal_honored` on the next process. The
+            // legacy completion-honored delta still ships so
+            // non-Unit-4 callers keep behaving as before. The
+            // semantic-delta-dedup path in Unit 1's
+            // `apply_transition_delta` ensures this delta is
+            // idempotent across replays of the same honored
+            // state — we always carry a fresh
+            // `transition_id` derived from `loop_id +
+            // contract_id + topic = "state_machine.terminal"
+            // + terminal_iteration`.
+            let next_delta = crate::state::CommitDelta::StateMachineTransition {
+                delta: crate::state_machine::StateMachineTransitionDelta {
+                    transition_id: crate::state_machine::StateMachineTransitionId::build(
+                        &self.current_loop_id_for_contract(),
+                        Some("terminal-honored"),
+                        "wave-scope",
+                        "state_machine.terminal_honored",
+                        None,
+                        self.state.iteration as u64,
+                    ),
+                    topic: "state_machine.terminal_honored".to_string(),
+                    instance_key: None,
+                    new_state: "terminal_honored".to_string(),
+                    opens_instance: false,
+                    closes_instance: false,
+                    terminal_observed: true,
+                    terminal_honored: true,
+                },
+            };
+            let _ = Self::commit_terminal_delta(&mut self.state.state_ledger, next_delta);
         }
 
         // Record completion honored in policy runtime state for downstream guarding

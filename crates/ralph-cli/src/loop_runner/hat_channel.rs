@@ -6,7 +6,7 @@
 //! backend exits, stamping every record with the authoritative hat id.
 
 use super::*;
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 use std::fs;
 use std::io::Write;
 use std::path::Path;

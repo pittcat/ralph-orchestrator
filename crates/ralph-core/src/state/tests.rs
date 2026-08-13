@@ -805,6 +805,28 @@ fn apply_delta_is_exhaustive() {
         topic: "forge.report.done".to_string(),
         payload: r#"{"report_path":"a.md"}"#.to_string(),
     });
+    // GAP-01 U1: KnowledgeObserved projection. Empty record list
+    // is a valid no-op apply; we keep coverage tight here so the
+    // exhaustive list mirrors every concrete variant.
+    snap.apply_delta(&CommitDelta::KnowledgeObserved { records: vec![] });
+    // GAP-02 Unit 1: replayable semantic StateMachine delta.
+    // Cold-start ledger has `state_machine_runtime == None`;
+    // the projection branch must lazily materialise the runtime
+    // and apply the delta.
+    snap.apply_delta(&CommitDelta::StateMachineTransition {
+        delta: crate::state_machine::StateMachineTransitionDelta {
+            transition_id: crate::state_machine::StateMachineTransitionId(
+                "exhaustive|sm|0".to_string(),
+            ),
+            topic: "experiment.planned".to_string(),
+            instance_key: Some("t-exhaustive".to_string()),
+            new_state: "planned".to_string(),
+            opens_instance: true,
+            closes_instance: false,
+            terminal_observed: false,
+            terminal_honored: false,
+        },
+    });
 
     // The exhaustive walk is the assertion: if any variant is
     // added without a branch, this test fails to compile.
@@ -1332,16 +1354,19 @@ fn knowledge_observation_delta_round_trips_through_replay() {
     let (_dir, mut ledger) = fresh_ledger();
 
     // Build a bounded observation record (no raw payload).
-    let record = KnowledgeRecord::builder(KnowledgeAuthority::LedgerSnapshot, KnowledgeKind::Observation)
-        .with_subject("U1 plan ready")
-        .with_payload_digest_hex("deadbeef")
-        .with_source_ref("accepted-event:1:0:obs-1")
-        .with_input_fingerprint(InputFingerprint::both(
-            "loopsha0000000000000000000000000000000000",
-            "plansha0000000000000000000000000000000000",
-        ))
-        .build()
-        .expect("builder must accept a bounded record");
+    let record = KnowledgeRecord::builder(
+        KnowledgeAuthority::LedgerSnapshot,
+        KnowledgeKind::Observation,
+    )
+    .with_subject("U1 plan ready")
+    .with_payload_digest_hex("deadbeef")
+    .with_source_ref("accepted-event:1:0:obs-1")
+    .with_input_fingerprint(InputFingerprint::both(
+        "loopsha0000000000000000000000000000000000",
+        "plansha0000000000000000000000000000000000",
+    ))
+    .build()
+    .expect("builder must accept a bounded record");
 
     let delta = CommitDelta::KnowledgeObserved {
         records: vec![record],
@@ -1357,13 +1382,14 @@ fn knowledge_observation_delta_round_trips_through_replay() {
     *second.snapshot_mut() = replayed;
 
     let snap = second.snapshot();
-    let view = snap.knowledge.view_against(&crate::state::InputFingerprint::Both {
-        loop_start_sha: "loop".into(),
-        plan_baseline_sha: "plan".into(),
-    });
+    let view = snap
+        .knowledge
+        .view_against(&crate::state::InputFingerprint::Both {
+            loop_start_sha: "loop".into(),
+            plan_baseline_sha: "plan".into(),
+        });
     assert_eq!(
-        view.total,
-        1,
+        view.total, 1,
         "replayed snapshot must carry exactly one knowledge record"
     );
     assert_eq!(
@@ -1379,9 +1405,7 @@ fn knowledge_observation_delta_round_trips_through_replay() {
 
 #[test]
 fn knowledge_freshness_is_conservative() {
-    use crate::state::knowledge::{
-        EvidenceFreshness, InputFingerprint, VerificationStatus,
-    };
+    use crate::state::knowledge::{EvidenceFreshness, InputFingerprint, VerificationStatus};
 
     // No fingerprint → freshness is Unknown.
     let none_fp = InputFingerprint::None;
@@ -1442,16 +1466,19 @@ fn knowledge_view_and_prompt_use_current_fingerprint() {
     };
 
     let mut state = OrchestrationKnowledgeState::default();
-    let record = KnowledgeRecord::builder(KnowledgeAuthority::LedgerSnapshot, KnowledgeKind::Observation)
-        .with_id("stale-record")
-        .with_subject("old observation")
-        .with_source_ref("/private/old-ref")
-        .with_input_fingerprint(InputFingerprint::Both {
-            loop_start_sha: "old-loop".into(),
-            plan_baseline_sha: "old-plan".into(),
-        })
-        .build()
-        .expect("record");
+    let record = KnowledgeRecord::builder(
+        KnowledgeAuthority::LedgerSnapshot,
+        KnowledgeKind::Observation,
+    )
+    .with_id("stale-record")
+    .with_subject("old observation")
+    .with_source_ref("/private/old-ref")
+    .with_input_fingerprint(InputFingerprint::Both {
+        loop_start_sha: "old-loop".into(),
+        plan_baseline_sha: "old-plan".into(),
+    })
+    .build()
+    .expect("record");
     state.insert(record);
 
     let current = InputFingerprint::Both {
@@ -1473,20 +1500,27 @@ fn knowledge_view_and_prompt_use_current_fingerprint() {
 fn knowledge_source_ref_is_scrubbed_before_persistence() {
     use crate::state::knowledge::{KnowledgeAuthority, KnowledgeKind, KnowledgeRecord};
 
-    let record = KnowledgeRecord::builder(KnowledgeAuthority::LedgerSnapshot, KnowledgeKind::Observation)
-        .with_id("source-ref-scrub")
-        .with_subject("source ref")
-        .with_source_ref("/private/path\nsecret")
-        .build()
-        .expect("record");
-    assert_eq!(record.source_ref.as_deref(), Some("<abs-path:private/path secret>"));
+    let record = KnowledgeRecord::builder(
+        KnowledgeAuthority::LedgerSnapshot,
+        KnowledgeKind::Observation,
+    )
+    .with_id("source-ref-scrub")
+    .with_subject("source ref")
+    .with_source_ref("/private/path\nsecret")
+    .build()
+    .expect("record");
+    assert_eq!(
+        record.source_ref.as_deref(),
+        Some("<abs-path:private/path secret>")
+    );
     assert!(!record.source_ref.as_deref().unwrap().contains('\n'));
 
-    let windows = KnowledgeRecord::builder(KnowledgeAuthority::LedgerSnapshot, KnowledgeKind::Claim)
-        .with_subject("windows path")
-        .with_source_ref(r"C:\Users\pittcat\secret")
-        .build()
-        .expect("windows source ref should build");
+    let windows =
+        KnowledgeRecord::builder(KnowledgeAuthority::LedgerSnapshot, KnowledgeKind::Claim)
+            .with_subject("windows path")
+            .with_source_ref(r"C:\Users\pittcat\secret")
+            .build()
+            .expect("windows source ref should build");
     assert_eq!(
         windows.source_ref.as_deref(),
         Some("<drive-path:Users\\pittcat\\secret>")
@@ -1519,15 +1553,18 @@ fn knowledge_record_apply_is_bounded_and_idempotent() {
         // Every even index uses the same id so the display
         // vec collapses 100 duplicates into a single entry.
         let id = if i % 2 == 0 { "dup-id" } else { "obs-{i}" };
-        let mut b = KnowledgeRecord::builder(KnowledgeAuthority::LedgerSnapshot, KnowledgeKind::Observation)
-            .with_id(id.to_string())
-            .with_subject(format!("record-{i}"))
-            .with_payload_digest_hex("abcd")
-            .with_source_ref(format!("accepted-event:1:{i}:obs"))
-            .with_input_fingerprint(InputFingerprint::Both {
-                loop_start_sha: "l".into(),
-                plan_baseline_sha: "p".into(),
-            });
+        let mut b = KnowledgeRecord::builder(
+            KnowledgeAuthority::LedgerSnapshot,
+            KnowledgeKind::Observation,
+        )
+        .with_id(id.to_string())
+        .with_subject(format!("record-{i}"))
+        .with_payload_digest_hex("abcd")
+        .with_source_ref(format!("accepted-event:1:{i}:obs"))
+        .with_input_fingerprint(InputFingerprint::Both {
+            loop_start_sha: "l".into(),
+            plan_baseline_sha: "p".into(),
+        });
         let _ = &mut b;
         records.push(b.build().expect("build"));
     }
@@ -1544,13 +1581,21 @@ fn knowledge_record_apply_is_bounded_and_idempotent() {
         view.total
     );
     assert_eq!(
-        snap.knowledge.records().iter().filter(|r| r.id == "dup-id").count(),
+        snap.knowledge
+            .records()
+            .iter()
+            .filter(|r| r.id == "dup-id")
+            .count(),
         1,
         "duplicate observation id must collapse to a single record"
     );
 
     // Re-applying the same delta must be idempotent.
-    let dup = vec![KnowledgeRecord::builder(KnowledgeAuthority::LedgerSnapshot, KnowledgeKind::Observation)
+    let dup = vec![
+        KnowledgeRecord::builder(
+            KnowledgeAuthority::LedgerSnapshot,
+            KnowledgeKind::Observation,
+        )
         .with_id("dup-id")
         .with_subject("dup")
         .with_payload_digest_hex("abcd")
@@ -1560,7 +1605,8 @@ fn knowledge_record_apply_is_bounded_and_idempotent() {
             plan_baseline_sha: "p".into(),
         })
         .build()
-        .expect("build")];
+        .expect("build"),
+    ];
     let count_before = snap.knowledge.records().len();
     snap.apply_delta(&CommitDelta::KnowledgeObserved { records: dup });
     let count_after = snap.knowledge.records().len();
@@ -1649,13 +1695,16 @@ fn knowledge_commit_failure_does_not_change_processed_result() {
 
     let mut ledger = StateLedger::new(workspace, true);
     let pre = ledger.snapshot().knowledge.records().len();
-    let record = KnowledgeRecord::builder(KnowledgeAuthority::LedgerSnapshot, KnowledgeKind::Observation)
-        .with_subject("subject")
-        .with_payload_digest_hex("digest")
-        .with_source_ref("src")
-        .with_input_fingerprint(InputFingerprint::None)
-        .build()
-        .expect("build");
+    let record = KnowledgeRecord::builder(
+        KnowledgeAuthority::LedgerSnapshot,
+        KnowledgeKind::Observation,
+    )
+    .with_subject("subject")
+    .with_payload_digest_hex("digest")
+    .with_source_ref("src")
+    .with_input_fingerprint(InputFingerprint::None)
+    .build()
+    .expect("build");
     let res = ledger.commit(
         CommitDelta::KnowledgeObserved {
             records: vec![record],
@@ -1683,10 +1732,8 @@ fn knowledge_commit_failure_does_not_change_processed_result() {
 
 #[test]
 fn observations_from_accepted_events_filters_disposition() {
-    use crate::event_loop::disposition::{classify, Disposition};
-    use crate::state::knowledge::{
-        InputFingerprint, observations_from_accepted_events,
-    };
+    use crate::event_loop::disposition::{Disposition, classify};
+    use crate::state::knowledge::{InputFingerprint, observations_from_accepted_events};
 
     fn mk_event(topic: &str, payload: &str, hat: Option<&str>) -> ralph_proto::Event {
         let mut e = ralph_proto::Event::new(topic, payload);
@@ -1701,19 +1748,21 @@ fn observations_from_accepted_events_filters_disposition() {
         plan_baseline_sha: "plan".into(),
     };
     let events: Vec<(usize, ralph_proto::Event)> = vec![
-        (0usize, mk_event("work.done", r#"{"task_key":"K1"}"#, Some("executor"))),
-        (1usize, mk_event("task.resume", r#"{"task_key":"K2"}"#, Some("recover"))),
+        (
+            0usize,
+            mk_event("work.done", r#"{"task_key":"K1"}"#, Some("executor")),
+        ),
+        (
+            1usize,
+            mk_event("task.resume", r#"{"task_key":"K2"}"#, Some("recover")),
+        ),
         (2usize, mk_event("event.malformed", "garbage", None)),
         (3usize, mk_event("LOOP_COMPLETE", "", None)),
         (4usize, mk_event("loop.cancel", "", None)),
         (5usize, mk_event("plan.blocked", "reason", Some("reviewer"))),
     ];
-    let batch = observations_from_accepted_events(
-        7,
-        &fp,
-        events.iter().map(|(i, e)| (*i, e)),
-        classify,
-    );
+    let batch =
+        observations_from_accepted_events(7, &fp, events.iter().map(|(i, e)| (*i, e)), classify);
 
     // Only Business/Recovery advance flow; the helper must
     // include exactly `work.done`, `task.resume`, and
@@ -1743,7 +1792,10 @@ fn observations_from_accepted_events_filters_disposition() {
 
     // Sanity: the disposition classifier is honoured — the
     // helper uses the public classifier, no mock.
-    assert_eq!(classify("event.malformed"), Disposition::DiagnosticObservation);
+    assert_eq!(
+        classify("event.malformed"),
+        Disposition::DiagnosticObservation
+    );
     assert_eq!(classify("LOOP_COMPLETE"), Disposition::LoopControl);
 }
 
@@ -1759,12 +1811,7 @@ fn accepted_event_observation_contains_digest_not_payload() {
     let event = ralph_proto::Event::new("work.done", sensitive_payload);
     let events = vec![(0usize, &event)];
 
-    let batch = observations_from_accepted_events(
-        1,
-        &InputFingerprint::None,
-        events,
-        classify,
-    );
+    let batch = observations_from_accepted_events(1, &InputFingerprint::None, events, classify);
     assert_eq!(batch.records.len(), 1);
     let record = &batch.records[0];
     assert_eq!(record.payload_digest.as_deref(), Some(digest.as_str()));
@@ -1866,12 +1913,22 @@ fn one_batch_has_at_most_one_knowledge_commit() {
     let (_dir, mut ledger) = fresh_ledger();
     let events = [
         (0usize, ralph_proto::Event::new("work.done", r#"{"k":"v"}"#)),
-        (1usize, ralph_proto::Event::new("work.failed", r#"{"k":"v"}"#)),
-        (2usize, ralph_proto::Event::new("plan.ready", r#"{"k":"v"}"#)),
+        (
+            1usize,
+            ralph_proto::Event::new("work.failed", r#"{"k":"v"}"#),
+        ),
+        (
+            2usize,
+            ralph_proto::Event::new("plan.ready", r#"{"k":"v"}"#),
+        ),
         (3usize, ralph_proto::Event::new("event.malformed", "")),
-        (4usize, ralph_proto::Event::new("work.done", r#"{"k":"v2"}"#)),
+        (
+            4usize,
+            ralph_proto::Event::new("work.done", r#"{"k":"v2"}"#),
+        ),
     ];
-    let events_ref: Vec<(usize, &ralph_proto::Event)> = events.iter().map(|(i, e)| (*i, e)).collect();
+    let events_ref: Vec<(usize, &ralph_proto::Event)> =
+        events.iter().map(|(i, e)| (*i, e)).collect();
     let batch = observations_from_accepted_events(
         2,
         &InputFingerprint::Both {
@@ -1884,7 +1941,10 @@ fn one_batch_has_at_most_one_knowledge_commit() {
     assert_eq!(batch.records.len(), 4, "4 of 5 events advance flow");
     assert_eq!(batch.non_advancing_skipped, 1);
     let outcome = commit_accepted_observations(&mut ledger, 2, batch);
-    assert!(matches!(outcome, CommitObservationOutcome::Committed { count: 4 }));
+    assert!(matches!(
+        outcome,
+        CommitObservationOutcome::Committed { count: 4 }
+    ));
 
     // Exactly one knowledge delta in the commit log.
     let knowledge_deltas = ledger
@@ -1924,16 +1984,19 @@ fn render_prompt_block_contains_authority_and_counts() {
     };
 
     let mut state = OrchestrationKnowledgeState::default();
-    let record = KnowledgeRecord::builder(KnowledgeAuthority::LedgerSnapshot, KnowledgeKind::Observation)
-        .with_subject("U1 plan ready")
-        .with_payload_digest_hex("deadbeef")
-        .with_source_ref("accepted-event:1:0:obs-1")
-        .with_input_fingerprint(InputFingerprint::Both {
-            loop_start_sha: "l".into(),
-            plan_baseline_sha: "p".into(),
-        })
-        .build()
-        .expect("build");
+    let record = KnowledgeRecord::builder(
+        KnowledgeAuthority::LedgerSnapshot,
+        KnowledgeKind::Observation,
+    )
+    .with_subject("U1 plan ready")
+    .with_payload_digest_hex("deadbeef")
+    .with_source_ref("accepted-event:1:0:obs-1")
+    .with_input_fingerprint(InputFingerprint::Both {
+        loop_start_sha: "l".into(),
+        plan_baseline_sha: "p".into(),
+    })
+    .build()
+    .expect("build");
     state.insert(record);
 
     let block = crate::state::render_prompt_block(
@@ -1967,18 +2030,21 @@ fn render_prompt_block_never_contains_raw_payload_or_path() {
     // Subject is fine-grained descriptive text; source_ref and
     // digest are scrubbed by the renderer to ensure paths and
     // raw payloads never leak.
-    let record = KnowledgeRecord::builder(KnowledgeAuthority::LedgerSnapshot, KnowledgeKind::Observation)
-        .with_subject("descriptive subject")
-        .with_payload_digest_hex("digest-abc123")
-        // The raw payload is supposed to land here, but the
-        // builder refuses it via the digest-only field.
-        .with_source_ref("/etc/passwd")
-        .with_input_fingerprint(InputFingerprint::Both {
-            loop_start_sha: "l".into(),
-            plan_baseline_sha: "p".into(),
-        })
-        .build()
-        .expect("build");
+    let record = KnowledgeRecord::builder(
+        KnowledgeAuthority::LedgerSnapshot,
+        KnowledgeKind::Observation,
+    )
+    .with_subject("descriptive subject")
+    .with_payload_digest_hex("digest-abc123")
+    // The raw payload is supposed to land here, but the
+    // builder refuses it via the digest-only field.
+    .with_source_ref("/etc/passwd")
+    .with_input_fingerprint(InputFingerprint::Both {
+        loop_start_sha: "l".into(),
+        plan_baseline_sha: "p".into(),
+    })
+    .build()
+    .expect("build");
     state.insert(record);
 
     let block = crate::state::render_prompt_block(&state, &crate::state::InputFingerprint::None);
@@ -1997,27 +2063,29 @@ fn render_prompt_block_never_contains_raw_payload_or_path() {
 #[test]
 fn render_prompt_block_evidence_refs_are_scrubbed() {
     use crate::state::knowledge::{
-        InputFingerprint, KnowledgeAuthority, KnowledgeKind, KnowledgeRecord,
-        EvidenceRef,
+        EvidenceRef, InputFingerprint, KnowledgeAuthority, KnowledgeKind, KnowledgeRecord,
     };
 
     let mut state = OrchestrationKnowledgeState::default();
     // ref_id contains an absolute path, a raw secret token, and embedded newlines.
     // All three must be stripped before the record reaches the prompt.
-    let record = KnowledgeRecord::builder(KnowledgeAuthority::LedgerSnapshot, KnowledgeKind::Observation)
-        .with_subject("U1 plan ready")
-        .with_payload_digest_hex("deadbeef")
-        .with_source_ref("accepted-event:1:0:obs-1")
-        .with_input_fingerprint(InputFingerprint::Both {
-            loop_start_sha: "l".into(),
-            plan_baseline_sha: "p".into(),
-        })
-        .with_evidence(EvidenceRef {
-            ref_id: "/absolute/path/REFID_SECRET_TOKEN_with_newline\nattack".to_string(),
-            digest: None,
-        })
-        .build()
-        .expect("build");
+    let record = KnowledgeRecord::builder(
+        KnowledgeAuthority::LedgerSnapshot,
+        KnowledgeKind::Observation,
+    )
+    .with_subject("U1 plan ready")
+    .with_payload_digest_hex("deadbeef")
+    .with_source_ref("accepted-event:1:0:obs-1")
+    .with_input_fingerprint(InputFingerprint::Both {
+        loop_start_sha: "l".into(),
+        plan_baseline_sha: "p".into(),
+    })
+    .with_evidence(EvidenceRef {
+        ref_id: "/absolute/path/REFID_SECRET_TOKEN_with_newline\nattack".to_string(),
+        digest: None,
+    })
+    .build()
+    .expect("build");
     state.insert(record);
 
     let block = crate::state::render_prompt_block(&state, &crate::state::InputFingerprint::None);
@@ -2080,3 +2148,438 @@ fn render_prompt_block_caps_records() {
         "rendered block must cap at PROMPT_RECORDS_VISIBLE; got {line_count}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Plan GAP-02 (2026-08-13-002) Unit 1: replayable StateMachine
+// semantic deltas live in `CommitDelta::StateMachineTransition`.
+// The runtime creates a small semantic-delta representation
+// (`StateMachineTransitionDelta`); the ledger applies it through
+// `LedgerSnapshot::apply_delta`, materially updating the
+// `state_machine_runtime` projection. The tests below cover the
+// Red→Green behaviour called out in Unit 1 §11 (5 unit-tests) and
+// §9 (acceptance test).
+// ---------------------------------------------------------------------------
+
+use crate::config::state_machine::{
+    InstanceKeyConfig, StateMachineConfig, TerminalGuardConfig, TransitionConfig,
+};
+use crate::state_machine::{
+    StateMachineDecision, StateMachineRuntimeState, StateMachineTransitionDelta,
+    StateMachineTransitionId,
+};
+
+fn experiment_sm_config() -> StateMachineConfig {
+    StateMachineConfig {
+        enabled: true,
+        instance_key: InstanceKeyConfig {
+            from_payload: "task_key".to_string(),
+            required_for: vec![
+                "experiment.planned".to_string(),
+                "experiment.ready".to_string(),
+                "experiment.blocked".to_string(),
+            ],
+        },
+        terminal_topics: vec!["LOOP_COMPLETE".to_string()],
+        business_topics: vec![
+            "experiment.planned".to_string(),
+            "experiment.ready".to_string(),
+            "experiment.blocked".to_string(),
+        ],
+        terminal_guard: TerminalGuardConfig::default(),
+        transitions: vec![
+            TransitionConfig {
+                topic: "experiment.planned".to_string(),
+                from: vec!["idle".to_string()],
+                to: "planned".to_string(),
+                opens_instance: true,
+                closes_instance: false,
+            },
+            TransitionConfig {
+                topic: "experiment.ready".to_string(),
+                from: vec!["planned".to_string()],
+                to: "ready".to_string(),
+                opens_instance: false,
+                closes_instance: false,
+            },
+            TransitionConfig {
+                topic: "experiment.blocked".to_string(),
+                from: vec!["planned".to_string(), "ready".to_string()],
+                to: "blocked".to_string(),
+                opens_instance: false,
+                closes_instance: true,
+            },
+        ],
+    }
+}
+
+fn plan_delta(sequence: u64, topic: &str, key: &str) -> StateMachineTransitionDelta {
+    StateMachineTransitionDelta {
+        transition_id: StateMachineTransitionId(format!("sm|test|{sequence}|{key}")),
+        topic: topic.to_string(),
+        instance_key: Some(key.to_string()),
+        new_state: "planned".to_string(),
+        opens_instance: true,
+        closes_instance: false,
+        terminal_observed: false,
+        terminal_honored: false,
+    }
+}
+
+fn block_delta(sequence: u64, key: &str) -> StateMachineTransitionDelta {
+    StateMachineTransitionDelta {
+        transition_id: StateMachineTransitionId(format!("sm|test|{sequence}|{key}|close")),
+        topic: "experiment.blocked".to_string(),
+        instance_key: Some(key.to_string()),
+        new_state: "blocked".to_string(),
+        opens_instance: false,
+        closes_instance: true,
+        terminal_observed: false,
+        terminal_honored: false,
+    }
+}
+
+#[test]
+fn u1_apply_state_machine_open_delta_records_runtime_state() {
+    // Unit 1 §11 test 1: cold-start apply, open instance reaches
+    // the right map / state / topic / count.
+    let mut snap = LedgerSnapshot::cold_start();
+    assert!(snap.state_machine_runtime.is_none());
+
+    snap.apply_delta(&CommitDelta::StateMachineTransition {
+        delta: plan_delta(1, "experiment.planned", "t1"),
+    });
+
+    let runtime = snap
+        .state_machine_runtime
+        .as_ref()
+        .expect("StateMachine runtime must be materialised lazily");
+    let open = runtime.open_instances_snapshot();
+    assert_eq!(open.len(), 1);
+    assert_eq!(open.get("t1").unwrap().state, "planned");
+    assert_eq!(open.get("t1").unwrap().last_topic, "experiment.planned");
+    assert_eq!(runtime.accepted_transition_count(), 1);
+}
+
+#[test]
+fn u1_apply_state_machine_close_delta_dedupes() {
+    // Unit 1 §11 test 2: open → close moves the instance between
+    // maps and dedupes on `transition_id`; replaying the same
+    // delta does not double-count.
+    let mut snap = LedgerSnapshot::cold_start();
+    snap.apply_delta(&CommitDelta::StateMachineTransition {
+        delta: plan_delta(1, "experiment.planned", "t1"),
+    });
+    snap.apply_delta(&CommitDelta::StateMachineTransition {
+        delta: block_delta(2, "t1"),
+    });
+
+    let runtime = snap.state_machine_runtime.as_ref().unwrap();
+    let open = runtime.open_instances_snapshot();
+    let closed = runtime.closed_instances_snapshot();
+    assert_eq!(open.len(), 0);
+    assert_eq!(closed.len(), 1);
+    assert_eq!(closed.get("t1").unwrap().state, "blocked");
+    assert_eq!(runtime.accepted_transition_count(), 2);
+
+    // Re-applying the same close delta is idempotent.
+    snap.apply_delta(&CommitDelta::StateMachineTransition {
+        delta: block_delta(2, "t1"),
+    });
+    let runtime = snap.state_machine_runtime.as_ref().unwrap();
+    assert_eq!(
+        runtime.accepted_transition_count(),
+        2,
+        "duplicate transition_id must not double-count"
+    );
+}
+
+#[test]
+fn u1_apply_terminal_observed_delta_separates_from_honored() {
+    // Unit 1 §11 test 3 + 4 (terminal observed/honored are
+    // independent deltas).
+    let mut snap = LedgerSnapshot::cold_start();
+    snap.apply_delta(&CommitDelta::StateMachineTransition {
+        delta: StateMachineTransitionDelta {
+            transition_id: StateMachineTransitionId("sm|test|terminal|obs".into()),
+            topic: "LOOP_COMPLETE".into(),
+            instance_key: None,
+            new_state: "terminal".into(),
+            opens_instance: false,
+            closes_instance: false,
+            terminal_observed: true,
+            terminal_honored: false,
+        },
+    });
+    let runtime = snap.state_machine_runtime.as_ref().unwrap();
+    assert!(runtime.is_terminal_honored() == false);
+    // Honored may only flip after observed.
+    snap.apply_delta(&CommitDelta::StateMachineTransition {
+        delta: StateMachineTransitionDelta {
+            transition_id: StateMachineTransitionId("sm|test|terminal|honored".into()),
+            topic: "LOOP_COMPLETE".into(),
+            instance_key: None,
+            new_state: "terminal".into(),
+            opens_instance: false,
+            closes_instance: false,
+            terminal_observed: false,
+            terminal_honored: true,
+        },
+    });
+    let runtime = snap.state_machine_runtime.as_ref().unwrap();
+    assert!(runtime.is_terminal_honored());
+}
+
+#[test]
+fn u1_replay_old_commit_log_without_state_machine_delta_keeps_runtime_default() {
+    // Unit 1 §11 test 5: legacy ledger.jsonl without StateMachine
+    // deltas must still replay; the runtime projection stays
+    // None so the disabled path keeps original semantics.
+    let (_dir, mut ledger) = fresh_ledger();
+    // Pre-existing delta variants only.
+    ledger
+        .commit(
+            CommitDelta::CounterChanged {
+                counter: CounterKind::Iteration,
+                new_value: 3,
+            },
+            Some("legacy".into()),
+        )
+        .expect("commit");
+    ledger
+        .commit(
+            CommitDelta::CompletionHonored,
+            Some("legacy-honored".into()),
+        )
+        .expect("commit");
+
+    // Open a new ledger on the same workspace → replay rebuilds
+    // snapshot but StateMachine remains absent.
+    let dir = _dir.keep();
+    let replayed = StateLedger::new(&dir, true);
+    let snap = replayed.snapshot();
+    assert_eq!(snap.iteration, 3);
+    assert!(snap.completion_honored);
+    assert!(
+        snap.state_machine_runtime.is_none(),
+        "legacy commit log must not synthesise a StateMachine runtime"
+    );
+}
+
+#[test]
+fn u1_failed_state_machine_commit_restores_snapshot() {
+    // Unit 1 §11 test 6: durability failure keeps the ledger
+    // intact (caller surface: snapshot unchanged after error).
+    let dir = workspace();
+    let workspace = dir.path().to_path_buf();
+    let mut ledger = StateLedger::new(&workspace, true);
+
+    // Baseline commit against a fresh on-disk log. We need the
+    // ledger file to exist first so the atomic-rewrite fault
+    // triggers on the SECOND commit.
+    ledger
+        .commit(
+            CommitDelta::CounterChanged {
+                counter: CounterKind::Iteration,
+                new_value: 5,
+            },
+            Some("before-failure".into()),
+        )
+        .expect("baseline commit must succeed before fault injection");
+
+    // Now replace the ledger file with a directory so the next
+    // atomic rewrite must fail.
+    let ralph_dir = workspace.join(".ralph");
+    std::fs::create_dir_all(&ralph_dir).expect("mkdir .ralph");
+    let ledger_file = workspace.join(LEDGER_RELATIVE_PATH);
+    if ledger_file.exists() {
+        std::fs::remove_file(&ledger_file).ok();
+    }
+    std::fs::create_dir(&ledger_file).expect("mkdir ledger-as-dir");
+
+    let before = ledger.snapshot().clone();
+
+    let err = ledger.commit(
+        CommitDelta::StateMachineTransition {
+            delta: plan_delta(1, "experiment.planned", "t1"),
+        },
+        Some("sm-delta-attempt".into()),
+    );
+    assert!(
+        err.is_err(),
+        "committing a StateMachine delta into a directory must fail"
+    );
+    let after = ledger.snapshot();
+    // Snapshot state identical to before — rollback preserved it.
+    assert_eq!(after.iteration, before.iteration);
+    // And the replay log carries only the pre-failure commit.
+    let log = ledger.commit_log();
+    assert_eq!(
+        log.iter()
+            .filter(|c| c.event_topic.as_deref() == Some("sm-delta-attempt"))
+            .count(),
+        0,
+        "failed commit must not leave a StateMachine delta in the log"
+    );
+    assert!(
+        after.state_machine_runtime.is_none(),
+        "StateMachine runtime must remain absent after a failed commit"
+    );
+}
+
+#[test]
+fn u1_state_machine_delta_commit_replays_to_same_runtime() {
+    // Unit 1 §9 acceptance: the accepted transition must commit,
+    // the snapshot must reflect live state, and a fresh ledger on
+    // the same workspace must rebuild an equivalent
+    // `state_machine_runtime` (Scenario S1/S6 combined).
+    let dir = workspace();
+    let workspace = dir.path().to_path_buf();
+    let config = experiment_sm_config();
+
+    // Drive StateMachine in-process to obtain Accept decisions,
+    // project each into a semantic delta. Use a single ledger
+    // (no per-call directory churn) so the commit log carries
+    // every delta on one workspace for replay.
+    let mut live_state = StateMachineRuntimeState::new();
+    let mut ledger = StateLedger::new(&workspace, true);
+    let mut sequence = 0u64;
+
+    // Open `t1` via the validator + projection helper.
+    sequence += 1;
+    let pre_open = live_state.classify_open_close(&Some("t1".to_string()));
+    let open_decision =
+        live_state.validate_event("experiment.planned", Some(r#"{"task_key":"t1"}"#), &config);
+    let open_id = StateMachineTransitionId::build(
+        "loop-A",
+        Some("contract-A"),
+        "executor",
+        "experiment.planned",
+        Some("t1"),
+        sequence,
+    );
+    let open_delta = live_state
+        .project_transition_delta(
+            open_id,
+            "experiment.planned",
+            &open_decision,
+            pre_open.0,
+            pre_open.1,
+        )
+        .expect("open decision must project");
+    ledger
+        .commit(
+            CommitDelta::StateMachineTransition { delta: open_delta },
+            Some("experiment.planned".into()),
+        )
+        .expect("commit open");
+
+    // Close `t1`.
+    sequence += 1;
+    let pre_close = live_state.classify_open_close(&Some("t1".to_string()));
+    let close_decision =
+        live_state.validate_event("experiment.blocked", Some(r#"{"task_key":"t1"}"#), &config);
+    let close_id = StateMachineTransitionId::build(
+        "loop-A",
+        Some("contract-A"),
+        "executor",
+        "experiment.blocked",
+        Some("t1"),
+        sequence,
+    );
+    let close_delta = live_state
+        .project_transition_delta(
+            close_id,
+            "experiment.blocked",
+            &close_decision,
+            pre_close.0,
+            pre_close.1,
+        )
+        .expect("close decision must project");
+    assert!(
+        close_delta.closes_instance,
+        "close delta must carry closes_instance=true"
+    );
+    ledger
+        .commit(
+            CommitDelta::StateMachineTransition { delta: close_delta },
+            Some("experiment.blocked".into()),
+        )
+        .expect("commit close");
+
+    // Capture first-process snapshot.
+    let first = ledger.snapshot().clone();
+    let first_runtime = first
+        .state_machine_runtime
+        .as_ref()
+        .expect("runtime materialised after first ledger");
+    let first_open = first_runtime.open_instances_snapshot();
+    let first_closed = first_runtime.closed_instances_snapshot();
+    assert!(
+        first_open.is_empty(),
+        "instance must have moved from open to closed"
+    );
+    assert_eq!(first_closed.len(), 1);
+    assert_eq!(first_closed.get("t1").unwrap().state, "blocked");
+    assert_eq!(first_runtime.accepted_transition_count(), 2);
+
+    // 2) Second ledger on the same workspace replays the same
+    // commit log; the freshly recovered `state_machine_runtime`
+    // must equal the first-process projection byte-for-byte at
+    // every observable field.
+    drop(ledger);
+    let replay = StateLedger::new(&workspace, true);
+    let second = replay.snapshot();
+    let second_runtime = second
+        .state_machine_runtime
+        .as_ref()
+        .expect("replay must also materialise the runtime");
+    assert_eq!(
+        second_runtime.open_instances_snapshot(),
+        first_open,
+        "open instances must replay identically"
+    );
+    assert_eq!(
+        second_runtime.closed_instances_snapshot(),
+        first_closed,
+        "closed instances must replay identically"
+    );
+    assert_eq!(
+        second_runtime.accepted_transition_count(),
+        first_runtime.accepted_transition_count(),
+        "accepted transition count must replay identically"
+    );
+}
+
+#[test]
+fn u1_state_machine_transition_id_dedupes_across_replay() {
+    // Property-style: applying the same delta twice in a row is
+    // a no-op on the second call. Covers R6 (idempotency) at the
+    // delta layer.
+    let mut snap = LedgerSnapshot::cold_start();
+    let delta = plan_delta(7, "experiment.planned", "t-x");
+
+    let first = StateMachineTransitionDelta::clone(&delta);
+    let second = StateMachineTransitionDelta::clone(&delta);
+
+    snap.apply_delta(&CommitDelta::StateMachineTransition {
+        delta: first.clone(),
+    });
+    let after_first = snap.state_machine_runtime.as_ref().unwrap().clone();
+    snap.apply_delta(&CommitDelta::StateMachineTransition {
+        delta: second.clone(),
+    });
+    let after_second = snap.state_machine_runtime.as_ref().unwrap().clone();
+    assert_eq!(
+        after_first.accepted_transition_count(),
+        after_second.accepted_transition_count(),
+        "dedupe must hold: replay should not double-count"
+    );
+    assert_eq!(
+        after_first.open_instances_snapshot(),
+        after_second.open_instances_snapshot(),
+        "dedupe must hold: replay should not re-insert"
+    );
+}
+
+#[allow(dead_code)]
+fn _ensure_state_machine_decision_in_test_scope(_d: &StateMachineDecision) {}

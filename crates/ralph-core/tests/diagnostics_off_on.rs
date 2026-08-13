@@ -4,7 +4,7 @@
 //! acceptance test, exercising the production writer path
 //! (not struct-level serde round-trips).
 
-use ralph_core::diagnosis::{build_suggestions_and_gaps, RepairSuggestion};
+use ralph_core::diagnosis::{RepairSuggestion, build_suggestions_and_gaps};
 use ralph_core::diagnostics::{
     FeedbackEntry, FeedbackLogger, FeedbackPhase, RuntimeTraceEntry, RuntimeTraceLogger,
     RuntimeTracePhase,
@@ -26,7 +26,8 @@ fn u4_runtime_trace_records_lifecycle() {
     let mut logger = RuntimeTraceLogger::new(&session).expect("RuntimeTraceLogger::new");
     logger.append(RuntimeTraceEntry::new(0, 0, RuntimeTracePhase::Activation).with_hat("executor"));
     logger.append(RuntimeTraceEntry::new(0, 0, RuntimeTracePhase::Accepted).with_hat("executor"));
-    logger.append(RuntimeTraceEntry::new(0, 0, RuntimeTracePhase::Termination).with_hat("executor"));
+    logger
+        .append(RuntimeTraceEntry::new(0, 0, RuntimeTracePhase::Termination).with_hat("executor"));
 
     let path = session.join("runtime-trace.jsonl");
     let body = fs::read_to_string(&path).expect("read runtime-trace.jsonl");
@@ -87,12 +88,18 @@ fn u4_feedback_records_real_lifecycle_sources() {
 
     let path = session.join("feedback.jsonl");
     let body = fs::read_to_string(&path).expect("read feedback.jsonl");
-    assert!(body.contains(r#""phase":"action""#), "missing action phase row");
+    assert!(
+        body.contains(r#""phase":"action""#),
+        "missing action phase row"
+    );
     assert!(
         body.contains(r#""phase":"validation""#),
         "missing validation phase row"
     );
-    assert!(body.contains(r#""phase":"final""#), "missing final phase row");
+    assert!(
+        body.contains(r#""phase":"final""#),
+        "missing final phase row"
+    );
 }
 
 #[test]
@@ -115,13 +122,8 @@ fn u4_suggestions_are_non_executing() {
     let feedback = FeedbackLifecycleReport::default();
     let warnings: Vec<String> = vec![];
 
-    let (suggestions, _gaps) = build_suggestions_and_gaps(
-        &input,
-        &trace,
-        &feedback,
-        &warnings,
-        &session,
-    );
+    let (suggestions, _gaps) =
+        build_suggestions_and_gaps(&input, &trace, &feedback, &warnings, &session);
 
     for s in &suggestions {
         assert_suggestion_is_non_executing(s);
@@ -131,11 +133,20 @@ fn u4_suggestions_are_non_executing() {
 fn assert_suggestion_is_non_executing(s: &RepairSuggestion) {
     let forbidden_substrings = [
         // No shell-execution patterns
-        "$", "|", "&", "&&", "||",
+        "$",
+        "|",
+        "&",
+        "&&",
+        "||",
         // No command-execution verbs at start of word
-        "rm -rf", "sudo ", "chmod ", "kill ",
+        "rm -rf",
+        "sudo ",
+        "chmod ",
+        "kill ",
         // No ralph emit / event-topic strings
-        "ralph emit", "ralph wave emit", "repair_",
+        "ralph emit",
+        "ralph wave emit",
+        "repair_",
         // No backtick command substitution
         "`",
     ];

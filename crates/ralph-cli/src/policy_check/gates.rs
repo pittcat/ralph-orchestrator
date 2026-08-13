@@ -798,18 +798,12 @@ pub fn check_scope_handoff_guard(
 
     // Topic-specific structural checks.
     match topic {
-        "merge.integrated" => {
-            check_merge_integrated_scope_fields(&value, workspace_root)
-        }
-        "merge.stabilized" => {
-            check_merge_stabilized_scope_fields(&value, workspace_root)
-        }
+        "merge.integrated" => check_merge_integrated_scope_fields(&value, workspace_root),
+        "merge.stabilized" => check_merge_stabilized_scope_fields(&value, workspace_root),
         "postmerge.changemap.ready" => {
             check_postmerge_changemap_scope_fields(&value, workspace_root)
         }
-        "redteam.plan.resolved" => {
-            check_redteam_plan_resolved_scope_fields(&value, workspace_root)
-        }
+        "redteam.plan.resolved" => check_redteam_plan_resolved_scope_fields(&value, workspace_root),
         _ => Ok(()),
     }
 }
@@ -828,11 +822,8 @@ fn check_merge_integrated_scope_fields(
     // structural validation; `require_status = Some("merge.integrated")`
     // adds the `merge_boundary_status` enum check on the integrated
     // topic.
-    let (boundary_path, boundary_digest) = validate_merge_boundary_pair(
-        obj,
-        workspace_root,
-        Some("merge.integrated"),
-    )?;
+    let (boundary_path, boundary_digest) =
+        validate_merge_boundary_pair(obj, workspace_root, Some("merge.integrated"))?;
 
     // Boundary digests use canonical JSON, excluding the self-referential
     // boundary_digest field. Other scope artifacts remain raw-byte digests.
@@ -859,8 +850,7 @@ fn check_merge_stabilized_scope_fields(
     // U9 (M2): `require_status = None` skips the `merge_boundary_status`
     // enum check on the stabilized topic; only path + digest are
     // enforced.
-    let (boundary_path, boundary_digest) =
-        validate_merge_boundary_pair(obj, workspace_root, None)?;
+    let (boundary_path, boundary_digest) = validate_merge_boundary_pair(obj, workspace_root, None)?;
 
     // Boundary digests use the same canonical JSON representation as
     // merge.integrated.
@@ -889,9 +879,7 @@ fn expect_scope_payload_object<'a>(
             payload_index: 0,
             field: "payload".to_string(),
             reason_code: "scope_handoff_inconsistent".to_string(),
-            message: format!(
-                "scope handoff guard: topic '{topic}' payload must be a JSON object"
-            ),
+            message: format!("scope handoff guard: topic '{topic}' payload must be a JSON object"),
             ..Default::default()
         }),
     }
@@ -938,14 +926,16 @@ pub(crate) fn validate_scoped_artifact_path(
         message: format!("{field} file does not exist or is unreadable: {artifact_path}: {e}"),
         ..Default::default()
     })?;
-    let canonical_root = std::fs::canonicalize(workspace_root.join(allowed_prefix.trim_end_matches('/')))
-        .map_err(|e| ValidationError {
-            payload_index: 0,
-            field: field.to_string(),
-            reason_code: "scope_handoff_inconsistent".to_string(),
-            message: format!("scope artifact root is unavailable: {allowed_prefix}: {e}"),
-            ..Default::default()
-        })?;
+    let canonical_root = std::fs::canonicalize(
+        workspace_root.join(allowed_prefix.trim_end_matches('/')),
+    )
+    .map_err(|e| ValidationError {
+        payload_index: 0,
+        field: field.to_string(),
+        reason_code: "scope_handoff_inconsistent".to_string(),
+        message: format!("scope artifact root is unavailable: {allowed_prefix}: {e}"),
+        ..Default::default()
+    })?;
     if !canonical_path.starts_with(&canonical_root) {
         return Err(ValidationError {
             payload_index: 0,
@@ -1010,7 +1000,8 @@ fn validate_merge_boundary_pair(
                 payload_index: 0,
                 field: "merge_boundary_path".to_string(),
                 reason_code: "scope_handoff_inconsistent".to_string(),
-                message: "merge_boundary_path is required and must be a non-empty string".to_string(),
+                message: "merge_boundary_path is required and must be a non-empty string"
+                    .to_string(),
                 ..Default::default()
             });
         }
@@ -1030,7 +1021,8 @@ fn validate_merge_boundary_pair(
                 payload_index: 0,
                 field: "merge_boundary_digest".to_string(),
                 reason_code: "scope_handoff_inconsistent".to_string(),
-                message: "merge_boundary_digest is required and must be a non-empty string".to_string(),
+                message: "merge_boundary_digest is required and must be a non-empty string"
+                    .to_string(),
                 ..Default::default()
             });
         }
@@ -1143,21 +1135,15 @@ fn read_scope_manifest_object(
         payload_index: 0,
         field: "scope_manifest_path".to_string(),
         reason_code: "scope_handoff_inconsistent".to_string(),
-        message: format!(
-            "{topic} cannot read scope manifest at {manifest_path}: {e}"
-        ),
+        message: format!("{topic} cannot read scope manifest at {manifest_path}: {e}"),
         ..Default::default()
     })?;
-    let value: serde_json::Value = serde_json::from_slice(&bytes).map_err(|e| {
-        ValidationError {
-            payload_index: 0,
-            field: "scope_manifest_path".to_string(),
-            reason_code: "scope_handoff_inconsistent".to_string(),
-            message: format!(
-                "{topic} scope manifest at {manifest_path} is not valid JSON: {e}"
-            ),
-            ..Default::default()
-        }
+    let value: serde_json::Value = serde_json::from_slice(&bytes).map_err(|e| ValidationError {
+        payload_index: 0,
+        field: "scope_manifest_path".to_string(),
+        reason_code: "scope_handoff_inconsistent".to_string(),
+        message: format!("{topic} scope manifest at {manifest_path} is not valid JSON: {e}"),
+        ..Default::default()
     })?;
     match value {
         serde_json::Value::Object(map) => Ok(map),
@@ -1271,8 +1257,7 @@ fn check_postmerge_resolved_thresholds(
         // U1 (R1/R2/C1): typed non-negative integer reads reject
         // negative `critical_unknown_count: -1` and string-encoded
         // `"0"` instead of silently coercing to 0.
-        let overall_confidence =
-            typed_threshold_u64(obj, "overall_confidence", topic, true, 0)?;
+        let overall_confidence = typed_threshold_u64(obj, "overall_confidence", topic, true, 0)?;
         if overall_confidence < 90 {
             return Err(ValidationError {
                 payload_index: 0,
@@ -1417,7 +1402,8 @@ fn check_postmerge_changemap_scope_fields(
 ) -> std::result::Result<(), ValidationError> {
     // U8 (M1): structural guard.
     let obj = expect_scope_payload_object(value, "postmerge.changemap.ready")?;
-    let manifest_path = required_scope_string(obj, "scope_manifest_path", "postmerge.changemap.ready")?;
+    let manifest_path =
+        required_scope_string(obj, "scope_manifest_path", "postmerge.changemap.ready")?;
     let manifest_digest = required_scope_string(obj, "scope_digest", "postmerge.changemap.ready")?;
     let scope_status = required_scope_string(obj, "scope_status", "postmerge.changemap.ready")?;
     let scope_base_sha = required_scope_string(obj, "scope_base_sha", "postmerge.changemap.ready")?;
@@ -1428,7 +1414,10 @@ fn check_postmerge_changemap_scope_fields(
             payload_index: 0,
             field: "scope_digest".to_string(),
             reason_code: "scope_handoff_inconsistent".to_string(),
-            message: format!("scope_digest must be a 64-char hex string; got {} chars", manifest_digest.len()),
+            message: format!(
+                "scope_digest must be a 64-char hex string; got {} chars",
+                manifest_digest.len()
+            ),
             ..Default::default()
         });
     }
@@ -1437,7 +1426,10 @@ fn check_postmerge_changemap_scope_fields(
             payload_index: 0,
             field: "scope_base_sha".to_string(),
             reason_code: "scope_handoff_inconsistent".to_string(),
-            message: format!("scope_base_sha must be a 40-char hex SHA; got {} chars", scope_base_sha.len()),
+            message: format!(
+                "scope_base_sha must be a 40-char hex SHA; got {} chars",
+                scope_base_sha.len()
+            ),
             ..Default::default()
         });
     }
@@ -1474,7 +1466,8 @@ fn check_postmerge_changemap_scope_fields(
     // U2 (R5): typed equality between payload fields and the canonical
     // manifest fields (D8 multi-plan-scope/v1). The guard rejects with
     // `scope_handoff_inconsistent` naming the first mismatched field.
-    let manifest_obj = read_scope_manifest_object(workspace_root, &manifest_path, "postmerge.changemap.ready")?;
+    let manifest_obj =
+        read_scope_manifest_object(workspace_root, &manifest_path, "postmerge.changemap.ready")?;
     check_postmerge_payload_manifest_consistency(obj, &manifest_obj)?;
 
     // U2 (R1/R2/D4): typed threshold checks (overall_confidence >=
@@ -1504,7 +1497,10 @@ fn check_redteam_plan_resolved_scope_fields(
             payload_index: 0,
             field: "scope_digest".to_string(),
             reason_code: "scope_handoff_inconsistent".to_string(),
-            message: format!("scope_digest must be a 64-char hex string; got {} chars", manifest_digest.len()),
+            message: format!(
+                "scope_digest must be a 64-char hex string; got {} chars",
+                manifest_digest.len()
+            ),
             ..Default::default()
         });
     }
@@ -1513,7 +1509,9 @@ fn check_redteam_plan_resolved_scope_fields(
             payload_index: 0,
             field: "scope_base_sha".to_string(),
             reason_code: "scope_handoff_inconsistent".to_string(),
-            message: format!("scope_base_sha must be a 40-char Git SHA, not a placeholder; got: {scope_base_sha}"),
+            message: format!(
+                "scope_base_sha must be a 40-char Git SHA, not a placeholder; got: {scope_base_sha}"
+            ),
             ..Default::default()
         });
     }
@@ -1522,7 +1520,10 @@ fn check_redteam_plan_resolved_scope_fields(
             payload_index: 0,
             field: "patch_digest".to_string(),
             reason_code: "scope_handoff_inconsistent".to_string(),
-            message: format!("patch_digest must be a 64-char hex string; got {} chars", patch_digest.len()),
+            message: format!(
+                "patch_digest must be a 64-char hex string; got {} chars",
+                patch_digest.len()
+            ),
             ..Default::default()
         });
     }
@@ -1565,7 +1566,8 @@ fn check_redteam_plan_resolved_scope_fields(
 
     // U2 (R5): typed equality between payload fields and the canonical
     // manifest fields (D8 multi-plan-scope/v1).
-    let manifest_obj = read_scope_manifest_object(workspace_root, &manifest_path, "redteam.plan.resolved")?;
+    let manifest_obj =
+        read_scope_manifest_object(workspace_root, &manifest_path, "redteam.plan.resolved")?;
     check_redteam_payload_manifest_consistency(obj, &manifest_obj)?;
 
     // U2 (R1/R2/D4): typed threshold checks (overall_confidence >=
@@ -1633,8 +1635,7 @@ mod tests {
         // over the same bytes the guard will canonicalize. The digest is
         // computed AFTER stripping `scope_digest` so the field's own
         // value does not feed back into the digest (self-exclusion).
-        let mut value: serde_json::Value =
-            serde_json::from_str(body).expect("valid manifest JSON");
+        let mut value: serde_json::Value = serde_json::from_str(body).expect("valid manifest JSON");
         // Insert a placeholder so the map shape matches the final
         // serialized form (otherwise key ordering or omission could
         // shift the canonical bytes); then strip the placeholder so
@@ -1684,8 +1685,7 @@ mod tests {
                 serde_json::Value::String(computed.clone()),
             );
         }
-        let serialized =
-            serde_json::to_string(&value).expect("serialize manifest");
+        let serialized = serde_json::to_string(&value).expect("serialize manifest");
         std::fs::write(&abs, serialized.as_bytes()).expect("write manifest");
         (computed, abs)
     }
@@ -1758,7 +1758,10 @@ mod tests {
         let (digest, _) = write_boundary(root.path(), br#"{"target_identity":"abc"}"#);
         let payload = build_boundary_payload(&digest, Some("complete"));
         let result = check_scope_handoff_guard("merge.integrated", &payload, root.path());
-        assert!(result.is_ok(), "merge.integrated with real artifact must accept: {result:?}");
+        assert!(
+            result.is_ok(),
+            "merge.integrated with real artifact must accept: {result:?}"
+        );
     }
 
     #[test]
@@ -1801,7 +1804,10 @@ mod tests {
         // merge.stabilized does NOT require merge_boundary_status.
         let payload = build_boundary_payload(&digest, None);
         let result = check_scope_handoff_guard("merge.stabilized", &payload, root.path());
-        assert!(result.is_ok(), "merge.stabilized with real artifact must accept: {result:?}");
+        assert!(
+            result.is_ok(),
+            "merge.stabilized with real artifact must accept: {result:?}"
+        );
     }
 
     #[test]
@@ -1847,7 +1853,10 @@ mod tests {
         );
         let payload = build_postmerge_payload(".ralph/post-merge/scope-manifest.json", &digest);
         let result = check_scope_handoff_guard("postmerge.changemap.ready", &payload, root.path());
-        assert!(result.is_ok(), "postmerge.changemap.ready with real artifact must accept: {result:?}");
+        assert!(
+            result.is_ok(),
+            "postmerge.changemap.ready with real artifact must accept: {result:?}"
+        );
     }
 
     #[test]
@@ -1910,7 +1919,10 @@ mod tests {
             &patch_digest,
         );
         let result = check_scope_handoff_guard("redteam.plan.resolved", &payload, root.path());
-        assert!(result.is_ok(), "redteam.plan.resolved with real artifacts must accept: {result:?}");
+        assert!(
+            result.is_ok(),
+            "redteam.plan.resolved with real artifacts must accept: {result:?}"
+        );
     }
 
     #[test]
@@ -1969,12 +1981,7 @@ mod tests {
         // `scope_handoff_inconsistent`, not panic on the previous
         // `value.as_object().unwrap()`.
         let root = tempfile::tempdir().expect("tempdir");
-        for payload in [
-            "[1,2,3]",
-            "\"string\"",
-            "null",
-            "42",
-        ] {
+        for payload in ["[1,2,3]", "\"string\"", "null", "42"] {
             let result = check_scope_handoff_guard("merge.integrated", payload, root.path());
             assert!(
                 result.is_err(),
@@ -1996,7 +2003,10 @@ mod tests {
             r#"{{"merge_boundary_path":".ralph/merge/../../outside.json","merge_boundary_digest":"{digest}","merge_boundary_status":"complete"}}"#
         );
         let result = check_scope_handoff_guard("merge.integrated", &payload, root.path());
-        assert!(result.is_err(), "path traversal must not resolve to {outside:?}");
+        assert!(
+            result.is_err(),
+            "path traversal must not resolve to {outside:?}"
+        );
     }
 
     #[test]
@@ -2022,8 +2032,7 @@ mod tests {
     /// rewrite the manifest's `scope_digest` field after the fact and
     /// still observe that the canonical bytes are stable.
     fn canonical_scope_digest(body: &str, declared_digest: &str) -> String {
-        let mut value: serde_json::Value =
-            serde_json::from_str(body).expect("valid manifest JSON");
+        let mut value: serde_json::Value = serde_json::from_str(body).expect("valid manifest JSON");
         if let Some(object) = value.as_object_mut() {
             object.insert(
                 "scope_digest".to_string(),
@@ -2084,18 +2093,18 @@ mod tests {
         // digest embedded, then verify it accepts.
         let root = tempfile::tempdir().expect("tempdir");
         let body = r#"{"scope_status":"resolved","overall_confidence":90}"#;
-        let (digest, _) = write_scope_manifest(
-            root.path(),
-            ".ralph/post-merge/scope-manifest.json",
-            body,
-        );
+        let (digest, _) =
+            write_scope_manifest(root.path(), ".ralph/post-merge/scope-manifest.json", body);
         let result = verify_scope_manifest_digest(
             root.path(),
             ".ralph/post-merge/scope-manifest.json",
             &digest,
             "scope_digest",
         );
-        assert!(result.is_ok(), "canonical digest match must accept: {result:?}");
+        assert!(
+            result.is_ok(),
+            "canonical digest match must accept: {result:?}"
+        );
     }
 
     #[test]
@@ -2104,15 +2113,11 @@ mod tests {
         // the verifier rejects.
         let root = tempfile::tempdir().expect("tempdir");
         let body = r#"{"scope_status":"resolved","overall_confidence":90}"#;
-        let (digest, abs_path) = write_scope_manifest(
-            root.path(),
-            ".ralph/post-merge/scope-manifest.json",
-            body,
-        );
+        let (digest, abs_path) =
+            write_scope_manifest(root.path(), ".ralph/post-merge/scope-manifest.json", body);
         // Tamper with the business field but leave `scope_digest` intact.
         let tampered = r#"{"scope_status":"resolved","overall_confidence":100}"#;
-        let mut value: serde_json::Value =
-            serde_json::from_str(tampered).expect("valid JSON");
+        let mut value: serde_json::Value = serde_json::from_str(tampered).expect("valid JSON");
         if let Some(object) = value.as_object_mut() {
             object.insert(
                 "scope_digest".to_string(),
@@ -2296,7 +2301,10 @@ mod tests {
             "coverage".to_string(),
             serde_json::Value::Number(serde_json::Number::from(100u64)),
         );
-        fields.insert("boundary_conflict".to_string(), serde_json::Value::Bool(false));
+        fields.insert(
+            "boundary_conflict".to_string(),
+            serde_json::Value::Bool(false),
+        );
         for (k, v) in extra {
             fields.insert(k.to_string(), v.clone());
         }
@@ -2323,7 +2331,10 @@ mod tests {
             &manifest_digest,
             ".ralph/red-team/resolved-patch.json",
             &patch_digest,
-            &[("overall_confidence", serde_json::Value::Number(serde_json::Number::from(89u64)))],
+            &[(
+                "overall_confidence",
+                serde_json::Value::Number(serde_json::Number::from(89u64)),
+            )],
         );
         let result = check_scope_handoff_guard("redteam.plan.resolved", &payload, root.path());
         let err = result.expect_err("low confidence resolved must reject");
@@ -2350,7 +2361,10 @@ mod tests {
             &manifest_digest,
             ".ralph/red-team/resolved-patch.json",
             &patch_digest,
-            &[("critical_unknown_count", serde_json::Value::Number(serde_json::Number::from(1u64)))],
+            &[(
+                "critical_unknown_count",
+                serde_json::Value::Number(serde_json::Number::from(1u64)),
+            )],
         );
         let result = check_scope_handoff_guard("redteam.plan.resolved", &payload, root.path());
         let err = result.expect_err("critical unknown resolved must reject");
@@ -2377,7 +2391,10 @@ mod tests {
             &manifest_digest,
             ".ralph/red-team/resolved-patch.json",
             &patch_digest,
-            &[("resolved_count", serde_json::Value::Number(serde_json::Number::from(0u64)))],
+            &[(
+                "resolved_count",
+                serde_json::Value::Number(serde_json::Number::from(0u64)),
+            )],
         );
         let result = check_scope_handoff_guard("redteam.plan.resolved", &payload, root.path());
         let err = result.expect_err("zero resolved_count must reject");
@@ -2404,7 +2421,10 @@ mod tests {
             &manifest_digest,
             ".ralph/red-team/resolved-patch.json",
             &patch_digest,
-            &[("coverage", serde_json::Value::Number(serde_json::Number::from(89u64)))],
+            &[(
+                "coverage",
+                serde_json::Value::Number(serde_json::Number::from(89u64)),
+            )],
         );
         let result = check_scope_handoff_guard("redteam.plan.resolved", &payload, root.path());
         let err = result.expect_err("low coverage resolved must reject");
@@ -2460,7 +2480,10 @@ mod tests {
             &manifest_digest,
             ".ralph/red-team/resolved-patch.json",
             &patch_digest,
-            &[("scope_status", serde_json::Value::String("blocked".to_string()))],
+            &[(
+                "scope_status",
+                serde_json::Value::String("blocked".to_string()),
+            )],
         );
         let result = check_scope_handoff_guard("redteam.plan.resolved", &payload, root.path());
         let err = result.expect_err("payload/manifest mismatch must reject");
@@ -2648,13 +2671,10 @@ mod tests {
         let mut hasher = Sha256::new();
         hasher.update(canonical);
         let manifest_digest = format!("{:x}", hasher.finalize());
-        manifest
-            .as_object_mut()
-            .expect("manifest object")
-            .insert(
-                "scope_digest".to_string(),
-                serde_json::Value::String(manifest_digest.clone()),
-            );
+        manifest.as_object_mut().expect("manifest object").insert(
+            "scope_digest".to_string(),
+            serde_json::Value::String(manifest_digest.clone()),
+        );
         std::fs::write(
             &manifest_path,
             serde_json::to_vec(&manifest).expect("write manifest JSON"),
@@ -2891,7 +2911,10 @@ mod tests {
         hasher.update(&canonical);
         let declared = format!("{:x}", hasher.finalize());
         if let Some(object) = value.as_object_mut() {
-            object.insert("scope_digest".to_string(), serde_json::json!(declared.clone()));
+            object.insert(
+                "scope_digest".to_string(),
+                serde_json::json!(declared.clone()),
+            );
         }
         let serialized = serde_json::to_string(&value).expect("serialize");
         let abs = root.path().join(".ralph/post-merge/manifest.json");
@@ -2916,7 +2939,10 @@ mod tests {
         let body = r#"{"merge_boundary_status":"complete","merge_integration_sha":"deadbeef1234567890abcdef1234567890abcdef12"}"#;
         let mut value: serde_json::Value = serde_json::from_str(body).expect("valid JSON");
         if let Some(object) = value.as_object_mut() {
-            object.insert("boundary_digest".to_string(), serde_json::json!("placeholder"));
+            object.insert(
+                "boundary_digest".to_string(),
+                serde_json::json!("placeholder"),
+            );
             object.remove("boundary_digest");
         }
         let mut canonical = serde_json::to_vec(&value).expect("canonical JSON");
@@ -2925,7 +2951,10 @@ mod tests {
         hasher.update(&canonical);
         let declared = format!("{:x}", hasher.finalize());
         if let Some(object) = value.as_object_mut() {
-            object.insert("boundary_digest".to_string(), serde_json::json!(declared.clone()));
+            object.insert(
+                "boundary_digest".to_string(),
+                serde_json::json!(declared.clone()),
+            );
         }
         let serialized = serde_json::to_string(&value).expect("serialize");
         let abs = root.path().join(".ralph/merge/boundary.json");
@@ -2962,7 +2991,10 @@ mod tests {
         // Tamper with a non-excluded field after writing the digest
         // so the recomputed digest differs.
         if let Some(object) = value.as_object_mut() {
-            object.insert("scope_digest".to_string(), serde_json::json!(declared.clone()));
+            object.insert(
+                "scope_digest".to_string(),
+                serde_json::json!(declared.clone()),
+            );
             object.insert(
                 "resolved_patch_path".to_string(),
                 serde_json::json!("tampered.json"),

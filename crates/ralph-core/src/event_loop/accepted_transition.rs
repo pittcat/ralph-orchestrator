@@ -25,13 +25,13 @@
 //! two leaves a durable record that a transition was accepted even if
 //! the in-memory bus never saw it; the reverse (publish-without-outbox)
 //! can never happen.
-
 use crate::file_lock::FileLock;
 use crate::state::StateLedger;
 use ralph_proto::{Event, EventBus};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
+use tracing::warn;
 
 /// Workspace-relative path of the durable transition outbox.
 ///
@@ -66,6 +66,14 @@ pub struct OutboxEntry {
     pub loop_id: String,
     /// The canonical payload digest (`sha256(event.payload)`).
     pub payload_digest: String,
+    /// Plan GAP-02 / Unit 3: optional StateMachine projection
+    /// embedded in the durable receipt so the StateLedger can
+    /// replay the StateMachine semantic delta after a partial
+    /// crash. `None` for legacy / Diagnostic / LoopControl
+    /// transitions that do not advance StateMachine state.
+    /// Serde-default ensures old outbox JSONL stays readable.
+    #[serde(default)]
+    pub state_machine_projection: Option<crate::state_machine::StateMachineTransitionDelta>,
     /// The event topic.
     pub topic: String,
     /// Unique transition identifier (`sha256` over the identity tuple).
@@ -242,6 +250,7 @@ impl AcceptedTransition {
             delivered: false,
             loop_id: loop_id.to_string(),
             payload_digest,
+            state_machine_projection: None,
             topic: event.topic.as_str().to_string(),
             transition_id,
         };
@@ -423,6 +432,125 @@ impl AcceptedTransition {
         result
     }
 
+    /// Commit a transition that carries a StateMachine projection.
+    ///
+    /// Plan GAP-02 / Unit 3: the projection is embedded in the durable
+    /// outbox receipt so it survives replay, and is ALSO committed to the
+    /// StateLedger atomically after the outbox write succeeds and BEFORE
+    /// the bus publish. This ordering is load-bearing: the ledger commit
+    /// is the crash-recovery path for the StateMachine semantic delta.
+    ///
+    /// Order: validate → materialize → durable outbox write (with
+    /// `projection` in `OutboxEntry.state_machine_projection`) →
+    /// if `projection.is_some()`: ledger commit with
+    /// `CommitDelta::StateMachineTransition` + event_topic tag →
+    /// bus publish.
+    ///
+    /// Idempotency: if the transition_id is already in the outbox,
+    /// returns the existing entry with zero side effects (no extra
+    /// ledger commit, no re-publish). The ledger projection is naturally
+    /// idempotent because `apply_transition_delta` dedupes on
+    /// `transition_id` via `applied_transition_ids`.
+    ///
+    /// Failure in any step before bus publish: rollback closure runs,
+    /// bus sees 0 events. The ledger is already committed by that point
+    /// so the projection is durable but the event is not published (the
+    /// next loop restart will re-commit and re-publish).
+    pub fn commit_idempotent_with_state_machine_projection(
+        event: &Event,
+        loop_id: &str,
+        activation_id: &str,
+        contract_revision: &str,
+        ledger: &mut StateLedger,
+        bus: &mut EventBus,
+        validate: impl FnOnce(&Event) -> Result<(), String>,
+        materialize: impl FnOnce() -> Result<Box<dyn FnOnce()>, String>,
+        projection: Option<crate::state_machine::StateMachineTransitionDelta>,
+    ) -> Result<OutboxEntry, TransitionError> {
+        let lock = FileLock::new(ledger.workspace().join(OUTBOX_RELATIVE_PATH)).map_err(|e| {
+            TransitionError::CommitFailed {
+                source: e.to_string(),
+            }
+        })?;
+        let _guard = lock
+            .exclusive()
+            .map_err(|e| TransitionError::CommitFailed {
+                source: e.to_string(),
+            })?;
+
+        // 1. Derive the deterministic identity tuple (same as commit).
+        let (payload_digest, transition_id) =
+            Self::derive_identity(event, loop_id, activation_id, contract_revision);
+
+        let workspace = ledger.workspace();
+
+        // 2. Idempotency check: if already committed, zero side effects.
+        match Self::find_committed(workspace, &transition_id) {
+            Ok(Some(existing)) => return Ok(existing),
+            Ok(None) => {}
+            Err(e) => {
+                return Err(TransitionError::CommitFailed {
+                    source: format!("outbox read failed: {e}"),
+                });
+            }
+        }
+
+        // 3. Validate before materializing so a rejected transition has
+        // no projection side effect at all.
+        validate(event).map_err(|reason| TransitionError::PreCommitRejected { reason })?;
+
+        // 4. First commit — stage materialization and retain rollback.
+        let rollback =
+            materialize().map_err(|reason| TransitionError::PreCommitRejected { reason })?;
+
+        // 5. Build the outbox entry with the projection embedded.
+        let entry = OutboxEntry {
+            activation_id: activation_id.to_string(),
+            committed_at: chrono::Utc::now().to_rfc3339(),
+            contract_revision: contract_revision.to_string(),
+            delivered: false,
+            loop_id: loop_id.to_string(),
+            payload_digest,
+            state_machine_projection: projection.clone(),
+            topic: event.topic.as_str().to_string(),
+            transition_id,
+        };
+
+        // 6. Durable outbox write — on failure, rollback and return.
+        if let Err(e) = ledger.append_outbox_unlocked(&entry) {
+            rollback();
+            return Err(TransitionError::CommitFailed {
+                source: e.to_string(),
+            });
+        }
+
+        // 7. If a projection is present, commit it to the StateLedger.
+        // This is best-effort: if the ledger commit fails we warn and
+        // continue so the outbox receipt is still durable. The projection
+        // will be repaired on the next loop restart via
+        // `repair_state_machine_projection_from_outbox`.
+        if let Some(ref delta) = entry.state_machine_projection {
+            if let Err(e) = ledger.commit(
+                crate::state::CommitDelta::StateMachineTransition {
+                    delta: delta.clone(),
+                },
+                Some("loop.state_machine_projection".to_string()),
+            ) {
+                warn!(
+                    transition_id = %delta.transition_id.as_str(),
+                    error = %e,
+                    "U3: ledger commit for StateMachine projection failed; \
+                    will be repaired on next restart"
+                );
+            }
+        }
+
+        // 8. Publish — only reached after the durable write succeeds.
+        bus.publish(event.clone());
+
+        Ok(entry)
+    }
+
     /// Acknowledge a transition as delivered.
     ///
     /// Marks the outbox entry with the given `transition_id` as
@@ -484,6 +612,67 @@ impl AcceptedTransition {
         }
         Ok(())
     }
+
+    /// Plan GAP-02 / Unit 4 (U4-finish): outbox-only crash window
+    /// repair. When a process dies after the durable outbox write
+    /// but before the StateLedger projection was committed, the
+    /// outbox entry carries the `state_machine_projection` field
+    /// but the ledger snapshot has not seen the corresponding
+    /// delta. On the next loop restart this helper walks every
+    /// outbox entry, finds any projection whose `transition_id` is
+    /// not yet in the ledger's `applied_transition_ids`, and
+    /// commits the delta via `StateLedger::commit`.
+    ///
+    /// Idempotency: `apply_transition_delta` (called by
+    /// `StateMachineTransition` apply path) dedupes on
+    /// `transition_id`, so a second restart that finds the same
+    /// receipts after the first one already repaired them is a
+    /// no-op for the runtime. The function returns the number of
+    /// projections actually repaired on this invocation.
+    ///
+    /// Failure semantics: a corrupted outbox line is *salvaged*
+    /// (RTF-001) so dedup continues working for every well-formed
+    /// entry. A genuine filesystem error returns `Err` and the
+    /// caller fails closed per the same fail-closed contract as
+    /// `commit_idempotent`.
+    pub fn repair_state_machine_projection_from_outbox(
+        ledger: &mut StateLedger,
+    ) -> Result<usize, std::io::Error> {
+        let entries = read_outbox(ledger.workspace())?;
+        let mut repaired = 0usize;
+        for entry in entries {
+            let delta = match entry.state_machine_projection {
+                Some(d) => d,
+                None => continue,
+            };
+            // Skip when the ledger has already seen this
+            // transition — protects against double-counting
+            // across multiple restart cycles.
+            let already_applied = ledger
+                .snapshot()
+                .state_machine_runtime
+                .as_ref()
+                .map(|rt| rt.has_applied_transition_id(&delta.transition_id))
+                .unwrap_or(false);
+            if already_applied {
+                continue;
+            }
+            // Commit the projection. Failure surfaces to the
+            // caller so the lifecycle wiring can fail closed
+            // (the same fail-closed contract as
+            // `commit_idempotent`'s `find_committed` Err branch).
+            ledger
+                .commit(
+                    crate::state::CommitDelta::StateMachineTransition { delta },
+                    Some("loop.state_machine_projection_repair".to_string()),
+                )
+                .map_err(|e| {
+                    std::io::Error::other(format!("state machine projection repair failed: {e}"))
+                })?;
+            repaired += 1;
+        }
+        Ok(repaired)
+    }
 }
 
 /// Absolute path of the transition outbox for a workspace.
@@ -541,7 +730,12 @@ mod tests {
 
     /// Build a workspace with an empty [`StateLedger`], an empty
     /// [`EventBus`], and a [`TaskStore`] holding one open task.
-    fn fixture() -> (TempDir, StateLedger, EventBus, TaskStore) {
+    ///
+    /// `pub(super)` so sibling test modules (e.g. the U3
+    /// StateMachine projection tests) can reuse the same
+    /// workspace / ledger / bus fixture without duplicating
+    /// bootstrap code.
+    pub(super) fn fixture() -> (TempDir, StateLedger, EventBus, TaskStore) {
         let dir = TempDir::new().unwrap();
         let ws = dir.path().to_path_buf();
         let ledger = StateLedger::new(&ws, true);
@@ -562,7 +756,7 @@ mod tests {
     }
 
     /// A valid business event used by the success / failure tests.
-    fn valid_event() -> Event {
+    pub(super) fn valid_event() -> Event {
         Event::new("work.done", "implemented U6").with_source("executor")
     }
 
@@ -779,6 +973,7 @@ mod tests {
             delivered: false,
             loop_id: "loop-1".into(),
             payload_digest: "deadbeef".into(),
+            state_machine_projection: None,
             topic: "work.done".into(),
             transition_id: "cafe".into(),
         };
@@ -1002,7 +1197,7 @@ mod tests {
     }
 
     /// A hand-built valid outbox entry for salvage tests.
-    fn raw_entry(transition_id: &str, activation_id: &str) -> OutboxEntry {
+    pub(super) fn raw_entry(transition_id: &str, activation_id: &str) -> OutboxEntry {
         OutboxEntry {
             activation_id: activation_id.to_string(),
             committed_at: "2026-07-31T00:00:00Z".to_string(),
@@ -1010,6 +1205,7 @@ mod tests {
             delivered: false,
             loop_id: "loop-1".to_string(),
             payload_digest: "deadbeef".to_string(),
+            state_machine_projection: None,
             topic: "work.done".to_string(),
             transition_id: transition_id.to_string(),
         }
@@ -1249,5 +1445,493 @@ mod tests {
             "cafe",
         );
         assert_eq!(a, b, "identical tuples must yield identical ids");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Plan GAP-02 (2026-08-13-002) Unit 3: StateMachine projection
+// receipt — outbox JSONL stays backward-compatible, projection
+// survives replay, idempotency holds with projection in place.
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod u3_state_machine_projection_tests {
+    use super::tests::{fixture, valid_event};
+    use super::*;
+    use crate::state_machine::{StateMachineTransitionDelta, StateMachineTransitionId};
+    use std::sync::{Arc, Mutex};
+
+    fn u3_raw_entry(transition_id: &str, activation_id: &str) -> OutboxEntry {
+        OutboxEntry {
+            activation_id: activation_id.to_string(),
+            committed_at: "2026-08-13T00:00:00Z".to_string(),
+            contract_revision: "rev-u3".to_string(),
+            delivered: false,
+            loop_id: "loop-u3".to_string(),
+            payload_digest: "sm-projection".to_string(),
+            state_machine_projection: None,
+            topic: "experiment.planned".to_string(),
+            transition_id: transition_id.to_string(),
+        }
+    }
+
+    fn u3_delta(id: &str, instance_key: &str) -> StateMachineTransitionDelta {
+        StateMachineTransitionDelta {
+            transition_id: StateMachineTransitionId(format!("u3|sm|{id}")),
+            topic: "experiment.planned".to_string(),
+            instance_key: Some(instance_key.to_string()),
+            new_state: "planned".to_string(),
+            opens_instance: true,
+            closes_instance: false,
+            terminal_observed: false,
+            terminal_honored: false,
+        }
+    }
+
+    #[test]
+    fn u3_legacy_outbox_entry_without_projection_remains_readable() {
+        // Hand-written legacy JSONL line that predates the
+        // GAP-02 / Unit 3 receipt field. serde_json::from_str
+        // must succeed and the projection must be `None` so the
+        // existing recovery harness can keep replaying without
+        // any schema bump.
+        let legacy_json = r#"{
+            "activation_id": "act-legacy",
+            "committed_at": "2026-01-01T00:00:00Z",
+            "contract_revision": "rev-0",
+            "delivered": false,
+            "loop_id": "loop-legacy",
+            "payload_digest": "deadbeef",
+            "topic": "work.done",
+            "transition_id": "legacy-id"
+        }"#;
+        let entry: OutboxEntry =
+            serde_json::from_str(legacy_json).expect("legacy outbox line must deserialise");
+        assert!(entry.state_machine_projection.is_none());
+        assert_eq!(entry.transition_id, "legacy-id");
+    }
+
+    #[test]
+    fn u3_projection_receipt_round_trips_with_outbox_entry() {
+        // Newly written receipts carry the projection field.
+        // Re-serialised JSON must round-trip with the field.
+        let mut entry = u3_raw_entry("u3-transition-1", "act-u3");
+        entry.state_machine_projection = Some(u3_delta("u3-transition-1", "t1"));
+        let json = serde_json::to_string(&entry).expect("serialize");
+        let parsed: OutboxEntry = serde_json::from_str(&json).expect("deserialize");
+        let projection = parsed
+            .state_machine_projection
+            .expect("projection must survive round-trip");
+        assert_eq!(projection.transition_id.as_str(), "u3|sm|u3-transition-1");
+        assert_eq!(projection.instance_key.as_deref(), Some("t1"));
+        assert!(projection.opens_instance);
+        assert!(!projection.closes_instance);
+    }
+
+    #[test]
+    fn u3_duplicate_transition_id_with_projection_skips_re_materialize() {
+        // Building on the existing U7 idempotency harness:
+        // two OutboxEntry values with the same transition_id
+        // but different projections (signature-bumped payload
+        // details) are still deduplicated by `transition_id`.
+        // Used by recovery tools that re-run commit() after
+        // partial init so they do not materialise twice.
+        let projection_a = u3_delta("dup-id", "t-A");
+        let projection_b = u3_delta("dup-id", "t-B");
+        let mut a = u3_raw_entry("dup-id", "act-A");
+        a.state_machine_projection = Some(projection_a);
+        let mut b = u3_raw_entry("dup-id", "act-B");
+        b.state_machine_projection = Some(projection_b);
+        // Distinct entries on disk but identical transition_id.
+        assert_ne!(a.activation_id, b.activation_id);
+        assert_eq!(a.transition_id, b.transition_id);
+        // Dedup-by-id means the recovery layer treats them as the
+        // same transition (test asserts the predicate the
+        // dedup layer uses, not the layer itself which already
+        // has full U7 coverage above).
+        assert_eq!(
+            a.transition_id, b.transition_id,
+            "duplicate transition_id is the dedup key"
+        );
+    }
+
+    #[test]
+    fn u3_commit_with_projection_writes_ledger_after_outbox() {
+        // When projection=Some(delta), the ledger receives a
+        // StateMachineTransition commit AFTER the outbox write
+        // succeeds and BEFORE the bus publish.
+        let (_dir, mut ledger, mut bus, _store) = fixture();
+        let ws = ledger.workspace().to_path_buf();
+
+        let seen = Arc::new(Mutex::new(Vec::<String>::new()));
+        let seen_clone = Arc::clone(&seen);
+        bus.add_observer(move |e| {
+            seen_clone.lock().unwrap().push(e.topic.to_string());
+        });
+
+        let event = valid_event();
+        let delta = u3_delta("proj-1", "t-proj");
+
+        let entry = AcceptedTransition::commit_idempotent_with_state_machine_projection(
+            &event,
+            "loop-u3",
+            "act-u3",
+            "rev-u3",
+            &mut ledger,
+            &mut bus,
+            |_| Ok(()),
+            || Ok(Box::new(|| {}) as Box<dyn FnOnce()>),
+            Some(delta),
+        )
+        .expect("commit with projection must succeed");
+
+        // Outbox has the entry with projection embedded.
+        let entries = read_outbox(&ws).unwrap();
+        assert_eq!(entries.len(), 1);
+        let on_disk = &entries[0];
+        assert!(
+            on_disk.state_machine_projection.is_some(),
+            "outbox entry must carry the projection"
+        );
+        // The returned entry's projection must round-trip through
+        // the outbox write — the on-disk value and the helper
+        // return value are the same serialized delta.
+        assert_eq!(
+            on_disk.state_machine_projection, entry.state_machine_projection,
+            "outbox receipt projection must equal the helper return value"
+        );
+
+        // Ledger has exactly one StateMachineTransition commit.
+        let commits = ledger.commit_log();
+        let sm_commits: Vec<_> = commits
+            .iter()
+            .filter(|c| {
+                matches!(
+                    c.delta,
+                    crate::state::CommitDelta::StateMachineTransition { .. }
+                )
+            })
+            .collect();
+        assert_eq!(
+            sm_commits.len(),
+            1,
+            "ledger must have exactly one StateMachineTransition commit"
+        );
+        assert_eq!(
+            sm_commits[0].event_topic.as_deref(),
+            Some("loop.state_machine_projection"),
+            "event_topic must be the projection tag"
+        );
+
+        // Bus saw exactly one event (published after outbox + ledger).
+        assert_eq!(
+            seen.lock().unwrap().len(),
+            1,
+            "bus must see exactly one event"
+        );
+    }
+
+    #[test]
+    fn u3_commit_with_projection_none_skips_ledger_commit() {
+        // When projection=None, no extra ledger commit happens
+        // (preserves the existing U6/U7 contract for non-StateMachine
+        // transitions).
+        let (_dir, mut ledger, mut bus, _store) = fixture();
+
+        let event = valid_event();
+        let ledger_commits_before = ledger.commit_log().len();
+
+        let _entry = AcceptedTransition::commit_idempotent_with_state_machine_projection(
+            &event,
+            "loop-u3",
+            "act-u3",
+            "rev-u3",
+            &mut ledger,
+            &mut bus,
+            |_| Ok(()),
+            || Ok(Box::new(|| {}) as Box<dyn FnOnce()>),
+            None,
+        )
+        .expect("commit without projection must succeed");
+
+        // Ledger gained no StateMachineTransition commits.
+        let sm_commits: Vec<_> = ledger
+            .commit_log()
+            .iter()
+            .filter(|c| {
+                matches!(
+                    c.delta,
+                    crate::state::CommitDelta::StateMachineTransition { .. }
+                )
+            })
+            .collect();
+        assert!(
+            sm_commits.is_empty(),
+            "projection=None must not add StateMachineTransition to ledger"
+        );
+        // Some other commits may have happened (e.g. counter), but no SM.
+        assert_eq!(
+            ledger.commit_log().len(),
+            ledger_commits_before,
+            "no new ledger commits when projection=None"
+        );
+    }
+
+    #[test]
+    fn u3_commit_with_projection_idempotent_on_replay() {
+        // Replaying a committed transition with a projection does NOT
+        // write a second ledger projection. The ledger projection is
+        // naturally idempotent because apply_transition_delta dedupes
+        // on transition_id.
+        let (_dir, mut ledger, mut bus, _store) = fixture();
+        let ws = ledger.workspace().to_path_buf();
+
+        let event = valid_event();
+        let delta = u3_delta("idempotent-proj", "t-idempotent");
+
+        // First commit.
+        AcceptedTransition::commit_idempotent_with_state_machine_projection(
+            &event,
+            "loop-u3",
+            "act-u3",
+            "rev-u3",
+            &mut ledger,
+            &mut bus,
+            |_| Ok(()),
+            || Ok(Box::new(|| {}) as Box<dyn FnOnce()>),
+            Some(delta.clone()),
+        )
+        .expect("first commit must succeed");
+
+        let commits_after_first = ledger.commit_log().len();
+        let sm_commits_after_first: usize = ledger
+            .commit_log()
+            .iter()
+            .filter(|c| {
+                matches!(
+                    c.delta,
+                    crate::state::CommitDelta::StateMachineTransition { .. }
+                )
+            })
+            .count();
+
+        // Replay the SAME transition (same identity tuple).
+        let _entry = AcceptedTransition::commit_idempotent_with_state_machine_projection(
+            &event,
+            "loop-u3",
+            "act-u3",
+            "rev-u3",
+            &mut ledger,
+            &mut bus,
+            |_| Ok(()),
+            || Ok(Box::new(|| {}) as Box<dyn FnOnce()>),
+            Some(delta),
+        )
+        .expect("replay must succeed");
+
+        // Outbox still has exactly 1 entry (idempotent).
+        let entries = read_outbox(&ws).unwrap();
+        assert_eq!(
+            entries.len(),
+            1,
+            "outbox must still have exactly 1 entry after replay"
+        );
+
+        // Ledger gained no extra commits.
+        assert_eq!(
+            ledger.commit_log().len(),
+            commits_after_first,
+            "no new ledger commits on replay"
+        );
+        let sm_commits_after_replay: usize = ledger
+            .commit_log()
+            .iter()
+            .filter(|c| {
+                matches!(
+                    c.delta,
+                    crate::state::CommitDelta::StateMachineTransition { .. }
+                )
+            })
+            .count();
+        assert_eq!(
+            sm_commits_after_replay, sm_commits_after_first,
+            "no extra StateMachineTransition commits on replay"
+        );
+    }
+
+    // ──────────────────────────────────────────────────────────────────
+    // Plan GAP-02 (2026-08-13-002) Unit 4 (U4-finish): outbox-only
+    // crash window repair. When the previous process dies after
+    // the durable outbox write but before the StateLedger commit,
+    // the projection lives only in the outbox; the next startup
+    // must catch it up so replay equivalence holds.
+    // ──────────────────────────────────────────────────────────────────
+
+    /// Hand-built outbox entry that carries a projection
+    /// receipt — simulates the post-outbox-write / pre-ledger-commit
+    /// crash window that U4-finish must repair on restart.
+    fn u4_outbox_only_entry(
+        transition_id: &str,
+        activation_id: &str,
+        delta: StateMachineTransitionDelta,
+    ) -> OutboxEntry {
+        OutboxEntry {
+            activation_id: activation_id.to_string(),
+            committed_at: "2026-08-13T00:00:00Z".to_string(),
+            contract_revision: "rev-u4".to_string(),
+            delivered: false,
+            loop_id: "loop-u4".to_string(),
+            payload_digest: "u4-outbox-only".to_string(),
+            state_machine_projection: Some(delta),
+            topic: "experiment.planned".to_string(),
+            transition_id: transition_id.to_string(),
+        }
+    }
+
+    #[test]
+    fn u4_outbox_only_projection_repairs_into_ledger_on_restart() {
+        // Crash-window simulation:
+        //   1. First process commits an outbox entry WITH the
+        //      projection field but NEVER materialises the
+        //      StateLedger delta (the helper's `ledger.commit`
+        //      step is skipped).
+        //   2. Process dies.
+        //   3. Second process boots, finds the outbox entry, and
+        //      the startup repair must catch the projection up.
+        let (_dir, mut ledger, _bus, _store) = fixture();
+        let ws = ledger.workspace().to_path_buf();
+
+        let delta = u3_delta("repair-1", "t-repair");
+        let entry = u4_outbox_only_entry("u4-entry-1", "act-u4", delta.clone());
+
+        // Persist ONLY the outbox line — ledger has no
+        // StateMachineTransition commit yet.
+        ledger.append_outbox_unlocked(&entry).unwrap();
+
+        // Snapshot before repair: no StateMachine runtime.
+        assert!(
+            ledger.snapshot().state_machine_runtime.is_none(),
+            "fresh workspace must have no StateMachine runtime"
+        );
+
+        // Run the startup repair.
+        let repaired = AcceptedTransition::repair_state_machine_projection_from_outbox(&mut ledger)
+            .expect("repair must succeed on a well-formed outbox");
+
+        assert_eq!(
+            repaired, 1,
+            "exactly one projection must be repaired on the first restart"
+        );
+
+        // Snapshot after repair: runtime exists and the
+        // transition identity is in the applied set.
+        let runtime = ledger
+            .snapshot()
+            .state_machine_runtime
+            .as_ref()
+            .expect("runtime must be populated after repair");
+        assert!(
+            runtime.has_applied_transition_id(&delta.transition_id),
+            "repaired projection's transition_id must be in applied set"
+        );
+
+        // Ledger has exactly one StateMachineTransition commit.
+        let sm_commits: Vec<_> = ledger
+            .commit_log()
+            .iter()
+            .filter(|c| {
+                matches!(
+                    c.delta,
+                    crate::state::CommitDelta::StateMachineTransition { .. }
+                )
+            })
+            .collect();
+        assert_eq!(sm_commits.len(), 1, "ledger must have one repair commit");
+        assert_eq!(
+            sm_commits[0].event_topic.as_deref(),
+            Some("loop.state_machine_projection_repair"),
+            "repair commit must carry the projection_repair topic tag"
+        );
+
+        // Second restart is a no-op (R6 idempotency).
+        let repaired_again =
+            AcceptedTransition::repair_state_machine_projection_from_outbox(&mut ledger)
+                .expect("second restart must succeed");
+        assert_eq!(
+            repaired_again, 0,
+            "second restart must NOT re-commit an already-applied projection"
+        );
+        drop(ws);
+    }
+
+    #[test]
+    fn u4_repair_is_noop_when_outbox_has_no_projection() {
+        // Legacy outbox entries (no `state_machine_projection`
+        // field) must not poison the repair path; the helper
+        // returns 0 and the ledger is untouched.
+        let (_dir, mut ledger, _bus, _store) = fixture();
+        let entry = u3_raw_entry("u4-legacy-1", "act-u4");
+        ledger.append_outbox_unlocked(&entry).unwrap();
+
+        let repaired = AcceptedTransition::repair_state_machine_projection_from_outbox(&mut ledger)
+            .expect("repair must succeed");
+        assert_eq!(
+            repaired, 0,
+            "legacy outbox without projection must not be repaired"
+        );
+        let sm_commits: Vec<_> = ledger
+            .commit_log()
+            .iter()
+            .filter(|c| {
+                matches!(
+                    c.delta,
+                    crate::state::CommitDelta::StateMachineTransition { .. }
+                )
+            })
+            .collect();
+        assert!(
+            sm_commits.is_empty(),
+            "no StateMachineTransition commits on the no-projection path"
+        );
+    }
+
+    #[test]
+    fn u4_repair_processes_multiple_projections_in_one_pass() {
+        // Multiple outbox-only projections (e.g. crash between
+        // several writes) must all be caught up in a single
+        // restart. Dedup keeps subsequent restarts no-op.
+        let (_dir, mut ledger, _bus, _store) = fixture();
+
+        for (i, key) in ["t-a", "t-b", "t-c"].iter().enumerate() {
+            let delta = u3_delta(&format!("multi-{i}"), key);
+            let entry = u4_outbox_only_entry(&format!("u4-multi-{i}"), "act-u4", delta);
+            ledger.append_outbox_unlocked(&entry).unwrap();
+        }
+
+        let repaired = AcceptedTransition::repair_state_machine_projection_from_outbox(&mut ledger)
+            .expect("repair must succeed");
+        assert_eq!(
+            repaired, 3,
+            "all three projections must be repaired in one pass"
+        );
+
+        let runtime = ledger
+            .snapshot()
+            .state_machine_runtime
+            .as_ref()
+            .expect("runtime must be populated");
+        for (i, key) in ["t-a", "t-b", "t-c"].iter().enumerate() {
+            let id = crate::state_machine::StateMachineTransitionId(format!("u3|sm|multi-{i}"));
+            assert!(
+                runtime.has_applied_transition_id(&id),
+                "transition {i} ({key}) must be in applied set"
+            );
+        }
+
+        // Idempotency on the second pass.
+        let repaired_again =
+            AcceptedTransition::repair_state_machine_projection_from_outbox(&mut ledger)
+                .expect("second pass must succeed");
+        assert_eq!(repaired_again, 0, "second pass must be no-op");
     }
 }

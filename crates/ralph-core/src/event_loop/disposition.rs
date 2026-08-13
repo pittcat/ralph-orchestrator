@@ -171,6 +171,74 @@ pub fn publish_synthetic(
     }
 }
 
+/// Plan GAP-02 / Unit 3 (U3-finish): same routing as
+/// [`publish_synthetic`] but with an optional StateMachine projection
+/// threaded into the durable outbox receipt. When the projection is
+/// `Some`, the helper takes the `StateLedger` mutably so the projection
+/// can be materialised to the ledger atomically *after* the outbox
+/// write succeeds and *before* the bus publish (the crash-recovery
+/// order pinned by the plan §3 fixed-order contract).
+///
+/// When the projection is `None`, this helper routes through the same
+/// [`AcceptedTransition::commit_idempotent`] path as the legacy
+/// `publish_synthetic` — preserving the U6/U7/U8 contract for every
+/// non-StateMachine transition (the disabled / no-candidate path is
+/// the common case today).
+pub fn publish_synthetic_with_state_machine_projection(
+    event: &Event,
+    disposition: Disposition,
+    loop_id: &str,
+    activation_id: &str,
+    contract_revision: &str,
+    ledger: &mut StateLedger,
+    bus: &mut EventBus,
+    projection: Option<crate::state_machine::StateMachineTransitionDelta>,
+) -> Result<Option<OutboxEntry>, TransitionError> {
+    if disposition.advances_flow() {
+        // Business / Recovery: durable outbox write + publish through
+        // the Accepted Transition API (idempotent on replay).
+        let entry = if projection.is_some() {
+            // Projection present: take the projection-aware path that
+            // commits the StateMachine delta to the ledger in addition
+            // to the outbox receipt.
+            AcceptedTransition::commit_idempotent_with_state_machine_projection(
+                event,
+                loop_id,
+                activation_id,
+                contract_revision,
+                ledger,
+                bus,
+                |_| Ok(()),
+                || Ok(Box::new(|| {}) as Box<dyn FnOnce()>),
+                projection,
+            )?
+        } else {
+            // No projection: legacy idempotent commit preserves
+            // the U6/U7/U8 contract byte-for-byte.
+            AcceptedTransition::commit_idempotent(
+                event,
+                loop_id,
+                activation_id,
+                contract_revision,
+                ledger,
+                bus,
+                |_| Ok(()),
+                || {},
+            )?
+        };
+        Ok(Some(entry))
+    } else {
+        // DiagnosticObservation / LoopControl: explicit direct channel.
+        // No outbox entry, no materialize, no phase-authority advance —
+        // the event is an observation / lifecycle signal, not a
+        // business state transition. Diagnostic / control topics never
+        // carry a StateMachine projection so the projection argument is
+        // intentionally ignored on this branch.
+        bus.publish(event.clone());
+        Ok(None)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

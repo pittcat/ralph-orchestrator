@@ -106,7 +106,7 @@ pub(crate) fn build_u8_event_loop(
         // `with_enabled(_, true)` is the same path U0 takes when the
         // operator sets the env var.
         ralph_core::diagnostics::DiagnosticsCollector::with_enabled(ctx.workspace(), true)
-        .expect("diagnostics collector must initialize in tmpdir")
+            .expect("diagnostics collector must initialize in tmpdir")
     } else {
         ralph_core::diagnostics::DiagnosticsCollector::disabled()
     };

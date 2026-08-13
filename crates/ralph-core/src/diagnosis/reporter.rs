@@ -1528,7 +1528,12 @@ pub fn render_markdown(report: &Report) -> String {
 
 fn push_diagnosis_input_md(out: &mut String, input: &DiagnosisInputReport) {
     out.push_str("## Diagnosis Input\n\n");
-    out.push_str(&format!("- status: `{}`\n", serde_json::to_string(&input.status).unwrap_or_default().trim_matches('"')));
+    out.push_str(&format!(
+        "- status: `{}`\n",
+        serde_json::to_string(&input.status)
+            .unwrap_or_default()
+            .trim_matches('"')
+    ));
     if let Some(path) = &input.path {
         out.push_str(&format!("- path: `{path}`\n"));
     }
@@ -1540,17 +1545,33 @@ fn push_diagnosis_input_md(out: &mut String, input: &DiagnosisInputReport) {
 
 fn push_runtime_trace_md(out: &mut String, trace: &RuntimeTraceReport) {
     out.push_str("## Runtime Trace\n\n");
-    out.push_str(&format!("- status: `{}`\n", serde_json::to_string(&trace.status).unwrap_or_default().trim_matches('"')));
+    out.push_str(&format!(
+        "- status: `{}`\n",
+        serde_json::to_string(&trace.status)
+            .unwrap_or_default()
+            .trim_matches('"')
+    ));
     out.push_str(&format!("- records: {}\n", trace.record_count));
     out.push_str(&format!("- malformed lines: {}\n", trace.malformed_lines));
-    out.push_str(&format!("- sequence contiguous: {}\n\n", trace.monotonic_sequences));
+    out.push_str(&format!(
+        "- sequence contiguous: {}\n\n",
+        trace.monotonic_sequences
+    ));
 }
 
 fn push_feedback_lifecycle_md(out: &mut String, feedback: &FeedbackLifecycleReport) {
     out.push_str("## Feedback Lifecycle\n\n");
-    out.push_str(&format!("- status: `{}`\n", serde_json::to_string(&feedback.status).unwrap_or_default().trim_matches('"')));
+    out.push_str(&format!(
+        "- status: `{}`\n",
+        serde_json::to_string(&feedback.status)
+            .unwrap_or_default()
+            .trim_matches('"')
+    ));
     out.push_str(&format!("- rows: {}\n", feedback.rows.len()));
-    out.push_str(&format!("- malformed lines: {}\n\n", feedback.malformed_lines));
+    out.push_str(&format!(
+        "- malformed lines: {}\n\n",
+        feedback.malformed_lines
+    ));
     if !feedback.rows.is_empty() {
         out.push_str("| feedback_id | retry_key | phase | outcome | final_status | evidence_refs |\n|---|---|---|---|---|---|\n");
         for row in &feedback.rows {

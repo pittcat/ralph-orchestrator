@@ -4,7 +4,6 @@
 //! Users can switch from Python v1.x to Rust v2.0 with zero config changes.
 
 pub mod agent_doc_sync;
-pub mod scope_topics;
 mod cli;
 mod core;
 mod error;
@@ -21,6 +20,7 @@ mod notifications;
 mod precheck;
 mod preflight_ext;
 mod ralph_config;
+pub mod scope_topics;
 mod skills;
 mod state_files;
 pub(crate) mod state_machine;

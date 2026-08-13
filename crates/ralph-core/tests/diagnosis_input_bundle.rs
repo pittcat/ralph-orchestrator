@@ -10,9 +10,9 @@ use std::fs;
 use std::path::Path;
 
 use ralph_core::diagnostics::{
-    write_manifest as write_input_bundle, ArtifactIntegrity, ArtifactStatus, CodeBaseline,
+    ArtifactIntegrity, ArtifactStatus, CodeBaseline, DIAGNOSIS_INPUT_SCHEMA_VERSION,
     DiagnosisInputBundle, DiagnosticsCollector, DiagnosticsOptions, ManifestStatus, RunMetadata,
-    DIAGNOSIS_INPUT_SCHEMA_VERSION,
+    write_manifest as write_input_bundle,
 };
 use tempfile::TempDir;
 
@@ -38,8 +38,7 @@ fn enabled_run_writes_input_bundle() {
         session_dir: None,
         workspace_root: None,
     };
-    let collector =
-        DiagnosticsCollector::with_options(base, &opts).expect("collector constructs");
+    let collector = DiagnosticsCollector::with_options(base, &opts).expect("collector constructs");
     let session = collector
         .session_dir()
         .expect("session dir present")
@@ -78,7 +77,10 @@ fn enabled_run_writes_input_bundle() {
         serde_json::from_slice(&bytes).expect("updated manifest is valid JSON");
     assert_eq!(updated.manifest_status, ManifestStatus::Present);
     assert_eq!(updated.run.loop_id.as_deref(), Some("loop-x"));
-    assert_eq!(updated.run.preset_label.as_deref(), Some("builtin:ce-executor-pipeline"));
+    assert_eq!(
+        updated.run.preset_label.as_deref(),
+        Some("builtin:ce-executor-pipeline")
+    );
     assert!(updated.code_baseline.worktree);
 
     // finalize
@@ -97,7 +99,10 @@ fn enabled_run_writes_input_bundle() {
         serde_json::from_slice(&bytes).expect("final manifest is valid JSON");
     assert_eq!(final_read.manifest_status, ManifestStatus::Finalized);
     assert_eq!(final_read.artifacts.len(), 1);
-    assert_eq!(final_read.execution_capabilities, vec!["single-chain".to_string()]);
+    assert_eq!(
+        final_read.execution_capabilities,
+        vec!["single-chain".to_string()]
+    );
 }
 
 #[test]
@@ -111,7 +116,10 @@ fn disabled_collector_writes_no_new_artifacts() {
     assert!(collector.session_dir().is_none());
     // No .ralph directory should have been created.
     let ralph_dir = base.join(".ralph");
-    assert!(!ralph_dir.exists(), "disabled collector must not create session dir");
+    assert!(
+        !ralph_dir.exists(),
+        "disabled collector must not create session dir"
+    );
 }
 
 #[test]
@@ -142,7 +150,10 @@ fn bundle_write_failure_is_degraded_not_error() {
     // either succeed via the previous data (not the case here, since
     // we removed the file) or return None.
     let read = ralph_core::diagnostics::read_manifest(&session);
-    assert!(read.is_none(), "read_manifest returns None for missing/garbled data");
+    assert!(
+        read.is_none(),
+        "read_manifest returns None for missing/garbled data"
+    );
 }
 
 #[test]
@@ -241,6 +252,9 @@ fn collector_update_and_finalize_round_trip() {
     let bundle: DiagnosisInputBundle = serde_json::from_slice(&bytes).expect("parse");
     assert_eq!(bundle.manifest_status, ManifestStatus::Finalized);
     assert_eq!(bundle.run.loop_id.as_deref(), Some("loop-y"));
-    assert_eq!(bundle.execution_capabilities, vec!["single-chain".to_string()]);
+    assert_eq!(
+        bundle.execution_capabilities,
+        vec!["single-chain".to_string()]
+    );
     assert_eq!(bundle.artifacts.len(), 1);
 }

@@ -374,11 +374,9 @@ impl EventLoop {
                     "runtime:directive".to_string(),
                     "inject_directive",
                 ),
-                RecoveryAction::ForcePlanBlocked { retry_key, .. } => (
-                    retry_key.clone(),
-                    retry_key.clone(),
-                    "force_plan_blocked",
-                ),
+                RecoveryAction::ForcePlanBlocked { retry_key, .. } => {
+                    (retry_key.clone(), retry_key.clone(), "force_plan_blocked")
+                }
             };
             match action {
                 RecoveryAction::PublishEvent { topic, payload } => {

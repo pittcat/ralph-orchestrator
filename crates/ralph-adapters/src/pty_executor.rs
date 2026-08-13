@@ -350,7 +350,11 @@ impl PtyExecutor {
 
         // Apply backend-specific environment variables (e.g., Agent Teams env var)
         // and re-pin workspace controls (stages 2+3 unified with headless path).
-        apply_backend_and_workspace_env!(&mut cmd_builder, &self.backend.env_vars, &self.config.workspace_root);
+        apply_backend_and_workspace_env!(
+            &mut cmd_builder,
+            &self.backend.env_vars,
+            &self.config.workspace_root
+        );
         let child = pair
             .slave
             .spawn_command(cmd_builder)

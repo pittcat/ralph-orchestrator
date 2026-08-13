@@ -6,12 +6,84 @@
 
 use crate::config::{BusinessAfterTerminalAction, DuplicateTerminalAction, StateMachineConfig};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use tracing::debug;
 
 // ---------------------------------------------------------------------------
 // Public Types
 // ---------------------------------------------------------------------------
+
+/// Plan GAP-02 / Unit 1: stable identity for an accepted StateMachine
+/// transition. Used as the idempotency key when a transition is replayed
+/// from the commit log so the snapshot projection does not double-count
+/// or repeat an open/close move. The string form is used in
+/// [`crate::state::commit::CommitDelta::StateMachineTransition`] for
+/// serde.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct StateMachineTransitionId(pub String);
+
+impl StateMachineTransitionId {
+    /// Build the canonical identity for a freshly accepted transition.
+    /// The fields are derived from the live event submission (loop id,
+    /// contract identity, source hat) plus the StateMachine semantic
+    /// fields (topic, instance key). The same submission produces the
+    /// same identity, so replaying the commit log is idempotent.
+    pub fn build(
+        loop_id: &str,
+        contract_id: Option<&str>,
+        source_hat: &str,
+        topic: &str,
+        instance_key: Option<&str>,
+        sequence: u64,
+    ) -> Self {
+        let mut s = String::with_capacity(loop_id.len() + topic.len() + 32);
+        s.push_str(loop_id);
+        s.push('|');
+        s.push_str(contract_id.unwrap_or(""));
+        s.push('|');
+        s.push_str(source_hat);
+        s.push('|');
+        s.push_str(topic);
+        s.push('|');
+        s.push_str(instance_key.unwrap_or(""));
+        s.push('|');
+        s.push_str(&sequence.to_string());
+        Self(s)
+    }
+
+    /// Expose the underlying string for ledger / outbox comparisons.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+/// Plan GAP-02 / Unit 1: minimal semantic delta describing a single
+/// accepted StateMachine transition. Carries only the fields required to
+/// replay the runtime projection — no full `StateMachineRuntimeState`
+/// snapshot (per plan §1.9 "performance"). The `transition_id` is the
+/// idempotency key; replay drop-duplicates on it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct StateMachineTransitionDelta {
+    /// Stable identity used to dedupe replay.
+    pub transition_id: StateMachineTransitionId,
+    /// Topic of the accepted event.
+    pub topic: String,
+    /// Instance key, if the transition targets a tracked instance.
+    #[serde(default)]
+    pub instance_key: Option<String>,
+    /// New state of the instance after the transition.
+    pub new_state: String,
+    /// Whether the transition opens a new instance.
+    pub opens_instance: bool,
+    /// Whether the transition closes the instance.
+    pub closes_instance: bool,
+    /// Whether this transition sets `terminal_observed`.
+    #[serde(default)]
+    pub terminal_observed: bool,
+    /// Whether this transition sets `terminal_honored`.
+    #[serde(default)]
+    pub terminal_honored: bool,
+}
 
 /// Result of state machine validation for a single event.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -70,6 +142,12 @@ pub struct StateMachineRuntimeState {
     last_terminal_rejection: Option<TerminalRejectionFingerprint>,
     /// Count of accepted state machine transitions (business events that advanced state).
     accepted_transition_count: u32,
+    /// Plan GAP-02 / Unit 1: idempotency set for accepted transitions
+    /// materialized through the ledger. The replay path uses this set
+    /// to drop duplicate `transition_id`s so a re-applied delta never
+    /// double-counts or re-runs an open/close move.
+    #[serde(default)]
+    applied_transition_ids: HashSet<StateMachineTransitionId>,
 }
 
 /// Fingerprint of a terminal rejection to detect repeated rejections.
@@ -114,6 +192,32 @@ impl StateMachineRuntimeState {
     /// Returns whether a terminal event has been honored.
     pub fn is_terminal_honored(&self) -> bool {
         self.terminal_honored
+    }
+
+    /// Returns whether a terminal event has been observed.
+    /// Plan GAP-02 / Unit 2 helper.
+    pub fn is_terminal_observed(&self) -> bool {
+        self.terminal_observed
+    }
+
+    /// Plan GAP-02 / Unit 2 helper: combined observed/honored
+    /// flag snapshot used by the candidate stage to thread the
+    /// post-validator state into the projection.
+    pub fn observed_snapshot(&self) -> (bool, bool) {
+        (self.terminal_observed, self.terminal_honored)
+    }
+
+    /// Plan GAP-02 / Unit 2 helper: read-only access to the
+    /// open/closed maps so the candidate stage can detect
+    /// open → close / open → advance transitions without
+    /// exposing the private `HashMap` fields.
+    pub fn instance_maps(
+        &self,
+    ) -> (
+        &HashMap<String, InstanceState>,
+        &HashMap<String, InstanceState>,
+    ) {
+        (&self.open_instances, &self.closed_instances)
     }
 
     /// Returns the count of accepted state machine transitions.
@@ -472,6 +576,135 @@ impl StateMachineRuntimeState {
         self.last_terminal_rejection
             .as_ref()
             .is_some_and(|f| f.topic == topic && f.reason == reason)
+    }
+
+    /// Plan GAP-02 / Unit 1: project an accepted [`StateMachineDecision`]
+    /// into a replayable semantic delta. The caller supplies the
+    /// `opens_instance` and `closes_instance` boolean flags because
+    /// the underlying `validate_event` mutates the live runtime
+    /// before this projection runs (the open→close decision
+    /// belongs to the validator, not to a post-hoc introspection).
+    /// Unit 2 wires the candidate stage; until then the helper
+    /// accepts the flags explicitly to keep the projection honest.
+    pub fn project_transition_delta(
+        &self,
+        transition_id: StateMachineTransitionId,
+        topic: &str,
+        decision: &StateMachineDecision,
+        opens_instance: bool,
+        closes_instance: bool,
+    ) -> Option<StateMachineTransitionDelta> {
+        // Plan §1.4 — only accepted business/terminal projections become
+        // ledger material; rejection/diagnostic decisions are not
+        // materialised.
+        let (instance_key, new_state) = match decision {
+            StateMachineDecision::Accept {
+                instance_key,
+                new_state,
+            } => (instance_key.clone(), new_state.clone()),
+            _ => return None,
+        };
+
+        Some(StateMachineTransitionDelta {
+            transition_id,
+            topic: topic.to_string(),
+            instance_key,
+            new_state,
+            opens_instance,
+            closes_instance,
+            // Ledger only records `terminal_observed=true` when the
+            // validator has set it on the live runtime.
+            terminal_observed: self.terminal_observed,
+            terminal_honored: self.terminal_honored,
+        })
+    }
+
+    /// Read-only side-channel for callers that want the inferred
+    /// open/close classification *before* calling
+    /// `validate_event` (which mutates `self`). Takes a snapshot
+    /// of the pre-mutation state and the candidate
+    /// `instance_key`, and returns the flags that the validator's
+    /// open/close decision would produce.
+    pub fn classify_open_close(&self, key: &Option<String>) -> (bool, bool) {
+        let key = match key {
+            Some(k) => k,
+            None => return (false, false),
+        };
+        let opens =
+            !self.open_instances.contains_key(key) && !self.closed_instances.contains_key(key);
+        let closes =
+            self.open_instances.contains_key(key) && !self.closed_instances.contains_key(key);
+        (opens, closes)
+    }
+
+    /// Plan GAP-02 / Unit 1: apply a replay-only delta onto the
+    /// live runtime. Idempotent: if the `transition_id` has already
+    /// been materialised (via this helper or a prior live accept),
+    /// the call is a no-op. Returns `true` when the delta was
+    /// applied.
+    ///
+    /// On a close delta, `apply_transition_delta` always moves the
+    /// key from `open_instances` to `closed_instances` if the
+    /// key was tracked in `open_instances`. A close delta
+    /// arriving on a cold-start replay where the open instance was
+    /// never recorded is a no-op for the instance maps (the
+    /// closed map stays empty) — this is the safe behaviour for
+    /// partial-restart paths.
+    pub fn apply_transition_delta(&mut self, delta: &StateMachineTransitionDelta) -> bool {
+        if self.applied_transition_ids.contains(&delta.transition_id) {
+            return false;
+        }
+        if let Some(key) = delta.instance_key.as_deref() {
+            if delta.closes_instance {
+                self.open_instances.remove(key);
+                self.closed_instances.insert(
+                    key.to_string(),
+                    InstanceState {
+                        state: delta.new_state.clone(),
+                        last_topic: delta.topic.clone(),
+                    },
+                );
+            } else if delta.opens_instance {
+                self.open_instances.insert(
+                    key.to_string(),
+                    InstanceState {
+                        state: delta.new_state.clone(),
+                        last_topic: delta.topic.clone(),
+                    },
+                );
+            } else if let Some(instance) = self.open_instances.get_mut(key) {
+                instance.state = delta.new_state.clone();
+                instance.last_topic = delta.topic.clone();
+            }
+        }
+        if delta.terminal_observed {
+            self.terminal_observed = true;
+        }
+        if delta.terminal_honored {
+            self.terminal_honored = true;
+        }
+        self.accepted_transition_count = self.accepted_transition_count.saturating_add(1);
+        self.applied_transition_ids
+            .insert(delta.transition_id.clone());
+        true
+    }
+
+    /// Read-only view over the applied-transition identity set.
+    /// Used by the snapshot apply path to mirror the runtime set on
+    /// the snapshot so `LedgerSnapshot` can also enforce replay
+    /// idempotency (Plan E11).
+    pub fn applied_transition_ids(&self) -> Vec<String> {
+        self.applied_transition_ids
+            .iter()
+            .map(|id| id.0.clone())
+            .collect()
+    }
+
+    /// Returns true if a transition id was already applied to this
+    /// runtime. Used by `LedgerSnapshot::apply_delta` to dedupe
+    /// before delegating.
+    pub fn has_applied_transition_id(&self, id: &StateMachineTransitionId) -> bool {
+        self.applied_transition_ids.contains(id)
     }
 
     /// Returns a summary of the current runtime state for snapshotting.

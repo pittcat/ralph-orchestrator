@@ -1,8 +1,8 @@
 //! Plan 2026-08-12-001 fix-plan U5 / synth:P1-3: sequence
 //! increment must happen AFTER write+flush; reader surfaces
 //! `monotonic_sequences: bool`.
-use ralph_core::diagnostics::{RuntimeTraceEntry, RuntimeTraceLogger, RuntimeTracePhase};
 use ralph_core::diagnosis::read_runtime_trace_report;
+use ralph_core::diagnostics::{RuntimeTraceEntry, RuntimeTraceLogger, RuntimeTracePhase};
 use tempfile::TempDir;
 
 #[test]

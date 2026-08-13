@@ -660,7 +660,8 @@ pub(super) async fn run_loop_impl_inner(
     if let Some(diagnostics) = prebuilt_diagnostics.as_ref() {
         let execution_capability = if config.event_loop.supervisor.enabled {
             "supervisor"
-        } else if config.event_loop.execution_mode == ralph_core::config::HatExecutionMode::Isolated {
+        } else if config.event_loop.execution_mode == ralph_core::config::HatExecutionMode::Isolated
+        {
             "isolated"
         } else {
             "single-chain"
