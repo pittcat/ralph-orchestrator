@@ -728,6 +728,128 @@ fn u3_unknown_target_has_no_receipt() {
     }
 }
 
+/// Plan 2026-08-13-003 U5 + R6/S10: the recovery payload
+/// built by `build_task_resume_payload` MUST include every
+/// agent-visible field that `enrich_task_resume_payload_full`
+/// already surfaces, so that hat prompt rendering sees the
+/// same recovery identity regardless of which ingress path
+/// produced the event.
+///
+/// Required field set (the union of both builders):
+///   reason, kind, target_hat, retry_key,
+///   original_trigger_topic, allowed_topics
+///
+/// Same payload byte-equality is NOT asserted (it would be a
+/// snapshot regression); only the required-field set is
+/// required by the runtime contract.
+#[test]
+fn u5_resume_payload_contract_is_consistent_across_builders() {
+    use crate::event_loop::rejection::{
+        build_task_resume_payload, enrich_task_resume_payload_full, Rejection, RejectionStage,
+    };
+    use crate::task::TaskStatus;
+
+    // 1. `build_task_resume_payload` (existing production builder).
+    let mut rejection = Rejection::from_origin(
+        Some("executor".to_string()),
+        "work.done".to_string(),
+        "violation_code_xyz",
+    );
+    rejection.stage = RejectionStage::Policy;
+    let allowed = vec!["work.failed".to_string(), "work.done".to_string()];
+    let required = vec!["executor_head_sha".to_string()];
+    let build_payload = build_task_resume_payload(
+        &rejection,
+        &allowed,
+        &required,
+        Some("plan.ready"),
+        Some(r#"{"step":"step-01"}"#),
+        None,
+    );
+    let parsed: serde_json::Value =
+        serde_json::from_str(&build_payload).expect("build payload must parse");
+
+    for field in [
+        "reason",
+        "kind",
+        "target_hat",
+        "retry_key",
+        "allowed_topics",
+        "original_trigger_topic",
+    ] {
+        assert!(
+            parsed.get(field).is_some(),
+            "build_task_resume_payload MUST include `{field}` (got {})",
+            parsed
+        );
+    }
+
+    // 2. `enrich_task_resume_payload_full` (full-control builder).
+    let enriched = enrich_task_resume_payload_full(
+        "Recovery directive message",
+        "missing_event_gate",
+        Some("executor"),
+        Some(RejectionStage::Policy),
+        None,
+        &allowed,
+    );
+    let parsed2: serde_json::Value =
+        serde_json::from_str(&enriched).expect("enriched payload must parse");
+    for field in ["reason", "target_hat", "kind", "allowed_topics"] {
+        assert!(
+            parsed2.get(field).is_some(),
+            "enrich_task_resume_payload_full MUST include `{field}` (got {})",
+            parsed2
+        );
+    }
+
+    // The contract test just checks the structural overlap;
+    // both builders expose the agent-visible fields hat
+    // prompts read. Specific byte equality is intentionally
+    // not pinned (the strings evolve with the recovery
+    // taxonomy).
+    let _ = TaskStatus::Open; // keep the import alive for the comment
+}
+
+/// Plan 2026-08-13-003 U5 + R7: the agent-facing recovery
+/// directives doc and the bounded-retry description in
+/// ralph-tools.md MUST agree with the runtime's actual
+/// escalation_threshold (= 3, see
+/// `crate::correction::escalation_threshold`). This is a
+/// static check, not a runtime call — a doc drift that
+/// contradicts the runtime must be fixed in the data
+/// file.
+#[test]
+fn u5_recovery_directives_match_runtime_thresholds() {
+    // Static read of the docs to catch the historical
+    // contradiction (ralph-tools.md said "second" while
+    // ralph-tools-recovery-directives.md said "third").
+    let ralph_tools = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("data/ralph-tools.md"),
+    )
+    .expect("ralph-tools.md readable");
+    let recovery_directives = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("data/ralph-tools-recovery-directives.md"),
+    )
+    .expect("ralph-tools-recovery-directives.md readable");
+
+    // The runtime escalation threshold is 3 (see
+    // correction::escalation_threshold = 3); both docs
+    // must describe the same bound.
+    assert!(
+        ralph_tools.contains("escalation_threshold == 3")
+            || ralph_tools.contains("第三次"),
+        "ralph-tools.md MUST describe the runtime 3-strike escalation threshold (was unchanged)"
+    );
+    assert!(
+        recovery_directives.contains("第 3 次")
+            || recovery_directives.contains("third"),
+        "ralph-tools-recovery-directives.md MUST describe the runtime 3-strike threshold"
+    );
+}
+
 #[test]
 fn unit3_unified_publisher_blocks_broadcast_when_no_safe_target() {
     let mut bus = ralph_proto::EventBus::new();
