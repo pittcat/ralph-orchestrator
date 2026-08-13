@@ -16,13 +16,20 @@ execution: code
 ## 0. 计划状态
 
 - **状态：READY**
-- **当前基线**：分支 `pittcat-dev`，HEAD `1585d922`；该提交已合并 GAP-01 计划分支。
+- **当前基线**：分支 `pittcat-dev`，HEAD `43af71ca`（2026-08-13）；该提交已包含 GAP-01、accepted-transition fail-close 以及最新 handoff precheck/worktree baseline 变更。
 - **工作树约束**：工作树当前有用户未提交修改，包含 GAP-01、diagnostics、state ledger 等文件。Executor 不得清理、回滚或覆盖这些修改；只在本计划列出的边界内增量修改。
 - **调查范围**：StateMachine validator、EventLoop 接纳流水线、state projection、execution contract、AcceptedTransition/outbox、StateLedger/CommitDelta/LedgerSnapshot、LoopState 生命周期初始化、已有 StateMachine/ledger/replay 测试、builtin preset/config/data skill。
-- **已执行的只读调查**：`rg`/`sed`/`git log`/`git status`/`git diff --check`；确认 `EventBus::publish` 的真实签名；确认 builtin preset 和 schema 中没有 `state_machine` 配置。
+- **已执行的只读调查**：在当前 HEAD 重新执行 `rg`/`sed`/`git log`/`git status`/`git diff --check`；再次确认 `EventBus::publish` 的真实签名、`AcceptedTransition` 的 outbox 路径，以及 builtin preset/schema 中没有 `state_machine` 配置。
 - **已有可执行证据**：此前在同一分支运行过 `cargo nextest run -p ralph-core -- state_machine`（31 个测试通过）和 `cargo nextest run -p ralph-core -- replay_from_disk`（3 个测试通过）。本计划执行阶段必须在当前修改集合上重新运行相关测试；计划阶段不把未重跑的结果伪装成最终验收。
 - **计划阶段未执行**：未修改生产代码，未运行完整 build/lint/全量测试；这些是 Executor 的 Unit 级和最终质量门禁。
 - **阻塞项**：无。所有实施关键决策均有当前代码证据，并在下方 Decision Record 中达到 `≥ 0.85`。如果执行时发现 `EventBus::publish`、`AcceptedTransition` 或 `StateLedger` 真实签名与本计划冲突，必须按 Unit 停止条件暂停，不得自行换架构。
+
+### 0.1 2026-08-13 仓库同步校准
+
+- 当前 `acceptance_and_lifecycle.rs` 已将 `StateLedger` 接入为始终启用的 loop state 组件；因此本计划的“显式启用 StateMachine”约束只适用于 StateMachine validator，不能再表述为 StateLedger opt-in。
+- `AcceptedTransition` 当前仍只保证 accepted-transitions outbox 写入先于 bus publish；`OutboxEntry` 尚未携带 StateMachine projection，`CommitDelta`/`LedgerSnapshot::apply_delta` 也尚未承载 StateMachine delta。这些仍是 Unit 1/3 的目标，不是现状。
+- 最新 `parse_and_emit.rs` 增加了 runtime handoff precheck：`work.done`/`stabilization.done` 在进入最终接纳前可能被 `worktree_handoff.rs` 拒绝。StateMachine projection 必须只从 precheck、workflow、policy、execution contract 等全部 gate 之后的最终 accepted 集合产生；precheck rejection 不得写 StateMachine accepted delta。
+- 最新 `event_processing.rs` 在 hat activation 时捕获 worktree baseline，属于前置验收证据，不改变本计划的 ledger 设计；Unit 2/4 的集成测试应覆盖“handoff precheck 拒绝不会污染 StateMachine ledger”。
 
 ## 1. 功能目标
 

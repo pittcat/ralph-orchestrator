@@ -24,10 +24,10 @@ date: 2026-08-13
 
 **READY**：所有实施关键决策均由当前源码、已有测试结构、现有运行时持久化 API 或已执行的历史验证支持，置信度均不低于 0.85。计划不新增配置、依赖、preset、schema、manifest、topic 或持久化文件。
 
-- **代码库基线**：分支 `pittcat-dev`，HEAD `400e59db`。
+- **代码库基线**：分支 `pittcat-dev`，HEAD `43af71ca`（2026-08-13）。
 - **调查范围**：`ralph-proto` 的 `Event`/`EventBus`；`ralph-core` 的 `EventReader`、`EventLoop`、`resume_routing`、rejection/correction、TaskStore、accepted transition、trusted JSONL 持久化、`loop.resume`；`ralph-cli` 的 loop runner、history logger 和 `integration_resume`；agent-facing recovery 文档；旧计划、solutions 和相关 Git 提交。
 - **输出位置解析**：仓库没有 `.compound-engineering/config.yaml` 或 `config.local.yaml`，因此按 ce-plan 默认值写入 `docs/plans/`；该目录已由现有计划实际使用。
-- **已执行的调查/验证**：`git rev-parse HEAD`、`git status --short`、相关源码 `rg`/`sed`、文件规模核验、历史 `git log`/`git show --stat`、已有 targeted nextest 结果（上一轮诊断中 `cargo nextest run -p ralph-core -- ingress_inventory_regression_storm_dispatch` 与 `cargo nextest run -p ralph-cli --test integration_resume` 均通过）。本轮计划编写没有新增测试、build 或 lint 执行。
+- **已执行的调查/验证**：在当前 HEAD 重新执行 `git rev-parse HEAD`、`git status --short`、相关源码 `rg`/`sed`、文件规模核验、历史 `git log`/`git show --stat`。既有 targeted nextest 结果仍仅作为历史证据（`cargo nextest run -p ralph-core -- ingress_inventory_regression_storm_dispatch` 与 `cargo nextest run -p ralph-cli --test integration_resume`），本轮计划同步没有新增测试、build 或 lint 执行。
 - **独立研究**：已按 ce-plan 要求启动 repo-research 与 learnings 两个只读子代理；它们的结果只作为辅助证据，主计划不依赖未经主线源码复核的结论。
 - **尚未执行**：本计划涉及的 Red、实现、targeted 回归、BDD、build、clippy、doctest、`./scripts/run-tests.sh` 和 CLI 文档 drift 检查均由 Executor 串行执行。
 - **阻塞项**：无。旧计划被视为历史已实施计划；本文件是其残留收敛计划，不与旧计划并行执行。
@@ -42,12 +42,13 @@ date: 2026-08-13
 
 ### 1.2 当前行为
 
-1. `resume_routing::resolve_resume_target` 已能校验显式 target、payload target、TaskStore owner、注册表、retry key 和 pending 去重，但生产 wrapper `publish_targeted_resume_for_hat_in` 总是把 `target_hint` 填入 `event_target`，把 `payload_target_hat` 置空，且多数调用方传入 `None` 的 TaskStore/task identity，因此 resolver 的关键 fallback/冲突检查在生产路径没有被真正使用。
+1. `resume_routing::resolve_resume_target` 已能校验显式 target、payload target、TaskStore owner、注册表、retry key 和 pending 去重，但生产 wrapper `publish_targeted_resume_for_hat_in` 仍总是把 `target_hint` 填入 `event_target`、把 `payload_target_hat` 置空，且多数调用方传入 `None` 的 TaskStore/task identity，因此 resolver 的关键 fallback/冲突检查在生产路径没有被真正使用。
 2. `parse_and_emit.rs` 的 isolated anonymous business 分支和 `completion_and_termination.rs` 的 phase violation 分支仍直接构造并 `bus.publish(Event::new("task.resume", ...))`；现有 inventory test 按“单行包含字符串”扫描，无法识别跨行构造。
-3. `EventBus::publish` 对显式 target 直达，但调用方忽略返回的 recipient 列表；未知/竞态/未注册目标可能表现为“调用成功但没有 hat 被唤醒”。
-4. runtime helper 只写内存 EventBus；已有 `persist_system_injected_jsonl_event` 能将 system-injected 事件写入 trusted events JSONL 并推进 reader cursor，但 targeted resume 尚未复用该边界。因此进程在 bus publish 后、下一次 activation 前崩溃时，普通 runtime resume 可能丢失。
-5. `is_correction_enabled()` 生产默认返回 true，`initialize_resume()` 因此调用 `initialize_resume_with_context(..., ResumeContext::default())`，输出 `loop.resume`，但 context 的 loop id、closed task count、progress summary、last iteration、scratchpad headline 均为空/零。`ralph-cli` 的 `EventLogger` 仍以 `task.resume` 作为 resume 的默认历史 topic，且 `integration_resume` 的部分断言在 marker/file 不存在时不执行断言。
-6. payload 有两个 builder：`build_task_resume_payload` 与 `enrich_task_resume_payload_full`，它们对 `reason`、`kind`、`target_hat`、`retry_key`、原始触发上下文和 allowed topics 的覆盖不一致；agent-facing 文档又同时出现“第二次阻塞”和“第三次失败”的不同描述。
+3. 最新 `runtime_precheck_rejection_for_event` 会在 `work.done`/`stabilization.done` 的 handoff 证据不一致时进入 recovery dispatch，并可能生成第三类生产 `task.resume`；该入口必须纳入统一 ingress 验收，不能只清理前述两个旧 direct path。
+4. `EventBus::publish` 对显式 target 直达，但调用方忽略返回的 recipient 列表；未知/竞态/未注册目标可能表现为“调用成功但没有 hat 被唤醒”。
+5. runtime helper 只写内存 EventBus；已有 `persist_system_injected_jsonl_event` 能将 system-injected 事件写入 trusted events JSONL 并推进 reader cursor，但 targeted resume 尚未复用该边界。因此进程在 bus publish 后、下一次 activation 前崩溃时，普通 runtime resume 可能丢失。
+6. `is_correction_enabled()` 生产默认返回 true，`initialize_resume()` 因此调用 `initialize_resume_with_context(..., ResumeContext::default())`，输出 `loop.resume`，但 context 的 loop id、closed task count、progress summary、last iteration、scratchpad headline 均为空/零。`ralph-cli` 的 `EventLogger` 仍以 `task.resume` 作为 resume 的默认历史 topic，且 `integration_resume` 的部分断言在 marker/file 不存在时不执行断言。
+7. payload 有两个 builder：`build_task_resume_payload` 与 `enrich_task_resume_payload_full`，它们对 `reason`、`kind`、`target_hat`、`retry_key`、原始触发上下文和 allowed topics 的覆盖不一致；agent-facing 文档又同时出现“第二次阻塞”和“第三次失败”的不同描述。
 
 ### 1.3 目标行为与行为差异
 
@@ -73,6 +74,13 @@ date: 2026-08-13
 - **安全/权限**：payload target 只在 registry 和可选 task owner 一致时生效；不可信 JSONL 不能用未注册 target 绕过 source/policy guard；system-injected 只表示编排器来源，不等于跳过 target 校验。
 - **已确认假设**：`EventBus` target 直达、`next_hat` targeted 优先、`Task.owner_hat_id`、`EventReader` 可选 `triggered`、`LoopHistory::last_iteration`、`ProgressSnapshot::parse`、`persist_system_injected_jsonl_event` 和 `Disposition::Recovery` 均已存在。
 - **待验证假设**：每个现有 runtime ingress 都能提供可审计的 retry key 和 target source；若某入口只有 `hat` 而没有 task identity，使用该入口已确认的 hat 作为 target，并把缺失 task identity 作为 payload 可选字段，不由 Executor 发明新的 owner 规则。验证动作属于 U1/U2 的 Red 前置检查，失败即停止并更新计划。
+
+### 0.1 2026-08-13 仓库同步校准
+
+- 最新 HEAD 新增 `crates/ralph-core/src/event_loop/worktree_handoff.rs`，并在 `parse_and_emit.rs` 增加 `runtime_precheck_rejection_for_event`。这条路径会在 `work.done`/`stabilization.done` 的 handoff 证据不一致时生成 precheck rejection，再由现有 recovery dispatch 注入 `task.resume`；Unit 1 的 ingress 清单必须把它作为真实生产入口覆盖。
+- `event_processing.rs` 现在在构造 prompt 时记录 activation worktree baseline，`dispatch_and_handoff.rs` 在审计时按 activation 前后快照判定 scope violation。Unit 1 不应把这类 scope/precheck 事件误判为普通业务 fanout；Unit 5 的全量回归必须保留其 fail-closed 语义。
+- 当前 `AcceptedTransition` 仍只对已有业务 transition 提供 outbox-before-publish；`publish_targeted_resume_for_hat*` 仍直接向 `EventBus` 发布并只写 block diagnostic。Unit 3 的“Recovery durable acceptance + checked delivery”是待实现边界，不能以现有 wrapper 测试通过替代验收。
+- 当前 `StateLedger` 在 loop 初始化中始终挂载，但这不等于 `task.resume` 已进入 ledger；本计划不应把 StateLedger wiring 的存在描述成 recovery durable receipt 已完成。
 
 ## 规划执行契约
 
@@ -250,7 +258,7 @@ continue：`ralph-cli/src/loop_runner/inner.rs` 调用 `EventLoop::initialize_re
 
 #### 1. Unit 目标
 
-当任一已确认 runtime recovery 分支产生 `task.resume` 时，只有统一 publisher 能创建/发布它；最终可观察结果是 target hat 收到带 `Event.target` 的恢复事件，错误 hat 不收到。
+当任一 runtime recovery 分支（包括 handoff precheck rejection）产生 `task.resume` 时，只有统一 publisher 能创建/发布它；最终可观察结果是 target hat 收到带 `Event.target` 的恢复事件，错误 hat 不收到。
 
 #### 2. 对应需求与 Scenario
 
@@ -266,7 +274,7 @@ isolated anonymous business 与 phase violation 两条当前 direct path 不再�
 
 #### 5. 输入与输出
 
-- 输入：anonymous/phase recovery 触发的 source hat、reason、topic、loop id、标准 payload。
+- 输入：anonymous/phase recovery 或 handoff precheck recovery 触发的 source hat、reason、topic、loop id、标准 payload。
 - 输出：`ResumeDecision::Allow` 后进入唯一 target pending queue，`event.target=Some(target)`。
 - 错误：unknown target、recipient 非唯一、publisher Block；不得直接 `bus.publish`。
 - 状态/副作用：保留已有 rejection digest/phase snapshot；只改变 task.resume 路由，不改变业务状态机。
@@ -277,6 +285,7 @@ isolated anonymous business 与 phase violation 两条当前 direct path 不再�
 - `crates/ralph-core/src/event_loop/resume_routing.rs`：当前 resolver/publisher SSOT；增加生产所需的带 target/recipient 结果的边界，不创建第二个 router。
 - `crates/ralph-core/src/event_loop/parse_and_emit.rs`：替换 anonymous recovery direct publish；保留其 diagnostic event 与 accepted bookkeeping。
 - `crates/ralph-core/src/event_loop/completion_and_termination.rs`：替换 phase violation direct task.resume；保留 phase budget/exhausted 分支。
+- `crates/ralph-core/src/event_loop/worktree_handoff.rs`：只作为当前 handoff precheck 的生产入口与测试依据；除非 Red 证明其调用边界本身有缺陷，否则不改该文件。
 - `crates/ralph-core/src/event_loop/tests/task_resume_runtime_routing.rs`：增加真实行为测试并改进 ingress guard；不把测试 fixture 的 bare Event 当生产 ingress。
 - 明确不修改：`EventBus` 普通 publish 订阅算法、preset YAML/schema、业务 topic。
 
@@ -290,7 +299,7 @@ isolated anonymous business 与 phase violation 两条当前 direct path 不再�
 
 #### 9. 验收测试
 
-- `runtime_generated_resume_is_targeted`：构造真实 EventLoop/registry，触发两条已确认 direct recovery 分支，断言目标 queue 一条、非目标 queue 零条、event target 等于责任 hat。
+- `runtime_generated_resume_is_targeted`：构造真实 EventLoop/registry，分别触发 anonymous、phase violation 和 handoff precheck recovery 分支，断言目标 queue 一条、非目标 queue 零条、event target 等于责任 hat。
 - `production_ingress_inventory_has_no_direct_publish`：仅作为 architecture guard，必须识别跨行构造；不能替代前一测试。
 - 运行：`cargo nextest run -p ralph-core -- ingress_inventory_regression_storm_dispatch`，再运行新增验收测试 `cargo nextest run -p ralph-core -- runtime_generated_resume_is_targeted`。
 
