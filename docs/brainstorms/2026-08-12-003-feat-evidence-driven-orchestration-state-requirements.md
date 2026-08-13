@@ -55,14 +55,14 @@ Ralph 已经具备 Accepted Transition、Execution Contract、Recovery Intent、
 - **需求记录**：对于启用 StateMachine 的流程，业务状态转换必须具有单一、可审计的接受结果：只有满足最终接受条件的转换才能成为 live state 和 durable state；拒绝、提交失败和进程重启不能留下半提交的状态；replay 必须与正常运行的状态等价。验证应覆盖下游拒绝、Ledger 写入失败、AcceptedTransition 发布失败和进程重启，而不是只测试 `validate_event` 的单元行为。
 - **边界**：不重复建设 OPAC 的 verify/apply/confirm，不把 task `Confirmed` 自动解释成知识状态 `Verified`，不要求 GAP-01 认知观察替代 accepted transition，也不要求替换 `AcceptedTransition`。本缺口只处理 StateMachine 运行态与最终接纳、durable replay 之间的剩余一致性。
 
-#### GAP-03：终态接受没有跨流程统一的硬证据与证据可信度边界
+#### GAP-03（已关闭）：终态证据没有统一语义
 
-- **当前状态**：Execution Contract 可以检查 payload 字段、task、git 和 test evidence 义务，但 test evidence 的一种模式只是检查 payload 中存在声明字段；`Verdict`、coordinator gate 和 Parallel Forge 的 confidence/coverage 门禁是局部机制。
-- **源码证据**：`crates/ralph-core/src/execution_contract/mod.rs:571`、`crates/ralph-core/src/execution_contract/mod.rs:1253`、`crates/ralph-core/src/event_loop/verdict.rs:1`、`crates/ralph-core/src/event_loop/stages/coordinator_decision_gate_stage.rs:1`、`presets/en/parallel-forge.yml:749`。
-- **缺少什么**：没有跨 preset 的 claim → evidence → independent evaluator → system gate 统一契约，也没有统一规定哪些 evidence 属于确定性证据、哪些只是 producer assertion；worker confidence、evaluator confidence、confidence gap、evidence strength、coverage、reproducibility 和 critical unknown 也没有成为系统接受条件。
-- **风险**：Agent 说“已完成”与系统有可复核证据之间仍存在断层；高置信度自评、存在字段的 payload 或局部 verdict 可能绕过覆盖不足、证据伪造或 critical unknown。
-- **需求记录**：重要状态转换必须基于独立验证或确定性证据；自报内容只能作为待评估输入，不能单独推动终态接受。
-- **边界**：不在此文档规定 Evaluator 使用的模型、提示词或具体测试命令。
+- **审计结论**：本项不再作为 P0。当前主 SSOT 流程已经通过 `precheck` gate、Execution Contract、`event_policy` 和 payload consistency guard 形成终态前的证据审计；Agent 的完成声明不能直接绕过 gate 推进下游。
+- **现有机制**：`ce-executor-pipeline` 对 `work.done`、`fix.done` 和 `work.failed` 启用 precheck。Producer 发出的事件先经过 `<topic>.proposed`，由合成的 `precheck-<topic>` gate 审计；通过后才转发原 topic，拒绝则通过 `task.resume` 打回，重试耗尽后进入 `plan.blocked`。`work.done` 的成功路径会检查 deliverable commit、验证文件、验证状态诚实性、Unit settlement 一致性、实际尝试证据和可抽查证据来源。
+- **源码证据**：`presets/en/ce-executor-pipeline.yml:92`、`presets/en/ce-executor-pipeline.yml:130`、`crates/ralph-core/src/config/precheck.rs:15`、`crates/ralph-core/src/config/ralph_config.rs:4368`、`crates/ralph-core/data/ralph-tools-precheck.md:45`、`crates/ralph-core/src/execution_contract/mod.rs:1253`。
+- **原始判断的修正**：此前把“不同 preset 尚未共享完全相同的 evidence contract”误写成“终态没有硬证据边界”。前者是跨 preset 的覆盖审计和规则复用问题，不足以构成当前主流程的 P0；后者已由现有 guard 机制解决。
+- **剩余问题**：`precheck` 是按 preset opt-in 的机制，且可被运行开关关闭；不同 preset 的 guard 覆盖范围也不完全相同。因此剩余工作是确认每个 workflow 的高风险 producer、terminal event、merge boundary 和 verifier 是否启用了合适的 contract，归入 GAP-13，不在本项重复建设 evaluator 或终态 gate。
+- **边界**：不新增一层“SSOT commit 后必须再启动一个 Agent”的固定流程；是否需要独立 Agent 由具体 preset 的风险和已有 guard 决定。已有 `precheck`、Execution Contract 和确定性 policy gate 应继续作为系统接受边界。
 
 ### P1 — 决策、动作、评估、路由与重试
 
@@ -187,7 +187,8 @@ Ralph 已经具备 Accepted Transition、Execution Contract、Recovery Intent、
 
 | 优先级 | Gap | 核心问题 |
 |---|---|---|
-| P0 | GAP-01、GAP-03 | 认知状态与终态证据可信度仍可能影响错误推进或错误完成。 |
+| 已关闭 | GAP-03 | 主 SSOT 流程已有 precheck、Execution Contract 和 policy guard 的终态证据审计闭环；剩余事项转由 GAP-13 处理。 |
+| P0 | GAP-01 | 认知状态与来源权威仍可能影响错误推进或错误完成。 |
 | P1（条件性） | GAP-02（仅启用 StateMachine 的流程） | StateMachine 运行态、durable replay 与最终接纳之间缺少统一提交语义，可能造成恢复或后续路由不一致。 |
 | P1 | GAP-04～GAP-09 | Decision、Action、Evaluator、Route 和 Retry 不能跨流程形成证据驱动闭环。 |
 | P2 | GAP-10～GAP-14 | 复用、覆盖、隔离和收敛存在局部实现，但缺少通用系统语义。 |
@@ -202,6 +203,7 @@ Ralph 已经具备 Accepted Transition、Execution Contract、Recovery Intent、
 - OPAC 已经覆盖 agent 操作层的 Observe/Precheck/Apply/Confirm；其 mutation fingerprint、ticket 和 task confirmation 不能替代 StateMachine 的 durable transition，也不能替代认知状态的 evidence verification。
 - GAP-01 已经提供可 replay 的 Ledger 认知观察和 isolated prompt 的只读投影；它不改变 accepted/rejected 结果，不应被重新描述成 StateMachine 的原子提交方案。
 - `Verdict`、coordinator decision gate、failure class、hard gate、Parallel Forge 和 Post-Merge Converge 已经提供局部的决策、分类、覆盖和收敛能力。
+- `precheck` gate 已经为主 SSOT 流程的 `work.done`、`fix.done` 和 `work.failed` 提供 proposed → audit → accept/reject → bounded retry → blocked 的证据审计闭环；它不是缺失能力，应作为后续 coverage 审计的现有基础。
 - `diagnosis` 已经具备 accepted event evidence、recovery metrics 和局部自愈判断。
 - `parallel-forge`、`post-merge-converge` 已经包含局部的 evidence gate 和 merge 后验证模式，但不能替代跨 preset 的统一契约。
 
@@ -214,7 +216,7 @@ Ralph 已经具备 Accepted Transition、Execution Contract、Recovery Intent、
 - 当前实现与目标编排模型之间的差距。
 - 每个 Gap 的源码事实、风险、优先级和需求方向。
 - 哪些已有机制可以作为补 Gap 的基础。
-- 后续规划必须覆盖的重启/replay、拒绝原子性、独立验证、动态路由、Retry information gain、证据失效和 merge 后收敛问题。
+- 后续规划必须覆盖的重启/replay、拒绝原子性、动态路由、Retry information gain、证据失效和 merge 后收敛问题；独立验证只在具体风险和现有 guard 覆盖不足时纳入，不再作为 GAP-03 的默认 P0 前提。
 - 后续规划必须额外覆盖的 Action Contract、Decision Contract、failure taxonomy、route cycle、gate coverage 和 evaluator independence 问题。
 
 ### 本文不记录的内容
