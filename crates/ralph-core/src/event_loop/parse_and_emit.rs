@@ -692,40 +692,18 @@ impl EventLoop {
                         isolated_hat.as_str(),
                         event.topic
                     );
-                    let decision = if let Some(ledger) =
-                        self.state.state_ledger.as_ref()
-                    {
-                        crate::event_loop::resume_routing::
-                            publish_targeted_recovery_resume_for_hat(
-                                &mut self.bus,
-                                &self.registry,
-                                None,
-                                ledger,
-                                loop_id_str,
-                                &activation_id,
-                                loop_id_str,
-                                isolated_hat.as_str(),
-                                None,
-                                None,
-                                None,
-                                &format!("anonymous_business:{}", event.topic),
-                                resume_payload,
-                                None,
-                            )
-                    } else {
-                        crate::event_loop::resume_routing::publish_targeted_resume_for_hat(
+                    let decision =
+                        crate::event_loop::resume_routing::task_resume_ingress(
                             &mut self.bus,
                             &self.registry,
-                            None,
-                            loop_id_for_resume.as_deref(),
+                            self.state.state_ledger.as_ref(),
+                            loop_id_str,
+                            &activation_id,
                             isolated_hat.as_str(),
-                            None,
-                            None,
                             None,
                             &format!("anonymous_business:{}", event.topic),
                             resume_payload,
-                        )
-                    };
+                        );
                     if let crate::event_loop::resume_routing::ResumeDecision::Block { reason } =
                         &decision
                     {
@@ -1123,38 +1101,18 @@ impl EventLoop {
                         let activation_id =
                             format!("resume:{}:{}", loop_id_str, self.state.iteration);
                         let recovery_payload_for_accepted = resume_payload;
-                        if let Some(ledger) = self.state.state_ledger.as_ref() {
-                            crate::event_loop::resume_routing::
-                                publish_targeted_recovery_resume_for_hat(
-                                    &mut self.bus,
-                                    &self.registry,
-                                    None,
-                                    ledger,
-                                    loop_id_str,
-                                    &activation_id,
-                                    loop_id_str,
-                                    isolated_hat.as_str(),
-                                    None,
-                                    None,
-                                    None,
-                                    &format!("scope_drop:{}", isolated_hat.as_str()),
-                                    recovery_payload_for_accepted.clone(),
-                                    None,
-                                );
-                        } else {
-                            crate::event_loop::resume_routing::publish_targeted_resume_for_hat(
+                        let _ =
+                            crate::event_loop::resume_routing::task_resume_ingress(
                                 &mut self.bus,
                                 &self.registry,
-                                None,
-                                loop_id_for_resume.as_deref(),
+                                self.state.state_ledger.as_ref(),
+                                loop_id_str,
+                                &activation_id,
                                 isolated_hat.as_str(),
-                                None,
-                                None,
                                 None,
                                 &format!("scope_drop:{}", isolated_hat.as_str()),
                                 recovery_payload_for_accepted.clone(),
                             );
-                        }
                         let recovery_payload = recovery_payload_for_accepted;
                         let _ = loop_id_for_resume;
                         // P1 finding #1: also push the synthetic
@@ -2749,43 +2707,18 @@ impl EventLoop {
                                     } else {
                                         step.to_string()
                                     };
-                                    let decision = if let Some(ledger) = self
-                                        .state
-                                        .state_ledger
-                                        .as_ref()
-                                    {
-                                        crate::event_loop::resume_routing::
-                                            publish_targeted_recovery_resume_for_hat(
-                                                &mut self.bus,
-                                                &self.registry,
-                                                None,
-                                                ledger,
-                                                loop_id_str,
-                                                &activation_id,
-                                                loop_id_str,
-                                                hat_id.as_str(),
-                                                None,
-                                                Some(retry_step_for_key.as_str()),
-                                                None,
-                                                "contract_rejection_retry",
-                                                retry_payload_string,
-                                                None,
-                                            )
-                                    } else {
-                                        crate::event_loop::resume_routing::
-                                            publish_targeted_resume_for_hat(
-                                                &mut self.bus,
-                                                &self.registry,
-                                                None,
-                                                loop_id_for_resume.as_deref(),
-                                                hat_id.as_str(),
-                                                None,
-                                                Some(retry_step_for_key.as_str()),
-                                                None,
-                                                "contract_rejection_retry",
-                                                retry_payload_string,
-                                            )
-                                    };
+                                    let decision =
+                                        crate::event_loop::resume_routing::task_resume_ingress(
+                                            &mut self.bus,
+                                            &self.registry,
+                                            self.state.state_ledger.as_ref(),
+                                            loop_id_str,
+                                            &activation_id,
+                                            hat_id.as_str(),
+                                            Some(retry_step_for_key.as_str()),
+                                            "contract_rejection_retry",
+                                            retry_payload_string,
+                                        );
                                     if let crate::event_loop::resume_routing::ResumeDecision::Block { reason } = &decision {
                                         tracing::warn!(
                                             target = %hat_id.as_str(),
@@ -4471,43 +4404,20 @@ impl EventLoop {
         let loop_id_for_resume = self.current_loop_id();
         let loop_id_str = loop_id_for_resume.as_deref().unwrap_or("default");
         let activation_id = format!("resume:{}:{}", loop_id_str, self.state.iteration);
-        if let Some(ledger) = self.state.state_ledger.as_ref() {
-            crate::event_loop::resume_routing::publish_targeted_recovery_resume_for_hat(
-                &mut self.bus,
-                &self.registry,
-                None,
-                ledger,
-                loop_id_str,
-                &activation_id,
-                loop_id_str,
-                pending.hat.as_str(),
-                None,
-                None,
-                None,
-                &format!(
-                    "isolated_budget:{}:per_turn",
-                    crate::diagnosis::normalize_part(pending.hat.as_str())
-                ),
-                payload,
-                None,
-            );
-        } else {
-            crate::event_loop::resume_routing::publish_targeted_resume_for_hat(
-                &mut self.bus,
-                &self.registry,
-                None,
-                loop_id_for_resume.as_deref(),
-                pending.hat.as_str(),
-                None,
-                None,
-                None,
-                &format!(
-                    "isolated_budget:{}:per_turn",
-                    crate::diagnosis::normalize_part(pending.hat.as_str())
-                ),
-                payload,
-            );
-        }
+        let _ = crate::event_loop::resume_routing::task_resume_ingress(
+            &mut self.bus,
+            &self.registry,
+            self.state.state_ledger.as_ref(),
+            loop_id_str,
+            &activation_id,
+            pending.hat.as_str(),
+            None,
+            &format!(
+                "isolated_budget:{}:per_turn",
+                crate::diagnosis::normalize_part(pending.hat.as_str())
+            ),
+            payload,
+        );
     }
 
     /// 2026-06-29-007 plan U1b: drive the `current_step`
@@ -4759,37 +4669,17 @@ impl EventLoop {
                 let loop_id_str = loop_id_for_resume.as_deref().unwrap_or("default");
                 let activation_id =
                     format!("resume:{}:{}", loop_id_str, self.state.iteration);
-                let decision = if let Some(ledger) = self.state.state_ledger.as_ref() {
-                    crate::event_loop::resume_routing::publish_targeted_recovery_resume_for_hat(
-                        &mut self.bus,
-                        &self.registry,
-                        None,
-                        ledger,
-                        loop_id_str,
-                        &activation_id,
-                        loop_id_str,
-                        &target_hat,
-                        None,
-                        None,
-                        None,
-                        &format!("precheck:{}:{}", gate_hat_id, guarded),
-                        resume_payload,
-                        None,
-                    )
-                } else {
-                    crate::event_loop::resume_routing::publish_targeted_resume_for_hat(
-                        &mut self.bus,
-                        &self.registry,
-                        None,
-                        loop_id_for_resume.as_deref(),
-                        &target_hat,
-                        None,
-                        None,
-                        None,
-                        &format!("precheck:{}:{}", gate_hat_id, guarded),
-                        resume_payload,
-                    )
-                };
+                let decision = crate::event_loop::resume_routing::task_resume_ingress(
+                    &mut self.bus,
+                    &self.registry,
+                    self.state.state_ledger.as_ref(),
+                    loop_id_str,
+                    &activation_id,
+                    &target_hat,
+                    None,
+                    &format!("precheck:{}:{}", gate_hat_id, guarded),
+                    resume_payload,
+                );
                 if let crate::event_loop::resume_routing::ResumeDecision::Block { reason } =
                     &decision
                 {

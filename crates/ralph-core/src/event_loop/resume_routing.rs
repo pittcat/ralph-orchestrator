@@ -565,6 +565,55 @@ pub fn publish_targeted_resume_for_hat(
     )
 }
 
+/// Unified `task.resume` ingress: routes to `publish_targeted_recovery_resume_for_hat`
+/// when a ledger is present, otherwise `publish_targeted_resume_for_hat`.
+///
+/// # Arguments
+/// * `ledger` – `None` → legacy path
+/// * `task_key` – optional step-key passed to both variants
+pub fn task_resume_ingress(
+    bus: &mut ralph_proto::EventBus,
+    registry: &impl RegisteredHats,
+    ledger: Option<&crate::state::StateLedger>,
+    loop_id_str: &str,
+    activation_id: &str,
+    target_hint: &str,
+    task_key: Option<&str>,
+    retry_key: &str,
+    payload: String,
+) -> ResumeDecision {
+    match ledger {
+        Some(ledger) => publish_targeted_recovery_resume_for_hat(
+            bus,
+            registry,
+            None,
+            ledger,
+            loop_id_str,
+            activation_id,
+            loop_id_str,
+            target_hint,
+            None,
+            task_key,
+            None,
+            retry_key,
+            payload,
+            None,
+        ),
+        None => publish_targeted_resume_for_hat(
+            bus,
+            registry,
+            None,
+            Some(loop_id_str),
+            target_hint,
+            None,
+            task_key,
+            None,
+            retry_key,
+            payload,
+        ),
+    }
+}
+
 /// Variant of [`publish_targeted_resume_for_hat`] that
 /// writes the diagnostic envelope into the supplied
 /// directory instead of the production

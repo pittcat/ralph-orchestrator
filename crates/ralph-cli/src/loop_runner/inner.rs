@@ -777,7 +777,8 @@ pub(super) async fn run_loop_impl_inner(
         // Plan 2026-08-13-003 U4: for the resume (`--continue`)
         // path the bootstrap topic is `loop.resume` (NOT
         // `task.start` / `task.resume`). The history logger
-        // default topic (line 1312) was already updated in this
+        // default topic (see `default_start_topic` assignment
+        // in the same function) was already updated in this
         // plan; here we keep the trusted events file consistent
         // with the history log.
         let (bootstrap_topic, bootstrap_payload) = match &manifest_recovery {
@@ -854,7 +855,7 @@ pub(super) async fn run_loop_impl_inner(
     // event — `loop.resume` — to the trusted events file so
     // `ralph diagnose`, replay, and audit tooling can read
     // it. The history logger writes the same topic (see
-    // `default_start_topic` at line 1312).
+    // `default_start_topic` assignment below).
     if resume && manifest_recovery.is_none() {
         match persist_starting_event_to_events_file(
             &ctx,
