@@ -949,7 +949,6 @@ impl EventLoop {
 /// All helpers are read-only; missing files or unreadable paths return
 /// `None` / `0` so the loop.resume event still fires for legacy
 /// workspaces that lack the auxiliary files.
-
 fn read_closed_tasks_count(tasks_path: &std::path::Path) -> u32 {
     use crate::task_store::TaskStore;
     TaskStore::load(tasks_path)
