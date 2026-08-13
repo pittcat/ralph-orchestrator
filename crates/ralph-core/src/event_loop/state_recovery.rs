@@ -308,18 +308,40 @@ impl EventLoop {
             // publish path. The live `peek_pending` adapter
             // covers the dedup check.
             let loop_id_for_resume = self.current_loop_id();
-            crate::event_loop::resume_routing::publish_targeted_resume_for_hat(
-                &mut self.bus,
-                &self.registry,
-                None,
-                loop_id_for_resume.as_deref(),
-                recovery.target_hat.as_str(),
-                None,
-                None,
-                None,
-                "manifest_resume",
-                recovery.payload,
-            );
+            let loop_id_str = loop_id_for_resume.as_deref().unwrap_or("default");
+            let activation_id =
+                format!("resume:{}:{}", loop_id_str, self.state.iteration);
+            if let Some(ledger) = self.state.state_ledger.as_ref() {
+                crate::event_loop::resume_routing::publish_targeted_recovery_resume_for_hat(
+                    &mut self.bus,
+                    &self.registry,
+                    None,
+                    ledger,
+                    loop_id_str,
+                    &activation_id,
+                    loop_id_str,
+                    recovery.target_hat.as_str(),
+                    None,
+                    None,
+                    None,
+                    "manifest_resume",
+                    recovery.payload,
+                    None,
+                );
+            } else {
+                crate::event_loop::resume_routing::publish_targeted_resume_for_hat(
+                    &mut self.bus,
+                    &self.registry,
+                    None,
+                    loop_id_for_resume.as_deref(),
+                    recovery.target_hat.as_str(),
+                    None,
+                    None,
+                    None,
+                    "manifest_resume",
+                    recovery.payload,
+                );
+            }
             debug!(
                 target_hat = %recovery.target_hat.as_str(),
                 original_trigger_topic = %recovery.original_trigger_topic,
@@ -921,18 +943,39 @@ impl EventLoop {
         // aggregate-timeout recoveries collapse into one resume
         // per wave.
         let loop_id_for_resume = self.current_loop_id();
-        let decision = crate::event_loop::resume_routing::publish_targeted_resume_for_hat(
-            &mut self.bus,
-            &self.registry,
-            None,
-            loop_id_for_resume.as_deref(),
-            target.as_str(),
-            None,
-            None,
-            None,
-            &format!("aggregate_timeout:{}", action.wave_id),
-            payload,
-        );
+        let loop_id_str = loop_id_for_resume.as_deref().unwrap_or("default");
+        let activation_id = format!("resume:{}:{}", loop_id_str, self.state.iteration);
+        let decision = if let Some(ledger) = self.state.state_ledger.as_ref() {
+            crate::event_loop::resume_routing::publish_targeted_recovery_resume_for_hat(
+                &mut self.bus,
+                &self.registry,
+                None,
+                ledger,
+                loop_id_str,
+                &activation_id,
+                loop_id_str,
+                target.as_str(),
+                None,
+                None,
+                None,
+                &format!("aggregate_timeout:{}", action.wave_id),
+                payload,
+                None,
+            )
+        } else {
+            crate::event_loop::resume_routing::publish_targeted_resume_for_hat(
+                &mut self.bus,
+                &self.registry,
+                None,
+                loop_id_for_resume.as_deref(),
+                target.as_str(),
+                None,
+                None,
+                None,
+                &format!("aggregate_timeout:{}", action.wave_id),
+                payload,
+            )
+        };
         if let crate::event_loop::resume_routing::ResumeDecision::Block { reason } = &decision {
             tracing::warn!(
                 target = %target.as_str(),

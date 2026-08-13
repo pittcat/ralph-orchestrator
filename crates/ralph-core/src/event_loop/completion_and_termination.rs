@@ -981,18 +981,49 @@ impl EventLoop {
                         // publisher returns Block with no
                         // bus side effect.
                         let loop_id_for_resume = self.loop_id_label();
-                        let decision = crate::event_loop::resume_routing::publish_targeted_resume_for_hat(
-                            &mut self.bus,
-                            &self.registry,
-                            None,
-                            Some(loop_id_for_resume.as_str()),
-                            hat,
-                            None,
-                            None,
-                            None,
-                            &format!("phase_violation:{}:{}", event.topic.as_str(), hat),
-                            resume_payload.to_string(),
-                        );
+                        let loop_id_str = loop_id_for_resume.as_str();
+                        let activation_id =
+                            format!("resume:{}:{}", loop_id_str, self.state.iteration);
+                        let decision = if let Some(ledger) = self.state.state_ledger.as_ref() {
+                            crate::event_loop::resume_routing::
+                                publish_targeted_recovery_resume_for_hat(
+                                    &mut self.bus,
+                                    &self.registry,
+                                    None,
+                                    ledger,
+                                    loop_id_str,
+                                    &activation_id,
+                                    loop_id_str,
+                                    hat,
+                                    None,
+                                    None,
+                                    None,
+                                    &format!(
+                                        "phase_violation:{}:{}",
+                                        event.topic.as_str(),
+                                        hat
+                                    ),
+                                    resume_payload.to_string(),
+                                    None,
+                                )
+                        } else {
+                            crate::event_loop::resume_routing::publish_targeted_resume_for_hat(
+                                &mut self.bus,
+                                &self.registry,
+                                None,
+                                Some(loop_id_str),
+                                hat,
+                                None,
+                                None,
+                                None,
+                                &format!(
+                                    "phase_violation:{}:{}",
+                                    event.topic.as_str(),
+                                    hat
+                                ),
+                                resume_payload.to_string(),
+                            )
+                        };
                         if let crate::event_loop::resume_routing::ResumeDecision::Block { reason } =
                             &decision
                         {

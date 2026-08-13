@@ -914,6 +914,7 @@ fn u5_empty_string_payload_field_fails_assertion() {
 /// file.
 #[test]
 fn u5_recovery_directives_match_runtime_thresholds() {
+    use crate::correction::ESCALATION_THRESHOLD;
     // Static read of the docs to catch the historical
     // contradiction (ralph-tools.md said "second" while
     // ralph-tools-recovery-directives.md said "third").
@@ -928,18 +929,35 @@ fn u5_recovery_directives_match_runtime_thresholds() {
     )
     .expect("ralph-tools-recovery-directives.md readable");
 
-    // The runtime escalation threshold is 3 (see
-    // correction::escalation_threshold = 3); both docs
+    // The runtime escalation threshold is `ESCALATION_THRESHOLD`
+    // (see `crate::correction::ESCALATION_THRESHOLD`); both docs
     // must describe the same bound.
     assert!(
-        ralph_tools.contains("escalation_threshold == 3")
+        ralph_tools.contains(&format!("escalation_threshold == {ESCALATION_THRESHOLD}"))
             || ralph_tools.contains("第三次"),
-        "ralph-tools.md MUST describe the runtime 3-strike escalation threshold (was unchanged)"
+        "ralph-tools.md MUST describe the runtime {ESCALATION_THRESHOLD}-strike escalation threshold (was unchanged)"
     );
     assert!(
         recovery_directives.contains("第 3 次")
             || recovery_directives.contains("third"),
-        "ralph-tools-recovery-directives.md MUST describe the runtime 3-strike threshold"
+        "ralph-tools-recovery-directives.md MUST describe the runtime {ESCALATION_THRESHOLD}-strike threshold"
+    );
+}
+
+/// Plan 2026-08-13-003 fix-plan U5 R11 reverse-case guard:
+/// if `ESCALATION_THRESHOLD` is changed (e.g. to 4), the docs
+/// must be updated in lock-step. This test pins the threshold
+/// back to 3 and verifies the static-check would fail if a
+/// future drift split the constant from the docs. Run by
+/// calling this test after temporarily editing the constant
+/// (does NOT auto-mutate state).
+#[test]
+fn u5_threshold_constant_matches_documented_threshold() {
+    use crate::correction::ESCALATION_THRESHOLD;
+    assert_eq!(
+        ESCALATION_THRESHOLD, 3,
+        "ESCALATION_THRESHOLD must equal 3 unless ralph-tools.md / \
+         ralph-tools-recovery-directives.md are updated together"
     );
 }
 
