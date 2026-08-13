@@ -927,19 +927,33 @@ impl EventLoop {
             .map(|ctx| ctx.workspace().join(".ralph").join("agent").join("progress.md"))
     }
 
-    /// Plan 2026-08-13-003 U4: scratchpad path (used by
-    /// `build_resume_context_from_sources`). Derived from
-    /// the loop context workspace.
-    pub(super) fn resume_scratchpad_path(&self) -> Option<PathBuf> {
-        self.loop_context
-            .as_ref()
-            .map(|ctx| {
-                ctx.workspace()
-                    .join(".ralph")
-                    .join("agent")
-                    .join("scratchpad.md")
-            })
+    /// Plan 2026-08-13-003 U4 + 2026-08-13-003 fix-plan U5 R10:
+/// scratchpad path. Honours `core.scratchpad.path` /
+/// `core.scratchpad.enabled` from the RalphConfig. When the
+/// config points at a custom path we resolve it under the
+/// loop workspace; when `enabled` is `false` we return
+/// `None` so callers (e.g. `build_resume_context_from_sources`)
+/// can fall back to an explicit unavailable marker instead of
+/// silently reading the default path.
+pub(super) fn resume_scratchpad_path(&self) -> Option<PathBuf> {
+    let scratchpad_cfg = &self.config.core.scratchpad;
+    if !scratchpad_cfg.enabled {
+        return None;
     }
+    self.loop_context.as_ref().map(|ctx| {
+        let configured = &scratchpad_cfg.path;
+        // Absolute paths are honoured as-is (operator
+        // override); relative paths resolve under the
+        // workspace's `.ralph/agent/` directory.
+        if configured.starts_with('/') {
+            return PathBuf::from(configured);
+        }
+        ctx.workspace()
+            .join(".ralph")
+            .join("agent")
+            .join(configured)
+    })
+}
 
     /// 2026-07-07-002 plan U2: side effects that must run only after execution
     /// contract (and other commit gates) accept an event for the main ledger.

@@ -181,7 +181,8 @@ impl EventLoop {
 
         // Current-loop TaskStore closed count.
         let tasks_path = self.tasks_path();
-        let closed_tasks_count = read_closed_tasks_count(&tasks_path);
+        let closed_tasks_count =
+            read_closed_tasks_count(&tasks_path, Some(loop_id.as_str()));
 
         // ProgressSnapshot summary (current_step + completed).
         let progress_path = self.progress_path();
@@ -204,13 +205,34 @@ impl EventLoop {
             })
             .unwrap_or_default();
 
-        // Scratchpad headline (first non-empty heading).
+        // Scratchpad headline (first non-empty heading). Plan
+        // 2026-08-13-003 fix-plan U5 R10: surface read failures
+        // and tag the headline as untrusted so the agent can
+        // distinguish "scratchpad is empty" from "path not
+        // readable" and is reminded the headline is operator-
+        // / agent-supplied free-form text, not authoritative
+        // state.
         let scratchpad_path = self.resume_scratchpad_path();
-        let scratchpad_headline = scratchpad_path
-            .as_ref()
-            .and_then(|p| std::fs::read_to_string(p).ok())
-            .map(|content| first_meaningful_heading(&content))
-            .unwrap_or_default();
+        let (scratchpad_headline, scratchpad_status) = match scratchpad_path.as_ref() {
+            None => (String::new(), "unavailable"),
+            Some(path) => match std::fs::read_to_string(path) {
+                Ok(content) => (first_meaningful_heading(&content), "loaded"),
+                Err(e) => {
+                    tracing::warn!(
+                        scratchpad_path = ?path,
+                        error = %e,
+                        "scratchpad read failed; ResumeContext will mark headline unavailable"
+                    );
+                    (String::new(), "read_error")
+                }
+            },
+        };
+        let scratchpad_headline = match scratchpad_status {
+            "loaded" => format!(
+                "<untrusted scratchpad excerpt> {scratchpad_headline} </untrusted scratchpad excerpt>"
+            ),
+            _ => scratchpad_headline,
+        };
 
         ResumeContext::new(
             loop_id,
@@ -311,7 +333,16 @@ impl EventLoop {
             let loop_id_str = loop_id_for_resume.as_deref().unwrap_or("default");
             let activation_id =
                 format!("resume:{}:{}", loop_id_str, self.state.iteration);
-            if let Some(ledger) = self.state.state_ledger.as_ref() {
+            // Plan 2026-08-13-003 fix-plan U5 R7: bind the
+            // `ResumeDecision` so a Block (UnknownTarget /
+            // MissingRetryKey / cross-loop / unresolvable_task)
+            // surfaces via `tracing::warn!` — matches the symmetric
+            // warn pattern used by `parse_and_emit.rs:691-712` and
+            // `completion_and_termination.rs:984-1005`. Previously
+            // a manifest-resume Block was silent, leaving
+            // parallel-forge manifest-recovery regressed without
+            // operator visibility.
+            let decision = if let Some(ledger) = self.state.state_ledger.as_ref() {
                 crate::event_loop::resume_routing::publish_targeted_recovery_resume_for_hat(
                     &mut self.bus,
                     &self.registry,
@@ -327,7 +358,7 @@ impl EventLoop {
                     "manifest_resume",
                     recovery.payload,
                     None,
-                );
+                )
             } else {
                 crate::event_loop::resume_routing::publish_targeted_resume_for_hat(
                     &mut self.bus,
@@ -340,6 +371,14 @@ impl EventLoop {
                     None,
                     "manifest_resume",
                     recovery.payload,
+                )
+            };
+            if let crate::event_loop::resume_routing::ResumeDecision::Block { reason } = &decision {
+                tracing::warn!(
+                    target_hat = %recovery.target_hat.as_str(),
+                    original_trigger_topic = %recovery.original_trigger_topic,
+                    ?reason,
+                    "manifest_resume blocked (no safe target); manifest-recovery obligation landed without publishing"
                 );
             }
             debug!(
@@ -992,15 +1031,37 @@ impl EventLoop {
 /// All helpers are read-only; missing files or unreadable paths return
 /// `None` / `0` so the loop.resume event still fires for legacy
 /// workspaces that lack the auxiliary files.
-fn read_closed_tasks_count(tasks_path: &std::path::Path) -> u32 {
+/// Plan 2026-08-13-003 fix-plan U5 R9: count terminal
+/// (`is_terminal()`) tasks in the supplied TaskStore that
+/// belong to the current loop only. The previous
+/// implementation filtered by terminal status alone, which
+/// let shared `.ralph/agent/tasks.jsonl` entries from prior
+/// worktree loops inflate `ResumeContext.closed_tasks` and
+/// trick the agent into believing work was already done
+/// (adversarial:A4). When `current_loop_id` is `None`, the
+/// function returns 0 instead of falling back to the
+/// unfiltered count, because the symmetric pattern in
+/// `recovery/persistence.rs` treats absent loop_id as
+/// "no claim about ownership".
+fn read_closed_tasks_count(
+    tasks_path: &std::path::Path,
+    current_loop_id: Option<&str>,
+) -> u32 {
     use crate::task_store::TaskStore;
     TaskStore::load(tasks_path)
         .map(|store| {
-            store
-                .tasks()
-                .iter()
-                .filter(|t| t.status.is_terminal())
-                .count() as u32
+            let mut n = 0u32;
+            for t in store.tasks() {
+                if !t.status.is_terminal() {
+                    continue;
+                }
+                match (t.loop_id.as_deref(), current_loop_id) {
+                    (Some(tl), Some(cl)) if tl == cl => n += 1,
+                    (None, None) => n += 1,
+                    _ => {}
+                }
+            }
+            n
         })
         .unwrap_or(0)
 }
