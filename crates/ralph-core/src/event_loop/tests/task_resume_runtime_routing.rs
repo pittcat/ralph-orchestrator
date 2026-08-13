@@ -532,6 +532,202 @@ fn u2_legacy_triggered_only_jsonl_preserves_target() {
     );
 }
 
+/// Plan 2026-08-13-003 U3 + R4/S8: `publish_targeted_recovery_resume`
+/// writes a Recovery durable outbox entry BEFORE publishing
+/// to the in-memory bus. Replaying the same payload must
+/// NOT publish a second event — `commit_idempotent` returns
+/// the existing entry and skips the second publish.
+#[test]
+fn u3_recovery_commit_precedes_publish() {
+    use crate::event_loop::resume_routing::{
+        publish_targeted_recovery_resume, ResumeDecision, ResumeRoutingInputs,
+    };
+    use crate::state::StateLedger;
+    use ralph_proto::Hat;
+
+    let temp_dir = tempfile::tempdir().expect("tempdir");
+    let ws = temp_dir.path().to_path_buf();
+    let ledger = StateLedger::new(&ws, true);
+
+    let mut bus = ralph_proto::EventBus::new();
+    bus.register(Hat::new("executor", "Executor").subscribe("task.resume"));
+    let registry: std::collections::HashSet<String> =
+        ["executor"].iter().map(|s| s.to_string()).collect();
+    let inputs = ResumeRoutingInputs {
+        event_target: Some("executor"),
+        retry_key: Some("u3_recovery_commit_precedes"),
+        ..Default::default()
+    };
+    let decision = publish_targeted_recovery_resume(
+        &mut bus,
+        &registry,
+        None,
+        &ledger,
+        "loop-A",
+        "u3_act_1",
+        "u3_contract",
+        &inputs,
+        r#"{"reason":"u3_recovery_commit_precedes","target_hat":"executor"}"#.to_string(),
+    )
+    .expect("commit must succeed");
+    assert!(
+        matches!(decision, ResumeDecision::Allow { .. }),
+        "decision must Allow (was {decision:?})"
+    );
+
+    // The durable outbox must contain the entry.
+    let outbox = crate::event_loop::accepted_transition::read_outbox(&ws)
+        .expect("outbox readable");
+    assert_eq!(
+        outbox.len(),
+        1,
+        "exactly one Recovery outbox entry must exist"
+    );
+    assert_eq!(outbox[0].topic, "task.resume");
+    assert_eq!(outbox[0].loop_id, "loop-A");
+    assert_eq!(outbox[0].activation_id, "u3_act_1");
+    assert!(!outbox[0].delivered, "first commit is not yet delivered/acked");
+
+    // The in-memory bus must hold exactly one task.resume
+    // (the publish happened AFTER the durable commit).
+    let exec_pending = bus
+        .peek_pending(&ralph_proto::HatId::new("executor"))
+        .expect("executor pending");
+    assert_eq!(
+        exec_pending.len(),
+        1,
+        "executor must hold the targeted resume"
+    );
+}
+
+/// Plan 2026-08-13-003 U3 + R4/S8: when the durable
+/// commit fails (simulated by handing a non-existent
+/// workspace to the StateLedger constructor), the
+/// `publish_targeted_recovery_resume` function MUST NOT
+/// publish the resume to the bus. The caller receives an
+/// `Err` and the bus stays empty — zero bus side effect
+/// per D3.
+#[test]
+fn u3_recovery_commit_failure_has_zero_bus_side_effect() {
+    use crate::event_loop::resume_routing::{
+        publish_targeted_recovery_resume, ResumeRoutingInputs,
+    };
+    use crate::state::StateLedger;
+    use ralph_proto::Hat;
+
+    // Use a workspace that we will make read-only at the
+    // outbox path level so the append fails. The simplest
+    // way is to construct a `StateLedger` pointing at a
+    // path that does not exist and that we cannot create
+    // (an existing regular file used as a directory
+    // replacement fails `OpenOptions::create`).
+    let temp_dir = tempfile::tempdir().expect("tempdir");
+    let blocker = temp_dir.path().join("blocker");
+    std::fs::write(&blocker, b"not a directory").expect("blocker file");
+    let ws = blocker.join("nested"); // cannot be created; blocker is a file
+    let ledger = StateLedger::new(&ws, true);
+
+    let mut bus = ralph_proto::EventBus::new();
+    bus.register(Hat::new("executor", "Executor").subscribe("task.resume"));
+    let registry: std::collections::HashSet<String> =
+        ["executor"].iter().map(|s| s.to_string()).collect();
+    let inputs = ResumeRoutingInputs {
+        event_target: Some("executor"),
+        retry_key: Some("u3_commit_failure"),
+        ..Default::default()
+    };
+    let result = publish_targeted_recovery_resume(
+        &mut bus,
+        &registry,
+        None,
+        &ledger,
+        "loop-A",
+        "u3_act_2",
+        "u3_contract",
+        &inputs,
+        r#"{"reason":"u3_commit_failure"}"#.to_string(),
+    );
+    assert!(
+        result.is_err(),
+        "commit failure MUST surface as Err (was {result:?})"
+    );
+    // The bus must be empty: zero bus side effect.
+    let exec_pending = bus
+        .peek_pending(&ralph_proto::HatId::new("executor"))
+        .map(|v| v.len())
+        .unwrap_or(0);
+    assert_eq!(
+        exec_pending, 0,
+        "durable commit failure MUST NOT publish to the bus"
+    );
+}
+
+/// Plan 2026-08-13-003 U3 + R4/S9: when the resolver
+/// returns Block (e.g. unknown target), the durable
+/// ledger must NOT receive a receipt — the failed
+/// preflight must short-circuit before the outbox append.
+#[test]
+fn u3_unknown_target_has_no_receipt() {
+    use crate::event_loop::resume_routing::{
+        publish_targeted_recovery_resume, ResumeBlockReason, ResumeDecision, ResumeRoutingInputs,
+    };
+    use crate::state::StateLedger;
+    use ralph_proto::Hat;
+
+    let temp_dir = tempfile::tempdir().expect("tempdir");
+    let ws = temp_dir.path().to_path_buf();
+    let ledger = StateLedger::new(&ws, true);
+
+    let mut bus = ralph_proto::EventBus::new();
+    bus.register(Hat::new("observer", "Observer").subscribe("task.resume"));
+    let registry: std::collections::HashSet<String> =
+        ["observer"].iter().map(|s| s.to_string()).collect();
+    let inputs = ResumeRoutingInputs {
+        event_target: Some("ghost"),
+        retry_key: Some("u3_unknown_target"),
+        ..Default::default()
+    };
+    let decision = publish_targeted_recovery_resume(
+        &mut bus,
+        &registry,
+        None,
+        &ledger,
+        "loop-A",
+        "u3_act_3",
+        "u3_contract",
+        &inputs,
+        r#"{"reason":"u3_unknown_target"}"#.to_string(),
+    )
+    .expect("unknown-target resolution must NOT error at the commit layer");
+    assert!(
+        matches!(
+            decision,
+            ResumeDecision::Block {
+                reason: ResumeBlockReason::UnknownTarget { .. }
+            }
+        ),
+        "unknown target must Block (was {decision:?})"
+    );
+
+    // No durable receipt: the preflight must short-circuit
+    // before any outbox append.
+    let outbox = crate::event_loop::accepted_transition::read_outbox(&ws)
+        .expect("outbox readable");
+    assert!(
+        outbox.is_empty(),
+        "unknown target MUST NOT leave a durable receipt (outbox = {outbox:?})"
+    );
+
+    // Bus is empty too.
+    for id in bus.hat_ids() {
+        let pending = bus.peek_pending(id).map(|v| v.len()).unwrap_or(0);
+        assert_eq!(
+            pending, 0,
+            "no hat must receive a resume when target is unknown (hat {id})"
+        );
+    }
+}
+
 #[test]
 fn unit3_unified_publisher_blocks_broadcast_when_no_safe_target() {
     let mut bus = ralph_proto::EventBus::new();

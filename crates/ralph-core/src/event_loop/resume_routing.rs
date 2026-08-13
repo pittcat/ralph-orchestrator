@@ -1233,3 +1233,58 @@ mod tests {
         assert_eq!(envelope_json["loop_id"], "loop-A");
     }
 }
+
+/// Plan 2026-08-13-003 U3: route the resolved `task.resume`
+/// through the existing `Disposition::Recovery` /
+/// `AcceptedTransition::commit_idempotent` durable boundary
+/// before publishing to the in-memory bus. The caller MUST
+/// pass the current `loop_id`, `activation_id`, and
+/// `contract_revision`; the durable outbox write happens
+/// before the bus publish, so a commit failure has zero
+/// bus side effect.
+pub fn publish_targeted_recovery_resume(
+    bus: &mut ralph_proto::EventBus,
+    registry: &impl RegisteredHats,
+    task_store: Option<&TaskStore>,
+    ledger: &crate::state::StateLedger,
+    loop_id: &str,
+    activation_id: &str,
+    contract_revision: &str,
+    inputs: &ResumeRoutingInputs<'_>,
+    payload: String,
+) -> Result<ResumeDecision, String> {
+    let existing = inputs
+        .event_target
+        .map(|t| ralph_proto::HatId::new(t))
+        .map(|hat| pending_resume_identities_from_bus(bus, &hat))
+        .unwrap_or_default();
+    let decision = resolve_resume_target(inputs, registry, task_store, &existing);
+    match &decision {
+        ResumeDecision::Allow { target, .. } => {
+            if !registry.is_registered(target.as_str()) {
+                return Ok(ResumeDecision::Block {
+                    reason: ResumeBlockReason::UnknownTargetRace {
+                        target: target.as_str().to_string(),
+                    },
+                });
+            }
+            let event = ralph_proto::Event::new("task.resume", payload.clone())
+                .with_source("orchestrator")
+                .with_system_injected()
+                .with_target(target.clone());
+            crate::event_loop::disposition::publish_synthetic(
+                &event,
+                crate::event_loop::disposition::Disposition::Recovery,
+                loop_id,
+                activation_id,
+                contract_revision,
+                ledger,
+                bus,
+            )
+            .map_err(|e| format!("recovery commit failed: {e}"))?;
+            Ok(decision)
+        }
+        ResumeDecision::Duplicate { .. } => Ok(decision),
+        ResumeDecision::Block { .. } => Ok(decision),
+    }
+}
