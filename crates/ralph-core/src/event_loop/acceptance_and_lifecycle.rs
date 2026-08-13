@@ -907,6 +907,40 @@ impl EventLoop {
             .unwrap_or_else(|| PathBuf::from(".ralph/agent/tasks.jsonl"))
     }
 
+    /// Plan 2026-08-13-003 U4: loop history path (used by
+    /// `build_resume_context_from_sources`). Returns
+    /// `None` when the loop context does not expose a
+    /// history path so the caller falls back to a safe
+    /// zero.
+    pub(super) fn loop_history_path(&self) -> Option<PathBuf> {
+        self.loop_context
+            .as_ref()
+            .map(|ctx| ctx.history_path())
+    }
+
+    /// Plan 2026-08-13-003 U4: progress.md path (used by
+    /// `build_resume_context_from_sources`). Derived from
+    /// the loop context workspace.
+    pub(super) fn progress_path(&self) -> Option<PathBuf> {
+        self.loop_context
+            .as_ref()
+            .map(|ctx| ctx.workspace().join(".ralph").join("agent").join("progress.md"))
+    }
+
+    /// Plan 2026-08-13-003 U4: scratchpad path (used by
+    /// `build_resume_context_from_sources`). Derived from
+    /// the loop context workspace.
+    pub(super) fn resume_scratchpad_path(&self) -> Option<PathBuf> {
+        self.loop_context
+            .as_ref()
+            .map(|ctx| {
+                ctx.workspace()
+                    .join(".ralph")
+                    .join("agent")
+                    .join("scratchpad.md")
+            })
+    }
+
     /// 2026-07-07-002 plan U2: side effects that must run only after execution
     /// contract (and other commit gates) accept an event for the main ledger.
     pub(super) fn apply_contract_committed_side_effects(&mut self, events: &[JsonlEvent]) {

@@ -131,12 +131,20 @@ impl EventLoop {
     /// [`crate::correction::ResumeContext`] block in the next
     /// prompt.  The legacy `task.resume` path is preserved for
     /// callers that have not opted in.
+    ///
+    /// Plan 2026-08-13-003 U4: the production default context
+    /// is no longer `ResumeContext::default()` — it is built
+    /// from the live `LoopHistory::last_iteration`, the
+    /// current-loop `TaskStore` closed/open counts, the
+    /// `.ralph/agent/progress.md` `ProgressSnapshot`, and the
+    /// scratchpad headline. Read failures fall back to safe
+    /// empty values (per D5 + plan §20) so the loop.resume
+    /// event still fires for legacy workspaces that lack the
+    /// auxiliary files.
     pub fn initialize_resume(&mut self, prompt_content: &str) {
         if crate::correction::is_correction_enabled() {
-            self.initialize_resume_with_context(
-                prompt_content,
-                crate::correction::ResumeContext::default(),
-            );
+            let context = self.build_resume_context_from_sources();
+            self.initialize_resume_with_context(prompt_content, context);
             return;
         }
         // Legacy path: emit `task.resume` regardless of starting_event
@@ -146,6 +154,71 @@ impl EventLoop {
         // Unit 3: rebuild bootstrap gate from recorded events so resume
         // does not re-open the guidance-suppression window mid-loop.
         self.rebuild_bootstrap_flags_from_recorded_events();
+    }
+
+    /// Plan 2026-08-13-003 U4: build a production
+    /// [`crate::correction::ResumeContext`] from the live
+    /// sources required by D5 (LoopHistory / current-loop
+    /// TaskStore / progress.md / scratchpad). Each source is
+    /// read independently; failure of any single read leaves
+    /// that field empty/zero (no fabricated values).
+    fn build_resume_context_from_sources(&self) -> crate::correction::ResumeContext {
+        use crate::correction::ResumeContext;
+        use crate::step_handoff::progress_task_gate::ProgressSnapshot;
+
+        let loop_id = self
+            .loop_id_label()
+            .trim()
+            .to_string();
+
+        // Last iteration from LoopHistory (if available).
+        let history_path = self.loop_history_path();
+        let last_iteration = history_path
+            .as_ref()
+            .and_then(|p| crate::loop_history::LoopHistory::new(p.clone()).last_iteration().ok())
+            .flatten()
+            .unwrap_or(0);
+
+        // Current-loop TaskStore closed count.
+        let tasks_path = self.tasks_path();
+        let closed_tasks_count = read_closed_tasks_count(&tasks_path);
+
+        // ProgressSnapshot summary (current_step + completed).
+        let progress_path = self.progress_path();
+        let progress_summary = progress_path
+            .as_ref()
+            .and_then(|p| std::fs::read_to_string(p).ok())
+            .map(|content| {
+                let snap = ProgressSnapshot::parse(&content);
+                let mut out = String::new();
+                if let Some(step) = snap.current_step() {
+                    out.push_str(&format!("current_step={step}; "));
+                }
+                if !snap.completed_steps.is_empty() {
+                    out.push_str(&format!(
+                        "completed={}; ",
+                        snap.completed_steps.join(",")
+                    ));
+                }
+                out
+            })
+            .unwrap_or_default();
+
+        // Scratchpad headline (first non-empty heading).
+        let scratchpad_path = self.resume_scratchpad_path();
+        let scratchpad_headline = scratchpad_path
+            .as_ref()
+            .and_then(|p| std::fs::read_to_string(p).ok())
+            .map(|content| first_meaningful_heading(&content))
+            .unwrap_or_default();
+
+        ResumeContext::new(
+            loop_id,
+            closed_tasks_count,
+            progress_summary,
+            last_iteration,
+            scratchpad_headline,
+        )
     }
 
     /// U7b (plan 2026-06-21-002): initialize resume with an
@@ -870,4 +943,40 @@ impl EventLoop {
         }
         true
     }
+}
+
+/// Plan 2026-08-13-003 U4: helpers for `build_resume_context_from_sources`.
+/// All helpers are read-only; missing files or unreadable paths return
+/// `None` / `0` so the loop.resume event still fires for legacy
+/// workspaces that lack the auxiliary files.
+
+fn read_closed_tasks_count(tasks_path: &std::path::Path) -> u32 {
+    use crate::task_store::TaskStore;
+    TaskStore::load(tasks_path)
+        .map(|store| {
+            store
+                .tasks()
+                .iter()
+                .filter(|t| t.status.is_terminal())
+                .count() as u32
+        })
+        .unwrap_or(0)
+}
+
+fn first_meaningful_heading(content: &str) -> String {
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if let Some(rest) = trimmed.strip_prefix("# ") {
+            return rest.trim().to_string();
+        }
+        if let Some(rest) = trimmed.strip_prefix("## ") {
+            return rest.trim().to_string();
+        }
+        if !trimmed.is_empty() {
+            // First non-heading non-empty line — use it as
+            // the headline for very loose scratchpads.
+            return trimmed.chars().take(80).collect();
+        }
+    }
+    String::new()
 }

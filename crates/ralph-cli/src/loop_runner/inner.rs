@@ -767,24 +767,35 @@ pub(super) async fn run_loop_impl_inner(
         // to the freshly created trusted events file so `ralph diagnose`,
         // replay, and audit tooling can read it.  Without this, the
         // bootstrap event only lives in the history logger and is invisible
-        // to the JSONL stream that drives the live loop.  Resume mode is
-        // handled separately by `EventLoop::initialize_resume` and uses
-        // `task.resume`; do not inject another `work.start` here.
+        // to the JSONL stream that drives the live loop.
         //
         // U2 (plan 2026-08-03-004): when a manifest recovery applies, the
         // bootstrap record is the targeted `task.resume` recovery payload
         // instead of the configured starting event — the audit ledger must
         // match what the loop actually bootstraps.
+        //
+        // Plan 2026-08-13-003 U4: for the resume (`--continue`)
+        // path the bootstrap topic is `loop.resume` (NOT
+        // `task.start` / `task.resume`). The history logger
+        // default topic (line 1312) was already updated in this
+        // plan; here we keep the trusted events file consistent
+        // with the history log.
         let (bootstrap_topic, bootstrap_payload) = match &manifest_recovery {
             Some(recovery) => ("task.resume".to_string(), recovery.payload.clone()),
-            None => (
-                config
-                    .event_loop
-                    .starting_event
-                    .clone()
-                    .unwrap_or_else(|| "task.start".to_string()),
-                prompt_content.clone(),
-            ),
+            None => {
+                if resume {
+                    (ralph_proto::LOOP_RESUME.to_string(), prompt_content.clone())
+                } else {
+                    (
+                        config
+                            .event_loop
+                            .starting_event
+                            .clone()
+                            .unwrap_or_else(|| "task.start".to_string()),
+                        prompt_content.clone(),
+                    )
+                }
+            }
         };
         match persist_starting_event_to_events_file(&ctx, &bootstrap_topic, &bootstrap_payload) {
             Ok(()) => {
@@ -831,6 +842,36 @@ pub(super) async fn run_loop_impl_inner(
                 debug!(
                     "Cleared scratchpad for fresh objective: {:?}",
                     scratchpad_path
+                );
+            }
+        }
+    } // end `if !resume`
+
+    // Plan 2026-08-13-003 U4: `--continue` bootstrap does
+    // NOT enter the `if !resume` block above (it does not
+    // regenerate the events-file marker or the candidate
+    // marker), but it still MUST persist the bootstrap
+    // event — `loop.resume` — to the trusted events file so
+    // `ralph diagnose`, replay, and audit tooling can read
+    // it. The history logger writes the same topic (see
+    // `default_start_topic` at line 1312).
+    if resume && manifest_recovery.is_none() {
+        match persist_starting_event_to_events_file(
+            &ctx,
+            ralph_proto::LOOP_RESUME,
+            &prompt_content,
+        ) {
+            Ok(()) => {
+                debug!(
+                    topic = %ralph_proto::LOOP_RESUME,
+                    "U4: persisted resume bootstrap event to trusted events file"
+                );
+            }
+            Err(e) => {
+                warn!(
+                    error = %e,
+                    topic = %ralph_proto::LOOP_RESUME,
+                    "U4: failed to persist resume bootstrap event to trusted events file"
                 );
             }
         }
@@ -1301,8 +1342,19 @@ pub(super) async fn run_loop_impl_inner(
     // Raw output parsing, orphan events, and terminate events all go here.
     let mut event_logger = EventLogger::history_from_context(&ctx);
 
-    // Log initial event (use configured starting_event or default to task.start/task.resume)
-    let default_start_topic = if resume { "task.resume" } else { "task.start" };
+    // Log initial event (use configured starting_event or
+    // default to task.start/loop.resume). Plan
+    // 2026-08-13-003 U4: `--continue` bootstrap records
+    // `loop.resume`, NOT `task.resume` — the orchestrator's
+    // history must not mislabel the continue startup as a
+    // per-hat recovery event. `task.resume` is reserved for
+    // runtime recovery signals (rejection / phase violation /
+    // handoff precheck etc.), not loop bootstrap.
+    let default_start_topic = if resume {
+        ralph_proto::LOOP_RESUME
+    } else {
+        "task.start"
+    };
     let start_topic = config
         .event_loop
         .starting_event

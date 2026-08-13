@@ -137,7 +137,7 @@ Previous work completed on feature B.
 }
 
 #[test]
-fn test_continue_publishes_task_resume_event() -> Result<()> {
+fn test_continue_publishes_loop_resume_event() -> Result<()> {
     let temp_dir = TempDir::new()?;
     let temp_path = temp_dir.path();
 
@@ -155,6 +155,12 @@ cli:
 
 core:
   scratchpad: ".ralph/agent/scratchpad.md"
+
+memories:
+  enabled: false
+
+tasks:
+  enabled: false
 "#;
 
     fs::write(temp_path.join("ralph.yml"), config_content)?;
@@ -184,6 +190,8 @@ This is a continued session.
 ";
     fs::write(agent_dir.join("scratchpad.md"), scratchpad_content)?;
 
+    let marker_path = ralph_dir.join("current-events");
+
     // Run ralph run --continue
     let _output = common::ralph_bin()
         .arg("run")
@@ -193,22 +201,32 @@ This is a continued session.
         .current_dir(temp_path)
         .output()?;
 
-    // Check that the event log contains task.resume instead of task.start
-    // Events are now stored in .ralph/ directory, read path from marker file
+    // Plan 2026-08-13-003 U4: the marker / events file
+    // MUST exist and contain `loop.resume` — fail the test
+    // loudly instead of silently skipping the assertion.
     let marker_path = ralph_dir.join("current-events");
-    if marker_path.exists() {
-        let events_path = fs::read_to_string(&marker_path)?.trim().to_string();
-        let events_file = temp_path.join(&events_path);
-        if events_file.exists() {
-            let events_content = fs::read_to_string(&events_file)?;
-
-            // Should contain task.resume event
-            assert!(events_content.contains("task.resume"));
-
-            // Should NOT contain task.start event (since this is continue mode)
-            assert!(!events_content.contains("task.start"));
-        }
-    }
+    assert!(
+        marker_path.exists(),
+        "current-events marker MUST exist after `ralph run --continue`"
+    );
+    let events_path = fs::read_to_string(&marker_path)?.trim().to_string();
+    let events_file = temp_path.join(&events_path);
+    assert!(
+        events_file.exists(),
+        "events file referenced by marker MUST exist (path={})",
+        events_file.display()
+    );
+    let events_content = fs::read_to_string(&events_file)?;
+    assert!(
+        events_content.contains(r#""topic":"loop.resume""#)
+            || events_content.contains(r#""topic": "loop.resume""#),
+        "events MUST contain `loop.resume` (continuation bootstrap), was: {events_content}"
+    );
+    assert!(
+        !events_content.contains("\"topic\":\"task.resume\"")
+            && !events_content.contains("\"topic\": \"task.resume\""),
+        "events MUST NOT contain `task.resume` bootstrap (continuation, not runtime recovery)"
+    );
 
     Ok(())
 }
@@ -282,9 +300,12 @@ core:
         String::new()
     };
 
-    // Verify the difference:
-    // - run should have task.start
-    // - continue should ADD task.resume to the same file
+    // Verify the difference (Plan 2026-08-13-003 U4):
+    // - run should produce `task.start`
+    // - continue should ADD `loop.resume` to the same file
+    //   (NOT `task.resume` — that is the runtime recovery
+    //   topic, reserved for recovery dispatch and never
+    //   emitted as a continuation bootstrap).
     if !run_events.is_empty() {
         assert!(
             run_events.contains("task.start"),
@@ -292,15 +313,14 @@ core:
         );
     }
 
-    // After continue, the file should contain both task.start (from run) and task.resume (from continue)
     if !continue_events.is_empty() {
         assert!(
             continue_events.contains("task.start"),
             "Events file should still contain task.start from the run"
         );
         assert!(
-            continue_events.contains("task.resume"),
-            "Events file should now also contain task.resume from the continue"
+            continue_events.contains("loop.resume"),
+            "Events file should now also contain loop.resume from the continue"
         );
     }
 
