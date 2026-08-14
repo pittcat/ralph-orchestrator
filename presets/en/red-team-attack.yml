@@ -277,6 +277,20 @@ event_loop:
               - {field: scope_status, eq: "resolved"}
               - {field: boundary_conflict, eq: true}
           message: "scope_status=resolved with boundary_conflict=true is not allowed; boundary conflict indicates a cross_check failure."
+        - id: redteam-scope-resolved-requires-proceed
+          topic: redteam.plan.resolved
+          when:
+            all:
+              - {field: scope_status, eq: "resolved"}
+              - {field: proceed, eq: false}
+          message: "scope_status=resolved requires proceed=true; unresolved scope must not activate attack-surface-mapper."
+        - id: redteam-scope-nonresolved-must-not-proceed
+          topic: redteam.plan.resolved
+          when:
+            all:
+              - {field: scope_status, ne: "resolved"}
+              - {field: proceed, eq: true}
+          message: "scope_status=ambiguous|blocked must not set proceed=true; emit redteam.failed instead."
         # 2026-08-08-004 review (fix-plan U1, A3) + 2026-08-10-002 plan
         # U3 (D5): runtime enforcement of the attack-surface-mapper
         # HARD GATE. The schema declares `predecessor_event` as a
@@ -367,8 +381,11 @@ hats:
 
       Read-only. Lock the target and write the lock artifact.
 
-      OPAC: `ralph-tools-opac` (auto-injected). Before emit:
-      `ralph tools skill load ralph-tools-emit` then `--policy-check` per emit skill §5.
+      OPAC: `ralph-tools-opac` (auto-injected). Before constructing any payload,
+      run `ralph tools skill load ralph-tools-emit` and follow its Policy-Check
+      feedback and §5 precheck. If policy-check rejects, use only visible
+      trigger/artifact values to repair the named field; never copy an example
+      or invent a business fact.
 
       ### Mission
       Lock the current branch, HEAD, and tree SHA. Write `.ralph/red-team/01-target-lock.md`.
@@ -416,7 +433,7 @@ hats:
 
       Read-only. Do NOT modify code or git history.
 
-      OPAC: `ralph-tools-opac`. Before emit: `ralph tools skill load ralph-tools-emit` then `--policy-check`.
+      OPAC: `ralph-tools-opac`. Before constructing any payload, run `ralph tools skill load ralph-tools-emit` and follow its Policy-Check feedback and §5 precheck. If policy-check rejects, use only visible trigger/artifact values to repair the named field; never copy an example or invent a business fact.
 
       ### Mission
       For each development plan, find the real implementation commits from Git history.
@@ -424,7 +441,7 @@ hats:
       Write artifacts, then emit exactly one event.
 
       ### Steps
-      1. Read `redteam.target.locked` payload. Verify `lock_status == locked` and
+      1. Read `redteam.target.locked` payload. Take `lock_file_path` from the trigger, run `test -f "$lock_file_path"`, and read the lock artifact before accepting its contents. Verify `lock_status == locked` and
          `git rev-parse HEAD` == `target_head`, `git rev-parse HEAD^{tree}` == `target_tree`.
          If `lock_status != locked`, read the target-locker failure artifact,
          write `.ralph/red-team/failures/plan-resolver.md`, and emit
@@ -476,18 +493,29 @@ hats:
          - Full-current patch: `git diff --binary --full-index --find-renames --find-copies <scope_base_sha>..<locked-head>`
            → `.ralph/red-team/patches/full-current.patch`
          - Scope manifest: write `.ralph/red-team/scope-manifest.json`
-           (multi-plan-scope/v1 schema, byte-stable canonical JSON)
+           (multi-plan-scope/v1 schema, byte-stable canonical JSON).
+           Compute `scope_digest` as SHA-256 of canonical JSON bytes after
+           excluding the `scope_digest` field itself; recompute it before every
+           emit attempt and reject if the manifest or digest changes.
       4. Classify each hunk: PLAN_OWNED / SHARED_BY_MULTIPLE_PLANS / OVERRIDDEN_LATER / UNATTRIBUTED / RELATED_NEIGHBOR_CHANGE.
       5. Build claim traceability matrix: plan claim → commit → patch hunk → current code → callers → tests → implementation status.
       6. Write `.ralph/red-team/02-plan-resolution.md` and `.ralph/red-team/03-patch-reconstruction.md`.
-      7. Gate check:
-         - scope_base_sha is a valid 40-char SHA (not `<global-baseline>`, `TBD`, `<pending>`, or any placeholder)
-           → emit `redteam.plan.resolved`
-         - scope_base_sha is missing, ambiguous, or a placeholder
+      7. Gate check: emit `redteam.plan.resolved` only when ALL are true:
+         `scope_status == resolved`, `proceed == true`,
+         `overall_confidence >= 90`, `critical_unknown_count == 0`,
+         `resolved_count >= 1`, `coverage >= 90`,
+         `critical_traceability >= 90`, `boundary_conflict == false`,
+         `boundary_consistency == true`, and `scope_base_sha` is a real
+         40-char Git SHA (not `<global-baseline>`, `TBD`, `<pending>`, or any
+         placeholder). Otherwise, write the failure artifact and emit
+         `redteam.failed` with a stable reason and `failure_artifact_path`.
+         If any required value is missing, ambiguous, or a placeholder,
            → write `.ralph/red-team/failures/plan-resolver.md` and emit
              `redteam.failed` with `failed_stage: plan-resolver`, a stable
              `reason`, and `failure_artifact_path`.
-      8. Precheck then emit. Single business event only.
+      8. Run the exact scope-topic policy-check, inspect its structured
+         feedback, then emit one business event only. `--unsafe-no-policy-check`
+         cannot bypass this scope handoff guard.
 
   attack-surface-mapper:
     name: "Attack Surface Mapper"
@@ -504,7 +532,7 @@ hats:
 
       Read-only on code. Do NOT modify anything.
 
-      OPAC: `ralph-tools-opac`. Before emit: `ralph tools skill load ralph-tools-emit` then `--policy-check`.
+      OPAC: `ralph-tools-opac`. Before constructing any payload, run `ralph tools skill load ralph-tools-emit` and follow its Policy-Check feedback and §5 precheck. If policy-check rejects, use only visible trigger/artifact values to repair the named field; never copy an example or invent a business fact.
 
       ### Template (must materialize first)
       ```bash
@@ -527,12 +555,15 @@ hats:
       - `overall_confidence >= 90` — if < 90, stop immediately and do NOT emit attack.mapped.
       - `coverage >= 90` — if < 90, stop immediately and do NOT emit attack.mapped.
       - `boundary_conflict == false` — if true, stop immediately and do NOT emit attack.mapped.
+      - `proceed == true` — if false or missing, stop immediately and do NOT emit attack.mapped.
+      - `boundary_consistency == true` — if false, stop immediately and do NOT emit attack.mapped.
+      - `critical_traceability >= 90` — if lower, stop immediately and do NOT emit attack.mapped.
       When any gate fires, write `.ralph/red-team/failures/attack-surface-mapper.md`
       and emit `redteam.failed`; do not emit `redteam.attack.mapped`.
 
       ### Runtime anchor (mandatory)
       This prompt-text gate is also enforced at runtime by
-      `payload_consistency` rule `redteam-attack-mapped-requires-predecessor`
+      `payload_consistency` rule `redteam-attack-mapped-predecessor-must-be-resolved`
       and the schema-required `predecessor_event` field on
       `redteam.attack.mapped`. The rule requires
       `predecessor_event` to exist AND equal the literal
@@ -586,7 +617,7 @@ hats:
 
       Execute experiments. Save raw evidence. Do NOT modify tracked code.
 
-      OPAC: `ralph-tools-opac`. Before emit: `ralph tools skill load ralph-tools-emit` then `--policy-check`.
+      OPAC: `ralph-tools-opac`. Before constructing any payload, run `ralph tools skill load ralph-tools-emit` and follow its Policy-Check feedback and §5 precheck. If policy-check rejects, use only visible trigger/artifact values to repair the named field; never copy an example or invent a business fact.
 
       ### Mission
       Execute exactly one queued experiment from the experiment plan. Save raw
@@ -595,10 +626,11 @@ hats:
       evidence-gate decides whether to schedule another experiment.
 
       ### Steps
-      1. On `redteam.attack.mapped`, read the experiment plan and select its
+      1. On `redteam.attack.mapped`, read `attack_surface_path` and `experiment_plan_path` from the trigger, run `test -f` on both, read and validate both artifacts, then select the plan's
          first unexecuted RTE identifier. On `redteam.experiment.next`, read
-         `next_experiment_id` and execute exactly that identifier; do not skip
-         or invent queue entries.
+         `next_experiment_id` and `evidence_board_path`, run `test -f` on the
+         board, read it to confirm the queue state, and execute exactly that
+         identifier; do not skip or invent queue entries.
       2. Verify HEAD/tree match lock (`git rev-parse HEAD`, `git rev-parse HEAD^{tree}`).
          If mismatch, write `.ralph/red-team/failures/experiment-runner.md` and
          emit `redteam.failed` with `failed_stage: experiment-runner`.
@@ -668,7 +700,7 @@ hats:
       Independent review. Do NOT accept experiment-runner's subjective conclusions.
       Read only raw evidence.
 
-      OPAC: `ralph-tools-opac`. Before emit: `ralph tools skill load ralph-tools-emit` then `--policy-check`.
+      OPAC: `ralph-tools-opac`. Before constructing any payload, run `ralph tools skill load ralph-tools-emit` and follow its Policy-Check feedback and §5 precheck. If policy-check rejects, use only visible trigger/artifact values to repair the named field; never copy an example or invent a business fact.
 
       ### Mission
       Independently score the current experiment against binary execution gates
@@ -705,8 +737,10 @@ hats:
       - Impact Certainty: direct modules clear (25) + state propagation clear (25) + lifecycle/config clear (20) + compatibility clear (15) + unaffected boundary clear (15)
 
       ### Steps
-      1. Read `redteam.experiment.done` payload. Read the experiment artifact,
-         evidence manifest, and ALL raw evidence files. Verify the manifest's
+      1. Read `redteam.experiment.done` payload. Run `test -f` on
+         `experiment_file_path`, `evidence_manifest_path`, and every entry in
+         `evidence_paths`; then read the experiment artifact, evidence manifest,
+         and ALL raw evidence files. Verify the manifest's
          `ledger_sha256` against the actual ledger/state artifact.
       2. Verify binary execution gates. If any false:
          - Any false gate → append this RTE to `.ralph/red-team/07-retry-board.md`
@@ -749,7 +783,7 @@ hats:
 
       Continue hands-on verification. Do NOT rely on evidence-gate's preliminary impact score.
 
-      OPAC: `ralph-tools-opac`. Before emit: `ralph tools skill load ralph-tools-emit` then `--policy-check`.
+      OPAC: `ralph-tools-opac`. Before constructing any payload, run `ralph tools skill load ralph-tools-emit` and follow its Policy-Check feedback and §5 precheck. If policy-check rejects, use only visible trigger/artifact values to repair the named field; never copy an example or invent a business fact.
 
       ### Template (must materialize first)
       ```bash
@@ -843,7 +877,7 @@ hats:
       Independent audit. Do NOT reinterpret low-score experiments.
       Do NOT add rejected items back to the plan.
 
-      OPAC: `ralph-tools-opac`. Before emit: `ralph tools skill load ralph-tools-emit` then `--policy-check`.
+      OPAC: `ralph-tools-opac`. Before constructing any payload, run `ralph tools skill load ralph-tools-emit` and follow its Policy-Check feedback and §5 precheck. If policy-check rejects, use only visible trigger/artifact values to repair the named field; never copy an example or invent a business fact.
 
       ### Mission
       Audit the final `PLAN.md` and all supporting artifacts.
@@ -876,8 +910,11 @@ hats:
       - No scope expansion without user confirmation
 
       ### Steps
-      1. Read trigger payload.
-         - On `redteam.plan.ready`: read `plan_file_path`, `finding_count`, `impact_file_path`.
+      1. Read trigger payload. Take each declared path from the trigger, run
+         `test -f` and read the file before accepting its contents.
+         - On `redteam.evidence.gated`: verify and read `evidence_board_path`.
+         - On `redteam.plan.ready`: verify and read `plan_file_path` and
+           `impact_file_path`; `finding_count` must match the artifacts.
       2. Read all available artifacts: target-lock, plan-resolution, patch-reconstruction,
          attack-surface, experiment-plan, experiments, evidence board, retry board,
          impact boundary, findings, PLAN.md (on plan.ready only).
@@ -907,7 +944,7 @@ hats:
 
       Write the final report and signal completion.
 
-      OPAC: `ralph-tools-opac`. Before emit: `ralph tools skill load ralph-tools-emit` then `--policy-check`.
+      OPAC: `ralph-tools-opac`. Before constructing any payload, run `ralph tools skill load ralph-tools-emit` and follow its Policy-Check feedback and §5 precheck. If policy-check rejects, use only visible trigger/artifact values to repair the named field; never copy an example or invent a business fact.
 
       ### Template (must materialize first)
       ```bash
@@ -925,6 +962,8 @@ hats:
 
       ### Steps (on `redteam.reviewed`)
       1. Read `redteam.reviewed` payload (`verdict`, `review_file_path`, `plan_file_path`).
+         Run `test -f` on both paths and read both artifacts; the review file is
+         required evidence for the final report, not just a path to copy.
       2. Verify HEAD/tree match lock.
       3. Verify `plan_file_path` exists and is readable.
       4. Write `.ralph/red-team/REPORT.md` from report template.
@@ -951,7 +990,8 @@ hats:
 
       ### Steps (on `redteam.failed`)
       1. Read `redteam.failed` payload (`failed_stage`, `reason`,
-         `failure_artifact_path`).
+         `failure_artifact_path`). Run `test -f` on `failure_artifact_path` and
+         read it before writing the FAIL report.
          Compare `failed_stage` with the triggering producer hat shown in the
          event context; if they differ, record the mismatch as a report
          integrity issue and keep `success: false`.

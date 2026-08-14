@@ -49,9 +49,10 @@ schemas:
         source: Count of plan paths from prompt file.
         fill_rule: Positive integer.
       lock_file_path:
-        meaning: Path to the target-lock artifact (`.ralph/red-team/01-target-lock.md`).
+        meaning: Path to the target-lock artifact under `.ralph/`.
         source: File actually written this activation.
-        fill_rule: Real readable path; agent must verify `test -f` before emit.
+        fill_rule: Real readable `.ralph/` artifact path; run `test -f` before emit.
+        examples: [".ralph/<plan>/<unit>/<target-lock>.md"]
       lock_status:
         meaning: Whether the target was successfully locked (no in-progress git operations, clean tree).
         source: Locker writes from git status checks.
@@ -82,9 +83,10 @@ schemas:
         source: Producer's failure analysis written to the failure artifact.
         fill_rule: Non-empty stable token; do not use prose or claim a qualified finding.
       failure_artifact_path:
-        meaning: Path to the failure artifact containing full evidence and follow-up guidance.
+        meaning: Path to the failure artifact under `.ralph/` containing full evidence and follow-up guidance.
         source: File written by the producer before the failure emit.
-        fill_rule: Real readable path under `.ralph/red-team/`; verify `test -f` before emit.
+        fill_rule: Real readable `.ralph/` artifact path; run `test -f` before emit.
+        examples: [".ralph/<plan>/<unit>/<failure>.md"]
 
   # plan-resolver -> per-plan commit resolution result. attack-surface-mapper
   # reads the resolution artifact to build attack surfaces.
@@ -104,6 +106,7 @@ schemas:
       - scope_manifest_path
       - scope_digest
       - scope_status
+      - proceed
       - overall_confidence
       - critical_unknown_count
       - scope_base_sha
@@ -130,14 +133,15 @@ schemas:
         source: Count from `.ralph/red-team/02-plan-resolution.md`.
         fill_rule: Integer >= 0.
       resolution_file_path:
-        meaning: Path to the plan-resolution artifact.
-        source: File actually written this activation.
-        fill_rule: Real readable path; agent must verify `test -f` before emit.
+        meaning: Path to the plan-resolution artifact under `.ralph/`.
+        source: File actually written by plan-resolver during this activation.
+        fill_rule: Real readable `.ralph/` artifact path; run `test -f` before emit.
+        examples: [".ralph/<plan>/<unit>/<plan-resolution>.md"]
       scope_manifest_path:
-        meaning: Repo-relative path to the multi-plan scope manifest JSON artifact.
-        source: Plan-resolver writes `.ralph/red-team/scope-manifest.json`.
-        fill_rule: Must be under `.ralph/red-team/`; real readable path only; reject emit if file is missing or digest mismatches.
-        examples: [".ralph/red-team/scope-manifest.json"]
+        meaning: Repo-relative path to the multi-plan scope manifest JSON artifact under `.ralph/`.
+        source: Plan-resolver writes the scope manifest during this activation.
+        fill_rule: Real readable `.ralph/` artifact path; run `test -f` and reject emit if missing or digest mismatches.
+        examples: [".ralph/<plan>/<unit>/<scope-manifest>.json"]
       scope_digest:
         meaning: SHA-256 hex digest of canonical scope manifest bytes (64 hex chars).
         source: Plan-resolver computes from scope-manifest.json canonical JSON.
@@ -146,6 +150,10 @@ schemas:
         meaning: Scope resolution decision from plan-resolver analysis.
         source: Plan-resolver resolves via plan candidates, commit attribution, and hunk classification.
         fill_rule: One of `resolved | ambiguous | blocked`; only `resolved` allows proceed to attack surface.
+      proceed:
+        meaning: Whether the resolved scope is allowed to activate attack-surface-mapper.
+        source: Plan-resolver's threshold decision from the current scope analysis.
+        fill_rule: Boolean; true only when scope_status=resolved, overall_confidence>=90, critical_unknown_count==0, resolved_count>=1, coverage>=90, critical_traceability>=90, boundary_conflict=false, and boundary_consistency=true; otherwise false and emit redteam.failed.
       overall_confidence:
         meaning: Weighted overall confidence score (0/85/90/100) for the scope resolution.
         source: "Plan-resolver computes per D7: identity 15% + base 15% + commit_attribution 20% + hunk_attribution 25% + interleaved 10% + override_revert 5% + cross_check 10%."
@@ -158,12 +166,12 @@ schemas:
         meaning: Git SHA of the scope base commit (lower bound of scoped diff); MUST NOT be a placeholder.
         source: Plan-resolver resolves via explicit input or fixed anchor/parent algorithm (D5).
         fill_rule: 40-char hex SHA; must not be `<global-baseline>`, `TBD`, `<pending>`, or any other placeholder string.
-        examples: ["abc1234def5678..."]
+        examples: ["<40-hex-git-sha>"]
       resolved_patch_path:
-        meaning: Repo-relative path to the resolved scoped patch artifact.
-        source: Plan-resolver writes after combining all plan-owned diffs.
-        fill_rule: Must be under `.ralph/red-team/`; real readable path only.
-        examples: [".ralph/red-team/patches/scoped.patch"]
+        meaning: Repo-relative path to the resolved scoped patch artifact under `.ralph/`.
+        source: Plan-resolver writes the patch after combining all plan-owned diffs.
+        fill_rule: Real readable `.ralph/` artifact path; run `test -f` before emit and reject if missing.
+        examples: [".ralph/<plan>/<unit>/<resolved-patch>.patch"]
       patch_digest:
         meaning: SHA-256 hex digest of the resolved patch file bytes (64 hex chars).
         source: Plan-resolver computes from resolved_patch_path.
@@ -217,16 +225,18 @@ schemas:
         source: Count from `.ralph/red-team/05-experiment-plan.md`.
         fill_rule: Integer >= 0.
       attack_surface_path:
-        meaning: Path to attack-surface artifact.
-        source: File actually written this activation.
-        fill_rule: Real readable path.
+        meaning: Path to the attack-surface artifact under `.ralph/`.
+        source: File actually written by attack-surface-mapper during this activation.
+        fill_rule: Real readable `.ralph/` artifact path; run `test -f` before emit.
+        examples: [".ralph/<plan>/<unit>/<attack-surface>.md"]
       experiment_plan_path:
-        meaning: Path to experiment-plan artifact.
-        source: File actually written this activation.
-        fill_rule: Real readable path.
+        meaning: Path to the experiment-plan artifact under `.ralph/`.
+        source: File actually written by attack-surface-mapper during this activation.
+        fill_rule: Real readable `.ralph/` artifact path; run `test -f` before emit.
+        examples: [".ralph/<plan>/<unit>/<experiment-plan>.md"]
       predecessor_event:
         meaning: Topic name of the prior scope-resolution event this emit binds to.
-        source: attack-surface-mapper reads from the most recent accepted `redteam.plan.resolved` in the events file.
+        source: The current trigger context's source topic; the emitter fills the literal after verifying the accepted `redteam.plan.resolved` trigger.
         fill_rule: Literal string `redteam.plan.resolved`. Missing field is rejected by `required_fields`; any value other than `redteam.plan.resolved` is rejected by the runtime payload_consistency rule `redteam-attack-mapped-predecessor-must-be-resolved`.
 
   # experiment-runner -> one experiment completed with raw evidence saved.
@@ -257,15 +267,18 @@ schemas:
       evidence_paths:
         meaning: Paths to raw evidence files (stdout, stderr, state dumps, screenshots).
         source: Runner writes from actual files saved under `.ralph/red-team/evidence/RTE-<NNN>/`.
-        fill_rule: Array of real readable paths; agent must verify each exists.
+        fill_rule: Array of real readable `.ralph/` artifact paths; run `test -f` for every entry before emit.
+        examples: [[".ralph/<plan>/<unit>/<evidence>.log"]]
       experiment_file_path:
-        meaning: Path to the experiment artifact (`.ralph/red-team/experiments/RTE-<NNN>.md`).
-        source: File actually written this activation.
-        fill_rule: Real readable path.
+        meaning: Path to the experiment artifact under `.ralph/`.
+        source: File actually written by experiment-runner during this activation.
+        fill_rule: Real readable `.ralph/` artifact path; run `test -f` before emit.
+        examples: [".ralph/<plan>/<unit>/<experiment>.md"]
       evidence_manifest_path:
-        meaning: Path to the machine-readable evidence manifest for this experiment.
-        source: Runner writes `.ralph/red-team/evidence/RTE-<NNN>/evidence-manifest.json` after hashing every mandatory evidence item.
-        fill_rule: Real readable path; the manifest must enumerate every mandatory evidence item and its SHA-256.
+        meaning: Path to the machine-readable evidence manifest under `.ralph/`.
+        source: Runner writes the manifest after hashing every mandatory evidence item.
+        fill_rule: Real readable `.ralph/` artifact path; run `test -f` before emit; the manifest must enumerate every mandatory evidence item and its SHA-256.
+        examples: [".ralph/<plan>/<unit>/<evidence-manifest>.json"]
       ledger_sha256:
         meaning: SHA-256 of the ledger/state artifact required by this experiment.
         source: Runner reads the hash from the evidence manifest after computing it from the actual target file.
@@ -306,7 +319,8 @@ schemas:
       evidence_board_path:
         meaning: Durable queue and evidence-board artifact consumed by the next runner activation.
         source: Evidence-gate writes `.ralph/red-team/07-evidence-board.md` before emitting.
-        fill_rule: Real readable path under `.ralph/red-team/`; retain for reporter and independent review.
+        fill_rule: Real readable `.ralph/` artifact path; run `test -f` and read it before the next runner activation; retain for reporter and independent review.
+        examples: [".ralph/<plan>/<unit>/<evidence-board>.md"]
 
   # evidence-gate -> all experiments accounted for and at least one qualified.
   # impact-boundary reads the aggregate board to bound impact.
@@ -358,7 +372,8 @@ schemas:
       evidence_board_path:
         meaning: Aggregate evidence board consumed by impact-boundary and independent-reviewer.
         source: Evidence-gate writes `.ralph/red-team/07-evidence-board.md` before final emit.
-        fill_rule: Real readable path under `.ralph/red-team/`; must include accepted and rejected experiments.
+        fill_rule: Real readable `.ralph/` artifact path; run `test -f` and read it before impact analysis; must include accepted and rejected experiments.
+        examples: [".ralph/<plan>/<unit>/<evidence-board>.md"]
 
   # impact-boundary -> all findings processed and PLAN.md written.
   # independent-reviewer picks this up to run the final audit.
@@ -370,17 +385,19 @@ schemas:
     payload: json_object
     field_docs:
       plan_file_path:
-        meaning: Path to the completed repair plan artifact (`.ralph/red-team/PLAN.md`).
-        source: File actually written this activation.
-        fill_rule: Real readable path; agent must verify `test -f` before emit.
+        meaning: Path to the completed repair-plan artifact under `.ralph/`.
+        source: File actually written by impact-boundary during this activation.
+        fill_rule: Real readable `.ralph/` artifact path; run `test -f` before emit.
+        examples: [".ralph/<plan>/<unit>/<repair-plan>.md"]
       finding_count:
         meaning: Number of formal findings (RTF-*) included in the plan.
         source: Count from `.ralph/red-team/findings/`.
         fill_rule: Integer >= 0.
       impact_file_path:
-        meaning: Path to impact boundary artifact (`.ralph/red-team/08-impact-boundary.md`).
-        source: File actually written this activation.
-        fill_rule: Real readable path.
+        meaning: Path to the impact-boundary artifact under `.ralph/`.
+        source: File actually written by impact-boundary during this activation.
+        fill_rule: Real readable `.ralph/` artifact path; run `test -f` before emit.
+        examples: [".ralph/<plan>/<unit>/<impact-boundary>.md"]
 
   # independent-reviewer -> final review complete. reporter reads review
   # artifact to write REPORT.md and emit completion.
@@ -396,13 +413,15 @@ schemas:
         source: Reviewer writes from audit checklist.
         fill_rule: One of `PLAN_READY`, `PLAN_REJECTED`.
       review_file_path:
-        meaning: Path to independent review artifact (`.ralph/red-team/10-independent-review.md`).
-        source: File actually written this activation.
-        fill_rule: Real readable path.
+        meaning: Path to the independent-review artifact under `.ralph/`.
+        source: File actually written by independent-reviewer during this activation.
+        fill_rule: Real readable `.ralph/` artifact path; run `test -f` before emit.
+        examples: [".ralph/<plan>/<unit>/<independent-review>.md"]
       plan_file_path:
-        meaning: Path to repair plan artifact (`.ralph/red-team/PLAN.md`).
-        source: File actually written this activation (by repair-planner, verified by reviewer).
-        fill_rule: Real readable path.
+        meaning: Path to the repair-plan artifact under `.ralph/`.
+        source: File written by impact-boundary and verified by independent-reviewer.
+        fill_rule: Real readable `.ralph/` artifact path; run `test -f` before emit.
+        examples: [".ralph/<plan>/<unit>/<repair-plan>.md"]
 
   # reporter -> sole completion token for red-team-attack.
   redteam.complete:
@@ -418,14 +437,17 @@ schemas:
         source: Reporter copies from `redteam.reviewed.verdict`.
         fill_rule: true only when verdict is `PLAN_READY`; otherwise false.
       report_path:
-        meaning: Path to operator-facing report (`.ralph/red-team/REPORT.md`).
-        source: File actually written this activation.
-        fill_rule: Real readable path; agent must verify `test -f` before emit.
+        meaning: Path to the operator-facing report artifact under `.ralph/`.
+        source: File actually written by reporter during this activation.
+        fill_rule: Real readable `.ralph/` artifact path; run `test -f` before emit.
+        examples: [".ralph/<plan>/<unit>/<report>.md"]
       plan_path:
-        meaning: Path to repair plan (`.ralph/red-team/PLAN.md`).
-        source: File actually written by repair-planner, verified by reporter.
-        fill_rule: Real readable path.
+        meaning: Path to the repair-plan artifact under `.ralph/`; it may be empty on the failure branch.
+        source: Reporter reads the repair plan on success, or the failure artifact on failure.
+        fill_rule: When success=true, use the readable repair-plan artifact path and verify `test -f`; when success=false, use an empty string. Never invent a path.
+        examples: [".ralph/<plan>/<unit>/<repair-plan>.md", ""]
       questions_path:
-        meaning: Path to questions file (`.ralph/red-team/QUESTIONS.md`).
-        source: File actually written this activation (may be empty if no questions).
-        fill_rule: Real readable path.
+        meaning: Path to the questions artifact under `.ralph/`, or an empty string when no questions exist.
+        source: Reporter writes the questions artifact during this activation.
+        fill_rule: When non-empty, use a real readable `.ralph/` artifact path and run `test -f`; otherwise use an empty string.
+        examples: [".ralph/<plan>/<unit>/<questions>.md", ""]

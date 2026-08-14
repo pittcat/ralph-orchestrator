@@ -60,6 +60,7 @@ fn write_redteam_scope_fixture(root: &std::path::Path, manifest_coverage: u64) -
         "scope_manifest_path": ".ralph/red-team/scope-manifest.json",
         "scope_digest": manifest_digest,
         "scope_status": "resolved",
+        "proceed": true,
         "overall_confidence": 100,
         "critical_unknown_count": 0,
         "scope_base_sha": "abc1234def5678901234567890abcdef12345678",
