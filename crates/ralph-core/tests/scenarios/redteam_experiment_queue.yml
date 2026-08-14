@@ -1,0 +1,90 @@
+# preset topology 回归：evidence-gate 必须把多个独立实验串成显式队列。
+
+name: redteam_experiment_queue
+description: evidence gate 记录第一个实验后继续调度第二个实验，最后才汇总
+
+config:
+  prompt_file: PROMPT.md
+  max_iterations: 8
+  hats:
+    experiment-runner:
+      subscribes_to:
+        - redteam.attack.mapped
+        - redteam.experiment.next
+      publishes:
+        - redteam.experiment.done
+    evidence-gate:
+      subscribes_to:
+        - redteam.experiment.done
+      publishes:
+        - redteam.experiment.next
+        - redteam.evidence.gated
+    reporter:
+      subscribes_to:
+        - redteam.evidence.gated
+      publishes:
+        - redteam.complete
+  event_loop:
+    execution_mode: isolated
+    starting_event: redteam.attack.mapped
+    completion_promise: redteam.complete
+    event_policy:
+      enabled: true
+      mode: enforce
+      on_violation: reject_with_resume
+      schemas:
+        redteam.attack.mapped:
+          required_fields: [experiment_count]
+        redteam.experiment.done:
+          required_fields: [experiment_id]
+        redteam.experiment.next:
+          required_fields: [next_experiment_id, remaining_count]
+        redteam.evidence.gated:
+          required_fields: [qualified_experiment_count]
+        redteam.complete:
+          required_fields: [success]
+
+mock_responses:
+  - hat: experiment-runner
+    text: |
+      <event topic="redteam.experiment.done">
+      {"experiment_id":"RTE-001"}
+      </event>
+  - hat: evidence-gate
+    text: |
+      <event topic="redteam.experiment.next">
+      {"next_experiment_id":"RTE-002","remaining_count":1}
+      </event>
+  - hat: experiment-runner
+    text: |
+      <event topic="redteam.experiment.done">
+      {"experiment_id":"RTE-002"}
+      </event>
+  - hat: evidence-gate
+    text: |
+      <event topic="redteam.evidence.gated">
+      {"qualified_experiment_count":2}
+      </event>
+  - hat: reporter
+    text: |
+      <event topic="redteam.complete">
+      {"success":true}
+      </event>
+
+expected:
+  iterations: 5
+  events:
+    - topic: redteam.experiment.done
+    - topic: redteam.experiment.next
+    - topic: redteam.experiment.done
+    - topic: redteam.evidence.gated
+    - topic: redteam.complete
+  completion: true
+  payload_matches:
+    - topic: redteam.experiment.next
+      fields:
+        next_experiment_id: RTE-002
+        remaining_count: 1
+    - topic: redteam.evidence.gated
+      fields:
+        qualified_experiment_count: 2

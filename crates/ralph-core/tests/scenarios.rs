@@ -4723,6 +4723,9 @@ fn test_retained_scenarios_pipeline_or_generic_only() {
         // red-team failure sink handoff fixture validates the real runtime
         // reporter path.
         "tests/scenarios/redteam_failed_",
+        // red-team experiment queue fixture validates the explicit serial
+        // continuation edge between evidence-gate and experiment-runner.
+        "tests/scenarios/redteam_experiment_queue",
         // 2026-08-08-004 plan U2: merge-batch boundary manifest routing
         // (abstract fixture with merge-batch hat chain; schema validation via unit/CLI tests)
         "tests/scenarios/merge_batch_boundary",
@@ -4985,6 +4988,14 @@ fn test_redteam_scope_unknown_hunk_blocks_attack() {
 #[test]
 fn test_redteam_failed_reaches_reporter() {
     let yaml = load_scenario("tests/scenarios/redteam_failed_reporter.yml");
+    run_workflow_guard_scenario(yaml);
+}
+
+/// The red-team evidence gate must record one experiment and explicitly route
+/// the next queued experiment before it emits the aggregate evidence handoff.
+#[test]
+fn test_redteam_experiment_queue_continues_before_aggregate_gate() {
+    let yaml = load_scenario("tests/scenarios/redteam_experiment_queue.yml");
     run_workflow_guard_scenario(yaml);
 }
 

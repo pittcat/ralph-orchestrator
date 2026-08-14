@@ -64,6 +64,8 @@ mandatory_evidence:
   - state_before
   - state_after
   - exit_codes
+  - evidence_manifest
+  - ledger_sha256
 
 ## Cleanup
 cleanup_commands: []
@@ -76,3 +78,5 @@ results:
   cleanup_verified: false
   tracked_tree_clean: false
   evidence_paths: []
+  evidence_manifest_path: ""
+  ledger_sha256: ""

@@ -5,7 +5,7 @@
 # at compile time. Edit ONLY this file when changing payload contract
 # requirements for any hat below.
 #
-# Topic coverage (8 hats):
+# Topic coverage (8 declared hats plus the evidence queue handoff):
 #   target-locker       -> redteam.target.locked
 #   plan-resolver       -> redteam.plan.resolved
 #   attack-surface-mapper -> redteam.attack.mapped
@@ -17,8 +17,9 @@
 #   producer hats       -> redteam.failed -> reporter
 #   target-locker failure is relayed by plan-resolver after required target.locked.
 #
-# Failure routing is intentionally terminal for this run. A failure artifact
-# records the operator-approved follow-up; the preset does not auto-retry.
+# Evidence-gate failures are recorded and the queue continues with independent
+# experiments. Producer failures (tree mutation, missing target, or broken
+# artifact ownership) remain terminal for this run.
 #
 # Topic deny rules live in `presets/en/red-team-attack.yml`
 # `event_policy.topic_deny_rules` (not in this SSOT).
@@ -237,6 +238,8 @@ schemas:
       - attack_reproduced
       - evidence_paths
       - experiment_file_path
+      - evidence_manifest_path
+      - ledger_sha256
     payload: json_object
     field_docs:
       experiment_id:
@@ -259,43 +262,103 @@ schemas:
         meaning: Path to the experiment artifact (`.ralph/red-team/experiments/RTE-<NNN>.md`).
         source: File actually written this activation.
         fill_rule: Real readable path.
+      evidence_manifest_path:
+        meaning: Path to the machine-readable evidence manifest for this experiment.
+        source: Runner writes `.ralph/red-team/evidence/RTE-<NNN>/evidence-manifest.json` after hashing every mandatory evidence item.
+        fill_rule: Real readable path; the manifest must enumerate every mandatory evidence item and its SHA-256.
+      ledger_sha256:
+        meaning: SHA-256 of the ledger/state artifact required by this experiment.
+        source: Runner reads the hash from the evidence manifest after computing it from the actual target file.
+        fill_rule: Exactly 64 lowercase hexadecimal characters; never infer it from a narrative, event log, or transition ID.
 
-  # evidence-gate -> experiment passed all thresholds. impact-boundary reads
-  # the evidence board to bound impact.
-  redteam.evidence.gated:
+  # evidence-gate -> request the next independent experiment. This explicit
+  # serial queue edge was missing from the previous preset.
+  redteam.experiment.next:
     required_fields:
-      - experiment_id
-      - confidence
-      - evidence_coverage
-      - verifiability
-      - impact_certainty
+      - next_experiment_id
+      - completed_count
+      - remaining_count
+      - accepted_count
+      - rejected_count
       - evidence_board_path
     payload: json_object
     field_docs:
-      experiment_id:
-        meaning: Experiment that was scored.
-        source: Gate reads from trigger payload.
-        fill_rule: Must match trigger `experiment_id`.
-      confidence:
-        meaning: Confidence score (0-100).
-        source: Gate computes from raw evidence.
-        fill_rule: Integer 0-100; must be >= threshold (85 or 90 for P0/P1).
-      evidence_coverage:
-        meaning: Evidence coverage score (0-100).
-        source: Gate computes from mandatory evidence checklist.
-        fill_rule: Integer 0-100; must be >= threshold.
-      verifiability:
-        meaning: Verifiability score (0-100).
-        source: Gate computes from reproducibility analysis.
-        fill_rule: Integer 0-100; must be >= threshold (90).
-      impact_certainty:
-        meaning: Impact certainty score (0-100).
-        source: Gate computes from preliminary impact analysis.
-        fill_rule: Integer 0-100; must be >= threshold (85 or 90).
+      next_experiment_id:
+        meaning: The exact next unexecuted RTE identifier selected from the experiment plan.
+        source: Evidence-gate reads the queue and accepted/rejected records from the evidence board.
+        fill_rule: Existing RTE-NNN identifier; do not invent or skip an experiment.
+      completed_count:
+        meaning: Number of experiments with a recorded done or rejected result.
+        source: Evidence-gate counts durable queue records in the evidence board.
+        fill_rule: Non-negative integer; must increase monotonically across the queue.
+      remaining_count:
+        meaning: Number of planned experiments still not executed after the current result.
+        source: Evidence-gate computes from the experiment plan and durable result records.
+        fill_rule: Positive integer for this topic; when zero, emit redteam.evidence.gated or redteam.failed instead.
+      accepted_count:
+        meaning: Number of completed experiments that passed the evidence gate so far.
+        source: Evidence-gate counts qualified entries in the evidence board.
+        fill_rule: Non-negative integer; rejected experiments are not counted.
+      rejected_count:
+        meaning: Number of completed experiments that failed evidence qualification so far.
+        source: Evidence-gate counts rejected entries in the evidence board.
+        fill_rule: Non-negative integer; every rejection retains its reason and artifact path.
       evidence_board_path:
-        meaning: Path to evidence board artifact (`.ralph/red-team/07-evidence-board.md`).
-        source: File actually written this activation.
-        fill_rule: Real readable path.
+        meaning: Durable queue and evidence-board artifact consumed by the next runner activation.
+        source: Evidence-gate writes `.ralph/red-team/07-evidence-board.md` before emitting.
+        fill_rule: Real readable path under `.ralph/red-team/`; retain for reporter and independent review.
+
+  # evidence-gate -> all experiments accounted for and at least one qualified.
+  # impact-boundary reads the aggregate board to bound impact.
+  redteam.evidence.gated:
+    required_fields:
+      - qualified_experiment_ids
+      - qualified_experiment_count
+      - rejected_experiment_count
+      - total_experiment_count
+      - minimum_confidence
+      - minimum_evidence_coverage
+      - minimum_verifiability
+      - minimum_impact_certainty
+      - evidence_board_path
+    payload: json_object
+    field_docs:
+      qualified_experiment_ids:
+        meaning: Ordered identifiers of experiments that passed all binary gates and thresholds.
+        source: Evidence-gate reads accepted entries in the evidence board.
+        fill_rule: Non-empty array of existing RTE-NNN identifiers; rejected IDs must not appear.
+      qualified_experiment_count:
+        meaning: Number of qualified experiments available for impact analysis.
+        source: Length of qualified_experiment_ids.
+        fill_rule: Positive integer; must match the array length.
+      rejected_experiment_count:
+        meaning: Number of planned experiments rejected after evidence review.
+        source: Evidence-gate counts rejected entries in the evidence board.
+        fill_rule: Non-negative integer; rejected candidates remain in the report.
+      total_experiment_count:
+        meaning: Number of experiments in the declared experiment plan.
+        source: attack.mapped experiment_count and the completed evidence board.
+        fill_rule: Positive integer; must equal qualified plus rejected counts at finalization.
+      minimum_confidence:
+        meaning: Lowest confidence score among qualified experiments.
+        source: Evidence-gate computes from accepted experiment scores.
+        fill_rule: Integer 0-100 and at least the applicable threshold.
+      minimum_evidence_coverage:
+        meaning: Lowest evidence coverage score among qualified experiments.
+        source: Evidence-gate computes from accepted experiment scores.
+        fill_rule: Integer 0-100 and at least the applicable threshold.
+      minimum_verifiability:
+        meaning: Lowest verifiability score among qualified experiments.
+        source: Evidence-gate computes from accepted experiment scores.
+        fill_rule: Integer 0-100 and at least 90.
+      minimum_impact_certainty:
+        meaning: Lowest impact certainty score among qualified experiments.
+        source: Evidence-gate computes from accepted experiment scores.
+        fill_rule: Integer 0-100 and at least the applicable threshold.
+      evidence_board_path:
+        meaning: Aggregate evidence board consumed by impact-boundary and independent-reviewer.
+        source: Evidence-gate writes `.ralph/red-team/07-evidence-board.md` before final emit.
+        fill_rule: Real readable path under `.ralph/red-team/`; must include accepted and rejected experiments.
 
   # impact-boundary -> all findings processed and PLAN.md written.
   # independent-reviewer picks this up to run the final audit.

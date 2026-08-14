@@ -27,6 +27,7 @@
 #   .ralph/red-team/05-experiment-plan.md        — attack-surface-mapper writes
 #   .ralph/red-team/experiments/RTE-*.md         — experiment-runner writes
 #   .ralph/red-team/evidence/RTE-*/**            — experiment-runner writes
+#   .ralph/red-team/evidence/RTE-*/evidence-manifest.json — experiment-runner writes
 #   .ralph/red-team/repros/RTE-*/**              — experiment-runner writes
 #   .ralph/red-team/07-evidence-board.md         — evidence-gate writes
 #   .ralph/red-team/07-retry-board.md            — evidence-gate writes
@@ -56,9 +57,11 @@
 topic_format_whitelist:
   - redteam.complete
 
-# No `mechanism.flow`: flat hat-only linear chain. Routing comes from hat
-# triggers/publishes and isolated mode; all producer failures converge on the
-# reporter through `redteam.failed`.
+# No `mechanism.flow`: isolated single-chain with an explicit serial evidence
+# queue. Routing comes from hat triggers/publishes; evidence-gate records a
+# rejected experiment and emits `redteam.experiment.next` until the queue is
+# exhausted. Producer failures still converge on the reporter through
+# `redteam.failed`.
 
 tasks:
   enabled: false
@@ -99,6 +102,7 @@ event_loop:
       - "redteam.plan.resolved"
       - "redteam.attack.mapped"
       - "redteam.experiment.done"
+      - "redteam.experiment.next"
       - "redteam.evidence.gated"
       - "redteam.plan.ready"
       - "redteam.reviewed"
@@ -148,6 +152,15 @@ event_loop:
       - {hat_id: impact-boundary, topic: redteam.evidence.gated}
       - {hat_id: independent-reviewer, topic: redteam.evidence.gated}
       - {hat_id: reporter, topic: redteam.evidence.gated}
+      # evidence-gate owns experiment.next (serial queue continuation)
+      - {hat_id: target-locker, topic: redteam.experiment.next}
+      - {hat_id: plan-resolver, topic: redteam.experiment.next}
+      - {hat_id: attack-surface-mapper, topic: redteam.experiment.next}
+      - {hat_id: experiment-runner, topic: redteam.experiment.next}
+      - {hat_id: impact-boundary, topic: redteam.experiment.next}
+      - {hat_id: independent-reviewer, topic: redteam.experiment.next}
+      - {hat_id: reporter, topic: redteam.experiment.next}
+      - {hat_id: ralph, topic: redteam.experiment.next}
       # impact-boundary owns plan.ready
       - {hat_id: target-locker, topic: redteam.plan.ready}
       - {hat_id: plan-resolver, topic: redteam.plan.ready}
@@ -184,6 +197,43 @@ event_loop:
       - {hat_id: ralph, topic: redteam.plan.ready}
       - {hat_id: ralph, topic: redteam.reviewed}
       - {hat_id: ralph, topic: redteam.complete}
+    # Key-stage subjective gates. These are intentionally limited to the
+    # experiment queue, per-experiment evidence handoff, and final aggregate
+    # evidence handoff. Terminal failure/completion stay deterministic so an
+    # exhausted LLM gate cannot strand an already-written operator report.
+    precheck:
+      enabled: true
+      rules:
+        redteam.attack.mapped:
+          prompt:
+            - "Read the declared attack-surface and experiment-plan artifacts. Confirm every planned experiment has a falsifiable hypothesis, a control group, an attack group, a machine-checkable failure oracle, and a concrete mandatory-evidence list. Reject placeholders or an empty experiment queue."
+            - "Confirm the experiment plan is internally consistent with experiment_count and that each experiment has a unique RTE identifier. Do not infer missing experiments from prose."
+          on_fail:
+            target: attack-surface-mapper
+            retry_budget: 3
+            on_exhausted: "plan.blocked(reason=redteam_attack_map_precheck_failed)"
+            reason: "attack plan evidence was not independently sufficient"
+        redteam.experiment.done:
+          prompt:
+            - "Read evidence_manifest_path and experiment_file_path from the proposed payload. Confirm both files exist, are non-empty, and the manifest lists every mandatory evidence item for this RTE experiment."
+            - "Confirm the manifest contains a real ledger_sha256 entry with the target path, hash command, and run identifier; never accept a hash inferred from narrative text."
+            - "Confirm control and attack execution results are distinguishable and the raw evidence supports the proposed control_passed and attack_reproduced values."
+          on_fail:
+            target: experiment-runner
+            retry_budget: 3
+            on_exhausted: "plan.blocked(reason=redteam_experiment_evidence_precheck_failed)"
+            reason: "experiment evidence manifest or result claim failed review"
+        redteam.evidence.gated:
+          prompt:
+            - "Read the aggregate evidence board and every experiment result listed in it. Confirm all planned experiments are accounted for, including rejected experiments and their reasons."
+            - "Confirm qualified_experiment_count is derived only from experiments that passed every binary gate and threshold; rejected experiments must remain visible in the board and must not be silently counted as qualified."
+            - "Confirm the aggregate event carries readable evidence-board and result artifacts sufficient for impact-boundary to identify findings and rejected candidates."
+          on_fail:
+            target: evidence-gate
+            retry_budget: 3
+            on_exhausted: "plan.blocked(reason=redteam_evidence_aggregate_precheck_failed)"
+            reason: "aggregate evidence handoff failed independent review"
+
     # 2026-08-08-004 plan U1 (D7/D12): scope manifest payload_consistency
     # rules for redteam.plan.resolved. These enforce:
     # - resolved requires overall_confidence >= 90 AND critical_unknown_count == 0 AND resolved_count >= 1
@@ -242,6 +292,46 @@ event_loop:
             field: predecessor_event
             ne: "redteam.plan.resolved"
           message: "redteam.attack.mapped requires predecessor_event == 'redteam.plan.resolved'; runtime gate rejects attack.mapped emits whose predecessor is missing or has a different value."
+        - id: redteam-attack-mapped-requires-experiments
+          topic: redteam.attack.mapped
+          when:
+            field: experiment_count
+            eq: 0
+          message: "redteam.attack.mapped requires at least one planned experiment; zero experiments cannot produce a red-team result."
+        - id: redteam-experiment-next-requires-remaining
+          topic: redteam.experiment.next
+          when:
+            field: remaining_count
+            eq: 0
+          message: "redteam.experiment.next requires remaining_count > 0; emit redteam.evidence.gated when the queue is exhausted."
+        - id: redteam-evidence-gated-requires-qualified-experiment
+          topic: redteam.evidence.gated
+          when:
+            field: qualified_experiment_count
+            eq: 0
+          message: "redteam.evidence.gated requires at least one qualified experiment; use redteam.failed when none pass."
+        - id: redteam-evidence-gated-counts-consistent
+          topic: redteam.evidence.gated
+          when:
+            all:
+              - {field: qualified_experiment_count, gte: 0}
+              - {field: rejected_experiment_count, gte: 0}
+              - {field: total_experiment_count, eq: 0}
+          message: "redteam.evidence.gated cannot claim an aggregate result for an empty experiment set."
+        - id: redteam-complete-success-requires-plan
+          topic: redteam.complete
+          when:
+            all:
+              - {field: success, eq: true}
+              - {field: plan_path, eq: ""}
+          message: "redteam.complete success=true requires a readable repair plan path."
+        - id: redteam-complete-failure-must-not-claim-plan
+          topic: redteam.complete
+          when:
+            all:
+              - {field: success, eq: false}
+              - {field: plan_path, non_empty: true}
+          message: "redteam.complete success=false must not claim a repair plan path."
 
 cli:
   backend: "auto"
@@ -483,14 +573,14 @@ hats:
 
   experiment-runner:
     name: "Experiment Runner"
-    description: "Executes one experiment per activation, saves raw evidence, verifies tracked tree unchanged."
-    triggers: ["redteam.attack.mapped"]
+    description: "Executes one queued experiment per activation, saves hashed raw evidence, verifies tracked tree unchanged."
+    triggers: ["redteam.attack.mapped", "redteam.experiment.next"]
     publishes: ["redteam.experiment.done", "redteam.failed"]
     exempt_topics: ["redteam.experiment.done", "redteam.failed"]
     terminal_events: ["redteam.experiment.done", "redteam.failed"]
     event_filter:
       enabled: true
-      events: ["redteam.attack.mapped"]
+      events: ["redteam.attack.mapped", "redteam.experiment.next"]
     instructions: |
       ## EXPERIMENT RUNNER MODE
 
@@ -499,11 +589,16 @@ hats:
       OPAC: `ralph-tools-opac`. Before emit: `ralph tools skill load ralph-tools-emit` then `--policy-check`.
 
       ### Mission
-      Execute one experiment from the experiment plan. Save raw evidence.
-      Verify tracked tree unchanged. Emit `redteam.experiment.done`.
+      Execute exactly one queued experiment from the experiment plan. Save raw
+      evidence and a machine-readable evidence manifest with SHA-256 entries.
+      Verify tracked tree unchanged. Emit `redteam.experiment.done`; the
+      evidence-gate decides whether to schedule another experiment.
 
       ### Steps
-      1. Read `redteam.attack.mapped` payload. Read experiment plan artifact.
+      1. On `redteam.attack.mapped`, read the experiment plan and select its
+         first unexecuted RTE identifier. On `redteam.experiment.next`, read
+         `next_experiment_id` and execute exactly that identifier; do not skip
+         or invent queue entries.
       2. Verify HEAD/tree match lock (`git rev-parse HEAD`, `git rev-parse HEAD^{tree}`).
          If mismatch, write `.ralph/red-team/failures/experiment-runner.md` and
          emit `redteam.failed` with `failed_stage: experiment-runner`.
@@ -525,8 +620,16 @@ hats:
           `redteam.failed` with `failed_stage: experiment-runner` and reason
           `EXPERIMENT_INVALID_CODE_MUTATION`; do not emit `experiment.done`.
       12. Save all evidence under `.ralph/red-team/evidence/RTE-<NNN>/`.
-      13. Write `.ralph/red-team/experiments/RTE-<NNN>.md` from template.
-      14. Precheck then emit `redteam.experiment.done`.
+      13. Compute SHA-256 for every mandatory evidence item, including the
+          actual ledger/state artifact. Write
+          `.ralph/red-team/evidence/RTE-<NNN>/evidence-manifest.json` with
+          each path, hash command, hash, and run identifier. The manifest must
+          contain a `ledger_sha256` entry; a narrative claim is not a substitute.
+      14. Write `.ralph/red-team/experiments/RTE-<NNN>.md` from the template and
+          record the manifest path and ledger SHA-256 in `results`.
+      15. Verify every manifest path with `test -f`, then policy-check and emit
+          `redteam.experiment.done` with `evidence_manifest_path` and
+          `ledger_sha256` copied from the actual manifest.
 
       ### Allowed Operations
       - Build project, run existing tests, lint, format-check, static check, benchmark, fuzz
@@ -553,9 +656,9 @@ hats:
     name: "Evidence Gate"
     description: "Independently scores experiment evidence against hard thresholds and qualification."
     triggers: ["redteam.experiment.done"]
-    publishes: ["redteam.evidence.gated", "redteam.failed"]
-    exempt_topics: ["redteam.evidence.gated", "redteam.failed"]
-    terminal_events: ["redteam.evidence.gated", "redteam.failed"]
+    publishes: ["redteam.experiment.next", "redteam.evidence.gated", "redteam.failed"]
+    exempt_topics: ["redteam.experiment.next", "redteam.evidence.gated", "redteam.failed"]
+    terminal_events: ["redteam.experiment.next", "redteam.evidence.gated", "redteam.failed"]
     event_filter:
       enabled: true
       events: ["redteam.experiment.done"]
@@ -568,10 +671,12 @@ hats:
       OPAC: `ralph-tools-opac`. Before emit: `ralph tools skill load ralph-tools-emit` then `--policy-check`.
 
       ### Mission
-      Score one experiment against binary execution gates and four metrics.
-      Emit `redteam.evidence.gated` if all pass. If any gate or threshold fails,
-      write the evidence failure artifact and emit `redteam.failed`; this preset
-      does not automatically retry business work.
+      Independently score the current experiment against binary execution gates
+      and four metrics, then maintain the durable aggregate evidence board.
+      A rejected experiment is recorded and does not stop independent queued
+      experiments. Only after every planned experiment is accounted for may
+      this hat emit the aggregate `redteam.evidence.gated`; if none qualify,
+      write the failure artifact and emit `redteam.failed`.
 
       ### Binary Execution Gates (all must be true)
       - experiment_actually_executed: true
@@ -600,23 +705,34 @@ hats:
       - Impact Certainty: direct modules clear (25) + state propagation clear (25) + lifecycle/config clear (20) + compatibility clear (15) + unaffected boundary clear (15)
 
       ### Steps
-      1. Read `redteam.experiment.done` payload. Read experiment artifact and ALL raw evidence files.
+      1. Read `redteam.experiment.done` payload. Read the experiment artifact,
+         evidence manifest, and ALL raw evidence files. Verify the manifest's
+         `ledger_sha256` against the actual ledger/state artifact.
       2. Verify binary execution gates. If any false:
-         - Any false gate → write `.ralph/red-team/07-retry-board.md` as a
-           diagnostic/follow-up artifact and emit `redteam.failed` with
-           `failed_stage: evidence-gate`, `reason: BINARY_GATE_FAILED`, and
-           `failure_artifact_path`.
+         - Any false gate → append this RTE to `.ralph/red-team/07-retry-board.md`
+           as a rejected candidate with the exact missing evidence. Continue
+           with the next independent experiment unless the queue is exhausted.
       3. Compute four metrics from raw evidence only.
       4. Check thresholds. If any below threshold:
-         - Identify failed metric(s) and missing evidence
-         - Write `.ralph/red-team/07-retry-board.md` describing the missing
-           evidence and the operator-approved follow-up needed.
-         - Emit `redteam.failed` with `failed_stage: evidence-gate`,
-           `reason: THRESHOLD_FAILED`, and `failure_artifact_path`.
-      5. If all thresholds pass AND all mandatory evidence present AND binary gates pass:
-         - Write `.ralph/red-team/07-evidence-board.md`
-         - Emit `redteam.evidence.gated` with scores and `evidence_board_path`
-      6. Precheck then emit. Single business event only.
+         - Identify failed metric(s), append the rejected candidate and missing
+           evidence to `07-retry-board.md`, then continue the queue.
+      5. If all thresholds and binary gates pass, append the qualified result
+         to `07-evidence-board.md`; otherwise append a rejected result with
+         its reason and failure artifact path.
+      6. Read the experiment plan and the aggregate board. If unexecuted
+         experiments remain, write the updated board, policy-check, then emit
+         exactly one `redteam.experiment.next` with counts and the next RTE ID.
+      7. If the queue is exhausted and at least one experiment qualified, write
+         the final aggregate board, policy-check, then emit exactly one
+         `redteam.evidence.gated` with qualified IDs, rejected count, total
+         count, minimum scores, and `evidence_board_path`.
+      8. If the queue is exhausted and none qualified, write a failure artifact
+         describing every rejected candidate and emit exactly one
+         `redteam.failed` with `reason: NO_QUALIFIED_EXPERIMENTS`.
+
+      A rejected experiment is not a producer failure. A malformed handoff,
+      unreadable artifact, or inability to preserve the target tree remains a
+      producer failure and must use `redteam.failed` immediately.
 
   impact-boundary:
     name: "Impact Boundary"
@@ -648,7 +764,10 @@ hats:
       After all findings processed, write `.ralph/red-team/PLAN.md`.
 
       ### Steps
-      1. Read `redteam.evidence.gated` payload. Read evidence board and experiment artifact.
+      1. Read `redteam.evidence.gated` payload. Read the aggregate evidence
+         board and every qualified experiment artifact listed by
+         `qualified_experiment_ids`; do not assume the trigger payload contains
+         the complete result.
       2. Verify HEAD/tree match lock.
       3. Run impact boundary experiments:
          - Run direct affected component tests
@@ -691,11 +810,10 @@ hats:
       7. If all thresholds pass:
          - Write `.ralph/red-team/findings/RTF-<NNN>.md` from finding template
          - Write `.ralph/red-team/08-impact-boundary.md`
-         - Do NOT emit yet; continue to step 8 to check if more experiments remain
-      8. After all findings processed (check if more experiments remain in evidence board):
-         - If more qualified experiments pending → wait for next trigger
-         - If all done → write `.ralph/red-team/PLAN.md` from plan template,
-           then emit `redteam.plan.ready` with `plan_file_path`, `finding_count`, `impact_file_path`
+      8. Process every qualified experiment listed in the aggregate board.
+         After all findings are processed, write `.ralph/red-team/PLAN.md` from
+         the plan template, then emit `redteam.plan.ready` with
+         `plan_file_path`, `finding_count`, and `impact_file_path`.
       9. Precheck then emit. Single business event only.
 
       ### Repair Plan Rules
