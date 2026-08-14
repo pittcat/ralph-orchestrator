@@ -473,6 +473,11 @@ fn hex_encode(bytes: &[u8]) -> String {
 // These are private because they only model the on-disk shape and are not
 // part of the public contract. Callers go through ScenarioFile::from_yaml.
 
+// ---------------- raw (YAML-facing) types ---------------- //
+//
+// These are private because they only model the on-disk shape and are not
+// part of the public contract. Callers go through ScenarioFile::from_yaml.
+
 #[derive(Debug, Deserialize)]
 struct RawScenarioFile {
     version: Option<u32>,
@@ -509,3 +514,478 @@ struct RawLimits {
     max_steps: Option<u32>,
     no_progress_steps: Option<u32>,
 }
+
+// ---------------- driver + trace (Unit 2) ---------------- //
+//
+// The driver drives a real `EventLoop` over the scripted responses and
+// returns an ordered `ScenarioTrace` consumed by the verdict evaluator
+// (Unit 3). It is intentionally decoupled from CLI/skill concerns.
+
+use std::io::Write;
+use std::path::{Path, PathBuf};
+
+use crate::config::RalphConfig;
+use crate::event_loop::{
+    EventLoop, ProcessedEvents, TerminationReason,
+};
+use crate::execution_contract;
+use crate::loop_context::LoopContext;
+use ralph_proto::Event;
+
+/// One step recorded by the driver. `accepted` lists topics from the
+/// `ProcessedEvents.accepted_events` for this iteration in order.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StepRecord {
+    pub step: usize,
+    pub response_index: usize,
+    pub hat: Option<String>,
+    pub output: String,
+    pub success: bool,
+    pub accepted: Vec<String>,
+    pub rejected: Vec<String>,
+    pub termination: Option<String>,
+}
+
+/// Per-scenario trace produced by [`run_scenario`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScenarioTrace {
+    pub scenario: Scenario,
+    pub steps: Vec<StepRecord>,
+    pub accepted_events: Vec<String>,
+    pub rejected_events: Vec<String>,
+    pub last_hat: Option<String>,
+    pub last_accepted_topic: Option<String>,
+    pub last_runtime_termination: Option<String>,
+    pub terminal_topic: Option<String>,
+    pub trace_digest: String,
+}
+
+/// Outcome of running one scenario. The verdict classifier in Unit 3 turns
+/// this into a structured `VerifyReportScenario` + `failure_kind`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScenarioOutcome {
+    pub trace: ScenarioTrace,
+    /// One of: passed, no_progress, timeout, unclosed_terminal,
+    /// scenario_failure, runtime_exception, static_contract_failure,
+    /// input_error.
+    pub failure_kind: Option<FailureKind>,
+    pub passed: bool,
+}
+
+/// Handle for the temp workspace the driver creates. Holds the tempdir until
+/// dropped; the driver itself does not return absolute paths to callers.
+pub struct DriverWorkspace {
+    pub temp_dir: tempfile::TempDir,
+}
+
+impl DriverWorkspace {
+    pub fn new() -> std::io::Result<Self> {
+        let temp_dir = tempfile::Builder::new()
+            .prefix("ralph-preset-verify-")
+            .tempdir()?;
+        Ok(Self { temp_dir })
+    }
+
+    pub fn ralph_dir(&self) -> PathBuf {
+        self.temp_dir.path().join(".ralph")
+    }
+
+    pub fn events_path(&self) -> PathBuf {
+        self.ralph_dir().join("events.jsonl")
+    }
+}
+
+/// Run one scenario through a real `EventLoop` and return the ordered trace.
+///
+/// `mutate_config` lets the caller (CLI) shape the loaded `RalphConfig`
+/// (workspace_root, hat setup, event_policy, etc.) before compile. The driver
+/// then pins the workspace to the tempdir and pins
+/// `event_loop.task_resume_ttl_seconds = Some(0)` so the deterministic
+/// fixture inputs aren't classified as stale by the freshness filter.
+pub fn run_scenario(
+    scenario: &Scenario,
+    config: &RalphConfig,
+    workspace: &DriverWorkspace,
+    input_blob: &str,
+) -> Result<ScenarioOutcome, FailureKind> {
+    // Prepare the .ralph directory and a writable events file in the temp
+    // workspace (real `process_events_from_jsonl` reads from this file).
+    std::fs::create_dir_all(workspace.ralph_dir()).map_err(|e| {
+        FailureKind::RuntimeException(format!("create .ralph dir failed: {e}"))
+    })?;
+
+    let mut config = config.clone();
+    config.core.workspace_root = workspace.temp_dir.path().to_path_buf();
+    // Disable freshness TTL so the fixture inputs aren't classified as stale.
+    config.event_loop.task_resume_ttl_seconds = Some(0);
+    // Re-pin workspace_root after the clone in case the caller overwrote core.
+    config.core.workspace_root = workspace.temp_dir.path().to_path_buf();
+
+    let context = LoopContext::primary(workspace.temp_dir.path().to_path_buf());
+
+    let resolved = execution_contract::compile(config).map_err(|e| {
+        FailureKind::StaticContractFailure(format!("contract compile failed: {e:?}"))
+    })?;
+
+    let mut event_loop = EventLoop::from_resolved(resolved, context);
+    event_loop.initialize("Verify");
+
+    let parser = crate::event_parser::EventParser::new();
+    let mut steps = Vec::with_capacity(scenario.responses.len());
+    let mut all_accepted: Vec<String> = Vec::new();
+    let mut all_rejected: Vec<String> = Vec::new();
+    let mut last_hat: Option<String> = None;
+    let mut last_accepted_topic: Option<String> = None;
+    let mut last_runtime_termination: Option<String> = None;
+    let mut terminal_topic: Option<String> = None;
+    let mut no_progress_window: usize = 0;
+    let mut step_count: usize = 0;
+
+    for (idx, response) in scenario.responses.iter().enumerate() {
+        step_count = step_count.saturating_add(1);
+        if step_count > scenario.limits.max_steps as usize {
+            let trace = build_trace(
+                scenario,
+                steps,
+                all_accepted.clone(),
+                all_rejected.clone(),
+                last_hat.clone(),
+                last_accepted_topic.clone(),
+                last_runtime_termination.clone(),
+                terminal_topic.clone(),
+                input_blob,
+            );
+            return Ok(ScenarioOutcome {
+                trace,
+                failure_kind: Some(FailureKind::Timeout(format!(
+                    "max_steps={} exceeded",
+                    scenario.limits.max_steps
+                ))),
+                passed: false,
+            });
+        }
+
+        // `next_hat()` is the only authority on the current hat. If the
+        // scenario pinned a hat and it doesn't match the runtime selection,
+        // we record a scenario_failure (the driver never silently routes the
+        // response to a different hat — D6 deterministic contract).
+        let next_hat = event_loop.next_hat().cloned();
+        if let Some(pinned) = &response.hat {
+            match &next_hat {
+                Some(actual) if actual.as_str() == pinned.as_str() => {}
+                _ => {
+                    let trace = build_trace(
+                        scenario,
+                        steps,
+                        all_accepted.clone(),
+                        all_rejected.clone(),
+                        last_hat.clone(),
+                        last_accepted_topic.clone(),
+                        last_runtime_termination.clone(),
+                        terminal_topic.clone(),
+                        input_blob,
+                    );
+                    let detail = format!(
+                        "scenario pinned hat={} but next_hat()={:?} at response_index={}",
+                        pinned,
+                        next_hat.as_ref().map(|h| h.to_string()),
+                        idx
+                    );
+                    return Ok(ScenarioOutcome {
+                        trace,
+                        failure_kind: Some(FailureKind::ScenarioFailure(detail)),
+                        passed: false,
+                    });
+                }
+            }
+        }
+
+        let hat_id = match next_hat {
+            Some(h) => h,
+            None => {
+                // No more hats to schedule. Treat as a bounded timeout
+                // (we've run out of routing options).
+                let trace = build_trace(
+                    scenario,
+                    steps,
+                    all_accepted.clone(),
+                    all_rejected.clone(),
+                    last_hat.clone(),
+                    last_accepted_topic.clone(),
+                    last_runtime_termination.clone(),
+                    terminal_topic.clone(),
+                    input_blob,
+                );
+                return Ok(ScenarioOutcome {
+                    trace,
+                    failure_kind: Some(FailureKind::UnclosedTerminal(
+                        "next_hat() returned None before consuming all responses".into(),
+                    )),
+                    passed: false,
+                });
+            }
+        };
+
+        // build_prompt is consumed but the prompt itself is not part of the
+        // trace (the verifier is about workflow, not about prompt text).
+        let _ = event_loop.build_prompt(&hat_id);
+
+        let termination: Option<TerminationReason> =
+            event_loop.process_output(&hat_id, &response.output, response.success);
+        if let Some(reason) = &termination {
+            last_runtime_termination = Some(format!("{reason:?}"));
+        }
+        last_hat = Some(hat_id.to_string());
+
+        // Parse the scripted output and append events to JSONL so
+        // process_events_from_jsonl can route them through the real runtime.
+        let parsed = parser.parse(&response.output);
+        let events_path = workspace.events_path();
+        write_events_to_jsonl(&events_path, &parsed, idx).map_err(|e| {
+            FailureKind::RuntimeException(format!("write events.jsonl failed: {e}"))
+        })?;
+
+        let processed: ProcessedEvents =
+            event_loop.process_events_from_jsonl().map_err(|e| {
+                FailureKind::RuntimeException(format!("process_events_from_jsonl failed: {e:?}"))
+            })?;
+
+        let mut step_accepted: Vec<String> = Vec::new();
+        let mut step_rejected: Vec<String> = Vec::new();
+        for event in &processed.accepted_events {
+            let topic = event.topic.to_string();
+            step_accepted.push(topic.clone());
+            all_accepted.push(topic.clone());
+            last_accepted_topic = Some(topic.clone());
+            if let Some(expected_topic) = &scenario.expect.terminal_topic {
+                if &topic == expected_topic {
+                    terminal_topic = Some(topic);
+                }
+            }
+        }
+        // We don't yet have a stable "rejected events" list at the public
+        // level (ProcessedEvents exposes contract_rejections + boolean
+        // flags). Surface the boolean flag + contract rejections as a flat
+        // rejected list, prefixed with `contract:` so callers can tell them
+        // apart from event_topic rejections.
+        if processed.had_rejected_events {
+            for finding in &processed.contract_rejections {
+                let label = format!(
+                    "contract:topic={} kind={:?}",
+                    finding.topic, finding.kind
+                );
+                step_rejected.push(label.clone());
+                all_rejected.push(label);
+            }
+        }
+
+        let step = StepRecord {
+            step: step_count,
+            response_index: idx,
+            hat: Some(hat_id.to_string()),
+            output: response.output.clone(),
+            success: response.success,
+            accepted: step_accepted,
+            rejected: step_rejected,
+            termination: last_runtime_termination.clone(),
+        };
+        steps.push(step);
+
+        // No-progress budget: empty accepted events counts as a no-progress
+        // step. We count only business-progress absence (empty accepted set),
+        // not pure contract rejections, because a partial rejection may still
+        // be progress in subsequent steps.
+        if processed.accepted_events.is_empty() {
+            no_progress_window = no_progress_window.saturating_add(1);
+        } else {
+            no_progress_window = 0;
+        }
+        if no_progress_window >= scenario.limits.no_progress_steps as usize {
+            let trace = build_trace(
+                scenario,
+                steps,
+                all_accepted.clone(),
+                all_rejected.clone(),
+                last_hat.clone(),
+                last_accepted_topic.clone(),
+                last_runtime_termination.clone(),
+                terminal_topic.clone(),
+                input_blob,
+            );
+            return Ok(ScenarioOutcome {
+                trace,
+                failure_kind: Some(FailureKind::NoProgress(format!(
+                    "no_progress_steps={} consecutive no-accepted events",
+                    scenario.limits.no_progress_steps
+                ))),
+                passed: false,
+            });
+        }
+    }
+
+    let trace = build_trace(
+        scenario,
+        steps,
+        all_accepted.clone(),
+        all_rejected.clone(),
+        last_hat.clone(),
+        last_accepted_topic.clone(),
+        last_runtime_termination.clone(),
+        terminal_topic.clone(),
+        input_blob,
+    );
+
+    // If we got here, classify based on terminal expectation vs reality.
+    // Unit 3 will refine this — for now, success is "the expected terminal
+    // topic was observed in the accepted trace".
+    let passed = match scenario.expect.terminal {
+        TerminalKind::None => true,
+        _ => terminal_topic.is_some()
+            && scenario
+                .expect
+                .terminal_topic
+                .as_ref()
+                .map(|t| terminal_topic.as_deref() == Some(t.as_str()))
+                .unwrap_or(false),
+    };
+
+    let failure_kind = if passed {
+        None
+    } else {
+        Some(FailureKind::UnclosedTerminal(format!(
+            "expected terminal={:?} topic={:?} but trace ended with accepted={:?}",
+            scenario.expect.terminal, scenario.expect.terminal_topic, all_accepted
+        )))
+    };
+
+    Ok(ScenarioOutcome {
+        trace,
+        failure_kind,
+        passed,
+    })
+}
+
+fn write_events_to_jsonl(
+    path: &Path,
+    events: &[Event],
+    response_index: usize,
+) -> std::io::Result<()> {
+    if events.is_empty() {
+        return Ok(());
+    }
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)?;
+    for event in events {
+        let entry = serde_json::json!({
+            "topic": event.topic,
+            "payload": event.payload,
+            "response_index": response_index,
+        });
+        writeln!(file, "{entry}")?;
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_trace(
+    scenario: &Scenario,
+    steps: Vec<StepRecord>,
+    accepted_events: Vec<String>,
+    rejected_events: Vec<String>,
+    last_hat: Option<String>,
+    last_accepted_topic: Option<String>,
+    last_runtime_termination: Option<String>,
+    terminal_topic: Option<String>,
+    input_blob: &str,
+) -> ScenarioTrace {
+    let accepted_refs: Vec<&str> = accepted_events.iter().map(String::as_str).collect();
+    let trace_digest = compute_trace_digest(scenario, input_blob, &accepted_refs);
+    ScenarioTrace {
+        scenario: scenario.clone(),
+        steps,
+        accepted_events,
+        rejected_events,
+        last_hat,
+        last_accepted_topic,
+        last_runtime_termination,
+        terminal_topic,
+        trace_digest,
+    }
+}
+
+// ---------------- Unit 3 verdict evaluator ---------------- //
+//
+// The verdict evaluator turns a `ScenarioOutcome` into a `VerifyReportScenario`
+// and decides the failure_kind for the run. It does NOT consume the
+// static-layer report (that's the CLI's job).
+
+/// Per-scenario verdict evaluation. Maps `ScenarioOutcome` into the final
+/// `VerifyReportScenario` shape required by the public report contract.
+pub fn evaluate_scenario(outcome: ScenarioOutcome) -> VerifyReportScenario {
+    let failure_tag = outcome.failure_kind.as_ref().map(FailureKind::tag);
+    VerifyReportScenario {
+        name: outcome.trace.scenario.name.clone(),
+        passed: outcome.passed,
+        steps: outcome.trace.steps.len(),
+        accepted_events: outcome.trace.accepted_events.clone(),
+        rejected_events: outcome.trace.rejected_events.clone(),
+        terminal_topic: outcome.trace.terminal_topic.clone(),
+        termination: outcome.trace.last_runtime_termination.clone(),
+        failure_kind: failure_tag.map(str::to_string),
+        last_observable_state: LastObservableState {
+            step: outcome.trace.steps.last().map(|s| s.step),
+            last_hat: outcome.trace.last_hat.clone(),
+            last_accepted_topic: outcome.trace.last_accepted_topic.clone(),
+            last_runtime_termination: outcome.trace.last_runtime_termination.clone(),
+            response_index: outcome.trace.steps.last().map(|s| s.response_index),
+        },
+        trace_digest: outcome.trace.trace_digest.clone(),
+    }
+}
+
+/// Build the full report from per-scenario outcomes and the static layer.
+pub fn build_report(
+    source_kind: SourceKind,
+    static_layer: StaticLayer,
+    outcomes: Vec<(ScenarioOutcome, VerifyReportScenario)>,
+    overall_failure: Option<&FailureKind>,
+    input_blob: &str,
+) -> PresetVerifyReport {
+    let passed = outcomes.iter().all(|(_, s)| s.passed) && overall_failure.is_none();
+    let scenarios: Vec<VerifyReportScenario> =
+        outcomes.into_iter().map(|(_, s)| s).collect();
+    let failure_kind_tag = overall_failure.map(FailureKind::tag).map(str::to_string);
+    let trace_digest = if let Some(last) = scenarios.last() {
+        last.trace_digest.clone()
+    } else {
+        compute_trace_digest_for_empty(input_blob)
+    };
+    let last_observable_state = scenarios
+        .last()
+        .map(|s| s.last_observable_state.clone())
+        .unwrap_or_default();
+    PresetVerifyReport {
+        passed,
+        source_kind,
+        static_layer,
+        scenarios,
+        failure_kind: failure_kind_tag,
+        last_observable_state,
+        trace_digest,
+    }
+}
+
+fn compute_trace_digest_for_empty(input_blob: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let mut h = Sha256::new();
+    h.update(b"empty-report\ninput=");
+    h.update(input_blob.as_bytes());
+    hex_encode(&h.finalize())
+}
+
+// Re-export `Event` so callers building static-layer helpers can construct
+// payloads without an extra import.
+pub use ralph_proto::Event as ProtoEvent;
+pub use ralph_proto::HatId as ProtoHatId;
