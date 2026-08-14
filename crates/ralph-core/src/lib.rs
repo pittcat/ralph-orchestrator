@@ -116,6 +116,8 @@ pub mod preflight;
 pub mod preset;
 pub mod preset_lint;
 pub mod preset_validator;
+/// Public verifier contract for `ralph preset verify` (Unit 1+).
+pub mod preset_verify;
 /// Runtime profile overlay loader (U2 of plan 2026-06-25-002). Parses
 /// `<scope>:<name>` specs, resolves them under the repo or user XDG
 /// config root, reads `<profile>/<preset>/<hat-id>.md` fragments, and
