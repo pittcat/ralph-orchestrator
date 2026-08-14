@@ -111,6 +111,105 @@ fn test_builtin_redteam_scope_policy_check_accepts_matching_manifest() {
     );
 }
 
+/// Every producer can publish the shared `redteam.failed` sink, while the
+/// reporter cannot publish its own input. This exercises the real preset +
+/// CLI policy path rather than locking the YAML text.
+#[test]
+fn test_builtin_redteam_failed_sink_is_publishable_by_producers_only() {
+    let temp_dir = TempDir::new().expect("temp dir");
+    let temp_path = temp_dir.path();
+    std::fs::create_dir_all(temp_path.join(".ralph")).unwrap();
+    let payload = serde_json::json!({
+        "failed_stage": "evidence-gate",
+        "reason": "THRESHOLD_FAILED",
+        "failure_artifact_path": ".ralph/red-team/failures/evidence-gate.md"
+    })
+    .to_string();
+
+    let accepted = common::ralph_bin()
+        .args([
+            "-H",
+            "builtin:red-team-attack",
+            "emit",
+            "redteam.failed",
+            "--json",
+            &payload,
+            "--policy-check",
+            "--hat",
+            "evidence-gate",
+        ])
+        .current_dir(temp_path)
+        .env("RALPH_HATS_SOURCE", "builtin:red-team-attack")
+        .env("RALPH_CURRENT_HAT", "evidence-gate")
+        .env("RALPH_EVENTS_FILE", temp_path.join(".ralph/events.jsonl"))
+        .output()
+        .expect("execute evidence-gate failure policy-check");
+
+    assert!(
+        accepted.status.success(),
+        "evidence-gate must publish redteam.failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&accepted.stdout),
+        String::from_utf8_lossy(&accepted.stderr)
+    );
+    assert!(
+        !temp_path.join(".ralph/events.jsonl").exists(),
+        "policy-check must not write an event"
+    );
+
+    let rejected = common::ralph_bin()
+        .args([
+            "-H",
+            "builtin:red-team-attack",
+            "emit",
+            "redteam.failed",
+            "--json",
+            &payload,
+            "--policy-check",
+            "--hat",
+            "reporter",
+        ])
+        .current_dir(temp_path)
+        .env("RALPH_HATS_SOURCE", "builtin:red-team-attack")
+        .env("RALPH_CURRENT_HAT", "reporter")
+        .env("RALPH_EVENTS_FILE", temp_path.join(".ralph/events.jsonl"))
+        .output()
+        .expect("execute reporter failure policy-check");
+    let rejected_text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&rejected.stdout),
+        String::from_utf8_lossy(&rejected.stderr)
+    );
+    assert!(!rejected.status.success(), "reporter must be rejected");
+    assert!(
+        rejected_text.contains(r#""accepted":false"#)
+            || rejected_text.contains("Event rejected by policy"),
+        "reporter rejection must be visible in policy output: {rejected_text}"
+    );
+
+    let removed_retry = common::ralph_bin()
+        .args([
+            "-H",
+            "builtin:red-team-attack",
+            "emit",
+            "redteam.retry.required",
+            "--json",
+            "{}",
+            "--policy-check",
+            "--hat",
+            "evidence-gate",
+        ])
+        .current_dir(temp_path)
+        .env("RALPH_HATS_SOURCE", "builtin:red-team-attack")
+        .env("RALPH_CURRENT_HAT", "evidence-gate")
+        .env("RALPH_EVENTS_FILE", temp_path.join(".ralph/events.jsonl"))
+        .output()
+        .expect("execute removed retry policy-check");
+    assert!(
+        !removed_retry.status.success(),
+        "removed retry topic must not reopen the business chain"
+    );
+}
+
 #[test]
 fn test_builtin_redteam_scope_policy_check_rejects_manifest_decision_mismatch() {
     let temp_dir = TempDir::new().expect("temp dir");

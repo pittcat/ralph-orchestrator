@@ -734,11 +734,9 @@ pub fn check_trigger_publish_asymmetry(
             if Some(trigger.as_str()) == cancellation_promise {
                 continue;
             }
-            // 2026-06-16-001 U5: runner-injected topics
-            // (`loop.stalled`, `task.resume`) are exempt for the
-            // same reason — the loop runner is the publisher,
-            // not a hat. (2026-06-28-005: `human.guidance` was
-            // removed from this list together with the topic.)
+            // Runner-injected topics (`loop.stalled`, `task.resume`) are
+            // exempt for the same reason — the loop runtime is the publisher,
+            // not a hat.
             if RUNNER_INJECTED_TRIGGERS.contains(&trigger.as_str()) {
                 continue;
             }

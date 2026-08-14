@@ -49,11 +49,18 @@ Preset 专用 trigger 状态表写在各 preset 的 hat `instructions:`；本文
 **Trigger:** `task.resume` with `target_hat=<被恢复的 hat>` and `kind=missing_event_gate`.
 
 **行为规范：**
-- After receiving this resume, you may re-emit `work.done` **at most 2 times** to close the gate.
-- Before each retry, read `ralph emit --schema work.done` and confirm every `required_fields` item is present and correctly typed.
-- On the third failure, stop retrying and emit `work.failed` with `reason="re-emit_exhausted"`.
+- 这是“上一次 activation 没有完成合法终态事件”的恢复信号。读取 `original_trigger_topic`、
+  `original_trigger_payload`、`allowed_topics`、`required_fields`、`reason` 和 `retry_key`，回到
+  同一业务上下文继续完成原动作；不要等待一个新的业务触发，也不要只回复文字说明。
+- 终态 topic 必须取自当前 hat 的 `allowed_topics` 与 preset 声明的 `publishes` 的交集；本节不
+  规定具体业务 topic。不要把其它 preset 的 `work.done`、`work.failed` 或任何示例 topic
+  当成当前 hat 的默认 emit。
+- 重新 emit 前，针对实际选中的 topic 执行 `ralph emit --policy-check --output json`，确认
+  `required_fields` 存在且类型正确，再正式 emit；只有 `ok=true` 且 `recorded=true` 才算恢复成功。
+- 遵守 runtime 提供的恢复次数上限；禁止无界重试、原样盲目重复发送或在同一 activation 发送
+  第二个业务事件。恢复失败时，依据结构化错误修正同一个目标事件，不能切换到未声明 topic。
 
-**禁止：** 连续重发同一 `work.done` payload 超过 2 次而不改字段内容。
+**禁止：** 把通用恢复示例当成当前 hat 的事件契约，或在没有确认 `recorded=true` 时结束恢复。
 
 ## RD-TASK-ID-MUST-BE-LOOP-SCOPED
 
@@ -82,7 +89,9 @@ Preset 专用 trigger 状态表写在各 preset 的 hat `instructions:`；本文
 **Trigger:** `task.resume` with `target_hat=<被恢复的 hat>` and `kind=recovery_exhausted`.
 
 **行为规范：**
-- Do not attempt another retry. Emit `plan.blocked(reason="recovery_exhausted:<retry_key>")` immediately.
+- Do not attempt another retry. Only emit a blocking event if the current hat's declared
+  `publishes` and the recovery contract explicitly allow that topic; otherwise stop and surface the
+  structured blocking reason to the operator / next human.
 - Surface the blocking reason in the current task note so the next agent/human understands the terminal state.
 - Treat this as a final state, not a recoverable error.
 

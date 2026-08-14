@@ -193,6 +193,30 @@ hats:
 }
 
 #[test]
+fn test_missing_terminal_emit_recovery_without_reporter_keeps_ralph_fallback() {
+    let yaml = r#"
+hats:
+  executor:
+    name: "Executor"
+    triggers: ["work.ready"]
+    publishes: ["work.done"]
+    terminal_events: ["work.done"]
+"#;
+    let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
+    let mut event_loop = EventLoop::new(config);
+    let hat_id = HatId::new("executor");
+    event_loop.state.last_activation_events = vec![ralph_proto::Event::new("work.ready", "{}")];
+
+    for _ in 0..=crate::event_loop::loop_state::U2_REJECTION_RETRY_LIMIT {
+        let _ =
+            event_loop.inject_missing_terminal_emit_recovery(&hat_id, &["work.done".to_string()]);
+    }
+
+    let ralph_pending = event_loop.bus.peek_pending(&HatId::new("ralph"));
+    assert!(ralph_pending.is_none_or(|events| events.is_empty()));
+}
+
+#[test]
 fn test_inject_fallback_event_targets_last_hat() {
     let yaml = r#"
 hats:

@@ -619,8 +619,8 @@ hats:
         "prompt must contain the directive section body"
     );
     assert!(
-        prompt.contains("at most 2 times"),
-        "directive content must be injected"
+        prompt.contains("allowed_topics") && prompt.contains("recorded=true"),
+        "generic recovery directive content must be injected"
     );
 }
 

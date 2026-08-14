@@ -4720,6 +4720,9 @@ fn test_retained_scenarios_pipeline_or_generic_only() {
         // — generic routing characterization; plan-resolver manifest + real
         // scope_base_sha without merge-batch boundary
         "tests/scenarios/redteam_scope_",
+        // red-team failure sink handoff fixture validates the real runtime
+        // reporter path.
+        "tests/scenarios/redteam_failed_",
         // 2026-08-08-004 plan U2: merge-batch boundary manifest routing
         // (abstract fixture with merge-batch hat chain; schema validation via unit/CLI tests)
         "tests/scenarios/merge_batch_boundary",
@@ -4973,6 +4976,15 @@ fn test_redteam_scope_boundary_conflict_unresolved() {
 #[test]
 fn test_redteam_scope_unknown_hunk_blocks_attack() {
     let yaml = load_scenario("tests/scenarios/redteam_scope_unknown_blocked.yml");
+    run_workflow_guard_scenario(yaml);
+}
+
+/// A producer failure is a first-class red-team business event. The real
+/// EventLoop routes the shared `redteam.failed` sink to the reporter, which
+/// closes the preset through the `redteam.complete(success=false)` contract.
+#[test]
+fn test_redteam_failed_reaches_reporter() {
+    let yaml = load_scenario("tests/scenarios/redteam_failed_reporter.yml");
     run_workflow_guard_scenario(yaml);
 }
 

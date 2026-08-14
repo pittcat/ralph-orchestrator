@@ -7,17 +7,18 @@
 #
 # Topic coverage (8 hats):
 #   target-locker       -> redteam.target.locked
-#   plan-resolver       -> redteam.plan.resolved / redteam.plan.unresolved
-#   attack-surface-mapper -> redteam.attack.mapped / redteam.retry.required
+#   plan-resolver       -> redteam.plan.resolved
+#   attack-surface-mapper -> redteam.attack.mapped
 #   experiment-runner   -> redteam.experiment.done
-#   evidence-gate       -> redteam.evidence.gated / redteam.retry.required
-#   impact-boundary     -> redteam.impact.qualified / redteam.impact.rejected
+#   evidence-gate       -> redteam.evidence.gated
+#   impact-boundary     -> redteam.plan.ready
 #   independent-reviewer -> redteam.reviewed
 #   reporter            -> redteam.complete (terminal completion token)
+#   producer hats       -> redteam.failed -> reporter
+#   target-locker failure is relayed by plan-resolver after required target.locked.
 #
-# Retry routing: evidence-gate emits redteam.retry.required back to
-# attack-surface-mapper (which doubles as experiment designer), then
-# experiment-runner re-executes, then evidence-gate re-scores.
+# Failure routing is intentionally terminal for this run. A failure artifact
+# records the operator-approved follow-up; the preset does not auto-retry.
 #
 # Topic deny rules live in `presets/en/red-team-attack.yml`
 # `event_policy.topic_deny_rules` (not in this SSOT).
@@ -55,14 +56,41 @@ schemas:
         source: Locker writes from git status checks.
         fill_rule: One of `locked`, `failed`. `locked` means clean tree and no MERGE_HEAD/REBASE_HEAD/CHERRY_PICK_HEAD; `failed` means any check failed.
 
+  # Any producer -> reporter. This is the only business failure branch.
+  redteam.failed:
+    required_fields:
+      - failed_stage
+      - reason
+      - failure_artifact_path
+    payload: json_object
+    allowed_values:
+      failed_stage:
+        - plan-resolver
+        - attack-surface-mapper
+        - experiment-runner
+        - evidence-gate
+        - impact-boundary
+        - independent-reviewer
+    field_docs:
+      failed_stage:
+        meaning: Hat stage that could not satisfy its activation contract.
+        source: The producer hat emitting this failure.
+        fill_rule: One of the listed producer hat IDs; it must match the emitting hat.
+      reason:
+        meaning: Stable reason code for the failure.
+        source: Producer's failure analysis written to the failure artifact.
+        fill_rule: Non-empty stable token; do not use prose or claim a qualified finding.
+      failure_artifact_path:
+        meaning: Path to the failure artifact containing full evidence and follow-up guidance.
+        source: File written by the producer before the failure emit.
+        fill_rule: Real readable path under `.ralph/red-team/`; verify `test -f` before emit.
+
   # plan-resolver -> per-plan commit resolution result. attack-surface-mapper
   # reads the resolution artifact to build attack surfaces.
   #
   # 2026-08-08-004 plan U1 (D3/D7/D8/D12): scope manifest fields added.
   # The plan-resolver emits redteam.plan.resolved only when scope_status
-  # is resolved AND all thresholds are met; otherwise it emits
-  # redteam.plan.unresolved. Downstream attack-surface-mapper must NOT
-  # run when scope is unresolved.
+  # is resolved AND all thresholds are met; otherwise it emits redteam.failed.
   #
   # 2026-08-08-004 plan U6: extended with coverage, boundary_consistency,
   # boundary_conflict, critical_traceability for mixed/conflict gates.
@@ -156,22 +184,6 @@ schemas:
         meaning: Whether a boundary disagreement was detected (true = conflict, blocks attack-surface).
         source: Plan-resolver detects when independent base SHA differs from boundary base SHA.
         fill_rule: "Boolean; default false; true means cross_check=0 and attack-surface must refuse."
-
-  # plan-resolver -> all plans failed to resolve. Terminal for this branch.
-  redteam.plan.unresolved:
-    required_fields:
-      - reason
-      - resolution_file_path
-    payload: json_object
-    field_docs:
-      reason:
-        meaning: Why no plan could be resolved.
-        source: Resolver writes from final retry state.
-        fill_rule: One of `REJECTED_NO_RESOLVED_PLAN`, `TARGET_HEAD_CHANGED`, `TARGET_TREE_CHANGED`, `SCOPE_BASE_MISSING`, `SCOPE_BASE_PLACEHOLDER`, `SCOPE_AMBIGUOUS`.
-      resolution_file_path:
-        meaning: Path to the plan-resolution artifact (contains retry history).
-        source: File actually written this activation.
-        fill_rule: Real readable path.
 
   # attack-surface-mapper -> attack surfaces identified and experiments designed.
   # experiment-runner reads the experiment plan artifact.
@@ -282,59 +294,6 @@ schemas:
         fill_rule: Integer 0-100; must be >= threshold (85 or 90).
       evidence_board_path:
         meaning: Path to evidence board artifact (`.ralph/red-team/07-evidence-board.md`).
-        source: File actually written this activation.
-        fill_rule: Real readable path.
-
-  # evidence-gate -> experiment below threshold, retry required.
-  # attack-surface-mapper (as designer) reads retry delta and redesigns.
-  redteam.retry.required:
-    required_fields:
-      - experiment_id
-      - attempt
-      - failed_metrics
-      - retry_delta
-      - retry_board_path
-    payload: json_object
-    field_docs:
-      experiment_id:
-        meaning: Experiment that needs retry.
-        source: Gate reads from trigger payload.
-        fill_rule: Must match trigger `experiment_id`.
-      attempt:
-        meaning: Current retry attempt number (1-indexed, excluding initial run).
-        source: Gate counts from retry history in evidence board.
-        fill_rule: Integer >= 1; must not exceed max_retries (default 2, P0/P1 3).
-      failed_metrics:
-        meaning: Which metrics are below threshold.
-        source: Gate writes from scoring results.
-        fill_rule: Array of metric names from `confidence`, `evidence_coverage`, `verifiability`, `impact_certainty`.
-      retry_delta:
-        meaning: What must change in the next attempt (new evidence, more repetitions, tighter controls).
-        source: Gate writes from failure analysis.
-        fill_rule: Non-empty string; must specify concrete additions, not "try again".
-      retry_board_path:
-        meaning: Path to retry board artifact (`.ralph/red-team/07-retry-board.md`).
-        source: File actually written this activation.
-        fill_rule: Real readable path.
-
-  # impact-boundary -> impact uncertain after retry exhausted, finding rejected.
-  redteam.impact.rejected:
-    required_fields:
-      - experiment_id
-      - reason
-      - impact_file_path
-    payload: json_object
-    field_docs:
-      experiment_id:
-        meaning: Experiment that was rejected.
-        source: Boundary reads from trigger payload.
-        fill_rule: Must match trigger `experiment_id`.
-      reason:
-        meaning: Rejection reason.
-        source: Boundary writes from final retry state.
-        fill_rule: One of `REJECTED_AFTER_RETRY_UNCERTAIN_IMPACT`, `REJECTED_AFTER_RETRY_LOW_CONFIDENCE`, `REJECTED_AFTER_RETRY_LOW_EVIDENCE`, `REJECTED_AFTER_RETRY_LOW_VERIFIABILITY`, `REJECTED_AFTER_RETRY_MISSING_MANDATORY_EVIDENCE`, `REJECTED_AFTER_RETRY_DIRTY_WORKTREE`, `REJECTED_AFTER_RETRY_NOT_EXECUTED`, `REJECTED_AFTER_RETRY_CONTROL_FAILED`, `REJECTED_AFTER_RETRY_NOT_REPRODUCIBLE`.
-      impact_file_path:
-        meaning: Path to impact boundary artifact (contains rejection history).
         source: File actually written this activation.
         fill_rule: Real readable path.
 

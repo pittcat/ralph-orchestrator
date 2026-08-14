@@ -207,7 +207,7 @@ ralph tools task ready  # Only shows unblocked tasks
 
 以下规范在 loop 遇到 `task.resume` 时由 runner 自动注入（对应 `ralph-tools-recovery-directives` skill）。task 管理**必须**遵守：
 
-- **收到 `task.resume(kind=recovery_exhausted)` 后**：**禁止**再重试；立即 emit `plan.blocked(reason="recovery_exhausted:<retry_key>")` 并把阻塞原因写入当前 task note。
+- **收到 `task.resume(kind=recovery_exhausted)` 后**：**禁止**再重试；只有当当前 hat 的 `allowed_topics` 与 preset `publishes` 明确允许阻塞事件时才 emit 它，否则把结构化阻塞原因写入当前 task note并停止。不要把 `plan.blocked` 当成所有 preset 的默认事件。
 - **收到 `task.resume(kind=execution_contract:TaskWrongLoop)` 后**：重新 emit 前**必须**确认 `task_id` 属于当前 loop；跨 loop task 只能读、不能改。
 - **收到 `task.resume` 且其 `required_action` 指向「修复 task 记录」而非「重做实现」时**（典型措辞：删除/修正冲突行、对齐 key、让 projector 重新派生）：这是 ledger 修复指令，**不要**重写代码。应：① `ralph tools task list` / `show` 找到与目标 `task_key` 不一致的行；② 删除或修正该行；③ 重新触发 handoff 事件或 `task ensure` 让记录恢复一致。实现代码本轮已完成，无需再改。
 - **任何 emit 的 `task_id` 必须真实且非空**：emit 前用 `ralph tools task list` / `show` 确认当前 loop 的 live id。`task_id=""`、`null` 或 `from_key:...` 会被拒收并破坏 step handoff。

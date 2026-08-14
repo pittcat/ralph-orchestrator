@@ -512,7 +512,7 @@ runtime **不**在 budget 拦截那一刻决定是否发 `task.resume`；它只�
 
 以下规范在 loop 遇到 `task.resume` 时由 runner 自动注入（对应 `ralph-tools-recovery-directives` skill）。emit 相关操作**必须**遵守：
 
-- **收到 `task.resume(kind=missing_event_gate)` 后**：重新 emit 同一 topic 前**必须**先用 `ralph emit --schema <TOPIC>` 确认全部 `required_fields`；**最多**重试 2 次；第 3 次仍失败则 emit `work.failed(reason="re-emit_exhausted")`。
+- **收到 `task.resume(kind=missing_event_gate)` 后**：读取恢复 payload 中的 `allowed_topics`、`required_fields`、`original_trigger_topic` 和 `original_trigger_payload`，针对当前 hat 合法的终态 topic 先用 `ralph emit --schema <TOPIC>` 确认全部 `required_fields`，再执行 precheck → apply → confirm；不要套用其它 preset 的 `work.done` / `work.failed` 示例。
 - **收到 `task.resume(kind=stall_recovery)` 后**：stall 超过 30 秒未收到预期事件时，主动 yield 并 emit `loop.stalled`（`human.guidance` 已不再是有效 emit 目标），不要无限重发。
 - **禁止**绕过 policy 直写 `.ralph/events.jsonl`；也**禁止**用 `--unsafe-no-policy-check` 作为默认修复手段。
 - 更多细节见自动注入的 `## RECOVERY DIRECTIVES` 块（ID：`RD-EXECUTOR-RESEND-LIMIT`、`RD-STALL-DETECT-AND-YIELD`）。

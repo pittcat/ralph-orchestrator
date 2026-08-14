@@ -1,0 +1,36 @@
+# A producer failure is routed through the single red-team failure sink.
+
+name: redteam_failed_reporter
+description: A red-team stage failure reaches the reporter and closes as a failed run
+
+config:
+  prompt_file: PROMPT.md
+  max_iterations: 5
+  hats:
+    reporter:
+      subscribes_to:
+        - redteam.failed
+      publishes:
+        - redteam.complete
+  event_loop:
+    execution_mode: isolated
+    starting_event: redteam.failed
+    completion_promise: redteam.complete
+
+mock_responses:
+  - text: |
+      <event topic="redteam.complete">
+      {"success":false,"report_path":".ralph/red-team/REPORT.md","plan_path":"","questions_path":".ralph/red-team/QUESTIONS.md"}
+      </event>
+    hat: reporter
+
+expected:
+  iterations: 1
+  events:
+    - topic: redteam.complete
+  completion: true
+  payload_matches:
+    - topic: redteam.complete
+      fields:
+        success: false
+        plan_path: ""
