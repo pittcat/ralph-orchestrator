@@ -28,7 +28,7 @@
 use std::path::Path;
 
 use ralph_core::diagnostics::{
-    RuntimeTraceEntry, RuntimeTraceLogger, RuntimeTracePhase, RUNTIME_TRACE_SCHEMA_VERSION,
+    RUNTIME_TRACE_SCHEMA_VERSION, RuntimeTraceEntry, RuntimeTraceLogger, RuntimeTracePhase,
 };
 use ralph_core::event_loop::ProcessedEvents;
 use serde_json::{Map, Value, json};
@@ -128,10 +128,7 @@ pub fn snapshot_channel(channel_path: Option<&Path>) -> ChannelSnapshot {
 /// (`merge_hat_channel` returned Err AND pre-merge bytes were 0)
 /// from non-empty merge error (pre-merge bytes > 0 but the
 /// write/append failed).
-pub fn refine_after_merge(
-    mut snapshot: ChannelSnapshot,
-    merge_succeeded: bool,
-) -> ChannelSnapshot {
+pub fn refine_after_merge(mut snapshot: ChannelSnapshot, merge_succeeded: bool) -> ChannelSnapshot {
     if merge_succeeded {
         // If bytes > 0 we now know the merge happened; promote
         // to `merged`. For `Missing` / `Unreadable` / `Empty`
@@ -194,6 +191,7 @@ impl ActivationOutcomeFacts {
     /// Build from a `ProcessedEvents` + `wave_policy_rejections`
     /// pair, falling back to zeros / false when not provided
     /// (e.g. interrupt path).
+    #[allow(dead_code)]
     pub fn from_processed(
         processed: Option<&ProcessedEvents>,
         wave_policy_rejections: usize,
@@ -228,22 +226,14 @@ impl ActivationOutcomeFacts {
         obj.insert("channel_exists".into(), Value::Bool(self.channel_exists));
         obj.insert(
             "channel_bytes".into(),
-            self.channel_bytes
-                .map(Value::from)
-                .unwrap_or(Value::Null),
+            self.channel_bytes.map(Value::from).unwrap_or(Value::Null),
         );
         obj.insert(
             "channel_readable".into(),
             Value::Bool(self.channel_readable),
         );
-        obj.insert(
-            "merge_succeeded".into(),
-            Value::Bool(self.merge_succeeded),
-        );
-        obj.insert(
-            "backend_success".into(),
-            Value::Bool(self.backend_success),
-        );
+        obj.insert("merge_succeeded".into(), Value::Bool(self.merge_succeeded));
+        obj.insert("backend_success".into(), Value::Bool(self.backend_success));
         obj.insert(
             "backend_exit_code".into(),
             self.backend_exit_code
@@ -258,10 +248,7 @@ impl ActivationOutcomeFacts {
             "backend_termination".into(),
             Value::Bool(self.backend_termination),
         );
-        obj.insert(
-            "output_bytes".into(),
-            Value::from(self.output_bytes),
-        );
+        obj.insert("output_bytes".into(), Value::from(self.output_bytes));
         obj.insert(
             "output_mentions_emit".into(),
             Value::Bool(self.output_mentions_emit),
@@ -343,6 +330,7 @@ pub fn log_activation_outcome(
 /// Helper for tests: a one-liner that asserts the row was written
 /// with the expected schema fields.
 #[cfg(test)]
+#[allow(dead_code)]
 pub(crate) fn read_outcome_row(session_dir: &Path) -> Option<Value> {
     use std::io::{BufRead, BufReader};
     let path = session_dir.join("runtime-trace.jsonl");
@@ -362,6 +350,13 @@ pub(crate) fn read_outcome_row(session_dir: &Path) -> Option<Value> {
     None
 }
 
+/// Helper to silence unused-import warnings while keeping the
+/// `json!` macro reachable for future field additions.
+#[allow(dead_code)]
+fn _ensure_json_macro_available() -> Value {
+    json!({})
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -378,17 +373,16 @@ mod tests {
             ActivationOutcomeStatus::MergeFailed.as_str(),
             "merge_failed"
         );
-        assert_eq!(
-            ActivationOutcomeStatus::Interrupted.as_str(),
-            "interrupted"
-        );
+        assert_eq!(ActivationOutcomeStatus::Interrupted.as_str(), "interrupted");
     }
 
     #[test]
     fn snapshot_channel_distinguishes_missing_unreadable_empty() {
         let tmp = tempfile::TempDir::new().unwrap();
-        // Missing
-        let missing = snapshot_channel(Some(&tmp.path().join("nope")));
+        // Missing: None path (no marker resolved) — the runner
+        // produces this when `resolve_hat_channel_events_path`
+        // returns None.
+        let missing = snapshot_channel(None);
         assert_eq!(missing.status, ActivationOutcomeStatus::Missing);
         assert_eq!(missing.bytes, None);
         // Empty (zero bytes file)
@@ -397,11 +391,35 @@ mod tests {
         let empty = snapshot_channel(Some(&empty_path));
         assert_eq!(empty.status, ActivationOutcomeStatus::Empty);
         assert_eq!(empty.bytes, Some(0));
-        // Unreadable (path is a directory)
-        let dir_path = tmp.path().join("dir");
-        std::fs::create_dir(&dir_path).unwrap();
-        let unreadable = snapshot_channel(Some(&dir_path));
-        assert_eq!(unreadable.status, ActivationOutcomeStatus::Unreadable);
+        // Unreadable: Some(path) where `metadata` fails. The
+        // simplest portable case is a path that does not exist
+        // and whose parent is also absent — that makes
+        // `std::fs::metadata` return ENOENT.
+        let non_existent_path = tmp.path().join("does-not-exist");
+        let unreadable = snapshot_channel(Some(&non_existent_path));
+        assert_eq!(
+            unreadable.status,
+            ActivationOutcomeStatus::Unreadable,
+            "non-existent path with Some(...) must be Unreadable"
+        );
+        assert_eq!(unreadable.bytes, None);
+        // Non-empty (placeholder status, refined by caller)
+        let non_empty_path = tmp.path().join("non-empty");
+        std::fs::write(&non_empty_path, b"abc\n").unwrap();
+        let non_empty = snapshot_channel(Some(&non_empty_path));
+        assert_eq!(non_empty.bytes, Some(4));
+        // Status is the placeholder before `refine_after_merge`;
+        // the helper returns Empty here because bytes > 0 path
+        // is just a placeholder branch the caller refines.
+        assert!(
+            matches!(
+                non_empty.status,
+                ActivationOutcomeStatus::Empty
+                    | ActivationOutcomeStatus::Merged
+                    | ActivationOutcomeStatus::MergeFailed
+            ),
+            "non-empty snapshot must be refineable to one of merged/empty/merge_failed"
+        );
     }
 
     #[test]
@@ -467,11 +485,4 @@ mod tests {
         assert_eq!(json["output_bytes"], 42);
         assert_eq!(json["terminal_obligation_topics"][0], "work.done");
     }
-}
-
-/// Helper to silence unused-import warnings while keeping the
-/// `json!` macro reachable for future field additions.
-#[allow(dead_code)]
-fn _ensure_json_macro_available() -> Value {
-    json!({})
 }

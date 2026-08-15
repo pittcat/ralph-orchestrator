@@ -4,7 +4,9 @@
 //! (normal merge, empty merge, interrupt).
 
 use super::super::super::*;
+#[allow(unused_imports)]
 use super::super::common::*;
+#[allow(unused_imports)]
 use super::super::fake_path::*;
 use super::helpers::init_git_workspace;
 use crate::test_support::CwdGuard;
@@ -107,7 +109,11 @@ fn u2_isolated_normal_merge_writes_merged_outcome_row() {
     // Seed an isolated hat channel with a valid record so the merge
     // path returns Ok with non-zero bytes.
     let channel_path = seed_hat_channel(&ctx, "executor", "primary-001", 1);
-    std::fs::write(&channel_path, "{\"topic\":\"work.done\",\"payload\":\"x\"}\n").unwrap();
+    std::fs::write(
+        &channel_path,
+        "{\"topic\":\"work.done\",\"payload\":\"x\"}\n",
+    )
+    .unwrap();
 
     let target = ctx.workspace().join(".ralph/events-main.jsonl");
     std::fs::create_dir_all(target.parent().unwrap()).unwrap();
@@ -118,17 +124,14 @@ fn u2_isolated_normal_merge_writes_merged_outcome_row() {
     // channel on success or empty-merge-error). The runner
     // performs the snapshot at this exact point in the live
     // call path; the contract test must mirror that order.
-    let snapshot =
-        crate::loop_runner::activation_outcome::snapshot_channel(Some(&channel_path));
-    let merge_result = crate::loop_runner::hat_channel::merge_hat_channel(
-        &ctx, &target, "executor", None,
-    );
+    let snapshot = crate::loop_runner::activation_outcome::snapshot_channel(Some(&channel_path));
+    let merge_result =
+        crate::loop_runner::hat_channel::merge_hat_channel(&ctx, &target, "executor", None);
     assert!(
         merge_result.is_ok(),
         "merge should succeed for non-empty channel"
     );
-    let refined =
-        crate::loop_runner::activation_outcome::refine_after_merge(snapshot, true);
+    let refined = crate::loop_runner::activation_outcome::refine_after_merge(snapshot, true);
     let facts = crate::loop_runner::activation_outcome::ActivationOutcomeFacts {
         loop_id: Some(ctx.loop_id().unwrap_or("loop").to_string()),
         channel_exists: true,
@@ -218,11 +221,9 @@ fn u2_empty_channel_merge_writes_empty_outcome_row() {
     // trigger `hat_channel_empty_after_activation` which
     // removes the channel and emits a diagnostic — the
     // snapshot must run first to record the raw empty fact.
-    let snapshot =
-        crate::loop_runner::activation_outcome::snapshot_channel(Some(&channel_path));
-    let merge_result = crate::loop_runner::hat_channel::merge_hat_channel(
-        &ctx, &target, "executor", None,
-    );
+    let snapshot = crate::loop_runner::activation_outcome::snapshot_channel(Some(&channel_path));
+    let merge_result =
+        crate::loop_runner::hat_channel::merge_hat_channel(&ctx, &target, "executor", None);
     assert!(
         merge_result.is_err(),
         "empty channel merge must fail closed (existing behaviour)"
@@ -233,8 +234,7 @@ fn u2_empty_channel_merge_writes_empty_outcome_row() {
         "existing\n",
         "empty channel must not pollute the target events file"
     );
-    let refined =
-        crate::loop_runner::activation_outcome::refine_after_merge(snapshot, false);
+    let refined = crate::loop_runner::activation_outcome::refine_after_merge(snapshot, false);
     let facts = crate::loop_runner::activation_outcome::ActivationOutcomeFacts {
         loop_id: Some(ctx.loop_id().unwrap_or("loop").to_string()),
         channel_exists: true,
@@ -308,13 +308,11 @@ fn u2_interrupt_path_writes_interrupted_outcome_row() {
     std::fs::create_dir_all(target.parent().unwrap()).unwrap();
     std::fs::write(&target, "").unwrap();
 
-    let merge_result = crate::loop_runner::hat_channel::merge_hat_channel(
-        &ctx, &target, "executor", None,
-    );
+    let merge_result =
+        crate::loop_runner::hat_channel::merge_hat_channel(&ctx, &target, "executor", None);
     assert!(merge_result.is_ok());
 
-    let snapshot =
-        crate::loop_runner::activation_outcome::snapshot_channel(Some(&channel_path));
+    let snapshot = crate::loop_runner::activation_outcome::snapshot_channel(Some(&channel_path));
     let refined = crate::loop_runner::activation_outcome::refine_for_interrupt(snapshot);
     let facts = crate::loop_runner::activation_outcome::ActivationOutcomeFacts {
         loop_id: Some(ctx.loop_id().unwrap_or("loop").to_string()),
@@ -454,11 +452,7 @@ fn u2_diagnostics_disabled_is_noop_for_outcome_row() {
     };
     let facts = crate::loop_runner::activation_outcome::ActivationOutcomeFacts::default();
     crate::loop_runner::activation_outcome::log_activation_outcome(
-        None,
-        0,
-        "executor",
-        &snapshot,
-        &facts,
+        None, 0, "executor", &snapshot, &facts,
     );
     // Reaching this line without a panic is the assertion.
 }
@@ -477,10 +471,8 @@ fn u2_outcome_row_carries_channel_source_ref() {
     let channel_path = seed_hat_channel(&ctx, "executor", "primary-004", 1);
     std::fs::write(&channel_path, "").unwrap();
 
-    let snapshot =
-        crate::loop_runner::activation_outcome::snapshot_channel(Some(&channel_path));
-    let refined =
-        crate::loop_runner::activation_outcome::refine_after_merge(snapshot, false);
+    let snapshot = crate::loop_runner::activation_outcome::snapshot_channel(Some(&channel_path));
+    let refined = crate::loop_runner::activation_outcome::refine_after_merge(snapshot, false);
     let facts = crate::loop_runner::activation_outcome::ActivationOutcomeFacts::default();
     crate::loop_runner::activation_outcome::log_activation_outcome(
         event_loop.diagnostics().session_dir(),
@@ -516,10 +508,8 @@ fn u2_outcome_row_keeps_schema_version_v1() {
     let channel_path = seed_hat_channel(&ctx, "executor", "primary-005", 1);
     std::fs::write(&channel_path, "").unwrap();
 
-    let snapshot =
-        crate::loop_runner::activation_outcome::snapshot_channel(Some(&channel_path));
-    let refined =
-        crate::loop_runner::activation_outcome::refine_after_merge(snapshot, false);
+    let snapshot = crate::loop_runner::activation_outcome::snapshot_channel(Some(&channel_path));
+    let refined = crate::loop_runner::activation_outcome::refine_after_merge(snapshot, false);
     let facts = crate::loop_runner::activation_outcome::ActivationOutcomeFacts::default();
     crate::loop_runner::activation_outcome::log_activation_outcome(
         event_loop.diagnostics().session_dir(),
@@ -537,10 +527,7 @@ fn u2_outcome_row_keeps_schema_version_v1() {
         Some("run-diagnosis-trace/v1"),
         "schema_version must stay at v1, got {row}"
     );
-    assert_eq!(
-        row.get("phase").and_then(Value::as_str),
-        Some("activation")
-    );
+    assert_eq!(row.get("phase").and_then(Value::as_str), Some("activation"));
 }
 
 // Keep the runtime-trace phase import alive so the test file

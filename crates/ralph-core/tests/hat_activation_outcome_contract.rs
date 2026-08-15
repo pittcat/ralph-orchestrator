@@ -9,10 +9,10 @@
 //! these guarantees so Unit 2's runner code and Unit 3's diagnosis
 //! skill can rely on them.
 
-use ralph_core::diagnostics::{
-    RuntimeTraceEntry, RuntimeTraceLogger, RuntimeTracePhase, RUNTIME_TRACE_SCHEMA_VERSION,
-};
 use ralph_core::diagnosis::read_runtime_trace_report;
+use ralph_core::diagnostics::{
+    RUNTIME_TRACE_SCHEMA_VERSION, RuntimeTraceEntry, RuntimeTraceLogger, RuntimeTracePhase,
+};
 use serde_json::json;
 use tempfile::TempDir;
 
@@ -63,19 +63,14 @@ fn hat_activation_outcome_round_trip_preserves_bounded_fields() {
     logger.append(entry);
 
     let report = read_runtime_trace_report(&session);
-    assert_eq!(
-        report.status,
-        ralph_core::diagnosis::BundleStatus::Present
-    );
+    assert_eq!(report.status, ralph_core::diagnosis::BundleStatus::Present);
     assert_eq!(report.record_count, 1);
     assert_eq!(report.first_sequence, Some(1));
     assert!(report.monotonic_sequences);
 
-    let body =
-        std::fs::read_to_string(session.join("runtime-trace.jsonl")).expect("read trace");
+    let body = std::fs::read_to_string(session.join("runtime-trace.jsonl")).expect("read trace");
     assert_eq!(body.lines().count(), 1, "exactly one row must be written");
-    let row: serde_json::Value =
-        serde_json::from_str(body.trim()).expect("row is valid JSON");
+    let row: serde_json::Value = serde_json::from_str(body.trim()).expect("row is valid JSON");
 
     // Schema version stays at v1 — additive contract.
     assert_eq!(
@@ -94,10 +89,7 @@ fn hat_activation_outcome_round_trip_preserves_bounded_fields() {
         Some(ACTIVATION_OUTCOME_KIND)
     );
     assert_eq!(row.get("status").and_then(|v| v.as_str()), Some("empty"));
-    assert_eq!(
-        row.get("hat").and_then(|v| v.as_str()),
-        Some("executor")
-    );
+    assert_eq!(row.get("hat").and_then(|v| v.as_str()), Some("executor"));
     assert_eq!(
         row.get("source_ref")
             .or_else(|| row.get("ref"))
@@ -158,9 +150,7 @@ fn legacy_runtime_trace_rows_still_pass_through_reader() {
 
     // Three rows that look like the v1 baseline: phase=batch /
     // accepted / commit, plain kind names, no new outcome fields.
-    logger.append(
-        RuntimeTraceEntry::new(0, 0, RuntimeTracePhase::Batch).with_hat("executor"),
-    );
+    logger.append(RuntimeTraceEntry::new(0, 0, RuntimeTracePhase::Batch).with_hat("executor"));
     logger.append(
         RuntimeTraceEntry::new(0, 0, RuntimeTracePhase::Accepted)
             .with_hat("executor")
@@ -169,10 +159,7 @@ fn legacy_runtime_trace_rows_still_pass_through_reader() {
     logger.append(RuntimeTraceEntry::new(0, 0, RuntimeTracePhase::Commit));
 
     let report = read_runtime_trace_report(&session);
-    assert_eq!(
-        report.status,
-        ralph_core::diagnosis::BundleStatus::Present
-    );
+    assert_eq!(report.status, ralph_core::diagnosis::BundleStatus::Present);
     assert_eq!(
         report.record_count, 3,
         "reader must count all 3 legacy rows"
@@ -182,13 +169,11 @@ fn legacy_runtime_trace_rows_still_pass_through_reader() {
     assert!(report.monotonic_sequences);
     assert_eq!(report.malformed_lines, 0);
 
-    let body =
-        std::fs::read_to_string(session.join("runtime-trace.jsonl")).expect("read trace");
+    let body = std::fs::read_to_string(session.join("runtime-trace.jsonl")).expect("read trace");
     // Every legacy row still uses the v1 schema string and never
     // carries the activation outcome kind.
     for line in body.lines() {
-        let row: serde_json::Value =
-            serde_json::from_str(line).expect("legacy row is valid JSON");
+        let row: serde_json::Value = serde_json::from_str(line).expect("legacy row is valid JSON");
         assert_eq!(
             row.get("schema_version").and_then(|v| v.as_str()),
             Some(RUNTIME_TRACE_SCHEMA_VERSION)
@@ -220,10 +205,7 @@ fn legacy_rows_and_activation_outcome_rows_share_one_session() {
     logger.append(RuntimeTraceEntry::new(0, 0, RuntimeTracePhase::Commit));
 
     let report = read_runtime_trace_report(&session);
-    assert_eq!(
-        report.status,
-        ralph_core::diagnosis::BundleStatus::Present
-    );
+    assert_eq!(report.status, ralph_core::diagnosis::BundleStatus::Present);
     assert_eq!(report.record_count, 3);
     assert_eq!(report.first_sequence, Some(1));
     assert_eq!(report.last_sequence, Some(3));
@@ -268,8 +250,7 @@ fn hat_activation_outcome_fields_are_bounded_by_field_cap() {
             .with_fields(huge_fields),
     );
 
-    let body =
-        std::fs::read_to_string(session.join("runtime-trace.jsonl")).expect("read trace");
+    let body = std::fs::read_to_string(session.join("runtime-trace.jsonl")).expect("read trace");
     // Cap is 8 KiB per field plus a small envelope. The whole row
     // must be far below the input size and bounded.
     assert!(
@@ -285,8 +266,7 @@ fn hat_activation_outcome_fields_are_bounded_by_field_cap() {
 
     // The small scalar `status` (which has its own per-string cap)
     // must survive the cap walk.
-    let row: serde_json::Value =
-        serde_json::from_str(body.trim()).expect("row is valid JSON");
+    let row: serde_json::Value = serde_json::from_str(body.trim()).expect("row is valid JSON");
     assert_eq!(
         row.get("status").and_then(|v| v.as_str()),
         Some("merged"),

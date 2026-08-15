@@ -31,11 +31,15 @@ mod prompt;
 // Plan 2026-08-15-1823 (fix empty channel activation observability)
 // Unit 2: bounded activation outcome rows in the runtime trace
 // sidecar. Module is purely additive — observation only, no effect
-// on loop / recovery / retry decisions.
+// on loop / recovery / retry decisions. Items are re-exported so
+// sibling modules (`inner.rs` / `entry.rs`) can call
+// `activation_outcome::xxx` without re-importing each name.
 mod activation_outcome;
+pub(crate) use activation_outcome::ActivationOutcomeStatus;
+#[allow(unused_imports)]
 pub(crate) use activation_outcome::{
-    log_activation_outcome, refine_after_merge, refine_for_interrupt, snapshot_channel,
-    ActivationOutcomeFacts, ActivationOutcomeStatus, ChannelSnapshot,
+    ActivationOutcomeFacts, ChannelSnapshot, log_activation_outcome, refine_after_merge,
+    refine_for_interrupt, snapshot_channel,
 };
 // Plan 2026-08-07-004: `loop_runner::runner` was split into five
 // sibling modules. The five `mod` declarations below are what makes
