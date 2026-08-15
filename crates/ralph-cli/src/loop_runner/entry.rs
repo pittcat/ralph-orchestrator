@@ -23,8 +23,8 @@ use tracing::{error, warn};
 use crate::cli::{ColorMode, Verbosity};
 
 use super::activation_outcome::{
-    ActivationOutcomeFacts, ActivationOutcomeStatus, log_activation_outcome, refine_for_interrupt,
-    snapshot_channel,
+    ActivationOutcomeFacts, channel_exists_for, channel_readable_for, log_activation_outcome,
+    refine_for_interrupt, snapshot_channel,
 };
 use super::inner::run_loop_impl_inner;
 use super::paths::resolve_current_events_path;
@@ -163,10 +163,9 @@ pub(crate) fn merge_isolated_channel_on_interrupt(
     let authoritative_hat_id = HatId::new(authoritative_hat);
     let facts = ActivationOutcomeFacts {
         loop_id: ctx.loop_id().map(|s| s.to_string()),
-        channel_exists: snapshot.bytes.is_some()
-            || matches!(snapshot.status, ActivationOutcomeStatus::Empty),
+        channel_exists: channel_exists_for(snapshot.status),
         channel_bytes: snapshot.bytes,
-        channel_readable: !matches!(snapshot.status, ActivationOutcomeStatus::Unreadable),
+        channel_readable: channel_readable_for(snapshot.status),
         // Interrupt path does not run the normal merge close;
         // mark `merge_succeeded` false so the diagnosis skill
         // never classifies an interrupted activation as a

@@ -14,7 +14,8 @@ use ralph_proto::HatId;
 use tracing::{error, warn};
 
 use super::activation_outcome::{
-    ActivationOutcomeFacts, ActivationOutcomeStatus, log_activation_outcome, snapshot_channel,
+    ActivationOutcomeFacts, channel_exists_for, channel_readable_for, log_activation_outcome,
+    snapshot_channel,
 };
 use super::late_events::output_mentions_ralph_emit;
 use super::paths::resolve_emit_events_path;
@@ -129,13 +130,9 @@ pub(crate) fn write_activation_outcome_for_normal_merge(
         super::activation_outcome::refine_after_merge(pre_snapshot, merge_succeeded);
     let facts = ActivationOutcomeFacts {
         loop_id: Some(ctx.loop_id().unwrap_or(loop_id).to_string()),
-        channel_exists: refined_snapshot.bytes.is_some()
-            || matches!(refined_snapshot.status, ActivationOutcomeStatus::Empty),
+        channel_exists: channel_exists_for(refined_snapshot.status),
         channel_bytes: refined_snapshot.bytes,
-        channel_readable: !matches!(
-            refined_snapshot.status,
-            ActivationOutcomeStatus::Unreadable
-        ),
+        channel_readable: channel_readable_for(refined_snapshot.status),
         merge_succeeded,
         backend_success: success,
         backend_exit_code: outcome_backend_exit_code,

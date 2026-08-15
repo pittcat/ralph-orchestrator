@@ -64,6 +64,26 @@ impl ActivationOutcomeStatus {
     }
 }
 
+/// `channel_readable` for a given status. Returns `false` only for
+/// `Missing` (no channel path resolved) and `Unreadable` (path
+/// present but metadata failed); all other statuses report a
+/// readable channel. Used by `ActivationOutcomeFacts` so the
+/// three-state `Missing` / `Empty` / `Unreadable` distinction is
+/// preserved in the trace row.
+pub fn channel_readable_for(status: ActivationOutcomeStatus) -> bool {
+    !matches!(
+        status,
+        ActivationOutcomeStatus::Missing | ActivationOutcomeStatus::Unreadable
+    )
+}
+
+/// `channel_exists` for a given status. Returns `false` only for
+/// `Missing`; all other statuses (including `Unreadable`) report
+/// an existing channel path that just could not be read.
+pub fn channel_exists_for(status: ActivationOutcomeStatus) -> bool {
+    !matches!(status, ActivationOutcomeStatus::Missing)
+}
+
 /// Snapshot of the pre-merge channel state. The runner captures this
 /// *before* invoking `merge_hat_channel` so the activation outcome
 /// row can describe the raw state even when `merge_hat_channel`
@@ -374,6 +394,33 @@ mod tests {
             "merge_failed"
         );
         assert_eq!(ActivationOutcomeStatus::Interrupted.as_str(), "interrupted");
+    }
+
+    #[test]
+    fn channel_readable_and_exists_truth_table() {
+        // Missing → channel_exists=false, channel_readable=false.
+        // Unreadable → channel_exists=true (path present), channel_readable=false.
+        // Everything else → both true.
+        let cases = [
+            (ActivationOutcomeStatus::Merged, true, true),
+            (ActivationOutcomeStatus::Empty, true, true),
+            (ActivationOutcomeStatus::Missing, false, false),
+            (ActivationOutcomeStatus::Unreadable, true, false),
+            (ActivationOutcomeStatus::MergeFailed, true, true),
+            (ActivationOutcomeStatus::Interrupted, true, true),
+        ];
+        for (status, expected_exists, expected_readable) in cases {
+            assert_eq!(
+                channel_exists_for(status),
+                expected_exists,
+                "channel_exists_for({status:?})",
+            );
+            assert_eq!(
+                channel_readable_for(status),
+                expected_readable,
+                "channel_readable_for({status:?})",
+            );
+        }
     }
 
     #[test]
