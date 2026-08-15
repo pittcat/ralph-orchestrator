@@ -976,20 +976,8 @@ async fn verify_preset(
             "preset verify requires event_loop.execution_mode: isolated; coordinator mode is \
              not supported";
         eprintln!("{detail}");
-        let report = PresetVerifyReport {
-            passed: false,
-            source_kind: SourceKind::External,
-            static_layer: StaticLayer {
-                passed: true,
-                warnings: 0,
-                errors: 0,
-                findings: Vec::new(),
-            },
-            scenarios: Vec::new(),
-            failure_kind: Some("input_error".to_string()),
-            last_observable_state: Default::default(),
-            trace_digest: String::new(),
-        };
+        let mut report = PresetVerifyReport::default();
+        report.with_failure_kind("input_error");
         return render_and_exit(report, format, use_colors);
     }
 
@@ -1030,15 +1018,10 @@ async fn verify_preset(
 
     // Static failure → return early with the static layer in the report.
     if !static_layer.passed {
-        let report = PresetVerifyReport {
-            passed: false,
-            source_kind,
-            static_layer,
-            scenarios: Vec::new(),
-            failure_kind: Some("static_contract_failure".to_string()),
-            last_observable_state: Default::default(),
-            trace_digest: String::new(),
-        };
+        let mut report = PresetVerifyReport::default();
+        report.with_failure_kind("static_contract_failure");
+        report.source_kind = source_kind;
+        report.static_layer = static_layer;
         return render_and_exit(report, format, use_colors);
     }
 
@@ -1054,15 +1037,10 @@ async fn verify_preset(
             // "scenario_failure" so reports are actionable.
             let kind = "input_error";
             let detail = format!("{err:?}");
-            let report = PresetVerifyReport {
-                passed: false,
-                source_kind,
-                static_layer,
-                scenarios: Vec::new(),
-                failure_kind: Some(kind.to_string()),
-                last_observable_state: Default::default(),
-                trace_digest: String::new(),
-            };
+            let mut report = PresetVerifyReport::default();
+            report.with_failure_kind(kind);
+            report.source_kind = source_kind;
+            report.static_layer = static_layer;
             eprintln!("scenario parse error: {detail}");
             return render_and_exit(report, format, use_colors);
         }
@@ -1076,15 +1054,10 @@ async fn verify_preset(
         let workspace = match DriverWorkspace::new() {
             Ok(ws) => ws,
             Err(e) => {
-                let report = PresetVerifyReport {
-                    passed: false,
-                    source_kind,
-                    static_layer,
-                    scenarios: Vec::new(),
-                    failure_kind: Some("runtime_exception".to_string()),
-                    last_observable_state: Default::default(),
-                    trace_digest: String::new(),
-                };
+                let mut report = PresetVerifyReport::default();
+                report.with_failure_kind("runtime_exception");
+                report.source_kind = source_kind;
+                report.static_layer = static_layer;
                 eprintln!("workspace error: {e}");
                 return render_and_exit(report, format, use_colors);
             }
@@ -1094,21 +1067,16 @@ async fn verify_preset(
                 let scenario_report = evaluate_scenario(outcome.clone());
                 if !scenario_report.passed && overall_failure.is_none() {
                     if let Some(kind) = &outcome.failure_kind {
-                        overall_failure = Some(clone_failure_kind(kind));
+                        overall_failure = Some(kind.clone());
                     }
                 }
                 outcomes.push((outcome, scenario_report));
             }
             Err(kind) => {
-                let report = PresetVerifyReport {
-                    passed: false,
-                    source_kind,
-                    static_layer,
-                    scenarios: Vec::new(),
-                    failure_kind: Some(kind.tag().to_string()),
-                    last_observable_state: Default::default(),
-                    trace_digest: String::new(),
-                };
+                let mut report = PresetVerifyReport::default();
+                report.with_failure_kind(kind.tag().to_string());
+                report.source_kind = source_kind;
+                report.static_layer = static_layer;
                 eprintln!("runtime error: {kind:?}");
                 return render_and_exit(report, format, use_colors);
             }
@@ -1142,18 +1110,6 @@ fn render_and_exit(
         std::process::exit(1);
     }
     Ok(())
-}
-
-fn clone_failure_kind(kind: &FailureKind) -> FailureKind {
-    match kind {
-        FailureKind::InputError(s) => FailureKind::InputError(s.clone()),
-        FailureKind::StaticContractFailure(s) => FailureKind::StaticContractFailure(s.clone()),
-        FailureKind::ScenarioFailure(s) => FailureKind::ScenarioFailure(s.clone()),
-        FailureKind::RuntimeException(s) => FailureKind::RuntimeException(s.clone()),
-        FailureKind::Timeout(s) => FailureKind::Timeout(s.clone()),
-        FailureKind::NoProgress(s) => FailureKind::NoProgress(s.clone()),
-        FailureKind::UnclosedTerminal(s) => FailureKind::UnclosedTerminal(s.clone()),
-    }
 }
 
 fn print_verify_human_report(report: &PresetVerifyReport, _use_colors: bool) {

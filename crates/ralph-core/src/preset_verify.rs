@@ -193,6 +193,38 @@ pub struct PresetVerifyReport {
     pub trace_digest: String,
 }
 
+impl Default for PresetVerifyReport {
+    /// Zero-state shim for early-exit report construction. CLI command
+    /// surfaces use `PresetVerifyReport::default().with_failure_kind(...)`.
+    fn default() -> Self {
+        Self {
+            passed: false,
+            source_kind: SourceKind::External,
+            static_layer: StaticLayer {
+                passed: true,
+                warnings: 0,
+                errors: 0,
+                findings: Vec::new(),
+            },
+            scenarios: Vec::new(),
+            failure_kind: None,
+            last_observable_state: LastObservableState::default(),
+            trace_digest: String::new(),
+        }
+    }
+}
+
+impl PresetVerifyReport {
+    /// Set `failure_kind` for early-exit error reports. Takes `&mut self` so
+    /// callers can compose additional field overrides after the initial
+    /// `PresetVerifyReport::default()` shim (e.g. attach the resolved
+    /// `static_layer` after a contract failure).
+    pub fn with_failure_kind(&mut self, kind: impl Into<String>) -> &mut Self {
+        self.failure_kind = Some(kind.into());
+        self
+    }
+}
+
 impl Limits {
     pub fn new(max_steps: u32, no_progress_steps: u32) -> Result<Self, InputError> {
         if max_steps == 0 {
