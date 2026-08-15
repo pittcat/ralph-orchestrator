@@ -686,3 +686,87 @@ fn u2_outcome_row_keeps_schema_version_v1() {
 fn _touch_phase() -> RuntimeTracePhase {
     RuntimeTracePhase::Activation
 }
+
+// Plan 2026-08-15-1823 U12 (R11): end-to-end runner-path test for
+// the merge_failed status. A non-empty channel that fails to merge
+// (e.g. write-locked target) must produce a row with status
+// "merge_failed", channel_exists=true, channel_bytes>0,
+// channel_readable=true.
+#[test]
+fn u12_in_process_runner_writes_merge_failed_outcome_row() {
+    use std::path::Path;
+    let workspace = tempfile::tempdir().expect("tempdir");
+    let _cwd = CwdGuard::set(workspace.path());
+    init_git_workspace(workspace.path());
+
+    let (ctx, event_loop) = build_isolated_executor_loop(workspace.path());
+    let channel_path = seed_hat_channel(&ctx, "executor", "primary-mf", 1);
+    // Non-empty channel.
+    std::fs::write(&channel_path, b"{\"topic\":\"work.done\"}\n").unwrap();
+
+    // Mark the events-main.jsonl as read-only so merge_hat_channel
+    // fails closed when it tries to append. The pre-merge snapshot
+    // still records the non-empty bytes; refine_after_merge on
+    // Err + non-empty bytes must produce MergeFailed.
+    let target = ctx.workspace().join(".ralph/events-main.jsonl");
+    std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+    std::fs::write(&target, "").unwrap();
+    let mut perms = std::fs::metadata(&target).unwrap().permissions();
+    perms.set_readonly(true);
+    std::fs::set_permissions(&target, perms).unwrap();
+
+    let snapshot =
+        crate::loop_runner::activation_outcome::snapshot_channel(Some(&channel_path));
+    let merge_result =
+        crate::loop_runner::hat_channel::merge_hat_channel(&ctx, &target, "executor", None);
+    // Restore perms so the test cleanup can write.
+    let mut perms = std::fs::metadata(&target).unwrap().permissions();
+    #[allow(clippy::permissions_set_readonly_false)]
+    perms.set_readonly(false);
+    std::fs::set_permissions(&target, perms).unwrap();
+
+    assert!(
+        merge_result.is_err(),
+        "merge must fail when target is read-only"
+    );
+    let refined =
+        crate::loop_runner::activation_outcome::refine_after_merge(snapshot, false);
+    assert_eq!(
+        refined.status,
+        crate::loop_runner::activation_outcome::ActivationOutcomeStatus::MergeFailed,
+        "non-empty channel + merge Err must refine to MergeFailed"
+    );
+
+    let facts = crate::loop_runner::activation_outcome::ActivationOutcomeFacts {
+        loop_id: Some(ctx.loop_id().unwrap_or("loop").to_string()),
+        channel_exists: true,
+        channel_bytes: refined.bytes,
+        channel_readable: true,
+        merge_succeeded: false,
+        backend_success: true,
+        backend_exit_code: Some(0),
+        watchdog_timeout: false,
+        backend_termination: false,
+        output_bytes: 0,
+        output_mentions_emit: false,
+        terminal_obligation_topics: vec!["work.done".into()],
+        ..Default::default()
+    };
+    crate::loop_runner::activation_outcome::log_activation_outcome(
+        event_loop.diagnostics().session_dir(),
+        1,
+        "executor",
+        &refined,
+        &facts,
+    );
+
+    let rows = read_outcome_rows(&event_loop);
+    assert_eq!(rows.len(), 1);
+    let row = &rows[0];
+    assert_eq!(
+        row.get("status").and_then(Value::as_str),
+        Some("merge_failed"),
+        "non-empty channel + merge Err must record status=merge_failed"
+    );
+    let _ = Path::new("unused");
+}
