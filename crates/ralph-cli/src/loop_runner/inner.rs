@@ -3669,30 +3669,33 @@ pub(super) async fn run_loop_impl_inner(
         // the authoritative hat of the channel.
         let mut empty_terminal_channel = false;
         // Plan 2026-08-15-1823 (fix empty channel activation observability)
-        // Unit 1: the if-isolated-mode block (channel resolution,
-        // merge, empty-terminal handling, activation outcome row
-        // emission) was extracted into the dedicated sibling module
-        // `activation_outcome_close`. The interrupt path lives in
-        // `entry.rs::merge_isolated_channel_on_interrupt` and does
-        // not depend on this block — the prior
-        // `activation_outcome_written` dead flag was removed.
+        // Unit 1+U5: the if-isolated-mode block was extracted into
+        // the dedicated sibling module `activation_outcome_close`.
+        // The pre-process half (`prepare_normal_merge`) captures
+        // the empty-terminal flag (used by the missing-terminal
+        // recovery path) and the pre-merge snapshot + merge
+        // outcome (used by the activation outcome row); the
+        // post-process half (`write_activation_outcome_for_normal_merge`)
+        // writes the structured row *after*
+        // `event_loop.process_output` so the row lives in the same
+        // iteration as the event processing it observes. The
+        // interrupt path lives in `entry.rs` and does not depend on
+        // this block.
+        let mut normal_merge_state: Option<crate::loop_runner::activation_outcome_close::NormalMergeState> = None;
         if isolated_mode {
-            let outcome_row =
-                crate::loop_runner::activation_outcome_close::write_activation_outcome_for_normal_merge(
+            let (outcome_row, merge_state) =
+                crate::loop_runner::activation_outcome_close::prepare_normal_merge(
                     &ctx,
                     &config,
                     state_machine_enabled,
-                    &event_loop,
-                    outcome.backend_exit_code,
-                    outcome.watchdog_timeout,
-                    &output,
                     &display_hat,
-                    &loop_id,
                     success,
+                    outcome.watchdog_timeout,
                     backend_termination.as_ref(),
-                    iteration as u64,
+                    &output,
                 );
             empty_terminal_channel = outcome_row.empty_terminal_channel;
+            normal_merge_state = Some(merge_state);
         }
 
         // Process output
@@ -3702,6 +3705,27 @@ pub(super) async fn run_loop_impl_inner(
                 info!(
                     "All done! {} detected.",
                     config.event_loop.completion_promise
+                );
+            }
+
+            // U5: the activation outcome row is best-effort
+            // observation. Termination is still terminal even
+            // when the row write fails, so the row goes
+            // *before* the hook dispatch chain — the row is
+            // observation only and must never block termination.
+            if let Some(merge_state) = normal_merge_state.take() {
+                crate::loop_runner::activation_outcome_close::write_activation_outcome_for_normal_merge(
+                    &event_loop,
+                    &ctx,
+                    merge_state,
+                    outcome.backend_exit_code,
+                    outcome.watchdog_timeout,
+                    &output,
+                    &display_hat,
+                    &loop_id,
+                    success,
+                    backend_termination.as_ref(),
+                    iteration as u64,
                 );
             }
 
@@ -3758,6 +3782,26 @@ pub(super) async fn run_loop_impl_inner(
             }
             finalize_recovery_diagnosis(&mut event_loop, &loop_context, None);
             return Ok(reason);
+        }
+
+        // U5: write the activation outcome row in the non-termination
+        // branch too. process_output has already run, so the row is
+        // observation-only and lives in the same iteration as the
+        // event processing it describes.
+        if let Some(merge_state) = normal_merge_state.take() {
+            crate::loop_runner::activation_outcome_close::write_activation_outcome_for_normal_merge(
+                &event_loop,
+                &ctx,
+                merge_state,
+                outcome.backend_exit_code,
+                outcome.watchdog_timeout,
+                &output,
+                &display_hat,
+                &loop_id,
+                success,
+                backend_termination.as_ref(),
+                iteration as u64,
+            );
         }
 
         // Check for planning session user responses (if in planning mode)

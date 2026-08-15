@@ -15,10 +15,23 @@ use tracing::{error, warn};
 
 use super::activation_outcome::{
     ActivationOutcomeFacts, channel_exists_for, channel_readable_for, log_activation_outcome,
-    snapshot_channel,
+    refine_after_merge, snapshot_channel, ChannelSnapshot,
 };
 use super::late_events::output_mentions_ralph_emit;
 use super::paths::resolve_emit_events_path;
+
+/// Intermediate state captured before `event_loop.process_output` so
+/// the activation outcome row can be written *after* event processing
+/// without re-running the channel read or losing the merge result.
+pub(crate) struct NormalMergeState {
+    /// Snapshot captured *before* `merge_hat_channel` so the
+    /// persisted row records the pre-merge `Empty` / `Missing` /
+    /// `Unreadable` / non-empty state (U2).
+    pub snapshot: ChannelSnapshot,
+    /// Whether `merge_hat_channel` returned `Ok`. Drives
+    /// `refine_after_merge` and the row's `merge_succeeded` flag.
+    pub merge_succeeded: bool,
+}
 
 /// Outcome of the activation-outcome close block. The runner uses
 /// `empty_terminal_channel` to drive the existing missing-terminal
@@ -31,38 +44,27 @@ pub(crate) struct NormalMergeOutcome {
     pub empty_terminal_channel: bool,
 }
 
-/// Snapshot the pre-merge channel state and merge the isolated
-/// hat-channel back into the main events file, then write a single
-/// bounded `hat_activation_outcome` row to `runtime-trace.jsonl`.
+/// Capture the pre-merge snapshot and merge the isolated hat-channel
+/// back into the main events file. Returns the state required to
+/// write the activation outcome row *after* `event_loop.process_output`
+/// (U5) plus the `empty_terminal_channel` flag that drives the
+/// missing-terminal recovery path.
 ///
-/// This is the entry point extracted from `inner.rs` so the
-/// orchestration body stays at the HARD RULE 5000-line ceiling. The
-/// function is observation-only: it never alters `task.resume`,
-/// retry, recovery, or any other loop decision. The caller is
-/// responsible for surfacing `NormalMergeOutcome::empty_terminal_channel`
-/// to the existing missing-terminal branch.
-///
-/// Snapshot-before-merge ordering (U2): `snapshot_channel` runs
-/// *before* `merge_hat_channel` so the activation outcome row
-/// captures the pre-merge `Empty` / `Missing` / `Unreadable` /
-/// non-empty state — production would otherwise re-read metadata
-/// on the (already deleted) empty channel and misclassify the row
-/// as `unreadable`.
+/// `process_output` MUST be called before
+/// [`write_activation_outcome_for_normal_merge`] — the row's four
+/// event counters come from the runner's processed state, not from
+/// the merge itself.
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn write_activation_outcome_for_normal_merge(
+pub(crate) fn prepare_normal_merge(
     ctx: &LoopContext,
     config: &RalphConfig,
     state_machine_enabled: bool,
-    event_loop: &EventLoop,
-    outcome_backend_exit_code: Option<i32>,
-    outcome_watchdog_timeout: bool,
-    output: &str,
     display_hat: &HatId,
-    loop_id: &str,
     success: bool,
+    outcome_watchdog_timeout: bool,
     backend_termination: Option<&String>,
-    iteration: u64,
-) -> NormalMergeOutcome {
+    output: &str,
+) -> (NormalMergeOutcome, NormalMergeState) {
     let mut result = NormalMergeOutcome::default();
 
     let channel_path = crate::loop_runner::paths::resolve_hat_channel_events_path(ctx);
@@ -120,20 +122,41 @@ pub(crate) fn write_activation_outcome_for_normal_merge(
         );
     }
 
-    // U2: refine the PRE-MERGE snapshot with the merge outcome.
-    // The snapshot was captured *before* `merge_hat_channel`
-    // deleted the file; the `refined_snapshot` therefore preserves
-    // the pre-merge `Empty` / `Missing` / `Unreadable` distinction
-    // even though the file no longer exists on disk by the time
-    // the activation outcome row is written.
-    let refined_snapshot =
-        super::activation_outcome::refine_after_merge(pre_snapshot, merge_succeeded);
+    let state = NormalMergeState {
+        snapshot: pre_snapshot,
+        merge_succeeded,
+    };
+    (result, state)
+}
+
+/// Write the activation outcome row AFTER `event_loop.process_output`
+/// (U5). The `processed` snapshot is the
+/// `Option<&ProcessedEventsWithWaves>` returned by the runner's
+/// process phase; when the runner cannot provide it the function
+/// falls back to zero counters. The row carries the pre-merge
+/// snapshot refined by the merge outcome, plus the bounded backend
+/// scalars.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn write_activation_outcome_for_normal_merge(
+    event_loop: &EventLoop,
+    ctx: &LoopContext,
+    state: NormalMergeState,
+    outcome_backend_exit_code: Option<i32>,
+    outcome_watchdog_timeout: bool,
+    output: &str,
+    display_hat: &HatId,
+    loop_id: &str,
+    success: bool,
+    backend_termination: Option<&String>,
+    iteration: u64,
+) {
+    let refined_snapshot = refine_after_merge(state.snapshot, state.merge_succeeded);
     let facts = ActivationOutcomeFacts {
         loop_id: Some(ctx.loop_id().unwrap_or(loop_id).to_string()),
         channel_exists: channel_exists_for(refined_snapshot.status),
         channel_bytes: refined_snapshot.bytes,
         channel_readable: channel_readable_for(refined_snapshot.status),
-        merge_succeeded,
+        merge_succeeded: state.merge_succeeded,
         backend_success: success,
         backend_exit_code: outcome_backend_exit_code,
         watchdog_timeout: outcome_watchdog_timeout,
@@ -154,6 +177,4 @@ pub(crate) fn write_activation_outcome_for_normal_merge(
         &refined_snapshot,
         &facts,
     );
-
-    result
 }
