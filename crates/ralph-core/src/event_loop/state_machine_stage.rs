@@ -249,6 +249,10 @@ impl EventLoop {
                 &candidate.decision,
                 candidate.opens_instance,
                 candidate.closes_instance,
+                // Plan GAP-02 / Unit 2: terminal flags come from the
+                // candidate's captured snapshot, not the live runtime.
+                candidate.accepted_at_terminal_observed,
+                candidate.accepted_at_terminal_honored,
             );
             if let Some(delta) = delta {
                 let mut delta = delta;

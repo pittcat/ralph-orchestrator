@@ -638,6 +638,14 @@ impl StateMachineRuntimeState {
     /// belongs to the validator, not to a post-hoc introspection).
     /// Unit 2 wires the candidate stage; until then the helper
     /// accepts the flags explicitly to keep the projection honest.
+    ///
+    /// Plan GAP-02 / Unit 2: the caller also supplies the terminal
+    /// `terminal_observed` / `terminal_honored` flags captured at
+    /// candidate stage (`accepted_at_terminal_observed/honored`).
+    /// Reading them from `self` (live) would lose the candidate's
+    /// view because the live runtime is not yet mutated by this
+    /// delta. The wire shape of `StateMachineTransitionDelta` is
+    /// unchanged; only the input source is corrected.
     pub fn project_transition_delta(
         &self,
         transition_id: StateMachineTransitionId,
@@ -645,6 +653,8 @@ impl StateMachineRuntimeState {
         decision: &StateMachineDecision,
         opens_instance: bool,
         closes_instance: bool,
+        terminal_observed: bool,
+        terminal_honored: bool,
     ) -> Option<StateMachineTransitionDelta> {
         // Plan §1.4 — only accepted business/terminal projections become
         // ledger material; rejection/diagnostic decisions are not
@@ -665,10 +675,12 @@ impl StateMachineRuntimeState {
             new_state,
             opens_instance,
             closes_instance,
-            // Ledger only records `terminal_observed=true` when the
-            // validator has set it on the live runtime.
-            terminal_observed: self.terminal_observed,
-            terminal_honored: self.terminal_honored,
+            // Unit 2: terminal flags come from the candidate snapshot,
+            // not the live runtime. The candidate stage already recorded
+            // them via `accepted_at_terminal_observed/honored`; reading
+            // from `self` here would be stale until apply mutates live.
+            terminal_observed,
+            terminal_honored,
         })
     }
 

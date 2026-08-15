@@ -1212,6 +1212,93 @@ hats:
     );
 }
 
+// ---------------------------------------------------------------------------
+// Plan GAP-02 / Unit 2: terminal observed/honored must propagate from the
+// candidate stage's captured snapshot into the projected delta and onto
+// the live runtime. Pre-fix, `project_transition_delta` read the live
+// runtime's terminal flags (still `false` because the apply had not
+// happened yet), so the durable delta lost the terminal flag and live
+// diverged from replay.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn u2_terminal_observed_propagates_from_candidate_to_live_runtime() {
+    // U2 §10 Red test: when a terminal event's candidate captures
+    // `accepted_at_terminal_observed = true` (set by
+    // `validate_terminal_event`), the projected delta must carry
+    // `terminal_observed = true` so that `apply_state_machine_decisions`
+    // updates the live runtime. Pre-fix this test fails because
+    // `project_transition_delta` reads `self.terminal_observed` (live),
+    // which is still `false` until apply mutates live, so the durable
+    // delta loses the terminal flag and live stays at `false` even
+    // though the candidate knew it was `true`.
+    //
+    // We invoke `apply_state_machine_decisions` directly with a
+    // hand-built candidate that mirrors the production capture: this
+    // tests the production projection path itself, not the synthetic
+    // candidate stage (whose terminal event would be rejected by the
+    // completion guard before reaching apply in the synthetic
+    // `process_events_from_jsonl` path).
+    use crate::event_loop::state_machine_stage::CandidateStateMachineDecision;
+    use crate::event_reader::Event as JsonlEvent;
+
+    let mut event_loop = EventLoop::new(RalphConfig::default());
+    event_loop.initialize("Test");
+
+    // Make sure the runtime is materialised (it is empty when
+    // state_machine is not enabled in config, but
+    // `apply_state_machine_decisions` materialises it via
+    // `get_or_insert_with`).
+    let candidate = CandidateStateMachineDecision {
+        event: JsonlEvent {
+            topic: "LOOP_COMPLETE".to_string(),
+            payload: Some("Done".to_string()),
+            ts: chrono::Utc::now().to_rfc3339(),
+            hat: None,
+            triggered: None,
+            source: None,
+            wave_id: None,
+            wave_index: None,
+            wave_total: None,
+            system_injected: None,
+        },
+        decision: crate::state_machine::StateMachineDecision::Accept {
+            instance_key: None,
+            new_state: "terminal".to_string(),
+        },
+        opens_instance: false,
+        closes_instance: false,
+        // Production candidate capture: validate_terminal_event set
+        // candidate.terminal_observed=true before returning Accept.
+        accepted_at_terminal_observed: true,
+        accepted_at_terminal_honored: false,
+    };
+
+    let projected = event_loop.apply_state_machine_decisions(&[candidate], "loop-u2");
+
+    assert_eq!(projected.len(), 1, "terminal candidate must project a delta");
+    let delta = &projected[0];
+    assert!(
+        delta.terminal_observed,
+        "delta.terminal_observed must come from candidate snapshot, not live runtime (U2 Red)"
+    );
+    assert!(
+        !delta.terminal_honored,
+        "delta.terminal_honored must remain false until mark_terminal_honored"
+    );
+
+    // Live runtime must reflect the delta's terminal_observed=true.
+    let runtime = event_loop
+        .state
+        .state_machine_runtime_state
+        .as_ref()
+        .expect("runtime must be materialised");
+    assert!(
+        runtime.is_terminal_observed(),
+        "live runtime must reflect candidate's terminal_observed after apply (U2 Red)"
+    );
+}
+
 #[allow(dead_code)]
 fn _u4_unused_runtime() -> StateMachineRuntimeState {
     StateMachineRuntimeState::new()
