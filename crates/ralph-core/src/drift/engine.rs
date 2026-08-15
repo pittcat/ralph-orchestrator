@@ -574,22 +574,17 @@ fn publish_hard_recovery_event(
         None,
         &allowed_topics,
     );
-    // Use the same resolver/publisher as every other runtime recovery path.
-    // This keeps registered-target validation, fail-close diagnostics, and
-    // pending dedup consistent for drift-triggered recovery.
-    let registered_hats: std::collections::HashSet<String> = event_loop
-        .registry
-        .ids()
-        .map(|id| id.as_str().to_string())
-        .collect();
-    let decision = crate::event_loop::resume_routing::publish_targeted_resume_for_hat(
-        event_loop.bus(),
-        &registered_hats,
-        None,
-        None,
+    // Use the single runtime ingress so drift-triggered recovery also
+    // receives durable acceptance when the loop ledger is available.
+    let loop_id = event_loop.current_loop_id_for_contract();
+    let activation_id = format!("resume:{}:{}", loop_id, event_loop.state.iteration);
+    let decision = crate::event_loop::resume_routing::task_resume_ingress(
+        &mut event_loop.bus,
+        &event_loop.registry,
+        event_loop.state.state_ledger.as_ref(),
+        &loop_id,
+        &activation_id,
         action.target_hat.as_str(),
-        None,
-        None,
         None,
         &action.retry_key,
         structured_payload,

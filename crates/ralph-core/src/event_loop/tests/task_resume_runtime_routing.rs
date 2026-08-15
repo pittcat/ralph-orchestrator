@@ -1072,7 +1072,7 @@ fn unit3_unified_publisher_blocks_broadcast_when_no_safe_target() {
 #[test]
 fn ingress_inventory_regression_storm_dispatch() {
     let event_loop_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/event_loop");
-    let mut bare_publishes: Vec<String> = Vec::new();
+    let mut ingress_bypasses: Vec<String> = Vec::new();
     walk_event_loop_rs(&event_loop_root, &mut |path| {
         let Ok(content) = std::fs::read_to_string(path) else {
             return;
@@ -1097,10 +1097,12 @@ fn ingress_inventory_regression_storm_dispatch() {
             if line.trim_start().starts_with("//") {
                 continue;
             }
-            if line.contains("Event::new(\"task.resume\"")
+            if line.contains("publish_targeted_resume_for_hat(")
+                || line.contains("publish_targeted_resume(")
+                || line.contains("Event::new(\"task.resume\"")
                 || line.contains("self.bus.publish(Event::new(\"task.resume\"")
             {
-                bare_publishes.push(format!(
+                ingress_bypasses.push(format!(
                     "{}:{}",
                     path.strip_prefix(env!("CARGO_MANIFEST_DIR"))
                         .unwrap_or(path)
@@ -1111,8 +1113,8 @@ fn ingress_inventory_regression_storm_dispatch() {
         }
     });
     assert!(
-        bare_publishes.is_empty(),
-        "production task.resume publish must route through publish_targeted_resume_*. Offenders: {bare_publishes:?}"
+        ingress_bypasses.is_empty(),
+        "production task.resume ingress must route through task_resume_ingress. Offenders: {ingress_bypasses:?}"
     );
 }
 

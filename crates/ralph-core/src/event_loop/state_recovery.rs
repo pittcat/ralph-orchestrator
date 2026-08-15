@@ -166,23 +166,23 @@ impl EventLoop {
         use crate::correction::ResumeContext;
         use crate::step_handoff::progress_task_gate::ProgressSnapshot;
 
-        let loop_id = self
-            .loop_id_label()
-            .trim()
-            .to_string();
+        let loop_id = self.loop_id_label().trim().to_string();
 
         // Last iteration from LoopHistory (if available).
         let history_path = self.loop_history_path();
         let last_iteration = history_path
             .as_ref()
-            .and_then(|p| crate::loop_history::LoopHistory::new(p.clone()).last_iteration().ok())
+            .and_then(|p| {
+                crate::loop_history::LoopHistory::new(p.clone())
+                    .last_iteration()
+                    .ok()
+            })
             .flatten()
             .unwrap_or(0);
 
         // Current-loop TaskStore closed count.
         let tasks_path = self.tasks_path();
-        let closed_tasks_count =
-            read_closed_tasks_count(&tasks_path, Some(loop_id.as_str()));
+        let closed_tasks_count = read_closed_tasks_count(&tasks_path, Some(loop_id.as_str()));
 
         // ProgressSnapshot summary (current_step + completed).
         let progress_path = self.progress_path();
@@ -196,10 +196,7 @@ impl EventLoop {
                     out.push_str(&format!("current_step={step}; "));
                 }
                 if !snap.completed_steps.is_empty() {
-                    out.push_str(&format!(
-                        "completed={}; ",
-                        snap.completed_steps.join(",")
-                    ));
+                    out.push_str(&format!("completed={}; ", snap.completed_steps.join(",")));
                 }
                 out
             })
@@ -331,8 +328,7 @@ impl EventLoop {
             // covers the dedup check.
             let loop_id_for_resume = self.current_loop_id();
             let loop_id_str = loop_id_for_resume.as_deref().unwrap_or("default");
-            let activation_id =
-                format!("resume:{}:{}", loop_id_str, self.state.iteration);
+            let activation_id = format!("resume:{}:{}", loop_id_str, self.state.iteration);
             // Plan 2026-08-13-003 fix-plan U5 R7: bind the
             // `ResumeDecision` so a Block (UnknownTarget /
             // MissingRetryKey / cross-loop / unresolvable_task)
@@ -342,37 +338,17 @@ impl EventLoop {
             // a manifest-resume Block was silent, leaving
             // parallel-forge manifest-recovery regressed without
             // operator visibility.
-            let decision = if let Some(ledger) = self.state.state_ledger.as_ref() {
-                crate::event_loop::resume_routing::publish_targeted_recovery_resume_for_hat(
-                    &mut self.bus,
-                    &self.registry,
-                    None,
-                    ledger,
-                    loop_id_str,
-                    &activation_id,
-                    loop_id_str,
-                    recovery.target_hat.as_str(),
-                    None,
-                    None,
-                    None,
-                    "manifest_resume",
-                    recovery.payload,
-                    None,
-                )
-            } else {
-                crate::event_loop::resume_routing::publish_targeted_resume_for_hat(
-                    &mut self.bus,
-                    &self.registry,
-                    None,
-                    loop_id_for_resume.as_deref(),
-                    recovery.target_hat.as_str(),
-                    None,
-                    None,
-                    None,
-                    "manifest_resume",
-                    recovery.payload,
-                )
-            };
+            let decision = crate::event_loop::resume_routing::task_resume_ingress(
+                &mut self.bus,
+                &self.registry,
+                self.state.state_ledger.as_ref(),
+                loop_id_str,
+                &activation_id,
+                recovery.target_hat.as_str(),
+                None,
+                "manifest_resume",
+                recovery.payload,
+            );
             if let crate::event_loop::resume_routing::ResumeDecision::Block { reason } = &decision {
                 tracing::warn!(
                     target_hat = %recovery.target_hat.as_str(),
@@ -984,37 +960,17 @@ impl EventLoop {
         let loop_id_for_resume = self.current_loop_id();
         let loop_id_str = loop_id_for_resume.as_deref().unwrap_or("default");
         let activation_id = format!("resume:{}:{}", loop_id_str, self.state.iteration);
-        let decision = if let Some(ledger) = self.state.state_ledger.as_ref() {
-            crate::event_loop::resume_routing::publish_targeted_recovery_resume_for_hat(
-                &mut self.bus,
-                &self.registry,
-                None,
-                ledger,
-                loop_id_str,
-                &activation_id,
-                loop_id_str,
-                target.as_str(),
-                None,
-                None,
-                None,
-                &format!("aggregate_timeout:{}", action.wave_id),
-                payload,
-                None,
-            )
-        } else {
-            crate::event_loop::resume_routing::publish_targeted_resume_for_hat(
-                &mut self.bus,
-                &self.registry,
-                None,
-                loop_id_for_resume.as_deref(),
-                target.as_str(),
-                None,
-                None,
-                None,
-                &format!("aggregate_timeout:{}", action.wave_id),
-                payload,
-            )
-        };
+        let decision = crate::event_loop::resume_routing::task_resume_ingress(
+            &mut self.bus,
+            &self.registry,
+            self.state.state_ledger.as_ref(),
+            loop_id_str,
+            &activation_id,
+            target.as_str(),
+            None,
+            &format!("aggregate_timeout:{}", action.wave_id),
+            payload,
+        );
         if let crate::event_loop::resume_routing::ResumeDecision::Block { reason } = &decision {
             tracing::warn!(
                 target = %target.as_str(),
@@ -1043,10 +999,7 @@ impl EventLoop {
 /// unfiltered count, because the symmetric pattern in
 /// `recovery/persistence.rs` treats absent loop_id as
 /// "no claim about ownership".
-fn read_closed_tasks_count(
-    tasks_path: &std::path::Path,
-    current_loop_id: Option<&str>,
-) -> u32 {
+fn read_closed_tasks_count(tasks_path: &std::path::Path, current_loop_id: Option<&str>) -> u32 {
     use crate::task_store::TaskStore;
     TaskStore::load(tasks_path)
         .map(|store| {

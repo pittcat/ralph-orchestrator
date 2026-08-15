@@ -864,39 +864,18 @@ impl EventLoop {
             );
             let loop_id_for_resume = self.current_loop_id();
             let loop_id_str = loop_id_for_resume.as_deref().unwrap_or("default");
-            let activation_id =
-                format!("resume:{}:{}", loop_id_str, self.state.iteration);
-            if let Some(ledger) = self.state.state_ledger.as_ref() {
-                crate::event_loop::resume_routing::publish_targeted_recovery_resume_for_hat(
-                    &mut self.bus,
-                    &self.registry,
-                    None,
-                    ledger,
-                    loop_id_str,
-                    &activation_id,
-                    loop_id_str,
-                    persistent_target.as_str(),
-                    None,
-                    None,
-                    None,
-                    "persistent_idle",
-                    persistent_payload,
-                    None,
-                );
-            } else {
-                crate::event_loop::resume_routing::publish_targeted_resume_for_hat(
-                    &mut self.bus,
-                    &self.registry,
-                    None,
-                    loop_id_for_resume.as_deref(),
-                    persistent_target.as_str(),
-                    None,
-                    None,
-                    None,
-                    "persistent_idle",
-                    persistent_payload,
-                );
-            }
+            let activation_id = format!("resume:{}:{}", loop_id_str, self.state.iteration);
+            let _ = crate::event_loop::resume_routing::task_resume_ingress(
+                &mut self.bus,
+                &self.registry,
+                self.state.state_ledger.as_ref(),
+                loop_id_str,
+                &activation_id,
+                persistent_target.as_str(),
+                None,
+                "persistent_idle",
+                persistent_payload,
+            );
 
             return None;
         }
@@ -958,47 +937,18 @@ impl EventLoop {
                 );
                 let loop_id_for_resume = self.current_loop_id();
                 let loop_id_str = loop_id_for_resume.as_deref().unwrap_or("default");
-                let activation_id =
-                    format!("resume:{}:{}", loop_id_str, self.state.iteration);
-                if let Some(ledger) = self.state.state_ledger.as_ref() {
-                    crate::event_loop::resume_routing::publish_targeted_recovery_resume_for_hat(
-                        &mut self.bus,
-                        &self.registry,
-                        None,
-                        ledger,
-                        loop_id_str,
-                        &activation_id,
-                        loop_id_str,
-                        "ralph",
-                        None,
-                        None,
-                        None,
-                        &format!(
-                            "open_tasks:{}:{}",
-                            open_tasks.len(),
-                            task_ids_hash
-                        ),
-                        open_tasks_payload,
-                        None,
-                    );
-                } else {
-                    crate::event_loop::resume_routing::publish_targeted_resume_for_hat(
-                        &mut self.bus,
-                        &self.registry,
-                        None,
-                        loop_id_for_resume.as_deref(),
-                        "ralph",
-                        None,
-                        None,
-                        None,
-                        &format!(
-                            "open_tasks:{}:{}",
-                            open_tasks.len(),
-                            task_ids_hash
-                        ),
-                        open_tasks_payload,
-                    );
-                }
+                let activation_id = format!("resume:{}:{}", loop_id_str, self.state.iteration);
+                let _ = crate::event_loop::resume_routing::task_resume_ingress(
+                    &mut self.bus,
+                    &self.registry,
+                    self.state.state_ledger.as_ref(),
+                    loop_id_str,
+                    &activation_id,
+                    "ralph",
+                    None,
+                    &format!("open_tasks:{}:{}", open_tasks.len(), task_ids_hash),
+                    open_tasks_payload,
+                );
                 return None;
             }
         } else if let Ok(false) = self.verify_scratchpad_complete() {

@@ -310,45 +310,23 @@ impl EventLoop {
         // to subscription routing (R4 / E3). Fail-closed when
         // the source hat is unknown / unregistered.
         let source_hat_id: Option<HatId> = source_hat.as_deref().map(|h| HatId::new(h.to_string()));
-        // TaskStore is loaded on demand via the loop-context
-        // SSOT accessor; the open-task owner fallback is
-        // optional and degrades gracefully when the ledger is
-        // unavailable. Plan 2026-08-10-001 U1 (R3): replace
-        // the hand-rolled `.ralph/agent/tasks.jsonl` join with
-        // `self.tasks_path()` so future loop-context overrides
-        // (worktree rewrites, alternate ralph dirs) propagate
-        // uniformly.
-        let task_store = crate::task_store::TaskStore::load(&self.tasks_path()).ok();
         let loop_id_owned = self.current_loop_id();
-        // The unified publisher takes a `&ResumeRoutingInputs`.
-        // We need owned strings for the lifetime; clone them into
-        // a small owned struct passed to a one-shot closure that
-        // builds the inputs by reference into a thread-local is
-        // overkill for one publish. Instead, build the inputs
-        // locally and pass them in. The borrow checker requires
-        // `loop_id_owned` to outlive the inputs, which we ensure
-        // by stacking the decision call inside this scope.
-        let (decision, _loop_id_keepalive) = {
-            let mut resume_inputs =
-                crate::event_loop::resume_routing::ResumeRoutingInputs::default();
-            if let Some(hat) = &source_hat_id {
-                resume_inputs.event_target = Some(hat.as_str());
-            }
-            if let Some(loop_id) = loop_id_owned.as_deref() {
-                resume_inputs.loop_id = Some(loop_id);
-            }
-            let retry_key = format!("invalid_step:{rejected_step}");
-            resume_inputs.retry_key = Some(&retry_key);
-            let decision = crate::event_loop::resume_routing::publish_targeted_resume(
-                &mut self.bus,
-                &resume_inputs,
-                &self.registry,
-                task_store.as_ref(),
-                &[],
-                payload_json,
-            );
-            (decision, loop_id_owned)
-        };
+        let loop_id_str = loop_id_owned.as_deref().unwrap_or("default");
+        let activation_id = format!("resume:{}:{}", loop_id_str, self.state.iteration);
+        let decision = crate::event_loop::resume_routing::task_resume_ingress(
+            &mut self.bus,
+            &self.registry,
+            self.state.state_ledger.as_ref(),
+            loop_id_str,
+            &activation_id,
+            source_hat_id
+                .as_ref()
+                .map(|hat| hat.as_str())
+                .unwrap_or("ralph"),
+            None,
+            &format!("invalid_step:{rejected_step}"),
+            payload_json,
+        );
         if let crate::event_loop::resume_routing::ResumeDecision::Block { reason } = &decision {
             tracing::warn!(
                 step = %rejected_step,
@@ -984,46 +962,17 @@ impl EventLoop {
                         let loop_id_str = loop_id_for_resume.as_str();
                         let activation_id =
                             format!("resume:{}:{}", loop_id_str, self.state.iteration);
-                        let decision = if let Some(ledger) = self.state.state_ledger.as_ref() {
-                            crate::event_loop::resume_routing::
-                                publish_targeted_recovery_resume_for_hat(
-                                    &mut self.bus,
-                                    &self.registry,
-                                    None,
-                                    ledger,
-                                    loop_id_str,
-                                    &activation_id,
-                                    loop_id_str,
-                                    hat,
-                                    None,
-                                    None,
-                                    None,
-                                    &format!(
-                                        "phase_violation:{}:{}",
-                                        event.topic.as_str(),
-                                        hat
-                                    ),
-                                    resume_payload.to_string(),
-                                    None,
-                                )
-                        } else {
-                            crate::event_loop::resume_routing::publish_targeted_resume_for_hat(
-                                &mut self.bus,
-                                &self.registry,
-                                None,
-                                Some(loop_id_str),
-                                hat,
-                                None,
-                                None,
-                                None,
-                                &format!(
-                                    "phase_violation:{}:{}",
-                                    event.topic.as_str(),
-                                    hat
-                                ),
-                                resume_payload.to_string(),
-                            )
-                        };
+                        let decision = crate::event_loop::resume_routing::task_resume_ingress(
+                            &mut self.bus,
+                            &self.registry,
+                            self.state.state_ledger.as_ref(),
+                            loop_id_str,
+                            &activation_id,
+                            hat,
+                            None,
+                            &format!("phase_violation:{}:{}", event.topic.as_str(), hat),
+                            resume_payload.to_string(),
+                        );
                         if let crate::event_loop::resume_routing::ResumeDecision::Block { reason } =
                             &decision
                         {

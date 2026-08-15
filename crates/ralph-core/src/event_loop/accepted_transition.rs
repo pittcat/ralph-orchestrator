@@ -31,7 +31,6 @@ use ralph_proto::{Event, EventBus};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
-use tracing::warn;
 
 /// Workspace-relative path of the durable transition outbox.
 ///
@@ -89,8 +88,8 @@ pub enum TransitionError {
         /// The human-readable rejection reason from the validator.
         reason: String,
     },
-    /// The durable outbox write failed. No event was published; the
-    /// caller may retry the commit.
+    /// A durable transition commit failed. No event was published; the
+    /// caller must surface the failure or retry through the recovery path.
     CommitFailed {
         /// The underlying I/O error, stringified.
         source: String,
@@ -106,7 +105,7 @@ impl std::fmt::Display for TransitionError {
             Self::CommitFailed { source } => {
                 write!(
                     f,
-                    "transition outbox write failed (no event published): {source}"
+                    "durable transition commit failed (no event published): {source}"
                 )
             }
         }
@@ -453,9 +452,10 @@ impl AcceptedTransition {
     /// `transition_id` via `applied_transition_ids`.
     ///
     /// Failure in any step before bus publish: rollback closure runs,
-    /// bus sees 0 events. The ledger is already committed by that point
-    /// so the projection is durable but the event is not published (the
-    /// next loop restart will re-commit and re-publish).
+    /// bus sees 0 events. If the outbox write succeeds but the ledger
+    /// projection commit fails, the durable outbox receipt is retained
+    /// for restart repair, while this call fails closed and does not
+    /// publish a success signal.
     pub fn commit_idempotent_with_state_machine_projection(
         event: &Event,
         loop_id: &str,
@@ -525,10 +525,10 @@ impl AcceptedTransition {
         }
 
         // 7. If a projection is present, commit it to the StateLedger.
-        // This is best-effort: if the ledger commit fails we warn and
-        // continue so the outbox receipt is still durable. The projection
-        // will be repaired on the next loop restart via
-        // `repair_state_machine_projection_from_outbox`.
+        // The outbox receipt is intentionally retained when this commit
+        // fails so the next restart can repair the projection. The live
+        // call must still fail closed: publishing here would expose a
+        // successful event while the ledger remains on the old state.
         if let Some(ref delta) = entry.state_machine_projection {
             if let Err(e) = ledger.commit(
                 crate::state::CommitDelta::StateMachineTransition {
@@ -536,12 +536,13 @@ impl AcceptedTransition {
                 },
                 Some("loop.state_machine_projection".to_string()),
             ) {
-                warn!(
-                    transition_id = %delta.transition_id.as_str(),
-                    error = %e,
-                    "U3: ledger commit for StateMachine projection failed; \
-                    will be repaired on next restart"
-                );
+                rollback();
+                return Err(TransitionError::CommitFailed {
+                    source: format!(
+                        "state machine projection commit failed for {}: {e}",
+                        delta.transition_id.as_str()
+                    ),
+                });
             }
         }
 
@@ -1874,8 +1875,9 @@ mod u3_state_machine_projection_tests {
         let entry = u3_raw_entry("u4-legacy-1", "act-u4");
         ledger.append_outbox_unlocked(&entry).unwrap();
 
-        let repaired = AcceptedTransition::repair_state_machine_projection_from_outbox(&mut ledger)
-            .expect("repair must succeed");
+        let repaired =
+            AcceptedTransition::repair_state_machine_projection_from_outbox(&mut ledger)
+                .expect("repair must succeed");
         assert_eq!(
             repaired, 0,
             "legacy outbox without projection must not be repaired"
@@ -1937,28 +1939,29 @@ mod u3_state_machine_projection_tests {
     }
 
     // ──────────────────────────────────────────────────────────────────
-    // PMI-011 reproducer (2026-08-14): when the StateLedger commit
+    // PMI-011 regression (2026-08-14): when the StateLedger commit
     // for the projection fails AFTER the durable outbox write, the
-    // helper must still return Ok(entry), keep the projection in the
-    // outbox (so the next restart's repair pass picks it up), and
-    // MUST NOT silently leave the in-memory ledger with a partial
-    // StateMachineTransition entry. The on-disk outbox is the
-    // single source of truth — bus publish still happens because the
-    // event was already validated and the outbox receipt was written.
+    // helper must fail closed, retain the projection in the outbox
+    // for restart repair, and MUST NOT publish an event or leave a
+    // partial in-memory StateMachineTransition entry.
     // ──────────────────────────────────────────────────────────────────
 
     #[test]
-    fn pmi011_ledger_commit_failure_does_not_block_commit_helper() {
+    fn pmi011_ledger_commit_failure_fails_closed_without_publish() {
         // Force the ledger.commit step to fail by activating the
         // bypass-active flag (P2-#4 in StateLedger::commit). Any
-        // commit call inside that window returns BypassActive, which
-        // the helper is expected to log and tolerate (U3 warn-and-
-        // continue path). We use the test-only raw setter so we can
+        // commit call inside that window returns BypassActive. We use
+        // the test-only raw setter so we can
         // hold `&mut ledger` for the helper at the same time — the
         // RAII BypassGuard returned by snapshot_mut borrows ledger
         // mutably and would conflict.
         let (_dir, mut ledger, mut bus, _store) = fixture();
         let ws = ledger.workspace().to_path_buf();
+        let seen = Arc::new(Mutex::new(0usize));
+        let seen_clone = Arc::clone(&seen);
+        bus.add_observer(move |_| *seen_clone.lock().unwrap() += 1);
+        let rollback_called = Arc::new(Mutex::new(false));
+        let rollback_called_clone = Arc::clone(&rollback_called);
 
         let sm_commits_before: usize = ledger
             .commit_log()
@@ -1983,20 +1986,26 @@ mod u3_state_machine_projection_tests {
             &mut ledger,
             &mut bus,
             |_| Ok(()),
-            || Ok(Box::new(|| {}) as Box<dyn FnOnce()>),
+            move || {
+                Ok(
+                    Box::new(move || *rollback_called_clone.lock().unwrap() = true)
+                        as Box<dyn FnOnce()>,
+                )
+            },
             Some(delta.clone()),
-        )
-        .expect("commit helper must succeed despite ledger commit failure");
+        );
         ledger.set_bypass_active_for_test(false);
+        assert!(matches!(result, Err(TransitionError::CommitFailed { .. })));
+        assert_eq!(*seen.lock().unwrap(), 0, "failed commit must not publish");
+        assert!(
+            *rollback_called.lock().unwrap(),
+            "failed projection commit must roll back materialization"
+        );
 
         // Outbox is durable and carries the projection.
         let entries = read_outbox(&ws).unwrap();
         assert_eq!(entries.len(), 1, "outbox must have one entry");
         let on_disk = &entries[0];
-        assert_eq!(
-            on_disk.transition_id, result.transition_id,
-            "outbox transition_id must match helper return"
-        );
         let on_disk_projection = on_disk
             .state_machine_projection
             .as_ref()
@@ -2025,9 +2034,8 @@ mod u3_state_machine_projection_tests {
 
         // Cold-start repair must consume the outbox projection
         // and apply it to the ledger.
-        let repaired =
-            AcceptedTransition::repair_state_machine_projection_from_outbox(&mut ledger)
-                .expect("repair must succeed");
+        let repaired = AcceptedTransition::repair_state_machine_projection_from_outbox(&mut ledger)
+            .expect("repair must succeed");
         assert_eq!(
             repaired, 1,
             "repair must consume the outbox projection left by the failed commit"

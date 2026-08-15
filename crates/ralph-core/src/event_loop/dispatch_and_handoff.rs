@@ -693,37 +693,17 @@ impl EventLoop {
             let loop_id_for_resume = self.current_loop_id();
             let loop_id_str = loop_id_for_resume.as_deref().unwrap_or("default");
             let activation_id = format!("resume:{}:{}", loop_id_str, self.state.iteration);
-            let decision = if let Some(ledger) = self.state.state_ledger.as_ref() {
-                crate::event_loop::resume_routing::publish_targeted_recovery_resume_for_hat(
-                    &mut self.bus,
-                    &self.registry,
-                    None,
-                    ledger,
-                    loop_id_str,
-                    &activation_id,
-                    loop_id_str,
-                    esc.safe_target.as_str(),
-                    None,
-                    None,
-                    None,
-                    &format!("handoff:{}:{}", esc.consumer, esc.event_id),
-                    payload.to_string(),
-                    None,
-                )
-            } else {
-                crate::event_loop::resume_routing::publish_targeted_resume_for_hat(
-                    &mut self.bus,
-                    &self.registry,
-                    None,
-                    Some(loop_id_str),
-                    esc.safe_target.as_str(),
-                    None,
-                    None,
-                    None,
-                    &format!("handoff:{}:{}", esc.consumer, esc.event_id),
-                    payload.to_string(),
-                )
-            };
+            let decision = crate::event_loop::resume_routing::task_resume_ingress(
+                &mut self.bus,
+                &self.registry,
+                self.state.state_ledger.as_ref(),
+                loop_id_str,
+                &activation_id,
+                esc.safe_target.as_str(),
+                None,
+                &format!("handoff:{}:{}", esc.consumer, esc.event_id),
+                payload.to_string(),
+            );
             if let crate::event_loop::resume_routing::ResumeDecision::Block { reason } = &decision {
                 tracing::warn!(
                     target = %esc.safe_target.as_str(),
