@@ -40,6 +40,13 @@ pub(crate) struct NormalMergeOutcome {
 /// retry, recovery, or any other loop decision. The caller is
 /// responsible for surfacing `NormalMergeOutcome::empty_terminal_channel`
 /// to the existing missing-terminal branch.
+///
+/// Snapshot-before-merge ordering (U2): `snapshot_channel` runs
+/// *before* `merge_hat_channel` so the activation outcome row
+/// captures the pre-merge `Empty` / `Missing` / `Unreadable` /
+/// non-empty state — production would otherwise re-read metadata
+/// on the (already deleted) empty channel and misclassify the row
+/// as `unreadable`.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn write_activation_outcome_for_normal_merge(
     ctx: &LoopContext,
@@ -57,8 +64,13 @@ pub(crate) fn write_activation_outcome_for_normal_merge(
 ) -> NormalMergeOutcome {
     let mut result = NormalMergeOutcome::default();
 
-    let channel_snapshot = crate::loop_runner::paths::resolve_hat_channel_events_path(ctx)
-        .map(|path| (path.clone(), std::fs::metadata(&path).map(|meta| meta.len()).ok()));
+    let channel_path = crate::loop_runner::paths::resolve_hat_channel_events_path(ctx);
+    let pre_snapshot = snapshot_channel(channel_path.as_deref());
+    let pre_bytes = pre_snapshot.bytes;
+    let channel_path_display = channel_path
+        .as_ref()
+        .map(|p| p.display().to_string());
+
     let target_events_path = resolve_emit_events_path(ctx, state_machine_enabled);
     let merge_result = crate::loop_runner::hat_channel::merge_hat_channel(
         ctx,
@@ -85,15 +97,10 @@ pub(crate) fn write_activation_outcome_for_normal_merge(
         // not an unreadable-channel condition. Preserve the
         // responsible-hat recovery path even though the merge now
         // fails closed instead of returning success.
-        if channel_snapshot
-            .as_ref()
-            .is_some_and(|(_, bytes)| *bytes == Some(0))
-        {
+        if pre_bytes == Some(0) {
             result.empty_terminal_channel = true;
         }
-    } else if let Some((channel_path, Some(channel_bytes))) = channel_snapshot.as_ref()
-        && *channel_bytes == 0
-    {
+    } else if pre_bytes == Some(0) {
         // Only treat an empty channel as a missing emit after the
         // channel was merged successfully. A missing or unreadable
         // channel is a routing failure and must stay on the existing
@@ -101,8 +108,8 @@ pub(crate) fn write_activation_outcome_for_normal_merge(
         result.empty_terminal_channel = true;
         warn!(
             hat = %display_hat.as_str(),
-            channel_path = %channel_path.display(),
-            channel_bytes,
+            channel_path = %channel_path_display.as_deref().unwrap_or("<unknown>"),
+            channel_bytes = 0u64,
             backend_success = success,
             watchdog_timeout = outcome_watchdog_timeout,
             backend_termination = ?backend_termination,
@@ -112,19 +119,14 @@ pub(crate) fn write_activation_outcome_for_normal_merge(
         );
     }
 
-    // Plan 2026-08-15-1823 U2: emit a bounded activation
-    // outcome row before the runner moves on to event
-    // processing. The row carries the raw pre-merge channel
-    // facts, the merge outcome, backend exit code, watchdog
-    // flags, and the event processing counters. It is a
-    // pure observation; nothing below this branch depends
-    // on it succeeding.
-    let pre_snapshot = snapshot_channel(
-        channel_snapshot
-            .as_ref()
-            .map(|(path, _)| path.as_path()),
-    );
-    let refined_snapshot = super::activation_outcome::refine_after_merge(pre_snapshot, merge_succeeded);
+    // U2: refine the PRE-MERGE snapshot with the merge outcome.
+    // The snapshot was captured *before* `merge_hat_channel`
+    // deleted the file; the `refined_snapshot` therefore preserves
+    // the pre-merge `Empty` / `Missing` / `Unreadable` distinction
+    // even though the file no longer exists on disk by the time
+    // the activation outcome row is written.
+    let refined_snapshot =
+        super::activation_outcome::refine_after_merge(pre_snapshot, merge_succeeded);
     let facts = ActivationOutcomeFacts {
         loop_id: Some(ctx.loop_id().unwrap_or(loop_id).to_string()),
         channel_exists: refined_snapshot.bytes.is_some()
