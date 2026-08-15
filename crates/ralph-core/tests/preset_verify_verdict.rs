@@ -398,3 +398,67 @@ fn terminal_kind_serializes_in_snake_case() {
         assert_eq!(serialized, expected);
     }
 }
+
+#[test]
+fn no_progress_under_terminal_none_forces_passed_false() {
+    // U3: When the driver classifies the run as NoProgress (budget exhaustion)
+    // and the scenario expects terminal: None, evaluate_scenario MUST return
+    // passed=false. This is the R2 gate: the verifier must not flip an
+    // honest driver failure into a pass.
+    use ralph_core::preset_verify::{
+        FailureKind, ScenarioOutcome, ScenarioTrace, evaluate_scenario,
+    };
+
+    let scenario_yaml = r#"
+version: 1
+scenarios:
+  - name: no-progress-terminal-none
+    responses:
+      - output: ""
+        success: true
+    expect:
+      start_event: work.start
+      accepted_events: []
+      forbidden_events: []
+      terminal: none
+    limits:
+      max_steps: 2
+      no_progress_steps: 1
+"#;
+    let scenario = parse_scenario(scenario_yaml);
+
+    // Construct an outcome exactly as the driver would: passed=false,
+    // failure_kind=NoProgress, empty trace (terminal: None means no event needed).
+    let trace = ScenarioTrace {
+        scenario: scenario.clone(),
+        steps: vec![],
+        accepted_events: vec![],
+        rejected_events: vec![],
+        last_hat: None,
+        last_accepted_topic: None,
+        last_runtime_termination: None,
+        terminal_topic: None,
+        trace_digest: "deadbeef".to_string(),
+    };
+    let outcome = ScenarioOutcome {
+        trace,
+        failure_kind: Some(FailureKind::NoProgress(
+            "no progress after 1 step".to_string(),
+        )),
+        passed: false,
+    };
+
+    let report = evaluate_scenario(outcome);
+
+    // R2 gate: passed must be false even when terminal: None
+    assert!(
+        !report.passed,
+        "evaluate_scenario must return passed=false for NoProgress under terminal:none"
+    );
+    // R5 gate: the NoProgress classification is preserved
+    assert_eq!(
+        report.failure_kind.as_deref(),
+        Some("no_progress"),
+        "failure_kind tag must be no_progress (R5: preserve driver classification)"
+    );
+}

@@ -995,7 +995,9 @@ pub fn evaluate_scenario(outcome: ScenarioOutcome) -> VerifyReportScenario {
     // Even when terminal is `none`, an unclosed run must not pass.
     let driver_unclosed = matches!(
         outcome.failure_kind,
-        Some(FailureKind::UnclosedTerminal(_)) | Some(FailureKind::Timeout(_))
+        Some(FailureKind::UnclosedTerminal(_))
+            | Some(FailureKind::Timeout(_))
+            | Some(FailureKind::NoProgress(_))
     );
     let exhausted_unclosed = outcome.trace.steps.len() < scenario.responses.len();
 
@@ -1042,7 +1044,15 @@ pub fn evaluate_scenario(outcome: ScenarioOutcome) -> VerifyReportScenario {
         if !forbidden_violated.is_empty() {
             detail.push_str(&format!("forbidden topics observed: {forbidden_violated:?}; "));
         }
-        let kind = if matches!(outcome.failure_kind, Some(FailureKind::UnclosedTerminal(_))) {
+        let kind = if matches!(scenario.expect.terminal, TerminalKind::None)
+            && matches!(outcome.failure_kind, Some(FailureKind::NoProgress(_)))
+        {
+            // Driver classified the run as no-progress (deterministic budget
+            // exhaustion). Preserve the driver's verdict under terminal: None
+            // so downstream consumers can distinguish budget exhaustion from
+            // contract mismatch.
+            FailureKind::NoProgress(detail)
+        } else if matches!(outcome.failure_kind, Some(FailureKind::UnclosedTerminal(_))) {
             FailureKind::UnclosedTerminal(detail)
         } else if matches!(outcome.failure_kind, Some(FailureKind::Timeout(_))) {
             FailureKind::Timeout(detail)
