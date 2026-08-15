@@ -31,6 +31,7 @@ OPAC 单项置信度见 [opac-audit-by-mode.md](opac-audit-by-mode.md)。本文�
 | Tier C 产物交叉验证 | +10 | findings / fix-log / progress / scratchpad 与 event payload 交叉印证 |
 | agent-output 明确违例 | +15 | FULL 模式下 `agent-output.jsonl` 中 tool_call 序列明确违例（仅 agent 归因可用） |
 | prompt visibility 矛盾 | +10 | `inspect prompt` JSON 显示 auto_inject 与 instructions 声明不一致（仅 agent/preset 归因可用） |
+| activation outcome row（plan 2026-08-15-1823） | +10 | runtime-trace.jsonl `phase=activation`/`kind=hat_activation_outcome` 行 + 第二账本（events / recovery / fallback）交叉验证；仅机制/编排/compound 归因可用；**仅凭 `status=empty` 不得升 P0**——必须配合 `terminal_obligation_topics` + 无 accepted/rejected candidate + recovery 一致 |
 
 **计分示例**：
 

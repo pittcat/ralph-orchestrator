@@ -57,12 +57,21 @@ argument-hint: "[run_dir] [preset_file_or_builtin] [optional: plan_file] [--incl
 当 `$RUN/.ralph/diagnostics/<session>/diagnosis-input.json` 存在时，**必须**先于任何 raw artifact 读取该 bundle，并按下面顺序消费：
 
 1. **`diagnosis-input.json`** — 锁定 `manifest_status`（`pending` / `present` / `finalized` / `degraded` / `missing` / `legacy` / `not_applicable`）、`run.preset_label`、`run.loop_id`、`code_baseline.head_sha`、`execution_capabilities`、per-artifact 完整性。
-2. **`runtime-trace.jsonl`** — 校对 `record_count` 与 `first/last_sequence`；坏行仅降低证据完备度，不阻断报告。
+2. **`runtime-trace.jsonl`** — 校对 `record_count` 与 `first/last_sequence`；按 `phase` / `kind` 索引 activation outcome 行（plan 2026-08-15-1823：`phase=activation` / `kind=hat_activation_outcome` 是每个 isolated hat activation close 的 raw outcome 记录）；坏行仅降低证据完备度，不阻断报告。
 3. **`feedback.jsonl`** — 按 `feedback_id == diagnosis_id` 聚合阶段（`discovered` / `evidence` / `action` / `validation` / `final`）；缺失仅作为 evidence gap。
 4. **legacy 兜底**：bundle `status == legacy` 或 `missing` 时，回退到 §0.1 之后既有的 current-events / Tier inventory 路径，**不**当作 P0 / 阻断；报告 frontmatter 标 `bundle: legacy`。
 5. **degraded 兜底**：`status == degraded` 时同样回退到 legacy 路径并写 evidence gap；repair suggestions 给出 filesystem 排查指引（见 §6）。
 
 修复建议（§6）一律 **non-executing**：报告只列**人工**可执行的 short / mid / long tier 建议；agent 不得自动 `ralph run`、不得自动改 preset、不得执行 `rm` / `cargo` / `git` 类命令。bundle 状态机、ArtifactStatus 映射和 tier 标签见 [report-template.md](references/report-template.md) §0.2。
+
+### 0.2.1 Activation outcome 识别（plan 2026-08-15-1823）
+
+`runtime-trace.jsonl` 中 `phase=activation` / `kind=hat_activation_outcome` 的行是 isolated hat activation close 时的 raw outcome；status 取值固定为 `merged` / `empty` / `missing` / `unreadable` / `merge_failed` / `interrupted` 之一。读取顺序与消费规则：
+
+1. **Phase 0 必扫**：盘点 runtime-trace 时按上述 `phase`+`kind` 过滤得到本 session 的 activation outcome 行集；缺行集时报告 frontmatter 标 `activation_outcomes: missing` / `degraded` / `legacy`，**不**当作 P0。
+2. **Phase 2 / L3 / L4 对账**：每条 outcome 行与 `events.jsonl` / `recovery.jsonl` / `channel-routing-fallback-*.md` / hat-channel 残留文件交叉对账；分类优先级见 [verification-pipeline.md](references/verification-pipeline.md) L3。
+3. **Phase 3 / L7 归因**：仅当 outcome 行 + 第二账本同时指向同一结论时，根因才能升 P0；仅凭 `status=empty` 不允许标"agent 未 emit"——必须满足 `terminal_obligation_topics` + 无 accepted/rejected candidate + recovery 一致。证据不足时输出 `unknown` / evidence gap。
+4. **不引入新 CLI 命令、不复制 runtime classifier**：报告消费 raw row，CLI diagnose 的 generic summary 保持原样。
 
 > **Recovery 通道术语（plan 2026-08-12-001 Unit 6 同步）**：
 > - `task.resume` 是当前 runtime recovery transport，由 `crates/ralph-core/src/event_loop/resume_routing.rs` 路由；不允许被描述为"已被完全删除"或"已经废弃"。

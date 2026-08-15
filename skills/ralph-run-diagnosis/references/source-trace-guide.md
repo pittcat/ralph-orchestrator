@@ -11,6 +11,9 @@
 | `workflow_guard` | `event_loop/mod.rs` |
 | `stall_recovery` / `loop_stale` | event_loop stall 分支 |
 | `topic_format` | event_policy topic 白名单 |
+| `hat_channel_empty_after_activation` (plan 2026-08-15-1823) | `crates/ralph-cli/src/loop_runner/hat_channel.rs`（merge_hat_channel 空文件路径）；是 evidence anchor，不是 root cause |
+| `merge_hat_channel_failed` | `crates/ralph-cli/src/loop_runner/inner.rs`（normal merge close 失败分支）；evidence anchor |
+| `merge_hat_channel_failed_on_interrupt` | `crates/ralph-cli/src/loop_runner/entry.rs::merge_isolated_channel_on_interrupt`；evidence anchor |
 
 `jq` 取 `reason_code` → `rg` 定位 → `sed -n` 读分支。
 
@@ -23,6 +26,7 @@
 | resume 死信 | preset `triggers` + hat 选择 |
 | silent-success | shipper recoverable、`shipper_reason.rs`、`max_residuals` |
 | scope 只 warn | `enforce_hat_scope` 实现 |
+| `runtime-trace.jsonl` 中 `phase=activation` / `kind=hat_activation_outcome` 行（plan 2026-08-15-1823） | `crates/ralph-cli/src/loop_runner/activation_outcome.rs`（snapshot_channel / refine_after_merge / log_activation_outcome）；evidence anchor；状态值见 §1 速查表 |
 
 ## 3. preset / schema
 

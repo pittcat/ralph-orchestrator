@@ -191,3 +191,112 @@ def test_report_template_frontmatter_has_4_required_fields() -> None:
         assert field in body, (
             f"report-template.md frontmatter must declare {field!r}"
         )
+
+
+# Plan 2026-08-15-1823 (fix empty channel activation
+# observability) Unit 3: stable anchors for the activation outcome
+# recognition contract. The diagnosis skill must:
+# - read raw activation rows from runtime-trace.jsonl
+# - distinguish the six status values
+# - keep non-executing / task.resume-as-runtime-transport / legacy
+#   fallback semantics
+# - report the activation outcome in frontmatter + §4.2 + L3
+# - never collapse `status=empty` into "agent did not emit"
+
+ACTIVATION_OUTCOME_STATUSES = (
+    "merged",
+    "empty",
+    "missing",
+    "unreadable",
+    "merge_failed",
+    "interrupted",
+)
+
+
+def test_skill_recognises_activation_outcome_kind() -> None:
+    body = _read(SKILL_MD)
+    assert "hat_activation_outcome" in body, (
+        "skill must reference the activation outcome kind tag so "
+        "agents can grep runtime-trace.jsonl for it"
+    )
+    assert "phase=activation" in body or "phase=activation " in body, (
+        "skill must name the activation phase"
+    )
+
+
+def test_skill_lists_activation_outcome_statuses() -> None:
+    body = _read(SKILL_MD)
+    missing = [s for s in ACTIVATION_OUTCOME_STATUSES if s not in body]
+    assert not missing, (
+        f"skill must list every activation outcome status value; missing: {missing}"
+    )
+
+
+def test_skill_does_not_collapse_empty_into_agent_root_cause() -> None:
+    body = _read(SKILL_MD).lower()
+    # The contract: `status=empty` alone is NOT enough to declare
+    # agent did-not-emit. The skill must say so.
+    assert "agent" in body and "empty" in body, (
+        "skill must mention both 'agent' and 'empty' in the activation context"
+    )
+
+
+def test_skill_keeps_task_resume_transport_and_non_executing() -> None:
+    body = _read(SKILL_MD)
+    # Plan 2026-08-15-1823 U3 explicitly preserves these
+    # invariants while adding activation outcome recognition.
+    assert "task.resume" in body or "task resume" in body.lower(), (
+        "skill must continue to label task.resume as the runtime recovery transport"
+    )
+    assert "non-executing" in body or "non_executing" in body, (
+        "skill must continue to mark repair suggestions as non-executing"
+    )
+
+
+def test_artifact_discovery_counts_activation_outcome_statuses() -> None:
+    body = _read(ARTIFACT_DISCOVERY)
+    for status in ACTIVATION_OUTCOME_STATUSES:
+        assert status in body, (
+            f"artifact-discovery.md must enumerate the activation outcome "
+            f"status value '{status}' so the inventory is complete"
+        )
+
+
+def test_report_template_has_activation_outcomes_frontmatter() -> None:
+    body = _read(REPORT_TEMPLATE)
+    assert "activation_outcomes" in body, (
+        "report-template.md frontmatter must declare the activation_outcomes "
+        "field so consumers can key on its presence/missing/degraded/legacy state"
+    )
+    for state in ("present", "missing", "degraded", "legacy"):
+        assert state in body, (
+            f"report-template.md frontmatter must list activation_outcomes state '{state}'"
+        )
+
+
+def test_report_template_has_section_4_2_activation_table() -> None:
+    body = _read(REPORT_TEMPLATE)
+    assert "4.2" in body, "report-template.md must include §4.2 activation outcome table"
+
+
+def test_confidence_rubric_caps_empty_alone_root_cause() -> None:
+    rubric = (
+        ROOT / "skills" / "ralph-run-diagnosis" / "references" / "confidence-rubric.md"
+    )
+    body = _read(rubric)
+    assert "status=empty" in body or "empty" in body, (
+        "confidence-rubric.md must address the status=empty classification boundary"
+    )
+
+
+def test_source_trace_guide_lists_activation_outcome_entry() -> None:
+    guide = (
+        ROOT / "skills" / "ralph-run-diagnosis" / "references" / "source-trace-guide.md"
+    )
+    body = _read(guide)
+    assert "hat_activation_outcome" in body or "activation_outcome" in body, (
+        "source-trace-guide.md must reference activation outcome rows as evidence anchors"
+    )
+    assert "activation_outcome.rs" in body, (
+        "source-trace-guide.md must point at the activation_outcome.rs Rust entry"
+    )
