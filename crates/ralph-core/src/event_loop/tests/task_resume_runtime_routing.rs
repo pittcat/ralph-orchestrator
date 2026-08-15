@@ -293,15 +293,17 @@ fn unit3_unified_publisher_targeted_resume_reaches_target_hat() {
 #[test]
 fn u1_publish_targeted_resume_recipient_mismatch_blocks() {
     use crate::event_loop::resume_routing::{
-        publish_targeted_resume, ResumeDecision, ResumeRoutingInputs,
+        ResumeDecision, ResumeRoutingInputs, publish_targeted_resume,
     };
 
     let mut bus = ralph_proto::EventBus::new();
     use ralph_proto::Hat;
     bus.register(Hat::new("executor", "Executor").subscribe("plan.ready"));
     bus.register(Hat::new("observer", "Observer").subscribe("plan.ready"));
-    let registry: std::collections::HashSet<String> =
-        ["executor", "observer"].iter().map(|s| s.to_string()).collect();
+    let registry: std::collections::HashSet<String> = ["executor", "observer"]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
     let inputs = ResumeRoutingInputs {
         event_target: Some("executor"),
         retry_key: Some("u1_recipient_check"),
@@ -426,16 +428,16 @@ fn u1_runtime_generated_resume_is_targeted() {
 /// side and payload-side agree on the resolved target).
 #[test]
 fn u2_publish_targeted_resume_for_hat_threads_payload_target() {
-    use crate::event_loop::resume_routing::{
-        publish_targeted_resume_for_hat, ResumeDecision,
-    };
+    use crate::event_loop::resume_routing::{ResumeDecision, publish_targeted_resume_for_hat};
 
     let mut bus = ralph_proto::EventBus::new();
     use ralph_proto::Hat;
     bus.register(Hat::new("executor", "Executor").subscribe("task.resume"));
     bus.register(Hat::new("observer", "Observer").subscribe("task.resume"));
-    let registry: std::collections::HashSet<String> =
-        ["executor", "observer"].iter().map(|s| s.to_string()).collect();
+    let registry: std::collections::HashSet<String> = ["executor", "observer"]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
 
     // Caller passes target_hint=executor AND payload
     // declares target_hat=executor. The wrapper must
@@ -459,11 +461,7 @@ fn u2_publish_targeted_resume_for_hat_threads_payload_target() {
     let exec_pending = bus
         .peek_pending(&ralph_proto::HatId::new("executor"))
         .expect("executor pending");
-    assert_eq!(
-        exec_pending.len(),
-        1,
-        "executor must hold the resume"
-    );
+    assert_eq!(exec_pending.len(), 1, "executor must hold the resume");
     let obs_pending = bus
         .peek_pending(&ralph_proto::HatId::new("observer"))
         .map(|v| v.len())
@@ -484,16 +482,16 @@ fn u2_publish_targeted_resume_for_hat_threads_payload_target() {
 /// `triggered_hat` and the registry accepts it.
 #[test]
 fn u2_legacy_triggered_only_jsonl_preserves_target() {
-    use crate::event_loop::resume_routing::{
-        publish_targeted_resume_for_hat, ResumeDecision,
-    };
+    use crate::event_loop::resume_routing::{ResumeDecision, publish_targeted_resume_for_hat};
 
     let mut bus = ralph_proto::EventBus::new();
     use ralph_proto::Hat;
     bus.register(Hat::new("executor", "Executor").subscribe("task.resume"));
     bus.register(Hat::new("observer", "Observer").subscribe("task.resume"));
-    let registry: std::collections::HashSet<String> =
-        ["executor", "observer"].iter().map(|s| s.to_string()).collect();
+    let registry: std::collections::HashSet<String> = ["executor", "observer"]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
 
     // Caller passes only event_target (from JSONL
     // `triggered=executor`) and no payload_target_hat.
@@ -540,7 +538,7 @@ fn u2_legacy_triggered_only_jsonl_preserves_target() {
 #[test]
 fn u3_recovery_commit_precedes_publish() {
     use crate::event_loop::resume_routing::{
-        publish_targeted_recovery_resume, ResumeDecision, ResumeRoutingInputs,
+        ResumeDecision, ResumeRoutingInputs, publish_targeted_recovery_resume,
     };
     use crate::state::StateLedger;
     use ralph_proto::Hat;
@@ -576,8 +574,7 @@ fn u3_recovery_commit_precedes_publish() {
     );
 
     // The durable outbox must contain the entry.
-    let outbox = crate::event_loop::accepted_transition::read_outbox(&ws)
-        .expect("outbox readable");
+    let outbox = crate::event_loop::accepted_transition::read_outbox(&ws).expect("outbox readable");
     assert_eq!(
         outbox.len(),
         1,
@@ -586,7 +583,10 @@ fn u3_recovery_commit_precedes_publish() {
     assert_eq!(outbox[0].topic, "task.resume");
     assert_eq!(outbox[0].loop_id, "loop-A");
     assert_eq!(outbox[0].activation_id, "u3_act_1");
-    assert!(!outbox[0].delivered, "first commit is not yet delivered/acked");
+    assert!(
+        !outbox[0].delivered,
+        "first commit is not yet delivered/acked"
+    );
 
     // The in-memory bus must hold exactly one task.resume
     // (the publish happened AFTER the durable commit).
@@ -610,7 +610,7 @@ fn u3_recovery_commit_precedes_publish() {
 #[test]
 fn u3_recovery_commit_failure_has_zero_bus_side_effect() {
     use crate::event_loop::resume_routing::{
-        publish_targeted_recovery_resume, ResumeRoutingInputs,
+        ResumeRoutingInputs, publish_targeted_recovery_resume,
     };
     use crate::state::StateLedger;
     use ralph_proto::Hat;
@@ -669,7 +669,7 @@ fn u3_recovery_commit_failure_has_zero_bus_side_effect() {
 #[test]
 fn u3_unknown_target_has_no_receipt() {
     use crate::event_loop::resume_routing::{
-        publish_targeted_recovery_resume, ResumeBlockReason, ResumeDecision, ResumeRoutingInputs,
+        ResumeBlockReason, ResumeDecision, ResumeRoutingInputs, publish_targeted_recovery_resume,
     };
     use crate::state::StateLedger;
     use ralph_proto::Hat;
@@ -711,8 +711,7 @@ fn u3_unknown_target_has_no_receipt() {
 
     // No durable receipt: the preflight must short-circuit
     // before any outbox append.
-    let outbox = crate::event_loop::accepted_transition::read_outbox(&ws)
-        .expect("outbox readable");
+    let outbox = crate::event_loop::accepted_transition::read_outbox(&ws).expect("outbox readable");
     assert!(
         outbox.is_empty(),
         "unknown target MUST NOT leave a durable receipt (outbox = {outbox:?})"
@@ -750,7 +749,7 @@ fn u3_unknown_target_has_no_receipt() {
 #[test]
 fn u5_resume_payload_contract_is_consistent_across_builders() {
     use crate::event_loop::rejection::{
-        build_task_resume_payload, enrich_task_resume_payload_full, Rejection, RejectionStage,
+        Rejection, RejectionStage, build_task_resume_payload, enrich_task_resume_payload_full,
     };
     use crate::task::TaskStatus;
 
@@ -782,7 +781,9 @@ fn u5_resume_payload_contract_is_consistent_across_builders() {
         "original_trigger_topic",
     ];
     for field in string_fields {
-        let value = parsed.get(field).unwrap_or_else(|| panic!("`{field}` missing"));
+        let value = parsed
+            .get(field)
+            .unwrap_or_else(|| panic!("`{field}` missing"));
         let s = value
             .as_str()
             .unwrap_or_else(|| panic!("`{field}` must be a non-null string, got {value}"));
@@ -810,7 +811,9 @@ fn u5_resume_payload_contract_is_consistent_across_builders() {
     let parsed2: serde_json::Value =
         serde_json::from_str(&enriched).expect("enriched payload must parse");
     for field in ["reason", "target_hat", "kind"] {
-        let value = parsed2.get(field).unwrap_or_else(|| panic!("`{field}` missing"));
+        let value = parsed2
+            .get(field)
+            .unwrap_or_else(|| panic!("`{field}` missing"));
         let s = value
             .as_str()
             .unwrap_or_else(|| panic!("`{field}` must be a non-null string, got {value}"));
@@ -857,9 +860,9 @@ fn assert_non_empty_string_array(
         "{builder} MUST populate `{field}` with a non-empty array (got {value})"
     );
     for entry in arr {
-        let s = entry
-            .as_str()
-            .unwrap_or_else(|| panic!("each `{field}` entry must be a non-null string, got {entry}"));
+        let s = entry.as_str().unwrap_or_else(|| {
+            panic!("each `{field}` entry must be a non-null string, got {entry}")
+        });
         assert!(
             !s.is_empty(),
             "{builder} MUST NOT write empty strings into `{field}` (got {arr:?})"
@@ -891,7 +894,12 @@ fn u5_empty_string_payload_field_fails_assertion() {
     let retry_key_empty = json!({"reason": "r", "kind": "x", "target_hat": "h", "retry_key": "", "original_trigger_topic": "t", "allowed_topics": ["a"]});
     assert!(retry_key_empty["retry_key"].as_str().unwrap().is_empty());
     let allowed_topics_empty = json!({"reason": "r", "kind": "x", "target_hat": "h", "retry_key": "r", "original_trigger_topic": "t", "allowed_topics": []});
-    assert!(allowed_topics_empty["allowed_topics"].as_array().unwrap().is_empty());
+    assert!(
+        allowed_topics_empty["allowed_topics"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
     let allowed_topics_with_empty = json!({"reason": "r", "kind": "x", "target_hat": "h", "retry_key": "r", "original_trigger_topic": "t", "allowed_topics": [""]});
     let entries: Vec<&str> = allowed_topics_with_empty["allowed_topics"]
         .as_array()
@@ -901,7 +909,11 @@ fn u5_empty_string_payload_field_fails_assertion() {
         .collect();
     assert!(entries.iter().all(|s| s.is_empty()));
     let allowed_topics_with_null = json!({"reason": "r", "kind": "x", "target_hat": "h", "retry_key": "r", "original_trigger_topic": "t", "allowed_topics": [null]});
-    assert!(allowed_topics_with_null["allowed_topics"][0].as_str().is_none());
+    assert!(
+        allowed_topics_with_null["allowed_topics"][0]
+            .as_str()
+            .is_none()
+    );
 }
 
 /// Plan 2026-08-13-003 U5 + R7: the agent-facing recovery
@@ -919,8 +931,7 @@ fn u5_recovery_directives_match_runtime_thresholds() {
     // contradiction (ralph-tools.md said "second" while
     // ralph-tools-recovery-directives.md said "third").
     let ralph_tools = std::fs::read_to_string(
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("data/ralph-tools.md"),
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("data/ralph-tools.md"),
     )
     .expect("ralph-tools.md readable");
     let recovery_directives = std::fs::read_to_string(
@@ -938,8 +949,7 @@ fn u5_recovery_directives_match_runtime_thresholds() {
         "ralph-tools.md MUST describe the runtime {ESCALATION_THRESHOLD}-strike escalation threshold (was unchanged)"
     );
     assert!(
-        recovery_directives.contains("第 3 次")
-            || recovery_directives.contains("third"),
+        recovery_directives.contains("第 3 次") || recovery_directives.contains("third"),
         "ralph-tools-recovery-directives.md MUST describe the runtime {ESCALATION_THRESHOLD}-strike threshold"
     );
 }

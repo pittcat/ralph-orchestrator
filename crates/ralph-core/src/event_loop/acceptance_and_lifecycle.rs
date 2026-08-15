@@ -513,12 +513,12 @@ impl EventLoop {
         // filesystem error (e.g. unreadable outbox) fails closed
         // here — the same fail-closed contract as
         // `commit_idempotent`'s outbox read failure path.
-        if let Some(ledger) = state.state_ledger.as_mut() {
-            if let Err(e) = crate::event_loop::accepted_transition::AcceptedTransition::repair_state_machine_projection_from_outbox(
+        if let Some(ledger) = state.state_ledger.as_mut()
+            && let Err(e) = crate::event_loop::accepted_transition::AcceptedTransition::repair_state_machine_projection_from_outbox(
                 ledger,
-            ) {
-                return Err(e);
-            }
+            )
+        {
+            return Err(e);
         }
 
         // Plan GAP-02 (2026-08-13-002) / Unit 4: rehydrate the
@@ -960,47 +960,48 @@ impl EventLoop {
     /// history path so the caller falls back to a safe
     /// zero.
     pub(super) fn loop_history_path(&self) -> Option<PathBuf> {
-        self.loop_context
-            .as_ref()
-            .map(|ctx| ctx.history_path())
+        self.loop_context.as_ref().map(|ctx| ctx.history_path())
     }
 
     /// Plan 2026-08-13-003 U4: progress.md path (used by
     /// `build_resume_context_from_sources`). Derived from
     /// the loop context workspace.
     pub(super) fn progress_path(&self) -> Option<PathBuf> {
-        self.loop_context
-            .as_ref()
-            .map(|ctx| ctx.workspace().join(".ralph").join("agent").join("progress.md"))
+        self.loop_context.as_ref().map(|ctx| {
+            ctx.workspace()
+                .join(".ralph")
+                .join("agent")
+                .join("progress.md")
+        })
     }
 
     /// Plan 2026-08-13-003 U4 + 2026-08-13-003 fix-plan U5 R10:
-/// scratchpad path. Honours `core.scratchpad.path` /
-/// `core.scratchpad.enabled` from the RalphConfig. When the
-/// config points at a custom path we resolve it under the
-/// loop workspace; when `enabled` is `false` we return
-/// `None` so callers (e.g. `build_resume_context_from_sources`)
-/// can fall back to an explicit unavailable marker instead of
-/// silently reading the default path.
-pub(super) fn resume_scratchpad_path(&self) -> Option<PathBuf> {
-    let scratchpad_cfg = &self.config.core.scratchpad;
-    if !scratchpad_cfg.enabled {
-        return None;
-    }
-    self.loop_context.as_ref().map(|ctx| {
-        let configured = &scratchpad_cfg.path;
-        // Absolute paths are honoured as-is (operator
-        // override); relative paths resolve under the
-        // workspace's `.ralph/agent/` directory.
-        if configured.starts_with('/') {
-            return PathBuf::from(configured);
+    /// scratchpad path. Honours `core.scratchpad.path` /
+    /// `core.scratchpad.enabled` from the RalphConfig. When the
+    /// config points at a custom path we resolve it under the
+    /// loop workspace; when `enabled` is `false` we return
+    /// `None` so callers (e.g. `build_resume_context_from_sources`)
+    /// can fall back to an explicit unavailable marker instead of
+    /// silently reading the default path.
+    pub(super) fn resume_scratchpad_path(&self) -> Option<PathBuf> {
+        let scratchpad_cfg = &self.config.core.scratchpad;
+        if !scratchpad_cfg.enabled {
+            return None;
         }
-        ctx.workspace()
-            .join(".ralph")
-            .join("agent")
-            .join(configured)
-    })
-}
+        self.loop_context.as_ref().map(|ctx| {
+            let configured = &scratchpad_cfg.path;
+            // Absolute paths are honoured as-is (operator
+            // override); relative paths resolve under the
+            // workspace's `.ralph/agent/` directory.
+            if configured.starts_with('/') {
+                return PathBuf::from(configured);
+            }
+            ctx.workspace()
+                .join(".ralph")
+                .join("agent")
+                .join(configured)
+        })
+    }
 
     /// 2026-07-07-002 plan U2: side effects that must run only after execution
     /// contract (and other commit gates) accept an event for the main ledger.

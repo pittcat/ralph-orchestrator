@@ -205,7 +205,7 @@ _RALPH_PRESET_CMDS=(
   "check:Check preset/workflow contract (config, topology, payload, orphan)"
   "diff:Show differences between a local preset and its template baseline"
   "upgrade:Preview upgrade information for a local preset (dry-run only)"
-  "verify:Run a deterministic scripted-workflow verification (Unit 4 of plan 2026-08-15-0722)"
+  "verify:Run a deterministic scripted-workflow verification"
 )
 
 # Builtin template names — must mirror TemplateCatalog::template_names()

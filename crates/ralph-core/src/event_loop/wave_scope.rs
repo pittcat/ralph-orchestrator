@@ -1016,7 +1016,7 @@ impl EventLoop {
                     terminal_honored: true,
                 },
             };
-            let _ = Self::commit_terminal_delta(&mut self.state.state_ledger, next_delta);
+            Self::commit_terminal_delta(&mut self.state.state_ledger, next_delta);
         }
 
         // Record completion honored in policy runtime state for downstream guarding

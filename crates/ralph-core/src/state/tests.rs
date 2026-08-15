@@ -2315,7 +2315,7 @@ fn u1_apply_terminal_observed_delta_separates_from_honored() {
         },
     });
     let runtime = snap.state_machine_runtime.as_ref().unwrap();
-    assert!(runtime.is_terminal_honored() == false);
+    assert!(!runtime.is_terminal_honored());
     // Honored may only flip after observed.
     snap.apply_delta(&CommitDelta::StateMachineTransition {
         delta: StateMachineTransitionDelta {

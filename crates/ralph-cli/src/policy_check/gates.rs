@@ -1295,18 +1295,18 @@ fn check_postmerge_resolved_thresholds(
                 ..Default::default()
             });
         }
-    } else if scope_status == "blocked" || scope_status == "ambiguous" {
-        if let Some(true) = typed_required_bool(obj, "proceed", topic)? {
-            return Err(ValidationError {
-                payload_index: 0,
-                field: "proceed".to_string(),
-                reason_code: "scope_handoff_inconsistent".to_string(),
-                message: format!(
-                    "{topic} requires proceed=false when scope_status={scope_status}; got proceed=true"
-                ),
-                ..Default::default()
-            });
-        }
+    } else if (scope_status == "blocked" || scope_status == "ambiguous")
+        && let Some(true) = typed_required_bool(obj, "proceed", topic)?
+    {
+        return Err(ValidationError {
+            payload_index: 0,
+            field: "proceed".to_string(),
+            reason_code: "scope_handoff_inconsistent".to_string(),
+            message: format!(
+                "{topic} requires proceed=false when scope_status={scope_status}; got proceed=true"
+            ),
+            ..Default::default()
+        });
     }
     Ok(())
 }

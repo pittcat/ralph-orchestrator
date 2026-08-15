@@ -503,12 +503,10 @@ mod cli_executor_integration {
         //   line 1: $RALPH_EVENTS_FILE
         //   line 2: $RALPH_WORKSPACE_ROOT
         //   line 3: $PWD
-        let script = concat!(
-            "printf '%s\\n' \"$RALPH_EVENTS_FILE\" > marker; \
-             printf '%s\\n' \"$RALPH_WORKSPACE_ROOT\" >> marker; \
-             printf '%s\\n' \"$PWD\" >> marker"
-        )
-        .to_string();
+        let script = "printf '%s\\n' \"$RALPH_EVENTS_FILE\" > marker; \
+                      printf '%s\\n' \"$RALPH_WORKSPACE_ROOT\" >> marker; \
+                      printf '%s\\n' \"$PWD\" >> marker"
+            .to_string();
 
         // Backend env: hat-channel path for RALPH_EVENTS_FILE, hostile paths
         // for RALPH_WORKSPACE_ROOT and PWD. The explicit workspace (passed to

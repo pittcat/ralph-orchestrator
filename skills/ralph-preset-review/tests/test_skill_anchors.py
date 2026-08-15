@@ -68,7 +68,7 @@ ANCHORS: tuple[tuple[str, str], ...] = (
     ),
     ("skills/ralph-preset-author/references/finding-rubric.md", "preset.triggered_self_or_static_target"),
     ("skills/ralph-preset-review/references/finding-rubric.md", "preset.triggered_self_or_static_target"),
-    # Runtime verification anchors (plan 2026-08-15-0722). Both author
+    # Runtime verification anchors. Both author
     # and review commands.md must surface `ralph preset verify`, and
     # both finding-rubric.md files must contain the dynamic evidence
     # finding ids so reviewers can pair preset coverage gaps with the
@@ -158,7 +158,7 @@ CAPABILITY_FIXTURES: tuple[tuple[str, str], ...] = (
         "key-stage-event-gate-no-reason-negative-fixture.yml",
         "preset.key_stage_event_gate_no_reason",
     ),
-    # Runtime verification negative fixture (plan 2026-08-15-0722).
+    # Runtime verification negative fixture.
     # The fixture advertises `verify.dynamic_evidence_missing` and
     # `verify.scenario_coverage_gap` as the primary review-only
     # finding ids it is meant to anchor; it is generic (no preset /
@@ -530,6 +530,38 @@ def _check_unique_advertised_ids(
             f"({len(seen_ids)} ids)"
         )
     return not collision
+
+
+def test_skill_anchors() -> None:
+    """Run the runtime-verification contract under pytest.
+
+    The direct script retains the repository's complete legacy fixture sweep;
+    pytest owns the new runtime-verification anchors so unrelated historical
+    fixture expectations do not mask this contract.
+    """
+    runtime_anchors = [
+        item
+        for item in ANCHORS
+        if "ralph preset verify" in item[1]
+        or item[1].startswith("verify.")
+    ]
+    results = [
+        (f"anchor:{path}:{anchor}", _check_anchor(path, anchor))
+        for path, anchor in runtime_anchors
+    ]
+    fixtures_dir = _project_root() / "skills" / "ralph-preset-review" / "fixtures"
+    results.append(
+        (
+            "fixture:runtime-verify-negative-fixture.yml",
+            _check_fixture_present(
+                fixtures_dir,
+                "runtime-verify-negative-fixture.yml",
+                "verify.dynamic_evidence_missing",
+            ),
+        )
+    )
+    failures = [label for label, passed in results if not passed]
+    assert not failures, f"skill anchor failures: {failures}"
 
 
 if __name__ == "__main__":

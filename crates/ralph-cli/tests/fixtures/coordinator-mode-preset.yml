@@ -1,5 +1,5 @@
 # Test fixture: 3-hat coordinator preset hats (execution_mode defaults to Coordinator).
-# This preset is used to verify that preset verify rejects coordinator mode.
+# This preset is used to verify that preset verify supports coordinator mode.
 # NOT a builtin preset - for test use only.
 # NOTE: The event_loop config with execution_mode: coordinator is provided via -c core.yml.
 
@@ -11,6 +11,8 @@ hats:
       - work.start
     publishes:
       - work.proceed.a
+      - loop.complete
+    terminal_events: [loop.complete]
     instructions: "Do nothing."
   hat_b:
     name: Hat B
@@ -19,6 +21,8 @@ hats:
       - work.proceed.a
     publishes:
       - work.proceed.b
+      - loop.complete
+    terminal_events: [loop.complete]
     instructions: "Do nothing."
   hat_c:
     name: Hat C
@@ -27,4 +31,5 @@ hats:
       - work.proceed.b
     publishes:
       - loop.complete
+    terminal_events: [loop.complete]
     instructions: "Do nothing."

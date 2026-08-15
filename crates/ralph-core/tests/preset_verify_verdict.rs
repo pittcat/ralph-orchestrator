@@ -9,8 +9,8 @@
 
 use ralph_core::config::{EventLoopConfig, HatConfig, RalphConfig};
 use ralph_core::preset_verify::{
-    DriverWorkspace, PresetVerifyReport, ScenarioFile, SourceKind, StaticLayer,
-    TerminalKind, build_report, evaluate_scenario, run_scenario,
+    DriverWorkspace, PresetVerifyReport, ScenarioFile, ScenarioOutcome, ScenarioTrace, SourceKind,
+    StaticLayer, StepRecord, TerminalKind, build_report, evaluate_scenario, run_scenario,
 };
 use std::collections::HashMap;
 
@@ -282,7 +282,10 @@ scenarios:
     assert_eq!(parsed.failure_kind, report.failure_kind);
     assert_eq!(parsed.scenarios.len(), 1);
     assert_eq!(parsed.scenarios[0].passed, scenario_report.passed);
-    assert_eq!(parsed.scenarios[0].failure_kind, scenario_report.failure_kind);
+    assert_eq!(
+        parsed.scenarios[0].failure_kind,
+        scenario_report.failure_kind
+    );
 }
 
 #[test]
@@ -326,9 +329,7 @@ fn forbidden_topic_observed_marks_scenario_failure() {
     // (Driving a real EventLoop with a topic that the runtime allows
     // requires non-trivial config; this unit test focuses on the
     // verdict mapping, which is the unit under test.)
-    use ralph_core::preset_verify::{
-        evaluate_scenario, Scenario, ScenarioOutcome, ScenarioTrace,
-    };
+    use ralph_core::preset_verify::{Scenario, ScenarioOutcome, ScenarioTrace, evaluate_scenario};
     let scenario_yaml = r#"
 version: 1
 scenarios:
@@ -351,10 +352,8 @@ scenarios:
     let trace = ScenarioTrace {
         scenario: scenario.clone(),
         steps: vec![],
-        accepted_events: vec![
-            "forbidden.topic".to_string(),
-            "LOOP_COMPLETE".to_string(),
-        ],
+        accepted_events: vec!["forbidden.topic".to_string(), "LOOP_COMPLETE".to_string()],
+        accepted_payloads: vec![],
         rejected_events: vec![],
         last_hat: Some("doer".to_string()),
         last_accepted_topic: Some("LOOP_COMPLETE".to_string()),
@@ -433,6 +432,7 @@ scenarios:
         scenario: scenario.clone(),
         steps: vec![],
         accepted_events: vec![],
+        accepted_payloads: vec![],
         rejected_events: vec![],
         last_hat: None,
         last_accepted_topic: None,
@@ -504,6 +504,105 @@ scenarios:
         Some("scenario_failure"),
         "invalid payload must surface as scenario_failure"
     );
+}
+
+#[test]
+fn accepted_event_order_is_verified() {
+    let scenario = parse_scenario(
+        r#"
+version: 1
+scenarios:
+  - name: ordered-events
+    responses:
+      - output: scripted
+    expect:
+      start_event: work.start
+      accepted_events: [work.done, LOOP_COMPLETE]
+      terminal: none
+    limits:
+      max_steps: 1
+      no_progress_steps: 1
+"#,
+    );
+    let trace = ScenarioTrace {
+        scenario,
+        steps: vec![StepRecord {
+            step: 1,
+            response_index: 0,
+            hat: Some("doer".to_string()),
+            output: "scripted".to_string(),
+            success: true,
+            accepted: vec![],
+            rejected: vec![],
+            termination: None,
+        }],
+        accepted_events: vec!["LOOP_COMPLETE".to_string(), "work.done".to_string()],
+        accepted_payloads: vec![],
+        rejected_events: vec![],
+        last_hat: Some("doer".to_string()),
+        last_accepted_topic: Some("work.done".to_string()),
+        last_runtime_termination: None,
+        terminal_topic: None,
+        trace_digest: "ordered".to_string(),
+    };
+    let report = evaluate_scenario(ScenarioOutcome {
+        trace,
+        failure_kind: None,
+        passed: true,
+    });
+    assert!(!report.passed, "reordered accepted topics must fail");
+    assert_eq!(report.failure_kind.as_deref(), Some("scenario_failure"));
+}
+
+#[test]
+fn payload_fields_are_verified_against_accepted_event_payload() {
+    let scenario = parse_scenario(
+        r#"
+version: 1
+scenarios:
+  - name: payload-fields
+    responses:
+      - output: scripted
+    expect:
+      start_event: work.start
+      accepted_events: [work.done]
+      terminal: none
+      payload_fields:
+        work.done:
+          ok: true
+    limits:
+      max_steps: 1
+      no_progress_steps: 1
+"#,
+    );
+    let trace = ScenarioTrace {
+        scenario,
+        steps: vec![StepRecord {
+            step: 1,
+            response_index: 0,
+            hat: Some("doer".to_string()),
+            output: "scripted".to_string(),
+            success: true,
+            accepted: vec![],
+            rejected: vec![],
+            termination: None,
+        }],
+        accepted_events: vec!["work.done".to_string()],
+        accepted_payloads: vec![("work.done".to_string(), r#"{"ok":false}"#.to_string())],
+        rejected_events: vec![],
+        last_hat: Some("doer".to_string()),
+        last_accepted_topic: Some("work.done".to_string()),
+        last_runtime_termination: None,
+        terminal_topic: None,
+        trace_digest: "payload".to_string(),
+    };
+    let report = evaluate_scenario(ScenarioOutcome {
+        trace,
+        failure_kind: None,
+        passed: true,
+    });
+    assert!(!report.passed, "payload mismatch must fail");
+    assert_eq!(report.failure_kind.as_deref(), Some("scenario_failure"));
 }
 
 #[test]

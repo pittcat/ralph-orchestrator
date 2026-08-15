@@ -1916,12 +1916,12 @@ hats:
     std::fs::write(&main_events, "").expect("create main events");
     std::fs::write(&hat_events, "").expect("create hat channel");
     std::fs::write(
-        &ralph_dir.join("current-events"),
+        ralph_dir.join("current-events"),
         ".ralph/events-main.jsonl\n",
     )
     .expect("write main marker");
     std::fs::write(
-        &ralph_dir.join("current-hat-events"),
+        ralph_dir.join("current-hat-events"),
         ".ralph/agent/events-hat-validator-loop-1.jsonl\n",
     )
     .expect("write hat marker");
@@ -1978,12 +1978,12 @@ fn test_emit_control_topic_preserves_missing_hat_behavior_with_active_hat_channe
     std::fs::write(&main_events, "").expect("create main events");
     std::fs::write(&hat_events, "").expect("create hat channel");
     std::fs::write(
-        &ralph_dir.join("current-events"),
+        ralph_dir.join("current-events"),
         ".ralph/events-main.jsonl\n",
     )
     .expect("write main marker");
     std::fs::write(
-        &ralph_dir.join("current-hat-events"),
+        ralph_dir.join("current-hat-events"),
         ".ralph/agent/events-hat-validator-loop-1.jsonl\n",
     )
     .expect("write hat marker");

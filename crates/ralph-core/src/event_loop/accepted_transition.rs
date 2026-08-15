@@ -529,21 +529,21 @@ impl AcceptedTransition {
         // fails so the next restart can repair the projection. The live
         // call must still fail closed: publishing here would expose a
         // successful event while the ledger remains on the old state.
-        if let Some(ref delta) = entry.state_machine_projection {
-            if let Err(e) = ledger.commit(
+        if let Some(ref delta) = entry.state_machine_projection
+            && let Err(e) = ledger.commit(
                 crate::state::CommitDelta::StateMachineTransition {
                     delta: delta.clone(),
                 },
                 Some("loop.state_machine_projection".to_string()),
-            ) {
-                rollback();
-                return Err(TransitionError::CommitFailed {
-                    source: format!(
-                        "state machine projection commit failed for {}: {e}",
-                        delta.transition_id.as_str()
-                    ),
-                });
-            }
+            )
+        {
+            rollback();
+            return Err(TransitionError::CommitFailed {
+                source: format!(
+                    "state machine projection commit failed for {}: {e}",
+                    delta.transition_id.as_str()
+                ),
+            });
         }
 
         // 8. Publish — only reached after the durable write succeeds.
@@ -1875,9 +1875,8 @@ mod u3_state_machine_projection_tests {
         let entry = u3_raw_entry("u4-legacy-1", "act-u4");
         ledger.append_outbox_unlocked(&entry).unwrap();
 
-        let repaired =
-            AcceptedTransition::repair_state_machine_projection_from_outbox(&mut ledger)
-                .expect("repair must succeed");
+        let repaired = AcceptedTransition::repair_state_machine_projection_from_outbox(&mut ledger)
+            .expect("repair must succeed");
         assert_eq!(
             repaired, 0,
             "legacy outbox without projection must not be repaired"

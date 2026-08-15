@@ -9,11 +9,11 @@
 
 use std::collections::BTreeSet;
 
+use ralph_core::EventLoopConfig;
 use ralph_core::preset_verify::{
     ExpectBlock, InputError, Limits, PresetVerifyReport, ScenarioFile, SourceKind, StaticLayer,
     TerminalKind, VerifyReportScenario, compute_trace_digest,
 };
-use ralph_core::EventLoopConfig;
 
 fn starting_event() -> String {
     "work.start".to_string()
@@ -252,10 +252,7 @@ scenarios:
 }
 
 #[test]
-fn empty_response_sequence_is_allowed() {
-    // scenario with no responses is allowed by the parser (used for budget-exhaustion fixtures).
-    // NOTE: parser accepts; driver rejects — see `empty_responses_terminal_none_does_not_pass_verifier`
-    // in `preset_verify_driver.rs`.
+fn rejects_empty_response_sequence() {
     let yaml = r#"
 version: 1
 scenarios:
@@ -270,8 +267,10 @@ scenarios:
       max_steps: 1
       no_progress_steps: 1
 "#;
-    let parsed = ScenarioFile::from_yaml(yaml, &starting_event()).expect("parse succeeds");
-    assert!(parsed.scenarios[0].responses.is_empty());
+    let error = ScenarioFile::from_yaml(yaml, &starting_event()).unwrap_err();
+    assert!(
+        matches!(error, InputError::InvalidScenario(message) if message.contains("responses list must not be empty"))
+    );
 }
 
 #[test]

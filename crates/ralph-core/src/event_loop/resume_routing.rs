@@ -106,10 +106,7 @@ pub enum ResumeBlockReason {
     /// Zero observer side-effects occurred (U3). The code/message
     /// describe the specific validation failure so operators can
     /// distinguish unknown-source vs unregistered-target vs no-recipients.
-    DeliveryValidationFailed {
-        code: &'static str,
-        message: String,
-    },
+    DeliveryValidationFailed { code: &'static str, message: String },
 }
 
 /// Identity tuple used to deduplicate equivalent pending resumes
@@ -410,10 +407,7 @@ pub fn publish_targeted_resume(
                     }
                 };
                 return ResumeDecision::Block {
-                    reason: ResumeBlockReason::DeliveryValidationFailed {
-                        code,
-                        message,
-                    },
+                    reason: ResumeBlockReason::DeliveryValidationFailed { code, message },
                 };
             }
             // U3: publish_checked validates again (in case of TOCTOU
@@ -761,9 +755,7 @@ fn write_envelope_to_dir(
         .map(|d| d.as_nanos())
         .unwrap_or(0);
     let counter = ENVELOPE_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let path = dir.join(format!(
-        "task_resume_block-{pid}-{nanos}-{counter}.jsonl"
-    ));
+    let path = dir.join(format!("task_resume_block-{pid}-{nanos}-{counter}.jsonl"));
     let line = envelope.to_string();
     std::fs::write(path, format!("{line}\n"))?;
     Ok(())
@@ -859,12 +851,15 @@ pub fn publish_targeted_recovery_resume_for_hat(
     payload: String,
     diagnostics_dir: Option<&std::path::Path>,
 ) -> ResumeDecision {
-    let resolved_task_id: Option<String> =
-        task_id.map(str::to_string).or_else(|| payload_task_id(&payload));
-    let resolved_task_key: Option<String> =
-        task_key.map(str::to_string).or_else(|| payload_task_key(&payload));
-    let resolved_payload_target: Option<String> =
-        payload_target_hat.map(str::to_string).or_else(|| self::payload_target_hat(&payload));
+    let resolved_task_id: Option<String> = task_id
+        .map(str::to_string)
+        .or_else(|| payload_task_id(&payload));
+    let resolved_task_key: Option<String> = task_key
+        .map(str::to_string)
+        .or_else(|| payload_task_key(&payload));
+    let resolved_payload_target: Option<String> = payload_target_hat
+        .map(str::to_string)
+        .or_else(|| self::payload_target_hat(&payload));
     let payload_clone = payload.clone();
     let inputs = ResumeRoutingInputs {
         event_target: Some(target_hint),

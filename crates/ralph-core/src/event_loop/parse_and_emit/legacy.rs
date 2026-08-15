@@ -14,9 +14,7 @@ impl EventLoop {
         if event.hat.as_deref() != Some(gate_hat.as_str()) {
             return None;
         }
-        let Some(precheck) = self.config.event_loop.precheck.as_ref() else {
-            return None;
-        };
+        let precheck = self.config.event_loop.precheck.as_ref()?;
         if !precheck.enabled || !precheck.rules.contains_key(guarded) {
             return None;
         }
@@ -39,13 +37,8 @@ impl EventLoop {
                 )
             }
             "stabilization.done" => {
-                if self
-                    .registry
-                    .get_config(&ralph_proto::HatId::new("test-stabilizer"))
-                    .is_none()
-                {
-                    return None;
-                }
+                self.registry
+                    .get_config(&ralph_proto::HatId::new("test-stabilizer"))?;
                 crate::event_loop::worktree_handoff::validate_stabilization_handoff(
                     &self.config.core.workspace_root,
                     self.activation_worktree_baselines.get("test-stabilizer"),
@@ -688,27 +681,24 @@ impl EventLoop {
                     // the publisher returns Block with no
                     // bus side effect.
                     let loop_id_for_resume = self.current_loop_id();
-                    let loop_id_str =
-                        loop_id_for_resume.as_deref().unwrap_or("default");
-                    let activation_id =
-                        format!("resume:{}:{}", loop_id_str, self.state.iteration);
+                    let loop_id_str = loop_id_for_resume.as_deref().unwrap_or("default");
+                    let activation_id = format!("resume:{}:{}", loop_id_str, self.state.iteration);
                     let resume_payload = format!(
                         "{{\"target_hat\":\"{}\",\"reason\":\"isolated_anonymous_business_topic\",\"topic\":\"{}\"}}",
                         isolated_hat.as_str(),
                         event.topic
                     );
-                    let decision =
-                        crate::event_loop::resume_routing::task_resume_ingress(
-                            &mut self.bus,
-                            &self.registry,
-                            self.state.state_ledger.as_ref(),
-                            loop_id_str,
-                            &activation_id,
-                            isolated_hat.as_str(),
-                            None,
-                            &format!("anonymous_business:{}", event.topic),
-                            resume_payload,
-                        );
+                    let decision = crate::event_loop::resume_routing::task_resume_ingress(
+                        &mut self.bus,
+                        &self.registry,
+                        self.state.state_ledger.as_ref(),
+                        loop_id_str,
+                        &activation_id,
+                        isolated_hat.as_str(),
+                        None,
+                        &format!("anonymous_business:{}", event.topic),
+                        resume_payload,
+                    );
                     if let crate::event_loop::resume_routing::ResumeDecision::Block { reason } =
                         &decision
                     {
@@ -1101,23 +1091,21 @@ impl EventLoop {
                         // post-scope `accepted` push still
                         // has access to them.
                         let loop_id_for_resume = self.current_loop_id();
-                        let loop_id_str =
-                            loop_id_for_resume.as_deref().unwrap_or("default");
+                        let loop_id_str = loop_id_for_resume.as_deref().unwrap_or("default");
                         let activation_id =
                             format!("resume:{}:{}", loop_id_str, self.state.iteration);
                         let recovery_payload_for_accepted = resume_payload;
-                        let _ =
-                            crate::event_loop::resume_routing::task_resume_ingress(
-                                &mut self.bus,
-                                &self.registry,
-                                self.state.state_ledger.as_ref(),
-                                loop_id_str,
-                                &activation_id,
-                                isolated_hat.as_str(),
-                                None,
-                                &format!("scope_drop:{}", isolated_hat.as_str()),
-                                recovery_payload_for_accepted.clone(),
-                            );
+                        let _ = crate::event_loop::resume_routing::task_resume_ingress(
+                            &mut self.bus,
+                            &self.registry,
+                            self.state.state_ledger.as_ref(),
+                            loop_id_str,
+                            &activation_id,
+                            isolated_hat.as_str(),
+                            None,
+                            &format!("scope_drop:{}", isolated_hat.as_str()),
+                            recovery_payload_for_accepted.clone(),
+                        );
                         let recovery_payload = recovery_payload_for_accepted;
                         let _ = loop_id_for_resume;
                         // P1 finding #1: also push the synthetic
@@ -2655,14 +2643,10 @@ impl EventLoop {
                                     // resume.
                                     let retry_payload_string = retry_payload.to_string();
                                     let loop_id_for_resume = self.current_loop_id();
-                                    let loop_id_str = loop_id_for_resume
-                                        .as_deref()
-                                        .unwrap_or("default");
-                                    let activation_id = format!(
-                                        "resume:{}:{}",
-                                        loop_id_str,
-                                        self.state.iteration
-                                    );
+                                    let loop_id_str =
+                                        loop_id_for_resume.as_deref().unwrap_or("default");
+                                    let activation_id =
+                                        format!("resume:{}:{}", loop_id_str, self.state.iteration);
                                     let retry_step_for_key: String = if step.is_empty() {
                                         String::from("none")
                                     } else {

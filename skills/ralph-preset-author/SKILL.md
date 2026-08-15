@@ -34,6 +34,16 @@ Use this skill to design and draft Ralph **presets** (builtin or local) with **A
   - **落盘位置限定在当前 `.ralph/`**：业务 artifact 落在当前 workspace / worktree 的 `.ralph/<plan>/<unit>/<file>.md` 等业务子目录；不得把 `.ralph/events.jsonl`、`.ralph/loops.json`、`.ralph/supervisor.db` 等 runtime internal ledger 当作业务 artifact 接口。
 - Command syntax lives in `crates/ralph-core/data/ralph-tools*.md` — **cite skill sections, do not copy parameter tables**.
 
+## Dynamic Verification Gate
+
+在声明 preset 已完成前，author 必须确认 source mode：`builtin:*` 是 builtin，其余本地文件按 external 黑盒处理。author 必须准备一个 version 1 scenario，至少覆盖成功路径，并执行：
+
+```bash
+ralph preset verify -H <path|builtin:name> --scenario <scenario.yml> --format json
+```
+
+读取 verify report 的 `passed`、`scenarios[].failure_kind`、`accepted_events`、`last_observable_state` 和 `trace_digest`。成功路径必须有实际 report；失败、blocked、no-output、recovery 或 terminal closure 路径若属于 preset 的职责范围，也必须补充对应 scenario。verify 失败、缺少终态、预算耗尽或 source mode 无法确认时，停止交付并修复，不得以 `preset check --strict` 单独替代动态证据。External preset 不要求 Rust、Cargo、源码行号或目标项目构建；builtin 源码、BDD、replay 只能作为补充证据。
+
 ## Workflow
 
 0. **Discovery and user-confirmation gate (MUST — before topology or YAML):**

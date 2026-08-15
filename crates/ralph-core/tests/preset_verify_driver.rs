@@ -14,7 +14,7 @@
 
 use ralph_core::config::{EventLoopConfig, HatConfig, RalphConfig};
 use ralph_core::preset_verify::{
-    DriverWorkspace, ScenarioFile, compute_trace_digest, evaluate_scenario, run_scenario,
+    DriverWorkspace, ScenarioFile, compute_trace_digest, run_scenario,
 };
 use std::collections::HashMap;
 
@@ -141,7 +141,10 @@ fn driver_runs_real_event_loop_success() {
         outcome.failure_kind
     );
     assert!(outcome.failure_kind.is_none());
-    assert_eq!(outcome.trace.terminal_topic.as_deref(), Some("LOOP_COMPLETE"));
+    assert_eq!(
+        outcome.trace.terminal_topic.as_deref(),
+        Some("LOOP_COMPLETE")
+    );
 }
 
 #[test]
@@ -198,11 +201,7 @@ fn driver_uses_actual_next_hat_for_unpinned_responses() {
     // route both responses. The trace must contain at least one step with a
     // hat id and at least one accepted event.
     assert!(!outcome.trace.steps.is_empty());
-    assert!(outcome
-        .trace
-        .steps
-        .iter()
-        .all(|s| s.hat.is_some()));
+    assert!(outcome.trace.steps.iter().all(|s| s.hat.is_some()));
 }
 
 #[test]
@@ -236,7 +235,10 @@ scenarios:
     assert!(!outcome.passed);
     let kind = outcome.failure_kind.expect("failure_kind present");
     assert!(
-        matches!(kind, ralph_core::preset_verify::FailureKind::ScenarioFailure(_)),
+        matches!(
+            kind,
+            ralph_core::preset_verify::FailureKind::ScenarioFailure(_)
+        ),
         "expected scenario_failure, got {kind:?}"
     );
 }
@@ -274,10 +276,9 @@ scenarios:
 }
 
 #[test]
-fn empty_responses_terminal_none_does_not_pass_verifier() {
-    // A scenario with zero responses AND terminal: none is not a valid scenario —
-    // the driver must reject it with NoProgress, and the verdict evaluator must
-    // surface that as a failure (not silently pass).
+fn empty_responses_are_rejected_before_runtime() {
+    // An empty response sequence is invalid input and must not construct or
+    // drive an EventLoop.
     let yaml = r#"
 version: 1
 scenarios:
@@ -292,35 +293,12 @@ scenarios:
       max_steps: 1
       no_progress_steps: 1
 "#;
-    let parsed = ScenarioFile::from_yaml(yaml, &starting_event()).expect("parse");
-    let scenario = &parsed.scenarios[0];
-    let config = make_single_hat_terminal_config();
-    let workspace = DriverWorkspace::new().expect("workspace");
-
-    let outcome = run_scenario(scenario, &config, &workspace, "blob").expect("run");
-
-    // Driver must return a failing outcome with NoProgress.
-    assert!(
-        matches!(
-            outcome.failure_kind,
-            Some(ralph_core::preset_verify::FailureKind::NoProgress(_))
-        ),
-        "expected NoProgress, got {:?}",
-        outcome.failure_kind
-    );
-    assert!(!outcome.passed, "outcome must not pass");
-
-    // R2 gate (U3 verdict reclassification): evaluate_scenario returns
-    // passed=false for NoProgress under terminal:none. U3 covers this
-    // assertion in `no_progress_under_terminal_none_forces_passed_false` in
-    // `preset_verify_verdict.rs`; this driver-level test only asserts the
-    // driver classification here.
-    let report = evaluate_scenario(outcome);
-    assert_eq!(
-        report.failure_kind.as_deref(),
-        Some("no_progress"),
-        "driver failure_kind tag must propagate to evaluator"
-    );
+    let error = ScenarioFile::from_yaml(yaml, &starting_event()).unwrap_err();
+    assert!(matches!(
+        error,
+        ralph_core::preset_verify::InputError::InvalidScenario(message)
+            if message.contains("responses list must not be empty")
+    ));
 }
 
 #[test]
@@ -335,7 +313,10 @@ fn driver_repeats_same_input_deterministically() {
     let outcome2 = run_scenario(scenario, &config, &ws2, "scenario-blob").expect("run2");
 
     // Accepted event sequences and trace digest must match across runs.
-    assert_eq!(outcome1.trace.accepted_events, outcome2.trace.accepted_events);
+    assert_eq!(
+        outcome1.trace.accepted_events,
+        outcome2.trace.accepted_events
+    );
     assert_eq!(outcome1.trace.trace_digest, outcome2.trace.trace_digest);
 }
 

@@ -228,7 +228,9 @@ impl PresetVerifyReport {
 impl Limits {
     pub fn new(max_steps: u32, no_progress_steps: u32) -> Result<Self, InputError> {
         if max_steps == 0 {
-            return Err(InputError::InvalidLimit("max_steps must be positive".into()));
+            return Err(InputError::InvalidLimit(
+                "max_steps must be positive".into(),
+            ));
         }
         if no_progress_steps == 0 {
             return Err(InputError::InvalidLimit(
@@ -288,9 +290,9 @@ impl ScenarioFile {
             )));
         }
 
-        let raw_scenarios = raw.scenarios.ok_or_else(|| {
-            InputError::InvalidScenario("scenarios list is required".into())
-        })?;
+        let raw_scenarios = raw
+            .scenarios
+            .ok_or_else(|| InputError::InvalidScenario("scenarios list is required".into()))?;
         if raw_scenarios.is_empty() {
             return Err(InputError::InvalidScenario(
                 "scenarios list must not be empty".into(),
@@ -300,9 +302,10 @@ impl ScenarioFile {
         let mut names = std::collections::HashSet::new();
         let mut scenarios = Vec::with_capacity(raw_scenarios.len());
         for raw_s in raw_scenarios {
-            let name = raw_s.name.clone().ok_or_else(|| {
-                InputError::InvalidScenario("scenario.name is required".into())
-            })?;
+            let name = raw_s
+                .name
+                .clone()
+                .ok_or_else(|| InputError::InvalidScenario("scenario.name is required".into()))?;
             if !names.insert(name.clone()) {
                 return Err(InputError::InvalidScenario(format!(
                     "duplicate scenario name: {name}"
@@ -324,7 +327,14 @@ impl Scenario {
             .name
             .clone()
             .ok_or_else(|| InputError::InvalidScenario("scenario.name is required".into()))?;
-        let raw_responses = raw.responses.unwrap_or_default();
+        let raw_responses = raw.responses.ok_or_else(|| {
+            InputError::InvalidScenario(format!("scenario {name}: responses list is required"))
+        })?;
+        if raw_responses.is_empty() {
+            return Err(InputError::InvalidScenario(format!(
+                "scenario {name}: responses list must not be empty"
+            )));
+        }
         let mut responses = Vec::with_capacity(raw_responses.len());
         for r in raw_responses {
             responses.push(Response::from_yaml(r)?);
@@ -335,9 +345,7 @@ impl Scenario {
         })?;
         let expect = ExpectBlock {
             start_event: expect_raw.start_event.ok_or_else(|| {
-                InputError::InvalidScenario(format!(
-                    "scenario {name}: expect.start_event required"
-                ))
+                InputError::InvalidScenario(format!("scenario {name}: expect.start_event required"))
             })?,
             accepted_events: expect_raw.accepted_events.unwrap_or_default(),
             forbidden_events: expect_raw.forbidden_events.unwrap_or_default(),
@@ -364,9 +372,9 @@ impl Scenario {
             limits_raw
                 .max_steps
                 .ok_or_else(|| InputError::InvalidLimit("max_steps required".into()))?,
-            limits_raw.no_progress_steps.ok_or_else(|| {
-                InputError::InvalidLimit("no_progress_steps required".into())
-            })?,
+            limits_raw
+                .no_progress_steps
+                .ok_or_else(|| InputError::InvalidLimit("no_progress_steps required".into()))?,
         )?;
 
         Ok(Self {
@@ -387,7 +395,7 @@ fn parse_terminal(value: Option<&str>) -> Result<TerminalKind, InputError> {
         Some(other) => {
             return Err(InputError::InvalidScenario(format!(
                 "unknown expect.terminal: {other}"
-            )))
+            )));
         }
     })
 }
@@ -402,7 +410,7 @@ fn parse_payload_fields(
             _ => {
                 return Err(InputError::InvalidScenario(format!(
                     "payload_fields[{topic}] must be an object"
-                )))
+                )));
             }
         };
         let mut topic_fields = BTreeMap::new();
@@ -415,7 +423,7 @@ fn parse_payload_fields(
                 other => {
                     return Err(InputError::InvalidScenario(format!(
                         "payload_fields[{topic}] key must be string/number/bool, got: {other:?}"
-                    )))
+                    )));
                 }
             };
             let json_v: serde_json::Value = serde_json::to_value(v).map_err(|e| {
@@ -557,9 +565,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use crate::config::RalphConfig;
-use crate::event_loop::{
-    EventLoop, ProcessedEvents, TerminationReason,
-};
+use crate::event_loop::{EventLoop, ProcessedEvents, TerminationReason};
 use crate::execution_contract;
 use crate::loop_context::LoopContext;
 use ralph_proto::Event;
@@ -584,6 +590,8 @@ pub struct ScenarioTrace {
     pub scenario: Scenario,
     pub steps: Vec<StepRecord>,
     pub accepted_events: Vec<String>,
+    /// Accepted event payloads in the same order as `accepted_events`.
+    pub accepted_payloads: Vec<(String, String)>,
     pub rejected_events: Vec<String>,
     pub last_hat: Option<String>,
     pub last_accepted_topic: Option<String>,
@@ -618,6 +626,7 @@ struct ScenarioTracer<'a> {
     scenario: &'a Scenario,
     steps: Vec<StepRecord>,
     accepted: Vec<String>,
+    accepted_payloads: Vec<(String, String)>,
     rejected: Vec<String>,
     last_hat: Option<String>,
     last_accepted_topic: Option<String>,
@@ -633,6 +642,7 @@ impl<'a> ScenarioTracer<'a> {
             scenario,
             steps: Vec::with_capacity(scenario.responses.len()),
             accepted: Vec::new(),
+            accepted_payloads: Vec::new(),
             rejected: Vec::new(),
             last_hat: None,
             last_accepted_topic: None,
@@ -645,12 +655,13 @@ impl<'a> ScenarioTracer<'a> {
 
     /// Record one response iteration, updating all accumulated state.
     fn record_step(&mut self, step: StepRecord, processed: &ProcessedEvents) {
-        self.step_count = self.step_count.saturating_add(1);
         self.steps.push(step);
 
         for event in &processed.accepted_events {
             let topic = event.topic.to_string();
             self.accepted.push(topic.clone());
+            self.accepted_payloads
+                .push((topic.clone(), event.payload.clone()));
             self.last_accepted_topic = Some(topic.clone());
             if let Some(expected_topic) = &self.scenario.expect.terminal_topic
                 && &topic == expected_topic
@@ -661,10 +672,7 @@ impl<'a> ScenarioTracer<'a> {
 
         if processed.had_rejected_events {
             for finding in &processed.contract_rejections {
-                let label = format!(
-                    "contract:topic={} kind={:?}",
-                    finding.topic, finding.kind
-                );
+                let label = format!("contract:topic={} kind={:?}", finding.topic, finding.kind);
                 self.rejected.push(label);
             }
         }
@@ -685,27 +693,13 @@ impl<'a> ScenarioTracer<'a> {
             scenario: self.scenario.clone(),
             steps: self.steps.clone(),
             accepted_events: self.accepted.clone(),
+            accepted_payloads: self.accepted_payloads.clone(),
             rejected_events: self.rejected.clone(),
             last_hat: self.last_hat.clone(),
             last_accepted_topic: self.last_accepted_topic.clone(),
             last_runtime_termination: self.last_runtime_termination.clone(),
             terminal_topic: self.terminal_topic.clone(),
             trace_digest,
-        }
-    }
-
-    /// Consume the tracer and wrap its accumulated state in a
-    /// [`ScenarioOutcome`].
-    fn finalize_with(
-        self,
-        input_blob: &str,
-        failure_kind: FailureKind,
-        passed: bool,
-    ) -> ScenarioOutcome {
-        ScenarioOutcome {
-            trace: self.snapshot(input_blob),
-            failure_kind: Some(failure_kind),
-            passed,
         }
     }
 }
@@ -742,9 +736,8 @@ pub fn run_scenario(
 ) -> Result<ScenarioOutcome, FailureKind> {
     // Prepare the .ralph directory and a writable events file in the temp
     // workspace (real `process_events_from_jsonl` reads from this file).
-    std::fs::create_dir_all(workspace.ralph_dir()).map_err(|e| {
-        FailureKind::RuntimeException(format!("create .ralph dir failed: {e}"))
-    })?;
+    std::fs::create_dir_all(workspace.ralph_dir())
+        .map_err(|e| FailureKind::RuntimeException(format!("create .ralph dir failed: {e}")))?;
 
     let mut config = config.clone();
     config.core.workspace_root = workspace.temp_dir.path().to_path_buf();
@@ -764,18 +757,6 @@ pub fn run_scenario(
 
     let parser = crate::event_parser::EventParser::new();
     let mut tracer = ScenarioTracer::new(scenario);
-
-    // P0 adversarial A1: an empty response sequence with terminal: none is not
-    // a valid scenario — it represents a degenerate input that must be rejected
-    // by the driver before the loop iterates zero times. Verifies with
-    // `FailureKind::NoProgress` and `passed=false`.
-    if scenario.responses.is_empty() && matches!(scenario.expect.terminal, TerminalKind::None) {
-        return Ok(tracer.finalize_with(
-            input_blob,
-            FailureKind::NoProgress("empty response sequence is not a valid scenario".into()),
-            false,
-        ));
-    }
 
     for (idx, response) in scenario.responses.iter().enumerate() {
         tracer.step_count = tracer.step_count.saturating_add(1);
@@ -848,10 +829,9 @@ pub fn run_scenario(
             FailureKind::RuntimeException(format!("write events.jsonl failed: {e}"))
         })?;
 
-        let processed: ProcessedEvents =
-            event_loop.process_events_from_jsonl().map_err(|e| {
-                FailureKind::RuntimeException(format!("process_events_from_jsonl failed: {e:?}"))
-            })?;
+        let processed: ProcessedEvents = event_loop.process_events_from_jsonl().map_err(|e| {
+            FailureKind::RuntimeException(format!("process_events_from_jsonl failed: {e:?}"))
+        })?;
 
         // StepRecord accepts/rejected fields are kept for backward compatibility
         // with consumers that read ScenarioTrace; tracer.record_step builds the
@@ -883,13 +863,15 @@ pub fn run_scenario(
     // If we got here, classify based on terminal expectation vs reality.
     let passed = match scenario.expect.terminal {
         TerminalKind::None => true,
-        _ => tracer.terminal_topic.is_some()
-            && scenario
-                .expect
-                .terminal_topic
-                .as_ref()
-                .map(|t| tracer.terminal_topic.as_deref() == Some(t.as_str()))
-                .unwrap_or(false),
+        _ => {
+            tracer.terminal_topic.is_some()
+                && scenario
+                    .expect
+                    .terminal_topic
+                    .as_ref()
+                    .map(|t| tracer.terminal_topic.as_deref() == Some(t.as_str()))
+                    .unwrap_or(false)
+        }
     };
 
     let failure_kind = if passed {
@@ -897,9 +879,7 @@ pub fn run_scenario(
     } else {
         Some(FailureKind::UnclosedTerminal(format!(
             "expected terminal={:?} topic={:?} but trace ended with accepted={:?}",
-            scenario.expect.terminal,
-            scenario.expect.terminal_topic,
-            tracer.accepted
+            scenario.expect.terminal, scenario.expect.terminal_topic, tracer.accepted
         )))
     };
 
@@ -962,8 +942,12 @@ fn write_events_to_jsonl(
 pub fn evaluate_scenario(outcome: ScenarioOutcome) -> VerifyReportScenario {
     use std::collections::HashSet;
     let scenario = &outcome.trace.scenario;
-    let accepted: HashSet<&str> =
-        outcome.trace.accepted_events.iter().map(String::as_str).collect();
+    let accepted: HashSet<&str> = outcome
+        .trace
+        .accepted_events
+        .iter()
+        .map(String::as_str)
+        .collect();
     let forbidden_violated: Vec<String> = scenario
         .expect
         .forbidden_events
@@ -972,17 +956,50 @@ pub fn evaluate_scenario(outcome: ScenarioOutcome) -> VerifyReportScenario {
         .cloned()
         .collect();
 
-    // accepted_events: every expected topic must appear in the trace.
-    // Order is intentionally not enforced at the verdict level — the
-    // driver's ordered trace preserves order, but the `expect.accepted_events`
-    // contract is set membership.
+    // accepted_events is an ordered contract. Runtime-generated recovery
+    // events may appear between expected events, so validate the expected
+    // topics as an ordered subsequence rather than requiring byte-for-byte
+    // equality with the complete runtime trace.
+    let mut expected_index = 0;
+    for actual in &outcome.trace.accepted_events {
+        if scenario
+            .expect
+            .accepted_events
+            .get(expected_index)
+            .is_some_and(|expected| expected == actual)
+        {
+            expected_index += 1;
+        }
+    }
     let missing_accepted: Vec<String> = scenario
         .expect
         .accepted_events
         .iter()
-        .filter(|t| !accepted.contains(t.as_str()))
+        .skip(expected_index)
         .cloned()
         .collect();
+
+    let payload_mismatches = scenario
+        .expect
+        .payload_fields
+        .iter()
+        .filter_map(|(topic, fields)| {
+            let payload = outcome
+                .trace
+                .accepted_payloads
+                .iter()
+                .find(|(accepted_topic, _)| accepted_topic == topic)
+                .map(|(_, payload)| payload);
+            let payload =
+                payload.and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok());
+            let object = payload.as_ref().and_then(serde_json::Value::as_object);
+            fields.iter().find_map(|(field, expected)| {
+                let actual = object.and_then(|value| value.get(field));
+                (actual != Some(expected))
+                    .then(|| format!("{topic}.{field}: expected {expected}, got {actual:?}"))
+            })
+        })
+        .collect::<Vec<_>>();
 
     // Driver exited early (e.g. next_hat returned None mid-response-list).
     // Even when terminal is `none`, an unclosed run must not pass.
@@ -1008,7 +1025,9 @@ pub fn evaluate_scenario(outcome: ScenarioOutcome) -> VerifyReportScenario {
     };
 
     // Forbidden + missing check.
-    let expected_ok = missing_accepted.is_empty() && forbidden_violated.is_empty();
+    let expected_ok = missing_accepted.is_empty()
+        && forbidden_violated.is_empty()
+        && payload_mismatches.is_empty();
 
     let (passed, failure_kind_override) = if terminal_ok && expected_ok {
         (true, None)
@@ -1028,14 +1047,21 @@ pub fn evaluate_scenario(outcome: ScenarioOutcome) -> VerifyReportScenario {
         } else if !terminal_ok {
             detail.push_str(&format!(
                 "expected terminal={:?} topic={:?} but trace ended with accepted={:?}; ",
-                scenario.expect.terminal, scenario.expect.terminal_topic, outcome.trace.accepted_events
+                scenario.expect.terminal,
+                scenario.expect.terminal_topic,
+                outcome.trace.accepted_events
             ));
         }
         if !missing_accepted.is_empty() {
             detail.push_str(&format!("missing expected topics: {missing_accepted:?}; "));
         }
         if !forbidden_violated.is_empty() {
-            detail.push_str(&format!("forbidden topics observed: {forbidden_violated:?}; "));
+            detail.push_str(&format!(
+                "forbidden topics observed: {forbidden_violated:?}; "
+            ));
+        }
+        if !payload_mismatches.is_empty() {
+            detail.push_str(&format!("payload mismatches: {payload_mismatches:?}; "));
         }
         let kind = if matches!(scenario.expect.terminal, TerminalKind::None)
             && matches!(outcome.failure_kind, Some(FailureKind::NoProgress(_)))
@@ -1089,8 +1115,7 @@ pub fn build_report(
     input_blob: &str,
 ) -> PresetVerifyReport {
     let passed = outcomes.iter().all(|(_, s)| s.passed) && overall_failure.is_none();
-    let scenarios: Vec<VerifyReportScenario> =
-        outcomes.into_iter().map(|(_, s)| s).collect();
+    let scenarios: Vec<VerifyReportScenario> = outcomes.into_iter().map(|(_, s)| s).collect();
     let failure_kind_tag = overall_failure.map(FailureKind::tag).map(str::to_string);
     let trace_digest = if let Some(last) = scenarios.last() {
         last.trace_digest.clone()

@@ -21,13 +21,12 @@ use crate::preset_templates::{
     TemplateCatalog, TemplateDifficulty, TemplateManifest, Version, XPresetMetadata,
 };
 use crate::{ConfigSource, HatsSource};
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 use clap::{Parser, Subcommand, ValueEnum};
-use ralph_core::config::HatExecutionMode;
 use ralph_core::HatRegistry;
 use ralph_core::preset_verify::{
-    build_report as build_verify_report, evaluate_scenario, FailureKind,
-    PresetVerifyReport, ScenarioFile, SourceKind, StaticLayer, run_scenario, DriverWorkspace,
+    DriverWorkspace, FailureKind, PresetVerifyReport, ScenarioFile, SourceKind, StaticLayer,
+    build_report as build_verify_report, evaluate_scenario, run_scenario,
 };
 use ralph_core::runtime_contract::{
     FindingSeverity, RuntimeContractReport, RuntimeContractStrictness,
@@ -875,7 +874,7 @@ async fn check_preset(
     }
 
     if !report.passed {
-        std::process::exit(1);
+        return Err(anyhow!("preset verify failed"));
     }
 
     Ok(())
@@ -970,17 +969,6 @@ async fn verify_preset(
         .clone()
         .unwrap_or_else(|| "task.start".to_string());
 
-    // U2 (P1:adversarial:A2) — execution_mode guard: reject coordinator mode.
-    if config.event_loop.execution_mode != HatExecutionMode::Isolated {
-        let detail =
-            "preset verify requires event_loop.execution_mode: isolated; coordinator mode is \
-             not supported";
-        eprintln!("{detail}");
-        let mut report = PresetVerifyReport::default();
-        report.with_failure_kind("input_error");
-        return render_and_exit(report, format, use_colors);
-    }
-
     // Step 3 — strict static contract check (single source of truth).
     let source_label = preset_source_label(config_sources, hats_source);
     let registry = HatRegistry::from_runtime_config(&config);
@@ -1065,10 +1053,11 @@ async fn verify_preset(
         match run_scenario(scenario, &config, &workspace, input_blob) {
             Ok(outcome) => {
                 let scenario_report = evaluate_scenario(outcome.clone());
-                if !scenario_report.passed && overall_failure.is_none() {
-                    if let Some(kind) = &outcome.failure_kind {
-                        overall_failure = Some(kind.clone());
-                    }
+                if !scenario_report.passed
+                    && overall_failure.is_none()
+                    && let Some(kind) = &outcome.failure_kind
+                {
+                    overall_failure = Some(kind.clone());
                 }
                 outcomes.push((outcome, scenario_report));
             }

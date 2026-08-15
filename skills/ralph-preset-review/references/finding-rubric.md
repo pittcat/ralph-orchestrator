@@ -443,7 +443,7 @@ fixture README §8、fixture 顶部注释与本表 ID 一一对应；review 命�
 | `verify.scenario_coverage_gap` | P1 | 80 | Q4 | feasibility | scenario 文件只覆盖 success，缺至少一个 failure / blocked / no-output / recovery / terminal-closure 场景；preset 拓扑里的失败 / 阻断 / 恢复路径无 dynamic 证据 |
 | `verify.failure_kind_inconsistency` | P1 | 85 | Q4 | payload-content | verify report 实际 `failure_kind` 与 expect 声明或与 plan 描述不符；report 中 scenario.passed=true 但 trace 含 `unclosed_terminal` / `no_progress` 是 silent-success 反模式 |
 | `verify.no_progress_misclassified` | P0 | 85 | Q4 | feasibility | empty-output / 非业务文本响应被报为 passed；静态配置可能通过但 runtime 静默 starve |
-| `verify.remote_source_accepted` | P0 | 95 | Q3 | feasibility | verify 报告来自远程 hats / config source 而非本地 / builtin；plan §3.5 / D9 明令 remote 必须拒收 |
+| `verify.remote_source_accepted` | P0 | 95 | Q3 | feasibility | verify 报告来自远程 hats / config source 而非本地 / builtin；remote source 必须在执行前拒收 |
 | `verify.builtin_external_boundary_violated` | P1 | 80 | Q3 | feasibility | external preset（非 `builtin:*`）的 review 报告要求 author 跑 Cargo、读 Rust 源码、或要求目标项目构建；external 模式禁止 Rust 工具链 |
 | `verify.failure_kind_in_review_report_unexplained` | P1 | 80 | Q4 | payload-content | review 报告抄录 verify report 的 `failure_kind` 但未在「Remediation Plan」给出失败原因 + 修复路径 |
 

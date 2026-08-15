@@ -1,4 +1,4 @@
-# 2026-08-15-0722 plan U5 §11/§15: generic runtime verification negative fixture
+# Generic runtime verification negative fixture.
 #
 # Static topology passes (preset check --strict shows green for the
 # surface contract) but `ralph preset verify` rejects because:

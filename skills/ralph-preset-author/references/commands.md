@@ -17,7 +17,7 @@
 ralph preset check -H <path|builtin:name> --strict
 ralph preset check -H <path|builtin:name> --strict --format json
 
-# Dynamic workflow verification (Unit 4 of plan 2026-08-15-0722):
+# Dynamic workflow verification:
 # runs version 1 scenario YAML through real EventLoop in a temp
 # workspace; reports ordered events / terminal closure / failure_kind.
 # author MUST run this for the success-path scenario before declaring

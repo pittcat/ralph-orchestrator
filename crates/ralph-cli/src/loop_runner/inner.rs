@@ -394,7 +394,7 @@ fn finalize_recovery_diagnosis(
             "diagnosis-summary.json",
         ]
         .into_iter()
-        .map(|name| diagnostic_artifact_integrity(&session_dir, name))
+        .map(|name| diagnostic_artifact_integrity(session_dir, name))
         .collect();
         event_loop
             .diagnostics()
@@ -858,11 +858,8 @@ pub(super) async fn run_loop_impl_inner(
     // it. The history logger writes the same topic (see
     // `default_start_topic` assignment below).
     if resume && manifest_recovery.is_none() {
-        match persist_starting_event_to_events_file(
-            &ctx,
-            ralph_proto::LOOP_RESUME,
-            &prompt_content,
-        ) {
+        match persist_starting_event_to_events_file(&ctx, ralph_proto::LOOP_RESUME, &prompt_content)
+        {
             Ok(()) => {
                 debug!(
                     topic = %ralph_proto::LOOP_RESUME,

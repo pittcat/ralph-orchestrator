@@ -164,25 +164,24 @@ scenarios:
     );
 
     let mut cmd = ralph_bin();
-    cmd.current_dir(tmp.path())
-        .env("RUST_LOG", "off")
-        .args([
-            "-H",
-            "builtin:merge-batch",
-            "preset",
-            "verify",
-            "--scenario",
-            scenario_path.to_str().unwrap(),
-            "--format",
-            "json",
-        ]);
+    cmd.current_dir(tmp.path()).env("RUST_LOG", "off").args([
+        "-H",
+        "builtin:merge-batch",
+        "preset",
+        "verify",
+        "--scenario",
+        scenario_path.to_str().unwrap(),
+        "--format",
+        "json",
+    ]);
 
     let output = cmd.output().expect("spawn ralph");
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
     let json_slice = extract_json(&stdout);
-    let json: serde_json::Value = serde_json::from_str(&json_slice)
-        .unwrap_or_else(|e| panic!("verify JSON unparseable: {e}\njson_slice={json_slice}\nstderr={stderr}"));
+    let json: serde_json::Value = serde_json::from_str(&json_slice).unwrap_or_else(|e| {
+        panic!("verify JSON unparseable: {e}\njson_slice={json_slice}\nstderr={stderr}")
+    });
     assert!(json["passed"].is_boolean());
     assert!(json["source_kind"].is_string());
     assert!(json["static"].is_object());
@@ -208,19 +207,18 @@ fn preset_verify_remote_hats_source_is_rejected_without_network() {
 
     let mut cmd = ralph_bin();
     scrub_agent_runtime_env(&mut cmd);
-    cmd.current_dir(tmp.path())
-        .args([
-            "-c",
-            core_path.to_str().unwrap(),
-            "-H",
-            "https://example.com/should-not-fetch/hats.yml",
-            "preset",
-            "verify",
-            "--scenario",
-            scenario_path.to_str().unwrap(),
-            "--format",
-            "json",
-        ]);
+    cmd.current_dir(tmp.path()).args([
+        "-c",
+        core_path.to_str().unwrap(),
+        "-H",
+        "https://example.com/should-not-fetch/hats.yml",
+        "preset",
+        "verify",
+        "--scenario",
+        scenario_path.to_str().unwrap(),
+        "--format",
+        "json",
+    ]);
 
     let output = cmd.output().expect("spawn ralph");
     assert_ne!(
@@ -252,19 +250,18 @@ fn preset_verify_builtin_source_kind_is_classified() {
     write_file(&scenario_path, MINIMAL_SCENARIO);
 
     let mut cmd = ralph_bin();
-    cmd.current_dir(tmp.path())
-        .args([
-            "-c",
-            core_path.to_str().unwrap(),
-            "-H",
-            "builtin:debug",
-            "preset",
-            "verify",
-            "--scenario",
-            scenario_path.to_str().unwrap(),
-            "--format",
-            "json",
-        ]);
+    cmd.current_dir(tmp.path()).args([
+        "-c",
+        core_path.to_str().unwrap(),
+        "-H",
+        "builtin:debug",
+        "preset",
+        "verify",
+        "--scenario",
+        scenario_path.to_str().unwrap(),
+        "--format",
+        "json",
+    ]);
 
     let output = cmd.output().expect("spawn ralph");
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -293,19 +290,18 @@ fn preset_verify_file_source_kind_is_external() {
     write_file(&scenario_path, MINIMAL_SCENARIO);
 
     let mut cmd = ralph_bin();
-    cmd.current_dir(tmp.path())
-        .args([
-            "-c",
-            core_path.to_str().unwrap(),
-            "-H",
-            hats_path.to_str().unwrap(),
-            "preset",
-            "verify",
-            "--scenario",
-            scenario_path.to_str().unwrap(),
-            "--format",
-            "json",
-        ]);
+    cmd.current_dir(tmp.path()).args([
+        "-c",
+        core_path.to_str().unwrap(),
+        "-H",
+        hats_path.to_str().unwrap(),
+        "preset",
+        "verify",
+        "--scenario",
+        scenario_path.to_str().unwrap(),
+        "--format",
+        "json",
+    ]);
 
     let output = cmd.output().expect("spawn ralph");
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -328,17 +324,16 @@ fn preset_verify_static_failure_returns_nonzero_and_does_not_consume_scenario() 
     write_file(&scenario_path, MINIMAL_SCENARIO);
 
     let mut cmd = ralph_bin();
-    cmd.current_dir(tmp.path())
-        .args([
-            "-H",
-            "builtin:debug",
-            "preset",
-            "verify",
-            "--scenario",
-            scenario_path.to_str().unwrap(),
-            "--format",
-            "json",
-        ]);
+    cmd.current_dir(tmp.path()).args([
+        "-H",
+        "builtin:debug",
+        "preset",
+        "verify",
+        "--scenario",
+        scenario_path.to_str().unwrap(),
+        "--format",
+        "json",
+    ]);
 
     let output = cmd.output().expect("spawn ralph");
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -351,7 +346,11 @@ fn preset_verify_static_failure_returns_nonzero_and_does_not_consume_scenario() 
         scenarios.is_empty(),
         "static failure must not consume scenarios; got {scenarios:?}"
     );
-    assert_ne!(output.status.code(), Some(0), "static failure must exit nonzero");
+    assert_ne!(
+        output.status.code(),
+        Some(0),
+        "static failure must exit nonzero"
+    );
 }
 
 #[test]
@@ -404,20 +403,18 @@ scenarios:
         .join("tests/fixtures/isolated-start-mismatch-preset.yml");
 
     let mut cmd = ralph_bin();
-    cmd.current_dir(tmp.path())
-        .env("RUST_LOG", "off")
-        .args([
-            "-c",
-            core_path.to_str().unwrap(),
-            "-H",
-            fixture_path.to_str().unwrap(),
-            "preset",
-            "verify",
-            "--scenario",
-            scenario_path.to_str().unwrap(),
-            "--format",
-            "json",
-        ]);
+    cmd.current_dir(tmp.path()).env("RUST_LOG", "off").args([
+        "-c",
+        core_path.to_str().unwrap(),
+        "-H",
+        fixture_path.to_str().unwrap(),
+        "preset",
+        "verify",
+        "--scenario",
+        scenario_path.to_str().unwrap(),
+        "--format",
+        "json",
+    ]);
 
     let output = cmd.output().expect("spawn ralph");
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -430,8 +427,9 @@ scenarios:
     );
 
     let json_slice = extract_json(&stdout);
-    let json: serde_json::Value = serde_json::from_str(&json_slice)
-        .unwrap_or_else(|e| panic!("verify JSON unparseable: {e}\njson_slice={json_slice}\nstderr={stderr}"));
+    let json: serde_json::Value = serde_json::from_str(&json_slice).unwrap_or_else(|e| {
+        panic!("verify JSON unparseable: {e}\njson_slice={json_slice}\nstderr={stderr}")
+    });
 
     assert_eq!(json["passed"], serde_json::Value::Bool(false));
     assert_eq!(
@@ -470,17 +468,16 @@ scenarios:
     );
 
     let mut cmd = ralph_bin();
-    cmd.current_dir(tmp.path())
-        .args([
-            "-H",
-            "builtin:merge-batch",
-            "preset",
-            "verify",
-            "--scenario",
-            scenario_path.to_str().unwrap(),
-            "--format",
-            "json",
-        ]);
+    cmd.current_dir(tmp.path()).args([
+        "-H",
+        "builtin:merge-batch",
+        "preset",
+        "verify",
+        "--scenario",
+        scenario_path.to_str().unwrap(),
+        "--format",
+        "json",
+    ]);
 
     let output = cmd.output().expect("spawn ralph");
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -514,16 +511,15 @@ fn preset_check_still_works_without_backend() {
     write_file(&scenario_path, MINIMAL_SCENARIO);
 
     let mut cmd = ralph_bin();
-    cmd.current_dir(tmp.path())
-        .args([
-            "-c",
-            core_path.to_str().unwrap(),
-            "-H",
-            hats_path.to_str().unwrap(),
-            "preset",
-            "check",
-            "--strict",
-        ]);
+    cmd.current_dir(tmp.path()).args([
+        "-c",
+        core_path.to_str().unwrap(),
+        "-H",
+        hats_path.to_str().unwrap(),
+        "preset",
+        "check",
+        "--strict",
+    ]);
 
     let output = cmd.output().expect("spawn ralph");
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -547,16 +543,15 @@ fn inspect_prompt_does_not_run_scenario() {
     write_file(&hats_path, MINIMAL_HATS);
 
     let mut cmd = ralph_bin();
-    cmd.current_dir(tmp.path())
-        .args([
-            "-c",
-            core_path.to_str().unwrap(),
-            "-H",
-            hats_path.to_str().unwrap(),
-            "inspect",
-            "prompt",
-            "doer",
-        ]);
+    cmd.current_dir(tmp.path()).args([
+        "-c",
+        core_path.to_str().unwrap(),
+        "-H",
+        hats_path.to_str().unwrap(),
+        "inspect",
+        "prompt",
+        "doer",
+    ]);
 
     let output = cmd.output().expect("spawn ralph");
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -568,9 +563,9 @@ fn inspect_prompt_does_not_run_scenario() {
 }
 
 #[test]
-fn preset_verify_rejects_coordinator_mode_with_input_error() {
-    // A preset with execution_mode=coordinator (default) must be rejected
-    // by verify with failure_kind=input_error and a message about isolated mode.
+fn preset_verify_supports_coordinator_mode() {
+    // Coordinator mode is a supported runtime mode for presets with up to
+    // three hats and must use the same real EventLoop driver as isolated mode.
     let tmp = make_scenario_workspace().expect("tempdir");
     let core_path = tmp.path().join("core.yml");
     let scenario_path = tmp.path().join("scenario.yml");
@@ -586,9 +581,8 @@ event_loop:
   max_iterations: 4
 
 tasks:
-  enabled: true
-  coordinator_hats:
-    - hat_a
+  enabled: false
+
 "#,
     );
 
@@ -597,15 +591,20 @@ tasks:
         r#"
 version: 1
 scenarios:
-  - name: coordinator-mode-rejected
+  - name: coordinator-mode-success
     responses:
-      - output: ""
+      - output: '<event topic="work.proceed.a">{"ok":true}</event>'
+        success: true
+      - output: '<event topic="work.proceed.b">{"ok":true}</event>'
+        success: true
+      - output: '<event topic="loop.complete">{"ok":true}</event>'
         success: true
     expect:
       start_event: work.start
-      accepted_events: []
+      accepted_events: [work.proceed.a, work.proceed.b, loop.complete]
       forbidden_events: []
-      terminal: none
+      terminal: success
+      terminal_topic: loop.complete
     limits:
       max_steps: 4
       no_progress_steps: 4
@@ -617,29 +616,27 @@ scenarios:
         Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/coordinator-mode-preset.yml");
 
     let mut cmd = ralph_bin();
-    cmd.current_dir(tmp.path())
-        .env("RUST_LOG", "off")
-        .args([
-            "-c",
-            core_path.to_str().unwrap(),
-            "-H",
-            fixture_path.to_str().unwrap(),
-            "preset",
-            "verify",
-            "--scenario",
-            scenario_path.to_str().unwrap(),
-            "--format",
-            "json",
-        ]);
+    cmd.current_dir(tmp.path()).env("RUST_LOG", "off").args([
+        "-c",
+        core_path.to_str().unwrap(),
+        "-H",
+        fixture_path.to_str().unwrap(),
+        "preset",
+        "verify",
+        "--scenario",
+        scenario_path.to_str().unwrap(),
+        "--format",
+        "json",
+    ]);
 
     let output = cmd.output().expect("spawn ralph");
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
 
-    assert_ne!(
+    assert_eq!(
         output.status.code(),
         Some(0),
-        "coordinator-mode preset must be rejected with non-zero exit; stdout={stdout}\nstderr={stderr}"
+        "coordinator-mode preset must verify successfully; stdout={stdout}\nstderr={stderr}"
     );
 
     let json_slice = extract_json(&stdout);
@@ -647,16 +644,9 @@ scenarios:
         panic!("verify JSON unparseable: {e}\njson_slice={json_slice}\nstderr={stderr}")
     });
 
+    assert_eq!(json["passed"], serde_json::Value::Bool(true));
     assert_eq!(
-        json["failure_kind"],
-        serde_json::Value::String("input_error".to_string()),
-        "coordinator mode rejection must be input_error; got {:?}\nstdout={stdout}\nstderr={stderr}",
-        json["failure_kind"]
-    );
-
-    assert!(
-        stderr.contains("event_loop.execution_mode: isolated")
-            || stderr.contains("coordinator mode is not supported"),
-        "stderr must mention isolated mode requirement; got: {stderr}"
+        json["source_kind"],
+        serde_json::Value::String("external".to_string())
     );
 }

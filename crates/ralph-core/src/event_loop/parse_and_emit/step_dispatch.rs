@@ -363,8 +363,7 @@ impl EventLoop {
                 // gate/topic collapse into a single resume.
                 let loop_id_for_resume = self.current_loop_id();
                 let loop_id_str = loop_id_for_resume.as_deref().unwrap_or("default");
-                let activation_id =
-                    format!("resume:{}:{}", loop_id_str, self.state.iteration);
+                let activation_id = format!("resume:{}:{}", loop_id_str, self.state.iteration);
                 let decision = crate::event_loop::resume_routing::task_resume_ingress(
                     &mut self.bus,
                     &self.registry,

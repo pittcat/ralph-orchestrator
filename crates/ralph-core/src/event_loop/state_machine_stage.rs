@@ -56,10 +56,7 @@ impl EventLoop {
         // below already starts from the live state and the
         // explicit capture is documentation of intent, not an
         // additional read.
-        let _live_snapshot = match self.state.state_machine_runtime_state.as_ref() {
-            Some(rt) => Some(rt.clone()),
-            None => None,
-        };
+        let _live_snapshot = self.state.state_machine_runtime_state.clone();
 
         let mut accepted: Vec<JsonlEvent> = Vec::with_capacity(events.len());
         let mut pending: Vec<CandidateStateMachineDecision> = Vec::new();
@@ -83,8 +80,7 @@ impl EventLoop {
         let mut candidate = self
             .state
             .state_machine_runtime_state
-            .as_ref()
-            .map(|rt| rt.clone())
+            .clone()
             .unwrap_or_default();
 
         for event in events {
@@ -167,7 +163,8 @@ impl EventLoop {
             let topic = candidate.event.topic.as_str();
             // The identity is derived from the accepted event and semantic
             // result. It must not depend on batch position or loop iteration.
-            let canonical_payload = canonical_payload(candidate.event.payload.as_deref().unwrap_or(""));
+            let canonical_payload =
+                canonical_payload(candidate.event.payload.as_deref().unwrap_or(""));
             let semantic_key = serde_json::to_string(&(
                 &canonical_payload,
                 &candidate.decision,
@@ -220,9 +217,9 @@ fn canonical_json_value(value: serde_json::Value) -> serde_json::Value {
                     .collect(),
             )
         }
-        serde_json::Value::Array(values) => serde_json::Value::Array(
-            values.into_iter().map(canonical_json_value).collect(),
-        ),
+        serde_json::Value::Array(values) => {
+            serde_json::Value::Array(values.into_iter().map(canonical_json_value).collect())
+        }
         other => other,
     }
 }
