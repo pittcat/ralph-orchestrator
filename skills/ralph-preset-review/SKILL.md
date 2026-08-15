@@ -13,7 +13,7 @@ Use this skill to **review** Ralph presets with **Agent 视角可行性（AAF）
 
 ## Dynamic Verification Gate
 
-review 必须先确认 source mode：`builtin:*` 可使用仓库源码、BDD 或 replay 作为补充证据；本地文件、未知来源和其他来源按 external 黑盒处理。无论哪种 source mode，都必须检查实际 `ralph preset verify` report，并同时核对静态 contract、scenario coverage、`passed`、`failure_kind`、accepted event 顺序和 terminal closure。只有 `preset check --strict` 通过而没有动态 report 时，必须报告 `verify.dynamic_evidence_missing`。External review 不得要求 Rust、Cargo、源码行号或目标项目构建。
+review 必须先确认 source mode：`builtin:*` 可使用仓库源码、BDD 或 replay 作为补充证据；本地文件、未知来源和其他来源按 external 黑盒处理。无论哪种 source mode，都必须检查实际 `ralph preset verify` report，并同时核对静态 contract、至少一个 success、failure/blocked、no-output/abnormal-output 场景，以及适用时的 recovery 和 terminal closure 场景；还要核对 `passed`、`failure_kind`、accepted event 顺序和 terminal closure。只有 `preset check --strict` 通过而没有动态 report 或必需场景证据时，必须报告 `verify.dynamic_evidence_missing` 或 `verify.scenario_coverage_gap`。External review 不得要求 Rust、Cargo、源码行号或目标项目构建。
 
 ## Use This Skill For
 

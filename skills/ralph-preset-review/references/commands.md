@@ -19,7 +19,9 @@ ralph preset check -H <path|builtin:name> --strict --format json
 
 # Dynamic workflow verification.
 # review REQUIRES actual verify report evidence; static-pass-only is not
-# sufficient. Failure to run verify, missing scenario file, or any
+# sufficient. Success, failure/block, and no-output/abnormal-output
+# scenarios are required; add recovery/terminal-closure cases when
+# applicable. Failure to run verify, missing scenario file, or any
 # non-pass scenario blocks review (see `references/finding-rubric.md`).
 ralph preset verify -H <path|builtin:name> --scenario <scenario.yml> --format json
 ralph preset verify -H <path|builtin:name> --scenario <scenario.yml> --format human

@@ -436,7 +436,7 @@ fixture README §8、fixture 顶部注释与本表 ID 一一对应；review 命�
 
 ### Runtime verification finding_id（author 必填、review 必看）
 
-`ralph preset verify --scenario <yml>` 是 deterministic dynamic verifier（version 1 scenario 跑真实 EventLoop，输出 `PresetVerifyReport`）。author 必须为 success-path 准备最小 scenario 并执行 verify，review 必须把 actual verify report 作为 AAF 之外的「动态证据」入主表。下面 ID 是通用类别，不绑定具体事故 / preset / topic：
+`ralph preset verify --scenario <yml>` 是 deterministic dynamic verifier（version 1 scenario 跑真实 EventLoop，输出 `PresetVerifyReport`）。author 必须为 success、failure/block、no-output/abnormal-output 准备最小 scenario 并执行 verify；适用时还要覆盖 recovery / terminal closure。review 必须把 actual verify report 作为 AAF 之外的「动态证据」入主表。下面 ID 是通用类别，不绑定具体事故 / preset / topic：
 
 | finding_id（裸 ID） | default_severity | default_confidence | aaf_question | category | 含义 |
 |---|---|---|---|---|---|

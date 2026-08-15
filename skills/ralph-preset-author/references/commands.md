@@ -20,8 +20,10 @@ ralph preset check -H <path|builtin:name> --strict --format json
 # Dynamic workflow verification:
 # runs version 1 scenario YAML through real EventLoop in a temp
 # workspace; reports ordered events / terminal closure / failure_kind.
-# author MUST run this for the success-path scenario before declaring
-# the preset ready; reviewer MUST require this evidence in the report.
+# author MUST run this for success, failure/block, and no-output/
+# abnormal-output scenarios before declaring the preset ready; add
+# recovery/terminal-closure scenarios when the workflow exposes them.
+# reviewer MUST require this evidence in the report.
 ralph preset verify -H <path|builtin:name> --scenario <scenario.yml> --format json
 
 # Workspace preset_lint 子集

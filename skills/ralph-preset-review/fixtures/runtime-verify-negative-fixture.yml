@@ -51,10 +51,39 @@ config:
       mode: enforce
       on_violation: reject_with_resume
 
-# Deliberately empty — this fixture demonstrates the absence-of-dynamic-
-# evidence negative path. A real preset would have at least one scenario
-# under scenarios/ to satisfy the Unit 5 gate.
-scenarios: []
+# These are public version-1 scenario contracts used by the review fixture:
+# one scripted empty-output case and one accepted-but-unclosed case. They are
+# intentionally review evidence, not a builtin preset registration.
+verification_scenarios:
+  version: 1
+  scenarios:
+    - name: empty-output
+      responses:
+        - output: ""
+          success: true
+      expect:
+        start_event: task.start
+        accepted_events: []
+        forbidden_events: []
+        terminal: none
+      limits:
+        max_steps: 1
+        no_progress_steps: 1
+      expected_failure_kind: no_progress
+    - name: unclosed-terminal
+      responses:
+        - output: '<event topic="work.done">{"status":"done"}</event>'
+          success: true
+      expect:
+        start_event: task.start
+        accepted_events: [work.done]
+        forbidden_events: []
+        terminal: success
+        terminal_topic: LOOP_COMPLETE
+      limits:
+        max_steps: 1
+        no_progress_steps: 1
+      expected_failure_kind: unclosed_terminal
 
 # Static check must pass (preset check --strict green); the fixture's
 # negative contract is the *absence* of `ralph preset verify` evidence,
@@ -78,7 +107,7 @@ review_findings:
   - finding_id: verify.scenario_coverage_gap
     severity: P1
     confidence: 85
-    evidence: only success-path is documented; failure / blocked / no-output / recovery / terminal-closure scenarios absent
+    evidence: actual verify evidence is absent even though the fixture defines no-output and unclosed-terminal cases
   - finding_id: verify.failure_kind_in_review_report_unexplained
     severity: P1
     confidence: 80

@@ -27,6 +27,16 @@ event_loop:
   execution_mode: isolated
   starting_event: work.start
   completion_promise: plan.complete
+  precheck:
+    enabled: true
+    rules:
+      work.done:
+        enabled: true
+        prompt:
+          - "工作结果满足当前阶段验收条件"
+        on_fail:
+          target: executor
+          retry_budget: 3
 hats:
   executor:
     name: Executor

@@ -21,6 +21,7 @@
 | `key-stage-event-gate-missing-selection-negative-fixture.yml` | Plan 2026-08-05-007 — key stage identified but no `guard_selection` / `confirmation_status: pending` while author ships YAML |
 | `key-stage-event-gate-divergence-negative-fixture.yml` | Plan 2026-08-05-007 — notes record precheck guard but YAML has no `event_loop.precheck.rules`; two retry budgets collapsed into one `retry_budget` |
 | `key-stage-event-gate-no-reason-negative-fixture.yml` | Plan 2026-08-05-007 — `guard_selection: neither` or `precheck_retry_budget < 3` with empty / vague `reason` |
+| `runtime-verify-negative-fixture.yml` | Generic runtime-verification evidence gap: version-1 empty-output (`no_progress`) and accepted-but-unclosed (`unclosed_terminal`) scenario contracts, plus missing actual verify report |
 
 ## Acceptance Checklist
 

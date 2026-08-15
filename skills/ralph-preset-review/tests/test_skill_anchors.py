@@ -346,7 +346,7 @@ def _key_stage_findings(fixture: Path) -> set[str]:
         wants_precheck and not precheck_rules
     ):
         findings.add("preset.key_stage_event_gate_notes_preset_diverge")
-    event_policy = event_loop.get("event_policy", {})
+    event_policy = preset.get("event_policy", {})
     payload_rules = event_policy.get("payload_consistency", {}).get("rules", [])
     if wants_payload_consistency and not isinstance(payload_rules, list) or (
         wants_payload_consistency and not payload_rules
@@ -506,6 +506,48 @@ def _check_fixture_present(
     return True
 
 
+def _check_runtime_verification_fixture(fixtures_dir: Path) -> bool:
+    """Validate the runtime negative fixture's executable scenario contract."""
+    fixture = fixtures_dir / "runtime-verify-negative-fixture.yml"
+    value = yaml.safe_load(_read(fixture))
+    if not isinstance(value, dict):
+        print("FAIL runtime verification fixture is not a YAML mapping")
+        return False
+    contract = value.get("verification_scenarios")
+    if not isinstance(contract, dict) or contract.get("version") != 1:
+        print("FAIL runtime verification fixture missing version 1 scenarios")
+        return False
+    scenarios = contract.get("scenarios")
+    if not isinstance(scenarios, list):
+        print("FAIL runtime verification fixture scenarios must be a list")
+        return False
+    by_name = {item.get("name"): item for item in scenarios if isinstance(item, dict)}
+    empty = by_name.get("empty-output")
+    unclosed = by_name.get("unclosed-terminal")
+    if not isinstance(empty, dict) or not isinstance(unclosed, dict):
+        print("FAIL runtime fixture must define empty-output and unclosed-terminal")
+        return False
+    empty_outputs = [
+        response.get("output")
+        for response in empty.get("responses", [])
+        if isinstance(response, dict)
+    ]
+    if "" not in empty_outputs or empty.get("expected_failure_kind") != "no_progress":
+        print("FAIL empty-output case does not assert no_progress")
+        return False
+    unclosed_expect = unclosed.get("expect", {})
+    if (
+        not isinstance(unclosed_expect, dict)
+        or unclosed.get("expected_failure_kind") != "unclosed_terminal"
+        or unclosed_expect.get("terminal_topic") != "LOOP_COMPLETE"
+        or not unclosed_expect.get("accepted_events")
+    ):
+        print("FAIL unclosed-terminal case does not assert accepted events without closure")
+        return False
+    print("OK runtime verification fixture covers no_progress and unclosed_terminal")
+    return True
+
+
 def _check_unique_advertised_ids(
     fixtures_dir: Path, advertised_ids: dict[str, str]
 ) -> bool:
@@ -558,6 +600,12 @@ def test_skill_anchors() -> None:
                 "runtime-verify-negative-fixture.yml",
                 "verify.dynamic_evidence_missing",
             ),
+        )
+    )
+    results.append(
+        (
+            "fixture:runtime-verification-scenarios",
+            _check_runtime_verification_fixture(fixtures_dir),
         )
     )
     failures = [label for label, passed in results if not passed]
