@@ -3404,6 +3404,10 @@ pub(super) async fn run_loop_impl_inner(
                     // `post_event_timed_out` is treated as a normal soft
                     // backend wrap-up (success=true), not a watchdog fire.
                     watchdog_timeout: result.timed_out && !result.post_event_timed_out,
+                    // Plan 2026-08-15-1823 U2: pass-through of the
+                    // CliExecutor exit code. The field already exists at
+                    // the adapter boundary; the runner used to drop it.
+                    backend_exit_code: result.exit_code,
                     total_cost_usd: 0.0,
                     input_tokens: 0,
                     output_tokens: 0,
@@ -3660,6 +3664,13 @@ pub(super) async fn run_loop_impl_inner(
         // file before the event loop reads it. This stamps every record with
         // the authoritative hat of the channel.
         let mut empty_terminal_channel = false;
+        // Plan 2026-08-15-1823 (fix empty channel activation observability)
+        // Unit 2: track the merge outcome so we can append a single
+        // bounded `hat_activation_outcome` row to runtime-trace.jsonl
+        // after the merge / fallback / recovery decisions are made.
+        // The fields are observation-only: they never influence
+        // `task.resume`, retry, or recovery paths.
+        let mut activation_outcome_written = false;
         if isolated_mode {
             let channel_snapshot = crate::loop_runner::paths::resolve_hat_channel_events_path(&ctx)
                 .map(|path| {
@@ -3673,6 +3684,7 @@ pub(super) async fn run_loop_impl_inner(
                 display_hat.as_str(),
                 Some(&config),
             );
+            let merge_succeeded = merge_result.is_ok();
             if let Err(e) = merge_result {
                 // 2026-07-03-002 plan U4: 从 warn! 升级为 error! + emit 诊断文件。
                 // 093813 run 暴露:merge 失败仅 warn! 导致 operator 看不到 events
@@ -3717,7 +3729,56 @@ pub(super) async fn run_loop_impl_inner(
                     "Isolated hat activation ended with an empty event channel"
                 );
             }
+
+            // Plan 2026-08-15-1823 U2: emit a bounded activation
+            // outcome row before the runner moves on to event
+            // processing. The row carries the raw pre-merge channel
+            // facts, the merge outcome, backend exit code, watchdog
+            // flags, and the event processing counters. It is a
+            // pure observation; nothing below this branch depends
+            // on it succeeding.
+            let pre_snapshot = activation_outcome::snapshot_channel(
+                channel_snapshot.as_ref().map(|(path, _)| path.as_path()),
+            );
+            let refined_snapshot =
+                activation_outcome::refine_after_merge(pre_snapshot, merge_succeeded);
+            let facts = activation_outcome::ActivationOutcomeFacts {
+                loop_id: Some(ctx.loop_id().unwrap_or(&loop_id).to_string()),
+                channel_exists: refined_snapshot.bytes.is_some()
+                    || matches!(refined_snapshot.status, ActivationOutcomeStatus::Empty),
+                channel_bytes: refined_snapshot.bytes,
+                channel_readable: !matches!(
+                    refined_snapshot.status,
+                    ActivationOutcomeStatus::Unreadable
+                ),
+                merge_succeeded,
+                backend_success: success,
+                backend_exit_code: outcome.backend_exit_code,
+                watchdog_timeout: outcome.watchdog_timeout,
+                backend_termination: backend_termination.is_some(),
+                output_bytes: output.len() as u64,
+                output_mentions_emit: output_mentions_ralph_emit(&output),
+                terminal_obligation_topics: event_loop
+                    .registry()
+                    .get_config(&display_hat)
+                    .map(|hat| hat.terminal_events.clone())
+                    .unwrap_or_default(),
+                ..Default::default()
+            };
+            activation_outcome::log_activation_outcome(
+                event_loop.diagnostics().session_dir(),
+                iteration as u64,
+                display_hat.as_str(),
+                &refined_snapshot,
+                &facts,
+            );
+            activation_outcome_written = true;
         }
+        // Track whether the activation outcome row has been
+        // appended; downstream code uses this flag to avoid double
+        // emission on the interrupt path (the interrupt branch runs
+        // outside the normal iteration close).
+        let _ = activation_outcome_written;
 
         // Process output
         if let Some(reason) = event_loop.process_output(&output_hat_id, &output, success) {

@@ -17,10 +17,15 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use ralph_core::{EventLoop, LoopContext, RalphConfig, TerminationReason};
+use ralph_proto::HatId;
 use tracing::{error, warn};
 
 use crate::cli::{ColorMode, Verbosity};
 
+use super::activation_outcome::{
+    log_activation_outcome, refine_for_interrupt, snapshot_channel, ActivationOutcomeFacts,
+    ActivationOutcomeStatus,
+};
 use super::inner::run_loop_impl_inner;
 use super::paths::resolve_current_events_path;
 use super::paths::resolve_emit_events_path;
@@ -116,6 +121,13 @@ pub(crate) fn merge_isolated_channel_on_interrupt(
         .map(|h| h.as_str())
         .unwrap_or("ralph");
 
+    // Plan 2026-08-15-1823 U2: snapshot the pre-merge channel
+    // state so the activation outcome row can describe the raw
+    // facts even when `merge_hat_channel` deletes the file or
+    // returns Err. Best-effort: never fails the interrupt path.
+    let channel_path = crate::loop_runner::paths::resolve_hat_channel_events_path(ctx);
+    let pre_snapshot = snapshot_channel(channel_path.as_deref());
+
     match crate::loop_runner::hat_channel::merge_hat_channel(
         ctx,
         &target_events_path,
@@ -141,6 +153,48 @@ pub(crate) fn merge_isolated_channel_on_interrupt(
             );
         }
     }
+
+    // Plan 2026-08-15-1823 U2: emit an activation outcome row
+    // tagged `status=interrupted` so `ralph-run-diagnosis` can
+    // distinguish interrupt paths from the normal empty / merged
+    // states. The interrupt path bypasses event processing so
+    // the event counters stay at zero / null.
+    let snapshot = refine_for_interrupt(pre_snapshot);
+    let authoritative_hat_id = HatId::new(authoritative_hat);
+    let facts = ActivationOutcomeFacts {
+        loop_id: ctx.loop_id().map(|s| s.to_string()),
+        channel_exists: snapshot.bytes.is_some()
+            || matches!(snapshot.status, ActivationOutcomeStatus::Empty),
+        channel_bytes: snapshot.bytes,
+        channel_readable: !matches!(
+            snapshot.status,
+            ActivationOutcomeStatus::Unreadable
+        ),
+        // Interrupt path does not run the normal merge close;
+        // mark `merge_succeeded` false so the diagnosis skill
+        // never classifies an interrupted activation as a
+        // normal close.
+        merge_succeeded: false,
+        backend_success: false,
+        backend_exit_code: None,
+        watchdog_timeout: false,
+        backend_termination: false,
+        output_bytes: 0,
+        output_mentions_emit: false,
+        terminal_obligation_topics: event_loop
+            .registry()
+            .get_config(&authoritative_hat_id)
+            .map(|hat| hat.terminal_events.clone())
+            .unwrap_or_default(),
+        ..Default::default()
+    };
+    log_activation_outcome(
+        event_loop.diagnostics().session_dir(),
+        event_loop.state().iteration as u64,
+        authoritative_hat,
+        &snapshot,
+        &facts,
+    );
 }
 
 /// U5 (2026-06-17-004 R5): append a single JSONL record for the

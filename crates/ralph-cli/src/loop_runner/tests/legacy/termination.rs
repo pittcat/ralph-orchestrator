@@ -388,6 +388,11 @@ fn test_watchdog_timeout_keeps_termination_none_so_event_pipeline_runs() {
         success: false,
         termination: convert_termination_type(ralph_adapters::TerminationType::IdleTimeout, false),
         watchdog_timeout: true,
+        // Plan 2026-08-15-1823 U2: pass-through field added to
+        // ExecutionOutcome so the activation outcome trace row can
+        // surface non-zero backend exits. Watchdog fires never carry
+        // an exit code.
+        backend_exit_code: None,
         total_cost_usd: 0.0,
         input_tokens: 0,
         output_tokens: 0,

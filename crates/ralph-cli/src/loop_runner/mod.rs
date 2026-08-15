@@ -28,6 +28,15 @@ mod payload_contract_gate;
 mod payload_inputs;
 mod preset_lint_gate;
 mod prompt;
+// Plan 2026-08-15-1823 (fix empty channel activation observability)
+// Unit 2: bounded activation outcome rows in the runtime trace
+// sidecar. Module is purely additive — observation only, no effect
+// on loop / recovery / retry decisions.
+mod activation_outcome;
+pub(crate) use activation_outcome::{
+    log_activation_outcome, refine_after_merge, refine_for_interrupt, snapshot_channel,
+    ActivationOutcomeFacts, ActivationOutcomeStatus, ChannelSnapshot,
+};
 // Plan 2026-08-07-004: `loop_runner::runner` was split into five
 // sibling modules. The five `mod` declarations below are what makes
 // them part of the `loop_runner` namespace; `runner.rs` itself only
