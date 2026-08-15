@@ -34,6 +34,7 @@
 | Drift | session `drift.jsonl` | 坏流无 drift |
 | Dedup | ledger / recovery | duplicate 仍推进 |
 | Terminal | events 终态 | silent-success |
+| Activation outcome row | runtime-trace.jsonl `phase=activation` / `kind=hat_activation_outcome`（plan 2026-08-15-1823） | raw facts 与 recovery / events 不一致 |
 
 > 新 recovery 常走 **prompt correction**（`docs/guide/runtime-diagnosis.md`），不一定有 bus 上的 resume 事件。
 

@@ -17,11 +17,18 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use ralph_core::{EventLoop, LoopContext, RalphConfig, TerminationReason};
+use ralph_proto::HatId;
 use tracing::{error, warn};
 
 use crate::cli::{ColorMode, Verbosity};
 
+use super::activation_outcome::{
+    ActivationOutcomeFacts, channel_exists_for, channel_readable_for, log_activation_outcome,
+    refine_for_interrupt, snapshot_channel,
+};
+use super::execution::ExecutionOutcome;
 use super::inner::run_loop_impl_inner;
+use super::late_events::output_mentions_ralph_emit;
 use super::paths::resolve_current_events_path;
 use super::paths::resolve_emit_events_path;
 
@@ -100,6 +107,14 @@ fn write_loop_termination_sentinel(loop_context: &Option<LoopContext>, reason: &
 ///   `state.last_hat` has been recorded (e.g. very first interrupt before any
 ///   iteration has run); this case always finds an empty channel so the
 ///   fallback label is cosmetic.
+///
+/// `pre_interrupt_outcome` / `output` thread the *real* `ExecutionOutcome`
+/// and rendered `output` so the persisted activation outcome row carries
+/// the pre-interrupt backend facts (`backend_success`, `backend_exit_code`,
+/// `watchdog_timeout`, `backend_termination`, `output_bytes`,
+/// `output_mentions_emit`) instead of the previous conservative defaults.
+/// `None` / `""` keep the conservative defaults — used by the
+/// iteration-top interrupt path where no backend call has happened yet.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn merge_isolated_channel_on_interrupt(
     ctx: &LoopContext,
@@ -107,6 +122,8 @@ pub(crate) fn merge_isolated_channel_on_interrupt(
     state_machine_enabled: bool,
     event_loop: &EventLoop,
     interrupt_kind: &'static str,
+    pre_interrupt_outcome: Option<&ExecutionOutcome>,
+    output: Option<&str>,
 ) {
     let target_events_path = resolve_emit_events_path(ctx, state_machine_enabled);
     let authoritative_hat = event_loop
@@ -115,6 +132,13 @@ pub(crate) fn merge_isolated_channel_on_interrupt(
         .as_ref()
         .map(|h| h.as_str())
         .unwrap_or("ralph");
+
+    // Plan 2026-08-15-1823 U2: snapshot the pre-merge channel
+    // state so the activation outcome row can describe the raw
+    // facts even when `merge_hat_channel` deletes the file or
+    // returns Err. Best-effort: never fails the interrupt path.
+    let channel_path = crate::loop_runner::paths::resolve_hat_channel_events_path(ctx);
+    let pre_snapshot = snapshot_channel(channel_path.as_deref());
 
     match crate::loop_runner::hat_channel::merge_hat_channel(
         ctx,
@@ -141,6 +165,64 @@ pub(crate) fn merge_isolated_channel_on_interrupt(
             );
         }
     }
+
+    // Plan 2026-08-15-1823 U2 + U4: emit an activation outcome row
+    // tagged `status=interrupted` so `ralph-run-diagnosis` can
+    // distinguish interrupt paths from the normal empty / merged
+    // states. U4 plumbs the real `ExecutionOutcome` + `output` so
+    // the persisted row preserves pre-interrupt backend facts
+    // instead of zero/null defaults. The interrupt path bypasses
+    // event processing so the event counters stay at zero / null.
+    let snapshot = refine_for_interrupt(pre_snapshot);
+    let authoritative_hat_id = HatId::new(authoritative_hat);
+    let (
+        backend_success,
+        backend_exit_code,
+        watchdog_timeout,
+        backend_termination,
+        output_bytes,
+        output_mentions_emit,
+    ) = match (pre_interrupt_outcome, output) {
+        (Some(outcome), Some(out_text)) => (
+            outcome.success,
+            outcome.backend_exit_code,
+            outcome.watchdog_timeout,
+            outcome.termination.is_some(),
+            out_text.len() as u64,
+            output_mentions_ralph_emit(out_text),
+        ),
+        _ => (false, None, false, false, 0u64, false),
+    };
+    let facts = ActivationOutcomeFacts {
+        loop_id: ctx.loop_id().map(|s| s.to_string()),
+        channel_exists: channel_exists_for(snapshot.status),
+        channel_bytes: snapshot.bytes,
+        channel_readable: channel_readable_for(snapshot.status),
+        // Interrupt path does not run the normal merge close;
+        // mark `merge_succeeded` false so the diagnosis skill
+        // never classifies an interrupted activation as a
+        // normal close.
+        merge_succeeded: false,
+        backend_success,
+        backend_exit_code,
+        watchdog_timeout,
+        backend_termination,
+        output_bytes,
+        output_mentions_emit,
+        terminal_obligation_topics: event_loop
+            .registry()
+            .get_config(&authoritative_hat_id)
+            .map(|hat| hat.terminal_events.clone())
+            .unwrap_or_default(),
+        ..Default::default()
+    };
+    log_activation_outcome(
+        event_loop.diagnostics().session_dir(),
+        event_loop.state().iteration as u64,
+        authoritative_hat,
+        &snapshot,
+        &facts,
+    );
 }
 
 /// U5 (2026-06-17-004 R5): append a single JSONL record for the

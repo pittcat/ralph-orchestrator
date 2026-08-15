@@ -87,6 +87,28 @@ L0 盘点 → L1 拓扑 → L2 日志三联 → L3 产物五证 → L4 机制十
 | `execution_capabilities` 含 wave，或 events 已见 `wave_id` | worker/dispatcher Confirm 走 `ralph events --events-source main`（main ledger）；**禁止**用 hat-channel 做 wave Confirm |
 | 不含 wave | events 无 `wave_id` → **N/A**，非故障 |
 
+### L3.activation — activation outcome 对账（plan 2026-08-15-1823）
+
+**适用条件**：runtime-trace.jsonl 含 `phase=activation` / `kind=hat_activation_outcome` 行。仅 FULL/MINIMAL 模式生效；LOGS_ONLY / DISABLED 跳过本节。
+
+**必做对账**（每条 outcome 行 vs 第二账本；至少一个对照点）：
+
+| outcome status | 对照账本 | 期望一致 | 不一致的归因方向 |
+|----------------|---------|---------|----------------|
+| `empty` | `recovery.jsonl` (task.resume envelope) + `events.jsonl` (无 terminal_obligation_topics 中的 topic) + hat-channel 不存在 | terminal obligation 缺失 + recovery 路由触发 | mechanism（runner missing-terminal recovery）或 compound（agent 未 emit + preset 误配置） |
+| `merged` | `events.jsonl` 含 hat stamp 的 accepted record + main events 行数递增 | 与 hat_channel merge 一致 | 报告无偏离 |
+| `merge_failed` | `.ralph/diagnostics/channel-routing-fallback-*.md` 含 `merge_hat_channel_failed` reason | 写入 fallback 时机一致 | mechanism（filesystem 写失败） |
+| `interrupted` | `loop_termination` / `termination_reason` sentinel + `.ralph/diagnostics/channel-routing-fallback-*.md` 含 `merge_hat_channel_failed_on_interrupt` | interrupt 时机一致 | report 中无偏离 |
+| `missing` / `unreadable` | hat-channel 路径在 workspace 下但 metadata/read 失败 | 写盘错误存在 | mechanism（filesystem 错误） |
+| `merged` 但 `backend_exit_code != 0` | `recovery.jsonl` 含 backend_failure reason | 后端进程非零退出与 outcome 一致 | compound（agent + backend） |
+
+**分类优先级**（同 hat 同一 activation 的 multi-row 折叠后取优先级最高者）：
+`timeout_or_termination` > `backend_failure` (nonzero/unsuccessful) > `channel_routing_failure` (missing/unreadable/merge_failed) > `attempted_but_rejected` (rejected/policy) > `successful_no_terminal_emit` (success + empty + terminal_obligation + 无 accepted/rejected candidate + recovery 一致) > `unknown`（证据不足，不得编造 agent 根因）
+
+**禁止**：`status=empty` 单值 → 标 agent 根因。必须满足：终端 obligation 列表 + 无任何 accepted/rejected candidate + recovery journal 同时指向 missing-terminal recovery，才允许升 P0；其他场景一律 `unknown` 或 evidence gap。
+
+**产出**：activation outcome table + classification + confidence + evidence gaps 写入报告 §4.2（如有）；不另设 §5 子章。
+
 **产出**：Agent C《偏离证据清单》DEV-xxx + §3.4 OPAC/机制行为表。
 
 ---

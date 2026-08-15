@@ -2410,6 +2410,8 @@ pub(super) async fn run_loop_impl_inner(
                 state_machine_enabled,
                 &event_loop,
                 "iteration_top_interrupt",
+                None,
+                None,
             );
 
             let reason = hooks::termination::dispatch_pre_loop_termination_hooks(
@@ -3404,6 +3406,10 @@ pub(super) async fn run_loop_impl_inner(
                     // `post_event_timed_out` is treated as a normal soft
                     // backend wrap-up (success=true), not a watchdog fire.
                     watchdog_timeout: result.timed_out && !result.post_event_timed_out,
+                    // Plan 2026-08-15-1823 U2: pass-through of the
+                    // CliExecutor exit code. The field already exists at
+                    // the adapter boundary; the runner used to drop it.
+                    backend_exit_code: result.exit_code,
                     total_cost_usd: 0.0,
                     input_tokens: 0,
                     output_tokens: 0,
@@ -3455,6 +3461,8 @@ pub(super) async fn run_loop_impl_inner(
                     state_machine_enabled,
                     &event_loop,
                     "mid_loop_select_interrupt",
+                    None,
+                    None,
                 );
 
                 let reason = hooks::termination::dispatch_pre_loop_termination_hooks(
@@ -3660,63 +3668,34 @@ pub(super) async fn run_loop_impl_inner(
         // file before the event loop reads it. This stamps every record with
         // the authoritative hat of the channel.
         let mut empty_terminal_channel = false;
+        // Plan 2026-08-15-1823 (fix empty channel activation observability)
+        // Unit 1+U5: the if-isolated-mode block was extracted into
+        // the dedicated sibling module `activation_outcome_close`.
+        // The pre-process half (`prepare_normal_merge`) captures
+        // the empty-terminal flag (used by the missing-terminal
+        // recovery path) and the pre-merge snapshot + merge
+        // outcome (used by the activation outcome row); the
+        // post-process half (`write_activation_outcome_for_normal_merge`)
+        // writes the structured row *after*
+        // `event_loop.process_output` so the row lives in the same
+        // iteration as the event processing it observes. The
+        // interrupt path lives in `entry.rs` and does not depend on
+        // this block.
+        let mut normal_merge_state: Option<crate::loop_runner::activation_outcome_close::NormalMergeState> = None;
         if isolated_mode {
-            let channel_snapshot = crate::loop_runner::paths::resolve_hat_channel_events_path(&ctx)
-                .map(|path| {
-                    let bytes = std::fs::metadata(&path).map(|meta| meta.len()).ok();
-                    (path, bytes)
-                });
-            let target_events_path = resolve_emit_events_path(&ctx, state_machine_enabled);
-            let merge_result = crate::loop_runner::hat_channel::merge_hat_channel(
-                &ctx,
-                &target_events_path,
-                display_hat.as_str(),
-                Some(&config),
-            );
-            if let Err(e) = merge_result {
-                // 2026-07-03-002 plan U4: 从 warn! 升级为 error! + emit 诊断文件。
-                // 093813 run 暴露:merge 失败仅 warn! 导致 operator 看不到 events
-                // 丢失风险。emit 诊断让 operator 能看到,loop 继续走 fallback。
-                crate::loop_runner::hat_channel::emit_channel_routing_fallback_diagnostic(
+            let (outcome_row, merge_state) =
+                crate::loop_runner::activation_outcome_close::prepare_normal_merge(
                     &ctx,
-                    display_hat.as_str(),
-                    "merge_hat_channel_failed",
+                    &config,
+                    state_machine_enabled,
+                    &display_hat,
+                    success,
+                    outcome.watchdog_timeout,
+                    backend_termination.as_ref(),
+                    &output,
                 );
-                error!(
-                    error = %e,
-                    hat = %display_hat.as_str(),
-                    "Failed to merge isolated hat channel; events may be lost (see diagnostic file)"
-                );
-                // An empty channel is a known missing-terminal condition,
-                // not an unreadable-channel condition. Preserve the
-                // responsible-hat recovery path even though the merge now
-                // fails closed instead of returning success.
-                if channel_snapshot
-                    .as_ref()
-                    .is_some_and(|(_, bytes)| *bytes == Some(0))
-                {
-                    empty_terminal_channel = true;
-                }
-            } else if let Some((channel_path, Some(channel_bytes))) = channel_snapshot.as_ref()
-                && *channel_bytes == 0
-            {
-                // Only treat an empty channel as a missing emit after the
-                // channel was merged successfully. A missing or unreadable
-                // channel is a routing failure and must stay on the existing
-                // fallback path instead of being retried as an agent error.
-                empty_terminal_channel = true;
-                warn!(
-                    hat = %display_hat.as_str(),
-                    channel_path = %channel_path.display(),
-                    channel_bytes,
-                    backend_success = success,
-                    watchdog_timeout = outcome.watchdog_timeout,
-                    backend_termination = ?backend_termination,
-                    output_bytes = output.len(),
-                    output_mentions_emit = output_mentions_ralph_emit(&output),
-                    "Isolated hat activation ended with an empty event channel"
-                );
-            }
+            empty_terminal_channel = outcome_row.empty_terminal_channel;
+            normal_merge_state = Some(merge_state);
         }
 
         // Process output
@@ -3726,6 +3705,27 @@ pub(super) async fn run_loop_impl_inner(
                 info!(
                     "All done! {} detected.",
                     config.event_loop.completion_promise
+                );
+            }
+
+            // U5: the activation outcome row is best-effort
+            // observation. Termination is still terminal even
+            // when the row write fails, so the row goes
+            // *before* the hook dispatch chain — the row is
+            // observation only and must never block termination.
+            if let Some(merge_state) = normal_merge_state.take() {
+                crate::loop_runner::activation_outcome_close::write_activation_outcome_for_normal_merge(
+                    &event_loop,
+                    &ctx,
+                    merge_state,
+                    outcome.backend_exit_code,
+                    outcome.watchdog_timeout,
+                    &output,
+                    &display_hat,
+                    &loop_id,
+                    success,
+                    backend_termination.as_ref(),
+                    iteration as u64,
                 );
             }
 
@@ -3782,6 +3782,26 @@ pub(super) async fn run_loop_impl_inner(
             }
             finalize_recovery_diagnosis(&mut event_loop, &loop_context, None);
             return Ok(reason);
+        }
+
+        // U5: write the activation outcome row in the non-termination
+        // branch too. process_output has already run, so the row is
+        // observation-only and lives in the same iteration as the
+        // event processing it describes.
+        if let Some(merge_state) = normal_merge_state.take() {
+            crate::loop_runner::activation_outcome_close::write_activation_outcome_for_normal_merge(
+                &event_loop,
+                &ctx,
+                merge_state,
+                outcome.backend_exit_code,
+                outcome.watchdog_timeout,
+                &output,
+                &display_hat,
+                &loop_id,
+                success,
+                backend_termination.as_ref(),
+                iteration as u64,
+            );
         }
 
         // Check for planning session user responses (if in planning mode)

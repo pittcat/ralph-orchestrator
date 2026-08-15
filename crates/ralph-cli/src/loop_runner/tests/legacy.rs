@@ -1,6 +1,8 @@
 // Legacy loop-runner regression suite, split into per-behavior submodules.
 // This file is the directory entry; the actual tests live in `legacy::*`.
 
+#[path = "legacy/activation_outcome.rs"]
+pub mod activation_outcome;
 #[path = "legacy/diagnosis.rs"]
 pub mod diagnosis;
 #[path = "legacy/event_processing.rs"]

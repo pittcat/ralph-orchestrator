@@ -35,6 +35,15 @@ pub(crate) struct ExecutionOutcome {
     ///   watchdog concept. If one is added, this field must be updated in
     ///   lockstep with the corresponding test in `tests.rs`.
     pub watchdog_timeout: bool,
+    /// Plan 2026-08-15-1823 (U2): pass-through of the backend process
+    /// exit code as reported by `PtyExecutionResult.exit_code` /
+    /// `ExecutionResult.exit_code`. `None` when the backend was
+    /// terminated by a signal before exit, or when the executor did
+    /// not surface a code (e.g. watchdog soft wrap-up, ACP). The
+    /// value is observation-only: it is recorded into the activation
+    /// outcome trace row but does NOT influence `success` /
+    /// `watchdog_timeout` / `termination` semantics.
+    pub backend_exit_code: Option<i32>,
     pub total_cost_usd: f64,
     pub input_tokens: u64,
     pub output_tokens: u64,
@@ -284,6 +293,11 @@ pub async fn execute_pty(
                 success: pty_result.success,
                 termination,
                 watchdog_timeout,
+                // Plan 2026-08-15-1823 U2: pass-through of the PTY
+                // exit code. The field already exists at the adapter
+                // boundary (`PtyExecutionResult.exit_code`); the
+                // runner used to drop it.
+                backend_exit_code: pty_result.exit_code,
                 total_cost_usd: pty_result.total_cost_usd,
                 input_tokens: pty_result.input_tokens,
                 output_tokens: pty_result.output_tokens,

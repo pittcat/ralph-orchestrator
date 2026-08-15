@@ -26,7 +26,10 @@ history_search: disabled | preset-only | full   # 来自主 SKILL §0.1 的 AskU
 structured_result_ref: "inline: summarized in report"  # JSON 只存在 DIAG_WORKDIR，清理后不在 target branch 留副本
 trace_status: present | missing | degraded | legacy        # runtime-trace.jsonl 读取状态
 feedback_status: present | missing | degraded | legacy     # feedback.jsonl 读取状态
-evidence_gaps: <list of strings>                          # bundle reader / trace reader / feedback reader 上报的证据缺口
+# plan 2026-08-15-1823 (U3): activation outcome 报告 frontmatter 字段
+# 仅记录 presence / classification 状态；具体行表在报告 §4.2 中展示
+activation_outcomes: present | missing | degraded | legacy  # runtime-trace.jsonl 中 phase=activation/kind=hat_activation_outcome 行集状态
+evidence_gaps: <list of strings>                          # bundle reader / trace reader / feedback reader / activation outcome reader 上报的证据缺口
 ---
 
 # <preset> Loop `<loop_id>` 运行链路诊断报告
@@ -122,6 +125,28 @@ evidence_gaps: <list of strings>                          # bundle reader / trac
 
 | Hat | O | P | A | C | 证据 | 置信度 |
 |-----|---|---|---|---|------|--------|
+
+### 4.2 Activation outcome 表（plan 2026-08-15-1823）
+
+> **⚠️ 启动条件**：仅当 frontmatter `activation_outcomes: present` 时填写本节。`missing` / `degraded` / `legacy` 时整节写 `N/A (activation outcomes unavailable)`，并把缺失原因写进 `evidence_gaps`。
+
+| sequence | hat | status | backend_exit_code | watchdog | merge_succeeded | channel_bytes | terminal_obligation | classification | confidence | evidence_refs | notes |
+|----------|-----|--------|-------------------|----------|-----------------|---------------|---------------------|----------------|------------|---------------|-------|
+
+**列含义**：
+
+- `sequence`：`runtime-trace.jsonl` 内的单调序号。
+- `status`：`merged` / `empty` / `missing` / `unreadable` / `merge_failed` / `interrupted`。
+- `classification`：`timeout_or_termination` / `backend_failure` / `channel_routing_failure` / `attempted_but_rejected` / `successful_no_terminal_emit` / `unknown`。
+- `confidence`：计分卡打分；`unknown` 一律 confidence<60。
+- `evidence_refs`：与第二账本交叉验证的 `file:line` 或 `recovery.jsonl:L<N>` 或 `events.jsonl:L<N>`。
+- `notes`：evidence gap 或 raw facts 摘录（不复制完整 output / prompt）。
+
+**禁止**：
+
+- 凭 `status=empty` 单值写 agent 根因；必须满足 `terminal_obligation + 无 accepted/rejected candidate + recovery 一致` 三条同时成立。
+- 凭 activation outcome row 跳过 L6 源码反查。
+- 在 `activation_outcomes: missing` / `legacy` 时仍填写本节——直接 N/A。
 
 ---
 

@@ -28,6 +28,27 @@ mod payload_contract_gate;
 mod payload_inputs;
 mod preset_lint_gate;
 mod prompt;
+// Plan 2026-08-15-1823 (fix empty channel activation observability)
+// Unit 2: bounded activation outcome rows in the runtime trace
+// sidecar. Module is purely additive — observation only, no effect
+// on loop / recovery / retry decisions. Items are re-exported so
+// sibling modules (`inner.rs` / `entry.rs`) can call
+// `activation_outcome::xxx` without re-importing each name.
+mod activation_outcome;
+// Plan 2026-08-15-1823 (fix empty channel activation observability)
+// Unit 1: extract the `if isolated_mode` block from `inner.rs`
+// into a dedicated sibling module so `inner.rs` stays at the
+// HARD RULE 5000-line ceiling. The interrupt path lives in
+// `entry.rs::merge_isolated_channel_on_interrupt` and does not
+// depend on this module.
+mod activation_outcome_close;
+#[allow(unused_imports)]
+pub(crate) use activation_outcome::ActivationOutcomeStatus;
+#[allow(unused_imports)]
+pub(crate) use activation_outcome::{
+    ActivationOutcomeFacts, ChannelSnapshot, log_activation_outcome, refine_after_merge,
+    refine_for_interrupt, snapshot_channel,
+};
 // Plan 2026-08-07-004: `loop_runner::runner` was split into five
 // sibling modules. The five `mod` declarations below are what makes
 // them part of the `loop_runner` namespace; `runner.rs` itself only

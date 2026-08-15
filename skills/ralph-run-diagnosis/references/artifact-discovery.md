@@ -76,6 +76,8 @@ FULL/MINIMAL 时列出 session 内文件存在性（orchestration、agent-output
 
 > **Bundle-first（plan 2026-08-12-001）**：`diagnosis-input.json` 是新 bundle 的入口；`runtime-trace.jsonl` 与 `feedback.jsonl` 是它的 sidecar。三者均按 §0.2 顺序读取；缺失则回退 legacy Tier 路径。
 
+> **Activation outcome（plan 2026-08-15-1823）**：`runtime-trace.jsonl` 内 `phase=activation` / `kind=hat_activation_outcome` 行按 session 对应盘点；缺行集时报告 §0 标 `activation_outcomes: missing`（FULL/MINIMAL 时）或 `legacy`（缺 bundle 时）；**不**列为 P0——activation outcome 是 additive sidecar，老 session / 非 isolated run 自然缺。盘点时一并统计 `empty` / `merged` / `merge_failed` / `interrupted` / `missing` / `unreadable` 计数与首个非 merged 行（若有）的 `hat` / `status` / `source_ref`。
+
 ---
 
 ## Step 4：Tier C 预期（从 preset + schema）
