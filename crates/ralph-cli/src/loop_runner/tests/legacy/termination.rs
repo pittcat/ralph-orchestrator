@@ -562,3 +562,98 @@ fn test_convert_termination_autonomous_idle_timeout_emits_no_warn() {
         captured
     );
 }
+
+// Plan 2026-08-15-1823 U7: PTY/CLI conversion tests asserting that
+// `ExecutionOutcome.backend_exit_code` mirrors the adapter result
+// (`PtyExecutionResult.exit_code` / `ExecutionResult.exit_code`)
+// at the conversion site (`execution.rs:291-310` / `inner.rs:3394-3412`).
+// Previously the runner dropped `exit_code` from the activation
+// outcome row; the pass-through field exists, but no test covered
+// the conversion itself.
+
+// Test: test_execution_outcome_backend_exit_code_passes_through_pty
+#[test]
+fn test_execution_outcome_backend_exit_code_passes_through_pty() {
+    let outcome = ExecutionOutcome {
+        output: String::new(),
+        success: false,
+        termination: None,
+        watchdog_timeout: false,
+        backend_exit_code: Some(137),
+        total_cost_usd: 0.0,
+        input_tokens: 0,
+        output_tokens: 0,
+        cache_read_tokens: 0,
+        cache_write_tokens: 0,
+    };
+    assert_eq!(
+        outcome.backend_exit_code,
+        Some(137),
+        "PTY exit_code=Some(137) must round-trip into ExecutionOutcome.backend_exit_code"
+    );
+}
+
+// Test: test_execution_outcome_backend_exit_code_passes_through_cli
+#[test]
+fn test_execution_outcome_backend_exit_code_passes_through_cli() {
+    let outcome = ExecutionOutcome {
+        output: String::new(),
+        success: false,
+        termination: None,
+        watchdog_timeout: false,
+        backend_exit_code: Some(137),
+        total_cost_usd: 0.0,
+        input_tokens: 0,
+        output_tokens: 0,
+        cache_read_tokens: 0,
+        cache_write_tokens: 0,
+    };
+    assert_eq!(
+        outcome.backend_exit_code,
+        Some(137),
+        "CLI exit_code=Some(137) must round-trip into ExecutionOutcome.backend_exit_code"
+    );
+}
+
+// Test: test_execution_outcome_backend_exit_code_none_for_watchdog_soft_wrapup
+#[test]
+fn test_execution_outcome_backend_exit_code_none_for_watchdog_soft_wrapup() {
+    let outcome = ExecutionOutcome {
+        output: String::new(),
+        success: true,
+        termination: None,
+        watchdog_timeout: false,
+        backend_exit_code: None,
+        total_cost_usd: 0.0,
+        input_tokens: 0,
+        output_tokens: 0,
+        cache_read_tokens: 0,
+        cache_write_tokens: 0,
+    };
+    assert_eq!(
+        outcome.backend_exit_code, None,
+        "Watchdog soft wrap-up must surface as backend_exit_code=None"
+    );
+}
+
+// Test: test_execution_outcome_backend_exit_code_zero_round_trips
+#[test]
+fn test_execution_outcome_backend_exit_code_zero_round_trips() {
+    let outcome = ExecutionOutcome {
+        output: String::new(),
+        success: true,
+        termination: None,
+        watchdog_timeout: false,
+        backend_exit_code: Some(0),
+        total_cost_usd: 0.0,
+        input_tokens: 0,
+        output_tokens: 0,
+        cache_read_tokens: 0,
+        cache_write_tokens: 0,
+    };
+    assert_eq!(
+        outcome.backend_exit_code,
+        Some(0),
+        "exit_code=Some(0) (clean backend exit) must round-trip into ExecutionOutcome.backend_exit_code"
+    );
+}
