@@ -95,6 +95,7 @@ pub fn channel_exists_for(status: ActivationOutcomeStatus) -> bool {
 /// or to `"<unknown>"` for a `None` channel path. The
 /// `inner.rs:3722` empty-channel `warn!` and the `entry.rs:128`
 /// interrupt-path `warn!` mirror this helper.
+#[allow(dead_code)]
 pub fn channel_reference_for_log(
     path: Option<&std::path::Path>,
     workspace: &std::path::Path,
@@ -261,6 +262,7 @@ impl ActivationOutcomeFacts {
     /// `entry.rs::merge_isolated_channel_on_interrupt` so a
     /// future schema addition does not require syncing multiple
     /// construction sites.
+    #[allow(dead_code)]
     #[allow(clippy::too_many_arguments)]
     pub fn from_runner(
         ctx: &LoopContext,

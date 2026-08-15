@@ -210,7 +210,7 @@ fn u2_runner_path_helper_observes_empty_not_unreadable() {
     let _cwd = CwdGuard::set(workspace.path());
     init_git_workspace(workspace.path());
 
-    let (ctx, event_loop) = build_isolated_executor_loop(workspace.path());
+    let (ctx, _event_loop) = build_isolated_executor_loop(workspace.path());
 
     // Seed a zero-byte channel (the empty-after-activation case
     // that was previously misclassified as Unreadable when the

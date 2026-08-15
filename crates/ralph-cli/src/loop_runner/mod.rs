@@ -42,6 +42,7 @@ mod activation_outcome;
 // `entry.rs::merge_isolated_channel_on_interrupt` and does not
 // depend on this module.
 mod activation_outcome_close;
+#[allow(unused_imports)]
 pub(crate) use activation_outcome::ActivationOutcomeStatus;
 #[allow(unused_imports)]
 pub(crate) use activation_outcome::{
