@@ -478,3 +478,97 @@ fn inspect_prompt_does_not_run_scenario() {
         "inspect prompt must not produce a verify report; stdout={stdout}\nstderr={stderr}"
     );
 }
+
+#[test]
+fn preset_verify_rejects_coordinator_mode_with_input_error() {
+    // A preset with execution_mode=coordinator (default) must be rejected
+    // by verify with failure_kind=input_error and a message about isolated mode.
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let core_path = tmp.path().join("core.yml");
+    let scenario_path = tmp.path().join("scenario.yml");
+
+    // Write a core config with execution_mode: omitted (defaults to Coordinator).
+    write_file(
+        &core_path,
+        r#"
+event_loop:
+  # NOTE: execution_mode is intentionally omitted so it defaults to Coordinator.
+  starting_event: work.start
+  completion_promise: loop.complete
+  max_iterations: 4
+
+tasks:
+  enabled: true
+  coordinator_hats:
+    - hat_a
+"#,
+    );
+
+    write_file(
+        &scenario_path,
+        r#"
+version: 1
+scenarios:
+  - name: coordinator-mode-rejected
+    responses:
+      - output: ""
+        success: true
+    expect:
+      start_event: work.start
+      accepted_events: []
+      forbidden_events: []
+      terminal: none
+    limits:
+      max_steps: 4
+      no_progress_steps: 4
+"#,
+    );
+
+    // coordinator-mode-preset.yml: 3-hat chain via fixture file.
+    let fixture_path =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/coordinator-mode-preset.yml");
+
+    let mut cmd = ralph_bin();
+    cmd.current_dir(tmp.path())
+        .env("RUST_LOG", "off")
+        .args([
+            "-c",
+            core_path.to_str().unwrap(),
+            "-H",
+            fixture_path.to_str().unwrap(),
+            "preset",
+            "verify",
+            "--scenario",
+            scenario_path.to_str().unwrap(),
+            "--format",
+            "json",
+        ]);
+
+    let output = cmd.output().expect("spawn ralph");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert_ne!(
+        output.status.code(),
+        Some(0),
+        "coordinator-mode preset must be rejected with non-zero exit; stdout={stdout}\nstderr={stderr}"
+    );
+
+    let json_slice = extract_json(&stdout);
+    let json: serde_json::Value = serde_json::from_str(&json_slice).unwrap_or_else(|e| {
+        panic!("verify JSON unparseable: {e}\njson_slice={json_slice}\nstderr={stderr}")
+    });
+
+    assert_eq!(
+        json["failure_kind"],
+        serde_json::Value::String("input_error".to_string()),
+        "coordinator mode rejection must be input_error; got {:?}\nstdout={stdout}\nstderr={stderr}",
+        json["failure_kind"]
+    );
+
+    assert!(
+        stderr.contains("event_loop.execution_mode: isolated")
+            || stderr.contains("coordinator mode is not supported"),
+        "stderr must mention isolated mode requirement; got: {stderr}"
+    );
+}

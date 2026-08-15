@@ -23,6 +23,7 @@ use crate::preset_templates::{
 use crate::{ConfigSource, HatsSource};
 use anyhow::{anyhow, Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
+use ralph_core::config::HatExecutionMode;
 use ralph_core::HatRegistry;
 use ralph_core::preset_verify::{
     build_report as build_verify_report, evaluate_scenario, FailureKind, InputError,
@@ -968,6 +969,29 @@ async fn verify_preset(
         .starting_event
         .clone()
         .unwrap_or_else(|| "task.start".to_string());
+
+    // U2 (P1:adversarial:A2) — execution_mode guard: reject coordinator mode.
+    if config.event_loop.execution_mode != HatExecutionMode::Isolated {
+        let detail =
+            "preset verify requires event_loop.execution_mode: isolated; coordinator mode is \
+             not supported";
+        eprintln!("{detail}");
+        let report = PresetVerifyReport {
+            passed: false,
+            source_kind: SourceKind::External,
+            static_layer: StaticLayer {
+                passed: true,
+                warnings: 0,
+                errors: 0,
+                findings: Vec::new(),
+            },
+            scenarios: Vec::new(),
+            failure_kind: Some("input_error".to_string()),
+            last_observable_state: Default::default(),
+            trace_digest: String::new(),
+        };
+        return render_and_exit(report, format, use_colors);
+    }
 
     // Step 3 — strict static contract check (single source of truth).
     let source_label = preset_source_label(config_sources, hats_source);
