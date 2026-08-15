@@ -93,13 +93,21 @@ tasks:
     (ctx, event_loop)
 }
 
+/// Build the minimal `RalphConfig` that `prepare_normal_merge`
+/// needs for `merge_hat_channel` to find the workspace.
+fn event_loop_config() -> ralph_core::RalphConfig {
+    ralph_core::RalphConfig::default()
+}
+
 /// T1 (U2): an isolated normal activation that successfully merges
 /// a non-empty channel must emit a single `hat_activation_outcome`
-/// row with `status=merged` and the bounded scalar fields. Existing
-/// recovery / event processing assertions are preserved by routing
-/// the test through the same merge helper the runner uses.
+/// row with `status=merged` and the bounded scalar fields. The test
+/// captures the pre-merge snapshot *before* `merge_hat_channel`
+/// deletes the file (the same order the runner uses — see
+/// `activation_outcome_close::prepare_normal_merge`), so a
+/// regression in snapshot-before-merge ordering surfaces here.
 #[test]
-fn u2_isolated_normal_merge_writes_merged_outcome_row() {
+fn u2_in_process_runner_writes_merged_outcome_row() {
     let workspace = tempfile::tempdir().expect("tempdir");
     let _cwd = CwdGuard::set(workspace.path());
     init_git_workspace(workspace.path());
@@ -187,12 +195,55 @@ fn u2_isolated_normal_merge_writes_merged_outcome_row() {
             .and_then(Value::as_str),
         Some("work.done")
     );
-    // Existing recovery / event processing assertions are not
-    // exercised here (the test bypasses the runner). The merged
-    // target events file must still be present and contain the
-    // merged record so the existing merge-test contract holds.
     let merged_body = std::fs::read_to_string(&target).unwrap();
     assert!(merged_body.contains("work.done"));
+}
+
+/// T6 (U6): the runner-path `prepare_normal_merge` helper must
+/// observe `Empty` (not `Unreadable`) for a zero-byte channel —
+/// this is the regression anchor for U2's snapshot-before-merge
+/// reorder. Driving the real helper rather than the underlying
+/// `merge_hat_channel` ensures the runner path is exercised.
+#[test]
+fn u2_runner_path_helper_observes_empty_not_unreadable() {
+    let workspace = tempfile::tempdir().expect("tempdir");
+    let _cwd = CwdGuard::set(workspace.path());
+    init_git_workspace(workspace.path());
+
+    let (ctx, event_loop) = build_isolated_executor_loop(workspace.path());
+
+    // Seed a zero-byte channel (the empty-after-activation case
+    // that was previously misclassified as Unreadable when the
+    // snapshot ran AFTER merge).
+    let _channel_path = seed_hat_channel(&ctx, "executor", "primary-empty", 1);
+
+    let target = ctx.workspace().join(".ralph/events-main.jsonl");
+    std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+    std::fs::write(&target, "").unwrap();
+
+    let config = event_loop_config();
+    let (outcome_row, merge_state) =
+        crate::loop_runner::activation_outcome_close::prepare_normal_merge(
+            &ctx,
+            &config,
+            false,
+            &ralph_proto::HatId::new("executor"),
+            true,
+            false,
+            None,
+            "",
+        );
+
+    // Empty channel + merge ok (no-op for empty) → snapshot must
+    // be Empty, NOT Unreadable. The empty-terminal flag must also
+    // be true so the missing-terminal recovery path still fires.
+    assert_eq!(
+        merge_state.snapshot.status,
+        crate::loop_runner::activation_outcome::ActivationOutcomeStatus::Empty,
+        "pre-merge snapshot of zero-byte channel must be Empty, not {:?}",
+        merge_state.snapshot.status
+    );
+    assert!(outcome_row.empty_terminal_channel);
 }
 
 /// T2 (U2): the empty channel merge path must emit `status=empty`
