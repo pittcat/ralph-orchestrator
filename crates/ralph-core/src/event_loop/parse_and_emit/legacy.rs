@@ -3989,30 +3989,20 @@ impl EventLoop {
                 // projection-aware helper; the non-projection
                 // branch auto-reborrows to `&StateLedger` inside
                 // `commit_idempotent`.
-                let ledger = self.state.state_ledger.as_mut().ok_or_else(|| {
-                    self.diagnostics.log_orchestration(
-                        self.state.iteration,
-                        event.source.as_ref().map(|h| h.as_str()).unwrap_or("unknown"),
-                        crate::diagnostics::OrchestrationEvent::BackpressureTriggered {
-                            reason: format!(
-                                "accepted transition unavailable for topic '{}': state ledger missing",
-                                event.topic
-                            ),
-                        },
-                    );
-                    std::io::Error::other(format!(
-                        "accepted transition unavailable for business/recovery topic '{}': state ledger missing",
-                        event.topic
-                    ))
-                })?;
-                crate::event_loop::disposition::publish_synthetic_with_state_machine_projection(
+                // Plan GAP-02 / Unit 3: commit the projection through the
+                // EventLoop helper that wires the pre-apply live-runtime
+                // snapshot into the rollback closure. On
+                // `StateLedger::commit` failure the live runtime is
+                // restored to the pre-apply snapshot; on success the
+                // snapshot is dropped. The helper accepts an
+                // `Option<Delta>` so it can also serve the no-projection
+                // legacy path (disabled state machine / no candidate).
+                self.commit_state_machine_projection(
                     &event,
                     u8_disposition,
                     &u7_loop_id,
                     &activation_id,
                     digest,
-                    ledger,
-                    &mut self.bus,
                     projection,
                 )
                 .map_err(|error| {

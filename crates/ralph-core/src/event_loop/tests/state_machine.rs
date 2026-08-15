@@ -1299,6 +1299,224 @@ fn u2_terminal_observed_propagates_from_candidate_to_live_runtime() {
     );
 }
 
+// ---------------------------------------------------------------------------
+// Plan GAP-02 / Unit 3: when the StateLedger projection commit fails,
+// the live runtime must be rolled back to the pre-apply snapshot and no
+// business event may be published. Pre-fix, `apply_state_machine_decisions`
+// mutates live *before* the durable commit and the disposition helper
+// passes a no-op rollback closure to the AcceptedTransition helper, so a
+// ledger fault leaves the in-memory runtime advanced while the durable
+// ledger does not record the transition.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn u3_apply_state_machine_rollback_on_ledger_failure() {
+    // U3 §10 Red test: walk the full pipeline
+    // `apply_state_machine_decisions` → `publish_synthetic_with_state_machine_projection`
+    // with a fault-injected ledger commit (bypass-active flag) and
+    // assert that the live runtime is exactly the pre-apply snapshot
+    // afterwards (no advance, no leak), the bus got no published
+    // business event, and the ledger has no StateMachineTransition
+    // commit. Pre-fix, `apply_state_machine_decisions` mutates live
+    // *before* the durable commit and the disposition helper passes a
+    // no-op rollback closure to the AcceptedTransition helper, so a
+    // ledger fault leaves the in-memory runtime advanced while the
+    // durable ledger does not record the transition.
+    use crate::event_loop::disposition::Disposition;
+    use crate::event_loop::state_machine_stage::CandidateStateMachineDecision;
+    use crate::event_reader::Event as JsonlEvent;
+    use crate::state::CommitDelta;
+    use crate::state_machine::{StateMachineDecision, StateMachineTransitionDelta};
+    use std::sync::{Arc, Mutex};
+    use tempfile::TempDir;
+
+    let temp_dir = TempDir::new().unwrap();
+    let workspace = temp_dir.path().to_path_buf();
+
+    // Real EventLoop for the live runtime.
+    let config: RalphConfig = serde_yaml::from_str(
+        r"
+event_loop:
+  state_machine:
+    enabled: true
+hats:
+  executor:
+    name: Executor
+    triggers: [experiment.planned]
+    publishes: [experiment.planned]
+",
+    )
+    .unwrap();
+    let mut event_loop = EventLoop::new(config);
+    event_loop.initialize("Test");
+
+    // Install an observer BEFORE apply so we count publishes from a
+    // clean slate.
+    let published = Arc::new(Mutex::new(Vec::<String>::new()));
+    let published_clone = Arc::clone(&published);
+    event_loop
+        .bus
+        .add_observer(move |event| {
+            published_clone
+                .lock()
+                .unwrap()
+                .push(event.topic.to_string());
+        });
+
+    // Build a candidate that the validator would have accepted.
+    let candidate = CandidateStateMachineDecision {
+        event: JsonlEvent {
+            topic: "experiment.planned".to_string(),
+            payload: Some(r#"{"task_key":"t-u3"}"#.to_string()),
+            ts: chrono::Utc::now().to_rfc3339(),
+            hat: None,
+            triggered: None,
+            source: None,
+            wave_id: None,
+            wave_index: None,
+            wave_total: None,
+            system_injected: None,
+        },
+        decision: StateMachineDecision::Accept {
+            instance_key: Some("t-u3".to_string()),
+            new_state: "planned".to_string(),
+        },
+        opens_instance: true,
+        closes_instance: false,
+        accepted_at_terminal_observed: false,
+        accepted_at_terminal_honored: false,
+    };
+
+    // Snapshot the pre-apply live runtime summary.
+    let pre_apply_summary = event_loop
+        .state
+        .state_machine_runtime_state
+        .clone()
+        .unwrap_or_default()
+        .summary();
+    let pre_apply_count = pre_apply_summary.open_instance_count
+        + pre_apply_summary.closed_instance_count;
+    let pre_apply_terminal = (
+        pre_apply_summary.terminal_observed,
+        pre_apply_summary.terminal_honored,
+    );
+
+    // Apply the candidate — mutates live runtime.
+    let projected = event_loop.apply_state_machine_decisions(&[candidate], "loop-u3");
+    assert_eq!(projected.len(), 1, "candidate must project a delta");
+
+    // Sanity: the apply advanced the live runtime.
+    let post_apply_summary = event_loop
+        .state
+        .state_machine_runtime_state
+        .as_ref()
+        .unwrap()
+        .summary();
+    assert_eq!(
+        post_apply_summary.open_instance_count,
+        pre_apply_summary.open_instance_count + 1,
+        "apply must have opened an instance before the rollback test"
+    );
+
+    let delta: StateMachineTransitionDelta = projected.into_iter().next().unwrap();
+
+    // Open a real ledger and inject a fault on its commit step. The
+    // EventLoop helper reads its ledger from `self.state.state_ledger`,
+    // so we install the ledger there. We toggle the bypass-active
+    // flag on the SAME ledger instance via a dedicated test-only
+    // setter that lives on `EventLoop` so we can avoid an unsafe
+    // borrow here.
+    let ledger = crate::state::StateLedger::new(&workspace, true);
+    event_loop.install_state_ledger_for_test(ledger);
+    event_loop.set_state_ledger_bypass_active_for_test(true);
+    // Suppress unused-mut warning when no further local `ledger`
+    // binding is needed.
+    let _ = ();
+
+    let event = JsonlEvent {
+        topic: "experiment.planned".to_string(),
+        payload: Some(r#"{"task_key":"t-u3"}"#.to_string()),
+        ts: chrono::Utc::now().to_rfc3339(),
+        hat: None,
+        triggered: None,
+        source: None,
+        wave_id: None,
+        wave_index: None,
+        wave_total: None,
+        system_injected: None,
+    };
+    let proto_event = ralph_proto::Event::new(event.topic.as_str(), event.payload.as_deref().unwrap_or(""));
+
+    // Pre-fix, the rollback closure inside
+    // `publish_synthetic_with_state_machine_projection` is a no-op
+    // (`|| Ok(Box::new(|| {}))`); the live runtime retains its
+    // post-apply advancement even though the ledger commit fails.
+    // After the U3 fix, `apply_state_machine_decisions` captures a
+    // pre-apply snapshot and `EventLoop::commit_state_machine_projection`
+    // wires it into the materialize closure; the rollback restores
+    // the live runtime on `StateLedger::commit` failure.
+    let result = event_loop.commit_state_machine_projection(
+        &proto_event,
+        Disposition::Business,
+        "loop-u3",
+        "act-u3",
+        "rev-u3",
+        Some(delta.clone()),
+    );
+    event_loop.set_state_ledger_bypass_active_for_test(false);
+
+    assert!(
+        result.is_err(),
+        "ledger fault must surface as a CommitFailed (U3 Red); got {result:?}"
+    );
+
+    // U3 §10 assertion: live runtime must match the pre-apply snapshot.
+    let after_failure_summary = event_loop
+        .state
+        .state_machine_runtime_state
+        .as_ref()
+        .map(|r| r.summary())
+        .unwrap_or_default();
+    let after_failure_count = after_failure_summary.open_instance_count
+        + after_failure_summary.closed_instance_count;
+    let after_failure_terminal = (
+        after_failure_summary.terminal_observed,
+        after_failure_summary.terminal_honored,
+    );
+    assert_eq!(
+        after_failure_count, pre_apply_count,
+        "live runtime open+closed count must be restored to pre-apply value (U3 Red); pre={pre_apply_count} after={after_failure_count}"
+    );
+    assert_eq!(
+        after_failure_terminal, pre_apply_terminal,
+        "live terminal flags must be restored to pre-apply value (U3 Red)"
+    );
+    assert_eq!(
+        after_failure_summary.open_instance_count, pre_apply_summary.open_instance_count,
+        "live open_instances count must be restored (U3 Red); pre={} after={}",
+        pre_apply_summary.open_instance_count,
+        after_failure_summary.open_instance_count
+    );
+
+    // No business event should have been published.
+    let published_topics = published.lock().unwrap().clone();
+    assert!(
+        !published_topics.iter().any(|t| t == "experiment.planned"),
+        "no business event may be published when ledger commit fails (U3 Red); got {published_topics:?}"
+    );
+
+    // Ledger has no StateMachineTransition commit (the bypass guard rejected it).
+    let commit_log = event_loop.state_ledger_commit_log();
+    let sm_commits: usize = commit_log
+        .iter()
+        .filter(|c| matches!(c.delta, CommitDelta::StateMachineTransition { .. }))
+        .count();
+    assert_eq!(
+        sm_commits, 0,
+        "ledger must not have a StateMachineTransition entry after rollback (U3 Red)"
+    );
+}
+
 #[allow(dead_code)]
 fn _u4_unused_runtime() -> StateMachineRuntimeState {
     StateMachineRuntimeState::new()

@@ -788,7 +788,7 @@ impl StateMachineRuntimeState {
 }
 
 /// A snapshot of the state machine runtime state.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct StateMachineStateSummary {
     /// Number of currently open instances.
     pub open_instance_count: usize,

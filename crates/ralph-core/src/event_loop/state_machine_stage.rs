@@ -217,11 +217,20 @@ impl EventLoop {
         if decisions.is_empty() {
             return Vec::new();
         }
+        // Plan GAP-02 / Unit 3: capture the pre-apply live runtime
+        // snapshot so the durable projection commit's rollback closure
+        // can restore live state if `StateLedger::commit` fails.
+        // Without this, `live.apply_transition_delta(&delta)` below
+        // would advance the in-memory runtime ahead of the durable
+        // ledger, leaving a half-applied state when the commit faults.
         let mut projected = Vec::with_capacity(decisions.len());
         let live = self
             .state
             .state_machine_runtime_state
             .get_or_insert_with(StateMachineRuntimeState::default);
+        // Capture AFTER materialising so the snapshot is `Some`, even
+        // on the first batch where the runtime started as `None`.
+        self.state_machine_apply_snapshot = Some(live.clone());
         for candidate in decisions {
             let topic = candidate.event.topic.as_str();
             // The identity is derived from the accepted event and semantic
@@ -262,6 +271,98 @@ impl EventLoop {
             }
         }
         projected
+    }
+
+    /// Plan GAP-02 / Unit 3: commit a single projected
+    /// the disposition helper, with a real rollback closure that
+    /// restores the pre-apply live runtime snapshot if the
+    /// `StateLedger::commit` step faults.
+    ///
+    /// The pre-apply snapshot is captured by
+    /// [`EventLoop::apply_state_machine_decisions`] (Unit 3) and
+    /// stored at `self.state_machine_apply_snapshot`. This method
+    /// takes the snapshot, builds a materialize closure that
+    /// borrows `&mut self.state.state_machine_runtime_state`, and
+    /// hands it to `disposition::publish_synthetic_with_state_machine_projection`.
+    /// On commit success the snapshot is dropped; on commit failure
+    /// the rollback fires and restores the live runtime.
+    pub(super) fn commit_state_machine_projection(
+        &mut self,
+        event: &ralph_proto::Event,
+        disposition: crate::event_loop::disposition::Disposition,
+        loop_id: &str,
+        activation_id: &str,
+        contract_revision: &str,
+        projection: Option<StateMachineTransitionDelta>,
+    ) -> Result<
+        Option<crate::event_loop::accepted_transition::OutboxEntry>,
+        crate::event_loop::accepted_transition::TransitionError,
+    > {
+        // Plan GAP-02 / Unit 3: the helper handles both projection
+        // and no-projection paths. With a projection it wires the
+        // pre-apply snapshot into the rollback closure; without a
+        // projection it falls back to the legacy idempotent commit
+        // and consumes the materialize closure once for symmetry
+        // (no live state to roll back).
+        let ledger = match self.state.state_ledger.as_mut() {
+            Some(l) => l,
+            None => {
+                return Err(
+                    crate::event_loop::accepted_transition::TransitionError::CommitFailed {
+                        source: "state ledger missing".to_string(),
+                    },
+                );
+            }
+        };
+        // The pre-apply snapshot was captured on the projection
+        // branch; if we are now on the no-projection branch the
+        // snapshot must already have been drained by a prior call or
+        // must remain None (legacy path never mutated live state).
+        let snapshot = self.state_machine_apply_snapshot.take();
+        // Plan GAP-02 / Unit 3: communicate the rollback snapshot
+        // from the `commit_idempotent_with_state_machine_projection`
+        // closure back to this method without `unsafe`. The
+        // rollback closure must be `'static` (per the helper's
+        // signature), so it cannot borrow `self`. Instead the
+        // closure writes the snapshot into a shared `Rc<RefCell<>>`
+        // cell on rollback; after `disposition` returns we drain
+        // the cell. On a successful commit the rollback never
+        // fires, the snapshot held inside the Box is dropped, and
+        // we leave the live runtime as advanced.
+        use std::cell::RefCell;
+        use std::rc::Rc;
+        let rollback_cell: Rc<RefCell<Option<crate::state_machine::StateMachineRuntimeState>>> =
+            Rc::new(RefCell::new(None));
+        let rollback_cell_for_closure = Rc::clone(&rollback_cell);
+        let materialize = move || -> Result<Box<dyn FnOnce()>, String> {
+            let snapshot = snapshot;
+            let cell = rollback_cell_for_closure;
+            Ok(Box::new(move || {
+                // No snapshot means the no-projection legacy path
+                // ran; nothing to restore.
+                if let Some(snap) = snapshot {
+                    *cell.borrow_mut() = Some(snap);
+                }
+            }) as Box<dyn FnOnce()>)
+        };
+        let result = crate::event_loop::disposition::publish_synthetic_with_state_machine_projection(
+            event,
+            disposition,
+            loop_id,
+            activation_id,
+            contract_revision,
+            ledger,
+            &mut self.bus,
+            materialize,
+            projection,
+        );
+        // Drain the rollback cell: a present snapshot means the
+        // rollback fired (commit failed) and the live runtime must
+        // be restored.
+        if let Some(snap) = rollback_cell.borrow_mut().take() {
+            self.state.state_machine_runtime_state = Some(snap);
+        }
+        result
     }
 }
 
@@ -309,6 +410,38 @@ pub(crate) struct CandidateStateMachineDecision {
     /// the Unit 3 apply stage; not consumed in Unit 2 itself.
     #[allow(dead_code)]
     pub accepted_at_terminal_honored: bool,
+}
+
+#[cfg(test)]
+impl EventLoop {
+    /// Test-only helper: install a state ledger bypassing the
+    /// normal loop-context wiring. Used by the U3 rollback test to
+    /// drive `commit_state_machine_projection` against a fault-injected
+    /// ledger without an `unsafe` borrow in the test body.
+    pub(crate) fn install_state_ledger_for_test(
+        &mut self,
+        ledger: crate::state::StateLedger,
+    ) {
+        self.state.state_ledger = Some(ledger);
+    }
+
+    /// Test-only helper: toggle `bypass_active_for_test` on the
+    /// installed ledger without exposing the inner borrow to the
+    /// caller.
+    pub(crate) fn set_state_ledger_bypass_active_for_test(&mut self, active: bool) {
+        if let Some(l) = self.state.state_ledger.as_mut() {
+            l.set_bypass_active_for_test(active);
+        }
+    }
+
+    /// Test-only helper: read the installed ledger's commit log.
+    pub(crate) fn state_ledger_commit_log(&self) -> Vec<crate::state::Commit> {
+        self.state
+            .state_ledger
+            .as_ref()
+            .map(|l| l.commit_log().to_vec())
+            .unwrap_or_default()
+    }
 }
 
 impl StateMachineDecision {

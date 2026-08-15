@@ -451,4 +451,11 @@ pub struct EventLoop {
     /// only and is reset on `process_parse_result` entry.
     pub(crate) pending_state_machine_candidates:
         Vec<crate::event_loop::state_machine_stage::CandidateStateMachineDecision>,
+    /// Plan GAP-02 / Unit 3: pre-apply live-runtime snapshot for
+    /// rollback. Captured at the start of
+    /// [`EventLoop::apply_state_machine_decisions`] and consumed by
+    /// the disposition helper's rollback closure when the
+    /// `StateLedger` projection commit fails. Cleared on a successful
+    /// commit.
+    pub(crate) state_machine_apply_snapshot: Option<crate::state_machine::StateMachineRuntimeState>,
 }
