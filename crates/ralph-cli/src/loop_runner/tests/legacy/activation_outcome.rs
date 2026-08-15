@@ -480,14 +480,9 @@ fn assert_outcome_row(
     std::fs::create_dir_all(target.parent().unwrap()).unwrap();
     std::fs::write(&target, "").unwrap();
 
-    let snapshot =
-        crate::loop_runner::activation_outcome::snapshot_channel(Some(&channel_path));
-    let merge_result = crate::loop_runner::hat_channel::merge_hat_channel(
-        &ctx,
-        &target,
-        "executor",
-        None,
-    );
+    let snapshot = crate::loop_runner::activation_outcome::snapshot_channel(Some(&channel_path));
+    let merge_result =
+        crate::loop_runner::hat_channel::merge_hat_channel(&ctx, &target, "executor", None);
     assert_eq!(
         merge_result.is_ok(),
         merge_succeeded,
@@ -543,18 +538,14 @@ fn u9_assert_outcome_row_collapsed_fixture_empty_channel() {
 
 #[test]
 fn u9_assert_outcome_row_collapsed_fixture_non_empty_channel() {
-    assert_outcome_row(
-        b"{\"topic\":\"work.done\"}\n",
-        true,
-        "merged",
-        |row| {
-            assert!(row
-                .get("fields")
+    assert_outcome_row(b"{\"topic\":\"work.done\"}\n", true, "merged", |row| {
+        assert!(
+            row.get("fields")
                 .and_then(|v| v.get("merge_succeeded"))
                 .and_then(Value::as_bool)
-                .unwrap_or(false));
-        },
-    );
+                .unwrap_or(false)
+        );
+    });
 }
 
 /// T6 (U2): when `merge_hat_channel` returns Ok on a non-empty
@@ -715,8 +706,7 @@ fn u12_in_process_runner_writes_merge_failed_outcome_row() {
     perms.set_readonly(true);
     std::fs::set_permissions(&target, perms).unwrap();
 
-    let snapshot =
-        crate::loop_runner::activation_outcome::snapshot_channel(Some(&channel_path));
+    let snapshot = crate::loop_runner::activation_outcome::snapshot_channel(Some(&channel_path));
     let merge_result =
         crate::loop_runner::hat_channel::merge_hat_channel(&ctx, &target, "executor", None);
     // Restore perms so the test cleanup can write.
@@ -729,8 +719,7 @@ fn u12_in_process_runner_writes_merge_failed_outcome_row() {
         merge_result.is_err(),
         "merge must fail when target is read-only"
     );
-    let refined =
-        crate::loop_runner::activation_outcome::refine_after_merge(snapshot, false);
+    let refined = crate::loop_runner::activation_outcome::refine_after_merge(snapshot, false);
     assert_eq!(
         refined.status,
         crate::loop_runner::activation_outcome::ActivationOutcomeStatus::MergeFailed,
@@ -784,8 +773,7 @@ fn u13_in_process_runner_writes_missing_outcome_row() {
     let (ctx, event_loop) = build_isolated_executor_loop(workspace.path());
     // Note: no seed_hat_channel call — the marker is absent, so
     // resolve_hat_channel_events_path returns None.
-    let snapshot =
-        crate::loop_runner::activation_outcome::snapshot_channel(None);
+    let snapshot = crate::loop_runner::activation_outcome::snapshot_channel(None);
     assert_eq!(
         snapshot.status,
         crate::loop_runner::activation_outcome::ActivationOutcomeStatus::Missing,
@@ -825,26 +813,23 @@ fn u13_in_process_runner_writes_missing_outcome_row() {
     );
 }
 
-// Plan 2026-08-15-1823 U13 (R11): end-to-end runner-path test for
-// the unreadable status. The channel path's parent directory is
-// absent, so std::fs::metadata returns Err and snapshot_channel
-// produces Unreadable.
+// Plan 2026-08-15-1823 U13 (R11): resolved-but-absent channel paths
+// are Missing, while other metadata failures are Unreadable.
 #[test]
-fn u13_in_process_runner_writes_unreadable_outcome_row() {
+fn u13_snapshot_distinguishes_missing_from_unreadable() {
     let workspace = tempfile::tempdir().expect("tempdir");
     let _cwd = CwdGuard::set(workspace.path());
     init_git_workspace(workspace.path());
 
     let (ctx, _event_loop) = build_isolated_executor_loop(workspace.path());
-    // Path whose parent does not exist; std::fs::metadata returns
-    // Err and snapshot_channel maps that to Unreadable.
-    let unreadable_path = ctx.workspace().join(".ralph/does-not-exist/events-hat-1.jsonl");
-    let snapshot = crate::loop_runner::activation_outcome::snapshot_channel(Some(
-        &unreadable_path,
-    ));
+    // Path whose parent does not exist; ENOENT means Missing.
+    let missing_path = ctx
+        .workspace()
+        .join(".ralph/does-not-exist/events-hat-1.jsonl");
+    let snapshot = crate::loop_runner::activation_outcome::snapshot_channel(Some(&missing_path));
     assert_eq!(
         snapshot.status,
-        crate::loop_runner::activation_outcome::ActivationOutcomeStatus::Unreadable,
-        "non-existent parent + Some(path) must produce Unreadable"
+        crate::loop_runner::activation_outcome::ActivationOutcomeStatus::Missing,
+        "ENOENT must produce Missing"
     );
 }

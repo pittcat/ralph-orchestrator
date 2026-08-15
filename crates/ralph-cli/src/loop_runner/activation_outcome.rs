@@ -27,13 +27,12 @@
 
 use std::path::Path;
 
-use ralph_core::diagnostics::{
-    RUNTIME_TRACE_SCHEMA_VERSION, RuntimeTraceEntry, RuntimeTraceLogger, RuntimeTracePhase,
-};
+use ralph_core::diagnostics::{DiagnosticsCollector, RuntimeTraceEntry, RuntimeTracePhase};
 use ralph_core::event_loop::ProcessedEvents;
 use ralph_core::{EventLoop, LoopContext, TerminationReason};
 use ralph_proto::HatId;
-use serde_json::{Map, Value, json};
+use serde_json::{Map, Value};
+#[cfg(test)]
 use tracing::warn;
 
 use super::execution::ExecutionOutcome;
@@ -91,18 +90,19 @@ pub fn channel_exists_for(status: ActivationOutcomeStatus) -> bool {
 /// U11 (R10): strip the workspace prefix from a channel path so
 /// the `source_ref` field in the activation outcome row does not
 /// leak the operator's local absolute path. Falls back to the
-/// raw path display when the channel is outside the workspace,
+/// stable marker when the channel is outside the workspace,
 /// or to `"<unknown>"` for a `None` channel path. The
 /// `inner.rs:3722` empty-channel `warn!` and the `entry.rs:128`
 /// interrupt-path `warn!` mirror this helper.
-#[allow(dead_code)]
 pub fn channel_reference_for_log(
     path: Option<&std::path::Path>,
     workspace: &std::path::Path,
 ) -> Option<String> {
     let p = path?;
-    let stripped = p.strip_prefix(workspace).unwrap_or(p);
-    Some(stripped.display().to_string())
+    match p.strip_prefix(workspace) {
+        Ok(stripped) => Some(stripped.display().to_string()),
+        Err(_) => Some("<outside-workspace>".to_string()),
+    }
 }
 
 /// Snapshot of the pre-merge channel state. The runner captures this
@@ -123,7 +123,17 @@ pub struct ChannelSnapshot {
 /// `missing` (path absent) from `unreadable` (path present but
 /// metadata failed) per plan §3 D2 / §6 implementation constraint
 /// 2.
+#[cfg(test)]
 pub fn snapshot_channel(channel_path: Option<&Path>) -> ChannelSnapshot {
+    snapshot_channel_with_workspace(channel_path, None)
+}
+
+/// Build a snapshot while retaining only a workspace-relative or stable
+/// short reference for the trace row.
+pub fn snapshot_channel_with_workspace(
+    channel_path: Option<&Path>,
+    workspace: Option<&Path>,
+) -> ChannelSnapshot {
     let Some(path) = channel_path else {
         return ChannelSnapshot {
             status: ActivationOutcomeStatus::Missing,
@@ -131,7 +141,14 @@ pub fn snapshot_channel(channel_path: Option<&Path>) -> ChannelSnapshot {
             reference: None,
         };
     };
-    let reference = Some(path.display().to_string());
+    let reference = Some(match workspace {
+        Some(workspace) => channel_reference_for_log(Some(path), workspace)
+            .unwrap_or_else(|| "<unknown>".to_string()),
+        None => path
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "<unknown>".to_string()),
+    });
     match std::fs::metadata(path) {
         Ok(meta) => {
             let bytes = meta.len();
@@ -156,6 +173,11 @@ pub fn snapshot_channel(channel_path: Option<&Path>) -> ChannelSnapshot {
                 }
             }
         }
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => ChannelSnapshot {
+            status: ActivationOutcomeStatus::Missing,
+            bytes: None,
+            reference,
+        },
         Err(_) => ChannelSnapshot {
             status: ActivationOutcomeStatus::Unreadable,
             bytes: None,
@@ -229,21 +251,23 @@ pub struct ActivationOutcomeFacts {
 }
 
 impl ActivationOutcomeFacts {
-    /// Build from a `ProcessedEvents` + `wave_policy_rejections`
+    /// Build from processed events and wave-policy statistics
     /// pair, falling back to zeros / false when not provided
     /// (e.g. interrupt path).
     #[allow(dead_code)]
     pub fn from_processed(
         processed: Option<&ProcessedEvents>,
         wave_policy_rejections: usize,
+        wave_raw_count: usize,
     ) -> Self {
         match processed {
             Some(processed) => {
                 let accepted = processed.accepted_events.len() as u64;
                 let rejected = (processed.had_rejected_events as u64)
-                    + processed.contract_rejections.len() as u64;
-                let raw = if processed.had_raw_events { 1u64 } else { 0u64 };
-                let candidate = raw + wave_policy_rejections as u64;
+                    + processed.contract_rejections.len() as u64
+                    + wave_policy_rejections as u64;
+                let raw = u64::from(processed.had_raw_events);
+                let candidate = raw + wave_raw_count as u64;
                 Self {
                     candidate_event_count: candidate,
                     accepted_event_count: accepted,
@@ -372,30 +396,19 @@ impl ActivationOutcomeFacts {
 /// a thin wrapper around `RuntimeTraceLogger::append` so the cap,
 /// schema_version, sequence and degraded-flip semantics stay in
 /// one place.
-pub fn log_activation_outcome(
-    session_dir: Option<&Path>,
+pub fn log_activation_outcome_with_diagnostics(
+    diagnostics: &DiagnosticsCollector,
     iteration: u64,
     hat: &str,
     snapshot: &ChannelSnapshot,
     facts: &ActivationOutcomeFacts,
 ) {
-    let Some(dir) = session_dir else {
+    if diagnostics.session_dir().is_none() {
         // Diagnostics disabled — do nothing. Plan §6 implementation
         // constraint 4: trace append failures must never change the
         // loop result.
         return;
-    };
-    let mut logger = match RuntimeTraceLogger::new(dir) {
-        Ok(l) => l,
-        Err(err) => {
-            warn!(
-                target: "ralph_cli::loop_runner",
-                error = %err,
-                "failed to open runtime trace for activation outcome; skipping"
-            );
-            return;
-        }
-    };
+    }
     let fields = facts.to_json();
     let mut entry = RuntimeTraceEntry::new(iteration, 0, RuntimeTracePhase::Activation)
         .with_kind(ACTIVATION_OUTCOME_KIND)
@@ -405,9 +418,37 @@ pub fn log_activation_outcome(
     if let Some(reference) = snapshot.reference.as_ref() {
         entry = entry.with_source_ref(reference.clone());
     }
-    // Make sure the row carries the canonical schema_version even
-    // if a future code path forgets the constant.
-    let _ = RUNTIME_TRACE_SCHEMA_VERSION; // touched to keep the import wired up
+    diagnostics.log_runtime_trace(entry);
+}
+
+/// Test-only compatibility helper for direct row-shape tests. Production
+/// callers must use `log_activation_outcome_with_diagnostics` so writes go
+/// through the collector's shared logger and degraded-state handling.
+#[cfg(test)]
+pub fn log_activation_outcome(
+    session_dir: Option<&Path>,
+    iteration: u64,
+    hat: &str,
+    snapshot: &ChannelSnapshot,
+    facts: &ActivationOutcomeFacts,
+) {
+    let Some(dir) = session_dir else { return };
+    let fields = facts.to_json();
+    let mut entry = RuntimeTraceEntry::new(iteration, 0, RuntimeTracePhase::Activation)
+        .with_kind(ACTIVATION_OUTCOME_KIND)
+        .with_hat(hat)
+        .with_status(snapshot.status.as_str())
+        .with_fields(fields);
+    if let Some(reference) = snapshot.reference.as_ref() {
+        entry = entry.with_source_ref(reference.clone());
+    }
+    let Ok(mut logger) = ralph_core::diagnostics::RuntimeTraceLogger::new(dir) else {
+        warn!(
+            target: "ralph_cli::loop_runner",
+            "failed to open runtime trace for activation outcome test helper"
+        );
+        return;
+    };
     logger.append(entry);
 }
 
@@ -434,13 +475,6 @@ pub(crate) fn read_outcome_row(session_dir: &Path) -> Option<Value> {
     None
 }
 
-/// Helper to silence unused-import warnings while keeping the
-/// `json!` macro reachable for future field additions.
-#[allow(dead_code)]
-fn _ensure_json_macro_available() -> Value {
-    json!({})
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -461,7 +495,7 @@ mod tests {
     }
 
     #[test]
-fn channel_readable_and_exists_truth_table() {
+    fn channel_readable_and_exists_truth_table() {
         // Missing → channel_exists=false, channel_readable=false.
         // Unreadable → channel_exists=true (path present), channel_readable=false.
         // Everything else → both true.
@@ -498,13 +532,13 @@ fn channel_readable_and_exists_truth_table() {
             Some(".ralph/agent/events-hat-1.jsonl"),
             "channel inside workspace must be stripped"
         );
-        // Channel outside the workspace → fall back to absolute path display.
+        // Channel outside the workspace → use a stable non-sensitive marker.
         let outer = std::path::Path::new("/var/tmp/events-hat-1.jsonl");
         let fallback = channel_reference_for_log(Some(outer), workspace);
         assert_eq!(
             fallback.as_deref(),
-            Some("/var/tmp/events-hat-1.jsonl"),
-            "channel outside workspace must fall back to raw display"
+            Some("<outside-workspace>"),
+            "channel outside workspace must not expose an absolute path"
         );
         // None channel → None.
         assert!(channel_reference_for_log(None, workspace).is_none());
@@ -525,17 +559,20 @@ fn channel_readable_and_exists_truth_table() {
         let empty = snapshot_channel(Some(&empty_path));
         assert_eq!(empty.status, ActivationOutcomeStatus::Empty);
         assert_eq!(empty.bytes, Some(0));
-        // Unreadable: Some(path) where `metadata` fails. The
-        // simplest portable case is a path that does not exist
-        // and whose parent is also absent — that makes
-        // `std::fs::metadata` return ENOENT.
+        // Missing: a resolved path whose file is absent.
         let non_existent_path = tmp.path().join("does-not-exist");
-        let unreadable = snapshot_channel(Some(&non_existent_path));
+        let missing_file = snapshot_channel(Some(&non_existent_path));
         assert_eq!(
-            unreadable.status,
-            ActivationOutcomeStatus::Unreadable,
-            "non-existent path with Some(...) must be Unreadable"
+            missing_file.status,
+            ActivationOutcomeStatus::Missing,
+            "ENOENT must be Missing, not Unreadable"
         );
+        assert_eq!(missing_file.bytes, None);
+        // Unreadable: InvalidInput is a stable metadata failure that does
+        // not depend on process privileges or platform file permissions.
+        let invalid_path = std::path::Path::new("\0");
+        let unreadable = snapshot_channel(Some(invalid_path));
+        assert_eq!(unreadable.status, ActivationOutcomeStatus::Unreadable);
         assert_eq!(unreadable.bytes, None);
         // Non-empty (placeholder status, refined by caller)
         let non_empty_path = tmp.path().join("non-empty");
@@ -618,5 +655,20 @@ fn channel_readable_and_exists_truth_table() {
         assert_eq!(json["backend_exit_code"], 0);
         assert_eq!(json["output_bytes"], 42);
         assert_eq!(json["terminal_obligation_topics"][0], "work.done");
+    }
+
+    #[test]
+    fn from_processed_carries_event_and_wave_counts() {
+        let processed = ProcessedEvents {
+            had_raw_events: true,
+            had_rejected_events: true,
+            accepted_events: Vec::new(),
+            ..Default::default()
+        };
+        let facts = ActivationOutcomeFacts::from_processed(Some(&processed), 2, 3);
+        assert_eq!(facts.candidate_event_count, 4);
+        assert_eq!(facts.accepted_event_count, 0);
+        assert_eq!(facts.rejected_event_count, 3);
+        assert_eq!(facts.wave_policy_rejection_count, 2);
     }
 }

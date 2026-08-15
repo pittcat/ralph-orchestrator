@@ -46,8 +46,7 @@ mod activation_outcome_close;
 pub(crate) use activation_outcome::ActivationOutcomeStatus;
 #[allow(unused_imports)]
 pub(crate) use activation_outcome::{
-    ActivationOutcomeFacts, ChannelSnapshot, log_activation_outcome, refine_after_merge,
-    refine_for_interrupt, snapshot_channel,
+    ActivationOutcomeFacts, ChannelSnapshot, refine_after_merge, refine_for_interrupt,
 };
 // Plan 2026-08-07-004: `loop_runner::runner` was split into five
 // sibling modules. The five `mod` declarations below are what makes
@@ -66,6 +65,7 @@ mod sync_timeout;
 mod sync_timeout_tests;
 pub mod wave;
 
+#[cfg(test)]
 pub(crate) use execution::ExecutionOutcome;
 pub(crate) use loop_owner::register_loop_owner;
 #[cfg(test)]
@@ -160,9 +160,9 @@ use anyhow::{Context, Result, bail};
 #[allow(unused_imports)]
 use ralph_adapters::{
     ClaudeStreamEvent, ClaudeStreamParser, CliBackend, CliExecutor, ConsoleStreamHandler,
-    ContentBlock, JsonRpcStreamHandler, OutputFormat as BackendOutputFormat, PiAssistantEvent,
-    PiStreamEvent, PiStreamParser, PrettyStreamHandler, PtyConfig, PtyExecutor, QuietStreamHandler,
-    TuiStreamHandler,
+    ContentBlock, ExecutionResult, JsonRpcStreamHandler, OutputFormat as BackendOutputFormat,
+    PiAssistantEvent, PiStreamEvent, PiStreamParser, PrettyStreamHandler, PtyConfig,
+    PtyExecutionResult, PtyExecutor, QuietStreamHandler, TuiStreamHandler,
 };
 #[allow(unused_imports)]
 use ralph_core::diagnostics::{HookDisposition, HookRunTelemetryEntry};

@@ -40,6 +40,7 @@ SKILL_MD = SKILL_DIR / "SKILL.md"
 REFS_DIR = SKILL_DIR / "references"
 ARTIFACT_DISCOVERY = REFS_DIR / "artifact-discovery.md"
 REPORT_TEMPLATE = REFS_DIR / "report-template.md"
+VERIFICATION_PIPELINE = REFS_DIR / "verification-pipeline.md"
 
 
 def _read(path: Path) -> str:
@@ -277,6 +278,26 @@ def test_report_template_has_activation_outcomes_frontmatter() -> None:
 def test_report_template_has_section_4_2_activation_table() -> None:
     body = _read(REPORT_TEMPLATE)
     assert "4.2" in body, "report-template.md must include §4.2 activation outcome table"
+
+
+def test_activation_classification_priority_is_ordered() -> None:
+    body = _read(VERIFICATION_PIPELINE)
+    priority = (
+        "timeout_or_termination",
+        "backend_failure",
+        "channel_routing_failure",
+        "attempted_but_rejected",
+        "successful_no_terminal_emit",
+        "unknown",
+    )
+    positions = [body.index(value) for value in priority]
+    assert positions == sorted(positions), (
+        "verification-pipeline.md must preserve the six classification "
+        "values in priority order"
+    )
+    assert "evidence gap" in body.lower() or "证据不足" in body, (
+        "classification contract must describe evidence insufficiency"
+    )
 
 
 def test_confidence_rubric_caps_empty_alone_root_cause() -> None:

@@ -9,13 +9,15 @@
 //! interrupt path lives in [`super::entry::merge_isolated_channel_on_interrupt`]
 //! and does not depend on this module.
 
+use ralph_core::event_loop::ProcessedEvents;
 use ralph_core::{EventLoop, LoopContext, RalphConfig};
 use ralph_proto::HatId;
 use tracing::{error, warn};
 
 use super::activation_outcome::{
-    ActivationOutcomeFacts, channel_exists_for, channel_readable_for, log_activation_outcome,
-    refine_after_merge, snapshot_channel, ChannelSnapshot,
+    ActivationOutcomeFacts, ChannelSnapshot, channel_exists_for, channel_readable_for,
+    channel_reference_for_log, log_activation_outcome_with_diagnostics, refine_after_merge,
+    snapshot_channel_with_workspace,
 };
 use super::late_events::output_mentions_ralph_emit;
 use super::paths::resolve_emit_events_path;
@@ -68,11 +70,12 @@ pub(crate) fn prepare_normal_merge(
     let mut result = NormalMergeOutcome::default();
 
     let channel_path = crate::loop_runner::paths::resolve_hat_channel_events_path(ctx);
-    let pre_snapshot = snapshot_channel(channel_path.as_deref());
+    let pre_snapshot =
+        snapshot_channel_with_workspace(channel_path.as_deref(), Some(ctx.workspace()));
     let pre_bytes = pre_snapshot.bytes;
     let channel_path_display = channel_path
-        .as_ref()
-        .map(|p| p.display().to_string());
+        .as_deref()
+        .and_then(|path| channel_reference_for_log(Some(path), ctx.workspace()));
 
     let target_events_path = resolve_emit_events_path(ctx, state_machine_enabled);
     let merge_result = crate::loop_runner::hat_channel::merge_hat_channel(
@@ -134,8 +137,8 @@ pub(crate) fn prepare_normal_merge(
 /// `Option<&ProcessedEventsWithWaves>` returned by the runner's
 /// process phase; when the runner cannot provide it the function
 /// falls back to zero counters. The row carries the pre-merge
-/// snapshot refined by the merge outcome, plus the bounded backend
-/// scalars.
+/// snapshot refined by the merge outcome, plus bounded backend and
+/// event-processing scalars.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn write_activation_outcome_for_normal_merge(
     event_loop: &EventLoop,
@@ -149,16 +152,18 @@ pub(crate) fn write_activation_outcome_for_normal_merge(
     success: bool,
     backend_termination: Option<&String>,
     iteration: u64,
+    processed: Option<&ProcessedEvents>,
+    wave_policy_rejection_count: usize,
+    wave_raw_count: usize,
 ) {
     let refined_snapshot = refine_after_merge(state.snapshot, state.merge_succeeded);
-    // U8: build the activation outcome facts via the shared
-    // helper. `from_runner` accepts a borrowed `ExecutionOutcome`,
-    // but the runner-path caller has already moved `outcome.output`
-    // into a local string, so we thread the two scalars
-    // (backend_exit_code, watchdog_timeout) individually and
-    // reconstruct the scalar fields inline. The interrupt path
-    // uses `from_runner` directly because it still owns the
-    // outcome.
+    // Build event counters from the runner's processed snapshot, then
+    // overlay the bounded backend/channel facts for this activation.
+    let event_facts = ActivationOutcomeFacts::from_processed(
+        processed,
+        wave_policy_rejection_count,
+        wave_raw_count,
+    );
     let facts = ActivationOutcomeFacts {
         loop_id: Some(ctx.loop_id().unwrap_or(loop_id).to_string()),
         channel_exists: channel_exists_for(refined_snapshot.status),
@@ -176,10 +181,10 @@ pub(crate) fn write_activation_outcome_for_normal_merge(
             .get_config(display_hat)
             .map(|hat| hat.terminal_events.clone())
             .unwrap_or_default(),
-        ..Default::default()
+        ..event_facts
     };
-    log_activation_outcome(
-        event_loop.diagnostics().session_dir(),
+    log_activation_outcome_with_diagnostics(
+        event_loop.diagnostics(),
         iteration,
         display_hat.as_str(),
         &refined_snapshot,

@@ -23,8 +23,8 @@ use tracing::{error, warn};
 use crate::cli::{ColorMode, Verbosity};
 
 use super::activation_outcome::{
-    ActivationOutcomeFacts, channel_exists_for, channel_readable_for, log_activation_outcome,
-    refine_for_interrupt, snapshot_channel,
+    ActivationOutcomeFacts, channel_exists_for, channel_readable_for,
+    log_activation_outcome_with_diagnostics, refine_for_interrupt, snapshot_channel_with_workspace,
 };
 use super::execution::ExecutionOutcome;
 use super::inner::run_loop_impl_inner;
@@ -138,7 +138,8 @@ pub(crate) fn merge_isolated_channel_on_interrupt(
     // facts even when `merge_hat_channel` deletes the file or
     // returns Err. Best-effort: never fails the interrupt path.
     let channel_path = crate::loop_runner::paths::resolve_hat_channel_events_path(ctx);
-    let pre_snapshot = snapshot_channel(channel_path.as_deref());
+    let pre_snapshot =
+        snapshot_channel_with_workspace(channel_path.as_deref(), Some(ctx.workspace()));
 
     match crate::loop_runner::hat_channel::merge_hat_channel(
         ctx,
@@ -216,8 +217,8 @@ pub(crate) fn merge_isolated_channel_on_interrupt(
             .unwrap_or_default(),
         ..Default::default()
     };
-    log_activation_outcome(
-        event_loop.diagnostics().session_dir(),
+    log_activation_outcome_with_diagnostics(
+        event_loop.diagnostics(),
         event_loop.state().iteration as u64,
         authoritative_hat,
         &snapshot,

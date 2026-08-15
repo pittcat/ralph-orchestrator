@@ -3393,29 +3393,12 @@ pub(super) async fn run_loop_impl_inner(
                         workspace_root,
                     )
                     .await?;
-                Ok(ExecutionOutcome {
-                    output: normalize_cli_output_for_parsing(
+                Ok(
+                    crate::loop_runner::execution::execution_outcome_from_cli_result(
+                        result,
                         effective_backend.output_format,
-                        &result.output,
                     ),
-                    success: result.success,
-                    termination: None,
-                    // Unit 3: surface the CliExecutor inactivity timeout via the
-                    // same diagnostic flag the PTY path uses, so the runner can
-                    // log a consistent watchdog-timeout message across paths.
-                    // `post_event_timed_out` is treated as a normal soft
-                    // backend wrap-up (success=true), not a watchdog fire.
-                    watchdog_timeout: result.timed_out && !result.post_event_timed_out,
-                    // Plan 2026-08-15-1823 U2: pass-through of the
-                    // CliExecutor exit code. The field already exists at
-                    // the adapter boundary; the runner used to drop it.
-                    backend_exit_code: result.exit_code,
-                    total_cost_usd: 0.0,
-                    input_tokens: 0,
-                    output_tokens: 0,
-                    cache_read_tokens: 0,
-                    cache_write_tokens: 0,
-                })
+                )
             }
         };
 
@@ -3545,6 +3528,39 @@ pub(super) async fn run_loop_impl_inner(
             .map(|reason| format!("{reason:?}"));
 
         if let Some(reason) = outcome.termination {
+            // Backend termination exits before the regular event-processing
+            // path. Preserve the isolated channel close observation before
+            // dispatching termination hooks; no processed-event counters are
+            // available on this early-return path.
+            if isolated_mode {
+                let (_, merge_state) =
+                    crate::loop_runner::activation_outcome_close::prepare_normal_merge(
+                        &ctx,
+                        &config,
+                        state_machine_enabled,
+                        &display_hat,
+                        outcome.success,
+                        outcome.watchdog_timeout,
+                        backend_termination.as_ref(),
+                        &outcome.output,
+                    );
+                crate::loop_runner::activation_outcome_close::write_activation_outcome_for_normal_merge(
+                    &event_loop,
+                    &ctx,
+                    merge_state,
+                    outcome.backend_exit_code,
+                    outcome.watchdog_timeout,
+                    &outcome.output,
+                    &display_hat,
+                    &loop_id,
+                    outcome.success,
+                    backend_termination.as_ref(),
+                    iteration as u64,
+                    None,
+                    0,
+                    0,
+                );
+            }
             let reason = hooks::termination::dispatch_pre_loop_termination_hooks(
                 &event_loop,
                 hooks_dispatch_enabled,
@@ -3681,7 +3697,9 @@ pub(super) async fn run_loop_impl_inner(
         // iteration as the event processing it observes. The
         // interrupt path lives in `entry.rs` and does not depend on
         // this block.
-        let mut normal_merge_state: Option<crate::loop_runner::activation_outcome_close::NormalMergeState> = None;
+        let mut normal_merge_state: Option<
+            crate::loop_runner::activation_outcome_close::NormalMergeState,
+        > = None;
         if isolated_mode {
             let (outcome_row, merge_state) =
                 crate::loop_runner::activation_outcome_close::prepare_normal_merge(
@@ -3726,6 +3744,9 @@ pub(super) async fn run_loop_impl_inner(
                     success,
                     backend_termination.as_ref(),
                     iteration as u64,
+                    None,
+                    0,
+                    0,
                 );
             }
 
@@ -3782,26 +3803,6 @@ pub(super) async fn run_loop_impl_inner(
             }
             finalize_recovery_diagnosis(&mut event_loop, &loop_context, None);
             return Ok(reason);
-        }
-
-        // U5: write the activation outcome row in the non-termination
-        // branch too. process_output has already run, so the row is
-        // observation-only and lives in the same iteration as the
-        // event processing it describes.
-        if let Some(merge_state) = normal_merge_state.take() {
-            crate::loop_runner::activation_outcome_close::write_activation_outcome_for_normal_merge(
-                &event_loop,
-                &ctx,
-                merge_state,
-                outcome.backend_exit_code,
-                outcome.watchdog_timeout,
-                &output,
-                &display_hat,
-                &loop_id,
-                success,
-                backend_termination.as_ref(),
-                iteration as u64,
-            );
         }
 
         // Check for planning session user responses (if in planning mode)
@@ -3928,6 +3929,27 @@ pub(super) async fn run_loop_impl_inner(
                     (None, Vec::new(), Vec::new(), 0)
                 }
             };
+
+        // Write the normal activation outcome only after event processing so
+        // candidate/accepted/rejected counters reflect this activation.
+        if let Some(merge_state) = normal_merge_state.take() {
+            crate::loop_runner::activation_outcome_close::write_activation_outcome_for_normal_merge(
+                &event_loop,
+                &ctx,
+                merge_state,
+                outcome.backend_exit_code,
+                outcome.watchdog_timeout,
+                &output,
+                &display_hat,
+                &loop_id,
+                success,
+                backend_termination.as_ref(),
+                iteration as u64,
+                processed_events.as_ref(),
+                wave_policy_rejections.len(),
+                wave_raw_count,
+            );
+        }
 
         if let Some(processed) = processed_events.as_ref()
             && !raw_output_logging_enabled

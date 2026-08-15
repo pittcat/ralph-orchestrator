@@ -50,6 +50,57 @@ pub(crate) struct ExecutionOutcome {
     pub cache_read_tokens: u64,
     pub cache_write_tokens: u64,
 }
+
+/// Convert the adapter-owned PTY result at the runner boundary. Keeping this
+/// conversion pure makes the exit-code and timeout semantics directly
+/// testable without spawning a backend process.
+pub(crate) fn execution_outcome_from_pty_result(
+    pty_result: PtyExecutionResult,
+    interactive: bool,
+) -> ExecutionOutcome {
+    let watchdog_timeout = matches!(
+        pty_result.termination,
+        ralph_adapters::TerminationType::IdleTimeout
+    );
+    let termination = convert_termination_type(pty_result.termination, interactive);
+    let output = if pty_result.extracted_text.is_empty() {
+        pty_result.stripped_output
+    } else {
+        pty_result.extracted_text
+    };
+    ExecutionOutcome {
+        output,
+        success: pty_result.success,
+        termination,
+        watchdog_timeout,
+        backend_exit_code: pty_result.exit_code,
+        total_cost_usd: pty_result.total_cost_usd,
+        input_tokens: pty_result.input_tokens,
+        output_tokens: pty_result.output_tokens,
+        cache_read_tokens: pty_result.cache_read_tokens,
+        cache_write_tokens: pty_result.cache_write_tokens,
+    }
+}
+
+/// Convert the headless CLI executor result at the runner boundary. This
+/// keeps exit-code and timeout projection testable alongside the PTY path.
+pub(crate) fn execution_outcome_from_cli_result(
+    result: ExecutionResult,
+    output_format: BackendOutputFormat,
+) -> ExecutionOutcome {
+    ExecutionOutcome {
+        output: normalize_cli_output_for_parsing(output_format, &result.output),
+        success: result.success,
+        termination: None,
+        watchdog_timeout: result.timed_out && !result.post_event_timed_out,
+        backend_exit_code: result.exit_code,
+        total_cost_usd: 0.0,
+        input_tokens: 0,
+        output_tokens: 0,
+        cache_read_tokens: 0,
+        cache_write_tokens: 0,
+    }
+}
 /// Injects Ralph hat execution context environment variables into a backend.
 /// Overwrites any existing Ralph reserved variables.
 ///
@@ -272,43 +323,67 @@ pub async fn execute_pty(
     };
 
     match result {
-        Ok(pty_result) => {
-            let watchdog_timeout = matches!(
-                pty_result.termination,
-                ralph_adapters::TerminationType::IdleTimeout
-            );
-            let termination = convert_termination_type(pty_result.termination, interactive);
-
-            // Use extracted_text for event parsing when available (NDJSON backends like Claude),
-            // otherwise fall back to stripped_output (non-JSON backends or interactive mode).
-            // This fixes event parsing for Claude's stream-json output where event tags like
-            // <event topic="..."> are inside JSON string values and not directly visible.
-            let output_for_parsing = if pty_result.extracted_text.is_empty() {
-                pty_result.stripped_output
-            } else {
-                pty_result.extracted_text
-            };
-            Ok(ExecutionOutcome {
-                output: output_for_parsing,
-                success: pty_result.success,
-                termination,
-                watchdog_timeout,
-                // Plan 2026-08-15-1823 U2: pass-through of the PTY
-                // exit code. The field already exists at the adapter
-                // boundary (`PtyExecutionResult.exit_code`); the
-                // runner used to drop it.
-                backend_exit_code: pty_result.exit_code,
-                total_cost_usd: pty_result.total_cost_usd,
-                input_tokens: pty_result.input_tokens,
-                output_tokens: pty_result.output_tokens,
-                cache_read_tokens: pty_result.cache_read_tokens,
-                cache_write_tokens: pty_result.cache_write_tokens,
-            })
-        }
+        Ok(pty_result) => Ok(execution_outcome_from_pty_result(pty_result, interactive)),
         Err(e) => {
             // PTY allocation may have failed - log and continue with error
             warn!("PTY execution failed: {}, continuing with error status", e);
             Err(anyhow::Error::new(e))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn pty_result(exit_code: Option<i32>) -> PtyExecutionResult {
+        PtyExecutionResult {
+            output: "raw".into(),
+            stripped_output: "stripped".into(),
+            extracted_text: "extracted".into(),
+            success: exit_code == Some(0),
+            exit_code,
+            termination: ralph_adapters::TerminationType::Natural,
+            total_cost_usd: 1.25,
+            input_tokens: 2,
+            output_tokens: 3,
+            cache_read_tokens: 4,
+            cache_write_tokens: 5,
+        }
+    }
+
+    #[test]
+    fn pty_result_conversion_preserves_exit_code_and_output_selection() {
+        let outcome = execution_outcome_from_pty_result(pty_result(Some(137)), false);
+        assert_eq!(outcome.backend_exit_code, Some(137));
+        assert!(!outcome.success);
+        assert_eq!(outcome.output, "extracted");
+    }
+
+    #[test]
+    fn pty_result_conversion_preserves_watchdog_semantics() {
+        let mut result = pty_result(None);
+        result.termination = ralph_adapters::TerminationType::IdleTimeout;
+        let outcome = execution_outcome_from_pty_result(result, false);
+        assert!(outcome.watchdog_timeout);
+        assert_eq!(outcome.termination, None);
+        assert_eq!(outcome.backend_exit_code, None);
+    }
+
+    #[test]
+    fn cli_result_conversion_preserves_exit_code_and_timeout_semantics() {
+        let outcome = execution_outcome_from_cli_result(
+            ExecutionResult {
+                output: "<event topic=\"work.done\">".into(),
+                success: false,
+                exit_code: Some(23),
+                timed_out: true,
+                post_event_timed_out: false,
+            },
+            BackendOutputFormat::Text,
+        );
+        assert_eq!(outcome.backend_exit_code, Some(23));
+        assert!(outcome.watchdog_timeout);
+        assert!(!outcome.success);
     }
 }
