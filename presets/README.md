@@ -88,7 +88,7 @@ ralph preset check -H builtin:ce-executor-pipeline --strict --format json
 
 ```bash
 # Author delivers a version 1 scenario YAML alongside the preset, then
-# runs the deterministic scripted-workflow verifier (plan 2026-08-15-0722).
+# runs the deterministic scripted-workflow verifier.
 # Verifier drives a real `EventLoop` in a temp workspace; remote sources
 # are rejected; source_kind classifies `builtin:*` vs file paths.
 ralph preset verify -H builtin:ce-executor-pipeline \

@@ -462,3 +462,94 @@ scenarios:
         "failure_kind tag must be no_progress (R5: preserve driver classification)"
     );
 }
+
+#[test]
+fn invalid_payload_is_rejected_not_accepted() {
+    // U7 G1 (plan §9 named acceptance test): when the scenario's expected
+    // payload shape does not match what the trace accepted (e.g. an expected
+    // topic is missing), the verdict must surface a `scenario_failure`
+    // (rejection), not silently flip the run to passed.
+    let yaml = r#"
+version: 1
+scenarios:
+  - name: invalid-payload-rejected
+    responses:
+      - output: |
+          <event topic="LOOP_COMPLETE">{"reason":"done"}</event>
+        success: true
+    expect:
+      start_event: work.start
+      accepted_events: [work.done, LOOP_COMPLETE]
+      forbidden_events: []
+      terminal: success
+      terminal_topic: LOOP_COMPLETE
+    limits:
+      max_steps: 4
+      no_progress_steps: 4
+"#;
+    let scenario = parse_scenario(yaml);
+    let config = make_single_hat_config("work.start", "LOOP_COMPLETE", "doer");
+    let workspace = DriverWorkspace::new().expect("workspace");
+    let outcome = run_scenario(&scenario, &config, &workspace, "blob").expect("run");
+    let report = evaluate_scenario(outcome);
+    // The expected `work.done` topic is missing from the accepted trace,
+    // so the verdict must classify this as a rejection (scenario_failure),
+    // not a pass.
+    assert!(
+        !report.passed,
+        "missing expected topic must not pass the verifier"
+    );
+    assert_eq!(
+        report.failure_kind.as_deref(),
+        Some("scenario_failure"),
+        "invalid payload must surface as scenario_failure"
+    );
+}
+
+#[test]
+fn runtime_recovery_must_have_terminal_or_allowed_successor() {
+    // U7 G1 (plan §9 named acceptance test): a multi-hat chain that fails
+    // to reach the terminal topic must close as `unclosed_terminal` (or a
+    // clearly-named scenario failure), never as a silent pass.
+    let yaml = r#"
+version: 1
+scenarios:
+  - name: runtime-recovery-no-terminal
+    responses:
+      - output: |
+          <event topic="work.done">{"step":"one"}</event>
+        success: true
+    expect:
+      start_event: work.start
+      accepted_events: [work.done, LOOP_COMPLETE]
+      forbidden_events: []
+      terminal: success
+      terminal_topic: LOOP_COMPLETE
+    limits:
+      max_steps: 4
+      no_progress_steps: 4
+"#;
+    let scenario = parse_scenario(yaml);
+    // Config only emits `work.done`; the recovery path that would publish
+    // LOOP_COMPLETE is not wired, so the trace terminates without reaching
+    // the expected terminal topic.
+    let config = make_single_hat_config("work.start", "work.done", "doer");
+    let workspace = DriverWorkspace::new().expect("workspace");
+    let outcome = run_scenario(&scenario, &config, &workspace, "blob").expect("run");
+    let report = evaluate_scenario(outcome);
+
+    // Verdict MUST surface the missing terminal as an unclosed run, never
+    // a silent pass.
+    assert!(
+        !report.passed,
+        "runtime recovery without terminal must not pass"
+    );
+    let kind = report
+        .failure_kind
+        .as_deref()
+        .expect("failure_kind must be set");
+    assert!(
+        kind == "unclosed_terminal" || kind == "scenario_failure",
+        "runtime recovery without terminal must surface unclosed_terminal or scenario_failure; got {kind}"
+    );
+}

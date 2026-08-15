@@ -47,3 +47,14 @@ pub fn ralph_bin() -> Command {
     scrub_agent_runtime_env(&mut cmd);
     cmd
 }
+
+/// Create a tempdir prefixed with `ralph-verify-ws-` for tests that
+/// spawn the `ralph` binary. The returned `tempfile::TempDir` keeps the
+/// directory alive until dropped — most tests should bind it to a
+/// variable in their test body so the cleanup runs on test exit.
+#[allow(dead_code)] // Not all integration test binaries use this helper.
+pub fn make_scenario_workspace() -> std::io::Result<tempfile::TempDir> {
+    tempfile::Builder::new()
+        .prefix("ralph-verify-ws-")
+        .tempdir()
+}

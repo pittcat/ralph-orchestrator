@@ -14,7 +14,7 @@
 
 mod common;
 
-use common::{ralph_bin, scrub_agent_runtime_env};
+use common::{make_scenario_workspace, ralph_bin, scrub_agent_runtime_env};
 use std::fs;
 use std::path::Path;
 
@@ -141,7 +141,7 @@ fn preset_verify_minimal_run_writes_json_report_and_exits_zero() {
     // event is `merge.start`. The scenario is intentionally trivial
     // (terminal: none, single empty response) so the verdict tests
     // CLI plumbing, not workflow correctness.
-    let tmp = tempfile::tempdir().expect("tempdir");
+    let tmp = make_scenario_workspace().expect("tempdir");
     let scenario_path = tmp.path().join("scenario.yml");
     write_file(
         &scenario_path,
@@ -200,7 +200,7 @@ scenarios:
 
 #[test]
 fn preset_verify_remote_hats_source_is_rejected_without_network() {
-    let tmp = tempfile::tempdir().expect("tempdir");
+    let tmp = make_scenario_workspace().expect("tempdir");
     let core_path = tmp.path().join("core.yml");
     let scenario_path = tmp.path().join("scenario.yml");
     write_file(&core_path, MINIMAL_CORE);
@@ -245,7 +245,7 @@ fn preset_verify_remote_hats_source_is_rejected_without_network() {
 
 #[test]
 fn preset_verify_builtin_source_kind_is_classified() {
-    let tmp = tempfile::tempdir().expect("tempdir");
+    let tmp = make_scenario_workspace().expect("tempdir");
     let core_path = tmp.path().join("core.yml");
     let scenario_path = tmp.path().join("scenario.yml");
     write_file(&core_path, MINIMAL_CORE);
@@ -284,7 +284,7 @@ fn preset_verify_builtin_source_kind_is_classified() {
 
 #[test]
 fn preset_verify_file_source_kind_is_external() {
-    let tmp = tempfile::tempdir().expect("tempdir");
+    let tmp = make_scenario_workspace().expect("tempdir");
     let core_path = tmp.path().join("core.yml");
     let hats_path = tmp.path().join("hats.yml");
     let scenario_path = tmp.path().join("scenario.yml");
@@ -323,7 +323,7 @@ fn preset_verify_file_source_kind_is_external() {
 fn preset_verify_static_failure_returns_nonzero_and_does_not_consume_scenario() {
     // `builtin:debug` fails strict static contract check; the driver
     // must not consume the scenario before reporting the static failure.
-    let tmp = tempfile::tempdir().expect("tempdir");
+    let tmp = make_scenario_workspace().expect("tempdir");
     let scenario_path = tmp.path().join("scenario.yml");
     write_file(&scenario_path, MINIMAL_SCENARIO);
 
@@ -358,7 +358,7 @@ fn preset_verify_static_failure_returns_nonzero_and_does_not_consume_scenario() 
 fn preset_verify_start_event_mismatch_is_input_error() {
     // StartEventMismatch (scenario start_event mismatches preset starting_event)
     // must classify as input_error per A3 finding, not scenario_failure.
-    let tmp = tempfile::tempdir().expect("tempdir");
+    let tmp = make_scenario_workspace().expect("tempdir");
     let core_path = tmp.path().join("core.yml");
     let scenario_path = tmp.path().join("scenario.yml");
 
@@ -447,7 +447,7 @@ fn preset_verify_scenario_failure_returns_nonzero_with_category() {
     // Scenario parse error (unknown top-level version) → input_error,
     // nonzero exit, static layer still present. Use `builtin:merge-batch`
     // which passes strict so we reach the scenario parse stage.
-    let tmp = tempfile::tempdir().expect("tempdir");
+    let tmp = make_scenario_workspace().expect("tempdir");
     let scenario_path = tmp.path().join("scenario.yml");
     write_file(
         &scenario_path,
@@ -505,7 +505,7 @@ scenarios:
 fn preset_check_still_works_without_backend() {
     // Regression: `preset check` must NOT consume the scenario YAML and
     // must NOT route through verify.
-    let tmp = tempfile::tempdir().expect("tempdir");
+    let tmp = make_scenario_workspace().expect("tempdir");
     let core_path = tmp.path().join("core.yml");
     let hats_path = tmp.path().join("hats.yml");
     let scenario_path = tmp.path().join("scenario.yml");
@@ -540,7 +540,7 @@ fn inspect_prompt_does_not_run_scenario() {
     // Regression: `inspect prompt` must remain read-only and not consume
     // any scenario YAML. We do NOT pass `--scenario`; this is a smoke
     // check that the inspect dispatch ignores verify.
-    let tmp = tempfile::tempdir().expect("tempdir");
+    let tmp = make_scenario_workspace().expect("tempdir");
     let core_path = tmp.path().join("core.yml");
     let hats_path = tmp.path().join("hats.yml");
     write_file(&core_path, MINIMAL_CORE);
@@ -571,7 +571,7 @@ fn inspect_prompt_does_not_run_scenario() {
 fn preset_verify_rejects_coordinator_mode_with_input_error() {
     // A preset with execution_mode=coordinator (default) must be rejected
     // by verify with failure_kind=input_error and a message about isolated mode.
-    let tmp = tempfile::tempdir().expect("tempdir");
+    let tmp = make_scenario_workspace().expect("tempdir");
     let core_path = tmp.path().join("core.yml");
     let scenario_path = tmp.path().join("scenario.yml");
 

@@ -433,7 +433,7 @@ fixture README §8、fixture 顶部注释与本表 ID 一一对应；review 命�
 | `scope.guard.unsafe_bypass` | P0 | 95 | Q3 | feasibility | review-only；hat `instructions` 提到 `--unsafe-no-policy-check` 可以跳过 scope handoff guard；该 guard 对 scope topics 是强制不可绕过的 |
 | `scope.contract.confidence_gate_bypass` | P0 | 90 | Q4 | payload-content | review-only；`overall_confidence` 低于 90 或 `critical_unknown_count` 非零时仍标记 `proceed = true` 并推进 scope；threshold gate 必须同时满足三个条件 |
 
-### Runtime verification finding_id（plan 2026-08-15-0722，review 必查 dynamic + closure 证据）
+### Runtime verification finding_id（review 必查 dynamic + closure 证据）
 
 `ralph preset verify --scenario <yml>` 是 deterministic dynamic verifier（version 1 scenario 跑真实 EventLoop，输出 `PresetVerifyReport`）。review 必须把 verify 的 JSON / human report 作为「动态证据」入主表，与 static contract 报告并列。**只有静态通过、没有实际 verify report 的 preset，review 必须拒绝**。下面 ID 是通用类别，不绑定具体事故 / preset / topic：
 
