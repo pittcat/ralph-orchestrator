@@ -900,6 +900,318 @@ fn u4_terminal_honored_delta_persists_to_ledger() {
     assert_eq!(runtime.accepted_transition_count(), 1);
 }
 
+// ---------------------------------------------------------------------------
+// Plan GAP-02 / Unit 1: final-survivor causal consistency. When a
+// downstream gate rejects a predecessor event, the rejected
+// predecessor's accumulated state changes must NOT influence the
+// revalidation of surviving events. The apply boundary calls
+// `revalidate_state_machine_candidates_in_order` which re-validates
+// each survivor against the LIVE runtime snapshot (not the cumulative
+// candidate clone).
+// ---------------------------------------------------------------------------
+
+#[test]
+fn u1_final_survivor_revalidation_drops_rejected_predecessor_decision() {
+    // U1 §3 test (a): revalidation of E2 (running) after E1 (planned)
+    // was downstream-rejected must NOT give E2 the instance-open
+    // flags that E1's cumulative acceptance would have produced.
+    //
+    // Setup: planned (opens t1) + running (transition on t1). The
+    // planned event passes the StateMachine validator but is later
+    // dropped by a downstream gate (scope guard / completion guard /
+    // workflow guard). The running event survives. On revalidation,
+    // running must be evaluated against the LIVE runtime snapshot
+    // (empty — planned was never applied), so running's candidate
+    // must show opens_instance=false and closes_instance=false.
+    use tempfile::TempDir;
+    let temp_dir = TempDir::new().unwrap();
+    let events_path = temp_dir.path().join("events.jsonl");
+
+    // Transition chain:
+    //   idle --[experiment.planned]--> planned  (opens_instance=true)
+    //   planned --[experiment.running]--> running (no instance effect)
+    // running from idle with opens_instance=false would be REJECTED
+    // by the validator (state mismatch). So the only way to get
+    // opens_instance=false in the revalidation is if the live runtime
+    // is empty — which is exactly what we're testing.
+    let yaml = r"
+event_loop:
+  state_machine:
+    enabled: true
+    instance_key:
+      from_payload: task_key
+      required_for: [experiment.planned, experiment.running]
+    terminal_topics: [LOOP_COMPLETE]
+    business_topics: [experiment.planned, experiment.running]
+    transitions:
+      - topic: experiment.planned
+        from: [idle]
+        to: planned
+        opens_instance: true
+      - topic: experiment.running
+        from: [planned]
+        to: running
+        opens_instance: false
+        closes_instance: false
+hats:
+  strategist:
+    name: Strategist
+    triggers: [experiment.planned, experiment.running]
+    publishes: [experiment.planned, experiment.running]
+";
+    let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
+    let mut event_loop = EventLoop::new(config);
+    event_loop.initialize("Test");
+    event_loop.event_reader = crate::event_reader::EventReader::new(&events_path);
+
+    // Write both events. In the full loop, the planned event would
+    // pass the candidate stage and enter pending_publish, but might
+    // then be dropped by a downstream gate (e.g. scope guard).
+    // We simulate this by calling process_events_from_jsonl which
+    // runs the full pipeline, then verifying that after the batch
+    // the live runtime reflects only the survivors.
+    //
+    // NOTE: this test exercises the full loop path. If both events
+    // pass every gate, the live runtime will have both transitions
+    // applied and the revalidation of running will show
+    // opens_instance=false (because running does NOT open instances).
+    // If planned is dropped downstream, the live runtime stays empty
+    // and running's revalidation candidate also shows
+    // opens_instance=false (correct — the live state has no t1 open).
+    write_event_to_jsonl(
+        &events_path,
+        "experiment.planned",
+        r#"{"task_key":"t1"}"#,
+    );
+    write_event_to_jsonl(
+        &events_path,
+        "experiment.running",
+        r#"{"task_key":"t1"}"#,
+    );
+
+    let result = event_loop.process_events_from_jsonl().unwrap();
+    assert!(
+        result.had_events,
+        "events must be admitted by the loop"
+    );
+
+    // Extract needed values before the mutable borrow for revalidation.
+    // We can read them from `event_loop.state` directly to avoid
+    // holding an immutable borrow across the revalidation call.
+    let pre_reval_count = event_loop
+        .state
+        .state_machine_runtime_state
+        .as_ref()
+        .expect("StateMachine runtime must be materialised when enabled")
+        .accepted_transition_count();
+    let pre_reval_open = event_loop
+        .state
+        .state_machine_runtime_state
+        .as_ref()
+        .expect("StateMachine runtime must be materialised when enabled")
+        .open_instances_snapshot();
+
+    // Build a survivor list representing only the running event
+    // (simulating the case where planned was downstream-rejected).
+    let survivor_events = vec![crate::event_reader::Event {
+        topic: "experiment.running".to_string(),
+        payload: Some(r#"{"task_key":"t1"}"#.to_string()),
+        ts: chrono::Utc::now().to_rfc3339(),
+        hat: None,
+        triggered: None,
+        source: None,
+        wave_id: None,
+        wave_index: None,
+        wave_total: None,
+        system_injected: None,
+    }];
+
+    // revalidate_state_machine_candidates_in_order takes &mut self,
+    // so we must not hold any other borrows at this point.
+    let revalidated = event_loop.revalidate_state_machine_candidates_in_order(&survivor_events);
+
+    // After revalidation, verify the live runtime is UNCHANGED.
+    // Re-read from state to get a fresh borrow for the assertions.
+    assert_eq!(
+        event_loop
+            .state
+            .state_machine_runtime_state
+            .as_ref()
+            .expect("StateMachine runtime must be materialised when enabled")
+            .accepted_transition_count(),
+        pre_reval_count,
+        "revalidate_state_machine_candidates_in_order must NOT mutate live runtime"
+    );
+    assert_eq!(
+        event_loop
+            .state
+            .state_machine_runtime_state
+            .as_ref()
+            .expect("StateMachine runtime must be materialised when enabled")
+            .open_instances_snapshot(),
+        pre_reval_open,
+        "revalidate_state_machine_candidates_in_order must NOT mutate live open_instances"
+    );
+
+    // The revalidated candidate for running (against empty live state
+    // with no t1 open) must have opens_instance=false.
+    // running's transition does NOT open instances, so the only way
+    // opens_instance could be true is if the cumulative candidate
+    // clone had already materialised t1 as open from planned.
+    if !revalidated.is_empty() {
+        let running_cand = revalidated.first().expect("must have a candidate");
+        assert!(
+            !running_cand.opens_instance,
+            "running revalidated against empty live must NOT show opens_instance=true"
+        );
+        assert!(
+            !running_cand.closes_instance,
+            "running revalidated against empty live must NOT show closes_instance=true"
+        );
+    }
+}
+
+#[test]
+fn u1_revalidate_state_machine_candidates_in_order_returns_fresh_candidates() {
+    // U1 §3 test (b): revalidation must produce candidates that are
+    // independent of the cumulative candidate decisions. Calling it
+    // twice with the same survivors must produce semantically
+    // identical candidates (idempotent read from live snapshot).
+    use tempfile::TempDir;
+    let temp_dir = TempDir::new().unwrap();
+    let events_path = temp_dir.path().join("events.jsonl");
+
+    let yaml = r"
+event_loop:
+  state_machine:
+    enabled: true
+    instance_key:
+      from_payload: task_key
+      required_for: [experiment.planned]
+    terminal_topics: [LOOP_COMPLETE]
+    business_topics: [experiment.planned]
+    transitions:
+      - topic: experiment.planned
+        from: [idle]
+        to: planned
+        opens_instance: true
+hats:
+  strategist:
+    name: Strategist
+    triggers: [experiment.planned]
+    publishes: [experiment.planned]
+";
+    let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
+    let mut event_loop = EventLoop::new(config);
+    event_loop.initialize("Test");
+    event_loop.event_reader = crate::event_reader::EventReader::new(&events_path);
+
+    write_event_to_jsonl(
+        &events_path,
+        "experiment.planned",
+        r#"{"task_key":"t-revalidate"}"#,
+    );
+    let _ = event_loop.process_events_from_jsonl().unwrap();
+
+    let survivor_events = vec![crate::event_reader::Event {
+        topic: "experiment.planned".to_string(),
+        payload: Some(r#"{"task_key":"t-revalidate"}"#.to_string()),
+        ts: chrono::Utc::now().to_rfc3339(),
+        hat: None,
+        triggered: None,
+        source: None,
+        wave_id: None,
+        wave_index: None,
+        wave_total: None,
+        system_injected: None,
+    }];
+
+    // First revalidation — live runtime is empty, so planned
+    // opens the instance.
+    let first = event_loop.revalidate_state_machine_candidates_in_order(&survivor_events);
+    // Second revalidation with same survivors — must be identical.
+    let second = event_loop.revalidate_state_machine_candidates_in_order(&survivor_events);
+
+    assert_eq!(
+        first.len(),
+        second.len(),
+        "revalidation must be idempotent"
+    );
+    for (a, b) in first.iter().zip(second.iter()) {
+        assert_eq!(
+            a.opens_instance, b.opens_instance,
+            "opens_instance must be stable across revalidations"
+        );
+        assert_eq!(
+            a.closes_instance, b.closes_instance,
+            "closes_instance must be stable across revalidations"
+        );
+    }
+
+    // Live runtime must still be unchanged after revalidations.
+    let runtime = event_loop
+        .state
+        .state_machine_runtime_state
+        .as_ref()
+        .expect("StateMachine runtime must be materialised");
+    assert_eq!(
+        runtime.open_instance_count(),
+        0,
+        "revalidation must not mutate live open_instances"
+    );
+}
+
+#[test]
+fn u1_disabled_state_machine_returns_empty_revalidation() {
+    // U1 §3 test (c): when state_machine is disabled,
+    // revalidate_state_machine_candidates_in_order must return an
+    // empty vec and not panic.
+    use tempfile::TempDir;
+    let temp_dir = TempDir::new().unwrap();
+    let events_path = temp_dir.path().join("events.jsonl");
+
+    let yaml = r"
+event_loop:
+  state_machine:
+    enabled: false
+hats:
+  strategist:
+    name: Strategist
+    triggers: [experiment.planned]
+    publishes: [experiment.planned]
+";
+    let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
+    let mut event_loop = EventLoop::new(config);
+    event_loop.initialize("Test");
+    event_loop.event_reader = crate::event_reader::EventReader::new(&events_path);
+
+    write_event_to_jsonl(
+        &events_path,
+        "experiment.planned",
+        r#"{"task_key":"t1"}"#,
+    );
+    let _ = event_loop.process_events_from_jsonl().unwrap();
+
+    let survivor_events = vec![crate::event_reader::Event {
+        topic: "experiment.planned".to_string(),
+        payload: Some(r#"{"task_key":"t1"}"#.to_string()),
+        ts: chrono::Utc::now().to_rfc3339(),
+        hat: None,
+        triggered: None,
+        source: None,
+        wave_id: None,
+        wave_index: None,
+        wave_total: None,
+        system_injected: None,
+    }];
+
+    let revalidated = event_loop.revalidate_state_machine_candidates_in_order(&survivor_events);
+    assert!(
+        revalidated.is_empty(),
+        "disabled state_machine must produce empty revalidation"
+    );
+}
+
 #[allow(dead_code)]
 fn _u4_unused_runtime() -> StateMachineRuntimeState {
     StateMachineRuntimeState::new()

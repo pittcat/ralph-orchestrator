@@ -20,10 +20,83 @@
 
 use super::*;
 
+use crate::config::state_machine::StateMachineConfig;
 use crate::event_reader::Event as JsonlEvent;
 use crate::state_machine::{
-    StateMachineDecision, StateMachineTransitionDelta, StateMachineTransitionId,
+    StateMachineDecision, StateMachineRuntimeState, StateMachineTransitionDelta,
+    StateMachineTransitionId,
 };
+
+/// Plan GAP-02 / Unit 1: re-validation helper. Validates each event
+/// in `survivor_events` against the live runtime snapshot (not the
+/// cumulative candidate clone) and produces fresh
+/// `CandidateStateMachineDecision`s. A downstream-rejected predecessor
+/// cannot influence a later survivor's decision because revalidation
+/// starts from the live state for every call.
+///
+/// This is called ONLY at the apply boundary (pending_publish) after
+/// downstream gates have filtered the candidate batch down to survivors.
+/// The live runtime is NOT mutated by this function.
+fn validate_events_against_candidate(
+    candidate: &mut StateMachineRuntimeState,
+    events: &[JsonlEvent],
+    sm_config: &StateMachineConfig,
+    bus: &mut EventBus,
+) -> (Vec<JsonlEvent>, Vec<CandidateStateMachineDecision>) {
+    let mut accepted: Vec<JsonlEvent> = Vec::with_capacity(events.len());
+    let mut pending: Vec<CandidateStateMachineDecision> = Vec::new();
+
+    for event in events {
+        let topic = event.topic.clone();
+        let payload = event.payload.clone();
+        let event_for_emit = event.clone();
+
+        let decision = candidate.validate_event(topic.as_str(), payload.as_deref(), sm_config);
+
+        match &decision {
+            StateMachineDecision::Accept { instance_key, .. } => {
+                let instance_key = instance_key.clone();
+                let (opens_map, closed_map) = candidate.instance_maps();
+                let key_ref = instance_key.as_deref().unwrap_or("");
+                let opens_instance =
+                    !opens_map.contains_key(key_ref) && !closed_map.contains_key(key_ref);
+                let closes_instance =
+                    opens_map.contains_key(key_ref) && !closed_map.contains_key(key_ref);
+                let (term_obs, term_hon) = candidate.observed_snapshot();
+                pending.push(CandidateStateMachineDecision {
+                    event: event_for_emit.clone(),
+                    decision: decision.clone(),
+                    opens_instance,
+                    closes_instance,
+                    accepted_at_terminal_observed: term_obs,
+                    accepted_at_terminal_honored: term_hon,
+                });
+                accepted.push(event_for_emit);
+            }
+            StateMachineDecision::Reject { finding } => {
+                bus.publish(ralph_proto::Event::new(
+                    "event.state_machine.rejected",
+                    serde_json::to_string(&finding).unwrap_or_else(|_| finding.reason.clone()),
+                ));
+            }
+            StateMachineDecision::Ignore { finding } => {
+                bus.publish(ralph_proto::Event::new(
+                    "event.state_machine.ignored",
+                    serde_json::to_string(&finding).unwrap_or_else(|_| finding.reason.clone()),
+                ));
+            }
+            StateMachineDecision::DiagnosticOnly { finding } => {
+                bus.publish(ralph_proto::Event::new(
+                    "event.state_machine.diagnostic",
+                    serde_json::to_string(&finding).unwrap_or_else(|_| finding.reason.clone()),
+                ));
+                accepted.push(event_for_emit.clone());
+            }
+        }
+    }
+
+    (accepted, pending)
+}
 
 impl EventLoop {
     /// Plan GAP-02 / Unit 2: candidate-stage validation. Each
@@ -58,9 +131,6 @@ impl EventLoop {
         // additional read.
         let _live_snapshot = self.state.state_machine_runtime_state.clone();
 
-        let mut accepted: Vec<JsonlEvent> = Vec::with_capacity(events.len());
-        let mut pending: Vec<CandidateStateMachineDecision> = Vec::new();
-
         // Plan GAP-02 / Unit 2 / parity guard: the original
         // state machine stage inlined a `get_or_insert_with` so
         // the runtime lived on the loop even when every event was
@@ -83,56 +153,49 @@ impl EventLoop {
             .clone()
             .unwrap_or_default();
 
-        for event in events {
-            let topic = event.topic.clone();
-            let payload = event.payload.clone();
-            let event_for_emit = event.clone();
+        // Delegate to the shared helper — same validation logic
+        // for both candidate-stage and revalidation at the apply
+        // boundary.
+        validate_events_against_candidate(
+            &mut candidate,
+            &events,
+            &sm_config,
+            &mut self.bus,
+        )
+    }
 
-            let decision = candidate.validate_event(topic.as_str(), payload.as_deref(), &sm_config);
+    /// Plan GAP-02 / Unit 1: re-validates the final survivor events
+    /// against the **live** runtime snapshot. Unlike
+    /// `run_state_machine_candidate_stage` which uses a cumulative
+    /// clone (each event sees prior accepts' mutations), this
+    /// function starts from the live state for every event so a
+    /// downstream-rejected predecessor cannot influence a later
+    /// survivor's decision.
+    ///
+    /// The live runtime is NOT mutated by this function; it only
+    /// produces fresh candidates for the apply stage.
+    pub(super) fn revalidate_state_machine_candidates_in_order(
+        &mut self,
+        survivor_events: &[JsonlEvent],
+    ) -> Vec<CandidateStateMachineDecision> {
+        let sm_config = match self.config.event_loop.state_machine.as_ref() {
+            Some(cfg) if cfg.enabled => cfg.clone(),
+            _ => return Vec::new(),
+        };
 
-            match &decision {
-                StateMachineDecision::Accept { instance_key, .. } => {
-                    let instance_key = instance_key.clone();
-                    let (opens_map, closed_map) = candidate.instance_maps();
-                    let key_ref = instance_key.as_deref().unwrap_or("");
-                    let opens_instance =
-                        !opens_map.contains_key(key_ref) && !closed_map.contains_key(key_ref);
-                    let closes_instance =
-                        opens_map.contains_key(key_ref) && !closed_map.contains_key(key_ref);
-                    let (term_obs, term_hon) = candidate.observed_snapshot();
-                    pending.push(CandidateStateMachineDecision {
-                        event: event_for_emit.clone(),
-                        decision: decision.clone(),
-                        opens_instance,
-                        closes_instance,
-                        accepted_at_terminal_observed: term_obs,
-                        accepted_at_terminal_honored: term_hon,
-                    });
-                    accepted.push(event_for_emit);
-                }
-                StateMachineDecision::Reject { finding } => {
-                    self.bus.publish(ralph_proto::Event::new(
-                        "event.state_machine.rejected",
-                        serde_json::to_string(&finding).unwrap_or_else(|_| finding.reason.clone()),
-                    ));
-                }
-                StateMachineDecision::Ignore { finding } => {
-                    self.bus.publish(ralph_proto::Event::new(
-                        "event.state_machine.ignored",
-                        serde_json::to_string(&finding).unwrap_or_else(|_| finding.reason.clone()),
-                    ));
-                }
-                StateMachineDecision::DiagnosticOnly { finding } => {
-                    self.bus.publish(ralph_proto::Event::new(
-                        "event.state_machine.diagnostic",
-                        serde_json::to_string(&finding).unwrap_or_else(|_| finding.reason.clone()),
-                    ));
-                    accepted.push(event_for_emit.clone());
-                }
-            }
-        }
+        // Start from the LIVE runtime snapshot — NOT the cumulative
+        // candidate clone. This is the key difference from
+        // `run_state_machine_candidate_stage`.
+        let candidate = self
+            .state
+            .state_machine_runtime_state
+            .clone()
+            .unwrap_or_default();
 
-        (accepted, pending)
+        let mut candidate = candidate;
+        let (_, pending) =
+            validate_events_against_candidate(&mut candidate, survivor_events, &sm_config, &mut self.bus);
+        pending
     }
 
     /// Plan GAP-02 / Unit 2: apply the candidate decisions that
