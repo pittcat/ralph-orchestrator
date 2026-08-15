@@ -43,6 +43,7 @@ metadata:
 | 要记录/查找记忆或 decision journal | `ralph tools memory add/search/prime` | `ralph-tools-memories`（已注入，若 memories.enabled） |
 | 要预览 profiles 或查阅低频 CLI 命令 | `ralph inspect profiles` | `ralph tools skill load ralph-tools-cmdref` |
 | 要落盘 builtin artifact 填写模板（binary-only；部署机无源码 templates 目录时） | `ralph preset materialize-artifacts <preset> --plan-key <key>` | `ralph tools skill load ralph-tools-cmdref`「materialize-artifacts」 |
+| 要用 version 1 scenario 跑真实 EventLoop 验证 preset workflow（动态证据；review 必查） | `ralph preset verify --scenario <yml> --format human\|json` | `ralph tools skill load ralph-tools-cmdref`「preset verify」 |
 | 要校验 hat 拓扑 | `ralph hats validate [--strict]` | `ralph hats --help`（strict 时启用 lint 所有权检查） |
 | Loop 崩溃/ledger 损坏需恢复 | `ralph loops clean --ledger` + `ralph diagnose --session latest` | `docs/guide/runtime-diagnosis.md`（JSON 含 `dup_storm_topics` + findings `hint`） |
 | `ralph emit` 报 `triggered_not_in_topology` | 普通业务 handoff 省略 `--triggered`；只有已确认的跨 hat 直达例外才改为不同的合法 hat。禁止把当前 hat 自己填成目标 | `ralph tools skill load ralph-tools-emit` |

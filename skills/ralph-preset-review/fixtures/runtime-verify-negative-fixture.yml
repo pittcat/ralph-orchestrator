@@ -1,0 +1,85 @@
+# 2026-08-15-0722 plan U5 §11/§15: generic runtime verification negative fixture
+#
+# Static topology passes (preset check --strict shows green for the
+# surface contract) but `ralph preset verify` rejects because:
+#   - only success scenario exists, no failure / no-output coverage
+#   - scenario uses `terminal: none` while plan declares failure /
+#     blocked / recovery paths that have no scenario counterpart
+#   - no actual verify report in the review artifact directory
+#
+# Review must surface this as `verify.dynamic_evidence_missing` /
+# `verify.scenario_coverage_gap` finding_ids (review-only, generic
+# category, NOT bound to a specific preset or accident).
+name: runtime_verify_negative
+description: |
+  Static contract passes, but no dynamic verify evidence — the preset
+  has no version-1 scenario YAML, no `ralph preset verify` JSON output,
+  and the review report only quotes `preset check --strict`.
+
+config:
+  prompt_file: PROMPT.md
+  max_iterations: 8
+  hats:
+    producer:
+      name: "Producer"
+      triggers:
+        - task.start
+      publishes:
+        - work.done
+    closer:
+      name: "Closer"
+      triggers:
+        - work.done
+      publishes:
+        - LOOP_COMPLETE
+  event_loop:
+    execution_mode: isolated
+    starting_event: "task.start"
+    completion_promise: "LOOP_COMPLETE"
+    precheck:
+      enabled: true
+      rules:
+        work.done:
+          prompt:
+            - "work is substantively complete"
+          on_fail:
+            target: producer
+            retry_budget: 3
+            on_exhausted: "plan.blocked(reason=precheck_failed)"
+    event_policy:
+      enabled: true
+      mode: enforce
+      on_violation: reject_with_resume
+
+# Deliberately empty — this fixture demonstrates the absence-of-dynamic-
+# evidence negative path. A real preset would have at least one scenario
+# under scenarios/ to satisfy the Unit 5 gate.
+scenarios: []
+
+# Static check must pass (preset check --strict green); the fixture's
+# negative contract is the *absence* of `ralph preset verify` evidence,
+# not a malformed YAML.
+expected:
+  static_check: pass
+  verify_report_present: false
+  scenario_coverage:
+    - success
+    - failure
+    - blocked
+    - no_output
+    - recovery
+    - terminal_closure
+
+review_findings:
+  - finding_id: verify.dynamic_evidence_missing
+    severity: P0
+    confidence: 92
+    evidence: no version-1 scenario YAML in scenarios/; review artifact dir lacks verify.json
+  - finding_id: verify.scenario_coverage_gap
+    severity: P1
+    confidence: 85
+    evidence: only success-path is documented; failure / blocked / no-output / recovery / terminal-closure scenarios absent
+  - finding_id: verify.failure_kind_in_review_report_unexplained
+    severity: P1
+    confidence: 80
+    evidence: review report does not mention verify report or closure gate

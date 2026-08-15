@@ -82,6 +82,21 @@ ralph preset check -H builtin:ce-executor-pipeline --strict --format json
 - `orphan` — published topics with no specific subscriber (typos and stale publishes)
 - `payload` — declared schemas vs. fields actually referenced by downstream hats
 
+## Dynamic Verification: `ralph preset verify`
+
+`ralph preset check` only validates the **static** authoring contract. To verify the **dynamic** workflow actually advances and closes, run:
+
+```bash
+# Author delivers a version 1 scenario YAML alongside the preset, then
+# runs the deterministic scripted-workflow verifier (plan 2026-08-15-0722).
+# Verifier drives a real `EventLoop` in a temp workspace; remote sources
+# are rejected; source_kind classifies `builtin:*` vs file paths.
+ralph preset verify -H builtin:ce-executor-pipeline \
+  --scenario scenarios/success-path.yml --format json
+```
+
+Review requires actual `ralph preset verify` evidence (JSON or human report) — a preset with only `ralph preset check --strict` passing is not considered reviewed. See `skills/ralph-preset-author` and `skills/ralph-preset-review` for the dynamic evidence gate.
+
 This is the recommended entry point for preset authors. `ralph hats validate`
 keeps its narrower hat-debug focus; `ralph preflight` is for environment +
 config checks before a run. See `docs/guide/runtime-contracts.md` for the

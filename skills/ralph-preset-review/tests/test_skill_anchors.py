@@ -68,6 +68,17 @@ ANCHORS: tuple[tuple[str, str], ...] = (
     ),
     ("skills/ralph-preset-author/references/finding-rubric.md", "preset.triggered_self_or_static_target"),
     ("skills/ralph-preset-review/references/finding-rubric.md", "preset.triggered_self_or_static_target"),
+    # Runtime verification anchors (plan 2026-08-15-0722). Both author
+    # and review commands.md must surface `ralph preset verify`, and
+    # both finding-rubric.md files must contain the dynamic evidence
+    # finding ids so reviewers can pair preset coverage gaps with the
+    # rubric entry.
+    ("skills/ralph-preset-author/references/commands.md", "ralph preset verify"),
+    ("skills/ralph-preset-review/references/commands.md", "ralph preset verify"),
+    ("skills/ralph-preset-author/references/finding-rubric.md", "verify.dynamic_evidence_missing"),
+    ("skills/ralph-preset-review/references/finding-rubric.md", "verify.dynamic_evidence_missing"),
+    ("skills/ralph-preset-author/references/finding-rubric.md", "verify.scenario_coverage_gap"),
+    ("skills/ralph-preset-review/references/finding-rubric.md", "verify.scenario_coverage_gap"),
 )
 
 # Capability-triggered fixtures from plan 2026-08-02-001 U3.
@@ -146,6 +157,15 @@ CAPABILITY_FIXTURES: tuple[tuple[str, str], ...] = (
     (
         "key-stage-event-gate-no-reason-negative-fixture.yml",
         "preset.key_stage_event_gate_no_reason",
+    ),
+    # Runtime verification negative fixture (plan 2026-08-15-0722).
+    # The fixture advertises `verify.dynamic_evidence_missing` and
+    # `verify.scenario_coverage_gap` as the primary review-only
+    # finding ids it is meant to anchor; it is generic (no preset /
+    # accident binding).
+    (
+        "runtime-verify-negative-fixture.yml",
+        "verify.dynamic_evidence_missing",
     ),
 )
 
