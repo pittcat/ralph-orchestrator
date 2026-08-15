@@ -1521,3 +1521,106 @@ hats:
 fn _u4_unused_runtime() -> StateMachineRuntimeState {
     StateMachineRuntimeState::new()
 }
+
+// ---------------------------------------------------------------------------
+// Plan 2026-08-15-2211 / Unit 4: cross-cutting regression after U1-U3.
+//
+// U4 verifies that the final-survivor revalidation (U1), the candidate
+// terminal-flag projection (U2), and the live rollback on ledger failure (U3)
+// leave the legacy restart / projection=None / diagnostic paths unchanged.
+// This test exercises one full StateLedger lifecycle: commit a delta via the
+// production-style helper, drop the ledger, reopen the same workspace, and
+// assert that the hydrated runtime matches what the live helper observed
+// before the drop. If a regression slips into U1-U3, the open-instance
+// snapshot or accepted count will diverge.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn u4_full_restart_replay_matches_live_helper_after_u1_u2_u3() {
+    use crate::state::CommitDelta;
+    use crate::state_machine::{
+        StateMachineTransitionDelta, StateMachineTransitionId,
+    };
+    use tempfile::TempDir;
+
+    let dir = TempDir::new().unwrap();
+    let workspace = dir.path();
+
+    let opens = StateMachineTransitionDelta {
+        transition_id: StateMachineTransitionId::build(
+            "loop-u4-2026-08-15-2211",
+            Some("contract-open"),
+            "executor",
+            "experiment.planned",
+            Some("t-u4-replay"),
+            "planned:t-u4-replay",
+        ),
+        source_hat: Some("executor".to_string()),
+        topic: "experiment.planned".to_string(),
+        instance_key: Some("t-u4-replay".to_string()),
+        new_state: "planned".to_string(),
+        opens_instance: true,
+        closes_instance: false,
+        terminal_observed: false,
+        terminal_honored: false,
+    };
+    let closes = StateMachineTransitionDelta {
+        transition_id: StateMachineTransitionId::build(
+            "loop-u4-2026-08-15-2211",
+            Some("contract-close"),
+            "executor",
+            "experiment.running",
+            Some("t-u4-replay"),
+            "running:t-u4-replay",
+        ),
+        source_hat: Some("executor".to_string()),
+        topic: "experiment.running".to_string(),
+        instance_key: Some("t-u4-replay".to_string()),
+        new_state: "running".to_string(),
+        opens_instance: false,
+        closes_instance: false,
+        terminal_observed: false,
+        terminal_honored: false,
+    };
+
+    let mut helper = StateMachineRuntimeState::new();
+    assert!(helper.apply_transition_delta(&opens), "apply opens");
+    assert!(helper.apply_transition_delta(&closes), "apply closes");
+    let live_count = helper.accepted_transition_count();
+
+    // Commit both deltas to a workspace ledger so the snapshot must hydrate.
+    let mut ledger = crate::state::StateLedger::new(workspace, true);
+    ledger
+        .commit(
+            CommitDelta::StateMachineTransition { delta: opens },
+            Some("experiment.planned".into()),
+        )
+        .expect("commit opens");
+    ledger
+        .commit(
+            CommitDelta::StateMachineTransition { delta: closes },
+            Some("experiment.running".into()),
+        )
+        .expect("commit closes");
+    drop(ledger);
+
+    let replay = crate::state::StateLedger::new(workspace, true);
+    let replay_rt = replay
+        .snapshot()
+        .state_machine_runtime
+        .clone()
+        .expect("StateMachine runtime must hydrate after restart");
+
+    // Live helper and replayed runtime must agree on open-instance set
+    // (both observe `t-u4-replay` until further close) and the same accepted
+    // transition count.
+    assert_eq!(
+        replay_rt.open_instances_snapshot(),
+        helper.open_instances_snapshot(),
+        "open_instances must replay identically after restart"
+    );
+    assert_eq!(
+        replay_rt.accepted_transition_count(), live_count,
+        "accepted transition count must replay identically after restart"
+    );
+}
