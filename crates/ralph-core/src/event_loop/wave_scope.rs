@@ -820,6 +820,46 @@ impl EventLoop {
             return None;
         }
 
+        // U1 (plan 2026-08-15-2211-fix-terminal-artifact-admission-plan):
+        // completion artifact admission gate. When the completion
+        // promise schema declares `report_path` or `artifact_path` as
+        // a required field, the field MUST resolve to a workspace-
+        // relative, canonical-inside-workspace, regular, readable
+        // file. Otherwise the completion is rejected with a stable
+        // signature and the loop continues via the deterministic
+        // correction path. Schemas without these fields (and configs
+        // without an event policy) passthrough, preserving pre-U1
+        // behaviour.
+        if let Err(sig) = Self::verify_completion_artifact_paths(
+            &self.config,
+            self.state.last_completion_payload.as_deref(),
+        ) {
+            warn!(
+                signature = %sig,
+                topic = %self.config.event_loop.completion_promise,
+                "Rejecting LOOP_COMPLETE: completion artifact path validation failed"
+            );
+            if let Some(reason) = self.handle_completion_rejection(sig.to_string(), self.count_tasks()) {
+                return Some(reason);
+            }
+            self.state.completion_requested = false;
+
+            let free_form = format!(
+                "LOOP_COMPLETE rejected: completion artifact path validation failed ({sig}). \
+                 The completion payload's `report_path` or `artifact_path` must be a \
+                 workspace-relative path to a readable regular file. Re-emit with a valid \
+                 path or use loop.cancel to abort."
+            );
+            if let Some(stuck) = Self::inject_completion_correction(
+                &mut self.state,
+                "completion_artifact_invalid",
+                &free_form,
+            ) {
+                return Some(stuck);
+            }
+            return None;
+        }
+
         self.state.completion_requested = false;
 
         // In persistent mode, suppress completion and keep the loop alive
@@ -1186,5 +1226,134 @@ impl EventLoop {
         // 2026-06-26 plan U6: correction queued; budget not
         // exhausted yet — caller should keep the loop alive.
         None
+    }
+
+    /// U1 (plan 2026-08-15-2211-fix-terminal-artifact-admission-plan):
+    /// completion artifact admission gate.
+    ///
+    /// When the completion promise schema declares `report_path` or
+    /// `artifact_path` as a required field, the field in the most
+    /// recent completion payload MUST resolve to a workspace-relative
+    /// path whose canonical form lives inside `config.core.workspace_root`
+    /// and points at a regular, readable file.
+    ///
+    /// Returns `Ok(())` when no artifact field is required, or all such
+    /// fields are valid. Returns `Err(&'static str)` with a stable
+    /// rejection signature (see the table below) on the first invalid
+    /// field. Schemas without these fields (and configs without an
+    /// enabled `event_policy`) passthrough.
+    ///
+    /// Stable rejection signatures (used as `task.resume` correction
+    /// `reason_hint` and folded into the stale-breaker fingerprint):
+    ///
+    /// | Signature | Meaning |
+    /// |-----------|---------|
+    /// | `completion_artifact_unreadable` | file missing, IO error, or non-readable |
+    /// | `completion_artifact_directory` | path resolves to a directory |
+    /// | `completion_artifact_absolute_or_escape` | absolute path or `..` escape |
+    /// | `completion_artifact_out_of_workspace` | canonical path outside `workspace_root` |
+    /// | `completion_artifact_field_missing` | required field absent from payload |
+    /// | `completion_artifact_field_not_string` | field present but not a string |
+    /// | `completion_artifact_payload_invalid` | payload is not a JSON object |
+    pub(super) fn verify_completion_artifact_paths(
+        config: &RalphConfig,
+        payload: Option<&str>,
+    ) -> Result<(), &'static str> {
+        // Locate the completion schema's `required_fields`. Schemas
+        // without an enabled `event_policy` or without a registered
+        // schema for the completion topic passthrough.
+        let completion_topic = config.event_loop.completion_promise.as_str();
+        let required_fields: &[String] = config
+            .event_loop
+            .event_policy
+            .as_ref()
+            .filter(|p| p.enabled)
+            .and_then(|p| p.schemas.get(completion_topic))
+            .map(|s| s.required_fields.as_slice())
+            .unwrap_or(&[]);
+
+        // Collect the artifact fields declared by the completion
+        // schema. Order follows `required_fields` so multi-field
+        // schemas surface the first invalid one deterministically.
+        let artifact_fields: Vec<&str> = required_fields
+            .iter()
+            .map(String::as_str)
+            .filter(|f| *f == "report_path" || *f == "artifact_path")
+            .collect();
+
+        if artifact_fields.is_empty() {
+            return Ok(());
+        }
+
+        // Parse the payload as a JSON object. A non-object payload is
+        // a contract violation (RequiredFieldsRule already screens
+        // this upstream, but we defend against legacy callers).
+        let payload_obj = match payload {
+            Some(s) => match serde_json::from_str::<serde_json::Value>(s) {
+                Ok(serde_json::Value::Object(m)) => m,
+                _ => return Err("completion_artifact_payload_invalid"),
+            },
+            None => return Err("completion_artifact_payload_invalid"),
+        };
+
+        let workspace_root = &config.core.workspace_root;
+        let canonical_workspace = workspace_root
+            .canonicalize()
+            .map_err(|_| "completion_artifact_unreadable")?;
+
+        for field in artifact_fields {
+            let value = payload_obj.get(field);
+            let path_str = match value {
+                Some(serde_json::Value::String(s)) if !s.is_empty() => s.as_str(),
+                Some(_) => return Err("completion_artifact_field_not_string"),
+                None => return Err("completion_artifact_field_missing"),
+            };
+
+            let relative_path = std::path::Path::new(path_str);
+
+            // Reject absolute paths up-front — the contract requires
+            // workspace-relative paths.
+            if relative_path.is_absolute() {
+                return Err("completion_artifact_absolute_or_escape");
+            }
+
+            // Join with the workspace root before canonicalization so
+            // symlink resolution sees the absolute base directory.
+            let joined = workspace_root.join(relative_path);
+
+            // Canonicalize the joined path. Failure here means the
+            // path is missing, points at a broken symlink, or has an
+            // IO error — all collapse into `unreadable` to keep the
+            // surface contract stable (no signature leaks the precise
+            // cause to avoid side-channel diagnosis).
+            let canonical_path = match joined.canonicalize() {
+                Ok(p) => p,
+                Err(_) => return Err("completion_artifact_unreadable"),
+            };
+
+            // Containment: the canonical path must live inside the
+            // canonical workspace. This catches `..` parent-escape,
+            // workspace-internal symlinks that point outside, and any
+            // future path-resolution trick that canonicalize() defeats.
+            if !canonical_path.starts_with(&canonical_workspace) {
+                return Err("completion_artifact_out_of_workspace");
+            }
+
+            // Stat the file: directories are not regular files, and
+            // non-readable files fall through `File::open` to the
+            // unreadable bucket.
+            let metadata = match std::fs::metadata(&canonical_path) {
+                Ok(m) => m,
+                Err(_) => return Err("completion_artifact_unreadable"),
+            };
+            if !metadata.is_file() {
+                return Err("completion_artifact_directory");
+            }
+            if std::fs::File::open(&canonical_path).is_err() {
+                return Err("completion_artifact_unreadable");
+            }
+        }
+
+        Ok(())
     }
 }

@@ -1284,3 +1284,378 @@ fn completion_payload_match_is_noop_when_unconfigured() {
         "unconfigured gate must accept mismatched paths"
     );
 }
+
+// ============================================================================
+// U1 (plan 2026-08-15-2211): completion artifact admission gate
+//
+// When the completion schema declares `report_path` or `artifact_path`
+// as a required field, the runtime MUST verify the field resolves to
+// a workspace-relative, canonical-inside-workspace, regular, readable
+// file. Otherwise LOOP_COMPLETE stays rejected. Schemas without these
+// fields passthrough (preserves pre-U1 behavior).
+// ============================================================================
+
+/// Shared helper: build a `RalphConfig` with a completion schema that
+/// requires the given artifact field (`report_path` or `artifact_path`).
+/// Workspace root is `temp_dir.path()`. The helper avoids configuring
+/// `completion_payload_match` so it does not interfere with the
+/// artifact gate under test.
+fn artifact_completion_config(
+    temp_dir: &tempfile::TempDir,
+    use_artifact_field: bool,
+) -> RalphConfig {
+    use std::collections::HashMap;
+
+    let artifact_field = if use_artifact_field {
+        "artifact_path"
+    } else {
+        "report_path"
+    };
+
+    let mut config = RalphConfig::default();
+    config.core.workspace_root = temp_dir.path().to_path_buf();
+
+    // Build event_policy.schemas with the completion promise requiring
+    // the artifact field. Predecessor schemas are not registered.
+    let mut schemas: HashMap<String, crate::config::EventSchema> = HashMap::new();
+    let completion_promise = config.event_loop.completion_promise.clone();
+    schemas.insert(
+        completion_promise,
+        crate::config::EventSchema {
+            required_fields: vec!["reason".to_string(), artifact_field.to_string()],
+            ..Default::default()
+        },
+    );
+
+    config.event_loop.event_policy = Some(crate::config::EventPolicyConfig {
+        enabled: true,
+        mode: crate::config::EventPolicyMode::Enforce,
+        schemas,
+        ..Default::default()
+    });
+    config
+}
+
+/// U1 / S1: a workspace-relative regular file pointed at by `report_path`
+/// is accepted and `LOOP_COMPLETE` honors termination.
+#[test]
+fn completion_artifact_accepts_workspace_relative_regular_file() {
+    use tempfile::TempDir;
+
+    let temp_dir = TempDir::new().unwrap();
+    let report_path = temp_dir.path().join("docs/report.md");
+    std::fs::create_dir_all(report_path.parent().unwrap()).unwrap();
+    std::fs::write(&report_path, "# Report\n").unwrap();
+
+    let config = artifact_completion_config(&temp_dir, false);
+
+    let events_path = temp_dir.path().join("events.jsonl");
+    let mut event_loop = EventLoop::new(config);
+    event_loop.initialize("Test");
+    event_loop.event_reader = crate::event_reader::EventReader::new(&events_path);
+
+    write_event_to_jsonl(
+        &events_path,
+        "LOOP_COMPLETE",
+        r#"{"reason":"done","report_path":"docs/report.md"}"#,
+    );
+    let _ = event_loop.process_events_from_jsonl();
+
+    let reason = event_loop.check_completion_event();
+    assert_eq!(
+        reason,
+        Some(TerminationReason::CompletionPromise),
+        "valid workspace-relative regular file must honor completion"
+    );
+    assert!(
+        event_loop.state().completion_honored,
+        "completion_honored must be set for valid artifact"
+    );
+}
+
+/// U1 / S1 (artifact_path variant): `artifact_path` field is also
+/// accepted when the completion schema declares it.
+#[test]
+fn completion_artifact_accepts_artifact_path_field() {
+    use tempfile::TempDir;
+
+    let temp_dir = TempDir::new().unwrap();
+    let artifact_path = temp_dir.path().join("docs/artifact.md");
+    std::fs::create_dir_all(artifact_path.parent().unwrap()).unwrap();
+    std::fs::write(&artifact_path, "# Artifact\n").unwrap();
+
+    let config = artifact_completion_config(&temp_dir, true);
+
+    let events_path = temp_dir.path().join("events.jsonl");
+    let mut event_loop = EventLoop::new(config);
+    event_loop.initialize("Test");
+    event_loop.event_reader = crate::event_reader::EventReader::new(&events_path);
+
+    write_event_to_jsonl(
+        &events_path,
+        "LOOP_COMPLETE",
+        r#"{"reason":"done","artifact_path":"docs/artifact.md"}"#,
+    );
+    let _ = event_loop.process_events_from_jsonl();
+
+    let reason = event_loop.check_completion_event();
+    assert_eq!(
+        reason,
+        Some(TerminationReason::CompletionPromise),
+        "valid workspace-relative artifact_path must honor completion"
+    );
+}
+
+/// U1 / S2: a missing file referenced by `report_path` is rejected
+/// and `completion_honored` stays false.
+#[test]
+fn completion_artifact_rejects_missing_file() {
+    use tempfile::TempDir;
+
+    let temp_dir = TempDir::new().unwrap();
+    let config = artifact_completion_config(&temp_dir, false);
+
+    let events_path = temp_dir.path().join("events.jsonl");
+    let mut event_loop = EventLoop::new(config);
+    event_loop.initialize("Test");
+    event_loop.event_reader = crate::event_reader::EventReader::new(&events_path);
+
+    write_event_to_jsonl(
+        &events_path,
+        "LOOP_COMPLETE",
+        r#"{"reason":"done","report_path":"docs/missing.md"}"#,
+    );
+    let _ = event_loop.process_events_from_jsonl();
+
+    let reason = event_loop.check_completion_event();
+    assert!(
+        reason.is_none(),
+        "missing artifact file must reject completion (no termination), got {reason:?}"
+    );
+    assert!(
+        !event_loop.state().completion_honored,
+        "completion_honored must remain false when artifact is missing"
+    );
+}
+
+/// U1 / S3: a directory cannot impersonate a report.
+#[test]
+fn completion_artifact_rejects_directory() {
+    use tempfile::TempDir;
+
+    let temp_dir = TempDir::new().unwrap();
+    // `docs/report` is a directory, not a regular file.
+    let dir_path = temp_dir.path().join("docs/report");
+    std::fs::create_dir_all(&dir_path).unwrap();
+
+    let config = artifact_completion_config(&temp_dir, false);
+
+    let events_path = temp_dir.path().join("events.jsonl");
+    let mut event_loop = EventLoop::new(config);
+    event_loop.initialize("Test");
+    event_loop.event_reader = crate::event_reader::EventReader::new(&events_path);
+
+    write_event_to_jsonl(
+        &events_path,
+        "LOOP_COMPLETE",
+        r#"{"reason":"done","report_path":"docs/report"}"#,
+    );
+    let _ = event_loop.process_events_from_jsonl();
+
+    let reason = event_loop.check_completion_event();
+    assert!(
+        reason.is_none(),
+        "directory artifact must reject completion (no termination), got {reason:?}"
+    );
+    assert!(
+        !event_loop.state().completion_honored,
+        "completion_honored must remain false when artifact is a directory"
+    );
+}
+
+/// U1 / S4 (a): absolute paths and `..` escape both reject the completion.
+#[test]
+fn completion_artifact_rejects_absolute_and_parent_escape() {
+    use tempfile::TempDir;
+
+    let temp_dir = TempDir::new().unwrap();
+    let events_path = temp_dir.path().join("events.jsonl");
+
+    // Absolute path.
+    {
+        let mut event_loop = EventLoop::new(artifact_completion_config(&temp_dir, false));
+        event_loop.initialize("Test");
+        event_loop.event_reader = crate::event_reader::EventReader::new(&events_path);
+
+        write_event_to_jsonl(
+            &events_path,
+            "LOOP_COMPLETE",
+            r#"{"reason":"done","report_path":"/tmp/absolute.md"}"#,
+        );
+        let _ = event_loop.process_events_from_jsonl();
+
+        let reason = event_loop.check_completion_event();
+        assert!(
+            reason.is_none(),
+            "absolute report_path must reject completion, got {reason:?}"
+        );
+        assert!(
+            !event_loop.state().completion_honored,
+            "completion_honored must remain false when artifact is absolute"
+        );
+    }
+
+    // Parent-escape path (`..`).
+    {
+        let mut event_loop = EventLoop::new(artifact_completion_config(&temp_dir, false));
+        event_loop.initialize("Test");
+        event_loop.event_reader = crate::event_reader::EventReader::new(&events_path);
+
+        write_event_to_jsonl(
+            &events_path,
+            "LOOP_COMPLETE",
+            r#"{"reason":"done","report_path":"../outside.md"}"#,
+        );
+        let _ = event_loop.process_events_from_jsonl();
+
+        let reason = event_loop.check_completion_event();
+        assert!(
+            reason.is_none(),
+            "parent-escape report_path must reject completion, got {reason:?}"
+        );
+        assert!(
+            !event_loop.state().completion_honored,
+            "completion_honored must remain false when artifact escapes workspace"
+        );
+    }
+}
+
+/// U1 / S4 (b): a symlink inside the workspace that points to a file
+/// outside the workspace must be rejected (canonical containment).
+#[cfg(unix)]
+#[test]
+fn completion_artifact_rejects_symlink_outside_workspace() {
+    use std::os::unix::fs::symlink;
+    use tempfile::TempDir;
+
+    let temp_dir = TempDir::new().unwrap();
+
+    // Create a real file outside the workspace, then a symlink inside
+    // pointing at it.
+    let outside_dir = TempDir::new().unwrap();
+    let outside_file = outside_dir.path().join("secret.md");
+    std::fs::write(&outside_file, "# Secret\n").unwrap();
+    let link_path = temp_dir.path().join("docs/leaked.md");
+    std::fs::create_dir_all(link_path.parent().unwrap()).unwrap();
+    symlink(&outside_file, &link_path).unwrap();
+
+    let config = artifact_completion_config(&temp_dir, false);
+
+    let events_path = temp_dir.path().join("events.jsonl");
+    let mut event_loop = EventLoop::new(config);
+    event_loop.initialize("Test");
+    event_loop.event_reader = crate::event_reader::EventReader::new(&events_path);
+
+    write_event_to_jsonl(
+        &events_path,
+        "LOOP_COMPLETE",
+        r#"{"reason":"done","report_path":"docs/leaked.md"}"#,
+    );
+    let _ = event_loop.process_events_from_jsonl();
+
+    let reason = event_loop.check_completion_event();
+    assert!(
+        reason.is_none(),
+        "symlink escape must reject completion, got {reason:?}"
+    );
+    assert!(
+        !event_loop.state().completion_honored,
+        "completion_honored must remain false when symlink escapes workspace"
+    );
+}
+
+/// U1 / S5 (characterization): completion schema without artifact
+/// fields passthrough — pre-U1 behavior preserved.
+#[test]
+fn completion_artifact_passthrough_when_schema_has_no_artifact_field() {
+    use tempfile::TempDir;
+
+    let temp_dir = TempDir::new().unwrap();
+
+    // Schema for LOOP_COMPLETE requires only `reason`, no artifact field.
+    let mut config = RalphConfig::default();
+    config.core.workspace_root = temp_dir.path().to_path_buf();
+    let mut schemas = std::collections::HashMap::new();
+    schemas.insert(
+        config.event_loop.completion_promise.clone(),
+        crate::config::EventSchema {
+            required_fields: vec!["reason".to_string()],
+            ..Default::default()
+        },
+    );
+    config.event_loop.event_policy = Some(crate::config::EventPolicyConfig {
+        enabled: true,
+        mode: crate::config::EventPolicyMode::Enforce,
+        schemas,
+        ..Default::default()
+    });
+
+    let events_path = temp_dir.path().join("events.jsonl");
+    let mut event_loop = EventLoop::new(config);
+    event_loop.initialize("Test");
+    event_loop.event_reader = crate::event_reader::EventReader::new(&events_path);
+
+    // Even with a non-existent report_path, completion must still be
+    // honored — the gate is gated on the schema declaring the field.
+    write_event_to_jsonl(
+        &events_path,
+        "LOOP_COMPLETE",
+        r#"{"reason":"done","report_path":"docs/never-written.md"}"#,
+    );
+    let _ = event_loop.process_events_from_jsonl();
+
+    let reason = event_loop.check_completion_event();
+    assert_eq!(
+        reason,
+        Some(TerminationReason::CompletionPromise),
+        "schema without artifact field must preserve pre-U1 passthrough"
+    );
+}
+
+/// U1: rejection injects a correction block so the next agent iteration
+/// sees a deterministic `task.resume`-shaped signal describing why the
+/// completion was refused.
+#[test]
+fn completion_artifact_rejection_injects_correction() {
+    use tempfile::TempDir;
+
+    let temp_dir = TempDir::new().unwrap();
+    let config = artifact_completion_config(&temp_dir, false);
+
+    let events_path = temp_dir.path().join("events.jsonl");
+    let mut event_loop = EventLoop::new(config);
+    event_loop.initialize("Test");
+    event_loop.event_reader = crate::event_reader::EventReader::new(&events_path);
+
+    write_event_to_jsonl(
+        &events_path,
+        "LOOP_COMPLETE",
+        r#"{"reason":"done","report_path":"docs/missing.md"}"#,
+    );
+    let _ = event_loop.process_events_from_jsonl();
+
+    let _ = event_loop.check_completion_event();
+
+    let blocks = &event_loop.state().prompt_context.correction_blocks;
+    assert!(
+        blocks
+            .iter()
+            .any(|b| b.last_message.contains("completion artifact")),
+        "correction block must describe the artifact rejection; got {:?}",
+        blocks.iter().map(|b| &b.last_message).collect::<Vec<_>>()
+    );
+    assert!(
+        !event_loop.state().completion_requested,
+        "completion_requested must be cleared after artifact rejection"
+    );
+}
