@@ -71,6 +71,371 @@ fn apply_completion_after_terminal_action(
     }
 }
 
+fn redteam_queue_enabled(config: &EventPolicyConfig) -> bool {
+    config.schemas.contains_key("redteam.attack.mapped")
+        && config.schemas.contains_key("redteam.experiment.done")
+        && config.schemas.contains_key("redteam.experiment.next")
+        && config.schemas.contains_key("redteam.evidence.gated")
+}
+
+fn redteam_counter(
+    topic: &str,
+    obj: &serde_json::Map<String, Value>,
+    field: &str,
+) -> Result<Option<u64>, Box<PolicyFinding>> {
+    let Some(value) = obj.get(field) else {
+        return Ok(None);
+    };
+    value.as_u64().map(Some).ok_or_else(|| Box::new(PolicyFinding {
+        topic: topic.to_string(),
+        violation_type: ViolationType::PayloadTypeMismatch {
+            expected: "non-negative integer".to_string(),
+            actual: type_name(value).to_string(),
+        },
+        message: format!(
+            "{topic} 的字段 '{field}' 必须是非负整数，当前类型是 {}。请从证据板重新计算后再发送。",
+            type_name(value)
+        ),
+        evidence: None,
+    }))
+}
+
+fn redteam_queue_finding(topic: &str, context: String, fields: &[&str]) -> PolicyFinding {
+    PolicyFinding {
+        topic: topic.to_string(),
+        violation_type: ViolationType::SemanticGateViolation {
+            gate: "redteam_experiment_queue_consistency".to_string(),
+            context: context.clone(),
+            referenced_fields: fields.iter().map(|field| (*field).to_string()).collect(),
+        },
+        message: format!(
+            "redteam_experiment_queue_consistency: {context}；请读取最新 evidence board，修正本次 handoff，只发送一个与当前队列状态一致的事件。"
+        ),
+        evidence: None,
+    }
+}
+
+/// Validate the red-team queue's cross-event invariants.
+///
+/// The generic `payload_consistency` evaluator deliberately examines only the
+/// current payload. This gate is the stateful counterpart for the red-team
+/// preset: it binds queue counters to accepted events and makes each serial
+/// handoff idempotent.
+fn check_redteam_queue_invariant(
+    topic: &str,
+    payload: Option<&str>,
+    config: &EventPolicyConfig,
+    state: &PolicyRuntimeState,
+) -> Option<PolicyFinding> {
+    if !redteam_queue_enabled(config) {
+        return None;
+    }
+    let payload = payload?;
+    let obj = match serde_json::from_str::<Value>(payload) {
+        Ok(Value::Object(obj)) => obj,
+        _ => return None,
+    };
+
+    match topic {
+        "redteam.attack.mapped" => {
+            if let Err(finding) = redteam_counter(topic, &obj, "experiment_count") {
+                return Some(*finding);
+            }
+            if state.redteam_experiment_total.is_some() {
+                Some(redteam_queue_finding(
+                    topic,
+                    "attack.mapped 只能初始化一次实验队列；检测到重复初始化".to_string(),
+                    &["experiment_count"],
+                ))
+            } else {
+                None
+            }
+        }
+        "redteam.experiment.done" => {
+            let experiment_id_value = obj.get("experiment_id")?;
+            let Some(experiment_id) = experiment_id_value.as_str() else {
+                return Some(redteam_queue_finding(
+                    topic,
+                    format!(
+                        "experiment_id 必须是字符串，当前类型是 {}",
+                        type_name(experiment_id_value)
+                    ),
+                    &["experiment_id"],
+                ));
+            };
+            if experiment_id.is_empty() {
+                return Some(redteam_queue_finding(
+                    topic,
+                    "experiment_id 不能为空".to_string(),
+                    &["experiment_id"],
+                ));
+            }
+            if let Some(expected) = &state.redteam_experiment_pending_id
+                && expected != experiment_id
+            {
+                return Some(redteam_queue_finding(
+                    topic,
+                    format!(
+                        "experiment.done 的 experiment_id={experiment_id} 与队列当前等待的 {expected} 不一致，不能跳过 next handoff"
+                    ),
+                    &["experiment_id", "next_experiment_id"],
+                ));
+            }
+            if state.redteam_experiment_done_ids.contains(experiment_id) {
+                return Some(redteam_queue_finding(
+                    topic,
+                    format!("experiment_id={experiment_id} 已经完成过，拒绝重复 experiment.done"),
+                    &["experiment_id"],
+                ));
+            }
+            if let Some(total) = state.redteam_experiment_total
+                && state.redteam_experiment_done_count >= total
+            {
+                return Some(redteam_queue_finding(
+                    topic,
+                    format!("实验队列已经完成 {total} 项，不能再接受 experiment.done"),
+                    &["experiment_id"],
+                ));
+            }
+            None
+        }
+        "redteam.experiment.next" => {
+            let completed = match redteam_counter(topic, &obj, "completed_count") {
+                Ok(value) => value,
+                Err(finding) => return Some(*finding),
+            };
+            let remaining = match redteam_counter(topic, &obj, "remaining_count") {
+                Ok(value) => value,
+                Err(finding) => return Some(*finding),
+            };
+            let accepted = match redteam_counter(topic, &obj, "accepted_count") {
+                Ok(value) => value,
+                Err(finding) => return Some(*finding),
+            };
+            let rejected = match redteam_counter(topic, &obj, "rejected_count") {
+                Ok(value) => value,
+                Err(finding) => return Some(*finding),
+            };
+            let next_id_value = obj.get("next_experiment_id")?;
+            let Some(next_id) = next_id_value.as_str() else {
+                return Some(redteam_queue_finding(
+                    topic,
+                    format!(
+                        "next_experiment_id 必须是字符串，当前类型是 {}",
+                        type_name(next_id_value)
+                    ),
+                    &["next_experiment_id"],
+                ));
+            };
+            if next_id.is_empty() {
+                return Some(redteam_queue_finding(
+                    topic,
+                    "next_experiment_id 不能为空".to_string(),
+                    &["next_experiment_id"],
+                ));
+            }
+            let (Some(completed), Some(remaining), Some(accepted), Some(rejected)) =
+                (completed, remaining, accepted, rejected)
+            else {
+                return None;
+            };
+            let Some(total) = state.redteam_experiment_total else {
+                return Some(redteam_queue_finding(
+                    topic,
+                    "实验队列尚未由 attack.mapped 初始化，不能发送 next handoff".to_string(),
+                    &["experiment_count", "next_experiment_id"],
+                ));
+            };
+            if remaining == 0 {
+                return Some(redteam_queue_finding(
+                    topic,
+                    "队列已经耗尽，必须发送 redteam.evidence.gated 或 redteam.failed，而不是 next"
+                        .to_string(),
+                    &["remaining_count"],
+                ));
+            }
+            if completed != state.redteam_experiment_done_count {
+                return Some(redteam_queue_finding(
+                    topic,
+                    format!(
+                        "completed_count={completed} 与已接受的 experiment.done 数量 {} 不一致",
+                        state.redteam_experiment_done_count
+                    ),
+                    &["completed_count"],
+                ));
+            }
+            if accepted.checked_add(rejected) != Some(completed) {
+                return Some(redteam_queue_finding(
+                    topic,
+                    format!(
+                        "accepted_count={accepted} 加 rejected_count={rejected} 必须等于 completed_count={completed}"
+                    ),
+                    &["completed_count", "accepted_count", "rejected_count"],
+                ));
+            }
+            if completed.checked_add(remaining) != Some(total) {
+                return Some(redteam_queue_finding(
+                    topic,
+                    format!(
+                        "completed_count={completed} 加 remaining_count={remaining} 必须等于 experiment_count={total}"
+                    ),
+                    &["completed_count", "remaining_count", "experiment_count"],
+                ));
+            }
+            if state.redteam_experiment_last_next_completed_count == Some(completed) {
+                return Some(redteam_queue_finding(
+                    topic,
+                    format!(
+                        "completed_count={completed} 的 next handoff 已经接受过；同一轮只能发送一次"
+                    ),
+                    &["completed_count", "next_experiment_id"],
+                ));
+            }
+            if state.redteam_experiment_next_seen_ids.contains(next_id)
+                || state.redteam_experiment_done_ids.contains(next_id)
+            {
+                return Some(redteam_queue_finding(
+                    topic,
+                    format!("next_experiment_id={next_id} 已经被调度或完成，不能重复或回退队列"),
+                    &["next_experiment_id"],
+                ));
+            }
+            None
+        }
+        "redteam.evidence.gated" => {
+            let total = match redteam_counter(topic, &obj, "total_experiment_count") {
+                Ok(value) => value,
+                Err(finding) => return Some(*finding),
+            };
+            let qualified = match redteam_counter(topic, &obj, "qualified_experiment_count") {
+                Ok(value) => value,
+                Err(finding) => return Some(*finding),
+            };
+            let rejected = match redteam_counter(topic, &obj, "rejected_experiment_count") {
+                Ok(value) => value,
+                Err(finding) => return Some(*finding),
+            };
+            let (Some(total), Some(qualified), Some(rejected)) = (total, qualified, rejected)
+            else {
+                return None;
+            };
+            let Some(expected_total) = state.redteam_experiment_total else {
+                return Some(redteam_queue_finding(
+                    topic,
+                    "evidence.gated 缺少已初始化的 attack.mapped 队列".to_string(),
+                    &["total_experiment_count", "experiment_count"],
+                ));
+            };
+            if total != expected_total || state.redteam_experiment_done_count != expected_total {
+                return Some(redteam_queue_finding(
+                    topic,
+                    format!(
+                        "最终 total_experiment_count={total}、已完成数量 {} 必须都等于 experiment_count={expected_total}",
+                        state.redteam_experiment_done_count
+                    ),
+                    &["total_experiment_count", "experiment_count"],
+                ));
+            }
+            if qualified.checked_add(rejected) != Some(total) {
+                return Some(redteam_queue_finding(
+                    topic,
+                    format!(
+                        "qualified_experiment_count={qualified} 加 rejected_experiment_count={rejected} 必须等于 total_experiment_count={total}"
+                    ),
+                    &[
+                        "qualified_experiment_count",
+                        "rejected_experiment_count",
+                        "total_experiment_count",
+                    ],
+                ));
+            }
+            let ids_value = obj.get("qualified_experiment_ids")?;
+            let Some(ids) = ids_value.as_array() else {
+                return Some(redteam_queue_finding(
+                    topic,
+                    format!(
+                        "qualified_experiment_ids 必须是数组，当前类型是 {}",
+                        type_name(ids_value)
+                    ),
+                    &["qualified_experiment_ids"],
+                ));
+            };
+            let ids: Option<Vec<&str>> = ids.iter().map(Value::as_str).collect();
+            let Some(ids) = ids else {
+                return Some(redteam_queue_finding(
+                    topic,
+                    "qualified_experiment_ids 必须是字符串 ID 数组".to_string(),
+                    &["qualified_experiment_ids"],
+                ));
+            };
+            let unique_ids: HashSet<&str> = ids.iter().copied().collect();
+            if ids.len() as u64 != qualified || unique_ids.len() != ids.len() {
+                return Some(redteam_queue_finding(topic,
+                    "qualified_experiment_ids 的长度必须等于 qualified_experiment_count，且不能含重复 ID"
+                        .to_string(),
+                    &["qualified_experiment_ids", "qualified_experiment_count"],
+                ));
+            }
+            if ids
+                .iter()
+                .any(|experiment_id| !state.redteam_experiment_done_ids.contains(*experiment_id))
+            {
+                return Some(redteam_queue_finding(
+                    topic,
+                    "qualified_experiment_ids 必须全部来自已接受的 experiment.done".to_string(),
+                    &["qualified_experiment_ids"],
+                ));
+            }
+            None
+        }
+        _ => None,
+    }
+}
+
+fn apply_redteam_queue_state(topic: &str, payload: Option<&str>, state: &mut PolicyRuntimeState) {
+    let Some(payload) = payload else {
+        return;
+    };
+    let Ok(Value::Object(obj)) = serde_json::from_str::<Value>(payload) else {
+        return;
+    };
+    match topic {
+        "redteam.attack.mapped" => {
+            if let Some(total) = obj.get("experiment_count").and_then(Value::as_u64) {
+                state.redteam_experiment_total = Some(total);
+                state.redteam_experiment_done_count = 0;
+                state.redteam_experiment_done_ids.clear();
+                state.redteam_experiment_next_seen_ids.clear();
+                state.redteam_experiment_pending_id = None;
+                state.redteam_experiment_last_next_completed_count = None;
+            }
+        }
+        "redteam.experiment.done" => {
+            if let Some(experiment_id) = obj.get("experiment_id").and_then(Value::as_str)
+                && state
+                    .redteam_experiment_done_ids
+                    .insert(experiment_id.to_string())
+            {
+                state.redteam_experiment_done_count =
+                    state.redteam_experiment_done_count.saturating_add(1);
+                state.redteam_experiment_pending_id = None;
+            }
+        }
+        "redteam.experiment.next" => {
+            if let Some(next_id) = obj.get("next_experiment_id").and_then(Value::as_str) {
+                state
+                    .redteam_experiment_next_seen_ids
+                    .insert(next_id.to_string());
+                state.redteam_experiment_pending_id = Some(next_id.to_string());
+            }
+            if let Some(completed) = obj.get("completed_count").and_then(Value::as_u64) {
+                state.redteam_experiment_last_next_completed_count = Some(completed);
+            }
+        }
+        _ => {}
+    }
+}
+
 /// R9: Check topic format against the whitelist of known topics.
 ///
 /// Rejects topics not in the whitelist **before** payload schema validation.
@@ -1525,7 +1890,16 @@ pub fn validate_event_with_options<H: HandoffEnvelopeConfigAccess>(
         }
     }
 
+    // Stateful red-team queue gate. This intentionally runs after the
+    // declarative same-payload rules so an existing local payload error keeps
+    // its stable finding code; cross-event queue errors are added only when
+    // the current payload is otherwise structurally usable.
+    if let Some(finding) = check_redteam_queue_invariant(topic, payload, config, state) {
+        findings.push(finding);
+    }
+
     if findings.is_empty() {
+        apply_redteam_queue_state(topic, payload, state);
         if topic == "plan.blocked" {
             state.last_plan_blocked_reason =
                 crate::shipper_reason::extract_plan_blocked_reason(payload);
@@ -1533,6 +1907,15 @@ pub fn validate_event_with_options<H: HandoffEnvelopeConfigAccess>(
             state.last_plan_blocked_reason = None;
         }
         return PolicyDecision::Accept;
+    }
+
+    // Observe/Warn modes still forward the event, so the stateful queue mirror
+    // must advance with the accepted event just as it does on a clean accept.
+    if matches!(config.mode, EventPolicyMode::Observe)
+        || (matches!(config.mode, EventPolicyMode::Enforce)
+            && matches!(config.on_violation, ViolationAction::Warn))
+    {
+        apply_redteam_queue_state(topic, payload, state);
     }
 
     match config.mode {

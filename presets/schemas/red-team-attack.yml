@@ -303,7 +303,7 @@ schemas:
       completed_count:
         meaning: Number of experiments with a recorded done or rejected result.
         source: Evidence-gate counts durable queue records in the evidence board.
-        fill_rule: Non-negative integer; must increase monotonically across the queue.
+        fill_rule: Non-negative integer; must equal the number of accepted redteam.experiment.done events and satisfy completed_count + remaining_count = experiment_count.
       remaining_count:
         meaning: Number of planned experiments still not executed after the current result.
         source: Evidence-gate computes from the experiment plan and durable result records.
@@ -311,11 +311,11 @@ schemas:
       accepted_count:
         meaning: Number of completed experiments that passed the evidence gate so far.
         source: Evidence-gate counts qualified entries in the evidence board.
-        fill_rule: Non-negative integer; rejected experiments are not counted.
+        fill_rule: Non-negative integer; rejected experiments are not counted, and accepted_count + rejected_count must equal completed_count.
       rejected_count:
         meaning: Number of completed experiments that failed evidence qualification so far.
         source: Evidence-gate counts rejected entries in the evidence board.
-        fill_rule: Non-negative integer; every rejection retains its reason and artifact path.
+        fill_rule: Non-negative integer; every rejection retains its reason and artifact path, and accepted_count + rejected_count must equal completed_count.
       evidence_board_path:
         meaning: Durable queue and evidence-board artifact consumed by the next runner activation.
         source: Evidence-gate writes `.ralph/red-team/07-evidence-board.md` before emitting.

@@ -53,6 +53,246 @@ fn c7_review_dimensions_complete_accepts_skipped_with_null_findings() {
     );
 }
 
+fn redteam_queue_config() -> EventPolicyConfig {
+    let mut config = test_config();
+    let schemas = [
+        (
+            "redteam.attack.mapped",
+            vec!["experiment_count"],
+        ),
+        (
+            "redteam.experiment.done",
+            vec!["experiment_id"],
+        ),
+        (
+            "redteam.experiment.next",
+            vec![
+                "next_experiment_id",
+                "completed_count",
+                "remaining_count",
+                "accepted_count",
+                "rejected_count",
+                "evidence_board_path",
+            ],
+        ),
+        (
+            "redteam.evidence.gated",
+            vec![
+                "qualified_experiment_ids",
+                "qualified_experiment_count",
+                "rejected_experiment_count",
+                "total_experiment_count",
+            ],
+        ),
+    ];
+    for (topic, required_fields) in schemas {
+        config.schemas.insert(
+            topic.to_string(),
+            EventSchema {
+                payload: Some(PayloadType::JsonObject),
+                required_fields: required_fields
+                    .into_iter()
+                    .map(str::to_string)
+                    .collect(),
+                ..Default::default()
+            },
+        );
+    }
+    config
+}
+
+fn redteam_done(experiment_id: &str) -> String {
+    serde_json::json!({"experiment_id": experiment_id}).to_string()
+}
+
+fn redteam_next(next_id: &str, completed: u64, remaining: u64, accepted: u64, rejected: u64) -> String {
+    serde_json::json!({
+        "next_experiment_id": next_id,
+        "completed_count": completed,
+        "remaining_count": remaining,
+        "accepted_count": accepted,
+        "rejected_count": rejected,
+        "evidence_board_path": ".ralph/red-team/07-evidence-board.md"
+    })
+    .to_string()
+}
+
+#[test]
+fn redteam_queue_rejects_counter_drift_and_duplicate_handoff() {
+    let config = redteam_queue_config();
+    let mut state = PolicyRuntimeState::default();
+
+    assert_eq!(
+        validate_event(
+            "redteam.attack.mapped",
+            Some(r#"{"experiment_count":2}"#),
+            &config,
+            &mut state,
+        ),
+        PolicyDecision::Accept
+    );
+    assert_eq!(
+        validate_event(
+            "redteam.experiment.done",
+            Some(&redteam_done("RTE-001")),
+            &config,
+            &mut state,
+        ),
+        PolicyDecision::Accept
+    );
+
+    let drifted = redteam_next("RTE-002", 1, 1, 1, 1);
+    let drift = validate_event("redteam.experiment.next", Some(&drifted), &config, &mut state);
+    assert!(
+        matches!(drift, PolicyDecision::RejectWithResume(PolicyFinding {
+            violation_type: ViolationType::SemanticGateViolation { ref gate, .. },
+            ..
+        }) if gate == "redteam_experiment_queue_consistency"),
+        "counter drift must be rejected, got {drift:?}"
+    );
+
+    let valid = redteam_next("RTE-002", 1, 1, 1, 0);
+    assert_eq!(
+        validate_event("redteam.experiment.next", Some(&valid), &config, &mut state),
+        PolicyDecision::Accept
+    );
+    let duplicate = validate_event("redteam.experiment.next", Some(&valid), &config, &mut state);
+    assert!(
+        matches!(duplicate, PolicyDecision::RejectWithResume(PolicyFinding {
+            violation_type: ViolationType::SemanticGateViolation { ref gate, .. },
+            ..
+        }) if gate == "redteam_experiment_queue_consistency"),
+        "same queue handoff must be rejected, got {duplicate:?}"
+    );
+}
+
+#[test]
+fn redteam_queue_rejects_skip_and_final_aggregate_drift() {
+    let config = redteam_queue_config();
+    let mut state = PolicyRuntimeState::default();
+    assert_eq!(
+        validate_event(
+            "redteam.attack.mapped",
+            Some(r#"{"experiment_count":2}"#),
+            &config,
+            &mut state,
+        ),
+        PolicyDecision::Accept
+    );
+    assert_eq!(
+        validate_event(
+            "redteam.experiment.done",
+            Some(&redteam_done("RTE-001")),
+            &config,
+            &mut state,
+        ),
+        PolicyDecision::Accept
+    );
+    assert_eq!(
+        validate_event(
+            "redteam.experiment.next",
+            Some(&redteam_next("RTE-002", 1, 1, 0, 1)),
+            &config,
+            &mut state,
+        ),
+        PolicyDecision::Accept
+    );
+
+    let skipped = validate_event(
+        "redteam.experiment.done",
+        Some(&redteam_done("RTE-003")),
+        &config,
+        &mut state,
+    );
+    assert!(
+        matches!(skipped, PolicyDecision::RejectWithResume(_)),
+        "done for an ID other than the pending handoff must be rejected, got {skipped:?}"
+    );
+
+    assert_eq!(
+        validate_event(
+            "redteam.experiment.done",
+            Some(&redteam_done("RTE-002")),
+            &config,
+            &mut state,
+        ),
+        PolicyDecision::Accept
+    );
+    let aggregate_drift = serde_json::json!({
+        "qualified_experiment_ids": ["RTE-001"],
+        "qualified_experiment_count": 1,
+        "rejected_experiment_count": 0,
+        "total_experiment_count": 2
+    })
+    .to_string();
+    let final_decision = validate_event(
+        "redteam.evidence.gated",
+        Some(&aggregate_drift),
+        &config,
+        &mut state,
+    );
+    assert!(
+        matches!(final_decision, PolicyDecision::RejectWithResume(_)),
+        "final aggregate drift must be rejected, got {final_decision:?}"
+    );
+
+    let null_ids = serde_json::json!({
+        "qualified_experiment_ids": null,
+        "qualified_experiment_count": 1,
+        "rejected_experiment_count": 1,
+        "total_experiment_count": 2
+    })
+    .to_string();
+    let null_ids_decision = validate_event(
+        "redteam.evidence.gated",
+        Some(&null_ids),
+        &config,
+        &mut state,
+    );
+    assert!(
+        matches!(null_ids_decision, PolicyDecision::RejectWithResume(_)),
+        "null qualified IDs must not pass final aggregate validation, got {null_ids_decision:?}"
+    );
+}
+
+#[test]
+fn redteam_queue_replay_restores_handoff_dedup_state() {
+    let config = redteam_queue_config();
+    let mut events = NamedTempFile::new().unwrap();
+    let lines = [
+        serde_json::json!({
+            "topic": "redteam.attack.mapped",
+            "payload": {"experiment_count": 2}
+        }),
+        serde_json::json!({
+            "topic": "redteam.experiment.done",
+            "payload": {"experiment_id": "RTE-001"}
+        }),
+        serde_json::json!({
+            "topic": "redteam.experiment.next",
+            "payload": serde_json::from_str::<Value>(&redteam_next("RTE-002", 1, 1, 1, 0)).unwrap()
+        }),
+    ];
+    for line in lines {
+        writeln!(events, "{line}").unwrap();
+    }
+    events.flush().unwrap();
+
+    let mut state = PolicyRuntimeState::from_events(events.path(), &config).unwrap();
+    assert_eq!(state.redteam_experiment_total, Some(2));
+    assert_eq!(state.redteam_experiment_done_count, 1);
+    let duplicate = validate_event(
+        "redteam.experiment.next",
+        Some(&redteam_next("RTE-002", 1, 1, 1, 0)),
+        &config,
+        &mut state,
+    );
+    assert!(
+        matches!(duplicate, PolicyDecision::RejectWithResume(_)),
+        "replayed queue state must reject duplicate handoff, got {duplicate:?}"
+    );
+}
+
 #[test]
 fn c7_review_dimensions_complete_allowed_values_on_status() {
     let mut config = test_config_with_enforce_and_resume();

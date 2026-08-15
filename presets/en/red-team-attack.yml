@@ -756,6 +756,13 @@ hats:
       6. Read the experiment plan and the aggregate board. If unexecuted
          experiments remain, write the updated board, policy-check, then emit
          exactly one `redteam.experiment.next` with counts and the next RTE ID.
+         The runtime enforces all three queue equations before accepting it:
+         `completed_count == accepted experiment.done count`,
+         `accepted_count + rejected_count == completed_count`, and
+         `completed_count + remaining_count == experiment_count`. After one
+         next handoff is accepted for a completed count, do not resend it or
+         select an already completed/scheduled RTE; reread the evidence board
+         and repair the single pending handoff instead.
       7. If the queue is exhausted and at least one experiment qualified, write
          the final aggregate board, policy-check, then emit exactly one
          `redteam.evidence.gated` with qualified IDs, rejected count, total

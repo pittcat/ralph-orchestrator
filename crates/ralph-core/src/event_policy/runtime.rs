@@ -132,6 +132,17 @@ pub struct PolicyRuntimeState {
     /// U7 of plan 2026-07-02-005: last accepted `plan.blocked.reason`
     /// for shipper strict-match runtime routing on `REVIEW_COMPLETE`.
     pub last_plan_blocked_reason: Option<String>,
+    /// Red-team experiment queue state. These fields are intentionally
+    /// maintained in the policy runtime rather than inferred from the latest
+    /// payload: `redteam.experiment.next` is a cross-event handoff and its
+    /// counters must agree with the accepted `attack.mapped` / `experiment.done`
+    /// sequence.
+    pub redteam_experiment_total: Option<u64>,
+    pub redteam_experiment_done_count: u64,
+    pub redteam_experiment_done_ids: HashSet<String>,
+    pub redteam_experiment_next_seen_ids: HashSet<String>,
+    pub redteam_experiment_pending_id: Option<String>,
+    pub redteam_experiment_last_next_completed_count: Option<u64>,
 }
 
 /// Dedup key for a precheck `<X>.proposed` candidate (U7 / R6).
@@ -341,6 +352,37 @@ impl PolicyRuntimeState {
             state.observed_topics.insert(event.topic.clone());
             if policy.terminal_topics.contains(&event.topic) {
                 state.terminal_observed = true;
+            }
+            // Red-team queue replay. Only accepted events are expected in the
+            // trusted event stream, so rebuild the same serial queue state the
+            // live validator uses after a loop restart.
+            if event.topic == "redteam.attack.mapped"
+                && let Some(obj) = Self::payload_object(event.payload.as_deref())
+                && let Some(total) = obj.get("experiment_count").and_then(|v| v.as_u64())
+            {
+                state.redteam_experiment_total = Some(total);
+            } else if event.topic == "redteam.experiment.done"
+                && let Some(obj) = Self::payload_object(event.payload.as_deref())
+                && let Some(experiment_id) = obj.get("experiment_id").and_then(|v| v.as_str())
+                && state
+                    .redteam_experiment_done_ids
+                    .insert(experiment_id.to_string())
+            {
+                state.redteam_experiment_done_count =
+                    state.redteam_experiment_done_count.saturating_add(1);
+                state.redteam_experiment_pending_id = None;
+            } else if event.topic == "redteam.experiment.next"
+                && let Some(obj) = Self::payload_object(event.payload.as_deref())
+            {
+                if let Some(next_id) = obj.get("next_experiment_id").and_then(|v| v.as_str()) {
+                    state
+                        .redteam_experiment_next_seen_ids
+                        .insert(next_id.to_string());
+                    state.redteam_experiment_pending_id = Some(next_id.to_string());
+                }
+                if let Some(completed) = obj.get("completed_count").and_then(|v| v.as_u64()) {
+                    state.redteam_experiment_last_next_completed_count = Some(completed);
+                }
             }
             // U4: Extract current_plan_name from work.ready events
             if event.topic == "work.ready"
