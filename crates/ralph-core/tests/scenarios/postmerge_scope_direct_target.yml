@@ -124,6 +124,15 @@ mock_responses:
       </event>
     hat: reporter
 
+# U2 (plan 2026-08-15-2211): stage the terminal report file so the
+# completion artifact admission gate (which checks `report_path` on the
+# LOOP_COMPLETE schema) has a real file to validate.
+fixture_files:
+  - path: .ralph/post-merge/REPORT.md
+    content: |
+      # Post-merge report (pass)
+      verdict: PASS
+
 expected:
   iterations: 5
   events:

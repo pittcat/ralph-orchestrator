@@ -105,6 +105,14 @@ mock_responses:
       </event>
     hat: reporter
 
+# U2 (plan 2026-08-15-2211): stage the terminal report file so the
+# completion artifact admission gate (which checks `report_path` on the
+# redteam.complete schema) has a real file to validate.
+fixture_files:
+  - path: .ralph/red-team/REPORT.md
+    content: |
+      # Red-team report (auto-staged fixture for U2 gate)
+
 expected:
   iterations: 3
   events:
