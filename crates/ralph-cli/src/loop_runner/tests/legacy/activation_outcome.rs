@@ -770,3 +770,81 @@ fn u12_in_process_runner_writes_merge_failed_outcome_row() {
     );
     let _ = Path::new("unused");
 }
+
+// Plan 2026-08-15-1823 U13 (R11): end-to-end runner-path test for
+// the missing status. The channel marker is not written, so
+// resolve_hat_channel_events_path returns None and snapshot_channel
+// produces Missing.
+#[test]
+fn u13_in_process_runner_writes_missing_outcome_row() {
+    let workspace = tempfile::tempdir().expect("tempdir");
+    let _cwd = CwdGuard::set(workspace.path());
+    init_git_workspace(workspace.path());
+
+    let (ctx, event_loop) = build_isolated_executor_loop(workspace.path());
+    // Note: no seed_hat_channel call — the marker is absent, so
+    // resolve_hat_channel_events_path returns None.
+    let snapshot =
+        crate::loop_runner::activation_outcome::snapshot_channel(None);
+    assert_eq!(
+        snapshot.status,
+        crate::loop_runner::activation_outcome::ActivationOutcomeStatus::Missing,
+        "missing marker must produce snapshot.status=Missing"
+    );
+
+    let facts = crate::loop_runner::activation_outcome::ActivationOutcomeFacts {
+        loop_id: Some(ctx.loop_id().unwrap_or("loop").to_string()),
+        channel_exists: false,
+        channel_bytes: None,
+        channel_readable: false,
+        merge_succeeded: false,
+        backend_success: true,
+        backend_exit_code: Some(0),
+        watchdog_timeout: false,
+        backend_termination: false,
+        output_bytes: 0,
+        output_mentions_emit: false,
+        terminal_obligation_topics: vec!["work.done".into()],
+        ..Default::default()
+    };
+    crate::loop_runner::activation_outcome::log_activation_outcome(
+        event_loop.diagnostics().session_dir(),
+        1,
+        "executor",
+        &snapshot,
+        &facts,
+    );
+
+    let rows = read_outcome_rows(&event_loop);
+    assert_eq!(rows.len(), 1);
+    let row = &rows[0];
+    assert_eq!(
+        row.get("status").and_then(Value::as_str),
+        Some("missing"),
+        "absent marker must record status=missing"
+    );
+}
+
+// Plan 2026-08-15-1823 U13 (R11): end-to-end runner-path test for
+// the unreadable status. The channel path's parent directory is
+// absent, so std::fs::metadata returns Err and snapshot_channel
+// produces Unreadable.
+#[test]
+fn u13_in_process_runner_writes_unreadable_outcome_row() {
+    let workspace = tempfile::tempdir().expect("tempdir");
+    let _cwd = CwdGuard::set(workspace.path());
+    init_git_workspace(workspace.path());
+
+    let (ctx, _event_loop) = build_isolated_executor_loop(workspace.path());
+    // Path whose parent does not exist; std::fs::metadata returns
+    // Err and snapshot_channel maps that to Unreadable.
+    let unreadable_path = ctx.workspace().join(".ralph/does-not-exist/events-hat-1.jsonl");
+    let snapshot = crate::loop_runner::activation_outcome::snapshot_channel(Some(
+        &unreadable_path,
+    ));
+    assert_eq!(
+        snapshot.status,
+        crate::loop_runner::activation_outcome::ActivationOutcomeStatus::Unreadable,
+        "non-existent parent + Some(path) must produce Unreadable"
+    );
+}
