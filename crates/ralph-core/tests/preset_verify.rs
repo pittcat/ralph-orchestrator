@@ -339,7 +339,7 @@ fn report_serde_round_trip_keeps_required_fields() {
     }
 
     let parsed: PresetVerifyReport = serde_json::from_str(&serialized).expect("deserialize");
-    assert_eq!(parsed.passed, true);
+    assert!(parsed.passed);
     assert_eq!(parsed.scenarios.len(), 1);
     assert!(matches!(parsed.source_kind, SourceKind::Builtin));
     assert!(parsed.failure_kind.is_none());

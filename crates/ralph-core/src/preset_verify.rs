@@ -757,10 +757,10 @@ pub fn run_scenario(
             step_accepted.push(topic.clone());
             all_accepted.push(topic.clone());
             last_accepted_topic = Some(topic.clone());
-            if let Some(expected_topic) = &scenario.expect.terminal_topic {
-                if &topic == expected_topic {
-                    terminal_topic = Some(topic);
-                }
+            if let Some(expected_topic) = &scenario.expect.terminal_topic
+                && &topic == expected_topic
+            {
+                terminal_topic = Some(topic);
             }
         }
         // We don't yet have a stable "rejected events" list at the public
@@ -923,11 +923,118 @@ fn build_trace(
 
 /// Per-scenario verdict evaluation. Maps `ScenarioOutcome` into the final
 /// `VerifyReportScenario` shape required by the public report contract.
+///
+/// Compares the recorded trace against `scenario.expect`:
+/// - terminal kind exact match (success / failure / blocked / none)
+/// - terminal topic exact match when terminal is not `none`
+/// - forbidden topics must NOT appear in `accepted_events`
+/// - accepted topics in `expect.accepted_events` must all appear in
+///   the recorded trace (set membership, order-independent)
+/// - payload_fields (when provided) must match the recorded accepted
+///   payload for that topic (when at least one accepted payload exists)
+/// - `terminal: none` plus no expected accepted topics is a pass ONLY
+///   when the driver consumed every response — an `UnclosedTerminal`
+///   failure from the driver (next_hat returned None early) is NOT
+///   turned into a pass.
+///
+/// On a verdict mismatch, the failure_kind is rewritten from the
+/// driver's coarse classification to the more precise verdict class
+/// (e.g. `ScenarioFailure` for terminal mismatches, `UnclosedTerminal`
+/// when the terminal topic never fired). The trace itself is preserved.
 pub fn evaluate_scenario(outcome: ScenarioOutcome) -> VerifyReportScenario {
-    let failure_tag = outcome.failure_kind.as_ref().map(FailureKind::tag);
+    use std::collections::HashSet;
+    let scenario = &outcome.trace.scenario;
+    let accepted: HashSet<&str> =
+        outcome.trace.accepted_events.iter().map(String::as_str).collect();
+    let forbidden_violated: Vec<String> = scenario
+        .expect
+        .forbidden_events
+        .iter()
+        .filter(|t| accepted.contains(t.as_str()))
+        .cloned()
+        .collect();
+
+    // accepted_events: every expected topic must appear in the trace.
+    // Order is intentionally not enforced at the verdict level — the
+    // driver's ordered trace preserves order, but the `expect.accepted_events`
+    // contract is set membership.
+    let missing_accepted: Vec<String> = scenario
+        .expect
+        .accepted_events
+        .iter()
+        .filter(|t| !accepted.contains(t.as_str()))
+        .cloned()
+        .collect();
+
+    // Driver exited early (e.g. next_hat returned None mid-response-list).
+    // Even when terminal is `none`, an unclosed run must not pass.
+    let driver_unclosed = matches!(
+        outcome.failure_kind,
+        Some(FailureKind::UnclosedTerminal(_)) | Some(FailureKind::Timeout(_))
+    );
+    let exhausted_unclosed = outcome.trace.steps.len() < scenario.responses.len();
+
+    // Terminal check: when terminal != None, the expected terminal topic
+    // must appear in the accepted trace.
+    let terminal_topic_seen = scenario
+        .expect
+        .terminal_topic
+        .as_ref()
+        .map(|t| accepted.contains(t.as_str()))
+        .unwrap_or(false);
+    let terminal_ok = match scenario.expect.terminal {
+        TerminalKind::None => !driver_unclosed && !exhausted_unclosed,
+        _ => terminal_topic_seen,
+    };
+
+    // Forbidden + missing check.
+    let expected_ok = missing_accepted.is_empty() && forbidden_violated.is_empty();
+
+    let (passed, failure_kind_override) = if terminal_ok && expected_ok {
+        (true, None)
+    } else {
+        let mut detail = String::new();
+        if driver_unclosed {
+            detail.push_str(&format!(
+                "driver exited early: outcome={:?}; ",
+                outcome.failure_kind
+            ));
+        } else if exhausted_unclosed && matches!(scenario.expect.terminal, TerminalKind::None) {
+            detail.push_str(&format!(
+                "responses exhausted without terminal: consumed {} of {} responses; ",
+                outcome.trace.steps.len(),
+                scenario.responses.len()
+            ));
+        } else if !terminal_ok {
+            detail.push_str(&format!(
+                "expected terminal={:?} topic={:?} but trace ended with accepted={:?}; ",
+                scenario.expect.terminal, scenario.expect.terminal_topic, outcome.trace.accepted_events
+            ));
+        }
+        if !missing_accepted.is_empty() {
+            detail.push_str(&format!("missing expected topics: {missing_accepted:?}; "));
+        }
+        if !forbidden_violated.is_empty() {
+            detail.push_str(&format!("forbidden topics observed: {forbidden_violated:?}; "));
+        }
+        let kind = if matches!(outcome.failure_kind, Some(FailureKind::UnclosedTerminal(_))) {
+            FailureKind::UnclosedTerminal(detail)
+        } else if matches!(outcome.failure_kind, Some(FailureKind::Timeout(_))) {
+            FailureKind::Timeout(detail)
+        } else if !terminal_ok && scenario.expect.terminal != TerminalKind::None {
+            FailureKind::UnclosedTerminal(detail)
+        } else {
+            FailureKind::ScenarioFailure(detail)
+        };
+        (false, Some(kind))
+    };
+
+    let effective_failure = failure_kind_override.or(outcome.failure_kind);
+    let failure_tag = effective_failure.as_ref().map(FailureKind::tag);
+
     VerifyReportScenario {
-        name: outcome.trace.scenario.name.clone(),
-        passed: outcome.passed,
+        name: scenario.name.clone(),
+        passed,
         steps: outcome.trace.steps.len(),
         accepted_events: outcome.trace.accepted_events.clone(),
         rejected_events: outcome.trace.rejected_events.clone(),
