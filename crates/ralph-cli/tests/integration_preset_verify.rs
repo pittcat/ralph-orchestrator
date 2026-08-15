@@ -355,6 +355,94 @@ fn preset_verify_static_failure_returns_nonzero_and_does_not_consume_scenario() 
 }
 
 #[test]
+fn preset_verify_start_event_mismatch_is_input_error() {
+    // StartEventMismatch (scenario start_event mismatches preset starting_event)
+    // must classify as input_error per A3 finding, not scenario_failure.
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let core_path = tmp.path().join("core.yml");
+    let scenario_path = tmp.path().join("scenario.yml");
+
+    // Core config with execution_mode: isolated + starting_event: debug.start.
+    write_file(
+        &core_path,
+        r#"
+event_loop:
+  execution_mode: isolated
+  starting_event: debug.start
+  completion_promise: loop.complete
+  max_iterations: 4
+
+tasks:
+  enabled: true
+  coordinator_hats:
+    - hat_a
+"#,
+    );
+
+    // Scenario uses work.start — mismatches the preset's debug.start.
+    write_file(
+        &scenario_path,
+        r#"
+version: 1
+scenarios:
+  - name: start-event-mismatch
+    responses:
+      - output: ""
+        success: true
+    expect:
+      start_event: work.start
+      accepted_events: []
+      forbidden_events: []
+      terminal: none
+    limits:
+      max_steps: 1
+      no_progress_steps: 1
+"#,
+    );
+
+    let fixture_path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/isolated-start-mismatch-preset.yml");
+
+    let mut cmd = ralph_bin();
+    cmd.current_dir(tmp.path())
+        .env("RUST_LOG", "off")
+        .args([
+            "-c",
+            core_path.to_str().unwrap(),
+            "-H",
+            fixture_path.to_str().unwrap(),
+            "preset",
+            "verify",
+            "--scenario",
+            scenario_path.to_str().unwrap(),
+            "--format",
+            "json",
+        ]);
+
+    let output = cmd.output().expect("spawn ralph");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert_ne!(
+        output.status.code(),
+        Some(0),
+        "start event mismatch must exit nonzero; stdout={stdout}\nstderr={stderr}"
+    );
+
+    let json_slice = extract_json(&stdout);
+    let json: serde_json::Value = serde_json::from_str(&json_slice)
+        .unwrap_or_else(|e| panic!("verify JSON unparseable: {e}\njson_slice={json_slice}\nstderr={stderr}"));
+
+    assert_eq!(json["passed"], serde_json::Value::Bool(false));
+    assert_eq!(
+        json["failure_kind"],
+        serde_json::Value::String("input_error".to_string()),
+        "StartEventMismatch must classify as input_error; got {:?}",
+        json["failure_kind"]
+    );
+}
+
+#[test]
 fn preset_verify_scenario_failure_returns_nonzero_with_category() {
     // Scenario parse error (unknown top-level version) → input_error,
     // nonzero exit, static layer still present. Use `builtin:merge-batch`

@@ -26,7 +26,7 @@ use clap::{Parser, Subcommand, ValueEnum};
 use ralph_core::config::HatExecutionMode;
 use ralph_core::HatRegistry;
 use ralph_core::preset_verify::{
-    build_report as build_verify_report, evaluate_scenario, FailureKind, InputError,
+    build_report as build_verify_report, evaluate_scenario, FailureKind,
     PresetVerifyReport, ScenarioFile, SourceKind, StaticLayer, run_scenario, DriverWorkspace,
 };
 use ralph_core::runtime_contract::{
@@ -1048,10 +1048,11 @@ async fn verify_preset(
     let scenario_file = match ScenarioFile::from_yaml(&scenario_yaml, &config_starting_event) {
         Ok(s) => s,
         Err(err) => {
-            let kind = match &err {
-                InputError::StartEventMismatch { .. } => "scenario_failure",
-                _ => "input_error",
-            };
+            // U4 (P2:adversarial:A3) — StartEventMismatch is an *input* error
+            // (the scenario's start_event must match the preset's
+            // starting_event). Reclassify to "input_error" instead of
+            // "scenario_failure" so reports are actionable.
+            let kind = "input_error";
             let detail = format!("{err:?}");
             let report = PresetVerifyReport {
                 passed: false,
