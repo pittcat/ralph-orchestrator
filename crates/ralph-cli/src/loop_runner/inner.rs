@@ -2410,6 +2410,8 @@ pub(super) async fn run_loop_impl_inner(
                 state_machine_enabled,
                 &event_loop,
                 "iteration_top_interrupt",
+                None,
+                None,
             );
 
             let reason = hooks::termination::dispatch_pre_loop_termination_hooks(
@@ -3459,6 +3461,8 @@ pub(super) async fn run_loop_impl_inner(
                     state_machine_enabled,
                     &event_loop,
                     "mid_loop_select_interrupt",
+                    None,
+                    None,
                 );
 
                 let reason = hooks::termination::dispatch_pre_loop_termination_hooks(

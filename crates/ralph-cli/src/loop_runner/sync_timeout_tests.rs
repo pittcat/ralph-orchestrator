@@ -222,6 +222,8 @@ pub mod runner_inner_test_api {
             state_machine_enabled,
             event_loop,
             interrupt_kind,
+            None,
+            None,
         )
     }
 }
