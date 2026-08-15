@@ -1255,7 +1255,7 @@ impl EventLoop {
     /// | `completion_artifact_field_missing` | required field absent from payload |
     /// | `completion_artifact_field_not_string` | field present but not a string |
     /// | `completion_artifact_payload_invalid` | payload is not a JSON object |
-    /// | convention | any required field whose name ends with `_path` is treated as an artifact path |
+    /// | convention | any required field whose name is `report_path`/`artifact_path`/`manifest_path`/`summary_path`/`deliverable_path`/`inspection_report_path`, or ends with `_report_path`/`_artifact_path`/`_manifest_path`/`_summary_path`/`_deliverable_path`/`_inspection_report_path`, is treated as an artifact path |
     pub(super) fn verify_completion_artifact_paths(
         config: &RalphConfig,
         payload: Option<&str>,
@@ -1279,7 +1279,20 @@ impl EventLoop {
         let artifact_fields: Vec<&str> = required_fields
             .iter()
             .map(String::as_str)
-            .filter(|f| f.ends_with("_path"))
+            .filter(|f| {
+                *f == "report_path"
+                    || *f == "artifact_path"
+                    || *f == "manifest_path"
+                    || *f == "summary_path"
+                    || *f == "deliverable_path"
+                    || *f == "inspection_report_path"
+                    || f.ends_with("_report_path")
+                    || f.ends_with("_artifact_path")
+                    || f.ends_with("_manifest_path")
+                    || f.ends_with("_summary_path")
+                    || f.ends_with("_deliverable_path")
+                    || f.ends_with("_inspection_report_path")
+            })
             .collect();
 
         if artifact_fields.is_empty() {
