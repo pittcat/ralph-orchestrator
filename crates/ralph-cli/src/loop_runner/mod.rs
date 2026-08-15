@@ -35,6 +35,13 @@ mod prompt;
 // sibling modules (`inner.rs` / `entry.rs`) can call
 // `activation_outcome::xxx` without re-importing each name.
 mod activation_outcome;
+// Plan 2026-08-15-1823 (fix empty channel activation observability)
+// Unit 1: extract the `if isolated_mode` block from `inner.rs`
+// into a dedicated sibling module so `inner.rs` stays at the
+// HARD RULE 5000-line ceiling. The interrupt path lives in
+// `entry.rs::merge_isolated_channel_on_interrupt` and does not
+// depend on this module.
+mod activation_outcome_close;
 pub(crate) use activation_outcome::ActivationOutcomeStatus;
 #[allow(unused_imports)]
 pub(crate) use activation_outcome::{
