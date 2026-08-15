@@ -1255,6 +1255,7 @@ impl EventLoop {
     /// | `completion_artifact_field_missing` | required field absent from payload |
     /// | `completion_artifact_field_not_string` | field present but not a string |
     /// | `completion_artifact_payload_invalid` | payload is not a JSON object |
+    /// | convention | any required field whose name ends with `_path` is treated as an artifact path |
     pub(super) fn verify_completion_artifact_paths(
         config: &RalphConfig,
         payload: Option<&str>,
@@ -1278,7 +1279,7 @@ impl EventLoop {
         let artifact_fields: Vec<&str> = required_fields
             .iter()
             .map(String::as_str)
-            .filter(|f| *f == "report_path" || *f == "artifact_path")
+            .filter(|f| f.ends_with("_path"))
             .collect();
 
         if artifact_fields.is_empty() {

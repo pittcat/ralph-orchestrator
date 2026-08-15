@@ -1659,3 +1659,109 @@ fn completion_artifact_rejection_injects_correction() {
         "completion_requested must be cleared after artifact rejection"
     );
 }
+
+/// U1 / convention (positive): any required field whose name ends with
+/// `_path` is treated as an artifact path — not just `report_path` /
+/// `artifact_path`. A custom field like `custom_manifest_path` is
+/// accepted when the file it points at exists and is a readable regular
+/// file inside the workspace.
+#[test]
+fn completion_artifact_accepts_arbitrary_path_suffixed_field() {
+    use tempfile::TempDir;
+
+    let temp_dir = TempDir::new().unwrap();
+    let manifest_path = temp_dir.path().join("docs/manifest.md");
+    std::fs::create_dir_all(manifest_path.parent().unwrap()).unwrap();
+    std::fs::write(&manifest_path, "# Manifest\n").unwrap();
+
+    // Build a config with a completion schema that requires a custom
+    // `_path`-suffixed field instead of the hardcoded allowlist fields.
+    let mut config = RalphConfig::default();
+    config.core.workspace_root = temp_dir.path().to_path_buf();
+    let mut schemas = std::collections::HashMap::new();
+    schemas.insert(
+        config.event_loop.completion_promise.clone(),
+        crate::config::EventSchema {
+            required_fields: vec!["reason".to_string(), "custom_manifest_path".to_string()],
+            ..Default::default()
+        },
+    );
+    config.event_loop.event_policy = Some(crate::config::EventPolicyConfig {
+        enabled: true,
+        mode: crate::config::EventPolicyMode::Enforce,
+        schemas,
+        ..Default::default()
+    });
+
+    let events_path = temp_dir.path().join("events.jsonl");
+    let mut event_loop = EventLoop::new(config);
+    event_loop.initialize("Test");
+    event_loop.event_reader = crate::event_reader::EventReader::new(&events_path);
+
+    write_event_to_jsonl(
+        &events_path,
+        "LOOP_COMPLETE",
+        r#"{"reason":"done","custom_manifest_path":"docs/manifest.md"}"#,
+    );
+    let _ = event_loop.process_events_from_jsonl();
+
+    let reason = event_loop.check_completion_event();
+    assert_eq!(
+        reason,
+        Some(TerminationReason::CompletionPromise),
+        "custom _path-suffixed field with valid file must honor completion"
+    );
+    assert!(
+        event_loop.state().completion_honored,
+        "completion_honored must be set for valid custom artifact field"
+    );
+}
+
+/// U1 / convention (negative): when a required `_path`-suffixed field
+/// names a file that does not exist, the completion is rejected even
+/// though the field is not `report_path` or `artifact_path`.
+#[test]
+fn completion_artifact_rejects_arbitrary_path_suffixed_field_missing() {
+    use tempfile::TempDir;
+
+    let temp_dir = TempDir::new().unwrap();
+
+    let mut config = RalphConfig::default();
+    config.core.workspace_root = temp_dir.path().to_path_buf();
+    let mut schemas = std::collections::HashMap::new();
+    schemas.insert(
+        config.event_loop.completion_promise.clone(),
+        crate::config::EventSchema {
+            required_fields: vec!["reason".to_string(), "custom_manifest_path".to_string()],
+            ..Default::default()
+        },
+    );
+    config.event_loop.event_policy = Some(crate::config::EventPolicyConfig {
+        enabled: true,
+        mode: crate::config::EventPolicyMode::Enforce,
+        schemas,
+        ..Default::default()
+    });
+
+    let events_path = temp_dir.path().join("events.jsonl");
+    let mut event_loop = EventLoop::new(config);
+    event_loop.initialize("Test");
+    event_loop.event_reader = crate::event_reader::EventReader::new(&events_path);
+
+    write_event_to_jsonl(
+        &events_path,
+        "LOOP_COMPLETE",
+        r#"{"reason":"done","custom_manifest_path":"docs/missing.md"}"#,
+    );
+    let _ = event_loop.process_events_from_jsonl();
+
+    let reason = event_loop.check_completion_event();
+    assert!(
+        reason.is_none(),
+        "missing file for custom _path field must reject completion, got {reason:?}"
+    );
+    assert!(
+        !event_loop.state().completion_honored,
+        "completion_honored must remain false when custom artifact is missing"
+    );
+}
