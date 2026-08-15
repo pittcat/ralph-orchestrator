@@ -273,3 +273,83 @@ fn hat_activation_outcome_fields_are_bounded_by_field_cap() {
         "small scalar status must survive the cap walk"
     );
 }
+
+// Plan 2026-08-15-1823 U15 (R13): a stream containing
+// `(malformed JSONL) + (legacy valid row) + (new outcome row)`
+// must produce `record_count == 2, malformed_lines == 1` from
+// `read_runtime_trace_report`. This locks the malformed-line
+// counter so a future reader change cannot silently lose the
+// distinction between legacy and new rows in the same file.
+#[test]
+fn malformed_lines_counter_distinguishes_legacy_and_new_outcome_rows() {
+    use std::io::Write;
+
+    let tmp = TempDir::new().expect("TempDir");
+    let session = session_dir(&tmp);
+
+    // Manually compose the trace file so we control which lines
+    // are valid and which are malformed.
+    let trace_path = session.join("runtime-trace.jsonl");
+    let mut file = std::fs::File::create(&trace_path).expect("create trace file");
+    // 1. Legacy valid row (kind=legacy_kind, no activation outcome).
+    writeln!(
+        file,
+        r#"{{"phase":"activation","kind":"legacy_kind","schema_version":"run-diagnosis-trace/v1","iteration":1,"sequence":1,"ts":"2026-08-15T00:00:00Z"}}"#
+    )
+    .unwrap();
+    // 2. Malformed line.
+    writeln!(file, "this is not json").unwrap();
+    // 3. New outcome row.
+    writeln!(
+        file,
+        r#"{{"phase":"activation","kind":"hat_activation_outcome","schema_version":"run-diagnosis-trace/v1","iteration":1,"sequence":2,"ts":"2026-08-15T00:00:01Z","status":"empty","fields":{{"channel_exists":true,"channel_bytes":0,"channel_readable":true,"merge_succeeded":true}}}}"#
+    )
+    .unwrap();
+    drop(file);
+
+    let report = read_runtime_trace_report(&session);
+    assert_eq!(
+        report.record_count, 2,
+        "exactly two valid rows (legacy + new outcome) expected, got {}",
+        report.record_count
+    );
+    assert_eq!(
+        report.malformed_lines, 1,
+        "exactly one malformed line expected, got {}",
+        report.malformed_lines
+    );
+
+    // Negative case: only malformed rows.
+    let tmp = TempDir::new().expect("TempDir");
+    let session = session_dir(&tmp);
+    let trace_path = session.join("runtime-trace.jsonl");
+    let mut file = std::fs::File::create(&trace_path).expect("create trace file");
+    writeln!(file, "garbage line 1").unwrap();
+    writeln!(file, "garbage line 2").unwrap();
+    drop(file);
+
+    let report = read_runtime_trace_report(&session);
+    assert_eq!(report.record_count, 0);
+    assert_eq!(report.malformed_lines, 2);
+
+    // Negative case: only legacy valid rows.
+    let tmp = TempDir::new().expect("TempDir");
+    let session = session_dir(&tmp);
+    let trace_path = session.join("runtime-trace.jsonl");
+    let mut file = std::fs::File::create(&trace_path).expect("create trace file");
+    writeln!(
+        file,
+        r#"{{"phase":"activation","kind":"legacy_kind","schema_version":"run-diagnosis-trace/v1","iteration":1,"sequence":1,"ts":"2026-08-15T00:00:00Z"}}"#
+    )
+    .unwrap();
+    writeln!(
+        file,
+        r#"{{"phase":"activation","kind":"legacy_kind","schema_version":"run-diagnosis-trace/v1","iteration":1,"sequence":2,"ts":"2026-08-15T00:00:01Z"}}"#
+    )
+    .unwrap();
+    drop(file);
+
+    let report = read_runtime_trace_report(&session);
+    assert_eq!(report.record_count, 2);
+    assert_eq!(report.malformed_lines, 0);
+}
