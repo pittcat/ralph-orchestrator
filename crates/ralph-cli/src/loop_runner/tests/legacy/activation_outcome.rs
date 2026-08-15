@@ -458,6 +458,105 @@ fn u2_non_empty_merge_failure_writes_merge_failed_status() {
     );
 }
 
+/// U9 (M4): collapse the 30-line setup dance in the `u2_*`
+/// helpers into a single `assert_outcome_row` fixture. Each call
+/// sets up the workspace, seeds the channel, drives the runner
+/// path, and asserts the persisted row.
+fn assert_outcome_row(
+    channel_bytes: &[u8],
+    merge_succeeded: bool,
+    expected_status: &str,
+    extra_fields: impl FnOnce(&Value),
+) {
+    let workspace = tempfile::tempdir().expect("tempdir");
+    let _cwd = CwdGuard::set(workspace.path());
+    init_git_workspace(workspace.path());
+
+    let (ctx, event_loop) = build_isolated_executor_loop(workspace.path());
+    let channel_path = seed_hat_channel(&ctx, "executor", "primary-u9", 1);
+    std::fs::write(&channel_path, channel_bytes).unwrap();
+
+    let target = ctx.workspace().join(".ralph/events-main.jsonl");
+    std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+    std::fs::write(&target, "").unwrap();
+
+    let snapshot =
+        crate::loop_runner::activation_outcome::snapshot_channel(Some(&channel_path));
+    let merge_result = crate::loop_runner::hat_channel::merge_hat_channel(
+        &ctx,
+        &target,
+        "executor",
+        None,
+    );
+    assert_eq!(
+        merge_result.is_ok(),
+        merge_succeeded,
+        "merge success did not match expected"
+    );
+    let refined =
+        crate::loop_runner::activation_outcome::refine_after_merge(snapshot, merge_succeeded);
+    let facts = crate::loop_runner::activation_outcome::ActivationOutcomeFacts {
+        loop_id: Some(ctx.loop_id().unwrap_or("loop").to_string()),
+        channel_exists: true,
+        channel_bytes: refined.bytes,
+        channel_readable: true,
+        merge_succeeded,
+        backend_success: true,
+        backend_exit_code: Some(0),
+        watchdog_timeout: false,
+        backend_termination: false,
+        output_bytes: 0,
+        output_mentions_emit: false,
+        terminal_obligation_topics: vec!["work.done".into()],
+        ..Default::default()
+    };
+    crate::loop_runner::activation_outcome::log_activation_outcome(
+        event_loop.diagnostics().session_dir(),
+        1,
+        "executor",
+        &refined,
+        &facts,
+    );
+
+    let rows = read_outcome_rows(&event_loop);
+    assert_eq!(rows.len(), 1);
+    let row = &rows[0];
+    assert_eq!(
+        row.get("status").and_then(Value::as_str),
+        Some(expected_status),
+        "row status mismatch"
+    );
+    extra_fields(row);
+}
+
+#[test]
+fn u9_assert_outcome_row_collapsed_fixture_empty_channel() {
+    assert_outcome_row(b"", false, "empty", |row| {
+        assert_eq!(
+            row.get("fields")
+                .and_then(|v| v.get("channel_bytes"))
+                .and_then(Value::as_u64),
+            Some(0)
+        );
+    });
+}
+
+#[test]
+fn u9_assert_outcome_row_collapsed_fixture_non_empty_channel() {
+    assert_outcome_row(
+        b"{\"topic\":\"work.done\"}\n",
+        true,
+        "merged",
+        |row| {
+            assert!(row
+                .get("fields")
+                .and_then(|v| v.get("merge_succeeded"))
+                .and_then(Value::as_bool)
+                .unwrap_or(false));
+        },
+    );
+}
+
 /// T6 (U2): when `merge_hat_channel` returns Ok on a non-empty
 /// channel, the outcome status is `merged`; on an empty channel
 /// (Err or Ok), the outcome status stays `empty` because the
