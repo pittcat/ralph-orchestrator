@@ -1,0 +1,23 @@
+# Test fixture: minimal isolated preset with starting_event: debug.start.
+# Used by integration tests that need to drive StartEventMismatch (scenario
+# start_event differs from preset starting_event) without tripping the
+# execution_mode guard or unrelated static contract findings.
+# NOT a builtin preset - for test use only.
+# Pair with `-c core.yml` providing event_loop.execution_mode: isolated +
+# tasks.coordinator_hats: [hat_a].
+
+hats:
+  hat_a:
+    name: Hat A
+    description: Single test hat
+    triggers:
+      - debug.start
+    publishes:
+      - loop.complete
+    terminal_events:
+      - loop.complete
+    event_filter:
+      enabled: true
+    exempt_topics:
+      - loop.complete
+    instructions: "Do nothing."

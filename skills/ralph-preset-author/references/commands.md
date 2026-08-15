@@ -17,6 +17,13 @@
 ralph preset check -H <path|builtin:name> --strict
 ralph preset check -H <path|builtin:name> --strict --format json
 
+# Dynamic workflow verification (Unit 4 of plan 2026-08-15-0722):
+# runs version 1 scenario YAML through real EventLoop in a temp
+# workspace; reports ordered events / terminal closure / failure_kind.
+# author MUST run this for the success-path scenario before declaring
+# the preset ready; reviewer MUST require this evidence in the report.
+ralph preset verify -H <path|builtin:name> --scenario <scenario.yml> --format json
+
 # Workspace preset_lint 子集
 cargo nextest run -p ralph-cli --bin ralph -- preset_lint
 cargo nextest run -p ralph-core -- preset_lint

@@ -433,3 +433,16 @@ fixture README §8、fixture 顶部注释与本表 ID 一一对应；review 命�
 | `scope.contract.boundary_authority` | P1 | 80 | Q3 | feasibility | review-only；preset 声明 merge-boundary 作为 scope 依据，但 boundary 来源 hat 不具备独立 authority（下游不应把 merge 结果当作 scope 解析的 authority） |
 | `scope.guard.unsafe_bypass` | P0 | 95 | Q3 | feasibility | review-only；hat `instructions` 提到 `--unsafe-no-policy-check` 可以跳过 scope handoff guard；该 guard 对 scope topics 是强制不可绕过的 |
 | `scope.contract.confidence_gate_bypass` | P0 | 90 | Q4 | payload-content | review-only；`overall_confidence` 低于 90 或 `critical_unknown_count` 非零时仍标记 `proceed = true` 并推进 scope；threshold gate 必须同时满足三个条件 |
+
+### Runtime verification finding_id（plan 2026-08-15-0722，author 必填、review 必看）
+
+`ralph preset verify --scenario <yml>` 是 plan 2026-08-15-0722 落地的 deterministic dynamic verifier（version 1 scenario 跑真实 EventLoop，输出 `PresetVerifyReport`）。author 必须为 success-path 准备最小 scenario 并执行 verify，review 必须把 actual verify report 作为 AAF 之外的「动态证据」入主表。下面 ID 是通用类别，不绑定具体事故 / preset / topic：
+
+| finding_id（裸 ID） | default_severity | default_confidence | aaf_question | category | 含义 |
+|---|---|---|---|---|---|
+| `verify.dynamic_evidence_missing` | P0 | 90 | Q4 | feasibility | author 未生成 `version: 1` scenario YAML，也未跑过 `ralph preset verify`；静态契约通过但运行时可能 stall / no-progress / unclosed |
+| `verify.scenario_coverage_gap` | P1 | 80 | Q4 | feasibility | 仅有 success-path scenario，缺 failure / blocked / no-output / recovery / terminal-closure 至少一个最小场景 |
+| `verify.failure_kind_inconsistency` | P1 | 85 | Q4 | payload-content | verify report 实际 `failure_kind` 与 expect 声明不一致（如 expect.success 但 trace 出现 `unclosed_terminal` / `no_progress`） |
+| `verify.no_progress_misclassified` | P0 | 85 | Q4 | feasibility | empty-output / 非业务文本响应被 verifier 报为成功而不是 `no_progress` / `unclosed_terminal` |
+| `verify.remote_source_accepted` | P0 | 95 | Q3 | feasibility | scenario 期望 verify 在远程 hats / config source 下继续运行；verify 必须在执行前拒绝 `http(s)://` 来源 |
+| `verify.builtin_external_boundary_violated` | P1 | 80 | Q3 | feasibility | external（非 `builtin:*`）preset 的 author / review skill 步骤要求读 Rust 源码或运行 Cargo；external 黑盒模式下禁止要求 Rust 工具链 |

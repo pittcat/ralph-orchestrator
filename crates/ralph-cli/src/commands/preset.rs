@@ -21,9 +21,14 @@ use crate::preset_templates::{
     TemplateCatalog, TemplateDifficulty, TemplateManifest, Version, XPresetMetadata,
 };
 use crate::{ConfigSource, HatsSource};
-use anyhow::{Context, Result};
+use anyhow::{anyhow, Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
+use ralph_core::config::HatExecutionMode;
 use ralph_core::HatRegistry;
+use ralph_core::preset_verify::{
+    build_report as build_verify_report, evaluate_scenario, FailureKind,
+    PresetVerifyReport, ScenarioFile, SourceKind, StaticLayer, run_scenario, DriverWorkspace,
+};
 use ralph_core::runtime_contract::{
     FindingSeverity, RuntimeContractReport, RuntimeContractStrictness,
 };
@@ -113,6 +118,20 @@ pub enum PresetCommands {
         #[command(subcommand)]
         command: PresetBuiltinCommands,
     },
+    /// Run a deterministic, scripted-workflow verification on a preset
+    /// (Unit 4 of plan 2026-08-15-0722). Reuses preflight + strict
+    /// static contract check, then drives a real EventLoop over a
+    /// version 1 scenario file in an isolated temp workspace.
+    /// Rejects remote sources (no network, no remote hats/config).
+    Verify {
+        /// Path to a version 1 scenario YAML file (`--scenario`)
+        #[arg(long)]
+        scenario: PathBuf,
+
+        /// Output format (human or json)
+        #[arg(long, value_enum, default_value_t = PresetVerifyFormat::Human)]
+        format: PresetVerifyFormat,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -166,6 +185,13 @@ pub enum PresetListFormat {
 pub enum PresetShowFormat {
     Human,
     Yaml,
+    Json,
+}
+
+/// Output format for `ralph preset verify`.
+#[derive(ValueEnum, Debug, Clone, Copy)]
+pub enum PresetVerifyFormat {
+    Human,
     Json,
 }
 
@@ -266,6 +292,9 @@ pub async fn execute(
             PresetBuiltinCommands::List { format } => list_builtins(format, use_colors),
             PresetBuiltinCommands::Show { id, format } => show_builtin(&id, format, use_colors),
         },
+        Some(PresetCommands::Verify { scenario, format }) => {
+            verify_preset(config_sources, hats_source, &scenario, format, use_colors).await
+        }
         None => {
             // Default to list with current config
             list_templates(PresetListFormat::Human, use_colors)
@@ -901,6 +930,216 @@ fn preset_source_label(
         }
     }
     "current-config".to_string()
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Preset runtime verify (Unit 4)
+// ─────────────────────────────────────────────────────────────────────────────
+
+async fn verify_preset(
+    config_sources: &[ConfigSource],
+    hats_source: Option<&HatsSource>,
+    scenario_path: &PathBuf,
+    format: PresetVerifyFormat,
+    use_colors: bool,
+) -> Result<()> {
+    // Step 1 — refuse remote sources before any I/O.
+    for source in config_sources {
+        if let ConfigSource::Remote(url) = source {
+            return Err(anyhow!(
+                "ralph preset verify does not accept remote config source: {url}"
+            ));
+        }
+    }
+    if let Some(source) = hats_source {
+        let label = source.label();
+        if SourceKind::is_remote(&label) {
+            return Err(anyhow!(
+                "ralph preset verify does not accept remote hats source: {label}"
+            ));
+        }
+    }
+
+    // Step 2 — load preset/config via existing preflight.
+    let config = preflight::load_config_for_preflight(config_sources, hats_source)
+        .await
+        .context("Failed to load config for preset verify")?;
+    let config_starting_event = config
+        .event_loop
+        .starting_event
+        .clone()
+        .unwrap_or_else(|| "task.start".to_string());
+
+    // U2 (P1:adversarial:A2) — execution_mode guard: reject coordinator mode.
+    if config.event_loop.execution_mode != HatExecutionMode::Isolated {
+        let detail =
+            "preset verify requires event_loop.execution_mode: isolated; coordinator mode is \
+             not supported";
+        eprintln!("{detail}");
+        let mut report = PresetVerifyReport::default();
+        report.with_failure_kind("input_error");
+        return render_and_exit(report, format, use_colors);
+    }
+
+    // Step 3 — strict static contract check (single source of truth).
+    let source_label = preset_source_label(config_sources, hats_source);
+    let registry = HatRegistry::from_runtime_config(&config);
+    let strictness = RuntimeContractStrictness::preset_check_strict();
+    let static_report = ralph_core::runtime_contract::RuntimeContractAggregator::aggregate(
+        &source_label,
+        &config,
+        &registry,
+        strictness,
+        None,
+    );
+    let static_layer = StaticLayer {
+        passed: static_report.passed,
+        warnings: static_report
+            .findings
+            .iter()
+            .filter(|f| f.severity == FindingSeverity::Warn)
+            .count(),
+        errors: static_report
+            .findings
+            .iter()
+            .filter(|f| f.severity == FindingSeverity::Error)
+            .count(),
+        findings: static_report
+            .findings
+            .iter()
+            .map(|f| format!("[{:?}] {}", f.source, f.message))
+            .collect(),
+    };
+
+    // Source-kind derivation for the report.
+    let source_kind = hats_source
+        .map(|hs| SourceKind::from_hats_source(&hs.label()))
+        .unwrap_or(SourceKind::External);
+
+    // Static failure → return early with the static layer in the report.
+    if !static_layer.passed {
+        let mut report = PresetVerifyReport::default();
+        report.with_failure_kind("static_contract_failure");
+        report.source_kind = source_kind;
+        report.static_layer = static_layer;
+        return render_and_exit(report, format, use_colors);
+    }
+
+    // Step 4 — read and parse the scenario YAML.
+    let scenario_yaml = std::fs::read_to_string(scenario_path)
+        .with_context(|| format!("Failed to read scenario file {}", scenario_path.display()))?;
+    let scenario_file = match ScenarioFile::from_yaml(&scenario_yaml, &config_starting_event) {
+        Ok(s) => s,
+        Err(err) => {
+            // U4 (P2:adversarial:A3) — StartEventMismatch is an *input* error
+            // (the scenario's start_event must match the preset's
+            // starting_event). Reclassify to "input_error" instead of
+            // "scenario_failure" so reports are actionable.
+            let kind = "input_error";
+            let detail = format!("{err:?}");
+            let mut report = PresetVerifyReport::default();
+            report.with_failure_kind(kind);
+            report.source_kind = source_kind;
+            report.static_layer = static_layer;
+            eprintln!("scenario parse error: {detail}");
+            return render_and_exit(report, format, use_colors);
+        }
+    };
+
+    // Step 5 — run each scenario through the real driver + verdict evaluator.
+    let mut outcomes = Vec::with_capacity(scenario_file.scenarios.len());
+    let mut overall_failure: Option<FailureKind> = None;
+    let input_blob = scenario_yaml.as_str();
+    for scenario in &scenario_file.scenarios {
+        let workspace = match DriverWorkspace::new() {
+            Ok(ws) => ws,
+            Err(e) => {
+                let mut report = PresetVerifyReport::default();
+                report.with_failure_kind("runtime_exception");
+                report.source_kind = source_kind;
+                report.static_layer = static_layer;
+                eprintln!("workspace error: {e}");
+                return render_and_exit(report, format, use_colors);
+            }
+        };
+        match run_scenario(scenario, &config, &workspace, input_blob) {
+            Ok(outcome) => {
+                let scenario_report = evaluate_scenario(outcome.clone());
+                if !scenario_report.passed && overall_failure.is_none() {
+                    if let Some(kind) = &outcome.failure_kind {
+                        overall_failure = Some(kind.clone());
+                    }
+                }
+                outcomes.push((outcome, scenario_report));
+            }
+            Err(kind) => {
+                let mut report = PresetVerifyReport::default();
+                report.with_failure_kind(kind.tag().to_string());
+                report.source_kind = source_kind;
+                report.static_layer = static_layer;
+                eprintln!("runtime error: {kind:?}");
+                return render_and_exit(report, format, use_colors);
+            }
+        }
+    }
+
+    let report = build_verify_report(
+        source_kind,
+        static_layer,
+        outcomes,
+        overall_failure.as_ref(),
+        input_blob,
+    );
+    render_and_exit(report, format, use_colors)
+}
+
+fn render_and_exit(
+    report: PresetVerifyReport,
+    format: PresetVerifyFormat,
+    use_colors: bool,
+) -> Result<()> {
+    match format {
+        PresetVerifyFormat::Json => {
+            println!("{}", serde_json::to_string_pretty(&report)?);
+        }
+        PresetVerifyFormat::Human => {
+            print_verify_human_report(&report, use_colors);
+        }
+    }
+    if !report.passed {
+        std::process::exit(1);
+    }
+    Ok(())
+}
+
+fn print_verify_human_report(report: &PresetVerifyReport, _use_colors: bool) {
+    println!(
+        "Preset Verify: source_kind={:?} passed={}",
+        report.source_kind, report.passed
+    );
+    println!(
+        "static layer: passed={} warnings={} errors={}",
+        report.static_layer.passed, report.static_layer.warnings, report.static_layer.errors
+    );
+    if let Some(kind) = &report.failure_kind {
+        println!("overall failure_kind: {kind}");
+    }
+    for scenario in &report.scenarios {
+        println!(
+            "  scenario '{}': passed={} steps={} failure_kind={:?}",
+            scenario.name, scenario.passed, scenario.steps, scenario.failure_kind
+        );
+        if let Some(last_hat) = &scenario.last_observable_state.last_hat {
+            println!("    last_hat={last_hat}");
+        }
+        if let Some(topic) = &scenario.last_observable_state.last_accepted_topic {
+            println!("    last_accepted_topic={topic}");
+        }
+        println!("    trace_digest={}", scenario.trace_digest);
+    }
+    if !report.trace_digest.is_empty() {
+        println!("report trace_digest={}", report.trace_digest);
+    }
 }
 
 fn print_human_report(report: &RuntimeContractReport, use_colors: bool) {

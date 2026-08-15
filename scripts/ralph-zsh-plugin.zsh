@@ -205,6 +205,7 @@ _RALPH_PRESET_CMDS=(
   "check:Check preset/workflow contract (config, topology, payload, orphan)"
   "diff:Show differences between a local preset and its template baseline"
   "upgrade:Preview upgrade information for a local preset (dry-run only)"
+  "verify:Run a deterministic scripted-workflow verification (Unit 4 of plan 2026-08-15-0722)"
 )
 
 # Builtin template names — must mirror TemplateCatalog::template_names()
@@ -580,6 +581,14 @@ _ralph_preset_subcmd() {
         '--force[Apply upgrade even if there are user changes (not implemented in MVP)]'
       )
       _arguments $upgrade_opts
+      ;;
+    verify)
+      local -a verify_opts
+      verify_opts=(
+        '--scenario+[Path to a version 1 scenario YAML file]:file:_files'
+        '--format+[Output format]:format:(human json)'
+      )
+      _arguments $verify_opts
       ;;
   esac
 }

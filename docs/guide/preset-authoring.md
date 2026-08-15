@@ -81,6 +81,13 @@ ralph preset check -H .ralph/hats/my-flow.yml --strict
 
 # JSON 输出（用于自动化）
 ralph preset check -H .ralph/hats/my-flow.yml --format json
+
+# 动态验证（plan 2026-08-15-0722）：用 version 1 scenario YAML 跑真实
+# EventLoop（temp workspace）。author 提交前必跑 success-path scenario，
+# 并把 verify report 入交付；review 把实际 verify report 作为动态证据
+# 入主表，没有 verify report 的 preset 会被打回。
+ralph preset verify -H .ralph/hats/my-flow.yml \
+  --scenario scenarios/my-flow-success.yml --format json
 ```
 
 `ralph preset check` 检查四个方面：

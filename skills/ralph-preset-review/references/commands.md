@@ -17,6 +17,13 @@
 ralph preset check -H <path|builtin:name> --strict
 ralph preset check -H <path|builtin:name> --strict --format json
 
+# Dynamic workflow verification (Unit 4 of plan 2026-08-15-0722).
+# review REQUIRES actual verify report evidence; static-pass-only is not
+# sufficient. Failure to run verify, missing scenario file, or any
+# non-pass scenario blocks review (see `references/finding-rubric.md`).
+ralph preset verify -H <path|builtin:name> --scenario <scenario.yml> --format json
+ralph preset verify -H <path|builtin:name> --scenario <scenario.yml> --format human
+
 # Workspace preset_lint 子集
 cargo nextest run -p ralph-cli --bin ralph -- preset_lint
 cargo nextest run -p ralph-core -- preset_lint

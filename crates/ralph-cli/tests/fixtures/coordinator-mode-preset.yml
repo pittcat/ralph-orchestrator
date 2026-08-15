@@ -1,0 +1,30 @@
+# Test fixture: 3-hat coordinator preset hats (execution_mode defaults to Coordinator).
+# This preset is used to verify that preset verify rejects coordinator mode.
+# NOT a builtin preset - for test use only.
+# NOTE: The event_loop config with execution_mode: coordinator is provided via -c core.yml.
+
+hats:
+  hat_a:
+    name: Hat A
+    description: First test hat in coordinator preset
+    triggers:
+      - work.start
+    publishes:
+      - work.proceed.a
+    instructions: "Do nothing."
+  hat_b:
+    name: Hat B
+    description: Second test hat in coordinator preset
+    triggers:
+      - work.proceed.a
+    publishes:
+      - work.proceed.b
+    instructions: "Do nothing."
+  hat_c:
+    name: Hat C
+    description: Third test hat in coordinator preset
+    triggers:
+      - work.proceed.b
+    publishes:
+      - loop.complete
+    instructions: "Do nothing."
