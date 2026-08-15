@@ -253,7 +253,9 @@ scenarios:
 
 #[test]
 fn empty_response_sequence_is_allowed() {
-    // scenario with no responses is allowed (used for budget-exhaustion fixtures)
+    // scenario with no responses is allowed by the parser (used for budget-exhaustion fixtures).
+    // NOTE: parser accepts; driver rejects — see `empty_responses_terminal_none_does_not_pass_verifier`
+    // in `preset_verify_driver.rs`.
     let yaml = r#"
 version: 1
 scenarios:

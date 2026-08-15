@@ -641,6 +641,31 @@ pub fn run_scenario(
     let mut no_progress_window: usize = 0;
     let mut step_count: usize = 0;
 
+    // P0 adversarial A1: an empty response sequence with terminal: none is not
+    // a valid scenario — it represents a degenerate input that must be rejected
+    // by the driver before the loop iterates zero times. Verifies with
+    // `FailureKind::NoProgress` and `passed=false`.
+    if scenario.responses.is_empty() && matches!(scenario.expect.terminal, TerminalKind::None) {
+        let trace = build_trace(
+            scenario,
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            None,
+            None,
+            None,
+            None,
+            input_blob,
+        );
+        return Ok(ScenarioOutcome {
+            trace,
+            failure_kind: Some(FailureKind::NoProgress(
+                "empty response sequence is not a valid scenario".into(),
+            )),
+            passed: false,
+        });
+    }
+
     for (idx, response) in scenario.responses.iter().enumerate() {
         step_count = step_count.saturating_add(1);
         if step_count > scenario.limits.max_steps as usize {

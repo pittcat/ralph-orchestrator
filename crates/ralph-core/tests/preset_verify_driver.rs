@@ -14,7 +14,7 @@
 
 use ralph_core::config::{EventLoopConfig, HatConfig, RalphConfig};
 use ralph_core::preset_verify::{
-    DriverWorkspace, ScenarioFile, compute_trace_digest, run_scenario,
+    DriverWorkspace, ScenarioFile, compute_trace_digest, evaluate_scenario, run_scenario,
 };
 use std::collections::HashMap;
 
@@ -271,6 +271,56 @@ scenarios:
     assert_eq!(outcome.trace.steps.len(), 1);
     assert_eq!(outcome.trace.steps[0].output, "");
     assert!(outcome.passed, "failure_kind={:?}", outcome.failure_kind);
+}
+
+#[test]
+fn empty_responses_terminal_none_does_not_pass_verifier() {
+    // A scenario with zero responses AND terminal: none is not a valid scenario —
+    // the driver must reject it with NoProgress, and the verdict evaluator must
+    // surface that as a failure (not silently pass).
+    let yaml = r#"
+version: 1
+scenarios:
+  - name: empty-responses-terminal-none
+    responses: []
+    expect:
+      start_event: work.start
+      accepted_events: []
+      forbidden_events: []
+      terminal: none
+    limits:
+      max_steps: 1
+      no_progress_steps: 1
+"#;
+    let parsed = ScenarioFile::from_yaml(yaml, &starting_event()).expect("parse");
+    let scenario = &parsed.scenarios[0];
+    let config = make_single_hat_terminal_config();
+    let workspace = DriverWorkspace::new().expect("workspace");
+
+    let outcome = run_scenario(scenario, &config, &workspace, "blob").expect("run");
+
+    // Driver must return a failing outcome with NoProgress.
+    assert!(
+        matches!(
+            outcome.failure_kind,
+            Some(ralph_core::preset_verify::FailureKind::NoProgress(_))
+        ),
+        "expected NoProgress, got {:?}",
+        outcome.failure_kind
+    );
+    assert!(!outcome.passed, "outcome must not pass");
+
+    // R2 gate (U3 verdict reclassification): evaluate_scenario returns
+    // passed=false for NoProgress under terminal:none. U3 covers this
+    // assertion in `no_progress_under_terminal_none_forces_passed_false` in
+    // `preset_verify_verdict.rs`; this driver-level test only asserts the
+    // driver classification here.
+    let report = evaluate_scenario(outcome);
+    assert_eq!(
+        report.failure_kind.as_deref(),
+        Some("no_progress"),
+        "driver failure_kind tag must propagate to evaluator"
+    );
 }
 
 #[test]
