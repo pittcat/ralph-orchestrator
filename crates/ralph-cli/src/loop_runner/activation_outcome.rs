@@ -31,8 +31,12 @@ use ralph_core::diagnostics::{
     RUNTIME_TRACE_SCHEMA_VERSION, RuntimeTraceEntry, RuntimeTraceLogger, RuntimeTracePhase,
 };
 use ralph_core::event_loop::ProcessedEvents;
+use ralph_core::{EventLoop, LoopContext, TerminationReason};
+use ralph_proto::HatId;
 use serde_json::{Map, Value, json};
 use tracing::warn;
+
+use super::execution::ExecutionOutcome;
 
 /// Stable kind tag for activation outcome rows.
 pub const ACTIVATION_OUTCOME_KIND: &str = "hat_activation_outcome";
@@ -232,6 +236,48 @@ impl ActivationOutcomeFacts {
                 }
             }
             None => Self::default(),
+        }
+    }
+
+    /// Single source of truth for the activation outcome row's
+    /// bounded scalar fields. Replaces the 13-field literal that
+    /// previously lived in `activation_outcome_close.rs` and
+    /// `entry.rs::merge_isolated_channel_on_interrupt` so a
+    /// future schema addition does not require syncing multiple
+    /// construction sites.
+    #[allow(clippy::too_many_arguments)]
+    pub fn from_runner(
+        ctx: &LoopContext,
+        event_loop: &EventLoop,
+        hat: &HatId,
+        snapshot: &ChannelSnapshot,
+        merge_succeeded: bool,
+        outcome: &ExecutionOutcome,
+        output: &str,
+        success: bool,
+        backend_termination: Option<&TerminationReason>,
+        output_mentions_emit: bool,
+    ) -> Self {
+        let refined = refine_after_merge(snapshot.clone(), merge_succeeded);
+        let terminal_obligation_topics = event_loop
+            .registry()
+            .get_config(hat)
+            .map(|hat| hat.terminal_events.clone())
+            .unwrap_or_default();
+        Self {
+            loop_id: ctx.loop_id().map(|s| s.to_string()),
+            channel_exists: channel_exists_for(refined.status),
+            channel_bytes: refined.bytes,
+            channel_readable: channel_readable_for(refined.status),
+            merge_succeeded,
+            backend_success: success,
+            backend_exit_code: outcome.backend_exit_code,
+            watchdog_timeout: outcome.watchdog_timeout,
+            backend_termination: backend_termination.is_some(),
+            output_bytes: output.len() as u64,
+            output_mentions_emit,
+            terminal_obligation_topics,
+            ..Self::default()
         }
     }
 

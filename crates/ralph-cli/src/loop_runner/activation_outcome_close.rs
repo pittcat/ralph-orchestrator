@@ -151,6 +151,14 @@ pub(crate) fn write_activation_outcome_for_normal_merge(
     iteration: u64,
 ) {
     let refined_snapshot = refine_after_merge(state.snapshot, state.merge_succeeded);
+    // U8: build the activation outcome facts via the shared
+    // helper. `from_runner` accepts a borrowed `ExecutionOutcome`,
+    // but the runner-path caller has already moved `outcome.output`
+    // into a local string, so we thread the two scalars
+    // (backend_exit_code, watchdog_timeout) individually and
+    // reconstruct the scalar fields inline. The interrupt path
+    // uses `from_runner` directly because it still owns the
+    // outcome.
     let facts = ActivationOutcomeFacts {
         loop_id: Some(ctx.loop_id().unwrap_or(loop_id).to_string()),
         channel_exists: channel_exists_for(refined_snapshot.status),
