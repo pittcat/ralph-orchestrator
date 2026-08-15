@@ -88,6 +88,22 @@ pub fn channel_exists_for(status: ActivationOutcomeStatus) -> bool {
     !matches!(status, ActivationOutcomeStatus::Missing)
 }
 
+/// U11 (R10): strip the workspace prefix from a channel path so
+/// the `source_ref` field in the activation outcome row does not
+/// leak the operator's local absolute path. Falls back to the
+/// raw path display when the channel is outside the workspace,
+/// or to `"<unknown>"` for a `None` channel path. The
+/// `inner.rs:3722` empty-channel `warn!` and the `entry.rs:128`
+/// interrupt-path `warn!` mirror this helper.
+pub fn channel_reference_for_log(
+    path: Option<&std::path::Path>,
+    workspace: &std::path::Path,
+) -> Option<String> {
+    let p = path?;
+    let stripped = p.strip_prefix(workspace).unwrap_or(p);
+    Some(stripped.display().to_string())
+}
+
 /// Snapshot of the pre-merge channel state. The runner captures this
 /// *before* invoking `merge_hat_channel` so the activation outcome
 /// row can describe the raw state even when `merge_hat_channel`
@@ -443,7 +459,7 @@ mod tests {
     }
 
     #[test]
-    fn channel_readable_and_exists_truth_table() {
+fn channel_readable_and_exists_truth_table() {
         // Missing → channel_exists=false, channel_readable=false.
         // Unreadable → channel_exists=true (path present), channel_readable=false.
         // Everything else → both true.
@@ -467,6 +483,29 @@ mod tests {
                 "channel_readable_for({status:?})",
             );
         }
+    }
+
+    #[test]
+    fn channel_reference_for_log_strips_workspace_prefix() {
+        let workspace = std::path::Path::new("/tmp/work");
+        // Channel inside the workspace → workspace-relative path.
+        let inner = std::path::Path::new("/tmp/work/.ralph/agent/events-hat-1.jsonl");
+        let stripped = channel_reference_for_log(Some(inner), workspace);
+        assert_eq!(
+            stripped.as_deref(),
+            Some(".ralph/agent/events-hat-1.jsonl"),
+            "channel inside workspace must be stripped"
+        );
+        // Channel outside the workspace → fall back to absolute path display.
+        let outer = std::path::Path::new("/var/tmp/events-hat-1.jsonl");
+        let fallback = channel_reference_for_log(Some(outer), workspace);
+        assert_eq!(
+            fallback.as_deref(),
+            Some("/var/tmp/events-hat-1.jsonl"),
+            "channel outside workspace must fall back to raw display"
+        );
+        // None channel → None.
+        assert!(channel_reference_for_log(None, workspace).is_none());
     }
 
     #[test]
