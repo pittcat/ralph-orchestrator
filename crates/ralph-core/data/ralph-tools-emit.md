@@ -57,6 +57,12 @@ ralph emit --schema work.done | jq -r .protocol_hash   # 改后
 
 **Agent 用法（HARD RULE）：** 在构造任何业务事件 payload 之前，**先**跑 `ralph emit --schema <topic>`，从返回的 `required_fields` 数组取得字段清单。`--schema` 的 topic 是 flag 的值；不要写成 `ralph emit <topic> --schema`。
 
+`required_fields` 的权威来源是当前 preset 的 `event_policy.schemas`：每个 topic 的必填字段由 schema 的 `required_fields` 数组声明（见 `ralph emit --schema <TOPIC>` 的返回结果）。不要凭记忆构造 payload，必须对照 schema 补齐。
+
+**Target hat 显式声明**：若 schema 的 `required_fields` 包含 `target_hat`，emit 时必须通过 `--triggered <HAT>` 显式指定目标 hat；loop runner 在 isolated 模式下不会自动推导 `target_hat`。
+
+**终态完成的唯一合法信号**：`recorded=true`（正式 emit 的 `--output json` 返回值）是唯一表示事件已落盘的信号。`--policy-check` 的 `ok=true` 只是预检通过，`recorded` 必须是 `false`；不要把预检通过当成发布完成。
+
 当你正由 `ralph run` 激活为某个 **hat**（本轮角色）时，runner 已注入当前 loop 的 `RALPH_HATS_SOURCE`（hat 集合来源）和 `RALPH_CONFIG`（项目配置来源）。这两个值是当前运行上下文的权威来源：
 
 - **不要**扫描 workspace 中的 YAML 来猜 preset。

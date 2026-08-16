@@ -79,6 +79,11 @@ ANCHORS: tuple[tuple[str, str], ...] = (
     ("skills/ralph-preset-review/references/finding-rubric.md", "verify.dynamic_evidence_missing"),
     ("skills/ralph-preset-author/references/finding-rubric.md", "verify.scenario_coverage_gap"),
     ("skills/ralph-preset-review/references/finding-rubric.md", "verify.scenario_coverage_gap"),
+    # Activation exit protocol anchors (plan 2026-08-16-1015).
+    ("crates/ralph-core/data/ralph-tools.md", "Activation exit protocol"),
+    ("crates/ralph-core/data/ralph-tools-emit.md", "recorded=true"),
+    ("crates/ralph-core/data/ralph-tools-emit.md", "required_fields"),
+    ("crates/ralph-core/data/ralph-tools-recovery-directives.md", "dynamic terminal contract"),
 )
 
 # Capability-triggered fixtures from plan 2026-08-02-001 U3.
