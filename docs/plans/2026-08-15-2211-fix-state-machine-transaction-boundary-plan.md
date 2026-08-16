@@ -38,6 +38,7 @@ execution: code
 - 输出：`StateMachineDecision`/`StateMachineTransitionDelta`、ledger commit/outbox receipt、bus publish 或确定性错误。
 - 状态：只有最终 accepted + durable 的 delta 改变 live/replay state；失败时 live rollback，outbox projection 可留待 restart repair。
 - 错误：ledger/outbox commit failure 必须 fail-closed，不 publish success；replay repair 保持现有 idempotent 语义；拒绝事件保留 diagnostic event，不改变 StateMachine live maps。
+- **In-process rollback 边界（plan 2026-08-15-2211 U6 增补）**：本计划的 live runtime 回滚**仅覆盖 in-process rollback**，即 `apply_state_machine_decisions` → `commit_state_machine_projection` 同一进程内的故障回调路径（apply 失败 / commit 失败 → 恢复 pre-apply snapshot）。**不覆盖**进程级崩溃（SIGKILL / OOM / panic / 宿主机断电 / OS 重启等）打断 `apply_state_machine_decisions` 与 `commit_state_machine_projection` 之间的情况——重启 rehydration 看到 ledger 终点 N' < 崩溃前 in-flight N 时，live 重建后会与崩溃前不一致。Crash safety 留待后续 plan 单独处理（参见末尾「已知未覆盖项」）。
 - 兼容：StateMachine disabled/None、`projection=None`、旧 ledger 无 StateMachine delta、旧 transition identity 必须继续通过现有测试。
 - 性能：仍以 semantic delta 持久化，不保存完整 runtime snapshot；candidate clone 只在启用路径使用。
 - 安全/权限：无外部权限变化；不得通过恢复/重放绕过 acceptance gate。
@@ -134,6 +135,7 @@ Feature: StateMachine 的接受、提交与 replay 保持一致
 | D3 | durable 失败如何保证 live 回滚？ | 让 ledger commit 后才 apply live；保存 runtime clone 后在失败时恢复；新增事务对象 | 在当前调用链中保存 apply 前 runtime snapshot，projection commit 失败执行精确 restore；outbox 保留 repair | E2、E4、E5、E6 | 先 commit ledger 需解决 ledger delta 与 live 同一结果但会扩大 AcceptedTransition API；新事务对象无现有模式 | 0.90 |
 | D4 | 是否改变 projection identity/source？ | 顺便改 identity；保持现状，仅新增测试 | 本计划不改变 identity/source；若 U1/U2 Red 明确证明 source collision 才停止并另立决策 | E9、E10、用户限制“不引入回归” | 当前证据支持事务/因果缺口，不足以把 identity migration 绑定进 P0 修复 | 0.92 |
 | D5 | 如何保护普通 preset？ | 把所有事件都走 StateMachine transaction；只在 projection Some 且 enabled 时走新路径 | 只修 StateMachine projection Some 路径；None/disabled/direct channel byte-for-byte regression | E11 | 全局改动会影响默认 preset 和诊断事件 | 0.98 |
+| D6 | **进程级崩溃（SIGKILL / OOM / panic / OS 重启）打断 apply 与 commit 之间是否需要安全保证？** | 在本计划内引入 WAL + 进程级 barrier；接受 in-process rollback only 并显式声明已知未覆盖项 | 接受 in-process rollback only（plan 2026-08-15-2211 U6 决策） | E2、E4、E5、E6 + plan §1「In-process rollback 边界」+ Unit 3 §3「In-process rollback 边界」 | 新事务框架超出 D3 决策范围；本计划的 live/ledger 事务边界已在 in-process 边界内闭环，进程级恢复需要 fsync + replay rewind 策略，留待后续 plan | 0.85 |
 
 没有低于 0.85 的关键决策。D3 的实现边界必须在 U3 Red 前用当前 clone/rollback API 验证；若失败，Unit 3 停止，不得让 Executor 自行换架构。
 
@@ -203,6 +205,8 @@ Unit 4：restart/replay/idempotency 及非 StateMachine 回归
 
 ### Unit 3：StateLedger projection 失败时回滚 live runtime
 
+**In-process rollback 边界（plan 2026-08-15-2211 U6 增补）**：本 Unit 标题中的「live runtime 回滚到提交前」**仅覆盖 in-process rollback**，即 `apply_state_machine_decisions` 与 `commit_state_machine_projection` 同一进程内的故障回调路径（apply 失败 / commit 失败的回调路径）；**不覆盖**进程级崩溃（SIGKILL / OOM / panic / 宿主机断电）打断上述两步之间的情况。重启 rehydration 看到 ledger 终点 N' < 崩溃前 in-flight N 时，live 重建后会与上次崩溃前不一致，属于已知未覆盖项（参见 plan 末尾「已知未覆盖项」段与 D6 决策）。Crash safety 留待后续 plan 单独处理。
+
 1. Unit 目标：outbox 已写但 StateLedger projection commit 失败时，EventLoop live StateMachine 恢复到提交前，且不 publish。
 2. 对应：R3、S3、D3、E2/E4/E5/E6。
 3. 外部结果：调用返回 commit failure；bus 没有成功事件；live map/flags/count 与 fault 前完全相同；outbox 保留 projection。
@@ -225,6 +229,8 @@ Unit 4：restart/replay/idempotency 及非 StateMachine 回归
 20. 风险：rollback snapshot 可能覆盖并发期间无关状态；检测：commit helper 的 exclusive lock/单线程 EventLoop 调用链；缓解：snapshot 只在本次 projection boundary 捕获并按 transition id 精确恢复，不做全 LoopState 替换。
 
 ### Unit 4：restart/replay/idempotency 与普通 preset 回归
+
+**In-process rollback 边界（plan 2026-08-15-2211 U6 增补）**：本 Unit 验证的「fresh ledger replay 与 live summary 等价」也仅在 in-process rollback 边界内成立。若进程在 `apply_state_machine_decisions` 与 `commit_state_machine_projection` 之间被 SIGKILL / OOM / panic 终止，重启 rehydration 会从 ledger 终点重建 runtime，与崩溃前 in-flight 状态不一致；这是已知未覆盖项，不在 U4 验证范围。Crash safety 留待后续 plan（参见 plan 末尾「已知未覆盖项」与 D6 决策）。
 
 1. Unit 目标：U1-U3 修复后，重新启动、重复 repair、disabled/no-projection 和 diagnostic/control 路径不回归。
 2. 对应：R4、S4-S5、D4/D5、E7/E8/E11。
@@ -307,3 +313,20 @@ S1-S5 全通过；PMI-011 旧断言保留且增加 live unchanged；无新增 sk
 | 所有关键决策是否有 Evidence | 是 | 第 2.2、3 节 |
 | 计划是否可以严格串行执行 | 是 | 第 8 节 |
 
+
+## 已知未覆盖项（deferred）
+
+> plan 2026-08-15-2211 U6 增补：本计划**仅承诺 in-process rollback**（`apply_state_machine_decisions` 与 `commit_state_machine_projection` 同一进程内的故障回调路径）。下列场景超出本计划的 in-process 边界，属于已知未覆盖项，留待后续 plan 单独处理。
+
+| 场景 | 触发条件 | 当前 in-process rollback 行为 | 期望方案（后续 plan） |
+|------|----------|-------------------------------|------------------------|
+| 进程级崩溃：SIGKILL / OOM / panic / OS 重启 / 宿主机断电 | 打断 `apply_state_machine_decisions` 与 `commit_state_machine_projection` 之间 | live 已 mutate N 个 delta，ledger 终点 N' < N；重启 rehydration 看到 ledger 终点 N'，重建的 runtime 与崩溃前 in-flight 状态不一致 | 进程级 fsync + barrier + replay rewind 策略，或显式两阶段提交 |
+| 并发场景 | 多线程同时 mutate live runtime（当前 EventLoop 是单线程，无此场景） | in-process rollback 只覆盖单线程调用链；并发需要独立的并发模型 | 不在本计划范围（保留单线程 EventLoop） |
+| 跨进程协调 | 多进程 / 分布式 EventLoop 实例协调同一 ledger | in-process rollback 不覆盖 | 不在本计划范围 |
+
+### Crash safety follow-up plan 入口
+
+- 触发条件：U3 §3「In-process rollback 边界」已声明不覆盖进程级崩溃；当 operator 在生产中观察到崩溃后 rehydration 与崩溃前 in-flight 不一致（adversarial A1 列举），需要独立 plan 处理 crash safety。
+- 决策依据：D6 决策表 + plan §1「In-process rollback 边界」+ Unit 3 §3 + Unit 4 §9。
+- 范围预估：需要新增 fsync 屏障、replay rewind 策略、可能需要扩展 `StateLedger::commit` 接受 fsync 序号；不在本计划内做。
+- 拒绝在本计划内做的理由：本计划核心目标是消除 P0 颗粒度错配 + U1/U2 验收断言无效 + revalidation 双重发布，crash safety 是另一类问题，混入会让单 plan 风险叠加。
