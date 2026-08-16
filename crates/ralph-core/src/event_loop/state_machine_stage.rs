@@ -27,41 +27,63 @@ use crate::state_machine::{
     StateMachineTransitionId,
 };
 
-/// Plan GAP-02 / Unit 1: re-validation helper. Validates each event
-/// in `survivor_events` against the live runtime snapshot (not the
-/// cumulative candidate clone) and produces fresh
-/// `CandidateStateMachineDecision`s. A downstream-rejected predecessor
-/// cannot influence a later survivor's decision because revalidation
-/// starts from the live state for every call.
+/// Plan GAP-02 / Unit 2 + 2026-08-15-2211 U5: revalidation helper.
+/// Validates each event in `events` against the candidate runtime
+/// snapshot. A downstream-rejected predecessor cannot influence a
+/// later survivor's decision because revalidation starts from the
+/// snapshot for every call.
 ///
-/// This is called ONLY at the apply boundary (pending_publish) after
-/// downstream gates have filtered the candidate batch down to survivors.
-/// The live runtime is NOT mutated by this function.
+/// Returns the in-flight [`CandidateStateMachineDecision`]s (used
+/// by the apply stage to materialise [`StateMachineTransitionDelta`]
+/// + outbox receipt), plus the rejected/ignored findings so the
+/// caller can surface them on the bus. The helper no longer returns
+/// an `accepted: Vec<JsonlEvent>` because `accepted_events` is the
+/// rejection-filtered subset of the input — the caller already has
+/// the input list and only needs the decision metadata.
 fn validate_events_against_candidate(
     candidate: &mut StateMachineRuntimeState,
     events: &[JsonlEvent],
     sm_config: &StateMachineConfig,
     bus: &mut EventBus,
-) -> (Vec<JsonlEvent>, Vec<CandidateStateMachineDecision>) {
-    let mut accepted: Vec<JsonlEvent> = Vec::with_capacity(events.len());
-    let mut pending: Vec<CandidateStateMachineDecision> = Vec::new();
+) -> (
+    Vec<CandidateStateMachineDecision>,
+    Vec<crate::state_machine::StateMachineFinding>,
+    Vec<crate::state_machine::StateMachineFinding>,
+) {
+    let mut pending: Vec<CandidateStateMachineDecision> = Vec::with_capacity(events.len());
+    let mut rejected: Vec<crate::state_machine::StateMachineFinding> = Vec::new();
+    let mut ignored: Vec<crate::state_machine::StateMachineFinding> = Vec::new();
 
     for event in events {
         let topic = event.topic.clone();
         let payload = event.payload.clone();
         let event_for_emit = event.clone();
 
+        // Capture the candidate's instance maps BEFORE the validator
+        // mutates them so the open/close decision reflects the
+        // pre-validation state — validate_event inserts the
+        // transition's effect into the maps, so a post-mutation read
+        // would always report `opens_instance=false, closes_instance=true`
+        // for opening transitions, which inverts the semantics the
+        // apply stage relies on.
+        let (pre_opens_map, pre_closed_map) = {
+            let (opens, closed) = candidate.instance_maps();
+            (opens.clone(), closed.clone())
+        };
+
         let decision = candidate.validate_event(topic.as_str(), payload.as_deref(), sm_config);
 
         match &decision {
             StateMachineDecision::Accept { instance_key, .. } => {
                 let instance_key = instance_key.clone();
-                let (opens_map, closed_map) = candidate.instance_maps();
                 let key_ref = instance_key.as_deref().unwrap_or("");
+                // Plan 2026-08-15-2211 U5: compute the open/close
+                // decision from the PRE-validation instance maps so
+                // the apply stage gets the correct semantic flags.
                 let opens_instance =
-                    !opens_map.contains_key(key_ref) && !closed_map.contains_key(key_ref);
-                let closes_instance =
-                    opens_map.contains_key(key_ref) && !closed_map.contains_key(key_ref);
+                    !pre_opens_map.contains_key(key_ref) && !pre_closed_map.contains_key(key_ref);
+                let closes_instance = pre_opens_map.contains_key(key_ref)
+                    && !pre_closed_map.contains_key(key_ref);
                 let (term_obs, term_hon) = candidate.observed_snapshot();
                 pending.push(CandidateStateMachineDecision {
                     event: event_for_emit.clone(),
@@ -71,31 +93,55 @@ fn validate_events_against_candidate(
                     accepted_at_terminal_observed: term_obs,
                     accepted_at_terminal_honored: term_hon,
                 });
-                accepted.push(event_for_emit);
             }
             StateMachineDecision::Reject { finding } => {
+                let finding = finding.clone();
                 bus.publish(ralph_proto::Event::new(
                     "event.state_machine.rejected",
-                    serde_json::to_string(&finding).unwrap_or_else(|_| finding.reason.clone()),
+                    serde_json::to_string(&finding)
+                        .unwrap_or_else(|_| finding.reason.clone()),
                 ));
+                rejected.push(finding);
             }
             StateMachineDecision::Ignore { finding } => {
+                let finding = finding.clone();
                 bus.publish(ralph_proto::Event::new(
                     "event.state_machine.ignored",
-                    serde_json::to_string(&finding).unwrap_or_else(|_| finding.reason.clone()),
+                    serde_json::to_string(&finding)
+                        .unwrap_or_else(|_| finding.reason.clone()),
                 ));
+                ignored.push(finding);
             }
             StateMachineDecision::DiagnosticOnly { finding } => {
+                let finding = finding.clone();
                 bus.publish(ralph_proto::Event::new(
                     "event.state_machine.diagnostic",
-                    serde_json::to_string(&finding).unwrap_or_else(|_| finding.reason.clone()),
+                    serde_json::to_string(&finding)
+                        .unwrap_or_else(|_| finding.reason.clone()),
                 ));
-                accepted.push(event_for_emit.clone());
+                // DiagnosticOnly keeps the event on the survivor
+                // list (it does NOT advance state) so we record a
+                // synthetic Accept decision with opens/closes=false
+                // and the current terminal flags. The caller decides
+                // whether to publish this as a business event based
+                // on the helper's downstream filter.
+                let (term_obs, term_hon) = candidate.observed_snapshot();
+                pending.push(CandidateStateMachineDecision {
+                    event: event_for_emit.clone(),
+                    decision: StateMachineDecision::Accept {
+                        instance_key: None,
+                        new_state: String::new(),
+                    },
+                    opens_instance: false,
+                    closes_instance: false,
+                    accepted_at_terminal_observed: term_obs,
+                    accepted_at_terminal_honored: term_hon,
+                });
             }
         }
     }
 
-    (accepted, pending)
+    (pending, rejected, ignored)
 }
 
 impl EventLoop {
@@ -155,13 +201,31 @@ impl EventLoop {
 
         // Delegate to the shared helper — same validation logic
         // for both candidate-stage and revalidation at the apply
-        // boundary.
-        validate_events_against_candidate(
+        // boundary. The candidate stage publishes rejected /
+        // ignored diagnostics to the bus exactly once per
+        // rejection (the helper emits the diagnostic event
+        // synchronously inside the match arm above).
+        let (pending, _rejected, _ignored) = validate_events_against_candidate(
             &mut candidate,
             &events,
             &sm_config,
             &mut self.bus,
-        )
+        );
+
+        // Plan 2026-08-15-2211 U5: the legacy candidate stage
+        // returned an `accepted: Vec<JsonlEvent>` so the caller
+        // could map survivors back to raw events. The new
+        // signature returns pending decisions only; the caller
+        // already has the input list and uses each pending
+        // decision's embedded `event` field as the survivor key.
+        // To preserve the wire contract at the apply boundary
+        // (legacy.rs filter), we re-emit the events whose
+        // decision landed in `pending` as the first tuple slot.
+        let accepted_events: Vec<JsonlEvent> = pending
+            .iter()
+            .map(|cand| cand.event.clone())
+            .collect();
+        (accepted_events, pending)
     }
 
     /// Plan GAP-02 / Unit 1: re-validates the final survivor events
@@ -173,7 +237,16 @@ impl EventLoop {
     /// survivor's decision.
     ///
     /// The live runtime is NOT mutated by this function; it only
-    /// produces fresh candidates for the apply stage.
+    /// produces fresh candidates for the apply stage. Plan
+    /// 2026-08-15-2211 U5: rejected/ignored diagnostics from the
+    /// revalidation stage ARE published exactly once to the bus
+    /// (the helper emits them inside the match arm) — this lets
+    /// operators see when a survivor that the candidate stage
+    /// accepted gets re-rejected against the live snapshot, e.g.
+    /// due to a downstream-rejected predecessor. The accepted
+    /// Vec is no longer returned because the revalidation
+    /// boundary uses pending decisions only; the caller has the
+    /// survivor events from `pending_state_machine_candidates`.
     pub(super) fn revalidate_state_machine_candidates_in_order(
         &mut self,
         survivor_events: &[JsonlEvent],
@@ -193,7 +266,7 @@ impl EventLoop {
             .unwrap_or_default();
 
         let mut candidate = candidate;
-        let (_, pending) =
+        let (pending, _rejected, _ignored) =
             validate_events_against_candidate(&mut candidate, survivor_events, &sm_config, &mut self.bus);
         pending
     }
