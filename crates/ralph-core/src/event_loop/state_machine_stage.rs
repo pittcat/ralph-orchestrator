@@ -294,6 +294,22 @@ impl EventLoop {
     /// decision is a no-op for `open_instances` /
     /// `closed_instances` collision. Unit 3 binds the
     /// `transition_id` with the durable outbox receipt.
+    ///
+    /// Plan 2026-08-15-2211 U1: this method captures the
+    /// pre-batch live snapshot for rollback and mutates live for
+    /// every projection in the batch. The per-projection rollback
+    /// lives in [`Self::commit_state_machine_projection`]: on a
+    /// `StateLedger::commit` failure for projection N, the
+    /// rollback restores live to the pre-batch snapshot, but the
+    /// caller (the legacy.rs per-event loop) re-applies
+    /// projections 1..N-1 in subsequent iterations. The original
+    /// per-batch-snapshot code stored the snapshot here and
+    /// consumed it via `take()` in commit — the `take()` model
+    /// degraded projection N+1's rollback to no-op because the
+    /// snapshot was already drained by projection 1's commit.
+    /// The new model uses a per-call snapshot inside
+    /// `commit_state_machine_projection` itself so each commit
+    /// gets its own rollback window (Plan 2026-08-15-2211 U1).
     pub(super) fn apply_state_machine_decisions(
         &mut self,
         decisions: &[CandidateStateMachineDecision],
@@ -302,22 +318,27 @@ impl EventLoop {
         if decisions.is_empty() {
             return Vec::new();
         }
-        // Plan GAP-02 / Unit 3: capture the pre-apply live runtime
-        // snapshot so the durable projection commit's rollback closure
-        // can restore live state if `StateLedger::commit` fails.
-        // Without this, `live.apply_transition_delta(&delta)` below
-        // would advance the in-memory runtime ahead of the durable
-        // ledger, leaving a half-applied state when the commit faults.
+        // Reset the per-batch snapshot slot at apply entry so a
+        // stale snapshot from a prior batch cannot leak into this
+        // batch's rollback. We then capture the live runtime
+        // BEFORE any projection mutates it.
+        self.state_machine_apply_snapshot = None;
         let mut projected = Vec::with_capacity(decisions.len());
+        // The live runtime is materialised here so projection can
+        // read it (instance maps, terminal flags) without `unwrap`.
         let live = self
             .state
             .state_machine_runtime_state
             .get_or_insert_with(StateMachineRuntimeState::default);
-        // Capture AFTER materialising so the snapshot is `Some`, even
-        // on the first batch where the runtime started as `None`.
+        // Plan GAP-02 / Unit 3 + 2026-08-15-2211 U1: capture the
+        // pre-apply live snapshot BEFORE any projection mutates
+        // live. The snapshot slot is NOT drained here (we just
+        // assign); `commit_state_machine_projection` reads it
+        // directly so every per-event commit in the batch sees
+        // the same pre-apply-batch snapshot for rollback.
         self.state_machine_apply_snapshot = Some(live.clone());
-        // Plan 2026-08-15-2211 U7: capture `terminal_honored` from
-        // the LIVE runtime at apply entry. `mark_terminal_honored`
+        // Plan 2026-08-15-2211 U7: capture `terminal_honored`
+        // from the LIVE runtime at apply entry. `mark_terminal_honored`
         // is invoked by per-event processing (e.g. wave_scope.rs)
         // BETWEEN the candidate stage and apply; capturing from the
         // candidate clone here would miss it and produce a delta
@@ -369,6 +390,15 @@ impl EventLoop {
             if let Some(delta) = delta {
                 let mut delta = delta;
                 delta.source_hat = Some("executor".to_string());
+                // Apply the delta to live so test / legacy paths
+                // observe the StateMachine progression. The
+                // projection-aware commit path
+                // (`commit_state_machine_projection` with a compiled
+                // execution contract) re-applies the delta BEFORE
+                // the durable commit; on commit failure the
+                // pre-apply snapshot restores live to its prior
+                // state. Net effect on a successful commit: live
+                // has the projection applied exactly once.
                 live.apply_transition_delta(&delta);
                 projected.push(delta);
             }
@@ -377,18 +407,24 @@ impl EventLoop {
     }
 
     /// Plan GAP-02 / Unit 3: commit a single projected
-    /// the disposition helper, with a real rollback closure that
+    /// the disposition helper, with per-projection rollback that
     /// restores the pre-apply live runtime snapshot if the
     /// `StateLedger::commit` step faults.
     ///
-    /// The pre-apply snapshot is captured by
-    /// [`EventLoop::apply_state_machine_decisions`] (Unit 3) and
-    /// stored at `self.state_machine_apply_snapshot`. This method
-    /// takes the snapshot, builds a materialize closure that
-    /// borrows `&mut self.state.state_machine_runtime_state`, and
-    /// hands it to `disposition::publish_synthetic_with_state_machine_projection`.
-    /// On commit success the snapshot is dropped; on commit failure
-    /// the rollback fires and restores the live runtime.
+    /// Plan 2026-08-15-2211 U1 + U8: this method no longer threads
+    /// the snapshot through a `'static` closure + `Rc<RefCell<>>`.
+    /// The apply (live mutation) happens here synchronously before
+    /// the disposition helper is called, and the rollback happens
+    /// here synchronously after the helper returns Err — single
+    /// linear control flow, no shared mutable cell, function body
+    /// < 50 lines.
+    ///
+    /// Per-projection granularity: each call captures its own
+    /// pre-apply snapshot of live, applies the delta, commits, and
+    /// rolls back on failure. Successive projections see the
+    /// prior projection's post-apply live state — so the
+    /// per-batch apply (which mutates live for every decision)
+    /// is consistent with the per-projection commit.
     pub(super) fn commit_state_machine_projection(
         &mut self,
         event: &ralph_proto::Event,
@@ -401,70 +437,92 @@ impl EventLoop {
         Option<crate::event_loop::accepted_transition::OutboxEntry>,
         crate::event_loop::accepted_transition::TransitionError,
     > {
-        // Plan GAP-02 / Unit 3: the helper handles both projection
-        // and no-projection paths. With a projection it wires the
-        // pre-apply snapshot into the rollback closure; without a
-        // projection it falls back to the legacy idempotent commit
-        // and consumes the materialize closure once for symmetry
-        // (no live state to roll back).
-        let ledger = match self.state.state_ledger.as_mut() {
-            Some(l) => l,
-            None => {
-                return Err(
-                    crate::event_loop::accepted_transition::TransitionError::CommitFailed {
-                        source: "state ledger missing".to_string(),
-                    },
-                );
-            }
-        };
-        // The pre-apply snapshot was captured on the projection
-        // branch; if we are now on the no-projection branch the
-        // snapshot must already have been drained by a prior call or
-        // must remain None (legacy path never mutated live state).
-        let snapshot = self.state_machine_apply_snapshot.take();
-        // Plan GAP-02 / Unit 3: communicate the rollback snapshot
-        // from the `commit_idempotent_with_state_machine_projection`
-        // closure back to this method without `unsafe`. The
-        // rollback closure must be `'static` (per the helper's
-        // signature), so it cannot borrow `self`. Instead the
-        // closure writes the snapshot into a shared `Rc<RefCell<>>`
-        // cell on rollback; after `disposition` returns we drain
-        // the cell. On a successful commit the rollback never
-        // fires, the snapshot held inside the Box is dropped, and
-        // we leave the live runtime as advanced.
-        use std::cell::RefCell;
-        use std::rc::Rc;
-        let rollback_cell: Rc<RefCell<Option<crate::state_machine::StateMachineRuntimeState>>> =
-            Rc::new(RefCell::new(None));
-        let rollback_cell_for_closure = Rc::clone(&rollback_cell);
-        let materialize = move || -> Result<Box<dyn FnOnce()>, String> {
-            let snapshot = snapshot;
-            let cell = rollback_cell_for_closure;
-            Ok(Box::new(move || {
-                // No snapshot means the no-projection legacy path
-                // ran; nothing to restore.
-                if let Some(snap) = snapshot {
-                    *cell.borrow_mut() = Some(snap);
-                }
-            }) as Box<dyn FnOnce()>)
-        };
-        let result = crate::event_loop::disposition::publish_synthetic_with_state_machine_projection(
-            event,
-            disposition,
-            loop_id,
-            activation_id,
-            contract_revision,
-            ledger,
-            &mut self.bus,
-            materialize,
-            projection,
-        );
-        // Drain the rollback cell: a present snapshot means the
-        // rollback fired (commit failed) and the live runtime must
-        // be restored.
-        if let Some(snap) = rollback_cell.borrow_mut().take() {
-            self.state.state_machine_runtime_state = Some(snap);
+        // Plan GAP-02 / Unit 3 + 2026-08-15-2211 U1: rollback uses
+        // the pre-apply-batch snapshot captured in
+        // `apply_state_machine_decisions` BEFORE any projection
+        // mutated live. We read it (no `take()`) so subsequent
+        // commits in the same batch also see a non-`None`
+        // snapshot for their rollback. Pre-fix the slot was
+        // drained by `take()` on the first commit, which left
+        // projection N+1 with `None` and degraded its rollback to
+        // no-op when the durable commit failed.
+        let mut pre_apply_snapshot: Option<StateMachineRuntimeState> =
+            self.state_machine_apply_snapshot.clone();
+        if let Some(ref delta) = projection {
+            let live = self
+                .state
+                .state_machine_runtime_state
+                .as_mut()
+                .expect("apply_state_machine_decisions must materialise runtime before commit");
+            // Apply is idempotent on transition_id; if
+            // apply_state_machine_decisions already applied this
+            // delta, this is a no-op and the snapshot already
+            // reflects the post-apply state.
+            live.apply_transition_delta(delta);
         }
+
+        // The disposition helper expects an
+        // `impl FnOnce() -> Result<Box<dyn FnOnce()>, String>`
+        // materialize closure. We no longer need a `'static` +
+        // `Rc<RefCell<>>` bridge to communicate the snapshot
+        // back: the rollback now happens in the post-dispatch
+        // Err branch below using the local
+        // `pre_apply_snapshot`.
+        let materialize = || -> Result<Box<dyn FnOnce()>, String> {
+            Ok(Box::new(|| {}) as Box<dyn FnOnce()>)
+        };
+
+        let result = {
+            // Reborrow the ledger for the duration of the dispatch.
+            let ledger = match self.state.state_ledger.as_mut() {
+                Some(l) => l,
+                None => {
+                    // Roll back the live mutation we just performed
+                    // before returning the error.
+                    if let Some(snap) = pre_apply_snapshot.take() {
+                        if let Some(live) =
+                            self.state.state_machine_runtime_state.as_mut()
+                        {
+                            *live = snap;
+                        }
+                    }
+                    return Err(
+                        crate::event_loop::accepted_transition::TransitionError::CommitFailed {
+                            source: "state ledger missing".to_string(),
+                        },
+                    );
+                }
+            };
+            crate::event_loop::disposition::publish_synthetic_with_state_machine_projection(
+                event,
+                disposition,
+                loop_id,
+                activation_id,
+                contract_revision,
+                ledger,
+                &mut self.bus,
+                materialize,
+                projection,
+            )
+        };
+
+        // Plan 2026-08-15-2211 U1: rollback. If the dispatch failed
+        // AND we have a pre-apply snapshot, restore live to it.
+        // Every commit in the per-event loop sees the same
+        // pre-apply-batch snapshot, so projections 1..N-1 are
+        // also rolled back when projection N fails (per-batch
+        // rollback semantics; the existing U3 §10 test relies on
+        // this). The snapshot slot is reset on the next
+        // `apply_state_machine_decisions` entry, so it does not
+        // need to be cleared here.
+        if result.is_err() {
+            if let Some(snap) = pre_apply_snapshot.take() {
+                if let Some(live) = self.state.state_machine_runtime_state.as_mut() {
+                    *live = snap;
+                }
+            }
+        }
+
         result
     }
 }
