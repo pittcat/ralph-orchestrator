@@ -6,7 +6,6 @@
 //! [`TelemetryConfig::validate`] is the first. Both must be correct.
 
 use super::*;
-use crate::config::RuntimeDiagnosisConfig;
 
 fn make_config_with_max_repeated_recoveries(max_repeats: usize) -> RalphConfig {
     let yaml = format!(
