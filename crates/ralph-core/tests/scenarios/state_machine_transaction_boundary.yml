@@ -1,0 +1,73 @@
+# Real EventLoop BDD coverage for the StateMachine acceptance path.
+# The business transitions open and close one instance before the terminal
+# event, so terminal admission proves that the runtime state machine was
+# actually enabled and applied the lifecycle in order.
+
+name: state_machine_transaction_boundary
+description: StateMachine business lifecycle reaches a valid terminal event through the real scenario harness
+
+config:
+  prompt_file: PROMPT.md
+  max_iterations: 4
+  hats:
+    planner:
+      subscribes_to: [experiment.start]
+      publishes: [experiment.planned]
+    finisher:
+      subscribes_to: [experiment.planned]
+      publishes: [experiment.completed]
+    reporter:
+      subscribes_to: [experiment.completed]
+      publishes: [LOOP_COMPLETE]
+  event_loop:
+    execution_mode: isolated
+    starting_event: experiment.start
+    completion_promise: LOOP_COMPLETE
+    required_events: [experiment.completed]
+    event_policy:
+      enabled: true
+      mode: enforce
+      terminal_topics: [LOOP_COMPLETE]
+      business_topics: [experiment.planned, experiment.completed]
+    state_machine:
+      enabled: true
+      instance_key:
+        from_payload: task_key
+        required_for: [experiment.planned, experiment.completed]
+      terminal_topics: [LOOP_COMPLETE]
+      business_topics: [experiment.planned, experiment.completed]
+      terminal_guard:
+        require_no_open_instances: true
+      transitions:
+        - topic: experiment.planned
+          from: [idle]
+          to: planned
+          opens_instance: true
+        - topic: experiment.completed
+          from: [planned]
+          to: completed
+          closes_instance: true
+
+mock_responses:
+  - hat: planner
+    text: |
+      <event topic="experiment.planned">
+      {"task_key":"state-machine-bdd","state":"planned"}
+      </event>
+  - hat: finisher
+    text: |
+      <event topic="experiment.completed">
+      {"task_key":"state-machine-bdd","state":"completed"}
+      </event>
+  - hat: reporter
+    text: |
+      <event topic="LOOP_COMPLETE">
+      {"reason":"state_machine_transaction_boundary"}
+      </event>
+
+expected:
+  iterations: 3
+  events:
+    - topic: experiment.planned
+    - topic: experiment.completed
+  completion: true

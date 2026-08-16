@@ -17,9 +17,9 @@ use crate::preset_lint::finding_id::{
     FINDING_TERMINAL_TARGET_CONSUMER_MISMATCH, FINDING_TERMINAL_TARGET_CONTRACT_EMPTY_STRING,
     FINDING_TERMINAL_TARGET_NOT_REGISTERED,
 };
+use crate::preset_lint::workflow_activation::HandoffGraph;
 use crate::preset_lint::{LintFinding, LintSeverity};
 use crate::workflow_contract::HandoffIndex;
-use crate::preset_lint::workflow_activation::HandoffGraph;
 
 /// Check all `event_policy.schemas` entries that declare a
 /// `required_target_hat` for the three routing contract violations.
@@ -71,7 +71,11 @@ pub fn check_target_routing(config: &RalphConfig) -> Vec<LintFinding> {
             // (not registered anywhere) or is a multi-consumer topic.
             // Zero subscribers → fire NOT_REGISTERED.
             // Multi-consumer (len > 1) → skip (no unique target to validate).
-            let subscriber_count = graph.topic_subscribers.get(topic).map(|h| h.len()).unwrap_or(0);
+            let subscriber_count = graph
+                .topic_subscribers
+                .get(topic)
+                .map(|h| h.len())
+                .unwrap_or(0);
             if subscriber_count == 0 {
                 findings.push(LintFinding {
                     id: FINDING_TERMINAL_TARGET_NOT_REGISTERED,

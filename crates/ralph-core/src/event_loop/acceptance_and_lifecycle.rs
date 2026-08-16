@@ -753,6 +753,7 @@ impl EventLoop {
             // on `process_parse_result` exit.
             pending_state_machine_candidates: Vec::new(),
             state_machine_apply_snapshot: None,
+            state_machine_committed_deltas: Vec::new(),
         })
     }
 
@@ -942,6 +943,7 @@ impl EventLoop {
             // Plan GAP-02 / Unit 3: pre-apply live-runtime snapshot
             // for rollback on projection commit failure.
             state_machine_apply_snapshot: None,
+            state_machine_committed_deltas: Vec::new(),
         }
     }
 
@@ -1177,7 +1179,10 @@ mod tests {
     /// Build a `RalphConfig` with `event_policy.schemas` declaring
     /// `required_target_hat` for one topic AND a hat definition that
     /// publishes that topic (so the handoff index finds a consumer).
-    fn config_with_required_target_hat(topic: &str, required_target_hat: Option<&str>) -> RalphConfig {
+    fn config_with_required_target_hat(
+        topic: &str,
+        required_target_hat: Option<&str>,
+    ) -> RalphConfig {
         let mut cfg = RalphConfig::default();
         let mut schemas = HashMap::new();
         schemas.insert(
@@ -1215,7 +1220,10 @@ mod tests {
     }
 
     /// Run an event through the loop's stage pipeline and return the result.
-    fn drive_event_through_pipeline(loop_: &mut EventLoop, event: Event) -> Result<(), crate::event_loop::stage_pipeline::StageReject> {
+    fn drive_event_through_pipeline(
+        loop_: &mut EventLoop,
+        event: Event,
+    ) -> Result<(), crate::event_loop::stage_pipeline::StageReject> {
         let mut repair_states = std::collections::HashMap::new();
         let mut ctx = StageContext::new(
             FlowStep::new("unit_loop"),
@@ -1315,7 +1323,10 @@ mod tests {
         let mut loop_ = make_loop(config);
 
         // Build a `work.done` event (topic not in the schema map).
-        let event = Event::new("work.done", r#"{"triggered":"executor","plan_name":"p","step":"S1","task_id":"t1"}"#);
+        let event = Event::new(
+            "work.done",
+            r#"{"triggered":"executor","plan_name":"p","step":"S1","task_id":"t1"}"#,
+        );
 
         // Pipeline must accept it (no contract applies).
         let result = drive_event_through_pipeline(&mut loop_, event.clone());
@@ -1333,5 +1344,4 @@ mod tests {
             "work.done without contract should not register handoff tracker entry"
         );
     }
-
 }

@@ -200,6 +200,10 @@ pub use gates::{
     check_scope_handoff_guard, check_step_handoff_gate, check_wave_dimension_assignment,
     enabled_event_policy, load_policy_config_for_cli_emit, load_workspace_config,
 };
+/// Unstable helper for looking up EventSchema::required_target_hat at the CLI layer.
+/// Exposed pub(crate) so `commands::emit::command_impl` can mirror the runtime guard
+/// without duplicating the schema-walking logic.
+pub(crate) use unified::required_target_hat_for_topic;
 #[cfg(test)]
 pub(crate) use unified::run_policy_check_unified;
 #[allow(unused_imports)]
@@ -212,7 +216,3 @@ pub use unified::{
     validate_topic_payload_against_config, validate_topic_payload_with_handoff,
     validate_topic_payload_with_state,
 };
-/// Unstable helper for looking up EventSchema::required_target_hat at the CLI layer.
-/// Exposed pub(crate) so `commands::emit::command_impl` can mirror the runtime guard
-/// without duplicating the schema-walking logic.
-pub(crate) use unified::required_target_hat_for_topic;

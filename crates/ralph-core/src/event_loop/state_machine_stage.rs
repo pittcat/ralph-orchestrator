@@ -335,6 +335,7 @@ impl EventLoop {
         // batch's rollback. We then capture the live runtime
         // BEFORE any projection mutates it.
         self.state_machine_apply_snapshot = None;
+        self.state_machine_committed_deltas.clear();
         let mut projected = Vec::with_capacity(decisions.len());
         // The live runtime is materialised here so projection can
         // read it (instance maps, terminal flags) without `unwrap`.
@@ -485,6 +486,7 @@ impl EventLoop {
         let materialize =
             || -> Result<Box<dyn FnOnce()>, String> { Ok(Box::new(|| {}) as Box<dyn FnOnce()>) };
 
+        let committed_projection = projection.clone();
         let result = {
             // Reborrow the ledger for the duration of the dispatch.
             let ledger = match self.state.state_ledger.as_mut() {
@@ -496,6 +498,9 @@ impl EventLoop {
                         && let Some(live) = self.state.state_machine_runtime_state.as_mut()
                     {
                         *live = snap;
+                        for committed in &self.state_machine_committed_deltas {
+                            live.apply_transition_delta(committed);
+                        }
                     }
                     return Err(
                         crate::event_loop::accepted_transition::TransitionError::CommitFailed {
@@ -517,20 +522,24 @@ impl EventLoop {
             )
         };
 
-        // Plan 2026-08-15-2211 U1: rollback. If the dispatch failed
-        // AND we have a pre-apply snapshot, restore live to it.
-        // Every commit in the per-event loop sees the same
-        // pre-apply-batch snapshot, so projections 1..N-1 are
-        // also rolled back when projection N fails (per-batch
-        // rollback semantics; the existing U3 §10 test relies on
-        // this). The snapshot slot is reset on the next
-        // `apply_state_machine_decisions` entry, so it does not
-        // need to be cleared here.
-        if result.is_err()
-            && let Some(snap) = pre_apply_snapshot.take()
-            && let Some(live) = self.state.state_machine_runtime_state.as_mut()
-        {
-            *live = snap;
+        // Plan 2026-08-15-2211 U1: rollback only the failed
+        // projection. If earlier projections already committed, restore
+        // the pre-batch snapshot and replay that durable prefix so live
+        // state remains aligned with ledger/outbox state.
+        if result.is_err() {
+            if let Some(snap) = pre_apply_snapshot.take()
+                && let Some(live) = self.state.state_machine_runtime_state.as_mut()
+            {
+                *live = snap;
+                // Keep live state aligned with the durable prefix. The
+                // earlier projections may already have committed and
+                // published before this projection failed.
+                for committed in &self.state_machine_committed_deltas {
+                    live.apply_transition_delta(committed);
+                }
+            }
+        } else if let Some(delta) = committed_projection {
+            self.state_machine_committed_deltas.push(delta);
         }
 
         result

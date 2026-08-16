@@ -1627,6 +1627,109 @@ hats:
     );
 }
 
+#[test]
+fn u3_failed_later_projection_preserves_durable_prefix() {
+    use crate::event_loop::disposition::Disposition;
+    use crate::event_loop::state_machine_stage::CandidateStateMachineDecision;
+    use crate::event_reader::Event as JsonlEvent;
+    use crate::state::CommitDelta;
+    use crate::state_machine::StateMachineDecision;
+    use tempfile::TempDir;
+
+    let temp_dir = TempDir::new().unwrap();
+    let workspace = temp_dir.path().to_path_buf();
+    let config: RalphConfig = serde_yaml::from_str(
+        r#"
+event_loop:
+  state_machine:
+    enabled: true
+hats:
+  executor:
+    name: Executor
+    triggers: [experiment.planned]
+    publishes: [experiment.planned]
+"#,
+    )
+    .unwrap();
+    let mut event_loop = EventLoop::new(config);
+    event_loop.initialize("Test");
+    event_loop.install_state_ledger_for_test(crate::state::StateLedger::new(&workspace, true));
+
+    let candidate = |key: &str| CandidateStateMachineDecision {
+        event: JsonlEvent {
+            topic: "experiment.planned".to_string(),
+            payload: Some(format!(r#"{{"task_key":"{key}"}}"#)),
+            ts: chrono::Utc::now().to_rfc3339(),
+            hat: None,
+            triggered: None,
+            source: None,
+            wave_id: None,
+            wave_index: None,
+            wave_total: None,
+            system_injected: None,
+        },
+        decision: StateMachineDecision::Accept {
+            instance_key: Some(key.to_string()),
+            new_state: "planned".to_string(),
+        },
+        opens_instance: true,
+        closes_instance: false,
+        accepted_at_terminal_observed: false,
+    };
+
+    let projected = event_loop.apply_state_machine_decisions(
+        &[candidate("prefix"), candidate("failed")],
+        "loop-u3-prefix",
+    );
+    assert_eq!(projected.len(), 2);
+
+    let proto_event = |key: &str| {
+        ralph_proto::Event::new("experiment.planned", format!(r#"{{"task_key":"{key}"}}"#))
+    };
+
+    event_loop
+        .commit_state_machine_projection(
+            &proto_event("prefix"),
+            Disposition::Business,
+            "loop-u3-prefix",
+            "act-prefix",
+            "rev-u3",
+            Some(projected[0].clone()),
+        )
+        .unwrap();
+
+    event_loop.set_state_ledger_bypass_active_for_test(true);
+    let result = event_loop.commit_state_machine_projection(
+        &proto_event("failed"),
+        Disposition::Business,
+        "loop-u3-prefix",
+        "act-failed",
+        "rev-u3",
+        Some(projected[1].clone()),
+    );
+    event_loop.set_state_ledger_bypass_active_for_test(false);
+
+    assert!(result.is_err(), "the later projection must fail");
+    let runtime = event_loop
+        .state
+        .state_machine_runtime_state
+        .as_ref()
+        .unwrap();
+    assert_eq!(runtime.open_instance_count(), 1);
+    assert!(runtime.open_instances_snapshot().contains_key("prefix"));
+    assert!(!runtime.open_instances_snapshot().contains_key("failed"));
+
+    let committed = event_loop.state_ledger_commit_log();
+    assert_eq!(
+        committed
+            .iter()
+            .filter(|entry| matches!(entry.delta, CommitDelta::StateMachineTransition { .. }))
+            .count(),
+        1,
+        "live state must match the single durable projection prefix"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Plan 2026-08-15-2211 / Unit 4: cross-cutting regression after U1-U3.
 //

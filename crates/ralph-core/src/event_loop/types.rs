@@ -458,4 +458,9 @@ pub struct EventLoop {
     /// `StateLedger` projection commit fails. Cleared on a successful
     /// commit.
     pub(crate) state_machine_apply_snapshot: Option<crate::state_machine::StateMachineRuntimeState>,
+    /// StateMachine projections durably committed in the current batch.
+    /// Used to restore live state to the durable prefix when a later
+    /// projection fails.
+    pub(crate) state_machine_committed_deltas:
+        Vec<crate::state_machine::StateMachineTransitionDelta>,
 }

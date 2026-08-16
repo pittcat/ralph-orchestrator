@@ -689,15 +689,13 @@ pub fn build_task_resume_payload_with_terminal_contract(
         sorted.sort();
         map.insert(
             topic.clone(),
-            serde_json::Value::Array(
-                sorted
-                    .into_iter()
-                    .map(serde_json::Value::String)
-                    .collect(),
-            ),
+            serde_json::Value::Array(sorted.into_iter().map(serde_json::Value::String).collect()),
         );
     }
-    object.insert("terminal_required_fields".into(), serde_json::Value::Object(map));
+    object.insert(
+        "terminal_required_fields".into(),
+        serde_json::Value::Object(map),
+    );
     value.to_string()
 }
 
@@ -2018,7 +2016,10 @@ mod tests {
         );
         let mut map: std::collections::BTreeMap<String, Vec<String>> =
             std::collections::BTreeMap::new();
-        map.insert("work.done".into(), vec!["plan_path".into(), "executor_head_sha".into()]);
+        map.insert(
+            "work.done".into(),
+            vec!["plan_path".into(), "executor_head_sha".into()],
+        );
         map.insert("work.failed".into(), vec!["reason".into()]);
         let payload_str = build_task_resume_payload_with_terminal_contract(
             &r,

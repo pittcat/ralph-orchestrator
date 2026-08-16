@@ -8,8 +8,8 @@
 use std::collections::HashMap;
 
 use crate::config::{EventPolicyConfig, EventSchema, RalphConfig};
-use crate::preset_lint::target_routing::check_target_routing;
 use crate::preset_lint::LintSeverity;
+use crate::preset_lint::target_routing::check_target_routing;
 
 /// Build a minimal config with two hats that can be wired as
 /// upstream/downstream for the tests.
@@ -37,7 +37,11 @@ fn minimal_config() -> RalphConfig {
     // breaking the routing check. Set Isolated so consumer derivation works.
     let mut event_loop = crate::config::EventLoopConfig::default();
     event_loop.execution_mode = crate::config::HatExecutionMode::Isolated;
-    RalphConfig { hats, event_loop, ..Default::default() }
+    RalphConfig {
+        hats,
+        event_loop,
+        ..Default::default()
+    }
 }
 
 /// Add a schema for `topic` with `required_target_hat = Some(hat)` to `config`.
@@ -46,7 +50,10 @@ fn add_schema_with_required_target(
     topic: &str,
     required_target_hat: Option<&str>,
 ) {
-    let policy = config.event_loop.event_policy.get_or_insert_with(EventPolicyConfig::default);
+    let policy = config
+        .event_loop
+        .event_policy
+        .get_or_insert_with(EventPolicyConfig::default);
     let mut schema = EventSchema::default();
     schema.required_fields = vec!["report".to_string()];
     schema.required_target_hat = required_target_hat.map(String::from);
@@ -61,12 +68,23 @@ fn target_routing_empty_string_contracts() {
     let findings = check_target_routing(&config);
     let ids: Vec<_> = findings.iter().map(|f| f.id).collect();
     assert!(
-        ids.contains(&crate::preset_lint::finding_id::FINDING_TERMINAL_TARGET_CONTRACT_EMPTY_STRING),
+        ids.contains(
+            &crate::preset_lint::finding_id::FINDING_TERMINAL_TARGET_CONTRACT_EMPTY_STRING
+        ),
         "empty-string required_target_hat must produce \
          terminal_target_contract_empty_string Warn finding; got: {findings:?}"
     );
-    let finding = findings.iter().find(|f| f.id == crate::preset_lint::finding_id::FINDING_TERMINAL_TARGET_CONTRACT_EMPTY_STRING).unwrap();
-    assert_eq!(finding.severity, LintSeverity::Warn, "empty-string finding must be Warn");
+    let finding = findings
+        .iter()
+        .find(|f| {
+            f.id == crate::preset_lint::finding_id::FINDING_TERMINAL_TARGET_CONTRACT_EMPTY_STRING
+        })
+        .unwrap();
+    assert_eq!(
+        finding.severity,
+        LintSeverity::Warn,
+        "empty-string finding must be Warn"
+    );
     assert!(finding.message.contains("report.done"));
     assert!(finding.message.contains("required_target_hat"));
 }
@@ -85,7 +103,10 @@ fn target_routing_topic_declares_contract_but_no_consumer() {
         "topic with required_target_hat but no consumer must produce \
          terminal_target_not_registered Error; got: {findings:?}"
     );
-    let finding = findings.iter().find(|f| f.id == crate::preset_lint::finding_id::FINDING_TERMINAL_TARGET_NOT_REGISTERED).unwrap();
+    let finding = findings
+        .iter()
+        .find(|f| f.id == crate::preset_lint::finding_id::FINDING_TERMINAL_TARGET_NOT_REGISTERED)
+        .unwrap();
     assert_eq!(finding.severity, LintSeverity::Error);
     assert!(finding.message.contains("audit.log"));
     assert!(finding.message.contains("reporter"));
@@ -125,7 +146,12 @@ fn target_routing_topic_declares_contract_and_consumer_mismatches() {
     );
     // executor publishes `audit.done` (via publishes inheritance from minimal_config)
     // but minimal_config's executor only publishes `report.done`. Add `audit.done`.
-    config.hats.get_mut("executor").unwrap().publishes.push("audit.done".to_string());
+    config
+        .hats
+        .get_mut("executor")
+        .unwrap()
+        .publishes
+        .push("audit.done".to_string());
 
     // required_target_hat = "reporter" but auditor is the unique consumer.
     add_schema_with_required_target(&mut config, "audit.done", Some("reporter"));
@@ -135,7 +161,10 @@ fn target_routing_topic_declares_contract_and_consumer_mismatches() {
         ids.contains(&crate::preset_lint::finding_id::FINDING_TERMINAL_TARGET_CONSUMER_MISMATCH),
         "mismatched consumer must produce terminal_target_consumer_mismatch Error; got: {findings:?}"
     );
-    let finding = findings.iter().find(|f| f.id == crate::preset_lint::finding_id::FINDING_TERMINAL_TARGET_CONSUMER_MISMATCH).unwrap();
+    let finding = findings
+        .iter()
+        .find(|f| f.id == crate::preset_lint::finding_id::FINDING_TERMINAL_TARGET_CONSUMER_MISMATCH)
+        .unwrap();
     assert_eq!(finding.severity, LintSeverity::Error);
     assert!(finding.message.contains("audit.done"));
     assert!(finding.message.contains("reporter")); // declared
@@ -165,12 +194,20 @@ fn target_routing_terminal_topics_use_declared_consumer() {
 #[test]
 fn target_routing_terminal_topics_detect_consumer_mismatch() {
     let mut config = minimal_config();
-    config.hats.get_mut("reporter").unwrap().terminal_events.push("report.done".to_string());
+    config
+        .hats
+        .get_mut("reporter")
+        .unwrap()
+        .terminal_events
+        .push("report.done".to_string());
     add_schema_with_required_target(&mut config, "report.done", Some("executor"));
     let findings = check_target_routing(&config);
-    assert!(findings.iter().any(|finding| {
-        finding.id == crate::preset_lint::finding_id::FINDING_TERMINAL_TARGET_CONSUMER_MISMATCH
-    }), "terminal topic consumer mismatch must be reported; got: {findings:?}");
+    assert!(
+        findings.iter().any(|finding| {
+            finding.id == crate::preset_lint::finding_id::FINDING_TERMINAL_TARGET_CONSUMER_MISMATCH
+        }),
+        "terminal topic consumer mismatch must be reported; got: {findings:?}"
+    );
 }
 
 /// Test 6: a NON-terminal topic with no subscribers must still fire

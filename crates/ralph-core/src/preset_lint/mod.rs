@@ -91,10 +91,9 @@ pub use finding_id::{
     FINDING_MISSING_TOPIC_OWNER, FINDING_MULTI_HAT_REQUIRES_ISOLATED, FINDING_OWNER_NOT_PUBLISHER,
     FINDING_OWNER_UNKNOWN_HAT, FINDING_RE_EMIT_TRAP, FINDING_TASK_PUBLISHER_NOT_COORDINATED,
     FINDING_TERMINAL_DUAL_SUBSCRIBE, FINDING_TERMINAL_PUBLISHER_INCOMPLETE,
-    FINDING_TERMINAL_TARGET_CONTRACT_EMPTY_STRING, FINDING_TERMINAL_TARGET_CONSUMER_MISMATCH,
-    FINDING_TERMINAL_TARGET_NOT_REGISTERED,
-    FINDING_TRIGGER_PUBLISH_ASYMMETRY, FINDING_WHITELIST_EXEMPT_TOPIC,
-    FINDING_WORK_DONE_ACTION_CHAIN_ORDER,
+    FINDING_TERMINAL_TARGET_CONSUMER_MISMATCH, FINDING_TERMINAL_TARGET_CONTRACT_EMPTY_STRING,
+    FINDING_TERMINAL_TARGET_NOT_REGISTERED, FINDING_TRIGGER_PUBLISH_ASYMMETRY,
+    FINDING_WHITELIST_EXEMPT_TOPIC, FINDING_WORK_DONE_ACTION_CHAIN_ORDER,
 };
 pub use flow_declaration::check_flow_declaration;
 
@@ -133,12 +132,12 @@ pub use payload_consistency::check_payload_consistency;
 pub use finding_id::FINDING_PRECHECK_RULE_WITHOUT_SYNTHESIZED_GATE_HAT;
 pub use precheck_gate_hat::check_precheck_rule_without_synthesized_gate_hat;
 // 2026-08-16-1015 plan U3: terminal target routing lint entry point.
-pub use target_routing::check_target_routing;
 pub use state_projection::check_work_done_action_chain_order;
 pub use strict_readonly_hat::{
     FINDING_STRICT_READONLY_INVALID_WRITE_PATH, FINDING_STRICT_READONLY_MISSING_WRITE_CONTRACT,
     check_strict_readonly_hat,
 };
+pub use target_routing::check_target_routing;
 // 2026-07-03-001 plan U9: export the supervisor lint entry
 // point so `ralph preset check` / `run_preset_lint` callers
 // can wire it (next line: into the unified orchestrator).
@@ -640,7 +639,9 @@ pub fn run_preset_lint_with_preset_name(
     //   - Warn if empty string (no-op defensive fallback).
     //   - Error if no hat subscribes to the topic.
     //   - Error if the declared hat doesn't match the handoff index consumer.
-    findings.extend(lint_findings_to_contract_findings(&check_target_routing(config)));
+    findings.extend(lint_findings_to_contract_findings(&check_target_routing(
+        config,
+    )));
 
     // 2026-06-27 mechanism foundation U5: flow declaration lint.
     // Only presets that declare a `mechanism:` block are checked.

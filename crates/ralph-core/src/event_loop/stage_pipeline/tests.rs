@@ -253,7 +253,12 @@ fn hat_only_pipeline_omits_flow_step_scope_and_accepts_plan_ready() {
         // Plan 2026-08-16-1015 U1: `TerminalTargetGuard` is inserted
         // after `EmitSchemaGate` (schema validation first, then
         // terminal-target contract check).
-        vec!["RepairDispatch", "EmitSchemaGate", "TerminalTargetGuard", "VerdictGate"]
+        vec![
+            "RepairDispatch",
+            "EmitSchemaGate",
+            "TerminalTargetGuard",
+            "VerdictGate"
+        ]
     );
 
     let mut sm: std::collections::HashMap<String, RepairStateMachine> =

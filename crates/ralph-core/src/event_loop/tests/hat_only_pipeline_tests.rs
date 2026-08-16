@@ -11,6 +11,11 @@ fn config_without_mechanism_uses_hat_only_emit_pipeline() {
         // Plan 2026-08-16-1015 U1: `TerminalTargetGuard` is inserted
         // after `EmitSchemaGate` (schema validation first, then
         // terminal-target contract check).
-        vec!["RepairDispatch", "EmitSchemaGate", "TerminalTargetGuard", "VerdictGate"]
+        vec![
+            "RepairDispatch",
+            "EmitSchemaGate",
+            "TerminalTargetGuard",
+            "VerdictGate"
+        ]
     );
 }

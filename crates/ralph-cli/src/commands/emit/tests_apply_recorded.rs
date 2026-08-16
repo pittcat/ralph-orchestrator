@@ -193,13 +193,12 @@ fn u2_maybe_derive_triggered_for_isolated_preserves_none_on_required_target_hat_
     let cfg = isolated_cfg_with_required_target_hat();
     // report.done requires target=reporter, but the agent passed triggered=None.
     // The function must NOT auto-derive "reporter" from HandoffIndex.
-    let result = maybe_derive_triggered_for_isolated(
-        "report.done",
-        Some("executor"),
-        None,
-        Some(&cfg),
+    let result =
+        maybe_derive_triggered_for_isolated("report.done", Some("executor"), None, Some(&cfg));
+    assert_eq!(
+        result, None,
+        "must not auto-derive on required_target_hat topic"
     );
-    assert_eq!(result, None, "must not auto-derive on required_target_hat topic");
 }
 
 #[test]
@@ -222,12 +221,8 @@ fn u2_maybe_derive_triggered_for_isolated_derives_for_non_contract_topic() {
     // We verify the short-circuit does NOT fire (None returned means the
     // HandoffIndex lookup happened and either found a consumer or returned
     // None — either way the required_target_hat guard did not block it).
-    let result = maybe_derive_triggered_for_isolated(
-        "align.done",
-        Some("aligner"),
-        None,
-        Some(&cfg),
-    );
+    let result =
+        maybe_derive_triggered_for_isolated("align.done", Some("aligner"), None, Some(&cfg));
     // The key assertion: required_target_hat short-circuit did NOT fire.
     // If it had fired, the result would be None immediately without consulting
     // HandoffIndex. The fact that we get here means the guard was skipped.

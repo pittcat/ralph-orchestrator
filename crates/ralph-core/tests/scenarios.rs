@@ -203,7 +203,11 @@ where
     let mut out = Vec::with_capacity(raw.len());
     for (i, v) in raw.into_iter().enumerate() {
         match v {
-            serde_yaml::Value::String(s) => out.push(MockResponseYaml { text: s, hat: None, triggered: None }),
+            serde_yaml::Value::String(s) => out.push(MockResponseYaml {
+                text: s,
+                hat: None,
+                triggered: None,
+            }),
             serde_yaml::Value::Mapping(_) => {
                 let parsed: MockResponseYaml = serde_yaml::from_value(v)
                     .map_err(|e| D::Error::custom(format!("mock_responses[{i}]: {e}")))?;
@@ -1347,7 +1351,7 @@ fn run_scenario_with_snapshots(
                 // `required_target_hat` contract (e.g. report.done targeted
                 // at the reporter hat itself).
                 if let Some(ref triggered) = response.triggered {
-            entry["triggered"] = serde_json::Value::String(triggered.clone());
+                    entry["triggered"] = serde_json::Value::String(triggered.clone());
                 }
                 writeln!(file, "{}", entry).unwrap();
             }
@@ -4463,9 +4467,8 @@ fn test_ce_executor_pipeline_fail_gate_exhaust() {
 /// self-targeted reporter completion.
 #[test]
 fn test_ce_executor_pipeline_reporter_targeted_completion() {
-    let yaml = load_scenario(
-        "tests/scenarios/ce_executor_pipeline_reporter_targeted_completion.yml",
-    );
+    let yaml =
+        load_scenario("tests/scenarios/ce_executor_pipeline_reporter_targeted_completion.yml");
     run_workflow_guard_scenario(yaml);
 }
 
@@ -4761,6 +4764,9 @@ fn test_retained_scenarios_pipeline_or_generic_only() {
         // implementation-review preset (6-hat wave review, non-pipeline / non-supervisor)
         // 非 pipeline / 非 supervisor）
         "tests/scenarios/implementation_review_",
+        // StateMachine transaction-boundary lifecycle is a generic runtime
+        // scenario and is not tied to a builtin pipeline.
+        "tests/scenarios/state_machine_transaction_boundary",
         // 2026-07-24-003 plan U8: wave protocol 通用场景
         // (normal_apply_confirm / recovery_required),跨 preset 共用
         "tests/scenarios/wave_protocol/",
@@ -5081,5 +5087,13 @@ fn test_redteam_scope_attack_mapped_gate_rejects_wrong_predecessor() {
 #[test]
 fn test_redteam_scope_attack_mapped_legal_predecessor_accepted() {
     let yaml = load_scenario("tests/scenarios/redteam_scope_attack_mapped_legal_predecessor.yml");
+    run_workflow_guard_scenario(yaml);
+}
+
+/// Plan 2026-08-15-2211: exercise the StateMachine lifecycle through the
+/// real scenario EventLoop rather than a source-only fixture assertion.
+#[test]
+fn test_state_machine_transaction_boundary() {
+    let yaml = load_scenario("tests/scenarios/state_machine_transaction_boundary.yml");
     run_workflow_guard_scenario(yaml);
 }

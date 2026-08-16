@@ -1660,13 +1660,10 @@ fn completion_artifact_rejection_injects_correction() {
     );
 }
 
-/// U1 / convention (positive): any required field whose name ends with
-/// `_path` is treated as an artifact path — not just `report_path` /
-/// `artifact_path`. A custom field like `custom_manifest_path` is
-/// accepted when the file it points at exists and is a readable regular
-/// file inside the workspace.
+/// U1 compatibility: custom path-like fields are not completion artifact
+/// admission fields. Only `report_path` and `artifact_path` are checked.
 #[test]
-fn completion_artifact_accepts_arbitrary_path_suffixed_field() {
+fn completion_artifact_ignores_custom_path_field() {
     use tempfile::TempDir;
 
     let temp_dir = TempDir::new().unwrap();
@@ -1709,7 +1706,7 @@ fn completion_artifact_accepts_arbitrary_path_suffixed_field() {
     assert_eq!(
         reason,
         Some(TerminationReason::CompletionPromise),
-        "custom _path-suffixed field with valid file must honor completion"
+        "custom path-like field must preserve legacy completion behavior"
     );
     assert!(
         event_loop.state().completion_honored,
@@ -1717,11 +1714,10 @@ fn completion_artifact_accepts_arbitrary_path_suffixed_field() {
     );
 }
 
-/// U1 / convention (negative): when a required `_path`-suffixed field
-/// names a file that does not exist, the completion is rejected even
-/// though the field is not `report_path` or `artifact_path`.
+/// U1 compatibility: a missing custom path-like field is not checked by
+/// the completion artifact gate when it is not report/artifact_path.
 #[test]
-fn completion_artifact_rejects_arbitrary_path_suffixed_field_missing() {
+fn completion_artifact_ignores_missing_custom_path_field() {
     use tempfile::TempDir;
 
     let temp_dir = TempDir::new().unwrap();
@@ -1756,12 +1752,13 @@ fn completion_artifact_rejects_arbitrary_path_suffixed_field_missing() {
     let _ = event_loop.process_events_from_jsonl();
 
     let reason = event_loop.check_completion_event();
-    assert!(
-        reason.is_none(),
-        "missing file for custom _path field must reject completion, got {reason:?}"
+    assert_eq!(
+        reason,
+        Some(TerminationReason::CompletionPromise),
+        "missing custom path-like file must preserve legacy completion behavior, got {reason:?}"
     );
     assert!(
-        !event_loop.state().completion_honored,
-        "completion_honored must remain false when custom artifact is missing"
+        event_loop.state().completion_honored,
+        "completion_honored must be set when only a custom path-like field is missing"
     );
 }
