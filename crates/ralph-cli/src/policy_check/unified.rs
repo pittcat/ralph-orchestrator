@@ -739,6 +739,26 @@ pub(crate) fn required_target_hat_for_topic(topic: &str, config: &RalphConfig) -
         .cloned()
 }
 
+/// A business self-loop is safe only when the publishing hat explicitly owns
+/// the topic in both directions: it publishes the topic and is triggered by
+/// the same topic. This keeps ordinary isolated handoffs fail-closed while
+/// allowing bounded verify/retest loops without requiring a fake downstream
+/// target.
+fn is_declared_business_self_loop(
+    topic: &str,
+    source_hat: Option<&str>,
+    config: &RalphConfig,
+) -> bool {
+    let Some(source_hat) = source_hat else {
+        return false;
+    };
+    let Some(hat) = config.hats.get(source_hat) else {
+        return false;
+    };
+    hat.publishes.iter().any(|published| published == topic)
+        && hat.triggers.iter().any(|trigger| trigger == topic)
+}
+
 /// Returns `Ok(())` when:
 /// - `triggered` is `None` (R12)
 /// - `triggered` is `Some(_)` AND the value matches a hat id
@@ -827,6 +847,7 @@ pub fn check_envelope_triggered(
     if config.event_loop.execution_mode == HatExecutionMode::Isolated
         && source_hat == Some(value)
         && required_target.as_deref() != Some(value)
+        && !is_declared_business_self_loop(topic, source_hat, config)
     {
         return Err(ValidationError {
             payload_index: 0,

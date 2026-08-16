@@ -1,16 +1,15 @@
 # merge_batch_boundary: boundary manifest routing characterization
 #
-# Tests the routing behavior of the `merge_boundary_path` /
-# `merge_boundary_digest` / `merge_boundary_status` fields that
-# Unit 1 added to `merge.integrated` and Unit 2 implemented in the
-# integrator instructions.
+# Tests the routing behavior of the merge-boundary fields and the independent
+# scope-manifest contract carried by merge-batch handoffs.
 #
 # Topology (abstract fixture — no builtin preset binding):
 #   reviewer --(merge.reviewed)--> integrator --(merge.integrated)--> stabilizer --(merge.stabilized)--> reporter --(merge.batch.complete)-->
 #
 # Routing-only test with schema validation: validates hat subscription
 # topology, schema-required fields, default_publishes routing, and completion.
-# Payload_consistency rules (path root, status allowed, stabilized echo)
+# Payload_consistency rules (path root, status allowed, stabilized echo,
+# resolved-scope thresholds)
 # are exercised by unit tests and CLI precheck tests, not this fixture.
 #
 # Two paths:
@@ -72,7 +71,7 @@ mock_responses:
   # merge.integrated is ACCEPTED → stabilizer wakes.
   - text: |
       <event topic="merge.integrated">
-      {"integration_complete":true,"ready_for_stabilization":true,"branches_merged":["branch-a"],"branches_skipped":[],"branches_failed":[],"merge_commit_shas":["abc123def456"],"integration_path":".ralph/merge/integration.md","merge_boundary_path":".ralph/merge/merge-boundary.json","merge_boundary_digest":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855","merge_boundary_status":"complete"}
+      {"integration_complete":true,"ready_for_stabilization":true,"branches_merged":["branch-a"],"branches_skipped":[],"branches_failed":[],"merge_commit_shas":["abc123def456"],"integration_path":".ralph/merge/integration.md","merge_boundary_path":".ralph/merge/merge-boundary.json","merge_boundary_digest":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855","merge_boundary_status":"complete","scope_manifest_path":".ralph/merge/scope-manifest.json","scope_digest":"1111111111111111111111111111111111111111111111111111111111111111","scope_status":"resolved","scope_base_sha":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","scope_source":"branch-merge","overall_confidence":100,"critical_unknown_count":0,"proceed":true}
       </event>
     hat: integrator
 
@@ -80,14 +79,14 @@ mock_responses:
   # The stabilizer echoes the boundary path/digest from merge.integrated.
   - text: |
       <event topic="merge.stabilized">
-      {"passed":true,"reason":null,"branches_failed":[],"attempts":1,"report_input_file":".ralph/merge/report-input.md","merge_boundary_path":".ralph/merge/merge-boundary.json","merge_boundary_digest":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"}
+      {"passed":true,"reason":null,"branches_failed":[],"attempts":1,"report_input_file":".ralph/merge/report-input.md","merge_boundary_path":".ralph/merge/merge-boundary.json","merge_boundary_digest":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855","scope_manifest_path":".ralph/merge/scope-manifest.json","scope_digest":"1111111111111111111111111111111111111111111111111111111111111111","scope_status":"resolved","scope_base_sha":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","scope_source":"branch-merge","overall_confidence":100,"critical_unknown_count":0,"proceed":true}
       </event>
     hat: stabilizer
 
   # iter 4: reporter publishes merge.batch.complete(success:true)
   - text: |
       <event topic="merge.batch.complete">
-      {"success":true,"report_path":".ralph/merge/REPORT.md","merged_branches":["branch-a"],"failed_stage":null,"reason":null}
+      {"success":true,"report_path":".ralph/merge/REPORT.md","scope_manifest_path":".ralph/merge/scope-manifest.json","scope_digest":"1111111111111111111111111111111111111111111111111111111111111111","scope_status":"resolved","scope_base_sha":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","scope_source":"branch-merge","overall_confidence":100,"critical_unknown_count":0,"proceed":true,"merged_branches":["branch-a"],"failed_stage":null,"reason":null}
       </event>
     hat: reporter
 

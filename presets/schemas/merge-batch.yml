@@ -68,7 +68,31 @@ schemas:
       - merge_boundary_path
       - merge_boundary_digest
       - merge_boundary_status
+      # Independent scope manifest contract
+      - scope_manifest_path
+      - scope_digest
+      - scope_status
+      - scope_base_sha
+      - scope_source
+      - overall_confidence
+      - critical_unknown_count
+      - proceed
     payload: json_object
+    allowed_values:
+      scope_status:
+        - resolved
+        - ambiguous
+        - blocked
+      scope_source:
+        - explicit
+        - direct-target
+        - branch-merge
+        - inferred
+      overall_confidence:
+        - 0
+        - 85
+        - 90
+        - 100
     # Single source of truth for the Integrator's handoff payload. Values in
     # angle brackets are computed from the artifacts written in this activation;
     # they are placeholders, not values that may be emitted verbatim.
@@ -85,6 +109,14 @@ schemas:
         merge_boundary_path: ".ralph/merge/merge-boundary.json"
         merge_boundary_digest: "<canonical-boundary-sha256>"
         merge_boundary_status: "complete"
+        scope_manifest_path: ".ralph/merge/scope-manifest.json"
+        scope_digest: "<canonical-scope-sha256>"
+        scope_status: "resolved"
+        scope_base_sha: "<target-sha-before-first-merge>"
+        scope_source: "branch-merge"
+        overall_confidence: 100
+        critical_unknown_count: 0
+        proceed: true
     field_docs:
       integration_complete:
         meaning: True iff every prompt branch is merged (this run or pre-merged);
@@ -135,6 +167,39 @@ schemas:
         meaning: Whether the merge-boundary artifact is complete or incomplete.
         source: Integrator writes from final merge state.
         fill_rule: One of `complete` or `incomplete`; `complete` only when every branch merged successfully.
+      scope_manifest_path:
+        meaning: Artifact落盘点，相对仓库根目录 `.ralph/` 的 batch scope manifest JSON 路径。
+        source: Integrator writes `.ralph/merge/scope-manifest.json` before the handoff.
+        fill_rule: Use the real readable path; reject the emit if the file is missing or outside `.ralph/merge/`.
+        examples: [".ralph/merge/scope-manifest.json"]
+      scope_digest:
+        meaning: SHA-256 hex digest of the canonical scope manifest, excluding its self-referential digest field.
+        source: Integrator recomputes the digest from the manifest written in this activation.
+        fill_rule: Remove `scope_digest`, serialize compact JSON with sorted keys, append one newline, and hash; recompute before every emit.
+      scope_status:
+        meaning: Whether the merge batch scope is fully resolved for downstream verification and reporting.
+        source: Integrator decides from branch coverage and the scope manifest evidence.
+        fill_rule: One of `resolved | ambiguous | blocked`; use `resolved` only when no critical scope fact is unknown.
+      scope_base_sha:
+        meaning: Full Git SHA of the target branch before this batch's first merge.
+        source: Integrator records `git rev-parse <target>` before mutating the target branch.
+        fill_rule: Exact 40-character SHA observed before the first merge; never hand-write or use a placeholder.
+      scope_source:
+        meaning: How the batch scope base was established.
+        source: Integrator records the Git-first merge-batch workflow used for this activation.
+        fill_rule: One of `explicit | direct-target | branch-merge | inferred`; use `branch-merge` when the base is taken from the target before merging.
+      overall_confidence:
+        meaning: Confidence score for branch coverage, merge identity, and scope manifest completeness.
+        source: Integrator scores the evidence recorded in `scope-manifest.json`.
+        fill_rule: One of `0 | 85 | 90 | 100`; `proceed=true` requires at least 90.
+      critical_unknown_count:
+        meaning: Number of unresolved critical branch, commit, or scope facts.
+        source: Integrator counts unresolved critical entries in the scope manifest.
+        fill_rule: Non-negative integer; `scope_status=resolved` and `proceed=true` require zero.
+      proceed:
+        meaning: Whether the stabilizer may run the verification loop.
+        source: Integrator derives from complete integration and resolved scope evidence.
+        fill_rule: true only when `integration_complete=true`, `scope_status=resolved`, `overall_confidence >= 90`, and `critical_unknown_count=0`; otherwise false.
 
   # stabilizer → self-loop retry signal. The hat itself emits
   # this after a fix attempt; the next activation re-enters
@@ -142,6 +207,9 @@ schemas:
   # stabilizer-state.json shape so the next attempt can read
   # `why_not_fixed` without re-deriving the failure class.
   merge.retest:
+    # This is the one intentional business self-loop in this preset. The
+    # runtime accepts it only because stabilizer declares this topic in both
+    # `triggers` and `publishes`; ordinary isolated self-targets remain blocked.
     required_fields:
       - attempt
       - classification
@@ -173,7 +241,31 @@ schemas:
       # U1 scope boundary echo
       - merge_boundary_path
       - merge_boundary_digest
+      # Scope identity is echoed to the reporter.
+      - scope_manifest_path
+      - scope_digest
+      - scope_status
+      - scope_base_sha
+      - scope_source
+      - overall_confidence
+      - critical_unknown_count
+      - proceed
     payload: json_object
+    allowed_values:
+      scope_status:
+        - resolved
+        - ambiguous
+        - blocked
+      scope_source:
+        - explicit
+        - direct-target
+        - branch-merge
+        - inferred
+      overall_confidence:
+        - 0
+        - 85
+        - 90
+        - 100
     field_docs:
       passed:
         meaning: True iff verification passed AND the integrator gate
@@ -203,14 +295,47 @@ schemas:
         fill_rule: Use the real readable manifest path; if any required evidence is unavailable, write a failure manifest and keep passed false.
         examples: [".ralph/<plan>/report-input.md"]
       merge_boundary_path:
-        meaning: Echoed from `merge.integrated.merge_boundary_path` for reporter cross-check.
+        meaning: Artifact落盘点，相对仓库根目录 `.ralph/` 的 merge-boundary JSON 路径，供 reporter 交叉核验。
         source: Stabilizer copies from `merge.integrated` trigger payload.
-        fill_rule: Must match the path from the merge.integrated trigger; reject emit if file is missing or digest changed.
+        fill_rule: Must match the trigger path and point to a readable artifact; reject emit if missing or digest changed.
         examples: [".ralph/merge/merge-boundary.json"]
       merge_boundary_digest:
         meaning: Echoed from `merge.integrated.merge_boundary_digest` for reporter cross-check.
         source: Stabilizer copies from `merge.integrated` trigger payload.
         fill_rule: Must match the digest from the merge.integrated trigger; recompute and reject if artifact changed since merge.integrated.
+      scope_manifest_path:
+        meaning: Artifact落盘点，相对仓库根目录 `.ralph/` 的 scope manifest JSON 路径。
+        source: Stabilizer copies from `merge.integrated.scope_manifest_path` after reading the artifact.
+        fill_rule: Preserve the exact readable path; reject if missing, outside `.ralph/merge/`, or unreadable.
+        examples: [".ralph/merge/scope-manifest.json"]
+      scope_digest:
+        meaning: Scope manifest digest carried unchanged from the integration handoff.
+        source: Stabilizer copies and recomputes `merge.integrated.scope_digest`.
+        fill_rule: Must equal the recomputed canonical manifest digest; never invent a replacement.
+      scope_status:
+        meaning: Scope resolution status carried to the reporter.
+        source: Stabilizer copies from the integration handoff after manifest validation.
+        fill_rule: One of `resolved | ambiguous | blocked`; do not upgrade an unresolved status.
+      scope_base_sha:
+        meaning: Full target-before-merge SHA carried to the reporter.
+        source: Stabilizer copies from `merge.integrated.scope_base_sha`.
+        fill_rule: Preserve the exact 40-character SHA; reject a missing or placeholder value.
+      scope_source:
+        meaning: Scope-base provenance carried to the reporter.
+        source: Stabilizer copies from `merge.integrated.scope_source`.
+        fill_rule: Preserve one of `explicit | direct-target | branch-merge | inferred`.
+      overall_confidence:
+        meaning: Scope evidence confidence carried to the reporter.
+        source: Stabilizer copies from the validated integration handoff.
+        fill_rule: Preserve one of `0 | 85 | 90 | 100`; never increase it during stabilization.
+      critical_unknown_count:
+        meaning: Unresolved critical scope facts carried to the reporter.
+        source: Stabilizer copies from the validated integration handoff.
+        fill_rule: Preserve the non-negative count; never reduce it during stabilization.
+      proceed:
+        meaning: Whether the integration and scope contract allow verification to proceed.
+        source: Stabilizer copies from `merge.integrated.proceed` after entry-gate validation.
+        fill_rule: Must remain false when integration is incomplete or scope is unresolved; true only for a resolved, high-confidence handoff.
 
   # reporter → sole completion token for merge-batch. Mirrors
   # the `merge.handled` shape in merge-loop: a single required
@@ -219,7 +344,30 @@ schemas:
     required_fields:
       - success
       - report_path
+      - scope_manifest_path
+      - scope_digest
+      - scope_status
+      - scope_base_sha
+      - scope_source
+      - overall_confidence
+      - critical_unknown_count
+      - proceed
     payload: json_object
+    allowed_values:
+      scope_status:
+        - resolved
+        - ambiguous
+        - blocked
+      scope_source:
+        - explicit
+        - direct-target
+        - branch-merge
+        - inferred
+      overall_confidence:
+        - 0
+        - 85
+        - 90
+        - 100
     field_docs:
       success:
         meaning: Whether the merge batch completed successfully for the operator.
@@ -230,3 +378,48 @@ schemas:
         source: File actually written this activation under .ralph/merge/ (typically REPORT.md).
         fill_rule: Real readable path only. Agent must verify the file exists before emit (schema checks the field is present, not the filesystem). Confirm must print DELIVERABLE_PATH with the same path.
         examples: [".ralph/<plan>/REPORT.md"]
+      scope_manifest_path:
+        meaning: Artifact落盘点，相对仓库根目录 `.ralph/` 的 scope manifest JSON 路径 retained for audit.
+        source: Reporter copies from `merge.stabilized.scope_manifest_path` after reading it.
+        fill_rule: Exact readable path under `.ralph/merge/`; reject if missing or changed.
+        examples: [".ralph/merge/scope-manifest.json"]
+      scope_digest:
+        meaning: Canonical digest of the scope manifest included in the final report identity.
+        source: Reporter copies from the validated `merge.stabilized` payload.
+        fill_rule: Must match the recomputed manifest digest; never hand-write.
+      scope_status:
+        meaning: Final scope resolution status recorded in REPORT.md.
+        source: Reporter copies from `merge.stabilized.scope_status`.
+        fill_rule: One of `resolved | ambiguous | blocked`.
+      scope_base_sha:
+        meaning: Target-before-merge SHA recorded in REPORT.md.
+        source: Reporter copies from `merge.stabilized.scope_base_sha`.
+        fill_rule: Exact 40-character SHA from the validated handoff.
+      scope_source:
+        meaning: Provenance of the scope base recorded in REPORT.md.
+        source: Reporter copies from `merge.stabilized.scope_source`.
+        fill_rule: One of `explicit | direct-target | branch-merge | inferred`.
+      overall_confidence:
+        meaning: Scope evidence confidence recorded in REPORT.md.
+        source: Reporter copies from `merge.stabilized.overall_confidence`.
+        fill_rule: One of `0 | 85 | 90 | 100`.
+      critical_unknown_count:
+        meaning: Unresolved critical scope fact count recorded in REPORT.md.
+        source: Reporter copies from `merge.stabilized.critical_unknown_count`.
+        fill_rule: Non-negative integer; report any non-zero value as an unresolved risk.
+      proceed:
+        meaning: Whether the scope contract allowed stabilization to proceed.
+        source: Reporter copies from `merge.stabilized.proceed`.
+        fill_rule: Must be true only for a resolved high-confidence scope; success must also be false when proceed is false.
+      merged_branches:
+        meaning: Optional final list of branches confirmed merged by reporter.
+        source: Reporter obtains from `git branch --merged <target>` and the report artifact.
+        fill_rule: Array of real branch names; omit only when the report cannot establish the list.
+      failed_stage:
+        meaning: Optional stage that prevented a successful batch completion.
+        source: Reporter derives from `merge.stabilized.reason` and the report-input manifest.
+        fill_rule: Short stage identifier such as `integration` or `stabilization`; omit on success.
+      reason:
+        meaning: Optional human-readable failure reason carried into the terminal event.
+        source: Reporter copies the stabilized reason and report-input evidence.
+        fill_rule: Omit on success; on failure use the observed reason, never an invented diagnosis.

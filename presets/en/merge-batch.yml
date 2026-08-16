@@ -17,6 +17,7 @@
 # Artifacts (canonical layout under .ralph/merge/, owned by hats — not by this preset):
 #   .ralph/merge/stabilize-log.md        — stabilizer writes per attempt
 #   .ralph/merge/stabilize-state.json    — stabilizer writes/reads across attempts
+#   .ralph/merge/scope-manifest.json     — integrator writes the batch scope contract
 #   .ralph/merge/REPORT.md               — reporter writes (operator-facing; required
 #                                          before merge.batch.complete)
 #   .ralph/merge/reports/<timestamp>.md  — reporter optional stamped copy
@@ -121,7 +122,67 @@ event_loop:
     # and the complete/incomplete status enum.
     payload_consistency:
       enabled: true
-      rules: []
+      rules:
+        - id: merge-integrated-scope-resolved-no-critical-unknown
+          topic: merge.integrated
+          when:
+            all:
+              - {field: scope_status, eq: "resolved"}
+              - {field: critical_unknown_count, gt: 0}
+          message: "scope_status=resolved requires critical_unknown_count == 0."
+        - id: merge-integrated-scope-resolved-proceed-true
+          topic: merge.integrated
+          when:
+            all:
+              - {field: scope_status, eq: "resolved"}
+              - {field: proceed, eq: false}
+          message: "scope_status=resolved requires proceed=true."
+        - id: merge-integrated-scope-unresolved-proceed-false
+          topic: merge.integrated
+          when:
+            any:
+              - all:
+                  - {field: scope_status, eq: "ambiguous"}
+                  - {field: proceed, eq: true}
+              - all:
+                  - {field: scope_status, eq: "blocked"}
+                  - {field: proceed, eq: true}
+          message: "scope_status=ambiguous|blocked requires proceed=false."
+        - id: merge-integrated-complete-proceed-true
+          topic: merge.integrated
+          when:
+            all:
+              - {field: integration_complete, eq: true}
+              - {field: proceed, eq: false}
+          message: "integration_complete=true requires proceed=true."
+        - id: merge-stabilized-passed-proceed-true
+          topic: merge.stabilized
+          when:
+            all:
+              - {field: passed, eq: true}
+              - {field: proceed, eq: false}
+          message: "passed=true requires proceed=true."
+        - id: merge-stabilized-scope-resolved-no-critical-unknown
+          topic: merge.stabilized
+          when:
+            all:
+              - {field: scope_status, eq: "resolved"}
+              - {field: critical_unknown_count, gt: 0}
+          message: "scope_status=resolved requires critical_unknown_count == 0."
+        - id: merge-complete-success-proceed-true
+          topic: merge.batch.complete
+          when:
+            all:
+              - {field: success, eq: true}
+              - {field: proceed, eq: false}
+          message: "success=true requires proceed=true."
+        - id: merge-complete-scope-resolved-no-critical-unknown
+          topic: merge.batch.complete
+          when:
+            all:
+              - {field: scope_status, eq: "resolved"}
+              - {field: critical_unknown_count, gt: 0}
+          message: "scope_status=resolved requires critical_unknown_count == 0."
 cli:
   backend: "auto"
 
@@ -143,6 +204,7 @@ core:
     - "Never roll back merge commits that already succeeded; only `git merge --abort` the in-progress step when stuck."
     - "Integrator: if any branch merge is aborted or cannot complete, STOP merging remaining branches; publish merge.integrated with integration_complete: false."
     - "Stabilizer: publish merge.stabilized with passed: true ONLY when integration_complete was true AND verification passes. Publish merge.stabilized with passed: false when merge was incomplete, stabilization is exhausted (attempt ≥ 35), or verification cannot be fixed. Never publish merge.retest without updating stabilize-log and stabilize-state."
+    - "Scope contract: integrator must write and validate .ralph/merge/scope-manifest.json before merge.integrated; downstream hats must preserve its digest and never upgrade unresolved scope evidence."
 
 hats:
   reviewer:
@@ -277,6 +339,10 @@ hats:
         `merge_commit_shas`, and one `branches_failed` entry with
         `branch: "<pre-merge-verification>"` and the failure reason, plus
         `integration_path: .ralph/merge/integration.md`.
+      Also write `.ralph/merge/scope-manifest.json` with `scope_status: blocked`,
+      `proceed: false`, `overall_confidence: 0`, and the observed target SHA as
+      `scope_base_sha`; the scope fields below are required on every
+      `merge.integrated` payload, including this failure path.
       The stabilizer will turn this into `merge.stabilized(passed: false,
       reason: merge_incomplete)`, allowing reporter to write the failure
       report and emit the normal completion token.
@@ -380,6 +446,38 @@ hats:
       }
       ```
 
+      ### Step 3a: Capture the independent scope manifest
+
+      The merge-boundary file is evidence about the merge window; it is not the
+      scope contract. Before the event precheck, write
+      `.ralph/merge/scope-manifest.json` containing:
+
+      ```json
+      {
+        "schema_version": "merge-batch-scope.v1",
+        "scope_base_sha": "<target SHA before first merge>",
+        "scope_source": "branch-merge",
+        "target_branch": "<target>",
+        "branch_order": ["<prompt branch>"],
+        "branches_merged": ["<branch>"],
+        "branches_skipped": [],
+        "branches_failed": [],
+        "scope_status": "resolved",
+        "overall_confidence": 100,
+        "critical_unknown_count": 0,
+        "proceed": true,
+        "scope_digest": "<64-char hex>"
+      }
+      ```
+
+      For incomplete integration, use `scope_status: blocked`,
+      `overall_confidence: 0`, `critical_unknown_count: 1` (or the observed
+      count), and `proceed: false`. Compute `scope_digest` by removing that
+      field, serializing compact JSON with sorted keys, appending one newline,
+      and hashing with SHA-256. Recompute the digest before policy-check.
+      `scope_base_sha` is the exact target SHA captured before the first merge;
+      never substitute the post-merge HEAD or a placeholder.
+
       Publish **`merge.integrated`** with payload fields:
       - `integration_complete`: **true** only if EVERY prompt branch is merged
         (merged this run or already merged); **false** if any branch was
@@ -395,6 +493,15 @@ hats:
       - `merge_boundary_path: .ralph/merge/merge-boundary.json`
       - `merge_boundary_digest: <64-char hex>`
       - `merge_boundary_status: complete|incomplete`
+      - `scope_manifest_path: .ralph/merge/scope-manifest.json`
+      - `scope_digest: <canonical scope-manifest SHA-256>`
+      - `scope_status: resolved|ambiguous|blocked`
+      - `scope_base_sha: <target SHA before the first merge>`
+      - `scope_source: explicit|direct-target|branch-merge|inferred`
+      - `overall_confidence: 0|85|90|100`
+      - `critical_unknown_count: <non-negative integer>`
+      - `proceed: true` only when integration is complete, scope is resolved,
+        confidence is at least 90, and critical unknown count is zero
 
   stabilizer:
     name: "Stabilizer"
@@ -417,7 +524,28 @@ hats:
 
       ### Entry gate (on `merge.integrated`)
 
-      Read the `merge.integrated` payload first.
+      Read the complete `merge.integrated` payload first, including
+      `integration_path`, `merge_boundary_path`/`merge_boundary_digest`, and
+      the full scope contract (`scope_manifest_path`, `scope_digest`,
+      `scope_status`, `scope_base_sha`, `scope_source`,
+      `overall_confidence`, `critical_unknown_count`, `proceed`).
+
+      Before deciding whether to verify, consume the upstream artifacts rather
+      than trusting path presence alone:
+
+      ```bash
+      test -f <integration_path>
+      sed -n '1,240p' <integration_path>
+      test -f <scope_manifest_path>
+      sed -n '1,240p' <scope_manifest_path>
+      ```
+
+      Confirm that the integration artifact's branch order, merged/skipped/
+      failed sets, merge SHAs, verification result, and failure evidence agree
+      with the trigger payload. Recompute the scope digest and confirm it
+      equals `scope_digest`; confirm `scope_base_sha` is the target-before-merge
+      SHA. If either artifact is missing, unreadable, malformed, or insufficient
+      for the decision, write a failure manifest and keep `passed: false`.
 
       If `integration_complete` is **false** OR `ready_for_stabilization` is
       **false**:
@@ -428,18 +556,24 @@ hats:
         - `branches_failed` from the integrator payload
         - `report_input_file: .ralph/merge/report-input.md` after writing a
           failure manifest that records the missing integration evidence
+        - `merge_boundary_path` and `merge_boundary_digest` copied from the
+          integrator payload after verifying the artifact
+        - every scope field copied from the validated integrator payload
       - Do NOT run verification or enter the fix loop
 
       ### Artifact paths (create `.ralph/merge/` if missing)
 
       - `.ralph/merge/stabilize-log.md` — human-readable attempt log
       - `.ralph/merge/stabilize-state.json` — structured handoff between attempts
+      - `.ralph/merge/scope-manifest.json` — independent batch scope contract
       - `.ralph/merge/report-input.md` — manifest consumed by reporter; owner is
         stabilizer, reader is reporter, retained with the merge tree for audit.
 
       ### EVERY stabilization attempt checklist
 
-      1. **Read** `stabilize-log.md` and `stabilize-state.json` (if missing, start attempt 1)
+      1. **Read** `stabilize-log.md`, `stabilize-state.json`, and the
+         `integration_path`/`scope_manifest_path` artifacts (if local state is
+         missing, start attempt 1). Reconfirm both digests before running tests.
       2. **Verification command** (pin on attempt 1, reuse thereafter):
          - If `stabilize-state.json` has `verification_command`, reuse it
          - Else if the prompt names a verification command, use it verbatim
@@ -452,7 +586,7 @@ hats:
          **`merge.stabilized`** with `passed: false`, `reason: stabilization_exhausted`
       4. **Run** the pinned verification command
       5. If **PASS** → update log with RESOLVED → publish **`merge.stabilized`**
-         with `passed: true`
+         with `passed: true` and the complete boundary/scope echo.
       6. If **FAIL** → follow failure protocol below → publish **`merge.retest`**
          (unless exhaustion applies on the next entry)
 
@@ -493,15 +627,25 @@ hats:
 
       Before every `merge.stabilized` emit, update `.ralph/merge/report-input.md`
       with readable paths for review, integration, stabilize-log, and
-      stabilize-state. If an upstream artifact is unavailable, record that fact
-      in the manifest and keep `passed: false`.
+      stabilize-state, plus `scope-manifest.json`. If an upstream artifact is
+      unavailable, record that fact in the manifest and keep `passed: false`.
 
       - **PASS** (and merge was complete) → `merge.stabilized` with `passed: true`
-        and `report_input_file: .ralph/merge/report-input.md`
-      - **FAIL after fix attempt** (and attempt < 35) → `merge.retest`
+        and `report_input_file: .ralph/merge/report-input.md`, plus the exact
+        `merge_boundary_*` and all scope fields from `merge.integrated`
+      - **FAIL after fix attempt** (and attempt < 35) → `merge.retest` with
+        explicit target `stabilizer` because this is the topology-declared
+        intentional self-loop
       - **Merge incomplete** (integrator gate) → `merge.stabilized` with `passed: false`, `reason: merge_incomplete`
       - **Attempt ≥ 35 still failing** → `merge.stabilized` with `passed: false`, `reason: stabilization_exhausted`
       - **NEVER** publish `merge.stabilized` with `passed: true` while verification is failing
+
+      Every `merge.stabilized` branch (merge incomplete, verification PASS,
+      verification failure exhaustion) must include `passed`,
+      `report_input_file`, both boundary fields, and all eight scope fields:
+      `scope_manifest_path`, `scope_digest`, `scope_status`, `scope_base_sha`,
+      `scope_source`, `overall_confidence`, `critical_unknown_count`, and
+      `proceed`. Do not omit the boundary echo on failure.
 
   reporter:
     name: "Merge Reporter"
@@ -559,7 +703,12 @@ hats:
       ## Repository state (remaining worktrees/branches)
       ```
 
-      Check `merge.stabilized` payload (`passed`, `reason`) and git state.
+      Check the complete `merge.stabilized` payload and git state. In addition
+      to `report_input_file`, read and validate `integration_path` and
+      `scope_manifest_path` through the report-input manifest; recompute and
+      record the scope digest, status, base SHA, confidence, and critical
+      unknown count in REPORT.md. Missing or insufficient artifacts require a
+      FAIL report and `success: false`.
       Read `report_input_file` from the trigger context. Run `test -f` on the
       manifest and every listed artifact, read them, and verify they contain
       enough evidence for the required report sections. If any artifact is
@@ -568,7 +717,7 @@ hats:
       ### Boundary artifact cross-check
 
       Read `merge.stabilized` payload (`merge_boundary_path` / `merge_boundary_digest`).
-      If the fields are present:
+      The fields are required by the terminal contract:
       1. Verify the file at `merge_boundary_path` is readable (`test -f`)
       2. Remove `boundary_digest`, serialize compact JSON with keys sorted,
          append one newline, recompute SHA-256, and confirm it matches
@@ -576,8 +725,9 @@ hats:
       3. Include the boundary digest and status in the report
 
       If path is missing or digest mismatch: record the discrepancy in the
-      report but do NOT change the completion outcome — boundary is OPTIONAL
-      cross-check evidence, NOT a downstream authority.
+      report and emit `success: false`; the boundary is required event
+      evidence, although it is not an authority for commits outside the merge
+      batch.
 
       ### On success (`passed: true` from `merge.stabilized`)
 
@@ -615,7 +765,11 @@ hats:
       Publish **`merge.batch.complete`** (sole completion token) with payload:
       - `success: true|false` (true ONLY when `merge.stabilized.passed` is true)
       - `report_path` (required; readable file under `.ralph/merge/`)
-      - `merged_branches`
-      - `failed_stage` / `reason` (if any)
+      - `scope_manifest_path`, `scope_digest`, `scope_status`,
+        `scope_base_sha`, `scope_source`, `overall_confidence`,
+        `critical_unknown_count`, `proceed` (copied from the validated
+        `merge.stabilized` payload)
+      - `merged_branches` (optional, only when confirmed from Git and report)
+      - `failed_stage` / `reason` (optional on failure; omit on success)
 
       Do NOT emit `MERGE_COMPLETE` — that token is not used by this preset.

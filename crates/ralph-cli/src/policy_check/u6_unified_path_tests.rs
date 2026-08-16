@@ -524,6 +524,23 @@ fn u7_check_envelope_triggered_rejects_isolated_self_target() {
 }
 
 #[test]
+fn u7_declared_business_self_loop_is_allowed_in_isolated_mode() {
+    let yaml = r#"
+hats:
+  stabilizer:
+    name: stabilizer
+    triggers: [merge.integrated, merge.retest]
+    publishes: [merge.retest, merge.stabilized]
+event_loop:
+  execution_mode: isolated
+"#;
+    let cfg: RalphConfig = serde_yaml::from_str(yaml).expect("synthetic self-loop config");
+
+    check_envelope_triggered("merge.retest", Some("stabilizer"), Some("stabilizer"), &cfg)
+        .expect("declared bounded business self-loop must be accepted");
+}
+
+#[test]
 fn u7_check_envelope_triggered_missing_allowed() {
     let cfg = cfg_with_hats(&["review-synthesizer"]);
     // R12: missing triggered is allowed.
