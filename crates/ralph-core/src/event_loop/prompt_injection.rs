@@ -277,7 +277,7 @@ impl EventLoop {
                     .telemetry
                     .runtime_diagnosis
                     .max_repeated_recoveries;
-                if cfg == 0 { 1 } else { cfg as u32 }
+                cfg.min(u32::MAX as usize) as u32
             },
             ..Default::default()
         };

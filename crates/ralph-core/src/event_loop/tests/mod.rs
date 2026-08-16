@@ -95,6 +95,9 @@ mod r5_hard_gate_routing;
 mod recovery_envelope_u7_u8;
 mod replay_light_integration;
 mod review_step_gate;
+/// U6 (2026-08-16-1015 plan): `max_repeated_recoveries` → `RuntimeContext::handoff_retry_cap`
+/// saturation cast + upper-bound validator.
+mod runtime_recovery_max_repeated_recoveries;
 /// 2026-07-24-005 U1 review fix: production `plan.blocked`
 /// synthesis paths must target `reporter`.
 mod u1_plan_blocked_reporter_target;

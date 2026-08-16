@@ -269,6 +269,12 @@ impl RuntimeDiagnosisConfig {
                 message: "must be greater than 0".to_string(),
             });
         }
+        if self.max_repeated_recoveries > u32::MAX as usize {
+            return Err(ConfigError::TelemetryValidation {
+                field: "telemetry.runtime_diagnosis.max_repeated_recoveries".to_string(),
+                message: format!("must not exceed u32::MAX ({})", u32::MAX),
+            });
+        }
         if self.artifact_retention == 0 {
             return Err(ConfigError::TelemetryValidation {
                 field: "telemetry.runtime_diagnosis.artifact_retention".to_string(),
@@ -799,5 +805,28 @@ runtime_diagnosis:
             .unwrap_or(false);
         let from_injected = cfg.to_diagnostics_options_with_full(Path::new("."), env_value);
         assert_eq!(from_env, from_injected);
+    }
+
+    /// `max_repeated_recoveries > u32::MAX` would cause a truncation when
+    /// cast to `u32` in [`crate::event_loop::prompt_injection::runtime_recovery_context`];
+    /// the validator must reject it.
+    #[test]
+    fn assert_cfg_max_repeated_recoveries_bounded_by_u32_max() {
+        let cfg = RuntimeDiagnosisConfig {
+            max_repeated_recoveries: u32::MAX as usize + 1,
+            ..RuntimeDiagnosisConfig::default()
+        };
+        let err = cfg.validate().unwrap_err();
+        assert!(
+            matches!(
+                err,
+                ConfigError::TelemetryValidation {
+                    ref field,
+                    ref message,
+                    ..
+                } if field.contains("max_repeated_recoveries") && message.contains("u32::MAX")
+            ),
+            "expected TelemetryValidation for max_repeated_recoveries exceeding u32::MAX, got {err:?}"
+        );
     }
 }
