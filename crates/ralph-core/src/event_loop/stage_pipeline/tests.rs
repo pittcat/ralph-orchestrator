@@ -316,6 +316,7 @@ fn config_with_required_target_hat(topic: &str, required_target_hat: Option<&str
 }
 
 /// Build an `EventLoopConfig` with no schemas (empty contract map).
+#[allow(dead_code)]
 fn empty_event_loop_config() -> EventLoopConfig {
     EventLoopConfig::default()
 }
