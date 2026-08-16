@@ -118,6 +118,36 @@ fn redteam_next(next_id: &str, completed: u64, remaining: u64, accepted: u64, re
 }
 
 #[test]
+fn redteam_queue_rejects_duplicate_attack_mapping_in_same_ledger() {
+    let config = redteam_queue_config();
+    let mut state = PolicyRuntimeState::default();
+
+    assert_eq!(
+        validate_event(
+            "redteam.attack.mapped",
+            Some(r#"{"experiment_count":2}"#),
+            &config,
+            &mut state,
+        ),
+        PolicyDecision::Accept
+    );
+
+    let duplicate = validate_event(
+        "redteam.attack.mapped",
+        Some(r#"{"experiment_count":2}"#),
+        &config,
+        &mut state,
+    );
+    assert!(
+        matches!(duplicate, PolicyDecision::RejectWithResume(PolicyFinding {
+            violation_type: ViolationType::SemanticGateViolation { ref gate, .. },
+            ..
+        }) if gate == "redteam_experiment_queue_consistency"),
+        "duplicate attack mapping in one accepted ledger must be rejected, got {duplicate:?}"
+    );
+}
+
+#[test]
 fn redteam_queue_rejects_counter_drift_and_duplicate_handoff() {
     let config = redteam_queue_config();
     let mut state = PolicyRuntimeState::default();

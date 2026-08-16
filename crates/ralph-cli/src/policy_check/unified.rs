@@ -282,13 +282,19 @@ pub fn run_policy_check_unified_with_config(
         ValidationPipeline::from_config(&view, &event_loop_config)
     };
 
-    // R12 (U11-T7): load .ralph/events.jsonl into LedgerSnapshot so
-    // the unified pipeline sees terminal/business state. The legacy
-    // `LedgerSnapshot::cold_start()` produced an empty snapshot, which
-    // made the post-commit rules in `validate_with_preview` reject
-    // legitimate terminal events (e.g. `work.done` with `task_id`
-    // pointing at a queue that does not exist in the snapshot).
-    let events_path = workspace_root.join(".ralph/events.jsonl");
+    // R12 (U11-T7)：加载当前 accepted-events ledger 到 LedgerSnapshot，
+    // 让统一 pipeline 能看到终态/业务状态。旧的
+    // `LedgerSnapshot::cold_start()` 会生成空快照，导致
+    // `validate_with_preview` 的 post-commit 规则拒绝合法终态事件
+    //（例如 `task_id` 指向快照中不存在队列的 `work.done`）。
+    //
+    // 一次运行的 accepted ledger 由 `.ralph/current-events` 选择。
+    // 只有没有活动 marker 的 workspace 才回退到静态
+    // `.ralph/events.jsonl`；当 timestamped ledger 已激活时继续重放静态
+    // 文件，会把上一轮运行的状态混入当前 policy decision。
+    let events_path = OperationContext::detect(workspace_root.clone())
+        .resolve_accepted_events_path()
+        .unwrap_or_else(|| workspace_root.join(".ralph/events.jsonl"));
     let mut snapshot = if events_path.exists() {
         match StateLedger::replay_from_disk(&workspace_root) {
             Ok(snap) => snap,
@@ -301,12 +307,12 @@ pub fn run_policy_check_unified_with_config(
         LedgerSnapshot::cold_start()
     };
 
-    // Keep the unified pipeline's stateful policy rules on the same replay
-    // authority as the legacy gate above. `LedgerSnapshot` is rebuilt from
-    // `.ralph/ledger.jsonl`, while queue and terminal policy state is derived
-    // from the accepted event stream in `.ralph/events.jsonl`. Without this
-    // bootstrap, red-team queue handoffs see a default empty state and reject
-    // a valid `experiment.next` after `attack.mapped`.
+    // 让 unified pipeline 的有状态 policy 规则与上面的 legacy gate 使用同一
+    // 重放权威源。`LedgerSnapshot` 仍从 `.ralph/ledger.jsonl` 重建，队列和
+    // 终态 policy 状态则从当前 accepted event stream 派生。没有这个 bootstrap
+    // 时，red-team queue handoff 会看到默认空状态，拒绝 `attack.mapped` 后
+    // 合法的 `experiment.next`；若继续使用静态镜像，则会把上一轮队列导入
+    // 新 activation。
     if let Some(policy) = event_loop_config
         .event_policy
         .as_ref()
