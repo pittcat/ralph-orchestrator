@@ -48,7 +48,7 @@ pub struct RetryKeyState {
 
 /// Context passed to every detector. Only the fields a detector cares about
 /// need to be populated; missing/empty fields are treated as "no signal".
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct RuntimeContext {
     pub current_iteration: u32,
     pub recovery_envelopes: Vec<EnvelopeSnapshot>,
@@ -63,6 +63,29 @@ pub struct RuntimeContext {
     /// that renames the executor hat (e.g. `executor-fix`,
     /// `executor-integration`) still triggers the detector.
     pub executor_hat_ids: Vec<String>,
+    /// Plan 2026-08-16-1015 Unit 3: cap on consecutive
+    /// `handoff_dispatch_timeout` envelopes for a single retry key
+    /// before `finalize_recovery_outcome` escalates to
+    /// `ForcePlanBlocked`. Source-of-truth is the existing
+    /// `TelemetryConfig::max_repeated_recoveries` (default 3, 0
+    /// rejected by config validation). A safe Default of 3 lets
+    /// hand-rolled test contexts opt out of plumbing the cap.
+    pub handoff_retry_cap: u32,
+}
+
+impl Default for RuntimeContext {
+    fn default() -> Self {
+        Self {
+            current_iteration: 0,
+            recovery_envelopes: Vec::new(),
+            events: Vec::new(),
+            retry_key_states: Vec::new(),
+            current_retry_key: None,
+            current_hat: None,
+            executor_hat_ids: Vec::new(),
+            handoff_retry_cap: 3,
+        }
+    }
 }
 
 /// Corrective action produced by a detector. Callers apply actions in the

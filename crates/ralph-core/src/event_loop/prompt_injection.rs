@@ -266,6 +266,19 @@ impl EventLoop {
         let mut ctx = crate::recovery_runtime::RuntimeContext {
             current_iteration: self.state.iteration,
             current_hat: self.state.last_hat.as_ref().map(|h| h.as_str().to_string()),
+            // Plan 2026-08-16-1015 Unit 3: thread the configured
+            // handoff-retry cap from the existing telemetry
+            // runtime-diagnosis config. Default 3 (config validation
+            // rejects 0); `RuntimeContext::default()` also supplies 3
+            // so manual test contexts get the same floor.
+            handoff_retry_cap: {
+                let cfg = self
+                    .config
+                    .telemetry
+                    .runtime_diagnosis
+                    .max_repeated_recoveries;
+                if cfg == 0 { 1 } else { cfg as u32 }
+            },
             ..Default::default()
         };
 
