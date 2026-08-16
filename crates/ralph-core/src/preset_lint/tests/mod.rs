@@ -18,4 +18,5 @@ mod finding_id_lock;
 mod ownership;
 mod precheck_gate_hat;
 mod run_preset_lint;
+mod target_routing_tests;
 mod topic_format;
