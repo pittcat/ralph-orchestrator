@@ -27,7 +27,7 @@ use crate::state_machine::{
     StateMachineTransitionId,
 };
 
-/// Plan GAP-02 / Unit 2 + 2026-08-15-2211 U5: revalidation helper.
+/// Plan GAP-02 / Unit 2 + 2026-08-15-2211 U5/U7: revalidation helper.
 /// Validates each event in `events` against the candidate runtime
 /// snapshot. A downstream-rejected predecessor cannot influence a
 /// later survivor's decision because revalidation starts from the
@@ -36,10 +36,20 @@ use crate::state_machine::{
 /// Returns the in-flight [`CandidateStateMachineDecision`]s (used
 /// by the apply stage to materialise [`StateMachineTransitionDelta`]
 /// + outbox receipt), plus the rejected/ignored findings so the
-/// caller can surface them on the bus. The helper no longer returns
-/// an `accepted: Vec<JsonlEvent>` because `accepted_events` is the
-/// rejection-filtered subset of the input — the caller already has
-/// the input list and only needs the decision metadata.
+/// caller can surface them on the bus.
+///
+/// Plan 2026-08-15-2211 U7: terminal_observed is captured from the
+/// candidate snapshot (per the original U2 capture semantics — the
+/// validator mutates terminal_observed=true before returning Accept
+/// for a terminal event, so reading it from the candidate AFTER
+/// `validate_event` reflects the post-mutation truth). terminal_honored
+/// is captured at `apply_state_machine_decisions` entry from the
+/// LIVE state, NOT here — `mark_terminal_honored` is invoked by the
+/// per-event processing flow (e.g. `wave_scope.rs::mark_terminal_honored`)
+/// between candidate stage and apply, so reading terminal_honored
+/// from the candidate clone would miss the honored transition and
+/// produce deltas that disagree with the live runtime / cold-start
+/// rehydration. See U7 §"capture 时机" for the TOCTOU trace.
 fn validate_events_against_candidate(
     candidate: &mut StateMachineRuntimeState,
     events: &[JsonlEvent],
@@ -84,14 +94,17 @@ fn validate_events_against_candidate(
                     !pre_opens_map.contains_key(key_ref) && !pre_closed_map.contains_key(key_ref);
                 let closes_instance = pre_opens_map.contains_key(key_ref)
                     && !pre_closed_map.contains_key(key_ref);
-                let (term_obs, term_hon) = candidate.observed_snapshot();
+                // Plan 2026-08-15-2211 U7: capture terminal_observed
+                // from the candidate snapshot (post-validate) but
+                // defer terminal_honored capture to apply time (see
+                // function-level comment for the TOCTOU rationale).
+                let (term_obs, _term_hon) = candidate.observed_snapshot();
                 pending.push(CandidateStateMachineDecision {
                     event: event_for_emit.clone(),
                     decision: decision.clone(),
                     opens_instance,
                     closes_instance,
                     accepted_at_terminal_observed: term_obs,
-                    accepted_at_terminal_honored: term_hon,
                 });
             }
             StateMachineDecision::Reject { finding } => {
@@ -125,7 +138,7 @@ fn validate_events_against_candidate(
                 // and the current terminal flags. The caller decides
                 // whether to publish this as a business event based
                 // on the helper's downstream filter.
-                let (term_obs, term_hon) = candidate.observed_snapshot();
+                let (term_obs, _term_hon) = candidate.observed_snapshot();
                 pending.push(CandidateStateMachineDecision {
                     event: event_for_emit.clone(),
                     decision: StateMachineDecision::Accept {
@@ -135,7 +148,6 @@ fn validate_events_against_candidate(
                     opens_instance: false,
                     closes_instance: false,
                     accepted_at_terminal_observed: term_obs,
-                    accepted_at_terminal_honored: term_hon,
                 });
             }
         }
@@ -304,6 +316,18 @@ impl EventLoop {
         // Capture AFTER materialising so the snapshot is `Some`, even
         // on the first batch where the runtime started as `None`.
         self.state_machine_apply_snapshot = Some(live.clone());
+        // Plan 2026-08-15-2211 U7: capture `terminal_honored` from
+        // the LIVE runtime at apply entry. `mark_terminal_honored`
+        // is invoked by per-event processing (e.g. wave_scope.rs)
+        // BETWEEN the candidate stage and apply; capturing from the
+        // candidate clone here would miss it and produce a delta
+        // that disagrees with the post-batch live runtime / cold-
+        // start rehydration. terminal_observed is still sourced from
+        // the candidate decision because `validate_terminal_event`
+        // mutates the candidate cumulative clone to set
+        // `terminal_observed=true` for the terminal event, and the
+        // mutation happens before the candidate stage returns.
+        let apply_terminal_honored = live.is_terminal_honored();
         for candidate in decisions {
             let topic = candidate.event.topic.as_str();
             // The identity is derived from the accepted event and semantic
@@ -331,10 +355,16 @@ impl EventLoop {
                 &candidate.decision,
                 candidate.opens_instance,
                 candidate.closes_instance,
-                // Plan GAP-02 / Unit 2: terminal flags come from the
-                // candidate's captured snapshot, not the live runtime.
+                // Plan GAP-02 / Unit 2: terminal_observed comes from
+                // the candidate's captured snapshot (the validator
+                // mutated the cumulative clone).
                 candidate.accepted_at_terminal_observed,
-                candidate.accepted_at_terminal_honored,
+                // Plan 2026-08-15-2211 U7: terminal_honored is
+                // captured from the LIVE runtime at apply entry so
+                // a mark_terminal_honored invocation between
+                // candidate stage and apply propagates into the
+                // delta (no TOCTOU mismatch with rehydration).
+                apply_terminal_honored,
             );
             if let Some(delta) = delta {
                 let mut delta = delta;
@@ -475,14 +505,16 @@ pub(crate) struct CandidateStateMachineDecision {
     pub decision: StateMachineDecision,
     pub opens_instance: bool,
     pub closes_instance: bool,
-    /// Plan GAP-02 / Unit 2 — projection snapshot. Reserved for
-    /// the Unit 3 apply stage; not consumed in Unit 2 itself.
-    #[allow(dead_code)]
+    /// Plan GAP-02 / Unit 2 — terminal_observed is captured from the
+    /// candidate snapshot AFTER `validate_terminal_event` mutated
+    /// `candidate.terminal_observed=true` (for terminal events).
+    /// Plan 2026-08-15-2211 U7 removes the `accepted_at_terminal_honored`
+    /// field; terminal_honored is captured fresh from the LIVE
+    /// runtime at `apply_state_machine_decisions` entry to avoid
+    /// the TOCTOU between candidate stage (captures too early) and
+    /// `mark_terminal_honored` (called by per-event processing
+    /// between candidate and apply).
     pub accepted_at_terminal_observed: bool,
-    /// Plan GAP-02 / Unit 2 — projection snapshot. Reserved for
-    /// the Unit 3 apply stage; not consumed in Unit 2 itself.
-    #[allow(dead_code)]
-    pub accepted_at_terminal_honored: bool,
 }
 
 #[cfg(test)]

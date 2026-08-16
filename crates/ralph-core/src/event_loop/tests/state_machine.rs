@@ -1323,7 +1323,6 @@ fn u2_terminal_observed_propagates_from_candidate_to_live_runtime() {
         opens_instance: false,
         closes_instance: false,
         accepted_at_terminal_observed: true,
-        accepted_at_terminal_honored: false,
     };
 
     // Run the production apply + commit pipeline. The helper now
@@ -1518,7 +1517,6 @@ hats:
         opens_instance: true,
         closes_instance: false,
         accepted_at_terminal_observed: false,
-        accepted_at_terminal_honored: false,
     };
 
     // Snapshot the pre-apply live runtime summary.
