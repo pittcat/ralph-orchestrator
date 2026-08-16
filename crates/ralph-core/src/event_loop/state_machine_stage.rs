@@ -492,10 +492,10 @@ impl EventLoop {
                 None => {
                     // Roll back the live mutation we just performed
                     // before returning the error.
-                    if let Some(snap) = pre_apply_snapshot.take() {
-                        if let Some(live) = self.state.state_machine_runtime_state.as_mut() {
-                            *live = snap;
-                        }
+                    if let Some(snap) = pre_apply_snapshot.take()
+                        && let Some(live) = self.state.state_machine_runtime_state.as_mut()
+                    {
+                        *live = snap;
                     }
                     return Err(
                         crate::event_loop::accepted_transition::TransitionError::CommitFailed {
@@ -526,12 +526,11 @@ impl EventLoop {
         // this). The snapshot slot is reset on the next
         // `apply_state_machine_decisions` entry, so it does not
         // need to be cleared here.
-        if result.is_err() {
-            if let Some(snap) = pre_apply_snapshot.take() {
-                if let Some(live) = self.state.state_machine_runtime_state.as_mut() {
-                    *live = snap;
-                }
-            }
+        if result.is_err()
+            && let Some(snap) = pre_apply_snapshot.take()
+            && let Some(live) = self.state.state_machine_runtime_state.as_mut()
+        {
+            *live = snap;
         }
 
         result
