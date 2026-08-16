@@ -59,7 +59,7 @@ ralph emit --schema work.done | jq -r .protocol_hash   # 改后
 
 `required_fields` 的权威来源是当前 preset 的 `event_policy.schemas`：每个 topic 的必填字段由 schema 的 `required_fields` 数组声明（见 `ralph emit --schema <TOPIC>` 的返回结果）。不要凭记忆构造 payload，必须对照 schema 补齐。
 
-**Target hat 显式声明**：若 schema 的 `required_fields` 包含 `target_hat`，emit 时必须通过 `--triggered <HAT>` 显式指定目标 hat；loop runner 在 isolated 模式下不会自动推导 `target_hat`。
+**Target hat 显式声明**：若 schema 的 `EventSchema.required_target_hat` 声明了 X（例如 `presets/schemas/ce-executor-pipeline.yml` 中 `report.done` 的 `required_target_hat: reporter`），emit 时必须通过 `--triggered <HAT>` 或 `RALPH_TRIGGERED_HAT` 显式指定目标 hat；loop runner 在 isolated 模式下不会自动推导 `target_hat`。
 
 **终态完成的唯一合法信号**：`recorded=true`（正式 emit 的 `--output json` 返回值）是唯一表示事件已落盘的信号。`--policy-check` 的 `ok=true` 只是预检通过，`recorded` 必须是 `false`；不要把预检通过当成发布完成。
 
