@@ -211,6 +211,79 @@ fn test_builtin_redteam_failed_sink_is_publishable_by_producers_only() {
     );
 }
 
+/// The unified policy-check path must replay the event ledger into the
+/// policy runtime state before validating a serial red-team queue handoff.
+/// Without this, `redteam.experiment.next` sees an empty queue even though
+/// `redteam.attack.mapped` and `redteam.experiment.done` are present.
+#[test]
+fn test_builtin_redteam_next_policy_check_replays_queue_state() {
+    let temp_dir = TempDir::new().expect("temp dir");
+    let temp_path = temp_dir.path();
+    let events_path = temp_path.join(".ralph/events.jsonl");
+    std::fs::create_dir_all(events_path.parent().expect("events parent")).unwrap();
+    std::fs::write(
+        &events_path,
+        concat!(
+            r#"{"topic":"redteam.attack.mapped","payload":{"experiment_count":18}}"#,
+            "\n",
+            r#"{"topic":"redteam.experiment.done","payload":{"experiment_id":"RTE-001"}}"#,
+            "\n"
+        ),
+    )
+    .unwrap();
+
+    let payload = serde_json::json!({
+        "next_experiment_id": "RTE-002",
+        "completed_count": 1,
+        "remaining_count": 17,
+        "accepted_count": 1,
+        "rejected_count": 0,
+        "evidence_board_path": ".ralph/red-team/07-evidence-board.md"
+    })
+    .to_string();
+
+    let output = common::ralph_bin()
+        .args([
+            "-H",
+            "builtin:red-team-attack",
+            "emit",
+            "redteam.experiment.next",
+            "--json",
+            &payload,
+            "--policy-check",
+            "--hat",
+            "evidence-gate",
+        ])
+        .current_dir(temp_path)
+        .env("RALPH_HATS_SOURCE", "builtin:red-team-attack")
+        .env("RALPH_CURRENT_HAT", "evidence-gate")
+        .env("RALPH_EVENTS_FILE", &events_path)
+        .output()
+        .expect("execute redteam next policy-check");
+
+    assert!(
+        output.status.success(),
+        "queue handoff must pass after replay: stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        !String::from_utf8_lossy(&output.stdout).contains("redteam_experiment_queue_consistency"),
+        "replayed queue state must not be reported as uninitialized: stdout={}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    assert_eq!(
+        std::fs::read_to_string(&events_path).unwrap(),
+        concat!(
+            r#"{"topic":"redteam.attack.mapped","payload":{"experiment_count":18}}"#,
+            "\n",
+            r#"{"topic":"redteam.experiment.done","payload":{"experiment_id":"RTE-001"}}"#,
+            "\n"
+        ),
+        "policy-check must not append an event"
+    );
+}
+
 #[test]
 fn test_builtin_redteam_scope_policy_check_rejects_manifest_decision_mismatch() {
     let temp_dir = TempDir::new().expect("temp dir");

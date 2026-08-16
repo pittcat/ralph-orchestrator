@@ -300,6 +300,24 @@ pub fn run_policy_check_unified_with_config(
     } else {
         LedgerSnapshot::cold_start()
     };
+
+    // Keep the unified pipeline's stateful policy rules on the same replay
+    // authority as the legacy gate above. `LedgerSnapshot` is rebuilt from
+    // `.ralph/ledger.jsonl`, while queue and terminal policy state is derived
+    // from the accepted event stream in `.ralph/events.jsonl`. Without this
+    // bootstrap, red-team queue handoffs see a default empty state and reject
+    // a valid `experiment.next` after `attack.mapped`.
+    if let Some(policy) = event_loop_config
+        .event_policy
+        .as_ref()
+        .filter(|policy| policy.enabled)
+        && events_path.exists()
+    {
+        let policy_context = PolicyCheckContext {
+            events_file: events_path.clone(),
+        };
+        snapshot.policy_runtime = Some(build_policy_state(policy, &policy_context));
+    }
     let mut projected = snapshot.clone();
 
     // U11-T7-R12b: legacy `validate_topic_payload_against_config` is
