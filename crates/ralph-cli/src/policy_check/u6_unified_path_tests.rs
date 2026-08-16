@@ -681,6 +681,13 @@ fn u2_check_envelope_triggered_accepts_correct_target_on_required_target_hat_top
 }
 
 #[test]
+fn u2_check_envelope_triggered_accepts_required_target_self_target_for_reporter() {
+    let cfg = cfg_with_required_target_hat("report.done", "reporter");
+    check_envelope_triggered("report.done", Some("reporter"), Some("reporter"), &cfg)
+        .expect("required terminal reporter target may equal the publishing hat");
+}
+
+#[test]
 fn u2_check_envelope_triggered_falls_through_for_non_contract_topic() {
     // report.done has required_target_hat=reporter; work.done has no schema entry.
     // work.done should fall through to existing semantics — use None (R12).

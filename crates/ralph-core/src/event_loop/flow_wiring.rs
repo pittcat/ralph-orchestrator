@@ -346,10 +346,10 @@ pub fn build_terminal_target_contracts_from_loop_config(
     let mut out = HashMap::new();
     if let Some(policy) = &loop_cfg.event_policy {
         for (topic, schema) in &policy.schemas {
-            if let Some(target) = schema.required_target_hat.as_ref() {
-                if !target.is_empty() {
-                    out.insert(topic.clone(), target.clone());
-                }
+            if let Some(target) = schema.required_target_hat.as_ref()
+                && !target.is_empty()
+            {
+                out.insert(topic.clone(), target.clone());
             }
         }
     }

@@ -44,6 +44,8 @@ ANCHORS: tuple[tuple[str, str], ...] = (
     # in finding-rubric.md, patterns.md, prompt-visibility.md, commands.md.
     ("skills/ralph-preset-author/references/finding-rubric.md", "evidence_bound_missing_invariant"),
     ("skills/ralph-preset-review/references/finding-rubric.md", "evidence_bound_missing_invariant"),
+    ("skills/ralph-preset-author/references/commands.md", "required_target_hat"),
+    ("skills/ralph-preset-review/references/commands.md", "required_target_hat"),
     ("skills/ralph-preset-author/references/patterns.md", "Evidence-bound correction pattern"),
     ("skills/ralph-preset-review/references/patterns.md", "Evidence-bound correction pattern"),
     ("skills/ralph-preset-author/references/prompt-visibility.md", "evidence-bound"),

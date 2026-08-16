@@ -136,7 +136,7 @@ Preset 专用 trigger 状态表写在各 preset 的 hat `instructions:`；本文
 
 **消费顺序规则：**
 1. 当前 hat 的 `allowed_topics`（与 `publishes` 交集）中，取 `terminal_topics` 或唯一的 `primary_terminal_topic`。
-2. 若 schema 的 `required_fields` 包含 `target_hat`，emit 时必须通过 `--triggered <HAT>` 显式指定。
+2. 若 schema 的 `EventSchema.required_target_hat` 声明目标 hat，emit 时必须通过 `--triggered <HAT>` 显式指定该目标。
 3. 终态事件必须满足 `recorded=true` 才算正式发布；`ok=true` 但 `recorded=false` 只是预检通过，不是终态。
 
 preset 的 `event_policy.schemas` 是 `required_fields` 的权威来源；不要凭记忆或跨 preset 的示例构造 payload。

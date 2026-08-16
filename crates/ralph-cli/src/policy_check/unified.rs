@@ -784,23 +784,26 @@ pub fn check_envelope_triggered(
     // When the schema declares a non-empty required_target_hat for this topic,
     // triggered MUST be Some(<that exact hat>). Mirror the runtime guard's
     // reason codes so agent repair tooling can dispatch on the same vocabulary.
-    if let Some(target) = required_target_hat_for_topic(topic, config) {
-        if value != target {
-            return Err(ValidationError {
-                payload_index: 0,
-                field: "triggered".to_string(),
-                reason_code: "terminal_target_mismatch".to_string(),
-                message: format!(
-                    "topic '{topic}' requires triggered='{target}'; got triggered='{value}'"
-                ),
-                actual: Some(value.to_string()),
-                ..Default::default()
-            });
-        }
-        // matches required target — fall through to existing checks
+    let required_target = required_target_hat_for_topic(topic, config);
+    if let Some(target) = required_target.as_deref()
+        && value != target
+    {
+        return Err(ValidationError {
+            payload_index: 0,
+            field: "triggered".to_string(),
+            reason_code: "terminal_target_mismatch".to_string(),
+            message: format!(
+                "topic '{topic}' requires triggered='{target}'; got triggered='{value}'"
+            ),
+            actual: Some(value.to_string()),
+            ..Default::default()
+        });
     }
 
-    if config.event_loop.execution_mode == HatExecutionMode::Isolated && source_hat == Some(value) {
+    if config.event_loop.execution_mode == HatExecutionMode::Isolated
+        && source_hat == Some(value)
+        && required_target.as_deref() != Some(value)
+    {
         return Err(ValidationError {
             payload_index: 0,
             field: "triggered".to_string(),

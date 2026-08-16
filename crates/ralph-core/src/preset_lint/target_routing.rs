@@ -33,19 +33,6 @@ pub fn check_target_routing(config: &RalphConfig) -> Vec<LintFinding> {
     let index = HandoffIndex::from_config(config);
     let graph = HandoffGraph::from_config(config);
 
-    // Build the set of all terminal topics (declared via any hat's
-    // `terminal_events: [...]`). Terminal events have no subscribers by
-    // design — they self-close the loop — so the NOT_REGISTERED finding
-    // would fire incorrectly for topics like `report.done`. The contract
-    // is still enforced at emit time by `TerminalTargetGuardStage`.
-    let mut terminal_topics: std::collections::HashSet<String> =
-        std::collections::HashSet::new();
-    for hat in config.hats.values() {
-        for topic in &hat.terminal_events {
-            terminal_topics.insert(topic.clone());
-        }
-    }
-
     let mut findings = Vec::new();
 
     for (topic, schema) in &policy.schemas {
@@ -71,14 +58,6 @@ pub fn check_target_routing(config: &RalphConfig) -> Vec<LintFinding> {
                         .to_string(),
                 ),
             });
-            continue;
-        }
-
-        // Terminal topics (e.g. `report.done`, `LOOP_COMPLETE`) have no
-        // subscribers by design — they self-close the loop. The
-        // `TerminalTargetGuardStage` enforces the contract at emit time.
-        // Skip the routing checks for terminal topics.
-        if terminal_topics.contains(topic) {
             continue;
         }
 

@@ -18,8 +18,8 @@
 
 - **Q1 使命:** 逐个 dispatch 原始计划的所有独立 U-ID；不得以规模或预计上下文压力替代执行。
 - **Q2 输入:** `plan.ready`、原始计划 U-ID/Dependencies、subagent 返回、git 与验证报告。
-- **Q3 执行:** Observe → baseline verifier → per-U dispatch/验收/commit → settlement → policy-check → emit/confirm。
-- **Q4 输出:** `work.done` 或包含 planned/attempted/completed/failed/blocked/skipped 的 `work.failed`。
+- **Q3 执行:** Observe → baseline verifier → per-U dispatch/验收/commit → settlement → policy-check → emit/confirm；终态预检必须使用 schema 声明的 `required_target_hat` 与 `recorded=true`。
+- **Q4 输出:** `work.done` 或包含 planned/attempted/completed/failed/blocked/skipped 的 `work.failed`；两者都必须按 schema 的目标与终态字段完成 policy-check，缺少目标或 `recorded=true` 时停止，不得把预检结果当作正式终态。
 - **Q5 交接:** reporter 用结构化 Unit 账单生成 blocked 终态。
 
 ### Hat: executor — Payload Contract
@@ -34,7 +34,7 @@
 
 - **Q1 使命:** 执行 `fix_plan_file` 中的 actionable Units，并无论成功、部分完成或阻塞，都发出一次 `fix.done` 尝试报告。
 - **Q2 输入 (Observe 命令 + 期望字段):** trigger `review.complete` 提供 `plan_name`、`plan_path`、`review_round`、`fix_base_sha`、`fix_plan_file`、`verdict`；读取 `fix_plan_file`；用 `git status --short` 确认最终 clean；用 `git rev-parse HEAD` 得到 `fix_attempt_commit_sha`；baseline / final / delta 验证结果分别读取本轮 `round-<NN>/baseline-verification.md`、`round-<NN>/final-verification.md`、`round-<NN>/verification-delta.md`。
-- **Q3 执行 (OPAC 命令序列):** Observe trigger/fix plan → Precheck `ralph emit --policy-check fix.done` → Apply per-Unit subagent + commit/verify → Confirm emit result。
+- **Q3 执行 (OPAC 命令序列):** Observe trigger/fix plan → Precheck `ralph emit --policy-check fix.done`（包含 schema 要求的目标与 `recorded=true`）→ Apply per-Unit subagent + commit/verify → Confirm emit result；预检拒绝时修正后重试，不能直接发布。
 - **Q4 输出 (topic + payload 合同):** 见下方 Payload Contract。
 - **Q5 交接 (emit 字段 → 下游 Observe 路径):** `review-reentry` 从 `fix.done.next_review_plan` 与 status 字段构造下一轮 `review.round.ready`；后续 review/gate 判断是否继续修复或走 `review.loop.blocked`。
 - **额外边界:** 如果发现密钥或其他敏感信息已经进入 git 历史，不把“重写历史”当成默认 loop 动作。先做本轮可见的本地修复和提交，再把需要旋转密钥、清理历史或通知仓库维护者的后续动作写进 `failure_reason` / `next_review_plan`。

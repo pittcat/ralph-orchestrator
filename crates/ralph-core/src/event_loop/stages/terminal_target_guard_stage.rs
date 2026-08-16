@@ -69,19 +69,18 @@ impl EmitStage for TerminalTargetGuardStage {
             _ => return Ok(()), // No contract declared → no gate.
         };
 
-        // The explicit target hat comes from one of FIVE places,
+        // The explicit target hat comes from one of FOUR places,
         // in priority order:
         //   1. payload.target_hat — explicit emit override.
         //   2. payload.triggered — CLI/agent alias.
         //   3. payload.target — generic schema field alias.
         //   4. event.target — runtime carrier field (set by
         //      `EventReader` from the JSONL `triggered` field).
-        //   5. event.source — last-resort carrier.
+        // `event.source` is the publishing hat, never a target fallback.
         let payload_target = extract_payload_target(&event.payload);
         let carrier_target = event.target.as_ref().map(|h| h.as_str().to_string());
-        let carrier_source = event.source.as_ref().map(|h| h.as_str().to_string());
 
-        let actual = payload_target.or(carrier_target).or(carrier_source);
+        let actual = payload_target.or(carrier_target);
 
         match actual {
             None => Err(StageReject::new(self.name(), REASON_MISSING_TARGET)),
@@ -181,6 +180,17 @@ mod tests {
         let mut repair = RepairStateMachine::default();
         let mut c = ctx(&mut repair);
         let e = event_for("report.done", None, None);
+        let err = s.check(&mut c, &e).unwrap_err();
+        assert_eq!(err.reason_code, "terminal_target_missing");
+    }
+
+    #[test]
+    fn source_without_target_is_rejected() {
+        let s = stage();
+        let mut repair = RepairStateMachine::default();
+        let mut c = ctx(&mut repair);
+        let mut e = Event::new("report.done", "{}");
+        e.source = Some(HatId::new("reporter"));
         let err = s.check(&mut c, &e).unwrap_err();
         assert_eq!(err.reason_code, "terminal_target_missing");
     }

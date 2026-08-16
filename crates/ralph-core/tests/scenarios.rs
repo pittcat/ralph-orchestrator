@@ -1347,7 +1347,7 @@ fn run_scenario_with_snapshots(
                 // `required_target_hat` contract (e.g. report.done targeted
                 // at the reporter hat itself).
                 if let Some(ref triggered) = response.triggered {
-                    entry["target"] = serde_json::Value::String(triggered.clone());
+            entry["triggered"] = serde_json::Value::String(triggered.clone());
                 }
                 writeln!(file, "{}", entry).unwrap();
             }

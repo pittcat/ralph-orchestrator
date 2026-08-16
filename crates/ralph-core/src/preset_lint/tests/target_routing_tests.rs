@@ -142,16 +142,12 @@ fn target_routing_topic_declares_contract_and_consumer_mismatches() {
     assert!(finding.message.contains("auditor")); // actual
 }
 
-/// Test 5: terminal topics (declared in any hat's `terminal_events`)
-///         are exempt from the routing checks — they self-close the
-///         loop and have no subscribers by design. The
-///         `TerminalTargetGuardStage` enforces the contract at emit time.
+/// Test 5: terminal topics still participate in target routing when they
+///         have a declared consumer.
 #[test]
-fn target_routing_terminal_topics_are_exempt() {
+fn target_routing_terminal_topics_use_declared_consumer() {
     let mut config = minimal_config();
     // Mark `report.done` as a terminal event on the reporter hat.
-    // Without the exemption, lint would flag `terminal_target_not_registered`
-    // because no hat subscribes to `report.done`.
     config
         .hats
         .get_mut("reporter")
@@ -164,6 +160,17 @@ fn target_routing_terminal_topics_are_exempt() {
         findings.is_empty(),
         "terminal topics must be exempt from the routing checks; got: {findings:?}"
     );
+}
+
+#[test]
+fn target_routing_terminal_topics_detect_consumer_mismatch() {
+    let mut config = minimal_config();
+    config.hats.get_mut("reporter").unwrap().terminal_events.push("report.done".to_string());
+    add_schema_with_required_target(&mut config, "report.done", Some("executor"));
+    let findings = check_target_routing(&config);
+    assert!(findings.iter().any(|finding| {
+        finding.id == crate::preset_lint::finding_id::FINDING_TERMINAL_TARGET_CONSUMER_MISMATCH
+    }), "terminal topic consumer mismatch must be reported; got: {findings:?}");
 }
 
 /// Test 6: a NON-terminal topic with no subscribers must still fire
@@ -180,4 +187,3 @@ fn target_routing_non_terminal_unregistered_topic_still_fires() {
         "non-terminal unregistered topic must still produce NOT_REGISTERED; got: {findings:?}"
     );
 }
-

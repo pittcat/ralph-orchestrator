@@ -5230,7 +5230,7 @@ hats:
   reporter:
     name: "Reporter"
     description: "Aggregates plan change / execution / review rounds / fixes / alignment residuals into a final report. Sole consumer of plan.blocked / work.failed / review.loop.blocked / stabilization.blocked / review.artifact.blocked. Emits report.done then LOOP_COMPLETE."
-    triggers: ["align.done", "plan.blocked", "work.failed", "review.loop.blocked", "stabilization.blocked", "review.artifact.blocked"]
+    triggers: ["align.done", "plan.blocked", "work.failed", "review.loop.blocked", "stabilization.blocked", "review.artifact.blocked", "report.done"]
     publishes: ["report.done", "LOOP_COMPLETE"]
     exempt_topics: ["report.done", "LOOP_COMPLETE"]
     terminal_events: ["report.done", "LOOP_COMPLETE"]

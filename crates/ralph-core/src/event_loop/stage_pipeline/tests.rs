@@ -358,7 +358,7 @@ fn test_stage_pipeline_constructors_wire_terminal_target_guard() {
 
     let contracts_c = build_terminal_target_contracts_from_loop_config(&config_c.event_loop);
     assert!(
-        contracts_c.get("report.done").is_none(),
+        !contracts_c.contains_key("report.done"),
         "config_c (empty-string contract): helper must omit the topic"
     );
 

@@ -148,7 +148,7 @@ review 必须先确认 source mode：`builtin:*` 可使用仓库源码、BDD 或
      6. **Handoff** — does any emitted field need to reach another hat? Does projection make it observable?
    - Fill AAF 五问表 + **Payload Audit 表** per emit topic (see `references/agent-native-model.md`).
    - For emitter hats, verify the instructions explicitly require `ralph tools skill load ralph-tools-emit` in the activation and stop on load failure, then cite `ralph-tools-emit` Policy-Check feedback when they mention payload construction, required fields, field shape, `ralph emit`, or `ralph wave emit`. Missing the explicit load is review-only `preset.instructions_emit_skill_load_missing` (P1, confidence 85).
-   - **Triggered 路由硬审**：逐条扫描 emitter instructions 中的 `--triggered`。它表示事件目标 hat，不表示来源 hat；普通 handoff 必须省略并依赖 isolated runtime / CLI 自动推导。self-target 直接命中 `preset.triggered_self_or_static_target` P0；固定指向不同 hat 但没有 author-notes 中的直达原因与拓扑证据，至少命中同一 finding 的 P1 分支。
+   - **Triggered 路由硬审**：逐条扫描 emitter instructions 中的 `--triggered`。它表示事件目标 hat，不表示来源 hat；普通 handoff 必须省略并依赖 isolated runtime / CLI 自动推导。若 schema 声明 `EventSchema.required_target_hat`，必须核对显式目标、唯一消费者与该字段一致，终态 reporter 的合法 self-target 不命中 self-target finding；其它 self-target 直接命中 `preset.triggered_self_or_static_target` P0。固定指向不同 hat 但没有 author-notes 中的直达原因与拓扑证据，至少命中同一 finding 的 P1 分支。
    - **Artifact-First 单 hat 审核(逐 hat 必做)**:在 AAF 五问表中加一列「Artifact 落盘 / 消费」或单列附注。
      - Q2 / Q3: 验证 consumer hat instructions 是否要求「从当前 hat 可见输入取得路径并读取 artifact」;producer hat instructions 是否要求「先写 artifact 再 emit」。
      - Q4: 验证 `artifact 落盘` 列已填(必填 / 可选 / 不需要 / 不落盘+理由);不落盘例外必须说明恢复 / 审计 / 下游依赖。
