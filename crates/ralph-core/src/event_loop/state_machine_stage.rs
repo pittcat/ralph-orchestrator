@@ -92,8 +92,8 @@ fn validate_events_against_candidate(
                 // the apply stage gets the correct semantic flags.
                 let opens_instance =
                     !pre_opens_map.contains_key(key_ref) && !pre_closed_map.contains_key(key_ref);
-                let closes_instance = pre_opens_map.contains_key(key_ref)
-                    && !pre_closed_map.contains_key(key_ref);
+                let closes_instance =
+                    pre_opens_map.contains_key(key_ref) && !pre_closed_map.contains_key(key_ref);
                 // Plan 2026-08-15-2211 U7: capture terminal_observed
                 // from the candidate snapshot (post-validate) but
                 // defer terminal_honored capture to apply time (see
@@ -109,25 +109,24 @@ fn validate_events_against_candidate(
             }
             StateMachineDecision::Reject { finding } => {
                 let finding = finding.clone();
-                let finding_json = serde_json::to_string(&finding)
-                    .unwrap_or_else(|serde_err| {
-                        // Plan 2026-08-15-2211 U9 A3: surface the
-                        // serde fallback instead of silently
-                        // dropping topic / source_hat / instance_key
-                        // / code. The diagnostic payload keeps the
-                        // original `reason` for human readability
-                        // and adds `_serde_fallback: true` plus the
-                        // underlying serde error so operators can
-                        // debug without losing the structured
-                        // fields when JSON re-serialisation fails.
-                        format!(
-                            "{{\"reason\":{},\"_serde_fallback\":true,\"_serde_error\":{}}}",
-                            serde_json::to_string(&finding.reason)
-                                .unwrap_or_else(|_| "\"<unserializable reason>\"".to_string()),
-                            serde_json::to_string(&serde_err.to_string())
-                                .unwrap_or_else(|_| "\"<unserializable error>\"".to_string()),
-                        )
-                    });
+                let finding_json = serde_json::to_string(&finding).unwrap_or_else(|serde_err| {
+                    // Plan 2026-08-15-2211 U9 A3: surface the
+                    // serde fallback instead of silently
+                    // dropping topic / source_hat / instance_key
+                    // / code. The diagnostic payload keeps the
+                    // original `reason` for human readability
+                    // and adds `_serde_fallback: true` plus the
+                    // underlying serde error so operators can
+                    // debug without losing the structured
+                    // fields when JSON re-serialisation fails.
+                    format!(
+                        "{{\"reason\":{},\"_serde_fallback\":true,\"_serde_error\":{}}}",
+                        serde_json::to_string(&finding.reason)
+                            .unwrap_or_else(|_| "\"<unserializable reason>\"".to_string()),
+                        serde_json::to_string(&serde_err.to_string())
+                            .unwrap_or_else(|_| "\"<unserializable error>\"".to_string()),
+                    )
+                });
                 bus.publish(ralph_proto::Event::new(
                     "event.state_machine.rejected",
                     finding_json,
@@ -136,16 +135,15 @@ fn validate_events_against_candidate(
             }
             StateMachineDecision::Ignore { finding } => {
                 let finding = finding.clone();
-                let finding_json = serde_json::to_string(&finding)
-                    .unwrap_or_else(|serde_err| {
-                        format!(
-                            "{{\"reason\":{},\"_serde_fallback\":true,\"_serde_error\":{}}}",
-                            serde_json::to_string(&finding.reason)
-                                .unwrap_or_else(|_| "\"<unserializable reason>\"".to_string()),
-                            serde_json::to_string(&serde_err.to_string())
-                                .unwrap_or_else(|_| "\"<unserializable error>\"".to_string()),
-                        )
-                    });
+                let finding_json = serde_json::to_string(&finding).unwrap_or_else(|serde_err| {
+                    format!(
+                        "{{\"reason\":{},\"_serde_fallback\":true,\"_serde_error\":{}}}",
+                        serde_json::to_string(&finding.reason)
+                            .unwrap_or_else(|_| "\"<unserializable reason>\"".to_string()),
+                        serde_json::to_string(&serde_err.to_string())
+                            .unwrap_or_else(|_| "\"<unserializable error>\"".to_string()),
+                    )
+                });
                 bus.publish(ralph_proto::Event::new(
                     "event.state_machine.ignored",
                     finding_json,
@@ -154,16 +152,15 @@ fn validate_events_against_candidate(
             }
             StateMachineDecision::DiagnosticOnly { finding } => {
                 let finding = finding.clone();
-                let finding_json = serde_json::to_string(&finding)
-                    .unwrap_or_else(|serde_err| {
-                        format!(
-                            "{{\"reason\":{},\"_serde_fallback\":true,\"_serde_error\":{}}}",
-                            serde_json::to_string(&finding.reason)
-                                .unwrap_or_else(|_| "\"<unserializable reason>\"".to_string()),
-                            serde_json::to_string(&serde_err.to_string())
-                                .unwrap_or_else(|_| "\"<unserializable error>\"".to_string()),
-                        )
-                    });
+                let finding_json = serde_json::to_string(&finding).unwrap_or_else(|serde_err| {
+                    format!(
+                        "{{\"reason\":{},\"_serde_fallback\":true,\"_serde_error\":{}}}",
+                        serde_json::to_string(&finding.reason)
+                            .unwrap_or_else(|_| "\"<unserializable reason>\"".to_string()),
+                        serde_json::to_string(&serde_err.to_string())
+                            .unwrap_or_else(|_| "\"<unserializable error>\"".to_string()),
+                    )
+                });
                 bus.publish(ralph_proto::Event::new(
                     "event.state_machine.diagnostic",
                     finding_json,
@@ -234,12 +231,8 @@ impl EventLoop {
         // ignored diagnostics to the bus exactly once per
         // rejection (the helper emits the diagnostic event
         // synchronously inside the match arm above).
-        let (pending, _rejected, _ignored) = validate_events_against_candidate(
-            &mut candidate,
-            &events,
-            &sm_config,
-            &mut self.bus,
-        );
+        let (pending, _rejected, _ignored) =
+            validate_events_against_candidate(&mut candidate, &events, &sm_config, &mut self.bus);
 
         // Plan 2026-08-15-2211 U5: the legacy candidate stage
         // returned an `accepted: Vec<JsonlEvent>` so the caller
@@ -250,10 +243,8 @@ impl EventLoop {
         // To preserve the wire contract at the apply boundary
         // (legacy.rs filter), we re-emit the events whose
         // decision landed in `pending` as the first tuple slot.
-        let accepted_events: Vec<JsonlEvent> = pending
-            .iter()
-            .map(|cand| cand.event.clone())
-            .collect();
+        let accepted_events: Vec<JsonlEvent> =
+            pending.iter().map(|cand| cand.event.clone()).collect();
         (accepted_events, pending)
     }
 
@@ -295,8 +286,12 @@ impl EventLoop {
             .unwrap_or_default();
 
         let mut candidate = candidate;
-        let (pending, _rejected, _ignored) =
-            validate_events_against_candidate(&mut candidate, survivor_events, &sm_config, &mut self.bus);
+        let (pending, _rejected, _ignored) = validate_events_against_candidate(
+            &mut candidate,
+            survivor_events,
+            &sm_config,
+            &mut self.bus,
+        );
         pending
     }
 
@@ -487,9 +482,8 @@ impl EventLoop {
         // back: the rollback now happens in the post-dispatch
         // Err branch below using the local
         // `pre_apply_snapshot`.
-        let materialize = || -> Result<Box<dyn FnOnce()>, String> {
-            Ok(Box::new(|| {}) as Box<dyn FnOnce()>)
-        };
+        let materialize =
+            || -> Result<Box<dyn FnOnce()>, String> { Ok(Box::new(|| {}) as Box<dyn FnOnce()>) };
 
         let result = {
             // Reborrow the ledger for the duration of the dispatch.
@@ -499,9 +493,7 @@ impl EventLoop {
                     // Roll back the live mutation we just performed
                     // before returning the error.
                     if let Some(snap) = pre_apply_snapshot.take() {
-                        if let Some(live) =
-                            self.state.state_machine_runtime_state.as_mut()
-                        {
+                        if let Some(live) = self.state.state_machine_runtime_state.as_mut() {
                             *live = snap;
                         }
                     }
@@ -600,10 +592,7 @@ impl EventLoop {
     /// normal loop-context wiring. Used by the U3 rollback test to
     /// drive `commit_state_machine_projection` against a fault-injected
     /// ledger without an `unsafe` borrow in the test body.
-    pub(crate) fn install_state_ledger_for_test(
-        &mut self,
-        ledger: crate::state::StateLedger,
-    ) {
+    pub(crate) fn install_state_ledger_for_test(&mut self, ledger: crate::state::StateLedger) {
         self.state.state_ledger = Some(ledger);
     }
 

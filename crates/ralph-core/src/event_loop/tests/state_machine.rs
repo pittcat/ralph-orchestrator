@@ -975,22 +975,11 @@ hats:
 
     // Both events pass process_events_from_jsonl so the loop runs end-
     // to-end; the live runtime advances through both transitions.
-    write_event_to_jsonl(
-        &events_path,
-        "experiment.planned",
-        r#"{"task_key":"t1"}"#,
-    );
-    write_event_to_jsonl(
-        &events_path,
-        "experiment.running",
-        r#"{"task_key":"t1"}"#,
-    );
+    write_event_to_jsonl(&events_path, "experiment.planned", r#"{"task_key":"t1"}"#);
+    write_event_to_jsonl(&events_path, "experiment.running", r#"{"task_key":"t1"}"#);
 
     let result = event_loop.process_events_from_jsonl().unwrap();
-    assert!(
-        result.had_events,
-        "events must be admitted by the loop"
-    );
+    assert!(result.had_events, "events must be admitted by the loop");
 
     // Simulate A (planned) being downstream-rejected: reset the live
     // runtime so the revalidation step sees the state as it would be
@@ -1151,11 +1140,7 @@ hats:
     // Second revalidation with same survivors — must be identical.
     let second = event_loop.revalidate_state_machine_candidates_in_order(&survivor_events);
 
-    assert_eq!(
-        first.len(),
-        second.len(),
-        "revalidation must be idempotent"
-    );
+    assert_eq!(first.len(), second.len(), "revalidation must be idempotent");
     for (a, b) in first.iter().zip(second.iter()) {
         assert_eq!(
             a.opens_instance, b.opens_instance,
@@ -1204,11 +1189,7 @@ hats:
     event_loop.initialize("Test");
     event_loop.event_reader = crate::event_reader::EventReader::new(&events_path);
 
-    write_event_to_jsonl(
-        &events_path,
-        "experiment.planned",
-        r#"{"task_key":"t1"}"#,
-    );
+    write_event_to_jsonl(&events_path, "experiment.planned", r#"{"task_key":"t1"}"#);
     let _ = event_loop.process_events_from_jsonl().unwrap();
 
     let survivor_events = vec![crate::event_reader::Event {
@@ -1286,14 +1267,12 @@ fn u2_terminal_observed_propagates_from_candidate_to_live_runtime() {
     // publishes the business event through the production pipeline.
     let published = Arc::new(Mutex::new(Vec::<String>::new()));
     let published_clone = Arc::clone(&published);
-    event_loop
-        .bus
-        .add_observer(move |event| {
-            published_clone
-                .lock()
-                .unwrap()
-                .push(event.topic.to_string());
-        });
+    event_loop.bus.add_observer(move |event| {
+        published_clone
+            .lock()
+            .unwrap()
+            .push(event.topic.to_string());
+    });
 
     // Install a real StateLedger so the production commit path runs
     // end-to-end (no bypass).
@@ -1329,7 +1308,11 @@ fn u2_terminal_observed_propagates_from_candidate_to_live_runtime() {
     // projects the candidate's terminal flags into the delta and
     // commits durably (no bypass).
     let projected = event_loop.apply_state_machine_decisions(&[terminal_candidate], "loop-u2");
-    assert_eq!(projected.len(), 1, "terminal candidate must project a delta");
+    assert_eq!(
+        projected.len(),
+        1,
+        "terminal candidate must project a delta"
+    );
     let delta = &projected[0];
 
     // ① delta flags must come from the candidate snapshot.
@@ -1487,14 +1470,12 @@ hats:
     // clean slate.
     let published = Arc::new(Mutex::new(Vec::<String>::new()));
     let published_clone = Arc::clone(&published);
-    event_loop
-        .bus
-        .add_observer(move |event| {
-            published_clone
-                .lock()
-                .unwrap()
-                .push(event.topic.to_string());
-        });
+    event_loop.bus.add_observer(move |event| {
+        published_clone
+            .lock()
+            .unwrap()
+            .push(event.topic.to_string());
+    });
 
     // Build a candidate that the validator would have accepted.
     let candidate = CandidateStateMachineDecision {
@@ -1526,8 +1507,8 @@ hats:
         .clone()
         .unwrap_or_default()
         .summary();
-    let pre_apply_count = pre_apply_summary.open_instance_count
-        + pre_apply_summary.closed_instance_count;
+    let pre_apply_count =
+        pre_apply_summary.open_instance_count + pre_apply_summary.closed_instance_count;
     let pre_apply_terminal = (
         pre_apply_summary.terminal_observed,
         pre_apply_summary.terminal_honored,
@@ -1574,7 +1555,8 @@ hats:
         wave_total: None,
         system_injected: None,
     };
-    let proto_event = ralph_proto::Event::new(event.topic.as_str(), event.payload.as_deref().unwrap_or(""));
+    let proto_event =
+        ralph_proto::Event::new(event.topic.as_str(), event.payload.as_deref().unwrap_or(""));
 
     // Pre-fix, the rollback closure inside
     // `publish_synthetic_with_state_machine_projection` is a no-op
@@ -1606,8 +1588,8 @@ hats:
         .as_ref()
         .map(|r| r.summary())
         .unwrap_or_default();
-    let after_failure_count = after_failure_summary.open_instance_count
-        + after_failure_summary.closed_instance_count;
+    let after_failure_count =
+        after_failure_summary.open_instance_count + after_failure_summary.closed_instance_count;
     let after_failure_terminal = (
         after_failure_summary.terminal_observed,
         after_failure_summary.terminal_honored,
@@ -1623,8 +1605,7 @@ hats:
     assert_eq!(
         after_failure_summary.open_instance_count, pre_apply_summary.open_instance_count,
         "live open_instances count must be restored (U3 Red); pre={} after={}",
-        pre_apply_summary.open_instance_count,
-        after_failure_summary.open_instance_count
+        pre_apply_summary.open_instance_count, after_failure_summary.open_instance_count
     );
 
     // No business event should have been published.
@@ -1662,9 +1643,7 @@ hats:
 #[test]
 fn u4_full_restart_replay_matches_live_helper_after_u1_u2_u3() {
     use crate::state::CommitDelta;
-    use crate::state_machine::{
-        StateMachineTransitionDelta, StateMachineTransitionId,
-    };
+    use crate::state_machine::{StateMachineTransitionDelta, StateMachineTransitionId};
     use tempfile::TempDir;
 
     let dir = TempDir::new().unwrap();
@@ -1744,7 +1723,8 @@ fn u4_full_restart_replay_matches_live_helper_after_u1_u2_u3() {
         "open_instances must replay identically after restart"
     );
     assert_eq!(
-        replay_rt.accepted_transition_count(), live_count,
+        replay_rt.accepted_transition_count(),
+        live_count,
         "accepted transition count must replay identically after restart"
     );
 }

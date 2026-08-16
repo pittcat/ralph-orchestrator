@@ -219,8 +219,8 @@ pub fn publish_synthetic_with_state_machine_projection(
             // closure is invoked once to consume it (and discard
             // the resulting rollback, since no live state changed
             // on this path).
-            let _rollback = materialize()
-                .map_err(|reason| TransitionError::PreCommitRejected { reason })?;
+            let _rollback =
+                materialize().map_err(|reason| TransitionError::PreCommitRejected { reason })?;
             AcceptedTransition::commit_idempotent(
                 event,
                 loop_id,
