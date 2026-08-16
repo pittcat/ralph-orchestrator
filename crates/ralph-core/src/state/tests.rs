@@ -2466,6 +2466,11 @@ fn u1_state_machine_delta_commit_replays_to_same_runtime() {
             &open_decision,
             pre_open.0,
             pre_open.1,
+            // Plan GAP-02 / Unit 2: terminal flags must be supplied by
+            // the caller (the candidate snapshot, not the live runtime).
+            // This delta is for a business event, not a terminal one.
+            false,
+            false,
         )
         .expect("open decision must project");
     ledger
@@ -2494,6 +2499,11 @@ fn u1_state_machine_delta_commit_replays_to_same_runtime() {
             &close_decision,
             pre_close.0,
             pre_close.1,
+            // Plan GAP-02 / Unit 2: terminal flags come from the
+            // caller (candidate snapshot). Close is a business event,
+            // not a terminal one.
+            false,
+            false,
         )
         .expect("close decision must project");
     assert!(

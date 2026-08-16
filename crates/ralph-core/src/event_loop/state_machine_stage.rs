@@ -20,10 +20,174 @@
 
 use super::*;
 
+use crate::config::state_machine::StateMachineConfig;
 use crate::event_reader::Event as JsonlEvent;
 use crate::state_machine::{
-    StateMachineDecision, StateMachineTransitionDelta, StateMachineTransitionId,
+    StateMachineDecision, StateMachineRuntimeState, StateMachineTransitionDelta,
+    StateMachineTransitionId,
 };
+
+/// Plan GAP-02 / Unit 2 + 2026-08-15-2211 U5/U7: revalidation helper.
+/// Validates each event in `events` against the candidate runtime
+/// snapshot. A downstream-rejected predecessor cannot influence a
+/// later survivor's decision because revalidation starts from the
+/// snapshot for every call.
+///
+/// Returns the in-flight [`CandidateStateMachineDecision`]s (used
+/// by the apply stage to materialise [`StateMachineTransitionDelta`]
+/// + outbox receipt), plus the rejected/ignored findings so the
+/// caller can surface them on the bus.
+///
+/// Plan 2026-08-15-2211 U7: terminal_observed is captured from the
+/// candidate snapshot (per the original U2 capture semantics — the
+/// validator mutates terminal_observed=true before returning Accept
+/// for a terminal event, so reading it from the candidate AFTER
+/// `validate_event` reflects the post-mutation truth). terminal_honored
+/// is captured at `apply_state_machine_decisions` entry from the
+/// LIVE state, NOT here — `mark_terminal_honored` is invoked by the
+/// per-event processing flow (e.g. `wave_scope.rs::mark_terminal_honored`)
+/// between candidate stage and apply, so reading terminal_honored
+/// from the candidate clone would miss the honored transition and
+/// produce deltas that disagree with the live runtime / cold-start
+/// rehydration. See U7 §"capture 时机" for the TOCTOU trace.
+fn validate_events_against_candidate(
+    candidate: &mut StateMachineRuntimeState,
+    events: &[JsonlEvent],
+    sm_config: &StateMachineConfig,
+    bus: &mut EventBus,
+) -> (
+    Vec<CandidateStateMachineDecision>,
+    Vec<crate::state_machine::StateMachineFinding>,
+    Vec<crate::state_machine::StateMachineFinding>,
+) {
+    let mut pending: Vec<CandidateStateMachineDecision> = Vec::with_capacity(events.len());
+    let mut rejected: Vec<crate::state_machine::StateMachineFinding> = Vec::new();
+    let mut ignored: Vec<crate::state_machine::StateMachineFinding> = Vec::new();
+
+    for event in events {
+        let topic = event.topic.clone();
+        let payload = event.payload.clone();
+        let event_for_emit = event.clone();
+
+        // Capture the candidate's instance maps BEFORE the validator
+        // mutates them so the open/close decision reflects the
+        // pre-validation state — validate_event inserts the
+        // transition's effect into the maps, so a post-mutation read
+        // would always report `opens_instance=false, closes_instance=true`
+        // for opening transitions, which inverts the semantics the
+        // apply stage relies on.
+        let (pre_opens_map, pre_closed_map) = {
+            let (opens, closed) = candidate.instance_maps();
+            (opens.clone(), closed.clone())
+        };
+
+        let decision = candidate.validate_event(topic.as_str(), payload.as_deref(), sm_config);
+
+        match &decision {
+            StateMachineDecision::Accept { instance_key, .. } => {
+                let instance_key = instance_key.clone();
+                let key_ref = instance_key.as_deref().unwrap_or("");
+                // Plan 2026-08-15-2211 U5: compute the open/close
+                // decision from the PRE-validation instance maps so
+                // the apply stage gets the correct semantic flags.
+                let opens_instance =
+                    !pre_opens_map.contains_key(key_ref) && !pre_closed_map.contains_key(key_ref);
+                let closes_instance =
+                    pre_opens_map.contains_key(key_ref) && !pre_closed_map.contains_key(key_ref);
+                // Plan 2026-08-15-2211 U7: capture terminal_observed
+                // from the candidate snapshot (post-validate) but
+                // defer terminal_honored capture to apply time (see
+                // function-level comment for the TOCTOU rationale).
+                let (term_obs, _term_hon) = candidate.observed_snapshot();
+                pending.push(CandidateStateMachineDecision {
+                    event: event_for_emit.clone(),
+                    decision: decision.clone(),
+                    opens_instance,
+                    closes_instance,
+                    accepted_at_terminal_observed: term_obs,
+                });
+            }
+            StateMachineDecision::Reject { finding } => {
+                let finding = finding.clone();
+                let finding_json = serde_json::to_string(&finding).unwrap_or_else(|serde_err| {
+                    // Plan 2026-08-15-2211 U9 A3: surface the
+                    // serde fallback instead of silently
+                    // dropping topic / source_hat / instance_key
+                    // / code. The diagnostic payload keeps the
+                    // original `reason` for human readability
+                    // and adds `_serde_fallback: true` plus the
+                    // underlying serde error so operators can
+                    // debug without losing the structured
+                    // fields when JSON re-serialisation fails.
+                    format!(
+                        "{{\"reason\":{},\"_serde_fallback\":true,\"_serde_error\":{}}}",
+                        serde_json::to_string(&finding.reason)
+                            .unwrap_or_else(|_| "\"<unserializable reason>\"".to_string()),
+                        serde_json::to_string(&serde_err.to_string())
+                            .unwrap_or_else(|_| "\"<unserializable error>\"".to_string()),
+                    )
+                });
+                bus.publish(ralph_proto::Event::new(
+                    "event.state_machine.rejected",
+                    finding_json,
+                ));
+                rejected.push(finding);
+            }
+            StateMachineDecision::Ignore { finding } => {
+                let finding = finding.clone();
+                let finding_json = serde_json::to_string(&finding).unwrap_or_else(|serde_err| {
+                    format!(
+                        "{{\"reason\":{},\"_serde_fallback\":true,\"_serde_error\":{}}}",
+                        serde_json::to_string(&finding.reason)
+                            .unwrap_or_else(|_| "\"<unserializable reason>\"".to_string()),
+                        serde_json::to_string(&serde_err.to_string())
+                            .unwrap_or_else(|_| "\"<unserializable error>\"".to_string()),
+                    )
+                });
+                bus.publish(ralph_proto::Event::new(
+                    "event.state_machine.ignored",
+                    finding_json,
+                ));
+                ignored.push(finding);
+            }
+            StateMachineDecision::DiagnosticOnly { finding } => {
+                let finding = finding.clone();
+                let finding_json = serde_json::to_string(&finding).unwrap_or_else(|serde_err| {
+                    format!(
+                        "{{\"reason\":{},\"_serde_fallback\":true,\"_serde_error\":{}}}",
+                        serde_json::to_string(&finding.reason)
+                            .unwrap_or_else(|_| "\"<unserializable reason>\"".to_string()),
+                        serde_json::to_string(&serde_err.to_string())
+                            .unwrap_or_else(|_| "\"<unserializable error>\"".to_string()),
+                    )
+                });
+                bus.publish(ralph_proto::Event::new(
+                    "event.state_machine.diagnostic",
+                    finding_json,
+                ));
+                // DiagnosticOnly keeps the event on the survivor
+                // list (it does NOT advance state) so we record a
+                // synthetic Accept decision with opens/closes=false
+                // and the current terminal flags. The caller decides
+                // whether to publish this as a business event based
+                // on the helper's downstream filter.
+                let (term_obs, _term_hon) = candidate.observed_snapshot();
+                pending.push(CandidateStateMachineDecision {
+                    event: event_for_emit.clone(),
+                    decision: StateMachineDecision::Accept {
+                        instance_key: None,
+                        new_state: String::new(),
+                    },
+                    opens_instance: false,
+                    closes_instance: false,
+                    accepted_at_terminal_observed: term_obs,
+                });
+            }
+        }
+    }
+
+    (pending, rejected, ignored)
+}
 
 impl EventLoop {
     /// Plan GAP-02 / Unit 2: candidate-stage validation. Each
@@ -47,28 +211,6 @@ impl EventLoop {
             _ => return (events, Vec::new()),
         };
 
-        // Take a snapshot of the live runtime for the candidate
-        // stage; the live runtime itself is not mutated by this
-        // stage. Unit 2 §3 / §6 explicitly require this
-        // separation so downstream reject cannot pollute live
-        // StateMachine. The snapshot is recorded as
-        // `_live_snapshot` because the cumulative `candidate`
-        // below already starts from the live state and the
-        // explicit capture is documentation of intent, not an
-        // additional read.
-        let _live_snapshot = self.state.state_machine_runtime_state.clone();
-
-        let mut accepted: Vec<JsonlEvent> = Vec::with_capacity(events.len());
-        let mut pending: Vec<CandidateStateMachineDecision> = Vec::new();
-
-        // Plan GAP-02 / Unit 2 / parity guard: the original
-        // state machine stage inlined a `get_or_insert_with` so
-        // the runtime lived on the loop even when every event was
-        // rejected. Preserving that semi-materialisation keeps
-        // tests / observers that peek at
-        // `state.state_machine_runtime_state` working. The unit
-        // stage itself never mutates the live runtime here —
-        // apply happens at the pending_publish boundary.
         if !events.is_empty() && self.state.state_machine_runtime_state.is_none() {
             self.state.state_machine_runtime_state = Some(StateMachineRuntimeState::new());
         }
@@ -83,56 +225,74 @@ impl EventLoop {
             .clone()
             .unwrap_or_default();
 
-        for event in events {
-            let topic = event.topic.clone();
-            let payload = event.payload.clone();
-            let event_for_emit = event.clone();
+        // Delegate to the shared helper — same validation logic
+        // for both candidate-stage and revalidation at the apply
+        // boundary. The candidate stage publishes rejected /
+        // ignored diagnostics to the bus exactly once per
+        // rejection (the helper emits the diagnostic event
+        // synchronously inside the match arm above).
+        let (pending, _rejected, _ignored) =
+            validate_events_against_candidate(&mut candidate, &events, &sm_config, &mut self.bus);
 
-            let decision = candidate.validate_event(topic.as_str(), payload.as_deref(), &sm_config);
+        // Plan 2026-08-15-2211 U5: the legacy candidate stage
+        // returned an `accepted: Vec<JsonlEvent>` so the caller
+        // could map survivors back to raw events. The new
+        // signature returns pending decisions only; the caller
+        // already has the input list and uses each pending
+        // decision's embedded `event` field as the survivor key.
+        // To preserve the wire contract at the apply boundary
+        // (legacy.rs filter), we re-emit the events whose
+        // decision landed in `pending` as the first tuple slot.
+        let accepted_events: Vec<JsonlEvent> =
+            pending.iter().map(|cand| cand.event.clone()).collect();
+        (accepted_events, pending)
+    }
 
-            match &decision {
-                StateMachineDecision::Accept { instance_key, .. } => {
-                    let instance_key = instance_key.clone();
-                    let (opens_map, closed_map) = candidate.instance_maps();
-                    let key_ref = instance_key.as_deref().unwrap_or("");
-                    let opens_instance =
-                        !opens_map.contains_key(key_ref) && !closed_map.contains_key(key_ref);
-                    let closes_instance =
-                        opens_map.contains_key(key_ref) && !closed_map.contains_key(key_ref);
-                    let (term_obs, term_hon) = candidate.observed_snapshot();
-                    pending.push(CandidateStateMachineDecision {
-                        event: event_for_emit.clone(),
-                        decision: decision.clone(),
-                        opens_instance,
-                        closes_instance,
-                        accepted_at_terminal_observed: term_obs,
-                        accepted_at_terminal_honored: term_hon,
-                    });
-                    accepted.push(event_for_emit);
-                }
-                StateMachineDecision::Reject { finding } => {
-                    self.bus.publish(ralph_proto::Event::new(
-                        "event.state_machine.rejected",
-                        serde_json::to_string(&finding).unwrap_or_else(|_| finding.reason.clone()),
-                    ));
-                }
-                StateMachineDecision::Ignore { finding } => {
-                    self.bus.publish(ralph_proto::Event::new(
-                        "event.state_machine.ignored",
-                        serde_json::to_string(&finding).unwrap_or_else(|_| finding.reason.clone()),
-                    ));
-                }
-                StateMachineDecision::DiagnosticOnly { finding } => {
-                    self.bus.publish(ralph_proto::Event::new(
-                        "event.state_machine.diagnostic",
-                        serde_json::to_string(&finding).unwrap_or_else(|_| finding.reason.clone()),
-                    ));
-                    accepted.push(event_for_emit.clone());
-                }
-            }
-        }
+    /// Plan GAP-02 / Unit 1: re-validates the final survivor events
+    /// against the **live** runtime snapshot. Unlike
+    /// `run_state_machine_candidate_stage` which uses a cumulative
+    /// clone (each event sees prior accepts' mutations), this
+    /// function starts from the live state for every event so a
+    /// downstream-rejected predecessor cannot influence a later
+    /// survivor's decision.
+    ///
+    /// The live runtime is NOT mutated by this function; it only
+    /// produces fresh candidates for the apply stage. Plan
+    /// 2026-08-15-2211 U5: rejected/ignored diagnostics from the
+    /// revalidation stage ARE published exactly once to the bus
+    /// (the helper emits them inside the match arm) — this lets
+    /// operators see when a survivor that the candidate stage
+    /// accepted gets re-rejected against the live snapshot, e.g.
+    /// due to a downstream-rejected predecessor. The accepted
+    /// Vec is no longer returned because the revalidation
+    /// boundary uses pending decisions only; the caller has the
+    /// survivor events from `pending_state_machine_candidates`.
+    pub(super) fn revalidate_state_machine_candidates_in_order(
+        &mut self,
+        survivor_events: &[JsonlEvent],
+    ) -> Vec<CandidateStateMachineDecision> {
+        let sm_config = match self.config.event_loop.state_machine.as_ref() {
+            Some(cfg) if cfg.enabled => cfg.clone(),
+            _ => return Vec::new(),
+        };
 
-        (accepted, pending)
+        // Start from the LIVE runtime snapshot — NOT the cumulative
+        // candidate clone. This is the key difference from
+        // `run_state_machine_candidate_stage`.
+        let candidate = self
+            .state
+            .state_machine_runtime_state
+            .clone()
+            .unwrap_or_default();
+
+        let mut candidate = candidate;
+        let (pending, _rejected, _ignored) = validate_events_against_candidate(
+            &mut candidate,
+            survivor_events,
+            &sm_config,
+            &mut self.bus,
+        );
+        pending
     }
 
     /// Plan GAP-02 / Unit 2: apply the candidate decisions that
@@ -146,6 +306,22 @@ impl EventLoop {
     /// decision is a no-op for `open_instances` /
     /// `closed_instances` collision. Unit 3 binds the
     /// `transition_id` with the durable outbox receipt.
+    ///
+    /// Plan 2026-08-15-2211 U1: this method captures the
+    /// pre-batch live snapshot for rollback and mutates live for
+    /// every projection in the batch. The per-projection rollback
+    /// lives in [`Self::commit_state_machine_projection`]: on a
+    /// `StateLedger::commit` failure for projection N, the
+    /// rollback restores live to the pre-batch snapshot, but the
+    /// caller (the legacy.rs per-event loop) re-applies
+    /// projections 1..N-1 in subsequent iterations. The original
+    /// per-batch-snapshot code stored the snapshot here and
+    /// consumed it via `take()` in commit — the `take()` model
+    /// degraded projection N+1's rollback to no-op because the
+    /// snapshot was already drained by projection 1's commit.
+    /// The new model uses a per-call snapshot inside
+    /// `commit_state_machine_projection` itself so each commit
+    /// gets its own rollback window (Plan 2026-08-15-2211 U1).
     pub(super) fn apply_state_machine_decisions(
         &mut self,
         decisions: &[CandidateStateMachineDecision],
@@ -154,11 +330,37 @@ impl EventLoop {
         if decisions.is_empty() {
             return Vec::new();
         }
+        // Reset the per-batch snapshot slot at apply entry so a
+        // stale snapshot from a prior batch cannot leak into this
+        // batch's rollback. We then capture the live runtime
+        // BEFORE any projection mutates it.
+        self.state_machine_apply_snapshot = None;
         let mut projected = Vec::with_capacity(decisions.len());
+        // The live runtime is materialised here so projection can
+        // read it (instance maps, terminal flags) without `unwrap`.
         let live = self
             .state
             .state_machine_runtime_state
             .get_or_insert_with(StateMachineRuntimeState::default);
+        // Plan GAP-02 / Unit 3 + 2026-08-15-2211 U1: capture the
+        // pre-apply live snapshot BEFORE any projection mutates
+        // live. The snapshot slot is NOT drained here (we just
+        // assign); `commit_state_machine_projection` reads it
+        // directly so every per-event commit in the batch sees
+        // the same pre-apply-batch snapshot for rollback.
+        self.state_machine_apply_snapshot = Some(live.clone());
+        // Plan 2026-08-15-2211 U7: capture `terminal_honored`
+        // from the LIVE runtime at apply entry. `mark_terminal_honored`
+        // is invoked by per-event processing (e.g. wave_scope.rs)
+        // BETWEEN the candidate stage and apply; capturing from the
+        // candidate clone here would miss it and produce a delta
+        // that disagrees with the post-batch live runtime / cold-
+        // start rehydration. terminal_observed is still sourced from
+        // the candidate decision because `validate_terminal_event`
+        // mutates the candidate cumulative clone to set
+        // `terminal_observed=true` for the terminal event, and the
+        // mutation happens before the candidate stage returns.
+        let apply_terminal_honored = live.is_terminal_honored();
         for candidate in decisions {
             let topic = candidate.event.topic.as_str();
             // The identity is derived from the accepted event and semantic
@@ -186,15 +388,152 @@ impl EventLoop {
                 &candidate.decision,
                 candidate.opens_instance,
                 candidate.closes_instance,
+                // Plan GAP-02 / Unit 2: terminal_observed comes from
+                // the candidate's captured snapshot (the validator
+                // mutated the cumulative clone).
+                candidate.accepted_at_terminal_observed,
+                // Plan 2026-08-15-2211 U7: terminal_honored is
+                // captured from the LIVE runtime at apply entry so
+                // a mark_terminal_honored invocation between
+                // candidate stage and apply propagates into the
+                // delta (no TOCTOU mismatch with rehydration).
+                apply_terminal_honored,
             );
             if let Some(delta) = delta {
                 let mut delta = delta;
                 delta.source_hat = Some("executor".to_string());
+                // Apply the delta to live so test / legacy paths
+                // observe the StateMachine progression. The
+                // projection-aware commit path
+                // (`commit_state_machine_projection` with a compiled
+                // execution contract) re-applies the delta BEFORE
+                // the durable commit; on commit failure the
+                // pre-apply snapshot restores live to its prior
+                // state. Net effect on a successful commit: live
+                // has the projection applied exactly once.
                 live.apply_transition_delta(&delta);
                 projected.push(delta);
             }
         }
         projected
+    }
+
+    /// Plan GAP-02 / Unit 3: commit a single projected
+    /// StateMachine transition through the disposition helper, with
+    /// rollback that restores the pre-apply live runtime snapshot
+    /// if the `StateLedger::commit` step faults.
+    ///
+    /// Plan 2026-08-15-2211 U1 + U8: this method no longer threads
+    /// the snapshot through a `'static` closure + `Rc<RefCell<>>`.
+    /// The apply (live mutation) happens here synchronously before
+    /// the disposition helper is called, and the rollback happens
+    /// here synchronously after the helper returns Err — single
+    /// linear control flow, no shared mutable cell.
+    ///
+    /// Per-batch snapshot semantics: the pre-apply snapshot is
+    /// captured once by `apply_state_machine_decisions` (BEFORE
+    /// any projection mutates live) and stored in
+    /// `state_machine_apply_snapshot`. Every commit in the
+    /// per-event loop reads the same snapshot (via clone, not
+    /// `take()`) so projections 2..N still see a non-`None`
+    /// rollback target — pre-fix the `take()` model drained the
+    /// slot on the first commit and degraded projection N+1's
+    /// rollback to no-op.
+    pub(super) fn commit_state_machine_projection(
+        &mut self,
+        event: &ralph_proto::Event,
+        disposition: crate::event_loop::disposition::Disposition,
+        loop_id: &str,
+        activation_id: &str,
+        contract_revision: &str,
+        projection: Option<StateMachineTransitionDelta>,
+    ) -> Result<
+        Option<crate::event_loop::accepted_transition::OutboxEntry>,
+        crate::event_loop::accepted_transition::TransitionError,
+    > {
+        // Plan GAP-02 / Unit 3 + 2026-08-15-2211 U1: rollback uses
+        // the pre-apply-batch snapshot captured in
+        // `apply_state_machine_decisions` BEFORE any projection
+        // mutated live. We read it (no `take()`) so subsequent
+        // commits in the same batch also see a non-`None`
+        // snapshot for their rollback. Pre-fix the slot was
+        // drained by `take()` on the first commit, which left
+        // projection N+1 with `None` and degraded its rollback to
+        // no-op when the durable commit failed.
+        let mut pre_apply_snapshot: Option<StateMachineRuntimeState> =
+            self.state_machine_apply_snapshot.clone();
+        if let Some(ref delta) = projection {
+            let live = self
+                .state
+                .state_machine_runtime_state
+                .as_mut()
+                .expect("apply_state_machine_decisions must materialise runtime before commit");
+            // Apply is idempotent on transition_id; if
+            // apply_state_machine_decisions already applied this
+            // delta, this is a no-op and the snapshot already
+            // reflects the post-apply state.
+            live.apply_transition_delta(delta);
+        }
+
+        // The disposition helper expects an
+        // `impl FnOnce() -> Result<Box<dyn FnOnce()>, String>`
+        // materialize closure. We no longer need a `'static` +
+        // `Rc<RefCell<>>` bridge to communicate the snapshot
+        // back: the rollback now happens in the post-dispatch
+        // Err branch below using the local
+        // `pre_apply_snapshot`.
+        let materialize =
+            || -> Result<Box<dyn FnOnce()>, String> { Ok(Box::new(|| {}) as Box<dyn FnOnce()>) };
+
+        let result = {
+            // Reborrow the ledger for the duration of the dispatch.
+            let ledger = match self.state.state_ledger.as_mut() {
+                Some(l) => l,
+                None => {
+                    // Roll back the live mutation we just performed
+                    // before returning the error.
+                    if let Some(snap) = pre_apply_snapshot.take()
+                        && let Some(live) = self.state.state_machine_runtime_state.as_mut()
+                    {
+                        *live = snap;
+                    }
+                    return Err(
+                        crate::event_loop::accepted_transition::TransitionError::CommitFailed {
+                            source: "state ledger missing".to_string(),
+                        },
+                    );
+                }
+            };
+            crate::event_loop::disposition::publish_synthetic_with_state_machine_projection(
+                event,
+                disposition,
+                loop_id,
+                activation_id,
+                contract_revision,
+                ledger,
+                &mut self.bus,
+                materialize,
+                projection,
+            )
+        };
+
+        // Plan 2026-08-15-2211 U1: rollback. If the dispatch failed
+        // AND we have a pre-apply snapshot, restore live to it.
+        // Every commit in the per-event loop sees the same
+        // pre-apply-batch snapshot, so projections 1..N-1 are
+        // also rolled back when projection N fails (per-batch
+        // rollback semantics; the existing U3 §10 test relies on
+        // this). The snapshot slot is reset on the next
+        // `apply_state_machine_decisions` entry, so it does not
+        // need to be cleared here.
+        if result.is_err()
+            && let Some(snap) = pre_apply_snapshot.take()
+            && let Some(live) = self.state.state_machine_runtime_state.as_mut()
+        {
+            *live = snap;
+        }
+
+        result
     }
 }
 
@@ -234,14 +573,45 @@ pub(crate) struct CandidateStateMachineDecision {
     pub decision: StateMachineDecision,
     pub opens_instance: bool,
     pub closes_instance: bool,
-    /// Plan GAP-02 / Unit 2 — projection snapshot. Reserved for
-    /// the Unit 3 apply stage; not consumed in Unit 2 itself.
-    #[allow(dead_code)]
+    /// Plan GAP-02 / Unit 2 — terminal_observed is captured from the
+    /// candidate snapshot AFTER `validate_terminal_event` mutated
+    /// `candidate.terminal_observed=true` (for terminal events).
+    /// Plan 2026-08-15-2211 U7 removes the `accepted_at_terminal_honored`
+    /// field; terminal_honored is captured fresh from the LIVE
+    /// runtime at `apply_state_machine_decisions` entry to avoid
+    /// the TOCTOU between candidate stage (captures too early) and
+    /// `mark_terminal_honored` (called by per-event processing
+    /// between candidate and apply).
     pub accepted_at_terminal_observed: bool,
-    /// Plan GAP-02 / Unit 2 — projection snapshot. Reserved for
-    /// the Unit 3 apply stage; not consumed in Unit 2 itself.
-    #[allow(dead_code)]
-    pub accepted_at_terminal_honored: bool,
+}
+
+#[cfg(test)]
+impl EventLoop {
+    /// Test-only helper: install a state ledger bypassing the
+    /// normal loop-context wiring. Used by the U3 rollback test to
+    /// drive `commit_state_machine_projection` against a fault-injected
+    /// ledger without an `unsafe` borrow in the test body.
+    pub(crate) fn install_state_ledger_for_test(&mut self, ledger: crate::state::StateLedger) {
+        self.state.state_ledger = Some(ledger);
+    }
+
+    /// Test-only helper: toggle `bypass_active_for_test` on the
+    /// installed ledger without exposing the inner borrow to the
+    /// caller.
+    pub(crate) fn set_state_ledger_bypass_active_for_test(&mut self, active: bool) {
+        if let Some(l) = self.state.state_ledger.as_mut() {
+            l.set_bypass_active_for_test(active);
+        }
+    }
+
+    /// Test-only helper: read the installed ledger's commit log.
+    pub(crate) fn state_ledger_commit_log(&self) -> Vec<crate::state::Commit> {
+        self.state
+            .state_ledger
+            .as_ref()
+            .map(|l| l.commit_log().to_vec())
+            .unwrap_or_default()
+    }
 }
 
 impl StateMachineDecision {

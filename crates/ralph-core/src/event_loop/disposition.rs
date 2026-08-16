@@ -192,6 +192,7 @@ pub fn publish_synthetic_with_state_machine_projection(
     contract_revision: &str,
     ledger: &mut StateLedger,
     bus: &mut EventBus,
+    materialize: impl FnOnce() -> Result<Box<dyn FnOnce()>, String>,
     projection: Option<crate::state_machine::StateMachineTransitionDelta>,
 ) -> Result<Option<OutboxEntry>, TransitionError> {
     if disposition.advances_flow() {
@@ -209,12 +210,17 @@ pub fn publish_synthetic_with_state_machine_projection(
                 ledger,
                 bus,
                 |_| Ok(()),
-                || Ok(Box::new(|| {}) as Box<dyn FnOnce()>),
+                materialize,
                 projection,
             )?
         } else {
             // No projection: legacy idempotent commit preserves
-            // the U6/U7/U8 contract byte-for-byte.
+            // the U6/U7/U8 contract byte-for-byte. The caller
+            // closure is invoked once to consume it (and discard
+            // the resulting rollback, since no live state changed
+            // on this path).
+            let _rollback =
+                materialize().map_err(|reason| TransitionError::PreCommitRejected { reason })?;
             AcceptedTransition::commit_idempotent(
                 event,
                 loop_id,

@@ -752,6 +752,7 @@ impl EventLoop {
             // Reset every batch by `process_parse_result`; cleared
             // on `process_parse_result` exit.
             pending_state_machine_candidates: Vec::new(),
+            state_machine_apply_snapshot: None,
         })
     }
 
@@ -938,6 +939,9 @@ impl EventLoop {
             // Plan GAP-02 / Unit 2: per-loop stash of StateMachine
             // candidate decisions captured at the candidate stage.
             pending_state_machine_candidates: Vec::new(),
+            // Plan GAP-02 / Unit 3: pre-apply live-runtime snapshot
+            // for rollback on projection commit failure.
+            state_machine_apply_snapshot: None,
         }
     }
 

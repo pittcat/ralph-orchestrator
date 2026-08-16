@@ -3913,20 +3913,27 @@ impl EventLoop {
         > = std::collections::HashMap::new();
         if !self.pending_state_machine_candidates.is_empty() {
             let loop_id = self.current_loop_id_for_contract();
-            let survivors: Vec<_> = self
+            let survivor_events: Vec<_> = self
                 .pending_state_machine_candidates
                 .iter()
-                .filter(|cand| {
-                    pending_publish.iter().any(|e| {
+                .filter_map(|cand| {
+                    if pending_publish.iter().any(|e| {
                         e.topic.as_str() == cand.event.topic.as_str()
                             && e.payload.as_str() == cand.event.payload.as_deref().unwrap_or("")
-                    })
+                    }) {
+                        Some(cand.event.clone())
+                    } else {
+                        None
+                    }
                 })
-                .cloned()
                 .collect();
             self.pending_state_machine_candidates.clear();
-            let projected = self.apply_state_machine_decisions(&survivors, &loop_id);
-            for (delta, cand) in projected.iter().zip(survivors.iter()) {
+            // U1 fix: final survivors are re-validated against the LIVE runtime
+            // snapshot (not the cumulative candidate clone) so a downstream-rejected
+            // predecessor cannot influence a later survivor's decision.
+            let revalidated = self.revalidate_state_machine_candidates_in_order(&survivor_events);
+            let projected = self.apply_state_machine_decisions(&revalidated, &loop_id);
+            for (delta, cand) in projected.iter().zip(revalidated.iter()) {
                 let key = (
                     cand.event.topic.as_str().to_string(),
                     cand.event.payload.as_deref().unwrap_or("").to_string(),
@@ -3982,30 +3989,20 @@ impl EventLoop {
                 // projection-aware helper; the non-projection
                 // branch auto-reborrows to `&StateLedger` inside
                 // `commit_idempotent`.
-                let ledger = self.state.state_ledger.as_mut().ok_or_else(|| {
-                    self.diagnostics.log_orchestration(
-                        self.state.iteration,
-                        event.source.as_ref().map(|h| h.as_str()).unwrap_or("unknown"),
-                        crate::diagnostics::OrchestrationEvent::BackpressureTriggered {
-                            reason: format!(
-                                "accepted transition unavailable for topic '{}': state ledger missing",
-                                event.topic
-                            ),
-                        },
-                    );
-                    std::io::Error::other(format!(
-                        "accepted transition unavailable for business/recovery topic '{}': state ledger missing",
-                        event.topic
-                    ))
-                })?;
-                crate::event_loop::disposition::publish_synthetic_with_state_machine_projection(
+                // Plan GAP-02 / Unit 3: commit the projection through the
+                // EventLoop helper that wires the pre-apply live-runtime
+                // snapshot into the rollback closure. On
+                // `StateLedger::commit` failure the live runtime is
+                // restored to the pre-apply snapshot; on success the
+                // snapshot is dropped. The helper accepts an
+                // `Option<Delta>` so it can also serve the no-projection
+                // legacy path (disabled state machine / no candidate).
+                self.commit_state_machine_projection(
                     &event,
                     u8_disposition,
                     &u7_loop_id,
                     &activation_id,
                     digest,
-                    ledger,
-                    &mut self.bus,
                     projection,
                 )
                 .map_err(|error| {
