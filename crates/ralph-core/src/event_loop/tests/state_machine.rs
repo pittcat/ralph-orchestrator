@@ -1561,9 +1561,6 @@ hats:
     let ledger = crate::state::StateLedger::new(&workspace, true);
     event_loop.install_state_ledger_for_test(ledger);
     event_loop.set_state_ledger_bypass_active_for_test(true);
-    // Suppress unused-mut warning when no further local `ledger`
-    // binding is needed.
-    let _ = ();
 
     let event = JsonlEvent {
         topic: "experiment.planned".to_string(),
@@ -1647,11 +1644,6 @@ hats:
         sm_commits, 0,
         "ledger must not have a StateMachineTransition entry after rollback (U3 Red)"
     );
-}
-
-#[allow(dead_code)]
-fn _u4_unused_runtime() -> StateMachineRuntimeState {
-    StateMachineRuntimeState::new()
 }
 
 // ---------------------------------------------------------------------------

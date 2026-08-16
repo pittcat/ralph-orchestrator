@@ -109,28 +109,64 @@ fn validate_events_against_candidate(
             }
             StateMachineDecision::Reject { finding } => {
                 let finding = finding.clone();
+                let finding_json = serde_json::to_string(&finding)
+                    .unwrap_or_else(|serde_err| {
+                        // Plan 2026-08-15-2211 U9 A3: surface the
+                        // serde fallback instead of silently
+                        // dropping topic / source_hat / instance_key
+                        // / code. The diagnostic payload keeps the
+                        // original `reason` for human readability
+                        // and adds `_serde_fallback: true` plus the
+                        // underlying serde error so operators can
+                        // debug without losing the structured
+                        // fields when JSON re-serialisation fails.
+                        format!(
+                            "{{\"reason\":{},\"_serde_fallback\":true,\"_serde_error\":{}}}",
+                            serde_json::to_string(&finding.reason)
+                                .unwrap_or_else(|_| "\"<unserializable reason>\"".to_string()),
+                            serde_json::to_string(&serde_err.to_string())
+                                .unwrap_or_else(|_| "\"<unserializable error>\"".to_string()),
+                        )
+                    });
                 bus.publish(ralph_proto::Event::new(
                     "event.state_machine.rejected",
-                    serde_json::to_string(&finding)
-                        .unwrap_or_else(|_| finding.reason.clone()),
+                    finding_json,
                 ));
                 rejected.push(finding);
             }
             StateMachineDecision::Ignore { finding } => {
                 let finding = finding.clone();
+                let finding_json = serde_json::to_string(&finding)
+                    .unwrap_or_else(|serde_err| {
+                        format!(
+                            "{{\"reason\":{},\"_serde_fallback\":true,\"_serde_error\":{}}}",
+                            serde_json::to_string(&finding.reason)
+                                .unwrap_or_else(|_| "\"<unserializable reason>\"".to_string()),
+                            serde_json::to_string(&serde_err.to_string())
+                                .unwrap_or_else(|_| "\"<unserializable error>\"".to_string()),
+                        )
+                    });
                 bus.publish(ralph_proto::Event::new(
                     "event.state_machine.ignored",
-                    serde_json::to_string(&finding)
-                        .unwrap_or_else(|_| finding.reason.clone()),
+                    finding_json,
                 ));
                 ignored.push(finding);
             }
             StateMachineDecision::DiagnosticOnly { finding } => {
                 let finding = finding.clone();
+                let finding_json = serde_json::to_string(&finding)
+                    .unwrap_or_else(|serde_err| {
+                        format!(
+                            "{{\"reason\":{},\"_serde_fallback\":true,\"_serde_error\":{}}}",
+                            serde_json::to_string(&finding.reason)
+                                .unwrap_or_else(|_| "\"<unserializable reason>\"".to_string()),
+                            serde_json::to_string(&serde_err.to_string())
+                                .unwrap_or_else(|_| "\"<unserializable error>\"".to_string()),
+                        )
+                    });
                 bus.publish(ralph_proto::Event::new(
                     "event.state_machine.diagnostic",
-                    serde_json::to_string(&finding)
-                        .unwrap_or_else(|_| finding.reason.clone()),
+                    finding_json,
                 ));
                 // DiagnosticOnly keeps the event on the survivor
                 // list (it does NOT advance state) so we record a
@@ -178,25 +214,6 @@ impl EventLoop {
             _ => return (events, Vec::new()),
         };
 
-        // Take a snapshot of the live runtime for the candidate
-        // stage; the live runtime itself is not mutated by this
-        // stage. Unit 2 §3 / §6 explicitly require this
-        // separation so downstream reject cannot pollute live
-        // StateMachine. The snapshot is recorded as
-        // `_live_snapshot` because the cumulative `candidate`
-        // below already starts from the live state and the
-        // explicit capture is documentation of intent, not an
-        // additional read.
-        let _live_snapshot = self.state.state_machine_runtime_state.clone();
-
-        // Plan GAP-02 / Unit 2 / parity guard: the original
-        // state machine stage inlined a `get_or_insert_with` so
-        // the runtime lived on the loop even when every event was
-        // rejected. Preserving that semi-materialisation keeps
-        // tests / observers that peek at
-        // `state.state_machine_runtime_state` working. The unit
-        // stage itself never mutates the live runtime here —
-        // apply happens at the pending_publish boundary.
         if !events.is_empty() && self.state.state_machine_runtime_state.is_none() {
             self.state.state_machine_runtime_state = Some(StateMachineRuntimeState::new());
         }
@@ -407,24 +424,26 @@ impl EventLoop {
     }
 
     /// Plan GAP-02 / Unit 3: commit a single projected
-    /// the disposition helper, with per-projection rollback that
-    /// restores the pre-apply live runtime snapshot if the
-    /// `StateLedger::commit` step faults.
+    /// StateMachine transition through the disposition helper, with
+    /// rollback that restores the pre-apply live runtime snapshot
+    /// if the `StateLedger::commit` step faults.
     ///
     /// Plan 2026-08-15-2211 U1 + U8: this method no longer threads
     /// the snapshot through a `'static` closure + `Rc<RefCell<>>`.
     /// The apply (live mutation) happens here synchronously before
     /// the disposition helper is called, and the rollback happens
     /// here synchronously after the helper returns Err — single
-    /// linear control flow, no shared mutable cell, function body
-    /// < 50 lines.
+    /// linear control flow, no shared mutable cell.
     ///
-    /// Per-projection granularity: each call captures its own
-    /// pre-apply snapshot of live, applies the delta, commits, and
-    /// rolls back on failure. Successive projections see the
-    /// prior projection's post-apply live state — so the
-    /// per-batch apply (which mutates live for every decision)
-    /// is consistent with the per-projection commit.
+    /// Per-batch snapshot semantics: the pre-apply snapshot is
+    /// captured once by `apply_state_machine_decisions` (BEFORE
+    /// any projection mutates live) and stored in
+    /// `state_machine_apply_snapshot`. Every commit in the
+    /// per-event loop reads the same snapshot (via clone, not
+    /// `take()`) so projections 2..N still see a non-`None`
+    /// rollback target — pre-fix the `take()` model drained the
+    /// slot on the first commit and degraded projection N+1's
+    /// rollback to no-op.
     pub(super) fn commit_state_machine_projection(
         &mut self,
         event: &ralph_proto::Event,
