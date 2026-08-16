@@ -22,10 +22,12 @@
 
 use crate::config::EventLoopConfig;
 use crate::event_loop::flow_declaration::FlowDeclaration;
+use crate::event_loop::flow_wiring::build_terminal_target_contracts_from_loop_config;
 pub use crate::event_loop::repair_flow::RepairStateMachine;
 use crate::event_loop::stages::emit_schema_gate_stage::{
     EmitSchemaGateStage, required_fields_from_loop_config,
 };
+use crate::event_loop::stages::terminal_target_guard_stage::TerminalTargetGuardStage;
 use ralph_proto::Event;
 
 #[cfg(test)]
@@ -277,9 +279,16 @@ impl StagePipeline {
             Some(cfg) => EmitSchemaGateStage::new(required_fields_from_loop_config(cfg)),
             None => EmitSchemaGateStage::with_defaults(),
         };
+        let terminal_target_contracts = loop_config
+            .map(build_terminal_target_contracts_from_loop_config)
+            .unwrap_or_default();
         Self::new(vec![
             Box::new(crate::event_loop::stages::repair_dispatch_stage::RepairDispatchStage),
             Box::new(schema_gate),
+            // Plan 2026-08-16-1015 U1: after schema gate (validates payload
+            // structure) and before flow-scope / verdict gates so the
+            // terminal-target contract fires at the right point.
+            Box::new(TerminalTargetGuardStage::new(terminal_target_contracts)),
             Box::new(crate::event_loop::stages::flow_step_scope_stage::FlowStepScopeStage::new(flow.clone())),
             Box::new(crate::event_loop::stages::step_close_obligation_stage::StepCloseObligationStage::new(flow.clone())),
             Box::new(crate::event_loop::stages::verdict_gate_stage::VerdictGateStage::new(flow)),
@@ -298,10 +307,15 @@ impl StagePipeline {
             Some(cfg) => EmitSchemaGateStage::new(required_fields_from_loop_config(cfg)),
             None => EmitSchemaGateStage::with_defaults(),
         };
+        let terminal_target_contracts = loop_config
+            .map(build_terminal_target_contracts_from_loop_config)
+            .unwrap_or_default();
         let verdict_flow = hat_only_verdict_flow_declaration();
         Self::new(vec![
             Box::new(crate::event_loop::stages::repair_dispatch_stage::RepairDispatchStage),
             Box::new(schema_gate),
+            // Plan 2026-08-16-1015 U1: after schema gate, before verdict gate.
+            Box::new(TerminalTargetGuardStage::new(terminal_target_contracts)),
             Box::new(
                 crate::event_loop::stages::verdict_gate_stage::VerdictGateStage::new(verdict_flow),
             ),
@@ -330,9 +344,15 @@ impl StagePipeline {
             Some(cfg) => EmitSchemaGateStage::new(required_fields_from_loop_config(cfg)),
             None => EmitSchemaGateStage::with_defaults(),
         };
+        let terminal_target_contracts = loop_config
+            .map(build_terminal_target_contracts_from_loop_config)
+            .unwrap_or_default();
         Self::new(vec![
             Box::new(crate::event_loop::stages::repair_dispatch_stage::RepairDispatchStage),
             Box::new(schema_gate),
+            // Plan 2026-08-16-1015 U1: after schema gate, before phase authority
+            // (so schema validates first, then terminal-target, then phase).
+            Box::new(TerminalTargetGuardStage::new(terminal_target_contracts)),
             Box::new(crate::event_loop::stages::phase_authority_stage::PhaseAuthorityStage::new(authority)),
             Box::new(crate::event_loop::stages::flow_step_scope_stage::FlowStepScopeStage::new(flow.clone())),
             Box::new(crate::event_loop::stages::step_close_obligation_stage::StepCloseObligationStage::new(flow.clone())),
